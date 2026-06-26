@@ -1,0 +1,29 @@
+# ЛОКАЛЬНЫЙ боевой контур на РЕАЛЬНЫХ данных (ПД на хосте, не на VPS).
+# Бот (поллинг + миниапп) крутится здесь; токен освобождён с VPS.
+# cloudflared даёт временный публичный https-адрес → его кладём в кнопку миниаппа
+# (setChatMenuButton). ПД идут транзитом через туннель, на чужом диске не лежат.
+#
+#   docker compose -f docker-compose.local.yml up -d --build
+#   docker compose -f docker-compose.local.yml logs -f tunnel   # тут будет trycloudflare-URL
+services:
+  bot:
+    build: .
+    image: hardbot:local
+    env_file: .env                # BOT_TOKEN, ADMIN_ID, GROUP_CHAT_ID
+    environment:
+      HARDBOT_DATA: /data
+      ADMIN_API_KEY: "hbadm_60933237ca8db1b9be1c1db91400e23d"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./data_dev:/data          # реальная БД на хосте
+      - ./miniapp:/app/miniapp    # фронт миниаппа — правки видны без пересборки (reload)
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate --url http://bot:8080
+    depends_on:
+      - bot
+    restart: unless-stopped

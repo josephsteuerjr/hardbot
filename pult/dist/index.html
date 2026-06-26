@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Контур · Выезды</title>
+<style>
+:root{
+  --bg:#FAF9F5; --card:#FFFFFF; --alt:#F5F4ED; --border:#E6E2D9;
+  --text:#2B2825; --muted:#6B6660; --accent:#36332E; --success:#5B8A3C; --danger:#B0472C;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font-family:'Segoe UI',-apple-system,Roboto,sans-serif;font-size:14px;line-height:1.5}
+.top{display:flex;align-items:center;justify-content:space-between;
+  padding:12px 18px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg)}
+.brand{font-weight:600;letter-spacing:.3px;font-size:16px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--border);margin-right:6px}
+.dot.ok{background:var(--success)} .dot.bad{background:var(--danger)}
+.wrap{padding:16px 18px;max-width:920px;margin:0 auto;display:grid;gap:14px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+.card h2{font-size:14px;margin:0 0 10px;font-weight:600;color:var(--accent)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
+.metric{background:var(--alt);border-radius:10px;padding:12px}
+.metric .n{font-size:24px;font-weight:600}
+.metric .l{font-size:12px;color:var(--muted)}
+input,button{font-family:inherit;font-size:14px}
+input[type=text],input[type=password]{padding:9px 11px;border:1px solid var(--border);
+  border-radius:9px;background:var(--card);color:var(--text);width:100%}
+button{padding:9px 14px;border:1px solid var(--border);border-radius:9px;background:var(--card);
+  color:var(--text);font-weight:500;cursor:pointer}
+button:hover{background:var(--alt)}
+button.acc{background:var(--accent);color:var(--bg);border:none}
+button.danger{color:var(--danger);border-color:var(--danger)}
+.muted{color:var(--muted)} .small{font-size:12px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td,th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--alt)}
+th{color:var(--muted);font-weight:500}
+.log{background:var(--alt);border-radius:9px;padding:10px 12px;font-size:12px;color:var(--muted);
+  white-space:pre-wrap;min-height:20px;margin-top:8px}
+.field{display:grid;gap:4px;margin-bottom:8px}
+.field label{font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="top">
+  <span class="brand">Контур · Выезды</span>
+  <span class="small"><span class="dot" id="conn"></span><span id="connt" class="muted">не подключено</span></span>
+</div>
+<div class="wrap">
+
+  <div class="card">
+    <h2>Подключение</h2>
+    <div class="field"><label>Адрес сервера</label>
+      <input type="text" id="url" placeholder="https://hardbot.38-135-54-29.nip.io"></div>
+    <div class="field"><label>Admin-ключ</label>
+      <input type="password" id="key" placeholder="hbadm_…"></div>
+    <div class="row">
+      <button class="acc" onclick="refresh()">Подключиться / обновить</button>
+      <span class="small muted" id="hint">ключ — в .env сервера (ADMIN_API_KEY)</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Сводка</h2>
+    <div class="grid" id="metrics">
+      <div class="metric"><div class="n" id="m_clients">—</div><div class="l">контрагентов</div></div>
+      <div class="metric"><div class="n" id="m_visited">—</div><div class="l">с визитом</div></div>
+      <div class="metric"><div class="n" id="m_emps">—</div><div class="l">сотрудников</div></div>
+      <div class="metric"><div class="n" id="m_binds">—</div><div class="l">выбрали себя</div></div>
+      <div class="metric"><div class="n" id="m_marks">—</div><div class="l">меток</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Реестр</h2>
+    <div class="row">
+      <input type="file" id="file" accept=".xlsx,.xlsm" style="display:none" onchange="doImport()">
+      <button class="acc" onclick="document.getElementById('file').click()">Импорт xlsx…</button>
+      <button onclick="download('/admin/export','registry_export.xlsx')">Экспорт реестра</button>
+      <button onclick="download('/admin/markers.xlsx','markers.xlsx')">Экспорт меток (курьеры)</button>
+      <button onclick="geocode()">Координаты (геокодинг)</button>
+    </div>
+    <div class="log" id="log">—</div>
+  </div>
+
+  <div class="card">
+    <h2>Период выгрузки (по дате закрепления)</h2>
+    <p class="small muted" style="margin:0 0 10px">Выездники увидят только клиентов с датой закрепления в этом окне. Пусто — видны все.</p>
+    <div class="row">
+      <input type="date" id="pfrom" style="width:auto">
+      <span class="muted">—</span>
+      <input type="date" id="pto" style="width:auto">
+      <button class="acc" onclick="applyPeriod()">Применить период</button>
+      <button onclick="clearPeriod()">Сбросить</button>
+    </div>
+    <div class="small muted" id="pcur" style="margin-top:8px">—</div>
+  </div>
+
+  <div class="card">
+    <h2>Приоритет выезда — куда ехать (движок)</h2>
+    <p class="small muted" style="margin:0 0 10px">Скоринг должника: лог-долг + кластер по городу + свежесть (штраф за прошлые выезды). Холодные — режим «разведка», с исходом — «дожим». Веса крутятся ползунками.</p>
+    <div class="row" style="gap:14px">
+      <label class="small muted" style="flex:1">Долг <b id="lwd">50</b><br><input type="range" id="wdebt" min="0" max="100" value="50" oninput="wlab()" style="width:100%"></label>
+      <label class="small muted" style="flex:1">Кластер <b id="lwc">30</b><br><input type="range" id="wcluster" min="0" max="100" value="30" oninput="wlab()" style="width:100%"></label>
+      <label class="small muted" style="flex:1">Свежесть <b id="lwf">20</b><br><input type="range" id="wfresh" min="0" max="100" value="20" oninput="wlab()" style="width:100%"></label>
+      <button class="acc" onclick="loadPriority()" style="align-self:flex-end">Пересчитать</button>
+    </div>
+    <div class="small muted" id="pclusters" style="margin:8px 0">—</div>
+    <table id="prio"><thead><tr><th>#</th><th>Клиент</th><th>Город</th><th>Долг&nbsp;₽</th><th>Выезд.</th><th>Score</th><th>Режим</th><th>Почему</th></tr></thead><tbody></tbody></table>
+  </div>
+
+  <div class="card">
+    <h2>Сотрудники и самовыбор</h2>
+    <table id="emps"><thead><tr><th>Сотрудник</th><th>Договоров</th></tr></thead><tbody></tbody></table>
+    <h2 style="margin-top:14px">Кто вошёл</h2>
+    <table id="binds"><thead><tr><th>telegram_id</th><th>Сотрудник</th><th>Роль</th><th></th></tr></thead><tbody></tbody></table>
+  </div>
+
+</div>
+
+<script>
+const $ = (id)=>document.getElementById(id);
+const store = window.localStorage;
+$("url").value = store.getItem("url") || "https://hardbot.38-135-54-29.nip.io";
+$("key").value = store.getItem("key") || "";
+const base = ()=> $("url").value.replace(/\/+$/,"");
+const hdr = ()=> ({ "X-Admin-Key": $("key").value });
+function setConn(ok,t){ $("conn").className="dot "+(ok?"ok":"bad"); $("connt").textContent=t; $("connt").className=ok?"":"muted"; }
+function log(t){ $("log").textContent = t; }
+
+async function refresh(){
+  store.setItem("url",$("url").value); store.setItem("key",$("key").value);
+  try{
+    const r = await fetch(base()+"/admin/stats",{headers:hdr()});
+    if(!r.ok){ setConn(false,"ошибка "+r.status); return; }
+    const d = await r.json();
+    setConn(true,"подключено");
+    $("m_clients").textContent=d.clients; $("m_visited").textContent=d.visited;
+    $("m_emps").textContent=d.employees.length; $("m_binds").textContent=d.bindings.length;
+    $("m_marks").textContent=d.markers;
+    $("emps").querySelector("tbody").innerHTML = d.employees.map(e=>
+      `<tr><td>${esc(e.employee)}</td><td>${e.contracts}</td></tr>`).join("")||`<tr><td class="muted" colspan=2>реестр пуст</td></tr>`;
+    $("binds").querySelector("tbody").innerHTML = d.bindings.map(b=>
+      `<tr><td>${b.telegram_id}</td><td>${esc(b.employee)}</td><td>${b.kind==="courier"?"курьер":"выездник"}</td>
+       <td><button class="danger small" onclick="unbind(${b.telegram_id})">сбросить</button></td></tr>`).join("")
+      ||`<tr><td class="muted" colspan=4>никто ещё не выбрал себя</td></tr>`;
+    showPeriod(d.period||{});
+    loadPriority();
+  }catch(e){ setConn(false,"нет связи"); }
+}
+function wlab(){ $("lwd").textContent=$("wdebt").value; $("lwc").textContent=$("wcluster").value; $("lwf").textContent=$("wfresh").value; }
+async function loadPriority(){
+  const u = base()+`/admin/priority?w_debt=${$("wdebt").value}&w_cluster=${$("wcluster").value}&w_fresh=${$("wfresh").value}&limit=40`;
+  try{
+    const r = await fetch(u,{headers:hdr()}); if(!r.ok){ $("pclusters").textContent="ошибка "+r.status; return; }
+    const d = await r.json();
+    $("pclusters").textContent = "кластеры: " + d.cities.map(c=>`${c.name} (${c.count})`).join(" · ");
+    $("prio").querySelector("tbody").innerHTML = d.items.map((it,i)=>
+      `<tr><td>${i+1}</td><td>${esc(it.client)}</td><td>${esc(it.city)}</td>
+       <td>${(it.debt||0).toLocaleString("ru-RU")}</td><td>${it.visits}</td>
+       <td><b>${it.score.toFixed(1)}</b></td><td>${esc(it.mode)}</td>
+       <td class="small muted">${esc(it.reason)}</td></tr>`).join("")
+      ||`<tr><td class="muted" colspan=8>пусто — импортируй реестр</td></tr>`;
+  }catch(e){ $("pclusters").textContent="нет связи"; }
+}
+function showPeriod(d){
+  $("pfrom").value=d.from||""; $("pto").value=d.to||"";
+  $("pcur").textContent = (d.from||d.to) ? `Активен: ${d.from||"…"} — ${d.to||"…"}` : "Период не задан (видны все).";
+}
+async function applyPeriod(){
+  try{
+    const r=await fetch(base()+"/admin/period",{method:"POST",
+      headers:{...hdr(),"Content-Type":"application/json"},
+      body:JSON.stringify({from:$("pfrom").value,to:$("pto").value})});
+    showPeriod(await r.json()); refresh();
+  }catch(e){ log("Ошибка периода"); }
+}
+function clearPeriod(){ $("pfrom").value=""; $("pto").value=""; applyPeriod(); }
+async function doImport(){
+  const f = $("file").files[0]; if(!f) return;
+  log("Импорт "+f.name+"…");
+  const fd = new FormData(); fd.append("file",f);
+  try{
+    const r = await fetch(base()+"/admin/import",{method:"POST",headers:hdr(),body:fd});
+    const d = await r.json();
+    log(`Импорт готов:\nстрок ${d.total_rows}, добавлено ${d.inserted}, обновлено ${d.updated}, без КД ${d.skipped_no_id}, дублей ${d.duplicates}`
+      + (d.unknown_columns&&d.unknown_columns.length?`\nнезнакомые колонки: ${d.unknown_columns.join(", ")}`:""));
+    refresh();
+  }catch(e){ log("Ошибка импорта"); }
+  $("file").value="";
+}
+async function download(path,name){
+  log("Готовлю "+name+"…");
+  try{
+    const r = await fetch(base()+path,{headers:hdr()});
+    if(!r.ok){ log("Ошибка "+r.status); return; }
+    const blob = await r.blob();
+    const a = document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=name;
+    document.body.appendChild(a); a.click(); a.remove();
+    log("Сохранено: "+name);
+  }catch(e){ log("Ошибка выгрузки"); }
+}
+async function geocode(){
+  log("Запускаю геокодинг на сервере…");
+  try{ await fetch(base()+"/admin/geocode",{method:"POST",headers:hdr()}); log("Геокодинг запущен (идёт в фоне; обнови сводку через минуту)."); }
+  catch(e){ log("Ошибка"); }
+}
+async function unbind(id){
+  if(!confirm("Сбросить выбор для "+id+"?")) return;
+  try{ await fetch(base()+"/admin/unbind",{method:"POST",headers:{...hdr(),"Content-Type":"application/json"},body:JSON.stringify({telegram_id:id})}); refresh(); }
+  catch(e){ log("Ошибка"); }
+}
+function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+if($("key").value) refresh();
+</script>
+</body>
+</html>

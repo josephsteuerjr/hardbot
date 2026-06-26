@@ -1,0 +1,7 @@
+aiogram>=3.13,<4
+openpyxl>=3.1
+python-dotenv>=1.0
+# Геокодер работает на стандартной библиотеке (normalize.py + GeoNames-дамп).
+# Опц. libpostal для лучшей нормализации кривых адресов:
+#   docker run -d -p 8088:8080 johnlonganecker/libpostal-rest  → LIBPOSTAL_URL=http://127.0.0.1:8088
+#   (или собрать пакет `postal` локально). Без него — офлайн-фолбэк нормализации.

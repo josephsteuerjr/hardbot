@@ -1,0 +1,16 @@
+# Секреты — НЕ коммитим (на сервер .env доставляется отдельно)
+.env
+
+# Данные и артефакты
+data/
+_devdata/
+photos/
+*.db
+*.xlsx
+*.xlsb
+_*.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/

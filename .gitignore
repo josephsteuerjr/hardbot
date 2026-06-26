@@ -1,0 +1,54 @@
+# === Секреты — НИКОГДА в git ===
+.env
+.env.*
+!.env.example
+**/.env
+**/secrets.env
+_infra/
+
+# === Реальные ПД и данные — НИКОГДА в git ===
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.xlsb
+*.xlsx
+Хард.xlsb
+photos/
+photo_*.jpg
+registry_export.xlsx
+
+# === Дев/демо-данные ===
+_devdata/
+_priodemo/
+data_dev/
+data/
+
+# === Локальные ops-скрипты и бэкап git-истории hardbot (не для ИТ/ИБ) ===
+_local/
+
+# === Геоданные (скачиваются/генерируются) ===
+**/geonames/*.txt
+*.pmtiles
+
+# === Артефакты сборки движка (генерируются build_demo.py) ===
+engine/web/dashboard.html
+engine/web/data.json
+
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+
+# === Tauri / Rust / Node (пульт) ===
+pult/src-tauri/target/
+pult/node_modules/
+node_modules/
+
+# === Прочее ===
+.DS_Store
+Thumbs.db
+*.log

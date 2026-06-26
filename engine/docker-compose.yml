@@ -1,0 +1,28 @@
+services:
+  engine:
+    build: .
+    image: kontur-engine:dev
+    restart: unless-stopped
+    environment:
+      - HARDBOT_DB=${HARDBOT_DB:-}        # путь к реальной SQLite-БД; пусто = синтетика
+    ports:
+      - "127.0.0.1:8090:8090"             # только localhost; наружу — через Caddy/Tailscale
+    # существующий amnezia-awg2 не трогаем
+
+  # --- профиль "full": включать на мощной машине, НЕ на 1 vCPU ---
+  # docker compose --profile full up -d
+  postgis:
+    image: postgis/postgis:16-3.4
+    profiles: ["full"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PGUSER:-kontur}
+      POSTGRES_PASSWORD: ${PGPASS:-change_me}
+      POSTGRES_DB: ${PGDB:-kontur}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+
+volumes:
+  pgdata: {}

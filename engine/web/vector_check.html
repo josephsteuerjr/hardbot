@@ -1,0 +1,25 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.min.js"></script>
+<script src="https://unpkg.com/pmtiles@3.2.0/dist/pmtiles.js"></script>
+<style>html,body,#m{margin:0;height:100%;background:#FAF9F5;font-family:Segoe UI,sans-serif}
+#tag{position:absolute;z-index:9;left:10px;top:10px;background:#fff;border:1px solid #E6E2D9;border-radius:8px;padding:6px 10px;font-size:12px;color:#2B2825}</style></head>
+<body><div id="m"></div><div id="tag">Свой вектор · PMTiles РФ+СА · 3 ГБ · сервер</div><script>
+const U='https://kontur.166.88.185.90.nip.io/tiles/basemap.pmtiles';
+maplibregl.addProtocol('pmtiles', new pmtiles.Protocol().tile);
+const c={earth:'#f4f2ea',water:'#bcd6e6',landuse:'#e9ece2',road:'#d6d1c4',bld:'#e2ddd1',place:'#5b5650',bg:'#FAF9F5'};
+const map=new maplibregl.Map({container:'m',center:[55,52],zoom:3.4,attributionControl:false,
+ style:{version:8,glyphs:'https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf',
+ sources:{pm:{type:'vector',url:'pmtiles://'+U,attribution:'© OpenStreetMap, Protomaps'}},
+ layers:[
+  {id:'bg',type:'background',paint:{'background-color':c.bg}},
+  {id:'earth',type:'fill',source:'pm','source-layer':'earth',paint:{'fill-color':c.earth}},
+  {id:'landuse',type:'fill',source:'pm','source-layer':'landuse',paint:{'fill-color':c.landuse}},
+  {id:'water',type:'fill',source:'pm','source-layer':'water',paint:{'fill-color':c.water}},
+  {id:'roads',type:'line',source:'pm','source-layer':'roads',paint:{'line-color':c.road,'line-width':['interpolate',['linear'],['zoom'],5,0.3,11,1.4]}},
+  {id:'bld',type:'fill',source:'pm','source-layer':'buildings',paint:{'fill-color':c.bld,'fill-opacity':0.6}},
+  {id:'places',type:'symbol',source:'pm','source-layer':'places',layout:{'text-field':['coalesce',['get','name:ru'],['get','name']],'text-size':12,'text-font':['Noto Sans Regular']},paint:{'text-color':c.place,'text-halo-color':c.bg,'text-halo-width':1.3}}
+ ]});
+const p=new URLSearchParams(location.hash.slice(1));
+if(p.get('z')) map.once('load',()=>map.jumpTo({center:[+p.get('lon'),+p.get('lat')],zoom:+p.get('z')}));
+</script></body></html>

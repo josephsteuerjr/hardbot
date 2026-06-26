@@ -1,0 +1,159 @@
+"""
+Схема реестра выездного взыскания.
+
+Источник истины — файл «Хард.xlsb», лист «Портфели» (колонки и пометки сх/хард)
+и лист «Статусы» (выпадающие списки).
+
+Здесь поля описаны ПО СМЫСЛУ (ключ + блок + источник + тип + словарь), а не по
+букве колонки. Большой реестр и его «уменьшенная копия» отличаются положением
+колонок, но логические поля и словари у них общие — поэтому экспорт ложится
+в любой из шаблонов.
+"""
+
+from dataclasses import dataclass, field as dc_field
+from typing import Optional
+
+
+# --- Источник данных по колонке -------------------------------------------
+SX = "сх"      # приходит из системы (read-only для выездника)
+HARD = "хард"  # заполняет выездник — это и собирает бот
+
+
+# --- Выпадающие списки (лист «Статусы») ------------------------------------
+# Ключ -> список вариантов. Транскрибировано из реестра один-в-один.
+DROPDOWNS: dict[str, list[str]] = {
+    # AT — мастер-статус
+    "overall_result": [
+        "Доп. Обогащение", "Рассрочка", "Отказ от оплаты", "Не обработан",
+        "В работе", "Нет контакта", "Обещает оплатить", "Оплачен",
+        "Передана инф 3 лицу", "Тюрьма", "Смерть", "Кредит не брал",
+    ],
+    # BF / BH — статус звонка (тот же список без «Доп. Обогащение»)
+    "call_status": [
+        "Рассрочка", "Отказ от оплаты", "Не обработан", "В работе",
+        "Нет контакта", "Обещает оплатить", "Оплачен", "Передана инф 3 лицу",
+        "Тюрьма", "Смерть", "Кредит не брал",
+    ],
+    # AP — прогноз
+    "forecast": ["Ждём", "Сомнение", "ОК", "Нет", "Срыв", "Уже"],
+    # BA — с кем был контакт
+    "contact_with": [
+        "Должник", "3 лицо", "Должник и 3 лицо",
+        "Контакт не установлен/ должника не знают",
+    ],
+    # BB — договорились на оплату
+    "agreed_payment": [
+        "Обещает оплатить клиент", "Обещает оплатить 3-е лицо",
+        "Обещает оплатить клиент и 3-е лицо",
+        "На оплату договориться не удалось",
+        "3-е лицо передаст информацию клиенту",
+    ],
+    # BC — кто был на адресе
+    "who_at_address": [
+        "По адресу проживает клиент",
+        "По адресу проживают родственники клиента",
+        "По адресу проживают знакомые клиента",
+        "По адресу клиента не знают/ не общаются",
+        "Не удалось установить кто проживает по адресу",
+    ],
+    # BD — местоположение клиента
+    "client_location": [
+        "Клиент в РФ", "Клиент на родине", "Клиент в другой стране",
+        "Местоположение не установлено",
+    ],
+    # BE — цель приезда в РФ
+    "purpose_rf": [
+        "Уехал на работу", "Переехал жить", "Находится на СВО",
+        "Уехал на лечение", "Не дали информацию",
+    ],
+}
+
+
+@dataclass(frozen=True)
+class Field:
+    key: str            # машинный ключ (имя колонки в БД)
+    title: str          # заголовок как в реестре
+    block: str          # блок реестра
+    source: str         # SX или HARD
+    dropdown: Optional[str] = None  # ключ в DROPDOWNS, если поле — выпадающий список
+
+    @property
+    def options(self) -> Optional[list[str]]:
+        return DROPDOWNS.get(self.dropdown) if self.dropdown else None
+
+
+# Блоки в порядке реестра
+B_INFO = "Информация по клиенту"
+B_DEBT = "Разбивка по долгу"
+B_PAY = "Блок оплат и обещаний"
+B_VISIT = "Блок выезда"
+
+
+# Все 50 колонок реестра, по порядку.
+FIELDS: list[Field] = [
+    # --- Информация по клиенту ---
+    Field("partner",          "Партнер",                    B_INFO, SX),
+    Field("pool",             "Пул",                        B_INFO, SX),
+    Field("contract_id",      "Номер КД / ID",              B_INFO, SX),   # ключ
+    Field("client",           "Клиент",                     B_INFO, SX),
+    Field("birth_date",       "Дата рождения",              B_INFO, SX),
+    Field("phone",            "Телефон",                    B_INFO, SX),
+    Field("responsible",      "ответственный Сотрудник",    B_INFO, SX),
+    Field("city",             "Город",                      B_INFO, HARD),
+    Field("address",          "Адрес",                      B_INFO, SX),
+    Field("address_customer", "адрес от заказчика",         B_INFO, HARD),
+    # --- Разбивка по долгу (первые 4 — ЗК, остальные — Делимобиль) ---
+    Field("debt_overdue",     "Просроченный долг",          B_DEBT, SX),
+    Field("interest_overdue", "Просроченные проценты",      B_DEBT, SX),
+    Field("penalty",          "Неустойка/штрафы",           B_DEBT, SX),
+    Field("duty",             "Госпошлина",                 B_DEBT, SX),
+    Field("dtp",              "Возмещение убытков ДТП",     B_DEBT, SX),
+    Field("rent",             "Аренда",                     B_DEBT, SX),
+    Field("camera_fine",      "Штраф с камер",              B_DEBT, SX),
+    Field("dirt",             "Грязь",                      B_DEBT, SX),
+    Field("trash",            "Мусор",                      B_DEBT, SX),
+    Field("new_damage",       "Новые повреждения",          B_DEBT, SX),
+    Field("evacuation",       "Эвакуация",                  B_DEBT, SX),
+    Field("peni",             "Пени",                       B_DEBT, SX),
+    Field("other",            "Прочее",                     B_DEBT, SX),
+    Field("debt_total",       "долг всего",                 B_DEBT, SX),
+    # --- Блок оплат и обещаний ---
+    Field("last_payment_sum", "Сумма последнего платежа",   B_PAY, SX),
+    Field("last_payment_date","Дата последнего платежа",    B_PAY, SX),
+    Field("forecast_sum",     "Сумма прогноза",             B_PAY, SX),
+    Field("promise_date",     "дата обещания",              B_PAY, SX),
+    Field("forecast",         "Прогноз",                    B_PAY, SX, "forecast"),
+    # --- Блок выезда ---
+    Field("debt_today",       "Долг на сегодня",            B_VISIT, SX),
+    Field("overall_result",   "Общий результат",            B_VISIT, SX, "overall_result"),
+    Field("phone_main",       "Телефон глав",               B_VISIT, SX),
+    Field("extra_address",    "Доп. Адрес/Доп.Номер",       B_VISIT, SX),
+    Field("visit_date",       "Дата выезда",                B_VISIT, HARD),
+    Field("visit_comment",    "Комментарий текущего месяца выезда", B_VISIT, HARD),
+    Field("meeting_date",     "Дата встречи",               B_VISIT, SX),
+    Field("contact_with",     "С кем был контакт?",         B_VISIT, HARD, "contact_with"),
+    Field("agreed_payment",   "Договорились на оплату?",    B_VISIT, HARD, "agreed_payment"),
+    Field("who_at_address",   "Кто был на адресе?",         B_VISIT, HARD, "who_at_address"),
+    Field("client_location",  "Местоположение клиента",     B_VISIT, HARD, "client_location"),
+    Field("purpose_rf",       "Цель приезда в РФ",          B_VISIT, HARD, "purpose_rf"),
+    Field("call_status",      "Cтатус звонка",              B_VISIT, HARD, "call_status"),
+    Field("call_comment",     "комментарий звонка",         B_VISIT, HARD),
+    Field("dp",               "ДП",                         B_VISIT, SX),
+    Field("kd_date",          "Дата оформления КД",         B_VISIT, SX),
+    Field("issued_sum",       "Выданная сумма",             B_VISIT, SX),
+    Field("product_type",     "Тип продукта(только в ЗК)",  B_VISIT, SX),
+    Field("point_name",       "Наименование точки(только в ЗК)", B_VISIT, SX),
+    Field("point_address",    "Адрес точки(только в ЗК)",   B_VISIT, SX),
+    Field("assign_date",      "Дата закрепления",           B_VISIT, SX),
+    Field("visits_count",     "Кол-во выездов",             B_VISIT, SX),
+    Field("debt_bucket",      "Бакет долга",                B_VISIT, SX),
+]
+
+# Быстрый доступ по ключу
+BY_KEY: dict[str, Field] = {f.key: f for f in FIELDS}
+
+# Поля, которые заполняет выездник (для шага «Зафиксировать визит»)
+HARD_FIELDS: list[Field] = [f for f in FIELDS if f.source == HARD]
+
+# Порядок блоков
+BLOCKS = [B_INFO, B_DEBT, B_PAY, B_VISIT]

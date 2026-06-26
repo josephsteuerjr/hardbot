@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Маршрут</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.min.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pmtiles@3.2.1/dist/pmtiles.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/protomaps-themes-base@4.4.0/dist/protomaps-themes-base.js"></script>
+<style>
+:root{
+  --bg:#FAF9F5; --card:#FFFFFF; --alt:#F5F4ED; --border:#E6E2D9;
+  --text:#2B2825; --muted:#6B6660; --accent:#36332E; --accent2:#46423B;
+  --success:#5B8A3C; --danger:#B0472C;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:var(--bg);color:var(--text);
+  font-family:'Inter',-apple-system,'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.45}
+.bar{display:flex;align-items:center;justify-content:space-between;
+  padding:12px 14px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);z-index:5}
+.brand{font-weight:600;letter-spacing:.3px}
+.langs{display:flex;gap:4px}
+.langs button{border:1px solid var(--border);background:var(--card);border-radius:20px;
+  padding:4px 10px;font-size:12px;color:var(--muted);font-family:inherit}
+.langs button.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+.wrap{padding:12px 14px;max-width:520px;margin:0 auto}
+.muted{color:var(--muted)}
+.search{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:10px;
+  background:var(--card);font-size:15px;font-family:inherit;margin-bottom:10px}
+.pcard{background:var(--card);border:1px solid var(--border);border-radius:12px;
+  padding:12px 14px;margin-bottom:8px;display:flex;align-items:center;gap:12px;cursor:pointer}
+.dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
+.dot.v{background:var(--success)} .dot.n{background:var(--border)}
+.pname{font-weight:500}
+.psub{font-size:12px;color:var(--muted)}
+.pamt{margin-left:auto;font-weight:500;white-space:nowrap}
+.back{border:none;background:none;color:var(--muted);font-size:14px;padding:0;font-family:inherit;margin-bottom:8px}
+.h{font-size:18px;font-weight:600;margin:2px 0 2px}
+.tabs{display:flex;gap:6px;margin:12px 0;overflow:auto;-webkit-overflow-scrolling:touch}
+.tabs button{flex:1 0 auto;border:1px solid var(--border);background:var(--card);border-radius:10px;
+  padding:9px 10px;font-size:13px;color:var(--text);font-family:inherit;white-space:nowrap}
+.tabs button.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+.panel{display:none} .panel.on{display:block}
+.box{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:10px}
+.kv{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid var(--alt);font-size:14px}
+.kv:last-child{border-bottom:none}
+.kv .k{color:var(--muted)} .kv .v{text-align:right;font-weight:500}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--success);font-weight:500}
+.pill.n{color:var(--muted)}
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;
+  padding:13px;border:1px solid var(--border);border-radius:11px;background:var(--card);
+  color:var(--text);font-size:15px;font-family:inherit;font-weight:500}
+.btn.acc{background:var(--accent);color:var(--bg);border:none}
+.btn.line{margin-top:8px}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.chips{display:flex;gap:6px;justify-content:center;margin-top:8px}
+.chips a{font-size:12px;color:var(--muted);border:1px solid var(--border);border-radius:20px;
+  padding:6px 12px;text-decoration:none;background:var(--alt)}
+.mapwrap{border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:10px;background:var(--card)}
+.map{height:180px;background:var(--alt)}
+.maplibregl-ctrl-attrib,.maplibregl-ctrl-logo{display:none}
+.geohint{font-size:11px;color:var(--muted);padding:6px 14px 0}
+label.fld{display:block;font-size:13px;color:var(--muted);margin:12px 0 5px}
+select,textarea{width:100%;padding:11px 12px;border:1px solid var(--border);border-radius:10px;
+  background:var(--card);font-size:15px;font-family:inherit;color:var(--text)}
+textarea{min-height:64px;resize:vertical}
+.cdcard{font-size:13px;border-bottom:1px solid var(--alt);padding:8px 0}
+.cdcard:last-child{border-bottom:none}
+.cdcard .t{font-weight:500;margin-bottom:2px}
+.toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:var(--accent);
+  color:var(--bg);padding:10px 18px;border-radius:24px;font-size:14px;opacity:0;
+  transition:opacity .2s;pointer-events:none;z-index:30}
+.toast.show{opacity:1}
+.center{text-align:center;color:var(--muted);padding:40px 16px}
+.opt{display:flex;gap:8px;margin:6px 0 2px}
+.opt button{flex:1 1 0;border:1px solid var(--border);background:var(--card);border-radius:10px;
+  padding:10px;font-size:14px;font-family:inherit;color:var(--text)}
+.opt button.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+.toolbtn{border:1px solid var(--border);background:var(--card);border-radius:20px;
+  padding:5px 12px;font-size:12px;color:var(--muted);font-family:inherit}
+.mk{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--alt);font-size:13px}
+.mk:last-child{border-bottom:none}
+.mkdot{width:8px;height:8px;border-radius:50%;background:var(--danger);flex:0 0 auto}
+</style>
+</head>
+<body>
+<div class="bar">
+  <span class="brand">Маршрут</span>
+  <div class="langs" id="langs"></div>
+</div>
+<div class="wrap" id="app"><div class="center" id="boot">…</div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+const TG = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+if (TG) { TG.ready(); TG.expand(); }
+
+// --- Локализация интерфейса (ru/uz/tg). Варианты ответов приходят с сервера.
+const I18N = {
+  ru:{visit:"Визит",client:"Клиент",debt:"Долг",form:"Заполнить",my:"Мои клиенты",
+    search:"Поиск: ФИО, договор, телефон",kd:"КД",total:"Долг всего",inwork:"В работе с",
+    drive:"Доехать",call:"Позвонить",save:"Сохранить выезд",addphoto:"Добавить фото",
+    comment:"Комментарий",tips:"Наводки (староста, соседи, ориентиры)",lastvisit:"Последний выезд",
+    status:"Статус",saved:"Сохранено",none:"Точка не задана",geook:"Точка проверена",
+    nocl:"За вами пока никто не закреплён",photos:"Фото",contracts:"Договоры",promise:"Обещания",born:"Дата рождения",
+    approx:"≈ примерно (центр н.п.)",exact:"точный адрес",manualpt:"точку отметил выездник",
+    who:"Кто вы?",agent:"Выездник",courier:"Курьер",pickemp:"Выберите себя из реестра",enter:"Войти",
+    setmark:"Поставить метку",marks:"Метки",map:"Карта",onmap:"на карте",newmark:"Новая метка",mlabel:"Подпись: что это / кто (необязательно)",
+    marksaved:"Метка сохранена",nomarks:"Меток пока нет",getloc:"Определяю точку…",standalone:"свободная метка",
+    nogeo:"Не получилось определить геолокацию — включите доступ или введите координаты."},
+  uz:{visit:"Chiqish",client:"Mijoz",debt:"Qarz",form:"To‘ldirish",my:"Mijozlarim",
+    search:"Qidirish: F.I.Sh., shartnoma, telefon",kd:"shartnoma",total:"Jami qarz",inwork:"Ish boshlandi",
+    drive:"Borish",call:"Qo‘ng‘iroq",save:"Chiqishni saqlash",addphoto:"Rasm qo‘shish",
+    comment:"Izoh",tips:"Ko‘rsatma (oqsoqol, qo‘shnilar, mo‘ljal)",lastvisit:"Oxirgi chiqish",
+    status:"Holat",saved:"Saqlandi",none:"Nuqta yo‘q",geook:"Nuqta tekshirildi",
+    nocl:"Sizga hali mijoz biriktirilmagan",photos:"Rasm",contracts:"Shartnomalar",promise:"Va’dalar",born:"Tug‘ilgan sana",
+    approx:"≈ taxminan (aholi punkti markazi)",exact:"aniq manzil",manualpt:"nuqtani chiquvchi belgilagan",
+    who:"Siz kimsiz?",agent:"Chiquvchi",courier:"Kuryer",pickemp:"Reyestrdan o‘zingizni tanlang",enter:"Kirish",
+    setmark:"Nuqta qo‘yish",marks:"Nuqtalar",map:"Xarita",onmap:"xaritada",newmark:"Yangi nuqta",mlabel:"Izoh: bu nima / kim (ixtiyoriy)",
+    marksaved:"Nuqta saqlandi",nomarks:"Hozircha nuqta yo‘q",getloc:"Nuqta aniqlanmoqda…",standalone:"erkin nuqta",
+    nogeo:"Geolokatsiyani aniqlab bo‘lmadi — ruxsat bering yoki koordinatani kiriting."},
+  tg:{visit:"Сафар",client:"Мизоҷ",debt:"Қарз",form:"Пур кардан",my:"Мизоҷони ман",
+    search:"Ҷустуҷӯ: НН, шартнома, телефон",kd:"шартнома",total:"Қарзи умумӣ",inwork:"Дар кор аз",
+    drive:"Расидан",call:"Занг задан",save:"Сафарро захира",addphoto:"Расм илова",
+    comment:"Шарҳ",tips:"Ишора (оқсаққол, ҳамсоягон, нишона)",lastvisit:"Сафари охирин",
+    status:"Ҳолат",saved:"Захира шуд",none:"Нуқта нест",geook:"Нуқта тасдиқ шуд",
+    nocl:"Ба шумо ҳоло мизоҷе вобаста нашудааст",photos:"Расм",contracts:"Шартномаҳо",promise:"Ваъдаҳо",born:"Санаи таваллуд",
+    approx:"≈ тахминан (маркази деҳа)",exact:"суроғаи аниқ",manualpt:"нуқтаро выездник гузошт",
+    who:"Шумо кӣ ҳастед?",agent:"Выездник",courier:"Курьер",pickemp:"Худро аз реестр интихоб кунед",enter:"Даромадан",
+    setmark:"Гузоштани нуқта",marks:"Нуқтаҳо",map:"Харита",onmap:"дар харита",newmark:"Нуқтаи нав",mlabel:"Шарҳ: ин чист / кӣ (ихтиёрӣ)",
+    marksaved:"Нуқта захира шуд",nomarks:"Ҳоло нуқта нест",getloc:"Нуқта муайян мешавад…",standalone:"нуқтаи озод",
+    nogeo:"Геолокатсия муайян нашуд — иҷозат диҳед ё координата ворид кунед."},
+};
+let STATE = {lang:"ru", meta:null, persons:[], cur:null, tab:"visit"};
+const L = () => I18N[STATE.lang] || I18N.ru;
+const $ = (id) => document.getElementById(id);
+const enc = encodeURIComponent;
+const money = (n,u) => (n||0).toLocaleString("ru-RU") + (u?(" "+u):"");
+
+function authHeaders(){
+  const h = {};
+  if (TG && TG.initData) h["X-Init-Data"] = TG.initData;
+  const dev = new URLSearchParams(location.search).get("dev_uid");
+  if (dev) h["X-Dev-Uid"] = dev;
+  return h;
+}
+async function api(path, opts){
+  opts = opts || {};
+  const h = authHeaders(); h["Content-Type"] = "application/json";
+  const r = await fetch(path, Object.assign({}, opts, {headers:h}));
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+function toast(t){ const e=$("toast"); e.textContent=t; e.classList.add("show");
+  setTimeout(()=>e.classList.remove("show"),1600); }
+
+function renderLangs(){
+  $("langs").innerHTML = ["ru","uz","tg"].map(c =>
+    `<button class="${c===STATE.lang?'on':''}" onclick="setLang('${c}')">${c.toUpperCase()}</button>`).join("");
+}
+async function setLang(c){
+  STATE.lang=c; renderLangs();
+  try{ await api("/api/lang",{method:"POST",body:JSON.stringify({lang:c})}); }catch(e){}
+  await boot();
+}
+
+async function boot(){
+  renderLangs();
+  try{
+    const d = await api("/api/bootstrap");
+    STATE.lang=d.lang||STATE.lang; renderLangs();
+    if(d.needsOnboarding){ STATE.onb=d; renderOnboarding(); return; }
+    STATE.meta=d.meta; STATE.persons=d.persons; STATE.kind=d.kind||"agent";
+    renderList();
+  }catch(e){
+    $("app").innerHTML = `<div class="center">⛔ Нет доступа.<br><span class="muted">Откройте через бота.</span></div>`;
+  }
+}
+
+// --- Онбординг (самовыбор прямо в миниаппе): язык наверху, роль, сотрудник ---
+function renderOnboarding(){
+  const t=L(), o=STATE.onb; STATE.onbRole=STATE.onbRole||"agent";
+  const emps=(o.employees||[]).map(e=>`<option value="${esc(e.employee)}">${esc(e.employee)} (${e.contracts})</option>`).join("");
+  $("app").innerHTML=`
+    <div class="h">${t.who}</div>
+    <div class="opt" id="roleopt">
+      <button data-r="agent" class="on" onclick="setRole('agent')">${t.agent}</button>
+      <button data-r="courier" onclick="setRole('courier')">${t.courier}</button>
+    </div>
+    <label class="fld">${t.pickemp}</label>
+    <select id="empsel">${emps||`<option value="">—</option>`}</select>
+    <button class="btn acc" style="margin-top:16px" onclick="doBind()">${t.enter}</button>`;
+}
+function setRole(r){ STATE.onbRole=r;
+  document.querySelectorAll("#roleopt button").forEach(b=>b.classList.toggle("on",b.dataset.r===r)); }
+async function doBind(){
+  const emp=$("empsel").value; if(!emp){ toast("—"); return; }
+  try{
+    await api("/api/bind",{method:"POST",body:JSON.stringify({kind:STATE.onbRole,employee:emp,lang:STATE.lang})});
+    await boot();
+  }catch(e){ toast("✕"); }
+}
+
+function renderList(){
+  STATE.cur=null; removeMap();
+  const t=L();
+  const bar=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+       <span class="muted">${t.my}: ${STATE.persons.length}</span>
+       <span style="display:flex;gap:6px">
+         <button class="toolbtn" onclick="renderMap()">🗺 ${t.map}</button>
+         <button class="toolbtn" onclick="renderMarkers()">📍 ${t.marks}</button></span></div>`;
+  if(!STATE.persons.length){ $("app").innerHTML=bar+`<div class="center">${t.nocl}</div>`; return; }
+  $("app").innerHTML = bar +
+    `<input class="search" id="q" placeholder="${t.search}" oninput="filterList()"><div id="plist"></div>`;
+  drawList(STATE.persons);
+}
+function drawList(items){
+  const t=L();
+  $("plist").innerHTML = items.map(p =>
+    `<div class="pcard" onclick="openP('${p.rep}')">
+       <span class="dot ${p.visited?'v':'n'}"></span>
+       <div><div class="pname">${esc(p.client)}</div>
+         <div class="psub">${p.n>1?(p.n+" "+t.kd+" · "):""}${money(p.total,p.unit)}</div></div>
+     </div>`).join("");
+}
+function filterList(){
+  const q=$("q").value.toLowerCase();
+  drawList(STATE.persons.filter(p=>p.client.toLowerCase().includes(q)));
+}
+
+async function openP(rep){
+  const d = await api("/api/person?rep="+enc(rep));
+  STATE.cur=d; STATE.tab="visit"; renderDetail();
+}
+
+function renderDetail(){
+  const d=STATE.cur, t=L();
+  const tab=(id,lbl)=>`<button class="${STATE.tab===id?'on':''}" onclick="setTab('${id}')">${lbl}</button>`;
+  $("app").innerHTML =
+    `<button class="back" onclick="renderList()">← ${t.my}</button>
+     <div class="h">${esc(d.client)}</div>
+     <div class="muted" style="font-size:13px">${d.birth_date?(t.born+": "+d.birth_date):""}${d.birth_date?" · ":""}${d.contracts.length} ${t.kd}</div>
+     <div class="tabs">${tab("visit",t.visit)}${tab("client",t.client)}${tab("debt",t.debt)}${tab("form",t.form)}</div>
+     <div id="panel"></div>`;
+  drawPanel();
+}
+function setTab(id){ STATE.tab=id; drawPanel();
+  document.querySelectorAll(".tabs button").forEach((b,i)=>b.classList.toggle("on",["visit","client","debt","form"][i]===id)); }
+
+function drawPanel(){
+  const d=STATE.cur, t=L(); const p=$("panel");
+  removeMap();
+  if(STATE.tab==="visit"){ p.innerHTML=panelVisit(d,t); setTimeout(initMap,0); }
+  else if(STATE.tab==="client") p.innerHTML=panelClient(d,t);
+  else if(STATE.tab==="debt") p.innerHTML=panelDebt(d,t);
+  else p.innerHTML=panelForm(d,t);
+}
+
+// --- Карта (MapLibre GL). Базовый слой — растровый OSM; пин — наш.
+// Самохостинг вектора (Protomaps PMTiles) подключается заменой RASTER_STYLE.
+let MAP=null, PROTO_REG=false;
+const RASTER_STYLE={version:8,sources:{osm:{type:"raster",
+  tiles:["https://a.tile.openstreetmap.org/{z}/{x}/{y}.png","https://b.tile.openstreetmap.org/{z}/{x}/{y}.png"],
+  tileSize:256,maxzoom:19,attribution:"© OpenStreetMap"}},
+  layers:[{id:"osm",type:"raster",source:"osm"}]};
+function removeMap(){ if(MAP){ try{MAP.remove();}catch(e){} MAP=null; } }
+// Наш вектор-тайлсет (Protomaps PMTiles), если подложен на сервере; иначе растр.
+function vectorStyle(url){
+  if(!PROTO_REG){ maplibregl.addProtocol("pmtiles", new pmtiles.Protocol().tile); PROTO_REG=true; }
+  const ptb=window.protomaps_themes_base;
+  const layers = ptb.layers ? ptb.layers("protomaps","light","ru") : ptb.default("protomaps","light");
+  return {version:8,
+    glyphs:"https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf",
+    sprite:"https://protomaps.github.io/basemaps-assets/sprites/v4/light",
+    sources:{protomaps:{type:"vector",url:"pmtiles://"+location.origin+url,attribution:"© OpenStreetMap"}},
+    layers};
+}
+function geoHint(d,t){
+  const g=d.geo&&d.geo.lat; if(!g) return t.none;
+  return d.geo.src==="geonames"?t.approx:(d.geo.src==="manual"?t.manualpt:t.exact);
+}
+function initMap(){
+  const el=$("map"); if(!el||!window.maplibregl) return;
+  const d=STATE.cur, g=d.geo&&d.geo.lat;
+  const lat=g?d.geo.lat:41.311, lon=g?d.geo.lon:69.240;
+  removeMap();
+  let style=RASTER_STYLE;
+  const vt=STATE.meta&&STATE.meta.vectorTiles;
+  if(vt&&window.pmtiles&&window.protomaps_themes_base){ try{ style=vectorStyle(vt); }catch(e){} }
+  MAP=new maplibregl.Map({container:el,style,center:[lon,lat],zoom:g?15:9,
+    attributionControl:false,dragRotate:false});
+  let fellBack=false;
+  MAP.on("error",()=>{ if(!fellBack&&style!==RASTER_STYLE){ fellBack=true; try{MAP.setStyle(RASTER_STYLE);}catch(e){} } });
+  MAP.addControl(new maplibregl.NavigationControl({showCompass:false}),"top-right");
+  if(g) new maplibregl.Marker({color:"#B0472C"}).setLngLat([lon,lat]).addTo(MAP);
+}
+
+// --- Карта всех моих клиентов: цвет точки = приоритет выезда, тап → карточка ---
+function priColor(s){
+  if(s==null) return "#9b9b9b";
+  if(s>=92) return "#B0472C";   // ехать первым
+  if(s>=82) return "#C9852A";   // высокий
+  if(s>=70) return "#6E8F3F";   // средний
+  return "#9bb08a";             // ниже
+}
+// Маршрут дня: едем по городам (где суммарно «жирнее»), внутри города — по приоритету.
+// Так нет зигзагов между городами Сугда (они далеко друг от друга).
+function routeOrder(pts){
+  const sc=p=>(p.score==null?-1:p.score), byCity={};
+  pts.forEach(p=>{ const c=p.city||"—"; (byCity[c]=byCity[c]||[]).push(p); });
+  const cities=Object.keys(byCity).sort((a,b)=>
+    byCity[b].reduce((s,p)=>s+sc(p),0)-byCity[a].reduce((s,p)=>s+sc(p),0));
+  const out=[];
+  cities.forEach(c=>byCity[c].sort((a,b)=>sc(b)-sc(a)).forEach(p=>out.push(p)));
+  return out;
+}
+function renderMap(){
+  STATE.cur=null; removeMap();
+  const t=L();
+  const pts=STATE.persons.filter(p=>p.lat!=null&&p.lon!=null);
+  $("app").innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+       <button class="back" onclick="renderList()">← ${t.my}</button>
+       <span class="muted">${t.onmap}: ${pts.length}/${STATE.persons.length}</span></div>
+     <div id="map" style="height:72vh;border-radius:12px;overflow:hidden"></div>`;
+  setTimeout(()=>initClientsMap(pts),0);
+}
+function initClientsMap(pts){
+  const el=$("map"); if(!el||!window.maplibregl) return;
+  removeMap();
+  let style=RASTER_STYLE; const vt=STATE.meta&&STATE.meta.vectorTiles;
+  if(vt&&window.pmtiles&&window.protomaps_themes_base){ try{ style=vectorStyle(vt);}catch(e){} }
+  const c=pts.length?[pts[0].lon,pts[0].lat]:[69.6,40.2];
+  MAP=new maplibregl.Map({container:el,style,center:c,zoom:8,attributionControl:false,dragRotate:false});
+  let fb=false;
+  MAP.on("error",()=>{ if(!fb&&style!==RASTER_STYLE){fb=true;try{MAP.setStyle(RASTER_STYLE);}catch(e){}} });
+  MAP.addControl(new maplibregl.NavigationControl({showCompass:false}),"top-right");
+  const route=routeOrder(pts);
+  const b=new maplibregl.LngLatBounds();
+  route.forEach((p,i)=>{
+    const m=document.createElement("div");
+    m.style.cssText="width:24px;height:24px;border-radius:50%;border:2px solid #fff;cursor:pointer;"+
+      "box-shadow:0 0 0 1px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;"+
+      "font:600 11px/1 system-ui,sans-serif;color:#fff;background:"+priColor(p.score);
+    m.textContent=(i+1);
+    m.title=p.client+(p.score!=null?(" · "+p.score):"");
+    m.onclick=()=>openP(p.rep);
+    new maplibregl.Marker({element:m,anchor:"center"}).setLngLat([p.lon,p.lat]).addTo(MAP);
+    b.extend([p.lon,p.lat]);
+  });
+  if(route.length>1){
+    const line={type:"Feature",geometry:{type:"LineString",coordinates:route.map(p=>[p.lon,p.lat])}};
+    MAP.on("load",()=>{ try{
+      MAP.addSource("route",{type:"geojson",data:line});
+      MAP.addLayer({id:"route",type:"line",source:"route",
+        layout:{"line-cap":"round","line-join":"round"},
+        paint:{"line-color":"#36332E","line-width":2,"line-dasharray":[2,1.6],"line-opacity":0.55}});
+    }catch(e){} });
+  }
+  if(route.length){ try{ MAP.fitBounds(b,{padding:54,maxZoom:13}); }catch(e){} }
+}
+
+function panelVisit(d,t){
+  const geo = d.geo && d.geo.lat;
+  return `
+   <div class="mapwrap">
+     <div class="map" id="map"></div>
+     <div class="geohint">${geoHint(d,t)}</div>
+     <div style="padding:12px 14px">
+       <button class="btn acc" onclick="drive()">🧭 ${t.drive}</button>
+       <div class="chips" id="drvchips"></div>
+     </div>
+   </div>
+   <button class="btn line" onclick="setMarkCase()">📍 ${t.setmark}</button>
+   ${d.phone?`<button class="btn line" onclick="call()">📞 ${t.call} · ${esc(d.phone)}</button>`:""}
+   <div class="box" style="margin-top:10px">
+     <div class="kv"><span class="k">${t.status}</span><span class="v">${esc(d.status||"—")}</span></div>
+     ${d.assign_date?`<div class="kv"><span class="k">${t.inwork}</span><span class="v">${d.assign_date}</span></div>`:""}
+     ${d.visit_date?`<div class="kv"><span class="k">${t.lastvisit}</span><span class="v">${d.visit_date}</span></div>`:""}
+     <div class="kv"><span class="k">${t.photos}</span><span class="v">${d.photos||0}</span></div>
+   </div>`;
+}
+function panelClient(d,t){
+  return `<div class="box">${d.info.map(r=>
+    `<div class="kv"><span class="k">${esc(r.title)}</span><span class="v">${esc(String(r.value))}</span></div>`).join("")}</div>`;
+}
+function panelDebt(d,t){
+  const cds = d.contracts.map(c=>{
+    const rows = Object.entries(c.debt).filter(([k,v])=>v&&String(v).trim());
+    return `<div class="cdcard"><div class="t">${esc(c.partner||"—")} · ${esc(c.contract_id)}</div>
+      ${rows.map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(String(v))}</span></div>`).join("")||'<span class="muted">—</span>'}</div>`;
+  }).join("");
+  const pr = d.promise.filter(r=>r.value&&r.value!=="—").map(r=>
+    `<div class="kv"><span class="k">${esc(r.title)}</span><span class="v">${esc(String(r.value))}</span></div>`).join("");
+  return `<div class="box"><div class="muted" style="margin-bottom:6px">${t.total}: <b>${money(d.total,d.unit)}</b></div>${cds}</div>
+    ${pr?`<div class="box"><div class="muted" style="margin-bottom:4px">${t.promise}</div>${pr}</div>`:""}`;
+}
+function panelForm(d,t){
+  const sel = d.form.map(f=>{
+    const opts=(STATE.meta.dropdowns[f.key]||[]).map(o=>
+      `<option value="${esc(o.value)}" ${o.value===f.current?"selected":""}>${esc(o.label)}</option>`).join("");
+    return `<label class="fld">${esc(f.title)}</label>
+      <select data-k="${f.key}"><option value="">—</option>${opts}</select>`;
+  }).join("");
+  return `${sel}
+    <label class="fld">${t.comment}</label><textarea id="f_call_comment">${esc(d.call_comment||"")}</textarea>
+    <label class="fld">${t.tips}</label><textarea id="f_tips">${esc(d.tips||"")}</textarea>
+    <label class="fld">${t.photos}</label>
+    <input type="file" accept="image/*" capture="environment" id="photo" style="margin-bottom:4px" onchange="upPhoto()">
+    <div class="muted" id="phc" style="font-size:12px">${t.photos}: ${d.photos||0}</div>
+    <button class="btn acc" style="margin-top:14px" onclick="saveVisit()">✓ ${t.save}</button>`;
+}
+
+function drive(){
+  const d=STATE.cur, a=d.address?enc(d.address):"";
+  const g=d.geo&&d.geo.lat;
+  const ya = g?`https://yandex.ru/maps/?pt=${d.geo.lon},${d.geo.lat}&z=17&l=map`:`https://yandex.ru/maps/?text=${a}`;
+  const go = g?`https://www.google.com/maps/search/?api=1&query=${d.geo.lat},${d.geo.lon}`:`https://www.google.com/maps/search/?api=1&query=${a}`;
+  const dg = `https://2gis.ru/search/${a}`;
+  $("drvchips").innerHTML =
+    `<a href="${ya}" target="_blank" onclick="openExt(event,'${ya}')">Я.Карты</a>
+     <a href="${go}" target="_blank" onclick="openExt(event,'${go}')">Google</a>
+     <a href="${dg}" target="_blank" onclick="openExt(event,'${dg}')">2ГИС</a>`;
+}
+function openExt(e,url){ if(TG&&TG.openLink){ e.preventDefault(); TG.openLink(url); } }
+function call(){ if(STATE.cur.phone) location.href="tel:"+STATE.cur.phone.replace(/[^+\d]/g,""); }
+
+async function upPhoto(){
+  const f=$("photo").files[0]; if(!f) return;
+  const fd=new FormData(); fd.append("photo",f);
+  try{
+    const r=await fetch("/api/photo?rep="+enc(STATE.cur.rep),{method:"POST",headers:authHeaders(),body:fd});
+    const j=await r.json(); STATE.cur.photos=j.photos; $("phc").textContent=L().photos+": "+j.photos; toast(L().saved);
+  }catch(e){ toast("✕"); }
+}
+async function saveVisit(){
+  const values={};
+  document.querySelectorAll("#panel select[data-k]").forEach(s=>{ if(s.value) values[s.dataset.k]=s.value; });
+  const cc=$("f_call_comment"); if(cc&&cc.value.trim()) values.call_comment=cc.value.trim();
+  const tp=$("f_tips"); if(tp&&tp.value.trim()) values.tips=tp.value.trim();
+  try{
+    const j=await api("/api/save",{method:"POST",body:JSON.stringify({rep:STATE.cur.rep,values,finish:true})});
+    STATE.cur=j.person; toast(L().saved);
+    if(TG&&TG.HapticFeedback) TG.HapticFeedback.notificationOccurred("success");
+    STATE.tab="visit"; renderDetail();
+    const p=STATE.persons.find(x=>x.rep===STATE.cur.rep); if(p) p.visited=true;
+  }catch(e){ toast("✕"); }
+}
+function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+// --- Геометки: захват точки (геолокация телефона) + сохранение ---
+function getLoc(){
+  return new Promise((resolve,reject)=>{
+    const manual=()=>{ const s=prompt("lat, lon"); if(s&&s.includes(",")){
+      const [a,b]=s.split(",").map(x=>parseFloat(x.trim())); if(!isNaN(a)&&!isNaN(b)) return resolve({lat:a,lon:b}); }
+      reject(new Error("denied")); };
+    if(navigator.geolocation){
+      navigator.geolocation.getCurrentPosition(
+        p=>resolve({lat:p.coords.latitude,lon:p.coords.longitude}),
+        ()=>manual(), {enableHighAccuracy:true,timeout:10000});
+    } else manual();
+  });
+}
+async function setMarkCase(){
+  const t=L(); toast(t.getloc);
+  try{
+    const loc=await getLoc();
+    const j=await api("/api/marker",{method:"POST",body:JSON.stringify({rep:STATE.cur.rep,lat:loc.lat,lon:loc.lon})});
+    if(j.person) STATE.cur=j.person;
+    if(TG&&TG.HapticFeedback) TG.HapticFeedback.notificationOccurred("success");
+    toast(t.marksaved); drawPanel();
+  }catch(e){ alert(t.nogeo); }
+}
+async function renderMarkers(){
+  removeMap(); STATE.cur=null; const t=L();
+  let j={markers:[]}; try{ j=await api("/api/markers"); }catch(e){}
+  const list=j.markers.length ? j.markers.map(m=>
+    `<div class="mk"><span class="mkdot"></span><div>
+       <div>${esc(m.label||(m.rep?("КД "+m.rep):t.standalone))}</div>
+       <div class="muted" style="font-size:11px">${(+m.lat).toFixed(5)}, ${(+m.lon).toFixed(5)} · ${String(m.at||"").replace("T"," ")}</div>
+     </div></div>`).join("") : `<div class="center">${t.nomarks}</div>`;
+  $("app").innerHTML=`
+    <button class="back" onclick="boot()">← ${t.my}</button>
+    <div class="h">${t.marks}</div>
+    <button class="btn acc" style="margin:8px 0" onclick="newMarker()">＋ ${t.newmark}</button>
+    <div>${list}</div>`;
+}
+async function newMarker(){
+  const t=L(); const label=(prompt(t.mlabel)||"").trim();
+  toast(t.getloc);
+  try{
+    const loc=await getLoc();
+    await api("/api/marker",{method:"POST",body:JSON.stringify({lat:loc.lat,lon:loc.lon,label})});
+    toast(t.marksaved); renderMarkers();
+  }catch(e){ alert(t.nogeo); }
+}
+
+boot();
+</script>
+</body>
+</html>

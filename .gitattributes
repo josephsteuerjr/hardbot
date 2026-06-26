@@ -1,0 +1,11 @@
+# Единые переносы строк: LF везде, кроме Windows-скриптов (CRLF).
+* text=auto eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+# Бинарные — не трогать.
+*.xlsb binary
+*.xlsx binary
+*.pmtiles binary
+*.jpg binary
+*.png binary
+*.ico binary
