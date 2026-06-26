@@ -72,3 +72,37 @@ def test_engine_auth_requires_token_for_real_db():
     with pytest.raises(HTTPException):
         engine_main._engine_auth("wrong")
     assert engine_main._engine_auth("s3cret") is None
+
+
+def test_all_api_routes_require_engine_token():
+    """Токен-auth висит на ВСЕХ /api/* движка (никто не забыт)."""
+    import app.main as engine_main
+    api_routes = [r for r in engine_main.app.routes
+                  if getattr(r, "path", "").startswith("/api/")]
+    assert api_routes, "нет /api/* маршрутов?"
+    for r in api_routes:
+        calls = [d.call for d in r.dependant.dependencies]
+        assert engine_main._engine_auth in calls, f"{r.path} без _engine_auth!"
+
+
+def test_startup_guard_blocks_real_db_without_token(monkeypatch):
+    import app.main as engine_main
+    monkeypatch.setattr(engine_main, "_REAL_DB", True)
+    monkeypatch.setattr(engine_main, "ENGINE_API_TOKEN", "")
+    with pytest.raises(RuntimeError):
+        engine_main._enforce_startup_safety()
+
+
+def test_startup_guard_blocks_public_bind(monkeypatch):
+    import app.main as engine_main
+    monkeypatch.setattr(engine_main, "_REAL_DB", True)
+    monkeypatch.setattr(engine_main, "ENGINE_API_TOKEN", "tok")
+    monkeypatch.setenv("ENGINE_HOST", "0.0.0.0")
+    with pytest.raises(RuntimeError):
+        engine_main._enforce_startup_safety()
+
+
+def test_startup_guard_ok_for_synthetic(monkeypatch):
+    import app.main as engine_main
+    monkeypatch.setattr(engine_main, "_REAL_DB", False)
+    engine_main._enforce_startup_safety()   # синтетика — без ограничений, не падает

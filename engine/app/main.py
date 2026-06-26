@@ -10,7 +10,7 @@ FastAPI-оркестратор движка «Контур · Выезды».
 geo/routing. Дубля скоринга (бывш. build_demo.score) больше нет — один источник истины.
 """
 from __future__ import annotations
-import hmac, logging, os, sys, sqlite3
+import hmac, os, sys, sqlite3
 from collections import Counter
 from pathlib import Path
 
@@ -37,9 +37,25 @@ _REAL_DB = bool(os.getenv("HARDBOT_DB") and Path(os.getenv("HARDBOT_DB", "")).ex
 # Caddy). Кросс-ориджин — только если явно задан CORS_ALLOW_ORIGIN (был открытый «*»).
 TILES_CORS_ORIGIN = os.getenv("CORS_ALLOW_ORIGIN", "").strip()
 
-if _REAL_DB and not ENGINE_API_TOKEN:
-    logging.warning("⚠ Движок с РЕАЛЬНОЙ БД (HARDBOT_DB) без ENGINE_API_TOKEN: /api/* отвечает "
-                    "401. Задай ENGINE_API_TOKEN и НЕ публикуй порт на 0.0.0.0 (только 127.0.0.1).")
+def _enforce_startup_safety() -> None:
+    """ИБ-гард старта (defense-in-depth поверх токен-auth). Реальную БД (ПД) НЕЛЬЗЯ:
+    (1) поднимать без ENGINE_API_TOKEN; (2) публиковать на 0.0.0.0 — только 127.0.0.1
+    (наружу — через Caddy/SSH-туннель). Синтетика (нет HARDBOT_DB) — без ограничений."""
+    if not _REAL_DB:
+        return
+    if not ENGINE_API_TOKEN:
+        raise RuntimeError(
+            "Движок с реальной БД (HARDBOT_DB) запущен БЕЗ ENGINE_API_TOKEN — старт запрещён. "
+            "Задай ENGINE_API_TOKEN: ПД должников не отдаём без аутентификации.")
+    argv = " ".join(sys.argv)
+    if (os.getenv("ENGINE_HOST", "") == "0.0.0.0"
+            or "--host 0.0.0.0" in argv or "--host=0.0.0.0" in argv):
+        raise RuntimeError(
+            "Движок с реальной БД нельзя публиковать на 0.0.0.0 — bind ТОЛЬКО 127.0.0.1 "
+            "(наружу — через Caddy/SSH-туннель). Убери --host 0.0.0.0.")
+
+
+_enforce_startup_safety()
 
 
 def _engine_auth(x_engine_token: str = Header(default="")) -> None:
