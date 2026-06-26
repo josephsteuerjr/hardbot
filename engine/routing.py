@@ -62,18 +62,32 @@ def _nearest_neighbour(mat: list[list[float]], start: int = 0) -> list[int]:
     return order
 
 
-def _two_opt(order: list[int], mat: list[list[float]], rounds: int = 60) -> list[int]:
-    """2-opt для ОТКРЫТОГО пути. Оценка свопа — инкрементальной ДЕЛЬТОЙ по изменённому
-    участку (а не пересчётом всей длины на каждый кандидат — было ~O(n) лишних операций
-    в двойном цикле, затык на реальном городе в сотни точек).
+def _is_symmetric(mat: list[list[float]]) -> bool:
+    """mat[i][j] == mat[j][i] для всех пар (гаверсинус — да; времена OSRM — обычно нет).
+    O(n²) разово; окупается O(1)-дельтой в 2-opt."""
+    n = len(mat)
+    for i in range(n):
+        row_i = mat[i]
+        for j in range(i + 1, n):
+            if row_i[j] != mat[j][i]:
+                return False
+    return True
 
-    Δ = (новые рёбра границы + развёрнутый внутренний сегмент) − (старые те же).
-    Прочая часть пути не меняется и в Δ не входит. Для симметричной матрицы (гаверсинус)
-    внутренний сегмент сокращается; для АСИММЕТРИЧНОЙ (времена OSRM, рёбра направленные)
-    учитываем разворот направления внутри сегмента — поэтому результат бит-в-бит совпадает
-    со старым «полным пересчётом» при том же пороге 1e-9 (см. tests/test_routing.py)."""
+
+def _two_opt(order: list[int], mat: list[list[float]], rounds: int = 60) -> list[int]:
+    """2-opt для ОТКРЫТОГО пути. Оценка свопа — инкрементальной ДЕЛЬТОЙ, а не пересчётом
+    всей длины на каждый кандидат (было ~O(n) лишних операций в двойном цикле → затык на
+    реальном городе в сотни точек).
+
+    Разворот сегмента [i..k] меняет рёбра-границы (i-1→i) и (k→k+1). Для СИММЕТРИЧНОЙ
+    матрицы (гаверсинус) внутренние рёбра при развороте не меняют вес → Δ считается по
+    ДВУМ рёбрам, O(1) на кандидат → O(n²) на проход (большой выигрыш на N в сотни точек).
+    Для АСИММЕТРИЧНОЙ (времена OSRM, рёбра направленные) учитываем разворот направления
+    внутри сегмента. В обоих случаях решение бит-в-бит совпадает со старым «полным
+    пересчётом» при пороге 1e-9 (см. tests/test_routing.py — sym и asym)."""
     n = len(order)
     best = order[:]
+    symmetric = _is_symmetric(mat)
     improved = True
     it = 0
     while improved and it < rounds:
@@ -83,17 +97,14 @@ def _two_opt(order: list[int], mat: list[list[float]], rounds: int = 60) -> list
             a = best[i - 1]
             for k in range(i + 1, n):
                 b, c = best[i], best[k]
-                old = mat[a][b]            # ребро перед сегментом
-                new = mat[a][c]
+                delta = mat[a][c] - mat[a][b]                 # ребро перед сегментом
                 if k + 1 < n:
                     d = best[k + 1]
-                    old += mat[c][d]       # ребро после сегмента (открытый путь — может отсутствовать)
-                    new += mat[b][d]
-                # внутренние рёбра сегмента: при развороте меняют направление
-                for j in range(i, k):
-                    old += mat[best[j]][best[j + 1]]
-                    new += mat[best[j + 1]][best[j]]
-                if new < old - 1e-9:
+                    delta += mat[b][d] - mat[c][d]            # ребро после сегмента
+                if not symmetric:                            # направленные внутренние рёбра
+                    for j in range(i, k):
+                        delta += mat[best[j + 1]][best[j]] - mat[best[j]][best[j + 1]]
+                if delta < -1e-9:
                     best[i:k + 1] = best[i:k + 1][::-1]
                     improved = True
     return best
