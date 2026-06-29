@@ -32,6 +32,7 @@
 | 14 | Пентест: объём и чек-лист (план) | [08-pentest-plan.md](08-pentest-plan.md) |
 | 15 | Маппинг 152-ФЗ / ZRU-547 / ТДж-1537 + ISO 27001 | [09-legal-mapping.md](09-legal-mapping.md) |
 | 16 | **Реестр go-live** (открытые пункты · владелец · приёмка) | [10-go-live-register.md](10-go-live-register.md) |
+| 17 | **Развёртывание и инфраструктура** (Linux + Docker, доступ, бэкапы) | [11-deployment-infra.md](11-deployment-infra.md) |
 
 ## Резюме для ИБ за 60 секунд
 
