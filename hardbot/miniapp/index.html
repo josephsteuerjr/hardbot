@@ -90,9 +90,21 @@ body.navon{overflow:hidden}
   font-size:14px;font-weight:600;font-family:inherit;box-shadow:0 4px 14px rgba(43,40,37,.32);cursor:pointer}
 .fab .ico{width:18px;height:18px}
 label.fld{display:block;font-size:13px;color:var(--muted);margin:12px 0 5px}
-select,textarea{width:100%;padding:11px 12px;border:1px solid var(--border);border-radius:10px;
+select,textarea{width:100%;padding:13px 12px;border:1px solid var(--border);border-radius:11px;
   background:var(--card);font-size:15px;font-family:inherit;color:var(--text)}
 textarea{min-height:64px;resize:vertical}
+/* --- Форма визита: секции-карточки, крупные тач-таргеты (заполнение на телефоне в поле) --- */
+.fsec{background:var(--card);border:1px solid var(--border);border-radius:14px;
+  padding:6px 14px 14px;margin-bottom:12px;box-shadow:0 1px 2px rgba(43,40,37,.04)}
+.fsec-h{font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;
+  color:var(--muted);margin:12px 0 2px}
+.fsec.key{border-color:var(--accent);box-shadow:0 2px 10px rgba(43,40,37,.10)}
+.fsec.key .fsec-h{color:var(--accent)}
+.fsec select{min-height:50px}
+.btn.acc.big{padding:16px;font-size:16px;font-weight:600;border-radius:14px;
+  box-shadow:0 4px 14px rgba(43,40,37,.22)}
+.draftrow{display:flex;align-items:center;gap:7px;font-size:12.5px;margin:2px 2px 0}
+.draftrow .d{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
 .cdcard{font-size:13px;border-bottom:1px solid var(--alt);padding:8px 0}
 .cdcard:last-child{border-bottom:none}
 .cdcard .t{font-weight:500;margin-bottom:2px}
@@ -197,7 +209,8 @@ const I18N = {
     marksaved:"Метка сохранена",nomarks:"Меток пока нет",getloc:"Определяю точку…",standalone:"свободная метка",
     nogeo:"Не получилось определить геолокацию — включите доступ или введите координаты.",
     go:"Поехать",exit:"Выйти",finishvisit:"Отметить визит",mins:"мин",
-    draftwait:"черновик не отправлен на сервер",draftsent:"черновик сохранён на сервере"},
+    draftwait:"черновик не отправлен на сервер",draftsent:"черновик сохранён на сервере",
+    secResult:"Результат выезда",secContact:"Контакт",secClient:"Клиент сейчас",secAgree:"Договорённость"},
   uz:{visit:"Chiqish",client:"Mijoz",debt:"Qarz",form:"To‘ldirish",my:"Mijozlarim",
     search:"Qidirish: F.I.Sh., shartnoma, telefon",kd:"shartnoma",total:"Jami qarz",inwork:"Ish boshlandi",
     drive:"Borish",call:"Qo‘ng‘iroq",save:"Chiqishni saqlash",addphoto:"Rasm qo‘shish",
@@ -210,7 +223,8 @@ const I18N = {
     marksaved:"Nuqta saqlandi",nomarks:"Hozircha nuqta yo‘q",getloc:"Nuqta aniqlanmoqda…",standalone:"erkin nuqta",
     nogeo:"Geolokatsiyani aniqlab bo‘lmadi — ruxsat bering yoki koordinatani kiriting.",
     go:"Yo‘lga chiqish",exit:"Yopish",finishvisit:"Tashrifni belgilash",mins:"daq",
-    draftwait:"qoralama serverga yuborilmadi",draftsent:"qoralama serverda saqlandi"},
+    draftwait:"qoralama serverga yuborilmadi",draftsent:"qoralama serverda saqlandi",
+    secResult:"Chiqish natijasi",secContact:"Kontakt",secClient:"Mijoz hozir",secAgree:"Kelishuv"},
   tg:{visit:"Сафар",client:"Мизоҷ",debt:"Қарз",form:"Пур кардан",my:"Мизоҷони ман",
     search:"Ҷустуҷӯ: НН, шартнома, телефон",kd:"шартнома",total:"Қарзи умумӣ",inwork:"Дар кор аз",
     drive:"Расидан",call:"Занг задан",save:"Сафарро захира",addphoto:"Расм илова",
@@ -223,7 +237,8 @@ const I18N = {
     marksaved:"Нуқта захира шуд",nomarks:"Ҳоло нуқта нест",getloc:"Нуқта муайян мешавад…",standalone:"нуқтаи озод",
     nogeo:"Геолокатсия муайян нашуд — иҷозат диҳед ё координата ворид кунед.",
     go:"Ба роҳ баромадан",exit:"Бастан",finishvisit:"Сафарро қайд кардан",mins:"дақ",
-    draftwait:"нусха ба сервер нафиристода шуд",draftsent:"нусха дар сервер захира шуд"},
+    draftwait:"нусха ба сервер нафиристода шуд",draftsent:"нусха дар сервер захира шуд",
+    secResult:"Натиҷаи сафар",secContact:"Тамос",secClient:"Мизоҷ ҳозир",secAgree:"Созиш"},
 };
 let STATE = {lang:"ru", meta:null, persons:[], cur:null, tab:"visit"};
 const L = () => I18N[STATE.lang] || I18N.ru;
@@ -506,23 +521,37 @@ function panelDebt(d,t){
   return `<div class="box"><div class="muted" style="margin-bottom:6px">${t.total}: <b>${money(d.total,d.unit)}</b></div>${cds}</div>
     ${pr?`<div class="box"><div class="muted" style="margin-bottom:4px">${t.promise}</div>${pr}</div>`:""}`;
 }
+// Одно поле-выпадашка. Контрол остаётся <select> (мобильный нативный пикер удобен для
+// длинных вариантов), автосохранение и восстановление работают по data-k без изменений.
+function formField(f){
+  const opts=(STATE.meta.dropdowns[f.key]||[]).map(o=>
+    `<option value="${esc(o.value)}" ${o.value===f.current?"selected":""}>${esc(o.label)}</option>`).join("");
+  return `<label class="fld">${esc(f.title)}</label>
+    <select data-k="${f.key}"><option value="">—</option>${opts}</select>`;
+}
 function panelForm(d,t){
-  const sel = d.form.map(f=>{
-    const opts=(STATE.meta.dropdowns[f.key]||[]).map(o=>
-      `<option value="${esc(o.value)}" ${o.value===f.current?"selected":""}>${esc(o.label)}</option>`).join("");
-    return `<label class="fld">${esc(f.title)}</label>
-      <select data-k="${f.key}"><option value="">—</option>${opts}</select>`;
-  }).join("");
-  return `${sel}
-    <label class="fld">${t.comment}</label><textarea id="f_call_comment">${esc(d.call_comment||"")}</textarea>
-    <label class="fld">${t.tips}</label><textarea id="f_tips">${esc(d.tips||"")}</textarea>
-    <label class="fld">${t.photos}</label>
-    <label class="btn line" style="cursor:pointer">${ic("camera")}<span>${t.addphoto}</span>
-      <input type="file" accept="image/*" capture="environment" id="photo" style="display:none" onchange="upPhoto()">
-    </label>
-    <div class="muted" id="phc" style="font-size:12px;margin-top:6px">${t.photos}: ${d.photos||0}</div>
-    <div id="draftstat" style="font-size:12px;margin-top:10px;display:none"></div>
-    <button class="btn acc" style="margin-top:14px" onclick="saveVisit()">${ic("check")}<span>${t.save}</span></button>`;
+  const byKey={}; d.form.forEach(f=>{ byKey[f.key]=f; });
+  const grp=keys=>keys.map(k=>byKey[k]?formField(byKey[k]):"").join("");
+  const known=new Set(["call_status","contact_with","who_at_address","client_location","purpose_rf","agreed_payment"]);
+  const rest=d.form.filter(f=>!known.has(f.key)).map(formField).join("");   // на случай новых полей с сервера
+  const sec=(cls,head,inner)=>inner?`<div class="fsec ${cls}"><div class="fsec-h">${head}</div>${inner}</div>`:"";
+  return `
+    ${sec("key",t.secResult,grp(["call_status"]))}
+    ${sec("",t.secContact,grp(["contact_with","who_at_address"]))}
+    ${sec("",t.secClient,grp(["client_location","purpose_rf"]))}
+    ${sec("",t.secAgree,grp(["agreed_payment"])+rest)}
+    <div class="fsec"><div class="fsec-h">${t.comment}</div>
+      <label class="fld">${t.comment}</label><textarea id="f_call_comment">${esc(d.call_comment||"")}</textarea>
+      <label class="fld">${t.tips}</label><textarea id="f_tips">${esc(d.tips||"")}</textarea>
+    </div>
+    <div class="fsec"><div class="fsec-h">${t.photos}</div>
+      <label class="btn line" style="cursor:pointer;margin-top:8px">${ic("camera")}<span>${t.addphoto}</span>
+        <input type="file" accept="image/*" capture="environment" id="photo" style="display:none" onchange="upPhoto()">
+      </label>
+      <div class="muted" id="phc" style="font-size:12px;margin-top:6px">${t.photos}: ${d.photos||0}</div>
+    </div>
+    <div id="draftstat" class="draftrow" style="display:none"></div>
+    <button class="btn acc big" style="margin-top:12px" onclick="saveVisit()">${ic("check")}<span>${t.save}</span></button>`;
 }
 
 // --- Ссылки на внешнюю навигацию (последняя миля — родное приложение телефона). ---
@@ -610,9 +639,9 @@ function onFormChange(){
 }
 function markDraftBadge(dirty){
   const e=$("draftstat"); if(!e) return; const t=L();
-  e.style.display="block";
-  e.style.color=dirty?"var(--danger)":"var(--success)";
-  e.textContent=(dirty?"● ":"✓ ")+(dirty?t.draftwait:t.draftsent);
+  e.style.display="flex";
+  e.innerHTML=`<span class="d" style="background:${dirty?'var(--danger)':'var(--success)'}"></span>`+
+    `<span class="muted">${dirty?t.draftwait:t.draftsent}</span>`;
 }
 
 // Восстановление черновика поверх серверных значений при открытии формы.
