@@ -46,12 +46,16 @@ async def reminder_loop(bot: Bot):
 
 
 async def main():
-    token = os.getenv("BOT_TOKEN")
-    if not token:
-        raise SystemExit("Не задан BOT_TOKEN (.env). Токен берётся у @BotFather.")
     db.init_db()
     if ADMIN_ID:
         db.ensure_owner(ADMIN_ID)
+    # Токен: сперва durable-настройка в БД (том /data — переживает рестарт и пересборку
+    # контейнера), иначе .env. Так «переключение на другой бот» из пульта
+    # (POST /admin/bot_token пишет токен в settings) применяется после рестарта процесса,
+    # даже если env контейнера ещё держит старый токен из env_file.
+    token = db.get_setting("bot_token") or os.getenv("BOT_TOKEN")
+    if not token:
+        raise SystemExit("Не задан BOT_TOKEN (.env). Токен берётся у @BotFather.")
     try:
         import scoring
         got = scoring.geocode_city_centroids()

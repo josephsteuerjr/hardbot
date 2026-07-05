@@ -635,6 +635,18 @@ async def _admin_activity(request: web.Request) -> web.Response:
                               "generated_at": datetime.now().isoformat(timespec="seconds")})
 
 
+async def _admin_restart(request: web.Request) -> web.Response:
+    """Плановый перезапуск процесса из пульта — чтобы применить новый BOT_TOKEN
+    (переключение на другой бот) и заново поставить menu-button миниаппа новому боту.
+    Работает в паре с супервизором, который поднимает процесс обратно: docker-compose
+    `restart: unless-stopped` (наш случай) или systemd. Ответ отдаём ДО выхода —
+    os._exit через call_later, чтобы клиент получил подтверждение."""
+    _admin(request)
+    logging.warning("Перезапуск процесса по запросу admin-API (применение нового токена)")
+    asyncio.get_event_loop().call_later(0.5, lambda: os._exit(0))
+    return web.json_response({"ok": True, "restarting": True})
+
+
 @web.middleware
 async def _cors(request: web.Request, handler):
     if request.method == "OPTIONS":
@@ -669,6 +681,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/admin/geocode", _admin_geocode)
     app.router.add_get("/admin/priority", _admin_priority)
     app.router.add_get("/admin/activity", _admin_activity)
+    app.router.add_post("/admin/restart", _admin_restart)
     app.router.add_get("/admin/period", _admin_period)
     app.router.add_post("/admin/period", _admin_period)
     app.router.add_get("/tiles/basemap.pmtiles", _tiles)
