@@ -425,7 +425,7 @@ input[type=range]{width:100%;accent-color:var(--accent);margin:0;height:22px}
 
       <div class="card">
         <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><path d="M21 12c-1 0-3-1-3-3s2-3 3-3-3-1-3-3 1-3 3-3"/><rect x="3" y="4" width="18" height="16" rx="2"/></svg></span>Токен бота</h2>
-        <p class="desc">Сменить бота (токен от @BotFather). После сохранения бот нужно перезапустить — токен подхватывается при старте. Токен нигде не показывается и не выгружается.</p>
+        <p class="desc">Сменить бота (токен от @BotFather). После сохранения нажмите «Перезапустить бота» — новый токен применится, и мини-аппа автоматически развернётся в новом боте. Токен нигде не показывается и не выгружается.</p>
         <div class="field"><label>Токен бота</label>
           <div class="keywrap">
             <input type="password" id="bottoken" placeholder="123456789:AA…">
@@ -436,6 +436,7 @@ input[type=range]{width:100%;accent-color:var(--accent);margin:0;height:22px}
         </div>
         <div class="row">
           <button class="btn acc" id="btnbottoken" onclick="changeBotToken()">Сменить бота</button>
+          <button class="btn" id="btnrestart" onclick="restartBot()">Перезапустить бота</button>
           <span class="small muted">формат: цифры : буквы/цифры (≥30 символов)</span>
         </div>
       </div>
@@ -805,9 +806,26 @@ async function changeBotToken(){
     if(!r.ok){ toast("Ошибка смены токена: "+r.status,true); return; }
     const d = await r.json().catch(()=>({}));
     $("bottoken").value = "";   // не держим токен в поле
-    toast(d.need_restart ? "Токен сохранён — перезапустите бота" : "Токен сохранён");
+    toast(d.need_restart ? "Токен сохранён — можно перезапустить бота" : "Токен сохранён");
+    if(d.need_restart && confirm("Токен сохранён. Перезапустить бота сейчас, чтобы применить?")) restartBot();
   }catch(e){ toast("Ошибка смены токена: "+(e.message||e),true); }
   finally{ btn.disabled=false; }
+}
+/* Перезапуск процесса бота (POST /admin/restart): применяет новый токен и заново
+   ставит menu-button миниаппа новому боту. Процесс поднимает супервизор (docker
+   restart:unless-stopped / systemd). Ответ приходит до выхода; обрыв соединения
+   сразу после — ожидаемое поведение, не ошибка. */
+async function restartBot(){
+  if(!confirm("Перезапустить бота? Он будет недоступен несколько секунд, затем поднимется автоматически и применит новый токен.")) return;
+  const btn=$("btnrestart"); btn.disabled=true;
+  try{
+    const r = await fetch(base()+"/admin/restart",{method:"POST",headers:hdr()});
+    if(r.status===404){ toast("Сервер ещё старый — нет /admin/restart",true); return; }
+    if(r.status===401){ toast("Неверный ключ admin-API",true); return; }
+    if(!r.ok){ toast("Ошибка перезапуска: "+r.status,true); return; }
+    toast("Перезапуск запущен — бот поднимется через несколько секунд");
+  }catch(e){ toast("Перезапуск запущен (соединение прервано — это нормально)"); }
+  finally{ setTimeout(()=>{ btn.disabled=false; }, 4000); }
 }
 ["url","key"].forEach(id=>$(id).addEventListener("keydown",e=>{ if(e.key==="Enter") refresh(); }));
 /* ключ и адрес персистятся сразу при вводе (тот же store, что и при подключении),
