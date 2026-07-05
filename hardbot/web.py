@@ -17,10 +17,13 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
+import re
 import tempfile
 import time
-from datetime import date
+import urllib.request
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import parse_qsl
 
@@ -40,6 +43,9 @@ MINIAPP_DIR = Path(__file__).parent / "miniapp"
 PHOTO_DIR = Path(os.getenv("HARDBOT_DATA", Path(__file__).parent)) / "photos"
 # Свой вектор-тайлсет (Protomaps PMTiles). Если файла нет — карта на растровом OSM.
 TILES_FILE = Path(os.getenv("HARDBOT_DATA", Path(__file__).parent)) / "basemap.pmtiles"
+# Свой маршрутизатор (OSRM) для геометрии «я → должник» в навигации миниаппа.
+# Пусто — навигация рисует честную прямую (haversine), это не баг, а заявленный фолбэк.
+OSRM_URL = (os.getenv("OSRM_URL", "") or "").strip()
 DEV = (os.getenv("HARDBOT_DEV", "") or "").lower() not in ("", "0", "false", "no")
 _MAX_AGE = 24 * 3600  # initData не старше суток
 
@@ -196,6 +202,30 @@ def _person_full(rep: str, lang: str) -> dict | None:
     }
 
 
+# --- Маршрут «я → должник» (навигация в миниаппе) ---------------------------
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    h = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(h))
+
+
+def _osrm_route(lat1: float, lon1: float, lat2: float, lon2: float, base: str):
+    """Геометрия по дорогам через OSRM /route. None при любой ошибке (сеть/таймаут/
+    граф не покрывает точку) — вызывающий код тогда честно падает на прямую линию."""
+    try:
+        url = (f"{base.rstrip('/')}/route/v1/driving/"
+               f"{lon1},{lat1};{lon2},{lat2}?overview=full&geometries=geojson")
+        req = urllib.request.Request(url, headers={"User-Agent": "hardbot-miniapp/1.0"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            data = json.loads(r.read())
+        route = data["routes"][0]
+        return route["geometry"]["coordinates"], route["distance"] / 1000.0, route["duration"] / 60.0
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # --- Хендлеры ---------------------------------------------------------------
 async def _index(request: web.Request) -> web.StreamResponse:
     return web.FileResponse(MINIAPP_DIR / "index.html")
@@ -301,6 +331,38 @@ async def _markers(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "markers": [
         {"id": r["id"], "lat": r["lat"], "lon": r["lon"], "label": r["label"],
          "rep": r["client_rep"], "at": r["created_at"]} for r in rows]})
+
+
+async def _route(request: web.Request) -> web.Response:
+    """Геометрия маршрута от живой точки выездника до должника — для полноэкранной
+    навигации в миниаппе. OSRM, если поднят (`OSRM_URL`); иначе честная прямая —
+    фронт в обоих случаях получает линию + км + минуты и рисует её на карте."""
+    uid, emp = _auth(request)
+    rep = request.query.get("rep", "")
+    try:
+        lat = float(request.query.get("lat", ""))
+        lon = float(request.query.get("lon", ""))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text="lat/lon")
+    row = db.get_client(rep)
+    if not row or (row["responsible"] != emp and uid != ADMIN_ID):
+        raise web.HTTPNotFound(text="person")
+    glat, glon = row["geo_lat"], row["geo_lon"]
+    if glat is None or glon is None:
+        raise web.HTTPNotFound(text="geo")
+    glat, glon = float(glat), float(glon)
+    result = None
+    if OSRM_URL:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, _osrm_route, lat, lon, glat, glon, OSRM_URL)
+    if result:
+        line, km, minutes = result
+        return web.json_response({"ok": True, "line": line, "km": round(km, 1),
+                                  "minutes": round(minutes), "src": "osrm"})
+    km = _haversine_km(lat, lon, glat, glon)
+    minutes = km / 30.0 * 60.0   # тот же запас скорости 30 км/ч, что и в движке без OSRM
+    return web.json_response({"ok": True, "line": [[lon, lat], [glon, glat]],
+                              "km": round(km, 1), "minutes": round(minutes), "src": "straight"})
 
 
 async def _person(request: web.Request) -> web.Response:
@@ -435,6 +497,33 @@ async def _admin_import(request: web.Request) -> web.Response:
     return web.json_response(report)
 
 
+async def _admin_import_json(request: web.Request) -> web.Response:
+    """Импорт из пульта: гриды листов уже распарсены на клиенте (calamine),
+    сервер только матчит заголовки и делает upsert — openpyxl не участвует."""
+    _admin(request)
+    body = await request.json()
+    grid = db.pick_grid(body.get("sheets") or [])
+    report = db.import_grid(grid)
+    try:
+        import scoring
+        report["geocoded"] = scoring.geocode_city_centroids()
+    except Exception as e:  # noqa: BLE001
+        logging.warning("geocode after import: %s", e)
+    return web.json_response(report)
+
+
+async def _admin_export_json(request: web.Request) -> web.Response:
+    """Экспорт реестра для пульта: схема колонок + строки. xlsx собирает пульт
+    (rust_xlsxwriter), сервер отдаёт чистые данные."""
+    _admin(request)
+    return web.json_response({"fields": db.export_schema(), "rows": db.registry_rows()})
+
+
+async def _admin_markers_json(request: web.Request) -> web.Response:
+    _admin(request)
+    return web.json_response({"rows": db.markers_rows()})
+
+
 async def _admin_export(request: web.Request) -> web.StreamResponse:
     _admin(request)
     p = os.path.join(tempfile.gettempdir(), "registry_export.xlsx")
@@ -449,11 +538,66 @@ async def _admin_markers_xlsx(request: web.Request) -> web.StreamResponse:
     return web.FileResponse(p, headers={"Content-Disposition": "attachment; filename=markers.xlsx"})
 
 
+async def _admin_employees(request: web.Request) -> web.Response:
+    """Список ФИО из реестра с уже проставленной привязкой — для экрана «Роли»
+    в пульте. Заказчик вписывает telegram_id каждому ФИО, тип (выездник/курьер)."""
+    _admin(request)
+    return web.json_response({"employees": db.employees_with_bindings()})
+
+
+async def _admin_bind(request: web.Request) -> web.Response:
+    """Предзаданная привязка из пульта: {telegram_id:int, employee:str, kind:str}.
+    Создать/обновить с approved=1 — работник с этим id сразу привязан к клиентам
+    (без самовыбора в боте). Upsert через db.set_bind (по employee и telegram_id)."""
+    _admin(request)
+    body = await request.json()
+    try:
+        tid = int(body["telegram_id"])
+    except (KeyError, TypeError, ValueError):
+        raise web.HTTPBadRequest(text="telegram_id")
+    employee = (body.get("employee") or "").strip()
+    if not employee:
+        raise web.HTTPBadRequest(text="employee required")
+    kind = "courier" if body.get("kind") == "courier" else "agent"
+    db.set_bind(tid, employee, kind)
+    return web.json_response({"ok": True, "telegram_id": tid,
+                              "employee": employee, "kind": kind})
+
+
 async def _admin_unbind(request: web.Request) -> web.Response:
     _admin(request)
     body = await request.json()
     db.unbind(int(body["telegram_id"]))
     return web.json_response({"ok": True})
+
+
+async def _admin_guests(request: web.Request) -> web.Response:
+    """Список гостей (кто писал боту) — для выбора telegram_id при привязке в пульте.
+    {guests:[{telegram_id, username, name, last_seen, bound_employee|null}]}. Свежие сверху."""
+    _admin(request)
+    return web.json_response({"guests": db.guests()})
+
+
+# Формат токена @BotFather: <digits>:<35+ буквенно-цифровых/подчёркивание/дефис>.
+_TOKEN_RE = re.compile(r"^\d+:[\w-]{30,}$")
+
+
+async def _admin_bot_token(request: web.Request) -> web.Response:
+    """Сменить токен бота: {token}. Валидируем формат, пишем в .env (+ settings),
+    процесс подхватит после РЕСТАРТА (env читается на старте) — сами НЕ перезапускаем.
+    Токен НЕ логируем и НЕ возвращаем. Ответ: {ok, need_restart:true}."""
+    _admin(request)
+    body = await request.json()
+    token = (body.get("token") or "").strip()
+    if not _TOKEN_RE.match(token):
+        raise web.HTTPBadRequest(text="bad token format")
+    try:
+        db.set_bot_token(token)
+    except OSError as e:  # не удалось записать .env — сообщаем без утечки токена
+        logging.warning("set_bot_token: write failed (%s)", type(e).__name__)
+        raise web.HTTPInternalServerError(text="cannot persist token")
+    logging.info("BOT_TOKEN changed via admin API (restart required to apply)")
+    return web.json_response({"ok": True, "need_restart": True})
 
 
 async def _admin_geocode(request: web.Request) -> web.Response:
@@ -483,6 +627,14 @@ async def _admin_priority(request: web.Request) -> web.Response:
     return web.json_response(res)
 
 
+async def _admin_activity(request: web.Request) -> web.Response:
+    """Активность работников (визиты/метки за 7/30 дней, простой) — вкладка
+    «Активность» в пульте. Считается на лету из visits/markers по created_at."""
+    _admin(request)
+    return web.json_response({"workers": db.activity_stats(),
+                              "generated_at": datetime.now().isoformat(timespec="seconds")})
+
+
 @web.middleware
 async def _cors(request: web.Request, handler):
     if request.method == "OPTIONS":
@@ -499,21 +651,30 @@ async def _cors(request: web.Request, handler):
 
 
 def build_app(bot=None) -> web.Application:
-    app = web.Application(client_max_size=24 * 1024 * 1024, middlewares=[_cors])
+    app = web.Application(client_max_size=256 * 1024 * 1024, middlewares=[_cors])
     app["bot"] = bot
     app.router.add_get("/", _index)
     app.router.add_get("/admin/stats", _admin_stats)
     app.router.add_post("/admin/import", _admin_import)
+    app.router.add_post("/admin/import.json", _admin_import_json)
     app.router.add_get("/admin/export", _admin_export)
+    app.router.add_get("/admin/export.json", _admin_export_json)
     app.router.add_get("/admin/markers.xlsx", _admin_markers_xlsx)
+    app.router.add_get("/admin/markers.json", _admin_markers_json)
+    app.router.add_get("/admin/employees", _admin_employees)
+    app.router.add_get("/admin/guests", _admin_guests)
+    app.router.add_post("/admin/bind", _admin_bind)
     app.router.add_post("/admin/unbind", _admin_unbind)
+    app.router.add_post("/admin/bot_token", _admin_bot_token)
     app.router.add_post("/admin/geocode", _admin_geocode)
     app.router.add_get("/admin/priority", _admin_priority)
+    app.router.add_get("/admin/activity", _admin_activity)
     app.router.add_get("/admin/period", _admin_period)
     app.router.add_post("/admin/period", _admin_period)
     app.router.add_get("/tiles/basemap.pmtiles", _tiles)
     app.router.add_get("/api/bootstrap", _bootstrap)
     app.router.add_get("/api/person", _person)
+    app.router.add_get("/api/route", _route)
     app.router.add_post("/api/save", _save)
     app.router.add_post("/api/photo", _photo)
     app.router.add_post("/api/lang", _lang)

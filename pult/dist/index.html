@@ -4,216 +4,824 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Контур · Выезды</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
-  --bg:#FAF9F5; --card:#FFFFFF; --alt:#F5F4ED; --border:#E6E2D9;
-  --text:#2B2825; --muted:#6B6660; --accent:#36332E; --success:#5B8A3C; --danger:#B0472C;
+  --bg:#FCFBF8; --side:#F6F4EE; --card:#FFFFFF; --alt:#F5F3EC; --border:#E9E5DB;
+  --text:#2B2825; --muted:#6E6961; --accent:#36332E; --accent-h:#4A463F;
+  --success:#5B8A3C; --danger:#B0472C; --warn:#A66B1F;
+  --shadow:0 1px 2px rgba(43,40,37,.05);
 }
 *{box-sizing:border-box}
+html,body{height:100%}
 body{margin:0;background:var(--bg);color:var(--text);
-  font-family:'Segoe UI',-apple-system,Roboto,sans-serif;font-size:14px;line-height:1.5}
-.top{display:flex;align-items:center;justify-content:space-between;
-  padding:12px 18px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg)}
-.brand{font-weight:600;letter-spacing:.3px;font-size:16px}
-.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--border);margin-right:6px}
-.dot.ok{background:var(--success)} .dot.bad{background:var(--danger)}
-.wrap{padding:16px 18px;max-width:920px;margin:0 auto;display:grid;gap:14px}
-.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
-.card h2{font-size:14px;margin:0 0 10px;font-weight:600;color:var(--accent)}
+  font-family:'Inter',-apple-system,'Segoe UI',Roboto,sans-serif;font-size:14px;line-height:1.5}
+.ico{display:inline-flex;flex:0 0 auto;width:17px;height:17px}
+.ico svg{width:100%;height:100%;display:block}
+
+/* ---------- каркас ---------- */
+.app{display:grid;grid-template-columns:222px 1fr;height:100vh}
+aside{background:var(--side);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;padding:14px 10px 12px}
+.logo{display:flex;align-items:center;gap:9px;padding:4px 10px 16px}
+.logomark{width:26px;height:26px;border-radius:8px;background:var(--accent);color:#FCFBF8;
+  display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex:0 0 auto}
+.logo .t{font-weight:600;font-size:14.5px;letter-spacing:.2px}
+.logo .t span{display:block;font-size:11px;font-weight:500;color:var(--muted);letter-spacing:.4px}
+nav{display:flex;flex-direction:column;gap:2px;flex:1}
+nav button{display:flex;align-items:center;gap:10px;width:100%;text-align:left;
+  padding:9px 11px;border:none;border-radius:9px;background:none;cursor:pointer;
+  font-family:inherit;font-size:13.5px;font-weight:500;color:var(--muted)}
+nav button:hover{background:rgba(43,40,37,.05);color:var(--text)}
+nav button.on{background:var(--accent);color:#FCFBF8}
+nav button .cnt{margin-left:auto;font-size:11px;font-weight:600;background:rgba(43,40,37,.09);
+  color:var(--muted);border-radius:10px;padding:1px 7px;min-width:20px;text-align:center}
+nav button.on .cnt{background:rgba(252,251,248,.18);color:#FCFBF8}
+nav .gap{flex:1}
+.sidefoot{display:flex;align-items:center;gap:9px;padding:11px 11px 4px;border-top:1px solid var(--border);margin-top:8px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--border);flex:0 0 auto}
+.dot.ok{background:var(--success);box-shadow:0 0 0 3px rgba(91,138,60,.15)}
+.dot.bad{background:var(--danger);box-shadow:0 0 0 3px rgba(176,71,44,.13)}
+.sidefoot .st{font-size:12.5px;font-weight:500;line-height:1.3}
+.sidefoot .host{font-size:11px;color:var(--muted);max-width:140px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+main{overflow-y:auto;position:relative}
+.mainbar{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:15px 26px;border-bottom:1px solid var(--border);position:sticky;top:0;
+  background:rgba(252,251,248,.92);backdrop-filter:blur(8px);z-index:10}
+.mainbar h1{font-size:18px;font-weight:600;margin:0}
+.mainbar .right{display:flex;align-items:center;gap:12px}
+.lastupd{font-size:12px;color:var(--muted)}
+.inner{max-width:880px;padding:20px 26px 40px;display:grid;gap:14px}
+.sec{display:none}
+.sec.on{display:block;animation:fadein .16s ease}
+@keyframes fadein{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+/* ---------- карточки ---------- */
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;
+  padding:16px 18px;box-shadow:var(--shadow)}
+.card h2{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;
+  margin:0 0 12px;color:var(--text);letter-spacing:.2px}
+.card h2 .ico{width:16px;height:16px;color:var(--muted)}
+.card .desc{font-size:12.5px;color:var(--muted);margin:-6px 0 12px}
+.stack{display:grid;gap:14px}
+
+/* ---------- кнопки и поля ---------- */
+button{font-family:inherit;font-size:13.5px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  padding:9px 15px;border:1px solid var(--border);border-radius:10px;background:var(--card);
+  color:var(--text);font-weight:500;cursor:pointer;transition:background .12s,border-color .12s}
+.btn:hover{background:var(--alt)}
+.btn:disabled{opacity:.45;cursor:default}
+.btn .ico{width:15px;height:15px;color:var(--muted)}
+.btn.acc{background:var(--accent);color:#FCFBF8;border-color:var(--accent)}
+.btn.acc:hover{background:var(--accent-h)}
+.btn.acc .ico{color:#FCFBF8}
+.btn.ghost{background:none;border-color:transparent;color:var(--muted)}
+.btn.ghost:hover{background:var(--alt);color:var(--text)}
+.btn.danger{color:var(--danger)}
+.btn.danger:hover{background:rgba(176,71,44,.07);border-color:var(--danger)}
+.btn.sm{padding:5px 10px;font-size:12px;border-radius:8px}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
-.metric{background:var(--alt);border-radius:10px;padding:12px}
-.metric .n{font-size:24px;font-weight:600}
-.metric .l{font-size:12px;color:var(--muted)}
-input,button{font-family:inherit;font-size:14px}
-input[type=text],input[type=password]{padding:9px 11px;border:1px solid var(--border);
-  border-radius:9px;background:var(--card);color:var(--text);width:100%}
-button{padding:9px 14px;border:1px solid var(--border);border-radius:9px;background:var(--card);
-  color:var(--text);font-weight:500;cursor:pointer}
-button:hover{background:var(--alt)}
-button.acc{background:var(--accent);color:var(--bg);border:none}
-button.danger{color:var(--danger);border-color:var(--danger)}
+input[type=text],input[type=password],input[type=date]{padding:10px 12px;border:1px solid var(--border);
+  border-radius:10px;background:var(--card);color:var(--text);width:100%;
+  font-family:inherit;font-size:13.5px;transition:border-color .12s,box-shadow .12s}
+input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(54,51,46,.08)}
+select{padding:8px 10px;border:1px solid var(--border);border-radius:9px;background:var(--card);
+  color:var(--text);font-family:inherit;font-size:13px;cursor:pointer}
+select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(54,51,46,.08)}
+input.tid{width:120px;padding:7px 10px;font-size:13px;border-radius:9px}
+.idcell{display:flex;flex-direction:column;gap:5px;min-width:210px}
+.idcell .gsel{max-width:260px}
+select.gsel{max-width:260px;text-overflow:ellipsis}
+.field{display:grid;gap:5px;margin-bottom:12px}
+.field label{font-size:12px;font-weight:500;color:var(--muted)}
 .muted{color:var(--muted)} .small{font-size:12px}
+.spin{animation:rot 0.9s linear infinite}
+@keyframes rot{to{transform:rotate(360deg)}}
+
+/* ---------- сводка ---------- */
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:10px}
+.metric{background:var(--card);border:1px solid var(--border);border-radius:13px;
+  padding:14px 15px;box-shadow:var(--shadow)}
+.metric .top{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.metric .l{font-size:12px;color:var(--muted);font-weight:500}
+.metric .top .ico{width:16px;height:16px;color:var(--border);color:rgba(43,40,37,.28)}
+.metric .n{font-size:26px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.3px}
+.bar{height:7px;border-radius:5px;background:var(--alt);overflow:hidden;margin:9px 0 7px}
+.bar i{display:block;height:100%;border-radius:5px;background:var(--success);width:0;transition:width .4s ease}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;
+  background:var(--alt);color:var(--text);border-radius:14px;padding:4px 11px}
+.chip b{font-weight:600}
+.chip.mode-d{background:rgba(176,71,44,.09);color:var(--danger)}
+.chip.mode-r{background:var(--alt);color:var(--muted)}
+.chip.ok{background:rgba(91,138,60,.12);color:var(--success)}
+
+/* ---------- таблицы ---------- */
+.tblwrap{margin:0 -18px -16px;overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-size:13px}
-td,th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--alt)}
-th{color:var(--muted);font-weight:500}
-.log{background:var(--alt);border-radius:9px;padding:10px 12px;font-size:12px;color:var(--muted);
-  white-space:pre-wrap;min-height:20px;margin-top:8px}
-.field{display:grid;gap:4px;margin-bottom:8px}
-.field label{font-size:12px;color:var(--muted)}
+td,th{text-align:left;padding:8px 10px;border-bottom:1px solid var(--alt)}
+td:first-child,th:first-child{padding-left:18px}
+td:last-child,th:last-child{padding-right:18px}
+tr:last-child td{border-bottom:none}
+th{color:var(--muted);font-weight:500;font-size:11.5px;letter-spacing:.3px;text-transform:uppercase;
+  border-bottom:1px solid var(--border);white-space:nowrap}
+tbody tr:hover{background:var(--alt)}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+td .why{font-size:12px;color:var(--muted)}
+.empty{padding:30px 16px;text-align:center;color:var(--muted);font-size:13px}
+.empty .ico{width:22px;height:22px;margin:0 auto 8px;display:block;color:var(--border)}
+
+/* ---------- реестр ---------- */
+.drop{border:1.5px dashed var(--border);border-radius:13px;background:var(--alt);
+  padding:26px 16px;text-align:center;cursor:pointer;transition:border-color .15s,background .15s}
+.drop:hover,.drop.drag{border-color:var(--accent);background:#F0EDE4}
+.drop .ico{width:22px;height:22px;margin:0 auto 8px;display:block;color:var(--muted)}
+.drop .t{font-weight:500}
+.drop .small{margin-top:2px}
+.report{display:none;margin-top:12px;border-top:1px solid var(--alt);padding-top:12px}
+.report.on{display:block}
+.kvs{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
+.kv{background:var(--alt);border-radius:9px;padding:8px 11px}
+.kv .k{font-size:11px;color:var(--muted)}
+.kv .v{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
+.warnline{margin-top:10px;font-size:12px;color:var(--warn)}
+
+/* ---------- приоритет ---------- */
+.weights{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:16px;align-items:end}
+.w label{display:block;font-size:12px;font-weight:500;color:var(--muted);margin-bottom:6px}
+.w label b{color:var(--text);font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--accent);margin:0;height:22px}
+.scorebadge{font-weight:600;font-variant-numeric:tabular-nums}
+
+/* ---------- подключение ---------- */
+.keywrap{position:relative}
+.keywrap input{padding-right:42px}
+.eye{position:absolute;right:6px;top:50%;transform:translateY(-50%);border:none;background:none;
+  cursor:pointer;padding:6px;color:var(--muted);border-radius:7px;display:flex}
+.eye:hover{background:var(--alt);color:var(--text)}
+
+/* ---------- тост ---------- */
+.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(6px);
+  background:var(--accent);color:#FCFBF8;padding:11px 20px;border-radius:24px;font-size:13.5px;
+  font-weight:500;opacity:0;transition:opacity .18s,transform .18s;pointer-events:none;z-index:50;
+  box-shadow:0 6px 20px rgba(43,40,37,.25);max-width:80%;text-align:center}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast.err{background:var(--danger)}
+
+@media (max-width:900px){
+  .app{grid-template-columns:64px 1fr}
+  .logo .t,nav button span.lbl,nav button .cnt,.sidefoot .txt{display:none}
+  nav button{justify-content:center;padding:11px 0}
+  .logo{justify-content:center;padding-left:0;padding-right:0}
+  .sidefoot{justify-content:center}
+  .weights{grid-template-columns:1fr}
+}
 </style>
 </head>
 <body>
-<div class="top">
-  <span class="brand">Контур · Выезды</span>
-  <span class="small"><span class="dot" id="conn"></span><span id="connt" class="muted">не подключено</span></span>
+<div class="app">
+
+<aside>
+  <div class="logo">
+    <div class="logomark">К</div>
+    <div class="t">Контур<span>ВЫЕЗДЫ</span></div>
+  </div>
+  <nav id="nav">
+    <button data-sec="dash" class="on">
+      <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg></span>
+      <span class="lbl">Сводка</span>
+    </button>
+    <button data-sec="registry">
+      <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h2"/><path d="M14 13h2"/><path d="M8 17h2"/><path d="M14 17h2"/></svg></span>
+      <span class="lbl">Реестр</span>
+    </button>
+    <button data-sec="prio">
+      <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/></svg></span>
+      <span class="lbl">Приоритет</span>
+    </button>
+    <button data-sec="people">
+      <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
+      <span class="lbl">Люди</span><span class="cnt" id="npeople" style="display:none">0</span>
+    </button>
+    <button data-sec="activity">
+      <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
+      <span class="lbl">Активность</span>
+    </button>
+    <div class="gap"></div>
+    <button data-sec="conn">
+      <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-3"/><path d="M9 2v5"/><path d="M15 2v5"/><path d="M6 7h12v5a6 6 0 0 1-12 0V7z"/></svg></span>
+      <span class="lbl">Подключение</span>
+    </button>
+  </nav>
+  <div class="sidefoot">
+    <span class="dot" id="conn"></span>
+    <div class="txt">
+      <div class="st" id="connt">не подключено</div>
+      <div class="host" id="connhost">—</div>
+    </div>
+  </div>
+</aside>
+
+<main>
+  <header class="mainbar">
+    <h1 id="sectitle">Сводка</h1>
+    <div class="right">
+      <span class="lastupd" id="lastupd"></span>
+      <button class="btn ghost" id="refbtn" onclick="refresh()">
+        <span class="ico" id="refico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg></span>
+        Обновить
+      </button>
+    </div>
+  </header>
+
+  <!-- ================= СВОДКА ================= -->
+  <section class="sec on" id="sec-dash">
+    <div class="inner">
+      <div class="metrics">
+        <div class="metric"><div class="top"><span class="l">Контрагентов</span>
+          <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg></span></div>
+          <div class="n" id="m_clients">—</div></div>
+        <div class="metric"><div class="top"><span class="l">С визитом</span>
+          <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span></div>
+          <div class="n" id="m_visited">—</div></div>
+        <div class="metric"><div class="top"><span class="l">Сотрудников</span>
+          <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span></div>
+          <div class="n" id="m_emps">—</div></div>
+        <div class="metric"><div class="top"><span class="l">Выбрали себя</span>
+          <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 0 1 12 0v1"/><path d="M19 8l1.5 1.5L23 7"/></svg></span></div>
+          <div class="n" id="m_binds">—</div></div>
+        <div class="metric"><div class="top"><span class="l">Меток</span>
+          <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z"/><circle cx="12" cy="10" r="3"/></svg></span></div>
+          <div class="n" id="m_marks">—</div></div>
+      </div>
+
+      <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span>Покрытие визитами</h2>
+        <div class="bar"><i id="covbar"></i></div>
+        <div class="small muted" id="covtxt">нет данных — подключись к серверу</div>
+      </div>
+
+      <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.2 8.4A10 10 0 1 1 15.6 2.8"/><path d="M22 2L12 12"/><path d="M16 2h6v6"/></svg></span>Исходы визитов</h2>
+        <div class="chips" id="results"><span class="small muted">—</span></div>
+      </div>
+
+      <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/></svg></span>Период выгрузки</h2>
+        <div class="small muted" id="pcur_dash">—</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= РЕЕСТР ================= -->
+  <section class="sec" id="sec-registry">
+    <div class="inner">
+      <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg></span>Импорт реестра</h2>
+        <input type="file" id="file" accept=".xlsx,.xlsm,.xlsb,.xls" style="display:none" onchange="doImport()">
+        <div class="drop" id="drop" onclick="document.getElementById('file').click()">
+          <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg></span>
+          <div class="t" id="droptxt">Перетащи файл сюда или нажми</div>
+          <div class="small muted">.xlsx / .xlsm / .xlsb / .xls — читается в пульте (calamine) · города геокодятся автоматически</div>
+        </div>
+        <div class="report" id="report">
+          <div class="kvs" id="repkvs"></div>
+          <div class="warnline" id="repwarn" style="display:none"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg></span>Экспорт</h2>
+        <p class="desc">xlsx собирает сам пульт (rust-xlsxwriter): даты и суммы — типизированные, автофильтр, свой выбор папки.</p>
+        <div class="row">
+          <button class="btn" onclick="exportRegistry()">
+            <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span>
+            Реестр целиком</button>
+          <button class="btn" onclick="exportMarkers()">
+            <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z"/><circle cx="12" cy="10" r="3"/></svg></span>
+            Метки курьеров</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z"/><circle cx="12" cy="10" r="3"/></svg></span>Геокодинг адресов</h2>
+        <p class="desc">Идёт на сервере в фоне. Запускай после импорта, если у части клиентов нет координат.</p>
+        <button class="btn" onclick="geocode()">Запустить геокодинг</button>
+      </div>
+
+      <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/></svg></span>Период выгрузки</h2>
+        <p class="desc">По дате закрепления: выездники видят только клиентов из этого окна. Пусто — видны все.</p>
+        <div class="row">
+          <input type="date" id="pfrom" style="width:auto">
+          <span class="muted">—</span>
+          <input type="date" id="pto" style="width:auto">
+          <button class="btn acc" onclick="applyPeriod()">Применить</button>
+          <button class="btn ghost" onclick="clearPeriod()">Сбросить</button>
+        </div>
+        <div class="small muted" id="pcur" style="margin-top:10px">—</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= ПРИОРИТЕТ ================= -->
+  <section class="sec" id="sec-prio">
+    <div class="inner">
+      <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M21 4h-7"/><path d="M10 4H3"/><path d="M21 12h-9"/><path d="M8 12H3"/><path d="M21 20h-5"/><path d="M12 20H3"/><path d="M14 2v4"/><path d="M8 10v4"/><path d="M16 18v4"/></svg></span>Веса скоринга</h2>
+        <p class="desc">Лог-долг + кластер по городу + свежесть (штраф за прошлые выезды). Холодные — «разведка», с исходом — «дожим».</p>
+        <div class="weights">
+          <div class="w"><label>Долг <b id="lwd">50</b></label>
+            <input type="range" id="wdebt" min="0" max="100" value="50" oninput="wlab()"></div>
+          <div class="w"><label>Кластер <b id="lwc">30</b></label>
+            <input type="range" id="wcluster" min="0" max="100" value="30" oninput="wlab()"></div>
+          <div class="w"><label>Свежесть <b id="lwf">20</b></label>
+            <input type="range" id="wfresh" min="0" max="100" value="20" oninput="wlab()"></div>
+          <button class="btn acc" onclick="loadPriority()">Пересчитать</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z"/><circle cx="12" cy="10" r="3"/></svg></span>Кластеры городов</h2>
+        <div class="chips" id="pclusters"><span class="small muted">—</span></div>
+      </div>
+
+      <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/></svg></span>Куда ехать — топ-40</h2>
+        <div class="tblwrap">
+        <table id="prio"><thead><tr>
+          <th>#</th><th>Клиент</th><th>Город</th><th class="num">Долг ₽</th>
+          <th class="num">Выезд.</th><th class="num">Score</th><th>Режим</th><th>Почему</th>
+        </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= ЛЮДИ / РОЛИ ================= -->
+  <section class="sec" id="sec-people">
+    <div class="inner">
+      <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>Назначение ролей</h2>
+        <p class="desc">ФИО берутся из реестра (колонка «ответственный»). Впиши Telegram ID сотруднику, выбери тип и нажми «Привязать» — работник, написавший боту с этим ID, сразу привязан к своим клиентам (без самовыбора). Можно переназначать.</p>
+        <div class="tblwrap">
+        <table id="roles"><thead><tr>
+          <th>Сотрудник</th><th class="num">Договоров</th><th>Telegram ID</th><th>Тип</th><th>Статус</th><th></th>
+        </tr></thead><tbody><tr><td colspan="6"><div class="empty">Нет данных — импортируй реестр на вкладке «Реестр»</div></td></tr></tbody></table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 0 1 12 0v1"/><path d="M19 8l1.5 1.5L23 7"/></svg></span>Кто вошёл в бот</h2>
+        <p class="desc">Все активные привязки telegram_id → сотрудник (заданы здесь, в «Назначении ролей»). «Сбросить» — отвязать telegram_id.</p>
+        <div class="tblwrap">
+        <table id="binds"><thead><tr><th>telegram_id</th><th>Сотрудник</th><th>Роль</th><th></th></tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= АКТИВНОСТЬ ================= -->
+  <section class="sec" id="sec-activity">
+    <div class="inner">
+      <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>Активность работников</h2>
+        <p class="desc">Каждый визит и метка пишутся в БД с датой — здесь только сводка. Простой — полных дней с последней активности; самые простаивающие сверху.</p>
+        <div class="tblwrap">
+        <table id="acttbl"><thead><tr>
+          <th>Сотрудник</th><th>Роль</th><th class="num">Визиты 7д</th><th class="num">30д</th>
+          <th class="num">Метки 7д</th><th class="num">30д</th><th>Последняя активность</th><th>Статус</th>
+        </tr></thead><tbody><tr><td colspan="8"><div class="empty">Нет данных — подключись к серверу</div></td></tr></tbody></table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= ПОДКЛЮЧЕНИЕ ================= -->
+  <section class="sec" id="sec-conn">
+    <div class="inner">
+      <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-3"/><path d="M9 2v5"/><path d="M15 2v5"/><path d="M6 7h12v5a6 6 0 0 1-12 0V7z"/></svg></span>Сервер</h2>
+        <div class="field"><label>Адрес сервера</label>
+          <input type="text" id="url" placeholder="https://hardbot.166.88.185.90.nip.io"></div>
+        <div class="field"><label>Admin-ключ</label>
+          <div class="keywrap">
+            <input type="password" id="key" placeholder="hbadm_…">
+            <button class="eye" id="eye" title="показать/скрыть" onclick="toggleKey()">
+              <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg></span>
+            </button>
+          </div>
+        </div>
+        <div class="row">
+          <button class="btn acc" onclick="refresh()">Подключиться</button>
+          <span class="small muted">ключ — в .env сервера (ADMIN_API_KEY)</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><path d="M21 12c-1 0-3-1-3-3s2-3 3-3-3-1-3-3 1-3 3-3"/><rect x="3" y="4" width="18" height="16" rx="2"/></svg></span>Токен бота</h2>
+        <p class="desc">Сменить бота (токен от @BotFather). После сохранения бот нужно перезапустить — токен подхватывается при старте. Токен нигде не показывается и не выгружается.</p>
+        <div class="field"><label>Токен бота</label>
+          <div class="keywrap">
+            <input type="password" id="bottoken" placeholder="123456789:AA…">
+            <button class="eye" id="eyebt" title="показать/скрыть" onclick="toggleBotToken()">
+              <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg></span>
+            </button>
+          </div>
+        </div>
+        <div class="row">
+          <button class="btn acc" id="btnbottoken" onclick="changeBotToken()">Сменить бота</button>
+          <span class="small muted">формат: цифры : буквы/цифры (≥30 символов)</span>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
 </div>
-<div class="wrap">
 
-  <div class="card">
-    <h2>Подключение</h2>
-    <div class="field"><label>Адрес сервера</label>
-      <input type="text" id="url" placeholder="https://hardbot.38-135-54-29.nip.io"></div>
-    <div class="field"><label>Admin-ключ</label>
-      <input type="password" id="key" placeholder="hbadm_…"></div>
-    <div class="row">
-      <button class="acc" onclick="refresh()">Подключиться / обновить</button>
-      <span class="small muted" id="hint">ключ — в .env сервера (ADMIN_API_KEY)</span>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>Сводка</h2>
-    <div class="grid" id="metrics">
-      <div class="metric"><div class="n" id="m_clients">—</div><div class="l">контрагентов</div></div>
-      <div class="metric"><div class="n" id="m_visited">—</div><div class="l">с визитом</div></div>
-      <div class="metric"><div class="n" id="m_emps">—</div><div class="l">сотрудников</div></div>
-      <div class="metric"><div class="n" id="m_binds">—</div><div class="l">выбрали себя</div></div>
-      <div class="metric"><div class="n" id="m_marks">—</div><div class="l">меток</div></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>Реестр</h2>
-    <div class="row">
-      <input type="file" id="file" accept=".xlsx,.xlsm" style="display:none" onchange="doImport()">
-      <button class="acc" onclick="document.getElementById('file').click()">Импорт xlsx…</button>
-      <button onclick="download('/admin/export','registry_export.xlsx')">Экспорт реестра</button>
-      <button onclick="download('/admin/markers.xlsx','markers.xlsx')">Экспорт меток (курьеры)</button>
-      <button onclick="geocode()">Координаты (геокодинг)</button>
-    </div>
-    <div class="log" id="log">—</div>
-  </div>
-
-  <div class="card">
-    <h2>Период выгрузки (по дате закрепления)</h2>
-    <p class="small muted" style="margin:0 0 10px">Выездники увидят только клиентов с датой закрепления в этом окне. Пусто — видны все.</p>
-    <div class="row">
-      <input type="date" id="pfrom" style="width:auto">
-      <span class="muted">—</span>
-      <input type="date" id="pto" style="width:auto">
-      <button class="acc" onclick="applyPeriod()">Применить период</button>
-      <button onclick="clearPeriod()">Сбросить</button>
-    </div>
-    <div class="small muted" id="pcur" style="margin-top:8px">—</div>
-  </div>
-
-  <div class="card">
-    <h2>Приоритет выезда — куда ехать (движок)</h2>
-    <p class="small muted" style="margin:0 0 10px">Скоринг должника: лог-долг + кластер по городу + свежесть (штраф за прошлые выезды). Холодные — режим «разведка», с исходом — «дожим». Веса крутятся ползунками.</p>
-    <div class="row" style="gap:14px">
-      <label class="small muted" style="flex:1">Долг <b id="lwd">50</b><br><input type="range" id="wdebt" min="0" max="100" value="50" oninput="wlab()" style="width:100%"></label>
-      <label class="small muted" style="flex:1">Кластер <b id="lwc">30</b><br><input type="range" id="wcluster" min="0" max="100" value="30" oninput="wlab()" style="width:100%"></label>
-      <label class="small muted" style="flex:1">Свежесть <b id="lwf">20</b><br><input type="range" id="wfresh" min="0" max="100" value="20" oninput="wlab()" style="width:100%"></label>
-      <button class="acc" onclick="loadPriority()" style="align-self:flex-end">Пересчитать</button>
-    </div>
-    <div class="small muted" id="pclusters" style="margin:8px 0">—</div>
-    <table id="prio"><thead><tr><th>#</th><th>Клиент</th><th>Город</th><th>Долг&nbsp;₽</th><th>Выезд.</th><th>Score</th><th>Режим</th><th>Почему</th></tr></thead><tbody></tbody></table>
-  </div>
-
-  <div class="card">
-    <h2>Сотрудники и самовыбор</h2>
-    <table id="emps"><thead><tr><th>Сотрудник</th><th>Договоров</th></tr></thead><tbody></tbody></table>
-    <h2 style="margin-top:14px">Кто вошёл</h2>
-    <table id="binds"><thead><tr><th>telegram_id</th><th>Сотрудник</th><th>Роль</th><th></th></tr></thead><tbody></tbody></table>
-  </div>
-
-</div>
+<div class="toast" id="toast"></div>
 
 <script>
 const $ = (id)=>document.getElementById(id);
 const store = window.localStorage;
-$("url").value = store.getItem("url") || "https://hardbot.38-135-54-29.nip.io";
-$("key").value = store.getItem("key") || "";
-const base = ()=> $("url").value.replace(/\/+$/,"");
-const hdr = ()=> ({ "X-Admin-Key": $("key").value });
-function setConn(ok,t){ $("conn").className="dot "+(ok?"ok":"bad"); $("connt").textContent=t; $("connt").className=ok?"":"muted"; }
-function log(t){ $("log").textContent = t; }
+const DEFAULT_URL = "https://hardbot.166.88.185.90.nip.io";
+const TITLES = {dash:"Сводка", registry:"Реестр", prio:"Приоритет выезда", people:"Люди", activity:"Активность", conn:"Подключение"};
+let connected = false, prioLoaded = false, actLoaded = false;
 
+/* миграция со старого (мёртвого) сервера */
+let savedUrl = store.getItem("url") || DEFAULT_URL;
+if(savedUrl.includes("38-135-54-29")) savedUrl = DEFAULT_URL;
+$("url").value = savedUrl;
+$("key").value = store.getItem("key") || "";
+
+const base = ()=> $("url").value.trim().replace(/\/+$/,"");
+const hdr  = ()=> ({ "X-Admin-Key": $("key").value.trim() });
+const fmt  = (n)=> (n==null?"—":Number(n).toLocaleString("ru-RU"));
+function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+/* ---------- навигация ---------- */
+document.querySelectorAll("#nav button").forEach(b=>b.addEventListener("click",()=>nav(b.dataset.sec)));
+function nav(sec){
+  document.querySelectorAll("#nav button").forEach(b=>b.classList.toggle("on",b.dataset.sec===sec));
+  document.querySelectorAll(".sec").forEach(s=>s.classList.toggle("on",s.id==="sec-"+sec));
+  $("sectitle").textContent = TITLES[sec]||"";
+  store.setItem("sec",sec);
+  if(sec==="prio" && connected && !prioLoaded) loadPriority();
+  if(sec==="activity" && connected && !actLoaded) loadActivity();
+  if(sec==="people" && connected) loadRoles();
+}
+
+/* ---------- статус/тост ---------- */
+function setConn(ok,t){
+  connected = ok;
+  $("conn").className = "dot "+(ok?"ok":"bad");
+  $("connt").textContent = t;
+  try{ $("connhost").textContent = new URL(base()).host; }catch(e){ $("connhost").textContent="—"; }
+}
+let toastTimer;
+function toast(t,err){
+  const el=$("toast"); el.textContent=t; el.className="toast show"+(err?" err":"");
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>el.classList.remove("show"),2600);
+}
+function busy(b){
+  $("refbtn").disabled=b; $("refico").classList.toggle("spin",b);
+}
+
+/* ---------- сводка ---------- */
 async function refresh(){
   store.setItem("url",$("url").value); store.setItem("key",$("key").value);
+  busy(true);
   try{
-    const r = await fetch(base()+"/admin/stats",{headers:hdr()});
-    if(!r.ok){ setConn(false,"ошибка "+r.status); return; }
+    const r = await fetch(base()+"/admin/stats",{headers:hdr(),signal:AbortSignal.timeout(10000)});
+    if(r.status===401){ setConn(false,"неверный ключ"); toast("Неверный admin-ключ",true); return; }
+    if(!r.ok){ setConn(false,"ошибка "+r.status); toast("Сервер ответил "+r.status,true); return; }
     const d = await r.json();
     setConn(true,"подключено");
-    $("m_clients").textContent=d.clients; $("m_visited").textContent=d.visited;
-    $("m_emps").textContent=d.employees.length; $("m_binds").textContent=d.bindings.length;
-    $("m_marks").textContent=d.markers;
-    $("emps").querySelector("tbody").innerHTML = d.employees.map(e=>
-      `<tr><td>${esc(e.employee)}</td><td>${e.contracts}</td></tr>`).join("")||`<tr><td class="muted" colspan=2>реестр пуст</td></tr>`;
+    $("m_clients").textContent=fmt(d.clients); $("m_visited").textContent=fmt(d.visited);
+    $("m_emps").textContent=fmt(d.employees.length); $("m_binds").textContent=fmt(d.bindings.length);
+    $("m_marks").textContent=fmt(d.markers);
+    const pc = d.clients? Math.round(d.visited/d.clients*100) : 0;
+    $("covbar").style.width=pc+"%";
+    $("covtxt").textContent = d.clients? `${fmt(d.visited)} из ${fmt(d.clients)} контрагентов — ${pc}%` : "реестр пуст";
+    $("results").innerHTML = (d.by_result&&d.by_result.length)
+      ? d.by_result.map(([r,c])=>`<span class="chip">${esc(r||"без исхода")} <b>${fmt(c)}</b></span>`).join("")
+      : `<span class="small muted">визитов с исходом пока нет</span>`;
+    const nb=d.bindings.length;
+    $("npeople").style.display = nb? "" : "none"; $("npeople").textContent=nb;
     $("binds").querySelector("tbody").innerHTML = d.bindings.map(b=>
-      `<tr><td>${b.telegram_id}</td><td>${esc(b.employee)}</td><td>${b.kind==="courier"?"курьер":"выездник"}</td>
-       <td><button class="danger small" onclick="unbind(${b.telegram_id})">сбросить</button></td></tr>`).join("")
-      ||`<tr><td class="muted" colspan=4>никто ещё не выбрал себя</td></tr>`;
+      `<tr><td class="num" style="text-align:left">${b.telegram_id}</td><td>${esc(b.employee)}</td>
+       <td><span class="chip ${b.kind==="courier"?"mode-r":"mode-d"}">${b.kind==="courier"?"курьер":"выездник"}</span></td>
+       <td style="text-align:right"><button class="btn sm danger" onclick="unbind(${b.telegram_id})">сбросить</button></td></tr>`).join("")
+      || `<tr><td colspan=4><div class="empty">Никто ещё не привязан</div></td></tr>`;
     showPeriod(d.period||{});
+    $("lastupd").textContent = "обновлено "+new Date().toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"});
+    loadRoles();
     loadPriority();
-  }catch(e){ setConn(false,"нет связи"); }
+    loadActivity();
+  }catch(e){
+    setConn(false,"нет связи"); toast("Нет связи с сервером",true);
+  }finally{ busy(false); }
 }
+
+/* ---------- приоритет ---------- */
 function wlab(){ $("lwd").textContent=$("wdebt").value; $("lwc").textContent=$("wcluster").value; $("lwf").textContent=$("wfresh").value; }
 async function loadPriority(){
   const u = base()+`/admin/priority?w_debt=${$("wdebt").value}&w_cluster=${$("wcluster").value}&w_fresh=${$("wfresh").value}&limit=40`;
+  const tb = $("prio").querySelector("tbody");
   try{
-    const r = await fetch(u,{headers:hdr()}); if(!r.ok){ $("pclusters").textContent="ошибка "+r.status; return; }
+    const r = await fetch(u,{headers:hdr(),signal:AbortSignal.timeout(15000)});
+    if(!r.ok){ $("pclusters").innerHTML=`<span class="small muted">ошибка ${r.status}</span>`; return; }
     const d = await r.json();
-    $("pclusters").textContent = "кластеры: " + d.cities.map(c=>`${c.name} (${c.count})`).join(" · ");
-    $("prio").querySelector("tbody").innerHTML = d.items.map((it,i)=>
-      `<tr><td>${i+1}</td><td>${esc(it.client)}</td><td>${esc(it.city)}</td>
-       <td>${(it.debt||0).toLocaleString("ru-RU")}</td><td>${it.visits}</td>
-       <td><b>${it.score.toFixed(1)}</b></td><td>${esc(it.mode)}</td>
-       <td class="small muted">${esc(it.reason)}</td></tr>`).join("")
-      ||`<tr><td class="muted" colspan=8>пусто — импортируй реестр</td></tr>`;
-  }catch(e){ $("pclusters").textContent="нет связи"; }
+    prioLoaded = true;
+    $("pclusters").innerHTML = d.cities.length
+      ? d.cities.map(c=>`<span class="chip">${esc(c.name)} <b>${fmt(c.count)}</b></span>`).join("")
+      : `<span class="small muted">городов нет — реестр пуст или нет координат</span>`;
+    tb.innerHTML = d.items.map((it,i)=>
+      `<tr><td class="muted">${i+1}</td><td><b style="font-weight:500">${esc(it.client)}</b></td>
+       <td>${esc(it.city)}</td><td class="num">${fmt(it.debt||0)}</td>
+       <td class="num">${it.visits}</td><td class="num scorebadge">${it.score.toFixed(1)}</td>
+       <td><span class="chip ${it.mode==="дожим"?"mode-d":"mode-r"}">${esc(it.mode)}</span></td>
+       <td><span class="why">${esc(it.reason)}</span></td></tr>`).join("")
+      || `<tr><td colspan=8><div class="empty">Пусто — импортируй реестр на вкладке «Реестр»</div></td></tr>`;
+  }catch(e){ $("pclusters").innerHTML=`<span class="small muted">нет связи</span>`; }
 }
+
+/* ---------- активность ---------- */
+function actStatus(w){
+  if(w.idle_days==null) return `<span class="chip mode-r">без активности</span>`;
+  if(w.idle_days<2)     return `<span class="chip ok">активен</span>`;
+  if(w.idle_days<=7)    return `<span class="chip mode-r">пауза ${w.idle_days} дн</span>`;
+  return `<span class="chip mode-d">простой ${w.idle_days} дн</span>`;
+}
+function actWhen(s){ return !s ? "—" : (s.length>10 ? s.slice(0,10)+" "+s.slice(11,16) : s); }
+async function loadActivity(){
+  const tb = $("acttbl").querySelector("tbody");
+  try{
+    const r = await fetch(base()+"/admin/activity",{headers:hdr(),signal:AbortSignal.timeout(15000)});
+    if(!r.ok){ if(r.status!==404) toast("Активность: ошибка "+r.status,true); return; } // 404 — сервер ещё старый
+    const d = await r.json();
+    actLoaded = true;
+    tb.innerHTML = d.workers.map(w=>
+      `<tr><td><b style="font-weight:500">${esc(w.employee)}</b></td>
+       <td><span class="chip ${w.kind==="courier"?"mode-r":"mode-d"}">${w.kind==="courier"?"курьер":"выездник"}</span></td>
+       <td class="num">${fmt(w.visits_7d)}</td><td class="num">${fmt(w.visits_30d)}</td>
+       <td class="num">${fmt(w.markers_7d)}</td><td class="num">${fmt(w.markers_30d)}</td>
+       <td>${esc(actWhen(w.last_activity))}</td><td>${actStatus(w)}</td></tr>`).join("")
+      || `<tr><td colspan="8"><div class="empty">Пока никто не привязан — активности нет</div></td></tr>`;
+  }catch(e){ /* нет связи — общий статус уже показал refresh() */ }
+}
+
+/* ---------- период ---------- */
 function showPeriod(d){
   $("pfrom").value=d.from||""; $("pto").value=d.to||"";
-  $("pcur").textContent = (d.from||d.to) ? `Активен: ${d.from||"…"} — ${d.to||"…"}` : "Период не задан (видны все).";
+  const t = (d.from||d.to) ? `Активен: ${d.from||"…"} — ${d.to||"…"}` : "Период не задан — видны все.";
+  $("pcur").textContent=t; $("pcur_dash").textContent=t;
 }
 async function applyPeriod(){
   try{
     const r=await fetch(base()+"/admin/period",{method:"POST",
       headers:{...hdr(),"Content-Type":"application/json"},
       body:JSON.stringify({from:$("pfrom").value,to:$("pto").value})});
-    showPeriod(await r.json()); refresh();
-  }catch(e){ log("Ошибка периода"); }
+    showPeriod(await r.json()); toast("Период сохранён"); refresh();
+  }catch(e){ toast("Ошибка сохранения периода",true); }
 }
 function clearPeriod(){ $("pfrom").value=""; $("pto").value=""; applyPeriod(); }
-async function doImport(){
-  const f = $("file").files[0]; if(!f) return;
-  log("Импорт "+f.name+"…");
-  const fd = new FormData(); fd.append("file",f);
-  try{
-    const r = await fetch(base()+"/admin/import",{method:"POST",headers:hdr(),body:fd});
-    const d = await r.json();
-    log(`Импорт готов:\nстрок ${d.total_rows}, добавлено ${d.inserted}, обновлено ${d.updated}, без КД ${d.skipped_no_id}, дублей ${d.duplicates}`
-      + (d.unknown_columns&&d.unknown_columns.length?`\nнезнакомые колонки: ${d.unknown_columns.join(", ")}`:""));
-    refresh();
-  }catch(e){ log("Ошибка импорта"); }
-  $("file").value="";
+
+/* ---------- импорт / экспорт ---------- */
+const drop=$("drop");
+["dragenter","dragover"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add("drag");}));
+["dragleave","drop"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove("drag");}));
+drop.addEventListener("drop",e=>{
+  const f=e.dataTransfer.files[0];
+  if(f){ importFile(f); }
+});
+function doImport(){ const f=$("file").files[0]; if(f) importFile(f); $("file").value=""; }
+
+/* invoke Rust-команд пульта; в обычном браузере (dev) __TAURI__ нет — фолбэк на старые endpoints */
+const tinvoke = window.__TAURI__ && window.__TAURI__.core ? window.__TAURI__.core.invoke : null;
+const fileToB64 = (f)=>new Promise((res,rej)=>{
+  const r=new FileReader();
+  r.onload=()=>res(String(r.result).split(",")[1]); r.onerror=rej;
+  r.readAsDataURL(f);
+});
+
+function showReport(d){
+  $("report").classList.add("on");
+  $("repkvs").innerHTML = [
+    ["строк",d.total_rows],["добавлено",d.inserted],["обновлено",d.updated],
+    ["без КД",d.skipped_no_id],["дублей",d.duplicates]
+  ].map(([k,v])=>`<div class="kv"><div class="k">${k}</div><div class="v">${fmt(v)}</div></div>`).join("");
+  const w=$("repwarn");
+  if(d.unknown_columns&&d.unknown_columns.length){
+    w.style.display=""; w.textContent="Незнакомые колонки: "+d.unknown_columns.join(", ");
+  } else w.style.display="none";
 }
+
+async function importFile(f){
+  if(!/\.(xlsx|xlsm|xlsb|xls)$/i.test(f.name)){ toast("Нужен .xlsx / .xlsm / .xlsb / .xls",true); return; }
+  if(!tinvoke && /\.(xlsb|xls)$/i.test(f.name)){ toast(".xlsb/.xls читает только пульт (не браузер)",true); return; }
+  $("droptxt").textContent="Импорт "+f.name+"…";
+  try{
+    let r = null;
+    if(tinvoke){
+      // файл парсится ЛОКАЛЬНО (Rust/calamine), на сервер летит чистый JSON
+      const sheets = await tinvoke("parse_workbook",{b64: await fileToB64(f), filename: f.name});
+      r = await fetch(base()+"/admin/import.json",{method:"POST",
+        headers:{...hdr(),"Content-Type":"application/json"},
+        body:JSON.stringify({sheets})});
+      if(r.status===404 && !/\.(xlsb|xls)$/i.test(f.name)){ r = null; } // сервер ещё старый — фолбэк ниже
+    }
+    if(!r){
+      const fd = new FormData(); fd.append("file",f);
+      r = await fetch(base()+"/admin/import",{method:"POST",headers:hdr(),body:fd});
+    }
+    if(!r.ok){ toast("Ошибка импорта: "+r.status,true); return; }
+    const d = await r.json();
+    showReport(d);
+    toast("Импорт готов: +"+fmt(d.inserted)+" / обновлено "+fmt(d.updated));
+    refresh();
+  }catch(e){ toast("Ошибка импорта: "+(e.message||e),true); }
+  finally{ $("droptxt").textContent="Перетащи файл сюда или нажми"; }
+}
+
+async function exportRegistry(){
+  if(!tinvoke) return download("/admin/export","registry_export.xlsx");
+  try{
+    const r = await fetch(base()+"/admin/export.json",{headers:hdr()});
+    if(r.status===404) return download("/admin/export","registry_export.xlsx"); // сервер ещё старый
+    if(!r.ok){ toast("Ошибка "+r.status,true); return; }
+    const d = await r.json();
+    const p = await tinvoke("save_registry_xlsx",{fields:d.fields, rows:d.rows});
+    toast(p ? "Сохранено: "+p : "Отменено");
+  }catch(e){ toast("Ошибка выгрузки: "+(e.message||e),true); }
+}
+async function exportMarkers(){
+  if(!tinvoke) return download("/admin/markers.xlsx","markers.xlsx");
+  try{
+    const r = await fetch(base()+"/admin/markers.json",{headers:hdr()});
+    if(r.status===404) return download("/admin/markers.xlsx","markers.xlsx"); // сервер ещё старый
+    if(!r.ok){ toast("Ошибка "+r.status,true); return; }
+    const d = await r.json();
+    const p = await tinvoke("save_markers_xlsx",{rows:d.rows});
+    toast(p ? "Сохранено: "+p : "Отменено");
+  }catch(e){ toast("Ошибка выгрузки: "+(e.message||e),true); }
+}
+
+/* фолбэк для браузера без Tauri */
 async function download(path,name){
-  log("Готовлю "+name+"…");
+  toast("Готовлю "+name+"…");
   try{
     const r = await fetch(base()+path,{headers:hdr()});
-    if(!r.ok){ log("Ошибка "+r.status); return; }
+    if(!r.ok){ toast("Ошибка "+r.status,true); return; }
     const blob = await r.blob();
     const a = document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=name;
     document.body.appendChild(a); a.click(); a.remove();
-    log("Сохранено: "+name);
-  }catch(e){ log("Ошибка выгрузки"); }
+    toast("Сохранено: "+name);
+  }catch(e){ toast("Ошибка выгрузки",true); }
 }
 async function geocode(){
-  log("Запускаю геокодинг на сервере…");
-  try{ await fetch(base()+"/admin/geocode",{method:"POST",headers:hdr()}); log("Геокодинг запущен (идёт в фоне; обнови сводку через минуту)."); }
-  catch(e){ log("Ошибка"); }
+  try{
+    await fetch(base()+"/admin/geocode",{method:"POST",headers:hdr()});
+    toast("Геокодинг запущен — идёт в фоне, обнови сводку через минуту");
+  }catch(e){ toast("Ошибка",true); }
 }
 async function unbind(id){
   if(!confirm("Сбросить выбор для "+id+"?")) return;
-  try{ await fetch(base()+"/admin/unbind",{method:"POST",headers:{...hdr(),"Content-Type":"application/json"},body:JSON.stringify({telegram_id:id})}); refresh(); }
-  catch(e){ log("Ошибка"); }
+  try{
+    await fetch(base()+"/admin/unbind",{method:"POST",headers:{...hdr(),"Content-Type":"application/json"},body:JSON.stringify({telegram_id:id})});
+    toast("Сброшено"); refresh();
+  }catch(e){ toast("Ошибка",true); }
 }
-function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
-if($("key").value) refresh();
+
+/* ---------- роли: ФИО из реестра → telegram_id + тип ---------- */
+let GUESTS = [];   // кэш гостей (кто писал боту) — для выпадающего выбора id
+
+function roleStatus(e){
+  if(e.telegram_id) return `<span class="chip ok">привязан ✓</span>`;
+  return `<span class="chip mode-r">не назначен</span>`;
+}
+function guestLabel(g){
+  const who = g.name ? esc(g.name) : (g.username ? "@"+esc(g.username) : "без имени");
+  const nick = g.username ? " · @"+esc(g.username) : "";
+  const busy = g.bound_employee ? "  ⚠ уже: "+esc(g.bound_employee) : "";
+  return `${who}${nick}  ·  ${g.telegram_id}${busy}`;
+}
+function guestOptions(selectedId){
+  // <option> для всех гостей + плейсхолдер. selectedId — подсветить текущего.
+  const opts = [`<option value="">— из писавших боту —</option>`];
+  for(const g of GUESTS){
+    const sel = String(g.telegram_id)===String(selectedId) ? " selected" : "";
+    opts.push(`<option value="${g.telegram_id}"${sel}>${guestLabel(g)}</option>`);
+  }
+  return opts.join("");
+}
+async function loadGuests(){
+  try{
+    const r = await fetch(base()+"/admin/guests",{headers:hdr(),signal:AbortSignal.timeout(15000)});
+    if(!r.ok){ GUESTS=[]; return; } // 404 — сервер ещё старый: тихо, ручной ввод остаётся
+    GUESTS = (await r.json()).guests || [];
+  }catch(e){ GUESTS=[]; }
+}
+async function loadRoles(){
+  await loadGuests();   // сперва гости — чтобы отрисовать выпадашки сразу
+  const tb = $("roles").querySelector("tbody");
+  try{
+    const r = await fetch(base()+"/admin/employees",{headers:hdr(),signal:AbortSignal.timeout(15000)});
+    if(!r.ok){ if(r.status!==404) toast("Роли: ошибка "+r.status,true); return; } // 404 — сервер ещё старый
+    const d = await r.json();
+    const emps = d.employees||[];
+    tb.innerHTML = emps.map((e,i)=>{
+      const kind = e.kind==="courier" ? "courier" : "agent";
+      const picker = GUESTS.length
+        ? `<select class="gsel" onchange="pickGuest(${i},this)" title="выбрать из писавших боту">${guestOptions(e.telegram_id)}</select>`
+        : `<span class="small muted" title="никто ещё не писал боту">нет гостей</span>`;
+      return `<tr data-emp="${esc(e.employee)}">
+        <td><b style="font-weight:500">${esc(e.employee)}</b></td>
+        <td class="num">${fmt(e.contracts)}</td>
+        <td><div class="idcell">
+          ${picker}
+          <input type="text" class="tid" id="tid_${i}" inputmode="numeric" placeholder="или впиши ID"
+             value="${e.telegram_id==null?"":e.telegram_id}">
+        </div></td>
+        <td><select id="kind_${i}">
+          <option value="agent"${kind==="agent"?" selected":""}>Выездник</option>
+          <option value="courier"${kind==="courier"?" selected":""}>Курьер ГПХ</option>
+        </select></td>
+        <td>${roleStatus(e)}</td>
+        <td style="text-align:right"><button class="btn sm acc" onclick="bindRole(${i},this)">Привязать</button></td>
+      </tr>`;
+    }).join("")
+      || `<tr><td colspan="6"><div class="empty">Реестр пуст — импортируй xlsx на вкладке «Реестр»</div></td></tr>`;
+  }catch(e){ /* нет связи — общий статус уже показал refresh() */ }
+}
+/* выбор гостя из выпадашки подставляет его telegram_id в поле ввода строки */
+function pickGuest(i, sel){
+  if(sel.value) $("tid_"+i).value = sel.value;
+}
+async function bindRole(i, btn){
+  const row = btn.closest("tr");
+  const employee = row.getAttribute("data-emp");
+  const tid = ($("tid_"+i).value||"").trim();
+  const kind = $("kind_"+i).value;
+  if(!/^\d{3,}$/.test(tid)){ toast("Впиши числовой Telegram ID (или выбери гостя из списка)",true); return; }
+  btn.disabled=true;
+  try{
+    const r = await fetch(base()+"/admin/bind",{method:"POST",
+      headers:{...hdr(),"Content-Type":"application/json"},
+      body:JSON.stringify({telegram_id:Number(tid), employee, kind})});
+    if(r.status===404){ toast("Сервер ещё старый — нет /admin/bind",true); return; }
+    if(!r.ok){ toast("Ошибка привязки: "+r.status,true); return; }
+    toast("Привязано: "+employee+" → "+tid);
+    refresh();
+  }catch(e){ toast("Ошибка привязки: "+(e.message||e),true); }
+  finally{ btn.disabled=false; }
+}
+
+/* ---------- подключение ---------- */
+function toggleKey(){
+  const k=$("key"); k.type = k.type==="password" ? "text" : "password";
+}
+function toggleBotToken(){
+  const k=$("bottoken"); k.type = k.type==="password" ? "text" : "password";
+}
+/* смена токена бота: валидируем формат на клиенте, шлём на сервер, поле чистим.
+   Токен НЕ сохраняется в localStorage (в отличие от url/ключа) — из соображений ИБ. */
+async function changeBotToken(){
+  const tok = ($("bottoken").value||"").trim();
+  if(!/^\d+:[\w-]{30,}$/.test(tok)){ toast("Неверный формат токена бота",true); return; }
+  if(!confirm("Сменить токен бота? После этого бот нужно перезапустить.")) return;
+  const btn=$("btnbottoken"); btn.disabled=true;
+  try{
+    const r = await fetch(base()+"/admin/bot_token",{method:"POST",
+      headers:{...hdr(),"Content-Type":"application/json"},
+      body:JSON.stringify({token:tok})});
+    if(r.status===404){ toast("Сервер ещё старый — нет /admin/bot_token",true); return; }
+    if(r.status===400){ toast("Сервер отклонил токен (формат)",true); return; }
+    if(!r.ok){ toast("Ошибка смены токена: "+r.status,true); return; }
+    const d = await r.json().catch(()=>({}));
+    $("bottoken").value = "";   // не держим токен в поле
+    toast(d.need_restart ? "Токен сохранён — перезапустите бота" : "Токен сохранён");
+  }catch(e){ toast("Ошибка смены токена: "+(e.message||e),true); }
+  finally{ btn.disabled=false; }
+}
+["url","key"].forEach(id=>$(id).addEventListener("keydown",e=>{ if(e.key==="Enter") refresh(); }));
+/* ключ и адрес персистятся сразу при вводе (тот же store, что и при подключении),
+   чтобы не терялись, если закрыть пульт не нажав «Подключиться» */
+$("url").addEventListener("input",()=>store.setItem("url",$("url").value));
+$("key").addEventListener("input",()=>store.setItem("key",$("key").value));
+
+/* ---------- старт ---------- */
+if($("key").value){
+  nav(store.getItem("sec")||"dash");
+  refresh();
+}else{
+  nav("conn");
+}
 </script>
 </body>
 </html>

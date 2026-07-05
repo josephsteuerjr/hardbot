@@ -44,6 +44,17 @@ TEXT: dict[str, dict[str, str]] = {
     },
     "choose_language": {
         "ru": "Выберите язык:", "uz": "Tilni tanlang:", "tg": "Забонро интихоб кунед:"},
+    # старт: только вход в мини-апп (рабочий процесс — там)
+    "start_app": {
+        "ru": "Здравствуйте! Нажмите кнопку ниже, чтобы открыть приложение.",
+        "uz": "Assalomu alaykum! Ilovani ochish uchun quyidagi tugmani bosing.",
+        "tg": "Салом! Барои кушодани барнома тугмаи зеринро пахш кунед."},
+    "start_no_app": {
+        "ru": "Здравствуйте! Приложение появится здесь, как только администратор его подключит.",
+        "uz": "Assalomu alaykum! Administrator ulagach, ilova shu yerda paydo bo‘ladi.",
+        "tg": "Салом! Пас аз пайвасти маъмур барнома ин ҷо пайдо мешавад."},
+    "btn_open_app": {
+        "ru": "🚀 Открыть приложение", "uz": "🚀 Ilovani ochish", "tg": "🚀 Кушодани барнома"},
     "language_saved": {
         "ru": "Язык сохранён ✅", "uz": "Til saqlandi ✅", "tg": "Забон захира шуд ✅"},
     "welcome": {

@@ -2,12 +2,13 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#FAF9F5">
 <title>Маршрут</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.min.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/pmtiles@3.2.1/dist/pmtiles.js"></script>
@@ -16,11 +17,14 @@
 :root{
   --bg:#FAF9F5; --card:#FFFFFF; --alt:#F5F4ED; --border:#E6E2D9;
   --text:#2B2825; --muted:#6B6660; --accent:#36332E; --accent2:#46423B;
-  --success:#5B8A3C; --danger:#B0472C;
+  --success:#5B8A3C; --danger:#B0472C; --navblue:#2F6FED;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 body{margin:0;background:var(--bg);color:var(--text);
   font-family:'Inter',-apple-system,'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.45}
+body.navon{overflow:hidden}
+.ico{display:inline-flex;flex:0 0 auto;width:18px;height:18px}
+.ico svg{width:100%;height:100%;display:block}
 .bar{display:flex;align-items:center;justify-content:space-between;
   padding:12px 14px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);z-index:5}
 .brand{font-weight:600;letter-spacing:.3px}
@@ -28,24 +32,33 @@ body{margin:0;background:var(--bg);color:var(--text);
 .langs button{border:1px solid var(--border);background:var(--card);border-radius:20px;
   padding:4px 10px;font-size:12px;color:var(--muted);font-family:inherit}
 .langs button.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
-.wrap{padding:12px 14px;max-width:520px;margin:0 auto}
+.wrap{padding:12px 14px 96px;max-width:520px;margin:0 auto}
 .muted{color:var(--muted)}
-.search{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:10px;
-  background:var(--card);font-size:15px;font-family:inherit;margin-bottom:10px}
+.searchwrap{position:relative;margin-bottom:10px}
+.searchwrap .ico{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--muted)}
+.search{width:100%;padding:10px 12px 10px 36px;border:1px solid var(--border);border-radius:10px;
+  background:var(--card);font-size:15px;font-family:inherit;margin:0;color:var(--text)}
 .pcard{background:var(--card);border:1px solid var(--border);border-radius:12px;
-  padding:12px 14px;margin-bottom:8px;display:flex;align-items:center;gap:12px;cursor:pointer}
-.dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
-.dot.v{background:var(--success)} .dot.n{background:var(--border)}
-.pname{font-weight:500}
+  padding:12px 14px;margin-bottom:8px;display:flex;align-items:center;gap:12px;cursor:pointer;
+  box-shadow:0 1px 2px rgba(43,40,37,.04);transition:transform .1s}
+.pcard:active{transform:scale(.98)}
+.pinfo{flex:1;min-width:0}
+.pchev{color:var(--border);flex:0 0 auto}
+.dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto;background:var(--border)}
+.dot.v{background:var(--success)}
+.pname{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .psub{font-size:12px;color:var(--muted)}
 .pamt{margin-left:auto;font-weight:500;white-space:nowrap}
-.back{border:none;background:none;color:var(--muted);font-size:14px;padding:0;font-family:inherit;margin-bottom:8px}
+.back{border:none;background:none;color:var(--muted);font-size:14px;padding:0;font-family:inherit;
+  margin-bottom:8px;display:inline-flex;align-items:center;gap:3px;cursor:pointer}
 .h{font-size:18px;font-weight:600;margin:2px 0 2px}
 .tabs{display:flex;gap:6px;margin:12px 0;overflow:auto;-webkit-overflow-scrolling:touch}
 .tabs button{flex:1 0 auto;border:1px solid var(--border);background:var(--card);border-radius:10px;
   padding:9px 10px;font-size:13px;color:var(--text);font-family:inherit;white-space:nowrap}
-.tabs button.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
-.panel{display:none} .panel.on{display:block}
+.tabs button.on{background:var(--accent);color:var(--bg);border-color:var(--accent);
+  box-shadow:0 2px 8px rgba(43,40,37,.18)}
+.panel{display:none} .panel.on{display:block;animation:fadein .18s ease}
+@keyframes fadein{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 .box{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:10px}
 .kv{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid var(--alt);font-size:14px}
 .kv:last-child{border-bottom:none}
@@ -54,17 +67,28 @@ body{margin:0;background:var(--bg);color:var(--text);
 .pill.n{color:var(--muted)}
 .btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;
   padding:13px;border:1px solid var(--border);border-radius:11px;background:var(--card);
-  color:var(--text);font-size:15px;font-family:inherit;font-weight:500}
+  color:var(--text);font-size:15px;font-family:inherit;font-weight:500;cursor:pointer}
 .btn.acc{background:var(--accent);color:var(--bg);border:none}
+.btn.ghost{background:transparent}
 .btn.line{margin-top:8px}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.chips{display:flex;gap:6px;justify-content:center;margin-top:8px}
-.chips a{font-size:12px;color:var(--muted);border:1px solid var(--border);border-radius:20px;
-  padding:6px 12px;text-decoration:none;background:var(--alt)}
-.mapwrap{border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:10px;background:var(--card)}
-.map{height:180px;background:var(--alt)}
+.providers{display:flex;gap:8px;margin-bottom:10px}
+.providers a{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;
+  border:1px solid var(--border);border-radius:12px;padding:8px 4px;font-size:11px;
+  color:var(--text);text-decoration:none;background:var(--alt)}
+.providers a .ico{width:18px;height:18px;color:var(--muted)}
+.mapwrap{border:1px solid var(--border);border-radius:14px;overflow:hidden;margin-bottom:10px;
+  background:var(--card);position:relative}
+.map{height:220px;background:var(--alt)}
 .maplibregl-ctrl-attrib,.maplibregl-ctrl-logo{display:none}
-.geohint{font-size:11px;color:var(--muted);padding:6px 14px 0}
+.geobadge{position:absolute;top:10px;left:10px;z-index:4;display:flex;align-items:center;gap:5px;
+  background:rgba(255,255,255,.92);backdrop-filter:blur(6px);border-radius:16px;padding:5px 10px 5px 8px;
+  font-size:11px;color:var(--muted);box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.geobadge .ico{width:13px;height:13px}
+.fab{position:absolute;right:10px;bottom:10px;z-index:4;display:flex;align-items:center;gap:7px;
+  background:var(--accent);color:#fff;border:none;border-radius:24px;padding:11px 18px 11px 13px;
+  font-size:14px;font-weight:600;font-family:inherit;box-shadow:0 4px 14px rgba(43,40,37,.32);cursor:pointer}
+.fab .ico{width:18px;height:18px}
 label.fld{display:block;font-size:13px;color:var(--muted);margin:12px 0 5px}
 select,textarea{width:100%;padding:11px 12px;border:1px solid var(--border);border-radius:10px;
   background:var(--card);font-size:15px;font-family:inherit;color:var(--text)}
@@ -72,7 +96,7 @@ textarea{min-height:64px;resize:vertical}
 .cdcard{font-size:13px;border-bottom:1px solid var(--alt);padding:8px 0}
 .cdcard:last-child{border-bottom:none}
 .cdcard .t{font-weight:500;margin-bottom:2px}
-.toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:var(--accent);
+.toast{position:fixed;left:50%;bottom:84px;transform:translateX(-50%);background:var(--accent);
   color:var(--bg);padding:10px 18px;border-radius:24px;font-size:14px;opacity:0;
   transition:opacity .2s;pointer-events:none;z-index:30}
 .toast.show{opacity:1}
@@ -86,6 +110,45 @@ textarea{min-height:64px;resize:vertical}
 .mk{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--alt);font-size:13px}
 .mk:last-child{border-bottom:none}
 .mkdot{width:8px;height:8px;border-radius:50%;background:var(--danger);flex:0 0 auto}
+
+/* --- нижняя навигация (как в нативном приложении) --- */
+.bottomnav{position:fixed;left:0;right:0;bottom:0;z-index:20;display:none;
+  background:rgba(250,249,245,.92);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  border-top:1px solid var(--border);padding:7px 10px calc(7px + env(safe-area-inset-bottom,0px))}
+.bottomnav-inner{display:flex;max-width:520px;margin:0 auto}
+.bottomnav button{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;
+  background:none;border:none;font-family:inherit;color:var(--muted);font-size:11px;padding:5px 0;cursor:pointer}
+.bottomnav button.on{color:var(--accent);font-weight:600}
+.bottomnav button .ico{width:21px;height:21px}
+
+/* --- полноэкранный режим навигации («Поехать») --- */
+.navmode{position:fixed;inset:0;background:var(--bg);z-index:100;display:none}
+.navmode.on{display:block}
+.navmap{position:absolute;inset:0}
+.navexit,.navrecenter{position:absolute;z-index:6;border:none;font-family:inherit;cursor:pointer;
+  background:rgba(25,22,19,.78);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  color:#fff;border-radius:22px;box-shadow:0 4px 16px rgba(0,0,0,.28)}
+.navexit{top:calc(env(safe-area-inset-top,0px) + 12px);left:14px;display:flex;align-items:center;
+  gap:6px;padding:9px 16px 9px 11px;font-size:13px;font-weight:500}
+.navexit .ico{width:16px;height:16px}
+.navrecenter{top:calc(env(safe-area-inset-top,0px) + 12px);right:14px;width:42px;height:42px;
+  display:flex;align-items:center;justify-content:center;padding:0}
+.navrecenter .ico{width:19px;height:19px}
+.navrecenter.hot{background:var(--navblue)}
+.navsheet{position:absolute;left:0;right:0;bottom:0;z-index:6;background:var(--card);
+  border-radius:20px 20px 0 0;padding:10px 18px calc(16px + env(safe-area-inset-bottom,0px));
+  box-shadow:0 -10px 30px rgba(0,0,0,.18)}
+.navhandle{width:36px;height:4px;border-radius:2px;background:var(--border);margin:0 auto 12px}
+.navtop{display:flex;align-items:flex-end;justify-content:space-between;gap:10px;margin-bottom:10px}
+.navdist{font-size:27px;font-weight:700;line-height:1.1;letter-spacing:-.3px}
+.navsub{font-size:13px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;max-width:54vw}
+.naveta{font-size:14px;color:var(--muted);font-weight:500;white-space:nowrap;padding-bottom:3px}
+.navbanner{display:flex;align-items:center;gap:8px;background:var(--alt);border-radius:10px;
+  padding:9px 10px;font-size:12.5px;color:var(--muted);margin-bottom:10px}
+.navbanner .ico{width:15px;height:15px;flex:0 0 auto;color:var(--danger)}
+.navme{width:30px;height:30px;color:var(--navblue);filter:drop-shadow(0 1px 4px rgba(0,0,0,.45))}
+.navme svg{width:100%;height:100%;display:block}
 </style>
 </head>
 <body>
@@ -94,11 +157,31 @@ textarea{min-height:64px;resize:vertical}
   <div class="langs" id="langs"></div>
 </div>
 <div class="wrap" id="app"><div class="center" id="boot">…</div></div>
+<div class="bottomnav" id="bottomnav"><div class="bottomnav-inner" id="bottomnavInner"></div></div>
+<div class="navmode" id="navmode"></div>
 <div class="toast" id="toast"></div>
 
 <script>
 const TG = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
 if (TG) { TG.ready(); TG.expand(); }
+
+// --- Иконки (инлайн-SVG вместо эмодзи — единый, спокойный визуальный язык). ---
+const ICONS = {
+  nav:    '<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linejoin="round"><path d="M12 2 L20 20 L12 16 L4 20 Z"/></svg>',
+  phone:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.6 10.8c1.4 2.8 3.8 5.2 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.5.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.4 21 3 13.6 3 4.1c0-.6.4-1 1-1h3.4c.6 0 1 .4 1 1 0 1.2.2 2.4.6 3.5.1.4 0 .8-.2 1L6.6 10.8Z"/></svg>',
+  pin:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s7-7.4 7-12a7 7 0 1 0-14 0c0 4.6 7 12 7 12Z"/><circle cx="12" cy="9" r="2.3"/></svg>',
+  map:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3 3 5.2v15.6L9 18.6l6 2.2 6-2.2V3.2L15 5.4 9 3.2Z"/><path d="M9 3.2v15.4M15 5.4v15.4"/></svg>',
+  list:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h12M9 12h12M9 18h12"/><circle cx="4" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="4" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="4" cy="18" r="1.3" fill="currentColor" stroke="none"/></svg>',
+  camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8.4a1 1 0 0 1 1-1h2.1L8.3 5.6a1 1 0 0 1 .85-.5h5.7c.34 0 .66.18.85.5l1.2 1.8H19a1 1 0 0 1 1 1V18a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1Z"/><circle cx="12" cy="13" r="3.2"/></svg>',
+  check:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5 9.5 18 20 6"/></svg>',
+  close:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 5l14 14M19 5 5 19"/></svg>',
+  chevL:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4 7 12l8 8"/></svg>',
+  chevR:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4l8 8-8 8"/></svg>',
+  search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4-4"/></svg>',
+  target: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><path d="M12 1.5v3M12 19.5v3M1.5 12h3M19.5 12h3"/></svg>',
+  plus:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+};
+function ic(name){ return `<span class="ico">${ICONS[name]||""}</span>`; }
 
 // --- Локализация интерфейса (ru/uz/tg). Варианты ответов приходят с сервера.
 const I18N = {
@@ -112,7 +195,9 @@ const I18N = {
     who:"Кто вы?",agent:"Выездник",courier:"Курьер",pickemp:"Выберите себя из реестра",enter:"Войти",
     setmark:"Поставить метку",marks:"Метки",map:"Карта",onmap:"на карте",newmark:"Новая метка",mlabel:"Подпись: что это / кто (необязательно)",
     marksaved:"Метка сохранена",nomarks:"Меток пока нет",getloc:"Определяю точку…",standalone:"свободная метка",
-    nogeo:"Не получилось определить геолокацию — включите доступ или введите координаты."},
+    nogeo:"Не получилось определить геолокацию — включите доступ или введите координаты.",
+    go:"Поехать",exit:"Выйти",finishvisit:"Отметить визит",mins:"мин",
+    draftwait:"черновик не отправлен на сервер",draftsent:"черновик сохранён на сервере"},
   uz:{visit:"Chiqish",client:"Mijoz",debt:"Qarz",form:"To‘ldirish",my:"Mijozlarim",
     search:"Qidirish: F.I.Sh., shartnoma, telefon",kd:"shartnoma",total:"Jami qarz",inwork:"Ish boshlandi",
     drive:"Borish",call:"Qo‘ng‘iroq",save:"Chiqishni saqlash",addphoto:"Rasm qo‘shish",
@@ -123,7 +208,9 @@ const I18N = {
     who:"Siz kimsiz?",agent:"Chiquvchi",courier:"Kuryer",pickemp:"Reyestrdan o‘zingizni tanlang",enter:"Kirish",
     setmark:"Nuqta qo‘yish",marks:"Nuqtalar",map:"Xarita",onmap:"xaritada",newmark:"Yangi nuqta",mlabel:"Izoh: bu nima / kim (ixtiyoriy)",
     marksaved:"Nuqta saqlandi",nomarks:"Hozircha nuqta yo‘q",getloc:"Nuqta aniqlanmoqda…",standalone:"erkin nuqta",
-    nogeo:"Geolokatsiyani aniqlab bo‘lmadi — ruxsat bering yoki koordinatani kiriting."},
+    nogeo:"Geolokatsiyani aniqlab bo‘lmadi — ruxsat bering yoki koordinatani kiriting.",
+    go:"Yo‘lga chiqish",exit:"Yopish",finishvisit:"Tashrifni belgilash",mins:"daq",
+    draftwait:"qoralama serverga yuborilmadi",draftsent:"qoralama serverda saqlandi"},
   tg:{visit:"Сафар",client:"Мизоҷ",debt:"Қарз",form:"Пур кардан",my:"Мизоҷони ман",
     search:"Ҷустуҷӯ: НН, шартнома, телефон",kd:"шартнома",total:"Қарзи умумӣ",inwork:"Дар кор аз",
     drive:"Расидан",call:"Занг задан",save:"Сафарро захира",addphoto:"Расм илова",
@@ -134,7 +221,9 @@ const I18N = {
     who:"Шумо кӣ ҳастед?",agent:"Выездник",courier:"Курьер",pickemp:"Худро аз реестр интихоб кунед",enter:"Даромадан",
     setmark:"Гузоштани нуқта",marks:"Нуқтаҳо",map:"Харита",onmap:"дар харита",newmark:"Нуқтаи нав",mlabel:"Шарҳ: ин чист / кӣ (ихтиёрӣ)",
     marksaved:"Нуқта захира шуд",nomarks:"Ҳоло нуқта нест",getloc:"Нуқта муайян мешавад…",standalone:"нуқтаи озод",
-    nogeo:"Геолокатсия муайян нашуд — иҷозат диҳед ё координата ворид кунед."},
+    nogeo:"Геолокатсия муайян нашуд — иҷозат диҳед ё координата ворид кунед.",
+    go:"Ба роҳ баромадан",exit:"Бастан",finishvisit:"Сафарро қайд кардан",mins:"дақ",
+    draftwait:"нусха ба сервер нафиристода шуд",draftsent:"нусха дар сервер захира шуд"},
 };
 let STATE = {lang:"ru", meta:null, persons:[], cur:null, tab:"visit"};
 const L = () => I18N[STATE.lang] || I18N.ru;
@@ -170,7 +259,7 @@ async function setLang(c){
 }
 
 async function boot(){
-  renderLangs();
+  renderLangs(); hideBottomNav();
   try{
     const d = await api("/api/bootstrap");
     STATE.lang=d.lang||STATE.lang; renderLangs();
@@ -178,12 +267,26 @@ async function boot(){
     STATE.meta=d.meta; STATE.persons=d.persons; STATE.kind=d.kind||"agent";
     renderList();
   }catch(e){
-    $("app").innerHTML = `<div class="center">⛔ Нет доступа.<br><span class="muted">Откройте через бота.</span></div>`;
+    $("app").innerHTML = `<div class="center">Нет доступа.<br><span class="muted">Откройте через бота.</span></div>`;
   }
 }
 
+// --- Нижняя навигация (Клиенты / Карта / Метки) — как в нативном приложении. ---
+function setBottomNav(active){
+  const items=[
+    {id:"clients", label:L().my,    icon:"list", fn:"renderList"},
+    {id:"map",     label:L().map,   icon:"map",  fn:"renderMap"},
+    {id:"marks",   label:L().marks, icon:"pin",  fn:"renderMarkers"},
+  ];
+  $("bottomnavInner").innerHTML = items.map(it =>
+    `<button class="${it.id===active?'on':''}" onclick="${it.fn}()">${ic(it.icon)}<span>${esc(it.label)}</span></button>`).join("");
+  $("bottomnav").style.display = "block";
+}
+function hideBottomNav(){ $("bottomnav").style.display = "none"; }
+
 // --- Онбординг (самовыбор прямо в миниаппе): язык наверху, роль, сотрудник ---
 function renderOnboarding(){
+  hideBottomNav();
   const t=L(), o=STATE.onb; STATE.onbRole=STATE.onbRole||"agent";
   const emps=(o.employees||[]).map(e=>`<option value="${esc(e.employee)}">${esc(e.employee)} (${e.contracts})</option>`).join("");
   $("app").innerHTML=`
@@ -207,26 +310,28 @@ async function doBind(){
 }
 
 function renderList(){
+  flushDraft(); stopAutoSync();   // уход с карточки через нижнюю навигацию — не потерять черновик
   STATE.cur=null; removeMap();
   const t=L();
-  const bar=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-       <span class="muted">${t.my}: ${STATE.persons.length}</span>
-       <span style="display:flex;gap:6px">
-         <button class="toolbtn" onclick="renderMap()">🗺 ${t.map}</button>
-         <button class="toolbtn" onclick="renderMarkers()">📍 ${t.marks}</button></span></div>`;
-  if(!STATE.persons.length){ $("app").innerHTML=bar+`<div class="center">${t.nocl}</div>`; return; }
+  const bar=`<div class="muted" style="margin-bottom:10px">${t.my}: ${STATE.persons.length}</div>`;
+  if(!STATE.persons.length){ $("app").innerHTML=bar+`<div class="center">${t.nocl}</div>`; setBottomNav("clients"); return; }
   $("app").innerHTML = bar +
-    `<input class="search" id="q" placeholder="${t.search}" oninput="filterList()"><div id="plist"></div>`;
+    `<div class="searchwrap">${ic("search")}<input class="search" id="q" placeholder="${esc(t.search)}" oninput="filterList()"></div>
+     <div id="plist"></div>`;
   drawList(STATE.persons);
+  setBottomNav("clients");
 }
 function drawList(items){
   const t=L();
-  $("plist").innerHTML = items.map(p =>
-    `<div class="pcard" onclick="openP('${p.rep}')">
-       <span class="dot ${p.visited?'v':'n'}"></span>
-       <div><div class="pname">${esc(p.client)}</div>
+  $("plist").innerHTML = items.map(p=>{
+    const dotStyle = (!p.visited && p.score!=null) ? ` style="background:${priColor(p.score)}"` : "";
+    return `<div class="pcard" onclick="openP('${p.rep}')">
+       <span class="dot ${p.visited?'v':'n'}"${dotStyle}></span>
+       <div class="pinfo"><div class="pname">${esc(p.client)}</div>
          <div class="psub">${p.n>1?(p.n+" "+t.kd+" · "):""}${money(p.total,p.unit)}</div></div>
-     </div>`).join("");
+       <span class="pchev">${ic("chevR")}</span>
+     </div>`;
+  }).join("");
 }
 function filterList(){
   const q=$("q").value.toLowerCase();
@@ -235,30 +340,35 @@ function filterList(){
 
 async function openP(rep){
   const d = await api("/api/person?rep="+enc(rep));
-  STATE.cur=d; STATE.tab="visit"; renderDetail();
+  STATE.cur=d; STATE.tab="visit";
+  draftDirty=false; clearTimeout(draftTimer);   // новый клиент — сбросить состояние сессии черновика
+  renderDetail();
 }
 
 function renderDetail(){
   const d=STATE.cur, t=L();
   const tab=(id,lbl)=>`<button class="${STATE.tab===id?'on':''}" onclick="setTab('${id}')">${lbl}</button>`;
   $("app").innerHTML =
-    `<button class="back" onclick="renderList()">← ${t.my}</button>
+    `<button class="back" onclick="renderList()">${ic("chevL")}${esc(t.my)}</button>
      <div class="h">${esc(d.client)}</div>
      <div class="muted" style="font-size:13px">${d.birth_date?(t.born+": "+d.birth_date):""}${d.birth_date?" · ":""}${d.contracts.length} ${t.kd}</div>
      <div class="tabs">${tab("visit",t.visit)}${tab("client",t.client)}${tab("debt",t.debt)}${tab("form",t.form)}</div>
      <div id="panel"></div>`;
   drawPanel();
+  setBottomNav("clients");
 }
-function setTab(id){ STATE.tab=id; drawPanel();
+function setTab(id){
+  if(STATE.tab==="form" && id!=="form") flushDraft();   // сохранить черновик до ухода с формы
+  STATE.tab=id; drawPanel();
   document.querySelectorAll(".tabs button").forEach((b,i)=>b.classList.toggle("on",["visit","client","debt","form"][i]===id)); }
 
 function drawPanel(){
   const d=STATE.cur, t=L(); const p=$("panel");
-  removeMap();
+  removeMap(); stopAutoSync();
   if(STATE.tab==="visit"){ p.innerHTML=panelVisit(d,t); setTimeout(initMap,0); }
   else if(STATE.tab==="client") p.innerHTML=panelClient(d,t);
   else if(STATE.tab==="debt") p.innerHTML=panelDebt(d,t);
-  else p.innerHTML=panelForm(d,t);
+  else { p.innerHTML=panelForm(d,t); setTimeout(setupFormDraft,0); }
 }
 
 // --- Карта (MapLibre GL). Базовый слой — растровый OSM; пин — наш.
@@ -320,14 +430,14 @@ function routeOrder(pts){
   return out;
 }
 function renderMap(){
+  flushDraft(); stopAutoSync();
   STATE.cur=null; removeMap();
   const t=L();
   const pts=STATE.persons.filter(p=>p.lat!=null&&p.lon!=null);
-  $("app").innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-       <button class="back" onclick="renderList()">← ${t.my}</button>
-       <span class="muted">${t.onmap}: ${pts.length}/${STATE.persons.length}</span></div>
-     <div id="map" style="height:72vh;border-radius:12px;overflow:hidden"></div>`;
+  $("app").innerHTML=`<div class="muted" style="margin-bottom:8px">${t.onmap}: ${pts.length}/${STATE.persons.length}</div>
+     <div id="map" style="height:calc(100vh - 230px);min-height:320px;border-radius:14px;overflow:hidden"></div>`;
   setTimeout(()=>initClientsMap(pts),0);
+  setBottomNav("map");
 }
 function initClientsMap(pts){
   const el=$("map"); if(!el||!window.maplibregl) return;
@@ -365,18 +475,15 @@ function initClientsMap(pts){
 }
 
 function panelVisit(d,t){
-  const geo = d.geo && d.geo.lat;
   return `
    <div class="mapwrap">
      <div class="map" id="map"></div>
-     <div class="geohint">${geoHint(d,t)}</div>
-     <div style="padding:12px 14px">
-       <button class="btn acc" onclick="drive()">🧭 ${t.drive}</button>
-       <div class="chips" id="drvchips"></div>
-     </div>
+     <div class="geobadge${(d.geo&&d.geo.lat)?"":" n"}">${ic("pin")}<span>${esc(geoHint(d,t))}</span></div>
+     <button class="fab" onclick="enterNav()">${ic("nav")}<span>${esc(t.go)}</span></button>
    </div>
-   <button class="btn line" onclick="setMarkCase()">📍 ${t.setmark}</button>
-   ${d.phone?`<button class="btn line" onclick="call()">📞 ${t.call} · ${esc(d.phone)}</button>`:""}
+   ${providerChips(d)}
+   <button class="btn line" onclick="setMarkCase()">${ic("pin")}<span>${t.setmark}</span></button>
+   ${d.phone?`<button class="btn line" onclick="call()">${ic("phone")}<span>${t.call} · ${esc(d.phone)}</span></button>`:""}
    <div class="box" style="margin-top:10px">
      <div class="kv"><span class="k">${t.status}</span><span class="v">${esc(d.status||"—")}</span></div>
      ${d.assign_date?`<div class="kv"><span class="k">${t.inwork}</span><span class="v">${d.assign_date}</span></div>`:""}
@@ -410,21 +517,33 @@ function panelForm(d,t){
     <label class="fld">${t.comment}</label><textarea id="f_call_comment">${esc(d.call_comment||"")}</textarea>
     <label class="fld">${t.tips}</label><textarea id="f_tips">${esc(d.tips||"")}</textarea>
     <label class="fld">${t.photos}</label>
-    <input type="file" accept="image/*" capture="environment" id="photo" style="margin-bottom:4px" onchange="upPhoto()">
-    <div class="muted" id="phc" style="font-size:12px">${t.photos}: ${d.photos||0}</div>
-    <button class="btn acc" style="margin-top:14px" onclick="saveVisit()">✓ ${t.save}</button>`;
+    <label class="btn line" style="cursor:pointer">${ic("camera")}<span>${t.addphoto}</span>
+      <input type="file" accept="image/*" capture="environment" id="photo" style="display:none" onchange="upPhoto()">
+    </label>
+    <div class="muted" id="phc" style="font-size:12px;margin-top:6px">${t.photos}: ${d.photos||0}</div>
+    <div id="draftstat" style="font-size:12px;margin-top:10px;display:none"></div>
+    <button class="btn acc" style="margin-top:14px" onclick="saveVisit()">${ic("check")}<span>${t.save}</span></button>`;
 }
 
-function drive(){
-  const d=STATE.cur, a=d.address?enc(d.address):"";
+// --- Ссылки на внешнюю навигацию (последняя миля — родное приложение телефона). ---
+// Внутри Telegram Mini App работают только https-ссылки (свои схемы вроде yandexnavi://
+// не открываются), поэтому везде — обычные https deep-link'и.
+function driveLinks(d){
+  const a=d.address?enc(d.address):"";
   const g=d.geo&&d.geo.lat;
-  const ya = g?`https://yandex.ru/maps/?pt=${d.geo.lon},${d.geo.lat}&z=17&l=map`:`https://yandex.ru/maps/?text=${a}`;
-  const go = g?`https://www.google.com/maps/search/?api=1&query=${d.geo.lat},${d.geo.lon}`:`https://www.google.com/maps/search/?api=1&query=${a}`;
-  const dg = `https://2gis.ru/search/${a}`;
-  $("drvchips").innerHTML =
-    `<a href="${ya}" target="_blank" onclick="openExt(event,'${ya}')">Я.Карты</a>
-     <a href="${go}" target="_blank" onclick="openExt(event,'${go}')">Google</a>
-     <a href="${dg}" target="_blank" onclick="openExt(event,'${dg}')">2ГИС</a>`;
+  return {
+    yandex: g?`https://yandex.ru/maps/?pt=${d.geo.lon},${d.geo.lat}&z=17&l=map`:`https://yandex.ru/maps/?text=${a}`,
+    google: g?`https://www.google.com/maps/search/?api=1&query=${d.geo.lat},${d.geo.lon}`:`https://www.google.com/maps/search/?api=1&query=${a}`,
+    twogis: `https://2gis.ru/search/${a}`,
+  };
+}
+function providerChips(d){
+  const l=driveLinks(d);
+  return `<div class="providers">
+    <a href="${l.yandex}" target="_blank" onclick="openExt(event,'${l.yandex}')">${ic("map")}<span>Я.Карты</span></a>
+    <a href="${l.google}" target="_blank" onclick="openExt(event,'${l.google}')">${ic("map")}<span>Google</span></a>
+    <a href="${l.twogis}" target="_blank" onclick="openExt(event,'${l.twogis}')">${ic("map")}<span>2ГИС</span></a>
+  </div>`;
 }
 function openExt(e,url){ if(TG&&TG.openLink){ e.preventDefault(); TG.openLink(url); } }
 function call(){ if(STATE.cur.phone) location.href="tel:"+STATE.cur.phone.replace(/[^+\d]/g,""); }
@@ -438,18 +557,104 @@ async function upPhoto(){
   }catch(e){ toast("✕"); }
 }
 async function saveVisit(){
+  const values=readForm();
+  const rep=STATE.cur.rep;
+  try{
+    const j=await api("/api/save",{method:"POST",body:JSON.stringify({rep,values,finish:true})});
+    STATE.cur=j.person; clearDraft(rep); draftDirty=false; stopAutoSync(); toast(L().saved);
+    if(TG&&TG.HapticFeedback) TG.HapticFeedback.notificationOccurred("success");
+    STATE.tab="visit"; renderDetail();
+    const p=STATE.persons.find(x=>x.rep===rep); if(p) p.visited=true;
+  }catch(e){ toast("✕"); }
+}
+
+// --- Автосохранение черновика формы (устойчивость к обрыву связи) ------------
+// localStorage — источник истины: черновик переживает закрытие вкладки/обрыв сети.
+// Раз в 20 сек тихо шлём его на сервер (POST /api/save finish:false — визит НЕ
+// помечается завершённым, уведомления в группу не уходят, см. web.py _save).
+// Полная очистка черновика — только после явного «Сохранить выезд» (finish:true).
+let draftTimer=null, syncTimer=null, draftDirty=false;
+
+function currentUid(){
+  try{ if(TG&&TG.initDataUnsafe&&TG.initDataUnsafe.user) return TG.initDataUnsafe.user.id; }catch(e){}
+  return new URLSearchParams(location.search).get("dev_uid") || "anon";
+}
+function draftKey(rep){ return "draft:"+currentUid()+":"+rep; }
+
+// Значения формы из DOM — общая точка для черновика и явного «Сохранить выезд».
+function readForm(){
   const values={};
   document.querySelectorAll("#panel select[data-k]").forEach(s=>{ if(s.value) values[s.dataset.k]=s.value; });
   const cc=$("f_call_comment"); if(cc&&cc.value.trim()) values.call_comment=cc.value.trim();
   const tp=$("f_tips"); if(tp&&tp.value.trim()) values.tips=tp.value.trim();
-  try{
-    const j=await api("/api/save",{method:"POST",body:JSON.stringify({rep:STATE.cur.rep,values,finish:true})});
-    STATE.cur=j.person; toast(L().saved);
-    if(TG&&TG.HapticFeedback) TG.HapticFeedback.notificationOccurred("success");
-    STATE.tab="visit"; renderDetail();
-    const p=STATE.persons.find(x=>x.rep===STATE.cur.rep); if(p) p.visited=true;
-  }catch(e){ toast("✕"); }
+  return values;
 }
+function formVisible(){ return !!(STATE.cur && STATE.tab==="form" && $("f_call_comment")); }
+
+function loadDraft(rep){ try{ const s=localStorage.getItem(draftKey(rep)); return s?JSON.parse(s):null; }catch(e){ return null; } }
+function clearDraft(rep){ try{ localStorage.removeItem(draftKey(rep)); }catch(e){} }
+function saveDraft(){
+  if(!formVisible()) return;   // не читать DOM другой вкладки — иначе затрём черновик пустотой
+  const v=readForm(), key=draftKey(STATE.cur.rep);
+  try{
+    if(Object.keys(v).length) localStorage.setItem(key, JSON.stringify({v, at:Date.now()}));
+    else localStorage.removeItem(key);
+  }catch(e){}
+}
+function flushDraft(){ clearTimeout(draftTimer); saveDraft(); }   // немедленно, перед уходом с формы
+
+function onFormChange(){
+  draftDirty=true;
+  clearTimeout(draftTimer);
+  draftTimer=setTimeout(()=>{ saveDraft(); markDraftBadge(true); }, 500);
+}
+function markDraftBadge(dirty){
+  const e=$("draftstat"); if(!e) return; const t=L();
+  e.style.display="block";
+  e.style.color=dirty?"var(--danger)":"var(--success)";
+  e.textContent=(dirty?"● ":"✓ ")+(dirty?t.draftwait:t.draftsent);
+}
+
+// Восстановление черновика поверх серверных значений при открытии формы.
+function restoreDraftIntoForm(){
+  if(!STATE.cur) return;
+  const d=loadDraft(STATE.cur.rep); if(!d||!d.v) return;
+  let applied=false;
+  Object.entries(d.v).forEach(([k,val])=>{
+    let el=null;
+    if(k==="call_comment") el=$("f_call_comment");
+    else if(k==="tips") el=$("f_tips");
+    else el=document.querySelector('#panel select[data-k="'+k+'"]');
+    if(el && el.value!==val){ el.value=val; applied=true; }   // отличается от сервера → есть несинхр. правка
+  });
+  if(applied){ draftDirty=true; markDraftBadge(true); }
+}
+function setupFormDraft(){
+  const p=$("panel"); if(!p) return;
+  restoreDraftIntoForm();
+  p.querySelectorAll('select[data-k], #f_call_comment, #f_tips').forEach(el=>{
+    el.addEventListener(el.tagName==="SELECT"?"change":"input", onFormChange);
+  });
+  startAutoSync();
+}
+
+function startAutoSync(){ stopAutoSync(); syncTimer=setInterval(()=>{ if(draftDirty) pushDraft(); }, 20000); }
+function stopAutoSync(){ if(syncTimer){ clearInterval(syncTimer); syncTimer=null; } }
+async function pushDraft(){
+  if(!STATE.cur) return;
+  const d=loadDraft(STATE.cur.rep), values=(d&&d.v)||{};
+  if(!Object.keys(values).length){ draftDirty=false; return; }
+  try{
+    await api("/api/save",{method:"POST",body:JSON.stringify({rep:STATE.cur.rep,values,finish:false})});
+    draftDirty=false; markDraftBadge(false);   // localStorage НЕ чистим — кэш до явного finish:true
+  }catch(e){}   // сеть/ошибка — черновик остаётся, повтор на следующем интервале
+}
+
+// Уход со страницы/сворачивание приложения — досрочно сохранить (и попробовать отправить).
+// В мобильном WebView не гарантировано, поэтому это лишь подстраховка; истина — localStorage.
+window.addEventListener("beforeunload", flushDraft);
+document.addEventListener("visibilitychange", ()=>{ if(document.hidden){ flushDraft(); pushDraft(); } });
+
 function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
 // --- Геометки: захват точки (геолокация телефона) + сохранение ---
@@ -476,6 +681,7 @@ async function setMarkCase(){
   }catch(e){ alert(t.nogeo); }
 }
 async function renderMarkers(){
+  flushDraft(); stopAutoSync();
   removeMap(); STATE.cur=null; const t=L();
   let j={markers:[]}; try{ j=await api("/api/markers"); }catch(e){}
   const list=j.markers.length ? j.markers.map(m=>
@@ -484,10 +690,10 @@ async function renderMarkers(){
        <div class="muted" style="font-size:11px">${(+m.lat).toFixed(5)}, ${(+m.lon).toFixed(5)} · ${String(m.at||"").replace("T"," ")}</div>
      </div></div>`).join("") : `<div class="center">${t.nomarks}</div>`;
   $("app").innerHTML=`
-    <button class="back" onclick="boot()">← ${t.my}</button>
     <div class="h">${t.marks}</div>
-    <button class="btn acc" style="margin:8px 0" onclick="newMarker()">＋ ${t.newmark}</button>
+    <button class="btn acc" style="margin:8px 0 14px" onclick="newMarker()">${ic("plus")}<span>${t.newmark}</span></button>
     <div>${list}</div>`;
+  setBottomNav("marks");
 }
 async function newMarker(){
   const t=L(); const label=(prompt(t.mlabel)||"").trim();
@@ -497,6 +703,167 @@ async function newMarker(){
     await api("/api/marker",{method:"POST",body:JSON.stringify({lat:loc.lat,lon:loc.lon,label})});
     toast(t.marksaved); renderMarkers();
   }catch(e){ alert(t.nogeo); }
+}
+
+// --- Полноэкранная навигация: «Поехать» переводит миниапп в режим навигатора. ---
+// Живая геопозиция (watchPosition) + камера «по курсу» (track-up, как в обычных
+// навигаторах) + линия маршрута (свой OSRM, если поднят, иначе честная прямая) +
+// нижняя плашка с расстоянием/ETA. Внешние приложения (Я/Google/2ГИС) остаются
+// для настоящей голосовой turn-by-turn навигации — это сознательное решение
+// (см. AGENTS.md), а не недоделка: здесь — живой превью-навигатор + быстрый переход.
+let NAV = {map:null, watchId:null, follow:true, lastPos:null, lastHeading:0,
+           meMarker:null, destMarker:null, routeFetched:false, refreshTimer:null,
+           dest:null, bannerTimeout:null};
+
+function bearingBetween(a,b){
+  const toRad=x=>x*Math.PI/180, toDeg=x=>x*180/Math.PI;
+  const dLon=toRad(b.lon-a.lon);
+  const y=Math.sin(dLon)*Math.cos(toRad(b.lat));
+  const x=Math.cos(toRad(a.lat))*Math.sin(toRad(b.lat))-Math.sin(toRad(a.lat))*Math.cos(toRad(b.lat))*Math.cos(dLon);
+  return (toDeg(Math.atan2(y,x))+360)%360;
+}
+function haversineKm(a,b){
+  const R=6371, toRad=x=>x*Math.PI/180;
+  const dLat=toRad(b.lat-a.lat), dLon=toRad(b.lon-a.lon);
+  const h=Math.sin(dLat/2)**2+Math.cos(toRad(a.lat))*Math.cos(toRad(b.lat))*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h));
+}
+
+function navShellHTML(d,t){
+  return `
+    <div class="navmap" id="navmap"></div>
+    <button class="navexit" onclick="exitNav()">${ic("close")}<span>${esc(t.exit)}</span></button>
+    <button class="navrecenter" id="navrecenter" onclick="navRecenter()">${ic("target")}</button>
+    <div class="navsheet">
+      <div class="navhandle"></div>
+      <div class="navtop">
+        <div><div class="navdist" id="navdist">—</div><div class="navsub">${esc(d.client)}</div></div>
+        <div class="naveta" id="naveta"></div>
+      </div>
+      <div class="navbanner" id="navbanner" style="display:none"></div>
+      ${providerChips(d)}
+      <button class="btn acc" onclick="navFinish()">${ic("check")}<span>${esc(t.finishvisit)}</span></button>
+    </div>`;
+}
+
+function enterNav(){
+  const d=STATE.cur, t=L();
+  if(!(d && d.geo && d.geo.lat)){ toast(t.none); return; }
+  NAV.dest={lat:d.geo.lat, lon:d.geo.lon};
+  document.body.classList.add("navon");
+  $("navmode").innerHTML = navShellHTML(d,t);
+  $("navmode").classList.add("on");
+  navShowBanner(t.getloc);
+  setTimeout(()=>initNavMap(d),0);
+  startNavWatch();
+  NAV.bannerTimeout = setTimeout(()=>{ if(!NAV.lastPos) navShowBanner(t.nogeo); }, 8000);
+  if(TG && TG.BackButton){ try{ TG.BackButton.offClick(exitNav); TG.BackButton.onClick(exitNav); TG.BackButton.show(); }catch(e){} }
+}
+function exitNav(){
+  document.body.classList.remove("navon");
+  $("navmode").classList.remove("on");
+  $("navmode").innerHTML = "";
+  stopNavWatch();
+  if(NAV.refreshTimer){ clearInterval(NAV.refreshTimer); NAV.refreshTimer=null; }
+  if(NAV.bannerTimeout){ clearTimeout(NAV.bannerTimeout); NAV.bannerTimeout=null; }
+  if(NAV.map){ try{NAV.map.remove();}catch(e){} }
+  NAV.map=null; NAV.meMarker=null; NAV.destMarker=null; NAV.routeFetched=false;
+  NAV.lastPos=null; NAV.follow=true;
+  if(TG && TG.BackButton){ try{ TG.BackButton.hide(); TG.BackButton.offClick(exitNav); }catch(e){} }
+}
+function navFinish(){
+  exitNav();
+  STATE.tab="form";
+  renderDetail();
+}
+function navRecenter(){
+  NAV.follow=true;
+  const rc=$("navrecenter"); if(rc) rc.classList.remove("hot");
+  if(NAV.map && NAV.lastPos){
+    try{ NAV.map.easeTo({center:[NAV.lastPos.lon,NAV.lastPos.lat], bearing:NAV.lastHeading||0,
+      pitch:55, zoom:Math.max(NAV.map.getZoom(),16), duration:450}); }catch(e){}
+  }
+}
+function navShowBanner(msg){ const b=$("navbanner"); if(!b) return; b.style.display="flex"; b.innerHTML=`${ic("pin")}<span>${esc(msg)}</span>`; }
+function navHideBanner(){ const b=$("navbanner"); if(b) b.style.display="none"; }
+
+function initNavMap(d){
+  const el=$("navmap"); if(!el||!window.maplibregl) return;
+  let style=RASTER_STYLE; const vt=STATE.meta&&STATE.meta.vectorTiles;
+  if(vt&&window.pmtiles&&window.protomaps_themes_base){ try{ style=vectorStyle(vt); }catch(e){} }
+  NAV.map=new maplibregl.Map({container:el, style, center:[d.geo.lon,d.geo.lat], zoom:15,
+    pitch:50, attributionControl:false, dragRotate:true});
+  let fb=false;
+  NAV.map.on("error",()=>{ if(!fb&&style!==RASTER_STYLE){ fb=true; try{NAV.map.setStyle(RASTER_STYLE);}catch(e){} } });
+  NAV.map.on("dragstart",()=>{ NAV.follow=false; const rc=$("navrecenter"); if(rc) rc.classList.add("hot"); });
+  NAV.destMarker=new maplibregl.Marker({color:"#B0472C"}).setLngLat([d.geo.lon,d.geo.lat]).addTo(NAV.map);
+}
+
+function startNavWatch(){
+  if(!navigator.geolocation){ navShowBanner(L().nogeo); return; }
+  NAV.watchId=navigator.geolocation.watchPosition(onNavPos, onNavPosErr,
+    {enableHighAccuracy:true, maximumAge:2000, timeout:15000});
+}
+function stopNavWatch(){ if(NAV.watchId!=null && navigator.geolocation){ navigator.geolocation.clearWatch(NAV.watchId); NAV.watchId=null; } }
+function onNavPosErr(){ navShowBanner(L().nogeo); }
+
+function onNavPos(p){
+  if(NAV.bannerTimeout){ clearTimeout(NAV.bannerTimeout); NAV.bannerTimeout=null; }
+  navHideBanner();
+  const me={lat:p.coords.latitude, lon:p.coords.longitude};
+  const heading=(p.coords.heading!=null && !isNaN(p.coords.heading)) ? p.coords.heading : null;
+  const prev=NAV.lastPos; NAV.lastPos=me;
+  if(heading!=null) NAV.lastHeading=heading;
+  else if(prev) NAV.lastHeading=bearingBetween(prev, me);
+  if(NAV.map){
+    if(!NAV.meMarker){
+      const elx=document.createElement("div"); elx.className="navme"; elx.innerHTML=ICONS.nav;
+      NAV.meMarker=new maplibregl.Marker({element:elx, anchor:"center",
+        rotationAlignment:"viewport", pitchAlignment:"viewport"}).setLngLat([me.lon,me.lat]).addTo(NAV.map);
+    } else NAV.meMarker.setLngLat([me.lon,me.lat]);
+    if(NAV.follow){
+      try{ NAV.map.easeTo({center:[me.lon,me.lat], bearing:NAV.lastHeading||NAV.map.getBearing(),
+        pitch:55, zoom:Math.max(NAV.map.getZoom(),16), duration:600}); }catch(e){}
+    }
+  }
+  updateNavStats(me);
+  if(!NAV.routeFetched){
+    NAV.routeFetched=true;
+    fetchNavRoute(me);
+    NAV.refreshTimer=setInterval(()=>{ if(NAV.lastPos) fetchNavRoute(NAV.lastPos); }, 25000);
+  }
+}
+
+function updateNavStats(me){
+  if(!NAV.dest) return;
+  const km=haversineKm(me, NAV.dest);
+  const dd=$("navdist"); if(dd) dd.textContent = km<1 ? Math.round(km*1000)+" м" : km.toFixed(1)+" км";
+  const minutes=Math.max(1, Math.round(km/30*60));
+  const de=$("naveta"); if(de) de.textContent = "≈ "+minutes+" "+L().mins;
+}
+
+async function fetchNavRoute(me){
+  try{
+    const j=await api(`/api/route?rep=${enc(STATE.cur.rep)}&lat=${me.lat}&lon=${me.lon}`);
+    if(j && j.line) drawNavRoute(j.line);
+  }catch(e){
+    if(NAV.dest) drawNavRoute([[me.lon,me.lat],[NAV.dest.lon,NAV.dest.lat]]);
+  }
+}
+function drawNavRoute(line){
+  if(!NAV.map) return;
+  const data={type:"Feature",geometry:{type:"LineString",coordinates:line}};
+  const draw=()=>{
+    try{
+      if(NAV.map.getSource("navroute")){ NAV.map.getSource("navroute").setData(data); return; }
+      NAV.map.addSource("navroute",{type:"geojson",data});
+      NAV.map.addLayer({id:"navroute-casing",type:"line",source:"navroute",
+        layout:{"line-cap":"round","line-join":"round"},paint:{"line-color":"#ffffff","line-width":9,"line-opacity":.9}});
+      NAV.map.addLayer({id:"navroute",type:"line",source:"navroute",
+        layout:{"line-cap":"round","line-join":"round"},paint:{"line-color":"#2F6FED","line-width":5}});
+    }catch(e){}
+  };
+  if(NAV.map.isStyleLoaded()) draw(); else NAV.map.once("load",draw);
 }
 
 boot();

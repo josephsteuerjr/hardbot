@@ -9,7 +9,7 @@
 import os
 import re
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fields import FIELDS, BY_KEY
@@ -106,6 +106,12 @@ def init_db() -> None:
         ucols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
         if "lang" not in ucols:
             conn.execute("ALTER TABLE users ADD COLUMN lang TEXT DEFAULT 'ru'")
+        # Гости: @username, имя и время последнего апдейта — чтобы в пульте можно было
+        # выбрать нужный telegram_id при привязке (не вводить руками). Идемпотентно.
+        if "username" not in ucols:
+            conn.execute("ALTER TABLE users ADD COLUMN username TEXT")
+        if "last_seen" not in ucols:
+            conn.execute("ALTER TABLE users ADD COLUMN last_seen TEXT")
         # Привязка «кто есть кто»: telegram_id → ответственный Сотрудник (одноразово).
         # kind: 'agent' (выездник) | 'courier' (ГПХ-разведчик). Разница — только в выгрузке.
         # approved: 1 — доступ открыт; 0 — ждёт аппрува ADMIN (ИБ: авторизация на этапе привязки).
@@ -188,6 +194,43 @@ def set_lang(telegram_id: int, lang: str) -> None:
         conn.commit()
 
 
+# --- Гости (кто писал боту) -------------------------------------------------
+def touch_guest(telegram_id: int, username: str | None = None,
+                name: str | None = None) -> None:
+    """Запомнить факт обращения к боту: telegram_id + @username + имя + время.
+    Источник для списка выбора при привязке в пульте. Пустые значения не затирают
+    уже сохранённые (COALESCE)."""
+    now = datetime.now().isoformat(timespec="seconds")
+    uname = (username or "").strip() or None
+    nm = (name or "").strip() or None
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO users (telegram_id, name, username, last_seen, role, created_at) "
+            "VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(telegram_id) DO UPDATE SET "
+            "  username=COALESCE(excluded.username, users.username), "
+            "  name=COALESCE(excluded.name, users.name), "
+            "  last_seen=excluded.last_seen",
+            (telegram_id, nm, uname, now, "collector", date.today().isoformat()),
+        )
+        conn.commit()
+
+
+def guests() -> list[dict]:
+    """Все, кто писал боту (users), с подтянутой привязкой (agent_bind):
+    {telegram_id, username, name, last_seen, bound_employee|None}. Свежие сверху.
+    Владелец (ADMIN) тоже попадёт сюда, если писал боту — это ок, его id обычно и нужен."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT u.telegram_id, u.username, u.name, u.last_seen, b.employee AS bound "
+            "FROM users u LEFT JOIN agent_bind b ON b.telegram_id = u.telegram_id "
+            "ORDER BY (u.last_seen IS NULL), u.last_seen DESC, u.telegram_id"
+        ).fetchall()
+    return [{"telegram_id": r["telegram_id"], "username": r["username"],
+             "name": r["name"], "last_seen": r["last_seen"],
+             "bound_employee": r["bound"]} for r in rows]
+
+
 # --- Привязка «кто есть кто» (telegram_id → сотрудник, одноразово) -----------
 def employees_in_registry() -> list[sqlite3.Row]:
     """Список ответственных сотрудников из реестра (для самовыбора)."""
@@ -211,6 +254,57 @@ def bind_agent(telegram_id: int, employee: str, kind: str = "agent",
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+def set_bind(telegram_id: int, employee: str, kind: str = "agent") -> None:
+    """Предзаданная привязка из пульта: заказчик сам вписывает telegram_id
+    сотруднику (ФИО из реестра) и тип. approved=1 сразу — работник, написавший
+    боту с этим id, сразу привязан к своим клиентам (без самовыбора).
+
+    Корректный upsert (в отличие от bind_agent с INSERT OR IGNORE):
+      (а) один employee = один telegram_id — старые записи этого ФИО чистим;
+      (б) переназначение того же telegram_id обновляет employee/kind, а не игнорит.
+    Матчинг клиентов к работнику идёт по clients.responsible == agent_bind.employee —
+    его не трогаем."""
+    kind = "courier" if kind == "courier" else "agent"
+    employee = (employee or "").strip()
+    with connect() as conn:
+        # (а) убрать прежние привязки этого ФИО на другие id (переезд ФИО на новый id)
+        conn.execute("DELETE FROM agent_bind WHERE employee = ? AND telegram_id <> ?",
+                     (employee, telegram_id))
+        # (б) upsert по telegram_id (PRIMARY KEY): создать или переназначить, approved=1
+        conn.execute(
+            "INSERT INTO agent_bind (telegram_id, employee, kind, approved, created_at) "
+            "VALUES (?,?,?,1,?) "
+            "ON CONFLICT(telegram_id) DO UPDATE SET "
+            "employee=excluded.employee, kind=excluded.kind, approved=1",
+            (telegram_id, employee, kind, date.today().isoformat()),
+        )
+        conn.commit()
+
+
+def employees_with_bindings() -> list[dict]:
+    """ФИО из реестра (clients.responsible) с подтянутой привязкой из agent_bind:
+    {employee, contracts, telegram_id|None, kind|None, approved|None}. Источник для
+    экрана «Роли» в пульте — там заказчик вписывает telegram_id каждому ФИО."""
+    with connect() as conn:
+        emps = conn.execute(
+            "SELECT responsible AS employee, COUNT(*) AS contracts FROM clients "
+            "WHERE responsible IS NOT NULL AND TRIM(responsible) <> '' "
+            "GROUP BY responsible ORDER BY responsible"
+        ).fetchall()
+        binds = {b["employee"]: b for b in
+                 conn.execute("SELECT * FROM agent_bind").fetchall()}
+    out = []
+    for e in emps:
+        b = binds.get(e["employee"])
+        out.append({
+            "employee": e["employee"], "contracts": e["contracts"],
+            "telegram_id": b["telegram_id"] if b else None,
+            "kind": (b["kind"] if b and b["kind"] else None) if b else None,
+            "approved": (b["approved"] if b else None),
+        })
+    return out
 
 
 def get_binding(telegram_id: int) -> str | None:
@@ -302,6 +396,39 @@ def set_setting(key: str, value: str) -> None:
             (key, str(value)),
         )
         conn.commit()
+
+
+# Путь к .env, откуда docker-compose (env_file) и load_dotenv() берут BOT_TOKEN.
+# Лежит рядом с кодом; в контейнере — /data не подходит (env_file читает .env билда),
+# поэтому пишем в файл рядом со скриптами. HARDBOT_ENV — переопределение пути на всякий.
+_ENV_PATH = Path(os.getenv("HARDBOT_ENV", Path(__file__).parent / ".env"))
+
+
+def set_bot_token(token: str) -> None:
+    """Сменить токен бота: обновить строку BOT_TOKEN= в .env (источник для env_file
+    docker-compose и load_dotenv при старте процесса) и продублировать в settings как
+    аудит-след факта смены (сам токен там тоже хранится — файл .env уже приватный,
+    БД лежит рядом; GET-эндпоинты его НЕ отдают). Применяется после рестарта процесса.
+    Токен НЕ логируем."""
+    token = (token or "").strip()
+    # (1) .env — главный источник. Переписываем/добавляем строку BOT_TOKEN=, остальное как есть.
+    try:
+        lines = _ENV_PATH.read_text(encoding="utf-8").splitlines() if _ENV_PATH.exists() else []
+    except OSError:
+        lines = []
+    out, replaced = [], False
+    for ln in lines:
+        if re.match(r"\s*BOT_TOKEN\s*=", ln) and not ln.lstrip().startswith("#"):
+            out.append(f"BOT_TOKEN={token}")
+            replaced = True
+        else:
+            out.append(ln)
+    if not replaced:
+        out.insert(0, f"BOT_TOKEN={token}")
+    _ENV_PATH.write_text("\n".join(out) + "\n", encoding="utf-8")
+    # (2) БД — резервная копия/аудит-след. read-only эндпоинтам не отдаётся.
+    set_setting("bot_token", token)
+    set_setting("bot_token_changed_at", datetime.now().isoformat(timespec="seconds"))
 
 
 # --- Фильтр по периоду (дата закрепления) ----------------------------------
@@ -477,6 +604,51 @@ def stats_all() -> dict:
     }
 
 
+def activity_stats() -> list[dict]:
+    """Активность каждого привязанного работника (agent_bind): визиты
+    (visits.agent_id) и метки (markers.telegram_id) за 7/30 дней по created_at,
+    последняя активность и простой. Пруф: активность пишется в БД, тут только
+    агрегируется. photos_total — сумма photos_count по клиентам сотрудника
+    (только если он matched в реестре по responsible, иначе None — данных нет).
+
+    Сортировка «проблемные сверху»: сначала вовсе без активности, затем по
+    убыванию idle_days (кто дольше простаивает), при равенстве — по имени.
+    """
+    today = date.today()
+    cut7 = (today - timedelta(days=7)).isoformat()    # окна включают границу
+    cut30 = (today - timedelta(days=30)).isoformat()
+    with connect() as conn:
+        vis = {r["agent_id"]: r for r in conn.execute(
+            "SELECT agent_id, SUM(created_at >= ?) d7, SUM(created_at >= ?) d30, "
+            "MAX(created_at) last FROM visits GROUP BY agent_id", (cut7, cut30))}
+        mrk = {r["telegram_id"]: r for r in conn.execute(
+            "SELECT telegram_id, SUM(created_at >= ?) d7, SUM(created_at >= ?) d30, "
+            "MAX(created_at) last FROM markers GROUP BY telegram_id", (cut7, cut30))}
+        photos = {r["responsible"]: r["ph"] for r in conn.execute(
+            "SELECT responsible, SUM(COALESCE(photos_count,0)) ph FROM clients "
+            "WHERE responsible IS NOT NULL AND TRIM(responsible) <> '' GROUP BY responsible")}
+        binds = conn.execute("SELECT * FROM agent_bind ORDER BY employee").fetchall()
+    out = []
+    for b in binds:
+        v, m = vis.get(b["telegram_id"]), mrk.get(b["telegram_id"])
+        # visits.created_at — дата, markers.created_at — datetime: ISO сравнимы лексикографически
+        last = max((x["last"] for x in (v, m) if x and x["last"]), default=None)
+        d = _as_date((last or "")[:10])
+        out.append({
+            "employee": b["employee"], "kind": b["kind"] or "agent",
+            "telegram_id": b["telegram_id"],
+            "visits_7d": (v["d7"] if v else 0) or 0,
+            "visits_30d": (v["d30"] if v else 0) or 0,
+            "markers_7d": (m["d7"] if m else 0) or 0,
+            "markers_30d": (m["d30"] if m else 0) or 0,
+            "photos_total": photos.get(b["employee"]),
+            "last_activity": last,
+            "idle_days": max((today - d).days, 0) if d else None,
+        })
+    out.sort(key=lambda w: (w["idle_days"] is not None, -(w["idle_days"] or 0), w["employee"]))
+    return out
+
+
 # --- Запись -----------------------------------------------------------------
 def update_fields(contract_id: str, values: dict[str, str]) -> None:
     """Перезаписать поля карточки (только существующие ключи)."""
@@ -580,20 +752,32 @@ def markers_for_telegram(telegram_id: int, limit: int = 500) -> list[sqlite3.Row
         ).fetchall()
 
 
-def export_markers(path: str) -> str:
-    """Выгрузка меток в xlsx (для курьеров — отдельный файл)."""
-    from openpyxl import Workbook
-    wb = Workbook(); ws = wb.active; ws.title = "Метки"
-    ws.append(["Дата", "Тип", "telegram_id", "Кейс (rep)", "Клиент", "Адрес",
-               "Метка/подпись", "Широта", "Долгота"])
+def markers_rows() -> list[dict]:
+    """Метки с подтянутым клиентом/адресом — общий источник для xlsx-легаси
+    и JSON-выдачи пульту (пульт пишет xlsx сам, rust_xlsxwriter)."""
+    out = []
     for m in list_markers():
         client = addr = ""
         if m["client_rep"]:
             row = get_client(m["client_rep"])
             if row:
                 client, addr = row["client"] or "", row["address"] or ""
-        ws.append([m["created_at"], m["kind"], m["telegram_id"], m["client_rep"] or "",
-                   client, addr, m["label"] or "", m["lat"], m["lon"]])
+        out.append({"created_at": m["created_at"], "kind": m["kind"],
+                    "telegram_id": m["telegram_id"], "rep": m["client_rep"] or "",
+                    "client": client, "address": addr, "label": m["label"] or "",
+                    "lat": m["lat"], "lon": m["lon"]})
+    return out
+
+
+def export_markers(path: str) -> str:
+    """Выгрузка меток в xlsx (легаси-путь: openpyxl на сервере; пульт делает то же сам)."""
+    from openpyxl import Workbook
+    wb = Workbook(); ws = wb.active; ws.title = "Метки"
+    ws.append(["Дата", "Тип", "telegram_id", "Кейс (rep)", "Клиент", "Адрес",
+               "Метка/подпись", "Широта", "Долгота"])
+    for m in markers_rows():
+        ws.append([m["created_at"], m["kind"], m["telegram_id"], m["rep"],
+                   m["client"], m["address"], m["label"], m["lat"], m["lon"]])
     wb.save(path)
     return path
 
@@ -649,6 +833,14 @@ def _block_spans() -> list[tuple[int, int, str]]:
 # чтобы ничего не потерялось; даты — типизированно, чтобы сортировались/фильтровались).
 DATE_KEYS = {"birth_date", "last_payment_date", "promise_date", "visit_date",
              "meeting_date", "kd_date", "assign_date"}
+
+# Денежные/числовые колонки — подсказка писателю xlsx (пульт, rust_xlsxwriter):
+# парсить в число и ставить формат # ##0, чтобы суммировалось и не зеленело.
+# В БД значения остаются текстом как пришли — это только метаданные экспорта.
+NUM_KEYS = {"debt_overdue", "interest_overdue", "penalty", "duty", "dtp", "rent",
+            "camera_fine", "dirt", "trash", "new_damage", "evacuation", "peni",
+            "other", "debt_total", "last_payment_sum", "forecast_sum",
+            "debt_today", "issued_sum", "visits_count"}
 
 
 def _as_date(v):
@@ -736,31 +928,72 @@ def write_xlsx(path: str, rows: list[dict]) -> str:
     return path
 
 
-def export_xlsx(path: str) -> str:
-    """Выгрузить БД обратно в реестр-шаблон."""
+def registry_rows() -> list[dict]:
+    """Строки реестра для экспорта: только колонки FIELDS, порядок как в БД-запросе.
+    Общий источник для xlsx-легаси и JSON-выдачи пульту."""
     with connect() as conn:
         rows = conn.execute("SELECT * FROM clients ORDER BY client").fetchall()
-    return write_xlsx(path, [dict(r) for r in rows])
+    return [{f.key: r[f.key] for f in FIELDS} for r in rows]
+
+
+def export_schema() -> list[dict]:
+    """Схема колонок для писателя xlsx на стороне пульта: блоки, заголовки,
+    типы (дата/число). Единственный источник правды — fields.FIELDS."""
+    return [{"key": f.key, "title": f.title, "block": f.block, "source": f.source,
+             "date": f.key in DATE_KEYS, "num": f.key in NUM_KEYS} for f in FIELDS]
+
+
+def export_xlsx(path: str) -> str:
+    """Выгрузить БД обратно в реестр-шаблон (легаси-путь: openpyxl на сервере)."""
+    return write_xlsx(path, registry_rows())
+
+
+def pick_grid(sheets: list[dict]) -> list[list]:
+    """Выбрать лист из [{name, grid}]: «Портфели», иначе тот, где больше всего
+    узнаваемых заголовков. Зеркало _pick_sheet для JSON-гридов из пульта."""
+    if not sheets:
+        return []
+    for s in sheets:
+        if s.get("name") == "Портфели":
+            return s.get("grid") or []
+    title_to_key = {_norm_title(f.title): f.key for f in FIELDS}
+    best, best_n = sheets[0].get("grid") or [], -1
+    for s in sheets:
+        grid = s.get("grid") or []
+        n = 0
+        for row in grid[:10]:
+            n = max(n, sum(1 for c in row if title_to_key.get(_norm_title(c))))
+        if n > best_n:
+            best_n, best = n, grid
+    return best
 
 
 def import_xlsx(path: str) -> dict:
-    """Загрузить выгрузку. Колонки матчатся по заголовку (строка 2) — переживает
-    «сдвиг влево». Upsert: для существующих КД обновляем только пришедшие поля,
-    не затирая назначение/визиты/фото.
-
-    Возвращает отчёт — чтобы было видно ТОЧНО, что вошло:
-    {total_rows, inserted, updated, skipped_no_id, duplicates, unknown_columns}.
-    """
+    """Легаси-обёртка: открыть файл openpyxl-ом и прогнать через import_grid.
+    Пульт этим путём больше не ходит — парсит файл сам (calamine) и шлёт грид
+    в POST /admin/import.json."""
     from openpyxl import load_workbook
-
-    report = {"total_rows": 0, "inserted": 0, "updated": 0,
-              "skipped_no_id": 0, "duplicates": 0, "unknown_columns": []}
 
     title_to_key = {_norm_title(f.title): f.key for f in FIELDS}
     wb = load_workbook(path, read_only=True, data_only=True)
     ws = _pick_sheet(wb, title_to_key)
-    rows = list(ws.iter_rows(values_only=True))
-    if len(rows) < 2:
+    return import_grid(list(ws.iter_rows(values_only=True)))
+
+
+def import_grid(rows: list[list]) -> dict:
+    """Ядро импорта: грид значений листа, источник любой (openpyxl на сервере,
+    calamine в пульте). Колонки матчатся по заголовку — переживает «сдвиг влево».
+    Upsert: для существующих КД обновляем только пришедшие поля, не затирая
+    назначение/визиты/фото.
+
+    Возвращает отчёт — чтобы было видно ТОЧНО, что вошло:
+    {total_rows, inserted, updated, skipped_no_id, duplicates, unknown_columns}.
+    """
+    report = {"total_rows": 0, "inserted": 0, "updated": 0,
+              "skipped_no_id": 0, "duplicates": 0, "unknown_columns": []}
+
+    title_to_key = {_norm_title(f.title): f.key for f in FIELDS}
+    if not rows or len(rows) < 2:
         return report
 
     # Авто-поиск строки заголовков: реальный файл может иметь иную/сдвинутую шапку.
@@ -814,3 +1047,4 @@ def import_xlsx(path: str) -> dict:
         conn.commit()
     _bump_version()   # массовая запись реестра → инвалидируем кэш приоритета
     return report
+
