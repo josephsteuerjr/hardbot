@@ -252,6 +252,11 @@ def _transfer_stats_and_filter(app, file_path: Path, emp_name: str, old_path):
                 ws.range(f"{first_empty}:{last_row}").api.Delete()
         else:
             ws.range(f"{DATA_START_ROW}:{last_row}").api.Delete()
+            first_empty = DATA_START_ROW
+        # как в оригинале Разборка.py: обновить кэш UsedRange + привести строки данных к виду
+        _ = ws.api.UsedRange
+        ws.range(f"{DATA_START_ROW}:{first_empty}").api.WrapText = False
+        ws.range(f"{DATA_START_ROW}:{first_empty}").row_height = 15
     wb.save(); wb.close()
 
 
