@@ -309,6 +309,22 @@ input[type=range]{width:100%;accent-color:var(--accent);margin:0;height:22px}
       </div>
 
       <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h6l2 3h10v12a2 2 0 0 1-2 2H3z"/><path d="M9 14l3-3 3 3"/><path d="M12 11v6"/></svg></span>Разброс по сотрудникам</h2>
+        <p class="desc">Раскладывает мастер-реестр по личным .xlsb сотрудников (по колонке «ответственный Сотрудник»). Файлы делает Excel — сохраняются выпадающие списки и лист «Статистика». Папки !Архив/_tech игнорируются. Сначала «Проверить совпадения», потом «Разложить».</p>
+        <div class="row">
+          <button class="btn" onclick="scatterAddRoot()">＋ Папка страны</button>
+          <button class="btn" onclick="scatterPickMaster()">Мастер-реестр…</button>
+        </div>
+        <div class="kvs" id="scatterRoots" style="margin-top:10px"></div>
+        <div class="small muted" id="scatterMaster" style="margin-top:6px">—</div>
+        <div class="row" style="margin-top:12px">
+          <button class="btn acc" id="scatterDry" onclick="scatterRun(false)">Проверить совпадения</button>
+          <button class="btn" id="scatterApply" onclick="scatterRun(true)">Разложить по папкам</button>
+        </div>
+        <div id="scatterOut" style="margin-top:10px"></div>
+      </div>
+
+      <div class="card">
         <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z"/><circle cx="12" cy="10" r="3"/></svg></span>Геокодинг адресов</h2>
         <p class="desc">Идёт на сервере в фоне. Запускай после импорта, если у части клиентов нет координат.</p>
         <button class="btn" onclick="geocode()">Запустить геокодинг</button>
@@ -672,6 +688,66 @@ async function exportMarkers(){
     toast(p ? "Сохранено: "+p : "Отменено");
   }catch(e){ toast("Ошибка выгрузки: "+(e.message||e),true); }
 }
+
+/* ---- Разброс реестра по сотрудникам (оркестрация razbros.py на стороне пульта) ---- */
+let scatterRoots = [];
+let scatterMaster = "";
+function renderScatterInputs(){
+  $("scatterRoots").innerHTML = scatterRoots.length
+    ? scatterRoots.map((r,i)=>`<div class="kv"><div class="k" style="word-break:break-all">${esc(r)}</div><div class="v"><button class="btn ghost" style="padding:2px 8px" onclick="scatterDelRoot(${i})">✕</button></div></div>`).join("")
+    : `<span class="small muted">папки стран не выбраны</span>`;
+  $("scatterMaster").textContent = scatterMaster ? ("мастер: "+scatterMaster) : "мастер-реестр не выбран";
+}
+function scatterDelRoot(i){ scatterRoots.splice(i,1); renderScatterInputs(); }
+async function scatterAddRoot(){
+  if(!tinvoke){ toast("Разброс доступен только в пульте",true); return; }
+  try{ const p = await tinvoke("pick_folder"); if(p && !scatterRoots.includes(p)){ scatterRoots.push(p); renderScatterInputs(); } }
+  catch(e){ toast("Не выбрать папку: "+(e.message||e),true); }
+}
+async function scatterPickMaster(){
+  if(!tinvoke){ toast("Разброс доступен только в пульте",true); return; }
+  try{ const p = await tinvoke("pick_master"); if(p){ scatterMaster = p; renderScatterInputs(); } }
+  catch(e){ toast("Не выбрать файл: "+(e.message||e),true); }
+}
+function scatterKvs(pairs){
+  return `<div class="kvs">${pairs.map(([k,v])=>`<div class="kv"><div class="k">${esc(k)}</div><div class="v">${fmt(v)}</div></div>`).join("")}</div>`;
+}
+function renderScatterReport(d, apply){
+  if(apply){
+    const skipped = d.skipped||[];
+    let h = scatterKvs([["записано файлов", d.written_count||0],["без папки (пропущено)", skipped.length]]);
+    if(skipped.length) h += `<div class="warnline">Без папки на диске: ${esc(skipped.join(", "))}</div>`;
+    $("scatterOut").innerHTML = h;
+    toast("Разброс готов: "+(d.written_count||0)+" файлов");
+    return;
+  }
+  const c = d.counts||{}, unm = d.unmatched||[], extra = d.extra_folders||[];
+  let h = scatterKvs([
+    ["в мастере сотрудников", d.employees_total||0],
+    ["нашли папку", c.matched||0],
+    ["без папки", c.unmatched||0],
+    ["лишние папки", c.extra||0],
+  ]);
+  if(unm.length) h += `<div class="warnline">Без папки на диске (${unm.length}): ${esc(unm.join(", "))}</div>`;
+  if(extra.length) h += `<div class="small muted" style="margin-top:6px">Папки без строк в мастере: ${esc(extra.join(", "))}</div>`;
+  $("scatterOut").innerHTML = h;
+}
+async function scatterRun(apply){
+  if(!tinvoke){ toast("Разброс доступен только в пульте",true); return; }
+  if(!scatterRoots.length){ toast("Выбери хотя бы одну папку страны",true); return; }
+  if(!scatterMaster){ toast("Выбери мастер-реестр",true); return; }
+  if(apply && !confirm("Разложить реестр по личным файлам сотрудников?\nСуществующие файлы будут перезаписаны (лист «Статистика» переносится). Делает Excel — может занять время.")) return;
+  const btn = apply ? $("scatterApply") : $("scatterDry");
+  btn.disabled = true;
+  $("scatterOut").innerHTML = `<div class="small muted">${apply?"Раскладываю через Excel…":"Проверяю совпадения…"}</div>`;
+  try{
+    const d = await tinvoke("run_razbros",{roots:scatterRoots, master:scatterMaster, apply});
+    if(d && d.ok===false){ $("scatterOut").innerHTML = `<div class="warnline">${esc(d.error||"ошибка")}</div>`; return; }
+    renderScatterReport(d, apply);
+  }catch(e){ $("scatterOut").innerHTML = `<div class="warnline">Ошибка: ${esc(String(e.message||e))}</div>`; }
+  finally{ btn.disabled = false; }
+}
+renderScatterInputs();
 
 /* фолбэк для браузера без Tauri */
 async function download(path,name){

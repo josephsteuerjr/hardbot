@@ -12,6 +12,8 @@ use rust_xlsxwriter::{Color, ExcelDateTime, Format, FormatAlign, Workbook, XlsxE
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::io::Cursor;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 // ---------- чтение: файл → гриды листов (для POST /admin/import.json) ----------
 
@@ -297,12 +299,102 @@ fn save_markers_xlsx(rows: Vec<Map<String, Value>>) -> Result<Option<String>, St
     Ok(Some(path.display().to_string()))
 }
 
+// ---------- разброс реестра по сотрудникам (оркестрация razbros.py) ----------
+// Сама раскладка в .xlsb (со списками и «Статистикой») — на Excel/COM внутри
+// razbros.py; пульт лишь даёт выбор папок/мастера, превью совпадений и запуск.
+
+/// Ищем razbros.py: сперва бандл-ресурс, затем рядом с exe и в cwd (для `tauri dev`).
+fn find_razbros(app: &tauri::AppHandle) -> Option<PathBuf> {
+    use tauri::Manager;
+    if let Ok(p) = app.path().resolve("razbros.py", tauri::path::BaseDirectory::Resource) {
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let mut cands: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for up in ["razbros.py", "../razbros.py", "../../razbros.py", "../../../razbros.py"] {
+                cands.push(dir.join(up));
+            }
+        }
+    }
+    cands.push(PathBuf::from("razbros.py"));
+    cands.push(PathBuf::from("../razbros.py"));
+    cands.into_iter().find(|p| p.exists())
+}
+
+/// Запуск `python razbros.py …` и разбор JSON-ответа из stdout (диагностика — в stderr).
+/// UTF-8 форсируем через env, иначе Windows отдаёт stdout в cp1251.
+fn run_razbros_core(
+    script: &Path,
+    roots: &[String],
+    master: Option<&str>,
+    apply: bool,
+) -> Result<Value, String> {
+    let mut last_spawn_err = String::new();
+    for py in ["python", "py", "python3"] {
+        let mut cmd = Command::new(py);
+        cmd.arg(script);
+        for r in roots {
+            cmd.arg("--root").arg(r);
+        }
+        if let Some(m) = master {
+            cmd.arg("--master").arg(m);
+        }
+        cmd.arg(if apply { "--apply" } else { "--dry-run" });
+        cmd.env("PYTHONUTF8", "1").env("PYTHONIOENCODING", "utf-8");
+        match cmd.output() {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let line = stdout.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+                return serde_json::from_str::<Value>(line).map_err(|e| {
+                    format!("не разобрал ответ razbros: {e}\nstdout: {stdout}\nstderr: {stderr}")
+                });
+            }
+            Err(e) => {
+                last_spawn_err = format!("{py}: {e}");
+                continue; // пробуем следующий интерпретатор
+            }
+        }
+    }
+    Err(format!("не удалось запустить Python ({last_spawn_err}). Установлен ли Python?"))
+}
+
+#[tauri::command]
+fn pick_folder() -> Option<String> {
+    rfd::FileDialog::new().pick_folder().map(|p| p.display().to_string())
+}
+
+#[tauri::command]
+fn pick_master() -> Option<String> {
+    rfd::FileDialog::new()
+        .add_filter("Мастер-реестр", &["xlsb", "xlsx", "xlsm", "xls"])
+        .pick_file()
+        .map(|p| p.display().to_string())
+}
+
+#[tauri::command]
+fn run_razbros(
+    app: tauri::AppHandle,
+    roots: Vec<String>,
+    master: Option<String>,
+    apply: bool,
+) -> Result<Value, String> {
+    let script = find_razbros(&app).ok_or_else(|| "рядом с пультом не найден razbros.py".to_string())?;
+    run_razbros_core(&script, &roots, master.as_deref(), apply)
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             parse_workbook,
             save_registry_xlsx,
-            save_markers_xlsx
+            save_markers_xlsx,
+            pick_folder,
+            pick_master,
+            run_razbros
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -385,5 +477,31 @@ mod tests {
         assert_eq!(parse_date("12.06.26"), Some((2026, 6, 12)));
         assert_eq!(parse_date("2026-06-12 00:00:00"), Some((2026, 6, 12)));
         assert_eq!(parse_date("июнь"), None);
+    }
+
+    // Интеграция Rust→python на реальном слепке. #[ignore]: нужен установленный Python
+    // и локальная папка «Скрипт СНГ/Путь» (в git её нет — только ПД-безопасные скрипты).
+    // Запуск: cargo test -- --ignored razbros_dry_run
+    #[test]
+    #[ignore]
+    fn razbros_dry_run_over_slepok() {
+        let script = Path::new("../razbros.py");
+        let base = "../../Скрипт СНГ/Путь";
+        let roots = vec![
+            format!("{base}/Таджикистан/Портфели отдела взыскания РТ"),
+            format!("{base}/Узбекистан/Портфели сотрудников УЗБ"),
+        ];
+        if !script.exists() || !Path::new(&roots[0]).exists() {
+            eprintln!("пропуск: нет razbros.py или слепка");
+            return;
+        }
+        // без --master → отчёт с картой папок
+        let v = run_razbros_core(script, &roots, None, false).expect("razbros должен ответить JSON");
+        assert_eq!(v["ok"], json!(true));
+        let indexed = v["folders_indexed"].as_i64().unwrap_or(0);
+        assert!(indexed > 0, "ожидали проиндексированные папки, got {v}");
+        // !Архив не должен просочиться в имена сотрудников
+        let emps = v["employees_with_folder"].as_array().cloned().unwrap_or_default();
+        assert!(emps.iter().all(|e| !e.as_str().unwrap_or("").starts_with('!')));
     }
 }
