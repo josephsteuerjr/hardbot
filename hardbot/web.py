@@ -647,6 +647,19 @@ async def _admin_restart(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "restarting": True})
 
 
+async def _admin_reset(request: web.Request) -> web.Response:
+    """Очистка данных для пульта. {scope:"visits"} — сброс полей визитов у всех клиентов
+    (новая сессия, портфель остаётся); {scope:"all"} — полное удаление реестра под свежий
+    импорт (привязки сотрудников сохраняются). Оба — под ADMIN_API_KEY."""
+    _admin(request)
+    scope = (await request.json()).get("scope")
+    if scope == "all":
+        return web.json_response(db.wipe_registry())
+    if scope == "visits":
+        return web.json_response(db.reset_visits())
+    raise web.HTTPBadRequest(text="scope: 'visits' | 'all'")
+
+
 @web.middleware
 async def _cors(request: web.Request, handler):
     if request.method == "OPTIONS":
@@ -682,6 +695,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/admin/priority", _admin_priority)
     app.router.add_get("/admin/activity", _admin_activity)
     app.router.add_post("/admin/restart", _admin_restart)
+    app.router.add_post("/admin/reset", _admin_reset)
     app.router.add_get("/admin/period", _admin_period)
     app.router.add_post("/admin/period", _admin_period)
     app.router.add_get("/tiles/basemap.pmtiles", _tiles)

@@ -1048,3 +1048,39 @@ def import_grid(rows: list[list]) -> dict:
     _bump_version()   # массовая запись реестра → инвалидируем кэш приоритета
     return report
 
+
+# Поля, которые заполняет ВЫЕЗД (форма миниаппа + служебные визита). Сбрасываются при
+# «очистке сессии», не трогая источник: долги, адрес, назначение (responsible), гео, период.
+VISIT_FILL_COLUMNS = [
+    "call_status", "contact_with", "who_at_address", "client_location",
+    "purpose_rf", "agreed_payment", "call_comment", "tips",
+    "visit_date", "visit_comment", "meeting_date", "overall_result", "reminder_date",
+]
+
+
+def reset_visits() -> dict:
+    """Сброс данных визитов у ВСЕХ клиентов (новая сессия на том же портфеле): поля
+    формы + служебные визита в NULL, счётчики фото/визитов в 0. Клиенты, долги, адреса,
+    закрепление (responsible), гео, период, привязки сотрудников, история visits — целы."""
+    sets = ", ".join(f'"{c}"=NULL' for c in VISIT_FILL_COLUMNS)
+    with connect() as conn:
+        n = conn.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
+        conn.execute(f"UPDATE clients SET {sets}, photos_count=0, visits_count=0")
+        conn.commit()
+    _bump_version()
+    return {"ok": True, "scope": "visits", "clients_reset": n}
+
+
+def wipe_registry() -> dict:
+    """Полная очистка реестра под свежий импорт: удалить всех клиентов, историю визитов
+    и метки. Привязки сотрудников (agent_bind), настройки (settings) и период — СОХРАНЯЮТСЯ,
+    чтобы после нового импорта сотрудники сразу видели своих клиентов без повторной привязки."""
+    with connect() as conn:
+        n = conn.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
+        conn.execute("DELETE FROM clients")
+        conn.execute("DELETE FROM visits")
+        conn.execute("DELETE FROM markers")
+        conn.commit()
+    _bump_version()
+    return {"ok": True, "scope": "all", "clients_removed": n}
+

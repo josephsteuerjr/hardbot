@@ -325,6 +325,16 @@ input[type=range]{width:100%;accent-color:var(--accent);margin:0;height:22px}
       </div>
 
       <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg></span>Очистка данных</h2>
+        <p class="desc"><b>Сброс визитов</b> — обнуляет заполненное выездами (статусы, комментарии, дата визита, фото), оставляя клиентов, долги и закрепление за сотрудником: новая сессия на том же портфеле. <b>Полная очистка</b> — удаляет всех клиентов, визиты и метки под свежий импорт (привязки сотрудников сохраняются).</p>
+        <div class="row">
+          <button class="btn" id="btnresetv" onclick="resetData('visits')">Сбросить данные визитов</button>
+          <button class="btn danger" id="btnresetall" onclick="resetData('all')">Полностью очистить реестр</button>
+        </div>
+        <div class="small muted" id="resetOut" style="margin-top:8px"></div>
+      </div>
+
+      <div class="card">
         <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z"/><circle cx="12" cy="10" r="3"/></svg></span>Геокодинг адресов</h2>
         <p class="desc">Идёт на сервере в фоне. Запускай после импорта, если у части клиентов нет координат.</p>
         <button class="btn" onclick="geocode()">Запустить геокодинг</button>
@@ -748,6 +758,29 @@ async function scatterRun(apply){
   finally{ btn.disabled = false; }
 }
 renderScatterInputs();
+
+/* ---- Очистка данных (сброс визитов / полная) через admin-API ---- */
+async function resetData(scope){
+  const msg = scope==="all"
+    ? "ПОЛНОСТЬЮ очистить реестр?\nУдалятся ВСЕ клиенты, визиты и метки (привязки сотрудников останутся). Обычно — перед свежим импортом."
+    : "Сбросить данные визитов у всех клиентов?\nОбнулятся статусы, комментарии, даты визита и фото. Клиенты, долги и закрепление за сотрудником останутся.";
+  if(!confirm(msg)) return;
+  if(scope==="all" && !confirm("Точно? Клиенты удалятся без возможности отката (только новый импорт вернёт).")) return;
+  const btn = scope==="all" ? $("btnresetall") : $("btnresetv");
+  btn.disabled = true;
+  try{
+    const r = await fetch(base()+"/admin/reset",{method:"POST",
+      headers:{...hdr(),"Content-Type":"application/json"}, body:JSON.stringify({scope})});
+    if(r.status===404){ toast("Сервер ещё старый — нет /admin/reset",true); return; }
+    if(!r.ok){ toast("Ошибка очистки: "+r.status,true); return; }
+    const d = await r.json();
+    const txt = scope==="all"
+      ? `Реестр очищен · было клиентов: ${fmt(d.clients_removed)}`
+      : `Данные визитов сброшены · клиентов: ${fmt(d.clients_reset)}`;
+    $("resetOut").textContent = txt; toast(txt); refresh();
+  }catch(e){ toast("Ошибка очистки: "+(e.message||e),true); }
+  finally{ btn.disabled = false; }
+}
 
 /* фолбэк для браузера без Tauri */
 async function download(path,name){
