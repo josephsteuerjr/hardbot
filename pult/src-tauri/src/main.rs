@@ -303,18 +303,44 @@ fn save_markers_xlsx(rows: Vec<Map<String, Value>>) -> Result<Option<String>, St
 // Сама раскладка в .xlsb (со списками и «Статистикой») — на Excel/COM внутри
 // razbros.py; пульт лишь даёт выбор папок/мастера, превью совпадений и запуск.
 
-/// Ищем razbros.py: сперва бандл-ресурс, затем рядом с exe и в cwd (для `tauri dev`).
-fn find_razbros(app: &tauri::AppHandle) -> Option<PathBuf> {
+/// Ищем ресурс, залитый в бандл. Tauri кладёт ресурс, заданный как «../имя», под
+/// `resources/_up_/имя` — поэтому проверяем и голое имя, и `_up_`-варианты (resolve и
+/// напрямую по resource_dir). Возвращает первый существующий путь.
+fn find_resource(app: &tauri::AppHandle, rels: &[&str]) -> Option<PathBuf> {
     use tauri::Manager;
-    if let Ok(p) = app.path().resolve("razbros.py", tauri::path::BaseDirectory::Resource) {
-        if p.exists() {
-            return Some(p);
+    for rel in rels {
+        if let Ok(p) = app.path().resolve(rel, tauri::path::BaseDirectory::Resource) {
+            if p.exists() {
+                return Some(p);
+            }
         }
+    }
+    if let Ok(rd) = app.path().resource_dir() {
+        for rel in rels {
+            let p = rd.join(rel);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Ищем razbros.py: сперва бандл-ресурс (в т.ч. `_up_`), затем рядом с exe и в cwd (`tauri dev`).
+fn find_razbros(app: &tauri::AppHandle) -> Option<PathBuf> {
+    if let Some(p) = find_resource(app, &["razbros.py", "_up_/razbros.py"]) {
+        return Some(p);
     }
     let mut cands: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            for up in ["razbros.py", "../razbros.py", "../../razbros.py", "../../../razbros.py"] {
+            for up in [
+                "razbros.py",
+                "_up_/razbros.py",
+                "../razbros.py",
+                "../../razbros.py",
+                "../../../razbros.py",
+            ] {
                 cands.push(dir.join(up));
             }
         }
@@ -324,23 +350,62 @@ fn find_razbros(app: &tauri::AppHandle) -> Option<PathBuf> {
     cands.into_iter().find(|p| p.exists())
 }
 
+/// Ищем конфиг республик в бандле (в т.ч. `_up_/_up_`), рядом с exe и вверх по дереву.
+/// Не нашли — не беда: у razbros есть встроенный дефолт республик.
+fn find_config(app: &tauri::AppHandle) -> Option<PathBuf> {
+    const NAME: &str = "конфигурация путей.json";
+    if let Some(p) = find_resource(app, &[NAME, "_up_/_up_/конфигурация путей.json"]) {
+        return Some(p);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for up in [
+                NAME,
+                "_up_/_up_/конфигурация путей.json",
+                "../конфигурация путей.json",
+                "../../конфигурация путей.json",
+                "../../../конфигурация путей.json",
+            ] {
+                let p = dir.join(up);
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Запуск `python razbros.py …` и разбор JSON-ответа из stdout (диагностика — в stderr).
 /// UTF-8 форсируем через env, иначе Windows отдаёт stdout в cp1251.
+#[allow(clippy::too_many_arguments)]
 fn run_razbros_core(
     script: &Path,
+    base: Option<&str>,
     roots: &[String],
-    master: Option<&str>,
+    config: Option<&str>,
+    source: Option<&str>,
+    only: &[String],
     apply: bool,
 ) -> Result<Value, String> {
     let mut last_spawn_err = String::new();
     for py in ["python", "py", "python3"] {
         let mut cmd = Command::new(py);
         cmd.arg(script);
+        if let Some(b) = base {
+            cmd.arg("--base").arg(b);
+        }
         for r in roots {
             cmd.arg("--root").arg(r);
         }
-        if let Some(m) = master {
-            cmd.arg("--master").arg(m);
+        if let Some(c) = config {
+            cmd.arg("--config").arg(c);
+        }
+        if let Some(s) = source {
+            cmd.arg("--source").arg(s);
+        }
+        for o in only {
+            cmd.arg("--only").arg(o);
         }
         cmd.arg(if apply { "--apply" } else { "--dry-run" });
         cmd.env("PYTHONUTF8", "1").env("PYTHONIOENCODING", "utf-8");
@@ -368,22 +433,34 @@ fn pick_folder() -> Option<String> {
 }
 
 #[tauri::command]
-fn pick_master() -> Option<String> {
+fn pick_source() -> Option<String> {
     rfd::FileDialog::new()
-        .add_filter("Мастер-реестр", &["xlsb", "xlsx", "xlsm", "xls"])
+        .add_filter("Экспорт кейсов", &["xlsb", "xlsx", "xlsm", "xls"])
         .pick_file()
         .map(|p| p.display().to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 fn run_razbros(
     app: tauri::AppHandle,
+    base: Option<String>,
     roots: Vec<String>,
-    master: Option<String>,
+    source: Option<String>,
+    only: Vec<String>,
     apply: bool,
 ) -> Result<Value, String> {
     let script = find_razbros(&app).ok_or_else(|| "рядом с пультом не найден razbros.py".to_string())?;
-    run_razbros_core(&script, &roots, master.as_deref(), apply)
+    let config = find_config(&app);
+    run_razbros_core(
+        &script,
+        base.as_deref(),
+        &roots,
+        config.as_deref().and_then(|p| p.to_str()),
+        source.as_deref(),
+        &only,
+        apply,
+    )
 }
 
 fn main() {
@@ -393,7 +470,7 @@ fn main() {
             save_registry_xlsx,
             save_markers_xlsx,
             pick_folder,
-            pick_master,
+            pick_source,
             run_razbros
         ])
         .run(tauri::generate_context!())
@@ -486,17 +563,14 @@ mod tests {
     #[ignore]
     fn razbros_dry_run_over_slepok() {
         let script = Path::new("../razbros.py");
-        let base = "../../Скрипт СНГ/Путь";
-        let roots = vec![
-            format!("{base}/Таджикистан/Портфели отдела взыскания РТ"),
-            format!("{base}/Узбекистан/Портфели сотрудников УЗБ"),
-        ];
-        if !script.exists() || !Path::new(&roots[0]).exists() {
+        let base = "../../Скрипт СНГ/Путь";                // в нём папки республик
+        if !script.exists() || !Path::new(base).exists() {
             eprintln!("пропуск: нет razbros.py или слепка");
             return;
         }
-        // без --master → отчёт с картой папок
-        let v = run_razbros_core(script, &roots, None, false).expect("razbros должен ответить JSON");
+        // --base + встроенный конфиг республик, без --source → отчёт с картой папок
+        let v = run_razbros_core(script, Some(base), &[], None, None, &[], false)
+            .expect("razbros должен ответить JSON");
         assert_eq!(v["ok"], json!(true));
         let indexed = v["folders_indexed"].as_i64().unwrap_or(0);
         assert!(indexed > 0, "ожидали проиндексированные папки, got {v}");

@@ -151,6 +151,14 @@ td .why{font-size:12px;color:var(--muted)}
 .kv .v{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
 .warnline{margin-top:10px;font-size:12px;color:var(--warn)}
 
+/* ---------- разброс: поимённый список ---------- */
+.sclist{margin-top:8px;max-height:260px;overflow:auto;border:1px solid var(--border);border-radius:9px}
+.scrow{display:flex;align-items:center;gap:9px;padding:6px 11px;cursor:pointer;border-bottom:1px solid var(--border)}
+.scrow:last-child{border-bottom:none}
+.scrow:hover{background:var(--alt)}
+.scrow input{margin:0;flex:none}
+.scrow .scname{font-size:13px;font-weight:500;flex:1}
+
 /* ---------- приоритет ---------- */
 .weights{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:16px;align-items:end}
 .w label{display:block;font-size:12px;font-weight:500;color:var(--muted);margin-bottom:6px}
@@ -309,19 +317,25 @@ input[type=range]{width:100%;accent-color:var(--accent);margin:0;height:22px}
       </div>
 
       <div class="card">
-        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h6l2 3h10v12a2 2 0 0 1-2 2H3z"/><path d="M9 14l3-3 3 3"/><path d="M12 11v6"/></svg></span>Разброс по сотрудникам</h2>
-        <p class="desc">Раскладывает мастер-реестр по личным .xlsb сотрудников (по колонке «ответственный Сотрудник»). Файлы делает Excel — сохраняются выпадающие списки и лист «Статистика». Папки !Архив/_tech игнорируются. Сначала «Проверить совпадения», потом «Разложить».</p>
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h6l2 3h10v12a2 2 0 0 1-2 2H3z"/><path d="M9 14l3-3 3 3"/><path d="M12 11v6"/></svg></span>Разброс кейсов по сотрудникам</h2>
+        <p class="desc">Раскладывает <b>экспорт кейсов</b> (формат «Хард») по личным .xlsb сотрудников — каждому его строки по колонке «ответственный Сотрудник». Папки берутся по маске <b>Республика / … / Город / ФИО / ФИО.xlsb</b> из выбранной <b>базовой папки</b> (в ней лежат республики) — диск целиком не сканируется. Файлы делает Excel: сохраняются списки «Статусы» и личная «Статистика», !Архив/_tech игнорируются. Мастер-реестр не нужен.</p>
         <div class="row">
-          <button class="btn" onclick="scatterAddRoot()">＋ Папка страны</button>
-          <button class="btn" onclick="scatterPickMaster()">Мастер-реестр…</button>
+          <button class="btn" onclick="scatterPickBase()">Папка с республиками…</button>
+          <button class="btn" onclick="scatterPickSource()">Экспорт кейсов…</button>
+          <button class="btn ghost" onclick="scatterAddRoot()">＋ прямая папка</button>
         </div>
-        <div class="kvs" id="scatterRoots" style="margin-top:10px"></div>
-        <div class="small muted" id="scatterMaster" style="margin-top:6px">—</div>
+        <div class="small muted" id="scatterBase" style="margin-top:8px">—</div>
+        <div class="small muted" id="scatterSource" style="margin-top:4px">—</div>
+        <div class="kvs" id="scatterRoots" style="margin-top:8px"></div>
         <div class="row" style="margin-top:12px">
-          <button class="btn acc" id="scatterDry" onclick="scatterRun(false)">Проверить совпадения</button>
-          <button class="btn" id="scatterApply" onclick="scatterRun(true)">Разложить по папкам</button>
+          <button class="btn acc" id="scatterDry" onclick="scatterRun(false,'all')">Проверить совпадения</button>
         </div>
         <div id="scatterOut" style="margin-top:10px"></div>
+        <div id="scatterPick" style="margin-top:10px"></div>
+        <div class="row" id="scatterApplyRow" style="margin-top:12px; display:none">
+          <button class="btn" id="scatterApplyAll" onclick="scatterRun(true,'all')">Разложить всех</button>
+          <button class="btn acc" id="scatterApplySel" onclick="scatterRun(true,'selected')">Разложить выбранных (<span id="scatterSelN">0</span>)</button>
+        </div>
       </div>
 
       <div class="card">
@@ -715,28 +729,68 @@ async function exportMarkers(){
   }catch(e){ toast("Ошибка выгрузки: "+(e.message||e),true); }
 }
 
-/* ---- Разброс реестра по сотрудникам (оркестрация razbros.py на стороне пульта) ---- */
-let scatterRoots = [];
-let scatterMaster = "";
+/* ---- Разброс кейсов по сотрудникам (оркестрация razbros.py на стороне пульта) ---- */
+let scatterBase   = store.getItem("scatterBase") || "";
+let scatterSource = store.getItem("scatterSource") || "";
+let scatterRoots  = [];
+let scatterMatched = [];                 // сотрудники из последнего dry-run
+const scatterSelected = new Set();       // поимённый выбор (копится между проверками)
+
 function renderScatterInputs(){
+  $("scatterBase").textContent   = scatterBase ? ("база: "+scatterBase) : "базовая папка не выбрана";
+  $("scatterSource").textContent = scatterSource ? ("экспорт: "+scatterSource) : "файл экспорта не выбран";
   $("scatterRoots").innerHTML = scatterRoots.length
-    ? scatterRoots.map((r,i)=>`<div class="kv"><div class="k" style="word-break:break-all">${esc(r)}</div><div class="v"><button class="btn ghost" style="padding:2px 8px" onclick="scatterDelRoot(${i})">✕</button></div></div>`).join("")
-    : `<span class="small muted">папки стран не выбраны</span>`;
-  $("scatterMaster").textContent = scatterMaster ? ("мастер: "+scatterMaster) : "мастер-реестр не выбран";
+    ? scatterRoots.map((r,i)=>`<div class="kv"><div class="k" style="word-break:break-all">прямая папка: ${esc(r)}</div><div class="v"><button class="btn ghost" style="padding:2px 8px" onclick="scatterDelRoot(${i})">✕</button></div></div>`).join("")
+    : "";
 }
 function scatterDelRoot(i){ scatterRoots.splice(i,1); renderScatterInputs(); }
+async function scatterPickBase(){
+  if(!tinvoke){ toast("Разброс доступен только в пульте",true); return; }
+  try{ const p = await tinvoke("pick_folder"); if(p){ scatterBase=p; store.setItem("scatterBase",p); renderScatterInputs(); } }
+  catch(e){ toast("Не выбрать папку: "+(e.message||e),true); }
+}
 async function scatterAddRoot(){
   if(!tinvoke){ toast("Разброс доступен только в пульте",true); return; }
   try{ const p = await tinvoke("pick_folder"); if(p && !scatterRoots.includes(p)){ scatterRoots.push(p); renderScatterInputs(); } }
   catch(e){ toast("Не выбрать папку: "+(e.message||e),true); }
 }
-async function scatterPickMaster(){
+async function scatterPickSource(){
   if(!tinvoke){ toast("Разброс доступен только в пульте",true); return; }
-  try{ const p = await tinvoke("pick_master"); if(p){ scatterMaster = p; renderScatterInputs(); } }
+  try{ const p = await tinvoke("pick_source"); if(p){ scatterSource=p; store.setItem("scatterSource",p); renderScatterInputs(); } }
   catch(e){ toast("Не выбрать файл: "+(e.message||e),true); }
 }
 function scatterKvs(pairs){
   return `<div class="kvs">${pairs.map(([k,v])=>`<div class="kv"><div class="k">${esc(k)}</div><div class="v">${fmt(v)}</div></div>`).join("")}</div>`;
+}
+function scatterSelN(){ return scatterMatched.filter(m=>scatterSelected.has(m.employee.toLowerCase())).length; }
+function updateScatterSelN(){
+  const n = scatterSelN();
+  $("scatterSelN").textContent = n;
+  $("scatterApplySel").disabled = n===0;
+}
+function scatterToggle(nameLower, on){
+  if(on) scatterSelected.add(nameLower); else scatterSelected.delete(nameLower);
+  updateScatterSelN();
+}
+function scatterCheckAll(on){
+  scatterMatched.forEach(m=>{ const k=m.employee.toLowerCase(); if(on) scatterSelected.add(k); else scatterSelected.delete(k); });
+  renderScatterPicklist(); updateScatterSelN();
+}
+function renderScatterPicklist(){
+  if(!scatterMatched.length){ $("scatterPick").innerHTML=""; return; }
+  const rows = scatterMatched.map(m=>{
+    const k = m.employee.toLowerCase(), on = scatterSelected.has(k);
+    const where = [...(m.republics||[]), ...(m.cities||[])].filter(Boolean).join(" · ");
+    return `<label class="scrow"><input type="checkbox" ${on?"checked":""} onchange="scatterToggle('${esc(k).replace(/'/g,"\\'")}', this.checked)">
+      <span class="scname">${esc(m.employee)}</span><span class="small muted">${esc(where)}</span></label>`;
+  }).join("");
+  $("scatterPick").innerHTML =
+    `<div class="row" style="justify-content:space-between;align-items:center">
+       <div class="small muted">Выбор поимённо (для «Разложить выбранных»):</div>
+       <div><button class="btn ghost sm" onclick="scatterCheckAll(true)">все</button>
+            <button class="btn ghost sm" onclick="scatterCheckAll(false)">снять</button></div>
+     </div>
+     <div class="sclist">${rows}</div>`;
 }
 function renderScatterReport(d, apply){
   if(apply){
@@ -748,28 +802,39 @@ function renderScatterReport(d, apply){
     return;
   }
   const c = d.counts||{}, unm = d.unmatched||[], extra = d.extra_folders||[];
+  scatterMatched = d.matched||[];
   let h = scatterKvs([
-    ["в мастере сотрудников", d.employees_total||0],
+    ["в экспорте сотрудников", d.employees_total||0],
     ["нашли папку", c.matched||0],
     ["без папки", c.unmatched||0],
     ["лишние папки", c.extra||0],
   ]);
   if(unm.length) h += `<div class="warnline">Без папки на диске (${unm.length}): ${esc(unm.join(", "))}</div>`;
-  if(extra.length) h += `<div class="small muted" style="margin-top:6px">Папки без строк в мастере: ${esc(extra.join(", "))}</div>`;
+  if(extra.length) h += `<div class="small muted" style="margin-top:6px">Папки без строк в экспорте: ${esc(extra.join(", "))}</div>`;
   $("scatterOut").innerHTML = h;
+  renderScatterPicklist();
+  $("scatterApplyRow").style.display = scatterMatched.length ? "" : "none";
+  updateScatterSelN();
 }
-async function scatterRun(apply){
+async function scatterRun(apply, which){
   if(!tinvoke){ toast("Разброс доступен только в пульте",true); return; }
-  if(!scatterRoots.length){ toast("Выбери хотя бы одну папку страны",true); return; }
-  if(!scatterMaster){ toast("Выбери мастер-реестр",true); return; }
-  if(apply && !confirm("Разложить реестр по личным файлам сотрудников?\nСуществующие файлы будут перезаписаны (лист «Статистика» переносится). Делает Excel — может занять время.")) return;
-  const btn = apply ? $("scatterApply") : $("scatterDry");
+  if(!scatterBase && !scatterRoots.length){ toast("Выбери базовую папку (или прямую папку)",true); return; }
+  if(!scatterSource){ toast("Выбери файл экспорта кейсов",true); return; }
+  const only = (apply && which==="selected")
+    ? scatterMatched.filter(m=>scatterSelected.has(m.employee.toLowerCase())).map(m=>m.employee)
+    : [];
+  if(apply && which==="selected" && !only.length){ toast("Никто не выбран",true); return; }
+  if(apply){
+    const who = which==="selected" ? `выбранным (${only.length})` : "ВСЕМ найденным";
+    if(!confirm(`Разложить кейсы по личным файлам — ${who}?\nЛичные .xlsb будут перезаписаны свежими строками (личная «Статистика» переносится). Делает Excel — может занять время.`)) return;
+  }
+  const btn = !apply ? $("scatterDry") : (which==="selected" ? $("scatterApplySel") : $("scatterApplyAll"));
   btn.disabled = true;
   $("scatterOut").innerHTML = `<div class="small muted">${apply?"Раскладываю через Excel…":"Проверяю совпадения…"}</div>`;
   try{
-    const d = await tinvoke("run_razbros",{roots:scatterRoots, master:scatterMaster, apply});
+    const d = await tinvoke("run_razbros",{base:scatterBase||null, roots:scatterRoots, source:scatterSource, only, apply});
     if(d && d.ok===false){ $("scatterOut").innerHTML = `<div class="warnline">${esc(d.error||"ошибка")}</div>`; return; }
-    renderScatterReport(d, apply);
+    renderScatterReport(d, apply);   // раскладка не трогает сервер — сводку не обновляем
   }catch(e){ $("scatterOut").innerHTML = `<div class="warnline">Ошибка: ${esc(String(e.message||e))}</div>`; }
   finally{ btn.disabled = false; }
 }
