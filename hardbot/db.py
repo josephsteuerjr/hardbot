@@ -6,6 +6,7 @@
 и таблица `visits` — история выездов (кнопка «История» в карточке).
 """
 
+import json
 import os
 import re
 import sqlite3
@@ -159,6 +160,20 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS settings (
               key TEXT PRIMARY KEY,
               value TEXT
+            )
+        """)
+        # Руководители (дайджест). Роль задаётся из пульта: telegram_id →
+        # набор городов (ярлык-подпись, свободный ввод) + набор сотрудников
+        # (ФИО из clients.responsible — источник правды «кого показывать»).
+        # cities/employees — JSON-массивы строк. Один руководитель = 1..N городов
+        # и 1..N сотрудников (Тадж «один на 2 города» — штатно, без хардкода).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS managers (
+              telegram_id INTEGER PRIMARY KEY,
+              name TEXT,
+              cities TEXT,
+              employees TEXT,
+              created_at TEXT
             )
         """)
         conn.commit()
@@ -396,6 +411,120 @@ def set_setting(key: str, value: str) -> None:
             (key, str(value)),
         )
         conn.commit()
+
+
+# --- Руководители (роль дайджеста) ------------------------------------------
+def _json_list(s) -> list[str]:
+    """Разобрать JSON-массив строк из БД в list[str]; мусор → []."""
+    try:
+        v = json.loads(s) if s else []
+    except (ValueError, TypeError):
+        return []
+    return [str(x).strip() for x in v if str(x).strip()] if isinstance(v, list) else []
+
+
+def _manager_dict(r: sqlite3.Row) -> dict:
+    return {"telegram_id": r["telegram_id"], "name": r["name"] or "",
+            "cities": _json_list(r["cities"]), "employees": _json_list(r["employees"])}
+
+
+def set_manager(telegram_id: int, name: str, cities: list[str],
+                employees: list[str]) -> None:
+    """Создать/обновить руководителя (upsert по telegram_id). cities — ярлык-подпись
+    (свободный ввод), employees — ФИО из реестра (кого он видит в дайджесте)."""
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO managers (telegram_id, name, cities, employees, created_at) "
+            "VALUES (?,?,?,?,?) "
+            "ON CONFLICT(telegram_id) DO UPDATE SET "
+            "name=excluded.name, cities=excluded.cities, employees=excluded.employees",
+            (telegram_id, (name or "").strip(),
+             json.dumps(list(cities or []), ensure_ascii=False),
+             json.dumps(list(employees or []), ensure_ascii=False),
+             date.today().isoformat()),
+        )
+        conn.commit()
+
+
+def get_manager(telegram_id: int) -> dict | None:
+    with connect() as conn:
+        r = conn.execute("SELECT * FROM managers WHERE telegram_id = ?",
+                         (telegram_id,)).fetchone()
+    return _manager_dict(r) if r else None
+
+
+def list_managers() -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM managers ORDER BY (name IS NULL OR name=''), name, telegram_id"
+        ).fetchall()
+    return [_manager_dict(r) for r in rows]
+
+
+def delete_manager(telegram_id: int) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM managers WHERE telegram_id = ?", (telegram_id,))
+        conn.commit()
+
+
+def is_manager(telegram_id: int) -> bool:
+    with connect() as conn:
+        return conn.execute("SELECT 1 FROM managers WHERE telegram_id = ?",
+                            (telegram_id,)).fetchone() is not None
+
+
+def cities_in_registry() -> list[dict]:
+    """Города из реестра (clients.city) с числом клиентов — для мультивыбора в пульте.
+    Часто пуст (city — HARD-поле, его заполняет выездник), поэтому пульт даёт и свободный ввод."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT TRIM(city) c, COUNT(*) n FROM clients "
+            "WHERE city IS NOT NULL AND TRIM(city) <> '' GROUP BY TRIM(city) ORDER BY n DESC, c"
+        ).fetchall()
+    return [{"name": r["c"], "count": r["n"]} for r in rows]
+
+
+def city_employees() -> dict[str, list[str]]:
+    """Карта город → сотрудники, у кого есть клиенты в этом городе (подсказка в пульте:
+    отметил город — предложили его команду). Работает только там, где city заполнен."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT TRIM(city) c, responsible FROM clients "
+            "WHERE city IS NOT NULL AND TRIM(city) <> '' "
+            "AND responsible IS NOT NULL AND TRIM(responsible) <> '' "
+            "GROUP BY TRIM(city), responsible"
+        ).fetchall()
+    out: dict[str, set] = {}
+    for r in rows:
+        out.setdefault(r["c"], set()).add(r["responsible"])
+    return {c: sorted(v) for c, v in out.items()}
+
+
+def employee_activity(employee: str) -> dict | None:
+    """Метрики активности сотрудника (визиты/метки 7/30д, простой) — если он привязан
+    к telegram (agent_bind). Не привязан → None (телеметрии нет). Тонкая обёртка над
+    activity_stats для карточки сотрудника в дайджесте."""
+    for w in activity_stats():
+        if w["employee"] == employee:
+            return w
+    return None
+
+
+def persons_processed(employee: str, on_date: str) -> list[dict]:
+    """Люди сотрудника, у кого выезд состоялся в дату on_date (ISO). Сигнал —
+    clients.visit_date (его ставит миниапп при завершении визита). Возвращает
+    сгруппированных людей (как persons_for_employee), но только обработанных в этот день."""
+    target = _as_date(on_date)
+    if target is None:
+        return []
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM clients WHERE responsible = ? "
+            "AND visit_date IS NOT NULL AND TRIM(visit_date) <> ''",
+            (employee,),
+        ).fetchall()
+    rows = [r for r in rows if _as_date(r["visit_date"]) == target]
+    return _group_persons(rows)
 
 
 # Путь к .env, откуда docker-compose (env_file) и load_dotenv() берут BOT_TOKEN.

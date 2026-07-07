@@ -121,6 +121,21 @@ select.gsel{max-width:260px;text-overflow:ellipsis}
 .chip.mode-r{background:var(--alt);color:var(--muted)}
 .chip.ok{background:rgba(91,138,60,.12);color:var(--success)}
 
+/* ---------- выбираемые чипсы (города / сотрудники руководителя) ---------- */
+.pick{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.pchip{cursor:pointer;user-select:none;border:1px solid var(--border);background:var(--card);
+  border-radius:14px;padding:5px 12px;font-size:12.5px;font-weight:500;color:var(--muted);
+  transition:background .12s,border-color .12s,color .12s;display:inline-flex;align-items:center;gap:5px}
+.pchip:hover{background:var(--alt);color:var(--text)}
+.pchip.on{background:var(--accent);color:#FCFBF8;border-color:var(--accent)}
+.pchip .n{opacity:.55;font-size:11px}
+.pchip.on .n{opacity:.75}
+.subttl{font-size:11.5px;font-weight:600;color:var(--muted);letter-spacing:.3px;
+  text-transform:uppercase;margin:14px 0 2px}
+.mgrmeta{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:3px}
+.mgrmeta .tag{font-size:11.5px;background:var(--alt);border-radius:10px;padding:2px 9px;color:var(--muted)}
+.addrow{display:flex;gap:8px;margin-top:8px;max-width:340px}
+
 /* ---------- таблицы ---------- */
 .tblwrap{margin:0 -18px -16px;overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -215,6 +230,10 @@ input[type=range]{width:100%;accent-color:var(--accent);margin:0;height:22px}
     <button data-sec="people">
       <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
       <span class="lbl">Люди</span><span class="cnt" id="npeople" style="display:none">0</span>
+    </button>
+    <button data-sec="mgrs">
+      <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="5"/><path d="M8.5 13.5L7 22l5-3 5 3-1.5-8.5"/></svg></span>
+      <span class="lbl">Руководители</span><span class="cnt" id="nmgrs" style="display:none">0</span>
     </button>
     <button data-sec="activity">
       <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
@@ -426,6 +445,68 @@ input[type=range]{width:100%;accent-color:var(--accent);margin:0;height:22px}
     </div>
   </section>
 
+  <!-- ================= РУКОВОДИТЕЛИ ================= -->
+  <section class="sec" id="sec-mgrs">
+    <div class="inner">
+      <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/><path d="M8 14h.01"/><path d="M12 14h.01"/><path d="M16 14h.01"/></svg></span>Автосводка руководителям</h2>
+        <p class="desc">В конце дня (по Москве) каждый руководитель получает дайджест: кто из его сотрудников кого обработал, с разбивкой по исходам. Реалтайм — руководитель жмёт «Дайджест за сегодня» в боте в любой момент.</p>
+        <div class="row">
+          <label class="small muted">Время (МСК)</label>
+          <input type="text" id="digTime" class="tid" style="width:80px" placeholder="16:30" inputmode="numeric">
+          <label class="small muted" style="display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="checkbox" id="digEnabled" checked style="width:auto"> автопуш включён</label>
+          <button class="btn acc" onclick="saveDigestSettings()">Сохранить</button>
+        </div>
+        <div class="small muted" id="digOut" style="margin-top:8px"></div>
+      </div>
+
+      <div class="card">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="5"/><path d="M8.5 13.5L7 22l5-3 5 3-1.5-8.5"/></svg></span>Руководители</h2>
+        <p class="desc">Каждый руководитель привязан к городам (подпись сводки) и к своим сотрудникам (по ним считается дайджест). Один руководитель может вести несколько городов — например, оба города по Таджикистану.</p>
+        <div class="tblwrap">
+        <table id="mgrtbl"><thead><tr>
+          <th>Руководитель</th><th>Города</th><th class="num">Сотрудников</th><th>Telegram ID</th><th></th>
+        </tr></thead><tbody><tr><td colspan="5"><div class="empty">Пока никого — добавьте ниже</div></td></tr></tbody></table>
+        </div>
+      </div>
+
+      <div class="card" id="mgrFormCard">
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6"/><path d="M22 11h-6"/></svg></span><span id="mgrFormTitle">Добавить руководителя</span></h2>
+
+        <div class="field"><label>Кто это (из писавших боту)</label>
+          <div class="idcell" style="min-width:auto">
+            <select class="gsel" id="mgrGuest" onchange="mgrPickGuest(this)" title="выбрать из писавших боту" style="max-width:100%"></select>
+            <input type="text" class="tid" id="mgrTid" inputmode="numeric" placeholder="или впиши Telegram ID" style="width:180px">
+          </div>
+        </div>
+        <div class="field"><label>Имя (для приветствия и подписи)</label>
+          <input type="text" id="mgrName" placeholder="напр. Рустам — РТ" style="max-width:340px">
+        </div>
+
+        <div class="subttl">Города (подпись сводки)</div>
+        <div class="pick" id="mgrCities"></div>
+        <div class="addrow">
+          <input type="text" id="mgrCityAdd" placeholder="добавить город вручную" onkeydown="if(event.key==='Enter'){mgrAddCity();event.preventDefault();}">
+          <button class="btn sm" onclick="mgrAddCity()">＋</button>
+        </div>
+
+        <div class="subttl">Сотрудники (по ним считается дайджест)</div>
+        <div class="row" style="margin:2px 0 0">
+          <button class="btn ghost sm" onclick="mgrEmpsAll(true)">выбрать всех</button>
+          <button class="btn ghost sm" onclick="mgrEmpsAll(false)">снять</button>
+          <span class="small muted" id="mgrEmpHint"></span>
+        </div>
+        <div class="pick" id="mgrEmps"></div>
+
+        <div class="row" style="margin-top:16px">
+          <button class="btn acc" id="mgrSaveBtn" onclick="saveManager()">Сохранить руководителя</button>
+          <button class="btn ghost" onclick="mgrFormReset()">Очистить форму</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ================= АКТИВНОСТЬ ================= -->
   <section class="sec" id="sec-activity">
     <div class="inner">
@@ -494,7 +575,7 @@ const store = window.localStorage;
 // рестарт бота). Старый hardbot.166… остался без /admin/reset → там «очистка» = Failed to fetch.
 const DEFAULT_URL = "https://hardbot2.166.88.185.90.nip.io";
 const DEFAULT_KEY = "hbadm_029ca66bc21804c4ced440bdbf93f0c8";  // admin-ключ hardbot2 (X-Admin-Key)
-const TITLES = {dash:"Сводка", registry:"Реестр", prio:"Приоритет выезда", people:"Люди", activity:"Активность", conn:"Подключение"};
+const TITLES = {dash:"Сводка", registry:"Реестр", prio:"Приоритет выезда", people:"Люди", mgrs:"Руководители", activity:"Активность", conn:"Подключение"};
 let connected = false, prioLoaded = false, actLoaded = false;
 
 /* Миграция сохранённого адреса: мёртвый IP и старый hardbot (без /admin/reset) → hardbot2.
@@ -522,6 +603,7 @@ function nav(sec){
   if(sec==="prio" && connected && !prioLoaded) loadPriority();
   if(sec==="activity" && connected && !actLoaded) loadActivity();
   if(sec==="people" && connected) loadRoles();
+  if(sec==="mgrs" && connected) loadManagers();
 }
 
 /* ---------- статус/тост ---------- */
@@ -571,6 +653,7 @@ async function refresh(){
     loadRoles();
     loadPriority();
     loadActivity();
+    loadManagers();
   }catch(e){
     setConn(false,"нет связи"); toast("Нет связи с сервером",true);
   }finally{ busy(false); }
@@ -971,6 +1054,135 @@ async function bindRole(i, btn){
     refresh();
   }catch(e){ toast("Ошибка привязки: "+(e.message||e),true); }
   finally{ btn.disabled=false; }
+}
+
+/* ---------- руководители: города + сотрудники + дайджест ---------- */
+let MGRS=[], MGR_CITIES=[], MGR_EMPS=[], MGR_CITY_EMPS={};
+let mgrForm={tid:"", name:"", cities:new Set(), employees:new Set()};
+
+async function loadManagers(){
+  await loadGuests();   // для выпадашки «кто это»
+  try{
+    const r = await fetch(base()+"/admin/managers",{headers:hdr(),signal:AbortSignal.timeout(15000)});
+    if(!r.ok){ if(r.status!==404) toast("Руководители: ошибка "+r.status,true); return; } // 404 — сервер ещё старый
+    const d = await r.json();
+    MGRS=d.managers||[]; MGR_CITIES=d.cities||[]; MGR_EMPS=d.employees||[]; MGR_CITY_EMPS=d.city_employees||{};
+    if(d.digest){ $("digTime").value=d.digest.time||"16:30"; $("digEnabled").checked=!!d.digest.enabled; }
+    const n=MGRS.length; $("nmgrs").style.display=n?"":"none"; $("nmgrs").textContent=n;
+    renderMgrTable(); renderMgrGuestPicker(); renderMgrCities(); renderMgrEmps();
+  }catch(e){ /* нет связи — общий статус уже показал refresh() */ }
+}
+
+function renderMgrTable(){
+  const tb=$("mgrtbl").querySelector("tbody");
+  tb.innerHTML = MGRS.length ? MGRS.map(m=>{
+    const cities=(m.cities||[]).map(esc).join(" · ")||"<span class='muted'>—</span>";
+    return `<tr>
+      <td><b style="font-weight:500">${esc(m.name||"без имени")}</b></td>
+      <td>${cities}</td>
+      <td class="num">${(m.employees||[]).length}</td>
+      <td class="num" style="text-align:left">${m.telegram_id}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn sm" onclick="mgrEdit(${m.telegram_id})">изменить</button>
+        <button class="btn sm danger" onclick="mgrDelete(${m.telegram_id})">удалить</button>
+      </td></tr>`;
+  }).join("") : `<tr><td colspan="5"><div class="empty">Пока никого — добавьте ниже</div></td></tr>`;
+}
+
+function renderMgrGuestPicker(){
+  $("mgrGuest").innerHTML = GUESTS.length ? guestOptions(mgrForm.tid)
+    : `<option value="">— никто ещё не писал боту —</option>`;
+}
+function mgrPickGuest(sel){ if(sel.value){ mgrForm.tid=sel.value; $("mgrTid").value=sel.value; } }
+
+function renderMgrCities(){
+  const reg=MGR_CITIES.map(c=>c.name);
+  const all=[...reg, ...[...mgrForm.cities].filter(c=>!reg.includes(c))];
+  $("mgrCities").innerHTML = all.length ? all.map(c=>{
+    const on=mgrForm.cities.has(c), cnt=(MGR_CITIES.find(x=>x.name===c)||{}).count;
+    return `<span class="pchip ${on?'on':''}" onclick="mgrToggleCity('${encodeURIComponent(c)}')">${esc(c)}${cnt?`<span class="n">${cnt}</span>`:''}</span>`;
+  }).join("") : `<span class="small muted">городов в реестре нет — добавьте вручную ниже</span>`;
+}
+function mgrSuggestEmpsForCity(c){ (MGR_CITY_EMPS[c]||[]).forEach(e=>mgrForm.employees.add(e)); }
+function mgrToggleCity(enc){
+  const c=decodeURIComponent(enc);
+  if(mgrForm.cities.has(c)) mgrForm.cities.delete(c);
+  else { mgrForm.cities.add(c); mgrSuggestEmpsForCity(c); }
+  renderMgrCities(); renderMgrEmps();
+}
+function mgrAddCity(){
+  const v=($("mgrCityAdd").value||"").trim(); if(!v) return;
+  mgrForm.cities.add(v); $("mgrCityAdd").value=""; mgrSuggestEmpsForCity(v);
+  renderMgrCities(); renderMgrEmps();
+}
+
+function renderMgrEmps(){
+  const reg=MGR_EMPS.map(e=>e.employee);
+  const all=[...reg, ...[...mgrForm.employees].filter(e=>!reg.includes(e))];
+  $("mgrEmps").innerHTML = all.length ? all.map(e=>{
+    const on=mgrForm.employees.has(e), cnt=(MGR_EMPS.find(x=>x.employee===e)||{}).contracts;
+    return `<span class="pchip ${on?'on':''}" onclick="mgrToggleEmp('${encodeURIComponent(e)}')">${esc(e)}${cnt?`<span class="n">${cnt}</span>`:''}</span>`;
+  }).join("") : `<span class="small muted">сотрудников в реестре нет — импортируйте реестр на вкладке «Реестр»</span>`;
+  $("mgrEmpHint").textContent = mgrForm.employees.size ? `выбрано: ${mgrForm.employees.size}` : "";
+}
+function mgrToggleEmp(enc){
+  const e=decodeURIComponent(enc);
+  if(mgrForm.employees.has(e)) mgrForm.employees.delete(e); else mgrForm.employees.add(e);
+  renderMgrEmps();
+}
+function mgrEmpsAll(on){ if(on) MGR_EMPS.forEach(e=>mgrForm.employees.add(e.employee)); else mgrForm.employees.clear(); renderMgrEmps(); }
+
+function mgrEdit(tid){
+  const m=MGRS.find(x=>String(x.telegram_id)===String(tid)); if(!m) return;
+  mgrForm={tid:String(m.telegram_id), name:m.name||"", cities:new Set(m.cities||[]), employees:new Set(m.employees||[])};
+  $("mgrTid").value=m.telegram_id; $("mgrName").value=m.name||"";
+  $("mgrFormTitle").textContent="Изменить руководителя";
+  renderMgrGuestPicker(); renderMgrCities(); renderMgrEmps();
+  $("mgrFormCard").scrollIntoView({behavior:"smooth",block:"start"});
+}
+function mgrFormReset(){
+  mgrForm={tid:"", name:"", cities:new Set(), employees:new Set()};
+  $("mgrTid").value=""; $("mgrName").value=""; $("mgrCityAdd").value="";
+  $("mgrFormTitle").textContent="Добавить руководителя";
+  renderMgrGuestPicker(); renderMgrCities(); renderMgrEmps();
+}
+async function saveManager(){
+  const tid=($("mgrTid").value||"").trim(), name=($("mgrName").value||"").trim();
+  if(!/^\d{3,}$/.test(tid)){ toast("Впиши Telegram ID руководителя (или выбери из списка)",true); return; }
+  if(!mgrForm.employees.size){ toast("Отметь хотя бы одного сотрудника",true); return; }
+  const btn=$("mgrSaveBtn"); btn.disabled=true;
+  try{
+    const r=await fetch(base()+"/admin/manager",{method:"POST",
+      headers:{...hdr(),"Content-Type":"application/json"},
+      body:JSON.stringify({telegram_id:Number(tid), name, cities:[...mgrForm.cities], employees:[...mgrForm.employees]})});
+    if(r.status===404){ toast("Сервер ещё старый — нет /admin/manager",true); return; }
+    if(!r.ok){ toast("Ошибка сохранения: "+r.status,true); return; }
+    toast("Руководитель сохранён: "+(name||tid));
+    mgrFormReset(); loadManagers();
+  }catch(e){ toast("Ошибка: "+(e.message||e),true); }
+  finally{ btn.disabled=false; }
+}
+async function mgrDelete(tid){
+  if(!confirm("Удалить руководителя "+tid+"? Он перестанет получать дайджест.")) return;
+  try{
+    const r=await fetch(base()+"/admin/manager_delete",{method:"POST",
+      headers:{...hdr(),"Content-Type":"application/json"},body:JSON.stringify({telegram_id:Number(tid)})});
+    if(!r.ok){ toast("Ошибка удаления: "+r.status,true); return; }
+    toast("Удалён"); loadManagers();
+  }catch(e){ toast("Ошибка удаления",true); }
+}
+async function saveDigestSettings(){
+  const time=($("digTime").value||"").trim(), enabled=$("digEnabled").checked;
+  if(time && !/^([01]?\d|2[0-3]):[0-5]\d$/.test(time)){ toast("Время в формате ЧЧ:ММ",true); return; }
+  try{
+    const r=await fetch(base()+"/admin/digest_settings",{method:"POST",
+      headers:{...hdr(),"Content-Type":"application/json"},body:JSON.stringify({time,enabled})});
+    if(r.status===404){ toast("Сервер ещё старый — нет настроек дайджеста",true); return; }
+    if(!r.ok){ toast("Ошибка: "+r.status,true); return; }
+    const d=await r.json();
+    $("digOut").textContent=`Автопуш ${d.enabled?"включён":"выключен"} · ${d.time} МСК`;
+    toast("Настройки сохранены");
+  }catch(e){ toast("Ошибка сохранения",true); }
 }
 
 /* ---------- подключение ---------- */

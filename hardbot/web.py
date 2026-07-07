@@ -635,6 +635,85 @@ async def _admin_activity(request: web.Request) -> web.Response:
                               "generated_at": datetime.now().isoformat(timespec="seconds")})
 
 
+async def _admin_managers(request: web.Request) -> web.Response:
+    """Экран «Руководители» в пульте: список руководителей + справочники для форм
+    (города и сотрудники из реестра, карта город→команда) + настройки автопуша."""
+    _admin(request)
+    return web.json_response({
+        "managers": db.list_managers(),
+        "cities": db.cities_in_registry(),
+        "employees": [{"employee": e["employee"], "contracts": e["contracts"]}
+                      for e in db.employees_in_registry()],
+        "city_employees": db.city_employees(),
+        "digest": {
+            "time": db.get_setting("digest_time") or "16:30",
+            "enabled": (db.get_setting("digest_enabled") or "1").strip().lower()
+                       not in ("0", "false", "no", "off"),
+        },
+    })
+
+
+async def _admin_manager_save(request: web.Request) -> web.Response:
+    """Создать/обновить руководителя: {telegram_id:int, name:str, cities:[str], employees:[str]}."""
+    _admin(request)
+    body = await request.json()
+    try:
+        tid = int(body["telegram_id"])
+    except (KeyError, TypeError, ValueError):
+        raise web.HTTPBadRequest(text="telegram_id")
+    name = (body.get("name") or "").strip()
+    cities = [str(c).strip() for c in (body.get("cities") or []) if str(c).strip()]
+    employees = [str(e).strip() for e in (body.get("employees") or []) if str(e).strip()]
+    db.set_manager(tid, name, cities, employees)
+    return web.json_response({"ok": True, "manager": db.get_manager(tid)})
+
+
+async def _admin_manager_delete(request: web.Request) -> web.Response:
+    _admin(request)
+    body = await request.json()
+    try:
+        tid = int(body["telegram_id"])
+    except (KeyError, TypeError, ValueError):
+        raise web.HTTPBadRequest(text="telegram_id")
+    db.delete_manager(tid)
+    return web.json_response({"ok": True})
+
+
+async def _admin_digest_settings(request: web.Request) -> web.Response:
+    """GET/POST настроек автопуша дайджеста: {time:"HH:MM", enabled:bool} (время по МСК)."""
+    _admin(request)
+    if request.method == "POST":
+        b = await request.json()
+        time_raw = (b.get("time") or "").strip()
+        if time_raw:
+            if not re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", time_raw):
+                raise web.HTTPBadRequest(text="bad time (HH:MM)")
+            db.set_setting("digest_time", time_raw)
+        if "enabled" in b:
+            db.set_setting("digest_enabled", "1" if b.get("enabled") else "0")
+    return web.json_response({
+        "ok": True,
+        "time": db.get_setting("digest_time") or "16:30",
+        "enabled": (db.get_setting("digest_enabled") or "1").strip().lower()
+                   not in ("0", "false", "no", "off"),
+    })
+
+
+async def _admin_digest_preview(request: web.Request) -> web.Response:
+    """Предпросмотр сводки руководителя (текст) для пульта: ?telegram_id=."""
+    _admin(request)
+    import digest
+    try:
+        tid = int(request.query.get("telegram_id", ""))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text="telegram_id")
+    mgr = db.get_manager(tid)
+    if not mgr:
+        raise web.HTTPNotFound(text="manager")
+    text, _ = digest.summary_view(mgr, digest.today_iso())
+    return web.json_response({"ok": True, "text": text})
+
+
 async def _admin_restart(request: web.Request) -> web.Response:
     """Плановый перезапуск процесса из пульта — чтобы применить новый BOT_TOKEN
     (переключение на другой бот) и заново поставить menu-button миниаппа новому боту.
@@ -730,6 +809,12 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/admin/activity", _admin_activity)
     app.router.add_post("/admin/restart", _admin_restart)
     app.router.add_post("/admin/reset", _admin_reset)
+    app.router.add_get("/admin/managers", _admin_managers)
+    app.router.add_post("/admin/manager", _admin_manager_save)
+    app.router.add_post("/admin/manager_delete", _admin_manager_delete)
+    app.router.add_get("/admin/digest_settings", _admin_digest_settings)
+    app.router.add_post("/admin/digest_settings", _admin_digest_settings)
+    app.router.add_get("/admin/digest_preview", _admin_digest_preview)
     app.router.add_get("/admin/period", _admin_period)
     app.router.add_post("/admin/period", _admin_period)
     app.router.add_get("/tiles/basemap.pmtiles", _tiles)
