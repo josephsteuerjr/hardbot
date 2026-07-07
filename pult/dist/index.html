@@ -639,13 +639,22 @@ const fileToB64 = (f)=>new Promise((res,rej)=>{
 
 function showReport(d){
   $("report").classList.add("on");
+  const w=$("repwarn");
+  if(d.error){
+    // Не нашли колонку-ключ — не тихий ноль: показываем причину + что реально было в файле,
+    // чтобы можно было сверить заголовок с ожидаемым «Номер КД / ID».
+    $("repkvs").innerHTML = "";
+    w.style.display = "";
+    w.textContent = d.error + (d.header_row_tried ? ` (строка ${d.header_row_tried})` : "") +
+      (d.header_sample && d.header_sample.length ? ". В файле: " + d.header_sample.join(", ") : "");
+    return;
+  }
   $("repkvs").innerHTML = [
     ["строк",d.total_rows],["добавлено",d.inserted],["обновлено",d.updated],
     ["без КД",d.skipped_no_id],["дублей",d.duplicates]
   ].map(([k,v])=>`<div class="kv"><div class="k">${k}</div><div class="v">${fmt(v)}</div></div>`).join("");
-  const w=$("repwarn");
   if(d.unknown_columns&&d.unknown_columns.length){
-    w.style.display=""; w.textContent="Незнакомые колонки: "+d.unknown_columns.join(", ");
+    w.style.display=""; w.textContent="Незнакомые колонки (не помешали импорту): "+d.unknown_columns.join(", ");
   } else w.style.display="none";
 }
 
@@ -761,11 +770,11 @@ renderScatterInputs();
 
 /* ---- Очистка данных (сброс визитов / полная) через admin-API ---- */
 async function resetData(scope){
+  // Одно окно confirm(), не два подряд — двойной нативный диалог не всегда надёжен в webview.
   const msg = scope==="all"
-    ? "ПОЛНОСТЬЮ очистить реестр?\nУдалятся ВСЕ клиенты, визиты и метки (привязки сотрудников останутся). Обычно — перед свежим импортом."
+    ? "ПОЛНОСТЬЮ очистить реестр?\nУдалятся ВСЕ клиенты, визиты и метки, без возможности отката (привязки сотрудников останутся). Обычно — перед свежим импортом."
     : "Сбросить данные визитов у всех клиентов?\nОбнулятся статусы, комментарии, даты визита и фото. Клиенты, долги и закрепление за сотрудником останутся.";
   if(!confirm(msg)) return;
-  if(scope==="all" && !confirm("Точно? Клиенты удалятся без возможности отката (только новый импорт вернёт).")) return;
   const btn = scope==="all" ? $("btnresetall") : $("btnresetv");
   btn.disabled = true;
   try{

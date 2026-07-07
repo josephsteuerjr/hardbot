@@ -73,6 +73,48 @@ def test_import_grid_empty_and_garbage():
     assert db.import_grid([["а", "б"], ["в", "г"]])["inserted"] == 0   # шапки нет
 
 
+def test_import_grid_survives_many_unknown_columns_if_key_matches():
+    """«Лишние столбцы» не должны обнулять импорт: реестр с кучей незнакомых заголовков,
+    но с распознанным ключом (Номер КД / ID), — должен импортироваться. Раньше критерий
+    был «совпало >=3 колонки», из-за пары опечаток в незначащих заголовках мог тихо
+    вернуть нули без объяснения — теперь критерий: распознана колонка-ключ."""
+    db.init_db()
+    titles = [db.BY_KEY["contract_id"].title, "Незнакомая колонка 1", "Незнакомая колонка 2"]
+    row = ["IG-MANY", "xxx", "xxx"]
+    rep = db.import_grid([titles, row])
+    assert rep["inserted"] == 1
+    assert "error" not in rep
+    assert set(rep["unknown_columns"]) == {"Незнакомая колонка 1", "Незнакомая колонка 2"}
+
+
+def test_import_grid_no_key_column_gives_diagnostic_not_silent_zero():
+    """Без колонки-ключа сопоставить строки нечем — но вместо тихого нуля отчёт
+    объясняет причину и показывает, что реально было в заголовке (для диагностики)."""
+    db.init_db()
+    rep = db.import_grid([["Совсем левая колонка", "И эта тоже"], ["xxx", "xxx"]])
+    assert rep["inserted"] == 0
+    assert "error" in rep
+    assert "Совсем левая колонка" in rep["header_sample"]
+
+
+def test_norm_title_strips_zero_width_and_trailing_punct():
+    assert db._norm_title("Дата закрепления") == db._norm_title("Дата закрепления:")
+    assert db._norm_title("Дата закрепления") == db._norm_title("Дата закрепления*")
+    assert db._norm_title("Дата закрепления") == db._norm_title("​Дата закрепления​")
+    assert db._norm_title("Дата закрепления") == db._norm_title("Дата  закрепления")  # двойной пробел
+
+
+def test_call_status_title_matches_cyrillic():
+    """Раньше "Cтатус звонка" в fields.py начинался с латинской C — не совпадало ни с
+    одним реальным (кириллическим) заголовком реестра."""
+    db.init_db()
+    titles = [db.BY_KEY["contract_id"].title, db.BY_KEY["call_status"].title]
+    rep = db.import_grid([titles, ["IG-CS", "Оплачен"]])
+    assert rep["inserted"] == 1
+    assert db.get_client("IG-CS")["call_status"] == "Оплачен"
+    assert db.BY_KEY["call_status"].title[0] == "С"   # кириллическая С (U+0421), не латинская C
+
+
 def test_pick_grid():
     good = _full_grid(_row(contract_id="X"))
     assert db.pick_grid([]) == []

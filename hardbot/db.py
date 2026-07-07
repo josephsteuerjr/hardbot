@@ -855,11 +855,21 @@ def _as_date(v):
     return None
 
 
+_ZERO_WIDTH = ("​", "‌", "‍", "﻿")  # невидимый мусор из копипаста в Excel
+
+
 def _norm_title(s) -> str:
-    """Нормализованный заголовок для устойчивого матчинга (регистр/пробелы/неразрывники)."""
+    """Нормализованный заголовок для устойчивого матчинга: регистр, пробелы (юникод-пробелы
+    и неразрывный — покрываются штатным классом пробельных символов regex), невидимые
+    нулевой-ширины символы, хвостовая пунктуация (:;*.) — реальные реестры нередко
+    добавляют её к заголовку без изменения смысла колонки."""
     if s in (None, ""):
         return ""
-    return re.sub(r"\s+", " ", str(s).replace(" ", " ").strip().lower())
+    t = str(s)
+    for zw in _ZERO_WIDTH:
+        t = t.replace(zw, "")
+    t = re.sub(r"\s+", " ", t.strip().lower())
+    return t.rstrip(":;*.")
 
 
 def _pick_sheet(wb, title_to_key):
@@ -997,14 +1007,24 @@ def import_grid(rows: list[list]) -> dict:
         return report
 
     # Авто-поиск строки заголовков: реальный файл может иметь иную/сдвинутую шапку.
-    best_h, col_keys, best_n = 0, [], -1
+    # Критерий — распознанная колонка-КЛЮЧ («Номер КД / ID»→contract_id), а не «просто
+    # много совпадений»: реестр с кучей лишних/незнакомых колонок, но нормальным ключом,
+    # должен импортироваться; несколько опечаток в незначащих заголовках не должны
+    # тихо обнулять весь импорт (было: best_n < 3 → return report без объяснений).
+    best_h, col_keys, best_n, best_has_id = 0, [], -1, False
     for i, row in enumerate(rows[:10]):
         keys = [title_to_key.get(_norm_title(c)) for c in row]
         n = sum(1 for k in keys if k)
-        if n > best_n:
-            best_n, best_h, col_keys = n, i, keys
-    if best_n < 3:
-        return report   # осмысленной шапки не нашли
+        has_id = "contract_id" in keys
+        if (has_id, n) > (best_has_id, best_n):
+            best_has_id, best_n, best_h, col_keys = has_id, n, i, keys
+    if not best_has_id:
+        # Без колонки-ключа сопоставить строки нечем — не тихий ноль, а понятная причина
+        # + что реально было в лучшей из первых 10 строк, чтобы диагностировать заголовок.
+        report["error"] = "не нашли колонку-ключ «Номер КД / ID» ни в одной из первых 10 строк"
+        report["header_row_tried"] = best_h + 1
+        report["header_sample"] = [str(c).strip() for c in rows[best_h] if c not in (None, "")][:20]
+        return report
     report["unknown_columns"] = [str(c).strip() for c, k in zip(rows[best_h], col_keys) if c and k is None]
 
     with connect() as conn:
@@ -1038,9 +1058,13 @@ def import_grid(rows: list[list]) -> dict:
             keys = ", ".join(f'"{k}"' for k in data)
             qs = ", ".join("?" for _ in data)
             updates = ", ".join(f'"{k}"=excluded."{k}"' for k in data if k != "contract_id")
+            # Строка «лишних столбцов» может дать ТОЛЬКО contract_id (все прочие заголовки
+            # незнакомы) — тогда updates пуст, и "DO UPDATE SET" без полей — синтаксическая
+            # ошибка SQLite. В этом случае обновлять нечего — просто не трогаем строку.
+            on_conflict = f"DO UPDATE SET {updates}" if updates else "DO NOTHING"
             conn.execute(
                 f"INSERT INTO clients ({keys}) VALUES ({qs}) "
-                f"ON CONFLICT(contract_id) DO UPDATE SET {updates}",
+                f"ON CONFLICT(contract_id) {on_conflict}",
                 tuple(data.values()),
             )
             report["updated" if is_update else "inserted"] += 1

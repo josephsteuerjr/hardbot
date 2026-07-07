@@ -136,7 +136,7 @@ FIELDS: list[Field] = [
     Field("who_at_address",   "Кто был на адресе?",         B_VISIT, HARD, "who_at_address"),
     Field("client_location",  "Местоположение клиента",     B_VISIT, HARD, "client_location"),
     Field("purpose_rf",       "Цель приезда в РФ",          B_VISIT, HARD, "purpose_rf"),
-    Field("call_status",      "Cтатус звонка",              B_VISIT, HARD, "call_status"),
+    Field("call_status",      "Статус звонка",              B_VISIT, HARD, "call_status"),
     Field("call_comment",     "комментарий звонка",         B_VISIT, HARD),
     Field("dp",               "ДП",                         B_VISIT, SX),
     Field("kd_date",          "Дата оформления КД",         B_VISIT, SX),

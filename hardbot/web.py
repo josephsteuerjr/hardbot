@@ -666,9 +666,18 @@ async def _cors(request: web.Request, handler):
         resp = web.Response(status=204)
     else:
         resp = await handler(request)
-    # CORS сужен: «*» убран. ACAO ставим только при явном CORS_ALLOW_ORIGIN — миниапп и
-    # его API ходят same-origin (свой aiohttp за Caddy), поэтому по умолчанию заголовок не нужен.
-    if CORS_ALLOW_ORIGIN:
+    if request.path.startswith("/admin/"):
+        # /admin/* — десктоп-пульт (Tauri), по природе кросс-ориджин к серверу (грузится не
+        # с этого домена). Ручки уже гейтятся секретным ключом (ADMIN_API_KEY в _admin()) —
+        # открытый CORS здесь не расширяет поверхность атаки (без ключа не пройти запрос),
+        # а без него браузер/webview молча блокирует preflight → "Failed to fetch" на КАЖДЫЙ
+        # POST-вызов пульта (не только явно проверенный при разработке).
+        resp.headers["Access-Control-Allow-Origin"] = CORS_ALLOW_ORIGIN or "*"
+        resp.headers["Access-Control-Allow-Headers"] = "X-Admin-Key, Content-Type"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    elif CORS_ALLOW_ORIGIN:
+        # Остальное (миниапп /api/*) — same-origin по умолчанию (свой aiohttp за Caddy),
+        # заголовок ставим только при явно заданном CORS_ALLOW_ORIGIN.
         resp.headers["Access-Control-Allow-Origin"] = CORS_ALLOW_ORIGIN
         resp.headers["Access-Control-Allow-Headers"] = "X-Admin-Key, X-Init-Data, X-Dev-Uid, Content-Type"
         resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
