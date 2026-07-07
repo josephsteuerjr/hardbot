@@ -660,12 +660,14 @@ async def _admin_reset(request: web.Request) -> web.Response:
     raise web.HTTPBadRequest(text="scope: 'visits' | 'all'")
 
 
-@web.middleware
-async def _cors(request: web.Request, handler):
-    if request.method == "OPTIONS":
-        resp = web.Response(status=204)
-    else:
-        resp = await handler(request)
+def _apply_cors(request: web.Request, resp: web.StreamResponse) -> None:
+    """Навесить CORS-заголовки на ЛЮБОЙ ответ, включая ошибочный.
+
+    КРИТИЧНО: заголовки надо ставить и на ответы-ошибки (401/404/400/500). Если хендлер
+    кинул HTTPException или упал, а CORS-заголовков нет — браузер/webview пульта блокирует
+    ответ и показывает «Failed to fetch» вместо настоящего статуса. Так, например, POST на
+    отсутствующую (старый сервер) ручку `/admin/reset` возвращает 404, но без заголовков он
+    выглядит как «нет связи» — реальную причину не видно."""
     if request.path.startswith("/admin/"):
         # /admin/* — десктоп-пульт (Tauri), по природе кросс-ориджин к серверу (грузится не
         # с этого домена). Ручки уже гейтятся секретным ключом (ADMIN_API_KEY в _admin()) —
@@ -681,6 +683,29 @@ async def _cors(request: web.Request, handler):
         resp.headers["Access-Control-Allow-Origin"] = CORS_ALLOW_ORIGIN
         resp.headers["Access-Control-Allow-Headers"] = "X-Admin-Key, X-Init-Data, X-Dev-Uid, Content-Type"
         resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+
+
+@web.middleware
+async def _cors(request: web.Request, handler):
+    if request.method == "OPTIONS":
+        resp = web.Response(status=204)
+        _apply_cors(request, resp)
+        return resp
+    try:
+        resp = await handler(request)
+    except web.HTTPException as exc:
+        # HTTPException — это сам по себе Response: навешиваем CORS и отдаём с настоящим
+        # статусом (401/404/400/…), чтобы пульт увидел код, а не «Failed to fetch».
+        _apply_cors(request, exc)
+        raise
+    except Exception:
+        # Непредвиденная ошибка (500). Тоже отдаём с CORS-заголовками — иначе в пульте вместо
+        # «Ошибка 500» будет «нет связи». Трейс пишем в лог сервера.
+        logging.exception("необработанная ошибка в %s %s", request.method, request.path)
+        resp = web.json_response({"error": "internal"}, status=500)
+        _apply_cors(request, resp)
+        return resp
+    _apply_cors(request, resp)
     return resp
 
 

@@ -476,15 +476,22 @@ input[type=range]{width:100%;accent-color:var(--accent);margin:0;height:22px}
 <script>
 const $ = (id)=>document.getElementById(id);
 const store = window.localStorage;
-const DEFAULT_URL = "https://hardbot.166.88.185.90.nip.io";
+// Актуальный инстанс — hardbot2 (свежий код: очистка данных /admin/reset, редизайн формы,
+// рестарт бота). Старый hardbot.166… остался без /admin/reset → там «очистка» = Failed to fetch.
+const DEFAULT_URL = "https://hardbot2.166.88.185.90.nip.io";
+const DEFAULT_KEY = "hbadm_029ca66bc21804c4ced440bdbf93f0c8";  // admin-ключ hardbot2 (X-Admin-Key)
 const TITLES = {dash:"Сводка", registry:"Реестр", prio:"Приоритет выезда", people:"Люди", activity:"Активность", conn:"Подключение"};
 let connected = false, prioLoaded = false, actLoaded = false;
 
-/* миграция со старого (мёртвого) сервера */
+/* Миграция сохранённого адреса: мёртвый IP и старый hardbot (без /admin/reset) → hardbot2.
+   Ключ старого сервера на hardbot2 не подойдёт, поэтому вместе с URL подставляем и его ключ. */
 let savedUrl = store.getItem("url") || DEFAULT_URL;
-if(savedUrl.includes("38-135-54-29")) savedUrl = DEFAULT_URL;
+let savedKey = store.getItem("key") || DEFAULT_KEY;
+if(savedUrl.includes("38-135-54-29") || /\/\/hardbot\.166\./.test(savedUrl)){
+  savedUrl = DEFAULT_URL; savedKey = DEFAULT_KEY;
+}
 $("url").value = savedUrl;
-$("key").value = store.getItem("key") || "";
+$("key").value = savedKey;
 
 const base = ()=> $("url").value.trim().replace(/\/+$/,"");
 const hdr  = ()=> ({ "X-Admin-Key": $("key").value.trim() });
