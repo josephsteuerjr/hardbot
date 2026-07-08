@@ -108,6 +108,9 @@ textarea{min-height:64px;resize:vertical}
 .cdcard{font-size:13px;border-bottom:1px solid var(--alt);padding:8px 0}
 .cdcard:last-child{border-bottom:none}
 .cdcard .t{font-weight:500;margin-bottom:2px}
+.cdhead{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:2px}
+.cdhead .t{margin-bottom:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cdsum{font-weight:600;white-space:nowrap}
 .toast{position:fixed;left:50%;bottom:84px;transform:translateX(-50%);background:var(--accent);
   color:var(--bg);padding:10px 18px;border-radius:24px;font-size:14px;opacity:0;
   transition:opacity .2s;pointer-events:none;z-index:30}
@@ -210,7 +213,8 @@ const I18N = {
     nogeo:"Не получилось определить геолокацию — включите доступ или введите координаты.",
     go:"Поехать",exit:"Выйти",finishvisit:"Отметить визит",mins:"мин",
     draftwait:"черновик не отправлен на сервер",draftsent:"черновик сохранён на сервере",
-    secResult:"Результат выезда",secContact:"Контакт",secClient:"Клиент сейчас",secAgree:"Договорённость"},
+    secResult:"Результат выезда",secContact:"Контакт",secClient:"Клиент сейчас",secAgree:"Договорённость",
+    nosplit:"разбивка по статьям не пришла"},
   uz:{visit:"Chiqish",client:"Mijoz",debt:"Qarz",form:"To‘ldirish",my:"Mijozlarim",
     search:"Qidirish: F.I.Sh., shartnoma, telefon",kd:"shartnoma",total:"Jami qarz",inwork:"Ish boshlandi",
     drive:"Borish",call:"Qo‘ng‘iroq",save:"Chiqishni saqlash",addphoto:"Rasm qo‘shish",
@@ -224,7 +228,8 @@ const I18N = {
     nogeo:"Geolokatsiyani aniqlab bo‘lmadi — ruxsat bering yoki koordinatani kiriting.",
     go:"Yo‘lga chiqish",exit:"Yopish",finishvisit:"Tashrifni belgilash",mins:"daq",
     draftwait:"qoralama serverga yuborilmadi",draftsent:"qoralama serverda saqlandi",
-    secResult:"Chiqish natijasi",secContact:"Kontakt",secClient:"Mijoz hozir",secAgree:"Kelishuv"},
+    secResult:"Chiqish natijasi",secContact:"Kontakt",secClient:"Mijoz hozir",secAgree:"Kelishuv",
+    nosplit:"moddalar bo‘yicha taqsimot kelmadi"},
   tg:{visit:"Сафар",client:"Мизоҷ",debt:"Қарз",form:"Пур кардан",my:"Мизоҷони ман",
     search:"Ҷустуҷӯ: НН, шартнома, телефон",kd:"шартнома",total:"Қарзи умумӣ",inwork:"Дар кор аз",
     drive:"Расидан",call:"Занг задан",save:"Сафарро захира",addphoto:"Расм илова",
@@ -238,7 +243,8 @@ const I18N = {
     nogeo:"Геолокатсия муайян нашуд — иҷозат диҳед ё координата ворид кунед.",
     go:"Ба роҳ баромадан",exit:"Бастан",finishvisit:"Сафарро қайд кардан",mins:"дақ",
     draftwait:"нусха ба сервер нафиристода шуд",draftsent:"нусха дар сервер захира шуд",
-    secResult:"Натиҷаи сафар",secContact:"Тамос",secClient:"Мизоҷ ҳозир",secAgree:"Созиш"},
+    secResult:"Натиҷаи сафар",secContact:"Тамос",secClient:"Мизоҷ ҳозир",secAgree:"Созиш",
+    nosplit:"тақсимот аз рӯи моддаҳо наомад"},
 };
 let STATE = {lang:"ru", meta:null, persons:[], cur:null, tab:"visit"};
 const L = () => I18N[STATE.lang] || I18N.ru;
@@ -343,7 +349,7 @@ function drawList(items){
     return `<div class="pcard" onclick="openP('${p.rep}')">
        <span class="dot ${p.visited?'v':'n'}"${dotStyle}></span>
        <div class="pinfo"><div class="pname">${esc(p.client)}</div>
-         <div class="psub">${p.n>1?(p.n+" "+t.kd+" · "):""}${money(p.total,p.unit)}</div></div>
+         <div class="psub">${p.n>1?(p.n+" "+t.kd+" · "):""}${totalStr(p)}</div></div>
        <span class="pchev">${ic("chevR")}</span>
      </div>`;
   }).join("");
@@ -510,15 +516,30 @@ function panelClient(d,t){
   return `<div class="box">${d.info.map(r=>
     `<div class="kv"><span class="k">${esc(r.title)}</span><span class="v">${esc(String(r.value))}</span></div>`).join("")}</div>`;
 }
+// Долг человека одним числом существует, только если валюта одна: портфель ЗК — в сумах,
+// Делимобиль — в рублях. Смешанному человеку показываем обе суммы, а не их сумму.
+function totalStr(d){
+  const ts = (d.totals && d.totals.length) ? d.totals : [{sum:d.total, unit:d.unit}];
+  return ts.map(x=>money(x.sum,x.unit)).join(" · ");
+}
+// Разбивка приходит с сервера готовой: подписи локализованы (было — ключи БД,
+// «camera_fine»), суммы — числа, состав статей зависит от контрагента
+// (Делимобиль — ДТП/аренда/эвакуация/…, кредитные — просрочка/проценты/неустойка/
+// пошлина), нулевые статьи отфильтрованы. См. hardbot/debt.py.
 function panelDebt(d,t){
-  const cds = d.contracts.map(c=>{
-    const rows = Object.entries(c.debt).filter(([k,v])=>v&&String(v).trim());
-    return `<div class="cdcard"><div class="t">${esc(c.partner||"—")} · ${esc(c.contract_id)}</div>
-      ${rows.map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(String(v))}</span></div>`).join("")||'<span class="muted">—</span>'}</div>`;
-  }).join("");
+  const cds = d.contracts.map(c=>`
+    <div class="cdcard">
+      <div class="cdhead">
+        <span class="t">${esc(c.partner||"—")} · ${esc(c.contract_id)}</span>
+        <span class="cdsum">${money(c.total,c.unit)}</span>
+      </div>
+      ${c.debt.map(a=>
+        `<div class="kv"><span class="k">${esc(a.title)}</span><span class="v">${money(a.value,c.unit)}</span></div>`
+      ).join("") || `<div class="muted" style="font-size:12.5px;padding:5px 0">${t.nosplit}</div>`}
+    </div>`).join("");
   const pr = d.promise.filter(r=>r.value&&r.value!=="—").map(r=>
     `<div class="kv"><span class="k">${esc(r.title)}</span><span class="v">${esc(String(r.value))}</span></div>`).join("");
-  return `<div class="box"><div class="muted" style="margin-bottom:6px">${t.total}: <b>${money(d.total,d.unit)}</b></div>${cds}</div>
+  return `<div class="box"><div class="muted" style="margin-bottom:6px">${t.total}: <b>${totalStr(d)}</b></div>${cds}</div>
     ${pr?`<div class="box"><div class="muted" style="margin-bottom:4px">${t.promise}</div>${pr}</div>`:""}`;
 }
 // Одно поле-выпадашка. Контрол остаётся <select> (мобильный нативный пикер удобен для

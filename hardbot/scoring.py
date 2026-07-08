@@ -29,7 +29,8 @@ import math
 from collections import Counter
 from datetime import date, datetime
 
-from gazetteer import parse_city, sughd_centroid  # единый газеттир (был _CITIES)
+from debt import contract_debt                     # «долг на сегодня», иначе «долг всего»
+from gazetteer import parse_city, sughd_centroid   # единый газеттир (был _CITIES)
 from util import num as _num                       # единый разбор чисел (был локальный _num)
 from scoring_config import (
     SIGNALS, KILLER_RESULTS, CLAMP_MAX, COURIER_UNREACHABLE,
@@ -319,7 +320,7 @@ def _items_from_xlsx(path: str) -> list[dict]:
 
     items = []
     for (name, _dob), ds in groups.items():
-        debt = sum(_money(x.get("debt_today") or x.get("debt_total")) for x in ds)
+        debt = sum(contract_debt(x) for x in ds)
         visits = max((_int(x.get("visits_count")) for x in ds), default=0)
 
         def first(key):

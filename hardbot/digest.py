@@ -23,6 +23,7 @@ from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
+import debt
 
 _MONTHS = ["", "января", "февраля", "марта", "апреля", "мая", "июня", "июля",
            "августа", "сентября", "октября", "ноября", "декабря"]
@@ -51,12 +52,7 @@ def _v(contracts, key):
     return next((c[key] for c in contracts if c[key] not in (None, "")), None)
 
 
-def _unit(partners: list[str]) -> str:
-    if partners == ["ЗК"]:
-        return "сум"
-    if partners and "ЗК" not in partners:
-        return "₽"
-    return ""
+_money = debt.fmt    # единая логика денег/валюты (была третья копия — card.py, web.py, здесь)
 
 
 # Эмодзи для исходов визита — чтобы сводка читалась «глазами», а не строкой текста.
@@ -85,15 +81,17 @@ def _outcomes(persons: list[dict]) -> list[tuple[str, int]]:
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
-def _persons_total(persons: list[dict]) -> tuple[int, str]:
-    """Сумма долга по обработанным кейсам + единица (по партнёрам)."""
-    total = sum(p["total"] for p in persons)
-    partners = sorted({pt for p in persons for pt in p["partners"]})
-    return total, _unit(partners)
+def _persons_total(persons: list[dict]) -> str:
+    """Сумма долга по обработанным кейсам, раздельно по валютам: «132 900 ₽ · 11 550 000 сум».
 
-
-def _money(total: int, unit: str) -> str:
-    return f"{total:,}".replace(",", " ") + (f" {unit}" if unit else "")
+    Складывать сумы ЗК с рублями Делимобиля в одно число нельзя — а именно это и
+    получалось у смешанной команды (единица при этом молча становилась пустой).
+    """
+    acc: dict[str, int] = {}
+    for p in persons:
+        for x in p["totals"]:
+            acc[x["unit"]] = acc.get(x["unit"], 0) + x["sum"]
+    return " · ".join(_money(s, u) for u, s in acc.items() if s)
 
 
 def sorted_employees(mgr: dict) -> list[str]:
@@ -123,14 +121,14 @@ def summary_view(mgr: dict, on_date: str) -> tuple[str, InlineKeyboardMarkup]:
     rows = _employee_persons(mgr, on_date)
     active = [r for r in rows if r[2]]
     total_clients = sum(len(ps) for _, _, ps in rows)
-    grand_total, grand_unit = _persons_total([p for _, _, ps in rows for p in ps])
+    grand_total = _persons_total([p for _, _, ps in rows for p in ps])
 
     head = [f"📊 <b>Дайджест · {human_date(on_date)}</b>",
             f"🏙 {_e(scope_label(mgr))}",
             f"👥 Команда: {len(rows)} · активны: {len(active)} · "
             f"обработано: <b>{total_clients}</b>"]
     if grand_total:
-        head.append(f"💰 Сумма по кейсам дня: {_money(grand_total, grand_unit)}")
+        head.append(f"💰 Сумма по кейсам дня: {grand_total}")
     head.append("━━━━━━━━━━━━━━")
 
     # порядок отображения: активные по убыванию числа кейсов, затем «нулевые»
@@ -167,7 +165,7 @@ def employee_view(mgr: dict, on_date: str, ei: int) -> tuple[str, InlineKeyboard
         return summary_view(mgr, on_date)
     emp = emps[ei]
     persons = db.persons_processed(emp, on_date)
-    total, unit = _persons_total(persons)
+    total = _persons_total(persons)
 
     lines = [f"👤 <b>{_e(emp)}</b>",
              f"🗓 {human_date(on_date)} · обработано <b>{len(persons)}</b>"]
@@ -178,7 +176,7 @@ def employee_view(mgr: dict, on_date: str, ei: int) -> tuple[str, InlineKeyboard
         for s, n in _outcomes(persons):
             lines.append(f"  {_st_emoji(s)} {_e(s)} — {n}")
         if total:
-            lines.append(f"💰 Сумма по кейсам: {_money(total, unit)}")
+            lines.append(f"💰 Сумма по кейсам: {total}")
 
     # телеметрия активности — если сотрудник привязан к telegram
     act = db.employee_activity(emp)
@@ -221,7 +219,6 @@ def person_card(mgr: dict, on_date: str, ei: int, ci: int) -> tuple[str, InlineK
         return employee_view(mgr, on_date, ei)
     p = persons[ci]
     cs = p["contracts"]
-    unit = _unit(p["partners"])
 
     def val(key):
         return _v(cs, key)
@@ -243,7 +240,7 @@ def person_card(mgr: dict, on_date: str, ei: int, ci: int) -> tuple[str, InlineK
     addr = val("address") or val("address_customer") or val("extra_address")
     if addr:
         head.append(f"📍 {_e(addr)}")
-    head.append(f"💰 <b>{_money(p['total'], unit)}</b>")
+    head.append(f"💰 <b>{_persons_total([p])}</b>")   # ЗК + Делимобиль → обе валюты, не их сумма
 
     # --- итог выезда: заполненное ---
     body = []

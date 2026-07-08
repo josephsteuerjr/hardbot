@@ -42,8 +42,11 @@ def test_import_grid_upsert_and_report():
     c = db.get_client("IG-1")
     assert c["client"] == "Тестов Обновлённый"          # upsert обновил поле
     assert c["city"] == "Москва"                        # но не затёр прочие
-    assert c["debt_total"] == "100900"                  # JSON-число → строка без .0
     assert c["assign_date"] == "2026-06-12"             # ISO-дата от calamine как есть
+    # «долг всего» — колонка разбивки (debt.SOURCE_OWNED): у последней строки по этому КД
+    # ячейка пуста, значит источник говорит «ноль», а не «нет данных». Это осознанная
+    # разница с обычными полями (city выше), см. test_import_grid_debt_cell_empty_means_zero.
+    assert c["debt_total"] is None
 
 
 def test_import_grid_header_shift_and_unknown():
@@ -113,6 +116,59 @@ def test_call_status_title_matches_cyrillic():
     assert rep["inserted"] == 1
     assert db.get_client("IG-CS")["call_status"] == "Оплачен"
     assert db.BY_KEY["call_status"].title[0] == "С"   # кириллическая С (U+0421), не латинская C
+
+
+def test_import_grid_debt_cell_empty_means_zero():
+    """Ежемесячный переимпорт: статью больше не начисляют → она обнуляется.
+
+    Раньше пустая ячейка значила «поле не пришло, не трогать», и в карточке навсегда
+    оставались призраки прошлых начислений (эвакуация, ДТП), а сумма статей расходилась
+    с «долгом всего». Обычные (не-денежные) поля upsert по-прежнему не затирает.
+    """
+    db.init_db()
+    db.import_grid(_full_grid(_row(contract_id="IG-D", partner="Делимобиль", city="Москва",
+                                   rent=12000, evacuation=5000, debt_total=17000)))
+    assert db.get_client("IG-D")["evacuation"] == "5000"
+    assert db.get_client("IG-D")["debt_total"] == "17000"    # JSON-число → строка без .0
+
+    # следующий месяц: эвакуацию погасили — колонка в файле есть, ячейка пуста
+    db.import_grid(_full_grid(_row(contract_id="IG-D", partner="Делимобиль",
+                                   rent=12000, debt_total=12000)))
+    c = db.get_client("IG-D")
+    assert c["evacuation"] is None          # статья погашена, а не «данных нет»
+    assert c["rent"] == "12000"
+    assert c["city"] == "Москва"            # не-денежное поле пустой ячейкой не затёрто
+
+
+def test_import_grid_absent_debt_column_is_not_cleared():
+    """Колонки разбивки, которой в файле НЕТ вообще, обнуление не касается — иначе
+    частичный экспорт (КД + аренда) стёр бы все остальные статьи."""
+    db.init_db()
+    db.import_grid(_full_grid(_row(contract_id="IG-P", partner="Делимобиль",
+                                   rent=12000, evacuation=5000)))
+    rep = db.import_grid([[db.BY_KEY["contract_id"].title, db.BY_KEY["rent"].title],
+                          ["IG-P", 9000]])
+    assert rep["updated"] == 1
+    c = db.get_client("IG-P")
+    assert c["rent"] == "9000"
+    assert c["evacuation"] == "5000"        # колонки не было в файле → не тронули
+
+
+def test_import_grid_matches_latin_homoglyph_header():
+    """В самом «Хард.xlsb» заголовок «Cтатус звонка» начинается с ЛАТИНСКОЙ C — колонка
+    молча уезжала в unknown_columns, и статус звонка не импортировался ни разу."""
+    db.init_db()
+    titles = [db.BY_KEY["contract_id"].title, "Cтатус звонка"]   # C = U+0043
+    assert titles[1][0] == "C" and ord(titles[1][0]) == 0x43
+    rep = db.import_grid([titles, ["IG-H", "Оплачен"]])
+    assert rep["unknown_columns"] == []
+    assert db.get_client("IG-H")["call_status"] == "Оплачен"
+
+
+def test_norm_title_homoglyphs_do_not_collide_across_fields():
+    """Сворачивание латиницы к кириллице не должно склеить два разных поля реестра."""
+    norms = [db._norm_title(f.title) for f in db.FIELDS]
+    assert len(norms) == len(set(norms))
 
 
 def test_pick_grid():

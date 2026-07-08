@@ -203,6 +203,28 @@ TEXT: dict[str, dict[str, str]] = {
 }
 
 FIELD_TITLES: dict[str, dict[str, str]] = {
+    # --- статьи разбивки по долгу (см. debt.py; порядок — как в реестре) ---
+    # ЗК и прочие кредитные контрагенты
+    "debt_overdue": {"ru": "Просроченный долг", "uz": "Muddati o‘tgan qarz",
+                     "tg": "Қарзи мӯҳлаташ гузашта"},
+    "interest_overdue": {"ru": "Просроченные проценты", "uz": "Muddati o‘tgan foizlar",
+                         "tg": "Фоизҳои мӯҳлаташ гузашта"},
+    "penalty": {"ru": "Неустойка и штрафы", "uz": "Penya va jarimalar", "tg": "Ноустуворӣ ва ҷаримаҳо"},
+    "duty": {"ru": "Госпошлина", "uz": "Davlat boji", "tg": "Боҷи давлатӣ"},
+    # Делимобиль (каршеринг)
+    "dtp": {"ru": "Возмещение убытков ДТП", "uz": "YTH zararini qoplash", "tg": "Ҷуброни зарари СНҲ"},
+    "rent": {"ru": "Аренда", "uz": "Ijara", "tg": "Иҷора"},
+    "camera_fine": {"ru": "Штрафы с камер", "uz": "Kameradan jarimalar", "tg": "Ҷаримаҳо аз камера"},
+    "dirt": {"ru": "Грязь в салоне", "uz": "Salon ifloslanishi", "tg": "Ифлосии дохили мошин"},
+    "trash": {"ru": "Мусор", "uz": "Axlat", "tg": "Партов"},
+    "new_damage": {"ru": "Новые повреждения", "uz": "Yangi shikastlar", "tg": "Осебҳои нав"},
+    "evacuation": {"ru": "Эвакуация", "uz": "Evakuatsiya", "tg": "Эвакуатсия"},
+    "peni": {"ru": "Пени", "uz": "Peniya", "tg": "Пеня"},
+    "other": {"ru": "Прочее", "uz": "Boshqa", "tg": "Дигар"},
+    # итоги (не статьи — показываются отдельно)
+    "debt_total": {"ru": "Долг всего", "uz": "Jami qarz", "tg": "Қарзи умумӣ"},
+    "debt_today": {"ru": "Долг на сегодня", "uz": "Bugungi qarz", "tg": "Қарз имрӯз"},
+    # --- поля формы выезда ---
     "call_status": {"ru": "Статус звонка", "uz": "Qo‘ng‘iroq holati", "tg": "Ҳолати занг"},
     "contact_with": {"ru": "С кем был контакт?", "uz": "Kim bilan aloqa bo‘ldi?", "tg": "Бо кӣ тамос буд?"},
     "who_at_address": {"ru": "Кто был на адресе?", "uz": "Manzilda kim bor edi?", "tg": "Дар суроға кӣ буд?"},

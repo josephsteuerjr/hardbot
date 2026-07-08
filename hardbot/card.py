@@ -3,20 +3,9 @@
 from aiogram.types import CallbackQuery
 
 import db
+import debt
 from i18n import t, tv
 from keyboards import card_kb
-
-
-def _unit(partners: list[str]) -> str:
-    if partners == ["ЗК"]:
-        return " сум"
-    if partners and "ЗК" not in partners:
-        return " ₽"
-    return ""
-
-
-def _fmt(amount: int, unit: str) -> str:
-    return f"{amount:,}".replace(",", " ") + unit
 
 
 def render_person(rep_cid: str, lang: str) -> str | None:
@@ -25,8 +14,12 @@ def render_person(rep_cid: str, lang: str) -> str | None:
         return None
     main = rows[0]
     partners = sorted({r["partner"] for r in rows if r["partner"]})
-    unit = _unit(partners)
-    total = sum(db._money_int(r["debt_today"] or r["debt_total"]) for r in rows)
+    unit = debt.unit(partners)
+    total = sum(debt.contract_debt(r) for r in rows)
+    # У человека с договорами ЗК (сумы) и Делимобиля (рубли) общей суммы нет —
+    # показываем раздельно, а не одним бессмысленным числом без валюты.
+    totals = debt.totals_by_unit(rows)
+    total_s = " · ".join(debt.fmt(x["sum"], x["unit"]) for x in totals) or debt.fmt(total, unit)
     photos = sum(r["photos_count"] or 0 for r in rows)
 
     head = t("card_visited", lang) if main["visit_date"] else t("card_not_visited", lang)
@@ -47,14 +40,14 @@ def render_person(rep_cid: str, lang: str) -> str | None:
         f"{t('card_phone2', lang)}: {first('phone_main') or '—'}",
         f"{t('card_address', lang)}: {first('address') or '—'}",
         "———————————",
-        f"{t('card_total', lang)}: <b>{_fmt(total, unit)}</b>  ·  {len(rows)} КД",
+        f"{t('card_total', lang)}: <b>{total_s}</b>  ·  {len(rows)} КД",
     ]
     # перечень договоров
     lines.append(f"<i>{t('card_contracts', lang)}:</i>")
     for r in rows:
-        d = db._money_int(r["debt_today"] or r["debt_total"])
+        d = debt.contract_debt(r)
         lines.append(f"  ▫️ {r['partner'] or '—'} · {r['contract_id']} · "
-                     f"{_fmt(d, _unit([r['partner']] if r['partner'] else []))}")
+                     f"{debt.fmt(d, debt.unit([r['partner']] if r['partner'] else []))}")
     lines += ["———————————", f"{t('card_status', lang)}: <b>{status}</b>"]
 
     if first("agreed_payment"):

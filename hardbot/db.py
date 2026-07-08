@@ -13,6 +13,7 @@ import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import debt
 from fields import FIELDS, BY_KEY
 from util import num as _money_int   # единый разбор чисел (был дубль локальной логики)
 
@@ -606,7 +607,8 @@ def _group_persons(rows: list[sqlite3.Row]) -> list[dict]:
         persons.append({
             "rep": rep, "client": name, "birth_date": dob,
             "contracts": rs, "n": len(rs),
-            "total": sum(_money_int(x["debt_today"] or x["debt_total"]) for x in rs),
+            "total": sum(debt.contract_debt(x) for x in rs),
+            "totals": debt.totals_by_unit(rs),   # раздельно по валютам: сумы ≠ рубли
             "partners": sorted({x["partner"] for x in rs if x["partner"]}),
         })
     persons.sort(key=lambda p: p["client"])
@@ -986,18 +988,24 @@ def _as_date(v):
 
 _ZERO_WIDTH = ("​", "‌", "‍", "﻿")  # невидимый мусор из копипаста в Excel
 
+# Латиница, неотличимая на глаз от кириллицы. В самом «Хард.xlsb» заголовок
+# «Cтатус звонка» начинается с латинской C — колонка молча уезжала в
+# unknown_columns, и статус звонка не импортировался вообще. Сворачиваем обе
+# стороны матчинга к кириллице (в БД и экспорте заголовки не меняются).
+_HOMOGLYPHS = str.maketrans("acekmoptxy", "асекмортху")
+
 
 def _norm_title(s) -> str:
     """Нормализованный заголовок для устойчивого матчинга: регистр, пробелы (юникод-пробелы
     и неразрывный — покрываются штатным классом пробельных символов regex), невидимые
-    нулевой-ширины символы, хвостовая пунктуация (:;*.) — реальные реестры нередко
-    добавляют её к заголовку без изменения смысла колонки."""
+    нулевой-ширины символы, латиница-двойники, хвостовая пунктуация (:;*.) — реальные
+    реестры нередко добавляют её к заголовку без изменения смысла колонки."""
     if s in (None, ""):
         return ""
     t = str(s)
     for zw in _ZERO_WIDTH:
         t = t.replace(zw, "")
-    t = re.sub(r"\s+", " ", t.strip().lower())
+    t = re.sub(r"\s+", " ", t.strip().lower()).translate(_HOMOGLYPHS)
     return t.rstrip(":;*.")
 
 
@@ -1125,6 +1133,12 @@ def import_grid(rows: list[list]) -> dict:
     Upsert: для существующих КД обновляем только пришедшие поля, не затирая
     назначение/визиты/фото.
 
+    Исключение — колонки разбивки по долгу (debt.SOURCE_OWNED). Если такая колонка
+    в файле ЕСТЬ, её пустая ячейка означает «статья погашена», а не «данные не
+    пришли»: иначе при ежемесячной переимпортации в карточке навсегда оставались
+    призраки старых начислений (эвакуация, ДТП…), и сумма статей расходилась с
+    «долгом всего». Колонки, которых в файле нет вообще, по-прежнему не трогаем.
+
     Возвращает отчёт — чтобы было видно ТОЧНО, что вошло:
     {total_rows, inserted, updated, skipped_no_id, duplicates, unknown_columns}.
     """
@@ -1155,6 +1169,8 @@ def import_grid(rows: list[list]) -> dict:
         report["header_sample"] = [str(c).strip() for c in rows[best_h] if c not in (None, "")][:20]
         return report
     report["unknown_columns"] = [str(c).strip() for c, k in zip(rows[best_h], col_keys) if c and k is None]
+    # Колонки разбивки, которые реально есть в этом файле → пустая ячейка = ноль.
+    owned = debt.SOURCE_OWNED.intersection(k for k in col_keys if k)
 
     with connect() as conn:
         existing = {r[0] for r in conn.execute("SELECT contract_id FROM clients")}
@@ -1179,6 +1195,8 @@ def import_grid(rows: list[list]) -> dict:
             if not cid:
                 report["skipped_no_id"] += 1
                 continue
+            for key in owned - data.keys():   # статья есть в файле, в строке пусто → погашена
+                data[key] = None
             is_update = cid in existing or cid in seen
             if cid in seen:
                 report["duplicates"] += 1

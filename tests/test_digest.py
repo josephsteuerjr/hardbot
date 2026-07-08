@@ -104,3 +104,27 @@ def test_view_bounds_safe():
     # некорректные индексы не роняют — откат к сводке/сотруднику
     assert digest.employee_view(mgr, TODAY, 999)
     assert digest.person_card(mgr, TODAY, 0, 999)
+
+
+def test_digest_never_adds_sums_to_rubles():
+    """Смешанная команда (ЗК в сумах + Делимобиль в рублях): дайджест показывает обе
+    валюты раздельно. Раньше «Сумма по кейсам дня» была сумом+рублём в одном числе,
+    да ещё и без единицы измерения (unit молча становился пустым)."""
+    _seed()
+    _add("D-DM", "Каримова Г.", "Рахимов Алишер", visit_date=TODAY,
+         partner="Делимобиль", debt="132 900", overall_result="Оплачен")
+    mgr = db.get_manager(MGR_TID)
+
+    text, _ = digest.summary_view(mgr, TODAY)
+    assert "132 900 ₽" in text
+    assert "сум" in text
+    assert "1 132 900" not in text          # сумы, сложенные с рублями
+
+    # у одного человека тоже: D-DM и D-2 — один клиент, два контрагента
+    emps = digest.sorted_employees(mgr)
+    ei = emps.index("Рахимов Алишер")
+    persons = db.persons_processed("Рахимов Алишер", TODAY)
+    ci = next(i for i, p in enumerate(persons) if p["client"] == "Каримова Г.")
+    assert len(persons[ci]["partners"]) == 2
+    card, _ = digest.person_card(mgr, TODAY, ei, ci)
+    assert "132 900 ₽" in card and "1 000 000 сум" in card

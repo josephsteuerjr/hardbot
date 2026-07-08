@@ -30,6 +30,7 @@ from urllib.parse import parse_qsl
 from aiohttp import web
 
 import db
+import debt
 from config import ADMIN_ID, approval_required, lang_of
 from fields import BY_KEY, DROPDOWNS
 from i18n import FIELD_TITLES, LANGUAGES, t, tf, tv
@@ -56,9 +57,9 @@ FORM_TEXT = ["call_comment", "tips"]
 # Что показываем во вкладке «Клиент» (плотные строки).
 INFO_KEYS = ["birth_date", "phone", "phone_main", "city", "address",
              "address_customer", "extra_address", "responsible", "tips"]
-# Что показываем во вкладке «Долг и обещания».
-DEBT_KEYS = ["debt_today", "debt_total", "debt_overdue", "interest_overdue",
-             "penalty", "duty", "rent", "camera_fine", "peni", "other"]
+# Вкладка «Долг»: статьи разбивки считает debt.breakdown (набор зависит от
+# контрагента), подписи — локализованные, суммы — числа. Раньше здесь лежал
+# плоский DEBT_KEYS, из-за которого миниапп рисовал ключи БД («camera_fine»).
 PROMISE_KEYS = ["agreed_payment", "promise_date", "last_payment_sum",
                 "last_payment_date", "forecast"]
 ALLOWED_SAVE = set(FORM_DROPDOWNS) | set(FORM_TEXT)
@@ -127,14 +128,6 @@ def _auth(request: web.Request) -> tuple[int, str]:
 
 
 # --- Формовка данных --------------------------------------------------------
-def _unit(partners: list[str]) -> str:
-    if partners == ["ЗК"]:
-        return "сум"
-    if partners and "ЗК" not in partners:
-        return "₽"
-    return ""
-
-
 def _title(key: str, lang: str) -> str:
     if key in FIELD_TITLES:
         return tf(key, lang)
@@ -158,8 +151,9 @@ def _person_brief(p: dict) -> dict:
             lat, lon = c["geo_lat"], c["geo_lon"]
             break
     return {"rep": p["rep"], "client": p["client"], "n": p["n"],
-            "total": p["total"], "unit": _unit(p["partners"]), "visited": visited,
-            "lat": lat, "lon": lon}
+            "total": p["total"], "unit": debt.unit(p["partners"]),
+            "totals": p["totals"],   # ЗК + Делимобиль → «11 550 000 сум · 132 900 ₽»
+            "visited": visited, "lat": lat, "lon": lon}
 
 
 def _row_get(rows, key):
@@ -174,8 +168,10 @@ def _person_full(rep: str, lang: str) -> dict | None:
     visited = any(r["visit_date"] for r in rows)
     contracts = [{
         "contract_id": r["contract_id"], "partner": r["partner"],
-        "unit": _unit([r["partner"]] if r["partner"] else []),
-        "debt": {k: r[k] for k in DEBT_KEYS},
+        "unit": debt.unit([r["partner"]] if r["partner"] else []),
+        "total": debt.contract_debt(r),
+        "debt": [{"key": k, "title": _title(k, lang), "value": v}
+                 for k, v in debt.breakdown(r)],
     } for r in rows]
     info = [{"key": k, "title": _title(k, lang), "value": _row_get(rows, k) or "—"}
             for k in INFO_KEYS]
@@ -192,8 +188,9 @@ def _person_full(rep: str, lang: str) -> dict | None:
         "assign_date": main["assign_date"], "visit_date": main["visit_date"],
         "address": _row_get(rows, "address"), "phone": _row_get(rows, "phone"),
         "geo": {"lat": main["geo_lat"], "lon": main["geo_lon"], "src": main["geo_src"]},
-        "total": sum(db._money_int(r["debt_today"] or r["debt_total"]) for r in rows),
-        "unit": _unit(sorted({r["partner"] for r in rows if r["partner"]})),
+        "total": sum(debt.contract_debt(r) for r in rows),
+        "unit": debt.unit(sorted({r["partner"] for r in rows if r["partner"]})),
+        "totals": debt.totals_by_unit(rows),
         "photos": sum(r["photos_count"] or 0 for r in rows),
         "contracts": contracts, "info": info, "promise": promise,
         "form": form,
