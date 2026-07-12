@@ -1,0 +1,84 @@
+/* Service worker миниаппа выездника.
+ *
+ * Цель — оффлайн «с холода»: приложение должно подниматься без сети, если хоть раз
+ * было открыто при интернете. Кэшируем оболочку (index.html), локальный Telegram SDK
+ * и иконки. Данные (/api/*) через SW НЕ кэшируем — их оффлайн-кэш держит сам миниапп в
+ * IndexedDB, а исходящие POST'ы (визит/фото/метка) идут в свою очередь. Карты грузятся
+ * лениво с CDN и кэшируются оппортунистически (для заполнения визита карта не нужна).
+ *
+ * ВАЖНО при обновлении оболочки на сервере: поднимите версию CACHE (v1→v2), иначе у уже
+ * открывавших приложение выездников останется старый index.html из кэша до смены версии.
+ */
+const CACHE = "hardbot-shell-v1";
+const PRECACHE = [
+  "/",
+  "/vendor/telegram-web-app.js",
+  "/manifest.webmanifest",
+  "/vendor/icon-192.png",
+  "/vendor/icon-512.png",
+];
+
+self.addEventListener("install", (e) => {
+  e.waitUntil(
+    caches.open(CACHE).then((c) => c.addAll(PRECACHE)).then(() => self.skipWaiting())
+  );
+});
+
+self.addEventListener("activate", (e) => {
+  e.waitUntil(
+    caches.keys()
+      .then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener("fetch", (e) => {
+  const req = e.request;
+  if (req.method !== "GET") return;                     // POST'ы (save/photo/marker) — мимо SW
+  const url = new URL(req.url);
+  const sameOrigin = url.origin === self.location.origin;
+
+  // Данные, админ-API и тайлы — всегда из сети (оффлайн-данные держит IndexedDB миниаппа).
+  if (sameOrigin && (url.pathname.startsWith("/api/") ||
+                     url.pathname.startsWith("/admin/") ||
+                     url.pathname.startsWith("/tiles/"))) return;
+
+  // Открытие приложения — отдаём оболочку из кэша сразу (оффлайн-старт), в фоне освежаем.
+  if (req.mode === "navigate") {
+    e.respondWith(
+      caches.match("/").then((hit) => {
+        const net = fetch(req).then((resp) => {
+          if (resp && resp.ok) caches.open(CACHE).then((c) => c.put("/", resp.clone()));
+          return resp;
+        }).catch(() => hit);
+        return hit || net;
+      })
+    );
+    return;
+  }
+
+  if (sameOrigin) {
+    // Свои ассеты (SDK, иконки, манифест) — cache-first с фоновым обновлением.
+    e.respondWith(
+      caches.match(req).then((hit) => {
+        const net = fetch(req).then((resp) => {
+          if (resp && resp.ok) caches.open(CACHE).then((c) => c.put(req, resp.clone()));
+          return resp;
+        }).catch(() => hit);
+        return hit || net;
+      })
+    );
+    return;
+  }
+
+  // Кросс-ориджин (карты/шрифты с CDN) — из кэша, иначе сеть; удачный ответ кладём в кэш
+  // на будущее (в т.ч. opaque-ответы no-cors — тогда и карта заработает оффлайн повторно).
+  e.respondWith(
+    caches.match(req).then((hit) =>
+      hit || fetch(req).then((resp) => {
+        caches.open(CACHE).then((c) => c.put(req, resp.clone())).catch(() => {});
+        return resp;
+      }).catch(() => hit)
+    )
+  );
+});

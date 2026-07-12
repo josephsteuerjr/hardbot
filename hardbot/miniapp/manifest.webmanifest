@@ -1,0 +1,14 @@
+{
+  "name": "Маршрут — выезды",
+  "short_name": "Маршрут",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#FAF9F5",
+  "theme_color": "#FAF9F5",
+  "lang": "ru",
+  "icons": [
+    { "src": "/vendor/icon-192.png", "sizes": "256x256", "type": "image/png", "purpose": "any" },
+    { "src": "/vendor/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

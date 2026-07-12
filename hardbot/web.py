@@ -228,6 +228,18 @@ async def _index(request: web.Request) -> web.StreamResponse:
     return web.FileResponse(MINIAPP_DIR / "index.html")
 
 
+async def _sw(request: web.Request) -> web.StreamResponse:
+    """Service worker миниаппа. Отдаётся с корня (/sw.js), чтобы его скоуп охватывал весь
+    origin. Service-Worker-Allowed:/ и no-cache — чтобы обновление SW подхватывалось."""
+    return web.FileResponse(MINIAPP_DIR / "sw.js", headers={
+        "Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
+
+
+async def _manifest(request: web.Request) -> web.StreamResponse:
+    return web.FileResponse(MINIAPP_DIR / "manifest.webmanifest",
+                            headers={"Content-Type": "application/manifest+json"})
+
+
 async def _tiles(request: web.Request) -> web.StreamResponse:
     if not TILES_FILE.exists():
         raise web.HTTPNotFound()
@@ -824,6 +836,11 @@ def build_app(bot=None) -> web.Application:
     app = web.Application(client_max_size=256 * 1024 * 1024, middlewares=[_cors])
     app["bot"] = bot
     app.router.add_get("/", _index)
+    app.router.add_get("/sw.js", _sw)
+    app.router.add_get("/manifest.webmanifest", _manifest)
+    # Локально захостенные ассеты оболочки (Telegram SDK, иконки PWA) — same-origin,
+    # чтобы миниапп поднимался в оффлайне без внешних CDN (их кэширует service worker).
+    app.router.add_static("/vendor/", path=str(MINIAPP_DIR / "vendor"))
     app.router.add_get("/admin/stats", _admin_stats)
     app.router.add_post("/admin/import", _admin_import)
     app.router.add_post("/admin/import.json", _admin_import_json)
