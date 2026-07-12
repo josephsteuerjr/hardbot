@@ -219,6 +219,8 @@ const I18N = {
     nogeo:"Не получилось определить геолокацию — включите доступ или введите координаты.",
     go:"Поехать",exit:"Выйти",finishvisit:"Отметить визит",mins:"мин",
     draftwait:"черновик не отправлен на сервер",draftsent:"черновик сохранён на сервере",
+    offline:"Оффлайн",datao:"данные на",pend:"ждут отправки",sending:"Отправляю…",
+    savedoff:"Сохранено — уйдёт при связи",queuedn:"в очереди",
     secResult:"Результат выезда",secContact:"Контакт",secClient:"Клиент сейчас",secAgree:"Договорённость",
     nosplit:"разбивка по статьям не пришла"},
   uz:{visit:"Chiqish",client:"Mijoz",debt:"Qarz",form:"To‘ldirish",my:"Mijozlarim",
@@ -234,6 +236,8 @@ const I18N = {
     nogeo:"Geolokatsiyani aniqlab bo‘lmadi — ruxsat bering yoki koordinatani kiriting.",
     go:"Yo‘lga chiqish",exit:"Yopish",finishvisit:"Tashrifni belgilash",mins:"daq",
     draftwait:"qoralama serverga yuborilmadi",draftsent:"qoralama serverda saqlandi",
+    offline:"Oflayn",datao:"ma’lumot",pend:"yuboriladi",sending:"Yuborilmoqda…",
+    savedoff:"Saqlandi — aloqa paydo bo‘lsa yuboriladi",queuedn:"navbatda",
     secResult:"Chiqish natijasi",secContact:"Kontakt",secClient:"Mijoz hozir",secAgree:"Kelishuv",
     nosplit:"moddalar bo‘yicha taqsimot kelmadi"},
   tg:{visit:"Сафар",client:"Мизоҷ",debt:"Қарз",form:"Пур кардан",my:"Мизоҷони ман",
@@ -249,6 +253,8 @@ const I18N = {
     nogeo:"Геолокатсия муайян нашуд — иҷозат диҳед ё координата ворид кунед.",
     go:"Ба роҳ баромадан",exit:"Бастан",finishvisit:"Сафарро қайд кардан",mins:"дақ",
     draftwait:"нусха ба сервер нафиристода шуд",draftsent:"нусха дар сервер захира шуд",
+    offline:"Офлайн",datao:"додаҳо аз",pend:"дар навбат",sending:"Фиристода мешавад…",
+    savedoff:"Захира шуд — ҳангоми алоқа фиристода мешавад",queuedn:"дар навбат",
     secResult:"Натиҷаи сафар",secContact:"Тамос",secClient:"Мизоҷ ҳозир",secAgree:"Созиш",
     nosplit:"тақсимот аз рӯи моддаҳо наомад"},
 };
@@ -312,16 +318,78 @@ async function warmCards(){
 async function updateOffBar(){
   const e=$("offbar"); if(!e) return;
   let qn=0; try{ qn=((await IDB.all("queue"))||[]).length; }catch(_){}
-  const off = STATE.online===false;
+  const off = STATE.online===false, t=L();
   if(!off && !qn){ e.className="offbar"; e.innerHTML=""; return; }
   let msg;
   if(off){ const snap=await loadBootstrapSnapshot();
     const at=snap&&snap.at?new Date(snap.at):null;
-    msg="Оффлайн"+(at?" · данные на "+hhmm(at):""); }
-  else msg="Отправляю…";
-  if(qn) msg+=" · "+qn+" ждут отправки";
+    msg=t.offline+(at?" · "+t.datao+" "+hhmm(at):""); }
+  else msg=t.sending;
+  if(qn) msg+=" · "+qn+" "+t.pend;
   e.className="offbar on";
   e.innerHTML=`<span class="d"></span><span>${esc(msg)}</span>`;
+}
+
+// --- Исходящая очередь операций (визит/фото/метка) --------------------------
+// Оффлайн операции копятся в IndexedDB (store queue, ключ op_id) и досылаются при
+// связи. op_id делает досыл идемпотентным на сервере (см. web.py): повтор не плодит
+// дубли визитов/меток/фото и не шлёт повторный пост в группу.
+function jsonHeaders(){ const h=authHeaders(); h["Content-Type"]="application/json"; return h; }
+async function enqueue(entry){ try{ await IDB.put("queue", entry); }catch(e){} }
+
+let _flushing=false;
+async function flushQueue(){
+  if(_flushing) return;
+  _flushing=true;
+  try{
+    let items=[]; try{ items=(await IDB.all("queue"))||[]; }catch(e){ items=[]; }
+    items.sort((a,b)=>(a.at||0)-(b.at||0));   // порядок как случилось в поле
+    for(const it of items){
+      let ok=false, stop=false;
+      try{
+        let r;
+        if(it.kind==="save"){
+          r=await fetch("/api/save",{method:"POST",headers:jsonHeaders(),
+            body:JSON.stringify({rep:it.rep,values:it.values,finish:true,op_id:it.op_id})});
+        }else if(it.kind==="marker"){
+          const body={lat:it.lat,lon:it.lon,op_id:it.op_id};
+          if(it.rep) body.rep=it.rep; if(it.label) body.label=it.label;
+          r=await fetch("/api/marker",{method:"POST",headers:jsonHeaders(),body:JSON.stringify(body)});
+        }else if(it.kind==="photo"){
+          const fd=new FormData(); fd.append("photo", it.blob, "photo"+(it.ext||".jpg"));
+          r=await fetch("/api/photo?rep="+enc(it.rep)+"&op="+it.op_id,{method:"POST",headers:authHeaders(),body:fd});
+        }else{ ok=true; }   // неизвестный тип — не держим вечно
+        if(r){
+          if(r.ok) ok=true;
+          else if(r.status===401||r.status===403||r.status>=500) stop=true;  // авторизация/сервер — позже
+          else ok=true;   // 400/404 — операция невалидна (кейс не наш и т.п.), не зависаем на ней
+        }
+      }catch(e){ stop=true; }   // сеть недоступна — прекращаем, повтор при следующей связи
+      if(ok){ try{ await IDB.del("queue", it.op_id); }catch(e){} }
+      if(stop){ STATE.online=false; break; }
+      STATE.online=true;
+    }
+  }finally{ _flushing=false; updateOffBar(); }
+}
+
+// Оптимистично отразить оффлайн-сохранение визита в кэше карточки и списке.
+function applyVisitLocally(rep, values){
+  const d=STATE.cur;
+  if(d && d.rep===rep){
+    d.visited=true; d.visit_date=(new Date()).toISOString().slice(0,10);
+    if(d.form) d.form.forEach(f=>{ if(values[f.key]!=null) f.current=values[f.key]; });
+    if(values.call_comment!=null) d.call_comment=values.call_comment;
+    if(values.tips!=null) d.tips=values.tips;
+    if(values.call_status!=null) d.status=values.call_status;
+    IDB.put("cards", d, rep).catch(()=>{});
+  }
+  const p=STATE.persons.find(x=>x.rep===rep); if(p) p.visited=true;
+}
+function finishSavedUI(rep, msg){
+  clearDraft(rep); draftDirty=false; stopAutoSync(); toast(msg);
+  if(TG&&TG.HapticFeedback) TG.HapticFeedback.notificationOccurred("success");
+  const p=STATE.persons.find(x=>x.rep===rep); if(p) p.visited=true;
+  STATE.tab="visit"; renderDetail();
 }
 
 function authHeaders(){
@@ -362,6 +430,7 @@ async function boot(){
     cacheBootstrap(d);            // снимок портфеля для оффлайна (в фоне, не блокирует UI)
     renderList();
     warmCards();                  // полные карточки всех клиентов в фон-кэш (онлайн)
+    flushQueue();                 // досыл накопленного оффлайна (визиты/фото/метки)
   }catch(e){
     // Нет сети / нет доступа — поднимаемся из оффлайн-снимка портфеля, если он есть.
     const snap = await loadBootstrapSnapshot();
@@ -689,22 +758,35 @@ function call(){ if(STATE.cur.phone) location.href="tel:"+STATE.cur.phone.replac
 
 async function upPhoto(){
   const f=$("photo").files[0]; if(!f) return;
+  const rep=STATE.cur.rep, op_id=uuid();
+  const ext=(f.name&&f.name.lastIndexOf(".")>0)?f.name.slice(f.name.lastIndexOf(".")):".jpg";
   const fd=new FormData(); fd.append("photo",f);
   try{
-    const r=await fetch("/api/photo?rep="+enc(STATE.cur.rep),{method:"POST",headers:authHeaders(),body:fd});
-    const j=await r.json(); STATE.cur.photos=j.photos; $("phc").textContent=L().photos+": "+j.photos; toast(L().saved);
-  }catch(e){ toast("✕"); }
+    const r=await fetch("/api/photo?rep="+enc(rep)+"&op="+op_id,{method:"POST",headers:authHeaders(),body:fd});
+    if(!r.ok) throw new Error(r.status);
+    const j=await r.json(); STATE.online=true;
+    STATE.cur.photos=j.photos; $("phc").textContent=L().photos+": "+j.photos; toast(L().saved);
+  }catch(e){
+    // Нет сети — фото (blob) в очередь; счётчик покажем оптимистично, отправим при связи.
+    await enqueue({op_id, kind:"photo", rep, blob:f, ext, at:Date.now()});
+    STATE.online=false; STATE.cur.photos=(STATE.cur.photos||0)+1;
+    const el=$("phc"); if(el) el.textContent=L().photos+": "+STATE.cur.photos+" ("+L().queuedn+")";
+    toast(L().savedoff); updateOffBar();
+  }
 }
 async function saveVisit(){
   const values=readForm();
-  const rep=STATE.cur.rep;
+  const rep=STATE.cur.rep, op_id=uuid();
   try{
-    const j=await api("/api/save",{method:"POST",body:JSON.stringify({rep,values,finish:true})});
-    STATE.cur=j.person; clearDraft(rep); draftDirty=false; stopAutoSync(); toast(L().saved);
-    if(TG&&TG.HapticFeedback) TG.HapticFeedback.notificationOccurred("success");
-    STATE.tab="visit"; renderDetail();
-    const p=STATE.persons.find(x=>x.rep===rep); if(p) p.visited=true;
-  }catch(e){ toast("✕"); }
+    const j=await api("/api/save",{method:"POST",body:JSON.stringify({rep,values,finish:true,op_id})});
+    STATE.online=true; STATE.cur=j.person; IDB.put("cards",j.person,rep).catch(()=>{});
+    finishSavedUI(rep, L().saved);
+  }catch(e){
+    // Нет сети — кладём выезд в очередь, помечаем визит локально; уйдёт при связи.
+    await enqueue({op_id, kind:"save", rep, values, at:Date.now()});
+    STATE.online=false; applyVisitLocally(rep, values);
+    finishSavedUI(rep, L().savedoff);
+  }
 }
 
 // --- Автосохранение черновика формы (устойчивость к обрыву связи) ------------
@@ -794,6 +876,13 @@ async function pushDraft(){
 window.addEventListener("beforeunload", flushDraft);
 document.addEventListener("visibilitychange", ()=>{ if(document.hidden){ flushDraft(); pushDraft(); } });
 
+// Появилась связь — досылаем накопленную очередь; пропала — переключаем индикатор.
+// Плюс попытка досыла при возвращении к приложению (события online в мобильном
+// WebView не всегда надёжны, visibilitychange — подстраховка).
+window.addEventListener("online", ()=>{ STATE.online=true; updateOffBar(); flushQueue(); });
+window.addEventListener("offline", ()=>{ STATE.online=false; updateOffBar(); });
+document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) flushQueue(); });
+
 function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
 // --- Геометки: захват точки (геолокация телефона) + сохранение ---
@@ -811,13 +900,20 @@ function getLoc(){
 }
 async function setMarkCase(){
   const t=L(); toast(t.getloc);
+  let loc; try{ loc=await getLoc(); }catch(e){ alert(t.nogeo); return; }   // сбой геолокации ≠ сбой сети
+  const rep=STATE.cur.rep, op_id=uuid();
   try{
-    const loc=await getLoc();
-    const j=await api("/api/marker",{method:"POST",body:JSON.stringify({rep:STATE.cur.rep,lat:loc.lat,lon:loc.lon})});
-    if(j.person) STATE.cur=j.person;
+    const j=await api("/api/marker",{method:"POST",body:JSON.stringify({rep,lat:loc.lat,lon:loc.lon,op_id})});
+    STATE.online=true; if(j.person){ STATE.cur=j.person; IDB.put("cards",j.person,rep).catch(()=>{}); }
     if(TG&&TG.HapticFeedback) TG.HapticFeedback.notificationOccurred("success");
     toast(t.marksaved); drawPanel();
-  }catch(e){ alert(t.nogeo); }
+  }catch(e){
+    await enqueue({op_id, kind:"marker", rep, lat:loc.lat, lon:loc.lon, at:Date.now()});
+    STATE.online=false;
+    if(STATE.cur && STATE.cur.rep===rep){ STATE.cur.geo={lat:loc.lat,lon:loc.lon,src:"manual"}; IDB.put("cards",STATE.cur,rep).catch(()=>{}); }
+    if(TG&&TG.HapticFeedback) TG.HapticFeedback.notificationOccurred("success");
+    toast(t.marksaved+" ("+t.queuedn+")"); drawPanel(); updateOffBar();
+  }
 }
 async function renderMarkers(){
   flushDraft(); stopAutoSync();
@@ -837,11 +933,15 @@ async function renderMarkers(){
 async function newMarker(){
   const t=L(); const label=(prompt(t.mlabel)||"").trim();
   toast(t.getloc);
+  let loc; try{ loc=await getLoc(); }catch(e){ alert(t.nogeo); return; }   // сбой геолокации ≠ сбой сети
+  const op_id=uuid();
   try{
-    const loc=await getLoc();
-    await api("/api/marker",{method:"POST",body:JSON.stringify({lat:loc.lat,lon:loc.lon,label})});
-    toast(t.marksaved); renderMarkers();
-  }catch(e){ alert(t.nogeo); }
+    await api("/api/marker",{method:"POST",body:JSON.stringify({lat:loc.lat,lon:loc.lon,label,op_id})});
+    STATE.online=true; toast(t.marksaved); renderMarkers();
+  }catch(e){
+    await enqueue({op_id, kind:"marker", lat:loc.lat, lon:loc.lon, label, at:Date.now()});
+    STATE.online=false; toast(t.marksaved+" ("+t.queuedn+")"); renderMarkers();
+  }
 }
 
 // --- Полноэкранная навигация: «Поехать» переводит миниапп в режим навигатора. ---
