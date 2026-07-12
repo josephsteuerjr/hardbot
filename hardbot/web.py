@@ -376,6 +376,27 @@ async def _person(request: web.Request) -> web.Response:
     return web.json_response(data)
 
 
+async def _cards(request: web.Request) -> web.Response:
+    """Все полные карточки портфеля сотрудника разом — прогрев оффлайн-кэша миниаппа.
+    Клиент зовёт это ОНЛАЙН сразу после /api/bootstrap и складывает карточки в IndexedDB,
+    чтобы в поле без сети открывать любого своего клиента и заполнять визит. Один запрос
+    вместо N (по карточке на человека). ПД в журнал доступа тут не пишем — это оптовый
+    предзагруз своего же портфеля, а не точечный просмотр (view_card логируется в _person)."""
+    uid, emp = _auth(request)
+    lang = lang_of(uid)
+    cards = {}
+    for p in db.persons_for_employee(emp):
+        full = _person_full(p["rep"], lang)
+        if full:
+            cards[p["rep"]] = full
+    # ИБ: точечный просмотр карточки логируется в _person (view_card). Здесь — оптовый
+    # предзагруз своего портфеля в оффлайн-кэш: пишем один факт (кто/когда/сколько), без
+    # строки на каждого. NB: оффлайн-открытия карточек в поле сервер уже не аудирует.
+    db.audit_access(uid, "cards_prefetch", detail=str(len(cards)))
+    return web.json_response({"ok": True, "cards": cards,
+                              "at": datetime.now().isoformat(timespec="seconds")})
+
+
 async def _save(request: web.Request) -> web.Response:
     uid, emp = _auth(request)
     body = await request.json()
@@ -831,6 +852,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/tiles/basemap.pmtiles", _tiles)
     app.router.add_get("/api/bootstrap", _bootstrap)
     app.router.add_get("/api/person", _person)
+    app.router.add_get("/api/cards", _cards)
     app.router.add_get("/api/route", _route)
     app.router.add_post("/api/save", _save)
     app.router.add_post("/api/photo", _photo)

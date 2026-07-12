@@ -28,6 +28,11 @@ body.navon{overflow:hidden}
 .bar{display:flex;align-items:center;justify-content:space-between;
   padding:12px 14px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);z-index:5}
 .brand{font-weight:600;letter-spacing:.3px}
+/* Индикатор оффлайна / очереди отправки (данные кэшируются, визиты — в очередь). */
+.offbar{display:none;align-items:center;gap:8px;padding:7px 14px;font-size:12.5px;
+  background:#FBEED9;color:#7A5A1E;border-bottom:1px solid #EBD9B5;position:sticky;top:49px;z-index:4}
+.offbar.on{display:flex}
+.offbar .d{width:7px;height:7px;border-radius:50%;background:#C9852A;flex:0 0 auto}
 .langs{display:flex;gap:4px}
 .langs button{border:1px solid var(--border);background:var(--card);border-radius:20px;
   padding:4px 10px;font-size:12px;color:var(--muted);font-family:inherit}
@@ -171,6 +176,7 @@ textarea{min-height:64px;resize:vertical}
   <span class="brand">Маршрут</span>
   <div class="langs" id="langs"></div>
 </div>
+<div class="offbar" id="offbar"></div>
 <div class="wrap" id="app"><div class="center" id="boot">…</div></div>
 <div class="bottomnav" id="bottomnav"><div class="bottomnav-inner" id="bottomnavInner"></div></div>
 <div class="navmode" id="navmode"></div>
@@ -252,6 +258,72 @@ const $ = (id) => document.getElementById(id);
 const enc = encodeURIComponent;
 const money = (n,u) => (n||0).toLocaleString("ru-RU") + (u?(" "+u):"");
 
+// --- Оффлайн-хранилище (IndexedDB) -----------------------------------------
+// Снимок портфеля (kv:bootstrap) + полные карточки (cards) + исходящая очередь
+// операций (queue). Даёт заполнение визита в поле без сети с досылом при связи.
+// Всё обёрнуто в try/catch: если IndexedDB недоступен (приватный режим/запрет) —
+// онлайн-путь не страдает, просто нет оффлайна.
+const IDB = (()=>{
+  let _db=null;
+  function open(){
+    if(_db) return Promise.resolve(_db);
+    return new Promise((resolve,reject)=>{
+      let req; try{ req=indexedDB.open("hardbot",1); }catch(e){ return reject(e); }
+      req.onupgradeneeded=()=>{ const d=req.result;
+        if(!d.objectStoreNames.contains("kv")) d.createObjectStore("kv");
+        if(!d.objectStoreNames.contains("cards")) d.createObjectStore("cards");
+        if(!d.objectStoreNames.contains("queue")) d.createObjectStore("queue",{keyPath:"op_id"});
+      };
+      req.onsuccess=()=>{ _db=req.result; resolve(_db); };
+      req.onerror=()=>reject(req.error);
+    });
+  }
+  const store=(name,mode)=>open().then(d=>d.transaction(name,mode).objectStore(name));
+  const p=(req)=>new Promise((res,rej)=>{ req.onsuccess=()=>res(req.result); req.onerror=()=>rej(req.error); });
+  return {
+    get:(s,k)=>store(s,"readonly").then(o=>p(o.get(k))),
+    put:(s,v,k)=>store(s,"readwrite").then(o=>p(k===undefined?o.put(v):o.put(v,k))),
+    del:(s,k)=>store(s,"readwrite").then(o=>p(o.delete(k))),
+    all:(s)=>store(s,"readonly").then(o=>p(o.getAll())),
+  };
+})();
+
+// uuid для идемпотентного op_id операций очереди (crypto, с запасным вариантом).
+function uuid(){
+  try{ if(crypto&&crypto.randomUUID) return crypto.randomUUID(); }catch(e){}
+  return "op-"+Date.now()+"-"+Math.random().toString(16).slice(2);
+}
+function hhmm(dt){ return String(dt.getHours()).padStart(2,"0")+":"+String(dt.getMinutes()).padStart(2,"0"); }
+
+async function cacheBootstrap(d){
+  try{ await IDB.put("kv",{lang:d.lang,meta:d.meta,persons:d.persons,kind:d.kind,
+    employee:d.employee,at:Date.now()},"bootstrap"); }catch(e){}
+}
+async function loadBootstrapSnapshot(){ try{ return await IDB.get("kv","bootstrap"); }catch(e){ return null; } }
+async function loadCard(rep){ try{ return (await IDB.get("cards",rep))||null; }catch(e){ return null; } }
+// Прогрев кэша всех карточек одним запросом (только онлайн, в фоне, не блокирует UI).
+async function warmCards(){
+  try{
+    const j=await api("/api/cards");
+    if(j&&j.cards){ for(const rep of Object.keys(j.cards)){ try{ await IDB.put("cards",j.cards[rep],rep); }catch(e){} } }
+  }catch(e){}
+}
+// Индикатор оффлайна / очереди. Обновляется на каждом основном экране (setBottomNav).
+async function updateOffBar(){
+  const e=$("offbar"); if(!e) return;
+  let qn=0; try{ qn=((await IDB.all("queue"))||[]).length; }catch(_){}
+  const off = STATE.online===false;
+  if(!off && !qn){ e.className="offbar"; e.innerHTML=""; return; }
+  let msg;
+  if(off){ const snap=await loadBootstrapSnapshot();
+    const at=snap&&snap.at?new Date(snap.at):null;
+    msg="Оффлайн"+(at?" · данные на "+hhmm(at):""); }
+  else msg="Отправляю…";
+  if(qn) msg+=" · "+qn+" ждут отправки";
+  e.className="offbar on";
+  e.innerHTML=`<span class="d"></span><span>${esc(msg)}</span>`;
+}
+
 function authHeaders(){
   const h = {};
   if (TG && TG.initData) h["X-Init-Data"] = TG.initData;
@@ -286,9 +358,21 @@ async function boot(){
     STATE.lang=d.lang||STATE.lang; renderLangs();
     if(d.needsOnboarding){ STATE.onb=d; renderOnboarding(); return; }
     STATE.meta=d.meta; STATE.persons=d.persons; STATE.kind=d.kind||"agent";
+    STATE.online=true;
+    cacheBootstrap(d);            // снимок портфеля для оффлайна (в фоне, не блокирует UI)
     renderList();
+    warmCards();                  // полные карточки всех клиентов в фон-кэш (онлайн)
   }catch(e){
-    $("app").innerHTML = `<div class="center">Нет доступа.<br><span class="muted">Откройте через бота.</span></div>`;
+    // Нет сети / нет доступа — поднимаемся из оффлайн-снимка портфеля, если он есть.
+    const snap = await loadBootstrapSnapshot();
+    if(snap && snap.persons){
+      STATE.lang=snap.lang||STATE.lang; renderLangs();
+      STATE.meta=snap.meta; STATE.persons=snap.persons; STATE.kind=snap.kind||"agent";
+      STATE.online=false;
+      renderList();
+    }else{
+      $("app").innerHTML = `<div class="center">Нет доступа.<br><span class="muted">Откройте через бота при интернете хотя бы раз.</span></div>`;
+    }
   }
 }
 
@@ -302,6 +386,7 @@ function setBottomNav(active){
   $("bottomnavInner").innerHTML = items.map(it =>
     `<button class="${it.id===active?'on':''}" onclick="${it.fn}()">${ic(it.icon)}<span>${esc(it.label)}</span></button>`).join("");
   $("bottomnav").style.display = "block";
+  updateOffBar();
 }
 function hideBottomNav(){ $("bottomnav").style.display = "none"; }
 
@@ -360,7 +445,11 @@ function filterList(){
 }
 
 async function openP(rep){
-  const d = await api("/api/person?rep="+enc(rep));
+  let d=null;
+  try{ d=await api("/api/person?rep="+enc(rep));
+    if(d){ STATE.online=true; IDB.put("cards",d,rep).catch(()=>{}); } }   // освежить кэш карточки
+  catch(e){ d=await loadCard(rep); if(d) STATE.online=false; }            // нет сети → из кэша
+  if(!d){ toast(STATE.online===false?"нет данных оффлайн":"✕"); return; }
   STATE.cur=d; STATE.tab="visit";
   draftDirty=false; clearTimeout(draftTimer);   // новый клиент — сбросить состояние сессии черновика
   renderDetail();
