@@ -315,7 +315,8 @@ async def _marker(request: web.Request) -> web.Response:
             raise web.HTTPNotFound(text="person")
         db.audit_access(uid, "marker", rep)
     label = (body.get("label") or "").strip() or None
-    mid = db.add_marker(uid, db.get_kind(uid), lat, lon, client_rep=rep, label=label)
+    op_id = (str(body.get("op_id") or "")).strip() or None
+    mid = db.add_marker(uid, db.get_kind(uid), lat, lon, client_rep=rep, label=label, op_id=op_id)
     out = {"ok": True, "id": mid}
     if rep:
         out["person"] = _person_full(rep, lang_of(uid))
@@ -389,9 +390,12 @@ async def _save(request: web.Request) -> web.Response:
     if body.get("finish"):
         db.update_person(rep, {"visit_date": date.today().isoformat()})
         cur = db.get_client(rep)
-        db.log_visit(rep, uid, f"Выезд (миниапп). Статус: {cur['call_status']}; "
-                     f"Договорённость: {cur['agreed_payment']}; {cur['call_comment'] or ''}")
-        await _notify_group(request, cur, uid)
+        op_id = (str(body.get("op_id") or "")).strip() or None
+        is_new = db.log_visit(
+            rep, uid, f"Выезд (миниапп). Статус: {cur['call_status']}; "
+            f"Договорённость: {cur['agreed_payment']}; {cur['call_comment'] or ''}", op_id=op_id)
+        if is_new:   # повтор того же выезда из оффлайн-очереди в группу НЕ шлём (дедуп по op_id)
+            await _notify_group(request, cur, uid)
     data = _person_full(rep, lang_of(uid))
     return web.json_response({"ok": True, "person": data})
 
@@ -410,7 +414,17 @@ async def _photo(request: web.Request) -> web.Response:
     dest = PHOTO_DIR / rep
     dest.mkdir(parents=True, exist_ok=True)
     ext = os.path.splitext(field.filename or "")[1][:8] or ".jpg"
-    path = dest / f"{int(time.time()*1000)}{ext}"
+    # op — идемпотентный ключ загрузки из оффлайн-очереди: имя файла = op, повторная
+    # доставка того же фото не создаёт второй файл и не накручивает счётчик photos_count.
+    op = re.sub(r"[^A-Za-z0-9_-]", "", request.query.get("op", ""))[:64]
+    if op:
+        path = dest / f"{op}{ext}"
+        if path.exists():   # уже загружено этим op — дренируем тело и отдаём текущий счётчик
+            while await field.read_chunk():
+                pass
+            return web.json_response({"ok": True, "photos": db.photos_count(rep), "dup": True})
+    else:
+        path = dest / f"{int(time.time()*1000)}{ext}"
     with open(path, "wb") as f:
         while chunk := await field.read_chunk():
             f.write(chunk)

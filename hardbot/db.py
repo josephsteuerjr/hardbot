@@ -92,9 +92,19 @@ def init_db() -> None:
               contract_id TEXT,
               agent_id INTEGER,
               created_at TEXT,
-              payload TEXT
+              payload TEXT,
+              op_id TEXT
             )
         """)
+        # Идемпотентный ключ выезда (uuid от клиента). Оффлайн-очередь миниаппа при
+        # восстановлении связи досылает накопленные выезды; повторная доставка того же
+        # выезда с тем же op_id НЕ создаёт дубль строки и НЕ шлёт повторный пост в группу.
+        # Старые строки (op_id IS NULL) уникальному индексу не мешают — в SQLite NULL-ы
+        # в UNIQUE-индексе считаются различными.
+        vcols = {r[1] for r in conn.execute("PRAGMA table_info(visits)")}
+        if "op_id" not in vcols:
+            conn.execute("ALTER TABLE visits ADD COLUMN op_id TEXT")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_visits_op ON visits(op_id)")
         # Профиль пользователя (язык). Whitelist теперь = привязка к сотруднику.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -153,9 +163,15 @@ def init_db() -> None:
               client_rep TEXT,
               lat REAL, lon REAL,
               label TEXT,
-              created_at TEXT
+              created_at TEXT,
+              op_id TEXT
             )
         """)
+        # Тот же идемпотентный ключ для меток из оффлайн-очереди (см. visits.op_id).
+        mcols = {r[1] for r in conn.execute("PRAGMA table_info(markers)")}
+        if "op_id" not in mcols:
+            conn.execute("ALTER TABLE markers ADD COLUMN op_id TEXT")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_markers_op ON markers(op_id)")
         # Настройки (например, принятая беседа group_chat_id).
         conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
@@ -818,14 +834,20 @@ def audit_tail(limit: int = 200) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def log_visit(contract_id: str, agent_id: int, payload: str) -> None:
+def log_visit(contract_id: str, agent_id: int, payload: str,
+              op_id: str | None = None) -> bool:
+    """Записать выезд в историю. op_id — идемпотентный ключ (uuid от клиента): повторная
+    доставка того же выезда из оффлайн-очереди НЕ создаёт дубль. Возвращает True, если
+    строка реально добавлена (значит, можно слать уведомление в группу); False — если это
+    повтор уже сохранённого выезда. Без op_id (старый путь) — всегда True (новая строка)."""
     with connect() as conn:
-        conn.execute(
-            "INSERT INTO visits (contract_id, agent_id, created_at, payload) "
-            "VALUES (?, ?, ?, ?)",
-            (contract_id, agent_id, date.today().isoformat(), payload),
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO visits (contract_id, agent_id, created_at, payload, op_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (contract_id, agent_id, date.today().isoformat(), payload, op_id),
         )
         conn.commit()
+        return cur.rowcount > 0
 
 
 def set_reminder(contract_id: str, when: str) -> None:
@@ -846,24 +868,43 @@ def add_photo(contract_id: str) -> int:
     return row["photos_count"] if row else 0
 
 
+def photos_count(contract_id: str) -> int:
+    """Текущее число фото у договора (для идемпотентной загрузки: повтор из очереди
+    отдаёт актуальный счётчик, ничего не инкрементируя)."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT photos_count FROM clients WHERE contract_id = ?", (contract_id,)
+        ).fetchone()
+    return (row["photos_count"] or 0) if row else 0
+
+
 def set_geo(contract_id: str, lat: float, lon: float) -> None:
     update_fields(contract_id, {"geo_lat": lat, "geo_lon": lon})
 
 
 # --- Метки (разведочные геокоординаты) -------------------------------------
 def add_marker(telegram_id: int, kind: str, lat: float, lon: float,
-               client_rep: str | None = None, label: str | None = None) -> int:
-    """Сохранить метку. Если задан client_rep — также проставить точку человеку (geo_src=manual)."""
+               client_rep: str | None = None, label: str | None = None,
+               op_id: str | None = None) -> int:
+    """Сохранить метку. op_id — идемпотентный ключ: повтор из оффлайн-очереди не плодит
+    дубль (вернём id уже сохранённой метки). Если задан client_rep — также проставить точку
+    человеку (geo_src=manual), но только при реальной вставке."""
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO markers (telegram_id, kind, client_rep, lat, lon, label, created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO markers "
+            "(telegram_id, kind, client_rep, lat, lon, label, created_at, op_id) "
+            "VALUES (?,?,?,?,?,?,?,?)",
             (telegram_id, kind, client_rep, lat, lon, label,
-             datetime.now().isoformat(timespec="seconds")),
+             datetime.now().isoformat(timespec="seconds"), op_id),
         )
         conn.commit()
-        mid = cur.lastrowid
-    if client_rep:
+        inserted = cur.rowcount > 0
+        if inserted:
+            mid = cur.lastrowid
+        else:   # повтор по op_id — вернуть id уже сохранённой метки
+            row = conn.execute("SELECT id FROM markers WHERE op_id = ?", (op_id,)).fetchone()
+            mid = row["id"] if row else cur.lastrowid
+    if client_rep and inserted:
         update_person(client_rep, {"geo_lat": lat, "geo_lon": lon, "geo_src": "manual"})
     return mid
 
