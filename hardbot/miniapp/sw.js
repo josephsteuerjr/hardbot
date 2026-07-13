@@ -9,7 +9,7 @@
  * ВАЖНО при обновлении оболочки на сервере: поднимите версию CACHE (v1→v2), иначе у уже
  * открывавших приложение выездников останется старый index.html из кэша до смены версии.
  */
-const CACHE = "hardbot-shell-v1";
+const CACHE = "hardbot-shell-v4";
 const PRECACHE = [
   "/",
   "/vendor/telegram-web-app.js",
@@ -43,16 +43,15 @@ self.addEventListener("fetch", (e) => {
                      url.pathname.startsWith("/admin/") ||
                      url.pathname.startsWith("/tiles/"))) return;
 
-  // Открытие приложения — отдаём оболочку из кэша сразу (оффлайн-старт), в фоне освежаем.
+  // Открытие приложения — NETWORK-FIRST: онлайн всегда берём свежую оболочку с сервера
+  // (ведёт себя как без SW — надёжно в webview Telegram), кэш только фолбэк при офлайне.
+  // Так service worker не может «залипнуть» на старой/сломанной закэшированной странице.
   if (req.mode === "navigate") {
     e.respondWith(
-      caches.match("/").then((hit) => {
-        const net = fetch(req).then((resp) => {
-          if (resp && resp.ok) caches.open(CACHE).then((c) => c.put("/", resp.clone()));
-          return resp;
-        }).catch(() => hit);
-        return hit || net;
-      })
+      fetch(req).then((resp) => {
+        if (resp && resp.ok) { const copy = resp.clone(); caches.open(CACHE).then((c) => c.put("/", copy)); }
+        return resp;
+      }).catch(() => caches.match("/"))
     );
     return;
   }

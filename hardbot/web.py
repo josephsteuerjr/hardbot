@@ -93,11 +93,19 @@ def validate_init_data(init_data: str, token: str, max_age: int = _MAX_AGE) -> d
 
 
 def _uid(request: web.Request) -> int | None:
-    """telegram_id запросившего: из подписанного initData либо из дев-обхода."""
+    """telegram_id запросившего: из подписанного initData (внутри Телеги), из токена
+    автономного PWA (вне Телеги) либо из дев-обхода."""
     data = validate_init_data(request.headers.get("X-Init-Data") or "",
                               os.getenv("BOT_TOKEN", ""))
     if data and isinstance(data.get("user"), dict):
         return int(data["user"].get("id") or 0) or None
+    # Автономное приложение (PWA вне Телеги): авторизация по выданному ботом токену.
+    # ТОЛЬКО из заголовка — в query токен нельзя (осел бы в access-логах/Referer/истории).
+    tok = (request.headers.get("X-App-Token") or "").strip()
+    if tok:
+        uid = db.uid_for_app_token(tok)
+        if uid:
+            return uid
     if DEV:
         raw = request.headers.get("X-Dev-Uid") or request.query.get("dev_uid")
         try:
@@ -463,6 +471,36 @@ async def _photo(request: web.Request) -> web.Response:
             f.write(chunk)
     n = db.add_photo(rep)
     return web.json_response({"ok": True, "photos": n})
+
+
+async def _redeem(request: web.Request) -> web.Response:
+    """Обмен одноразового кода из ссылки бота на девайс-токен автономного PWA.
+    Код невалиден (использован/просрочен/чужой) → 410: клиент решает сам — если на
+    устройстве уже есть живой токен, продолжает тихо (повторное открытие той же
+    ссылки), иначе просит взять новую ссылку у бота."""
+    try:
+        code = str((await request.json()).get("code") or "").strip()
+    except Exception:  # noqa: BLE001
+        code = ""
+    token = db.redeem_app_link(code)
+    if not token:
+        raise web.HTTPGone(text="link")
+    uid = db.uid_for_app_token(token)
+    db.audit_access(uid or 0, "app_login")
+    return web.json_response({"ok": True, "token": token, "days": db.APP_TOKEN_DAYS})
+
+
+async def _admin_app_revoke(request: web.Request) -> web.Response:
+    """Отзыв доступа автономного приложения из пульта: {telegram_id}."""
+    _admin(request)
+    body = await request.json()
+    try:
+        tid = int(body["telegram_id"])
+    except (KeyError, TypeError, ValueError):
+        raise web.HTTPBadRequest(text="telegram_id")
+    n = db.revoke_app_access(tid)
+    db.audit_access(tid, "app_revoke", detail=str(n))
+    return web.json_response({"ok": True, "revoked": n})
 
 
 async def _lang(request: web.Request) -> web.Response:
@@ -874,6 +912,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/save", _save)
     app.router.add_post("/api/photo", _photo)
     app.router.add_post("/api/lang", _lang)
+    app.router.add_post("/api/redeem", _redeem)
+    app.router.add_post("/admin/app_revoke", _admin_app_revoke)
     app.router.add_post("/api/bind", _bind)
     app.router.add_post("/api/marker", _marker)
     app.router.add_get("/api/markers", _markers)

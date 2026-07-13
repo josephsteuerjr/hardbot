@@ -39,15 +39,32 @@ def _remember(user) -> None:
         pass
 
 
-def _open_app_kb(lang: str) -> InlineKeyboardMarkup | None:
+def _open_app_kb(lang: str, uid: int | None = None) -> InlineKeyboardMarkup | None:
     """Inline-кнопка WebApp «Открыть приложение» — только при заданном https-URL миниаппа.
-    Дублирует нативную menu-кнопку (её ставит app.py), но появляется прямо в сообщении."""
+    Дублирует нативную menu-кнопку (её ставит app.py), но появляется прямо в сообщении.
+    Привязанному выезднику добавляется вторая кнопка — одноразовая ссылка для входа в
+    автономное приложение (PWA, работает без интернета)."""
     url = os.getenv("MINIAPP_URL", "").strip()
     if not url or not url.lower().startswith("https://"):
         return None   # WebApp-кнопки требуют https; без URL кнопку не рисуем
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=t("btn_open_app", lang),
-                             web_app=WebAppInfo(url=url))]])
+    rows = [[InlineKeyboardButton(text=t("btn_open_app", lang),
+                                  web_app=WebAppInfo(url=url))]]
+    if uid and db.get_binding(uid):
+        rows.append([InlineKeyboardButton(text=t("btn_app_link", lang),
+                                          callback_data="applink")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _applink_text(uid: int, lang: str) -> str | None:
+    """Короткое сообщение с одноразовой ссылкой входа в автономное приложение.
+    Только привязанным (иначе ссылка бессмысленна: /api отдаст 403) и только при
+    настроенном https-URL. Код — в #-фрагменте: не попадает в логи сервера."""
+    url = os.getenv("MINIAPP_URL", "").strip().rstrip("/")
+    if not url or not db.get_binding(uid):
+        return None
+    code = db.create_app_link(uid)
+    db.audit_access(uid, "app_link_issued")
+    return t("applink_msg", lang, url=f"{url}/#link={code}", days=db.APP_LINK_DAYS)
 
 
 # --- Старт: приветствие + кнопка входа в приложение -------------------------
@@ -55,9 +72,21 @@ def _open_app_kb(lang: str) -> InlineKeyboardMarkup | None:
 async def cmd_start(message: Message):
     _remember(message.from_user)
     lang = lang_of(message.from_user.id)
-    kb = _open_app_kb(lang)
+    kb = _open_app_kb(lang, message.from_user.id)
     text = t("start_app", lang) if kb else t("start_no_app", lang)
     await message.answer(text, reply_markup=kb)
+
+
+# --- Одноразовая ссылка входа в автономное приложение (кнопка) ---------------
+@router.callback_query(F.data == "applink")
+async def applink_cb(cb: CallbackQuery):
+    lang = lang_of(cb.from_user.id)
+    text = _applink_text(cb.from_user.id, lang)
+    if text:
+        await cb.message.answer(text)
+        await cb.answer()
+    else:
+        await cb.answer("⛔", show_alert=True)   # не привязан / URL не настроен
 
 
 @router.message(Command("whoami"))
@@ -140,12 +169,18 @@ async def decline_group(cb: CallbackQuery):
 
 # --- Любое другое сообщение в ЛИЧКЕ: запоминаем гостя + показываем кнопку ----
 # Стоит ПОСЛЕДНИМ, чтобы не перехватывать команды/колбэки выше. Только private —
-# чтобы не спамить рабочую беседу. Ничего «рабочего» в чате не делает: регистрирует
-# id (для списка гостей в пульте) и снова предлагает открыть приложение.
+# чтобы не спамить рабочую беседу. Привязанному выезднику любое сообщение приносит
+# одноразовую ссылку входа в автономное приложение (самолечение протухшего доступа:
+# написал боту что угодно → получил свежую ссылку). Непривязанному — как раньше,
+# кнопка «Открыть приложение» (регистрируем id для списка гостей в пульте).
 @router.message(F.chat.type == "private")
 async def any_message(message: Message):
     _remember(message.from_user)
     lang = lang_of(message.from_user.id)
+    text = _applink_text(message.from_user.id, lang)
+    if text:
+        await message.answer(text, reply_markup=_open_app_kb(lang, message.from_user.id))
+        return
     kb = _open_app_kb(lang)
     if kb:
         await message.answer(t("start_app", lang), reply_markup=kb)

@@ -9,6 +9,7 @@
 import json
 import os
 import re
+import secrets
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -193,6 +194,30 @@ def init_db() -> None:
               created_at TEXT
             )
         """)
+        # Автономное приложение (PWA вне Телеги): вне Телеги нет initData, поэтому вход
+        # двухступенчатый. Бот шлёт ОДНОРАЗОВУЮ ссылку (app_links, окно активации
+        # APP_LINK_DAYS); при первом открытии код обменивается на девайс-токен
+        # (app_tokens, живёт APP_TOKEN_DAYS). Пересланная/старая ссылка бесполезна.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS app_links (
+              code TEXT PRIMARY KEY,
+              telegram_id INTEGER,
+              created_at TEXT,
+              used_at TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS app_tokens (
+              token TEXT PRIMARY KEY,
+              telegram_id INTEGER,
+              created_at TEXT,
+              expires_at TEXT
+            )
+        """)
+        # Миграция ранней дев-схемы app_tokens (без expires_at).
+        tcols = {r[1] for r in conn.execute("PRAGMA table_info(app_tokens)")}
+        if "expires_at" not in tcols:
+            conn.execute("ALTER TABLE app_tokens ADD COLUMN expires_at TEXT")
         conn.commit()
 
 
@@ -408,9 +433,89 @@ def list_bindings() -> list[sqlite3.Row]:
 
 
 def unbind(telegram_id: int) -> None:
+    """Снять привязку сотрудника. Заодно отзываем доступ автономного приложения
+    (токены + неактивированные ссылки): «убрать работника» из пульта должно закрывать
+    и PWA, а не оставлять живой девайс-токен до 30 дней."""
     with connect() as conn:
         conn.execute("DELETE FROM agent_bind WHERE telegram_id = ?", (telegram_id,))
+        conn.execute("DELETE FROM app_tokens WHERE telegram_id = ?", (telegram_id,))
+        conn.execute("DELETE FROM app_links WHERE telegram_id = ?", (telegram_id,))
         conn.commit()
+
+
+# --- Автономное приложение (PWA вне Телеги): одноразовые ссылки + токены -----
+APP_LINK_DAYS = 7     # окно активации одноразовой ссылки
+APP_TOKEN_DAYS = 30   # срок жизни девайс-токена (потом — новая ссылка у бота)
+
+
+def create_app_link(telegram_id: int) -> str:
+    """Одноразовый код входа для автономного PWA (бот шлёт ссылкой). Прежние
+    НЕИСПОЛЬЗОВАННЫЕ коды юзера гасим (живая — только последняя ссылка), уже
+    выданный девайс-токен НЕ трогаем: сообщение боту не разлогинивает телефон."""
+    code = secrets.token_urlsafe(18)
+    now = datetime.now()
+    with connect() as conn:
+        conn.execute("DELETE FROM app_links WHERE telegram_id = ? AND used_at IS NULL",
+                     (telegram_id,))
+        # заодно чистим просроченный мусор всех юзеров (лениво, без отдельного крона)
+        cutoff = (now - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
+        conn.execute("DELETE FROM app_links WHERE created_at < ?", (cutoff,))
+        conn.execute("INSERT INTO app_links (code, telegram_id, created_at) VALUES (?,?,?)",
+                     (code, telegram_id, now.isoformat(timespec="seconds")))
+        conn.commit()
+    return code
+
+
+def redeem_app_link(code: str) -> str | None:
+    """Обменять одноразовый код на девайс-токен (APP_TOKEN_DAYS). None — код неизвестен,
+    уже использован или старше APP_LINK_DAYS. Прежние токены пользователя НЕ трогаем:
+    у выездника может быть несколько устройств/браузеров, и случайное открытие свежей
+    ссылки в «неправильном» браузере не должно разлогинивать рабочий телефон. Полный
+    отзыв — только явный revoke_app_access (увольнение/сброс) или unbind."""
+    if not code:
+        return None
+    now = datetime.now()
+    cutoff = (now - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
+    with connect() as conn:
+        # Атомарно «сжигаем» код: помечаем used только если он ещё не использован и свеж.
+        # rowcount==0 → код чужой/использован/просрочен (в т.ч. проигранная гонка двух
+        # параллельных обменов) — обмен не состоялся.
+        cur = conn.execute(
+            "UPDATE app_links SET used_at = ? WHERE code = ? AND used_at IS NULL "
+            "AND created_at >= ?", (now.isoformat(timespec="seconds"), code, cutoff))
+        if cur.rowcount == 0:
+            conn.commit()
+            return None
+        uid = conn.execute("SELECT telegram_id FROM app_links WHERE code = ?",
+                           (code,)).fetchone()["telegram_id"]
+        token = secrets.token_urlsafe(24)
+        conn.execute(
+            "INSERT INTO app_tokens (token, telegram_id, created_at, expires_at) VALUES (?,?,?,?)",
+            (token, uid, now.isoformat(timespec="seconds"),
+             (now + timedelta(days=APP_TOKEN_DAYS)).isoformat(timespec="seconds")))
+        conn.commit()
+    return token
+
+
+def uid_for_app_token(token: str) -> int | None:
+    """telegram_id по девайс-токену; просроченный (или легаси без expires_at) не пускаем."""
+    if not token:
+        return None
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT telegram_id FROM app_tokens WHERE token = ? AND expires_at >= ?",
+            (token, datetime.now().isoformat(timespec="seconds"))).fetchone()
+    return row["telegram_id"] if row else None
+
+
+def revoke_app_access(telegram_id: int) -> int:
+    """Отзыв доступа автономного приложения: гасим и токены, и неактивированные ссылки.
+    Возвращает число отозванных токенов (для ответа пульту)."""
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM app_tokens WHERE telegram_id = ?", (telegram_id,))
+        conn.execute("DELETE FROM app_links WHERE telegram_id = ?", (telegram_id,))
+        conn.commit()
+        return cur.rowcount
 
 
 # --- Настройки --------------------------------------------------------------

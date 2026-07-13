@@ -228,6 +228,9 @@ const I18N = {
     draftwait:"черновик не отправлен на сервер",draftsent:"черновик сохранён на сервере",
     offline:"Оффлайн",datao:"данные на",pend:"ждут отправки",sending:"Отправляю…",
     savedoff:"Сохранено — уйдёт при связи",queuedn:"в очереди",
+    authexpired:"Срок доступа истёк. Напишите боту любое сообщение — он пришлёт новую ссылку для входа. Несинхронизированные визиты не потеряются.",
+    authneed:"Нет доступа. Возьмите ссылку для входа у бота (напишите ему любое сообщение) и откройте её в этом браузере.",
+    entercode:"Ввести код вручную",codeprompt:"Вставьте ссылку или код из сообщения бота:",
     secResult:"Результат выезда",secContact:"Контакт",secClient:"Клиент сейчас",secAgree:"Договорённость",
     nosplit:"разбивка по статьям не пришла"},
   uz:{visit:"Chiqish",client:"Mijoz",debt:"Qarz",form:"To‘ldirish",my:"Mijozlarim",
@@ -245,6 +248,9 @@ const I18N = {
     draftwait:"qoralama serverga yuborilmadi",draftsent:"qoralama serverda saqlandi",
     offline:"Oflayn",datao:"ma’lumot",pend:"yuboriladi",sending:"Yuborilmoqda…",
     savedoff:"Saqlandi — aloqa paydo bo‘lsa yuboriladi",queuedn:"navbatda",
+    authexpired:"Kirish muddati tugadi. Botga istalgan xabar yozing — u yangi kirish havolasini yuboradi. Yuborilmagan chiqishlar yo‘qolmaydi.",
+    authneed:"Kirish yo‘q. Botdan kirish havolasini oling (unga istalgan xabar yozing) va shu brauzerda oching.",
+    entercode:"Kodni qo‘lda kiritish",codeprompt:"Bot xabaridagi havola yoki kodni joylashtiring:",
     secResult:"Chiqish natijasi",secContact:"Kontakt",secClient:"Mijoz hozir",secAgree:"Kelishuv",
     nosplit:"moddalar bo‘yicha taqsimot kelmadi"},
   tg:{visit:"Сафар",client:"Мизоҷ",debt:"Қарз",form:"Пур кардан",my:"Мизоҷони ман",
@@ -262,6 +268,9 @@ const I18N = {
     draftwait:"нусха ба сервер нафиристода шуд",draftsent:"нусха дар сервер захира шуд",
     offline:"Офлайн",datao:"додаҳо аз",pend:"дар навбат",sending:"Фиристода мешавад…",
     savedoff:"Захира шуд — ҳангоми алоқа фиристода мешавад",queuedn:"дар навбат",
+    authexpired:"Мӯҳлати дастрасӣ гузашт. Ба бот ҳар гуна паём нависед — ӯ пайванди нави воридшавӣ мефиристад. Сафарҳои фиристоданашуда гум намешаванд.",
+    authneed:"Дастрасӣ нест. Аз бот пайванди воридшавӣ гиред (ба ӯ ҳар паём нависед) ва онро дар ҳамин браузер кушоед.",
+    entercode:"Ворид кардани код дастӣ",codeprompt:"Пайванд ё коди паёми ботро гузоред:",
     secResult:"Натиҷаи сафар",secContact:"Тамос",secClient:"Мизоҷ ҳозир",secAgree:"Созиш",
     nosplit:"тақсимот аз рӯи моддаҳо наомад"},
 };
@@ -298,8 +307,13 @@ const IDB = (()=>{
     put:(s,v,k)=>store(s,"readwrite").then(o=>p(k===undefined?o.put(v):o.put(v,k))),
     del:(s,k)=>store(s,"readwrite").then(o=>p(o.delete(k))),
     all:(s)=>store(s,"readonly").then(o=>p(o.getAll())),
+    clear:(s)=>store(s,"readwrite").then(o=>p(o.clear())),
   };
 })();
+
+// Стереть локальные данные прежнего пользователя (смена сотрудника на устройстве):
+// карточки и исходящую очередь. Снимок (kv) тут же перезапишется свежим bootstrap.
+async function clearLocalData(){ for(const s of ["cards","queue"]){ try{ await IDB.clear(s); }catch(e){} } }
 
 // uuid для идемпотентного op_id операций очереди (crypto, с запасным вариантом).
 function uuid(){
@@ -399,9 +413,68 @@ function finishSavedUI(rep, msg){
   STATE.tab="visit"; renderDetail();
 }
 
+// Автономное приложение (PWA вне Телеги): вход по ОДНОРАЗОВОЙ ссылке бота.
+// В #link= лежит одноразовый код (фрагмент не попадает в логи сервера — как initData
+// у Телеги); при первом открытии он обменивается на девайс-токен (30 дней, localStorage).
+// Установленный ярлык (start_url «/») дальше авторизуется токеном без всяких ссылок.
+function appToken(){ try{ return localStorage.getItem('app_token')||''; }catch(e){ return ''; } }
+function cleanLinkFromUrl(){ try{ const u=new URL(location.href);
+  u.searchParams.delete('link'); u.searchParams.delete('token');
+  history.replaceState(null,'',u.pathname+(u.search||'')); }catch(e){} }
+// true — токен получен; 'have-token' — код невалиден/сервер недоступен, но на устройстве
+// уже есть токен (тихо продолжаем); 'net' — код НЕ обменян и токена нет (оставляем код в
+// URL, попробуем при следующем открытии); false — код ДЕЙСТВИТЕЛЬНО мёртв (410) и токена нет.
+async function redeemCode(code, fromUrl){
+  try{
+    const r=await fetch('/api/redeem',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({code})});
+    if(r.ok){ const j=await r.json();
+      if(j&&j.token){ try{ localStorage.setItem('app_token',j.token); }catch(e){} }
+      if(fromUrl) cleanLinkFromUrl();
+      return true; }
+    if(r.status===410){                        // код мёртв (использован/просрочен/чужой) — жжём
+      if(fromUrl) cleanLinkFromUrl();
+      return appToken()?'have-token':false; }
+    return appToken()?'have-token':'net';       // 5xx/прочее: сервер/прокси недоступен — код НЕ жжём
+  }catch(e){ return 'net'; }                     // сети нет — код остаётся, повтор при связи
+}
+async function redeemFromUrl(){
+  let code=null;
+  try{ const u=new URL(location.href);
+    if(u.hash) code=new URLSearchParams(u.hash.replace(/^#/,'')).get('link');
+    if(!code) code=u.searchParams.get('link');
+  }catch(e){}
+  if(code) await redeemCode(code, true);
+}
+// Новая ссылка открылась в УЖЕ живой вкладке приложения: переход «/» → «/#link=…»
+// меняет только фрагмент, страница НЕ перезагружается и boot() сам не стартует.
+// Ловим hashchange: обмениваем код и перезапускаем загрузку.
+window.addEventListener('hashchange', async()=>{
+  let c=null;
+  try{ c=new URLSearchParams(location.hash.replace(/^#/,'')).get('link'); }catch(e){}
+  if(c && (await redeemCode(c, true))===true) boot();
+});
+// Экран «нужна ссылка от бота»: истёкший токен или мёртвый код без токена. Самолечение —
+// любое сообщение боту приносит новую ссылку; кнопка ручного ввода кода закрывает случай,
+// когда открыть ссылку в этом же браузере неудобно (iOS вне Chrome и т.п.).
+function renderAppAuthGone(expired){
+  hideBottomNav(); const t=L();
+  $("app").innerHTML=`<div class="center">${esc(expired?t.authexpired:t.authneed)}<br><br>
+    <button class="btn acc" style="max-width:280px;margin:0 auto" onclick="enterCode()">${esc(t.entercode)}</button></div>`;
+}
+async function enterCode(){
+  const raw=(prompt(L().codeprompt)||'').trim(); if(!raw) return;
+  // Принимаем и целую вставку сообщения бота, и ссылку, и голый код: вытаскиваем link=CODE
+  // где угодно в тексте (в т.ч. многострочном), иначе считаем ввод самим кодом.
+  const m=raw.match(/link=([A-Za-z0-9_-]+)/);
+  const r=await redeemCode(m?m[1]:raw, false);
+  if(r===true){ toast('✓'); boot(); } else toast('✕');
+}
+
 function authHeaders(){
   const h = {};
-  if (TG && TG.initData) h["X-Init-Data"] = TG.initData;
+  if (TG && TG.initData) h["X-Init-Data"] = TG.initData;    // внутри Телеги — подпись WebApp
+  else { const t = appToken(); if(t) h["X-App-Token"]=t; }  // автономное PWA — токен от бота
   const dev = new URLSearchParams(location.search).get("dev_uid");
   if (dev) h["X-Dev-Uid"] = dev;
   return h;
@@ -426,12 +499,18 @@ async function setLang(c){
   await boot();
 }
 
+let REDEEMED=false;
 async function boot(){
   renderLangs(); hideBottomNav();
+  if(!REDEEMED){ REDEEMED=true; await redeemFromUrl(); }   // одноразовый код из ссылки бота
   try{
     const d = await api("/api/bootstrap");
     STATE.lang=d.lang||STATE.lang; renderLangs();
     if(d.needsOnboarding){ STATE.onb=d; renderOnboarding(); return; }
+    // Сменился сотрудник на устройстве (перевыпуск на другого человека) — чистим кэш и
+    // очередь прошлого, чтобы не смешивать ПД и не долить чужие визиты под новым токеном.
+    const prev = await loadBootstrapSnapshot();
+    if(prev && prev.employee && d.employee && prev.employee !== d.employee) await clearLocalData();
     STATE.meta=d.meta; STATE.persons=d.persons; STATE.kind=d.kind||"agent";
     STATE.online=true;
     cacheBootstrap(d);            // снимок портфеля для оффлайна (в фоне, не блокирует UI)
@@ -439,7 +518,11 @@ async function boot(){
     warmCards();                  // полные карточки всех клиентов в фон-кэш (онлайн)
     flushQueue();                 // досыл накопленного оффлайна (визиты/фото/метки)
   }catch(e){
-    // Нет сети / нет доступа — поднимаемся из оффлайн-снимка портфеля, если он есть.
+    const st=+((e&&e.message)||0);
+    // Сервер ответил «не пускаю» вне Телеги: токен истёк/отозван либо его ещё нет.
+    // Кэш здесь НЕ поднимаем (сервер доступен и отказал) — просим новую ссылку у бота.
+    if((st===401||st===403) && !(TG&&TG.initData)){ renderAppAuthGone(!!appToken()); return; }
+    // Сети нет — поднимаемся из оффлайн-снимка портфеля, если он есть.
     const snap = await loadBootstrapSnapshot();
     if(snap && snap.persons){
       STATE.lang=snap.lang||STATE.lang; renderLangs();
