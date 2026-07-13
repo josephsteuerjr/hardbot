@@ -72,9 +72,15 @@ def _applink_text(uid: int, lang: str) -> str | None:
 async def cmd_start(message: Message):
     _remember(message.from_user)
     lang = lang_of(message.from_user.id)
-    kb = _open_app_kb(lang, message.from_user.id)
-    text = t("start_app", lang) if kb else t("start_no_app", lang)
-    await message.answer(text, reply_markup=kb)
+    # Привязанному выезднику сразу шлём ссылку автономного приложения (не заставляем
+    # искать кнопку) — как и на любое другое сообщение. Непривязанному — обычный старт.
+    text = _applink_text(message.from_user.id, lang)
+    if text:
+        await message.answer(text, reply_markup=_open_app_kb(lang, message.from_user.id))
+        return
+    kb = _open_app_kb(lang)
+    await message.answer(t("start_app", lang) if kb else t("start_no_app", lang),
+                         reply_markup=kb)
 
 
 # --- Одноразовая ссылка входа в автономное приложение (кнопка) ---------------
