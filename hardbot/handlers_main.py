@@ -50,8 +50,12 @@ def _open_app_kb(lang: str, uid: int | None = None) -> InlineKeyboardMarkup | No
     rows = [[InlineKeyboardButton(text=t("btn_open_app", lang),
                                   web_app=WebAppInfo(url=url))]]
     if uid and db.get_binding(uid):
-        rows.append([InlineKeyboardButton(text=t("btn_app_link", lang),
-                                          callback_data="applink")])
+        # Ссылка уже в тексте сообщения — вместо кнопки «дай ссылку» кладём кнопки
+        # с инструкцией установки под платформу (по тапу приходит пошаговый мануал).
+        rows.append([InlineKeyboardButton(text=t("btn_manual_android", lang),
+                                          callback_data="manual:android")])
+        rows.append([InlineKeyboardButton(text=t("btn_manual_ios", lang),
+                                          callback_data="manual:ios")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -93,6 +97,19 @@ async def applink_cb(cb: CallbackQuery):
         await cb.answer()
     else:
         await cb.answer("⛔", show_alert=True)   # не привязан / URL не настроен
+
+
+# --- Инструкция установки автономного приложения (кнопки под ссылкой) --------
+@router.callback_query(F.data == "manual:android")
+async def manual_android_cb(cb: CallbackQuery):
+    await cb.message.answer(t("manual_android", lang_of(cb.from_user.id)))
+    await cb.answer()
+
+
+@router.callback_query(F.data == "manual:ios")
+async def manual_ios_cb(cb: CallbackQuery):
+    await cb.message.answer(t("manual_ios", lang_of(cb.from_user.id)))
+    await cb.answer()
 
 
 @router.message(Command("whoami"))

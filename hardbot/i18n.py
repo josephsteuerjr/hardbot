@@ -60,6 +60,47 @@ TEXT: dict[str, dict[str, str]] = {
         "ru": "📲 Ссылка для входа в приложение",
         "uz": "📲 Ilovaga kirish havolasi",
         "tg": "📲 Пайванди воридшавӣ ба барнома"},
+    "btn_manual_android": {
+        "ru": "📖 Установить на Android", "uz": "📖 Android’ga o‘rnatish",
+        "tg": "📖 Насб дар Android"},
+    "btn_manual_ios": {
+        "ru": "📖 Установить на iPhone", "uz": "📖 iPhone’ga o‘rnatish",
+        "tg": "📖 Насб дар iPhone"},
+    "manual_android": {
+        "ru": "📖 Установка на Android:\n"
+              "1) Откройте ссылку выше в Chrome.\n"
+              "2) Меню ⋮ (три точки) → «Установить приложение».\n"
+              "3) Открывайте с иконки на экране.\n"
+              "Работает без интернета: заполняйте визиты, при связи всё уйдёт само.",
+        "uz": "📖 Android’ga o‘rnatish:\n"
+              "1) Yuqoridagi havolani Chrome’da oching.\n"
+              "2) Menyu ⋮ → «Ilovani o‘rnatish».\n"
+              "3) Ekrandagi ikonkadan oching.\n"
+              "Internetsiz ishlaydi: chiqishlarni to‘ldiring, aloqa paydo bo‘lganda o‘zi yuboriladi.",
+        "tg": "📖 Насб дар Android:\n"
+              "1) Пайванди болоиро дар Chrome кушоед.\n"
+              "2) Меню ⋮ → «Насби барнома».\n"
+              "3) Аз нишонаи экран кушоед.\n"
+              "Бе интернет кор мекунад: сафарҳоро пур кунед, ҳангоми алоқа худаш фиристода мешавад."},
+    "manual_ios": {
+        "ru": "🍎 Установка на iPhone:\n"
+              "1) Откройте ссылку в Safari → «Поделиться» → «На экран Домой».\n"
+              "2) Откройте приложение с иконки.\n"
+              "3) Появится «Нет доступа» → нажмите «Ввести код вручную».\n"
+              "4) Напишите боту любое сообщение — придёт новая ссылка, вставьте её.\n"
+              "Дальше работает без интернета.",
+        "uz": "🍎 iPhone’ga o‘rnatish:\n"
+              "1) Havolani Safari’da oching → «Ulashish» → «Bosh ekranga».\n"
+              "2) Ilovani ikonkadan oching.\n"
+              "3) «Kirish yo‘q» chiqadi → «Kodni qo‘lda kiritish»ni bosing.\n"
+              "4) Botga istalgan xabar yozing — yangi havola keladi, uni joylang.\n"
+              "Keyin internetsiz ishlaydi.",
+        "tg": "🍎 Насб дар iPhone:\n"
+              "1) Пайвандро дар Safari кушоед → «Мубодила» → «Ба экрани асосӣ».\n"
+              "2) Барномаро аз нишона кушоед.\n"
+              "3) «Дастрасӣ нест» мебарояд → «Ворид кардани код дастӣ»-ро пахш кунед.\n"
+              "4) Ба бот ҳар паём нависед — пайванди нав меояд, онро гузоред.\n"
+              "Баъд бе интернет кор мекунад."},
     "applink_msg": {
         "ru": "📲 Ваша ссылка для входа (только для вас, {days} дн.):\n{url}\n\n"
               "Установка (1 раз):\n"
