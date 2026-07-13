@@ -367,6 +367,9 @@ class Pult(tk.Tk):
         self.scatter_matched: list[dict] = []
         self.scatter_selected: set[str] = set()
         self.scatter_roots: list[str] = []
+        self.enr_matched: list[dict] = []
+        self.enr_selected: set[str] = set()
+        self._enr_fields: list[dict] | None = None
         self._loaded: set[str] = set()
 
         self._dpi_geometry()
@@ -675,20 +678,49 @@ class Pult(tk.Tk):
                                  justify="left", wraplength=760)
         self.imp_warn.pack(anchor="w")
 
-        exp = Card(inner, "Экспорт",
-                   "«Обогатить реестр» — главный путь: берёт ТВОЙ живой файл и дописывает "
-                   "в него только заполненное выездниками (их кейсы, их столбцы визита), "
-                   "ничего не перезатирая; рядом создаётся резервная копия. "
-                   "«Реестр целиком» — новый xlsx-слепок БД (как раньше).")
+        enr = Card(inner, "Обогащение реестров выездников",
+                   "Главный путь выгрузки. Данные — с сервера: ТОЛЬКО завершённые визиты "
+                   "(кейсы с датой выезда) и только столбцы формы визита. Файлы — личные "
+                   "ФИО.xlsb по той же маске, что и разброс: Республика / … / Город / ФИО. "
+                   "В каждый файл точечно дописываются кейсы его сотрудника, ничего не "
+                   "перезатирается, рядом с изменёнными файлами создаётся резервная копия.")
+        enr.pack(fill="x", pady=(12, 0))
+        rowe = tk.Frame(enr.inner, bg=CARD)
+        rowe.pack(anchor="w")
+        btn(rowe, "Папка с республиками…", self.scatter_pick_base).pack(side="left")
+        btn(rowe, "Кого обогащать?", self.enr_preview, kind="accent").pack(
+            side="left", padx=(8, 0))
+        btn(rowe, "Обогатить один файл…", self.do_enrich).pack(side="left", padx=(8, 0))
+        self.enr_base_lbl = tk.Label(enr.inner, text="", bg=CARD, fg=MUTED, font=f(9),
+                                     wraplength=760, justify="left")
+        self.enr_base_lbl.pack(anchor="w", pady=(8, 0))
+        self.enr_kvs = KVGrid(enr.inner)
+        self.enr_kvs.pack(anchor="w", pady=(8, 0))
+        self.enr_warn = tk.Label(enr.inner, text="", bg=CARD, fg=WARN, font=f(9),
+                                 justify="left", wraplength=760)
+        self.enr_warn.pack(anchor="w")
+        self.enr_pick_frame = tk.Frame(enr.inner, bg=CARD)
+        self.enr_pick_frame.pack(fill="x")
+        self.enr_apply_row = tk.Frame(enr.inner, bg=CARD)
+        self.enr_apply_sel_btn = btn(self.enr_apply_row, "Обогатить выбранных (0)",
+                                     lambda: self.enr_apply("selected"), kind="accent")
+        self.enr_apply_sel_btn.pack(side="left")
+        self.enr_apply_all_btn = btn(self.enr_apply_row, "Обогатить всех",
+                                     lambda: self.enr_apply("all"))
+        self.enr_apply_all_btn.pack(side="left", padx=(8, 0))
+        self.enrich_out = tk.Label(enr.inner, text="", bg=CARD, fg=MUTED, font=f(9),
+                                   justify="left", wraplength=760)
+        self.enrich_out.pack(anchor="w", pady=(8, 0))
+
+        exp = Card(inner, "Экспорт-слепок",
+                   "«Реестр целиком» — новый xlsx из БД сервера (типизированные даты и "
+                   "суммы, автофильтр). Это слепок БД, а не твой живой файл — для сверки "
+                   "и «чистой» выгрузки.")
         exp.pack(fill="x", pady=(12, 0))
         rowb = tk.Frame(exp.inner, bg=CARD)
         rowb.pack(anchor="w")
-        btn(rowb, "Обогатить реестр…", self.do_enrich, kind="accent").pack(side="left")
-        btn(rowb, "Реестр целиком…", self.do_export_full).pack(side="left", padx=(8, 0))
+        btn(rowb, "Реестр целиком…", self.do_export_full).pack(side="left")
         btn(rowb, "Метки курьеров…", self.do_export_markers).pack(side="left", padx=(8, 0))
-        self.enrich_out = tk.Label(exp.inner, text="", bg=CARD, fg=MUTED, font=f(9),
-                                   justify="left", wraplength=760)
-        self.enrich_out.pack(anchor="w", pady=(8, 0))
 
         sc = Card(inner, "Разброс кейсов по сотрудникам",
                   "Раскладывает экспорт кейсов (формат «Хард») по личным .xlsb — каждому "
@@ -794,7 +826,164 @@ class Pult(tk.Tk):
             self.refresh()
         self.bg_task(work, done)
 
-    # --- экспорт: обогащение ---
+    # --- обогащение по папке республик (главный путь) ---
+    def _personal_files(self, entries, emp) -> list[Path]:
+        """Личные реестры сотрудника в его папках: ФИО.xlsb (имя из источника или
+        папки), иначе первый непременной .xlsb в папке (~времянки Excel — мимо)."""
+        files: list[Path] = []
+        for e in entries:
+            folder = e["path"]
+            cands = [folder / f"{razbros.sanitize_filename(emp)}.xlsb",
+                     folder / f"{folder.name}.xlsb"]
+            found = next((c for c in cands if c.exists()), None)
+            if not found:
+                xs = [p for p in sorted(folder.glob("*.xlsb"))
+                      if not p.name.startswith("~")]
+                found = xs[0] if xs else None
+            if found and found not in files:
+                files.append(found)
+        return files
+
+    def enr_preview(self):
+        if not self.scatter_base:
+            self.toast("Сначала выбери папку с республиками", err=True)
+            return
+        self.enr_warn.configure(text="Проверяю: данные сервера + папки сотрудников…")
+        base = self.scatter_base
+        def work():
+            d = self.api("GET", "/admin/export.json", timeout=120)
+            by_emp = enrich.split_by_employee(d["rows"])
+            reps = razbros.load_config(None)
+            fmap = razbros.build_folder_map(razbros.resolve_roots(base, reps, []))
+            return d["fields"], by_emp, fmap
+        def done(res):
+            fields, by_emp, fmap = res
+            self._enr_fields = fields
+            matched, nofolder, nofile = [], [], []
+            for key, e in sorted(by_emp.items(), key=lambda kv: kv[1]["employee"].lower()):
+                if not e["filled"]:
+                    continue        # бот ничего не заполнял — обогащать нечего
+                entries = fmap.get(key)
+                if not entries:
+                    nofolder.append(f"{e['employee']} ({e['filled']})")
+                    continue
+                files = self._personal_files(entries, e["employee"])
+                if not files:
+                    nofile.append(e["employee"])
+                    continue
+                matched.append({"key": key, "employee": e["employee"],
+                                "filled": e["filled"], "files": files,
+                                "rows": e["rows"]})
+            self.enr_matched = matched
+            self.enr_selected = {m["key"] for m in matched}
+            self.enr_kvs.set_pairs([
+                ("с визитами бота", sum(1 for e in by_emp.values() if e["filled"])),
+                ("готовы к обогащению", len(matched)),
+                ("завершённых визитов", sum(m["filled"] for m in matched)),
+                ("файлов", sum(len(m["files"]) for m in matched))])
+            warn = ""
+            if nofolder:
+                warn = "Есть данные бота, но нет папки: " + ", ".join(nofolder)
+            if nofile:
+                warn += ("\n" if warn else "") + "Папка есть, но нет .xlsb: " + ", ".join(nofile)
+            if not matched and not warn:
+                warn = "Бот пока ничего не заполнил — обогащать нечего."
+            self.enr_warn.configure(text=warn)
+            self._render_enr_pick()
+        self.bg_task(work, done, lambda e: (self.enr_warn.configure(text=f"Ошибка: {e}"),
+                                            self.toast(str(e), err=True)))
+
+    def _render_enr_pick(self):
+        for w in self.enr_pick_frame.winfo_children():
+            w.destroy()
+        self.enr_apply_row.pack_forget()
+        if not self.enr_matched:
+            return
+        head = tk.Frame(self.enr_pick_frame, bg=CARD)
+        head.pack(fill="x", pady=(10, 4))
+        tk.Label(head, text="Кого обогащать (галочки):", bg=CARD, fg=MUTED,
+                 font=f(9)).pack(side="left")
+        btn(head, "все", lambda: self._enr_all(True)).pack(side="right")
+        btn(head, "снять", lambda: self._enr_all(False)).pack(side="right", padx=(0, 6))
+        box = tk.Frame(self.enr_pick_frame, bg=CARD, highlightbackground=BORDER,
+                       highlightthickness=1)
+        box.pack(fill="x")
+        self._enr_vars: dict[str, tk.BooleanVar] = {}
+        for m in self.enr_matched:
+            var = tk.BooleanVar(value=m["key"] in self.enr_selected)
+            self._enr_vars[m["key"]] = var
+            row = tk.Frame(box, bg=CARD)
+            row.pack(fill="x")
+            tk.Checkbutton(row, text=m["employee"], variable=var, bg=CARD, fg=TEXT,
+                           activebackground=CARD, selectcolor=CARD, font=f(9),
+                           command=lambda k=m["key"], v=var: self._enr_toggle(k, v.get())
+                           ).pack(side="left", padx=6)
+            where = " · ".join(p.parent.parent.name for p in m["files"])
+            tk.Label(row, text=f"визитов: {m['filled']} · файлов: {len(m['files'])} · {where}",
+                     bg=CARD, fg=MUTED, font=f(8)).pack(side="left")
+        self.enr_apply_row.pack(anchor="w", pady=(10, 0))
+        self._enr_seln()
+
+    def _enr_toggle(self, k, on):
+        (self.enr_selected.add if on else self.enr_selected.discard)(k)
+        self._enr_seln()
+
+    def _enr_all(self, on):
+        for m in self.enr_matched:
+            (self.enr_selected.add if on else self.enr_selected.discard)(m["key"])
+            if m["key"] in self._enr_vars:
+                self._enr_vars[m["key"]].set(on)
+        self._enr_seln()
+
+    def _enr_seln(self):
+        n = sum(1 for m in self.enr_matched if m["key"] in self.enr_selected)
+        self.enr_apply_sel_btn.configure(text=f"Обогатить выбранных ({n})",
+                                         state="normal" if n else "disabled")
+
+    def enr_apply(self, which: str):
+        picked = [m for m in self.enr_matched
+                  if which == "all" or m["key"] in self.enr_selected]
+        if not picked:
+            self.toast("Никто не выбран", err=True)
+            return
+        jobs = [{"employee": m["employee"], "path": p, "rows": m["rows"]}
+                for m in picked for p in m["files"]]
+        if not messagebox.askyesno(
+                "Обогащение реестров",
+                f"Обогатить личные реестры: сотрудников {len(picked)}, файлов {len(jobs)}?\n\n"
+                "В каждый файл дописываются ТОЛЬКО кейсы его сотрудника, заполненные "
+                "ботом. Рядом с каждым файлом создаётся резервная копия. Делает Excel — "
+                "может занять время."):
+            return
+        fields = self._enr_fields
+        log = lambda s: self.after(0, lambda: self.enrich_out.configure(text=s))
+        def done(results):
+            ok = [r for r in results if "error" not in r]
+            bad = [r for r in results if "error" in r]
+            cells = sum(r["cells_written"] for r in ok)
+            over = sum(r["cells_over_nonempty"] for r in ok)
+            missing = sum(len(r["missing"]) for r in ok)
+            lines = [f"Готово: файлов {len(ok)} из {len(results)} · дописано ячеек: {cells}"
+                     + (f" (поверх старых: {over})" if over else "")
+                     + (f" · кейсов не нашлось в файлах: {missing}" if missing else "")]
+            for r in ok[:15]:
+                lines.append(f"  {r['employee']} — {Path(r['file']).name}: "
+                             f"ячеек {r['cells_written']}, кейсов {r['changed_cases']}")
+            if len(ok) > 15:
+                lines.append(f"  … и ещё {len(ok) - 15} файлов")
+            for r in bad:
+                lines.append(f"  ⚠ {r['employee']} — {Path(r['file']).name}: {r['error']}")
+            n_bak = sum(1 for r in ok if r.get("backup"))
+            if n_bak:
+                lines.append(f"Резервные копии созданы рядом с изменёнными файлами ({n_bak}).")
+            self.enrich_out.configure(text="\n".join(lines))
+            self.toast(f"Обогащено файлов: {len(ok)}" + (f", ошибок: {len(bad)}" if bad else ""),
+                       err=bool(bad))
+        self.bg_task(lambda: enrich.enrich_many(jobs, fields, log), done,
+                     lambda e: (self.enrich_out.configure(text=f"Ошибка: {e}"),
+                                self.toast(str(e), err=True)))
+
+    # --- экспорт: обогащение одного файла (запасной путь) ---
     def do_enrich(self):
         path = filedialog.askopenfilename(
             title="Живой файл реестра для обогащения",
@@ -825,7 +1014,9 @@ class Pult(tk.Tk):
                    if p["cells_over_nonempty"] else ""),
                 f"уже совпадало: {p['cells_already']}",
             ]
-            text = " · ".join(parts) + f"\nРезервная копия: {p['backup']}"
+            text = " · ".join(parts)
+            text += (f"\nРезервная копия: {p['backup']}" if p.get("backup")
+                     else "\nФайл не изменился — резервная копия не создавалась.")
             if p["missing"]:
                 text += f"\n⚠ Заполнены ботом, но не найдены в файле ({len(p['missing'])}): " \
                         + ", ".join(p["missing"][:20]) + ("…" if len(p["missing"]) > 20 else "")
@@ -870,8 +1061,11 @@ class Pult(tk.Tk):
         self._scatter_labels()
 
     def _scatter_labels(self):
-        self.sc_base_lbl.configure(
-            text=("база: " + self.scatter_base) if self.scatter_base else "базовая папка не выбрана")
+        base_txt = ("база: " + self.scatter_base) if self.scatter_base \
+            else "базовая папка не выбрана"
+        if hasattr(self, "enr_base_lbl"):    # общая база с карточкой обогащения
+            self.enr_base_lbl.configure(text=base_txt)
+        self.sc_base_lbl.configure(text=base_txt)
         self.sc_src_lbl.configure(
             text=("экспорт: " + self.scatter_source) if self.scatter_source else "файл экспорта не выбран")
         self.sc_roots_lbl.configure(

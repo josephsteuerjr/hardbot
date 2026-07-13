@@ -14,11 +14,10 @@
     build_plan(grid, fields, rows) -> план (какие ячейки чем заполнить)
     enrich_file(path, fields, rows) -> бэкап + запись плана через xlwings
 
-Какие столбцы считаются «заполняет бот» — VISIT_KEYS, зеркало
-db.VISIT_FILL_COLUMNS (колонки формы визита миниаппа) ∩ схема экспорта.
-Кейс попадает в план, только если у него в БД непусто хотя бы одно из этих
-полей; ячейка пишется, только если значение непустое и отличается от того,
-что уже стоит в файле.
+Какие столбцы пишем — VISIT_KEYS (то, что реально заполняет миниапп + дата
+визита). Кейс попадает в план, только если у него завершённый визит
+(FILLED_MARKER = visit_date — его ставит только миниапп); ячейка пишется,
+только если значение непустое и отличается от того, что уже стоит в файле.
 """
 
 from __future__ import annotations
@@ -30,13 +29,19 @@ from pathlib import Path
 
 SHEET_NAME = "Портфели"
 
-# Поля формы визита (зеркало hardbot/db.VISIT_FILL_COLUMNS без служебных
-# tips/reminder_date, которых нет в схеме экспорта). Порядок — как в реестре.
+# Колонки, которые РЕАЛЬНО пишет бот: форма визита миниаппа (зеркало
+# web.ALLOWED_SAVE ∩ схема экспорта) + visit_date (ставит сервер при завершении
+# визита). Шире нельзя: overall_result приходит из системы («Не обработан» у
+# всех строк импорта), who_at_address/client_location бывают заполнены ещё в
+# исходном файле — писать их без завершённого визита = тащить старую выгрузку.
 VISIT_KEYS = [
-    "visit_date", "visit_comment", "overall_result", "meeting_date",
-    "contact_with", "agreed_payment", "who_at_address", "client_location",
-    "purpose_rf", "call_status", "call_comment",
+    "visit_date", "call_status", "contact_with", "agreed_payment",
+    "who_at_address", "client_location", "purpose_rf", "call_comment",
 ]
+
+# Маркер «кейс заполнен ботом» — только visit_date: его ставит ИСКЛЮЧИТЕЛЬНО
+# миниапп при завершении визита (та же метрика, что «С визитом» в сводке).
+FILLED_MARKER = "visit_date"
 
 CONTRACT_KEY = "contract_id"
 
@@ -55,6 +60,11 @@ def norm_title(s) -> str:
         t = t.replace(zw, "")
     t = re.sub(r"\s+", " ", t.strip().lower()).translate(_HOMOGLYPHS)
     return t.rstrip(":;*.")
+
+
+def norm_name(s) -> str:
+    """ФИО для матчинга с папками сотрудников (как в razbros): схлоп пробелов, lower."""
+    return re.sub(r"\s+", " ", str(s or "").replace(" ", " ").strip()).lower()
 
 
 def norm_cid(v) -> str:
@@ -123,6 +133,26 @@ def find_header(grid: list[list], fields: list[dict]) -> tuple[int, dict]:
     return best_h, best_map
 
 
+def is_filled(row: dict) -> bool:
+    """Кейс «заполнен ботом» = завершённый визит (стоит visit_date)."""
+    return cell_text(row.get(FILLED_MARKER)) != ""
+
+
+def split_by_employee(rows: list[dict]) -> dict[str, dict]:
+    """Строки сервера → по ответственным: {ключ: {employee, rows, filled}}.
+    filled — сколько кейсов сотрудника заполнено ботом (кандидаты на обогащение)."""
+    out: dict[str, dict] = {}
+    for r in rows:
+        emp = str(r.get("responsible") or "").strip()
+        if not emp:
+            continue
+        e = out.setdefault(norm_name(emp), {"employee": emp, "rows": [], "filled": 0})
+        e["rows"].append(r)
+        if is_filled(r):
+            e["filled"] += 1
+    return out
+
+
 def _is_source_row(row: list) -> bool:
     """Строка-пометка «сх/хард» под заголовками — не данные."""
     nonempty = [str(v).strip().lower() for v in row if v not in (None, "")]
@@ -160,11 +190,10 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict]) -> dict:
 
     for srv in rows:
         cid = norm_cid(srv.get(CONTRACT_KEY))
+        if not cid or not is_filled(srv):
+            continue     # без завершённого визита кейс не трогаем вообще
         values = {k: srv.get(k) for k in VISIT_KEYS
                   if cell_text(srv.get(k)) != "" and k in col_map}
-        # «заполнен ботом» = есть хоть одно поле визита (даже если колонки нет в файле)
-        if not cid or not any(cell_text(srv.get(k)) != "" for k in VISIT_KEYS):
-            continue
         filled_cases += 1
         targets = file_rows.get(cid)
         if not targets:
@@ -262,52 +291,83 @@ def backup_copy(path: Path) -> Path:
     return dst
 
 
-def enrich_file(path: str | Path, fields: list[dict], rows: list[dict],
-                log=lambda s: None) -> dict:
-    """Обогатить живой файл реестра: бэкап → читаем лист → план → точечная запись →
-    сохранить тем же форматом. Возвращает план + backup/sheet. Требует Excel."""
+def _co_init():
+    """Пульт зовёт Excel из фонового потока — COM в нём инициализируем явно."""
     try:
-        # пульт зовёт нас из фонового потока — COM в нём надо инициализировать явно
         import pythoncom
         pythoncom.CoInitialize()
     except ImportError:
         pass
+
+
+def _enrich_workbook(app, path: Path, fields: list[dict], rows: list[dict],
+                     log=lambda s: None) -> dict:
+    """Один файл в уже открытом Excel: бэкап → лист → план → точечная запись →
+    сохранить тем же форматом. Возвращает план + backup/sheet/file."""
+    wb = app.books.open(str(path))
+    try:
+        ws = _pick_sheet(wb, fields)
+        # читаем строго от A1: used_range может начинаться не с A1,
+        # а индексы плана — координаты ячеек листа
+        last = ws.used_range.last_cell
+        grid = ws.range((1, 1), (last.row, last.column)).value or []
+        if grid and not isinstance(grid[0], list):   # один ряд/одна ячейка
+            grid = [grid if isinstance(grid, list) else [grid]]
+
+        plan = build_plan(grid, fields, rows)
+        writes = plan["writes"]
+        plan["backup"] = None
+        if writes:
+            # бэкап — только когда реально есть что писать (файл на диске ещё
+            # не изменён: Excel не сохранял); нет записей — нет мусорных копий
+            plan["backup"] = str(backup_copy(path))
+            for i, (r, c, val, _is_date) in enumerate(writes, 1):
+                ws.range((r + 1, c + 1)).value = val
+                if i % 200 == 0:
+                    log(f"{path.name}: пишу {i} / {len(writes)}…")
+            wb.save()
+        plan["sheet"] = ws.name
+        plan["file"] = str(path)
+        return plan
+    finally:
+        wb.close()
+
+
+def enrich_file(path: str | Path, fields: list[dict], rows: list[dict],
+                log=lambda s: None) -> dict:
+    """Обогатить один живой файл реестра. Требует Excel."""
+    _co_init()
     import xlwings as xw
 
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"файл не найден: {path}")
-
-    log("Делаю резервную копию…")
-    backup = backup_copy(path)
-
-    log("Открываю файл в Excel…")
+    log("Открываю Excel…")
     with open_excel(xw, log) as app:
         app.display_alerts = False
         app.screen_updating = False
-        wb = app.books.open(str(path))
-        try:
-            ws = _pick_sheet(wb, fields)
-            log(f"Читаю лист «{ws.name}»…")
-            # читаем строго от A1: used_range может начинаться не с A1,
-            # а индексы плана — координаты ячеек листа
-            last = ws.used_range.last_cell
-            grid = ws.range((1, 1), (last.row, last.column)).value or []
-            if grid and not isinstance(grid[0], list):   # один ряд/одна ячейка
-                grid = [grid if isinstance(grid, list) else [grid]]
+        log(f"Обогащаю {path.name}…")
+        return _enrich_workbook(app, path, fields, rows, log)
 
-            plan = build_plan(grid, fields, rows)
-            writes = plan["writes"]
-            log(f"Пишу {len(writes)} ячеек…")
-            for i, (r, c, val, _is_date) in enumerate(writes, 1):
-                ws.range((r + 1, c + 1)).value = val
-                if i % 200 == 0:
-                    log(f"Пишу {i} / {len(writes)}…")
-            if writes:
-                wb.save()
-            plan["backup"] = str(backup)
-            plan["sheet"] = ws.name
-            plan["file"] = str(path)
-            return plan
-        finally:
-            wb.close()
+
+def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None) -> list[dict]:
+    """Обогатить личные реестры пачкой, одной сессией Excel.
+    jobs: [{employee, path, rows}] — каждому файлу свои строки (его кейсы).
+    Ошибка одного файла не валит остальные: в результат кладётся {..., error}."""
+    _co_init()
+    import xlwings as xw
+
+    results = []
+    with open_excel(xw, log) as app:
+        app.display_alerts = False
+        app.screen_updating = False
+        for i, job in enumerate(jobs, 1):
+            path = Path(job["path"])
+            log(f"[{i}/{len(jobs)}] {job['employee']} — {path.name}…")
+            try:
+                plan = _enrich_workbook(app, path, fields, job["rows"], log)
+            except Exception as e:  # noqa: BLE001 — файл занят/битый: дальше по списку
+                plan = {"file": str(path), "error": str(e)}
+            plan["employee"] = job["employee"]
+            results.append(plan)
+    return results
