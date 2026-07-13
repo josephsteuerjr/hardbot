@@ -1,0 +1,1651 @@
+"""
+Контур · Выезды — десктоп-пульт аналитика (Python/Tkinter).
+
+Замена Tauri-пульта (src-tauri/ — легаси): тот же дизайн «Контур» (слоновая
+кость + графит), те же разделы, но обычный Python — без Rust-тулчейна, правится
+на месте. High-DPI: процесс объявляет DPI-awareness, размеры считаются от
+реального DPI монитора.
+
+Главное отличие от Tauri-версии — экспорт «Обогатить реестр» (enrich.py):
+берёт ЖИВОЙ файл реестра и точечно дописывает в него только то, что заполнили
+выездники через бота (их кейсы, их столбцы), ничего не перезатирая. Старый
+режим «Реестр целиком» (файл с нуля из БД) тоже остался — как слепок БД.
+
+Запуск: python pult.py  (или «Пульт.bat» — pythonw, без консоли).
+Зависимости: python-calamine (чтение реестров), openpyxl (экспорт xlsx),
+xlwings + установленный Excel (обогащение и разброс .xlsb).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import ssl
+import threading
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import date, datetime
+from pathlib import Path
+
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+
+import enrich
+import razbros
+
+APP_DIR = Path(__file__).resolve().parent
+SETTINGS_PATH = APP_DIR / "настройки пульта.json"
+
+# Актуальный инстанс — hardbot2 (свежий код сервера). Ключ — X-Admin-Key.
+DEFAULT_URL = "https://hardbot2.166.88.185.90.nip.io"
+DEFAULT_KEY = "hbadm_029ca66bc21804c4ced440bdbf93f0c8"
+
+# --- Палитра (1:1 с index.html Tauri-пульта) ---------------------------------
+BG = "#FCFBF8"        # фон
+SIDE = "#F6F4EE"      # сайдбар
+CARD = "#FFFFFF"      # карточка
+ALT = "#F5F3EC"       # вторичная заливка
+BORDER = "#E9E5DB"    # тёплая рамка
+TEXT = "#2B2825"      # чернила
+MUTED = "#6E6961"
+ACCENT = "#36332E"    # графит
+ACCENT_H = "#4A463F"
+SUCCESS = "#5B8A3C"
+DANGER = "#B0472C"
+WARN = "#A66B1F"
+
+FONT = "Segoe UI"
+
+
+def f(size: int, bold: bool = False) -> tuple:
+    return (FONT, size, "bold") if bold else (FONT, size)
+
+
+def fmt_n(n) -> str:
+    """1234567 → «1 234 567» (как toLocaleString ru-RU)."""
+    if n is None:
+        return "—"
+    try:
+        return f"{int(float(n)):,}".replace(",", " ")
+    except (TypeError, ValueError):
+        return str(n)
+
+
+def parse_num(v):
+    """«10 000 000» / «12 400,50» / 100900 → float | None."""
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = "".join(ch for ch in str(v or "") if not ch.isspace()).replace(",", ".")
+    try:
+        return float(s) if s else None
+    except ValueError:
+        return None
+
+
+def to_iso(s: str) -> str:
+    """Дата из поля периода: ISO или дд.мм.гггг → ISO; пусто → пусто."""
+    s = (s or "").strip()
+    if not s:
+        return ""
+    d = enrich.parse_date(s)
+    if not d:
+        raise ValueError(f"не дата: «{s}» (нужно ГГГГ-ММ-ДД или ДД.ММ.ГГГГ)")
+    return d.isoformat()
+
+
+# --- Чтение книги Excel → грид листов (зеркало Rust parse_workbook) ----------
+def _cell_json(v):
+    """Значение calamine → JSON-значение как у Rust cell_to_json: пустые → None,
+    целые float → int, даты → ISO (полночь режем до даты)."""
+    if v is None or isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        t = v.strip()
+        return t or None
+    if isinstance(v, float):
+        return int(v) if v.is_integer() and abs(v) < 9e15 else v
+    if isinstance(v, datetime):
+        s = v.isoformat(sep=" ", timespec="seconds")
+        return s[:-9] if s.endswith(" 00:00:00") else s
+    if isinstance(v, date):
+        return v.isoformat()
+    return v if isinstance(v, (int, float, bool)) else str(v)
+
+
+def read_workbook_sheets(path: str) -> list[dict]:
+    """Файл реестра → [{name, grid}] для POST /admin/import.json. Парсится
+    локально (python-calamine: .xlsx/.xlsm/.xlsb/.xls), на сервер летит JSON."""
+    from python_calamine import CalamineWorkbook
+
+    wb = CalamineWorkbook.from_path(path)
+    sheets = []
+    for name in wb.sheet_names:
+        rows = wb.get_sheet_by_name(name).to_python()
+        grid = [[_cell_json(c) for c in row] for row in rows]
+        if grid:
+            sheets.append({"name": name, "grid": grid})
+    if not sheets:
+        raise ValueError("в файле нет читаемых листов")
+    return sheets
+
+
+# --- Экспорт xlsx (порт rust_xlsxwriter-логики на openpyxl) ------------------
+def _col_width(key: str, title: str) -> float:
+    if key in ("address", "visit_comment"):
+        return 42
+    if key in ("client", "address_customer", "extra_address", "point_address"):
+        return 28
+    if key in ("responsible", "point_name", "call_comment"):
+        return 22
+    if key.endswith("_date"):
+        return 12
+    return min(max(len(title) * 1.1, 9), 20)
+
+
+def write_registry_xlsx(path: str, fields: list[dict], rows: list[dict]) -> None:
+    """Слепок БД в новый xlsx: 3 строки шапки (блоки объединены), даты и суммы —
+    типизированные, автофильтр, закреплённая шапка."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Портфели"
+
+    bold = Font(bold=True)
+    italic = Font(italic=True, color="8A8578")
+    center = Alignment(horizontal="center")
+
+    # строка 1 — шапки блоков (merge по колонкам блока)
+    start = 0
+    for i in range(1, len(fields) + 1):
+        if i == len(fields) or fields[i]["block"] != fields[start]["block"]:
+            c = ws.cell(row=1, column=start + 1, value=fields[start]["block"])
+            c.font, c.alignment = bold, center
+            if i - 1 > start:
+                ws.merge_cells(start_row=1, start_column=start + 1,
+                               end_row=1, end_column=i)
+            start = i
+    # строка 2 — заголовки, строка 3 — сх/хард, ширины
+    for j, fld in enumerate(fields, start=1):
+        ws.cell(row=2, column=j, value=fld["title"]).font = bold
+        ws.cell(row=3, column=j, value=fld["source"]).font = italic
+        ws.column_dimensions[get_column_letter(j)].width = _col_width(fld["key"], fld["title"])
+    # данные со строки 4
+    for r, row in enumerate(rows, start=4):
+        for j, fld in enumerate(fields, start=1):
+            v = row.get(fld["key"])
+            if v in (None, ""):
+                continue
+            if fld.get("date"):
+                d = enrich.parse_date(v)
+                if d:
+                    c = ws.cell(row=r, column=j, value=d)
+                    c.number_format = "DD.MM.YYYY"
+                    continue
+            if fld.get("num"):
+                n = parse_num(v)
+                if n is not None:
+                    c = ws.cell(row=r, column=j, value=n)
+                    c.number_format = "#,##0"
+                    continue
+            ws.cell(row=r, column=j, value=str(v))
+    last = max(len(rows) + 3, 4)
+    ws.auto_filter.ref = f"A2:{get_column_letter(len(fields))}{last}"
+    ws.freeze_panes = "A4"
+    wb.save(path)
+
+
+MARKER_COLS = [
+    ("created_at", "Дата", 19), ("kind", "Тип", 12), ("telegram_id", "telegram_id", 14),
+    ("rep", "Кейс (rep)", 16), ("client", "Клиент", 28), ("address", "Адрес", 42),
+    ("label", "Метка/подпись", 30), ("lat", "Широта", 12), ("lon", "Долгота", 12),
+]
+
+
+def write_markers_xlsx(path: str, rows: list[dict]) -> None:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Метки"
+    for j, (_k, title, w) in enumerate(MARKER_COLS, start=1):
+        ws.cell(row=1, column=j, value=title).font = Font(bold=True)
+        ws.column_dimensions[get_column_letter(j)].width = w
+    for r, row in enumerate(rows, start=2):
+        for j, (k, _t, _w) in enumerate(MARKER_COLS, start=1):
+            v = row.get(k)
+            if v in (None, ""):
+                continue
+            if k == "created_at":
+                try:
+                    c = ws.cell(row=r, column=j,
+                                value=datetime.fromisoformat(str(v).replace("T", " ")))
+                    c.number_format = "DD.MM.YYYY HH:MM"
+                    continue
+                except ValueError:
+                    pass
+            elif k in ("lat", "lon") and isinstance(v, (int, float)):
+                c = ws.cell(row=r, column=j, value=float(v))
+                c.number_format = "0.000000"
+                continue
+            ws.cell(row=r, column=j, value=v if isinstance(v, (int, float)) else str(v))
+    if rows:
+        from openpyxl.utils import get_column_letter as gcl
+        ws.auto_filter.ref = f"A1:{gcl(len(MARKER_COLS))}{len(rows) + 1}"
+    ws.freeze_panes = "A2"
+    wb.save(path)
+
+
+# --- Мелкие виджеты в стиле «Контур» -----------------------------------------
+class Card(tk.Frame):
+    """Белая карточка с тёплой рамкой, заголовком и опц. описанием."""
+
+    def __init__(self, parent, title: str, desc: str | None = None):
+        super().__init__(parent, bg=CARD, highlightbackground=BORDER,
+                         highlightthickness=1, bd=0)
+        self.inner = tk.Frame(self, bg=CARD)
+        self.inner.pack(fill="both", expand=True, padx=16, pady=(12, 14))
+        tk.Label(self.inner, text=title, bg=CARD, fg=TEXT,
+                 font=f(10, True)).pack(anchor="w")
+        if desc:
+            tk.Label(self.inner, text=desc, bg=CARD, fg=MUTED, font=f(9),
+                     justify="left", wraplength=760).pack(anchor="w", pady=(2, 0))
+        tk.Frame(self.inner, bg=CARD, height=8).pack()
+
+
+def btn(parent, text, command=None, kind="ghost", bg_=CARD):
+    """accent (графит) | ghost (обводка) | danger."""
+    if kind == "accent":
+        bg, fg, hover, hl = ACCENT, "#FCFBF8", ACCENT_H, ACCENT
+    elif kind == "danger":
+        bg, fg, hover, hl = bg_, DANGER, "#F5E3DD", BORDER
+    else:
+        bg, fg, hover, hl = bg_, TEXT, ALT, BORDER
+    b = tk.Button(parent, text=text, command=command, bg=bg, fg=fg,
+                  activebackground=hover, activeforeground=fg, relief="flat",
+                  font=f(9), cursor="hand2", padx=13, pady=6, bd=0,
+                  highlightbackground=hl, highlightthickness=1)
+    b.bind("<Enter>", lambda _e: b["state"] == "normal" and b.config(bg=hover))
+    b.bind("<Leave>", lambda _e: b.config(bg=bg))
+    return b
+
+
+def entry(parent, width=None, show=None, bg_=CARD):
+    e = tk.Entry(parent, bg=bg_, fg=TEXT, insertbackground=TEXT, relief="flat",
+                 font=f(10), highlightbackground=BORDER, highlightcolor=ACCENT,
+                 highlightthickness=1, show=show or "")
+    if width:
+        e.configure(width=width)
+    return e
+
+
+class ChipFlow(tk.Text):
+    """Поток «чипсов» с автопереносом (трюк: Text + window_create)."""
+
+    def __init__(self, parent, bg_=CARD):
+        super().__init__(parent, wrap="char", bd=0, bg=bg_, cursor="arrow",
+                         height=1, highlightthickness=0, state="disabled",
+                         spacing1=2, spacing3=2)
+        self._bg = bg_
+        self.bind("<Configure>", lambda _e: self._fit())
+
+    def set_chips(self, items: list[tuple[str, bool, object]] | list[str]):
+        """items: строки (пассивные чипсы) или (текст, включён, on_click)."""
+        self.configure(state="normal")
+        self.delete("1.0", "end")
+        for it in items:
+            if isinstance(it, str):
+                w = tk.Label(self, text=it, bg=ALT, fg=TEXT, font=f(9), padx=9, pady=2)
+            else:
+                text, on, cb = it
+                w = tk.Button(self, text=text, command=cb, relief="flat", bd=0,
+                              bg=ACCENT if on else self._bg,
+                              fg="#FCFBF8" if on else MUTED,
+                              activebackground=ACCENT_H if on else ALT,
+                              activeforeground="#FCFBF8" if on else TEXT,
+                              font=f(9), padx=10, pady=2, cursor="hand2",
+                              highlightbackground=ACCENT if on else BORDER,
+                              highlightthickness=1)
+            self.window_create("end", window=w, padx=2, pady=2)
+        self.configure(state="disabled")
+        self.after_idle(self._fit)
+
+    def _fit(self):
+        try:
+            lines = self.count("1.0", "end", "displaylines")
+            n = lines[0] if isinstance(lines, tuple) else (lines or 1)
+            self.configure(height=max(int(n), 1))
+        except tk.TclError:
+            pass
+
+
+class KVGrid(tk.Frame):
+    """Плашки «показатель → число» (отчёт импорта/разброса)."""
+
+    def __init__(self, parent, bg_=CARD):
+        super().__init__(parent, bg=bg_)
+
+    def set_pairs(self, pairs: list[tuple[str, object]]):
+        for w in self.winfo_children():
+            w.destroy()
+        for i, (k, v) in enumerate(pairs):
+            cell = tk.Frame(self, bg=ALT, padx=10, pady=6)
+            cell.grid(row=0, column=i, padx=(0 if i == 0 else 6, 0), sticky="w")
+            tk.Label(cell, text=k, bg=ALT, fg=MUTED, font=f(8)).pack(anchor="w")
+            tk.Label(cell, text=fmt_n(v), bg=ALT, fg=TEXT, font=f(11, True)).pack(anchor="w")
+
+
+# --- Приложение ---------------------------------------------------------------
+SECTIONS = [
+    ("dash", "Сводка"), ("registry", "Реестр"), ("prio", "Приоритет"),
+    ("people", "Люди"), ("mgrs", "Руководители"), ("activity", "Активность"),
+    ("conn", "Подключение"),
+]
+TITLES = dict(SECTIONS) | {"prio": "Приоритет выезда"}
+
+
+class Pult(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Контур · Выезды")
+        self.configure(bg=BG)
+        self.settings = self._load_settings()
+        self.url = self.settings.get("url", DEFAULT_URL)
+        self.key = self.settings.get("key", DEFAULT_KEY)
+        self.connected = False
+        self.guests: list[dict] = []
+        self.mgrs: list[dict] = []
+        self.mgr_cities: list[dict] = []
+        self.mgr_emps: list[dict] = []
+        self.mgr_city_emps: dict = {}
+        self.mgr_form = {"tid": "", "cities": set(), "employees": set()}
+        self.scatter_matched: list[dict] = []
+        self.scatter_selected: set[str] = set()
+        self.scatter_roots: list[str] = []
+        self._loaded: set[str] = set()
+
+        self._dpi_geometry()
+        self._styles()
+        self._build()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        sec = self.settings.get("sec", "dash") if self.key else "conn"
+        self.nav(sec if sec in self.frames else "dash")
+        if self.key:
+            self.after(150, self.refresh)
+
+    # ── DPI / стили ────────────────────────────────────────────────────
+    def _dpi_geometry(self):
+        self.update_idletasks()
+        scale = self.winfo_fpixels("1i") / 96.0
+        self.px = lambda n: int(n * scale + 0.5)
+        w, h = self.px(1180), self.px(800)
+        x = max((self.winfo_screenwidth() - w) // 2, 0)
+        y = max((self.winfo_screenheight() - h) // 3, 0)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.minsize(self.px(980), self.px(660))
+        try:
+            self.iconphoto(True, tk.PhotoImage(file=str(APP_DIR / "icon-src.png")))
+        except tk.TclError:
+            pass
+
+    def _styles(self):
+        st = ttk.Style(self)
+        st.theme_use("clam")
+        st.configure("Treeview", background=CARD, fieldbackground=CARD,
+                     foreground=TEXT, rowheight=self.px(28), borderwidth=0, font=f(9))
+        st.map("Treeview", background=[("selected", ALT)], foreground=[("selected", TEXT)])
+        st.configure("Treeview.Heading", background=CARD, foreground=MUTED,
+                     font=(FONT, 8, "bold"), relief="flat", padding=(6, 6))
+        st.map("Treeview.Heading", background=[("active", CARD)])
+        st.configure("TCombobox", fieldbackground=CARD, background=CARD,
+                     foreground=TEXT, arrowcolor=MUTED, bordercolor=BORDER,
+                     lightcolor=CARD, darkcolor=CARD, padding=4)
+        st.configure("Horizontal.TScale", background=CARD, troughcolor=ALT)
+        st.configure("Vertical.TScrollbar", background=SIDE, troughcolor=BG,
+                     bordercolor=BG, arrowcolor=MUTED)
+
+    # ── каркас ─────────────────────────────────────────────────────────
+    def _build(self):
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        # сайдбар
+        side = tk.Frame(self, bg=SIDE, width=self.px(224))
+        side.grid(row=0, column=0, sticky="nsw")
+        side.pack_propagate(False)
+        logo = tk.Frame(side, bg=SIDE)
+        logo.pack(fill="x", padx=14, pady=(16, 14))
+        mark = tk.Label(logo, text="К", bg=ACCENT, fg="#FCFBF8", font=f(11, True),
+                        width=2, height=1)
+        mark.pack(side="left")
+        tt = tk.Frame(logo, bg=SIDE)
+        tt.pack(side="left", padx=(9, 0))
+        tk.Label(tt, text="Контур", bg=SIDE, fg=TEXT, font=f(11, True)).pack(anchor="w")
+        tk.Label(tt, text="ВЫЕЗДЫ", bg=SIDE, fg=MUTED, font=(FONT, 7, "bold")).pack(anchor="w")
+
+        self.nav_btns: dict[str, tk.Button] = {}
+        navf = tk.Frame(side, bg=SIDE)
+        navf.pack(fill="both", expand=True, padx=8)
+        for sec, label in SECTIONS:
+            if sec == "conn":
+                tk.Frame(navf, bg=SIDE).pack(fill="both", expand=True)
+            b = tk.Button(navf, text=label, anchor="w", relief="flat", bd=0,
+                          bg=SIDE, fg=MUTED, activebackground=ALT, activeforeground=TEXT,
+                          font=f(10), padx=12, pady=7, cursor="hand2",
+                          command=lambda s=sec: self.nav(s))
+            b.pack(fill="x", pady=1)
+            self.nav_btns[sec] = b
+
+        foot = tk.Frame(side, bg=SIDE)
+        foot.pack(fill="x", padx=14, pady=12)
+        self.dot = tk.Canvas(foot, width=self.px(10), height=self.px(10),
+                             bg=SIDE, highlightthickness=0)
+        self.dot.pack(side="left")
+        ft = tk.Frame(foot, bg=SIDE)
+        ft.pack(side="left", padx=(8, 0))
+        self.conn_lbl = tk.Label(ft, text="не подключено", bg=SIDE, fg=TEXT, font=f(9))
+        self.conn_lbl.pack(anchor="w")
+        self.host_lbl = tk.Label(ft, text="—", bg=SIDE, fg=MUTED, font=f(8))
+        self.host_lbl.pack(anchor="w")
+        self._set_conn(False, "не подключено")
+
+        # шапка + прокручиваемое содержимое
+        main = tk.Frame(self, bg=BG)
+        main.grid(row=0, column=1, sticky="nsew")
+        main.grid_rowconfigure(1, weight=1)
+        main.grid_columnconfigure(0, weight=1)
+
+        bar = tk.Frame(main, bg=BG)
+        bar.grid(row=0, column=0, sticky="ew", padx=26, pady=(14, 10))
+        self.sec_title = tk.Label(bar, text="Сводка", bg=BG, fg=TEXT, font=f(14, True))
+        self.sec_title.pack(side="left")
+        btn(bar, "Обновить", self.refresh, bg_=BG).pack(side="right")
+        self.upd_lbl = tk.Label(bar, text="", bg=BG, fg=MUTED, font=f(8))
+        self.upd_lbl.pack(side="right", padx=10)
+
+        wrap = tk.Frame(main, bg=BG)
+        wrap.grid(row=1, column=0, sticky="nsew")
+        wrap.grid_rowconfigure(0, weight=1)
+        wrap.grid_columnconfigure(0, weight=1)
+        self.canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0)
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=sb.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        sb.grid(row=0, column=1, sticky="ns")
+        self.content = tk.Frame(self.canvas, bg=BG)
+        self._cwin = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
+        self.content.bind("<Configure>",
+                          lambda _e: self.canvas.configure(
+                              scrollregion=self.canvas.bbox("all") or (0, 0, 0, 0)))
+        self.canvas.bind("<Configure>",
+                         lambda e: self.canvas.itemconfigure(self._cwin, width=e.width))
+        self.bind_all("<MouseWheel>",
+                      lambda e: self.canvas.yview_scroll(-e.delta // 120, "units"))
+
+        self.frames: dict[str, tk.Frame] = {}
+        for sec, _ in SECTIONS:
+            fr = tk.Frame(self.content, bg=BG)
+            self.frames[sec] = fr
+            getattr(self, f"_build_{sec}")(fr)
+
+        # тост
+        self.toast_lbl = tk.Label(self, text="", bg=ACCENT, fg="#FCFBF8",
+                                  font=f(9), padx=18, pady=8)
+        self._toast_timer = None
+
+    def _section_inner(self, fr) -> tk.Frame:
+        inner = tk.Frame(fr, bg=BG)
+        inner.pack(fill="x", padx=26, pady=(4, 30))
+        return inner
+
+    def nav(self, sec: str):
+        for s, b in self.nav_btns.items():
+            on = s == sec
+            b.configure(bg=ACCENT if on else SIDE, fg="#FCFBF8" if on else MUTED,
+                        activebackground=ACCENT_H if on else ALT,
+                        activeforeground="#FCFBF8" if on else TEXT)
+        for s, fr in self.frames.items():
+            fr.pack_forget()
+        self.frames[sec].pack(fill="both", expand=True)
+        self.sec_title.configure(text=TITLES.get(sec, ""))
+        self.settings["sec"] = sec
+        self.canvas.yview_moveto(0)
+        if self.connected and sec in ("prio", "activity", "people", "mgrs") \
+                and sec not in self._loaded:
+            {"prio": self.load_priority, "activity": self.load_activity,
+             "people": self.load_roles, "mgrs": self.load_managers}[sec]()
+
+    # ── связь/фоновые задачи ───────────────────────────────────────────
+    def _set_conn(self, ok: bool, text: str):
+        self.connected = ok
+        self.dot.delete("all")
+        r = self.px(9)
+        self.dot.create_oval(1, 1, r, r, fill=SUCCESS if ok else DANGER, outline="")
+        self.conn_lbl.configure(text=text)
+        try:
+            self.host_lbl.configure(text=urllib.parse.urlsplit(self.url).netloc or "—")
+        except ValueError:
+            self.host_lbl.configure(text="—")
+
+    def toast(self, text: str, err: bool = False):
+        self.toast_lbl.configure(text=text, bg=DANGER if err else ACCENT)
+        self.toast_lbl.place(relx=0.5, rely=1.0, y=-self.px(26), anchor="s")
+        if self._toast_timer:
+            self.after_cancel(self._toast_timer)
+        self._toast_timer = self.after(3200, self.toast_lbl.place_forget)
+
+    def bg_task(self, fn, done=None, fail=None):
+        """fn — в потоке; done(result)/fail(exc) — в UI-потоке."""
+        def run():
+            try:
+                res = fn()
+            except Exception as e:  # noqa: BLE001 — показываем пользователю
+                self.after(0, lambda: (fail or self._fail)(e))
+                return
+            if done:
+                self.after(0, lambda: done(res))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _fail(self, e: Exception):
+        self.toast(str(e), err=True)
+
+    def api(self, method: str, path: str, body: dict | None = None, timeout=20):
+        """Запрос к admin-API. Дружелюбные ошибки вместо трейсбеков."""
+        url = self.url.rstrip("/") + path
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method,
+                                     headers={"X-Admin-Key": self.key})
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+        try:
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    return json.load(r)
+            except urllib.error.URLError as e:
+                # самоподписанный/прокси-сертификат — пробуем без проверки TLS
+                if isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
+                    ctx = ssl._create_unverified_context()  # noqa: S323 — осознанно
+                    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+                        return json.load(r)
+                raise
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                raise RuntimeError("Неверный admin-ключ") from e
+            if e.code == 404:
+                raise RuntimeError(f"На сервере нет {path} — сервер старой версии?") from e
+            raise RuntimeError(f"Сервер ответил {e.code} на {path}") from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Нет связи с сервером ({e.reason})") from e
+
+    # ══ СВОДКА ══════════════════════════════════════════════════════════
+    def _build_dash(self, fr):
+        inner = self._section_inner(fr)
+        row = tk.Frame(inner, bg=BG)
+        row.pack(fill="x")
+        self.metrics: dict[str, tk.Label] = {}
+        for i, (key, label) in enumerate([
+                ("clients", "Контрагентов"), ("visited", "С визитом"),
+                ("emps", "Сотрудников"), ("binds", "Выбрали себя"), ("marks", "Меток")]):
+            m = tk.Frame(row, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+            m.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 8, 0))
+            row.grid_columnconfigure(i, weight=1)
+            tk.Label(m, text=label, bg=CARD, fg=MUTED, font=f(8)).pack(
+                anchor="w", padx=13, pady=(10, 0))
+            v = tk.Label(m, text="—", bg=CARD, fg=TEXT, font=f(17, True))
+            v.pack(anchor="w", padx=13, pady=(0, 10))
+            self.metrics[key] = v
+
+        cov = Card(inner, "Покрытие визитами")
+        cov.pack(fill="x", pady=(12, 0))
+        self._cov_pc = 0
+        self.cov_bar = tk.Canvas(cov.inner, height=self.px(8), bg=ALT, highlightthickness=0)
+        self.cov_bar.pack(fill="x")
+        self.cov_bar.bind("<Configure>", lambda _e: self._draw_cov())
+        self.cov_txt = tk.Label(cov.inner, text="нет данных — подключись к серверу",
+                                bg=CARD, fg=MUTED, font=f(9))
+        self.cov_txt.pack(anchor="w", pady=(7, 0))
+
+        res = Card(inner, "Исходы визитов")
+        res.pack(fill="x", pady=(12, 0))
+        self.res_chips = ChipFlow(res.inner)
+        self.res_chips.pack(fill="x")
+        self.res_chips.set_chips(["—"])
+
+        per = Card(inner, "Период выгрузки")
+        per.pack(fill="x", pady=(12, 0))
+        self.period_dash = tk.Label(per.inner, text="—", bg=CARD, fg=MUTED, font=f(9))
+        self.period_dash.pack(anchor="w")
+
+    def _draw_cov(self):
+        self.cov_bar.delete("all")
+        w = max(self.cov_bar.winfo_width(), 10)
+        self.cov_bar.create_rectangle(0, 0, w * self._cov_pc / 100, self.px(8),
+                                      fill=SUCCESS, outline="")
+
+    def refresh(self):
+        self.settings["url"], self.settings["key"] = self.url, self.key
+        self._save_settings()
+        def done(d):
+            self._set_conn(True, "подключено")
+            self.metrics["clients"].configure(text=fmt_n(d.get("clients")))
+            self.metrics["visited"].configure(text=fmt_n(d.get("visited")))
+            self.metrics["emps"].configure(text=fmt_n(len(d.get("employees", []))))
+            self.metrics["binds"].configure(text=fmt_n(len(d.get("bindings", []))))
+            self.metrics["marks"].configure(text=fmt_n(d.get("markers")))
+            cl, vi = d.get("clients") or 0, d.get("visited") or 0
+            pc = round(vi / cl * 100) if cl else 0
+            self._cov_pc = pc
+            self._draw_cov()
+            self.cov_txt.configure(
+                text=f"{fmt_n(vi)} из {fmt_n(cl)} контрагентов — {pc}%" if cl else "реестр пуст")
+            br = d.get("by_result") or []
+            self.res_chips.set_chips(
+                [f"{r or 'без исхода'}  {fmt_n(c)}" for r, c in br] or ["визитов с исходом пока нет"])
+            self._show_period(d.get("period") or {})
+            self._render_binds(d.get("bindings") or [])
+            self.upd_lbl.configure(
+                text="обновлено " + datetime.now().strftime("%H:%M"))
+            self._loaded.clear()
+            cur = self.settings.get("sec", "dash")
+            if cur in ("prio", "activity", "people", "mgrs"):
+                self.nav(cur)
+        def fail(e):
+            self._set_conn(False, "нет связи")
+            self.toast(str(e), err=True)
+        self.bg_task(lambda: self.api("GET", "/admin/stats"), done, fail)
+
+    # ══ РЕЕСТР ══════════════════════════════════════════════════════════
+    def _build_registry(self, fr):
+        inner = self._section_inner(fr)
+
+        imp = Card(inner, "Импорт реестра",
+                   ".xlsx / .xlsm / .xlsb / .xls — файл читается в пульте (calamine), "
+                   "на сервер летит JSON · города геокодятся автоматически")
+        imp.pack(fill="x")
+        btn(imp.inner, "Выбрать файл и импортировать…", self.do_import,
+            kind="accent").pack(anchor="w")
+        self.imp_kvs = KVGrid(imp.inner)
+        self.imp_kvs.pack(anchor="w", pady=(10, 0))
+        self.imp_warn = tk.Label(imp.inner, text="", bg=CARD, fg=WARN, font=f(9),
+                                 justify="left", wraplength=760)
+        self.imp_warn.pack(anchor="w")
+
+        exp = Card(inner, "Экспорт",
+                   "«Обогатить реестр» — главный путь: берёт ТВОЙ живой файл и дописывает "
+                   "в него только заполненное выездниками (их кейсы, их столбцы визита), "
+                   "ничего не перезатирая; рядом создаётся резервная копия. "
+                   "«Реестр целиком» — новый xlsx-слепок БД (как раньше).")
+        exp.pack(fill="x", pady=(12, 0))
+        rowb = tk.Frame(exp.inner, bg=CARD)
+        rowb.pack(anchor="w")
+        btn(rowb, "Обогатить реестр…", self.do_enrich, kind="accent").pack(side="left")
+        btn(rowb, "Реестр целиком…", self.do_export_full).pack(side="left", padx=(8, 0))
+        btn(rowb, "Метки курьеров…", self.do_export_markers).pack(side="left", padx=(8, 0))
+        self.enrich_out = tk.Label(exp.inner, text="", bg=CARD, fg=MUTED, font=f(9),
+                                   justify="left", wraplength=760)
+        self.enrich_out.pack(anchor="w", pady=(8, 0))
+
+        sc = Card(inner, "Разброс кейсов по сотрудникам",
+                  "Раскладывает экспорт кейсов (формат «Хард») по личным .xlsb — каждому "
+                  "его строки по колонке «ответственный Сотрудник». Папки по маске "
+                  "Республика / … / Город / ФИО из базовой папки; !Архив и _tech "
+                  "игнорируются. Файлы делает Excel: списки «Статусы» и личная "
+                  "«Статистика» сохраняются.")
+        sc.pack(fill="x", pady=(12, 0))
+        rowsc = tk.Frame(sc.inner, bg=CARD)
+        rowsc.pack(anchor="w")
+        btn(rowsc, "Папка с республиками…", self.scatter_pick_base).pack(side="left")
+        btn(rowsc, "Экспорт кейсов…", self.scatter_pick_source).pack(side="left", padx=(8, 0))
+        btn(rowsc, "＋ прямая папка", self.scatter_add_root).pack(side="left", padx=(8, 0))
+        self.sc_base_lbl = tk.Label(sc.inner, text="базовая папка не выбрана", bg=CARD,
+                                    fg=MUTED, font=f(9), wraplength=760, justify="left")
+        self.sc_base_lbl.pack(anchor="w", pady=(8, 0))
+        self.sc_src_lbl = tk.Label(sc.inner, text="файл экспорта не выбран", bg=CARD,
+                                   fg=MUTED, font=f(9), wraplength=760, justify="left")
+        self.sc_src_lbl.pack(anchor="w")
+        self.sc_roots_lbl = tk.Label(sc.inner, text="", bg=CARD, fg=MUTED, font=f(9),
+                                     wraplength=760, justify="left")
+        self.sc_roots_lbl.pack(anchor="w")
+        btn(sc.inner, "Проверить совпадения", lambda: self.scatter_run(False),
+            kind="accent").pack(anchor="w", pady=(10, 0))
+        self.sc_kvs = KVGrid(sc.inner)
+        self.sc_kvs.pack(anchor="w", pady=(10, 0))
+        self.sc_warn = tk.Label(sc.inner, text="", bg=CARD, fg=WARN, font=f(9),
+                                justify="left", wraplength=760)
+        self.sc_warn.pack(anchor="w")
+        self.sc_pick_frame = tk.Frame(sc.inner, bg=CARD)
+        self.sc_pick_frame.pack(fill="x")
+        self.sc_apply_row = tk.Frame(sc.inner, bg=CARD)
+        self.sc_apply_all_btn = btn(self.sc_apply_row, "Разложить всех",
+                                    lambda: self.scatter_run(True, "all"))
+        self.sc_apply_all_btn.pack(side="left")
+        self.sc_apply_sel_btn = btn(self.sc_apply_row, "Разложить выбранных (0)",
+                                    lambda: self.scatter_run(True, "selected"), kind="accent")
+        self.sc_apply_sel_btn.pack(side="left", padx=(8, 0))
+        self._scatter_restore()
+
+        cl = Card(inner, "Очистка данных",
+                  "«Сброс визитов» — обнуляет заполненное выездами (статусы, комментарии, "
+                  "дату визита, фото), клиенты/долги/закрепление остаются. «Полная очистка» — "
+                  "удаляет всех клиентов, визиты и метки под свежий импорт.")
+        cl.pack(fill="x", pady=(12, 0))
+        rc = tk.Frame(cl.inner, bg=CARD)
+        rc.pack(anchor="w")
+        btn(rc, "Сбросить данные визитов", lambda: self.do_reset("visits")).pack(side="left")
+        btn(rc, "Полностью очистить реестр", lambda: self.do_reset("all"),
+            kind="danger").pack(side="left", padx=(8, 0))
+        self.reset_out = tk.Label(cl.inner, text="", bg=CARD, fg=MUTED, font=f(9))
+        self.reset_out.pack(anchor="w", pady=(6, 0))
+
+        geo = Card(inner, "Геокодинг адресов",
+                   "Идёт на сервере в фоне. Запускай после импорта, если у части клиентов "
+                   "нет координат.")
+        geo.pack(fill="x", pady=(12, 0))
+        btn(geo.inner, "Запустить геокодинг", self.do_geocode).pack(anchor="w")
+
+        per = Card(inner, "Период выгрузки",
+                   "По дате закрепления: выездники видят только клиентов из этого окна. "
+                   "Пусто — видны все. Формат: ГГГГ-ММ-ДД или ДД.ММ.ГГГГ.")
+        per.pack(fill="x", pady=(12, 0))
+        rp = tk.Frame(per.inner, bg=CARD)
+        rp.pack(anchor="w")
+        self.p_from = entry(rp, width=12)
+        self.p_from.pack(side="left")
+        tk.Label(rp, text="—", bg=CARD, fg=MUTED).pack(side="left", padx=6)
+        self.p_to = entry(rp, width=12)
+        self.p_to.pack(side="left")
+        btn(rp, "Применить", self.apply_period, kind="accent").pack(side="left", padx=(10, 0))
+        btn(rp, "Сбросить", self.clear_period).pack(side="left", padx=(8, 0))
+        self.period_cur = tk.Label(per.inner, text="—", bg=CARD, fg=MUTED, font=f(9))
+        self.period_cur.pack(anchor="w", pady=(8, 0))
+
+    # --- импорт ---
+    def do_import(self):
+        path = filedialog.askopenfilename(
+            title="Файл реестра", filetypes=[("Excel", "*.xlsx *.xlsm *.xlsb *.xls")])
+        if not path:
+            return
+        self.toast("Импорт " + Path(path).name + "…")
+        def work():
+            sheets = read_workbook_sheets(path)
+            return self.api("POST", "/admin/import.json", {"sheets": sheets}, timeout=120)
+        def done(d):
+            if d.get("error"):
+                self.imp_kvs.set_pairs([])
+                extra = ""
+                if d.get("header_sample"):
+                    extra = ". В файле: " + ", ".join(d["header_sample"])
+                self.imp_warn.configure(text=d["error"] + extra)
+                self.toast("Импорт не прошёл", err=True)
+                return
+            self.imp_kvs.set_pairs([
+                ("строк", d.get("total_rows")), ("добавлено", d.get("inserted")),
+                ("обновлено", d.get("updated")), ("без КД", d.get("skipped_no_id")),
+                ("дублей", d.get("duplicates"))])
+            unk = d.get("unknown_columns") or []
+            self.imp_warn.configure(
+                text=("Незнакомые колонки (не помешали импорту): " + ", ".join(unk)) if unk else "")
+            self.toast(f"Импорт готов: +{fmt_n(d.get('inserted'))} / обновлено {fmt_n(d.get('updated'))}")
+            self.refresh()
+        self.bg_task(work, done)
+
+    # --- экспорт: обогащение ---
+    def do_enrich(self):
+        path = filedialog.askopenfilename(
+            title="Живой файл реестра для обогащения",
+            initialfile=self.settings.get("enrich_file", ""),
+            filetypes=[("Excel", "*.xlsb *.xlsx *.xlsm *.xls")])
+        if not path:
+            return
+        if not messagebox.askyesno(
+                "Обогатить реестр",
+                f"{Path(path).name}\n\nВ файл будут дописаны ТОЛЬКО данные визитов "
+                "(заполненные ботом кейсы и их столбцы). Остальные строки, столбцы, "
+                "листы и форматирование не трогаются.\n\nРезервная копия будет создана "
+                "рядом с файлом. Продолжить?"):
+            return
+        self.settings["enrich_file"] = path
+        self._save_settings()
+        self.enrich_out.configure(text="Забираю данные с сервера…")
+        def work():
+            d = self.api("GET", "/admin/export.json", timeout=120)
+            log = lambda s: self.after(0, lambda: self.enrich_out.configure(text=s))
+            return enrich.enrich_file(path, d["fields"], d["rows"], log=log)
+        def done(p):
+            parts = [
+                f"Кейсов с данными бота: {p['filled_cases']}",
+                f"найдено в файле: {p['matched_cases']}",
+                f"дописано ячеек: {p['cells_written']}"
+                + (f" (поверх старых значений: {p['cells_over_nonempty']})"
+                   if p["cells_over_nonempty"] else ""),
+                f"уже совпадало: {p['cells_already']}",
+            ]
+            text = " · ".join(parts) + f"\nРезервная копия: {p['backup']}"
+            if p["missing"]:
+                text += f"\n⚠ Заполнены ботом, но не найдены в файле ({len(p['missing'])}): " \
+                        + ", ".join(p["missing"][:20]) + ("…" if len(p["missing"]) > 20 else "")
+            if p["visit_cols_absent"]:
+                text += "\n⚠ В файле нет колонок: " + ", ".join(p["visit_cols_absent"])
+            self.enrich_out.configure(text=text)
+            self.toast(f"Обогащено: {p['changed_cases']} кейсов, {p['cells_written']} ячеек")
+        def fail(e):
+            self.enrich_out.configure(text=f"Ошибка: {e}")
+            self.toast(str(e), err=True)
+        self.bg_task(work, done, fail)
+
+    # --- экспорт: слепок/метки ---
+    def do_export_full(self):
+        path = filedialog.asksaveasfilename(
+            title="Куда сохранить слепок реестра", defaultextension=".xlsx",
+            initialfile="registry_export.xlsx", filetypes=[("Excel", "*.xlsx")])
+        if not path:
+            return
+        def work():
+            d = self.api("GET", "/admin/export.json", timeout=120)
+            write_registry_xlsx(path, d["fields"], d["rows"])
+            return len(d["rows"])
+        self.bg_task(work, lambda n: self.toast(f"Сохранено: {path} ({fmt_n(n)} строк)"))
+
+    def do_export_markers(self):
+        path = filedialog.asksaveasfilename(
+            title="Куда сохранить метки", defaultextension=".xlsx",
+            initialfile="markers.xlsx", filetypes=[("Excel", "*.xlsx")])
+        if not path:
+            return
+        def work():
+            d = self.api("GET", "/admin/markers.json", timeout=120)
+            write_markers_xlsx(path, d["rows"])
+            return len(d["rows"])
+        self.bg_task(work, lambda n: self.toast(f"Сохранено: {path} ({fmt_n(n)} меток)"))
+
+    # --- разброс ---
+    def _scatter_restore(self):
+        self.scatter_base = self.settings.get("scatterBase", "")
+        self.scatter_source = self.settings.get("scatterSource", "")
+        self._scatter_labels()
+
+    def _scatter_labels(self):
+        self.sc_base_lbl.configure(
+            text=("база: " + self.scatter_base) if self.scatter_base else "базовая папка не выбрана")
+        self.sc_src_lbl.configure(
+            text=("экспорт: " + self.scatter_source) if self.scatter_source else "файл экспорта не выбран")
+        self.sc_roots_lbl.configure(
+            text="\n".join("прямая папка: " + r for r in self.scatter_roots))
+
+    def scatter_pick_base(self):
+        p = filedialog.askdirectory(title="Папка, в которой лежат папки республик")
+        if p:
+            self.scatter_base = p
+            self.settings["scatterBase"] = p
+            self._save_settings()
+            self._scatter_labels()
+
+    def scatter_pick_source(self):
+        p = filedialog.askopenfilename(
+            title="Экспорт кейсов (формат «Хард»)",
+            filetypes=[("Экспорт кейсов", "*.xlsb *.xlsx *.xlsm *.xls")])
+        if p:
+            self.scatter_source = p
+            self.settings["scatterSource"] = p
+            self._save_settings()
+            self._scatter_labels()
+
+    def scatter_add_root(self):
+        p = filedialog.askdirectory(title="Прямая папка портфелей (в обход маски)")
+        if p and p not in self.scatter_roots:
+            self.scatter_roots.append(p)
+            self._scatter_labels()
+
+    def scatter_run(self, apply: bool, which: str = "all"):
+        if not self.scatter_base and not self.scatter_roots:
+            self.toast("Выбери базовую папку (или прямую папку)", err=True)
+            return
+        if not self.scatter_source:
+            self.toast("Выбери файл экспорта кейсов", err=True)
+            return
+        only = None
+        if apply and which == "selected":
+            only = [m["employee"] for m in self.scatter_matched
+                    if m["employee"].lower() in self.scatter_selected]
+            if not only:
+                self.toast("Никто не выбран", err=True)
+                return
+        if apply:
+            who = f"выбранным ({len(only)})" if only else "ВСЕМ найденным"
+            if not messagebox.askyesno(
+                    "Разброс кейсов",
+                    f"Разложить кейсы по личным файлам — {who}?\nЛичные .xlsb будут "
+                    "перезаписаны свежими строками (личная «Статистика» переносится). "
+                    "Делает Excel — может занять время."):
+                return
+        self.sc_warn.configure(
+            text="Раскладываю через Excel…" if apply else "Проверяю совпадения…")
+        base, roots, source = self.scatter_base, list(self.scatter_roots), self.scatter_source
+        def work():
+            if apply:   # Excel/COM в фоновом потоке требует явной инициализации
+                try:
+                    import pythoncom
+                    pythoncom.CoInitialize()
+                except ImportError:
+                    pass
+            reps = razbros.load_config(None)
+            rts = razbros.resolve_roots(base or None, reps, roots)
+            fmap = razbros.build_folder_map(rts)
+            emps = razbros.read_source_employees(Path(source))
+            if apply:
+                sel = {o.strip().lower() for o in only} if only else None
+                return True, razbros.apply_scatter(Path(source), fmap, emps, sel)
+            return False, razbros.make_report(fmap, emps)
+        def done(res):
+            was_apply, d = res
+            self.sc_warn.configure(text="")
+            if was_apply:
+                skipped = d.get("skipped") or []
+                self.sc_kvs.set_pairs([("записано файлов", d.get("written_count", 0)),
+                                       ("без папки (пропущено)", len(skipped))])
+                self.sc_warn.configure(
+                    text=("Без папки на диске: " + ", ".join(skipped)) if skipped else "")
+                self.toast(f"Разброс готов: {d.get('written_count', 0)} файлов")
+                return
+            c = d.get("counts") or {}
+            self.scatter_matched = d.get("matched") or []
+            self.sc_kvs.set_pairs([
+                ("в экспорте сотрудников", d.get("employees_total", 0)),
+                ("нашли папку", c.get("matched", 0)),
+                ("без папки", c.get("unmatched", 0)),
+                ("лишние папки", c.get("extra", 0))])
+            warn = ""
+            if d.get("unmatched"):
+                warn = f"Без папки на диске ({len(d['unmatched'])}): " + ", ".join(d["unmatched"])
+            if d.get("extra_folders"):
+                warn += ("\n" if warn else "") + "Папки без строк в экспорте: " \
+                        + ", ".join(d["extra_folders"])
+            self.sc_warn.configure(text=warn)
+            self._render_scatter_pick()
+        self.bg_task(work, done, lambda e: (self.sc_warn.configure(text=f"Ошибка: {e}"),
+                                            self.toast(str(e), err=True)))
+
+    def _render_scatter_pick(self):
+        for w in self.sc_pick_frame.winfo_children():
+            w.destroy()
+        self.sc_apply_row.pack_forget()
+        if not self.scatter_matched:
+            return
+        head = tk.Frame(self.sc_pick_frame, bg=CARD)
+        head.pack(fill="x", pady=(10, 4))
+        tk.Label(head, text="Выбор поимённо (для «Разложить выбранных»):",
+                 bg=CARD, fg=MUTED, font=f(9)).pack(side="left")
+        btn(head, "все", lambda: self._scatter_all(True)).pack(side="right")
+        btn(head, "снять", lambda: self._scatter_all(False)).pack(side="right", padx=(0, 6))
+        box = tk.Frame(self.sc_pick_frame, bg=CARD, highlightbackground=BORDER,
+                       highlightthickness=1)
+        box.pack(fill="x")
+        self._sc_vars: dict[str, tk.BooleanVar] = {}
+        for m in self.scatter_matched:
+            k = m["employee"].lower()
+            var = tk.BooleanVar(value=k in self.scatter_selected)
+            self._sc_vars[k] = var
+            where = " · ".join(list(m.get("republics") or []) + list(m.get("cities") or []))
+            row = tk.Frame(box, bg=CARD)
+            row.pack(fill="x")
+            cb = tk.Checkbutton(row, text=m["employee"], variable=var, bg=CARD, fg=TEXT,
+                                activebackground=CARD, selectcolor=CARD, font=f(9),
+                                command=lambda k=k, v=var: self._scatter_toggle(k, v.get()))
+            cb.pack(side="left", padx=6)
+            tk.Label(row, text=where, bg=CARD, fg=MUTED, font=f(8)).pack(side="left")
+        self.sc_apply_row.pack(anchor="w", pady=(10, 0))
+        self._scatter_seln()
+
+    def _scatter_toggle(self, k, on):
+        (self.scatter_selected.add if on else self.scatter_selected.discard)(k)
+        self._scatter_seln()
+
+    def _scatter_all(self, on):
+        for m in self.scatter_matched:
+            k = m["employee"].lower()
+            (self.scatter_selected.add if on else self.scatter_selected.discard)(k)
+            if k in self._sc_vars:
+                self._sc_vars[k].set(on)
+        self._scatter_seln()
+
+    def _scatter_seln(self):
+        n = sum(1 for m in self.scatter_matched
+                if m["employee"].lower() in self.scatter_selected)
+        self.sc_apply_sel_btn.configure(text=f"Разложить выбранных ({n})",
+                                        state="normal" if n else "disabled")
+
+    # --- очистка/геокодинг/период ---
+    def do_reset(self, scope):
+        msg = ("ПОЛНОСТЬЮ очистить реестр?\nУдалятся ВСЕ клиенты, визиты и метки, без "
+               "возможности отката (привязки сотрудников останутся)."
+               if scope == "all" else
+               "Сбросить данные визитов у всех клиентов?\nОбнулятся статусы, комментарии, "
+               "даты визита и фото. Клиенты, долги и закрепление останутся.")
+        if not messagebox.askyesno("Очистка данных", msg):
+            return
+        def done(d):
+            txt = (f"Реестр очищен · было клиентов: {fmt_n(d.get('clients_removed'))}"
+                   if scope == "all" else
+                   f"Данные визитов сброшены · клиентов: {fmt_n(d.get('clients_reset'))}")
+            self.reset_out.configure(text=txt)
+            self.toast(txt)
+            self.refresh()
+        self.bg_task(lambda: self.api("POST", "/admin/reset", {"scope": scope}), done)
+
+    def do_geocode(self):
+        self.bg_task(lambda: self.api("POST", "/admin/geocode"),
+                     lambda _d: self.toast("Геокодинг запущен — идёт в фоне, обнови сводку через минуту"))
+
+    def _show_period(self, d):
+        self.p_from.delete(0, "end")
+        self.p_from.insert(0, d.get("from") or "")
+        self.p_to.delete(0, "end")
+        self.p_to.insert(0, d.get("to") or "")
+        t = (f"Активен: {d.get('from') or '…'} — {d.get('to') or '…'}"
+             if d.get("from") or d.get("to") else "Период не задан — видны все.")
+        self.period_cur.configure(text=t)
+        self.period_dash.configure(text=t)
+
+    def apply_period(self):
+        try:
+            body = {"from": to_iso(self.p_from.get()), "to": to_iso(self.p_to.get())}
+        except ValueError as e:
+            self.toast(str(e), err=True)
+            return
+        self.bg_task(lambda: self.api("POST", "/admin/period", body),
+                     lambda d: (self._show_period(d), self.toast("Период сохранён")))
+
+    def clear_period(self):
+        self.p_from.delete(0, "end")
+        self.p_to.delete(0, "end")
+        self.apply_period()
+
+    # ══ ПРИОРИТЕТ ═══════════════════════════════════════════════════════
+    def _build_prio(self, fr):
+        inner = self._section_inner(fr)
+        wcard = Card(inner, "Веса скоринга",
+                     "Лог-долг + кластер по городу + свежесть (штраф за прошлые выезды). "
+                     "Холодные — «разведка», с исходом — «дожим».")
+        wcard.pack(fill="x")
+        row = tk.Frame(wcard.inner, bg=CARD)
+        row.pack(fill="x")
+        self.weights: dict[str, tk.DoubleVar] = {}   # DoubleVar: ttk.Scale пишет дробные
+        for i, (key, label, init) in enumerate([("debt", "Долг", 50),
+                                                ("cluster", "Кластер", 30),
+                                                ("fresh", "Свежесть", 20)]):
+            cell = tk.Frame(row, bg=CARD)
+            cell.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 14, 0))
+            row.grid_columnconfigure(i, weight=1)
+            var = tk.DoubleVar(value=init)
+            self.weights[key] = var
+            lab = tk.Label(cell, text=f"{label} {init}", bg=CARD, fg=MUTED, font=f(9))
+            lab.pack(anchor="w")
+            s = ttk.Scale(cell, from_=0, to=100, variable=var,
+                          command=lambda v, l=lab, t=label, vv=var:
+                          l.configure(text=f"{t} {int(vv.get())}"))
+            s.pack(fill="x")
+        btn(row, "Пересчитать", self.load_priority, kind="accent").grid(
+            row=0, column=3, padx=(16, 0), sticky="s")
+
+        ccard = Card(inner, "Кластеры городов")
+        ccard.pack(fill="x", pady=(12, 0))
+        self.cluster_chips = ChipFlow(ccard.inner)
+        self.cluster_chips.pack(fill="x")
+        self.cluster_chips.set_chips(["—"])
+
+        tcard = Card(inner, "Куда ехать — топ-40")
+        tcard.pack(fill="x", pady=(12, 0))
+        cols = ("n", "client", "city", "debt", "visits", "score", "mode", "why")
+        heads = ("#", "Клиент", "Город", "Долг ₽", "Выезд.", "Score", "Режим", "Почему")
+        widths = (34, 190, 110, 90, 60, 60, 90, 330)
+        self.prio_tv = ttk.Treeview(tcard.inner, columns=cols, show="headings", height=18)
+        for c, h, w in zip(cols, heads, widths):
+            self.prio_tv.heading(c, text=h)
+            anchor = "e" if c in ("debt", "visits", "score", "n") else "w"
+            self.prio_tv.column(c, width=self.px(w), anchor=anchor,
+                                stretch=(c in ("client", "why")))
+        self.prio_tv.pack(fill="x")
+
+    def load_priority(self):
+        q = (f"?w_debt={int(self.weights['debt'].get())}"
+             f"&w_cluster={int(self.weights['cluster'].get())}"
+             f"&w_fresh={int(self.weights['fresh'].get())}&limit=40")
+        def done(d):
+            self._loaded.add("prio")
+            cities = d.get("cities") or []
+            self.cluster_chips.set_chips(
+                [f"{c['name']}  {fmt_n(c['count'])}" for c in cities]
+                or ["городов нет — реестр пуст или нет координат"])
+            self.prio_tv.delete(*self.prio_tv.get_children())
+            for i, it in enumerate(d.get("items") or [], 1):
+                self.prio_tv.insert("", "end", values=(
+                    i, it.get("client", ""), it.get("city", ""), fmt_n(it.get("debt") or 0),
+                    it.get("visits", 0), f"{it.get('score', 0):.1f}",
+                    it.get("mode", ""), it.get("reason", "")))
+        self.bg_task(lambda: self.api("GET", "/admin/priority" + q), done)
+
+    # ══ ЛЮДИ ════════════════════════════════════════════════════════════
+    def _build_people(self, fr):
+        inner = self._section_inner(fr)
+        rc = Card(inner, "Назначение ролей",
+                  "ФИО берутся из реестра (колонка «ответственный»). Впиши Telegram ID "
+                  "сотруднику (или выбери из писавших боту), тип — и «Привязать»: работник "
+                  "с этим ID сразу привязан к своим клиентам. Можно переназначать.")
+        rc.pack(fill="x")
+        self.roles_frame = tk.Frame(rc.inner, bg=CARD)
+        self.roles_frame.pack(fill="x")
+        tk.Label(self.roles_frame, text="Нет данных — импортируй реестр и нажми «Обновить»",
+                 bg=CARD, fg=MUTED, font=f(9)).pack(anchor="w")
+
+        bc = Card(inner, "Кто вошёл в бот",
+                  "Активные привязки telegram_id → сотрудник. «Сбросить» — отвязать.")
+        bc.pack(fill="x", pady=(12, 0))
+        self.binds_frame = tk.Frame(bc.inner, bg=CARD)
+        self.binds_frame.pack(fill="x")
+
+    def _guest_label(self, g):
+        who = g.get("name") or (("@" + g["username"]) if g.get("username") else "без имени")
+        nick = (" · @" + g["username"]) if g.get("username") else ""
+        busy = ("  ⚠ уже: " + g["bound_employee"]) if g.get("bound_employee") else ""
+        return f"{who}{nick} · {g['telegram_id']}{busy}"
+
+    def load_roles(self):
+        def work():
+            try:
+                guests = self.api("GET", "/admin/guests").get("guests") or []
+            except RuntimeError:
+                guests = []
+            emps = self.api("GET", "/admin/employees").get("employees") or []
+            return guests, emps
+        def done(res):
+            self._loaded.add("people")
+            self.guests, emps = res
+            frame = self.roles_frame
+            for w in frame.winfo_children():
+                w.destroy()
+            if not emps:
+                tk.Label(frame, text="Реестр пуст — импортируй xlsx на вкладке «Реестр»",
+                         bg=CARD, fg=MUTED, font=f(9)).pack(anchor="w")
+                return
+            head = tk.Frame(frame, bg=CARD)
+            head.pack(fill="x")
+            for text, w in (("СОТРУДНИК", 26), ("ДОГОВОРОВ", 10), ("TELEGRAM ID", 34),
+                            ("ТИП", 13), ("СТАТУС", 12)):
+                tk.Label(head, text=text, bg=CARD, fg=MUTED, font=(FONT, 8, "bold"),
+                         width=w, anchor="w").pack(side="left")
+            glabels = [self._guest_label(g) for g in self.guests]
+            self._role_rows = []
+            for e in emps:
+                row = tk.Frame(frame, bg=CARD)
+                row.pack(fill="x", pady=2)
+                tk.Label(row, text=e["employee"], bg=CARD, fg=TEXT, font=f(9),
+                         width=26, anchor="w").pack(side="left")
+                tk.Label(row, text=fmt_n(e.get("contracts")), bg=CARD, fg=TEXT,
+                         font=f(9), width=10, anchor="w").pack(side="left")
+                idcell = tk.Frame(row, bg=CARD)
+                idcell.pack(side="left")
+                combo = ttk.Combobox(idcell, values=["— из писавших боту —"] + glabels,
+                                     state="readonly", width=30, font=f(8))
+                combo.current(0)
+                combo.pack(anchor="w")
+                tid = entry(idcell, width=16)
+                if e.get("telegram_id"):
+                    tid.insert(0, str(e["telegram_id"]))
+                tid.pack(anchor="w", pady=(2, 0))
+                combo.bind("<<ComboboxSelected>>",
+                           lambda _e, c=combo, t=tid: self._pick_guest(c, t))
+                kind = ttk.Combobox(row, values=["Выездник", "Курьер ГПХ"],
+                                    state="readonly", width=11, font=f(8))
+                kind.current(1 if e.get("kind") == "courier" else 0)
+                kind.pack(side="left", padx=(6, 6))
+                status = "привязан ✓" if e.get("telegram_id") else "не назначен"
+                tk.Label(row, text=status, bg=CARD,
+                         fg=SUCCESS if e.get("telegram_id") else MUTED,
+                         font=f(9), width=12, anchor="w").pack(side="left")
+                btn(row, "Привязать",
+                    lambda emp=e["employee"], t=tid, k=kind: self.bind_role(emp, t, k),
+                    kind="accent").pack(side="left")
+        self.bg_task(work, done)
+
+    def _pick_guest(self, combo, tid_entry):
+        i = combo.current()
+        if i > 0:
+            tid_entry.delete(0, "end")
+            tid_entry.insert(0, str(self.guests[i - 1]["telegram_id"]))
+
+    def bind_role(self, employee, tid_entry, kind_combo):
+        tid = tid_entry.get().strip()
+        if not re.fullmatch(r"\d{3,}", tid):
+            self.toast("Впиши числовой Telegram ID (или выбери гостя из списка)", err=True)
+            return
+        kind = "courier" if kind_combo.get() == "Курьер ГПХ" else "agent"
+        body = {"telegram_id": int(tid), "employee": employee, "kind": kind}
+        self.bg_task(lambda: self.api("POST", "/admin/bind", body),
+                     lambda _d: (self.toast(f"Привязано: {employee} → {tid}"), self.refresh()))
+
+    def _render_binds(self, bindings):
+        frame = self.binds_frame
+        for w in frame.winfo_children():
+            w.destroy()
+        if not bindings:
+            tk.Label(frame, text="Никто ещё не привязан", bg=CARD, fg=MUTED,
+                     font=f(9)).pack(anchor="w")
+            return
+        for b in bindings:
+            row = tk.Frame(frame, bg=CARD)
+            row.pack(fill="x", pady=1)
+            tk.Label(row, text=str(b["telegram_id"]), bg=CARD, fg=TEXT, font=f(9),
+                     width=14, anchor="w").pack(side="left")
+            tk.Label(row, text=b["employee"], bg=CARD, fg=TEXT, font=f(9),
+                     width=30, anchor="w").pack(side="left")
+            tk.Label(row, text="курьер" if b.get("kind") == "courier" else "выездник",
+                     bg=ALT, fg=MUTED, font=f(8), padx=8).pack(side="left")
+            btn(row, "сбросить",
+                lambda t=b["telegram_id"]: self.unbind(t), kind="danger").pack(side="right")
+
+    def unbind(self, tid):
+        if not messagebox.askyesno("Сброс привязки", f"Сбросить выбор для {tid}?"):
+            return
+        self.bg_task(lambda: self.api("POST", "/admin/unbind", {"telegram_id": tid}),
+                     lambda _d: (self.toast("Сброшено"), self.refresh()))
+
+    # ══ РУКОВОДИТЕЛИ ═════════════════════════════════════════════════════
+    def _build_mgrs(self, fr):
+        inner = self._section_inner(fr)
+        dc = Card(inner, "Автосводка руководителям",
+                  "В конце дня (по Москве) каждый руководитель получает дайджест по своим "
+                  "сотрудникам. Реалтайм — кнопка «Дайджест за сегодня» в боте.")
+        dc.pack(fill="x")
+        rd = tk.Frame(dc.inner, bg=CARD)
+        rd.pack(anchor="w")
+        tk.Label(rd, text="Время (МСК)", bg=CARD, fg=MUTED, font=f(9)).pack(side="left")
+        self.dig_time = entry(rd, width=7)
+        self.dig_time.insert(0, "16:30")
+        self.dig_time.pack(side="left", padx=(8, 12))
+        self.dig_enabled = tk.BooleanVar(value=True)
+        tk.Checkbutton(rd, text="автопуш включён", variable=self.dig_enabled, bg=CARD,
+                       fg=TEXT, activebackground=CARD, selectcolor=CARD,
+                       font=f(9)).pack(side="left")
+        btn(rd, "Сохранить", self.save_digest, kind="accent").pack(side="left", padx=(12, 0))
+        self.dig_out = tk.Label(dc.inner, text="", bg=CARD, fg=MUTED, font=f(9))
+        self.dig_out.pack(anchor="w", pady=(6, 0))
+
+        mc = Card(inner, "Руководители",
+                  "Каждый привязан к городам (подпись сводки) и своим сотрудникам "
+                  "(по ним считается дайджест).")
+        mc.pack(fill="x", pady=(12, 0))
+        self.mgr_list = tk.Frame(mc.inner, bg=CARD)
+        self.mgr_list.pack(fill="x")
+        tk.Label(self.mgr_list, text="Пока никого — добавьте ниже", bg=CARD, fg=MUTED,
+                 font=f(9)).pack(anchor="w")
+
+        fc = Card(inner, "Добавить / изменить руководителя")
+        fc.pack(fill="x", pady=(12, 0))
+        self.mgr_form_card = fc
+        tk.Label(fc.inner, text="Кто это (из писавших боту)", bg=CARD, fg=MUTED,
+                 font=f(9)).pack(anchor="w")
+        self.mgr_guest_combo = ttk.Combobox(fc.inner, values=["— никто ещё не писал боту —"],
+                                            state="readonly", width=42, font=f(8))
+        self.mgr_guest_combo.current(0)
+        self.mgr_guest_combo.pack(anchor="w", pady=(2, 6))
+        self.mgr_guest_combo.bind("<<ComboboxSelected>>", self._mgr_pick_guest)
+        rowt = tk.Frame(fc.inner, bg=CARD)
+        rowt.pack(anchor="w", fill="x")
+        tk.Label(rowt, text="Telegram ID", bg=CARD, fg=MUTED, font=f(9)).pack(side="left")
+        self.mgr_tid = entry(rowt, width=15)
+        self.mgr_tid.pack(side="left", padx=(8, 16))
+        tk.Label(rowt, text="Имя (для приветствия)", bg=CARD, fg=MUTED,
+                 font=f(9)).pack(side="left")
+        self.mgr_name = entry(rowt, width=26)
+        self.mgr_name.pack(side="left", padx=(8, 0))
+
+        tk.Label(fc.inner, text="ГОРОДА (ПОДПИСЬ СВОДКИ)", bg=CARD, fg=MUTED,
+                 font=(FONT, 8, "bold")).pack(anchor="w", pady=(12, 2))
+        self.mgr_city_chips = ChipFlow(fc.inner)
+        self.mgr_city_chips.pack(fill="x")
+        rowc = tk.Frame(fc.inner, bg=CARD)
+        rowc.pack(anchor="w", pady=(4, 0))
+        self.mgr_city_add = entry(rowc, width=24)
+        self.mgr_city_add.pack(side="left")
+        self.mgr_city_add.bind("<Return>", lambda _e: self._mgr_add_city())
+        btn(rowc, "＋ добавить город", self._mgr_add_city).pack(side="left", padx=(8, 0))
+
+        rowh = tk.Frame(fc.inner, bg=CARD)
+        rowh.pack(fill="x", pady=(12, 2))
+        tk.Label(rowh, text="СОТРУДНИКИ (ПО НИМ СЧИТАЕТСЯ ДАЙДЖЕСТ)", bg=CARD, fg=MUTED,
+                 font=(FONT, 8, "bold")).pack(side="left")
+        self.mgr_emp_hint = tk.Label(rowh, text="", bg=CARD, fg=MUTED, font=f(8))
+        self.mgr_emp_hint.pack(side="right")
+        btn(rowh, "снять", lambda: self._mgr_emps_all(False)).pack(side="right", padx=(0, 8))
+        btn(rowh, "выбрать всех", lambda: self._mgr_emps_all(True)).pack(side="right", padx=(0, 6))
+        self.mgr_emp_chips = ChipFlow(fc.inner)
+        self.mgr_emp_chips.pack(fill="x")
+
+        rows = tk.Frame(fc.inner, bg=CARD)
+        rows.pack(anchor="w", pady=(14, 0))
+        btn(rows, "Сохранить руководителя", self.save_manager, kind="accent").pack(side="left")
+        btn(rows, "Очистить форму", self._mgr_form_reset).pack(side="left", padx=(8, 0))
+
+    def load_managers(self):
+        def work():
+            try:
+                guests = self.api("GET", "/admin/guests").get("guests") or []
+            except RuntimeError:
+                guests = []
+            d = self.api("GET", "/admin/managers")
+            return guests, d
+        def done(res):
+            self._loaded.add("mgrs")
+            self.guests, d = res
+            self.mgrs = d.get("managers") or []
+            self.mgr_cities = d.get("cities") or []
+            self.mgr_emps = d.get("employees") or []
+            self.mgr_city_emps = d.get("city_employees") or {}
+            dig = d.get("digest") or {}
+            if dig:
+                self.dig_time.delete(0, "end")
+                self.dig_time.insert(0, dig.get("time") or "16:30")
+                self.dig_enabled.set(bool(dig.get("enabled")))
+            self.mgr_guest_combo.configure(
+                values=["— из писавших боту —"] + [self._guest_label(g) for g in self.guests])
+            self.mgr_guest_combo.current(0)
+            self._render_mgr_table()
+            self._render_mgr_chips()
+        self.bg_task(work, done)
+
+    def _render_mgr_table(self):
+        for w in self.mgr_list.winfo_children():
+            w.destroy()
+        if not self.mgrs:
+            tk.Label(self.mgr_list, text="Пока никого — добавьте ниже", bg=CARD,
+                     fg=MUTED, font=f(9)).pack(anchor="w")
+            return
+        for m in self.mgrs:
+            row = tk.Frame(self.mgr_list, bg=CARD)
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text=m.get("name") or "без имени", bg=CARD, fg=TEXT,
+                     font=f(9, True), width=22, anchor="w").pack(side="left")
+            tk.Label(row, text=" · ".join(m.get("cities") or []) or "—", bg=CARD,
+                     fg=MUTED, font=f(9), width=30, anchor="w").pack(side="left")
+            tk.Label(row, text=f"сотрудников: {len(m.get('employees') or [])}", bg=CARD,
+                     fg=MUTED, font=f(9), width=16, anchor="w").pack(side="left")
+            tk.Label(row, text=str(m["telegram_id"]), bg=CARD, fg=MUTED, font=f(9),
+                     width=13, anchor="w").pack(side="left")
+            btn(row, "удалить", lambda t=m["telegram_id"]: self.mgr_delete(t),
+                kind="danger").pack(side="right")
+            btn(row, "изменить", lambda t=m["telegram_id"]: self.mgr_edit(t)).pack(
+                side="right", padx=(0, 6))
+
+    def _render_mgr_chips(self):
+        form = self.mgr_form
+        reg = [c["name"] for c in self.mgr_cities]
+        cities = reg + [c for c in sorted(form["cities"]) if c not in reg]
+        def city_chip(c):
+            cnt = next((x.get("count") for x in self.mgr_cities if x["name"] == c), None)
+            text = f"{c} {cnt}" if cnt else c
+            return (text, c in form["cities"], lambda c=c: self._mgr_toggle_city(c))
+        self.mgr_city_chips.set_chips([city_chip(c) for c in cities]
+                                      or ["городов в реестре нет — добавьте вручную"])
+        reg_e = [e["employee"] for e in self.mgr_emps]
+        emps = reg_e + [e for e in sorted(form["employees"]) if e not in reg_e]
+        def emp_chip(e):
+            cnt = next((x.get("contracts") for x in self.mgr_emps if x["employee"] == e), None)
+            text = f"{e} {cnt}" if cnt else e
+            return (text, e in form["employees"], lambda e=e: self._mgr_toggle_emp(e))
+        self.mgr_emp_chips.set_chips([emp_chip(e) for e in emps]
+                                     or ["сотрудников в реестре нет — импортируйте реестр"])
+        self.mgr_emp_hint.configure(
+            text=f"выбрано: {len(form['employees'])}" if form["employees"] else "")
+
+    def _mgr_pick_guest(self, _e):
+        i = self.mgr_guest_combo.current()
+        if i > 0:
+            self.mgr_tid.delete(0, "end")
+            self.mgr_tid.insert(0, str(self.guests[i - 1]["telegram_id"]))
+
+    def _mgr_toggle_city(self, c):
+        form = self.mgr_form
+        if c in form["cities"]:
+            form["cities"].discard(c)
+        else:
+            form["cities"].add(c)
+            for e in self.mgr_city_emps.get(c) or []:
+                form["employees"].add(e)
+        self._render_mgr_chips()
+
+    def _mgr_add_city(self):
+        v = self.mgr_city_add.get().strip()
+        if not v:
+            return
+        self.mgr_city_add.delete(0, "end")
+        self.mgr_form["cities"].add(v)
+        for e in self.mgr_city_emps.get(v) or []:
+            self.mgr_form["employees"].add(e)
+        self._render_mgr_chips()
+
+    def _mgr_toggle_emp(self, e):
+        form = self.mgr_form
+        form["employees"].discard(e) if e in form["employees"] else form["employees"].add(e)
+        self._render_mgr_chips()
+
+    def _mgr_emps_all(self, on):
+        if on:
+            self.mgr_form["employees"] = {e["employee"] for e in self.mgr_emps}
+        else:
+            self.mgr_form["employees"] = set()
+        self._render_mgr_chips()
+
+    def mgr_edit(self, tid):
+        m = next((x for x in self.mgrs if str(x["telegram_id"]) == str(tid)), None)
+        if not m:
+            return
+        self.mgr_form = {"tid": str(tid), "cities": set(m.get("cities") or []),
+                         "employees": set(m.get("employees") or [])}
+        self.mgr_tid.delete(0, "end")
+        self.mgr_tid.insert(0, str(tid))
+        self.mgr_name.delete(0, "end")
+        self.mgr_name.insert(0, m.get("name") or "")
+        self._render_mgr_chips()
+
+    def _mgr_form_reset(self):
+        self.mgr_form = {"tid": "", "cities": set(), "employees": set()}
+        self.mgr_tid.delete(0, "end")
+        self.mgr_name.delete(0, "end")
+        self.mgr_city_add.delete(0, "end")
+        self.mgr_guest_combo.current(0)
+        self._render_mgr_chips()
+
+    def save_manager(self):
+        tid = self.mgr_tid.get().strip()
+        if not re.fullmatch(r"\d{3,}", tid):
+            self.toast("Впиши Telegram ID руководителя (или выбери из списка)", err=True)
+            return
+        if not self.mgr_form["employees"]:
+            self.toast("Отметь хотя бы одного сотрудника", err=True)
+            return
+        body = {"telegram_id": int(tid), "name": self.mgr_name.get().strip(),
+                "cities": sorted(self.mgr_form["cities"]),
+                "employees": sorted(self.mgr_form["employees"])}
+        def done(_d):
+            self.toast("Руководитель сохранён: " + (body["name"] or tid))
+            self._mgr_form_reset()
+            self.load_managers()
+        self.bg_task(lambda: self.api("POST", "/admin/manager", body), done)
+
+    def mgr_delete(self, tid):
+        if not messagebox.askyesno("Удаление",
+                                   f"Удалить руководителя {tid}? Он перестанет получать дайджест."):
+            return
+        self.bg_task(lambda: self.api("POST", "/admin/manager_delete", {"telegram_id": tid}),
+                     lambda _d: (self.toast("Удалён"), self.load_managers()))
+
+    def save_digest(self):
+        t = self.dig_time.get().strip()
+        if t and not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", t):
+            self.toast("Время в формате ЧЧ:ММ", err=True)
+            return
+        body = {"time": t, "enabled": self.dig_enabled.get()}
+        def done(d):
+            self.dig_out.configure(
+                text=f"Автопуш {'включён' if d.get('enabled') else 'выключен'} · {d.get('time')} МСК")
+            self.toast("Настройки сохранены")
+        self.bg_task(lambda: self.api("POST", "/admin/digest_settings", body), done)
+
+    # ══ АКТИВНОСТЬ ══════════════════════════════════════════════════════
+    def _build_activity(self, fr):
+        inner = self._section_inner(fr)
+        ac = Card(inner, "Активность работников",
+                  "Каждый визит и метка пишутся в БД с датой — здесь сводка. Простой — "
+                  "полных дней с последней активности; самые простаивающие сверху.")
+        ac.pack(fill="x")
+        cols = ("emp", "role", "v7", "v30", "m7", "m30", "last", "status")
+        heads = ("Сотрудник", "Роль", "Визиты 7д", "30д", "Метки 7д", "30д",
+                 "Последняя активность", "Статус")
+        widths = (190, 80, 70, 55, 70, 55, 150, 120)
+        self.act_tv = ttk.Treeview(ac.inner, columns=cols, show="headings", height=14)
+        for c, h, w in zip(cols, heads, widths):
+            self.act_tv.heading(c, text=h)
+            self.act_tv.column(c, width=self.px(w),
+                               anchor="e" if c in ("v7", "v30", "m7", "m30") else "w",
+                               stretch=(c in ("emp", "status")))
+        self.act_tv.pack(fill="x")
+
+    def load_activity(self):
+        def done(d):
+            self._loaded.add("activity")
+            self.act_tv.delete(*self.act_tv.get_children())
+            for w in d.get("workers") or []:
+                idle = w.get("idle_days")
+                status = ("без активности" if idle is None else
+                          "активен" if idle < 2 else
+                          f"пауза {idle} дн" if idle <= 7 else f"простой {idle} дн")
+                last = w.get("last_activity") or "—"
+                if len(last) > 16:
+                    last = last[:10] + " " + last[11:16]
+                self.act_tv.insert("", "end", values=(
+                    w.get("employee", ""), "курьер" if w.get("kind") == "courier" else "выездник",
+                    fmt_n(w.get("visits_7d")), fmt_n(w.get("visits_30d")),
+                    fmt_n(w.get("markers_7d")), fmt_n(w.get("markers_30d")), last, status))
+        self.bg_task(lambda: self.api("GET", "/admin/activity"), done)
+
+    # ══ ПОДКЛЮЧЕНИЕ ═════════════════════════════════════════════════════
+    def _build_conn(self, fr):
+        inner = self._section_inner(fr)
+        sc = Card(inner, "Сервер")
+        sc.pack(fill="x")
+        tk.Label(sc.inner, text="Адрес сервера", bg=CARD, fg=MUTED, font=f(9)).pack(anchor="w")
+        self.url_entry = entry(sc.inner)
+        self.url_entry.insert(0, self.url)
+        self.url_entry.pack(fill="x", pady=(2, 8))
+        tk.Label(sc.inner, text="Admin-ключ", bg=CARD, fg=MUTED, font=f(9)).pack(anchor="w")
+        rowk = tk.Frame(sc.inner, bg=CARD)
+        rowk.pack(fill="x", pady=(2, 8))
+        self.key_entry = entry(rowk, show="•")
+        self.key_entry.insert(0, self.key)
+        self.key_entry.pack(side="left", fill="x", expand=True)
+        btn(rowk, "👁", self._toggle_key).pack(side="left", padx=(6, 0))
+        rowc = tk.Frame(sc.inner, bg=CARD)
+        rowc.pack(anchor="w")
+        btn(rowc, "Подключиться", self._connect, kind="accent").pack(side="left")
+        tk.Label(rowc, text="ключ — в .env сервера (ADMIN_API_KEY)", bg=CARD, fg=MUTED,
+                 font=f(8)).pack(side="left", padx=(10, 0))
+
+        tc = Card(inner, "Токен бота",
+                  "Сменить бота (токен от @BotFather). После сохранения — «Перезапустить "
+                  "бота»: токен применится, миниаппа развернётся в новом боте. Токен нигде "
+                  "не показывается и не выгружается.")
+        tc.pack(fill="x", pady=(12, 0))
+        rowt = tk.Frame(tc.inner, bg=CARD)
+        rowt.pack(fill="x", pady=(0, 8))
+        self.token_entry = entry(rowt, show="•")
+        self.token_entry.pack(side="left", fill="x", expand=True)
+        btn(rowt, "👁", self._toggle_token).pack(side="left", padx=(6, 0))
+        rowb = tk.Frame(tc.inner, bg=CARD)
+        rowb.pack(anchor="w")
+        btn(rowb, "Сменить бота", self.change_token, kind="accent").pack(side="left")
+        btn(rowb, "Перезапустить бота", self.restart_bot).pack(side="left", padx=(8, 0))
+        tk.Label(rowb, text="формат: цифры : буквы/цифры (≥30 символов)", bg=CARD,
+                 fg=MUTED, font=f(8)).pack(side="left", padx=(10, 0))
+
+    def _toggle_key(self):
+        self.key_entry.configure(show="" if self.key_entry["show"] else "•")
+
+    def _toggle_token(self):
+        self.token_entry.configure(show="" if self.token_entry["show"] else "•")
+
+    def _connect(self):
+        self.url = self.url_entry.get().strip().rstrip("/")
+        self.key = self.key_entry.get().strip()
+        self.refresh()
+
+    def change_token(self):
+        tok = self.token_entry.get().strip()
+        if not re.fullmatch(r"\d+:[\w-]{30,}", tok):
+            self.toast("Неверный формат токена бота", err=True)
+            return
+        if not messagebox.askyesno("Смена токена",
+                                   "Сменить токен бота? После этого бота нужно перезапустить."):
+            return
+        def done(d):
+            self.token_entry.delete(0, "end")
+            self.toast("Токен сохранён — можно перезапустить бота")
+            if d.get("need_restart") and messagebox.askyesno(
+                    "Перезапуск", "Токен сохранён. Перезапустить бота сейчас?"):
+                self.restart_bot(confirmed=True)
+        self.bg_task(lambda: self.api("POST", "/admin/bot_token", {"token": tok}), done)
+
+    def restart_bot(self, confirmed=False):
+        if not confirmed and not messagebox.askyesno(
+                "Перезапуск бота",
+                "Перезапустить бота? Он будет недоступен несколько секунд, затем "
+                "поднимется автоматически."):
+            return
+        def done(_d):
+            self.toast("Перезапуск запущен — бот поднимется через несколько секунд")
+        def fail(_e):
+            # обрыв соединения сразу после рестарта — ожидаемое поведение
+            self.toast("Перезапуск запущен (соединение прервано — это нормально)")
+        self.bg_task(lambda: self.api("POST", "/admin/restart"), done, fail)
+
+    # ── настройки ──────────────────────────────────────────────────────
+    def _load_settings(self) -> dict:
+        try:
+            return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def _save_settings(self):
+        try:
+            SETTINGS_PATH.write_text(
+                json.dumps(self.settings, ensure_ascii=False, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _on_close(self):
+        self.settings["url"], self.settings["key"] = self.url, self.key
+        self._save_settings()
+        self.destroy()
+
+
+def main():
+    # High-DPI: объявляем осведомлённость ДО создания окна — иначе Windows
+    # растягивает битмап и всё мылится на 125–200% масштабах.
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)   # Per-Monitor v2
+        except (AttributeError, OSError):
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:  # noqa: BLE001 — не Windows / старая система
+        pass
+    app = Pult()
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()

@@ -189,10 +189,16 @@ def read_source_employees(source: Path) -> list[str]:
     Лист «Портфели»; если его нет — первый лист. Матч заголовка нормализованный."""
     import pandas as pd  # ленивый импорт: карта папок/превью работают без pandas
 
+    def _read(sheet):
+        try:
+            return pd.read_excel(source, sheet_name=sheet, header=None, engine="calamine")
+        except ImportError:   # python-calamine не установлен — штатный движок pandas
+            return pd.read_excel(source, sheet_name=sheet, header=None)
+
     try:
-        df = pd.read_excel(source, sheet_name=SHEET_NAME, header=None, engine="calamine")
+        df = _read(SHEET_NAME)
     except Exception:                                     # нет листа «Портфели» — берём первый
-        df = pd.read_excel(source, sheet_name=0, header=None, engine="calamine")
+        df = _read(0)
 
     if len(df) < HEADER_ROW_NAMES:
         raise ValueError("В источнике нет строки заголовков")
@@ -249,6 +255,28 @@ def apply_scatter(source: Path, folder_map: dict[str, list[dict]],
     import time
     import xlwings as xw
 
+    def open_excel():
+        """Битый кэш COM-обёрток pywin32 (gen_py) валит запуск Excel
+        («…no attribute 'CLSIDToPackageMap'») — чистим и повторяем."""
+        try:
+            return xw.App(visible=False)
+        except AttributeError as e:
+            if "gen_py" not in repr(e) and "CLSIDToPackageMap" not in repr(e):
+                raise
+            import sys
+            import tempfile
+            try:
+                import win32com
+                cache = Path(win32com.__gen_path__)
+            except Exception:  # noqa: BLE001
+                cache = Path(tempfile.gettempdir()) / "gen_py" / \
+                    f"{sys.version_info.major}.{sys.version_info.minor}"
+            shutil.rmtree(cache, ignore_errors=True)
+            for m in [m for m in sys.modules if "gen_py" in m]:
+                sys.modules.pop(m, None)
+            log("[i] Кэш COM-обёрток Excel сброшен — повторяю запуск")
+            return xw.App(visible=False)
+
     tmp_tpl = source.parent / "~temp_razbros.xlsb"
 
     def build_template(app):
@@ -260,7 +288,7 @@ def apply_scatter(source: Path, folder_map: dict[str, list[dict]],
         wb.save(); wb.close()
 
     written, skipped = [], []
-    with xw.App(visible=False) as app:
+    with open_excel() as app:
         app.screen_updating = False
         app.calculation = "manual"
         app.display_alerts = False
