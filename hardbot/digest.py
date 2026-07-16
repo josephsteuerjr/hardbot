@@ -125,11 +125,16 @@ def summary_view(mgr: dict, on_date: str) -> tuple[str, InlineKeyboardMarkup]:
     active = [r for r in rows if r[2]]
     total_clients = sum(len(ps) for _, _, ps in rows)
     grand_total = _persons_total([p for _, _, ps in rows for p in ps])
+    # покрытие фото: у скольких обработанных есть снимки за этот день
+    cov = {emp: sum(1 for p in ps if photostore.day_photos(p["contracts"], on_date))
+           for _ei, emp, ps in rows}
 
     head = [f"📊 <b>Дайджест · {human_date(on_date)}</b>",
             f"🏙 {_e(scope_label(mgr))}",
             f"👥 Команда: {len(rows)} · активны: {len(active)} · "
             f"обработано: <b>{total_clients}</b>"]
+    if total_clients:
+        head.append(f"📸 С фото: {sum(cov.values())} из {total_clients}")
     if grand_total:
         head.append(f"💰 Сумма по кейсам дня: {grand_total}")
     head.append("━━━━━━━━━━━━━━")
@@ -141,7 +146,8 @@ def summary_view(mgr: dict, on_date: str) -> tuple[str, InlineKeyboardMarkup]:
         if ps:
             oc = _outcomes(ps)
             brief = " · ".join(f"{_st_emoji(s)} {_e(s)} {n}" for s, n in oc[:3])
-            body.append(f"👤 <b>{_e(emp)}</b> — {len(ps)} {_plural(len(ps), 'кейс', 'кейса', 'кейсов')}")
+            body.append(f"👤 <b>{_e(emp)}</b> — {len(ps)} {_plural(len(ps), 'кейс', 'кейса', 'кейсов')}"
+                        f" · 📸 {cov[emp]}/{len(ps)}")
             if brief:
                 body.append(f"    {brief}")
         else:
@@ -169,6 +175,9 @@ def employee_view(mgr: dict, on_date: str, ei: int) -> tuple[str, InlineKeyboard
     emp = emps[ei]
     persons = db.persons_processed(emp, on_date)
     total = _persons_total(persons)
+    # у кого из кейсов есть фото за этот день (для статы и меток на кнопках)
+    with_ph = {ci for ci, p in enumerate(persons)
+               if photostore.day_photos(p["contracts"], on_date)}
 
     lines = [f"👤 <b>{_e(emp)}</b>",
              f"🗓 {human_date(on_date)} · обработано <b>{len(persons)}</b>"]
@@ -178,6 +187,7 @@ def employee_view(mgr: dict, on_date: str, ei: int) -> tuple[str, InlineKeyboard
         lines.append("📊 <b>Исходы за день</b>")
         for s, n in _outcomes(persons):
             lines.append(f"  {_st_emoji(s)} {_e(s)} — {n}")
+        lines.append(f"📸 С фото: {len(with_ph)} из {len(persons)}")
         if total:
             lines.append(f"💰 Сумма по кейсам: {total}")
 
@@ -201,7 +211,8 @@ def employee_view(mgr: dict, on_date: str, ei: int) -> tuple[str, InlineKeyboard
         lines.append("Кейсы за сегодня:")
         for ci, p in enumerate(persons):
             st = _person_status(p)
-            kb.button(text=f"{_st_emoji(st)} {_short(p['client'], 26)}",
+            kb.button(text=f"{_st_emoji(st)} {_short(p['client'], 26)}"
+                           + (" 📸" if ci in with_ph else ""),
                       callback_data=f"dg:c:{on_date}:{ei}:{ci}")
     else:
         lines.append("━━━━━━━━━━━━━━")

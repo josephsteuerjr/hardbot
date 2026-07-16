@@ -13,22 +13,21 @@ digest_loop в app.py. Навигация внутри — правкой соо
 import html
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import BaseFilter, Command
 from aiogram.types import (
-    CallbackQuery, FSInputFile, InputMediaDocument, InputMediaPhoto,
-    KeyboardButton, Message, ReplyKeyboardMarkup,
+    CallbackQuery, KeyboardButton, Message, ReplyKeyboardMarkup,
 )
 
 import db
 import digest
+import notify
 from config import ADMIN_ID
 
 router = Router()
 
 BTN_DIGEST = "📊 Дайджест за сегодня"
 
-_ALBUM = 10        # лимит Телеграма на медиагруппу
 _MAX_PHOTOS = 30   # за одно нажатие — чтобы личка не превращалась в ленту
 
 
@@ -108,25 +107,7 @@ async def fallback(message: Message):
 
 
 async def _send_album(message: Message, files, caption: str | None) -> None:
-    """Файлы альбомами по 10. Что не влезло фотографией (>10 МБ, HEIC…) —
-    повторяем документом; совсем битое — честно говорим, не молчим."""
-    for i in range(0, len(files), _ALBUM):
-        chunk = files[i:i + _ALBUM]
-        cap = caption if i == 0 else None
-        for cls in (InputMediaPhoto, InputMediaDocument):
-            if len(chunk) == 1:   # медиагруппа = минимум 2 элемента
-                send = message.answer_photo if cls is InputMediaPhoto else message.answer_document
-                coro = send(FSInputFile(str(chunk[0])), caption=cap)
-            else:
-                coro = message.answer_media_group(
-                    [cls(media=FSInputFile(str(p)), caption=cap if j == 0 else None)
-                     for j, p in enumerate(chunk)])
-            try:
-                await coro
-                break
-            except TelegramAPIError:
-                if cls is InputMediaDocument:
-                    await message.answer("⚠️ Часть фото не удалось отправить.")
+    await notify.send_album(message.bot, message.chat.id, files, caption)
 
 
 async def _send_photos(cb: CallbackQuery, mgr: dict, kind: str,

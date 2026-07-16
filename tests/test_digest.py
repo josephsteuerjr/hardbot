@@ -194,3 +194,26 @@ def test_photo_buttons_and_helpers():
     assert digest.photos_for_person(mgr, TODAY, 999, 0) == (None, [])
     assert digest.photos_for_person(mgr, TODAY, ei, 999) == (None, [])
     assert digest.photos_for_employee_day(mgr, TODAY, 999) == (None, [])
+
+
+def test_photo_coverage_in_stats():
+    """«Для скольких обработанных есть фото»: сводка и экран сотрудника."""
+    _seed()
+    _seed_photos()
+    mgr = db.get_manager(MGR_TID)
+
+    text, _ = digest.summary_view(mgr, TODAY)
+    assert "📸 С фото: 2 из 3" in text     # Абдуллаев + Назаров; Каримова без фото
+    assert "📸 1/2" in text                 # строка Рахимова
+    assert "📸 1/1" in text                 # строка Каримова Бахтиёра
+
+    ei = digest.sorted_employees(mgr).index("Рахимов Алишер")
+    etext, kb = digest.employee_view(mgr, TODAY, ei)
+    assert "📸 С фото: 1 из 2" in etext
+    # метка 📸 — только на кнопке кейса с фото
+    persons = db.persons_processed("Рахимов Алишер", TODAY)
+    ci = next(i for i, p in enumerate(persons) if p["client"] == "Абдуллаев А.")
+    ci2 = next(i for i, p in enumerate(persons) if p["client"] == "Каримова Г.")
+    btns = {b.callback_data: b.text for row in kb.inline_keyboard for b in row}
+    assert btns[f"dg:c:{TODAY}:{ei}:{ci}"].endswith("📸")
+    assert not btns[f"dg:c:{TODAY}:{ei}:{ci2}"].endswith("📸")

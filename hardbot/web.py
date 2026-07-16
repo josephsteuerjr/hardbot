@@ -35,7 +35,7 @@ from config import ADMIN_ID, approval_required, lang_of
 from fields import BY_KEY, DROPDOWNS
 from i18n import FIELD_TITLES, LANGUAGES, t, tf, tv
 from keyboards import approve_bind_kb
-from photostore import PHOTO_DIR
+from photostore import PHOTO_DIR, day_photos
 
 # CORS на статике/тайлах: по умолчанию НЕ ставим «*» (миниапп и тайлы — same-origin
 # через свой aiohttp/Caddy). Кросс-ориджин — только если явно задан CORS_ALLOW_ORIGIN.
@@ -437,6 +437,7 @@ async def _save(request: web.Request) -> web.Response:
             f"Договорённость: {cur['agreed_payment']}; {cur['call_comment'] or ''}", op_id=op_id)
         if is_new:   # повтор того же выезда из оффлайн-очереди в группу НЕ шлём (дедуп по op_id)
             await _notify_group(request, cur, uid)
+            await _notify_managers(request, cur)
     data = _person_full(rep, lang_of(uid))
     return web.json_response({"ok": True, "person": data})
 
@@ -524,6 +525,34 @@ async def _notify_group(request: web.Request, row, uid: int) -> None:
             f"💬 {row['call_comment'] or '—'}"))
     except Exception:  # noqa: BLE001
         pass
+
+
+async def _notify_managers(request: web.Request, row) -> None:
+    """Реалтайм-пуш: визит закрыт → руководителям этого сотрудника в личку уходит
+    сводка + фото за день альбомом. Дедуп повторов из оффлайн-очереди — снаружи
+    (is_new от log_visit). Рубильник без редеплоя: settings.visit_push = 0."""
+    bot = request.app.get("bot")
+    if not bot or (db.get_setting("visit_push") or "1").strip().lower() in ("0", "false", "off"):
+        return
+    emp = row["responsible"] or ""
+    targets = [m for m in db.list_managers() if emp in (m.get("employees") or [])]
+    if not targets:
+        return
+    files = day_photos(db.person_contracts(row["contract_id"]), date.today().isoformat())
+    text = (f"✅ Выезд отработан\n👤 {row['client']} ({row['contract_id']})\n"
+            f"🧑‍💼 {emp}\n"
+            f"📝 {row['call_status'] or '—'} · {row['agreed_payment'] or '—'}\n"
+            f"💬 {row['call_comment'] or '—'}"
+            + (f"\n📸 {len(files)} фото" if files else "\n📸 без фото"))
+    from notify import send_album
+    for m in targets:
+        try:
+            if files:
+                await send_album(bot, m["telegram_id"], files, text)
+            else:
+                await bot.send_message(m["telegram_id"], text)
+        except Exception as e:  # noqa: BLE001 — пуш не должен ломать сохранение визита
+            logging.warning("manager push failed: tid=%s err=%s", m["telegram_id"], e)
 
 
 # --- Admin API (для десктоп-пульта; авторизация — ключ ADMIN_API_KEY) --------
