@@ -291,6 +291,56 @@ async def _bootstrap(request: web.Request) -> web.Response:
                               "persons": persons, "meta": _meta(lang)})
 
 
+async def _route_day(request: web.Request) -> web.Response:
+    """Черновик маршрута дня: топ невизитированных кейсов по скорингу (регуляторные
+    дропы скоринга не берём: их score=0), свёрнутый жадной цепочкой «ближайший
+    следующий» от живой точки выездника (?lat/lon; без неё — от самого приоритетного)."""
+    uid = _uid(request)
+    if not uid:
+        raise web.HTTPUnauthorized(text="auth")
+    emp = _employee(uid)
+    if not emp:
+        raise web.HTTPNotFound(text="bind")
+    try:
+        lat, lon = float(request.query.get("lat", "")), float(request.query.get("lon", ""))
+        start = (lat, lon)
+    except (TypeError, ValueError):
+        start = None
+    grouped = db.persons_for_employee(emp)
+    persons = [_person_brief(p) for p in grouped]
+    try:
+        import scoring
+        idx = scoring.priority_index()
+        for pb, p in zip(persons, grouped):
+            s = idx.get(f"{p['client'] or ''}|{p['birth_date'] or ''}")
+            if s:
+                pb["score"] = s["score"]
+    except Exception as e:  # noqa: BLE001
+        logging.warning("route_day scoring: %s", e)
+    cand = [p for p in persons if not p["visited"] and p.get("lat") is not None
+            and (p.get("score") is None or p["score"] > 0)]
+    cand.sort(key=lambda x: x.get("score") or 0, reverse=True)
+    cand = cand[:12]   # больше 12 адресов в день не объехать
+    order, km_total, cur = [], 0.0, start
+    while cand:
+        if cur is None:
+            i = 0        # без точки старта — начинаем с самого приоритетного
+            leg = None
+        else:
+            i = min(range(len(cand)),
+                    key=lambda k: _haversine_km(cur[0], cur[1], cand[k]["lat"], cand[k]["lon"]))
+            leg = round(_haversine_km(cur[0], cur[1], cand[i]["lat"], cand[i]["lon"]), 1)
+            km_total += leg
+        nxt = cand.pop(i)
+        order.append({"rep": nxt["rep"], "client": nxt["client"], "totals": nxt["totals"],
+                      "score": nxt.get("score"), "km": leg,
+                      "lat": nxt["lat"], "lon": nxt["lon"]})
+        cur = (nxt["lat"], nxt["lon"])
+    db.audit_access(uid, "route_day", detail=f"{emp} {len(order)}")
+    return web.json_response({"ok": True, "employee": emp,
+                              "order": order, "km": round(km_total, 1)})
+
+
 async def _bind(request: web.Request) -> web.Response:
     uid = _uid(request)
     if not uid:
@@ -1069,6 +1119,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/person", _person)
     app.router.add_get("/api/cards", _cards)
     app.router.add_get("/api/route", _route)
+    app.router.add_get("/api/route_day", _route_day)
     app.router.add_post("/api/save", _save)
     app.router.add_post("/api/photo", _photo)
     app.router.add_post("/api/lang", _lang)

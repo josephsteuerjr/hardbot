@@ -216,6 +216,7 @@ const I18N = {
   ru:{visit:"Визит",client:"Клиент",debt:"Долг",form:"Заполнить",my:"Мои клиенты",
     search:"Поиск: ФИО, договор, телефон",kd:"КД",total:"Долг всего",inwork:"В работе с",
     drive:"Доехать",call:"Позвонить",save:"Сохранить выезд",addphoto:"Добавить фото",
+    routeday:"Маршрут дня",rdempty:"Нет невизитированных кейсов с точками",
     comment:"Комментарий",tips:"Наводки (староста, соседи, ориентиры)",lastvisit:"Последний выезд",
     status:"Статус",saved:"Сохранено",none:"Точка не задана",geook:"Точка проверена",
     nocl:"За вами пока никто не закреплён",photos:"Фото",contracts:"Договоры",promise:"Обещания",born:"Дата рождения",
@@ -236,6 +237,7 @@ const I18N = {
   uz:{visit:"Chiqish",client:"Mijoz",debt:"Qarz",form:"To‘ldirish",my:"Mijozlarim",
     search:"Qidirish: F.I.Sh., shartnoma, telefon",kd:"shartnoma",total:"Jami qarz",inwork:"Ish boshlandi",
     drive:"Borish",call:"Qo‘ng‘iroq",save:"Chiqishni saqlash",addphoto:"Rasm qo‘shish",
+    routeday:"Kun marshruti",rdempty:"Nuqtali ochiq ishlar yo‘q",
     comment:"Izoh",tips:"Ko‘rsatma (oqsoqol, qo‘shnilar, mo‘ljal)",lastvisit:"Oxirgi chiqish",
     status:"Holat",saved:"Saqlandi",none:"Nuqta yo‘q",geook:"Nuqta tekshirildi",
     nocl:"Sizga hali mijoz biriktirilmagan",photos:"Rasm",contracts:"Shartnomalar",promise:"Va’dalar",born:"Tug‘ilgan sana",
@@ -256,6 +258,7 @@ const I18N = {
   tg:{visit:"Сафар",client:"Мизоҷ",debt:"Қарз",form:"Пур кардан",my:"Мизоҷони ман",
     search:"Ҷустуҷӯ: НН, шартнома, телефон",kd:"шартнома",total:"Қарзи умумӣ",inwork:"Дар кор аз",
     drive:"Расидан",call:"Занг задан",save:"Сафарро захира",addphoto:"Расм илова",
+    routeday:"Масири рӯз",rdempty:"Кейси кушодаи нуқтадор нест",
     comment:"Шарҳ",tips:"Ишора (оқсаққол, ҳамсоягон, нишона)",lastvisit:"Сафари охирин",
     status:"Ҳолат",saved:"Захира шуд",none:"Нуқта нест",geook:"Нуқта тасдиқ шуд",
     nocl:"Ба шумо ҳоло мизоҷе вобаста нашудааст",photos:"Расм",contracts:"Шартномаҳо",promise:"Ваъдаҳо",born:"Санаи таваллуд",
@@ -584,9 +587,32 @@ function renderList(){
   if(!STATE.persons.length){ $("app").innerHTML=bar+`<div class="center">${t.nocl}</div>`; setBottomNav("clients"); return; }
   $("app").innerHTML = bar +
     `<div class="searchwrap">${ic("search")}<input class="search" id="q" placeholder="${esc(t.search)}" oninput="filterList()"></div>
+     <button class="btn line" style="margin-bottom:10px" onclick="routeDay()">🧭 ${esc(t.routeday)}</button>
      <div id="plist"></div>`;
   drawList(STATE.persons);
   setBottomNav("clients");
+}
+
+// Черновик маршрута дня: сервер берёт топ по скорингу и сворачивает цепочкой
+// «ближайший следующий» от живой точки (если дали гео). Тап по строке — карточка.
+async function routeDay(){
+  const t=L();
+  const geo=await grabGeo(3000);
+  let url="/api/route_day"; if(geo) url+="?lat="+geo.lat+"&lon="+geo.lon;
+  let j=null;
+  try{ j=await api(url); }catch(e){ toast("✕"); return; }
+  const items=(j&&j.order)||[];
+  if(!items.length){ toast(t.rdempty); return; }
+  $("plist").innerHTML =
+    `<div class="muted" style="margin:4px 0 10px">🧭 ${esc(t.routeday)}: ${items.length}`+
+    (j.km?` · ≈ ${j.km} км`:"")+`</div>`+
+    items.map((p,i)=>`<div class="pcard" onclick="openP('${p.rep}')">
+       <span style="flex:0 0 24px;height:24px;border-radius:50%;background:#2F80ED;color:#fff;
+         display:flex;align-items:center;justify-content:center;font:600 12px/1 sans-serif">${i+1}</span>
+       <div class="pinfo"><div class="pname">${esc(p.client)}</div>
+         <div class="psub">${p.km!=null?("→ "+p.km+" км · "):""}${totalStr(p)}</div></div>
+       <span class="pchev">${ic("chevR")}</span>
+     </div>`).join("");
 }
 function drawList(items){
   const t=L();
