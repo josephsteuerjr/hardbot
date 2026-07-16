@@ -13,6 +13,7 @@ Callback-схема (компактная, только ASCII-индексы —
   dg:c:{date}:{ei}:{ci}  — клиент ci у сотрудника ei → карточка
   dg:p:{date}:{ei}:{ci}  — фото кейса альбомом в этот же чат (не правка сообщения)
   dg:pe:{date}:{ei}      — фото сотрудника за день, альбом на каждого клиента
+  dg:o:{date}            — просроченные обещания по команде (контроль обещаний)
 где date — ISO (YYYY-MM-DD), ei/ci — индексы в детерминированно отсортированных списках.
 """
 
@@ -162,6 +163,9 @@ def summary_view(mgr: dict, on_date: str) -> tuple[str, InlineKeyboardMarkup]:
         mark = "👤" if ps else "▫️"
         kb.button(text=f"{mark} {_short(emp)} · {len(ps)}",
                   callback_data=f"dg:e:{on_date}:{ei}")
+    n_over = sum(len(ps) for _, ps in overdue_by_employee(mgr, on_date))
+    if n_over:
+        kb.button(text=f"⏰ Обещания просрочены: {n_over}", callback_data=f"dg:o:{on_date}")
     kb.button(text="🔄 Обновить", callback_data=f"dg:h:{on_date}")
     kb.adjust(1)
     return "\n".join(head + body + tail), kb.as_markup()
@@ -303,6 +307,42 @@ def person_card(mgr: dict, on_date: str, ei: int, ci: int) -> tuple[str, InlineK
     kb.button(text="🏠 К сводке", callback_data=f"dg:h:{on_date}")
     kb.adjust(1)
     return text, kb.as_markup()
+
+
+# --- ЭКРАН 4: просроченные обещания (контроль обещаний) ----------------------
+def overdue_by_employee(mgr: dict, on_date: str) -> list[tuple[str, list[dict]]]:
+    """[(employee, люди с просроченными обещаниями)] — только у кого они есть."""
+    out = []
+    for emp in sorted_employees(mgr):
+        ps = db.overdue_promises(emp, on_date)
+        if ps:
+            out.append((emp, ps))
+    return out
+
+
+def promises_view(mgr: dict, on_date: str) -> tuple[str, InlineKeyboardMarkup]:
+    """«Обещал и пропал»: promise_date в прошлом, оплаты нет. Самые тухлые сверху."""
+    items = overdue_by_employee(mgr, on_date)
+    total = sum(len(ps) for _, ps in items)
+    lines = [f"⏰ <b>Просроченные обещания · {human_date(on_date)}</b>",
+             f"🏙 {_e(scope_label(mgr))} · всего: <b>{total}</b>"]
+    if not items:
+        lines.append("━━━━━━━━━━━━━━")
+        lines.append("Просроченных обещаний нет 🎉")
+    for emp, ps in items:
+        lines.append("━━━━━━━━━━━━━━")
+        lines.append(f"👤 <b>{_e(emp)}</b> — {len(ps)}")
+        for p in ps[:12]:
+            money = _persons_total([p])
+            lines.append(f"  🔴 {_e(p['client'])} — обещал {human_date(p['promise_date'])}, "
+                         f"{p['days_overdue']} дн назад" + (f" · {money}" if money else ""))
+        if len(ps) > 12:
+            lines.append(f"  …и ещё {len(ps) - 12}")
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔄 Обновить", callback_data=f"dg:o:{on_date}")
+    kb.button(text="⬅️ К сводке", callback_data=f"dg:h:{on_date}")
+    kb.adjust(1)
+    return "\n".join(lines), kb.as_markup()
 
 
 # --- фото (данные для альбомов; сама отправка — в handlers_manager) ----------

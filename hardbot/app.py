@@ -50,9 +50,9 @@ async def reminder_loop(bot: Bot):
         await asyncio.sleep(3600)
 
 
-def _digest_time() -> tuple[int, int]:
-    """HH:MM из настроек (по МСК), дефолт 16:30. Кривое значение → дефолт."""
-    raw = (db.get_setting("digest_time") or "16:30").strip()
+def _setting_time(key: str, dh: int, dm: int) -> tuple[int, int]:
+    """HH:MM из настроек (по МСК), кривое/пустое значение → дефолт."""
+    raw = (db.get_setting(key) or "").strip()
     try:
         h, m = raw.split(":")
         h, m = int(h), int(m)
@@ -60,7 +60,11 @@ def _digest_time() -> tuple[int, int]:
             return h, m
     except (ValueError, AttributeError):
         pass
-    return 16, 30
+    return dh, dm
+
+
+def _digest_time() -> tuple[int, int]:
+    return _setting_time("digest_time", 16, 30)
 
 
 async def digest_loop(bot: Bot):
@@ -83,6 +87,33 @@ async def digest_loop(bot: Bot):
                 db.set_setting("digest_last_run", today)
         except Exception as e:  # noqa: BLE001
             logging.warning("digest_loop: %s", e)
+        await asyncio.sleep(45)
+
+
+async def promise_loop(bot: Bot):
+    """Утренний контроль обещаний (по умолчанию 09:30 МСК): каждому руководителю —
+    список ПРОСРОЧЕННЫХ обещаний его сотрудников (promise_date прошла, оплаты нет).
+    Дни без просрочек не шумят — пуш не уходит. Механика раз-в-день с догоном —
+    как у digest_loop (settings.promise_last_run)."""
+    while True:
+        try:
+            enabled = (db.get_setting("promise_enabled") or "1").strip().lower() \
+                not in ("0", "false", "no", "off")
+            today = date.today().isoformat()
+            th, tm = _setting_time("promise_time", 9, 30)
+            now = datetime.now(MSK)
+            if enabled and (now.hour, now.minute) >= (th, tm) \
+                    and db.get_setting("promise_last_run") != today:
+                for mgr in db.list_managers():
+                    try:
+                        if digest.overdue_by_employee(mgr, today):
+                            text, kb = digest.promises_view(mgr, today)
+                            await bot.send_message(mgr["telegram_id"], text, reply_markup=kb)
+                    except Exception as e:  # noqa: BLE001
+                        logging.warning("promise push %s failed: %s", mgr.get("telegram_id"), e)
+                db.set_setting("promise_last_run", today)
+        except Exception as e:  # noqa: BLE001
+            logging.warning("promise_loop: %s", e)
         await asyncio.sleep(45)
 
 
@@ -139,6 +170,7 @@ async def main():
 
     asyncio.create_task(reminder_loop(bot))
     asyncio.create_task(digest_loop(bot))
+    asyncio.create_task(promise_loop(bot))
     logging.info("Бот запущен. ADMIN_ID=%s", ADMIN_ID)
     # drop_pending_updates=False: сообщения за время простоя/перезагрузки не теряются
     await dp.start_polling(bot, drop_pending_updates=False)

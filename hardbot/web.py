@@ -795,18 +795,26 @@ async def _admin_digest_settings(request: web.Request) -> web.Response:
     _admin(request)
     if request.method == "POST":
         b = await request.json()
-        time_raw = (b.get("time") or "").strip()
-        if time_raw:
-            if not re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", time_raw):
-                raise web.HTTPBadRequest(text="bad time (HH:MM)")
-            db.set_setting("digest_time", time_raw)
+        for key, setting in (("time", "digest_time"), ("promise_time", "promise_time")):
+            raw = (b.get(key) or "").strip()
+            if raw:
+                if not re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", raw):
+                    raise web.HTTPBadRequest(text=f"bad {key} (HH:MM)")
+                db.set_setting(setting, raw)
         if "enabled" in b:
             db.set_setting("digest_enabled", "1" if b.get("enabled") else "0")
+        if "promise_enabled" in b:
+            db.set_setting("promise_enabled", "1" if b.get("promise_enabled") else "0")
+
+    def _on(key):
+        return (db.get_setting(key) or "1").strip().lower() not in ("0", "false", "no", "off")
+
     return web.json_response({
         "ok": True,
         "time": db.get_setting("digest_time") or "16:30",
-        "enabled": (db.get_setting("digest_enabled") or "1").strip().lower()
-                   not in ("0", "false", "no", "off"),
+        "enabled": _on("digest_enabled"),
+        "promise_time": db.get_setting("promise_time") or "09:30",
+        "promise_enabled": _on("promise_enabled"),
     })
 
 

@@ -814,6 +814,40 @@ def due_reminders(on_date: str) -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def overdue_promises(employee: str, on_date: str) -> list[dict]:
+    """Люди сотрудника с ПРОСРОЧЕННЫМ обещанием: promise_date (реестр) в прошлом,
+    кейс не «Оплачен» и после даты обещания платежа не было (last_payment_date).
+    Группировка по людям; в каждом — promise_date (самая ранняя просроченная)
+    и days_overdue. Самые «тухлые» сверху."""
+    target = _as_date(on_date)
+    if target is None:
+        return []
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM clients WHERE responsible = ? "
+            "AND promise_date IS NOT NULL AND TRIM(promise_date) <> ''",
+            (employee,),
+        ).fetchall()
+    bad = []
+    for r in rows:
+        pd = _as_date(r["promise_date"])
+        if pd is None or pd >= target:
+            continue                       # обещание ещё не наступило
+        if "Оплачен" in ((r["overall_result"] or "") + (r["call_status"] or "")):
+            continue                       # уже оплачен
+        lp = _as_date(r["last_payment_date"])
+        if lp and lp >= pd:
+            continue                       # платёж после даты обещания = сдержал
+        bad.append(r)
+    persons = _group_persons(bad)
+    for p in persons:
+        pd = min(d for d in (_as_date(x["promise_date"]) for x in p["contracts"]) if d)
+        p["promise_date"] = pd.isoformat()
+        p["days_overdue"] = (target - pd).days
+    persons.sort(key=lambda p: -p["days_overdue"])
+    return persons
+
+
 def visit_history(contract_id: str) -> list[sqlite3.Row]:
     with connect() as conn:
         return conn.execute(

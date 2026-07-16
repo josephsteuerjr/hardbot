@@ -1476,6 +1476,16 @@ class Pult(tk.Tk):
                        fg=TEXT, activebackground=CARD, selectcolor=CARD,
                        font=f(9)).pack(side="left")
         btn(rd, "Сохранить", self.save_digest, kind="accent").pack(side="left", padx=(12, 0))
+        rp = tk.Frame(dc.inner, bg=CARD)
+        rp.pack(anchor="w", pady=(6, 0))
+        tk.Label(rp, text="Обещания (МСК)", bg=CARD, fg=MUTED, font=f(9)).pack(side="left")
+        self.prom_time = entry(rp, width=7)
+        self.prom_time.insert(0, "09:30")
+        self.prom_time.pack(side="left", padx=(8, 12))
+        self.prom_enabled = tk.BooleanVar(value=True)
+        tk.Checkbutton(rp, text="утренний пуш «обещание просрочено»",
+                       variable=self.prom_enabled, bg=CARD, fg=TEXT,
+                       activebackground=CARD, selectcolor=CARD, font=f(9)).pack(side="left")
         self.dig_out = tk.Label(dc.inner, text="", bg=CARD, fg=MUTED, font=f(9))
         self.dig_out.pack(anchor="w", pady=(6, 0))
 
@@ -1555,6 +1565,9 @@ class Pult(tk.Tk):
                 self.dig_time.delete(0, "end")
                 self.dig_time.insert(0, dig.get("time") or "16:30")
                 self.dig_enabled.set(bool(dig.get("enabled")))
+                self.prom_time.delete(0, "end")
+                self.prom_time.insert(0, dig.get("promise_time") or "09:30")
+                self.prom_enabled.set(bool(dig.get("promise_enabled", True)))
             self.mgr_guest_combo.configure(
                 values=["— из писавших боту —"] + [self._guest_label(g) for g in self.guests])
             self.mgr_guest_combo.current(0)
@@ -1690,13 +1703,18 @@ class Pult(tk.Tk):
 
     def save_digest(self):
         t = self.dig_time.get().strip()
-        if t and not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", t):
-            self.toast("Время в формате ЧЧ:ММ", err=True)
-            return
-        body = {"time": t, "enabled": self.dig_enabled.get()}
+        pt = self.prom_time.get().strip()
+        for v in (t, pt):
+            if v and not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", v):
+                self.toast("Время в формате ЧЧ:ММ", err=True)
+                return
+        body = {"time": t, "enabled": self.dig_enabled.get(),
+                "promise_time": pt, "promise_enabled": self.prom_enabled.get()}
         def done(d):
             self.dig_out.configure(
-                text=f"Автопуш {'включён' if d.get('enabled') else 'выключен'} · {d.get('time')} МСК")
+                text=f"Дайджест {'вкл' if d.get('enabled') else 'выкл'} · {d.get('time')} МСК"
+                     f"   ·   Обещания {'вкл' if d.get('promise_enabled') else 'выкл'}"
+                     f" · {d.get('promise_time')} МСК")
             self.toast("Настройки сохранены")
         self.bg_task(lambda: self.api("POST", "/admin/digest_settings", body), done)
 
