@@ -1342,11 +1342,21 @@ class Pult(tk.Tk):
         self.binds_frame = tk.Frame(bc.inner, bg=CARD)
         self.binds_frame.pack(fill="x")
 
+    @staticmethod
+    def _fmt_seen(iso):
+        """«был 16.07 12:01» — отличать живой аккаунт от брошенного тёзки: у человека
+        бывает два телеграма с одним именем, роль надо давать тому, с которого пишут."""
+        try:
+            d = datetime.fromisoformat(str(iso or ""))
+        except ValueError:
+            return ""
+        return f" · был {d.day:02d}.{d.month:02d} {d.hour:02d}:{d.minute:02d}"
+
     def _guest_label(self, g):
         who = g.get("name") or (("@" + g["username"]) if g.get("username") else "без имени")
         nick = (" · @" + g["username"]) if g.get("username") else ""
         busy = ("  ⚠ уже: " + g["bound_employee"]) if g.get("bound_employee") else ""
-        return f"{who}{nick} · {g['telegram_id']}{busy}"
+        return f"{who}{nick} · {g['telegram_id']}{self._fmt_seen(g.get('last_seen'))}{busy}"
 
     def load_roles(self):
         def work():
@@ -1384,7 +1394,7 @@ class Pult(tk.Tk):
                 idcell = tk.Frame(row, bg=CARD)
                 idcell.pack(side="left")
                 combo = ttk.Combobox(idcell, values=["— из писавших боту —"] + glabels,
-                                     state="readonly", width=30, font=f(8))
+                                     state="readonly", width=40, font=f(8))
                 combo.current(0)
                 combo.pack(anchor="w")
                 tid = entry(idcell, width=16)
@@ -1484,7 +1494,7 @@ class Pult(tk.Tk):
         tk.Label(fc.inner, text="Кто это (из писавших боту)", bg=CARD, fg=MUTED,
                  font=f(9)).pack(anchor="w")
         self.mgr_guest_combo = ttk.Combobox(fc.inner, values=["— никто ещё не писал боту —"],
-                                            state="readonly", width=42, font=f(8))
+                                            state="readonly", width=58, font=f(8))
         self.mgr_guest_combo.current(0)
         self.mgr_guest_combo.pack(anchor="w", pady=(2, 6))
         self.mgr_guest_combo.bind("<<ComboboxSelected>>", self._mgr_pick_guest)
