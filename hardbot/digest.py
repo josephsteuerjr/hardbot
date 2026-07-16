@@ -14,13 +14,14 @@ Callback-схема (компактная, только ASCII-индексы —
   dg:p:{date}:{ei}:{ci}  — фото кейса альбомом в этот же чат (не правка сообщения)
   dg:pe:{date}:{ei}      — фото сотрудника за день, альбом на каждого клиента
   dg:o:{date}            — просроченные обещания по команде (контроль обещаний)
+  dg:w:{date}:{days}     — сводка за период (7/30 дней до date включительно)
 где date — ISO (YYYY-MM-DD), ei/ci — индексы в детерминированно отсортированных списках.
 """
 
 from __future__ import annotations
 
 import html
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -166,6 +167,7 @@ def summary_view(mgr: dict, on_date: str) -> tuple[str, InlineKeyboardMarkup]:
     n_over = sum(len(ps) for _, ps in overdue_by_employee(mgr, on_date))
     if n_over:
         kb.button(text=f"⏰ Обещания просрочены: {n_over}", callback_data=f"dg:o:{on_date}")
+    kb.button(text="📅 Неделя", callback_data=f"dg:w:{on_date}:7")
     kb.button(text="🔄 Обновить", callback_data=f"dg:h:{on_date}")
     kb.adjust(1)
     return "\n".join(head + body + tail), kb.as_markup()
@@ -307,6 +309,67 @@ def person_card(mgr: dict, on_date: str, ei: int, ci: int) -> tuple[str, InlineK
     kb.button(text="🏠 К сводке", callback_data=f"dg:h:{on_date}")
     kb.adjust(1)
     return text, kb.as_markup()
+
+
+# --- ЭКРАН 5: сводка за период (неделя/месяц) --------------------------------
+def period_view(mgr: dict, on_date: str,
+                days: int = 7) -> tuple[str, InlineKeyboardMarkup]:
+    """Динамика команды за N дней до on_date включительно: кейсы, конверсия
+    в «Оплачен», фото-дисциплина, деньги. Кнопки 7/30 переключают период."""
+    days = days if days in (7, 30) else 7
+    end = db._as_date(on_date) or date.today()
+    start = end - timedelta(days=days - 1)
+    d_from, d_to = start.isoformat(), end.isoformat()
+
+    rows = []   # (emp, persons, с фото, оплачено)
+    for emp in sorted_employees(mgr):
+        ps = db.persons_processed_range(emp, d_from, d_to)
+        ph = sum(1 for p in ps if photostore.photos_between(p["contracts"], d_from, d_to))
+        paid = [p for p in ps if _person_status(p) == "Оплачен"]
+        rows.append((emp, ps, ph, paid))
+
+    total = sum(len(ps) for _, ps, _, _ in rows)
+    total_ph = sum(ph for _, _, ph, _ in rows)
+    paid_all = [p for _, _, _, paid in rows for p in paid]
+    money_all = _persons_total([p for _, ps, _, _ in rows for p in ps])
+    money_paid = _persons_total(paid_all)
+
+    def pct(a, b):
+        return f" ({round(100 * a / b)}%)" if b else ""
+
+    lines = [f"📅 <b>Сводка за {days} дн · {human_date(d_from)} — {human_date(d_to)}</b>",
+             f"🏙 {_e(scope_label(mgr))}",
+             f"👥 Обработано: <b>{total}</b>"]
+    if total:
+        lines.append(f"✅ Оплачен: {len(paid_all)}{pct(len(paid_all), total)}"
+                     + (f" · закрыто: {money_paid}" if money_paid else ""))
+        lines.append(f"📸 С фото: {total_ph} из {total}{pct(total_ph, total)}")
+    if money_all:
+        lines.append(f"💰 Долг по обработанным: {money_all}")
+    lines.append("━━━━━━━━━━━━━━")
+
+    order = sorted(rows, key=lambda x: (-len(x[1]), x[0].lower()))
+    for emp, ps, ph, paid in order:
+        if not ps:
+            lines.append(f"▫️ <s>{_e(emp)}</s> — 0")
+            continue
+        lines.append(f"👤 <b>{_e(emp)}</b> — {len(ps)} "
+                     f"{_plural(len(ps), 'кейс', 'кейса', 'кейсов')}"
+                     f" · ✅ {len(paid)}{pct(len(paid), len(ps))} · 📸 {ph}/{len(ps)}")
+        brief = " · ".join(f"{_st_emoji(s)} {_e(s)} {n}"
+                           for s, n in _outcomes(ps)[:3])
+        if brief:
+            lines.append(f"    {brief}")
+    if not total:
+        lines.append("За период выездов нет.")
+
+    kb = InlineKeyboardBuilder()
+    other = 30 if days == 7 else 7
+    kb.button(text=f"📅 За {other} дней", callback_data=f"dg:w:{on_date}:{other}")
+    kb.button(text="🔄 Обновить", callback_data=f"dg:w:{on_date}:{days}")
+    kb.button(text="⬅️ К сводке", callback_data=f"dg:h:{on_date}")
+    kb.adjust(1)
+    return "\n".join(lines), kb.as_markup()
 
 
 # --- ЭКРАН 4: просроченные обещания (контроль обещаний) ----------------------

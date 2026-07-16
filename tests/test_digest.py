@@ -217,3 +217,28 @@ def test_photo_coverage_in_stats():
     btns = {b.callback_data: b.text for row in kb.inline_keyboard for b in row}
     assert btns[f"dg:c:{TODAY}:{ei}:{ci}"].endswith("📸")
     assert not btns[f"dg:c:{TODAY}:{ei}:{ci2}"].endswith("📸")
+
+
+def test_period_view_week():
+    """Недельная сводка: вчерашний кейс попадает, конверсия и фото-дисциплина считаются."""
+    _seed()
+    _seed_photos()
+    mgr = db.get_manager(MGR_TID)
+    text, kb = digest.period_view(mgr, TODAY, 7)
+    assert "Сводка за 7 дн" in text
+    assert "Старый кейс" not in text            # имена людей в сводке не светятся
+    # вчерашний «Оплачен» (D-3) теперь в счётчиках: 4 человека за неделю
+    assert "Обработано: <b>4</b>" in text
+    assert "✅ Оплачен: " in text and "📸 С фото: " in text
+    cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert f"dg:w:{TODAY}:30" in cbs             # переключатель периода
+    assert f"dg:h:{TODAY}" in cbs
+
+    # из сводки есть вход
+    _, skb = digest.summary_view(mgr, TODAY)
+    assert any(b.callback_data == f"dg:w:{TODAY}:7"
+               for row in skb.inline_keyboard for b in row)
+
+    # кривые days откатываются к 7
+    t2, _ = digest.period_view(mgr, TODAY, 999)
+    assert "Сводка за 7 дн" in t2

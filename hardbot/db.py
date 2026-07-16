@@ -649,6 +649,22 @@ def persons_processed(employee: str, on_date: str) -> list[dict]:
     return _group_persons(rows)
 
 
+def persons_processed_range(employee: str, date_from: str, date_to: str) -> list[dict]:
+    """Как persons_processed, но за диапазон дат [date_from..date_to] включительно —
+    для недельной/месячной сводки руководителя."""
+    lo, hi = _as_date(date_from), _as_date(date_to)
+    if lo is None or hi is None:
+        return []
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM clients WHERE responsible = ? "
+            "AND visit_date IS NOT NULL AND TRIM(visit_date) <> ''",
+            (employee,),
+        ).fetchall()
+    rows = [r for r in rows if (d := _as_date(r["visit_date"])) and lo <= d <= hi]
+    return _group_persons(rows)
+
+
 # Путь к .env, откуда docker-compose (env_file) и load_dotenv() берут BOT_TOKEN.
 # Лежит рядом с кодом; в контейнере — /data не подходит (env_file читает .env билда),
 # поэтому пишем в файл рядом со скриптами. HARDBOT_ENV — переопределение пути на всякий.

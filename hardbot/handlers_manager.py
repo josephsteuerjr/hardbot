@@ -165,6 +165,8 @@ async def navigate(cb: CallbackQuery):
             text, kb = digest.employee_view(mgr, on_date, int(parts[3]))
         elif kind == "o":
             text, kb = digest.promises_view(mgr, on_date)
+        elif kind == "w":
+            text, kb = digest.period_view(mgr, on_date, int(parts[3]))
         elif kind == "c":
             db.audit_access(cb.from_user.id, "digest_view_card", detail=on_date)
             text, kb = digest.person_card(mgr, on_date, int(parts[3]), int(parts[4]))

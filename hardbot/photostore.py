@@ -38,3 +38,9 @@ def day_photos(contracts, on_date: str) -> list[Path]:
     """Фото человека, загруженные в дату on_date (ISO, локальное время сервера)."""
     return [p for p in person_photos(contracts)
             if date.fromtimestamp(p.stat().st_mtime).isoformat() == on_date]
+
+
+def photos_between(contracts, date_from: str, date_to: str) -> list[Path]:
+    """Фото человека за диапазон дат [date_from..date_to] (ISO, сравнение строк)."""
+    return [p for p in person_photos(contracts)
+            if date_from <= date.fromtimestamp(p.stat().st_mtime).isoformat() <= date_to]
