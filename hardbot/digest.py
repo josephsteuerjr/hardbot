@@ -21,6 +21,7 @@ Callback-схема (компактная, только ASCII-индексы —
 from __future__ import annotations
 
 import html
+import os
 from datetime import date, datetime, timedelta
 
 from aiogram.types import InlineKeyboardMarkup
@@ -28,6 +29,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
 import debt
+import maplink
 import photostore
 
 _MONTHS = ["", "января", "февраля", "марта", "апреля", "мая", "июня", "июля",
@@ -226,6 +228,10 @@ def employee_view(mgr: dict, on_date: str, ei: int) -> tuple[str, InlineKeyboard
     nday = sum(len(photostore.day_photos(p["contracts"], on_date)) for p in persons)
     if nday:
         kb.button(text=f"📸 Фото за день ({nday})", callback_data=f"dg:pe:{on_date}:{ei}")
+    base = (os.getenv("MINIAPP_URL", "") or "").strip()
+    if base:   # карта дня — отдельная веб-страница по подписанной ссылке (48 ч)
+        kb.button(text="🗺 Карта дня",
+                  url=f"{base.rstrip('/')}/manager/map?{maplink.sign(emp, on_date)}")
     kb.button(text="⬅️ К сводке", callback_data=f"dg:h:{on_date}")
     kb.adjust(1)
     return "\n".join(lines), kb.as_markup()

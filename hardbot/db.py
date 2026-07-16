@@ -1013,6 +1013,40 @@ def log_visit(contract_id: str, agent_id: int, payload: str,
         return cur.rowcount > 0
 
 
+def day_map_points(employee: str, on_date: str) -> dict:
+    """Точки «Карты дня» руководителя: визиты (точка закрытия из гео-контроля),
+    метки выездника за день и адреса обработанных должников (geo клиента)."""
+    with connect() as conn:
+        visits = conn.execute(
+            "SELECT v.visit_lat lat, v.visit_lon lon, v.dist_m dist_m, c.client client "
+            "FROM visits v JOIN clients c ON c.contract_id = v.contract_id "
+            "WHERE c.responsible = ? AND v.created_at = ? AND v.visit_lat IS NOT NULL "
+            "ORDER BY v.id", (employee, on_date)).fetchall()
+        tids = [r["telegram_id"] for r in conn.execute(
+            "SELECT telegram_id FROM agent_bind WHERE employee = ?", (employee,))]
+        markers = []
+        if tids:
+            qs = ",".join("?" for _ in tids)
+            markers = conn.execute(
+                f"SELECT lat, lon, label, created_at FROM markers "
+                f"WHERE telegram_id IN ({qs}) AND created_at LIKE ? ORDER BY id",
+                (*tids, on_date + "%")).fetchall()
+    targets = []
+    for p in persons_processed(employee, on_date):
+        c = next((x for x in p["contracts"]
+                  if x["geo_lat"] is not None and x["geo_lon"] is not None), None)
+        if c:
+            targets.append({"lat": c["geo_lat"], "lon": c["geo_lon"],
+                            "client": p["client"], "src": c["geo_src"] or ""})
+    return {
+        "visits": [{"lat": r["lat"], "lon": r["lon"], "dist_m": r["dist_m"],
+                    "client": r["client"]} for r in visits],
+        "markers": [{"lat": r["lat"], "lon": r["lon"], "label": r["label"] or "",
+                     "at": (r["created_at"] or "")[11:16]} for r in markers],
+        "targets": targets,
+    }
+
+
 def last_visit_geo(contract_ids: list[str]):
     """Последний визит с гео-дистанцией по любому из договоров человека
     (для карточки дайджеста: «закрыт в X м от адреса»)."""

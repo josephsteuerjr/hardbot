@@ -34,6 +34,7 @@ import debt
 from config import ADMIN_ID, approval_required, lang_of
 from fields import BY_KEY, DROPDOWNS
 from i18n import FIELD_TITLES, LANGUAGES, t, tf, tv
+import maplink
 from keyboards import approve_bind_kb
 from photostore import PHOTO_DIR, day_photos
 
@@ -571,6 +572,110 @@ async def _notify_managers(request: web.Request, row, dist_m: int | None = None)
             logging.warning("manager push failed: tid=%s err=%s", m["telegram_id"], e)
 
 
+# --- «Карта дня» руководителя (подписанная ссылка из дайджеста) --------------
+def _map_auth(request: web.Request) -> tuple[str, str]:
+    q = request.query
+    emp, d = q.get("e", ""), q.get("d", "")
+    if not maplink.verify(emp, d, q.get("x", ""), q.get("s", "")):
+        raise web.HTTPForbidden(
+            text="Ссылка устарела. Откройте карту заново из дайджеста в боте.")
+    return emp, d
+
+
+async def _manager_map_data(request: web.Request) -> web.Response:
+    emp, d = _map_auth(request)
+    pts = db.day_map_points(emp, d)
+    return web.json_response({
+        "ok": True, "employee": emp, "date": d, **pts,
+        "vectorTiles": "/tiles/basemap.pmtiles" if TILES_FILE.exists() else None,
+        "alert_m": db.geo_alert_m(),
+    })
+
+
+async def _manager_map(request: web.Request) -> web.Response:
+    _map_auth(request)
+    return web.Response(text=MAP_PAGE, content_type="text/html", charset="utf-8")
+
+
+# Отдельная лёгкая страница (не миниапп): руководитель открывает её из Телеги по
+# подписанной ссылке. Библиотеки карт — c CDN (руководитель онлайн), вектор PMTiles —
+# если подложен на сервере, иначе растровый OSM (тот же фолбэк, что в миниаппе).
+MAP_PAGE = """<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Карта дня</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.min.css">
+<style>
+html,body{margin:0;height:100%;font-family:Inter,-apple-system,Segoe UI,Roboto,sans-serif}
+#map{position:absolute;inset:0}
+.hdr{position:absolute;z-index:5;top:10px;left:10px;right:10px;background:#fff;
+  border:1px solid #DEE4EA;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,.08);
+  padding:10px 14px;font-size:13px;color:#222}
+.hdr b{font-size:14px}
+.leg{margin-top:6px;color:#666;font-size:12px;display:flex;gap:12px;flex-wrap:wrap}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:-1px}
+.pin{width:22px;height:22px;border-radius:50%;border:2px solid #fff;
+  box-shadow:0 1px 4px rgba(0,0,0,.4);color:#fff;font-size:11px;font-weight:700;
+  display:flex;align-items:center;justify-content:center}
+.empty{position:absolute;z-index:4;inset:0;display:flex;align-items:center;
+  justify-content:center;color:#666;font-size:15px;background:#F4F6F8}
+</style></head><body>
+<div id="map"></div><div class="hdr" id="hdr">Загрузка…</div>
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pmtiles@3.2.1/dist/pmtiles.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/protomaps-themes-base@4.4.0/dist/protomaps-themes-base.js"></script>
+<script>
+const RASTER={version:8,sources:{osm:{type:"raster",
+  tiles:["https://a.tile.openstreetmap.org/{z}/{x}/{y}.png","https://b.tile.openstreetmap.org/{z}/{x}/{y}.png"],
+  tileSize:256,maxzoom:19,attribution:"© OpenStreetMap"}},layers:[{id:"osm",type:"raster",source:"osm"}]};
+function vstyle(url){
+  maplibregl.addProtocol("pmtiles", new pmtiles.Protocol().tile);
+  const ptb=window.protomaps_themes_base;
+  const layers=ptb.layers?ptb.layers("protomaps","light","ru"):ptb.default("protomaps","light");
+  return {version:8,glyphs:"https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf",
+    sprite:"https://protomaps.github.io/basemaps-assets/sprites/v4/light",
+    sources:{protomaps:{type:"vector",url:"pmtiles://"+location.origin+url,attribution:"© OpenStreetMap"}},layers};
+}
+function pin(bg,txt){const e=document.createElement("div");e.className="pin";
+  e.style.background=bg;e.textContent=txt||"";return e;}
+(async()=>{
+  const r=await fetch("/manager/map_data"+location.search);
+  if(!r.ok){document.getElementById("hdr").textContent="Ссылка устарела — откройте карту из дайджеста заново.";return;}
+  const j=await r.json();
+  const pts=[...j.targets,...j.visits,...j.markers];
+  document.getElementById("hdr").innerHTML=
+    "<b>🗺 "+j.employee+"</b> · "+j.date+
+    "<div class='leg'><span><span class='dot' style='background:#2F80ED'></span>адрес должника ("+j.targets.length+")</span>"+
+    "<span><span class='dot' style='background:#219653'></span>визит закрыт ("+j.visits.length+")</span>"+
+    "<span><span class='dot' style='background:#B0472C'></span>визит далеко от адреса</span>"+
+    "<span><span class='dot' style='background:#F2994A'></span>метка ("+j.markers.length+")</span></div>";
+  if(!pts.length){const e=document.createElement("div");e.className="empty";
+    e.textContent="За этот день гео-точек нет";document.body.appendChild(e);return;}
+  let style=RASTER;
+  if(j.vectorTiles&&window.pmtiles&&window.protomaps_themes_base){try{style=vstyle(j.vectorTiles);}catch(e){}}
+  const map=new maplibregl.Map({container:"map",style,center:[pts[0].lon,pts[0].lat],
+    zoom:12,attributionControl:false,dragRotate:false});
+  let fell=false;
+  map.on("error",()=>{if(!fell&&style!==RASTER){fell=true;try{map.setStyle(RASTER);}catch(e){}}});
+  map.addControl(new maplibregl.NavigationControl({showCompass:false}),"top-right");
+  const b=new maplibregl.LngLatBounds();
+  const add=(p,el,html)=>{
+    new maplibregl.Marker({element:el,anchor:"center"}).setLngLat([p.lon,p.lat])
+      .setPopup(new maplibregl.Popup({offset:14}).setHTML(html)).addTo(map);
+    b.extend([p.lon,p.lat]);
+  };
+  j.targets.forEach(p=>add(p,pin("#2F80ED"),"🏠 "+p.client));
+  j.visits.forEach((p,i)=>{
+    const far=p.dist_m!=null&&p.dist_m>j.alert_m;
+    const d=p.dist_m==null?"":(p.dist_m>=1000?(p.dist_m/1000).toFixed(1)+" км":p.dist_m+" м")+" от адреса";
+    add(p,pin(far?"#B0472C":"#219653",String(i+1)),
+        (far?"⚠️ ":"✅ ")+p.client+(d?"<br>"+d:""));
+  });
+  j.markers.forEach(p=>add(p,pin("#F2994A"),"📍 "+(p.label||"метка")+(p.at?" · "+p.at:"")));
+  map.fitBounds(b,{padding:70,maxZoom:15});
+})();
+</script></body></html>"""
+
+
 # --- Admin API (для десктоп-пульта; авторизация — ключ ADMIN_API_KEY) --------
 def _admin(request: web.Request) -> None:
     key = os.getenv("ADMIN_API_KEY", "")
@@ -957,6 +1062,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/admin/digest_preview", _admin_digest_preview)
     app.router.add_get("/admin/period", _admin_period)
     app.router.add_post("/admin/period", _admin_period)
+    app.router.add_get("/manager/map", _manager_map)
+    app.router.add_get("/manager/map_data", _manager_map_data)
     app.router.add_get("/tiles/basemap.pmtiles", _tiles)
     app.router.add_get("/api/bootstrap", _bootstrap)
     app.router.add_get("/api/person", _person)
