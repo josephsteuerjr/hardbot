@@ -35,13 +35,13 @@ from config import ADMIN_ID, approval_required, lang_of
 from fields import BY_KEY, DROPDOWNS
 from i18n import FIELD_TITLES, LANGUAGES, t, tf, tv
 from keyboards import approve_bind_kb
+from photostore import PHOTO_DIR
 
 # CORS на статике/тайлах: по умолчанию НЕ ставим «*» (миниапп и тайлы — same-origin
 # через свой aiohttp/Caddy). Кросс-ориджин — только если явно задан CORS_ALLOW_ORIGIN.
 CORS_ALLOW_ORIGIN = os.getenv("CORS_ALLOW_ORIGIN", "").strip()
 
 MINIAPP_DIR = Path(__file__).parent / "miniapp"
-PHOTO_DIR = Path(os.getenv("HARDBOT_DATA", Path(__file__).parent)) / "photos"
 # Свой вектор-тайлсет (Protomaps PMTiles). Если файла нет — карта на растровом OSM.
 TILES_FILE = Path(os.getenv("HARDBOT_DATA", Path(__file__).parent)) / "basemap.pmtiles"
 # Свой маршрутизатор (OSRM) для геометрии «я → должник» в навигации миниаппа.

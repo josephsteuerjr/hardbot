@@ -3,12 +3,17 @@
 Проверяем, что:
   • CRUD руководителей работает (JSON-списки городов/сотрудников целы);
   • persons_processed берёт только визиты за нужную дату (по clients.visit_date);
-  • три экрана дайджеста строятся, содержат стату и корректные callback'и.
+  • три экрана дайджеста строятся, содержат стату и корректные callback'и;
+  • фото (photostore): кнопки в карточке/у сотрудника и выборка файлов за день.
 """
+import os
+import shutil
+import time
 from datetime import date, timedelta
 
 import db
 import digest
+import photostore
 
 TODAY = date.today().isoformat()
 YESTERDAY = (date.today() - timedelta(days=1)).isoformat()
@@ -128,3 +133,64 @@ def test_digest_never_adds_sums_to_rubles():
     assert len(persons[ci]["partners"]) == 2
     card, _ = digest.person_card(mgr, TODAY, ei, ci)
     assert "132 900 ₽" in card and "1 000 000 сум" in card
+
+
+# --- фото ---------------------------------------------------------------------
+def _photo(cid, name, days_ago=0):
+    d = photostore.PHOTO_DIR / cid
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_bytes(b"jpegdata")
+    ts = time.time() - days_ago * 86400
+    os.utime(p, (ts, ts))
+    return p
+
+
+def _seed_photos():
+    for cid in ("D-1", "D-2", "D-4"):
+        shutil.rmtree(photostore.PHOTO_DIR / cid, ignore_errors=True)
+    _photo("D-1", "a.jpg")
+    _photo("D-1", "b.jpg")
+    _photo("D-1", "old.jpg", days_ago=3)   # старое: в кейсе есть, в «за день» нет
+    _photo("D-4", "c.jpg")                 # другой сотрудник — не подмешивается
+
+
+def test_photo_buttons_and_helpers():
+    _seed()
+    _seed_photos()
+    mgr = db.get_manager(MGR_TID)
+    emps = digest.sorted_employees(mgr)
+    ei = emps.index("Рахимов Алишер")
+
+    # экран сотрудника: кнопка «за день» считает только сегодняшние фото
+    _, kb = digest.employee_view(mgr, TODAY, ei)
+    btns = {b.callback_data: b.text for row in kb.inline_keyboard for b in row}
+    assert f"dg:pe:{TODAY}:{ei}" in btns
+    assert "(2)" in btns[f"dg:pe:{TODAY}:{ei}"]
+
+    # карточка кейса: все фото человека, включая старое
+    persons = db.persons_processed("Рахимов Алишер", TODAY)
+    ci = next(i for i, p in enumerate(persons) if p["client"] == "Абдуллаев А.")
+    _, kcard = digest.person_card(mgr, TODAY, ei, ci)
+    btns = {b.callback_data: b.text for row in kcard.inline_keyboard for b in row}
+    assert f"dg:p:{TODAY}:{ei}:{ci}" in btns
+    assert "(3)" in btns[f"dg:p:{TODAY}:{ei}:{ci}"]
+
+    # кейс без фото — кнопки нет
+    ci2 = next(i for i, p in enumerate(persons) if p["client"] == "Каримова Г.")
+    _, k2 = digest.person_card(mgr, TODAY, ei, ci2)
+    assert not any(b.callback_data.startswith("dg:p:")
+                   for row in k2.inline_keyboard for b in row)
+
+    # хелперы: карточный — всё (новые сверху), дневной — без старого и без чужого
+    p, files = digest.photos_for_person(mgr, TODAY, ei, ci)
+    assert p["client"] == "Абдуллаев А." and len(files) == 3
+    assert files[-1].name == "old.jpg"
+    emp, items = digest.photos_for_employee_day(mgr, TODAY, ei)
+    assert emp == "Рахимов Алишер"
+    assert [(x["client"], len(fs)) for x, fs in items] == [("Абдуллаев А.", 2)]
+
+    # сбитые индексы не роняют
+    assert digest.photos_for_person(mgr, TODAY, 999, 0) == (None, [])
+    assert digest.photos_for_person(mgr, TODAY, ei, 999) == (None, [])
+    assert digest.photos_for_employee_day(mgr, TODAY, 999) == (None, [])

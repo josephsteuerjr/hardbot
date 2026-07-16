@@ -13,10 +13,11 @@ digest_loop в app.py. Навигация внутри — правкой соо
 import html
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import BaseFilter, Command
 from aiogram.types import (
-    CallbackQuery, KeyboardButton, Message, ReplyKeyboardMarkup,
+    CallbackQuery, FSInputFile, InputMediaDocument, InputMediaPhoto,
+    KeyboardButton, Message, ReplyKeyboardMarkup,
 )
 
 import db
@@ -26,6 +27,9 @@ from config import ADMIN_ID
 router = Router()
 
 BTN_DIGEST = "📊 Дайджест за сегодня"
+
+_ALBUM = 10        # лимит Телеграма на медиагруппу
+_MAX_PHOTOS = 30   # за одно нажатие — чтобы личка не превращалась в ленту
 
 
 def manager_menu() -> ReplyKeyboardMarkup:
@@ -103,6 +107,66 @@ async def fallback(message: Message):
     await _send_digest(message)
 
 
+async def _send_album(message: Message, files, caption: str | None) -> None:
+    """Файлы альбомами по 10. Что не влезло фотографией (>10 МБ, HEIC…) —
+    повторяем документом; совсем битое — честно говорим, не молчим."""
+    for i in range(0, len(files), _ALBUM):
+        chunk = files[i:i + _ALBUM]
+        cap = caption if i == 0 else None
+        for cls in (InputMediaPhoto, InputMediaDocument):
+            if len(chunk) == 1:   # медиагруппа = минимум 2 элемента
+                send = message.answer_photo if cls is InputMediaPhoto else message.answer_document
+                coro = send(FSInputFile(str(chunk[0])), caption=cap)
+            else:
+                coro = message.answer_media_group(
+                    [cls(media=FSInputFile(str(p)), caption=cap if j == 0 else None)
+                     for j, p in enumerate(chunk)])
+            try:
+                await coro
+                break
+            except TelegramAPIError:
+                if cls is InputMediaDocument:
+                    await message.answer("⚠️ Часть фото не удалось отправить.")
+
+
+async def _send_photos(cb: CallbackQuery, mgr: dict, kind: str,
+                       on_date: str, parts: list[str]) -> None:
+    """dg:p / dg:pe — фото шлём НОВЫМИ сообщениями в чат, дайджест не трогаем."""
+    if kind == "p":
+        try:
+            p, files = digest.photos_for_person(mgr, on_date, int(parts[3]), int(parts[4]))
+        except (IndexError, ValueError):
+            p, files = None, []
+        if not files:
+            await cb.answer("Фото по кейсу нет", show_alert=True)
+            return
+        db.audit_access(cb.from_user.id, "digest_photos", target=p["rep"], detail=on_date)
+        cap = f"📸 {p['client']} · {len(files)} фото"
+        if len(files) > _MAX_PHOTOS:
+            cap += f" (показаны последние {_MAX_PHOTOS})"
+        await _send_album(cb.message, files[:_MAX_PHOTOS], cap)
+    else:   # pe: по каждому клиенту сотрудника — свой альбом с подписью-ФИО
+        try:
+            emp, items = digest.photos_for_employee_day(mgr, on_date, int(parts[3]))
+        except (IndexError, ValueError):
+            emp, items = None, []
+        if not items:
+            await cb.answer("За этот день фото нет", show_alert=True)
+            return
+        db.audit_access(cb.from_user.id, "digest_photos_day", target=emp, detail=on_date)
+        sent = 0
+        for p, files in items:
+            left = _MAX_PHOTOS - sent
+            if left <= 0:
+                await cb.message.answer(
+                    f"…лимит {_MAX_PHOTOS} фото за раз — остальное смотрите по кейсам.")
+                break
+            take = files[:left]
+            await _send_album(cb.message, take, f"📸 {p['client']} · {len(take)} фото")
+            sent += len(take)
+    await cb.answer()
+
+
 @router.callback_query(F.data.startswith("dg:"))
 async def navigate(cb: CallbackQuery):
     mgr = scope(cb.from_user.id)
@@ -112,6 +176,9 @@ async def navigate(cb: CallbackQuery):
     parts = cb.data.split(":")
     kind = parts[1] if len(parts) > 1 else "h"
     on_date = parts[2] if len(parts) > 2 else digest.today_iso()
+    if kind in ("p", "pe"):
+        await _send_photos(cb, mgr, kind, on_date, parts)
+        return
     try:
         if kind == "e":
             text, kb = digest.employee_view(mgr, on_date, int(parts[3]))

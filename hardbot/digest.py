@@ -11,6 +11,8 @@ Callback-схема (компактная, только ASCII-индексы —
   dg:h:{date}            — домой (сводка со списком сотрудников)
   dg:e:{date}:{ei}       — сотрудник ei → его клиенты за дату
   dg:c:{date}:{ei}:{ci}  — клиент ci у сотрудника ei → карточка
+  dg:p:{date}:{ei}:{ci}  — фото кейса альбомом в этот же чат (не правка сообщения)
+  dg:pe:{date}:{ei}      — фото сотрудника за день, альбом на каждого клиента
 где date — ISO (YYYY-MM-DD), ei/ci — индексы в детерминированно отсортированных списках.
 """
 
@@ -24,6 +26,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
 import debt
+import photostore
 
 _MONTHS = ["", "января", "февраля", "марта", "апреля", "мая", "июня", "июля",
            "августа", "сентября", "октября", "ноября", "декабря"]
@@ -203,6 +206,9 @@ def employee_view(mgr: dict, on_date: str, ei: int) -> tuple[str, InlineKeyboard
     else:
         lines.append("━━━━━━━━━━━━━━")
         lines.append("Сегодня этот сотрудник ещё никого не обработал.")
+    nday = sum(len(photostore.day_photos(p["contracts"], on_date)) for p in persons)
+    if nday:
+        kb.button(text=f"📸 Фото за день ({nday})", callback_data=f"dg:pe:{on_date}:{ei}")
     kb.button(text="⬅️ К сводке", callback_data=f"dg:h:{on_date}")
     kb.adjust(1)
     return "\n".join(lines), kb.as_markup()
@@ -279,10 +285,40 @@ def person_card(mgr: dict, on_date: str, ei: int, ci: int) -> tuple[str, InlineK
         text += "\n" + "   ".join(tail)
 
     kb = InlineKeyboardBuilder()
+    nph = len(photostore.person_photos(cs))
+    if nph:
+        kb.button(text=f"📸 Фото ({nph})", callback_data=f"dg:p:{on_date}:{ei}:{ci}")
     kb.button(text="⬅️ Назад к сотруднику", callback_data=f"dg:e:{on_date}:{ei}")
     kb.button(text="🏠 К сводке", callback_data=f"dg:h:{on_date}")
     kb.adjust(1)
     return text, kb.as_markup()
+
+
+# --- фото (данные для альбомов; сама отправка — в handlers_manager) ----------
+def photos_for_person(mgr: dict, on_date: str, ei: int, ci: int):
+    """(person, все его фото) по кейсу дайджеста — или (None, []) при сбитых индексах."""
+    emps = sorted_employees(mgr)
+    if not (0 <= ei < len(emps)):
+        return None, []
+    persons = db.persons_processed(emps[ei], on_date)
+    if not (0 <= ci < len(persons)):
+        return None, []
+    p = persons[ci]
+    return p, photostore.person_photos(p["contracts"])
+
+
+def photos_for_employee_day(mgr: dict, on_date: str, ei: int):
+    """(employee, [(person, его фото за on_date)]) — только люди, у кого фото есть."""
+    emps = sorted_employees(mgr)
+    if not (0 <= ei < len(emps)):
+        return None, []
+    emp = emps[ei]
+    items = []
+    for p in db.persons_processed(emp, on_date):
+        files = photostore.day_photos(p["contracts"], on_date)
+        if files:
+            items.append((p, files))
+    return emp, items
 
 
 def _plural(n: int, one: str, few: str, many: str) -> str:
