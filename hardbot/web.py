@@ -48,6 +48,9 @@ TILES_FILE = Path(os.getenv("HARDBOT_DATA", Path(__file__).parent)) / "basemap.p
 # Свой маршрутизатор (OSRM) для геометрии «я → должник» в навигации миниаппа.
 # Пусто — навигация рисует честную прямую (haversine), это не баг, а заявленный фолбэк.
 OSRM_URL = (os.getenv("OSRM_URL", "") or "").strip()
+# Распознавание голосовых комментариев: путь к модели faster-whisper (large-v3-turbo,
+# смонтирована с хоста read-only). Пусто = фича выключена, миниапп прячет микрофон.
+VOICE_MODEL = (os.getenv("VOICE_MODEL", "") or "").strip()
 DEV = (os.getenv("HARDBOT_DEV", "") or "").lower() not in ("", "0", "false", "no")
 _MAX_AGE = 24 * 3600  # initData не старше суток
 
@@ -149,6 +152,7 @@ def _meta(lang: str) -> dict:
                       for k in FORM_DROPDOWNS},
         "dropdownTitles": {k: _title(k, lang) for k in FORM_DROPDOWNS},
         "vectorTiles": "/tiles/basemap.pmtiles" if TILES_FILE.exists() else None,
+        "voice": bool(VOICE_MODEL),   # микрофон в форме показываем только когда есть модель
     }
 
 
@@ -535,6 +539,64 @@ async def _photo(request: web.Request) -> web.Response:
             f.write(chunk)
     n = db.add_photo(rep)
     return web.json_response({"ok": True, "photos": n})
+
+
+# --- Голосовой комментарий: faster-whisper (large-v3-turbo с хоста) ----------
+# Модель грузится лениво при первом голосовом (≈1.5 ГБ RAM int8) и живёт дальше.
+# Транскрипции сериализуются локом: CPU двухъядерный, параллель только мешает.
+_WHISPER = None
+_WHISPER_LOCK = asyncio.Lock()
+# Языки выездников (users.lang) → коды Whisper. Подсказка повышает точность,
+# но не запирает: у 'tg' качество так себе — оставляем автоопределение.
+_VOICE_LANG = {"ru": "ru", "uz": "uz"}
+
+
+def _transcribe(path: str, lang: str | None) -> str:
+    global _WHISPER
+    if _WHISPER is None:
+        from faster_whisper import WhisperModel
+        _WHISPER = WhisperModel(VOICE_MODEL, device="cpu", compute_type="int8")
+    segments, _info = _WHISPER.transcribe(path, language=lang, task="transcribe",
+                                          vad_filter=True, beam_size=1)
+    return " ".join(s.text.strip() for s in segments).strip()
+
+
+async def _voice(request: web.Request) -> web.Response:
+    """Голосовое из миниаппа → текст. Файл (webm/ogg/m4a) декодирует PyAV внутри
+    faster-whisper, ffmpeg в системе не нужен."""
+    uid, _emp = _auth(request)
+    if not VOICE_MODEL:
+        raise web.HTTPServiceUnavailable(text="voice off")
+    reader = await request.multipart()
+    field = await reader.next()
+    if field is None or field.name != "voice":
+        raise web.HTTPBadRequest(text="no voice")
+    size = 0
+    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as f:
+        tmp = f.name
+        while chunk := await field.read_chunk():
+            size += len(chunk)
+            if size > 15 * 1024 * 1024:   # 15 МБ ≈ несколько минут — больше не звук
+                f.close()
+                os.unlink(tmp)
+                raise web.HTTPRequestEntityTooLarge(max_size=15 * 1024 * 1024,
+                                                    actual_size=size)
+            f.write(chunk)
+    db.audit_access(uid, "voice", request.query.get("rep") or None)
+    lang = _VOICE_LANG.get(lang_of(uid))
+    try:
+        async with _WHISPER_LOCK:
+            text = await asyncio.get_event_loop().run_in_executor(
+                None, _transcribe, tmp, lang)
+    except Exception as e:  # noqa: BLE001 — битый файл/модель: честная ошибка, не 500
+        logging.warning("voice transcribe failed: %s", e)
+        raise web.HTTPUnprocessableEntity(text="transcribe failed")
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return web.json_response({"ok": True, "text": text})
 
 
 async def _redeem(request: web.Request) -> web.Response:
@@ -1122,6 +1184,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/route_day", _route_day)
     app.router.add_post("/api/save", _save)
     app.router.add_post("/api/photo", _photo)
+    app.router.add_post("/api/voice", _voice)
     app.router.add_post("/api/lang", _lang)
     app.router.add_post("/api/redeem", _redeem)
     app.router.add_post("/admin/app_revoke", _admin_app_revoke)

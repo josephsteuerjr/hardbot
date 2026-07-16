@@ -217,6 +217,7 @@ const I18N = {
     search:"Поиск: ФИО, договор, телефон",kd:"КД",total:"Долг всего",inwork:"В работе с",
     drive:"Доехать",call:"Позвонить",save:"Сохранить выезд",addphoto:"Добавить фото",
     routeday:"Маршрут дня",rdempty:"Нет невизитированных кейсов с точками",
+    voice:"Надиктовать",voicestop:"Стоп — распознать",voicewait:"Распознаю…",voicefail:"Не распозналось, попробуйте ещё",
     comment:"Комментарий",tips:"Наводки (староста, соседи, ориентиры)",lastvisit:"Последний выезд",
     status:"Статус",saved:"Сохранено",none:"Точка не задана",geook:"Точка проверена",
     nocl:"За вами пока никто не закреплён",photos:"Фото",contracts:"Договоры",promise:"Обещания",born:"Дата рождения",
@@ -238,6 +239,7 @@ const I18N = {
     search:"Qidirish: F.I.Sh., shartnoma, telefon",kd:"shartnoma",total:"Jami qarz",inwork:"Ish boshlandi",
     drive:"Borish",call:"Qo‘ng‘iroq",save:"Chiqishni saqlash",addphoto:"Rasm qo‘shish",
     routeday:"Kun marshruti",rdempty:"Nuqtali ochiq ishlar yo‘q",
+    voice:"Ovozli izoh",voicestop:"To‘xtatish",voicewait:"Aniqlanmoqda…",voicefail:"Bo‘lmadi, yana urinib ko‘ring",
     comment:"Izoh",tips:"Ko‘rsatma (oqsoqol, qo‘shnilar, mo‘ljal)",lastvisit:"Oxirgi chiqish",
     status:"Holat",saved:"Saqlandi",none:"Nuqta yo‘q",geook:"Nuqta tekshirildi",
     nocl:"Sizga hali mijoz biriktirilmagan",photos:"Rasm",contracts:"Shartnomalar",promise:"Va’dalar",born:"Tug‘ilgan sana",
@@ -259,6 +261,7 @@ const I18N = {
     search:"Ҷустуҷӯ: НН, шартнома, телефон",kd:"шартнома",total:"Қарзи умумӣ",inwork:"Дар кор аз",
     drive:"Расидан",call:"Занг задан",save:"Сафарро захира",addphoto:"Расм илова",
     routeday:"Масири рӯз",rdempty:"Кейси кушодаи нуқтадор нест",
+    voice:"Гуфтан",voicestop:"Ист — шинохт",voicewait:"Шинохта истодааст…",voicefail:"Нашуд, боз кӯшиш кунед",
     comment:"Шарҳ",tips:"Ишора (оқсаққол, ҳамсоягон, нишона)",lastvisit:"Сафари охирин",
     status:"Ҳолат",saved:"Захира шуд",none:"Нуқта нест",geook:"Нуқта тасдиқ шуд",
     nocl:"Ба шумо ҳоло мизоҷе вобаста нашудааст",photos:"Расм",contracts:"Шартномаҳо",promise:"Ваъдаҳо",born:"Санаи таваллуд",
@@ -861,6 +864,7 @@ function panelForm(d,t){
     ${sec("",t.secAgree,grp(["agreed_payment"])+rest)}
     <div class="fsec"><div class="fsec-h">${t.comment}</div>
       <label class="fld">${t.comment}</label><textarea id="f_call_comment">${esc(d.call_comment||"")}</textarea>
+      ${(STATE.meta&&STATE.meta.voice)?`<button class="btn line" id="micbtn" style="margin-top:8px" onclick="toggleVoice()">🎤 <span>${esc(t.voice)}</span></button>`:""}
       <label class="fld">${t.tips}</label><textarea id="f_tips">${esc(d.tips||"")}</textarea>
     </div>
     <div class="fsec"><div class="fsec-h">${t.photos}</div>
@@ -927,6 +931,45 @@ function grabGeo(ms){
       ()=>fin(null),
       {enableHighAccuracy:true, timeout:ms, maximumAge:60000});
   });
+}
+
+// Голосовой комментарий: диктовка → /api/voice (Whisper на сервере) → текст в поле.
+// Выездники часто плохо пишут по-русски; голосом быстрее и полнее.
+let REC=null;
+async function toggleVoice(){
+  const t=L(), btn=$("micbtn");
+  if(REC){ try{REC.stop();}catch(e){} return; }
+  if(!(navigator.mediaDevices&&window.MediaRecorder)){ toast(t.voicefail); return; }
+  let stream=null;
+  try{ stream=await navigator.mediaDevices.getUserMedia({audio:true}); }
+  catch(e){ toast(t.voicefail); return; }
+  const chunks=[];
+  REC=new MediaRecorder(stream);
+  REC.ondataavailable=e=>{ if(e.data&&e.data.size) chunks.push(e.data); };
+  REC.onstop=async()=>{
+    stream.getTracks().forEach(x=>x.stop());
+    REC=null;
+    if(btn) btn.innerHTML="🎤 <span>"+esc(t.voice)+"</span>";
+    const blob=new Blob(chunks,{type:(chunks[0]&&chunks[0].type)||"audio/webm"});
+    if(blob.size<800) return;   // случайный тап — тишину не шлём
+    toast(t.voicewait);
+    const fd=new FormData(); fd.append("voice",blob,"voice.webm");
+    try{
+      const r=await fetch("/api/voice?rep="+enc(STATE.cur?STATE.cur.rep:""),
+                          {method:"POST",headers:authHeaders(),body:fd});
+      if(!r.ok) throw 0;
+      const j=await r.json();
+      const ta=$("f_call_comment");
+      if(j&&j.text&&ta){
+        ta.value=(ta.value?ta.value.trim()+" ":"")+j.text;
+        ta.dispatchEvent(new Event("input",{bubbles:true}));   // черновик подхватит
+        toast("✓");
+      } else toast(t.voicefail);
+    }catch(e){ toast(t.voicefail); }
+  };
+  REC.start();
+  if(btn) btn.innerHTML="⏹ <span>"+esc(t.voicestop)+"</span>";
+  setTimeout(()=>{ if(REC){ try{REC.stop();}catch(e){} } }, 60000);   // предохранитель
 }
 
 async function saveVisit(){
