@@ -370,8 +370,10 @@ async function flushQueue(){
       try{
         let r;
         if(it.kind==="save"){
+          const sbody={rep:it.rep,values:it.values,finish:true,op_id:it.op_id};
+          if(it.geo) sbody.geo=it.geo;
           r=await fetch("/api/save",{method:"POST",headers:jsonHeaders(),
-            body:JSON.stringify({rep:it.rep,values:it.values,finish:true,op_id:it.op_id})});
+            body:JSON.stringify(sbody)});
         }else if(it.kind==="marker"){
           const body={lat:it.lat,lon:it.lon,op_id:it.op_id};
           if(it.rep) body.rep=it.rep; if(it.label) body.label=it.label;
@@ -886,16 +888,34 @@ async function upPhoto(){
     toast(L().savedoff); updateOffBar();
   }
 }
+// Точка закрытия визита — для гео-контроля на сервере (⚠️ «закрыт далеко от адреса»).
+// Не блокирует сохранение: нет разрешения/сигнала за ms — сохраняем без точки.
+function grabGeo(ms){
+  return new Promise(res=>{
+    if(!navigator.geolocation) return res(null);
+    let done=false;
+    const fin=v=>{ if(!done){ done=true; clearTimeout(t); res(v); } };
+    const t=setTimeout(()=>fin(null), ms);
+    navigator.geolocation.getCurrentPosition(
+      p=>fin({lat:p.coords.latitude, lon:p.coords.longitude}),
+      ()=>fin(null),
+      {enableHighAccuracy:true, timeout:ms, maximumAge:60000});
+  });
+}
+
 async function saveVisit(){
   const values=readForm();
   const rep=STATE.cur.rep, op_id=uuid();
+  const geo=await grabGeo(4000);
+  const body={rep,values,finish:true,op_id};
+  if(geo) body.geo=geo;
   try{
-    const j=await api("/api/save",{method:"POST",body:JSON.stringify({rep,values,finish:true,op_id})});
+    const j=await api("/api/save",{method:"POST",body:JSON.stringify(body)});
     STATE.online=true; STATE.cur=j.person; IDB.put("cards",j.person,rep).catch(()=>{});
     finishSavedUI(rep, L().saved);
   }catch(e){
     // Нет сети — кладём выезд в очередь, помечаем визит локально; уйдёт при связи.
-    await enqueue({op_id, kind:"save", rep, values, at:Date.now()});
+    await enqueue({op_id, kind:"save", rep, values, geo, at:Date.now()});
     STATE.online=false; applyVisitLocally(rep, values);
     finishSavedUI(rep, L().savedoff);
   }

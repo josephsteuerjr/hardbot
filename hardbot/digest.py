@@ -287,6 +287,14 @@ def person_card(mgr: dict, on_date: str, ei: int, ci: int) -> tuple[str, InlineK
     if comment:
         body.append(f"💬 {_e(comment)}")
 
+    # гео-контроль: где реально был телефон при закрытии последнего визита
+    gv = db.last_visit_geo([c["contract_id"] for c in cs])
+    if gv and gv["dist_m"] is not None:
+        d = gv["dist_m"]
+        pretty = f"{d / 1000:.1f} км" if d >= 1000 else f"{d} м"
+        body.append(f"⚠️ Визит закрыт в {pretty} от адреса!" if d > db.geo_alert_m()
+                    else f"📍 Точка закрытия: {pretty} от адреса")
+
     tail = []
     if val("visit_date"):
         tail.append(f"🗓 Выезд: {_e(val('visit_date'))}")

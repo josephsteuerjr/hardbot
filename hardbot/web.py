@@ -432,12 +432,24 @@ async def _save(request: web.Request) -> web.Response:
         db.update_person(rep, {"visit_date": date.today().isoformat()})
         cur = db.get_client(rep)
         op_id = (str(body.get("op_id") or "")).strip() or None
+        # Гео-контроль: точка телефона в момент закрытия vs известная точка должника.
+        # 'city' не считаем — центроид города, честная дистанция там бессмысленна.
+        vlat = vlon = dist_m = None
+        g = body.get("geo") or {}
+        try:
+            vlat, vlon = float(g["lat"]), float(g["lon"])
+        except (KeyError, TypeError, ValueError):
+            vlat = vlon = None
+        if vlat is not None and cur["geo_lat"] is not None and cur["geo_lon"] is not None \
+                and (cur["geo_src"] or "") not in ("", "city"):
+            dist_m = round(_haversine_km(vlat, vlon, cur["geo_lat"], cur["geo_lon"]) * 1000)
         is_new = db.log_visit(
             rep, uid, f"Выезд (миниапп). Статус: {cur['call_status']}; "
-            f"Договорённость: {cur['agreed_payment']}; {cur['call_comment'] or ''}", op_id=op_id)
+            f"Договорённость: {cur['agreed_payment']}; {cur['call_comment'] or ''}",
+            op_id=op_id, lat=vlat, lon=vlon, dist_m=dist_m)
         if is_new:   # повтор того же выезда из оффлайн-очереди в группу НЕ шлём (дедуп по op_id)
             await _notify_group(request, cur, uid)
-            await _notify_managers(request, cur)
+            await _notify_managers(request, cur, dist_m)
     data = _person_full(rep, lang_of(uid))
     return web.json_response({"ok": True, "person": data})
 
@@ -527,7 +539,7 @@ async def _notify_group(request: web.Request, row, uid: int) -> None:
         pass
 
 
-async def _notify_managers(request: web.Request, row) -> None:
+async def _notify_managers(request: web.Request, row, dist_m: int | None = None) -> None:
     """Реалтайм-пуш: визит закрыт → руководителям этого сотрудника в личку уходит
     сводка + фото за день альбомом. Дедуп повторов из оффлайн-очереди — снаружи
     (is_new от log_visit). Рубильник без редеплоя: settings.visit_push = 0."""
@@ -544,6 +556,10 @@ async def _notify_managers(request: web.Request, row) -> None:
             f"📝 {row['call_status'] or '—'} · {row['agreed_payment'] or '—'}\n"
             f"💬 {row['call_comment'] or '—'}"
             + (f"\n📸 {len(files)} фото" if files else "\n📸 без фото"))
+    if dist_m is not None:
+        pretty = f"{dist_m / 1000:.1f} км" if dist_m >= 1000 else f"{dist_m} м"
+        text += (f"\n⚠️ Закрыт в {pretty} от адреса!" if dist_m > db.geo_alert_m()
+                 else f"\n📍 На адресе ({pretty} от точки)")
     from notify import send_album
     for m in targets:
         try:

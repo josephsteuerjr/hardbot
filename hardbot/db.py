@@ -106,6 +106,11 @@ def init_db() -> None:
         if "op_id" not in vcols:
             conn.execute("ALTER TABLE visits ADD COLUMN op_id TEXT")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_visits_op ON visits(op_id)")
+        # Гео-контроль: точка телефона в момент закрытия визита + дистанция до
+        # известной точки должника (метры). NULL = точки не было (нет разрешения/сигнала).
+        for col, decl in (("visit_lat", "REAL"), ("visit_lon", "REAL"), ("dist_m", "INTEGER")):
+            if col not in vcols:
+                conn.execute(f"ALTER TABLE visits ADD COLUMN {col} {decl}")
         # Профиль пользователя (язык). Whitelist теперь = привязка к сотруднику.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -990,19 +995,43 @@ def audit_tail(limit: int = 200) -> list[sqlite3.Row]:
 
 
 def log_visit(contract_id: str, agent_id: int, payload: str,
-              op_id: str | None = None) -> bool:
+              op_id: str | None = None, lat: float | None = None,
+              lon: float | None = None, dist_m: int | None = None) -> bool:
     """Записать выезд в историю. op_id — идемпотентный ключ (uuid от клиента): повторная
     доставка того же выезда из оффлайн-очереди НЕ создаёт дубль. Возвращает True, если
     строка реально добавлена (значит, можно слать уведомление в группу); False — если это
-    повтор уже сохранённого выезда. Без op_id (старый путь) — всегда True (новая строка)."""
+    повтор уже сохранённого выезда. Без op_id (старый путь) — всегда True (новая строка).
+    lat/lon/dist_m — гео-контроль: точка закрытия и дистанция до точки должника."""
     with connect() as conn:
         cur = conn.execute(
-            "INSERT OR IGNORE INTO visits (contract_id, agent_id, created_at, payload, op_id) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (contract_id, agent_id, date.today().isoformat(), payload, op_id),
+            "INSERT OR IGNORE INTO visits (contract_id, agent_id, created_at, payload, "
+            "op_id, visit_lat, visit_lon, dist_m) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (contract_id, agent_id, date.today().isoformat(), payload, op_id,
+             lat, lon, dist_m),
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+def last_visit_geo(contract_ids: list[str]):
+    """Последний визит с гео-дистанцией по любому из договоров человека
+    (для карточки дайджеста: «закрыт в X м от адреса»)."""
+    ids = [c for c in contract_ids if c]
+    if not ids:
+        return None
+    qs = ",".join("?" for _ in ids)
+    with connect() as conn:
+        return conn.execute(
+            f"SELECT * FROM visits WHERE contract_id IN ({qs}) AND dist_m IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1", tuple(ids)).fetchone()
+
+
+def geo_alert_m() -> int:
+    """Порог «далеко от адреса» в метрах (settings.geo_alert_m, дефолт 1000)."""
+    try:
+        return int(get_setting("geo_alert_m") or 1000)
+    except (TypeError, ValueError):
+        return 1000
 
 
 def set_reminder(contract_id: str, when: str) -> None:
