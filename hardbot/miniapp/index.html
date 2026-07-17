@@ -439,10 +439,10 @@ async function redeemCode(code, fromUrl){
       body:JSON.stringify({code})});
     if(r.ok){ const j=await r.json();
       if(j&&j.token){ try{ localStorage.setItem('app_token',j.token); }catch(e){} }
-      if(fromUrl) cleanLinkFromUrl();
+      stampTokenUrl();                         // #link=код → #t=токен: ярлык унесёт вход
       return true; }
     if(r.status===410){                        // код мёртв (использован/просрочен/чужой) — жжём
-      if(fromUrl) cleanLinkFromUrl();
+      if(appToken()) stampTokenUrl(); else if(fromUrl) cleanLinkFromUrl();
       return appToken()?'have-token':false; }
     return appToken()?'have-token':'net';       // 5xx/прочее: сервер/прокси недоступен — код НЕ жжём
   }catch(e){ return 'net'; }                     // сети нет — код остаётся, повтор при связи
@@ -453,12 +453,12 @@ async function redeemCode(code, fromUrl){
 let URLT=null, TRIED_URLT=false;   // кандидат из URL: живой localStorage-токен сразу
                                    // не затираем, но подменяем, если сервер дал 401
 function absorbTokenFromUrl(){
+  // URL не чистим: #t в адресе — это и есть «преемственность» (см. stampTokenUrl).
   try{ const u=new URL(location.href);
     const tk=u.hash?new URLSearchParams(u.hash.replace(/^#/,'')).get('t'):null;
     if(!tk) return;
     URLT=tk;
     if(!appToken()){ try{ localStorage.setItem('app_token',tk); }catch(e){} }
-    cleanLinkFromUrl();
   }catch(e){}
 }
 function personalizeManifest(){
@@ -468,6 +468,18 @@ function personalizeManifest(){
   const tk=appToken(); if(!tk || (TG&&TG.initData)) return;
   const l=document.querySelector('link[rel="manifest"]');
   if(l) l.href='/manifest.webmanifest?t='+encodeURIComponent(tk);
+}
+function stampTokenUrl(){
+  // Живой токен держим ПРЯМО в адресе страницы (#t=…, фрагмент на сервер не уходит):
+  // iOS при «На экран Домой» берёт то ли текущий URL, то ли start_url манифеста —
+  // после этой строчки ОБА варианта несут вход с собой, ярлык рождается «с уже
+  // подставленным кодом». Плата: токен виден в адресной строке/истории браузера —
+  // осознанный выбор владельца в пользу простоты для выездников.
+  const tk=appToken(); if(!tk || (TG&&TG.initData)) return;
+  try{ const u=new URL(location.href);
+    u.searchParams.delete('link'); u.searchParams.delete('token');
+    history.replaceState(null,'',u.pathname+(u.search||'')+'#t='+encodeURIComponent(tk));
+  }catch(e){}
 }
 async function redeemFromUrl(){
   absorbTokenFromUrl();
@@ -553,6 +565,7 @@ async function boot(){
   try{
     const d = await api("/api/bootstrap");
     personalizeManifest();   // авторизация удалась → ярлык с этой страницы унесёт вход
+    stampTokenUrl();         // …и в самом адресе страницы тоже (iOS берёт любой из двух)
     STATE.lang=d.lang||STATE.lang; renderLangs();
     if(d.needsOnboarding){ STATE.onb=d; renderOnboarding(); return; }
     // Сменился сотрудник на устройстве (перевыпуск на другого человека) — чистим кэш и
