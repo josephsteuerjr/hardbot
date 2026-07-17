@@ -1342,6 +1342,23 @@ class Pult(tk.Tk):
         self.binds_frame = tk.Frame(bc.inner, bg=CARD)
         self.binds_frame.pack(fill="x")
 
+        uc = Card(inner, "Убрать клиентов у сотрудника",
+                  "Выбери сотрудника — появится его список. Отметь галочками лишних и "
+                  "нажми «Снять выбранных»: договор остаётся в реестре (без "
+                  "ответственного) и пропадает из приложения сотрудника.")
+        uc.pack(fill="x", pady=(12, 0))
+        urow = tk.Frame(uc.inner, bg=CARD)
+        urow.pack(fill="x")
+        self.un_emp = ttk.Combobox(urow, values=[], state="readonly", width=32, font=f(9))
+        self.un_emp.pack(side="left")
+        self.un_emp.bind("<<ComboboxSelected>>", lambda _e: self.load_emp_clients())
+        self.un_btn = btn(urow, "Снять выбранных (0)", self.do_unassign, kind="danger")
+        self.un_btn.configure(state="disabled")
+        self.un_btn.pack(side="right")
+        self.un_frame = tk.Frame(uc.inner, bg=CARD)
+        self.un_frame.pack(fill="x", pady=(8, 0))
+        self._un_vars: dict[str, tk.BooleanVar] = {}
+
     @staticmethod
     def _fmt_seen(iso):
         """«был 16.07 12:01» — отличать живой аккаунт от брошенного тёзки: у человека
@@ -1369,6 +1386,7 @@ class Pult(tk.Tk):
         def done(res):
             self._loaded.add("people")
             self.guests, emps = res
+            self.un_emp["values"] = [e["employee"] for e in emps]
             frame = self.roles_frame
             for w in frame.winfo_children():
                 w.destroy()
@@ -1457,6 +1475,74 @@ class Pult(tk.Tk):
             return
         self.bg_task(lambda: self.api("POST", "/admin/unbind", {"telegram_id": tid}),
                      lambda _d: (self.toast("Сброшено"), self.refresh()))
+
+    # ── Убрать клиентов у сотрудника ─────────────────────────────────────
+    def load_emp_clients(self):
+        emp = self.un_emp.get().strip()
+        if not emp:
+            return
+        path = "/admin/emp_clients?employee=" + urllib.parse.quote(emp)
+        def done(d):
+            frame = self.un_frame
+            for w in frame.winfo_children():
+                w.destroy()
+            self._un_vars = {}
+            clients = d.get("clients") or []
+            if not clients:
+                tk.Label(frame, text="За сотрудником сейчас никого нет", bg=CARD,
+                         fg=MUTED, font=f(9)).pack(anchor="w")
+                self._un_seln()
+                return
+            head = tk.Frame(frame, bg=CARD)
+            head.pack(fill="x", pady=(0, 4))
+            tk.Label(head, text=f"Договоров: {len(clients)}", bg=CARD, fg=MUTED,
+                     font=f(9)).pack(side="left")
+            btn(head, "все", lambda: self._un_all(True)).pack(side="right")
+            btn(head, "ничего", lambda: self._un_all(False)).pack(side="right", padx=(0, 6))
+            box = tk.Frame(frame, bg=CARD, highlightbackground=BORDER,
+                           highlightthickness=1)
+            box.pack(fill="x")
+            for c in clients:
+                var = tk.BooleanVar(value=False)
+                self._un_vars[c["contract_id"]] = var
+                row = tk.Frame(box, bg=CARD)
+                row.pack(fill="x")
+                tk.Checkbutton(row, text=f'{c.get("client") or "—"} · КД {c["contract_id"]}',
+                               variable=var, bg=CARD, fg=TEXT, activebackground=CARD,
+                               selectcolor=CARD, font=f(9),
+                               command=self._un_seln).pack(side="left", padx=6)
+                debt_s = fmt_n(c.get("debt")) + (f' {c["unit"]}' if c.get("unit") else "")
+                tk.Label(row, text=debt_s, bg=CARD, fg=MUTED,
+                         font=f(8)).pack(side="right", padx=8)
+            self._un_seln()
+        self.bg_task(lambda: self.api("GET", path), done)
+
+    def _un_all(self, on):
+        for v in self._un_vars.values():
+            v.set(on)
+        self._un_seln()
+
+    def _un_seln(self):
+        n = sum(1 for v in self._un_vars.values() if v.get())
+        self.un_btn.configure(text=f"Снять выбранных ({n})",
+                              state="normal" if n else "disabled")
+
+    def do_unassign(self):
+        emp = self.un_emp.get().strip()
+        ids = [k for k, v in self._un_vars.items() if v.get()]
+        if not emp or not ids:
+            return
+        if not messagebox.askyesno(
+                "Убрать клиентов",
+                f"Снять {len(ids)} договор(ов) с «{emp}»?\n\nКлиенты останутся в "
+                "реестре без ответственного и пропадут из приложения сотрудника."):
+            return
+        def done(d):
+            self.toast(f"Снято: {d.get('n', 0)}")
+            self.load_emp_clients()   # список пересобирается, счётчики — через refresh
+            self.refresh()
+        self.bg_task(lambda: self.api("POST", "/admin/unassign",
+                                      {"employee": emp, "contract_ids": ids}), done)
 
     # ══ РУКОВОДИТЕЛИ ═════════════════════════════════════════════════════
     def _build_mgrs(self, fr):

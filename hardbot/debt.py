@@ -82,16 +82,10 @@ def contract_debt(row) -> int:
 
 
 def unit(partners: list[str]) -> str:
-    """Валюта показа: портфель ЗК — в сумах, российские контрагенты — в рублях.
-    У человека с договорами обоих типов общей валюты нет (см. totals_by_unit)."""
-    ps = [p for p in partners if p]
-    if not ps:
-        return ""
-    if all(p == ZK for p in ps):
-        return "сум"
-    if all(p != ZK for p in ps):
-        return "₽"
-    return ""
+    """Валюта показа — рубли для всех контрагентов (заказчик перевёл показ ЗК с сумов
+    на рубли 17.07.2026). Каркас «валюта зависит от партнёра» намеренно оставлен
+    (totals_by_unit, unit в API): если сумы вернутся — менять снова только здесь."""
+    return "₽" if any(p for p in partners) else ""
 
 
 def totals_by_unit(rows) -> list[dict]:

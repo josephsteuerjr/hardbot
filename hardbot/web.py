@@ -903,6 +903,33 @@ async def _admin_employees(request: web.Request) -> web.Response:
     return web.json_response({"employees": db.employees_with_bindings()})
 
 
+async def _admin_emp_clients(request: web.Request) -> web.Response:
+    """Договоры сотрудника для «убрать клиентов» в пульте: ?employee=ФИО →
+    {clients:[{contract_id, client, debt, unit}]} в порядке ФИО клиента."""
+    _admin(request)
+    employee = (request.query.get("employee") or "").strip()
+    if not employee:
+        raise web.HTTPBadRequest(text="employee")
+    out = [{"contract_id": r["contract_id"], "client": r["client"],
+            "debt": debt.contract_debt(r), "unit": debt.unit([r["partner"]])}
+           for r in db.clients_of_employee(employee)]
+    return web.json_response({"clients": out})
+
+
+async def _admin_unassign(request: web.Request) -> web.Response:
+    """Снять договоры с сотрудника: {employee, contract_ids:[…]}. Клиенты остаются
+    в реестре без ответственного и пропадают из миниаппа сотрудника. {ok, n}."""
+    _admin(request)
+    body = await request.json()
+    employee = (body.get("employee") or "").strip()
+    ids = body.get("contract_ids") or []
+    if not employee or not isinstance(ids, list) or not ids:
+        raise web.HTTPBadRequest(text="employee/contract_ids")
+    n = db.unassign_clients(employee, ids)
+    db.audit_access(ADMIN_ID, "unassign", employee, str(n))
+    return web.json_response({"ok": True, "n": n})
+
+
 async def _admin_bind(request: web.Request) -> web.Response:
     """Предзаданная привязка из пульта: {telegram_id:int, employee:str, kind:str}.
     Создать/обновить с approved=1 — работник с этим id сразу привязан к клиентам
@@ -1171,6 +1198,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/admin/markers.xlsx", _admin_markers_xlsx)
     app.router.add_get("/admin/markers.json", _admin_markers_json)
     app.router.add_get("/admin/employees", _admin_employees)
+    app.router.add_get("/admin/emp_clients", _admin_emp_clients)
+    app.router.add_post("/admin/unassign", _admin_unassign)
     app.router.add_get("/admin/guests", _admin_guests)
     app.router.add_post("/admin/bind", _admin_bind)
     app.router.add_post("/admin/unbind", _admin_unbind)

@@ -1,7 +1,7 @@
 """debt.py — статьи разбивки, контрагенты, валюта.
 
 Смысл модуля: набор статей зависит от контрагента (Делимобиль ≠ кредитные),
-а сумы и рубли нельзя складывать в одно число.
+а знание о валюте показа живёт в одном месте (с 17.07.2026 — рубли для всех).
 """
 import debt
 
@@ -52,21 +52,23 @@ def test_contract_debt_prefers_today_and_respects_explicit_zero():
     assert debt.contract_debt({"debt_today": 0, "debt_total": "1000"}) == 0   # погашен, не «нет данных»
 
 
-def test_unit_by_partner_mix():
-    assert debt.unit(["ЗК"]) == "сум"
-    assert debt.unit(["ЗК", "ЗК"]) == "сум"
+def test_unit_is_rubles_for_everyone():
+    """С 17.07.2026 показ везде в рублях (заказчик перевёл ЗК с сумов): у любого
+    непустого портфеля валюта ₽, пустой — без валюты."""
+    assert debt.unit(["ЗК"]) == "₽"
+    assert debt.unit(["ЗК", "ЗК"]) == "₽"
     assert debt.unit(["Делимобиль"]) == "₽"
-    assert debt.unit(["ЗК", "Делимобиль"]) == ""      # общей валюты нет
+    assert debt.unit(["ЗК", "Делимобиль"]) == "₽"
     assert debt.unit([]) == ""
+    assert debt.unit(["", None]) == ""
 
 
-def test_totals_by_unit_does_not_add_sums_to_rubles():
-    """Главный баг витрины: у человека с ЗК + Делимобилем «долг всего» был суммой
-    сумов с рублями — числом, которое ничего не значит."""
+def test_totals_by_unit_single_currency_now_merges():
+    """ЗК + Делимобиль теперь одна валюта (₽) — долг человека складывается в одно число.
+    Каркас totals_by_unit оставлен на случай возврата второй валюты."""
     rows = [{"partner": "ЗК", "debt_today": "11 550 000", "debt_total": None},
             {"partner": "Делимобиль", "debt_today": "132 900", "debt_total": None}]
-    assert debt.totals_by_unit(rows) == [{"unit": "сум", "sum": 11550000},
-                                         {"unit": "₽", "sum": 132900}]
+    assert debt.totals_by_unit(rows) == [{"unit": "₽", "sum": 11682900}]
 
 
 def test_totals_by_unit_merges_same_currency_and_drops_zeros():

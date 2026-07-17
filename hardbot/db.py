@@ -375,6 +375,31 @@ def employees_with_bindings() -> list[dict]:
     return out
 
 
+def clients_of_employee(employee: str) -> list:
+    """Все договоры, закреплённые за сотрудником, — для «убрать клиентов» в пульте.
+    Без фильтра по периоду: снимают из ПОЛНОГО текущего портфеля, а не из витрины."""
+    with connect() as conn:
+        return conn.execute(
+            "SELECT contract_id, client, partner, debt_total, debt_today FROM clients "
+            "WHERE responsible = ? ORDER BY client, contract_id", (employee,)).fetchall()
+
+
+def unassign_clients(employee: str, contract_ids: list[str]) -> int:
+    """Снять договоры с сотрудника (пульт): чистим responsible — клиент ОСТАЁТСЯ в
+    реестре, но уходит из миниаппа сотрудника. Снимаем только его собственные
+    договоры (гонка с переимпортом/переразбросом — чужие молча пропускаются).
+    Возвращает число снятых."""
+    ids = [str(c).strip() for c in contract_ids if str(c or "").strip()]
+    if not employee or not ids:
+        return 0
+    with connect() as conn:
+        cur = conn.execute(
+            f"UPDATE clients SET responsible = '' WHERE responsible = ? "
+            f"AND contract_id IN ({','.join('?' * len(ids))})", (employee, *ids))
+        conn.commit()
+        return cur.rowcount
+
+
 def get_binding(telegram_id: int) -> str | None:
     """Сотрудник пользователя — ТОЛЬКО если привязка одобрена (approved=1).
     Привязка в ожидании аппрува доступа не даёт (ИБ: авторизация на этапе привязки)."""
