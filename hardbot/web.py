@@ -109,6 +109,7 @@ def _uid(request: web.Request) -> int | None:
     if tok:
         uid = db.uid_for_app_token(tok)
         if uid:
+            db.touch_app_token(tok)   # скользящие 30 дней: пользуются — не протухает
             return uid
     if DEV:
         raw = request.headers.get("X-Dev-Uid") or request.query.get("dev_uid")
@@ -249,8 +250,21 @@ async def _sw(request: web.Request) -> web.StreamResponse:
 
 
 async def _manifest(request: web.Request) -> web.StreamResponse:
-    return web.FileResponse(MINIAPP_DIR / "manifest.webmanifest",
-                            headers={"Content-Type": "application/manifest+json"})
+    """Манифест PWA. С ?t=<живой девайс-токен> отдаём ПЕРСОНАЛЬНЫЙ манифест:
+    start_url со вшитым токеном (во фрагменте — на сервер не уходит). Это
+    преемственность входа для iOS-ярлыка: у «На экран Домой» отдельное хранилище,
+    localStorage Safari туда не переезжает — а start_url переезжает всегда. Страница
+    после входа сама переписывает <link rel=manifest> на /manifest.webmanifest?t=…,
+    и ярлык рождается уже авторизованным. Чужой/протухший t молча игнорируем.
+    Компромисс: t оседает в access-логах (логи — root-only на своём VPS; сами токены
+    и так лежат рядом в БД), no-store — чтобы прокси/SW не закэшировали чужой манифест."""
+    raw = json.loads((MINIAPP_DIR / "manifest.webmanifest").read_text("utf-8"))
+    tok = (request.query.get("t") or "").strip()
+    if tok and db.uid_for_app_token(tok):
+        raw["start_url"] = f"/#t={tok}"
+    return web.Response(text=json.dumps(raw, ensure_ascii=False),
+                        content_type="application/manifest+json",
+                        headers={"Cache-Control": "no-store"})
 
 
 async def _tiles(request: web.Request) -> web.StreamResponse:

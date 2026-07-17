@@ -67,59 +67,93 @@ TEXT: dict[str, dict[str, str]] = {
         "ru": "📖 Установить на iPhone", "uz": "📖 iPhone’ga o‘rnatish",
         "tg": "📖 Насб дар iPhone"},
     "manual_android": {
-        "ru": "📖 Установка на Android:\n"
-              "1) Откройте ссылку выше в Chrome.\n"
-              "2) Меню ⋮ (три точки) → «Установить приложение».\n"
-              "3) Открывайте с иконки на экране.\n"
+        "ru": "📖 Установка на Android — по шагам:\n\n"
+              "1) Нажмите на ссылку в сообщении выше — откроется страница.\n"
+              "2) Если страница открылась ВНУТРИ Телеграма — нажмите ⋮ (три точки "
+              "в правом верхнем углу) → «Открыть в…» / «Открыть в Chrome».\n"
+              "3) В Chrome подождите, пока появится список клиентов.\n"
+              "4) Нажмите ⋮ (три точки в правом верхнем углу Chrome).\n"
+              "5) Выберите «Установить приложение» (или «Добавить на гл. экран»).\n"
+              "6) Нажмите «Установить». На рабочем столе появится иконка «Маршрут».\n"
+              "7) Готово. Теперь ВСЕГДА открывайте с этой иконки, как обычное "
+              "приложение — заново входить не нужно.\n\n"
               "Работает без интернета: заполняйте визиты, при связи всё уйдёт само.",
-        "uz": "📖 Android’ga o‘rnatish:\n"
-              "1) Yuqoridagi havolani Chrome’da oching.\n"
-              "2) Menyu ⋮ → «Ilovani o‘rnatish».\n"
-              "3) Ekrandagi ikonkadan oching.\n"
+        "uz": "📖 Android’ga o‘rnatish — bosqichma-bosqich:\n\n"
+              "1) Yuqoridagi xabardagi havolani bosing — sahifa ochiladi.\n"
+              "2) Sahifa Telegram ICHIDA ochilsa — ⋮ (yuqori o‘ng burchakdagi uch "
+              "nuqta) → «…da ochish» / «Chrome’da ochish».\n"
+              "3) Chrome’da mijozlar ro‘yxati chiqquncha kuting.\n"
+              "4) Chrome’ning yuqori o‘ng burchagidagi ⋮ ni bosing.\n"
+              "5) «Ilovani o‘rnatish» (yoki «Bosh ekranga qo‘shish»)ni tanlang.\n"
+              "6) «O‘rnatish»ni bosing. Ekranda «Marshrut» ikonkasi paydo bo‘ladi.\n"
+              "7) Tayyor. Endi DOIM shu ikonkadan oching — qayta kirish kerak emas.\n\n"
               "Internetsiz ishlaydi: chiqishlarni to‘ldiring, aloqa paydo bo‘lganda o‘zi yuboriladi.",
-        "tg": "📖 Насб дар Android:\n"
-              "1) Пайванди болоиро дар Chrome кушоед.\n"
-              "2) Меню ⋮ → «Насби барнома».\n"
-              "3) Аз нишонаи экран кушоед.\n"
+        "tg": "📖 Насб дар Android — қадам ба қадам:\n\n"
+              "1) Пайванди паёми болоро пахш кунед — саҳифа мекушояд.\n"
+              "2) Агар саҳифа ДАР ДОХИЛИ Телеграм кушода шавад — ⋮ (се нуқта дар "
+              "кунҷи болои рост) → «Кушодан дар…» / «Кушодан дар Chrome».\n"
+              "3) Дар Chrome то пайдо шудани рӯйхати мизоҷон интизор шавед.\n"
+              "4) Дар кунҷи болои рости Chrome ⋮ -ро пахш кунед.\n"
+              "5) «Насби барнома» (ё «Ба экрани асосӣ илова»)-ро интихоб кунед.\n"
+              "6) «Насб»-ро пахш кунед. Дар экран нишонаи «Маршрут» пайдо мешавад.\n"
+              "7) Тайёр. Акнун ҲАМЕША аз ҳамин нишона кушоед — аз нав даромадан "
+              "лозим нест.\n\n"
               "Бе интернет кор мекунад: сафарҳоро пур кунед, ҳангоми алоқа худаш фиристода мешавад."},
     "manual_ios": {
-        "ru": "🍎 Установка на iPhone:\n"
-              "1) Откройте ссылку в Safari → «Поделиться» → «На экран Домой».\n"
-              "2) Откройте приложение с иконки.\n"
-              "3) Появится «Нет доступа» → нажмите «Ввести код вручную».\n"
-              "4) Напишите боту любое сообщение — придёт новая ссылка, вставьте её.\n"
-              "Дальше работает без интернета.",
-        "uz": "🍎 iPhone’ga o‘rnatish:\n"
-              "1) Havolani Safari’da oching → «Ulashish» → «Bosh ekranga».\n"
-              "2) Ilovani ikonkadan oching.\n"
-              "3) «Kirish yo‘q» chiqadi → «Kodni qo‘lda kiritish»ni bosing.\n"
-              "4) Botga istalgan xabar yozing — yangi havola keladi, uni joylang.\n"
-              "Keyin internetsiz ishlaydi.",
-        "tg": "🍎 Насб дар iPhone:\n"
-              "1) Пайвандро дар Safari кушоед → «Мубодила» → «Ба экрани асосӣ».\n"
-              "2) Барномаро аз нишона кушоед.\n"
-              "3) «Дастрасӣ нест» мебарояд → «Ворид кардани код дастӣ»-ро пахш кунед.\n"
-              "4) Ба бот ҳар паём нависед — пайванди нав меояд, онро гузоред.\n"
-              "Баъд бе интернет кор мекунад."},
+        "ru": "🍎 Установка на iPhone — по шагам:\n\n"
+              "1) Нажмите на ссылку в сообщении выше — откроется страница.\n"
+              "2) Страница откроется ВНУТРИ Телеграма. Нажмите «···» в углу → "
+              "«Открыть в Safari». (Если сразу открылся Safari — ещё лучше.)\n"
+              "3) В Safari подождите, пока появится список клиентов.\n"
+              "4) Нажмите кнопку «Поделиться» — квадратик со стрелкой вверх ⬆️ "
+              "внизу экрана по центру.\n"
+              "5) Прокрутите список вниз и выберите «На экран “Домой”».\n"
+              "6) Нажмите «Добавить». На рабочем столе появится иконка «Маршрут».\n"
+              "7) Готово. Теперь ВСЕГДА открывайте с этой иконки — заново входить "
+              "не нужно.\n\n"
+              "Работает без интернета: заполняйте визиты, при связи всё уйдёт само.",
+        "uz": "🍎 iPhone’ga o‘rnatish — bosqichma-bosqich:\n\n"
+              "1) Yuqoridagi xabardagi havolani bosing — sahifa ochiladi.\n"
+              "2) Sahifa Telegram ICHIDA ochiladi. Burchakdagi «···» → «Safari’da "
+              "ochish». (Darhol Safari ochilsa — yanada yaxshi.)\n"
+              "3) Safari’da mijozlar ro‘yxati chiqquncha kuting.\n"
+              "4) «Ulashish» tugmasini bosing — ekran pastidagi ⬆️ strelkali kvadrat.\n"
+              "5) Ro‘yxatni pastga aylantiring va «Bosh ekranga»ni tanlang.\n"
+              "6) «Qo‘shish»ni bosing. Ekranda «Marshrut» ikonkasi paydo bo‘ladi.\n"
+              "7) Tayyor. Endi DOIM shu ikonkadan oching — qayta kirish kerak emas.\n\n"
+              "Internetsiz ishlaydi: chiqishlarni to‘ldiring, aloqa paydo bo‘lganda o‘zi yuboriladi.",
+        "tg": "🍎 Насб дар iPhone — қадам ба қадам:\n\n"
+              "1) Пайванди паёми болоро пахш кунед — саҳифа мекушояд.\n"
+              "2) Саҳифа ДАР ДОХИЛИ Телеграм мекушояд. «···»-и кунҷро пахш кунед → "
+              "«Дар Safari кушодан». (Агар якбора Safari кушода шавад — боз беҳтар.)\n"
+              "3) Дар Safari то пайдо шудани рӯйхати мизоҷон интизор шавед.\n"
+              "4) Тугмаи «Мубодила»-ро пахш кунед — чоркунҷа бо тири ⬆️ дар поёни "
+              "экран, дар марказ.\n"
+              "5) Рӯйхатро ба поён гардонед ва «Ба экрани асосӣ»-ро интихоб кунед.\n"
+              "6) «Илова»-ро пахш кунед. Дар экран нишонаи «Маршрут» пайдо мешавад.\n"
+              "7) Тайёр. Акнун ҲАМЕША аз ҳамин нишона кушоед — аз нав даромадан "
+              "лозим нест.\n\n"
+              "Бе интернет кор мекунад: сафарҳоро пур кунед, ҳангоми алоқа худаш фиристода мешавад."},
+    # Ссылка многоразовая в окне активации (db.APP_LINK_MAX_USES): её можно открыть
+    # и в браузере Телеги, и потом в Safari/Chrome для установки — ничего не сгорает,
+    # никаких кодов руками. Вход в установленный ярлык переезжает сам (персональный
+    # манифест со start_url-токеном — см. web._manifest).
     "applink_msg": {
         "ru": "📲 Ваша ссылка для входа (только для вас, {days} дн.):\n{url}\n\n"
               "Установка (1 раз):\n"
-              "1) Зажмите ссылку выше → «Копировать».\n"
-              "2) Откройте Chrome, вставьте в адресную строку, перейдите.\n"
-              "3) Меню ⋮ → «Установить приложение».\n"
-              "Потом открывайте с иконки — работает без интернета.",
+              "• Android: откройте ссылку в Chrome → меню ⋮ → «Установить приложение».\n"
+              "• iPhone: откройте ссылку в Safari → «Поделиться» → «На экран Домой».\n"
+              "Вход перенесётся сам. Дальше открывайте с иконки — работает без интернета.",
         "uz": "📲 Kirish havolangiz (faqat siz uchun, {days} kun):\n{url}\n\n"
               "O‘rnatish (1 marta):\n"
-              "1) Havolani bosib turing → «Nusxalash».\n"
-              "2) Chrome’ni oching, manzil qatoriga joylang, o‘ting.\n"
-              "3) Menyu ⋮ → «Ilovani o‘rnatish».\n"
-              "Keyin ikonkadan oching — internetsiz ishlaydi.",
+              "• Android: havolani Chrome’da oching → menyu ⋮ → «Ilovani o‘rnatish».\n"
+              "• iPhone: havolani Safari’da oching → «Ulashish» → «Bosh ekranga».\n"
+              "Kirish o‘zi ko‘chib o‘tadi. Keyin ikonkadan oching — internetsiz ishlaydi.",
         "tg": "📲 Пайванди воридшавии шумо (танҳо барои шумо, {days} рӯз):\n{url}\n\n"
               "Насб (1 маротиба):\n"
-              "1) Пайвандро зер карда нигоҳ доред → «Нусхабардорӣ».\n"
-              "2) Chrome-ро кушоед, ба сатри суроға гузоред, гузаред.\n"
-              "3) Меню ⋮ → «Насби барнома».\n"
-              "Баъд аз нишона кушоед — бе интернет кор мекунад."},
+              "• Android: пайвандро дар Chrome кушоед → меню ⋮ → «Насби барнома».\n"
+              "• iPhone: пайвандро дар Safari кушоед → «Мубодила» → «Ба экрани асосӣ».\n"
+              "Воридшавӣ худаш мегузарад. Баъд аз нишона кушоед — бе интернет кор мекунад."},
     "language_saved": {
         "ru": "Язык сохранён ✅", "uz": "Til saqlandi ✅", "tg": "Забон захира шуд ✅"},
     "welcome": {

@@ -230,9 +230,9 @@ const I18N = {
     draftwait:"черновик не отправлен на сервер",draftsent:"черновик сохранён на сервере",
     offline:"Оффлайн",datao:"данные на",pend:"ждут отправки",sending:"Отправляю…",
     savedoff:"Сохранено — уйдёт при связи",queuedn:"в очереди",
-    authexpired:"Срок доступа истёк. Напишите боту любое сообщение — он пришлёт новую ссылку для входа. Несинхронизированные визиты не потеряются.",
-    authneed:"Нет доступа. Возьмите ссылку для входа у бота (напишите ему любое сообщение) и откройте её в этом браузере.",
-    entercode:"Ввести код вручную",codeprompt:"Вставьте ссылку или код из сообщения бота:",
+    authexpired:"Срок доступа истёк. Напишите боту любое сообщение — придёт новая ссылка: откройте её и добавьте приложение на экран заново, либо вставьте её сюда. Несинхронизированные визиты не потеряются.",
+    authneed:"Нет доступа. Напишите боту любое сообщение — придёт ссылка для входа: откройте её, либо вставьте сюда.",
+    entercode:"Вставить ссылку вручную",codeprompt:"Вставьте ссылку или код из сообщения бота:",codeph:"Ссылка из сообщения бота",
     secResult:"Результат выезда",secContact:"Контакт",secClient:"Клиент сейчас",secAgree:"Договорённость",
     nosplit:"разбивка по статьям не пришла"},
   uz:{visit:"Chiqish",client:"Mijoz",debt:"Qarz",form:"To‘ldirish",my:"Mijozlarim",
@@ -252,9 +252,9 @@ const I18N = {
     draftwait:"qoralama serverga yuborilmadi",draftsent:"qoralama serverda saqlandi",
     offline:"Oflayn",datao:"ma’lumot",pend:"yuboriladi",sending:"Yuborilmoqda…",
     savedoff:"Saqlandi — aloqa paydo bo‘lsa yuboriladi",queuedn:"navbatda",
-    authexpired:"Kirish muddati tugadi. Botga istalgan xabar yozing — u yangi kirish havolasini yuboradi. Yuborilmagan chiqishlar yo‘qolmaydi.",
-    authneed:"Kirish yo‘q. Botdan kirish havolasini oling (unga istalgan xabar yozing) va shu brauzerda oching.",
-    entercode:"Kodni qo‘lda kiritish",codeprompt:"Bot xabaridagi havola yoki kodni joylashtiring:",
+    authexpired:"Kirish muddati tugadi. Botga istalgan xabar yozing — yangi havola keladi: uni oching va ilovani ekranga qayta qo‘shing, yoki shu yerga joylang. Yuborilmagan chiqishlar yo‘qolmaydi.",
+    authneed:"Kirish yo‘q. Botga istalgan xabar yozing — kirish havolasi keladi: uni oching yoki shu yerga joylang.",
+    entercode:"Havolani qo‘lda joylash",codeprompt:"Bot xabaridagi havola yoki kodni joylashtiring:",codeph:"Bot xabaridagi havola",
     secResult:"Chiqish natijasi",secContact:"Kontakt",secClient:"Mijoz hozir",secAgree:"Kelishuv",
     nosplit:"moddalar bo‘yicha taqsimot kelmadi"},
   tg:{visit:"Сафар",client:"Мизоҷ",debt:"Қарз",form:"Пур кардан",my:"Мизоҷони ман",
@@ -274,9 +274,9 @@ const I18N = {
     draftwait:"нусха ба сервер нафиристода шуд",draftsent:"нусха дар сервер захира шуд",
     offline:"Офлайн",datao:"додаҳо аз",pend:"дар навбат",sending:"Фиристода мешавад…",
     savedoff:"Захира шуд — ҳангоми алоқа фиристода мешавад",queuedn:"дар навбат",
-    authexpired:"Мӯҳлати дастрасӣ гузашт. Ба бот ҳар гуна паём нависед — ӯ пайванди нави воридшавӣ мефиристад. Сафарҳои фиристоданашуда гум намешаванд.",
-    authneed:"Дастрасӣ нест. Аз бот пайванди воридшавӣ гиред (ба ӯ ҳар паём нависед) ва онро дар ҳамин браузер кушоед.",
-    entercode:"Ворид кардани код дастӣ",codeprompt:"Пайванд ё коди паёми ботро гузоред:",
+    authexpired:"Мӯҳлати дастрасӣ гузашт. Ба бот ҳар паём нависед — пайванди нав меояд: онро кушоед ва барномаро аз нав ба экран гузоред, ё ин ҷо гузоред. Сафарҳои фиристоданашуда гум намешаванд.",
+    authneed:"Дастрасӣ нест. Ба бот ҳар паём нависед — пайванди воридшавӣ меояд: онро кушоед ё ин ҷо гузоред.",
+    entercode:"Гузоштани пайванд дастӣ",codeprompt:"Пайванд ё коди паёми ботро гузоред:",codeph:"Пайванд аз паёми бот",
     secResult:"Натиҷаи сафар",secContact:"Тамос",secClient:"Мизоҷ ҳозир",secAgree:"Созиш",
     nosplit:"тақсимот аз рӯи моддаҳо наомад"},
 };
@@ -421,10 +421,11 @@ function finishSavedUI(rep, msg){
   STATE.tab="visit"; renderDetail();
 }
 
-// Автономное приложение (PWA вне Телеги): вход по ОДНОРАЗОВОЙ ссылке бота.
-// В #link= лежит одноразовый код (фрагмент не попадает в логи сервера — как initData
-// у Телеги); при первом открытии он обменивается на девайс-токен (30 дней, localStorage).
-// Установленный ярлык (start_url «/») дальше авторизуется токеном без всяких ссылок.
+// Автономное приложение (PWA вне Телеги): вход по ссылке бота. В #link= лежит код
+// (фрагмент не попадает в логи сервера — как initData у Телеги); код многоразовый в
+// окне активации: одну ссылку открывают в браузере Телеги, потом в Safari/Chrome при
+// установке — каждый обмен даёт девайс-токен (скользящие 30 дней, localStorage).
+// Установленный ярлык живёт на персональном start_url «/#t=<токен>» (см. ниже).
 function appToken(){ try{ return localStorage.getItem('app_token')||''; }catch(e){ return ''; } }
 function cleanLinkFromUrl(){ try{ const u=new URL(location.href);
   u.searchParams.delete('link'); u.searchParams.delete('token');
@@ -446,7 +447,30 @@ async function redeemCode(code, fromUrl){
     return appToken()?'have-token':'net';       // 5xx/прочее: сервер/прокси недоступен — код НЕ жжём
   }catch(e){ return 'net'; }                     // сети нет — код остаётся, повтор при связи
 }
+// Преемственность входа для установленного ярлыка: манифест после входа становится
+// персональным (start_url «/#t=<токен>»), и iOS-ярлык — у которого хранилище ОТДЕЛЬНОЕ
+// от Safari — рождается уже авторизованным: токен приезжает в URL при каждом запуске.
+let URLT=null, TRIED_URLT=false;   // кандидат из URL: живой localStorage-токен сразу
+                                   // не затираем, но подменяем, если сервер дал 401
+function absorbTokenFromUrl(){
+  try{ const u=new URL(location.href);
+    const tk=u.hash?new URLSearchParams(u.hash.replace(/^#/,'')).get('t'):null;
+    if(!tk) return;
+    URLT=tk;
+    if(!appToken()){ try{ localStorage.setItem('app_token',tk); }catch(e){} }
+    cleanLinkFromUrl();
+  }catch(e){}
+}
+function personalizeManifest(){
+  // Вызываем после УСПЕШНОЙ авторизации токеном: установка «На экран Домой» /
+  // «Установить приложение» с этой страницы унесёт вход с собой. Внутри Телеги
+  // не трогаем (там initData, а ярлык оттуда не ставят).
+  const tk=appToken(); if(!tk || (TG&&TG.initData)) return;
+  const l=document.querySelector('link[rel="manifest"]');
+  if(l) l.href='/manifest.webmanifest?t='+encodeURIComponent(tk);
+}
 async function redeemFromUrl(){
+  absorbTokenFromUrl();
   let code=null;
   try{ const u=new URL(location.href);
     if(u.hash) code=new URLSearchParams(u.hash.replace(/^#/,'')).get('link');
@@ -467,13 +491,28 @@ window.addEventListener('hashchange', async()=>{
 // когда открыть ссылку в этом же браузере неудобно (iOS вне Chrome и т.п.).
 function renderAppAuthGone(expired){
   hideBottomNav(); const t=L();
+  // Поле ввода прямо на экране, а не prompt(): на iOS-ярлыке prompt не переживает
+  // переключение в Телегу за кодом, да и вставка в него неудобна. font-size 16px —
+  // чтобы iOS не зумил страницу при фокусе.
   $("app").innerHTML=`<div class="center">${esc(expired?t.authexpired:t.authneed)}<br><br>
+    <input id="codein" placeholder="${esc(t.codeph)}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+      style="display:block;width:100%;max-width:280px;margin:0 auto 10px;padding:13px 12px;border:1px solid var(--border);border-radius:11px;font-size:16px"
+      onkeydown="if(event.key==='Enter')enterCode()">
     <button class="btn acc" style="max-width:280px;margin:0 auto" onclick="enterCode()">${esc(t.entercode)}</button></div>`;
 }
 async function enterCode(){
-  const raw=(prompt(L().codeprompt)||'').trim(); if(!raw) return;
-  // Принимаем и целую вставку сообщения бота, и ссылку, и голый код: вытаскиваем link=CODE
-  // где угодно в тексте (в т.ч. многострочном), иначе считаем ввод самим кодом.
+  // Код берём из поля; пустое поле → пробуем буфер обмена (iOS сам спросит
+  // разрешение «Вставить») — но только если там похожее на код, чтобы не жечь
+  // попытку о случайный мусор. Принимаем и целую вставку сообщения бота, и
+  // ссылку, и голый код: вытаскиваем link=CODE где угодно в тексте.
+  const el=document.getElementById("codein");
+  let raw=el?el.value.trim():'';
+  if(!raw && el && navigator.clipboard && navigator.clipboard.readText){
+    try{ const cb=(await navigator.clipboard.readText()).trim();
+      if(/link=[A-Za-z0-9_-]+/.test(cb)||/^[A-Za-z0-9_-]{16,}$/.test(cb)){ raw=cb; el.value=cb; } }catch(e){}
+  }
+  if(!raw && !el) raw=(prompt(L().codeprompt)||'').trim();
+  if(!raw){ if(el) el.focus(); return; }
   const m=raw.match(/link=([A-Za-z0-9_-]+)/);
   const r=await redeemCode(m?m[1]:raw, false);
   if(r===true){ toast('✓'); boot(); } else toast('✕');
@@ -513,6 +552,7 @@ async function boot(){
   if(!REDEEMED){ REDEEMED=true; await redeemFromUrl(); }   // одноразовый код из ссылки бота
   try{
     const d = await api("/api/bootstrap");
+    personalizeManifest();   // авторизация удалась → ярлык с этой страницы унесёт вход
     STATE.lang=d.lang||STATE.lang; renderLangs();
     if(d.needsOnboarding){ STATE.onb=d; renderOnboarding(); return; }
     // Сменился сотрудник на устройстве (перевыпуск на другого человека) — чистим кэш и
@@ -529,7 +569,13 @@ async function boot(){
     const st=+((e&&e.message)||0);
     // Сервер ответил «не пускаю» вне Телеги: токен истёк/отозван либо его ещё нет.
     // Кэш здесь НЕ поднимаем (сервер доступен и отказал) — просим новую ссылку у бота.
-    if((st===401||st===403) && !(TG&&TG.initData)){ renderAppAuthGone(!!appToken()); return; }
+    if((st===401||st===403) && !(TG&&TG.initData)){
+      // В localStorage мог остаться мёртвый токен, а в start_url ярлыка — живой
+      // (переустановили ярлык после простоя): пробуем кандидата из URL один раз.
+      if(URLT && URLT!==appToken() && !TRIED_URLT){ TRIED_URLT=true;
+        try{ localStorage.setItem('app_token',URLT); }catch(e){}
+        return boot(); }
+      renderAppAuthGone(!!appToken()); return; }
     // Сети нет — поднимаемся из оффлайн-снимка портфеля, если он есть.
     const snap = await loadBootstrapSnapshot();
     if(snap && snap.persons){

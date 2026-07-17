@@ -200,15 +200,17 @@ def init_db() -> None:
             )
         """)
         # Автономное приложение (PWA вне Телеги): вне Телеги нет initData, поэтому вход
-        # двухступенчатый. Бот шлёт ОДНОРАЗОВУЮ ссылку (app_links, окно активации
-        # APP_LINK_DAYS); при первом открытии код обменивается на девайс-токен
-        # (app_tokens, живёт APP_TOKEN_DAYS). Пересланная/старая ссылка бесполезна.
+        # двухступенчатый. Бот шлёт ссылку (app_links, окно активации APP_LINK_DAYS,
+        # до APP_LINK_MAX_USES обменов — одну ссылку открывают и в браузере Телеги, и в
+        # Safari/Chrome при установке на экран); код обменивается на девайс-токен
+        # (app_tokens, скользящие APP_TOKEN_DAYS — продлевается при использовании).
         conn.execute("""
             CREATE TABLE IF NOT EXISTS app_links (
               code TEXT PRIMARY KEY,
               telegram_id INTEGER,
               created_at TEXT,
-              used_at TEXT
+              used_at TEXT,
+              uses INTEGER NOT NULL DEFAULT 0
             )
         """)
         conn.execute("""
@@ -223,6 +225,10 @@ def init_db() -> None:
         tcols = {r[1] for r in conn.execute("PRAGMA table_info(app_tokens)")}
         if "expires_at" not in tcols:
             conn.execute("ALTER TABLE app_tokens ADD COLUMN expires_at TEXT")
+        # Миграция app_links времён одноразовых кодов (без счётчика uses).
+        lcols = {r[1] for r in conn.execute("PRAGMA table_info(app_links)")}
+        if "uses" not in lcols:
+            conn.execute("ALTER TABLE app_links ADD COLUMN uses INTEGER NOT NULL DEFAULT 0")
         conn.commit()
 
 
@@ -448,15 +454,17 @@ def unbind(telegram_id: int) -> None:
         conn.commit()
 
 
-# --- Автономное приложение (PWA вне Телеги): одноразовые ссылки + токены -----
-APP_LINK_DAYS = 7     # окно активации одноразовой ссылки
-APP_TOKEN_DAYS = 30   # срок жизни девайс-токена (потом — новая ссылка у бота)
+# --- Автономное приложение (PWA вне Телеги): ссылки входа + токены -----------
+APP_LINK_DAYS = 7       # окно активации ссылки входа
+APP_LINK_MAX_USES = 10  # обменов на токен с одной ссылки (Телега + Safari + повторы)
+APP_TOKEN_DAYS = 30     # скользящий срок токена: продлевается при каждом использовании
 
 
 def create_app_link(telegram_id: int) -> str:
-    """Одноразовый код входа для автономного PWA (бот шлёт ссылкой). Прежние
-    НЕИСПОЛЬЗОВАННЫЕ коды юзера гасим (живая — только последняя ссылка), уже
-    выданный девайс-токен НЕ трогаем: сообщение боту не разлогинивает телефон."""
+    """Код входа для автономного PWA (бот шлёт ссылкой). Прежние НЕОТКРЫТЫЕ коды
+    юзера гасим (из неоткрытых жива только последняя ссылка; уже открытые доживают
+    своё окно — по ним могли ещё не доустановить ярлык), выданный девайс-токен
+    НЕ трогаем: сообщение боту не разлогинивает телефон."""
     code = secrets.token_urlsafe(18)
     now = datetime.now()
     with connect() as conn:
@@ -472,22 +480,25 @@ def create_app_link(telegram_id: int) -> str:
 
 
 def redeem_app_link(code: str) -> str | None:
-    """Обменять одноразовый код на девайс-токен (APP_TOKEN_DAYS). None — код неизвестен,
-    уже использован или старше APP_LINK_DAYS. Прежние токены пользователя НЕ трогаем:
-    у выездника может быть несколько устройств/браузеров, и случайное открытие свежей
-    ссылки в «неправильном» браузере не должно разлогинивать рабочий телефон. Полный
-    отзыв — только явный revoke_app_access (увольнение/сброс) или unbind."""
+    """Обменять код из ссылки бота на девайс-токен. Код МНОГОразовый в окне активации
+    (APP_LINK_DAYS, максимум APP_LINK_MAX_USES обменов): одну и ту же ссылку выездник
+    открывает в ин-апп браузере Телеги, потом в Safari/Chrome для установки на экран —
+    каждый контекст получает свой токен, ничего не «сгорает» и код руками не вводится.
+    Плата за преемственность: пересланная СВЕЖАЯ ссылка тоже пустит; защита — короткое
+    окно, лимит обменов и явный revoke_app_access из пульта. Прежние токены пользователя
+    НЕ трогаем: несколько устройств/браузеров — норма. None — код неизвестен, просрочен
+    или исчерпан."""
     if not code:
         return None
     now = datetime.now()
     cutoff = (now - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
     with connect() as conn:
-        # Атомарно «сжигаем» код: помечаем used только если он ещё не использован и свеж.
-        # rowcount==0 → код чужой/использован/просрочен (в т.ч. проигранная гонка двух
-        # параллельных обменов) — обмен не состоялся.
+        # Атомарный расход попытки: rowcount==0 → код чужой/просрочен/исчерпан
+        # (в т.ч. проигранная гонка параллельных обменов за последнюю попытку).
         cur = conn.execute(
-            "UPDATE app_links SET used_at = ? WHERE code = ? AND used_at IS NULL "
-            "AND created_at >= ?", (now.isoformat(timespec="seconds"), code, cutoff))
+            "UPDATE app_links SET used_at = ?, uses = uses + 1 WHERE code = ? "
+            "AND created_at >= ? AND uses < ?",
+            (now.isoformat(timespec="seconds"), code, cutoff, APP_LINK_MAX_USES))
         if cur.rowcount == 0:
             conn.commit()
             return None
@@ -511,6 +522,20 @@ def uid_for_app_token(token: str) -> int | None:
             "SELECT telegram_id FROM app_tokens WHERE token = ? AND expires_at >= ?",
             (token, datetime.now().isoformat(timespec="seconds"))).fetchone()
     return row["telegram_id"] if row else None
+
+
+def touch_app_token(token: str) -> None:
+    """Скользящее продление: живой токен при использовании отодвигает expires_at ещё
+    на APP_TOKEN_DAYS. Пока приложение открывают хотя бы раз в месяц — вход вечный
+    («поставил на экран — это его телефон»); умирает только у брошенных устройств.
+    Просроченный токен НЕ воскрешаем (только живой), отзыв из пульта работает как раньше."""
+    now = datetime.now()
+    with connect() as conn:
+        conn.execute(
+            "UPDATE app_tokens SET expires_at = ? WHERE token = ? AND expires_at >= ?",
+            ((now + timedelta(days=APP_TOKEN_DAYS)).isoformat(timespec="seconds"),
+             token, now.isoformat(timespec="seconds")))
+        conn.commit()
 
 
 def revoke_app_access(telegram_id: int) -> int:
