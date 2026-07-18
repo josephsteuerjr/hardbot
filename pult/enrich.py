@@ -188,7 +188,7 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict]) -> dict:
 
     writes: list[tuple[int, int, object, bool]] = []
     filled_cases = matched_cases = changed_cases = 0
-    cells_already = cells_over_nonempty = 0
+    cells_already = cells_over_nonempty = poison_cleared = 0
     missing: list[str] = []
 
     for srv in rows:
@@ -217,6 +217,21 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict]) -> dict:
                     cells_over_nonempty += 1
                 writes.append((r, c, out_val, is_date))
                 case_changed = True
+        # Анти-яд (баг до 18.07.2026: комментарий выездника писался в «комментарий
+        # звонка» и прошлые обогащения разнесли его в файлы). Если на сервере
+        # «звонок» пуст, а в ячейке файла лежит ПОБАЙТНО тот же текст, что серверный
+        # «Комментарий выезда» этого же КД, — это наш бот-текст, а не колл-центр:
+        # чистим. ЕДИНСТВЕННЫЙ случай, когда обогащение пишет пустоту; любые другие
+        # тексты в «звонке» (в т.ч. ручные правки в файле) не трогаются.
+        vc = cell_text(srv.get("visit_comment"))
+        if vc and cell_text(srv.get("call_comment")) == "" and "call_comment" in col_map:
+            c = col_map["call_comment"]
+            for r in targets:
+                cur = grid[r][c] if c < len(grid[r]) else None
+                if cell_text(cur) == vc:
+                    writes.append((r, c, None, False))
+                    poison_cleared += 1
+                    case_changed = True
         if case_changed:
             changed_cases += 1
 
@@ -230,6 +245,7 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict]) -> dict:
         "cells_written": len(writes),
         "cells_already": cells_already,    # уже совпадало — не трогали
         "cells_over_nonempty": cells_over_nonempty,  # обновили поверх старого значения
+        "poison_cleared": poison_cleared,  # бот-текст убран из «комментария звонка»
         "missing": missing,                # заполнены ботом, но строки в файле нет
         "visit_cols_absent": visit_cols_absent,      # колонок визита нет в файле
     }

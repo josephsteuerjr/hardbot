@@ -231,3 +231,40 @@ def test_cell_text():
     assert enrich.cell_text(None) == ""
     assert enrich.cell_text("  x ") == "x"
     assert enrich.cell_text(datetime(2026, 7, 1)) == "2026-07-01"
+
+
+# --- анти-яд: бот-текст в «комментарии звонка» файла ---------------------------
+def test_poison_bot_text_in_call_column_cleared():
+    """Баг до 18.07.2026: комментарий выездника уезжал в «комментарий звонка» файлов.
+    Если на сервере «звонок» пуст, а в ячейке файла побайтно серверный «Комментарий
+    выезда» — чистим (единственный случай записи пустоты)."""
+    grid = make_grid([["T-1", "Иванов", "100", None, None,
+                       "приехал, говорил с братом", None]])
+    rows = [srv_row("T-1", visit_date="2026-07-10",
+                    visit_comment="приехал, говорил с братом", call_comment=None)]
+    plan = enrich.build_plan(grid, FIELDS, rows)
+    assert plan["poison_cleared"] == 1
+    assert (3, 5, None, False) in plan["writes"]
+
+
+def test_call_texts_differing_from_bot_comment_kept():
+    """Любой другой текст в «звонке» файла (родной колл-комментарий, ручная правка)
+    не трогается; и при непустом серверном «звонке» анти-яд не срабатывает."""
+    grid = make_grid([["T-1", "Иванов", "100", None, None,
+                       "11.12.2024 позвонил, не берёт", None]])
+    rows = [srv_row("T-1", visit_date="2026-07-10",
+                    visit_comment="приехал, говорил с братом", call_comment=None)]
+    plan = enrich.build_plan(grid, FIELDS, rows)
+    assert plan["poison_cleared"] == 0
+    assert all(v is not None for *_x, v, _d in
+               [(r, c, v, d) for r, c, v, d in plan["writes"]])
+
+    # непустой серверный «звонок» (восстановленный оригинал) пишется штатно, не пустотой
+    rows2 = [srv_row("T-1", visit_date="2026-07-10",
+                     visit_comment="приехал, говорил с братом",
+                     call_comment="11.12.2024 позвонил, не берёт")]
+    grid2 = make_grid([["T-1", "Иванов", "100", None, None,
+                       "приехал, говорил с братом", None]])
+    plan2 = enrich.build_plan(grid2, FIELDS, rows2)
+    assert plan2["poison_cleared"] == 0
+    assert (3, 5, "11.12.2024 позвонил, не берёт", False) in plan2["writes"]
