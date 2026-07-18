@@ -61,7 +61,7 @@ def render_person(rep_cid: str, lang: str) -> str | None:
         details = [tv(main["call_status"], lang) if main["call_status"] else None,
                    tv(main["who_at_address"], lang) if main["who_at_address"] else None,
                    tv(main["client_location"], lang) if main["client_location"] else None,
-                   main["call_comment"]]
+                   main["visit_comment"] or main["call_comment"]]
         lines += ["", f"<i>{t('card_last_visit', lang)}: {main['visit_date']}</i>"]
         lines += [f"  ▫️ {v}" for v in details if v]
     if first("reminder_date"):

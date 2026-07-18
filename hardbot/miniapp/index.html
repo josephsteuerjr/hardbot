@@ -407,7 +407,8 @@ function applyVisitLocally(rep, values){
   if(d && d.rep===rep){
     d.visited=true; d.visit_date=(new Date()).toISOString().slice(0,10);
     if(d.form) d.form.forEach(f=>{ if(values[f.key]!=null) f.current=values[f.key]; });
-    if(values.call_comment!=null) d.call_comment=values.call_comment;
+    if(values.visit_comment!=null) d.visit_comment=values.visit_comment;
+    if(values.call_comment!=null) d.visit_comment=values.call_comment;  // легаси-черновики
     if(values.tips!=null) d.tips=values.tips;
     if(values.call_status!=null) d.status=values.call_status;
     IDB.put("cards", d, rep).catch(()=>{});
@@ -922,7 +923,7 @@ function panelForm(d,t){
     ${sec("",t.secClient,grp(["client_location","purpose_rf"]))}
     ${sec("",t.secAgree,grp(["agreed_payment"])+rest)}
     <div class="fsec"><div class="fsec-h">${t.comment}</div>
-      <label class="fld">${t.comment}</label><textarea id="f_call_comment">${esc(d.call_comment||"")}</textarea>
+      <label class="fld">${t.comment}</label><textarea id="f_visit_comment">${esc(d.visit_comment||d.call_comment||"")}</textarea>
       ${(STATE.meta&&STATE.meta.voice)?`<button class="btn line" id="micbtn" style="margin-top:8px" onclick="toggleVoice()">🎤 <span>${esc(t.voice)}</span></button>`:""}
       <label class="fld">${t.tips}</label><textarea id="f_tips">${esc(d.tips||"")}</textarea>
     </div>
@@ -1018,7 +1019,7 @@ async function toggleVoice(){
                           {method:"POST",headers:authHeaders(),body:fd});
       if(!r.ok) throw 0;
       const j=await r.json();
-      const ta=$("f_call_comment");
+      const ta=$("f_visit_comment");
       if(j&&j.text&&ta){
         ta.value=(ta.value?ta.value.trim()+" ":"")+j.text;
         ta.dispatchEvent(new Event("input",{bubbles:true}));   // черновик подхватит
@@ -1066,11 +1067,11 @@ function draftKey(rep){ return "draft:"+currentUid()+":"+rep; }
 function readForm(){
   const values={};
   document.querySelectorAll("#panel select[data-k]").forEach(s=>{ if(s.value) values[s.dataset.k]=s.value; });
-  const cc=$("f_call_comment"); if(cc&&cc.value.trim()) values.call_comment=cc.value.trim();
+  const cc=$("f_visit_comment"); if(cc&&cc.value.trim()) values.visit_comment=cc.value.trim();
   const tp=$("f_tips"); if(tp&&tp.value.trim()) values.tips=tp.value.trim();
   return values;
 }
-function formVisible(){ return !!(STATE.cur && STATE.tab==="form" && $("f_call_comment")); }
+function formVisible(){ return !!(STATE.cur && STATE.tab==="form" && $("f_visit_comment")); }
 
 function loadDraft(rep){ try{ const s=localStorage.getItem(draftKey(rep)); return s?JSON.parse(s):null; }catch(e){ return null; } }
 function clearDraft(rep){ try{ localStorage.removeItem(draftKey(rep)); }catch(e){} }
@@ -1103,7 +1104,8 @@ function restoreDraftIntoForm(){
   let applied=false;
   Object.entries(d.v).forEach(([k,val])=>{
     let el=null;
-    if(k==="call_comment") el=$("f_call_comment");
+    // call_comment — легаси-черновики, сохранённые старой оболочкой в localStorage
+    if(k==="visit_comment"||k==="call_comment") el=$("f_visit_comment");
     else if(k==="tips") el=$("f_tips");
     else el=document.querySelector('#panel select[data-k="'+k+'"]');
     if(el && el.value!==val){ el.value=val; applied=true; }   // отличается от сервера → есть несинхр. правка
@@ -1113,7 +1115,7 @@ function restoreDraftIntoForm(){
 function setupFormDraft(){
   const p=$("panel"); if(!p) return;
   restoreDraftIntoForm();
-  p.querySelectorAll('select[data-k], #f_call_comment, #f_tips').forEach(el=>{
+  p.querySelectorAll('select[data-k], #f_visit_comment, #f_tips').forEach(el=>{
     el.addEventListener(el.tagName==="SELECT"?"change":"input", onFormChange);
   });
   startAutoSync();

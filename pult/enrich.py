@@ -36,7 +36,10 @@ SHEET_NAME = "Портфели"
 # исходном файле — писать их без завершённого визита = тащить старую выгрузку.
 VISIT_KEYS = [
     "visit_date", "call_status", "contact_with", "agreed_payment",
-    "who_at_address", "client_location", "purpose_rf", "call_comment",
+    "who_at_address", "client_location", "purpose_rf",
+    # комментарий выездника живёт в visit_comment (с 18.07.2026);
+    # call_comment оставлен для строк, заполненных до переноса
+    "visit_comment", "call_comment",
 ]
 
 # Маркер «кейс заполнен ботом» — только visit_date: его ставит ИСКЛЮЧИТЕЛЬНО

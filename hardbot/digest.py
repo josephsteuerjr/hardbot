@@ -289,7 +289,7 @@ def person_card(mgr: dict, on_date: str, ei: int, ci: int) -> tuple[str, InlineK
     tips = val("tips")
     if tips:
         body.append(f"🧭 Наводки: {_e(tips)}")
-    comment = val("call_comment") or val("visit_comment")
+    comment = val("visit_comment") or val("call_comment")   # выездник пишет в visit_comment
     if comment:
         body.append(f"💬 {_e(comment)}")
 

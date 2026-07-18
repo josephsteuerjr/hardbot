@@ -57,7 +57,11 @@ _MAX_AGE = 24 * 3600  # initData не старше суток
 # Поля выезда, которые заполняет выездник (выпадающие списки + свободный текст).
 FORM_DROPDOWNS = ["call_status", "contact_with", "who_at_address",
                   "client_location", "purpose_rf", "agreed_payment"]
-FORM_TEXT = ["call_comment", "tips"]
+# Комментарий выездника живёт в visit_comment («Комментарий текущего месяца
+# выезда»). До 18.07.2026 форма ошибочно писала его в call_comment («комментарий
+# звонка») — в выгрузке он сидел не в той колонке; легаси-сохранения ремапятся
+# в _save, старые данные перенесены миграцией на проде.
+FORM_TEXT = ["visit_comment", "tips"]
 # Что показываем во вкладке «Клиент» (плотные строки).
 INFO_KEYS = ["birth_date", "phone", "phone_main", "city", "address",
              "address_customer", "extra_address", "responsible", "tips"]
@@ -208,6 +212,9 @@ def _person_full(rep: str, lang: str) -> dict | None:
         "photos": sum(r["photos_count"] or 0 for r in rows),
         "contracts": contracts, "info": info, "promise": promise,
         "form": form,
+        "visit_comment": _row_get(rows, "visit_comment") or "",
+        # call_comment оставлен для закэшированных старых оболочек (префилл);
+        # новая форма читает и пишет visit_comment.
         "call_comment": _row_get(rows, "call_comment") or "",
         "tips": _row_get(rows, "tips") or "",
     }
@@ -493,7 +500,12 @@ async def _save(request: web.Request) -> web.Response:
     row = db.get_client(rep)
     if not row or (row["responsible"] != emp and uid != ADMIN_ID):
         raise web.HTTPNotFound(text="person")
-    values = {k: v for k, v in (body.get("values") or {}).items() if k in ALLOWED_SAVE}
+    raw_values = dict(body.get("values") or {})
+    # Легаси-клиенты (закэшированная оболочка, оффлайн-очереди на телефонах) шлют
+    # комментарий выездника старым ключом call_comment — переадресуем в visit_comment.
+    if "call_comment" in raw_values and "visit_comment" not in raw_values:
+        raw_values["visit_comment"] = raw_values.pop("call_comment")
+    values = {k: v for k, v in raw_values.items() if k in ALLOWED_SAVE}
     db.audit_access(uid, "save_visit" if body.get("finish") else "save_card", rep)
     if values:
         db.update_person(rep, values)  # пишется во ВСЕ договоры человека, сразу в БД
@@ -514,7 +526,8 @@ async def _save(request: web.Request) -> web.Response:
             dist_m = round(_haversine_km(vlat, vlon, cur["geo_lat"], cur["geo_lon"]) * 1000)
         is_new = db.log_visit(
             rep, uid, f"Выезд (миниапп). Статус: {cur['call_status']}; "
-            f"Договорённость: {cur['agreed_payment']}; {cur['call_comment'] or ''}",
+            f"Договорённость: {cur['agreed_payment']}; "
+            f"{cur['visit_comment'] or cur['call_comment'] or ''}",
             op_id=op_id, lat=vlat, lon=vlon, dist_m=dist_m)
         if is_new:   # повтор того же выезда из оффлайн-очереди в группу НЕ шлём (дедуп по op_id)
             await _notify_group(request, cur, uid)
@@ -661,7 +674,7 @@ async def _notify_group(request: web.Request, row, uid: int) -> None:
             f"✅ Выезд отработан (миниапп)\n👤 {row['client']} ({row['contract_id']})\n"
             f"🧑‍💼 id {uid}\n"
             f"📝 {row['call_status'] or '—'} · {row['agreed_payment'] or '—'}\n"
-            f"💬 {row['call_comment'] or '—'}"))
+            f"💬 {row['visit_comment'] or row['call_comment'] or '—'}"))
     except Exception:  # noqa: BLE001
         pass
 
@@ -681,7 +694,7 @@ async def _notify_managers(request: web.Request, row, dist_m: int | None = None)
     text = (f"✅ Выезд отработан\n👤 {row['client']} ({row['contract_id']})\n"
             f"🧑‍💼 {emp}\n"
             f"📝 {row['call_status'] or '—'} · {row['agreed_payment'] or '—'}\n"
-            f"💬 {row['call_comment'] or '—'}"
+            f"💬 {row['visit_comment'] or row['call_comment'] or '—'}"
             + (f"\n📸 {len(files)} фото" if files else "\n📸 без фото"))
     if dist_m is not None:
         pretty = f"{dist_m / 1000:.1f} км" if dist_m >= 1000 else f"{dist_m} м"
