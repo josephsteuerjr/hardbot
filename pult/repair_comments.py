@@ -116,7 +116,7 @@ def build_repair_plan(grid: list[list], fields: list[dict], srv_by_cid: dict[str
 
     writes: list[tuple[int, int, object]] = []
     st = {"rows_matched": 0, "visit_filled": 0, "poison_cleared": 0,
-          "restored_from_backup": 0, "genuine_kept": 0,
+          "restored_from_backup": 0, "genuine_kept": 0, "visit_conflicts": [],
           "visit_col_missing": vis_col is None}
     for r in range(start, len(grid)):
         row = grid[r]
@@ -131,9 +131,13 @@ def build_repair_plan(grid: list[list], fields: list[dict], srv_by_cid: dict[str
         cur_call = enrich.cell_text(row[call_col] if call_col < len(row) else None)
         if vis_col is not None:
             cur_vis = enrich.cell_text(row[vis_col] if vis_col < len(row) else None)
-            if cur_vis != vc:
+            if not cur_vis:
                 writes.append((r, vis_col, vc))
                 st["visit_filled"] += 1
+            elif cur_vis != vc:
+                # в файле НЕ пусто и НЕ серверный текст — возможно, писали руками
+                # после прошлых обогащений. Не затираем: конфликт на глаза владельцу.
+                st["visit_conflicts"].append((cid, cur_vis[:60]))
         if cur_call == vc:                      # яд: бот-текст в колонке звонка
             orig = (backup_call or {}).get(cid, "")
             if orig == vc:                      # бэкап сделан уже после затирания
@@ -202,12 +206,14 @@ def collect_jobs(base: str, fields: list[dict], rows: list[dict]) -> tuple[list[
 def _report(job: dict, st: dict) -> None:
     print(f"  {job['employee']} — {Path(job['path']).name}: "
           f"строк с комментарием бота: {st['rows_matched']}, "
-          f"дописать в «Комментарий выезда»: {st['visit_filled']}, "
+          f"дописать в «Комментарий выезда» (только пустые): {st['visit_filled']}, "
           f"очистить яд в «звонке»: {st['poison_cleared']} "
           f"(из бэкапа вернётся: {st['restored_from_backup']}), "
           f"настоящих колл-комментариев не тронуто: {st['genuine_kept']}"
           + ("  [!] НЕТ колонки «Комментарий текущего месяца выезда»"
              if st["visit_col_missing"] else ""))
+    for cid, txt in st["visit_conflicts"]:
+        print(f"    [конфликт, не тронуто] КД {cid}: в файле уже написано: {txt!r}")
 
 
 def main(argv=None) -> int:

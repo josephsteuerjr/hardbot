@@ -55,3 +55,13 @@ def test_already_repaired_is_idempotent():
     srv = {"R-6": {"visit_comment": "видел клиента лично"}}
     st = rc.build_repair_plan(grid, FIELDS, srv, {"R-6": "06.02 клиент ищет деньги"})
     assert st["writes"] == [] and st["genuine_kept"] == 1
+
+
+def test_manual_file_comment_is_conflict_not_overwritten():
+    """Сотрудник руками вписал в файл свой «Комментарий выезда» — не затираем,
+    выносим в конфликты."""
+    grid = _grid(["R-7", "", "написано руками в файле"])
+    srv = {"R-7": {"visit_comment": "серверный бот-текст"}}
+    st = rc.build_repair_plan(grid, FIELDS, srv, {})
+    assert st["writes"] == [] and st["visit_filled"] == 0
+    assert st["visit_conflicts"] == [("R-7", "написано руками в файле")]
