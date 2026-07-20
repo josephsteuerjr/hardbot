@@ -29,7 +29,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 import enrich
 import razbros
@@ -316,10 +316,15 @@ class ChipFlow(tk.Text):
         self.after_idle(self._fit)
 
     def _fit(self):
+        """Высота — по РЕАЛЬНЫМ пикселям контента. Text меряет height в строках
+        СВОЕГО шрифта, а чипсы-кнопки почти вдвое выше строки: при нескольких
+        рядах низ списка обрезался и был недостижим (выглядело как «список
+        сотрудников не прокручивается» в форме руководителя)."""
         try:
-            lines = self.count("1.0", "end", "displaylines")
-            n = lines[0] if isinstance(lines, tuple) else (lines or 1)
-            self.configure(height=max(int(n), 1))
+            ypix = self.count("1.0", "end", "ypixels")
+            ypix = ypix[0] if isinstance(ypix, tuple) else (ypix or 0)
+            ls = max(tkfont.Font(font=self.cget("font")).metrics("linespace"), 1)
+            self.configure(height=max(1, -(-int(ypix) // ls)))
         except tk.TclError:
             pass
 
@@ -489,6 +494,14 @@ class Pult(tk.Tk):
                          lambda e: self.canvas.itemconfigure(self._cwin, width=e.width))
         self.bind_all("<MouseWheel>",
                       lambda e: self.canvas.yview_scroll(-e.delta // 120, "units"))
+        # Колесо над комбобоксом листало его ЗНАЧЕНИЯ, а над чипсами (Text) — их
+        # внутренний скролл: страница «застревала». Всегда крутим страницу и гасим
+        # родное поведение виджета (break: класс-биндинг перекрывает и 'all').
+        def _wheel_page(e):
+            self.canvas.yview_scroll(-e.delta // 120, "units")
+            return "break"
+        self.bind_class("TCombobox", "<MouseWheel>", _wheel_page)
+        self.bind_class("Text", "<MouseWheel>", _wheel_page)
 
         self.frames: dict[str, tk.Frame] = {}
         for sec, _ in SECTIONS:

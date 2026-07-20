@@ -1138,12 +1138,42 @@ async function pushDraft(){
 window.addEventListener("beforeunload", flushDraft);
 document.addEventListener("visibilitychange", ()=>{ if(document.hidden){ flushDraft(); pushDraft(); } });
 
+// Тихое фоновое обновление портфеля. iOS-ярлык неделями живёт без перезагрузки
+// страницы (процесс замораживается/размораживается), boot() не перезапускается —
+// без этого свежий разброс «не появлялся» (выглядело как кэш; данные /api service
+// worker НЕ кэширует, виновата вечно спящая вкладка). Обновляем STATE и оффлайн-
+// снимок; список перерисовываем ТОЛЬКО если он сейчас на экране — открытую
+// карточку/форму не дёргаем, черновики целы.
+let LAST_REFRESH=0;
+async function refreshData(){
+  if(Date.now()-LAST_REFRESH<60000) return;      // не чаще раза в минуту
+  try{
+    const d=await api("/api/bootstrap");
+    LAST_REFRESH=Date.now();
+    if(d.needsOnboarding) return;                // экраны входа фоном не дёргаем
+    const prev=await loadBootstrapSnapshot();
+    if(prev && prev.employee && d.employee && prev.employee!==d.employee) await clearLocalData();
+    const sig=ps=>JSON.stringify((ps||[]).map(p=>[p.rep,p.visited,p.n]));
+    const changed=sig(STATE.persons)!==sig(d.persons);
+    STATE.meta=d.meta; STATE.persons=d.persons; STATE.kind=d.kind||"agent";
+    STATE.online=true; cacheBootstrap(d); updateOffBar();
+    if(changed){
+      warmCards();                               // и полные карточки новых клиентов
+      const q=$("q");                            // поиск есть только на экране списка
+      if(!STATE.cur && q){ const qs=q.value; renderList();
+        if(qs){ $("q").value=qs; filterList(); } }
+    }
+  }catch(e){}                                    // оффлайн/отказ — молча, до следующего раза
+}
+setInterval(refreshData, 10*60*1000);            // раз в 10 минут при открытом приложении
+
 // Появилась связь — досылаем накопленную очередь; пропала — переключаем индикатор.
-// Плюс попытка досыла при возвращении к приложению (события online в мобильном
-// WebView не всегда надёжны, visibilitychange — подстраховка).
-window.addEventListener("online", ()=>{ STATE.online=true; updateOffBar(); flushQueue(); });
+// Плюс досыл и обновление данных при возвращении к приложению (события online в
+// мобильном WebView не всегда надёжны, visibilitychange/pageshow — подстраховка).
+window.addEventListener("online", ()=>{ STATE.online=true; updateOffBar(); flushQueue(); refreshData(); });
 window.addEventListener("offline", ()=>{ STATE.online=false; updateOffBar(); });
-document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) flushQueue(); });
+document.addEventListener("visibilitychange", ()=>{ if(!document.hidden){ flushQueue(); refreshData(); } });
+window.addEventListener("pageshow", e=>{ if(e.persisted){ flushQueue(); refreshData(); } });
 
 function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
