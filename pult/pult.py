@@ -329,18 +329,38 @@ class ChipFlow(tk.Text):
             pass
 
 
+def names_look_different(typed: str, real: str) -> bool:
+    """Похожи ли имена «на глаз». Точное совпадение не нужно и вредно: «Гульноза»
+    против «Гульноза Алишеровна» — один человек, а «Михаил» против «Алиев Озодбек» —
+    разные. Считаем похожими, если совпало хотя бы одно слово от трёх букв."""
+    def words(s):
+        return {w for w in re.split(r"[^\w]+", str(s or "").casefold().replace("ё", "е"))
+                if len(w) >= 3}
+    a, b = words(typed), words(real)
+    return bool(a and b and not (a & b))
+
+
 class KVGrid(tk.Frame):
-    """Плашки «показатель → число» (отчёт импорта/разброса)."""
+    """Плашки «показатель → число» (отчёт импорта/разброса).
+
+    Больше COLS плашек в ряд в карточку не влезает, а горизонтальной прокрутки в
+    пульте нет — лишние молча уезжали за правый край. Поэтому переносим на ряд ниже."""
+
+    COLS = 6
 
     def __init__(self, parent, bg_=CARD):
         super().__init__(parent, bg=bg_)
 
-    def set_pairs(self, pairs: list[tuple[str, object]]):
+    def set_pairs(self, pairs: list[tuple[str, object]], cols: int | None = None):
         for w in self.winfo_children():
             w.destroy()
+        cols = cols or self.COLS
         for i, (k, v) in enumerate(pairs):
+            row, col = divmod(i, cols)
             cell = tk.Frame(self, bg=ALT, padx=10, pady=6)
-            cell.grid(row=0, column=i, padx=(0 if i == 0 else 6, 0), sticky="w")
+            cell.grid(row=row, column=col, sticky="w",
+                      padx=(0 if col == 0 else 6, 0),
+                      pady=(0 if row == 0 else 6, 0))
             tk.Label(cell, text=k, bg=ALT, fg=MUTED, font=f(8)).pack(anchor="w")
             tk.Label(cell, text=fmt_n(v), bg=ALT, fg=TEXT, font=f(11, True)).pack(anchor="w")
 
@@ -561,7 +581,10 @@ class Pult(tk.Tk):
             try:
                 res = fn()
             except Exception as e:  # noqa: BLE001 — показываем пользователю
-                self.after(0, lambda: (fail or self._fail)(e))
+                # e=e обязательно: Python удаляет переменную except при выходе из
+                # блока, и лямбда без захвата падала бы NameError уже в Tk-цикле —
+                # все fail-обработчики молча умирали, UI застревал на «Идёт…».
+                self.after(0, lambda e=e: (fail or self._fail)(e))
                 return
             if done:
                 self.after(0, lambda: done(res))
@@ -616,6 +639,32 @@ class Pult(tk.Tk):
             v.pack(anchor="w", padx=13, pady=(0, 10))
             self.metrics[key] = v
 
+        countries = Card(
+            inner, "По республикам",
+            "Отдельно по закреплённым кейсам. Республика берётся из настроенного "
+            "scope руководителя, а не из числового поля «Пул».")
+        countries.pack(fill="x", pady=(12, 0))
+        country_grid = tk.Frame(countries.inner, bg=CARD)
+        country_grid.pack(fill="x")
+        self.country_kv: dict[str, KVGrid] = {}
+        self.country_results: dict[str, ChipFlow] = {}
+        for i, (code, title) in enumerate((("tj", "🇹🇯 Таджикистан"),
+                                           ("uz", "🇺🇿 Узбекистан"))):
+            pane = tk.Frame(country_grid, bg=CARD, highlightbackground=BORDER,
+                            highlightthickness=1, padx=12, pady=10)
+            pane.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 8, 0))
+            country_grid.grid_columnconfigure(i, weight=1)
+            tk.Label(pane, text=title, bg=CARD, fg=TEXT,
+                     font=f(10, True)).pack(anchor="w")
+            kv = KVGrid(pane)
+            kv.pack(fill="x", pady=(7, 3))
+            kv.set_pairs([("договоров", 0), ("с визитом", 0), ("сотрудников", 0)])
+            chips = ChipFlow(pane)
+            chips.pack(fill="x", pady=(3, 0))
+            chips.set_chips(["нет закреплённых кейсов"])
+            self.country_kv[code] = kv
+            self.country_results[code] = chips
+
         cov = Card(inner, "Покрытие визитами")
         cov.pack(fill="x", pady=(12, 0))
         self._cov_pc = 0
@@ -653,6 +702,20 @@ class Pult(tk.Tk):
             self.metrics["emps"].configure(text=fmt_n(len(d.get("employees", []))))
             self.metrics["binds"].configure(text=fmt_n(len(d.get("bindings", []))))
             self.metrics["marks"].configure(text=fmt_n(d.get("markers")))
+            country_rows = {c.get("code"): c for c in (d.get("countries") or [])}
+            for code in ("tj", "uz"):
+                c = country_rows.get(code) or {}
+                clients, visited = c.get("clients") or 0, c.get("visited") or 0
+                pc_country = round(visited / clients * 100) if clients else 0
+                self.country_kv[code].set_pairs([
+                    ("договоров", clients), ("с визитом", visited),
+                    ("покрытие", f"{pc_country}%"),
+                    ("сотрудников", c.get("employees") or 0),
+                ])
+                outcomes = c.get("by_result") or []
+                self.country_results[code].set_chips(
+                    [f"{name or 'без исхода'}  {fmt_n(n)}" for name, n in outcomes]
+                    or ["нет закреплённых кейсов"])
             cl, vi = d.get("clients") or 0, d.get("visited") or 0
             pc = round(vi / cl * 100) if cl else 0
             self._cov_pc = pc
@@ -680,23 +743,42 @@ class Pult(tk.Tk):
         inner = self._section_inner(fr)
 
         imp = Card(inner, "Импорт реестра",
-                   ".xlsx / .xlsm / .xlsb / .xls — файл читается в пульте (calamine), "
-                   "на сервер летит JSON · города геокодятся автоматически")
+                   "«Кого импортировать?» — личные ФИО.xlsb по той же маске папок, что "
+                   "обогащение/разброс, галочками по сотрудникам. Файлы читаются в "
+                   "пульте (calamine), на сервер летит JSON · города геокодятся "
+                   "автоматически. Результат завершённого визита бота старый файл "
+                   "затереть не может; правки, сделанные в реестре ПОСЛЕ обогащения, "
+                   "принимаются как офисные.")
         imp.pack(fill="x")
-        btn(imp.inner, "Выбрать файл и импортировать…", self.do_import,
-            kind="accent").pack(anchor="w")
+        rowi = tk.Frame(imp.inner, bg=CARD)
+        rowi.pack(anchor="w")
+        self.imp_scan_btn = btn(rowi, "Кого импортировать?", self.do_import_batch,
+                                kind="accent")
+        self.imp_scan_btn.pack(side="left")
+        btn(rowi, "Один файл…", self.do_import).pack(side="left", padx=(8, 0))
         self.imp_kvs = KVGrid(imp.inner)
         self.imp_kvs.pack(anchor="w", pady=(10, 0))
         self.imp_warn = tk.Label(imp.inner, text="", bg=CARD, fg=WARN, font=f(9),
                                  justify="left", wraplength=760)
         self.imp_warn.pack(anchor="w")
+        self.imp_pick_frame = tk.Frame(imp.inner, bg=CARD)
+        self.imp_pick_frame.pack(fill="x")
+        self.imp_apply_row = tk.Frame(imp.inner, bg=CARD)
+        self.imp_apply_sel_btn = btn(self.imp_apply_row, "Импортировать выбранных (0)",
+                                     lambda: self.impb_apply("selected"), kind="accent")
+        self.imp_apply_sel_btn.pack(side="left")
+        self.imp_apply_all_btn = btn(self.imp_apply_row, "Импортировать всех",
+                                     lambda: self.impb_apply("all"))
+        self.imp_apply_all_btn.pack(side="left", padx=(8, 0))
+        self.impb_matched, self.impb_selected = [], set()
 
         enr = Card(inner, "Обогащение реестров выездников",
                    "Главный путь выгрузки. Данные — с сервера: ТОЛЬКО завершённые визиты "
                    "(кейсы с датой выезда) и только столбцы формы визита. Файлы — личные "
                    "ФИО.xlsb по той же маске, что и разброс: Республика / … / Город / ФИО. "
                    "В каждый файл точечно дописываются кейсы его сотрудника, ничего не "
-                   "перезатирается, рядом с изменёнными файлами создаётся резервная копия.")
+                   "перезатирается, рядом с изменёнными файлами создаётся резервная копия. "
+                   "Если в реестрах правили руками — сначала импорт, потом обогащение.")
         enr.pack(fill="x", pady=(12, 0))
         rowe = tk.Frame(enr.inner, bg=CARD)
         rowe.pack(anchor="w")
@@ -740,7 +822,10 @@ class Pult(tk.Tk):
                   "его строки по колонке «ответственный Сотрудник». Папки по маске "
                   "Республика / … / Город / ФИО из базовой папки; !Архив и _tech "
                   "игнорируются. Файлы делает Excel: списки «Статусы» и личная "
-                  "«Статистика» сохраняются.")
+                  "«Статистика» сохраняются.\n"
+                  "⚠️ Портфель пересобирается из экспорта: всё, что сотрудник вписал в файл "
+                  "руками и чего нет в источнике, будет потеряно. Сначала импорт реестров "
+                  "в бота, потом разброс — иначе ручные правки не вернуть.")
         sc.pack(fill="x", pady=(12, 0))
         rowsc = tk.Frame(sc.inner, bg=CARD)
         rowsc.pack(anchor="w")
@@ -828,21 +913,205 @@ class Pult(tk.Tk):
                 self.imp_warn.configure(text=d["error"] + extra)
                 self.toast("Импорт не прошёл", err=True)
                 return
-            self.imp_kvs.set_pairs([
-                ("строк", d.get("total_rows")), ("добавлено", d.get("inserted")),
-                ("обновлено", d.get("updated")), ("без КД", d.get("skipped_no_id")),
-                ("дублей", d.get("duplicates"))])
-            unk = d.get("unknown_columns") or []
-            self.imp_warn.configure(
-                text=("Незнакомые колонки (не помешали импорту): " + ", ".join(unk)) if unk else "")
+            self.imp_kvs.set_pairs(self._imp_pairs(d))
+            self.imp_warn.configure(text="\n".join(self._imp_notes(d)))
             self.toast(f"Импорт готов: +{fmt_n(d.get('inserted'))} / обновлено {fmt_n(d.get('updated'))}")
             self.refresh()
         self.bg_task(work, done)
 
+    @staticmethod
+    def _imp_pairs(d: dict) -> list[tuple[str, object]]:
+        return [("строк", d.get("total_rows")), ("добавлено", d.get("inserted")),
+                ("обновлено", d.get("updated")), ("без КД", d.get("skipped_no_id")),
+                ("дублей", d.get("duplicates")),
+                ("без ответственного", d.get("no_responsible")),
+                ("офисных правок", d.get("office_cells")),
+                # None (старый сервер без счётчиков) KVGrid покажет как «—», а не 0
+                ("отклонено защитой", d.get("protected_cells"))]
+
+    @staticmethod
+    def _imp_notes(d: dict) -> list[str]:
+        notes = []
+        if d.get("no_responsible"):
+            notes.append(f"Без ответственного: {d['no_responsible']} строк — колонка "
+                         "«ответственный Сотрудник» пуста и в файле, и в базе. Эти "
+                         "договоры в базе есть, но их не видит ни один выездник, они не "
+                         "входят в отчёты руководителей, и обогащение их результат "
+                         "никуда не запишет — личного файла у них нет. Проставь "
+                         "ответственного в реестре и импортируй ещё раз.")
+        if d.get("office_cells"):
+            notes.append(f"Принято офисных правок: {d['office_cells']} ячеек по "
+                         f"{d.get('office_contracts') or 0} договорам — файл видел "
+                         "обогащение (дата выезда совпала), отличия учтены как правки "
+                         "офиса и попадут в карточки и обогащение.")
+        if d.get("protected_cells"):
+            notes.append(f"Отклонено защитой: {d['protected_cells']} ячеек по "
+                         f"{d.get('protected_contracts') or 0} договорам — в файле нет "
+                         "свежей даты выезда бота (устаревшая копия?), результат "
+                         "выездника не затёрт.")
+        unk = d.get("unknown_columns") or []
+        if unk:
+            notes.append("Незнакомые колонки (не помешали импорту): " + ", ".join(unk))
+        return notes
+
+    def do_import_batch(self):
+        """Пакетный импорт: как «Кого обогащать?», только в обратную сторону.
+        Ищет личные ФИО.xlsb по маске папок (Республика / … / Город / ФИО),
+        показывает сотрудников галочками; файлы выбранных читаются calamine и
+        уходят по одному в POST /admin/import.json; отчёты суммируются."""
+        if not self.scatter_base:
+            self.toast("Сначала выбери «Папку с республиками» (карточка обогащения)", err=True)
+            return
+        base = self.scatter_base
+        def work():
+            reps = razbros.load_config(None)
+            fmap = razbros.build_folder_map(razbros.resolve_roots(base, reps, []))
+            matched = []
+            for key in sorted(fmap):
+                entries = fmap[key]
+                emp = entries[0]["path"].name
+                files = self._personal_files(entries, emp)
+                if files:
+                    matched.append({"key": key, "employee": emp, "files": files,
+                                    "cities": sorted({e["city"] for e in entries})})
+            return matched
+        def done(matched):
+            self.impb_matched = matched
+            self.impb_selected = {m["key"] for m in matched}
+            self.imp_warn.configure(
+                text="" if matched else "По маске не нашлось ни одного личного .xlsb")
+            if not matched:
+                self.toast("Файлы не найдены", err=True)
+            self._render_impb_pick()
+        self.imp_warn.configure(text="Ищу личные реестры по маске…")
+        self.bg_task(work, done, lambda e: (self.imp_warn.configure(text=f"Ошибка: {e}"),
+                                            self.toast(str(e), err=True)))
+
+    def _render_impb_pick(self):
+        for w in self.imp_pick_frame.winfo_children():
+            w.destroy()
+        self.imp_apply_row.pack_forget()
+        if not self.impb_matched:
+            return
+        head = tk.Frame(self.imp_pick_frame, bg=CARD)
+        head.pack(fill="x", pady=(10, 4))
+        tk.Label(head, text="Кого импортировать (галочки):", bg=CARD, fg=MUTED,
+                 font=f(9)).pack(side="left")
+        btn(head, "все", lambda: self._impb_all(True)).pack(side="right")
+        btn(head, "снять", lambda: self._impb_all(False)).pack(side="right", padx=(0, 6))
+        box = tk.Frame(self.imp_pick_frame, bg=CARD, highlightbackground=BORDER,
+                       highlightthickness=1)
+        box.pack(fill="x")
+        self._impb_vars: dict[str, tk.BooleanVar] = {}
+        for m in self.impb_matched:
+            var = tk.BooleanVar(value=m["key"] in self.impb_selected)
+            self._impb_vars[m["key"]] = var
+            row = tk.Frame(box, bg=CARD)
+            row.pack(fill="x")
+            tk.Checkbutton(row, text=m["employee"], variable=var, bg=CARD, fg=TEXT,
+                           activebackground=CARD, selectcolor=CARD, font=f(9),
+                           command=lambda k=m["key"], v=var: self._impb_toggle(k, v.get())
+                           ).pack(side="left", padx=6)
+            tk.Label(row, text=f"файлов: {len(m['files'])} · {' · '.join(m['cities'])}",
+                     bg=CARD, fg=MUTED, font=f(8)).pack(side="left")
+        self.imp_apply_row.pack(anchor="w", pady=(10, 0))
+        self._impb_seln()
+
+    def _impb_toggle(self, k, on):
+        (self.impb_selected.add if on else self.impb_selected.discard)(k)
+        self._impb_seln()
+
+    def _impb_all(self, on):
+        for m in self.impb_matched:
+            (self.impb_selected.add if on else self.impb_selected.discard)(m["key"])
+            if m["key"] in self._impb_vars:
+                self._impb_vars[m["key"]].set(on)
+        self._impb_seln()
+
+    def _impb_seln(self):
+        n = sum(1 for m in self.impb_matched if m["key"] in self.impb_selected)
+        self.imp_apply_sel_btn.configure(text=f"Импортировать выбранных ({n})",
+                                         state="normal" if n else "disabled")
+
+    def impb_apply(self, which: str):
+        picked = [m for m in self.impb_matched
+                  if which == "all" or m["key"] in self.impb_selected]
+        if not picked:
+            self.toast("Никто не выбран", err=True)
+            return
+        files: list[Path] = []
+        for m in picked:
+            for p in m["files"]:
+                if p not in files:
+                    files.append(p)
+        if not messagebox.askyesno(
+                "Пакетный импорт",
+                f"Импортировать в БД: сотрудников {len(picked)}, файлов {len(files)}?\n\n"
+                "У существующих КД обновятся только колонки из файла. Результат "
+                "завершённого визита бота старый файл затереть не может; правки, "
+                "сделанные в реестре после обогащения, будут приняты как офисные."):
+            return
+        self._import_batch_run(files)
+
+    def _impb_busy(self, busy: bool):
+        """Кнопки запуска импорта на время пакета: повторный клик открыл бы второй
+        параллельный поток с перемешанным отчётом."""
+        state = "disabled" if busy else "normal"
+        for b in (self.imp_scan_btn, self.imp_apply_sel_btn, self.imp_apply_all_btn):
+            b.configure(state=state)
+        if not busy:
+            self._impb_seln()      # «выбранных (N)» мог остаться disabled при n=0
+
+    def _import_batch_run(self, files: list[Path]):
+        self._impb_busy(True)
+        log = lambda s: self.after(0, lambda s=s: self.imp_warn.configure(text=s))
+        def work():
+            agg = {"total_rows": 0, "inserted": 0, "updated": 0, "skipped_no_id": 0,
+                   "duplicates": 0, "protected_cells": 0, "protected_contracts": 0,
+                   "office_cells": 0, "office_contracts": 0, "no_responsible": 0}
+            errors: list[str] = []
+            unknown: list[str] = []
+            for i, p in enumerate(files, 1):
+                log(f"[{i}/{len(files)}] {p.name}…")
+                try:
+                    sheets = read_workbook_sheets(str(p))
+                    d = self.api("POST", "/admin/import.json", {"sheets": sheets}, timeout=120)
+                except Exception as e:  # noqa: BLE001 — один битый файл не валит пакет
+                    errors.append(f"{p.name}: {e}")
+                    continue
+                if d.get("error"):
+                    errors.append(f"{p.name}: {d['error']}")
+                    continue
+                for k in agg:
+                    agg[k] += int(d.get(k) or 0)
+                for c in d.get("unknown_columns") or []:
+                    if c not in unknown:
+                        unknown.append(c)
+            agg["unknown_columns"] = unknown
+            return agg, errors
+        def done(res):
+            agg, errors = res
+            ok = len(files) - len(errors)
+            self._impb_busy(False)
+            self.imp_kvs.set_pairs([("файлов", ok)] + self._imp_pairs(agg))
+            lines = self._imp_notes(agg) + [f"⚠ {e}" for e in errors]
+            self.imp_warn.configure(text="\n".join(lines))
+            self.toast(f"Импорт: файлов {ok} из {len(files)}, +{fmt_n(agg['inserted'])} / "
+                       f"обновлено {fmt_n(agg['updated'])}", err=bool(errors))
+            self.refresh()
+        self.bg_task(work, done,
+                     lambda e: (self._impb_busy(False),
+                                self.imp_warn.configure(text=f"Ошибка: {e}"),
+                                self.toast(str(e), err=True)))
+
     # --- обогащение по папке республик (главный путь) ---
     def _personal_files(self, entries, emp) -> list[Path]:
         """Личные реестры сотрудника в его папках: ФИО.xlsb (имя из источника или
-        папки), иначе первый непременной .xlsb в папке (~времянки Excel — мимо)."""
+        папки), иначе первый непременной .xlsb в папке (~времянки Excel — мимо).
+
+        Страховочные копии «(до обогащения …)» / «(до разброса …)» / «(до починки …)»
+        тоже мимо: подхватить копию вместо живого файла — значит обогатить или
+        импортировать данные недельной давности."""
         files: list[Path] = []
         for e in entries:
             folder = e["path"]
@@ -851,7 +1120,8 @@ class Pult(tk.Tk):
             found = next((c for c in cands if c.exists()), None)
             if not found:
                 xs = [p for p in sorted(folder.glob("*.xlsb"))
-                      if not p.name.startswith("~")]
+                      if not p.name.startswith("~")
+                      and not razbros.is_backup_copy(p.name)]
                 found = xs[0] if xs else None
             if found and found not in files:
                 files.append(found)
@@ -889,14 +1159,31 @@ class Pult(tk.Tk):
                                 "rows": e["rows"]})
             self.enr_matched = matched
             self.enr_selected = {m["key"] for m in matched}
-            self.enr_kvs.set_pairs([
+            pairs = [
                 ("с визитами бота", sum(1 for e in by_emp.values() if e["filled"])),
                 ("готовы к обогащению", len(matched)),
                 ("завершённых визитов", sum(m["filled"] for m in matched)),
-                ("файлов", sum(len(m["files"]) for m in matched))])
+                ("файлов", sum(len(m["files"]) for m in matched))]
+            orphan_filled = getattr(by_emp, "orphan_filled", 0)
+            if orphan_filled:
+                pairs.append(("визитов без ответственного", orphan_filled))
+            self.enr_kvs.set_pairs(pairs)
             warn = ""
+            if orphan_filled:
+                # Главная строка отчёта: эти визиты не попадут никуда, и раньше об
+                # этом не было ни слова — так потерялись 173 выезда за 09-17.07.
+                sample = [c for c in getattr(by_emp, "orphan_cids", []) if c][:10]
+                warn = (f"⚠ Завершённых визитов без ответственного: {orphan_filled} — "
+                        "они НЕ попадут ни в один реестр: личного файла у таких строк "
+                        f"нет (всего строк без владельца: "
+                        f"{getattr(by_emp, 'orphan_rows', 0)}). Проставь «ответственный "
+                        "Сотрудник» в реестре, импортируй его — и обогащай заново."
+                        + ((" КД: " + ", ".join(sample)
+                            + ("…" if orphan_filled > len(sample) else ""))
+                           if sample else ""))
             if nofolder:
-                warn = "Есть данные бота, но нет папки: " + ", ".join(nofolder)
+                warn += (("\n" if warn else "")
+                         + "Есть данные бота, но нет папки: " + ", ".join(nofolder))
             if nofile:
                 warn += ("\n" if warn else "") + "Папка есть, но нет .xlsb: " + ", ".join(nofile)
             if not matched and not warn:
@@ -966,7 +1253,9 @@ class Pult(tk.Tk):
                 f"Обогатить личные реестры: сотрудников {len(picked)}, файлов {len(jobs)}?\n\n"
                 "В каждый файл дописываются ТОЛЬКО кейсы его сотрудника, заполненные "
                 "ботом. Рядом с каждым файлом создаётся резервная копия. Делает Excel — "
-                "может занять время."):
+                "может занять время.\n\nСовет: если в реестрах правили руками — сначала "
+                "запусти «Кого импортировать?», иначе обогащение перепишет правки "
+                "серверными значениями."):
             return
         fields = self._enr_fields
         log = lambda s: self.after(0, lambda: self.enrich_out.configure(text=s))
@@ -1009,7 +1298,8 @@ class Pult(tk.Tk):
                 f"{Path(path).name}\n\nВ файл будут дописаны ТОЛЬКО данные визитов "
                 "(заполненные ботом кейсы и их столбцы). Остальные строки, столбцы, "
                 "листы и форматирование не трогаются.\n\nРезервная копия будет создана "
-                "рядом с файлом. Продолжить?"):
+                "рядом с файлом. Если в файле правили руками — сначала запусти импорт. "
+                "Продолжить?"):
             return
         self.settings["enrich_file"] = path
         self._save_settings()
@@ -1050,7 +1340,9 @@ class Pult(tk.Tk):
         if not path:
             return
         def work():
-            d = self.api("GET", "/admin/export.json", timeout=120)
+            # Raw-слепок отделён от безопасного потока обогащения: без mode=full
+            # сервер намеренно очищает все неподтверждённые поля визита.
+            d = self.api("GET", "/admin/export.json?mode=full", timeout=120)
             write_registry_xlsx(path, d["fields"], d["rows"])
             return len(d["rows"])
         self.bg_task(work, lambda n: self.toast(f"Сохранено: {path} ({fmt_n(n)} строк)"))
@@ -1558,6 +1850,95 @@ class Pult(tk.Tk):
                                       {"employee": emp, "contract_ids": ids}), done)
 
     # ══ РУКОВОДИТЕЛИ ═════════════════════════════════════════════════════
+    # --- беседы отчётов о выездах ---
+    def chats_refresh(self):
+        def done(d):
+            self._chats_emp = d.get("employees") or []
+            self._render_chats(d.get("chats") or [])
+        self.bg_task(lambda: self.api("GET", "/admin/chats"), done)
+
+    def _render_chats(self, chats):
+        for w in self.chats_list.winfo_children():
+            w.destroy()
+        if not chats:
+            tk.Label(self.chats_list,
+                     text="Бесед пока нет — добавь бота в группу, и она появится здесь",
+                     bg=CARD, fg=MUTED, font=f(9)).pack(anchor="w")
+            return
+        # Title подделываем кто угодно (любой может создать группу-двойника и
+        # добавить бота) — рядом всегда показываем chat_id и дату, дубли имён
+        # подсвечиваем, чтобы админ не включил чужую беседу.
+        titles = [(c.get("title") or "").strip().lower() for c in chats]
+        for c in chats:
+            row = tk.Frame(self.chats_list, bg=CARD)
+            row.pack(fill="x", pady=1)
+            var = tk.BooleanVar(value=c.get("enabled", False))
+            title = c.get("title") or "(без названия)"
+            dup = titles.count((c.get("title") or "").strip().lower()) > 1
+            label = f"{title}  ·  id {c.get('chat_id')}"
+            if c.get("added_at"):
+                label += f" · с {str(c['added_at'])[:10]}"
+            if dup:
+                label += " · ⚠ есть тёзка!"
+            if c.get("removed"):
+                label += " · бот удалён из беседы"
+            tk.Checkbutton(row, text=label, variable=var, bg=CARD,
+                           fg=WARN if dup else TEXT,
+                           activebackground=CARD, selectcolor=CARD, font=f(9),
+                           command=lambda cid=c["chat_id"], v=var:
+                           self._chat_toggle(cid, v.get())).pack(side="left")
+            emps = c.get("employees") or []
+            short = (", ".join(emps[:3]) + ("…" if len(emps) > 3 else "")) if emps \
+                else "сотрудники не закреплены — посты не идут"
+            tk.Label(row, text=short, bg=CARD, fg=MUTED, font=f(8)).pack(
+                side="left", padx=(8, 0))
+            btn(row, f"Сотрудники ({len(emps)})",
+                lambda c=c: self._chat_emps_dialog(c)).pack(side="right")
+
+    def _chat_toggle(self, chat_id, on):
+        # При сбое чекбокс НЕ должен показывать выключенное при включённом
+        # сервере (посты с ПД продолжались бы «невидимо») — перечитываем правду.
+        self.bg_task(lambda: self.api("POST", "/admin/chats.set",
+                                      {"chat_id": chat_id, "enabled": on}),
+                     lambda d: self.toast("Беседа включена" if on
+                                          else "Беседа выключена"),
+                     lambda e: (self.toast(f"Не сохранилось: {e}", err=True),
+                                self.chats_refresh()))
+
+    def _chat_emps_dialog(self, chat):
+        top = tk.Toplevel(self)
+        top.title(chat.get("title") or str(chat.get("chat_id")))
+        top.configure(bg=CARD)
+        tk.Label(top, text="Чьи визиты постить в эту беседу:", bg=CARD, fg=TEXT,
+                 font=f(10, True)).pack(anchor="w", padx=12, pady=(12, 6))
+        emps = self._chats_emp or []
+        if not emps:
+            tk.Label(top, text="Реестр пуст — сотрудников нет", bg=CARD, fg=MUTED,
+                     font=f(9)).pack(anchor="w", padx=12)
+        sel = set(chat.get("employees") or [])
+        grid = tk.Frame(top, bg=CARD)
+        grid.pack(fill="both", expand=True, padx=12)
+        rows_per_col = max(1, (len(emps) + 1) // 2)
+        chk_vars: dict[str, tk.BooleanVar] = {}
+        for i, e in enumerate(emps):
+            v = tk.BooleanVar(value=e in sel)
+            chk_vars[e] = v
+            tk.Checkbutton(grid, text=e, variable=v, bg=CARD, fg=TEXT,
+                           activebackground=CARD, selectcolor=CARD, font=f(9)
+                           ).grid(row=i % rows_per_col, column=i // rows_per_col,
+                                  sticky="w", padx=(0, 12))
+        def save():
+            chosen = [e for e, v in chk_vars.items() if v.get()]
+            def done(d):
+                self.toast("Сотрудники беседы сохранены")
+                top.destroy()
+                self._chats_emp = [x for x in self._chats_emp]
+                self._render_chats(d.get("chats") or [])
+            self.bg_task(lambda: self.api(
+                "POST", "/admin/chats.set",
+                {"chat_id": chat["chat_id"], "employees": chosen}), done)
+        btn(top, "Сохранить", save, kind="accent").pack(anchor="e", padx=12, pady=12)
+
     def _build_mgrs(self, fr):
         inner = self._section_inner(fr)
         dc = Card(inner, "Автосводка руководителям",
@@ -1587,6 +1968,20 @@ class Pult(tk.Tk):
                        activebackground=CARD, selectcolor=CARD, font=f(9)).pack(side="left")
         self.dig_out = tk.Label(dc.inner, text="", bg=CARD, fg=MUTED, font=f(9))
         self.dig_out.pack(anchor="w", pady=(6, 0))
+
+        rc = Card(inner, "Пересылка отчётов в беседы",
+                  "Закрытый визит уходит постом в закреплённые беседы — как сотрудники "
+                  "пишут руками, только автоматически: клиент, адрес, статусы, "
+                  "комментарий, фото и фактические гео-точки (закрытие визита и съёмка "
+                  "фото). Добавь бота в беседу — она появится в списке; включи её и "
+                  "закрепи сотрудников (ФИО из реестра = их привязанные телеграмы).")
+        rc.pack(fill="x", pady=(12, 0))
+        btn(rc.inner, "Обновить список бесед", self.chats_refresh).pack(anchor="w")
+        self.chats_list = tk.Frame(rc.inner, bg=CARD)
+        self.chats_list.pack(fill="x", pady=(8, 0))
+        tk.Label(self.chats_list, text="Список загрузится при открытии вкладки…",
+                 bg=CARD, fg=MUTED, font=f(9)).pack(anchor="w")
+        self._chats_emp: list[str] = []
 
         mc = Card(inner, "Руководители",
                   "Каждый привязан к городам (подпись сводки) и своим сотрудникам "
@@ -1658,6 +2053,7 @@ class Pult(tk.Tk):
             self.mgrs = d.get("managers") or []
             self.mgr_cities = d.get("cities") or []
             self.mgr_emps = d.get("employees") or []
+            self.chats_refresh()   # карточка бесед не должна висеть пустой
             self.mgr_city_emps = d.get("city_employees") or {}
             dig = d.get("digest") or {}
             if dig:
@@ -1719,10 +2115,20 @@ class Pult(tk.Tk):
             text=f"выбрано: {len(form['employees'])}" if form["employees"] else "")
 
     def _mgr_pick_guest(self, _e):
+        """Из выбранного аккаунта берём и id, И имя.
+
+        Раньше подставлялся только id, а имя оператор печатал руками — и никакая
+        опечатка в выборе не была видна: запись «Михаил» со всеми городами уехала
+        на посторонний аккаунт и четыре дня получала полный дайджест."""
         i = self.mgr_guest_combo.current()
-        if i > 0:
-            self.mgr_tid.delete(0, "end")
-            self.mgr_tid.insert(0, str(self.guests[i - 1]["telegram_id"]))
+        if i <= 0:
+            return
+        g = self.guests[i - 1]
+        self.mgr_tid.delete(0, "end")
+        self.mgr_tid.insert(0, str(g["telegram_id"]))
+        if not self.mgr_name.get().strip():
+            self.mgr_name.delete(0, "end")
+            self.mgr_name.insert(0, (g.get("name") or g.get("username") or "").strip())
 
     def _mgr_toggle_city(self, c):
         form = self.mgr_form
@@ -1784,11 +2190,30 @@ class Pult(tk.Tk):
         if not self.mgr_form["employees"]:
             self.toast("Отметь хотя бы одного сотрудника", err=True)
             return
+        # Права получает ВЛАДЕЛЕЦ telegram_id, а не тот, чьё имя вписали в форму.
+        # Если такой id боту ни разу не писал, сверить некому — спрашиваем явно.
+        known = next((g for g in self.guests if str(g["telegram_id"]) == tid), None)
+        if not known and not messagebox.askyesno(
+                "Незнакомый аккаунт",
+                f"Аккаунт {tid} боту ещё не писал, поэтому проверить, кто это, нельзя.\n\n"
+                "Руководителю уходит полная сводка по его сотрудникам: ФИО должников, "
+                "суммы, просроченные обещания, фото выездов.\n\nВсё равно выдать доступ?"):
+            return
         body = {"telegram_id": int(tid), "name": self.mgr_name.get().strip(),
                 "cities": sorted(self.mgr_form["cities"]),
                 "employees": sorted(self.mgr_form["employees"])}
-        def done(_d):
-            self.toast("Руководитель сохранён: " + (body["name"] or tid))
+        def done(d):
+            # Показываем НЕ то, что напечатал оператор, а кого сервер увидел за этим id.
+            acc = (d or {}).get("account") or {}
+            real = (acc.get("name") or acc.get("username") or "").strip()
+            typed = body["name"].strip()
+            if names_look_different(typed, real):
+                messagebox.showwarning(
+                    "Имя не совпало",
+                    f"Ты вписал «{typed}», а телеграм-аккаунт {tid} принадлежит "
+                    f"«{real}».\n\nДоступ выдан ВЛАДЕЛЬЦУ аккаунта. Если это не тот "
+                    "человек — удали руководителя и заведи заново с верным id.")
+            self.toast("Руководитель сохранён: " + (real or typed or tid))
             self._mgr_form_reset()
             self.load_managers()
         self.bg_task(lambda: self.api("POST", "/admin/manager", body), done)

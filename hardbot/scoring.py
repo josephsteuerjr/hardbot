@@ -227,7 +227,10 @@ def _items_from_db() -> list[dict]:
             "visits": visits, "result": first("overall_result"),
             "location": first("client_location"),
             "who": first("who_at_address") or "",
-            "promise_date": first("promise_date"), "visit_date": first("visit_date"),
+            "promise_date": first("promise_date"),
+            # Ограничение «не чаще раза в неделю» относится только к реально
+            # завершённым визитам, а не к импортному HARD visit_date.
+            "visit_date": first("bot_visit_at"),
             "partners": p["partners"], "n": p["n"],
         })
     return items

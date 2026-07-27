@@ -17,12 +17,10 @@ import hashlib
 import hmac
 import json
 import logging
-import math
 import os
 import re
 import tempfile
 import time
-import urllib.request
 from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import parse_qsl
@@ -35,6 +33,7 @@ from config import ADMIN_ID, approval_required, lang_of
 from fields import BY_KEY, DROPDOWNS
 from i18n import FIELD_TITLES, LANGUAGES, t, tf, tv
 import maplink
+import routing_client
 from keyboards import approve_bind_kb
 from photostore import PHOTO_DIR, day_photos
 
@@ -45,9 +44,13 @@ CORS_ALLOW_ORIGIN = os.getenv("CORS_ALLOW_ORIGIN", "").strip()
 MINIAPP_DIR = Path(__file__).parent / "miniapp"
 # Свой вектор-тайлсет (Protomaps PMTiles). Если файла нет — карта на растровом OSM.
 TILES_FILE = Path(os.getenv("HARDBOT_DATA", Path(__file__).parent)) / "basemap.pmtiles"
-# Свой маршрутизатор (OSRM) для геометрии «я → должник» в навигации миниаппа.
-# Пусто — навигация рисует честную прямую (haversine), это не баг, а заявленный фолбэк.
+# Маршрутизаторы UZ/TJ проверяются по расстоянию привязки к дорожному графу: соседний
+# граф тоже может вернуть Ok, но «притянуть» точку на десятки километров к границе.
+# OSRM_URL оставлен как совместимый одиночный фолбэк.
 OSRM_URL = (os.getenv("OSRM_URL", "") or "").strip()
+OSRM_URL_UZ = (os.getenv("OSRM_URL_UZ", "") or "").strip()
+OSRM_URL_TJ = (os.getenv("OSRM_URL_TJ", "") or "").strip()
+VROOM_URL = (os.getenv("VROOM_URL", "") or "").strip()
 # Распознавание голосовых комментариев: путь к модели faster-whisper (large-v3-turbo,
 # смонтирована с хоста read-only). Пусто = фича выключена, миниапп прячет микрофон.
 VOICE_MODEL = (os.getenv("VOICE_MODEL", "") or "").strip()
@@ -162,7 +165,7 @@ def _meta(lang: str) -> dict:
 
 
 def _person_brief(p: dict) -> dict:
-    visited = any(c["visit_date"] for c in p["contracts"])
+    visited = any(db.bot_visit_snapshot(c) is not None for c in p["contracts"])
     lat = lon = None
     for c in p["contracts"]:
         if c["geo_lat"] is not None:
@@ -183,7 +186,8 @@ def _person_full(rep: str, lang: str) -> dict | None:
     if not rows:
         return None
     main = rows[0]
-    visited = any(r["visit_date"] for r in rows)
+    visit = next((v for r in rows if (v := db.bot_visit_snapshot(r)) is not None), None)
+    visited = visit is not None
     contracts = [{
         "contract_id": r["contract_id"], "partner": r["partner"],
         "unit": debt.unit([r["partner"]] if r["partner"] else []),
@@ -197,13 +201,22 @@ def _person_full(rep: str, lang: str) -> dict | None:
                 "value": tv(_row_get(rows, k), lang) if k == "agreed_payment"
                 else (_row_get(rows, k) or "—")}
                for k in PROMISE_KEYS]
-    form = [{"key": k, "title": _title(k, lang), "current": _row_get(rows, k) or ""}
-            for k in FORM_DROPDOWNS]
+    form = []
+    for k in FORM_DROPDOWNS:
+        # После завершения показываем именно подтверждённый снимок. До первого
+        # визита допустимо подсказать каноническое значение из импорта, но мусор
+        # вроде CONSUMER/дат в select не подставляем.
+        current = (visit.get(k, "") if visit is not None else (_row_get(rows, k) or ""))
+        if current and current not in DROPDOWNS[k]:
+            current = ""
+        form.append({"key": k, "title": _title(k, lang), "current": current})
     return {
         "rep": rep, "client": main["client"], "birth_date": main["birth_date"],
         "visited": visited,
-        "status": tv(main["overall_result"] or main["call_status"], lang),
-        "assign_date": main["assign_date"], "visit_date": main["visit_date"],
+        "status": tv((visit or {}).get("call_status") or main["overall_result"]
+                     or main["call_status"], lang),
+        "assign_date": main["assign_date"],
+        "visit_date": (visit or {}).get("visit_date"),
         "address": _row_get(rows, "address"), "phone": _row_get(rows, "phone"),
         "geo": {"lat": main["geo_lat"], "lon": main["geo_lon"], "src": main["geo_src"]},
         "total": sum(debt.contract_debt(r) for r in rows),
@@ -222,26 +235,27 @@ def _person_full(rep: str, lang: str) -> dict | None:
 
 # --- Маршрут «я → должник» (навигация в миниаппе) ---------------------------
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    r = 6371.0
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dphi, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
-    h = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return 2 * r * math.asin(math.sqrt(h))
+    return routing_client.haversine_km((lat1, lon1), (lat2, lon2))
+
+
+def _routing_backends() -> list[tuple[str, str]]:
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for name, value in (("uz", OSRM_URL_UZ), ("tj", OSRM_URL_TJ), ("default", OSRM_URL)):
+        url = (value or "").strip().rstrip("/")
+        if url and url not in seen:
+            result.append((name, url))
+            seen.add(url)
+    return result
 
 
 def _osrm_route(lat1: float, lon1: float, lat2: float, lon2: float, base: str):
-    """Геометрия по дорогам через OSRM /route. None при любой ошибке (сеть/таймаут/
-    граф не покрывает точку) — вызывающий код тогда честно падает на прямую линию."""
-    try:
-        url = (f"{base.rstrip('/')}/route/v1/driving/"
-               f"{lon1},{lat1};{lon2},{lat2}?overview=full&geometries=geojson")
-        req = urllib.request.Request(url, headers={"User-Agent": "hardbot-miniapp/1.0"})
-        with urllib.request.urlopen(req, timeout=6) as r:
-            data = json.loads(r.read())
-        route = data["routes"][0]
-        return route["geometry"]["coordinates"], route["distance"] / 1000.0, route["duration"] / 60.0
-    except Exception:  # noqa: BLE001
+    """Совместимая обёртка старого одиночного OSRM-вызова для внешних тестов."""
+    result = routing_client.best_route(
+        (lat1, lon1), (lat2, lon2), backends=[("default", base)])
+    if not result:
         return None
+    return result["line"], result["km"], result["minutes"]
 
 
 # --- Хендлеры ---------------------------------------------------------------
@@ -317,9 +331,11 @@ async def _bootstrap(request: web.Request) -> web.Response:
 
 
 async def _route_day(request: web.Request) -> web.Response:
-    """Черновик маршрута дня: топ невизитированных кейсов по скорингу (регуляторные
-    дропы скоринга не берём: их score=0), свёрнутый жадной цепочкой «ближайший
-    следующий» от живой точки выездника (?lat/lon; без неё — от самого приоритетного)."""
+    """Маршрут дня: top-12 по скорингу, дорожная OSRM-матрица и VROOM.
+
+    Неверный соседний граф отбрасывается по snap-distance. При любой недоступности
+    остаётся локальный 2-opt по той же матрице либо честный haversine-фолбэк.
+    """
     uid = _uid(request)
     if not uid:
         raise web.HTTPUnauthorized(text="auth")
@@ -346,24 +362,20 @@ async def _route_day(request: web.Request) -> web.Response:
             and (p.get("score") is None or p["score"] > 0)]
     cand.sort(key=lambda x: x.get("score") or 0, reverse=True)
     cand = cand[:12]   # больше 12 адресов в день не объехать
-    order, km_total, cur = [], 0.0, start
-    while cand:
-        if cur is None:
-            i = 0        # без точки старта — начинаем с самого приоритетного
-            leg = None
-        else:
-            i = min(range(len(cand)),
-                    key=lambda k: _haversine_km(cur[0], cur[1], cand[k]["lat"], cand[k]["lon"]))
-            leg = round(_haversine_km(cur[0], cur[1], cand[i]["lat"], cand[i]["lon"]), 1)
-            km_total += leg
-        nxt = cand.pop(i)
+    plan = await asyncio.get_event_loop().run_in_executor(
+        None, routing_client.plan_day, cand, start, _routing_backends(), VROOM_URL)
+    order = []
+    for index, leg in zip(plan["order"], plan["legs_km"]):
+        nxt = cand[index]
         order.append({"rep": nxt["rep"], "client": nxt["client"], "totals": nxt["totals"],
                       "score": nxt.get("score"), "km": leg,
                       "lat": nxt["lat"], "lon": nxt["lon"]})
-        cur = (nxt["lat"], nxt["lon"])
-    db.audit_access(uid, "route_day", detail=f"{emp} {len(order)}")
+    db.audit_access(uid, "route_day",
+                    detail=f"{emp} {len(order)} {plan['matrix_src']} {plan['solver']}")
     return web.json_response({"ok": True, "employee": emp,
-                              "order": order, "km": round(km_total, 1)})
+                              "order": order, "km": plan["km"],
+                              "matrix_src": plan["matrix_src"], "solver": plan["solver"],
+                              "max_snap_m": plan.get("max_snap_m")})
 
 
 async def _bind(request: web.Request) -> web.Response:
@@ -429,7 +441,7 @@ async def _markers(request: web.Request) -> web.Response:
 
 async def _route(request: web.Request) -> web.Response:
     """Геометрия маршрута от живой точки выездника до должника — для полноэкранной
-    навигации в миниаппе. OSRM, если поднят (`OSRM_URL`); иначе честная прямая —
+    навигации в миниаппе. Выбираем UZ/TJ OSRM по реальной близости к графу; иначе прямая —
     фронт в обоих случаях получает линию + км + минуты и рисует её на карте."""
     uid, emp = _auth(request)
     rep = request.query.get("rep", "")
@@ -445,14 +457,14 @@ async def _route(request: web.Request) -> web.Response:
     if glat is None or glon is None:
         raise web.HTTPNotFound(text="geo")
     glat, glon = float(glat), float(glon)
-    result = None
-    if OSRM_URL:
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, _osrm_route, lat, lon, glat, glon, OSRM_URL)
+    result = await asyncio.get_event_loop().run_in_executor(
+        None, routing_client.best_route, (lat, lon), (glat, glon), _routing_backends())
     if result:
-        line, km, minutes = result
-        return web.json_response({"ok": True, "line": line, "km": round(km, 1),
-                                  "minutes": round(minutes), "src": "osrm"})
+        return web.json_response({"ok": True, "line": result["line"],
+                                  "km": round(result["km"], 1),
+                                  "minutes": round(result["minutes"]), "src": "osrm",
+                                  "router": result["name"],
+                                  "max_snap_m": round(result["max_snap_m"])})
     km = _haversine_km(lat, lon, glat, glon)
     minutes = km / 30.0 * 60.0   # тот же запас скорости 30 км/ч, что и в движке без OSRM
     return web.json_response({"ok": True, "line": [[lon, lat], [glon, glat]],
@@ -505,12 +517,22 @@ async def _save(request: web.Request) -> web.Response:
     # комментарий выездника старым ключом call_comment — переадресуем в visit_comment.
     if "call_comment" in raw_values and "visit_comment" not in raw_values:
         raw_values["visit_comment"] = raw_values.pop("call_comment")
-    values = {k: v for k, v in raw_values.items() if k in ALLOWED_SAVE}
+    values = {}
+    for key, raw in raw_values.items():
+        if key not in ALLOWED_SAVE:
+            continue
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        if key in FORM_DROPDOWNS and value not in DROPDOWNS[key]:
+            raise web.HTTPBadRequest(text=f"invalid {key}")
+        values[key] = value
     db.audit_access(uid, "save_visit" if body.get("finish") else "save_card", rep)
     if values:
         db.update_person(rep, values)  # пишется во ВСЕ договоры человека, сразу в БД
     if body.get("finish"):
-        db.update_person(rep, {"visit_date": date.today().isoformat()})
+        completed_at = date.today().isoformat()
+        db.update_person(rep, {"visit_date": completed_at})
         cur = db.get_client(rep)
         op_id = (str(body.get("op_id") or "")).strip() or None
         # Гео-контроль: точка телефона в момент закрытия vs известная точка должника.
@@ -524,16 +546,71 @@ async def _save(request: web.Request) -> web.Response:
         if vlat is not None and cur["geo_lat"] is not None and cur["geo_lon"] is not None \
                 and (cur["geo_src"] or "") not in ("", "city"):
             dist_m = round(_haversine_km(vlat, vlon, cur["geo_lat"], cur["geo_lon"]) * 1000)
-        is_new = db.log_visit(
-            rep, uid, f"Выезд (миниапп). Статус: {cur['call_status']}; "
-            f"Договорённость: {cur['agreed_payment']}; "
-            f"{cur['visit_comment'] or cur['call_comment'] or ''}",
-            op_id=op_id, lat=vlat, lon=vlon, dist_m=dist_m)
-        if is_new:   # повтор того же выезда из оффлайн-очереди в группу НЕ шлём (дедуп по op_id)
+        payload = (f"Выезд (миниапп). Статус: {cur['call_status']}; "
+                   f"Договорённость: {cur['agreed_payment']}; "
+                   f"{cur['visit_comment'] or cur['call_comment'] or ''}")
+        # Считаем ДО log_visit, иначе своя же свежая строка себя и заглушит.
+        same_today = db.same_visit_logged_today(rep, uid, payload)
+        is_new = db.log_visit(rep, uid, payload,
+                              op_id=op_id, lat=vlat, lon=vlon, dist_m=dist_m)
+        # Снимок строится только из values этого POST, а не из сырых HARD-полей
+        # clients. При ретрае после редкого падения между log_visit и этой записью
+        # восстанавливаем отсутствующий снимок; старый дубль новый снимок не откатывает.
+        if is_new or not db.has_bot_visit(rep):
+            db.record_bot_visit(rep, values, completed_at)
+        # is_new гасит повтор из оффлайн-очереди (тот же op_id), same_today — повторное
+        # нажатие «Сохранить выезд» (новый op_id, но выезд тот же: тот же выездник и тот
+        # же результат). Без второго условия руководителю прилетало 2-3 одинаковых
+        # отбивки по одному должнику. Сравниваем содержимое, а не сам факт строки:
+        # второй настоящий выезд в тот же день с другим исходом отбивку получить обязан.
+        # Данные при этом пишутся как раньше — глушим только рассылку.
+        if is_new and not same_today:
             await _notify_group(request, cur, uid)
-            await _notify_managers(request, cur, dist_m)
+            try:
+                await _notify_managers(request, cur, dist_m)
+            except Exception as e:  # noqa: BLE001 — пуш не должен ломать сохранение:
+                # иначе 500 после log_visit, а повтор из очереди уже is_new=False —
+                # и пуш руководителю, и отчёт в беседу пропадут навсегда
+                logging.warning("manager notify failed: %s", e)
+            await _notify_report_chats(request, cur, vlat, vlon, dist_m)
     data = _person_full(rep, lang_of(uid))
     return web.json_response({"ok": True, "person": data})
+
+
+def _photo_geo_from(request: web.Request) -> tuple | None:
+    """Гео фото из запроса: заголовок X-Photo-Geo «lat,lon,acc,gat» (основной
+    путь — заголовки не попадают в access-логи, в отличие от query на общем
+    VPS) или query-параметры (запасной)."""
+    h = request.headers.get("X-Photo-Geo", "")
+    if h:
+        parts = [p.strip() for p in h.split(",")]
+        q = dict(zip(("lat", "lon", "acc", "gat"), parts))
+        return _photo_geo_query(q)
+    return _photo_geo_query(request.query)
+
+
+def _photo_geo_query(q) -> tuple | None:
+    """(lat, lon, acc_m, captured_at) — фактическая точка съёмки (миниапп
+    снимает её в момент съёмки, оффлайн-очередь доносит её же). Мусор молча
+    игнорируем: фото важнее геометки."""
+    try:
+        lat, lon = float(q["lat"]), float(q["lon"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return None
+    try:
+        acc = max(0, min(int(float(q.get("acc") or 0)), 100_000))
+    except (TypeError, ValueError):
+        acc = 0
+    captured = None
+    try:
+        ms = int(q.get("gat") or 0)
+        if ms > 0:
+            captured = datetime.fromtimestamp(ms / 1000).isoformat(timespec="seconds")
+    except (TypeError, ValueError, OSError, OverflowError):
+        pass
+    return lat, lon, acc, captured
 
 
 async def _photo(request: web.Request) -> web.Response:
@@ -553,18 +630,37 @@ async def _photo(request: web.Request) -> web.Response:
     # op — идемпотентный ключ загрузки из оффлайн-очереди: имя файла = op, повторная
     # доставка того же фото не создаёт второй файл и не накручивает счётчик photos_count.
     op = re.sub(r"[^A-Za-z0-9_-]", "", request.query.get("op", ""))[:64]
+    geo = _photo_geo_from(request)
     if op:
         path = dest / f"{op}{ext}"
         if path.exists():   # уже загружено этим op — дренируем тело и отдаём текущий счётчик
             while await field.read_chunk():
                 pass
+            if geo:   # первая доставка могла упасть после записи файла — гео
+                db.add_photo_geo(rep, f"{rep}/{path.name}", uid, *geo)   # доносим
             return web.json_response({"ok": True, "photos": db.photos_count(rep), "dup": True})
     else:
         path = dest / f"{int(time.time()*1000)}{ext}"
-    with open(path, "wb") as f:
-        while chunk := await field.read_chunk():
-            f.write(chunk)
-    n = db.add_photo(rep)
+    # Пишем во временный файл и переименовываем атомарно: обрыв мобильной сети
+    # посреди тела не должен оставить обрезанный файл под финальным op-именем —
+    # иначе честный досыл из очереди примется за дубликат, и фото (доказательство
+    # вручения досудебки) навсегда останется битым.
+    tmp = dest / f"~{path.stem}.{os.getpid()}{ext}.part"
+    try:
+        with open(tmp, "wb") as f:
+            while chunk := await field.read_chunk():
+                f.write(chunk)
+        existed = path.exists()   # параллельный досыл того же op успел раньше
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    n = db.add_photo(rep) if not existed else db.photos_count(rep)
+    if geo:
+        db.add_photo_geo(rep, f"{rep}/{path.name}", uid, *geo)
     return web.json_response({"ok": True, "photos": n})
 
 
@@ -669,14 +765,43 @@ async def _notify_group(request: web.Request, row, uid: int) -> None:
     if not bot:
         return
     try:
+        import html as _html
         from notify import post_to_group
+        e = lambda v: _html.escape(str(v or ""))   # бот шлёт с parse_mode=HTML
         await post_to_group(bot, text=(
-            f"✅ Выезд отработан (миниапп)\n👤 {row['client']} ({row['contract_id']})\n"
+            f"✅ Выезд отработан (миниапп)\n👤 {e(row['client'])} ({e(row['contract_id'])})\n"
             f"🧑‍💼 id {uid}\n"
-            f"📝 {row['call_status'] or '—'} · {row['agreed_payment'] or '—'}\n"
-            f"💬 {row['visit_comment'] or row['call_comment'] or '—'}"))
+            f"📝 {e(row['call_status']) or '—'} · {e(row['agreed_payment']) or '—'}\n"
+            f"💬 {e(row['visit_comment'] or row['call_comment']) or '—'}"))
     except Exception:  # noqa: BLE001
         pass
+
+
+async def _notify_report_chats(request: web.Request, row, vlat, vlon,
+                               dist_m: int | None = None) -> None:
+    """Отчёт о визите в закреплённые беседы (опциональная фича, настраивается
+    пультом): текст по образцу постов сотрудников + фото за день + фактические
+    гео-точки (закрытие визита и съёмка фото — такое не подделаешь)."""
+    bot = request.app.get("bot")
+    if not bot:
+        return
+    try:
+        chat_ids = db.report_chats_for(row["responsible"] or "")
+        if not chat_ids:
+            return
+        files = day_photos(db.person_contracts(row["contract_id"]),
+                           date.today().isoformat())
+        rels = [f"{p.parent.name}/{p.name}" for p in files]
+        geo_map = db.photo_geo_for_files(rels)
+        pg = next(((g["lat"], g["lon"]) for r in rels if (g := geo_map.get(r))), None)
+        from notify import post_visit_report, visit_report_text
+        text = visit_report_text(
+            row, dist_m=dist_m,
+            visit_geo=(vlat, vlon) if vlat is not None else None,
+            photo_geo=pg, photos_n=len(files))
+        await post_visit_report(bot, chat_ids, text, files)
+    except Exception as e:  # noqa: BLE001 — пост не должен ломать сохранение визита
+        logging.warning("report chats notify failed: %s", e)
 
 
 async def _notify_managers(request: web.Request, row, dist_m: int | None = None) -> None:
@@ -686,15 +811,17 @@ async def _notify_managers(request: web.Request, row, dist_m: int | None = None)
     bot = request.app.get("bot")
     if not bot or (db.get_setting("visit_push") or "1").strip().lower() in ("0", "false", "off"):
         return
+    import html as _html
+    e = lambda v: _html.escape(str(v or ""))   # бот шлёт с parse_mode=HTML
     emp = row["responsible"] or ""
     targets = [m for m in db.list_managers() if emp in (m.get("employees") or [])]
     if not targets:
         return
     files = day_photos(db.person_contracts(row["contract_id"]), date.today().isoformat())
-    text = (f"✅ Выезд отработан\n👤 {row['client']} ({row['contract_id']})\n"
-            f"🧑‍💼 {emp}\n"
-            f"📝 {row['call_status'] or '—'} · {row['agreed_payment'] or '—'}\n"
-            f"💬 {row['visit_comment'] or row['call_comment'] or '—'}"
+    text = (f"✅ Выезд отработан\n👤 {e(row['client'])} ({e(row['contract_id'])})\n"
+            f"🧑‍💼 {e(emp)}\n"
+            f"📝 {e(row['call_status']) or '—'} · {e(row['agreed_payment']) or '—'}\n"
+            f"💬 {e(row['visit_comment'] or row['call_comment']) or '—'}"
             + (f"\n📸 {len(files)} фото" if files else "\n📸 без фото"))
     if dist_m is not None:
         pretty = f"{dist_m / 1000:.1f} км" if dist_m >= 1000 else f"{dist_m} м"
@@ -827,6 +954,7 @@ async def _admin_stats(request: web.Request) -> web.Response:
     s = db.stats_all()
     return web.json_response({
         "clients": s["total"], "visited": s["visited"], "markers": len(db.list_markers()),
+        "countries": db.stats_by_country(),
         "employees": [{"employee": e["employee"], "contracts": e["contracts"]}
                       for e in db.employees_in_registry()],
         "bindings": [{"telegram_id": b["telegram_id"], "employee": b["employee"],
@@ -883,11 +1011,43 @@ async def _admin_import_json(request: web.Request) -> web.Response:
     return web.json_response(report)
 
 
-async def _admin_export_json(request: web.Request) -> web.Response:
-    """Экспорт реестра для пульта: схема колонок + строки. xlsx собирает пульт
-    (rust_xlsxwriter), сервер отдаёт чистые данные."""
+async def _admin_chats(request: web.Request) -> web.Response:
+    """Пульту: беседы, которые бот собрал (его добавляли в группы), + список ФИО
+    из реестра для закрепления."""
     _admin(request)
-    return web.json_response({"fields": db.export_schema(), "rows": db.registry_rows()})
+    return web.json_response({
+        "chats": db.list_report_chats(),
+        "employees": [r["employee"] for r in db.employees_in_registry()]})
+
+
+async def _admin_chats_set(request: web.Request) -> web.Response:
+    """Настройка беседы из пульта: {chat_id, enabled?, employees?}."""
+    _admin(request)
+    body = await request.json()
+    try:
+        chat_id = int(body["chat_id"])
+    except (KeyError, TypeError, ValueError):
+        raise web.HTTPBadRequest(text="chat_id")
+    enabled = body.get("enabled")
+    employees = body.get("employees")
+    db.set_report_chat(
+        chat_id,
+        enabled=None if enabled is None else bool(enabled),
+        employees=None if employees is None else [str(e) for e in employees])
+    return web.json_response({"ok": True, "chats": db.list_report_chats()})
+
+
+async def _admin_export_json(request: web.Request) -> web.Response:
+    """Данные пульта: по умолчанию безопасный поток для обогащения.
+
+    ``?mode=full`` — отдельный raw-слепок БД для команды «Реестр целиком».
+    Старый пульт без параметра тоже получает очищенный поток и потому не может
+    повторно разнести импортные псевдовизиты по живым файлам.
+    """
+    _admin(request)
+    rows = db.registry_rows() if request.query.get("mode") == "full" \
+        else db.enrichment_rows()
+    return web.json_response({"fields": db.export_schema(), "rows": rows})
 
 
 async def _admin_markers_json(request: web.Request) -> web.Response:
@@ -1063,7 +1223,11 @@ async def _admin_manager_save(request: web.Request) -> web.Response:
     cities = [str(c).strip() for c in (body.get("cities") or []) if str(c).strip()]
     employees = [str(e).strip() for e in (body.get("employees") or []) if str(e).strip()]
     db.set_manager(tid, name, cities, employees)
-    return web.json_response({"ok": True, "manager": db.get_manager(tid)})
+    # account — КТО владеет этим telegram_id по данным бота (или null, если бот его
+    # не видел). «name» — всего лишь подпись оператора, права получает владелец id;
+    # пульт сверяет одно с другим и показывает расхождение сразу, а не через неделю.
+    return web.json_response({"ok": True, "manager": db.get_manager(tid),
+                              "account": db.guest(tid)})
 
 
 async def _admin_manager_delete(request: web.Request) -> web.Response:
@@ -1118,6 +1282,23 @@ async def _admin_digest_preview(request: web.Request) -> web.Response:
         raise web.HTTPNotFound(text="manager")
     text, _ = digest.summary_view(mgr, digest.today_iso())
     return web.json_response({"ok": True, "text": text})
+
+
+async def _admin_notify(request: web.Request) -> web.Response:
+    """Сообщение владельцу бота: {text:str}. Нужно суточному циклу на машине Егора
+    (pult/daily_cycle.py) — он работает по расписанию и без этого молчит. Молчание
+    планировщика опаснее ошибки: незамеченный сбой = сутки без обмена данными."""
+    _admin(request)
+    body = await request.json()
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise web.HTTPBadRequest(text="text required")
+    bot = request.app.get("bot")
+    if not bot or not ADMIN_ID:
+        raise web.HTTPServiceUnavailable(text="нет бота или не задан ADMIN_ID")
+    import html as _html
+    await bot.send_message(ADMIN_ID, _html.escape(text[:3500]))
+    return web.json_response({"ok": True})
 
 
 async def _admin_restart(request: web.Request) -> web.Response:
@@ -1206,6 +1387,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/admin/stats", _admin_stats)
     app.router.add_post("/admin/import", _admin_import)
     app.router.add_post("/admin/import.json", _admin_import_json)
+    app.router.add_get("/admin/chats", _admin_chats)
+    app.router.add_post("/admin/chats.set", _admin_chats_set)
     app.router.add_get("/admin/export", _admin_export)
     app.router.add_get("/admin/export.json", _admin_export_json)
     app.router.add_get("/admin/markers.xlsx", _admin_markers_xlsx)
@@ -1220,6 +1403,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/admin/geocode", _admin_geocode)
     app.router.add_get("/admin/priority", _admin_priority)
     app.router.add_get("/admin/activity", _admin_activity)
+    app.router.add_post("/admin/notify", _admin_notify)
     app.router.add_post("/admin/restart", _admin_restart)
     app.router.add_post("/admin/reset", _admin_reset)
     app.router.add_get("/admin/managers", _admin_managers)

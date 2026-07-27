@@ -23,6 +23,8 @@ def _add(cid, client, **f):
         conn.execute(f"INSERT OR REPLACE INTO clients ({keys}) VALUES ({qs})",
                      tuple(row.values()))
         conn.commit()
+    if row.get("visit_date"):
+        db.record_bot_visit(cid, row, row["visit_date"])
 
 
 def test_route_day_chain(monkeypatch):

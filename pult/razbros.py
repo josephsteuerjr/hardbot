@@ -68,6 +68,55 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", str(s).replace(" ", " ").strip()).lower()
 
 
+_BACKUP_RE = re.compile(r"\s\(до\s[^)]*\)\s*$")
+
+
+def is_backup_copy(name: str) -> bool:
+    """Страховочная копия рядом с живым реестром: «ФИО (до обогащения 13.07 14-05).xlsb»,
+    «(до разброса …)», «(до починки …)».
+
+    Такие файлы нельзя принимать за личный реестр сотрудника: обогатить или
+    импортировать СТАРУЮ копию вместо живого файла — значит вернуть в работу данные
+    недельной давности. Раньше отсеивались только времянки Excel («~…»), а копии
+    подходили под маску «первый .xlsb в папке»."""
+    stem = str(name or "")
+    if stem.lower().endswith(".xlsb") or stem.lower().endswith(".xlsx"):
+        stem = stem.rsplit(".", 1)[0]
+    return bool(_BACKUP_RE.search(stem))
+
+
+KEEP_BACKUPS = 5      # сколько копий «(до разброса …)» держать на сотрудника
+
+
+def _rotate_backups(folder, stem: str, log=lambda *a: None, keep: int = KEEP_BACKUPS):
+    """Оставить только последние ``keep`` копий «(до разброса …)» этого сотрудника.
+
+    Личный реестр весит мегабайты и лежит на сетевом диске: копия за каждый прогон и
+    ежедневный разброс — это гигабайты в год в чужой папке. Удаляем только то, чьё имя
+    полностью разобралось как наша копия; при любом сомнении файл остаётся."""
+    import re as _re
+    pat = _re.compile(r"^" + _re.escape(stem) + r" \(до разброса (\d{2}\.\d{2} \d{2}-\d{2})"
+                      r"(?:, (\d+))?\)\.xlsb$")
+    found = []
+    try:
+        names = sorted(p for p in folder.glob("*.xlsb"))
+    except OSError:
+        return
+    for p in names:
+        m = pat.match(p.name)
+        if m:
+            found.append((m.group(1), int(m.group(2) or 1), p))
+    if len(found) <= keep:
+        return
+    found.sort(key=lambda x: (x[0], x[1]))      # по разобранному штампу, не по mtime
+    for _stamp, _n, p in found[:-keep]:
+        try:
+            os.remove(p)
+            log(f"[i] Старая копия удалена: {p.name}")
+        except OSError as e:
+            log(f"[!] Не удалить старую копию {p.name}: {e}")
+
+
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "_", str(name).strip())
 
@@ -355,11 +404,29 @@ def _transfer_stats_and_filter(app, file_path: Path, emp_name: str, old_path):
         finally:
             import time
             time.sleep(0.1)
+            # Прежний личный файл НЕ удаляем: разброс пересобирает портфель из экспорта,
+            # и всё, что сотрудник вписал руками и чего нет в источнике, живёт только
+            # здесь. Раньше эта копия стиралась — и восстанавливать пропавшие
+            # комментарии/доп. номера приходилось из теневых копий сети.
             if Path(old_path).exists():
+                from datetime import datetime as _dt
+                stamp = _dt.now().strftime("%d.%m %H-%M")
+                base = Path(old_path).name[len("~old_"):-len(".xlsb")]
+                folder = Path(old_path).parent
+                # Счётчик коллизий — ВНУТРИ скобок: «(до разброса 27.07 14-05, 2)».
+                # Снаружи он ломал бы распознавание копии (is_backup_copy смотрит на
+                # хвост имени), и такой файл потом приняли бы за живой реестр.
+                keep = folder / f"{base} (до разброса {stamp}).xlsb"
+                n = 1
+                while keep.exists():
+                    n += 1
+                    keep = folder / f"{base} (до разброса {stamp}, {n}).xlsb"
                 try:
-                    os.remove(old_path)
+                    os.replace(old_path, keep)
+                    log(f"[i] Прежний файл сохранён: {keep.name}")
+                    _rotate_backups(folder, base, log)
                 except OSError as e:
-                    log(f"[!] Не удалить временный {Path(old_path).name}: {e}")
+                    log(f"[!] Не сохранить прежний {Path(old_path).name}: {e}")
 
     wb = app.books.open(str(file_path))
     ws = wb.sheets[SHEET_NAME]

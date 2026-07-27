@@ -4,7 +4,7 @@
 кнопки-ФИО сотрудников → список клиентов → карточка (заполненное по визиту + референс).
 
 Три экрана строятся здесь (текст + инлайн-клавиатура), навигация — правкой того же
-сообщения. Источник данных — db.persons_processed (визиты за дату по clients.visit_date).
+сообщения. Источник данных — db.persons_processed (подтверждённые визиты по bot_visit_at).
 Всё на русском: руководители читают по-русски, значения статусов уже каноничные.
 
 Callback-схема (компактная, только ASCII-индексы — ФИО в callback не попадают):
@@ -28,6 +28,7 @@ from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
+import country_scope
 import debt
 import maplink
 import photostore
@@ -111,6 +112,21 @@ def scope_label(mgr: dict) -> str:
     return " · ".join(cities) if cities else "все города"
 
 
+def scope_heading(mgr: dict) -> str:
+    """Явная республика + города для раздельных руководительских сводок.
+
+    У руководителя с обеими республиками показываем обе, а не молчим: раньше
+    смешанный scope схлопывался в один город, и заказчик разделения РТ/РУ видел
+    сводку вообще без признака страны."""
+    codes = country_scope.scope_countries(mgr.get("cities") or [])
+    place = scope_label(mgr)
+    if not codes:
+        return f"🏙 {_e(place)}"
+    specs = [country_scope.info(c) for c in codes]
+    label = " + ".join(f"{s['flag']} <b>{s['name']}</b>" for s in specs)
+    return f"{label} · 🏙 {_e(place)}"
+
+
 # --- построение сводки ------------------------------------------------------
 def _employee_persons(mgr: dict, on_date: str):
     """[(ei, employee, persons)] — по всем сотрудникам руководителя за дату."""
@@ -134,7 +150,7 @@ def summary_view(mgr: dict, on_date: str) -> tuple[str, InlineKeyboardMarkup]:
            for _ei, emp, ps in rows}
 
     head = [f"📊 <b>Дайджест · {human_date(on_date)}</b>",
-            f"🏙 {_e(scope_label(mgr))}",
+            scope_heading(mgr),
             f"👥 Команда: {len(rows)} · активны: {len(active)} · "
             f"обработано: <b>{total_clients}</b>"]
     if total_clients:
@@ -145,24 +161,67 @@ def summary_view(mgr: dict, on_date: str) -> tuple[str, InlineKeyboardMarkup]:
 
     # порядок отображения: активные по убыванию числа кейсов, затем «нулевые»
     order = sorted(rows, key=lambda x: (-len(x[2]), x[1].lower()))
-    body = []
-    for _ei, emp, ps in order:
-        if ps:
-            oc = _outcomes(ps)
-            brief = " · ".join(f"{_st_emoji(s)} {_e(s)} {n}" for s, n in oc[:3])
-            body.append(f"👤 <b>{_e(emp)}</b> — {len(ps)} {_plural(len(ps), 'кейс', 'кейса', 'кейсов')}"
-                        f" · 📸 {cov[emp]}/{len(ps)}")
-            if brief:
-                body.append(f"    {brief}")
-        else:
-            body.append(f"▫️ <s>{_e(emp)}</s> — 0")
+
+    def _emp_lines(items):
+        out = []
+        for _ei, emp, ps in items:
+            if ps:
+                oc = _outcomes(ps)
+                brief = " · ".join(f"{_st_emoji(s)} {_e(s)} {n}" for s, n in oc[:3])
+                out.append(f"👤 <b>{_e(emp)}</b> — {len(ps)} "
+                           f"{_plural(len(ps), 'кейс', 'кейса', 'кейсов')}"
+                           f" · 📸 {cov[emp]}/{len(ps)}")
+                if brief:
+                    out.append(f"    {brief}")
+            else:
+                out.append(f"▫️ <s>{_e(emp)}</s> — 0")
+        return out
+
+    # У руководителя с обеими республиками сводка раньше шла общим списком — тот, кто
+    # просил разделения РТ/РУ, его как раз и не видел. Теперь при смешанном scope
+    # сотрудники разложены по странам; у одно-страновых руководителей всё как было.
+    codes = country_scope.scope_countries(mgr.get("cities") or [])
+    body, display = [], order
+    if len(codes) > 1:
+        # Таблица руководителей крошечная (единицы строк), и читаем её только когда
+        # scope действительно смешанный — на одно-страновых сводках запроса нет вовсе.
+        mapping = country_scope.employee_countries(db.list_managers())
+        groups = country_scope.split_employees([r[1] for r in order], mapping)
+        # Один и тот же ФИО может встретиться у руководителя дважды (тёзки в разных
+        # городах) — идём по очереди, а не по словарю, иначе часть строк потерялась бы.
+        pool = list(order)
+        display = []
+        for code, emps in groups:
+            spec = country_scope.info(code) if code else None
+            title = (f"{spec['flag']} <b>{spec['name']}</b>" if spec
+                     else "❔ <b>Без республики</b>")
+            picked = []
+            for name in emps:
+                idx = next((i for i, r in enumerate(pool) if r[1] == name), None)
+                if idx is not None:
+                    picked.append(pool.pop(idx))
+            if not picked:
+                continue
+            body.append(f"{title} — {len(picked)} "
+                        f"{_plural(len(picked), 'сотрудник', 'сотрудника', 'сотрудников')}")
+            body += _emp_lines(picked)
+            body.append("")
+            display += picked
+        display += pool                       # никого не потеряли
+        body += _emp_lines(pool)
+        while body and not body[-1]:
+            body.pop()
+    else:
+        body = _emp_lines(order)
     if not active:
         body = ["Сегодня выездов пока нет."]
 
     tail = ["━━━━━━━━━━━━━━", "Кнопки ниже — детали и кейсы сотрудника."]
 
     kb = InlineKeyboardBuilder()
-    for ei, emp, ps in order:
+    # Кнопки идут в том же порядке, что и строки текста: иначе у руководителя с обеими
+    # республиками список сгруппирован по странам, а кнопки — вперемешку.
+    for ei, emp, ps in display:
         mark = "👤" if ps else "▫️"
         kb.button(text=f"{mark} {_short(emp)} · {len(ps)}",
                   callback_data=f"dg:e:{on_date}:{ei}")
@@ -288,7 +347,7 @@ def person_card(mgr: dict, on_date: str, ei: int, ci: int) -> tuple[str, InlineK
     add("🎯", "Цель в РФ: ", "purpose_rf")
     tips = val("tips")
     if tips:
-        body.append(f"🧭 Наводки: {_e(tips)}")
+        body.append(f"📇 Доп. адрес/номер: {_e(tips)}")
     comment = val("visit_comment") or val("call_comment")   # выездник пишет в visit_comment
     if comment:
         body.append(f"💬 {_e(comment)}")
@@ -352,7 +411,7 @@ def period_view(mgr: dict, on_date: str,
         return f" ({round(100 * a / b)}%)" if b else ""
 
     lines = [f"📅 <b>Сводка за {days} дн · {human_date(d_from)} — {human_date(d_to)}</b>",
-             f"🏙 {_e(scope_label(mgr))}",
+             scope_heading(mgr),
              f"👥 Обработано: <b>{total}</b>"]
     if total:
         lines.append(f"✅ Оплачен: {len(paid_all)}{pct(len(paid_all), total)}"
@@ -401,20 +460,51 @@ def promises_view(mgr: dict, on_date: str) -> tuple[str, InlineKeyboardMarkup]:
     """«Обещал и пропал»: promise_date в прошлом, оплаты нет. Самые тухлые сверху."""
     items = overdue_by_employee(mgr, on_date)
     total = sum(len(ps) for _, ps in items)
+    everyone = [p for _, ps in items for p in ps]
+    worked = sum(1 for p in everyone if p.get("visited_after_promise"))
     lines = [f"⏰ <b>Просроченные обещания · {human_date(on_date)}</b>",
              f"🏙 {_e(scope_label(mgr))} · всего: <b>{total}</b>"]
+    if total:
+        # Отвечает на вопрос «обновлена информация или нет»: сколько из списка
+        # реально трогали после обещания, а сколько лежит нетронутым.
+        lines.append(f"🟢 отработано после обещания: {worked} · "
+                     f"⚪ не тронуто: {total - worked}")
     if not items:
         lines.append("━━━━━━━━━━━━━━")
         lines.append("Просроченных обещаний нет 🎉")
+    # Телеграм рубит сообщение на 4096 символах, а список просрочек сам не рассасывается:
+    # он копится, пока обещание не закроют. Держим бюджет и честно говорим, что урезали, —
+    # молча оборванный список руководитель принял бы за полный.
+    budget, hidden_p, hidden_e = 3600, 0, 0
+    items = sorted(items, key=lambda x: -len(x[1]))   # самые тухлые сотрудники первыми
     for emp, ps in items:
-        lines.append("━━━━━━━━━━━━━━")
-        lines.append(f"👤 <b>{_e(emp)}</b> — {len(ps)}")
+        block = ["━━━━━━━━━━━━━━", f"👤 <b>{_e(emp)}</b> — {len(ps)}"]
         for p in ps[:12]:
             money = _persons_total([p])
-            lines.append(f"  🔴 {_e(p['client'])} — обещал {human_date(p['promise_date'])}, "
-                         f"{p['days_overdue']} дн назад" + (f" · {money}" if money else ""))
+            if p.get("visited_after_promise"):
+                fresh = f" · 🟢 визит {human_date(p['last_visit'])}"
+            elif p.get("last_visit"):
+                fresh = f" · 🟡 визит {human_date(p['last_visit'])}, до обещания"
+            else:
+                fresh = " · ⚪ визитов не было"
+            block.append(f"  🔴 {_e(p['client'])} — обещал {human_date(p['promise_date'])}, "
+                         f"{p['days_overdue']} дн назад" + (f" · {money}" if money else "")
+                         + fresh)
         if len(ps) > 12:
-            lines.append(f"  …и ещё {len(ps) - 12}")
+            block.append(f"  …и ещё {len(ps) - 12}")
+        # Меряем ГОТОВЫЙ блок: у одного сотрудника это до 14 строк, и проверка «до»
+        # позволяла перевалить лимит последним же блоком.
+        if sum(len(x) + 1 for x in lines + block) > budget:
+            hidden_e += 1
+            hidden_p += len(ps)
+            continue
+        lines += block
+    if hidden_e:
+        lines.append("━━━━━━━━━━━━━━")
+        lines.append(f"…и ещё {hidden_p} "
+                     f"{_plural(hidden_p, 'должник', 'должника', 'должников')} у {hidden_e} "
+                     f"{_plural(hidden_e, 'сотрудника', 'сотрудников', 'сотрудников')} — "
+                     "не поместились, смотрите по сотруднику из сводки")
     kb = InlineKeyboardBuilder()
     kb.button(text="🔄 Обновить", callback_data=f"dg:o:{on_date}")
     kb.button(text="⬅️ К сводке", callback_data=f"dg:h:{on_date}")

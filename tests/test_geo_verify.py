@@ -27,6 +27,7 @@ def _add(cid, client, **f):
         conn.execute(f"INSERT OR REPLACE INTO clients ({keys}) VALUES ({qs})",
                      tuple(row.values()))
         conn.commit()
+    db.record_bot_visit(cid, row, TODAY)
 
 
 def _seed():

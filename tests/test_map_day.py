@@ -47,6 +47,7 @@ def test_day_map_points():
         conn.execute("INSERT INTO agent_bind (telegram_id, employee) VALUES (909, ?)", (EMP,))
         conn.commit()
     db.log_visit("MAP-1", 909, "визит", op_id="map-v1", lat=40.51, lon=69.51, dist_m=140)
+    db.record_bot_visit("MAP-1", {}, TODAY)
     db.add_marker(909, "case", 40.52, 69.52, label="подъезд", op_id="map-m1")
 
     pts = db.day_map_points(EMP, TODAY)

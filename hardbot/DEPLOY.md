@@ -45,6 +45,34 @@ ADMIN_API_KEY=<любой секрет>                     # нужен пул�
 > и тем же токеном** — второй оборвёт первого (конфликт getUpdates). Перед стартом
 > VPS-бота останови локального (или наоборот), либо используй разные токены.
 
+## 2a. Актуальная вечерняя выкладка hardbot2 + собственный Whisper
+
+Боевой второй инстанс обновляется только штатным локальным скриптом из корня
+проекта. Он не заливает `.env`, compose и данные и отказывается стартовать, если
+конкурирующий `/opt/hardbot` уже поднят.
+
+Перед первой выкладкой пакета 2026-07-21 один раз отделить Whisper hardbot2 от
+общего каталога Praxis:
+
+```powershell
+python _local\_deploy_hardbot2.py check
+python _local\_deploy_hardbot2.py prepare-whisper
+python _local\_deploy_hardbot2.py dry-run
+python _local\_deploy_hardbot2.py deploy
+```
+
+`prepare-whisper`:
+
+- атомарно копирует модель в `/opt/hardbot2/models/whisper`;
+- проверяет размер и обязательные `model.bin`/`config.json`;
+- делает timestamp-backup серверного `docker-compose.yml`;
+- меняет только mount на
+  `/opt/hardbot2/models/whisper:/models/whisper:ro`;
+- проверяет `docker compose config --quiet`, но не перезапускает контейнер.
+
+Обычный `deploy` теперь откажется продолжать, пока собственная модель и read-only
+mount не подтверждены. Общий каталог Praxis не удаляется и не изменяется.
+
 ## 3. Разброс реестра по сотрудникам (пульт)
 
 Пульт → раздел **Реестр** → карточка **Разброс по сотрудникам**:

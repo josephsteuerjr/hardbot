@@ -28,6 +28,7 @@ db.bind_agent(111, synth.DEV_EMPLOYEE)
 
 PORT = int(os.getenv("MINIAPP_PORT", "8080"))
 URL = f"http://127.0.0.1:{PORT}/?dev_uid=111"
-threading.Timer(1.2, lambda: webbrowser.open(URL)).start()
+if os.getenv("HARDBOT_NO_BROWSER") != "1":
+    threading.Timer(1.2, lambda: webbrowser.open(URL)).start()
 print("Миниапп (дев-режим):", URL)
 aw.run_app(web.build_app(), host="127.0.0.1", port=PORT)

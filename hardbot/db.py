@@ -14,6 +14,7 @@ import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import country_scope
 import debt
 from fields import FIELDS, BY_KEY
 from util import num as _money_int   # единый разбор чисел (был дубль локальной логики)
@@ -33,7 +34,44 @@ BOOKKEEPING = [
     ("geo_src", "TEXT"),            # источник точки: nominatim/geonames/manual (выездник)
     ("tips", "TEXT"),               # наводки выездника (староста, соседи, ориентиры)
     ("updated_at", "TEXT"),
+    # Доказательство происхождения результата визита. Обычный импорт реестра эти
+    # колонки не знает и потому не может подделать завершённый визит миниаппа.
+    ("bot_visit_at", "TEXT"),
+    ("bot_visit_data", "TEXT"),
+    # Офисные правки визита, принятые импортом через якорь по «Дате выезда»
+    # (см. import_grid): сотрудники дописывают в реестрах и в офисе. Снимок
+    # bot_visit_data остаётся нетронутым доказательством фактического POST.
+    ("office_edit_data", "TEXT"),
+    # Журнал всех значений, которые бот/шлюз когда-либо считал правдой по полям
+    # визита. Нужен якорному шлюзу: файл, обогащённый между двумя визитами
+    # одного дня, содержит СТАРЫЙ снимок — без журнала он выглядел бы как
+    # «офисная правка» и откатывал бы результат повторного выезда.
+    ("visit_value_log", "TEXT"),
 ]
+
+# Ровно те поля, которые обогащение вправе переносить в живой Excel. Снимок
+# создаётся при finish=true только из фактически присланных миниаппом значений;
+# сырые HARD-поля clients могут содержать исторический импорт и доказательством
+# визита не являются.
+BOT_VISIT_KEYS = (
+    "visit_date", "call_status", "contact_with", "agreed_payment",
+    "who_at_address", "client_location", "purpose_rf",
+    "visit_comment", "call_comment",
+)
+# ``tips`` — тоже bot-owned поле формы, но в исходном реестре отдельной колонки
+# с таким ключом нет. Сохраняем его в доказанном снимке для safe-выгрузки; пульт
+# направляет значение в «Доп. Адрес/Доп.Номер». В OFFICE_EDIT_KEYS не включаем:
+# наводки меняет только выездник через приложение.
+BOT_SNAPSHOT_KEYS = BOT_VISIT_KEYS + ("tips",)
+BOT_VISIT_MARKER = "_bot_completed"
+BOT_DROPDOWN_KEYS = (
+    "call_status", "contact_with", "agreed_payment", "who_at_address",
+    "client_location", "purpose_rf",
+)
+BOT_IMPORT_PROTECTED = set(BOT_VISIT_KEYS) | {"tips"}
+# Поля, которые офис вправе поправить импортом ПОСЛЕ визита (через якорь по дате
+# выезда). Сама «Дата выезда» — якорь и ставится только ботом; наводки — только бот.
+OFFICE_EDIT_KEYS = set(BOT_VISIT_KEYS) - {"visit_date"}
 
 
 # Версия данных: монотонный счётчик, растёт при ЛЮБОЙ записи в clients. Нужен для
@@ -60,6 +98,177 @@ def connect() -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=8000")
     return conn
+
+
+def _bot_snapshot(values, completed_at: str) -> dict | None:
+    """Нормализованный снимок подтверждённого визита либо None при мусоре.
+
+    Дата обязана быть строгой ISO, dropdown-значения — входить в каноническую
+    схему. Это второй контур защиты после валидации API и фильтра пульта.
+    """
+    completed_at = str(completed_at or "").strip()
+    try:
+        if date.fromisoformat(completed_at).isoformat() != completed_at:
+            return None
+    except ValueError:
+        return None
+    out = {"visit_date": completed_at}
+    for key in BOT_SNAPSHOT_KEYS:
+        if key == "visit_date":
+            continue
+        try:
+            value = values[key]
+        except (KeyError, TypeError):
+            continue
+        if value in (None, ""):
+            continue
+        value = str(value).strip()
+        if not value:
+            continue
+        if key in BOT_DROPDOWN_KEYS and value not in (BY_KEY[key].options or []):
+            return None
+        out[key] = value
+    return out
+
+
+def _decode_bot_snapshot(row) -> dict | None:
+    """Проверить служебный JSON перед использованием как доверенного источника."""
+    try:
+        completed_at = row["bot_visit_at"]
+        data = json.loads(row["bot_visit_data"] or "")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or str(data.get("visit_date") or "") != completed_at:
+        return None
+    return _bot_snapshot(data, completed_at)
+
+
+def _decode_office_edits(row) -> dict:
+    """Принятые офисные правки визита (JSON office_edit_data) с той же строгой
+    валидацией, что у снимка: только ключи OFFICE_EDIT_KEYS, dropdown — только
+    канонические значения. Оверлей привязан к визиту, к которому его приняли
+    (visit_at == bot_visit_at): если код откатывали и старый record_bot_visit
+    записал новый снимок, не обнулив колонку, протухший оверлей не должен лечь
+    поверх свежего результата. Любой мусор молча отбрасывается (fail-closed)."""
+    try:
+        data = json.loads(row["office_edit_data"] or "")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError, IndexError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    try:
+        if str(data.get("visit_at") or "") != str(row["bot_visit_at"] or ""):
+            return {}
+    except (KeyError, IndexError):
+        return {}
+    fields = data.get("fields")
+    if not isinstance(fields, dict):
+        return {}
+    out = {}
+    for key, value in fields.items():
+        if key not in OFFICE_EDIT_KEYS or value in (None, ""):
+            continue
+        value = str(value).strip()
+        if not value:
+            continue
+        if key in BOT_DROPDOWN_KEYS and value not in (BY_KEY[key].options or []):
+            continue
+        out[key] = value
+    return out
+
+
+def _decode_value_log(row) -> dict:
+    """Журнал известных значений визита {ключ: [значения]} из visit_value_log."""
+    try:
+        data = json.loads(row["visit_value_log"] or "")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError, IndexError):
+        return {}
+    fields = data.get("fields") if isinstance(data, dict) else None
+    if not isinstance(fields, dict):
+        return {}
+    return {k: [str(v) for v in vs][-12:] for k, vs in fields.items()
+            if k in OFFICE_EDIT_KEYS and isinstance(vs, list)}
+
+
+def _log_append(log: dict, values: dict) -> dict:
+    """Дописать значения в журнал (без дублей, хвост из 12 на ключ)."""
+    out = {k: list(v) for k, v in log.items()}
+    for key, value in values.items():
+        if key not in OFFICE_EDIT_KEYS or value in (None, ""):
+            continue
+        s = str(value).strip()
+        if s and s not in out.setdefault(key, []):
+            out[key] = (out[key] + [s])[-12:]
+    return out
+
+
+def _log_json(log: dict) -> str:
+    return json.dumps({"fields": log}, ensure_ascii=False, separators=(",", ":"))
+
+
+def _canon_option(key: str, value: str) -> str | None:
+    """Свести значение dropdown к каноническому варианту: регистр и хвостовая
+    пунктуация (автозамены Excel) не должны превращать правку в отказ. Не
+    свелось — None (мусор вроде CONSUMER не проходит)."""
+    options = BY_KEY[key].options or []
+    if value in options:
+        return value
+    norm = value.casefold().strip(" .…!,;")
+    return next((o for o in options if o.casefold() == norm), None)
+
+
+def _merged_visit(row) -> dict | None:
+    """Подтверждённый результат визита: снимок миниаппа + принятые офисные правки.
+    Без валидного снимка офисные правки не существуют (некуда накладывать)."""
+    snapshot = _decode_bot_snapshot(row)
+    if snapshot is None:
+        return None
+    edits = _decode_office_edits(row)
+    return {**snapshot, **edits} if edits else snapshot
+
+
+def _backfill_bot_visit_snapshots(conn: sqlite3.Connection) -> int:
+    """Однократно сохранить доказанные старые визиты после добавления колонок.
+
+    Допуск строгий: есть строка history.visits, её последняя дата совпадает с
+    clients.visit_date, все непустые dropdown-значения каноничны. Несовпадение
+    означает старую сессию/последующий импорт и намеренно остаётся без маркера.
+    """
+    rows = conn.execute("""
+        WITH latest AS (
+          SELECT contract_id, MAX(id) AS visit_id
+          FROM visits
+          GROUP BY contract_id
+        )
+        SELECT c.*, v.id AS visit_id, v.created_at AS completed_at
+        FROM latest x
+        JOIN visits v ON v.id = x.visit_id
+        JOIN clients c ON c.contract_id = v.contract_id
+        ORDER BY v.id DESC
+    """).fetchall()
+    done: set[tuple[str, str, str]] = set()
+    changed = 0
+    for row in rows:
+        person = (row["client"] or "", row["birth_date"] or "",
+                  row["responsible"] or "")
+        if person in done:
+            continue
+        done.add(person)
+        if row["bot_visit_data"] or row["visit_date"] != row["completed_at"]:
+            continue
+        snapshot = _bot_snapshot(row, row["completed_at"])
+        if snapshot is None:
+            continue
+        payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+        cur = conn.execute(
+            "UPDATE clients SET bot_visit_at=?, bot_visit_data=? "
+            "WHERE client IS ? AND IFNULL(birth_date,'')=IFNULL(?, '') "
+            "AND IFNULL(responsible,'')=IFNULL(?, '') AND bot_visit_data IS NULL",
+            (row["completed_at"], payload, row["client"], row["birth_date"],
+             row["responsible"]),
+        )
+        changed += cur.rowcount
+    return changed
 
 
 def init_db() -> None:
@@ -221,6 +430,40 @@ def init_db() -> None:
               expires_at TEXT
             )
         """)
+        # Фактическая точка съёмки фото (вручение досудебки не подделаешь):
+        # миниапп шлёт координаты в момент загрузки /api/photo. Ключ — путь
+        # «КД/имя файла»: повторная доставка того же op из оффлайн-очереди
+        # строк не плодит. Колонка в реестре пока обсуждается — здесь только сбор.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS photo_geo (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              contract_id TEXT,
+              file TEXT UNIQUE,
+              telegram_id INTEGER,
+              lat REAL, lon REAL, acc_m INTEGER,
+              captured_at TEXT,
+              created_at TEXT
+            )
+        """)
+        # Беседы для отчётов о выездах: бот, добавленный в группу, регистрирует
+        # её здесь (выключенной); пульт включает и закрепляет сотрудников (ФИО
+        # из реестра). Закрытый визит сотрудника постится в его беседы.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS report_chats (
+              chat_id INTEGER PRIMARY KEY,
+              title TEXT,
+              enabled INTEGER NOT NULL DEFAULT 0,
+              removed INTEGER NOT NULL DEFAULT 0,
+              added_at TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS report_chat_employees (
+              chat_id INTEGER,
+              employee TEXT,
+              UNIQUE(chat_id, employee)
+            )
+        """)
         # Миграция ранней дев-схемы app_tokens (без expires_at).
         tcols = {r[1] for r in conn.execute("PRAGMA table_info(app_tokens)")}
         if "expires_at" not in tcols:
@@ -229,6 +472,32 @@ def init_db() -> None:
         lcols = {r[1] for r in conn.execute("PRAGMA table_info(app_links)")}
         if "uses" not in lcols:
             conn.execute("ALTER TABLE app_links ADD COLUMN uses INTEGER NOT NULL DEFAULT 0")
+        # Одноразовый переход без потери уже завершённых визитов: переносим только
+        # текущие значения, подтверждённые history.visits и той же датой. Маркер
+        # обязателен: после reset_visits история остаётся, и повторная миграция не
+        # должна воскресить старую сессию из очередного импорта.
+        migration_key = "migration_bot_visit_provenance_v1"
+        migrated = conn.execute(
+            "SELECT 1 FROM settings WHERE key=?", (migration_key,)).fetchone()
+        if not migrated:
+            n_backfilled = _backfill_bot_visit_snapshots(conn)
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?)",
+                (migration_key, json.dumps({"contracts": n_backfilled,
+                                            "at": date.today().isoformat()})),
+            )
+        # Сидинг журнала значений визита для строк, созданных до колонки
+        # visit_value_log: без него якорный шлюз принял бы эхо текущего снимка
+        # из давно обогащённого файла за офисную правку. Идемпотентно: после
+        # первого прохода журнал непустой и строка больше не выбирается.
+        for r in conn.execute("SELECT * FROM clients WHERE bot_visit_data IS NOT "
+                              "NULL AND visit_value_log IS NULL").fetchall():
+            seeded = _log_append(_log_append({}, _decode_bot_snapshot(r) or {}),
+                                 _decode_office_edits(r))
+            if seeded:
+                conn.execute(
+                    "UPDATE clients SET visit_value_log=? WHERE contract_id=?",
+                    (_log_json(seeded), r["contract_id"]))
         conn.commit()
 
 
@@ -297,6 +566,23 @@ def guests() -> list[dict]:
     return [{"telegram_id": r["telegram_id"], "username": r["username"],
              "name": r["name"], "last_seen": r["last_seen"],
              "bound_employee": r["bound"]} for r in rows]
+
+
+def guest(telegram_id: int) -> dict | None:
+    """Кто сидит на этом telegram_id ПО ФАКТУ (users), или None — бот такого не видел.
+
+    Имя руководителя в пульте печатает оператор, а права всегда получает владелец id.
+    Разошлись — значит роль ушла не тому: так запись «Михаил» со всеми четырьмя
+    городами оказалась на постороннем аккаунте и четыре дня получала полный дайджест
+    с ФИО должников. Поэтому перед выдачей роли сверяемся с этой функцией."""
+    with connect() as conn:
+        r = conn.execute(
+            "SELECT u.telegram_id, u.username, u.name, u.last_seen, b.employee AS bound "
+            "FROM users u LEFT JOIN agent_bind b ON b.telegram_id = u.telegram_id "
+            "WHERE u.telegram_id = ?", (telegram_id,)).fetchone()
+    return {"telegram_id": r["telegram_id"], "username": r["username"],
+            "name": r["name"], "last_seen": r["last_seen"],
+            "bound_employee": r["bound"]} if r else None
 
 
 # --- Привязка «кто есть кто» (telegram_id → сотрудник, одноразово) -----------
@@ -489,7 +775,7 @@ def create_app_link(telegram_id: int) -> str:
     """Код входа для автономного PWA (бот шлёт ссылкой). Прежние НЕОТКРЫТЫЕ коды
     юзера гасим (из неоткрытых жива только последняя ссылка; уже открытые доживают
     своё окно — по ним могли ещё не доустановить ярлык), выданный девайс-токен
-    НЕ трогаем: сообщение боту не разлогинивает телефон."""
+    НЕ трогаем: запрос новой ссылки не разлогинивает телефон."""
     code = secrets.token_urlsafe(18)
     now = datetime.now()
     with connect() as conn:
@@ -689,7 +975,7 @@ def employee_activity(employee: str) -> dict | None:
 
 def persons_processed(employee: str, on_date: str) -> list[dict]:
     """Люди сотрудника, у кого выезд состоялся в дату on_date (ISO). Сигнал —
-    clients.visit_date (его ставит миниапп при завершении визита). Возвращает
+    служебный bot_visit_at (его ставит только завершение в миниаппе). Возвращает
     сгруппированных людей (как persons_for_employee), но только обработанных в этот день."""
     target = _as_date(on_date)
     if target is None:
@@ -697,10 +983,11 @@ def persons_processed(employee: str, on_date: str) -> list[dict]:
     with connect() as conn:
         rows = conn.execute(
             "SELECT * FROM clients WHERE responsible = ? "
-            "AND visit_date IS NOT NULL AND TRIM(visit_date) <> ''",
+            "AND bot_visit_at IS NOT NULL AND TRIM(bot_visit_at) <> ''",
             (employee,),
         ).fetchall()
-    rows = [r for r in rows if _as_date(r["visit_date"]) == target]
+    rows = [r for r in rows if _as_date(r["bot_visit_at"]) == target
+            and _decode_bot_snapshot(r) is not None]
     return _group_persons(rows)
 
 
@@ -713,11 +1000,129 @@ def persons_processed_range(employee: str, date_from: str, date_to: str) -> list
     with connect() as conn:
         rows = conn.execute(
             "SELECT * FROM clients WHERE responsible = ? "
-            "AND visit_date IS NOT NULL AND TRIM(visit_date) <> ''",
+            "AND bot_visit_at IS NOT NULL AND TRIM(bot_visit_at) <> ''",
             (employee,),
         ).fetchall()
-    rows = [r for r in rows if (d := _as_date(r["visit_date"])) and lo <= d <= hi]
+    rows = [r for r in rows if _decode_bot_snapshot(r) is not None
+            and (d := _as_date(r["bot_visit_at"])) and lo <= d <= hi]
     return _group_persons(rows)
+
+
+# --- Гео фото (фактическая точка съёмки) -------------------------------------
+def add_photo_geo(contract_id: str, file: str, telegram_id: int,
+                  lat: float, lon: float, acc_m: int | None,
+                  captured_at: str | None = None) -> None:
+    """Запомнить точку загрузки фото. file = «КД/имя файла» (уникален);
+    повторная доставка того же фото из оффлайн-очереди строк не плодит."""
+    now = datetime.now().isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO photo_geo (contract_id, file, telegram_id, lat, lon, "
+            "acc_m, captured_at, created_at) VALUES (?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(file) DO NOTHING",
+            (contract_id, file, telegram_id, lat, lon, acc_m,
+             captured_at or now, now))
+        conn.commit()
+
+
+def photo_geo_for_files(files: list[str]) -> dict[str, sqlite3.Row]:
+    """{«КД/имя файла»: строка гео} для набора фото (отчёт в беседу, экспорт)."""
+    if not files:
+        return {}
+    qs = ",".join("?" for _ in files)
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM photo_geo WHERE file IN ({qs})", list(files)).fetchall()
+    return {r["file"]: r for r in rows}
+
+
+# --- Беседы для отчётов о выездах (опционально, настраивается пультом) --------
+def upsert_report_chat(chat_id: int, title: str) -> None:
+    """Бот в беседе → она появляется в списке пульта (выключенной). Сотрудники
+    при повторном добавлении сохраняются, но ВКЛЮЧЁННОСТЬ после выгона бота не
+    воскресает: кик — способ группы отписаться от отчётов, и любой участник,
+    вернувший бота, не должен молча возобновить посты с ПД. Включение — только
+    пульт."""
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO report_chats (chat_id, title, enabled, removed, added_at) "
+            "VALUES (?,?,0,0,?) ON CONFLICT(chat_id) DO UPDATE SET "
+            "title=excluded.title, "
+            "enabled=CASE WHEN report_chats.removed=1 THEN 0 "
+            "ELSE report_chats.enabled END, removed=0",
+            (chat_id, title, datetime.now().isoformat(timespec="seconds")))
+        conn.commit()
+
+
+def remove_report_chat(chat_id: int) -> None:
+    """Бота выгнали из беседы: помечаем, настройки и сотрудников не теряем."""
+    with connect() as conn:
+        conn.execute("UPDATE report_chats SET removed=1 WHERE chat_id=?", (chat_id,))
+        conn.commit()
+
+
+def list_report_chats() -> list[dict]:
+    with connect() as conn:
+        chats = conn.execute(
+            "SELECT * FROM report_chats ORDER BY added_at DESC, chat_id").fetchall()
+        emps: dict[int, list[str]] = {}
+        for r in conn.execute("SELECT chat_id, employee FROM report_chat_employees"):
+            emps.setdefault(r["chat_id"], []).append(r["employee"])
+    return [{"chat_id": r["chat_id"], "title": r["title"] or "",
+             "enabled": bool(r["enabled"]), "removed": bool(r["removed"]),
+             "added_at": r["added_at"] or "",
+             "employees": sorted(emps.get(r["chat_id"], []))} for r in chats]
+
+
+def set_report_chat(chat_id: int, enabled: bool | None = None,
+                    employees: list[str] | None = None) -> None:
+    """Настройка из пульта: включённость и/или список ФИО (None = не трогать)."""
+    with connect() as conn:
+        if enabled is not None:
+            conn.execute("UPDATE report_chats SET enabled=? WHERE chat_id=?",
+                         (1 if enabled else 0, chat_id))
+        if employees is not None:
+            conn.execute("DELETE FROM report_chat_employees WHERE chat_id=?",
+                         (chat_id,))
+            conn.executemany(
+                "INSERT OR IGNORE INTO report_chat_employees (chat_id, employee) "
+                "VALUES (?,?)",
+                [(chat_id, e.strip()) for e in employees if e and e.strip()])
+        conn.commit()
+
+
+def migrate_report_chat(old_id: int, new_id: int) -> None:
+    """Группа стала супергруппой — Telegram сменил chat_id. Переносим настройку
+    и сотрудников на новый id, чтобы отчёты не умерли молча."""
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM report_chats WHERE chat_id=?",
+                           (old_id,)).fetchone()
+        if row is None:
+            return
+        conn.execute(
+            "INSERT INTO report_chats (chat_id, title, enabled, removed, added_at) "
+            "VALUES (?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET "
+            "title=excluded.title, enabled=excluded.enabled, removed=0",
+            (new_id, row["title"], row["enabled"], row["removed"], row["added_at"]))
+        conn.execute("DELETE FROM report_chats WHERE chat_id=?", (old_id,))
+        for r in conn.execute("SELECT employee FROM report_chat_employees "
+                              "WHERE chat_id=?", (old_id,)).fetchall():
+            conn.execute("INSERT OR IGNORE INTO report_chat_employees "
+                         "(chat_id, employee) VALUES (?,?)", (new_id, r["employee"]))
+        conn.execute("DELETE FROM report_chat_employees WHERE chat_id=?", (old_id,))
+        conn.commit()
+
+
+def report_chats_for(employee: str) -> list[int]:
+    """Куда постить отчёт о визите сотрудника: беседа включена, бот в ней есть,
+    ФИО закреплено."""
+    if not (employee or "").strip():
+        return []
+    with connect() as conn:
+        return [r[0] for r in conn.execute(
+            "SELECT c.chat_id FROM report_chats c "
+            "JOIN report_chat_employees e ON e.chat_id = c.chat_id "
+            "WHERE c.enabled=1 AND c.removed=0 AND e.employee=?", (employee,))]
 
 
 # Путь к .env, откуда docker-compose (env_file) и load_dotenv() берут BOT_TOKEN.
@@ -866,6 +1271,54 @@ def update_person(rep_contract_id: str, values: dict) -> None:
         update_fields(r["contract_id"], values)
 
 
+def record_bot_visit(rep_contract_id: str, values: dict,
+                     completed_at: str | None = None) -> int:
+    """Зафиксировать доверенный снимок завершённого визита во всех КД человека.
+
+    ``values`` — уже отфильтрованное тело фактического POST /api/save; намеренно
+    не дочитываем пропущенные поля из clients, потому что там может лежать старый
+    импорт. Возвращает число помеченных договоров.
+    """
+    completed_at = completed_at or date.today().isoformat()
+    snapshot = _bot_snapshot(values, completed_at)
+    if snapshot is None:
+        return 0
+    contracts = person_contracts(rep_contract_id)
+    if not contracts:
+        return 0
+    payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+    now = date.today().isoformat()
+    with connect() as conn:
+        # office_edit_data=NULL: новый визит перекрывает прежние офисные правки —
+        # иначе старый оверлей лёг бы поверх свежего снимка повторного выезда.
+        # Журнал НЕ чистим, а дополняем: значения прежнего снимка должны остаться
+        # «известными», чтобы файл, обогащённый до повторного выезда, не выдал их
+        # импорту за офисные правки.
+        for r in contracts:
+            log = _log_append(_decode_value_log(r), snapshot)
+            conn.execute(
+                "UPDATE clients SET bot_visit_at=?, bot_visit_data=?, "
+                "office_edit_data=NULL, visit_value_log=?, updated_at=? "
+                "WHERE contract_id=?",
+                (completed_at, payload, _log_json(log), now, r["contract_id"]),
+            )
+        conn.commit()
+    _bump_version()
+    return len(contracts)
+
+
+def has_bot_visit(rep_contract_id: str) -> bool:
+    """Есть ли у человека валидный текущий снимок завершённого визита."""
+    return any(_decode_bot_snapshot(r) is not None
+               for r in person_contracts(rep_contract_id))
+
+
+def bot_visit_snapshot(row) -> dict | None:
+    """Публичное read-only представление подтверждённого результата визита строки:
+    снимок миниаппа + принятые офисные правки (карточка, миниапп, дайджест)."""
+    return _merged_visit(row)
+
+
 def person_history(rep_contract_id: str) -> list[sqlite3.Row]:
     cids = [r["contract_id"] for r in person_contracts(rep_contract_id)]
     if not cids:
@@ -915,6 +1368,13 @@ def overdue_promises(employee: str, on_date: str) -> list[dict]:
         pd = min(d for d in (_as_date(x["promise_date"]) for x in p["contracts"]) if d)
         p["promise_date"] = pd.isoformat()
         p["days_overdue"] = (target - pd).days
+        # Свежесть: ходил ли к нему выездник ПОСЛЕ того, как он обещал. Без этого
+        # признака список выглядит одинаково и для «обещал, съездили, снова тянет»,
+        # и для «обещал месяц назад, и с тех пор к нему никто не заходил».
+        visits = [_as_date(x["bot_visit_at"]) for x in p["contracts"]]
+        last = max([d for d in visits if d], default=None)
+        p["last_visit"] = last.isoformat() if last else None
+        p["visited_after_promise"] = bool(last and last >= pd)
     persons.sort(key=lambda p: -p["days_overdue"])
     return persons
 
@@ -949,7 +1409,8 @@ def stats_all() -> dict:
     with connect() as conn:
         total = conn.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
         visited = conn.execute(
-            "SELECT COUNT(*) FROM clients WHERE visit_date IS NOT NULL"
+            "SELECT COUNT(*) FROM clients WHERE bot_visit_at IS NOT NULL "
+            "AND TRIM(bot_visit_at) <> '' AND bot_visit_data IS NOT NULL"
         ).fetchone()[0]
         by_result = conn.execute(
             "SELECT COALESCE(overall_result,'(нет)') r, COUNT(*) c FROM clients "
@@ -959,6 +1420,43 @@ def stats_all() -> dict:
         "total": total, "visited": visited,
         "by_result": [(r["r"], r["c"]) for r in by_result],
     }
+
+
+def stats_by_country() -> list[dict]:
+    """Раздельная статистика Таджикистана/Узбекистана по явным manager scopes.
+
+    ``pool`` на живом реестре — числовой код и страной не является. Поэтому договор
+    относится к республике только через ``responsible`` сотрудника, включённого в
+    однозначный country-scope руководителя. Нераспределённые и неоднозначные строки
+    остаются в общей статистике ``stats_all``, но не угадываются здесь.
+    """
+    employee_map = country_scope.employee_countries(list_managers())
+    with connect() as conn:
+        registry_employees = {r["responsible"] for r in conn.execute(
+            "SELECT DISTINCT responsible FROM clients "
+            "WHERE responsible IS NOT NULL AND TRIM(responsible) <> ''")}
+        result = []
+        for spec in country_scope.COUNTRIES:
+            employees = sorted(emp for emp, code in employee_map.items()
+                               if code == spec["code"] and emp in registry_employees)
+            if employees:
+                marks = ",".join("?" for _ in employees)
+                total, visited = conn.execute(
+                    f"SELECT COUNT(*), SUM(CASE WHEN bot_visit_at IS NOT NULL "
+                    f"AND TRIM(bot_visit_at) <> '' AND bot_visit_data IS NOT NULL "
+                    f"THEN 1 ELSE 0 END) FROM clients "
+                    f"WHERE responsible IN ({marks})", employees).fetchone()
+                by_result = conn.execute(
+                    f"SELECT COALESCE(overall_result,'(нет)') r, COUNT(*) c "
+                    f"FROM clients WHERE responsible IN ({marks}) "
+                    f"GROUP BY r ORDER BY c DESC, r", employees).fetchall()
+            else:
+                total, visited, by_result = 0, 0, []
+            result.append({**country_scope.info(spec["code"]),
+                           "clients": total or 0, "visited": visited or 0,
+                           "employees": len(employees),
+                           "by_result": [(r["r"], r["c"]) for r in by_result]})
+    return result
 
 
 def activity_stats() -> list[dict]:
@@ -1061,6 +1559,36 @@ def log_visit(contract_id: str, agent_id: int, payload: str,
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+def same_visit_logged_today(contract_id: str, agent_id: int, payload: str,
+                            on_date: str | None = None) -> bool:
+    """Был ли СЕГОДНЯ записан ТОТ ЖЕ выезд: тот же выездник и тот же результат.
+
+    Нужно для дедупа УВЕДОМЛЕНИЙ, а не записи. op_id ловит только повтор из оффлайн-очереди
+    (тот же ключ), а повторное нажатие «Сохранить выезд» рождает НОВЫЙ op_id — и раньше это
+    было ещё одно уведомление руководителю по тому же должнику. В живой базе так набралось
+    149 лишних записей из 516, рекорд — 34 отбивки по одному договору за день.
+
+    Сравниваем именно СОДЕРЖИМОЕ: дедуп «была ли сегодня хоть одна строка» глушил и
+    второй настоящий выезд к тому же должнику — утром «нет контакта», вечером «обещает
+    оплатить», и об этом не узнавал никто, потому что в беседу отчётов повторов не бывает.
+
+    Сброс визитов из пульта не должен воскрешать дедуп: строки visits переживают reset
+    (на них держатся карта дня и активность), поэтому смотрим только на записи, сделанные
+    ПОСЛЕ последнего сброса — водяной знак по id, а не по дате, у которой суточная
+    гранулярность."""
+    on_date = on_date or date.today().isoformat()
+    try:
+        floor = int(get_setting("visits_reset_id") or 0)
+    except (TypeError, ValueError):
+        floor = 0
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT agent_id, payload FROM visits WHERE contract_id = ? AND created_at = ? "
+            "AND id > ? ORDER BY id DESC LIMIT 1",
+            (contract_id, on_date, floor)).fetchone()
+    return bool(row) and row["agent_id"] == agent_id and (row["payload"] or "") == (payload or "")
 
 
 def day_map_points(employee: str, on_date: str) -> dict:
@@ -1386,10 +1914,42 @@ def write_xlsx(path: str, rows: list[dict]) -> str:
 
 def registry_rows() -> list[dict]:
     """Строки реестра для экспорта: только колонки FIELDS, порядок как в БД-запросе.
-    Общий источник для xlsx-легаси и JSON-выдачи пульту."""
+    Это полный raw-слепок для отдельного режима сверки, включая импортные HARD-поля."""
     with connect() as conn:
         rows = conn.execute("SELECT * FROM clients ORDER BY client").fetchall()
     return [{f.key: r[f.key] for f in FIELDS} for r in rows]
+
+
+def enrichment_rows() -> list[dict]:
+    """Безопасные строки для точечного обогащения живых файлов.
+
+    Все потенциально импортные поля визита сначала очищаются. Вернуть их можно
+    только из валидного служебного снимка ``bot_visit_data``; дополнительный
+    boolean-маркер нужен новому пульту. Поэтому даже старый пульт, который всё
+    ещё смотрит лишь на непустой visit_date, не увидит неподтверждённый мусор.
+    """
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM clients ORDER BY client").fetchall()
+    result = []
+    for raw in rows:
+        row = {f.key: raw[f.key] for f in FIELDS}
+        for key in BOT_VISIT_KEYS:
+            if key in row:
+                row[key] = None
+        snapshot = _merged_visit(raw)
+        row[BOT_VISIT_MARKER] = snapshot is not None
+        if snapshot:
+            # Снимки, созданные до фикса маппинга 24.07, ещё не содержат ``tips``.
+            # Сама колонка bot-owned (import_grid её не знает и не пишет), поэтому
+            # при наличии валидного доказанного визита можно безопасно дослать
+            # сохранённые наводки из raw. Новые record_bot_visit уже кладут tips
+            # непосредственно в bot_visit_data.
+            tips = str(snapshot.get("tips") or raw["tips"] or "").strip()
+            if tips:
+                snapshot = {**snapshot, "tips": tips}
+            row.update(snapshot)
+        result.append(row)
+    return result
 
 
 def export_schema() -> list[dict]:
@@ -1448,11 +2008,36 @@ def import_grid(rows: list[list]) -> dict:
     призраки старых начислений (эвакуация, ДТП…), и сумма статей расходилась с
     «долгом всего». Колонки, которых в файле нет вообще, по-прежнему не трогаем.
 
+    Поля визита договоров с завершённым визитом бота проходят через якорный шлюз
+    (сотрудники дописывают в реестрах и в офисе — эта информация должна попадать
+    в бот, но нельзя дать устаревшему файлу затереть результат выездника):
+      * якорь — «Дата выезда» строки файла совпадает с датой визита бота. Дату
+        пишет в файл только обогащение, значит файл ВИДЕЛ результат бота;
+      * отличие принимается как офисная правка, только если значение НЕ известно
+        журналу visit_value_log (эхо прежнего снимка — файл, обогащённый между
+        визитами, не должен откатывать повторный выезд), не является сигнатурой
+        июльского яда (call_comment == серверный visit_comment) и для dropdown
+        сводится к каноническому варианту;
+      * принятая правка идёт в raw-поля и office_edit_data ВСЕХ договоров
+        человека с этим визитом (карточка/дайджест читают первый КД человека);
+        снимок bot_visit_data не меняется никогда;
+      * без якоря (старый файл, мусорная дата) — как раньше: всё выбрасывается.
+
     Возвращает отчёт — чтобы было видно ТОЧНО, что вошло:
-    {total_rows, inserted, updated, skipped_no_id, duplicates, unknown_columns}.
+    {total_rows, inserted, updated, skipped_no_id, duplicates, unknown_columns,
+    protected_cells, protected_contracts, office_cells, office_contracts,
+    office_applied}. protected_* — отклонено шлюзом (устаревший файл/мусор);
+    office_* — принятые офисные правки, office_applied = {КД: {поле: значение}}
+    (пульту — чтобы обогащение сразу писало свежепринятые значения).
     """
     report = {"total_rows": 0, "inserted": 0, "updated": 0,
-              "skipped_no_id": 0, "duplicates": 0, "unknown_columns": []}
+              "skipped_no_id": 0, "duplicates": 0, "unknown_columns": [],
+              "protected_cells": 0, "protected_contracts": 0,
+              "office_cells": 0, "office_contracts": 0, "office_applied": {},
+              # Строки без ответственного попадают в базу, но невидимы выезднику и не
+              # входят ни в один отчёт руководителя. Раньше это не показывалось нигде,
+              # поэтому 1970 договоров из 5267 «потерялись» молча.
+              "no_responsible": 0}
 
     title_to_key = {_norm_title(f.title): f.key for f in FIELDS}
     if not rows or len(rows) < 2:
@@ -1482,8 +2067,31 @@ def import_grid(rows: list[list]) -> dict:
     owned = debt.SOURCE_OWNED.intersection(k for k in col_keys if k)
 
     with connect() as conn:
-        existing = {r[0] for r in conn.execute("SELECT contract_id FROM clients")}
+        existing = {r["contract_id"]: r for r in conn.execute(
+            "SELECT contract_id, client, birth_date, responsible, bot_visit_at, "
+            "bot_visit_data, office_edit_data, visit_value_log FROM clients")}
+        # Визит — на человека: принятая правка разносится по всем его договорам
+        # с тем же визитом, иначе карточка/дайджест (первый КД человека) её не
+        # увидят, а файлы разъедутся построчно.
+        person_map: dict[tuple, list[str]] = {}
+        for r in existing.values():
+            if r["bot_visit_data"]:
+                person_map.setdefault(
+                    (r["client"] or "", r["birth_date"] or "",
+                     r["responsible"] or ""), []).append(r["contract_id"])
+        # Дубли КД в одном файле и договоры одного человека: накапливаем принятые
+        # правки/журнал, чтобы следующая строка видела свежее состояние (row0 из
+        # префетча внутри транзакции стар).
+        fresh_overlays: dict[str, dict] = {}
+        fresh_logs: dict[str, dict] = {}
+        office_cids: set[str] = set()
+        protected_cids: set[str] = set()
         seen: set[str] = set()
+        # Владелец каждого КД по мере разбора файла: в реестре у одного договора бывает
+        # несколько строк, и владелец может стоять только в первой. Без этой памяти
+        # счётчик «без ответственного» считал бы остальные строки ничьими и пугал бы
+        # цифрой, которой в базе нет.
+        owners: dict[str, str] = {}
         for raw in rows[best_h + 1:]:
             if raw is None or all(v is None for v in raw):
                 continue  # пустая строка
@@ -1499,7 +2107,13 @@ def import_grid(rows: list[list]) -> dict:
                     elif isinstance(val, date):
                         data[key] = val.isoformat()
                     else:
-                        data[key] = str(val).strip()
+                        text = str(val).strip()
+                        if not text:
+                            # Ячейка из пробелов — это НЕ «очистить поле». Пульт такие
+                            # гасит у себя, а веб-загрузка раньше писала "" и затирала
+                            # ответственного, после чего кейс исчезал у выездника.
+                            continue
+                        data[key] = text
             cid = data.get("contract_id")
             if not cid:
                 report["skipped_no_id"] += 1
@@ -1507,6 +2121,90 @@ def import_grid(rows: list[list]) -> dict:
             for key in owned - data.keys():   # статья есть в файле, в строке пусто → погашена
                 data[key] = None
             is_update = cid in existing or cid in seen
+            # Кто владеет строкой после импорта: значение из файла, иначе запомненное
+            # по этому же файлу, иначе прежнее из базы. Пустой владелец = кейс в базе
+            # есть, а у выездника его нет. Считаем по ДОГОВОРАМ, а не по строкам файла.
+            prev_resp = owners.get(cid) or (
+                existing[cid]["responsible"] if cid in existing else "")
+            owners[cid] = str(data.get("responsible") or prev_resp or "").strip()
+            # После подтверждённого визита очередной импорт может обновлять долг,
+            # адрес и прочие поля источника, а поля визита — только через якорный
+            # шлюз (см. докстринг): совпавшая «Дата выезда» доказывает, что файл
+            # видел результат бота, и отличия — офисная правка, а не старая копия.
+            row0 = existing.get(cid)
+            if row0 is not None and row0["bot_visit_data"]:
+                snapshot0 = _decode_bot_snapshot(row0) or {}
+                merged = _merged_visit(row0)
+                if merged:
+                    merged.update(fresh_overlays.get(cid) or {})
+                known = fresh_logs.get(cid) or _decode_value_log(row0)
+                anchor_ok = (merged is not None
+                             and _as_date(data.get("visit_date")) is not None
+                             and _as_date(data.get("visit_date"))
+                             == _as_date(merged.get("visit_date")))
+                office: dict = {}
+                rejected = 0
+                for key in BOT_IMPORT_PROTECTED:
+                    if key == "contract_id":
+                        continue
+                    sval = str(data.pop(key, None) or "").strip()
+                    if not sval:
+                        continue                # пустота никогда не затирает
+                    if not anchor_ok:
+                        rejected += 1           # старая копия/мусорная дата
+                        continue
+                    if key == "visit_date" or sval == str(merged.get(key) or ""):
+                        continue                # эхо текущего состояния
+                    if sval in known.get(key, ()):
+                        continue                # эхо ПРЕЖНЕГО снимка/правки: файл
+                                                # обогащён между визитами — это не
+                                                # человек, откатывать нечего
+                    if key == "call_comment" and sval in (
+                            str(merged.get("visit_comment") or ""),
+                            str(snapshot0.get("visit_comment") or "")):
+                        continue                # сигнатура июльского яда: бот-текст
+                                                # в «звонке»; примешь — легализуешь
+                                                # и отключишь анти-яд обогащения
+                    if key in BOT_DROPDOWN_KEYS:
+                        canon = _canon_option(key, sval)
+                        if canon is None:
+                            rejected += 1       # мусор вроде CONSUMER не проходит
+                            continue
+                        sval = canon
+                    office[key] = sval
+                if office:
+                    pkey = (row0["client"] or "", row0["birth_date"] or "",
+                            row0["responsible"] or "")
+                    sibs = [c for c in person_map.get(pkey, [])
+                            if existing[c]["bot_visit_at"] == row0["bot_visit_at"]]
+                    if cid not in sibs:
+                        sibs.append(cid)
+                    at = date.today().isoformat()
+                    for sc in sibs:
+                        base = existing[sc]
+                        ov = {**(fresh_overlays.get(sc)
+                                 or _decode_office_edits(base)), **office}
+                        lg = _log_append(fresh_logs.get(sc)
+                                         or _decode_value_log(base), office)
+                        fresh_overlays[sc], fresh_logs[sc] = ov, lg
+                        sets = ", ".join(f'"{k}"=?' for k in office)
+                        conn.execute(
+                            f'UPDATE clients SET {sets}, office_edit_data=?, '
+                            f'visit_value_log=? WHERE contract_id=?',
+                            (*office.values(),
+                             json.dumps({"at": at,
+                                         "visit_at": base["bot_visit_at"],
+                                         "fields": ov}, ensure_ascii=False,
+                                        separators=(",", ":")),
+                             _log_json(lg), sc))
+                        report["office_applied"].setdefault(sc, {}).update(office)
+                    for key, val in office.items():
+                        data[key] = val         # и в upsert самой строки файла
+                    office_cids.add(cid)
+                    report["office_cells"] += len(office)
+                if rejected:
+                    protected_cids.add(cid)
+                    report["protected_cells"] += rejected
             if cid in seen:
                 report["duplicates"] += 1
             seen.add(cid)
@@ -1524,6 +2222,11 @@ def import_grid(rows: list[list]) -> dict:
                 tuple(data.values()),
             )
             report["updated" if is_update else "inserted"] += 1
+        report["office_contracts"] = len(office_cids)        # договоры, не строки
+        report["protected_contracts"] = len(protected_cids)
+        # Считаем по итогу разбора всего файла, а не построчно: у одного договора в
+        # реестре бывает несколько строк, и владелец может стоять в любой из них.
+        report["no_responsible"] = sum(1 for owner in owners.values() if not owner)
         conn.commit()
     _bump_version()   # массовая запись реестра → инвалидируем кэш приоритета
     return report
@@ -1545,8 +2248,16 @@ def reset_visits() -> dict:
     sets = ", ".join(f'"{c}"=NULL' for c in VISIT_FILL_COLUMNS)
     with connect() as conn:
         n = conn.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
-        conn.execute(f"UPDATE clients SET {sets}, photos_count=0, visits_count=0")
+        conn.execute(f"UPDATE clients SET {sets}, bot_visit_at=NULL, "
+                     f"bot_visit_data=NULL, office_edit_data=NULL, "
+                     f"visit_value_log=NULL, photos_count=0, visits_count=0")
+        # Водяной знак для дедупа уведомлений: строки visits намеренно переживают сброс
+        # (на них держатся карта дня и активность), но выезд, закрытый ПОСЛЕ сброса,
+        # не должен считаться повтором вчерашнего — иначе первая же отбивка новой
+        # сессии молча пропадёт.
+        last = conn.execute("SELECT COALESCE(MAX(id), 0) FROM visits").fetchone()[0]
         conn.commit()
+    set_setting("visits_reset_id", str(last))
     _bump_version()
     return {"ok": True, "scope": "visits", "clients_reset": n}
 
@@ -1563,4 +2274,3 @@ def wipe_registry() -> dict:
         conn.commit()
     _bump_version()
     return {"ok": True, "scope": "all", "clients_removed": n}
-

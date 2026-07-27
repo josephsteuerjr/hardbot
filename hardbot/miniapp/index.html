@@ -25,26 +25,34 @@ if("serviceWorker" in navigator){
   --bg:#FAF9F5; --card:#FFFFFF; --alt:#F5F4ED; --border:#E6E2D9;
   --text:#2B2825; --muted:#6B6660; --accent:#36332E; --accent2:#46423B;
   --success:#5B8A3C; --danger:#B0472C; --navblue:#2F6FED;
+  --app-height:100vh;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-body{margin:0;background:var(--bg);color:var(--text);
+html{width:100%;height:100%;overflow:hidden;overscroll-behavior:none;background:var(--bg)}
+body{position:fixed;top:0;left:0;right:0;width:100%;height:var(--app-height);margin:0;
+  overflow:hidden;overscroll-behavior:none;background:var(--bg);color:var(--text);
+  display:flex;flex-direction:column;
   font-family:'Inter',-apple-system,'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.45}
-body.navon{overflow:hidden}
+button,a,input,select,textarea,.pcard{touch-action:manipulation}
 .ico{display:inline-flex;flex:0 0 auto;width:18px;height:18px}
 .ico svg{width:100%;height:100%;display:block}
 .bar{display:flex;align-items:center;justify-content:space-between;
-  padding:12px 14px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);z-index:5}
+  padding:12px 14px;border-bottom:1px solid var(--border);position:relative;
+  flex:0 0 auto;background:var(--bg);z-index:5}
 .brand{font-weight:600;letter-spacing:.3px}
 /* Индикатор оффлайна / очереди отправки (данные кэшируются, визиты — в очередь). */
 .offbar{display:none;align-items:center;gap:8px;padding:7px 14px;font-size:12.5px;
-  background:#FBEED9;color:#7A5A1E;border-bottom:1px solid #EBD9B5;position:sticky;top:49px;z-index:4}
+  background:#FBEED9;color:#7A5A1E;border-bottom:1px solid #EBD9B5;
+  position:relative;flex:0 0 auto;z-index:4}
 .offbar.on{display:flex}
 .offbar .d{width:7px;height:7px;border-radius:50%;background:#C9852A;flex:0 0 auto}
 .langs{display:flex;gap:4px}
 .langs button{border:1px solid var(--border);background:var(--card);border-radius:20px;
   padding:4px 10px;font-size:12px;color:var(--muted);font-family:inherit}
 .langs button.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
-.wrap{padding:12px 14px 96px;max-width:520px;margin:0 auto}
+.wrap{flex:1 1 auto;min-height:0;width:100%;padding:12px 14px 96px;max-width:520px;
+  margin:0 auto;overflow-x:hidden;overflow-y:auto;overscroll-behavior-y:contain;
+  -webkit-overflow-scrolling:touch;scrollbar-gutter:stable;scroll-padding-bottom:96px}
 .muted{color:var(--muted)}
 .searchwrap{position:relative;margin-bottom:10px}
 .searchwrap .ico{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--muted)}
@@ -52,8 +60,8 @@ body.navon{overflow:hidden}
   background:var(--card);font-size:15px;font-family:inherit;margin:0;color:var(--text)}
 .pcard{background:var(--card);border:1px solid var(--border);border-radius:12px;
   padding:12px 14px;margin-bottom:8px;display:flex;align-items:center;gap:12px;cursor:pointer;
-  box-shadow:0 1px 2px rgba(43,40,37,.04);transition:transform .1s}
-.pcard:active{transform:scale(.98)}
+  box-shadow:0 1px 2px rgba(43,40,37,.04);transition:background .1s}
+.pcard:active{background:var(--alt)}
 .pinfo{flex:1;min-width:0}
 .pchev{color:var(--border);flex:0 0 auto}
 .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto;background:var(--border)}
@@ -69,8 +77,8 @@ body.navon{overflow:hidden}
   padding:9px 10px;font-size:13px;color:var(--text);font-family:inherit;white-space:nowrap}
 .tabs button.on{background:var(--accent);color:var(--bg);border-color:var(--accent);
   box-shadow:0 2px 8px rgba(43,40,37,.18)}
-.panel{display:none} .panel.on{display:block;animation:fadein .18s ease}
-@keyframes fadein{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.panel{display:none} .panel.on{display:block;animation:fadein .12s ease}
+@keyframes fadein{from{opacity:0}to{opacity:1}}
 .box{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:10px}
 .kv{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid var(--alt);font-size:14px}
 .kv:last-child{border-bottom:none}
@@ -123,7 +131,7 @@ textarea{min-height:64px;resize:vertical}
 .cdhead{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:2px}
 .cdhead .t{margin-bottom:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cdsum{font-weight:600;white-space:nowrap}
-.toast{position:fixed;left:50%;bottom:84px;transform:translateX(-50%);background:var(--accent);
+.toast{position:absolute;left:50%;bottom:84px;transform:translateX(-50%);background:var(--accent);
   color:var(--bg);padding:10px 18px;border-radius:24px;font-size:14px;opacity:0;
   transition:opacity .2s;pointer-events:none;z-index:30}
 .toast.show{opacity:1}
@@ -139,7 +147,7 @@ textarea{min-height:64px;resize:vertical}
 .mkdot{width:8px;height:8px;border-radius:50%;background:var(--danger);flex:0 0 auto}
 
 /* --- нижняя навигация (как в нативном приложении) --- */
-.bottomnav{position:fixed;left:0;right:0;bottom:0;z-index:20;display:none;
+.bottomnav{position:absolute;left:0;right:0;bottom:0;z-index:20;display:none;
   background:rgba(250,249,245,.92);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
   border-top:1px solid var(--border);padding:7px 10px calc(7px + env(safe-area-inset-bottom,0px))}
 .bottomnav-inner{display:flex;max-width:520px;margin:0 auto}
@@ -149,7 +157,7 @@ textarea{min-height:64px;resize:vertical}
 .bottomnav button .ico{width:21px;height:21px}
 
 /* --- полноэкранный режим навигации («Поехать») --- */
-.navmode{position:fixed;inset:0;background:var(--bg);z-index:100;display:none}
+.navmode{position:absolute;inset:0;background:var(--bg);z-index:100;display:none}
 .navmode.on{display:block}
 .navmap{position:absolute;inset:0}
 .navexit,.navrecenter{position:absolute;z-index:6;border:none;font-family:inherit;cursor:pointer;
@@ -191,7 +199,25 @@ textarea{min-height:64px;resize:vertical}
 
 <script>
 const TG = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-if (TG) { TG.ready(); TG.expand(); }
+function lockAppViewport(){
+  // Telegram отдаёт stableHeight отдельно от текущей высоты клавиатуры/свайпа. Фиксируем
+  // оболочку по стабильному viewport: двигается только .wrap, а не всё приложение.
+  const h = TG && Number(TG.viewportStableHeight) > 0
+    ? Number(TG.viewportStableHeight) : window.innerHeight;
+  if(h > 0) document.documentElement.style.setProperty("--app-height", Math.round(h)+"px");
+}
+if (TG) {
+  TG.ready();
+  TG.expand();
+  // Telegram 7.7+: вертикальный жест больше не тянет весь WebApp вниз/к закрытию.
+  try { if(typeof TG.disableVerticalSwipes === "function") TG.disableVerticalSwipes(); } catch(e) {}
+  lockAppViewport();
+  try { TG.onEvent("viewportChanged", e=>{ if(!e || e.isStateStable) lockAppViewport(); }); } catch(e) {}
+} else {
+  lockAppViewport();
+  // В standalone PWA пересчитываем рамку только при реальном повороте, не при клавиатуре.
+  window.addEventListener("orientationchange", ()=>setTimeout(lockAppViewport, 120));
+}
 
 // --- Иконки (инлайн-SVG вместо эмодзи — единый, спокойный визуальный язык). ---
 const ICONS = {
@@ -218,7 +244,7 @@ const I18N = {
     drive:"Доехать",call:"Позвонить",save:"Сохранить выезд",addphoto:"Добавить фото",
     routeday:"Маршрут дня",rdempty:"Нет невизитированных кейсов с точками",
     voice:"Надиктовать",voicestop:"Стоп — распознать",voicewait:"Распознаю…",voicefail:"Не распозналось, попробуйте ещё",
-    comment:"Комментарий",tips:"Наводки (староста, соседи, ориентиры)",lastvisit:"Последний выезд",
+    comment:"Комментарий",tips:"Доп. адрес / доп. номер",lastvisit:"Последний выезд",
     status:"Статус",saved:"Сохранено",none:"Точка не задана",geook:"Точка проверена",
     nocl:"За вами пока никто не закреплён",photos:"Фото",contracts:"Договоры",promise:"Обещания",born:"Дата рождения",
     approx:"≈ примерно (центр н.п.)",exact:"точный адрес",manualpt:"точку отметил выездник",
@@ -230,8 +256,8 @@ const I18N = {
     draftwait:"черновик не отправлен на сервер",draftsent:"черновик сохранён на сервере",
     offline:"Оффлайн",datao:"данные на",pend:"ждут отправки",sending:"Отправляю…",
     savedoff:"Сохранено — уйдёт при связи",queuedn:"в очереди",
-    authexpired:"Срок доступа истёк. Напишите боту любое сообщение — придёт новая ссылка: откройте её и добавьте приложение на экран заново, либо вставьте её сюда. Несинхронизированные визиты не потеряются.",
-    authneed:"Нет доступа. Напишите боту любое сообщение — придёт ссылка для входа: откройте её, либо вставьте сюда.",
+    authexpired:"Срок доступа истёк. Напишите боту слово «ссылка» — придёт новая ссылка: откройте её и добавьте приложение на экран заново, либо вставьте её сюда. Несинхронизированные визиты не потеряются.",
+    authneed:"Нет доступа. Напишите боту слово «ссылка» — придёт ссылка для входа: откройте её, либо вставьте сюда.",
     entercode:"Вставить ссылку вручную",codeprompt:"Вставьте ссылку или код из сообщения бота:",codeph:"Ссылка из сообщения бота",
     secResult:"Результат выезда",secContact:"Контакт",secClient:"Клиент сейчас",secAgree:"Договорённость",
     nosplit:"разбивка по статьям не пришла"},
@@ -240,7 +266,7 @@ const I18N = {
     drive:"Borish",call:"Qo‘ng‘iroq",save:"Chiqishni saqlash",addphoto:"Rasm qo‘shish",
     routeday:"Kun marshruti",rdempty:"Nuqtali ochiq ishlar yo‘q",
     voice:"Ovozli izoh",voicestop:"To‘xtatish",voicewait:"Aniqlanmoqda…",voicefail:"Bo‘lmadi, yana urinib ko‘ring",
-    comment:"Izoh",tips:"Ko‘rsatma (oqsoqol, qo‘shnilar, mo‘ljal)",lastvisit:"Oxirgi chiqish",
+    comment:"Izoh",tips:"Qo‘shimcha manzil / raqam",lastvisit:"Oxirgi chiqish",
     status:"Holat",saved:"Saqlandi",none:"Nuqta yo‘q",geook:"Nuqta tekshirildi",
     nocl:"Sizga hali mijoz biriktirilmagan",photos:"Rasm",contracts:"Shartnomalar",promise:"Va’dalar",born:"Tug‘ilgan sana",
     approx:"≈ taxminan (aholi punkti markazi)",exact:"aniq manzil",manualpt:"nuqtani chiquvchi belgilagan",
@@ -252,8 +278,8 @@ const I18N = {
     draftwait:"qoralama serverga yuborilmadi",draftsent:"qoralama serverda saqlandi",
     offline:"Oflayn",datao:"ma’lumot",pend:"yuboriladi",sending:"Yuborilmoqda…",
     savedoff:"Saqlandi — aloqa paydo bo‘lsa yuboriladi",queuedn:"navbatda",
-    authexpired:"Kirish muddati tugadi. Botga istalgan xabar yozing — yangi havola keladi: uni oching va ilovani ekranga qayta qo‘shing, yoki shu yerga joylang. Yuborilmagan chiqishlar yo‘qolmaydi.",
-    authneed:"Kirish yo‘q. Botga istalgan xabar yozing — kirish havolasi keladi: uni oching yoki shu yerga joylang.",
+    authexpired:"Kirish muddati tugadi. Botga «ссылка» deb yozing — yangi havola keladi: uni oching va ilovani ekranga qayta qo‘shing, yoki shu yerga joylang. Yuborilmagan chiqishlar yo‘qolmaydi.",
+    authneed:"Kirish yo‘q. Botga «ссылка» deb yozing — kirish havolasi keladi: uni oching yoki shu yerga joylang.",
     entercode:"Havolani qo‘lda joylash",codeprompt:"Bot xabaridagi havola yoki kodni joylashtiring:",codeph:"Bot xabaridagi havola",
     secResult:"Chiqish natijasi",secContact:"Kontakt",secClient:"Mijoz hozir",secAgree:"Kelishuv",
     nosplit:"moddalar bo‘yicha taqsimot kelmadi"},
@@ -262,7 +288,7 @@ const I18N = {
     drive:"Расидан",call:"Занг задан",save:"Сафарро захира",addphoto:"Расм илова",
     routeday:"Масири рӯз",rdempty:"Кейси кушодаи нуқтадор нест",
     voice:"Гуфтан",voicestop:"Ист — шинохт",voicewait:"Шинохта истодааст…",voicefail:"Нашуд, боз кӯшиш кунед",
-    comment:"Шарҳ",tips:"Ишора (оқсаққол, ҳамсоягон, нишона)",lastvisit:"Сафари охирин",
+    comment:"Шарҳ",tips:"Суроға / рақами иловагӣ",lastvisit:"Сафари охирин",
     status:"Ҳолат",saved:"Захира шуд",none:"Нуқта нест",geook:"Нуқта тасдиқ шуд",
     nocl:"Ба шумо ҳоло мизоҷе вобаста нашудааст",photos:"Расм",contracts:"Шартномаҳо",promise:"Ваъдаҳо",born:"Санаи таваллуд",
     approx:"≈ тахминан (маркази деҳа)",exact:"суроғаи аниқ",manualpt:"нуқтаро выездник гузошт",
@@ -274,8 +300,8 @@ const I18N = {
     draftwait:"нусха ба сервер нафиристода шуд",draftsent:"нусха дар сервер захира шуд",
     offline:"Офлайн",datao:"додаҳо аз",pend:"дар навбат",sending:"Фиристода мешавад…",
     savedoff:"Захира шуд — ҳангоми алоқа фиристода мешавад",queuedn:"дар навбат",
-    authexpired:"Мӯҳлати дастрасӣ гузашт. Ба бот ҳар паём нависед — пайванди нав меояд: онро кушоед ва барномаро аз нав ба экран гузоред, ё ин ҷо гузоред. Сафарҳои фиристоданашуда гум намешаванд.",
-    authneed:"Дастрасӣ нест. Ба бот ҳар паём нависед — пайванди воридшавӣ меояд: онро кушоед ё ин ҷо гузоред.",
+    authexpired:"Мӯҳлати дастрасӣ гузашт. Ба бот калимаи «ссылка» нависед — пайванди нав меояд: онро кушоед ва барномаро аз нав ба экран гузоред, ё ин ҷо гузоред. Сафарҳои фиристоданашуда гум намешаванд.",
+    authneed:"Дастрасӣ нест. Ба бот калимаи «ссылка» нависед — пайванди воридшавӣ меояд: онро кушоед ё ин ҷо гузоред.",
     entercode:"Гузоштани пайванд дастӣ",codeprompt:"Пайванд ё коди паёми ботро гузоред:",codeph:"Пайванд аз паёми бот",
     secResult:"Натиҷаи сафар",secContact:"Тамос",secClient:"Мизоҷ ҳозир",secAgree:"Созиш",
     nosplit:"тақсимот аз рӯи моддаҳо наомад"},
@@ -386,7 +412,8 @@ async function flushQueue(){
           r=await fetch("/api/marker",{method:"POST",headers:jsonHeaders(),body:JSON.stringify(body)});
         }else if(it.kind==="photo"){
           const fd=new FormData(); fd.append("photo", it.blob, "photo"+(it.ext||".jpg"));
-          r=await fetch("/api/photo?rep="+enc(it.rep)+"&op="+it.op_id,{method:"POST",headers:authHeaders(),body:fd});
+          r=await fetch("/api/photo?rep="+enc(it.rep)+"&op="+it.op_id,
+            {method:"POST",headers:photoHeaders(it.geo),body:fd});
         }else{ ok=true; }   // неизвестный тип — не держим вечно
         if(r){
           if(r.ok) ok=true;
@@ -500,7 +527,7 @@ window.addEventListener('hashchange', async()=>{
   if(c && (await redeemCode(c, true))===true) boot();
 });
 // Экран «нужна ссылка от бота»: истёкший токен или мёртвый код без токена. Самолечение —
-// любое сообщение боту приносит новую ссылку; кнопка ручного ввода кода закрывает случай,
+// слово «ссылка» боту приносит новую ссылку; кнопка ручного ввода кода закрывает случай,
 // когда открыть ссылку в этом же браузере неудобно (iOS вне Chrome и т.п.).
 function renderAppAuthGone(expired){
   hideBottomNav(); const t=L();
@@ -816,7 +843,7 @@ function renderMap(){
   const t=L();
   const pts=STATE.persons.filter(p=>p.lat!=null&&p.lon!=null);
   $("app").innerHTML=`<div class="muted" style="margin-bottom:8px">${t.onmap}: ${pts.length}/${STATE.persons.length}</div>
-     <div id="map" style="height:calc(100vh - 230px);min-height:320px;border-radius:14px;overflow:hidden"></div>`;
+     <div id="map" style="height:calc(var(--app-height, 100dvh) - 230px);min-height:320px;border-radius:14px;overflow:hidden"></div>`;
   setTimeout(()=>initClientsMap(pts),0);
   setBottomNav("map");
 }
@@ -934,7 +961,7 @@ function panelForm(d,t){
       <div class="muted" id="phc" style="font-size:12px;margin-top:6px">${t.photos}: ${d.photos||0}</div>
     </div>
     <div id="draftstat" class="draftrow" style="display:none"></div>
-    <button class="btn acc big" style="margin-top:12px" onclick="saveVisit()">${ic("check")}<span>${t.save}</span></button>`;
+    <button class="btn acc big" id="savebtn" style="margin-top:12px" onclick="saveVisit()">${ic("check")}<span>${t.save}</span></button>`;
 }
 
 // --- Ссылки на внешнюю навигацию (последняя миля — родное приложение телефона). ---
@@ -960,19 +987,33 @@ function providerChips(d){
 function openExt(e,url){ if(TG&&TG.openLink){ e.preventDefault(); TG.openLink(url); } }
 function call(){ if(STATE.cur.phone) location.href="tel:"+STATE.cur.phone.replace(/[^+\d]/g,""); }
 
+// Гео снимается В МОМЕНТ съёмки (не отправки): фактическая точка вручения
+// досудебки. Уходит ЗАГОЛОВКОМ (не в URL — query оседает в access-логах),
+// одинаково для онлайн-пути и оффлайн-очереди. ts — реальное время гео-фикса
+// (не момент вызова): кэшированная точка не выдаётся за точку съёмки.
+function photoHeaders(geo){
+  const h=authHeaders();
+  if(geo) h["X-Photo-Geo"]=geo.lat+","+geo.lon+","+(geo.acc||0)+","+(geo.ts||Date.now());
+  return h;
+}
 async function upPhoto(){
   const f=$("photo").files[0]; if(!f) return;
   const rep=STATE.cur.rep, op_id=uuid();
   const ext=(f.name&&f.name.lastIndexOf(".")>0)?f.name.slice(f.name.lastIndexOf(".")):".jpg";
+  // maximumAge 5с: для пруфа съёмки нужна свежая точка, а не кэш минутной
+  // давности от прошлого адреса. Нет разрешения/сигнала — фото без точки.
+  const geo=await grabGeo(4000,5000);
   const fd=new FormData(); fd.append("photo",f);
   try{
-    const r=await fetch("/api/photo?rep="+enc(rep)+"&op="+op_id,{method:"POST",headers:authHeaders(),body:fd});
+    const r=await fetch("/api/photo?rep="+enc(rep)+"&op="+op_id,
+      {method:"POST",headers:photoHeaders(geo),body:fd});
     if(!r.ok) throw new Error(r.status);
     const j=await r.json(); STATE.online=true;
     STATE.cur.photos=j.photos; $("phc").textContent=L().photos+": "+j.photos; toast(L().saved);
   }catch(e){
-    // Нет сети — фото (blob) в очередь; счётчик покажем оптимистично, отправим при связи.
-    await enqueue({op_id, kind:"photo", rep, blob:f, ext, at:Date.now()});
+    // Нет сети — фото (blob) в очередь вместе с гео момента съёмки; счётчик
+    // покажем оптимистично, отправим при связи.
+    await enqueue({op_id, kind:"photo", rep, blob:f, ext, geo, at:Date.now()});
     STATE.online=false; STATE.cur.photos=(STATE.cur.photos||0)+1;
     const el=$("phc"); if(el) el.textContent=L().photos+": "+STATE.cur.photos+" ("+L().queuedn+")";
     toast(L().savedoff); updateOffBar();
@@ -980,16 +1021,18 @@ async function upPhoto(){
 }
 // Точка закрытия визита — для гео-контроля на сервере (⚠️ «закрыт далеко от адреса»).
 // Не блокирует сохранение: нет разрешения/сигнала за ms — сохраняем без точки.
-function grabGeo(ms){
+function grabGeo(ms,maxAge){
   return new Promise(res=>{
     if(!navigator.geolocation) return res(null);
     let done=false;
     const fin=v=>{ if(!done){ done=true; clearTimeout(t); res(v); } };
     const t=setTimeout(()=>fin(null), ms);
     navigator.geolocation.getCurrentPosition(
-      p=>fin({lat:p.coords.latitude, lon:p.coords.longitude}),
+      p=>fin({lat:p.coords.latitude, lon:p.coords.longitude,
+              acc:Math.round(p.coords.accuracy||0), ts:p.timestamp||0}),
       ()=>fin(null),
-      {enableHighAccuracy:true, timeout:ms, maximumAge:60000});
+      {enableHighAccuracy:true, timeout:ms,
+       maximumAge:(maxAge==null?60000:maxAge)});
   });
 }
 
@@ -1032,21 +1075,33 @@ async function toggleVoice(){
   setTimeout(()=>{ if(REC){ try{REC.stop();}catch(e){} } }, 60000);   // предохранитель
 }
 
+// Кнопка гасится на всё время отправки: grabGeo ждёт точку до 4 секунд, и за эту паузу
+// палец успевает нажать ещё раз. Каждое нажатие — новый op_id, то есть отдельный выезд и
+// отдельная отбивка руководителю (в проде так набралось 34 записи по одному договору).
+let SAVING=false;
 async function saveVisit(){
-  const values=readForm();
-  const rep=STATE.cur.rep, op_id=uuid();
-  const geo=await grabGeo(4000);
-  const body={rep,values,finish:true,op_id};
-  if(geo) body.geo=geo;
+  if(SAVING) return;
+  SAVING=true;
+  const btn=$("savebtn"); if(btn) btn.disabled=true;
   try{
-    const j=await api("/api/save",{method:"POST",body:JSON.stringify(body)});
-    STATE.online=true; STATE.cur=j.person; IDB.put("cards",j.person,rep).catch(()=>{});
-    finishSavedUI(rep, L().saved);
-  }catch(e){
-    // Нет сети — кладём выезд в очередь, помечаем визит локально; уйдёт при связи.
-    await enqueue({op_id, kind:"save", rep, values, geo, at:Date.now()});
-    STATE.online=false; applyVisitLocally(rep, values);
-    finishSavedUI(rep, L().savedoff);
+    const values=readForm();
+    const rep=STATE.cur.rep, op_id=uuid();
+    const geo=await grabGeo(4000);
+    const body={rep,values,finish:true,op_id};
+    if(geo) body.geo=geo;
+    try{
+      const j=await api("/api/save",{method:"POST",body:JSON.stringify(body)});
+      STATE.online=true; STATE.cur=j.person; IDB.put("cards",j.person,rep).catch(()=>{});
+      finishSavedUI(rep, L().saved);
+    }catch(e){
+      // Нет сети — кладём выезд в очередь, помечаем визит локально; уйдёт при связи.
+      await enqueue({op_id, kind:"save", rep, values, geo, at:Date.now()});
+      STATE.online=false; applyVisitLocally(rep, values);
+      finishSavedUI(rep, L().savedoff);
+    }
+  } finally {
+    SAVING=false;
+    const b=$("savebtn"); if(b) b.disabled=false;
   }
 }
 

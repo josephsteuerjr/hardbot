@@ -120,6 +120,13 @@ select.gsel{max-width:260px;text-overflow:ellipsis}
 .chip.mode-d{background:rgba(176,71,44,.09);color:var(--danger)}
 .chip.mode-r{background:var(--alt);color:var(--muted)}
 .chip.ok{background:rgba(91,138,60,.12);color:var(--success)}
+.countrygrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.country{border:1px solid var(--border);border-radius:11px;padding:12px;background:var(--card)}
+.country .ctitle{font-weight:600;margin-bottom:8px}
+.country .cnums{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:8px}
+.country .cnum{background:var(--alt);border-radius:8px;padding:6px 8px}
+.country .cnum span{display:block;color:var(--muted);font-size:10.5px}
+.country .cnum b{font-size:14px;font-variant-numeric:tabular-nums}
 
 /* ---------- выбираемые чипсы (города / сотрудники руководителя) ---------- */
 .pick{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
@@ -203,6 +210,7 @@ input[type=range]{width:100%;accent-color:var(--accent);margin:0;height:22px}
   .logo{justify-content:center;padding-left:0;padding-right:0}
   .sidefoot{justify-content:center}
   .weights{grid-template-columns:1fr}
+  .countrygrid{grid-template-columns:1fr}
 }
 </style>
 </head>
@@ -285,6 +293,12 @@ input[type=range]{width:100%;accent-color:var(--accent);margin:0;height:22px}
         <div class="metric"><div class="top"><span class="l">Меток</span>
           <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z"/><circle cx="12" cy="10" r="3"/></svg></span></div>
           <div class="n" id="m_marks">—</div></div>
+      </div>
+
+      <div class="card">
+        <h2>По республикам</h2>
+        <p class="desc">Закреплённые кейсы по scope руководителей; числовой «Пул» страной не считается.</p>
+        <div class="countrygrid" id="countryStats"></div>
       </div>
 
       <div class="card">
@@ -592,6 +606,24 @@ const base = ()=> $("url").value.trim().replace(/\/+$/,"");
 const hdr  = ()=> ({ "X-Admin-Key": $("key").value.trim() });
 const fmt  = (n)=> (n==null?"—":Number(n).toLocaleString("ru-RU"));
 function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function renderCountryStats(items){
+  const by=Object.fromEntries((items||[]).map(x=>[x.code,x]));
+  $("countryStats").innerHTML=[["tj","🇹🇯 Таджикистан"],["uz","🇺🇿 Узбекистан"]]
+    .map(([code,title])=>{
+      const c=by[code]||{}, clients=Number(c.clients||0), visited=Number(c.visited||0);
+      const pc=clients?Math.round(visited/clients*100):0;
+      const outcomes=(c.by_result||[])
+        .map(([name,n])=>`<span class="chip">${esc(name||"без исхода")} <b>${fmt(n)}</b></span>`)
+        .join("") || `<span class="small muted">нет закреплённых кейсов</span>`;
+      return `<div class="country"><div class="ctitle">${title}</div><div class="cnums">
+        <div class="cnum"><span>договоров</span><b>${fmt(clients)}</b></div>
+        <div class="cnum"><span>с визитом</span><b>${fmt(visited)}</b></div>
+        <div class="cnum"><span>покрытие</span><b>${pc}%</b></div>
+        <div class="cnum"><span>сотрудников</span><b>${fmt(c.employees||0)}</b></div>
+        </div><div class="chips">${outcomes}</div></div>`;
+    }).join("");
+}
+renderCountryStats([]);
 
 /* ---------- навигация ---------- */
 document.querySelectorAll("#nav button").forEach(b=>b.addEventListener("click",()=>nav(b.dataset.sec)));
@@ -635,6 +667,7 @@ async function refresh(){
     $("m_clients").textContent=fmt(d.clients); $("m_visited").textContent=fmt(d.visited);
     $("m_emps").textContent=fmt(d.employees.length); $("m_binds").textContent=fmt(d.bindings.length);
     $("m_marks").textContent=fmt(d.markers);
+    renderCountryStats(d.countries);
     const pc = d.clients? Math.round(d.visited/d.clients*100) : 0;
     $("covbar").style.width=pc+"%";
     $("covtxt").textContent = d.clients? `${fmt(d.visited)} из ${fmt(d.clients)} контрагентов — ${pc}%` : "реестр пуст";

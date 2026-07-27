@@ -31,18 +31,23 @@ FIELDS = [
      "source": "хард", "date": False, "num": False},
     {"key": "overall_result", "title": "Общий результат", "block": "Выезд",
      "source": "сх", "date": False, "num": False},
+    {"key": "extra_address", "title": "Доп. Адрес/Доп.Номер", "block": "Выезд",
+     "source": "сх", "date": False, "num": False},
+    {"key": "visit_comment", "title": "Комментарий текущего месяца выезда",
+     "block": "Выезд", "source": "хард", "date": False, "num": False},
 ]
 
 # Заголовок «Cтатус звонка» — с ЛАТИНСКОЙ C, как в реальном Хард.xlsb
 HEADERS = ["Номер КД / ID", "Клиент", "долг всего", "Дата выезда",
-           "Cтатус звонка", "комментарий звонка", "Общий результат"]
+           "Cтатус звонка", "комментарий звонка", "Общий результат",
+           "Доп. Адрес/Доп.Номер", "Комментарий текущего месяца выезда"]
 
 
 def make_grid(data_rows):
     return [
-        ["Инфо", None, None, "Выезд", None, None, None],   # блоки
+        ["Инфо", None, None, "Выезд", None, None, None, None, None],  # блоки
         HEADERS,                                            # заголовки
-        ["сх", "сх", "сх", "хард", "хард", "хард", "сх"],   # строка-источник
+        ["сх", "сх", "сх", "хард", "хард", "хард", "сх", "сх", "хард"],
         *data_rows,
     ]
 
@@ -52,6 +57,11 @@ def srv_row(cid, **kw):
     row["contract_id"] = cid
     row.update(kw)
     return row
+
+
+def bot_row(cid, **kw):
+    """Строка нового безопасного API: provenance-маркер + данные визита."""
+    return srv_row(cid, _bot_completed=True, **kw)
 
 
 # --- шапка --------------------------------------------------------------------
@@ -79,7 +89,7 @@ def test_only_filled_cases_and_columns():
         ["T-2", "Петров", "200", None, None, None, None],
     ])
     rows = [
-        srv_row("T-1", call_status="Оплачен", visit_date="2026-07-10"),
+        bot_row("T-1", call_status="Оплачен", visit_date="2026-07-10"),
         srv_row("T-2"),                                   # бот ничего не заполнял
     ]
     plan = enrich.build_plan(grid, FIELDS, rows)
@@ -87,7 +97,7 @@ def test_only_filled_cases_and_columns():
     assert plan["matched_cases"] == 1
     assert plan["cells_written"] == 2
     # обе записи — в строку T-1 (индекс 3), в колонки визита
-    assert {(r, c) for r, c, *_ in plan["writes"]} == {(3, 4), (3, 3)}
+    assert {(r, c) for r, c, *_ in plan["writes"]} == {(3, 6), (3, 3)}
     # дата пишется настоящей датой
     dates = [v for _r, c, v, is_d in plan["writes"] if is_d]
     assert dates == [date(2026, 7, 10)]
@@ -97,11 +107,11 @@ def test_never_writes_empty_or_foreign_columns():
     """Пустые значения бота и не-визитные колонки (клиент, долг) не пишутся никогда —
     даже если в БД они отличаются от файла (это защита от «старой выгрузки»)."""
     grid = make_grid([["T-1", "Иванов", "100", None, None, None, None]])
-    rows = [srv_row("T-1", visit_date="2026-07-10", client="СТАРОЕ ИМЯ",
+    rows = [bot_row("T-1", visit_date="2026-07-10", client="СТАРОЕ ИМЯ",
                     debt_total="9999", call_comment="взял трубку")]
     plan = enrich.build_plan(grid, FIELDS, rows)
     cols = {c for _r, c, *_ in plan["writes"]}
-    assert cols == {3, 5}, "дата и комментарий; клиент и долг — не наши колонки"
+    assert cols == {3}, "только дата; клиент, долг и колонки звонков не тронуты"
 
 
 def test_case_without_finished_visit_is_skipped():
@@ -114,11 +124,30 @@ def test_case_without_finished_visit_is_skipped():
     assert plan["cells_written"] == 0
 
 
+def test_imported_pseudo_visits_never_reach_excel():
+    """Регрессия Тошмахматова: 531 стал 14.06.1901 в date-ячейке, а рядом
+    уехали CONSUMER/«Не определен»/дата вместо dropdown. Даже ISO visit_date
+    без серверного provenance не является завершённым визитом.
+    """
+    grid = make_grid([
+        ["T-1", "Первый", "100", None, None, None, None],
+        ["T-2", "Второй", "200", None, None, None, None],
+    ])
+    rows = [
+        srv_row("T-1", visit_date="531", contact_with="CONSUMER",
+                agreed_payment="Не определен", client_location="2026-07-09"),
+        srv_row("T-2", visit_date="2026-07-08", contact_with="EXPRESS"),
+    ]
+    plan = enrich.build_plan(grid, FIELDS, rows)
+    assert plan["filled_cases"] == 0
+    assert plan["cells_written"] == 0
+
+
 def test_system_default_overall_result_never_written():
     """overall_result приходит из системы («Не обработан» у ВСЕХ строк импорта) —
     не колонка бота, не пишется даже у кейса с завершённым визитом."""
     grid = make_grid([["T-1", "Иванов", "100", None, None, None, None]])
-    rows = [srv_row("T-1", visit_date="2026-07-10", overall_result="Не обработан")]
+    rows = [bot_row("T-1", visit_date="2026-07-10", overall_result="Не обработан")]
     plan = enrich.build_plan(grid, FIELDS, rows)
     cols = {c for _r, c, *_ in plan["writes"]}
     assert cols == {3}, "только дата визита; общий результат — системная колонка"
@@ -126,9 +155,10 @@ def test_system_default_overall_result_never_written():
 
 def test_equal_values_not_rewritten():
     grid = make_grid([
-        ["T-1", "Иванов", "100", datetime(2026, 7, 10), "Оплачен", None, None],
+        ["T-1", "Иванов", "100", datetime(2026, 7, 10),
+         None, None, "Оплачен", None],
     ])
-    rows = [srv_row("T-1", visit_date="2026-07-10", call_status="Оплачен")]
+    rows = [bot_row("T-1", visit_date="2026-07-10", call_status="Оплачен")]
     plan = enrich.build_plan(grid, FIELDS, rows)
     assert plan["cells_written"] == 0
     assert plan["cells_already"] == 2
@@ -136,16 +166,18 @@ def test_equal_values_not_rewritten():
 
 
 def test_overwrite_of_nonempty_is_counted():
-    grid = make_grid([["T-1", "Иванов", "100", None, "В работе", None, None]])
-    rows = [srv_row("T-1", visit_date="2026-07-10", call_status="Оплачен")]
+    grid = make_grid([
+        ["T-1", "Иванов", "100", None, None, None, "В работе", None],
+    ])
+    rows = [bot_row("T-1", visit_date="2026-07-10", call_status="Оплачен")]
     plan = enrich.build_plan(grid, FIELDS, rows)
-    assert plan["cells_written"] == 2          # дата + статус
-    assert plan["cells_over_nonempty"] == 1    # статус лёг поверх «В работе»
+    assert plan["cells_written"] == 2          # дата + результат
+    assert plan["cells_over_nonempty"] == 1    # результат лёг поверх «В работе»
 
 
 def test_missing_case_reported_not_silent():
     grid = make_grid([["T-1", "Иванов", "100", None, None, None, None]])
-    rows = [srv_row("T-9", visit_date="2026-07-10", call_status="Оплачен")]
+    rows = [bot_row("T-9", visit_date="2026-07-10", call_status="Оплачен")]
     plan = enrich.build_plan(grid, FIELDS, rows)
     assert plan["missing"] == ["T-9"]
     assert plan["cells_written"] == 0
@@ -154,7 +186,7 @@ def test_missing_case_reported_not_silent():
 def test_float_contract_id_matches():
     """Excel отдаёт номер КД как 12345.0 — матчится с «12345» сервера."""
     grid = make_grid([[12345.0, "Иванов", "100", None, None, None, None]])
-    rows = [srv_row("12345", visit_date="2026-07-10", call_status="Оплачен")]
+    rows = [bot_row("12345", visit_date="2026-07-10", call_status="Оплачен")]
     plan = enrich.build_plan(grid, FIELDS, rows)
     assert plan["matched_cases"] == 1
     assert plan["cells_written"] == 2
@@ -166,15 +198,51 @@ def test_duplicate_rows_in_file_all_enriched():
         ["T-1", "Иванов", "100", None, None, None, None],
         ["T-1", "Иванов", "100", None, None, None, None],
     ])
-    rows = [srv_row("T-1", call_status="Оплачен", visit_date="2026-07-10")]
+    rows = [bot_row("T-1", call_status="Оплачен", visit_date="2026-07-10")]
     plan = enrich.build_plan(grid, FIELDS, rows)
-    assert {(r, c) for r, c, *_ in plan["writes"]} == {(3, 3), (3, 4), (4, 3), (4, 4)}
+    assert {(r, c) for r, c, *_ in plan["writes"]} == \
+        {(3, 3), (3, 6), (4, 3), (4, 6)}
+
+
+def test_visit_result_targets_overall_result_not_call_status():
+    """Выездник выбирает результат ВЫЕЗДА; колл-центр этим потоком не трогаем."""
+    grid = make_grid([
+        ["T-1", "Иванов", "100", datetime(2026, 7, 10),
+         "Родной статус колл-центра", None, None, None],
+    ])
+    rows = [bot_row("T-1", visit_date="2026-07-10", call_status="Оплачен")]
+    plan = enrich.build_plan(grid, FIELDS, rows)
+    assert plan["writes"] == [(3, 6, "Оплачен", False)]
+    assert all(c != 4 for _r, c, _v, _d in plan["writes"])
+
+
+def test_tips_append_to_extra_address_and_are_idempotent():
+    """Новые номера не затирают исходный доп. адрес и не дублируются повторно."""
+    initial = "старый дополнительный адрес\n+998 93 284 00 03"
+    grid = make_grid([
+        ["T-1", "Иванов", "100", datetime(2026, 7, 10),
+         None, None, "В работе", initial],
+    ])
+    rows = [bot_row(
+        "T-1", visit_date="2026-07-10", call_status="В работе",
+        tips="932840003\nориентир: дом у школы",
+    )]
+    plan = enrich.build_plan(grid, FIELDS, rows)
+    assert plan["writes"] == [
+        (3, 7, initial + "\nориентир: дом у школы", False),
+    ]
+    assert plan["cells_over_nonempty"] == 1
+
+    grid[3][7] = plan["writes"][0][2]
+    again = enrich.build_plan(grid, FIELDS, rows)
+    assert again["cells_written"] == 0
+    assert again["cells_already"] == 3  # дата, результат и наводки
 
 
 def test_source_row_skipped_as_data():
     """Строка «сх/хард» под заголовками — не данные (и не кейс с cid='сх')."""
     grid = make_grid([["T-1", "Иванов", "100", None, None, None, None]])
-    plan = enrich.build_plan(grid, FIELDS, [srv_row("T-1", visit_date="2026-07-10")])
+    plan = enrich.build_plan(grid, FIELDS, [bot_row("T-1", visit_date="2026-07-10")])
     assert plan["data_start"] == 3
 
 
@@ -186,10 +254,10 @@ def test_absent_visit_column_is_reported():
         ["сх", "сх", "сх", "хард"],
         ["T-1", "Иванов", "100", None],
     ]
-    rows = [srv_row("T-1", visit_date="2026-07-10", call_status="Оплачен",
+    rows = [bot_row("T-1", visit_date="2026-07-10", call_status="Оплачен",
                     call_comment="взял трубку")]
     plan = enrich.build_plan(grid, FIELDS, rows)
-    assert {"call_status", "call_comment"} <= set(plan["visit_cols_absent"])
+    assert {"call_status", "visit_comment"} <= set(plan["visit_cols_absent"])
     # дату записали, статус/комментарий — некуда, но кейс не потерян
     assert plan["cells_written"] == 1
     assert plan["matched_cases"] == 1
@@ -198,9 +266,9 @@ def test_absent_visit_column_is_reported():
 # --- группировка по сотрудникам (обогащение личных реестров) -------------------
 def test_split_by_employee():
     rows = [
-        srv_row("T-1", visit_date="2026-07-09") | {"responsible": "Иванов Иван"},
+        bot_row("T-1", visit_date="2026-07-09") | {"responsible": "Иванов Иван"},
         srv_row("T-2") | {"responsible": "иванов  иван"},        # регистр/пробелы
-        srv_row("T-3", visit_date="2026-07-10") | {"responsible": "Петров Пётр"},
+        bot_row("T-3", visit_date="2026-07-10") | {"responsible": "Петров Пётр"},
         srv_row("T-4") | {"responsible": ""},                     # без ответственного
     ]
     by = enrich.split_by_employee(rows)
@@ -210,13 +278,15 @@ def test_split_by_employee():
     assert by["петров пётр"]["filled"] == 1
 
 
-def test_is_filled_marker_is_visit_date_only():
+def test_is_filled_requires_provenance_and_valid_date():
     assert not enrich.is_filled(srv_row("T-1", client="Иванов", debt_total="99"))
     # статус/комментарий из старого импорта без завершённого визита — не маркер
     assert not enrich.is_filled(srv_row("T-1", call_comment="был на адресе",
                                         call_status="В работе"))
     assert not enrich.is_filled(srv_row("T-1", overall_result="Не обработан"))
-    assert enrich.is_filled(srv_row("T-1", visit_date="2026-07-10"))
+    assert not enrich.is_filled(srv_row("T-1", visit_date="2026-07-10"))
+    assert not enrich.is_filled(bot_row("T-1", visit_date="531"))
+    assert enrich.is_filled(bot_row("T-1", visit_date="2026-07-10"))
 
 
 # --- вспомогательное ----------------------------------------------------------
@@ -233,38 +303,42 @@ def test_cell_text():
     assert enrich.cell_text(datetime(2026, 7, 1)) == "2026-07-01"
 
 
-# --- анти-яд: бот-текст в «комментарии звонка» файла ---------------------------
-def test_poison_bot_text_in_call_column_cleared():
-    """Баг до 18.07.2026: комментарий выездника уезжал в «комментарий звонка» файлов.
-    Если на сервере «звонок» пуст, а в ячейке файла побайтно серверный «Комментарий
-    выезда» — чистим (единственный случай записи пустоты)."""
+# --- комментарии: обогащение не удаляет и не затирает текст --------------------
+def test_call_column_never_touched_even_when_it_matches_visit_comment():
+    """Колонки звонков не принадлежат выездникам и всегда остаются как в файле."""
     grid = make_grid([["T-1", "Иванов", "100", None, None,
                        "приехал, говорил с братом", None]])
-    rows = [srv_row("T-1", visit_date="2026-07-10",
-                    visit_comment="приехал, говорил с братом", call_comment=None)]
-    plan = enrich.build_plan(grid, FIELDS, rows)
-    assert plan["poison_cleared"] == 1
-    assert (3, 5, None, False) in plan["writes"]
-
-
-def test_call_texts_differing_from_bot_comment_kept():
-    """Любой другой текст в «звонке» файла (родной колл-комментарий, ручная правка)
-    не трогается; и при непустом серверном «звонке» анти-яд не срабатывает."""
-    grid = make_grid([["T-1", "Иванов", "100", None, None,
-                       "11.12.2024 позвонил, не берёт", None]])
-    rows = [srv_row("T-1", visit_date="2026-07-10",
+    rows = [bot_row("T-1", visit_date="2026-07-10",
                     visit_comment="приехал, говорил с братом", call_comment=None)]
     plan = enrich.build_plan(grid, FIELDS, rows)
     assert plan["poison_cleared"] == 0
-    assert all(v is not None for *_x, v, _d in
-               [(r, c, v, d) for r, c, v, d in plan["writes"]])
+    assert all(c != 5 for _r, c, _v, _d in plan["writes"])
+    assert (3, 8, "приехал, говорил с братом", False) in plan["writes"]
 
-    # непустой серверный «звонок» (восстановленный оригинал) пишется штатно, не пустотой
-    rows2 = [srv_row("T-1", visit_date="2026-07-10",
-                     visit_comment="приехал, говорил с братом",
-                     call_comment="11.12.2024 позвонил, не берёт")]
-    grid2 = make_grid([["T-1", "Иванов", "100", None, None,
-                       "приехал, говорил с братом", None]])
-    plan2 = enrich.build_plan(grid2, FIELDS, rows2)
-    assert plan2["poison_cleared"] == 0
-    assert (3, 5, "11.12.2024 позвонил, не берёт", False) in plan2["writes"]
+
+def test_visit_comment_is_merged_without_losing_manual_text_and_is_idempotent():
+    """Ручной комментарий в файле сохраняется, серверный дописывается один раз."""
+    grid = make_grid([["T-1", "Иванов", "100", None, None,
+                       "11.12.2024 позвонил, не берёт", None, None,
+                       "офис дописал после визита"]])
+    rows = [bot_row("T-1", visit_date="2026-07-10",
+                    visit_comment="приехал, говорил с братом", call_comment=None)]
+    plan = enrich.build_plan(grid, FIELDS, rows)
+    assert plan["poison_cleared"] == 0
+    assert all(c != 5 for _r, c, _v, _d in plan["writes"])
+    merged = "офис дописал после визита\nприехал, говорил с братом"
+    assert (3, 8, merged, False) in plan["writes"]
+
+    grid[3][3] = date(2026, 7, 10)
+    grid[3][8] = merged
+    again = enrich.build_plan(grid, FIELDS, rows)
+    assert again["cells_written"] == 0
+
+
+def test_enrichment_never_plans_empty_writes():
+    grid = make_grid([["T-1", "Иванов", "100", None, None,
+                       "не трогать", None, None, None]])
+    rows = [bot_row("T-1", visit_date="2026-07-10",
+                    visit_comment="комментарий выезда")]
+    plan = enrich.build_plan(grid, FIELDS, rows)
+    assert all(value not in (None, "") for _r, _c, value, _d in plan["writes"])

@@ -15,8 +15,8 @@
     enrich_file(path, fields, rows) -> бэкап + запись плана через xlwings
 
 Какие столбцы пишем — VISIT_KEYS (то, что реально заполняет миниапп + дата
-визита). Кейс попадает в план, только если у него завершённый визит
-(FILLED_MARKER = visit_date — его ставит только миниапп); ячейка пишется,
+визита). Кейс попадает в план, только если сервер прислал явное доказательство
+завершённого визита (FILLED_MARKER) и валидную дату; ячейка пишется,
 только если значение непустое и отличается от того, что уже стоит в файле.
 """
 
@@ -29,22 +29,31 @@ from pathlib import Path
 
 SHEET_NAME = "Портфели"
 
-# Колонки, которые РЕАЛЬНО пишет бот: форма визита миниаппа (зеркало
-# web.ALLOWED_SAVE ∩ схема экспорта) + visit_date (ставит сервер при завершении
-# визита). Шире нельзя: overall_result приходит из системы («Не обработан» у
-# всех строк импорта), who_at_address/client_location бывают заполнены ещё в
-# исходном файле — писать их без завершённого визита = тащить старую выгрузку.
+# Поля, которые РЕАЛЬНО пишет выездник: форма миниаппа + visit_date (ставит
+# сервер при завершении визита). Внутренний legacy-ключ call_status означает
+# результат ВЫЕЗДА и ниже направляется в «Общий результат», а не в «Статус
+# звонка». Bot-owned tips направляется в «Доп. Адрес/Доп.Номер».
 VISIT_KEYS = [
     "visit_date", "call_status", "contact_with", "agreed_payment",
     "who_at_address", "client_location", "purpose_rf",
-    # комментарий выездника живёт в visit_comment (с 18.07.2026);
-    # call_comment оставлен для строк, заполненных до переноса
-    "visit_comment", "call_comment",
+    "tips",
+    # Комментарий выездника живёт только в visit_comment. Поля звонка этим
+    # потоком не трогаем вообще: выездники не звонят, а в рабочих файлах там
+    # могут быть самостоятельные заметки колл-центра.
+    "visit_comment",
 ]
 
-# Маркер «кейс заполнен ботом» — только visit_date: его ставит ИСКЛЮЧИТЕЛЬНО
-# миниапп при завершении визита (та же метрика, что «С визитом» в сводке).
-FILLED_MARKER = "visit_date"
+# Серверные ключи → ключи целевых колонок живого реестра. Системные raw-значения
+# overall_result/extra_address при этом не используются: источник — только
+# доказанная safe-строка завершённого визита.
+WRITE_TARGETS = {
+    "call_status": "overall_result",
+    "tips": "extra_address",
+}
+
+# Маркер происхождения выдаёт только сервер из служебного снимка завершённого
+# визита. Отсутствие маркера — fail closed: старый сервер/сырой импорт не пишем.
+FILLED_MARKER = "_bot_completed"
 
 CONTRACT_KEY = "contract_id"
 
@@ -117,6 +126,65 @@ def _values_equal(file_val, new_val, is_date: bool) -> bool:
     return cell_text(file_val) == cell_text(new_val)
 
 
+def _line_identity(value: str) -> tuple[str, str]:
+    """Идентичность строки для идемпотентного дополнения наводок.
+
+    Чистый телефон сравниваем по последним девяти цифрам, чтобы
+    ``+998 93 ...`` не продублировался рядом с локальной записью ``93...``.
+    Произвольный текст сравниваем без регистра и лишних пробелов.
+    """
+    text = re.sub(r"\s+", " ", value.strip())
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if 7 <= len(digits) <= 15 and re.fullmatch(r"[\d+\s()./\-]+", text):
+        return "phone", digits[-9:]
+    return "text", text.casefold()
+
+
+def merge_unique_lines(current, incoming) -> str:
+    """Сохранить старый «Доп. Адрес/Доп.Номер» и дописать новые строки один раз."""
+    cur = cell_text(current).replace("\r\n", "\n").replace("\r", "\n")
+    new = cell_text(incoming).replace("\r\n", "\n").replace("\r", "\n")
+    incoming_lines = [line.strip() for line in new.split("\n") if line.strip()]
+    if not incoming_lines:
+        return cur
+    existing = {_line_identity(line) for line in cur.split("\n") if line.strip()}
+    additions = []
+    for line in incoming_lines:
+        identity = _line_identity(line)
+        if identity not in existing:
+            additions.append(line)
+            existing.add(identity)
+    if not additions:
+        return cur
+    return (cur.rstrip() + ("\n" if cur.strip() else "") + "\n".join(additions))
+
+
+def merge_preserving_text(current, incoming) -> str:
+    """Добавить комментарий выезда, не стирая уже написанное в живом файле.
+
+    Ручной офисный текст может быть новее серверного снимка, поэтому непустую
+    ячейку обычное обогащение не заменяет. Если один текст уже целиком содержит
+    другой, оставляем более полный вариант; независимые тексты соединяем с
+    новой строки. Повторный запуск идемпотентен.
+    """
+    cur = cell_text(current).replace("\r\n", "\n").replace("\r", "\n")
+    new = cell_text(incoming).replace("\r\n", "\n").replace("\r", "\n")
+    if not cur:
+        return new
+    if not new:
+        return cur
+
+    def identity(value: str) -> str:
+        return re.sub(r"\s+", " ", value).strip().casefold()
+
+    cur_id, new_id = identity(cur), identity(new)
+    if cur_id == new_id or new_id in cur_id:
+        return cur
+    if cur_id in new_id:
+        return new
+    return cur.rstrip() + "\n" + new
+
+
 def find_header(grid: list[list], fields: list[dict]) -> tuple[int, dict]:
     """(индекс строки заголовков, {key: индекс колонки}) — как в db.import_grid:
     лучшая из первых 10 строк, обязательное условие — колонка-ключ «Номер КД / ID»."""
@@ -137,17 +205,50 @@ def find_header(grid: list[list], fields: list[dict]) -> tuple[int, dict]:
 
 
 def is_filled(row: dict) -> bool:
-    """Кейс «заполнен ботом» = завершённый визит (стоит visit_date)."""
-    return cell_text(row.get(FILLED_MARKER)) != ""
+    """Только явно подтверждённый сервером визит с разбираемой датой."""
+    return row.get(FILLED_MARKER) is True and parse_date(row.get("visit_date")) is not None
 
 
-def split_by_employee(rows: list[dict]) -> dict[str, dict]:
+# Сколько номеров КД показывать в предупреждении пульта: список нужен, чтобы
+# «визиты в никуда» можно было проверить руками, а не поверить на слово.
+ORPHAN_SAMPLE = 20
+
+
+class EmployeeSplit(dict):
+    """Разбивка по ответственным + счётчики «сирот» — строк без владельца.
+
+    Это dict, а не новый тип: все прежние вызовы (items/values/get) работают как
+    работали, а потери читаются атрибутами.
+        orphan_rows   — строк сервера без «ответственного Сотрудника»;
+        orphan_filled — из них с завершённым визитом бота: именно эти результаты
+                        не попадут ни в один личный реестр, писать их некуда;
+        orphan_cids   — первые ORPHAN_SAMPLE номеров КД таких визитов.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.orphan_rows = 0
+        self.orphan_filled = 0
+        self.orphan_cids: list[str] = []
+
+
+def split_by_employee(rows: list[dict]) -> EmployeeSplit:
     """Строки сервера → по ответственным: {ключ: {employee, rows, filled}}.
-    filled — сколько кейсов сотрудника заполнено ботом (кандидаты на обогащение)."""
-    out: dict[str, dict] = {}
+    filled — сколько кейсов сотрудника заполнено ботом (кандидаты на обогащение).
+
+    Строки без ответственного не принадлежат никому: личного файла у них нет,
+    поэтому в обогащение они не попадают. Раньше они отбрасывались МОЛЧА — так
+    из выгрузки выпали 173 завершённых визита за 09-17.07, и жалоба Ильи о
+    пропавших комментариях неделю висела без объяснения. Теперь они считаются."""
+    out = EmployeeSplit()
     for r in rows:
         emp = str(r.get("responsible") or "").strip()
         if not emp:
+            out.orphan_rows += 1
+            if is_filled(r):
+                out.orphan_filled += 1
+                if len(out.orphan_cids) < ORPHAN_SAMPLE:
+                    out.orphan_cids.append(norm_cid(r.get(CONTRACT_KEY)))
             continue
         e = out.setdefault(norm_name(emp), {"employee": emp, "rows": [], "filled": 0})
         e["rows"].append(r)
@@ -170,6 +271,15 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict]) -> dict:
     0-based относительно grid. Пишутся ТОЛЬКО ячейки визита заполненных кейсов,
     и только когда значение отличается от файла."""
     header_row, col_map = find_header(grid, fields)
+    # Не позволяем fallback в легаси-колонку «Статус звонка»: если целевой
+    # «Общий результат» отсутствует, результат должен быть явно отмечен как
+    # некуда записывать. Аналогично tips требует «Доп. Адрес/Доп.Номер».
+    for source_key, target_key in WRITE_TARGETS.items():
+        target_col = col_map.get(target_key)
+        if target_col is None:
+            col_map.pop(source_key, None)
+        else:
+            col_map[source_key] = target_col
     is_date_key = {f["key"]: bool(f.get("date")) for f in fields}
 
     data_start = header_row + 1
@@ -188,7 +298,7 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict]) -> dict:
 
     writes: list[tuple[int, int, object, bool]] = []
     filled_cases = matched_cases = changed_cases = 0
-    cells_already = cells_over_nonempty = poison_cleared = 0
+    cells_already = cells_over_nonempty = 0
     missing: list[str] = []
 
     for srv in rows:
@@ -207,31 +317,25 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict]) -> dict:
         for key, val in values.items():
             c = col_map[key]
             is_date = is_date_key.get(key, False)
-            out_val = parse_date(val) if is_date and parse_date(val) else cell_text(val)
             for r in targets:
                 cur = grid[r][c] if c < len(grid[r]) else None
-                if _values_equal(cur, val, is_date):
+                if key == "tips":
+                    out_val = merge_unique_lines(cur, val)
+                elif key == "visit_comment":
+                    out_val = merge_preserving_text(cur, val)
+                else:
+                    out_val = parse_date(val) if is_date and parse_date(val) \
+                        else cell_text(val)
+                if (key in ("tips", "visit_comment")
+                        and out_val == cell_text(cur)) or \
+                        (key not in ("tips", "visit_comment")
+                         and _values_equal(cur, val, is_date)):
                     cells_already += 1
                     continue
                 if cell_text(cur) != "":
                     cells_over_nonempty += 1
                 writes.append((r, c, out_val, is_date))
                 case_changed = True
-        # Анти-яд (баг до 18.07.2026: комментарий выездника писался в «комментарий
-        # звонка» и прошлые обогащения разнесли его в файлы). Если на сервере
-        # «звонок» пуст, а в ячейке файла лежит ПОБАЙТНО тот же текст, что серверный
-        # «Комментарий выезда» этого же КД, — это наш бот-текст, а не колл-центр:
-        # чистим. ЕДИНСТВЕННЫЙ случай, когда обогащение пишет пустоту; любые другие
-        # тексты в «звонке» (в т.ч. ручные правки в файле) не трогаются.
-        vc = cell_text(srv.get("visit_comment"))
-        if vc and cell_text(srv.get("call_comment")) == "" and "call_comment" in col_map:
-            c = col_map["call_comment"]
-            for r in targets:
-                cur = grid[r][c] if c < len(grid[r]) else None
-                if cell_text(cur) == vc:
-                    writes.append((r, c, None, False))
-                    poison_cleared += 1
-                    case_changed = True
         if case_changed:
             changed_cases += 1
 
@@ -245,7 +349,10 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict]) -> dict:
         "cells_written": len(writes),
         "cells_already": cells_already,    # уже совпадало — не трогали
         "cells_over_nonempty": cells_over_nonempty,  # обновили поверх старого значения
-        "poison_cleared": poison_cleared,  # бот-текст убран из «комментария звонка»
+        # Обратная совместимость отчётов старого пульта. Обычное обогащение
+        # больше никогда не очищает комментарии; точечная починка — отдельный
+        # dry-run/apply инструмент с собственным бэкапом.
+        "poison_cleared": 0,
         "missing": missing,                # заполнены ботом, но строки в файле нет
         "visit_cols_absent": visit_cols_absent,      # колонок визита нет в файле
     }
@@ -322,7 +429,13 @@ def _co_init():
 def _enrich_workbook(app, path: Path, fields: list[dict], rows: list[dict],
                      log=lambda s: None) -> dict:
     """Один файл в уже открытом Excel: бэкап → лист → план → точечная запись →
-    сохранить тем же форматом. Возвращает план + backup/sheet/file."""
+    сохранить тем же форматом. Возвращает план + backup/sheet/file.
+
+    Осознанно ОДНОсторонний поток (бот → файл): идея «синхронизировать файл в БД
+    перед записью» отклонена пользователем и ревью 23.07 — скрытый импорт при
+    обогащении реимпортировал бы июльский яд из «комментария звонка» и вставлял
+    скелетные КД прошлых сессий. Офисные правки приносит ИМПОРТ (якорный шлюз в
+    db.import_grid) — отдельным осознанным действием, желательно до обогащения."""
     wb = app.books.open(str(path))
     try:
         ws = _pick_sheet(wb, fields)

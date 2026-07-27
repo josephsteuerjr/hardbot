@@ -2,7 +2,7 @@
 
 Проверяем, что:
   • CRUD руководителей работает (JSON-списки городов/сотрудников целы);
-  • persons_processed берёт только визиты за нужную дату (по clients.visit_date);
+  • persons_processed берёт только подтверждённые визиты за нужную дату;
   • три экрана дайджеста строятся, содержат стату и корректные callback'и;
   • фото (photostore): кнопки в карточке/у сотрудника и выборка файлов за день.
 """
@@ -30,6 +30,8 @@ def _add(cid, client, resp, **f):
         conn.execute(f"INSERT OR REPLACE INTO clients ({keys}) VALUES ({qs})",
                      tuple(row.values()))
         conn.commit()
+    if row.get("visit_date"):
+        db.record_bot_visit(cid, row, row["visit_date"])
 
 
 def _seed():
@@ -78,6 +80,7 @@ def test_summary_view_has_per_employee_stats():
     mgr = db.get_manager(MGR_TID)
     text, kb = digest.summary_view(mgr, TODAY)
     assert "Рахимов Алишер" in text
+    assert "🇹🇯" in text and "Таджикистан" in text
     assert "Обработано" in text or "обработано" in text
     assert "Нет контакта" in text                            # исход в сводке
     # кнопка на каждого сотрудника + «Обновить»

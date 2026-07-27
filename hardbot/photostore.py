@@ -17,10 +17,12 @@ PHOTO_DIR = Path(os.getenv("HARDBOT_DATA", Path(__file__).parent)) / "photos"
 
 
 def contract_photos(contract_id: str) -> list[Path]:
-    """Все фото договора, новые сверху."""
+    """Все фото договора, новые сверху. Времянки идущей загрузки (~…part,
+    web._photo пишет атомарно через rename) — не фото, в альбомы не попадают."""
     d = PHOTO_DIR / str(contract_id)
     try:
-        files = [p for p in d.iterdir() if p.is_file()]
+        files = [p for p in d.iterdir() if p.is_file()
+                 and not p.name.startswith("~") and not p.name.endswith(".part")]
     except OSError:  # папки нет = фото нет
         return []
     return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)

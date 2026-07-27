@@ -173,7 +173,10 @@ def personal_files(entries: list[dict], emp: str) -> list[Path]:
                  folder / f"{folder.name}.xlsb"]
         found = next((c for c in cands if c.exists()), None)
         if not found:
-            xs = [p for p in sorted(folder.glob("*.xlsb")) if not p.name.startswith("~")]
+            # Страховочные копии «(до …)» сортируются раньше живого файла по алфавиту,
+            # и без этого фильтра починка правила бы старую копию вместо реестра.
+            xs = [p for p in sorted(folder.glob("*.xlsb"))
+                  if not p.name.startswith("~") and not razbros.is_backup_copy(p.name)]
             found = xs[0] if xs else None
         if found and found not in files:
             files.append(found)

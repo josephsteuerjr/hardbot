@@ -71,32 +71,25 @@ def _applink_text(uid: int, lang: str) -> str | None:
     return t("applink_msg", lang, url=f"{url}/#link={code}", days=db.APP_LINK_DAYS)
 
 
+def _is_applink_request(text: str | None) -> bool:
+    """Ссылка выпускается только на отдельное слово «ссылка».
+
+    Регистр и внешние пробелы несущественны; фразы и знаки препинания не подходят,
+    чтобы случайное сообщение не создавало новый код входа.
+    """
+    return (text or "").strip().casefold() == "ссылка"
+
+
 # --- Старт: приветствие + кнопка входа в приложение -------------------------
 @router.message(Command("start"), F.chat.type == "private")
 async def cmd_start(message: Message):
     _remember(message.from_user)
     lang = lang_of(message.from_user.id)
-    # Привязанному выезднику сразу шлём ссылку автономного приложения (не заставляем
-    # искать кнопку) — как и на любое другое сообщение. Непривязанному — обычный старт.
-    text = _applink_text(message.from_user.id, lang)
-    if text:
-        await message.answer(text, reply_markup=_open_app_kb(lang, message.from_user.id))
-        return
+    # /start никогда не выпускает автономную ссылку. Для неё сотрудник явно пишет
+    # отдельное слово «ссылка» — случайный старт/текст больше не плодит коды входа.
     kb = _open_app_kb(lang)
     await message.answer(t("start_app", lang) if kb else t("start_no_app", lang),
                          reply_markup=kb)
-
-
-# --- Одноразовая ссылка входа в автономное приложение (кнопка) ---------------
-@router.callback_query(F.data == "applink")
-async def applink_cb(cb: CallbackQuery):
-    lang = lang_of(cb.from_user.id)
-    text = _applink_text(cb.from_user.id, lang)
-    if text:
-        await cb.message.answer(text)
-        await cb.answer()
-    else:
-        await cb.answer("⛔", show_alert=True)   # не привязан / URL не настроен
 
 
 # --- Инструкция установки автономного приложения (кнопки под ссылкой) --------
@@ -164,6 +157,9 @@ async def bot_added(event: ChatMemberUpdated):
     new = event.new_chat_member.status
     old = event.old_chat_member.status
     if new in ("member", "administrator") and old in ("left", "kicked"):
+        # Любая беседа, куда добавили бота, попадает в реестр бесед отчётов
+        # (выключенной) — включение и сотрудники настраиваются пультом.
+        db.upsert_report_chat(event.chat.id, event.chat.title or "")
         if not ADMIN_ID:
             return
         await event.bot.send_message(
@@ -171,6 +167,9 @@ async def bot_added(event: ChatMemberUpdated):
             t("group_accept_q", lang_of(ADMIN_ID), title=event.chat.title or "—",
               id=event.chat.id),
             reply_markup=accept_group_kb(event.chat.id, lang_of(ADMIN_ID)))
+    elif new in ("left", "kicked"):
+        # Бота выгнали — беседа гаснет в пульте, настройки сохраняются.
+        db.remove_report_chat(event.chat.id)
 
 
 @router.callback_query(F.data.startswith("acceptgroup:"))
@@ -190,20 +189,29 @@ async def decline_group(cb: CallbackQuery):
     await cb.answer()
 
 
-# --- Любое другое сообщение в ЛИЧКЕ: запоминаем гостя + показываем кнопку ----
+# --- Сообщения в группах: тихая регистрация беседы ---------------------------
+# Беседы, где бот сидел ЕЩЁ ДО этого релиза, не дадут события my_chat_member —
+# без этого их нельзя включить в пульте. Любое видимое боту сообщение группы
+# (команда/упоминание; все — если бот админ) обновляет реестр бесед. Молча:
+# отвечать в рабочие беседы нельзя.
+@router.message(F.chat.type.in_({"group", "supergroup"}))
+async def group_message(message: Message):
+    db.upsert_report_chat(message.chat.id, message.chat.title or "")
+
+
+# --- Любое другое сообщение в ЛИЧКЕ: «ссылка» или обычная кнопка приложения ---
 # Стоит ПОСЛЕДНИМ, чтобы не перехватывать команды/колбэки выше. Только private —
-# чтобы не спамить рабочую беседу. Привязанному выезднику любое сообщение приносит
-# одноразовую ссылку входа в автономное приложение (самолечение протухшего доступа:
-# написал боту что угодно → получил свежую ссылку). Непривязанному — как раньше,
-# кнопка «Открыть приложение» (регистрируем id для списка гостей в пульте).
+# чтобы не спамить рабочую беседу. Код входа создаётся только на отдельное слово
+# «ссылка»; произвольный текст больше не выпускает и не отправляет ссылку.
 @router.message(F.chat.type == "private")
 async def any_message(message: Message):
     _remember(message.from_user)
     lang = lang_of(message.from_user.id)
-    text = _applink_text(message.from_user.id, lang)
-    if text:
-        await message.answer(text, reply_markup=_open_app_kb(lang, message.from_user.id))
-        return
+    if _is_applink_request(message.text):
+        text = _applink_text(message.from_user.id, lang)
+        if text:
+            await message.answer(text, reply_markup=_open_app_kb(lang, message.from_user.id))
+            return
     kb = _open_app_kb(lang)
     if kb:
         await message.answer(t("start_app", lang), reply_markup=kb)

@@ -4,6 +4,8 @@
 матчинг заголовков, upsert, дубли, пропуски без КД, незнакомые колонки,
 выбор листа из нескольких (pick_grid).
 """
+from datetime import date
+
 import db
 
 
@@ -171,6 +173,37 @@ def test_norm_title_homoglyphs_do_not_collide_across_fields():
     assert len(norms) == len(set(norms))
 
 
+def test_import_grid_reports_protected_cells():
+    """Защита визитов (BOT_IMPORT_PROTECTED) раньше срабатывала молча — руководитель не
+    понимал, почему его правка колонок визита «не вошла». Теперь отчёт говорит явно,
+    сколько значений и по скольким договорам выброшено."""
+    db.init_db()
+    keys = ["contract_id", "client", "responsible", "city", "visit_date", "call_status"]
+    titles = [db.BY_KEY[k].title for k in keys]
+    db.import_grid([titles, ["IG-PR", "Клиент", "Агент", "Ташкент", None, None]])
+    today = date.today().isoformat()
+    db.update_person("IG-PR", {"visit_date": today, "call_status": "Оплачен"})
+    db.log_visit("IG-PR", 101, "визит", op_id="ig-pr-prot")
+    db.record_bot_visit("IG-PR", {"call_status": "Оплачен"}, today)
+
+    rep = db.import_grid([titles, ["IG-PR", "Клиент", "Агент", "Самарканд",
+                                   "2026-01-01", "Нет контакта"]])
+    assert rep["updated"] == 1
+    assert rep["protected_cells"] == 2              # visit_date + call_status выброшены
+    assert rep["protected_contracts"] == 1
+    c = db.get_client("IG-PR")
+    assert c["city"] == "Самарканд"                 # обычное поле источника обновилось
+    assert c["visit_date"] == today                 # результат бота не тронут
+    assert c["call_status"] == "Оплачен"
+
+    # без завершённого визита бота счётчик молчит, поля визита из файла проходят
+    rep2 = db.import_grid([titles, ["IG-NP", "Новый", "Агент", "Бухара",
+                                    "2026-01-01", "Нет контакта"]])
+    assert rep2["protected_cells"] == 0
+    assert rep2["protected_contracts"] == 0
+    assert db.get_client("IG-NP")["call_status"] == "Нет контакта"
+
+
 def test_pick_grid():
     good = _full_grid(_row(contract_id="X"))
     assert db.pick_grid([]) == []
@@ -182,3 +215,67 @@ def test_pick_grid():
     sheets = [{"name": "Данные", "grid": good},
               {"name": "Портфели", "grid": [["только", "имя"]]}]
     assert db.pick_grid(sheets) == [["только", "имя"]]
+
+
+# --- Ответственный: видимость строки для выездника ---------------------------
+# Строка без «ответственный Сотрудник» попадает в базу, но невидима выезднику и не
+# входит ни в один отчёт руководителя. На проде так молча накопилось 1970 договоров
+# из 5267 — в отчёте импорта это не показывалось нигде.
+
+def test_report_counts_rows_without_responsible():
+    db.init_db()
+    grid = _full_grid(
+        _row(contract_id="IG-NR-1", client="Ничей", debt_total=1000),
+        _row(contract_id="IG-NR-2", client="С владельцем", responsible="Хозяев Х."),
+    )
+    rep = db.import_grid(grid)
+    assert rep["no_responsible"] == 1
+    assert db.get_client("IG-NR-1")["responsible"] in (None, "")
+    assert db.get_client("IG-NR-2")["responsible"] == "Хозяев Х."
+
+
+def test_existing_owner_counts_as_owned_when_column_absent():
+    """Повторный импорт без колонки владельца не считает строку ничьей."""
+    db.init_db()
+    db.import_grid(_full_grid(
+        _row(contract_id="IG-NR-3", client="Был хозяин", responsible="Хозяев Х.")))
+    rep = db.import_grid(_full_grid(
+        _row(contract_id="IG-NR-3", client="Обновлён", debt_total=555)))
+    assert rep["no_responsible"] == 0
+    assert db.get_client("IG-NR-3")["responsible"] == "Хозяев Х."
+
+
+def test_blank_cell_does_not_wipe_responsible():
+    """Ячейка из пробелов — не «очистить поле»: раньше она затирала владельца,
+    и кейс исчезал у выездника без следа в отчёте."""
+    db.init_db()
+    db.import_grid(_full_grid(
+        _row(contract_id="IG-NR-4", client="Хозяин есть", responsible="Хозяев Х.")))
+    rep = db.import_grid(_full_grid(
+        _row(contract_id="IG-NR-4", client="Хозяин есть", responsible="   ")))
+    assert db.get_client("IG-NR-4")["responsible"] == "Хозяев Х."
+    assert rep["no_responsible"] == 0
+
+
+def test_no_responsible_counts_contracts_not_rows():
+    """У одного КД в реестре бывает несколько строк, и владелец может стоять только
+    в одной из них — в любой. Счётчик обязан считать договоры, а не строки файла."""
+    db.init_db()
+    rep = db.import_grid(_full_grid(
+        _row(contract_id="IG-NR-5", client="Многострочный", responsible="Хозяев Х."),
+        _row(contract_id="IG-NR-5", client="Многострочный", debt_total=100),
+        _row(contract_id="IG-NR-5", client="Многострочный", debt_overdue=50),
+    ))
+    assert rep["no_responsible"] == 0, "дубли строк не должны раздувать счётчик"
+    assert db.get_client("IG-NR-5")["responsible"] == "Хозяев Х."
+
+
+def test_no_responsible_counts_when_owner_arrives_in_later_row():
+    """Владелец пришёл во ВТОРОЙ строке того же договора — договор не ничей."""
+    db.init_db()
+    rep = db.import_grid(_full_grid(
+        _row(contract_id="IG-NR-6", client="Поздний хозяин", debt_total=100),
+        _row(contract_id="IG-NR-6", client="Поздний хозяин", responsible="Хозяев Х."),
+    ))
+    assert rep["no_responsible"] == 0
+    assert db.get_client("IG-NR-6")["responsible"] == "Хозяев Х."

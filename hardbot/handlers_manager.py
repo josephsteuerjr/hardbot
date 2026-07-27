@@ -23,7 +23,7 @@ import db
 import digest
 import notify
 from config import ADMIN_ID, lang_of
-from handlers_main import _applink_text, _open_app_kb
+from handlers_main import _applink_text, _is_applink_request, _open_app_kb
 
 router = Router()
 
@@ -58,15 +58,14 @@ class IsManager(BaseFilter):
         return uid == ADMIN_ID or db.is_manager(uid)
 
 
-async def _maybe_applink(message: Message) -> None:
-    """Руководитель, ОДНОВРЕМЕННО привязанный как выездник (владелец, тестирующий обе
-    роли с одного аккаунта, или «кейс Василия»), без этого никогда не получит ссылку
-    входа в приложение: manager-роутер стоит перед handlers_main и съедает и /start,
-    и любой текст. Дошлём её отдельным сообщением после дайджеста."""
+async def _send_requested_applink(message: Message) -> bool:
+    """Выдать ссылку dual-role руководителю только по явному слову «ссылка»."""
     lang = lang_of(message.from_user.id)
     text = _applink_text(message.from_user.id, lang)
     if text:
         await message.answer(text, reply_markup=_open_app_kb(lang, message.from_user.id))
+        return True
+    return False
 
 
 async def _send_digest(message: Message) -> None:
@@ -96,7 +95,6 @@ async def start(message: Message):
         reply_markup=manager_menu(),
     )
     await _send_digest(message)
-    await _maybe_applink(message)
 
 
 @router.message(Command("digest"), F.chat.type == "private", IsManager())
@@ -114,10 +112,12 @@ async def digest_btn(message: Message):
 # «сквозь» в handlers_main. Стоит последним в этом роутере.
 @router.message(F.chat.type == "private", IsManager(), F.text & ~F.text.startswith("/"))
 async def fallback(message: Message):
+    if _is_applink_request(message.text):
+        if await _send_requested_applink(message):
+            return
     await message.answer("Меню — снизу. Нажмите «📊 Дайджест за сегодня».",
                          reply_markup=manager_menu())
     await _send_digest(message)
-    await _maybe_applink(message)
 
 
 async def _send_album(message: Message, files, caption: str | None) -> None:
