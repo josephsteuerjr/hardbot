@@ -30,7 +30,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import shutil
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -53,6 +55,13 @@ REPORT_DIR = APP_DIR / "отчёты возврата"
 # Комментарий выезда и поля формы сюда НЕ входят: их возвращает обогащение, и там свои
 # правила старшинства.
 RESTORE_KEYS = ["extra_address", "phone", "phone_main", "call_comment", "overall_result"]
+MAX_WRITES_PER_FILE = 300
+MAX_WRITE_SHARE = 0.25
+MAX_VALUE_LEN = 500
+
+
+class VerificationError(RuntimeError):
+    pass
 
 
 def load_settings() -> dict:
@@ -88,13 +97,34 @@ def plan_file(path: Path, fields: list[dict], rows: list[dict], log) -> dict:
     by_cid = {enrich.norm_cid(r.get("contract_id")): r for r in rows}
 
     writes, absent = [], [k for k in RESTORE_KEYS if k not in col_map]
+    file_rows: dict[str, list[list]] = {}
+    cid_col = col_map.get("contract_id")
+    if cid_col is not None:
+        for row in grid[hi + 1:]:
+            cid = enrich.norm_cid(row[cid_col] if cid_col < len(row) else None)
+            if cid:
+                file_rows.setdefault(cid, []).append(row)
+
+    conflict_contracts = set()
+    for cid, cid_rows in file_rows.items():
+        for key in RESTORE_KEYS:
+            ci = col_map.get(key)
+            if ci is None:
+                continue
+            values = {enrich.cell_text(row[ci] if ci < len(row) else None)
+                      for row in cid_rows}
+            values.discard("")
+            if len(values) > 1:
+                conflict_contracts.add(cid)
+                break
+
+    oversize = 0
     for ri in range(hi + 1, len(grid)):
         row = grid[ri]
-        cid_col = col_map.get("contract_id")
         if cid_col is None or cid_col >= len(row):
             continue
         cid = enrich.norm_cid(row[cid_col])
-        if not cid or cid not in by_cid:
+        if not cid or cid not in by_cid or cid in conflict_contracts:
             continue
         srv = by_cid[cid]
         for key in RESTORE_KEYS:
@@ -106,13 +136,77 @@ def plan_file(path: Path, fields: list[dict], rows: list[dict], log) -> dict:
             value = enrich.cell_text(srv.get(key))
             if not value:
                 continue
+            if len(value) > MAX_VALUE_LEN:
+                oversize += 1
+                continue
             writes.append({"row": ri + 1, "col": ci + 1, "cid": cid,
                            "key": key, "value": value})
+    data_rows = max(len(grid) - (hi + 1), 0)
+    blocked = []
+    if absent:
+        blocked.append(f"нет колонок {absent}")
+    if len(writes) > MAX_WRITES_PER_FILE:
+        blocked.append(f"план {len(writes)} > {MAX_WRITES_PER_FILE} ячеек")
+    if data_rows and len(writes) > data_rows * MAX_WRITE_SHARE:
+        blocked.append(f"план {len(writes)} > четверти {data_rows} строк")
+    if blocked:
+        writes = []
     return {"file": str(path), "sheet": name, "header_row": hi + 1,
-            "writes": writes, "absent_columns": absent}
+            "writes": writes, "absent_columns": absent, "data_rows": data_rows,
+            "conflict_contracts": sorted(conflict_contracts),
+            "oversize_values": oversize, "blocked": blocked}
 
 
-def apply_plan(app, path: Path, plan: dict, log) -> int:
+def _read_grid(path: Path, sheet: str) -> list[list]:
+    from python_calamine import CalamineWorkbook
+
+    wb = CalamineWorkbook.from_path(str(path))
+    return wb.get_sheet_by_name(sheet).to_python()
+
+
+def _value_diffs(before: list[list], after: list[list]) -> set[tuple[int, int]]:
+    rows = max(len(before), len(after))
+    cols = max(max((len(r) for r in before), default=0),
+               max((len(r) for r in after), default=0))
+    diffs = set()
+    for ri in range(rows):
+        for ci in range(cols):
+            old = before[ri][ci] if ri < len(before) and ci < len(before[ri]) else None
+            new = after[ri][ci] if ri < len(after) and ci < len(after[ri]) else None
+            if enrich.cell_text(old) != enrich.cell_text(new):
+                diffs.add((ri + 1, ci + 1))
+    return diffs
+
+
+def verify_applied(path: Path, backup: Path, plan: dict, fields: list[dict]) -> None:
+    """После Excel-save фактический diff обязан быть ровно планом."""
+    before = _read_grid(backup, plan["sheet"])
+    after = _read_grid(path, plan["sheet"])
+    expected = {(w["row"], w["col"]) for w in plan["writes"]}
+    actual = _value_diffs(before, after)
+    if actual != expected:
+        raise VerificationError(
+            f"diff не совпал: ожидалось {len(expected)}, получено {len(actual)}, "
+            f"лишних {len(actual - expected)}, пропущено {len(expected - actual)}")
+    for w in plan["writes"]:
+        ri, ci = w["row"] - 1, w["col"] - 1
+        got = after[ri][ci] if ri < len(after) and ci < len(after[ri]) else None
+        if enrich.cell_text(got) != enrich.cell_text(w["value"]):
+            raise VerificationError(
+                f"ячейка {w['row']}:{w['col']} не содержит записанное значение")
+
+    _hi, col_map = enrich.find_header(before, fields)
+    restore_cols = [col_map[k] for k in RESTORE_KEYS if k in col_map]
+    def nonempty(grid):
+        return sum(1 for row in grid[_hi + 1:] for ci in restore_cols
+                   if ci < len(row) and enrich.cell_text(row[ci]))
+    before_n, after_n = nonempty(before), nonempty(after)
+    if after_n < before_n:
+        raise VerificationError(
+            f"непустых ячеек стало меньше: {before_n} → {after_n}")
+
+
+def apply_plan(app, path: Path, plan: dict, fields: list[dict], log) -> int:
     """Записать план в файл. Копия делается ДО первой записи, как в обогащении."""
     stamp = datetime.now().strftime("%d.%m.%y %H-%M")
     keep = path.with_name(f"{path.stem} (до возврата {stamp}){path.suffix}")
@@ -120,18 +214,33 @@ def apply_plan(app, path: Path, plan: dict, log) -> int:
     while keep.exists():
         n += 1
         keep = path.with_name(f"{path.stem} (до возврата {stamp}, {n}){path.suffix}")
-    import shutil
     shutil.copy2(path, keep)
     log(f"  копия: {keep.name}")
 
-    wb = app.books.open(str(path))
+    wb = None
     try:
+        wb = app.books.open(str(path))
         ws = wb.sheets[plan["sheet"]]
         for w in plan["writes"]:
             ws.range((w["row"], w["col"])).value = w["value"]
         wb.save()
+    except Exception:
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:  # noqa: BLE001
+                pass
+            wb = None
+        shutil.copy2(keep, path)
+        raise
     finally:
-        wb.close()
+        if wb is not None:
+            wb.close()
+    try:
+        verify_applied(path, keep, plan, fields)
+    except Exception:
+        shutil.copy2(keep, path)
+        raise
     return len(plan["writes"])
 
 
@@ -174,6 +283,16 @@ def main(argv=None) -> int:
                     skipped.append(f"{p.name}: {e}")
                     continue
                 plan["employee"] = emp
+                for reason in plan["blocked"]:
+                    skipped.append(f"{p.name}: {reason}")
+                if plan["conflict_contracts"]:
+                    skipped.append(
+                        f"{p.name}: конфликтующие значения у "
+                        f"{len(plan['conflict_contracts'])} КД — они пропущены")
+                if plan["oversize_values"]:
+                    skipped.append(
+                        f"{p.name}: значений длиннее {MAX_VALUE_LEN} — "
+                        f"{plan['oversize_values']}, они пропущены")
                 if plan["writes"]:
                     plans.append(plan)
 
@@ -218,10 +337,20 @@ def main(argv=None) -> int:
         for i, p in enumerate(plans, 1):
             path = Path(p["file"])
             log(f"[{i}/{len(plans)}] {p['employee']} — {path.name}: {len(p['writes'])} ячеек")
-            try:
-                written += apply_plan(app, path, p, log)
-            except Exception as e:  # noqa: BLE001
-                log(f"  [!] не записан: {e}")
+            for attempt in range(1, 4):
+                try:
+                    written += apply_plan(app, path, p, fields, log)
+                    log("  проверка diff: ok")
+                    break
+                except VerificationError as e:
+                    log(f"  [!] проверка не прошла, файл восстановлен из копии: {e}")
+                    break
+                except Exception as e:  # noqa: BLE001
+                    if attempt == 3:
+                        log(f"  [!] не записан после трёх попыток: {e}")
+                        break
+                    log(f"  [!] попытка {attempt}/3 не удалась: {e}; повтор через минуту")
+                    time.sleep(60)
     log(f"\nЗаписано ячеек: {written}")
     return 0
 

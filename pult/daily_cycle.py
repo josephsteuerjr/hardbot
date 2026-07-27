@@ -34,7 +34,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
@@ -237,6 +237,28 @@ def step_export(settings: dict, base: str | None, dry: bool, log) -> str:
     return out
 
 
+def _cell_json(v):
+    """Значение calamine → JSON-совместимое значение.
+
+    Общий реестр содержит настоящие Excel-даты. python-calamine возвращает их
+    как ``date``/``datetime``, которые стандартный json.dumps не сериализует.
+    Держим преобразование тем же, что в интерактивном пульте.
+    """
+    if v is None or isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        t = v.strip()
+        return t or None
+    if isinstance(v, float):
+        return int(v) if v.is_integer() and abs(v) < 9e15 else v
+    if isinstance(v, datetime):
+        s = v.isoformat(sep=" ", timespec="seconds")
+        return s[:-9] if s.endswith(" 00:00:00") else s
+    if isinstance(v, date):
+        return v.isoformat()
+    return v if isinstance(v, (int, float, bool)) else str(v)
+
+
 def read_sheets(path: str) -> list[dict]:
     """Файл реестра → [{name, grid}] для POST /admin/import.json (python-calamine).
     Тот же парсер, что в пульте: разбор локальный, на сервер летит JSON."""
@@ -246,8 +268,7 @@ def read_sheets(path: str) -> list[dict]:
     sheets = []
     for name in wb.sheet_names:
         rows = wb.get_sheet_by_name(name).to_python()
-        grid = [[(None if c is None or (isinstance(c, str) and not c.strip()) else c)
-                 for c in row] for row in rows]
+        grid = [[_cell_json(c) for c in row] for row in rows]
         if grid:
             sheets.append({"name": name, "grid": grid})
     if not sheets:
@@ -255,8 +276,52 @@ def read_sheets(path: str) -> list[dict]:
     return sheets
 
 
+def _contract_id(value) -> str:
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return str(value or "").strip()
+
+
+def filter_to_existing_contracts(sheets: list[dict], existing_ids: set[str]):
+    """Оставить в листе реестра только КД, уже существующие в production.
+
+    Общий реестр СНГ намного шире сознательно ограниченной базы бота. Его импорт
+    нужен для обновления владельцев и полей имеющихся КД, а не для неявной
+    загрузки десятков тысяч новых договоров. Исходный Excel не меняется:
+    фильтруется только JSON-грид в памяти перед POST.
+    """
+    out = [{"name": s["name"], "grid": s["grid"]} for s in sheets]
+    candidates = []
+    for si, sheet in enumerate(sheets):
+        for hi, row in enumerate(sheet["grid"][:10]):
+            for ci, cell in enumerate(row):
+                if str(cell or "").strip().lower().startswith("номер кд"):
+                    candidates.append((sheet["name"] == "Портфели", si, hi, ci))
+    if not candidates:
+        raise ValueError("колонка «Номер КД / ID» не найдена в первых 10 строках")
+    _named, si, hi, ci = max(candidates)
+    grid = sheets[si]["grid"]
+    prefix = list(grid[:hi + 1])
+    kept, skipped = 0, 0
+    for row in grid[hi + 1:]:
+        nonempty = [str(v).strip().lower() for v in row if v not in (None, "")]
+        if nonempty and all(v in ("сх", "хард") for v in nonempty):
+            prefix.append(row)
+            continue
+        cid = _contract_id(row[ci] if ci < len(row) else None)
+        if not cid:
+            continue
+        if cid in existing_ids:
+            prefix.append(row)
+            kept += 1
+        else:
+            skipped += 1
+    out[si] = {"name": sheets[si]["name"], "grid": prefix}
+    return out, {"kept": kept, "skipped_new": skipped}
+
+
 def step_import(settings: dict, base: str | None, dry: bool, log,
-                registry: str | None = None) -> str:
+                registry: str | None = None, allow_new: bool = False) -> str:
     """ЗАГРУЗКА: полные портфели в бота.
 
     Штатный источник — ОБЩИЙ реестр одним файлом: он и есть источник правды по
@@ -282,6 +347,12 @@ def step_import(settings: dict, base: str | None, dry: bool, log,
         log(f"Источник — личные реестры, найдено: {len(files)}")
     if not files:
         return "Реестров не нашлось — проверь путь или базовую папку"
+    existing_ids = None
+    if registry and not allow_new:
+        current = api(settings, "GET", "/admin/export.json", timeout=180)
+        existing_ids = {_contract_id(r.get("contract_id"))
+                        for r in current.get("rows") or [] if r.get("contract_id")}
+
     if dry:
         # Открываем файл по-настоящему: смысл сухого прогона в том, чтобы узнать о
         # неузнанной шапке ДО записи в прод, а не после.
@@ -292,6 +363,9 @@ def step_import(settings: dict, base: str | None, dry: bool, log,
             except Exception as e:  # noqa: BLE001
                 out.append(f"  ✗ {p.name}: не читается — {e}")
                 continue
+            guard = None
+            if existing_ids is not None:
+                sheets, guard = filter_to_existing_contracts(sheets, existing_ids)
             best = max(sheets, key=lambda s: len(s["grid"]))
             named = next((s for s in sheets if s["name"] == "Портфели"), best)
             hdr = None
@@ -300,11 +374,15 @@ def step_import(settings: dict, base: str | None, dry: bool, log,
                     hdr = i
                     break
             rows = max(len(named["grid"]) - (hdr + 1 if hdr is not None else 0), 0)
-            out.append(f"  {p.name}: лист «{named['name']}», "
-                       + (f"шапка в строке {hdr + 1}, строк данных ~{rows}"
-                          if hdr is not None
-                          else "✗ колонка «Номер КД / ID» не найдена в первых 10 строках — "
-                               "сервер откажет"))
+            line = (f"  {p.name}: лист «{named['name']}», "
+                    + (f"шапка в строке {hdr + 1}, строк данных ~{rows}"
+                       if hdr is not None
+                       else "✗ колонка «Номер КД / ID» не найдена в первых 10 строках — "
+                            "сервер откажет"))
+            if guard is not None:
+                line += (f"; защита БД: строк существующих КД {guard['kept']}, "
+                         f"новых пропустит {guard['skipped_new']}")
+            out.append(line)
         return "\n".join(out)
 
     agg = {"total_rows": 0, "inserted": 0, "updated": 0, "skipped_no_id": 0,
@@ -314,6 +392,10 @@ def step_import(settings: dict, base: str | None, dry: bool, log,
         log(f"[{i}/{len(files)}] {p.name}…")
         try:
             sheets = read_sheets(str(p))
+            if existing_ids is not None:
+                sheets, guard = filter_to_existing_contracts(sheets, existing_ids)
+                log(f"Защита БД: оставлено строк существующих КД {guard['kept']}, "
+                    f"новых пропущено {guard['skipped_new']}")
             d = api(settings, "POST", "/admin/import.json", {"sheets": sheets}, timeout=300)
         except Exception as e:  # noqa: BLE001 — битый файл не валит пакет
             errors.append(f"{p.name}: {e}")
@@ -344,6 +426,9 @@ def main(argv=None) -> int:
                          "import — загрузка портфелей в бота после него")
     ap.add_argument("--base", help="базовая папка республик (по умолчанию из настроек пульта)")
     ap.add_argument("--registry", help="общий реестр одним файлом — штатный источник загрузки")
+    ap.add_argument("--allow-new", action="store_true",
+                    help="разрешить общему реестру создавать новые КД (по умолчанию "
+                         "он обновляет только уже загруженную подвыборку)")
     ap.add_argument("--after-registry", help="ждать этот файл общего реестра перед стартом")
     ap.add_argument("--stable-min", type=int, default=20,
                     help="сколько минут файл должен не меняться (по умолчанию 20)")
@@ -382,7 +467,8 @@ def main(argv=None) -> int:
                 summary = step_export(settings, base, a.dry_run, log)
             else:
                 summary = step_import(settings, base, a.dry_run, log,
-                                      registry=a.registry or a.after_registry)
+                                      registry=a.registry or a.after_registry,
+                                      allow_new=a.allow_new)
             summary += f" · {int(time.time() - started) // 60} мин"
         log(summary.replace("\n", " | "))
         if not a.no_report and not a.dry_run:
