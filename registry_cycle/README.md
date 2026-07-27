@@ -42,6 +42,30 @@ python -m registry_cycle scheduler install
 Задача создаётся с `InteractiveToken`: пользователь должен быть вошедшим в Windows,
 иначе Excel COM не запускается.
 
+## Аддитивный ночной разброс
+
+Пока первый baseline полного merge не очищен, новые закрепы раскладываются отдельным
+режимом. Общий реестр в нём только читается, существующие строки личных файлов не
+перезаписываются, а КД, исчезнувшие из общего, не удаляются:
+
+```powershell
+python -m registry_cycle.distribution plan --snapshot <run>\snapshot.json --assignment-baseline <master-before-assignments>.xlsb
+python -m registry_cycle.distribution stage --snapshot <run>\snapshot.json --plan <run>\distribution\plan.json
+python -m registry_cycle.distribution validate --plan <run>\distribution\plan.json --stage <run>\distribution\staging-*\stage.json
+python -m registry_cycle.distribution publish --plan <run>\distribution\plan.json --stage <run>\distribution\staging-*\stage.json --confirm-digest <sha256>
+```
+
+Каждая новая строка должна иметь пустого ответственного в assignment-baseline и
+конкретного ответственного в текущем общем реестре. После staging проверяются все
+старые и новые ячейки, листы и фильтры. Публикация возможна только при совпадении
+digest, неизменных live-файлах и отсутствии Excel lock; перед заменой создаётся
+соседняя копия `(... до ночного разброса ...)`.
+
+Этот режим пока не устанавливается в Планировщик автоматически. Для регулярного
+запуска ему нужны отдельный жизненный цикл assignment-baseline и очередь закрепов,
+для которых ещё нет активного личного файла. Существующая задача полного
+`execute --publish --scheduled` не должна подменять этот режим.
+
 ## Аддитивное восстановление из архивов
 
 Восстановление отделено от обычной сборки/разборки и по умолчанию работает только
@@ -72,6 +96,7 @@ python -m registry_cycle.recovery publish --plan <run>\recovery\plan.json --stag
 
 - `config/app.json` — пути, города, безопасность, расписание и owner-only уведомления;
 - `config/fields.json` — HARD/SOFT/shared, типы, aliases и политика конфликтов;
+- `config/distribution.json` — aliases закрепов и лимиты аддитивного ночного разброса;
 - `config/recovery.json` — архивные точки, VSS, разрешённые поля и лимиты восстановления;
 - `config/theme.json` — Graphite UI.
 

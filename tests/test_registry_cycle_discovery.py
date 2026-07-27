@@ -27,6 +27,7 @@ def test_discovery_uses_only_configured_active_files(tmp_path):
     active_dir.mkdir(parents=True)
     (active_dir / "Иванов Иван.xlsb").write_bytes(b"active")
     (active_dir / "Иванов Иван (до разброса 27.07 12-00).xlsb").write_bytes(b"backup")
+    (active_dir / "Копия Иванов Иван.xlsb").write_bytes(b"ambiguous-copy")
     (active_dir / "~$Иванов Иван.xlsb").write_bytes(b"lock")
 
     soft_dir = tmp_path / "Soft" / "Петров Пётр"

@@ -89,7 +89,7 @@
       "_",
       "~"
     ],
-    "backup_name_regex": "\\s\\(до\\s[^)]*\\)\\s*\\.xlsb$",
+    "backup_name_regex": "(?:^Копия\\s|\\s\\(до\\s[^)]*\\)\\s*\\.xlsb$)",
     "profile_rules": [
       {
         "filename_regex": "^СОФТ\\s+",
@@ -108,7 +108,7 @@
   },
   "scheduler": {
     "task_name": "Контур — цикл реестров СНГ",
-    "enabled": true,
+    "enabled": false,
     "time": "23:40",
     "days": [
       "MON",
