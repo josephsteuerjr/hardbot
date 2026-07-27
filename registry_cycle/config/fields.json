@@ -1,0 +1,219 @@
+{
+  "schema_version": 1,
+  "schema": {
+    "portfolio_sheet": "Портфели",
+    "statistics_sheet": "Статистика",
+    "status_sheet": "Статусы",
+    "key_title": "Номер КД / ID",
+    "responsible_title": "ответственный Сотрудник",
+    "header_search_rows": 10,
+    "type_row_offset": 1
+  },
+  "profiles": {
+    "hard": {
+      "label": "HARD",
+      "include_type_tags": [
+        "хард",
+        "сх"
+      ]
+    },
+    "soft": {
+      "label": "SOFT",
+      "include_type_tags": [
+        "софт",
+        "сх"
+      ]
+    }
+  },
+  "collect": [
+    {
+      "title": "Сумма последнего платежа",
+      "profiles": [
+        "hard",
+        "soft"
+      ],
+      "empty": "ignore",
+      "conflict": "error",
+      "value_type": "number"
+    },
+    {
+      "title": "Дата последнего платежа",
+      "profiles": [
+        "hard",
+        "soft"
+      ],
+      "empty": "ignore",
+      "conflict": "error",
+      "value_type": "date"
+    },
+    {
+      "title": "Сумма прогноза",
+      "profiles": [
+        "hard",
+        "soft"
+      ],
+      "empty": "ignore",
+      "conflict": "error",
+      "value_type": "number"
+    },
+    {
+      "title": "Прогноз",
+      "profiles": [
+        "hard",
+        "soft"
+      ],
+      "empty": "ignore",
+      "conflict": "error"
+    },
+    {
+      "title": "дата обещания",
+      "profiles": [
+        "hard",
+        "soft"
+      ],
+      "empty": "ignore",
+      "conflict": "error",
+      "value_type": "date"
+    },
+    {
+      "title": "Общий результат",
+      "profiles": [
+        "hard",
+        "soft"
+      ],
+      "empty": "ignore",
+      "conflict": "error"
+    },
+    {
+      "title": "Доп. Адрес/Доп.Номер",
+      "profiles": [
+        "hard",
+        "soft"
+      ],
+      "empty": "ignore",
+      "conflict": "error",
+      "master_conflict": "accept_superset"
+    },
+    {
+      "title": "Дата встречи",
+      "profiles": [
+        "hard",
+        "soft"
+      ],
+      "empty": "ignore",
+      "conflict": "error",
+      "value_type": "date"
+    },
+    {
+      "title": "Дата выезда",
+      "profiles": [
+        "hard"
+      ],
+      "empty": "ignore",
+      "conflict": "error",
+      "value_type": "date"
+    },
+    {
+      "title": "Комментарий текущего месяца выезда",
+      "profiles": [
+        "hard"
+      ],
+      "empty": "ignore",
+      "conflict": "error",
+      "master_conflict": "accept_superset"
+    },
+    {
+      "title": "С кем был контакт?",
+      "profiles": [
+        "hard"
+      ],
+      "empty": "ignore",
+      "conflict": "error"
+    },
+    {
+      "title": "Договорились на оплату?",
+      "profiles": [
+        "hard"
+      ],
+      "empty": "ignore",
+      "conflict": "error"
+    },
+    {
+      "title": "Кто был на адресе?",
+      "profiles": [
+        "hard"
+      ],
+      "empty": "ignore",
+      "conflict": "error"
+    },
+    {
+      "title": "Местоположение клиента",
+      "profiles": [
+        "hard"
+      ],
+      "empty": "ignore",
+      "conflict": "error"
+    },
+    {
+      "title": "Цель приезда в РФ",
+      "profiles": [
+        "hard"
+      ],
+      "empty": "ignore",
+      "conflict": "error"
+    },
+    {
+      "title": "Cтатус звонка",
+      "profiles": [
+        "hard"
+      ],
+      "empty": "ignore",
+      "conflict": "error"
+    },
+    {
+      "title": "комментарий звонка",
+      "profiles": [
+        "hard"
+      ],
+      "empty": "ignore",
+      "conflict": "error",
+      "master_conflict": "accept_superset"
+    },
+    {
+      "title": "статус звонка софт",
+      "profiles": [
+        "soft"
+      ],
+      "empty": "ignore",
+      "conflict": "error"
+    },
+    {
+      "title": "Дата перезвона",
+      "profiles": [
+        "soft"
+      ],
+      "empty": "ignore",
+      "conflict": "error",
+      "value_type": "date"
+    },
+    {
+      "title": "Комментарий текущего месяца Софт",
+      "profiles": [
+        "soft"
+      ],
+      "empty": "ignore",
+      "conflict": "error",
+      "master_conflict": "accept_superset"
+    }
+  ],
+  "preserve_if_master_blank": [
+    "Телефон",
+    "Телефон глав",
+    "Город"
+  ],
+  "aliases": {
+    "Сумма последнего платежа": [
+      "Блок оплат и обещаний"
+    ]
+  }
+}

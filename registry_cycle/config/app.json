@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "product": {
+    "name": "Контур · Реестры",
+    "environment": "СНГ"
+  },
+  "calendar": {
+    "month_names": {
+      "1": "ЯНВАРЬ",
+      "2": "ФЕВРАЛЬ",
+      "3": "МАРТ",
+      "4": "АПРЕЛЬ",
+      "5": "МАЙ",
+      "6": "ИЮНЬ",
+      "7": "ИЮЛЬ",
+      "8": "АВГУСТ",
+      "9": "СЕНТЯБРЬ",
+      "10": "ОКТЯБРЬ",
+      "11": "НОЯБРЬ",
+      "12": "ДЕКАБРЬ"
+    }
+  },
+  "paths": {
+    "master_pattern": "U:\\rbr\\Развитие СНГ\\ОБЩИЙ РЕЕСТР {month_ru}.xlsb",
+    "workspace": "{project_root}\\_local\\registry_cycle_v2",
+    "portfolio_roots": [
+      {
+        "country": "Таджикистан",
+        "path": "U:\\rbr\\Развитие СНГ\\Таджикистан\\Портфели отдела взыскания РТ",
+        "groups": [
+          {
+            "name": "Душанбе",
+            "profile": "hard",
+            "enabled": true,
+            "required": true
+          },
+          {
+            "name": "Худжанд",
+            "profile": "hard",
+            "enabled": true,
+            "required": true
+          },
+          {
+            "name": "Soft",
+            "profile": "soft",
+            "enabled": true,
+            "required": true
+          }
+        ]
+      },
+      {
+        "country": "Узбекистан",
+        "path": "U:\\rbr\\Развитие СНГ\\Узбекистан\\Портфели сотрудников УЗБ",
+        "groups": [
+          {
+            "name": "Ташкент",
+            "profile": "hard",
+            "enabled": true,
+            "required": true
+          },
+          {
+            "name": "Самарканд",
+            "profile": "hard",
+            "enabled": true,
+            "required": true
+          },
+          {
+            "name": "Soft",
+            "profile": "soft",
+            "enabled": true,
+            "required": true
+          },
+          {
+            "name": "Андижан",
+            "profile": "hard",
+            "enabled": false,
+            "required": false
+          }
+        ]
+      }
+    ]
+  },
+  "discovery": {
+    "active_extensions": [
+      ".xlsb"
+    ],
+    "ignored_directory_prefixes": [
+      "!",
+      "_",
+      "~"
+    ],
+    "backup_name_regex": "\\s\\(до\\s[^)]*\\)\\s*\\.xlsb$",
+    "profile_rules": [
+      {
+        "filename_regex": "^СОФТ\\s+",
+        "profile": "soft"
+      }
+    ]
+  },
+  "safety": {
+    "require_all_configured_groups": true,
+    "block_unconfigured_groups_with_files": true,
+    "block_multiple_active_files_per_folder": false,
+    "max_master_cell_changes": 20000,
+    "require_zero_forbidden_diff": true,
+    "source_stability_seconds": 3,
+    "lock_stale_seconds": 21600
+  },
+  "scheduler": {
+    "task_name": "Контур — цикл реестров СНГ",
+    "enabled": true,
+    "time": "23:40",
+    "days": [
+      "MON",
+      "TUE",
+      "WED",
+      "THU",
+      "FRI"
+    ],
+    "profile": "all",
+    "run_only_when_logged_on": true,
+    "start_when_available": true
+  },
+  "notifications": {
+    "enabled": true,
+    "provider": "admin_api",
+    "settings_file": "{project_root}\\pult\\настройки пульта.json",
+    "endpoint": "/admin/notify",
+    "audience": "owner_only"
+  }
+}

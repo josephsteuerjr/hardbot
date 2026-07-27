@@ -1,0 +1,40 @@
+{
+  "name": "Graphite",
+  "colors": {
+    "canvas": "#0B0E13",
+    "sidebar": "#0E1218",
+    "surface": "#121821",
+    "surface_alt": "#171E29",
+    "border": "#273142",
+    "border_soft": "#1D2633",
+    "text": "#F4F7FB",
+    "text_muted": "#8D99AA",
+    "text_dim": "#657185",
+    "accent": "#D8FF5F",
+    "accent_hover": "#E4FF8A",
+    "accent_text": "#11150A",
+    "success": "#62D9A5",
+    "warning": "#F1BC67",
+    "danger": "#FF7C7C",
+    "info": "#72A7FF"
+  },
+  "typography": {
+    "family": "Segoe UI Variable",
+    "fallback": "Segoe UI",
+    "title": 26,
+    "heading": 16,
+    "body": 10,
+    "small": 9,
+    "metric": 24
+  },
+  "layout": {
+    "window_width": 1240,
+    "window_height": 780,
+    "minimum_width": 1060,
+    "minimum_height": 680,
+    "sidebar_width": 224,
+    "page_padding": 30,
+    "card_padding": 22,
+    "gap": 14
+  }
+}
