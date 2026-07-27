@@ -42,10 +42,37 @@ python -m registry_cycle scheduler install
 Задача создаётся с `InteractiveToken`: пользователь должен быть вошедшим в Windows,
 иначе Excel COM не запускается.
 
+## Аддитивное восстановление из архивов
+
+Восстановление отделено от обычной сборки/разборки и по умолчанию работает только
+с полями из `config/recovery.json`:
+
+```powershell
+python -m registry_cycle.recovery prepare --snapshot <run>\snapshot.json
+python -m registry_cycle.recovery stage --snapshot <run>\snapshot.json --plan <run>\recovery\plan.json
+python -m registry_cycle.recovery validate --plan <run>\recovery\plan.json --stage <run>\recovery\staging-*\stage.json
+python -m registry_cycle.recovery publish --plan <run>\recovery\plan.json --stage <run>\recovery\staging-*\stage.json --confirm-digest <sha256>
+```
+
+Контур восстанавливает значение только в пустую ячейку того же КД и того же
+ответственного. Расходящаяся история пропускается. Комментарии текущего месяца
+не берутся из точек раньше 6 июля, чтобы не вернуть июньский перенос.
+
+Перед staging архивные значения автоматически сверяются с копией общего реестра:
+допустимы только пустота или точное совпадение. Отличающееся непустое значение,
+чужой ответственный или отсутствующий КД блокируют пакет. Изменения больше
+300 ячеек или 25% строк одного файла также требуют отдельного доказательного
+разбора.
+
+Публикация не открывает живые книги через Excel. Она проверяет lock-файл и SHA,
+создаёт соседнюю копию `(... до восстановления из архивов ...)`, заменяет только
+неизменившийся файл и при любой ошибке откатывает уже заменённые книги.
+
 ## Конфигурация
 
 - `config/app.json` — пути, города, безопасность, расписание и owner-only уведомления;
 - `config/fields.json` — HARD/SOFT/shared, типы, aliases и политика конфликтов;
+- `config/recovery.json` — архивные точки, VSS, разрешённые поля и лимиты восстановления;
 - `config/theme.json` — Graphite UI.
 
 В конфиге явно активны Душанбе, Худжанд, Ташкент, Самарканд и SOFT обеих стран.

@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "archive": {
+    "root": "U:\\rbr\\Портфели\\Аналитика\\Оперативные задачи\\Клинов\\Архив реестров",
+    "points": [
+      {
+        "label": "02.07",
+        "folder": "02.07",
+        "at": "2026-07-02T23:00:00+04:00"
+      },
+      {
+        "label": "06.07",
+        "folder": "06.07",
+        "at": "2026-07-06T23:00:00+04:00"
+      },
+      {
+        "label": "07.07",
+        "folder": "07.07",
+        "at": "2026-07-07T23:00:00+04:00"
+      },
+      {
+        "label": "08.07",
+        "folder": "08.07",
+        "at": "2026-07-08T23:00:00+04:00"
+      },
+      {
+        "label": "09.07",
+        "folder": "09.07",
+        "at": "2026-07-09T23:00:00+04:00"
+      },
+      {
+        "label": "10.07",
+        "folder": "10.07",
+        "at": "2026-07-10T23:00:00+04:00"
+      },
+      {
+        "label": "11.07",
+        "folder": "11.07",
+        "at": "2026-07-11T23:00:00+04:00"
+      },
+      {
+        "label": "13.07",
+        "folder": "13.07",
+        "at": "2026-07-13T23:00:00+04:00"
+      },
+      {
+        "label": "14.07",
+        "folder": "14.07",
+        "at": "2026-07-14T23:00:00+04:00"
+      },
+      {
+        "label": "15.07",
+        "folder": "15.07",
+        "at": "2026-07-15T23:00:00+04:00"
+      },
+      {
+        "label": "16.07",
+        "folder": "16.07",
+        "at": "2026-07-16T23:00:00+04:00"
+      },
+      {
+        "label": "17.07",
+        "folder": "17.07",
+        "at": "2026-07-17T23:00:00+04:00"
+      },
+      {
+        "label": "19.07",
+        "folder": "19.07",
+        "at": "2026-07-19T23:00:00+04:00"
+      },
+      {
+        "label": "20.07",
+        "folder": "20.07",
+        "at": "2026-07-20T22:00:00+04:00"
+      },
+      {
+        "label": "21.07 · 14:00",
+        "folder": "21.07 (1)",
+        "at": "2026-07-21T14:00:00+04:00"
+      },
+      {
+        "label": "21.07 · 23:00",
+        "folder": "21.07",
+        "at": "2026-07-21T23:00:00+04:00"
+      },
+      {
+        "label": "22.07 · 00:05",
+        "folder": "22.07 (1)",
+        "at": "2026-07-22T00:05:00+04:00"
+      },
+      {
+        "label": "23.07 · 00:17",
+        "folder": "22.07",
+        "at": "2026-07-23T00:17:00+04:00"
+      },
+      {
+        "label": "23.07 · 00:52",
+        "folder": "23.07 для проверки комментов",
+        "at": "2026-07-23T00:52:00+04:00"
+      }
+    ]
+  },
+  "vss": {
+    "enabled": true,
+    "mapped_root": "U:\\",
+    "share_root": "\\\\rbr-m2-fs01.cis.corp.mikrokapital.com\\RBR$",
+    "enumeration_path": "\\\\rbr-m2-fs01.cis.corp.mikrokapital.com\\RBR$\\rbr\\Развитие СНГ",
+    "from_local_date": "2026-07-23",
+    "utc_offset_hours": 4,
+    "latest_per_local_day": true
+  },
+  "extra_sources": {
+    "include_target_folder_backups": true,
+    "include_project_root_backups": true
+  },
+  "fields": [
+    {
+      "title": "Доп. Адрес/Доп.Номер",
+      "profiles": [
+        "hard",
+        "soft"
+      ],
+      "max_length": 500,
+      "append_only": true
+    },
+    {
+      "title": "Телефон",
+      "profiles": [
+        "hard",
+        "soft"
+      ],
+      "max_length": 500,
+      "append_only": true
+    },
+    {
+      "title": "Телефон глав",
+      "profiles": [
+        "hard",
+        "soft"
+      ],
+      "max_length": 500,
+      "append_only": true
+    },
+    {
+      "title": "комментарий звонка",
+      "profiles": [
+        "hard"
+      ],
+      "max_length": 500,
+      "append_only": true
+    },
+    {
+      "title": "Общий результат",
+      "profiles": [
+        "hard",
+        "soft"
+      ],
+      "max_length": 500,
+      "append_only": false
+    },
+    {
+      "title": "Комментарий текущего месяца выезда",
+      "profiles": [
+        "hard"
+      ],
+      "max_length": 5000,
+      "append_only": true,
+      "not_before": "2026-07-06T00:00:00+04:00"
+    },
+    {
+      "title": "Комментарий текущего месяца Софт",
+      "profiles": [
+        "soft"
+      ],
+      "max_length": 5000,
+      "append_only": true,
+      "not_before": "2026-07-06T00:00:00+04:00"
+    }
+  ],
+  "safety": {
+    "max_writes_per_file": 300,
+    "max_write_share": 0.25,
+    "exclude_filename_regex": "^Копия\\s",
+    "require_same_responsible": true,
+    "block_history_conflicts": true
+  }
+}
