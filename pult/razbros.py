@@ -95,7 +95,8 @@ def _rotate_backups(folder, stem: str, log=lambda *a: None, keep: int = KEEP_BAC
     ежедневный разброс — это гигабайты в год в чужой папке. Удаляем только то, чьё имя
     полностью разобралось как наша копия; при любом сомнении файл остаётся."""
     import re as _re
-    pat = _re.compile(r"^" + _re.escape(stem) + r" \(до разброса (\d{2}\.\d{2} \d{2}-\d{2})"
+    pat = _re.compile(r"^" + _re.escape(stem) + r" \(до разброса "
+                      r"(\d{2})\.(\d{2})(?:\.(\d{2}))? (\d{2})-(\d{2})"
                       r"(?:, (\d+))?\)\.xlsb$")
     found = []
     try:
@@ -105,11 +106,15 @@ def _rotate_backups(folder, stem: str, log=lambda *a: None, keep: int = KEEP_BAC
     for p in names:
         m = pat.match(p.name)
         if m:
-            found.append((m.group(1), int(m.group(2) or 1), p))
+            dd, mm, yy, hh, mi, dup = m.groups()
+            # Сортируем по РАЗОБРАННОЙ дате: сравнение строк «ДД.ММ» на стыке месяцев
+            # ставило 31.12 выше 01.01 и удаляло самые свежие копии.
+            key = (int(yy or 0), int(mm), int(dd), int(hh), int(mi), int(dup or 1))
+            found.append((key, p))
     if len(found) <= keep:
         return
-    found.sort(key=lambda x: (x[0], x[1]))      # по разобранному штампу, не по mtime
-    for _stamp, _n, p in found[:-keep]:
+    found.sort(key=lambda x: x[0])             # по разобранному штампу, не по mtime
+    for _key, p in found[:-keep]:
         try:
             os.remove(p)
             log(f"[i] Старая копия удалена: {p.name}")
@@ -410,7 +415,7 @@ def _transfer_stats_and_filter(app, file_path: Path, emp_name: str, old_path):
             # комментарии/доп. номера приходилось из теневых копий сети.
             if Path(old_path).exists():
                 from datetime import datetime as _dt
-                stamp = _dt.now().strftime("%d.%m %H-%M")
+                stamp = _dt.now().strftime("%d.%m.%y %H-%M")
                 base = Path(old_path).name[len("~old_"):-len(".xlsb")]
                 folder = Path(old_path).parent
                 # Счётчик коллизий — ВНУТРИ скобок: «(до разброса 27.07 14-05, 2)».

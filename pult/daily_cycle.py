@@ -40,6 +40,14 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(APP_DIR))
 
+# Планировщик перехватывает вывод, и на русской Windows он уходит в cp1251 —
+# первая же кириллическая строка роняла бы прогон UnicodeEncodeError.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 — старый Python или подменённый поток
+        pass
+
 import enrich          # noqa: E402  — рядом, тот же пакет пульта
 import razbros         # noqa: E402
 
@@ -272,10 +280,32 @@ def step_import(settings: dict, base: str | None, dry: bool, log,
                 if f not in files:
                     files.append(f)
         log(f"Источник — личные реестры, найдено: {len(files)}")
-    if dry:
-        return f"Сухой прогон: импортировали бы {len(files)} файлов"
     if not files:
         return "Реестров не нашлось — проверь путь или базовую папку"
+    if dry:
+        # Открываем файл по-настоящему: смысл сухого прогона в том, чтобы узнать о
+        # неузнанной шапке ДО записи в прод, а не после.
+        out = [f"Сухой прогон, файлов {len(files)} — запись не выполнялась"]
+        for p in files:
+            try:
+                sheets = read_sheets(str(p))
+            except Exception as e:  # noqa: BLE001
+                out.append(f"  ✗ {p.name}: не читается — {e}")
+                continue
+            best = max(sheets, key=lambda s: len(s["grid"]))
+            named = next((s for s in sheets if s["name"] == "Портфели"), best)
+            hdr = None
+            for i, row in enumerate(named["grid"][:10]):
+                if any(str(c or "").strip().lower().startswith("номер кд") for c in row):
+                    hdr = i
+                    break
+            rows = max(len(named["grid"]) - (hdr + 1 if hdr is not None else 0), 0)
+            out.append(f"  {p.name}: лист «{named['name']}», "
+                       + (f"шапка в строке {hdr + 1}, строк данных ~{rows}"
+                          if hdr is not None
+                          else "✗ колонка «Номер КД / ID» не найдена в первых 10 строках — "
+                               "сервер откажет"))
+        return "\n".join(out)
 
     agg = {"total_rows": 0, "inserted": 0, "updated": 0, "skipped_no_id": 0,
            "duplicates": 0, "protected_cells": 0, "office_cells": 0, "no_responsible": 0}
@@ -329,8 +359,13 @@ def main(argv=None) -> int:
     try:
         settings = load_settings()
         base = a.base or settings.get("scatterBase") or None
-        if not base:
-            log("[!] Базовая папка не задана: ни --base, ни scatterBase в настройках пульта")
+        # Папка республик нужна там, где мы ходим по личным реестрам. Импорт одним
+        # общим реестром знает свой путь и в базе папок не нуждается — раньше проверка
+        # стояла до развилки и рубила именно главный сценарий.
+        if not base and not (a.step == "import" and a.registry):
+            log("[!] Базовая папка не задана: ни --base, ни scatterBase в настройках пульта. "
+                "Она нужна для обогащения и для импорта личных реестров; "
+                "импорту одного общего реестра (--registry) она не требуется.")
             return 2
 
         if a.after_registry and not a.dry_run:
