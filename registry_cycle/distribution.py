@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any
 
 from .config import ConfigBundle, load_config_bundle
+from .cycle_lock import CycleLock
+from .discovery import discover
 from .errors import SafetyViolation
 from .excel_host import (
     ExcelHost,
@@ -47,7 +49,7 @@ from .normalize import (
 )
 from .reader import read_portfolio
 from .semantics import values_equal_for_rule
-from .snapshot import SnapshotSet, load_snapshot
+from .snapshot import SnapshotSet, capture_sources, load_snapshot
 from .staging import (
     _canonical_date_format,
     _format_new_rows,
@@ -212,6 +214,37 @@ class DistributionValidation:
 
 
 @dataclass(slots=True)
+class DistributionPreflight:
+    run_id: str
+    plan_digest: str
+    validation: DistributionValidation
+    checked_master: bool = False
+    checked_files: int = 0
+    issues: list[Issue] | None = None
+
+    def __post_init__(self) -> None:
+        if self.issues is None:
+            self.issues = []
+
+    @property
+    def blocked(self) -> bool:
+        return self.validation.blocked or any(
+            issue.severity == "error" for issue in self.issues or []
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "plan_digest": self.plan_digest,
+            "checked_master": self.checked_master,
+            "checked_files": self.checked_files,
+            "validation": self.validation.as_dict(),
+            "issues": [issue.as_dict() for issue in self.issues or []],
+            "blocked": self.blocked,
+        }
+
+
+@dataclass(slots=True)
 class DistributionPublishResult:
     run_id: str
     plan_digest: str
@@ -220,6 +253,7 @@ class DistributionPublishResult:
     rolled_back: list[str]
     issues: list[Issue]
     notification: dict[str, Any] | None = None
+    provenance_path: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -236,6 +270,7 @@ class DistributionPublishResult:
             "rolled_back": self.rolled_back,
             "issues": [issue.as_dict() for issue in self.issues],
             "notification": self.notification,
+            "provenance_path": self.provenance_path,
             "ok": self.ok,
         }
 
@@ -1484,6 +1519,237 @@ def _exclusive_file_check(path: Path) -> None:
         handle.Close()
 
 
+def _excel_lock_path(path: Path) -> Path:
+    return path.with_name("~$" + path.name)
+
+
+def _quick_stat_matches(
+    path: Path,
+    expected: FileFingerprint,
+) -> bool:
+    stat = path.stat()
+    return (
+        stat.st_size == expected.size
+        and stat.st_mtime_ns == expected.mtime_ns
+    )
+
+
+def preflight_distribution(
+    bundle: ConfigBundle,
+    stage: DistributionStage,
+    plan: DistributionPlan,
+) -> DistributionPreflight:
+    """Повторно проверить staging и optimistic-lock всех live-источников."""
+    validation = validate_distribution_staging(bundle, stage, plan)
+    report = DistributionPreflight(
+        run_id=stage.run_id,
+        plan_digest=plan.digest,
+        validation=validation,
+    )
+    assert report.issues is not None
+    if validation.blocked:
+        report.issues.append(
+            Issue(
+                "error",
+                "distribution_validation_blocked",
+                "distribution staging не прошёл validation",
+                {
+                    "codes": [
+                        issue.code
+                        for issue in validation.issues or []
+                        if issue.severity == "error"
+                    ]
+                },
+            )
+        )
+        _atomic_json(stage.staging_dir / "preflight.json", report.as_dict())
+        return report
+
+    try:
+        snapshot = load_snapshot(plan.snapshot_path)
+    except Exception as exc:  # noqa: BLE001
+        report.issues.append(
+            Issue(
+                "error",
+                "distribution_snapshot_unavailable",
+                "не загружен snapshot distribution-плана",
+                {"path": str(plan.snapshot_path), "error": str(exc)},
+            )
+        )
+        _atomic_json(stage.staging_dir / "preflight.json", report.as_dict())
+        return report
+
+    if (
+        snapshot.run_id != plan.run_id
+        or stage.run_id != plan.run_id
+        or snapshot.master_fingerprint != plan.master_fingerprint
+    ):
+        report.issues.append(
+            Issue(
+                "error",
+                "distribution_snapshot_identity_mismatch",
+                "snapshot, план и staging относятся к разным запускам",
+            )
+        )
+
+    try:
+        if fingerprint(plan.assignment_baseline_path) != (
+            plan.assignment_baseline_fingerprint
+        ):
+            report.issues.append(
+                Issue(
+                    "error",
+                    "distribution_assignment_baseline_changed",
+                    "assignment-baseline изменился после построения плана",
+                    {"path": str(plan.assignment_baseline_path)},
+                )
+            )
+    except Exception as exc:  # noqa: BLE001
+        report.issues.append(
+            Issue(
+                "error",
+                "distribution_assignment_baseline_unavailable",
+                "assignment-baseline недоступен",
+                {
+                    "path": str(plan.assignment_baseline_path),
+                    "error": str(exc),
+                },
+            )
+        )
+
+    master_path = snapshot.master_original
+    master_lock = _excel_lock_path(master_path)
+    if master_lock.exists():
+        report.issues.append(
+            Issue(
+                "error",
+                "distribution_live_master_locked",
+                "общий реестр открыт в Excel",
+                {"path": str(master_path), "lock": str(master_lock)},
+            )
+        )
+    else:
+        try:
+            _exclusive_file_check(master_path)
+            if fingerprint(master_path) != plan.master_fingerprint:
+                report.issues.append(
+                    Issue(
+                        "error",
+                        "distribution_live_master_changed",
+                        "общий реестр изменился после snapshot",
+                        {"path": str(master_path)},
+                    )
+                )
+            else:
+                report.checked_master = True
+        except Exception as exc:  # noqa: BLE001
+            report.issues.append(
+                Issue(
+                    "error",
+                    "distribution_live_master_unavailable",
+                    "общий реестр занят или недоступен для preflight",
+                    {"path": str(master_path), "error": str(exc)},
+                )
+            )
+
+    captured_by_entry = {
+        item.entry.entry_id: item
+        for item in snapshot.personals
+    }
+    for item in stage.files:
+        captured = captured_by_entry.get(item.entry_id)
+        if captured is None:
+            report.issues.append(
+                Issue(
+                    "error",
+                    "distribution_live_entry_missing",
+                    "файл staging отсутствует в snapshot",
+                    {"entry_id": item.entry_id},
+                )
+            )
+            continue
+        if (
+            captured.fingerprint != item.source_fingerprint
+            or str(captured.entry.path).casefold()
+            != str(item.original_path).casefold()
+        ):
+            report.issues.append(
+                Issue(
+                    "error",
+                    "distribution_live_entry_identity_mismatch",
+                    "цель staging не совпала со snapshot",
+                    {
+                        "entry_id": item.entry_id,
+                        "path": str(item.original_path),
+                    },
+                )
+            )
+            continue
+        lock = _excel_lock_path(item.original_path)
+        if lock.exists():
+            report.issues.append(
+                Issue(
+                    "error",
+                    "distribution_live_personal_locked",
+                    "личный реестр открыт в Excel",
+                    {
+                        "entry_id": item.entry_id,
+                        "path": str(item.original_path),
+                        "lock": str(lock),
+                    },
+                )
+            )
+            continue
+        try:
+            _exclusive_file_check(item.original_path)
+            live_fingerprint = fingerprint(item.original_path)
+            staged_fingerprint = fingerprint(item.staged_path)
+        except Exception as exc:  # noqa: BLE001
+            report.issues.append(
+                Issue(
+                    "error",
+                    "distribution_live_personal_unavailable",
+                    "личный реестр или staging занят либо недоступен",
+                    {
+                        "entry_id": item.entry_id,
+                        "path": str(item.original_path),
+                        "error": str(exc),
+                    },
+                )
+            )
+            continue
+        if live_fingerprint != item.source_fingerprint:
+            report.issues.append(
+                Issue(
+                    "error",
+                    "distribution_live_personal_changed",
+                    "личный реестр изменился после snapshot",
+                    {
+                        "entry_id": item.entry_id,
+                        "path": str(item.original_path),
+                    },
+                )
+            )
+            continue
+        if staged_fingerprint != item.staged_fingerprint:
+            report.issues.append(
+                Issue(
+                    "error",
+                    "distribution_staged_personal_changed",
+                    "локальный staging изменился после сборки",
+                    {
+                        "entry_id": item.entry_id,
+                        "path": str(item.staged_path),
+                    },
+                )
+            )
+            continue
+        report.checked_files += 1
+
+    _atomic_json(stage.staging_dir / "preflight.json", report.as_dict())
+    return report
+
+
 def _unique_distribution_backup(path: Path, stamp: datetime) -> Path:
     label = stamp.strftime("%d.%m.%y %H-%M")
     candidate = path.with_name(
@@ -1513,10 +1779,10 @@ def publish_distribution(
         raise SafetyViolation(
             "digest подтверждения distribution не совпал"
         )
-    validation = validate_distribution_staging(bundle, stage, plan)
-    if validation.blocked:
+    preflight = preflight_distribution(bundle, stage, plan)
+    if preflight.blocked:
         raise SafetyViolation(
-            "distribution staging не прошёл повторную validation"
+            "distribution не прошёл финальный preflight"
         )
     result = DistributionPublishResult(
         run_id=stage.run_id,
@@ -1530,12 +1796,46 @@ def publish_distribution(
     temp_by_entry: dict[str, Path] = {}
     replaced: list[DistributionStagedFile] = []
     stamp = datetime.now()
+    snapshot = load_snapshot(plan.snapshot_path)
+    intent_path = stage.staging_dir / "publication_intent.json"
+    _atomic_json(
+        intent_path,
+        {
+            "created_at": datetime.now().astimezone().isoformat(),
+            "run_id": stage.run_id,
+            "plan_digest": plan.digest,
+            "master": {
+                "path": str(snapshot.master_original),
+                "fingerprint": plan.master_fingerprint.as_dict(),
+                "mode": "read_only",
+            },
+            "files": [
+                {
+                    "entry_id": item.entry_id,
+                    "path": str(item.original_path),
+                    "before": item.source_fingerprint.as_dict(),
+                    "after": item.staged_fingerprint.as_dict(),
+                    "appended_rows": item.appended_rows,
+                }
+                for item in stage.files
+            ],
+        },
+    )
 
     try:
-        for item in stage.files:
-            lock = item.original_path.with_name(
-                "~$" + item.original_path.name
+        master_lock = _excel_lock_path(snapshot.master_original)
+        if master_lock.exists():
+            raise SafetyViolation(
+                f"Excel lock-файл у общего: {snapshot.master_original}"
             )
+        _exclusive_file_check(snapshot.master_original)
+        if fingerprint(snapshot.master_original) != plan.master_fingerprint:
+            raise SafetyViolation(
+                "общий реестр изменился после distribution snapshot"
+            )
+
+        for item in stage.files:
+            lock = _excel_lock_path(item.original_path)
             if lock.exists():
                 raise SafetyViolation(
                     f"Excel lock-файл у цели: {item.original_path}"
@@ -1578,8 +1878,39 @@ def publish_distribution(
                     "живой файл изменился при подготовке: "
                     f"{item.original_path}"
                 )
+        if _excel_lock_path(snapshot.master_original).exists():
+            raise SafetyViolation(
+                f"Excel lock-файл у общего: {snapshot.master_original}"
+            )
+        _exclusive_file_check(snapshot.master_original)
+        if fingerprint(snapshot.master_original) != plan.master_fingerprint:
+            raise SafetyViolation(
+                "общий реестр изменился при подготовке distribution"
+            )
 
         for item in stage.files:
+            if _excel_lock_path(snapshot.master_original).exists():
+                raise SafetyViolation(
+                    f"Excel lock-файл у общего: {snapshot.master_original}"
+                )
+            if not _quick_stat_matches(
+                snapshot.master_original,
+                plan.master_fingerprint,
+            ):
+                raise SafetyViolation(
+                    "общий реестр изменился во время distribution"
+                )
+            lock = _excel_lock_path(item.original_path)
+            if lock.exists():
+                raise SafetyViolation(
+                    f"Excel lock-файл у цели: {item.original_path}"
+                )
+            _exclusive_file_check(item.original_path)
+            if fingerprint(item.original_path) != item.source_fingerprint:
+                raise SafetyViolation(
+                    "живой файл изменился непосредственно перед заменой: "
+                    f"{item.original_path}"
+                )
             temporary = temp_by_entry[item.entry_id]
             os.replace(temporary, item.original_path)
             replaced.append(item)
@@ -1646,6 +1977,46 @@ def publish_distribution(
             f"distribution публикация отменена и откачена: {exc}"
         ) from exc
 
+    provenance_path = stage.staging_dir / "post_publish_provenance.json"
+    try:
+        _atomic_json(
+            provenance_path,
+            {
+                "published_at": datetime.now().astimezone().isoformat(),
+                "run_id": stage.run_id,
+                "plan_digest": plan.digest,
+                "plan_path": str(
+                    plan.snapshot_path.parent / "distribution" / "plan.json"
+                ),
+                "master": {
+                    "path": str(snapshot.master_original),
+                    "fingerprint": plan.master_fingerprint.as_dict(),
+                    "mode": "read_only",
+                },
+                "files": [
+                    {
+                        "entry_id": item.entry_id,
+                        "path": str(item.original_path),
+                        "before": item.source_fingerprint.as_dict(),
+                        "after": item.staged_fingerprint.as_dict(),
+                        "backup": str(backup_by_entry[item.entry_id]),
+                        "appended_rows": item.appended_rows,
+                    }
+                    for item in stage.files
+                ],
+            },
+        )
+        result.provenance_path = str(provenance_path)
+    except Exception as exc:  # noqa: BLE001
+        result.issues.append(
+            Issue(
+                "warning",
+                "distribution_provenance_write_failed",
+                "публикация завершена, но не записан отдельный post-manifest",
+                {"intent": str(intent_path), "error": str(exc)},
+            )
+        )
+
     if notify_owner:
         from .notifications import OwnerNotifier
 
@@ -1698,6 +2069,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config-dir", type=Path)
     commands = parser.add_subparsers(dest="command", required=True)
+    prepare = commands.add_parser(
+        "prepare",
+        help="снять свежий snapshot, собрать и проверить staging",
+    )
+    prepare.add_argument(
+        "--assignment-baseline",
+        type=Path,
+        required=True,
+    )
+    prepare.add_argument("--run-id")
     plan = commands.add_parser(
         "plan",
         help="построить доказательный план новых строк",
@@ -1720,6 +2101,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate.add_argument("--plan", type=Path, required=True)
     validate.add_argument("--stage", type=Path, required=True)
+    preflight = commands.add_parser(
+        "preflight",
+        help="проверить staging и неизменность всех live-источников",
+    )
+    preflight.add_argument("--plan", type=Path, required=True)
+    preflight.add_argument("--stage", type=Path, required=True)
     publish = commands.add_parser(
         "publish",
         help="опубликовать проверенные личные файлы",
@@ -1734,6 +2121,88 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     bundle = load_config_bundle(args.config_dir)
+    if args.command == "prepare":
+        config = load_distribution_config(bundle)
+        stale = int(
+            bundle.app.safety.get("lock_stale_seconds", 21600)
+        )
+        with CycleLock(
+            bundle.workspace_path() / "cycle.lock",
+            stale_seconds=stale,
+        ):
+            discovery = discover(bundle)
+            if discovery.blocked:
+                print(
+                    json.dumps(
+                        discovery.as_dict(),
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+                return 2
+            snapshot = capture_sources(
+                bundle,
+                discovery,
+                run_id=args.run_id,
+            )
+            distribution_dir = snapshot.run_dir / "distribution"
+            _atomic_json(
+                distribution_dir / "discovery.json",
+                discovery.as_dict(),
+            )
+            plan = build_distribution_plan(
+                bundle,
+                snapshot,
+                config,
+                args.assignment_baseline,
+                snapshot_path=snapshot.run_dir / "snapshot.json",
+            )
+            payload = _summary_payload(plan)
+            payload["snapshot"] = str(
+                snapshot.run_dir / "snapshot.json"
+            )
+            if plan.blocked:
+                print(
+                    json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+                return 2
+            staged = build_distribution_staging(
+                bundle,
+                snapshot,
+                plan,
+            )
+            preflight = preflight_distribution(
+                bundle,
+                staged,
+                plan,
+            )
+            payload["stage"] = str(
+                staged.staging_dir / "stage.json"
+            )
+            payload["preflight"] = str(
+                staged.staging_dir / "preflight.json"
+            )
+            payload["checked_master"] = preflight.checked_master
+            payload["checked_files"] = preflight.checked_files
+            payload["checked_existing_cells"] = (
+                preflight.validation.checked_existing_cells
+            )
+            payload["checked_appended_cells"] = (
+                preflight.validation.checked_appended_cells
+            )
+            payload["preflight_blocked"] = preflight.blocked
+            print(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 2 if preflight.blocked else 0
     if args.command == "plan":
         snapshot = load_snapshot(args.snapshot)
         config = load_distribution_config(bundle)
@@ -1762,6 +2231,16 @@ def main(argv: list[str] | None = None) -> int:
         plan = load_distribution_plan(args.plan)
         staged = load_distribution_stage(args.stage)
         report = validate_distribution_staging(
+            bundle,
+            staged,
+            plan,
+        )
+        print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
+        return 2 if report.blocked else 0
+    if args.command == "preflight":
+        plan = load_distribution_plan(args.plan)
+        staged = load_distribution_stage(args.stage)
+        report = preflight_distribution(
             bundle,
             staged,
             plan,

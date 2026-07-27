@@ -6,7 +6,11 @@ import registry_cycle.distribution as distribution
 from registry_cycle.config import ConfigBundle, FieldConfig
 from registry_cycle.distribution import (
     DistributionConfig,
+    DistributionPlan,
+    DistributionStage,
+    DistributionValidation,
     build_distribution_plan,
+    preflight_distribution,
 )
 from registry_cycle.models import (
     FileFingerprint,
@@ -268,4 +272,82 @@ def test_distribution_volume_limit_blocks_plan(monkeypatch, tmp_path):
     assert any(
         issue.code == "distribution_total_limit_exceeded"
         for issue in plan.issues
+    )
+
+
+def test_preflight_blocks_when_live_master_changed(monkeypatch, tmp_path):
+    master_original = tmp_path / "live-master.xlsb"
+    master_copy = tmp_path / "master-copy.xlsb"
+    baseline_path = tmp_path / "assignment-baseline.xlsb"
+    expected_master = _fingerprint("expected-master")
+    expected_baseline = _fingerprint("baseline")
+    changed_master = _fingerprint("changed-master")
+    snapshot = SnapshotSet(
+        run_id="preflight-run",
+        run_dir=tmp_path / "run",
+        master_original=master_original,
+        master_copy=master_copy,
+        master_fingerprint=expected_master,
+        personals=(),
+    )
+    plan = DistributionPlan(
+        run_id=snapshot.run_id,
+        snapshot_path=tmp_path / "snapshot.json",
+        assignment_baseline_path=baseline_path,
+        assignment_baseline_fingerprint=expected_baseline,
+        master_fingerprint=expected_master,
+        rows=[],
+        issues=[],
+    )
+    staging_dir = tmp_path / "staging"
+    staging_dir.mkdir()
+    stage = DistributionStage(
+        run_id=snapshot.run_id,
+        run_dir=snapshot.run_dir,
+        staging_dir=staging_dir,
+        plan_digest=plan.digest,
+        files=(),
+    )
+    validation = DistributionValidation(
+        run_id=snapshot.run_id,
+        plan_digest=plan.digest,
+        issues=[],
+    )
+    monkeypatch.setattr(
+        distribution,
+        "validate_distribution_staging",
+        lambda _bundle, _stage, _plan: validation,
+    )
+    monkeypatch.setattr(
+        distribution,
+        "load_snapshot",
+        lambda _path: snapshot,
+    )
+    monkeypatch.setattr(
+        distribution,
+        "_exclusive_file_check",
+        lambda _path: None,
+    )
+
+    def fake_fingerprint(path):
+        target = Path(path)
+        if target == baseline_path:
+            return expected_baseline
+        if target == master_original:
+            return changed_master
+        raise AssertionError(f"unexpected fingerprint path: {target}")
+
+    monkeypatch.setattr(distribution, "fingerprint", fake_fingerprint)
+
+    report = preflight_distribution(
+        _bundle(tmp_path),
+        stage,
+        plan,
+    )
+
+    assert report.blocked
+    assert not report.checked_master
+    assert any(
+        issue.code == "distribution_live_master_changed"
+        for issue in report.issues or []
     )

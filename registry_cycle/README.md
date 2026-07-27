@@ -49,17 +49,23 @@ python -m registry_cycle scheduler install
 перезаписываются, а КД, исчезнувшие из общего, не удаляются:
 
 ```powershell
+python -m registry_cycle.distribution prepare --assignment-baseline <master-before-assignments>.xlsb
 python -m registry_cycle.distribution plan --snapshot <run>\snapshot.json --assignment-baseline <master-before-assignments>.xlsb
 python -m registry_cycle.distribution stage --snapshot <run>\snapshot.json --plan <run>\distribution\plan.json
 python -m registry_cycle.distribution validate --plan <run>\distribution\plan.json --stage <run>\distribution\staging-*\stage.json
+python -m registry_cycle.distribution preflight --plan <run>\distribution\plan.json --stage <run>\distribution\staging-*\stage.json
 python -m registry_cycle.distribution publish --plan <run>\distribution\plan.json --stage <run>\distribution\staging-*\stage.json --confirm-digest <sha256>
 ```
 
+`prepare` выполняет весь безопасный dry-run до точки подтверждения: discovery,
+свежий snapshot, план, Excel staging, validation и live-preflight.
 Каждая новая строка должна иметь пустого ответственного в assignment-baseline и
 конкретного ответственного в текущем общем реестре. После staging проверяются все
 старые и новые ячейки, листы и фильтры. Публикация возможна только при совпадении
-digest, неизменных live-файлах и отсутствии Excel lock; перед заменой создаётся
-соседняя копия `(... до ночного разброса ...)`.
+digest, неизменных общем и личных live-файлах и отсутствии Excel lock; перед
+заменой создаётся соседняя копия `(... до ночного разброса ...)`. Успешная
+публикация сохраняет отдельный provenance-manifest, поэтому добавленные из общего
+строки не считаются последующими правками сотрудников.
 
 Этот режим пока не устанавливается в Планировщик автоматически. Для регулярного
 запуска ему нужны отдельный жизненный цикл assignment-baseline и очередь закрепов,
