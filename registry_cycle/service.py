@@ -9,6 +9,7 @@ from .config import ConfigBundle
 from .discovery import discover
 from .errors import SafetyViolation, WorkbookReadError
 from .models import DiscoveryReport, Issue, SyncPlan
+from .ownership import manifest_owner_matches
 from .planner import build_sync_plan
 from .reader import read_portfolio
 from .reporting import write_plan_reports
@@ -86,6 +87,36 @@ class CycleService:
                         "personal_read_failed",
                         f"не прочитан личный файл: {personal.entry.path.name}",
                         {"path": str(personal.entry.path), "error": str(exc)},
+                    )
+                )
+                continue
+            responsibles = local_book.unique_responsibles(
+                self.bundle.fields.responsible_title
+            )
+            if (
+                len(responsibles) == 1
+                and not manifest_owner_matches(
+                    self.bundle,
+                    personal.entry,
+                    responsibles[0],
+                )
+            ):
+                read_issues.append(
+                    Issue(
+                        "error",
+                        "manifest_owner_mismatch",
+                        "ответственный внутри книги не совпал с папкой "
+                        "или именем файла",
+                        {
+                            "path": str(personal.entry.path),
+                            "employee_folder": (
+                                personal.entry.employee_folder
+                            ),
+                            "responsible_hint": (
+                                personal.entry.responsible_hint
+                            ),
+                            "book_responsible": responsibles[0],
+                        },
                     )
                 )
                 continue

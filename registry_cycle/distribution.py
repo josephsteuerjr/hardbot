@@ -47,6 +47,7 @@ from .normalize import (
     norm_name,
     norm_title,
 )
+from .ownership import manifest_owner_matches
 from .reader import read_portfolio
 from .semantics import values_equal_for_rule
 from .snapshot import SnapshotSet, capture_sources, load_snapshot
@@ -501,6 +502,22 @@ def build_distribution_plan(
             )
             continue
         responsible = responsibles[0]
+        if not manifest_owner_matches(bundle, entry, responsible):
+            issues.append(
+                Issue(
+                    "error",
+                    "distribution_manifest_owner_mismatch",
+                    "ответственный внутри книги не совпал с папкой или именем файла",
+                    {
+                        "entry_id": entry.entry_id,
+                        "path": str(entry.path),
+                        "employee_folder": entry.employee_folder,
+                        "responsible_hint": entry.responsible_hint,
+                        "book_responsible": responsible,
+                    },
+                )
+            )
+            continue
         target_key = (entry.profile, norm_name(responsible))
         if target_key in personal_targets:
             issues.append(

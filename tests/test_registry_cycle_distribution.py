@@ -100,6 +100,7 @@ def _run_plan(
     baseline_rows,
     personal_rows,
     employee: str = EMPLOYEE,
+    entry_employee: str | None = None,
     config: DistributionConfig | None = None,
 ):
     master_path = tmp_path / "master.xlsb"
@@ -110,12 +111,12 @@ def _run_plan(
     personal = _book(personal_path, personal_rows, "personal")
     entry = ManifestEntry(
         entry_id="employee-1",
-        path=tmp_path / f"{employee}.xlsb",
+        path=tmp_path / f"{entry_employee or employee}.xlsb",
         country="Тест",
         group="Город",
         profile="hard",
-        employee_folder=employee,
-        responsible_hint=employee,
+        employee_folder=entry_employee or employee,
+        responsible_hint=entry_employee or employee,
     )
     snapshot = SnapshotSet(
         run_id="test-distribution",
@@ -271,6 +272,27 @@ def test_distribution_volume_limit_blocks_plan(monkeypatch, tmp_path):
     assert len(plan.rows) == 2
     assert any(
         issue.code == "distribution_total_limit_exceeded"
+        for issue in plan.issues
+    )
+
+
+def test_manifest_owner_mismatch_blocks_misplaced_book(
+    monkeypatch,
+    tmp_path,
+):
+    plan = _run_plan(
+        monkeypatch,
+        tmp_path,
+        master_rows=(("1", EMPLOYEE, "A"),),
+        baseline_rows=(("1", None, "A"),),
+        personal_rows=(("anchor", EMPLOYEE, "существующее"),),
+        entry_employee="Петров Пётр",
+    )
+
+    assert plan.blocked
+    assert not plan.rows
+    assert any(
+        issue.code == "distribution_manifest_owner_mismatch"
         for issue in plan.issues
     )
 
