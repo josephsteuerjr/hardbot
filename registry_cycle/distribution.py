@@ -1860,8 +1860,7 @@ def publish_distribution(
             backup_by_entry[item.entry_id] = backup
             result.backups.append(str(backup))
             temporary = item.original_path.parent / (
-                f".registry-distribution-{stage.run_id}-{item.entry_id}-"
-                f"{secrets.token_hex(3)}.next"
+                f".rcd-{item.entry_id[:8]}-{secrets.token_hex(3)}.next"
                 f"{item.original_path.suffix.casefold()}"
             )
             stable_copy(item.staged_path, temporary)
@@ -1925,8 +1924,7 @@ def publish_distribution(
         for item in reversed(replaced):
             backup = backup_by_entry[item.entry_id]
             rollback_temp = item.original_path.parent / (
-                f".registry-distribution-{stage.run_id}-{item.entry_id}-"
-                f"{secrets.token_hex(3)}.rollback"
+                f".rcd-{item.entry_id[:8]}-{secrets.token_hex(3)}.rollback"
                 f"{item.original_path.suffix.casefold()}"
             )
             try:
