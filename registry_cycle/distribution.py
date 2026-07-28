@@ -221,9 +221,12 @@ class DistributionPreflight:
     validation: DistributionValidation
     checked_master: bool = False
     checked_files: int = 0
+    sidecar_files: list[str] | None = None
     issues: list[Issue] | None = None
 
     def __post_init__(self) -> None:
+        if self.sidecar_files is None:
+            self.sidecar_files = []
         if self.issues is None:
             self.issues = []
 
@@ -239,6 +242,7 @@ class DistributionPreflight:
             "plan_digest": self.plan_digest,
             "checked_master": self.checked_master,
             "checked_files": self.checked_files,
+            "sidecar_files": self.sidecar_files,
             "validation": self.validation.as_dict(),
             "issues": [issue.as_dict() for issue in self.issues or []],
             "blocked": self.blocked,
@@ -253,12 +257,17 @@ class DistributionPublishResult:
     backups: list[str]
     rolled_back: list[str]
     issues: list[Issue]
+    sidecars: list[str] | None = None
     notification: dict[str, Any] | None = None
     provenance_path: str | None = None
 
+    def __post_init__(self) -> None:
+        if self.sidecars is None:
+            self.sidecars = []
+
     @property
     def ok(self) -> bool:
-        return bool(self.published) and not any(
+        return bool(self.published or self.sidecars) and not any(
             issue.severity == "error" for issue in self.issues
         )
 
@@ -267,6 +276,7 @@ class DistributionPublishResult:
             "run_id": self.run_id,
             "plan_digest": self.plan_digest,
             "published": self.published,
+            "sidecars": self.sidecars,
             "backups": self.backups,
             "rolled_back": self.rolled_back,
             "issues": [issue.as_dict() for issue in self.issues],
@@ -1555,6 +1565,8 @@ def preflight_distribution(
     bundle: ConfigBundle,
     stage: DistributionStage,
     plan: DistributionPlan,
+    *,
+    allow_locked_sidecars: bool = False,
 ) -> DistributionPreflight:
     """Повторно проверить staging и optimistic-lock всех live-источников."""
     validation = validate_distribution_staging(bundle, stage, plan)
@@ -1702,23 +1714,44 @@ def preflight_distribution(
                 )
             )
             continue
+        requires_sidecar = False
         lock = _excel_lock_path(item.original_path)
         if lock.exists():
-            report.issues.append(
-                Issue(
-                    "error",
-                    "distribution_live_personal_locked",
-                    "личный реестр открыт в Excel",
-                    {
-                        "entry_id": item.entry_id,
-                        "path": str(item.original_path),
-                        "lock": str(lock),
-                    },
+            if not allow_locked_sidecars:
+                report.issues.append(
+                    Issue(
+                        "error",
+                        "distribution_live_personal_locked",
+                        "личный реестр открыт в Excel",
+                        {
+                            "entry_id": item.entry_id,
+                            "path": str(item.original_path),
+                            "lock": str(lock),
+                        },
+                    )
                 )
-            )
-            continue
+                continue
+            requires_sidecar = True
         try:
-            _exclusive_file_check(item.original_path)
+            if not requires_sidecar:
+                _exclusive_file_check(item.original_path)
+        except Exception as exc:  # noqa: BLE001
+            if not allow_locked_sidecars:
+                report.issues.append(
+                    Issue(
+                        "error",
+                        "distribution_live_personal_unavailable",
+                        "личный реестр или staging занят либо недоступен",
+                        {
+                            "entry_id": item.entry_id,
+                            "path": str(item.original_path),
+                            "error": str(exc),
+                        },
+                    )
+                )
+                continue
+            requires_sidecar = True
+        try:
             live_fingerprint = fingerprint(item.original_path)
             staged_fingerprint = fingerprint(item.staged_path)
         except Exception as exc:  # noqa: BLE001
@@ -1761,6 +1794,21 @@ def preflight_distribution(
                 )
             )
             continue
+        if requires_sidecar:
+            assert report.sidecar_files is not None
+            report.sidecar_files.append(str(item.original_path))
+            report.issues.append(
+                Issue(
+                    "warning",
+                    "distribution_live_personal_sidecar_required",
+                    "открытый личный реестр будет опубликован соседней копией",
+                    {
+                        "entry_id": item.entry_id,
+                        "path": str(item.original_path),
+                        "lock": str(lock) if lock.exists() else None,
+                    },
+                )
+            )
         report.checked_files += 1
 
     _atomic_json(stage.staging_dir / "preflight.json", report.as_dict())
@@ -1782,6 +1830,21 @@ def _unique_distribution_backup(path: Path, stamp: datetime) -> Path:
     return candidate
 
 
+def _unique_distribution_sidecar(path: Path, stamp: datetime) -> Path:
+    label = stamp.strftime("%d.%m.%y %H-%M")
+    candidate = path.with_name(
+        f"Копия {path.stem} (после распределения {label}){path.suffix}"
+    )
+    counter = 1
+    while candidate.exists():
+        counter += 1
+        candidate = path.with_name(
+            f"Копия {path.stem} (после распределения {label}, {counter})"
+            f"{path.suffix}"
+        )
+    return candidate
+
+
 def publish_distribution(
     bundle: ConfigBundle,
     stage: DistributionStage,
@@ -1789,6 +1852,7 @@ def publish_distribution(
     *,
     confirmation_digest: str,
     notify_owner: bool = True,
+    sidecar_locked: bool = False,
 ) -> DistributionPublishResult:
     if not (
         confirmation_digest == plan.digest == stage.plan_digest
@@ -1796,7 +1860,12 @@ def publish_distribution(
         raise SafetyViolation(
             "digest подтверждения distribution не совпал"
         )
-    preflight = preflight_distribution(bundle, stage, plan)
+    preflight = preflight_distribution(
+        bundle,
+        stage,
+        plan,
+        allow_locked_sidecars=sidecar_locked,
+    )
     if preflight.blocked:
         raise SafetyViolation(
             "distribution не прошёл финальный preflight"
@@ -1812,8 +1881,37 @@ def publish_distribution(
     backup_by_entry: dict[str, Path] = {}
     temp_by_entry: dict[str, Path] = {}
     replaced: list[DistributionStagedFile] = []
+    created_sidecars: list[DistributionStagedFile] = []
     stamp = datetime.now()
     snapshot = load_snapshot(plan.snapshot_path)
+    sidecar_paths = {
+        path.casefold()
+        for path in (preflight.sidecar_files or [])
+    }
+    sidecar_entry_ids = {
+        item.entry_id
+        for item in stage.files
+        if str(item.original_path).casefold() in sidecar_paths
+    }
+    if sidecar_locked:
+        for item in stage.files:
+            if item.entry_id in sidecar_entry_ids:
+                continue
+            if _excel_lock_path(item.original_path).exists():
+                sidecar_entry_ids.add(item.entry_id)
+                continue
+            try:
+                _exclusive_file_check(item.original_path)
+            except Exception:  # noqa: BLE001
+                sidecar_entry_ids.add(item.entry_id)
+    sidecar_by_entry = {
+        item.entry_id: _unique_distribution_sidecar(
+            item.original_path,
+            stamp,
+        )
+        for item in stage.files
+        if item.entry_id in sidecar_entry_ids
+    }
     intent_path = stage.staging_dir / "publication_intent.json"
     _atomic_json(
         intent_path,
@@ -1833,6 +1931,17 @@ def publish_distribution(
                     "before": item.source_fingerprint.as_dict(),
                     "after": item.staged_fingerprint.as_dict(),
                     "appended_rows": item.appended_rows,
+                    "mode": (
+                        "sidecar"
+                        if item.entry_id in sidecar_entry_ids
+                        else "replace"
+                    ),
+                    "published_path": str(
+                        sidecar_by_entry.get(
+                            item.entry_id,
+                            item.original_path,
+                        )
+                    ),
                 }
                 for item in stage.files
             ],
@@ -1852,12 +1961,13 @@ def publish_distribution(
             )
 
         for item in stage.files:
-            lock = _excel_lock_path(item.original_path)
-            if lock.exists():
-                raise SafetyViolation(
-                    f"Excel lock-файл у цели: {item.original_path}"
-                )
-            _exclusive_file_check(item.original_path)
+            if item.entry_id not in sidecar_entry_ids:
+                lock = _excel_lock_path(item.original_path)
+                if lock.exists():
+                    raise SafetyViolation(
+                        f"Excel lock-файл у цели: {item.original_path}"
+                    )
+                _exclusive_file_check(item.original_path)
             if fingerprint(item.original_path) != item.source_fingerprint:
                 raise SafetyViolation(
                     "живой файл изменился после snapshot: "
@@ -1869,13 +1979,14 @@ def publish_distribution(
                 )
 
         for item in stage.files:
-            backup = _unique_distribution_backup(
-                item.original_path,
-                stamp,
-            )
-            stable_copy(item.original_path, backup)
-            backup_by_entry[item.entry_id] = backup
-            result.backups.append(str(backup))
+            if item.entry_id not in sidecar_entry_ids:
+                backup = _unique_distribution_backup(
+                    item.original_path,
+                    stamp,
+                )
+                stable_copy(item.original_path, backup)
+                backup_by_entry[item.entry_id] = backup
+                result.backups.append(str(backup))
             temporary = item.original_path.parent / (
                 f".rcd-{item.entry_id[:8]}-{secrets.token_hex(3)}.next"
                 f"{item.original_path.suffix.casefold()}"
@@ -1888,7 +1999,8 @@ def publish_distribution(
             temp_by_entry[item.entry_id] = temporary
 
         for item in stage.files:
-            _exclusive_file_check(item.original_path)
+            if item.entry_id not in sidecar_entry_ids:
+                _exclusive_file_check(item.original_path)
             if fingerprint(item.original_path) != item.source_fingerprint:
                 raise SafetyViolation(
                     "живой файл изменился при подготовке: "
@@ -1916,28 +2028,64 @@ def publish_distribution(
                 raise SafetyViolation(
                     "общий реестр изменился во время distribution"
                 )
-            lock = _excel_lock_path(item.original_path)
-            if lock.exists():
-                raise SafetyViolation(
-                    f"Excel lock-файл у цели: {item.original_path}"
-                )
-            _exclusive_file_check(item.original_path)
             if fingerprint(item.original_path) != item.source_fingerprint:
                 raise SafetyViolation(
-                    "живой файл изменился непосредственно перед заменой: "
+                    "живой файл изменился непосредственно перед публикацией: "
                     f"{item.original_path}"
                 )
             temporary = temp_by_entry[item.entry_id]
-            os.replace(temporary, item.original_path)
-            replaced.append(item)
-            if fingerprint(item.original_path) != item.staged_fingerprint:
-                raise SafetyViolation(
-                    f"проверка после публикации не прошла: "
-                    f"{item.original_path}"
-                )
-            result.published.append(str(item.original_path))
+            if item.entry_id in sidecar_entry_ids:
+                sidecar = sidecar_by_entry[item.entry_id]
+                if sidecar.exists():
+                    raise SafetyViolation(
+                        f"sidecar уже существует: {sidecar}"
+                    )
+                os.replace(temporary, sidecar)
+                created_sidecars.append(item)
+                if fingerprint(sidecar) != item.staged_fingerprint:
+                    raise SafetyViolation(
+                        f"проверка sidecar после публикации не прошла: "
+                        f"{sidecar}"
+                    )
+                assert result.sidecars is not None
+                result.sidecars.append(str(sidecar))
+            else:
+                lock = _excel_lock_path(item.original_path)
+                if lock.exists():
+                    raise SafetyViolation(
+                        f"Excel lock-файл у цели: {item.original_path}"
+                    )
+                _exclusive_file_check(item.original_path)
+                os.replace(temporary, item.original_path)
+                replaced.append(item)
+                if fingerprint(item.original_path) != (
+                    item.staged_fingerprint
+                ):
+                    raise SafetyViolation(
+                        f"проверка после публикации не прошла: "
+                        f"{item.original_path}"
+                    )
+                result.published.append(str(item.original_path))
     except Exception as exc:  # noqa: BLE001
         rollback_failures = []
+        for item in reversed(created_sidecars):
+            sidecar = sidecar_by_entry[item.entry_id]
+            try:
+                if fingerprint(sidecar) != item.staged_fingerprint:
+                    raise SafetyViolation(
+                        "SHA sidecar перед rollback не совпал"
+                    )
+                sidecar.unlink()
+                result.rolled_back.append(str(sidecar))
+                if result.sidecars is not None:
+                    result.sidecars.remove(str(sidecar))
+            except Exception as rollback_exc:  # noqa: BLE001
+                rollback_failures.append(
+                    {
+                        "path": str(sidecar),
+                        "error": str(rollback_exc),
+                    }
+                )
         for item in reversed(replaced):
             backup = backup_by_entry[item.entry_id]
             rollback_temp = item.original_path.parent / (
@@ -2014,7 +2162,22 @@ def publish_distribution(
                         "path": str(item.original_path),
                         "before": item.source_fingerprint.as_dict(),
                         "after": item.staged_fingerprint.as_dict(),
-                        "backup": str(backup_by_entry[item.entry_id]),
+                        "mode": (
+                            "sidecar"
+                            if item.entry_id in sidecar_entry_ids
+                            else "replace"
+                        ),
+                        "published_path": str(
+                            sidecar_by_entry.get(
+                                item.entry_id,
+                                item.original_path,
+                            )
+                        ),
+                        "backup": (
+                            str(backup_by_entry[item.entry_id])
+                            if item.entry_id in backup_by_entry
+                            else None
+                        ),
                         "appended_rows": item.appended_rows,
                     }
                     for item in stage.files
@@ -2039,6 +2202,8 @@ def publish_distribution(
             "Ночной аддитивный разброс завершён.\n"
             f"Новых КД: {len(plan.rows)}\n"
             f"Файлов: {len(stage.files)}\n"
+            f"Соседних копий для открытых файлов: "
+            f"{len(result.sidecars or [])}\n"
             "Общий реестр: не изменялся\n"
             f"Digest: {plan.digest[:16]}"
         )
@@ -2129,6 +2294,14 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--plan", type=Path, required=True)
     publish.add_argument("--stage", type=Path, required=True)
     publish.add_argument("--confirm-digest", required=True)
+    publish.add_argument(
+        "--sidecar-locked",
+        action="store_true",
+        help=(
+            "для открытых целей создать соседнюю копию "
+            "'Копия ... (после распределения ...)'"
+        ),
+    )
     publish.add_argument("--no-notify", action="store_true")
     return parser
 
@@ -2271,6 +2444,7 @@ def main(argv: list[str] | None = None) -> int:
             plan,
             confirmation_digest=args.confirm_digest,
             notify_owner=not args.no_notify,
+            sidecar_locked=args.sidecar_locked,
         )
         print(json.dumps(result.as_dict(), ensure_ascii=False, indent=2))
         return 0

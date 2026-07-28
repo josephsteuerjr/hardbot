@@ -8,9 +8,11 @@ from registry_cycle.distribution import (
     DistributionConfig,
     DistributionPlan,
     DistributionStage,
+    DistributionStagedFile,
     DistributionValidation,
     build_distribution_plan,
     preflight_distribution,
+    publish_distribution,
 )
 from registry_cycle.models import (
     FileFingerprint,
@@ -373,3 +375,130 @@ def test_preflight_blocks_when_live_master_changed(monkeypatch, tmp_path):
         issue.code == "distribution_live_master_changed"
         for issue in report.issues or []
     )
+
+
+def test_publish_uses_sidecar_for_locked_target_and_replaces_free_target(
+    monkeypatch,
+    tmp_path,
+):
+    master = tmp_path / "master.xlsb"
+    baseline = tmp_path / "baseline.xlsb"
+    master.write_bytes(b"master")
+    baseline.write_bytes(b"baseline")
+    locked = tmp_path / "locked.xlsb"
+    free = tmp_path / "free.xlsb"
+    locked_stage = tmp_path / "locked-stage.xlsb"
+    free_stage = tmp_path / "free-stage.xlsb"
+    locked.write_bytes(b"locked-old")
+    free.write_bytes(b"free-old")
+    locked_stage.write_bytes(b"locked-new")
+    free_stage.write_bytes(b"free-new")
+    lock_file = locked.with_name("~$" + locked.name)
+    lock_file.write_bytes(b"excel-lock")
+
+    locked_entry = ManifestEntry(
+        entry_id="locked",
+        path=locked,
+        country="Тест",
+        group="Город",
+        profile="hard",
+        employee_folder="Занят",
+        responsible_hint="Занят",
+    )
+    free_entry = ManifestEntry(
+        entry_id="free",
+        path=free,
+        country="Тест",
+        group="Город",
+        profile="hard",
+        employee_folder="Свободен",
+        responsible_hint="Свободен",
+    )
+    snapshot = SnapshotSet(
+        run_id="mixed-publish",
+        run_dir=tmp_path,
+        master_original=master,
+        master_copy=tmp_path / "master-copy.xlsb",
+        master_fingerprint=distribution.fingerprint(master),
+        personals=(
+            CapturedPersonal(
+                entry=locked_entry,
+                copy_path=tmp_path / "locked-copy.xlsb",
+                fingerprint=distribution.fingerprint(locked),
+            ),
+            CapturedPersonal(
+                entry=free_entry,
+                copy_path=tmp_path / "free-copy.xlsb",
+                fingerprint=distribution.fingerprint(free),
+            ),
+        ),
+    )
+    plan = DistributionPlan(
+        run_id=snapshot.run_id,
+        snapshot_path=tmp_path / "snapshot.json",
+        assignment_baseline_path=baseline,
+        assignment_baseline_fingerprint=distribution.fingerprint(baseline),
+        master_fingerprint=snapshot.master_fingerprint,
+        rows=[],
+        issues=[],
+    )
+    staging_dir = tmp_path / "staging"
+    staging_dir.mkdir()
+    stage = DistributionStage(
+        run_id=snapshot.run_id,
+        run_dir=tmp_path,
+        staging_dir=staging_dir,
+        plan_digest=plan.digest,
+        files=(
+            DistributionStagedFile(
+                entry_id=locked_entry.entry_id,
+                original_path=locked,
+                source_copy=tmp_path / "locked-copy.xlsb",
+                staged_path=locked_stage,
+                source_fingerprint=distribution.fingerprint(locked),
+                staged_fingerprint=distribution.fingerprint(locked_stage),
+                appended_rows=2,
+            ),
+            DistributionStagedFile(
+                entry_id=free_entry.entry_id,
+                original_path=free,
+                source_copy=tmp_path / "free-copy.xlsb",
+                staged_path=free_stage,
+                source_fingerprint=distribution.fingerprint(free),
+                staged_fingerprint=distribution.fingerprint(free_stage),
+                appended_rows=3,
+            ),
+        ),
+    )
+    validation = DistributionValidation(
+        run_id=snapshot.run_id,
+        plan_digest=plan.digest,
+        checked_files=2,
+        issues=[],
+    )
+    monkeypatch.setattr(
+        distribution,
+        "validate_distribution_staging",
+        lambda _bundle, _stage, _plan: validation,
+    )
+    monkeypatch.setattr(distribution, "load_snapshot", lambda _path: snapshot)
+
+    result = publish_distribution(
+        _bundle(tmp_path),
+        stage,
+        plan,
+        confirmation_digest=plan.digest,
+        notify_owner=False,
+        sidecar_locked=True,
+    )
+
+    assert result.ok
+    assert result.published == [str(free)]
+    assert len(result.sidecars or []) == 1
+    sidecar = Path((result.sidecars or [])[0])
+    assert sidecar.name.startswith("Копия locked (после распределения ")
+    assert locked.read_bytes() == b"locked-old"
+    assert sidecar.read_bytes() == b"locked-new"
+    assert free.read_bytes() == b"free-new"
+    assert len(result.backups) == 1
+    assert Path(result.backups[0]).read_bytes() == b"free-old"
