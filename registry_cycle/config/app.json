@@ -97,6 +97,16 @@
       }
     ]
   },
+  "ownership_delegations": [
+    {
+      "country": "Узбекистан",
+      "group": "Soft",
+      "book_owner": "Турсунов Улугбек",
+      "delegate_folder": "Курбаниязов Ильхомбек",
+      "enabled": true,
+      "reason": "Временное замещение на период больничного владельца"
+    }
+  ],
   "safety": {
     "require_all_configured_groups": true,
     "block_unconfigured_groups_with_files": true,

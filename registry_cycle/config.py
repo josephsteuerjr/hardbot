@@ -53,6 +53,16 @@ class PortfolioRoot:
 
 
 @dataclass(frozen=True, slots=True)
+class OwnerDelegation:
+    country: str
+    group: str
+    book_owner: str
+    delegate_folder: str
+    enabled: bool
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     schema_version: int
     product_name: str
@@ -65,6 +75,7 @@ class AppConfig:
     active_extensions: tuple[str, ...]
     ignored_directory_prefixes: tuple[str, ...]
     profile_rules: tuple[dict[str, str], ...]
+    ownership_delegations: tuple[OwnerDelegation, ...]
     scheduler: dict[str, Any]
     notifications: dict[str, Any]
     safety: dict[str, Any]
@@ -172,6 +183,17 @@ def _parse_app(raw: dict[str, Any]) -> AppConfig:
                 "profile": str(rule["profile"]),
             }
             for rule in discovery.get("profile_rules", [])
+        ),
+        ownership_delegations=tuple(
+            OwnerDelegation(
+                country=str(item["country"]),
+                group=str(item["group"]),
+                book_owner=str(item["book_owner"]),
+                delegate_folder=str(item["delegate_folder"]),
+                enabled=bool(item.get("enabled", True)),
+                reason=str(item.get("reason", "")),
+            )
+            for item in raw.get("ownership_delegations", [])
         ),
         scheduler=dict(raw.get("scheduler") or {}),
         notifications=dict(raw.get("notifications") or {}),

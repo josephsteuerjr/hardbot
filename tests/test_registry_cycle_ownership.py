@@ -35,3 +35,41 @@ def test_book_in_another_employee_folder_is_rejected():
         _entry("Курбаниязов Ильхомбек", "СОФТ Курбаниязов"),
         "СОФТ Турсунов Улугбек",
     )
+
+
+def test_configured_temporary_delegation_is_allowed():
+    bundle = load_config_bundle()
+
+    assert manifest_owner_matches(
+        bundle,
+        ManifestEntry(
+            entry_id="delegated",
+            path=Path("Курбаниязов Ильхомбек")
+            / "СОФТ Турсунов Улугбек.xlsb",
+            country="Узбекистан",
+            group="Soft",
+            profile="soft",
+            employee_folder="Курбаниязов Ильхомбек",
+            responsible_hint="СОФТ Турсунов Улугбек",
+        ),
+        "СОФТ Турсунов Улугбек",
+    )
+
+
+def test_delegation_does_not_allow_misnamed_book():
+    bundle = load_config_bundle()
+
+    assert not manifest_owner_matches(
+        bundle,
+        ManifestEntry(
+            entry_id="misnamed-delegated",
+            path=Path("Курбаниязов Ильхомбек")
+            / "СОФТ Курбаниязов.xlsb",
+            country="Узбекистан",
+            group="Soft",
+            profile="soft",
+            employee_folder="Курбаниязов Ильхомбек",
+            responsible_hint="СОФТ Курбаниязов",
+        ),
+        "СОФТ Турсунов Улугбек",
+    )

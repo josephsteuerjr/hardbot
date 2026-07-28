@@ -32,12 +32,27 @@ def manifest_owner_matches(
     entry: ManifestEntry,
     responsible: Any,
 ) -> bool:
-    """Ответственный должен совпасть и с папкой, и с именем книги."""
+    """Ответственный должен совпасть с книгой и владельцем либо делегатом."""
     actual = normalized_owner_label(bundle, responsible)
-    return bool(actual) and all(
-        normalized_owner_label(bundle, candidate) == actual
-        for candidate in (
-            entry.employee_folder,
-            entry.responsible_hint,
-        )
-    )
+    if not actual:
+        return False
+    if normalized_owner_label(bundle, entry.responsible_hint) != actual:
+        return False
+    if normalized_owner_label(bundle, entry.employee_folder) == actual:
+        return True
+    for delegation in bundle.app.ownership_delegations:
+        if not delegation.enabled:
+            continue
+        if (
+            norm_name(delegation.country) == norm_name(entry.country)
+            and norm_name(delegation.group) == norm_name(entry.group)
+            and normalized_owner_label(bundle, delegation.book_owner)
+            == actual
+            and normalized_owner_label(
+                bundle,
+                delegation.delegate_folder,
+            )
+            == normalized_owner_label(bundle, entry.employee_folder)
+        ):
+            return True
+    return False
