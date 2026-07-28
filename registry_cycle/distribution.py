@@ -38,6 +38,10 @@ from .excel_host import (
     workbook_untouched_signatures,
 )
 from .files import fingerprint, stable_copy
+from .file_access import (
+    excel_lock_path as _excel_lock_path,
+    exclusive_file_check as _exclusive_file_check,
+)
 from .models import FileFingerprint, Issue, WorkbookSnapshot
 from .normalize import (
     comparable_value,
@@ -47,12 +51,11 @@ from .normalize import (
     norm_name,
     norm_title,
 )
-from .ownership import manifest_owner_matches
+from .ownership import manifest_owner_matches, resolve_book_responsible
 from .reader import read_portfolio
 from .semantics import values_equal_for_rule
 from .snapshot import SnapshotSet, capture_sources, load_snapshot
 from .staging import (
-    _canonical_date_format,
     _format_new_rows,
     _revealed_rows,
     excel_safe_value,
@@ -501,7 +504,12 @@ def build_distribution_plan(
             )
             continue
         responsibles = book.unique_responsibles(bundle.fields.responsible_title)
-        if len(responsibles) != 1:
+        responsible = resolve_book_responsible(
+            entry,
+            book,
+            bundle.fields.responsible_title,
+        )
+        if responsible is None:
             issues.append(
                 Issue(
                     "error",
@@ -511,7 +519,6 @@ def build_distribution_plan(
                 )
             )
             continue
-        responsible = responsibles[0]
         if not manifest_owner_matches(bundle, entry, responsible):
             issues.append(
                 Issue(
@@ -524,6 +531,11 @@ def build_distribution_plan(
                         "employee_folder": entry.employee_folder,
                         "responsible_hint": entry.responsible_hint,
                         "book_responsible": responsible,
+                        "responsible_source": (
+                            "manifest"
+                            if not responsibles
+                            else "workbook"
+                        ),
                     },
                 )
             )
@@ -1093,19 +1105,6 @@ def _append_rows_to_book(
                 new_last_row=new_last_row,
                 columns=width,
             )
-            for column, value_type in enumerate(value_types, start=1):
-                if value_type != "date":
-                    continue
-                number_format = _canonical_date_format(
-                    sheet,
-                    column=column,
-                    first_data_row=first_data_row,
-                    last_search_row=max(old_last_row, first_data_row),
-                )
-                sheet.range(
-                    (first_new_row, column),
-                    (new_last_row, column),
-                ).api.NumberFormat = number_format
             target.value = [
                 [
                     excel_safe_value(value, value_types[column])
@@ -1519,35 +1518,6 @@ def validate_distribution_staging(
 
     _atomic_json(stage.staging_dir / "validation.json", report.as_dict())
     return report
-
-
-def _exclusive_file_check(path: Path) -> None:
-    if os.name != "nt":
-        return
-    import pywintypes
-    import win32con
-    import win32file
-
-    try:
-        handle = win32file.CreateFile(
-            str(path),
-            win32con.GENERIC_READ | win32con.GENERIC_WRITE,
-            0,
-            None,
-            win32con.OPEN_EXISTING,
-            win32con.FILE_ATTRIBUTE_NORMAL,
-            None,
-        )
-    except pywintypes.error as exc:
-        raise SafetyViolation(
-            f"файл занят или недоступен: {path} ({exc})"
-        ) from exc
-    else:
-        handle.Close()
-
-
-def _excel_lock_path(path: Path) -> Path:
-    return path.with_name("~$" + path.name)
 
 
 def _quick_stat_matches(

@@ -71,6 +71,12 @@
             "required": true
           },
           {
+            "name": "ГПХ Агент выезд",
+            "profile": "hard",
+            "enabled": true,
+            "required": true
+          },
+          {
             "name": "Андижан",
             "profile": "hard",
             "enabled": false,
@@ -97,6 +103,9 @@
       }
     ]
   },
+  "responsible_aliases": {
+    "Тургунов Музафар": "Тургунов Музаффар"
+  },
   "ownership_delegations": [
     {
       "country": "Узбекистан",
@@ -113,19 +122,35 @@
     "block_multiple_active_files_per_folder": false,
     "max_master_cell_changes": 20000,
     "require_zero_forbidden_diff": true,
+    "multi_owner_case_policy": "master_responsible",
+    "busy_file_policy": "block",
+    "force_close": {
+      "enabled": false,
+      "command": "",
+      "arguments": [
+        "--manifest",
+        "{manifest}"
+      ],
+      "unsaved_changes_policy": "block",
+      "grace_seconds": 15,
+      "timeout_seconds": 60
+    },
     "source_stability_seconds": 3,
     "lock_stale_seconds": 21600
   },
   "scheduler": {
     "task_name": "Контур — цикл реестров СНГ",
     "enabled": false,
+    "publish": false,
     "time": "23:40",
     "days": [
       "MON",
       "TUE",
       "WED",
       "THU",
-      "FRI"
+      "FRI",
+      "SAT",
+      "SUN"
     ],
     "profile": "all",
     "run_only_when_logged_on": true,

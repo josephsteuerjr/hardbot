@@ -20,6 +20,16 @@ class FieldRule:
     conflict: str = "error"
     value_type: str = "text"
     master_conflict: str = "require_baseline"
+    invalid: str = "error"
+
+
+@dataclass(frozen=True, slots=True)
+class MonthRolloverConfig:
+    enabled: bool
+    trigger: str
+    current_payments_title: str
+    history_title_template: str
+    employee_clear_titles: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +45,10 @@ class FieldConfig:
     collect: tuple[FieldRule, ...]
     preserve_if_master_blank: tuple[str, ...]
     aliases: dict[str, tuple[str, ...]]
+    previous_responsible_title: str | None = None
+    employee_header_fill_rgb: tuple[str, ...] = ("#FFFF00",)
+    strict_header_color_validation: bool = False
+    month_rollover: MonthRolloverConfig | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +89,7 @@ class AppConfig:
     active_extensions: tuple[str, ...]
     ignored_directory_prefixes: tuple[str, ...]
     profile_rules: tuple[dict[str, str], ...]
+    responsible_aliases: dict[str, str]
     ownership_delegations: tuple[OwnerDelegation, ...]
     scheduler: dict[str, Any]
     notifications: dict[str, Any]
@@ -164,6 +179,33 @@ def _parse_app(raw: dict[str, Any]) -> AppConfig:
             )
         )
 
+    safety = dict(raw.get("safety") or {})
+    multi_owner_policy = str(
+        safety.get("multi_owner_case_policy", "block")
+    )
+    if multi_owner_policy not in {"block", "master_responsible"}:
+        raise ConfigurationError(
+            "safety.multi_owner_case_policy должен быть "
+            "'block' или 'master_responsible'"
+        )
+    busy_file_policy = str(safety.get("busy_file_policy", "block"))
+    if busy_file_policy not in {"block", "sidecar", "force_close"}:
+        raise ConfigurationError(
+            "safety.busy_file_policy должен быть "
+            "'block', 'sidecar' или 'force_close'"
+        )
+    force_close = safety.get("force_close") or {}
+    if not isinstance(force_close, dict):
+        raise ConfigurationError("safety.force_close должен быть объектом")
+    unsaved_policy = str(
+        force_close.get("unsaved_changes_policy", "block")
+    )
+    if unsaved_policy not in {"block", "save_then_close", "discard"}:
+        raise ConfigurationError(
+            "safety.force_close.unsaved_changes_policy должен быть "
+            "'block', 'save_then_close' или 'discard'"
+        )
+
     return AppConfig(
         schema_version=version,
         product_name=str(product["name"]),
@@ -184,6 +226,12 @@ def _parse_app(raw: dict[str, Any]) -> AppConfig:
             }
             for rule in discovery.get("profile_rules", [])
         ),
+        responsible_aliases={
+            str(source): str(target)
+            for source, target in (
+                raw.get("responsible_aliases") or {}
+            ).items()
+        },
         ownership_delegations=tuple(
             OwnerDelegation(
                 country=str(item["country"]),
@@ -197,7 +245,7 @@ def _parse_app(raw: dict[str, Any]) -> AppConfig:
         ),
         scheduler=dict(raw.get("scheduler") or {}),
         notifications=dict(raw.get("notifications") or {}),
-        safety=dict(raw.get("safety") or {}),
+        safety=safety,
     )
 
 
@@ -218,6 +266,7 @@ def _parse_fields(raw: dict[str, Any]) -> FieldConfig:
             master_conflict=str(
                 item.get("master_conflict", "require_baseline")
             ),
+            invalid=str(item.get("invalid", "error")),
         )
         for item in _require(raw, "collect", "fields.json")
     )
@@ -236,7 +285,7 @@ def _parse_fields(raw: dict[str, Any]) -> FieldConfig:
             raise ConfigurationError(
                 f"пока поддерживается только conflict='error': {rule.title!r}"
             )
-        if rule.value_type not in {"text", "date", "number"}:
+        if rule.value_type not in {"text", "date", "number", "literal"}:
             raise ConfigurationError(
                 f"неизвестный value_type у {rule.title!r}: {rule.value_type}"
             )
@@ -244,6 +293,11 @@ def _parse_fields(raw: dict[str, Any]) -> FieldConfig:
             raise ConfigurationError(
                 f"неизвестный master_conflict у {rule.title!r}: "
                 f"{rule.master_conflict}"
+            )
+        if rule.invalid not in {"error", "preserve"}:
+            raise ConfigurationError(
+                f"неизвестная политика invalid у {rule.title!r}: "
+                f"{rule.invalid}"
             )
 
     titles = [rule.title.casefold() for rule in collect]
@@ -261,6 +315,113 @@ def _parse_fields(raw: dict[str, Any]) -> FieldConfig:
             f"{sorted(unknown_alias_targets)}"
         )
 
+    directions = raw.get("directions") or {}
+    if not isinstance(directions, dict):
+        raise ConfigurationError("directions в fields.json должен быть объектом")
+    raw_fill_rgb = directions.get(
+        "employee_header_fill_rgb",
+        ["#FFFF00"],
+    )
+    if not isinstance(raw_fill_rgb, list) or not raw_fill_rgb:
+        raise ConfigurationError(
+            "directions.employee_header_fill_rgb должен быть непустым списком"
+        )
+    employee_header_fill_rgb = tuple(
+        str(value).strip().upper()
+        for value in raw_fill_rgb
+    )
+    if any(
+        len(value) != 7
+        or not value.startswith("#")
+        or any(character not in "0123456789ABCDEF" for character in value[1:])
+        for value in employee_header_fill_rgb
+    ):
+        raise ConfigurationError(
+            "directions.employee_header_fill_rgb должен содержать цвета #RRGGBB"
+        )
+    supported_direction_keys = {
+        "employee_header_fill_rgb",
+        "strict_header_color_validation",
+        "employee_to_master",
+        "master_to_employee",
+        "preserve_employee_values_for_existing_owner",
+        "transfer_employee_values_on_reassignment",
+    }
+    unknown_direction_keys = set(directions) - supported_direction_keys
+    if unknown_direction_keys:
+        raise ConfigurationError(
+            "неизвестные ключи fields.directions: "
+            f"{sorted(unknown_direction_keys)}"
+        )
+    expected_direction_values: dict[str, str | bool] = {
+        "employee_to_master": "collect",
+        "master_to_employee": "profile_columns_except_collect",
+        "preserve_employee_values_for_existing_owner": True,
+        "transfer_employee_values_on_reassignment": True,
+    }
+    for key, expected in expected_direction_values.items():
+        actual = directions.get(key, expected)
+        if type(actual) is not type(expected) or actual != expected:
+            raise ConfigurationError(
+                f"directions.{key} пока поддерживает только {expected!r}"
+            )
+
+    raw_rollover = raw.get("month_rollover")
+    month_rollover: MonthRolloverConfig | None = None
+    if raw_rollover is not None:
+        if not isinstance(raw_rollover, dict):
+            raise ConfigurationError(
+                "month_rollover в fields.json должен быть объектом"
+            )
+        trigger = str(
+            raw_rollover.get("trigger", "last_calendar_day")
+        )
+        if trigger != "last_calendar_day":
+            raise ConfigurationError(
+                "month_rollover.trigger пока поддерживает только "
+                "'last_calendar_day'"
+            )
+        clear_titles = tuple(
+            str(value)
+            for value in raw_rollover.get("employee_clear_titles", [])
+        )
+        normalized_collect = {title.casefold() for title in collect_titles}
+        unknown_clear_titles = [
+            title
+            for title in clear_titles
+            if title.casefold() not in normalized_collect
+        ]
+        if unknown_clear_titles:
+            raise ConfigurationError(
+                "month_rollover.employee_clear_titles ссылается на поля "
+                f"вне collect: {unknown_clear_titles}"
+            )
+        history_template = str(
+            raw_rollover.get(
+                "history_title_template",
+                "Оплаты за {month:02d}.{year2:02d}",
+            )
+        )
+        try:
+            history_template.format(month=7, year=2026, year2=26)
+        except (KeyError, ValueError) as exc:
+            raise ConfigurationError(
+                "некорректный month_rollover.history_title_template"
+            ) from exc
+        month_rollover = MonthRolloverConfig(
+            enabled=bool(raw_rollover.get("enabled", False)),
+            trigger=trigger,
+            current_payments_title=str(
+                _require(
+                    raw_rollover,
+                    "current_payments_title",
+                    "month_rollover",
+                )
+            ),
+            history_title_template=history_template,
+            employee_clear_titles=clear_titles,
+        )
+
     return FieldConfig(
         sheet_name=str(schema["portfolio_sheet"]),
         statistics_sheet=str(schema["statistics_sheet"]),
@@ -275,6 +436,16 @@ def _parse_fields(raw: dict[str, Any]) -> FieldConfig:
             str(value) for value in raw.get("preserve_if_master_blank", [])
         ),
         aliases=aliases,
+        previous_responsible_title=(
+            str(schema["previous_responsible_title"])
+            if schema.get("previous_responsible_title")
+            else None
+        ),
+        employee_header_fill_rgb=employee_header_fill_rgb,
+        strict_header_color_validation=bool(
+            directions.get("strict_header_color_validation", False)
+        ),
+        month_rollover=month_rollover,
     )
 
 

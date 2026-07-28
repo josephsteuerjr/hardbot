@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from .config import ConfigBundle, load_config_bundle
 from .errors import RegistryCycleError
+from .force_close import DelegatedForceCloser
 from .notifications import OwnerNotifier
 from .publishing import publish_validated
 from .scheduler import install_task, remove_task, task_status
@@ -52,6 +53,11 @@ class RegistryCycleApp(tk.Tk):
         self._nav_buttons: dict[str, tk.Button] = {}
         self._status_var = tk.StringVar(value="Готов к dry-run")
         self._progress_var = tk.StringVar(value="")
+        self.busy_mode = tk.StringVar(
+            value=str(
+                bundle.app.safety.get("busy_file_policy", "block")
+            )
+        )
         self._build_window()
         self._build_styles()
         self._build_shell()
@@ -487,6 +493,61 @@ class RegistryCycleApp(tk.Tk):
             fg=self.colors["text_muted"],
             font=self.font(9),
         ).pack(anchor="w", pady=(7, 16))
+        mode_row = tk.Frame(controls.inner, bg=self.colors["surface"])
+        mode_row.pack(fill="x", pady=(0, 16))
+        tk.Label(
+            mode_row,
+            text="ЗАНЯТЫЕ ФАЙЛЫ",
+            bg=self.colors["surface"],
+            fg=self.colors["text_dim"],
+            font=self.font(8, "bold"),
+        ).pack(side="left", padx=(0, 14))
+        force_reason = DelegatedForceCloser(
+            self.bundle
+        ).unavailable_reason
+        labels = {
+            "block": "BLOCK",
+            "sidecar": "SIDECAR",
+            "force_close": "FORCE CLOSE",
+        }
+        for mode, label in labels.items():
+            button = tk.Radiobutton(
+                mode_row,
+                text=label,
+                value=mode,
+                variable=self.busy_mode,
+                indicatoron=False,
+                bg=self.colors["surface_alt"],
+                fg=self.colors["text_muted"],
+                selectcolor=self.colors["accent"],
+                activebackground=self.colors["border"],
+                activeforeground=self.colors["text"],
+                disabledforeground=self.colors["text_dim"],
+                relief="flat",
+                borderwidth=0,
+                padx=12,
+                pady=7,
+                font=self.font(8, "bold"),
+                state=(
+                    "disabled"
+                    if mode == "force_close" and force_reason
+                    else "normal"
+                ),
+            )
+            button.pack(side="left", padx=(0, 6))
+        self._button(
+            mode_row,
+            "Сохранить режим",
+            self.save_busy_mode_config,
+        ).pack(side="right")
+        if force_reason:
+            tk.Label(
+                controls.inner,
+                text=f"Force close недоступен: {force_reason}.",
+                bg=self.colors["surface"],
+                fg=self.colors["warning"],
+                font=self.font(8),
+            ).pack(anchor="w", pady=(0, 14))
         buttons = tk.Frame(controls.inner, bg=self.colors["surface"])
         buttons.pack(fill="x")
         self._button(buttons, "Собрать staging", self.build_stage).pack(
@@ -639,6 +700,9 @@ class RegistryCycleApp(tk.Tk):
         self.schedule_enabled = tk.BooleanVar(
             value=bool(scheduler.get("enabled", True))
         )
+        self.schedule_publish = tk.BooleanVar(
+            value=bool(scheduler.get("publish", False))
+        )
         self.notify_enabled = tk.BooleanVar(
             value=bool(self.bundle.app.notifications.get("enabled", True))
         )
@@ -652,7 +716,7 @@ class RegistryCycleApp(tk.Tk):
         top.pack(fill="x")
         tk.Checkbutton(
             top,
-            text="Автопубликация включена",
+            text="Ночной запуск включён",
             variable=self.schedule_enabled,
             bg=self.colors["surface"],
             fg=self.colors["text"],
@@ -728,7 +792,21 @@ class RegistryCycleApp(tk.Tk):
             activeforeground=self.colors["text"],
             font=self.font(9),
         )
-        notify.pack(anchor="w", pady=(0, 18))
+        notify.pack(anchor="w", pady=(0, 10))
+        tk.Checkbutton(
+            card.inner,
+            text=(
+                "После зелёного контроля публиковать автоматически "
+                "(иначе только dry-run)"
+            ),
+            variable=self.schedule_publish,
+            bg=self.colors["surface"],
+            fg=self.colors["warning"],
+            selectcolor=self.colors["surface_alt"],
+            activebackground=self.colors["surface"],
+            activeforeground=self.colors["text"],
+            font=self.font(9, "bold"),
+        ).pack(anchor="w", pady=(0, 18))
         buttons = tk.Frame(card.inner, bg=self.colors["surface"])
         buttons.pack(fill="x")
         self._button(
@@ -960,12 +1038,24 @@ class RegistryCycleApp(tk.Tk):
         if self.validation.blocked:
             messagebox.showwarning("Контур", "Validation содержит ошибки.")
             return
+        mode = self.busy_mode.get()
+        if mode == "force_close":
+            reason = DelegatedForceCloser(
+                self.bundle
+            ).unavailable_reason
+            if reason:
+                messagebox.showerror(
+                    "Контур",
+                    f"Force close недоступен:\n\n{reason}",
+                )
+                return
         digest = self.prepared.plan.digest
         token = digest[:12]
         entered = simpledialog.askstring(
             "Подтверждение публикации",
             "Будут атомарно заменены общий реестр и личные портфели.\n"
             "При сбое сработает rollback.\n\n"
+            f"Режим занятых файлов: {mode}\n\n"
             f"Введи digest:  {token}",
             parent=self,
         )
@@ -988,20 +1078,33 @@ class RegistryCycleApp(tk.Tk):
                 self.prepared.plan,
                 self.validation,
                 confirmation_digest=digest,
+                busy_mode=mode,
             ),
             self._publish_ready,
         )
 
     def _publish_ready(self, result) -> None:
-        OwnerNotifier(self.bundle).send(
-            "Контур · Реестры — ОПУБЛИКОВАНО\n"
-            f"Запуск: {result.run_id}\n"
-            f"Файлов: {len(result.published)}"
+        status = (
+            "ОПУБЛИКОВАНО"
+            if result.complete
+            else "ОПУБЛИКОВАНО С SIDECAR"
         )
-        self._status_var.set("Публикация завершена")
+        OwnerNotifier(self.bundle).send(
+            f"Контур · Реестры — {status}\n"
+            f"Запуск: {result.run_id}\n"
+            f"Live-файлов: {len(result.published)}\n"
+            f"Sidecar: {len(result.sidecars)}"
+        )
+        self._status_var.set(
+            "Публикация завершена"
+            if result.complete
+            else "Публикация требует сведения sidecar"
+        )
         messagebox.showinfo(
             "Контур",
             f"Опубликовано файлов: {len(result.published)}\n"
+            f"Sidecar-файлов: {len(result.sidecars)}\n"
+            f"Соседних backup: {len(result.backups)}\n"
             "Baseline обновлён. Журнал сохранён.",
         )
         self.show_page("logs")
@@ -1022,6 +1125,7 @@ class RegistryCycleApp(tk.Tk):
         path = self.bundle.config_dir / "app.json"
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload["scheduler"]["enabled"] = self.schedule_enabled.get()
+        payload["scheduler"]["publish"] = self.schedule_publish.get()
         payload["scheduler"]["time"] = raw_time
         payload["scheduler"]["days"] = selected_days
         payload["notifications"]["enabled"] = self.notify_enabled.get()
@@ -1035,6 +1139,35 @@ class RegistryCycleApp(tk.Tk):
         self.service = CycleService(self.bundle)
         self._status_var.set("Конфигурация расписания сохранена")
         return True
+
+    def save_busy_mode_config(self) -> None:
+        mode = self.busy_mode.get()
+        if mode not in {"block", "sidecar", "force_close"}:
+            messagebox.showerror("Контур", "Неизвестный режим занятых файлов.")
+            return
+        if mode == "force_close":
+            reason = DelegatedForceCloser(
+                self.bundle
+            ).unavailable_reason
+            if reason:
+                messagebox.showerror(
+                    "Контур",
+                    f"Force close недоступен:\n\n{reason}",
+                )
+                self.busy_mode.set("block")
+                return
+        path = self.bundle.config_dir / "app.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload.setdefault("safety", {})["busy_file_policy"] = mode
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+        self.bundle = load_config_bundle(self.bundle.config_dir)
+        self.service = CycleService(self.bundle)
+        self._status_var.set(f"Режим занятых файлов сохранён: {mode}")
 
     def refresh_schedule(self) -> None:
         self._run_async(
@@ -1060,12 +1193,19 @@ class RegistryCycleApp(tk.Tk):
         if not self.schedule_enabled.get():
             messagebox.showwarning(
                 "Расписание",
-                "Сначала включи автопубликацию.",
+                "Сначала включи ночной запуск.",
             )
             return
         if not messagebox.askyesno(
             "Планировщик Windows",
-            "Установить/обновить задание автопубликации?",
+            (
+                "Установить/обновить ночное задание?\n\n"
+                + (
+                    "Режим: АВТОПУБЛИКАЦИЯ."
+                    if self.schedule_publish.get()
+                    else "Режим: только dry-run."
+                )
+            ),
         ):
             return
         self._run_async(

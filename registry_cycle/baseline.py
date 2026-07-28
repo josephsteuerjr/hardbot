@@ -14,7 +14,7 @@ from .config import ConfigBundle, FieldConfig, FieldRule
 from .errors import SafetyViolation
 from .models import WorkbookSnapshot
 from .normalize import is_blank, json_value, norm_key, norm_title
-from .semantics import comparable_for_rule, write_value_for_rule
+from .semantics import baseline_value_for_rule, comparable_for_rule
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +36,7 @@ class CycleBaseline:
             {
                 "contract_id": contract_id,
                 "title": title,
-                "value": json_value(value),
+                "value": value,
             }
             for (contract_id, title), value in sorted(self.values.items())
         ]
@@ -109,7 +109,7 @@ def build_baseline(
                         f"{contract_id}, поле «{rule.title}»"
                     )
                 continue
-            values[key] = json_value(write_value_for_rule(value, rule_map[title]))
+            values[key] = baseline_value_for_rule(value, rule_map[title])
 
     return CycleBaseline(
         schema_version=1,

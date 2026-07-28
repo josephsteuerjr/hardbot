@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime
 
 from .baseline import CycleBaseline, load_baseline
 from .config import ConfigBundle
+from .directions import validate_master_header_directions
 from .discovery import discover
 from .errors import SafetyViolation, WorkbookReadError
 from .models import DiscoveryReport, Issue, SyncPlan
-from .ownership import manifest_owner_matches
+from .ownership import manifest_owner_matches, resolve_book_responsible
 from .planner import build_sync_plan
 from .reader import read_portfolio
 from .reporting import write_plan_reports
+from .rollover import resolve_rollover_month
 from .snapshot import SnapshotSet, capture_sources, load_snapshot
 
 
@@ -31,7 +34,20 @@ class CycleService:
     def discover(self) -> DiscoveryReport:
         return discover(self.bundle)
 
-    def prepare(self, *, run_id: str | None = None) -> PreparedRun:
+    def prepare(
+        self,
+        *,
+        run_id: str | None = None,
+        rollover_month: str | None = None,
+        now: datetime | None = None,
+    ) -> PreparedRun:
+        now = now or datetime.now()
+        resolved_rollover = resolve_rollover_month(
+            self.bundle.fields,
+            explicit=rollover_month,
+            at=now,
+            automatic=True,
+        )
         discovery_report = self.discover()
         if discovery_report.blocked:
             reasons = "; ".join(
@@ -45,22 +61,43 @@ class CycleService:
             self.bundle,
             discovery_report,
             run_id=run_id,
+            now=now,
         )
-        return self.prepare_snapshot(snapshot, discovery_report)
+        return self.prepare_snapshot(
+            snapshot,
+            discovery_report,
+            rollover_month=resolved_rollover,
+        )
 
-    def prepare_existing(self, snapshot_path) -> PreparedRun:
+    def prepare_existing(
+        self,
+        snapshot_path,
+        *,
+        rollover_month: str | None = None,
+    ) -> PreparedRun:
         snapshot = load_snapshot(snapshot_path)
         discovery_report = DiscoveryReport(
             entries=[personal.entry for personal in snapshot.personals]
         )
-        return self.prepare_snapshot(snapshot, discovery_report)
+        return self.prepare_snapshot(
+            snapshot,
+            discovery_report,
+            rollover_month=rollover_month,
+        )
 
     def prepare_snapshot(
         self,
         snapshot: SnapshotSet,
         discovery_report: DiscoveryReport,
+        *,
+        rollover_month: str | None = None,
     ) -> PreparedRun:
         master_local = read_portfolio(snapshot.master_copy, self.bundle.fields)
+        direction_issues = validate_master_header_directions(
+            snapshot.master_copy,
+            master_local,
+            self.bundle.fields,
+        )
         master = replace(
             master_local,
             path=snapshot.master_original,
@@ -93,12 +130,17 @@ class CycleService:
             responsibles = local_book.unique_responsibles(
                 self.bundle.fields.responsible_title
             )
+            responsible = resolve_book_responsible(
+                personal.entry,
+                local_book,
+                self.bundle.fields.responsible_title,
+            )
             if (
-                len(responsibles) == 1
+                responsible is not None
                 and not manifest_owner_matches(
                     self.bundle,
                     personal.entry,
-                    responsibles[0],
+                    responsible,
                 )
             ):
                 read_issues.append(
@@ -115,7 +157,12 @@ class CycleService:
                             "responsible_hint": (
                                 personal.entry.responsible_hint
                             ),
-                            "book_responsible": responsibles[0],
+                            "book_responsible": responsible,
+                            "responsible_source": (
+                                "manifest"
+                                if not responsibles
+                                else "workbook"
+                            ),
                         },
                     )
                 )
@@ -136,8 +183,20 @@ class CycleService:
             books,
             self.bundle.fields,
             baseline=baseline,
+            multi_owner_policy=str(
+                self.bundle.app.safety.get(
+                    "multi_owner_case_policy",
+                    "block",
+                )
+            ),
+            responsible_aliases=self.bundle.app.responsible_aliases,
+            rollover_month=rollover_month,
         )
-        plan.issues[:0] = [*discovery_report.issues, *read_issues]
+        plan.issues[:0] = [
+            *discovery_report.issues,
+            *read_issues,
+            *direction_issues,
+        ]
         if len(plan.changes) > int(
             self.bundle.app.safety.get("max_master_cell_changes", 20000)
         ):

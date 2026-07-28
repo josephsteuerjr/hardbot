@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import secrets
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -14,12 +17,17 @@ from .excel_host import (
     sheet_filter_signature,
     workbook_untouched_signatures,
 )
-from .files import fingerprint
+from .files import fingerprint, stable_copy
 from .models import Issue, PersonalProjection, SyncPlan, WorkbookSnapshot
 from .normalize import comparable_value, is_blank, json_value, norm_title
 from .reader import read_portfolio
-from .semantics import values_equal_for_rule
-from .staging import ProgressCallback, StageSet
+from .semantics import same_representation, values_equal_for_rule
+from .staging import (
+    ProgressCallback,
+    StageSet,
+    _excel_datetime_serial,
+    _is_general_number_format,
+)
 
 
 @dataclass(slots=True)
@@ -57,6 +65,33 @@ def _same_value(left: Any, right: Any) -> bool:
     return comparable_value(left) == comparable_value(right)
 
 
+def _master_change_value_matches(
+    actual: Any,
+    expected: Any,
+    rule,
+) -> bool:
+    if values_equal_for_rule(actual, expected, rule):
+        return (
+            rule.value_type != "date"
+            or same_representation(actual, expected)
+        )
+    if (
+        isinstance(expected, (date, datetime))
+        and isinstance(actual, (int, float))
+        and not isinstance(actual, bool)
+        and rule.value_type in {"date", "literal"}
+    ):
+        expected_serial = (
+            _excel_datetime_serial(expected)
+            if isinstance(expected, datetime)
+            else _excel_datetime_serial(
+                datetime.combine(expected, datetime.min.time())
+            )
+        )
+        return abs(float(actual) - float(expected_serial)) < 1e-9
+    return False
+
+
 def _snapshot_cell(
     snapshot: WorkbookSnapshot,
     absolute_row: int,
@@ -74,6 +109,8 @@ def _validate_structure(
     issues: list[Issue],
     *,
     label: str,
+    expected_headers: tuple[Any, ...] | None = None,
+    expected_type_tags: tuple[Any, ...] | None = None,
 ) -> bool:
     okay = True
     if source.sheet_names != staged.sheet_names:
@@ -93,8 +130,20 @@ def _validate_structure(
         ("header_row", source.header_row, staged.header_row),
         ("type_row", source.type_row, staged.type_row),
         ("data_start", source.data_start, staged.data_start),
-        ("headers", source.headers, staged.headers),
-        ("type_tags", source.type_tags, staged.type_tags),
+        (
+            "headers",
+            expected_headers if expected_headers is not None else source.headers,
+            staged.headers,
+        ),
+        (
+            "type_tags",
+            (
+                expected_type_tags
+                if expected_type_tags is not None
+                else source.type_tags
+            ),
+            staged.type_tags,
+        ),
     ):
         if before != after:
             okay = False
@@ -109,6 +158,34 @@ def _validate_structure(
     return okay
 
 
+def _mapped_master_column(plan: SyncPlan, source_column: int) -> int:
+    rollover = plan.month_rollover
+    if (
+        rollover is not None
+        and rollover.insert_history_column
+        and source_column >= rollover.history_column
+    ):
+        return source_column + 1
+    return source_column
+
+
+def _expected_master_structure(
+    source: WorkbookSnapshot,
+    plan: SyncPlan,
+) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+    rollover = plan.month_rollover
+    if rollover is None or not rollover.insert_history_column:
+        return source.headers, source.type_tags
+    headers = list(source.headers)
+    type_tags = list(source.type_tags)
+    headers.insert(rollover.history_column, rollover.history_title)
+    type_tags.insert(
+        rollover.history_column,
+        source.type_tags[rollover.current_column],
+    )
+    return tuple(headers), tuple(type_tags)
+
+
 def _validate_master(
     bundle: ConfigBundle,
     stage: StageSet,
@@ -117,11 +194,17 @@ def _validate_master(
 ) -> None:
     source = read_portfolio(stage.master.source_copy, bundle.fields)
     staged = read_portfolio(stage.master.staged_path, bundle.fields)
+    expected_headers, expected_type_tags = _expected_master_structure(
+        source,
+        plan,
+    )
     if not _validate_structure(
         source,
         staged,
         report.issues,
         label=stage.master.original_path.name,
+        expected_headers=expected_headers,
+        expected_type_tags=expected_type_tags,
     ):
         return
     rules = {rule.title: rule for rule in bundle.fields.collect}
@@ -133,38 +216,84 @@ def _validate_master(
     missing_expected: list[dict[str, Any]] = []
     max_rows = max(len(source.rows), len(staged.rows))
     width = len(source.headers)
+    rollover = plan.month_rollover
     for offset in range(max_rows):
         absolute_row = source.data_start + offset
         for column in range(width):
             before = _snapshot_cell(source, absolute_row, column)
-            after = _snapshot_cell(staged, absolute_row, column)
+            staged_column = _mapped_master_column(plan, column)
+            after = _snapshot_cell(staged, absolute_row, staged_column)
             report.checked_master_cells += 1
             change = allowed.get((absolute_row, column))
+            expected = change.after if change is not None else before
+            if rollover is not None:
+                if column == rollover.current_column:
+                    expected = None
+                elif (
+                    not rollover.insert_history_column
+                    and column == rollover.history_column
+                ):
+                    current_before = _snapshot_cell(
+                        source,
+                        absolute_row,
+                        rollover.current_column,
+                    )
+                    if not is_blank(current_before):
+                        expected = current_before
             if change is None:
-                if not _same_value(before, after):
+                if not _same_value(expected, after):
                     if len(forbidden) < 100:
                         forbidden.append(
                             {
                                 "row": absolute_row + 1,
-                                "column": column + 1,
+                                "column": staged_column + 1,
                                 "title": source.headers[column],
-                                "before": json_value(before),
+                                "before": json_value(expected),
                                 "after": json_value(after),
                             }
                         )
                 continue
             rule = rules[change.title]
-            if not values_equal_for_rule(after, change.after, rule):
+            if not _master_change_value_matches(
+                after,
+                change.after,
+                rule,
+            ):
                 if len(missing_expected) < 100:
                     missing_expected.append(
                         {
                             "row": absolute_row + 1,
-                            "column": column + 1,
+                            "column": staged_column + 1,
                             "title": change.title,
                             "expected": json_value(change.after),
                             "actual": json_value(after),
                         }
                     )
+        if rollover is not None and rollover.insert_history_column:
+            expected_history = _snapshot_cell(
+                source,
+                absolute_row,
+                rollover.current_column,
+            )
+            actual_history = _snapshot_cell(
+                staged,
+                absolute_row,
+                rollover.history_column,
+            )
+            report.checked_master_cells += 1
+            if (
+                not _same_value(expected_history, actual_history)
+                and len(forbidden) < 100
+            ):
+                forbidden.append(
+                    {
+                        "row": absolute_row + 1,
+                        "column": rollover.history_column + 1,
+                        "title": rollover.history_title,
+                        "before": json_value(expected_history),
+                        "after": json_value(actual_history),
+                    }
+                )
     if forbidden:
         report.issues.append(
             Issue(
@@ -229,6 +358,12 @@ def _validate_projection(
                 if rule is not None
                 else _same_value(actual, expected)
             )
+            if (
+                equal
+                and rule is not None
+                and rule.value_type == "date"
+            ):
+                equal = same_representation(actual, expected)
             report.checked_projection_cells += 1
             if not equal and len(mismatches) < 100:
                 mismatches.append(
@@ -271,10 +406,38 @@ def _validate_untouched_sheets(
     report: ValidationReport,
     *,
     projections: dict[str, PersonalProjection],
+    plan: SyncPlan,
     progress: ProgressCallback | None,
 ) -> None:
     total = len(stage.files)
     with ExcelHost() as host:
+        rollover_reference_signatures = None
+        rollover = plan.month_rollover
+        if rollover is not None and rollover.insert_history_column:
+            reference_path = stage.staging_dir / (
+                ".validation-rollover-reference-"
+                f"{secrets.token_hex(4)}{stage.master.source_copy.suffix}"
+            )
+            try:
+                stable_copy(stage.master.source_copy, reference_path)
+                with host.open_book(reference_path, read_only=False) as reference_book:
+                    reference_sheet = sheet_by_name(
+                        reference_book,
+                        bundle.fields.sheet_name,
+                    )
+                    reference_sheet.range(
+                        (1, rollover.history_column + 1)
+                    ).api.EntireColumn.Insert()
+                    reference_book.api.Save()
+                with host.open_book(reference_path, read_only=True) as reference_book:
+                    rollover_reference_signatures = (
+                        workbook_untouched_signatures(
+                            reference_book,
+                            mutable_sheet=bundle.fields.sheet_name,
+                        )
+                    )
+            finally:
+                reference_path.unlink(missing_ok=True)
         for index, item in enumerate(stage.files, start=1):
             with host.open_book(item.source_copy, read_only=True) as source_book:
                 source_names = tuple(source_book.sheet_names)
@@ -282,6 +445,11 @@ def _validate_untouched_sheets(
                     source_book,
                     mutable_sheet=bundle.fields.sheet_name,
                 )
+                if (
+                    item.kind == "master"
+                    and rollover_reference_signatures is not None
+                ):
+                    source_signatures = rollover_reference_signatures
                 source_filter = sheet_filter_signature(
                     sheet_by_name(source_book, bundle.fields.sheet_name)
                 )
@@ -294,6 +462,51 @@ def _validate_untouched_sheets(
                 staged_filter = sheet_filter_signature(
                     sheet_by_name(staged_book, bundle.fields.sheet_name)
                 )
+                if item.kind == "master":
+                    staged_sheet = sheet_by_name(
+                        staged_book,
+                        bundle.fields.sheet_name,
+                    )
+                    bad_date_formats = []
+                    for change in plan.changes:
+                        if not isinstance(
+                            change.after,
+                            (date, datetime),
+                        ):
+                            continue
+                        number_format = staged_sheet.range(
+                            (
+                                change.row + 1,
+                                _mapped_master_column(
+                                    plan,
+                                    change.column,
+                                )
+                                + 1,
+                            )
+                        ).api.NumberFormat
+                        if (
+                            _is_general_number_format(number_format)
+                            and len(bad_date_formats) < 100
+                        ):
+                            bad_date_formats.append(
+                                {
+                                    "row": change.row + 1,
+                                    "column": change.column + 1,
+                                    "title": change.title,
+                                    "contract_id": change.contract_id,
+                                    "number_format": str(number_format),
+                                }
+                            )
+                    if bad_date_formats:
+                        report.issues.append(
+                            Issue(
+                                "error",
+                                "typed_date_format_missing",
+                                "typed-date изменения мастера остались "
+                                "в General-формате",
+                                {"samples": bad_date_formats},
+                            )
+                        )
             if source_names != staged_names:
                 report.issues.append(
                     Issue(
@@ -314,9 +527,37 @@ def _validate_untouched_sheets(
                         },
                     )
                 )
-            source_without_last = {
+            expected_filter = copy.deepcopy(source_filter)
+            rollover = plan.month_rollover
+            if (
+                item.kind == "master"
+                and rollover is not None
+                and rollover.insert_history_column
+                and bool(expected_filter.get("enabled"))
+            ):
+                insertion_column = rollover.history_column + 1
+                first_column = int(expected_filter["first_column"])
+                columns = int(expected_filter["columns"])
+                if (
+                    first_column
+                    <= insertion_column
+                    <= first_column + columns - 1
+                ):
+                    relative_field = (
+                        insertion_column - first_column + 1
+                    )
+                    expected_filter["columns"] = columns + 1
+                    for criterion in expected_filter.get(
+                        "criteria",
+                        [],
+                    ):
+                        if int(criterion["field"]) >= relative_field:
+                            criterion["field"] = int(
+                                criterion["field"]
+                            ) + 1
+            expected_without_last = {
                 key: value
-                for key, value in source_filter.items()
+                for key, value in expected_filter.items()
                 if key != "last_row"
             }
             staged_without_last = {
@@ -324,7 +565,7 @@ def _validate_untouched_sheets(
                 for key, value in staged_filter.items()
                 if key != "last_row"
             }
-            expected_last = source_filter.get("last_row")
+            expected_last = expected_filter.get("last_row")
             if item.kind == "personal" and source_filter.get("enabled"):
                 assert item.entry_id is not None
                 source_snapshot = read_portfolio(item.source_copy, bundle.fields)
@@ -334,7 +575,7 @@ def _validate_untouched_sheets(
                     source_snapshot.data_start + len(projection.rows),
                 )
             if (
-                source_without_last != staged_without_last
+                expected_without_last != staged_without_last
                 or staged_filter.get("last_row") != expected_last
             ):
                 report.issues.append(
@@ -439,6 +680,7 @@ def validate_staging(
         stage,
         report,
         projections=projections,
+        plan=plan,
         progress=progress,
     )
     report.checked_files = len(stage.files)

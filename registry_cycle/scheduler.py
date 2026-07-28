@@ -103,7 +103,10 @@ def build_task_xml(
     actions.set("Context", "Author")
     execute = _sub(actions, "Exec")
     _sub(execute, "Command", str(python_executable or sys.executable))
-    _sub(execute, "Arguments", "-m registry_cycle execute --publish --scheduled")
+    arguments = "-m registry_cycle execute --scheduled"
+    if bool(config.get("publish", False)):
+        arguments += " --publish"
+    _sub(execute, "Arguments", arguments)
     _sub(execute, "WorkingDirectory", str(bundle.project_root))
     return ET.tostring(task, encoding="unicode")
 

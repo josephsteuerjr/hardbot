@@ -11,6 +11,8 @@ from typing import Any, Callable
 from .config import ConfigBundle
 from .cycle_lock import CycleLock
 from .errors import SafetyViolation
+from .file_access import busy_files
+from .force_close import DelegatedForceCloser
 from .notifications import NotificationResult, OwnerNotifier
 from .publishing import PublishResult, publish_validated
 from .service import CycleService, PreparedRun
@@ -75,6 +77,12 @@ def _summary(outcome: CycleOutcome) -> str:
         f"Портфелей: {len(plan.projections)}",
         f"Ошибок плана: {errors}",
     ]
+    if plan.month_rollover is not None:
+        lines.append(
+            "Закрытие месяца: "
+            f"{plan.month_rollover.closing_month}, "
+            f"оплат {len(plan.month_rollover.archive_cells)}"
+        )
     if outcome.validation is not None:
         lines.append(
             "Validation: "
@@ -82,6 +90,7 @@ def _summary(outcome: CycleOutcome) -> str:
         )
     if outcome.publication is not None:
         lines.append(f"Опубликовано файлов: {len(outcome.publication.published)}")
+        lines.append(f"Sidecar-файлов: {len(outcome.publication.sidecars)}")
     return "\n".join(lines)
 
 
@@ -92,6 +101,8 @@ def execute_cycle(
     scheduled: bool = False,
     run_id: str | None = None,
     progress: RunnerProgress | None = None,
+    busy_mode: str | None = None,
+    rollover_month: str | None = None,
 ) -> CycleOutcome:
     if scheduled and not bool(bundle.app.scheduler.get("enabled", False)):
         raise SafetyViolation("запуск из планировщика отключён в config")
@@ -99,9 +110,45 @@ def execute_cycle(
     stale = int(bundle.app.safety.get("lock_stale_seconds", 21600))
     notifier = OwnerNotifier(bundle)
     prepared: PreparedRun | None = None
+    selected_busy_mode = (
+        busy_mode
+        if busy_mode is not None
+        else str(bundle.app.safety.get("busy_file_policy", "block"))
+    )
     try:
         with CycleLock(lock_path, stale_seconds=stale):
-            prepared = CycleService(bundle).prepare(run_id=run_id)
+            service = CycleService(bundle)
+            if publish and selected_busy_mode == "force_close":
+                discovery = service.discover()
+                if discovery.blocked:
+                    reasons = "; ".join(
+                        issue.message
+                        for issue in discovery.issues
+                        if issue.severity == "error"
+                    )
+                    raise SafetyViolation(
+                        f"manifest не прошёл проверку до force_close: {reasons}"
+                    )
+                targets = (
+                    bundle.master_path(),
+                    *(entry.path for entry in discovery.entries),
+                )
+                occupied = busy_files(tuple(targets))
+                if occupied:
+                    DelegatedForceCloser(bundle).close(
+                        occupied,
+                        audit_dir=(
+                            bundle.workspace_path()
+                            / "force-close"
+                            / "pre-snapshot"
+                        ),
+                    )
+            # При force_close snapshot принципиально снимается уже после
+            # освобождения файлов.
+            prepared = service.prepare(
+                run_id=run_id,
+                rollover_month=rollover_month,
+            )
             if prepared.plan.blocked:
                 outcome = CycleOutcome("ПЛАН ЗАБЛОКИРОВАН", prepared)
                 notification = notifier.send(_summary(outcome))
@@ -150,11 +197,20 @@ def execute_cycle(
                     prepared.plan,
                     validation,
                     confirmation_digest=prepared.plan.digest,
+                    busy_mode=selected_busy_mode,
                 )
                 if publish
                 else None
             )
-            status = "ОПУБЛИКОВАНО" if publication else "DRY-RUN ПРОЙДЕН"
+            status = (
+                "ОПУБЛИКОВАНО"
+                if publication and publication.complete
+                else (
+                    "ОПУБЛИКОВАНО С SIDECAR"
+                    if publication
+                    else "DRY-RUN ПРОЙДЕН"
+                )
+            )
             outcome = CycleOutcome(
                 status,
                 prepared,

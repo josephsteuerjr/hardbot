@@ -12,6 +12,10 @@ from . import __version__
 from .config import load_config_bundle
 from .errors import RegistryCycleError
 from .publishing import publish_validated
+from .rehearsal import (
+    execute_first_baseline_rehearsal,
+    promote_first_baseline_rehearsal,
+)
 from .runner import execute_cycle
 from .scheduler import build_task_xml, install_task, remove_task, task_status
 from .service import CycleService
@@ -45,20 +49,66 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="повторно построить план из существующего snapshot.json",
     )
+    plan.add_argument(
+        "--rollover-month",
+        help="явно закрыть месяц YYYY-MM (для ручного/аварийного запуска)",
+    )
     stage = commands.add_parser("stage", help="собрать локальный staging")
     stage.add_argument("--snapshot", type=Path)
     stage.add_argument("--run-id")
+    stage.add_argument("--rollover-month")
     validate = commands.add_parser("validate", help="повторно проверить staging")
     validate.add_argument("--snapshot", type=Path, required=True)
     validate.add_argument("--stage", type=Path, required=True)
+    validate.add_argument("--rollover-month")
     publish = commands.add_parser("publish", help="опубликовать зелёный staging")
     publish.add_argument("--snapshot", type=Path, required=True)
     publish.add_argument("--stage", type=Path, required=True)
     publish.add_argument("--confirm-digest", required=True)
+    publish.add_argument("--rollover-month")
+    publish.add_argument(
+        "--busy-mode",
+        choices=("block", "sidecar", "force_close"),
+        help="переопределить config только для этой публикации",
+    )
     execute = commands.add_parser("execute", help="полный свежий цикл")
     execute.add_argument("--publish", action="store_true")
     execute.add_argument("--scheduled", action="store_true")
     execute.add_argument("--run-id")
+    execute.add_argument("--rollover-month")
+    execute.add_argument(
+        "--busy-mode",
+        choices=("block", "sidecar", "force_close"),
+        help="переопределить config только для этого цикла",
+    )
+    rehearse = commands.add_parser(
+        "rehearse-first-baseline",
+        help="непубликуемая staging-репетиция первого baseline",
+    )
+    rehearse.add_argument("--snapshot", type=Path, required=True)
+    rehearse.add_argument("--rollover-month")
+    rehearse.add_argument(
+        "--summary",
+        action="store_true",
+        help="вывести только компактный итог; полный отчёт останется в run_dir",
+    )
+    promote = commands.add_parser(
+        "promote-first-baseline",
+        help="явно опубликовать зелёную одноразовую first-baseline репетицию",
+    )
+    promote.add_argument("--snapshot", type=Path, required=True)
+    promote.add_argument("--stage", type=Path, required=True)
+    promote.add_argument(
+        "--candidate-baseline",
+        type=Path,
+        required=True,
+    )
+    promote.add_argument("--confirm-digest", required=True)
+    promote.add_argument("--rollover-month")
+    promote.add_argument(
+        "--busy-mode",
+        choices=("block", "sidecar", "force_close"),
+    )
     scheduler = commands.add_parser("scheduler", help="Планировщик Windows")
     scheduler.add_argument(
         "action",
@@ -83,9 +133,15 @@ def main(argv: list[str] | None = None) -> int:
             if args.snapshot and args.run_id:
                 parser.error("--snapshot и --run-id взаимоисключающие")
             prepared = (
-                service.prepare_existing(args.snapshot)
+                service.prepare_existing(
+                    args.snapshot,
+                    rollover_month=args.rollover_month,
+                )
                 if args.snapshot
-                else service.prepare(run_id=args.run_id)
+                else service.prepare(
+                    run_id=args.run_id,
+                    rollover_month=args.rollover_month,
+                )
             )
             payload = prepared.plan.as_dict()
             payload["run_id"] = prepared.snapshot.run_id
@@ -96,9 +152,15 @@ def main(argv: list[str] | None = None) -> int:
             if args.snapshot and args.run_id:
                 parser.error("--snapshot и --run-id взаимоисключающие")
             prepared = (
-                service.prepare_existing(args.snapshot)
+                service.prepare_existing(
+                    args.snapshot,
+                    rollover_month=args.rollover_month,
+                )
                 if args.snapshot
-                else service.prepare(run_id=args.run_id)
+                else service.prepare(
+                    run_id=args.run_id,
+                    rollover_month=args.rollover_month,
+                )
             )
             staged = build_staging(
                 bundle,
@@ -108,7 +170,10 @@ def main(argv: list[str] | None = None) -> int:
             _print_json(staged.as_dict())
             return 0
         if command == "validate":
-            prepared = service.prepare_existing(args.snapshot)
+            prepared = service.prepare_existing(
+                args.snapshot,
+                rollover_month=args.rollover_month,
+            )
             staged = load_stage(args.stage)
             report = validate_staging(
                 bundle,
@@ -118,7 +183,10 @@ def main(argv: list[str] | None = None) -> int:
             _print_json(report.as_dict())
             return 2 if report.blocked else 0
         if command == "publish":
-            prepared = service.prepare_existing(args.snapshot)
+            prepared = service.prepare_existing(
+                args.snapshot,
+                rollover_month=args.rollover_month,
+            )
             staged = load_stage(args.stage)
             report = validate_staging(bundle, staged, prepared.plan)
             result = publish_validated(
@@ -127,18 +195,75 @@ def main(argv: list[str] | None = None) -> int:
                 prepared.plan,
                 report,
                 confirmation_digest=args.confirm_digest,
+                busy_mode=args.busy_mode,
             )
             _print_json(result.as_dict())
-            return 0
+            return 0 if result.complete else 2
         if command == "execute":
             outcome = execute_cycle(
                 bundle,
                 publish=args.publish,
                 scheduled=args.scheduled,
                 run_id=args.run_id,
+                busy_mode=args.busy_mode,
+                rollover_month=args.rollover_month,
             )
             _print_json(outcome.as_dict())
             return 0 if outcome.status in {"ОПУБЛИКОВАНО", "DRY-RUN ПРОЙДЕН"} else 2
+        if command == "rehearse-first-baseline":
+            outcome = execute_first_baseline_rehearsal(
+                bundle,
+                args.snapshot,
+                rollover_month=args.rollover_month,
+            )
+            if args.summary:
+                _print_json(
+                    {
+                        "kind": "candidate_first_baseline_rehearsal",
+                        "publishable": False,
+                        "run_dir": str(outcome.run_dir),
+                        "snapshot": str(args.snapshot),
+                        "stage": (
+                            str(outcome.stage.staging_dir / "stage.json")
+                            if outcome.stage
+                            else None
+                        ),
+                        "candidate_baseline": str(
+                            outcome.run_dir
+                            / "candidate-baseline.json.gz"
+                        ),
+                        "blocked": outcome.blocked,
+                        "plan_digest": outcome.prepared.plan.digest,
+                        "changes": len(outcome.prepared.plan.changes),
+                        "projections": len(
+                            outcome.prepared.plan.projections
+                        ),
+                        "plan_issues": [
+                            issue.as_dict()
+                            for issue in outcome.prepared.plan.issues
+                        ],
+                        "validation": (
+                            outcome.validation.as_dict()
+                            if outcome.validation
+                            else None
+                        ),
+                    }
+                )
+            else:
+                _print_json(outcome.as_dict())
+            return 2 if outcome.blocked else 0
+        if command == "promote-first-baseline":
+            result = promote_first_baseline_rehearsal(
+                bundle,
+                args.snapshot,
+                args.stage,
+                args.candidate_baseline,
+                confirmation_digest=args.confirm_digest,
+                rollover_month=args.rollover_month,
+                busy_mode=args.busy_mode,
+            )
+            _print_json(result.as_dict())
+            return 0 if result.complete else 2
         if command == "scheduler":
             if args.action == "status":
                 status = task_status(bundle)

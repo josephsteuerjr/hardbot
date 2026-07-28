@@ -1,8 +1,11 @@
 from pathlib import Path
 
 from registry_cycle.config import load_config_bundle
-from registry_cycle.models import ManifestEntry
-from registry_cycle.ownership import manifest_owner_matches
+from registry_cycle.models import FileFingerprint, ManifestEntry, WorkbookSnapshot
+from registry_cycle.ownership import (
+    manifest_owner_matches,
+    resolve_book_responsible,
+)
 
 
 def _entry(folder: str, hint: str) -> ManifestEntry:
@@ -72,4 +75,56 @@ def test_delegation_does_not_allow_misnamed_book():
             responsible_hint="СОФТ Курбаниязов",
         ),
         "СОФТ Турсунов Улугбек",
+    )
+
+
+def _book(rows) -> WorkbookSnapshot:
+    return WorkbookSnapshot(
+        path=Path("Иванов Иван.xlsb"),
+        sheet="Портфели",
+        sheet_names=("Портфели",),
+        fingerprint=FileFingerprint(1, 1, "a" * 64),
+        header_row=0,
+        type_row=1,
+        data_start=2,
+        headers=("Номер КД / ID", "ответственный Сотрудник"),
+        type_tags=("сх", "сх"),
+        rows=tuple(tuple(row) for row in rows),
+    )
+
+
+def test_empty_book_owner_is_inferred_from_manifest_hint():
+    entry = _entry("Иванов Иван", "Иванов Иван")
+
+    assert (
+        resolve_book_responsible(
+            entry,
+            _book(()),
+            "ответственный Сотрудник",
+        )
+        == "Иванов Иван"
+    )
+
+
+def test_nonempty_book_without_owner_is_never_inferred():
+    entry = _entry("Иванов Иван", "Иванов Иван")
+
+    assert (
+        resolve_book_responsible(
+            entry,
+            _book((("123", None),)),
+            "ответственный Сотрудник",
+        )
+        is None
+    )
+
+
+def test_configured_responsible_alias_is_valid_for_manifest_owner():
+    bundle = load_config_bundle()
+    entry = _entry("Тургунов Музаффар", "Тургунов Музаффар")
+
+    assert manifest_owner_matches(
+        bundle,
+        entry,
+        "Тургунов Музафар",
     )

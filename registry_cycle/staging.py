@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -18,8 +18,8 @@ from .excel_host import (
     sheet_by_name,
 )
 from .files import fingerprint, stable_copy
-from .models import FileFingerprint, PersonalProjection, SyncPlan
-from .normalize import is_blank, json_value, norm_title, parse_date
+from .models import FileFingerprint, MonthRolloverPlan, PersonalProjection, SyncPlan
+from .normalize import comparable_value, is_blank, json_value, norm_title
 from .reader import read_portfolio
 from .semantics import values_equal_for_rule
 from .snapshot import CapturedPersonal, SnapshotSet
@@ -165,11 +165,13 @@ def excel_safe_value(value: Any, value_type: str | None = None) -> Any:
     if value_type == "text" and isinstance(value, (date, datetime)):
         return "'" + str(json_value(value))
     if value_type == "date":
-        parsed = parse_date(value)
-        if parsed is not None:
-            return _excel_serial(parsed)
-        if value is not None:
-            return "'" + str(json_value(value))
+        if isinstance(value, datetime):
+            return _excel_datetime_serial(value)
+        if isinstance(value, date):
+            return _excel_serial(value)
+        if isinstance(value, str):
+            return "'" + value
+        return value
     if isinstance(value, datetime):
         return _excel_datetime_serial(value)
     if isinstance(value, date):
@@ -354,26 +356,6 @@ def _revealed_rows(
         )
 
 
-def _canonical_date_format(
-    sheet: Any,
-    *,
-    column: int,
-    first_data_row: int,
-    last_search_row: int,
-) -> Any:
-    fallback = None
-    for row in range(first_data_row, min(last_search_row, first_data_row + 500) + 1):
-        number_format = sheet.range((row, column)).api.NumberFormat
-        fallback = fallback or number_format
-        if number_format not in (None, "@", "General", "Общий"):
-            return number_format
-    if fallback not in (None, "@", "General", "Общий"):
-        return fallback
-    raise SafetyViolation(
-        f"staging: не найден шаблон формата даты в колонке {column}"
-    )
-
-
 def _write_column_runs(
     sheet: Any,
     changes,
@@ -382,6 +364,8 @@ def _write_column_runs(
     first_data_row: int,
 ) -> None:
     ordered = sorted(changes, key=lambda item: (item.column, item.row))
+    date_format_cache: dict[int, Any] = {}
+    general_format_cache: dict[str, Any] = {}
     runs: list[list[Any]] = []
     for change in ordered:
         if (
@@ -400,11 +384,10 @@ def _write_column_runs(
             (first.row + 1, first.column + 1),
             (last.row + 1, last.column + 1),
         )
-        before_values = target.value
-        if len(run) == 1:
-            before_values = [before_values]
-        elif not isinstance(before_values, list):
-            before_values = [before_values]
+        before_values = _single_column_values(
+            target.value,
+            len(run),
+        )
         for change, current in zip(run, before_values, strict=True):
             rule = rules_by_title[change.title]
             if not values_equal_for_rule(current, change.before, rule):
@@ -413,17 +396,260 @@ def _write_column_runs(
                     f"{change.contract_id}, «{change.title}»"
                 )
         rule = rules_by_title[first.title]
-        if rule.value_type == "date":
-            target.api.NumberFormat = _canonical_date_format(
-                sheet,
-                column=first.column + 1,
-                first_data_row=first_data_row,
-                last_search_row=max(last.row + 1, first_data_row),
-            )
+        for change in run:
+            if (
+                rule.value_type in {"date", "literal"}
+                and isinstance(change.after, (int, float))
+                and not isinstance(change.after, bool)
+            ):
+                sheet.range(
+                    (change.row + 1, change.column + 1)
+                ).api.NumberFormat = _general_format_for_sheet(
+                    sheet,
+                    row=change.row + 1,
+                    first_data_row=first_data_row,
+                    cache=general_format_cache,
+                )
+                continue
+            if not isinstance(change.after, (date, datetime)):
+                continue
+            cell_row = change.row + 1
+            cell_column = change.column + 1
+            current_format = sheet.range(
+                (cell_row, cell_column)
+            ).api.NumberFormat
+            if _is_general_number_format(current_format):
+                sheet.range(
+                    (cell_row, cell_column)
+                ).api.NumberFormat = _date_format_for_changed_cell(
+                    sheet,
+                    row=cell_row,
+                    column=cell_column,
+                    first_data_row=first_data_row,
+                    cache=date_format_cache,
+                )
         target.value = [
             [excel_safe_value(change.after, rule.value_type)]
             for change in run
         ]
+
+
+def _single_column_values(raw: Any, count: int) -> list[Any]:
+    """Привести xlwings scalar/column matrix к списку скаляров."""
+    if count == 1:
+        if (
+            isinstance(raw, list)
+            and len(raw) == 1
+            and isinstance(raw[0], list)
+            and len(raw[0]) == 1
+        ):
+            return [raw[0][0]]
+        return [raw]
+    if not isinstance(raw, list):
+        return [raw]
+    values = []
+    for row in raw:
+        if isinstance(row, list):
+            values.append(row[0] if row else None)
+        else:
+            values.append(row)
+    return values
+
+
+def _is_general_number_format(value: Any) -> bool:
+    if value is None:
+        return True
+    return str(value).strip().casefold() in {
+        "@",
+        "general",
+        "общий",
+        "основной",
+    }
+
+
+def _date_format_for_changed_cell(
+    sheet: Any,
+    *,
+    row: int,
+    column: int,
+    first_data_row: int,
+    cache: dict[int, Any],
+) -> Any:
+    current = sheet.range((row, column)).api.NumberFormat
+    if not _is_general_number_format(current):
+        return current
+    if column in cache:
+        return cache[column]
+
+    candidates = [
+        *range(max(first_data_row, row - 80), row),
+        *range(first_data_row, first_data_row + 500),
+    ]
+    seen: set[int] = set()
+    for candidate_row in candidates:
+        if candidate_row in seen:
+            continue
+        seen.add(candidate_row)
+        number_format = sheet.range(
+            (candidate_row, column)
+        ).api.NumberFormat
+        if not _is_general_number_format(number_format):
+            cache[column] = number_format
+            return number_format
+    # Fallback применяется только к новой typed-date ячейке, а не к столбцу.
+    cache[column] = "dd.mm.yyyy"
+    return cache[column]
+
+
+def _general_format_for_sheet(
+    sheet: Any,
+    *,
+    row: int,
+    first_data_row: int,
+    cache: dict[str, Any],
+) -> Any:
+    if "value" in cache:
+        return cache["value"]
+    candidates = [
+        *((row, column) for column in range(1, 11)),
+        *(
+            (candidate_row, column)
+            for candidate_row in range(first_data_row, first_data_row + 10)
+            for column in range(1, 11)
+        ),
+    ]
+    for candidate_row, candidate_column in candidates:
+        number_format = sheet.range(
+            (candidate_row, candidate_column)
+        ).api.NumberFormat
+        if _is_general_number_format(number_format):
+            cache["value"] = number_format
+            return number_format
+    raise SafetyViolation(
+        "staging: в книге не найден локализованный General-формат"
+    )
+
+
+def _contiguous_archive_runs(cells):
+    runs: list[list[Any]] = []
+    for cell in sorted(cells, key=lambda item: item.row):
+        if runs and runs[-1][-1].row + 1 == cell.row:
+            runs[-1].append(cell)
+        else:
+            runs.append([cell])
+    return runs
+
+
+def _write_month_rollover(
+    host: ExcelHost,
+    sheet: Any,
+    source_snapshot,
+    rollover: MonthRolloverPlan,
+) -> None:
+    first_data_row = source_snapshot.data_start + 1
+    last_data_row = source_snapshot.data_start + len(source_snapshot.rows)
+    source_current_column = rollover.current_column + 1
+    current_header = sheet.range(
+        (source_snapshot.header_row + 1, source_current_column)
+    ).value
+    if norm_title(current_header) != norm_title(rollover.current_title):
+        raise SafetyViolation(
+            "staging: колонка «Текущие платежи» сдвинулась после dry-run"
+        )
+
+    if last_data_row >= first_data_row:
+        current_range = sheet.range(
+            (first_data_row, source_current_column),
+            (last_data_row, source_current_column),
+        )
+        if range_has_formulas(current_range):
+            raise SafetyViolation(
+                "staging: в «Текущих платежах» найдены формулы; "
+                "архивация только вычисленного кэша запрещена"
+            )
+        current_values = _single_column_values(
+            current_range.value,
+            len(source_snapshot.rows),
+        )
+        for offset, actual in enumerate(current_values):
+            expected = source_snapshot.row_value(
+                source_snapshot.rows[offset],
+                rollover.current_column,
+            )
+            if comparable_value(actual) != comparable_value(expected):
+                raise SafetyViolation(
+                    "staging: «Текущие платежи» изменились после dry-run: "
+                    f"строка {source_snapshot.data_start + offset + 1}"
+                )
+
+    if rollover.insert_history_column:
+        insertion = sheet.range((1, rollover.history_column + 1))
+        insertion.api.EntireColumn.Insert()
+        history_column = rollover.history_column + 1
+        current_column = rollover.current_column + 2
+        # Excel сам наследует формат соседней исторической колонки при
+        # вставке. Форматы через PasteSpecial здесь намеренно не копируются:
+        # на .xlsb с AutoFilter COM способен применить формат ко всему листу.
+        sheet.range((1, history_column)).column_width = sheet.range(
+            (1, current_column)
+        ).column_width
+    else:
+        history_column = rollover.history_column + 1
+        current_column = rollover.current_column + 1
+        history_header = sheet.range(
+            (source_snapshot.header_row + 1, history_column)
+        ).value
+        if norm_title(history_header) != norm_title(rollover.history_title):
+            raise SafetyViolation(
+                "staging: историческая колонка месяца сдвинулась "
+                "после dry-run"
+            )
+        if last_data_row >= first_data_row:
+            history_range = sheet.range(
+                (first_data_row, history_column),
+                (last_data_row, history_column),
+            )
+            if range_has_formulas(history_range):
+                raise SafetyViolation(
+                    "staging: в исторической колонке платежей найдены формулы"
+                )
+
+    sheet.range(
+        (source_snapshot.header_row + 1, history_column)
+    ).value = rollover.history_title
+    if source_snapshot.type_row is not None:
+        sheet.range(
+            (source_snapshot.type_row + 1, history_column)
+        ).clear_contents()
+
+    for run in _contiguous_archive_runs(rollover.archive_cells):
+        first = run[0].row + 1
+        last = run[-1].row + 1
+        target = sheet.range(
+            (first, history_column),
+            (last, history_column),
+        )
+        if not rollover.insert_history_column:
+            existing = _single_column_values(target.value, len(run))
+            for cell, before in zip(run, existing, strict=True):
+                if (
+                    not is_blank(before)
+                    and comparable_value(before)
+                    != comparable_value(cell.value)
+                ):
+                    raise SafetyViolation(
+                        "staging: историческая оплата изменилась "
+                        f"после dry-run: строка {cell.row + 1}"
+                    )
+        target.value = [
+            [excel_safe_value(cell.value)]
+            for cell in run
+        ]
+    if last_data_row >= first_data_row:
+        sheet.range(
+            (first_data_row, current_column),
+            (last_data_row, current_column),
+        ).clear_contents()
 
 
 def _write_master(
@@ -436,9 +662,30 @@ def _write_master(
     source_snapshot = read_portfolio(path, bundle.fields)
     with host.open_book(path, read_only=False) as book:
         sheet = sheet_by_name(book, bundle.fields.sheet_name)
-        if plan.changes:
-            first_row = min(change.row + 1 for change in plan.changes)
-            last_row = max(change.row + 1 for change in plan.changes)
+        if plan.month_rollover is not None:
+            _write_month_rollover(
+                host,
+                sheet,
+                source_snapshot,
+                plan.month_rollover,
+            )
+        mapped_changes = plan.changes
+        if (
+            plan.month_rollover is not None
+            and plan.month_rollover.insert_history_column
+        ):
+            insertion_column = plan.month_rollover.history_column
+            mapped_changes = [
+                (
+                    replace(change, column=change.column + 1)
+                    if change.column >= insertion_column
+                    else change
+                )
+                for change in plan.changes
+            ]
+        if mapped_changes:
+            first_row = min(change.row + 1 for change in mapped_changes)
+            last_row = max(change.row + 1 for change in mapped_changes)
             with _revealed_rows(
                 sheet,
                 first_row=first_row,
@@ -446,7 +693,7 @@ def _write_master(
             ):
                 _write_column_runs(
                     sheet,
-                    plan.changes,
+                    mapped_changes,
                     rules,
                     first_data_row=source_snapshot.data_start + 1,
                 )
@@ -514,6 +761,7 @@ def _write_projection(
             )
             for title in projection.headers
         ]
+        general_format_cache: dict[str, Any] = {}
         with _revealed_rows(
             sheet,
             first_row=first_data_row,
@@ -542,24 +790,29 @@ def _write_projection(
                     columns=width,
                 )
                 mutable.clear_contents()
-                for column, value_type in enumerate(value_types, start=1):
-                    if value_type != "date" or new_last_row < first_data_row:
-                        continue
-                    number_format = _canonical_date_format(
-                        sheet,
-                        column=column,
-                        first_data_row=first_data_row,
-                        last_search_row=max(old_last_row, first_data_row),
-                    )
-                    sheet.range(
-                        (first_data_row, column),
-                        (new_last_row, column),
-                    ).api.NumberFormat = number_format
             chunk_size = 500
             for offset in range(0, len(projection.rows), chunk_size):
                 chunk = projection.rows[offset : offset + chunk_size]
                 start = first_data_row + offset
                 finish = start + len(chunk) - 1
+                for row_offset, row in enumerate(chunk):
+                    for column, value in enumerate(row):
+                        if (
+                            value_types[column] in {"date", "literal"}
+                            and isinstance(value, (int, float))
+                            and not isinstance(value, bool)
+                        ):
+                            sheet.range(
+                                (
+                                    start + row_offset,
+                                    column + 1,
+                                )
+                            ).api.NumberFormat = _general_format_for_sheet(
+                                sheet,
+                                row=start + row_offset,
+                                first_data_row=first_data_row,
+                                cache=general_format_cache,
+                            )
                 sheet.range((start, 1), (finish, width)).value = [
                     [
                         excel_safe_value(value, value_types[column])

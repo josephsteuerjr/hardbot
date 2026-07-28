@@ -6,6 +6,7 @@
     "status_sheet": "Статусы",
     "key_title": "Номер КД / ID",
     "responsible_title": "ответственный Сотрудник",
+    "previous_responsible_title": "пред отв",
     "header_search_rows": 10,
     "type_row_offset": 1
   },
@@ -25,6 +26,26 @@
       ]
     }
   },
+  "directions": {
+    "employee_header_fill_rgb": [
+      "#FFFF00"
+    ],
+    "strict_header_color_validation": true,
+    "employee_to_master": "collect",
+    "master_to_employee": "profile_columns_except_collect",
+    "preserve_employee_values_for_existing_owner": true,
+    "transfer_employee_values_on_reassignment": true
+  },
+  "month_rollover": {
+    "enabled": true,
+    "trigger": "last_calendar_day",
+    "current_payments_title": "Текущие платежи",
+    "history_title_template": "Оплаты за {month:02d}.{year2:02d}",
+    "employee_clear_titles": [
+      "Сумма последнего платежа",
+      "Дата последнего платежа"
+    ]
+  },
   "collect": [
     {
       "title": "Сумма последнего платежа",
@@ -34,7 +55,8 @@
       ],
       "empty": "ignore",
       "conflict": "error",
-      "value_type": "number"
+      "value_type": "number",
+      "invalid": "preserve"
     },
     {
       "title": "Дата последнего платежа",
@@ -44,7 +66,8 @@
       ],
       "empty": "ignore",
       "conflict": "error",
-      "value_type": "date"
+      "value_type": "date",
+      "invalid": "preserve"
     },
     {
       "title": "Сумма прогноза",
@@ -54,7 +77,8 @@
       ],
       "empty": "ignore",
       "conflict": "error",
-      "value_type": "number"
+      "value_type": "number",
+      "invalid": "preserve"
     },
     {
       "title": "Прогноз",
@@ -73,10 +97,20 @@
       ],
       "empty": "ignore",
       "conflict": "error",
-      "value_type": "date"
+      "value_type": "date",
+      "invalid": "preserve"
     },
     {
       "title": "Общий результат",
+      "profiles": [
+        "hard",
+        "soft"
+      ],
+      "empty": "ignore",
+      "conflict": "error"
+    },
+    {
+      "title": "Телефон глав",
       "profiles": [
         "hard",
         "soft"
@@ -102,7 +136,8 @@
       ],
       "empty": "ignore",
       "conflict": "error",
-      "value_type": "date"
+      "value_type": "date",
+      "invalid": "preserve"
     },
     {
       "title": "Дата выезда",
@@ -111,7 +146,7 @@
       ],
       "empty": "ignore",
       "conflict": "error",
-      "value_type": "date"
+      "value_type": "literal"
     },
     {
       "title": "Комментарий текущего месяца выезда",
@@ -194,7 +229,8 @@
       ],
       "empty": "ignore",
       "conflict": "error",
-      "value_type": "date"
+      "value_type": "date",
+      "invalid": "preserve"
     },
     {
       "title": "Комментарий текущего месяца Софт",
@@ -208,7 +244,6 @@
   ],
   "preserve_if_master_blank": [
     "Телефон",
-    "Телефон глав",
     "Город"
   ],
   "aliases": {

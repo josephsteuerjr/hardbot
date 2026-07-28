@@ -186,6 +186,24 @@ def test_personal_row_missing_from_master_is_retained(monkeypatch, tmp_path):
     assert not plan.rows
 
 
+def test_first_assignment_can_target_new_empty_portfolio(
+    monkeypatch,
+    tmp_path,
+):
+    plan = _run_plan(
+        monkeypatch,
+        tmp_path,
+        master_rows=(("new", EMPLOYEE, "данные"),),
+        baseline_rows=(("new", None, "данные"),),
+        personal_rows=(),
+    )
+
+    assert not plan.blocked
+    assert len(plan.rows) == 1
+    assert plan.rows[0].contract_id == "new"
+    assert plan.rows[0].responsible == EMPLOYEE
+
+
 def test_nonblank_baseline_owner_blocks_unproven_assignment(
     monkeypatch,
     tmp_path,

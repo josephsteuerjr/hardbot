@@ -176,6 +176,48 @@ class CellChange:
 
 
 @dataclass(frozen=True, slots=True)
+class PaymentArchiveCell:
+    row: int
+    value: Any
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "row": self.row + 1,
+            "value": json_value(self.value),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class MonthRolloverPlan:
+    closing_month: str
+    history_title: str
+    current_title: str
+    history_column: int
+    current_column: int
+    insert_history_column: bool
+    mode: str
+    archive_cells: tuple[PaymentArchiveCell, ...]
+    employee_clear_titles: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "closing_month": self.closing_month,
+            "history_title": self.history_title,
+            "current_title": self.current_title,
+            "history_column": self.history_column + 1,
+            "current_column": self.current_column + 1,
+            "insert_history_column": self.insert_history_column,
+            "mode": self.mode,
+            "archive_cells": [
+                cell.as_dict()
+                for cell in self.archive_cells
+            ],
+            "archive_cell_count": len(self.archive_cells),
+            "employee_clear_titles": list(self.employee_clear_titles),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class PersonalProjection:
     entry: ManifestEntry
     responsible: str
@@ -183,6 +225,11 @@ class PersonalProjection:
     rows: tuple[tuple[Any, ...], ...]
     source_fingerprint: FileFingerprint
     preserved_cells: int = 0
+    employee_owned_preserved_cells: int = 0
+    handoff_cells: int = 0
+    rollover_cleared_cells: int = 0
+    retained_rows: int = 0
+    removed_rows: int = 0
 
     def as_summary(self) -> dict[str, Any]:
         return {
@@ -191,6 +238,13 @@ class PersonalProjection:
             "columns": len(self.headers),
             "rows": len(self.rows),
             "preserved_cells": self.preserved_cells,
+            "employee_owned_preserved_cells": (
+                self.employee_owned_preserved_cells
+            ),
+            "handoff_cells": self.handoff_cells,
+            "rollover_cleared_cells": self.rollover_cleared_cells,
+            "retained_rows": self.retained_rows,
+            "removed_rows": self.removed_rows,
             "source_fingerprint": self.source_fingerprint.as_dict(),
         }
 
@@ -202,6 +256,7 @@ class SyncPlan:
     changes: list[CellChange] = field(default_factory=list)
     projections: list[PersonalProjection] = field(default_factory=list)
     issues: list[Issue] = field(default_factory=list)
+    month_rollover: MonthRolloverPlan | None = None
 
     @property
     def blocked(self) -> bool:
@@ -214,6 +269,11 @@ class SyncPlan:
             "changes": [change.as_dict() for change in self.changes],
             "projections": [projection.as_summary() for projection in self.projections],
             "issues": [issue.as_dict() for issue in self.issues],
+            "month_rollover": (
+                self.month_rollover.as_dict()
+                if self.month_rollover is not None
+                else None
+            ),
             "blocked": self.blocked,
         }
 

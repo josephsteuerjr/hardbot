@@ -8,12 +8,14 @@ import secrets
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .baseline import baseline_path, build_baseline, save_baseline
 from .config import ConfigBundle
 from .errors import PublishError, SafetyViolation
+from .file_access import BusyFile, busy_files
 from .files import fingerprint, stable_copy
+from .force_close import DelegatedForceCloser
 from .models import Issue, SyncPlan
 from .reader import read_portfolio
 from .staging import StageSet, StagedFile
@@ -27,6 +29,8 @@ class PublishResult:
     started_at: str
     finished_at: str | None = None
     published: list[str] = field(default_factory=list)
+    sidecars: list[str] = field(default_factory=list)
+    backups: list[str] = field(default_factory=list)
     rolled_back: list[str] = field(default_factory=list)
     issues: list[Issue] = field(default_factory=list)
     baseline: str | None = None
@@ -38,6 +42,10 @@ class PublishResult:
             for issue in self.issues
         )
 
+    @property
+    def complete(self) -> bool:
+        return self.ok and not self.sidecars
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
@@ -45,10 +53,13 @@ class PublishResult:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "published": self.published,
+            "sidecars": self.sidecars,
+            "backups": self.backups,
             "rolled_back": self.rolled_back,
             "issues": [issue.as_dict() for issue in self.issues],
             "baseline": self.baseline,
             "ok": self.ok,
+            "complete": self.complete,
         }
 
 
@@ -119,10 +130,92 @@ def _cleanup_temps(paths: list[Path], journal: _Journal) -> None:
             journal.append("temp_remove_failed", path=str(path), error=str(exc))
 
 
+def _unique_sibling(
+    item: StagedFile,
+    *,
+    label: str,
+    stamp: datetime,
+) -> Path:
+    base = item.original_path.with_name(
+        f"Копия {item.original_path.stem} "
+        f"({label} {stamp:%d.%m.%y %H-%M})"
+        f"{item.original_path.suffix}"
+    )
+    if not base.exists():
+        return base
+    for number in range(2, 1000):
+        candidate = base.with_name(
+            f"{base.stem} {number}{base.suffix}"
+        )
+        if not candidate.exists():
+            return candidate
+    raise SafetyViolation(
+        f"не найдено свободное имя соседней копии: {item.original_path}"
+    )
+
+
+def _busy_targets(
+    files: tuple[StagedFile, ...],
+    *,
+    mode: str,
+    journal: _Journal,
+    force_close: Callable[[tuple[BusyFile, ...]], None] | None,
+) -> set[str]:
+    if mode not in {"block", "sidecar", "force_close"}:
+        raise SafetyViolation(f"неизвестный режим занятых файлов: {mode}")
+    by_path = {
+        str(item.original_path).casefold(): item
+        for item in files
+    }
+    busy = busy_files(tuple(item.original_path for item in files))
+    if busy and mode == "force_close":
+        if force_close is None:
+            raise SafetyViolation(
+                "force_close выбран, но делегированный механизм не передан"
+            )
+        journal.append(
+            "force_close_requested",
+            files=[item.as_dict() for item in busy],
+        )
+        force_close(busy)
+        busy = busy_files(tuple(item.original_path for item in files))
+        if busy:
+            raise SafetyViolation(
+                "после force_close остались занятые цели: "
+                + ", ".join(str(item.path) for item in busy)
+            )
+        journal.append("force_close_passed")
+        return set()
+    if not busy:
+        return set()
+
+    sidecars: set[str] = set()
+    for item in busy:
+        staged = by_path.get(str(item.path).casefold())
+        if mode == "sidecar" and staged is not None and staged.kind == "personal":
+            sidecars.add(str(staged.original_path).casefold())
+            continue
+        raise SafetyViolation(
+            "live-файл занят; публикация остановлена: "
+            f"{item.path} ({item.reason})"
+        )
+    journal.append(
+        "sidecars_required",
+        files=[
+            item.as_dict()
+            for item in busy
+            if str(item.path).casefold() in sidecars
+        ],
+    )
+    return sidecars
+
+
 def atomic_publish_files(
     stage: StageSet,
     *,
     journal_path: str | Path | None = None,
+    busy_mode: str = "block",
+    force_close: Callable[[tuple[BusyFile, ...]], None] | None = None,
 ) -> PublishResult:
     """Опубликовать уже проверенные файлы; пригодно для fault-injection тестов."""
     files = _publish_order(stage)
@@ -139,6 +232,10 @@ def atomic_publish_files(
     )
     prepared: dict[str, Path] = {}
     replaced: list[StagedFile] = []
+    created_sidecars: list[tuple[StagedFile, Path]] = []
+    sidecar_targets: set[str] = set()
+    sidecar_paths: dict[str, Path] = {}
+    stamp = datetime.now()
     journal.append(
         "publish_started",
         run_id=stage.run_id,
@@ -146,6 +243,12 @@ def atomic_publish_files(
         files=len(files),
     )
     try:
+        sidecar_targets |= _busy_targets(
+            files,
+            mode=busy_mode,
+            journal=journal,
+            force_close=force_close,
+        )
         for item in files:
             if fingerprint(item.staged_path) != item.staged_fingerprint:
                 raise SafetyViolation(
@@ -169,13 +272,64 @@ def atomic_publish_files(
             )
 
         # Второй барьер закрывает окно между длинным копированием temp и replace.
+        sidecar_targets |= _busy_targets(
+            files,
+            mode=busy_mode,
+            journal=journal,
+            force_close=force_close,
+        )
         for item in files:
             _assert_unchanged(item)
         journal.append("second_preflight_passed")
 
         for item in files:
+            sidecar_targets |= _busy_targets(
+                (item,),
+                mode=busy_mode,
+                journal=journal,
+                force_close=force_close,
+            )
             _assert_unchanged(item)
             temporary = prepared[str(item.original_path).casefold()]
+            target_key = str(item.original_path).casefold()
+            if target_key in sidecar_targets:
+                sidecar = sidecar_paths.setdefault(
+                    target_key,
+                    _unique_sibling(
+                        item,
+                        label="после ночного цикла",
+                        stamp=stamp,
+                    ),
+                )
+                os.replace(temporary, sidecar)
+                created_sidecars.append((item, sidecar))
+                if fingerprint(sidecar) != item.staged_fingerprint:
+                    raise PublishError(
+                        f"проверка sidecar не пройдена: {sidecar}"
+                    )
+                result.sidecars.append(str(sidecar))
+                journal.append(
+                    "sidecar_created",
+                    target=str(item.original_path),
+                    sidecar=str(sidecar),
+                )
+                continue
+            backup = _unique_sibling(
+                item,
+                label="до ночного цикла",
+                stamp=stamp,
+            )
+            stable_copy(item.original_path, backup)
+            if fingerprint(backup) != item.source_fingerprint:
+                raise PublishError(
+                    f"соседний backup не совпал с live: {backup}"
+                )
+            result.backups.append(str(backup))
+            journal.append(
+                "sibling_backup_created",
+                target=str(item.original_path),
+                backup=str(backup),
+            )
             os.replace(temporary, item.original_path)
             replaced.append(item)
             if fingerprint(item.original_path) != item.staged_fingerprint:
@@ -204,6 +358,26 @@ def atomic_publish_files(
                     backup=str(item.source_copy),
                     error=str(rollback_exc),
                 )
+        for item, sidecar in reversed(created_sidecars):
+            try:
+                if fingerprint(sidecar) != item.staged_fingerprint:
+                    raise PublishError(
+                        "SHA sidecar перед rollback не совпал"
+                    )
+                sidecar.unlink()
+                result.sidecars.remove(str(sidecar))
+                result.rolled_back.append(str(sidecar))
+                journal.append(
+                    "sidecar_removed_on_rollback",
+                    path=str(sidecar),
+                )
+            except Exception as rollback_exc:  # noqa: BLE001
+                rollback_failures.append(str(sidecar))
+                journal.append(
+                    "sidecar_rollback_failed",
+                    path=str(sidecar),
+                    error=str(rollback_exc),
+                )
         _cleanup_temps(list(prepared.values()), journal)
         result.issues.append(
             Issue(
@@ -224,6 +398,16 @@ def atomic_publish_files(
         raise PublishError(f"публикация отменена и откачена: {exc}") from exc
 
     result.finished_at = datetime.now().isoformat(timespec="seconds")
+    if result.sidecars:
+        result.issues.append(
+            Issue(
+                "warning",
+                "publish_sidecars_pending",
+                "часть занятых личных файлов опубликована соседними копиями; "
+                "пакет требует последующего сведения",
+                {"sidecars": list(result.sidecars)},
+            )
+        )
     journal.append("publish_files_completed")
     return result
 
@@ -235,6 +419,7 @@ def publish_validated(
     validation: ValidationReport,
     *,
     confirmation_digest: str,
+    busy_mode: str | None = None,
 ) -> PublishResult:
     if plan.blocked:
         raise SafetyViolation("заблокированный план нельзя публиковать")
@@ -269,18 +454,91 @@ def publish_validated(
     )
     stable_copy(pending_baseline, baseline_temp)
 
+    selected_busy_mode = (
+        busy_mode
+        if busy_mode is not None
+        else str(bundle.app.safety.get("busy_file_policy", "block"))
+    )
+    closer = DelegatedForceCloser(bundle)
+
+    def force_close_callback(items: tuple[BusyFile, ...]) -> None:
+        closer.close(
+            items,
+            audit_dir=stage.run_dir / "force-close",
+        )
+
     try:
-        result = atomic_publish_files(stage)
+        result = atomic_publish_files(
+            stage,
+            busy_mode=selected_busy_mode,
+            force_close=(
+                force_close_callback
+                if selected_busy_mode == "force_close"
+                else None
+            ),
+        )
     except Exception:
         baseline_temp.unlink(missing_ok=True)
         raise
+    if result.sidecars:
+        # Sidecar означает, что хотя бы один живой личный файл остался на
+        # прежнем состоянии. Активировать baseline всего staging в этот момент
+        # опасно: на следующем цикле старый открытый оригинал выглядел бы как
+        # новая правка сотрудника относительно уже нового baseline.
+        baseline_temp.unlink(missing_ok=True)
+        pending_originals = [
+            str(item.original_path)
+            for item in stage.personals
+            if str(item.original_path) not in result.published
+        ]
+        result.issues.append(
+            Issue(
+                "warning",
+                "baseline_deferred_for_sidecars",
+                "baseline не активирован до контролируемого сведения sidecar",
+                {
+                    "candidate_baseline": str(pending_baseline),
+                    "sidecars": list(result.sidecars),
+                    "originals": pending_originals,
+                },
+            )
+        )
+        _atomic_json(
+            stage.run_dir / "pending-sidecars.json",
+            {
+                "run_id": stage.run_id,
+                "plan_digest": plan.digest,
+                "candidate_baseline": str(pending_baseline),
+                "sidecars": result.sidecars,
+                "originals": pending_originals,
+                "pairs": [
+                    {
+                        "original": original,
+                        "sidecar": sidecar,
+                    }
+                    for original, sidecar in zip(
+                        pending_originals,
+                        result.sidecars,
+                        strict=True,
+                    )
+                ],
+            },
+        )
+        _atomic_json(stage.run_dir / "publish.json", result.as_dict())
+        return result
     try:
         os.replace(baseline_temp, target_baseline)
     except Exception as exc:
         journal = _Journal(stage.run_dir / "publish.journal.jsonl")
         journal.append("baseline_activation_failed", error=str(exc))
         rollback_failures: list[str] = []
+        published = {
+            path.casefold()
+            for path in result.published
+        }
         for item in reversed(_publish_order(stage)):
+            if str(item.original_path).casefold() not in published:
+                continue
             rollback_temp = _temp_path(item, stage.run_id, "baseline-rollback")
             try:
                 if fingerprint(item.original_path) != item.staged_fingerprint:
@@ -302,6 +560,31 @@ def publish_validated(
                     "rollback_failed_after_baseline_failure",
                     target=str(item.original_path),
                     backup=str(item.source_copy),
+                    error=str(rollback_exc),
+                )
+        for sidecar_text in list(result.sidecars):
+            sidecar = Path(sidecar_text)
+            try:
+                expected_fingerprints = {
+                    item.staged_fingerprint
+                    for item in stage.personals
+                }
+                if fingerprint(sidecar) not in expected_fingerprints:
+                    raise PublishError(
+                        "SHA sidecar перед rollback baseline не совпал"
+                    )
+                sidecar.unlink()
+                result.sidecars.remove(sidecar_text)
+                result.rolled_back.append(sidecar_text)
+                journal.append(
+                    "sidecar_removed_after_baseline_failure",
+                    path=sidecar_text,
+                )
+            except Exception as rollback_exc:  # noqa: BLE001
+                rollback_failures.append(sidecar_text)
+                journal.append(
+                    "sidecar_rollback_failed_after_baseline_failure",
+                    path=sidecar_text,
                     error=str(rollback_exc),
                 )
         baseline_temp.unlink(missing_ok=True)
