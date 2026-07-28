@@ -67,6 +67,7 @@ python -m registry_cycle scheduler install
 - [Отчёт для руководителей](REPORT_FOR_MANAGEMENT_2026-07-28.md)
 - [Технический приёмочный отчёт](REHEARSAL_REPORT_2026-07-28.md)
 - [Подробное описание логики](SCRIPT_GUIDE_2026-07-28.md)
+- [Технический разбор предыдущей версии](LEGACY_SCRIPT_REVIEW_FOR_DEVELOPER_2026-07-28.md)
 - [Решения встречи](MEETING_NOTES_2026-07-28.md)
 - [Техническое задание](MODERNIZATION_TZ_2026-07-28.md)
 
