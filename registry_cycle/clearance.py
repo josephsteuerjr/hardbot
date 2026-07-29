@@ -27,6 +27,8 @@ import limited_test_reset as hardbot_reset
 from exchange_contract import (
     CLEARANCE_RECEIPT_SCHEMA,
     CONTRACT_KEY,
+    OFFICE_DIRECT_EDIT_KEYS,
+    OFFICE_RESULT_SNAPSHOT_KEY,
     PROVENANCE_MARKER,
     SNAPSHOT_KEYS,
     SNAPSHOT_KIND,
@@ -336,6 +338,10 @@ def _backup_export_rows(
     raw_rows: list[dict[str, Any]] = []
     safe_rows: list[dict[str, Any]] = []
     bot_keys = set(VISIT_KEYS) - {"tips"}
+    office_keys = {
+        OFFICE_RESULT_SNAPSHOT_KEY,
+        *OFFICE_DIRECT_EDIT_KEYS,
+    }
     for row in rows:
         raw = {key: row[key] for key in field_keys}
         safe = dict(raw)
@@ -371,7 +377,7 @@ def _backup_export_rows(
                 and isinstance(edits.get("fields"), dict)
             ):
                 for key, value in edits["fields"].items():
-                    if key in bot_keys and not _blank(value):
+                    if key in office_keys and not _blank(value):
                         snapshot[key] = str(value).strip()
             tips = str(snapshot.get("tips") or row["tips"] or "").strip()
             if tips:
