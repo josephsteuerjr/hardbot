@@ -6,6 +6,7 @@
 и таблица `visits` — история выездов (кнопка «История» в карточке).
 """
 
+import hashlib
 import json
 import os
 import re
@@ -16,6 +17,33 @@ from pathlib import Path
 
 import country_scope
 import debt
+from exchange_contract import (
+    ExchangeContractError,
+    FORM_DROPDOWN_KEYS,
+    IMPORT_SOURCE_KINDS,
+    IMPORT_SOURCE_PUBLISHED_MASTER,
+    IMPORT_SOURCE_TEST_SUBSET,
+    OFFICE_CALL_FIELDS,
+    OFFICE_DIRECT_EDIT_KEYS,
+    OFFICE_RESULT_SNAPSHOT_KEY,
+    OFFICE_RESULT_SOURCE_KEY,
+    PROVENANCE_MARKER,
+    SNAPSHOT_KEYS,
+    WORKBOOK_ALLOWED_IGNORED_HEADERS,
+    WORKBOOK_ALLOWED_IGNORED_HEADER_PATTERNS,
+    WORKBOOK_CONTRACT_KEY,
+    WORKBOOK_HEADER_ALIASES,
+    WORKBOOK_HEADER_SEARCH_ROWS,
+    WORKBOOK_RESPONSIBLE_KEY,
+    WORKBOOK_SHEET_NAME,
+    WORKBOOK_TEST_SUBSET_REQUIRED_KEYS,
+    WORKBOOK_TYPE_ROW_ALLOWED_BLANK_KEYS,
+    WORKBOOK_TYPE_ROW_OFFSET,
+    WORKBOOK_TYPE_ROW_TAGS,
+    validate_import_source_proof,
+    validate_import_source_proof_record,
+    verify_export_schema,
+)
 from fields import FIELDS, BY_KEY
 from util import num as _money_int   # единый разбор чисел (был дубль локальной логики)
 
@@ -49,29 +77,29 @@ BOOKKEEPING = [
     ("visit_value_log", "TEXT"),
 ]
 
-# Ровно те поля, которые обогащение вправе переносить в живой Excel. Снимок
-# создаётся при finish=true только из фактически присланных миниаппом значений;
-# сырые HARD-поля clients могут содержать исторический импорт и доказательством
-# визита не являются.
-BOT_VISIT_KEYS = (
-    "visit_date", "call_status", "contact_with", "agreed_payment",
-    "who_at_address", "client_location", "purpose_rf",
-    "visit_comment", "call_comment",
+# Семантика обмена больше не дублируется между bot/pult/clearance. Она загружается
+# из version+SHA-locked data_exchange_contract.json; несовместимая правка не даст
+# даже импортировать модуль. BOT_VISIT_KEYS — только физические registry-поля,
+# тогда как BOT_SNAPSHOT_KEYS включает bot-only ``tips``.
+BOT_SNAPSHOT_KEYS = SNAPSHOT_KEYS
+BOT_VISIT_KEYS = tuple(key for key in BOT_SNAPSHOT_KEYS if key in BY_KEY)
+BOT_VISIT_MARKER = PROVENANCE_MARKER
+BOT_DROPDOWN_KEYS = FORM_DROPDOWN_KEYS
+OFFICE_EDIT_KEYS = {OFFICE_RESULT_SNAPSHOT_KEY, *OFFICE_DIRECT_EDIT_KEYS}
+
+_exchange_registry_keys = (
+    set(BOT_VISIT_KEYS)
+    | set(BOT_DROPDOWN_KEYS)
+    | set(OFFICE_DIRECT_EDIT_KEYS)
+    | set(OFFICE_CALL_FIELDS)
+    | {OFFICE_RESULT_SOURCE_KEY, OFFICE_RESULT_SNAPSHOT_KEY}
 )
-# ``tips`` — тоже bot-owned поле формы, но в исходном реестре отдельной колонки
-# с таким ключом нет. Сохраняем его в доказанном снимке для safe-выгрузки; пульт
-# направляет значение в «Доп. Адрес/Доп.Номер». В OFFICE_EDIT_KEYS не включаем:
-# наводки меняет только выездник через приложение.
-BOT_SNAPSHOT_KEYS = BOT_VISIT_KEYS + ("tips",)
-BOT_VISIT_MARKER = "_bot_completed"
-BOT_DROPDOWN_KEYS = (
-    "call_status", "contact_with", "agreed_payment", "who_at_address",
-    "client_location", "purpose_rf",
-)
-BOT_IMPORT_PROTECTED = set(BOT_VISIT_KEYS) | {"tips"}
-# Поля, которые офис вправе поправить импортом ПОСЛЕ визита (через якорь по дате
-# выезда). Сама «Дата выезда» — якорь и ставится только ботом; наводки — только бот.
-OFFICE_EDIT_KEYS = set(BOT_VISIT_KEYS) - {"visit_date"}
+_exchange_registry_missing = _exchange_registry_keys - set(BY_KEY)
+if _exchange_registry_missing:
+    raise RuntimeError(
+        "data exchange contract references unknown registry keys: "
+        + ", ".join(sorted(_exchange_registry_missing))
+    )
 
 
 # Версия данных: монотонный счётчик, растёт при ЛЮБОЙ записи в clients. Нужен для
@@ -171,7 +199,15 @@ def _decode_office_edits(row) -> dict:
         value = str(value).strip()
         if not value:
             continue
-        if key in BOT_DROPDOWN_KEYS and value not in (BY_KEY[key].options or []):
+        option_key = (
+            OFFICE_RESULT_SOURCE_KEY
+            if key == OFFICE_RESULT_SNAPSHOT_KEY
+            else key
+        )
+        if (
+            option_key in BOT_DROPDOWN_KEYS
+            or option_key == OFFICE_RESULT_SOURCE_KEY
+        ) and value not in (BY_KEY[option_key].options or []):
             continue
         out[key] = value
     return out
@@ -394,6 +430,45 @@ def init_db() -> None:
               value TEXT
             )
         """)
+        # Доверенная граница внешнего импорта. HTTP-клиент не может создавать
+        # эти записи: exact proof заранее регистрируется локальным/root CLI.
+        # Head переживает application reset и не даёт переиграть старый master.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS import_receipts (
+              proof_digest TEXT PRIMARY KEY,
+              source_kind TEXT NOT NULL,
+              source_id TEXT NOT NULL,
+              sequence INTEGER NOT NULL,
+              proof_json TEXT NOT NULL,
+              status TEXT NOT NULL,
+              registered_at TEXT NOT NULL,
+              expires_at TEXT NOT NULL,
+              consumed_at TEXT,
+              result_json TEXT,
+              result_digest TEXT,
+              UNIQUE(source_id, sequence)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS import_source_heads (
+              source_id TEXT PRIMARY KEY,
+              sequence INTEGER NOT NULL,
+              proof_digest TEXT NOT NULL,
+              imported_at TEXT NOT NULL
+            )
+        """)
+        receipt_cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(import_receipts)")
+        }
+        if "result_digest" not in receipt_cols:
+            conn.execute(
+                "ALTER TABLE import_receipts ADD COLUMN result_digest TEXT"
+            )
+        if "expires_at" not in receipt_cols:
+            conn.execute(
+                "ALTER TABLE import_receipts ADD COLUMN expires_at TEXT"
+            )
         # Руководители (дайджест). Роль задаётся из пульта: telegram_id →
         # набор городов (ярлык-подпись, свободный ввод) + набор сотрудников
         # (ФИО из clients.responsible — источник правды «кого показывать»).
@@ -1869,19 +1944,32 @@ def _norm_title(s) -> str:
     return t.rstrip(":;*.")
 
 
-def _pick_sheet(wb, title_to_key):
-    """Лист «Портфели» или тот, где больше всего узнаваемых заголовков (для реальных файлов)."""
-    if "Портфели" in wb.sheetnames:
-        return wb["Портфели"]
-    best, best_n = wb.active, -1
-    for name in wb.sheetnames:
-        ws = wb[name]
-        n = 0
-        for row in ws.iter_rows(min_row=1, max_row=10, values_only=True):
-            n = max(n, sum(1 for c in row if title_to_key.get(_norm_title(c))))
-        if n > best_n:
-            best_n, best = n, ws
-    return best
+def _canonical_contract_id(value) -> str:
+    """Канонический КД для duplicate preflight и SQLite lookup.
+
+    Calamine/openpyxl могут вернуть один Excel-КД как ``12345``, ``12345.0`` или
+    строку ``"12345.0"``. Все три формы обязаны попасть в один конфликтный домен;
+    буквенно-цифровые КД и значащие ведущие нули не переписываем.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    text = str(value).strip()
+    numeric_excel = re.fullmatch(r"([+-]?\d+)\.0+", text)
+    return numeric_excel.group(1) if numeric_excel else text
+
+
+def _pick_sheet(wb, _title_to_key):
+    """Production import accepts only the contract-bound portfolio sheet."""
+    if WORKBOOK_SHEET_NAME not in wb.sheetnames:
+        raise ValueError(
+            f"обязательный лист «{WORKBOOK_SHEET_NAME}» отсутствует; "
+            "fallback на похожий лист запрещён"
+        )
+    return wb[WORKBOOK_SHEET_NAME]
 
 
 def write_xlsx(path: str, rows: list[dict]) -> str:
@@ -1978,8 +2066,19 @@ def enrichment_rows() -> list[dict]:
 def export_schema() -> list[dict]:
     """Схема колонок для писателя xlsx на стороне пульта: блоки, заголовки,
     типы (дата/число). Единственный источник правды — fields.FIELDS."""
-    return [{"key": f.key, "title": f.title, "block": f.block, "source": f.source,
-             "date": f.key in DATE_KEYS, "num": f.key in NUM_KEYS} for f in FIELDS]
+    schema = [
+        {
+            "key": f.key,
+            "title": f.title,
+            "block": f.block,
+            "source": f.source,
+            "date": f.key in DATE_KEYS,
+            "num": f.key in NUM_KEYS,
+        }
+        for f in FIELDS
+    ]
+    verify_export_schema(schema)
+    return schema
 
 
 def export_xlsx(path: str) -> str:
@@ -1988,26 +2087,43 @@ def export_xlsx(path: str) -> str:
 
 
 def pick_grid(sheets: list[dict]) -> list[list]:
-    """Выбрать лист из [{name, grid}]: «Портфели», иначе тот, где больше всего
-    узнаваемых заголовков. Зеркало _pick_sheet для JSON-гридов из пульта."""
-    if not sheets:
-        return []
-    for s in sheets:
-        if s.get("name") == "Портфели":
-            return s.get("grid") or []
-    title_to_key = {_norm_title(f.title): f.key for f in FIELDS}
-    best, best_n = sheets[0].get("grid") or [], -1
-    for s in sheets:
-        grid = s.get("grid") or []
-        n = 0
-        for row in grid[:10]:
-            n = max(n, sum(1 for c in row if title_to_key.get(_norm_title(c))))
-        if n > best_n:
-            best_n, best = n, grid
-    return best
+    """Select only the exact contract-bound sheet from JSON workbook grids."""
+    if not isinstance(sheets, list):
+        raise ValueError("sheets должен быть списком листов")
+    names = [
+        str(sheet.get("name"))
+        for sheet in sheets
+        if isinstance(sheet, dict) and sheet.get("name") is not None
+    ]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(
+            "книга содержит повторяющиеся имена листов: "
+            + ", ".join(duplicates)
+        )
+    for sheet in sheets:
+        if (
+            isinstance(sheet, dict)
+            and sheet.get("name") == WORKBOOK_SHEET_NAME
+        ):
+            grid = sheet.get("grid")
+            if not isinstance(grid, list):
+                raise ValueError(
+                    f"лист «{WORKBOOK_SHEET_NAME}» не содержит grid"
+                )
+            return grid
+    raise ValueError(
+        f"обязательный лист «{WORKBOOK_SHEET_NAME}» отсутствует; "
+        "fallback на похожий лист запрещён"
+    )
 
 
-def import_xlsx(path: str) -> dict:
+def import_xlsx(
+    path: str,
+    *,
+    source_kind: str | None = None,
+    source_proof: dict | None = None,
+) -> dict:
     """Легаси-обёртка: открыть файл openpyxl-ом и прогнать через import_grid.
     Пульт этим путём больше не ходит — парсит файл сам (calamine) и шлёт грид
     в POST /admin/import.json."""
@@ -2016,12 +2132,303 @@ def import_xlsx(path: str) -> dict:
     title_to_key = {_norm_title(f.title): f.key for f in FIELDS}
     wb = load_workbook(path, read_only=True, data_only=True)
     ws = _pick_sheet(wb, title_to_key)
-    return import_grid(list(ws.iter_rows(values_only=True)))
+    return import_grid(
+        list(ws.iter_rows(values_only=True)),
+        source_kind=source_kind,
+        source_proof=source_proof,
+    )
 
 
-def import_grid(rows: list[list]) -> dict:
-    """Ядро импорта: грид значений листа, источник любой (openpyxl на сервере,
-    calamine в пульте). Колонки матчатся по заголовку — переживает «сдвиг влево».
+def _canonical_json(value) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _json_digest(value) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def register_import_authorization(
+    proof: dict,
+    *,
+    source_kind: str,
+    ttl_hours: int = 24,
+) -> dict:
+    """Register one exact import proof through a local/root-only boundary.
+
+    There is deliberately no HTTP route for this operation. The registry
+    operator (or a later thin orchestrator) must first validate the external
+    publication/test scope and invoke the CLI next to the server data store.
+    """
+
+    if isinstance(ttl_hours, bool) or not isinstance(ttl_hours, int):
+        raise ExchangeContractError("authorization ttl_hours must be integer")
+    if ttl_hours < 1 or ttl_hours > 168:
+        raise ExchangeContractError(
+            "authorization ttl_hours must be between 1 and 168"
+        )
+    verified = validate_import_source_proof_record(
+        proof,
+        source_kind=source_kind,
+    )
+    now = datetime.now().astimezone()
+    expires = now + timedelta(hours=ttl_hours)
+    digest = verified["digest"]
+    source_id = verified["source_id"]
+    sequence = verified["sequence"]
+    proof_json = _canonical_json(proof)
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT * FROM import_receipts WHERE proof_digest=?",
+            (digest,),
+        ).fetchone()
+        if existing is not None:
+            if (
+                existing["source_kind"] != source_kind
+                or existing["source_id"] != source_id
+                or int(existing["sequence"]) != sequence
+                or existing["proof_json"] != proof_json
+            ):
+                raise ExchangeContractError(
+                    "stored import authorization disagrees with exact proof"
+                )
+            conn.commit()
+            return {
+                "proof_digest": digest,
+                "source_kind": source_kind,
+                "source_id": source_id,
+                "sequence": sequence,
+                "status": existing["status"],
+                "expires_at": existing["expires_at"],
+                "idempotent": True,
+            }
+        collision = conn.execute(
+            "SELECT proof_digest FROM import_receipts "
+            "WHERE source_id=? AND sequence=?",
+            (source_id, sequence),
+        ).fetchone()
+        if collision is not None:
+            raise ExchangeContractError(
+                "another receipt already owns this source sequence"
+            )
+        head = conn.execute(
+            "SELECT sequence, proof_digest FROM import_source_heads "
+            "WHERE source_id=?",
+            (source_id,),
+        ).fetchone()
+        if head is not None and sequence <= int(head["sequence"]):
+            raise ExchangeContractError(
+                "authorization is not newer than the imported source head"
+            )
+        conn.execute(
+            "INSERT INTO import_receipts "
+            "(proof_digest, source_kind, source_id, sequence, proof_json, "
+            "status, registered_at, expires_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (
+                digest,
+                source_kind,
+                source_id,
+                sequence,
+                proof_json,
+                "pending",
+                now.isoformat(timespec="microseconds"),
+                expires.isoformat(timespec="microseconds"),
+            ),
+        )
+        conn.commit()
+    return {
+        "proof_digest": digest,
+        "source_kind": source_kind,
+        "source_id": source_id,
+        "sequence": sequence,
+        "status": "pending",
+        "expires_at": expires.isoformat(timespec="microseconds"),
+        "idempotent": False,
+    }
+
+
+def import_authorization_status(proof_digest: str) -> dict | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT proof_digest, source_kind, source_id, sequence, status, "
+            "registered_at, expires_at, consumed_at, result_digest "
+            "FROM import_receipts WHERE proof_digest=?",
+            (str(proof_digest or "").strip(),),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def clear_pending_import_authorizations() -> int:
+    """Invalidate pre-reset permissions while preserving consumed audit/head."""
+
+    with connect() as conn:
+        count = conn.execute(
+            "DELETE FROM import_receipts WHERE status='pending'"
+        ).rowcount
+        conn.commit()
+    return count
+
+
+def _authorized_import_state(
+    conn: sqlite3.Connection,
+    verified_source: dict,
+    *,
+    source_kind: str,
+) -> dict | None:
+    digest = verified_source["digest"]
+    row = conn.execute(
+        "SELECT * FROM import_receipts WHERE proof_digest=?",
+        (digest,),
+    ).fetchone()
+    if row is None:
+        raise ExchangeContractError(
+            "source proof is not pre-registered by the trusted server registrar"
+        )
+    if (
+        row["source_kind"] != source_kind
+        or row["source_id"] != verified_source["source_id"]
+        or int(row["sequence"]) != verified_source["sequence"]
+    ):
+        raise ExchangeContractError(
+            "registered authorization metadata disagrees with source proof"
+        )
+    if row["proof_json"] != _canonical_json(verified_source["proof"]):
+        raise ExchangeContractError(
+            "registered authorization bytes disagree with source proof"
+        )
+    head = conn.execute(
+        "SELECT sequence, proof_digest FROM import_source_heads "
+        "WHERE source_id=?",
+        (verified_source["source_id"],),
+    ).fetchone()
+    if head is not None:
+        head_sequence = int(head["sequence"])
+        if verified_source["sequence"] < head_sequence:
+            raise ExchangeContractError(
+                "source proof is older than the imported source head"
+            )
+        if (
+            verified_source["sequence"] == head_sequence
+            and head["proof_digest"] != digest
+        ):
+            raise ExchangeContractError(
+                "source sequence is already owned by another receipt"
+            )
+    if row["status"] == "consumed":
+        if (
+            head is None
+            or int(head["sequence"]) != verified_source["sequence"]
+            or head["proof_digest"] != digest
+        ):
+            raise ExchangeContractError(
+                "consumed receipt is not the current source head"
+            )
+        try:
+            stored = json.loads(row["result_json"] or "")
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ExchangeContractError(
+                "consumed import receipt has no trusted result"
+            ) from exc
+        if (
+            not isinstance(stored, dict)
+            or row["result_digest"] != _json_digest(stored)
+        ):
+            raise ExchangeContractError(
+                "consumed import result digest is invalid"
+            )
+        replay = dict(stored)
+        replay["idempotent_replay"] = True
+        replay["original_result"] = {
+            key: stored.get(key)
+            for key in ("inserted", "updated", "office_cells")
+        }
+        for key in (
+            "inserted",
+            "updated",
+            "office_cells",
+            "office_contracts",
+            "protected_cells",
+            "protected_contracts",
+        ):
+            if key in replay:
+                replay[key] = 0
+        return replay
+    if row["status"] != "pending":
+        raise ExchangeContractError("import authorization is not pending")
+    try:
+        expires_at = datetime.fromisoformat(str(row["expires_at"]))
+    except (TypeError, ValueError) as exc:
+        raise ExchangeContractError(
+            "import authorization expiry is invalid"
+        ) from exc
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.astimezone()
+    if datetime.now().astimezone() >= expires_at:
+        raise ExchangeContractError("import authorization has expired")
+    if head is not None:
+        if verified_source["sequence"] == int(head["sequence"]):
+            raise ExchangeContractError(
+                "source sequence is already owned by another receipt"
+            )
+    return None
+
+
+def _consume_import_authorization(
+    conn: sqlite3.Connection,
+    verified_source: dict,
+    report: dict,
+) -> None:
+    now = datetime.now().astimezone().isoformat(timespec="microseconds")
+    result_json = _canonical_json(report)
+    updated = conn.execute(
+        "UPDATE import_receipts SET status='consumed', consumed_at=?, "
+        "result_json=?, result_digest=? "
+        "WHERE proof_digest=? AND status='pending'",
+        (
+            now,
+            result_json,
+            _json_digest(report),
+            verified_source["digest"],
+        ),
+    ).rowcount
+    if updated != 1:
+        raise ExchangeContractError(
+            "import authorization was consumed concurrently"
+        )
+    conn.execute(
+        "INSERT INTO import_source_heads "
+        "(source_id, sequence, proof_digest, imported_at) VALUES (?,?,?,?) "
+        "ON CONFLICT(source_id) DO UPDATE SET "
+        "sequence=excluded.sequence, proof_digest=excluded.proof_digest, "
+        "imported_at=excluded.imported_at "
+        "WHERE excluded.sequence > import_source_heads.sequence",
+        (
+            verified_source["source_id"],
+            verified_source["sequence"],
+            verified_source["digest"],
+            now,
+        ),
+    )
+
+
+def import_grid(
+    rows: list[list],
+    *,
+    source_kind: str | None = None,
+    source_proof: dict | None = None,
+    require_source_proof: bool = False,
+) -> dict:
+    """Ядро импорта опубликованного master/test subset.
+
+    Источник обязателен и проверяется до разбора/записи. Личные книги сюда не
+    допускаются: их обмен с master выполняет только :mod:`registry_cycle`.
+    Колонки матчатся по заголовку — переживает «сдвиг влево».
     Upsert: для существующих КД обновляем только пришедшие поля, не затирая
     назначение/визиты/фото.
 
@@ -2031,11 +2438,12 @@ def import_grid(rows: list[list]) -> dict:
     призраки старых начислений (эвакуация, ДТП…), и сумма статей расходилась с
     «долгом всего». Колонки, которых в файле нет вообще, по-прежнему не трогаем.
 
-    Поля визита договоров с завершённым визитом бота проходят через якорный шлюз
-    (сотрудники дописывают в реестрах и в офисе — эта информация должна попадать
-    в бот, но нельзя дать устаревшему файлу затереть результат выездника):
+    Поля визита договоров с завершённым визитом бота проходят через якорный шлюз:
       * якорь — «Дата выезда» строки файла совпадает с датой визита бота. Дату
-        пишет в файл только обогащение, значит файл ВИДЕЛ результат бота;
+        пишет в personal только обогащение; затем registry_cycle публикует её в
+        master, значит опубликованный master ВИДЕЛ результат бота;
+      * «Общий результат» reverse-map-ится во внутренний call_status;
+        «Статус звонка» и «Комментарий звонка» никогда не становятся оверлеем;
       * отличие принимается как офисная правка, только если значение НЕ известно
         журналу visit_value_log (эхо прежнего снимка — файл, обогащённый между
         визитами, не должен откатывать повторный выезд), не является сигнатурой
@@ -2046,31 +2454,75 @@ def import_grid(rows: list[list]) -> dict:
         снимок bot_visit_data не меняется никогда;
       * без якоря (старый файл, мусорная дата) — как раньше: всё выбрасывается.
 
-    Повтор одного КД сначала сводится в одну логическую запись. Дополняющие друг
-    друга строки разрешены, одинаковые значения идемпотентны. Два разных
-    непустых значения одного поля для того же КД — блокирующий конфликт всего
-    файла: порядок строк не должен молча выбирать победителя (last-write-wins).
+    Любой повтор канонического КД блокирует весь файл до записи, включая
+    одинаковые/дополняющие строки и числовые эквиваленты. UNIQUE(contract_id) не
+    умеет представить две реальные строки master, поэтому неявное слияние
+    запрещено; коллизия уходит в отчёт/карантин для ручного решения.
 
     Возвращает отчёт — чтобы было видно ТОЧНО, что вошло:
-    {total_rows, inserted, updated, skipped_no_id, duplicates, unknown_columns,
+    {source_kind, total_rows, inserted, updated, skipped_no_id, duplicates,
+    unknown_columns,
     protected_cells, protected_contracts, office_cells, office_contracts,
     office_applied, blocked, duplicate_conflicts}. protected_* — отклонено
     шлюзом (устаревший файл/мусор);
     office_* — принятые офисные правки, office_applied = {КД: {поле: значение}}
     (пульту — чтобы обогащение сразу писало свежепринятые значения).
     """
-    report = {"total_rows": 0, "inserted": 0, "updated": 0,
+    report = {"source_kind": source_kind,
+              "total_rows": 0, "inserted": 0, "updated": 0,
               "skipped_no_id": 0, "duplicates": 0, "unknown_columns": [],
               "protected_cells": 0, "protected_contracts": 0,
               "office_cells": 0, "office_contracts": 0, "office_applied": {},
+              "isolated_call_cells": 0, "isolated_call_contracts": 0,
               # Строки без ответственного попадают в базу, но невидимы выезднику и не
               # входят ни в один отчёт руководителя. Раньше это не показывалось нигде,
               # поэтому 1970 договоров из 5267 «потерялись» молча.
               "no_responsible": 0,
-              "blocked": False, "duplicate_conflicts": []}
+              "source_proof_digest": None,
+              "blocked": False, "duplicate_conflicts": [],
+              "quarantined_contracts": []}
 
-    title_to_key = {_norm_title(f.title): f.key for f in FIELDS}
+    if source_kind not in IMPORT_SOURCE_KINDS:
+        report["blocked"] = True
+        report["error"] = (
+            "импорт заблокирован: обязателен явный source_kind "
+            f"из {sorted(IMPORT_SOURCE_KINDS)}; личные реестры импортировать "
+            "в hardbot запрещено"
+        )
+        return report
+
+    if source_proof is None and not require_source_proof:
+        # Trusted in-process fixtures/dev tools have no transport boundary.
+        # Production admin HTTP always sets require_source_proof=True.
+        verified_source = {"digest": None, "scope": None}
+    else:
+        try:
+            verified_source = validate_import_source_proof(
+                source_proof,
+                source_kind=source_kind,
+                grid=rows,
+            )
+        except ExchangeContractError as exc:
+            report["blocked"] = True
+            report["error"] = f"импорт заблокирован: {exc}"
+            return report
+        report["source_proof_digest"] = verified_source["digest"]
+
+    schema = export_schema()
+    title_to_key = {_norm_title(f["title"]): f["key"] for f in schema}
+    for alias_key, aliases in WORKBOOK_HEADER_ALIASES.items():
+        for alias in aliases:
+            normalized = _norm_title(alias)
+            prior = title_to_key.get(normalized)
+            if prior is not None and prior != alias_key:
+                raise ExchangeContractError(
+                    "workbook header alias collides after normalization: "
+                    f"{alias!r} -> {prior}/{alias_key}"
+                )
+            title_to_key[normalized] = alias_key
     if not rows or len(rows) < 2:
+        report["blocked"] = True
+        report["error"] = "импорт заблокирован: книга не содержит данных и заголовков"
         return report
 
     # Авто-поиск строки заголовков: реальный файл может иметь иную/сдвинутую шапку.
@@ -2079,7 +2531,7 @@ def import_grid(rows: list[list]) -> dict:
     # должен импортироваться; несколько опечаток в незначащих заголовках не должны
     # тихо обнулять весь импорт (было: best_n < 3 → return report без объяснений).
     best_h, col_keys, best_n, best_has_id = 0, [], -1, False
-    for i, row in enumerate(rows[:10]):
+    for i, row in enumerate(rows[:WORKBOOK_HEADER_SEARCH_ROWS]):
         keys = [title_to_key.get(_norm_title(c)) for c in row]
         n = sum(1 for k in keys if k)
         has_id = "contract_id" in keys
@@ -2088,31 +2540,239 @@ def import_grid(rows: list[list]) -> dict:
     if not best_has_id:
         # Без колонки-ключа сопоставить строки нечем — не тихий ноль, а понятная причина
         # + что реально было в лучшей из первых 10 строк, чтобы диагностировать заголовок.
-        report["error"] = "не нашли колонку-ключ «Номер КД / ID» ни в одной из первых 10 строк"
+        report["blocked"] = True
+        report["error"] = (
+            f"импорт заблокирован: не нашли колонку-ключ "
+            f"«{BY_KEY[WORKBOOK_CONTRACT_KEY].title}» ни в одной из первых "
+            f"{WORKBOOK_HEADER_SEARCH_ROWS} строк"
+        )
         report["header_row_tried"] = best_h + 1
         report["header_sample"] = [str(c).strip() for c in rows[best_h] if c not in (None, "")][:20]
         return report
-    report["unknown_columns"] = [str(c).strip() for c, k in zip(rows[best_h], col_keys) if c and k is None]
+    recognized_positions: dict[str, list[int]] = {}
+    normalized_title_positions: dict[str, list[int]] = {}
+    normalized_title_samples: dict[str, str] = {}
+    for column, key in enumerate(col_keys, start=1):
+        if key:
+            recognized_positions.setdefault(key, []).append(column)
+        raw_title = rows[best_h][column - 1]
+        if raw_title not in (None, ""):
+            normalized_title = _norm_title(raw_title)
+            if normalized_title:
+                normalized_title_positions.setdefault(
+                    normalized_title, []
+                ).append(column)
+                normalized_title_samples.setdefault(
+                    normalized_title, str(raw_title).strip()
+                )
+    duplicate_headers = {
+        key: positions
+        for key, positions in recognized_positions.items()
+        if len(positions) > 1
+    }
+    duplicate_titles = {
+        normalized_title_samples[title]: positions
+        for title, positions in normalized_title_positions.items()
+        if len(positions) > 1
+    }
+    if duplicate_headers or duplicate_titles:
+        report["blocked"] = True
+        report["duplicate_headers"] = duplicate_headers
+        report["duplicate_titles"] = duplicate_titles
+        details = [
+            f"{key} ({','.join(map(str, columns))})"
+            for key, columns in sorted(duplicate_headers.items())
+        ]
+        details.extend(
+            f"{title!r} ({','.join(map(str, columns))})"
+            for title, columns in sorted(duplicate_titles.items())
+        )
+        report["error"] = (
+            "импорт заблокирован: заголовок дублируется или один логический "
+            "ключ распознан в нескольких колонках: "
+            + ", ".join(details)
+        )
+        return report
+
+    present_keys = {key for key in col_keys if key}
+    required_keys = (
+        {item["key"] for item in schema}
+        if source_kind == IMPORT_SOURCE_PUBLISHED_MASTER
+        else set(WORKBOOK_TEST_SUBSET_REQUIRED_KEYS)
+    )
+    missing_headers = sorted(required_keys - present_keys)
+    if missing_headers:
+        report["blocked"] = True
+        report["missing_headers"] = missing_headers
+        report["error"] = (
+            "импорт заблокирован: отсутствуют обязательные колонки: "
+            + ", ".join(BY_KEY[key].title for key in missing_headers)
+        )
+        return report
+
+    allowed_ignored_titles = {
+        _norm_title(title) for title in WORKBOOK_ALLOWED_IGNORED_HEADERS
+    }
+    allowed_ignored_patterns = tuple(
+        re.compile(pattern)
+        for pattern in WORKBOOK_ALLOWED_IGNORED_HEADER_PATTERNS
+    )
+    ignored_columns: list[str] = []
+    unknown_columns: list[str] = []
+    for cell, key in zip(rows[best_h], col_keys):
+        if cell in (None, "") or key is not None:
+            continue
+        title = str(cell).strip()
+        if not title:
+            continue
+        if (
+            _norm_title(title) in allowed_ignored_titles
+            or any(pattern.fullmatch(title) for pattern in allowed_ignored_patterns)
+        ):
+            ignored_columns.append(title)
+        else:
+            unknown_columns.append(title)
+    report["ignored_columns"] = ignored_columns
+    report["unknown_columns"] = unknown_columns
+    if report["unknown_columns"]:
+        report["blocked"] = True
+        report["error"] = (
+            "импорт заблокирован: незнакомые заголовки требуют явного alias "
+            "или новой версии контракта: "
+            + ", ".join(report["unknown_columns"][:20])
+        )
+        return report
+
+    # У production master сразу после заголовка находится строка профилей
+    # («сх» / «хард» / «софт»). Это часть формы книги, а не клиент. Раньше
+    # эвристика знала только два тега и реальная строка с «софт» превращалась
+    # в клиента contract_id='сх'. Теперь строка распознаётся только в
+    # контрактной позиции и сверяется по каждой колонке до любых записей.
+    type_row_index = best_h + WORKBOOK_TYPE_ROW_OFFSET
+    type_row = rows[type_row_index] if type_row_index < len(rows) else []
+    allowed_type_tags = {
+        _norm_title(tag) for tag in WORKBOOK_TYPE_ROW_TAGS
+    }
+    contract_column = col_keys.index(WORKBOOK_CONTRACT_KEY)
+    contract_type_tag = (
+        _norm_title(type_row[contract_column])
+        if contract_column < len(type_row)
+        else ""
+    )
+    type_row_claimed = contract_type_tag in allowed_type_tags
+    if (
+        source_kind == IMPORT_SOURCE_PUBLISHED_MASTER
+        and not type_row_claimed
+    ):
+        report["blocked"] = True
+        report["type_row"] = {
+            "row": type_row_index + 1,
+            "status": "missing_or_malformed",
+        }
+        report["error"] = (
+            "импорт заблокирован: опубликованный master не содержит "
+            f"контрактную строку типов сразу после заголовка "
+            f"(ожидалась строка {type_row_index + 1})"
+        )
+        return report
+
+    type_row_to_skip: int | None = None
+    if type_row_claimed:
+        schema_by_key = {item["key"]: item for item in schema}
+        allowed_blank_keys = set(WORKBOOK_TYPE_ROW_ALLOWED_BLANK_KEYS)
+        type_mismatches: list[dict[str, object]] = []
+        for column, (header_cell, key) in enumerate(
+            zip(rows[best_h], col_keys),
+            start=1,
+        ):
+            raw_tag = (
+                type_row[column - 1]
+                if column - 1 < len(type_row)
+                else None
+            )
+            actual_tag = _norm_title(raw_tag)
+            if key is not None:
+                expected_tag = _norm_title(schema_by_key[key]["source"])
+                if (
+                    actual_tag == expected_tag
+                    or (not actual_tag and key in allowed_blank_keys)
+                ):
+                    continue
+                type_mismatches.append(
+                    {
+                        "column": column,
+                        "key": key,
+                        "actual": str(raw_tag or "").strip(),
+                        "expected": schema_by_key[key]["source"],
+                    }
+                )
+                continue
+            if not _norm_title(header_cell):
+                if actual_tag:
+                    type_mismatches.append(
+                        {
+                            "column": column,
+                            "key": None,
+                            "actual": str(raw_tag or "").strip(),
+                            "expected": "empty (header is empty)",
+                        }
+                    )
+                continue
+            if actual_tag and actual_tag not in allowed_type_tags:
+                type_mismatches.append(
+                    {
+                        "column": column,
+                        "key": None,
+                        "actual": str(raw_tag or "").strip(),
+                        "expected": sorted(WORKBOOK_TYPE_ROW_TAGS),
+                    }
+                )
+        if type_mismatches:
+            report["blocked"] = True
+            report["type_row"] = {
+                "row": type_row_index + 1,
+                "status": "mismatch",
+                "mismatches": type_mismatches[:20],
+            }
+            report["error"] = (
+                "импорт заблокирован: строка типов workbook не совпадает "
+                "с versioned контрактом"
+            )
+            return report
+        type_row_to_skip = type_row_index
+        report["type_row"] = {
+            "row": type_row_index + 1,
+            "status": "validated",
+        }
+    else:
+        report["type_row"] = {"row": None, "status": "absent"}
+
     # Колонки разбивки, которые реально есть в этом файле → пустая ячейка = ноль.
     owned = debt.SOURCE_OWNED.intersection(k for k in col_keys if k)
 
     # Сначала разобрать ВЕСЬ файл в памяти. Это обязательный preflight: при
-    # конфликтующем дубле не должна успеть записаться ни одна предыдущая строка.
-    # Пустые SOURCE_OWNED применяем после сведения всех строк КД, иначе
-    # дополняющая строка «КД + ещё одна статья» случайно обнулит статьи первой.
+    # повторе КД не должна успеть записаться ни одна предыдущая строка.
     grouped: dict[str, dict] = {}
     duplicate_conflicts: dict[str, set[str]] = {}
-    for raw in rows[best_h + 1:]:
-        if raw is None or all(v is None for v in raw):
+    duplicate_rows: dict[str, list[int]] = {}
+    first_rows: dict[str, int] = {}
+    for offset, raw in enumerate(rows[best_h + 1:], start=best_h + 2):
+        if (
+            type_row_to_skip is not None
+            and offset == type_row_to_skip + 1
+        ):
             continue
-        nonempty = [str(v).strip().lower() for v in raw if v is not None]
-        if nonempty and all(v in ("сх", "хард") for v in nonempty):
+        if raw is None or all(v is None for v in raw):
             continue
         report["total_rows"] += 1
         data = {}
         for key, val in zip(col_keys, raw):
             if key and val is not None:
-                if isinstance(val, datetime):
+                if key == "contract_id":
+                    canonical = _canonical_contract_id(val)
+                    if canonical:
+                        data[key] = canonical
+                elif isinstance(val, datetime):
                     data[key] = val.strftime("%Y-%m-%d")
                 elif isinstance(val, date):
                     data[key] = val.isoformat()
@@ -2126,26 +2786,72 @@ def import_grid(rows: list[list]) -> dict:
             continue
         if cid not in grouped:
             grouped[cid] = data
+            first_rows[cid] = offset
             continue
         report["duplicates"] += 1
-        merged = grouped[cid]
+        duplicate_rows.setdefault(cid, [first_rows[cid]]).append(offset)
+        first = grouped[cid]
         for key, value in data.items():
-            if key in merged and merged[key] != value:
+            if key in first and first[key] != value:
                 duplicate_conflicts.setdefault(cid, set()).add(key)
-            else:
-                merged[key] = value
 
-    if duplicate_conflicts:
+    if duplicate_rows:
         report["blocked"] = True
         report["error"] = (
-            "импорт заблокирован: один КД содержит разные непустые значения "
-            "одного поля; исправьте источник, порядок строк победителя не выбирает"
+            "импорт заблокирован: опубликованный master содержит повтор "
+            "канонического КД; hardbot не сливает одинаковые, дополняющие или "
+            "конфликтующие строки — исправьте источник и опубликуйте заново"
         )
         report["duplicate_conflicts"] = [
-            {"contract_id": cid, "fields": sorted(fields)}
-            for cid, fields in sorted(duplicate_conflicts.items())
+            {
+                "contract_id": cid,
+                "rows": duplicate_rows[cid],
+                "fields": sorted(duplicate_conflicts.get(cid, set())),
+            }
+            for cid in sorted(duplicate_rows)
         ]
+        report["quarantined_contracts"] = sorted(duplicate_rows)
         return report
+
+    if (
+        source_kind == IMPORT_SOURCE_TEST_SUBSET
+        and verified_source["scope"] is not None
+    ):
+        raw_scope = verified_source["scope"] or {}
+        expected_scope: dict[str, str] = {}
+        for raw_contract_id, responsible in raw_scope.items():
+            contract_id = _canonical_contract_id(raw_contract_id)
+            if not contract_id or contract_id in expected_scope:
+                report["blocked"] = True
+                report["error"] = (
+                    "импорт заблокирован: test-subset proof имеет неоднозначные "
+                    "канонические номера КД"
+                )
+                return report
+            expected_scope[contract_id] = responsible
+        actual_scope = {
+            contract_id: str(data.get(WORKBOOK_RESPONSIBLE_KEY) or "").strip()
+            for contract_id, data in grouped.items()
+        }
+        if actual_scope != expected_scope:
+            missing = sorted(set(expected_scope) - set(actual_scope))
+            extra = sorted(set(actual_scope) - set(expected_scope))
+            owner_mismatches = sorted(
+                contract_id
+                for contract_id in set(actual_scope) & set(expected_scope)
+                if actual_scope[contract_id] != expected_scope[contract_id]
+            )
+            report["blocked"] = True
+            report["scope_mismatch"] = {
+                "missing_contract_ids": missing,
+                "extra_contract_ids": extra,
+                "owner_mismatch_contract_ids": owner_mismatches,
+            }
+            report["error"] = (
+                "импорт заблокирован: строки/ответственные test-subset не "
+                "совпадают с exact утверждённым scope"
+            )
+            return report
 
     # Для SOURCE_OWNED пустота во всём наборе строк КД означает погашение.
     # Колонки, отсутствующей в файле целиком, в ``owned`` нет и мы её не трогаем.
@@ -2154,6 +2860,22 @@ def import_grid(rows: list[list]) -> dict:
             data[key] = None
 
     with connect() as conn:
+        if require_source_proof:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                replay = _authorized_import_state(
+                    conn,
+                    verified_source,
+                    source_kind=source_kind,
+                )
+            except ExchangeContractError as exc:
+                conn.rollback()
+                report["blocked"] = True
+                report["error"] = f"импорт заблокирован: {exc}"
+                return report
+            if replay is not None:
+                conn.rollback()
+                return replay
         existing = {r["contract_id"]: r for r in conn.execute(
             "SELECT contract_id, client, birth_date, responsible, bot_visit_at, "
             "bot_visit_data, office_edit_data, visit_value_log FROM clients")}
@@ -2166,14 +2888,14 @@ def import_grid(rows: list[list]) -> dict:
                 person_map.setdefault(
                     (r["client"] or "", r["birth_date"] or "",
                      r["responsible"] or ""), []).append(r["contract_id"])
-        # Дубли КД в одном файле и договоры одного человека: накапливаем принятые
-        # правки/журнал, чтобы следующая строка видела свежее состояние (row0 из
-        # префетча внутри транзакции стар).
+        # Договоры одного человека: накапливаем принятые правки/журнал, чтобы
+        # следующий sibling видел свежее состояние (row0 из префетча стар).
         fresh_overlays: dict[str, dict] = {}
         fresh_logs: dict[str, dict] = {}
         office_cids: set[str] = set()
         protected_cids: set[str] = set()
-        # Владелец каждого уникального КД после сведения дополняющих строк.
+        isolated_call_cids: set[str] = set()
+        # Владелец каждого уникального КД после duplicate preflight.
         owners: dict[str, str] = {}
         for cid, data in grouped.items():
             is_update = cid in existing
@@ -2186,45 +2908,74 @@ def import_grid(rows: list[list]) -> dict:
             # видел результат бота, и отличия — офисная правка, а не старая копия.
             row0 = existing.get(cid)
             if row0 is not None and row0["bot_visit_data"]:
-                snapshot0 = _decode_bot_snapshot(row0) or {}
                 merged = _merged_visit(row0)
                 if merged:
                     merged.update(fresh_overlays.get(cid) or {})
                 known = fresh_logs.get(cid) or _decode_value_log(row0)
-                anchor_ok = (merged is not None
-                             and _as_date(data.get("visit_date")) is not None
-                             and _as_date(data.get("visit_date"))
+                anchor_value = data.pop("visit_date", None)
+                anchor_ok = (
+                             source_kind == IMPORT_SOURCE_PUBLISHED_MASTER
+                             and merged is not None
+                             and _as_date(anchor_value) is not None
+                             and _as_date(anchor_value)
                              == _as_date(merged.get("visit_date")))
                 office: dict = {}
                 rejected = 0
-                for key in BOT_IMPORT_PROTECTED:
-                    if key == "contract_id":
-                        continue
-                    sval = str(data.pop(key, None) or "").strip()
+                # Call-only колонки master не являются результатом визита. Для
+                # завершённого визита они не попадают ни в raw upsert, ни в overlay.
+                for call_key in OFFICE_CALL_FIELDS:
+                    sval = str(data.pop(call_key, None) or "").strip()
+                    if sval:
+                        report["isolated_call_cells"] += 1
+                        isolated_call_cids.add(cid)
+
+                candidates = {
+                    key: data.pop(key, None)
+                    for key in OFFICE_DIRECT_EDIT_KEYS
+                }
+                # Для завершённого визита «Общий результат» тоже защищён якорем:
+                # до успешной проверки убираем его из обычного master-upsert.
+                candidates[OFFICE_RESULT_SNAPSHOT_KEY] = data.pop(
+                    OFFICE_RESULT_SOURCE_KEY,
+                    None,
+                )
+                for key, raw_value in candidates.items():
+                    sval = str(raw_value or "").strip()
                     if not sval:
                         continue                # пустота никогда не затирает
                     if not anchor_ok:
-                        rejected += 1           # старая копия/мусорная дата
+                        # test_subset никогда не является published-office
+                        # overlay, даже если дата случайно совпала. Для master
+                        # сюда также попадает старая копия/мусорная дата.
+                        rejected += 1
                         continue
-                    if key == "visit_date" or sval == str(merged.get(key) or ""):
+                    option_key = (
+                        OFFICE_RESULT_SOURCE_KEY
+                        if key == OFFICE_RESULT_SNAPSHOT_KEY
+                        else key
+                    )
+                    if (
+                        option_key in BOT_DROPDOWN_KEYS
+                        or option_key == OFFICE_RESULT_SOURCE_KEY
+                    ):
+                        canon = _canon_option(option_key, sval)
+                        if canon is None:
+                            rejected += 1       # мусор вроде CONSUMER не проходит
+                            continue
+                        sval = canon
+                    if sval == str(merged.get(key) or ""):
+                        if key == OFFICE_RESULT_SNAPSHOT_KEY:
+                            data[OFFICE_RESULT_SOURCE_KEY] = sval
                         continue                # эхо текущего состояния
                     if sval in known.get(key, ()):
                         continue                # эхо ПРЕЖНЕГО снимка/правки: файл
                                                 # обогащён между визитами — это не
                                                 # человек, откатывать нечего
-                    if key == "call_comment" and sval in (
-                            str(merged.get("visit_comment") or ""),
-                            str(snapshot0.get("visit_comment") or "")):
-                        continue                # сигнатура июльского яда: бот-текст
-                                                # в «звонке»; примешь — легализуешь
-                                                # и отключишь анти-яд обогащения
-                    if key in BOT_DROPDOWN_KEYS:
-                        canon = _canon_option(key, sval)
-                        if canon is None:
-                            rejected += 1       # мусор вроде CONSUMER не проходит
-                            continue
-                        sval = canon
+                    if key == OFFICE_RESULT_SNAPSHOT_KEY:
+                        data[OFFICE_RESULT_SOURCE_KEY] = sval
                     office[key] = sval
+                if anchor_value not in (None, "") and not anchor_ok:
+                    rejected += 1
                 if office:
                     pkey = (row0["client"] or "", row0["birth_date"] or "",
                             row0["responsible"] or "")
@@ -2273,9 +3024,12 @@ def import_grid(rows: list[list]) -> dict:
             report["updated" if is_update else "inserted"] += 1
         report["office_contracts"] = len(office_cids)        # договоры, не строки
         report["protected_contracts"] = len(protected_cids)
+        report["isolated_call_contracts"] = len(isolated_call_cids)
         # Считаем по итогу разбора всего файла, а не построчно: у одного договора в
         # реестре бывает несколько строк, и владелец может стоять в любой из них.
         report["no_responsible"] = sum(1 for owner in owners.values() if not owner)
+        if require_source_proof:
+            _consume_import_authorization(conn, verified_source, report)
         conn.commit()
     _bump_version()   # массовая запись реестра → инвалидируем кэш приоритета
     return report
@@ -2283,11 +3037,16 @@ def import_grid(rows: list[list]) -> dict:
 
 # Поля, которые заполняет ВЫЕЗД (форма миниаппа + служебные визита). Сбрасываются при
 # «очистке сессии», не трогая источник: долги, адрес, назначение (responsible), гео, период.
-VISIT_FILL_COLUMNS = [
-    "call_status", "contact_with", "who_at_address", "client_location",
-    "purpose_rf", "agreed_payment", "call_comment", "tips",
-    "visit_date", "visit_comment", "meeting_date", "overall_result", "reminder_date",
-]
+VISIT_FILL_COLUMNS = list(
+    dict.fromkeys(
+        (
+            *BOT_SNAPSHOT_KEYS,
+            "meeting_date",
+            OFFICE_RESULT_SOURCE_KEY,
+            "reminder_date",
+        )
+    )
+)
 
 
 def reset_visits() -> dict:

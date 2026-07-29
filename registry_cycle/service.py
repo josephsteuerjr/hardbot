@@ -16,7 +16,13 @@ from .planner import build_sync_plan
 from .reader import read_portfolio
 from .reporting import write_plan_reports
 from .rollover import resolve_rollover_month
-from .snapshot import SnapshotSet, capture_sources, load_snapshot
+from .snapshot import (
+    SnapshotSet,
+    assert_snapshot_config_identity,
+    assert_snapshot_run_dir,
+    capture_sources,
+    load_snapshot,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +98,8 @@ class CycleService:
         *,
         rollover_month: str | None = None,
     ) -> PreparedRun:
+        assert_snapshot_config_identity(self.bundle, snapshot)
+        assert_snapshot_run_dir(self.bundle, snapshot)
         master_local = read_portfolio(snapshot.master_copy, self.bundle.fields)
         direction_issues = validate_master_header_directions(
             snapshot.master_copy,
@@ -191,6 +199,7 @@ class CycleService:
             ),
             responsible_aliases=self.bundle.app.responsible_aliases,
             rollover_month=rollover_month,
+            config_identity=self.bundle.config_identity,
         )
         plan.issues[:0] = [
             *discovery_report.issues,

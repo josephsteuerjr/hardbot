@@ -14,7 +14,7 @@ write-запуск требует отдельного согласования 
     17:00      руководители сдают заявки на закрепление
     ~17:30     ВЫГРУЗКА (export): обогащаем личные реестры результатами выездов за день
     ~23:00     ЧУЖОЙ ночной скрипт на xlwings вносит закрепления в общий реестр
-    после него ЗАГРУЗКА (import): полные портфели из личных реестров едут в бота
+    после него ЗАГРУЗКА (import): опубликованный общий master едет в бота
 
 Ночной скрипт НЕ наш: он работает с теми же файлами на сетевом диске, и запускать
 загрузку «по часам» опасно — сдвинулся на полчаса, и мы затираем друг друга. Поэтому
@@ -347,33 +347,24 @@ def filter_to_existing_contracts(sheets: list[dict], existing_ids: set[str]):
 
 def step_import(settings: dict, base: str | None, dry: bool, log,
                 registry: str | None = None, allow_new: bool = False) -> str:
-    """ЗАГРУЗКА: полные портфели в бота.
+    """ЗАГРУЗКА: только опубликованный общий master в бота.
 
     Штатный источник — ОБЩИЙ реестр одним файлом: он и есть источник правды по
     закреплениям после ночного скрипта, а сопоставление колонок у сервера идёт по
-    заголовкам, поэтому общий реестр импортируется ровно так же, как личный.
-    Это заодно возвращает владельца строкам, которые его потеряли.
-
-    Личные реестры — запасной путь (тест-режим, когда общий недоступен)."""
+    заголовкам. Personal ↔ master выполняет только registry_cycle; аварийного
+    fallback personal → bot нет."""
     if not dry:
         require_legacy_write_enabled()
-    if registry:
-        p = Path(registry)
-        if not p.exists():
-            raise FileNotFoundError(f"общий реестр не найден: {p}")
-        files = [p]
-        log(f"Источник — общий реестр: {p.name}")
-    else:
-        fmap = folder_map(base)
-        files = []
-        for entries in fmap.values():
-            emp = entries[0].get("employee") or entries[0]["path"].name
-            for f in personal_files(entries, emp):
-                if f not in files:
-                    files.append(f)
-        log(f"Источник — личные реестры, найдено: {len(files)}")
-    if not files:
-        return "Реестров не нашлось — проверь путь или базовую папку"
+    if not registry:
+        raise ValueError(
+            "импорт personal → bot запрещён; укажи опубликованный master "
+            "через --registry/--after-registry"
+        )
+    p = Path(registry)
+    if not p.exists():
+        raise FileNotFoundError(f"общий реестр не найден: {p}")
+    files = [p]
+    log(f"Источник — опубликованный общий master: {p.name}")
     existing_ids = None
     if registry and not allow_new:
         current = api(settings, "GET", "/admin/export.json", timeout=180)
@@ -423,7 +414,14 @@ def step_import(settings: dict, base: str | None, dry: bool, log,
                 sheets, guard = filter_to_existing_contracts(sheets, existing_ids)
                 log(f"Защита БД: оставлено строк существующих КД {guard['kept']}, "
                     f"новых пропущено {guard['skipped_new']}")
-            d = api(settings, "POST", "/admin/import.json", {"sheets": sheets}, timeout=300)
+            source_kind = "published_master" if allow_new else "test_subset"
+            d = api(
+                settings,
+                "POST",
+                "/admin/import.json",
+                {"source_kind": source_kind, "sheets": sheets},
+                timeout=300,
+            )
         except Exception as e:  # noqa: BLE001 — битый файл не валит пакет
             errors.append(f"{p.name}: {e}")
             continue
@@ -454,7 +452,10 @@ def main(argv=None) -> int:
                     help="export — выгрузка в реестры до ночного скрипта; "
                          "import — загрузка портфелей в бота после него")
     ap.add_argument("--base", help="базовая папка республик (по умолчанию из настроек пульта)")
-    ap.add_argument("--registry", help="общий реестр одним файлом — штатный источник загрузки")
+    ap.add_argument(
+        "--registry",
+        help="опубликованный общий master — единственный источник загрузки",
+    )
     ap.add_argument("--allow-new", action="store_true",
                     help="разрешить общему реестру создавать новые КД (по умолчанию "
                          "он обновляет только уже загруженную подвыборку)")
@@ -480,13 +481,13 @@ def main(argv=None) -> int:
     try:
         settings = load_settings()
         base = a.base or settings.get("scatterBase") or None
-        # Папка республик нужна там, где мы ходим по личным реестрам. Импорт одним
-        # общим реестром знает свой путь и в базе папок не нуждается — раньше проверка
-        # стояла до развилки и рубила именно главный сценарий.
-        if not base and not (a.step == "import" and a.registry):
+        if a.step == "export" and not base:
             log("[!] Базовая папка не задана: ни --base, ни scatterBase в настройках пульта. "
-                "Она нужна для обогащения и для импорта личных реестров; "
-                "импорту одного общего реестра (--registry) она не требуется.")
+                "Она нужна для обогащения personal-файлов.")
+            return 2
+        if a.step == "import" and not (a.registry or a.after_registry):
+            log("[!] Импорт personal → bot запрещён. Укажи опубликованный master "
+                "через --registry или --after-registry.")
             return 2
 
         if a.after_registry and not a.dry_run:

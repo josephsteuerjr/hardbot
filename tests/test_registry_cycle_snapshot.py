@@ -1,10 +1,17 @@
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from registry_cycle.config import load_config_bundle
+from registry_cycle.errors import SafetyViolation
 from registry_cycle.files import fingerprint, stable_copy
 from registry_cycle.models import DiscoveryReport, ManifestEntry
-from registry_cycle.snapshot import capture_sources
+from registry_cycle.snapshot import (
+    assert_snapshot_config_identity,
+    capture_sources,
+    load_snapshot,
+)
 
 
 def test_stable_copy_preserves_content_and_returns_source_fingerprint(tmp_path):
@@ -52,3 +59,19 @@ def test_capture_sources_uses_opaque_local_names(tmp_path):
     assert snapshot.personals[0].copy_path.name == "abc123.xlsb"
     assert snapshot.personals[0].copy_path.read_bytes() == b"personal"
     assert (snapshot.run_dir / "snapshot.json").is_file()
+    assert snapshot.config_identity == bundle.config_identity
+    assert (
+        load_snapshot(snapshot.run_dir / "snapshot.json").config_identity
+        == bundle.config_identity
+    )
+
+    drifted_bundle = replace(bundle, config_identity="f" * 64)
+    with pytest.raises(SafetyViolation, match="config drift"):
+        assert_snapshot_config_identity(drifted_bundle, snapshot)
+
+    with pytest.raises(SafetyViolation, match="вне workspace/runs"):
+        capture_sources(
+            bundle,
+            DiscoveryReport(entries=[entry]),
+            run_id="../escape",
+        )

@@ -22,7 +22,10 @@ if __name__ == "__main__":
 
     import db
     db.init_db()
-    rep = db.import_xlsx(src)
+    rep = db.import_xlsx(
+        src,
+        source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
+    )
     print(f"источник: {src}")
     print(f"БД: {data_dir / 'hardbot.db'}")
     print(f"импорт: строк {rep['total_rows']}, добавлено {rep['inserted']}, "

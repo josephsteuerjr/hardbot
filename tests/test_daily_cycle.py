@@ -79,6 +79,65 @@ def test_legacy_daily_cycle_direct_steps_are_guarded(monkeypatch):
         daily_cycle.step_import({}, None, False, lambda _message: None)
 
 
+def test_daily_import_has_no_personal_registry_fallback():
+    with pytest.raises(ValueError, match="personal → bot запрещён"):
+        daily_cycle.step_import(
+            {},
+            "unused-personal-root",
+            True,
+            lambda _message: None,
+        )
+
+
+def test_daily_master_import_sends_explicit_test_subset_source(
+    monkeypatch,
+    tmp_path,
+):
+    registry = tmp_path / "published-master.xlsb"
+    registry.write_bytes(b"placeholder")
+    sheets = [{
+        "name": "Портфели",
+        "grid": [
+            ["Номер КД / ID", "Клиент"],
+            ["K-1", "Клиент"],
+        ],
+    }]
+    monkeypatch.setenv(daily_cycle.LEGACY_WRITE_ENV, "1")
+    monkeypatch.setattr(daily_cycle, "read_sheets", lambda _path: sheets)
+    posted = []
+
+    def fake_api(_settings, method, path, body=None, timeout=180):
+        if method == "GET":
+            assert path == "/admin/export.json"
+            return {"rows": [{"contract_id": "K-1"}]}
+        posted.append((path, body, timeout))
+        return {
+            "total_rows": 1,
+            "inserted": 0,
+            "updated": 1,
+            "skipped_no_id": 0,
+            "duplicates": 0,
+            "protected_cells": 0,
+            "office_cells": 0,
+            "no_responsible": 0,
+        }
+
+    monkeypatch.setattr(daily_cycle, "api", fake_api)
+
+    daily_cycle.step_import(
+        {},
+        None,
+        False,
+        lambda _message: None,
+        registry=str(registry),
+        allow_new=False,
+    )
+
+    assert posted[0][0] == "/admin/import.json"
+    assert posted[0][1]["source_kind"] == "test_subset"
+    assert posted[0][1]["sheets"][0]["grid"][-1][0] == "K-1"
+
+
 def test_daily_cycle_dry_run_remains_available(monkeypatch, tmp_path):
     monkeypatch.delenv(daily_cycle.LEGACY_WRITE_ENV, raising=False)
     state = tmp_path / "state"

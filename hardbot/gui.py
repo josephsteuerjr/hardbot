@@ -139,7 +139,7 @@ class ControlPanel(tk.Tk):
         self.lbl_counts.pack(anchor="w", pady=(0, 8))
         row = tk.Frame(c, bg=T.CARD)
         row.pack(fill="x")
-        T.button(row, "Импорт xlsx…", self._import).pack(side="left")
+        T.button(row, "Импорт master xlsx…", self._import).pack(side="left")
         T.button(row, "Экспорт xlsx…", self._export, kind="ghost").pack(side="left", padx=6)
         T.button(row, "Координаты (геокодинг)", self._geocode, kind="ghost").pack(side="left")
         T.button(row, "Экспорт меток", self._export_markers, kind="ghost").pack(side="left", padx=6)
@@ -158,7 +158,10 @@ class ControlPanel(tk.Tk):
         if not path:
             return
         try:
-            rep = db.import_xlsx(path)
+            rep = db.import_xlsx(
+                path,
+                source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
+            )
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("Контур", f"Не смог разобрать файл:\n{e}")
             return
@@ -326,7 +329,10 @@ class ControlPanel(tk.Tk):
             return
         owner = int(admin)
         db.ensure_owner(owner)
-        db.import_xlsx(synth.generate(n=30, responsible=synth.DEV_EMPLOYEE))
+        db.import_xlsx(
+            synth.generate(n=30, responsible=synth.DEV_EMPLOYEE),
+            source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
+        )
         db.unbind(owner)                       # чтобы привязка прошла заново
         db.bind_agent(owner, synth.DEV_EMPLOYEE)
         self._refresh_bindings()

@@ -29,7 +29,7 @@ from typing import Any
 from .config import ConfigBundle, load_config_bundle
 from .cycle_lock import CycleLock
 from .discovery import discover
-from .errors import SafetyViolation
+from .errors import ConfigurationError, SafetyViolation
 from .excel_host import (
     ExcelHost,
     range_has_formulas,
@@ -43,6 +43,10 @@ from .file_access import (
     exclusive_file_check as _exclusive_file_check,
 )
 from .models import FileFingerprint, Issue, WorkbookSnapshot
+from .publishing import (
+    assert_no_incomplete_publications,
+    publication_cycle_lock,
+)
 from .normalize import (
     comparable_value,
     is_blank,
@@ -51,10 +55,20 @@ from .normalize import (
     norm_name,
     norm_title,
 )
-from .ownership import manifest_owner_matches, resolve_book_responsible
+from .ownership import (
+    canonical_responsible_name,
+    manifest_owner_matches,
+    resolve_book_responsible,
+)
 from .reader import read_portfolio
 from .semantics import values_equal_for_rule
-from .snapshot import SnapshotSet, capture_sources, load_snapshot
+from .snapshot import (
+    SnapshotSet,
+    assert_snapshot_config_identity,
+    assert_snapshot_run_dir,
+    capture_sources,
+    load_snapshot,
+)
 from .staging import (
     _format_new_rows,
     _revealed_rows,
@@ -106,6 +120,7 @@ class DistributionPlan:
     master_fingerprint: FileFingerprint
     rows: list[DistributionRow]
     issues: list[Issue]
+    config_identity: str = ""
 
     @property
     def blocked(self) -> bool:
@@ -121,6 +136,7 @@ class DistributionPlan:
                 self.assignment_baseline_fingerprint.as_dict()
             ),
             "master_fingerprint": self.master_fingerprint.as_dict(),
+            "config_identity": self.config_identity,
             "rows": [row.as_dict() for row in self.rows],
             "issues": [issue.as_dict() for issue in self.issues],
         }
@@ -141,6 +157,7 @@ class DistributionPlan:
                 self.assignment_baseline_fingerprint.as_dict()
             ),
             "master_fingerprint": self.master_fingerprint.as_dict(),
+            "config_identity": self.config_identity,
             "rows": [row.as_dict() for row in self.rows],
             "issues": [issue.as_dict() for issue in self.issues],
             "blocked": self.blocked,
@@ -177,6 +194,7 @@ class DistributionStage:
     staging_dir: Path
     plan_digest: str
     files: tuple[DistributionStagedFile, ...]
+    config_identity: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -184,6 +202,7 @@ class DistributionStage:
             "run_dir": str(self.run_dir),
             "staging_dir": str(self.staging_dir),
             "plan_digest": self.plan_digest,
+            "config_identity": self.config_identity,
             "files": [item.as_dict() for item in self.files],
         }
 
@@ -303,15 +322,114 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    with temporary.open("w", encoding="utf-8") as stream:
+        stream.write(json.dumps(payload, ensure_ascii=False, indent=2))
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
+
+class _DistributionJournal:
+    """Durable marker of the distribution live-mutation boundary."""
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    def append(self, event: str, **payload: Any) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "at": datetime.now().astimezone().isoformat(),
+            "event": event,
+            **payload,
+        }
+        with self.path.open("a", encoding="utf-8") as stream:
+            stream.write(
+                json.dumps(record, ensure_ascii=False, default=str)
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+
+def _assert_exact_file(
+    path: Path,
+    expected: FileFingerprint,
+    *,
+    context: str,
+) -> None:
+    try:
+        actual = fingerprint(path)
+    except OSError as exc:
+        raise SafetyViolation(f"{context}: файл недоступен: {path}") from exc
+    if actual != expected:
+        raise SafetyViolation(f"{context}: fingerprint изменился: {path}")
+
+
+def _destructive_replace(source: Path, target: Path) -> None:
+    """Narrow seam for fault injection around the actual atomic replace."""
+    os.replace(source, target)
+
+
+def _replace_if_exact(
+    source: Path,
+    target: Path,
+    *,
+    expected_source: FileFingerprint,
+    expected_target: FileFingerprint | None,
+    context: str,
+) -> None:
+    """Replace only after the last exact source/target barrier.
+
+    ``expected_target=None`` means that creating a sidecar must not overwrite
+    any pre-existing path.
+    """
+    _assert_exact_file(
+        source,
+        expected_source,
+        context=f"{context}; source",
     )
-    temporary.replace(path)
+    if expected_target is None:
+        if os.path.lexists(target):
+            raise SafetyViolation(
+                f"{context}: имя назначения уже занято: {target}"
+            )
+    else:
+        # Keep the live-target check immediately adjacent to destructive replace.
+        _assert_exact_file(
+            target,
+            expected_target,
+            context=f"{context}; target",
+        )
+    _destructive_replace(source, target)
+
+
+def _destructive_unlink(path: Path) -> None:
+    """Narrow seam for fault injection around the actual unlink."""
+    path.unlink()
+
+
+def _unlink_if_exact(
+    path: Path,
+    expected: FileFingerprint,
+    *,
+    context: str,
+) -> None:
+    _assert_exact_file(path, expected, context=context)
+    _destructive_unlink(path)
 
 
 def load_distribution_config(bundle: ConfigBundle) -> DistributionConfig:
-    payload = _read_json(bundle.config_dir / "distribution.json")
+    try:
+        payload = bundle.pinned_config("distribution.json")
+    except ConfigurationError as exc:
+        # Synthetic low-level tests intentionally build a minimal bundle
+        # without AppConfig. A production bundle must always use the payload
+        # already covered by config_identity and never reread mutable files.
+        if bundle.app is not None:
+            raise SafetyViolation(
+                "distribution.json не закреплён в config_identity"
+            ) from exc
+        payload = _read_json(bundle.config_dir / "distribution.json")
     if int(payload.get("schema_version", 0)) != 1:
         raise SafetyViolation(
             "неподдерживаемая schema_version в distribution.json"
@@ -325,6 +443,12 @@ def load_distribution_config(bundle: ConfigBundle) -> DistributionConfig:
     normalized = [norm_name(source) for source in aliases]
     if len(normalized) != len(set(normalized)):
         raise SafetyViolation("дубли aliases ответственных в distribution.json")
+    app = getattr(bundle, "app", None)
+    if app is not None and aliases != dict(app.responsible_aliases):
+        raise SafetyViolation(
+            "responsible_aliases в app.json и distribution.json "
+            "должны совпадать точно"
+        )
     return DistributionConfig(
         responsible_aliases=aliases,
         safety=dict(payload.get("safety") or {}),
@@ -398,6 +522,8 @@ def build_distribution_plan(
     snapshot_path: str | Path | None = None,
 ) -> DistributionPlan:
     """Построить план только на отсутствующие у сотрудника новые КД."""
+    assert_snapshot_config_identity(bundle, snapshot)
+    assert_snapshot_run_dir(bundle, snapshot)
     master = read_portfolio(snapshot.master_copy, bundle.fields)
     if master.fingerprint != snapshot.master_fingerprint:
         raise SafetyViolation("копия общего реестра изменилась после snapshot")
@@ -406,12 +532,14 @@ def build_distribution_plan(
 
     key_column = master.column_index(bundle.fields.key_title)
     responsible_column = master.column_index(bundle.fields.responsible_title)
+    baseline_key_column = baseline.column_index(bundle.fields.key_title)
     baseline_responsible_column = baseline.column_index(
         bundle.fields.responsible_title
     )
     if (
         key_column is None
         or responsible_column is None
+        or baseline_key_column is None
         or baseline_responsible_column is None
     ):
         raise SafetyViolation(
@@ -475,6 +603,7 @@ def build_distribution_plan(
         tuple[str, str],
         tuple[Any, WorkbookSnapshot, str, tuple[tuple[str, int], ...]],
     ] = {}
+    seen_responsible_profiles: dict[str, tuple[str, Path]] = {}
     excluded_files = 0
     for captured in snapshot.personals:
         entry = captured.entry
@@ -540,7 +669,36 @@ def build_distribution_plan(
                 )
             )
             continue
-        target_key = (entry.profile, norm_name(responsible))
+        responsible_norm = canonical_responsible_name(
+            responsible,
+            config.responsible_aliases,
+        )
+        previous_profile = seen_responsible_profiles.get(responsible_norm)
+        if (
+            previous_profile is not None
+            and previous_profile[0] != entry.profile
+        ):
+            issues.append(
+                Issue(
+                    "error",
+                    "responsible_in_multiple_active_profiles",
+                    "один ответственный найден в нескольких активных профилях",
+                    {
+                        "responsible": responsible,
+                        "responsible_normalized": responsible_norm,
+                        "first_profile": previous_profile[0],
+                        "first_path": str(previous_profile[1]),
+                        "second_profile": entry.profile,
+                        "second_path": str(entry.path),
+                    },
+                )
+            )
+            continue
+        seen_responsible_profiles.setdefault(
+            responsible_norm,
+            (entry.profile, entry.path),
+        )
+        target_key = (entry.profile, responsible_norm)
         if target_key in personal_targets:
             issues.append(
                 Issue(
@@ -616,7 +774,32 @@ def build_distribution_plan(
         list[tuple[str, int, tuple[Any, ...], str]],
     ] = defaultdict(list)
     unmatched = Counter()
+    new_assignment_without_target: list[dict[str, Any]] = []
+    new_assignment_without_target_count = 0
     alias_counts = Counter()
+
+    def baseline_item_for(
+        contract_id: str,
+        master_row: int,
+    ) -> tuple[int, tuple[Any, ...]] | None:
+        baseline_offset = master_row - master.data_start
+        if 0 <= baseline_offset < len(baseline.rows):
+            candidate = baseline.rows[baseline_offset]
+            if (
+                norm_key(
+                    baseline.row_value(candidate, baseline_key_column)
+                )
+                == contract_id
+            ):
+                return (
+                    baseline.data_start + baseline_offset,
+                    candidate,
+                )
+        candidates = baseline_rows_by_key.get(contract_id, [])
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
     for offset, row in enumerate(master.rows):
         master_row = master.data_start + offset
         contract_id = norm_key(master.row_value(row, key_column))
@@ -626,10 +809,45 @@ def build_distribution_plan(
         original_norm = norm_name(raw_responsible)
         if not original_norm:
             continue
-        target_norm = aliases.get(original_norm, original_norm)
+        target_norm = canonical_responsible_name(
+            raw_responsible,
+            config.responsible_aliases,
+        )
         targets = target_by_responsible.get(target_norm, [])
         if not targets:
             unmatched[str(raw_responsible).strip()] += 1
+            baseline_item = baseline_item_for(contract_id, master_row)
+            if baseline_item is None:
+                new_assignment_without_target_count += 1
+                if len(new_assignment_without_target) < 100:
+                    new_assignment_without_target.append(
+                        {
+                            "contract_id": contract_id,
+                            "master_row": master_row + 1,
+                            "responsible": str(raw_responsible).strip(),
+                            "reason": "baseline_missing_or_ambiguous",
+                        }
+                    )
+            else:
+                _baseline_row, baseline_values = baseline_item
+                if is_blank(
+                    baseline.row_value(
+                        baseline_values,
+                        baseline_responsible_column,
+                    )
+                ):
+                    new_assignment_without_target_count += 1
+                    if len(new_assignment_without_target) < 100:
+                        new_assignment_without_target.append(
+                            {
+                                "contract_id": contract_id,
+                                "master_row": master_row + 1,
+                                "responsible": str(
+                                    raw_responsible
+                                ).strip(),
+                                "reason": "baseline_owner_blank",
+                            }
+                        )
             continue
         if original_norm in aliases:
             alias_counts[alias_display[original_norm]] += 1
@@ -717,31 +935,10 @@ def build_distribution_plan(
                 master_values,
                 raw_master_responsible,
             ) in contract_assignments:
-                baseline_offset = master_row - master.data_start
-                baseline_item = None
-                if 0 <= baseline_offset < len(baseline.rows):
-                    candidate = baseline.rows[baseline_offset]
-                    baseline_key_column = baseline.column_index(
-                        bundle.fields.key_title
-                    )
-                    assert baseline_key_column is not None
-                    if (
-                        norm_key(
-                            baseline.row_value(
-                                candidate,
-                                baseline_key_column,
-                            )
-                        )
-                        == contract_id
-                    ):
-                        baseline_item = (
-                            baseline.data_start + baseline_offset,
-                            candidate,
-                        )
-                if baseline_item is None:
-                    candidates = baseline_rows_by_key.get(contract_id, [])
-                    if len(candidates) == 1:
-                        baseline_item = candidates[0]
+                baseline_item = baseline_item_for(
+                    contract_id,
+                    master_row,
+                )
                 if baseline_item is None:
                     missing_baseline_count += 1
                     if len(missing_baseline) < 100:
@@ -816,6 +1013,18 @@ def build_distribution_plan(
                 {"count": unproven_count, "samples": unproven},
             )
         )
+    if new_assignment_without_target_count:
+        issues.append(
+            Issue(
+                "error",
+                "distribution_new_assignment_without_target",
+                "новый закреп не имеет однозначного активного личного файла",
+                {
+                    "count": new_assignment_without_target_count,
+                    "samples": new_assignment_without_target,
+                },
+            )
+        )
     if unmatched:
         issues.append(
             Issue(
@@ -885,6 +1094,7 @@ def build_distribution_plan(
         master_fingerprint=snapshot.master_fingerprint,
         rows=rows,
         issues=issues,
+        config_identity=snapshot.config_identity,
     )
     output = snapshot.run_dir / "distribution"
     _atomic_json(output / "plan.json", plan.as_dict())
@@ -1007,6 +1217,7 @@ def load_distribution_plan(path: str | Path) -> DistributionPlan:
         ),
         rows=rows,
         issues=issues,
+        config_identity=str(payload.get("config_identity") or ""),
     )
     expected = str(payload.get("digest") or "")
     if plan.digest != expected:
@@ -1146,6 +1357,17 @@ def build_distribution_staging(
         )
     if not plan.rows:
         raise SafetyViolation("distribution-план не содержит новых строк")
+    assert_snapshot_run_dir(bundle, snapshot)
+    config_identity = str(getattr(bundle, "config_identity", "") or "")
+    if not (
+        snapshot.config_identity
+        == plan.config_identity
+        == config_identity
+    ):
+        raise SafetyViolation(
+            "snapshot/plan относятся к другой конфигурации; "
+            "distribution staging запрещён"
+        )
     if snapshot.master_fingerprint != plan.master_fingerprint:
         raise SafetyViolation(
             "distribution-план относится к другой копии общего реестра"
@@ -1215,6 +1437,7 @@ def build_distribution_staging(
         staging_dir=staging_dir,
         plan_digest=plan.digest,
         files=tuple(staged_files),
+        config_identity=config_identity,
     )
     _atomic_json(staging_dir / "stage.json", stage.as_dict())
     return stage
@@ -1248,6 +1471,7 @@ def load_distribution_stage(path: str | Path) -> DistributionStage:
         staging_dir=Path(payload["staging_dir"]),
         plan_digest=str(payload["plan_digest"]),
         files=tuple(files),
+        config_identity=str(payload.get("config_identity") or ""),
     )
 
 
@@ -1283,6 +1507,20 @@ def validate_distribution_staging(
         plan_digest=plan.digest,
     )
     assert report.issues is not None
+    config_identity = str(getattr(bundle, "config_identity", "") or "")
+    if not (
+        stage.config_identity
+        == plan.config_identity
+        == config_identity
+    ):
+        report.issues.append(
+            Issue(
+                "error",
+                "distribution_config_identity_mismatch",
+                "plan/staging относятся к другой конфигурации",
+            )
+        )
+        return report
     if stage.plan_digest != plan.digest:
         report.issues.append(
             Issue(
@@ -1518,17 +1756,6 @@ def validate_distribution_staging(
 
     _atomic_json(stage.staging_dir / "validation.json", report.as_dict())
     return report
-
-
-def _quick_stat_matches(
-    path: Path,
-    expected: FileFingerprint,
-) -> bool:
-    stat = path.stat()
-    return (
-        stat.st_size == expected.size
-        and stat.st_mtime_ns == expected.mtime_ns
-    )
 
 
 def preflight_distribution(
@@ -1815,6 +2042,59 @@ def _unique_distribution_sidecar(path: Path, stamp: datetime) -> Path:
     return candidate
 
 
+def _assert_distribution_terminal_state(
+    stage: DistributionStage,
+    *,
+    sidecar_by_entry: dict[str, Path],
+    expected: str,
+) -> None:
+    """Prove the complete all-old/all-new set before a terminal event."""
+    if expected not in {"old", "new"}:
+        raise ValueError(f"unknown distribution terminal state: {expected}")
+    for item in stage.files:
+        sidecar = sidecar_by_entry.get(item.entry_id)
+        if expected == "old" or sidecar is not None:
+            wanted_live = item.source_fingerprint
+        else:
+            wanted_live = item.staged_fingerprint
+        _assert_exact_file(
+            item.original_path,
+            wanted_live,
+            context=f"distribution terminal {expected}",
+        )
+        if sidecar is None:
+            continue
+        if expected == "old":
+            if os.path.lexists(sidecar):
+                raise SafetyViolation(
+                    "distribution rollback оставил sidecar: "
+                    f"{sidecar}"
+                )
+        else:
+            _assert_exact_file(
+                sidecar,
+                item.staged_fingerprint,
+                context="distribution terminal new sidecar",
+            )
+
+
+def _distribution_journal_path(
+    cycle_lock: CycleLock,
+    stage: DistributionStage,
+) -> Path:
+    """Require the journal to live under the workspace scanned by the guard."""
+    journal = stage.staging_dir / "publish.journal.jsonl"
+    runs_root = (cycle_lock.path.parent / "runs").resolve()
+    try:
+        journal.resolve().relative_to(runs_root)
+    except ValueError as exc:
+        raise SafetyViolation(
+            "distribution staging находится вне workspace/runs; "
+            f"аварийный journal не будет виден общему guard: {stage.staging_dir}"
+        ) from exc
+    return journal
+
+
 def publish_distribution(
     bundle: ConfigBundle,
     stage: DistributionStage,
@@ -1823,7 +2103,33 @@ def publish_distribution(
     confirmation_digest: str,
     notify_owner: bool = True,
     sidecar_locked: bool = False,
+    cycle_lock: CycleLock | None = None,
 ) -> DistributionPublishResult:
+    if cycle_lock is None:
+        with publication_cycle_lock(bundle) as acquired:
+            return publish_distribution(
+                bundle,
+                stage,
+                plan,
+                confirmation_digest=confirmation_digest,
+                notify_owner=notify_owner,
+                sidecar_locked=sidecar_locked,
+                cycle_lock=acquired,
+            )
+    cycle_lock.assert_owned()
+    # Distribution пишет те же live-портфели, поэтому не вправе обходить
+    # аварийный journal обычного цикла даже если файловый lock уже снялся
+    # (например, при Ctrl+C с корректным unwinding context manager).
+    assert_no_incomplete_publications(cycle_lock.path.parent)
+    config_identity = str(getattr(bundle, "config_identity", "") or "")
+    if not (
+        stage.config_identity
+        == plan.config_identity
+        == config_identity
+    ):
+        raise SafetyViolation(
+            "distribution plan/staging относятся к другой конфигурации"
+        )
     if not (
         confirmation_digest == plan.digest == stage.plan_digest
     ):
@@ -1883,6 +2189,11 @@ def publish_distribution(
         if item.entry_id in sidecar_entry_ids
     }
     intent_path = stage.staging_dir / "publication_intent.json"
+    result_path = stage.staging_dir / "publish.json"
+    journal = _DistributionJournal(
+        _distribution_journal_path(cycle_lock, stage)
+    )
+    journal_started = False
     _atomic_json(
         intent_path,
         {
@@ -1955,6 +2266,11 @@ def publish_distribution(
                     stamp,
                 )
                 stable_copy(item.original_path, backup)
+                _assert_exact_file(
+                    backup,
+                    item.source_fingerprint,
+                    context="distribution backup",
+                )
                 backup_by_entry[item.entry_id] = backup
                 result.backups.append(str(backup))
             temporary = item.original_path.parent / (
@@ -1986,14 +2302,42 @@ def publish_distribution(
                 "общий реестр изменился при подготовке distribution"
             )
 
+        journal.append(
+            "distribution_publish_started",
+            run_id=stage.run_id,
+            plan_digest=plan.digest,
+            intent=str(intent_path),
+            result=str(result_path),
+            files=[
+                {
+                    "entry_id": item.entry_id,
+                    "target": str(item.original_path),
+                    "published_path": str(
+                        sidecar_by_entry.get(
+                            item.entry_id,
+                            item.original_path,
+                        )
+                    ),
+                    "mode": (
+                        "sidecar"
+                        if item.entry_id in sidecar_entry_ids
+                        else "replace"
+                    ),
+                    "before": item.source_fingerprint.as_dict(),
+                    "after": item.staged_fingerprint.as_dict(),
+                }
+                for item in stage.files
+            ],
+        )
+        journal_started = True
+
         for item in stage.files:
             if _excel_lock_path(snapshot.master_original).exists():
                 raise SafetyViolation(
                     f"Excel lock-файл у общего: {snapshot.master_original}"
                 )
-            if not _quick_stat_matches(
-                snapshot.master_original,
-                plan.master_fingerprint,
+            if fingerprint(snapshot.master_original) != (
+                plan.master_fingerprint
             ):
                 raise SafetyViolation(
                     "общий реестр изменился во время distribution"
@@ -2006,11 +2350,24 @@ def publish_distribution(
             temporary = temp_by_entry[item.entry_id]
             if item.entry_id in sidecar_entry_ids:
                 sidecar = sidecar_by_entry[item.entry_id]
-                if sidecar.exists():
-                    raise SafetyViolation(
-                        f"sidecar уже существует: {sidecar}"
-                    )
-                os.replace(temporary, sidecar)
+                journal.append(
+                    "distribution_sidecar_replace_started",
+                    entry_id=item.entry_id,
+                    target=str(item.original_path),
+                    sidecar=str(sidecar),
+                )
+                _assert_exact_file(
+                    item.original_path,
+                    item.source_fingerprint,
+                    context="distribution sidecar source",
+                )
+                _replace_if_exact(
+                    temporary,
+                    sidecar,
+                    expected_source=item.staged_fingerprint,
+                    expected_target=None,
+                    context="distribution sidecar replace",
+                )
                 created_sidecars.append(item)
                 if fingerprint(sidecar) != item.staged_fingerprint:
                     raise SafetyViolation(
@@ -2019,6 +2376,12 @@ def publish_distribution(
                     )
                 assert result.sidecars is not None
                 result.sidecars.append(str(sidecar))
+                journal.append(
+                    "distribution_sidecar_created",
+                    entry_id=item.entry_id,
+                    target=str(item.original_path),
+                    sidecar=str(sidecar),
+                )
             else:
                 lock = _excel_lock_path(item.original_path)
                 if lock.exists():
@@ -2026,7 +2389,19 @@ def publish_distribution(
                         f"Excel lock-файл у цели: {item.original_path}"
                     )
                 _exclusive_file_check(item.original_path)
-                os.replace(temporary, item.original_path)
+                journal.append(
+                    "distribution_live_replace_started",
+                    entry_id=item.entry_id,
+                    target=str(item.original_path),
+                    temporary=str(temporary),
+                )
+                _replace_if_exact(
+                    temporary,
+                    item.original_path,
+                    expected_source=item.staged_fingerprint,
+                    expected_target=item.source_fingerprint,
+                    context="distribution live replace",
+                )
                 replaced.append(item)
                 if fingerprint(item.original_path) != (
                     item.staged_fingerprint
@@ -2036,19 +2411,39 @@ def publish_distribution(
                         f"{item.original_path}"
                     )
                 result.published.append(str(item.original_path))
+                journal.append(
+                    "distribution_live_replaced",
+                    entry_id=item.entry_id,
+                    target=str(item.original_path),
+                )
+        _assert_distribution_terminal_state(
+            stage,
+            sidecar_by_entry=sidecar_by_entry,
+            expected="new",
+        )
     except Exception as exc:  # noqa: BLE001
         rollback_failures = []
         for item in reversed(created_sidecars):
             sidecar = sidecar_by_entry[item.entry_id]
             try:
-                if fingerprint(sidecar) != item.staged_fingerprint:
-                    raise SafetyViolation(
-                        "SHA sidecar перед rollback не совпал"
-                    )
-                sidecar.unlink()
+                journal.append(
+                    "distribution_sidecar_unlink_started",
+                    entry_id=item.entry_id,
+                    sidecar=str(sidecar),
+                )
+                _unlink_if_exact(
+                    sidecar,
+                    item.staged_fingerprint,
+                    context="distribution sidecar rollback unlink",
+                )
                 result.rolled_back.append(str(sidecar))
                 if result.sidecars is not None:
                     result.sidecars.remove(str(sidecar))
+                journal.append(
+                    "distribution_sidecar_removed_on_rollback",
+                    entry_id=item.entry_id,
+                    sidecar=str(sidecar),
+                )
             except Exception as rollback_exc:  # noqa: BLE001
                 rollback_failures.append(
                     {
@@ -2063,8 +2458,25 @@ def publish_distribution(
                 f"{item.original_path.suffix.casefold()}"
             )
             try:
+                _assert_exact_file(
+                    item.original_path,
+                    item.staged_fingerprint,
+                    context="distribution rollback current target",
+                )
                 stable_copy(backup, rollback_temp)
-                os.replace(rollback_temp, item.original_path)
+                journal.append(
+                    "distribution_live_rollback_replace_started",
+                    entry_id=item.entry_id,
+                    target=str(item.original_path),
+                    temporary=str(rollback_temp),
+                )
+                _replace_if_exact(
+                    rollback_temp,
+                    item.original_path,
+                    expected_source=item.source_fingerprint,
+                    expected_target=item.staged_fingerprint,
+                    context="distribution live rollback replace",
+                )
                 if fingerprint(item.original_path) != (
                     item.source_fingerprint
                 ):
@@ -2072,6 +2484,11 @@ def publish_distribution(
                         "SHA distribution rollback не совпал"
                     )
                 result.rolled_back.append(str(item.original_path))
+                journal.append(
+                    "distribution_live_rolled_back",
+                    entry_id=item.entry_id,
+                    target=str(item.original_path),
+                )
             except Exception as rollback_exc:  # noqa: BLE001
                 rollback_failures.append(
                     {
@@ -2079,11 +2496,39 @@ def publish_distribution(
                         "error": str(rollback_exc),
                     }
                 )
-        for temporary in temp_by_entry.values():
+        stage_by_entry = {
+            item.entry_id: item
+            for item in stage.files
+        }
+        for entry_id, temporary in temp_by_entry.items():
             try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
+                if os.path.lexists(temporary):
+                    _unlink_if_exact(
+                        temporary,
+                        stage_by_entry[entry_id].staged_fingerprint,
+                        context="distribution private temp cleanup",
+                    )
+            except Exception as cleanup_exc:  # noqa: BLE001
+                rollback_failures.append(
+                    {
+                        "path": str(temporary),
+                        "error": str(cleanup_exc),
+                    }
+                )
+        if not rollback_failures:
+            try:
+                _assert_distribution_terminal_state(
+                    stage,
+                    sidecar_by_entry=sidecar_by_entry,
+                    expected="old",
+                )
+            except Exception as rollback_exc:  # noqa: BLE001
+                rollback_failures.append(
+                    {
+                        "path": str(stage.staging_dir),
+                        "error": str(rollback_exc),
+                    }
+                )
         result.issues.append(
             Issue(
                 "error",
@@ -2096,7 +2541,7 @@ def publish_distribution(
             )
         )
         _atomic_json(
-            stage.staging_dir / "publish.json",
+            result_path,
             result.as_dict(),
         )
         if rollback_failures:
@@ -2106,6 +2551,15 @@ def publish_distribution(
                     item["path"] for item in rollback_failures
                 )
             ) from exc
+        if journal_started:
+            journal.append(
+                "distribution_publish_rolled_back",
+                run_id=stage.run_id,
+                plan_digest=plan.digest,
+                intent=str(intent_path),
+                result=str(result_path),
+                reason=str(exc),
+            )
         raise SafetyViolation(
             f"distribution публикация отменена и откачена: {exc}"
         ) from exc
@@ -2184,8 +2638,26 @@ def publish_distribution(
             "audience": "owner_only",
         }
     _atomic_json(
-        stage.staging_dir / "publish.json",
+        result_path,
         result.as_dict(),
+    )
+    _assert_exact_file(
+        snapshot.master_original,
+        plan.master_fingerprint,
+        context="distribution terminal master",
+    )
+    _assert_distribution_terminal_state(
+        stage,
+        sidecar_by_entry=sidecar_by_entry,
+        expected="new",
+    )
+    journal.append(
+        "distribution_publish_committed",
+        run_id=stage.run_id,
+        plan_digest=plan.digest,
+        intent=str(intent_path),
+        result=str(result_path),
+        provenance=result.provenance_path,
     )
     return result
 

@@ -2,14 +2,38 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .errors import ConfigurationError
+from .normalize import norm_title
+
+
+SUPPORTED_PORTFOLIO_LAYOUT = "root/group/employee/*.xlsb"
+
+# Registry-cycle owns personal↔master execution, while this machine contract
+# owns the shared workbook boundary.  Loading it read-only here catches a
+# sheet/header/mapping drift before discovery or Excel is touched.
+_HARDBOT_DIR = Path(__file__).resolve().parents[1] / "hardbot"
+if str(_HARDBOT_DIR) not in sys.path:
+    sys.path.insert(0, str(_HARDBOT_DIR))
+import exchange_contract as _exchange_contract  # noqa: E402
+import fields as _hardbot_fields  # noqa: E402
+
+if Path(_exchange_contract.__file__).resolve() != (
+    _HARDBOT_DIR / "exchange_contract.py"
+).resolve():
+    raise RuntimeError("exchange_contract imported outside the hardbot checkout")
+if Path(_hardbot_fields.__file__).resolve() != (
+    _HARDBOT_DIR / "fields.py"
+).resolve():
+    raise RuntimeError("fields imported outside the hardbot checkout")
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +109,7 @@ class AppConfig:
     workspace: str
     month_names: dict[int, str]
     portfolio_roots: tuple[PortfolioRoot, ...]
+    portfolio_layout: str
     backup_name_regex: str
     active_extensions: tuple[str, ...]
     ignored_directory_prefixes: tuple[str, ...]
@@ -103,6 +128,8 @@ class ConfigBundle:
     theme: dict[str, Any]
     config_dir: Path
     project_root: Path
+    config_identity: str = ""
+    config_payloads: tuple[tuple[str, str], ...] = ()
 
     def render(self, value: str, at: datetime | None = None) -> str:
         at = at or datetime.now()
@@ -129,6 +156,19 @@ class ConfigBundle:
     def workspace_path(self, at: datetime | None = None) -> Path:
         return Path(self.render(self.app.workspace, at))
 
+    def pinned_config(self, name: str) -> dict[str, Any]:
+        """Return a fresh object from the exact bytes bound by config_identity."""
+
+        payload = dict(self.config_payloads).get(name)
+        if payload is None:
+            raise ConfigurationError(
+                f"конфигурация {name} не закреплена в ConfigBundle"
+            )
+        decoded = json.loads(payload)
+        if not isinstance(decoded, dict):
+            raise ConfigurationError(f"конфигурация {name} должна быть object")
+        return decoded
+
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
@@ -147,12 +187,34 @@ def _require(mapping: dict[str, Any], key: str, where: str) -> Any:
 
 def _parse_app(raw: dict[str, Any]) -> AppConfig:
     version = int(_require(raw, "schema_version", "app.json"))
-    if version != 1:
+    if version != 2:
         raise ConfigurationError(f"неподдерживаемая schema_version={version}")
     product = _require(raw, "product", "app.json")
     paths = _require(raw, "paths", "app.json")
     discovery = _require(raw, "discovery", "app.json")
     calendar = _require(raw, "calendar", "app.json")
+    portfolio_layout = str(
+        _require(discovery, "portfolio_layout", "discovery")
+    ).strip()
+    if portfolio_layout != SUPPORTED_PORTFOLIO_LAYOUT:
+        raise ConfigurationError(
+            "discovery.portfolio_layout должен быть "
+            f"{SUPPORTED_PORTFOLIO_LAYOUT!r}, получено {portfolio_layout!r}"
+        )
+    active_extensions = tuple(
+        str(ext).casefold()
+        for ext in _require(
+            discovery,
+            "active_extensions",
+            "discovery",
+        )
+    )
+    if set(active_extensions) != {".xlsb"}:
+        raise ConfigurationError(
+            "для discovery.portfolio_layout "
+            f"{SUPPORTED_PORTFOLIO_LAYOUT!r} active_extensions должен "
+            "содержать только '.xlsb'"
+        )
 
     month_names = {int(key): str(value) for key, value in calendar["month_names"].items()}
     if set(month_names) != set(range(1, 13)):
@@ -180,6 +242,11 @@ def _parse_app(raw: dict[str, Any]) -> AppConfig:
         )
 
     safety = dict(raw.get("safety") or {})
+    if not bool(safety.get("block_unconfigured_groups_with_files", True)):
+        raise ConfigurationError(
+            "safety.block_unconfigured_groups_with_files должен быть true "
+            "для fail-closed portfolio_layout"
+        )
     multi_owner_policy = str(
         safety.get("multi_owner_case_policy", "block")
     )
@@ -214,8 +281,9 @@ def _parse_app(raw: dict[str, Any]) -> AppConfig:
         workspace=str(paths["workspace"]),
         month_names=month_names,
         portfolio_roots=tuple(roots),
+        portfolio_layout=portfolio_layout,
         backup_name_regex=str(discovery["backup_name_regex"]),
-        active_extensions=tuple(str(ext).casefold() for ext in discovery["active_extensions"]),
+        active_extensions=active_extensions,
         ignored_directory_prefixes=tuple(
             str(prefix).casefold() for prefix in discovery["ignored_directory_prefixes"]
         ),
@@ -456,11 +524,88 @@ def load_config_bundle(config_dir: str | Path | None = None) -> ConfigBundle:
         else Path(__file__).resolve().parent / "config"
     ).resolve()
     project_root = Path(__file__).resolve().parents[1]
-    raw_app = _read_json(config_path / "app.json")
-    raw_fields = _read_json(config_path / "fields.json")
-    raw_theme = _read_json(config_path / "theme.json")
+    config_names = {
+        path.name
+        for path in config_path.glob("*.json")
+    } | {"app.json", "fields.json", "theme.json"}
+    raw_configs = {
+        name: _read_json(config_path / name)
+        for name in sorted(config_names)
+    }
+    raw_app = raw_configs["app.json"]
+    raw_fields = raw_configs["fields.json"]
+    raw_theme = raw_configs["theme.json"]
+    config_identity = hashlib.sha256(
+        json.dumps(
+            raw_configs,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    config_payloads = tuple(
+        (
+            name,
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+        for name, payload in sorted(raw_configs.items())
+    )
     app = _parse_app(raw_app)
     fields = _parse_fields(raw_fields)
+
+    boundary_mismatches = []
+    if fields.sheet_name != _exchange_contract.WORKBOOK_SHEET_NAME:
+        boundary_mismatches.append("portfolio_sheet")
+    if fields.header_search_rows != _exchange_contract.WORKBOOK_HEADER_SEARCH_ROWS:
+        boundary_mismatches.append("header_search_rows")
+    if fields.key_title != _exchange_contract.WORKBOOK_CONTRACT_TITLE:
+        boundary_mismatches.append("key_title")
+    if fields.responsible_title != _exchange_contract.WORKBOOK_RESPONSIBLE_TITLE:
+        boundary_mismatches.append("responsible_title")
+    if boundary_mismatches:
+        raise ConfigurationError(
+            "fields.json расходится с data_exchange_contract: "
+            + ", ".join(boundary_mismatches)
+        )
+
+    collect_titles = {norm_title(rule.title) for rule in fields.collect}
+    boundary_keys = {
+        target
+        for _source, target, _merge in (
+            _exchange_contract.ENRICHMENT_WRITE_RULES
+        )
+    } | set(_exchange_contract.OFFICE_CALL_FIELDS)
+    unknown_boundary_keys = boundary_keys - set(_hardbot_fields.BY_KEY)
+    if unknown_boundary_keys:
+        raise ConfigurationError(
+            "data_exchange_contract ссылается на неизвестные hardbot fields: "
+            + ", ".join(sorted(unknown_boundary_keys))
+        )
+    missing_collect_titles = sorted(
+        _hardbot_fields.BY_KEY[key].title
+        for key in boundary_keys
+        if norm_title(_hardbot_fields.BY_KEY[key].title) not in collect_titles
+    )
+    if missing_collect_titles:
+        raise ConfigurationError(
+            "registry collect не содержит поля bot/Excel boundary: "
+            + ", ".join(missing_collect_titles)
+        )
+    for key, aliases in _exchange_contract.WORKBOOK_HEADER_ALIASES.items():
+        canonical_title = _hardbot_fields.BY_KEY[key].title
+        configured = set(fields.aliases.get(canonical_title, ()))
+        missing_aliases = set(aliases) - configured
+        if missing_aliases:
+            raise ConfigurationError(
+                f"registry aliases для {canonical_title!r} расходятся с "
+                "data_exchange_contract: "
+                + ", ".join(sorted(missing_aliases))
+            )
 
     unknown_group_profiles = {
         group.profile
@@ -488,4 +633,6 @@ def load_config_bundle(config_dir: str | Path | None = None) -> ConfigBundle:
         theme=raw_theme,
         config_dir=config_path,
         project_root=project_root,
+        config_identity=config_identity,
+        config_payloads=config_payloads,
     )

@@ -40,11 +40,13 @@ class SnapshotSet:
     personals: tuple[CapturedPersonal, ...]
     baseline_copy: Path | None = None
     baseline_fingerprint: FileFingerprint | None = None
+    config_identity: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
             "run_dir": str(self.run_dir),
+            "config_identity": self.config_identity,
             "master": {
                 "original": str(self.master_original),
                 "copy": str(self.master_copy),
@@ -77,6 +79,33 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _assert_run_dir_under_workspace(
+    bundle: ConfigBundle,
+    run_dir: Path,
+    *,
+    at: datetime | None = None,
+) -> None:
+    workspace = (
+        bundle.workspace_path(at)
+        if getattr(bundle, "app", None) is not None
+        else Path(bundle.project_root) / ".registry-cycle"
+    )
+    runs_root = (workspace / "runs").resolve()
+    resolved_run_dir = run_dir.resolve()
+    try:
+        resolved_run_dir.relative_to(runs_root)
+    except ValueError as exc:
+        raise SafetyViolation(
+            "run_dir snapshot находится вне workspace/runs: "
+            f"{run_dir}"
+        ) from exc
+    if resolved_run_dir == runs_root:
+        raise SafetyViolation(
+            "run_dir snapshot должен быть отдельной папкой внутри "
+            f"workspace/runs: {run_dir}"
+        )
+
+
 def capture_sources(
     bundle: ConfigBundle,
     discovery: DiscoveryReport,
@@ -93,6 +122,7 @@ def capture_sources(
         raise SafetyViolation("discovery заблокирован; снимок не создаётся")
     run_id = run_id or new_run_id(now)
     run_dir = bundle.workspace_path(now) / "runs" / run_id
+    _assert_run_dir_under_workspace(bundle, run_dir, at=now)
     source_dir = run_dir / "sources"
     source_dir.mkdir(parents=True, exist_ok=False)
 
@@ -134,6 +164,7 @@ def capture_sources(
         personals=tuple(personals),
         baseline_copy=baseline_copy,
         baseline_fingerprint=baseline_fingerprint,
+        config_identity=bundle.config_identity,
     )
     _atomic_json(run_dir / "snapshot.json", snapshot.as_dict())
     return snapshot
@@ -196,6 +227,7 @@ def load_snapshot(path: str | Path) -> SnapshotSet:
         personals=tuple(personals),
         baseline_copy=baseline_copy,
         baseline_fingerprint=baseline_fingerprint,
+        config_identity=str(payload.get("config_identity") or ""),
     )
     missing = [
         str(item)
@@ -211,3 +243,22 @@ def load_snapshot(path: str | Path) -> SnapshotSet:
             "снимок неполон; отсутствуют копии: " + ", ".join(missing[:10])
         )
     return snapshot
+
+
+def assert_snapshot_config_identity(
+    bundle: ConfigBundle,
+    snapshot: SnapshotSet,
+) -> None:
+    expected = str(getattr(bundle, "config_identity", "") or "")
+    if snapshot.config_identity != expected:
+        raise SafetyViolation(
+            "snapshot создан с другой конфигурацией; повторный запуск "
+            "после config drift запрещён"
+        )
+
+
+def assert_snapshot_run_dir(
+    bundle: ConfigBundle,
+    snapshot: SnapshotSet,
+) -> None:
+    _assert_run_dir_under_workspace(bundle, snapshot.run_dir)

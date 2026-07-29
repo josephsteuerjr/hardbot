@@ -22,7 +22,11 @@ from .models import FileFingerprint, MonthRolloverPlan, PersonalProjection, Sync
 from .normalize import comparable_value, is_blank, json_value, norm_title
 from .reader import read_portfolio
 from .semantics import values_equal_for_rule
-from .snapshot import CapturedPersonal, SnapshotSet
+from .snapshot import (
+    CapturedPersonal,
+    SnapshotSet,
+    assert_snapshot_run_dir,
+)
 
 ProgressCallback = Callable[[str, int, int], None]
 
@@ -57,6 +61,7 @@ class StageSet:
     plan_digest: str
     master: StagedFile
     personals: tuple[StagedFile, ...]
+    config_identity: str = ""
 
     @property
     def files(self) -> tuple[StagedFile, ...]:
@@ -68,6 +73,7 @@ class StageSet:
             "run_dir": str(self.run_dir),
             "staging_dir": str(self.staging_dir),
             "plan_digest": self.plan_digest,
+            "config_identity": self.config_identity,
             "master": self.master.as_dict(),
             "personals": [item.as_dict() for item in self.personals],
         }
@@ -119,6 +125,7 @@ def load_stage(path: str | Path) -> StageSet:
             _staged_file_from_dict(item)
             for item in payload["personals"]
         ),
+        config_identity=str(payload.get("config_identity") or ""),
     )
     missing = [
         str(item.staged_path)
@@ -833,6 +840,16 @@ def build_staging(
 ) -> StageSet:
     if plan.blocked:
         raise SafetyViolation("заблокированный план нельзя переносить в staging")
+    assert_snapshot_run_dir(bundle, snapshot)
+    config_identity = str(getattr(bundle, "config_identity", "") or "")
+    if not (
+        snapshot.config_identity
+        == plan.config_identity
+        == config_identity
+    ):
+        raise SafetyViolation(
+            "snapshot/plan относятся к другой конфигурации; staging запрещён"
+        )
     if plan.digest == "":
         raise SafetyViolation("у плана нет digest")
     staging_dir = (
@@ -912,6 +929,7 @@ def build_staging(
         plan_digest=plan.digest,
         master=master_file,
         personals=personals,
+        config_identity=config_identity,
     )
     _atomic_json(staging_dir / "stage.json", stage_set.as_dict())
     return stage_set

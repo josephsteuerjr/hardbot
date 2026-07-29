@@ -1,8 +1,9 @@
-"""Якорный шлюз офисных правок: сотрудники дописывают в реестрах и в офисе,
-импорт принимает эти правки ПОСЛЕ визита бота, только если файл доказал, что
-видел обогащение («Дата выезда» строки совпала с датой визита бота). Снимок
-миниаппа (bot_visit_data) неприкосновенен; устаревший файл по-прежнему не
-может затереть результат выездника."""
+"""Якорный шлюз published master → hardbot.
+
+Офисная правка проходит personal → registry_cycle → published master. Итог из
+Excel ``overall_result`` reverse-map-ится во внутренний visit-result
+``call_status``; настоящие call_status/call_comment из master изолированы.
+"""
 
 import json
 from datetime import date
@@ -10,6 +11,7 @@ from datetime import date
 import pytest
 
 import db
+from pult import enrich
 
 
 @pytest.fixture(autouse=True)
@@ -18,13 +20,31 @@ def _isolated_db(tmp_path, monkeypatch):
     db.init_db()
 
 
-KEYS = ["contract_id", "client", "responsible", "city",
-        "visit_date", "call_status", "visit_comment"]
+KEYS = [
+    "contract_id",
+    "client",
+    "responsible",
+    "city",
+    "visit_date",
+    "overall_result",
+    "call_status",
+    "visit_comment",
+    "call_comment",
+    "contact_with",
+    "agreed_payment",
+    "who_at_address",
+    "client_location",
+    "purpose_rf",
+]
 
 
 def _import(*rows):
-    titles = [db.BY_KEY[k].title for k in KEYS]
-    return db.import_grid([titles] + [[r.get(k) for k in KEYS] for r in rows])
+    titles = [field.title for field in db.FIELDS]
+    return db.import_grid(
+        [titles, [field.source for field in db.FIELDS]]
+        + [[row.get(field.key) for field in db.FIELDS] for row in rows],
+        source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
+    )
 
 
 def _complete_visit(cid, today, **values):
@@ -58,6 +78,38 @@ def test_office_edit_accepted_with_anchor():
     assert safe[db.BOT_VISIT_MARKER] is True
 
 
+def test_test_subset_can_never_apply_office_overlay():
+    today = date.today().isoformat()
+    _import(
+        {
+            "contract_id": "OF-SUBSET",
+            "client": "Тестовая выборка",
+            "responsible": "Агент",
+        }
+    )
+    _complete_visit("OF-SUBSET", today, call_status="Оплачен")
+    values = {
+        "contract_id": "OF-SUBSET",
+        "client": "Тестовая выборка",
+        "responsible": "Агент",
+        "visit_date": today,
+        "overall_result": "Доп. Обогащение",
+    }
+    grid = [
+        [field.title for field in db.FIELDS],
+        [values.get(field.key) for field in db.FIELDS],
+    ]
+    rep = db.import_grid(
+        grid,
+        source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
+    )
+    assert rep["office_cells"] == 0
+    assert rep["protected_cells"] >= 2
+    assert db.bot_visit_snapshot(
+        db.get_client("OF-SUBSET")
+    )["call_status"] == "Оплачен"
+
+
 def test_office_edit_reimport_echo_is_silent():
     """Повторный импорт того же файла стабилен: принятая правка стала «эхом»."""
     today = date.today().isoformat()
@@ -82,7 +134,8 @@ def test_stale_file_still_rejected():
                    "visit_date": "531", "call_status": "Нет контакта",
                    "visit_comment": "древняя копия"})
     assert rep["office_cells"] == 0
-    assert rep["protected_cells"] == 3          # дата+статус+комментарий не вошли
+    assert rep["protected_cells"] == 2          # дата+visit_comment не вошли
+    assert rep["isolated_call_cells"] == 1      # call_status — отдельный звонок
     assert rep["protected_contracts"] == 1
     raw = db.get_client("OF-3")
     assert raw["call_status"] == "Оплачен"
@@ -96,7 +149,7 @@ def test_office_dropdown_must_be_canonical():
     _import({"contract_id": "OF-4", "client": "Каноничный", "responsible": "Агент"})
     _complete_visit("OF-4", today, call_status="Оплачен")
     rep = _import({"contract_id": "OF-4", "client": "Каноничный", "responsible": "Агент",
-                   "visit_date": today, "call_status": "CONSUMER"})
+                   "visit_date": today, "overall_result": "CONSUMER"})
     assert rep["office_cells"] == 0
     assert rep["protected_cells"] == 1
     assert db.get_client("OF-4")["call_status"] == "Оплачен"
@@ -125,7 +178,7 @@ def test_enriched_copy_between_same_day_visits_does_not_roll_back():
     # обогащение в 12:00 записало «Нет контакта» в файл; в 15:00 повторный визит
     _complete_visit("OF-8", today, call_status="Оплачен")
     rep = _import({"contract_id": "OF-8", "client": "Дважды", "responsible": "Агент",
-                   "visit_date": today, "call_status": "Нет контакта"})
+                   "visit_date": today, "overall_result": "Нет контакта"})
     assert rep["office_cells"] == 0                 # эхо первого снимка, не правка
     assert rep["protected_cells"] == 0
     assert db.get_client("OF-8")["call_status"] == "Оплачен"
@@ -145,6 +198,7 @@ def test_poison_signature_call_comment_not_accepted():
                    "call_status": "Оплачен", "call_comment": "говорил лично"})
     assert rep["office_cells"] == 0
     assert rep["protected_cells"] == 0
+    assert rep["isolated_call_cells"] == 2
     raw = db.get_client("OF-9")
     assert raw["call_comment"] is None              # яд не легализован
     safe = next(r for r in db.enrichment_rows() if r["contract_id"] == "OF-9")
@@ -174,10 +228,89 @@ def test_office_dropdown_normalized_to_canonical():
     _import({"contract_id": "OF-B", "client": "Регистр", "responsible": "Агент"})
     _complete_visit("OF-B", today, call_status="Нет контакта")
     rep = _import({"contract_id": "OF-B", "client": "Регистр", "responsible": "Агент",
-                   "visit_date": today, "call_status": "оплачен."})
+                   "visit_date": today, "overall_result": "оплачен."})
     assert rep["office_cells"] == 1
     assert rep["office_applied"]["OF-B"]["call_status"] == "Оплачен"
     assert db.get_client("OF-B")["call_status"] == "Оплачен"
+
+
+def test_published_master_reverse_map_survives_two_enrichment_cycles():
+    """Полный контракт без personal→bot gateway.
+
+    safe export → personal enrichment → registry publication (представлена тем
+    же master-row) → explicit master import повторяется дважды. Офисный итог
+    сохраняется, а самостоятельные поля звонка не трогаются.
+    """
+    today = date.today().isoformat()
+    _import({
+        "contract_id": "OF-CYCLE",
+        "client": "Два цикла",
+        "responsible": "Агент",
+    })
+    _complete_visit(
+        "OF-CYCLE",
+        today,
+        call_status="Нет контакта",
+        visit_comment="бот",
+    )
+
+    keys = [field.key for field in db.FIELDS]
+    initial = {
+        "contract_id": "OF-CYCLE",
+        "call_status": "В работе",
+        "call_comment": "звонок офиса",
+    }
+    grid = [
+        [db.BY_KEY[key].title for key in keys],
+        [initial.get(key) for key in keys],
+    ]
+
+    def apply_safe_export():
+        safe = [
+            row
+            for row in db.enrichment_rows()
+            if row["contract_id"] == "OF-CYCLE"
+        ]
+        plan = enrich.build_plan(grid, db.export_schema(), safe)
+        for row, column, value, _is_date in plan["writes"]:
+            grid[row][column] = value
+        return plan
+
+    first = apply_safe_export()
+    assert first["cells_written"] == 3
+    assert grid[1][keys.index("overall_result")] == "Нет контакта"
+    assert grid[1][keys.index("call_status")] == "В работе"
+    assert grid[1][keys.index("call_comment")] == "звонок офиса"
+
+    # Ручная правка в personal прошла registry_cycle и появилась в master.
+    grid[1][keys.index("overall_result")] = "Доп. Обогащение"
+    published = dict(zip(keys, grid[1], strict=True))
+    rep = _import({**published, "client": "Два цикла", "responsible": "Агент"})
+    assert rep["office_applied"]["OF-CYCLE"]["call_status"] == "Доп. Обогащение"
+    assert rep["isolated_call_cells"] == 2
+
+    raw = db.get_client("OF-CYCLE")
+    assert json.loads(raw["bot_visit_data"])["call_status"] == "Нет контакта"
+    assert db.bot_visit_snapshot(raw)["call_status"] == "Доп. Обогащение"
+    assert raw["call_comment"] is None
+
+    second = apply_safe_export()
+    assert grid[1][keys.index("overall_result")] == "Доп. Обогащение"
+    assert grid[1][keys.index("call_status")] == "В работе"
+    assert grid[1][keys.index("call_comment")] == "звонок офиса"
+    assert second["cells_written"] == 0
+    assert second["cells_already"] >= 3
+
+    published_again = dict(zip(keys, grid[1], strict=True))
+    echo = _import({
+        **published_again,
+        "client": "Два цикла",
+        "responsible": "Агент",
+    })
+    assert echo["office_cells"] == 0
+    assert db.bot_visit_snapshot(
+        db.get_client("OF-CYCLE")
+    )["call_status"] == "Доп. Обогащение"
 
 
 def test_stale_overlay_from_code_rollback_is_ignored():

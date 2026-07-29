@@ -10,13 +10,22 @@ from typing import Any
 
 from .baseline import baseline_path, build_baseline, load_baseline, save_baseline
 from .config import ConfigBundle
+from .cycle_lock import CycleLock
 from .errors import SafetyViolation
 from .files import fingerprint
 from .models import DiscoveryReport
-from .publishing import PublishResult, publish_validated
+from .publishing import (
+    PublishResult,
+    publication_cycle_lock,
+    publish_validated,
+)
 from .reader import read_portfolio
 from .service import CycleService, PreparedRun
-from .snapshot import SnapshotSet, load_snapshot
+from .snapshot import (
+    SnapshotSet,
+    assert_snapshot_config_identity,
+    load_snapshot,
+)
 from .staging import StageSet, build_staging, load_stage
 from .validation import ValidationReport, validate_staging
 
@@ -65,9 +74,21 @@ def execute_first_baseline_rehearsal(
     *,
     now: datetime | None = None,
     rollover_month: str | None = None,
+    cycle_lock: CycleLock | None = None,
 ) -> RehearsalOutcome:
     """Проверить предполагаемый первый цикл, не создавая active baseline."""
+    if cycle_lock is None:
+        with publication_cycle_lock(bundle) as acquired:
+            return execute_first_baseline_rehearsal(
+                bundle,
+                snapshot_path,
+                now=now,
+                rollover_month=rollover_month,
+                cycle_lock=acquired,
+            )
+    cycle_lock.assert_owned()
     source = load_snapshot(snapshot_path)
+    assert_snapshot_config_identity(bundle, source)
     now = now or datetime.now()
     run_dir = (
         source.run_dir
@@ -104,6 +125,7 @@ def execute_first_baseline_rehearsal(
         personals=source.personals,
         baseline_copy=candidate_path,
         baseline_fingerprint=fingerprint(candidate_path),
+        config_identity=source.config_identity,
     )
     discovery = DiscoveryReport(
         entries=[item.entry for item in source.personals]
@@ -168,9 +190,24 @@ def promote_first_baseline_rehearsal(
     confirmation_digest: str,
     rollover_month: str | None = None,
     busy_mode: str | None = None,
+    cycle_lock: CycleLock | None = None,
 ) -> PublishResult:
     """Явно опубликовать зелёную одноразовую first-baseline репетицию."""
+    if cycle_lock is None:
+        with publication_cycle_lock(bundle) as acquired:
+            return promote_first_baseline_rehearsal(
+                bundle,
+                snapshot_path,
+                stage_path,
+                candidate_baseline_path,
+                confirmation_digest=confirmation_digest,
+                rollover_month=rollover_month,
+                busy_mode=busy_mode,
+                cycle_lock=acquired,
+            )
+    cycle_lock.assert_owned()
     source = load_snapshot(snapshot_path)
+    assert_snapshot_config_identity(bundle, source)
     if source.baseline_copy is not None:
         raise SafetyViolation(
             "snapshot уже содержит baseline; одноразовое продвижение запрещено"
@@ -221,6 +258,7 @@ def promote_first_baseline_rehearsal(
         personals=source.personals,
         baseline_copy=candidate_path,
         baseline_fingerprint=fingerprint(candidate_path),
+        config_identity=source.config_identity,
     )
     discovery = DiscoveryReport(
         entries=[item.entry for item in source.personals]
@@ -255,4 +293,5 @@ def promote_first_baseline_rehearsal(
         confirmation_digest=confirmation_digest,
         busy_mode=busy_mode,
         allow_initial_baseline=True,
+        cycle_lock=cycle_lock,
     )

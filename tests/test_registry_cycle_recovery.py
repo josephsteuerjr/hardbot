@@ -3,8 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 import registry_cycle.recovery as recovery
 from registry_cycle.config import ConfigBundle, FieldConfig
+from registry_cycle.errors import SafetyViolation
 from registry_cycle.models import FileFingerprint, ManifestEntry, WorkbookSnapshot
 from registry_cycle.recovery import (
     CapturedSource,
@@ -12,6 +15,7 @@ from registry_cycle.recovery import (
     RecoveryField,
     audit_recovery_against_master,
     build_recovery_plan,
+    publish_recovery,
 )
 from registry_cycle.snapshot import CapturedPersonal, SnapshotSet
 
@@ -130,7 +134,7 @@ def _run_plan(
     )
     snapshot = SnapshotSet(
         run_id="test-recovery",
-        run_dir=tmp_path / "run",
+        run_dir=tmp_path / ".registry-cycle" / "runs" / "run",
         master_original=master_path,
         master_copy=master_path,
         master_fingerprint=master.fingerprint,
@@ -173,6 +177,17 @@ def _run_plan(
 
 
 UTC = timezone.utc
+
+
+def test_recovery_publish_is_disabled_for_limited_testing():
+    with pytest.raises(SafetyViolation, match="ограниченного тестирования"):
+        publish_recovery(
+            None,  # type: ignore[arg-type]
+            None,  # type: ignore[arg-type]
+            None,  # type: ignore[arg-type]
+            confirmation_digest="x",
+            notify_owner=False,
+        )
 
 
 def test_current_nonblank_value_always_wins(monkeypatch, tmp_path):

@@ -6,11 +6,17 @@ from pathlib import Path
 import pytest
 
 from registry_cycle.config import ConfigurationError, load_config_bundle
+from registry_cycle.distribution import load_distribution_config
+from registry_cycle.errors import SafetyViolation
+from registry_cycle.recovery import load_recovery_config
 
 
 def test_default_configuration_is_complete_and_renderable():
     bundle = load_config_bundle()
 
+    assert len(bundle.config_identity) == 64
+    assert int(bundle.config_identity, 16) >= 0
+    assert bundle.app.schema_version == 2
     assert bundle.app.product_name == "Контур · Реестры"
     assert set(bundle.fields.profile_tags) == {"hard", "soft"}
     assert bundle.master_path(datetime(2026, 7, 27)).name == "ОБЩИЙ РЕЕСТР ИЮЛЬ.xlsb"
@@ -23,6 +29,10 @@ def test_default_configuration_is_complete_and_renderable():
     assert bundle.fields.previous_responsible_title == "пред отв"
     assert bundle.fields.employee_header_fill_rgb == ("#FFFF00",)
     assert bundle.fields.strict_header_color_validation
+    assert (
+        bundle.app.portfolio_layout
+        == "root/group/employee/*.xlsb"
+    )
     assert bundle.fields.month_rollover is not None
     assert bundle.fields.month_rollover.employee_clear_titles == (
         "Сумма последнего платежа",
@@ -30,22 +40,24 @@ def test_default_configuration_is_complete_and_renderable():
     )
 
 
-def test_four_primary_cities_and_soft_are_explicit_in_config():
+def test_primary_groups_and_optional_hard_gph_are_config_driven():
     bundle = load_config_bundle()
     enabled = {
-        (root.country, group.name, group.profile)
+        (root.country, group.name, group.profile, group.required)
         for root in bundle.app.portfolio_roots
         for group in root.groups
         if group.enabled
     }
 
-    assert ("Таджикистан", "Душанбе", "hard") in enabled
-    assert ("Таджикистан", "Худжанд", "hard") in enabled
-    assert ("Узбекистан", "Ташкент", "hard") in enabled
-    assert ("Узбекистан", "Самарканд", "hard") in enabled
-    assert ("Таджикистан", "Soft", "soft") in enabled
-    assert ("Узбекистан", "Soft", "soft") in enabled
-    assert ("Узбекистан", "Андижан", "hard") not in enabled
+    assert ("Таджикистан", "Душанбе", "hard", True) in enabled
+    assert ("Таджикистан", "Худжанд", "hard", True) in enabled
+    assert ("Узбекистан", "Ташкент", "hard", True) in enabled
+    assert ("Узбекистан", "Самарканд", "hard", True) in enabled
+    assert ("Таджикистан", "Soft", "soft", True) in enabled
+    assert ("Узбекистан", "Soft", "soft", True) in enabled
+    assert ("Таджикистан", "ГПХ Агент выезд", "hard", False) in enabled
+    assert ("Узбекистан", "ГПХ Агент выезд", "hard", True) in enabled
+    assert ("Узбекистан", "Андижан", "hard", False) not in enabled
 
 
 def test_field_semantics_are_explicit_and_safe():
@@ -82,6 +94,60 @@ def test_full_cycle_has_shared_responsible_aliases():
     }
 
 
+def test_distribution_aliases_must_match_app_exactly(tmp_path: Path):
+    source = Path(__file__).parents[1] / "registry_cycle" / "config"
+    config_dir = tmp_path / "config"
+    shutil.copytree(source, config_dir)
+    original_identity = load_config_bundle(config_dir).config_identity
+    distribution_path = config_dir / "distribution.json"
+    payload = json.loads(
+        distribution_path.read_text(encoding="utf-8")
+    )
+    payload["responsible_aliases"]["Другой"] = "Ответственный"
+    distribution_path.write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    bundle = load_config_bundle(config_dir)
+    assert bundle.config_identity != original_identity
+    with pytest.raises(SafetyViolation, match="должны совпадать точно"):
+        load_distribution_config(bundle)
+
+
+def test_loaded_bundle_pins_distribution_and_recovery_payloads(tmp_path: Path):
+    source = Path(__file__).parents[1] / "registry_cycle" / "config"
+    config_dir = tmp_path / "config"
+    shutil.copytree(source, config_dir)
+    bundle = load_config_bundle(config_dir)
+    distribution_before = load_distribution_config(bundle)
+    recovery_before = load_recovery_config(bundle)
+
+    distribution_path = config_dir / "distribution.json"
+    distribution_payload = json.loads(
+        distribution_path.read_text(encoding="utf-8")
+    )
+    distribution_payload["safety"]["max_total_rows"] = 1
+    distribution_path.write_text(
+        json.dumps(distribution_payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    recovery_path = config_dir / "recovery.json"
+    recovery_payload = json.loads(recovery_path.read_text(encoding="utf-8"))
+    recovery_payload["safety"]["max_writes_per_file"] = 1
+    recovery_path.write_text(
+        json.dumps(recovery_payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    assert load_distribution_config(bundle) == distribution_before
+    assert load_recovery_config(bundle) == recovery_before
+    changed = load_config_bundle(config_dir)
+    assert changed.config_identity != bundle.config_identity
+    assert load_distribution_config(changed).safety["max_total_rows"] == 1
+    assert load_recovery_config(changed).safety["max_writes_per_file"] == 1
+
+
 @pytest.mark.parametrize(
     ("key", "value"),
     [
@@ -109,4 +175,65 @@ def test_direction_contract_cannot_be_silently_changed(
     )
 
     with pytest.raises(ConfigurationError, match="directions"):
+        load_config_bundle(config_dir)
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value", "message"),
+    [
+        (
+            "discovery",
+            "portfolio_layout",
+            "root/group/**/*.xlsb",
+            "portfolio_layout",
+        ),
+        (
+            "discovery",
+            "active_extensions",
+            [".xlsx"],
+            "active_extensions",
+        ),
+        (
+            "safety",
+            "block_unconfigured_groups_with_files",
+            False,
+            "block_unconfigured_groups_with_files",
+        ),
+    ],
+)
+def test_portfolio_layout_contract_cannot_be_silently_changed(
+    tmp_path: Path,
+    section: str,
+    key: str,
+    value: object,
+    message: str,
+):
+    source = Path(__file__).parents[1] / "registry_cycle" / "config"
+    config_dir = tmp_path / "config"
+    shutil.copytree(source, config_dir)
+    app_path = config_dir / "app.json"
+    app = json.loads(app_path.read_text(encoding="utf-8"))
+    app[section][key] = value
+    app_path.write_text(
+        json.dumps(app, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match=message):
+        load_config_bundle(config_dir)
+
+
+def test_pre_layout_app_schema_is_rejected_instead_of_guessed(tmp_path: Path):
+    source = Path(__file__).parents[1] / "registry_cycle" / "config"
+    config_dir = tmp_path / "config"
+    shutil.copytree(source, config_dir)
+    app_path = config_dir / "app.json"
+    app = json.loads(app_path.read_text(encoding="utf-8"))
+    app["schema_version"] = 1
+    app_path.write_text(
+        json.dumps(app, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="schema_version=1"):
         load_config_bundle(config_dir)

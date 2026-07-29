@@ -1,0 +1,223 @@
+{
+  "schema": "hardbot.data-exchange-contract.v1",
+  "version": 1,
+  "artifacts": {
+    "snapshot_kind": "hardbot_limited_test_pre_reset.v2",
+    "enrichment_evidence_schema": "hardbot.pult-enrichment.v2",
+    "enrichment_file_map_schema": "hardbot.pult-enrichment-map.v2",
+    "clearance_receipt_schema": "hardbot.registry-clearance.v2"
+  },
+  "form": {
+    "protocol_version": 2,
+    "dropdown_keys": [
+      "call_status",
+      "contact_with",
+      "who_at_address",
+      "client_location",
+      "purpose_rf",
+      "agreed_payment"
+    ],
+    "text_keys": [
+      "visit_comment",
+      "tips"
+    ]
+  },
+  "workbook_shape": {
+    "required_sheet_name": "Портфели",
+    "header_search_rows": 10,
+    "header_policy": "hardbot-normalized-title.v1",
+    "type_row": {
+      "offset_from_header": 1,
+      "published_master": "required",
+      "test_subset": "optional",
+      "allowed_tags": [
+        "сх",
+        "хард",
+        "софт"
+      ],
+      "allowed_blank_keys": [
+        "debt_bucket",
+        "visits_count"
+      ]
+    },
+    "required_keys_policy": {
+      "published_master": "all-export-schema-fields",
+      "test_subset": [
+        "contract_id",
+        "responsible"
+      ]
+    },
+    "unknown_headers_policy": "block",
+    "duplicate_headers_policy": "block",
+    "export_schema_sha256": "30708d4d66fd9a2ea77644dd3a8bbcb4a97ccbb8816db09adacd938030e27c1d",
+    "contract_key": "contract_id",
+    "responsible_key": "responsible",
+    "contract_title": "Номер КД / ID",
+    "responsible_title": "ответственный Сотрудник",
+    "header_aliases": {
+      "last_payment_sum": [
+        "Блок оплат и обещаний"
+      ]
+    },
+    "allowed_ignored_headers": [
+      "Страна",
+      "Подразделение",
+      "ФИО кириллица",
+      "пред отв",
+      "Направление",
+      "Область",
+      "Район",
+      "Джамоат\\Махаля",
+      "Текущие платежи",
+      "Долг на начало месяца",
+      "Изменение долга",
+      "Историчный комментарий выезда",
+      "статус звонка софт",
+      "Дата перезвона",
+      "Комментарий текущего месяца Софт",
+      "Историчный комментарий Софт",
+      "Долг на момент передачи в работу",
+      "Дата входа",
+      "Дата отзыва",
+      "Причина отзыва",
+      "Дата решения суда",
+      "Статус дела",
+      "Статус ИП",
+      "Проверка на ФРОД",
+      "Дата обогащения",
+      "ПИНФЛ",
+      "дата посл выезда",
+      "Передача на отзыв",
+      "Вывод из работы"
+    ],
+    "allowed_ignored_header_patterns": [
+      "^Оплаты за (?:0[1-9]|1[0-2])\\.[0-9]{2}$"
+    ]
+  },
+  "provenance": {
+    "marker": "_bot_completed",
+    "completion_date_key": "visit_date",
+    "snapshot_keys": [
+      "visit_date",
+      "call_status",
+      "contact_with",
+      "agreed_payment",
+      "who_at_address",
+      "client_location",
+      "purpose_rf",
+      "visit_comment",
+      "call_comment",
+      "tips"
+    ],
+    "legacy_read_keys": [
+      "call_comment"
+    ],
+    "enrichment_source_keys": [
+      "visit_date",
+      "call_status",
+      "contact_with",
+      "agreed_payment",
+      "who_at_address",
+      "client_location",
+      "purpose_rf",
+      "tips",
+      "visit_comment"
+    ]
+  },
+  "enrichment": {
+    "allowed_merge_modes": [
+      "replace",
+      "unique_lines",
+      "preserve_text"
+    ],
+    "writes": [
+      {
+        "source": "visit_date",
+        "target": "visit_date",
+        "merge": "replace"
+      },
+      {
+        "source": "call_status",
+        "target": "overall_result",
+        "merge": "replace"
+      },
+      {
+        "source": "contact_with",
+        "target": "contact_with",
+        "merge": "replace"
+      },
+      {
+        "source": "agreed_payment",
+        "target": "agreed_payment",
+        "merge": "replace"
+      },
+      {
+        "source": "who_at_address",
+        "target": "who_at_address",
+        "merge": "replace"
+      },
+      {
+        "source": "client_location",
+        "target": "client_location",
+        "merge": "replace"
+      },
+      {
+        "source": "purpose_rf",
+        "target": "purpose_rf",
+        "merge": "replace"
+      },
+      {
+        "source": "tips",
+        "target": "extra_address",
+        "merge": "unique_lines"
+      },
+      {
+        "source": "visit_comment",
+        "target": "visit_comment",
+        "merge": "preserve_text"
+      }
+    ],
+    "forbidden_targets": [
+      "call_status",
+      "call_comment"
+    ]
+  },
+  "office_overlay": {
+    "result_source_key": "overall_result",
+    "result_snapshot_key": "call_status",
+    "direct_edit_keys": [
+      "contact_with",
+      "agreed_payment",
+      "who_at_address",
+      "client_location",
+      "purpose_rf",
+      "visit_comment"
+    ],
+    "isolated_call_fields": [
+      "call_status",
+      "call_comment"
+    ]
+  },
+  "imports": {
+    "published_master_kind": "published_master",
+    "test_subset_kind": "test_subset",
+    "published_master_source_id": "cis-master-v1",
+    "published_master_proof_schema": "hardbot.published-master-source.v2",
+    "test_subset_proof_schema": "hardbot.test-subset-source.v2",
+    "legacy_publication_bootstrap": [
+      {
+        "run_id": "first-live-20260729-0340-01-candidate",
+        "plan_digest": "0bc77e620a98f9b66139e20a35c31395a9c4c8a06bdaec74f9e4cd08622ba6c5",
+        "publish_receipt_sha256": "fba3f48214888ee0825eaed19320cabba450cc5babce43ecb748b30b7c31593f",
+        "stage_receipt_sha256": "ac0bb6a52d97291e71eb94cabfc13cc6ea9aea75a92b0e3a9bc18e1585cfbf54",
+        "journal_sha256": "27ad30f76b139c94de1f31d3764e60176c7e30c0f4276746512ee733d4305ad9",
+        "baseline_sha256": "212af369d19aaaec071affd4aee894a96193dbf02cbff973af9136524928a96c",
+        "master_sha256": "4cf6781ca18c03cbc04ac339de9eeca9af69e85ac6a94e1134a636076a32551b"
+      }
+    ],
+    "allowed_source_kinds": [
+      "published_master",
+      "test_subset"
+    ]
+  }
+}

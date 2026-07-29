@@ -22,40 +22,411 @@
 
 from __future__ import annotations
 
+import argparse
+from contextlib import contextmanager
+import gzip
+import hashlib
+import json
+import os
 import re
+import secrets
 import shutil
-from datetime import date, datetime
+import stat
+import sys
+import tempfile
+from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Any
 
-SHEET_NAME = "Портфели"
+# Один JSON-контракт живёт в build-context hardbot и теми же байтами читается
+# операторским пультом. Жёстко проверяем origin модуля, чтобы окружение Python
+# не подсунуло одноимённый пакет раньше checkout.
+_HARDBOT_DIR = Path(__file__).resolve().parents[1] / "hardbot"
+if str(_HARDBOT_DIR) not in sys.path:
+    sys.path.insert(0, str(_HARDBOT_DIR))
 
-# Поля, которые РЕАЛЬНО пишет выездник: форма миниаппа + visit_date (ставит
-# сервер при завершении визита). Внутренний legacy-ключ call_status означает
-# результат ВЫЕЗДА и ниже направляется в «Общий результат», а не в «Статус
-# звонка». Bot-owned tips направляется в «Доп. Адрес/Доп.Номер».
-VISIT_KEYS = [
-    "visit_date", "call_status", "contact_with", "agreed_payment",
-    "who_at_address", "client_location", "purpose_rf",
-    "tips",
-    # Комментарий выездника живёт только в visit_comment. Поля звонка этим
-    # потоком не трогаем вообще: выездники не звонят, а в рабочих файлах там
-    # могут быть самостоятельные заметки колл-центра.
-    "visit_comment",
-]
+import exchange_contract as _exchange_contract  # noqa: E402
 
-# Серверные ключи → ключи целевых колонок живого реестра. Системные raw-значения
-# overall_result/extra_address при этом не используются: источник — только
-# доказанная safe-строка завершённого визита.
+if Path(_exchange_contract.__file__).resolve() != (
+    _HARDBOT_DIR / "exchange_contract.py"
+).resolve():
+    raise RuntimeError("exchange_contract imported outside the hardbot checkout")
+
+from exchange_contract import (  # noqa: E402
+    CONTRACT_KEY,
+    ExchangeContractError,
+    ENRICHMENT_EVIDENCE_SCHEMA,
+    ENRICHMENT_FILE_MAP_SCHEMA,
+    ENRICHMENT_SHEET_NAME,
+    ENRICHMENT_SOURCE_KEYS,
+    ENRICHMENT_WRITE_RULES,
+    IMPORT_SOURCE_PUBLISHED_MASTER,
+    LEGACY_PUBLICATION_BOOTSTRAP,
+    PUBLISHED_MASTER_SOURCE_ID,
+    PROVENANCE_MARKER,
+    SNAPSHOT_KIND,
+    WORKBOOK_HEADER_ALIASES,
+    WORKBOOK_HEADER_SEARCH_ROWS,
+    build_published_master_source_proof,
+    contract_binding,
+    publication_sequence,
+    validate_contract_binding,
+    verify_export_schema,
+)
+
+SHEET_NAME = ENRICHMENT_SHEET_NAME
+VISIT_KEYS = list(ENRICHMENT_SOURCE_KEYS)
 WRITE_TARGETS = {
-    "call_status": "overall_result",
-    "tips": "extra_address",
+    source: target
+    for source, target, _merge in ENRICHMENT_WRITE_RULES
+    if source != target
 }
+MERGE_MODES = {
+    source: merge
+    for source, _target, merge in ENRICHMENT_WRITE_RULES
+}
+FILLED_MARKER = PROVENANCE_MARKER
+EVIDENCE_SCHEMA = ENRICHMENT_EVIDENCE_SCHEMA
+FILE_MAP_SCHEMA = ENRICHMENT_FILE_MAP_SCHEMA
+DATA_EXCHANGE_CONTRACT = contract_binding()
 
-# Маркер происхождения выдаёт только сервер из служебного снимка завершённого
-# визита. Отсутствие маркера — fail closed: старый сервер/сырой импорт не пишем.
-FILLED_MARKER = "_bot_completed"
 
-CONTRACT_KEY = "contract_id"
+def validate_server_export(payload: Any) -> None:
+    """Reject stale pult/server combinations before preview or file access."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("сервер вернул не JSON-объект выгрузки")
+    try:
+        validate_contract_binding(payload.get("data_exchange_contract"))
+        verify_export_schema(payload.get("fields"))
+    except ExchangeContractError as exc:
+        raise ValueError(f"несовместимый контракт сервера/пульта: {exc}") from exc
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _transport_cell(value: Any) -> Any:
+    if isinstance(value, datetime):
+        text = value.isoformat(sep=" ", timespec="seconds")
+        return text[:-9] if text.endswith(" 00:00:00") else text
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def read_stable_workbook(workbook_path: str | Path) -> dict[str, Any]:
+    """Parse one immutable workbook copy and return exact transport sheets."""
+
+    from python_calamine import CalamineWorkbook
+
+    workbook_path = Path(workbook_path)
+    if workbook_path.is_symlink() or not workbook_path.is_file():
+        raise ValueError(
+            f"workbook не является обычным файлом: {workbook_path}"
+        )
+    selected_sha_before = _sha256_file(workbook_path)
+    with tempfile.TemporaryDirectory(
+        prefix="hardbot-master-read-",
+        ignore_cleanup_errors=True,
+    ) as temp_dir:
+        immutable_copy = Path(temp_dir) / (
+            "workbook" + workbook_path.suffix.lower()
+        )
+        shutil.copyfile(workbook_path, immutable_copy)
+        copied_sha = _sha256_file(immutable_copy)
+        if copied_sha != selected_sha_before:
+            raise ValueError(
+                "workbook изменился во время создания read-only копии"
+            )
+        workbook = CalamineWorkbook.from_path(str(immutable_copy))
+        names = list(workbook.sheet_names)
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(
+                "книга содержит повторяющиеся имена листов: "
+                + ", ".join(duplicates)
+            )
+        sheets = []
+        for name in names:
+            rows = workbook.get_sheet_by_name(name).to_python()
+            grid = [
+                [_transport_cell(cell) for cell in row]
+                for row in rows
+            ]
+            if grid:
+                sheets.append({"name": name, "grid": grid})
+    selected_sha_after = _sha256_file(workbook_path)
+    if selected_sha_after != selected_sha_before:
+        raise ValueError("workbook изменился во время стабильного чтения")
+    if not sheets:
+        raise ValueError("в workbook нет читаемых непустых листов")
+    return {
+        "sheets": sheets,
+        "file_sha256": selected_sha_after,
+    }
+
+
+def prepare_published_master_import(
+    master_path: str | Path,
+    *,
+    workspace: str | Path | None = None,
+) -> dict[str, Any]:
+    """Parse one immutable copy and bind its grid to the latest publication."""
+
+    master = Path(master_path)
+    stable = read_stable_workbook(master)
+    sheets = stable["sheets"]
+    selected_sha_after = stable["file_sha256"]
+    exact = [
+        sheet["grid"]
+        for sheet in sheets
+        if sheet["name"] == SHEET_NAME
+    ]
+    if len(exact) != 1:
+        raise ValueError(
+            f"обязательный единственный лист «{SHEET_NAME}» отсутствует"
+        )
+    proof = _published_master_source_proof(
+        master,
+        exact[0],
+        parsed_file_sha256=selected_sha_after,
+        workspace=workspace,
+    )
+    return {
+        "sheets": sheets,
+        "source_proof": proof,
+        "file_sha256": selected_sha_after,
+    }
+
+
+def _published_master_source_proof(
+    master_path: str | Path,
+    grid: list[list],
+    *,
+    parsed_file_sha256: str,
+    workspace: str | Path | None = None,
+) -> dict[str, Any]:
+    """Find and verify the registry-cycle receipt for exact selected bytes.
+
+    The registry cycle remains self-contained: this function only consumes its
+    durable stage/publish/journal artifacts and never starts or repeats it.
+    """
+
+    master = Path(master_path)
+    if (
+        master.is_symlink()
+        or not master.is_file()
+        or not master.resolve().is_file()
+    ):
+        raise ValueError(f"master не является обычным файлом: {master}")
+    root = (
+        Path(workspace)
+        if workspace is not None
+        else _HARDBOT_DIR.parent / "_local" / "registry_cycle_v2"
+    )
+    if not root.is_dir() or root.is_symlink():
+        raise ValueError(
+            "не найден workspace registry_cycle с publish receipt; "
+            "сначала выполните canonical publish"
+        )
+    # Never fall back to a previous committed master while a later publish is
+    # unresolved: personal files may already be partly replaced even if the
+    # master itself still has the old hash. Reuse registry_cycle's own journal
+    # authority instead of duplicating its terminal-event rules here.
+    checkout_root = _HARDBOT_DIR.parent
+    if str(checkout_root) not in sys.path:
+        sys.path.insert(0, str(checkout_root))
+    try:
+        from registry_cycle.errors import SafetyViolation
+        from registry_cycle.publishing import assert_no_incomplete_publications
+
+        assert_no_incomplete_publications(root)
+    except SafetyViolation as exc:
+        raise ValueError(
+            "workspace registry_cycle содержит незавершённую публикацию; "
+            "сначала выполните reconcile/ручную сверку"
+        ) from exc
+    selected_key = str(master.resolve()).casefold()
+    selected_sha = _sha256_file(master)
+    if selected_sha != parsed_file_sha256:
+        raise ValueError(
+            "master изменился после стабильного чтения workbook grid"
+        )
+    candidates: list[tuple[int, str, str, str, dict[str, Any]]] = []
+    for stage_path in root.glob("runs/**/stage.json"):
+        try:
+            if stage_path.is_symlink() or not stage_path.is_file():
+                continue
+            stage = json.loads(stage_path.read_text(encoding="utf-8"))
+            run_dir = stage_path.parent.parent
+            publish_path = run_dir / "publish.json"
+            journal_path = run_dir / "publish.journal.jsonl"
+            if any(
+                path.is_symlink() or not path.is_file()
+                for path in (publish_path, journal_path)
+            ):
+                continue
+            master_item = stage["master"]
+            master_key = str(
+                Path(master_item["original_path"]).resolve()
+            ).casefold()
+            run_id = str(stage["run_id"])
+            plan_digest = str(stage["plan_digest"])
+            staged_sha = str(master_item["staged_fingerprint"]["sha256"])
+            publish = json.loads(publish_path.read_text(encoding="utf-8"))
+            if (
+                publish.get("run_id") != run_id
+                or publish.get("plan_digest") != plan_digest
+                or publish.get("complete") is not True
+                or publish.get("ok") is not True
+                or publish.get("sidecars") != []
+                or not publish.get("finished_at")
+                or not publish.get("baseline")
+                or master_key
+                not in {
+                    str(Path(value).resolve()).casefold()
+                    for value in publish.get("published") or []
+                }
+            ):
+                continue
+            finished_at = str(publish["finished_at"])
+            sequence = publication_sequence(finished_at)
+            baseline_recorded = Path(str(publish["baseline"]))
+            baseline_paths = (
+                baseline_recorded,
+                root / "baselines" / baseline_recorded.name,
+            )
+            baseline_path = next(
+                (
+                    path
+                    for path in baseline_paths
+                    if path.is_file() and not path.is_symlink()
+                ),
+                None,
+            )
+            if baseline_path is None:
+                continue
+            baseline_sha = _sha256_file(baseline_path)
+            with gzip.open(baseline_path, "rt", encoding="utf-8") as stream:
+                baseline = json.load(stream)
+            if (
+                not isinstance(baseline, dict)
+                or baseline.get("plan_digest") != plan_digest
+                or str(baseline.get("master_path") or "").casefold()
+                != str(master_item["original_path"]).casefold()
+            ):
+                continue
+            records = []
+            malformed = False
+            for line in journal_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    malformed = True
+                    break
+                if not isinstance(record, dict):
+                    malformed = True
+                    break
+                records.append(record)
+            if malformed:
+                continue
+            starts = [
+                index
+                for index, record in enumerate(records)
+                if record.get("event") == "publish_started"
+            ]
+            if not starts:
+                continue
+            tail = records[starts[-1]:]
+            modern_terminal = any(
+                record.get("event") == "publish_committed"
+                and record.get("run_id") == run_id
+                and record.get("plan_digest") == plan_digest
+                for record in tail
+            )
+            publish_sha = _sha256_file(publish_path)
+            stage_sha = _sha256_file(stage_path)
+            journal_sha = _sha256_file(journal_path)
+            legacy_identity = {
+                "run_id": run_id,
+                "plan_digest": plan_digest,
+                "publish_receipt_sha256": publish_sha,
+                "stage_receipt_sha256": stage_sha,
+                "journal_sha256": journal_sha,
+                "baseline_sha256": baseline_sha,
+                "master_sha256": staged_sha,
+            }
+            legacy_terminal = (
+                bool(tail)
+                and tail[-1].get("event") == "publish_files_completed"
+                and legacy_identity in LEGACY_PUBLICATION_BOOTSTRAP
+            )
+            if not modern_terminal and not legacy_terminal:
+                continue
+            publication = {
+                "run_id": run_id,
+                "source_id": PUBLISHED_MASTER_SOURCE_ID,
+                "publication_seq": sequence,
+                "plan_digest": plan_digest,
+                "finished_at": finished_at,
+                "publish_receipt_sha256": publish_sha,
+                "stage_receipt_sha256": stage_sha,
+                "journal_sha256": journal_sha,
+                "baseline_sha256": baseline_sha,
+                "master_sha256": staged_sha,
+            }
+            candidates.append(
+                (sequence, run_id, master_key, staged_sha, publication)
+            )
+        except (
+            KeyError,
+            OSError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+            ExchangeContractError,
+        ):
+            continue
+    if not candidates:
+        raise ValueError(
+            "для выбранного master не найден complete registry_cycle publish "
+            "с terminal receipt и проверяемым active baseline"
+        )
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    latest_sequence = candidates[0][0]
+    latest = [
+        item for item in candidates if item[0] == latest_sequence
+    ]
+    if len({(item[1], item[2]) for item in latest}) != 1:
+        raise ValueError(
+            "несколько публикаций master имеют один monotonic sequence"
+        )
+    (
+        _sequence,
+        _run_id,
+        latest_master_key,
+        latest_master_sha,
+        publication,
+    ) = latest[0]
+    if selected_key != latest_master_key or selected_sha != latest_master_sha:
+        raise ValueError(
+            "выбранный master не совпадает с новейшей complete публикацией"
+        )
+    return build_published_master_source_proof(
+        grid,
+        file_sha256=selected_sha,
+        publication=publication,
+    )
 
 # --- Нормализация заголовков (зеркало db._norm_title — держать в синхроне!) --
 _ZERO_WIDTH = ("​", "‌", "‍", "﻿")
@@ -189,18 +560,67 @@ def find_header(grid: list[list], fields: list[dict]) -> tuple[int, dict]:
     """(индекс строки заголовков, {key: индекс колонки}) — как в db.import_grid:
     лучшая из первых 10 строк, обязательное условие — колонка-ключ «Номер КД / ID»."""
     title_to_key = {norm_title(f["title"]): f["key"] for f in fields}
-    best_h, best_map, best_n, best_has_id = -1, {}, -1, False
-    for i, row in enumerate(grid[:10]):
+    for alias_key, aliases in WORKBOOK_HEADER_ALIASES.items():
+        for alias in aliases:
+            normalized = norm_title(alias)
+            previous = title_to_key.get(normalized)
+            if previous is not None and previous != alias_key:
+                raise ValueError(
+                    f"alias заголовка {alias!r} неоднозначен: "
+                    f"{previous}/{alias_key}"
+                )
+            title_to_key[normalized] = alias_key
+    best_h, best_map, best_positions, best_n, best_has_id = -1, {}, {}, -1, False
+    for i, row in enumerate(grid[:WORKBOOK_HEADER_SEARCH_ROWS]):
         col_map = {}
+        positions: dict[str, list[int]] = {}
         for j, cell in enumerate(row):
             key = title_to_key.get(norm_title(cell))
-            if key and key not in col_map:
-                col_map[key] = j
+            if key:
+                positions.setdefault(key, []).append(j)
+                col_map.setdefault(key, j)
         has_id = CONTRACT_KEY in col_map
         if (has_id, len(col_map)) > (best_has_id, best_n):
-            best_has_id, best_n, best_h, best_map = has_id, len(col_map), i, col_map
+            best_has_id, best_n, best_h, best_map, best_positions = (
+                has_id,
+                len(col_map),
+                i,
+                col_map,
+                positions,
+            )
     if not best_has_id:
-        raise ValueError("в листе нет колонки-ключа «Номер КД / ID» (первые 10 строк)")
+        raise ValueError(
+            "в листе нет колонки-ключа «Номер КД / ID» "
+            f"(первые {WORKBOOK_HEADER_SEARCH_ROWS} строк)"
+        )
+    duplicate = {
+        key: columns
+        for key, columns in best_positions.items()
+        if len(columns) > 1
+    }
+    if duplicate:
+        raise ValueError(
+            "неоднозначные повторные заголовки: "
+            + ", ".join(
+                f"{key} ({','.join(str(column + 1) for column in columns)})"
+                for key, columns in sorted(duplicate.items())
+            )
+        )
+    schema_keys = {field["key"] for field in fields}
+    required_targets = {
+        CONTRACT_KEY,
+        *(
+            target
+            for _source, target, _merge in ENRICHMENT_WRITE_RULES
+            if target in schema_keys
+        ),
+    }
+    missing = sorted(required_targets - set(best_map))
+    if missing:
+        raise ValueError(
+            "нет обязательных колонок enrichment-контракта: "
+            + ", ".join(missing)
+        )
     return best_h, best_map
 
 
@@ -300,11 +720,14 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict]) -> dict:
     filled_cases = matched_cases = changed_cases = 0
     cells_already = cells_over_nonempty = 0
     missing: list[str] = []
+    filled_contract_ids: list[str] = []
+    matched_contract_ids: list[str] = []
 
     for srv in rows:
         cid = norm_cid(srv.get(CONTRACT_KEY))
         if not cid or not is_filled(srv):
             continue     # без завершённого визита кейс не трогаем вообще
+        filled_contract_ids.append(cid)
         values = {k: srv.get(k) for k in VISIT_KEYS
                   if cell_text(srv.get(k)) != "" and k in col_map}
         filled_cases += 1
@@ -313,22 +736,28 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict]) -> dict:
             missing.append(cid)
             continue
         matched_cases += 1
+        matched_contract_ids.append(cid)
         case_changed = False
         for key, val in values.items():
             c = col_map[key]
             is_date = is_date_key.get(key, False)
             for r in targets:
                 cur = grid[r][c] if c < len(grid[r]) else None
-                if key == "tips":
+                merge_mode = MERGE_MODES[key]
+                if merge_mode == "unique_lines":
                     out_val = merge_unique_lines(cur, val)
-                elif key == "visit_comment":
+                elif merge_mode == "preserve_text":
                     out_val = merge_preserving_text(cur, val)
-                else:
+                elif merge_mode == "replace":
                     out_val = parse_date(val) if is_date and parse_date(val) \
                         else cell_text(val)
-                if (key in ("tips", "visit_comment")
+                else:
+                    raise ValueError(
+                        f"неподдерживаемый merge mode {merge_mode!r} для {key}"
+                    )
+                if (merge_mode != "replace"
                         and out_val == cell_text(cur)) or \
-                        (key not in ("tips", "visit_comment")
+                        (merge_mode == "replace"
                          and _values_equal(cur, val, is_date)):
                     cells_already += 1
                     continue
@@ -354,6 +783,8 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict]) -> dict:
         # dry-run/apply инструмент с собственным бэкапом.
         "poison_cleared": 0,
         "missing": missing,                # заполнены ботом, но строки в файле нет
+        "filled_contract_ids": filled_contract_ids,
+        "matched_contract_ids": matched_contract_ids,
         "visit_cols_absent": visit_cols_absent,      # колонок визита нет в файле
     }
 
@@ -388,21 +819,36 @@ def open_excel(xw, log=lambda s: None):
 
 
 def _pick_sheet(wb, fields: list[dict]):
-    """Лист «Портфели», иначе — где больше узнаваемых заголовков в первых 10 строках."""
+    """Only the exact contract-bound portfolio sheet may be changed."""
     names = [s.name for s in wb.sheets]
     if SHEET_NAME in names:
         return wb.sheets[SHEET_NAME]
-    title_keys = {norm_title(f["title"]) for f in fields}
-    best, best_n = wb.sheets[0], -1
-    for s in wb.sheets:
-        head = s.range((1, 1), (10, 60)).value or []
-        n = 0
-        for row in head:
-            row = row if isinstance(row, list) else [row]
-            n = max(n, sum(1 for c in row if norm_title(c) in title_keys))
-        if n > best_n:
-            best_n, best = n, s
-    return best
+    raise ValueError(
+        f"обязательный лист «{SHEET_NAME}» отсутствует; "
+        "fallback на похожий лист запрещён"
+    )
+
+
+def _workbook_grid(wb, fields: list[dict]) -> tuple[object, list[list]]:
+    """Read one workbook without changing it, using the same sheet contract."""
+
+    ws = _pick_sheet(wb, fields)
+    last = ws.used_range.last_cell
+    grid = ws.range((1, 1), (last.row, last.column)).value or []
+    if grid and not isinstance(grid[0], list):
+        grid = [grid if isinstance(grid, list) else [grid]]
+    return ws, grid
+
+
+def _plan_workbook(app, path: Path, fields: list[dict], rows: list[dict]) -> dict:
+    """Reopen a saved workbook and recompute the enrichment plan read-only."""
+
+    wb = app.books.open(str(path), update_links=False, read_only=True)
+    try:
+        _ws, grid = _workbook_grid(wb, fields)
+        return build_plan(grid, fields, rows)
+    finally:
+        wb.close()
 
 
 def backup_copy(path: Path) -> Path:
@@ -434,17 +880,14 @@ def _enrich_workbook(app, path: Path, fields: list[dict], rows: list[dict],
     Осознанно ОДНОсторонний поток (бот → файл): идея «синхронизировать файл в БД
     перед записью» отклонена пользователем и ревью 23.07 — скрытый импорт при
     обогащении реимпортировал бы июльский яд из «комментария звонка» и вставлял
-    скелетные КД прошлых сессий. Офисные правки приносит ИМПОРТ (якорный шлюз в
-    db.import_grid) — отдельным осознанным действием, желательно до обогащения."""
+    скелетные КД прошлых сессий. Офисные правки идут только personal →
+    registry_cycle → опубликованный master → explicit master import; прямого
+    personal → bot gateway нет."""
     wb = app.books.open(str(path))
     try:
-        ws = _pick_sheet(wb, fields)
-        # читаем строго от A1: used_range может начинаться не с A1,
-        # а индексы плана — координаты ячеек листа
-        last = ws.used_range.last_cell
-        grid = ws.range((1, 1), (last.row, last.column)).value or []
-        if grid and not isinstance(grid[0], list):   # один ряд/одна ячейка
-            grid = [grid if isinstance(grid, list) else [grid]]
+        # Читаем строго от A1: used_range может начинаться не с A1,
+        # а индексы плана — координаты ячеек листа.
+        ws, grid = _workbook_grid(wb, fields)
 
         plan = build_plan(grid, fields, rows)
         writes = plan["writes"]
@@ -465,6 +908,157 @@ def _enrich_workbook(app, path: Path, fields: list[dict], rows: list[dict],
         wb.close()
 
 
+def _is_reparse(info: os.stat_result) -> bool:
+    return bool(
+        getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+
+
+def _same_file_state(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        left.st_dev,
+        left.st_ino,
+        left.st_mode,
+        left.st_size,
+        left.st_mtime_ns,
+    ) == (
+        right.st_dev,
+        right.st_ino,
+        right.st_mode,
+        right.st_size,
+        right.st_mtime_ns,
+    )
+
+
+@contextmanager
+def _open_regular_read(path: Path, *, label: str):
+    try:
+        before = os.lstat(path)
+    except OSError as exc:
+        raise RuntimeError(f"{label} недоступен: {path}") from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or _is_reparse(before)
+        or path.is_symlink()
+    ):
+        raise RuntimeError(f"{label} должен быть обычным non-reparse файлом: {path}")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RuntimeError(f"{label} не удалось безопасно открыть: {path}") from exc
+    stream = os.fdopen(descriptor, "rb")
+    try:
+        opened = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or (before.st_dev, before.st_ino)
+            != (opened.st_dev, opened.st_ino)
+        ):
+            raise RuntimeError(f"{label} подменён при открытии: {path}")
+        yield stream
+        after = os.fstat(stream.fileno())
+        if not _same_file_state(opened, after):
+            raise RuntimeError(f"{label} изменился во время чтения: {path}")
+        try:
+            current = os.lstat(path)
+        except OSError as exc:
+            raise RuntimeError(f"{label} исчез во время чтения: {path}") from exc
+        if not _same_file_state(opened, current):
+            raise RuntimeError(f"{label} заменён во время чтения: {path}")
+    finally:
+        stream.close()
+
+
+def _read_regular_bytes(path: Path, *, label: str) -> bytes:
+    with _open_regular_read(path, label=label) as stream:
+        return stream.read()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with _open_regular_read(path, label="файл для SHA-256") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _load_json_regular(path: Path, *, label: str) -> Any:
+    try:
+        return json.loads(_read_regular_bytes(path, label=label).decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"{label} содержит некорректный JSON: {path}") from exc
+
+
+def _plan_summary(plan: dict) -> dict[str, Any]:
+    return {
+        "filled_cases": int(plan["filled_cases"]),
+        "filled_contract_ids": list(plan["filled_contract_ids"]),
+        "matched_cases": int(plan["matched_cases"]),
+        "matched_contract_ids": list(plan["matched_contract_ids"]),
+        "changed_cases": int(plan["changed_cases"]),
+        "cells_written": int(plan["cells_written"]),
+        "errors": [],
+        "visit_cols_absent": list(plan["visit_cols_absent"]),
+        "missing_contract_ids": list(plan["missing"]),
+    }
+
+
+def _enrich_with_evidence(
+    app,
+    path: Path,
+    fields: list[dict],
+    rows: list[dict],
+    log=lambda s: None,
+) -> dict:
+    """Run the existing writer, then reopen and prove a zero second plan."""
+
+    raw_path = Path(path)
+    if raw_path.is_symlink() or not raw_path.is_file():
+        raise FileNotFoundError(f"нужен обычный Excel-файл: {raw_path}")
+    path = raw_path.resolve()
+    pre_sha = _sha256_file(path)
+    plan = _enrich_workbook(app, path, fields, rows, log)
+    post_sha = _sha256_file(path)
+    backup_raw = plan.get("backup")
+    backup_path = Path(backup_raw).resolve() if backup_raw else None
+    backup_sha = _sha256_file(backup_path) if backup_path is not None else None
+    if plan["cells_written"]:
+        if backup_path is None or backup_sha != pre_sha or pre_sha == post_sha:
+            raise RuntimeError(f"{path.name}: backup/pre/post contract нарушен")
+    elif backup_path is not None or pre_sha != post_sha:
+        raise RuntimeError(f"{path.name}: zero-write contract нарушен")
+
+    post_plan = _plan_workbook(app, path, fields, rows)
+    if post_plan["cells_written"] or post_plan["changed_cases"]:
+        raise RuntimeError(f"{path.name}: повторный enrichment plan не нулевой")
+    if (
+        post_plan["filled_contract_ids"] != plan["filled_contract_ids"]
+        or post_plan["matched_contract_ids"] != plan["matched_contract_ids"]
+        or post_plan["missing"] != plan["missing"]
+    ):
+        raise RuntimeError(f"{path.name}: coverage изменился после сохранения")
+
+    plan.update(
+        {
+            "path": str(path),
+            "pre_sha256": pre_sha,
+            "post_sha256": post_sha,
+            "backup_path": str(backup_path) if backup_path is not None else None,
+            "backup_sha256": backup_sha,
+            "errors": [],
+            "post_plan": _plan_summary(post_plan),
+        }
+    )
+    return plan
+
+
 def enrich_file(path: str | Path, fields: list[dict], rows: list[dict],
                 log=lambda s: None) -> dict:
     """Обогатить один живой файл реестра. Требует Excel."""
@@ -479,7 +1073,7 @@ def enrich_file(path: str | Path, fields: list[dict], rows: list[dict],
         app.display_alerts = False
         app.screen_updating = False
         log(f"Обогащаю {path.name}…")
-        return _enrich_workbook(app, path, fields, rows, log)
+        return _enrich_with_evidence(app, path, fields, rows, log)
 
 
 def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None) -> list[dict]:
@@ -497,9 +1091,403 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None) -> lis
             path = Path(job["path"])
             log(f"[{i}/{len(jobs)}] {job['employee']} — {path.name}…")
             try:
-                plan = _enrich_workbook(app, path, fields, job["rows"], log)
+                plan = _enrich_with_evidence(
+                    app,
+                    path,
+                    fields,
+                    job["rows"],
+                    log,
+                )
             except Exception as e:  # noqa: BLE001 — файл занят/битый: дальше по списку
                 plan = {"file": str(path), "error": str(e)}
             plan["employee"] = job["employee"]
             results.append(plan)
     return results
+
+
+def _canonical(payload: Any) -> bytes:
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _load_snapshot_inputs(snapshot_raw: str | Path) -> tuple[Path, dict, list, list]:
+    snapshot = Path(snapshot_raw)
+    if snapshot.is_symlink() or not snapshot.is_dir():
+        raise RuntimeError(f"Некорректный snapshot: {snapshot}")
+    snapshot = snapshot.resolve()
+    manifest_path = snapshot / "snapshot_manifest.json"
+    safe_path = snapshot / "safe-enrichment.json.gz"
+    schema_path = snapshot / "export-schema.json"
+    raw_path = snapshot / "raw-diagnostic.json.gz"
+    for path in (manifest_path, safe_path, schema_path, raw_path):
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError(f"Snapshot artifact отсутствует/не regular: {path}")
+    manifest_bytes = _read_regular_bytes(
+        manifest_path,
+        label="snapshot manifest",
+    )
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Snapshot manifest содержит некорректный JSON") from exc
+    artifacts = manifest.get("artifacts") or {}
+    artifact_bytes = {
+        safe_path: _read_regular_bytes(safe_path, label="safe export"),
+        schema_path: _read_regular_bytes(schema_path, label="export schema"),
+        raw_path: _read_regular_bytes(raw_path, label="raw export"),
+    }
+    for path, content in artifact_bytes.items():
+        expected = artifacts.get(path.name)
+        if (
+            not isinstance(expected, str)
+            or hashlib.sha256(content).hexdigest() != expected
+        ):
+            raise RuntimeError(f"Snapshot SHA не совпал: {path.name}")
+    try:
+        safe = json.loads(gzip.decompress(artifact_bytes[safe_path]).decode("utf-8"))
+        fields = json.loads(artifact_bytes[schema_path].decode("utf-8"))
+        raw = json.loads(gzip.decompress(artifact_bytes[raw_path]).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Safe/raw export/schema содержит некорректный JSON") from exc
+    rows = safe.get("rows") if isinstance(safe, dict) else None
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("kind") != SNAPSHOT_KIND
+        or manifest.get("data_exchange_contract") != DATA_EXCHANGE_CONTRACT
+        or not isinstance(safe, dict)
+        or safe.get("kind") != "safe_enrichment"
+        or safe.get("data_exchange_contract") != DATA_EXCHANGE_CONTRACT
+        or not isinstance(raw, dict)
+        or raw.get("kind") != "raw_diagnostic"
+        or raw.get("data_exchange_contract") != DATA_EXCHANGE_CONTRACT
+        or not isinstance(rows, list)
+        or not isinstance(fields, list)
+        or len(rows) != (manifest.get("counts") or {}).get("clients")
+    ):
+        raise RuntimeError(
+            "Snapshot несовместим с локальным data-exchange contract"
+        )
+    try:
+        verify_export_schema(fields)
+    except ExchangeContractError as exc:
+        raise RuntimeError(
+            f"Snapshot export schema несовместима с контрактом: {exc}"
+        ) from exc
+    binding = {
+        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "database_state_digest": manifest.get("database_state_digest"),
+        "safe_export_sha256": artifacts.get(safe_path.name),
+        "raw_export_sha256": artifacts.get(raw_path.name),
+        "data_exchange_contract_sha256": DATA_EXCHANGE_CONTRACT["sha256"],
+    }
+    if any(
+        not isinstance(value, str) or len(value) != 64
+        for value in binding.values()
+    ):
+        raise RuntimeError("Snapshot binding неполный")
+    return snapshot, binding, fields, rows
+
+
+def _completed_by_owner(rows: list[dict]) -> dict[str, dict[str, Any]]:
+    owners: dict[str, dict[str, Any]] = {}
+    seen: set[str] = set()
+    for row in rows:
+        if row.get(FILLED_MARKER) is not True:
+            continue
+        cid = norm_cid(row.get(CONTRACT_KEY))
+        responsible = str(row.get("responsible") or "").strip()
+        if not cid or cid in seen:
+            raise RuntimeError("Safe export содержит пустой/duplicate completed КД")
+        if not responsible:
+            raise RuntimeError(f"Завершённый визит без ответственного: {cid}")
+        seen.add(cid)
+        key = norm_name(responsible)
+        item = owners.setdefault(
+            key,
+            {"responsible": responsible, "contract_ids": [], "rows": []},
+        )
+        if item["responsible"] != responsible:
+            raise RuntimeError(
+                "Ответственные различаются только нормализацией имени: "
+                f"{item['responsible']} / {responsible}"
+            )
+        item["contract_ids"].append(cid)
+        item["rows"].append(row)
+    for item in owners.values():
+        order = sorted(
+            range(len(item["contract_ids"])),
+            key=lambda index: item["contract_ids"][index],
+        )
+        item["contract_ids"] = [item["contract_ids"][index] for index in order]
+        item["rows"] = [item["rows"][index] for index in order]
+    return owners
+
+
+def _load_file_map(
+    path_raw: str | Path,
+    *,
+    binding: dict[str, str],
+    owners: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    path = Path(path_raw)
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"File map отсутствует/не regular: {path}")
+    payload = _load_json_regular(path, label="file map")
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") != FILE_MAP_SCHEMA
+        or payload.get("snapshot") != binding
+        or set(payload) != {"schema", "snapshot", "owners"}
+        or not isinstance(payload.get("owners"), list)
+    ):
+        raise RuntimeError("File map schema/snapshot binding не совпал")
+    mapped: dict[str, dict[str, Any]] = {}
+    all_files: set[str] = set()
+    jobs: list[dict[str, Any]] = []
+    for raw in payload["owners"]:
+        if not isinstance(raw, dict) or set(raw) != {
+            "responsible",
+            "contract_ids",
+            "files",
+        }:
+            raise RuntimeError("File map owner имеет неверную schema")
+        responsible = str(raw["responsible"]).strip()
+        key = norm_name(responsible)
+        if key in mapped or key not in owners:
+            raise RuntimeError(f"File map содержит чужого/duplicate owner: {responsible}")
+        expected = owners[key]
+        if (
+            responsible != expected["responsible"]
+            or raw["contract_ids"] != expected["contract_ids"]
+            or not isinstance(raw["files"], list)
+            or not raw["files"]
+        ):
+            raise RuntimeError(f"File map owner contract нарушен: {responsible}")
+        files: list[str] = []
+        for item in raw["files"]:
+            candidate = Path(item)
+            if candidate.is_symlink() or not candidate.is_file():
+                raise RuntimeError(f"Personal-файл отсутствует/не regular: {candidate}")
+            resolved = str(candidate.resolve())
+            if resolved in all_files:
+                raise RuntimeError(f"Personal-файл указан повторно: {resolved}")
+            all_files.add(resolved)
+            files.append(resolved)
+            jobs.append(
+                {
+                    "employee": responsible,
+                    "path": resolved,
+                    "rows": expected["rows"],
+                    "owner_contract_ids": expected["contract_ids"],
+                }
+            )
+        mapped[key] = {"responsible": responsible, "files": files}
+    if set(mapped) != set(owners):
+        missing = sorted(set(owners) - set(mapped))
+        raise RuntimeError(f"File map не покрывает exact owners: {missing}")
+    return jobs
+
+
+def _receipt_file(result: dict, expected_ids: list[str]) -> dict[str, Any]:
+    if "error" in result:
+        raise RuntimeError(
+            f"{result.get('employee')}/{result.get('file')}: {result['error']}"
+        )
+    return {
+        "responsible": result["employee"],
+        "path": str(Path(result["path"]).resolve()),
+        "pre_sha256": result["pre_sha256"],
+        "post_sha256": result["post_sha256"],
+        "backup_path": result["backup_path"],
+        "backup_sha256": result["backup_sha256"],
+        "owner_contract_ids": list(expected_ids),
+        "filled_cases": result["filled_cases"],
+        "filled_contract_ids": list(result["filled_contract_ids"]),
+        "matched_cases": result["matched_cases"],
+        "matched_contract_ids": list(result["matched_contract_ids"]),
+        "changed_cases": result["changed_cases"],
+        "cells_written": result["cells_written"],
+        "errors": list(result["errors"]),
+        "visit_cols_absent": list(result["visit_cols_absent"]),
+        "missing_contract_ids": list(result["missing"]),
+        "post_plan": result["post_plan"],
+    }
+
+
+def _write_receipt(path_raw: str | Path, payload: dict[str, Any]) -> None:
+    path = Path(path_raw)
+    if path.exists() or path.is_symlink():
+        raise RuntimeError(f"Evidence receipt уже существует: {path}")
+    if path.parent.is_symlink() or not path.parent.is_dir():
+        raise RuntimeError(f"Небезопасный parent evidence receipt: {path.parent}")
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+    temporary = path.parent / (
+        f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(8)}"
+    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        if hasattr(os, "O_DIRECTORY"):
+            descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def evidence_run(
+    *,
+    snapshot_dir: str | Path,
+    file_map: str | Path,
+    output: str | Path,
+    log=lambda s: None,
+) -> dict[str, Any]:
+    """Run the existing enrichment writer and emit a machine-only receipt."""
+
+    snapshot, binding, fields, rows = _load_snapshot_inputs(snapshot_dir)
+    output_path = Path(output)
+    if output_path.parent.resolve() != snapshot:
+        raise RuntimeError(
+            "Evidence receipt должен быть прямым файлом внутри snapshot"
+        )
+    if output_path.exists() or output_path.is_symlink():
+        raise RuntimeError(f"Evidence receipt уже существует: {output_path}")
+    if output_path.parent.is_symlink() or not output_path.parent.is_dir():
+        raise RuntimeError(
+            f"Небезопасный parent evidence receipt: {output_path.parent}"
+        )
+    owners = _completed_by_owner(rows)
+    jobs = _load_file_map(
+        file_map,
+        binding=binding,
+        owners=owners,
+    )
+    results = enrich_many(jobs, fields, log) if jobs else []
+    by_job = {
+        (job["employee"], str(Path(job["path"]).resolve())): job
+        for job in jobs
+    }
+    files: list[dict[str, Any]] = []
+    covered: set[str] = set()
+    for result in results:
+        result_path = result.get("path") or result.get("file")
+        if not result_path:
+            raise RuntimeError("Enrichment result does not identify its file")
+        key = (result["employee"], str(Path(result_path).resolve()))
+        job = by_job.get(key)
+        if job is None:
+            raise RuntimeError("Enrichment вернул неожиданный файл/owner")
+        item = _receipt_file(result, job["owner_contract_ids"])
+        expected = set(job["owner_contract_ids"])
+        matched = set(item["matched_contract_ids"])
+        if (
+            item["errors"]
+            or item["visit_cols_absent"]
+            or set(item["filled_contract_ids"]) != expected
+            or not matched <= expected
+            or covered & matched
+            or item["post_plan"]["cells_written"] != 0
+            or item["post_plan"]["changed_cases"] != 0
+        ):
+            raise RuntimeError(f"Evidence gate не пройден: {item['path']}")
+        covered.update(matched)
+        files.append(item)
+    completed = sorted(
+        cid for owner in owners.values() for cid in owner["contract_ids"]
+    )
+    if covered != set(completed):
+        raise RuntimeError(
+            "Enrichment не покрыл exact completed set: "
+            f"covered={len(covered)}, expected={len(completed)}"
+        )
+    receipt = {
+        "schema": EVIDENCE_SCHEMA,
+        "data_exchange_contract": DATA_EXCHANGE_CONTRACT,
+        "created_at": datetime.now(timezone.utc).replace(
+            microsecond=0
+        ).isoformat(),
+        "snapshot": binding,
+        "completed_contract_ids": completed,
+        "owners": [
+            {
+                "responsible": item["responsible"],
+                "contract_ids": item["contract_ids"],
+                "files": sorted(
+                    str(Path(job["path"]).resolve())
+                    for job in jobs
+                    if job["employee"] == item["responsible"]
+                ),
+            }
+            for item in sorted(
+                owners.values(),
+                key=lambda value: value["responsible"].casefold(),
+            )
+        ],
+        "expected_files": sorted(
+            str(Path(job["path"]).resolve())
+            for job in jobs
+        ),
+        "files": sorted(files, key=lambda item: item["path"].casefold()),
+    }
+    receipt["receipt_digest"] = hashlib.sha256(_canonical(receipt)).hexdigest()
+    _write_receipt(output_path, receipt)
+    return receipt
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    evidence = commands.add_parser(
+        "evidence-run",
+        help="обогатить exact snapshot rows и выдать machine evidence",
+    )
+    evidence.add_argument("--snapshot-dir", type=Path, required=True)
+    evidence.add_argument("--file-map", type=Path, required=True)
+    evidence.add_argument("--output", type=Path, required=True)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        payload = evidence_run(
+            snapshot_dir=args.snapshot_dir,
+            file_map=args.file_map,
+            output=args.output,
+            log=lambda message: print(message, file=sys.stderr),
+        )
+    except Exception as exc:  # noqa: BLE001 - owner CLI must fail closed.
+        print(f"ОТКАЗ: {exc}", file=sys.stderr)
+        return 4
+    print(
+        json.dumps(
+            {
+                "schema": payload["schema"],
+                "receipt_digest": payload["receipt_digest"],
+                "completed_cases": len(payload["completed_contract_ids"]),
+                "files": len(payload["files"]),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

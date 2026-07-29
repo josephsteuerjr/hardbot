@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .config import ConfigBundle, load_config_bundle
-from .errors import SafetyViolation
+from .errors import ConfigurationError, SafetyViolation
 from .files import stable_copy
 from .excel_host import (
     ExcelHost,
@@ -46,7 +46,12 @@ from .normalize import (
     norm_title,
 )
 from .reader import read_portfolio
-from .snapshot import SnapshotSet, load_snapshot
+from .snapshot import (
+    SnapshotSet,
+    assert_snapshot_config_identity,
+    assert_snapshot_run_dir,
+    load_snapshot,
+)
 from .staging import _revealed_rows, excel_safe_value
 
 
@@ -150,6 +155,7 @@ class RecoveryPlan:
     issues: list[Issue]
     blocked_entries: set[str]
     source_manifest_path: Path
+    config_identity: str = ""
 
     @property
     def digest(self) -> str:
@@ -159,6 +165,7 @@ class RecoveryPlan:
             "writes": [item.as_dict() for item in self.writes],
             "issues": [item.as_dict() for item in self.issues],
             "blocked_entries": sorted(self.blocked_entries),
+            "config_identity": self.config_identity,
         }
         raw = json.dumps(
             payload,
@@ -180,6 +187,7 @@ class RecoveryPlan:
             "writes": [item.as_dict() for item in self.writes],
             "issues": [item.as_dict() for item in self.issues],
             "blocked_entries": sorted(self.blocked_entries),
+            "config_identity": self.config_identity,
             "blocked": self.blocked,
             "digest": self.digest,
         }
@@ -213,12 +221,14 @@ class RecoveryStage:
     run_dir: Path
     plan_digest: str
     files: tuple[RecoveryStagedFile, ...]
+    config_identity: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
             "run_dir": str(self.run_dir),
             "plan_digest": self.plan_digest,
+            "config_identity": self.config_identity,
             "files": [item.as_dict() for item in self.files],
         }
 
@@ -320,8 +330,14 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def load_recovery_config(bundle: ConfigBundle) -> RecoveryConfig:
-    path = bundle.config_dir / "recovery.json"
-    raw = _read_json(path)
+    try:
+        raw = bundle.pinned_config("recovery.json")
+    except ConfigurationError as exc:
+        if bundle.app is not None:
+            raise SafetyViolation(
+                "recovery.json не закреплён в config_identity"
+            ) from exc
+        raw = _read_json(bundle.config_dir / "recovery.json")
     if int(raw.get("schema_version", 0)) != 1:
         raise SafetyViolation("неподдерживаемая schema_version в recovery.json")
     archive = raw.get("archive") or {}
@@ -727,6 +743,8 @@ def capture_recovery_sources(
     *,
     progress: Callable[[int, int, SourceDescriptor], None] | None = None,
 ) -> tuple[Path, tuple[CapturedSource, ...], list[Issue]]:
+    assert_snapshot_config_identity(bundle, snapshot)
+    assert_snapshot_run_dir(bundle, snapshot)
     descriptors, issues = discover_recovery_sources(bundle, snapshot, config)
     recovery_dir = snapshot.run_dir / "recovery"
     source_dir = recovery_dir / "sources"
@@ -877,6 +895,8 @@ def build_recovery_plan(
     *,
     snapshot_path: str | Path | None = None,
 ) -> RecoveryPlan:
+    assert_snapshot_config_identity(bundle, snapshot)
+    assert_snapshot_run_dir(bundle, snapshot)
     captured_sources = load_captured_sources(source_manifest_path)
     sources_by_entry: dict[str, list[CapturedSource]] = defaultdict(list)
     for source in captured_sources:
@@ -1157,6 +1177,7 @@ def build_recovery_plan(
         issues=issues,
         blocked_entries=blocked_entries,
         source_manifest_path=Path(source_manifest_path),
+        config_identity=snapshot.config_identity,
     )
     recovery_dir = snapshot.run_dir / "recovery"
     recovery_dir.mkdir(parents=True, exist_ok=True)
@@ -1297,6 +1318,7 @@ def load_recovery_plan(path: str | Path) -> RecoveryPlan:
         issues=issues,
         blocked_entries=set(str(value) for value in payload.get("blocked_entries") or []),
         source_manifest_path=Path(payload["source_manifest_path"]),
+        config_identity=str(payload.get("config_identity") or ""),
     )
     expected = str(payload.get("digest") or "")
     if plan.digest != expected:
@@ -1472,6 +1494,17 @@ def build_recovery_staging(
     snapshot: SnapshotSet,
     plan: RecoveryPlan,
 ) -> RecoveryStage:
+    assert_snapshot_run_dir(bundle, snapshot)
+    config_identity = str(getattr(bundle, "config_identity", "") or "")
+    if not (
+        snapshot.config_identity
+        == plan.config_identity
+        == config_identity
+    ):
+        raise SafetyViolation(
+            "snapshot/plan относятся к другой конфигурации; "
+            "recovery staging запрещён"
+        )
     unexpected_errors = [
         issue
         for issue in plan.issues
@@ -1542,6 +1575,7 @@ def build_recovery_staging(
         run_dir=snapshot.run_dir,
         plan_digest=plan.digest,
         files=tuple(staged_files),
+        config_identity=config_identity,
     )
     _atomic_json(stage_dir / "stage.json", stage.as_dict())
     return stage
@@ -1569,6 +1603,7 @@ def load_recovery_stage(path: str | Path) -> RecoveryStage:
         run_dir=Path(payload["run_dir"]),
         plan_digest=str(payload["plan_digest"]),
         files=tuple(files),
+        config_identity=str(payload.get("config_identity") or ""),
     )
 
 
@@ -1609,6 +1644,20 @@ def validate_recovery_staging(
         expected_changes=len(plan.writes),
     )
     assert report.issues is not None
+    config_identity = str(getattr(bundle, "config_identity", "") or "")
+    if not (
+        stage.config_identity
+        == plan.config_identity
+        == config_identity
+    ):
+        report.issues.append(
+            Issue(
+                "error",
+                "recovery_config_identity_mismatch",
+                "plan/staging относятся к другой конфигурации",
+            )
+        )
+        return report
     if stage.plan_digest != plan.digest:
         report.issues.append(
             Issue(
@@ -1861,6 +1910,10 @@ def publish_recovery(
     confirmation_digest: str,
     notify_owner: bool = True,
 ) -> RecoveryPublishResult:
+    raise SafetyViolation(
+        "recovery publish отключён для ограниченного тестирования; "
+        "доступны capture/plan/stage/validate без live apply"
+    )
     if not (
         confirmation_digest
         == plan.digest

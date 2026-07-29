@@ -30,6 +30,15 @@ from aiohttp import web
 import db
 import debt
 from config import ADMIN_ID, approval_required, lang_of
+from exchange_contract import (
+    ExchangeContractError,
+    FORM_DROPDOWN_KEYS,
+    FORM_PROTOCOL_VERSION,
+    FORM_TEXT_KEYS,
+    OFFICE_RESULT_SNAPSHOT_KEY,
+    contract_binding,
+    validate_contract_binding,
+)
 from fields import BY_KEY, DROPDOWNS
 from i18n import FIELD_TITLES, LANGUAGES, t, tf, tv
 import maplink
@@ -98,14 +107,15 @@ _PHOTO_CANONICAL_EXT = {
 }
 _PHOTO_SUFFIXES = frozenset().union(*_PHOTO_EXTENSIONS.values())
 
-# Поля выезда, которые заполняет выездник (выпадающие списки + свободный текст).
-FORM_DROPDOWNS = ["call_status", "contact_with", "who_at_address",
-                  "client_location", "purpose_rf", "agreed_payment"]
+# Поля формы и её протокол берутся из того же version+SHA-locked контракта, что
+# bot snapshot, Excel enrichment и clearance. Смена списка в одном компоненте
+# теперь блокирует контур вместо частично совместимой выгрузки.
+FORM_DROPDOWNS = list(FORM_DROPDOWN_KEYS)
 # Комментарий выездника живёт в visit_comment («Комментарий текущего месяца
 # выезда»). До 18.07.2026 форма ошибочно писала его в call_comment («комментарий
 # звонка») — в выгрузке он сидел не в той колонке; легаси-сохранения ремапятся
 # в _save, старые данные перенесены миграцией на проде.
-FORM_TEXT = ["visit_comment", "tips"]
+FORM_TEXT = list(FORM_TEXT_KEYS)
 # Что показываем во вкладке «Клиент» (плотные строки).
 INFO_KEYS = ["birth_date", "phone", "phone_main", "city", "address",
              "address_customer", "extra_address", "responsible", "tips"]
@@ -115,6 +125,7 @@ INFO_KEYS = ["birth_date", "phone", "phone_main", "city", "address",
 PROMISE_KEYS = ["agreed_payment", "promise_date", "last_payment_sum",
                 "last_payment_date", "forecast"]
 ALLOWED_SAVE = set(FORM_DROPDOWNS) | set(FORM_TEXT)
+DATA_EXCHANGE_CONTRACT = contract_binding()
 
 
 # --- Проверка подписи Telegram WebApp --------------------------------------
@@ -200,6 +211,8 @@ def _meta(lang: str) -> dict:
         "dropdowns": {k: [{"value": v, "label": tv(v, lang)} for v in DROPDOWNS[k]]
                       for k in FORM_DROPDOWNS},
         "dropdownTitles": {k: _title(k, lang) for k in FORM_DROPDOWNS},
+        "formProtocolVersion": FORM_PROTOCOL_VERSION,
+        "dataExchangeContract": DATA_EXCHANGE_CONTRACT,
         "vectorTiles": "/tiles/basemap.pmtiles" if TILES_FILE.exists() else None,
         # Микрофон показываем только при полностью заданном UDS-контракте.
         "voice": _voice_configured(),
@@ -245,17 +258,20 @@ def _person_full(rep: str, lang: str) -> dict | None:
                for k in PROMISE_KEYS]
     form = []
     for k in FORM_DROPDOWNS:
-        # После завершения показываем именно подтверждённый снимок. До первого
-        # визита допустимо подсказать каноническое значение из импорта, но мусор
-        # вроде CONSUMER/дат в select не подставляем.
-        current = (visit.get(k, "") if visit is not None else (_row_get(rows, k) or ""))
+        # До первого доказанного визита форма всегда пустая. Значения HARD-полей
+        # из master допустимы только как read-only контекст в карточке: иначе
+        # простое открытие и сохранение формы превращало старый импорт в
+        # bot_visit_data. Пользовательский черновик восстанавливает клиент из
+        # отдельного localStorage и присылает только явно затронутые поля.
+        current = visit.get(k, "") if visit is not None else ""
         if current and current not in DROPDOWNS[k]:
             current = ""
         form.append({"key": k, "title": _title(k, lang), "current": current})
     return {
         "rep": rep, "client": main["client"], "birth_date": main["birth_date"],
         "visited": visited,
-        "status": tv((visit or {}).get("call_status") or main["overall_result"]
+        "status": tv((visit or {}).get(OFFICE_RESULT_SNAPSHOT_KEY)
+                     or main["overall_result"]
                      or main["call_status"], lang),
         "assign_date": main["assign_date"],
         "visit_date": (visit or {}).get("visit_date"),
@@ -267,11 +283,11 @@ def _person_full(rep: str, lang: str) -> dict | None:
         "photos": sum(r["photos_count"] or 0 for r in rows),
         "contracts": contracts, "info": info, "promise": promise,
         "form": form,
-        "visit_comment": _row_get(rows, "visit_comment") or "",
-        # call_comment оставлен для закэшированных старых оболочек (префилл);
-        # новая форма читает и пишет visit_comment.
-        "call_comment": _row_get(rows, "call_comment") or "",
-        "tips": _row_get(rows, "tips") or "",
+        "visit_comment": (visit or {}).get("visit_comment") or "",
+        # call_comment оставлен для чтения доказанных legacy snapshot старой
+        # оболочкой; сырой master-комментарий форму не префиллит.
+        "call_comment": (visit or {}).get("call_comment") or "",
+        "tips": (visit or {}).get("tips") or "",
     }
 
 
@@ -555,6 +571,27 @@ async def _save(request: web.Request) -> web.Response:
     if not row or (row["responsible"] != emp and uid != ADMIN_ID):
         raise web.HTTPNotFound(text="person")
     raw_values = dict(body.get("values") or {})
+    finish = bool(body.get("finish"))
+    if finish:
+        if body.get("form_version") != FORM_PROTOCOL_VERSION:
+            raise web.HTTPConflict(
+                text="refresh form: explicit field provenance required"
+            )
+        input_keys = body.get("input_keys")
+        if not isinstance(input_keys, list) or not all(
+            isinstance(key, str) for key in input_keys
+        ):
+            raise web.HTTPBadRequest(text="input_keys required")
+        # Даже если старая оффлайн-карточка сохранила префилл master, новая
+        # оболочка передаёт только поля, которых пользователь действительно
+        # коснулся. Остальные значения тела не участвуют ни в raw update, ни в
+        # журнале, ни в доказанном snapshot.
+        explicit_keys = set(input_keys)
+        raw_values = {
+            key: value
+            for key, value in raw_values.items()
+            if key in explicit_keys
+        }
     # Легаси-клиенты (закэшированная оболочка, оффлайн-очереди на телефонах) шлют
     # комментарий выездника старым ключом call_comment — переадресуем в visit_comment.
     if "call_comment" in raw_values and "visit_comment" not in raw_values:
@@ -569,10 +606,12 @@ async def _save(request: web.Request) -> web.Response:
         if key in FORM_DROPDOWNS and value not in DROPDOWNS[key]:
             raise web.HTTPBadRequest(text=f"invalid {key}")
         values[key] = value
-    db.audit_access(uid, "save_visit" if body.get("finish") else "save_card", rep)
+    if finish and OFFICE_RESULT_SNAPSHOT_KEY not in values:
+        raise web.HTTPBadRequest(text="visit result required")
+    db.audit_access(uid, "save_visit" if finish else "save_card", rep)
     if values:
         db.update_person(rep, values)  # пишется во ВСЕ договоры человека, сразу в БД
-    if body.get("finish"):
+    if finish:
         completed_at = date.today().isoformat()
         db.update_person(rep, {"visit_date": completed_at})
         cur = db.get_client(rep)
@@ -588,9 +627,14 @@ async def _save(request: web.Request) -> web.Response:
         if vlat is not None and cur["geo_lat"] is not None and cur["geo_lon"] is not None \
                 and (cur["geo_src"] or "") not in ("", "city"):
             dist_m = round(_haversine_km(vlat, vlon, cur["geo_lat"], cur["geo_lon"]) * 1000)
-        payload = (f"Выезд (миниапп). Статус: {cur['call_status']}; "
-                   f"Договорённость: {cur['agreed_payment']}; "
-                   f"{cur['visit_comment'] or cur['call_comment'] or ''}")
+        # История визита строится из явного тела этой формы. Сырые HARD-поля
+        # clients/master запрещено дочитывать даже для текста журнала.
+        payload = (
+            f"Выезд (миниапп). Статус: "
+            f"{values.get(OFFICE_RESULT_SNAPSHOT_KEY, '')}; "
+            f"Договорённость: {values.get('agreed_payment', '')}; "
+            f"{values.get('visit_comment', '')}"
+        )
         # Считаем ДО log_visit, иначе своя же свежая строка себя и заглушит.
         same_today = db.same_visit_logged_today(rep, uid, payload)
         is_new = db.log_visit(rep, uid, payload,
@@ -600,6 +644,11 @@ async def _save(request: web.Request) -> web.Response:
         # восстанавливаем отсутствующий снимок; старый дубль новый снимок не откатывает.
         if is_new or not db.has_bot_visit(rep):
             db.record_bot_visit(rep, values, completed_at)
+        proven_row = db.get_client(rep)
+        proven_snapshot = db.bot_visit_snapshot(proven_row) or {}
+        notify_row = dict(proven_row)
+        for key in db.BOT_SNAPSHOT_KEYS:
+            notify_row[key] = proven_snapshot.get(key)
         # is_new гасит повтор из оффлайн-очереди (тот же op_id), same_today — повторное
         # нажатие «Сохранить выезд» (новый op_id, но выезд тот же: тот же выездник и тот
         # же результат). Без второго условия руководителю прилетало 2-3 одинаковых
@@ -607,14 +656,20 @@ async def _save(request: web.Request) -> web.Response:
         # второй настоящий выезд в тот же день с другим исходом отбивку получить обязан.
         # Данные при этом пишутся как раньше — глушим только рассылку.
         if is_new and not same_today:
-            await _notify_group(request, cur, uid)
+            await _notify_group(request, notify_row, uid)
             try:
-                await _notify_managers(request, cur, dist_m)
+                await _notify_managers(request, notify_row, dist_m)
             except Exception as e:  # noqa: BLE001 — пуш не должен ломать сохранение:
                 # иначе 500 после log_visit, а повтор из очереди уже is_new=False —
                 # и пуш руководителю, и отчёт в беседу пропадут навсегда
                 logging.warning("manager notify failed: %s", e)
-            await _notify_report_chats(request, cur, vlat, vlon, dist_m)
+            await _notify_report_chats(
+                request,
+                notify_row,
+                vlat,
+                vlon,
+                dist_m,
+            )
     data = _person_full(rep, lang_of(uid))
     return web.json_response({"ok": True, "person": data})
 
@@ -1206,38 +1261,59 @@ async def _admin_period(request: web.Request) -> web.Response:
 
 
 async def _admin_import(request: web.Request) -> web.Response:
+    """Legacy multipart import is intentionally disabled.
+
+    It cannot carry the versioned publication/test-scope receipt used by the
+    JSON boundary, so accepting it would reopen a stale-client bypass.
+    """
     _admin(request)
-    reader = await request.multipart()
-    field = await reader.next()
-    if field is None:
-        raise web.HTTPBadRequest(text="no file")
-    fd, tmp = tempfile.mkstemp(suffix=".xlsx")
-    with os.fdopen(fd, "wb") as f:
-        while chunk := await field.read_chunk():
-            f.write(chunk)
-    try:
-        report = db.import_xlsx(tmp)
-        if report.get("blocked"):
-            return web.json_response(report, status=409)
-        try:
-            import scoring
-            report["geocoded"] = scoring.geocode_city_centroids()
-        except Exception as e:  # noqa: BLE001
-            logging.warning("geocode after import: %s", e)
-    finally:
-        os.unlink(tmp)
-    return web.json_response(report)
+    return web.json_response(
+        {
+            "blocked": True,
+            "error": (
+                "multipart import отключён: используйте contract-bound "
+                "/admin/import.json с exact source proof"
+            ),
+        },
+        status=409,
+    )
 
 
 async def _admin_import_json(request: web.Request) -> web.Response:
-    """Импорт из пульта: гриды листов уже распарсены на клиенте (calamine),
-    сервер только матчит заголовки и делает upsert — openpyxl не участвует."""
+    """Импорт published master: гриды уже распарсены клиентом (calamine).
+
+    ``source_kind`` обязателен. Personal-books → bot здесь не существует:
+    personal ↔ master обслуживает только registry_cycle.
+    """
     _admin(request)
     body = await request.json()
-    grid = db.pick_grid(body.get("sheets") or [])
-    report = db.import_grid(grid)
+    source_kind = body.get("source_kind")
+    if source_kind not in db.IMPORT_SOURCE_KINDS:
+        return web.json_response(
+            db.import_grid([], source_kind=source_kind),
+            status=409,
+        )
+    try:
+        validate_contract_binding(body.get("data_exchange_contract"))
+        grid = db.pick_grid(body.get("sheets") or [])
+    except (ExchangeContractError, ValueError) as exc:
+        return web.json_response(
+            {"blocked": True, "error": f"импорт заблокирован: {exc}"},
+            status=409,
+        )
+    report = db.import_grid(
+        grid,
+        source_kind=source_kind,
+        source_proof=body.get("source_proof"),
+        require_source_proof=True,
+    )
     if report.get("blocked"):
         return web.json_response(report, status=409)
+    # A consumed receipt is an exact zero-write replay. Do not run ancillary
+    # mutators behind it: otherwise replaying the same import could still
+    # change coordinates after the atomic import transaction.
+    if report.get("idempotent_replay"):
+        return web.json_response(report)
     try:
         import scoring
         report["geocoded"] = scoring.geocode_city_centroids()
@@ -1282,7 +1358,13 @@ async def _admin_export_json(request: web.Request) -> web.Response:
     _admin(request)
     rows = db.registry_rows() if request.query.get("mode") == "full" \
         else db.enrichment_rows()
-    return web.json_response({"fields": db.export_schema(), "rows": rows})
+    return web.json_response(
+        {
+            "data_exchange_contract": DATA_EXCHANGE_CONTRACT,
+            "fields": db.export_schema(),
+            "rows": rows,
+        }
+    )
 
 
 async def _admin_markers_json(request: web.Request) -> web.Response:
@@ -1549,16 +1631,24 @@ async def _admin_restart(request: web.Request) -> web.Response:
 
 
 async def _admin_reset(request: web.Request) -> web.Response:
-    """Очистка данных для пульта. {scope:"visits"} — сброс полей визитов у всех клиентов
-    (новая сессия, портфель остаётся); {scope:"all"} — полное удаление реестра под свежий
-    импорт (привязки сотрудников сохраняются). Оба — под ADMIN_API_KEY."""
+    """Keep the legacy URL fail-closed during the limited-test contour.
+
+    Both historical scopes destroy provenance outside the evidence-bound
+    snapshot/clearance/reset transaction. The route remains present so stale
+    clients receive an explicit refusal instead of mistaking a 404 for a
+    network failure.
+    """
     _admin(request)
-    scope = (await request.json()).get("scope")
-    if scope == "all":
-        return web.json_response(db.wipe_registry())
-    if scope == "visits":
-        return web.json_response(db.reset_visits())
-    raise web.HTTPBadRequest(text="scope: 'visits' | 'all'")
+    return web.json_response(
+        {
+            "blocked": True,
+            "error": (
+                "legacy admin reset отключён: используйте только "
+                "evidence-bound limited-test reset с snapshot и clearance"
+            ),
+        },
+        status=409,
+    )
 
 
 def _apply_cors(request: web.Request, resp: web.StreamResponse) -> None:

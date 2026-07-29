@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "product": {
     "name": "Контур · Реестры",
     "environment": "СНГ"
@@ -45,6 +45,12 @@
             "profile": "soft",
             "enabled": true,
             "required": true
+          },
+          {
+            "name": "ГПХ Агент выезд",
+            "profile": "hard",
+            "enabled": true,
+            "required": false
           }
         ]
       },
@@ -87,6 +93,7 @@
     ]
   },
   "discovery": {
+    "portfolio_layout": "root/group/employee/*.xlsb",
     "active_extensions": [
       ".xlsb"
     ],

@@ -125,8 +125,12 @@ def test_first_baseline_promotion_revalidates_before_publish(
         monkeypatch,
     )
 
+    bundle = SimpleNamespace(
+        workspace_path=lambda: tmp_path / "workspace",
+        app=SimpleNamespace(safety={}),
+    )
     result = rehearsal.promote_first_baseline_rehearsal(
-        SimpleNamespace(),
+        bundle,
         tmp_path / "snapshot.json",
         tmp_path / "stage.json",
         candidate,
@@ -149,9 +153,13 @@ def test_first_baseline_promotion_rejects_wrong_digest(
         monkeypatch,
     )
 
+    bundle = SimpleNamespace(
+        workspace_path=lambda: tmp_path / "workspace",
+        app=SimpleNamespace(safety={}),
+    )
     with pytest.raises(SafetyViolation, match="digest"):
         rehearsal.promote_first_baseline_rehearsal(
-            SimpleNamespace(),
+            bundle,
             tmp_path / "snapshot.json",
             tmp_path / "stage.json",
             candidate,

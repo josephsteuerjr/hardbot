@@ -627,6 +627,21 @@ def validate_staging(
         run_id=stage.run_id,
         plan_digest=stage.plan_digest,
     )
+    config_identity = str(getattr(bundle, "config_identity", "") or "")
+    if not (
+        stage.config_identity
+        == plan.config_identity
+        == config_identity
+    ):
+        report.issues.append(
+            Issue(
+                "error",
+                "config_identity_mismatch",
+                "snapshot/plan/staging относятся к разным конфигурациям",
+            )
+        )
+        _write_report(stage, report)
+        return report
     if stage.plan_digest != plan.digest:
         report.issues.append(
             Issue(

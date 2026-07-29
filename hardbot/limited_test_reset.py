@@ -15,12 +15,15 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import gzip
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import sqlite3
+import stat
 import sys
 import tarfile
 from datetime import datetime, timezone
@@ -28,10 +31,15 @@ from pathlib import Path
 from typing import Any
 
 import db
+from exchange_contract import (
+    CLEARANCE_RECEIPT_SCHEMA,
+    SNAPSHOT_KIND,
+    contract_binding,
+)
 from photostore import PHOTO_DIR as DEFAULT_PHOTO_DIR
 
 
-EXPECTED_TABLES = {
+RESET_TABLES = {
     "clients",
     "visits",
     "users",
@@ -46,6 +54,16 @@ EXPECTED_TABLES = {
     "report_chats",
     "report_chat_employees",
 }
+
+# Import receipts are a server-side anti-replay trust anchor, not test data.
+# Consumed receipts and source heads must survive a limited-test reset; otherwise
+# an old published master could become "new" again immediately after cleanup.
+# Pending authorizations are invalidated atomically during reset.
+RETAINED_TABLES = {
+    "import_receipts",
+    "import_source_heads",
+}
+EXPECTED_TABLES = RESET_TABLES | RETAINED_TABLES
 
 # Сначала зависимые/операционные сущности, затем registry и identity/config.
 DELETE_ORDER = (
@@ -68,12 +86,16 @@ SNAPSHOT_MANIFEST = "snapshot_manifest.json"
 POST_RESET_MANIFEST = "post_reset_manifest.json"
 APPLY_STARTED_MANIFEST = "apply_started_manifest.json"
 RECOVERY_MANIFEST = "recovery_manifest.json"
+ORCHESTRATION_INTENT = "orchestration_apply_intent"
+ORCHESTRATION_INTENT_SCHEMA = "hardbot.reset-orchestration-apply-intent.v1"
 BACKUP_NAME = "hardbot-pre-reset.sqlite3"
 SAFE_EXPORT_NAME = "safe-enrichment.json.gz"
 RAW_EXPORT_NAME = "raw-diagnostic.json.gz"
 SCHEMA_NAME = "export-schema.json"
 PHOTO_MANIFEST_NAME = "photos-manifest.json.gz"
 PHOTO_ARCHIVE_NAME = "photos-before-reset.tar.gz"
+CLEARANCE_RECEIPT_NAME = "registry-clearance.json"
+DATA_EXCHANGE_CONTRACT = contract_binding()
 EXPECTED_ARTIFACTS = frozenset(
     {
         BACKUP_NAME,
@@ -97,27 +119,173 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def _sha256_file(path: Path) -> str:
+def _is_reparse(info: os.stat_result) -> bool:
+    return bool(
+        getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+
+
+def _same_file_state(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        left.st_dev,
+        left.st_ino,
+        left.st_mode,
+        left.st_size,
+        left.st_mtime_ns,
+    ) == (
+        right.st_dev,
+        right.st_ino,
+        right.st_mode,
+        right.st_size,
+        right.st_mtime_ns,
+    )
+
+
+@contextmanager
+def _open_regular_read(path: Path, *, label: str):
+    try:
+        before = os.lstat(path)
+    except OSError as exc:
+        raise ResetBlocked(f"{label} недоступен: {path}") from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or _is_reparse(before)
+        or path.is_symlink()
+    ):
+        raise ResetBlocked(f"{label} должен быть обычным non-reparse файлом: {path}")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ResetBlocked(f"{label} не удалось безопасно открыть: {path}") from exc
+    stream = os.fdopen(descriptor, "rb")
+    try:
+        opened = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or (before.st_dev, before.st_ino)
+            != (opened.st_dev, opened.st_ino)
+        ):
+            raise ResetBlocked(f"{label} подменён при открытии: {path}")
+        yield stream
+        after = os.fstat(stream.fileno())
+        if not _same_file_state(opened, after):
+            raise ResetBlocked(f"{label} изменился во время чтения: {path}")
+        try:
+            current = os.lstat(path)
+        except OSError as exc:
+            raise ResetBlocked(f"{label} исчез во время чтения: {path}") from exc
+        if not _same_file_state(opened, current):
+            raise ResetBlocked(f"{label} заменён во время чтения: {path}")
+    finally:
+        stream.close()
+
+
+def _read_regular_bytes(path: Path, *, label: str) -> bytes:
+    with _open_regular_read(path, label=label) as stream:
+        return stream.read()
+
+
+def _sha256_file(path: Path, *, label: str = "artifact") -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
+    with _open_regular_read(path, label=label) as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
 
 
-def _write_json(path: Path, payload: Any) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
+def _canonical_digest(payload: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _require_safe_parent(path: Path) -> Path:
+    parent = path.parent
     try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-            json.dump(payload, stream, ensure_ascii=False, indent=2)
-            stream.write("\n")
+        parent_info = os.lstat(parent)
+    except OSError as exc:
+        raise ResetBlocked(f"Unsafe artifact parent: {parent}") from exc
+    if (
+        not parent.exists()
+        or not parent.is_dir()
+        or parent.is_symlink()
+        or not stat.S_ISDIR(parent_info.st_mode)
+        or _is_reparse(parent_info)
+    ):
+        raise ResetBlocked(f"Небезопасный родитель артефакта: {parent}")
+    target_info = os.lstat(path) if path.exists() or path.is_symlink() else None
+    if (
+        path.is_symlink()
+        or (path.exists() and not path.is_file())
+        or (
+            target_info is not None
+            and (
+                not stat.S_ISREG(target_info.st_mode)
+                or _is_reparse(target_info)
+            )
+        )
+    ):
+        raise ResetBlocked(f"Небезопасный target артефакта: {path}")
+    return parent
+
+
+def _open_unique_temp(path: Path, *, mode: int = 0o600):
+    """Open a same-directory O_EXCL temp so replace cannot cross filesystems."""
+
+    parent = _require_safe_parent(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    for _attempt in range(32):
+        temporary = parent / (
+            f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(8)}"
+        )
+        try:
+            descriptor = os.open(temporary, flags, mode)
+        except FileExistsError:
+            continue
+        return temporary, os.fdopen(descriptor, "wb")
+    raise ResetBlocked(f"Не удалось создать уникальный temp для {path}")
+
+
+def _fsync_file(path: Path) -> None:
+    # Windows FlushFileBuffers rejects a read-only CRT descriptor.
+    descriptor = os.open(path, os.O_RDWR if os.name == "nt" else os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+    temporary = None
+    try:
+        temporary, stream = _open_unique_temp(path)
+        with stream:
+            stream.write(encoded)
             stream.flush()
             os.fsync(stream.fileno())
         _private_mode(temporary)
         os.replace(temporary, path)
         _fsync_directory(path.parent)
     except Exception:
-        temporary.unlink(missing_ok=True)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
         raise
 
 
@@ -127,9 +295,10 @@ def _write_json_gz(path: Path, payload: Any) -> None:
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
-    temporary = path.with_name(f".{path.name}.tmp")
+    temporary = None
     try:
-        with temporary.open("wb") as raw:
+        temporary, raw = _open_unique_temp(path)
+        with raw:
             with gzip.GzipFile(
                 filename="",
                 mode="wb",
@@ -143,7 +312,8 @@ def _write_json_gz(path: Path, payload: Any) -> None:
         os.replace(temporary, path)
         _fsync_directory(path.parent)
     except Exception:
-        temporary.unlink(missing_ok=True)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
         raise
 
 
@@ -166,9 +336,27 @@ def _private_mode(path: Path) -> None:
 
 
 def _validated_archive_dir(raw: str | os.PathLike[str], *, create: bool) -> Path:
-    data_dir = Path(db.DB_PATH).resolve().parent
-    backup_root = (data_dir / "backups").resolve()
-    archive = Path(raw).resolve()
+    data_dir = Path(os.path.abspath(Path(db.DB_PATH).parent))
+    backup_root_raw = data_dir / "backups"
+    archive_raw = Path(os.path.abspath(Path(raw)))
+    if archive_raw.parent != backup_root_raw:
+        raise ResetBlocked(
+            f"Reset archive must be a direct child of {backup_root_raw}"
+        )
+    try:
+        data_info = os.lstat(data_dir)
+    except OSError as exc:
+        raise ResetBlocked(f"Data directory is unavailable: {data_dir}") from exc
+    if (
+        not stat.S_ISDIR(data_info.st_mode)
+        or _is_reparse(data_info)
+        or data_dir.is_symlink()
+    ):
+        raise ResetBlocked(f"Unsafe data directory: {data_dir}")
+    if backup_root_raw.is_symlink() or archive_raw.is_symlink():
+        raise ResetBlocked("Symlink в пути reset-архива запрещён")
+    backup_root = backup_root_raw.resolve()
+    archive = archive_raw.resolve()
     try:
         archive.relative_to(backup_root)
     except ValueError as exc:
@@ -178,9 +366,28 @@ def _validated_archive_dir(raw: str | os.PathLike[str], *, create: bool) -> Path
     if archive == backup_root:
         raise ResetBlocked("Корневой каталог backups нельзя использовать как reset-архив")
     if create:
+        backup_root.mkdir(parents=True, exist_ok=True)
+        backup_info = os.lstat(backup_root)
+        if (
+            backup_root.is_symlink()
+            or not backup_root.is_dir()
+            or _is_reparse(backup_info)
+        ):
+            raise ResetBlocked(f"Небезопасный backup root: {backup_root}")
         archive.mkdir(parents=True, exist_ok=False)
+        archive_info = os.lstat(archive)
+        if not stat.S_ISDIR(archive_info.st_mode) or _is_reparse(archive_info):
+            raise ResetBlocked(f"Unsafe reset archive: {archive}")
         _private_mode(archive)
-    elif not archive.is_dir():
+        _fsync_directory(archive)
+        _fsync_directory(backup_root)
+        _fsync_directory(backup_root.parent)
+    elif (
+        not archive.is_dir()
+        or archive.is_symlink()
+        or _is_reparse(os.lstat(archive))
+        or _is_reparse(os.lstat(backup_root))
+    ):
         raise ResetBlocked(f"Reset-архив не найден: {archive}")
     return archive
 
@@ -210,7 +417,7 @@ def _table_counts(conn: sqlite3.Connection) -> dict[str, int]:
     _require_known_schema(conn)
     return {
         table: int(conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
-        for table in sorted(EXPECTED_TABLES)
+        for table in sorted(RESET_TABLES)
     }
 
 
@@ -240,18 +447,89 @@ def _database_state_digest(conn: sqlite3.Connection) -> str:
     return digest.hexdigest()
 
 
+def _retained_import_state(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Return a non-sensitive proof that the anti-replay ledger is coherent."""
+
+    _require_known_schema(conn)
+    orphan = conn.execute(
+        "SELECT h.source_id FROM import_source_heads AS h "
+        "LEFT JOIN import_receipts AS r "
+        "ON r.proof_digest=h.proof_digest "
+        "AND r.source_id=h.source_id AND r.sequence=h.sequence "
+        "AND r.status='consumed' "
+        "WHERE r.proof_digest IS NULL LIMIT 1"
+    ).fetchone()
+    if orphan is not None:
+        raise ResetBlocked(
+            "Anti-replay source head не подтверждён consumed import receipt"
+        )
+
+    receipt_columns = (
+        "proof_digest",
+        "source_kind",
+        "source_id",
+        "sequence",
+        "proof_json",
+        "status",
+        "registered_at",
+        "expires_at",
+        "consumed_at",
+        "result_json",
+        "result_digest",
+    )
+    consumed = [
+        list(row)
+        for row in conn.execute(
+            "SELECT " + ",".join(receipt_columns) + " "
+            "FROM import_receipts WHERE status='consumed' "
+            "ORDER BY source_id, sequence, proof_digest"
+        )
+    ]
+    invalid_status = conn.execute(
+        "SELECT status FROM import_receipts "
+        "WHERE status NOT IN ('pending','consumed') LIMIT 1"
+    ).fetchone()
+    if invalid_status is not None:
+        raise ResetBlocked(
+            "Anti-replay ledger содержит неизвестный статус receipt"
+        )
+    pending = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM import_receipts WHERE status='pending'"
+        ).fetchone()[0]
+    )
+    heads = [
+        list(row)
+        for row in conn.execute(
+            "SELECT source_id,sequence,proof_digest,imported_at "
+            "FROM import_source_heads ORDER BY source_id"
+        )
+    ]
+    return {
+        "pending": pending,
+        "consumed": len(consumed),
+        "consumed_digest": _canonical_digest(consumed),
+        "heads": len(heads),
+        "heads_digest": _canonical_digest(heads),
+    }
+
+
 def _online_backup(target: Path) -> None:
     if target.exists():
         raise ResetBlocked(f"Backup уже существует: {target}")
+    _require_safe_parent(target)
     source = db.connect()
     destination = sqlite3.connect(target)
     try:
+        destination.execute("PRAGMA synchronous=FULL")
         source.backup(destination)
         destination.commit()
     finally:
         destination.close()
         source.close()
     _private_mode(target)
+    _fsync_file(target)
+    _fsync_directory(target.parent)
     check = sqlite3.connect(f"file:{target}?mode=ro", uri=True)
     try:
         quick = check.execute("PRAGMA quick_check").fetchone()[0]
@@ -266,6 +544,8 @@ def _online_backup(target: Path) -> None:
 
 def _photo_manifest(root_raw: str | os.PathLike[str] | None = None) -> dict[str, Any]:
     root = Path(PHOTO_DIR if root_raw is None else root_raw)
+    if root.is_symlink():
+        raise ResetBlocked(f"Symlink в photo storage запрещён: {root}")
     entries: list[dict[str, Any]] = []
     if root.exists():
         for path in sorted(root.rglob("*"), key=lambda item: str(item).casefold()):
@@ -288,6 +568,7 @@ def _photo_manifest(root_raw: str | os.PathLike[str] | None = None) -> dict[str,
     ).encode("utf-8")
     return {
         "root": str(root),
+        "root_exists": root.exists(),
         "files": len(entries),
         "bytes": sum(int(entry["size"]) for entry in entries),
         "digest": hashlib.sha256(canonical).hexdigest(),
@@ -297,26 +578,61 @@ def _photo_manifest(root_raw: str | os.PathLike[str] | None = None) -> dict[str,
 
 def _create_photo_archive(path: Path, entries: list[dict[str, Any]]) -> None:
     root = Path(PHOTO_DIR)
-    temporary = path.with_name(f".{path.name}.tmp")
+    temporary = None
     try:
-        with tarfile.open(temporary, "w:gz") as archive:
-            for entry in entries:
-                relative = str(entry["path"])
-                source = root / Path(relative)
-                info = archive.gettarinfo(str(source), arcname=relative)
-                info.uid = info.gid = 0
-                info.uname = info.gname = ""
-                info.mtime = 0
-                with source.open("rb") as stream:
-                    archive.addfile(info, stream)
-        with temporary.open("r+b") as stream:
-            os.fsync(stream.fileno())
+        temporary, raw = _open_unique_temp(path)
+        with raw:
+            with tarfile.open(fileobj=raw, mode="w:gz") as archive:
+                for entry in entries:
+                    relative = str(entry["path"])
+                    source = root / Path(relative)
+                    info = archive.gettarinfo(str(source), arcname=relative)
+                    info.uid = info.gid = 0
+                    info.uname = info.gname = ""
+                    info.mtime = 0
+                    with source.open("rb") as stream:
+                        archive.addfile(info, stream)
+            raw.flush()
+            os.fsync(raw.fileno())
         _private_mode(temporary)
         os.replace(temporary, path)
         _fsync_directory(path.parent)
     except Exception:
-        temporary.unlink(missing_ok=True)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
         raise
+
+
+def _snapshot_export_rows(
+    conn: sqlite3.Connection,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build both exports from the exact online-backup connection.
+
+    ``db.registry_rows``/``db.enrichment_rows`` normally open the live DB.
+    During a running prepare-clearance snapshot that would create a race
+    between the backup and exports, so the same canonical projection is
+    evaluated against rows read from the immutable backup.
+    """
+
+    rows = conn.execute("SELECT * FROM clients ORDER BY client").fetchall()
+    raw_rows: list[dict[str, Any]] = []
+    safe_rows: list[dict[str, Any]] = []
+    for raw in rows:
+        registry = {field.key: raw[field.key] for field in db.FIELDS}
+        raw_rows.append(registry)
+        safe = dict(registry)
+        for key in db.BOT_VISIT_KEYS:
+            if key in safe:
+                safe[key] = None
+        snapshot = db._merged_visit(raw)
+        safe[db.BOT_VISIT_MARKER] = snapshot is not None
+        if snapshot:
+            tips = str(snapshot.get("tips") or raw["tips"] or "").strip()
+            if tips:
+                snapshot = {**snapshot, "tips": tips}
+            safe.update(snapshot)
+        safe_rows.append(safe)
+    return safe_rows, raw_rows
 
 
 def create_snapshot(archive_raw: str | os.PathLike[str]) -> dict[str, Any]:
@@ -326,18 +642,18 @@ def create_snapshot(archive_raw: str | os.PathLike[str]) -> dict[str, Any]:
     try:
         _online_backup(backup)
 
-        conn = db.connect()
+        conn = sqlite3.connect(f"file:{backup}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
         try:
             counts = _table_counts(conn)
             state_digest = _database_state_digest(conn)
             quick_check = conn.execute("PRAGMA quick_check").fetchone()[0]
+            safe_rows, raw_rows = _snapshot_export_rows(conn)
         finally:
             conn.close()
         if quick_check != "ok":
-            raise ResetBlocked(f"Рабочая БД не прошла quick_check: {quick_check}")
+            raise ResetBlocked(f"SQLite backup не прошёл quick_check: {quick_check}")
 
-        safe_rows = db.enrichment_rows()
-        raw_rows = db.registry_rows()
         schema = db.export_schema()
         photos = _photo_manifest()
 
@@ -350,6 +666,7 @@ def create_snapshot(archive_raw: str | os.PathLike[str]) -> dict[str, Any]:
             safe_path,
             {
                 "kind": "safe_enrichment",
+                "data_exchange_contract": DATA_EXCHANGE_CONTRACT,
                 "created_at": _utc_now(),
                 "rows": safe_rows,
             },
@@ -358,6 +675,7 @@ def create_snapshot(archive_raw: str | os.PathLike[str]) -> dict[str, Any]:
             raw_path,
             {
                 "kind": "raw_diagnostic",
+                "data_exchange_contract": DATA_EXCHANGE_CONTRACT,
                 "created_at": _utc_now(),
                 "rows": raw_rows,
             },
@@ -365,12 +683,40 @@ def create_snapshot(archive_raw: str | os.PathLike[str]) -> dict[str, Any]:
         _write_json(schema_path, schema)
         _write_json_gz(photo_path, photos)
         _create_photo_archive(photo_archive_path, photos["entries"])
+        photos_after_archive = _photo_manifest()
+        if (
+            photos_after_archive["root_exists"] != photos["root_exists"]
+            or photos_after_archive["files"] != photos["files"]
+            or photos_after_archive["bytes"] != photos["bytes"]
+            or photos_after_archive["digest"] != photos["digest"]
+        ):
+            raise ResetBlocked(
+                "Photo storage изменился во время snapshot; повторите prepare-clearance"
+            )
 
         if len(safe_rows) != counts["clients"] or len(raw_rows) != counts["clients"]:
             raise ResetBlocked(
                 "Число строк экспортов не совпало с таблицей clients: "
                 f"safe={len(safe_rows)}, raw={len(raw_rows)}, "
                 f"clients={counts['clients']}"
+            )
+        live = db.connect()
+        try:
+            live_counts = _table_counts(live)
+            live_digest = _database_state_digest(live)
+        finally:
+            live.close()
+        final_photos = _photo_manifest()
+        if live_counts != counts or live_digest != state_digest:
+            raise ResetBlocked(
+                "Рабочая БД изменилась во время snapshot; повторите prepare-clearance"
+            )
+        if (
+            final_photos["root_exists"] != photos["root_exists"]
+            or final_photos["digest"] != photos["digest"]
+        ):
+            raise ResetBlocked(
+                "Photo storage изменился во время snapshot; повторите prepare-clearance"
             )
 
         artifacts = {
@@ -382,10 +728,12 @@ def create_snapshot(archive_raw: str | os.PathLike[str]) -> dict[str, Any]:
             PHOTO_ARCHIVE_NAME: _sha256_file(photo_archive_path),
         }
         token_source = {
+            "data_exchange_contract": DATA_EXCHANGE_CONTRACT,
             "artifacts": artifacts,
             "counts": counts,
             "database_state_digest": state_digest,
             "photos_digest": photos["digest"],
+            "photos_root_exists": photos["root_exists"],
         }
         confirm_token = hashlib.sha256(
             json.dumps(
@@ -395,7 +743,8 @@ def create_snapshot(archive_raw: str | os.PathLike[str]) -> dict[str, Any]:
             ).encode("utf-8")
         ).hexdigest()
         manifest = {
-            "kind": "hardbot_limited_test_pre_reset",
+            "kind": SNAPSHOT_KIND,
+            "data_exchange_contract": DATA_EXCHANGE_CONTRACT,
             "created_at": _utc_now(),
             "database": str(Path(db.DB_PATH).resolve()),
             "database_state_digest": state_digest,
@@ -404,6 +753,7 @@ def create_snapshot(archive_raw: str | os.PathLike[str]) -> dict[str, Any]:
             "safe_rows": len(safe_rows),
             "raw_rows": len(raw_rows),
             "photos": {
+                "root_exists": photos["root_exists"],
                 "files": photos["files"],
                 "bytes": photos["bytes"],
                 "digest": photos["digest"],
@@ -416,17 +766,173 @@ def create_snapshot(archive_raw: str | os.PathLike[str]) -> dict[str, Any]:
     except Exception:
         # Не оставлять полуготовый каталог, который можно ошибочно принять за backup.
         shutil.rmtree(archive, ignore_errors=True)
+        _fsync_directory(archive.parent)
         raise
+
+
+def _load_json_regular(path: Path, *, label: str) -> Any:
+    try:
+        return json.loads(
+            _read_regular_bytes(path, label=label).decode("utf-8")
+        )
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+        raise ResetBlocked(f"Invalid {label}: {path}") from exc
+
+
+def _load_json_gz_regular(path: Path, *, label: str) -> Any:
+    try:
+        return json.loads(
+            gzip.decompress(_read_regular_bytes(path, label=label)).decode(
+                "utf-8"
+            )
+        )
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+        raise ResetBlocked(f"Invalid {label}: {path}") from exc
+
+
+def _verify_photo_archive(
+    archive_path: Path,
+    entries: list[dict[str, Any]],
+) -> None:
+    expected: dict[str, dict[str, Any]] = {}
+    for item in entries:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"path", "size", "sha256"}
+            or not isinstance(item["path"], str)
+            or not item["path"]
+            or isinstance(item["size"], bool)
+            or not isinstance(item["size"], int)
+            or item["size"] < 0
+            or not isinstance(item["sha256"], str)
+            or len(item["sha256"]) != 64
+        ):
+            raise ResetBlocked("Photo manifest entry has invalid schema")
+        relative = Path(item["path"])
+        parts = tuple(item["path"].replace("\\", "/").split("/"))
+        if (
+            relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in parts)
+            or item["path"] in expected
+        ):
+            raise ResetBlocked("Photo manifest contains unsafe/duplicate path")
+        expected[item["path"]] = {
+            "size": item["size"],
+            "sha256": item["sha256"],
+        }
+
+    actual: dict[str, dict[str, Any]] = {}
+    try:
+        with _open_regular_read(
+            archive_path,
+            label="photo archive",
+        ) as raw:
+            with tarfile.open(fileobj=raw, mode="r:gz") as packed:
+                for member in packed.getmembers():
+                    parts = tuple(member.name.replace("\\", "/").split("/"))
+                    if (
+                        not member.isfile()
+                        or member.name.startswith("/")
+                        or any(part in {"", ".", ".."} for part in parts)
+                        or member.name in actual
+                    ):
+                        raise ResetBlocked(
+                            "Photo archive contains unsafe/duplicate entry"
+                        )
+                    extracted = packed.extractfile(member)
+                    if extracted is None:
+                        raise ResetBlocked("Photo archive entry is unreadable")
+                    digest = hashlib.sha256()
+                    size = 0
+                    for block in iter(
+                        lambda: extracted.read(1024 * 1024),
+                        b"",
+                    ):
+                        digest.update(block)
+                        size += len(block)
+                    actual[member.name] = {
+                        "size": size,
+                        "sha256": digest.hexdigest(),
+                    }
+    except ResetBlocked:
+        raise
+    except (OSError, tarfile.TarError) as exc:
+        raise ResetBlocked("Photo archive is invalid") from exc
+    if actual != expected:
+        raise ResetBlocked("Photo archive does not match photo manifest")
+
+
+def _verify_backup_and_exports(
+    archive: Path,
+    manifest: dict[str, Any],
+) -> None:
+    backup = archive / BACKUP_NAME
+    before_sha = _sha256_file(backup, label="SQLite backup")
+    connection = sqlite3.connect(f"file:{backup}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        quick = connection.execute("PRAGMA quick_check").fetchone()[0]
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+        _require_known_schema(connection)
+        counts = _table_counts(connection)
+        state_digest = _database_state_digest(connection)
+        safe_rows, raw_rows = _snapshot_export_rows(connection)
+    finally:
+        connection.close()
+    if _sha256_file(backup, label="SQLite backup") != before_sha:
+        raise ResetBlocked("SQLite backup changed during verification")
+    if (
+        quick != "ok"
+        or integrity != "ok"
+        or counts != manifest["counts"]
+        or state_digest != manifest["database_state_digest"]
+    ):
+        raise ResetBlocked(
+            "SQLite backup integrity/count/logical digest mismatch"
+        )
+
+    schema = _load_json_regular(
+        archive / SCHEMA_NAME,
+        label="export schema",
+    )
+    if schema != db.export_schema():
+        raise ResetBlocked("Export schema is not the deployed DB schema")
+    safe = _load_json_gz_regular(
+        archive / SAFE_EXPORT_NAME,
+        label="safe export",
+    )
+    raw = _load_json_gz_regular(
+        archive / RAW_EXPORT_NAME,
+        label="raw export",
+    )
+    if (
+        not isinstance(safe, dict)
+        or not isinstance(raw, dict)
+        or safe.get("kind") != "safe_enrichment"
+        or raw.get("kind") != "raw_diagnostic"
+        or safe.get("data_exchange_contract") != DATA_EXCHANGE_CONTRACT
+        or raw.get("data_exchange_contract") != DATA_EXCHANGE_CONTRACT
+        or safe.get("rows") != safe_rows
+        or raw.get("rows") != raw_rows
+    ):
+        raise ResetBlocked(
+            "Safe/raw exports are not exact projections of SQLite backup"
+        )
 
 
 def _load_verified_manifest(archive: Path) -> dict[str, Any]:
     manifest_path = archive / SNAPSHOT_MANIFEST
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise ResetBlocked(f"Некорректный snapshot manifest: {manifest_path}") from exc
-    if manifest.get("kind") != "hardbot_limited_test_pre_reset":
-        raise ResetBlocked("Неизвестный тип snapshot manifest")
+    manifest = _load_json_regular(
+        manifest_path,
+        label="snapshot manifest",
+    )
+    if (
+        manifest.get("kind") != SNAPSHOT_KIND
+        or manifest.get("data_exchange_contract") != DATA_EXCHANGE_CONTRACT
+    ):
+        raise ResetBlocked(
+            "Snapshot manifest несовместим с deployed data-exchange contract"
+        )
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict) or set(artifacts) != EXPECTED_ARTIFACTS:
         raise ResetBlocked(
@@ -435,7 +941,7 @@ def _load_verified_manifest(archive: Path) -> dict[str, Any]:
     counts = manifest.get("counts")
     if (
         not isinstance(counts, dict)
-        or set(counts) != EXPECTED_TABLES
+        or set(counts) != RESET_TABLES
         or any(
             isinstance(value, bool)
             or not isinstance(value, int)
@@ -444,10 +950,16 @@ def _load_verified_manifest(archive: Path) -> dict[str, Any]:
         )
     ):
         raise ResetBlocked("Snapshot manifest содержит некорректные counts")
+    if (
+        manifest.get("safe_rows") != counts["clients"]
+        or manifest.get("raw_rows") != counts["clients"]
+    ):
+        raise ResetBlocked("Snapshot manifest safe/raw counts не совпали с clients")
     photos = manifest.get("photos")
     state_digest = manifest.get("database_state_digest")
     if (
         not isinstance(photos, dict)
+        or not isinstance(photos.get("root_exists"), bool)
         or not isinstance(photos.get("digest"), str)
         or len(photos["digest"]) != 64
         or not isinstance(state_digest, str)
@@ -460,11 +972,29 @@ def _load_verified_manifest(archive: Path) -> dict[str, Any]:
         path = archive / name
         if not path.is_file() or _sha256_file(path) != expected:
             raise ResetBlocked(f"Артефакт отсутствует или повреждён: {name}")
+    _verify_backup_and_exports(archive, manifest)
+    photo_artifact = _load_json_gz_regular(
+        archive / PHOTO_MANIFEST_NAME,
+        label="photo manifest",
+    )
+    if (
+        photo_artifact.get("root_exists") != photos["root_exists"]
+        or photo_artifact.get("files") != photos.get("files")
+        or photo_artifact.get("bytes") != photos.get("bytes")
+        or photo_artifact.get("digest") != photos["digest"]
+    ):
+        raise ResetBlocked("Photo manifest artifact не совпал со snapshot manifest")
+    entries = photo_artifact.get("entries")
+    if not isinstance(entries, list):
+        raise ResetBlocked("Photo manifest entries must be a list")
+    _verify_photo_archive(archive / PHOTO_ARCHIVE_NAME, entries)
     token_source = {
+        "data_exchange_contract": DATA_EXCHANGE_CONTRACT,
         "artifacts": artifacts,
         "counts": counts,
         "database_state_digest": state_digest,
         "photos_digest": photos["digest"],
+        "photos_root_exists": photos["root_exists"],
     }
     expected_token = hashlib.sha256(
         json.dumps(
@@ -478,31 +1008,408 @@ def _load_verified_manifest(archive: Path) -> dict[str, Any]:
     return manifest
 
 
-def _restore_photos(archived_photos: Path) -> None:
+def _load_verified_clearance(
+    archive: Path,
+    manifest: dict[str, Any],
+    *,
+    claimed_digest: str,
+    claimed_receipt_sha256: str,
+) -> dict[str, Any]:
+    """Validate the portable reset binding; local CLI validates source files."""
+
+    def valid_sha(value: Any) -> bool:
+        return (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(ch in "0123456789abcdef" for ch in value)
+        )
+
+    path = archive / CLEARANCE_RECEIPT_NAME
+    if path.is_symlink() or not path.is_file():
+        raise ResetBlocked("Verified registry clearance receipt отсутствует")
+    if _sha256_file(path) != claimed_receipt_sha256:
+        raise ResetBlocked("Clearance receipt SHA-256 не совпал")
+    receipt = _load_json_regular(path, label="registry clearance")
+    if (
+        receipt.get("schema") != CLEARANCE_RECEIPT_SCHEMA
+        or receipt.get("data_exchange_contract") != DATA_EXCHANGE_CONTRACT
+    ):
+        raise ResetBlocked("Неизвестная schema registry clearance")
+    embedded_digest = receipt.get("clearance_digest")
+    unsigned = {
+        key: value
+        for key, value in receipt.items()
+        if key != "clearance_digest"
+    }
+    actual_digest = hashlib.sha256(
+        json.dumps(
+            unsigned,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if (
+        not claimed_digest
+        or claimed_digest != embedded_digest
+        or actual_digest != embedded_digest
+    ):
+        raise ResetBlocked("Canonical registry clearance digest не совпал")
+
+    snapshot = receipt.get("snapshot")
+    provenance = receipt.get("provenance")
+    coverage = receipt.get("coverage")
+    enrichment = receipt.get("enrichment")
+    registry = receipt.get("registry")
+    if not all(
+        isinstance(item, dict)
+        for item in (snapshot, provenance, coverage, enrichment, registry)
+    ):
+        raise ResetBlocked("Clearance receipt содержит неполные evidence sections")
+    expected_snapshot = {
+        "manifest_sha256": _sha256_file(archive / SNAPSHOT_MANIFEST),
+        "confirm_token": manifest["confirm_token"],
+        "database_state_digest": manifest["database_state_digest"],
+        "safe_export_sha256": manifest["artifacts"][SAFE_EXPORT_NAME],
+        "raw_export_sha256": manifest["artifacts"][RAW_EXPORT_NAME],
+        "data_exchange_contract_sha256": DATA_EXCHANGE_CONTRACT["sha256"],
+    }
+    if any(snapshot.get(key) != value for key, value in expected_snapshot.items()):
+        raise ResetBlocked("Registry clearance относится к другому reset snapshot")
+    if (
+        provenance.get("clients") != manifest["counts"]["clients"]
+        or provenance.get("safe_rows") != manifest["safe_rows"]
+        or provenance.get("raw_rows") != manifest["raw_rows"]
+        or provenance.get("completed_cases") != coverage.get("completed_cases")
+    ):
+        raise ResetBlocked("Registry clearance provenance counts не совпали")
+    zero_invariants = {
+        "invalid_completed_cases": provenance.get("invalid_completed_cases"),
+        "orphan_completed_cases": provenance.get("orphan_completed_cases"),
+        "unprovenanced_visit_rows": provenance.get(
+            "unprovenanced_visit_rows"
+        ),
+        "uncovered_cases": coverage.get("uncovered_cases"),
+        "duplicate_coverage_cases": coverage.get("duplicate_coverage_cases"),
+        "coverage_orphan_completed_cases": coverage.get(
+            "orphan_completed_cases"
+        ),
+        "failed_files": coverage.get("failed_files"),
+        "missing_columns": coverage.get("missing_columns"),
+        "post_plan_writes": coverage.get("post_plan_writes"),
+        "post_run_changes": registry.get("post_run_changes"),
+        "unfinished_publish_journals": registry.get(
+            "unfinished_publish_journals"
+        ),
+    }
+    if any(value != 0 for value in zero_invariants.values()):
+        raise ResetBlocked(f"Registry clearance zero-invariants нарушены: {zero_invariants}")
+    if coverage.get("covered_cases") != coverage.get("completed_cases"):
+        raise ResetBlocked("Registry clearance coverage неполный")
+    mode = registry.get("mode")
+    expected_roles = {
+        "registry_snapshot",
+        "plan",
+        "stage",
+        "validation",
+        "post_snapshot",
+        "post_plan",
+        "post_stage",
+        "post_validation",
+        "active_baseline",
+    }
+    if mode == "published":
+        expected_roles.add("publication")
+    artifacts = registry.get("artifacts")
+    if not isinstance(artifacts, dict) or set(artifacts) != expected_roles:
+        raise ResetBlocked("Registry clearance artifact set неточный")
+    for role, item in artifacts.items():
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"path", "sha256"}
+            or not isinstance(item.get("path"), str)
+            or not item["path"]
+            or not valid_sha(item.get("sha256"))
+        ):
+            raise ResetBlocked(f"Registry clearance artifact некорректен: {role}")
+    if (
+        not valid_sha(enrichment.get("evidence_sha256"))
+        or not valid_sha(provenance.get("completed_contract_ids_digest"))
+        or mode not in {"published", "already_zero"}
+        or not valid_sha(registry.get("plan_digest"))
+        or not valid_sha(registry.get("post_run_digest"))
+        or not valid_sha(registry.get("active_baseline_sha256"))
+        or not valid_sha(registry.get("active_baseline_plan_digest"))
+        or not valid_sha(registry.get("post_run_master_sha256"))
+    ):
+        raise ResetBlocked("Registry clearance evidence hashes неполны")
+    return receipt
+
+
+def _valid_sha(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _load_verified_intent(
+    archive: Path,
+    manifest: dict[str, Any],
+    *,
+    clearance_digest: str,
+    clearance_receipt_sha256: str,
+    claimed_intent_digest: str,
+) -> dict[str, Any]:
+    path = archive / ORCHESTRATION_INTENT
+    intent = _load_json_regular(path, label="orchestration intent")
+    required = {
+        "schema",
+        "created_at_utc",
+        "nonce",
+        "archive",
+        "confirm_token",
+        "snapshot_manifest_sha256",
+        "clearance_digest",
+        "clearance_receipt_sha256",
+        "container_id",
+        "image_id",
+        "app_stopped",
+        "intent_digest",
+    }
+    if not isinstance(intent, dict) or set(intent) != required:
+        raise ResetBlocked("Orchestration intent has an inexact schema")
+    embedded = intent.get("intent_digest")
+    unsigned = {
+        key: value
+        for key, value in intent.items()
+        if key != "intent_digest"
+    }
+    if (
+        intent.get("schema") != ORCHESTRATION_INTENT_SCHEMA
+        or not _valid_sha(embedded)
+        or embedded != claimed_intent_digest
+        or _canonical_digest(unsigned) != embedded
+        or intent.get("archive") != str(archive)
+        or intent.get("confirm_token") != manifest["confirm_token"]
+        or intent.get("snapshot_manifest_sha256")
+        != _sha256_file(
+            archive / SNAPSHOT_MANIFEST,
+            label="snapshot manifest",
+        )
+        or intent.get("clearance_digest") != clearance_digest
+        or intent.get("clearance_receipt_sha256")
+        != clearance_receipt_sha256
+        or intent.get("app_stopped") is not True
+        or not _valid_sha(intent.get("nonce"))
+        or not str(intent.get("container_id") or "")
+        or not str(intent.get("image_id") or "").startswith("sha256:")
+    ):
+        raise ResetBlocked("Orchestration intent binding/digest mismatch")
+    intent["_sha256"] = _sha256_file(path, label="orchestration intent")
+    return intent
+
+
+def _reset_binding(
+    archive: Path,
+    manifest: dict[str, Any],
+    *,
+    clearance_digest: str,
+    clearance_receipt_sha256: str,
+    intent: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "snapshot_manifest_sha256": _sha256_file(
+            archive / SNAPSHOT_MANIFEST,
+            label="snapshot manifest",
+        ),
+        "confirm_token": manifest["confirm_token"],
+        "clearance_digest": clearance_digest,
+        "clearance_receipt_sha256": clearance_receipt_sha256,
+        "orchestration_intent_digest": intent["intent_digest"],
+        "orchestration_intent_sha256": intent["_sha256"],
+        "orchestration_nonce": intent["nonce"],
+        "container_id": intent["container_id"],
+        "image_id": intent["image_id"],
+    }
+
+
+def _signed_receipt(payload: dict[str, Any]) -> dict[str, Any]:
+    return {**payload, "receipt_digest": _canonical_digest(payload)}
+
+
+def _load_apply_started(
+    archive: Path,
+    manifest: dict[str, Any],
+    *,
+    claimed_intent_digest: str,
+) -> dict[str, Any]:
+    path = archive / APPLY_STARTED_MANIFEST
+    started = _load_json_regular(path, label="apply-started receipt")
+    required = {
+        "schema",
+        "kind",
+        "started_at",
+        "snapshot_manifest_sha256",
+        "confirm_token",
+        "clearance_digest",
+        "clearance_receipt_sha256",
+        "orchestration_intent_digest",
+        "orchestration_intent_sha256",
+        "orchestration_nonce",
+        "container_id",
+        "image_id",
+        "receipt_digest",
+    }
+    if not isinstance(started, dict) or set(started) != required:
+        raise ResetBlocked("Apply-started receipt has an inexact schema")
+    unsigned = {
+        key: value
+        for key, value in started.items()
+        if key != "receipt_digest"
+    }
+    if (
+        started.get("schema") != "hardbot.reset-apply-started.v2"
+        or started.get("kind") != "hardbot_limited_test_apply_started"
+        or not _valid_sha(started.get("receipt_digest"))
+        or _canonical_digest(unsigned) != started["receipt_digest"]
+        or started.get("snapshot_manifest_sha256")
+        != _sha256_file(
+            archive / SNAPSHOT_MANIFEST,
+            label="snapshot manifest",
+        )
+        or started.get("confirm_token") != manifest["confirm_token"]
+        or started.get("orchestration_intent_digest")
+        != claimed_intent_digest
+        or not _valid_sha(started.get("clearance_digest"))
+        or not _valid_sha(started.get("clearance_receipt_sha256"))
+        or not _valid_sha(started.get("orchestration_intent_sha256"))
+        or not _valid_sha(started.get("orchestration_nonce"))
+        or not str(started.get("container_id") or "")
+        or not str(started.get("image_id") or "").startswith("sha256:")
+    ):
+        raise ResetBlocked("Apply-started receipt binding/digest mismatch")
+    return started
+
+
+def _sync_database_storage() -> None:
+    database = Path(db.DB_PATH)
+    for path in (
+        database,
+        database.with_name(database.name + "-wal"),
+        database.with_name(database.name + "-shm"),
+    ):
+        if path.is_symlink():
+            raise ResetBlocked(f"Symlink SQLite storage запрещён: {path}")
+        if path.exists():
+            if not path.is_file():
+                raise ResetBlocked(f"Некорректный SQLite storage: {path}")
+            _fsync_file(path)
+    _fsync_directory(database.parent)
+
+
+def _durable_photo_quarantine(photo_root: Path, archived_photos: Path) -> bool:
+    if photo_root.is_symlink():
+        raise ResetBlocked(f"Symlink photo storage запрещён: {photo_root}")
+    if archived_photos.exists() or archived_photos.is_symlink():
+        raise ResetBlocked(f"Photo quarantine уже существует: {archived_photos}")
+    if not photo_root.exists():
+        return False
+    if not photo_root.is_dir():
+        raise ResetBlocked(f"Photo storage не является каталогом: {photo_root}")
+    if archived_photos.parent.is_symlink() or not archived_photos.parent.is_dir():
+        raise ResetBlocked(
+            f"Небезопасный родитель photo quarantine: {archived_photos.parent}"
+        )
+    os.replace(photo_root, archived_photos)
+    _fsync_directory(photo_root.parent)
+    if archived_photos.parent != photo_root.parent:
+        _fsync_directory(archived_photos.parent)
+    return True
+
+
+def _restore_photos(
+    archived_photos: Path,
+    *,
+    root_existed: bool,
+    expected_digest: str,
+) -> None:
     photo_root = Path(PHOTO_DIR)
+    if photo_root.is_symlink():
+        raise ResetBlocked(f"Symlink photo storage запрещён: {photo_root}")
+    if not archived_photos.exists():
+        current = _photo_manifest(photo_root)
+        if current["digest"] != expected_digest:
+            raise ResetBlocked(
+                "Photo quarantine отсутствует, а live photo storage не равен pre-state"
+            )
+        if current["root_exists"] == root_existed:
+            return
+        if root_existed:
+            raise ResetBlocked("Исходный photo storage отсутствует в quarantine")
+        if photo_root.exists():
+            if not photo_root.is_dir() or any(photo_root.iterdir()):
+                raise ResetBlocked(
+                    "Новый photo storage не пуст; автоматическое удаление запрещено"
+                )
+            photo_root.rmdir()
+            _fsync_directory(photo_root.parent)
+        return
     if photo_root.exists():
-        shutil.rmtree(photo_root)
+        if not photo_root.is_dir() or any(photo_root.iterdir()):
+            raise ResetBlocked(
+                "Новый photo storage не пуст; автоматическое удаление запрещено"
+            )
+        photo_root.rmdir()
+        _fsync_directory(photo_root.parent)
     if archived_photos.exists():
+        if archived_photos.is_symlink() or not archived_photos.is_dir():
+            raise ResetBlocked(f"Некорректный photo quarantine: {archived_photos}")
         os.replace(archived_photos, photo_root)
+        _fsync_directory(archived_photos.parent)
+        if photo_root.parent != archived_photos.parent:
+            _fsync_directory(photo_root.parent)
+        _fsync_directory(photo_root)
 
 
 def _restore_database(backup: Path) -> None:
     database = Path(db.DB_PATH)
+    if (
+        not backup.is_file()
+        or backup.is_symlink()
+        or database.is_symlink()
+        or not database.parent.is_dir()
+        or database.parent.is_symlink()
+    ):
+        raise ResetBlocked("Небезопасный SQLite backup/target для recovery")
     source = sqlite3.connect(f"file:{backup}?mode=ro", uri=True)
-    destination = sqlite3.connect(database)
+    destination = sqlite3.connect(database, timeout=30)
     try:
+        destination.execute("PRAGMA synchronous=FULL")
+        destination.execute("PRAGMA busy_timeout=30000")
         source.backup(destination)
         destination.commit()
         destination.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        if destination.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise RuntimeError("Recovery SQLite quick_check не вернул ok")
     finally:
         destination.close()
         source.close()
+    _sync_database_storage()
+
+
+def _fault_point(_name: str) -> None:
+    """No-op production hook; tests replace it to emulate abrupt power loss."""
 
 
 def apply_reset(
     archive_raw: str | os.PathLike[str],
     *,
     confirm_token: str,
+    clearance_digest: str,
+    clearance_receipt_sha256: str,
+    orchestration_intent_digest: str,
     app_stopped: bool,
 ) -> dict[str, Any]:
     """Очистить все application tables и переместить фото в reset-архив."""
@@ -514,7 +1421,35 @@ def apply_reset(
     manifest = _load_verified_manifest(archive)
     if not confirm_token or confirm_token != manifest.get("confirm_token"):
         raise ResetBlocked("Confirm-token не совпал со snapshot manifest")
-    if (archive / POST_RESET_MANIFEST).exists():
+    clearance = _load_verified_clearance(
+        archive,
+        manifest,
+        claimed_digest=clearance_digest,
+        claimed_receipt_sha256=clearance_receipt_sha256,
+    )
+    intent = _load_verified_intent(
+        archive,
+        manifest,
+        clearance_digest=clearance["clearance_digest"],
+        clearance_receipt_sha256=clearance_receipt_sha256,
+        claimed_intent_digest=orchestration_intent_digest,
+    )
+    binding = _reset_binding(
+        archive,
+        manifest,
+        clearance_digest=clearance["clearance_digest"],
+        clearance_receipt_sha256=clearance_receipt_sha256,
+        intent=intent,
+    )
+    if any(
+        (archive / marker_name).exists()
+        or (archive / marker_name).is_symlink()
+        for marker_name in (
+            POST_RESET_MANIFEST,
+            APPLY_STARTED_MANIFEST,
+            RECOVERY_MANIFEST,
+        )
+    ):
         raise ResetBlocked("Этот snapshot уже использован для reset")
 
     conn = db.connect()
@@ -522,6 +1457,7 @@ def apply_reset(
         _require_known_schema(conn)
         current_counts = _table_counts(conn)
         current_digest = _database_state_digest(conn)
+        retained_before = _retained_import_state(conn)
     finally:
         conn.close()
     if current_counts != manifest["counts"] or current_digest != manifest[
@@ -532,7 +1468,11 @@ def apply_reset(
         )
 
     current_photos = _photo_manifest()
-    if current_photos["digest"] != manifest["photos"]["digest"]:
+    if (
+        current_photos["digest"] != manifest["photos"]["digest"]
+        or current_photos["root_exists"]
+        != manifest["photos"]["root_exists"]
+    ):
         raise ResetBlocked(
             "Photo storage изменился после snapshot; требуется новый snapshot"
         )
@@ -541,68 +1481,130 @@ def apply_reset(
     archived_photos = archive / "photos-before-reset"
     backup = archive / BACKUP_NAME
     photos_moved = False
-    database_changed = False
+    apply_started = False
+    terminal_committed = False
     try:
         _write_json(
             archive / APPLY_STARTED_MANIFEST,
-            {
+            _signed_receipt({
+                "schema": "hardbot.reset-apply-started.v2",
                 "kind": "hardbot_limited_test_apply_started",
                 "started_at": _utc_now(),
-                "confirm_token": manifest["confirm_token"],
-            },
+                **binding,
+            }),
         )
-        if archived_photos.exists():
-            raise ResetBlocked(f"Photo quarantine уже существует: {archived_photos}")
-        if photo_root.exists():
-            os.replace(photo_root, archived_photos)
-            photos_moved = True
+        apply_started = True
+        _fault_point("after_apply_started")
+        photos_moved = _durable_photo_quarantine(photo_root, archived_photos)
         photo_root.mkdir(parents=True, exist_ok=True)
         _private_mode(photo_root)
+        _fsync_directory(photo_root)
+        _fsync_directory(photo_root.parent)
+        _fault_point("after_photo_quarantine")
 
         conn = db.connect()
         try:
             _require_known_schema(conn)
+            conn.execute("PRAGMA synchronous=FULL")
             conn.execute("BEGIN IMMEDIATE")
             for table in DELETE_ORDER:
                 conn.execute(f'DELETE FROM "{table}"')
+            pending_invalidated = conn.execute(
+                "DELETE FROM import_receipts WHERE status='pending'"
+            ).rowcount
             if conn.execute(
                 "SELECT 1 FROM sqlite_master "
                 "WHERE type='table' AND name='sqlite_sequence'"
             ).fetchone():
                 conn.execute("DELETE FROM sqlite_sequence")
             conn.commit()
-            database_changed = True
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             conn.execute("VACUUM")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             if conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                 raise RuntimeError("quick_check после reset не вернул ok")
             post_counts = _table_counts(conn)
+            retained_after = _retained_import_state(conn)
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
+        _sync_database_storage()
+        _fault_point("after_database_reset")
 
         nonzero = {name: count for name, count in post_counts.items() if count}
         if nonzero:
             raise RuntimeError(f"После reset остались строки: {nonzero}")
+        if (
+            retained_after["pending"] != 0
+            or pending_invalidated != retained_before["pending"]
+            or {
+                key: retained_after[key]
+                for key in (
+                    "consumed",
+                    "consumed_digest",
+                    "heads",
+                    "heads_digest",
+                )
+            }
+            != {
+                key: retained_before[key]
+                for key in (
+                    "consumed",
+                    "consumed_digest",
+                    "heads",
+                    "heads_digest",
+                )
+            }
+        ):
+            raise RuntimeError(
+                "Anti-replay ledger не сохранил consumed receipts/source heads "
+                "или не очистил pending authorizations"
+            )
         if any(photo_root.iterdir()):
             raise RuntimeError("Новый photo storage не пуст")
 
-        post = {
+        post = _signed_receipt({
+            "schema": "hardbot.reset-post.v2",
             "kind": "hardbot_limited_test_post_reset",
             "completed_at": _utc_now(),
             "pre_reset_counts": manifest["counts"],
             "post_reset_counts": post_counts,
             "database_quick_check": "ok",
+            "import_authorizations": {
+                "pending_invalidated": pending_invalidated,
+                **retained_after,
+            },
             "photos_quarantined": current_photos["files"],
             "photo_quarantine": str(archived_photos),
             "rollback_database": str(backup),
-        }
-        _write_json(archive / POST_RESET_MANIFEST, post)
+            **binding,
+        })
+        try:
+            _write_json(archive / POST_RESET_MANIFEST, post)
+            terminal_committed = True
+        except Exception:
+            # If replace succeeded but the directory fsync/reporting failed,
+            # the exact terminal receipt must win over rollback.  On power
+            # loss it either survives with the post-state or disappears and
+            # the durable apply-started receipt drives recovery.
+            try:
+                durable = _load_json_regular(
+                    archive / POST_RESET_MANIFEST,
+                    label="post-reset receipt",
+                )
+            except ResetBlocked:
+                durable = None
+            if durable == post:
+                terminal_committed = True
+            raise
+        _fault_point("after_post_receipt")
         return post
     except Exception:
-        if database_changed:
+        if terminal_committed:
+            raise
+        if apply_started:
             _restore_database(backup)
         if photos_moved:
             archived_manifest = _photo_manifest(archived_photos)
@@ -610,7 +1612,49 @@ def apply_reset(
                 raise RuntimeError(
                     "Photo quarantine повреждён; автоматический rollback запрещён"
                 )
-            _restore_photos(archived_photos)
+        if apply_started:
+            _restore_photos(
+                archived_photos,
+                root_existed=bool(manifest["photos"]["root_exists"]),
+                expected_digest=str(manifest["photos"]["digest"]),
+            )
+            conn = db.connect()
+            try:
+                recovered_counts = _table_counts(conn)
+                recovered_digest = _database_state_digest(conn)
+                recovered_quick = conn.execute("PRAGMA quick_check").fetchone()[0]
+            finally:
+                conn.close()
+            recovered_photos = _photo_manifest()
+            if (
+                recovered_counts != manifest["counts"]
+                or recovered_digest != manifest["database_state_digest"]
+                or recovered_quick != "ok"
+                or recovered_photos["digest"] != manifest["photos"]["digest"]
+                or recovered_photos["root_exists"]
+                != manifest["photos"]["root_exists"]
+            ):
+                raise RuntimeError(
+                    "Автоматический rollback reset не восстановил exact pre-state"
+                )
+            _write_json(
+                archive / RECOVERY_MANIFEST,
+                _signed_receipt({
+                    "schema": "hardbot.reset-recovery.v2",
+                    "kind": "hardbot_limited_test_recovery",
+                    "completed_at": _utc_now(),
+                    "reason": "automatic_apply_rollback",
+                    "counts": recovered_counts,
+                    "database_quick_check": recovered_quick,
+                    "photos": {
+                        "root_exists": recovered_photos["root_exists"],
+                        "files": recovered_photos["files"],
+                        "bytes": recovered_photos["bytes"],
+                        "digest": recovered_photos["digest"],
+                    },
+                    **binding,
+                }),
+            )
         raise
 
 
@@ -618,6 +1662,7 @@ def recover_incomplete_reset(
     archive_raw: str | os.PathLike[str],
     *,
     confirm_token: str,
+    orchestration_intent_digest: str,
     app_stopped: bool,
 ) -> dict[str, Any]:
     """Restore the pre-reset snapshot after an interrupted destructive process."""
@@ -630,12 +1675,33 @@ def recover_incomplete_reset(
     manifest = _load_verified_manifest(archive)
     if not confirm_token or confirm_token != manifest.get("confirm_token"):
         raise ResetBlocked("Confirm-token не совпал со snapshot manifest")
-    if (archive / POST_RESET_MANIFEST).exists():
+    if (
+        (archive / POST_RESET_MANIFEST).exists()
+        or (archive / POST_RESET_MANIFEST).is_symlink()
+    ):
         raise ResetBlocked("Reset завершён; incomplete recovery запрещён")
     started = archive / APPLY_STARTED_MANIFEST
     if not started.is_file():
         raise ResetBlocked("Нет durable evidence начала destructive reset")
-
+    started_payload = _load_apply_started(
+        archive,
+        manifest,
+        claimed_intent_digest=orchestration_intent_digest,
+    )
+    binding = {
+        key: started_payload[key]
+        for key in (
+            "snapshot_manifest_sha256",
+            "confirm_token",
+            "clearance_digest",
+            "clearance_receipt_sha256",
+            "orchestration_intent_digest",
+            "orchestration_intent_sha256",
+            "orchestration_nonce",
+            "container_id",
+            "image_id",
+        )
+    }
     backup = archive / BACKUP_NAME
     archived_photos = archive / "photos-before-reset"
     if archived_photos.exists():
@@ -643,8 +1709,11 @@ def recover_incomplete_reset(
         if archived_manifest["digest"] != manifest["photos"]["digest"]:
             raise ResetBlocked("Photo quarantine не совпал со snapshot manifest")
     _restore_database(backup)
-    if archived_photos.exists():
-        _restore_photos(archived_photos)
+    _restore_photos(
+        archived_photos,
+        root_existed=bool(manifest["photos"]["root_exists"]),
+        expected_digest=str(manifest["photos"]["digest"]),
+    )
 
     conn = db.connect()
     try:
@@ -659,19 +1728,24 @@ def recover_incomplete_reset(
         or digest != manifest["database_state_digest"]
         or quick != "ok"
         or photos["digest"] != manifest["photos"]["digest"]
+        or photos["root_exists"] != manifest["photos"]["root_exists"]
     ):
         raise RuntimeError("Interrupted reset recovery не восстановил pre-reset state")
-    result = {
+    result = _signed_receipt({
+        "schema": "hardbot.reset-recovery.v2",
         "kind": "hardbot_limited_test_recovery",
         "completed_at": _utc_now(),
+        "reason": "operator_interrupted_recovery",
         "counts": counts,
         "database_quick_check": quick,
         "photos": {
+            "root_exists": photos["root_exists"],
             "files": photos["files"],
             "bytes": photos["bytes"],
             "digest": photos["digest"],
         },
-    }
+        **binding,
+    })
     _write_json(archive / RECOVERY_MANIFEST, result)
     return result
 
@@ -681,6 +1755,7 @@ def current_status() -> dict[str, Any]:
     try:
         counts = _table_counts(conn)
         quick = conn.execute("PRAGMA quick_check").fetchone()[0]
+        import_authorizations = _retained_import_state(conn)
     finally:
         conn.close()
     photos = _photo_manifest()
@@ -688,7 +1763,9 @@ def current_status() -> dict[str, Any]:
         "database": str(Path(db.DB_PATH).resolve()),
         "quick_check": quick,
         "counts": counts,
+        "import_authorizations": import_authorizations,
         "photos": {
+            "root_exists": photos["root_exists"],
             "files": photos["files"],
             "bytes": photos["bytes"],
             "digest": photos["digest"],
@@ -704,6 +1781,9 @@ def _parser() -> argparse.ArgumentParser:
     apply = sub.add_parser("apply", help="очистить после внешней проверки snapshot")
     apply.add_argument("--archive", required=True)
     apply.add_argument("--confirm-token", required=True)
+    apply.add_argument("--clearance-digest", required=True)
+    apply.add_argument("--clearance-receipt-sha256", required=True)
+    apply.add_argument("--orchestration-intent-digest", required=True)
     apply.add_argument("--app-stopped", action="store_true")
     recover = sub.add_parser(
         "recover",
@@ -711,6 +1791,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     recover.add_argument("--archive", required=True)
     recover.add_argument("--confirm-token", required=True)
+    recover.add_argument("--orchestration-intent-digest", required=True)
     recover.add_argument("--app-stopped", action="store_true")
     sub.add_parser("status", help="read-only counts/checks")
     return parser
@@ -725,12 +1806,16 @@ def main(argv: list[str] | None = None) -> int:
             result = apply_reset(
                 args.archive,
                 confirm_token=args.confirm_token,
+                clearance_digest=args.clearance_digest,
+                clearance_receipt_sha256=args.clearance_receipt_sha256,
+                orchestration_intent_digest=args.orchestration_intent_digest,
                 app_stopped=args.app_stopped,
             )
         elif args.command == "recover":
             result = recover_incomplete_reset(
                 args.archive,
                 confirm_token=args.confirm_token,
+                orchestration_intent_digest=args.orchestration_intent_digest,
                 app_stopped=args.app_stopped,
             )
         else:

@@ -257,6 +257,7 @@ class SyncPlan:
     projections: list[PersonalProjection] = field(default_factory=list)
     issues: list[Issue] = field(default_factory=list)
     month_rollover: MonthRolloverPlan | None = None
+    config_identity: str = ""
 
     @property
     def blocked(self) -> bool:
@@ -266,6 +267,7 @@ class SyncPlan:
         return {
             "master_path": str(self.master_path),
             "master_fingerprint": self.master_fingerprint.as_dict(),
+            "config_identity": self.config_identity,
             "changes": [change.as_dict() for change in self.changes],
             "projections": [projection.as_summary() for projection in self.projections],
             "issues": [issue.as_dict() for issue in self.issues],

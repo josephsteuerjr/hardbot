@@ -22,7 +22,10 @@ from aiohttp import web as aw  # noqa: E402
 
 db.init_db()
 if not db.employees_in_registry():
-    db.import_xlsx(synth.generate(n=30, responsible=synth.DEV_EMPLOYEE))
+    db.import_xlsx(
+        synth.generate(n=30, responsible=synth.DEV_EMPLOYEE),
+        source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
+    )
 synth.seed_geo()  # координаты для демо-карты (пины)
 db.bind_agent(111, synth.DEV_EMPLOYEE)
 

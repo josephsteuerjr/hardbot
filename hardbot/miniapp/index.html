@@ -256,6 +256,7 @@ const I18N = {
     nogeo:"Не получилось определить геолокацию — включите доступ или введите координаты.",
     go:"Поехать",exit:"Выйти",finishvisit:"Отметить визит",mins:"мин",
     draftwait:"черновик не отправлен на сервер",draftsent:"черновик сохранён на сервере",
+    resultreq:"Сначала выберите результат выезда",
     offline:"Оффлайн",datao:"данные на",pend:"ждут отправки",sending:"Отправляю…",
     savedoff:"Сохранено — уйдёт при связи",queuedn:"в очереди",
     photoretake:"фото нужно переснять",photolost:"Фото не сохранилось — снимите его ещё раз",
@@ -280,6 +281,7 @@ const I18N = {
     nogeo:"Geolokatsiyani aniqlab bo‘lmadi — ruxsat bering yoki koordinatani kiriting.",
     go:"Yo‘lga chiqish",exit:"Yopish",finishvisit:"Tashrifni belgilash",mins:"daq",
     draftwait:"qoralama serverga yuborilmadi",draftsent:"qoralama serverda saqlandi",
+    resultreq:"Avval chiqish natijasini tanlang",
     offline:"Oflayn",datao:"ma’lumot",pend:"yuboriladi",sending:"Yuborilmoqda…",
     savedoff:"Saqlandi — aloqa paydo bo‘lsa yuboriladi",queuedn:"navbatda",
     photoretake:"rasmni qayta olish kerak",photolost:"Rasm saqlanmadi — qayta oling",
@@ -304,6 +306,7 @@ const I18N = {
     nogeo:"Геолокатсия муайян нашуд — иҷозат диҳед ё координата ворид кунед.",
     go:"Ба роҳ баромадан",exit:"Бастан",finishvisit:"Сафарро қайд кардан",mins:"дақ",
     draftwait:"нусха ба сервер нафиристода шуд",draftsent:"нусха дар сервер захира шуд",
+    resultreq:"Аввал натиҷаи сафарро интихоб кунед",
     offline:"Офлайн",datao:"додаҳо аз",pend:"дар навбат",sending:"Фиристода мешавад…",
     savedoff:"Захира шуд — ҳангоми алоқа фиристода мешавад",queuedn:"дар навбат",
     photoretake:"расмро аз нав гирифтан лозим",photolost:"Расм захира нашуд — аз нав гиред",
@@ -315,10 +318,17 @@ const I18N = {
     nosplit:"тақсимот аз рӯи моддаҳо наомад"},
 };
 let STATE = {lang:"ru", meta:null, persons:[], cur:null, tab:"visit"};
+let FORM_VERSION=0;
+let FORM_TOUCHED=new Set();
 const L = () => I18N[STATE.lang] || I18N.ru;
 const $ = (id) => document.getElementById(id);
 const enc = encodeURIComponent;
 const money = (n,u) => (n||0).toLocaleString("ru-RU") + (u?(" "+u):"");
+function setMeta(meta){
+  STATE.meta=meta||{};
+  const v=Number(STATE.meta.formProtocolVersion);
+  FORM_VERSION=Number.isInteger(v)&&v>0?v:0;
+}
 
 // --- Оффлайн-хранилище (IndexedDB) -----------------------------------------
 // Снимок портфеля (kv:bootstrap) + полные карточки (cards) + исходящая очередь
@@ -508,11 +518,15 @@ async function flushQueue(){
       // Нечитаемое/отклонённое фото остаётся видимым для пересъёмки, но не держит
       // за собой более поздние визиты, метки и фото.
       if(it.kind==="photo"&&it.failed) continue;
+      // Очередь старой оболочки не содержит списка явно затронутых полей.
+      // Сервер её не сертифицирует; сохраняем запись для ручного разбора.
+      if(it.kind==="save"&&it.failed==="refresh-form") continue;
       let ok=false, stop=false;
       try{
         let r;
         if(it.kind==="save"){
-          const sbody={rep:it.rep,values:it.values,finish:true,op_id:it.op_id};
+          const sbody={rep:it.rep,values:it.values,finish:true,op_id:it.op_id,
+            form_version:it.form_version,input_keys:it.input_keys};
           if(it.geo) sbody.geo=it.geo;
           r=await fetch("/api/save",{method:"POST",headers:jsonHeaders(),
             body:JSON.stringify(sbody)});
@@ -538,6 +552,11 @@ async function flushQueue(){
             }
           }
           else if(r.status===401||r.status===403||r.status>=500) stop=true;  // авторизация/сервер — позже
+          else if(it.kind==="save"&&r.status===409){
+            it.failed="refresh-form"; it.failed_at=Date.now();
+            try{ await IDB.put("queue",it); }catch(e){}
+            STATE.online=true; continue;
+          }
           else if(it.kind==="photo"){
             // Raw 4xx (в т.ч. 413/422) повтором не вылечится: запись сохраняем
             // как требующую пересъёмки и продолжаем последующие операции.
@@ -569,7 +588,7 @@ function applyVisitLocally(rep, values){
   const p=STATE.persons.find(x=>x.rep===rep); if(p) p.visited=true;
 }
 function finishSavedUI(rep, msg){
-  clearDraft(rep); draftDirty=false; stopAutoSync(); toast(msg);
+  clearDraft(rep); draftDirty=false; FORM_TOUCHED.clear(); stopAutoSync(); toast(msg);
   if(TG&&TG.HapticFeedback) TG.HapticFeedback.notificationOccurred("success");
   const p=STATE.persons.find(x=>x.rep===rep); if(p) p.visited=true;
   STATE.tab="visit"; renderDetail();
@@ -726,7 +745,7 @@ async function boot(){
     // очередь прошлого, чтобы не смешивать ПД и не долить чужие визиты под новым токеном.
     const prev = await loadBootstrapSnapshot();
     if(prev && prev.employee && d.employee && prev.employee !== d.employee) await clearLocalData();
-    STATE.meta=d.meta; STATE.persons=d.persons; STATE.kind=d.kind||"agent";
+    setMeta(d.meta); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
     STATE.online=true;
     cacheBootstrap(d);            // снимок портфеля для оффлайна (в фоне, не блокирует UI)
     renderList();
@@ -747,7 +766,7 @@ async function boot(){
     const snap = await loadBootstrapSnapshot();
     if(snap && snap.persons){
       STATE.lang=snap.lang||STATE.lang; renderLangs();
-      STATE.meta=snap.meta; STATE.persons=snap.persons; STATE.kind=snap.kind||"agent";
+      setMeta(snap.meta); STATE.persons=snap.persons; STATE.kind=snap.kind||"agent";
       STATE.online=false;
       renderList();
     }else{
@@ -853,7 +872,16 @@ async function openP(rep){
     if(d){ STATE.online=true; IDB.put("cards",d,rep).catch(()=>{}); } }   // освежить кэш карточки
   catch(e){ d=await loadCard(rep); if(d) STATE.online=false; }            // нет сети → из кэша
   if(!d){ toast(STATE.online===false?"нет данных оффлайн":"✕"); return; }
+  // Старые IndexedDB-карточки могли содержать form-prefill из master. До
+  // доказанного snapshot он не является пользовательским вводом и очищается;
+  // отдельный localStorage-черновик восстановится поверх пустой формы ниже.
+  if(!d.visited){
+    (d.form||[]).forEach(f=>{ f.current=""; });
+    d.visit_comment=""; d.call_comment=""; d.tips="";
+    IDB.put("cards",d,rep).catch(()=>{});
+  }
   STATE.cur=d; STATE.tab="visit";
+  FORM_TOUCHED.clear();
   draftDirty=false; clearTimeout(draftTimer);   // новый клиент — сбросить состояние сессии черновика
   renderDetail();
 }
@@ -1247,13 +1275,22 @@ async function toggleVoice(){
 let SAVING=false;
 async function saveVisit(){
   if(SAVING) return;
+  if(!FORM_VERSION){
+    toast("Подключитесь к сети и обновите форму");
+    return;
+  }
+  const values=readForm(), input_keys=[...FORM_TOUCHED];
+  if(!values.call_status || !FORM_TOUCHED.has("call_status")){
+    toast(L().resultreq);
+    return;
+  }
   SAVING=true;
   const btn=$("savebtn"); if(btn) btn.disabled=true;
   try{
-    const values=readForm();
     const rep=STATE.cur.rep, op_id=uuid();
     const geo=await grabGeo(4000);
-    const body={rep,values,finish:true,op_id};
+    const body={rep,values,finish:true,op_id,
+      form_version:FORM_VERSION,input_keys};
     if(geo) body.geo=geo;
     try{
       const j=await api("/api/save",{method:"POST",body:JSON.stringify(body)});
@@ -1261,7 +1298,8 @@ async function saveVisit(){
       finishSavedUI(rep, L().saved);
     }catch(e){
       // Нет сети — кладём выезд в очередь, помечаем визит локально; уйдёт при связи.
-      await enqueue({op_id, kind:"save", rep, values, geo, at:Date.now()});
+      await enqueue({op_id, kind:"save", rep, values, input_keys,
+        form_version:FORM_VERSION, geo, at:Date.now()});
       STATE.online=false; applyVisitLocally(rep, values);
       finishSavedUI(rep, L().savedoff);
     }
@@ -1284,12 +1322,25 @@ function currentUid(){
 }
 function draftKey(rep){ return "draft:"+currentUid()+":"+rep; }
 
-// Значения формы из DOM — общая точка для черновика и явного «Сохранить выезд».
+// В payload попадают только явно затронутые пользователем контролы. Это отделяет
+// локальный черновик от старого master-prefill в кэшированной карточке.
+function fieldKey(el){
+  if(!el) return "";
+  if(el.dataset&&el.dataset.k) return el.dataset.k;
+  if(el.id==="f_visit_comment") return "visit_comment";
+  if(el.id==="f_tips") return "tips";
+  return "";
+}
 function readForm(){
   const values={};
-  document.querySelectorAll("#panel select[data-k]").forEach(s=>{ if(s.value) values[s.dataset.k]=s.value; });
-  const cc=$("f_visit_comment"); if(cc&&cc.value.trim()) values.visit_comment=cc.value.trim();
-  const tp=$("f_tips"); if(tp&&tp.value.trim()) values.tips=tp.value.trim();
+  document.querySelectorAll("#panel select[data-k]").forEach(s=>{
+    if(FORM_TOUCHED.has(s.dataset.k)&&s.value) values[s.dataset.k]=s.value;
+  });
+  const cc=$("f_visit_comment");
+  if(FORM_TOUCHED.has("visit_comment")&&cc&&cc.value.trim())
+    values.visit_comment=cc.value.trim();
+  const tp=$("f_tips");
+  if(FORM_TOUCHED.has("tips")&&tp&&tp.value.trim()) values.tips=tp.value.trim();
   return values;
 }
 function formVisible(){ return !!(STATE.cur && STATE.tab==="form" && $("f_visit_comment")); }
@@ -1300,13 +1351,16 @@ function saveDraft(){
   if(!formVisible()) return;   // не читать DOM другой вкладки — иначе затрём черновик пустотой
   const v=readForm(), key=draftKey(STATE.cur.rep);
   try{
-    if(Object.keys(v).length) localStorage.setItem(key, JSON.stringify({v, at:Date.now()}));
+    if(Object.keys(v).length) localStorage.setItem(
+      key, JSON.stringify({v, keys:[...FORM_TOUCHED], at:Date.now()}));
     else localStorage.removeItem(key);
   }catch(e){}
 }
 function flushDraft(){ clearTimeout(draftTimer); saveDraft(); }   // немедленно, перед уходом с формы
 
-function onFormChange(){
+function onFormChange(event){
+  const key=fieldKey(event&&event.target);
+  if(key) FORM_TOUCHED.add(key);
   draftDirty=true;
   clearTimeout(draftTimer);
   draftTimer=setTimeout(()=>{ saveDraft(); markDraftBadge(true); }, 500);
@@ -1322,16 +1376,23 @@ function markDraftBadge(dirty){
 function restoreDraftIntoForm(){
   if(!STATE.cur) return;
   const d=loadDraft(STATE.cur.rep); if(!d||!d.v) return;
+  const draftKeys=new Set(
+    Array.isArray(d.keys) ? d.keys : Object.keys(d.v)
+  );
   let applied=false;
   Object.entries(d.v).forEach(([k,val])=>{
+    if(!draftKeys.has(k)) return;
     let el=null;
     // call_comment — легаси-черновики, сохранённые старой оболочкой в localStorage
     if(k==="visit_comment"||k==="call_comment") el=$("f_visit_comment");
     else if(k==="tips") el=$("f_tips");
     else el=document.querySelector('#panel select[data-k="'+k+'"]');
-    if(el && el.value!==val){ el.value=val; applied=true; }   // отличается от сервера → есть несинхр. правка
+    if(el){
+      FORM_TOUCHED.add(k==="call_comment"?"visit_comment":k);
+      if(el.value!==val){ el.value=val; applied=true; }
+    }
   });
-  if(applied){ draftDirty=true; markDraftBadge(true); }
+  if(applied||FORM_TOUCHED.size){ draftDirty=true; markDraftBadge(true); }
 }
 function setupFormDraft(){
   const p=$("panel"); if(!p) return;
@@ -1347,9 +1408,12 @@ function stopAutoSync(){ if(syncTimer){ clearInterval(syncTimer); syncTimer=null
 async function pushDraft(){
   if(!STATE.cur) return;
   const d=loadDraft(STATE.cur.rep), values=(d&&d.v)||{};
+  const input_keys=(d&&Array.isArray(d.keys))?d.keys:Object.keys(values);
   if(!Object.keys(values).length){ draftDirty=false; return; }
   try{
-    await api("/api/save",{method:"POST",body:JSON.stringify({rep:STATE.cur.rep,values,finish:false})});
+    await api("/api/save",{method:"POST",body:JSON.stringify({
+      rep:STATE.cur.rep,values,finish:false,
+      form_version:FORM_VERSION,input_keys})});
     draftDirty=false; markDraftBadge(false);   // localStorage НЕ чистим — кэш до явного finish:true
   }catch(e){}   // сеть/ошибка — черновик остаётся, повтор на следующем интервале
 }
@@ -1376,7 +1440,7 @@ async function refreshData(){
     if(prev && prev.employee && d.employee && prev.employee!==d.employee) await clearLocalData();
     const sig=ps=>JSON.stringify((ps||[]).map(p=>[p.rep,p.visited,p.n]));
     const changed=sig(STATE.persons)!==sig(d.persons);
-    STATE.meta=d.meta; STATE.persons=d.persons; STATE.kind=d.kind||"agent";
+    setMeta(d.meta); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
     STATE.online=true; cacheBootstrap(d); updateOffBar();
     if(changed){
       warmCards();                               // и полные карточки новых клиентов

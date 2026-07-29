@@ -33,7 +33,7 @@ import razbros
 APP_DIR = Path(__file__).resolve().parent
 SETTINGS_PATH = APP_DIR / "настройки пульта.json"
 DEFAULT_URL = "https://hardbot2.166.88.185.90.nip.io"
-DEFAULT_KEY = "hbadm_029ca66bc21804c4ced440bdbf93f0c8"
+DEFAULT_KEY = ""
 
 try:  # русские буквы в консоли Windows
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

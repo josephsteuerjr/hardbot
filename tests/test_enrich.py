@@ -5,14 +5,19 @@
 пишет миниапп. Никаких записей в чужие строки, чужие колонки, пустыми
 значениями, системными дефолтами («Не обработан») — и никакой пересборки файла.
 """
+import gzip
+import hashlib
+import json
 import sys
 from datetime import date, datetime
 from pathlib import Path
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "pult"))
 
 import enrich  # noqa: E402
+import db  # noqa: E402
 
 
 # --- фикстуры: мини-реестр формата «Хард» ------------------------------------
@@ -46,7 +51,7 @@ HEADERS = ["Номер КД / ID", "Клиент", "долг всего", "Да�
 def make_grid(data_rows):
     return [
         ["Инфо", None, None, "Выезд", None, None, None, None, None],  # блоки
-        HEADERS,                                            # заголовки
+        list(HEADERS),                                      # заголовки
         ["сх", "сх", "сх", "хард", "хард", "хард", "сх", "сх", "хард"],
         *data_rows,
     ]
@@ -80,6 +85,25 @@ def test_no_key_column_is_loud():
         raise AssertionError("ожидали ValueError")
     except ValueError as e:
         assert "Номер КД" in str(e)
+
+
+def test_duplicate_recognized_header_is_loud():
+    grid = make_grid([["T-1", "Иванов", "100", None, None, None, None]])
+    grid[1].append("Общий результат:")
+    with pytest.raises(ValueError, match="повторные заголовки"):
+        enrich.find_header(grid, FIELDS)
+
+
+def test_sheet_picker_has_no_fallback():
+    class _Sheet:
+        def __init__(self, name):
+            self.name = name
+
+    class _Book:
+        sheets = [_Sheet("Данные"), _Sheet("Похожий лист")]
+
+    with pytest.raises(ValueError, match="fallback"):
+        enrich._pick_sheet(_Book(), FIELDS)
 
 
 # --- ядро: только заполненные кейсы, только их столбцы -------------------------
@@ -256,11 +280,8 @@ def test_absent_visit_column_is_reported():
     ]
     rows = [bot_row("T-1", visit_date="2026-07-10", call_status="Оплачен",
                     call_comment="взял трубку")]
-    plan = enrich.build_plan(grid, FIELDS, rows)
-    assert {"call_status", "visit_comment"} <= set(plan["visit_cols_absent"])
-    # дату записали, статус/комментарий — некуда, но кейс не потерян
-    assert plan["cells_written"] == 1
-    assert plan["matched_cases"] == 1
+    with pytest.raises(ValueError, match="обязательных колонок"):
+        enrich.build_plan(grid, FIELDS, rows)
 
 
 # --- группировка по сотрудникам (обогащение личных реестров) -------------------
@@ -342,3 +363,438 @@ def test_enrichment_never_plans_empty_writes():
                     visit_comment="комментарий выезда")]
     plan = enrich.build_plan(grid, FIELDS, rows)
     assert all(value not in (None, "") for _r, _c, value, _d in plan["writes"])
+
+
+def test_unknown_merge_mode_never_falls_through_to_replace(monkeypatch):
+    grid = make_grid([["T-1", "Иванов", "100", None, None, None, None]])
+    rows = [bot_row("T-1", visit_date="2026-07-10")]
+    monkeypatch.setitem(enrich.MERGE_MODES, "visit_date", "future-mode")
+    with pytest.raises(ValueError, match="неподдерживаемый merge mode"):
+        enrich.build_plan(grid, FIELDS, rows)
+
+
+def test_published_master_proof_requires_complete_matching_registry_cycle(tmp_path):
+    from openpyxl import Workbook, load_workbook
+
+    master = tmp_path / "ОБЩИЙ РЕЕСТР.xlsx"
+    grid = make_grid(
+        [["T-1", "Иванов", "100", None, None, None, None, None, None]]
+    )
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = enrich.SHEET_NAME
+    for row in grid:
+        sheet.append(row)
+    workbook.save(master)
+    master_sha = hashlib.sha256(master.read_bytes()).hexdigest()
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / "runs" / "run-1"
+    staging = run_dir / "staging"
+    staging.mkdir(parents=True)
+    plan_digest = "a" * 64
+    baseline_path = tmp_path / "baseline.json.gz"
+    with gzip.open(baseline_path, "wt", encoding="utf-8") as stream:
+        json.dump(
+            {
+                "plan_digest": plan_digest,
+                "master_path": str(master),
+            },
+            stream,
+        )
+    stage_path = staging / "stage.json"
+    stage_path.write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "plan_digest": plan_digest,
+                "master": {
+                    "original_path": str(master),
+                    "staged_fingerprint": {"sha256": master_sha},
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    publish_path = run_dir / "publish.json"
+    publish_path.write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "plan_digest": plan_digest,
+                "complete": True,
+                "ok": True,
+                "sidecars": [],
+                "finished_at": "2026-07-29T12:00:00",
+                "baseline": str(baseline_path),
+                "published": [str(master)],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    journal_path = run_dir / "publish.journal.jsonl"
+    journal_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "event": "publish_started",
+                        "run_id": "run-1",
+                        "plan_digest": plan_digest,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event": "publish_committed",
+                        "run_id": "run-1",
+                        "plan_digest": plan_digest,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    prepared = enrich.prepare_published_master_import(
+        master,
+        workspace=workspace,
+    )
+    proof = prepared["source_proof"]
+    assert proof["file_sha256"] == master_sha
+    assert proof["publication"]["run_id"] == "run-1"
+    assert prepared["sheets"][0]["name"] == enrich.SHEET_NAME
+
+    # A previous successful master is not admissible while another publish
+    # has an unresolved tail: personal files may already be in a mixed state.
+    interrupted = workspace / "runs" / "run-interrupted"
+    interrupted.mkdir()
+    interrupted_journal = interrupted / "publish.journal.jsonl"
+    interrupted_journal.write_text(
+        json.dumps(
+            {
+                "event": "publish_started",
+                "run_id": "run-interrupted",
+                "plan_digest": "f" * 64,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="незавершённую публикацию"):
+        enrich.prepare_published_master_import(
+            master,
+            workspace=workspace,
+        )
+    interrupted_journal.unlink()
+    interrupted.rmdir()
+
+    # A newer complete publication on a new monthly path makes the old path
+    # stale too; "latest" is global, not merely latest for the selected name.
+    newer = tmp_path / "ОБЩИЙ РЕЕСТР АВГУСТ.xlsx"
+    newer.write_bytes(master.read_bytes())
+    newer_sha = hashlib.sha256(newer.read_bytes()).hexdigest()
+    newer_run = workspace / "runs" / "run-2"
+    newer_staging = newer_run / "staging"
+    newer_staging.mkdir(parents=True)
+    newer_plan = "b" * 64
+    newer_stage = newer_staging / "stage.json"
+    newer_stage.write_text(
+        json.dumps(
+            {
+                "run_id": "run-2",
+                "plan_digest": newer_plan,
+                "master": {
+                    "original_path": str(newer),
+                    "staged_fingerprint": {"sha256": newer_sha},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    newer_baseline = tmp_path / "baseline-2.json.gz"
+    with gzip.open(newer_baseline, "wt", encoding="utf-8") as stream:
+        json.dump(
+            {"plan_digest": newer_plan, "master_path": str(newer)},
+            stream,
+        )
+    (newer_run / "publish.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-2",
+                "plan_digest": newer_plan,
+                "complete": True,
+                "ok": True,
+                "sidecars": [],
+                "finished_at": "2026-07-29T12:01:00",
+                "baseline": str(newer_baseline),
+                "published": [str(newer)],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (newer_run / "publish.journal.jsonl").write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "event": event,
+                    "run_id": "run-2",
+                    "plan_digest": newer_plan,
+                }
+            )
+            for event in ("publish_started", "publish_committed")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="не совпадает с новейшей"):
+        enrich.prepare_published_master_import(master, workspace=workspace)
+    newest = enrich.prepare_published_master_import(newer, workspace=workspace)
+    assert newest["source_proof"]["publication"]["run_id"] == "run-2"
+
+    changed = load_workbook(newer)
+    changed[enrich.SHEET_NAME].cell(row=4, column=2, value="third-state")
+    changed.save(newer)
+    with pytest.raises(ValueError, match="не совпадает с новейшей"):
+        enrich.prepare_published_master_import(
+            newer,
+            workspace=workspace,
+        )
+
+
+def test_machine_evidence_run_uses_success_path_and_emits_signed_receipt(
+    monkeypatch,
+    tmp_path,
+):
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    row = bot_row(
+        "T-1",
+        visit_date="2026-07-10",
+        responsible="Employee",
+    )
+    safe_path = snapshot / "safe-enrichment.json.gz"
+    raw_path = snapshot / "raw-diagnostic.json.gz"
+    schema_path = snapshot / "export-schema.json"
+    with gzip.open(safe_path, "wt", encoding="utf-8") as stream:
+        json.dump(
+            {
+                "kind": "safe_enrichment",
+                "data_exchange_contract": enrich.DATA_EXCHANGE_CONTRACT,
+                "rows": [row],
+            },
+            stream,
+        )
+    with gzip.open(raw_path, "wt", encoding="utf-8") as stream:
+        json.dump(
+            {
+                "kind": "raw_diagnostic",
+                "data_exchange_contract": enrich.DATA_EXCHANGE_CONTRACT,
+                "rows": [row],
+            },
+            stream,
+        )
+    schema_path.write_text(json.dumps(db.export_schema()), encoding="utf-8")
+    artifacts = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in (safe_path, raw_path, schema_path)
+    }
+    manifest_path = snapshot / "snapshot_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "kind": enrich.SNAPSHOT_KIND,
+                "data_exchange_contract": enrich.DATA_EXCHANGE_CONTRACT,
+                "counts": {"clients": 1},
+                "database_state_digest": "a" * 64,
+                "artifacts": artifacts,
+            }
+        ),
+        encoding="utf-8",
+    )
+    binding = {
+        "manifest_sha256": hashlib.sha256(
+            manifest_path.read_bytes()
+        ).hexdigest(),
+        "database_state_digest": "a" * 64,
+        "safe_export_sha256": artifacts[safe_path.name],
+        "raw_export_sha256": artifacts[raw_path.name],
+        "data_exchange_contract_sha256": enrich.DATA_EXCHANGE_CONTRACT[
+            "sha256"
+        ],
+    }
+    personal = tmp_path / "personal.xlsx"
+    personal.write_bytes(b"fixture")
+    file_map = snapshot / "file-map.json"
+    file_map.write_text(
+        json.dumps(
+            {
+                "schema": enrich.FILE_MAP_SCHEMA,
+                "snapshot": binding,
+                "owners": [
+                    {
+                        "responsible": "Employee",
+                        "contract_ids": ["T-1"],
+                        "files": [str(personal)],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    file_sha = hashlib.sha256(personal.read_bytes()).hexdigest()
+    plan = {
+        "employee": "Employee",
+        "path": str(personal.resolve()),
+        "pre_sha256": file_sha,
+        "post_sha256": file_sha,
+        "backup_path": None,
+        "backup_sha256": None,
+        "filled_cases": 1,
+        "filled_contract_ids": ["T-1"],
+        "matched_cases": 1,
+        "matched_contract_ids": ["T-1"],
+        "changed_cases": 0,
+        "cells_written": 0,
+        "errors": [],
+        "visit_cols_absent": [],
+        "missing": [],
+        "post_plan": {
+            "filled_cases": 1,
+            "filled_contract_ids": ["T-1"],
+            "matched_cases": 1,
+            "matched_contract_ids": ["T-1"],
+            "changed_cases": 0,
+            "cells_written": 0,
+            "errors": [],
+            "visit_cols_absent": [],
+            "missing_contract_ids": [],
+        },
+    }
+    monkeypatch.setattr(
+        enrich,
+        "enrich_many",
+        lambda *_args, **_kwargs: [plan],
+    )
+
+    output = snapshot / "pult-enrichment-receipt.json"
+    receipt = enrich.evidence_run(
+        snapshot_dir=snapshot,
+        file_map=file_map,
+        output=output,
+    )
+
+    assert receipt["files"][0]["path"] == str(personal.resolve())
+    assert receipt["receipt_digest"] == hashlib.sha256(
+        enrich._canonical(
+            {
+                key: value
+                for key, value in receipt.items()
+                if key != "receipt_digest"
+            }
+        )
+    ).hexdigest()
+    assert output.is_file()
+
+    def fail_if_writer_restarts(*_args, **_kwargs):
+        raise AssertionError("writer must not run when receipt already exists")
+
+    monkeypatch.setattr(enrich, "enrich_many", fail_if_writer_restarts)
+    try:
+        enrich.evidence_run(
+            snapshot_dir=snapshot,
+            file_map=file_map,
+            output=output,
+        )
+    except RuntimeError as exc:
+        assert "уже существует" in str(exc)
+    else:
+        raise AssertionError("existing receipt must block a second evidence run")
+
+
+def test_machine_evidence_run_accepts_zero_completed_without_starting_excel(
+    monkeypatch,
+    tmp_path,
+):
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    safe_path = snapshot / "safe-enrichment.json.gz"
+    raw_path = snapshot / "raw-diagnostic.json.gz"
+    schema_path = snapshot / "export-schema.json"
+    with gzip.open(safe_path, "wt", encoding="utf-8") as stream:
+        json.dump(
+            {
+                "kind": "safe_enrichment",
+                "data_exchange_contract": enrich.DATA_EXCHANGE_CONTRACT,
+                "rows": [],
+            },
+            stream,
+        )
+    with gzip.open(raw_path, "wt", encoding="utf-8") as stream:
+        json.dump(
+            {
+                "kind": "raw_diagnostic",
+                "data_exchange_contract": enrich.DATA_EXCHANGE_CONTRACT,
+                "rows": [],
+            },
+            stream,
+        )
+    schema_path.write_text(json.dumps(db.export_schema()), encoding="utf-8")
+    artifacts = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in (safe_path, raw_path, schema_path)
+    }
+    manifest_path = snapshot / "snapshot_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "kind": enrich.SNAPSHOT_KIND,
+                "data_exchange_contract": enrich.DATA_EXCHANGE_CONTRACT,
+                "counts": {"clients": 0},
+                "database_state_digest": "b" * 64,
+                "artifacts": artifacts,
+            }
+        ),
+        encoding="utf-8",
+    )
+    binding = {
+        "manifest_sha256": hashlib.sha256(
+            manifest_path.read_bytes()
+        ).hexdigest(),
+        "database_state_digest": "b" * 64,
+        "safe_export_sha256": artifacts[safe_path.name],
+        "raw_export_sha256": artifacts[raw_path.name],
+        "data_exchange_contract_sha256": enrich.DATA_EXCHANGE_CONTRACT[
+            "sha256"
+        ],
+    }
+    file_map = snapshot / "file-map.json"
+    file_map.write_text(
+        json.dumps(
+            {
+                "schema": enrich.FILE_MAP_SCHEMA,
+                "snapshot": binding,
+                "owners": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_if_excel_starts(*_args, **_kwargs):
+        raise AssertionError("Excel must not start for an empty completed set")
+
+    monkeypatch.setattr(enrich, "enrich_many", fail_if_excel_starts)
+    output = snapshot / "pult-enrichment-receipt.json"
+
+    receipt = enrich.evidence_run(
+        snapshot_dir=snapshot,
+        file_map=file_map,
+        output=output,
+    )
+
+    assert receipt["completed_contract_ids"] == []
+    assert receipt["owners"] == []
+    assert receipt["expected_files"] == []
+    assert receipt["files"] == []
+    assert output.is_file()

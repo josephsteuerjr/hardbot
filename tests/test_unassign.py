@@ -9,7 +9,10 @@ def _seed(cid: str, emp: str, client: str = "Тестов Тест"):
             [f.source for f in db.FIELDS],
             [{"contract_id": cid, "client": client, "responsible": emp,
               "partner": "ЗК", "debt_today": "500"}.get(f.key) for f in db.FIELDS]]
-    db.import_grid(grid)
+    db.import_grid(
+        grid,
+        source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
+    )
 
 
 def test_unassign_clears_responsible_keeps_client():

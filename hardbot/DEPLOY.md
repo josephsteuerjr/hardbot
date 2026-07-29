@@ -76,13 +76,15 @@ Legacy multipart остаётся только для очередей стар�
 
 Штатный цикл:
 
-1. Явно импортировать разрешённые офисные исправления в hardbot.
-2. Снять safe export из hardbot.
-3. Обогатить личные реестры без очистки ручного текста.
-4. Сделать snapshot, plan и staging через `registry_cycle`.
-5. Полностью проверить общий и все личные файлы.
-6. Вручную опубликовать единый доказанный пакет.
-7. Сразу выполнить нулевой dry-run.
+1. Собрать personal → master только через `registry_cycle`.
+2. Полностью проверить staging общего и всех личных файлов.
+3. Вручную опубликовать единый доказанный Excel-пакет.
+4. Импортировать опубликованный master только с exact contract binding и
+   source proof его publication receipt, file SHA и переданного grid.
+5. Снять safe export из hardbot.
+6. Выполнить evidence-bound обогащение личных реестров без очистки ручного
+   текста; legacy Tk write-кнопки на ограниченный тест закрыты.
+7. Провести следующий `registry_cycle` и сразу выполнить нулевой dry-run.
 
 `pult/razbros.py`, `pult/daily_cycle.py` и
 `pult/restore_from_bot.py` не являются штатными write-путями. Legacy-запись
@@ -91,28 +93,114 @@ Legacy multipart остаётся только для очередей стар�
 baseline. Частичный пакет, конфликт дублей КД, ошибка provenance или
 незавершённая проверка означают STOP.
 
+Любой `publish_started` без terminal-event/доказанного complete-result
+блокирует новый publish и снятие stale lock. Оператор запускает
+`python -m registry_cycle reconcile-publish --run-dir ... --mode auto`;
+auto выбирает all-new только если все live-файлы уже точно равны staging,
+иначе выполняет verified all-old из snapshot-backups. Personal-файлы в
+hardbot напрямую не импортируются.
+
+Admin JSON-import требует exact лист `Портфели`. Для published master
+обязательны все 52 поля export-schema; для test subset — точные
+`contract_id`, `responsible` и proof с полным утверждённым `{КД: владелец}`
+scope. Missing, unknown и нормализованные дубли блокируются до первой записи.
+Служебные колонки принимаются только из versioned allowlist/узкого pattern;
+legacy multipart import отвечает 409. Следующая сразу за заголовком строка
+типов опубликованного master обязательна: exact `сх`/`хард`/`софт` проверяется
+по каждой распознанной колонке, а строка исключается из данных.
+
+Source proof v2 перед отправкой одноразово регистрируется локальным
+`hardbot/import_authorization.py` внутри production runtime. HTTP-endpoint для
+регистрации отсутствует. Регистратор сверяет весь proof с активным контрактом,
+TTL и монотонной последовательностью публикаций; import атомарно consume-ит
+receipt и продвигает source head. Старый head, collision одной sequence с
+другим proof, незарегистрированный или просроченный proof означают `STOP`.
+Точные команды подготовки и применения опубликованного master/test-subset
+описаны в `../pult/README.md`.
+
+Root-регистрация выполняется внутри уже запущенного exact контейнера с
+смонтированной production SQLite; proof заранее кладётся в приватный каталог
+`/opt/hardbot2/data/backups` и виден как `/data/backups/...`:
+
+```bash
+cd /opt/hardbot2
+docker compose exec -T bot python /app/import_authorization.py register \
+  --source-kind published_master \
+  --proof /data/backups/<private-import-dir>/proof.json
+```
+
+Для пилотной выборки используется exact `--source-kind test_subset`.
+Регистратор не печатает proof, строки реестра, DB path или secret.
+
+Все publish/rehearsal/first-baseline/execute/distribution/reconcile entrypoint
+сериализуются одним `cycle.lock` с уникальным owner token. Stale reclaim
+оставляет атомарный tombstone; release сверяет owner token. Terminal считается
+действительным только при точном совпадении `run_id` и `plan_digest` последнего
+`publish_started`. Reconcile имеет повторные exact-проверки перед каждым
+replace, перед baseline и перед terminal; любое внешнее изменение оставляет
+run незавершённым и требует STOP.
+
+После выкладки PWA v15 отдельно проверить: до первого доказанного визита форма
+пуста при любых старых HARD-полях master; без явного выбора результата сервер
+не создаёт `visits`, `visit_date` или `bot_visit_data`. Черновик localStorage
+восстанавливается отдельно и сервер принимает только перечисленные оболочкой
+явно затронутые поля.
+
 ## Очистка перед ограниченным тестом
 
 Очистка выполняется только после успешного deploy и live-канареек:
 
 ```powershell
 python _local\reset_hardbot2_for_limited_test.py plan
+python _local\reset_hardbot2_for_limited_test.py prepare-clearance
+# затем отдельно: pult.enrich → registry_cycle publish/post-run
+# → python -m registry_cycle.clearance issue/verify
 python _local\reset_hardbot2_for_limited_test.py apply `
+  --snapshot <snapshot> `
+  --clearance <snapshot>\registry-clearance.json `
   --confirm CLEAR-HARDBOT2-FOR-LIMITED-TEST
 ```
 
-`apply` останавливает контейнер, создаёт финальный online-backup SQLite,
-safe/raw exports, schema, хэшированный photo manifest и полную копию фото,
-скачивает их локально под ограниченным ACL и независимо сверяет SHA-256,
-integrity, counts и содержимое фотоархива. Только затем он очищает
-точно известные application-таблицы и атомарно переносит фото в карантин.
+`prepare-clearance` при работающем боте создаёт согласованный online-backup
+SQLite, safe/raw exports, schema, хэшированный photo manifest и полную копию
+фото, скачивает их локально под ограниченным ACL и независимо сверяет SHA-256,
+integrity, counts и содержимое фотоархива. Затем внешний существующий
+enrichment/registry_cycle завершается и проверяется через evidence-only
+`registry_cycle.clearance`; этот модуль ничего не переносит и не публикует.
+
+Старые Tk/Tauri-кнопки очистки отключены, а `/admin/reset` для обоих legacy
+scope всегда отвечает `409`. Обход snapshot/clearance через admin API
+отсутствует.
+
+`apply` требует exact snapshot и digest-bound clearance receipt, повторно
+проверяет все локальные evidence-файлы, останавливает контейнер и доказывает,
+что live БД/фото не изменились после snapshot. Только затем он очищает точно
+известные application-таблицы и pending import-authorizations, атомарно
+переносит фото в карантин. Consumed import receipts и source heads не
+очищаются: reset не превращает старый опубликованный master снова в новый.
+После остановки controller создаёт одноразовый signed orchestration intent:
+он связан с exact archive/confirm-token, SHA snapshot и clearance receipt,
+случайным nonce, а также полными container/image ID. Внутренний one-shot
+`apply` принимает только digest этого intent; сам по себе `--app-stopped`
+очистку не разрешает.
+
+До destructive шага сохраняется digest-bound `apply_started` receipt. Успех и
+восстановление завершаются отдельными signed receipts с той же привязкой.
+Registry clearance lease и hardbot ops lock остаются удержанными до
+подтверждённого post-state либо полного recovery, поэтому прямой запуск
+внутреннего reset-командного контейнера не является операторским путём.
 После запуска повторно проверяются пустое operational-состояние, SQLite и
 логи. Перед каждым one-shot дополнительно доказываются activated deploy receipt,
 Git/release manifest, hashes reset/db/photo кода и pinned image ID. Backup и
 карантин сохраняются для rollback.
 
+Точный порядок и JSON-контракт enrichment evidence описаны в
+`registry_cycle/CLEARANCE_FOR_LIMITED_TEST.md`.
+
 Очищенную БД наполняют только согласованной тестовой выборкой. Боевые
-реестры, выгрузки, БД и фото не добавляются в git.
+реестры, выгрузки, БД и фото не добавляются в git. Production admin key,
+когда-либо попадавший в tracked history, до пилота ротируется; значение не
+печатается в отчётах и хранится только в production/local ignored settings.
 
 ## Переключение Telegram-бота
 

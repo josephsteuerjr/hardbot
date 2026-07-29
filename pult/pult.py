@@ -6,10 +6,10 @@
 на месте. High-DPI: процесс объявляет DPI-awareness, размеры считаются от
 реального DPI монитора.
 
-Главное отличие от Tauri-версии — экспорт «Обогатить реестр» (enrich.py):
-берёт ЖИВОЙ файл реестра и точечно дописывает в него только то, что заполнили
-выездники через бота (их кейсы, их столбцы), ничего не перезатирая. Старый
-режим «Реестр целиком» (файл с нуля из БД) тоже остался — как слепок БД.
+На период ограниченного теста обычные Tk write-paths обогащения отключены:
+запись в личные реестры выполняется только доказуемым evidence-run либо
+самостоятельным ночным registry_cycle. Предпросмотр соответствий остаётся
+read-only. «Реестр целиком» остаётся слепком БД для сверки.
 
 Запуск: python pult.py  (или «Пульт.bat» — pythonw, без консоли).
 Зависимости: python-calamine (чтение реестров), openpyxl (экспорт xlsx),
@@ -39,7 +39,27 @@ SETTINGS_PATH = APP_DIR / "настройки пульта.json"
 
 # Актуальный инстанс — hardbot2 (свежий код сервера). Ключ — X-Admin-Key.
 DEFAULT_URL = "https://hardbot2.166.88.185.90.nip.io"
-DEFAULT_KEY = "hbadm_029ca66bc21804c4ced440bdbf93f0c8"
+DEFAULT_KEY = ""
+IMPORT_SOURCE_PUBLISHED_MASTER = enrich.IMPORT_SOURCE_PUBLISHED_MASTER
+LIMITED_TEST_ENRICH_WRITES_ENABLED = False
+LIMITED_TEST_MASTER_IMPORT_UI_ENABLED = False
+LIMITED_TEST_RESET_UI_ENABLED = False
+LIMITED_TEST_ENRICH_DISABLED_MESSAGE = (
+    "Запись в личные реестры из Tk-пульта отключена на период ограниченного "
+    "теста. Разрешены только evidence-run канонического registry_cycle и "
+    "самостоятельный ночной registry_cycle. Здесь доступен только предпросмотр."
+)
+LIMITED_TEST_MASTER_IMPORT_DISABLED_MESSAGE = (
+    "Прямой импорт master из Tk-пульта отключён: сервер требует отдельную "
+    "root-регистрацию exact proof. Используйте двухфазный "
+    "limited_test_import.py: prepare-published-master → register → apply. "
+    "Ночной registry_cycle пульт не запускает."
+)
+LIMITED_TEST_RESET_DISABLED_MESSAGE = (
+    "Сброс через Tk-пульт отключён на период ограниченного теста: он обходит "
+    "обязательные snapshot, export и registry clearance. Используйте только "
+    "evidence-bound limited-test reset из hardbot/DEPLOY.md."
+)
 
 # --- Палитра (1:1 с index.html Tauri-пульта) ---------------------------------
 BG = "#FCFBF8"        # фон
@@ -752,50 +772,30 @@ class Pult(tk.Tk):
     def _build_registry(self, fr):
         inner = self._section_inner(fr)
 
-        imp = Card(inner, "Импорт реестра",
-                   "«Кого импортировать?» — личные ФИО.xlsb по той же маске папок, что "
-                   "обогащение/разброс, галочками по сотрудникам. Файлы читаются в "
-                   "пульте (calamine), на сервер летит JSON · города геокодятся "
-                   "автоматически. Результат завершённого визита бота старый файл "
-                   "затереть не может; правки, сделанные в реестре ПОСЛЕ обогащения, "
-                   "принимаются как офисные.")
+        imp = Card(inner, "Импорт опубликованного master",
+                   "Единственный вход в hardbot: общий реестр, уже опубликованный "
+                   "registry_cycle. Личные ФИО.xlsb сюда не загружаются. Офисные "
+                   "правки сначала проходят personal → registry_cycle → master.")
         imp.pack(fill="x")
         rowi = tk.Frame(imp.inner, bg=CARD)
         rowi.pack(anchor="w")
-        self.imp_scan_btn = btn(rowi, "Кого импортировать?", self.do_import_batch,
-                                kind="accent")
-        self.imp_scan_btn.pack(side="left")
-        btn(rowi, "Один файл…", self.do_import).pack(side="left", padx=(8, 0))
+        btn(rowi, "Выбрать опубликованный master…", self.do_import,
+            kind="accent").pack(side="left")
         self.imp_kvs = KVGrid(imp.inner)
         self.imp_kvs.pack(anchor="w", pady=(10, 0))
         self.imp_warn = tk.Label(imp.inner, text="", bg=CARD, fg=WARN, font=f(9),
                                  justify="left", wraplength=760)
         self.imp_warn.pack(anchor="w")
-        self.imp_pick_frame = tk.Frame(imp.inner, bg=CARD)
-        self.imp_pick_frame.pack(fill="x")
-        self.imp_apply_row = tk.Frame(imp.inner, bg=CARD)
-        self.imp_apply_sel_btn = btn(self.imp_apply_row, "Импортировать выбранных (0)",
-                                     lambda: self.impb_apply("selected"), kind="accent")
-        self.imp_apply_sel_btn.pack(side="left")
-        self.imp_apply_all_btn = btn(self.imp_apply_row, "Импортировать всех",
-                                     lambda: self.impb_apply("all"))
-        self.imp_apply_all_btn.pack(side="left", padx=(8, 0))
-        self.impb_matched, self.impb_selected = [], set()
 
-        enr = Card(inner, "Обогащение реестров выездников",
-                   "Главный путь выгрузки. Данные — с сервера: ТОЛЬКО завершённые визиты "
-                   "(кейсы с датой выезда) и только столбцы формы визита. Файлы — личные "
-                   "ФИО.xlsb по той же маске, что и разброс: Республика / … / Город / ФИО. "
-                   "В каждый файл точечно дописываются кейсы его сотрудника, ничего не "
-                   "перезатирается, рядом с изменёнными файлами создаётся резервная копия. "
-                   "Если в реестрах правили руками — сначала импорт, потом обогащение.")
+        enr = Card(inner, "Обогащение: только предпросмотр",
+                   LIMITED_TEST_ENRICH_DISABLED_MESSAGE)
         enr.pack(fill="x", pady=(12, 0))
         rowe = tk.Frame(enr.inner, bg=CARD)
         rowe.pack(anchor="w")
         btn(rowe, "Папка с республиками…", self.scatter_pick_base).pack(side="left")
-        btn(rowe, "Кого обогащать?", self.enr_preview, kind="accent").pack(
+        btn(rowe, "Проверить соответствия (без записи)", self.enr_preview,
+            kind="accent").pack(
             side="left", padx=(8, 0))
-        btn(rowe, "Обогатить один файл…", self.do_enrich).pack(side="left", padx=(8, 0))
         self.enr_base_lbl = tk.Label(enr.inner, text="", bg=CARD, fg=MUTED, font=f(9),
                                      wraplength=760, justify="left")
         self.enr_base_lbl.pack(anchor="w", pady=(8, 0))
@@ -875,9 +875,19 @@ class Pult(tk.Tk):
         cl.pack(fill="x", pady=(12, 0))
         rc = tk.Frame(cl.inner, bg=CARD)
         rc.pack(anchor="w")
-        btn(rc, "Сбросить данные визитов", lambda: self.do_reset("visits")).pack(side="left")
-        btn(rc, "Полностью очистить реестр", lambda: self.do_reset("all"),
-            kind="danger").pack(side="left", padx=(8, 0))
+        reset_visits_btn = btn(
+            rc, "Сбросить данные визитов", lambda: self.do_reset("visits")
+        )
+        reset_visits_btn.configure(state="disabled")
+        reset_visits_btn.pack(side="left")
+        reset_all_btn = btn(
+            rc,
+            "Полностью очистить реестр",
+            lambda: self.do_reset("all"),
+            kind="danger",
+        )
+        reset_all_btn.configure(state="disabled")
+        reset_all_btn.pack(side="left", padx=(8, 0))
         self.reset_out = tk.Label(cl.inner, text="", bg=CARD, fg=MUTED, font=f(9))
         self.reset_out.pack(anchor="w", pady=(6, 0))
 
@@ -905,14 +915,33 @@ class Pult(tk.Tk):
 
     # --- импорт ---
     def do_import(self):
+        if not LIMITED_TEST_MASTER_IMPORT_UI_ENABLED:
+            self.imp_kvs.set_pairs([])
+            self.imp_warn.configure(
+                text=LIMITED_TEST_MASTER_IMPORT_DISABLED_MESSAGE
+            )
+            self.toast(LIMITED_TEST_MASTER_IMPORT_DISABLED_MESSAGE, err=True)
+            return
         path = filedialog.askopenfilename(
-            title="Файл реестра", filetypes=[("Excel", "*.xlsx *.xlsm *.xlsb *.xls")])
+            title="Опубликованный master",
+            filetypes=[("Excel", "*.xlsx *.xlsm *.xlsb *.xls")],
+        )
         if not path:
             return
         self.toast("Импорт " + Path(path).name + "…")
         def work():
-            sheets = read_workbook_sheets(path)
-            return self.api("POST", "/admin/import.json", {"sheets": sheets}, timeout=120)
+            prepared = enrich.prepare_published_master_import(path)
+            return self.api(
+                "POST",
+                "/admin/import.json",
+                {
+                    "data_exchange_contract": enrich.DATA_EXCHANGE_CONTRACT,
+                    "source_kind": IMPORT_SOURCE_PUBLISHED_MASTER,
+                    "source_proof": prepared["source_proof"],
+                    "sheets": prepared["sheets"],
+                },
+                timeout=120,
+            )
         def done(d):
             if d.get("error"):
                 self.imp_kvs.set_pairs([])
@@ -924,7 +953,13 @@ class Pult(tk.Tk):
                 return
             self.imp_kvs.set_pairs(self._imp_pairs(d))
             self.imp_warn.configure(text="\n".join(self._imp_notes(d)))
-            self.toast(f"Импорт готов: +{fmt_n(d.get('inserted'))} / обновлено {fmt_n(d.get('updated'))}")
+            if d.get("idempotent_replay"):
+                self.toast(
+                    "Этот receipt уже использован; повтор ничего не записал",
+                    err=True,
+                )
+            else:
+                self.toast(f"Импорт готов: +{fmt_n(d.get('inserted'))} / обновлено {fmt_n(d.get('updated'))}")
             self.refresh()
         self.bg_task(work, done)
 
@@ -935,12 +970,19 @@ class Pult(tk.Tk):
                 ("дублей", d.get("duplicates")),
                 ("без ответственного", d.get("no_responsible")),
                 ("офисных правок", d.get("office_cells")),
+                ("call-полей изолировано", d.get("isolated_call_cells")),
                 # None (старый сервер без счётчиков) KVGrid покажет как «—», а не 0
                 ("отклонено защитой", d.get("protected_cells"))]
 
     @staticmethod
     def _imp_notes(d: dict) -> list[str]:
         notes = []
+        if d.get("idempotent_replay"):
+            notes.append(
+                "Идемпотентный повтор: это разрешение уже было использовано, "
+                "сервер не сделал ни одной записи. Для нового состояния нужен "
+                "новый опубликованный master или новый утверждённый test-subset."
+            )
         if d.get("no_responsible"):
             notes.append(f"Без ответственного: {d['no_responsible']} строк — колонка "
                          "«ответственный Сотрудник» пуста и в файле, и в базе. Эти "
@@ -960,158 +1002,28 @@ class Pult(tk.Tk):
                          "выездника не затёрт.")
         unk = d.get("unknown_columns") or []
         if unk:
-            notes.append("Незнакомые колонки (не помешали импорту): " + ", ".join(unk))
+            notes.append(
+                "Незнакомые колонки требуют новой версии контракта: "
+                + ", ".join(unk)
+            )
+        ignored = d.get("ignored_columns") or []
+        if ignored:
+            notes.append(
+                "Служебные колонки по текущему контракту: "
+                + ", ".join(ignored)
+            )
         return notes
 
     def do_import_batch(self):
-        """Пакетный импорт: как «Кого обогащать?», только в обратную сторону.
-        Ищет личные ФИО.xlsb по маске папок (Республика / … / Город / ФИО),
-        показывает сотрудников галочками; файлы выбранных читаются calamine и
-        уходят по одному в POST /admin/import.json; отчёты суммируются."""
-        if not self.scatter_base:
-            self.toast("Сначала выбери «Папку с республиками» (карточка обогащения)", err=True)
-            return
-        base = self.scatter_base
-        def work():
-            reps = razbros.load_config(None)
-            fmap = razbros.build_folder_map(razbros.resolve_roots(base, reps, []))
-            matched = []
-            for key in sorted(fmap):
-                entries = fmap[key]
-                emp = entries[0]["path"].name
-                files = self._personal_files(entries, emp)
-                if files:
-                    matched.append({"key": key, "employee": emp, "files": files,
-                                    "cities": sorted({e["city"] for e in entries})})
-            return matched
-        def done(matched):
-            self.impb_matched = matched
-            self.impb_selected = {m["key"] for m in matched}
-            self.imp_warn.configure(
-                text="" if matched else "По маске не нашлось ни одного личного .xlsb")
-            if not matched:
-                self.toast("Файлы не найдены", err=True)
-            self._render_impb_pick()
-        self.imp_warn.configure(text="Ищу личные реестры по маске…")
-        self.bg_task(work, done, lambda e: (self.imp_warn.configure(text=f"Ошибка: {e}"),
-                                            self.toast(str(e), err=True)))
+        """Личные книги никогда не импортируются в hardbot.
 
-    def _render_impb_pick(self):
-        for w in self.imp_pick_frame.winfo_children():
-            w.destroy()
-        self.imp_apply_row.pack_forget()
-        if not self.impb_matched:
-            return
-        head = tk.Frame(self.imp_pick_frame, bg=CARD)
-        head.pack(fill="x", pady=(10, 4))
-        tk.Label(head, text="Кого импортировать (галочки):", bg=CARD, fg=MUTED,
-                 font=f(9)).pack(side="left")
-        btn(head, "все", lambda: self._impb_all(True)).pack(side="right")
-        btn(head, "снять", lambda: self._impb_all(False)).pack(side="right", padx=(0, 6))
-        box = tk.Frame(self.imp_pick_frame, bg=CARD, highlightbackground=BORDER,
-                       highlightthickness=1)
-        box.pack(fill="x")
-        self._impb_vars: dict[str, tk.BooleanVar] = {}
-        for m in self.impb_matched:
-            var = tk.BooleanVar(value=m["key"] in self.impb_selected)
-            self._impb_vars[m["key"]] = var
-            row = tk.Frame(box, bg=CARD)
-            row.pack(fill="x")
-            tk.Checkbutton(row, text=m["employee"], variable=var, bg=CARD, fg=TEXT,
-                           activebackground=CARD, selectcolor=CARD, font=f(9),
-                           command=lambda k=m["key"], v=var: self._impb_toggle(k, v.get())
-                           ).pack(side="left", padx=6)
-            tk.Label(row, text=f"файлов: {len(m['files'])} · {' · '.join(m['cities'])}",
-                     bg=CARD, fg=MUTED, font=f(8)).pack(side="left")
-        self.imp_apply_row.pack(anchor="w", pady=(10, 0))
-        self._impb_seln()
-
-    def _impb_toggle(self, k, on):
-        (self.impb_selected.add if on else self.impb_selected.discard)(k)
-        self._impb_seln()
-
-    def _impb_all(self, on):
-        for m in self.impb_matched:
-            (self.impb_selected.add if on else self.impb_selected.discard)(m["key"])
-            if m["key"] in self._impb_vars:
-                self._impb_vars[m["key"]].set(on)
-        self._impb_seln()
-
-    def _impb_seln(self):
-        n = sum(1 for m in self.impb_matched if m["key"] in self.impb_selected)
-        self.imp_apply_sel_btn.configure(text=f"Импортировать выбранных ({n})",
-                                         state="normal" if n else "disabled")
-
-    def impb_apply(self, which: str):
-        picked = [m for m in self.impb_matched
-                  if which == "all" or m["key"] in self.impb_selected]
-        if not picked:
-            self.toast("Никто не выбран", err=True)
-            return
-        files: list[Path] = []
-        for m in picked:
-            for p in m["files"]:
-                if p not in files:
-                    files.append(p)
-        if not messagebox.askyesno(
-                "Пакетный импорт",
-                f"Импортировать в БД: сотрудников {len(picked)}, файлов {len(files)}?\n\n"
-                "У существующих КД обновятся только колонки из файла. Результат "
-                "завершённого визита бота старый файл затереть не может; правки, "
-                "сделанные в реестре после обогащения, будут приняты как офисные."):
-            return
-        self._import_batch_run(files)
-
-    def _impb_busy(self, busy: bool):
-        """Кнопки запуска импорта на время пакета: повторный клик открыл бы второй
-        параллельный поток с перемешанным отчётом."""
-        state = "disabled" if busy else "normal"
-        for b in (self.imp_scan_btn, self.imp_apply_sel_btn, self.imp_apply_all_btn):
-            b.configure(state=state)
-        if not busy:
-            self._impb_seln()      # «выбранных (N)» мог остаться disabled при n=0
-
-    def _import_batch_run(self, files: list[Path]):
-        self._impb_busy(True)
-        log = lambda s: self.after(0, lambda s=s: self.imp_warn.configure(text=s))
-        def work():
-            agg = {"total_rows": 0, "inserted": 0, "updated": 0, "skipped_no_id": 0,
-                   "duplicates": 0, "protected_cells": 0, "protected_contracts": 0,
-                   "office_cells": 0, "office_contracts": 0, "no_responsible": 0}
-            errors: list[str] = []
-            unknown: list[str] = []
-            for i, p in enumerate(files, 1):
-                log(f"[{i}/{len(files)}] {p.name}…")
-                try:
-                    sheets = read_workbook_sheets(str(p))
-                    d = self.api("POST", "/admin/import.json", {"sheets": sheets}, timeout=120)
-                except Exception as e:  # noqa: BLE001 — один битый файл не валит пакет
-                    errors.append(f"{p.name}: {e}")
-                    continue
-                if d.get("error"):
-                    errors.append(f"{p.name}: {d['error']}")
-                    continue
-                for k in agg:
-                    agg[k] += int(d.get(k) or 0)
-                for c in d.get("unknown_columns") or []:
-                    if c not in unknown:
-                        unknown.append(c)
-            agg["unknown_columns"] = unknown
-            return agg, errors
-        def done(res):
-            agg, errors = res
-            ok = len(files) - len(errors)
-            self._impb_busy(False)
-            self.imp_kvs.set_pairs([("файлов", ok)] + self._imp_pairs(agg))
-            lines = self._imp_notes(agg) + [f"⚠ {e}" for e in errors]
-            self.imp_warn.configure(text="\n".join(lines))
-            self.toast(f"Импорт: файлов {ok} из {len(files)}, +{fmt_n(agg['inserted'])} / "
-                       f"обновлено {fmt_n(agg['updated'])}", err=bool(errors))
-            self.refresh()
-        self.bg_task(work, done,
-                     lambda e: (self._impb_busy(False),
-                                self.imp_warn.configure(text=f"Ошибка: {e}"),
-                                self.toast(str(e), err=True)))
+        Метод оставлен как fail-closed совместимость для старых горячих клавиш/
+        сборок; в актуальном UI кнопки нет."""
+        self.imp_warn.configure(
+            text="Загрузка личных реестров в hardbot отключена: "
+                 "personal ↔ master выполняет registry_cycle."
+        )
+        self.toast("Импорт личных реестров запрещён", err=True)
 
     # --- обогащение по папке республик (главный путь) ---
     def _personal_files(self, entries, emp) -> list[Path]:
@@ -1144,6 +1056,7 @@ class Pult(tk.Tk):
         base = self.scatter_base
         def work():
             d = self.api("GET", "/admin/export.json", timeout=120)
+            enrich.validate_server_export(d)
             by_emp = enrich.split_by_employee(d["rows"])
             reps = razbros.load_config(None)
             fmap = razbros.build_folder_map(razbros.resolve_roots(base, reps, []))
@@ -1230,7 +1143,8 @@ class Pult(tk.Tk):
             where = " · ".join(p.parent.parent.name for p in m["files"])
             tk.Label(row, text=f"визитов: {m['filled']} · файлов: {len(m['files'])} · {where}",
                      bg=CARD, fg=MUTED, font=f(8)).pack(side="left")
-        self.enr_apply_row.pack(anchor="w", pady=(10, 0))
+        if LIMITED_TEST_ENRICH_WRITES_ENABLED:
+            self.enr_apply_row.pack(anchor="w", pady=(10, 0))
         self._enr_seln()
 
     def _enr_toggle(self, k, on):
@@ -1250,6 +1164,10 @@ class Pult(tk.Tk):
                                          state="normal" if n else "disabled")
 
     def enr_apply(self, which: str):
+        if not LIMITED_TEST_ENRICH_WRITES_ENABLED:
+            self.enr_warn.configure(text=LIMITED_TEST_ENRICH_DISABLED_MESSAGE)
+            self.toast(LIMITED_TEST_ENRICH_DISABLED_MESSAGE, err=True)
+            return
         picked = [m for m in self.enr_matched
                   if which == "all" or m["key"] in self.enr_selected]
         if not picked:
@@ -1262,9 +1180,9 @@ class Pult(tk.Tk):
                 f"Обогатить личные реестры: сотрудников {len(picked)}, файлов {len(jobs)}?\n\n"
                 "В каждый файл дописываются ТОЛЬКО кейсы его сотрудника, заполненные "
                 "ботом. Рядом с каждым файлом создаётся резервная копия. Делает Excel — "
-                "может занять время.\n\nСовет: если в реестрах правили руками — сначала "
-                "запусти «Кого импортировать?», иначе обогащение перепишет правки "
-                "серверными значениями."):
+                "может занять время.\n\nЕсли в personal правили результат визита, "
+                "сначала проведи registry_cycle, опубликуй master и импортируй именно "
+                "его в hardbot. Прямой импорт personal запрещён."):
             return
         fields = self._enr_fields
         log = lambda s: self.after(0, lambda: self.enrich_out.configure(text=s))
@@ -1296,6 +1214,10 @@ class Pult(tk.Tk):
 
     # --- экспорт: обогащение одного файла (запасной путь) ---
     def do_enrich(self):
+        if not LIMITED_TEST_ENRICH_WRITES_ENABLED:
+            self.enr_warn.configure(text=LIMITED_TEST_ENRICH_DISABLED_MESSAGE)
+            self.toast(LIMITED_TEST_ENRICH_DISABLED_MESSAGE, err=True)
+            return
         path = filedialog.askopenfilename(
             title="Живой файл реестра для обогащения",
             initialfile=self.settings.get("enrich_file", ""),
@@ -1315,6 +1237,7 @@ class Pult(tk.Tk):
         self.enrich_out.configure(text="Забираю данные с сервера…")
         def work():
             d = self.api("GET", "/admin/export.json", timeout=120)
+            enrich.validate_server_export(d)
             log = lambda s: self.after(0, lambda: self.enrich_out.configure(text=s))
             return enrich.enrich_file(path, d["fields"], d["rows"], log=log)
         def done(p):
@@ -1352,6 +1275,7 @@ class Pult(tk.Tk):
             # Raw-слепок отделён от безопасного потока обогащения: без mode=full
             # сервер намеренно очищает все неподтверждённые поля визита.
             d = self.api("GET", "/admin/export.json?mode=full", timeout=120)
+            enrich.validate_server_export(d)
             write_registry_xlsx(path, d["fields"], d["rows"])
             return len(d["rows"])
         self.bg_task(work, lambda n: self.toast(f"Сохранено: {path} ({fmt_n(n)} строк)"))
@@ -1533,6 +1457,10 @@ class Pult(tk.Tk):
 
     # --- очистка/геокодинг/период ---
     def do_reset(self, scope):
+        if not LIMITED_TEST_RESET_UI_ENABLED:
+            self.reset_out.configure(text=LIMITED_TEST_RESET_DISABLED_MESSAGE)
+            self.toast(LIMITED_TEST_RESET_DISABLED_MESSAGE, err=True)
+            return
         msg = ("ПОЛНОСТЬЮ очистить реестр?\nУдалятся ВСЕ клиенты, визиты и метки, без "
                "возможности отката (привязки сотрудников останутся)."
                if scope == "all" else

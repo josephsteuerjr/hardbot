@@ -41,7 +41,10 @@ def main():
 
     # 1) импорт синтетики (один сотрудник, часть людей — с 2 договорами)
     path = synth.generate(n=40, responsible=synth.DEV_EMPLOYEE)
-    rep = db.import_xlsx(path)
+    rep = db.import_xlsx(
+        path,
+        source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
+    )
     print("отчёт импорта:", rep)
     check(rep["inserted"] == 40, "импортировано 40 договоров")
     check(rep["skipped_no_id"] == 0 and rep["unknown_columns"] == [], "колонки распознаны, без потерь")
@@ -79,7 +82,10 @@ def main():
     import importlib
     importlib.reload(db)
     db.init_db()
-    db.import_xlsx(export_path)
+    db.import_xlsx(
+        export_path,
+        source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
+    )
     after = snapshot()
 
     mism = 0

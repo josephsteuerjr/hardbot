@@ -11,7 +11,11 @@ from pathlib import Path
 from . import __version__
 from .config import load_config_bundle
 from .errors import RegistryCycleError
-from .publishing import publish_validated
+from .publishing import (
+    publication_cycle_lock,
+    publish_validated,
+    reconcile_incomplete_publication,
+)
 from .rehearsal import (
     execute_first_baseline_rehearsal,
     promote_first_baseline_rehearsal,
@@ -70,6 +74,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--busy-mode",
         choices=("block", "sidecar", "force_close"),
         help="переопределить config только для этой публикации",
+    )
+    reconcile = commands.add_parser(
+        "reconcile-publish",
+        help="свести аварийную публикацию к проверенному all-old/all-new",
+    )
+    reconcile.add_argument("--run-dir", type=Path, required=True)
+    reconcile.add_argument(
+        "--mode",
+        choices=("auto", "all-old", "all-new"),
+        default="auto",
     )
     execute = commands.add_parser("execute", help="полный свежий цикл")
     execute.add_argument("--publish", action="store_true")
@@ -183,22 +197,34 @@ def main(argv: list[str] | None = None) -> int:
             _print_json(report.as_dict())
             return 2 if report.blocked else 0
         if command == "publish":
-            prepared = service.prepare_existing(
-                args.snapshot,
-                rollover_month=args.rollover_month,
-            )
-            staged = load_stage(args.stage)
-            report = validate_staging(bundle, staged, prepared.plan)
-            result = publish_validated(
-                bundle,
-                staged,
-                prepared.plan,
-                report,
-                confirmation_digest=args.confirm_digest,
-                busy_mode=args.busy_mode,
-            )
+            with publication_cycle_lock(bundle) as cycle_lock:
+                prepared = service.prepare_existing(
+                    args.snapshot,
+                    rollover_month=args.rollover_month,
+                )
+                staged = load_stage(args.stage)
+                report = validate_staging(bundle, staged, prepared.plan)
+                result = publish_validated(
+                    bundle,
+                    staged,
+                    prepared.plan,
+                    report,
+                    confirmation_digest=args.confirm_digest,
+                    busy_mode=args.busy_mode,
+                    cycle_lock=cycle_lock,
+                )
             _print_json(result.as_dict())
             return 0 if result.complete else 2
+        if command == "reconcile-publish":
+            # Только explicit reconcile получает allow_incomplete lock внутри
+            # recovery-функции и вправе atomically claim stale owner.
+            result = reconcile_incomplete_publication(
+                bundle,
+                args.run_dir,
+                mode=args.mode,
+            )
+            _print_json(result)
+            return 0
         if command == "execute":
             outcome = execute_cycle(
                 bundle,

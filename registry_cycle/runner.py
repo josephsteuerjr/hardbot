@@ -9,12 +9,16 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import ConfigBundle
-from .cycle_lock import CycleLock
 from .errors import SafetyViolation
 from .file_access import busy_files
 from .force_close import DelegatedForceCloser
 from .notifications import NotificationResult, OwnerNotifier
-from .publishing import PublishResult, publish_validated
+from .publishing import (
+    PublishResult,
+    assert_no_incomplete_publications,
+    publication_cycle_lock,
+    publish_validated,
+)
 from .service import CycleService, PreparedRun
 from .staging import StageSet, build_staging
 from .validation import ValidationReport, validate_staging
@@ -106,8 +110,7 @@ def execute_cycle(
 ) -> CycleOutcome:
     if scheduled and not bool(bundle.app.scheduler.get("enabled", False)):
         raise SafetyViolation("запуск из планировщика отключён в config")
-    lock_path = bundle.workspace_path() / "cycle.lock"
-    stale = int(bundle.app.safety.get("lock_stale_seconds", 21600))
+    workspace = bundle.workspace_path()
     notifier = OwnerNotifier(bundle)
     prepared: PreparedRun | None = None
     selected_busy_mode = (
@@ -116,7 +119,9 @@ def execute_cycle(
         else str(bundle.app.safety.get("busy_file_policy", "block"))
     )
     try:
-        with CycleLock(lock_path, stale_seconds=stale):
+        if publish:
+            assert_no_incomplete_publications(workspace)
+        with publication_cycle_lock(bundle) as cycle_lock:
             service = CycleService(bundle)
             if publish and selected_busy_mode == "force_close":
                 discovery = service.discover()
@@ -198,6 +203,7 @@ def execute_cycle(
                     validation,
                     confirmation_digest=prepared.plan.digest,
                     busy_mode=selected_busy_mode,
+                    cycle_lock=cycle_lock,
                 )
                 if publish
                 else None

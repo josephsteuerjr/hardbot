@@ -22,7 +22,10 @@ def _seed(cid: str):
             [f.source for f in db.FIELDS],
             [{"contract_id": cid, "client": "Клиент К.", "responsible": EMP}.get(f.key)
              for f in db.FIELDS]]
-    db.import_grid(grid)
+    db.import_grid(
+        grid,
+        source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
+    )
 
 
 def _save(body, monkeypatch):
@@ -54,12 +57,12 @@ def test_legacy_call_comment_remapped(monkeypatch):
     assert not (c["call_comment"] or "")
 
 
-def test_person_payload_has_both_keys(monkeypatch):
-    """Новая форма префиллится из visit_comment; call_comment остаётся в payload
-    для ещё закэшированных старых оболочек."""
+def test_unfinished_server_draft_does_not_prefill_visit_form(monkeypatch):
+    """Черновик хранится локально, а raw clients не становится form-prefill."""
     db.init_db()
     _seed("VC-3")
     _save({"rep": "VC-3", "values": {"visit_comment": "тест"}}, monkeypatch)
     data = web._person_full("VC-3", "ru")
-    assert data["visit_comment"] == "тест"
+    assert db.get_client("VC-3")["visit_comment"] == "тест"
+    assert data["visit_comment"] == ""
     assert "call_comment" in data

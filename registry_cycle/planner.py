@@ -130,6 +130,7 @@ def build_sync_plan(
     multi_owner_policy: str = "block",
     responsible_aliases: dict[str, str] | None = None,
     rollover_month: str | None = None,
+    config_identity: str = "",
 ) -> SyncPlan:
     """Собрать изменения мастера и ожидаемые личные портфели.
 
@@ -144,7 +145,11 @@ def build_sync_plan(
         value,
         responsible_aliases,
     )
-    plan = SyncPlan(master.path, master.fingerprint)
+    plan = SyncPlan(
+        master.path,
+        master.fingerprint,
+        config_identity=config_identity,
+    )
     rollover, rollover_issues = build_month_rollover_plan(
         master,
         fields,
@@ -201,6 +206,7 @@ def build_sync_plan(
     invalid_source_values: list[dict[str, Any]] = []
     source_owner: dict[tuple[str, str], str] = {}
     seen_projection_targets: dict[tuple[str, str], Path] = {}
+    seen_responsible_profiles: dict[str, tuple[str, Path]] = {}
     case_sources: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     read_only_sources: dict[tuple[str, str], dict[str, Any]] = {}
     removed_sources: dict[tuple[str, str], dict[str, Any]] = {}
@@ -237,7 +243,32 @@ def build_sync_plan(
             )
             continue
         responsible_norm = owner_norm(responsible)
-        book_responsibles[entry.entry_id] = responsible
+
+        previous_profile = seen_responsible_profiles.get(responsible_norm)
+        if (
+            previous_profile is not None
+            and previous_profile[0] != entry.profile
+        ):
+            plan.issues.append(
+                Issue(
+                    "error",
+                    "responsible_in_multiple_active_profiles",
+                    "один ответственный найден в нескольких активных профилях",
+                    {
+                        "responsible": responsible,
+                        "responsible_normalized": responsible_norm,
+                        "first_profile": previous_profile[0],
+                        "first_path": str(previous_profile[1]),
+                        "second_profile": entry.profile,
+                        "second_path": str(entry.path),
+                    },
+                )
+            )
+            continue
+        seen_responsible_profiles.setdefault(
+            responsible_norm,
+            (entry.profile, entry.path),
+        )
 
         target_key = (entry.profile, responsible_norm)
         if target_key in seen_projection_targets:
@@ -253,8 +284,10 @@ def build_sync_plan(
                     },
                 )
             )
+            continue
         else:
             seen_projection_targets[target_key] = entry.path
+        book_responsibles[entry.entry_id] = responsible
 
         if owner_norm(entry.responsible_hint) != responsible_norm:
             plan.issues.append(

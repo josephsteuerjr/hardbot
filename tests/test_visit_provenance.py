@@ -6,7 +6,7 @@ from datetime import date
 
 import pytest
 from aiohttp import web as aiohttp_web
-from aiohttp.test_utils import make_mocked_request
+from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
 import db
 import web as webmod
@@ -26,7 +26,10 @@ def _import(*rows):
     grid = [titles]
     for values in rows:
         grid.append([values.get(k) for k in keys])
-    return db.import_grid(grid)
+    return db.import_grid(
+        grid,
+        source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
+    )
 
 
 def _safe(cid: str) -> dict:
@@ -184,6 +187,11 @@ def test_invalid_dropdown_cannot_become_trusted_snapshot():
 
 
 def _api_save(body, monkeypatch, employee="API Агент"):
+    body = dict(body)
+    if body.get("finish"):
+        values = dict(body.get("values") or {})
+        body.setdefault("form_version", webmod.FORM_PROTOCOL_VERSION)
+        body.setdefault("input_keys", list(values))
     monkeypatch.setattr(webmod, "_auth", lambda _request: (501, employee))
     request = make_mocked_request("POST", "/api/save")
 
@@ -210,6 +218,161 @@ def test_finish_api_creates_provenance_snapshot(monkeypatch):
     assert row["tips"] == "новый номер"
 
 
+def test_stale_master_form_open_and_untouched_save_cannot_certify(monkeypatch):
+    """До proven snapshot API формы не подмешивает ни одно HARD-поле master.
+
+    Моделируем ровно клиентский open → readForm → save без касаний: payload пуст,
+    сервер отклоняет finish до visit_date/log/snapshot.
+    """
+    _import({
+        "contract_id": "PV-STALE-FORM",
+        "client": "Старый префилл",
+        "responsible": "API Агент",
+        "visit_date": "2025-01-01",
+        "call_status": "Оплачен",
+        "contact_with": "Должник",
+        "agreed_payment": "Обещает оплатить",
+        "who_at_address": "Родственник",
+        "client_location": "На работе",
+        "purpose_rf": "Работа",
+        "visit_comment": "старый master-комментарий",
+    })
+    db.update_person(
+        "PV-STALE-FORM",
+        {"call_comment": "старый звонок", "tips": "старый номер"},
+    )
+
+    opened = webmod._person_full("PV-STALE-FORM", "ru")
+    assert opened["visited"] is False
+    assert all(field["current"] == "" for field in opened["form"])
+    assert opened["visit_comment"] == ""
+    assert opened["call_comment"] == ""
+    assert opened["tips"] == ""
+
+    untouched = {
+        field["key"]: field["current"]
+        for field in opened["form"]
+        if field["current"]
+    }
+    with pytest.raises(aiohttp_web.HTTPBadRequest) as blocked:
+        _api_save({
+            "rep": "PV-STALE-FORM",
+            "finish": True,
+            "op_id": "pv-stale-untouched",
+            "values": untouched,
+        }, monkeypatch)
+    assert "visit result" in blocked.value.text
+
+    assert db.has_bot_visit("PV-STALE-FORM") is False
+    with db.connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM visits WHERE contract_id=?",
+            ("PV-STALE-FORM",),
+        ).fetchone()[0] == 0
+
+
+def test_http_stale_master_open_then_untouched_finish_is_fail_closed(monkeypatch):
+    """Реальный HTTP-маршрут не превращает master-prefill в proven visit."""
+    _import({
+        "contract_id": "PV-HTTP-STALE",
+        "client": "HTTP старый префилл",
+        "responsible": "API Агент",
+        "visit_date": "2025-01-01",
+        "call_status": "Оплачен",
+        "contact_with": "Должник",
+        "agreed_payment": "Обещает оплатить",
+        "who_at_address": "Родственник",
+        "client_location": "На работе",
+        "purpose_rf": "Работа",
+        "visit_comment": "старый master-комментарий",
+    })
+    db.update_person(
+        "PV-HTTP-STALE",
+        {"call_comment": "старый звонок", "tips": "старый номер"},
+    )
+    monkeypatch.setattr(webmod, "_auth", lambda _request: (501, "API Агент"))
+
+    async def scenario():
+        client = TestClient(TestServer(webmod.build_app(None)))
+        await client.start_server()
+        try:
+            opened_response = await client.get(
+                "/api/person",
+                params={"rep": "PV-HTTP-STALE"},
+            )
+            assert opened_response.status == 200
+            opened = await opened_response.json()
+            assert opened["visited"] is False
+            assert all(field["current"] == "" for field in opened["form"])
+            assert opened["visit_comment"] == ""
+            assert opened["call_comment"] == ""
+            assert opened["tips"] == ""
+
+            untouched = {
+                field["key"]: field["current"]
+                for field in opened["form"]
+                if field["current"]
+            }
+            saved_response = await client.post(
+                "/api/save",
+                json={
+                    "rep": "PV-HTTP-STALE",
+                    "finish": True,
+                    "op_id": "pv-http-stale-untouched",
+                    "form_version": webmod.FORM_PROTOCOL_VERSION,
+                    "input_keys": list(untouched),
+                    "values": untouched,
+                },
+            )
+            assert saved_response.status == 400
+            assert "visit result" in await saved_response.text()
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+    assert db.has_bot_visit("PV-HTTP-STALE") is False
+    with db.connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM visits WHERE contract_id=?",
+            ("PV-HTTP-STALE",),
+        ).fetchone()[0] == 0
+
+
+def test_deliberate_result_does_not_pull_omitted_master_fields_into_proof(
+    monkeypatch,
+):
+    _import({
+        "contract_id": "PV-EXPLICIT-ONLY",
+        "client": "Только явное",
+        "responsible": "API Агент",
+        "call_status": "Нет контакта",
+        "contact_with": "Представитель",
+        "agreed_payment": "Отказ",
+        "visit_comment": "старый master-комментарий",
+    })
+
+    _api_save({
+        "rep": "PV-EXPLICIT-ONLY",
+        "finish": True,
+        "op_id": "pv-explicit-only",
+        "values": {"call_status": "Оплачен"},
+    }, monkeypatch)
+
+    snapshot = db.bot_visit_snapshot(db.get_client("PV-EXPLICIT-ONLY"))
+    assert snapshot["call_status"] == "Оплачен"
+    assert "contact_with" not in snapshot
+    assert "agreed_payment" not in snapshot
+    assert "visit_comment" not in snapshot
+    with db.connect() as conn:
+        payload = conn.execute(
+            "SELECT payload FROM visits WHERE contract_id=?",
+            ("PV-EXPLICIT-ONLY",),
+        ).fetchone()[0]
+    assert "старый master-комментарий" not in payload
+    assert "Отказ" not in payload
+    assert "Оплачен" in payload
+
+
 def test_api_rejects_noncanonical_dropdown(monkeypatch):
     _import({"contract_id": "PV-BAD-API", "client": "Подмена API",
              "responsible": "API Агент"})
@@ -217,3 +380,21 @@ def test_api_rejects_noncanonical_dropdown(monkeypatch):
         _api_save({"rep": "PV-BAD-API", "finish": True,
                    "values": {"contact_with": "CONSUMER"}}, monkeypatch)
     assert _safe("PV-BAD-API")[db.BOT_VISIT_MARKER] is False
+
+
+def test_finish_from_old_shell_without_explicit_field_protocol_is_blocked(
+    monkeypatch,
+):
+    _import({
+        "contract_id": "PV-OLD-SHELL",
+        "client": "Старая оболочка",
+        "responsible": "API Агент",
+    })
+    with pytest.raises(aiohttp_web.HTTPConflict):
+        _api_save({
+            "rep": "PV-OLD-SHELL",
+            "finish": True,
+            "form_version": 1,
+            "values": {"call_status": "Оплачен"},
+        }, monkeypatch)
+    assert db.has_bot_visit("PV-OLD-SHELL") is False

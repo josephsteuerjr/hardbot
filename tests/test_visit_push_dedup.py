@@ -67,8 +67,15 @@ def _finish(rep, op_id, bot, monkeypatch, values=None):
     request = make_mocked_request("POST", "/api/save", app=app)
 
     async def _json():
-        return {"rep": rep, "finish": True, "op_id": op_id,
-                "values": values or {"call_status": "В работе"}}
+        submitted = values or {"call_status": "В работе"}
+        return {
+            "rep": rep,
+            "finish": True,
+            "op_id": op_id,
+            "values": submitted,
+            "form_version": webmod.FORM_PROTOCOL_VERSION,
+            "input_keys": list(submitted),
+        }
 
     request.json = _json
     return asyncio.run(webmod._save(request))

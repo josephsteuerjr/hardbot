@@ -323,12 +323,12 @@ input[type=range]{width:100%;accent-color:var(--accent);margin:0;height:22px}
   <section class="sec" id="sec-registry">
     <div class="inner">
       <div class="card">
-        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg></span>Импорт реестра</h2>
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg></span>Импорт опубликованного master</h2>
         <input type="file" id="file" accept=".xlsx,.xlsm,.xlsb,.xls" style="display:none" onchange="doImport()">
         <div class="drop" id="drop" onclick="document.getElementById('file').click()">
           <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg></span>
           <div class="t" id="droptxt">Перетащи файл сюда или нажми</div>
-          <div class="small muted">.xlsx / .xlsm / .xlsb / .xls — читается в пульте (calamine) · города геокодятся автоматически</div>
+          <div class="small muted">Только master после registry_cycle. Личные ФИО.xlsb сюда не загружаются.</div>
         </div>
         <div class="report" id="report">
           <div class="kvs" id="repkvs"></div>
@@ -372,8 +372,8 @@ input[type=range]{width:100%;accent-color:var(--accent);margin:0;height:22px}
         <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg></span>Очистка данных</h2>
         <p class="desc"><b>Сброс визитов</b> — обнуляет заполненное выездами (статусы, комментарии, дата визита, фото), оставляя клиентов, долги и закрепление за сотрудником: новая сессия на том же портфеле. <b>Полная очистка</b> — удаляет всех клиентов, визиты и метки под свежий импорт (привязки сотрудников сохраняются).</p>
         <div class="row">
-          <button class="btn" id="btnresetv" onclick="resetData('visits')">Сбросить данные визитов</button>
-          <button class="btn danger" id="btnresetall" onclick="resetData('all')">Полностью очистить реестр</button>
+          <button class="btn" id="btnresetv" onclick="resetData('visits')" disabled>Сбросить данные визитов</button>
+          <button class="btn danger" id="btnresetall" onclick="resetData('all')" disabled>Полностью очистить реестр</button>
         </div>
         <div class="small muted" id="resetOut" style="margin-top:8px"></div>
       </div>
@@ -585,7 +585,7 @@ const store = window.localStorage;
 // Актуальный инстанс — hardbot2 (свежий код: очистка данных /admin/reset, редизайн формы,
 // рестарт бота). Старый hardbot.166… остался без /admin/reset → там «очистка» = Failed to fetch.
 const DEFAULT_URL = "https://hardbot2.166.88.185.90.nip.io";
-const DEFAULT_KEY = "hbadm_029ca66bc21804c4ced440bdbf93f0c8";  // admin-ключ hardbot2 (X-Admin-Key)
+const DEFAULT_KEY = "";  // admin-ключ вводится оператором и не хранится в tracked HTML
 const TITLES = {dash:"Сводка", registry:"Реестр", prio:"Приоритет выезда", people:"Люди", mgrs:"Руководители", activity:"Активность", conn:"Подключение"};
 let connected = false, prioLoaded = false, actLoaded = false;
 
@@ -803,17 +803,18 @@ async function importFile(f){
       const sheets = await tinvoke("parse_workbook",{b64: await fileToB64(f), filename: f.name});
       r = await fetch(base()+"/admin/import.json",{method:"POST",
         headers:{...hdr(),"Content-Type":"application/json"},
-        body:JSON.stringify({sheets})});
+        body:JSON.stringify({source_kind:"published_master",sheets})});
       if(r.status===404 && !/\.(xlsb|xls)$/i.test(f.name)){ r = null; } // сервер ещё старый — фолбэк ниже
     }
     if(!r){
       const fd = new FormData(); fd.append("file",f);
-      r = await fetch(base()+"/admin/import",{method:"POST",headers:hdr(),body:fd});
+      r = await fetch(base()+"/admin/import?source_kind=published_master",
+        {method:"POST",headers:hdr(),body:fd});
     }
     if(!r.ok){
       if(r.status===409){
         const d = await r.json().catch(()=>null);
-        if(d){ showReport(d); toast("Импорт заблокирован: исправь конфликт КД",true); return; }
+        if(d){ showReport(d); toast("Импорт заблокирован: "+(d.error||"проверь источник"),true); return; }
       }
       toast("Ошибка импорта: "+r.status,true); return;
     }
@@ -961,6 +962,8 @@ renderScatterInputs();
 
 /* ---- Очистка данных (сброс визитов / полная) через admin-API ---- */
 async function resetData(scope){
+  toast("Сброс из legacy-пульта отключён: используйте evidence-bound limited-test reset",true);
+  return;
   // Одно окно confirm(), не два подряд — двойной нативный диалог не всегда надёжен в webview.
   const msg = scope==="all"
     ? "ПОЛНОСТЬЮ очистить реестр?\nУдалятся ВСЕ клиенты, визиты и метки, без возможности отката (привязки сотрудников останутся). Обычно — перед свежим импортом."

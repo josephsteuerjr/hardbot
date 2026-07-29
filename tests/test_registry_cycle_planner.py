@@ -279,6 +279,46 @@ def test_responsible_mismatch_blocks_transfer():
     assert any(issue.code == "responsible_mismatch" for issue in plan.issues)
 
 
+def test_same_responsible_in_two_active_profiles_blocks_plan():
+    master = _book(
+        "master.xlsb",
+        [["1", "Иванов Иван", None, None, None]],
+    )
+    hard_entry = _entry("hard/Иванов Иван.xlsb")
+    soft_entry = replace(
+        _entry("soft/Иванов Иван.xlsb"),
+        profile="soft",
+    )
+    hard_book = _book(
+        "hard/Иванов Иван.xlsb",
+        [["1", "Иванов Иван", None, None, None]],
+    )
+    soft_book = _book(
+        "soft/Иванов Иван.xlsb",
+        [["1", "Иванов Иван", None, None, None]],
+    )
+    fields = replace(
+        _fields(),
+        profile_tags={
+            "hard": ("сх", "хард"),
+            "soft": ("сх", "хард"),
+        },
+    )
+
+    plan = build_sync_plan(
+        master,
+        [(hard_entry, hard_book), (soft_entry, soft_book)],
+        fields,
+    )
+
+    assert plan.blocked
+    assert any(
+        issue.code == "responsible_in_multiple_active_profiles"
+        for issue in plan.issues
+    )
+    assert len(plan.projections) == 1
+
+
 def test_nonblank_master_phone_is_not_replaced_by_old_personal_phone():
     master = _book(
         "master.xlsb",
