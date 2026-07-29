@@ -254,4 +254,5 @@ def promote_first_baseline_rehearsal(
         validation,
         confirmation_digest=confirmation_digest,
         busy_mode=busy_mode,
+        allow_initial_baseline=True,
     )

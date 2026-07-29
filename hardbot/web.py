@@ -34,6 +34,7 @@ from fields import BY_KEY, DROPDOWNS
 from i18n import FIELD_TITLES, LANGUAGES, t, tf, tv
 import maplink
 import routing_client
+import stt_client
 from keyboards import approve_bind_kb
 from photostore import PHOTO_DIR, day_photos
 
@@ -51,11 +52,51 @@ OSRM_URL = (os.getenv("OSRM_URL", "") or "").strip()
 OSRM_URL_UZ = (os.getenv("OSRM_URL_UZ", "") or "").strip()
 OSRM_URL_TJ = (os.getenv("OSRM_URL_TJ", "") or "").strip()
 VROOM_URL = (os.getenv("VROOM_URL", "") or "").strip()
-# Распознавание голосовых комментариев: путь к модели faster-whisper (large-v3-turbo,
-# смонтирована с хоста read-only). Пусто = фича выключена, миниапп прячет микрофон.
-VOICE_MODEL = (os.getenv("VOICE_MODEL", "") or "").strip()
+# Голос распознаёт уже прогретая модель Praxis через authenticated Unix socket.
+# Local fallback намеренно отсутствует: в лимит hardbot2 вторая модель не помещается
+# и пять раз приводила к cgroup OOM. Некорректный/пустой backend = фича выключена.
+VOICE_BACKEND = (os.getenv("VOICE_BACKEND", "off") or "off").strip().casefold()
+PRAXIS_STT_SOCKET = (
+    os.getenv("PRAXIS_STT_SOCKET", "/run/praxis-stt/stt.sock") or ""
+).strip()
+PRAXIS_STT_TOKEN_FILE = (
+    os.getenv(
+        "PRAXIS_STT_TOKEN_FILE",
+        "/run/secrets/praxis-stt-client.token",
+    )
+    or ""
+).strip()
+try:
+    VOICE_TIMEOUT_SECONDS = max(
+        5.0,
+        min(float(os.getenv("VOICE_TIMEOUT_SECONDS", "60")), 70.0),
+    )
+except (TypeError, ValueError):
+    VOICE_TIMEOUT_SECONDS = 60.0
 DEV = (os.getenv("HARDBOT_DEV", "") or "").lower() not in ("", "0", "false", "no")
 _MAX_AGE = 24 * 3600  # initData не старше суток
+
+# Фото с iPhone после сна PWA раньше повторно уходило как File из IndexedDB через
+# FormData. WebKit мог выставить multipart boundary в заголовке, но не записать сам
+# multipart-body. Новая оболочка материализует байты и шлёт raw-body; 25 МБ с запасом
+# покрывают реальные снимки (на live максимум был <9 МБ) и не дают занять весь
+# client_max_size одним файлом.
+PHOTO_MAX_BYTES = 25 * 1024 * 1024
+_PHOTO_CHUNK = 64 * 1024
+_PHOTO_MAGIC_BYTES = 256
+_PHOTO_EXTENSIONS = {
+    "jpeg": {".jpg", ".jpeg", ".jpe", ".jfif"},
+    "png": {".png"},
+    "gif": {".gif"},
+    "webp": {".webp"},
+    "heif": {".heic", ".heif"},
+    "avif": {".avif"},
+}
+_PHOTO_CANONICAL_EXT = {
+    "jpeg": ".jpg", "png": ".png", "gif": ".gif", "webp": ".webp",
+    "heif": ".heic", "avif": ".avif",
+}
+_PHOTO_SUFFIXES = frozenset().union(*_PHOTO_EXTENSIONS.values())
 
 # Поля выезда, которые заполняет выездник (выпадающие списки + свободный текст).
 FORM_DROPDOWNS = ["call_status", "contact_with", "who_at_address",
@@ -160,7 +201,8 @@ def _meta(lang: str) -> dict:
                       for k in FORM_DROPDOWNS},
         "dropdownTitles": {k: _title(k, lang) for k in FORM_DROPDOWNS},
         "vectorTiles": "/tiles/basemap.pmtiles" if TILES_FILE.exists() else None,
-        "voice": bool(VOICE_MODEL),   # микрофон в форме показываем только когда есть модель
+        # Микрофон показываем только при полностью заданном UDS-контракте.
+        "voice": _voice_configured(),
     }
 
 
@@ -613,6 +655,140 @@ def _photo_geo_query(q) -> tuple | None:
     return lat, lon, acc, captured
 
 
+class _PhotoBodyError(ValueError):
+    """Тело не является допустимым фото; до финального пути ничего не опубликовано."""
+
+    def __init__(self, reason: str, *, actual_size: int = 0,
+                 too_large: bool = False):
+        super().__init__(reason)
+        self.reason = reason
+        self.actual_size = actual_size
+        self.too_large = too_large
+
+
+def _photo_kind(head: bytes) -> str | None:
+    """Определить поддержанный формат по сигнатуре, не доверяя имени/MIME клиента."""
+    if head.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if head.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    if len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    if len(head) >= 12 and head[4:8] == b"ftyp":
+        box_size = int.from_bytes(head[:4], "big")
+        end = min(len(head), box_size if box_size >= 16 else len(head))
+        brands = {head[8:12].lower()}
+        # ISO-BMFF: major_brand, minor_version, затем compatible_brands.
+        brands.update(head[pos:pos + 4].lower()
+                      for pos in range(16, end - 3, 4))
+        if brands & {b"avif", b"avis"}:
+            return "avif"
+        if brands & {
+            b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis",
+            b"hevm", b"hevs", b"mif1", b"msf1",
+        }:
+            return "heif"
+    return None
+
+
+def _photo_ext(kind: str, hint: str | None) -> str:
+    """Сохранить расширение старого op для идемпотентного retry, но сверить с magic."""
+    hint = (hint or "").strip()
+    if not hint:
+        return _PHOTO_CANONICAL_EXT[kind]
+    if not re.fullmatch(r"\.[A-Za-z0-9]{1,7}", hint):
+        raise _PhotoBodyError("bad extension")
+    if hint.lower() not in _PHOTO_EXTENSIONS[kind]:
+        raise _PhotoBodyError("extension does not match image")
+    return hint
+
+
+async def _part_chunks(field):
+    while chunk := await field.read_chunk(size=_PHOTO_CHUNK):
+        yield chunk
+
+
+async def _legacy_photo_field(request: web.Request):
+    """Найти photo в multipart независимо от порядка полей.
+
+    Любая ошибка framing превращается вызывающим в 503: оболочка v12 удаляет
+    очередь на 4xx, а 5xx оставляет единственную локальную копию до обновления.
+    """
+    reader = await request.multipart()
+    while field := await reader.next():
+        if field.name == "photo":
+            return field
+        await field.release()
+    return None
+
+
+async def _store_photo(chunks, dest: Path, op: str, ext_hint: str | None):
+    """Полностью принять и проверить фото, затем атомарно опубликовать hard-link.
+
+    Возвращает (финальный путь, опубликован_впервые). Уникальная времянка нужна
+    в том числе двум одновременным retry одного op; hard-link с O_EXCL-семантикой
+    не перезаписывает уже опубликованный файл и не даёт дважды поднять счётчик.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    prefix = re.sub(r"[^A-Za-z0-9_-]", "", op)[:48] or "photo"
+    fd, tmp_name = tempfile.mkstemp(prefix=f"~{prefix}.", suffix=".part", dir=dest)
+    tmp = Path(tmp_name)
+    size = 0
+    head = bytearray()
+    try:
+        with os.fdopen(fd, "wb") as out:
+            async for chunk in chunks:
+                if not chunk:
+                    continue
+                size += len(chunk)
+                if size > PHOTO_MAX_BYTES:
+                    raise _PhotoBodyError(
+                        "photo too large", actual_size=size, too_large=True)
+                if len(head) < _PHOTO_MAGIC_BYTES:
+                    head.extend(chunk[:_PHOTO_MAGIC_BYTES - len(head)])
+                out.write(chunk)
+        if size == 0:
+            raise _PhotoBodyError("empty photo")
+        kind = _photo_kind(bytes(head))
+        if not kind:
+            raise _PhotoBodyError("unsupported image", actual_size=size)
+        ext = _photo_ext(kind, ext_hint)
+        stem = op or str(time.time_ns())
+        # Retry оболочки v12/v13 должен узнать уже опубликованный op даже если
+        # регистр/синоним расширения отличался (.JPG/.jpeg). Тело всё равно
+        # полностью прочитано и проверено выше.
+        if op:
+            old = next(
+                (candidate for candidate in dest.iterdir()
+                 if candidate.is_file() and candidate.stem == stem
+                 and candidate.suffix.lower() in _PHOTO_SUFFIXES),
+                None,
+            )
+            if old is not None:
+                return old, False
+        path = dest / f"{stem}{ext}"
+        try:
+            os.link(tmp, path)
+            published = True
+        except FileExistsError:
+            published = False
+        return path, published
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _permanent_photo_count(dest: Path) -> int:
+    return sum(
+        1 for path in dest.iterdir()
+        if path.is_file() and path.suffix.lower() in _PHOTO_SUFFIXES
+    )
+
+
 async def _photo(request: web.Request) -> web.Response:
     uid, emp = _auth(request)
     rep = request.query.get("rep", "")
@@ -620,105 +796,160 @@ async def _photo(request: web.Request) -> web.Response:
     if not row or (row["responsible"] != emp and uid != ADMIN_ID):
         raise web.HTTPNotFound(text="person")
     db.audit_access(uid, "photo", rep)
-    reader = await request.multipart()
-    field = await reader.next()
-    if field is None or field.name != "photo":
-        raise web.HTTPBadRequest(text="no file")
     dest = PHOTO_DIR / rep
-    dest.mkdir(parents=True, exist_ok=True)
-    ext = os.path.splitext(field.filename or "")[1][:8] or ".jpg"
     # op — идемпотентный ключ загрузки из оффлайн-очереди: имя файла = op, повторная
     # доставка того же фото не создаёт второй файл и не накручивает счётчик photos_count.
     op = re.sub(r"[^A-Za-z0-9_-]", "", request.query.get("op", ""))[:64]
     geo = _photo_geo_from(request)
-    if op:
-        path = dest / f"{op}{ext}"
-        if path.exists():   # уже загружено этим op — дренируем тело и отдаём текущий счётчик
-            while await field.read_chunk():
-                pass
-            if geo:   # первая доставка могла упасть после записи файла — гео
-                db.add_photo_geo(rep, f"{rep}/{path.name}", uid, *geo)   # доносим
-            return web.json_response({"ok": True, "photos": db.photos_count(rep), "dup": True})
+    raw = request.headers.get("X-Photo-Raw", "") == "1"
+    if raw:
+        if request.content_type.lower() != "application/octet-stream":
+            raise web.HTTPUnprocessableEntity(text="raw photo content type")
+        chunks = request.content.iter_chunked(_PHOTO_CHUNK)
+        ext_hint = request.headers.get("X-Photo-Ext")
     else:
-        path = dest / f"{int(time.time()*1000)}{ext}"
-    # Пишем во временный файл и переименовываем атомарно: обрыв мобильной сети
-    # посреди тела не должен оставить обрезанный файл под финальным op-именем —
-    # иначе честный досыл из очереди примется за дубликат, и фото (доказательство
-    # вручения досудебки) навсегда останется битым.
-    tmp = dest / f"~{path.stem}.{os.getpid()}{ext}.part"
+        # Совместимость с установленной v12. Malformed/empty/invalid multipart
+        # намеренно получает 503, а не 4xx: старая очередь удаляет элемент на 4xx.
+        if request.content_type.lower() != "multipart/form-data":
+            raise web.HTTPServiceUnavailable(text="legacy photo retry")
+        try:
+            field = await _legacy_photo_field(request)
+        except Exception:  # noqa: BLE001 - любой framing/parser сбой должен сохранить v12 queue
+            raise web.HTTPServiceUnavailable(text="legacy photo retry")
+        if field is None:
+            raise web.HTTPServiceUnavailable(text="legacy photo retry")
+        chunks = _part_chunks(field)
+        ext_hint = os.path.splitext(field.filename or "")[1][:8] or None
+
     try:
-        with open(tmp, "wb") as f:
+        path, published = await _store_photo(chunks, dest, op, ext_hint)
+    except _PhotoBodyError as e:
+        if not raw:
+            raise web.HTTPServiceUnavailable(text="legacy photo retry")
+        if e.too_large:
+            raise web.HTTPRequestEntityTooLarge(
+                max_size=PHOTO_MAX_BYTES, actual_size=e.actual_size)
+        raise web.HTTPUnprocessableEntity(text=e.reason)
+    except Exception:  # noqa: BLE001 - legacy v12 удаляет фото на любом 4xx
+        if not raw:
+            raise web.HTTPServiceUnavailable(text="legacy photo retry")
+        raise
+
+    # Сверяем и на первой публикации, и на duplicate. Если процесс упал после
+    # hard-link, но до SQLite, committed IDB-очередь повторит op и починит счётчик.
+    n = db.ensure_photos_count(rep, _permanent_photo_count(dest))
+    if geo:
+        db.add_photo_geo(rep, f"{rep}/{path.name}", uid, *geo)
+    return web.json_response(
+        {"ok": True, "photos": n, **({"dup": True} if not published else {})})
+
+
+# --- Голосовой комментарий: общий прогретый Whisper Praxis по UDS ------------
+_STT = None
+_VOICE_LOCK = asyncio.Lock()
+# Для таджикского профиль Praxis пока использует auto.
+_VOICE_LANG = {"ru": "ru", "uz": "uz"}
+
+
+def _voice_configured() -> bool:
+    return (
+        VOICE_BACKEND == "praxis"
+        and bool(PRAXIS_STT_SOCKET)
+        and bool(PRAXIS_STT_TOKEN_FILE)
+    )
+
+
+def _stt() -> stt_client.STTClient:
+    global _STT
+    if _STT is None:
+        _STT = stt_client.STTClient(
+            unix_socket=PRAXIS_STT_SOCKET,
+            token_file=PRAXIS_STT_TOKEN_FILE,
+            timeout_seconds=VOICE_TIMEOUT_SECONDS,
+        )
+    return _STT
+
+
+async def _voice(request: web.Request) -> web.Response:
+    """Голосовое из миниаппа → общий Whisper Praxis → текст.
+
+    На границу Praxis уходят только байты и ``ru|uz|auto``: uid/ФИО/КД,
+    исходное имя файла и текст формы не передаются.
+    """
+    uid, _emp = _auth(request)
+    if not _voice_configured():
+        raise web.HTTPServiceUnavailable(text="voice off")
+    try:
+        reader = await request.multipart()
+        field = None
+        while candidate := await reader.next():
+            if candidate.name == "voice":
+                field = candidate
+                break
+    except (AssertionError, OSError, ValueError):
+        raise web.HTTPBadRequest(text="bad voice multipart")
+    if field is None:
+        raise web.HTTPBadRequest(text="no voice")
+    size = 0
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".audio", delete=False) as f:
+            tmp = f.name
             while chunk := await field.read_chunk():
+                size += len(chunk)
+                if size > stt_client.MAX_AUDIO_BYTES:
+                    raise web.HTTPRequestEntityTooLarge(
+                        max_size=stt_client.MAX_AUDIO_BYTES,
+                        actual_size=size,
+                    )
                 f.write(chunk)
-        existed = path.exists()   # параллельный досыл того же op успел раньше
-        os.replace(tmp, path)
+        if size <= 0:
+            raise web.HTTPUnprocessableEntity(text="empty voice")
+        db.audit_access(uid, "voice", request.query.get("rep") or None)
+        lang = _VOICE_LANG.get(lang_of(uid), "auto")
+        async with _VOICE_LOCK:
+            text = str(await _stt().transcribe(tmp, lang) or "").strip()
+        if not text:
+            raise web.HTTPUnprocessableEntity(text="empty transcript")
+    except stt_client.STTError as exc:
+        logging.warning(
+            "praxis stt failed: status=%s retryable=%s",
+            exc.status,
+            exc.retryable,
+        )
+        headers = (
+            {"Retry-After": str(exc.retry_after)}
+            if exc.retry_after is not None
+            else None
+        )
+        if exc.status == 413:
+            raise web.HTTPRequestEntityTooLarge(
+                max_size=stt_client.MAX_AUDIO_BYTES,
+                actual_size=size,
+                headers=headers,
+            )
+        if exc.retryable or exc.status in {401, 403, 408, 429, 503}:
+            raise web.HTTPServiceUnavailable(
+                text="voice temporarily unavailable",
+                headers=headers,
+            )
+        raise web.HTTPUnprocessableEntity(
+            text="transcribe failed",
+            headers=headers,
+        )
+    except web.HTTPException:
+        raise
+    except (AssertionError, OSError, ValueError):
+        raise web.HTTPBadRequest(text="bad voice body")
+    except Exception:  # noqa: BLE001 — отсутствие UDS/неожиданный client failure
+        logging.exception("praxis stt unexpected client failure")
+        raise web.HTTPServiceUnavailable(text="voice temporarily unavailable")
     finally:
-        if tmp.exists():
+        if tmp is not None:
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
-    n = db.add_photo(rep) if not existed else db.photos_count(rep)
-    if geo:
-        db.add_photo_geo(rep, f"{rep}/{path.name}", uid, *geo)
-    return web.json_response({"ok": True, "photos": n})
-
-
-# --- Голосовой комментарий: faster-whisper (large-v3-turbo с хоста) ----------
-# Модель грузится лениво при первом голосовом (≈1.5 ГБ RAM int8) и живёт дальше.
-# Транскрипции сериализуются локом: CPU двухъядерный, параллель только мешает.
-_WHISPER = None
-_WHISPER_LOCK = asyncio.Lock()
-# Языки выездников (users.lang) → коды Whisper. Подсказка повышает точность,
-# но не запирает: у 'tg' качество так себе — оставляем автоопределение.
-_VOICE_LANG = {"ru": "ru", "uz": "uz"}
-
-
-def _transcribe(path: str, lang: str | None) -> str:
-    global _WHISPER
-    if _WHISPER is None:
-        from faster_whisper import WhisperModel
-        _WHISPER = WhisperModel(VOICE_MODEL, device="cpu", compute_type="int8")
-    segments, _info = _WHISPER.transcribe(path, language=lang, task="transcribe",
-                                          vad_filter=True, beam_size=1)
-    return " ".join(s.text.strip() for s in segments).strip()
-
-
-async def _voice(request: web.Request) -> web.Response:
-    """Голосовое из миниаппа → текст. Файл (webm/ogg/m4a) декодирует PyAV внутри
-    faster-whisper, ffmpeg в системе не нужен."""
-    uid, _emp = _auth(request)
-    if not VOICE_MODEL:
-        raise web.HTTPServiceUnavailable(text="voice off")
-    reader = await request.multipart()
-    field = await reader.next()
-    if field is None or field.name != "voice":
-        raise web.HTTPBadRequest(text="no voice")
-    size = 0
-    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as f:
-        tmp = f.name
-        while chunk := await field.read_chunk():
-            size += len(chunk)
-            if size > 15 * 1024 * 1024:   # 15 МБ ≈ несколько минут — больше не звук
-                f.close()
-                os.unlink(tmp)
-                raise web.HTTPRequestEntityTooLarge(max_size=15 * 1024 * 1024,
-                                                    actual_size=size)
-            f.write(chunk)
-    db.audit_access(uid, "voice", request.query.get("rep") or None)
-    lang = _VOICE_LANG.get(lang_of(uid))
-    try:
-        async with _WHISPER_LOCK:
-            text = await asyncio.get_event_loop().run_in_executor(
-                None, _transcribe, tmp, lang)
-    except Exception as e:  # noqa: BLE001 — битый файл/модель: честная ошибка, не 500
-        logging.warning("voice transcribe failed: %s", e)
-        raise web.HTTPUnprocessableEntity(text="transcribe failed")
-    finally:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
     return web.json_response({"ok": True, "text": text})
 
 
@@ -986,6 +1217,8 @@ async def _admin_import(request: web.Request) -> web.Response:
             f.write(chunk)
     try:
         report = db.import_xlsx(tmp)
+        if report.get("blocked"):
+            return web.json_response(report, status=409)
         try:
             import scoring
             report["geocoded"] = scoring.geocode_city_centroids()
@@ -1003,6 +1236,8 @@ async def _admin_import_json(request: web.Request) -> web.Response:
     body = await request.json()
     grid = db.pick_grid(body.get("sheets") or [])
     report = db.import_grid(grid)
+    if report.get("blocked"):
+        return web.json_response(report, status=409)
     try:
         import scoring
         report["geocoded"] = scoring.geocode_city_centroids()

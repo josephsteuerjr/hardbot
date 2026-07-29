@@ -1,4 +1,9 @@
-"""Суточный цикл «бот ↔ реестры» без пульта — под планировщик Windows.
+"""LEGACY: суточный цикл «бот ↔ реестры» без пульта.
+
+Запись по умолчанию заблокирована. Разрешён только ``--dry-run``. Аварийный
+write-запуск требует отдельного согласования и точного значения
+``HARDBOT_EMERGENCY_ALLOW_DAILY_CYCLE_WRITE=1`` в окружении одного процесса.
+Штатный обмен выполняется через ``registry_cycle``.
 
 Зачем: ежедневная работа сводилась к десятку кликов в пульте (папка → файл → галочки →
 кнопка → отчёт), и делал их человек. Регламент СНГ (раздел 8.2) описывает этот цикл как
@@ -20,9 +25,7 @@
 Excel через COM требует живой интерактивной сессии: в планировщике задача должна стоять
 «выполнять только при входе пользователя в систему», иначе xlwings не поднимется.
 
-Примеры:
-    python daily_cycle.py export
-    python daily_cycle.py import --after-registry "U:\\rbr\\...\\ОБЩИЙ РЕЕСТР ИЮЛЬ.xlsb"
+Разрешённый диагностический пример:
     python daily_cycle.py export --dry-run
 """
 from __future__ import annotations
@@ -55,6 +58,26 @@ SETTINGS_PATH = APP_DIR / "настройки пульта.json"
 STATE_DIR = APP_DIR.parent / "_local" / "daily_cycle"
 LOCK_PATH = STATE_DIR / "cycle.lock"
 LOCK_STALE_SEC = 6 * 3600      # зависший прогон не блокирует навсегда
+LEGACY_WRITE_ENV = "HARDBOT_EMERGENCY_ALLOW_DAILY_CYCLE_WRITE"
+LEGACY_WRITE_BLOCKED_EXIT = 4
+
+
+class LegacyWriteBlocked(RuntimeError):
+    """Старый двусторонний цикл не вправе писать без аварийного допуска."""
+
+
+def legacy_write_enabled() -> bool:
+    """Аварийный допуск является fail-closed: разрешает только точное ``1``."""
+    return os.environ.get(LEGACY_WRITE_ENV, "") == "1"
+
+
+def require_legacy_write_enabled() -> None:
+    if not legacy_write_enabled():
+        raise LegacyWriteBlocked(
+            "запись старого daily_cycle заблокирована; штатный обмен выполняется "
+            "через registry_cycle. Только для отдельно согласованной аварийной "
+            f"операции установи {LEGACY_WRITE_ENV}=1 на время одного запуска"
+        )
 
 
 # --- журнал -----------------------------------------------------------------
@@ -194,6 +217,8 @@ def personal_files(entries, employee: str) -> list[Path]:
 
 def step_export(settings: dict, base: str | None, dry: bool, log) -> str:
     """ВЫГРУЗКА: результаты выездов из бота в личные реестры (обогащение)."""
+    if not dry:
+        require_legacy_write_enabled()
     data = api(settings, "GET", "/admin/export.json", timeout=180)
     by_emp = enrich.split_by_employee(data["rows"])
     fmap = folder_map(base)
@@ -330,6 +355,8 @@ def step_import(settings: dict, base: str | None, dry: bool, log,
     Это заодно возвращает владельца строкам, которые его потеряли.
 
     Личные реестры — запасной путь (тест-режим, когда общий недоступен)."""
+    if not dry:
+        require_legacy_write_enabled()
     if registry:
         p = Path(registry)
         if not p.exists():
@@ -420,7 +447,9 @@ def step_import(settings: dict, base: str | None, dry: bool, log,
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Суточный цикл бот ↔ реестры")
+    ap = argparse.ArgumentParser(
+        description="LEGACY суточный цикл бот ↔ реестры; запись заблокирована"
+    )
     ap.add_argument("step", choices=["export", "import"],
                     help="export — выгрузка в реестры до ночного скрипта; "
                          "import — загрузка портфелей в бота после него")
@@ -437,6 +466,13 @@ def main(argv=None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="ничего не писать, только показать план")
     ap.add_argument("--no-report", action="store_true", help="не слать итог в Телеграм")
     a = ap.parse_args(argv)
+
+    if not a.dry_run:
+        try:
+            require_legacy_write_enabled()
+        except LegacyWriteBlocked as exc:
+            print(f"[BLOCKED] {exc}", file=sys.stderr, flush=True)
+            return LEGACY_WRITE_BLOCKED_EXIT
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     log = Journal(STATE_DIR / f"{datetime.now():%Y-%m-%d}.log")

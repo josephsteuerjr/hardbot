@@ -350,8 +350,8 @@ input[type=range]{width:100%;accent-color:var(--accent);margin:0;height:22px}
       </div>
 
       <div class="card">
-        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h6l2 3h10v12a2 2 0 0 1-2 2H3z"/><path d="M9 14l3-3 3 3"/><path d="M12 11v6"/></svg></span>Разброс кейсов по сотрудникам</h2>
-        <p class="desc">Раскладывает <b>экспорт кейсов</b> (формат «Хард») по личным .xlsb сотрудников — каждому его строки по колонке «ответственный Сотрудник». Папки берутся по маске <b>Республика / … / Город / ФИО / ФИО.xlsb</b> из выбранной <b>базовой папки</b> (в ней лежат республики) — диск целиком не сканируется. Файлы делает Excel: сохраняются списки «Статусы» и личная «Статистика», !Архив/_tech игнорируются. Мастер-реестр не нужен.</p>
+        <h2><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h6l2 3h10v12a2 2 0 0 1-2 2H3z"/><path d="M9 14l3-3 3 3"/><path d="M12 11v6"/></svg></span>Legacy-разброс отключён</h2>
+        <p class="desc">Старый режим пересобирал личные книги из полного экспорта и мог стереть ручные данные. Запись заблокирована. Для рабочего цикла используйте <b>«Контур · Реестры»</b>; здесь оставлен только read-only предпросмотр соответствия папок.</p>
         <div class="row">
           <button class="btn" onclick="scatterPickBase()">Папка с республиками…</button>
           <button class="btn" onclick="scatterPickSource()">Экспорт кейсов…</button>
@@ -365,10 +365,7 @@ input[type=range]{width:100%;accent-color:var(--accent);margin:0;height:22px}
         </div>
         <div id="scatterOut" style="margin-top:10px"></div>
         <div id="scatterPick" style="margin-top:10px"></div>
-        <div class="row" id="scatterApplyRow" style="margin-top:12px; display:none">
-          <button class="btn" id="scatterApplyAll" onclick="scatterRun(true,'all')">Разложить всех</button>
-          <button class="btn acc" id="scatterApplySel" onclick="scatterRun(true,'selected')">Разложить выбранных (<span id="scatterSelN">0</span>)</button>
-        </div>
+        <div class="row" id="scatterApplyRow" style="display:none"></div>
       </div>
 
       <div class="card">
@@ -813,7 +810,13 @@ async function importFile(f){
       const fd = new FormData(); fd.append("file",f);
       r = await fetch(base()+"/admin/import",{method:"POST",headers:hdr(),body:fd});
     }
-    if(!r.ok){ toast("Ошибка импорта: "+r.status,true); return; }
+    if(!r.ok){
+      if(r.status===409){
+        const d = await r.json().catch(()=>null);
+        if(d){ showReport(d); toast("Импорт заблокирован: исправь конфликт КД",true); return; }
+      }
+      toast("Ошибка импорта: "+r.status,true); return;
+    }
     const d = await r.json();
     showReport(d);
     toast("Импорт готов: +"+fmt(d.inserted)+" / обновлено "+fmt(d.updated));

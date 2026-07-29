@@ -1,4 +1,10 @@
-"""Возврат данных из бота в личные реестры — только в ПУСТЫЕ ячейки.
+"""LEGACY: возврат данных из бота в личные реестры — только в ПУСТЫЕ ячейки.
+
+Режим отчёта остаётся доступным для диагностики. ``--apply`` по умолчанию
+заблокирован; штатное восстановление выполняется через
+``registry_cycle recovery``. Аварийная запись требует отдельного согласования
+и точного значения ``HARDBOT_EMERGENCY_ALLOW_RESTORE_FROM_BOT_WRITE=1`` в
+окружении одного процесса.
 
 Зачем. За 20–24 июля филиалы несколько раз жаловались, что из личных реестров пропали
 доп. номера, доп. адреса и комментарии. Бот к этому непричастен: цикл сборки-разброса
@@ -20,7 +26,7 @@
 Порядок работы:
     python restore_from_bot.py                       # отчёт по всем сотрудникам
     python restore_from_bot.py --only "Иванов Иван"  # по одному
-    python restore_from_bot.py --apply               # запись, с копией «(до возврата …)»
+    # --apply — только аварийный режим по отдельному регламенту
 
 База папок берётся из «настройки пульта.json» (scatterBase) или из --base, маска
 республик — из «конфигурация путей.json», как у обогащения и разброса.
@@ -30,6 +36,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import shutil
 import sys
 import time
@@ -50,6 +57,8 @@ import razbros         # noqa: E402
 
 SETTINGS_PATH = APP_DIR / "настройки пульта.json"
 REPORT_DIR = APP_DIR / "отчёты возврата"
+LEGACY_WRITE_ENV = "HARDBOT_EMERGENCY_ALLOW_RESTORE_FROM_BOT_WRITE"
+LEGACY_WRITE_BLOCKED_EXIT = 4
 
 # Колонки, которые в приложении не заполняются: их источник — реестр, бот им архив.
 # Комментарий выезда и поля формы сюда НЕ входят: их возвращает обогащение, и там свои
@@ -62,6 +71,25 @@ MAX_VALUE_LEN = 500
 
 class VerificationError(RuntimeError):
     pass
+
+
+class LegacyWriteBlocked(RuntimeError):
+    """Старое восстановление не вправе писать без аварийного допуска."""
+
+
+def legacy_write_enabled() -> bool:
+    """Аварийный допуск является fail-closed: разрешает только точное ``1``."""
+    return os.environ.get(LEGACY_WRITE_ENV, "") == "1"
+
+
+def require_legacy_write_enabled() -> None:
+    if not legacy_write_enabled():
+        raise LegacyWriteBlocked(
+            "запись restore_from_bot заблокирована; штатное восстановление "
+            "выполняется через registry_cycle recovery. Только для отдельно "
+            "согласованной аварийной операции установи "
+            f"{LEGACY_WRITE_ENV}=1 на время одного запуска"
+        )
 
 
 def load_settings() -> dict:
@@ -208,6 +236,7 @@ def verify_applied(path: Path, backup: Path, plan: dict, fields: list[dict]) -> 
 
 def apply_plan(app, path: Path, plan: dict, fields: list[dict], log) -> int:
     """Записать план в файл. Копия делается ДО первой записи, как в обогащении."""
+    require_legacy_write_enabled()
     stamp = datetime.now().strftime("%d.%m.%y %H-%M")
     keep = path.with_name(f"{path.stem} (до возврата {stamp}){path.suffix}")
     n = 1
@@ -248,8 +277,22 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Возврат данных из бота в личные реестры")
     ap.add_argument("--base", help="папка с республиками (по умолчанию из настроек пульта)")
     ap.add_argument("--only", action="append", default=[], help="только этот сотрудник")
-    ap.add_argument("--apply", action="store_true", help="записать (по умолчанию только отчёт)")
+    ap.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "аварийная запись; требует "
+            f"{LEGACY_WRITE_ENV}=1 (по умолчанию только отчёт)"
+        ),
+    )
     a = ap.parse_args(argv)
+
+    if a.apply:
+        try:
+            require_legacy_write_enabled()
+        except LegacyWriteBlocked as exc:
+            print(f"[BLOCKED] {exc}", file=sys.stderr, flush=True)
+            return LEGACY_WRITE_BLOCKED_EXIT
 
     def log(s):
         print(s, flush=True)

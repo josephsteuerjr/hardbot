@@ -25,30 +25,49 @@ def _full_grid(*data_rows) -> list[list]:
             *data_rows]
 
 
-def test_import_grid_upsert_and_report():
+def test_import_grid_conflicting_duplicate_blocks_whole_file():
     db.init_db()
     grid = _full_grid(
         _row(contract_id="IG-1", client="Тестов Тест", city="Москва",
              debt_total=100900, assign_date="2026-06-12"),
-        _row(contract_id="IG-1", client="Тестов Обновлённый"),      # дубль → update
+        _row(contract_id="IG-1", client="Тестов Обновлённый"),
+        _row(contract_id="IG-ATOMIC", client="Не должен записаться"),
         _row(client="Без номера КД"),                               # skip_no_id
     )
     rep = db.import_grid(grid)
-    assert rep["total_rows"] == 3
-    assert rep["inserted"] == 1
-    assert rep["updated"] == 1
+    assert rep["total_rows"] == 4
+    assert rep["inserted"] == 0
+    assert rep["updated"] == 0
     assert rep["duplicates"] == 1
     assert rep["skipped_no_id"] == 1
     assert rep["unknown_columns"] == []
+    assert rep["blocked"] is True
+    assert rep["duplicate_conflicts"] == [
+        {"contract_id": "IG-1", "fields": ["client"]}
+    ]
+    assert db.get_client("IG-1") is None
+    assert db.get_client("IG-ATOMIC") is None
 
-    c = db.get_client("IG-1")
-    assert c["client"] == "Тестов Обновлённый"          # upsert обновил поле
-    assert c["city"] == "Москва"                        # но не затёр прочие
-    assert c["assign_date"] == "2026-06-12"             # ISO-дата от calamine как есть
-    # «долг всего» — колонка разбивки (debt.SOURCE_OWNED): у последней строки по этому КД
-    # ячейка пуста, значит источник говорит «ноль», а не «нет данных». Это осознанная
-    # разница с обычными полями (city выше), см. test_import_grid_debt_cell_empty_means_zero.
-    assert c["debt_total"] is None
+
+def test_import_grid_merges_complementary_and_identical_duplicates():
+    db.init_db()
+    grid = _full_grid(
+        _row(contract_id="IG-MERGE", client="Один человек", city="Москва",
+             debt_total=100900),
+        _row(contract_id="IG-MERGE", client="Один человек",
+             responsible="Хозяев Х.", debt_overdue=50900),
+    )
+    rep = db.import_grid(grid)
+    assert rep["blocked"] is False
+    assert rep["duplicates"] == 1
+    assert rep["inserted"] == 1
+    assert rep["updated"] == 0
+    c = db.get_client("IG-MERGE")
+    assert c["client"] == "Один человек"
+    assert c["city"] == "Москва"
+    assert c["responsible"] == "Хозяев Х."
+    assert c["debt_total"] == "100900"
+    assert c["debt_overdue"] == "50900"
 
 
 def test_import_grid_header_shift_and_unknown():

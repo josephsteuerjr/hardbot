@@ -25,5 +25,4 @@ def test_only_inner_content_scrolls_and_controls_do_not_translate():
 
 
 def test_shell_cache_was_bumped_for_new_index():
-    assert 'const CACHE = "hardbot-shell-v12";' in SW
-
+    assert 'const CACHE = "hardbot-shell-v13";' in SW

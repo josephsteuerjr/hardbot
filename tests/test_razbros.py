@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "pult"))
 
@@ -113,3 +115,6 @@ def test_make_report_matched_unmatched_extra(tmp_path):
     assert "Сидоров Сидор" in rep["extra_folders"]
     names = {m["employee"] for m in rep["matched"]}
     assert names == {"Петров Пётр", "Иванов Иван"}
+def test_legacy_scatter_apply_is_fail_closed(tmp_path):
+    with pytest.raises(razbros.LegacyScatterDisabled, match="Legacy-разброс отключён"):
+        razbros.apply_scatter(tmp_path / "source.xlsb", {}, [], None)

@@ -46,6 +46,8 @@ button,a,input,select,textarea,.pcard{touch-action:manipulation}
   position:relative;flex:0 0 auto;z-index:4}
 .offbar.on{display:flex}
 .offbar .d{width:7px;height:7px;border-radius:50%;background:#C9852A;flex:0 0 auto}
+.offbar .offact{margin-left:auto;border:1px solid #C9852A;border-radius:14px;
+  background:transparent;color:#7A5A1E;padding:3px 9px;font:inherit;white-space:nowrap}
 .langs{display:flex;gap:4px}
 .langs button{border:1px solid var(--border);background:var(--card);border-radius:20px;
   padding:4px 10px;font-size:12px;color:var(--muted);font-family:inherit}
@@ -243,7 +245,7 @@ const I18N = {
     search:"Поиск: ФИО, договор, телефон",kd:"КД",total:"Долг всего",inwork:"В работе с",
     drive:"Доехать",call:"Позвонить",save:"Сохранить выезд",addphoto:"Добавить фото",
     routeday:"Маршрут дня",rdempty:"Нет невизитированных кейсов с точками",
-    voice:"Надиктовать",voicestop:"Стоп — распознать",voicewait:"Распознаю…",voicefail:"Не распозналось, попробуйте ещё",
+    voice:"Надиктовать",voicestop:"Стоп — распознать",voicewait:"Распознаю…",voicefail:"Не распозналось, попробуйте ещё",voiceunavail:"Голос временно недоступен — введите комментарий вручную",
     comment:"Комментарий",tips:"Доп. адрес / доп. номер",lastvisit:"Последний выезд",
     status:"Статус",saved:"Сохранено",none:"Точка не задана",geook:"Точка проверена",
     nocl:"За вами пока никто не закреплён",photos:"Фото",contracts:"Договоры",promise:"Обещания",born:"Дата рождения",
@@ -256,6 +258,8 @@ const I18N = {
     draftwait:"черновик не отправлен на сервер",draftsent:"черновик сохранён на сервере",
     offline:"Оффлайн",datao:"данные на",pend:"ждут отправки",sending:"Отправляю…",
     savedoff:"Сохранено — уйдёт при связи",queuedn:"в очереди",
+    photoretake:"фото нужно переснять",photolost:"Фото не сохранилось — снимите его ещё раз",
+    retake:"Переснять",retakehint:"Карточка открыта — нажмите «Добавить фото»",
     authexpired:"Срок доступа истёк. Напишите боту слово «ссылка» — придёт новая ссылка: откройте её и добавьте приложение на экран заново, либо вставьте её сюда. Несинхронизированные визиты не потеряются.",
     authneed:"Нет доступа. Напишите боту слово «ссылка» — придёт ссылка для входа: откройте её, либо вставьте сюда.",
     entercode:"Вставить ссылку вручную",codeprompt:"Вставьте ссылку или код из сообщения бота:",codeph:"Ссылка из сообщения бота",
@@ -265,7 +269,7 @@ const I18N = {
     search:"Qidirish: F.I.Sh., shartnoma, telefon",kd:"shartnoma",total:"Jami qarz",inwork:"Ish boshlandi",
     drive:"Borish",call:"Qo‘ng‘iroq",save:"Chiqishni saqlash",addphoto:"Rasm qo‘shish",
     routeday:"Kun marshruti",rdempty:"Nuqtali ochiq ishlar yo‘q",
-    voice:"Ovozli izoh",voicestop:"To‘xtatish",voicewait:"Aniqlanmoqda…",voicefail:"Bo‘lmadi, yana urinib ko‘ring",
+    voice:"Ovozli izoh",voicestop:"To‘xtatish",voicewait:"Aniqlanmoqda…",voicefail:"Bo‘lmadi, yana urinib ko‘ring",voiceunavail:"Ovoz vaqtincha ishlamayapti — izohni qo‘lda kiriting",
     comment:"Izoh",tips:"Qo‘shimcha manzil / raqam",lastvisit:"Oxirgi chiqish",
     status:"Holat",saved:"Saqlandi",none:"Nuqta yo‘q",geook:"Nuqta tekshirildi",
     nocl:"Sizga hali mijoz biriktirilmagan",photos:"Rasm",contracts:"Shartnomalar",promise:"Va’dalar",born:"Tug‘ilgan sana",
@@ -278,6 +282,8 @@ const I18N = {
     draftwait:"qoralama serverga yuborilmadi",draftsent:"qoralama serverda saqlandi",
     offline:"Oflayn",datao:"ma’lumot",pend:"yuboriladi",sending:"Yuborilmoqda…",
     savedoff:"Saqlandi — aloqa paydo bo‘lsa yuboriladi",queuedn:"navbatda",
+    photoretake:"rasmni qayta olish kerak",photolost:"Rasm saqlanmadi — qayta oling",
+    retake:"Qayta olish",retakehint:"Karta ochildi — «Rasm qo‘shish»ni bosing",
     authexpired:"Kirish muddati tugadi. Botga «ссылка» deb yozing — yangi havola keladi: uni oching va ilovani ekranga qayta qo‘shing, yoki shu yerga joylang. Yuborilmagan chiqishlar yo‘qolmaydi.",
     authneed:"Kirish yo‘q. Botga «ссылка» deb yozing — kirish havolasi keladi: uni oching yoki shu yerga joylang.",
     entercode:"Havolani qo‘lda joylash",codeprompt:"Bot xabaridagi havola yoki kodni joylashtiring:",codeph:"Bot xabaridagi havola",
@@ -287,7 +293,7 @@ const I18N = {
     search:"Ҷустуҷӯ: НН, шартнома, телефон",kd:"шартнома",total:"Қарзи умумӣ",inwork:"Дар кор аз",
     drive:"Расидан",call:"Занг задан",save:"Сафарро захира",addphoto:"Расм илова",
     routeday:"Масири рӯз",rdempty:"Кейси кушодаи нуқтадор нест",
-    voice:"Гуфтан",voicestop:"Ист — шинохт",voicewait:"Шинохта истодааст…",voicefail:"Нашуд, боз кӯшиш кунед",
+    voice:"Гуфтан",voicestop:"Ист — шинохт",voicewait:"Шинохта истодааст…",voicefail:"Нашуд, боз кӯшиш кунед",voiceunavail:"Овоз муваққатан дастнорас аст — шарҳро дастӣ нависед",
     comment:"Шарҳ",tips:"Суроға / рақами иловагӣ",lastvisit:"Сафари охирин",
     status:"Ҳолат",saved:"Захира шуд",none:"Нуқта нест",geook:"Нуқта тасдиқ шуд",
     nocl:"Ба шумо ҳоло мизоҷе вобаста нашудааст",photos:"Расм",contracts:"Шартномаҳо",promise:"Ваъдаҳо",born:"Санаи таваллуд",
@@ -300,6 +306,8 @@ const I18N = {
     draftwait:"нусха ба сервер нафиристода шуд",draftsent:"нусха дар сервер захира шуд",
     offline:"Офлайн",datao:"додаҳо аз",pend:"дар навбат",sending:"Фиристода мешавад…",
     savedoff:"Захира шуд — ҳангоми алоқа фиристода мешавад",queuedn:"дар навбат",
+    photoretake:"расмро аз нав гирифтан лозим",photolost:"Расм захира нашуд — аз нав гиред",
+    retake:"Аз нав гирифтан",retakehint:"Корт кушода шуд — «Иловаи расм»-ро пахш кунед",
     authexpired:"Мӯҳлати дастрасӣ гузашт. Ба бот калимаи «ссылка» нависед — пайванди нав меояд: онро кушоед ва барномаро аз нав ба экран гузоред, ё ин ҷо гузоред. Сафарҳои фиристоданашуда гум намешаванд.",
     authneed:"Дастрасӣ нест. Ба бот калимаи «ссылка» нависед — пайванди воридшавӣ меояд: онро кушоед ё ин ҷо гузоред.",
     entercode:"Гузоштани пайванд дастӣ",codeprompt:"Пайванд ё коди паёми ботро гузоред:",codeph:"Пайванд аз паёми бот",
@@ -334,12 +342,25 @@ const IDB = (()=>{
   }
   const store=(name,mode)=>open().then(d=>d.transaction(name,mode).objectStore(name));
   const p=(req)=>new Promise((res,rej)=>{ req.onsuccess=()=>res(req.result); req.onerror=()=>rej(req.error); });
+  // Для очереди одного request.onsuccess недостаточно: транзакция IndexedDB ещё
+  // может abort-нуться (quota/закрытие iOS PWA). Запись считается надёжной только
+  // после transaction.oncomplete.
+  const write=(name,action)=>open().then(d=>new Promise((res,rej)=>{
+    let tx;
+    try{
+      tx=d.transaction(name,"readwrite");
+      action(tx.objectStore(name));
+    }catch(e){ rej(e); return; }
+    tx.oncomplete=()=>res();
+    tx.onabort=()=>rej(tx.error||new Error("idb abort"));
+    tx.onerror=()=>rej(tx.error||new Error("idb error"));
+  }));
   return {
     get:(s,k)=>store(s,"readonly").then(o=>p(o.get(k))),
-    put:(s,v,k)=>store(s,"readwrite").then(o=>p(k===undefined?o.put(v):o.put(v,k))),
-    del:(s,k)=>store(s,"readwrite").then(o=>p(o.delete(k))),
+    put:(s,v,k)=>write(s,o=>{ if(k===undefined) o.put(v); else o.put(v,k); }),
+    del:(s,k)=>write(s,o=>o.delete(k)),
     all:(s)=>store(s,"readonly").then(o=>p(o.getAll())),
-    clear:(s)=>store(s,"readwrite").then(o=>p(o.clear())),
+    clear:(s)=>write(s,o=>o.clear()),
   };
 })();
 
@@ -368,19 +389,40 @@ async function warmCards(){
   }catch(e){}
 }
 // Индикатор оффлайна / очереди. Обновляется на каждом основном экране (setBottomNav).
+let _retakeTarget=null;
 async function updateOffBar(){
   const e=$("offbar"); if(!e) return;
-  let qn=0; try{ qn=((await IDB.all("queue"))||[]).length; }catch(_){}
+  let items=[]; try{ items=(await IDB.all("queue"))||[]; }catch(_){}
+  const failedItems=items.filter(it=>it&&it.kind==="photo"&&it.failed);
+  failedItems.sort((a,b)=>(a.failed_at||a.at||0)-(b.failed_at||b.at||0));
+  const failed=failedItems.length;
+  _retakeTarget=failedItems[0]||null;
+  const failedReps=[...new Set(failedItems.map(it=>it.rep).filter(Boolean))];
+  const qn=items.length-failed;
   const off = STATE.online===false, t=L();
-  if(!off && !qn){ e.className="offbar"; e.innerHTML=""; return; }
+  if(!off && !qn && !failed){ e.className="offbar"; e.innerHTML=""; return; }
   let msg;
   if(off){ const snap=await loadBootstrapSnapshot();
     const at=snap&&snap.at?new Date(snap.at):null;
     msg=t.offline+(at?" · "+t.datao+" "+hhmm(at):""); }
-  else msg=t.sending;
+  else msg=qn?t.sending:"";
   if(qn) msg+=" · "+qn+" "+t.pend;
+  if(failed){
+    const shown=failedReps.slice(0,3).join(", ")+(failedReps.length>3?", …":"");
+    msg+=(msg?" · ":"")+failed+" "+t.photoretake+(shown?" ("+shown+")":"");
+  }
   e.className="offbar on";
-  e.innerHTML=`<span class="d"></span><span>${esc(msg)}</span>`;
+  e.innerHTML=`<span class="d"></span><span>${esc(msg)}</span>`+
+    (failed?`<button class="offact" onclick="retakeFailedPhoto()">${esc(t.retake)}</button>`:"");
+}
+function retakeFailedPhoto(){
+  const it=_retakeTarget;
+  if(!it) return;
+  if(STATE.cur&&STATE.cur.rep===it.rep){
+    // Никаких await до click(): iOS сохраняет user activation только синхронно.
+    const input=$("photo"); if(input){ input.click(); return; }
+  }
+  openP(it.rep).then(()=>toast(L().retakehint));
 }
 
 // --- Исходящая очередь операций (визит/фото/метка) --------------------------
@@ -388,7 +430,71 @@ async function updateOffBar(){
 // связи. op_id делает досыл идемпотентным на сервере (см. web.py): повтор не плодит
 // дубли визитов/меток/фото и не шлёт повторный пост в группу.
 function jsonHeaders(){ const h=authHeaders(); h["Content-Type"]="application/json"; return h; }
-async function enqueue(entry){ try{ await IDB.put("queue", entry); }catch(e){} }
+async function enqueue(entry){
+  try{ await IDB.put("queue", entry); return true; }catch(e){ return false; }
+}
+
+const PHOTO_MAX_BYTES=25*1024*1024;
+// Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
+// его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
+const PHOTO_PREPARING=new Set();
+function photoExt(name,mime){
+  const m=String(name||"").match(/\.(?:jpe?g|jpe|jfif|png|gif|webp|heic|heif|avif)$/i);
+  if(m) return m[0];
+  return ({"image/jpeg":".jpg","image/png":".png","image/gif":".gif",
+    "image/webp":".webp","image/heic":".heic","image/heif":".heif",
+    "image/avif":".avif"})[String(mime||"").toLowerCase()]||".jpg";
+}
+async function photoBytes(value){
+  let bytes=null;
+  if(value instanceof ArrayBuffer) bytes=value;
+  else if(ArrayBuffer.isView(value))
+    bytes=value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength);
+  else if(value instanceof Blob)
+    bytes=value.arrayBuffer?await value.arrayBuffer():await new Response(value).arrayBuffer();
+  if(!bytes||!bytes.byteLength||bytes.byteLength>PHOTO_MAX_BYTES) throw new Error("photo bytes");
+  return bytes;
+}
+async function queuedPhotoBytes(it){
+  if(it.bytes) return photoBytes(it.bytes);
+  // Миграция v12: в IndexedDB лежит File/Blob. На iOS такой File после сна PWA
+  // терял native path и FormData отправлял заголовок boundary без multipart-body.
+  // Материализуем байты и сразу переписываем запись; op_id и ext не меняются.
+  const bytes=await photoBytes(it.blob);
+  const migrated=Object.assign({},it,{bytes,mime:it.mime||(it.blob&&it.blob.type)||"image/jpeg",
+    ext:it.ext||photoExt(it.blob&&it.blob.name,it.blob&&it.blob.type),migrated_raw:1});
+  delete migrated.blob;
+  try{ await IDB.put("queue",migrated); }catch(e){}  // текущий retry всё равно имеет bytes в памяти
+  Object.assign(it,migrated); delete it.blob;
+  return bytes;
+}
+async function markPhotoFailed(it,status){
+  it.failed=status||"retake";
+  it.failed_at=Date.now();
+  try{ await IDB.put("queue",it); }catch(e){}
+}
+async function firstFailedPhoto(rep,exceptOp){
+  try{
+    const items=(await IDB.all("queue"))||[];
+    return items.filter(it=>it&&it.kind==="photo"&&it.failed&&it.rep===rep&&it.op_id!==exceptOp)
+      .sort((a,b)=>(a.failed_at||a.at||0)-(b.failed_at||b.at||0))[0]||null;
+  }catch(e){ return null; }
+}
+async function retireReplacedPhoto(it){
+  // Только явная связь, записанная при нажатии «Переснять». Удалять «любой
+  // failed того же КД» нельзя: это может скрыть другую реально потерянную съёмку.
+  const old=it.replaces_op_id;
+  if(old&&old!==it.op_id){
+    try{ await IDB.del("queue",old); }catch(e){}
+  }
+}
+function showPhotoCount(rep,photos){
+  if(!Number.isFinite(Number(photos))) return;
+  if(STATE.cur&&STATE.cur.rep===rep){
+    STATE.cur.photos=Number(photos);
+    const el=$("phc"); if(el) el.textContent=L().photos+": "+STATE.cur.photos;
+  }
+}
 
 let _flushing=false;
 async function flushQueue(){
@@ -398,6 +504,10 @@ async function flushQueue(){
     let items=[]; try{ items=(await IDB.all("queue"))||[]; }catch(e){ items=[]; }
     items.sort((a,b)=>(a.at||0)-(b.at||0));   // порядок как случилось в поле
     for(const it of items){
+      if(it.kind==="photo"&&PHOTO_PREPARING.has(it.op_id)) continue;
+      // Нечитаемое/отклонённое фото остаётся видимым для пересъёмки, но не держит
+      // за собой более поздние визиты, метки и фото.
+      if(it.kind==="photo"&&it.failed) continue;
       let ok=false, stop=false;
       try{
         let r;
@@ -411,14 +521,30 @@ async function flushQueue(){
           if(it.rep) body.rep=it.rep; if(it.label) body.label=it.label;
           r=await fetch("/api/marker",{method:"POST",headers:jsonHeaders(),body:JSON.stringify(body)});
         }else if(it.kind==="photo"){
-          const fd=new FormData(); fd.append("photo", it.blob, "photo"+(it.ext||".jpg"));
+          let bytes;
+          try{ bytes=await queuedPhotoBytes(it); }
+          catch(e){ await markPhotoFailed(it,"retake"); STATE.online=true; continue; }
           r=await fetch("/api/photo?rep="+enc(it.rep)+"&op="+it.op_id,
-            {method:"POST",headers:photoHeaders(it.geo),body:fd});
+            {method:"POST",headers:photoHeaders(it.geo,it.ext),body:bytes});
         }else{ ok=true; }   // неизвестный тип — не держим вечно
         if(r){
-          if(r.ok) ok=true;
+          if(r.ok){
+            ok=true;
+            if(it.kind==="photo"){
+              try{ const j=await r.json(); showPhotoCount(it.rep,j.photos); }catch(e){}
+              // Успешная пересъёмка закрывает ровно одну старую failed-запись
+              // этого КД; текущий op удалится общим путём ниже.
+              await retireReplacedPhoto(it);
+            }
+          }
           else if(r.status===401||r.status===403||r.status>=500) stop=true;  // авторизация/сервер — позже
-          else ok=true;   // 400/404 — операция невалидна (кейс не наш и т.п.), не зависаем на ней
+          else if(it.kind==="photo"){
+            // Raw 4xx (в т.ч. 413/422) повтором не вылечится: запись сохраняем
+            // как требующую пересъёмки и продолжаем последующие операции.
+            await markPhotoFailed(it,String(r.status));
+            await retireReplacedPhoto(it);
+            STATE.online=true; continue;
+          }else ok=true;   // прочая невалидная операция не держит очередь вечно
         }
       }catch(e){ stop=true; }   // сеть недоступна — прекращаем, повтор при следующей связи
       if(ok){ try{ await IDB.del("queue", it.op_id); }catch(e){} }
@@ -991,29 +1117,64 @@ function call(){ if(STATE.cur.phone) location.href="tel:"+STATE.cur.phone.replac
 // досудебки. Уходит ЗАГОЛОВКОМ (не в URL — query оседает в access-логах),
 // одинаково для онлайн-пути и оффлайн-очереди. ts — реальное время гео-фикса
 // (не момент вызова): кэшированная точка не выдаётся за точку съёмки.
-function photoHeaders(geo){
+function photoHeaders(geo,ext){
   const h=authHeaders();
+  h["Content-Type"]="application/octet-stream";
+  h["X-Photo-Raw"]="1";
+  h["X-Photo-Ext"]=ext||".jpg";
   if(geo) h["X-Photo-Geo"]=geo.lat+","+geo.lon+","+(geo.acc||0)+","+(geo.ts||Date.now());
   return h;
 }
 async function upPhoto(){
   const f=$("photo").files[0]; if(!f) return;
-  const rep=STATE.cur.rep, op_id=uuid();
-  const ext=(f.name&&f.name.lastIndexOf(".")>0)?f.name.slice(f.name.lastIndexOf(".")):".jpg";
-  // maximumAge 5с: для пруфа съёмки нужна свежая точка, а не кэш минутной
-  // давности от прошлого адреса. Нет разрешения/сигнала — фото без точки.
-  const geo=await grabGeo(4000,5000);
-  const fd=new FormData(); fd.append("photo",f);
+  const rep=STATE.cur.rep, op_id=uuid(), ext=photoExt(f.name,f.type), at=Date.now();
+  // Важно для iOS: читаем File СРАЗУ, пока security-scoped файл из picker жив.
+  // В сеть и IndexedDB дальше идёт самостоятельный ArrayBuffer, не File/Blob path.
+  let bytes;
+  try{ bytes=await photoBytes(f); }
+  catch(e){ toast(L().photolost); return; }
+  try{ $("photo").value=""; }catch(e){}
+  // Сначала фиксируем единственную самостоятельную копию и ждём commit IDB.
+  // Только после этого допустимы geolocation/fetch: iOS может выгрузить PWA на
+  // любом await, а pageshow/следующий запуск безопасно досылает тот же op_id.
+  const entry={op_id,kind:"photo",rep,bytes,mime:f.type||"image/jpeg",ext,geo:null,at};
+  let geo=null;
+  PHOTO_PREPARING.add(op_id);
+  try{
+    if(!(await enqueue(entry))){ toast(L().photolost); return; }
+    const prior=await firstFailedPhoto(rep,op_id);
+    if(prior){
+      entry.replaces_op_id=prior.op_id;
+      try{ await IDB.put("queue",entry); }catch(e){}  // базовая запись уже committed
+    }
+    // maximumAge 5с: для пруфа съёмки нужна свежая точка, а не кэш минутной
+    // давности от прошлого адреса. Нет разрешения/сигнала — фото без точки.
+    geo=await grabGeo(4000,5000);
+    entry.geo=geo;
+    try{ await IDB.put("queue",entry); }catch(e){}  // без geo фото всё равно сохранено
+  }finally{
+    PHOTO_PREPARING.delete(op_id);
+  }
   try{
     const r=await fetch("/api/photo?rep="+enc(rep)+"&op="+op_id,
-      {method:"POST",headers:photoHeaders(geo),body:fd});
-    if(!r.ok) throw new Error(r.status);
-    const j=await r.json(); STATE.online=true;
-    STATE.cur.photos=j.photos; $("phc").textContent=L().photos+": "+j.photos; toast(L().saved);
+      {method:"POST",headers:photoHeaders(geo,ext),body:bytes});
+    if(r.ok){
+      const j=await r.json(); STATE.online=true;
+      showPhotoCount(rep,j.photos);
+      await retireReplacedPhoto(entry);
+      try{ await IDB.del("queue",op_id); }catch(e){}
+      toast(L().saved); updateOffBar(); return;
+    }
+    if(r.status!==401&&r.status!==403&&r.status<500){
+      await markPhotoFailed(entry,String(r.status));
+      await retireReplacedPhoto(entry);
+      STATE.online=true;
+      toast(L().photolost); updateOffBar(); return;
+    }
+    throw new Error(r.status);
   }catch(e){
-    // Нет сети — фото (blob) в очередь вместе с гео момента съёмки; счётчик
-    // покажем оптимистично, отправим при связи.
-    await enqueue({op_id, kind:"photo", rep, blob:f, ext, geo, at:Date.now()});
+    // Нет сети/временная серверная ошибка: committed-запись уже в очереди.
+    // Счётчик покажем оптимистично, тот же op_id досылается при связи.
     STATE.online=false; STATE.cur.photos=(STATE.cur.photos||0)+1;
     const el=$("phc"); if(el) el.textContent=L().photos+": "+STATE.cur.photos+" ("+L().queuedn+")";
     toast(L().savedoff); updateOffBar();
@@ -1038,9 +1199,10 @@ function grabGeo(ms,maxAge){
 
 // Голосовой комментарий: диктовка → /api/voice (Whisper на сервере) → текст в поле.
 // Выездники часто плохо пишут по-русски; голосом быстрее и полнее.
-let REC=null;
+let REC=null,VOICE_WAIT=false;
 async function toggleVoice(){
   const t=L(), btn=$("micbtn");
+  if(VOICE_WAIT) return;
   if(REC){ try{REC.stop();}catch(e){} return; }
   if(!(navigator.mediaDevices&&window.MediaRecorder)){ toast(t.voicefail); return; }
   let stream=null;
@@ -1055,11 +1217,14 @@ async function toggleVoice(){
     if(btn) btn.innerHTML="🎤 <span>"+esc(t.voice)+"</span>";
     const blob=new Blob(chunks,{type:(chunks[0]&&chunks[0].type)||"audio/webm"});
     if(blob.size<800) return;   // случайный тап — тишину не шлём
+    VOICE_WAIT=true;
     toast(t.voicewait);
     const fd=new FormData(); fd.append("voice",blob,"voice.webm");
+    const ctl=new AbortController(), timer=setTimeout(()=>ctl.abort(),70000);
     try{
       const r=await fetch("/api/voice?rep="+enc(STATE.cur?STATE.cur.rep:""),
-                          {method:"POST",headers:authHeaders(),body:fd});
+                          {method:"POST",headers:authHeaders(),body:fd,signal:ctl.signal});
+      if(r.status===429||r.status===503){ toast(t.voiceunavail); return; }
       if(!r.ok) throw 0;
       const j=await r.json();
       const ta=$("f_visit_comment");
@@ -1068,7 +1233,8 @@ async function toggleVoice(){
         ta.dispatchEvent(new Event("input",{bubbles:true}));   // черновик подхватит
         toast("✓");
       } else toast(t.voicefail);
-    }catch(e){ toast(t.voicefail); }
+    }catch(e){ toast(e&&e.name==="AbortError"?t.voiceunavail:t.voicefail); }
+    finally{ clearTimeout(timer); VOICE_WAIT=false; }
   };
   REC.start();
   if(btn) btn.innerHTML="⏹ <span>"+esc(t.voicestop)+"</span>";

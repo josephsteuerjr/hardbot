@@ -617,6 +617,16 @@ class Pult(tk.Tk):
                 raise RuntimeError("Неверный admin-ключ") from e
             if e.code == 404:
                 raise RuntimeError(f"На сервере нет {path} — сервер старой версии?") from e
+            if e.code == 409:
+                # Валидационный конфликт импорта (например, один КД с разными
+                # владельцами/ФИО) — сервер гарантированно ничего не записал.
+                # Вернуть структурированный отчёт экрану вместо безликого HTTP 409.
+                try:
+                    payload = json.load(e)
+                except (ValueError, TypeError):
+                    payload = None
+                if isinstance(payload, dict) and payload.get("error"):
+                    return payload
             raise RuntimeError(f"Сервер ответил {e.code} на {path}") from e
         except urllib.error.URLError as e:
             raise RuntimeError(f"Нет связи с сервером ({e.reason})") from e
@@ -817,15 +827,12 @@ class Pult(tk.Tk):
         btn(rowb, "Реестр целиком…", self.do_export_full).pack(side="left")
         btn(rowb, "Метки курьеров…", self.do_export_markers).pack(side="left", padx=(8, 0))
 
-        sc = Card(inner, "Разброс кейсов по сотрудникам",
-                  "Раскладывает экспорт кейсов (формат «Хард») по личным .xlsb — каждому "
-                  "его строки по колонке «ответственный Сотрудник». Папки по маске "
-                  "Республика / … / Город / ФИО из базовой папки; !Архив и _tech "
-                  "игнорируются. Файлы делает Excel: списки «Статусы» и личная "
-                  "«Статистика» сохраняются.\n"
-                  "⚠️ Портфель пересобирается из экспорта: всё, что сотрудник вписал в файл "
-                  "руками и чего нет в источнике, будет потеряно. Сначала импорт реестров "
-                  "в бота, потом разброс — иначе ручные правки не вернуть.")
+        sc = Card(inner, "Legacy-разброс отключён",
+                  "Старый режим пересобирал личные .xlsb из полного экспорта и мог "
+                  "стереть ручные данные. Запись заблокирована на уровне интерфейса, "
+                  "CLI и движка. Для сборки и распределения используйте отдельное "
+                  "приложение «Контур · Реестры»; здесь оставлен только безопасный "
+                  "предпросмотр соответствия папок.")
         sc.pack(fill="x", pady=(12, 0))
         rowsc = tk.Frame(sc.inner, bg=CARD)
         rowsc.pack(anchor="w")
@@ -853,9 +860,11 @@ class Pult(tk.Tk):
         self.sc_apply_row = tk.Frame(sc.inner, bg=CARD)
         self.sc_apply_all_btn = btn(self.sc_apply_row, "Разложить всех",
                                     lambda: self.scatter_run(True, "all"))
+        self.sc_apply_all_btn.configure(state="disabled")
         self.sc_apply_all_btn.pack(side="left")
         self.sc_apply_sel_btn = btn(self.sc_apply_row, "Разложить выбранных (0)",
                                     lambda: self.scatter_run(True, "selected"), kind="accent")
+        self.sc_apply_sel_btn.configure(state="disabled")
         self.sc_apply_sel_btn.pack(side="left", padx=(8, 0))
         self._scatter_restore()
 
@@ -1401,6 +1410,9 @@ class Pult(tk.Tk):
             self._scatter_labels()
 
     def scatter_run(self, apply: bool, which: str = "all"):
+        if apply:
+            self.toast(razbros.LEGACY_SCATTER_DISABLED_MESSAGE, err=True)
+            return
         if not self.scatter_base and not self.scatter_roots:
             self.toast("Выбери базовую папку (или прямую папку)", err=True)
             return
@@ -1497,7 +1509,8 @@ class Pult(tk.Tk):
                                 command=lambda k=k, v=var: self._scatter_toggle(k, v.get()))
             cb.pack(side="left", padx=6)
             tk.Label(row, text=where, bg=CARD, fg=MUTED, font=f(8)).pack(side="left")
-        self.sc_apply_row.pack(anchor="w", pady=(10, 0))
+        if razbros.LEGACY_SCATTER_ENABLED:
+            self.sc_apply_row.pack(anchor="w", pady=(10, 0))
         self._scatter_seln()
 
     def _scatter_toggle(self, k, on):

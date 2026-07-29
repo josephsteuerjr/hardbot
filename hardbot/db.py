@@ -1664,6 +1664,29 @@ def add_photo(contract_id: str) -> int:
     return row["photos_count"] if row else 0
 
 
+def ensure_photos_count(contract_id: str, permanent_files: int) -> int:
+    """Поднять счётчик минимум до числа уже опубликованных файлов.
+
+    Файл и SQLite не могут быть одной транзакцией. Поэтому /api/photo вызывает
+    эту операцию и после первой публикации, и после duplicate-retry: если процесс
+    упал между hard-link и UPDATE, повтор того же op_id ремонтирует счётчик.
+    MAX защищает от гонки двух параллельных загрузок и не уменьшает историческое
+    значение при внешнем удалении/архивации файлов.
+    """
+    n = max(0, int(permanent_files))
+    with connect() as conn:
+        conn.execute(
+            "UPDATE clients SET photos_count = "
+            "MAX(COALESCE(photos_count,0), ?) WHERE contract_id = ?",
+            (n, contract_id),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT photos_count FROM clients WHERE contract_id = ?", (contract_id,)
+        ).fetchone()
+    return (row["photos_count"] or 0) if row else 0
+
+
 def photos_count(contract_id: str) -> int:
     """Текущее число фото у договора (для идемпотентной загрузки: повтор из очереди
     отдаёт актуальный счётчик, ничего не инкрементируя)."""
@@ -2023,10 +2046,16 @@ def import_grid(rows: list[list]) -> dict:
         снимок bot_visit_data не меняется никогда;
       * без якоря (старый файл, мусорная дата) — как раньше: всё выбрасывается.
 
+    Повтор одного КД сначала сводится в одну логическую запись. Дополняющие друг
+    друга строки разрешены, одинаковые значения идемпотентны. Два разных
+    непустых значения одного поля для того же КД — блокирующий конфликт всего
+    файла: порядок строк не должен молча выбирать победителя (last-write-wins).
+
     Возвращает отчёт — чтобы было видно ТОЧНО, что вошло:
     {total_rows, inserted, updated, skipped_no_id, duplicates, unknown_columns,
     protected_cells, protected_contracts, office_cells, office_contracts,
-    office_applied}. protected_* — отклонено шлюзом (устаревший файл/мусор);
+    office_applied, blocked, duplicate_conflicts}. protected_* — отклонено
+    шлюзом (устаревший файл/мусор);
     office_* — принятые офисные правки, office_applied = {КД: {поле: значение}}
     (пульту — чтобы обогащение сразу писало свежепринятые значения).
     """
@@ -2037,7 +2066,8 @@ def import_grid(rows: list[list]) -> dict:
               # Строки без ответственного попадают в базу, но невидимы выезднику и не
               # входят ни в один отчёт руководителя. Раньше это не показывалось нигде,
               # поэтому 1970 договоров из 5267 «потерялись» молча.
-              "no_responsible": 0}
+              "no_responsible": 0,
+              "blocked": False, "duplicate_conflicts": []}
 
     title_to_key = {_norm_title(f.title): f.key for f in FIELDS}
     if not rows or len(rows) < 2:
@@ -2066,6 +2096,63 @@ def import_grid(rows: list[list]) -> dict:
     # Колонки разбивки, которые реально есть в этом файле → пустая ячейка = ноль.
     owned = debt.SOURCE_OWNED.intersection(k for k in col_keys if k)
 
+    # Сначала разобрать ВЕСЬ файл в памяти. Это обязательный preflight: при
+    # конфликтующем дубле не должна успеть записаться ни одна предыдущая строка.
+    # Пустые SOURCE_OWNED применяем после сведения всех строк КД, иначе
+    # дополняющая строка «КД + ещё одна статья» случайно обнулит статьи первой.
+    grouped: dict[str, dict] = {}
+    duplicate_conflicts: dict[str, set[str]] = {}
+    for raw in rows[best_h + 1:]:
+        if raw is None or all(v is None for v in raw):
+            continue
+        nonempty = [str(v).strip().lower() for v in raw if v is not None]
+        if nonempty and all(v in ("сх", "хард") for v in nonempty):
+            continue
+        report["total_rows"] += 1
+        data = {}
+        for key, val in zip(col_keys, raw):
+            if key and val is not None:
+                if isinstance(val, datetime):
+                    data[key] = val.strftime("%Y-%m-%d")
+                elif isinstance(val, date):
+                    data[key] = val.isoformat()
+                else:
+                    text = str(val).strip()
+                    if text:
+                        data[key] = text
+        cid = data.get("contract_id")
+        if not cid:
+            report["skipped_no_id"] += 1
+            continue
+        if cid not in grouped:
+            grouped[cid] = data
+            continue
+        report["duplicates"] += 1
+        merged = grouped[cid]
+        for key, value in data.items():
+            if key in merged and merged[key] != value:
+                duplicate_conflicts.setdefault(cid, set()).add(key)
+            else:
+                merged[key] = value
+
+    if duplicate_conflicts:
+        report["blocked"] = True
+        report["error"] = (
+            "импорт заблокирован: один КД содержит разные непустые значения "
+            "одного поля; исправьте источник, порядок строк победителя не выбирает"
+        )
+        report["duplicate_conflicts"] = [
+            {"contract_id": cid, "fields": sorted(fields)}
+            for cid, fields in sorted(duplicate_conflicts.items())
+        ]
+        return report
+
+    # Для SOURCE_OWNED пустота во всём наборе строк КД означает погашение.
+    # Колонки, отсутствующей в файле целиком, в ``owned`` нет и мы её не трогаем.
+    for data in grouped.values():
+        for key in owned - data.keys():
+            data[key] = None
+
     with connect() as conn:
         existing = {r["contract_id"]: r for r in conn.execute(
             "SELECT contract_id, client, birth_date, responsible, bot_visit_at, "
@@ -2086,46 +2173,12 @@ def import_grid(rows: list[list]) -> dict:
         fresh_logs: dict[str, dict] = {}
         office_cids: set[str] = set()
         protected_cids: set[str] = set()
-        seen: set[str] = set()
-        # Владелец каждого КД по мере разбора файла: в реестре у одного договора бывает
-        # несколько строк, и владелец может стоять только в первой. Без этой памяти
-        # счётчик «без ответственного» считал бы остальные строки ничьими и пугал бы
-        # цифрой, которой в базе нет.
+        # Владелец каждого уникального КД после сведения дополняющих строк.
         owners: dict[str, str] = {}
-        for raw in rows[best_h + 1:]:
-            if raw is None or all(v is None for v in raw):
-                continue  # пустая строка
-            nonempty = [str(v).strip().lower() for v in raw if v is not None]
-            if nonempty and all(v in ("сх", "хард") for v in nonempty):
-                continue  # строка-источник (сх/хард), не данные
-            report["total_rows"] += 1
-            data = {}
-            for key, val in zip(col_keys, raw):
-                if key and val is not None:
-                    if isinstance(val, datetime):
-                        data[key] = val.strftime("%Y-%m-%d")   # дату-ячейку → ISO
-                    elif isinstance(val, date):
-                        data[key] = val.isoformat()
-                    else:
-                        text = str(val).strip()
-                        if not text:
-                            # Ячейка из пробелов — это НЕ «очистить поле». Пульт такие
-                            # гасит у себя, а веб-загрузка раньше писала "" и затирала
-                            # ответственного, после чего кейс исчезал у выездника.
-                            continue
-                        data[key] = text
-            cid = data.get("contract_id")
-            if not cid:
-                report["skipped_no_id"] += 1
-                continue
-            for key in owned - data.keys():   # статья есть в файле, в строке пусто → погашена
-                data[key] = None
-            is_update = cid in existing or cid in seen
-            # Кто владеет строкой после импорта: значение из файла, иначе запомненное
-            # по этому же файлу, иначе прежнее из базы. Пустой владелец = кейс в базе
-            # есть, а у выездника его нет. Считаем по ДОГОВОРАМ, а не по строкам файла.
-            prev_resp = owners.get(cid) or (
-                existing[cid]["responsible"] if cid in existing else "")
+        for cid, data in grouped.items():
+            is_update = cid in existing
+            # Пустой владелец = кейс в базе есть, а у выездника его нет.
+            prev_resp = existing[cid]["responsible"] if cid in existing else ""
             owners[cid] = str(data.get("responsible") or prev_resp or "").strip()
             # После подтверждённого визита очередной импорт может обновлять долг,
             # адрес и прочие поля источника, а поля визита — только через якорный
@@ -2205,10 +2258,6 @@ def import_grid(rows: list[list]) -> dict:
                 if rejected:
                     protected_cids.add(cid)
                     report["protected_cells"] += rejected
-            if cid in seen:
-                report["duplicates"] += 1
-            seen.add(cid)
-
             keys = ", ".join(f'"{k}"' for k in data)
             qs = ", ".join("?" for _ in data)
             updates = ", ".join(f'"{k}"=excluded."{k}"' for k in data if k != "contract_id")

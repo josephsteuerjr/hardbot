@@ -420,6 +420,7 @@ def publish_validated(
     *,
     confirmation_digest: str,
     busy_mode: str | None = None,
+    allow_initial_baseline: bool = False,
 ) -> PublishResult:
     if plan.blocked:
         raise SafetyViolation("заблокированный план нельзя публиковать")
@@ -435,6 +436,17 @@ def publish_validated(
     if validation.checked_files != len(stage.files):
         raise SafetyViolation("validation проверил не все staging-файлы")
 
+    target_baseline = baseline_path(bundle, stage.master.original_path)
+    if not target_baseline.is_file() and not allow_initial_baseline:
+        raise SafetyViolation(
+            "активный baseline отсутствует; обычная публикация запрещена. "
+            "Первый baseline публикуется только через promote-first-baseline"
+        )
+    if target_baseline.exists() and allow_initial_baseline:
+        raise SafetyViolation(
+            "активный baseline уже существует; initial-baseline режим запрещён"
+        )
+
     staged_master = read_portfolio(stage.master.staged_path, bundle.fields)
     staged_master = replace(
         staged_master,
@@ -447,7 +459,6 @@ def publish_validated(
     )
     pending_baseline = stage.run_dir / "baseline.next.json.gz"
     save_baseline(pending_baseline, baseline)
-    target_baseline = baseline_path(bundle, stage.master.original_path)
     target_baseline.parent.mkdir(parents=True, exist_ok=True)
     baseline_temp = target_baseline.with_name(
         f".{target_baseline.name}.{stage.run_id}.{secrets.token_hex(3)}.next"

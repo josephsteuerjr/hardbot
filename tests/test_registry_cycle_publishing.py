@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import registry_cycle.publishing as publishing
-from registry_cycle.errors import PublishError
+from registry_cycle.errors import PublishError, SafetyViolation
 from registry_cycle.files import fingerprint
 from registry_cycle.publishing import atomic_publish_files, publish_validated
 from registry_cycle.staging import StageSet, StagedFile
@@ -248,3 +248,82 @@ def test_publish_validated_defers_baseline_until_sidecar_is_reconciled(
         issue.code == "baseline_deferred_for_sidecars"
         for issue in result.issues
     )
+
+
+def test_ordinary_publish_refuses_to_create_missing_active_baseline(
+    tmp_path,
+    monkeypatch,
+):
+    stage = _stage(tmp_path)
+    missing = tmp_path / "baselines" / "missing.json.gz"
+    monkeypatch.setattr(publishing, "baseline_path", lambda *_args: missing)
+    bundle = SimpleNamespace(
+        fields=object(),
+        app=SimpleNamespace(safety={"busy_file_policy": "block", "force_close": {}}),
+    )
+    plan = SimpleNamespace(blocked=False, digest=stage.plan_digest)
+    validation = ValidationReport(
+        run_id=stage.run_id,
+        plan_digest=stage.plan_digest,
+        checked_files=len(stage.files),
+    )
+
+    with pytest.raises(SafetyViolation, match="promote-first-baseline"):
+        publish_validated(
+            bundle,
+            stage,
+            plan,
+            validation,
+            confirmation_digest=stage.plan_digest,
+        )
+
+    assert stage.master.original_path.read_bytes() == b"old-master"
+    assert not stage.run_dir.exists()
+
+
+def test_explicit_initial_baseline_mode_can_publish_once(tmp_path, monkeypatch):
+    stage = _stage(tmp_path)
+    active_baseline = tmp_path / "baselines" / "active.json.gz"
+
+    def fake_save_baseline(path, _baseline):
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"initial-baseline")
+        return target
+
+    monkeypatch.setattr(publishing, "read_portfolio", lambda *_args: object())
+    monkeypatch.setattr(publishing, "replace", lambda value, **_changes: value)
+    monkeypatch.setattr(
+        publishing,
+        "build_baseline",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(publishing, "save_baseline", fake_save_baseline)
+    monkeypatch.setattr(
+        publishing,
+        "baseline_path",
+        lambda *_args: active_baseline,
+    )
+    bundle = SimpleNamespace(
+        fields=object(),
+        app=SimpleNamespace(safety={"busy_file_policy": "block", "force_close": {}}),
+    )
+    plan = SimpleNamespace(blocked=False, digest=stage.plan_digest)
+    validation = ValidationReport(
+        run_id=stage.run_id,
+        plan_digest=stage.plan_digest,
+        checked_files=len(stage.files),
+    )
+
+    result = publish_validated(
+        bundle,
+        stage,
+        plan,
+        validation,
+        confirmation_digest=stage.plan_digest,
+        allow_initial_baseline=True,
+    )
+
+    assert result.complete
+    assert stage.master.original_path.read_bytes() == b"new-master"
+    assert active_baseline.read_bytes() == b"initial-baseline"
