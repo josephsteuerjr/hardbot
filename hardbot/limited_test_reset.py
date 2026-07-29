@@ -27,7 +27,7 @@ import stat
 import sys
 import tarfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import db
@@ -87,7 +87,7 @@ POST_RESET_MANIFEST = "post_reset_manifest.json"
 APPLY_STARTED_MANIFEST = "apply_started_manifest.json"
 RECOVERY_MANIFEST = "recovery_manifest.json"
 ORCHESTRATION_INTENT = "orchestration_apply_intent"
-ORCHESTRATION_INTENT_SCHEMA = "hardbot.reset-orchestration-apply-intent.v1"
+ORCHESTRATION_INTENT_SCHEMA = "hardbot.reset-orchestration-apply-intent.v2"
 BACKUP_NAME = "hardbot-pre-reset.sqlite3"
 SAFE_EXPORT_NAME = "safe-enrichment.json.gz"
 RAW_EXPORT_NAME = "raw-diagnostic.json.gz"
@@ -95,7 +95,35 @@ SCHEMA_NAME = "export-schema.json"
 PHOTO_MANIFEST_NAME = "photos-manifest.json.gz"
 PHOTO_ARCHIVE_NAME = "photos-before-reset.tar.gz"
 CLEARANCE_RECEIPT_NAME = "registry-clearance.json"
+PREPARE_RECEIPT_NAME = "reset-prepare.json"
+ARCHIVE_ONLY_AUTHORIZATION_NAME = "archive-only-authorization.json"
+ARCHIVE_ONLY_AUTHORIZATION_SCHEMA = (
+    "hardbot.archive-only-reset-authorization.v1"
+)
+ARCHIVE_ONLY_AUTHORIZATION_KIND = "obsolete_dataset_archive_only"
+AUTHORITY_MODE_REGISTRY = "registry_clearance"
+AUTHORITY_MODE_ARCHIVE_ONLY = "archive_only_owner"
+AUTHORITY_MODES = {
+    AUTHORITY_MODE_REGISTRY,
+    AUTHORITY_MODE_ARCHIVE_ONLY,
+}
+LEGACY_APPLY_STARTED_SCHEMA = "hardbot.reset-apply-started.v2"
+APPLY_STARTED_SCHEMA = "hardbot.reset-apply-started.v3"
+POST_RESET_SCHEMA = "hardbot.reset-post.v3"
+RECOVERY_SCHEMA = "hardbot.reset-recovery.v3"
 DATA_EXCHANGE_CONTRACT = contract_binding()
+# Recovery-only compatibility for snapshots created before the 2026-07-29
+# exchange_contract.py SHA-shadowing fix. The buggy loader returned the last
+# legacy bootstrap hash as the contract-file SHA. It must never authorize a
+# new apply, but a durable v2 apply-started receipt must still be recoverable.
+LEGACY_V2_RECOVERY_DATA_EXCHANGE_CONTRACT = {
+    "schema": "hardbot.data-exchange-contract.v1",
+    "version": 1,
+    "sha256": (
+        "4cf6781ca18c03cbc04ac339de9eeca9a"
+        "f69e85ac6a94e1134a636076a32551b"
+    ),
+}
 EXPECTED_ARTIFACTS = frozenset(
     {
         BACKUP_NAME,
@@ -109,6 +137,18 @@ EXPECTED_ARTIFACTS = frozenset(
 
 # Точка подменяется только в изолированных тестах.
 PHOTO_DIR = DEFAULT_PHOTO_DIR
+
+
+def _archive_only_decision() -> dict[str, Any]:
+    return {
+        "dataset_status": "obsolete",
+        "registry_transfer": "explicitly_not_required_by_owner",
+        "archive_required": True,
+        "clear_application_data": True,
+        "preserve_consumed_import_receipts": True,
+        "preserve_import_source_heads": True,
+        "invalidate_pending_import_authorizations": True,
+    }
 
 
 class ResetBlocked(RuntimeError):
@@ -865,6 +905,8 @@ def _verify_photo_archive(
 def _verify_backup_and_exports(
     archive: Path,
     manifest: dict[str, Any],
+    *,
+    expected_contract_binding: dict[str, Any],
 ) -> None:
     backup = archive / BACKUP_NAME
     before_sha = _sha256_file(backup, label="SQLite backup")
@@ -910,8 +952,8 @@ def _verify_backup_and_exports(
         or not isinstance(raw, dict)
         or safe.get("kind") != "safe_enrichment"
         or raw.get("kind") != "raw_diagnostic"
-        or safe.get("data_exchange_contract") != DATA_EXCHANGE_CONTRACT
-        or raw.get("data_exchange_contract") != DATA_EXCHANGE_CONTRACT
+        or safe.get("data_exchange_contract") != expected_contract_binding
+        or raw.get("data_exchange_contract") != expected_contract_binding
         or safe.get("rows") != safe_rows
         or raw.get("rows") != raw_rows
     ):
@@ -920,7 +962,11 @@ def _verify_backup_and_exports(
         )
 
 
-def _load_verified_manifest(archive: Path) -> dict[str, Any]:
+def _load_verified_manifest_with_contract(
+    archive: Path,
+    *,
+    expected_contract_binding: dict[str, Any],
+) -> dict[str, Any]:
     manifest_path = archive / SNAPSHOT_MANIFEST
     manifest = _load_json_regular(
         manifest_path,
@@ -928,7 +974,8 @@ def _load_verified_manifest(archive: Path) -> dict[str, Any]:
     )
     if (
         manifest.get("kind") != SNAPSHOT_KIND
-        or manifest.get("data_exchange_contract") != DATA_EXCHANGE_CONTRACT
+        or manifest.get("data_exchange_contract")
+        != expected_contract_binding
     ):
         raise ResetBlocked(
             "Snapshot manifest несовместим с deployed data-exchange contract"
@@ -972,7 +1019,11 @@ def _load_verified_manifest(archive: Path) -> dict[str, Any]:
         path = archive / name
         if not path.is_file() or _sha256_file(path) != expected:
             raise ResetBlocked(f"Артефакт отсутствует или повреждён: {name}")
-    _verify_backup_and_exports(archive, manifest)
+    _verify_backup_and_exports(
+        archive,
+        manifest,
+        expected_contract_binding=expected_contract_binding,
+    )
     photo_artifact = _load_json_gz_regular(
         archive / PHOTO_MANIFEST_NAME,
         label="photo manifest",
@@ -989,7 +1040,7 @@ def _load_verified_manifest(archive: Path) -> dict[str, Any]:
         raise ResetBlocked("Photo manifest entries must be a list")
     _verify_photo_archive(archive / PHOTO_ARCHIVE_NAME, entries)
     token_source = {
-        "data_exchange_contract": DATA_EXCHANGE_CONTRACT,
+        "data_exchange_contract": expected_contract_binding,
         "artifacts": artifacts,
         "counts": counts,
         "database_state_digest": state_digest,
@@ -1006,6 +1057,51 @@ def _load_verified_manifest(archive: Path) -> dict[str, Any]:
     if manifest.get("confirm_token") != expected_token:
         raise ResetBlocked("Confirm-token snapshot manifest не соответствует содержимому")
     return manifest
+
+
+def _load_verified_manifest(archive: Path) -> dict[str, Any]:
+    """Verify every new operation against only the current contract binding."""
+
+    return _load_verified_manifest_with_contract(
+        archive,
+        expected_contract_binding=DATA_EXCHANGE_CONTRACT,
+    )
+
+
+def _load_verified_recovery_manifest(
+    archive: Path,
+    *,
+    apply_started_schema: str,
+) -> dict[str, Any]:
+    """Allow the historical buggy binding only to undo a durable v2 apply."""
+
+    if apply_started_schema not in {
+        LEGACY_APPLY_STARTED_SCHEMA,
+        APPLY_STARTED_SCHEMA,
+    }:
+        raise ResetBlocked("Apply-started receipt has an unknown schema")
+    preview = _load_json_regular(
+        archive / SNAPSHOT_MANIFEST,
+        label="snapshot manifest",
+    )
+    if not isinstance(preview, dict):
+        raise ResetBlocked("Snapshot manifest has an invalid schema")
+    binding = preview.get("data_exchange_contract")
+    if binding == DATA_EXCHANGE_CONTRACT:
+        expected = DATA_EXCHANGE_CONTRACT
+    elif (
+        apply_started_schema == LEGACY_APPLY_STARTED_SCHEMA
+        and binding == LEGACY_V2_RECOVERY_DATA_EXCHANGE_CONTRACT
+    ):
+        expected = LEGACY_V2_RECOVERY_DATA_EXCHANGE_CONTRACT
+    else:
+        raise ResetBlocked(
+            "Snapshot manifest is incompatible with recovery contract"
+        )
+    return _load_verified_manifest_with_contract(
+        archive,
+        expected_contract_binding=expected,
+    )
 
 
 def _load_verified_clearance(
@@ -1154,6 +1250,180 @@ def _valid_sha(value: Any) -> bool:
     )
 
 
+def _load_verified_archive_only_authorization(
+    archive: Path,
+    manifest: dict[str, Any],
+    *,
+    claimed_digest: str,
+    claimed_receipt_sha256: str,
+) -> dict[str, Any]:
+    """Validate the separate owner decision for an obsolete archived dataset."""
+
+    path = archive / ARCHIVE_ONLY_AUTHORIZATION_NAME
+    if path.is_symlink() or not path.is_file():
+        raise ResetBlocked("Archive-only owner authorization отсутствует")
+    if (
+        not _valid_sha(claimed_receipt_sha256)
+        or _sha256_file(path) != claimed_receipt_sha256
+    ):
+        raise ResetBlocked("Archive-only authorization SHA-256 не совпал")
+    receipt = _load_json_regular(
+        path,
+        label="archive-only owner authorization",
+    )
+    base_required = {
+        "schema",
+        "kind",
+        "authorized_at_utc",
+        "nonce",
+        "data_exchange_contract",
+        "snapshot",
+        "prepare",
+        "decision",
+        "authorization_digest",
+    }
+    if not isinstance(receipt, dict) or set(receipt) != base_required:
+        raise ResetBlocked("Archive-only authorization имеет неточную schema")
+    authorized_at = receipt.get("authorized_at_utc")
+    try:
+        datetime.strptime(str(authorized_at or ""), "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as exc:
+        raise ResetBlocked(
+            "Archive-only authorization timestamp некорректен"
+        ) from exc
+    if (
+        receipt.get("schema") != ARCHIVE_ONLY_AUTHORIZATION_SCHEMA
+        or receipt.get("kind") != ARCHIVE_ONLY_AUTHORIZATION_KIND
+        or receipt.get("data_exchange_contract") != DATA_EXCHANGE_CONTRACT
+        or not _valid_sha(receipt.get("nonce"))
+        or receipt.get("decision") != _archive_only_decision()
+    ):
+        raise ResetBlocked(
+            "Archive-only authorization identity/decision mismatch"
+        )
+    embedded_digest = receipt.get("authorization_digest")
+    unsigned = {
+        key: value
+        for key, value in receipt.items()
+        if key != "authorization_digest"
+    }
+    if (
+        not _valid_sha(claimed_digest)
+        or embedded_digest != claimed_digest
+        or _canonical_digest(unsigned) != claimed_digest
+    ):
+        raise ResetBlocked("Archive-only authorization digest не совпал")
+
+    backup = archive / BACKUP_NAME
+    connection = sqlite3.connect(f"file:{backup}?mode=ro", uri=True)
+    try:
+        retained = _retained_import_state(connection)
+    finally:
+        connection.close()
+    expected_snapshot = {
+        "manifest_sha256": _sha256_file(
+            archive / SNAPSHOT_MANIFEST,
+            label="snapshot manifest",
+        ),
+        "confirm_token": manifest["confirm_token"],
+        "database_state_digest": manifest["database_state_digest"],
+        "counts": manifest["counts"],
+        "artifacts": manifest["artifacts"],
+        "photos": manifest["photos"],
+        "import_authorizations": retained,
+    }
+    if receipt.get("snapshot") != expected_snapshot:
+        raise ResetBlocked(
+            "Archive-only authorization относится к другому reset snapshot"
+        )
+    prepare = receipt.get("prepare")
+    expected_remote_archive = (
+        PurePosixPath("/opt/hardbot2/data/backups") / archive.name
+    )
+    if (
+        not archive.name.startswith("limited-test-archive-only-")
+        or not isinstance(prepare, dict)
+        or set(prepare)
+        != {
+            "receipt_sha256",
+            "remote_archive",
+            "container_id",
+            "image_id",
+            "release_git_head",
+        }
+        or not _valid_sha(prepare.get("receipt_sha256"))
+        or prepare.get("remote_archive") != str(expected_remote_archive)
+        or len(str(prepare.get("container_id") or "")) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in str(prepare.get("container_id") or "")
+        )
+        or not str(prepare.get("image_id") or "").startswith("sha256:")
+        or len(str(prepare.get("image_id"))) != 71
+        or any(
+            character not in "0123456789abcdef"
+            for character in str(prepare.get("image_id"))[7:]
+        )
+        or len(str(prepare.get("release_git_head") or "")) not in {40, 64}
+        or any(
+            character not in "0123456789abcdef"
+            for character in str(prepare.get("release_git_head") or "")
+        )
+    ):
+        raise ResetBlocked(
+            "Archive-only authorization prepare/runtime binding некорректен"
+        )
+    prepare_path = archive / PREPARE_RECEIPT_NAME
+    if prepare_path.is_symlink() or not prepare_path.is_file():
+        raise ResetBlocked("Immutable reset prepare receipt отсутствует")
+    if _sha256_file(
+        prepare_path,
+        label="reset prepare receipt",
+    ) != prepare["receipt_sha256"]:
+        raise ResetBlocked("Reset prepare receipt SHA-256 не совпал")
+    prepare_receipt = _load_json_regular(
+        prepare_path,
+        label="reset prepare receipt",
+    )
+    prepare_required = {
+        "schema",
+        "prepared_at_utc",
+        "remote_archive",
+        "local_archive",
+        "snapshot_manifest_sha256",
+        "confirm_token",
+        "container_id",
+        "image_id",
+        "release_git_head",
+    }
+    try:
+        datetime.strptime(
+            str(prepare_receipt.get("prepared_at_utc") or ""),
+            "%Y%m%dT%H%M%SZ",
+        )
+    except (AttributeError, ValueError) as exc:
+        raise ResetBlocked("Reset prepare receipt timestamp некорректен") from exc
+    if (
+        not isinstance(prepare_receipt, dict)
+        or set(prepare_receipt) != prepare_required
+        or prepare_receipt.get("schema") != "hardbot.reset-prepare.v1"
+        or prepare_receipt.get("remote_archive")
+        != str(expected_remote_archive)
+        or not str(prepare_receipt.get("local_archive") or "")
+        or prepare_receipt.get("snapshot_manifest_sha256")
+        != expected_snapshot["manifest_sha256"]
+        or prepare_receipt.get("confirm_token") != manifest["confirm_token"]
+        or any(
+            prepare_receipt.get(key) != prepare.get(key)
+            for key in ("container_id", "image_id", "release_git_head")
+        )
+    ):
+        raise ResetBlocked(
+            "Immutable reset prepare receipt binding не совпал"
+        )
+    return receipt
+
+
 def _load_verified_intent(
     archive: Path,
     manifest: dict[str, Any],
@@ -1161,6 +1431,7 @@ def _load_verified_intent(
     clearance_digest: str,
     clearance_receipt_sha256: str,
     claimed_intent_digest: str,
+    authority_mode: str,
 ) -> dict[str, Any]:
     path = archive / ORCHESTRATION_INTENT
     intent = _load_json_regular(path, label="orchestration intent")
@@ -1173,6 +1444,7 @@ def _load_verified_intent(
         "snapshot_manifest_sha256",
         "clearance_digest",
         "clearance_receipt_sha256",
+        "authority_mode",
         "container_id",
         "image_id",
         "app_stopped",
@@ -1201,6 +1473,8 @@ def _load_verified_intent(
         or intent.get("clearance_digest") != clearance_digest
         or intent.get("clearance_receipt_sha256")
         != clearance_receipt_sha256
+        or intent.get("authority_mode") != authority_mode
+        or authority_mode not in AUTHORITY_MODES
         or intent.get("app_stopped") is not True
         or not _valid_sha(intent.get("nonce"))
         or not str(intent.get("container_id") or "")
@@ -1218,7 +1492,10 @@ def _reset_binding(
     clearance_digest: str,
     clearance_receipt_sha256: str,
     intent: dict[str, Any],
+    authority_mode: str,
 ) -> dict[str, Any]:
+    if authority_mode not in AUTHORITY_MODES:
+        raise ResetBlocked("Неизвестный reset authority mode")
     return {
         "snapshot_manifest_sha256": _sha256_file(
             archive / SNAPSHOT_MANIFEST,
@@ -1227,6 +1504,7 @@ def _reset_binding(
         "confirm_token": manifest["confirm_token"],
         "clearance_digest": clearance_digest,
         "clearance_receipt_sha256": clearance_receipt_sha256,
+        "authority_mode": authority_mode,
         "orchestration_intent_digest": intent["intent_digest"],
         "orchestration_intent_sha256": intent["_sha256"],
         "orchestration_nonce": intent["nonce"],
@@ -1247,7 +1525,7 @@ def _load_apply_started(
 ) -> dict[str, Any]:
     path = archive / APPLY_STARTED_MANIFEST
     started = _load_json_regular(path, label="apply-started receipt")
-    required = {
+    base_required = {
         "schema",
         "kind",
         "started_at",
@@ -1262,7 +1540,18 @@ def _load_apply_started(
         "image_id",
         "receipt_digest",
     }
-    if not isinstance(started, dict) or set(started) != required:
+    if not isinstance(started, dict):
+        raise ResetBlocked("Apply-started receipt has an inexact schema")
+    if started.get("schema") == APPLY_STARTED_SCHEMA:
+        required = base_required | {"authority_mode"}
+        authority_mode = started.get("authority_mode")
+    elif started.get("schema") == LEGACY_APPLY_STARTED_SCHEMA:
+        # Before archive-only existed, every v2 receipt was registry-cleared.
+        required = base_required
+        authority_mode = AUTHORITY_MODE_REGISTRY
+    else:
+        raise ResetBlocked("Apply-started receipt has an unknown schema")
+    if set(started) != required:
         raise ResetBlocked("Apply-started receipt has an inexact schema")
     unsigned = {
         key: value
@@ -1270,8 +1559,8 @@ def _load_apply_started(
         if key != "receipt_digest"
     }
     if (
-        started.get("schema") != "hardbot.reset-apply-started.v2"
-        or started.get("kind") != "hardbot_limited_test_apply_started"
+        started.get("kind") != "hardbot_limited_test_apply_started"
+        or authority_mode not in AUTHORITY_MODES
         or not _valid_sha(started.get("receipt_digest"))
         or _canonical_digest(unsigned) != started["receipt_digest"]
         or started.get("snapshot_manifest_sha256")
@@ -1290,7 +1579,7 @@ def _load_apply_started(
         or not str(started.get("image_id") or "").startswith("sha256:")
     ):
         raise ResetBlocked("Apply-started receipt binding/digest mismatch")
-    return started
+    return {**started, "authority_mode": authority_mode}
 
 
 def _sync_database_storage() -> None:
@@ -1403,7 +1692,7 @@ def _fault_point(_name: str) -> None:
     """No-op production hook; tests replace it to emulate abrupt power loss."""
 
 
-def apply_reset(
+def _apply_authorized_reset(
     archive_raw: str | os.PathLike[str],
     *,
     confirm_token: str,
@@ -1411,6 +1700,7 @@ def apply_reset(
     clearance_receipt_sha256: str,
     orchestration_intent_digest: str,
     app_stopped: bool,
+    authority_mode: str,
 ) -> dict[str, Any]:
     """Очистить все application tables и переместить фото в reset-архив."""
     if not app_stopped:
@@ -1421,25 +1711,48 @@ def apply_reset(
     manifest = _load_verified_manifest(archive)
     if not confirm_token or confirm_token != manifest.get("confirm_token"):
         raise ResetBlocked("Confirm-token не совпал со snapshot manifest")
-    clearance = _load_verified_clearance(
-        archive,
-        manifest,
-        claimed_digest=clearance_digest,
-        claimed_receipt_sha256=clearance_receipt_sha256,
-    )
+    if authority_mode == AUTHORITY_MODE_REGISTRY:
+        clearance = _load_verified_clearance(
+            archive,
+            manifest,
+            claimed_digest=clearance_digest,
+            claimed_receipt_sha256=clearance_receipt_sha256,
+        )
+        verified_clearance_digest = clearance["clearance_digest"]
+    elif authority_mode == AUTHORITY_MODE_ARCHIVE_ONLY:
+        clearance = _load_verified_archive_only_authorization(
+            archive,
+            manifest,
+            claimed_digest=clearance_digest,
+            claimed_receipt_sha256=clearance_receipt_sha256,
+        )
+        verified_clearance_digest = clearance["authorization_digest"]
+    else:
+        raise ResetBlocked("Неизвестный reset authority mode")
     intent = _load_verified_intent(
         archive,
         manifest,
-        clearance_digest=clearance["clearance_digest"],
+        clearance_digest=verified_clearance_digest,
         clearance_receipt_sha256=clearance_receipt_sha256,
         claimed_intent_digest=orchestration_intent_digest,
+        authority_mode=authority_mode,
     )
+    if authority_mode == AUTHORITY_MODE_ARCHIVE_ONLY:
+        prepare = clearance["prepare"]
+        if (
+            prepare["container_id"] != intent["container_id"]
+            or prepare["image_id"] != intent["image_id"]
+        ):
+            raise ResetBlocked(
+                "Archive-only authorization runtime не совпал с orchestration intent"
+            )
     binding = _reset_binding(
         archive,
         manifest,
-        clearance_digest=clearance["clearance_digest"],
+        clearance_digest=verified_clearance_digest,
         clearance_receipt_sha256=clearance_receipt_sha256,
         intent=intent,
+        authority_mode=authority_mode,
     )
     if any(
         (archive / marker_name).exists()
@@ -1487,7 +1800,7 @@ def apply_reset(
         _write_json(
             archive / APPLY_STARTED_MANIFEST,
             _signed_receipt({
-                "schema": "hardbot.reset-apply-started.v2",
+                "schema": APPLY_STARTED_SCHEMA,
                 "kind": "hardbot_limited_test_apply_started",
                 "started_at": _utc_now(),
                 **binding,
@@ -1566,7 +1879,7 @@ def apply_reset(
             raise RuntimeError("Новый photo storage не пуст")
 
         post = _signed_receipt({
-            "schema": "hardbot.reset-post.v2",
+            "schema": POST_RESET_SCHEMA,
             "kind": "hardbot_limited_test_post_reset",
             "completed_at": _utc_now(),
             "pre_reset_counts": manifest["counts"],
@@ -1640,7 +1953,7 @@ def apply_reset(
             _write_json(
                 archive / RECOVERY_MANIFEST,
                 _signed_receipt({
-                    "schema": "hardbot.reset-recovery.v2",
+                    "schema": RECOVERY_SCHEMA,
                     "kind": "hardbot_limited_test_recovery",
                     "completed_at": _utc_now(),
                     "reason": "automatic_apply_rollback",
@@ -1658,6 +1971,50 @@ def apply_reset(
         raise
 
 
+def apply_reset(
+    archive_raw: str | os.PathLike[str],
+    *,
+    confirm_token: str,
+    clearance_digest: str,
+    clearance_receipt_sha256: str,
+    orchestration_intent_digest: str,
+    app_stopped: bool,
+) -> dict[str, Any]:
+    """Apply the existing registry-clearance reset path unchanged."""
+
+    return _apply_authorized_reset(
+        archive_raw,
+        confirm_token=confirm_token,
+        clearance_digest=clearance_digest,
+        clearance_receipt_sha256=clearance_receipt_sha256,
+        orchestration_intent_digest=orchestration_intent_digest,
+        app_stopped=app_stopped,
+        authority_mode=AUTHORITY_MODE_REGISTRY,
+    )
+
+
+def apply_archive_only_reset(
+    archive_raw: str | os.PathLike[str],
+    *,
+    confirm_token: str,
+    authorization_digest: str,
+    authorization_receipt_sha256: str,
+    orchestration_intent_digest: str,
+    app_stopped: bool,
+) -> dict[str, Any]:
+    """Clear an explicitly obsolete dataset after exact archive authorization."""
+
+    return _apply_authorized_reset(
+        archive_raw,
+        confirm_token=confirm_token,
+        clearance_digest=authorization_digest,
+        clearance_receipt_sha256=authorization_receipt_sha256,
+        orchestration_intent_digest=orchestration_intent_digest,
+        app_stopped=app_stopped,
+        authority_mode=AUTHORITY_MODE_ARCHIVE_ONLY,
+    )
+
+
 def recover_incomplete_reset(
     archive_raw: str | os.PathLike[str],
     *,
@@ -1672,9 +2029,6 @@ def recover_incomplete_reset(
             "Основной контейнер должен быть остановлен; предъявите --app-stopped"
         )
     archive = _validated_archive_dir(archive_raw, create=False)
-    manifest = _load_verified_manifest(archive)
-    if not confirm_token or confirm_token != manifest.get("confirm_token"):
-        raise ResetBlocked("Confirm-token не совпал со snapshot manifest")
     if (
         (archive / POST_RESET_MANIFEST).exists()
         or (archive / POST_RESET_MANIFEST).is_symlink()
@@ -1683,11 +2037,28 @@ def recover_incomplete_reset(
     started = archive / APPLY_STARTED_MANIFEST
     if not started.is_file():
         raise ResetBlocked("Нет durable evidence начала destructive reset")
+    started_preview = _load_json_regular(
+        started,
+        label="apply-started receipt",
+    )
+    if not isinstance(started_preview, dict):
+        raise ResetBlocked("Apply-started receipt has an inexact schema")
+    started_schema = started_preview.get("schema")
+    manifest = _load_verified_recovery_manifest(
+        archive,
+        apply_started_schema=str(started_schema or ""),
+    )
+    if not confirm_token or confirm_token != manifest.get("confirm_token"):
+        raise ResetBlocked("Confirm-token не совпал со snapshot manifest")
     started_payload = _load_apply_started(
         archive,
         manifest,
         claimed_intent_digest=orchestration_intent_digest,
     )
+    if started_payload.get("schema") != started_schema:
+        raise ResetBlocked(
+            "Apply-started receipt changed during recovery verification"
+        )
     binding = {
         key: started_payload[key]
         for key in (
@@ -1695,6 +2066,7 @@ def recover_incomplete_reset(
             "confirm_token",
             "clearance_digest",
             "clearance_receipt_sha256",
+            "authority_mode",
             "orchestration_intent_digest",
             "orchestration_intent_sha256",
             "orchestration_nonce",
@@ -1732,7 +2104,7 @@ def recover_incomplete_reset(
     ):
         raise RuntimeError("Interrupted reset recovery не восстановил pre-reset state")
     result = _signed_receipt({
-        "schema": "hardbot.reset-recovery.v2",
+        "schema": RECOVERY_SCHEMA,
         "kind": "hardbot_limited_test_recovery",
         "completed_at": _utc_now(),
         "reason": "operator_interrupted_recovery",
@@ -1785,6 +2157,22 @@ def _parser() -> argparse.ArgumentParser:
     apply.add_argument("--clearance-receipt-sha256", required=True)
     apply.add_argument("--orchestration-intent-digest", required=True)
     apply.add_argument("--app-stopped", action="store_true")
+    archive_apply = sub.add_parser(
+        "apply-archive-only",
+        help="очистить obsolete dataset после отдельного owner authorization",
+    )
+    archive_apply.add_argument("--archive", required=True)
+    archive_apply.add_argument("--confirm-token", required=True)
+    archive_apply.add_argument("--authorization-digest", required=True)
+    archive_apply.add_argument(
+        "--authorization-receipt-sha256",
+        required=True,
+    )
+    archive_apply.add_argument(
+        "--orchestration-intent-digest",
+        required=True,
+    )
+    archive_apply.add_argument("--app-stopped", action="store_true")
     recover = sub.add_parser(
         "recover",
         help="восстановить pre-reset state после оборванного apply",
@@ -1808,6 +2196,17 @@ def main(argv: list[str] | None = None) -> int:
                 confirm_token=args.confirm_token,
                 clearance_digest=args.clearance_digest,
                 clearance_receipt_sha256=args.clearance_receipt_sha256,
+                orchestration_intent_digest=args.orchestration_intent_digest,
+                app_stopped=args.app_stopped,
+            )
+        elif args.command == "apply-archive-only":
+            result = apply_archive_only_reset(
+                args.archive,
+                confirm_token=args.confirm_token,
+                authorization_digest=args.authorization_digest,
+                authorization_receipt_sha256=(
+                    args.authorization_receipt_sha256
+                ),
                 orchestration_intent_digest=args.orchestration_intent_digest,
                 app_stopped=args.app_stopped,
             )

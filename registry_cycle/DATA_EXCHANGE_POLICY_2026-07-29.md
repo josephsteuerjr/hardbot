@@ -126,6 +126,16 @@ legacy-задач проверяется отдельно; перед пилот
 2. Перед очисткой БД обязательны:
    online SQLite backup, SHA-256, `PRAGMA quick_check`, финальный safe export
    и ограниченный raw diagnostic export для расследования.
+   Штатный путь дополнительно требует завершённый registry clearance. Если
+   владелец явно объявил весь dataset устаревшим и отменил его перенос,
+   допускается только отдельный `archive-only` owner authorization: собственная
+   schema, exact binding к тому же snapshot/runtime/ledger, отдельная
+   owner-фраза и затем отдельная destructive-фраза. Эти два authority-типа
+   не взаимозаменяемы. Archive-only снимает только business-readiness gate
+   переноса: logical SQLite digest, exact safe/raw projection, photo archive,
+   anti-replay ledger и immutable `reset-prepare.json` с runtime/release
+   binding остаются обязательными. В apply/post/recovery receipt режим
+   фиксируется отдельным `authority_mode`.
 3. Очистка выполняется по утверждённой retention-матрице. Удаление только
    `clients`, `visits`, `markers` недостаточно: отдельно проверяются
    `photo_geo`, `audit`, пользователи/токены/ссылки, bindings/roles/settings
@@ -368,8 +378,10 @@ Read-only/dry-run старых инструментов допускается �
   Compose-файлах; локальный/production env остаётся единственным источником,
   а скомпрометированное историей значение требует ротации до пилота;
 - `/admin/reset` всегда fail-closed `409`; очистка возможна только через
-  snapshot/clearance-bound reset, а consumed import replay не запускает
-  post-import geocode или другой mutator;
+  snapshot + exact registry-clearance либо отдельный owner-authorized
+  archive-only reset. Archive-only не утверждает, что данные перенесены в
+  реестры, и не ослабляет обычный clearance. Consumed import replay не
+  запускает post-import geocode или другой mutator;
 - оба CLI возвращают код `4` при штатной блокировке;
 - dry-run/report остаются доступны без аварийного флага;
 - разрешающим считается только точное значение `1`.

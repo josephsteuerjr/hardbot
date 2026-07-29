@@ -161,6 +161,42 @@ python _local\reset_hardbot2_for_limited_test.py apply `
   --confirm CLEAR-HARDBOT2-FOR-LIMITED-TEST
 ```
 
+Если владелец данных явно признал весь текущий dataset устаревшим и отменил
+его перенос в реестры, используется отдельный контур — он не изображает
+успешный registry clearance:
+
+```powershell
+python _local\reset_hardbot2_for_limited_test.py prepare-archive
+python _local\reset_hardbot2_for_limited_test.py authorize-archive-only `
+  --snapshot <snapshot> `
+  --confirm ARCHIVE-OBSOLETE-HARDBOT2-DATA
+python _local\reset_hardbot2_for_limited_test.py apply-archive-only `
+  --snapshot <snapshot> `
+  --authorization <snapshot>\archive-only-authorization.json `
+  --confirm CLEAR-HARDBOT2-FOR-LIMITED-TEST
+```
+
+Первая фраза фиксирует owner-disposition только для exact проверенного
+snapshot; вторая отдельно разрешает destructive шаг. Archive-only receipt
+имеет собственную schema и не принимается обычным `apply`, а
+`registry-clearance.json` не принимается `apply-archive-only`. Registry lease
+в этом режиме не берётся, потому что registry publication исключена решением
+владельца; hardbot ops lock, остановка exact container/image, watchdog,
+DB/photo drift-check, durable apply-started/post/recovery receipts и rollback
+остаются обязательными.
+
+`prepare-archive` проверяет архивную целостность, а не готовность старых
+визитов к переносу: logical SQLite digest, exact safe/raw projection, полный
+фотоархив и anti-replay ledger остаются обязательными, но registry-only
+требования к бизнес-провенансу завершённых визитов не применяются. Обычный
+`prepare-clearance` по-прежнему применяет их полностью.
+
+Перед one-shot controller CAS-загружает в remote archive exact
+`reset-prepare.json`; owner authorization связан с его SHA-256, snapshot,
+полными container/image ID и release HEAD. `apply-started`, post и recovery
+receipts версии v3 всегда содержат `authority_mode`, поэтому archive-only и
+registry-clearance невозможно спутать и после аварийного восстановления.
+
 `prepare-clearance` при работающем боте создаёт согласованный online-backup
 SQLite, safe/raw exports, schema, хэшированный photo manifest и полную копию
 фото, скачивает их локально под ограниченным ACL и независимо сверяет SHA-256,
@@ -168,16 +204,17 @@ integrity, counts и содержимое фотоархива. Затем вн�
 enrichment/registry_cycle завершается и проверяется через evidence-only
 `registry_cycle.clearance`; этот модуль ничего не переносит и не публикует.
 
-Старые Tk/Tauri-кнопки очистки отключены, а `/admin/reset` для обоих legacy
-scope всегда отвечает `409`. Обход snapshot/clearance через admin API
+Старая Tk-кнопка очистки отключена, а legacy `/admin/reset` всегда отвечает
+`409`. Обход snapshot/clearance через admin API
 отсутствует.
 
-`apply` требует exact snapshot и digest-bound clearance receipt, повторно
-проверяет все локальные evidence-файлы, останавливает контейнер и доказывает,
-что live БД/фото не изменились после snapshot. Только затем он очищает точно
-известные application-таблицы и pending import-authorizations, атомарно
-переносит фото в карантин. Consumed import receipts и source heads не
-очищаются: reset не превращает старый опубликованный master снова в новый.
+Оба apply-пути требуют exact snapshot и свой digest-bound authority receipt,
+повторно проверяют все локальные evidence-файлы, останавливают контейнер и
+доказывают, что live БД/фото не изменились после snapshot. Только затем
+очищаются точно известные application-таблицы и pending
+import-authorizations, а фото атомарно переносятся в карантин. Consumed import
+receipts и source heads не очищаются; их counts/digests независимо сверяются
+по архивному backup, post receipt и live status после рестарта.
 После остановки controller создаёт одноразовый signed orchestration intent:
 он связан с exact archive/confirm-token, SHA snapshot и clearance receipt,
 случайным nonce, а также полными container/image ID. Внутренний one-shot

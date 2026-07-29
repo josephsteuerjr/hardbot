@@ -80,6 +80,17 @@ def test_every_exchange_consumer_uses_one_versioned_contract():
     assert clearance.RECEIPT_SCHEMA == contract.CLEARANCE_RECEIPT_SCHEMA
 
 
+def test_contract_binding_sha_is_exact_raw_contract_file_sha():
+    raw_sha256 = hashlib.sha256(contract.CONTRACT_PATH.read_bytes()).hexdigest()
+
+    assert contract.CONTRACT_SHA256 == raw_sha256
+    assert contract.contract_binding() == {
+        "schema": contract.CONTRACT_SCHEMA,
+        "version": contract.CONTRACT_VERSION,
+        "sha256": raw_sha256,
+    }
+
+
 def test_form_snapshot_enrichment_and_import_semantics_cannot_drift_apart():
     assert tuple(web.FORM_DROPDOWNS) == contract.FORM_DROPDOWN_KEYS
     assert tuple(web.FORM_TEXT) == contract.FORM_TEXT_KEYS

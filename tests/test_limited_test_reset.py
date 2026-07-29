@@ -88,6 +88,51 @@ def _seed_all_tables(photos: Path) -> None:
     (photo_dir / "photo.jpg").write_bytes(b"\xff\xd8\xfftest-photo")
 
 
+def _seed_import_ledger() -> tuple[dict, dict]:
+    grid = [
+        [
+            db.BY_KEY["contract_id"].title,
+            db.BY_KEY["client"].title,
+            db.BY_KEY["responsible"].title,
+        ],
+        [
+            db.BY_KEY["contract_id"].source,
+            db.BY_KEY["client"].source,
+            db.BY_KEY["responsible"].source,
+        ],
+        ["RESET-1", "Тестовый Должник", "Сотрудник"],
+    ]
+    consumed_proof = contract.build_test_subset_source_proof(
+        grid,
+        approval_id="archive-reset-consumed",
+        contracts=[
+            {"contract_id": "RESET-1", "responsible": "Сотрудник"}
+        ],
+    )
+    consumed = db.register_import_authorization(
+        consumed_proof,
+        source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
+    )
+    assert db.import_grid(
+        grid,
+        source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
+        source_proof=consumed_proof,
+        require_source_proof=True,
+    )["blocked"] is False
+    pending_proof = contract.build_test_subset_source_proof(
+        grid,
+        approval_id="archive-reset-pending",
+        contracts=[
+            {"contract_id": "RESET-1", "responsible": "Сотрудник"}
+        ],
+    )
+    pending = db.register_import_authorization(
+        pending_proof,
+        source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
+    )
+    return consumed, pending
+
+
 def _install_clearance(archive: Path, manifest: dict) -> tuple[str, str]:
     completed = 0
     unsigned = {
@@ -181,6 +226,10 @@ def _install_intent(
     manifest: dict,
     clearance_digest: str,
     clearance_sha: str,
+    *,
+    container_id: str = "container-test-id",
+    image_id: str = "sha256:" + "9" * 64,
+    authority_mode: str = reset.AUTHORITY_MODE_REGISTRY,
 ) -> str:
     unsigned = {
         "schema": reset.ORCHESTRATION_INTENT_SCHEMA,
@@ -193,8 +242,9 @@ def _install_intent(
         ),
         "clearance_digest": clearance_digest,
         "clearance_receipt_sha256": clearance_sha,
-        "container_id": "container-test-id",
-        "image_id": "sha256:" + "9" * 64,
+        "authority_mode": authority_mode,
+        "container_id": container_id,
+        "image_id": image_id,
         "app_stopped": True,
     }
     digest = reset._canonical_digest(unsigned)
@@ -203,6 +253,76 @@ def _install_intent(
         {**unsigned, "intent_digest": digest},
     )
     return digest
+
+
+def _install_archive_only_authorization(
+    archive: Path,
+    manifest: dict,
+    *,
+    container_id: str = "a" * 64,
+    image_id: str = "sha256:" + "9" * 64,
+) -> tuple[str, str]:
+    backup = sqlite3.connect(
+        f"file:{archive / reset.BACKUP_NAME}?mode=ro",
+        uri=True,
+    )
+    try:
+        retained = reset._retained_import_state(backup)
+    finally:
+        backup.close()
+    remote_archive = f"/opt/hardbot2/data/backups/{archive.name}"
+    prepare_receipt = {
+        "schema": "hardbot.reset-prepare.v1",
+        "prepared_at_utc": "20260729T000000Z",
+        "remote_archive": remote_archive,
+        "local_archive": str(archive.resolve()),
+        "snapshot_manifest_sha256": reset._sha256_file(
+            archive / reset.SNAPSHOT_MANIFEST
+        ),
+        "confirm_token": manifest["confirm_token"],
+        "container_id": container_id,
+        "image_id": image_id,
+        "release_git_head": "6" * 40,
+    }
+    reset._write_json(
+        archive / reset.PREPARE_RECEIPT_NAME,
+        prepare_receipt,
+    )
+    unsigned = {
+        "schema": reset.ARCHIVE_ONLY_AUTHORIZATION_SCHEMA,
+        "kind": reset.ARCHIVE_ONLY_AUTHORIZATION_KIND,
+        "authorized_at_utc": "2026-07-29T00:00:00Z",
+        "nonce": "8" * 64,
+        "data_exchange_contract": reset.DATA_EXCHANGE_CONTRACT,
+        "snapshot": {
+            "manifest_sha256": reset._sha256_file(
+                archive / reset.SNAPSHOT_MANIFEST
+            ),
+            "confirm_token": manifest["confirm_token"],
+            "database_state_digest": manifest["database_state_digest"],
+            "counts": manifest["counts"],
+            "artifacts": manifest["artifacts"],
+            "photos": manifest["photos"],
+            "import_authorizations": retained,
+        },
+        "prepare": {
+            "receipt_sha256": reset._sha256_file(
+                archive / reset.PREPARE_RECEIPT_NAME
+            ),
+            "remote_archive": remote_archive,
+            "container_id": container_id,
+            "image_id": image_id,
+            "release_git_head": "6" * 40,
+        },
+        "decision": reset._archive_only_decision(),
+    }
+    digest = reset._canonical_digest(unsigned)
+    path = archive / reset.ARCHIVE_ONLY_AUTHORIZATION_NAME
+    reset._write_json(
+        path,
+        {**unsigned, "authorization_digest": digest},
+    )
+    return digest, reset._sha256_file(path)
 
 
 def _authority(archive: Path, manifest: dict) -> tuple[str, str, str]:
@@ -219,6 +339,31 @@ def _authority(archive: Path, manifest: dict) -> tuple[str, str, str]:
     return clearance_digest, clearance_sha, intent_digest
 
 
+def _archive_authority(
+    archive: Path,
+    manifest: dict,
+    *,
+    container_id: str = "a" * 64,
+    intent_container_id: str | None = None,
+) -> tuple[str, str, str]:
+    authorization_digest, authorization_sha = (
+        _install_archive_only_authorization(
+            archive,
+            manifest,
+            container_id=container_id,
+        )
+    )
+    intent_digest = _install_intent(
+        archive,
+        manifest,
+        authorization_digest,
+        authorization_sha,
+        container_id=intent_container_id or container_id,
+        authority_mode=reset.AUTHORITY_MODE_ARCHIVE_ONLY,
+    )
+    return authorization_digest, authorization_sha, intent_digest
+
+
 def _install_apply_started(
     archive: Path,
     manifest: dict,
@@ -232,6 +377,7 @@ def _install_apply_started(
         clearance_digest=clearance_digest,
         clearance_receipt_sha256=clearance_sha,
         claimed_intent_digest=intent_digest,
+        authority_mode=reset.AUTHORITY_MODE_REGISTRY,
     )
     binding = reset._reset_binding(
         archive,
@@ -239,18 +385,53 @@ def _install_apply_started(
         clearance_digest=clearance_digest,
         clearance_receipt_sha256=clearance_sha,
         intent=intent,
+        authority_mode=reset.AUTHORITY_MODE_REGISTRY,
     )
     reset._write_json(
         archive / reset.APPLY_STARTED_MANIFEST,
         reset._signed_receipt(
             {
-                "schema": "hardbot.reset-apply-started.v2",
+                "schema": reset.APPLY_STARTED_SCHEMA,
                 "kind": "hardbot_limited_test_apply_started",
                 "started_at": "2026-07-29T00:00:00+00:00",
                 **binding,
             }
         ),
     )
+
+
+def _rewrite_snapshot_contract_binding(
+    archive: Path,
+    manifest: dict,
+    binding: dict,
+) -> dict:
+    """Reproduce the exact artifacts emitted by the historical SHA bug."""
+
+    for name in (reset.SAFE_EXPORT_NAME, reset.RAW_EXPORT_NAME):
+        path = archive / name
+        with gzip.open(path, "rt", encoding="utf-8") as stream:
+            payload = json.load(stream)
+        payload["data_exchange_contract"] = dict(binding)
+        reset._write_json_gz(path, payload)
+        manifest["artifacts"][name] = reset._sha256_file(path)
+    manifest["data_exchange_contract"] = dict(binding)
+    token_source = {
+        "data_exchange_contract": dict(binding),
+        "artifacts": manifest["artifacts"],
+        "counts": manifest["counts"],
+        "database_state_digest": manifest["database_state_digest"],
+        "photos_digest": manifest["photos"]["digest"],
+        "photos_root_exists": manifest["photos"]["root_exists"],
+    }
+    manifest["confirm_token"] = hashlib.sha256(
+        json.dumps(
+            token_source,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    reset._write_json(archive / reset.SNAPSHOT_MANIFEST, manifest)
+    return manifest
 
 
 def _apply(archive: Path, manifest: dict):
@@ -302,6 +483,8 @@ def test_snapshot_and_reset_cover_all_tables_and_quarantine_photos(
         assert extracted.read() == b"\xff\xd8\xfftest-photo"
 
     post = _apply(archive, manifest)
+    assert post["schema"] == reset.POST_RESET_SCHEMA
+    assert post["authority_mode"] == reset.AUTHORITY_MODE_REGISTRY
     assert not any(post["post_reset_counts"].values())
     assert list(photos.iterdir()) == []
     assert (
@@ -378,6 +561,200 @@ def test_reset_invalidates_pending_but_preserves_consumed_import_ledger(
         ).fetchone()
     assert head["source_id"] == "test-subset:reset-consumed"
     assert head["proof_digest"] == consumed["proof_digest"]
+
+
+def test_archive_only_reset_preserves_ledger_and_quarantines_exact_archive(
+    monkeypatch,
+    tmp_path,
+):
+    database, photos = _isolate(monkeypatch, tmp_path)
+    _seed_all_tables(photos)
+    consumed, pending = _seed_import_ledger()
+    archive = (
+        database.parent
+        / "backups"
+        / "limited-test-archive-only-20260729T000000Z-deadbeef"
+    )
+    manifest = reset.create_snapshot(archive)
+    authorization_digest, authorization_sha, intent_digest = (
+        _archive_authority(archive, manifest)
+    )
+
+    post = reset.apply_archive_only_reset(
+        archive,
+        confirm_token=manifest["confirm_token"],
+        authorization_digest=authorization_digest,
+        authorization_receipt_sha256=authorization_sha,
+        orchestration_intent_digest=intent_digest,
+        app_stopped=True,
+    )
+
+    assert not any(post["post_reset_counts"].values())
+    assert post["schema"] == reset.POST_RESET_SCHEMA
+    assert post["authority_mode"] == reset.AUTHORITY_MODE_ARCHIVE_ONLY
+    assert post["clearance_digest"] == authorization_digest
+    assert post["clearance_receipt_sha256"] == authorization_sha
+    assert post["import_authorizations"]["pending_invalidated"] == 1
+    assert post["import_authorizations"]["pending"] == 0
+    assert post["import_authorizations"]["consumed"] == 1
+    assert post["import_authorizations"]["heads"] == 1
+    assert db.import_authorization_status(
+        consumed["proof_digest"]
+    )["status"] == "consumed"
+    assert db.import_authorization_status(pending["proof_digest"]) is None
+    assert list(photos.iterdir()) == []
+    assert (
+        archive / "photos-before-reset" / "RESET-1" / "photo.jpg"
+    ).read_bytes() == b"\xff\xd8\xfftest-photo"
+    assert (archive / reset.ARCHIVE_ONLY_AUTHORIZATION_NAME).is_file()
+
+
+def test_registry_and_archive_only_authorities_are_not_interchangeable(
+    monkeypatch,
+    tmp_path,
+):
+    database, photos = _isolate(monkeypatch, tmp_path)
+    _seed_all_tables(photos)
+    archive_only = (
+        database.parent
+        / "backups"
+        / "limited-test-archive-only-20260729T000001Z-deadbeef"
+    )
+    archive_manifest = reset.create_snapshot(archive_only)
+    authorization_digest, authorization_sha, archive_intent = (
+        _archive_authority(archive_only, archive_manifest)
+    )
+    with pytest.raises(reset.ResetBlocked, match="registry clearance"):
+        reset.apply_reset(
+            archive_only,
+            confirm_token=archive_manifest["confirm_token"],
+            clearance_digest=authorization_digest,
+            clearance_receipt_sha256=authorization_sha,
+            orchestration_intent_digest=archive_intent,
+            app_stopped=True,
+        )
+    assert db.get_client("RESET-1") is not None
+    assert (photos / "RESET-1" / "photo.jpg").is_file()
+
+    registry_archive = (
+        database.parent / "backups" / "registry-authority-is-not-owner"
+    )
+    registry_manifest = reset.create_snapshot(registry_archive)
+    clearance_digest, clearance_sha, registry_intent = _authority(
+        registry_archive,
+        registry_manifest,
+    )
+    with pytest.raises(reset.ResetBlocked, match="owner authorization"):
+        reset.apply_archive_only_reset(
+            registry_archive,
+            confirm_token=registry_manifest["confirm_token"],
+            authorization_digest=clearance_digest,
+            authorization_receipt_sha256=clearance_sha,
+            orchestration_intent_digest=registry_intent,
+            app_stopped=True,
+        )
+    assert db.get_client("RESET-1") is not None
+    assert (photos / "RESET-1" / "photo.jpg").is_file()
+
+
+def test_archive_only_reset_requires_exact_prepare_runtime_binding(
+    monkeypatch,
+    tmp_path,
+):
+    database, photos = _isolate(monkeypatch, tmp_path)
+    _seed_all_tables(photos)
+    archive = (
+        database.parent
+        / "backups"
+        / "limited-test-archive-only-20260729T000002Z-deadbeef"
+    )
+    manifest = reset.create_snapshot(archive)
+    authorization_digest, authorization_sha, intent_digest = (
+        _archive_authority(
+            archive,
+            manifest,
+            container_id="a" * 64,
+            intent_container_id="b" * 64,
+        )
+    )
+
+    with pytest.raises(reset.ResetBlocked, match="runtime"):
+        reset.apply_archive_only_reset(
+            archive,
+            confirm_token=manifest["confirm_token"],
+            authorization_digest=authorization_digest,
+            authorization_receipt_sha256=authorization_sha,
+            orchestration_intent_digest=intent_digest,
+            app_stopped=True,
+        )
+    assert not (archive / reset.APPLY_STARTED_MANIFEST).exists()
+    assert db.get_client("RESET-1") is not None
+    assert (photos / "RESET-1" / "photo.jpg").is_file()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["decision", "snapshot", "contract", "prepare"],
+)
+def test_archive_only_authorization_tamper_blocks_before_write(
+    monkeypatch,
+    tmp_path,
+    mutation,
+):
+    database, photos = _isolate(monkeypatch, tmp_path)
+    _seed_all_tables(photos)
+    archive = (
+        database.parent
+        / "backups"
+        / f"limited-test-archive-only-tamper-{mutation}"
+    )
+    manifest = reset.create_snapshot(archive)
+    _authorization_digest, _authorization_sha = (
+        _install_archive_only_authorization(archive, manifest)
+    )
+    path = archive / reset.ARCHIVE_ONLY_AUTHORIZATION_NAME
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if mutation == "decision":
+        payload["decision"]["registry_transfer"] = "skipped"
+    elif mutation == "snapshot":
+        payload["snapshot"]["database_state_digest"] = "0" * 64
+    elif mutation == "contract":
+        payload["data_exchange_contract"]["sha256"] = "0" * 64
+    else:
+        payload["prepare"]["receipt_sha256"] = "0" * 64
+    payload["authorization_digest"] = reset._canonical_digest(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "authorization_digest"
+        }
+    )
+    reset._write_json(path, payload)
+    authorization_sha = reset._sha256_file(path)
+    intent_digest = _install_intent(
+        archive,
+        manifest,
+        payload["authorization_digest"],
+        authorization_sha,
+        container_id="a" * 64,
+        authority_mode=reset.AUTHORITY_MODE_ARCHIVE_ONLY,
+    )
+
+    with pytest.raises(
+        reset.ResetBlocked,
+        match="Archive-only|prepare receipt",
+    ):
+        reset.apply_archive_only_reset(
+            archive,
+            confirm_token=manifest["confirm_token"],
+            authorization_digest=payload["authorization_digest"],
+            authorization_receipt_sha256=authorization_sha,
+            orchestration_intent_digest=intent_digest,
+            app_stopped=True,
+        )
+    assert not (archive / reset.APPLY_STARTED_MANIFEST).exists()
+    assert db.get_client("RESET-1") is not None
+    assert (photos / "RESET-1" / "photo.jpg").is_file()
 
 
 def test_reset_blocks_if_database_changed_after_snapshot(monkeypatch, tmp_path):
@@ -534,6 +911,8 @@ def test_recover_incomplete_reset_restores_database_and_photos(
         app_stopped=True,
     )
     assert recovered["database_quick_check"] == "ok"
+    assert recovered["schema"] == reset.RECOVERY_SCHEMA
+    assert recovered["authority_mode"] == reset.AUTHORITY_MODE_REGISTRY
     assert recovered["counts"] == manifest["counts"]
     assert recovered["orchestration_intent_digest"] == intent_digest
     assert recovered["snapshot_manifest_sha256"] == reset._sha256_file(
@@ -548,6 +927,131 @@ def test_recover_incomplete_reset_restores_database_and_photos(
     )
     assert (photos / "RESET-1" / "photo.jpg").is_file()
     assert (archive / reset.RECOVERY_MANIFEST).is_file()
+
+
+def test_legacy_v2_apply_started_receipt_still_recovers_as_registry_mode(
+    monkeypatch,
+    tmp_path,
+):
+    database, photos = _isolate(monkeypatch, tmp_path)
+    _seed_all_tables(photos)
+    archive = database.parent / "backups" / "legacy-v2-recovery"
+    manifest = reset.create_snapshot(archive)
+    manifest = _rewrite_snapshot_contract_binding(
+        archive,
+        manifest,
+        reset.LEGACY_V2_RECOVERY_DATA_EXCHANGE_CONTRACT,
+    )
+    with pytest.raises(reset.ResetBlocked, match="data-exchange contract"):
+        reset._load_verified_manifest(archive)
+
+    clearance_digest = "c" * 64
+    clearance_sha = "d" * 64
+    intent_unsigned = {
+        "schema": "hardbot.reset-orchestration-apply-intent.v1",
+        "created_at_utc": "2026-07-29T00:00:00Z",
+        "nonce": "8" * 64,
+        "archive": str(archive),
+        "confirm_token": manifest["confirm_token"],
+        "snapshot_manifest_sha256": reset._sha256_file(
+            archive / reset.SNAPSHOT_MANIFEST
+        ),
+        "clearance_digest": clearance_digest,
+        "clearance_receipt_sha256": clearance_sha,
+        "container_id": "a" * 64,
+        "image_id": "sha256:" + "9" * 64,
+        "app_stopped": True,
+    }
+    intent_digest = reset._canonical_digest(intent_unsigned)
+    reset._write_json(
+        archive / reset.ORCHESTRATION_INTENT,
+        {**intent_unsigned, "intent_digest": intent_digest},
+    )
+    legacy_started = {
+        "schema": reset.LEGACY_APPLY_STARTED_SCHEMA,
+        "kind": "hardbot_limited_test_apply_started",
+        "started_at": "2026-07-29T00:00:00+00:00",
+        "snapshot_manifest_sha256": reset._sha256_file(
+            archive / reset.SNAPSHOT_MANIFEST
+        ),
+        "confirm_token": manifest["confirm_token"],
+        "clearance_digest": clearance_digest,
+        "clearance_receipt_sha256": clearance_sha,
+        "orchestration_intent_digest": intent_digest,
+        "orchestration_intent_sha256": reset._sha256_file(
+            archive / reset.ORCHESTRATION_INTENT
+        ),
+        "orchestration_nonce": intent_unsigned["nonce"],
+        "container_id": intent_unsigned["container_id"],
+        "image_id": intent_unsigned["image_id"],
+    }
+    reset._write_json(
+        archive / reset.APPLY_STARTED_MANIFEST,
+        reset._signed_receipt(legacy_started),
+    )
+
+    archived_photos = archive / "photos-before-reset"
+    photos.replace(archived_photos)
+    photos.mkdir()
+    with db.connect() as connection:
+        for table in reset.DELETE_ORDER:
+            connection.execute(f'DELETE FROM "{table}"')
+        connection.commit()
+
+    recovered = reset.recover_incomplete_reset(
+        archive,
+        confirm_token=manifest["confirm_token"],
+        orchestration_intent_digest=intent_digest,
+        app_stopped=True,
+    )
+
+    assert recovered["schema"] == reset.RECOVERY_SCHEMA
+    assert recovered["authority_mode"] == reset.AUTHORITY_MODE_REGISTRY
+    assert recovered["counts"] == manifest["counts"]
+    assert (photos / "RESET-1" / "photo.jpg").is_file()
+
+
+def test_legacy_buggy_contract_is_rejected_for_v3_recovery(
+    monkeypatch,
+    tmp_path,
+):
+    database, photos = _isolate(monkeypatch, tmp_path)
+    _seed_all_tables(photos)
+    archive = database.parent / "backups" / "legacy-binding-v3-blocked"
+    manifest = _rewrite_snapshot_contract_binding(
+        archive,
+        reset.create_snapshot(archive),
+        reset.LEGACY_V2_RECOVERY_DATA_EXCHANGE_CONTRACT,
+    )
+    clearance_digest = "c" * 64
+    clearance_sha = "d" * 64
+    intent_digest = _install_intent(
+        archive,
+        manifest,
+        clearance_digest,
+        clearance_sha,
+    )
+    _install_apply_started(
+        archive,
+        manifest,
+        clearance_digest,
+        clearance_sha,
+        intent_digest,
+    )
+
+    with pytest.raises(
+        reset.ResetBlocked,
+        match="incompatible with recovery contract",
+    ):
+        reset.recover_incomplete_reset(
+            archive,
+            confirm_token=manifest["confirm_token"],
+            orchestration_intent_digest=intent_digest,
+            app_stopped=True,
+        )
+
+    assert db.get_client("RESET-1") is not None
+    assert (photos / "RESET-1" / "photo.jpg").is_file()
 
 
 def test_direct_apply_is_blocked_without_controller_intent(
@@ -696,6 +1200,63 @@ def test_crash_before_terminal_receipt_recovers_exact_pre_state(
     assert not (archive / reset.POST_RESET_MANIFEST).exists()
 
 
+def test_archive_only_crash_recovery_restores_exact_pre_state_and_ledger(
+    monkeypatch,
+    tmp_path,
+):
+    database, photos = _isolate(monkeypatch, tmp_path)
+    _seed_all_tables(photos)
+    consumed, pending = _seed_import_ledger()
+    archive = (
+        database.parent
+        / "backups"
+        / "limited-test-archive-only-crash-recovery"
+    )
+    manifest = reset.create_snapshot(archive)
+    authorization_digest, authorization_sha, intent_digest = (
+        _archive_authority(archive, manifest)
+    )
+
+    def crash(name):
+        if name == "after_database_reset":
+            raise _SyntheticPowerLoss(name)
+
+    monkeypatch.setattr(reset, "_fault_point", crash)
+    with pytest.raises(_SyntheticPowerLoss, match="after_database_reset"):
+        reset.apply_archive_only_reset(
+            archive,
+            confirm_token=manifest["confirm_token"],
+            authorization_digest=authorization_digest,
+            authorization_receipt_sha256=authorization_sha,
+            orchestration_intent_digest=intent_digest,
+            app_stopped=True,
+        )
+
+    recovered = reset.recover_incomplete_reset(
+        archive,
+        confirm_token=manifest["confirm_token"],
+        orchestration_intent_digest=intent_digest,
+        app_stopped=True,
+    )
+    assert recovered["database_quick_check"] == "ok"
+    assert recovered["schema"] == reset.RECOVERY_SCHEMA
+    assert recovered["authority_mode"] == reset.AUTHORITY_MODE_ARCHIVE_ONLY
+    assert db.import_authorization_status(
+        consumed["proof_digest"]
+    )["status"] == "consumed"
+    assert db.import_authorization_status(
+        pending["proof_digest"]
+    )["status"] == "pending"
+    with db.connect() as conn:
+        assert reset._table_counts(conn) == manifest["counts"]
+        assert (
+            reset._database_state_digest(conn)
+            == manifest["database_state_digest"]
+        )
+    assert reset._photo_manifest()["digest"] == manifest["photos"]["digest"]
+    assert (photos / "RESET-1" / "photo.jpg").is_file()
+
+
 def test_crash_after_durable_terminal_receipt_is_exact_post_state(
     monkeypatch,
     tmp_path,
@@ -777,7 +1338,8 @@ def test_post_receipt_write_ambiguity_never_rolls_back_behind_receipt(
     post = json.loads(
         (archive / reset.POST_RESET_MANIFEST).read_text(encoding="utf-8")
     )
-    assert post["schema"] == "hardbot.reset-post.v2"
+    assert post["schema"] == reset.POST_RESET_SCHEMA
+    assert post["authority_mode"] == reset.AUTHORITY_MODE_REGISTRY
     assert post["orchestration_intent_digest"] == intent_digest
     with db.connect() as connection:
         assert not any(reset._table_counts(connection).values())

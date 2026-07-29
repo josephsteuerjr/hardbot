@@ -53,7 +53,7 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
             f"exchange contract is absent or not a regular file: {CONTRACT_PATH}"
         )
     raw = CONTRACT_PATH.read_bytes()
-    digest = hashlib.sha256(raw).hexdigest()
+    raw_digest = hashlib.sha256(raw).hexdigest()
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
@@ -79,7 +79,7 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
         raise ExchangeContractError("contract.version must be a positive integer")
     expected_digest = _SUPPORTED_RAW_SHA256.get(version)
-    if expected_digest is None or digest != expected_digest:
+    if expected_digest is None or raw_digest != expected_digest:
         raise ExchangeContractError(
             "exchange contract bytes are not approved for this version; "
             "bump/review the version and update the supported SHA"
@@ -444,15 +444,15 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
         for key, value in receipt.items():
             if key == "run_id":
                 continue
-            digest = _string(
+            legacy_digest = _string(
                 value,
                 label=(
                     f"imports.legacy_publication_bootstrap[{index}].{key}"
                 ),
             )
             if (
-                len(digest) != 64
-                or any(ch not in "0123456789abcdef" for ch in digest)
+                len(legacy_digest) != 64
+                or any(ch not in "0123456789abcdef" for ch in legacy_digest)
             ):
                 raise ExchangeContractError(
                     "legacy publication bootstrap hashes must be lowercase SHA-256"
@@ -464,7 +464,7 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
     if set(allowed_source_kinds) != {published_master_kind, test_subset_kind}:
         raise ExchangeContractError("allowed import kinds disagree with named kinds")
 
-    return root, raw, digest
+    return root, raw, raw_digest
 
 
 CONTRACT, CONTRACT_BYTES, CONTRACT_SHA256 = _load()

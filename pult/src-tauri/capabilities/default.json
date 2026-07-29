@@ -1,7 +1,0 @@
-{
-  "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "default",
-  "description": "Базовые разрешения окна пульта",
-  "windows": ["main"],
-  "permissions": ["core:default"]
-}

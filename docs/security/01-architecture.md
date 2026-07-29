@@ -9,13 +9,13 @@
 | **Хранилище** `hardbot/db.py` | SQLite (WAL) | Реестр должников, визиты, привязки, метки, аудит | **Да** |
 | **Скоринг** `hardbot/scoring.py` | чистый Python | Единый приоритет «куда выгоднее ехать» (бот+движок) | Да (на входе) |
 | **Геокодер** `hardbot/geocode.py` + `gazetteer.py` | Python, OSM/GeoNames | Адрес → координата (слоями, офлайн-фолбэк) | Да (адрес) |
-| **Пульт** `pult/` (Tauri/Rust) | Tauri, NSIS | Десктоп аналитика: импорт/экспорт, веса, привязки | Да |
+| **Пульт** `pult/pult.py` | Python 3.12, Tkinter | Десктоп аналитика: импорт/экспорт, веса, привязки | Да |
 | **Движок** `engine/app/main.py` | FastAPI/uvicorn | Дашборд + аналитика/маршрут (демо — синтетика) | Только при `HARDBOT_DB` |
 | **Маршрут** `engine/routing.py`,`planner.py` | Python + OSRM + VROOM | Объезд по дорогам, раздача на бригаду | Нет (координаты) |
 | **Карта** | MapLibre GL + PMTiles (Caddy, Range) | Базовый слой + точки | Нет (тайлы) |
 
-Легаси Tkinter `gui.py`/`theme.py` — заменяется Tauri-пультом, **исключён из прод-образа**
-(`.dockerignore`); в эксплуатацию ИТ/ИБ не идёт.
+Старый встроенный `hardbot/gui.py`/`theme.py` исключён из прод-образа
+(`.dockerignore`). Рабочий операторский интерфейс — отдельный `pult/pult.py`.
 
 ## 1.2. Среды (строго не путать)
 
@@ -46,7 +46,7 @@ flowchart TB
     VROOM[VROOM :3000 — 127.0.0.1]
     TILES[PMTiles basemap]
   end
-  ADMIN[Аналитик: Tauri-пульт + SSH/Tailscale]
+  ADMIN[Аналитик: Tk-пульт + SSH/Tailscale]
 
   U -- HTTPS initData(HMAC) --> CADDY
   CADDY -- reverse_proxy --> BOT
