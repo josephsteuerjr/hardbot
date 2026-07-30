@@ -550,6 +550,31 @@ def init_db() -> None:
                      "ON track_points(session_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_track_emp_ts "
                      "ON track_points(employee, ts)")
+        # КОРПУС ДЛЯ ОБУЧЕНИЯ СКОРИНГА. Отдельная сущность от портфелей выездников:
+        # сюда загружается ОБЩИЙ реестр целиком (17 тыс договоров), а не то, что
+        # роздано на выезд. Живёт своей жизнью и переживает сброс портфелей —
+        # иначе каждый сброс стирал бы всё, на чём модель училась.
+        #
+        # Персональных данных здесь НЕТ и быть не должно: обучению нужны признаки
+        # и результат, а не имя с адресом. Номер договора хранится хэшем — его
+        # хватает, чтобы не задваивать строки при повторной загрузке снимка.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS training_rows (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              snapshot TEXT NOT NULL,
+              contract_key TEXT NOT NULL,
+              debt REAL,
+              product_type TEXT, partner TEXT, country TEXT,
+              assign_date TEXT, kd_date TEXT, promise_date TEXT,
+              result TEXT, contact_with TEXT, who TEXT, location TEXT,
+              visits INTEGER, paid_months INTEGER,
+              target REAL,
+              created_at TEXT,
+              UNIQUE(snapshot, contract_key)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_training_snapshot "
+                     "ON training_rows(snapshot)")
         # Беседы для отчётов о выездах: бот, добавленный в группу, регистрирует
         # её здесь (выключенной); пульт включает и закрепляет сотрудников (ФИО
         # из реестра). Закрытый визит сотрудника постится в его беседы.
@@ -1171,6 +1196,67 @@ def add_track_points(session_id: str, employee: str, telegram_id: int,
             "ON CONFLICT(session_id, ts) DO NOTHING", rows)
         conn.commit()
         return conn.total_changes - before
+
+
+_TRAIN_COLS = ("debt", "product_type", "partner", "country", "assign_date", "kd_date",
+               "promise_date", "result", "contact_with", "who", "location",
+               "visits", "paid_months", "target")
+
+
+def contract_key(contract_id: str | None) -> str:
+    """Хэш номера договора. Нужен только для дедупликации внутри снимка —
+    самого номера в корпусе обучения не храним."""
+    return hashlib.sha256(str(contract_id or "").strip().encode()).hexdigest()[:24]
+
+
+def add_training_rows(snapshot: str, rows: list[dict]) -> int:
+    """Загрузить снимок общего реестра в корпус обучения. Возвращает число новых строк.
+
+    Повторная загрузка того же снимка ничего не задваивает (UNIQUE snapshot+договор),
+    поэтому прерванную загрузку можно просто повторить."""
+    now = datetime.now().isoformat(timespec="seconds")
+    payload = []
+    for r in rows or []:
+        key = r.get("contract_key") or contract_key(r.get("contract_id"))
+        if not key:
+            continue
+        payload.append((snapshot, key,
+                        *[r.get(c) for c in _TRAIN_COLS], now))
+    if not payload:
+        return 0
+    cols = ", ".join(_TRAIN_COLS)
+    marks = ", ".join("?" * (len(_TRAIN_COLS) + 3))
+    with connect() as conn:
+        before = conn.total_changes
+        conn.executemany(
+            f"INSERT INTO training_rows (snapshot, contract_key, {cols}, created_at) "
+            f"VALUES ({marks}) ON CONFLICT(snapshot, contract_key) DO NOTHING", payload)
+        conn.commit()
+        return conn.total_changes - before
+
+
+def training_rows(snapshot: str | None = None) -> list[sqlite3.Row]:
+    """Корпус для обучения. Без снимка — последний загруженный."""
+    with connect() as conn:
+        if snapshot is None:
+            got = conn.execute(
+                "SELECT snapshot FROM training_rows ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+            if not got:
+                return []
+            snapshot = got[0]
+        return conn.execute(
+            "SELECT * FROM training_rows WHERE snapshot = ?", (snapshot,)).fetchall()
+
+
+def training_snapshots() -> list[sqlite3.Row]:
+    """Какие снимки реестра загружены: сколько строк, когда, сколько с оплатой."""
+    with connect() as conn:
+        return conn.execute(
+            "SELECT snapshot, COUNT(*) AS n, "
+            "SUM(CASE WHEN target > 0 THEN 1 ELSE 0 END) AS paid, "
+            "SUM(target) AS collected, MIN(created_at) AS loaded_at "
+            "FROM training_rows GROUP BY snapshot ORDER BY loaded_at DESC").fetchall()
 
 
 def track_sessions(employee: str | None = None, limit: int = 200) -> list[sqlite3.Row]:

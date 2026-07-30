@@ -51,7 +51,6 @@ RESET_TABLES = {
     "app_links",
     "app_tokens",
     "photo_geo",
-    "track_points",
     "report_chats",
     "report_chat_employees",
 }
@@ -63,6 +62,18 @@ RESET_TABLES = {
 RETAINED_TABLES = {
     "import_receipts",
     "import_source_heads",
+    # Корпус для обучения скоринга — это НЕ портфель выездника. Сюда загружается
+    # общий реестр целиком, отдельной операцией, и стирать его вместе с раздачей
+    # нельзя: каждый сброс обнулял бы всё, на чём модель училась. Персональных
+    # данных в нём нет по построению (только признаки и результат, номер договора
+    # хэшем), поэтому и с точки зрения приватности сохранять его безопасно.
+    "training_rows",
+    # Треки поездок. Решение владельца: они переживают сброс портфелей — иначе
+    # каждый цикл теряет ровно те данные, ради которых треки и заводились
+    # (фактическое время в пути, проезжаемость дорог, длительность визита).
+    # ВНИМАНИЕ: в отличие от training_rows это ПД сотрудника (его перемещения).
+    # Чтобы вернуть прежнее поведение — перенести строку в RESET_TABLES.
+    "track_points",
 }
 EXPECTED_TABLES = RESET_TABLES | RETAINED_TABLES
 
@@ -70,7 +81,6 @@ EXPECTED_TABLES = RESET_TABLES | RETAINED_TABLES
 DELETE_ORDER = (
     "report_chat_employees",
     "report_chats",
-    "track_points",
     "photo_geo",
     "app_tokens",
     "app_links",

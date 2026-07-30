@@ -5,8 +5,16 @@
 не на сервере-витрине. Результат — маленький `scoring_model.json` (~5 КБ), только
 коэффициенты, без единой персональной строки: его и везём на сервер.
 
-    python train_scoring.py "путь/к/реестру.xlsx"            # обучить и показать отчёт
-    python train_scoring.py "реестр.xlsx" --write            # ещё и записать модель
+    python train_scoring.py "реестр.xlsx"                 # обучить и показать отчёт
+    python train_scoring.py "реестр.xlsx" --write         # ещё и записать модель
+    python train_scoring.py "реестр.xlsx" --load          # положить реестр в корпус БД
+    python train_scoring.py --from-db --write             # обучить по корпусу из БД
+
+КОРПУС В БАЗЕ. Общий реестр грузится в `training_rows` ОТДЕЛЬНОЙ операцией — это не
+раздача портфелей выездникам, и сброс портфелей его не трогает (см. RETAINED_TABLES
+в limited_test_reset). В корпус уезжают только признаки и результат: ни имени, ни
+телефона, ни адреса, номер договора — хэшем. Обучение с нуля после сброса больше
+не требуется.
 
 ЧТО СЧИТАЕТСЯ ЦЕЛЬЮ. «Текущие платежи» — единственная колонка, которая сходится
 с фактической динамикой долга: корреляция со снижением «Долг на начало месяца» минус
@@ -85,14 +93,54 @@ def load_registry(path: str) -> list[dict]:
         ("visits", "Кол-во выездов"))}
     target = col("Текущие платежи")
 
+    contract_ids = col("Номер КД / ID")
     rows = []
     for i in range(len(df)):
         item = {k: v[i] for k, v in fields.items()}
         item["debt"] = debt_before[i]
         item["paid_months"] = paid_months[i]
         item["_target"] = _to_num(target[i])
+        item["contract_id"] = contract_ids[i]
         rows.append(item)
     return rows
+
+
+def save_to_db(rows: list[dict], snapshot: str) -> int:
+    """Положить разобранный реестр в корпус обучения.
+
+    В БД уезжают ТОЛЬКО признаки и результат — ни имени, ни телефона, ни адреса.
+    Номер договора хэшируется: его достаточно, чтобы повторная загрузка того же
+    снимка не задвоила строки, и недостаточно, чтобы кого-то опознать."""
+    import db
+    payload = []
+    for r in rows:
+        payload.append({
+            "contract_key": db.contract_key(r.get("contract_id")),
+            "debt": _to_num(r.get("debt")),
+            "product_type": r.get("product_type"), "partner": r.get("partner"),
+            "country": r.get("country"), "assign_date": r.get("assign_date"),
+            "kd_date": r.get("kd_date"), "promise_date": r.get("promise_date"),
+            "result": r.get("result"), "contact_with": r.get("contact_with"),
+            "who": r.get("who"), "location": r.get("location"),
+            "visits": int(_to_num(r.get("visits"))),
+            "paid_months": int(_to_num(r.get("paid_months"))),
+            "target": _to_num(r.get("_target")),
+        })
+    return db.add_training_rows(snapshot, payload)
+
+
+def load_from_db(snapshot: str | None = None) -> list[dict]:
+    """Корпус обучения из БД в том же виде, что даёт load_registry."""
+    import db
+    out = []
+    for row in db.training_rows(snapshot):
+        item = {k: row[k] for k in (
+            "debt", "product_type", "partner", "country", "assign_date", "kd_date",
+            "promise_date", "result", "contact_with", "who", "location", "visits")}
+        item["paid_months"] = row["paid_months"]
+        item["_target"] = row["target"] or 0.0
+        out.append(item)
+    return out
 
 
 def fit(rows: list[dict], today: date | None = None) -> dict:
@@ -180,13 +228,27 @@ def _split(rows: list[dict], ratio: float = 0.7):
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 2:
+    args = [a for a in argv[1:] if not a.startswith("--")]
+    flags = {a for a in argv[1:] if a.startswith("--")}
+    if not args and "--from-db" not in flags:
         print(__doc__)
         return 2
-    path = argv[1]
-    write = "--write" in argv
-    rows = load_registry(path)
-    print(f"договоров: {len(rows)}")
+    write = "--write" in flags
+
+    if "--from-db" in flags:
+        rows = load_from_db(args[0] if args else None)
+        print(f"корпус из БД: {len(rows)} договоров")
+        if not rows:
+            print("корпус пуст — сперва загрузите реестр: train_scoring.py реестр.xlsx --load")
+            return 1
+    else:
+        path = args[0]
+        rows = load_registry(path)
+        print(f"договоров: {len(rows)}")
+        if "--load" in flags:
+            snapshot = Path(path).stem
+            added = save_to_db(rows, snapshot)
+            print(f"в корпус обучения добавлено {added} строк (снимок «{snapshot}»)")
 
     train, test = _split(rows)
     holdout = fit(train)
