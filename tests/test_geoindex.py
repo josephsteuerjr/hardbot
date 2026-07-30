@@ -114,3 +114,28 @@ def test_region_display_name_is_russian():
 
 def test_empty_address_resolves_to_nothing():
     assert _index().resolve(A.parse("")) is None
+
+
+# --- где лежит справочник ------------------------------------------------------
+def test_gazetteer_is_found_next_to_code_when_data_dir_is_empty(monkeypatch, tmp_path):
+    """На проде HARDBOT_DATA=/data, а справочник приезжает в /app/geonames вместе
+    с релизом. Пока модуль смотрел только в /data, он молча грузил ПОЛОВИНУ
+    справочника — 20 016 ключей вместо 40 118 и ноль улиц, без единой ошибки
+    в логах. Файл рядом с кодом обязан находиться."""
+    monkeypatch.setattr(geoindex, "GEO_DIRS",
+                        (tmp_path / "geonames", geoindex.Path(geoindex.__file__).parent / "geonames"))
+    monkeypatch.setattr(geoindex, "_INDEX", None)
+    idx = geoindex.load()
+    assert len(idx.by_key) > 30_000, "справочник рядом с кодом не подхватился"
+    assert len(idx.streets) > 10_000, "слой улиц не подхватился"
+    monkeypatch.setattr(geoindex, "_INDEX", None)
+
+
+def test_data_dir_wins_over_code_dir(tmp_path, monkeypatch):
+    """Порядок важен: обновлённый дамп кладут в том с данными, и он должен
+    перекрывать версию из релиза — иначе обновить справочник без передеплоя нельзя."""
+    (tmp_path / "geonames").mkdir()
+    (tmp_path / "geonames" / "TJ.txt").write_text("x" * 10, encoding="utf-8")
+    monkeypatch.setattr(geoindex, "GEO_DIRS",
+                        (tmp_path / "geonames", geoindex.Path(geoindex.__file__).parent / "geonames"))
+    assert geoindex._find("TJ.txt") == tmp_path / "geonames" / "TJ.txt"

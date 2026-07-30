@@ -38,7 +38,26 @@ from pathlib import Path
 
 import addr_cis
 
-GEO_DIR = Path(os.getenv("HARDBOT_DATA", Path(__file__).parent)) / "geonames"
+# Справочник ищем в ДВУХ местах, и порядок важен.
+#   1) том с данными (HARDBOT_DATA) — туда кладут обновлённые дампы без передеплоя;
+#   2) папка рядом с кодом — туда справочник приезжает ВМЕСТЕ с релизом.
+# Без второго пути на проде случилась ровно эта ошибка: файлы уехали в /app/geonames,
+# а модуль смотрел только в /data/geonames и молча грузил половину справочника
+# (20 016 ключей вместо 40 118, ноль улиц) — без единой ошибки в логах.
+GEO_DIRS = tuple(dict.fromkeys([
+    Path(os.getenv("HARDBOT_DATA", Path(__file__).parent)) / "geonames",
+    Path(__file__).parent / "geonames",
+]))
+GEO_DIR = GEO_DIRS[0]          # куда качать дампы (совместимость)
+
+
+def _find(name: str) -> Path | None:
+    """Первый существующий файл справочника из GEO_DIRS."""
+    for directory in GEO_DIRS:
+        candidate = directory / name
+        if candidate.exists() and candidate.stat().st_size > 0:
+            return candidate
+    return None
 UA = "hardbot-geocoder/0.2 (internal collection-agency tool)"
 DEFAULT_COUNTRIES = tuple(
     c.strip().upper() for c in os.getenv("GEOINDEX_COUNTRIES", "TJ,UZ").split(",") if c.strip()
@@ -441,9 +460,10 @@ ALLOW_DOWNLOAD = os.getenv("GEOINDEX_DOWNLOAD", "").strip().lower() in ("1", "tr
 
 def _dump(cc: str) -> Path | None:
     """Путь к дампу страны или None, если его нет и качать не разрешено."""
+    found = _find(f"{cc}.txt")
+    if found is not None:
+        return found
     txt = GEO_DIR / f"{cc}.txt"
-    if txt.exists() and txt.stat().st_size > 0:
-        return txt
     if not ALLOW_DOWNLOAD:
         return None
     GEO_DIR.mkdir(parents=True, exist_ok=True)
@@ -476,8 +496,8 @@ def load(countries: tuple[str, ...] = DEFAULT_COUNTRIES) -> Index:
         # Второй слой — места из того же OSM, из которого собран дорожный граф.
         # Файл готовится офлайн (osmium по .osm.pbf) и просто лежит рядом;
         # его отсутствие не ошибка — работаем на одном GeoNames.
-        osm = GEO_DIR / f"osm_places_{cc}.tsv"
-        if osm.exists():
+        osm = _find(f"osm_places_{cc}.tsv")
+        if osm is not None:
             with osm.open(encoding="utf-8") as fh:
                 next(fh, None)                                  # заголовок
                 for line in fh:
@@ -491,8 +511,8 @@ def load(countries: tuple[str, ...] = DEFAULT_COUNTRIES) -> Index:
         # Третий слой — именованные улицы из того же OSM. Нужен, потому что улица
         # распознаётся у 76% узбекских адресов, а точка до сих пор ставилась
         # в центр махалли.
-        streets = GEO_DIR / f"osm_streets_{cc}.tsv"
-        if streets.exists():
+        streets = _find(f"osm_streets_{cc}.tsv")
+        if streets is not None:
             with streets.open(encoding="utf-8") as fh:
                 next(fh, None)
                 for line in fh:
