@@ -34,22 +34,49 @@ def test_killer_address_not_exists():
     assert _one(result="Адрес не существует")["dropped"]
 
 
-def test_courier_unreachable_dropped_but_agent_ok():
-    assert _one(result="В работе", location="в РФ", )["dropped"]          # courier
+def test_unreachable_is_retargeted_not_dropped():
+    """ПОЛИТИКА ИЗМЕНЕНА ОСОЗНАННО. Раньше «клиент в РФ» снимало договор из очереди.
+    На реальных 17 075 договорах под фильтр попадали 2 177 (12.7%), и они дали
+    28.4% всего сбора — по 5 966 ₽ против 2 195 ₽ у остальных. Уехавший на
+    заработки платит ЛУЧШЕ, а по адресу живут родственники (лучший предиктор,
+    ×2.2). Поэтому теперь не выбрасываем, а меняем цель визита."""
+    r = _one(result="В работе", location="в РФ")
+    assert not r["dropped"]
+    assert r["purpose"] == "работа с родственниками"
+    assert "родственник" in r["reason"]
+
+
+def test_unreachable_purpose_only_for_courier():
     a = scoring.score_items([{"city": "Худжанд", "debt": 1_000_000, "visits": 0,
                               "result": "В работе", "location": "в РФ", "who": ""}],
                             W, "agent", today=TODAY)[0]
-    assert not a["dropped"]                                               # для agent — не killer
+    assert not a["dropped"] and not a["purpose"]      # агенту ехать не надо
 
 
-# --- Сигналы дожима --------------------------------------------------------
+# --- Сигналы дожима (балльный режим — фолбэк, когда модель не обучена) ------
+def _fallback(**kw):
+    """Тот же вход, но принудительно старым балльным путём."""
+    base = {"rep": "1", "city": "Худжанд", "debt": 1_000_000, "visits": 0,
+            "result": "", "location": "", "who": ""}
+    base.update(kw)
+    return scoring.score_items([base], W, "courier", today=TODAY,
+                               model=scoring.scoring_model.Model({}))[0]
+
+
 def test_signal_homeland_only_courier():
-    c = _one(result="В работе", location="на родине")
+    c = _fallback(result="В работе", location="на родине")
     assert "на родине ✓" in c["reason"] and c["adj"] >= 8
 
 
 def test_signal_promise_bonus():
-    assert _one(result="Обещает оплатить")["adj"] >= 12
+    assert _fallback(result="Обещает оплатить")["adj"] >= 12
+
+
+def test_fallback_used_when_model_missing():
+    """Модель — файл. Если он не доехал до сервера, скоринг обязан работать
+    по-старому, а не остановить выезды."""
+    r = _fallback(result="Не обработан")
+    assert r["mode"] == "разведка" and "adj" in r and 0 <= r["score"] <= 130
 
 
 # --- Регуляторные killer-фильтры (230-ФЗ) ----------------------------------

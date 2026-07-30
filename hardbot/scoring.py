@@ -32,8 +32,10 @@ from datetime import date, datetime
 from debt import contract_debt                     # «долг на сегодня», иначе «долг всего»
 from gazetteer import parse_city, sughd_centroid   # единый газеттир (был _CITIES)
 from util import num as _num                       # единый разбор чисел (был локальный _num)
+import scoring_model                                 # модель ожидаемого сбора
 from scoring_config import (
     SIGNALS, KILLER_RESULTS, CLAMP_MAX, COURIER_UNREACHABLE,
+    COURIER_DROP_UNREACHABLE, VISIT_PURPOSE_RELATIVES,
     RESPECT_PROMISE_DATE, MIN_DAYS_BETWEEN_VISITS,
 )
 
@@ -62,8 +64,21 @@ def _drop_reason(res: str, loc: str, audience: str) -> str | None:
         return "адрес не существует"
     if res in KILLER_RESULTS:
         return res
-    if audience == "courier" and any(k in loc for k in COURIER_UNREACHABLE):
+    if (COURIER_DROP_UNREACHABLE and audience == "courier"
+            and any(k in loc for k in COURIER_UNREACHABLE)):
         return "клиент не в Таджикистане"
+    return None
+
+
+def _visit_purpose(loc: str, audience: str) -> str | None:
+    """Цель визита, если самого должника по адресу не застать.
+
+    Раньше такие договоры просто снимались из очереди. На реальном портфеле это
+    12.7% договоров, давших 28.4% сбора: уехавший на заработки платит ЛУЧШЕ, а по
+    адресу живут родственники — сильнейший из известных предикторов оплаты.
+    Ехать надо, меняется не адрес, а с кем там разговаривать."""
+    if audience == "courier" and any(k in loc for k in COURIER_UNREACHABLE):
+        return VISIT_PURPOSE_RELATIVES
     return None
 
 
@@ -121,15 +136,83 @@ def _reason(drop: str | None, debt: int, city: str | None, cn: int,
     return " · ".join(tags[:4])
 
 
+def _money(value: float) -> str:
+    return f"≈{round(value):,} ₽".replace(",", " ")
+
+
+def _score_expected(items: list[dict], weights: dict, audience: str,
+                    today: date, model) -> list[dict]:
+    """РЕЖИМ «ОЖИДАЕМЫЙ СБОР». Приоритет = сколько денег принесёт выезд:
+    P(заплатит) × сумма(если заплатит), обе части — из модели, обученной на реальном
+    портфеле. Проверка на отложенной выборке: верхние 10% очереди дают 61% сбора
+    против 31% при сортировке по долгу.
+
+    Кластер остаётся множителем, а не слагаемым: он не про деньги, а про стоимость
+    объезда — рядом стоящий должник дешевле в дороге при том же ожидании. Ползунок
+    «кластер» в пульте этим множителем и управляет; ползунки «долг» и «свежесть»
+    в этом режиме не действуют — их знание теперь внутри модели."""
+    city_counts = Counter(c for c in (it.get("city") for it in items) if c and c != "—")
+    max_cluster = max(city_counts.values()) if city_counts else 1
+    cluster_w = _norm_weights(weights)["cluster"]
+
+    raw, out = [], []
+    for it in items:
+        cn = city_counts.get(it.get("city"), 0)
+        cluster_s = (cn / max_cluster) if max_cluster else 0.0
+        expected = model.expected(it, today)
+        raw.append(expected * (1.0 + cluster_w * cluster_s))
+    top = max(raw) or 1.0
+
+    for it, value in zip(items, raw):
+        expected = model.expected(it, today)
+        res = (it.get("result") or "").strip().lower()
+        loc = (it.get("location") or "").strip().lower()
+        cn = city_counts.get(it.get("city"), 0)
+        drop = _drop_reason(res, loc, audience) or _regulatory_drop(it, today)
+        purpose = _visit_purpose(loc, audience)
+        score = 0.0 if drop else round(value / top * 100.0, 1)
+
+        tags = [_money(expected)]
+        if purpose:
+            tags.append(purpose)
+        tags += scoring_model.explain(model, it, top=2, today=today)
+        if cn >= 4 and it.get("city") and it["city"] != "—":
+            tags.append(f"кластер {it['city']} ({cn})")
+
+        # «Разведка/дожим» остаётся: выездник по этой подписи понимает, едет он
+        # за данными или закрывать. Считается ровно как раньше.
+        scouted = bool(res and res != "не обработан") or ("не установ" not in loc and loc)
+
+        out.append({
+            **it,
+            "debt": _num(it.get("debt")), "visits": _num(it.get("visits")),
+            "expected": round(expected, 1),
+            "cluster_s": round((cn / max_cluster) if max_cluster else 0.0, 4),
+            "score": score, "mode": "дожим" if scouted else "разведка",
+            "purpose": purpose,
+            "dropped": bool(drop), "drop_reason": drop,
+            "reason": f"⛔ {drop}" if drop else " · ".join(tags[:4]),
+        })
+    return out
+
+
 def score_items(items: list[dict], weights: dict, audience: str = "courier",
-                today: date | None = None) -> list[dict]:
+                today: date | None = None, model=None) -> list[dict]:
     """ЧИСТОЕ ядро скоринга. items: [{city, debt, visits, result, location, who, ...}],
     где city уже определён вызывающим (бот — parse_city; движок — из синтетики/БД).
     Возвращает НОВЫЙ список: исходные поля + компоненты (debt_s/cluster_s/fresh_s/adj)
     + score/mode/dropped/reason. Вход НЕ мутирует, НЕ сортирует (порядок — забота caller).
-    today — для регуляторных killer-фильтров (даты), по умолчанию date.today()."""
-    w = _norm_weights(weights)
+    today — для регуляторных killer-фильтров (даты), по умолчанию date.today().
+
+    Если обученная модель доступна — считаем ОЖИДАЕМЫЙ СБОР (см. _score_expected).
+    Старый балльный режим остаётся: он работает без модели и служит фолбэком,
+    если файл коэффициентов не доехал до сервера."""
     today = today or date.today()
+    model = model if model is not None else scoring_model.load()
+    if getattr(model, "is_trained", False):
+        return _score_expected(items, weights, audience, today, model)
+
+    w = _norm_weights(weights)
     city_counts = Counter(c for c in (it.get("city") for it in items) if c and c != "—")
     max_cluster = max(city_counts.values()) if city_counts else 1
     max_debt = max((_num(it.get("debt")) for it in items), default=0) or 1
@@ -187,6 +270,10 @@ def compute_priority(items: list[dict], weights: dict, audience: str = "courier"
         "debt": it["debt"], "visits": it["visits"], "n": it.get("n", 1),
         "score": it["score"], "mode": it["mode"], "reason": it["reason"],
         "dropped": it["dropped"],
+        # Ожидаемый сбор в деньгах и цель визита — то, ради чего затевался
+        # новый скоринг: выездник видит не абстрактный балл, а «≈8 500 ₽,
+        # работа с родственниками».
+        "expected": it.get("expected"), "purpose": it.get("purpose"),
     } for it in scored]
 
     city_counts = Counter(it["city"] for it in resolved if it["city"] != "—")
@@ -232,6 +319,12 @@ def _items_from_db() -> list[dict]:
             # завершённым визитам, а не к импортному HARD visit_date.
             "visit_date": first("bot_visit_at"),
             "partners": p["partners"], "n": p["n"],
+            # Признаки модели ожидаемого сбора. Чего нет в реестре — приходит
+            # пустым и получает нейтральный лифт, модель от этого не ломается.
+            "partner": first("partner"), "product_type": first("product_type"),
+            "contact_with": first("contact_with"),
+            "assign_date": first("assign_date"), "kd_date": first("kd_date"),
+            "country": first("country"), "paid_months": first("paid_months"),
         })
     return items
 
