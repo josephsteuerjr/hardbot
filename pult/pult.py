@@ -1508,8 +1508,10 @@ class Pult(tk.Tk):
     def _build_prio(self, fr):
         inner = self._section_inner(fr)
         wcard = Card(inner, "Веса скоринга",
-                     "Лог-долг + кластер по городу + свежесть (штраф за прошлые выезды). "
-                     "Холодные — «разведка», с исходом — «дожим».")
+                     "Порядок выезда считается по ОЖИДАЕМОМУ СБОРУ: вероятность оплаты × "
+                     "сумма, по модели на реальном портфеле. Долг и свежесть теперь внутри "
+                     "модели — эти ползунки на порядок не влияют. «Кластер» влияет: он про "
+                     "стоимость объезда, а не про деньги.")
         wcard.pack(fill="x")
         row = tk.Frame(wcard.inner, bg=CARD)
         row.pack(fill="x")
@@ -1539,13 +1541,16 @@ class Pult(tk.Tk):
 
         tcard = Card(inner, "Куда ехать — топ-40")
         tcard.pack(fill="x", pady=(12, 0))
-        cols = ("n", "client", "city", "debt", "visits", "score", "mode", "why")
-        heads = ("#", "Клиент", "Город", "Долг ₽", "Выезд.", "Score", "Режим", "Почему")
-        widths = (34, 190, 110, 90, 60, 60, 90, 330)
+        # «Ожидание» — главная колонка: сколько денег принесёт выезд. Score оставлен
+        # как относительная шкала 0–100 внутри текущей выборки.
+        cols = ("n", "client", "city", "debt", "exp", "visits", "score", "mode", "why")
+        heads = ("#", "Клиент", "Город", "Долг ₽", "Ожидание ₽", "Выезд.", "Score",
+                 "Режим", "Почему")
+        widths = (34, 180, 100, 90, 100, 56, 56, 84, 300)
         self.prio_tv = ttk.Treeview(tcard.inner, columns=cols, show="headings", height=18)
         for c, h, w in zip(cols, heads, widths):
             self.prio_tv.heading(c, text=h)
-            anchor = "e" if c in ("debt", "visits", "score", "n") else "w"
+            anchor = "e" if c in ("debt", "exp", "visits", "score", "n") else "w"
             self.prio_tv.column(c, width=self.px(w), anchor=anchor,
                                 stretch=(c in ("client", "why")))
         self.prio_tv.pack(fill="x")
@@ -1564,7 +1569,8 @@ class Pult(tk.Tk):
             for i, it in enumerate(d.get("items") or [], 1):
                 self.prio_tv.insert("", "end", values=(
                     i, it.get("client", ""), it.get("city", ""), fmt_n(it.get("debt") or 0),
-                    it.get("visits", 0), f"{it.get('score', 0):.1f}",
+                    fmt_n(round(it.get("expected") or 0)), it.get("visits", 0),
+                    f"{it.get('score', 0):.1f}",
                     it.get("mode", ""), it.get("reason", "")))
         self.bg_task(lambda: self.api("GET", "/admin/priority" + q), done)
 

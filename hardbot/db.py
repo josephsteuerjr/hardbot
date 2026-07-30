@@ -56,6 +56,19 @@ DB_PATH = _data_dir / "hardbot.db"
 # (agent_id удалён — легаси: назначение давно идёт через responsible + agent_bind.)
 BOOKKEEPING = [
     ("photos_count", "INTEGER DEFAULT 0"),
+    # --- Колонки реестра, которые читаются ТОЛЬКО для скоринга ------------------
+    # В экспортную схему они намеренно НЕ входят: файл, уходящий в офис, менять
+    # не нужно, а значит не меняются ни его форма, ни отпечаток контракта, ни
+    # строка типов. Контракт эти заголовки и так знает — они перечислены в
+    # allowed_ignored_headers; здесь мы просто перестаём выбрасывать их значения.
+    ("country", "TEXT"),               # «Страна» — страна портфеля (лифт ×1.5/×0.6)
+    ("debt_start_month", "REAL"),      # «Долг на начало месяца» — долг ДО периода
+    ("paid_current", "REAL"),          # «Текущие платежи» — фактический сбор
+    # Сколько месяцев из «Оплаты за MM.YY» с ненулевым платежом. Сами колонки
+    # помесячные и называются по-новому каждый месяц, поэтому в контракте они
+    # заданы шаблоном, а в БД сворачиваются в одно число. Признак сильный:
+    # платившие раньше платят снова (лифт ×2.4).
+    ("paid_months", "INTEGER"),
     ("reminder_date", "TEXT"),      # дата повторного выезда (для «Мои планы»)
     ("geo_lat", "REAL"),
     ("geo_lon", "REAL"),
@@ -2111,6 +2124,34 @@ _ZERO_WIDTH = ("​", "‌", "‍", "﻿")  # невидимый мусор из
 _HOMOGLYPHS = str.maketrans("acekmoptxy", "асекмортху")
 
 
+# Колонки реестра, которые нужны СКОРИНГУ, но не нужны офису. Контракт их уже
+# знает и разрешает игнорировать (allowed_ignored_headers) — здесь мы перестаём
+# выбрасывать их значения, не заводя полями реестра. Плюс такого решения: форма
+# экспортируемого файла, отпечаток контракта и строка типов не меняются вообще,
+# а значит и пульт с офисными шаблонами ломать нечего.
+_SCORING_ONLY_TITLES = {
+    "Страна": "country",
+    "Долг на начало месяца": "debt_start_month",
+    "Текущие платежи": "paid_current",
+}
+
+# Помесячные оплаты названы по месяцу («Оплаты за 04.26») и меняются каждый месяц,
+# поэтому в контракте они заданы шаблоном, а в БД сворачиваются в счётчик месяцев.
+_PAID_MONTH_RX = re.compile(r"^Оплаты за (?:0[1-9]|1[0-2])\.[0-9]{2}$")
+
+SCORING_ONLY_HEADERS: dict[str, str] = {}
+
+
+def _scoring_only_headers() -> dict[str, str]:
+    """Нормализованный заголовок → служебная колонка. Считаем лениво: `_norm_title`
+    объявлен ниже по файлу, а сравнивать заголовки надо уже нормализованными."""
+    global SCORING_ONLY_HEADERS
+    if not SCORING_ONLY_HEADERS:
+        SCORING_ONLY_HEADERS = {_norm_title(t): k
+                                for t, k in _SCORING_ONLY_TITLES.items()}
+    return SCORING_ONLY_HEADERS
+
+
 def _norm_title(s) -> str:
     """Нормализованный заголовок для устойчивого матчинга: регистр, пробелы (юникод-пробелы
     и неразрывный — покрываются штатным классом пробельных символов regex), невидимые
@@ -2931,6 +2972,21 @@ def import_grid(
     # Колонки разбивки, которые реально есть в этом файле → пустая ячейка = ноль.
     owned = debt.SOURCE_OWNED.intersection(k for k in col_keys if k)
 
+    # Колонки «только для скоринга»: контракт разрешает их игнорировать, а мы
+    # читаем значения, не заводя их полями реестра. Экспортная схема, её отпечаток
+    # и строка типов при этом не меняются вообще.
+    scoring_cols: dict[int, str] = {}
+    paid_month_cols: list[int] = []
+    for index, (cell, key) in enumerate(zip(rows[best_h], col_keys)):
+        if key is not None or cell in (None, ""):
+            continue
+        title = str(cell).strip()
+        mapped = _scoring_only_headers().get(_norm_title(title))
+        if mapped:
+            scoring_cols[index] = mapped
+        elif _PAID_MONTH_RX.fullmatch(title):
+            paid_month_cols.append(index)
+
     # Сначала разобрать ВЕСЬ файл в памяти. Это обязательный preflight: при
     # повторе КД не должна успеть записаться ни одна предыдущая строка.
     grouped: dict[str, dict] = {}
@@ -2961,6 +3017,24 @@ def import_grid(
                     text = str(val).strip()
                     if text:
                         data[key] = text
+        for index, target in scoring_cols.items():
+            val = raw[index] if index < len(raw) else None
+            if val is None:
+                continue
+            if target == "country":
+                text = str(val).strip()
+                if text:
+                    data[target] = text
+            else:
+                number = _money_int(val)
+                if number:
+                    data[target] = number
+        if paid_month_cols:
+            # Пустой месяц — это «не платил», а не «нет данных»: колонки помесячных
+            # оплат в реестре есть всегда, поэтому ноль здесь осмысленный.
+            data["paid_months"] = sum(
+                1 for index in paid_month_cols
+                if index < len(raw) and _money_int(raw[index]) > 0)
         cid = data.get("contract_id")
         if not cid:
             report["skipped_no_id"] += 1
