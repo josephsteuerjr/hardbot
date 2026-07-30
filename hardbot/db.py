@@ -520,6 +520,36 @@ def init_db() -> None:
               created_at TEXT
             )
         """)
+        # Трек поездки: точки, снятые НАВИГАТОРОМ по дороге к должнику, пока визит
+        # ещё не закрыт. До этого от всей поездки оставались только координата
+        # фотографии и точка закрытия визита — то есть две точки на весь день.
+        #
+        # Зачем копим: (1) фактическое время в пути против оценки OSRM — сейчас в
+        # движке стоит взятый с потолка коэффициент ×1.15; (2) какие дороги реально
+        # проезжаемы (в горах ТДж OSM рисует сезонные грунтовки как обычные дороги);
+        # (3) сколько на самом деле длится визит — вход в скоринг.
+        #
+        # UNIQUE(session_id, ts): повторная доставка пачки из оффлайн-очереди
+        # (сеть в поле рвётся постоянно) не должна плодить точки — тот же приём,
+        # что и в photo_geo с UNIQUE(file).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS track_points (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              session_id TEXT NOT NULL,
+              employee TEXT,
+              telegram_id INTEGER,
+              contract_id TEXT,
+              ts TEXT NOT NULL,
+              lat REAL NOT NULL, lon REAL NOT NULL,
+              acc_m INTEGER, speed REAL, heading REAL,
+              created_at TEXT,
+              UNIQUE(session_id, ts)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_track_session "
+                     "ON track_points(session_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_track_emp_ts "
+                     "ON track_points(employee, ts)")
         # Беседы для отчётов о выездах: бот, добавленный в группу, регистрирует
         # её здесь (выключенной); пульт включает и закрепляет сотрудников (ФИО
         # из реестра). Закрытый визит сотрудника постится в его беседы.
@@ -1098,6 +1128,71 @@ def add_photo_geo(contract_id: str, file: str, telegram_id: int,
             (contract_id, file, telegram_id, lat, lon, acc_m,
              captured_at or now, now))
         conn.commit()
+
+
+def add_track_points(session_id: str, employee: str, telegram_id: int,
+                     contract_id: str | None, points: list[dict]) -> int:
+    """Дописать точки трека. Возвращает число ДЕЙСТВИТЕЛЬНО новых строк.
+
+    Точки с битыми координатами молча отбрасываются: телефон в поле присылает
+    и NaN, и нули, и «точность 5 км» — падать из-за этого посреди поездки нельзя.
+    Дубли по (session_id, ts) игнорируются, поэтому повторная отправка одной и
+    той же пачки из оффлайн-очереди безопасна."""
+    now = datetime.now().isoformat(timespec="seconds")
+    rows = []
+    for p in points or []:
+        try:
+            lat, lon = float(p.get("lat")), float(p.get("lon"))
+        except (TypeError, ValueError):
+            continue
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+            continue
+        ts = str(p.get("ts") or "").strip()
+        if not ts:
+            continue
+
+        def _f(key):
+            try:
+                return float(p.get(key))
+            except (TypeError, ValueError):
+                return None
+
+        acc = _f("acc")
+        rows.append((session_id, employee, telegram_id, contract_id, ts, lat, lon,
+                     int(acc) if acc is not None else None,
+                     _f("speed"), _f("heading"), now))
+    if not rows:
+        return 0
+    with connect() as conn:
+        before = conn.total_changes
+        conn.executemany(
+            "INSERT INTO track_points (session_id, employee, telegram_id, contract_id, "
+            "ts, lat, lon, acc_m, speed, heading, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(session_id, ts) DO NOTHING", rows)
+        conn.commit()
+        return conn.total_changes - before
+
+
+def track_sessions(employee: str | None = None, limit: int = 200) -> list[sqlite3.Row]:
+    """Сводка по поездкам: точек, начало/конец, к кому ехали. Для пульта и анализа."""
+    sql = ("SELECT session_id, employee, contract_id, COUNT(*) AS n, "
+           "MIN(ts) AS started, MAX(ts) AS finished FROM track_points ")
+    args: list = []
+    if employee:
+        sql += "WHERE employee = ? "
+        args.append(employee)
+    sql += "GROUP BY session_id ORDER BY started DESC LIMIT ?"
+    args.append(limit)
+    with connect() as conn:
+        return conn.execute(sql, args).fetchall()
+
+
+def track_points(session_id: str) -> list[sqlite3.Row]:
+    """Точки одной поездки по возрастанию времени."""
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM track_points WHERE session_id = ? ORDER BY ts", (session_id,)
+        ).fetchall()
 
 
 def photo_geo_for_files(files: list[str]) -> dict[str, sqlite3.Row]:

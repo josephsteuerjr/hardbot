@@ -33,6 +33,10 @@ def configured_backends() -> list[tuple[str, str]]:
     raw = (
         ("uz", os.getenv("OSRM_URL_UZ", "")),
         ("tj", os.getenv("OSRM_URL_TJ", "")),
+        # РФ — отдельный граф (Самарская область). Порядок здесь не про приоритет:
+        # ниже всё равно выбирается тот граф, где ВСЕ точки притянулись близко,
+        # поэтому лишний backend не портит маршрут, а только расширяет покрытие.
+        ("ru", os.getenv("OSRM_URL_RU", "")),
         ("default", os.getenv("OSRM_URL", "")),
     )
     result: list[tuple[str, str]] = []

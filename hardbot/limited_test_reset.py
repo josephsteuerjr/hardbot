@@ -51,6 +51,7 @@ RESET_TABLES = {
     "app_links",
     "app_tokens",
     "photo_geo",
+    "track_points",
     "report_chats",
     "report_chat_employees",
 }
@@ -69,6 +70,7 @@ EXPECTED_TABLES = RESET_TABLES | RETAINED_TABLES
 DELETE_ORDER = (
     "report_chat_employees",
     "report_chats",
+    "track_points",
     "photo_geo",
     "app_tokens",
     "app_links",

@@ -245,6 +245,8 @@ const I18N = {
     search:"Поиск: ФИО, договор, телефон",kd:"КД",total:"Долг всего",inwork:"В работе с",
     drive:"Доехать",call:"Позвонить",save:"Сохранить выезд",addphoto:"Добавить фото",
     routeday:"Маршрут дня",rdempty:"Нет невизитированных кейсов с точками",
+    freenav:"Навигация по адресу",freenavph:"Адрес или «41.31, 69.24»",
+    freenavfail:"Адрес не распознан",freenavrough:"Точность: только до района",
     voice:"Надиктовать",voicestop:"Стоп — распознать",voicewait:"Распознаю…",voicefail:"Не распозналось, попробуйте ещё",voiceunavail:"Голос временно недоступен — введите комментарий вручную",
     comment:"Комментарий",tips:"Доп. адрес / доп. номер",lastvisit:"Последний выезд",
     status:"Статус",saved:"Сохранено",none:"Точка не задана",geook:"Точка проверена",
@@ -270,6 +272,8 @@ const I18N = {
     search:"Qidirish: F.I.Sh., shartnoma, telefon",kd:"shartnoma",total:"Jami qarz",inwork:"Ish boshlandi",
     drive:"Borish",call:"Qo‘ng‘iroq",save:"Chiqishni saqlash",addphoto:"Rasm qo‘shish",
     routeday:"Kun marshruti",rdempty:"Nuqtali ochiq ishlar yo‘q",
+    freenav:"Manzil bo‘yicha navigatsiya",freenavph:"Manzil yoki «41.31, 69.24»",
+    freenavfail:"Manzil topilmadi",freenavrough:"Aniqlik: faqat tuman darajasida",
     voice:"Ovozli izoh",voicestop:"To‘xtatish",voicewait:"Aniqlanmoqda…",voicefail:"Bo‘lmadi, yana urinib ko‘ring",voiceunavail:"Ovoz vaqtincha ishlamayapti — izohni qo‘lda kiriting",
     comment:"Izoh",tips:"Qo‘shimcha manzil / raqam",lastvisit:"Oxirgi chiqish",
     status:"Holat",saved:"Saqlandi",none:"Nuqta yo‘q",geook:"Nuqta tekshirildi",
@@ -295,6 +299,8 @@ const I18N = {
     search:"Ҷустуҷӯ: НН, шартнома, телефон",kd:"шартнома",total:"Қарзи умумӣ",inwork:"Дар кор аз",
     drive:"Расидан",call:"Занг задан",save:"Сафарро захира",addphoto:"Расм илова",
     routeday:"Масири рӯз",rdempty:"Кейси кушодаи нуқтадор нест",
+    freenav:"Навигатсия аз рӯи нишонӣ",freenavph:"Нишонӣ ё «41.31, 69.24»",
+    freenavfail:"Нишонӣ шинохта нашуд",freenavrough:"Дақиқӣ: танҳо то ноҳия",
     voice:"Гуфтан",voicestop:"Ист — шинохт",voicewait:"Шинохта истодааст…",voicefail:"Нашуд, боз кӯшиш кунед",voiceunavail:"Овоз муваққатан дастнорас аст — шарҳро дастӣ нависед",
     comment:"Шарҳ",tips:"Суроға / рақами иловагӣ",lastvisit:"Сафари охирин",
     status:"Ҳолат",saved:"Захира шуд",none:"Нуқта нест",geook:"Нуқта тасдиқ шуд",
@@ -823,6 +829,7 @@ function renderList(){
   $("app").innerHTML = bar +
     `<div class="searchwrap">${ic("search")}<input class="search" id="q" placeholder="${esc(t.search)}" oninput="filterList()"></div>
      <button class="btn line" style="margin-bottom:10px" onclick="routeDay()">🧭 ${esc(t.routeday)}</button>
+     <button class="btn line" style="margin-bottom:10px" onclick="askAddress()">📍 ${esc(t.freenav)}</button>
      <div id="plist"></div>`;
   drawList(STATE.persons);
   setBottomNav("clients");
@@ -1529,7 +1536,8 @@ async function newMarker(){
 // (см. AGENTS.md), а не недоделка: здесь — живой превью-навигатор + быстрый переход.
 let NAV = {map:null, watchId:null, follow:true, lastPos:null, lastHeading:0,
            meMarker:null, destMarker:null, routeFetched:false, refreshTimer:null,
-           dest:null, bannerTimeout:null};
+           dest:null, bannerTimeout:null, free:false,
+           session:null, buf:[], trackTimer:null, lastTracked:null};
 
 function bearingBetween(a,b){
   const toRad=x=>x*Math.PI/180, toDeg=x=>x*180/Math.PI;
@@ -1558,13 +1566,57 @@ function navShellHTML(d,t){
       </div>
       <div class="navbanner" id="navbanner" style="display:none"></div>
       ${providerChips(d)}
-      <button class="btn acc" onclick="navFinish()">${ic("check")}<span>${esc(t.finishvisit)}</span></button>
+      ${d.free ? "" :
+        `<button class="btn acc" onclick="navFinish()">${ic("check")}<span>${esc(t.finishvisit)}</span></button>`}
     </div>`;
 }
 
-function enterNav(){
-  const d=STATE.cur, t=L();
+// --- Навигация по произвольному адресу ----------------------------------------
+// Руководителю — доехать до адреса должника, которого нет в его портфеле;
+// владельцу — проверить навигатор на любой точке. Адрес разбирается и ищется
+// ОФЛАЙН-справочником на сервере (/api/geocode): наружу ничего не уходит, потому
+// что публичные геокодеры на сервере-витрине запрещены (адреса должников — ПД).
+function askAddress(){
+  if($("freenavbox")) { const q=$("freenavq"); if(q) q.focus(); return; }
+  const t=L();
+  $("plist").insertAdjacentHTML("beforebegin", `
+    <div class="pcard" id="freenavbox" style="display:block;margin-bottom:10px">
+      <input class="search" id="freenavq" style="width:100%;margin-bottom:8px"
+             placeholder="${esc(t.freenavph)}" onkeydown="if(event.key==='Enter')freeNavGo()">
+      <div style="display:flex;gap:8px">
+        <button class="btn acc" style="flex:1" onclick="freeNavGo()">${ic("nav")}<span>${esc(t.go)}</span></button>
+        <button class="btn line" style="flex:0 0 52px" onclick="closeFreeNav()">✕</button>
+      </div>
+      <div class="muted" id="freenavhint" style="margin-top:8px"></div>
+    </div>`);
+  const el=$("freenavq"); if(el) el.focus();
+}
+function closeFreeNav(){ const b=$("freenavbox"); if(b) b.remove(); }
+async function freeNavGo(){
+  const t=L(), el=$("freenavq"), h=$("freenavhint");
+  const q=((el&&el.value)||"").trim();
+  if(!q) return;
+  if(h) h.textContent="…";
+  let j=null;
+  try{ j=await api("/api/geocode?q="+enc(q)); }catch(e){ j=null; }
+  if(!j||!j.ok){ if(h) h.textContent=t.freenavfail; return; }
+  // Справочник честно сообщает достигнутую точность. Ниже района ехать по такой
+  // точке бессмысленно — предупреждаем, но не запрещаем: это тестовый режим.
+  const rough = (j.precision==="district"||j.precision==="region");
+  closeFreeNav();
+  if(rough) toast(t.freenavrough);
+  enterNav({lat:j.lat, lon:j.lon, title:j.pretty||q});
+}
+
+// Без аргумента — навигация к текущему должнику (как было). С аргументом
+// {lat,lon,title} — к произвольной точке: адресу, которого нет в портфеле.
+function enterNav(dest){
+  const t=L();
+  const d = (dest && dest.lat!=null)
+    ? {client:dest.title||"", geo:{lat:dest.lat, lon:dest.lon}, free:true}
+    : STATE.cur;
   if(!(d && d.geo && d.geo.lat)){ toast(t.none); return; }
+  NAV.free = !!d.free;
   NAV.dest={lat:d.geo.lat, lon:d.geo.lon};
   document.body.classList.add("navon");
   $("navmode").innerHTML = navShellHTML(d,t);
@@ -1584,7 +1636,8 @@ function exitNav(){
   if(NAV.bannerTimeout){ clearTimeout(NAV.bannerTimeout); NAV.bannerTimeout=null; }
   if(NAV.map){ try{NAV.map.remove();}catch(e){} }
   NAV.map=null; NAV.meMarker=null; NAV.destMarker=null; NAV.routeFetched=false;
-  NAV.lastPos=null; NAV.follow=true;
+  NAV.lastPos=null; NAV.follow=true; NAV.free=false;
+  NAV.session=null; NAV.buf=[]; NAV.lastTracked=null;
   if(TG && TG.BackButton){ try{ TG.BackButton.hide(); TG.BackButton.offClick(exitNav); }catch(e){} }
 }
 function navFinish(){
@@ -1616,12 +1669,63 @@ async function initNavMap(d){
   NAV.destMarker=new maplibregl.Marker({color:"#B0472C"}).setLngLat([d.geo.lon,d.geo.lat]).addTo(NAV.map);
 }
 
+// --- Запись трека поездки ------------------------------------------------------
+// Копим точки в памяти и отправляем пачками. Что не ушло (в поле сеть рвётся
+// постоянно) — переживает закрытие аппы в localStorage и досылается при следующем
+// запуске. Сервер идемпотентен по (session_id, ts), поэтому повторы безопасны.
+const TRACK_KEY="hb_track_queue", TRACK_FLUSH_N=10, TRACK_FLUSH_MS=30000, TRACK_MIN_M=15;
+
+function trackQueue(){ try{ return JSON.parse(localStorage.getItem(TRACK_KEY)||"[]"); }catch(e){ return []; } }
+function trackQueueSet(q){ try{ localStorage.setItem(TRACK_KEY, JSON.stringify(q.slice(-2000))); }catch(e){} }
+
+function trackPush(me, p){
+  if(!NAV.session) return;
+  // Стоящий на месте телефон шлёт точку каждую секунду — держим шаг ≥15 м,
+  // иначе за час стоянки набегут тысячи одинаковых координат.
+  const last=NAV.lastTracked;
+  if(last && haversineKm(last, me)*1000 < TRACK_MIN_M) return;
+  NAV.lastTracked=me;
+  NAV.buf.push({ts:new Date(p.timestamp||Date.now()).toISOString(), lat:me.lat, lon:me.lon,
+                acc:(p.coords&&p.coords.accuracy)||null,
+                speed:(p.coords&&p.coords.speed)||null, heading:NAV.lastHeading||null});
+  if(NAV.buf.length>=TRACK_FLUSH_N) trackFlush();
+}
+
+async function trackFlush(){
+  if(!NAV.session || !NAV.buf.length) return;
+  const batch={session_id:NAV.session, rep:(NAV.free?null:(STATE.cur&&STATE.cur.rep)||null),
+               points:NAV.buf.splice(0, NAV.buf.length)};
+  try{
+    await api("/api/track", {method:"POST", body:JSON.stringify(batch)});
+  }catch(e){
+    const q=trackQueue(); q.push(batch); trackQueueSet(q);   // не ушло — в очередь на потом
+  }
+}
+
+async function trackDrainQueue(){
+  const q=trackQueue();
+  if(!q.length) return;
+  const left=[];
+  for(const b of q){
+    try{ await api("/api/track", {method:"POST", body:JSON.stringify(b)}); }
+    catch(e){ left.push(b); }
+  }
+  trackQueueSet(left);
+}
+
 function startNavWatch(){
+  NAV.session=uuid(); NAV.buf=[]; NAV.lastTracked=null;
+  trackDrainQueue();                                   // сначала досылаем прошлое
   if(!navigator.geolocation){ navShowBanner(L().nogeo); return; }
+  NAV.trackTimer=setInterval(trackFlush, TRACK_FLUSH_MS);
   NAV.watchId=navigator.geolocation.watchPosition(onNavPos, onNavPosErr,
     {enableHighAccuracy:true, maximumAge:2000, timeout:15000});
 }
-function stopNavWatch(){ if(NAV.watchId!=null && navigator.geolocation){ navigator.geolocation.clearWatch(NAV.watchId); NAV.watchId=null; } }
+function stopNavWatch(){
+  if(NAV.watchId!=null && navigator.geolocation){ navigator.geolocation.clearWatch(NAV.watchId); NAV.watchId=null; }
+  if(NAV.trackTimer){ clearInterval(NAV.trackTimer); NAV.trackTimer=null; }
+  trackFlush();                       // хвост поездки не теряем
+}
 function onNavPosErr(){ navShowBanner(L().nogeo); }
 
 function onNavPos(p){
@@ -1643,6 +1747,7 @@ function onNavPos(p){
         pitch:55, zoom:Math.max(NAV.map.getZoom(),16), duration:600}); }catch(e){}
     }
   }
+  trackPush(me, p);
   updateNavStats(me);
   if(!NAV.routeFetched){
     NAV.routeFetched=true;
@@ -1661,7 +1766,10 @@ function updateNavStats(me){
 
 async function fetchNavRoute(me){
   try{
-    const j=await api(`/api/route?rep=${enc(STATE.cur.rep)}&lat=${me.lat}&lon=${me.lon}`);
+    const url = NAV.free
+      ? `/api/route_to?lat=${me.lat}&lon=${me.lon}&dlat=${NAV.dest.lat}&dlon=${NAV.dest.lon}`
+      : `/api/route?rep=${enc(STATE.cur.rep)}&lat=${me.lat}&lon=${me.lon}`;
+    const j=await api(url);
     if(j && j.line) drawNavRoute(j.line);
   }catch(e){
     if(NAV.dest) drawNavRoute([[me.lon,me.lat],[NAV.dest.lon,NAV.dest.lat]]);

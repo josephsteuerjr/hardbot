@@ -28,7 +28,9 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+import addr_cis                                           # слой 0: структурный разбор адреса СНГ
 import db
+import geoindex                                           # иерархический офлайн-справочник координат
 import normalize                                          # слой 1: libpostal/офлайн-нормализация
 import scoring                                            # источник истины по городам Согда (parse_city)
 
@@ -188,8 +190,19 @@ def geocode_address(address: str | None, city: str | None = None,
     full = ", ".join(x for x in [address, city] if x)
     if not full:
         return None
-    q = normalize.query(address, city) or full         # слой 1: нормализуем кривой адрес
-    loc = normalize.locality(full) or full             # чистая строка локалити
+    # Слой 0: структурный разбор официального адреса СНГ. Он же даёт чистый запрос
+    # для точных геокодеров — раньше туда уходила трёхалфавитная каша
+    # («ўзбекистон самарканд вилояти пастдаргом тумани илм мфй улица илм кишлоги»),
+    # теперь «Самаркандская обл., Пастдарг‘ом р-н, МФЙ Илм, ул. Илм».
+    parsed = addr_cis.parse(address, city)
+    idx = None
+    try:
+        idx = geoindex.load()
+    except Exception:                                  # noqa: BLE001 - справочник не обязателен
+        idx = None
+    q = (addr_cis.pretty(parsed, idx.display_names(parsed) if idx else None)
+         or normalize.query(address, city) or full)
+    loc = normalize.locality(full) or full             # чистая строка локалити (старый путь)
     anchor = _city_anchor(address, city)               # надёжный якорь Согда (guard) | None
     if use_precise:
         # Yandex (если ключ) → Nominatim → Photon. Сеть не должна валить батч.
@@ -202,9 +215,22 @@ def geocode_address(address: str | None, city: str | None = None,
                 if anchor and _km((anchor["lat"], anchor["lon"]),
                                   (res["lat"], res["lon"])) > MAX_ANCHOR_KM:
                     continue                           # точный хит уехал далеко от города — не верим
+                res.setdefault("precision", "exact")
                 return res
-    # фолбэк: центр города Согда → центроид аула (GeoNames, TJ/UZ) → ручная метка
-    return anchor or geonames_lookup(loc)
+    # Офлайн-фолбэк. Иерархический справочник ИДЁТ ПЕРВЫМ и обходит якорь Согда:
+    # якорь знает только 9 городов и всегда возвращает центр города, а справочник
+    # доводит до махалли/кишлака и честно сообщает достигнутую точность.
+    if idx:
+        hit = idx.resolve(parsed)
+        if hit:
+            return hit
+    if anchor:
+        anchor.setdefault("precision", "city")
+        return anchor
+    hit = geonames_lookup(loc)
+    if hit:
+        hit.setdefault("precision", "region")
+    return hit
 
 
 # --- Пакетный прогон по реестру -------------------------------------------

@@ -27,8 +27,10 @@ from urllib.parse import parse_qsl
 
 from aiohttp import web
 
+import addr_cis                       # разбор произвольного адреса для навигации
 import db
 import debt
+import geoindex                       # офлайн-справочник координат (без похода в сеть)
 from config import ADMIN_ID, approval_required, lang_of
 from exchange_contract import (
     ExchangeContractError,
@@ -514,7 +516,13 @@ async def _route(request: web.Request) -> web.Response:
     glat, glon = row["geo_lat"], row["geo_lon"]
     if glat is None or glon is None:
         raise web.HTTPNotFound(text="geo")
-    glat, glon = float(glat), float(glon)
+    return await _route_payload(lat, lon, float(glat), float(glon))
+
+
+async def _route_payload(lat: float, lon: float,
+                         glat: float, glon: float) -> web.Response:
+    """Общий ответ навигации: линия по дорогам (OSRM) либо честная прямая.
+    Один и тот же расчёт для маршрута к должнику и к произвольной точке."""
     result = await asyncio.get_event_loop().run_in_executor(
         None, routing_client.best_route, (lat, lon), (glat, glon), _routing_backends())
     if result:
@@ -527,6 +535,100 @@ async def _route(request: web.Request) -> web.Response:
     minutes = km / 30.0 * 60.0   # тот же запас скорости 30 км/ч, что и в движке без OSRM
     return web.json_response({"ok": True, "line": [[lon, lat], [glon, glat]],
                               "km": round(km, 1), "minutes": round(minutes), "src": "straight"})
+
+
+# Координаты, введённые руками: «41.31, 69.24». Десятичная точка обязательна —
+# с запятой «41,31 69,24» неотличимо от пары целых, и разбор становится гаданием.
+_LATLON_RX = re.compile(r"^\s*(-?\d{1,2}(?:\.\d+)?)\s*[, ]\s*(-?\d{1,3}(?:\.\d+)?)\s*$")
+
+
+async def _geocode_free(request: web.Request) -> web.Response:
+    """Произвольный адрес (или пара координат) → точка. Для навигации по адресу,
+    которого нет в реестре: руководителю — проверить адрес должника, владельцу —
+    съездить куда угодно на тесте.
+
+    ТОЛЬКО офлайн-справочник. Сервер-витрина принципиально не ходит в публичные
+    геокодеры: туда уехали бы адреса должников (см. модуль geocode — точный
+    геокодинг живёт в пульте на машине владельца, а не здесь)."""
+    _auth(request)
+    q = (request.query.get("q") or "").strip()
+    if not q:
+        raise web.HTTPBadRequest(text="q")
+
+    m = _LATLON_RX.match(q)
+    if m:
+        lat, lon = float(m.group(1)), float(m.group(2))
+        if -90 <= lat <= 90 and -180 <= lon <= 180:
+            return web.json_response({"ok": True, "lat": lat, "lon": lon,
+                                      "pretty": f"{lat:.5f}, {lon:.5f}",
+                                      "precision": "point", "name": ""})
+
+    parsed = addr_cis.parse(q)
+    try:
+        idx = geoindex.load()
+    except Exception:                                  # noqa: BLE001
+        logging.exception("gazetteer load failed")
+        raise web.HTTPServiceUnavailable(text="gazetteer")
+    hit = idx.resolve(parsed)
+    if not hit:
+        raise web.HTTPNotFound(text="geo")
+    return web.json_response({"ok": True, "lat": hit["lat"], "lon": hit["lon"],
+                              "pretty": addr_cis.pretty(parsed, idx.display_names(parsed)) or q,
+                              "precision": hit["precision"], "name": hit.get("name") or ""})
+
+
+# Пачка за раз. Навигатор шлёт ~10 точек, но оффлайн-очередь после часа без сети
+# может накопить сотни — режем, чтобы одна отправка не встала колом.
+TRACK_MAX_POINTS = 500
+
+
+async def _track(request: web.Request) -> web.Response:
+    """Точки трека из навигатора — пока визит ещё НЕ закрыт.
+
+    Раньше от всей поездки в БД оставались две точки: координата фотографии и
+    место закрытия визита. Трек даёт фактическое время в пути (сейчас движок
+    берёт оценку OSRM и множит на взятый с потолка коэффициент), проезжаемость
+    дорог и реальную длительность визита.
+
+    Идемпотентна по (session_id, ts): в поле сеть рвётся, и клиент переотправляет
+    одну и ту же пачку — дублей это не создаёт."""
+    uid, emp = _auth(request)
+    try:
+        body = await request.json()
+    except Exception:                                  # noqa: BLE001
+        raise web.HTTPBadRequest(text="json")
+    session_id = str(body.get("session_id") or "").strip()[:64]
+    if not session_id:
+        raise web.HTTPBadRequest(text="session_id")
+    points = body.get("points")
+    if not isinstance(points, list):
+        raise web.HTTPBadRequest(text="points")
+
+    rep = str(body.get("rep") or "").strip() or None
+    if rep:
+        # rep приходит от клиента: подпись подтверждает личность, но не право на
+        # ЭТОТ договор. Чужой не отклоняем — просто пишем трек без привязки,
+        # иначе потеря сети превратится в потерю данных поездки.
+        row = db.get_client(rep)
+        if not row or (row["responsible"] != emp and uid != ADMIN_ID):
+            rep = None
+    added = db.add_track_points(session_id, emp, uid, rep, points[:TRACK_MAX_POINTS])
+    return web.json_response({"ok": True, "added": added})
+
+
+async def _route_to(request: web.Request) -> web.Response:
+    """Маршрут до произвольной точки (без привязки к договору).
+    Проверка «чей должник» здесь не нужна: цель задал сам пользователь,
+    из БД ничего не читается."""
+    _auth(request)
+    try:
+        lat = float(request.query.get("lat", ""))
+        lon = float(request.query.get("lon", ""))
+        dlat = float(request.query.get("dlat", ""))
+        dlon = float(request.query.get("dlon", ""))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text="lat/lon")
+    return await _route_payload(lat, lon, dlat, dlon)
 
 
 async def _person(request: web.Request) -> web.Response:
@@ -1746,6 +1848,9 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/person", _person)
     app.router.add_get("/api/cards", _cards)
     app.router.add_get("/api/route", _route)
+    app.router.add_get("/api/route_to", _route_to)
+    app.router.add_get("/api/geocode", _geocode_free)
+    app.router.add_post("/api/track", _track)
     app.router.add_get("/api/route_day", _route_day)
     app.router.add_post("/api/save", _save)
     app.router.add_post("/api/photo", _photo)
