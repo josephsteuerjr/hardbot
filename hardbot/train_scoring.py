@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from collections import defaultdict
 from datetime import date
@@ -43,8 +44,11 @@ K_P, K_A = 120.0, 40.0
 CAP_LO, CAP_HI = 0.25, 4.0        # потолок лифта — защита от переоценки хвостов
 MIN_N = 30                        # значения реже этого в модель не кладём
 
-PAY_MONTHS = ("Оплаты за 01.26", "Оплаты за 02.26", "Оплаты за 03.26",
-              "Оплаты за 04.26", "Оплаты за 05.26", "Оплаты за 06.26")
+# Колонки помесячных оплат ищем ТЕМ ЖЕ правилом, что и импорт (db._PAID_MONTH_RX).
+# Раньше здесь были жёстко зашиты шесть месяцев 2026 года, а импорт складывал любые
+# — и признак «платил раньше» в обучении и в бою считался по разным окнам: в январе
+# лучший плательщик года получил бы в бою счётчик 12, которого модель не видела.
+PAY_MONTH_RX = re.compile(r"^Оплаты за (?:0[1-9]|1[0-2])\.[0-9]{2}$")
 
 
 def _to_num(v) -> float:
@@ -74,8 +78,12 @@ def load_registry(path: str) -> list[dict]:
         return ["" if v is None or (isinstance(v, float) and v != v) else str(v).strip()
                 for v in s]
 
+    pay_cols = [c for c in df.columns if PAY_MONTH_RX.match(str(c).strip())]
+    if not pay_cols:
+        print("ВНИМАНИЕ: колонок «Оплаты за MM.YY» в файле нет — признак "
+              "«платил раньше» будет нулевым у всех, и модель его не выучит")
     paid_months = [0] * len(df)
-    for m in PAY_MONTHS:
+    for m in pay_cols:
         for i, v in enumerate(col(m)):
             if _to_num(v) > 0:
                 paid_months[i] += 1

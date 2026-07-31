@@ -244,6 +244,8 @@ const I18N = {
   ru:{visit:"Визит",client:"Клиент",debt:"Долг",form:"Заполнить",my:"Мои клиенты",
     search:"Поиск: ФИО, договор, телефон",kd:"КД",total:"Долг всего",inwork:"В работе с",
     drive:"Доехать",call:"Позвонить",save:"Сохранить выезд",addphoto:"Добавить фото",
+    mgrpending:"Не отправлено операций: {n}. Они сохранятся, но уйдут только под текущим сотрудником. Переключиться всё равно?",
+    savefailed:"визитов отклонено сервером",
     mgrviewing:"Смотрю портфель сотрудника",mgrswitching:"Переключаю…",
     warmnone:"Карточки для работы без сети ещё не загружены",warmgo:"Загрузить для оффлайна",
     warmgoing:"Загружаю карточки",warmready:"Готово к работе без сети",
@@ -275,6 +277,8 @@ const I18N = {
   uz:{visit:"Chiqish",client:"Mijoz",debt:"Qarz",form:"To‘ldirish",my:"Mijozlarim",
     search:"Qidirish: F.I.Sh., shartnoma, telefon",kd:"shartnoma",total:"Jami qarz",inwork:"Ish boshlandi",
     drive:"Borish",call:"Qo‘ng‘iroq",save:"Chiqishni saqlash",addphoto:"Rasm qo‘shish",
+    mgrpending:"Yuborilmagan amallar: {n}. Ular saqlanadi, lekin joriy xodim nomidan ketadi. Baribir almashtirilsinmi?",
+    savefailed:"tashrif server tomonidan rad etildi",
     mgrviewing:"Xodim portfelini ko‘ryapman",mgrswitching:"Almashtirilmoqda…",
     warmnone:"Tarmoqsiz ishlash uchun kartalar hali yuklanmagan",warmgo:"Oflayn uchun yuklash",
     warmgoing:"Kartalar yuklanmoqda",warmready:"Tarmoqsiz ishlashga tayyor",
@@ -306,6 +310,8 @@ const I18N = {
   tg:{visit:"Сафар",client:"Мизоҷ",debt:"Қарз",form:"Пур кардан",my:"Мизоҷони ман",
     search:"Ҷустуҷӯ: НН, шартнома, телефон",kd:"шартнома",total:"Қарзи умумӣ",inwork:"Дар кор аз",
     drive:"Расидан",call:"Занг задан",save:"Сафарро захира",addphoto:"Расм илова",
+    mgrpending:"Амалҳои нафиристода: {n}. Онҳо нигоҳ дошта мешаванд, вале аз номи корманди ҷорӣ мераванд. Бо вуҷуди ин иваз шавад?",
+    savefailed:"боздиди рад кардашуда",
     mgrviewing:"Портфели кормандро мебинам",mgrswitching:"Иваз мешавад…",
     warmnone:"Кортҳо барои кори бе шабака ҳанӯз боргирӣ нашудаанд",warmgo:"Барои офлайн боргирӣ",
     warmgoing:"Кортҳо боргирӣ мешаванд",warmready:"Барои кори бе шабака тайёр",
@@ -394,7 +400,28 @@ const IDB = (()=>{
 
 // Стереть локальные данные прежнего пользователя (смена сотрудника на устройстве):
 // карточки и исходящую очередь. Снимок (kv) тут же перезапишется свежим bootstrap.
-async function clearLocalData(){ for(const s of ["cards","queue"]){ try{ await IDB.clear(s); }catch(e){} } }
+// Смена сотрудника на устройстве: чужие ПД чистим, а РАБОТУ ЧЕЛОВЕКА — нет.
+// Раньше отсюда безусловно стиралась вся очередь, включая неотправленные визиты
+// и фото; при переключении портфеля руководителем это была прямая потеря работы.
+// Плюс не трогался localStorage, и черновик формы с очередью трека прошлого
+// выездника продолжали жить под новым именем.
+async function clearLocalData(opts){
+  const keepQueue = !!(opts && opts.keepQueue);
+  const stores = keepQueue ? ["cards"] : ["cards","queue"];
+  for(const s of stores){ try{ await IDB.clear(s); }catch(e){} }
+  try{
+    localStorage.removeItem(TRACK_KEY);
+    localStorage.removeItem(WARM_KEY);
+    Object.keys(localStorage)
+      .filter(k => k.indexOf("draft:") === 0)
+      .forEach(k => localStorage.removeItem(k));
+  }catch(e){}
+}
+
+// Сколько операций ещё не ушло на сервер (визиты/фото/метки).
+async function pendingCount(){
+  try{ return ((await IDB.all("queue"))||[]).length; }catch(e){ return 0; }
+}
 
 // uuid для идемпотентного op_id операций очереди (crypto, с запасным вариантом).
 function uuid(){
@@ -465,9 +492,13 @@ async function updateOffBar(){
   const failed=failedItems.length;
   _retakeTarget=failedItems[0]||null;
   const failedReps=[...new Set(failedItems.map(it=>it.rep).filter(Boolean))];
-  const qn=items.length-failed;
+  // Визиты, отклонённые сервером (404/400), теперь не удаляются молча — значит
+  // должны быть ВИДНЫ, иначе они просто копятся незаметно.
+  const rejected=items.filter(it=>it&&it.kind==="save"&&
+                                  String(it.failed||"").indexOf("server-")===0);
+  const qn=items.length-failed-rejected.length;
   const off = STATE.online===false, t=L();
-  if(!off && !qn && !failed){ e.className="offbar"; e.innerHTML=""; return; }
+  if(!off && !qn && !failed && !rejected.length){ e.className="offbar"; e.innerHTML=""; return; }
   let msg;
   if(off){ const snap=await loadBootstrapSnapshot();
     const at=snap&&snap.at?new Date(snap.at):null;
@@ -477,6 +508,10 @@ async function updateOffBar(){
   if(failed){
     const shown=failedReps.slice(0,3).join(", ")+(failedReps.length>3?", …":"");
     msg+=(msg?" · ":"")+failed+" "+t.photoretake+(shown?" ("+shown+")":"");
+  }
+  if(rejected.length){
+    const reps=[...new Set(rejected.map(it=>it.rep).filter(Boolean))].slice(0,3).join(", ");
+    msg+=(msg?" · ":"")+"⚠️ "+rejected.length+" "+t.savefailed+(reps?" ("+reps+")":"");
   }
   e.className="offbar on";
   e.innerHTML=`<span class="d"></span><span>${esc(msg)}</span>`+
@@ -578,6 +613,9 @@ async function flushQueue(){
       // Очередь старой оболочки не содержит списка явно затронутых полей.
       // Сервер её не сертифицирует; сохраняем запись для ручного разбора.
       if(it.kind==="save"&&it.failed==="refresh-form") continue;
+      // Визит, отклонённый сервером (404/400): держим видимым для ручного разбора,
+      // но не даём ему тормозить последующие операции.
+      if(it.kind==="save"&&String(it.failed||"").indexOf("server-")===0) continue;
       let ok=false, stop=false;
       try{
         let r;
@@ -619,6 +657,16 @@ async function flushQueue(){
             // как требующую пересъёмки и продолжаем последующие операции.
             await markPhotoFailed(it,String(r.status));
             await retireReplacedPhoto(it);
+            STATE.online=true; continue;
+          }
+          else if(it.kind==="save"){
+            // ВИЗИТ НЕ УДАЛЯЕМ. Раньше любой 4xx кроме 409 попадал в общий
+            // `else ok=true`, и заполненная в поле форма исчезала БЕЗ СЛЕДА:
+            // ни тоста, ни записи. А 404 здесь — штатная ситуация (кейс отдали
+            // другому выезднику, договор ушёл из портфеля), то есть терялась
+            // именно та работа, которую человек уже сделал.
+            it.failed="server-"+r.status; it.failed_at=Date.now();
+            try{ await IDB.put("queue",it); }catch(e){}
             STATE.online=true; continue;
           }else ok=true;   // прочая невалидная операция не держит очередь вечно
         }
@@ -1645,12 +1693,22 @@ function managerSwitchHTML(){
 
 async function actAs(employee){
   if(!employee || (STATE.roles && employee===STATE.roles.acting)) return;
-  toast(L().mgrswitching);
+  const t = L();
+  // Сначала пытаемся ДОСЛАТЬ незавершённое: переключение портфеля не должно
+  // стоить человеку уже сделанной работы.
+  await flushQueue();
+  const left = await pendingCount();
+  if(left && !confirm(t.mgrpending.replace("{n}", left))){
+    renderList();                 // вернуть селектор к текущему сотруднику
+    return;
+  }
+  toast(t.mgrswitching);
   try{
     await api("/api/act_as", {method:"POST", body:JSON.stringify({employee})});
   }catch(e){ toast("✕"); return; }
-  // Портфель другой — локальный кэш прошлого сотрудника чистим, чтобы не смешивать ПД.
-  await clearLocalData();
+  // Чужие карточки убираем всегда; неотправленную очередь сохраняем — её судьбу
+  // человек только что решил сам.
+  await clearLocalData({keepQueue: left > 0});
   await boot();
 }
 
@@ -1781,7 +1839,15 @@ async function initNavMap(d){
 // запуске. Сервер идемпотентен по (session_id, ts), поэтому повторы безопасны.
 const TRACK_KEY="hb_track_queue", TRACK_FLUSH_N=10, TRACK_FLUSH_MS=30000, TRACK_MIN_M=15;
 
-function trackQueue(){ try{ return JSON.parse(localStorage.getItem(TRACK_KEY)||"[]"); }catch(e){ return []; } }
+function trackQueue(){
+  let q=[]; try{ q=JSON.parse(localStorage.getItem(TRACK_KEY)||"[]"); }catch(e){ return []; }
+  // Пачки, сохранённые прошлой версией, id не имеют. Без него фильтр по bid
+  // вычистил бы их все разом — выдаём id на месте.
+  let patched=false;
+  for(const b of q){ if(b && !b.bid){ b.bid=uuid(); patched=true; } }
+  if(patched) trackQueueSet(q);
+  return q;
+}
 function trackQueueSet(q){ try{ localStorage.setItem(TRACK_KEY, JSON.stringify(q.slice(-2000))); }catch(e){} }
 
 function trackPush(me, p){
@@ -1799,24 +1865,27 @@ function trackPush(me, p){
 
 async function trackFlush(){
   if(!NAV.session || !NAV.buf.length) return;
-  const batch={session_id:NAV.session, rep:(NAV.free?null:(STATE.cur&&STATE.cur.rep)||null),
+  const batch={bid:uuid(),   // стабильный id пачки: по нему её удаляют из очереди
+               session_id:NAV.session, rep:(NAV.free?null:(STATE.cur&&STATE.cur.rep)||null),
                points:NAV.buf.splice(0, NAV.buf.length)};
   try{
     await api("/api/track", {method:"POST", body:JSON.stringify(batch)});
   }catch(e){
-    const q=trackQueue(); q.push(batch); trackQueueSet(q);   // не ушло — в очередь на потом
+    trackQueueSet(trackQueue().concat([batch]));   // не ушло — в очередь на потом
   }
 }
 
+// Досыл накопленного. Очередь перечитывается ПЕРЕД каждой правкой и удаляется
+// ровно одна пачка по её id: раньше здесь один раз делался снимок, а в конце
+// он записывался обратно целиком — и всё, что trackFlush дописал за время
+// ожидания сети, молча стиралось вместе с точками текущей поездки.
 async function trackDrainQueue(){
-  const q=trackQueue();
-  if(!q.length) return;
-  const left=[];
-  for(const b of q){
-    try{ await api("/api/track", {method:"POST", body:JSON.stringify(b)}); }
-    catch(e){ left.push(b); }
+  for(const b of trackQueue()){
+    try{
+      await api("/api/track", {method:"POST", body:JSON.stringify(b)});
+      trackQueueSet(trackQueue().filter(x => x.bid !== b.bid));
+    }catch(e){ return; }        // сеть пропала — остальное дождётся следующего раза
   }
-  trackQueueSet(left);
 }
 
 function startNavWatch(){

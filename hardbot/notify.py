@@ -51,20 +51,28 @@ def _maps_link(lat, lon) -> str:
 
 
 def visit_report_text(row, dist_m=None, visit_geo=None, photo_geo=None,
-                      photos_n: int = 0) -> str:
+                      photos_n: int = 0, actor: str | None = None) -> str:
     """Отчёт о выезде для беседы — по образцу постов сотрудников (клиент, адрес,
     рассказ), но с доказуемыми точками: гео закрытия визита и гео съёмки фото.
     row — клиент ПОСЛЕ сохранения (sqlite.Row или dict). Бот шлёт с
     parse_mode=HTML, поэтому все данные экранируются: «<» в комментарии не
     должен ронять доставку, а разметка из реестра — рендериться в беседе."""
-    def g(key):
+    def raw(key):
         try:
-            return html.escape(str(row[key] or ""))
-        except (KeyError, IndexError):
+            return str(row[key] or "")
+        except (KeyError, IndexError, TypeError):
             return ""
+
+    def g(key):
+        return html.escape(raw(key))
     lines = ["✅ Выезд отработан",
              f"🧑‍💼 {g('responsible') or '—'}",
              f"👤 {g('client') or '—'} ({g('contract_id')})"]
+    # Руководитель работает В ПРИЛОЖЕНИИ от имени своего сотрудника, и закрытый им
+    # визит выглядел бы визитом этого сотрудника — с координатами руководителя.
+    # Кто фактически закрыл, обязано быть видно в отчёте, иначе гео-контроль врёт.
+    if actor and actor != raw("responsible"):
+        lines.insert(1, f"👤 закрыл: {html.escape(str(actor))} (от имени сотрудника)")
     place = " · ".join(x for x in (g("city"), g("address")) if x)
     if place:
         lines.append(f"🏠 {place}")

@@ -248,7 +248,8 @@ def geocode_all(overwrite: bool = False, use_precise: bool = True,
             if res:
                 db.update_fields(r["contract_id"], {
                     "geo_lat": round(res["lat"], 6), "geo_lon": round(res["lon"], 6),
-                    "geo_src": res["src"]})
+                    "geo_src": res["src"],
+                    "geo_precision": res.get("precision") or ""})
                 stat["precise" if res["src"] in ("nominatim", "yandex", "photon") else "aul"] += 1
             else:
                 stat["fail"] += 1

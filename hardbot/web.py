@@ -27,6 +27,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl
 
 from aiohttp import web
+from aiohttp.abc import AbstractAccessLogger
 
 import addr_cis                       # разбор произвольного адреса для навигации
 import db
@@ -769,8 +770,17 @@ async def _save(request: web.Request) -> web.Response:
             vlat, vlon = float(g["lat"]), float(g["lon"])
         except (KeyError, TypeError, ValueError):
             vlat = vlon = None
+        # Грубые уровни отсекаем ЯВНО: центр района или области — это не адрес,
+        # и расстояние до него ничего не проверяет, зато выглядит как нарушение.
+        # Раньше судили только по geo_src, а он у всей иерархии один — «geonames».
+        # Пустая точность — это «неизвестно» (строка геокодирована старым кодом),
+        # и тогда судим по-прежнему, только по geo_src. Отключать гео-контроль
+        # для всей накопленной базы было бы хуже, чем изредка спросить лишний раз.
+        rough = {"city", "district", "region"}
+        precision = (cur["geo_precision"] if "geo_precision" in cur.keys() else "") or ""
         if vlat is not None and cur["geo_lat"] is not None and cur["geo_lon"] is not None \
-                and (cur["geo_src"] or "") not in ("", "city"):
+                and (cur["geo_src"] or "") not in ("", "city") \
+                and precision not in rough:
             dist_m = round(_haversine_km(vlat, vlon, cur["geo_lat"], cur["geo_lon"]) * 1000)
         # История визита строится из явного тела этой формы. Сырые HARD-поля
         # clients/master запрещено дочитывать даже для текста журнала.
@@ -1191,6 +1201,17 @@ async def _lang(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+
+def _acting_actor_name(uid: int) -> str:
+    """Человекочитаемое имя того, кто действует от имени сотрудника.
+    Пусто — если это обычный выездник со своей привязкой."""
+    mgr = db.get_manager(uid)
+    if mgr:
+        return f"руководитель {mgr.get('name') or uid}"
+    if uid == ADMIN_ID:
+        return "владелец"
+    return ""
+
 async def _notify_group(request: web.Request, row, uid: int) -> None:
     bot = request.app.get("bot")
     if not bot:
@@ -1226,10 +1247,15 @@ async def _notify_report_chats(request: web.Request, row, vlat, vlon,
         geo_map = db.photo_geo_for_files(rels)
         pg = next(((g["lat"], g["lon"]) for r in rels if (g := geo_map.get(r))), None)
         from notify import post_visit_report, visit_report_text
+        # Кто ФАКТИЧЕСКИ закрыл визит. У выездника это он сам (привязка), у
+        # руководителя привязки нет — значит он работал от имени сотрудника,
+        # и отчёт обязан это показать: иначе координаты руководителя уедут
+        # в гео-контроль как координаты выездника.
+        actor = db.get_binding(uid) or _acting_actor_name(uid)
         text = visit_report_text(
             row, dist_m=dist_m,
             visit_geo=(vlat, vlon) if vlat is not None else None,
-            photo_geo=pg, photos_n=len(files))
+            photo_geo=pg, photos_n=len(files), actor=actor)
         await post_visit_report(bot, chat_ids, text, files)
     except Exception as e:  # noqa: BLE001 — пост не должен ломать сохранение визита
         logging.warning("report chats notify failed: %s", e)
@@ -1335,12 +1361,17 @@ function vstyle(url){
 function pin(bg,txt){const e=document.createElement("div");e.className="pin";
   e.style.background=bg;e.textContent=txt||"";return e;}
 (async()=>{
+  // Всё, что пришло из БД, попадает в innerHTML/setHTML — а подпись метки и ФИО
+  // вводит человек. Без экранирования это хранимый XSS: выездник сохраняет метку
+  // с тегом, руководитель открывает карту дня и исполняет его в своей сессии.
+  const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,
+    c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const r=await fetch("/manager/map_data"+location.search);
   if(!r.ok){document.getElementById("hdr").textContent="Ссылка устарела — откройте карту из дайджеста заново.";return;}
   const j=await r.json();
   const pts=[...j.targets,...j.visits,...j.markers];
   document.getElementById("hdr").innerHTML=
-    "<b>🗺 "+j.employee+"</b> · "+j.date+
+    "<b>🗺 "+esc(j.employee)+"</b> · "+esc(j.date)+
     "<div class='leg'><span><span class='dot' style='background:#2F80ED'></span>адрес должника ("+j.targets.length+")</span>"+
     "<span><span class='dot' style='background:#219653'></span>визит закрыт ("+j.visits.length+")</span>"+
     "<span><span class='dot' style='background:#B0472C'></span>визит далеко от адреса</span>"+
@@ -1360,14 +1391,15 @@ function pin(bg,txt){const e=document.createElement("div");e.className="pin";
       .setPopup(new maplibregl.Popup({offset:14}).setHTML(html)).addTo(map);
     b.extend([p.lon,p.lat]);
   };
-  j.targets.forEach(p=>add(p,pin("#2F80ED"),"🏠 "+p.client));
+  j.targets.forEach(p=>add(p,pin("#2F80ED"),"🏠 "+esc(p.client)));
   j.visits.forEach((p,i)=>{
     const far=p.dist_m!=null&&p.dist_m>j.alert_m;
     const d=p.dist_m==null?"":(p.dist_m>=1000?(p.dist_m/1000).toFixed(1)+" км":p.dist_m+" м")+" от адреса";
     add(p,pin(far?"#B0472C":"#219653",String(i+1)),
-        (far?"⚠️ ":"✅ ")+p.client+(d?"<br>"+d:""));
+        (far?"⚠️ ":"✅ ")+esc(p.client)+(d?"<br>"+esc(d):""));
   });
-  j.markers.forEach(p=>add(p,pin("#F2994A"),"📍 "+(p.label||"метка")+(p.at?" · "+p.at:"")));
+  j.markers.forEach(p=>add(p,pin("#F2994A"),
+    "📍 "+esc(p.label||"метка")+(p.at?" · "+esc(p.at):"")));
   map.fitBounds(b,{padding:70,maxZoom:15});
 })();
 </script></body></html>"""
@@ -1922,9 +1954,24 @@ def build_app(bot=None) -> web.Application:
     return app
 
 
+
+class _PathOnlyAccessLogger(AbstractAccessLogger):
+    """Access-лог без query-строки: в ней ездят адреса должников и координаты."""
+
+    def log(self, request, response, time):
+        self.logger.info("%s %s %s %s %.3f",
+                         request.remote or "-", request.method, request.path,
+                         response.status, time)
+
 async def start_site(bot=None, host: str = "0.0.0.0", port: int = 8080):
     """Поднять веб-сервер рядом с поллингом (один asyncio-loop)."""
-    runner = web.AppRunner(build_app(bot))
+    # Access-лог aiohttp по умолчанию печатает ПОЛНЫЙ путь с query-строкой, а туда
+    # попадают адрес должника (/api/geocode?q=…) и живые координаты выездника
+    # (/api/route?lat=…&lon=…). Логи контейнера читает кто угодно с доступом
+    # к серверу и уезжают в бэкапы — это хранение ПД там, где его быть не должно.
+    # Свой логгер печатает метод, ПУТЬ БЕЗ ЗАПРОСА, код и размер — этого хватает
+    # для диагностики.
+    runner = web.AppRunner(build_app(bot), access_log_class=_PathOnlyAccessLogger)
     await runner.setup()
     site = web.TCPSite(runner, host, port)
     await site.start()

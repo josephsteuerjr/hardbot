@@ -151,6 +151,8 @@ def _score_expected(items: list[dict], weights: dict, audience: str,
     объезда — рядом стоящий должник дешевле в дороге при том же ожидании. Ползунок
     «кластер» в пульте этим множителем и управляет; ползунки «долг» и «свежесть»
     в этом режиме не действуют — их знание теперь внутри модели."""
+    if not items:
+        return []          # пустой портфель — штатное состояние сразу после сброса
     city_counts = Counter(c for c in (it.get("city") for it in items) if c and c != "—")
     max_cluster = max(city_counts.values()) if city_counts else 1
     cluster_w = _norm_weights(weights)["cluster"]
@@ -161,7 +163,7 @@ def _score_expected(items: list[dict], weights: dict, audience: str,
         cluster_s = (cn / max_cluster) if max_cluster else 0.0
         expected = model.expected(it, today)
         raw.append(expected * (1.0 + cluster_w * cluster_s))
-    top = max(raw) or 1.0
+    top = max(raw, default=0.0) or 1.0
 
     for it, value in zip(items, raw):
         expected = model.expected(it, today)
@@ -286,8 +288,18 @@ def compute_priority(items: list[dict], weights: dict, audience: str = "courier"
             "items": out, "cities": cities}
 
 
+def _visit_snapshot(row) -> dict:
+    """Подтверждённый результат СОБСТВЕННОГО визита бота по строке (или пусто)."""
+    import db
+    try:
+        return db.bot_visit_snapshot(row) or {}
+    except Exception:                                    # noqa: BLE001
+        return {}
+
+
 def _items_from_db() -> list[dict]:
     import db
+    from exchange_contract import OFFICE_RESULT_SNAPSHOT_KEY
     with db.connect() as conn:
         rows = conn.execute("SELECT * FROM clients").fetchall()
     persons = db._group_persons(rows)
@@ -303,6 +315,39 @@ def _items_from_db() -> list[dict]:
                         return v
             return None
 
+        def first_live(key):
+            """То же, но ТОЛЬКО по договорам, где долг ещё не погашен.
+
+            У человека с двумя КД `first` брал результат с любого из них: если
+            один договор закрыт («Оплачен»), killer-фильтр снимал из очереди
+            человека целиком — вместе со вторым, непогашенным долгом. Деньги
+            складываются по всем договорам, а исход — нет, поэтому и брать его
+            надо там, где ещё есть что взыскивать."""
+            for r in cs:
+                if key in r.keys() and contract_debt(r) > 0:
+                    v = r[key]
+                    if v not in (None, ""):
+                        return v
+            return None
+
+        def outcome(key, snapshot_key=None):
+            """Исход визита: сначала ДОКАЗАННЫЙ снимок собственного визита бота,
+            потом значение из реестра.
+
+            Форма выезда пишет результат в call_status, а `overall_result`
+            заполняет только импорт мастера. Пока скоринг читал лишь второе, он
+            не видел исхода собственного визита: человек, которому вчера
+            записали «Оплачен», назавтра снова стоял в очереди."""
+            if snapshot_key:
+                for r in cs:
+                    if contract_debt(r) <= 0:
+                        continue
+                    snap = _visit_snapshot(r)
+                    v = snap.get(snapshot_key) if snap else None
+                    if v not in (None, ""):
+                        return v
+            return first_live(key) or first(key)
+
         visits = 0
         for r in cs:
             if "visits_count" in r.keys():
@@ -311,10 +356,11 @@ def _items_from_db() -> list[dict]:
             "rep": p["rep"], "client": p["client"], "birth": p["birth_date"],
             "debt": p["total"],
             "address": first("address"), "city": first("city"),
-            "visits": visits, "result": first("overall_result"),
-            "location": first("client_location"),
-            "who": first("who_at_address") or "",
-            "promise_date": first("promise_date"),
+            "visits": visits,
+            "result": outcome("overall_result", OFFICE_RESULT_SNAPSHOT_KEY),
+            "location": first_live("client_location") or first("client_location"),
+            "who": first_live("who_at_address") or first("who_at_address") or "",
+            "promise_date": first_live("promise_date") or first("promise_date"),
             # Ограничение «не чаще раза в неделю» относится только к реально
             # завершённым визитам, а не к импортному HARD visit_date.
             "visit_date": first("bot_visit_at"),

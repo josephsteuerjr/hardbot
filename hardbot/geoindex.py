@@ -81,6 +81,12 @@ _OK_CLASS = {
 _OK_CODE = {
     "district": ("ADM2", "ADM3", "PPLA2", "PPLA3"),
     "region": ("ADM1", "PPLA"),
+    # ADM1 — это ЦЕНТРОИД ОБЛАСТИ. Раньше на уровне «город» фильтра по коду не было,
+    # класс "A" проходил, и запись области отдавалась как precision="city": метка
+    # врала, а точка вдобавок перебивала известный центр района, который был бы
+    # заметно ближе. Ниже области — только настоящие населённые пункты.
+    "city": ("PPL", "PPLA", "PPLA2", "PPLA3", "PPLA4", "PPLC", "PPLX", "ADM3", "ADM4"),
+    "jamoat": ("PPL", "PPLA2", "PPLA3", "PPLA4", "PPLX", "ADM3", "ADM4"),
 }
 
 
@@ -289,7 +295,7 @@ class Index:
         """Сначала GeoNames (там есть коды области/района — защита строгая),
         и только если он пуст — OSM с гео-проверкой по опорной точке."""
         best = self._pick_geonames([r for r in recs if r.src == "geonames"],
-                                   level, cc, adm1, adm2)
+                                   level, cc, adm1, adm2, anchor)
         if best:
             return best
         return self._pick_osm([r for r in recs if r.src == "osm"], level, anchor)
@@ -315,8 +321,8 @@ class Index:
             return near[0]
         return cands[0] if len(cands) == 1 else None
 
-    def _pick_geonames(self, recs: list[_Rec], level: str,
-                       cc: str | None, adm1: str | None, adm2: str | None) -> _Rec | None:
+    def _pick_geonames(self, recs: list[_Rec], level: str, cc: str | None,
+                       adm1: str | None, adm2: str | None, anchor=None) -> _Rec | None:
         """Выбрать запись нужного типа, максимально согласованную с адресом."""
         ok_class = _OK_CLASS.get(level, ("P", "A"))
         ok_code = _OK_CODE.get(level)
@@ -341,6 +347,20 @@ class Index:
         # ответ гарантированно свой.
         if adm1 and best.adm1 != adm1 and level != "region":
             return None
+        # Гео-проверка — та же, что для OSM. Код района в дампах заполнен не всегда
+        # (у всех 62 записей «Гулистон» и 25 «Навобод» класса P поле adm2 пустое),
+        # поэтому ранг по adm2 там ничего не решает: все кандидаты внутри области
+        # равны, и побеждает тот, кто первым лёг в индекс — тёзка за сотню
+        # километров. Опорная точка это ловит.
+        if anchor and level not in ("district", "region"):
+            lat0, lon0, kind = anchor
+            if _km((lat0, lon0), (best.lat, best.lon)) > _MAX_KM.get(kind, 120.0):
+                near = [r for r in cands
+                        if _km((lat0, lon0), (r.lat, r.lon)) <= _MAX_KM.get(kind, 120.0)]
+                if not near:
+                    return None
+                near.sort(key=lambda r: _km((lat0, lon0), (r.lat, r.lon)))
+                return near[0]
         return best
 
     def resolve(self, parsed: dict) -> dict | None:

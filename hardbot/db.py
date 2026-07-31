@@ -73,6 +73,11 @@ BOOKKEEPING = [
     ("geo_lat", "REAL"),
     ("geo_lon", "REAL"),
     ("geo_src", "TEXT"),            # источник точки: nominatim/geonames/manual (выездник)
+    # До какого уровня адрес реально разобран: street/village/mahalla/jamoat/city/
+    # district/region. Без неё центр района выглядел как адресная точка, и гео-контроль
+    # честного выездника показывал руководителю «визит далеко от адреса» — при том,
+    # что «адрес» был центром района за десятки километров.
+    ("geo_precision", "TEXT"),
     ("tips", "TEXT"),               # наводки выездника (староста, соседи, ориентиры)
     ("updated_at", "TEXT"),
     # Доказательство происхождения результата визита. Обычный импорт реестра эти
@@ -1110,7 +1115,14 @@ def acting_employee(telegram_id: int, allowed: list[str]) -> str | None:
     if not allowed:
         return None
     chosen = get_setting(_ACTING_KEY.format(telegram_id))
-    return chosen if chosen in allowed else allowed[0]
+    if chosen in allowed:
+        return chosen
+    # Фолбэк ЗАПИСЫВАЕМ. Иначе личность руководителя дрейфует сама: allowed[0]
+    # зависит от текущего состава списка, а пульт перезаписывает его целиком —
+    # добавили сотрудника с фамилией на «А», и человек молча оказался в другом
+    # портфеле, а приложение сочло это сменой сотрудника и стёрло локальные данные.
+    set_setting(_ACTING_KEY.format(telegram_id), allowed[0])
+    return allowed[0]
 
 
 def set_acting_employee(telegram_id: int, employee: str, allowed: list[str]) -> bool:
@@ -2174,6 +2186,23 @@ def _block_spans() -> list[tuple[int, int, str]]:
 DATE_KEYS = {"birth_date", "last_payment_date", "promise_date", "visit_date",
              "meeting_date", "kd_date", "assign_date"}
 
+# Границы разумного для серийной даты Excel: 1990-01-01 .. 2100-01-01. Всё, что
+# вне — не дата, а просто число в колонке даты, и выдавать его за дату опаснее,
+# чем оставить как есть.
+_EXCEL_EPOCH = datetime(1899, 12, 30)
+_EXCEL_MIN, _EXCEL_MAX = 32874, 73051
+
+
+def _excel_serial_date(value) -> str | None:
+    """Серийная дата Excel → «ГГГГ-ММ-ДД». None, если это не похоже на дату."""
+    try:
+        days = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not (_EXCEL_MIN <= days <= _EXCEL_MAX):
+        return None
+    return (_EXCEL_EPOCH + timedelta(days=int(days))).date().isoformat()
+
 # Денежные/числовые колонки — подсказка писателю xlsx (пульт, rust_xlsxwriter):
 # парсить в число и ставить формат # ##0, чтобы суммировалось и не зеленело.
 # В БД значения остаются текстом как пришли — это только метаданные экспорта.
@@ -3093,6 +3122,13 @@ def import_grid(
                     data[key] = val.strftime("%Y-%m-%d")
                 elif isinstance(val, date):
                     data[key] = val.isoformat()
+                elif key in DATE_KEYS and isinstance(val, (int, float)) \
+                        and not isinstance(val, bool):
+                    # Ячейка, потерявшая в Excel формат даты, приезжает числом —
+                    # серийной датой (46204 = 21.07.2026). Раньше она сохранялась
+                    # как текст «46204», и договор с такой «Датой выезда» выпадал
+                    # из фильтров по дате: визит вроде есть, а в отчётах его нет.
+                    data[key] = _excel_serial_date(val) or str(val).strip()
                 else:
                     text = str(val).strip()
                     if text:
