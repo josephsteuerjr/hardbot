@@ -23,7 +23,8 @@ import db
 import digest
 import notify
 from config import ADMIN_ID, lang_of
-from handlers_main import _applink_text, _is_applink_request, _open_app_kb
+from handlers_main import (_applink_refusal, _applink_text,
+                           _is_applink_request, _open_app_kb)
 
 router = Router()
 
@@ -115,6 +116,11 @@ async def fallback(message: Message):
     if _is_applink_request(message.text):
         if await _send_requested_applink(message):
             return
+        # Не выдалась — говорим почему. Раньше руководитель просто получал дайджест
+        # вместо ссылки и не понимал, что пошло не так.
+        await message.answer(_applink_refusal(message.from_user.id,
+                                              lang_of(message.from_user.id)))
+        return
     await message.answer("Меню — снизу. Нажмите «📊 Дайджест за сегодня».",
                          reply_markup=manager_menu())
     await _send_digest(message)

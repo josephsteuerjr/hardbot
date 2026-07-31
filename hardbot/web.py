@@ -181,10 +181,24 @@ def _uid(request: web.Request) -> int | None:
     return None
 
 
+def _manager_scope(uid: int) -> list[str]:
+    """Сотрудники, чьи портфели вправе открыть этот руководитель (или владелец)."""
+    return db.manager_employees(uid, is_owner=(uid == ADMIN_ID))
+
+
 def _employee(uid: int) -> str | None:
+    """Кем пользователь работает в приложении.
+
+    У выездника это его привязка. У РУКОВОДИТЕЛЯ привязки нет и быть не должно —
+    у него своя роль, — поэтому он «действует от имени» одного из своих сотрудников
+    и переключается между ними. Без этого руководитель со ссылкой входа упирался
+    в 403 «not bound»: ссылка выдавалась, а приложение не пускало."""
     emp = db.get_binding(uid)
     if emp:
         return emp
+    acting = db.acting_employee(uid, _manager_scope(uid))
+    if acting:
+        return acting
     if DEV and uid == ADMIN_ID:  # владельцу в дев-режиме показываем первого из реестра
         emps = db.employees_in_registry()
         return emps[0]["employee"] if emps else None
@@ -385,9 +399,37 @@ async def _bootstrap(request: web.Request) -> web.Response:
         persons.sort(key=lambda x: x.get("score", -1), reverse=True)   # приоритет наверху
     except Exception as e:  # noqa: BLE001
         logging.warning("priority_index: %s", e)
+    # Роль руководителя: у него нет привязки, он работает от имени сотрудника и
+    # может переключаться. Фронт по этому блоку рисует переключатель портфелей.
+    scope = _manager_scope(uid)
+    roles = {"manager": bool(scope) and not db.get_binding(uid),
+             "employees": scope, "acting": emp} if scope else None
     return web.json_response({"ok": True, "uid": uid, "employee": emp,
                               "kind": db.get_kind(uid), "lang": lang,
-                              "persons": persons, "meta": _meta(lang)})
+                              "persons": persons, "meta": _meta(lang),
+                              "roles": roles})
+
+
+async def _act_as(request: web.Request) -> web.Response:
+    """Руководитель переключается на портфель другого своего сотрудника.
+
+    Проверка списка — на сервере: клиент присылает имя, но право открыть этот
+    портфель определяется ролью в БД, а не тем, что пришло в запросе."""
+    uid = _uid(request)
+    if not uid:
+        raise web.HTTPUnauthorized(text="auth")
+    try:
+        body = await request.json()
+    except Exception:                                  # noqa: BLE001
+        raise web.HTTPBadRequest(text="json")
+    employee = str(body.get("employee") or "").strip()
+    scope = _manager_scope(uid)
+    if not scope:
+        raise web.HTTPForbidden(text="not a manager")
+    if not db.set_acting_employee(uid, employee, scope):
+        raise web.HTTPForbidden(text="employee not in scope")
+    db.audit_access(uid, "act_as", employee)           # ИБ: смена контекста — в журнал
+    return web.json_response({"ok": True, "acting": employee})
 
 
 async def _route_day(request: web.Request) -> web.Response:
@@ -1851,6 +1893,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/route_to", _route_to)
     app.router.add_get("/api/geocode", _geocode_free)
     app.router.add_post("/api/track", _track)
+    app.router.add_post("/api/act_as", _act_as)
     app.router.add_get("/api/route_day", _route_day)
     app.router.add_post("/api/save", _save)
     app.router.add_post("/api/photo", _photo)

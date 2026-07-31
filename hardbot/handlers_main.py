@@ -59,16 +59,35 @@ def _open_app_kb(lang: str, uid: int | None = None) -> InlineKeyboardMarkup | No
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _may_open_app(uid: int) -> bool:
+    """Кому ссылка входа вообще имеет смысл.
+
+    Выезднику — по привязке. Руководителю и владельцу — по роли: привязки у них
+    нет и быть не должно, но приложение их пускает (действуют от имени своего
+    сотрудника, см. web._employee). Раньше здесь стояла одна проверка на привязку,
+    поэтому владелец писал «ссылка» и не получал ничего — вообще без объяснений."""
+    if db.get_binding(uid):
+        return True
+    return bool(db.manager_employees(uid, is_owner=(uid == ADMIN_ID)))
+
+
 def _applink_text(uid: int, lang: str) -> str | None:
     """Короткое сообщение с одноразовой ссылкой входа в автономное приложение.
-    Только привязанным (иначе ссылка бессмысленна: /api отдаст 403) и только при
-    настроенном https-URL. Код — в #-фрагменте: не попадает в логи сервера."""
+    Код — в #-фрагменте: не попадает в логи сервера."""
     url = os.getenv("MINIAPP_URL", "").strip().rstrip("/")
-    if not url or not db.get_binding(uid):
+    if not url or not _may_open_app(uid):
         return None
     code = db.create_app_link(uid)
     db.audit_access(uid, "app_link_issued")
     return t("applink_msg", lang, url=f"{url}/#link={code}", days=db.APP_LINK_DAYS)
+
+
+def _applink_refusal(uid: int, lang: str) -> str:
+    """ПОЧЕМУ ссылку выдать нельзя. Молчание здесь — худший вариант: человек пишет
+    «ссылка», получает обычную кнопку и не понимает, сломан бот или он сам."""
+    if not os.getenv("MINIAPP_URL", "").strip():
+        return t("applink_no_url", lang)
+    return t("applink_not_bound", lang)
 
 
 def _is_applink_request(text: str | None) -> bool:
@@ -211,7 +230,10 @@ async def any_message(message: Message):
         text = _applink_text(message.from_user.id, lang)
         if text:
             await message.answer(text, reply_markup=_open_app_kb(lang, message.from_user.id))
-            return
+        else:
+            # Явный отказ с причиной вместо тихого падения в обычную кнопку.
+            await message.answer(_applink_refusal(message.from_user.id, lang))
+        return
     kb = _open_app_kb(lang)
     if kb:
         await message.answer(t("start_app", lang), reply_markup=kb)

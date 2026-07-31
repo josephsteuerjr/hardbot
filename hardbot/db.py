@@ -1079,6 +1079,48 @@ def is_manager(telegram_id: int) -> bool:
                             (telegram_id,)).fetchone() is not None
 
 
+# --- Руководитель в приложении: чей портфель он сейчас смотрит ----------------
+# Руководителя НЕ привязывают к сотруднику как выездника — у него своя роль. Чтобы
+# он мог открыть приложение, ему разрешено «действовать от имени» одного из СВОИХ
+# сотрудников и переключаться между ними. Выбор хранится в settings по uid: он
+# личный, переживает перезаход и не мешает другим.
+_ACTING_KEY = "acting_employee:{}"
+
+
+def manager_employees(telegram_id: int, *, is_owner: bool = False) -> list[str]:
+    """Сотрудники, портфели которых руководитель вправе открыть.
+
+    Владелец без явной роли видит всех — это его контур. Обычный руководитель —
+    только тех, кто закреплён за ним в пульте; пустой список у него означает
+    «никого», а не «всех», иначе роль не ограничивала бы ничего."""
+    mgr = get_manager(telegram_id)
+    if mgr is not None:
+        allowed = [e for e in mgr.get("employees") or [] if str(e).strip()]
+        return sorted(dict.fromkeys(allowed))
+    if is_owner:
+        return [r["employee"] for r in employees_in_registry()]
+    return []
+
+
+def acting_employee(telegram_id: int, allowed: list[str]) -> str | None:
+    """Текущий выбор руководителя, сверенный со списком доступных.
+
+    Сверка обязательна: сотрудника могли открепить или переименовать в реестре,
+    и сохранённый выбор не должен становиться дырой в доступе."""
+    if not allowed:
+        return None
+    chosen = get_setting(_ACTING_KEY.format(telegram_id))
+    return chosen if chosen in allowed else allowed[0]
+
+
+def set_acting_employee(telegram_id: int, employee: str, allowed: list[str]) -> bool:
+    """Переключить руководителя на портфель сотрудника. False — не разрешён."""
+    if employee not in allowed:
+        return False
+    set_setting(_ACTING_KEY.format(telegram_id), employee)
+    return True
+
+
 def cities_in_registry() -> list[dict]:
     """Города из реестра (clients.city) с числом клиентов — для мультивыбора в пульте.
     Часто пуст (city — HARD-поле, его заполняет выездник), поэтому пульт даёт и свободный ввод."""

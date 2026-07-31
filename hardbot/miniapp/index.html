@@ -244,6 +244,10 @@ const I18N = {
   ru:{visit:"Визит",client:"Клиент",debt:"Долг",form:"Заполнить",my:"Мои клиенты",
     search:"Поиск: ФИО, договор, телефон",kd:"КД",total:"Долг всего",inwork:"В работе с",
     drive:"Доехать",call:"Позвонить",save:"Сохранить выезд",addphoto:"Добавить фото",
+    mgrviewing:"Смотрю портфель сотрудника",mgrswitching:"Переключаю…",
+    warmnone:"Карточки для работы без сети ещё не загружены",warmgo:"Загрузить для оффлайна",
+    warmgoing:"Загружаю карточки",warmready:"Готово к работе без сети",
+    warmagain:"Обновить оффлайн-копию",warmfail:"Не удалось загрузить — нужна сеть",
     routeday:"Маршрут дня",rdempty:"Нет невизитированных кейсов с точками",
     freenav:"Навигация по адресу",freenavph:"Адрес или «41.31, 69.24»",
     freenavfail:"Адрес не распознан",freenavrough:"Точность: только до района",
@@ -271,6 +275,10 @@ const I18N = {
   uz:{visit:"Chiqish",client:"Mijoz",debt:"Qarz",form:"To‘ldirish",my:"Mijozlarim",
     search:"Qidirish: F.I.Sh., shartnoma, telefon",kd:"shartnoma",total:"Jami qarz",inwork:"Ish boshlandi",
     drive:"Borish",call:"Qo‘ng‘iroq",save:"Chiqishni saqlash",addphoto:"Rasm qo‘shish",
+    mgrviewing:"Xodim portfelini ko‘ryapman",mgrswitching:"Almashtirilmoqda…",
+    warmnone:"Tarmoqsiz ishlash uchun kartalar hali yuklanmagan",warmgo:"Oflayn uchun yuklash",
+    warmgoing:"Kartalar yuklanmoqda",warmready:"Tarmoqsiz ishlashga tayyor",
+    warmagain:"Oflayn nusxani yangilash",warmfail:"Yuklanmadi — tarmoq kerak",
     routeday:"Kun marshruti",rdempty:"Nuqtali ochiq ishlar yo‘q",
     freenav:"Manzil bo‘yicha navigatsiya",freenavph:"Manzil yoki «41.31, 69.24»",
     freenavfail:"Manzil topilmadi",freenavrough:"Aniqlik: faqat tuman darajasida",
@@ -298,6 +306,10 @@ const I18N = {
   tg:{visit:"Сафар",client:"Мизоҷ",debt:"Қарз",form:"Пур кардан",my:"Мизоҷони ман",
     search:"Ҷустуҷӯ: НН, шартнома, телефон",kd:"шартнома",total:"Қарзи умумӣ",inwork:"Дар кор аз",
     drive:"Расидан",call:"Занг задан",save:"Сафарро захира",addphoto:"Расм илова",
+    mgrviewing:"Портфели кормандро мебинам",mgrswitching:"Иваз мешавад…",
+    warmnone:"Кортҳо барои кори бе шабака ҳанӯз боргирӣ нашудаанд",warmgo:"Барои офлайн боргирӣ",
+    warmgoing:"Кортҳо боргирӣ мешаванд",warmready:"Барои кори бе шабака тайёр",
+    warmagain:"Нусхаи офлайнро нав кунед",warmfail:"Нашуд — шабака лозим аст",
     routeday:"Масири рӯз",rdempty:"Кейси кушодаи нуқтадор нест",
     freenav:"Навигатсия аз рӯи нишонӣ",freenavph:"Нишонӣ ё «41.31, 69.24»",
     freenavfail:"Нишонӣ шинохта нашуд",freenavrough:"Дақиқӣ: танҳо то ноҳия",
@@ -398,11 +410,50 @@ async function cacheBootstrap(d){
 async function loadBootstrapSnapshot(){ try{ return await IDB.get("kv","bootstrap"); }catch(e){ return null; } }
 async function loadCard(rep){ try{ return (await IDB.get("cards",rep))||null; }catch(e){ return null; } }
 // Прогрев кэша всех карточек одним запросом (только онлайн, в фоне, не блокирует UI).
-async function warmCards(){
+// Полные карточки портфеля в оффлайн-кэш. `manual` — запуск кнопкой: тогда процесс
+// показываем, при фоновом прогреве после входа — только итог. Раскладка идёт
+// порциями с паузой: на слабом телефоне синхронный цикл по сотням карточек
+// подвешивал интерфейс ровно в тот момент, когда человек собирается уезжать.
+// Просим браузер НЕ вычищать наше хранилище. И iOS, и Android вправе выбросить
+// IndexedDB под давлением памяти — а выездник обнаружит это в поле, где сети нет.
+// Просить надо один раз и до прогрева кэша; отказ не страшен, просто работаем как есть.
+async function askPersistentStorage(){
   try{
-    const j=await api("/api/cards");
-    if(j&&j.cards){ for(const rep of Object.keys(j.cards)){ try{ await IDB.put("cards",j.cards[rep],rep); }catch(e){} } }
+    if(navigator.storage && navigator.storage.persist){
+      if(await navigator.storage.persisted()) return true;
+      return await navigator.storage.persist();
+    }
   }catch(e){}
+  return false;
+}
+
+async function warmCards(manual){
+  const t = L();
+  await askPersistentStorage();
+  if(manual) warmBar(`<div class="pcard" style="display:block;margin-bottom:10px">
+      <div class="muted" id="warmtxt">${esc(t.warmgoing)}…</div></div>`);
+  let j=null;
+  try{ j=await api("/api/cards"); }
+  catch(e){
+    if(manual) warmBar(`<div class="pcard" style="display:block;margin-bottom:10px">
+        <div class="muted">⚠️ ${esc(t.warmfail)}</div>
+        <button class="btn line" style="margin-top:8px" onclick="warmCards(true)">⬇ ${esc(t.warmagain)}</button>
+      </div>`);
+    return;
+  }
+  const reps = (j && j.cards) ? Object.keys(j.cards) : [];
+  let done = 0;
+  for(const rep of reps){
+    try{ await IDB.put("cards", j.cards[rep], rep); done++; }catch(e){}
+    if(manual && (done % 10 === 0 || done === reps.length)){
+      const el = $("warmtxt");
+      if(el) el.textContent = `${t.warmgoing}: ${done}/${reps.length}`;
+      await new Promise(r => setTimeout(r, 0));   // отдаём кадр — интерфейс не замирает
+    }
+  }
+  STATE.warmCount = done;
+  try{ localStorage.setItem(WARM_KEY, String(Date.now())); }catch(e){}
+  warmBar(warmStatusHTML());
 }
 // Индикатор оффлайна / очереди. Обновляется на каждом основном экране (setBottomNav).
 let _retakeTarget=null;
@@ -752,6 +803,7 @@ async function boot(){
     const prev = await loadBootstrapSnapshot();
     if(prev && prev.employee && d.employee && prev.employee !== d.employee) await clearLocalData();
     setMeta(d.meta); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
+    STATE.roles=d.roles||null;   // роль руководителя: список его сотрудников + текущий
     STATE.online=true;
     cacheBootstrap(d);            // снимок портфеля для оффлайна (в фоне, не блокирует UI)
     renderList();
@@ -828,10 +880,13 @@ function renderList(){
   if(!STATE.persons.length){ $("app").innerHTML=bar+`<div class="center">${t.nocl}</div>`; setBottomNav("clients"); return; }
   $("app").innerHTML = bar +
     `<div class="searchwrap">${ic("search")}<input class="search" id="q" placeholder="${esc(t.search)}" oninput="filterList()"></div>
+     ${managerSwitchHTML()}
      <button class="btn line" style="margin-bottom:10px" onclick="routeDay()">🧭 ${esc(t.routeday)}</button>
      <button class="btn line" style="margin-bottom:10px" onclick="askAddress()">📍 ${esc(t.freenav)}</button>
+     <div id="warmbar"></div>
      <div id="plist"></div>`;
   drawList(STATE.persons);
+  warmBar(warmStatusHTML());     // видно, готов ли оффлайн-кэш, ещё до выезда
   setBottomNav("clients");
 }
 
@@ -1448,6 +1503,7 @@ async function refreshData(){
     const sig=ps=>JSON.stringify((ps||[]).map(p=>[p.rep,p.visited,p.n]));
     const changed=sig(STATE.persons)!==sig(d.persons);
     setMeta(d.meta); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
+    STATE.roles=d.roles||null;   // роль руководителя: список его сотрудников + текущий
     STATE.online=true; cacheBootstrap(d); updateOffBar();
     if(changed){
       warmCards();                               // и полные карточки новых клиентов
@@ -1568,6 +1624,56 @@ function navShellHTML(d,t){
       ${providerChips(d)}
       ${d.free ? "" :
         `<button class="btn acc" onclick="navFinish()">${ic("check")}<span>${esc(t.finishvisit)}</span></button>`}
+    </div>`;
+}
+
+// --- Руководитель: чей портфель смотрим ---------------------------------------
+// У руководителя нет привязки к сотруднику — он работает «от имени» одного из своих
+// и переключается здесь. Право открыть портфель проверяет СЕРВЕР по роли в БД:
+// сюда приходит только имя, и подделать его бесполезно.
+function managerSwitchHTML(){
+  const r = STATE.roles;
+  if(!r || !r.manager || !(r.employees||[]).length) return "";
+  const t = L();
+  const opts = r.employees.map(e =>
+    `<option value="${esc(e)}"${e===r.acting?" selected":""}>${esc(e)}</option>`).join("");
+  return `<div class="pcard" style="display:block;margin-bottom:10px">
+      <div class="muted" style="margin-bottom:6px">${esc(t.mgrviewing)}</div>
+      <select class="search" style="width:100%" onchange="actAs(this.value)">${opts}</select>
+    </div>`;
+}
+
+async function actAs(employee){
+  if(!employee || (STATE.roles && employee===STATE.roles.acting)) return;
+  toast(L().mgrswitching);
+  try{
+    await api("/api/act_as", {method:"POST", body:JSON.stringify({employee})});
+  }catch(e){ toast("✕"); return; }
+  // Портфель другой — локальный кэш прошлого сотрудника чистим, чтобы не смешивать ПД.
+  await clearLocalData();
+  await boot();
+}
+
+// --- Оффлайн-подгрузка карточек: видимый процесс ------------------------------
+// Раньше карточки тянулись молча, и выездник уезжал в поле не зная, докачалось ли.
+// Теперь виден прогресс, итог и время последней загрузки — а при обрыве понятно,
+// что кэш неполный и надо повторить, пока сеть ещё есть.
+const WARM_KEY = "hb_warm_at";
+
+function warmBar(html){ const el=$("warmbar"); if(el) el.innerHTML=html; }
+
+function warmStatusHTML(){
+  const t = L();
+  const at = +(localStorage.getItem(WARM_KEY) || 0);
+  const n = STATE.warmCount || 0, total = (STATE.persons||[]).length;
+  if(!at) return `<div class="pcard" style="display:block;margin-bottom:10px">
+      <div class="muted">${esc(t.warmnone)}</div>
+      <button class="btn line" style="margin-top:8px" onclick="warmCards(true)">⬇ ${esc(t.warmgo)}</button>
+    </div>`;
+  const ok = n >= total && total > 0;
+  return `<div class="pcard" style="display:block;margin-bottom:10px">
+      <div class="muted">${ok ? "✅ " : "⚠️ "}${esc(t.warmready)}: ${n}/${total} · ${hhmm(at)}</div>
+      <button class="btn line" style="margin-top:8px" onclick="warmCards(true)">⬇ ${esc(t.warmagain)}</button>
     </div>`;
 }
 
