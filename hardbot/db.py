@@ -1504,13 +1504,44 @@ def get_client(contract_id: str) -> sqlite3.Row | None:
         ).fetchone()
 
 
+def person_key(row) -> tuple:
+    """Ключ человека: (ФИО, дата рождения) — а без даты рождения ещё и адрес.
+
+    ПУСТАЯ ДАТА РОЖДЕНИЯ — не значение, а «неизвестно». Прежний `birth_date or ''`
+    превращал её в полноценный ключ, и два РАЗНЫХ должника с одинаковым ФИО
+    сливались в одного: в карточке оказывались два адреса и два чужих телефона,
+    долг складывался, а закрытие визита по одному договору писало снимок и во
+    второй — результат выезда уезжал в чужую строку офисного реестра.
+
+    Но просто разделить всех без ДР нельзя: несколько займов на одного человека —
+    норма. На реальном реестре (17 075 строк, 17.7% без ДР) таких групп 331 на
+    1 382 договора, и у 320 из них АДРЕС СОВПАДАЕТ — это действительно один
+    человек. Групп с расходящимися адресами не нашлось ни одной.
+
+    Поэтому без ДР объединяем только при совпадающем опознавательном признаке:
+    адрес, иначе телефон. Нет ни того, ни другого — человек равен договору.
+    Ошибка в сторону разделения безопасна (два кейса вместо одного), в сторону
+    объединения — нет (смешение ПД и визит не тому должнику)."""
+    dob = (row["birth_date"] or "").strip()
+    if dob:
+        return (row["client"] or "", dob)
+    ident = (row["address"] or "").strip().lower() or (row["phone"] or "").strip()
+    if ident:
+        return (row["client"] or "", "\x00адрес:" + ident)
+    return (row["client"] or "", "\x00договор:" + (row["contract_id"] or ""))
+
+
 def _group_persons(rows: list[sqlite3.Row]) -> list[dict]:
     """Объединить договоры в людей по (ФИО, дата рождения)."""
     groups: dict[tuple, list] = {}
     for r in rows:
-        groups.setdefault((r["client"] or "", r["birth_date"] or ""), []).append(r)
+        groups.setdefault(person_key(r), []).append(r)
     persons = []
     for (name, dob), rs in groups.items():
+        # Служебный суффикс ключа (номер договора вместо неизвестной ДР) наружу
+        # не отдаём — снаружи это по-прежнему «дата рождения неизвестна».
+        if dob.startswith("\x00"):
+            dob = ""
         rep = min(rs, key=lambda x: x["contract_id"] or "")["contract_id"]
         persons.append({
             "rep": rep, "client": name, "birth_date": dob,
@@ -1540,17 +1571,24 @@ def persons_for_employee(employee: str) -> list[dict]:
 
 
 def person_contracts(rep_contract_id: str) -> list[sqlite3.Row]:
-    """Все договоры человека, к которому относится этот договор."""
+    """Все договоры человека, к которому относится этот договор.
+
+    Без даты рождения объединять НЕЛЬЗЯ (см. person_key): результат визита
+    расходится по всем договорам человека, и при склейке однофамильцев он уехал бы
+    в чужую строку реестра. Пустая ДР → человек = ровно этот договор."""
     row = get_client(rep_contract_id)
     if not row:
         return []
     with connect() as conn:
-        return conn.execute(
+        candidates = conn.execute(
             "SELECT * FROM clients WHERE client IS ? "
-            "AND IFNULL(birth_date,'') = IFNULL(?, '') "
             "AND IFNULL(responsible,'') = IFNULL(?, '') ORDER BY contract_id",
-            (row["client"], row["birth_date"], row["responsible"]),
+            (row["client"], row["responsible"]),
         ).fetchall()
+    # Фильтруем ТЕМ ЖЕ ключом, что и группировка: иначе SQL и _group_persons
+    # разойдутся, и визит разнесётся по договорам, которых карточка не показывает.
+    key = person_key(row)
+    return [c for c in candidates if person_key(c) == key]
 
 
 def search_persons(employee: str, query: str) -> list[dict]:
@@ -3173,18 +3211,23 @@ def import_grid(
             if replay is not None:
                 conn.rollback()
                 return replay
+        # address/phone нужны person_key: без даты рождения человек различается
+        # именно по ним, иначе однофамильцы склеятся (см. person_key).
         existing = {r["contract_id"]: r for r in conn.execute(
-            "SELECT contract_id, client, birth_date, responsible, bot_visit_at, "
-            "bot_visit_data, office_edit_data, visit_value_log FROM clients")}
+            "SELECT contract_id, client, birth_date, responsible, address, phone, "
+            "bot_visit_at, bot_visit_data, office_edit_data, visit_value_log "
+            "FROM clients")}
         # Визит — на человека: принятая правка разносится по всем его договорам
         # с тем же визитом, иначе карточка/дайджест (первый КД человека) её не
         # увидят, а файлы разъедутся построчно.
         person_map: dict[tuple, list[str]] = {}
         for r in existing.values():
             if r["bot_visit_data"]:
+                # Ключ тот же, что и везде: без ДР человек = один договор,
+                # иначе офисная правка разъедется по однофамильцам (см. person_key).
                 person_map.setdefault(
-                    (r["client"] or "", r["birth_date"] or "",
-                     r["responsible"] or ""), []).append(r["contract_id"])
+                    person_key(r) + (r["responsible"] or "",),
+                    []).append(r["contract_id"])
         # Договоры одного человека: накапливаем принятые правки/журнал, чтобы
         # следующий sibling видел свежее состояние (row0 из префетча стар).
         fresh_overlays: dict[str, dict] = {}
@@ -3274,8 +3317,7 @@ def import_grid(
                 if anchor_value not in (None, "") and not anchor_ok:
                     rejected += 1
                 if office:
-                    pkey = (row0["client"] or "", row0["birth_date"] or "",
-                            row0["responsible"] or "")
+                    pkey = person_key(row0) + (row0["responsible"] or "",)
                     sibs = [c for c in person_map.get(pkey, [])
                             if existing[c]["bot_visit_at"] == row0["bot_visit_at"]]
                     if cid not in sibs:

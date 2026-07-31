@@ -13,6 +13,7 @@ aiohttp идёт в комплекте с aiogram — новых зависим�
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import hmac
 import json
@@ -1619,11 +1620,25 @@ async def _admin_bot_token(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "need_restart": True})
 
 
+# Точные геокодеры (Nominatim/Photon/Yandex) — публичные сервисы. Пускать в них
+# адреса должников С СЕРВЕРА нельзя: это трансграничная передача ПД третьей стороне,
+# и запрещено это прямо (SECURITY.md, docstring geocode.py). Раньше кнопка «Запустить
+# геокодинг» в пульте била сюда, а отсюда `geocode_all()` вызывался БЕЗ аргументов —
+# то есть с use_precise=True по умолчанию, и каждый адрес без координат уезжал
+# в nominatim.openstreetmap.org. Ни флага, ни проверки не было.
+#
+# Теперь сервер считает только офлайн-справочником (он же здесь и лежит — geoindex
+# с дампами GeoNames и OSM). Точный геокодинг остаётся в пульте, на машине владельца.
+GEOCODER_ALLOW_PUBLIC = os.getenv("GEOCODER_ALLOW_PUBLIC", "").strip() in ("1", "true", "yes")
+
+
 async def _admin_geocode(request: web.Request) -> web.Response:
     _admin(request)
     import geocode
-    asyncio.get_event_loop().run_in_executor(None, geocode.geocode_all)
-    return web.json_response({"ok": True, "started": True})
+    asyncio.get_event_loop().run_in_executor(
+        None, functools.partial(geocode.geocode_all, use_precise=GEOCODER_ALLOW_PUBLIC))
+    return web.json_response({"ok": True, "started": True,
+                              "precise": GEOCODER_ALLOW_PUBLIC})
 
 
 async def _admin_priority(request: web.Request) -> web.Response:

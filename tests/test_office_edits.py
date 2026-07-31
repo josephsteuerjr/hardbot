@@ -40,6 +40,11 @@ KEYS = [
 
 def _import(*rows):
     titles = [field.title for field in db.FIELDS]
+    # Адрес проставляем по умолчанию: без даты рождения именно он отличает
+    # однофамильцев друг от друга (db.person_key), и в реальном реестре он есть
+    # почти всегда. Строка вообще без опознавательных признаков — не тот случай,
+    # который эти тесты описывают.
+    rows = [{"address": f"адрес {row.get('client') or ''}", **row} for row in rows]
     return db.import_grid(
         [titles, [field.source for field in db.FIELDS]]
         + [[row.get(field.key) for field in db.FIELDS] for row in rows],

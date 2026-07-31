@@ -21,7 +21,11 @@ MGR_TID = 700001
 
 
 def _add(cid, client, resp, **f):
+    # Адрес обязателен: без даты рождения человек различается именно по нему
+    # (db.person_key). В реальном реестре адрес заполнен у 95.8% строк, поэтому
+    # фикстура без адреса описывала бы случай, которого в проде не бывает.
     row = dict(contract_id=cid, client=client, responsible=resp,
+               address=f.pop("address", f"адрес {client}"),
                partner="ЗК", debt_today=f.pop("debt", "1 000 000"))
     row.update(f)
     with db.connect() as conn:
