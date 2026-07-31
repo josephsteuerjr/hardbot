@@ -62,13 +62,16 @@ def _open_app_kb(lang: str, uid: int | None = None) -> InlineKeyboardMarkup | No
 def _may_open_app(uid: int) -> bool:
     """Кому ссылка входа вообще имеет смысл.
 
-    Выезднику — по привязке. Руководителю и владельцу — по роли: привязки у них
-    нет и быть не должно, но приложение их пускает (действуют от имени своего
-    сотрудника, см. web._employee). Раньше здесь стояла одна проверка на привязку,
-    поэтому владелец писал «ссылка» и не получал ничего — вообще без объяснений."""
+    Выезднику — по привязке. Руководителю — по назначенным ему сотрудникам.
+    Владельцу — ВСЕГДА: это его контур, и отказывать ему из-за того, что реестр
+    ещё не залит, бессмысленно — он увидит пустой экран и поймёт больше, чем из
+    отказа. Раньше здесь стояла одна проверка на привязку, поэтому владелец писал
+    «ссылка» и не получал вообще ничего, даже объяснения."""
+    if uid == ADMIN_ID:
+        return True
     if db.get_binding(uid):
         return True
-    return bool(db.manager_employees(uid, is_owner=(uid == ADMIN_ID)))
+    return bool(db.manager_employees(uid))
 
 
 def _applink_text(uid: int, lang: str) -> str | None:
@@ -87,6 +90,10 @@ def _applink_refusal(uid: int, lang: str) -> str:
     «ссылка», получает обычную кнопку и не понимает, сломан бот или он сам."""
     if not os.getenv("MINIAPP_URL", "").strip():
         return t("applink_no_url", lang)
+    if db.is_manager(uid):
+        # Руководитель есть, а сотрудников ему не назначили — причина совсем другая,
+        # и чинится она в пульте, а не привязкой.
+        return t("applink_no_employees", lang)
     return t("applink_not_bound", lang)
 
 

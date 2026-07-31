@@ -144,6 +144,29 @@ def test_link_is_issued_to_owner(monkeypatch):
     assert handlers_main._may_open_app(ADMIN_ID)
 
 
+def test_owner_gets_link_even_on_empty_registry(monkeypatch):
+    """Реестр ещё не залит — владельцу всё равно надо пускать: это его контур,
+    и пустой экран объясняет больше, чем отказ. Ровно этот случай и всплыл
+    на проде сразу после сброса БД под тест."""
+    db.init_db()
+    with db.connect() as conn:
+        conn.execute("DELETE FROM clients")
+        conn.commit()
+    monkeypatch.setenv("MINIAPP_URL", "https://example.invalid")
+    assert db.manager_employees(ADMIN_ID, is_owner=True) == []
+    assert handlers_main._may_open_app(ADMIN_ID)
+    assert handlers_main._applink_text(ADMIN_ID, "ru")
+
+
+def test_manager_without_employees_gets_the_right_reason(monkeypatch):
+    _seed()
+    db.set_manager(MGR, "Руководитель Р.", [], [])
+    monkeypatch.setenv("MINIAPP_URL", "https://example.invalid")
+    assert not handlers_main._may_open_app(MGR)
+    reason = handlers_main._applink_refusal(MGR, "ru")
+    assert "не закреплён ни один сотрудник" in reason
+
+
 def test_link_refused_to_stranger_but_with_a_reason(monkeypatch):
     """Главное здесь — не отказ, а то, что он ОБЪЯСНЁН."""
     _seed()
