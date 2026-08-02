@@ -144,7 +144,9 @@ def validate_init_data(init_data: str, token: str, max_age: int = _MAX_AGE) -> d
     check = "\n".join(f"{k}={pairs[k]}" for k in sorted(pairs))
     secret = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
     calc = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(calc, received):
+    # Байтами по той же причине, что и в maplink: не-ASCII в чужом hash
+    # бросал TypeError и превращал отказ авторизации в 500.
+    if not hmac.compare_digest(calc.encode(), (received or "").encode()):
         return None
     try:
         if max_age and time.time() - int(pairs.get("auth_date", "0")) > max_age:

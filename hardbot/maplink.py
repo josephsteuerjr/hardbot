@@ -43,4 +43,8 @@ def verify(employee: str, on_date: str, exp: str, sig: str) -> bool:
         return False
     if exp_i < time.time():
         return False
-    return hmac.compare_digest(_sig(employee, on_date, exp_i), sig or "")
+    # Сравниваем БАЙТАМИ. compare_digest на строках требует, чтобы обе были
+    # ASCII, и на кириллическом омоглифе в подделанной ссылке бросал TypeError:
+    # страница карты дня отдавала 500 вместо честного «ссылка устарела».
+    return hmac.compare_digest(_sig(employee, on_date, exp_i).encode(),
+                               (sig or "").encode())

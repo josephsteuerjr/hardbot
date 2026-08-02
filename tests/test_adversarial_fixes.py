@@ -244,3 +244,23 @@ def test_geo_alert_ignores_an_imprecise_phone_fix():
     src = inspect.getsource(web._save)
     assert 'g.get("acc")' in src, "погрешность точки не читается"
     assert "trusted_fix" in src
+
+
+def test_non_ascii_signature_is_refused_not_crashed():
+    """compare_digest на СТРОКАХ требует ASCII с обеих сторон и бросал TypeError
+    на кириллическом омоглифе: страница карты дня отдавала 500 вместо честного
+    «ссылка устарела», а отказ авторизации превращался в 500."""
+    import time
+    import maplink
+    exp = str(int(time.time()) + 3600)
+    assert maplink.verify("Иванов", "2026-08-02", exp, "абвгд") is False
+    assert maplink.verify("Иванов", "2026-08-02", exp, "deadbeef") is False
+    assert web.validate_init_data("hash=абвгд&auth_date=1", "1:TOK") is None
+
+
+def test_album_caption_is_escaped():
+    """Бот шлёт подписи с parse_mode=HTML — ФИО из реестра туда попадает как есть."""
+    import inspect
+    import handlers_manager
+    src = inspect.getsource(handlers_manager._send_photos)
+    assert "html.escape(p['client'])" in src or 'html.escape(p["client"])' in src

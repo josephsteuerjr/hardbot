@@ -143,7 +143,7 @@ async def _send_photos(cb: CallbackQuery, mgr: dict, kind: str,
             await cb.answer("Фото по кейсу нет", show_alert=True)
             return
         db.audit_access(cb.from_user.id, "digest_photos", target=p["rep"], detail=on_date)
-        cap = f"📸 {p['client']} · {len(files)} фото"
+        cap = f"📸 {html.escape(p['client'])} · {len(files)} фото"
         if len(files) > _MAX_PHOTOS:
             cap += f" (показаны последние {_MAX_PHOTOS})"
         await _send_album(cb.message, files[:_MAX_PHOTOS], cap)
@@ -164,7 +164,7 @@ async def _send_photos(cb: CallbackQuery, mgr: dict, kind: str,
                     f"…лимит {_MAX_PHOTOS} фото за раз — остальное смотрите по кейсам.")
                 break
             take = files[:left]
-            await _send_album(cb.message, take, f"📸 {p['client']} · {len(take)} фото")
+            await _send_album(cb.message, take, f"📸 {html.escape(p['client'])} · {len(take)} фото")
             sent += len(take)
     await cb.answer()
 
