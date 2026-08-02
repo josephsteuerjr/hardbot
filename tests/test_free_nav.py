@@ -147,3 +147,50 @@ def test_routes_registered():
              for r in web.build_app(None).router.routes()}
     assert "/api/geocode" in paths
     assert "/api/route_to" in paths
+
+
+# --- /api/geo/suggest ---------------------------------------------------------
+def test_suggest_needs_two_letters(monkeypatch):
+    """На одну букву не ищем: подсказки бессмысленны, а запрос летит с каждой
+    нажатой клавишей в дороге по слабой связи."""
+    r = _body(_call(web._geo_suggest, "/api/geo/suggest?q=ш", monkeypatch))
+    assert r["items"] == []
+
+
+def test_suggest_finds_by_prefix_in_both_scripts(monkeypatch):
+    """Набирают и кириллицей, и латиницей — справочник обязан отвечать одинаково.
+
+    ИЗВЕСТНЫЙ ПРЕДЕЛ: недопечатанное слово в ТРЕТЬЕМ написании не находится.
+    «Shahrik» — начало альт-имени «Shahrikhon», а в записи лежит «Shahrixon»;
+    нечёткий ключ схлопывает «kh» в «h», и «sahrik» перестаёт быть префиксом
+    «sahrihon». Два основных написания работают, третье — нет. Чинится хранением
+    альт-имён в записи; трогать индексацию ради этого не стали."""
+    for q in ("шахрих", "shahrix"):
+        r = _body(_call(web._geo_suggest, f"/api/geo/suggest?q={q}", monkeypatch))
+        assert r["items"], q
+        assert any("Shahrixon" in i["label"] for i in r["items"]), (q, r["items"])
+
+
+def test_suggest_puts_the_bigger_place_first(monkeypatch):
+    """Человек, набравший несколько букв, почти всегда имеет в виду крупное.
+    Раньше ранжирование шло от точности совпадения ключа, и наверх всплывал
+    нулевой по населению тёзка."""
+    r = _body(_call(web._geo_suggest, "/api/geo/suggest?q=sam", monkeypatch))
+    assert r["items"]
+    # Область (3.9 млн) законно обгоняет город (595 тыс.) — оба самаркандские;
+    # проверяем, что наверх не всплыл нулевой по населению тёзка.
+    top = r["items"][0]["label"]
+    assert "Samarqand" in top or "Самарканд" in top, top
+
+
+def test_suggest_labels_carry_the_region(monkeypatch):
+    """Тёзки различаются только областью — без неё выбор вслепую."""
+    r = _body(_call(web._geo_suggest, "/api/geo/suggest?q=shahrix", monkeypatch))
+    assert any("·" in i["label"] for i in r["items"])
+
+
+def test_suggest_returns_a_usable_point(monkeypatch):
+    """Подсказка без координат бесполезна: по ней сразу строят маршрут."""
+    r = _body(_call(web._geo_suggest, "/api/geo/suggest?q=shahrix", monkeypatch))
+    it = r["items"][0]
+    assert isinstance(it["lat"], float) and isinstance(it["lon"], float)

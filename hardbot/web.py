@@ -586,6 +586,106 @@ async def _route_payload(lat: float, lon: float,
 _LATLON_RX = re.compile(r"^\s*(-?\d{1,2}(?:\.\d+)?)\s*[, ]\s*(-?\d{1,3}(?:\.\d+)?)\s*$")
 
 
+_SUGGEST_LIMIT = 8
+
+
+def _suggest_label(idx, rec) -> str:
+    """«Конибодом · Согдийская область» — чтобы тёзки различались на глаз."""
+    parts = [rec.ru or rec.name]
+    try:
+        adm = idx.adm1_by_code.get((rec.cc, rec.adm1)) if rec.adm1 else None
+        if adm is not None and (adm.ru or adm.name) != (rec.ru or rec.name):
+            parts.append(adm.ru or adm.name)
+    except Exception:                                  # noqa: BLE001
+        pass
+    return " · ".join(p for p in parts if p)
+
+
+async def _geo_suggest(request: web.Request) -> web.Response:
+    """Подсказки при наборе адреса в навигаторе.
+
+    Тот же офлайн-справочник, что и у геокодинга: наружу ничего не уходит.
+    Ранжируем по населению — при одинаковом имени человек почти всегда имеет в
+    виду тот населённый пункт, который крупнее, а мелкие тёзки различаются
+    подписью области.
+    """
+    _auth(request)
+    q = (request.query.get("q") or "").strip()
+    if len(q) < 2:
+        return web.json_response({"items": []})
+    try:
+        import addr_cis
+        import geoindex
+        idx = geoindex.load()
+    except Exception:                                  # noqa: BLE001
+        return web.json_response({"items": []})
+
+    needle = addr_cis.fuzzy(q)
+    if not needle:
+        return web.json_response({"items": []})
+
+    seen: set[int] = set()
+    hits: list[tuple[int, int, int, object]] = []
+    for key, recs in idx.by_key.items():
+        if not key.startswith(needle):
+            continue
+        exact = 0 if key == needle else 1
+        for rec in recs:
+            if id(rec) in seen:
+                continue
+            seen.add(id(rec))
+            hits.append((-int(rec.pop or 0), exact, len(rec.name or ""), rec))
+        if len(hits) > 400:                            # хватит для ранжирования
+            break
+
+    # Запасной проход по обычному написанию. Нечёткий ключ схлопывает диграфы
+    # («kh» → «h»), и НЕДОпечатанное слово перестаёт быть префиксом полного:
+    # «Shahrik» даёт «sahrik», а «Shahrikhon» — «sahrihon». Человек набирает
+    # адрес по частям, поэтому такой промах здесь — правило, а не исключение.
+    if len(hits) < _SUGGEST_LIMIT:
+        plain = q.lower().replace("‘", "").replace("'", "").replace("ʻ", "")
+        for recs in idx.by_key.values():
+            for rec in recs:
+                if id(rec) in seen:
+                    continue
+                for nm in (rec.name, rec.ru):
+                    if nm and nm.lower().replace("‘", "").replace("'", "").startswith(plain):
+                        seen.add(id(rec))
+                        hits.append((-int(rec.pop or 0), 1, len(rec.name or ""), rec))
+                        break
+            if len(hits) > 400:
+                break
+    # Население — ГЛАВНЫЙ критерий, а не точность совпадения. Обратный порядок
+    # выносил наверх мусор: на «душан» первым шёл безымянный Dusham (0 жителей),
+    # потому что его ключ совпал буква в букву, а Душанбе с полутора миллионами
+    # оказывался ниже. Человек, набравший пять букв, имеет в виду крупное.
+    hits.sort(key=lambda t: (t[0], t[1], t[2]))
+
+    # Один и тот же населённый пункт лежит в справочнике по нескольку раз: запись
+    # города, запись района, копия из OSM, разные написания. На экране это давало
+    # «Душанбе, Душанбе, Душанбе». Схлопываем по (имя, область) — этого достаточно,
+    # чтобы тёзки из РАЗНЫХ областей остались видны и различимы по подписи.
+    import addr_cis as _ac
+    items, place_seen, names_seen = [], set(), set()
+    for _p, _e, _l, r in hits:
+        nm = _ac.fuzzy(r.ru or r.name)
+        # У копий из OSM области нет вовсе, поэтому по паре (имя, область) они не
+        # схлопывались и «Конибодом» появлялся дважды. Безобластную запись
+        # показываем, только если такого имени ещё не было.
+        if not r.adm1 and nm in names_seen:
+            continue
+        mark = (nm, r.cc, r.adm1 or "")
+        if mark in place_seen:
+            continue
+        place_seen.add(mark)
+        names_seen.add(nm)
+        items.append({"label": _suggest_label(idx, r), "lat": r.lat, "lon": r.lon,
+                      "kind": r.fcode or ""})
+        if len(items) >= _SUGGEST_LIMIT:
+            break
+    return web.json_response({"items": items})
+
+
 async def _geocode_free(request: web.Request) -> web.Response:
     """Произвольный адрес (или пара координат) → точка. Для навигации по адресу,
     которого нет в реестре: руководителю — проверить адрес должника, владельцу —
@@ -1939,6 +2039,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/route", _route)
     app.router.add_get("/api/route_to", _route_to)
     app.router.add_get("/api/geocode", _geocode_free)
+    app.router.add_get("/api/geo/suggest", _geo_suggest)
     app.router.add_post("/api/track", _track)
     app.router.add_post("/api/act_as", _act_as)
     app.router.add_get("/api/route_day", _route_day)
