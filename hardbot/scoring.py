@@ -83,15 +83,16 @@ def _visit_purpose(loc: str, audience: str) -> str | None:
 
 
 def _parse_date(v) -> date | None:
-    if not v:
-        return None
-    s = str(v).strip()[:10]
-    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d.%m.%y"):
-        try:
-            return datetime.strptime(s, fmt).date()
-        except ValueError:
-            continue
-    return None
+    """Дата из реестра — ОДНИМ правилом с остальной системой.
+
+    Здесь жил третий по счёту парсер дат, и самый узкий: он не знал ни «01/08/2026»,
+    ни хвостовых точек после копипаста. Из-за этого один и тот же договор мог
+    считаться «с обещанием» в дайджесте и «без обещания» в скоринге — очередь и
+    контроль обещаний расходились на ровном месте. Делегируем в db._as_date, он
+    же обслуживает импорт, фильтр периода и просроченные обещания.
+    """
+    import db
+    return db._as_date(v)
 
 
 def _regulatory_drop(it: dict, today: date) -> str | None:

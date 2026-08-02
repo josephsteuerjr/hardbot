@@ -195,3 +195,31 @@ def test_act_as_route_registered():
     paths = {r.resource.canonical for r in web.build_app(None).router.routes()
              if getattr(r, "resource", None)}
     assert "/api/act_as" in paths
+
+
+def test_manager_role_beats_an_accidental_agent_binding(monkeypatch):
+    """Оператор вписал telegram_id руководителя на экран «Роли» как выездника —
+    тот молча терял переключатель, запирался в чужом портфеле, а его визит уходил
+    в гео-контроль от имени этого сотрудника. Роль назначает владелец осознанно,
+    привязка появляется самовыбором: при конфликте выигрывает роль."""
+    uid = 940404
+    db.init_db()
+    with db.connect() as conn:
+        conn.execute("DELETE FROM agent_bind WHERE telegram_id=?", (uid,))
+        conn.execute("DELETE FROM managers WHERE telegram_id=?", (uid,))
+        conn.execute("DELETE FROM settings WHERE key=?", (f"acting_employee:{uid}",))
+        conn.commit()
+    db.set_bind(uid, "Чужой Сотрудник")                 # ошибка оператора
+    db.set_manager(uid, "Руководитель", [], ["Свой Первый", "Свой Второй"])
+    assert web._employee(uid) in ("Свой Первый", "Свой Второй")
+    assert web._employee(uid) != "Чужой Сотрудник"
+
+
+def test_binding_still_works_for_a_plain_agent():
+    uid = 940505
+    db.init_db()
+    with db.connect() as conn:
+        conn.execute("DELETE FROM managers WHERE telegram_id=?", (uid,))
+        conn.commit()
+    db.set_bind(uid, "Обычный Выездник")
+    assert web._employee(uid) == "Обычный Выездник"

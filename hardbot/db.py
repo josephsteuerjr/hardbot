@@ -78,6 +78,13 @@ BOOKKEEPING = [
     # честного выездника показывал руководителю «визит далеко от адреса» — при том,
     # что «адрес» был центром района за десятки километров.
     ("geo_precision", "TEXT"),
+    # С КОГО договор сняли в пульте. Держим не флаг, а ИМЯ: следующий импорт
+    # приносит responsible из файла и молча возвращал клиента обратно — снятие
+    # жило до ближайшей загрузки реестра, хотя карточка пульта обещает обратное.
+    # По имени видно, то же самое написано в файле (значит офис ничего не менял,
+    # снятие в силе) или другое (значит кейс переназначили — это законно, и
+    # снятие снимается вместе с пометкой).
+    ("unassigned_from", "TEXT"),
     ("tips", "TEXT"),               # наводки выездника (староста, соседи, ориентиры)
     ("updated_at", "TEXT"),
     # Доказательство происхождения результата визита. Обычный импорт реестра эти
@@ -865,8 +872,10 @@ def unassign_clients(employee: str, contract_ids: list[str]) -> int:
         return 0
     with connect() as conn:
         cur = conn.execute(
-            f"UPDATE clients SET responsible = '' WHERE responsible = ? "
-            f"AND contract_id IN ({','.join('?' * len(ids))})", (employee, *ids))
+            f"UPDATE clients SET responsible = '', unassigned_from = ? "
+            f"WHERE responsible = ? "
+            f"AND contract_id IN ({','.join('?' * len(ids))})",
+            (employee, employee, *ids))
         conn.commit()
         return cur.rowcount
 
@@ -1909,6 +1918,10 @@ def activity_stats() -> list[dict]:
             "SELECT responsible, SUM(COALESCE(photos_count,0)) ph FROM clients "
             "WHERE responsible IS NOT NULL AND TRIM(responsible) <> '' GROUP BY responsible")}
         binds = conn.execute("SELECT * FROM agent_bind ORDER BY employee").fetchall()
+    # ФИО, которые реально встречаются в реестре как ответственные. Привязка на
+    # имя вне этого списка — осиротевшая: сотрудника переименовали, и портфель
+    # обнулился молча.
+    known = {r["employee"] for r in employees_in_registry()}
     out = []
     for b in binds:
         v, m = vis.get(b["telegram_id"]), mrk.get(b["telegram_id"])
@@ -1925,6 +1938,12 @@ def activity_stats() -> list[dict]:
             "photos_total": photos.get(b["employee"]),
             "last_activity": last,
             "idle_days": max((today - d).days, 0) if d else None,
+            # ФИО привязки не совпадает ни с одним «ответственным» в реестре.
+            # Обычно это переименование сотрудника в офисе: портфель обнуляется
+            # бесшумно — приложение отвечает 200 и «за вами никто не закреплён»,
+            # осиротевшей привязки не видно ни на одном экране. Отдаём признак,
+            # чтобы пульт мог показать её человеку.
+            "orphaned": b["employee"] not in known,
         })
     out.sort(key=lambda w: (w["idle_days"] is not None, -(w["idle_days"] or 0), w["employee"]))
     return out
@@ -3369,6 +3388,7 @@ def import_grid(
         # именно по ним, иначе однофамильцы склеятся (см. person_key).
         existing = {r["contract_id"]: r for r in conn.execute(
             "SELECT contract_id, client, birth_date, responsible, address, phone, "
+            "unassigned_from, "
             "bot_visit_at, bot_visit_data, office_edit_data, visit_value_log "
             "FROM clients")}
         # Визит — на человека: принятая правка разносится по всем его договорам
@@ -3395,7 +3415,19 @@ def import_grid(
             is_update = cid in existing
             # Пустой владелец = кейс в базе есть, а у выездника его нет.
             prev_resp = existing[cid]["responsible"] if cid in existing else ""
-            owners[cid] = str(data.get("responsible") or prev_resp or "").strip()
+            # Договор сняли в пульте — файл не должен вернуть его молча. Снятие
+            # держится, пока в реестре стоит ТОТ ЖЕ ответственный: значит офис
+            # ничего не менял, просто переразбросил как было. Появилось другое
+            # имя — это законное переназначение, снятие отменяется вместе с ним.
+            was_unassigned = (existing[cid]["unassigned_from"]
+                              if cid in existing else None) or ""
+            incoming_resp = str(data.get("responsible") or "").strip()
+            if was_unassigned and incoming_resp == was_unassigned:
+                data["responsible"] = ""
+                incoming_resp = ""
+            elif was_unassigned and incoming_resp:
+                data["unassigned_from"] = ""      # переназначили — метку снимаем
+            owners[cid] = str(incoming_resp or prev_resp or "").strip()
             # После подтверждённого визита очередной импорт может обновлять долг,
             # адрес и прочие поля источника, а поля визита — только через якорный
             # шлюз (см. докстринг): совпавшая «Дата выезда» доказывает, что файл
