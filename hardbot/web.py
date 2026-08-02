@@ -513,6 +513,45 @@ async def _bind(request: web.Request) -> web.Response:
     return web.json_response({"ok": ok, "employee": db.get_binding(uid), "kind": db.get_kind(uid)})
 
 
+async def _note_add(request: web.Request) -> web.Response:
+    """Заметка выездника «для себя». Привязка к кейсу необязательна.
+
+    Чужой кейс привязать нельзя — иначе заметка стала бы способом узнать, что
+    договор с таким номером вообще существует.
+    """
+    uid, emp = _auth(request)
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise web.HTTPBadRequest(text="text")
+    rep = (body.get("rep") or "").strip() or None
+    if rep:
+        row = db.get_client(rep)
+        if not row or (row["responsible"] != emp and uid != ADMIN_ID):
+            raise web.HTTPNotFound(text="person")
+    op_id = (str(body.get("op_id") or "")).strip() or None
+    nid = db.add_note(uid, text, employee=emp, client_rep=rep, op_id=op_id)
+    return web.json_response({"ok": True, "id": nid})
+
+
+async def _notes(request: web.Request) -> web.Response:
+    uid, _ = _auth(request)
+    rows = db.notes_for(uid)
+    return web.json_response({"ok": True, "notes": [
+        {"id": r["id"], "rep": r["client_rep"], "text": r["text"], "at": r["created_at"]}
+        for r in rows]})
+
+
+async def _note_delete(request: web.Request) -> web.Response:
+    uid, _ = _auth(request)
+    body = await request.json()
+    try:
+        nid = int(body.get("id"))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text="id")
+    return web.json_response({"ok": db.delete_note(uid, nid)})
+
+
 async def _marker(request: web.Request) -> web.Response:
     uid, emp = _auth(request)
     body = await request.json()
@@ -2052,6 +2091,9 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/bind", _bind)
     app.router.add_post("/api/marker", _marker)
     app.router.add_get("/api/markers", _markers)
+    app.router.add_post("/api/note", _note_add)
+    app.router.add_get("/api/notes", _notes)
+    app.router.add_post("/api/note_delete", _note_delete)
     return app
 
 

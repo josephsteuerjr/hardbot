@@ -262,7 +262,7 @@ const I18N = {
     setmark:"Поставить метку",marks:"Метки",map:"Карта",onmap:"на карте",newmark:"Новая метка",mlabel:"Подпись: что это / кто (необязательно)",
     marksaved:"Метка сохранена",nomarks:"Меток пока нет",getloc:"Определяю точку…",standalone:"свободная метка",
     nogeo:"Не получилось определить геолокацию — включите доступ или введите координаты.",
-    navtab:"Навигатор", navph:"Адрес или координаты", navgo:"Проехать", geoon:"Включить геопозицию", geowhy:"Нужна, чтобы отметить, что вы были на адресе",
+    navtab:"Навигатор", navph:"Адрес или координаты", navgo:"Проехать", notes:"Заметки", noteph:"Записать для себя — что не влезло в форму", noteadd:"Записать", notesaved:"Заметка сохранена", nonotes:"Заметок пока нет", mehere:"Вы здесь", openmap:"Открыть карту", geoon:"Включить геопозицию", geowhy:"Нужна, чтобы отметить, что вы были на адресе",
     geowait:"Определяю…", geook:"Геопозиция включена",
     geodenied:"Доступ к геопозиции запрещён. Включите его в настройках телефона для этого приложения.",
     geonosignal:"Сигнал не поймался. Выйдите из помещения и попробуйте ещё раз.",
@@ -300,7 +300,7 @@ const I18N = {
     setmark:"Nuqta qo‘yish",marks:"Nuqtalar",map:"Xarita",onmap:"xaritada",newmark:"Yangi nuqta",mlabel:"Izoh: bu nima / kim (ixtiyoriy)",
     marksaved:"Nuqta saqlandi",nomarks:"Hozircha nuqta yo‘q",getloc:"Nuqta aniqlanmoqda…",standalone:"erkin nuqta",
     nogeo:"Geolokatsiyani aniqlab bo‘lmadi — ruxsat bering yoki koordinatani kiriting.",
-    navtab:"Navigator", navph:"Manzil yoki koordinata", navgo:"Borish", geoon:"Geolokatsiyani yoqish", geowhy:"Manzilda bo‘lganingizni tasdiqlash uchun kerak",
+    navtab:"Navigator", navph:"Manzil yoki koordinata", navgo:"Borish", notes:"Eslatmalar", noteph:"O‘zingiz uchun yozib qo‘ying", noteadd:"Yozib qo‘yish", notesaved:"Eslatma saqlandi", nonotes:"Hozircha eslatma yo‘q", mehere:"Siz shu yerdasiz", openmap:"Xaritani ochish", geoon:"Geolokatsiyani yoqish", geowhy:"Manzilda bo‘lganingizni tasdiqlash uchun kerak",
     geowait:"Aniqlanmoqda…", geook:"Geolokatsiya yoqildi",
     geodenied:"Geolokatsiyaga ruxsat yo‘q. Telefon sozlamalarida shu ilova uchun yoqing.",
     geonosignal:"Signal yo‘q. Ko‘chaga chiqib, yana urinib ko‘ring.",
@@ -338,7 +338,7 @@ const I18N = {
     setmark:"Гузоштани нуқта",marks:"Нуқтаҳо",map:"Харита",onmap:"дар харита",newmark:"Нуқтаи нав",mlabel:"Шарҳ: ин чист / кӣ (ихтиёрӣ)",
     marksaved:"Нуқта захира шуд",nomarks:"Ҳоло нуқта нест",getloc:"Нуқта муайян мешавад…",standalone:"нуқтаи озод",
     nogeo:"Геолокатсия муайян нашуд — иҷозат диҳед ё координата ворид кунед.",
-    navtab:"Навигатор", navph:"Суроға ё координата", navgo:"Рафтан", geoon:"Фаъол кардани геомавқеъ", geowhy:"Барои тасдиқи он ки шумо дар суроға будед",
+    navtab:"Навигатор", navph:"Суроға ё координата", navgo:"Рафтан", notes:"Қайдҳо", noteph:"Барои худатон нависед", noteadd:"Навиштан", notesaved:"Қайд захира шуд", nonotes:"Ҳоло қайд нест", mehere:"Шумо дар ин ҷо", openmap:"Кушодани харита", geoon:"Фаъол кардани геомавқеъ", geowhy:"Барои тасдиқи он ки шумо дар суроға будед",
     geowait:"Муайян мешавад…", geook:"Геомавқеъ фаъол шуд",
     geodenied:"Иҷозат ба геомавқеъ нест. Дар танзимоти телефон барои ин барнома фаъол кунед.",
     geonosignal:"Сигнал нест. Аз бино бароед ва боз кӯшиш кунед.",
@@ -644,6 +644,10 @@ async function flushQueue(){
           const body={lat:it.lat,lon:it.lon,op_id:it.op_id};
           if(it.rep) body.rep=it.rep; if(it.label) body.label=it.label;
           r=await fetch("/api/marker",{method:"POST",headers:jsonHeaders(),body:JSON.stringify(body)});
+        }else if(it.kind==="note"){
+          const body={text:it.text,op_id:it.op_id};
+          if(it.rep) body.rep=it.rep;
+          r=await fetch("/api/note",{method:"POST",headers:jsonHeaders(),body:JSON.stringify(body)});
         }else if(it.kind==="photo"){
           let bytes;
           try{ bytes=await queuedPhotoBytes(it); }
@@ -867,6 +871,7 @@ async function boot(){
     // очередь прошлого, чтобы не смешивать ПД и не долить чужие визиты под новым токеном.
     const prev = await loadBootstrapSnapshot();
     if(prev && prev.employee && d.employee && prev.employee !== d.employee) await clearLocalData();
+    setBottomNav("clients");   // три вкладки видны с первого экрана
     setMeta(d.meta); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
     STATE.roles=d.roles||null;   // роль руководителя: список его сотрудников + текущий
     STATE.online=true;
@@ -898,12 +903,14 @@ async function boot(){
   }
 }
 
-// --- Нижняя навигация (Клиенты / Карта / Метки) — как в нативном приложении. ---
+// --- Нижняя навигация (Клиенты / Навигатор / Метки) — как в нативном приложении.
+// Показывается СРАЗУ после входа, а не после первого захода в карточку: человек
+// должен видеть, из чего состоит приложение, с первого экрана.
 function setBottomNav(active){
   const items=[
-    {id:"clients", label:L().my,    icon:"list", fn:"renderList"},
-    {id:"map",     label:L().map,   icon:"map",  fn:"renderMap"},
-    {id:"nav",     label:L().navtab, icon:"nav", fn:"renderNav"},
+    {id:"clients", label:L().my,     icon:"list", fn:"renderList"},
+    {id:"map",     label:L().navtab, icon:"nav",  fn:"renderNav"},
+    {id:"marks",   label:L().marks,  icon:"pin",  fn:"renderMarks"},
   ];
   $("bottomnavInner").innerHTML = items.map(it =>
     `<button class="${it.id===active?'on':''}" onclick="${it.fn}()">${ic(it.icon)}<span>${esc(it.label)}</span></button>`).join("");
@@ -938,6 +945,7 @@ async function doBind(){
 }
 
 function renderList(){
+  stopMeWatch();
   flushDraft(); stopAutoSync();   // уход с карточки через нижнюю навигацию — не потерять черновик
   STATE.cur=null; removeMap();
   const t=L();
@@ -1123,6 +1131,7 @@ function routeOrder(pts){
   return out;
 }
 function renderMap(){
+  stopMeWatch();
   flushDraft(); stopAutoSync();
   STATE.cur=null; removeMap();
   const t=L();
@@ -1171,7 +1180,8 @@ async function initClientsMap(pts){
 function panelVisit(d,t){
   return `
    <div class="mapwrap">
-     <div class="map" id="map"></div>
+     <div class="map" id="map" onclick="openCaseOnMap()"
+          style="cursor:pointer" title="${esc(t.openmap)}"></div>
      <div class="geobadge${(d.geo&&d.geo.lat)?"":" n"}">${ic("pin")}<span>${esc(geoHint(d,t))}</span></div>
      <button class="fab" onclick="enterNav()">${ic("nav")}<span>${esc(t.go)}</span></button>
    </div>
@@ -1756,8 +1766,20 @@ async function setMarkCase(){
 // точками — списком строк они были нужны меньше, чем сама карта.
 let NAVPICK=null;
 
-async function renderNav(){
-  flushDraft(); stopAutoSync();
+// Тап по окошку карты в карточке — открыть полноценную карту на этом должнике.
+// Раньше окошко было картинкой: посмотреть в деталях было нельзя, только уехать
+// в полноэкранное ведение, а это уже «поехали», а не «покажи».
+function openCaseOnMap(){
+  const d=STATE.cur;
+  if(d && d.geo && d.geo.lat!=null){
+    renderNav({lat:d.geo.lat, lon:d.geo.lon, title:d.client||L().none});
+  }else{
+    renderNav();
+  }
+}
+
+async function renderNav(focus){
+  flushDraft(); stopAutoSync(); stopMeWatch();
   removeMap(); STATE.cur=null; NAVPICK=null;
   const t=L();
   $("app").innerHTML=`
@@ -1767,9 +1789,9 @@ async function renderNav(){
     <div id="navsug"></div>
     <div id="navpick" class="muted" style="margin-bottom:8px"></div>
     <div id="navmap" style="height:calc(var(--app-height, 100dvh) - 260px);min-height:300px;border-radius:14px;overflow:hidden"></div>
-    <button class="btn line" style="margin-top:10px" onclick="newMarker()">${ic("plus")}<span>${esc(t.newmark)}</span></button>`;
+`;
   setBottomNav("nav");
-  setTimeout(initNavMap,0);
+  setTimeout(()=>initNavTabMap(focus),0);
 }
 
 // Подсказки: сервер ищет по тому же офлайн-справочнику, наружу ничего не уходит.
@@ -1840,7 +1862,10 @@ function navDropPin(p){
   }catch(e){}
 }
 
-async function initNavMap(){
+// ВНИМАНИЕ: имя initNavTabMap, а не initNavMap — последнее уже занято
+// полноэкранным режимом ведения (объявление ниже по файлу перекрыло бы это).
+let MEPIN=null, MEWATCH=null;
+async function initNavTabMap(focus){
   const el=$("navmap"); if(!el) return;
   if(!(await ensureMapLibs())) return;
   removeMap();
@@ -1849,24 +1874,33 @@ async function initNavMap(){
   // «Небольшая область рядом» — если точка известна. Права уже могли дать раньше;
   // если нет, не дёргаем систему молча: покажется общий вид, а кнопка запроса
   // прав живёт на списке клиентов.
+  const pts=(STATE.persons||[]).filter(p=>p.lat!=null&&p.lon!=null);
   let center=[69.6,40.2], zoom=8;
   const me = (GEO.state==="granted") ? (GEO.last || await grabGeo(4000)) : GEO.last;
-  if(me){ center=[me.lon,me.lat]; zoom=14; }
-  else{
-    const p=(STATE.persons||[]).find(x=>x.lat!=null&&x.lon!=null);
-    if(p){ center=[p.lon,p.lat]; zoom=11; }
-  }
+  if(focus && focus.lat!=null){ center=[focus.lon,focus.lat]; zoom=15; }
+  else if(me){ center=[me.lon,me.lat]; zoom=14; }
+  else if(pts.length){ center=[pts[0].lon,pts[0].lat]; zoom=11; }
   MAP=new maplibregl.Map({container:el,style,center,zoom,attributionControl:false,dragRotate:false});
   let fb=false;
   MAP.on("error",()=>{ if(!fb&&style!==RASTER_STYLE){fb=true;try{MAP.setStyle(RASTER_STYLE);}catch(e){}} });
   MAP.addControl(new maplibregl.NavigationControl({showCompass:false}),"top-right");
-  if(me){
-    try{
-      const d=document.createElement("div");
-      d.style.cssText="width:14px;height:14px;border-radius:50%;background:#2F7D5B;border:2px solid #fff";
-      new maplibregl.Marker({element:d}).setLngLat([me.lon,me.lat]).addTo(MAP);
-    }catch(e){}
-  }
+
+  // Мои клиенты — цвет точки по приоритету, номер по порядку объезда. Раньше это
+  // была отдельная вкладка «Карта»; смысла держать две карты нет.
+  const route=routeOrder(pts);
+  route.forEach((p,i)=>{
+    const d=document.createElement("div");
+    d.style.cssText=`width:22px;height:22px;border-radius:50%;display:flex;align-items:center;
+      justify-content:center;font:600 11px/1 system-ui;color:#fff;border:2px solid #fff;
+      box-shadow:0 1px 4px rgba(0,0,0,.35);background:${priColor(p.score)}`;
+    d.textContent=String(i+1);
+    d.onclick=(ev)=>{ ev.stopPropagation(); openCase(p.rep); };
+    try{ new maplibregl.Marker({element:d}).setLngLat([p.lon,p.lat]).addTo(MAP); }catch(e){}
+  });
+
+  drawMePin(me);
+  startMeWatch();                      // точка «где я» должна ехать вместе с тобой
+
   // Ранее поставленные метки — точками на этой же карте.
   try{
     const j=await api("/api/markers");
@@ -1878,6 +1912,9 @@ async function initNavMap(){
              .setText(m.label||(m.rep?("КД "+m.rep):L().standalone))); }catch(e){}
     });
   }catch(e){}
+
+  if(focus && focus.lat!=null){ NAVPICK=focus; navShowPick(); navDropPin(focus); }
+
   // Тап по карте — тоже цель: удобнее, чем набирать адрес на ходу.
   MAP.on("click", ev=>{
     NAVPICK={lat:ev.lngLat.lat, lon:ev.lngLat.lng,
@@ -1885,6 +1922,103 @@ async function initNavMap(){
     navShowPick(); navDropPin(NAVPICK);
   });
 }
+
+function drawMePin(me){
+  if(!me || !MAP) return;
+  try{
+    if(MEPIN){ MEPIN.setLngLat([me.lon,me.lat]); return; }
+    const d=document.createElement("div");
+    d.style.cssText="width:16px;height:16px;border-radius:50%;background:#2F7D5B;"+
+      "border:3px solid #fff;box-shadow:0 0 0 4px rgba(47,125,91,.25)";
+    d.title=L().mehere;
+    MEPIN=new maplibregl.Marker({element:d}).setLngLat([me.lon,me.lat]).addTo(MAP);
+  }catch(e){}
+}
+
+// Живая точка «где я сейчас». Без неё карта отвечает на вопрос «где должники»,
+// но не на «где я относительно них» — а в поле нужен именно второй.
+function startMeWatch(){
+  stopMeWatch();
+  if(!navigator.geolocation || GEO.state!=="granted") return;
+  try{
+    MEWATCH=navigator.geolocation.watchPosition(
+      p=>{ GEO.last={lat:p.coords.latitude, lon:p.coords.longitude,
+                     acc:Math.round(p.coords.accuracy||0), ts:p.timestamp||0};
+           drawMePin(GEO.last); },
+      ()=>{}, {enableHighAccuracy:true, maximumAge:5000, timeout:20000});
+  }catch(e){}
+}
+function stopMeWatch(){
+  if(MEWATCH!=null && navigator.geolocation){
+    try{ navigator.geolocation.clearWatch(MEWATCH); }catch(e){}
+  }
+  MEWATCH=null; MEPIN=null;
+}
+// --- Вкладка «Метки и заметки» -----------------------------------------------
+// Метка — это «я был вот здесь». Заметка — «вот что я об этом думаю»: в форму
+// визита на ходу влезает не всё, а вечером вспомнить уже нечего.
+async function renderMarks(){
+  flushDraft(); stopAutoSync(); stopMeWatch();
+  removeMap(); STATE.cur=null;
+  const t=L();
+  $("app").innerHTML=`
+    <div class="h">${esc(t.marks)}</div>
+    <button class="btn acc" style="margin:8px 0 12px" onclick="newMarker()">${ic("plus")}<span>${esc(t.newmark)}</span></button>
+    <div id="mklist" class="muted">…</div>
+    <div class="h" style="margin-top:18px">${esc(t.notes)}</div>
+    <textarea id="notetext" class="search" rows="3" style="width:100%;margin-bottom:8px"
+              placeholder="${esc(t.noteph)}"></textarea>
+    <button class="btn acc" style="margin-bottom:12px" onclick="addNote()">${ic("plus")}<span>${esc(t.noteadd)}</span></button>
+    <div id="notelist" class="muted">…</div>`;
+  setBottomNav("marks");
+  loadMarks(); loadNotes();
+}
+
+async function loadMarks(){
+  const t=L(), box=$("mklist"); if(!box) return;
+  let j={markers:[]}; try{ j=await api("/api/markers"); }catch(e){ box.textContent=t.offline||"—"; return; }
+  box.innerHTML = j.markers.length ? j.markers.map(m=>
+    `<div class="mk"><span class="mkdot"></span><div>
+       <div>${esc(m.label||(m.rep?("КД "+m.rep):t.standalone))}</div>
+       <div class="muted" style="font-size:11px">${(+m.lat).toFixed(5)}, ${(+m.lon).toFixed(5)} · ${esc(String(m.at||"").replace("T"," "))}</div>
+     </div></div>`).join("") : `<div class="center">${esc(t.nomarks)}</div>`;
+}
+
+async function loadNotes(){
+  const t=L(), box=$("notelist"); if(!box) return;
+  let j={notes:[]}; try{ j=await api("/api/notes"); }catch(e){ box.textContent="—"; return; }
+  box.innerHTML = j.notes.length ? j.notes.map(n=>
+    `<div class="mk"><span class="mkdot" style="background:#6E8F3F"></span><div style="flex:1">
+       <div>${esc(n.text)}</div>
+       <div class="muted" style="font-size:11px">${esc(String(n.at||"").replace("T"," "))}${n.rep?(" · КД "+esc(n.rep)):""}</div>
+     </div><button class="btn line" style="flex:0 0 44px;padding:4px" onclick="delNote(${n.id})">✕</button></div>`
+    ).join("") : `<div class="center">${esc(t.nonotes)}</div>`;
+}
+
+// Заметка сохраняется как визит и метка: с op_id и через ту же очередь, если
+// связи нет. Иначе запись, ради которой всё затевалось, потеряется именно там,
+// где сети и не бывает.
+async function addNote(){
+  const t=L(), el=$("notetext");
+  const text=((el&&el.value)||"").trim();
+  if(!text) return;
+  const op_id=uuid();
+  const rep=(STATE.cur&&STATE.cur.rep)||null;
+  try{
+    await api("/api/note",{method:"POST",body:JSON.stringify({text,op_id,rep})});
+    STATE.online=true; if(el) el.value=""; toast(t.notesaved); loadNotes();
+  }catch(e){
+    await enqueue({op_id, kind:"note", text, rep, at:Date.now()});
+    STATE.online=false; if(el) el.value="";
+    toast(t.notesaved+" ("+t.queuedn+")"); updateOffBar();
+  }
+}
+
+async function delNote(id){
+  try{ await api("/api/note_delete",{method:"POST",body:JSON.stringify({id})}); }catch(e){}
+  loadNotes();
+}
+
 async function newMarker(){
   const t=L(); const label=(prompt(t.mlabel)||"").trim();
   toast(t.getloc);

@@ -441,6 +441,23 @@ def init_db() -> None:
         if "op_id" not in mcols:
             conn.execute("ALTER TABLE markers ADD COLUMN op_id TEXT")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_markers_op ON markers(op_id)")
+        # Заметки выездника «для себя»: в форму визита успевает влезть не всё, а
+        # на ходу проще надиктовать пару строк и вернуться к ним вечером. Живут на
+        # сервере, а не только в телефоне: иначе пропадут при смене устройства.
+        # Привязка к кейсу необязательна — бывает мысль вообще не про кейс.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS notes (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              telegram_id INTEGER,
+              employee TEXT,
+              client_rep TEXT,
+              text TEXT,
+              created_at TEXT,
+              op_id TEXT
+            )
+        """)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_op ON notes(op_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_tg ON notes(telegram_id)")
         # Настройки (например, принятая беседа group_chat_id).
         conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
@@ -2060,6 +2077,51 @@ def photos_count(contract_id: str) -> int:
 
 def set_geo(contract_id: str, lat: float, lon: float) -> None:
     update_fields(contract_id, {"geo_lat": lat, "geo_lon": lon})
+
+
+# --- Заметки выездника «для себя» -------------------------------------------
+NOTE_MAX_LEN = 4000
+
+
+def add_note(telegram_id: int, text: str, employee: str | None = None,
+             client_rep: str | None = None, op_id: str | None = None) -> int:
+    """Сохранить заметку. op_id идемпотентен так же, как у визитов и меток:
+    оффлайн-очередь досылает одно и то же по нескольку раз, и дубль здесь выглядел
+    бы как «приложение размножает мои записи»."""
+    text = (text or "").strip()[:NOTE_MAX_LEN]
+    if not text:
+        return 0
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO notes "
+            "(telegram_id, employee, client_rep, text, created_at, op_id) "
+            "VALUES (?,?,?,?,?,?)",
+            (telegram_id, employee, client_rep, text,
+             datetime.now().isoformat(timespec="seconds"), op_id),
+        )
+        conn.commit()
+        if cur.rowcount > 0:
+            return cur.lastrowid
+        row = conn.execute("SELECT id FROM notes WHERE op_id = ?", (op_id,)).fetchone()
+        return row["id"] if row else 0
+
+
+def notes_for(telegram_id: int, limit: int = 300) -> list[sqlite3.Row]:
+    """Заметки одного человека, свежие сверху. Чужие не отдаём: это личные записи."""
+    with connect() as conn:
+        return conn.execute(
+            "SELECT id, client_rep, text, created_at FROM notes "
+            "WHERE telegram_id = ? ORDER BY id DESC LIMIT ?",
+            (telegram_id, limit)).fetchall()
+
+
+def delete_note(telegram_id: int, note_id: int) -> bool:
+    """Удалить свою заметку. Чужую — нельзя: telegram_id в условии обязателен."""
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM notes WHERE id = ? AND telegram_id = ?",
+                           (note_id, telegram_id))
+        conn.commit()
+        return cur.rowcount > 0
 
 
 # --- Метки (разведочные геокоординаты) -------------------------------------
