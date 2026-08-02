@@ -1185,53 +1185,8 @@ function routeOrder(pts){
   cities.forEach(c=>byCity[c].sort((a,b)=>sc(b)-sc(a)).forEach(p=>out.push(p)));
   return out;
 }
-function renderMap(){
-  stopMeWatch();
-  flushDraft(); stopAutoSync();
-  STATE.cur=null; removeMap();
-  const t=L();
-  const pts=STATE.persons.filter(p=>p.lat!=null&&p.lon!=null);
-  $("app").innerHTML=`<div class="muted" style="margin-bottom:8px">${t.onmap}: ${pts.length}/${STATE.persons.length}</div>
-     <div id="map" style="height:calc(var(--app-height, 100dvh) - 230px);min-height:320px;border-radius:14px;overflow:hidden"></div>`;
-  setTimeout(()=>initClientsMap(pts),0);
-  setBottomNav("map");
-}
-async function initClientsMap(pts){
-  const el=$("map"); if(!el) return;
-  if(!(await ensureMapLibs())) return;
-  removeMap();
-  let style=RASTER_STYLE; const vt=STATE.meta&&STATE.meta.vectorTiles;
-  if(vt&&window.pmtiles&&window.protomaps_themes_base){ try{ style=vectorStyle(vt);}catch(e){} }
-  const c=pts.length?[pts[0].lon,pts[0].lat]:[69.6,40.2];
-  MAP=new maplibregl.Map({container:el,style,center:c,zoom:8,attributionControl:false,dragRotate:false});
-  let fb=false;
-  MAP.on("error",()=>{ if(!fb&&style!==RASTER_STYLE){fb=true;try{MAP.setStyle(RASTER_STYLE);}catch(e){}} });
-  MAP.addControl(new maplibregl.NavigationControl({showCompass:false}),"top-right");
-  const route=routeOrder(pts);
-  const b=new maplibregl.LngLatBounds();
-  route.forEach((p,i)=>{
-    const m=document.createElement("div");
-    m.style.cssText="width:24px;height:24px;border-radius:50%;border:2px solid #fff;cursor:pointer;"+
-      "box-shadow:0 0 0 1px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;"+
-      "font:600 11px/1 system-ui,sans-serif;color:#fff;background:"+priColor(p.score);
-    m.textContent=(i+1);
-    m.title=p.client+(p.score!=null?(" · "+p.score):"");
-    m.onclick=()=>openP(p.rep);
-    new maplibregl.Marker({element:m,anchor:"center"}).setLngLat([p.lon,p.lat]).addTo(MAP);
-    b.extend([p.lon,p.lat]);
-  });
-  if(route.length>1){
-    const line={type:"Feature",geometry:{type:"LineString",coordinates:route.map(p=>[p.lon,p.lat])}};
-    MAP.on("load",()=>{ try{
-      MAP.addSource("route",{type:"geojson",data:line});
-      MAP.addLayer({id:"route",type:"line",source:"route",
-        layout:{"line-cap":"round","line-join":"round"},
-        paint:{"line-color":"#36332E","line-width":2,"line-dasharray":[2,1.6],"line-opacity":0.55}});
-    }catch(e){} });
-  }
-  if(route.length){ try{ MAP.fitBounds(b,{padding:54,maxZoom:13}); }catch(e){} }
-}
-
+// renderMap удалён: вкладку «Карта» заменил «Навигатор» (renderNav), вызовов нет.
+// initClientsMap удалён вместе с renderMap: точки клиентов рисует initNavTabMap.
 function panelVisit(d,t){
   return `
    <div class="mapwrap">
@@ -2134,10 +2089,10 @@ async function newMarker(){
   const op_id=uuid();
   try{
     await api("/api/marker",{method:"POST",body:JSON.stringify({lat:loc.lat,lon:loc.lon,label,op_id})});
-    STATE.online=true; toast(t.marksaved); renderNav();
+    STATE.online=true; toast(t.marksaved); renderMarks();
   }catch(e){
     await enqueue({op_id, kind:"marker", lat:loc.lat, lon:loc.lon, label, at:Date.now()});
-    STATE.online=false; toast(t.marksaved+" ("+t.queuedn+")"); renderNav();
+    STATE.online=false; toast(t.marksaved+" ("+t.queuedn+")"); renderMarks();
   }
 }
 
