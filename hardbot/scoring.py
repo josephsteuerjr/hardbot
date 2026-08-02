@@ -259,8 +259,14 @@ def compute_priority(items: list[dict], weights: dict, audience: str = "courier"
     location, who, partners, rep}]. → {weights, audience, total, items, cities}."""
     resolved = []
     for it in items:
+        # Готовая точка из БД сильнее любого угадывания: её поставил геокодер по
+        # полному адресу (или сам выездник меткой). parse_city — только фолбэк для
+        # входа без координат (бот на синтетике, тесты), и он знает лишь Согд.
         disp, lat, lon = parse_city(it.get("address"), it.get("city"))
-        resolved.append({**it, "city": disp or "—", "lat": lat, "lon": lon})
+        if it.get("lat") is not None and it.get("lon") is not None:
+            lat, lon = it["lat"], it["lon"]
+        resolved.append({**it, "city": disp or (it.get("city") or "").strip() or "—",
+                         "lat": lat, "lon": lon})
 
     scored = score_items(resolved, weights, audience)
     scored.sort(key=lambda x: x["score"], reverse=True)
@@ -282,8 +288,16 @@ def compute_priority(items: list[dict], weights: dict, audience: str = "courier"
     cities = []
     for name, count in city_counts.most_common():
         c = sughd_centroid(name)
-        cities.append({"name": name, "count": count,
-                       "lat": c[0] if c else None, "lon": c[1] if c else None})
+        if c:
+            lat, lon = c[0], c[1]
+        else:
+            # Города вне курируемого Согда: центр кластера — среднее его же точек.
+            # Иначе у Ташкента и Самарканда не было бы ни центра, ни порядка обхода.
+            pts = [(it["lat"], it["lon"]) for it in resolved
+                   if it["city"] == name and it.get("lat") is not None]
+            lat = sum(p[0] for p in pts) / len(pts) if pts else None
+            lon = sum(p[1] for p in pts) / len(pts) if pts else None
+        cities.append({"name": name, "count": count, "lat": lat, "lon": lon})
     return {"weights": _norm_weights(weights), "audience": audience, "total": len(out),
             "items": out, "cities": cities}
 
@@ -371,6 +385,11 @@ def _items_from_db() -> list[dict]:
             "contact_with": first("contact_with"),
             "assign_date": first("assign_date"), "kd_date": first("kd_date"),
             "country": first("country"), "paid_months": first("paid_months"),
+            # Готовая точка из БД: её ставит геокодер (или сам выездник меткой).
+            # Без неё выдача заново угадывала город через parse_city, а это
+            # курируемый список Согда — весь Узбекистан оставался без точек.
+            "lat": first("geo_lat"), "lon": first("geo_lon"),
+            "geo_precision": first("geo_precision"),
         })
     return items
 

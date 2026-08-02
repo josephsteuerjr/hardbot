@@ -70,3 +70,20 @@ def test_coarse_points_are_spread_apart():
     scoring.geocode_city_centroids()
     points = {_coords(f"GEO-1{i}")[:2] for i in range(4)}
     assert len(points) == 4, "точки одного города совпали"
+
+
+def test_queue_keeps_the_stored_point_instead_of_guessing_the_city():
+    """Выдача очереди обязана отдавать точку из БД.
+
+    Раньше compute_priority выбрасывала координаты и заново угадывала город через
+    parse_city — курируемый список Согда. У Ташкента и Самарканда точки не было
+    вовсе: ни карты, ни маршрута дня, ни порядка обхода.
+    """
+    _seed([("GEO-6", "г. Ташкент, Чиланзарский район, мас. Кизил Шарк", "Ташкент")])
+    scoring.geocode_city_centroids()
+    items = [i for i in scoring._items_from_db() if i["rep"] == "GEO-6"]
+    assert items and items[0]["lat"] is not None, "точка не доехала из БД в item"
+    out = scoring.compute_priority(items, {"debt": 50, "cluster": 30, "fresh": 20})
+    assert out["items"][0]["lat"] is not None, "очередь потеряла точку"
+    assert out["cities"] and out["cities"][0]["lat"] is not None, \
+        "у кластера вне Согда нет центра — маршрут дня не построится"
