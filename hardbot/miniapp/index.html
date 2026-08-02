@@ -409,6 +409,7 @@ const IDB = (()=>{
     put:(s,v,k)=>write(s,o=>{ if(k===undefined) o.put(v); else o.put(v,k); }),
     del:(s,k)=>write(s,o=>o.delete(k)),
     all:(s)=>store(s,"readonly").then(o=>p(o.getAll())),
+    count:(s)=>store(s,"readonly").then(o=>p(o.count())),
     clear:(s)=>write(s,o=>o.clear()),
   };
 })();
@@ -495,6 +496,16 @@ async function warmCards(manual){
   }
   STATE.warmCount = done;
   try{ localStorage.setItem(WARM_KEY, String(Date.now())); }catch(e){}
+  warmBar(warmStatusHTML());
+}
+// Сколько карточек РЕАЛЬНО лежит в оффлайн-кэше. Счётчик прогрева жил только в памяти
+// и заполнялся из warmCards(), а тот без сети не отрабатывает: при каждом входе полоска
+// показывала «⚠️ 0/N» на полном кэше — и именно оффлайн, когда проверить больше нечем.
+// Считаем правду в IndexedDB и перерисовываем полоску, если счёт разошёлся.
+async function syncWarmCount(){
+  let n; try{ n = await IDB.count("cards"); }catch(e){ return; }
+  if(n === STATE.warmCount) return;
+  STATE.warmCount = n;
   warmBar(warmStatusHTML());
 }
 // Индикатор оффлайна / очереди. Обновляется на каждом основном экране (setBottomNav).
@@ -1002,9 +1013,15 @@ function renderList(){
      <div id="warmbar"></div>
      <div id="plist"></div>`;
   drawList(STATE.persons);
+  // Навигация — ПЕРВОЙ из необязательных отрисовок. При входе без сети (boot ушёл в
+  // catch и поднялся из снимка) это единственный вызов setBottomNav за весь запуск:
+  // исключение в любой полоске ниже обрывало бы renderList и оставляло выездника
+  // в поле вообще без нижних вкладок. Проверено: throw в warmStatusHTML() ронял
+  // renderList, и bottomnav оставался display:none.
+  setBottomNav("clients");
   geoBanner();                   // без прав гео визит закроется без точки
   warmBar(warmStatusHTML());     // видно, готов ли оффлайн-кэш, ещё до выезда
-  setBottomNav("clients");
+  syncWarmCount();               // …и цифра в ней — из хранилища, а не из памяти сессии
 }
 
 // Черновик маршрута дня: сервер берёт топ по скорингу и сворачивает цепочкой
