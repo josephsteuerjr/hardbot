@@ -404,30 +404,55 @@ def priority_index(weights: dict | None = None, audience: str = "courier") -> di
     return idx
 
 
+# Точность, при которой точка — это центр чего-то большого, а не адрес. Такие
+# точки разводим джиттером (иначе весь город слипается в одну кляксу на карте) и
+# по ним же гео-контроль не считает расстояние до визита.
+_COARSE_PRECISION = ("city", "jamoat", "mahalla", "village", "district", "region", "")
+
+
 def geocode_city_centroids(overwrite: bool = False) -> int:
-    """Быстрый офлайн-геокодер: адрес → центроид города/махалли (+детерминированный
-    джиттер ~±2 км, чтобы точки одного города не слипались). Дом в Таджикистане не
-    геокодим. Метку выездника (geo_src='manual') не трогаем. Возвращает число точек."""
+    """Офлайн-геокодер по всему реестру. Возвращает число проставленных точек.
+
+    Зовётся после каждого импорта. Раньше спрашивал только `parse_city` — это
+    курируемый список городов СОГДА, оставшийся с июня, когда портфель был
+    целиком таджикский. Узбекистана он не знает вообще, поэтому весь Ташкент и
+    Самарканд оставались без координат: ни карты, ни маршрута дня, ни гео-контроля
+    у половины сотрудников. Замерено на реальной выборке: старый путь 21 адрес из
+    40, слоёный `geocode_address` — 40 из 40.
+
+    Теперь спрашиваем слоёный геокодер (структурный разбор → GeoNames/OSM), в
+    котором `parse_city` остался первым слоем, так что согдийские точки не поехали.
+
+    `use_precise=False` жёстко: адреса должников с сервера наружу не уходят, это
+    трансграничная передача ПД (см. GEOCODER_ALLOW_PUBLIC в web.py). Точный
+    геокодинг живёт в пульте, на машине владельца.
+    """
     import hashlib
     import db
+    import geocode
     n = 0
     with db.connect() as conn:
         rows = conn.execute(
             "SELECT contract_id, address, city, geo_lat, geo_src FROM clients").fetchall()
         for r in rows:
-            if r["geo_src"] == "manual":
+            if r["geo_src"] == "manual":               # точку поставил выездник — свято
                 continue
             if r["geo_lat"] is not None and not overwrite:
                 continue
-            _disp, lat, lon = parse_city(r["address"], r["city"])
-            if lat is None:
+            hit = geocode.geocode_address(r["address"], r["city"], use_precise=False)
+            if not hit:
                 continue
-            h = int(hashlib.md5((r["contract_id"] or "").encode()).hexdigest(), 16)
-            jlat = lat + ((h % 1000) / 1000 - 0.5) * 0.04
-            jlon = lon + ((h // 1000 % 1000) / 1000 - 0.5) * 0.04
+            lat, lon = hit["lat"], hit["lon"]
+            precision = hit.get("precision") or ""
+            if precision in _COARSE_PRECISION:
+                h = int(hashlib.md5((r["contract_id"] or "").encode()).hexdigest(), 16)
+                lat += ((h % 1000) / 1000 - 0.5) * 0.04
+                lon += ((h // 1000 % 1000) / 1000 - 0.5) * 0.04
             conn.execute(
-                "UPDATE clients SET geo_lat=?, geo_lon=?, geo_src='city' WHERE contract_id=?",
-                (jlat, jlon, r["contract_id"]))
+                "UPDATE clients SET geo_lat=?, geo_lon=?, geo_src=?, geo_precision=? "
+                "WHERE contract_id=?",
+                (round(lat, 6), round(lon, 6), hit.get("src") or "city", precision,
+                 r["contract_id"]))
             n += 1
         conn.commit()
     return n
