@@ -1936,7 +1936,14 @@ async def _admin_manager_save(request: web.Request) -> web.Response:
     name = (body.get("name") or "").strip()
     cities = [str(c).strip() for c in (body.get("cities") or []) if str(c).strip()]
     employees = [str(e).strip() for e in (body.get("employees") or []) if str(e).strip()]
-    db.set_manager(tid, name, cities, employees)
+    # Пульт про направления не знает и поля direction не шлёт. Без этой строки
+    # любая правка руководителя направления в пульте молча сбрасывала бы его в
+    # обычный список — и живой состав сотрудников превращался бы в замороженный.
+    direction = body.get("direction")
+    if direction is None:
+        prev = db.get_manager(tid)
+        direction = (prev or {}).get("direction") or None
+    db.set_manager(tid, name, cities, employees, direction=direction)
     # account — КТО владеет этим telegram_id по данным бота (или null, если бот его
     # не видел). «name» — всего лишь подпись оператора, права получает владелец id;
     # пульт сверяет одно с другим и показывает расхождение сразу, а не через неделю.

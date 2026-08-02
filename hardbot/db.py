@@ -460,9 +460,13 @@ def init_db() -> None:
               client_rep TEXT,
               text TEXT,
               created_at TEXT,
-              op_id TEXT
+              op_id TEXT,
+              deleted_at TEXT
             )
         """)
+        ncols = {r[1] for r in conn.execute("PRAGMA table_info(notes)")}
+        if "deleted_at" not in ncols:
+            conn.execute("ALTER TABLE notes ADD COLUMN deleted_at TEXT")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_op ON notes(op_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_tg ON notes(telegram_id)")
         # Настройки (например, принятая беседа group_chat_id).
@@ -522,9 +526,15 @@ def init_db() -> None:
               name TEXT,
               cities TEXT,
               employees TEXT,
+              direction TEXT,
               created_at TEXT
             )
         """)
+        # direction (tj/uz/all) — руководитель НАПРАВЛЕНИЯ: список его сотрудников
+        # считается живьём, чтобы не устаревал с каждым разбросом.
+        mgcols = {r[1] for r in conn.execute("PRAGMA table_info(managers)")}
+        if "direction" not in mgcols:
+            conn.execute("ALTER TABLE managers ADD COLUMN direction TEXT")
         # Автономное приложение (PWA вне Телеги): вне Телеги нет initData, поэтому вход
         # двухступенчатый. Бот шлёт ссылку (app_links, окно активации APP_LINK_DAYS,
         # до APP_LINK_MAX_USES обменов — одну ссылку открывают и в браузере Телеги, и в
@@ -878,6 +888,28 @@ def clients_of_employee(employee: str) -> list:
             "WHERE responsible = ? ORDER BY client, contract_id", (employee,)).fetchall()
 
 
+def _name_key(name) -> str:
+    """Ключ сравнения ФИО: регистр, лишние пробелы и ё/е значения не имеют.
+
+    SQL-ный NOCASE тут бессилен — он работает только с латиницей. А в реестре
+    достаточно одной опечатки регистра («михаил» вместо «Михаил»), чтобы у
+    сотрудника появился двойник: отдельный «сотрудник» с одним договором, свой
+    портфель, своя привязка. На экране «Роли» это видно, но искать причину
+    приходится глазами.
+    """
+    return " ".join(str(name or "").replace("ё", "е").replace("Ё", "Е").split()).casefold()
+
+
+def canonical_responsible(name: str, known: dict[str, str]) -> str:
+    """Привести написание ответственного к уже известному в базе.
+
+    known — {ключ сравнения: как записано в базе}. Совпало по ключу — берём
+    написание из базы; не совпало — это действительно новый человек.
+    """
+    key = _name_key(name)
+    return known.get(key, name) if key else name
+
+
 def unassign_clients(employee: str, contract_ids: list[str]) -> int:
     """Снять договоры с сотрудника (пульт): чистим responsible — клиент ОСТАЁТСЯ в
     реестре, но уходит из миниаппа сотрудника. Снимаем только его собственные
@@ -1105,24 +1137,62 @@ def _json_list(s) -> list[str]:
     return [str(x).strip() for x in v if str(x).strip()] if isinstance(v, list) else []
 
 
+DIRECTIONS = {
+    "tj": ("Таджикистан", ("Таджикистан",)),
+    "uz": ("Узбекистан", ("Узбекистан",)),
+    "all": ("СНГ", ("Таджикистан", "Узбекистан")),
+}
+
+
+def employees_by_direction(direction: str) -> list[str]:
+    """Сотрудники направления — СЧИТАЕМ ЖИВЬЁМ, а не замораживаем списком.
+
+    У руководителя направления состав меняется с каждым разбросом. Замороженный
+    список устаревал бы молча: новый сотрудник не появлялся бы в сводке, а
+    уволенный оставался бы в ней навсегда. Страну берём из колонки «Страна»
+    реестра, а если она пуста — из города, теми же токенами, что и статистика.
+    """
+    import country_scope
+    want = {"tj", "uz"} if direction == "all" else {direction}
+    out: dict[str, None] = {}
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT responsible, country, city FROM clients "
+            "WHERE responsible IS NOT NULL AND TRIM(responsible) <> ''").fetchall()
+    for r in rows:
+        code = (country_scope.scope_country([r["country"] or ""])
+                or country_scope.scope_country([r["city"] or ""]))
+        if code in want:
+            out.setdefault(r["responsible"], None)
+    return sorted(out)
+
+
 def _manager_dict(r: sqlite3.Row) -> dict:
+    keys = r.keys()
     return {"telegram_id": r["telegram_id"], "name": r["name"] or "",
-            "cities": _json_list(r["cities"]), "employees": _json_list(r["employees"])}
+            "cities": _json_list(r["cities"]), "employees": _json_list(r["employees"]),
+            "direction": (r["direction"] or "") if "direction" in keys else ""}
 
 
 def set_manager(telegram_id: int, name: str, cities: list[str],
-                employees: list[str]) -> None:
+                employees: list[str], direction: str | None = None) -> None:
     """Создать/обновить руководителя (upsert по telegram_id). cities — ярлык-подпись
-    (свободный ввод), employees — ФИО из реестра (кого он видит в дайджесте)."""
+    (свободный ввод), employees — ФИО из реестра (кого он видит в дайджесте).
+
+    direction (tj/uz/all) — руководитель НАПРАВЛЕНИЯ: сотрудники считаются живьём.
+    """
     with connect() as conn:
         conn.execute(
-            "INSERT INTO managers (telegram_id, name, cities, employees, created_at) "
-            "VALUES (?,?,?,?,?) "
+            "INSERT INTO managers "
+            "(telegram_id, name, cities, employees, direction, created_at) "
+            "VALUES (?,?,?,?,?,?) "
             "ON CONFLICT(telegram_id) DO UPDATE SET "
-            "name=excluded.name, cities=excluded.cities, employees=excluded.employees",
+            "name=excluded.name, cities=excluded.cities, employees=excluded.employees, "
+            "direction=excluded.direction",
             (telegram_id, (name or "").strip(),
              json.dumps(list(cities or []), ensure_ascii=False),
              json.dumps(list(employees or []), ensure_ascii=False),
+             (direction or "").strip() or None,
              date.today().isoformat()),
         )
         conn.commit()
@@ -1171,6 +1241,9 @@ def manager_employees(telegram_id: int, *, is_owner: bool = False) -> list[str]:
     «никого», а не «всех», иначе роль не ограничивала бы ничего."""
     mgr = get_manager(telegram_id)
     if mgr is not None:
+        direction = (mgr.get("direction") or "").strip()
+        if direction:                      # руководитель направления — список живой
+            return employees_by_direction(direction)
         allowed = [e for e in mgr.get("employees") or [] if str(e).strip()]
         return sorted(dict.fromkeys(allowed))
     if is_owner:
@@ -2197,7 +2270,7 @@ def add_note(telegram_id: int, text: str, employee: str | None = None,
         if cur.rowcount > 0:
             return cur.lastrowid
         row = conn.execute("SELECT id FROM notes WHERE op_id = ?", (op_id,)).fetchone()
-        return row["id"] if row else 0
+        return row["id"] if row else 0        # уже была (в т.ч. удалённая) — не воскрешаем
 
 
 def notes_for(telegram_id: int, limit: int = 300) -> list[sqlite3.Row]:
@@ -2205,15 +2278,23 @@ def notes_for(telegram_id: int, limit: int = 300) -> list[sqlite3.Row]:
     with connect() as conn:
         return conn.execute(
             "SELECT id, client_rep, text, created_at FROM notes "
-            "WHERE telegram_id = ? ORDER BY id DESC LIMIT ?",
+            "WHERE telegram_id = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT ?",
             (telegram_id, limit)).fetchall()
 
 
 def delete_note(telegram_id: int, note_id: int) -> bool:
-    """Удалить свою заметку. Чужую — нельзя: telegram_id в условии обязателен."""
+    """Удалить свою заметку. Чужую — нельзя: telegram_id в условии обязателен.
+
+    Не стираем строку, а гасим её: op_id обязан остаться занятым. Иначе досылка
+    из оффлайн-очереди по тому же op_id создаст запись заново, и удалённая
+    заметка воскреснет — при живой сети этого не видно, а после дня без связи
+    видно сразу.
+    """
     with connect() as conn:
-        cur = conn.execute("DELETE FROM notes WHERE id = ? AND telegram_id = ?",
-                           (note_id, telegram_id))
+        cur = conn.execute(
+            "UPDATE notes SET text = '', deleted_at = ? "
+            "WHERE id = ? AND telegram_id = ? AND deleted_at IS NULL",
+            (datetime.now().isoformat(timespec="seconds"), note_id, telegram_id))
         conn.commit()
         return cur.rowcount > 0
 
@@ -3438,6 +3519,13 @@ def import_grid(
         isolated_call_cids: set[str] = set()
         # Владелец каждого уникального КД после duplicate preflight.
         owners: dict[str, str] = {}
+        # Как ответственные УЖЕ записаны в базе — чтобы опечатка регистра в файле
+        # не заводила двойника сотрудника с собственным портфелем.
+        known_resp: dict[str, str] = {}
+        for r in existing.values():
+            nm = (r["responsible"] or "").strip()
+            if nm:
+                known_resp.setdefault(_name_key(nm), nm)
         for cid, data in grouped.items():
             is_update = cid in existing
             # Пустой владелец = кейс в базе есть, а у выездника его нет.
@@ -3448,7 +3536,11 @@ def import_grid(
             # имя — это законное переназначение, снятие отменяется вместе с ним.
             was_unassigned = (existing[cid]["unassigned_from"]
                               if cid in existing else None) or ""
-            incoming_resp = str(data.get("responsible") or "").strip()
+            incoming_resp = canonical_responsible(
+                str(data.get("responsible") or "").strip(), known_resp)
+            if incoming_resp:
+                data["responsible"] = incoming_resp
+                known_resp.setdefault(_name_key(incoming_resp), incoming_resp)
             if was_unassigned and incoming_resp == was_unassigned:
                 data["responsible"] = ""
                 incoming_resp = ""

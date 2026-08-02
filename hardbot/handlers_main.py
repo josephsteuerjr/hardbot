@@ -12,13 +12,15 @@
   • авто-подхват рабочей беседы (my_chat_member + acceptgroup) — утилита владельца.
 """
 
+import html
 import os
 
 from aiogram import F, Router
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery, ChatMemberUpdated, InlineKeyboardButton, InlineKeyboardMarkup,
-    Message, WebAppInfo,
+    KeyboardButton, Message, ReplyKeyboardMarkup, WebAppInfo,
 )
 
 import db
@@ -49,6 +51,15 @@ def _open_app_kb(lang: str, uid: int | None = None) -> InlineKeyboardMarkup | No
         return None   # WebApp-кнопки требуют https; без URL кнопку не рисуем
     rows = [[InlineKeyboardButton(text=t("btn_open_app", lang),
                                   web_app=WebAppInfo(url=url))]]
+    # Заявка на роль — тем, у кого ни роли, ни привязки. Вторым сообщением это
+    # было бы спамом на каждый /start, а без неё человеку некуда нажать, кроме
+    # как писать владельцу в личку. Сбой БД не должен ломать саму клавиатуру.
+    try:
+        if uid and uid != ADMIN_ID and not db.is_manager(uid) and not db.get_binding(uid):
+            rows.append([InlineKeyboardButton(text="🧑‍💼 Запрос для руководителей",
+                                              callback_data="mgrself")])
+    except Exception:  # noqa: BLE001
+        pass
     if uid and db.get_binding(uid):
         # Ссылка уже в тексте сообщения — вместо кнопки «дай ссылку» кладём кнопки
         # с инструкцией установки под платформу (по тапу приходит пошаговый мануал).
@@ -118,6 +129,7 @@ async def cmd_start(message: Message):
                          reply_markup=kb)
 
 
+
 # --- Инструкция установки автономного приложения (кнопки под ссылкой) --------
 @router.callback_query(F.data == "manual:android")
 async def manual_android_cb(cb: CallbackQuery):
@@ -140,6 +152,138 @@ async def whoami(message: Message):
 
 
 # --- Аппрув привязки владельцем (колбэки заявок из web.py) -------------------
+# --- Заявка на роль руководителя ------------------------------------------------
+# Раньше руководителя заводили только руками в пульте: человек, которому дали
+# бота, упирался в экран выездника и писал владельцу в личку. Теперь он жмёт
+# кнопку, владелец получает заявку, вписывает имя и выбирает направление.
+BTN_MANAGER_REQ = "🧑‍💼 Запрос для руководителей"
+
+_PENDING_MGR = "mgr_request_from"     # settings: чья заявка сейчас оформляется
+
+
+def _direction_kb() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=title, callback_data=f"mgrdir:{code}")]
+            for code, (title, _cities) in db.DIRECTIONS.items()]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data == "mgrself")
+async def manager_request_cb(cb: CallbackQuery):
+    await _manager_request(cb.from_user, cb.message)
+    await cb.answer("Заявка отправлена")
+
+
+@router.message(F.text == BTN_MANAGER_REQ, F.chat.type == "private")
+async def manager_request(message: Message):
+    await _manager_request(message.from_user, message)
+
+
+async def _manager_request(user, message):
+    uid = user.id
+    if db.is_manager(uid) or uid == ADMIN_ID:
+        await message.answer("Роль руководителя у вас уже есть.")
+        return
+    who = " ".join(p for p in (user.first_name, user.last_name) if p) or "—"
+    tag = f"@{user.username}" if user.username else "без ника"
+    db.audit_access(uid, "manager_request")
+    await message.answer("Заявка отправлена. Как только её подтвердят, "
+                         "нажмите «Дайджест за сегодня».")
+    if not ADMIN_ID:
+        return
+    try:
+        await message.bot.send_message(
+            ADMIN_ID,
+            f"🧑‍💼 <b>Заявка на роль руководителя</b>\n"
+            f"{html.escape(who)} · {html.escape(tag)} · id <code>{uid}</code>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Назначить", callback_data=f"mgrreq:{uid}"),
+                InlineKeyboardButton(text="Отклонить", callback_data=f"mgrno:{uid}"),
+            ]]))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@router.callback_query(F.data.startswith("mgrreq:"))
+async def manager_request_accept(cb: CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("⛔", show_alert=True)
+        return
+    uid = int(cb.data.split(":", 1)[1])
+    db.set_setting(_PENDING_MGR, str(uid))
+    await cb.message.edit_text(
+        cb.message.html_text
+        + "\n✍️ Пришлите ИМЯ этого руководителя одним сообщением.")
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("mgrno:"))
+async def manager_request_reject(cb: CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("⛔", show_alert=True)
+        return
+    uid = int(cb.data.split(":", 1)[1])
+    db.set_setting(_PENDING_MGR, "")
+    await cb.message.edit_text(cb.message.html_text + "\n❌ Отклонено.")
+    try:
+        await cb.bot.send_message(uid, "Заявка на роль руководителя отклонена.")
+    except Exception:  # noqa: BLE001
+        pass
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("mgrdir:"))
+async def manager_request_direction(cb: CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("⛔", show_alert=True)
+        return
+    code = cb.data.split(":", 1)[1]
+    spec = db.DIRECTIONS.get(code)
+    raw = db.get_setting(_PENDING_MGR) or ""
+    name = db.get_setting(_PENDING_MGR + "_name") or ""
+    if not spec or not raw.isdigit():
+        await cb.answer("Заявка уже закрыта", show_alert=True)
+        return
+    uid = int(raw)
+    title, cities = spec
+    # employees НЕ фиксируем: у руководителя направления список считается живьём.
+    db.set_manager(uid, name or title, list(cities), [], direction=code)
+    db.set_setting(_PENDING_MGR, "")
+    db.set_setting(_PENDING_MGR + "_name", "")
+    db.audit_access(ADMIN_ID, "manager_grant", str(uid), f"{name} · {title}")
+    n = len(db.manager_employees(uid))
+    await cb.message.edit_text(
+        f"✅ <b>{html.escape(name or title)}</b> — руководитель направления "
+        f"«{html.escape(title)}». Сотрудников сейчас: {n}.")
+    try:
+        await cb.bot.send_message(
+            uid, f"Вам выдана роль руководителя по направлению «{title}».\n"
+                 f"Нажмите «📊 Дайджест за сегодня».")
+    except Exception:  # noqa: BLE001
+        pass
+    await cb.answer()
+
+
+@router.message(F.chat.type == "private", F.text & ~F.text.startswith("/"))
+async def manager_name_reply(message: Message):
+    """Владелец прислал имя для заявки — показываем выбор направления.
+
+    Хендлер молчит для всех, кроме владельца с открытой заявкой, и пропускает
+    сообщение дальше: иначе он съел бы обычную переписку.
+    """
+    if message.from_user.id != ADMIN_ID:
+        raise SkipHandler
+    raw = db.get_setting(_PENDING_MGR) or ""
+    if not raw.isdigit():
+        raise SkipHandler
+    name = (message.text or "").strip()[:80]
+    if not name:
+        raise SkipHandler
+    db.set_setting(_PENDING_MGR + "_name", name)
+    await message.answer(
+        f"Имя: <b>{html.escape(name)}</b>. Теперь направление:",
+        reply_markup=_direction_kb())
+
+
 @router.callback_query(F.data.startswith("approvebind:"))
 async def approve_bind(cb: CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
@@ -244,3 +388,4 @@ async def any_message(message: Message):
     kb = _open_app_kb(lang)
     if kb:
         await message.answer(t("start_app", lang), reply_markup=kb)
+
