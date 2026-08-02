@@ -917,9 +917,21 @@ async def _save(request: web.Request) -> web.Response:
         # для всей накопленной базы было бы хуже, чем изредка спросить лишний раз.
         rough = {"city", "district", "region"}
         precision = (cur["geo_precision"] if "geo_precision" in cur.keys() else "") or ""
+        # Погрешность САМОЙ точки телефона. В частном секторе, в подвале и просто
+        # в помещении GPS не ловится, и браузер отдаёт сетевой фикс с точностью
+        # 800–1500 м — то есть больше порога тревоги. Считать по такой точке
+        # расстояние значит обвинить человека, который стоял ровно там, где надо:
+        # «⚠️ закрыт в 3.9 км от адреса» уходит руководителю в личку, в беседу
+        # отчётов и красной точкой на карту дня. Меряем, только если точка
+        # телефона точнее порога.
+        try:
+            acc = float(g.get("acc") or 0)
+        except (TypeError, ValueError):
+            acc = 0.0
+        trusted_fix = acc <= 0 or acc < db.geo_alert_m()
         if vlat is not None and cur["geo_lat"] is not None and cur["geo_lon"] is not None \
                 and (cur["geo_src"] or "") not in ("", "city") \
-                and precision not in rough:
+                and precision not in rough and trusted_fix:
             dist_m = round(_haversine_km(vlat, vlon, cur["geo_lat"], cur["geo_lon"]) * 1000)
         # История визита строится из явного тела этой формы. Сырые HARD-поля
         # clients/master запрещено дочитывать даже для текста журнала.
@@ -963,6 +975,7 @@ async def _save(request: web.Request) -> web.Response:
                 vlat,
                 vlon,
                 dist_m,
+                uid,
             )
     data = _person_full(rep, lang_of(uid))
     return web.json_response({"ok": True, "person": data})
@@ -1369,7 +1382,7 @@ async def _notify_group(request: web.Request, row, uid: int) -> None:
 
 
 async def _notify_report_chats(request: web.Request, row, vlat, vlon,
-                               dist_m: int | None = None) -> None:
+                               dist_m: int | None = None, uid: int = 0) -> None:
     """Отчёт о визите в закреплённые беседы (опциональная фича, настраивается
     пультом): текст по образцу постов сотрудников + фото за день + фактические
     гео-точки (закрытие визита и съёмка фото — такое не подделаешь)."""

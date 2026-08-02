@@ -851,6 +851,25 @@ def _plan_workbook(app, path: Path, fields: list[dict], rows: list[dict]) -> dic
         wb.close()
 
 
+# Excel считает формулой всё, что начинается с =, +, - или @. Комментарий
+# «=перезвонить» превращается в #ИМЯ?, «5.08» — в число, а повторная сверка плана
+# перестаёт сходиться и роняет ВЕСЬ прогон обогащения — уже после того, как файлы
+# переписаны. То есть один комментарий одного выездника оставляет офис без
+# квитанции и с испорченными реестрами у всех. Ведущий апостроф Excel не
+# показывает, но хранит значение текстом.
+_EXCEL_FORMULA_START = ("=", "+", "-", "@")
+_EXCEL_CELL_LIMIT = 32767
+
+
+def _excel_safe(value):
+    if not isinstance(value, str):
+        return value
+    v = value[:_EXCEL_CELL_LIMIT]
+    if v[:1] in _EXCEL_FORMULA_START:
+        return "'" + v
+    return v
+
+
 def backup_copy(path: Path) -> Path:
     """Копия рядом с файлом: «Имя (до обогащения 13.07 14-05).xlsb». Откат = переименовать."""
     stamp = datetime.now().strftime("%d.%m %H-%M")
@@ -897,7 +916,7 @@ def _enrich_workbook(app, path: Path, fields: list[dict], rows: list[dict],
             # не изменён: Excel не сохранял); нет записей — нет мусорных копий
             plan["backup"] = str(backup_copy(path))
             for i, (r, c, val, _is_date) in enumerate(writes, 1):
-                ws.range((r + 1, c + 1)).value = val
+                ws.range((r + 1, c + 1)).value = _excel_safe(val)
                 if i % 200 == 0:
                     log(f"{path.name}: пишу {i} / {len(writes)}…")
             wb.save()

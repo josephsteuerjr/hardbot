@@ -77,6 +77,26 @@ def _st_emoji(s: str) -> str:
 
 
 def _person_status(p: dict) -> str:
+    """Исход по человеку: сначала ДОКАЗАННЫЙ снимок визита бота, потом реестр.
+
+    Порядок был обратный, и дайджест врал в обе стороны. Форма выезда пишет
+    результат в `call_status`, а `overall_result` заполняет только импорт мастера.
+    Поэтому выезд с реальным сбором показывался как «Обещает оплатить», сводка
+    недели рапортовала «✅ Оплачен: 0 (0%)», а кейс, где в файле стоит «Оплачен»,
+    а выездник закрыл «Нет контакта», прибавлял чужой долг к «закрыто».
+
+    Мгновенная отбивка о визите при этом брала исход правильно — продукт
+    противоречил сам себе в пределах одного дня. Тот же приём, что в
+    scoring.outcome() и card.py: снимок сильнее импорта.
+    """
+    for row in p["contracts"]:
+        try:
+            snap = db.bot_visit_snapshot(row) or {}
+        except Exception:                                  # noqa: BLE001
+            snap = {}
+        v = snap.get("call_status")
+        if v not in (None, ""):
+            return v
     return _v(p["contracts"], "overall_result") or _v(p["contracts"], "call_status") or "—"
 
 
@@ -333,12 +353,26 @@ def person_card(mgr: dict, on_date: str, ei: int, ci: int) -> tuple[str, InlineK
     # --- итог выезда: заполненное ---
     body = []
 
+    # Телеграм не принимает сообщение длиннее 4096 символов, а комментарий выезда
+    # ничем не ограничен: длинный текст из реестра или пять-шесть диктовок подряд
+    # переваливают порог. Раньше кейс с самым подробным отчётом — ровно тот, что
+    # откроют на показе, — просто переставал открываться: ошибку глотал except.
+    _CARD_FIELD_LIMIT = 900
+
     def add(emoji, label, key, prefix=""):
         v = val(key)
-        if v:
-            body.append(f"{emoji} {label}{_e(v)}" if not prefix else f"{emoji} {label}{prefix}{_e(v)}")
+        if not v:
+            return
+        if len(v) > _CARD_FIELD_LIMIT:
+            v = v[:_CARD_FIELD_LIMIT].rstrip() + "… (обрезано)"
+        body.append(f"{emoji} {label}{_e(v)}" if not prefix else f"{emoji} {label}{prefix}{_e(v)}")
 
-    add("✅", "", "overall_result")
+    # Итог выезда — из доказанного снимка (как и всюду выше). Печатать здесь
+    # «overall_result» значило бы поставить рядом две противоречащие строки:
+    # офисную колонку и настоящий исход, который выездник закрыл сегодня.
+    outcome = _person_status(p)
+    if outcome and outcome != "—":
+        body.append(f"✅ {_e(outcome)}")
     add("📞", "Звонок: ", "call_status")
     add("🤝", "", "agreed_payment")
     add("👥", "Контакт: ", "contact_with")

@@ -11,6 +11,7 @@ digest_loop в app.py. Навигация внутри — правкой соо
 """
 
 import html
+import logging
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -196,6 +197,14 @@ async def navigate(cb: CallbackQuery):
         text, kb = digest.summary_view(mgr, on_date)
     try:
         await cb.message.edit_text(text, reply_markup=kb)
-    except TelegramBadRequest:
-        pass   # «message is not modified» (напр. «Обновить» без новых данных) — не ошибка
+    except TelegramBadRequest as e:
+        # «message is not modified» (напр. «Обновить» без новых данных) — не ошибка.
+        # А вот всё остальное (чаще всего слишком длинное сообщение) раньше тоже
+        # глоталось: экран не менялся, ошибки не было ни на виду, ни в логах, и
+        # кейс с самым подробным отчётом — ровно тот, который откроют на показе, —
+        # выглядел как неработающая кнопка.
+        if "not modified" not in str(e).lower():
+            logging.warning("digest edit failed: %s", e)
+            await cb.answer("Не удалось показать карточку", show_alert=True)
+            return
     await cb.answer()

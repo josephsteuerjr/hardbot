@@ -262,7 +262,7 @@ const I18N = {
     setmark:"Поставить метку",marks:"Метки",map:"Карта",onmap:"на карте",newmark:"Новая метка",mlabel:"Подпись: что это / кто (необязательно)",
     marksaved:"Метка сохранена",nomarks:"Меток пока нет",getloc:"Определяю точку…",standalone:"свободная метка",
     nogeo:"Не получилось определить геолокацию — включите доступ или введите координаты.",
-    navtab:"Навигатор", navph:"Адрес или координаты", navgo:"Проехать", notes:"Заметки", noteph:"Записать для себя — что не влезло в форму", noteadd:"Записать", notesaved:"Заметка сохранена", nonotes:"Заметок пока нет", mehere:"Вы здесь", openmap:"Открыть карту", geoon:"Включить геопозицию", geowhy:"Нужна, чтобы отметить, что вы были на адресе",
+    navtab:"Навигатор", navph:"Адрес или координаты", navgo:"Проехать", notes:"Заметки", noteph:"Записать для себя — что не влезло в форму", noteadd:"Записать", notesaved:"Заметка сохранена", nonotes:"Заметок пока нет", mehere:"Вы здесь", openmap:"Открыть карту", voiceother:"Записано в карточку, где вы говорили", geoon:"Включить геопозицию", geowhy:"Нужна, чтобы отметить, что вы были на адресе",
     geowait:"Определяю…", geook:"Геопозиция включена",
     geodenied:"Доступ к геопозиции запрещён. Включите его в настройках телефона для этого приложения.",
     geonosignal:"Сигнал не поймался. Выйдите из помещения и попробуйте ещё раз.",
@@ -300,7 +300,7 @@ const I18N = {
     setmark:"Nuqta qo‘yish",marks:"Nuqtalar",map:"Xarita",onmap:"xaritada",newmark:"Yangi nuqta",mlabel:"Izoh: bu nima / kim (ixtiyoriy)",
     marksaved:"Nuqta saqlandi",nomarks:"Hozircha nuqta yo‘q",getloc:"Nuqta aniqlanmoqda…",standalone:"erkin nuqta",
     nogeo:"Geolokatsiyani aniqlab bo‘lmadi — ruxsat bering yoki koordinatani kiriting.",
-    navtab:"Navigator", navph:"Manzil yoki koordinata", navgo:"Borish", notes:"Eslatmalar", noteph:"O‘zingiz uchun yozib qo‘ying", noteadd:"Yozib qo‘yish", notesaved:"Eslatma saqlandi", nonotes:"Hozircha eslatma yo‘q", mehere:"Siz shu yerdasiz", openmap:"Xaritani ochish", geoon:"Geolokatsiyani yoqish", geowhy:"Manzilda bo‘lganingizni tasdiqlash uchun kerak",
+    navtab:"Navigator", navph:"Manzil yoki koordinata", navgo:"Borish", notes:"Eslatmalar", noteph:"O‘zingiz uchun yozib qo‘ying", noteadd:"Yozib qo‘yish", notesaved:"Eslatma saqlandi", nonotes:"Hozircha eslatma yo‘q", mehere:"Siz shu yerdasiz", openmap:"Xaritani ochish", voiceother:"Siz gapirgan kartaga yozildi", geoon:"Geolokatsiyani yoqish", geowhy:"Manzilda bo‘lganingizni tasdiqlash uchun kerak",
     geowait:"Aniqlanmoqda…", geook:"Geolokatsiya yoqildi",
     geodenied:"Geolokatsiyaga ruxsat yo‘q. Telefon sozlamalarida shu ilova uchun yoqing.",
     geonosignal:"Signal yo‘q. Ko‘chaga chiqib, yana urinib ko‘ring.",
@@ -338,7 +338,7 @@ const I18N = {
     setmark:"Гузоштани нуқта",marks:"Нуқтаҳо",map:"Харита",onmap:"дар харита",newmark:"Нуқтаи нав",mlabel:"Шарҳ: ин чист / кӣ (ихтиёрӣ)",
     marksaved:"Нуқта захира шуд",nomarks:"Ҳоло нуқта нест",getloc:"Нуқта муайян мешавад…",standalone:"нуқтаи озод",
     nogeo:"Геолокатсия муайян нашуд — иҷозат диҳед ё координата ворид кунед.",
-    navtab:"Навигатор", navph:"Суроға ё координата", navgo:"Рафтан", notes:"Қайдҳо", noteph:"Барои худатон нависед", noteadd:"Навиштан", notesaved:"Қайд захира шуд", nonotes:"Ҳоло қайд нест", mehere:"Шумо дар ин ҷо", openmap:"Кушодани харита", geoon:"Фаъол кардани геомавқеъ", geowhy:"Барои тасдиқи он ки шумо дар суроға будед",
+    navtab:"Навигатор", navph:"Суроға ё координата", navgo:"Рафтан", notes:"Қайдҳо", noteph:"Барои худатон нависед", noteadd:"Навиштан", notesaved:"Қайд захира шуд", nonotes:"Ҳоло қайд нест", mehere:"Шумо дар ин ҷо", openmap:"Кушодани харита", voiceother:"Ба корти он ҷо, ки гап задед, навишта шуд", geoon:"Фаъол кардани геомавқеъ", geowhy:"Барои тасдиқи он ки шумо дар суроға будед",
     geowait:"Муайян мешавад…", geook:"Геомавқеъ фаъол шуд",
     geodenied:"Иҷозат ба геомавқеъ нест. Дар танзимоти телефон барои ин барнома фаъол кунед.",
     geonosignal:"Сигнал нест. Аз бино бароед ва боз кӯшиш кунед.",
@@ -950,7 +950,16 @@ function renderList(){
   STATE.cur=null; removeMap();
   const t=L();
   const bar=`<div class="muted" style="margin-bottom:10px">${t.my}: ${STATE.persons.length}</div>`;
-  if(!STATE.persons.length){ $("app").innerHTML=bar+`<div class="center">${t.nocl}</div>`; setBottomNav("clients"); return; }
+  // Пустой портфель — штатное состояние: сотрудника открепили, период отсёк,
+  // переименовали в реестре. Раньше здесь был ранний return ДО переключателя
+  // сотрудников, и руководитель, переключившийся на такого человека, залипал на
+  // экране без единой кнопки: выбор хранится на сервере и переживает перезаход,
+  // то есть перезагрузка возвращала туда же.
+  if(!STATE.persons.length){
+    $("app").innerHTML = bar + managerSwitchHTML() +
+      `<div id="geobar"></div><div class="center">${esc(t.nocl)}</div>`;
+    geoBanner(); setBottomNav("clients"); return;
+  }
   $("app").innerHTML = bar +
     `<div class="searchwrap">${ic("search")}<input class="search" id="q" placeholder="${esc(t.search)}" oninput="filterList()"></div>
      ${managerSwitchHTML()}
@@ -1021,6 +1030,19 @@ async function openP(rep){
   }
   STATE.cur=d; STATE.tab="visit";
   FORM_TOUCHED.clear();
+  // ПОВТОРНОЕ открытие уже закрытого визита: считаем тронутым всё, что человек
+  // видит заполненным. Иначе второе сохранение («утром Нет контакта, вечером
+  // Оплачен», «поправил опечатку») отправляет только заново набранное поле, а
+  // снимок визита перезаписывается им целиком — и контакт, кто на адресе,
+  // местонахождение, цель, договорённость и комментарий обнуляются молча.
+  // Провенанс не страдает: у завершённого визита форма префиллится ИСКЛЮЧИТЕЛЬНО
+  // из доказанного снимка (мастер её не префиллит, см. очистку выше), поэтому
+  // отправляем ровно то, что уже было подтверждено нами же.
+  if(d.visited){
+    (d.form||[]).forEach(f=>{ if(f.current) FORM_TOUCHED.add(f.key); });
+    if(d.visit_comment) FORM_TOUCHED.add("visit_comment");
+    if(d.tips) FORM_TOUCHED.add("tips");
+  }
   draftDirty=false; clearTimeout(draftTimer);   // новый клиент — сбросить состояние сессии черновика
   renderDetail();
 }
@@ -1515,18 +1537,32 @@ async function toggleVoice(){
     toast(t.voicewait);
     const fd=new FormData(); fd.append("voice",blob,"voice.webm");
     const ctl=new AbortController(), timer=setTimeout(()=>ctl.abort(),70000);
+    // КАКАЯ карточка была открыта, когда говорили. Распознавание идёт до минуты,
+    // и за это время выездник успевает уйти к следующему должнику. Раньше текст
+    // вставлялся в ту карточку, что открыта в момент ОТВЕТА, и автосохранение
+    // уносило его на сервер под чужим КД: и мусор в чужой строке реестра, и
+    // смешение персональных данных двух людей. Заметить это нельзя — человек уже
+    // смотрит следующий адрес.
+    const rep0 = STATE.cur ? STATE.cur.rep : null;
     try{
-      const r=await fetch("/api/voice?rep="+enc(STATE.cur?STATE.cur.rep:""),
+      const r=await fetch("/api/voice?rep="+enc(rep0||""),
                           {method:"POST",headers:authHeaders(),body:fd,signal:ctl.signal});
       if(r.status===429||r.status===503){ toast(t.voiceunavail); return; }
       if(!r.ok) throw 0;
       const j=await r.json();
+      if(!(j&&j.text)){ toast(t.voicefail); return; }
+      const sameCase = STATE.cur && STATE.cur.rep===rep0;
       const ta=$("f_visit_comment");
-      if(j&&j.text&&ta){
+      if(sameCase && ta){
         ta.value=(ta.value?ta.value.trim()+" ":"")+j.text;
         ta.dispatchEvent(new Event("input",{bubbles:true}));   // черновик подхватит
         toast("✓");
-      } else toast(t.voicefail);
+      }else if(rep0){
+        // Ушли из карточки, пока говорили. Текст не теряем — дописываем в её
+        // черновик и честно говорим, к кому он лёг.
+        appendToDraft(rep0, j.text);
+        toast(t.voiceother);
+      }else toast(t.voicefail);
     }catch(e){ toast(e&&e.name==="AbortError"?t.voiceunavail:t.voicefail); }
     finally{ clearTimeout(timer); VOICE_WAIT=false; }
   };
@@ -1554,7 +1590,7 @@ async function saveVisit(){
   const btn=$("savebtn"); if(btn) btn.disabled=true;
   try{
     const rep=STATE.cur.rep, op_id=uuid();
-    const geo=await grabGeo(4000);
+    const geo=await grabGeo(4000,5000);   // свежая точка, не с прошлого адреса
     const body={rep,values,finish:true,op_id,
       form_version:FORM_VERSION,input_keys};
     if(geo) body.geo=geo;
@@ -1623,6 +1659,20 @@ function saveDraft(){
   }catch(e){}
 }
 function flushDraft(){ clearTimeout(draftTimer); saveDraft(); }   // немедленно, перед уходом с формы
+
+// Дописать текст в черновик ЧУЖОЙ (не открытой сейчас) карточки. Нужен ровно
+// одному сценарию: голос ушёл на распознавание, а выездник за эту минуту перешёл
+// к следующему должнику. Терять надиктованное нельзя, вставлять в открытую
+// карточку — тем более: это чужие персональные данные.
+function appendToDraft(rep, text){
+  if(!rep || !text) return;
+  let d=loadDraft(rep) || {v:{}, keys:[], at:Date.now()};
+  const prev=(d.v && d.v.visit_comment) ? String(d.v.visit_comment).trim() : "";
+  d.v=d.v||{}; d.v.visit_comment = prev ? (prev+" "+text) : text;
+  d.keys=[...new Set([...(d.keys||[]), "visit_comment"])];
+  d.at=Date.now();
+  try{ localStorage.setItem(draftKey(rep), JSON.stringify(d)); }catch(e){}
+}
 
 function onFormChange(event){
   const key=fieldKey(event&&event.target);

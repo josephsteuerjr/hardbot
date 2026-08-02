@@ -248,3 +248,33 @@ def test_period_view_week():
     # кривые days откатываются к 7
     t2, _ = digest.period_view(mgr, TODAY, 999)
     assert "Сводка за 7 дн" in t2
+
+
+def test_digest_shows_the_visit_outcome_not_the_office_column(monkeypatch):
+    """Дайджест обязан показывать исход ВЫЕЗДА, а не колонку офиса.
+
+    Форма выезда пишет результат в call_status, а overall_result заполняет только
+    импорт мастера. Пока приоритет был обратным, выезд с реальным сбором стоял в
+    сводке как «Обещает оплатить», а неделя рапортовала «Оплачен: 0 (0%)».
+    """
+    import db
+    import digest
+
+    db.init_db()
+    with db.connect() as conn:
+        conn.execute("DELETE FROM clients WHERE contract_id LIKE 'DG-%'")
+        conn.commit()
+    grid = [[f.title for f in db.FIELDS], [f.source for f in db.FIELDS]]
+    grid.append([{"contract_id": "DG-1", "client": "Проверкин П.",
+                  "birth_date": "1980-01-01", "responsible": "Иванов",
+                  "address": "Худжанд", "overall_result": "Обещает оплатить",
+                  "debt_total": "50000"}.get(f.key) for f in db.FIELDS])
+    db.import_grid(grid, source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
+
+    # выездник закрыл визит с другим исходом — это и есть правда
+    db.record_bot_visit("DG-1", {"call_status": "Оплачен"})
+
+    with db.connect() as conn:
+        rows = conn.execute("SELECT * FROM clients WHERE contract_id='DG-1'").fetchall()
+    person = {"contracts": rows}
+    assert digest._person_status(person) == "Оплачен"
