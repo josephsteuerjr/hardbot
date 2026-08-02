@@ -674,10 +674,15 @@ async def _geo_suggest(request: web.Request) -> web.Response:
     q = (request.query.get("q") or "").strip()
     if len(q) < 2:
         return web.json_response({"items": []})
+    # geoindex.load() читает дампы с диска 5–7 секунд и КЭША НА ДИСКЕ НЕ ИМЕЕТ,
+    # то есть платится на каждый рестарт. В корутине это останавливало весь
+    # процесс: не проходили /api/save, не грузились фото, молчал поллинг
+    # Телеграма. Достаточно было одному выезднику набрать две буквы в поиске
+    # первым после перезапуска. Уносим в поток.
     try:
         import addr_cis
         import geoindex
-        idx = geoindex.load()
+        idx = await asyncio.get_running_loop().run_in_executor(None, geoindex.load)
     except Exception:                                  # noqa: BLE001
         return web.json_response({"items": []})
 
@@ -769,8 +774,8 @@ async def _geocode_free(request: web.Request) -> web.Response:
                                       "precision": "point", "name": ""})
 
     parsed = addr_cis.parse(q)
-    try:
-        idx = geoindex.load()
+    try:                                               # см. _geo_suggest: не в корутине
+        idx = await asyncio.get_running_loop().run_in_executor(None, geoindex.load)
     except Exception:                                  # noqa: BLE001
         logging.exception("gazetteer load failed")
         raise web.HTTPServiceUnavailable(text="gazetteer")
@@ -937,7 +942,13 @@ async def _save(request: web.Request) -> web.Response:
         # Пустая точность — это «неизвестно» (строка геокодирована старым кодом),
         # и тогда судим по-прежнему, только по geo_src. Отключать гео-контроль
         # для всей накопленной базы было бы хуже, чем изредка спросить лишний раз.
-        rough = {"city", "district", "region"}
+        # Список «грубых» уровней ОДИН на систему. Раньше здесь был свой литерал
+        # из трёх значений, а scoring размазывает джиттером ещё и махаллю, кишлак
+        # и джамоат — самые обычные единицы узбекского и таджикского адреса.
+        # Джиттер ±0.02° сам по себе перебивает порог 1000 м, и гео-контроль
+        # обвинял выездника, стоявшего ровно там, где надо.
+        from scoring import _COARSE_PRECISION
+        rough = set(_COARSE_PRECISION) - {""}
         precision = (cur["geo_precision"] if "geo_precision" in cur.keys() else "") or ""
         # Погрешность САМОЙ точки телефона. В частном секторе, в подвале и просто
         # в помещении GPS не ловится, и браузер отдаёт сетевой фикс с точностью

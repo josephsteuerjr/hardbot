@@ -83,3 +83,33 @@ def test_pending_request_does_not_occupy_the_employee():
     db.bind_agent(4004, "Каримов К.", "agent", approved=False)
     r = _bind(5005, "Каримов К.")
     assert not r.get("pending"), "чужая неодобренная заявка заблокировала вход"
+
+
+def test_a_wrong_pick_can_be_corrected_while_pending():
+    """Промах пальцем при онбординге запирал навсегда: INSERT OR IGNORE молча
+    ничего не делал (telegram_id — PRIMARY KEY), приложение показывало «Нет
+    доступа», выхода из экрана не было. Неодобренную заявку переписать можно."""
+    _bind(1001, "Джумаев Ш.")                 # ФИО занято
+    _bind(6006, "Джумаев Ш.")                 # промахнулся — заявка висит
+    assert db.pending_binding(6006)["employee"] == "Джумаев Ш."
+    r = _bind(6006, "Хасанов А.")             # выбрал правильного, тот свободен
+    assert not r.get("pending")
+    assert db.get_binding(6006) == "Хасанов А."
+
+
+def test_an_approved_binding_cannot_be_switched_by_self_selection():
+    """Одобренную привязку самовыбором не сменить — только через пульт."""
+    _bind(7007, "Хасанов А.")
+    assert db.get_binding(7007) == "Хасанов А."
+    _bind(7007, "Джумаев Ш.")
+    assert db.get_binding(7007) == "Хасанов А."
+
+
+def test_reminders_go_only_to_an_approved_device():
+    """ФИО, номер договора и адрес должника не должны уходить на аккаунт,
+    которому система только что отказала в доступе."""
+    _bind(1001, "Джумаев Ш.")
+    _bind(2002, "Джумаев Ш.")                 # второй телефон, не одобрен
+    assert db.telegram_for_employee("Джумаев Ш.") == 1001
+    db.approve_binding(2002)
+    assert db.telegram_for_employee("Джумаев Ш.") in (1001, 2002)

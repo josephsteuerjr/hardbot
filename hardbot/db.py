@@ -770,14 +770,26 @@ def employees_in_registry() -> list[sqlite3.Row]:
 
 def bind_agent(telegram_id: int, employee: str, kind: str = "agent",
                approved: bool = True) -> bool:
-    """Закрепить за пользователем сотрудника + тип (agent/courier). Одноразово.
-    approved=False — привязка создаётся в статусе «ждёт аппрува ADMIN» (доступа пока нет)."""
+    """Закрепить за пользователем сотрудника + тип (agent/courier).
+
+    Одобренную привязку менять НЕЛЬЗЯ: самовыбор одноразовый, переназначение —
+    только через пульт. А вот НЕОДОБРЕННУЮ заявку человек вправе переписать: без
+    этого промах пальцем при онбординге запирал навсегда. INSERT OR IGNORE молча
+    ничего не делал (telegram_id — PRIMARY KEY), приложение показывало «Нет
+    доступа», и выхода из этого экрана не было вообще.
+    """
     with connect() as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO agent_bind (telegram_id, employee, kind, approved, created_at) "
             "VALUES (?,?,?,?,?)",
             (telegram_id, employee, kind, 1 if approved else 0, date.today().isoformat()),
         )
+        if cur.rowcount == 0:
+            cur = conn.execute(
+                "UPDATE agent_bind SET employee = ?, kind = ?, approved = ?, created_at = ? "
+                "WHERE telegram_id = ? AND approved = 0",
+                (employee, kind, 1 if approved else 0, date.today().isoformat(), telegram_id),
+            )
         conn.commit()
         return cur.rowcount > 0
 
@@ -839,8 +851,12 @@ def employees_with_bindings() -> list[dict]:
             "WHERE responsible IS NOT NULL AND TRIM(responsible) <> '' "
             "GROUP BY responsible ORDER BY responsible"
         ).fetchall()
+        # Только одобренные: неодобренная заявка второго телефона на то же ФИО
+        # не должна выглядеть как «сотрудник привязан» (правило «одно ФИО — одно
+        # устройство» теперь такие строки создаёт штатно).
         binds = {b["employee"]: b for b in
-                 conn.execute("SELECT * FROM agent_bind").fetchall()}
+                 conn.execute("SELECT * FROM agent_bind WHERE approved = 1"
+                              " ORDER BY telegram_id").fetchall()}
     out = []
     for e in emps:
         b = binds.get(e["employee"])
@@ -936,9 +952,18 @@ def get_kind(telegram_id: int) -> str:
 
 
 def telegram_for_employee(employee: str) -> int | None:
+    """Кому слать напоминание о повторном выезде — ТОЛЬКО одобренной привязке.
+
+    Фильтра approved здесь не было, и он стал обязательным после правила «одно ФИО
+    — одно устройство»: теперь неодобренные строки появляются штатно, при каждой
+    попытке второго телефона. Без фильтра ФИО, номер договора и адрес должника
+    каждый час уходили бы на аккаунт, которому система только что ОТКАЗАЛА в
+    доступе, а настоящий выездник напоминания не видел бы вовсе.
+    """
     with connect() as conn:
         row = conn.execute(
-            "SELECT telegram_id FROM agent_bind WHERE employee = ? LIMIT 1", (employee,)
+            "SELECT telegram_id FROM agent_bind WHERE employee = ? AND approved = 1 "
+            "ORDER BY telegram_id LIMIT 1", (employee,)
         ).fetchone()
     return row["telegram_id"] if row else None
 
