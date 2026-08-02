@@ -198,3 +198,49 @@ def test_city_from_the_address_anchors_the_search():
     assert hit is not None
     assert abs(hit["lat"] - 40.91) < 0.2 and abs(hit["lon"] - 69.64) < 0.2, \
         f"точка не в Охангароне: {hit}"
+
+
+# --- находки адверсарки по спине 02.08.2026 ------------------------------------
+def test_unparsed_assign_date_does_not_hide_the_case():
+    """Одно нажатие «Применить» в панели периода прятало у выездника десятки
+    договоров: дата закрепления в реестре бывает пустой или в незнакомом формате.
+    Пульт при этом показывал полное число, и причину было не найти."""
+    from datetime import date as _d
+    lo, hi = _d(2026, 1, 1), _d(2026, 12, 31)
+    assert db._date_in("", lo, hi) is True
+    assert db._date_in("чепуха", lo, hi) is True
+    assert db._date_in("01.01.2020", lo, hi) is False      # настоящая дата вне окна — прячем
+
+
+def test_date_parser_knows_the_formats_people_actually_type():
+    from datetime import date as _d
+    want = _d(2026, 8, 1)
+    for s in ("01.08.2026", "2026-08-01", "01/08/2026", "01-08-2026",
+              "2026/08/01", "01.08.2026."):
+        assert db._as_date(s) == want, s
+
+
+def test_report_chat_notifier_has_every_name_it_uses():
+    """`uid` использовался, но не был параметром — NameError на КАЖДОМ визите,
+    съеденный общим except: отчёт в беседу не уходил вообще, а наружу HTTP 200."""
+    import ast
+    import inspect
+    tree = ast.parse(inspect.getsource(web._notify_report_chats))
+    fn = tree.body[0]
+    names = {a.arg for a in fn.args.args}
+    assigned = {t.id for n in ast.walk(fn) if isinstance(n, ast.Assign)
+                for t in n.targets if isinstance(t, ast.Name)}
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+            if n.id in ("uid", "row", "vlat", "vlon", "dist_m"):
+                assert n.id in names or n.id in assigned, f"{n.id} не определено"
+
+
+def test_geo_alert_ignores_an_imprecise_phone_fix():
+    """В помещении браузер отдаёт сетевой фикс с точностью 800–1500 м при пороге
+    тревоги 1000 м. Считать по такой точке расстояние — обвинить человека,
+    стоявшего ровно там, где надо."""
+    import inspect
+    src = inspect.getsource(web._save)
+    assert 'g.get("acc")' in src, "погрешность точки не читается"
+    assert "trusted_fix" in src

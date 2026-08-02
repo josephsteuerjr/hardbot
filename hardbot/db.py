@@ -1179,12 +1179,31 @@ def city_employees() -> dict[str, list[str]]:
 
 def employee_activity(employee: str) -> dict | None:
     """Метрики активности сотрудника (визиты/метки 7/30д, простой) — если он привязан
-    к telegram (agent_bind). Не привязан → None (телеметрии нет). Тонкая обёртка над
-    activity_stats для карточки сотрудника в дайджесте."""
-    for w in activity_stats():
-        if w["employee"] == employee:
-            return w
-    return None
+    к telegram (agent_bind). Не привязан → None (телеметрии нет).
+
+    СУММИРУЕМ ПО ВСЕМ привязкам этого ФИО, а не берём первую попавшуюся. У людей
+    бывает два телеграм-аккаунта (реальный случай: роль выдали одному, стучится с
+    другого), самовыбор в онбординге заводит вторую строку, а сортировка ставит
+    аккаунт БЕЗ активности первым — и карточка показывала «Визиты: 7д 0 · 30д 0»
+    человеку, который отработал весь день. Заметить неоткуда: экран «Роли» в
+    пульте дубли схлопывает по ФИО.
+    """
+    rows = [w for w in activity_stats() if w["employee"] == employee]
+    if not rows:
+        return None
+    if len(rows) == 1:
+        return rows[0]
+    merged = dict(rows[0])
+    for key in ("visits7", "visits30", "marks7", "marks30", "d7", "d30"):
+        if key in merged:
+            merged[key] = sum(int(r.get(key) or 0) for r in rows)
+    lasts = [r.get("last") for r in rows if r.get("last")]
+    if "last" in merged:
+        merged["last"] = max(lasts) if lasts else None
+    idles = [r.get("idle_days") for r in rows if r.get("idle_days") is not None]
+    if "idle_days" in merged:
+        merged["idle_days"] = min(idles) if idles else None
+    return merged
 
 
 def persons_processed(employee: str, on_date: str) -> list[dict]:
@@ -1515,9 +1534,18 @@ def _period_bounds():
 
 
 def _date_in(val, lo, hi) -> bool:
+    """Попадает ли дата закрепления в окно периода.
+
+    ДАТА НЕ РАСПОЗНАНА — кейс ПОКАЗЫВАЕМ. Раньше было наоборот, и одно нажатие
+    «Применить» в панели периода прятало у выездника десятки договоров: в реестре
+    дата закрепления бывает пустой или записанной в формате, которого не знает
+    `_as_date`. Пульт при этом продолжал показывать полное число договоров, поиск
+    по номеру КД переставал находить, и причину было не найти ни на одном экране.
+    Показать лишнее — потеря минуты; спрятать нужное — сорванный выезд.
+    """
     d = _as_date(val)
     if d is None:
-        return not (lo or hi)        # без даты закрепления — только когда фильтр не задан
+        return True
     if lo and d < lo:
         return False
     if hi and d > hi:
@@ -2275,10 +2303,18 @@ NUM_KEYS = {"debt_overdue", "interest_overdue", "penalty", "duty", "dtp", "rent"
 
 
 def _as_date(v):
+    """Дата из реестра в любом виде, в каком её туда занесли руками.
+
+    Форматов больше, чем кажется: в одном и том же файле встречаются «01.08.2026»,
+    «01/08/2026», хвостовые точки и запятые после копипаста. Нераспознанная дата
+    раньше молча прятала договор от выездника (см. _date_in), поэтому список
+    форматов лучше держать щедрым.
+    """
     if not v:
         return None
-    s = str(v).strip()
-    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d %H:%M:%S"):
+    s = str(v).strip().rstrip(".,;")
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d %H:%M:%S",
+                "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%Y/%m/%d"):
         try:
             return datetime.strptime(s, fmt).date()
         except ValueError:
