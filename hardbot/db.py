@@ -775,6 +775,26 @@ def bind_agent(telegram_id: int, employee: str, kind: str = "agent",
         return cur.rowcount > 0
 
 
+def employee_taken_by(employee: str, exclude_telegram_id: int = 0) -> int | None:
+    """telegram_id, за которым УЖЕ закреплён этот сотрудник (или None).
+
+    Правило владельца: один сотрудник — одно устройство. Второй аккаунт на то же
+    ФИО почти всегда означает одно из двух: человек завёл второй телеграм (и тогда
+    его активность разъезжается по двум привязкам — карточка дайджеста показывала
+    нули отработавшему), либо на чужое ФИО зашёл посторонний. И то и другое должен
+    разрешать владелец руками, а не самовыбор.
+
+    Считаем только ОДОБРЕННЫЕ: заявка, которую владелец ещё не подтвердил, никого
+    не занимает.
+    """
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT telegram_id FROM agent_bind "
+            "WHERE employee = ? AND approved = 1 AND telegram_id <> ? LIMIT 1",
+            (employee, exclude_telegram_id)).fetchone()
+    return row["telegram_id"] if row else None
+
+
 def set_bind(telegram_id: int, employee: str, kind: str = "agent") -> None:
     """Предзаданная привязка из пульта: заказчик сам вписывает telegram_id
     сотруднику (ФИО из реестра) и тип. approved=1 сразу — работник, написавший

@@ -494,22 +494,32 @@ async def _bind(request: web.Request) -> web.Response:
         db.set_lang(uid, lang)
     if not employee:
         raise web.HTTPBadRequest(text="employee required")
-    if approval_required():
-        # ИБ: привязка ждёт аппрува ADMIN; доступа к данным пока нет.
+    # Самовыбор активируется СРАЗУ: выездник в поле не должен ждать, пока владелец
+    # увидит заявку. Аппрув остаётся ровно для одного случая — на это ФИО уже сел
+    # другой телефон. Один сотрудник = одно устройство, иначе активность разъезжается
+    # по двум привязкам (карточка дайджеста показывала нули отработавшему), а на
+    # чужое ФИО может сесть посторонний. Разрешить второе устройство может только
+    # владелец, кнопкой под заявкой.
+    taken_by = db.employee_taken_by(employee, exclude_telegram_id=uid)
+    if taken_by:
         created = db.bind_agent(uid, employee, kind, approved=False)
-        db.audit_access(uid, "bind_request", employee)
-        if created:                                # шлём заявку ADMIN только при первом создании
+        db.audit_access(uid, "bind_request_taken", employee)
+        if created:                                # заявка уходит владельцу один раз
             bot = request.app.get("bot")
             if bot and ADMIN_ID:
                 try:
                     await bot.send_message(
-                        ADMIN_ID, t("bind_request_admin", lang_of(ADMIN_ID), id=uid, emp=employee),
+                        ADMIN_ID,
+                        t("bind_request_admin", lang_of(ADMIN_ID), id=uid, emp=employee)
+                        + f"\n\n⚠️ За «{employee}» уже закреплено другое устройство"
+                          f" (id {taken_by}). Подтвердите, только если это тот же человек.",
                         reply_markup=approve_bind_kb(uid, lang_of(ADMIN_ID)))
                 except Exception:  # noqa: BLE001
                     pass
-        return web.json_response({"ok": True, "pending": True, "employee": None,
-                                  "kind": db.get_kind(uid)})
-    ok = db.bind_agent(uid, employee, kind)   # одноразово, сразу активна
+        return web.json_response({"ok": True, "pending": True, "taken": True,
+                                  "employee": None, "kind": db.get_kind(uid)})
+    ok = db.bind_agent(uid, employee, kind)   # свободное ФИО — работаем сразу
+    db.audit_access(uid, "bind_self", employee)
     return web.json_response({"ok": ok, "employee": db.get_binding(uid), "kind": db.get_kind(uid)})
 
 

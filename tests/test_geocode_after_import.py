@@ -96,11 +96,29 @@ def test_foreign_address_is_refused_not_guessed():
     (Таджикистан). Точка уезжала за тысячи километров, а карточка утверждала,
     что всё в порядке."""
     import geocode
-    for addr in ("Самара, улица Ново-Садовая, 106",
-                 "Самарская область, Тольятти, Ленинский проспект 1",
-                 "Россия, Москва, Тверская 1",
-                 "г. Екатеринбург"):
+    for addr in ("Россия, Москва, Тверская 1", "Москве", "г. Екатеринбург",
+                 "Казань, Баумана 5", "Уфа", "Казахстан, Алматы"):
         assert geocode.geocode_address(addr, "", use_precise=False) is None, addr
+
+
+def test_samara_region_is_covered_now():
+    """Самарскую область положили в справочник отдельно (2010 записей): владелец
+    проверяет навигатор со своего адреса. Остальная Россия по-прежнему молчит."""
+    import geocode
+    for addr in ("Самара, улица Ново-Садовая, 106",
+                 "Самарская область, Тольятти",
+                 "г. Сызрань"):
+        hit = geocode.geocode_address(addr, "", use_precise=False)
+        assert hit and hit.get("cc") == "RU", addr
+
+
+def test_the_guard_matches_word_starts_not_substrings():
+    """«уфа» не должна срабатывать внутри «Мустафо», а «москв» обязана ловить
+    склонения: первая версия проверяла границу не с той стороны и не ловила
+    ничего склоняемого вообще."""
+    import geocode
+    assert geocode._outside_coverage("деҳаи Мустафо, ноҳияи Спитамен") is False
+    assert geocode._outside_coverage("Москвой") is True
 
 
 def test_the_guard_does_not_eat_samarkand():

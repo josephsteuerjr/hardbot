@@ -59,8 +59,13 @@ def _find(name: str) -> Path | None:
             return candidate
     return None
 UA = "hardbot-geocoder/0.2 (internal collection-agency tool)"
+# RU здесь — это НЕ вся Россия. В hardbot/geonames/RU.txt лежит только Самарская
+# область (adm1=65, 2010 записей, 300 КБ): владелец тестирует навигатор со своего
+# адреса, а полный дамп на 412 тысяч строк ради этого возить незачем. Понадобится
+# другой регион — доложить строки тем же фильтром и расширить _NO_COVERAGE в geocode.
 DEFAULT_COUNTRIES = tuple(
-    c.strip().upper() for c in os.getenv("GEOINDEX_COUNTRIES", "TJ,UZ").split(",") if c.strip()
+    c.strip().upper()
+    for c in os.getenv("GEOINDEX_COUNTRIES", "TJ,UZ,RU").split(",") if c.strip()
 )
 
 # Порядок уровней от точного к грубому — он же порядок попыток поиска.
