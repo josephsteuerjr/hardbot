@@ -87,3 +87,25 @@ def test_queue_keeps_the_stored_point_instead_of_guessing_the_city():
     assert out["items"][0]["lat"] is not None, "очередь потеряла точку"
     assert out["cities"] and out["cities"][0]["lat"] is not None, \
         "у кластера вне Согда нет центра — маршрут дня не построится"
+
+
+def test_foreign_address_is_refused_not_guessed():
+    """Справочник знает только Таджикистан и Узбекистан, и на чужой стране он
+    раньше не молчал, а уверенно врал: «Самара» → Samariy (Узбекистан) с
+    точностью «город», «Самарская область, Тольятти» → Rudaki District
+    (Таджикистан). Точка уезжала за тысячи километров, а карточка утверждала,
+    что всё в порядке."""
+    import geocode
+    for addr in ("Самара, улица Ново-Садовая, 106",
+                 "Самарская область, Тольятти, Ленинский проспект 1",
+                 "Россия, Москва, Тверская 1",
+                 "г. Екатеринбург"):
+        assert geocode.geocode_address(addr, "", use_precise=False) is None, addr
+
+
+def test_the_guard_does_not_eat_samarkand():
+    """«Самарканд» начинается как «Самара» — защита не должна его срезать."""
+    import geocode
+    for addr, city in (("УЗБЕКИСТАН, САМАРКАНДСКАЯ ОБЛАСТЬ, НАРПАЙСКИЙ", "Самарканд"),
+                       ("САМАРҚАНД ВИЛОЯТИ, КАТТАҚЎРҒОН ШАҲРИ", "")):
+        assert geocode.geocode_address(addr, city, use_precise=False) is not None, addr

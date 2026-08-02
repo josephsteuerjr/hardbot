@@ -25,4 +25,18 @@ def test_only_inner_content_scrolls_and_controls_do_not_translate():
 
 
 def test_shell_cache_was_bumped_for_new_index():
-    assert 'const CACHE = "hardbot-shell-v15";' in SW
+    """Правишь оболочку — поднимай версию кэша, иначе у поставивших на экран
+    останется старая: service worker отдаст своё, и починка до них не доедет.
+
+    Проверяем СВЯЗЬ, а не константу: обе строки ниже придётся обновить руками,
+    и «случайно» пройти тест нельзя. Раньше здесь была прибита только версия —
+    её приходилось править, ни на что не глядя, и смысл проверки терялся.
+    """
+    import hashlib
+
+    index_sha = hashlib.sha256(
+        (ROOT / "hardbot" / "miniapp" / "index.html").read_bytes()).hexdigest()
+    assert index_sha == (
+        "d6beb1ecfa281d1023b868300dc147b813b9d7d3a7e05b83e6dc7a141fd36337"
+    ), "оболочка изменилась — обнови этот хэш И версию CACHE в sw.js"
+    assert 'const CACHE = "hardbot-shell-v16";' in SW

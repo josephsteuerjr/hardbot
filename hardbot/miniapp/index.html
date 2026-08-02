@@ -262,6 +262,11 @@ const I18N = {
     setmark:"Поставить метку",marks:"Метки",map:"Карта",onmap:"на карте",newmark:"Новая метка",mlabel:"Подпись: что это / кто (необязательно)",
     marksaved:"Метка сохранена",nomarks:"Меток пока нет",getloc:"Определяю точку…",standalone:"свободная метка",
     nogeo:"Не получилось определить геолокацию — включите доступ или введите координаты.",
+    geoon:"Включить геопозицию", geowhy:"Нужна, чтобы отметить, что вы были на адресе",
+    geowait:"Определяю…", geook:"Геопозиция включена",
+    geodenied:"Доступ к геопозиции запрещён. Включите его в настройках телефона для этого приложения.",
+    geonosignal:"Сигнал не поймался. Выйдите из помещения и попробуйте ещё раз.",
+    geoslow:"Не успели ответить на запрос. Нажмите ещё раз и выберите «Разрешить».",
     go:"Поехать",exit:"Выйти",finishvisit:"Отметить визит",mins:"мин",
     draftwait:"черновик не отправлен на сервер",draftsent:"черновик сохранён на сервере",
     resultreq:"Сначала выберите результат выезда",
@@ -295,6 +300,11 @@ const I18N = {
     setmark:"Nuqta qo‘yish",marks:"Nuqtalar",map:"Xarita",onmap:"xaritada",newmark:"Yangi nuqta",mlabel:"Izoh: bu nima / kim (ixtiyoriy)",
     marksaved:"Nuqta saqlandi",nomarks:"Hozircha nuqta yo‘q",getloc:"Nuqta aniqlanmoqda…",standalone:"erkin nuqta",
     nogeo:"Geolokatsiyani aniqlab bo‘lmadi — ruxsat bering yoki koordinatani kiriting.",
+    geoon:"Geolokatsiyani yoqish", geowhy:"Manzilda bo‘lganingizni tasdiqlash uchun kerak",
+    geowait:"Aniqlanmoqda…", geook:"Geolokatsiya yoqildi",
+    geodenied:"Geolokatsiyaga ruxsat yo‘q. Telefon sozlamalarida shu ilova uchun yoqing.",
+    geonosignal:"Signal yo‘q. Ko‘chaga chiqib, yana urinib ko‘ring.",
+    geoslow:"So‘rovga javob bermadingiz. Yana bosing va «Ruxsat berish»ni tanlang.",
     go:"Yo‘lga chiqish",exit:"Yopish",finishvisit:"Tashrifni belgilash",mins:"daq",
     draftwait:"qoralama serverga yuborilmadi",draftsent:"qoralama serverda saqlandi",
     resultreq:"Avval chiqish natijasini tanlang",
@@ -328,6 +338,11 @@ const I18N = {
     setmark:"Гузоштани нуқта",marks:"Нуқтаҳо",map:"Харита",onmap:"дар харита",newmark:"Нуқтаи нав",mlabel:"Шарҳ: ин чист / кӣ (ихтиёрӣ)",
     marksaved:"Нуқта захира шуд",nomarks:"Ҳоло нуқта нест",getloc:"Нуқта муайян мешавад…",standalone:"нуқтаи озод",
     nogeo:"Геолокатсия муайян нашуд — иҷозат диҳед ё координата ворид кунед.",
+    geoon:"Фаъол кардани геомавқеъ", geowhy:"Барои тасдиқи он ки шумо дар суроға будед",
+    geowait:"Муайян мешавад…", geook:"Геомавқеъ фаъол шуд",
+    geodenied:"Иҷозат ба геомавқеъ нест. Дар танзимоти телефон барои ин барнома фаъол кунед.",
+    geonosignal:"Сигнал нест. Аз бино бароед ва боз кӯшиш кунед.",
+    geoslow:"Ба дархост ҷавоб надодед. Боз пахш кунед ва «Иҷозат» -ро интихоб кунед.",
     go:"Ба роҳ баромадан",exit:"Бастан",finishvisit:"Сафарро қайд кардан",mins:"дақ",
     draftwait:"нусха ба сервер нафиристода шуд",draftsent:"нусха дар сервер захира шуд",
     resultreq:"Аввал натиҷаи сафарро интихоб кунед",
@@ -839,6 +854,8 @@ async function setLang(c){
 let REDEEMED=false;
 async function boot(){
   renderLangs(); hideBottomNav();
+  geoProbe();                 // узнаём, дали ли права раньше (не спрашивает, только смотрит)
+  tgGeoInit();                // внутри Телеграма — её собственный LocationManager
   if(!REDEEMED){ REDEEMED=true; await redeemFromUrl(); }   // одноразовый код из ссылки бота
   try{
     const d = await api("/api/bootstrap");
@@ -931,9 +948,11 @@ function renderList(){
      ${managerSwitchHTML()}
      <button class="btn line" style="margin-bottom:10px" onclick="routeDay()">🧭 ${esc(t.routeday)}</button>
      <button class="btn line" style="margin-bottom:10px" onclick="askAddress()">📍 ${esc(t.freenav)}</button>
+     <div id="geobar"></div>
      <div id="warmbar"></div>
      <div id="plist"></div>`;
   drawList(STATE.persons);
+  geoBanner();                   // без прав гео визит закроется без точки
   warmBar(warmStatusHTML());     // видно, готов ли оффлайн-кэш, ещё до выезда
   setBottomNav("clients");
 }
@@ -942,7 +961,9 @@ function renderList(){
 // «ближайший следующий» от живой точки (если дали гео). Тап по строке — карточка.
 async function routeDay(){
   const t=L();
-  const geo=await grabGeo(3000);
+  // Нажатие — законный момент спросить права: маршрут от текущей точки без неё
+  // строится «от первого кейса», и человек не понимает, почему порядок странный.
+  const geo = (GEO.state==="granted") ? await grabGeo(3000) : await askGeo();
   let url="/api/route_day"; if(geo) url+="?lat="+geo.lat+"&lon="+geo.lon;
   let j=null;
   try{ j=await api(url); }catch(e){ toast("✕"); return; }
@@ -1318,21 +1339,146 @@ async function upPhoto(){
     toast(L().savedoff); updateOffBar();
   }
 }
-// Точка закрытия визита — для гео-контроля на сервере (⚠️ «закрыт далеко от адреса»).
-// Не блокирует сохранение: нет разрешения/сигнала за ms — сохраняем без точки.
-function grabGeo(ms,maxAge){
+// --- Геопозиция --------------------------------------------------------------
+// ПОЧЕМУ ЗДЕСЬ ОТДЕЛЬНЫЙ ЗАПРОС ПРАВ. Раньше приложение не просило разрешение
+// никогда и нигде: точку дёргали неявно, изнутри сохранения визита и отправки
+// фото, и с таймаутом 3–4 секунды. За это время человек физически не успевает
+// прочитать системный диалог «Разрешить доступ к геопозиции?» и нажать
+// «Разрешить»: таймер срабатывает первым, промис закрывается, ответ выбрасывать
+// уже некому. iOS второй раз диалог не показывает — и прав нет никогда, а значок
+// геолокации не загорается. На андроиде, где права однажды дали, всё работало,
+// поэтому баг и дожил. Отсюда правила ниже.
+const GEO={state:"unknown",   // unknown | granted | denied | unavailable
+           last:null, lastErr:0};
+
+function geoErrText(code){
+  const t=L();
+  if(code===1) return t.geodenied;
+  if(code===2) return t.geonosignal;
+  if(code===3) return t.geoslow;
+  return t.nogeo;
+}
+
+// Телеграм на айфоне не всегда пробрасывает navigator.geolocation в свой webview:
+// у неё для этого собственный LocationManager (Bot API 8.0+). Если он есть —
+// работаем через него, иначе остаётся обычный браузерный путь.
+let TGLOC=null;
+function tgGeoInit(){
+  try{
+    if(TG && TG.LocationManager && TG.LocationManager.init){
+      TG.LocationManager.init(()=>{ TGLOC=TG.LocationManager; });
+    }
+  }catch(e){}
+}
+
+function tgGetLocation(){
   return new Promise(res=>{
-    if(!navigator.geolocation) return res(null);
+    if(!TGLOC || !TGLOC.getLocation) return res(null);
+    try{
+      TGLOC.getLocation(d=>{
+        if(d && typeof d.latitude==="number"){
+          GEO.state="granted";
+          GEO.last={lat:d.latitude, lon:d.longitude,
+                    acc:Math.round(d.horizontal_accuracy||0), ts:Date.now()};
+          return res(GEO.last);
+        }
+        res(null);
+      });
+    }catch(e){ res(null); }
+  });
+}
+
+// Явный запрос прав. Вызывается ТОЛЬКО по нажатию и БЕЗ таймаута: сколько
+// человеку нужно на диалог — столько и ждём. Возвращает точку или null.
+async function askGeo(){
+  const viaTg = await tgGetLocation();
+  if(viaTg) return viaTg;
+  return askGeoBrowser();
+}
+
+function askGeoBrowser(){
+  return new Promise(res=>{
+    if(!navigator.geolocation){ GEO.state="unavailable"; return res(null); }
+    navigator.geolocation.getCurrentPosition(
+      p=>{ GEO.state="granted"; GEO.lastErr=0;
+           GEO.last={lat:p.coords.latitude, lon:p.coords.longitude,
+                     acc:Math.round(p.coords.accuracy||0), ts:p.timestamp||0};
+           res(GEO.last); },
+      e=>{ GEO.lastErr=(e&&e.code)||0;
+           GEO.state=(GEO.lastErr===1)?"denied":"unknown";
+           res(null); },
+      {enableHighAccuracy:true, maximumAge:0});   // timeout НЕ задаём намеренно
+  });
+}
+
+// Фоновый снимок точки: для гео-контроля визита и пруфа фото. Не блокирует
+// сохранение — нет разрешения или сигнала, сохраняем без точки.
+// Короткий таймаут допустим ТОЛЬКО когда права уже подтверждены: иначе он снова
+// обгонит системный диалог. Пока прав нет — не дёргаем систему вхолостую.
+async function grabGeo(ms,maxAge){
+  if(TGLOC){ const p=await tgGetLocation(); if(p) return p; }
+  return grabGeoBrowser(ms,maxAge);
+}
+
+function grabGeoBrowser(ms,maxAge){
+  return new Promise(res=>{
+    if(!navigator.geolocation){ GEO.state="unavailable"; return res(null); }
+    if(GEO.state==="denied") return res(null);
+    if(GEO.state!=="granted") return res(null);   // права спрашиваются явно, кнопкой
     let done=false;
     const fin=v=>{ if(!done){ done=true; clearTimeout(t); res(v); } };
     const t=setTimeout(()=>fin(null), ms);
     navigator.geolocation.getCurrentPosition(
-      p=>fin({lat:p.coords.latitude, lon:p.coords.longitude,
-              acc:Math.round(p.coords.accuracy||0), ts:p.timestamp||0}),
-      ()=>fin(null),
+      p=>{ GEO.last={lat:p.coords.latitude, lon:p.coords.longitude,
+                     acc:Math.round(p.coords.accuracy||0), ts:p.timestamp||0};
+           fin(GEO.last); },
+      e=>{ GEO.lastErr=(e&&e.code)||0;
+           if(GEO.lastErr===1) GEO.state="denied";
+           fin(null); },
       {enableHighAccuracy:true, timeout:ms,
        maximumAge:(maxAge==null?60000:maxAge)});
   });
+}
+
+// Плашка «Включить геопозицию» на списке клиентов. Показывается, пока права не
+// подтверждены: без явного нажатия система прав не даст, а молча падать —
+// ровно та ошибка, из-за которой гео не работало вообще.
+function geoStatusHTML(){
+  const t=L();
+  if(GEO.state==="granted") return "";
+  if(GEO.state==="unavailable") return "";
+  const msg = GEO.lastErr ? `<div class="muted" style="margin-top:6px">${esc(geoErrText(GEO.lastErr))}</div>` : "";
+  return `<div class="pcard" id="geocard" style="display:block;margin-bottom:10px">
+      <div class="muted">📍 ${esc(t.geowhy)}</div>${msg}
+      <button class="btn line" style="margin-top:8px" onclick="geoEnable()">${esc(t.geoon)}</button>
+    </div>`;
+}
+
+function geoBanner(){ const el=$("geobar"); if(el) el.innerHTML=geoStatusHTML(); }
+
+async function geoEnable(){
+  const t=L(), card=$("geocard");
+  if(card) card.innerHTML=`<div class="muted">📍 ${esc(t.geowait)}</div>`;
+  const p=await askGeo();
+  if(p){ toast("✅ "+t.geook); }
+  else if(GEO.lastErr) toast(geoErrText(GEO.lastErr));
+  geoBanner();
+}
+
+// Состояние прав на старте. permissions.query есть не везде (старый iOS Safari
+// его не знает) — там остаёмся в "unknown" и показываем кнопку.
+async function geoProbe(){
+  try{
+    if(navigator.permissions && navigator.permissions.query){
+      const st=await navigator.permissions.query({name:"geolocation"});
+      if(st.state==="granted") GEO.state="granted";
+      else if(st.state==="denied") GEO.state="denied";
+      if(st.addEventListener) st.addEventListener("change",()=>{
+        GEO.state=(st.state==="granted")?"granted":(st.state==="denied"?"denied":"unknown");
+        try{ geoBanner(); }catch(e){}
+      });
+    }
+  }catch(e){}
 }
 
 // Голосовой комментарий: диктовка → /api/voice (Whisper на сервере) → текст в поле.
@@ -1574,16 +1720,17 @@ window.addEventListener("pageshow", e=>{ if(e.persisted){ flushQueue(); refreshD
 function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
 // --- Геометки: захват точки (геолокация телефона) + сохранение ---
+// Метка ставится по нажатию, значит можно и нужно спрашивать права здесь же —
+// БЕЗ таймаута. Прежние 10 секунд тоже обгоняли системный диалог на холодном
+// устройстве, и человек проваливался в ручной ввод координат, хотя всего лишь
+// не успел нажать «Разрешить».
 function getLoc(){
   return new Promise((resolve,reject)=>{
     const manual=()=>{ const s=prompt("lat, lon"); if(s&&s.includes(",")){
       const [a,b]=s.split(",").map(x=>parseFloat(x.trim())); if(!isNaN(a)&&!isNaN(b)) return resolve({lat:a,lon:b}); }
       reject(new Error("denied")); };
-    if(navigator.geolocation){
-      navigator.geolocation.getCurrentPosition(
-        p=>resolve({lat:p.coords.latitude,lon:p.coords.longitude}),
-        ()=>manual(), {enableHighAccuracy:true,timeout:10000});
-    } else manual();
+    askGeo().then(p=>{ if(p) resolve({lat:p.lat,lon:p.lon}); else manual(); })
+            .catch(()=>manual());
   });
 }
 async function setMarkCase(){
@@ -1888,10 +2035,16 @@ async function trackDrainQueue(){
   }
 }
 
-function startNavWatch(){
+async function startNavWatch(){
   NAV.session=uuid(); NAV.buf=[]; NAV.lastTracked=null;
   trackDrainQueue();                                   // сначала досылаем прошлое
   if(!navigator.geolocation){ navShowBanner(L().nogeo); return; }
+  // watchPosition сам покажет системный диалог, но его ответ никто не ждёт и
+  // навигация стартует «слепой». Спрашиваем права заранее и по-человечески.
+  if(GEO.state!=="granted"){
+    const p=await askGeo();
+    if(!p){ navShowBanner(geoErrText(GEO.lastErr)); return; }
+  }
   NAV.trackTimer=setInterval(trackFlush, TRACK_FLUSH_MS);
   NAV.watchId=navigator.geolocation.watchPosition(onNavPos, onNavPosErr,
     {enableHighAccuracy:true, maximumAge:2000, timeout:15000});
