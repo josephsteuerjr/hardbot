@@ -87,6 +87,10 @@ DELETE_ORDER = (
     "report_chat_employees",
     "report_chats",
     "photo_geo",
+    "notes",          # заметки объявлены сбрасываемыми — но чистить их забыли,
+                      # и сброс падал целиком, как только у кого-то появлялась
+                      # первая заметка (список RESET_TABLES и порядок удаления
+                      # сверяются между собой)
     "app_tokens",
     "app_links",
     "managers",

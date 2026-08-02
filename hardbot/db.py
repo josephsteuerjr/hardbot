@@ -1247,16 +1247,18 @@ def employee_activity(employee: str) -> dict | None:
         return None
     if len(rows) == 1:
         return rows[0]
+    # Ключи здесь ДОЛЖНЫ совпадать с теми, что кладёт activity_stats. Первая
+    # версия суммировала по выдуманным именам («visits7» вместо «visits_7d»),
+    # молча ничего не делала и оставляла карточку с нулями — то есть чинила баг
+    # только на бумаге.
     merged = dict(rows[0])
-    for key in ("visits7", "visits30", "marks7", "marks30", "d7", "d30"):
-        if key in merged:
-            merged[key] = sum(int(r.get(key) or 0) for r in rows)
-    lasts = [r.get("last") for r in rows if r.get("last")]
-    if "last" in merged:
-        merged["last"] = max(lasts) if lasts else None
-    idles = [r.get("idle_days") for r in rows if r.get("idle_days") is not None]
-    if "idle_days" in merged:
-        merged["idle_days"] = min(idles) if idles else None
+    for key in ("visits_7d", "visits_30d", "markers_7d", "markers_30d"):
+        merged[key] = sum(int(r.get(key) or 0) for r in rows)
+    lasts = [r.get("last_activity") for r in rows if r.get("last_activity")]
+    merged["last_activity"] = max(lasts) if lasts else None
+    idles = [r["idle_days"] for r in rows if r.get("idle_days") is not None]
+    merged["idle_days"] = min(idles) if idles else None
+    merged["orphaned"] = all(r.get("orphaned") for r in rows)
     return merged
 
 

@@ -264,3 +264,63 @@ def test_album_caption_is_escaped():
     import handlers_manager
     src = inspect.getsource(handlers_manager._send_photos)
     assert "html.escape(p['client'])" in src or 'html.escape(p["client"])' in src
+
+
+# --- находки финальной адверсарки, часть 2 -------------------------------------
+def test_reset_can_actually_delete_every_table_it_claims():
+    """Таблица объявлена сбрасываемой, но забыта в порядке удаления — и сброс
+    падает целиком, как только у кого-то появится первая заметка."""
+    import limited_test_reset as ltr
+    assert not (ltr.RESET_TABLES - set(ltr.DELETE_ORDER)), "нечем удалить"
+    assert not (set(ltr.DELETE_ORDER) - ltr.RESET_TABLES), "удаляем необъявленное"
+
+
+def test_activity_merge_uses_the_keys_that_actually_exist():
+    """Слияние по двум телеграм-аккаунтам одного ФИО было написано по выдуманным
+    ключам и молча не делало ничего: карточка так и показывала нули."""
+    db.init_db()
+    with db.connect() as conn:
+        conn.execute("DELETE FROM agent_bind WHERE telegram_id IN (8801, 8802)")
+        conn.execute("DELETE FROM visits WHERE contract_id = 'ACT-1'")
+        conn.commit()
+    db.set_bind(8801, "Двухтелефонов Д.")
+    db.bind_agent(8802, "Двухтелефонов Д.", "agent", approved=True)
+    with db.connect() as conn:
+        conn.execute("INSERT INTO visits (contract_id, agent_id, created_at, payload) "
+                     "VALUES ('ACT-1', 8802, date('now'), '')")
+        conn.commit()
+    a = db.employee_activity("Двухтелефонов Д.")
+    assert a["visits_7d"] == 1, f"активность второго аккаунта потеряна: {a}"
+
+
+def test_app_search_refuses_addresses_outside_coverage():
+    """Поиск в приложении шёл в справочник напрямую, мимо защиты: «Москва»
+    отдавалась как достоверная точка кишлака Москва в Хатлоне."""
+    import inspect
+    src = inspect.getsource(web._geocode_free)
+    assert "_outside_coverage" in src
+
+
+def test_null_island_is_not_a_visit_location():
+    """Точка (0,0) — сбой датчика, а не место визита: без отсечки она давала
+    публичное «закрыт в 8290 км от адреса»."""
+    import inspect
+    src = inspect.getsource(web._save)
+    assert "abs(vlat) < 0.01" in src
+
+
+def test_manager_switcher_depends_on_the_role_only():
+    """Условие «и нет привязки» запирало руководителя в чужом портфеле: портфель
+    открывает роль, а переключатель исчезал из-за случайной привязки."""
+    import inspect
+    src = inspect.getsource(web._bootstrap)
+    assert '"manager": bool(scope)' in src
+    assert "not db.get_binding(uid)" not in src
+
+
+def test_report_is_signed_by_the_same_rule_that_opened_the_portfolio():
+    """Иначе в одном посте три разных человека: кейс сотрудника A, подпись
+    «выездник B», а на месте был руководитель C."""
+    import inspect
+    src = inspect.getsource(web._notify_report_chats)
+    assert "_acting_actor_name(uid) or db.get_binding(uid)" in src

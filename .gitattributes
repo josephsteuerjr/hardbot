@@ -1,11 +1,19 @@
-# Единые переносы строк: LF везде, кроме Windows-скриптов (CRLF).
+# Переводы строк — всегда LF, и в репозитории, и в рабочей копии.
+#
+# До этого стоял core.autocrlf=true: git подсовывал CRLF при чекауте, тарбол
+# деплоя собирался из рабочей копии — и на сервер уезжал код с CRLF. Питону это
+# безразлично, но файлы на проде переставали побайтово совпадать с гитом, а
+# проверка целостности оболочки падала ложно после каждого коммита.
 * text=auto eol=lf
-*.bat text eol=crlf
-*.ps1 text eol=crlf
-# Бинарные — не трогать.
+
+# Двоичное трогать нельзя ни при каких настройках.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.pmtiles binary
 *.xlsb binary
 *.xlsx binary
-*.pmtiles binary
-*.jpg binary
-*.png binary
-*.ico binary
+*.zip binary
+*.exe binary
+*.docx binary

@@ -416,8 +416,12 @@ async def _bootstrap(request: web.Request) -> web.Response:
     # Роль руководителя: у него нет привязки, он работает от имени сотрудника и
     # может переключаться. Фронт по этому блоку рисует переключатель портфелей.
     scope = _manager_scope(uid)
-    roles = {"manager": bool(scope) and not db.get_binding(uid),
-             "employees": scope, "acting": emp} if scope else None
+    # Переключатель портфелей рисуется по этому флагу. Условие «и нет привязки»
+    # запирало руководителя в чужом портфеле: стоило оператору вписать его
+    # telegram_id как выездника (или самому руководителю пройти онбординг), и
+    # переключатель исчезал совсем — при том, что портфель ему открывает РОЛЬ.
+    # Право определяется ролью, значит и переключатель зависит только от неё.
+    roles = {"manager": bool(scope), "employees": scope, "acting": emp} if scope else None
     return web.json_response({"ok": True, "uid": uid, "employee": emp,
                               "kind": db.get_kind(uid), "lang": lang,
                               "persons": persons, "meta": _meta(lang),
@@ -773,6 +777,14 @@ async def _geocode_free(request: web.Request) -> web.Response:
                                       "pretty": f"{lat:.5f}, {lon:.5f}",
                                       "precision": "point", "name": ""})
 
+    # Та же защита, что и в geocode_address: справочник знает только Таджикистан,
+    # Узбекистан и Самарскую область. Здесь её не было — поиск в приложении шёл
+    # в indx.resolve напрямую и отдавал «Москву» как достоверную точку кишлака
+    # Москва в Хатлоне.
+    import geocode as _gc
+    if _gc._outside_coverage(q):
+        raise web.HTTPNotFound(text="geo")
+
     parsed = addr_cis.parse(q)
     try:                                               # см. _geo_suggest: не в корутине
         idx = await asyncio.get_running_loop().run_in_executor(None, geoindex.load)
@@ -957,6 +969,11 @@ async def _save(request: web.Request) -> web.Response:
         # «⚠️ закрыт в 3.9 км от адреса» уходит руководителю в личку, в беседу
         # отчётов и красной точкой на карту дня. Меряем, только если точка
         # телефона точнее порога.
+        # Нулевой остров у берегов Африки — это сбой датчика, а не место визита.
+        # Без отсечки такая точка превращалась в «⚠️ закрыт в 8290 км от адреса»
+        # в личке руководителя, в беседе отчётов и красной точкой на карте дня.
+        if vlat is not None and abs(vlat) < 0.01 and abs(vlon) < 0.01:
+            vlat = vlon = None
         try:
             acc = float(g.get("acc") or 0)
         except (TypeError, ValueError):
@@ -1436,7 +1453,11 @@ async def _notify_report_chats(request: web.Request, row, vlat, vlon,
         # руководителя привязки нет — значит он работал от имени сотрудника,
         # и отчёт обязан это показать: иначе координаты руководителя уедут
         # в гео-контроль как координаты выездника.
-        actor = db.get_binding(uid) or _acting_actor_name(uid)
+        # Подписываем тем же правилом, каким открыт портфель (см. _employee):
+        # роль сильнее привязки. Иначе в одном посте оказывались три разных
+        # человека — кейс сотрудника A, подпись «выездник B», а на месте был
+        # руководитель C.
+        actor = _acting_actor_name(uid) or db.get_binding(uid)
         text = visit_report_text(
             row, dist_m=dist_m,
             visit_geo=(vlat, vlon) if vlat is not None else None,

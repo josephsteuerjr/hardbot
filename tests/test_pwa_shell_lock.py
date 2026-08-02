@@ -34,9 +34,12 @@ def test_shell_cache_was_bumped_for_new_index():
     """
     import hashlib
 
-    index_sha = hashlib.sha256(
-        (ROOT / "hardbot" / "miniapp" / "index.html").read_bytes()).hexdigest()
+    # Хэшируем СОДЕРЖИМОЕ, а не байты: git переписывает переводы строк при
+    # коммите (core.autocrlf), и проверка по сырым байтам падала ложно после
+    # каждого коммита, ничего не говоря о самой оболочке.
+    text = (ROOT / "hardbot" / "miniapp" / "index.html").read_text("utf-8")
+    index_sha = hashlib.sha256(text.replace(chr(13) + chr(10), chr(10)).encode("utf-8")).hexdigest()
     assert index_sha == (
-        "2d617f8362f283be2a032460351bd21f0c325d50b69164df2ba1ea151710fc1a"
+        "a2a22ba35f749204938272db91826d6684ae6c3c5e4502d67b8907c24b175623"
     ), "оболочка изменилась — обнови этот хэш И версию CACHE в sw.js"
     assert 'const CACHE = "hardbot-shell-v22";' in SW
