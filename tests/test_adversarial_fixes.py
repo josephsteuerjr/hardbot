@@ -159,3 +159,42 @@ def test_acting_employee_choice_is_persisted():
     # состав пополнился именем, которое встало ПЕРВЫМ: выбор обязан остаться прежним,
     # иначе руководитель молча оказывается в чужом портфеле
     assert db.acting_employee(uid, ["Аакимов", "Абрамов", "Борисов"]) == "Абрамов"
+
+
+# --- геокодер: два бага, найденных тестовыми реестрами 01.08.2026 ---------------
+def test_capital_city_wins_over_the_region_of_the_same_name():
+    """В GeoNames «Ташкент» — это и город (adm1=13), и область (adm1=14), обе
+    записи с fcode=ADM1. Код брал первую попавшуюся, порядок задавал файл дампа:
+    для адреса в Юнусабаде опорой становился центроид ОБЛАСТИ, точка уезжала за
+    66 км, а точность при этом рапортовалась «махалля»."""
+    import geocode
+    hit = geocode.geocode_address(
+        "г. Ташкент, Юнусабадский район, кв. 11, Богишамол МСГ", "Ташкент",
+        use_precise=False)
+    assert hit is not None
+    assert abs(hit["lat"] - 41.31) < 0.25 and abs(hit["lon"] - 69.28) < 0.25, \
+        f"точка не в Ташкенте: {hit}"
+
+
+def test_region_wins_when_the_address_says_region():
+    """Обратный случай: «ТОШКЕНТ ВИЛОЯТИ, ЯНГИЙЎЛ ШАҲРИ» — это область, и
+    подменять её городом нельзя, иначе Янгиюль схлопнется в центр Ташкента."""
+    import geocode
+    hit = geocode.geocode_address(
+        "ЎЗБЕКИСТОН, ТОШКЕНТ ВИЛОЯТИ, ЯНГИЙЎЛ ШАҲРИ, РАМАДОН МФЙ", "Ташкент",
+        use_precise=False)
+    assert hit is not None
+    assert abs(hit["lat"] - 41.11) < 0.35, f"точка уехала из Янгиюля: {hit}"
+
+
+def test_city_from_the_address_anchors_the_search():
+    """Района в адресе нет, город назван прямым текстом — он и есть опора.
+    Иначе кандидаты ранжируются относительно центра области, и «Bo'ston» под
+    Ангреном выигрывает у правильного под Охангароном (39 км мимо)."""
+    import geocode
+    hit = geocode.geocode_address(
+        "ЎЗБЕКИСТОН, ТОШКЕНТ ВИЛОЯТИ, ОХАНГАРОН ШАҲРИ, BO‘STON MFY", "",
+        use_precise=False)
+    assert hit is not None
+    assert abs(hit["lat"] - 40.91) < 0.2 and abs(hit["lon"] - 69.64) < 0.2, \
+        f"точка не в Охангароне: {hit}"

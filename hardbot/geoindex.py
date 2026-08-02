@@ -178,6 +178,35 @@ def _ru_variant(alt: str) -> str:
     return best
 
 
+# Слова, по которым запись ADM1 опознаётся как ОБЛАСТЬ, а не как одноимённый
+# город-столица. В GeoNames у обоих fcode=ADM1, различаются они только именем:
+# «Tashkent Region» (adm1=14) и «Tashkent» (adm1=13).
+_REGION_WORDS = ("region", "province", "viloyat", "oblast", "область", "вилоят")
+
+
+def _prefer_admin1(hits, *, want_region: bool):
+    """Выбрать ADM1 из нескольких одноимённых: столица или одноимённая область.
+
+    Раньше брали первую попавшуюся через `break`, а порядок задавал файл дампа.
+    Для «Ташкент» первой ложилась Ташкентская ОБЛАСТЬ, и опорной точкой для всего
+    города становился её центроид — адрес в Юнусабаде уезжал за 65 км, а точность
+    при этом рапортовалась «махалля».
+
+    Что именно имел в виду адрес, знает разбор: «ТОШКЕНТ ВИЛОЯТИ» кладётся в
+    region, «ТОШКЕНТ ШАҲРИ» — в city. По этому и выбираем.
+    """
+    hits = list(hits)
+    if not hits:
+        return None
+
+    def is_region(rec) -> bool:
+        low = (rec.name or "").lower()
+        return any(w in low for w in _REGION_WORDS)
+
+    preferred = [r for r in hits if is_region(r) == want_region]
+    return (preferred or hits)[0]
+
+
 class Index:
     """Индекс GeoNames: по нечёткому ключу имени → записи, плюс коды adm1/adm2."""
 
@@ -276,10 +305,10 @@ class Index:
             name = parsed.get(field)
             if not name:
                 continue
-            for rec in self._hits(name, self.adm1_by_key):
+            hits = self._hits(name, self.adm1_by_key)
+            rec = _prefer_admin1(hits, want_region=(field == "region"))
+            if rec is not None:
                 cc, adm1 = rec.cc, rec.adm1
-                break
-            if adm1:
                 break
         district = parsed.get("district")
         if district:
@@ -368,7 +397,7 @@ class Index:
         Идём от самого точного уровня к самому грубому."""
         parsed = _apply_aliases(parsed)
         cc, adm1, adm2 = self._admin_codes(parsed)
-        anchor = self._anchor(cc, adm1, adm2)
+        anchor = self._anchor(cc, adm1, adm2, parsed)
         for name, level in addr_cis.geo_candidates(parsed):
             rec = self._pick(self._hits(name, self.by_key), level, cc, adm1, adm2, anchor)
             if rec:
@@ -397,13 +426,32 @@ class Index:
                         "precision": "region", "src": "geonames", "cc": rec.cc}
         return None
 
-    def _anchor(self, cc, adm1, adm2):
-        """Опорная точка для гео-проверки объектов OSM: центр района, иначе области.
-        (lat, lon, «насколько далеко разрешено») или None, если ни то, ни другое
-        не опознано — тогда OSM принимается только при единственном кандидате."""
+    def _anchor(self, cc, adm1, adm2, parsed: dict | None = None):
+        """Опорная точка для гео-проверки объектов OSM: город из адреса, затем центр
+        района, затем области. (lat, lon, «насколько далеко разрешено») или None —
+        тогда OSM принимается только при единственном кандидате.
+
+        Город идёт ПЕРВЫМ, хотя раньше его не спрашивали вовсе. «ОХАНГАРОН ШАҲРИ,
+        BO‘STON MFY»: района в адресе нет, поэтому опорной точкой становился центр
+        Ташкентской области — а до него неправильный «Bo'ston» под Ангреном ближе
+        (34 км), чем правильный под Охангароном (43 км). Побеждал тёзка, и точка
+        уезжала за 42 км при заявленной точности «махалля». Город в адресе назван
+        прямым текстом и на порядок надёжнее центра области."""
         if cc and adm1 and adm2:
             rec = self.adm2_by_code.get((cc, adm1, adm2))
             if rec:
+                return rec.lat, rec.lon, "district"
+        # Района нет, а город в адресе назван — он и есть лучшая опора. «ОХАНГАРОН
+        # ШАҲРИ, BO‘STON MFY»: без этого опорой становился центр Ташкентской области,
+        # до которого неправильный «Bo'ston» под Ангреном ближе (34 км), чем
+        # правильный под Охангароном (43 км) — побеждал тёзка за 39 км от адреса.
+        # Только при ОТСУТСТВИИ района: когда район известен, он надёжнее города
+        # (в «г. Ташкент, Юнусабадский район» город-миллионник слишком крупная опора).
+        if parsed and parsed.get("city"):
+            rec = self._pick_geonames(
+                [r for r in self._hits(parsed["city"], self.by_key)
+                 if r.src == "geonames"], "city", cc, adm1, None, None)
+            if rec is not None:
                 return rec.lat, rec.lon, "district"
         if cc and adm1:
             rec = self.adm1_by_code.get((cc, adm1))
