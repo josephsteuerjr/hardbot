@@ -185,6 +185,33 @@ def _uid(request: web.Request) -> int | None:
     return None
 
 
+def _remember_from_init(request: web.Request) -> None:
+    """Запомнить, КТО открыл приложение: id, @ник, имя.
+
+    `touch_guest` звали только обработчики БОТА. Кто заходил сразу в приложение —
+    а это штатный путь, миниапп открывается кнопкой меню — оставался в списке
+    голым числом без имени и ника. 03.08.2026 на этом сгорел час: два аккаунта
+    выбрали чужие фамилии, и опознать их было нечем, кроме как спрашивать людей.
+
+    Тихо: сбой БД не должен ломать вход в приложение — имя это удобство, а не
+    условие доступа.
+    """
+    try:
+        data = validate_init_data(request.headers.get("X-Init-Data") or "",
+                                  os.getenv("BOT_TOKEN", ""))
+        user = (data or {}).get("user")
+        if not isinstance(user, dict):
+            return
+        uid = int(user.get("id") or 0)
+        if not uid:
+            return
+        name = " ".join(part for part in (user.get("first_name"), user.get("last_name"))
+                        if part).strip()
+        db.touch_guest(uid, user.get("username"), name or None)
+    except Exception:                                  # noqa: BLE001
+        pass
+
+
 def _manager_scope(uid: int) -> list[str]:
     """Сотрудники, чьи портфели вправе открыть этот руководитель (или владелец)."""
     return db.manager_employees(uid, is_owner=(uid == ADMIN_ID))
@@ -389,6 +416,7 @@ async def _bootstrap(request: web.Request) -> web.Response:
     uid = _uid(request)
     if not uid:
         raise web.HTTPUnauthorized(text="auth")
+    _remember_from_init(request)     # вход в приложение — тоже знакомство
     lang = lang_of(uid)
     emp = _employee(uid)
     if not emp:
@@ -502,6 +530,9 @@ async def _bind(request: web.Request) -> web.Response:
     uid = _uid(request)
     if not uid:
         raise web.HTTPUnauthorized(text="auth")
+    # Именно здесь имя нужнее всего: человек выбирает себя из списка, и если он
+    # промахнётся, владелец должен видеть в пульте «кто», а не голый номер.
+    _remember_from_init(request)
     body = await request.json()
     kind = "courier" if body.get("kind") == "courier" else "agent"
     employee = (body.get("employee") or "").strip()
