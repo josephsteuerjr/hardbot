@@ -20,8 +20,10 @@ from __future__ import annotations
 import json
 import re
 import ssl
+import sys
 import tempfile
 import threading
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,11 +33,47 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
-import enrich
-import razbros
-
 APP_DIR = Path(__file__).resolve().parent
 SETTINGS_PATH = APP_DIR / "настройки пульта.json"
+# Пульт делит с ботом контракт обмена и схему полей — они живут в `hardbot/`
+# рядом. Раньше путь дописывал `enrich` где-то внутри себя, и если папку
+# `hardbot` не скопировали вместе с пультом, всё разваливалось на
+# `ModuleNotFoundError: exchange_contract` ещё до первого окна. А запускается
+# пульт через `pythonw` («без консоли») — значит трейсбек уходил в никуда, и со
+# стороны это выглядело как «ярлык нажал, ничего не произошло».
+HARDBOT_DIR = APP_DIR.parent / "hardbot"
+
+
+def _fatal(title: str, text: str) -> None:
+    """Показать причину человеку и выйти. Под pythonw это единственный способ:
+    stderr там не существует, и молча умереть — худшее, что можно сделать."""
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(title, text)
+        root.destroy()
+    except Exception:                                  # noqa: BLE001
+        print(f"{title}\n\n{text}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+if not (HARDBOT_DIR / "exchange_contract.py").is_file():
+    _fatal("Пульт не запускается",
+           "Рядом с пультом нет папки «hardbot».\n\n"
+           f"Ожидается здесь:\n{HARDBOT_DIR}\n\n"
+           "Пульт использует общий с ботом контракт обмена и схему полей, "
+           "поэтому папку «hardbot» надо копировать вместе с папкой «pult» — "
+           "они должны лежать рядом, внутри одной папки проекта.")
+if str(HARDBOT_DIR) not in sys.path:
+    sys.path.insert(0, str(HARDBOT_DIR))
+
+try:
+    import enrich
+    import razbros
+except Exception as _exc:                              # noqa: BLE001
+    _fatal("Пульт не запускается",
+           f"Не удалось загрузить модули пульта: {type(_exc).__name__}: {_exc}\n\n"
+           + traceback.format_exc()[-1200:])
 
 # Актуальный инстанс — hardbot2 (свежий код сервера). Ключ — X-Admin-Key.
 DEFAULT_URL = "https://hardbot2.166.88.185.90.nip.io"
@@ -2839,7 +2877,16 @@ def main():
             ctypes.windll.user32.SetProcessDPIAware()
     except Exception:  # noqa: BLE001 — не Windows / старая система
         pass
-    app = Pult()
+    # Любая ошибка при СБОРКЕ окна под pythonw означала пустой экран без единой
+    # подсказки. Пусть лучше вылезет диалог с причиной — по нему видно, чинить
+    # окружение или звать разработчика.
+    try:
+        app = Pult()
+    except Exception as exc:                           # noqa: BLE001
+        _fatal("Пульт не запускается",
+               f"Ошибка при построении окна: {type(exc).__name__}: {exc}\n\n"
+               + traceback.format_exc()[-1500:])
+        return
     app.mainloop()
 
 
