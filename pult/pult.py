@@ -29,7 +29,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import filedialog, font as tkfont, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 import enrich
 import razbros
@@ -409,6 +409,7 @@ class Pult(tk.Tk):
         self.settings = self._load_settings()
         self.url = self.settings.get("url", DEFAULT_URL)
         self.key = self.settings.get("key", DEFAULT_KEY)
+        self.device_token = self.settings.get("device_token", "")
         self.imp_book: dict = {}          # выбранная книга: путь, грид, вид источника
         self.imp_selected: set[str] = set()   # кого из сотрудников грузим
         self._imp_vars: dict = {}
@@ -627,8 +628,11 @@ class Pult(tk.Tk):
         """Запрос к admin-API. Дружелюбные ошибки вместо трейсбеков."""
         url = self.url.rstrip("/") + path
         data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(url, data=data, method=method,
-                                     headers={"X-Admin-Key": self.key})
+        # Каждый день ходим ТОКЕНОМ устройства; мастер-ключ идёт только если
+        # устройство ещё не привязано (или его отозвали и надо привязать заново).
+        headers = {"X-Device-Token": self.device_token} if self.device_token \
+            else {"X-Admin-Key": self.key}
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
         if data is not None:
             req.add_header("Content-Type", "application/json")
         try:
@@ -644,7 +648,10 @@ class Pult(tk.Tk):
                 raise
         except urllib.error.HTTPError as e:
             if e.code == 401:
-                raise RuntimeError("Неверный admin-ключ") from e
+                raise RuntimeError(
+                    "Устройство не принято: токен отозван — привяжи заново "
+                    "мастер-ключом" if self.device_token
+                    else "Неверный мастер-ключ") from e
             if e.code == 404:
                 raise RuntimeError(f"На сервере нет {path} — сервер старой версии?") from e
             if e.code == 409:
@@ -2561,13 +2568,24 @@ class Pult(tk.Tk):
         btn(rowk, "👁", self._toggle_key).pack(side="left", padx=(6, 0))
         rowc = tk.Frame(sc.inner, bg=CARD)
         rowc.pack(anchor="w")
-        btn(rowc, "Подключиться", self._connect, kind="accent").pack(side="left")
-        btn(rowc, "Сохранить ключ", self.key_save).pack(side="left", padx=(8, 0))
-        btn(rowc, "Удалить ключ", self.key_forget).pack(side="left", padx=(8, 0))
+        btn(rowc, "Привязать это устройство", self.device_enroll,
+            kind="accent").pack(side="left")
+        btn(rowc, "Подключиться", self._connect).pack(side="left", padx=(8, 0))
+        btn(rowc, "Отвязать это устройство", self.device_unbind).pack(
+            side="left", padx=(8, 0))
         self.key_out = tk.Label(sc.inner, text="", bg=CARD, fg=MUTED, font=f(8),
                                 justify="left", wraplength=760)
         self.key_out.pack(anchor="w", pady=(8, 0))
         self._key_state()
+
+        dv = Card(inner, "Привязанные устройства",
+                  "Каждое устройство ходит своим токеном. Потерянный ноутбук "
+                  "отзывается по одному — мастер-ключ менять не надо, остальные "
+                  "продолжают работать. Отзыв возможен только мастер-ключом.")
+        dv.pack(fill="x", pady=(12, 0))
+        btn(dv.inner, "Обновить список", self.devices_load).pack(anchor="w")
+        self.dev_frame = tk.Frame(dv.inner, bg=CARD)
+        self.dev_frame.pack(fill="x", pady=(8, 0))
 
         tc = Card(inner, "Токен бота",
                   "Сменить бота (токен от @BotFather). После сохранения — «Перезапустить "
@@ -2586,47 +2604,164 @@ class Pult(tk.Tk):
         tk.Label(rowb, text="формат: цифры : буквы/цифры (≥30 символов)", bg=CARD,
                  fg=MUTED, font=f(8)).pack(side="left", padx=(10, 0))
 
-    # --- admin-ключ: сохранить / забыть -------------------------------------
-    def _key_state(self):
-        saved = bool((self.settings.get("key") or "").strip())
-        self.key_out.configure(
-            text=("Ключ сохранён в «настройки пульта.json» рядом с пультом. "
-                  "Файл не уезжает в репозиторий."
-                  if saved else
-                  "Ключ НЕ сохранён: живёт только в этом окне и забудется при "
-                  "закрытии. Ключ задаётся на сервере в .env (ADMIN_API_KEY)."))
+    # --- привязка устройства -------------------------------------------------
+    @staticmethod
+    def device_fingerprint() -> str:
+        """Стабильный отпечаток машины. Хэш, а не имя: в БД сервера не нужны ПД.
 
-    def key_save(self):
-        self.key = self.key_entry.get().strip()
-        if not self.key:
-            self.toast("Пустой ключ нечего сохранять", err=True)
-            return
-        self.settings["key"] = self.key
-        self._save_settings()
-        self._key_state()
-        self.toast("Ключ сохранён")
-
-    def key_forget(self):
-        """Стереть ключ и из файла, и из окна.
-
-        Закрытие пульта раньше сохраняло ключ обратно само — поэтому мало убрать
-        его из файла, надо забыть и в памяти, иначе он вернётся при выходе.
+        Берём то, что не меняется от перезагрузки к перезагрузке: имя машины,
+        MAC-адрес и имя пользователя. Совпадение отпечатка означает «тот же
+        пульт на той же машине» — этого достаточно, чтобы повторная привязка
+        заменяла прежний токен, а не плодила записи.
         """
-        if not messagebox.askyesno(
-                "Удалить ключ",
-                "Стереть admin-ключ из настроек пульта? На сервере он останется — "
-                "пульт просто перестанет его помнить."):
+        import getpass
+        import hashlib
+        import platform
+        import uuid
+        raw = f"{platform.node()}|{uuid.getnode()}|{getpass.getuser()}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _key_state(self):
+        if self.device_token:
+            self.key_out.configure(
+                text="Устройство привязано: пульт ходит своим токеном, мастер-ключ "
+                     "здесь не хранится. Поле ключа нужно только чтобы привязать "
+                     "новое устройство или перепривязать это.")
+        else:
+            self.key_out.configure(
+                text="Устройство НЕ привязано — пульт ходит мастер-ключом. Введи "
+                     "ключ и нажми «Привязать это устройство»: ключ уйдёт на сервер "
+                     "один раз, в обмен на токен, и сохранён не будет.")
+
+    def device_enroll(self):
+        key = self.key_entry.get().strip()
+        if not key:
+            self.toast("Введи мастер-ключ — он нужен один раз", err=True)
             return
-        self.key = ""
-        self.settings.pop("key", None)
+        name = simpledialog.askstring(
+            "Имя устройства", "Как назвать это устройство?\n"
+            "Оно будет видно в списке привязанных.",
+            initialvalue=self.device_default_name(), parent=self)
+        if name is None:
+            return
+        fingerprint = self.device_fingerprint()
+        # Привязка идёт МАСТЕР-КЛЮЧОМ явно, а не через self.api: там уже мог
+        # лежать токен прошлой привязки, и перепривязка ходила бы им.
+        self.key, self.device_token = key, ""
+
+        def work():
+            return self.api("POST", "/admin/device/enroll.json",
+                            {"device_id": fingerprint, "name": name.strip()})
+
+        def done(d):
+            token = (d or {}).get("token") or ""
+            if not token:
+                self.toast("Сервер не выдал токен", err=True)
+                return
+            self.device_token = token
+            self.settings["device_token"] = token
+            # Ключ НЕ сохраняем — в этом весь смысл: на диске остаётся токен,
+            # который отзывается по одному и работает только с этой машины.
+            self.settings.pop("key", None)
+            self.key = ""
+            try:
+                self.key_entry.delete(0, "end")
+            except tk.TclError:
+                pass
+            self._save_settings()
+            self._key_state()
+            self.toast("Устройство привязано — ключ больше не хранится")
+            self.devices_load()
+            self.refresh()
+
+        def fail(exc):
+            self.key = key
+            self.toast(str(exc), err=True)
+
+        self.bg_task(work, done, fail)
+
+    @staticmethod
+    def device_default_name() -> str:
+        import platform
+        return f"Пульт · {platform.node()}"[:60]
+
+    def device_unbind(self):
+        """Забыть токен на этой машине. На сервере запись остаётся живой.
+
+        Отзыв на сервере — отдельное действие (мастер-ключом, из списка ниже):
+        «я больше не хочу хранить токен здесь» и «этот токен больше не должен
+        работать нигде» — разные вещи, и путать их опасно.
+        """
+        if not self.device_token:
+            self.toast("Устройство и так не привязано", err=True)
+            return
+        if not messagebox.askyesno(
+                "Отвязать устройство",
+                "Забыть токен на этой машине? Пульт снова будет спрашивать "
+                "мастер-ключ.\n\nНа сервере токен останется действующим — чтобы "
+                "погасить его совсем, отзови устройство в списке ниже."):
+            return
+        self.device_token = ""
+        self.settings.pop("device_token", None)
         self._save_settings()
-        try:
-            self.key_entry.delete(0, "end")
-        except tk.TclError:
-            pass
         self.connected = False
         self._key_state()
-        self.toast("Ключ удалён из пульта")
+        self.toast("Токен забыт на этой машине")
+
+    def devices_load(self):
+        def done(d):
+            for w in self.dev_frame.winfo_children():
+                w.destroy()
+            devices = (d or {}).get("devices") or []
+            if not devices:
+                tk.Label(self.dev_frame, text="Привязанных устройств нет", bg=CARD,
+                         fg=MUTED, font=f(9)).pack(anchor="w")
+                return
+            for dev in devices:
+                row = tk.Frame(self.dev_frame, bg=CARD)
+                row.pack(fill="x", pady=(0, 2))
+                tk.Label(row, text=dev.get("name") or "(без имени)", bg=CARD, fg=TEXT,
+                         font=f(9)).pack(side="left")
+                seen = dev.get("last_seen") or "ни разу"
+                tk.Label(row, text=f"  ·  привязано {dev.get('created_at') or '—'}"
+                                   f"  ·  на связи: {seen}",
+                         bg=CARD, fg=MUTED, font=f(8)).pack(side="left")
+                btn(row, "Отозвать",
+                    lambda i=dev.get("id"), n=dev.get("name"): self.device_revoke(i, n)
+                    ).pack(side="right")
+        self.bg_task(lambda: self.api("GET", "/admin/devices.json"), done)
+
+    def device_revoke(self, row_id, name):
+        if not messagebox.askyesno(
+                "Отзыв устройства",
+                f"Отозвать «{name or row_id}»? Его токен перестанет работать "
+                "немедленно. Для отзыва нужен мастер-ключ — введи его в поле выше, "
+                "если поле пустое."):
+            return
+        key = self.key_entry.get().strip()
+        if not key:
+            self.toast("Отзыв возможен только мастер-ключом — введи его выше",
+                       err=True)
+            return
+        saved_token = self.device_token
+        self.key, self.device_token = key, ""
+
+        def restore():
+            self.device_token = saved_token
+            self.key = ""
+
+        def done(d):
+            restore()
+            self.toast("Устройство отозвано" if (d or {}).get("ok")
+                       else "Устройство уже было отозвано", err=not (d or {}).get("ok"))
+            self.devices_load()
+
+        def fail(exc):
+            restore()
+            self.toast(str(exc), err=True)
+
+        self.bg_task(lambda: self.api("POST", "/admin/device/revoke.json",
+                                      {"id": row_id}), done, fail)
 
     def _toggle_key(self):
         self.key_entry.configure(show="" if self.key_entry["show"] else "•")
@@ -2684,10 +2819,11 @@ class Pult(tk.Tk):
 
     def _on_close(self):
         self.settings["url"] = self.url
-        # Ключ сохраняем при выходе, только если он УЖЕ был сохранён: иначе
-        # «Удалить ключ» отменялось бы самим закрытием окна.
-        if self.settings.get("key"):
-            self.settings["key"] = self.key
+        # Мастер-ключ при выходе НЕ сохраняем никогда. Он нужен ровно на одну
+        # операцию — привязать или отозвать устройство — и оставаться на диске
+        # ему незачем: для повседневной работы есть токен устройства.
+        if self.device_token:
+            self.settings["device_token"] = self.device_token
         self._save_settings()
         self.destroy()
 

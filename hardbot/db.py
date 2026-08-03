@@ -430,6 +430,21 @@ def init_db() -> None:
               detail TEXT
             )
         """)
+        # Устройства пульта. Admin-ключ вводится ОДИН РАЗ — чтобы обменять его на
+        # токен, привязанный к этой машине. Дальше ключ в пульте не хранится, и
+        # утёкший ключ сам по себе ничего не грузит: нужен ещё и enroll с машины.
+        # Храним ХЭШ токена, а не токен: дамп таблицы не даёт войти.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS admin_devices (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              token_hash TEXT NOT NULL UNIQUE,
+              device_id TEXT NOT NULL,     -- отпечаток машины (хэш), не ПД
+              name TEXT,                   -- как назвал владелец: «Ноут дома»
+              created_at TEXT,
+              last_seen TEXT,
+              revoked_at TEXT
+            )
+        """)
         # Метки: и привязанные к кейсу (client_rep), и отдельные «разведочные» (rep пуст).
         conn.execute("""
             CREATE TABLE IF NOT EXISTS markers (
@@ -2071,6 +2086,80 @@ def update_fields(contract_id: str, values: dict[str, str]) -> None:
         )
         conn.commit()
     _bump_version()   # данные изменились → кэш приоритета протухает
+
+
+# --- Устройства пульта -------------------------------------------------------
+def _device_token_hash(token: str) -> str:
+    return hashlib.sha256(str(token or "").strip().encode("utf-8")).hexdigest()
+
+
+def enroll_admin_device(device_id: str, name: str = "") -> dict:
+    """Привязать устройство и выдать ему токен. Токен возвращается ОДИН раз.
+
+    Повторный enroll с той же машины не плодит записи, а отзывает прежний токен и
+    выдаёт новый: иначе список устройств зарастал бы дублями после каждой
+    переустановки пульта, и «отозвать это устройство» перестало бы что-то значить.
+    """
+    token = secrets.token_urlsafe(32)
+    now = datetime.now().isoformat(timespec="seconds")
+    device_id = str(device_id or "").strip()[:128]
+    if not device_id:
+        raise ValueError("device_id обязателен")
+    with connect() as conn:
+        conn.execute(
+            "UPDATE admin_devices SET revoked_at=? WHERE device_id=? AND revoked_at IS NULL",
+            (now, device_id))
+        conn.execute(
+            "INSERT INTO admin_devices (token_hash, device_id, name, created_at) "
+            "VALUES (?,?,?,?)",
+            (_device_token_hash(token), device_id, str(name or "").strip()[:80], now))
+        row = conn.execute("SELECT id FROM admin_devices WHERE token_hash=?",
+                           (_device_token_hash(token),)).fetchone()
+        conn.commit()
+    audit_access(0, "device_enroll", str(row["id"]), name or device_id[:16])
+    return {"id": row["id"], "token": token, "created_at": now}
+
+
+def admin_device_by_token(token: str) -> dict | None:
+    """Живое устройство по токену; заодно отмечаем, что оно на связи."""
+    if not str(token or "").strip():
+        return None
+    digest = _device_token_hash(token)
+    now = datetime.now().isoformat(timespec="seconds")
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id, device_id, name, created_at, last_seen FROM admin_devices "
+            "WHERE token_hash=? AND revoked_at IS NULL", (digest,)).fetchone()
+        if row is None:
+            return None
+        conn.execute("UPDATE admin_devices SET last_seen=? WHERE id=?", (now, row["id"]))
+        conn.commit()
+    return {"id": row["id"], "device_id": row["device_id"], "name": row["name"] or "",
+            "created_at": row["created_at"], "last_seen": row["last_seen"] or ""}
+
+
+def list_admin_devices(include_revoked: bool = False) -> list[dict]:
+    where = "" if include_revoked else " WHERE revoked_at IS NULL"
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT id, device_id, name, created_at, last_seen, revoked_at "
+            f"FROM admin_devices{where} ORDER BY id DESC").fetchall()
+    return [{"id": r["id"], "device_id": (r["device_id"] or "")[:12],
+             "name": r["name"] or "", "created_at": r["created_at"] or "",
+             "last_seen": r["last_seen"] or "", "revoked_at": r["revoked_at"] or ""}
+            for r in rows]
+
+
+def revoke_admin_device(device_row_id: int) -> bool:
+    now = datetime.now().isoformat(timespec="seconds")
+    with connect() as conn:
+        changed = conn.execute(
+            "UPDATE admin_devices SET revoked_at=? WHERE id=? AND revoked_at IS NULL",
+            (now, int(device_row_id))).rowcount
+        conn.commit()
+    if changed:
+        audit_access(0, "device_revoke", str(device_row_id))
+    return bool(changed)
 
 
 def audit_access(actor: int, action: str, target: str | None = None,

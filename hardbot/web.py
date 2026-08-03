@@ -1611,11 +1611,61 @@ function pin(bg,txt){const e=document.createElement("div");e.className="pin";
 </script></body></html>"""
 
 
-# --- Admin API (для десктоп-пульта; авторизация — ключ ADMIN_API_KEY) --------
+# --- Admin API (для десктоп-пульта) ------------------------------------------
+# Два способа войти, и это не дублирование:
+#   * ADMIN_API_KEY — «мастер-ключ». Живёт в .env сервера, его знает владелец. Им
+#     привязывают устройство и им же чинят ситуацию, когда все токены отозваны.
+#   * токен устройства — то, чем пульт ходит каждый день. Привязан к конкретной
+#     машине, отзывается по одному, виден в аудите поимённо.
+# Смысл разделения: утёкший мастер-ключ перестаёт быть «загрузи что угодно
+# откуда угодно», а потерянный ноут отзывается, не меняя ключ всем остальным.
 def _admin(request: web.Request) -> None:
     key = os.getenv("ADMIN_API_KEY", "")
-    if not key or request.headers.get("X-Admin-Key") != key:
-        raise web.HTTPUnauthorized(text="admin")
+    if key and hmac.compare_digest(request.headers.get("X-Admin-Key") or "", key):
+        return
+    token = request.headers.get("X-Device-Token") or ""
+    if token and db.admin_device_by_token(token):
+        return
+    raise web.HTTPUnauthorized(text="admin")
+
+
+def _admin_master_key_only(request: web.Request) -> None:
+    """Операции над самими устройствами — только мастер-ключом.
+
+    Иначе токен устройства мог бы привязать ещё одно устройство и отозвать
+    остальные: укравший ноут заперновладельца снаружи, а сам остался бы внутри.
+    """
+    key = os.getenv("ADMIN_API_KEY", "")
+    if not key or not hmac.compare_digest(request.headers.get("X-Admin-Key") or "", key):
+        raise web.HTTPUnauthorized(text="master key required")
+
+
+async def _admin_device_enroll(request: web.Request) -> web.Response:
+    """Обменять мастер-ключ на токен этой машины. Токен показывается один раз."""
+    _admin_master_key_only(request)
+    body = await request.json()
+    try:
+        made = db.enroll_admin_device(body.get("device_id") or "",
+                                      body.get("name") or "")
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    return web.json_response({"ok": True, **made})
+
+
+async def _admin_devices(request: web.Request) -> web.Response:
+    _admin(request)
+    return web.json_response({"devices": db.list_admin_devices(
+        include_revoked=request.rel_url.query.get("all") == "1")})
+
+
+async def _admin_device_revoke(request: web.Request) -> web.Response:
+    _admin_master_key_only(request)
+    body = await request.json()
+    try:
+        row_id = int(body.get("id"))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "id"}, status=400)
+    return web.json_response({"ok": db.revoke_admin_device(row_id)})
 
 
 async def _admin_stats(request: web.Request) -> web.Response:
@@ -2157,6 +2207,9 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/admin/import", _admin_import)
     app.router.add_post("/admin/import.json", _admin_import_json)
     app.router.add_post("/admin/import/authorize.json", _admin_import_authorize)
+    app.router.add_post("/admin/device/enroll.json", _admin_device_enroll)
+    app.router.add_get("/admin/devices.json", _admin_devices)
+    app.router.add_post("/admin/device/revoke.json", _admin_device_revoke)
     app.router.add_get("/admin/chats", _admin_chats)
     app.router.add_post("/admin/chats.set", _admin_chats_set)
     app.router.add_get("/admin/export", _admin_export)
