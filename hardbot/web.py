@@ -974,6 +974,7 @@ async def _save(request: web.Request) -> web.Response:
         # Гео-контроль: точка телефона в момент закрытия vs известная точка должника.
         # 'city' не считаем — центроид города, честная дистанция там бессмысленна.
         vlat = vlon = dist_m = None
+        geo_far = None
         g = body.get("geo") or {}
         try:
             vlat, vlon = float(g["lat"]), float(g["lon"])
@@ -990,9 +991,13 @@ async def _save(request: web.Request) -> web.Response:
         # и джамоат — самые обычные единицы узбекского и таджикского адреса.
         # Джиттер ±0.02° сам по себе перебивает порог 1000 м, и гео-контроль
         # обвинял выездника, стоявшего ровно там, где надо.
-        from scoring import _COARSE_PRECISION
-        rough = set(_COARSE_PRECISION) - {""}
         precision = (cur["geo_precision"] if "geo_precision" in cur.keys() else "") or ""
+        # Допуск — ПО УРОВНЮ разбора адреса, а не один порог на всех. «Улица» в
+        # офлайн-справочнике собрана усреднением сегментов по километровой сетке,
+        # то есть это середина улицы, а не дом; мерить от неё по 1000 м значит
+        # обвинять честного выездника. None = точка не адресная, судить не по чему.
+        tolerance = db.geo_tolerance_m(
+            precision, cur["geo_src"] if "geo_src" in cur.keys() else "")
         # Погрешность САМОЙ точки телефона. В частном секторе, в подвале и просто
         # в помещении GPS не ловится, и браузер отдаёт сетевой фикс с точностью
         # 800–1500 м — то есть больше порога тревоги. Считать по такой точке
@@ -1009,11 +1014,14 @@ async def _save(request: web.Request) -> web.Response:
             acc = float(g.get("acc") or 0)
         except (TypeError, ValueError):
             acc = 0.0
-        trusted_fix = acc <= 0 or acc < db.geo_alert_m()
+        # Погрешность телефона СКЛАДЫВАЕМ с погрешностью адреса, а не сравниваем с
+        # фиксированным порогом. Сетевой фикс в подъезде даёт 800-1500 м: раньше
+        # такой визит либо не мерился вовсе, либо становился «нарушением» из-за
+        # того, что GPS не поймал спутники, — виноват был человек, а не датчик.
         if vlat is not None and cur["geo_lat"] is not None and cur["geo_lon"] is not None \
-                and (cur["geo_src"] or "") not in ("", "city") \
-                and precision not in rough and trusted_fix:
+                and tolerance is not None:
             dist_m = round(_haversine_km(vlat, vlon, cur["geo_lat"], cur["geo_lon"]) * 1000)
+            geo_far = dist_m > tolerance + max(acc, 0.0)
         # История визита строится из явного тела этой формы. Сырые HARD-поля
         # clients/master запрещено дочитывать даже для текста журнала.
         payload = (
@@ -1025,7 +1033,8 @@ async def _save(request: web.Request) -> web.Response:
         # Считаем ДО log_visit, иначе своя же свежая строка себя и заглушит.
         same_today = db.same_visit_logged_today(rep, uid, payload)
         is_new = db.log_visit(rep, uid, payload,
-                              op_id=op_id, lat=vlat, lon=vlon, dist_m=dist_m)
+                              op_id=op_id, lat=vlat, lon=vlon, dist_m=dist_m,
+                              geo_far=geo_far)
         # Снимок строится только из values этого POST, а не из сырых HARD-полей
         # clients. При ретрае после редкого падения между log_visit и этой записью
         # восстанавливаем отсутствующий снимок; старый дубль новый снимок не откатывает.

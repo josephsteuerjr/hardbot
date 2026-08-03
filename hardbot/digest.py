@@ -391,7 +391,15 @@ def person_card(mgr: dict, on_date: str, ei: int, ci: int) -> tuple[str, InlineK
     if gv and gv["dist_m"] is not None:
         d = gv["dist_m"]
         pretty = f"{d / 1000:.1f} км" if d >= 1000 else f"{d} м"
-        body.append(f"⚠️ Визит закрыт в {pretty} от адреса!" if d > db.geo_alert_m()
+        # Вердикт берём СОХРАНЁННЫЙ на момент визита, а не пересчитываем сейчас:
+        # точность точки должника меняется после каждого геокодинга, и пересчёт
+        # задним числом переписывал бы историю — честно закрытый вчера визит
+        # сегодня становился бы нарушением. Старые записи (geo_far нет) судим
+        # по прежнему общему порогу, чтобы накопленное не поехало.
+        far = gv["geo_far"] if "geo_far" in gv.keys() else None
+        if far is None:
+            far = d > db.geo_alert_m()
+        body.append(f"⚠️ Визит закрыт в {pretty} от адреса!" if far
                     else f"📍 Точка закрытия: {pretty} от адреса")
 
     tail = []

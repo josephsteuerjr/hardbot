@@ -378,7 +378,12 @@ def init_db() -> None:
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_visits_op ON visits(op_id)")
         # Гео-контроль: точка телефона в момент закрытия визита + дистанция до
         # известной точки должника (метры). NULL = точки не было (нет разрешения/сигнала).
-        for col, decl in (("visit_lat", "REAL"), ("visit_lon", "REAL"), ("dist_m", "INTEGER")):
+        # geo_far — ВЕРДИКТ на момент визита, а не вычисление на лету. Точность
+        # точки должника может измениться после следующего геокодинга, и тогда
+        # пересчёт задним числом переписал бы историю: визит, закрытый честно,
+        # завтра стал бы нарушением. NULL = не судили (точка не адресная).
+        for col, decl in (("visit_lat", "REAL"), ("visit_lon", "REAL"),
+                          ("dist_m", "INTEGER"), ("geo_far", "INTEGER")):
             if col not in vcols:
                 conn.execute(f"ALTER TABLE visits ADD COLUMN {col} {decl}")
         # Профиль пользователя (язык). Whitelist теперь = привязка к сотруднику.
@@ -2185,18 +2190,21 @@ def audit_tail(limit: int = 200) -> list[sqlite3.Row]:
 
 def log_visit(contract_id: str, agent_id: int, payload: str,
               op_id: str | None = None, lat: float | None = None,
-              lon: float | None = None, dist_m: int | None = None) -> bool:
+              lon: float | None = None, dist_m: int | None = None,
+              geo_far: bool | None = None) -> bool:
     """Записать выезд в историю. op_id — идемпотентный ключ (uuid от клиента): повторная
     доставка того же выезда из оффлайн-очереди НЕ создаёт дубль. Возвращает True, если
     строка реально добавлена (значит, можно слать уведомление в группу); False — если это
     повтор уже сохранённого выезда. Без op_id (старый путь) — всегда True (новая строка).
-    lat/lon/dist_m — гео-контроль: точка закрытия и дистанция до точки должника."""
+    lat/lon/dist_m — гео-контроль: точка закрытия и дистанция до точки должника.
+    geo_far — вердикт «далеко» с учётом допуска по точности адреса; None — не судили."""
     with connect() as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO visits (contract_id, agent_id, created_at, payload, "
-            "op_id, visit_lat, visit_lon, dist_m) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "op_id, visit_lat, visit_lon, dist_m, geo_far) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (contract_id, agent_id, date.today().isoformat(), payload, op_id,
-             lat, lon, dist_m),
+             lat, lon, dist_m, None if geo_far is None else int(bool(geo_far))),
         )
         conn.commit()
         return cur.rowcount > 0
@@ -2279,8 +2287,34 @@ def last_visit_geo(contract_ids: list[str]):
             "ORDER BY id DESC LIMIT 1", tuple(ids)).fetchone()
 
 
+# Собственная погрешность точки должника — по уровню, до которого разобран адрес.
+# Один порог на всех врал: «улица» в нашем справочнике собрана усреднением
+# сегментов по километровой сетке, то есть это середина улицы, а не дом. 03.08.2026
+# на боевых визитах это дало 6 предупреждений «далеко от адреса» из 7, причём у
+# четырёх РАЗНЫХ договоров дистанция совпала до метра (4452 м) — верный признак,
+# что мерили не от дома, а от одной общей точки на всю улицу.
+#
+# None = «точка не адресная, мерить нечего». Молчание здесь честнее числа.
+_GEO_TOLERANCE_M = {
+    "manual": 150,      # метку поставил выездник у двери — это самое точное, что есть
+    "exact": 300,       # дом от точного геокодера
+    "house": 300,
+    "street": 2000,     # ячейка сетки 1.1 км + длина самой улицы
+}
+
+
+def geo_tolerance_m(precision: str | None, src: str | None = None) -> int | None:
+    """Допуск для «далеко от адреса» или None, если судить не по чему."""
+    if (src or "").strip().lower() == "manual":
+        return _GEO_TOLERANCE_M["manual"]
+    return _GEO_TOLERANCE_M.get((precision or "").strip().lower())
+
+
 def geo_alert_m() -> int:
-    """Порог «далеко от адреса» в метрах (settings.geo_alert_m, дефолт 1000)."""
+    """Порог «далеко от адреса» в метрах (settings.geo_alert_m, дефолт 1000).
+
+    Остался для точек без известной точности (старые записи) и как настройка.
+    Новый путь считает допуск по уровню разбора адреса — см. geo_tolerance_m."""
     try:
         return int(get_setting("geo_alert_m") or 1000)
     except (TypeError, ValueError):
