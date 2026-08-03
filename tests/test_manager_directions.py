@@ -38,7 +38,28 @@ def test_direction_scopes_are_separate():
 def test_cis_manager_sees_both():
     _setup()
     db.set_manager(603, "Рук СНГ", ["Таджикистан", "Узбекистан"], [], direction="all")
-    assert len(db.manager_employees(603)) == 3
+    # Проверяем ВХОЖДЕНИЕ, а не длину: «СНГ» — это все сотрудники базы, и точное
+    # число зависит от того, что оставили после себя соседние тесты.
+    assert {"Таджиков Т.", "Узбеков У.", "Самаркандов С."} <= set(
+        db.manager_employees(603))
+
+
+def test_cis_manager_sees_russia_too():
+    """СНГ — это ВСЕ, а не «РТ плюс УЗ».
+
+    Появился портфель по Самарской области. Пока «all» означало объединение двух
+    стран, сотрудник с одними российскими кейсами не попадал НИ В ОДНО направление
+    и пропадал из сводки руководителя СНГ молча — как будто не работает.
+    """
+    _setup()
+    _import([("DIR-RU", "Самарский С.", "Самара")])
+    db.set_manager(603, "Рук СНГ", list(db.DIRECTIONS["all"][1]), [], direction="all")
+    assert "Самарский С." in db.manager_employees(603)
+    # …и при этом не протёк в страновые направления
+    db.set_manager(601, "Рук РТ", ["Таджикистан"], [], direction="tj")
+    db.set_manager(602, "Рук УЗ", ["Узбекистан"], [], direction="uz")
+    assert "Самарский С." not in db.manager_employees(601)
+    assert "Самарский С." not in db.manager_employees(602)
 
 
 def test_new_employee_appears_without_touching_the_role():

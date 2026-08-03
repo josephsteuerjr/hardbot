@@ -1140,7 +1140,7 @@ def _json_list(s) -> list[str]:
 DIRECTIONS = {
     "tj": ("Таджикистан", ("Таджикистан",)),
     "uz": ("Узбекистан", ("Узбекистан",)),
-    "all": ("СНГ", ("Таджикистан", "Узбекистан")),
+    "all": ("СНГ", ("Таджикистан", "Узбекистан", "Россия")),
 }
 
 
@@ -1153,16 +1153,23 @@ def employees_by_direction(direction: str) -> list[str]:
     реестра, а если она пуста — из города, теми же токенами, что и статистика.
     """
     import country_scope
-    want = {"tj", "uz"} if direction == "all" else {direction}
     out: dict[str, None] = {}
     with connect() as conn:
         rows = conn.execute(
             "SELECT DISTINCT responsible, country, city FROM clients "
             "WHERE responsible IS NOT NULL AND TRIM(responsible) <> ''").fetchall()
+    if direction == "all":
+        # СНГ — это ВСЕ, а не «Таджикистан плюс Узбекистан». Пока страна умела быть
+        # только этими двумя, разницы не было; с портфелем по России сотрудник, у
+        # которого нет ни одного таджикского или узбекского кейса, выпадал бы из
+        # сводки руководителя СНГ молча — как будто он не работает.
+        for r in rows:
+            out.setdefault(r["responsible"], None)
+        return sorted(out)
     for r in rows:
         code = (country_scope.scope_country([r["country"] or ""])
                 or country_scope.scope_country([r["city"] or ""]))
-        if code in want:
+        if code == direction:
             out.setdefault(r["responsible"], None)
     return sorted(out)
 
