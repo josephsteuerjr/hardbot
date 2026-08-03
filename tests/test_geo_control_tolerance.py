@@ -20,23 +20,38 @@ def test_manual_point_is_the_tightest():
 
 def test_house_level_is_strict_and_street_is_loose():
     assert db.geo_tolerance_m("exact", "photon") == 300
-    assert db.geo_tolerance_m("street", "osm") == 2000
+    assert db.geo_tolerance_m("street", "osm") == 700
     assert db.geo_tolerance_m("street", "osm") > db.geo_tolerance_m("exact", "photon")
 
 
 def test_administrative_points_are_not_judged_at_all():
-    """Центр района — не адрес. Молчание честнее числа."""
-    for level in ("city", "district", "region", "mahalla", "village", "jamoat", "", None):
+    """Центр района или области — не адрес. Молчание честнее числа."""
+    for level in ("city", "district", "region", "", None):
         assert db.geo_tolerance_m(level, "geonames") is None, level
 
 
-def test_todays_real_case_stops_being_a_violation():
-    """Тот самый визит: точность «улица», 4452 м. Был ⚠, должен стать нормой."""
-    tol = db.geo_tolerance_m("street", "osm")
-    assert tol is not None
-    assert 4452 <= tol + 3000, "фикс не покрывает случай, ради которого делался"
-    # А вот 5643 м при плохом фиксе телефона — уже за гранью и должно остаться ⚠
-    assert 5643 > tol + 500
+def test_settlement_levels_are_judged_with_their_own_size():
+    """Махалля и кишлак — это конец адреса, а не его отсутствие.
+
+    Их 1293 из 4105 — втрое больше, чем улиц. Пока они считались «грубыми»,
+    гео-контроль по самой массовой группе адресов молчал вообще.
+    """
+    assert db.geo_tolerance_m("mahalla", "osm") == 800
+    assert db.geo_tolerance_m("village", "osm") == 1200
+    assert db.geo_tolerance_m("jamoat", "osm") == 3000
+    # Порядок допусков повторяет реальный размер единицы
+    order = [db.geo_tolerance_m(x, "osm")
+             for x in ("exact", "street", "mahalla", "village", "jamoat")]
+    assert order == sorted(order), f"допуски не по возрастанию размера: {order}"
+
+
+def test_street_tolerance_follows_the_gazetteer_grid():
+    """Допуск улицы привязан к сетке справочника, а не взят с потолка.
+
+    Сетка 110 м плюс длина отрезка — 700 м с запасом. Когда сетка была
+    километровой, здесь стояло 2000; уменьшили сетку — уменьшили и допуск.
+    """
+    assert db.geo_tolerance_m("street", "osm") == 700
 
 
 def test_phone_accuracy_widens_the_tolerance_not_the_blame():
