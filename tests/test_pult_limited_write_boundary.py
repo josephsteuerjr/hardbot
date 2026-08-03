@@ -143,3 +143,41 @@ def test_rows_without_contract_id_are_skipped_not_guessed():
             ["41", "Илья", "дубль того же КД"]]
     scope = pult_ui.Pult._scope_from_grid(grid)
     assert scope == [{"contract_id": "41", "responsible": "Егор"}]
+
+
+# --- выбор сотрудников галочками ---------------------------------------------
+DIRTY = [["блоки"], HEADER, ["сх", "хард", "софт"],
+         ["41", "Егор", "К"], ["42", "егор", "К"], ["43", "Егор ", "К"],
+         ["44", "Илья", "К"], ["45", "Михаил", "К"]]
+
+
+def _book(grid):
+    head, first, c_id, c_who = pult_ui.Pult._grid_layout(grid)
+    return {"grid": grid, "head": head, "first": first, "c_id": c_id, "c_who": c_who}
+
+
+def test_one_employee_written_three_ways_is_one_checkbox():
+    """Иначе половина строк молча не уехала бы: галочка стояла бы на «Егор», а
+    строки с «егор» и «Егор » остались бы дома."""
+    keys = [pult_ui.Pult._emp_key(v) for v in ("Егор", "егор", "Егор ", " ЕГОР")]
+    assert len(set(keys)) == 1
+
+
+def test_selected_employee_takes_all_his_spellings():
+    grid = pult_ui.Pult._grid_for(_book(DIRTY), {pult_ui.Pult._emp_key("Егор")})
+    assert grid[:3] == DIRTY[:3], "шапка книги должна уехать целиком"
+    assert [row[0] for row in grid[3:]] == ["41", "42", "43"]
+
+
+def test_unselected_employees_do_not_leak():
+    grid = pult_ui.Pult._grid_for(_book(DIRTY), {pult_ui.Pult._emp_key("Илья")})
+    assert [row[0] for row in grid[3:]] == ["44"]
+
+
+def test_empty_selection_is_an_error_not_an_empty_import():
+    """Пустой отбор — это «ничего не грузим», а не «загрузить пустую книгу»."""
+    try:
+        pult_ui.Pult._grid_for(_book(DIRTY), set())
+    except ValueError:
+        return
+    raise AssertionError("пустой отбор прошёл как валидная книга")

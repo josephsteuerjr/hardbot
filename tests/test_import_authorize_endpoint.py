@@ -45,22 +45,27 @@ def test_disabled_by_default(monkeypatch):
     assert body["blocked"] is True and body["enabled"] is False
 
 
-def test_published_master_never_registers_over_http(monkeypatch):
-    """Боевой master — только локальным регистратором, даже когда ручка открыта."""
+def test_unknown_source_kind_is_refused(monkeypatch):
+    """Вид источника — из закрытого списка, а не из тела запроса."""
     monkeypatch.setenv("ADMIN_API_KEY", "test-admin-key")
     monkeypatch.setattr(web, "IMPORT_REGISTRAR_HTTP", True)
 
     def forbidden(*_a, **_k):
-        raise AssertionError("published_master зарегистрирован через HTTP")
+        raise AssertionError("зарегистрирован неизвестный source_kind")
 
     monkeypatch.setattr(db, "register_import_authorization", forbidden)
-    status, body = _post({"source_kind": db.IMPORT_SOURCE_PUBLISHED_MASTER,
-                          "source_proof": {"x": 1}})
-    assert status == 403
-    assert "published_master" in body["error"]
+    for kind in ("personal_book", "", None, "PUBLISHED_MASTER"):
+        status, body = _post({"source_kind": kind, "source_proof": {"x": 1}})
+        assert status == 409, kind
+        assert body["blocked"] is True
 
 
-def test_test_subset_registers_when_enabled(monkeypatch):
+def test_both_kinds_register_when_enabled(monkeypatch):
+    """Владелец открыл ручку — она работает для обоих видов источника.
+
+    Это осознанный размен: с открытой ручкой admin-ключ становится достаточным
+    условием загрузки. Закрытие флага возвращает двухшаговый порядок целиком.
+    """
     monkeypatch.setenv("ADMIN_API_KEY", "test-admin-key")
     monkeypatch.setattr(web, "IMPORT_REGISTRAR_HTTP", True)
     seen = {}
@@ -70,11 +75,11 @@ def test_test_subset_registers_when_enabled(monkeypatch):
         return {"proof_digest": "a" * 64, "status": "pending"}
 
     monkeypatch.setattr(db, "register_import_authorization", register)
-    status, body = _post({"source_kind": db.IMPORT_SOURCE_TEST_SUBSET,
-                          "source_proof": {"x": 1}})
-    assert status == 200 and body["ok"] is True
-    assert seen["source_kind"] == db.IMPORT_SOURCE_TEST_SUBSET
-    assert seen["ttl_hours"] == 24
+    for kind in (db.IMPORT_SOURCE_TEST_SUBSET, db.IMPORT_SOURCE_PUBLISHED_MASTER):
+        status, body = _post({"source_kind": kind, "source_proof": {"x": 1}})
+        assert status == 200 and body["ok"] is True, kind
+        assert seen["source_kind"] == kind
+        assert seen["ttl_hours"] == 24
 
 
 def test_bad_proof_is_a_refusal_not_a_crash(monkeypatch):

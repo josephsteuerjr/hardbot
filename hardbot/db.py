@@ -2743,14 +2743,14 @@ def register_import_authorization(
 ) -> dict:
     """Register one exact import proof through a local/root-only boundary.
 
-    ``published_master`` has deliberately no HTTP route: the registry operator
-    must first validate the external publication and invoke the CLI next to the
-    server data store, so a single admin key can never load the live master.
+    By default there is no HTTP route at all: the registry operator validates
+    the external publication or test scope and invokes the CLI next to the
+    server data store, so knowing the admin key is not enough to load anything.
 
-    ``test_subset`` (approved subset with an explicit approval-id and scope) may
-    additionally be registered over ``/admin/import/authorize.json`` — but only
-    on an instance where the owner switched ``IMPORT_REGISTRAR_HTTP`` on. The
-    validation below is the same either way; only the entry point differs.
+    An instance owner may open ``/admin/import/authorize.json`` by switching
+    ``IMPORT_REGISTRAR_HTTP`` on, accepting that the admin key then becomes a
+    sufficient condition. The validation below is identical either way; only the
+    entry point differs, and turning the flag off restores the two-step order.
     """
 
     if isinstance(ttl_hours, bool) or not isinstance(ttl_hours, int):

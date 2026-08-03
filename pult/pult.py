@@ -409,6 +409,9 @@ class Pult(tk.Tk):
         self.settings = self._load_settings()
         self.url = self.settings.get("url", DEFAULT_URL)
         self.key = self.settings.get("key", DEFAULT_KEY)
+        self.imp_book: dict = {}          # выбранная книга: путь, грид, вид источника
+        self.imp_selected: set[str] = set()   # кого из сотрудников грузим
+        self._imp_vars: dict = {}
         self.connected = False
         self.guests: list[dict] = []
         self.mgrs: list[dict] = []
@@ -788,7 +791,16 @@ class Pult(tk.Tk):
         imp.pack(fill="x")
         rowi = tk.Frame(imp.inner, bg=CARD)
         rowi.pack(anchor="w")
-        btn(rowi, "Выбрать реестр…", self.do_import, kind="accent").pack(side="left")
+        btn(rowi, "Выбрать реестр…", self.pick_registry, kind="accent").pack(side="left")
+        self.imp_file_lbl = tk.Label(imp.inner, text="", bg=CARD, fg=MUTED, font=f(9),
+                                     justify="left", wraplength=760)
+        self.imp_file_lbl.pack(anchor="w", pady=(8, 0))
+        self.imp_pick_frame = tk.Frame(imp.inner, bg=CARD)
+        self.imp_pick_frame.pack(fill="x")
+        self.imp_go_row = tk.Frame(imp.inner, bg=CARD)
+        self.imp_go_btn = btn(self.imp_go_row, "Загрузить выбранных (0)",
+                              self.do_import, kind="accent")
+        self.imp_go_btn.pack(side="left")
         self.imp_kvs = KVGrid(imp.inner)
         self.imp_kvs.pack(anchor="w", pady=(10, 0))
         self.imp_warn = tk.Label(imp.inner, text="", bg=CARD, fg=WARN, font=f(9),
@@ -931,37 +943,41 @@ class Pult(tk.Tk):
             )
             self.toast(LIMITED_TEST_MASTER_IMPORT_DISABLED_MESSAGE, err=True)
             return
-        path = filedialog.askopenfilename(
-            title="Опубликованный master",
-            filetypes=[("Excel", "*.xlsx *.xlsm *.xlsb *.xls")],
-        )
-        if not path:
+        book = self.imp_book
+        if not book:
+            self.toast("Сначала выбери реестр", err=True)
             return
-        self.toast("Импорт " + Path(path).name + "…")
+        picked = sorted(self.imp_selected)
+        if not picked:
+            self.toast("Отметь хотя бы одного сотрудника", err=True)
+            return
+        self.toast(f"Импорт {Path(book['path']).name}: {len(picked)} сотр…")
 
         def work():
-            prepared = self._prepare_import(path)
+            prepared = self._prepare_import(book, picked)
             body = {
                 "data_exchange_contract": enrich.DATA_EXCHANGE_CONTRACT,
                 "source_kind": prepared["source_kind"],
                 "source_proof": prepared["source_proof"],
                 "sheets": prepared["sheets"],
             }
-            # Разрешение на импорт регистрируется ОТДЕЛЬНЫМ актом. Обычно — на самом
-            # сервере (`import_authorization.py register`), и тогда пульт про него
-            # ничего не знает. Если владелец открыл узкую ручку для test_subset, тот
-            # же акт делается отсюда; отказ ручки — не ошибка, а «регистрируй руками».
+            # Разрешение на импорт — ОТДЕЛЬНЫЙ акт. Если ручка регистратора на
+            # сервере открыта, пульт делает его тем же admin-ключом; если закрыта,
+            # это не ошибка пульта, а «зарегистрируй на сервере» — команда ниже.
             registered = None
-            if prepared["source_kind"] == IMPORT_SOURCE_TEST_SUBSET:
+            try:
                 registered = self.api(
                     "POST", "/admin/import/authorize.json",
                     {"source_kind": prepared["source_kind"],
                      "source_proof": prepared["source_proof"]},
                     timeout=60)
-            result = self.api("POST", "/admin/import.json", body, timeout=120)
+            except Exception:                              # noqa: BLE001
+                registered = None
+            result = self.api("POST", "/admin/import.json", body, timeout=180)
             if isinstance(result, dict) and result.get("error"):
                 result = {**result,
                           "_proof_digest": prepared["proof_digest"],
+                          "_source_kind": prepared["source_kind"],
                           "_registered": bool(registered and registered.get("ok"))}
             return result
 
@@ -973,13 +989,15 @@ class Pult(tk.Tk):
                     extra = ". В файле: " + ", ".join(d["header_sample"])
                 if d.get("_proof_digest") and not d.get("_registered"):
                     extra += (
-                        "\n\nРазрешение не зарегистрировано. На сервере:\n"
+                        "\n\nРазрешение не зарегистрировано — ручка регистратора на "
+                        "сервере закрыта. Либо открой её (IMPORT_REGISTRAR_HTTP=1 в "
+                        "/opt/hardbot2/.env), либо зарегистрируй вручную:\n"
                         "  docker compose exec -T bot python import_authorization.py "
-                        f"register --source-kind {IMPORT_SOURCE_TEST_SUBSET} "
+                        f"register --source-kind {d.get('_source_kind') or ''} "
                         "--proof /tmp/proof.json\n"
-                        f"proof: {self._proof_path or '—'}\n"
+                        f"proof лежит здесь: {self._proof_path or '—'}\n"
                         f"digest: {d['_proof_digest']}\n"
-                        "После регистрации нажми «Выбрать реестр…» и тот же файл ещё раз."
+                        "После регистрации нажми «Загрузить выбранных» ещё раз."
                     )
                 self.imp_warn.configure(text=d["error"] + extra)
                 self.toast("Импорт не прошёл", err=True)
@@ -1000,22 +1018,151 @@ class Pult(tk.Tk):
     # руками, если HTTP-ручка регистратора на сервере выключена.
     _proof_path = None
 
-    def _prepare_import(self, path: str) -> dict:
-        """Файл → (source_kind, proof, sheets). Вид источника выбирается по файлу.
+    def pick_registry(self):
+        """Шаг 1: выбрать книгу и показать, кто в ней есть. Ничего не отправляет."""
+        path = filedialog.askopenfilename(
+            title="Реестр",
+            filetypes=[("Excel", "*.xlsx *.xlsm *.xlsb *.xls")])
+        if not path:
+            return
+        self.imp_file_lbl.configure(text="Читаю " + Path(path).name + "…")
+        self.imp_kvs.set_pairs([])
+        self.imp_warn.configure(text="")
 
-        Опубликованный master узнаётся по receipt registry_cycle рядом с ним: если
-        receipt есть, грузим как `published_master` — это боевой путь, и HTTP его
-        не регистрирует ни при каких настройках. Если receipt'а нет, файл может
-        быть только утверждённым подмножеством (`test_subset`): тогда scope
-        строится из самого файла, а approval-id привязан к его SHA — подменить
-        книгу под уже выданное разрешение нельзя.
+        def done(book):
+            head, first, c_id, c_who = self._grid_layout(book["grid"])
+            book.update(head=head, first=first, c_id=c_id, c_who=c_who)
+            self.imp_book = book
+            self.imp_selected = {e["key"] for e in book["employees"]}
+            kind = ("опубликованный master (есть расписка цикла)"
+                    if book.get("published") else
+                    "утверждённое подмножество: расписки registry_cycle для этого "
+                    "файла нет")
+            self.imp_file_lbl.configure(
+                text=f"{Path(path).name} · строк {len(book['scope'])} · "
+                     f"сотрудников {len(book['employees'])}\nВид источника: {kind}")
+            self._imp_render()
+
+        def fail(exc):
+            self.imp_book = {}
+            self.imp_selected = set()
+            self._imp_render()
+            self.imp_file_lbl.configure(text=f"Файл не разобран: {exc}")
+            self.toast("Реестр не прочитан", err=True)
+
+        self.bg_task(lambda: self.read_registry(path), done, fail)
+
+    def _imp_render(self):
+        for w in self.imp_pick_frame.winfo_children():
+            w.destroy()
+        self.imp_go_row.pack_forget()
+        book = self.imp_book
+        if not book:
+            return
+        head = tk.Frame(self.imp_pick_frame, bg=CARD)
+        head.pack(fill="x", pady=(10, 4))
+        tk.Label(head, text="Кого грузить (галочки):", bg=CARD, fg=MUTED,
+                 font=f(9)).pack(side="left")
+        btn(head, "все", lambda: self._imp_all(True)).pack(side="right")
+        btn(head, "снять", lambda: self._imp_all(False)).pack(side="right", padx=(0, 6))
+        box = tk.Frame(self.imp_pick_frame, bg=CARD, highlightbackground=BORDER,
+                       highlightthickness=1)
+        box.pack(fill="x")
+        self._imp_vars = {}
+        for emp in book["employees"]:
+            var = tk.BooleanVar(value=emp["key"] in self.imp_selected)
+            self._imp_vars[emp["key"]] = var
+            row = tk.Frame(box, bg=CARD)
+            row.pack(fill="x")
+            tk.Checkbutton(row, text=emp["name"], variable=var,
+                           bg=CARD, fg=TEXT, activebackground=CARD, selectcolor=CARD,
+                           font=f(9),
+                           command=lambda k=emp["key"], v=var: self._imp_toggle(k, v.get())
+                           ).pack(side="left", padx=6)
+            note = (f"договоров: {emp['count']}" +
+                    (f" · написаний в файле: {emp['variants']}"
+                     if emp["variants"] > 1 else ""))
+            tk.Label(row, text=note, bg=CARD, fg=MUTED, font=f(8)).pack(side="left")
+        self.imp_go_row.pack(anchor="w", pady=(10, 0))
+        self._imp_count()
+
+    def _imp_toggle(self, name, on):
+        (self.imp_selected.add if on else self.imp_selected.discard)(name)
+        self._imp_count()
+
+    def _imp_all(self, on):
+        self.imp_selected = ({e["key"] for e in self.imp_book.get("employees") or []}
+                             if on else set())
+        for key, var in (self._imp_vars or {}).items():
+            var.set(key in self.imp_selected)
+        self._imp_count()
+
+    def _imp_count(self):
+        book = self.imp_book or {}
+        rows = sum(e["count"] for e in book.get("employees") or []
+                   if e["key"] in self.imp_selected)
+        self.imp_go_btn.configure(
+            text=f"Загрузить выбранных ({len(self.imp_selected)} чел · {rows} дог.)",
+            state="normal" if self.imp_selected else "disabled")
+
+    def read_registry(self, path: str) -> dict:
+        """Прочитать книгу и разложить её по сотрудникам. Ничего не отправляет.
+
+        Заодно выясняем, есть ли для этого файла publish-receipt registry_cycle.
+        Receipt привязан к ТОЧНОМУ пути (`U:\\rbr\\…`) и SHA файла, поэтому копия
+        мастера в «Загрузках» его не имеет — и это не поломка, а ровно то, что
+        receipt и означает: «этот файл опубликован циклом вот отсюда».
+        """
+        import limited_test_import as lti
+
+        stable = enrich.read_stable_workbook(path)
+        grid = lti._validate_sheets(stable["sheets"])
+        rows = self._scope_from_grid(grid)
+        # Группируем по КАНОНИЧЕСКОМУ имени: в реестре одна и та же фамилия живёт
+        # и «Егор», и «егор», и «Егор ». Бот их давно склеивает, а список галочек
+        # показывал бы двух разных людей — и половина строк молча не уехала бы.
+        # В подписи при этом показываем живое написание, а не служебный ключ.
+        groups: dict[str, dict] = {}
+        for item in rows:
+            key = self._emp_key(item["responsible"])
+            spelling = " ".join(str(item["responsible"] or "").split())
+            g = groups.setdefault(key, {"key": key, "count": 0, "spellings": {}})
+            g["count"] += 1
+            g["spellings"][spelling] = g["spellings"].get(spelling, 0) + 1
+        employees = []
+        for g in groups.values():
+            best = max(g["spellings"].items(), key=lambda kv: (kv[1], kv[0]))[0]
+            employees.append({"key": g["key"], "name": best or "(без ответственного)",
+                              "count": g["count"], "variants": len(g["spellings"])})
+        employees.sort(key=lambda e: (-e["count"], e["name"]))
+        try:
+            published = enrich.prepare_published_master_import(path)
+            no_receipt = ""
+        except Exception as exc:                           # noqa: BLE001
+            published, no_receipt = None, str(exc)
+        return {"path": path, "sheets": stable["sheets"], "grid": grid,
+                "file_sha256": stable["file_sha256"], "scope": rows,
+                "employees": employees,
+                "published": published, "no_receipt": no_receipt}
+
+    def _prepare_import(self, book: dict, picked: list[str]) -> dict:
+        """Книга + отмеченные сотрудники → (source_kind, proof, sheets).
+
+        Весь файл целиком и с receipt'ом — это `published_master`, боевой путь.
+        Как только выбраны НЕ все сотрудники, файл перестаёт быть опубликованным
+        мастером: строки режутся, и грузить это можно только как утверждённое
+        подмножество со своим scope. Название вида источника — не косметика: от
+        него зависит, что сервер сверяет и что попадёт в аудит.
         """
         import exchange_contract as contract
         import limited_test_import as lti
 
         self._proof_path = None
-        try:
-            prepared = enrich.prepare_published_master_import(path)
+        all_emps = {e["key"] for e in book["employees"]}
+        whole = set(picked) == all_emps
+
+        if whole and book.get("published"):
+            prepared = book["published"]
             grid = lti._validate_sheets(prepared["sheets"])
             digest = contract.validate_import_source_proof(
                 prepared["source_proof"],
@@ -1024,13 +1171,11 @@ class Pult(tk.Tk):
             return {"source_kind": IMPORT_SOURCE_PUBLISHED_MASTER,
                     "source_proof": prepared["source_proof"],
                     "sheets": prepared["sheets"], "proof_digest": digest}
-        except Exception:                                  # noqa: BLE001
-            pass
 
-        stable = enrich.read_stable_workbook(path)
-        grid = lti._validate_sheets(stable["sheets"])
+        grid = self._grid_for(book, set(picked)) if not whole else book["grid"]
         scope = self._scope_from_grid(grid)
-        approval = f"pult-{Path(path).stem.strip()[:80]}-{stable['file_sha256'][:12]}"
+        approval = (f"pult-{Path(book['path']).stem.strip()[:60]}"
+                    f"-{book['file_sha256'][:12]}-{len(scope)}")
         proof = contract.build_test_subset_source_proof(
             grid, approval_id=approval, contracts=scope)
         digest = contract.validate_import_source_proof(
@@ -1043,21 +1188,43 @@ class Pult(tk.Tk):
         except OSError:
             self._proof_path = None
         return {"source_kind": IMPORT_SOURCE_TEST_SUBSET, "source_proof": proof,
-                "sheets": stable["sheets"], "proof_digest": digest}
+                "sheets": [{"name": contract.WORKBOOK_SHEET_NAME, "grid": grid}],
+                "proof_digest": digest}
 
     @staticmethod
-    def _scope_from_grid(grid: list[list]) -> list[dict[str, str]]:
-        """[{contract_id, responsible}] из книги — ровно то, что разрешаем грузить.
+    def _emp_key(name) -> str:
+        """Ответственный для группировки: схлопнутые пробелы, регистр не важен."""
+        return " ".join(str(name or "").split()).casefold()
 
-        Пробелы и регистр не режем сами: контракт нормализует их одинаково с обеих
-        сторон. Именно на этом спотыкался ручной scope — хвостовой пробел в
-        «ответственный Сотрудник» валил импорт целиком с `scope_invalid`.
+    @staticmethod
+    def _grid_for(book: dict, picked: set[str]) -> list[list]:
+        """Грид только из строк отмеченных сотрудников — шапка целиком, данные срезом.
+
+        Резать надо именно ГРИД, а не один scope: сервер сверяет утверждённый
+        список с тем, что реально разобрал из книги, и scope-подмножество при
+        полном гриде честно отбивается как `scope_mismatch`.
+        """
+        grid, head = book["grid"], book["head"]
+        c_who = book["c_who"]
+        out = list(grid[:book["first"]])
+        for row in grid[book["first"]:]:
+            if len(row) > c_who and Pult._emp_key(row[c_who]) in picked:
+                out.append(row)
+        # Сравниваем с `first`, а не с `head`: в шапке ТРИ строки, и «len > head»
+        # было истиной даже для книги без единой строки данных.
+        if len(out) <= book["first"]:
+            raise ValueError("после отбора не осталось ни одной строки")
+        return out
+
+    @staticmethod
+    def _grid_layout(grid: list[list]) -> tuple[int, int, int, int]:
+        """(строка заголовков, первая строка данных, колонка КД, колонка ФИО).
 
         Строка профилей («сх»/«хард»/«софт») под заголовком — часть формы книги,
         а не клиент. Распознаём её ТОЧНО ТАК ЖЕ, как сервер: только в контрактной
-        позиции и только по тегу в колонке-ключе. Иначе она приезжает в scope
-        тринадцатым «договором» с ответственным «сх», а сервер её пропускает — и
-        импорт валится на `scope_mismatch`, который винит данные, а не пульт.
+        позиции и только по тегу в колонке-ключе. Наивное «первая строка после
+        шапки — уже данные» давало лишний договор с ответственным «сх», а сервер
+        его пропускал — импорт валился на scope_mismatch, который винит реестр.
         """
         import exchange_contract as contract
 
@@ -1074,14 +1241,29 @@ class Pult(tk.Tk):
         c_who = cols.get(enrich.norm_title("ответственный Сотрудник"))
         if c_who is None:
             raise ValueError("в книге нет колонки «ответственный Сотрудник»")
-
         first = head + 1
         type_row_index = head + contract.WORKBOOK_TYPE_ROW_OFFSET
         tags = {enrich.norm_title(t) for t in contract.WORKBOOK_TYPE_ROW_TAGS}
         if type_row_index < len(grid) and c_id < len(grid[type_row_index]) \
                 and enrich.norm_title(grid[type_row_index][c_id]) in tags:
             first = type_row_index + 1
+        return head, first, c_id, c_who
 
+    @staticmethod
+    def _scope_from_grid(grid: list[list]) -> list[dict[str, str]]:
+        """[{contract_id, responsible}] из книги — ровно то, что разрешаем грузить.
+
+        Пробелы и регистр не режем сами: контракт нормализует их одинаково с обеих
+        сторон. Именно на этом спотыкался ручной scope — хвостовой пробел в
+        «ответственный Сотрудник» валил импорт целиком с `scope_invalid`.
+
+        Строка профилей («сх»/«хард»/«софт») под заголовком — часть формы книги,
+        а не клиент. Распознаём её ТОЧНО ТАК ЖЕ, как сервер: только в контрактной
+        позиции и только по тегу в колонке-ключе. Иначе она приезжает в scope
+        тринадцатым «договором» с ответственным «сх», а сервер её пропускает — и
+        импорт валится на `scope_mismatch`, который винит данные, а не пульт.
+        """
+        head, first, c_id, c_who = Pult._grid_layout(grid)
         scope, seen = [], set()
         for row in grid[first:]:
             if len(row) <= max(c_id, c_who):
@@ -2380,8 +2562,12 @@ class Pult(tk.Tk):
         rowc = tk.Frame(sc.inner, bg=CARD)
         rowc.pack(anchor="w")
         btn(rowc, "Подключиться", self._connect, kind="accent").pack(side="left")
-        tk.Label(rowc, text="ключ — в .env сервера (ADMIN_API_KEY)", bg=CARD, fg=MUTED,
-                 font=f(8)).pack(side="left", padx=(10, 0))
+        btn(rowc, "Сохранить ключ", self.key_save).pack(side="left", padx=(8, 0))
+        btn(rowc, "Удалить ключ", self.key_forget).pack(side="left", padx=(8, 0))
+        self.key_out = tk.Label(sc.inner, text="", bg=CARD, fg=MUTED, font=f(8),
+                                justify="left", wraplength=760)
+        self.key_out.pack(anchor="w", pady=(8, 0))
+        self._key_state()
 
         tc = Card(inner, "Токен бота",
                   "Сменить бота (токен от @BotFather). После сохранения — «Перезапустить "
@@ -2399,6 +2585,48 @@ class Pult(tk.Tk):
         btn(rowb, "Перезапустить бота", self.restart_bot).pack(side="left", padx=(8, 0))
         tk.Label(rowb, text="формат: цифры : буквы/цифры (≥30 символов)", bg=CARD,
                  fg=MUTED, font=f(8)).pack(side="left", padx=(10, 0))
+
+    # --- admin-ключ: сохранить / забыть -------------------------------------
+    def _key_state(self):
+        saved = bool((self.settings.get("key") or "").strip())
+        self.key_out.configure(
+            text=("Ключ сохранён в «настройки пульта.json» рядом с пультом. "
+                  "Файл не уезжает в репозиторий."
+                  if saved else
+                  "Ключ НЕ сохранён: живёт только в этом окне и забудется при "
+                  "закрытии. Ключ задаётся на сервере в .env (ADMIN_API_KEY)."))
+
+    def key_save(self):
+        self.key = self.key_entry.get().strip()
+        if not self.key:
+            self.toast("Пустой ключ нечего сохранять", err=True)
+            return
+        self.settings["key"] = self.key
+        self._save_settings()
+        self._key_state()
+        self.toast("Ключ сохранён")
+
+    def key_forget(self):
+        """Стереть ключ и из файла, и из окна.
+
+        Закрытие пульта раньше сохраняло ключ обратно само — поэтому мало убрать
+        его из файла, надо забыть и в памяти, иначе он вернётся при выходе.
+        """
+        if not messagebox.askyesno(
+                "Удалить ключ",
+                "Стереть admin-ключ из настроек пульта? На сервере он останется — "
+                "пульт просто перестанет его помнить."):
+            return
+        self.key = ""
+        self.settings.pop("key", None)
+        self._save_settings()
+        try:
+            self.key_entry.delete(0, "end")
+        except tk.TclError:
+            pass
+        self.connected = False
+        self._key_state()
+        self.toast("Ключ удалён из пульта")
 
     def _toggle_key(self):
         self.key_entry.configure(show="" if self.key_entry["show"] else "•")
@@ -2455,7 +2683,11 @@ class Pult(tk.Tk):
             pass
 
     def _on_close(self):
-        self.settings["url"], self.settings["key"] = self.url, self.key
+        self.settings["url"] = self.url
+        # Ключ сохраняем при выходе, только если он УЖЕ был сохранён: иначе
+        # «Удалить ключ» отменялось бы самим закрытием окна.
+        if self.settings.get("key"):
+            self.settings["key"] = self.key
         self._save_settings()
         self.destroy()
 

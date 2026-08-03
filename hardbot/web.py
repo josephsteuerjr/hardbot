@@ -1663,17 +1663,19 @@ async def _admin_import(request: web.Request) -> web.Response:
 
 
 # Регистратор разрешений на импорт живёт РЯДОМ С ДАННЫМИ и по умолчанию не имеет
-# HTTP-входа: боевой master нельзя загрузить одним ключом, нужен отдельный акт на
-# самом сервере. Для СВОЕГО тестового контура владелец может открыть узкую ручку —
-# только для test_subset (утверждённое подмножество с явным approval-id и scope),
-# и только явным флагом окружения. published_master через HTTP не регистрируется
-# НИКОГДА, чтобы контроль над боевой загрузкой остался двухшаговым.
+# HTTP-входа: загрузка реестра — это отдельный акт, а не следствие знания ключа.
+#
+# Владелец может открыть узкую ручку на СВОЁМ стенде явным флагом окружения. Тогда
+# второй фактор исчезает: admin-ключ становится достаточным условием загрузки. Это
+# осознанный размен владельца (03.08.2026) — он один и оператор, и владелец, а
+# терминал в рабочем цикле для него дороже второго шага. Флаг по умолчанию ВЫКЛЮЧЕН,
+# и выключение возвращает исходный порядок целиком, без правки кода.
 IMPORT_REGISTRAR_HTTP = os.getenv("IMPORT_REGISTRAR_HTTP", "").strip() in (
     "1", "true", "yes")
 
 
 async def _admin_import_authorize(request: web.Request) -> web.Response:
-    """Зарегистрировать proof тестового подмножества (если ручка включена)."""
+    """Зарегистрировать один exact proof (если ручка включена)."""
     _admin(request)
     if not IMPORT_REGISTRAR_HTTP:
         return web.json_response(
@@ -1683,12 +1685,10 @@ async def _admin_import_authorize(request: web.Request) -> web.Response:
             status=403)
     body = await request.json()
     source_kind = body.get("source_kind")
-    if source_kind != db.IMPORT_SOURCE_TEST_SUBSET:
+    if source_kind not in db.IMPORT_SOURCE_KINDS:
         return web.json_response(
             {"blocked": True, "enabled": True,
-             "error": "через HTTP регистрируется только test_subset; "
-                      "published_master — только локальным регистратором"},
-            status=403)
+             "error": f"неизвестный source_kind: {source_kind!r}"}, status=409)
     try:
         authorization = db.register_import_authorization(
             body.get("source_proof"), source_kind=source_kind,
