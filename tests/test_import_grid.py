@@ -44,7 +44,7 @@ def _full_grid(*data_rows) -> list[list]:
             *data_rows]
 
 
-def test_import_grid_conflicting_duplicate_blocks_whole_file():
+def test_import_grid_conflicting_duplicate_warns_and_keeps_first():
     db.init_db()
     grid = _full_grid(
         _row(contract_id="IG-1", client="Тестов Тест", city="Москва",
@@ -55,20 +55,21 @@ def test_import_grid_conflicting_duplicate_blocks_whole_file():
     )
     rep = _import_grid(grid)
     assert rep["total_rows"] == 4
-    assert rep["inserted"] == 0
-    assert rep["updated"] == 0
     assert rep["duplicates"] == 1
     assert rep["skipped_no_id"] == 1
     assert rep["unknown_columns"] == []
-    assert rep["blocked"] is True
+    # Повтор КД — предупреждение, а не отказ (03.08.2026): берётся ПЕРВАЯ строка,
+    # слияния по-прежнему нет, конфликт перечислен поимённо.
+    assert rep["blocked"] is False
+    assert any("повторы канонического КД" in w for w in rep["warnings"])
     assert rep["duplicate_conflicts"] == [
         {"contract_id": "IG-1", "rows": [4, 5], "fields": ["client"]}
     ]
-    assert db.get_client("IG-1") is None
-    assert db.get_client("IG-ATOMIC") is None
+    assert db.get_client("IG-1") is not None
+    assert db.get_client("IG-ATOMIC") is not None
 
 
-def test_import_grid_blocks_complementary_and_identical_duplicates():
+def test_import_grid_never_merges_complementary_or_identical_duplicates():
     db.init_db()
     grid = _full_grid(
         _row(contract_id="IG-MERGE", client="Один человек", city="Москва",
@@ -77,12 +78,11 @@ def test_import_grid_blocks_complementary_and_identical_duplicates():
              responsible="Хозяев Х.", debt_overdue=50900),
     )
     rep = _import_grid(grid)
-    assert rep["blocked"] is True
+    assert rep["blocked"] is False
     assert rep["duplicates"] == 1
-    assert rep["inserted"] == 0
-    assert rep["updated"] == 0
     assert rep["quarantined_contracts"] == ["IG-MERGE"]
-    assert db.get_client("IG-MERGE") is None
+    # Главное свойство осталось: строки НЕ слиты. Взята первая, вторая пропущена.
+    assert db.get_client("IG-MERGE") is not None
 
 
 def test_import_grid_header_shift_and_unknown():
@@ -112,17 +112,18 @@ def test_import_grid_empty_and_garbage():
     assert _import_grid([["а", "б"], ["в", "г"]])["inserted"] == 0   # шапки нет
 
 
-def test_import_grid_blocks_unknown_columns_before_write():
+def test_import_grid_warns_about_unknown_columns_and_ignores_them():
     """Новый/переименованный заголовок не может молча исчезнуть из импорта."""
     db.init_db()
     titles = [db.BY_KEY["contract_id"].title, "Незнакомая колонка 1", "Незнакомая колонка 2"]
     row = ["IG-MANY", "xxx", "xxx"]
     rep = _import_grid([titles, row])
-    assert rep["blocked"] is True
-    assert rep["inserted"] == 0
-    assert "незнакомые заголовки" in rep["error"]
+    assert rep["blocked"] is False
+    assert rep["inserted"] == 1
+    assert any("незнакомые заголовки" in w for w in rep["warnings"])
     assert set(rep["unknown_columns"]) == {"Незнакомая колонка 1", "Незнакомая колонка 2"}
-    assert db.get_client("IG-MANY") is None
+    # Колонки по-прежнему НЕ читаются — они просто не отбивают весь файл.
+    assert db.get_client("IG-MANY") is not None
 
 
 def test_import_grid_accepts_only_versioned_ignored_master_columns():
@@ -158,9 +159,10 @@ def test_import_grid_accepts_only_versioned_ignored_master_columns():
         ],
         source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
     )
-    assert rejected["blocked"] is True
+    assert rejected["blocked"] is False
     assert rejected["unknown_columns"] == ["Оплаты за 13.26"]
-    assert db.get_client("IG-BAD-MONTH") is None
+    assert any("незнакомые заголовки" in w for w in rejected["warnings"])
+    assert db.get_client("IG-BAD-MONTH") is not None
 
 
 def test_duplicate_ignored_header_also_blocks_before_write():
@@ -455,29 +457,31 @@ def test_blank_cell_does_not_wipe_responsible():
     assert rep["no_responsible"] == 0
 
 
-def test_real_style_two_clients_with_same_contract_is_quarantined():
+def test_real_style_two_clients_with_same_contract_are_not_merged():
     """Реальная коллизия 35854193 не может слиться в UNIQUE(contract_id)."""
     db.init_db()
     rep = _import_grid(_full_grid(
         _row(contract_id="35854193", client="Первый клиент", responsible="Хозяев Х."),
         _row(contract_id="35854193", client="Второй клиент", responsible="Хозяев Х."),
     ))
-    assert rep["blocked"] is True
+    assert rep["blocked"] is False
     assert rep["quarantined_contracts"] == ["35854193"]
-    assert db.get_client("35854193") is None
+    # Два РАЗНЫХ человека под одним КД: слияния нет, в базе первый из них.
+    assert db.get_client("35854193") is not None
 
 
-def test_numeric_equivalent_contract_ids_collide_atomically():
+def test_numeric_equivalent_contract_ids_do_not_take_neighbours_down():
     db.init_db()
     rep = _import_grid(_full_grid(
         _row(contract_id=12345, client="Первый"),
         _row(contract_id="12345.0", client="Второй"),
         _row(contract_id="SAFE", client="Тоже не должен записаться"),
     ))
-    assert rep["blocked"] is True
+    assert rep["blocked"] is False
     assert rep["quarantined_contracts"] == ["12345"]
-    assert db.get_client("12345") is None
-    assert db.get_client("SAFE") is None
+    assert db.get_client("12345") is not None
+    # Соседняя строка больше не страдает за чужой конфликт — она и была ни при чём.
+    assert db.get_client("SAFE") is not None
 
 
 def test_missing_or_unknown_source_kind_is_fail_closed():

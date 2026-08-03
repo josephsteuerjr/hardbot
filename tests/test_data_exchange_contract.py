@@ -259,10 +259,17 @@ def test_external_published_master_requires_grid_and_publication_binding():
     assert "another workbook grid" in rejected["error"]
 
 
-def test_syntactically_valid_unregistered_proof_cannot_import(
+def test_unregistered_proof_now_self_authorizes_and_stays_idempotent(
     monkeypatch,
     tmp_path,
 ):
+    """Незарегистрированный proof больше не отбивается — он регистрируется сам.
+
+    Требование «разрешение выдаётся отдельным актом на сервере» снято владельцем
+    03.08.2026. Важно, что при этом НЕ потерялось: расписка всё равно создаётся и
+    гасится, поэтому повтор того же файла остаётся идемпотентным, а не пишет
+    второй раз.
+    """
     _isolated_db(monkeypatch, tmp_path)
     grid = _master_grid("UNREGISTERED-1", client="Не должен появиться")
     proof = _master_proof(
@@ -278,12 +285,27 @@ def test_syntactically_valid_unregistered_proof_cannot_import(
         require_source_proof=True,
     )
 
-    assert report["blocked"] is True
-    assert "not pre-registered" in report["error"]
-    assert db.get_client("UNREGISTERED-1") is None
+    assert report["blocked"] is False
+    assert report["inserted"] == 1
+    assert db.get_client("UNREGISTERED-1") is not None
+
+    replay = db.import_grid(
+        grid,
+        source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
+        source_proof=proof,
+        require_source_proof=True,
+    )
+    assert replay.get("idempotent_replay") is True
+    assert replay["inserted"] == 0
 
 
-def test_client_cannot_self_approve_a_test_subset(monkeypatch, tmp_path):
+def test_self_approved_test_subset_is_recorded_as_self_issued(monkeypatch, tmp_path):
+    """Клиент теперь может выдать разрешение себе сам — но это видно в аудите.
+
+    Раньше такой proof отбивался. Владелец снял требование; цена размена в том,
+    что admin-ключа достаточно для загрузки, и единственное, что остаётся, —
+    честная запись о том, кто выдал разрешение.
+    """
     _isolated_db(monkeypatch, tmp_path)
     values = {
         "contract_id": "FAKE-APPROVAL-1",
@@ -313,9 +335,12 @@ def test_client_cannot_self_approve_a_test_subset(monkeypatch, tmp_path):
         require_source_proof=True,
     )
 
-    assert report["blocked"] is True
-    assert "not pre-registered" in report["error"]
-    assert db.get_client(values["contract_id"]) is None
+    assert report["blocked"] is False
+    assert db.get_client(values["contract_id"]) is not None
+    with db.connect() as conn:
+        actions = [r[0] for r in conn.execute(
+            "SELECT action FROM audit WHERE action LIKE 'import_%'")]
+    assert "import_self_authorized" in actions
 
 
 def test_master_receipts_are_one_shot_idempotent_and_monotonic(

@@ -27,6 +27,7 @@ from contextlib import contextmanager
 import gzip
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -250,10 +251,14 @@ def _published_master_source_proof(
 
         assert_no_incomplete_publications(root)
     except SafetyViolation as exc:
-        raise ValueError(
-            "workspace registry_cycle содержит незавершённую публикацию; "
-            "сначала выполните reconcile/ручную сверку"
-        ) from exc
+        # ПРЕДУПРЕЖДЕНИЕ, а не отказ (03.08.2026, решение владельца). Проверка
+        # смотрит на ВЕСЬ workspace: одна зависшая репетиция месячной давности
+        # запрещала импорт любого мастера, включая тот, чья публикация завершилась
+        # штатно. Сама публикация выбранного файла ниже проверяется отдельно и
+        # по-прежнему обязана быть complete с terminal receipt.
+        logging.warning(
+            "в workspace registry_cycle есть незавершённая публикация (%s); "
+            "выбранный master проверяется отдельно и должен быть complete", exc)
     selected_key = str(master.resolve()).casefold()
     selected_sha = _sha256_file(master)
     if selected_sha != parsed_file_sha256:
@@ -418,10 +423,20 @@ def _published_master_source_proof(
         latest_master_sha,
         publication,
     ) = latest[0]
-    if selected_key != latest_master_key or selected_sha != latest_master_sha:
+    # Решает СОВПАДЕНИЕ БАЙТОВ, а не путь (03.08.2026, решение владельца).
+    # Раньше сверялось и то и другое, и копия опубликованного мастера, положенная
+    # рядом с пультом, переставала быть опубликованным мастером: расписка держит
+    # `U:\rbr\…`, а сетевого диска на домашней машине нет. Байты те же — значит это
+    # тот же файл, и подменить его нельзя: SHA сверяется с застейдженным.
+    # Путь остаётся диагностикой: расхождение видно в предупреждении.
+    if selected_sha != latest_master_sha:
         raise ValueError(
             "выбранный master не совпадает с новейшей complete публикацией"
         )
+    if selected_key != latest_master_key:
+        logging.warning(
+            "published master найден по SHA, но лежит не там, где публиковался: "
+            "%s вместо %s", selected_key, latest_master_key)
     return build_published_master_source_proof(
         grid,
         file_sha256=selected_sha,

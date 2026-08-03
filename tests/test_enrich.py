@@ -466,8 +466,11 @@ def test_published_master_proof_requires_complete_matching_registry_cycle(tmp_pa
     assert proof["publication"]["run_id"] == "run-1"
     assert prepared["sheets"][0]["name"] == enrich.SHEET_NAME
 
-    # A previous successful master is not admissible while another publish
-    # has an unresolved tail: personal files may already be in a mixed state.
+    # Чужая незавершённая публикация в workspace больше не отбивает импорт
+    # (03.08.2026, решение владельца): проверка смотрела на ВЕСЬ workspace, и
+    # одна зависшая репетиция месячной давности запрещала грузить мастер, чья
+    # собственная публикация завершилась штатно. Публикация ВЫБРАННОГО файла
+    # по-прежнему обязана быть complete с terminal receipt — это ниже.
     interrupted = workspace / "runs" / "run-interrupted"
     interrupted.mkdir()
     interrupted_journal = interrupted / "publish.journal.jsonl"
@@ -482,19 +485,26 @@ def test_published_master_proof_requires_complete_matching_registry_cycle(tmp_pa
         + "\n",
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="незавершённую публикацию"):
-        enrich.prepare_published_master_import(
-            master,
-            workspace=workspace,
-        )
+    still_ok = enrich.prepare_published_master_import(
+        master,
+        workspace=workspace,
+    )
+    assert still_ok["source_proof"]["publication"]["run_id"] == "run-1"
     interrupted_journal.unlink()
     interrupted.rmdir()
 
     # A newer complete publication on a new monthly path makes the old path
     # stale too; "latest" is global, not merely latest for the selected name.
+    # Содержимое РАЗНОЕ, иначе проверять нечего: с 03.08.2026 файл опознаётся по
+    # байтам, а не по пути, и побайтовая копия опубликованного мастера — это и есть
+    # тот же опубликованный мастер, где бы она ни лежала. Устаревшим файл делает
+    # не путь, а содержимое, которое уже перекрыто более новой публикацией.
     newer = tmp_path / "ОБЩИЙ РЕЕСТР АВГУСТ.xlsx"
-    newer.write_bytes(master.read_bytes())
+    newer_book = load_workbook(master)
+    newer_book[enrich.SHEET_NAME].cell(row=4, column=2, value="Петров")
+    newer_book.save(newer)
     newer_sha = hashlib.sha256(newer.read_bytes()).hexdigest()
+    assert newer_sha != master_sha
     newer_run = workspace / "runs" / "run-2"
     newer_staging = newer_run / "staging"
     newer_staging.mkdir(parents=True)

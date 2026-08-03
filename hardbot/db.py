@@ -2863,6 +2863,50 @@ def clear_pending_import_authorizations() -> int:
     return count
 
 
+def _register_authorization_row(
+    conn: sqlite3.Connection,
+    verified_source: dict,
+    *,
+    source_kind: str,
+    self_issued: bool = False,
+    ttl_hours: int = 24,
+) -> None:
+    """Вставить расписку прямо в открытой транзакции импорта.
+
+    Отличие от ``register_import_authorization``: та открывает своё соединение и
+    коммитит, а здесь мы уже внутри ``BEGIN IMMEDIATE`` импорта — второй коннект
+    к тому же SQLite встал бы на блокировке насмерть.
+
+    Проверки source_id/sequence НЕ дублируем: их только что сделал
+    ``validate_import_source_proof``, а обгон head'а всё равно ловится ниже, в
+    ``_authorized_import_state``, для любого происхождения расписки.
+    """
+    now = datetime.now().astimezone()
+    conn.execute(
+        "INSERT INTO import_receipts "
+        "(proof_digest, source_kind, source_id, sequence, proof_json, "
+        "status, registered_at, expires_at) VALUES (?,?,?,?,?,?,?,?)",
+        (
+            verified_source["digest"],
+            source_kind,
+            verified_source["source_id"],
+            verified_source["sequence"],
+            _canonical_json(verified_source.get("proof") or {}),
+            "pending",
+            now.isoformat(timespec="microseconds"),
+            (now + timedelta(hours=ttl_hours)).isoformat(timespec="microseconds"),
+        ),
+    )
+    # Пишем аудит ТОЙ ЖЕ транзакцией. `audit_access` открывает своё соединение, а
+    # мы внутри BEGIN IMMEDIATE — второй коннект встал бы на блокировке, и запись
+    # молча терялась бы (audit_access глушит исключения намеренно).
+    conn.execute(
+        "INSERT INTO audit (ts, actor, action, target, detail) VALUES (?,?,?,?,?)",
+        (now.isoformat(timespec="seconds"), 0,
+         "import_self_authorized" if self_issued else "import_authorized",
+         verified_source["digest"], source_kind))
+
+
 def _authorized_import_state(
     conn: sqlite3.Connection,
     verified_source: dict,
@@ -2875,9 +2919,25 @@ def _authorized_import_state(
         (digest,),
     ).fetchone()
     if row is None:
-        raise ExchangeContractError(
-            "source proof is not pre-registered by the trusted server registrar"
-        )
+        # ПРЕДУПРЕЖДЕНИЕ, а не отказ (03.08.2026, решение владельца). Требование
+        # «разрешение выдаётся отдельным актом на сервере» снято: незарегистрированный
+        # proof теперь регистрируется тут же и помечается как самовыданный.
+        #
+        # Что при этом НЕ потеряно и потеряться не должно: расписка всё равно
+        # создаётся и тут же гасится, поэтому повтор того же файла остаётся
+        # идемпотентным, а не пишет второй раз; source_id/sequence по-прежнему
+        # защищают от отката на старую версию источника; в аудите видно, что
+        # разрешение выдал сам импорт, а не оператор.
+        _register_authorization_row(conn, verified_source,
+                                    source_kind=source_kind, self_issued=True)
+        row = conn.execute(
+            "SELECT * FROM import_receipts WHERE proof_digest=?",
+            (digest,),
+        ).fetchone()
+        if row is None:                       # запись не удержалась — это уже отказ
+            raise ExchangeContractError(
+                "source proof could not be registered"
+            )
     if (
         row["source_kind"] != source_kind
         or row["source_id"] != verified_source["source_id"]
@@ -3223,13 +3283,16 @@ def import_grid(
     report["ignored_columns"] = ignored_columns
     report["unknown_columns"] = unknown_columns
     if report["unknown_columns"]:
-        report["blocked"] = True
-        report["error"] = (
-            "импорт заблокирован: незнакомые заголовки требуют явного alias "
-            "или новой версии контракта: "
+        # ПРЕДУПРЕЖДЕНИЕ, а не отказ (03.08.2026, решение владельца). Раньше одна
+        # незнакомая колонка отбивала весь файл: в боевом реестре 88+ колонок,
+        # офис добавляет свои, и импорт на 52 тысячи строк падал из-за заголовка,
+        # который боту вообще не нужен. Колонки по-прежнему не читаются — они
+        # просто не мешают, и их видно в отчёте.
+        report["warnings"] = report.get("warnings", []) + [
+            "незнакомые заголовки пропущены (нужен alias или новая версия "
+            "контракта, чтобы бот начал их читать): "
             + ", ".join(report["unknown_columns"][:20])
-        )
-        return report
+        ]
 
     # У production master сразу после заголовка находится строка профилей
     # («сх» / «хард» / «софт»). Это часть формы книги, а не клиент. Раньше
@@ -3424,12 +3487,11 @@ def import_grid(
                 duplicate_conflicts.setdefault(cid, set()).add(key)
 
     if duplicate_rows:
-        report["blocked"] = True
-        report["error"] = (
-            "импорт заблокирован: опубликованный master содержит повтор "
-            "канонического КД; hardbot не сливает одинаковые, дополняющие или "
-            "конфликтующие строки — исправьте источник и опубликуйте заново"
-        )
+        # ПРЕДУПРЕЖДЕНИЕ, а не отказ (03.08.2026, решение владельца). Повторы
+        # канонического КД в боевом реестре встречаются, и отказ всего файла из-за
+        # них означал «импорта не будет вообще». Слияния как не было, так и нет:
+        # берём ПЕРВУЮ строку договора (она уже в `grouped`), остальные не трогаем
+        # и перечисляем поимённо — вместе с полями, где они разошлись.
         report["duplicate_conflicts"] = [
             {
                 "contract_id": cid,
@@ -3439,7 +3501,13 @@ def import_grid(
             for cid in sorted(duplicate_rows)
         ]
         report["quarantined_contracts"] = sorted(duplicate_rows)
-        return report
+        conflicting = sorted(duplicate_conflicts)
+        report["warnings"] = report.get("warnings", []) + [
+            f"повторы канонического КД: {len(duplicate_rows)} договоров, взята "
+            f"первая строка каждого"
+            + (f"; расходятся значения у {len(conflicting)} из них: "
+               + ", ".join(conflicting[:10]) if conflicting else "")
+        ]
 
     if (
         source_kind == IMPORT_SOURCE_TEST_SUBSET
