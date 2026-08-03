@@ -1662,6 +1662,46 @@ async def _admin_import(request: web.Request) -> web.Response:
     )
 
 
+# Регистратор разрешений на импорт живёт РЯДОМ С ДАННЫМИ и по умолчанию не имеет
+# HTTP-входа: боевой master нельзя загрузить одним ключом, нужен отдельный акт на
+# самом сервере. Для СВОЕГО тестового контура владелец может открыть узкую ручку —
+# только для test_subset (утверждённое подмножество с явным approval-id и scope),
+# и только явным флагом окружения. published_master через HTTP не регистрируется
+# НИКОГДА, чтобы контроль над боевой загрузкой остался двухшаговым.
+IMPORT_REGISTRAR_HTTP = os.getenv("IMPORT_REGISTRAR_HTTP", "").strip() in (
+    "1", "true", "yes")
+
+
+async def _admin_import_authorize(request: web.Request) -> web.Response:
+    """Зарегистрировать proof тестового подмножества (если ручка включена)."""
+    _admin(request)
+    if not IMPORT_REGISTRAR_HTTP:
+        return web.json_response(
+            {"blocked": True, "enabled": False,
+             "error": "HTTP-регистрация разрешений выключена: зарегистрируйте proof "
+                      "на сервере — import_authorization.py register"},
+            status=403)
+    body = await request.json()
+    source_kind = body.get("source_kind")
+    if source_kind != db.IMPORT_SOURCE_TEST_SUBSET:
+        return web.json_response(
+            {"blocked": True, "enabled": True,
+             "error": "через HTTP регистрируется только test_subset; "
+                      "published_master — только локальным регистратором"},
+            status=403)
+    try:
+        authorization = db.register_import_authorization(
+            body.get("source_proof"), source_kind=source_kind,
+            ttl_hours=int(body.get("ttl_hours") or 24))
+    except (ExchangeContractError, ValueError, TypeError) as exc:
+        return web.json_response(
+            {"blocked": True, "error": f"proof отклонён: {exc}"}, status=409)
+    db.audit_access(0, "import_authorize", authorization.get("proof_digest") or "",
+                    source_kind)
+    return web.json_response({"ok": True, "enabled": True,
+                              "authorization": authorization})
+
+
 async def _admin_import_json(request: web.Request) -> web.Response:
     """Импорт published master: гриды уже распарсены клиентом (calamine).
 
@@ -2116,6 +2156,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/admin/stats", _admin_stats)
     app.router.add_post("/admin/import", _admin_import)
     app.router.add_post("/admin/import.json", _admin_import_json)
+    app.router.add_post("/admin/import/authorize.json", _admin_import_authorize)
     app.router.add_get("/admin/chats", _admin_chats)
     app.router.add_post("/admin/chats.set", _admin_chats_set)
     app.router.add_get("/admin/export", _admin_export)

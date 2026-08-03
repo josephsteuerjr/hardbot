@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 import ssl
+import tempfile
 import threading
 import urllib.error
 import urllib.parse
@@ -40,13 +41,20 @@ SETTINGS_PATH = APP_DIR / "настройки пульта.json"
 DEFAULT_URL = "https://hardbot2.166.88.185.90.nip.io"
 DEFAULT_KEY = ""
 IMPORT_SOURCE_PUBLISHED_MASTER = enrich.IMPORT_SOURCE_PUBLISHED_MASTER
-LIMITED_TEST_ENRICH_WRITES_ENABLED = False
-LIMITED_TEST_MASTER_IMPORT_UI_ENABLED = False
+IMPORT_SOURCE_TEST_SUBSET = "test_subset"
+# Возвращено владельцем 03.08.2026. Запись в личные книги — это штатная работа
+# пульта (и в политике обмена она названа единственным штатным способом перенести
+# доказанные визиты бота вниз). На период первого live-baseline её выключали, чтобы
+# ничто не писало в книги мимо registry_cycle; baseline опубликован 29.07.
+# Что НЕ вернулось: сброс базы из пульта. Он обходит snapshot/export/clearance,
+# и это не про удобство, а про доказуемость очистки перед тестом на серверах компании.
+LIMITED_TEST_ENRICH_WRITES_ENABLED = True
+LIMITED_TEST_MASTER_IMPORT_UI_ENABLED = True
 LIMITED_TEST_RESET_UI_ENABLED = False
 LIMITED_TEST_ENRICH_DISABLED_MESSAGE = (
-    "Запись в личные реестры из Tk-пульта отключена на период ограниченного "
-    "теста. Разрешены только evidence-run канонического registry_cycle и "
-    "самостоятельный ночной registry_cycle. Здесь доступен только предпросмотр."
+    "Запись в личные реестры из Tk-пульта отключена. Разрешены только "
+    "evidence-run канонического registry_cycle и самостоятельный ночной "
+    "registry_cycle. Здесь доступен только предпросмотр."
 )
 LIMITED_TEST_MASTER_IMPORT_DISABLED_MESSAGE = (
     "Прямой импорт master из Tk-пульта отключён: сервер требует отдельную "
@@ -771,23 +779,26 @@ class Pult(tk.Tk):
     def _build_registry(self, fr):
         inner = self._section_inner(fr)
 
-        imp = Card(inner, "Импорт опубликованного master",
-                   "Единственный вход в hardbot: общий реестр, уже опубликованный "
-                   "registry_cycle. Личные ФИО.xlsb сюда не загружаются. Офисные "
-                   "правки сначала проходят personal → registry_cycle → master.")
+        imp = Card(inner, "Импорт реестра",
+                   "Общий реестр: опубликованный registry_cycle master или "
+                   "утверждённое тестовое подмножество. Личные ФИО.xlsb сюда не "
+                   "загружаются — офисные правки идут personal → registry_cycle → "
+                   "master. Разрешение на загрузку регистрируется отдельно; если "
+                   "ручка регистратора на сервере закрыта, пульт покажет команду.")
         imp.pack(fill="x")
         rowi = tk.Frame(imp.inner, bg=CARD)
         rowi.pack(anchor="w")
-        btn(rowi, "Выбрать опубликованный master…", self.do_import,
-            kind="accent").pack(side="left")
+        btn(rowi, "Выбрать реестр…", self.do_import, kind="accent").pack(side="left")
         self.imp_kvs = KVGrid(imp.inner)
         self.imp_kvs.pack(anchor="w", pady=(10, 0))
         self.imp_warn = tk.Label(imp.inner, text="", bg=CARD, fg=WARN, font=f(9),
                                  justify="left", wraplength=760)
         self.imp_warn.pack(anchor="w")
 
-        enr = Card(inner, "Обогащение: только предпросмотр",
-                   LIMITED_TEST_ENRICH_DISABLED_MESSAGE)
+        enr = Card(inner, "Обогащение личных реестров",
+                   "Точечно переносит доказанные визиты бота в личные ФИО.xlsb: "
+                   "пишутся только ячейки с доказательством визита, чужие правки "
+                   "не трогаются. Сначала предпросмотр, запись — отдельной кнопкой.")
         enr.pack(fill="x", pady=(12, 0))
         rowe = tk.Frame(enr.inner, bg=CARD)
         rowe.pack(anchor="w")
@@ -890,12 +901,11 @@ class Pult(tk.Tk):
         self.reset_out = tk.Label(cl.inner, text="", bg=CARD, fg=MUTED, font=f(9))
         self.reset_out.pack(anchor="w", pady=(6, 0))
 
-        geo = Card(inner, "Геокодинг адресов",
-                   "Идёт на сервере в фоне. Запускай после импорта, если у части клиентов "
-                   "нет координат.")
-        geo.pack(fill="x", pady=(12, 0))
-        btn(geo.inner, "Запустить геокодинг", self.do_geocode).pack(anchor="w")
-
+        # Кнопки «Запустить геокодинг» здесь больше нет. Координаты сервер ставит
+        # сам после каждого импорта (scoring.geocode_city_centroids в конце
+        # /admin/import.json), тем же офлайн-справочником и тем же кодом. Ручной
+        # повтор давал ровно тот же результат и только создавал впечатление, что
+        # без него точки не появятся.
         per = Card(inner, "Период выгрузки",
                    "По дате закрепления: выездники видят только клиентов из этого окна. "
                    "Пусто — видны все. Формат: ГГГГ-ММ-ДД или ДД.ММ.ГГГГ.")
@@ -928,25 +938,49 @@ class Pult(tk.Tk):
         if not path:
             return
         self.toast("Импорт " + Path(path).name + "…")
+
         def work():
-            prepared = enrich.prepare_published_master_import(path)
-            return self.api(
-                "POST",
-                "/admin/import.json",
-                {
-                    "data_exchange_contract": enrich.DATA_EXCHANGE_CONTRACT,
-                    "source_kind": IMPORT_SOURCE_PUBLISHED_MASTER,
-                    "source_proof": prepared["source_proof"],
-                    "sheets": prepared["sheets"],
-                },
-                timeout=120,
-            )
+            prepared = self._prepare_import(path)
+            body = {
+                "data_exchange_contract": enrich.DATA_EXCHANGE_CONTRACT,
+                "source_kind": prepared["source_kind"],
+                "source_proof": prepared["source_proof"],
+                "sheets": prepared["sheets"],
+            }
+            # Разрешение на импорт регистрируется ОТДЕЛЬНЫМ актом. Обычно — на самом
+            # сервере (`import_authorization.py register`), и тогда пульт про него
+            # ничего не знает. Если владелец открыл узкую ручку для test_subset, тот
+            # же акт делается отсюда; отказ ручки — не ошибка, а «регистрируй руками».
+            registered = None
+            if prepared["source_kind"] == IMPORT_SOURCE_TEST_SUBSET:
+                registered = self.api(
+                    "POST", "/admin/import/authorize.json",
+                    {"source_kind": prepared["source_kind"],
+                     "source_proof": prepared["source_proof"]},
+                    timeout=60)
+            result = self.api("POST", "/admin/import.json", body, timeout=120)
+            if isinstance(result, dict) and result.get("error"):
+                result = {**result,
+                          "_proof_digest": prepared["proof_digest"],
+                          "_registered": bool(registered and registered.get("ok"))}
+            return result
+
         def done(d):
             if d.get("error"):
                 self.imp_kvs.set_pairs([])
                 extra = ""
                 if d.get("header_sample"):
                     extra = ". В файле: " + ", ".join(d["header_sample"])
+                if d.get("_proof_digest") and not d.get("_registered"):
+                    extra += (
+                        "\n\nРазрешение не зарегистрировано. На сервере:\n"
+                        "  docker compose exec -T bot python import_authorization.py "
+                        f"register --source-kind {IMPORT_SOURCE_TEST_SUBSET} "
+                        "--proof /tmp/proof.json\n"
+                        f"proof: {self._proof_path or '—'}\n"
+                        f"digest: {d['_proof_digest']}\n"
+                        "После регистрации нажми «Выбрать реестр…» и тот же файл ещё раз."
+                    )
                 self.imp_warn.configure(text=d["error"] + extra)
                 self.toast("Импорт не прошёл", err=True)
                 return
@@ -961,6 +995,106 @@ class Pult(tk.Tk):
                 self.toast(f"Импорт готов: +{fmt_n(d.get('inserted'))} / обновлено {fmt_n(d.get('updated'))}")
             self.refresh()
         self.bg_task(work, done)
+
+    # Куда положен proof последней попытки — чтобы его можно было зарегистрировать
+    # руками, если HTTP-ручка регистратора на сервере выключена.
+    _proof_path = None
+
+    def _prepare_import(self, path: str) -> dict:
+        """Файл → (source_kind, proof, sheets). Вид источника выбирается по файлу.
+
+        Опубликованный master узнаётся по receipt registry_cycle рядом с ним: если
+        receipt есть, грузим как `published_master` — это боевой путь, и HTTP его
+        не регистрирует ни при каких настройках. Если receipt'а нет, файл может
+        быть только утверждённым подмножеством (`test_subset`): тогда scope
+        строится из самого файла, а approval-id привязан к его SHA — подменить
+        книгу под уже выданное разрешение нельзя.
+        """
+        import exchange_contract as contract
+        import limited_test_import as lti
+
+        self._proof_path = None
+        try:
+            prepared = enrich.prepare_published_master_import(path)
+            grid = lti._validate_sheets(prepared["sheets"])
+            digest = contract.validate_import_source_proof(
+                prepared["source_proof"],
+                source_kind=IMPORT_SOURCE_PUBLISHED_MASTER,
+                grid=grid)["digest"]
+            return {"source_kind": IMPORT_SOURCE_PUBLISHED_MASTER,
+                    "source_proof": prepared["source_proof"],
+                    "sheets": prepared["sheets"], "proof_digest": digest}
+        except Exception:                                  # noqa: BLE001
+            pass
+
+        stable = enrich.read_stable_workbook(path)
+        grid = lti._validate_sheets(stable["sheets"])
+        scope = self._scope_from_grid(grid)
+        approval = f"pult-{Path(path).stem.strip()[:80]}-{stable['file_sha256'][:12]}"
+        proof = contract.build_test_subset_source_proof(
+            grid, approval_id=approval, contracts=scope)
+        digest = contract.validate_import_source_proof(
+            proof, source_kind=IMPORT_SOURCE_TEST_SUBSET, grid=grid)["digest"]
+        try:
+            out = Path(tempfile.gettempdir()) / f"hardbot-proof-{digest[:12]}.json"
+            out.write_text(json.dumps(proof, ensure_ascii=False, sort_keys=True),
+                           encoding="utf-8")
+            self._proof_path = str(out)
+        except OSError:
+            self._proof_path = None
+        return {"source_kind": IMPORT_SOURCE_TEST_SUBSET, "source_proof": proof,
+                "sheets": stable["sheets"], "proof_digest": digest}
+
+    @staticmethod
+    def _scope_from_grid(grid: list[list]) -> list[dict[str, str]]:
+        """[{contract_id, responsible}] из книги — ровно то, что разрешаем грузить.
+
+        Пробелы и регистр не режем сами: контракт нормализует их одинаково с обеих
+        сторон. Именно на этом спотыкался ручной scope — хвостовой пробел в
+        «ответственный Сотрудник» валил импорт целиком с `scope_invalid`.
+
+        Строка профилей («сх»/«хард»/«софт») под заголовком — часть формы книги,
+        а не клиент. Распознаём её ТОЧНО ТАК ЖЕ, как сервер: только в контрактной
+        позиции и только по тегу в колонке-ключе. Иначе она приезжает в scope
+        тринадцатым «договором» с ответственным «сх», а сервер её пропускает — и
+        импорт валится на `scope_mismatch`, который винит данные, а не пульт.
+        """
+        import exchange_contract as contract
+
+        head = None
+        for i, row in enumerate(grid[:10]):
+            titles = {enrich.norm_title(c) for c in row}
+            if enrich.norm_title("Номер КД / ID") in titles:
+                head = i
+                break
+        if head is None:
+            raise ValueError("в книге нет колонки «Номер КД / ID»")
+        cols = {enrich.norm_title(c): j for j, c in enumerate(grid[head]) if c}
+        c_id = cols[enrich.norm_title("Номер КД / ID")]
+        c_who = cols.get(enrich.norm_title("ответственный Сотрудник"))
+        if c_who is None:
+            raise ValueError("в книге нет колонки «ответственный Сотрудник»")
+
+        first = head + 1
+        type_row_index = head + contract.WORKBOOK_TYPE_ROW_OFFSET
+        tags = {enrich.norm_title(t) for t in contract.WORKBOOK_TYPE_ROW_TAGS}
+        if type_row_index < len(grid) and c_id < len(grid[type_row_index]) \
+                and enrich.norm_title(grid[type_row_index][c_id]) in tags:
+            first = type_row_index + 1
+
+        scope, seen = [], set()
+        for row in grid[first:]:
+            if len(row) <= max(c_id, c_who):
+                continue
+            cid = enrich.norm_cid(row[c_id])
+            if not cid or cid in seen:
+                continue
+            seen.add(cid)
+            scope.append({"contract_id": cid,
+                          "responsible": enrich.cell_text(row[c_who])})
+        if not scope:
+            raise ValueError("в книге нет ни одной строки с номером КД")
+        return scope
 
     @staticmethod
     def _imp_pairs(d: dict) -> list[tuple[str, object]]:
@@ -1475,10 +1609,6 @@ class Pult(tk.Tk):
             self.toast(txt)
             self.refresh()
         self.bg_task(lambda: self.api("POST", "/admin/reset", {"scope": scope}), done)
-
-    def do_geocode(self):
-        self.bg_task(lambda: self.api("POST", "/admin/geocode"),
-                     lambda _d: self.toast("Геокодинг запущен — идёт в фоне, обнови сводку через минуту"))
 
     def _show_period(self, d):
         self.p_from.delete(0, "end")
