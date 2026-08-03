@@ -36,7 +36,7 @@ def test_start_never_issues_link(monkeypatch):
     marker = object()
     monkeypatch.setattr(handlers_main, "_remember", lambda _user: None)
     monkeypatch.setattr(handlers_main, "lang_of", lambda _uid: "ru")
-    monkeypatch.setattr(handlers_main, "_open_app_kb", lambda _lang: marker)
+    monkeypatch.setattr(handlers_main, "_open_app_kb", lambda _lang, _uid: marker)
     monkeypatch.setattr(handlers_main, "t", lambda key, _lang: key)
     monkeypatch.setattr(
         handlers_main, "_applink_text",

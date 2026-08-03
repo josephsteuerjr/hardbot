@@ -41,11 +41,17 @@ def _remember(user) -> None:
         pass
 
 
-def _open_app_kb(lang: str, uid: int | None = None) -> InlineKeyboardMarkup | None:
+def _open_app_kb(lang: str, uid: int) -> InlineKeyboardMarkup | None:
     """Inline-кнопка WebApp «Открыть приложение» — только при заданном https-URL миниаппа.
     Дублирует нативную menu-кнопку (её ставит app.py), но появляется прямо в сообщении.
     Привязанному выезднику добавляется вторая кнопка — одноразовая ссылка для входа в
-    автономное приложение (PWA, работает без интернета)."""
+    автономное приложение (PWA, работает без интернета).
+
+    `uid` ОБЯЗАТЕЛЕН. Он был необязательным, и два вызова из четырёх его не
+    передавали — ровно те, через которые проходит новый человек: `/start` и
+    ответ на любой текст. Кнопка заявки на роль зависит от uid, поэтому
+    руководитель писал боту и не видел вообще ничего, кроме «Открыть приложение».
+    Значение по умолчанию тут не удобство, а способ потерять кнопку молча."""
     url = os.getenv("MINIAPP_URL", "").strip()
     if not url or not url.lower().startswith("https://"):
         return None   # WebApp-кнопки требуют https; без URL кнопку не рисуем
@@ -54,19 +60,23 @@ def _open_app_kb(lang: str, uid: int | None = None) -> InlineKeyboardMarkup | No
     # Заявка на роль — тем, у кого ни роли, ни привязки. Вторым сообщением это
     # было бы спамом на каждый /start, а без неё человеку некуда нажать, кроме
     # как писать владельцу в личку. Сбой БД не должен ломать саму клавиатуру.
+    # Оба похода в БД — под одной защитой. Раньше прикрыт был только первый, и
+    # сбой на втором ронял ВСЮ клавиатуру: человек получал сообщение вообще без
+    # кнопок, включая «Открыть приложение», ради которой всё и затевалось.
     try:
-        if uid and uid != ADMIN_ID and not db.is_manager(uid) and not db.get_binding(uid):
-            rows.append([InlineKeyboardButton(text="🧑‍💼 Запрос для руководителей",
+        bound = db.get_binding(uid) if uid else None
+        if uid and uid != ADMIN_ID and not bound and not db.is_manager(uid):
+            rows.append([InlineKeyboardButton(text=BTN_MANAGER_REQ,
                                               callback_data="mgrself")])
+        if bound:
+            # Ссылка уже в тексте сообщения — вместо кнопки «дай ссылку» кладём кнопки
+            # с инструкцией установки под платформу (по тапу приходит пошаговый мануал).
+            rows.append([InlineKeyboardButton(text=t("btn_manual_android", lang),
+                                              callback_data="manual:android")])
+            rows.append([InlineKeyboardButton(text=t("btn_manual_ios", lang),
+                                              callback_data="manual:ios")])
     except Exception:  # noqa: BLE001
         pass
-    if uid and db.get_binding(uid):
-        # Ссылка уже в тексте сообщения — вместо кнопки «дай ссылку» кладём кнопки
-        # с инструкцией установки под платформу (по тапу приходит пошаговый мануал).
-        rows.append([InlineKeyboardButton(text=t("btn_manual_android", lang),
-                                          callback_data="manual:android")])
-        rows.append([InlineKeyboardButton(text=t("btn_manual_ios", lang),
-                                          callback_data="manual:ios")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -124,7 +134,7 @@ async def cmd_start(message: Message):
     lang = lang_of(message.from_user.id)
     # /start никогда не выпускает автономную ссылку. Для неё сотрудник явно пишет
     # отдельное слово «ссылка» — случайный старт/текст больше не плодит коды входа.
-    kb = _open_app_kb(lang)
+    kb = _open_app_kb(lang, message.from_user.id)
     await message.answer(t("start_app", lang) if kb else t("start_no_app", lang),
                          reply_markup=kb)
 
@@ -385,7 +395,7 @@ async def any_message(message: Message):
             # Явный отказ с причиной вместо тихого падения в обычную кнопку.
             await message.answer(_applink_refusal(message.from_user.id, lang))
         return
-    kb = _open_app_kb(lang)
+    kb = _open_app_kb(lang, message.from_user.id)
     if kb:
         await message.answer(t("start_app", lang), reply_markup=kb)
 
