@@ -658,7 +658,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=28;
+const SHELL_VERSION=29;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
