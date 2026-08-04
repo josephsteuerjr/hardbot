@@ -133,8 +133,18 @@ def sorted_employees(mgr: dict) -> list[str]:
 
     Точечный руководитель (список из пульта) не страдает: manager_employees
     возвращает ему тот же явный список.
+
+    ВЛАДЕЛЕЦ — особый случай, и на нём я эту правку и сломал. У него нет записи
+    в managers: дайджест собирает ему синтетического «руководителя» со всеми
+    сотрудниками реестра прямо в mgr["employees"]. Запрос в БД по его id
+    возвращает пусто, и владелец увидел «Команда: 0 · обработано: 0» при живой
+    работе у пятерых. Поэтому пустой ответ БД — повод посмотреть в сам объект,
+    а не считать, что сотрудников нет.
     """
-    return sorted(set(db.manager_employees(mgr["telegram_id"])))
+    live = db.manager_employees(mgr["telegram_id"])
+    if not live:
+        live = [e for e in (mgr.get("employees") or []) if str(e).strip()]
+    return sorted(set(live))
 
 
 def scope_label(mgr: dict) -> str:

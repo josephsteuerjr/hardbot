@@ -68,3 +68,32 @@ def test_summary_counts_the_live_team():
     db.set_manager(7101, "Рук УЗ", ["Узбекистан"], [], direction="uz")
     text, _kb = digest.summary_view(db.get_manager(7101), digest.today_iso())
     assert "Команда: 0" not in text, "сводка направленца снова пустая"
+
+
+def test_owner_without_a_manager_record_still_sees_his_team():
+    """Владелец — синтетический руководитель: записи в managers у него нет.
+
+    04.08.2026: починив дайджест направленцев, я стал спрашивать состав только у
+    БД — и владелец увидел «Команда: 0 · обработано: 0» при живой работе у
+    пятерых. Его список собран прямо в объекте, и пустой ответ БД должен
+    отправлять именно туда.
+    """
+    _clean()
+    _import([("DGS-1", "Узбеков У.", "Ташкент"), ("DGS-2", "Самаркандов С.", "Самарканд")])
+    synthetic = {"telegram_id": 999999, "name": "Владелец", "cities": [],
+                 "employees": ["Узбеков У.", "Самаркандов С."]}
+    assert db.get_manager(999999) is None, "предпосылка: записи в managers нет"
+    team = digest.sorted_employees(synthetic)
+    assert team == ["Самаркандов С.", "Узбеков У."]
+    text, _kb = digest.summary_view(synthetic, digest.today_iso())
+    assert "Команда: 0" not in text
+
+
+def test_db_answer_wins_over_a_stale_stored_list():
+    """У настоящего руководителя живой состав важнее сохранённого."""
+    _clean()
+    _import([("DGS-1", "Узбеков У.", "Ташкент")])
+    db.set_manager(7101, "Рук УЗ", ["Узбекистан"], [], direction="uz")
+    mgr = dict(db.get_manager(7101))
+    mgr["employees"] = ["Кто-то Устаревший"]      # как будто осталось от пульта
+    assert "Кто-то Устаревший" not in digest.sorted_employees(mgr)
