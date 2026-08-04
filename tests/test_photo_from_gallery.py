@@ -80,7 +80,7 @@ def test_all_selected_files_are_read_while_the_picker_is_alive():
     body = INDEX[i:INDEX.index("async function sendPhoto(")]
     read = body.index("photoBytes(small||f)")
     clear = body.index("el.value=\"\"")
-    send = body.index("sendPhoto(rep,p,")
+    send = body.index("await sendPhoto(rep,prepared[i],")
     assert read < clear < send
 
 

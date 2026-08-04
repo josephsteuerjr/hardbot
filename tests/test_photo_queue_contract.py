@@ -83,7 +83,10 @@ def test_retake_keeps_ios_user_activation_and_links_exact_failed_op():
     assert "const it=_retakeTarget;" in body
     assert "input.click()" in body
     assert "async function retakeFailedPhoto" not in body
-    assert "entry.replaces_op_id=prior.op_id;" in INDEX
+    # Связь ставится по явному нажатию, а не по «самому старому failed» этого КД:
+    # иначе обычное добавление снимка молча убирало чужую запись из очереди.
+    assert "RETAKE_FOR={op_id:it.op_id, rep:it.rep};" in body
+    assert "entry.replaces_op_id=retakeOf;" in INDEX
 
 
 def test_indexeddb_write_failure_is_not_reported_as_queued():

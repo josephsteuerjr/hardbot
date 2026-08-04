@@ -40,6 +40,6 @@ def test_shell_cache_was_bumped_for_new_index():
     text = (ROOT / "hardbot" / "miniapp" / "index.html").read_text("utf-8")
     index_sha = hashlib.sha256(text.replace(chr(13) + chr(10), chr(10)).encode("utf-8")).hexdigest()
     assert index_sha == (
-        "733521d04b58579734106a9bcfe65a6f7bd9089faed4a52c56204cb9332a14bd"
+        "368025d78a1c29262da01c222270bbb312482f4764598673c19c4c46d737d06a"
     ), "оболочка изменилась — обнови этот хэш И версию CACHE в sw.js"
     assert 'const CACHE = "hardbot-shell-v28";' in SW

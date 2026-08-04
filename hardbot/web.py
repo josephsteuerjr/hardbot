@@ -1166,6 +1166,14 @@ def _photo_ext(kind: str, hint: str | None) -> str:
     hint = (hint or "").strip()
     if not hint:
         return _PHOTO_CANONICAL_EXT[kind]
+    # Оболочка v26 слала расширение сжатого снимка БЕЗ ведущей точки («jpg»), и
+    # каждое пережатое фото получало 422 «bad extension» — то есть не доезжало
+    # вообще, а очередь помечала его «нужно переснять» навсегда. Оболочку
+    # починили, но у людей в поле она обновится не в ту же секунду, поэтому
+    # точку дописываем здесь: значение всё равно сверяется с magic-байтами ниже,
+    # так что послабление не пропускает ничего нового.
+    if not hint.startswith("."):
+        hint = "." + hint
     if not re.fullmatch(r"\.[A-Za-z0-9]{1,7}", hint):
         raise _PhotoBodyError("bad extension")
     if hint.lower() not in _PHOTO_EXTENSIONS[kind]:

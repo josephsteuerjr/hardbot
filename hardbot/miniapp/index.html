@@ -396,17 +396,30 @@ const money = (n,u) => (n||0).toLocaleString("ru-RU") + (u?(" "+u):"");
 // прерываем: пока человек заполняет форму, показываем полосу «обновитесь», и
 // перезагружаемся только по его тапу либо когда работа закончена.
 let UPDATE_READY=false;
-function noteShellVersion(v){
+// live — версия пришла ЖИВЫМ ответом сервера, а не из оффлайн-снимка в
+// IndexedDB. Разница принципиальная: снимок хранит версию, которую сервер
+// отдавал когда-то, и без сети перезагрузка возьмёт из кэша ту же самую старую
+// оболочку. Получился бы вечный цикл «вижу новую версию → перезагрузка → снова
+// старая оболочка → снова вижу новую версию», и телефон в поле стал бы
+// непригоден именно там, где связи нет.
+function noteShellVersion(v, live){
+  if(!live) return;
   const srv=Number(v);
   if(!Number.isInteger(srv)||srv<=SHELL_VERSION||UPDATE_READY) return;
   UPDATE_READY=true;
-  const busy=(typeof draftDirty!=="undefined"&&draftDirty)||PHOTO_PREPARING.size;
+  // «Занят» — это ещё и открытый выбор файла со сжатием: возврат из системной
+  // камеры сам поднимает visibilitychange, а PHOTO_PREPARING заполняется лишь
+  // ПОСЛЕ чтения и сжатия. Перезагрузиться в этом промежутке — стереть снимок
+  // до того, как он попал в очередь, ровно в тот момент, когда человек его
+  // только что сделал.
+  const busy=(typeof draftDirty!=="undefined"&&draftDirty)
+             ||PHOTO_PREPARING.size||PHOTO_BUSY>0;
   if(!busy){ setTimeout(()=>location.reload(),600); return; }
   try{ updateOffBar(); }catch(e){}
 }
 function reloadForUpdate(){ location.reload(); }
 
-function setMeta(meta){
+function setMeta(meta, live){
   const next=meta||{};
   // Пустые справочники НЕ затирают живые. Снимок бутстрапа лежит в IndexedDB, и
   // после выгрузки приложения он может прийти раньше свежего ответа сервера. Если
@@ -419,7 +432,7 @@ function setMeta(meta){
   STATE.meta=next;
   const v=Number(STATE.meta.formProtocolVersion);
   FORM_VERSION=Number.isInteger(v)&&v>0?v:0;
-  noteShellVersion(STATE.meta.shellVersion);
+  noteShellVersion(STATE.meta.shellVersion, live);
 }
 
 // --- Оффлайн-хранилище (IndexedDB) -----------------------------------------
@@ -581,14 +594,12 @@ async function updateOffBar(){
                                   String(it.failed||"").indexOf("server-")===0);
   const qn=items.length-failed-rejected.length;
   const off = STATE.online===false, t=L();
-  if(!off && !qn && !failed && !rejected.length){ e.className="offbar"; e.innerHTML=""; return; }
+  // UPDATE_READY тоже повод показать полосу. Раньше этот выход стоял ВЫШЕ ветки
+  // обновления, и человек «онлайн, очередь пуста» — то есть в самом обычном
+  // состоянии — кнопку «Обновить» не видел вообще никогда.
+  if(!off && !qn && !failed && !rejected.length && !UPDATE_READY){
+    e.className="offbar"; e.innerHTML=""; return; }
   let msg;
-  if(UPDATE_READY){
-    e.className="offbar on";
-    e.innerHTML=`<span>${esc(L().updready)}</span>`
-      +`<button class="btn line" onclick="reloadForUpdate()">${esc(L().updbtn)}</button>`;
-    return;
-  }
   if(off){ const snap=await loadBootstrapSnapshot();
     const at=snap&&snap.at?new Date(snap.at):null;
     msg=t.offline+(at?" · "+t.datao+" "+hhmm(at):""); }
@@ -606,17 +617,25 @@ async function updateOffBar(){
     const reps=[...new Set(rejected.map(it=>it.rep).filter(Boolean))].slice(0,3).join(", ");
     msg+=(msg?" · ":"")+"⚠️ "+rejected.length+" "+t.savefailed+(reps?" ("+reps+")":"");
   }
+  // Обновление ДОПОЛНЯЕТ полосу, а не подменяет её. Подменяло — и пропадали
+  // разом счётчик очереди, «N фото нужно переснять [код]» и кнопка «Переснять»,
+  // то есть ровно то, ради чего полоса и существует.
+  if(UPDATE_READY) msg=(msg?msg+" · ":"")+t.updready;
   e.className="offbar on";
   e.innerHTML=`<span class="d"></span><span>${esc(msg)}</span>`+
-    (failed?`<button class="offact" onclick="retakeFailedPhoto()">${esc(t.retake)}</button>`:"");
+    (failed?`<button class="offact" onclick="retakeFailedPhoto()">${esc(t.retake)}</button>`:"")+
+    (UPDATE_READY?`<button class="offact" onclick="reloadForUpdate()">${esc(t.updbtn)}</button>`:"");
 }
 function retakeFailedPhoto(){
   const it=_retakeTarget;
   if(!it) return;
+  RETAKE_FOR={op_id:it.op_id, rep:it.rep};
   if(STATE.cur&&STATE.cur.rep===it.rep){
     // Никаких await до click(): iOS сохраняет user activation только синхронно.
     const input=$("photo"); if(input){ input.click(); return; }
   }
+  // Карточка не открыта: открываем и подсказываем. Намерение переживает переход,
+  // но привяжется только к снимку ТОГО ЖЕ КД — см. проверку в upPhoto.
   openP(it.rep).then(()=>toast(L().retakehint));
 }
 
@@ -637,6 +656,13 @@ const SHELL_VERSION=28;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
+// Выбор файла открыт / снимок читается и жмётся. До PHOTO_PREPARING тут ещё
+// ничего нет, а перезагружаться уже нельзя: файл живёт только в памяти.
+let PHOTO_BUSY=0;
+// Явная пересъёмка: op_id того снимка, который человек ЗАМЕНЯЕТ, нажав
+// «Переснять». Заполняется только там — иначе обычное добавление фото стирало
+// бы из очереди чужую неудачную запись просто потому, что она того же КД.
+let RETAKE_FOR=null;   // {op_id, rep} — снимок, который заменяют
 function photoExt(name,mime){
   const m=String(name||"").match(/\.(?:jpe?g|jpe|jfif|png|gif|webp|heic|heif|avif)$/i);
   if(m) return m[0];
@@ -708,13 +734,6 @@ async function markPhotoFailed(it,status){
   it.failed=status||"retake";
   it.failed_at=Date.now();
   try{ await IDB.put("queue",it); }catch(e){}
-}
-async function firstFailedPhoto(rep,exceptOp){
-  try{
-    const items=(await IDB.all("queue"))||[];
-    return items.filter(it=>it&&it.kind==="photo"&&it.failed&&it.rep===rep&&it.op_id!==exceptOp)
-      .sort((a,b)=>(a.failed_at||a.at||0)-(b.failed_at||b.at||0))[0]||null;
-  }catch(e){ return null; }
 }
 async function retireReplacedPhoto(it){
   // Только явная связь, записанная при нажатии «Переснять». Удалять «любой
@@ -1027,7 +1046,7 @@ async function boot(){
     const prev = await loadBootstrapSnapshot();
     if(prev && prev.employee && d.employee && prev.employee !== d.employee) await clearLocalData();
     setBottomNav("clients");   // три вкладки видны с первого экрана
-    setMeta(d.meta); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
+    setMeta(d.meta, true); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
     STATE.roles=d.roles||null;   // роль руководителя: список его сотрудников + текущий
     STATE.online=true;
     cacheBootstrap(d);            // снимок портфеля для оффлайна (в фоне, не блокирует UI)
@@ -1505,25 +1524,36 @@ function photoHeaders(geo,ext){
 async function upPhoto(id, live){
   const el=$(id||"photo"); if(!el) return;
   const files=[...(el.files||[])]; if(!files.length) return;
+  if(!STATE.cur) return;                       // карточку успели закрыть
   const rep=STATE.cur.rep;
+  // Намерение «переснять» живёт до первого снимка пачки, только для него и
+  // только в пределах своего же КД.
+  const retakeOf=(RETAKE_FOR&&RETAKE_FOR.rep===rep)?RETAKE_FOR.op_id:null;
+  RETAKE_FOR=null;
+  PHOTO_BUSY++;
   // Важно для iOS: читаем и жмём ВСЕ выбранные файлы сразу, пока
   // security-scoped файлы из picker живы. Дальше в сеть и IndexedDB идут
   // самостоятельные ArrayBuffer'ы, не File/Blob path.
   const prepared=[];
-  for(const f of files){
-    try{
-      // Жмём ДО чтения в ArrayBuffer: иначе в память и в IndexedDB ляжет
-      // восьмимегабайтный оригинал, который потом всё равно не уедет.
-      const small=await shrinkPhoto(f);
-      prepared.push({bytes:await photoBytes(small||f),
-                     mime:small?"image/jpeg":(f.type||"image/jpeg"),
-                     ext:small?"jpg":photoExt(f.name,f.type)});
-    }catch(e){ toast(L().photolost); }
-  }
-  try{ el.value=""; }catch(e){}
-  for(const p of prepared) await sendPhoto(rep,p,live!==false);
+  try{
+    for(const f of files){
+      try{
+        // Жмём ДО чтения в ArrayBuffer: иначе в память и в IndexedDB ляжет
+        // восьмимегабайтный оригинал, который потом всё равно не уедет.
+        const small=await shrinkPhoto(f);
+        prepared.push({bytes:await photoBytes(small||f),
+                       mime:small?"image/jpeg":(f.type||"image/jpeg"),
+                       ext:small?".jpg":photoExt(f.name,f.type)});
+      }catch(e){ toast(L().photolost); }
+    }
+    try{ el.value=""; }catch(e){}
+    // Держим «занят» до конца отправки ВСЕЙ пачки: пока идёт сеть по первому
+    // снимку, остальные живут только в памяти, и перезагрузка их потеряет.
+    for(let i=0;i<prepared.length;i++)
+      await sendPhoto(rep,prepared[i],live!==false,i===0?retakeOf:null);
+  }finally{ PHOTO_BUSY--; }
 }
-async function sendPhoto(rep,p,live){
+async function sendPhoto(rep,p,live,retakeOf){
   const op_id=uuid(), at=Date.now();
   const bytes=p.bytes, mime=p.mime, ext2=p.ext;
   // Сначала фиксируем единственную самостоятельную копию и ждём commit IDB.
@@ -1534,9 +1564,12 @@ async function sendPhoto(rep,p,live){
   PHOTO_PREPARING.add(op_id);
   try{
     if(!(await enqueue(entry))){ toast(L().photolost); return; }
-    const prior=await firstFailedPhoto(rep,op_id);
-    if(prior){
-      entry.replaces_op_id=prior.op_id;
+    // Связь ставим ТОЛЬКО если человек нажал «Переснять». Раньше её вешали на
+    // «самое старое неудачное фото этого КД», и обычное добавление снимка молча
+    // убирало из очереди чужую запись — вместе с напоминанием, что её надо
+    // переснять. С мультивыбором это стало бы заметнее.
+    if(retakeOf&&retakeOf!==op_id){
+      entry.replaces_op_id=retakeOf;
       try{ await IDB.put("queue",entry); }catch(e){}  // базовая запись уже committed
     }
     // maximumAge 5с: для пруфа съёмки нужна свежая точка, а не кэш минутной
@@ -1570,8 +1603,14 @@ async function sendPhoto(rep,p,live){
   }catch(e){
     // Нет сети/временная серверная ошибка: committed-запись уже в очереди.
     // Счётчик покажем оптимистично, тот же op_id досылается при связи.
-    STATE.online=false; STATE.cur.photos=(STATE.cur.photos||0)+1;
-    const el=$("phc"); if(el) el.textContent=L().photos+": "+STATE.cur.photos+" ("+L().queuedn+")";
+    // STATE.cur обнуляется тапом по нижней навигации. Без проверки это TypeError,
+    // и он рвёт цикл отправки: остальные снимки пачки не уходят вообще.
+    STATE.online=false;
+    if(STATE.cur&&STATE.cur.rep===rep){
+      STATE.cur.photos=(STATE.cur.photos||0)+1;
+      const el=$("phc");
+      if(el) el.textContent=L().photos+": "+STATE.cur.photos+" ("+L().queuedn+")";
+    }
     toast(L().savedoff); updateOffBar();
   }
 }
@@ -1985,7 +2024,7 @@ async function refreshData(){
     if(prev && prev.employee && d.employee && prev.employee!==d.employee) await clearLocalData();
     const sig=ps=>JSON.stringify((ps||[]).map(p=>[p.rep,p.visited,p.n]));
     const changed=sig(STATE.persons)!==sig(d.persons);
-    setMeta(d.meta); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
+    setMeta(d.meta, true); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
     STATE.roles=d.roles||null;   // роль руководителя: список его сотрудников + текущий
     STATE.online=true; cacheBootstrap(d); updateOffBar();
     if(changed){
