@@ -26,13 +26,18 @@ INDEX = (pathlib.Path(__file__).resolve().parent.parent
          / "hardbot" / "miniapp" / "index.html").read_text(encoding="utf-8")
 
 
-def _fn(name: str, size: int = 900) -> str:
+def _fn(name: str, until: str) -> str:
+    """Тело функции по ГРАНИЦЕ, а не по числу символов.
+
+    Срез фиксированной длины ломается от любого добавленного комментария и
+    сообщает «инвариант нарушен» там, где нарушен только счёт байтов.
+    """
     i = INDEX.index(f"function {name}(")
-    return INDEX[i:i + size]
+    return INDEX[i:INDEX.index(until, i)]
 
 
 def test_update_decision_uses_only_a_live_server_answer():
-    body = _fn("noteShellVersion")
+    body = _fn("noteShellVersion", "function reloadForUpdate(")
     assert "if(!live) return;" in body, "решение снова принимается по кэшу — цикл перезагрузок"
     assert "function noteShellVersion(v, live)" in INDEX
 
@@ -43,8 +48,21 @@ def test_offline_boot_does_not_claim_the_version_is_live():
     assert INDEX.count("setMeta(d.meta, true);") == 2, "живые ответы должны быть помечены"
 
 
+def test_open_form_counts_as_busy_even_when_the_draft_is_already_synced():
+    """draftDirty — «есть неотправленные правки», а не «человек работает».
+
+    pushDraft гасит его каждые 20 секунд и при уходе в фон, поэтому открытая
+    заполненная форма почти всё время выглядит «свободен». Человек посреди
+    разговора с должником вылетел бы в список клиентов: текст черновика уцелел
+    бы, а место — нет.
+    """
+    body = _fn("noteShellVersion", "function reloadForUpdate(")
+    assert "formVisible()" in body, "открытая форма снова не считается работой"
+    assert 'STATE.tab==="form"' in INDEX
+
+
 def test_busy_covers_the_gap_between_the_camera_and_the_queue():
-    body = _fn("noteShellVersion")
+    body = _fn("noteShellVersion", "function reloadForUpdate(")
     assert "PHOTO_BUSY>0" in body, "промежуток «камера закрылась, фото ещё в памяти» не покрыт"
     assert "let PHOTO_BUSY=0;" in INDEX
 
@@ -60,7 +78,7 @@ def test_photo_busy_is_held_until_the_whole_batch_is_queued():
 
 
 def test_update_bar_is_reachable_in_the_normal_state():
-    body = _fn("updateOffBar", 2600)
+    body = _fn("updateOffBar", "function retakeFailedPhoto(")
     early = body.index('e.className="offbar"; e.innerHTML=""; return;')
     guard = body.rindex("!UPDATE_READY", 0, early)
     assert guard < early, "ранний выход снова закрывает собой полосу обновления"

@@ -41,7 +41,7 @@ def test_server_reads_the_version_from_sw_and_does_not_duplicate_it():
 def test_update_never_interrupts_work():
     """Перезагрузка посреди заполнения формы стоила бы человеку работы."""
     i = INDEX.index("function noteShellVersion(")
-    body = INDEX[i:i + 700]
+    body = INDEX[i:INDEX.index("function reloadForUpdate(", i)]
     assert "draftDirty" in body, "не проверяется незаконченный черновик"
     assert "PHOTO_PREPARING.size" in body, "не проверяется готовящееся фото"
     assert "location.reload()" in body
@@ -60,5 +60,5 @@ def test_update_message_exists_in_all_three_languages():
 def test_older_or_equal_server_version_does_nothing():
     """Сервер позади или вровень — обновляться не с чего."""
     i = INDEX.index("function noteShellVersion(")
-    body = INDEX[i:i + 400]
+    body = INDEX[i:INDEX.index("function reloadForUpdate(", i)]
     assert "srv<=SHELL_VERSION" in body
