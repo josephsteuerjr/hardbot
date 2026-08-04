@@ -263,12 +263,28 @@ def _title(key: str, lang: str) -> str:
     return BY_KEY[key].title if key in BY_KEY else key
 
 
+@functools.lru_cache(maxsize=1)
+def _shell_version() -> int:
+    """Номер версии оболочки из sw.js. Дублировать его в коде нельзя: разъедется."""
+    try:
+        text = (Path(__file__).parent / "miniapp" / "sw.js").read_text(encoding="utf-8")
+        m = re.search(r"hardbot-shell-v(\d+)", text)
+        return int(m.group(1)) if m else 0
+    except OSError:
+        return 0
+
+
 def _meta(lang: str) -> dict:
     return {
         "dropdowns": {k: [{"value": v, "label": tv(v, lang)} for v in DROPDOWNS[k]]
                       for k in FORM_DROPDOWNS},
         "dropdownTitles": {k: _title(k, lang) for k in FORM_DROPDOWNS},
         "formProtocolVersion": FORM_PROTOCOL_VERSION,
+        # Версия оболочки — из sw.js, единственного места, где она объявлена.
+        # Приложение сравнивает её со своей и, если сервер ушёл вперёд,
+        # предлагает обновиться САМО. 04.08.2026 обновление приходилось объяснять
+        # людям словами «закройте из списка задач», и до половины оно не дошло.
+        "shellVersion": _shell_version(),
         "dataExchangeContract": DATA_EXCHANGE_CONTRACT,
         "vectorTiles": "/tiles/basemap.pmtiles" if TILES_FILE.exists() else None,
         # Микрофон показываем только при полностью заданном UDS-контракте.

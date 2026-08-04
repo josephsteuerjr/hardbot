@@ -290,6 +290,7 @@ const I18N = {
     savedoff:"Сохранено — уйдёт при связи",queuedn:"в очереди",
     photoretake:"фото нужно переснять",photolost:"Фото не сохранилось — снимите его ещё раз",
     nolist:"Список не загрузился. Закройте приложение и откройте заново — при связи он придёт с сервера.",
+    updready:"Вышло обновление приложения",updbtn:"Обновить",
     retake:"Переснять",retakehint:"Карточка открыта — нажмите «Добавить фото»",
     authexpired:"Срок доступа истёк. Напишите боту слово «ссылка» — придёт новая ссылка: откройте её и добавьте приложение на экран заново, либо вставьте её сюда. Несинхронизированные визиты не потеряются.",
     authneed:"Нет доступа. Напишите боту слово «ссылка» — придёт ссылка для входа: откройте её, либо вставьте сюда.",
@@ -329,6 +330,7 @@ const I18N = {
     savedoff:"Saqlandi — aloqa paydo bo‘lsa yuboriladi",queuedn:"navbatda",
     photoretake:"rasmni qayta olish kerak",photolost:"Rasm saqlanmadi — qayta oling",
     nolist:"Ro'yxat yuklanmadi. Ilovani yopib, qayta oching — aloqa bo'lsa serverdan keladi.",
+    updready:"Ilova yangilandi",updbtn:"Yangilash",
     retake:"Qayta olish",retakehint:"Karta ochildi — «Rasm qo‘shish»ni bosing",
     authexpired:"Kirish muddati tugadi. Botga «ссылка» deb yozing — yangi havola keladi: uni oching va ilovani ekranga qayta qo‘shing, yoki shu yerga joylang. Yuborilmagan chiqishlar yo‘qolmaydi.",
     authneed:"Kirish yo‘q. Botga «ссылка» deb yozing — kirish havolasi keladi: uni oching yoki shu yerga joylang.",
@@ -368,6 +370,7 @@ const I18N = {
     savedoff:"Захира шуд — ҳангоми алоқа фиристода мешавад",queuedn:"дар навбат",
     photoretake:"расмро аз нав гирифтан лозим",photolost:"Расм захира нашуд — аз нав гиред",
     nolist:"Рӯйхат бор нашуд. Барномаро пӯшед ва аз нав кушоед — ҳангоми алоқа аз сервер меояд.",
+    updready:"Навсозии барнома баромад",updbtn:"Навсозӣ",
     retake:"Аз нав гирифтан",retakehint:"Корт кушода шуд — «Иловаи расм»-ро пахш кунед",
     authexpired:"Мӯҳлати дастрасӣ гузашт. Ба бот калимаи «ссылка» нависед — пайванди нав меояд: онро кушоед ва барномаро аз нав ба экран гузоред, ё ин ҷо гузоред. Сафарҳои фиристоданашуда гум намешаванд.",
     authneed:"Дастрасӣ нест. Ба бот калимаи «ссылка» нависед — пайванди воридшавӣ меояд: онро кушоед ё ин ҷо гузоред.",
@@ -382,6 +385,20 @@ const L = () => I18N[STATE.lang] || I18N.ru;
 const $ = (id) => document.getElementById(id);
 const enc = encodeURIComponent;
 const money = (n,u) => (n||0).toLocaleString("ru-RU") + (u?(" "+u):"");
+// Обновление, которое не надо объяснять словами. Черновик и загрузку фото не
+// прерываем: пока человек заполняет форму, показываем полосу «обновитесь», и
+// перезагружаемся только по его тапу либо когда работа закончена.
+let UPDATE_READY=false;
+function noteShellVersion(v){
+  const srv=Number(v);
+  if(!Number.isInteger(srv)||srv<=SHELL_VERSION||UPDATE_READY) return;
+  UPDATE_READY=true;
+  const busy=(typeof draftDirty!=="undefined"&&draftDirty)||PHOTO_PREPARING.size;
+  if(!busy){ setTimeout(()=>location.reload(),600); return; }
+  try{ updateOffBar(); }catch(e){}
+}
+function reloadForUpdate(){ location.reload(); }
+
 function setMeta(meta){
   const next=meta||{};
   // Пустые справочники НЕ затирают живые. Снимок бутстрапа лежит в IndexedDB, и
@@ -395,6 +412,7 @@ function setMeta(meta){
   STATE.meta=next;
   const v=Number(STATE.meta.formProtocolVersion);
   FORM_VERSION=Number.isInteger(v)&&v>0?v:0;
+  noteShellVersion(STATE.meta.shellVersion);
 }
 
 // --- Оффлайн-хранилище (IndexedDB) -----------------------------------------
@@ -558,6 +576,12 @@ async function updateOffBar(){
   const off = STATE.online===false, t=L();
   if(!off && !qn && !failed && !rejected.length){ e.className="offbar"; e.innerHTML=""; return; }
   let msg;
+  if(UPDATE_READY){
+    e.className="offbar on";
+    e.innerHTML=`<span>${esc(L().updready)}</span>`
+      +`<button class="btn line" onclick="reloadForUpdate()">${esc(L().updbtn)}</button>`;
+    return;
+  }
   if(off){ const snap=await loadBootstrapSnapshot();
     const at=snap&&snap.at?new Date(snap.at):null;
     msg=t.offline+(at?" · "+t.datao+" "+hhmm(at):""); }
@@ -599,6 +623,10 @@ async function enqueue(entry){
 }
 
 const PHOTO_MAX_BYTES=25*1024*1024;
+// Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
+// ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
+// sw.js: тест test_pwa_shell_lock не даст забыть.
+const SHELL_VERSION=27;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
