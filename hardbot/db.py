@@ -1020,9 +1020,21 @@ def telegram_for_employee(employee: str) -> int | None:
     return row["telegram_id"] if row else None
 
 
-def list_bindings() -> list[sqlite3.Row]:
+def list_bindings(include_pending: bool = False) -> list[sqlite3.Row]:
+    """Действующие привязки. Заявка, ждущая одобрения, — НЕ привязка.
+
+    04.08.2026: в сводке пульта у Акназарова оказалось «два устройства», и по
+    списку это выглядело как выданный доступ постороннему. На деле вторая строка
+    была заявкой с approved=0 — правило «одно устройство» отработало и никого не
+    пустило. Но отличить это по списку было нельзя: он показывал обе одинаково.
+
+    Тревога по такому поводу дороже пропущенной: владелец идёт отзывать доступ,
+    которого нет, и теряет доверие к списку. Кому нужны заявки — просит явно.
+    """
+    where = "" if include_pending else " WHERE approved = 1"
     with connect() as conn:
-        return conn.execute("SELECT * FROM agent_bind ORDER BY employee").fetchall()
+        return conn.execute(
+            f"SELECT * FROM agent_bind{where} ORDER BY employee").fetchall()
 
 
 def unbind(telegram_id: int) -> None:
