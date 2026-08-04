@@ -35,6 +35,21 @@ body{position:fixed;top:0;left:0;right:0;width:100%;height:var(--app-height);mar
   font-family:'Inter',-apple-system,'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.45}
 button,a,input,select,textarea,.pcard{touch-action:manipulation}
   .warnfld{border:1px solid #B0472C;border-radius:10px;padding:10px 12px;color:#B0472C;font-size:13px;line-height:1.35;margin-bottom:10px}
+  /* Нативный select остаётся в DOM (по нему читают форму), но не показывается. */
+  .nativesel{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+  .pick{display:block;width:100%;text-align:left;padding:13px 14px;margin-bottom:10px;
+    border:1px solid var(--bd);border-radius:10px;background:#fff;color:var(--muted);
+    font-size:15px;line-height:1.2}
+  .pick.has{color:var(--ink);font-weight:600}
+  .pick:after{content:"⌄";float:right;color:var(--muted)}
+  .picksheet{position:fixed;inset:0;z-index:60;display:flex;align-items:flex-end}
+  .pickbg{position:absolute;inset:0;background:rgba(0,0,0,.35)}
+  .pickbody{position:relative;width:100%;max-height:70vh;overflow:auto;background:#fff;
+    border-radius:14px 14px 0 0;padding:8px}
+  .pickrow{display:block;width:100%;text-align:left;padding:16px 14px;border:0;
+    background:none;font-size:16px;border-bottom:1px solid var(--bd);color:var(--ink)}
+  .pickrow:last-child{border-bottom:0}
+  .pickrow.on{font-weight:700;background:var(--alt)}
 .ico{display:inline-flex;flex:0 0 auto;width:18px;height:18px}
 .ico svg{width:100%;height:100%;display:block}
 .bar{display:flex;align-items:center;justify-content:space-between;
@@ -1316,8 +1331,59 @@ function formField(f){
   // неотличим от «не открывается пикер»: человек тапает и не понимает, кто виноват.
   if(!list.length) return `<label class="fld">${esc(f.title)}</label>
     <div class="warnfld" data-k="${f.key}">${esc(L().nolist)}</div>`;
+  // <select> ОСТАЁТСЯ в DOM и остаётся источником истины: по нему читают форму,
+  // в него восстанавливают черновик, на него подписан автосейв. Меняем только
+  // способ выбрать — своей кнопкой и своим списком, потому что системный пикер
+  // 04.08.2026 не открылся у выездника, и человек встал на полтора часа.
+  const cur=list.find(o=>o.value===f.current);
   return `<label class="fld">${esc(f.title)}</label>
-    <select data-k="${f.key}"><option value="">—</option>${opts}</select>`;
+    <select data-k="${f.key}" class="nativesel"><option value="">—</option>${opts}</select>
+    <button type="button" class="pick${cur?" has":""}" data-for="${f.key}"
+      onclick="openPick('${esc(f.key)}')">${esc(cur?cur.label:"—")}</button>`;
+}
+// Свой список вариантов. Открывается листом снизу, вариант — крупная кнопка.
+// Не зависит от прошивки телефона и от того, умеет ли webview показывать
+// системный <select>.
+function openPick(key){
+  const list=(STATE.meta&&STATE.meta.dropdowns&&STATE.meta.dropdowns[key])||[];
+  if(!list.length){ toast(L().nolist); return; }
+  const sel=document.querySelector('#panel select[data-k="'+key+'"]');
+  const cur=sel?sel.value:"";
+  const rows=[{value:"",label:"—"}].concat(list).map(o=>
+    `<button type="button" class="pickrow${o.value===cur?" on":""}"
+       onclick="choosePick('${esc(key)}',this)" data-v="${esc(o.value)}">${esc(o.label)}</button>`
+  ).join("");
+  const box=document.createElement("div");
+  box.className="picksheet"; box.id="picksheet";
+  box.innerHTML=`<div class="pickbg" onclick="closePick()"></div>
+    <div class="pickbody">${rows}</div>`;
+  document.body.appendChild(box);
+}
+function closePick(){ const b=$("picksheet"); if(b) b.remove(); }
+function choosePick(key,btn){
+  const sel=document.querySelector('#panel select[data-k="'+key+'"]');
+  const val=btn.getAttribute("data-v")||"";
+  if(sel&&sel.value!==val){
+    sel.value=val;
+    // change — тот же сигнал, что и от системного пикера: автосейв и черновик
+    // подписаны именно на него и ничего не знают про нашу кнопку.
+    sel.dispatchEvent(new Event("change",{bubbles:true}));
+  }
+  syncPickLabels();
+  closePick();
+}
+// Кнопка показывает то, что реально лежит в <select> — включая восстановленный
+// черновик и значение, пришедшее с сервера.
+function syncPickLabels(){
+  document.querySelectorAll('#panel button.pick[data-for]').forEach(b=>{
+    const k=b.getAttribute("data-for");
+    const sel=document.querySelector('#panel select[data-k="'+k+'"]');
+    if(!sel) return;
+    const opt=sel.options[sel.selectedIndex];
+    const txt=(opt&&opt.value)?opt.text:"—";
+    b.textContent=txt;
+    b.classList.toggle("has",!!(opt&&opt.value));
+  });
 }
 function panelForm(d,t){
   const byKey={}; d.form.forEach(f=>{ byKey[f.key]=f; });
@@ -1806,9 +1872,11 @@ function restoreDraftIntoForm(){
 function setupFormDraft(){
   const p=$("panel"); if(!p) return;
   restoreDraftIntoForm();
+  syncPickLabels();   // черновик мог проставить значения мимо наших кнопок
   p.querySelectorAll('select[data-k], #f_visit_comment, #f_tips').forEach(el=>{
     el.addEventListener(el.tagName==="SELECT"?"change":"input", onFormChange);
   });
+  p.addEventListener("change", e=>{ if(e.target&&e.target.matches("select[data-k]")) syncPickLabels(); });
   startAutoSync();
 }
 
