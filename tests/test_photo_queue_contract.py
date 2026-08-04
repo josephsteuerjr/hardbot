@@ -19,7 +19,7 @@ def test_selected_file_is_materialized_before_geolocation_wait():
     Проверяем сам инвариант: байты получены → очередь committed → только потом
     ждём геолокацию.
     """
-    materialize = INDEX.index("bytes=await photoBytes(")
+    materialize = INDEX.index("prepared.push({bytes:await photoBytes(")
     durable_queue = INDEX.index("if(!(await enqueue(entry)))", materialize)
     geolocation = INDEX.index("geo=await grabGeo(4000,5000);", materialize)
     assert materialize < durable_queue < geolocation
@@ -35,7 +35,7 @@ def test_photo_is_shrunk_before_it_is_materialized():
     оригинал всё равно ляжет в память и в IndexedDB.
     """
     shrink = INDEX.index("const small=await shrinkPhoto(f);")
-    materialize = INDEX.index("bytes=await photoBytes(", shrink)
+    materialize = INDEX.index("photoBytes(small||f)", shrink)
     assert shrink < materialize
     # Провал сжатия не должен терять фото — уходит оригинал
     assert "photoBytes(small||f)" in INDEX

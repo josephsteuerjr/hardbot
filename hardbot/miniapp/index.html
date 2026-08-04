@@ -252,6 +252,7 @@ const ICONS = {
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4-4"/></svg>',
   target: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><path d="M12 1.5v3M12 19.5v3M1.5 12h3M19.5 12h3"/></svg>',
   plus:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+  image:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.6"/><path d="m4 17 4.5-4.5 3 3L15 12l5 5"/></svg>',
 };
 function ic(name){ return `<span class="ico">${ICONS[name]||""}</span>`; }
 
@@ -289,6 +290,8 @@ const I18N = {
     offline:"Оффлайн",datao:"данные на",pend:"ждут отправки",sending:"Отправляю…",
     savedoff:"Сохранено — уйдёт при связи",queuedn:"в очереди",
     photoretake:"фото нужно переснять",photolost:"Фото не сохранилось — снимите его ещё раз",
+    fromgallery:"Выбрать из галереи",
+    galhint:"Снимок из галереи прикрепится без точки съёмки — она снимается только камерой в приложении",
     nolist:"Список не загрузился. Закройте приложение и откройте заново — при связи он придёт с сервера.",
     updready:"Вышло обновление приложения",updbtn:"Обновить",
     retake:"Переснять",retakehint:"Карточка открыта — нажмите «Добавить фото»",
@@ -329,6 +332,8 @@ const I18N = {
     offline:"Oflayn",datao:"ma’lumot",pend:"yuboriladi",sending:"Yuborilmoqda…",
     savedoff:"Saqlandi — aloqa paydo bo‘lsa yuboriladi",queuedn:"navbatda",
     photoretake:"rasmni qayta olish kerak",photolost:"Rasm saqlanmadi — qayta oling",
+    fromgallery:"Galereyadan tanlash",
+    galhint:"Galereyadagi rasm suratga olingan nuqtasiz biriktiriladi — nuqta faqat ilovadagi kamera bilan olinadi",
     nolist:"Ro'yxat yuklanmadi. Ilovani yopib, qayta oching — aloqa bo'lsa serverdan keladi.",
     updready:"Ilova yangilandi",updbtn:"Yangilash",
     retake:"Qayta olish",retakehint:"Karta ochildi — «Rasm qo‘shish»ni bosing",
@@ -369,6 +374,8 @@ const I18N = {
     offline:"Офлайн",datao:"додаҳо аз",pend:"дар навбат",sending:"Фиристода мешавад…",
     savedoff:"Захира шуд — ҳангоми алоқа фиристода мешавад",queuedn:"дар навбат",
     photoretake:"расмро аз нав гирифтан лозим",photolost:"Расм захира нашуд — аз нав гиред",
+    fromgallery:"Аз галерея интихоб",
+    galhint:"Расм аз галерея бе нуқтаи аксбардорӣ замима мешавад — нуқта танҳо бо камераи барнома гирифта мешавад",
     nolist:"Рӯйхат бор нашуд. Барномаро пӯшед ва аз нав кушоед — ҳангоми алоқа аз сервер меояд.",
     updready:"Навсозии барнома баромад",updbtn:"Навсозӣ",
     retake:"Аз нав гирифтан",retakehint:"Корт кушода шуд — «Иловаи расм»-ро пахш кунед",
@@ -626,7 +633,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=27;
+const SHELL_VERSION=28;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1439,8 +1446,12 @@ function panelForm(d,t){
     </div>
     <div class="fsec"><div class="fsec-h">${t.photos}</div>
       <label class="btn line" style="cursor:pointer;margin-top:8px">${ic("camera")}<span>${t.addphoto}</span>
-        <input type="file" accept="image/*" capture="environment" id="photo" style="display:none" onchange="upPhoto()">
+        <input type="file" accept="image/*" capture="environment" id="photo" style="display:none" onchange="upPhoto('photo',true)">
       </label>
+      <label class="btn line" style="cursor:pointer;margin-top:8px">${ic("image")}<span>${t.fromgallery}</span>
+        <input type="file" accept="image/*" multiple id="photogal" style="display:none" onchange="upPhoto('photogal',false)">
+      </label>
+      <div class="muted" style="font-size:11px;margin-top:6px">${t.galhint}</div>
       <div class="muted" id="phc" style="font-size:12px;margin-top:6px">${t.photos}: ${d.photos||0}</div>
     </div>
     <div id="draftstat" class="draftrow" style="display:none"></div>
@@ -1482,21 +1493,39 @@ function photoHeaders(geo,ext){
   if(geo) h["X-Photo-Geo"]=geo.lat+","+geo.lon+","+(geo.acc||0)+","+(geo.ts||Date.now());
   return h;
 }
-async function upPhoto(){
-  const f=$("photo").files[0]; if(!f) return;
-  const rep=STATE.cur.rep, op_id=uuid(), ext=photoExt(f.name,f.type), at=Date.now();
-  // Важно для iOS: читаем File СРАЗУ, пока security-scoped файл из picker жив.
-  // В сеть и IndexedDB дальше идёт самостоятельный ArrayBuffer, не File/Blob path.
-  let bytes, mime=f.type||"image/jpeg", ext2=ext;
-  try{
-    // Жмём ДО чтения в ArrayBuffer: иначе в память и в IndexedDB ляжет
-    // восьмимегабайтный оригинал, который потом всё равно не уедет.
-    const small=await shrinkPhoto(f);
-    bytes=await photoBytes(small||f);
-    if(small){ mime="image/jpeg"; ext2="jpg"; }
+// ДВЕ КНОПКИ, А НЕ УГАДЫВАНИЕ. Из поля просили прикладывать уже снятое — снял
+// на камеру телефона, оформил вечером. Но точка съёмки у фото не украшение: по
+// ней руководитель видит, что человек был на адресе. Камерное фото снимается
+// ЗДЕСЬ И СЕЙЧАС, и текущая точка ему правда; лежавшее в галерее снято когда-то
+// в другом месте, и подставить ему сегодняшнюю точку — соврать руководителю.
+// Различать по file.lastModified нельзя: часть webview отдаёт время копирования
+// файла в песочницу, то есть «сейчас» для любого старого снимка. Поэтому путь
+// выбирает человек кнопкой, а мы просто не приписываем галерее того, чего не
+// знаем. Само фото доезжает целиком — именно этого и просили.
+async function upPhoto(id, live){
+  const el=$(id||"photo"); if(!el) return;
+  const files=[...(el.files||[])]; if(!files.length) return;
+  const rep=STATE.cur.rep;
+  // Важно для iOS: читаем и жмём ВСЕ выбранные файлы сразу, пока
+  // security-scoped файлы из picker живы. Дальше в сеть и IndexedDB идут
+  // самостоятельные ArrayBuffer'ы, не File/Blob path.
+  const prepared=[];
+  for(const f of files){
+    try{
+      // Жмём ДО чтения в ArrayBuffer: иначе в память и в IndexedDB ляжет
+      // восьмимегабайтный оригинал, который потом всё равно не уедет.
+      const small=await shrinkPhoto(f);
+      prepared.push({bytes:await photoBytes(small||f),
+                     mime:small?"image/jpeg":(f.type||"image/jpeg"),
+                     ext:small?"jpg":photoExt(f.name,f.type)});
+    }catch(e){ toast(L().photolost); }
   }
-  catch(e){ toast(L().photolost); return; }
-  try{ $("photo").value=""; }catch(e){}
+  try{ el.value=""; }catch(e){}
+  for(const p of prepared) await sendPhoto(rep,p,live!==false);
+}
+async function sendPhoto(rep,p,live){
+  const op_id=uuid(), at=Date.now();
+  const bytes=p.bytes, mime=p.mime, ext2=p.ext;
   // Сначала фиксируем единственную самостоятельную копию и ждём commit IDB.
   // Только после этого допустимы geolocation/fetch: iOS может выгрузить PWA на
   // любом await, а pageshow/следующий запуск безопасно досылает тот же op_id.
@@ -1512,9 +1541,12 @@ async function upPhoto(){
     }
     // maximumAge 5с: для пруфа съёмки нужна свежая точка, а не кэш минутной
     // давности от прошлого адреса. Нет разрешения/сигнала — фото без точки.
-    geo=await grabGeo(4000,5000);
-    entry.geo=geo;
-    try{ await IDB.put("queue",entry); }catch(e){}  // без geo фото всё равно сохранено
+    // Галерея точку не получает вовсе (см. комментарий у upPhoto).
+    if(live){
+      geo=await grabGeo(4000,5000);
+      entry.geo=geo;
+      try{ await IDB.put("queue",entry); }catch(e){}  // без geo фото всё равно сохранено
+    }
   }finally{
     PHOTO_PREPARING.delete(op_id);
   }
