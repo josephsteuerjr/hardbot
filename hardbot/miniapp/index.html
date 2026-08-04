@@ -546,6 +546,10 @@ async function updateOffBar(){
   const failed=failedItems.length;
   _retakeTarget=failedItems[0]||null;
   const failedReps=[...new Set(failedItems.map(it=>it.rep).filter(Boolean))];
+  // Коды отказов, как их вернул сервер: 413 — снимок больше лимита, 422 — тело
+  // пришло битым (оборванная загрузка), retake — байты не удалось прочитать.
+  const failedWhy=[...new Set(failedItems.map(it=>String(it.failed||"")).filter(Boolean))]
+    .slice(0,3).join(", ");
   // Визиты, отклонённые сервером (404/400), теперь не удаляются молча — значит
   // должны быть ВИДНЫ, иначе они просто копятся незаметно.
   const rejected=items.filter(it=>it&&it.kind==="save"&&
@@ -561,7 +565,11 @@ async function updateOffBar(){
   if(qn) msg+=" · "+qn+" "+t.pend;
   if(failed){
     const shown=failedReps.slice(0,3).join(", ")+(failedReps.length>3?", …":"");
-    msg+=(msg?" · ":"")+failed+" "+t.photoretake+(shown?" ("+shown+")":"");
+    // Причину отказа показываем человеку и владельцу. 04.08.2026 два фото
+    // висели «нужно переснять» без единого намёка почему, и разбираться
+    // пришлось по журналу сервера — при том что код отказа лежал тут же.
+    msg+=(msg?" · ":"")+failed+" "+t.photoretake+(shown?" ("+shown+")":"")
+        +(failedWhy?" ["+failedWhy+"]":"");
   }
   if(rejected.length){
     const reps=[...new Set(rejected.map(it=>it.rep).filter(Boolean))].slice(0,3).join(", ");
