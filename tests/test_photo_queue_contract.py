@@ -13,11 +13,37 @@ INDEX = (ROOT / "hardbot" / "miniapp" / "index.html").read_text("utf-8")
 
 
 def test_selected_file_is_materialized_before_geolocation_wait():
-    materialize = INDEX.index("try{ bytes=await photoBytes(f); }")
+    """Порядок важнее конкретной строки: iOS выгружает PWA на любом await.
+
+    Раньше тест был прибит к точному литералу и падал от любой правки рядом.
+    Проверяем сам инвариант: байты получены → очередь committed → только потом
+    ждём геолокацию.
+    """
+    materialize = INDEX.index("bytes=await photoBytes(")
     durable_queue = INDEX.index("if(!(await enqueue(entry)))", materialize)
     geolocation = INDEX.index("geo=await grabGeo(4000,5000);", materialize)
     assert materialize < durable_queue < geolocation
     assert 'fd.append("photo"' not in INDEX
+
+
+def test_photo_is_shrunk_before_it_is_materialized():
+    """Жать надо ДО чтения в ArrayBuffer.
+
+    04.08.2026: снимок с телефона 3-8 МБ уходил по мобильной сети 1-2 минуты, и
+    сеть рвала соединение — «POST /api/photo 200 120.209» рядом с
+    ConnectionResetError и 500. Если сжать ПОСЛЕ материализации, восьмимегабайтный
+    оригинал всё равно ляжет в память и в IndexedDB.
+    """
+    shrink = INDEX.index("const small=await shrinkPhoto(f);")
+    materialize = INDEX.index("bytes=await photoBytes(", shrink)
+    assert shrink < materialize
+    # Провал сжатия не должен терять фото — уходит оригинал
+    assert "photoBytes(small||f)" in INDEX
+
+
+def test_photo_geo_does_not_depend_on_exif():
+    """Пережатие стирает EXIF. Координата обязана ехать заголовком."""
+    assert 'h["X-Photo-Geo"]' in INDEX or "X-Photo-Geo" in INDEX
 
 
 def test_indexeddb_writes_wait_for_transaction_commit():

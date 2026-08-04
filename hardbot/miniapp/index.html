@@ -573,6 +573,43 @@ function photoExt(name,mime){
     "image/webp":".webp","image/heic":".heic","image/heif":".heif",
     "image/avif":".avif"})[String(mime||"").toLowerCase()]||".jpg";
 }
+// Снимок с телефона — это 3-8 МБ. По мобильной сети Таджикистана он уходит
+// 1-2 минуты, и сеть успевает разорвать соединение: 04.08.2026 в логах
+// «POST /api/photo 200 120.209» рядом с «ConnectionResetError: Connection lost»
+// и 500. Выездник видел, что фото «не сохраняется».
+//
+// Ужимаем ДО отправки: 1600 px по длинной стороне, JPEG 0.72 — это 200-400 КБ,
+// в 10-20 раз меньше. Фото здесь доказательство визита, а не полиграфия.
+//
+// Координата съёмки НЕ страдает: она едет отдельным заголовком X-Photo-Geo
+// (см. photoHeaders и web.py:1078), а не в EXIF, который пережатие стирает.
+//
+// Любой сбой — отдаём оригинал. Старый webview без createImageBitmap/toBlob
+// должен продолжать работать, пусть и медленно: лучше долго, чем никак.
+const PHOTO_MAX_SIDE=1600, PHOTO_JPEG_Q=0.72;
+async function shrinkPhoto(file){
+  try{
+    if(!(file instanceof Blob)) return null;
+    if(!/^image\/(jpeg|png|heic|heif|webp)/i.test(file.type||"")) return null;
+    if(typeof createImageBitmap!=="function") return null;
+    const bmp=await createImageBitmap(file);
+    const side=Math.max(bmp.width,bmp.height);
+    if(!side) return null;
+    const k=Math.min(1,PHOTO_MAX_SIDE/side);
+    const w=Math.max(1,Math.round(bmp.width*k)), h=Math.max(1,Math.round(bmp.height*k));
+    const cv=(typeof OffscreenCanvas==="function")?new OffscreenCanvas(w,h)
+             :Object.assign(document.createElement("canvas"),{width:w,height:h});
+    const ctx=cv.getContext("2d"); if(!ctx) return null;
+    ctx.drawImage(bmp,0,0,w,h);
+    try{ bmp.close&&bmp.close(); }catch(e){}
+    const blob=cv.convertToBlob?await cv.convertToBlob({type:"image/jpeg",quality:PHOTO_JPEG_Q})
+      :await new Promise(res=>cv.toBlob(res,"image/jpeg",PHOTO_JPEG_Q));
+    if(!blob||!blob.size) return null;
+    // Если «сжатие» вышло больше оригинала (крошечный снимок) — оригинал честнее.
+    if(file.size&&blob.size>=file.size) return null;
+    return blob;
+  }catch(e){ return null; }
+}
 async function photoBytes(value){
   let bytes=null;
   if(value instanceof ArrayBuffer) bytes=value;
@@ -1330,14 +1367,20 @@ async function upPhoto(){
   const rep=STATE.cur.rep, op_id=uuid(), ext=photoExt(f.name,f.type), at=Date.now();
   // Важно для iOS: читаем File СРАЗУ, пока security-scoped файл из picker жив.
   // В сеть и IndexedDB дальше идёт самостоятельный ArrayBuffer, не File/Blob path.
-  let bytes;
-  try{ bytes=await photoBytes(f); }
+  let bytes, mime=f.type||"image/jpeg", ext2=ext;
+  try{
+    // Жмём ДО чтения в ArrayBuffer: иначе в память и в IndexedDB ляжет
+    // восьмимегабайтный оригинал, который потом всё равно не уедет.
+    const small=await shrinkPhoto(f);
+    bytes=await photoBytes(small||f);
+    if(small){ mime="image/jpeg"; ext2="jpg"; }
+  }
   catch(e){ toast(L().photolost); return; }
   try{ $("photo").value=""; }catch(e){}
   // Сначала фиксируем единственную самостоятельную копию и ждём commit IDB.
   // Только после этого допустимы geolocation/fetch: iOS может выгрузить PWA на
   // любом await, а pageshow/следующий запуск безопасно досылает тот же op_id.
-  const entry={op_id,kind:"photo",rep,bytes,mime:f.type||"image/jpeg",ext,geo:null,at};
+  const entry={op_id,kind:"photo",rep,bytes,mime,ext:ext2,geo:null,at};
   let geo=null;
   PHOTO_PREPARING.add(op_id);
   try{
@@ -1357,7 +1400,7 @@ async function upPhoto(){
   }
   try{
     const r=await fetch("/api/photo?rep="+enc(rep)+"&op="+op_id,
-      {method:"POST",headers:photoHeaders(geo,ext),body:bytes});
+      {method:"POST",headers:photoHeaders(geo,ext2),body:bytes});
     if(r.ok){
       const j=await r.json(); STATE.online=true;
       showPhotoCount(rep,j.photos);
