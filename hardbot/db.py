@@ -3782,9 +3782,23 @@ def import_grid(
                     merged.update(fresh_overlays.get(cid) or {})
                 known = fresh_logs.get(cid) or _decode_value_log(row0)
                 anchor_value = data.pop("visit_date", None)
+                # ЯКОРЬ — И ЕСТЬ ДОКАЗАТЕЛЬСТВО. Совпавшая «Дата выезда»
+                # означает, что файл видел результат бота, а значит отличия в
+                # нём — осознанная правка офиса, а не старая копия.
+                #
+                # Требование `source_kind == published_master` отсюда снято
+                # 05.08.2026. Оно защищало не от порчи данных (от неё защищает
+                # якорь), а от «неофициального файла» — и на практике не
+                # открывалось никогда: реестр грузят из пульта, метка всегда
+                # test_subset, и потому за всё время в базу не попало НИ ОДНОЙ
+                # офисной правки (office_cells = 0 во всех расписках). Офис
+                # правил «Общий результат» в книгах, бот об этом не узнавал, и
+                # очередное обогащение возвращало туда своё значение — так
+                # пропали правки по 28 договорам Уткирова за 03.08.
+                #
+                # Замок, который не открывается никогда, — это стена.
                 anchor_ok = (
-                             source_kind == IMPORT_SOURCE_PUBLISHED_MASTER
-                             and merged is not None
+                             merged is not None
                              and _as_date(anchor_value) is not None
                              and _as_date(anchor_value)
                              == _as_date(merged.get("visit_date")))

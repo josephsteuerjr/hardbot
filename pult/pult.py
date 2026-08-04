@@ -866,6 +866,24 @@ class Pult(tk.Tk):
         self.enr_base_lbl = tk.Label(enr.inner, text="", bg=CARD, fg=MUTED, font=f(9),
                                      wraplength=760, justify="left")
         self.enr_base_lbl.pack(anchor="w", pady=(8, 0))
+
+        # ОКНО ДАТ ВЫЕЗДА. Без него прогон переутверждает базу поверх всей
+        # истории визитов: 04.08.2026 обогащение так вернуло в книгу офисные
+        # правки за 03.08, сделанные уже после предыдущего прогона. Ставит
+        # человек — угадывать за него мы не беремся.
+        roww = tk.Frame(enr.inner, bg=CARD)
+        roww.pack(anchor="w", pady=(10, 0))
+        tk.Label(roww, text="Выезды с", bg=CARD, fg=MUTED, font=f(9)).pack(side="left")
+        self.enr_since = tk.Entry(roww, width=12, font=f(9))
+        self.enr_since.pack(side="left", padx=(6, 0))
+        tk.Label(roww, text="по", bg=CARD, fg=MUTED, font=f(9)).pack(side="left",
+                                                                    padx=(8, 0))
+        self.enr_until = tk.Entry(roww, width=12, font=f(9))
+        self.enr_until.pack(side="left", padx=(6, 0))
+        tk.Label(roww, text="  ДД.ММ.ГГГГ · пусто = без границы",
+                 bg=CARD, fg=MUTED, font=f(8)).pack(side="left", padx=(8, 0))
+        btn(roww, "Только сегодня", self._enr_window_today).pack(side="left",
+                                                                 padx=(10, 0))
         self.enr_kvs = KVGrid(enr.inner)
         self.enr_kvs.pack(anchor="w", pady=(8, 0))
         self.enr_warn = tk.Label(enr.inner, text="", bg=CARD, fg=WARN, font=f(9),
@@ -1523,6 +1541,24 @@ class Pult(tk.Tk):
         self.enr_apply_sel_btn.configure(text=f"Обогатить выбранных ({n})",
                                          state="normal" if n else "disabled")
 
+    def _enr_window_today(self):
+        today = datetime.now().strftime("%d.%m.%Y")
+        for entry in (self.enr_since, self.enr_until):
+            entry.delete(0, "end")
+            entry.insert(0, today)
+
+    def _enr_window(self) -> tuple[str, str]:
+        """Введённое окно как есть. Разбор дат — в enrich.build_plan."""
+        return (self.enr_since.get().strip(), self.enr_until.get().strip())
+
+    def _enr_backup_root(self):
+        """Куда класть резервные копии. Сорить в папках сотрудников запрещено,
+        а переносить копии руками ПОСЛЕ прогона — ослеплять инструменты
+        восстановления: они ищут копии рядом с живым файлом."""
+        if not self.scatter_base:
+            return None
+        return str(Path(self.scatter_base) / "!! Обогащение из БД")
+
     def enr_apply(self, which: str):
         if not LIMITED_TEST_ENRICH_WRITES_ENABLED:
             self.enr_warn.configure(text=LIMITED_TEST_ENRICH_DISABLED_MESSAGE)
@@ -1535,40 +1571,68 @@ class Pult(tk.Tk):
             return
         jobs = [{"employee": m["employee"], "path": p, "rows": m["rows"]}
                 for m in picked for p in m["files"]]
+        since, until = self._enr_window()
+        window_txt = (f"Окно выездов: с {since or '—'} по {until or '—'}."
+                      if (since or until) else
+                      "ОКНО НЕ ЗАДАНО: в книги пойдут выезды за ВСЮ историю, "
+                      "включая уже обогащённые ранее. Если после прошлого прогона "
+                      "результат правили в книге или в реестре, правка будет "
+                      "заменена версией бота.")
         if not messagebox.askyesno(
                 "Обогащение реестров",
                 f"Обогатить личные реестры: сотрудников {len(picked)}, файлов {len(jobs)}?\n\n"
+                f"{window_txt}\n\n"
                 "В каждый файл дописываются ТОЛЬКО кейсы его сотрудника, заполненные "
-                "ботом. Рядом с каждым файлом создаётся резервная копия. Делает Excel — "
-                "может занять время.\n\nЕсли в personal правили результат визита, "
-                "сначала проведи registry_cycle, опубликуй master и импортируй именно "
-                "его в hardbot. Прямой импорт personal запрещён."):
+                "ботом. Резервная копия создаётся перед записью. Делает Excel — "
+                "может занять время."):
             return
         fields = self._enr_fields
         log = lambda s: self.after(0, lambda: self.enrich_out.configure(text=s))
         def done(results):
             ok = [r for r in results if "error" not in r]
-            bad = [r for r in results if "error" in r]
-            cells = sum(r["cells_written"] for r in ok)
-            over = sum(r["cells_over_nonempty"] for r in ok)
-            missing = sum(len(r["missing"]) for r in ok)
+            unver = [r for r in results if r.get("written_unverified")]
+            bad = [r for r in results if "error" in r
+                   and not r.get("written_unverified")]
+            cells = sum(r.get("cells_written") or 0 for r in ok)
+            over = sum(r.get("cells_over_nonempty") or 0 for r in ok)
+            missing = sum(len(r.get("missing") or []) for r in ok)
+            skipped = sum(r.get("out_of_window") or 0 for r in ok)
             lines = [f"Готово: файлов {len(ok)} из {len(results)} · дописано ячеек: {cells}"
                      + (f" (поверх старых: {over})" if over else "")
-                     + (f" · кейсов не нашлось в файлах: {missing}" if missing else "")]
+                     + (f" · кейсов не нашлось в файлах: {missing}" if missing else "")
+                     + (f" · вне окна дат пропущено: {skipped}" if skipped else "")]
             for r in ok[:15]:
                 lines.append(f"  {r['employee']} — {Path(r['file']).name}: "
-                             f"ячеек {r['cells_written']}, кейсов {r['changed_cases']}")
+                             f"ячеек {r.get('cells_written')}, кейсов {r.get('changed_cases')}")
             if len(ok) > 15:
                 lines.append(f"  … и ещё {len(ok) - 15} файлов")
+            # Что именно вытеснили — поимённо, а не одним счётчиком.
+            displaced = [(r.get("employee"), d)
+                         for r in results for d in (r.get("displaced") or [])]
+            if displaced:
+                lines.append(f"ЗАМЕНЕНО ПОВЕРХ ЧУЖИХ ЗНАЧЕНИЙ ({len(displaced)}):")
+                for emp, d in displaced[:12]:
+                    lines.append(f"  {emp} · КД {d['contract_id']} · {d['column']}: "
+                                 f"«{d['was']}» → «{d['now']}» (выезд {d['visit_date']})")
+                if len(displaced) > 12:
+                    lines.append(f"  … и ещё {len(displaced) - 12}; полный список в квитанции")
+            for r in unver:
+                lines.append(f"  ⚠ {r['employee']} — {Path(r['file']).name}: записано, "
+                             f"но проверить не удалось. НЕ откатывать эту книгу.")
             for r in bad:
                 lines.append(f"  ⚠ {r['employee']} — {Path(r['file']).name}: {r['error']}")
             n_bak = sum(1 for r in ok if r.get("backup"))
             if n_bak:
-                lines.append(f"Резервные копии созданы рядом с изменёнными файлами ({n_bak}).")
+                lines.append(f"Резервные копии: {n_bak}. Пути и хэши — в квитанции.")
             self.enrich_out.configure(text="\n".join(lines))
             self.toast(f"Обогащено файлов: {len(ok)}" + (f", ошибок: {len(bad)}" if bad else ""),
                        err=bool(bad))
-        self.bg_task(lambda: enrich.enrich_many(jobs, fields, log), done,
+        backup_root = self._enr_backup_root()
+        receipt_dir = str(Path(backup_root) / "_квитанции") if backup_root else None
+        self.bg_task(lambda: enrich.enrich_many(
+                        jobs, fields, log, since=since, until=until,
+                        backup_root=backup_root, receipt_dir=receipt_dir),
+                     done,
                      lambda e: (self.enrich_out.configure(text=f"Ошибка: {e}"),
                                 self.toast(str(e), err=True)))
 

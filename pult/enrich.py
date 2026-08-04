@@ -698,9 +698,21 @@ def _is_source_row(row: list) -> bool:
     return bool(nonempty) and all(v in ("сх", "хард") for v in nonempty)
 
 
-def build_plan(grid: list[list], fields: list[dict], rows: list[dict]) -> dict:
+def visit_window(since=None, until=None) -> tuple:
+    """Границы окна обогащения как даты. Пустая граница — открытая сторона."""
+    return parse_date(since) if since else None, parse_date(until) if until else None
+
+
+def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
+               since=None, until=None) -> dict:
     """План обогащения. grid — лист файла как список строк (значения как есть),
     fields — схема сервера [{key,title,date,...}], rows — строки клиентов сервера.
+
+    since/until — ОКНО ДАТ ВЫЕЗДА, которое задаёт оператор. Без него прогон
+    переутверждает базу поверх всей истории визитов, а не только новых: так
+    04.08.2026 обогащение вернуло в книгу Уткирова офисные правки за 03.08,
+    сделанные уже после предыдущего прогона. Границы включительные, пустая
+    граница означает открытую сторону.
 
     Возвращает {sheet_writes: [(r, c, value, is_date)], ...статистика}. Индексы
     0-based относительно grid. Пишутся ТОЛЬКО ячейки визита заполненных кейсов,
@@ -730,18 +742,30 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict]) -> dict:
             file_rows.setdefault(cid, []).append(r)
 
     visit_cols_absent = sorted(k for k in VISIT_KEYS if k not in col_map)
+    title_by_key = {f["key"]: f.get("title") or f["key"] for f in fields}
+
+    since_d, until_d = visit_window(since, until)
 
     writes: list[tuple[int, int, object, bool]] = []
     filled_cases = matched_cases = changed_cases = 0
     cells_already = cells_over_nonempty = 0
+    out_of_window = 0
     missing: list[str] = []
     filled_contract_ids: list[str] = []
     matched_contract_ids: list[str] = []
+    # Что именно вытесняем. Раньше старое значение не сохранялось нигде, и
+    # единственным следом оставалась резервная копия книги: чтобы узнать, что
+    # затёрли, приходилось сравнивать файлы целиком.
+    displaced: list[dict] = []
 
     for srv in rows:
         cid = norm_cid(srv.get(CONTRACT_KEY))
         if not cid or not is_filled(srv):
             continue     # без завершённого визита кейс не трогаем вообще
+        vdate = parse_date(srv.get("visit_date"))
+        if (since_d and vdate < since_d) or (until_d and vdate > until_d):
+            out_of_window += 1
+            continue
         filled_contract_ids.append(cid)
         values = {k: srv.get(k) for k in VISIT_KEYS
                   if cell_text(srv.get(k)) != "" and k in col_map}
@@ -778,6 +802,20 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict]) -> dict:
                     continue
                 if cell_text(cur) != "":
                     cells_over_nonempty += 1
+                    # Слияние старое значение сохраняет внутри нового, замена —
+                    # нет. Вытеснением считаем только второе: иначе в журнал
+                    # попадёт каждый дописанный комментарий.
+                    if merge_mode == "replace":
+                        displaced.append({
+                            "contract_id": cid,
+                            "key": key,
+                            "column": title_by_key.get(WRITE_TARGETS.get(key, key),
+                                                       key),
+                            "row": r + 1,          # как видно в Excel
+                            "was": cell_text(cur),
+                            "now": cell_text(out_val),
+                            "visit_date": vdate.isoformat() if vdate else "",
+                        })
                 writes.append((r, c, out_val, is_date))
                 case_changed = True
         if case_changed:
@@ -793,6 +831,10 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict]) -> dict:
         "cells_written": len(writes),
         "cells_already": cells_already,    # уже совпадало — не трогали
         "cells_over_nonempty": cells_over_nonempty,  # обновили поверх старого значения
+        "displaced": displaced,            # ЧТО именно вытеснили: было/стало
+        "out_of_window": out_of_window,    # отсеяно окном дат оператора
+        "window": {"since": since_d.isoformat() if since_d else "",
+                   "until": until_d.isoformat() if until_d else ""},
         # Обратная совместимость отчётов старого пульта. Обычное обогащение
         # больше никогда не очищает комментарии; точечная починка — отдельный
         # dry-run/apply инструмент с собственным бэкапом.
@@ -855,13 +897,14 @@ def _workbook_grid(wb, fields: list[dict]) -> tuple[object, list[list]]:
     return ws, grid
 
 
-def _plan_workbook(app, path: Path, fields: list[dict], rows: list[dict]) -> dict:
+def _plan_workbook(app, path: Path, fields: list[dict], rows: list[dict],
+                   since=None, until=None) -> dict:
     """Reopen a saved workbook and recompute the enrichment plan read-only."""
 
     wb = app.books.open(str(path), update_links=False, read_only=True)
     try:
         _ws, grid = _workbook_grid(wb, fields)
-        return build_plan(grid, fields, rows)
+        return build_plan(grid, fields, rows, since, until)
     finally:
         wb.close()
 
@@ -885,13 +928,32 @@ def _excel_safe(value):
     return v
 
 
-def backup_copy(path: Path) -> Path:
-    """Копия рядом с файлом: «Имя (до обогащения 13.07 14-05).xlsb». Откат = переименовать."""
-    stamp = datetime.now().strftime("%d.%m %H-%M")
-    dst = path.with_name(f"{path.stem} (до обогащения {stamp}){path.suffix}")
+def backup_copy(path: Path, root: str | Path | None = None) -> Path:
+    """Копия «Имя (до обогащения 13.07.2026 14-05).xlsb». Откат = переименовать.
+
+    root — корень для копий. Без него копия ложится рядом с книгой, как раньше.
+    С ним — в `<root>/<город>/<ФИО>/`, повторяя маску папок сотрудников: сваливать
+    семь книг в одну папку нельзя, одноимённые файлы столкнутся.
+
+    Корень нужен потому, что сорить в папках сотрудников запрещено, а переносить
+    копии руками ПОСЛЕ прогона — ослеплять инструменты восстановления: они ищут
+    копии рядом с живым файлом. Пусть кладёт сразу куда надо.
+
+    Год в имени обязателен. Без него год приходилось достраивать из времени
+    файла, а оно сбрасывается при переносе на другой том — и цепочка копий
+    выстраивалась в неверном порядке.
+    """
+    stamp = datetime.now().strftime("%d.%m.%Y %H-%M")
+    name = f"{path.stem} (до обогащения {stamp}){path.suffix}"
+    if root:
+        folder = Path(root) / path.parent.parent.name / path.parent.name
+        folder.mkdir(parents=True, exist_ok=True)
+    else:
+        folder = path.parent
+    dst = folder / name
     n = 2
     while dst.exists():
-        dst = path.with_name(f"{path.stem} (до обогащения {stamp}, {n}){path.suffix}")
+        dst = folder / f"{path.stem} (до обогащения {stamp}, {n}){path.suffix}"
         n += 1
     shutil.copy2(path, dst)
     return dst
@@ -907,7 +969,8 @@ def _co_init():
 
 
 def _enrich_workbook(app, path: Path, fields: list[dict], rows: list[dict],
-                     log=lambda s: None) -> dict:
+                     log=lambda s: None, since=None, until=None,
+                     backup_root=None) -> dict:
     """Один файл в уже открытом Excel: бэкап → лист → план → точечная запись →
     сохранить тем же форматом. Возвращает план + backup/sheet/file.
 
@@ -923,13 +986,13 @@ def _enrich_workbook(app, path: Path, fields: list[dict], rows: list[dict],
         # а индексы плана — координаты ячеек листа.
         ws, grid = _workbook_grid(wb, fields)
 
-        plan = build_plan(grid, fields, rows)
+        plan = build_plan(grid, fields, rows, since, until)
         writes = plan["writes"]
         plan["backup"] = None
         if writes:
             # бэкап — только когда реально есть что писать (файл на диске ещё
             # не изменён: Excel не сохранял); нет записей — нет мусорных копий
-            plan["backup"] = str(backup_copy(path))
+            plan["backup"] = str(backup_copy(path, backup_root))
             for i, (r, c, val, _is_date) in enumerate(writes, 1):
                 ws.range((r + 1, c + 1)).value = _excel_safe(val)
                 if i % 200 == 0:
@@ -940,6 +1003,19 @@ def _enrich_workbook(app, path: Path, fields: list[dict], rows: list[dict],
         return plan
     finally:
         wb.close()
+
+
+class WrittenButUnverified(RuntimeError):
+    """Книга сохранена, но проверить результат не удалось.
+
+    Отдельный тип нужен, чтобы отличать это от «файл не обработан». Разница
+    практическая: необработанную книгу надо прогнать заново, а эту — НЕ
+    откатывать по копии, иначе потеряется уже записанная верная работа.
+    """
+
+    def __init__(self, **info):
+        super().__init__(info.get("reason") or "не удалось проверить запись")
+        self.info = info
 
 
 def _is_reparse(info: os.stat_result) -> bool:
@@ -1050,6 +1126,9 @@ def _enrich_with_evidence(
     fields: list[dict],
     rows: list[dict],
     log=lambda s: None,
+    since=None,
+    until=None,
+    backup_root=None,
 ) -> dict:
     """Run the existing writer, then reopen and prove a zero second plan."""
 
@@ -1058,7 +1137,7 @@ def _enrich_with_evidence(
         raise FileNotFoundError(f"нужен обычный Excel-файл: {raw_path}")
     path = raw_path.resolve()
     pre_sha = _sha256_file(path)
-    plan = _enrich_workbook(app, path, fields, rows, log)
+    plan = _enrich_workbook(app, path, fields, rows, log, since, until, backup_root)
     post_sha = _sha256_file(path)
     backup_raw = plan.get("backup")
     backup_path = Path(backup_raw).resolve() if backup_raw else None
@@ -1069,7 +1148,19 @@ def _enrich_with_evidence(
     elif backup_path is not None or pre_sha != post_sha:
         raise RuntimeError(f"{path.name}: zero-write contract нарушен")
 
-    post_plan = _plan_workbook(app, path, fields, rows)
+    try:
+        post_plan = _plan_workbook(app, path, fields, rows, since, until)
+    except Exception as e:  # noqa: BLE001
+        # Книга к этому моменту УЖЕ сохранена и её содержимое подтверждено
+        # хэшами выше. Если проверку выполнить не удалось (обычно потому, что
+        # Excel умер), нельзя докладывать это как «файл не обработан»: такой
+        # доклад неотличим от неоткрытой книги, и откат по копии уничтожит
+        # верную работу.
+        raise WrittenButUnverified(
+            path=str(path), pre_sha256=pre_sha, post_sha256=post_sha,
+            backup_path=str(backup_path) if backup_path is not None else None,
+            backup_sha256=backup_sha, cells_written=plan["cells_written"],
+            displaced=plan.get("displaced") or [], reason=str(e)) from e
     if post_plan["cells_written"] or post_plan["changed_cases"]:
         raise RuntimeError(f"{path.name}: повторный enrichment plan не нулевой")
     if (
@@ -1094,7 +1185,8 @@ def _enrich_with_evidence(
 
 
 def enrich_file(path: str | Path, fields: list[dict], rows: list[dict],
-                log=lambda s: None) -> dict:
+                log=lambda s: None, since=None, until=None,
+                backup_root=None) -> dict:
     """Обогатить один живой файл реестра. Требует Excel."""
     _co_init()
     import xlwings as xw
@@ -1107,36 +1199,109 @@ def enrich_file(path: str | Path, fields: list[dict], rows: list[dict],
         app.display_alerts = False
         app.screen_updating = False
         log(f"Обогащаю {path.name}…")
-        return _enrich_with_evidence(app, path, fields, rows, log)
+        return _enrich_with_evidence(app, path, fields, rows, log,
+                                     since, until, backup_root)
 
 
-def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None) -> list[dict]:
+def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
+                since=None, until=None, backup_root=None,
+                receipt_dir=None) -> list[dict]:
     """Обогатить личные реестры пачкой, одной сессией Excel.
     jobs: [{employee, path, rows}] — каждому файлу свои строки (его кейсы).
-    Ошибка одного файла не валит остальные: в результат кладётся {..., error}."""
+    Ошибка одного файла не валит остальные: в результат кладётся {..., error}.
+
+    since/until — окно дат выезда, которое задал оператор.
+
+    Результат СОБИРАЕТСЯ СНАРУЖИ блока Excel. Раньше он жил внутри, и смерть
+    сессии на выходе (`quit()` по мёртвому COM) уносила его целиком: книги на
+    диске сохранены, а чем они кончились — неизвестно, включая пути резервных
+    копий. Теперь смерть Excel гасится, а всё, что успели, доезжает до отчёта.
+    """
     _co_init()
     import xlwings as xw
 
-    results = []
-    with open_excel(xw, log) as app:
-        app.display_alerts = False
-        app.screen_updating = False
-        for i, job in enumerate(jobs, 1):
-            path = Path(job["path"])
-            log(f"[{i}/{len(jobs)}] {job['employee']} — {path.name}…")
-            try:
-                plan = _enrich_with_evidence(
-                    app,
-                    path,
-                    fields,
-                    job["rows"],
-                    log,
-                )
-            except Exception as e:  # noqa: BLE001 — файл занят/битый: дальше по списку
-                plan = {"file": str(path), "error": str(e)}
-            plan["employee"] = job["employee"]
-            results.append(plan)
+    results: list[dict] = []
+    fatal = None
+    try:
+        with open_excel(xw, log) as app:
+            app.display_alerts = False
+            app.screen_updating = False
+            for i, job in enumerate(jobs, 1):
+                path = Path(job["path"])
+                log(f"[{i}/{len(jobs)}] {job['employee']} — {path.name}…")
+                try:
+                    plan = _enrich_with_evidence(
+                        app, path, fields, job["rows"], log,
+                        since, until, backup_root,
+                    )
+                except WrittenButUnverified as e:
+                    # Записано, но не проверено. НЕ откатывать.
+                    plan = {**e.info, "file": str(path), "written_unverified": True}
+                    log(f"{path.name}: записано, но проверить не удалось — "
+                        f"откатывать эту книгу нельзя")
+                except Exception as e:  # noqa: BLE001 — занят/битый: дальше по списку
+                    plan = {"file": str(path), "error": str(e)}
+                plan["employee"] = job["employee"]
+                results.append(plan)
+    except Exception as e:  # noqa: BLE001 — смерть сессии Excel не уносит результат
+        fatal = str(e)
+        log(f"Сессия Excel оборвалась: {e}")
+
+    done = {r.get("file") for r in results}
+    for job in jobs:
+        if str(Path(job["path"])) not in done:
+            results.append({"file": str(Path(job["path"])),
+                            "employee": job["employee"],
+                            "not_attempted": True,
+                            "error": fatal or "не дошла очередь"})
+    if fatal:
+        for r in results:
+            r.setdefault("session_error", fatal)
+    if receipt_dir:
+        try:
+            path = write_batch_receipt(results, receipt_dir,
+                                       since=since, until=until, fatal=fatal)
+            log(f"Квитанция: {path}")
+        except Exception as e:  # noqa: BLE001 — квитанция не важнее данных
+            log(f"Квитанцию записать не удалось: {e}")
     return results
+
+
+def write_batch_receipt(results: list[dict], receipt_dir, *,
+                        since=None, until=None, fatal=None) -> Path:
+    """Долговечный след пачки: пути и хэши копий, окно, вытесненные значения.
+
+    Раньше это умел только CLI-путь `evidence_run`, а батч из пульта показывал
+    один счётчик «копии созданы (N)» — без имён и без хэшей. После прогона
+    04.08.2026 не осталось доказательной связки «эта копия — от этого прогона»
+    ни для одной из семи книг.
+    """
+    folder = Path(receipt_dir)
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    payload = {
+        "at": datetime.now().isoformat(timespec="seconds"),
+        "window": {"since": str(since or ""), "until": str(until or "")},
+        "session_error": fatal or "",
+        "files": [
+            {k: r.get(k) for k in (
+                "employee", "file", "path", "backup_path", "backup_sha256",
+                "pre_sha256", "post_sha256", "cells_written",
+                "cells_over_nonempty", "changed_cases", "out_of_window",
+                "error", "written_unverified", "not_attempted")}
+            for r in results
+        ],
+        "displaced": [
+            {**d, "employee": r.get("employee")}
+            for r in results for d in (r.get("displaced") or [])
+        ],
+    }
+    out = folder / f"обогащение-{stamp}.json"
+    tmp = out.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                   encoding="utf-8")
+    tmp.replace(out)
+    return out
 
 
 def _canonical(payload: Any) -> bytes:

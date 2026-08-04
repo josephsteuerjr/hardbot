@@ -72,10 +72,30 @@ def pick_grid_calamine(path: Path, fields: list[dict]) -> list[list] | None:
     return None
 
 
-def oldest_backup(path: Path) -> Path | None:
+def backup_folders(path: Path, roots=None):
+    """Где искать копии книги: рядом с ней и в корнях для копий.
+
+    Сорить в папках сотрудников запрещено, поэтому обогащение умеет складывать
+    копии в отдельный корень по маске `<корень>/<город>/<ФИО>/`. Инструменты
+    восстановления обязаны знать про оба места: копия, унесённая из папки
+    сотрудника, раньше означала «доказательное восстановление невозможно».
+    """
+    yield path.parent
+    for root in (roots or []):
+        if not root:
+            continue
+        yield Path(root) / path.parent.parent.name / path.parent.name
+
+
+def oldest_backup(path: Path, roots=None) -> Path | None:
     """Самая ранняя копия «(до обогащения …)» — в ней колонка звонка ДО затирания."""
     pref = path.stem + " (до обогащения"
-    cands = [p for p in path.parent.glob("*.xlsb") if p.stem.startswith(pref)]
+    cands = []
+    for folder in backup_folders(path, roots):
+        try:
+            cands += [p for p in folder.glob("*.xlsb") if p.stem.startswith(pref)]
+        except OSError:
+            continue
     return min(cands, key=lambda p: p.stat().st_mtime) if cands else None
 
 

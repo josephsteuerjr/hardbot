@@ -83,19 +83,26 @@ def test_office_edit_accepted_with_anchor():
     assert safe[db.BOT_VISIT_MARKER] is True
 
 
-def test_test_subset_can_never_apply_office_overlay():
+def test_office_edit_is_accepted_from_a_pult_import_too():
+    """Происхождение файла больше не решает — решает якорь.
+
+    05.08.2026. Раньше офисная правка принималась только из опубликованного
+    мастера. На практике реестр грузят из пульта, метка всегда test_subset, и
+    замок не открывался НИ РАЗУ: во всех расписках office_cells = 0. Офис правил
+    «Общий результат» прямо в книгах, бот об этом не узнавал, и очередное
+    обогащение возвращало туда своё значение — так пропали правки по 28
+    договорам Уткирова за 03.08.
+
+    Проверка подлинности осталась прежней и живёт в якоре (см. соседние тесты):
+    совпавшая дата выезда доказывает, что файл видел результат бота.
+    """
     today = date.today().isoformat()
-    _import(
-        {
-            "contract_id": "OF-SUBSET",
-            "client": "Тестовая выборка",
-            "responsible": "Агент",
-        }
-    )
+    _import({"contract_id": "OF-SUBSET", "client": "Из пульта",
+             "responsible": "Агент"})
     _complete_visit("OF-SUBSET", today, call_status="Оплачен")
     values = {
         "contract_id": "OF-SUBSET",
-        "client": "Тестовая выборка",
+        "client": "Из пульта",
         "responsible": "Агент",
         "visit_date": today,
         "overall_result": "Доп. Обогащение",
@@ -104,15 +111,38 @@ def test_test_subset_can_never_apply_office_overlay():
         [field.title for field in db.FIELDS],
         [values.get(field.key) for field in db.FIELDS],
     ]
-    rep = db.import_grid(
-        grid,
-        source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
-    )
+    rep = db.import_grid(grid, source_kind=db.IMPORT_SOURCE_TEST_SUBSET)
+    assert rep["office_cells"] >= 1, "правка офиса снова не доезжает до бота"
+    assert db.bot_visit_snapshot(
+        db.get_client("OF-SUBSET"))["call_status"] == "Доп. Обогащение"
+
+
+def test_pult_import_with_a_wrong_date_is_still_rejected():
+    """Якорь остался единственной, но настоящей защитой.
+
+    Файл без совпавшей даты выезда — это старая копия, а не правка офиса.
+    Снятие требования «опубликованный мастер» не должно её пропустить.
+    """
+    today = date.today().isoformat()
+    _import({"contract_id": "OF-STALE-SUBSET", "client": "Старая копия",
+             "responsible": "Агент"})
+    _complete_visit("OF-STALE-SUBSET", today, call_status="Оплачен")
+    values = {
+        "contract_id": "OF-STALE-SUBSET",
+        "client": "Старая копия",
+        "responsible": "Агент",
+        "visit_date": "2020-01-01",           # файл не видел этого визита
+        "overall_result": "Доп. Обогащение",
+    }
+    grid = [
+        [field.title for field in db.FIELDS],
+        [values.get(field.key) for field in db.FIELDS],
+    ]
+    rep = db.import_grid(grid, source_kind=db.IMPORT_SOURCE_TEST_SUBSET)
     assert rep["office_cells"] == 0
     assert rep["protected_cells"] >= 2
     assert db.bot_visit_snapshot(
-        db.get_client("OF-SUBSET")
-    )["call_status"] == "Оплачен"
+        db.get_client("OF-STALE-SUBSET"))["call_status"] == "Оплачен"
 
 
 def test_office_edit_reimport_echo_is_silent():

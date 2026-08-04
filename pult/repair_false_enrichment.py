@@ -455,16 +455,32 @@ def _registry_structure(snapshot: dict) -> tuple:
 
 
 def _backup_regex(path: Path) -> re.Pattern[str]:
+    """Имя копии. Год необязателен: старые копии его не содержат.
+
+    Новые содержат — и это важно. Без года его приходилось достраивать из
+    времени создания файла, а оно сбрасывается при переносе копии на другой том,
+    и цепочка копий выстраивалась в неверном порядке.
+    """
     return re.compile(
         rf"^{re.escape(path.stem)} \(до обогащения "
-        r"(\d{2})\.(\d{2}) (\d{2})-(\d{2})(?:, (\d+))?\)$",
+        r"(?P<day>\d{2})\.(?P<month>\d{2})(?:\.(?P<year>\d{4}))? "
+        r"(?P<hour>\d{2})-(?P<minute>\d{2})(?:, (?P<seq>\d+))?\)$",
         flags=re.IGNORECASE,
     )
 
 
 def _parsed_backup_stamp(path: Path, match: re.Match[str]) -> tuple[datetime, int]:
-    day, month, hour, minute = (int(match.group(i)) for i in range(1, 5))
-    sequence = int(match.group(5) or 1)
+    day, month = int(match.group("day")), int(match.group("month"))
+    hour, minute = int(match.group("hour")), int(match.group("minute"))
+    sequence = int(match.group("seq") or 1)
+    named_year = match.group("year")
+    if named_year:
+        try:
+            return datetime(int(named_year), month, day, hour, minute), sequence
+        except ValueError as exc:
+            raise ValueError(f"некорректная дата в имени копии: {path.name}") from exc
+    # Год в имени отсутствует (копия сделана до 05.08.2026) — угадываем по
+    # времени файла, как раньше.
     try:
         anchor = datetime.fromtimestamp(path.stat().st_ctime)
     except OSError:
@@ -481,10 +497,29 @@ def _parsed_backup_stamp(path: Path, match: re.Match[str]) -> tuple[datetime, in
     return stamp, sequence
 
 
-def discover_backups(path: Path) -> list[dict]:
+def backup_folders(path: Path, roots=None):
+    """Рядом с книгой и в корнях для копий — см. enrich.backup_copy.
+
+    Копия, унесённая из папки сотрудника (сорить там запрещено), раньше означала
+    «доказательное восстановление невозможно»: искали только в path.parent.
+    """
+    yield path.parent
+    for root in (roots or []):
+        if not root:
+            continue
+        yield Path(root) / path.parent.parent.name / path.parent.name
+
+
+def discover_backups(path: Path, roots=None) -> list[dict]:
     pattern = _backup_regex(path)
     found = []
-    for candidate in path.parent.iterdir():
+    candidates = []
+    for folder in backup_folders(path, roots):
+        try:
+            candidates += list(folder.iterdir())
+        except OSError:
+            continue
+    for candidate in candidates:
         if not candidate.is_file() or candidate.suffix.lower() != path.suffix.lower():
             continue
         match = pattern.fullmatch(candidate.stem)
