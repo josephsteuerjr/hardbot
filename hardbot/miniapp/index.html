@@ -34,6 +34,7 @@ body{position:fixed;top:0;left:0;right:0;width:100%;height:var(--app-height);mar
   display:flex;flex-direction:column;
   font-family:'Inter',-apple-system,'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.45}
 button,a,input,select,textarea,.pcard{touch-action:manipulation}
+  .warnfld{border:1px solid #B0472C;border-radius:10px;padding:10px 12px;color:#B0472C;font-size:13px;line-height:1.35;margin-bottom:10px}
 .ico{display:inline-flex;flex:0 0 auto;width:18px;height:18px}
 .ico svg{width:100%;height:100%;display:block}
 .bar{display:flex;align-items:center;justify-content:space-between;
@@ -273,6 +274,7 @@ const I18N = {
     offline:"Оффлайн",datao:"данные на",pend:"ждут отправки",sending:"Отправляю…",
     savedoff:"Сохранено — уйдёт при связи",queuedn:"в очереди",
     photoretake:"фото нужно переснять",photolost:"Фото не сохранилось — снимите его ещё раз",
+    nolist:"Список не загрузился. Закройте приложение и откройте заново — при связи он придёт с сервера.",
     retake:"Переснять",retakehint:"Карточка открыта — нажмите «Добавить фото»",
     authexpired:"Срок доступа истёк. Напишите боту слово «ссылка» — придёт новая ссылка: откройте её и добавьте приложение на экран заново, либо вставьте её сюда. Несинхронизированные визиты не потеряются.",
     authneed:"Нет доступа. Напишите боту слово «ссылка» — придёт ссылка для входа: откройте её, либо вставьте сюда.",
@@ -311,6 +313,7 @@ const I18N = {
     offline:"Oflayn",datao:"ma’lumot",pend:"yuboriladi",sending:"Yuborilmoqda…",
     savedoff:"Saqlandi — aloqa paydo bo‘lsa yuboriladi",queuedn:"navbatda",
     photoretake:"rasmni qayta olish kerak",photolost:"Rasm saqlanmadi — qayta oling",
+    nolist:"Ro'yxat yuklanmadi. Ilovani yopib, qayta oching — aloqa bo'lsa serverdan keladi.",
     retake:"Qayta olish",retakehint:"Karta ochildi — «Rasm qo‘shish»ni bosing",
     authexpired:"Kirish muddati tugadi. Botga «ссылка» deb yozing — yangi havola keladi: uni oching va ilovani ekranga qayta qo‘shing, yoki shu yerga joylang. Yuborilmagan chiqishlar yo‘qolmaydi.",
     authneed:"Kirish yo‘q. Botga «ссылка» deb yozing — kirish havolasi keladi: uni oching yoki shu yerga joylang.",
@@ -349,6 +352,7 @@ const I18N = {
     offline:"Офлайн",datao:"додаҳо аз",pend:"дар навбат",sending:"Фиристода мешавад…",
     savedoff:"Захира шуд — ҳангоми алоқа фиристода мешавад",queuedn:"дар навбат",
     photoretake:"расмро аз нав гирифтан лозим",photolost:"Расм захира нашуд — аз нав гиред",
+    nolist:"Рӯйхат бор нашуд. Барномаро пӯшед ва аз нав кушоед — ҳангоми алоқа аз сервер меояд.",
     retake:"Аз нав гирифтан",retakehint:"Корт кушода шуд — «Иловаи расм»-ро пахш кунед",
     authexpired:"Мӯҳлати дастрасӣ гузашт. Ба бот калимаи «ссылка» нависед — пайванди нав меояд: онро кушоед ва барномаро аз нав ба экран гузоред, ё ин ҷо гузоред. Сафарҳои фиристоданашуда гум намешаванд.",
     authneed:"Дастрасӣ нест. Ба бот калимаи «ссылка» нависед — пайванди воридшавӣ меояд: онро кушоед ё ин ҷо гузоред.",
@@ -364,7 +368,16 @@ const $ = (id) => document.getElementById(id);
 const enc = encodeURIComponent;
 const money = (n,u) => (n||0).toLocaleString("ru-RU") + (u?(" "+u):"");
 function setMeta(meta){
-  STATE.meta=meta||{};
+  const next=meta||{};
+  // Пустые справочники НЕ затирают живые. Снимок бутстрапа лежит в IndexedDB, и
+  // после выгрузки приложения он может прийти раньше свежего ответа сервера. Если
+  // в нём dropdowns пуст, каждое поле формы превращается в <select> с единственным
+  // «—»: выглядит рабочим, выбрать нечего, автосохранение честно шлёт пустоту.
+  // 04.08.2026 выездник так простоял полтора часа на одной карточке.
+  const had=STATE.meta&&STATE.meta.dropdowns&&Object.keys(STATE.meta.dropdowns).length;
+  const got=next.dropdowns&&Object.keys(next.dropdowns).length;
+  if(had&&!got) next.dropdowns=STATE.meta.dropdowns;
+  STATE.meta=next;
   const v=Number(STATE.meta.formProtocolVersion);
   FORM_VERSION=Number.isInteger(v)&&v>0?v:0;
 }
@@ -1296,8 +1309,13 @@ function panelDebt(d,t){
 // Одно поле-выпадашка. Контрол остаётся <select> (мобильный нативный пикер удобен для
 // длинных вариантов), автосохранение и восстановление работают по data-k без изменений.
 function formField(f){
-  const opts=(STATE.meta.dropdowns[f.key]||[]).map(o=>
+  const list=(STATE.meta&&STATE.meta.dropdowns&&STATE.meta.dropdowns[f.key])||[];
+  const opts=list.map(o=>
     `<option value="${esc(o.value)}" ${o.value===f.current?"selected":""}>${esc(o.label)}</option>`).join("");
+  // Пустой список — это поломка, а не поле. Молчаливый <select> с одним «—»
+  // неотличим от «не открывается пикер»: человек тапает и не понимает, кто виноват.
+  if(!list.length) return `<label class="fld">${esc(f.title)}</label>
+    <div class="warnfld" data-k="${f.key}">${esc(L().nolist)}</div>`;
   return `<label class="fld">${esc(f.title)}</label>
     <select data-k="${f.key}"><option value="">—</option>${opts}</select>`;
 }
