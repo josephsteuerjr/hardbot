@@ -1624,8 +1624,16 @@ class Pult(tk.Tk):
             for r in bad:
                 lines.append(f"  ⚠ {r['employee']} — {Path(r['file']).name}: {r['error']}")
             n_bak = sum(1 for r in ok if r.get("backup"))
+            receipt = next((r.get("receipt") for r in results if r.get("receipt")), None)
+            rec_err = next((r.get("receipt_error") for r in results
+                            if r.get("receipt_error")), None)
             if n_bak:
-                lines.append(f"Резервные копии: {n_bak}. Пути и хэши — в квитанции.")
+                lines.append(f"Резервные копии: {n_bak}.")
+            if receipt:
+                lines.append(f"Квитанция: {receipt}")
+            elif rec_err:
+                lines.append(f"⚠ КВИТАНЦИЯ НЕ ЗАПИСАНА: {rec_err}. "
+                             f"Пути и хэши копий нигде не сохранены.")
             self.enrich_out.configure(text="\n".join(lines))
             self.toast(f"Обогащено файлов: {len(ok)}" + (f", ошибок: {len(bad)}" if bad else ""),
                        err=bool(bad))

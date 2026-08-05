@@ -20,6 +20,8 @@
 
 import json
 import sys
+
+import pytest
 from datetime import date, datetime
 from pathlib import Path
 
@@ -108,6 +110,29 @@ def test_window_accepts_the_russian_date_the_operator_types():
     rows = [_srv("A", "2026-08-04", call_status="Оплачен")]
     plan = enrich.build_plan(grid, FIELDS, rows, since="04.08.2026")
     assert plan["filled_cases"] == 1
+
+
+def test_a_typo_in_the_date_stops_the_run_instead_of_disabling_the_window():
+    """Иначе опечатка молча снимала бы единственный новый предохранитель.
+
+    Неразобранная граница возвращала None, а None означает «открытая сторона».
+    Человек думает, что обогащает за сегодня, а переутверждается вся история.
+    """
+    for bad in ("вчера", "32.13.2026", "04-08-2026x", "0408"):
+        with pytest.raises(ValueError, match="не понимаю дату"):
+            enrich.visit_window(bad, "")
+        with pytest.raises(ValueError, match="не понимаю дату"):
+            enrich.visit_window("", bad)
+
+
+def test_reversed_window_is_refused():
+    with pytest.raises(ValueError, match="позже конца"):
+        enrich.visit_window("05.08.2026", "04.08.2026")
+
+
+def test_empty_borders_stay_open():
+    assert enrich.visit_window("", "") == (None, None)
+    assert enrich.visit_window(None, None) == (None, None)
 
 
 # --- 2. Журнал вытесненного -------------------------------------------------
@@ -282,6 +307,45 @@ def test_written_but_unverified_is_a_separate_kind_of_failure():
     body = src[i:src.index("def write_batch_receipt(")]
     assert '"written_unverified": True' in body
     assert "не откатывать" in body.lower()
+
+
+def test_unverified_book_is_not_counted_as_success():
+    """Без ключа error отчёт считал её успехом и показывал зелёное «7 из 7»."""
+    src = Path(enrich.__file__).read_text(encoding="utf-8")
+    i = src.index("except WrittenButUnverified as e:")
+    body = src[i:i + 500]
+    assert '"error": e.info.get("reason")' in body
+
+
+def test_not_attempted_is_tracked_by_index_not_by_path_string():
+    """Сравнение строк путей давало дубль: результат несёт resolve(), задание —
+    сырой путь из настроек. На сетевом диске они расходятся, и успешная книга
+    попадала в отчёт вторым разом как «не дошла очередь»."""
+    src = Path(enrich.__file__).read_text(encoding="utf-8")
+    i = src.index("def enrich_many(")
+    body = src[i:src.index("def write_batch_receipt(")]
+    assert "attempted: set[int] = set()" in body
+    assert "attempted.add(i)" in body
+    assert "if i not in attempted:" in body
+    assert 'done = {r.get("file")' not in body, "снова сверяем строки путей"
+
+
+def test_receipt_failure_reaches_the_final_report():
+    """Единственным следом провала был log(), который отчёт сразу перезаписывал."""
+    src = Path(enrich.__file__).read_text(encoding="utf-8")
+    i = src.index("def enrich_many(")
+    body = src[i:src.index("def write_batch_receipt(")]
+    assert 'r["receipt_error"] = str(e)' in body
+    assert 'r["receipt"] = str(path)' in body
+    pult = (Path(enrich.__file__).parent / "pult.py").read_text(encoding="utf-8")
+    assert "КВИТАНЦИЯ НЕ ЗАПИСАНА" in pult
+
+
+def test_receipt_records_the_applied_window_not_the_typed_text(tmp_path):
+    out = enrich.write_batch_receipt([], tmp_path, since="04.08.2026", until="")
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["window"]["since"] == "2026-08-04", "записан сырой ввод, не окно"
+    assert data["window_input"]["since"] == "04.08.2026"
 
 
 def test_batch_result_survives_a_dead_excel_session():

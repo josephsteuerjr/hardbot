@@ -714,8 +714,28 @@ def _is_technical_empty(value) -> bool:
 
 
 def visit_window(since=None, until=None) -> tuple:
-    """Границы окна обогащения как даты. Пустая граница — открытая сторона."""
-    return parse_date(since) if since else None, parse_date(until) if until else None
+    """Границы окна обогащения как даты. Пустая граница — открытая сторона.
+
+    Непустая, но неразобранная граница — ОШИБКА, а не «открытая сторона».
+    Иначе опечатка в дате не сужала бы прогон и не отменяла его, а молча
+    снимала единственный предохранитель: человек думает, что обогащает за
+    сегодня, а переутверждается вся история.
+    """
+    out = []
+    for label, raw in (("с", since), ("по", until)):
+        text = str(raw or "").strip()
+        if not text:
+            out.append(None)
+            continue
+        parsed = parse_date(text)
+        if parsed is None:
+            raise ValueError(f"не понимаю дату «{text}» в границе «{label}» — "
+                             f"нужен формат ДД.ММ.ГГГГ")
+        out.append(parsed)
+    if out[0] and out[1] and out[0] > out[1]:
+        raise ValueError(f"начало окна ({out[0].isoformat()}) позже конца "
+                         f"({out[1].isoformat()})")
+    return out[0], out[1]
 
 
 def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
@@ -1239,7 +1259,12 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
     _co_init()
     import xlwings as xw
 
+    # Окно разбираем ДО открытия Excel: неразобранная граница должна остановить
+    # прогон, а не тихо превратиться в «без границы».
+    visit_window(since, until)
+
     results: list[dict] = []
+    attempted: set[int] = set()
     fatal = None
     try:
         with open_excel(xw, log) as app:
@@ -1248,14 +1273,18 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
             for i, job in enumerate(jobs, 1):
                 path = Path(job["path"])
                 log(f"[{i}/{len(jobs)}] {job['employee']} — {path.name}…")
+                attempted.add(i)
                 try:
                     plan = _enrich_with_evidence(
                         app, path, fields, job["rows"], log,
                         since, until, backup_root,
                     )
                 except WrittenButUnverified as e:
-                    # Записано, но не проверено. НЕ откатывать.
-                    plan = {**e.info, "file": str(path), "written_unverified": True}
+                    # Записано, но не проверено. НЕ откатывать. Ключ error нужен,
+                    # иначе отчёт посчитает такую книгу успехом и покажет
+                    # зелёное «файлов 7 из 7».
+                    plan = {**e.info, "file": str(path), "written_unverified": True,
+                            "error": e.info.get("reason") or str(e)}
                     log(f"{path.name}: записано, но проверить не удалось — "
                         f"откатывать эту книгу нельзя")
                 except Exception as e:  # noqa: BLE001 — занят/битый: дальше по списку
@@ -1266,9 +1295,13 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
         fatal = str(e)
         log(f"Сессия Excel оборвалась: {e}")
 
-    done = {r.get("file") for r in results}
-    for job in jobs:
-        if str(Path(job["path"])) not in done:
+    # Недошедшие ищем ПО НОМЕРУ задания, а не сравнением строк путей: результат
+    # несёт разрешённый путь (resolve), а задание — сырой из настроек пульта. На
+    # сетевом диске, в UNC и при другом регистре эти строки расходятся, и
+    # успешно обогащённая книга попадала в отчёт вторым разом как «не дошла
+    # очередь» — с предложением прогнать её заново.
+    for i, job in enumerate(jobs, 1):
+        if i not in attempted:
             results.append({"file": str(Path(job["path"])),
                             "employee": job["employee"],
                             "not_attempted": True,
@@ -1277,12 +1310,16 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
         for r in results:
             r.setdefault("session_error", fatal)
     if receipt_dir:
+        # Провал квитанции обязан быть виден в итоговом отчёте, а не мелькнуть в
+        # строке лога, которую отчёт через мгновение перезапишет.
         try:
             path = write_batch_receipt(results, receipt_dir,
                                        since=since, until=until, fatal=fatal)
-            log(f"Квитанция: {path}")
+            for r in results:
+                r["receipt"] = str(path)
         except Exception as e:  # noqa: BLE001 — квитанция не важнее данных
-            log(f"Квитанцию записать не удалось: {e}")
+            for r in results:
+                r["receipt_error"] = str(e)
     return results
 
 
@@ -1298,9 +1335,14 @@ def write_batch_receipt(results: list[dict], receipt_dir, *,
     folder = Path(receipt_dir)
     folder.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    # Пишем ПРИМЕНЁННОЕ окно, а не то, что набрал человек: иначе квитанция
+    # утверждала бы наличие границы там, где фильтр её не применил.
+    since_d, until_d = visit_window(since, until)
     payload = {
         "at": datetime.now().isoformat(timespec="seconds"),
-        "window": {"since": str(since or ""), "until": str(until or "")},
+        "window": {"since": since_d.isoformat() if since_d else "",
+                   "until": until_d.isoformat() if until_d else ""},
+        "window_input": {"since": str(since or ""), "until": str(until or "")},
         "session_error": fatal or "",
         "files": [
             {k: r.get(k) for k in (

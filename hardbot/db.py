@@ -3916,6 +3916,14 @@ def import_grid(
                     pkey = person_key(row0) + (row0["responsible"] or "",)
                     sibs = [c for c in person_map.get(pkey, [])
                             if existing[c]["bot_visit_at"] == row0["bot_visit_at"]]
+                    # У файла со scope правка не должна выходить за его пределы.
+                    # person_map собран по ВСЕЙ таблице, поэтому правка из
+                    # выборки на одного сотрудника разлеталась на договоры того
+                    # же человека, которых в файле нет вовсе — а расписка
+                    # считала их обычными office_cells, и увидеть это было
+                    # неоткуда.
+                    if verified_source["scope"] is not None:
+                        sibs = [c for c in sibs if c in grouped]
                     if cid not in sibs:
                         sibs.append(cid)
                     at = date.today().isoformat()
