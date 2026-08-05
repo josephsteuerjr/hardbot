@@ -41,6 +41,30 @@ class _Label:
         self.text = kwargs.get("text", self.text)
 
 
+class _BoolVar:
+    def __init__(self, value: bool) -> None:
+        self.value = value
+
+    def get(self) -> bool:
+        return self.value
+
+
+class _Widget:
+    def __init__(self) -> None:
+        self.options = {}
+
+    def configure(self, **kwargs) -> None:
+        self.options.update(kwargs)
+
+
+class _KV:
+    def __init__(self) -> None:
+        self.pairs = []
+
+    def set_pairs(self, pairs) -> None:
+        self.pairs = list(pairs)
+
+
 class _ResetGuardProbe:
     def __init__(self) -> None:
         self.reset_out = _Label()
@@ -181,3 +205,148 @@ def test_empty_selection_is_an_error_not_an_empty_import():
     except ValueError:
         return
     raise AssertionError("пустой отбор прошёл как валидная книга")
+
+
+def test_full_registry_is_an_explicit_flag_not_inferred_from_source_kind():
+    class Probe:
+        imp_book = {
+            "file_sha256": "f" * 64,
+            "source_kind": pult_ui.IMPORT_SOURCE_PUBLISHED_MASTER,
+            "employees": [{"key": "егор"}, {"key": "илья"}],
+        }
+        imp_selected = {"егор", "илья"}
+        imp_full_var = _BoolVar(False)
+
+    probe = Probe()
+    assert pult_ui.Pult._imp_selection_is_whole(probe) is True
+    assert pult_ui.Pult._imp_signature(probe)[-1] is False
+
+    probe.imp_full_var = _BoolVar(True)
+    assert pult_ui.Pult._imp_signature(probe)[-1] is True
+
+
+def test_employee_slice_is_not_a_whole_registry():
+    class Probe:
+        imp_book = {"employees": [{"key": "егор"}, {"key": "илья"}]}
+        imp_selected = {"егор"}
+
+    assert pult_ui.Pult._imp_selection_is_whole(Probe()) is False
+
+
+def test_import_report_exposes_unassignment_count():
+    pairs = dict(pult_ui.Pult._imp_pairs({"auto_unassigned": 12}))
+    assert pairs["будет снято / снято"] == 12
+
+
+def test_pult_previews_before_apply_and_reuses_the_exact_request():
+    class Probe:
+        def __init__(self):
+            self.imp_book = {
+                "path": "C:/registry.xlsx",
+                "file_sha256": "a" * 64,
+                "employees": [{"key": "егор"}],
+            }
+            self.imp_selected = {"егор"}
+            self.imp_full_var = _BoolVar(True)
+            self.imp_kvs = _KV()
+            self.imp_warn = _Widget()
+            self.imp_apply_btn = _Widget()
+            self._imp_preview_body = None
+            self._imp_preview_signature = None
+            self._imp_preview_meta = {}
+            self.calls = []
+            self.toasts = []
+            self.refreshed = False
+
+        def _prepare_import(self, _book, _picked):
+            return {
+                "source_kind": pult_ui.IMPORT_SOURCE_PUBLISHED_MASTER,
+                "source_proof": {"proof": "exact"},
+                "sheets": [{"name": "Портфели", "grid": [["id"]]}],
+                "proof_digest": "d" * 64,
+            }
+
+        def api(self, method, path, body=None, timeout=20):
+            self.calls.append((method, path, body, timeout))
+            if path == "/admin/import/preview.json":
+                return {
+                    "blocked": False,
+                    "total_rows": 1,
+                    "inserted": 0,
+                    "updated": 1,
+                    "auto_unassigned": 3,
+                }
+            if path == "/admin/import/authorize.json":
+                return {"ok": True}
+            if path == "/admin/import.json":
+                return {
+                    "blocked": False,
+                    "inserted": 0,
+                    "updated": 1,
+                    "auto_unassigned": 3,
+                }
+            raise AssertionError(path)
+
+        def bg_task(self, fn, done=None, fail=None):
+            try:
+                result = fn()
+            except Exception as exc:  # pragma: no cover - диагностическая ветка
+                if fail:
+                    fail(exc)
+                else:
+                    raise
+            else:
+                if done:
+                    done(result)
+
+        def toast(self, message, *, err=False):
+            self.toasts.append((message, err))
+
+        def refresh(self):
+            self.refreshed = True
+
+        def _imp_signature(self):
+            return pult_ui.Pult._imp_signature(self)
+
+        def _imp_selection_is_whole(self):
+            return pult_ui.Pult._imp_selection_is_whole(self)
+
+        def _invalidate_import_preview(self, *, clear_report):
+            return pult_ui.Pult._invalidate_import_preview(
+                self, clear_report=clear_report
+            )
+
+        def _imp_pairs(self, report):
+            return pult_ui.Pult._imp_pairs(report)
+
+        def _imp_notes(self, report):
+            return pult_ui.Pult._imp_notes(report)
+
+        def _show_import_error(self, report, *, registration_hint=False):
+            return pult_ui.Pult._show_import_error(
+                self, report, registration_hint=registration_hint
+            )
+
+    probe = Probe()
+    pult_ui.Pult.do_import(probe)
+
+    assert [call[1] for call in probe.calls] == ["/admin/import/preview.json"]
+    preview_request = probe.calls[0][2]
+    assert preview_request["full_registry"] is True
+    assert "expected_auto_unassigned" not in preview_request
+    assert probe._imp_preview_body["expected_auto_unassigned"] == 3
+    assert probe.imp_apply_btn.options["state"] == "normal"
+    assert "снять 3" in probe.imp_apply_btn.options["text"]
+
+    pult_ui.Pult.apply_import(probe)
+
+    assert [call[1] for call in probe.calls] == [
+        "/admin/import/preview.json",
+        "/admin/import/authorize.json",
+        "/admin/import.json",
+    ]
+    apply_request = probe.calls[-1][2]
+    assert apply_request["source_proof"] == preview_request["source_proof"]
+    assert apply_request["sheets"] == preview_request["sheets"]
+    assert apply_request["expected_auto_unassigned"] == 3
+    assert probe.refreshed is True

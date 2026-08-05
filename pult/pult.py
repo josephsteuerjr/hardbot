@@ -451,6 +451,9 @@ class Pult(tk.Tk):
         self.imp_book: dict = {}          # выбранная книга: путь, грид, вид источника
         self.imp_selected: set[str] = set()   # кого из сотрудников грузим
         self._imp_vars: dict = {}
+        self._imp_preview_body: dict | None = None
+        self._imp_preview_signature: tuple | None = None
+        self._imp_preview_meta: dict = {}
         self.connected = False
         self.guests: list[dict] = []
         self.mgrs: list[dict] = []
@@ -842,10 +845,25 @@ class Pult(tk.Tk):
         self.imp_file_lbl.pack(anchor="w", pady=(8, 0))
         self.imp_pick_frame = tk.Frame(imp.inner, bg=CARD)
         self.imp_pick_frame.pack(fill="x")
+        self.imp_full_var = tk.BooleanVar(value=False)
+        self.imp_full_check = tk.Checkbutton(
+            imp.inner,
+            text=("Это полный реестр — снять с портфелей договоры, которых "
+                  "нет в файле"),
+            variable=self.imp_full_var,
+            command=self._imp_full_toggle,
+            bg=CARD, fg=WARN, activebackground=CARD, selectcolor=CARD,
+            font=f(9),
+        )
+        self.imp_full_check.pack(anchor="w", pady=(10, 0))
         self.imp_go_row = tk.Frame(imp.inner, bg=CARD)
-        self.imp_go_btn = btn(self.imp_go_row, "Загрузить выбранных (0)",
+        self.imp_go_btn = btn(self.imp_go_row, "Предпросмотр выбранных (0)",
                               self.do_import, kind="accent")
         self.imp_go_btn.pack(side="left")
+        self.imp_apply_btn = btn(self.imp_go_row, "Применить импорт",
+                                 self.apply_import)
+        self.imp_apply_btn.configure(state="disabled")
+        self.imp_apply_btn.pack(side="left", padx=(8, 0))
         self.imp_kvs = KVGrid(imp.inner)
         self.imp_kvs.pack(anchor="w", pady=(10, 0))
         self.imp_warn = tk.Label(imp.inner, text="", bg=CARD, fg=WARN, font=f(9),
@@ -999,6 +1017,7 @@ class Pult(tk.Tk):
 
     # --- импорт ---
     def do_import(self):
+        """Построить read-only preview. Запись доступна только отдельной кнопкой."""
         if not LIMITED_TEST_MASTER_IMPORT_UI_ENABLED:
             self.imp_kvs.set_pairs([])
             self.imp_warn.configure(
@@ -1014,7 +1033,16 @@ class Pult(tk.Tk):
         if not picked:
             self.toast("Отметь хотя бы одного сотрудника", err=True)
             return
-        self.toast(f"Импорт {Path(book['path']).name}: {len(picked)} сотр…")
+        full_registry = bool(self.imp_full_var.get())
+        if full_registry and not self._imp_selection_is_whole():
+            self.toast(
+                "Полный реестр нельзя совместить со срезом сотрудников",
+                err=True,
+            )
+            return
+        signature = self._imp_signature()
+        self._invalidate_import_preview(clear_report=True)
+        self.toast(f"Проверяю импорт {Path(book['path']).name}: {len(picked)} сотр…")
 
         def work():
             prepared = self._prepare_import(book, picked)
@@ -1023,63 +1051,181 @@ class Pult(tk.Tk):
                 "source_kind": prepared["source_kind"],
                 "source_proof": prepared["source_proof"],
                 "sheets": prepared["sheets"],
+                "full_registry": full_registry,
             }
-            # Разрешение на импорт — ОТДЕЛЬНЫЙ акт. Если ручка регистратора на
-            # сервере открыта, пульт делает его тем же admin-ключом; если закрыта,
-            # это не ошибка пульта, а «зарегистрируй на сервере» — команда ниже.
+            result = self.api(
+                "POST", "/admin/import/preview.json", body, timeout=180
+            )
+            return {"report": result, "body": body, "prepared": prepared,
+                    "signature": signature}
+
+        def done(payload):
+            d = payload["report"]
+            if payload["signature"] != self._imp_signature():
+                self._invalidate_import_preview(clear_report=True)
+                self.toast(
+                    "Выбор изменился во время проверки — предпросмотр отменён",
+                    err=True,
+                )
+                return
+            if d.get("error"):
+                self._show_import_error(d)
+                return
+            self._imp_preview_body = {
+                **payload["body"],
+                "expected_auto_unassigned": int(d.get("auto_unassigned") or 0),
+            }
+            self._imp_preview_signature = payload["signature"]
+            self._imp_preview_meta = payload["prepared"]
+            self.imp_kvs.set_pairs(self._imp_pairs(d))
+            notes = self._imp_notes(d)
+            if full_registry:
+                notes.insert(
+                    0,
+                    "ПОЛНЫЙ РЕЕСТР: после применения будет снято договоров: "
+                    f"{fmt_n(d.get('auto_unassigned'))}.",
+                )
+            else:
+                notes.insert(
+                    0,
+                    "ЧАСТИЧНЫЙ ИМПОРТ: отсутствующие в файле договоры сниматься не будут.",
+                )
+            self.imp_warn.configure(text="\n".join(notes))
+            unassigned = int(d.get("auto_unassigned") or 0)
+            label = "Применить импорт"
+            if unassigned:
+                label += f" · снять {fmt_n(unassigned)}"
+            self.imp_apply_btn.configure(text=label, state="normal")
+            self.toast(
+                "Предпросмотр готов"
+                + (f": будет снято {fmt_n(unassigned)}" if full_registry else "")
+            )
+        self.bg_task(work, done)
+
+    def apply_import(self):
+        """Применить проверенные preview proof/sheets/full + ожидаемый счётчик."""
+        body = self._imp_preview_body
+        meta = self._imp_preview_meta
+        if not body or self._imp_preview_signature != self._imp_signature():
+            self._invalidate_import_preview(clear_report=True)
+            self.toast("Сначала сделай свежий предпросмотр импорта", err=True)
+            return
+        self.imp_apply_btn.configure(state="disabled")
+        self.toast("Применяю проверенный импорт…")
+
+        def work():
+            # Разрешение на импорт — отдельный акт. Preview его не создаёт и не
+            # consume-ит; регистрация начинается только после явного «Применить».
             registered = None
             try:
                 registered = self.api(
                     "POST", "/admin/import/authorize.json",
-                    {"source_kind": prepared["source_kind"],
-                     "source_proof": prepared["source_proof"]},
-                    timeout=60)
+                    {"source_kind": meta["source_kind"],
+                     "source_proof": meta["source_proof"]},
+                    timeout=60,
+                )
             except Exception:                              # noqa: BLE001
                 registered = None
             result = self.api("POST", "/admin/import.json", body, timeout=180)
             if isinstance(result, dict) and result.get("error"):
-                result = {**result,
-                          "_proof_digest": prepared["proof_digest"],
-                          "_source_kind": prepared["source_kind"],
-                          "_registered": bool(registered and registered.get("ok"))}
+                result = {
+                    **result,
+                    "_proof_digest": meta["proof_digest"],
+                    "_source_kind": meta["source_kind"],
+                    "_registered": bool(registered and registered.get("ok")),
+                }
             return result
 
         def done(d):
             if d.get("error"):
-                self.imp_kvs.set_pairs([])
-                extra = ""
-                if d.get("header_sample"):
-                    extra = ". В файле: " + ", ".join(d["header_sample"])
-                if d.get("_proof_digest") and not d.get("_registered"):
-                    extra += (
-                        "\n\nРазрешение не зарегистрировано — ручка регистратора на "
-                        "сервере закрыта. Либо открой её (IMPORT_REGISTRAR_HTTP=1 в "
-                        "/opt/hardbot2/.env), либо зарегистрируй вручную:\n"
-                        "  docker compose exec -T bot python import_authorization.py "
-                        f"register --source-kind {d.get('_source_kind') or ''} "
-                        "--proof /tmp/proof.json\n"
-                        f"proof лежит здесь: {self._proof_path or '—'}\n"
-                        f"digest: {d['_proof_digest']}\n"
-                        "После регистрации нажми «Загрузить выбранных» ещё раз."
-                    )
-                self.imp_warn.configure(text=d["error"] + extra)
-                self.toast("Импорт не прошёл", err=True)
+                self._show_import_error(d, registration_hint=True)
+                if d.get("preview_stale"):
+                    self._invalidate_import_preview(clear_report=False)
+                else:
+                    self.imp_apply_btn.configure(state="normal")
                 return
             self.imp_kvs.set_pairs(self._imp_pairs(d))
             self.imp_warn.configure(text="\n".join(self._imp_notes(d)))
+            self._invalidate_import_preview(clear_report=False)
             if d.get("idempotent_replay"):
                 self.toast(
                     "Этот receipt уже использован; повтор ничего не записал",
                     err=True,
                 )
             else:
-                self.toast(f"Импорт готов: +{fmt_n(d.get('inserted'))} / обновлено {fmt_n(d.get('updated'))}")
+                message = (
+                    f"Импорт готов: +{fmt_n(d.get('inserted'))} / "
+                    f"обновлено {fmt_n(d.get('updated'))}"
+                )
+                if d.get("auto_unassigned"):
+                    message += f" / снято {fmt_n(d['auto_unassigned'])}"
+                self.toast(message)
             self.refresh()
-        self.bg_task(work, done)
+
+        def fail(exc):
+            if self._imp_preview_signature == self._imp_signature():
+                self.imp_apply_btn.configure(state="normal")
+            self.toast(str(exc), err=True)
+
+        self.bg_task(work, done, fail)
+
+    def _show_import_error(self, d: dict, *, registration_hint: bool = False):
+        self.imp_kvs.set_pairs([])
+        extra = ""
+        if d.get("header_sample"):
+            extra = ". В файле: " + ", ".join(d["header_sample"])
+        if (registration_hint and d.get("_proof_digest")
+                and not d.get("_registered")):
+            extra += (
+                "\n\nРазрешение не зарегистрировано — ручка регистратора на "
+                "сервере закрыта. Либо открой её (IMPORT_REGISTRAR_HTTP=1 в "
+                "/opt/hardbot2/.env), либо зарегистрируй вручную:\n"
+                "  docker compose exec -T bot python import_authorization.py "
+                f"register --source-kind {d.get('_source_kind') or ''} "
+                "--proof /tmp/proof.json\n"
+                f"proof лежит здесь: {self._proof_path or '—'}\n"
+                f"digest: {d['_proof_digest']}\n"
+                "После регистрации нажми «Применить импорт» ещё раз."
+            )
+        self.imp_warn.configure(text=d["error"] + extra)
+        self.toast("Импорт не прошёл", err=True)
 
     # Куда положен proof последней попытки — чтобы его можно было зарегистрировать
     # руками, если HTTP-ручка регистратора на сервере выключена.
     _proof_path = None
+
+    def _invalidate_import_preview(self, *, clear_report: bool):
+        self._imp_preview_body = None
+        self._imp_preview_signature = None
+        self._imp_preview_meta = {}
+        if hasattr(self, "imp_apply_btn"):
+            self.imp_apply_btn.configure(text="Применить импорт", state="disabled")
+        if clear_report and hasattr(self, "imp_kvs"):
+            self.imp_kvs.set_pairs([])
+            self.imp_warn.configure(text="")
+
+    def _imp_selection_is_whole(self) -> bool:
+        all_emps = {e["key"] for e in (self.imp_book.get("employees") or [])}
+        return bool(all_emps) and self.imp_selected == all_emps
+
+    def _imp_signature(self) -> tuple:
+        book = self.imp_book or {}
+        full = bool(self.imp_full_var.get()) if hasattr(self, "imp_full_var") else False
+        return (book.get("file_sha256"), tuple(sorted(self.imp_selected)), full)
+
+    def _imp_full_toggle(self):
+        if self.imp_full_var.get() and not self._imp_selection_is_whole():
+            self.imp_full_var.set(False)
+            self._invalidate_import_preview(clear_report=True)
+            message = (
+                "Режим полного реестра доступен только когда выбраны все строки "
+                "файла. Даже тогда полнота остаётся отдельным решением оператора."
+            )
+            self.imp_warn.configure(text=message)
+            self.toast("Полный режим не включён", err=True)
+            return
+        self._invalidate_import_preview(clear_report=True)
+        self._imp_count()
 
     def pick_registry(self):
         """Шаг 1: выбрать книгу и показать, кто в ней есть. Ничего не отправляет."""
@@ -1088,15 +1234,17 @@ class Pult(tk.Tk):
             filetypes=[("Excel", "*.xlsx *.xlsm *.xlsb *.xls")])
         if not path:
             return
+        self.imp_full_var.set(False)
+        self._invalidate_import_preview(clear_report=True)
         self.imp_file_lbl.configure(text="Читаю " + Path(path).name + "…")
-        self.imp_kvs.set_pairs([])
-        self.imp_warn.configure(text="")
 
         def done(book):
             head, first, c_id, c_who = self._grid_layout(book["grid"])
             book.update(head=head, first=first, c_id=c_id, c_who=c_who)
             self.imp_book = book
             self.imp_selected = {e["key"] for e in book["employees"]}
+            self.imp_full_var.set(False)
+            self._invalidate_import_preview(clear_report=True)
             kind = ("опубликованный master (есть расписка цикла)"
                     if book.get("published") else
                     "утверждённое подмножество: расписки registry_cycle для этого "
@@ -1109,6 +1257,8 @@ class Pult(tk.Tk):
         def fail(exc):
             self.imp_book = {}
             self.imp_selected = set()
+            self.imp_full_var.set(False)
+            self._invalidate_import_preview(clear_report=True)
             self._imp_render()
             self.imp_file_lbl.configure(text=f"Файл не разобран: {exc}")
             self.toast("Реестр не прочитан", err=True)
@@ -1151,6 +1301,10 @@ class Pult(tk.Tk):
 
     def _imp_toggle(self, name, on):
         (self.imp_selected.add if on else self.imp_selected.discard)(name)
+        if self.imp_full_var.get() and not self._imp_selection_is_whole():
+            self.imp_full_var.set(False)
+            self.toast("Полный режим снят: выбран срез сотрудников", err=True)
+        self._invalidate_import_preview(clear_report=True)
         self._imp_count()
 
     def _imp_all(self, on):
@@ -1158,6 +1312,9 @@ class Pult(tk.Tk):
                              if on else set())
         for key, var in (self._imp_vars or {}).items():
             var.set(key in self.imp_selected)
+        if self.imp_full_var.get() and not self._imp_selection_is_whole():
+            self.imp_full_var.set(False)
+        self._invalidate_import_preview(clear_report=True)
         self._imp_count()
 
     def _imp_count(self):
@@ -1165,7 +1322,8 @@ class Pult(tk.Tk):
         rows = sum(e["count"] for e in book.get("employees") or []
                    if e["key"] in self.imp_selected)
         self.imp_go_btn.configure(
-            text=f"Загрузить выбранных ({len(self.imp_selected)} чел · {rows} дог.)",
+            text=(f"Предпросмотр выбранных ({len(self.imp_selected)} чел · "
+                  f"{rows} дог.)"),
             state="normal" if self.imp_selected else "disabled")
 
     def read_registry(self, path: str) -> dict:
@@ -1346,6 +1504,7 @@ class Pult(tk.Tk):
         return [("строк", d.get("total_rows")), ("добавлено", d.get("inserted")),
                 ("обновлено", d.get("updated")), ("без КД", d.get("skipped_no_id")),
                 ("дублей", d.get("duplicates")),
+                ("будет снято / снято", d.get("auto_unassigned")),
                 ("без ответственного", d.get("no_responsible")),
                 ("офисных правок", d.get("office_cells")),
                 ("call-полей изолировано", d.get("isolated_call_cells")),

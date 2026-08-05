@@ -52,6 +52,9 @@ _data_dir = Path(os.getenv("HARDBOT_DATA", Path(__file__).parent))
 _data_dir.mkdir(parents=True, exist_ok=True)
 DB_PATH = _data_dir / "hardbot.db"
 
+UNASSIGNED_REASON_MANUAL = "manual"
+UNASSIGNED_REASON_ABSENT_FROM_REGISTRY = "absent_from_registry"
+
 # Служебные колонки бота (не из реестра).
 # (agent_id удалён — легаси: назначение давно идёт через responsible + agent_bind.)
 BOOKKEEPING = [
@@ -85,6 +88,10 @@ BOOKKEEPING = [
     # снятие в силе) или другое (значит кейс переназначили — это законно, и
     # снятие снимается вместе с пометкой).
     ("unassigned_from", "TEXT"),
+    # Причины снятия имеют разную политику возврата. Ручное снятие держится,
+    # пока офис не назначит другого сотрудника; автоснятие из-за отсутствия
+    # строки отменяется при любом возвращении договора в реестр.
+    ("unassigned_reason", "TEXT"),
     ("tips", "TEXT"),               # наводки выездника (староста, соседи, ориентиры)
     ("updated_at", "TEXT"),
     # Доказательство происхождения результата визита. Обычный импорт реестра эти
@@ -350,6 +357,15 @@ def init_db() -> None:
         for name, decl in [(f.key, "TEXT") for f in FIELDS] + BOOKKEEPING:
             if name not in have:
                 conn.execute(f'ALTER TABLE clients ADD COLUMN "{name}" {decl}')
+        # До появления отдельной причины все непустые unassigned_from создавались
+        # только ручной кнопкой пульта. Явно закрепляем прежнюю семантику, чтобы
+        # обновление схемы не вернуло снятые вручную договоры в портфель.
+        conn.execute(
+            "UPDATE clients SET unassigned_reason=? "
+            "WHERE COALESCE(unassigned_from, '') <> '' "
+            "AND COALESCE(unassigned_reason, '') = ''",
+            (UNASSIGNED_REASON_MANUAL,),
+        )
         # Миграция: убрать легаси-колонку clients.agent_id (назначение — через
         # responsible + agent_bind). SQLite ≥3.35 умеет DROP COLUMN; если нет — пропускаем.
         if "agent_id" in have:
@@ -940,10 +956,11 @@ def unassign_clients(employee: str, contract_ids: list[str]) -> int:
         return 0
     with connect() as conn:
         cur = conn.execute(
-            f"UPDATE clients SET responsible = '', unassigned_from = ? "
+            f"UPDATE clients SET responsible = '', unassigned_from = ?, "
+            f"unassigned_reason = ? "
             f"WHERE responsible = ? "
             f"AND contract_id IN ({','.join('?' * len(ids))})",
-            (employee, employee, *ids))
+            (employee, UNASSIGNED_REASON_MANUAL, employee, *ids))
         conn.commit()
         return cur.rowcount
 
@@ -3138,7 +3155,7 @@ def _authorized_import_state(
         replay["idempotent_replay"] = True
         replay["original_result"] = {
             key: stored.get(key)
-            for key in ("inserted", "updated", "office_cells")
+            for key in ("inserted", "updated", "office_cells", "auto_unassigned")
         }
         for key in (
             "inserted",
@@ -3147,6 +3164,7 @@ def _authorized_import_state(
             "office_contracts",
             "protected_cells",
             "protected_contracts",
+            "auto_unassigned",
         ):
             if key in replay:
                 replay[key] = 0
@@ -3215,6 +3233,9 @@ def import_grid(
     source_kind: str | None = None,
     source_proof: dict | None = None,
     require_source_proof: bool = False,
+    full_registry: bool = False,
+    preview_only: bool = False,
+    expected_auto_unassigned: int | None = None,
 ) -> dict:
     """Ядро импорта опубликованного master/test subset.
 
@@ -3255,16 +3276,26 @@ def import_grid(
     умеет представить две реальные строки master, поэтому неявное слияние
     запрещено; коллизия уходит в отчёт/карантин для ручного решения.
 
+    ``full_registry`` — отдельное явное решение оператора, а не следствие
+    ``source_kind``. Только при нём существующие назначенные договоры, которых
+    нет среди строк файла, снимаются с причиной ``absent_from_registry``.
+    ``preview_only`` выполняет тот же расчёт в транзакции и откатывает все записи.
+    При применении пульт передаёт увиденный ``expected_auto_unassigned``; если
+    состояние БД успело измениться, импорт откатывается и требует новый preview.
+
     Возвращает отчёт — чтобы было видно ТОЧНО, что вошло:
     {source_kind, total_rows, inserted, updated, skipped_no_id, duplicates,
     unknown_columns,
     protected_cells, protected_contracts, office_cells, office_contracts,
-    office_applied, blocked, duplicate_conflicts}. protected_* — отклонено
+    office_applied, auto_unassigned, blocked, duplicate_conflicts}.
+    protected_* — отклонено
     шлюзом (устаревший файл/мусор);
     office_* — принятые офисные правки, office_applied = {КД: {поле: значение}}
     (пульту — чтобы обогащение сразу писало свежепринятые значения).
     """
     report = {"source_kind": source_kind,
+              "full_registry": bool(full_registry),
+              "preview_only": bool(preview_only),
               "total_rows": 0, "inserted": 0, "updated": 0,
               "skipped_no_id": 0, "duplicates": 0, "unknown_columns": [],
               "protected_cells": 0, "protected_contracts": 0,
@@ -3274,9 +3305,25 @@ def import_grid(
               # входят ни в один отчёт руководителя. Раньше это не показывалось нигде,
               # поэтому 1970 договоров из 5267 «потерялись» молча.
               "no_responsible": 0,
+              "auto_unassigned": 0,
               "source_proof_digest": None,
               "blocked": False, "duplicate_conflicts": [],
               "quarantined_contracts": []}
+
+    if (
+        expected_auto_unassigned is not None
+        and (
+            isinstance(expected_auto_unassigned, bool)
+            or not isinstance(expected_auto_unassigned, int)
+            or expected_auto_unassigned < 0
+        )
+    ):
+        report["blocked"] = True
+        report["error"] = (
+            "импорт заблокирован: expected_auto_unassigned должен быть "
+            "неотрицательным целым"
+        )
+        return report
 
     if source_kind not in IMPORT_SOURCE_KINDS:
         report["blocked"] = True
@@ -3724,7 +3771,7 @@ def import_grid(
         # именно по ним, иначе однофамильцы склеятся (см. person_key).
         existing = {r["contract_id"]: r for r in conn.execute(
             "SELECT contract_id, client, birth_date, responsible, address, phone, "
-            "unassigned_from, "
+            "unassigned_from, unassigned_reason, "
             "bot_visit_at, bot_visit_data, office_edit_data, visit_value_log "
             "FROM clients")}
         # Визит — на человека: принятая правка разносится по всем его договорам
@@ -3758,22 +3805,31 @@ def import_grid(
             is_update = cid in existing
             # Пустой владелец = кейс в базе есть, а у выездника его нет.
             prev_resp = existing[cid]["responsible"] if cid in existing else ""
-            # Договор сняли в пульте — файл не должен вернуть его молча. Снятие
-            # держится, пока в реестре стоит ТОТ ЖЕ ответственный: значит офис
-            # ничего не менял, просто переразбросил как было. Появилось другое
-            # имя — это законное переназначение, снятие отменяется вместе с ним.
+            # Ручное снятие держится, пока в реестре стоит ТОТ ЖЕ ответственный:
+            # значит офис ничего не менял. Появилось другое имя — это законное
+            # переназначение. Автоснятие имеет обратную политику: сама вернувшаяся
+            # строка означает, что офис вернул договор, даже тому же сотруднику.
             was_unassigned = (existing[cid]["unassigned_from"]
                               if cid in existing else None) or ""
+            unassigned_reason = (existing[cid]["unassigned_reason"]
+                                 if cid in existing else None) or ""
+            if was_unassigned and not unassigned_reason:
+                # Совместимость с БД, которую открыли без предварительного init_db.
+                unassigned_reason = UNASSIGNED_REASON_MANUAL
             incoming_resp = canonical_responsible(
                 str(data.get("responsible") or "").strip(), known_resp)
             if incoming_resp:
                 data["responsible"] = incoming_resp
                 known_resp.setdefault(_name_key(incoming_resp), incoming_resp)
-            if was_unassigned and incoming_resp == was_unassigned:
+            if unassigned_reason == UNASSIGNED_REASON_ABSENT_FROM_REGISTRY:
+                data["unassigned_from"] = ""
+                data["unassigned_reason"] = ""
+            elif was_unassigned and incoming_resp == was_unassigned:
                 data["responsible"] = ""
                 incoming_resp = ""
             elif was_unassigned and incoming_resp:
                 data["unassigned_from"] = ""      # переназначили — метку снимаем
+                data["unassigned_reason"] = ""
             owners[cid] = str(incoming_resp or prev_resp or "").strip()
             # После подтверждённого визита очередной импорт может обновлять долг,
             # адрес и прочие поля источника, а поля визита — только через якорный
@@ -3971,10 +4027,44 @@ def import_grid(
         # Считаем по итогу разбора всего файла, а не построчно: у одного договора в
         # реестре бывает несколько строк, и владелец может стоять в любой из них.
         report["no_responsible"] = sum(1 for owner in owners.values() if not owner)
-        if require_source_proof:
-            _consume_import_authorization(conn, verified_source, report)
-        conn.commit()
-    _bump_version()   # массовая запись реестра → инвалидируем кэш приоритета
+        if full_registry:
+            # Отсутствие считается только по каноническим КД, разобранным тем же
+            # preflight выше. Никаких лимитов/выборок: оператор видит полный счётчик
+            # в preview до применения. Строки, визиты, фото и долги не удаляются.
+            for cid, old in existing.items():
+                former = str(old["responsible"] or "").strip()
+                if not former or cid in grouped:
+                    continue
+                changed = conn.execute(
+                    "UPDATE clients SET responsible='', unassigned_from=?, "
+                    "unassigned_reason=? WHERE contract_id=? AND responsible=?",
+                    (former, UNASSIGNED_REASON_ABSENT_FROM_REGISTRY, cid,
+                     old["responsible"]),
+                ).rowcount
+                report["auto_unassigned"] += changed
+        if (
+            expected_auto_unassigned is not None
+            and report["auto_unassigned"] != expected_auto_unassigned
+        ):
+            conn.rollback()
+            report["blocked"] = True
+            report["preview_stale"] = True
+            report["expected_auto_unassigned"] = expected_auto_unassigned
+            report["error"] = (
+                "импорт заблокирован: после предпросмотра состояние БД "
+                "изменилось; ожидалось снять договоров "
+                f"{expected_auto_unassigned}, сейчас получилось бы "
+                f"{report['auto_unassigned']}. Сделайте новый предпросмотр"
+            )
+            return report
+        if preview_only:
+            conn.rollback()
+        else:
+            if require_source_proof:
+                _consume_import_authorization(conn, verified_source, report)
+            conn.commit()
+    if not preview_only:
+        _bump_version()   # массовая запись реестра → инвалидируем кэш приоритета
     return report
 
 

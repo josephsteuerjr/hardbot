@@ -1830,6 +1830,35 @@ async def _admin_import_json(request: web.Request) -> web.Response:
             db.import_grid([], source_kind=source_kind),
             status=409,
         )
+    full_registry = body.get("full_registry", False)
+    if type(full_registry) is not bool:
+        return web.json_response(
+            {"blocked": True,
+             "error": "импорт заблокирован: full_registry должен быть boolean"},
+            status=409,
+        )
+    expected_auto_unassigned = body.get("expected_auto_unassigned")
+    if (
+        expected_auto_unassigned is not None
+        and (
+            isinstance(expected_auto_unassigned, bool)
+            or not isinstance(expected_auto_unassigned, int)
+            or expected_auto_unassigned < 0
+        )
+    ):
+        return web.json_response(
+            {"blocked": True,
+             "error": ("импорт заблокирован: expected_auto_unassigned должен "
+                       "быть неотрицательным целым")},
+            status=409,
+        )
+    if full_registry and expected_auto_unassigned is None:
+        return web.json_response(
+            {"blocked": True,
+             "error": ("импорт заблокирован: для полного реестра обязателен "
+                       "свежий предпросмотр числа снятий")},
+            status=409,
+        )
     try:
         validate_contract_binding(body.get("data_exchange_contract"))
         grid = db.pick_grid(body.get("sheets") or [])
@@ -1843,6 +1872,8 @@ async def _admin_import_json(request: web.Request) -> web.Response:
         source_kind=source_kind,
         source_proof=body.get("source_proof"),
         require_source_proof=True,
+        full_registry=full_registry,
+        expected_auto_unassigned=expected_auto_unassigned,
     )
     if report.get("blocked"):
         return web.json_response(report, status=409)
@@ -1856,6 +1887,54 @@ async def _admin_import_json(request: web.Request) -> web.Response:
         report["geocoded"] = scoring.geocode_city_centroids()
     except Exception as e:  # noqa: BLE001
         logging.warning("geocode after import: %s", e)
+    return web.json_response(report)
+
+
+async def _admin_import_preview_json(request: web.Request) -> web.Response:
+    """Read-only preflight импорта без consume receipt и побочных mutator-ов.
+
+    Отдельный endpoint намеренный: новый пульт, попавший на старый сервер, получит
+    404 и остановится, а не отправит якобы preview в старый write-handler.
+    """
+    _admin(request)
+    body = await request.json()
+    source_kind = body.get("source_kind")
+    if source_kind not in db.IMPORT_SOURCE_KINDS:
+        return web.json_response(
+            db.import_grid([], source_kind=source_kind, preview_only=True),
+            status=409,
+        )
+    full_registry = body.get("full_registry", False)
+    if type(full_registry) is not bool:
+        return web.json_response(
+            {"blocked": True,
+             "error": "предпросмотр заблокирован: full_registry должен быть boolean"},
+            status=409,
+        )
+    if not isinstance(body.get("source_proof"), dict):
+        return web.json_response(
+            {"blocked": True,
+             "error": "предпросмотр заблокирован: source_proof обязателен"},
+            status=409,
+        )
+    try:
+        validate_contract_binding(body.get("data_exchange_contract"))
+        grid = db.pick_grid(body.get("sheets") or [])
+    except (ExchangeContractError, ValueError) as exc:
+        return web.json_response(
+            {"blocked": True, "error": f"предпросмотр заблокирован: {exc}"},
+            status=409,
+        )
+    report = db.import_grid(
+        grid,
+        source_kind=source_kind,
+        source_proof=body.get("source_proof"),
+        require_source_proof=False,
+        full_registry=full_registry,
+        preview_only=True,
+    )
+    if report.get("blocked"):
+        return web.json_response(report, status=409)
     return web.json_response(report)
 
 
@@ -2270,6 +2349,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/admin/stats", _admin_stats)
     app.router.add_post("/admin/import", _admin_import)
     app.router.add_post("/admin/import.json", _admin_import_json)
+    app.router.add_post("/admin/import/preview.json", _admin_import_preview_json)
     app.router.add_post("/admin/import/authorize.json", _admin_import_authorize)
     app.router.add_post("/admin/device/enroll.json", _admin_device_enroll)
     app.router.add_get("/admin/devices.json", _admin_devices)

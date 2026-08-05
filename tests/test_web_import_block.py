@@ -22,7 +22,8 @@ def test_blocked_imports_return_409_before_geocoding(monkeypatch):
     monkeypatch.setattr(
         db,
         "import_grid",
-        lambda grid, *, source_kind, source_proof, require_source_proof: (
+        lambda grid, *, source_kind, source_proof, require_source_proof,
+        full_registry, expected_auto_unassigned: (
             blocked_grid.copy()
         ),
     )
@@ -86,7 +87,8 @@ def test_consumed_import_replay_never_runs_post_import_mutator(monkeypatch):
     monkeypatch.setattr(
         db,
         "import_grid",
-        lambda grid, *, source_kind, source_proof, require_source_proof: {
+        lambda grid, *, source_kind, source_proof, require_source_proof,
+        full_registry, expected_auto_unassigned: {
             "blocked": False,
             "idempotent_replay": True,
             "source_proof_digest": "a" * 64,
@@ -121,6 +123,77 @@ def test_consumed_import_replay_never_runs_post_import_mutator(monkeypatch):
             await client.close()
 
     asyncio.run(scenario())
+
+
+def test_import_preview_is_read_only_and_carries_explicit_full_flag(monkeypatch):
+    monkeypatch.setenv("ADMIN_API_KEY", "test-admin-key")
+    monkeypatch.setattr(db, "pick_grid", lambda sheets: sheets[0]["grid"])
+    calls = []
+
+    def preview_import(
+        grid,
+        *,
+        source_kind,
+        source_proof,
+        require_source_proof,
+        full_registry,
+        preview_only,
+    ):
+        calls.append(
+            {
+                "grid": grid,
+                "source_kind": source_kind,
+                "source_proof": source_proof,
+                "require_source_proof": require_source_proof,
+                "full_registry": full_registry,
+                "preview_only": preview_only,
+            }
+        )
+        return {
+            "blocked": False,
+            "preview_only": True,
+            "full_registry": True,
+            "auto_unassigned": 7,
+        }
+
+    monkeypatch.setattr(db, "import_grid", preview_import)
+
+    def forbidden_geocode():
+        raise AssertionError("preview must not run post-import mutators")
+
+    monkeypatch.setattr(scoring, "geocode_city_centroids", forbidden_geocode)
+
+    async def scenario():
+        client = TestClient(TestServer(web.build_app(None)))
+        await client.start_server()
+        try:
+            response = await client.post(
+                "/admin/import/preview.json",
+                json={
+                    "data_exchange_contract": web.DATA_EXCHANGE_CONTRACT,
+                    "source_kind": "published_master",
+                    "source_proof": {"test": "proof"},
+                    "sheets": [{"name": "Портфели", "grid": [["id"]]}],
+                    "full_registry": True,
+                },
+                headers={"X-Admin-Key": "test-admin-key"},
+            )
+            assert response.status == 200
+            assert (await response.json())["auto_unassigned"] == 7
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+    assert calls == [
+        {
+            "grid": [["id"]],
+            "source_kind": "published_master",
+            "source_proof": {"test": "proof"},
+            "require_source_proof": False,
+            "full_registry": True,
+            "preview_only": True,
+        }
+    ]
 
 
 def test_legacy_admin_reset_cannot_bypass_clearance(monkeypatch):
