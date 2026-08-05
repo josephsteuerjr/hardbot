@@ -1597,10 +1597,12 @@ class Pult(tk.Tk):
             over = sum(r.get("cells_over_nonempty") or 0 for r in ok)
             missing = sum(len(r.get("missing") or []) for r in ok)
             skipped = sum(r.get("out_of_window") or 0 for r in ok)
+            tech = sum(r.get("technical_overwrites") or 0 for r in ok)
             lines = [f"Готово: файлов {len(ok)} из {len(results)} · дописано ячеек: {cells}"
                      + (f" (поверх старых: {over})" if over else "")
                      + (f" · кейсов не нашлось в файлах: {missing}" if missing else "")
-                     + (f" · вне окна дат пропущено: {skipped}" if skipped else "")]
+                     + (f" · вне окна дат пропущено: {skipped}" if skipped else "")
+                     + (f" · поверх «Не обработан»: {tech}" if tech else "")]
             for r in ok[:15]:
                 lines.append(f"  {r['employee']} — {Path(r['file']).name}: "
                              f"ячеек {r.get('cells_written')}, кейсов {r.get('changed_cases')}")

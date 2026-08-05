@@ -133,6 +133,39 @@ def test_writing_into_an_empty_cell_is_not_displacement():
     assert plan["displaced"] == []
 
 
+def test_technical_not_processed_is_not_displacement():
+    """«Не обработан» — состояние по умолчанию, а не чьё-то решение.
+
+    Сверка книг после прогона 04.08.2026: из 595 свежих записей 84 легли поверх
+    непустого, и почти все — поверх «Не обработан». Считать их вытеснением
+    значит топить настоящие потери (их было 28) в десятках пустых тревог.
+    """
+    grid = _grid([{"Номер КД / ID": "A", "Общий результат": "Не обработан"}])
+    rows = [_srv("A", "2026-08-03", call_status="Оплачен")]
+    plan = enrich.build_plan(grid, FIELDS, rows)
+    assert plan["cells_written"] >= 1, "запись вообще не произошла"
+    assert plan["displaced"] == [], "«Не обработан» записан как вытеснение"
+    assert plan["technical_overwrites"] == 1
+    assert plan["cells_over_nonempty"] == 1, "механический счётчик должен остаться честным"
+
+
+def test_case_and_spaces_do_not_hide_technical_emptiness():
+    grid = _grid([{"Номер КД / ID": "A", "Общий результат": "  НЕ ОБРАБОТАН "}])
+    rows = [_srv("A", "2026-08-03", call_status="Оплачен")]
+    plan = enrich.build_plan(grid, FIELDS, rows)
+    assert plan["displaced"] == []
+    assert plan["technical_overwrites"] == 1
+
+
+def test_a_real_office_value_is_still_displacement():
+    """Контроль к двум тестам выше: настоящую правку они не должны прятать."""
+    grid = _grid([{"Номер КД / ID": "A", "Общий результат": "Доп. Обогащение"}])
+    rows = [_srv("A", "2026-08-03", call_status="Оплачен")]
+    plan = enrich.build_plan(grid, FIELDS, rows)
+    assert [d["was"] for d in plan["displaced"]] == ["Доп. Обогащение"]
+    assert plan["technical_overwrites"] == 0
+
+
 def test_merged_columns_are_never_reported_as_displacement():
     """Слияние сохраняет старый текст внутри нового — это не потеря.
 

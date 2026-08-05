@@ -698,6 +698,21 @@ def _is_source_row(row: list) -> bool:
     return bool(nonempty) and all(v in ("сх", "хард") for v in nonempty)
 
 
+# ТЕХНИЧЕСКАЯ ПУСТОТА. В книге «Не обработан» означает «до этого кейса ещё не
+# доходили» — это не чьё-то решение, а состояние по умолчанию. Запись поверх
+# него ничего не вытесняет.
+#
+# Разница не косметическая. Сверка книг после прогона 04.08.2026 показала: из
+# 595 свежих записей 84 легли поверх непустого, и почти все — поверх «Не
+# обработан». Если считать их вытеснением, человек будет видеть десятки тревог
+# за прогон, среди которых утонут настоящие потери — их было 28.
+TECHNICAL_EMPTY = {"не обработан"}
+
+
+def _is_technical_empty(value) -> bool:
+    return cell_text(value).casefold() in TECHNICAL_EMPTY
+
+
 def visit_window(since=None, until=None) -> tuple:
     """Границы окна обогащения как даты. Пустая граница — открытая сторона."""
     return parse_date(since) if since else None, parse_date(until) if until else None
@@ -749,7 +764,7 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
     writes: list[tuple[int, int, object, bool]] = []
     filled_cases = matched_cases = changed_cases = 0
     cells_already = cells_over_nonempty = 0
-    out_of_window = 0
+    out_of_window = technical_overwrites = 0
     missing: list[str] = []
     filled_contract_ids: list[str] = []
     matched_contract_ids: list[str] = []
@@ -804,8 +819,11 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
                     cells_over_nonempty += 1
                     # Слияние старое значение сохраняет внутри нового, замена —
                     # нет. Вытеснением считаем только второе: иначе в журнал
-                    # попадёт каждый дописанный комментарий.
-                    if merge_mode == "replace":
+                    # попадёт каждый дописанный комментарий. И «Не обработан» —
+                    # не чьё-то решение, а состояние по умолчанию.
+                    if _is_technical_empty(cur):
+                        technical_overwrites += 1
+                    elif merge_mode == "replace":
                         displaced.append({
                             "contract_id": cid,
                             "key": key,
@@ -832,6 +850,7 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
         "cells_already": cells_already,    # уже совпадало — не трогали
         "cells_over_nonempty": cells_over_nonempty,  # обновили поверх старого значения
         "displaced": displaced,            # ЧТО именно вытеснили: было/стало
+        "technical_overwrites": technical_overwrites,  # поверх «Не обработан»
         "out_of_window": out_of_window,    # отсеяно окном дат оператора
         "window": {"since": since_d.isoformat() if since_d else "",
                    "until": until_d.isoformat() if until_d else ""},
