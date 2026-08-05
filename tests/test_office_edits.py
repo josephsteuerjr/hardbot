@@ -99,12 +99,13 @@ def test_office_edit_is_accepted_from_a_pult_import_too():
     today = date.today().isoformat()
     _import({"contract_id": "OF-SUBSET", "client": "Из пульта",
              "responsible": "Агент"})
-    _complete_visit("OF-SUBSET", today, call_status="Оплачен")
+    _complete_visit("OF-SUBSET", today, call_status="Оплачен", visit_comment="бот")
     values = {
         "contract_id": "OF-SUBSET",
         "client": "Из пульта",
         "responsible": "Агент",
         "visit_date": today,
+        "visit_comment": "бот",              # эхо визита: строка его видела
         "overall_result": "Доп. Обогащение",
     }
     grid = [
@@ -115,6 +116,35 @@ def test_office_edit_is_accepted_from_a_pult_import_too():
     assert rep["office_cells"] >= 1, "правка офиса снова не доезжает до бота"
     assert db.bot_visit_snapshot(
         db.get_client("OF-SUBSET"))["call_status"] == "Доп. Обогащение"
+
+
+def test_pre_visit_value_with_a_matching_date_cannot_roll_back_the_visit():
+    """Совпавшей даты мало — она ничего не доказывает сама по себе.
+
+    05.08.2026, находка состязательной проверки, воспроизведена прогоном. После
+    снятия требования «опубликованный мастер» единственной проверкой осталось
+    равенство дат. Но «Дата выезда» — поле HARD, его печатают руками. Старая
+    копия реестра, где дата уже проставлена, а «Общий результат» ещё довизитный
+    («В работе»), проходила как «осознанная правка офиса»: доказанный визит
+    откатывался, и следующее обогащение разносило откат по живым книгам.
+
+    Такого значения нет в visit_value_log — его породил не бот, — поэтому эхо
+    прежнего снимка тут не спасает. Спасает требование, чтобы строка хотя бы
+    одним полем визита подтвердила, что видела ЭТОТ выезд.
+    """
+    today = date.today().isoformat()
+    _import({"contract_id": "OF-PRE", "client": "Довизитная копия",
+             "responsible": "Агент"})
+    _complete_visit("OF-PRE", today, call_status="Оплачен", visit_comment="бот")
+
+    # Дата совпала, но строка довизитная: полей визита в ней нет.
+    rep = _import({"contract_id": "OF-PRE", "client": "Довизитная копия",
+                   "responsible": "Агент", "visit_date": today,
+                   "overall_result": "В работе"})
+    assert rep["office_cells"] == 0, "довизитное значение принято за правку офиса"
+    assert rep["protected_cells"] >= 1
+    snapshot = db.bot_visit_snapshot(db.get_client("OF-PRE"))
+    assert snapshot["call_status"] == "Оплачен", "доказанный визит откачен"
 
 
 def test_pult_import_with_a_wrong_date_is_still_rejected():
@@ -258,12 +288,18 @@ def test_office_edit_propagates_to_person_contracts():
 
 
 def test_office_dropdown_normalized_to_canonical():
-    """«оплачен.» после автозамены Excel — это «Оплачен», а не отказ."""
+    """«оплачен.» после автозамены Excel — это «Оплачен», а не отказ.
+
+    В строке есть и эхо визита (комментарий бота): смена РЕЗУЛЬТАТА принимается
+    только от строки, которая доказала, что видела этот выезд. Реальная строка
+    обогащённого реестра несёт все поля визита, так что это не искусственно.
+    """
     today = date.today().isoformat()
     _import({"contract_id": "OF-B", "client": "Регистр", "responsible": "Агент"})
-    _complete_visit("OF-B", today, call_status="Нет контакта")
+    _complete_visit("OF-B", today, call_status="Нет контакта", visit_comment="бот")
     rep = _import({"contract_id": "OF-B", "client": "Регистр", "responsible": "Агент",
-                   "visit_date": today, "overall_result": "оплачен."})
+                   "visit_date": today, "visit_comment": "бот",
+                   "overall_result": "оплачен."})
     assert rep["office_cells"] == 1
     assert rep["office_applied"]["OF-B"]["call_status"] == "Оплачен"
     assert db.get_client("OF-B")["call_status"] == "Оплачен"
