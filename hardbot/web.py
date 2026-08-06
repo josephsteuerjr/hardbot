@@ -309,8 +309,15 @@ def _row_get(rows, key):
     return next((r[key] for r in rows if r[key] not in (None, "")), None)
 
 
-def _person_full(rep: str, lang: str) -> dict | None:
-    rows = db.person_contracts(rep)
+def _person_full_from_rows(rows, rep: str, lang: str) -> dict | None:
+    """Полная карточка из уже выбранных строк одного человека.
+
+    `/api/cards` получает все группы одним запросом. Повторный
+    `db.person_contracts(rep)` на каждую карточку создавал N+1 SQLite-запросов:
+    у Фирдавса 270 карточек строились сотнями отдельных соединений. Точечный
+    `/api/person` по-прежнему выбирает только своего человека и делегирует сюда.
+    """
+    rows = list(rows or [])
     if not rows:
         return None
     main = rows[0]
@@ -372,6 +379,10 @@ def _person_full(rep: str, lang: str) -> dict | None:
     }
 
 
+def _person_full(rep: str, lang: str) -> dict | None:
+    return _person_full_from_rows(db.person_contracts(rep), rep, lang)
+
+
 # --- Маршрут «я → должник» (навигация в миниаппе) ---------------------------
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return routing_client.haversine_km((lat1, lon1), (lat2, lon2))
@@ -399,7 +410,25 @@ def _osrm_route(lat1: float, lon1: float, lat2: float, lon2: float, base: str):
 
 # --- Хендлеры ---------------------------------------------------------------
 async def _index(request: web.Request) -> web.StreamResponse:
-    return web.FileResponse(MINIAPP_DIR / "index.html")
+    # Telegram WebView и установленная PWA могут жить неделями. HTTP-кэш не
+    # должен подменять сетевой ответ старым index.html: оффлайн-копией управляет
+    # только service worker, который знает версию оболочки.
+    return web.FileResponse(MINIAPP_DIR / "index.html", headers={
+        "Cache-Control": "no-store, max-age=0",
+        "Pragma": "no-cache",
+        "X-Hardbot-Shell-Version": str(_shell_version()),
+    })
+
+
+async def _version(request: web.Request) -> web.Response:
+    """Публичная версия без ПД и авторизации для пробуждённой старой PWA."""
+    return web.json_response({
+        "shellVersion": _shell_version(),
+        "dataExchangeContract": DATA_EXCHANGE_CONTRACT,
+    }, headers={
+        "Cache-Control": "no-store, max-age=0",
+        "Pragma": "no-cache",
+    })
 
 
 async def _sw(request: web.Request) -> web.StreamResponse:
@@ -437,6 +466,7 @@ async def _tiles(request: web.Request) -> web.StreamResponse:
 
 
 async def _bootstrap(request: web.Request) -> web.Response:
+    started = time.perf_counter()
     uid = _uid(request)
     if not uid:
         raise web.HTTPUnauthorized(text="auth")
@@ -474,10 +504,20 @@ async def _bootstrap(request: web.Request) -> web.Response:
     # переключатель исчезал совсем — при том, что портфель ему открывает РОЛЬ.
     # Право определяется ролью, значит и переключатель зависит только от неё.
     roles = {"manager": bool(scope), "employees": scope, "acting": emp} if scope else None
-    return web.json_response({"ok": True, "uid": uid, "employee": emp,
-                              "kind": db.get_kind(uid), "lang": lang,
-                              "persons": persons, "meta": _meta(lang),
-                              "roles": roles})
+    diagnostics = {
+        "server_ms": round((time.perf_counter() - started) * 1000, 1),
+        "persons": len(persons),
+        "contracts": sum(int(p.get("n") or 0) for p in persons),
+    }
+    response = web.json_response({
+        "ok": True, "uid": uid, "employee": emp,
+        "kind": db.get_kind(uid), "lang": lang,
+        "persons": persons, "meta": _meta(lang),
+        "roles": roles, "diagnostics": diagnostics,
+    })
+    response.headers["Server-Timing"] = f"app;dur={diagnostics['server_ms']}"
+    response.enable_compression()
+    return response
 
 
 async def _act_as(request: web.Request) -> web.Response:
@@ -927,19 +967,85 @@ async def _cards(request: web.Request) -> web.Response:
     чтобы в поле без сети открывать любого своего клиента и заполнять визит. Один запрос
     вместо N (по карточке на человека). ПД в журнал доступа тут не пишем — это оптовый
     предзагруз своего же портфеля, а не точечный просмотр (view_card логируется в _person)."""
+    started = time.perf_counter()
     uid, emp = _auth(request)
     lang = lang_of(uid)
     cards = {}
-    for p in db.persons_for_employee(emp):
-        full = _person_full(p["rep"], lang)
+    grouped = db.persons_for_employee(emp)
+    for p in grouped:
+        # persons_for_employee уже принёс все строки договоров. Не открываем
+        # отдельное SQLite-соединение для каждой карточки.
+        full = _person_full_from_rows(p["contracts"], p["rep"], lang)
         if full:
             cards[p["rep"]] = full
     # ИБ: точечный просмотр карточки логируется в _person (view_card). Здесь — оптовый
     # предзагруз своего портфеля в оффлайн-кэш: пишем один факт (кто/когда/сколько), без
     # строки на каждого. NB: оффлайн-открытия карточек в поле сервер уже не аудирует.
-    db.audit_access(uid, "cards_prefetch", detail=str(len(cards)))
-    return web.json_response({"ok": True, "cards": cards,
-                              "at": datetime.now().isoformat(timespec="seconds")})
+    cards_json_bytes = len(json.dumps(
+        cards, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8"))
+    diagnostics = {
+        "server_ms": round((time.perf_counter() - started) * 1000, 1),
+        "cards": len(cards),
+        "contracts": sum(len(p["contracts"]) for p in grouped),
+        "cards_bytes": cards_json_bytes,
+    }
+    db.audit_access(
+        uid, "cards_prefetch", target=emp,
+        detail=json.dumps(diagnostics, ensure_ascii=False, separators=(",", ":")),
+    )
+    response = web.json_response({
+        "ok": True, "cards": cards,
+        "at": datetime.now().isoformat(timespec="seconds"),
+        "diagnostics": diagnostics,
+    })
+    response.headers["Server-Timing"] = f"app;dur={diagnostics['server_ms']}"
+    response.enable_compression()
+    return response
+
+
+_CLIENT_EVENTS = {
+    "boot_ok", "boot_error", "warm_ok", "warm_error", "render_error",
+    "shell_update",
+}
+_CLIENT_METRICS = {
+    "persons", "cards", "contracts", "server_ms", "download_ms", "cache_ms",
+    "render_ms", "cards_bytes", "shell",
+}
+
+
+async def _client_event(request: web.Request) -> web.Response:
+    """Ограниченные метрики загрузки без имён, КД, адресов и текста ошибок."""
+    uid, emp = _auth(request)
+    if request.content_length is not None and request.content_length > 4096:
+        raise web.HTTPRequestEntityTooLarge(max_size=4096, actual_size=request.content_length)
+    try:
+        raw_body = await request.read()
+        if len(raw_body) > 4096:
+            raise web.HTTPRequestEntityTooLarge(max_size=4096, actual_size=len(raw_body))
+        body = json.loads(raw_body)
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+        raise web.HTTPBadRequest(text="json")
+    event = body.get("event") if isinstance(body, dict) else None
+    if event not in _CLIENT_EVENTS:
+        raise web.HTTPBadRequest(text="event")
+    raw_metrics = body.get("metrics") or {}
+    if not isinstance(raw_metrics, dict):
+        raise web.HTTPBadRequest(text="metrics")
+    metrics = {}
+    for key in _CLIENT_METRICS:
+        value = raw_metrics.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if value != value or value in (float("inf"), float("-inf")):
+            continue
+        metrics[key] = round(max(0.0, min(float(value), 1_000_000_000.0)), 1)
+    detail = json.dumps(
+        {"event": event, "metrics": metrics},
+        ensure_ascii=False, separators=(",", ":"),
+    )
+    db.audit_access(uid, f"client_{event}", target=emp, detail=detail)
+    return web.json_response({"ok": True})
 
 
 async def _save(request: web.Request) -> web.Response:
@@ -2436,6 +2542,7 @@ def build_app(bot=None) -> web.Application:
     app = web.Application(client_max_size=256 * 1024 * 1024, middlewares=[_cors])
     app["bot"] = bot
     app.router.add_get("/", _index)
+    app.router.add_get("/version.json", _version)
     app.router.add_get("/sw.js", _sw)
     app.router.add_get("/manifest.webmanifest", _manifest)
     # Локально захостенные ассеты оболочки (Telegram SDK, иконки PWA) — same-origin,
@@ -2482,6 +2589,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/bootstrap", _bootstrap)
     app.router.add_get("/api/person", _person)
     app.router.add_get("/api/cards", _cards)
+    app.router.add_post("/api/client-event", _client_event)
     app.router.add_get("/api/route", _route)
     app.router.add_get("/api/route_to", _route_to)
     app.router.add_get("/api/geocode", _geocode_free)

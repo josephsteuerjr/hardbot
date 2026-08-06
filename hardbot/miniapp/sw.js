@@ -9,7 +9,7 @@
  * ВАЖНО при обновлении оболочки на сервере: поднимите версию CACHE (v1→v2), иначе у уже
  * открывавших приложение выездников останется старый index.html из кэша до смены версии.
  */
-const CACHE = "hardbot-shell-v30";
+const CACHE = "hardbot-shell-v31";
 const PRECACHE = [
   "/",
   "/vendor/telegram-web-app.js",
@@ -38,6 +38,11 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(req.url);
   const sameOrigin = url.origin === self.location.origin;
 
+  // Маленький version handshake всегда идёт в сеть и никогда не становится
+  // частью shell-кэша. Иначе именно старая PWA могла бы "подтвердить" себе
+  // старую версию из собственного cache-first.
+  if (sameOrigin && url.pathname === "/version.json") return;
+
   // Данные, админ-API и тайлы — всегда из сети (оффлайн-данные держит IndexedDB миниаппа).
   if (sameOrigin && (url.pathname.startsWith("/api/") ||
                      url.pathname.startsWith("/admin/") ||
@@ -48,7 +53,7 @@ self.addEventListener("fetch", (e) => {
   // Так service worker не может «залипнуть» на старой/сломанной закэшированной странице.
   if (req.mode === "navigate") {
     e.respondWith(
-      fetch(req).then((resp) => {
+      fetch(req, {cache: "no-store"}).then((resp) => {
         if (resp && resp.ok) { const copy = resp.clone(); caches.open(CACHE).then((c) => c.put("/", copy)); }
         return resp;
       }).catch(() => caches.match("/"))

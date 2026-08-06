@@ -407,6 +407,7 @@ function noteShellVersion(v, live){
   const srv=Number(v);
   if(!Number.isInteger(srv)||srv<=SHELL_VERSION||UPDATE_READY) return;
   UPDATE_READY=true;
+  clientMetric("shell_update", {shell:srv});
   // «Занят» — это ещё и открытый выбор файла со сжатием: возврат из системной
   // камеры сам поднимает visibilitychange, а PHOTO_PREPARING заполняется лишь
   // ПОСЛЕ чтения и сжатия. Перезагрузиться в этом промежутке — стереть снимок
@@ -424,6 +425,19 @@ function noteShellVersion(v, live){
   try{ updateOffBar(); }catch(e){}
 }
 function reloadForUpdate(){ location.reload(); }
+
+// Проверка версии не зависит от тяжёлого авторизованного bootstrap. Это важно
+// для старого Telegram WebView и ярлыка PWA, который ОС могла заморозить на
+// несколько дней: маленький публичный ответ будит механизм обновления первым.
+let LAST_VERSION_CHECK=0;
+async function checkShellVersion(){
+  if(Date.now()-LAST_VERSION_CHECK<60000) return;
+  LAST_VERSION_CHECK=Date.now();
+  try{
+    const r=await fetch("/version.json", {cache:"no-store"});
+    if(r.ok){ const d=await r.json(); noteShellVersion(d.shellVersion, true); }
+  }catch(e){}
+}
 
 function setMeta(meta, live){
   const next=meta||{};
@@ -483,6 +497,12 @@ const IDB = (()=>{
     all:(s)=>store(s,"readonly").then(o=>p(o.getAll())),
     count:(s)=>store(s,"readonly").then(o=>p(o.count())),
     clear:(s)=>write(s,o=>o.clear()),
+    // Один атомарный снимок портфеля: сотни отдельных транзакций подвешивали
+    // слабые телефоны, а частичный сбой оставлял смесь старых и новых карточек.
+    replace:(s,entries)=>write(s,o=>{
+      o.clear();
+      for(const [k,v] of entries) o.put(v,k);
+    }),
   };
 })();
 
@@ -548,26 +568,37 @@ async function warmCards(manual){
   if(manual) warmBar(`<div class="pcard" style="display:block;margin-bottom:10px">
       <div class="muted" id="warmtxt">${esc(t.warmgoing)}…</div></div>`);
   let j=null;
+  const downloadStarted=performance.now();
   try{ j=await api("/api/cards"); }
   catch(e){
+    clientMetric("warm_error", {});
     if(manual) warmBar(`<div class="pcard" style="display:block;margin-bottom:10px">
         <div class="muted">⚠️ ${esc(t.warmfail)}</div>
         <button class="btn line" style="margin-top:8px" onclick="warmCards(true)">⬇ ${esc(t.warmagain)}</button>
       </div>`);
     return;
   }
+  const downloadMs=performance.now()-downloadStarted;
   const reps = (j && j.cards) ? Object.keys(j.cards) : [];
-  let done = 0;
-  for(const rep of reps){
-    try{ await IDB.put("cards", j.cards[rep], rep); done++; }catch(e){}
-    if(manual && (done % 10 === 0 || done === reps.length)){
-      const el = $("warmtxt");
-      if(el) el.textContent = `${t.warmgoing}: ${done}/${reps.length}`;
-      await new Promise(r => setTimeout(r, 0));   // отдаём кадр — интерфейс не замирает
-    }
+  const entries=reps.map(rep=>[rep,j.cards[rep]]);
+  const cacheStarted=performance.now();
+  try{
+    await IDB.replace("cards", entries);
+  }catch(e){
+    clientMetric("warm_error", {cards:reps.length,download_ms:downloadMs});
+    if(manual) warmBar(`<div class="pcard" style="display:block;margin-bottom:10px">
+        <div class="muted">⚠️ ${esc(t.warmfail)}</div>
+        <button class="btn line" style="margin-top:8px" onclick="warmCards(true)">⬇ ${esc(t.warmagain)}</button>
+      </div>`);
+    return;
   }
-  STATE.warmCount = done;
+  const cacheMs=performance.now()-cacheStarted;
+  STATE.warmCount = entries.length;
   try{ localStorage.setItem(WARM_KEY, String(Date.now())); }catch(e){}
+  const sd=(j&&j.diagnostics)||{};
+  clientMetric("warm_ok", {cards:entries.length,contracts:sd.contracts,
+    server_ms:sd.server_ms,cards_bytes:sd.cards_bytes,
+    download_ms:downloadMs,cache_ms:cacheMs});
   warmBar(warmStatusHTML());
 }
 // Сколько карточек РЕАЛЬНО лежит в оффлайн-кэше. Счётчик прогрева жил только в памяти
@@ -658,7 +689,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=30;
+const SHELL_VERSION=31;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -989,6 +1020,15 @@ async function api(path, opts){
   if (!r.ok) throw new Error(r.status);
   return r.json();
 }
+// Только числовые замеры этапов. Ни имена, ни КД, ни адреса, ни тексты ошибок
+// сюда не принимаются — сервер повторно проверяет тот же белый список.
+function clientMetric(event, metrics){
+  try{
+    const h=authHeaders(); h["Content-Type"]="application/json";
+    fetch("/api/client-event", {method:"POST",headers:h,keepalive:true,
+      body:JSON.stringify({event,metrics:metrics||{}})}).catch(()=>{});
+  }catch(e){}
+}
 function toast(t){ const e=$("toast"); e.textContent=t; e.classList.add("show");
   setTimeout(()=>e.classList.remove("show"),1600); }
 
@@ -1033,6 +1073,8 @@ async function restartOnboarding(){
 }
 
 async function boot(){
+  const bootStarted=performance.now();
+  checkShellVersion();
   renderLangs(); hideBottomNav();
   geoProbe();                 // узнаём, дали ли права раньше (не спрашивает, только смотрит)
   tgGeoInit();                // внутри Телеграма — её собственный LocationManager
@@ -1056,10 +1098,17 @@ async function boot(){
     STATE.roles=d.roles||null;   // роль руководителя: список его сотрудников + текущий
     STATE.online=true;
     cacheBootstrap(d);            // снимок портфеля для оффлайна (в фоне, не блокирует UI)
+    const renderStarted=performance.now();
     renderList();
+    const bd=d.diagnostics||{};
+    clientMetric("boot_ok", {persons:STATE.persons.length,
+      contracts:bd.contracts,server_ms:bd.server_ms,
+      render_ms:performance.now()-renderStarted,
+      download_ms:performance.now()-bootStarted});
     warmCards();                  // полные карточки всех клиентов в фон-кэш (онлайн)
     flushQueue();                 // досыл накопленного оффлайна (визиты/фото/метки)
   }catch(e){
+    clientMetric("boot_error", {download_ms:performance.now()-bootStarted});
     const st=+((e&&e.message)||0);
     // Сервер ответил «не пускаю» вне Телеги: токен истёк/отозван либо его ещё нет.
     // Кэш здесь НЕ поднимаем (сервер доступен и отказал) — просим новую ссылку у бота.
@@ -1172,6 +1221,7 @@ async function routeDay(){
   try{ j=await api(url); }catch(e){ toast("✕"); return; }
   const items=(j&&j.order)||[];
   if(!items.length){ toast(t.rdempty); return; }
+  LIST_RENDER_SEQ++;                 // отменить незавершённую порционную выдачу списка
   $("plist").innerHTML =
     `<div class="muted" style="margin:4px 0 10px">🧭 ${esc(t.routeday)}: ${items.length}`+
     (j.km?` · ≈ ${j.km} км`:"")+`</div>`+
@@ -1183,17 +1233,30 @@ async function routeDay(){
        <span class="pchev">${ic("chevR")}</span>
      </div>`).join("");
 }
+let LIST_RENDER_SEQ=0;
+function personCardHTML(p,t){
+  const dotStyle = (!p.visited && p.score!=null) ? ` style="background:${priColor(p.score)}"` : "";
+  return `<div class="pcard" onclick="openP(decodeURIComponent('${enc(p.rep)}'))">
+     <span class="dot ${p.visited?'v':'n'}"${dotStyle}></span>
+     <div class="pinfo"><div class="pname">${esc(p.client)}</div>
+       <div class="psub">${p.n>1?(p.n+" "+t.kd+" · "):""}${totalStr(p)}</div></div>
+     <span class="pchev">${ic("chevR")}</span>
+   </div>`;
+}
 function drawList(items){
-  const t=L();
-  $("plist").innerHTML = items.map(p=>{
-    const dotStyle = (!p.visited && p.score!=null) ? ` style="background:${priColor(p.score)}"` : "";
-    return `<div class="pcard" onclick="openP('${p.rep}')">
-       <span class="dot ${p.visited?'v':'n'}"${dotStyle}></span>
-       <div class="pinfo"><div class="pname">${esc(p.client)}</div>
-         <div class="psub">${p.n>1?(p.n+" "+t.kd+" · "):""}${totalStr(p)}</div></div>
-       <span class="pchev">${ic("chevR")}</span>
-     </div>`;
-  }).join("");
+  const host=$("plist"); if(!host) return;
+  const t=L(), seq=++LIST_RENDER_SEQ, batch=60;
+  let offset=0;
+  host.innerHTML="";
+  const append=()=>{
+    // Поиск/маршрут/переход могли заменить экран, пока ждали следующий кадр.
+    if(seq!==LIST_RENDER_SEQ || $("plist")!==host) return;
+    const end=Math.min(offset+batch,items.length);
+    host.insertAdjacentHTML("beforeend",items.slice(offset,end).map(p=>personCardHTML(p,t)).join(""));
+    offset=end;
+    if(offset<items.length) requestAnimationFrame(append);
+  };
+  try{ append(); }catch(e){ clientMetric("render_error", {persons:items.length}); }
 }
 function filterList(){
   const q=$("q").value.toLowerCase();
@@ -1211,7 +1274,10 @@ async function openP(rep){
   // отдельный localStorage-черновик восстановится поверх пустой формы ниже.
   if(!d.visited){
     (d.form||[]).forEach(f=>{ f.current=""; });
-    d.visit_comment=""; d.call_comment=""; d.tips="";
+    // Текущий комментарий месяца — живой совместный текст офиса и бота. Его
+    // сохраняем даже до первого завершённого визита; очищаем только недоказанный
+    // legacy-prefill прочих полей.
+    d.call_comment=""; d.tips="";
     IDB.put("cards",d,rep).catch(()=>{});
   }
   STATE.cur=d; STATE.tab="visit";
@@ -2049,14 +2115,15 @@ async function refreshData(){
   }catch(e){}                                    // оффлайн/отказ — молча, до следующего раза
 }
 setInterval(refreshData, 10*60*1000);            // раз в 10 минут при открытом приложении
+setInterval(checkShellVersion, 5*60*1000);        // версия легче полного портфеля
 
 // Появилась связь — досылаем накопленную очередь; пропала — переключаем индикатор.
 // Плюс досыл и обновление данных при возвращении к приложению (события online в
 // мобильном WebView не всегда надёжны, visibilitychange/pageshow — подстраховка).
-window.addEventListener("online", ()=>{ STATE.online=true; updateOffBar(); flushQueue(); refreshData(); });
+window.addEventListener("online", ()=>{ STATE.online=true; updateOffBar(); flushQueue(); checkShellVersion(); refreshData(); });
 window.addEventListener("offline", ()=>{ STATE.online=false; updateOffBar(); });
-document.addEventListener("visibilitychange", ()=>{ if(!document.hidden){ flushQueue(); refreshData(); } });
-window.addEventListener("pageshow", e=>{ if(e.persisted){ flushQueue(); refreshData(); } });
+document.addEventListener("visibilitychange", ()=>{ if(!document.hidden){ flushQueue(); checkShellVersion(); refreshData(); } });
+window.addEventListener("pageshow", e=>{ checkShellVersion(); if(e.persisted){ flushQueue(); refreshData(); } });
 
 function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
