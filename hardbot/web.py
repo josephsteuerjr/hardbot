@@ -1983,13 +1983,38 @@ async def _admin_export_json(request: web.Request) -> web.Response:
     повторно разнести импортные псевдовизиты по живым файлам.
     """
     _admin(request)
-    rows = db.registry_rows() if request.query.get("mode") == "full" \
-        else db.enrichment_rows()
+    full = request.query.get("mode") == "full"
+    employees = request.query.getall("employee", [])
+    visit_from = request.query.get("visit_from", "")
+    visit_to = request.query.get("visit_to", "")
+    if not full and (employees or visit_from or visit_to):
+        return web.json_response(
+            {"error": "фильтры сотрудников и дат доступны только для mode=full"},
+            status=409,
+        )
+    try:
+        rows = (
+            db.registry_rows(
+                employees=employees or None,
+                visit_from=visit_from,
+                visit_to=visit_to,
+            )
+            if full else db.enrichment_rows()
+        )
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=409)
     return web.json_response(
         {
             "data_exchange_contract": DATA_EXCHANGE_CONTRACT,
             "fields": db.export_schema(),
             "rows": rows,
+            "selection": {
+                "all_employees": not bool(employees),
+                "employees": employees,
+                "visit_from": visit_from,
+                "visit_to": visit_to,
+                "rows": len(rows),
+            },
         }
     )
 

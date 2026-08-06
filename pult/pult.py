@@ -451,6 +451,9 @@ class Pult(tk.Tk):
         self.imp_book: dict = {}          # выбранная книга: путь, грид, вид источника
         self.imp_selected: set[str] = set()   # кого из сотрудников грузим
         self.db_employees: list[dict] = []    # фактические портфели последнего /stats
+        self.exp_selected: set[str] = set()
+        self._exp_vars: dict[str, tk.BooleanVar] = {}
+        self._exp_initialized = False
         self._imp_vars: dict = {}
         self._imp_preview_body: dict | None = None
         self._imp_preview_signature: tuple | None = None
@@ -787,6 +790,7 @@ class Pult(tk.Tk):
         def done(d):
             self._set_conn(True, "подключено")
             self.db_employees = list(d.get("employees") or [])
+            self._render_export_employees()
             self.metrics["clients"].configure(text=fmt_n(d.get("clients")))
             self.metrics["visited"].configure(text=fmt_n(d.get("visited")))
             self.metrics["emps"].configure(text=fmt_n(len(d.get("employees", []))))
@@ -923,78 +927,41 @@ class Pult(tk.Tk):
         self.enrich_out.pack(anchor="w", pady=(8, 0))
 
         exp = Card(inner, "Экспорт-слепок",
-                   "«Реестр целиком» — новый xlsx из БД сервера (типизированные даты и "
-                   "суммы, автофильтр). Это слепок БД, а не твой живой файл — для сверки "
-                   "и «чистой» выгрузки.")
+                   "Новый xlsx из БД сервера. Можно выгрузить весь реестр либо "
+                   "только выбранных сотрудников и независимо ограничить строки "
+                   "доказанными выездами за период.")
         exp.pack(fill="x", pady=(12, 0))
+        exp_head = tk.Frame(exp.inner, bg=CARD)
+        exp_head.pack(fill="x")
+        tk.Label(exp_head, text="Сотрудники:", bg=CARD, fg=MUTED,
+                 font=f(9)).pack(side="left")
+        btn(exp_head, "все", lambda: self._exp_all(True)).pack(side="right")
+        btn(exp_head, "снять", lambda: self._exp_all(False)).pack(
+            side="right", padx=(0, 6))
+        self.exp_pick_frame = tk.Frame(exp.inner, bg=CARD)
+        self.exp_pick_frame.pack(fill="x", pady=(6, 0))
+        tk.Label(self.exp_pick_frame, text="Подключись к серверу, чтобы увидеть "
+                 "сотрудников из БД", bg=CARD, fg=MUTED, font=f(8)).pack(anchor="w")
+        exp_dates = tk.Frame(exp.inner, bg=CARD)
+        exp_dates.pack(anchor="w", pady=(10, 0))
+        tk.Label(exp_dates, text="Выезды с", bg=CARD, fg=MUTED,
+                 font=f(9)).pack(side="left")
+        self.exp_since = entry(exp_dates, width=12)
+        self.exp_since.pack(side="left", padx=(6, 0))
+        tk.Label(exp_dates, text="по", bg=CARD, fg=MUTED,
+                 font=f(9)).pack(side="left", padx=(8, 0))
+        self.exp_until = entry(exp_dates, width=12)
+        self.exp_until.pack(side="left", padx=(6, 0))
+        tk.Label(exp_dates, text="  пусто = без ограничения", bg=CARD,
+                 fg=MUTED, font=f(8)).pack(side="left", padx=(8, 0))
+        btn(exp_dates, "Только сегодня", self._exp_today).pack(
+            side="left", padx=(10, 0))
         rowb = tk.Frame(exp.inner, bg=CARD)
-        rowb.pack(anchor="w")
-        btn(rowb, "Реестр целиком…", self.do_export_full).pack(side="left")
+        rowb.pack(anchor="w", pady=(10, 0))
+        btn(rowb, "Подготовить выгрузку…", self.do_export_full,
+            kind="accent").pack(side="left")
         btn(rowb, "Метки курьеров…", self.do_export_markers).pack(side="left", padx=(8, 0))
-
-        sc = Card(inner, "Legacy-разброс отключён",
-                  "Старый режим пересобирал личные .xlsb из полного экспорта и мог "
-                  "стереть ручные данные. Запись заблокирована на уровне интерфейса, "
-                  "CLI и движка. Для сборки и распределения используйте отдельное "
-                  "приложение «Контур · Реестры»; здесь оставлен только безопасный "
-                  "предпросмотр соответствия папок.")
-        sc.pack(fill="x", pady=(12, 0))
-        rowsc = tk.Frame(sc.inner, bg=CARD)
-        rowsc.pack(anchor="w")
-        btn(rowsc, "Папка с республиками…", self.scatter_pick_base).pack(side="left")
-        btn(rowsc, "Экспорт кейсов…", self.scatter_pick_source).pack(side="left", padx=(8, 0))
-        btn(rowsc, "＋ прямая папка", self.scatter_add_root).pack(side="left", padx=(8, 0))
-        self.sc_base_lbl = tk.Label(sc.inner, text="базовая папка не выбрана", bg=CARD,
-                                    fg=MUTED, font=f(9), wraplength=760, justify="left")
-        self.sc_base_lbl.pack(anchor="w", pady=(8, 0))
-        self.sc_src_lbl = tk.Label(sc.inner, text="файл экспорта не выбран", bg=CARD,
-                                   fg=MUTED, font=f(9), wraplength=760, justify="left")
-        self.sc_src_lbl.pack(anchor="w")
-        self.sc_roots_lbl = tk.Label(sc.inner, text="", bg=CARD, fg=MUTED, font=f(9),
-                                     wraplength=760, justify="left")
-        self.sc_roots_lbl.pack(anchor="w")
-        btn(sc.inner, "Проверить совпадения", lambda: self.scatter_run(False),
-            kind="accent").pack(anchor="w", pady=(10, 0))
-        self.sc_kvs = KVGrid(sc.inner)
-        self.sc_kvs.pack(anchor="w", pady=(10, 0))
-        self.sc_warn = tk.Label(sc.inner, text="", bg=CARD, fg=WARN, font=f(9),
-                                justify="left", wraplength=760)
-        self.sc_warn.pack(anchor="w")
-        self.sc_pick_frame = tk.Frame(sc.inner, bg=CARD)
-        self.sc_pick_frame.pack(fill="x")
-        self.sc_apply_row = tk.Frame(sc.inner, bg=CARD)
-        self.sc_apply_all_btn = btn(self.sc_apply_row, "Разложить всех",
-                                    lambda: self.scatter_run(True, "all"))
-        self.sc_apply_all_btn.configure(state="disabled")
-        self.sc_apply_all_btn.pack(side="left")
-        self.sc_apply_sel_btn = btn(self.sc_apply_row, "Разложить выбранных (0)",
-                                    lambda: self.scatter_run(True, "selected"), kind="accent")
-        self.sc_apply_sel_btn.configure(state="disabled")
-        self.sc_apply_sel_btn.pack(side="left", padx=(8, 0))
         self._scatter_restore()
-
-        cl = Card(inner, "Очистка данных",
-                  "«Сброс визитов» — обнуляет заполненное выездами (статусы, комментарии, "
-                  "дату визита, фото), клиенты/долги/закрепление остаются. «Полная очистка» — "
-                  "удаляет всех клиентов, визиты и метки под свежий импорт.")
-        cl.pack(fill="x", pady=(12, 0))
-        rc = tk.Frame(cl.inner, bg=CARD)
-        rc.pack(anchor="w")
-        reset_visits_btn = btn(
-            rc, "Сбросить данные визитов", lambda: self.do_reset("visits")
-        )
-        reset_visits_btn.configure(state="disabled")
-        reset_visits_btn.pack(side="left")
-        reset_all_btn = btn(
-            rc,
-            "Полностью очистить реестр",
-            lambda: self.do_reset("all"),
-            kind="danger",
-        )
-        reset_all_btn.configure(state="disabled")
-        reset_all_btn.pack(side="left", padx=(8, 0))
-        self.reset_out = tk.Label(cl.inner, text="", bg=CARD, fg=MUTED, font=f(9))
-        self.reset_out.pack(anchor="w", pady=(6, 0))
 
         # Кнопки «Запустить геокодинг» здесь больше нет. Координаты сервер ставит
         # сам после каждого импорта (scoring.geocode_city_centroids в конце
@@ -1973,20 +1940,152 @@ class Pult(tk.Tk):
         self.bg_task(work, done, fail)
 
     # --- экспорт: слепок/метки ---
-    def do_export_full(self):
-        path = filedialog.asksaveasfilename(
-            title="Куда сохранить слепок реестра", defaultextension=".xlsx",
-            initialfile="registry_export.xlsx", filetypes=[("Excel", "*.xlsx")])
-        if not path:
+    def _render_export_employees(self):
+        if not hasattr(self, "exp_pick_frame"):
             return
+        rows = self._merge_import_employees([], self.db_employees)
+        keys = {row["key"] for row in rows}
+        old_keys = set(self._exp_vars)
+        if not self._exp_initialized or (
+            old_keys and self.exp_selected == old_keys
+        ):
+            self.exp_selected = set(keys)
+            self._exp_initialized = True
+        else:
+            self.exp_selected.intersection_update(keys)
+        for widget in self.exp_pick_frame.winfo_children():
+            widget.destroy()
+        self._exp_vars = {}
+        if not rows:
+            tk.Label(
+                self.exp_pick_frame,
+                text=("Закреплённых сотрудников в БД нет; полный экспорт всё "
+                      "равно включит строки без ответственного."),
+                bg=CARD, fg=MUTED, font=f(8),
+            ).pack(anchor="w")
+            return
+        box = tk.Frame(
+            self.exp_pick_frame, bg=CARD,
+            highlightbackground=BORDER, highlightthickness=1,
+        )
+        box.pack(fill="x")
+        box.grid_columnconfigure(0, weight=1)
+        box.grid_columnconfigure(1, weight=1)
+        for index, employee in enumerate(rows):
+            key = employee["key"]
+            var = tk.BooleanVar(value=key in self.exp_selected)
+            self._exp_vars[key] = var
+            check = tk.Checkbutton(
+                box,
+                text=(f"{employee['name']} · "
+                      f"{fmt_n(employee.get('db_count') or 0)} дог."),
+                variable=var,
+                bg=CARD, fg=TEXT, activebackground=CARD, selectcolor=CARD,
+                font=f(9), anchor="w",
+                command=lambda k=key, v=var: self._exp_toggle(k, v.get()),
+            )
+            check.grid(
+                row=index // 2, column=index % 2, sticky="ew", padx=6, pady=1
+            )
+
+    def _exp_toggle(self, key: str, on: bool):
+        (self.exp_selected.add if on else self.exp_selected.discard)(key)
+
+    def _exp_all(self, on: bool):
+        self.exp_selected = set(self._exp_vars) if on else set()
+        for key, var in self._exp_vars.items():
+            var.set(key in self.exp_selected)
+
+    def _exp_today(self):
+        today = datetime.now().strftime("%d.%m.%Y")
+        for field in (self.exp_since, self.exp_until):
+            field.delete(0, "end")
+            field.insert(0, today)
+
+    def _export_request(self) -> dict:
+        employees = self._merge_import_employees([], self.db_employees)
+        all_keys = {employee["key"] for employee in employees}
+        picked = self.exp_selected.intersection(all_keys)
+        if all_keys and not picked:
+            raise ValueError("отметь хотя бы одного сотрудника для экспорта")
+        all_employees = not all_keys or picked == all_keys
+        names = [] if all_employees else [
+            employee["name"] for employee in employees
+            if employee["key"] in picked
+        ]
+        visit_from = to_iso(self.exp_since.get())
+        visit_to = to_iso(self.exp_until.get())
+        if visit_from and visit_to and visit_from > visit_to:
+            raise ValueError("начало окна выгрузки позже окончания")
+        params = [("mode", "full")]
+        params.extend(("employee", name) for name in names)
+        if visit_from:
+            params.append(("visit_from", visit_from))
+        if visit_to:
+            params.append(("visit_to", visit_to))
+        return {
+            "path": "/admin/export.json?" + urllib.parse.urlencode(params),
+            "employees": names,
+            "all_employees": all_employees,
+            "visit_from": visit_from,
+            "visit_to": visit_to,
+        }
+
+    def do_export_full(self):
+        try:
+            request = self._export_request()
+        except ValueError as exc:
+            self.toast(str(exc), err=True)
+            return
+        self.toast("Готовлю точный состав выгрузки…")
+
         def work():
             # Raw-слепок отделён от безопасного потока обогащения: без mode=full
             # сервер намеренно очищает все неподтверждённые поля визита.
-            d = self.api("GET", "/admin/export.json?mode=full", timeout=120)
+            d = self.api("GET", request["path"], timeout=120)
             enrich.validate_server_export(d)
-            write_registry_xlsx(path, d["fields"], d["rows"])
-            return len(d["rows"])
-        self.bg_task(work, lambda n: self.toast(f"Сохранено: {path} ({fmt_n(n)} строк)"))
+            return d
+
+        def ready(data):
+            employee_text = (
+                "весь реестр, включая строки без ответственного"
+                if request["all_employees"]
+                else ", ".join(request["employees"])
+            )
+            window = (
+                f"с {request['visit_from'] or '…'} по "
+                f"{request['visit_to'] or '…'}"
+                if request["visit_from"] or request["visit_to"]
+                else "без ограничения по дате выезда"
+            )
+            if not messagebox.askyesno(
+                "Экспорт реестра",
+                f"Строк в выгрузке: {fmt_n(len(data['rows']))}\n\n"
+                f"Сотрудники: {employee_text}\nПериод: {window}\n\n"
+                "Сохранить новый xlsx?",
+            ):
+                return
+            path = filedialog.asksaveasfilename(
+                title="Куда сохранить слепок реестра",
+                defaultextension=".xlsx",
+                initialfile="registry_export.xlsx",
+                filetypes=[("Excel", "*.xlsx")],
+            )
+            if not path:
+                return
+
+            def save():
+                write_registry_xlsx(path, data["fields"], data["rows"])
+                return len(data["rows"])
+
+            self.bg_task(
+                save,
+                lambda count: self.toast(
+                    f"Сохранено: {path} ({fmt_n(count)} строк)"
+                ),
+            )
+
+        self.bg_task(work, ready)
 
     def do_export_markers(self):
         path = filedialog.asksaveasfilename(
@@ -2011,11 +2110,14 @@ class Pult(tk.Tk):
             else "базовая папка не выбрана"
         if hasattr(self, "enr_base_lbl"):    # общая база с карточкой обогащения
             self.enr_base_lbl.configure(text=base_txt)
-        self.sc_base_lbl.configure(text=base_txt)
-        self.sc_src_lbl.configure(
-            text=("экспорт: " + self.scatter_source) if self.scatter_source else "файл экспорта не выбран")
-        self.sc_roots_lbl.configure(
-            text="\n".join("прямая папка: " + r for r in self.scatter_roots))
+        if hasattr(self, "sc_base_lbl"):
+            self.sc_base_lbl.configure(text=base_txt)
+            self.sc_src_lbl.configure(
+                text=("экспорт: " + self.scatter_source)
+                if self.scatter_source else "файл экспорта не выбран")
+            self.sc_roots_lbl.configure(
+                text="\n".join("прямая папка: " + r
+                               for r in self.scatter_roots))
 
     def scatter_pick_base(self):
         p = filedialog.askdirectory(title="Папка, в которой лежат папки республик")

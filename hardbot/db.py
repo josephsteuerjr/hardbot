@@ -2767,12 +2767,51 @@ def write_xlsx(path: str, rows: list[dict]) -> str:
     return path
 
 
-def registry_rows() -> list[dict]:
-    """Строки реестра для экспорта: только колонки FIELDS, порядок как в БД-запросе.
-    Это полный raw-слепок для отдельного режима сверки, включая импортные HARD-поля."""
+def registry_rows(
+    *,
+    employees: list[str] | None = None,
+    visit_from: str | None = None,
+    visit_to: str | None = None,
+) -> list[dict]:
+    """Raw-слепок с явными, независимыми фильтрами выгрузки.
+
+    ``employees=None`` сохраняет прежний полный экспорт, включая строки без
+    ответственного. Переданный список ограничивает выгрузку только выбранными
+    сотрудниками. Окно дат относится к доказанному ``bot_visit_at`` и потому не
+    принимает импортную/ручную ``visit_date`` за состоявшийся визит.
+    """
+    if isinstance(employees, str):
+        employees = [employees]
+    employee_keys = None if employees is None else {
+        _name_key(employee) for employee in employees if _name_key(employee)
+    }
+    since = _as_date(visit_from) if str(visit_from or "").strip() else None
+    until = _as_date(visit_to) if str(visit_to or "").strip() else None
+    if str(visit_from or "").strip() and since is None:
+        raise ValueError("неверная дата начала выгрузки")
+    if str(visit_to or "").strip() and until is None:
+        raise ValueError("неверная дата окончания выгрузки")
+    if since and until and since > until:
+        raise ValueError("начало окна выгрузки позже окончания")
     with connect() as conn:
         rows = conn.execute("SELECT * FROM clients ORDER BY client").fetchall()
-    return [{f.key: r[f.key] for f in FIELDS} for r in rows]
+    result = []
+    for row in rows:
+        if (
+            employee_keys is not None
+            and _name_key(row["responsible"]) not in employee_keys
+        ):
+            continue
+        if since or until:
+            visit_date = _as_date(row["bot_visit_at"])
+            if not row["bot_visit_data"] or visit_date is None:
+                continue
+            if since and visit_date < since:
+                continue
+            if until and visit_date > until:
+                continue
+        result.append({f.key: row[f.key] for f in FIELDS})
+    return result
 
 
 def enrichment_rows() -> list[dict]:

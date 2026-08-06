@@ -49,6 +49,14 @@ class _BoolVar:
         return self.value
 
 
+class _EntryValue:
+    def __init__(self, value: str = "") -> None:
+        self.value = value
+
+    def get(self) -> str:
+        return self.value
+
+
 class _Widget:
     def __init__(self) -> None:
         self.options = {}
@@ -258,6 +266,53 @@ def test_database_only_employee_can_form_an_empty_full_slice():
 def test_import_report_exposes_unassignment_count():
     pairs = dict(pult_ui.Pult._imp_pairs({"auto_unassigned": 12}))
     assert pairs["будет снято / снято"] == 12
+
+
+def test_export_request_uses_no_employee_filter_for_familiar_full_export():
+    class Probe:
+        db_employees = [
+            {"employee": "Егор", "contracts": 5},
+            {"employee": "Илья", "contracts": 7},
+        ]
+        exp_selected = {"егор", "илья"}
+        exp_since = _EntryValue("")
+        exp_until = _EntryValue("")
+
+        def _merge_import_employees(self, file_rows, db_rows):
+            return pult_ui.Pult._merge_import_employees(file_rows, db_rows)
+
+    request = pult_ui.Pult._export_request(Probe())
+    query = pult_ui.urllib.parse.parse_qs(
+        pult_ui.urllib.parse.urlsplit(request["path"]).query
+    )
+
+    assert request["all_employees"] is True
+    assert "employee" not in query
+    assert query["mode"] == ["full"]
+
+
+def test_export_request_combines_employee_subset_and_visit_window():
+    class Probe:
+        db_employees = [
+            {"employee": "Егор", "contracts": 5},
+            {"employee": "Илья", "contracts": 7},
+        ]
+        exp_selected = {"егор"}
+        exp_since = _EntryValue("01.08.2026")
+        exp_until = _EntryValue("2026-08-03")
+
+        def _merge_import_employees(self, file_rows, db_rows):
+            return pult_ui.Pult._merge_import_employees(file_rows, db_rows)
+
+    request = pult_ui.Pult._export_request(Probe())
+    query = pult_ui.urllib.parse.parse_qs(
+        pult_ui.urllib.parse.urlsplit(request["path"]).query
+    )
+
+    assert request["all_employees"] is False
+    assert query["employee"] == ["Егор"]
+    assert query["visit_from"] == ["2026-08-01"]
+    assert query["visit_to"] == ["2026-08-03"]
 
 
 def test_pult_previews_before_apply_and_reuses_the_exact_request():
