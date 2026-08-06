@@ -848,9 +848,9 @@ def validate_import_source_proof(
             label="test subset approval_id",
         )
         raw_contracts = payload["contracts"]
-        if not isinstance(raw_contracts, list) or not raw_contracts:
+        if not isinstance(raw_contracts, list):
             raise ExchangeContractError(
-                "test subset contracts must be a nonempty list"
+                "test subset contracts must be a list"
             )
         scope: dict[str, str] = {}
         ordered: list[str] = []

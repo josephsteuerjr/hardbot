@@ -205,6 +205,25 @@ def test_external_test_subset_requires_exact_contracts_and_owners():
     ]
 
 
+def test_empty_test_subset_proof_can_represent_zero_row_employee_slice():
+    grid = [
+        [field.title for field in db.FIELDS],
+        [field.source for field in db.FIELDS],
+    ]
+    proof = contract.build_test_subset_source_proof(
+        grid,
+        approval_id="zero-row-employee-slice",
+        contracts=[],
+    )
+
+    verified = contract.validate_import_source_proof(
+        proof,
+        source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
+        grid=grid,
+    )
+    assert verified["scope"] == {}
+
+
 def test_external_published_master_requires_grid_and_publication_binding():
     db.init_db()
     values = {

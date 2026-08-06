@@ -1837,7 +1837,11 @@ async def _admin_import_json(request: web.Request) -> web.Response:
              "error": "импорт заблокирован: full_registry должен быть boolean"},
             status=409,
         )
+    authoritative_employees = body.get("authoritative_employees")
     expected_auto_unassigned = body.get("expected_auto_unassigned")
+    expected_auto_unassigned_digest = body.get(
+        "expected_auto_unassigned_digest"
+    )
     if (
         expected_auto_unassigned is not None
         and (
@@ -1852,11 +1856,14 @@ async def _admin_import_json(request: web.Request) -> web.Response:
                        "быть неотрицательным целым")},
             status=409,
         )
-    if full_registry and expected_auto_unassigned is None:
+    if full_registry and (
+        expected_auto_unassigned is None
+        or expected_auto_unassigned_digest is None
+    ):
         return web.json_response(
             {"blocked": True,
-             "error": ("импорт заблокирован: для полного реестра обязателен "
-                       "свежий предпросмотр числа снятий")},
+             "error": ("импорт заблокирован: для полного среза обязателен "
+                       "свежий предпросмотр точного множества снятий")},
             status=409,
         )
     try:
@@ -1873,7 +1880,9 @@ async def _admin_import_json(request: web.Request) -> web.Response:
         source_proof=body.get("source_proof"),
         require_source_proof=True,
         full_registry=full_registry,
+        authoritative_employees=authoritative_employees,
         expected_auto_unassigned=expected_auto_unassigned,
+        expected_auto_unassigned_digest=expected_auto_unassigned_digest,
     )
     if report.get("blocked"):
         return web.json_response(report, status=409)
@@ -1911,6 +1920,7 @@ async def _admin_import_preview_json(request: web.Request) -> web.Response:
              "error": "предпросмотр заблокирован: full_registry должен быть boolean"},
             status=409,
         )
+    authoritative_employees = body.get("authoritative_employees")
     if not isinstance(body.get("source_proof"), dict):
         return web.json_response(
             {"blocked": True,
@@ -1931,6 +1941,7 @@ async def _admin_import_preview_json(request: web.Request) -> web.Response:
         source_proof=body.get("source_proof"),
         require_source_proof=False,
         full_registry=full_registry,
+        authoritative_employees=authoritative_employees,
         preview_only=True,
     )
     if report.get("blocked"):

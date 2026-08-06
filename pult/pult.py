@@ -450,6 +450,7 @@ class Pult(tk.Tk):
         self.device_token = self.settings.get("device_token", "")
         self.imp_book: dict = {}          # выбранная книга: путь, грид, вид источника
         self.imp_selected: set[str] = set()   # кого из сотрудников грузим
+        self.db_employees: list[dict] = []    # фактические портфели последнего /stats
         self._imp_vars: dict = {}
         self._imp_preview_body: dict | None = None
         self._imp_preview_signature: tuple | None = None
@@ -785,6 +786,7 @@ class Pult(tk.Tk):
         self._save_settings()
         def done(d):
             self._set_conn(True, "подключено")
+            self.db_employees = list(d.get("employees") or [])
             self.metrics["clients"].configure(text=fmt_n(d.get("clients")))
             self.metrics["visited"].configure(text=fmt_n(d.get("visited")))
             self.metrics["emps"].configure(text=fmt_n(len(d.get("employees", []))))
@@ -1039,13 +1041,19 @@ class Pult(tk.Tk):
         self.toast(f"Проверяю импорт {Path(book['path']).name}: {len(picked)} сотр…")
 
         def work():
-            prepared = self._prepare_import(book, picked)
+            prepared = self._prepare_import(
+                book, picked, full_registry=full_registry
+            )
             body = {
                 "data_exchange_contract": enrich.DATA_EXCHANGE_CONTRACT,
                 "source_kind": prepared["source_kind"],
                 "source_proof": prepared["source_proof"],
                 "sheets": prepared["sheets"],
                 "full_registry": full_registry,
+                "authoritative_employees": (
+                    prepared["authoritative_employees"]
+                    if full_registry else []
+                ),
             }
             result = self.api(
                 "POST", "/admin/import/preview.json", body, timeout=180
@@ -1065,21 +1073,38 @@ class Pult(tk.Tk):
             if d.get("error"):
                 self._show_import_error(d)
                 return
+            effect_digest = d.get("auto_unassigned_digest")
+            if full_registry and (
+                not isinstance(effect_digest, str) or len(effect_digest) != 64
+            ):
+                self._invalidate_import_preview(clear_report=True)
+                self.toast(
+                    "Сервер не вернул точное множество снятий — нужен новый сервер",
+                    err=True,
+                )
+                return
             self._imp_preview_body = {
                 **payload["body"],
                 "expected_auto_unassigned": int(d.get("auto_unassigned") or 0),
+                "expected_auto_unassigned_digest": effect_digest,
             }
             self._imp_preview_signature = payload["signature"]
             self._imp_preview_meta = payload["prepared"]
             self.imp_kvs.set_pairs(self._imp_pairs(d))
             notes = self._imp_notes(d)
             if full_registry:
+                by_employee = d.get("auto_unassigned_by_employee") or {}
+                breakdown = ", ".join(
+                    f"{name}: {fmt_n(count)}"
+                    for name, count in by_employee.items()
+                )
                 notes.insert(
                     0,
                     "ПОЛНЫЙ СРЕЗ ВЫБРАННЫХ: у выбранных сотрудников после "
                     "применения будет снято договоров: "
                     f"{fmt_n(d.get('auto_unassigned'))}. Остальные сотрудники "
-                    "не затрагиваются.",
+                    "не затрагиваются."
+                    + (f"\nПо сотрудникам: {breakdown}." if breakdown else ""),
                 )
             else:
                 notes.insert(
@@ -1228,11 +1253,23 @@ class Pult(tk.Tk):
         self._invalidate_import_preview(clear_report=True)
         self.imp_file_lbl.configure(text="Читаю " + Path(path).name + "…")
 
+        def work():
+            book = self.read_registry(path)
+            stats = self.api("GET", "/admin/stats")
+            book["db_employees"] = list(stats.get("employees") or [])
+            book["employees"] = self._merge_import_employees(
+                book["employees"], book["db_employees"]
+            )
+            return book
+
         def done(book):
             head, first, c_id, c_who = self._grid_layout(book["grid"])
             book.update(head=head, first=first, c_id=c_id, c_who=c_who)
             self.imp_book = book
-            self.imp_selected = {e["key"] for e in book["employees"]}
+            self.db_employees = list(book.get("db_employees") or [])
+            self.imp_selected = {
+                e["key"] for e in book["employees"] if e.get("file_count")
+            }
             self.imp_full_var.set(False)
             self._invalidate_import_preview(clear_report=True)
             kind = ("опубликованный master (есть расписка цикла)"
@@ -1253,7 +1290,7 @@ class Pult(tk.Tk):
             self.imp_file_lbl.configure(text=f"Файл не разобран: {exc}")
             self.toast("Реестр не прочитан", err=True)
 
-        self.bg_task(lambda: self.read_registry(path), done, fail)
+        self.bg_task(work, done, fail)
 
     def _imp_render(self):
         for w in self.imp_pick_frame.winfo_children():
@@ -1282,9 +1319,20 @@ class Pult(tk.Tk):
                            font=f(9),
                            command=lambda k=emp["key"], v=var: self._imp_toggle(k, v.get())
                            ).pack(side="left", padx=6)
-            note = (f"договоров: {emp['count']}" +
-                    (f" · написаний в файле: {emp['variants']}"
-                     if emp["variants"] > 1 else ""))
+            file_count = int(emp.get("file_count") or 0)
+            db_count = int(emp.get("db_count") or 0)
+            if file_count and db_count:
+                state = "есть в файле и БД"
+            elif file_count:
+                state = "новый для БД"
+            else:
+                state = "только в БД"
+            note = (
+                f"в файле: {fmt_n(file_count)} · сейчас в БД: "
+                f"{fmt_n(db_count)} · {state}"
+                + (f" · написаний в файле: {emp['variants']}"
+                   if emp.get("variants", 1) > 1 else "")
+            )
             tk.Label(row, text=note, bg=CARD, fg=MUTED, font=f(8)).pack(side="left")
         self.imp_go_row.pack(anchor="w", pady=(10, 0))
         self._imp_count()
@@ -1304,7 +1352,8 @@ class Pult(tk.Tk):
 
     def _imp_count(self):
         book = self.imp_book or {}
-        rows = sum(e["count"] for e in book.get("employees") or []
+        rows = sum(int(e.get("file_count", e.get("count", 0)) or 0)
+                   for e in book.get("employees") or []
                    if e["key"] in self.imp_selected)
         mode = "полного среза" if self.imp_full_var.get() else "выбранных"
         self.imp_go_btn.configure(
@@ -1339,8 +1388,14 @@ class Pult(tk.Tk):
         employees = []
         for g in groups.values():
             best = max(g["spellings"].items(), key=lambda kv: (kv[1], kv[0]))[0]
-            employees.append({"key": g["key"], "name": best or "(без ответственного)",
-                              "count": g["count"], "variants": len(g["spellings"])})
+            employees.append({
+                "key": g["key"],
+                "name": best or "(без ответственного)",
+                "count": g["count"],
+                "file_count": g["count"],
+                "db_count": 0,
+                "variants": len(g["spellings"]),
+            })
         employees.sort(key=lambda e: (-e["count"], e["name"]))
         try:
             published = enrich.prepare_published_master_import(path)
@@ -1352,7 +1407,13 @@ class Pult(tk.Tk):
                 "employees": employees,
                 "published": published, "no_receipt": no_receipt}
 
-    def _prepare_import(self, book: dict, picked: list[str]) -> dict:
+    def _prepare_import(
+        self,
+        book: dict,
+        picked: list[str],
+        *,
+        full_registry: bool = False,
+    ) -> dict:
         """Книга + отмеченные сотрудники → (source_kind, proof, sheets).
 
         Весь файл целиком и с receipt'ом — это `published_master`, боевой путь.
@@ -1365,8 +1426,18 @@ class Pult(tk.Tk):
         import limited_test_import as lti
 
         self._proof_path = None
-        all_emps = {e["key"] for e in book["employees"]}
-        whole = set(picked) == all_emps
+        by_key = {e["key"]: e for e in book["employees"]}
+        unknown = sorted(set(picked) - set(by_key))
+        if unknown:
+            raise ValueError(
+                "неизвестные сотрудники в выборе: " + ", ".join(unknown)
+            )
+        authoritative_employees = [by_key[key]["name"] for key in picked]
+        file_emps = {
+            e["key"] for e in book["employees"]
+            if int(e.get("file_count", e.get("count", 0)) or 0) > 0
+        }
+        whole = set(picked) == file_emps
 
         if whole and book.get("published"):
             prepared = book["published"]
@@ -1377,10 +1448,14 @@ class Pult(tk.Tk):
                 grid=grid)["digest"]
             return {"source_kind": IMPORT_SOURCE_PUBLISHED_MASTER,
                     "source_proof": prepared["source_proof"],
-                    "sheets": prepared["sheets"], "proof_digest": digest}
+                    "sheets": prepared["sheets"], "proof_digest": digest,
+                    "authoritative_employees": authoritative_employees}
 
-        grid = self._grid_for(book, set(picked)) if not whole else book["grid"]
-        scope = self._scope_from_grid(grid)
+        grid = (
+            self._grid_for(book, set(picked), allow_empty=full_registry)
+            if not whole else book["grid"]
+        )
+        scope = self._scope_from_grid(grid, allow_empty=full_registry)
         approval = (f"pult-{Path(book['path']).stem.strip()[:60]}"
                     f"-{book['file_sha256'][:12]}-{len(scope)}")
         proof = contract.build_test_subset_source_proof(
@@ -1396,21 +1471,73 @@ class Pult(tk.Tk):
             self._proof_path = None
         return {"source_kind": IMPORT_SOURCE_TEST_SUBSET, "source_proof": proof,
                 "sheets": [{"name": contract.WORKBOOK_SHEET_NAME, "grid": grid}],
-                "proof_digest": digest}
+                "proof_digest": digest,
+                "authoritative_employees": authoritative_employees}
 
     @staticmethod
     def _emp_key(name) -> str:
         """Ответственный для группировки: схлопнутые пробелы, регистр не важен."""
-        return " ".join(str(name or "").split()).casefold()
+        return " ".join(
+            str(name or "").replace("ё", "е").replace("Ё", "Е").split()
+        ).casefold()
 
     @staticmethod
-    def _grid_for(book: dict, picked: set[str]) -> list[list]:
+    def _merge_import_employees(
+        file_employees: list[dict], db_employees: list[dict]
+    ) -> list[dict]:
+        """Объединить сотрудников файла и БД без заранее заданных фамилий."""
+        merged: dict[str, dict] = {}
+        for item in file_employees or []:
+            name = " ".join(str(item.get("name") or "").split())
+            key = str(item.get("key") or Pult._emp_key(name))
+            if not key:
+                continue
+            file_count = int(item.get("file_count", item.get("count", 0)) or 0)
+            row = merged.setdefault(key, {
+                "key": key, "name": name, "file_count": 0, "db_count": 0,
+                "variants": 0,
+            })
+            row["file_count"] += file_count
+            row["count"] = row["file_count"]
+            row["variants"] = max(
+                int(row.get("variants") or 0),
+                int(item.get("variants") or 1),
+            )
+            if name:
+                row["name"] = name
+        for item in db_employees or []:
+            name = " ".join(str(item.get("employee") or "").split())
+            key = Pult._emp_key(name)
+            if not key:
+                continue
+            row = merged.setdefault(key, {
+                "key": key, "name": name, "file_count": 0, "count": 0,
+                "db_count": 0, "variants": 0,
+            })
+            row["db_count"] += int(item.get("contracts") or 0)
+            if not row.get("name"):
+                row["name"] = name
+        return sorted(
+            merged.values(),
+            key=lambda item: (
+                not bool(item.get("file_count")),
+                -int(item.get("file_count") or 0),
+                Pult._emp_key(item.get("name")),
+            ),
+        )
+
+    @staticmethod
+    def _grid_for(
+        book: dict, picked: set[str], *, allow_empty: bool = False
+    ) -> list[list]:
         """Грид только из строк отмеченных сотрудников — шапка целиком, данные срезом.
 
         Резать надо именно ГРИД, а не один scope: сервер сверяет утверждённый
         список с тем, что реально разобрал из книги, и scope-подмножество при
         полном гриде честно отбивается как `scope_mismatch`.
         """
+        if not picked:
+            raise ValueError("не выбран ни один сотрудник")
         grid, head = book["grid"], book["head"]
         c_who = book["c_who"]
         out = list(grid[:book["first"]])
@@ -1419,7 +1546,7 @@ class Pult(tk.Tk):
                 out.append(row)
         # Сравниваем с `first`, а не с `head`: в шапке ТРИ строки, и «len > head»
         # было истиной даже для книги без единой строки данных.
-        if len(out) <= book["first"]:
+        if len(out) <= book["first"] and not allow_empty:
             raise ValueError("после отбора не осталось ни одной строки")
         return out
 
@@ -1457,7 +1584,9 @@ class Pult(tk.Tk):
         return head, first, c_id, c_who
 
     @staticmethod
-    def _scope_from_grid(grid: list[list]) -> list[dict[str, str]]:
+    def _scope_from_grid(
+        grid: list[list], *, allow_empty: bool = False
+    ) -> list[dict[str, str]]:
         """[{contract_id, responsible}] из книги — ровно то, что разрешаем грузить.
 
         Пробелы и регистр не режем сами: контракт нормализует их одинаково с обеих
@@ -1481,7 +1610,7 @@ class Pult(tk.Tk):
             seen.add(cid)
             scope.append({"contract_id": cid,
                           "responsible": enrich.cell_text(row[c_who])})
-        if not scope:
+        if not scope and not allow_empty:
             raise ValueError("в книге нет ни одной строки с номером КД")
         return scope
 

@@ -3234,8 +3234,10 @@ def import_grid(
     source_proof: dict | None = None,
     require_source_proof: bool = False,
     full_registry: bool = False,
+    authoritative_employees: list[str] | None = None,
     preview_only: bool = False,
     expected_auto_unassigned: int | None = None,
+    expected_auto_unassigned_digest: str | None = None,
 ) -> dict:
     """Ядро импорта опубликованного master/test subset.
 
@@ -3277,8 +3279,10 @@ def import_grid(
     запрещено; коллизия уходит в отчёт/карантин для ручного решения.
 
     ``full_registry`` — отдельное явное решение оператора, а не следствие
-    ``source_kind``. Только при нём существующие назначенные договоры, которых
-    нет среди строк файла, снимаются с причиной ``absent_from_registry``.
+    ``source_kind``. При нём ``authoritative_employees`` задаёт точную область:
+    снимаются только отсутствующие договоры этих сотрудников, остальные
+    портфели не затрагиваются. Пустой вход допустим и означает нулевой портфель
+    явно выбранного сотрудника.
     ``preview_only`` выполняет тот же расчёт в транзакции и откатывает все записи.
     При применении пульт передаёт увиденный ``expected_auto_unassigned``; если
     состояние БД успело измениться, импорт откатывается и требует новый preview.
@@ -3306,6 +3310,9 @@ def import_grid(
               # поэтому 1970 договоров из 5267 «потерялись» молча.
               "no_responsible": 0,
               "auto_unassigned": 0,
+              "auto_unassigned_by_employee": {},
+              "auto_unassigned_digest": hashlib.sha256(b"[]").hexdigest(),
+              "authoritative_employees": [],
               "source_proof_digest": None,
               "blocked": False, "duplicate_conflicts": [],
               "quarantined_contracts": []}
@@ -3322,6 +3329,55 @@ def import_grid(
         report["error"] = (
             "импорт заблокирован: expected_auto_unassigned должен быть "
             "неотрицательным целым"
+        )
+        return report
+
+    if expected_auto_unassigned_digest is not None and (
+        not isinstance(expected_auto_unassigned_digest, str)
+        or len(expected_auto_unassigned_digest) != 64
+        or any(ch not in "0123456789abcdef"
+               for ch in expected_auto_unassigned_digest)
+    ):
+        report["blocked"] = True
+        report["error"] = (
+            "импорт заблокирован: expected_auto_unassigned_digest должен быть "
+            "lowercase SHA-256"
+        )
+        return report
+
+    authoritative_by_key: dict[str, str] = {}
+    if full_registry:
+        if not isinstance(authoritative_employees, list) or not authoritative_employees:
+            report["blocked"] = True
+            report["error"] = (
+                "импорт заблокирован: для полного среза обязателен непустой "
+                "список authoritative_employees"
+            )
+            return report
+        for index, raw_employee in enumerate(authoritative_employees):
+            if not isinstance(raw_employee, str):
+                report["blocked"] = True
+                report["error"] = (
+                    "импорт заблокирован: authoritative_employees"
+                    f"[{index}] должен быть строкой"
+                )
+                return report
+            employee = " ".join(raw_employee.split())
+            key = _name_key(employee)
+            if not key:
+                report["blocked"] = True
+                report["error"] = (
+                    "импорт заблокирован: authoritative_employees содержит "
+                    "пустое имя"
+                )
+                return report
+            authoritative_by_key.setdefault(key, employee)
+        report["authoritative_employees"] = list(authoritative_by_key.values())
+    elif authoritative_employees not in (None, []):
+        report["blocked"] = True
+        report["error"] = (
+            "импорт заблокирован: authoritative_employees применим только к "
+            "полному срезу"
         )
         return report
 
@@ -3744,6 +3800,23 @@ def import_grid(
             )
             return report
 
+    if full_registry:
+        outside_scope = sorted({
+            str(data.get(WORKBOOK_RESPONSIBLE_KEY) or "").strip()
+            for data in grouped.values()
+            if str(data.get(WORKBOOK_RESPONSIBLE_KEY) or "").strip()
+            and _name_key(data.get(WORKBOOK_RESPONSIBLE_KEY))
+            not in authoritative_by_key
+        })
+        if outside_scope:
+            report["blocked"] = True
+            report["outside_authoritative_scope"] = outside_scope
+            report["error"] = (
+                "импорт заблокирован: во входе есть ответственные вне явно "
+                "выбранного полного среза: " + ", ".join(outside_scope[:20])
+            )
+            return report
+
     # Для SOURCE_OWNED пустота во всём наборе строк КД означает погашение.
     # Колонки, отсутствующей в файле целиком, в ``owned`` нет и мы её не трогаем.
     for data in grouped.values():
@@ -3801,6 +3874,11 @@ def import_grid(
             nm = (r["responsible"] or "").strip()
             if nm:
                 known_resp.setdefault(_name_key(nm), nm)
+        if full_registry:
+            report["authoritative_employees"] = [
+                known_resp.get(key, employee)
+                for key, employee in authoritative_by_key.items()
+            ]
         for cid, data in grouped.items():
             is_update = cid in existing
             # Пустой владелец = кейс в базе есть, а у выездника его нет.
@@ -4027,13 +4105,18 @@ def import_grid(
         # Считаем по итогу разбора всего файла, а не построчно: у одного договора в
         # реестре бывает несколько строк, и владелец может стоять в любой из них.
         report["no_responsible"] = sum(1 for owner in owners.values() if not owner)
+        auto_unassigned_effect: list[tuple[str, str]] = []
         if full_registry:
             # Отсутствие считается только по каноническим КД, разобранным тем же
-            # preflight выше. Никаких лимитов/выборок: оператор видит полный счётчик
-            # в preview до применения. Строки, визиты, фото и долги не удаляются.
+            # preflight выше, и только внутри явно выбранных сотрудников. Строки,
+            # визиты, фото и долги не удаляются.
             for cid, old in existing.items():
                 former = str(old["responsible"] or "").strip()
-                if not former or cid in grouped:
+                if (
+                    not former
+                    or _name_key(former) not in authoritative_by_key
+                    or cid in grouped
+                ):
                     continue
                 changed = conn.execute(
                     "UPDATE clients SET responsible='', unassigned_from=?, "
@@ -4042,19 +4125,48 @@ def import_grid(
                      old["responsible"]),
                 ).rowcount
                 report["auto_unassigned"] += changed
-        if (
+                if changed:
+                    auto_unassigned_effect.append((cid, former))
+        effect_rows = [
+            {"contract_id": cid, "employee": employee}
+            for cid, employee in sorted(auto_unassigned_effect)
+        ]
+        report["auto_unassigned_digest"] = hashlib.sha256(
+            json.dumps(
+                effect_rows,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        by_employee: dict[str, int] = {}
+        for _cid, employee in auto_unassigned_effect:
+            by_employee[employee] = by_employee.get(employee, 0) + 1
+        report["auto_unassigned_by_employee"] = {
+            employee: by_employee[employee]
+            for employee in sorted(by_employee, key=_name_key)
+        }
+        stale_count = (
             expected_auto_unassigned is not None
             and report["auto_unassigned"] != expected_auto_unassigned
-        ):
+        )
+        stale_digest = (
+            expected_auto_unassigned_digest is not None
+            and report["auto_unassigned_digest"]
+            != expected_auto_unassigned_digest
+        )
+        if stale_count or stale_digest:
             conn.rollback()
             report["blocked"] = True
             report["preview_stale"] = True
             report["expected_auto_unassigned"] = expected_auto_unassigned
+            report["expected_auto_unassigned_digest"] = (
+                expected_auto_unassigned_digest
+            )
             report["error"] = (
                 "импорт заблокирован: после предпросмотра состояние БД "
-                "изменилось; ожидалось снять договоров "
-                f"{expected_auto_unassigned}, сейчас получилось бы "
-                f"{report['auto_unassigned']}. Сделайте новый предпросмотр"
+                "изменилось; ожидаемое множество снятий больше не совпадает с "
+                "фактическим. Сделайте новый предпросмотр"
             )
             return report
         if preview_only:

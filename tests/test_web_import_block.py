@@ -23,7 +23,8 @@ def test_blocked_imports_return_409_before_geocoding(monkeypatch):
         db,
         "import_grid",
         lambda grid, *, source_kind, source_proof, require_source_proof,
-        full_registry, expected_auto_unassigned: (
+        full_registry, authoritative_employees, expected_auto_unassigned,
+        expected_auto_unassigned_digest: (
             blocked_grid.copy()
         ),
     )
@@ -88,7 +89,8 @@ def test_consumed_import_replay_never_runs_post_import_mutator(monkeypatch):
         db,
         "import_grid",
         lambda grid, *, source_kind, source_proof, require_source_proof,
-        full_registry, expected_auto_unassigned: {
+        full_registry, authoritative_employees, expected_auto_unassigned,
+        expected_auto_unassigned_digest: {
             "blocked": False,
             "idempotent_replay": True,
             "source_proof_digest": "a" * 64,
@@ -137,6 +139,7 @@ def test_import_preview_is_read_only_and_carries_explicit_full_flag(monkeypatch)
         source_proof,
         require_source_proof,
         full_registry,
+        authoritative_employees,
         preview_only,
     ):
         calls.append(
@@ -146,6 +149,7 @@ def test_import_preview_is_read_only_and_carries_explicit_full_flag(monkeypatch)
                 "source_proof": source_proof,
                 "require_source_proof": require_source_proof,
                 "full_registry": full_registry,
+                "authoritative_employees": authoritative_employees,
                 "preview_only": preview_only,
             }
         )
@@ -175,6 +179,7 @@ def test_import_preview_is_read_only_and_carries_explicit_full_flag(monkeypatch)
                     "source_proof": {"test": "proof"},
                     "sheets": [{"name": "Портфели", "grid": [["id"]]}],
                     "full_registry": True,
+                    "authoritative_employees": ["Егор"],
                 },
                 headers={"X-Admin-Key": "test-admin-key"},
             )
@@ -191,6 +196,7 @@ def test_import_preview_is_read_only_and_carries_explicit_full_flag(monkeypatch)
             "source_proof": {"test": "proof"},
             "require_source_proof": False,
             "full_registry": True,
+            "authoritative_employees": ["Егор"],
             "preview_only": True,
         }
     ]

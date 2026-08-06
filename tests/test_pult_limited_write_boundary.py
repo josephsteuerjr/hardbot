@@ -218,19 +218,41 @@ def test_full_registry_is_an_explicit_flag_not_inferred_from_source_kind():
         imp_full_var = _BoolVar(False)
 
     probe = Probe()
-    assert pult_ui.Pult._imp_selection_is_whole(probe) is True
     assert pult_ui.Pult._imp_signature(probe)[-1] is False
 
     probe.imp_full_var = _BoolVar(True)
     assert pult_ui.Pult._imp_signature(probe)[-1] is True
 
 
-def test_employee_slice_is_not_a_whole_registry():
-    class Probe:
-        imp_book = {"employees": [{"key": "егор"}, {"key": "илья"}]}
-        imp_selected = {"егор"}
+def test_import_employee_list_is_union_of_file_and_database():
+    employees = pult_ui.Pult._merge_import_employees(
+        [
+            {"key": "егор", "name": "Егор", "count": 2, "variants": 1},
+            {"key": "илья", "name": "Илья", "count": 1, "variants": 1},
+        ],
+        [
+            {"employee": "ЕГОР", "contracts": 5},
+            {"employee": "Мария", "contracts": 7},
+        ],
+    )
 
-    assert pult_ui.Pult._imp_selection_is_whole(Probe()) is False
+    by_key = {row["key"]: row for row in employees}
+    assert by_key["егор"]["file_count"] == 2
+    assert by_key["егор"]["db_count"] == 5
+    assert by_key["илья"]["file_count"] == 1
+    assert by_key["илья"]["db_count"] == 0
+    assert by_key["мария"]["file_count"] == 0
+    assert by_key["мария"]["db_count"] == 7
+
+
+def test_database_only_employee_can_form_an_empty_full_slice():
+    book = _book(DIRTY)
+    grid = pult_ui.Pult._grid_for(
+        book, {pult_ui.Pult._emp_key("Мария")}, allow_empty=True
+    )
+
+    assert grid == DIRTY[:3]
+    assert pult_ui.Pult._scope_from_grid(grid, allow_empty=True) == []
 
 
 def test_import_report_exposes_unassignment_count():
@@ -244,7 +266,12 @@ def test_pult_previews_before_apply_and_reuses_the_exact_request():
             self.imp_book = {
                 "path": "C:/registry.xlsx",
                 "file_sha256": "a" * 64,
-                "employees": [{"key": "егор"}],
+                "employees": [
+                    {
+                        "key": "егор", "name": "Егор", "file_count": 1,
+                        "db_count": 4,
+                    }
+                ],
             }
             self.imp_selected = {"егор"}
             self.imp_full_var = _BoolVar(True)
@@ -258,12 +285,14 @@ def test_pult_previews_before_apply_and_reuses_the_exact_request():
             self.toasts = []
             self.refreshed = False
 
-        def _prepare_import(self, _book, _picked):
+        def _prepare_import(self, _book, _picked, *, full_registry=False):
+            assert full_registry is True
             return {
                 "source_kind": pult_ui.IMPORT_SOURCE_PUBLISHED_MASTER,
                 "source_proof": {"proof": "exact"},
                 "sheets": [{"name": "Портфели", "grid": [["id"]]}],
                 "proof_digest": "d" * 64,
+                "authoritative_employees": ["Егор"],
             }
 
         def api(self, method, path, body=None, timeout=20):
@@ -275,6 +304,8 @@ def test_pult_previews_before_apply_and_reuses_the_exact_request():
                     "inserted": 0,
                     "updated": 1,
                     "auto_unassigned": 3,
+                    "auto_unassigned_by_employee": {"Егор": 3},
+                    "auto_unassigned_digest": "e" * 64,
                 }
             if path == "/admin/import/authorize.json":
                 return {"ok": True}
@@ -308,9 +339,6 @@ def test_pult_previews_before_apply_and_reuses_the_exact_request():
         def _imp_signature(self):
             return pult_ui.Pult._imp_signature(self)
 
-        def _imp_selection_is_whole(self):
-            return pult_ui.Pult._imp_selection_is_whole(self)
-
         def _invalidate_import_preview(self, *, clear_report):
             return pult_ui.Pult._invalidate_import_preview(
                 self, clear_report=clear_report
@@ -333,8 +361,10 @@ def test_pult_previews_before_apply_and_reuses_the_exact_request():
     assert [call[1] for call in probe.calls] == ["/admin/import/preview.json"]
     preview_request = probe.calls[0][2]
     assert preview_request["full_registry"] is True
+    assert preview_request["authoritative_employees"] == ["Егор"]
     assert "expected_auto_unassigned" not in preview_request
     assert probe._imp_preview_body["expected_auto_unassigned"] == 3
+    assert probe._imp_preview_body["expected_auto_unassigned_digest"] == "e" * 64
     assert probe.imp_apply_btn.options["state"] == "normal"
     assert "снять 3" in probe.imp_apply_btn.options["text"]
 
@@ -349,4 +379,5 @@ def test_pult_previews_before_apply_and_reuses_the_exact_request():
     assert apply_request["source_proof"] == preview_request["source_proof"]
     assert apply_request["sheets"] == preview_request["sheets"]
     assert apply_request["expected_auto_unassigned"] == 3
+    assert apply_request["expected_auto_unassigned_digest"] == "e" * 64
     assert probe.refreshed is True

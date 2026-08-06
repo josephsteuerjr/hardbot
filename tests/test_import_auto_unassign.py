@@ -43,6 +43,7 @@ def test_full_import_unassigns_missing_contract_but_keeps_row_and_visits(
         _grid([("AUTO-KEEP", "Иванов И.")]),
         source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
         full_registry=True,
+        authoritative_employees=["Иванов И.", "Петров П."],
     )
 
     assert report["auto_unassigned"] == 1
@@ -82,6 +83,7 @@ def test_automatically_unassigned_contract_returns_with_the_same_owner(
         _grid([("RETURN-KEEP", "Иванов И.")]),
         source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
         full_registry=True,
+        authoritative_employees=["Иванов И.", "Петров П."],
     )
     assert db.get_client("RETURN-ME")["responsible"] == ""
 
@@ -132,11 +134,14 @@ def test_preview_reports_unassignment_and_rolls_back_every_write(
         _grid([("PREVIEW-KEEP", "Иванов И.")]),
         source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
         full_registry=True,
+        authoritative_employees=["Иванов И.", "Петров П."],
         preview_only=True,
     )
 
     assert preview["preview_only"] is True
     assert preview["auto_unassigned"] == 1
+    assert preview["auto_unassigned_by_employee"] == {"Петров П.": 1}
+    assert len(preview["auto_unassigned_digest"]) == 64
     assert db.get_client("PREVIEW-GONE")["responsible"] == "Петров П."
     assert db.data_version() == version_before
 
@@ -144,6 +149,7 @@ def test_preview_reports_unassignment_and_rolls_back_every_write(
         _grid([("PREVIEW-KEEP", "Иванов И.")]),
         source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
         full_registry=True,
+        authoritative_employees=["Иванов И.", "Петров П."],
     )
     assert applied["auto_unassigned"] == 1
     assert db.get_client("PREVIEW-GONE")["responsible"] == ""
@@ -174,6 +180,7 @@ def test_apply_stops_if_unassignment_count_changed_after_preview(
         _grid([("STALE-KEEP", "Иванов И.")]),
         source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
         full_registry=True,
+        authoritative_employees=["Иванов И.", "Петров П."],
         preview_only=True,
     )
     assert preview["auto_unassigned"] == 1
@@ -184,7 +191,9 @@ def test_apply_stops_if_unassignment_count_changed_after_preview(
         _grid([("STALE-KEEP", "Иванов И.")]),
         source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
         full_registry=True,
+        authoritative_employees=["Иванов И.", "Петров П."],
         expected_auto_unassigned=1,
+        expected_auto_unassigned_digest=preview["auto_unassigned_digest"],
     )
 
     assert report["blocked"] is True
@@ -192,3 +201,92 @@ def test_apply_stops_if_unassignment_count_changed_after_preview(
     assert report["auto_unassigned"] == 0
     stale = db.get_client("STALE-GONE")
     assert stale["unassigned_reason"] == db.UNASSIGNED_REASON_MANUAL
+
+
+def test_full_slice_never_touches_an_unselected_employee(tmp_path, monkeypatch):
+    _isolated_db(tmp_path, monkeypatch)
+    _seed([
+        ("A-KEEP", "Иванов И."),
+        ("A-GONE", "Иванов И."),
+        ("B-STAY", "Петров П."),
+    ])
+
+    report = db.import_grid(
+        _grid([("A-KEEP", "Иванов И.")]),
+        source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
+        full_registry=True,
+        authoritative_employees=["иванов  и."],
+    )
+
+    assert report["blocked"] is False
+    assert report["auto_unassigned"] == 1
+    assert db.get_client("A-GONE")["responsible"] == ""
+    assert db.get_client("B-STAY")["responsible"] == "Петров П."
+
+
+def test_selected_employee_with_zero_rows_loses_assignments_not_rows(
+    tmp_path, monkeypatch
+):
+    _isolated_db(tmp_path, monkeypatch)
+    _seed([("ZERO-1", "Петров П."), ("ZERO-2", "Петров П.")])
+
+    report = db.import_grid(
+        _grid([]),
+        source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
+        full_registry=True,
+        authoritative_employees=["Петров П."],
+    )
+
+    assert report["auto_unassigned"] == 2
+    assert report["inserted"] == 0
+    assert report["updated"] == 0
+    assert db.get_client("ZERO-1") is not None
+    assert db.get_client("ZERO-2") is not None
+    assert db.get_client("ZERO-1")["responsible"] == ""
+    assert db.get_client("ZERO-2")["responsible"] == ""
+
+
+def test_full_slice_requires_explicit_employee_scope(tmp_path, monkeypatch):
+    _isolated_db(tmp_path, monkeypatch)
+    _seed([("SCOPE-1", "Иванов И.")])
+
+    report = db.import_grid(
+        _grid([]),
+        source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
+        full_registry=True,
+    )
+
+    assert report["blocked"] is True
+    assert "authoritative_employees" in report["error"]
+    assert db.get_client("SCOPE-1")["responsible"] == "Иванов И."
+
+
+def test_effect_digest_catches_same_count_different_contract(
+    tmp_path, monkeypatch
+):
+    _isolated_db(tmp_path, monkeypatch)
+    _seed([("DIGEST-KEEP", "Иванов И."), ("DIGEST-OLD", "Иванов И.")])
+    preview = db.import_grid(
+        _grid([("DIGEST-KEEP", "Иванов И.")]),
+        source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
+        full_registry=True,
+        authoritative_employees=["Иванов И."],
+        preview_only=True,
+    )
+    assert preview["auto_unassigned"] == 1
+
+    assert db.unassign_clients("Иванов И.", ["DIGEST-OLD"]) == 1
+    _seed([("DIGEST-NEW", "Иванов И.")])
+    report = db.import_grid(
+        _grid([("DIGEST-KEEP", "Иванов И.")]),
+        source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
+        full_registry=True,
+        authoritative_employees=["Иванов И."],
+        expected_auto_unassigned=1,
+        expected_auto_unassigned_digest=preview["auto_unassigned_digest"],
+    )
+
+    assert report["auto_unassigned"] == 1
+    assert report["blocked"] is True
+    assert report["preview_stale"] is True
+    assert db.get_client("DIGEST-NEW")["responsible"] == "Иванов И."
