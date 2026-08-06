@@ -101,7 +101,7 @@ auto выбирает all-new только если все live-файлы уж�
 hardbot напрямую не импортируются.
 
 Admin JSON-import требует exact лист `Портфели`. Для published master
-обязательны все 52 поля export-schema; для test subset — точные
+обязательны все поля текущей versioned export-schema; для test subset — точные
 `contract_id`, `responsible` и proof с полным утверждённым `{КД: владелец}`
 scope. Missing, unknown и нормализованные дубли блокируются до первой записи.
 Служебные колонки принимаются только из versioned allowlist/узкого pattern;

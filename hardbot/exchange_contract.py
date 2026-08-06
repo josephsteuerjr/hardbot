@@ -23,6 +23,7 @@ class ExchangeContractError(RuntimeError):
 CONTRACT_PATH = Path(__file__).with_name("data_exchange_contract.json")
 _SUPPORTED_RAW_SHA256 = {
     1: "6a6f06af70dff45ea9b4fde2fa2f23b2fef03fd658bcaca56ab6cc6513eb60b9",
+    2: "d6f2a8c46f8d490eca7c715fe9e4561201f6cb7053a89aceabcf49ed9548b7c7",
 }
 
 
@@ -351,6 +352,7 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
             "result_source_key",
             "result_snapshot_key",
             "direct_edit_keys",
+            "echo_only_keys",
             "isolated_call_fields",
         },
         label="office_overlay",
@@ -367,6 +369,10 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
         office["direct_edit_keys"],
         label="office_overlay.direct_edit_keys",
     )
+    echo_only_keys = _strings(
+        office["echo_only_keys"],
+        label="office_overlay.echo_only_keys",
+    )
     isolated_call_fields = _strings(
         office["isolated_call_fields"],
         label="office_overlay.isolated_call_fields",
@@ -376,6 +382,10 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
         raise ExchangeContractError("office result mapping disagrees with enrichment")
     if not set(direct_edit_keys) <= set(enrichment_source_keys):
         raise ExchangeContractError("office direct fields are not enrichment sources")
+    if not set(echo_only_keys) <= set(enrichment_source_keys):
+        raise ExchangeContractError("office echo-only fields are not enrichment sources")
+    if set(echo_only_keys) & set(direct_edit_keys):
+        raise ExchangeContractError("office echo-only/direct fields overlap")
     if set(isolated_call_fields) != set(forbidden_targets):
         raise ExchangeContractError("isolated call fields disagree with forbidden targets")
 
@@ -539,6 +549,7 @@ OFFICE_RESULT_SNAPSHOT_KEY = CONTRACT["office_overlay"][
     "result_snapshot_key"
 ]
 OFFICE_DIRECT_EDIT_KEYS = tuple(CONTRACT["office_overlay"]["direct_edit_keys"])
+OFFICE_ECHO_ONLY_KEYS = tuple(CONTRACT["office_overlay"]["echo_only_keys"])
 OFFICE_CALL_FIELDS = frozenset(
     CONTRACT["office_overlay"]["isolated_call_fields"]
 )

@@ -271,7 +271,7 @@ const I18N = {
     freenav:"Навигация по адресу",freenavph:"Адрес или «41.31, 69.24»",
     freenavfail:"Адрес не распознан",freenavrough:"Точность: только до района",
     voice:"Надиктовать",voicestop:"Стоп — распознать",voicewait:"Распознаю…",voicefail:"Не распозналось, попробуйте ещё",voiceunavail:"Голос временно недоступен — введите комментарий вручную",
-    comment:"Комментарий",tips:"Доп. адрес / доп. номер",lastvisit:"Последний выезд",
+    comment:"Комментарий",historicalComment:"Историчный комментарий выезда",tips:"Доп. адрес / доп. номер",lastvisit:"Последний выезд",
     status:"Статус",saved:"Сохранено",none:"Точка не задана",geook:"Точка проверена",
     nocl:"За вами пока никто не закреплён",photos:"Фото",contracts:"Договоры",promise:"Обещания",born:"Дата рождения",
     approx:"≈ примерно (центр н.п.)",exact:"точный адрес",manualpt:"точку отметил выездник",
@@ -313,7 +313,7 @@ const I18N = {
     freenav:"Manzil bo‘yicha navigatsiya",freenavph:"Manzil yoki «41.31, 69.24»",
     freenavfail:"Manzil topilmadi",freenavrough:"Aniqlik: faqat tuman darajasida",
     voice:"Ovozli izoh",voicestop:"To‘xtatish",voicewait:"Aniqlanmoqda…",voicefail:"Bo‘lmadi, yana urinib ko‘ring",voiceunavail:"Ovoz vaqtincha ishlamayapti — izohni qo‘lda kiriting",
-    comment:"Izoh",tips:"Qo‘shimcha manzil / raqam",lastvisit:"Oxirgi chiqish",
+    comment:"Izoh",historicalComment:"Oldingi tashriflar izohi",tips:"Qo‘shimcha manzil / raqam",lastvisit:"Oxirgi chiqish",
     status:"Holat",saved:"Saqlandi",none:"Nuqta yo‘q",geook:"Nuqta tekshirildi",
     nocl:"Sizga hali mijoz biriktirilmagan",photos:"Rasm",contracts:"Shartnomalar",promise:"Va’dalar",born:"Tug‘ilgan sana",
     approx:"≈ taxminan (aholi punkti markazi)",exact:"aniq manzil",manualpt:"nuqtani chiquvchi belgilagan",
@@ -355,7 +355,7 @@ const I18N = {
     freenav:"Навигатсия аз рӯи нишонӣ",freenavph:"Нишонӣ ё «41.31, 69.24»",
     freenavfail:"Нишонӣ шинохта нашуд",freenavrough:"Дақиқӣ: танҳо то ноҳия",
     voice:"Гуфтан",voicestop:"Ист — шинохт",voicewait:"Шинохта истодааст…",voicefail:"Нашуд, боз кӯшиш кунед",voiceunavail:"Овоз муваққатан дастнорас аст — шарҳро дастӣ нависед",
-    comment:"Шарҳ",tips:"Суроға / рақами иловагӣ",lastvisit:"Сафари охирин",
+    comment:"Шарҳ",historicalComment:"Шарҳи таърихии боздид",tips:"Суроға / рақами иловагӣ",lastvisit:"Сафари охирин",
     status:"Ҳолат",saved:"Захира шуд",none:"Нуқта нест",geook:"Нуқта тасдиқ шуд",
     nocl:"Ба шумо ҳоло мизоҷе вобаста нашудааст",photos:"Расм",contracts:"Шартномаҳо",promise:"Ваъдаҳо",born:"Санаи таваллуд",
     approx:"≈ тахминан (маркази деҳа)",exact:"суроғаи аниқ",manualpt:"нуқтаро выездник гузошт",
@@ -658,7 +658,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=29;
+const SHELL_VERSION=30;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1226,7 +1226,9 @@ async function openP(rep){
   // отправляем ровно то, что уже было подтверждено нами же.
   if(d.visited){
     (d.form||[]).forEach(f=>{ if(f.current) FORM_TOUCHED.add(f.key); });
-    if(d.visit_comment) FORM_TOUCHED.add("visit_comment");
+    // Серверный комментарий текущего месяца показываем для продолжения, но не
+    // считаем касанием формы: простое открытие/закрытие карточки не должно
+    // превращать импортированный текст в доказанный результат нового визита.
     if(d.tips) FORM_TOUCHED.add("tips");
   }
   draftDirty=false; clearTimeout(draftTimer);   // новый клиент — сбросить состояние сессии черновика
@@ -1240,7 +1242,7 @@ function renderDetail(){
     `<button class="back" onclick="renderList()">${ic("chevL")}${esc(t.my)}</button>
      <div class="h">${esc(d.client)}</div>
      <div class="muted" style="font-size:13px">${d.birth_date?(t.born+": "+d.birth_date):""}${d.birth_date?" · ":""}${d.contracts.length} ${t.kd}</div>
-     <div class="tabs">${tab("visit",t.visit)}${tab("client",t.client)}${tab("debt",t.debt)}${tab("form",t.form)}</div>
+     <div class="tabs">${tab("visit",t.visit)}${tab("debt",t.debt)}${tab("client",t.client)}${tab("form",t.form)}</div>
      <div id="panel"></div>`;
   drawPanel();
   setBottomNav("clients");
@@ -1248,7 +1250,7 @@ function renderDetail(){
 function setTab(id){
   if(STATE.tab==="form" && id!=="form") flushDraft();   // сохранить черновик до ухода с формы
   STATE.tab=id; drawPanel();
-  document.querySelectorAll(".tabs button").forEach((b,i)=>b.classList.toggle("on",["visit","client","debt","form"][i]===id)); }
+  document.querySelectorAll(".tabs button").forEach((b,i)=>b.classList.toggle("on",["visit","debt","client","form"][i]===id)); }
 
 function drawPanel(){
   const d=STATE.cur, t=L(); const p=$("panel");
@@ -1360,7 +1362,12 @@ function panelVisit(d,t){
    </div>`;
 }
 function panelClient(d,t){
-  return `<div class="box">${d.info.map(r=>
+  const historical = String(d.historical_visit_comment||"").trim();
+  const historicalBox = historical ? `<div class="box">
+    <div class="muted" style="margin-bottom:6px">${esc(t.historicalComment)}</div>
+    <div style="white-space:pre-wrap;line-height:1.45">${esc(historical)}</div>
+  </div>` : "";
+  return `${historicalBox}<div class="box">${d.info.map(r=>
     `<div class="kv"><span class="k">${esc(r.title)}</span><span class="v">${esc(String(r.value))}</span></div>`).join("")}</div>`;
 }
 // Долг человека одним числом существует, только если валюта одна: портфель ЗК — в сумах,

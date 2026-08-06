@@ -1,6 +1,6 @@
 {
   "schema": "hardbot.data-exchange-contract.v1",
-  "version": 1,
+  "version": 2,
   "artifacts": {
     "snapshot_kind": "hardbot_limited_test_pre_reset.v2",
     "enrichment_evidence_schema": "hardbot.pult-enrichment.v2",
@@ -49,7 +49,7 @@
     },
     "unknown_headers_policy": "block",
     "duplicate_headers_policy": "block",
-    "export_schema_sha256": "30708d4d66fd9a2ea77644dd3a8bbcb4a97ccbb8816db09adacd938030e27c1d",
+    "export_schema_sha256": "94ea00279e624796f66202a034fc6d9e247116056ee68446f2b2de39bdabe87a",
     "contract_key": "contract_id",
     "responsible_key": "responsible",
     "contract_title": "Номер КД / ID",
@@ -71,7 +71,6 @@
       "Текущие платежи",
       "Долг на начало месяца",
       "Изменение долга",
-      "Историчный комментарий выезда",
       "статус звонка софт",
       "Дата перезвона",
       "Комментарий текущего месяца Софт",
@@ -190,7 +189,9 @@
       "agreed_payment",
       "who_at_address",
       "client_location",
-      "purpose_rf",
+      "purpose_rf"
+    ],
+    "echo_only_keys": [
       "visit_comment"
     ],
     "isolated_call_fields": [

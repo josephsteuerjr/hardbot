@@ -356,7 +356,15 @@ def _person_full(rep: str, lang: str) -> dict | None:
         "photos": sum(r["photos_count"] or 0 for r in rows),
         "contracts": contracts, "info": info, "promise": promise,
         "form": form,
-        "visit_comment": (visit or {}).get("visit_comment") or "",
+        # Текущий комментарий — живой совместный текст месяца: его можно
+        # продолжить до завершения визита, а доказанный snapshot остаётся
+        # отдельной неизменяемой историей.
+        "visit_comment": _row_get(rows, "visit_comment") or "",
+        # Служебный односторонний контекст из общего реестра; в форму и POST
+        # сотрудника этот ключ не входит.
+        "historical_visit_comment": (
+            _row_get(rows, "historical_visit_comment") or ""
+        ),
         # call_comment оставлен для чтения доказанных legacy snapshot старой
         # оболочкой; сырой master-комментарий форму не префиллит.
         "call_comment": (visit or {}).get("call_comment") or "",
@@ -1837,10 +1845,29 @@ async def _admin_import_json(request: web.Request) -> web.Response:
              "error": "импорт заблокирован: full_registry должен быть boolean"},
             status=409,
         )
+    replace_current_visit_comments = body.get(
+        "replace_current_visit_comments", False
+    )
+    import_historical_visit_comments = body.get(
+        "import_historical_visit_comments", False
+    )
+    for option_name, option_value in (
+        ("replace_current_visit_comments", replace_current_visit_comments),
+        ("import_historical_visit_comments", import_historical_visit_comments),
+    ):
+        if type(option_value) is not bool:
+            return web.json_response(
+                {"blocked": True,
+                 "error": f"импорт заблокирован: {option_name} должен быть boolean"},
+                status=409,
+            )
     authoritative_employees = body.get("authoritative_employees")
     expected_auto_unassigned = body.get("expected_auto_unassigned")
     expected_auto_unassigned_digest = body.get(
         "expected_auto_unassigned_digest"
+    )
+    expected_comment_effect_digest = body.get(
+        "expected_comment_effect_digest"
     )
     if (
         expected_auto_unassigned is not None
@@ -1866,6 +1893,16 @@ async def _admin_import_json(request: web.Request) -> web.Response:
                        "свежий предпросмотр точного множества снятий")},
             status=409,
         )
+    if (
+        (replace_current_visit_comments or import_historical_visit_comments)
+        and expected_comment_effect_digest is None
+    ):
+        return web.json_response(
+            {"blocked": True,
+             "error": ("импорт заблокирован: для изменения комментариев "
+                       "обязателен свежий предпросмотр точного множества замен")},
+            status=409,
+        )
     try:
         validate_contract_binding(body.get("data_exchange_contract"))
         grid = db.pick_grid(body.get("sheets") or [])
@@ -1881,8 +1918,11 @@ async def _admin_import_json(request: web.Request) -> web.Response:
         require_source_proof=True,
         full_registry=full_registry,
         authoritative_employees=authoritative_employees,
+        replace_current_visit_comments=replace_current_visit_comments,
+        import_historical_visit_comments=import_historical_visit_comments,
         expected_auto_unassigned=expected_auto_unassigned,
         expected_auto_unassigned_digest=expected_auto_unassigned_digest,
+        expected_comment_effect_digest=expected_comment_effect_digest,
     )
     if report.get("blocked"):
         return web.json_response(report, status=409)
@@ -1920,6 +1960,23 @@ async def _admin_import_preview_json(request: web.Request) -> web.Response:
              "error": "предпросмотр заблокирован: full_registry должен быть boolean"},
             status=409,
         )
+    replace_current_visit_comments = body.get(
+        "replace_current_visit_comments", False
+    )
+    import_historical_visit_comments = body.get(
+        "import_historical_visit_comments", False
+    )
+    for option_name, option_value in (
+        ("replace_current_visit_comments", replace_current_visit_comments),
+        ("import_historical_visit_comments", import_historical_visit_comments),
+    ):
+        if type(option_value) is not bool:
+            return web.json_response(
+                {"blocked": True,
+                 "error": (f"предпросмотр заблокирован: {option_name} "
+                           "должен быть boolean")},
+                status=409,
+            )
     authoritative_employees = body.get("authoritative_employees")
     if not isinstance(body.get("source_proof"), dict):
         return web.json_response(
@@ -1943,6 +2000,8 @@ async def _admin_import_preview_json(request: web.Request) -> web.Response:
         full_registry=full_registry,
         authoritative_employees=authoritative_employees,
         preview_only=True,
+        replace_current_visit_comments=replace_current_visit_comments,
+        import_historical_visit_comments=import_historical_visit_comments,
     )
     if report.get("blocked"):
         return web.json_response(report, status=409)

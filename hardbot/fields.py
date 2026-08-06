@@ -89,7 +89,8 @@ B_PAY = "Блок оплат и обещаний"
 B_VISIT = "Блок выезда"
 
 
-# Все 50 колонок реестра, по порядку.
+# Все поддерживаемые колонки реестра, по порядку. Число намеренно не фиксируем:
+# форма реестра развивается, а контракт ниже проверяет реальные ключи/заголовки.
 FIELDS: list[Field] = [
     # --- Информация по клиенту ---
     Field("partner",          "Партнер",                    B_INFO, SX),
@@ -130,6 +131,7 @@ FIELDS: list[Field] = [
     Field("extra_address",    "Доп. Адрес/Доп.Номер",       B_VISIT, SX),
     Field("visit_date",       "Дата выезда",                B_VISIT, HARD),
     Field("visit_comment",    "Комментарий текущего месяца выезда", B_VISIT, HARD),
+    Field("historical_visit_comment", "Историчный комментарий выезда", B_VISIT, SX),
     Field("meeting_date",     "Дата встречи",               B_VISIT, SX),
     Field("contact_with",     "С кем был контакт?",         B_VISIT, HARD, "contact_with"),
     Field("agreed_payment",   "Договорились на оплату?",    B_VISIT, HARD, "agreed_payment"),

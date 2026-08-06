@@ -197,7 +197,7 @@ def read_workbook_sheets(path: str) -> list[dict]:
 
 # --- Экспорт xlsx (порт rust_xlsxwriter-логики на openpyxl) ------------------
 def _col_width(key: str, title: str) -> float:
-    if key in ("address", "visit_comment"):
+    if key in ("address", "visit_comment", "historical_visit_comment"):
         return 42
     if key in ("client", "address_customer", "extra_address", "point_address"):
         return 28
@@ -862,6 +862,28 @@ class Pult(tk.Tk):
             font=f(9),
         )
         self.imp_full_check.pack(anchor="w", pady=(10, 0))
+        self.imp_replace_current_comments_var = tk.BooleanVar(value=False)
+        self.imp_replace_current_comments_check = tk.Checkbutton(
+            imp.inner,
+            text=("Начало месяца: заменить текущие комментарии значениями файла "
+                  "(пустая ячейка очистит комментарий)"),
+            variable=self.imp_replace_current_comments_var,
+            command=self._imp_comment_toggle,
+            bg=CARD, fg=WARN, activebackground=CARD, selectcolor=CARD,
+            font=f(9), justify="left", wraplength=760,
+        )
+        self.imp_replace_current_comments_check.pack(anchor="w", pady=(6, 0))
+        self.imp_import_historical_comments_var = tk.BooleanVar(value=False)
+        self.imp_import_historical_comments_check = tk.Checkbutton(
+            imp.inner,
+            text=("Разово загрузить историчные комментарии из файла "
+                  "(пустая ячейка очистит историчный комментарий)"),
+            variable=self.imp_import_historical_comments_var,
+            command=self._imp_comment_toggle,
+            bg=CARD, fg=WARN, activebackground=CARD, selectcolor=CARD,
+            font=f(9), justify="left", wraplength=760,
+        )
+        self.imp_import_historical_comments_check.pack(anchor="w", pady=(6, 0))
         self.imp_go_row = tk.Frame(imp.inner, bg=CARD)
         self.imp_go_btn = btn(self.imp_go_row, "Предпросмотр выбранных (0)",
                               self.do_import, kind="accent")
@@ -1003,6 +1025,14 @@ class Pult(tk.Tk):
             self.toast("Отметь хотя бы одного сотрудника", err=True)
             return
         full_registry = bool(self.imp_full_var.get())
+        replace_current_comments = (
+            bool(self.imp_replace_current_comments_var.get())
+            if hasattr(self, "imp_replace_current_comments_var") else False
+        )
+        import_historical_comments = (
+            bool(self.imp_import_historical_comments_var.get())
+            if hasattr(self, "imp_import_historical_comments_var") else False
+        )
         signature = self._imp_signature()
         self._invalidate_import_preview(clear_report=True)
         self.toast(f"Проверяю импорт {Path(book['path']).name}: {len(picked)} сотр…")
@@ -1021,6 +1051,8 @@ class Pult(tk.Tk):
                     prepared["authoritative_employees"]
                     if full_registry else []
                 ),
+                "replace_current_visit_comments": replace_current_comments,
+                "import_historical_visit_comments": import_historical_comments,
             }
             result = self.api(
                 "POST", "/admin/import/preview.json", body, timeout=180
@@ -1050,10 +1082,26 @@ class Pult(tk.Tk):
                     err=True,
                 )
                 return
+            comment_effect_digest = d.get("comment_effect_digest")
+            changes_comments = bool(
+                payload["body"].get("replace_current_visit_comments")
+                or payload["body"].get("import_historical_visit_comments")
+            )
+            if changes_comments and (
+                not isinstance(comment_effect_digest, str)
+                or len(comment_effect_digest) != 64
+            ):
+                self._invalidate_import_preview(clear_report=True)
+                self.toast(
+                    "Сервер не вернул точный набор замен комментариев — нужен новый сервер",
+                    err=True,
+                )
+                return
             self._imp_preview_body = {
                 **payload["body"],
                 "expected_auto_unassigned": int(d.get("auto_unassigned") or 0),
                 "expected_auto_unassigned_digest": effect_digest,
+                "expected_comment_effect_digest": comment_effect_digest,
             }
             self._imp_preview_signature = payload["signature"]
             self._imp_preview_meta = payload["prepared"]
@@ -1080,9 +1128,20 @@ class Pult(tk.Tk):
                 )
             self.imp_warn.configure(text="\n".join(notes))
             unassigned = int(d.get("auto_unassigned") or 0)
+            comment_changes = sum(
+                int(d.get(key) or 0)
+                for key in (
+                    "current_comments_replaced",
+                    "current_comments_cleared",
+                    "historical_comments_imported",
+                    "historical_comments_cleared",
+                )
+            )
             label = "Применить импорт"
             if unassigned:
                 label += f" · снять {fmt_n(unassigned)}"
+            if comment_changes:
+                label += f" · комментариев {fmt_n(comment_changes)}"
             self.imp_apply_btn.configure(text=label, state="normal")
             self.toast(
                 "Предпросмотр готов"
@@ -1195,7 +1254,34 @@ class Pult(tk.Tk):
     def _imp_signature(self) -> tuple:
         book = self.imp_book or {}
         full = bool(self.imp_full_var.get()) if hasattr(self, "imp_full_var") else False
-        return (book.get("file_sha256"), tuple(sorted(self.imp_selected)), full)
+        replace_current = (
+            bool(self.imp_replace_current_comments_var.get())
+            if hasattr(self, "imp_replace_current_comments_var") else False
+        )
+        import_historical = (
+            bool(self.imp_import_historical_comments_var.get())
+            if hasattr(self, "imp_import_historical_comments_var") else False
+        )
+        return (
+            book.get("file_sha256"), tuple(sorted(self.imp_selected)), full,
+            replace_current, import_historical,
+        )
+
+    def _imp_comment_toggle(self):
+        self._invalidate_import_preview(clear_report=True)
+        notes = []
+        if self.imp_replace_current_comments_var.get():
+            notes.append(
+                "Текущие комментарии будут заменены значениями файла, включая пустые."
+            )
+        if self.imp_import_historical_comments_var.get():
+            notes.append(
+                "Историчные комментарии будут разово загружены из файла, включая пустые."
+            )
+        if notes:
+            notes.append("Перед записью пульт покажет точный предпросмотр изменений.")
+            self.imp_warn.configure(text="\n".join(notes))
+        self._imp_count()
 
     def _imp_full_toggle(self):
         self._invalidate_import_preview(clear_report=True)
@@ -1217,6 +1303,8 @@ class Pult(tk.Tk):
         if not path:
             return
         self.imp_full_var.set(False)
+        self.imp_replace_current_comments_var.set(False)
+        self.imp_import_historical_comments_var.set(False)
         self._invalidate_import_preview(clear_report=True)
         self.imp_file_lbl.configure(text="Читаю " + Path(path).name + "…")
 
@@ -1587,6 +1675,16 @@ class Pult(tk.Tk):
                 ("обновлено", d.get("updated")), ("без КД", d.get("skipped_no_id")),
                 ("дублей", d.get("duplicates")),
                 ("будет снято / снято", d.get("auto_unassigned")),
+                ("текущих комментариев сохранено",
+                 d.get("current_comments_preserved")),
+                ("текущих комментариев заменено",
+                 d.get("current_comments_replaced")),
+                ("текущих комментариев очищено",
+                 d.get("current_comments_cleared")),
+                ("историчных комментариев загружено",
+                 d.get("historical_comments_imported")),
+                ("историчных комментариев очищено",
+                 d.get("historical_comments_cleared")),
                 ("без ответственного", d.get("no_responsible")),
                 ("офисных правок", d.get("office_cells")),
                 ("call-полей изолировано", d.get("isolated_call_cells")),
@@ -1596,6 +1694,31 @@ class Pult(tk.Tk):
     @staticmethod
     def _imp_notes(d: dict) -> list[str]:
         notes = []
+        if d.get("replace_current_visit_comments"):
+            notes.append(
+                "Режим начала месяца включён: текущие комментарии заменяются "
+                "точно значениями файла; пустые ячейки очищают БД. "
+                f"Заменено: {fmt_n(d.get('current_comments_replaced'))}, "
+                f"очищено: {fmt_n(d.get('current_comments_cleared'))}, "
+                f"без изменений: {fmt_n(d.get('current_comments_unchanged'))}."
+            )
+        else:
+            notes.append(
+                "Текущие комментарии существующих договоров защищены: "
+                f"сохранено как есть {fmt_n(d.get('current_comments_preserved'))}."
+            )
+        if d.get("import_historical_visit_comments"):
+            notes.append(
+                "Разовый импорт историчных комментариев включён: "
+                f"загружено {fmt_n(d.get('historical_comments_imported'))}, "
+                f"очищено {fmt_n(d.get('historical_comments_cleared'))}, "
+                f"без изменений {fmt_n(d.get('historical_comments_unchanged'))}."
+            )
+        else:
+            notes.append(
+                "Историчные комментарии этим импортом не трогаются: "
+                f"сохранено {fmt_n(d.get('historical_comments_preserved'))}."
+            )
         if d.get("idempotent_replay"):
             notes.append(
                 "Идемпотентный повтор: это разрешение уже было использовано, "

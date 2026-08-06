@@ -62,24 +62,28 @@ def test_office_edit_accepted_with_anchor():
     today = date.today().isoformat()
     _import({"contract_id": "OF-1", "client": "Человек", "responsible": "Агент",
              "city": "Ташкент"})
-    _complete_visit("OF-1", today, call_status="Оплачен", visit_comment="бот")
+    _complete_visit(
+        "OF-1", today, call_status="Оплачен", visit_comment="бот",
+        contact_with="Должник",
+    )
 
     rep = _import({"contract_id": "OF-1", "client": "Человек", "responsible": "Агент",
                    "city": "Ташкент", "visit_date": today, "call_status": "Оплачен",
-                   "visit_comment": "бот, офис дополнил"})
+                   "visit_comment": "бот", "contact_with": "3 лицо"})
     assert rep["office_cells"] == 1
     assert rep["office_contracts"] == 1
-    assert rep["office_applied"] == {"OF-1": {"visit_comment": "бот, офис дополнил"}}
+    assert rep["office_applied"] == {"OF-1": {"contact_with": "3 лицо"}}
     assert rep["protected_cells"] == 0
 
     raw = db.get_client("OF-1")
-    assert raw["visit_comment"] == "бот, офис дополнил"     # raw: карточка/дайджест
+    assert raw["visit_comment"] == "бот"                    # echo-only, не правка
+    assert raw["contact_with"] == "3 лицо"                  # raw: карточка/дайджест
     snapshot = json.loads(raw["bot_visit_data"])
-    assert snapshot["visit_comment"] == "бот"               # снимок миниаппа нетронут
+    assert snapshot["contact_with"] == "Должник"            # снимок миниаппа нетронут
     merged = db.bot_visit_snapshot(raw)
-    assert merged["visit_comment"] == "бот, офис дополнил"  # публичный результат
+    assert merged["contact_with"] == "3 лицо"               # публичный результат
     safe = next(r for r in db.enrichment_rows() if r["contract_id"] == "OF-1")
-    assert safe["visit_comment"] == "бот, офис дополнил"    # обогащение разнесёт
+    assert safe["contact_with"] == "3 лицо"                 # обогащение разнесёт
     assert safe[db.BOT_VISIT_MARKER] is True
 
 
@@ -179,15 +183,19 @@ def test_office_edit_reimport_echo_is_silent():
     """Повторный импорт того же файла стабилен: принятая правка стала «эхом»."""
     today = date.today().isoformat()
     _import({"contract_id": "OF-2", "client": "Тихий", "responsible": "Агент"})
-    _complete_visit("OF-2", today, call_status="Оплачен")
+    _complete_visit(
+        "OF-2", today, call_status="Оплачен", visit_comment="бот",
+        contact_with="Должник",
+    )
     row = {"contract_id": "OF-2", "client": "Тихий", "responsible": "Агент",
-           "visit_date": today, "call_status": "Оплачен", "visit_comment": "офис"}
+           "visit_date": today, "call_status": "Оплачен", "visit_comment": "бот",
+           "contact_with": "3 лицо"}
     rep1 = _import(row)
     assert rep1["office_cells"] == 1
     rep2 = _import(row)
     assert rep2["office_cells"] == 0
     assert rep2["protected_cells"] == 0
-    assert db.bot_visit_snapshot(db.get_client("OF-2"))["visit_comment"] == "офис"
+    assert db.bot_visit_snapshot(db.get_client("OF-2"))["contact_with"] == "3 лицо"
 
 
 def test_stale_file_still_rejected():
@@ -199,7 +207,8 @@ def test_stale_file_still_rejected():
                    "visit_date": "531", "call_status": "Нет контакта",
                    "visit_comment": "древняя копия"})
     assert rep["office_cells"] == 0
-    assert rep["protected_cells"] == 2          # дата+visit_comment не вошли
+    assert rep["protected_cells"] == 1          # неверная дата не вошла
+    assert rep["current_comments_preserved"] == 1
     assert rep["isolated_call_cells"] == 1      # call_status — отдельный звонок
     assert rep["protected_contracts"] == 1
     raw = db.get_client("OF-3")
@@ -229,7 +238,8 @@ def test_office_edit_of_visit_date_never_accepted():
     rep = _import({"contract_id": "OF-5", "client": "Дата", "responsible": "Агент",
                    "visit_date": "2020-01-01", "visit_comment": "офис"})
     assert rep["office_cells"] == 0
-    assert rep["protected_cells"] == 2
+    assert rep["protected_cells"] == 1
+    assert rep["current_comments_preserved"] == 1
     assert db.get_client("OF-5")["visit_date"] == today
 
 
@@ -276,15 +286,19 @@ def test_office_edit_propagates_to_person_contracts():
     today = date.today().isoformat()
     _import({"contract_id": "OF-A1", "client": "Двойной", "responsible": "Агент"},
             {"contract_id": "OF-A2", "client": "Двойной", "responsible": "Агент"})
-    _complete_visit("OF-A1", today, call_status="Оплачен")
+    _complete_visit(
+        "OF-A1", today, call_status="Оплачен", visit_comment="бот",
+        contact_with="Должник",
+    )
     rep = _import({"contract_id": "OF-A2", "client": "Двойной", "responsible": "Агент",
-                   "visit_date": today, "visit_comment": "офис дополнил"})
+                   "visit_date": today, "visit_comment": "бот",
+                   "contact_with": "3 лицо"})
     assert rep["office_cells"] == 1
     assert set(rep["office_applied"]) == {"OF-A1", "OF-A2"}
     for cid in ("OF-A1", "OF-A2"):
         raw = db.get_client(cid)
-        assert raw["visit_comment"] == "офис дополнил"
-        assert db.bot_visit_snapshot(raw)["visit_comment"] == "офис дополнил"
+        assert raw["contact_with"] == "3 лицо"
+        assert db.bot_visit_snapshot(raw)["contact_with"] == "3 лицо"
 
 
 def test_office_dropdown_normalized_to_canonical():
@@ -406,23 +420,35 @@ def test_new_bot_visit_supersedes_office_edits():
     лечь поверх свежего снимка нового визита."""
     today = date.today().isoformat()
     _import({"contract_id": "OF-7", "client": "Повторный", "responsible": "Агент"})
-    _complete_visit("OF-7", today, call_status="Оплачен")
+    _complete_visit(
+        "OF-7", today, call_status="Оплачен", visit_comment="бот",
+        contact_with="Должник",
+    )
     _import({"contract_id": "OF-7", "client": "Повторный", "responsible": "Агент",
-             "visit_date": today, "visit_comment": "офисная правка"})
-    assert db.bot_visit_snapshot(db.get_client("OF-7"))["visit_comment"] == "офисная правка"
+             "visit_date": today, "visit_comment": "бот",
+             "contact_with": "3 лицо"})
+    assert db.bot_visit_snapshot(db.get_client("OF-7"))["contact_with"] == "3 лицо"
 
-    _complete_visit("OF-7", today, call_status="Оплачен", visit_comment="новый выезд")
+    _complete_visit(
+        "OF-7", today, call_status="Оплачен", visit_comment="новый выезд",
+        contact_with="Должник и 3 лицо",
+    )
     raw = db.get_client("OF-7")
     assert raw["office_edit_data"] is None
     assert db.bot_visit_snapshot(raw)["visit_comment"] == "новый выезд"
+    assert db.bot_visit_snapshot(raw)["contact_with"] == "Должник и 3 лицо"
 
 
 def test_reset_visits_clears_office_edits():
     today = date.today().isoformat()
     _import({"contract_id": "OF-6", "client": "Сброс", "responsible": "Агент"})
-    _complete_visit("OF-6", today, call_status="Оплачен")
+    _complete_visit(
+        "OF-6", today, call_status="Оплачен", visit_comment="бот",
+        contact_with="Должник",
+    )
     _import({"contract_id": "OF-6", "client": "Сброс", "responsible": "Агент",
-             "visit_date": today, "visit_comment": "офис"})
+             "visit_date": today, "visit_comment": "бот",
+             "contact_with": "3 лицо"})
     assert db.get_client("OF-6")["office_edit_data"]
     db.reset_visits()
     assert db.get_client("OF-6")["office_edit_data"] is None

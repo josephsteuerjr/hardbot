@@ -245,7 +245,9 @@ def test_stale_master_form_open_and_untouched_save_cannot_certify(monkeypatch):
     opened = webmod._person_full("PV-STALE-FORM", "ru")
     assert opened["visited"] is False
     assert all(field["current"] == "" for field in opened["form"])
-    assert opened["visit_comment"] == ""
+    # Текущий комментарий — живой рабочий текст, но он не входит в dropdown
+    # prefill и без реального касания формы не становится доказательством визита.
+    assert opened["visit_comment"] == "старый master-комментарий"
     assert opened["call_comment"] == ""
     assert opened["tips"] == ""
 
@@ -304,7 +306,7 @@ def test_http_stale_master_open_then_untouched_finish_is_fail_closed(monkeypatch
             opened = await opened_response.json()
             assert opened["visited"] is False
             assert all(field["current"] == "" for field in opened["form"])
-            assert opened["visit_comment"] == ""
+            assert opened["visit_comment"] == "старый master-комментарий"
             assert opened["call_comment"] == ""
             assert opened["tips"] == ""
 
@@ -362,7 +364,9 @@ def test_deliberate_result_does_not_pull_omitted_master_fields_into_proof(
     assert snapshot["call_status"] == "Оплачен"
     assert "contact_with" not in snapshot
     assert "agreed_payment" not in snapshot
-    assert "visit_comment" not in snapshot
+    # Публичная карточка накладывает живой текущий комментарий поверх снимка,
+    # однако immutable payload ниже по-прежнему содержит только отправленные поля.
+    assert snapshot["visit_comment"] == "старый master-комментарий"
     with db.connect() as conn:
         payload = conn.execute(
             "SELECT payload FROM visits WHERE contract_id=?",

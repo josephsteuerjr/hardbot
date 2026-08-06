@@ -25,6 +25,7 @@ from exchange_contract import (
     IMPORT_SOURCE_TEST_SUBSET,
     OFFICE_CALL_FIELDS,
     OFFICE_DIRECT_EDIT_KEYS,
+    OFFICE_ECHO_ONLY_KEYS,
     OFFICE_RESULT_SNAPSHOT_KEY,
     OFFICE_RESULT_SOURCE_KEY,
     PROVENANCE_MARKER,
@@ -123,6 +124,7 @@ _exchange_registry_keys = (
     set(BOT_VISIT_KEYS)
     | set(BOT_DROPDOWN_KEYS)
     | set(OFFICE_DIRECT_EDIT_KEYS)
+    | set(OFFICE_ECHO_ONLY_KEYS)
     | set(OFFICE_CALL_FIELDS)
     | {OFFICE_RESULT_SOURCE_KEY, OFFICE_RESULT_SNAPSHOT_KEY}
 )
@@ -286,13 +288,25 @@ def _canon_option(key: str, value: str) -> str | None:
 
 
 def _merged_visit(row) -> dict | None:
-    """Подтверждённый результат визита: снимок миниаппа + принятые офисные правки.
-    Без валидного снимка офисные правки не существуют (некуда накладывать)."""
+    """Подтверждённый результат визита + живой комментарий текущего месяца.
+
+    Снимок миниаппа остаётся неизменяемым доказательством завершённого визита,
+    офисные правки накладываются поверх него. ``visit_comment`` отличается по
+    природе: это совместный рабочий текст текущего месяца, который сотрудник
+    продолжает в боте или офисе и который аналитик может отдельно заменить при
+    месячном импорте, включая явную пустоту. Поэтому его каноническое текущее
+    значение берём из raw-колонки последним слоем, не переписывая снимок.
+    Без валидного снимка функция по-прежнему не создаёт результат визита."""
     snapshot = _decode_bot_snapshot(row)
     if snapshot is None:
         return None
     edits = _decode_office_edits(row)
-    return {**snapshot, **edits} if edits else snapshot
+    merged = {**snapshot, **edits} if edits else dict(snapshot)
+    try:
+        merged["visit_comment"] = str(row["visit_comment"] or "").strip()
+    except (KeyError, IndexError):
+        pass
+    return merged
 
 
 def _backfill_bot_visit_snapshots(conn: sqlite3.Connection) -> int:
@@ -1887,12 +1901,25 @@ def record_bot_visit(rep_contract_id: str, values: dict,
         # импорту за офисные правки.
         for r in contracts:
             log = _log_append(_decode_value_log(r), snapshot)
-            conn.execute(
-                "UPDATE clients SET bot_visit_at=?, bot_visit_data=?, "
-                "office_edit_data=NULL, visit_value_log=?, updated_at=? "
-                "WHERE contract_id=?",
-                (completed_at, payload, _log_json(log), now, r["contract_id"]),
-            )
+            if "visit_comment" in snapshot:
+                # Прямые in-process вызовы record_bot_visit (миграции/тесты)
+                # тоже обязаны синхронизировать живой комментарий. HTTP-путь уже
+                # записал его через update_person, повтор здесь идемпотентен.
+                conn.execute(
+                    "UPDATE clients SET visit_comment=?, bot_visit_at=?, "
+                    "bot_visit_data=?, office_edit_data=NULL, visit_value_log=?, "
+                    "updated_at=? WHERE contract_id=?",
+                    (snapshot["visit_comment"], completed_at, payload,
+                     _log_json(log), now, r["contract_id"]),
+                )
+            else:
+                conn.execute(
+                    "UPDATE clients SET bot_visit_at=?, bot_visit_data=?, "
+                    "office_edit_data=NULL, visit_value_log=?, updated_at=? "
+                    "WHERE contract_id=?",
+                    (completed_at, payload, _log_json(log), now,
+                     r["contract_id"]),
+                )
         conn.commit()
     _bump_version()
     return len(contracts)
@@ -1905,8 +1932,8 @@ def has_bot_visit(rep_contract_id: str) -> bool:
 
 
 def bot_visit_snapshot(row) -> dict | None:
-    """Публичное read-only представление подтверждённого результата визита строки:
-    снимок миниаппа + принятые офисные правки (карточка, миниапп, дайджест)."""
+    """Публичное представление подтверждённого визита для чтения:
+    неизменяемый снимок + офисные правки + живой комментарий текущего месяца."""
     return _merged_visit(row)
 
 
@@ -3275,8 +3302,11 @@ def import_grid(
     full_registry: bool = False,
     authoritative_employees: list[str] | None = None,
     preview_only: bool = False,
+    replace_current_visit_comments: bool = False,
+    import_historical_visit_comments: bool = False,
     expected_auto_unassigned: int | None = None,
     expected_auto_unassigned_digest: str | None = None,
+    expected_comment_effect_digest: str | None = None,
 ) -> dict:
     """Ядро импорта опубликованного master/test subset.
 
@@ -3326,6 +3356,16 @@ def import_grid(
     При применении пульт передаёт увиденный ``expected_auto_unassigned``; если
     состояние БД успело измениться, импорт откатывается и требует новый preview.
 
+    Комментарии имеют два независимых, выключенных по умолчанию режима:
+      * текущий комментарий существующего договора сохраняется как есть; только
+        ``replace_current_visit_comments`` заменяет его значением файла, включая
+        пустую ячейку;
+      * историчный комментарий вообще не импортируется без явного
+        ``import_historical_visit_comments`` и никогда не входит в форму/обратную
+        запись сотрудника.
+    Точный набор замен связывается preview/apply через
+    ``expected_comment_effect_digest`` так же, как набор автоснятий.
+
     Возвращает отчёт — чтобы было видно ТОЧНО, что вошло:
     {source_kind, total_rows, inserted, updated, skipped_no_id, duplicates,
     unknown_columns,
@@ -3351,10 +3391,36 @@ def import_grid(
               "auto_unassigned": 0,
               "auto_unassigned_by_employee": {},
               "auto_unassigned_digest": hashlib.sha256(b"[]").hexdigest(),
+              "replace_current_visit_comments": bool(
+                  replace_current_visit_comments
+              ),
+              "import_historical_visit_comments": bool(
+                  import_historical_visit_comments
+              ),
+              "current_comments_preserved": 0,
+              "current_comments_replaced": 0,
+              "current_comments_cleared": 0,
+              "current_comments_unchanged": 0,
+              "historical_comments_preserved": 0,
+              "historical_comments_imported": 0,
+              "historical_comments_cleared": 0,
+              "historical_comments_unchanged": 0,
+              "comment_effect_digest": hashlib.sha256(b"[]").hexdigest(),
               "authoritative_employees": [],
               "source_proof_digest": None,
               "blocked": False, "duplicate_conflicts": [],
               "quarantined_contracts": []}
+
+    for option_name, option_value in (
+        ("replace_current_visit_comments", replace_current_visit_comments),
+        ("import_historical_visit_comments", import_historical_visit_comments),
+    ):
+        if type(option_value) is not bool:
+            report["blocked"] = True
+            report["error"] = (
+                f"импорт заблокирован: {option_name} должен быть boolean"
+            )
+            return report
 
     if (
         expected_auto_unassigned is not None
@@ -3381,6 +3447,30 @@ def import_grid(
         report["error"] = (
             "импорт заблокирован: expected_auto_unassigned_digest должен быть "
             "lowercase SHA-256"
+        )
+        return report
+
+    if expected_comment_effect_digest is not None and (
+        not isinstance(expected_comment_effect_digest, str)
+        or len(expected_comment_effect_digest) != 64
+        or any(ch not in "0123456789abcdef"
+               for ch in expected_comment_effect_digest)
+    ):
+        report["blocked"] = True
+        report["error"] = (
+            "импорт заблокирован: expected_comment_effect_digest должен быть "
+            "lowercase SHA-256"
+        )
+        return report
+    if (
+        (replace_current_visit_comments or import_historical_visit_comments)
+        and not preview_only
+        and expected_comment_effect_digest is None
+    ):
+        report["blocked"] = True
+        report["error"] = (
+            "импорт заблокирован: для изменения комментариев обязателен "
+            "свежий предпросмотр точного множества замен"
         )
         return report
 
@@ -3533,6 +3623,24 @@ def import_grid(
         return report
 
     present_keys = {key for key in col_keys if key}
+    requested_comment_headers = {
+        key
+        for key, requested in (
+            ("visit_comment", replace_current_visit_comments),
+            ("historical_visit_comment", import_historical_visit_comments),
+        )
+        if requested
+    }
+    missing_comment_headers = sorted(requested_comment_headers - present_keys)
+    if missing_comment_headers:
+        report["blocked"] = True
+        report["missing_comment_headers"] = missing_comment_headers
+        report["error"] = (
+            "импорт заблокирован: запрошенная операция с комментариями требует "
+            "колонки файла: "
+            + ", ".join(BY_KEY[key].title for key in missing_comment_headers)
+        )
+        return report
     required_keys = (
         {item["key"] for item in schema}
         if source_kind == IMPORT_SOURCE_PUBLISHED_MASTER
@@ -3722,8 +3830,14 @@ def import_grid(
             continue
         report["total_rows"] += 1
         data = {}
-        for key, val in zip(col_keys, raw):
-            if key and val is not None:
+        exact_comment_keys = requested_comment_headers
+        for index, key in enumerate(col_keys):
+            val = raw[index] if index < len(raw) else None
+            if key in exact_comment_keys:
+                # Для явной месячной операции пустая ячейка — полноценное
+                # значение «очистить», в том числе если строка короче шапки.
+                data[key] = ("" if val is None else str(val).strip())
+            elif key and val is not None:
                 if key == "contract_id":
                     canonical = _canonical_contract_id(val)
                     if canonical:
@@ -3883,6 +3997,7 @@ def import_grid(
         # именно по ним, иначе однофамильцы склеятся (см. person_key).
         existing = {r["contract_id"]: r for r in conn.execute(
             "SELECT contract_id, client, birth_date, responsible, address, phone, "
+            "visit_comment, historical_visit_comment, "
             "unassigned_from, unassigned_reason, "
             "bot_visit_at, bot_visit_data, office_edit_data, visit_value_log "
             "FROM clients")}
@@ -3904,6 +4019,7 @@ def import_grid(
         office_cids: set[str] = set()
         protected_cids: set[str] = set()
         isolated_call_cids: set[str] = set()
+        comment_effect_rows: list[dict[str, str]] = []
         # Владелец каждого уникального КД после duplicate preflight.
         owners: dict[str, str] = {}
         # Как ответственные УЖЕ записаны в базе — чтобы опечатка регистра в файле
@@ -3920,6 +4036,76 @@ def import_grid(
             ]
         for cid, data in grouped.items():
             is_update = cid in existing
+            row0 = existing.get(cid)
+            comment_updates: dict[str, str] = {}
+            office_echo_values = {
+                key: data.get(key)
+                for key in OFFICE_ECHO_ONLY_KEYS
+            }
+
+            if replace_current_visit_comments:
+                incoming_current = str(data.pop("visit_comment", "") or "").strip()
+                previous_current = (
+                    str(row0["visit_comment"] or "").strip()
+                    if row0 is not None else ""
+                )
+                comment_updates["visit_comment"] = incoming_current
+                if previous_current == incoming_current:
+                    report["current_comments_unchanged"] += 1
+                else:
+                    key = (
+                        "current_comments_cleared"
+                        if not incoming_current
+                        else "current_comments_replaced"
+                    )
+                    report[key] += 1
+                    comment_effect_rows.append({
+                        "contract_id": cid,
+                        "field": "visit_comment",
+                        "before": previous_current,
+                        "after": incoming_current,
+                    })
+            elif row0 is not None:
+                # Обычный импорт никогда не подменяет совместный текст текущего
+                # месяца. Для новой строки непустой текст файла можно принять:
+                # сохранять в БД там ещё нечего.
+                if "visit_comment" in present_keys:
+                    report["current_comments_preserved"] += 1
+                data.pop("visit_comment", None)
+
+            if import_historical_visit_comments:
+                incoming_historical = str(
+                    data.pop("historical_visit_comment", "") or ""
+                ).strip()
+                previous_historical = (
+                    str(row0["historical_visit_comment"] or "").strip()
+                    if row0 is not None else ""
+                )
+                comment_updates[
+                    "historical_visit_comment"
+                ] = incoming_historical
+                if previous_historical == incoming_historical:
+                    report["historical_comments_unchanged"] += 1
+                else:
+                    key = (
+                        "historical_comments_cleared"
+                        if not incoming_historical
+                        else "historical_comments_imported"
+                    )
+                    report[key] += 1
+                    comment_effect_rows.append({
+                        "contract_id": cid,
+                        "field": "historical_visit_comment",
+                        "before": previous_historical,
+                        "after": incoming_historical,
+                    })
+            else:
+                if row0 is not None and "historical_visit_comment" in present_keys:
+                    report["historical_comments_preserved"] += 1
+                # Историчный текст по природе односторонний и не возникает в БД
+                # даже у новой строки без отдельного решения аналитика.
+                data.pop("historical_visit_comment", None)
+
             # Пустой владелец = кейс в базе есть, а у выездника его нет.
             prev_resp = existing[cid]["responsible"] if cid in existing else ""
             # Ручное снятие держится, пока в реестре стоит ТОТ ЖЕ ответственный:
@@ -3952,7 +4138,6 @@ def import_grid(
             # адрес и прочие поля источника, а поля визита — только через якорный
             # шлюз (см. докстринг): совпавшая «Дата выезда» доказывает, что файл
             # видел результат бота, и отличия — офисная правка, а не старая копия.
-            row0 = existing.get(cid)
             if row0 is not None and row0["bot_visit_data"]:
                 merged = _merged_visit(row0)
                 if merged:
@@ -4020,6 +4205,10 @@ def import_grid(
                 # остаются эхом снимка. Довизитная строка эха не даёт — там, где
                 # бот ещё не был, эти поля пусты.
                 echo_hits = 0
+                for key, raw_value in office_echo_values.items():
+                    sval = str(raw_value or "").strip()
+                    if sval and sval == str(merged.get(key) or ""):
+                        echo_hits += 1
                 for key, raw_value in candidates.items():
                     sval = str(raw_value or "").strip()
                     if not sval:
@@ -4125,6 +4314,7 @@ def import_grid(
                 if rejected:
                     protected_cids.add(cid)
                     report["protected_cells"] += rejected
+            data.update(comment_updates)
             keys = ", ".join(f'"{k}"' for k in data)
             qs = ", ".join("?" for _ in data)
             updates = ", ".join(f'"{k}"=excluded."{k}"' for k in data if k != "contract_id")
@@ -4141,6 +4331,17 @@ def import_grid(
         report["office_contracts"] = len(office_cids)        # договоры, не строки
         report["protected_contracts"] = len(protected_cids)
         report["isolated_call_contracts"] = len(isolated_call_cids)
+        comment_effect_rows.sort(
+            key=lambda item: (item["contract_id"], item["field"])
+        )
+        report["comment_effect_digest"] = hashlib.sha256(
+            json.dumps(
+                comment_effect_rows,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         # Считаем по итогу разбора всего файла, а не построчно: у одного договора в
         # реестре бывает несколько строк, и владелец может стоять в любой из них.
         report["no_responsible"] = sum(1 for owner in owners.values() if not owner)
@@ -4194,7 +4395,12 @@ def import_grid(
             and report["auto_unassigned_digest"]
             != expected_auto_unassigned_digest
         )
-        if stale_count or stale_digest:
+        stale_comment_digest = (
+            expected_comment_effect_digest is not None
+            and report["comment_effect_digest"]
+            != expected_comment_effect_digest
+        )
+        if stale_count or stale_digest or stale_comment_digest:
             conn.rollback()
             report["blocked"] = True
             report["preview_stale"] = True
@@ -4202,10 +4408,14 @@ def import_grid(
             report["expected_auto_unassigned_digest"] = (
                 expected_auto_unassigned_digest
             )
+            report["expected_comment_effect_digest"] = (
+                expected_comment_effect_digest
+            )
             report["error"] = (
                 "импорт заблокирован: после предпросмотра состояние БД "
-                "изменилось; ожидаемое множество снятий больше не совпадает с "
-                "фактическим. Сделайте новый предпросмотр"
+                "изменилось; ожидаемые множества снятий/замен комментариев "
+                "больше не совпадают с фактическими. Сделайте новый "
+                "предпросмотр"
             )
             return report
         if preview_only:

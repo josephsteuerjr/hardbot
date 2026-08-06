@@ -108,6 +108,18 @@ def test_form_snapshot_enrichment_and_import_semantics_cannot_drift_apart():
         contract.IMPORT_SOURCE_PUBLISHED_MASTER
     )
     assert tuple(enrich.VISIT_KEYS) == contract.ENRICHMENT_SOURCE_KEYS
+    historical = next(
+        field for field in db.export_schema()
+        if field["key"] == "historical_visit_comment"
+    )
+    assert historical["title"] == "Историчный комментарий выезда"
+    assert historical["source"] == "сх"
+    assert historical["title"] not in contract.WORKBOOK_ALLOWED_IGNORED_HEADERS
+    assert historical["key"] not in contract.FORM_TEXT_KEYS
+    assert historical["key"] not in contract.OFFICE_DIRECT_EDIT_KEYS
+    assert historical["key"] not in contract.ENRICHMENT_SOURCE_KEYS
+    assert "visit_comment" not in contract.OFFICE_DIRECT_EDIT_KEYS
+    assert contract.OFFICE_ECHO_ONLY_KEYS == ("visit_comment",)
 
     rules = {
         source: (target, merge)

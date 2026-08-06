@@ -226,10 +226,10 @@ def test_full_registry_is_an_explicit_flag_not_inferred_from_source_kind():
         imp_full_var = _BoolVar(False)
 
     probe = Probe()
-    assert pult_ui.Pult._imp_signature(probe)[-1] is False
+    assert pult_ui.Pult._imp_signature(probe)[2] is False
 
     probe.imp_full_var = _BoolVar(True)
-    assert pult_ui.Pult._imp_signature(probe)[-1] is True
+    assert pult_ui.Pult._imp_signature(probe)[2] is True
 
 
 def test_import_employee_list_is_union_of_file_and_database():
@@ -330,6 +330,8 @@ def test_pult_previews_before_apply_and_reuses_the_exact_request():
             }
             self.imp_selected = {"егор"}
             self.imp_full_var = _BoolVar(True)
+            self.imp_replace_current_comments_var = _BoolVar(True)
+            self.imp_import_historical_comments_var = _BoolVar(True)
             self.imp_kvs = _KV()
             self.imp_warn = _Widget()
             self.imp_apply_btn = _Widget()
@@ -361,6 +363,11 @@ def test_pult_previews_before_apply_and_reuses_the_exact_request():
                     "auto_unassigned": 3,
                     "auto_unassigned_by_employee": {"Егор": 3},
                     "auto_unassigned_digest": "e" * 64,
+                    "replace_current_visit_comments": True,
+                    "import_historical_visit_comments": True,
+                    "current_comments_replaced": 1,
+                    "historical_comments_imported": 1,
+                    "comment_effect_digest": "c" * 64,
                 }
             if path == "/admin/import/authorize.json":
                 return {"ok": True}
@@ -417,9 +424,12 @@ def test_pult_previews_before_apply_and_reuses_the_exact_request():
     preview_request = probe.calls[0][2]
     assert preview_request["full_registry"] is True
     assert preview_request["authoritative_employees"] == ["Егор"]
+    assert preview_request["replace_current_visit_comments"] is True
+    assert preview_request["import_historical_visit_comments"] is True
     assert "expected_auto_unassigned" not in preview_request
     assert probe._imp_preview_body["expected_auto_unassigned"] == 3
     assert probe._imp_preview_body["expected_auto_unassigned_digest"] == "e" * 64
+    assert probe._imp_preview_body["expected_comment_effect_digest"] == "c" * 64
     assert probe.imp_apply_btn.options["state"] == "normal"
     assert "снять 3" in probe.imp_apply_btn.options["text"]
 
@@ -435,4 +445,5 @@ def test_pult_previews_before_apply_and_reuses_the_exact_request():
     assert apply_request["sheets"] == preview_request["sheets"]
     assert apply_request["expected_auto_unassigned"] == 3
     assert apply_request["expected_auto_unassigned_digest"] == "e" * 64
+    assert apply_request["expected_comment_effect_digest"] == "c" * 64
     assert probe.refreshed is True

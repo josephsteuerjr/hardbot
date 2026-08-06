@@ -24,7 +24,8 @@ def test_blocked_imports_return_409_before_geocoding(monkeypatch):
         "import_grid",
         lambda grid, *, source_kind, source_proof, require_source_proof,
         full_registry, authoritative_employees, expected_auto_unassigned,
-        expected_auto_unassigned_digest: (
+        expected_auto_unassigned_digest, replace_current_visit_comments,
+        import_historical_visit_comments, expected_comment_effect_digest: (
             blocked_grid.copy()
         ),
     )
@@ -90,7 +91,8 @@ def test_consumed_import_replay_never_runs_post_import_mutator(monkeypatch):
         "import_grid",
         lambda grid, *, source_kind, source_proof, require_source_proof,
         full_registry, authoritative_employees, expected_auto_unassigned,
-        expected_auto_unassigned_digest: {
+        expected_auto_unassigned_digest, replace_current_visit_comments,
+        import_historical_visit_comments, expected_comment_effect_digest: {
             "blocked": False,
             "idempotent_replay": True,
             "source_proof_digest": "a" * 64,
@@ -141,6 +143,8 @@ def test_import_preview_is_read_only_and_carries_explicit_full_flag(monkeypatch)
         full_registry,
         authoritative_employees,
         preview_only,
+        replace_current_visit_comments,
+        import_historical_visit_comments,
     ):
         calls.append(
             {
@@ -151,6 +155,8 @@ def test_import_preview_is_read_only_and_carries_explicit_full_flag(monkeypatch)
                 "full_registry": full_registry,
                 "authoritative_employees": authoritative_employees,
                 "preview_only": preview_only,
+                "replace_current_visit_comments": replace_current_visit_comments,
+                "import_historical_visit_comments": import_historical_visit_comments,
             }
         )
         return {
@@ -180,6 +186,8 @@ def test_import_preview_is_read_only_and_carries_explicit_full_flag(monkeypatch)
                     "sheets": [{"name": "Портфели", "grid": [["id"]]}],
                     "full_registry": True,
                     "authoritative_employees": ["Егор"],
+                    "replace_current_visit_comments": True,
+                    "import_historical_visit_comments": False,
                 },
                 headers={"X-Admin-Key": "test-admin-key"},
             )
@@ -198,8 +206,38 @@ def test_import_preview_is_read_only_and_carries_explicit_full_flag(monkeypatch)
             "full_registry": True,
             "authoritative_employees": ["Егор"],
             "preview_only": True,
+            "replace_current_visit_comments": True,
+            "import_historical_visit_comments": False,
         }
     ]
+
+
+def test_comment_writes_require_preview_digest_at_http_boundary(monkeypatch):
+    monkeypatch.setenv("ADMIN_API_KEY", "test-admin-key")
+
+    async def scenario():
+        client = TestClient(TestServer(web.build_app(None)))
+        await client.start_server()
+        try:
+            response = await client.post(
+                "/admin/import.json",
+                json={
+                    "data_exchange_contract": web.DATA_EXCHANGE_CONTRACT,
+                    "source_kind": "published_master",
+                    "source_proof": {"test": "proof"},
+                    "sheets": [{"name": "Портфели", "grid": [["id"]]}],
+                    "replace_current_visit_comments": True,
+                },
+                headers={"X-Admin-Key": "test-admin-key"},
+            )
+            assert response.status == 409
+            payload = await response.json()
+            assert payload["blocked"] is True
+            assert "предпросмотр" in payload["error"]
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
 
 
 def test_legacy_admin_reset_cannot_bypass_clearance(monkeypatch):

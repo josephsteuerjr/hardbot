@@ -57,12 +57,12 @@ def test_legacy_call_comment_remapped(monkeypatch):
     assert not (c["call_comment"] or "")
 
 
-def test_unfinished_server_draft_does_not_prefill_visit_form(monkeypatch):
-    """Черновик хранится локально, а raw clients не становится form-prefill."""
+def test_unfinished_server_comment_prefills_for_continuation(monkeypatch):
+    """Живой комментарий можно продолжить после закрытия карточки/на другом устройстве."""
     db.init_db()
     _seed("VC-3")
     _save({"rep": "VC-3", "values": {"visit_comment": "тест"}}, monkeypatch)
     data = web._person_full("VC-3", "ru")
     assert db.get_client("VC-3")["visit_comment"] == "тест"
-    assert data["visit_comment"] == ""
+    assert data["visit_comment"] == "тест"
     assert "call_comment" in data
