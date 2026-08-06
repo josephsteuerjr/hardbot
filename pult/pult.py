@@ -848,8 +848,8 @@ class Pult(tk.Tk):
         self.imp_full_var = tk.BooleanVar(value=False)
         self.imp_full_check = tk.Checkbutton(
             imp.inner,
-            text=("Это полный реестр — снять с портфелей договоры, которых "
-                  "нет в файле"),
+            text=("Для выбранных сотрудников это полный срез — снять у них договоры, "
+                  "которых нет в выбранных строках файла"),
             variable=self.imp_full_var,
             command=self._imp_full_toggle,
             bg=CARD, fg=WARN, activebackground=CARD, selectcolor=CARD,
@@ -1034,12 +1034,6 @@ class Pult(tk.Tk):
             self.toast("Отметь хотя бы одного сотрудника", err=True)
             return
         full_registry = bool(self.imp_full_var.get())
-        if full_registry and not self._imp_selection_is_whole():
-            self.toast(
-                "Полный реестр нельзя совместить со срезом сотрудников",
-                err=True,
-            )
-            return
         signature = self._imp_signature()
         self._invalidate_import_preview(clear_report=True)
         self.toast(f"Проверяю импорт {Path(book['path']).name}: {len(picked)} сотр…")
@@ -1082,8 +1076,10 @@ class Pult(tk.Tk):
             if full_registry:
                 notes.insert(
                     0,
-                    "ПОЛНЫЙ РЕЕСТР: после применения будет снято договоров: "
-                    f"{fmt_n(d.get('auto_unassigned'))}.",
+                    "ПОЛНЫЙ СРЕЗ ВЫБРАННЫХ: у выбранных сотрудников после "
+                    "применения будет снято договоров: "
+                    f"{fmt_n(d.get('auto_unassigned'))}. Остальные сотрудники "
+                    "не затрагиваются.",
                 )
             else:
                 notes.insert(
@@ -1204,27 +1200,21 @@ class Pult(tk.Tk):
             self.imp_kvs.set_pairs([])
             self.imp_warn.configure(text="")
 
-    def _imp_selection_is_whole(self) -> bool:
-        all_emps = {e["key"] for e in (self.imp_book.get("employees") or [])}
-        return bool(all_emps) and self.imp_selected == all_emps
-
     def _imp_signature(self) -> tuple:
         book = self.imp_book or {}
         full = bool(self.imp_full_var.get()) if hasattr(self, "imp_full_var") else False
         return (book.get("file_sha256"), tuple(sorted(self.imp_selected)), full)
 
     def _imp_full_toggle(self):
-        if self.imp_full_var.get() and not self._imp_selection_is_whole():
-            self.imp_full_var.set(False)
-            self._invalidate_import_preview(clear_report=True)
+        self._invalidate_import_preview(clear_report=True)
+        if self.imp_full_var.get():
             message = (
-                "Режим полного реестра доступен только когда выбраны все строки "
-                "файла. Даже тогда полнота остаётся отдельным решением оператора."
+                "ПОЛНЫЙ СРЕЗ: у выбранных сотрудников будут сняты договоры, "
+                "которых нет среди их выбранных строк. Остальные сотрудники "
+                "не затрагиваются."
             )
             self.imp_warn.configure(text=message)
-            self.toast("Полный режим не включён", err=True)
-            return
-        self._invalidate_import_preview(clear_report=True)
+            self.toast("Полный режим включён для выбранных сотрудников")
         self._imp_count()
 
     def pick_registry(self):
@@ -1301,9 +1291,6 @@ class Pult(tk.Tk):
 
     def _imp_toggle(self, name, on):
         (self.imp_selected.add if on else self.imp_selected.discard)(name)
-        if self.imp_full_var.get() and not self._imp_selection_is_whole():
-            self.imp_full_var.set(False)
-            self.toast("Полный режим снят: выбран срез сотрудников", err=True)
         self._invalidate_import_preview(clear_report=True)
         self._imp_count()
 
@@ -1312,8 +1299,6 @@ class Pult(tk.Tk):
                              if on else set())
         for key, var in (self._imp_vars or {}).items():
             var.set(key in self.imp_selected)
-        if self.imp_full_var.get() and not self._imp_selection_is_whole():
-            self.imp_full_var.set(False)
         self._invalidate_import_preview(clear_report=True)
         self._imp_count()
 
@@ -1321,8 +1306,9 @@ class Pult(tk.Tk):
         book = self.imp_book or {}
         rows = sum(e["count"] for e in book.get("employees") or []
                    if e["key"] in self.imp_selected)
+        mode = "полного среза" if self.imp_full_var.get() else "выбранных"
         self.imp_go_btn.configure(
-            text=(f"Предпросмотр выбранных ({len(self.imp_selected)} чел · "
+            text=(f"Предпросмотр {mode} ({len(self.imp_selected)} чел · "
                   f"{rows} дог.)"),
             state="normal" if self.imp_selected else "disabled")
 
@@ -1370,10 +1356,10 @@ class Pult(tk.Tk):
         """Книга + отмеченные сотрудники → (source_kind, proof, sheets).
 
         Весь файл целиком и с receipt'ом — это `published_master`, боевой путь.
-        Как только выбраны НЕ все сотрудники, файл перестаёт быть опубликованным
-        мастером: строки режутся, и грузить это можно только как утверждённое
-        подмножество со своим scope. Название вида источника — не косметика: от
-        него зависит, что сервер сверяет и что попадёт в аудит.
+        Как только выбраны НЕ все сотрудники, строки режутся, и файл грузится как
+        утверждённое подмножество со своим scope. Флаг полного среза на эту нарезку
+        не влияет: сервер использует его после проверки proof, чтобы снять только
+        отсутствующие договоры сотрудников из exact scope.
         """
         import exchange_contract as contract
         import limited_test_import as lti
