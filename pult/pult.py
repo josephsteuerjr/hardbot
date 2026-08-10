@@ -76,7 +76,7 @@ except Exception as _exc:                              # noqa: BLE001
            + traceback.format_exc()[-1200:])
 
 # Актуальный инстанс — hardbot2 (свежий код сервера). Ключ — X-Admin-Key.
-DEFAULT_URL = "https://hardbot2.166.88.185.90.nip.io"
+DEFAULT_URL = "https://hardbot2.209.222.251.112.nip.io"
 DEFAULT_KEY = ""
 IMPORT_SOURCE_PUBLISHED_MASTER = enrich.IMPORT_SOURCE_PUBLISHED_MASTER
 IMPORT_SOURCE_TEST_SUBSET = "test_subset"

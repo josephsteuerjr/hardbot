@@ -54,7 +54,7 @@ import razbros
 
 APP_DIR = Path(__file__).resolve().parent
 SETTINGS_PATH = APP_DIR / "настройки пульта.json"
-DEFAULT_URL = "https://hardbot2.166.88.185.90.nip.io"
+DEFAULT_URL = "https://hardbot2.209.222.251.112.nip.io"
 FORMAT_VERSION = 1
 SUPPORTED_EXTS = (".xlsb", ".xlsm", ".xlsx", ".xls")
 BACKUP_MARKER = " (до обогащения "
