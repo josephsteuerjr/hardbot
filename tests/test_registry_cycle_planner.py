@@ -640,18 +640,23 @@ def test_literal_date_string_is_not_equal_to_typed_excel_date():
     assert any(issue.code == "initial_master_conflicts" for issue in plan.issues)
 
 
-def test_new_empty_portfolio_uses_manifest_owner_and_remains_empty():
+def test_empty_portfolio_without_owner_is_skipped_not_guessed():
+    """Пустая книга не получает владельца по имени файла.
+
+    Прежде владелец брался из подсказки манифеста, и пустой портфель уезжал
+    сотруднику, чьим именем названа папка. Теперь владелец читается только
+    из самой книги: пустую пропускаем и отмечаем в отчёте, но работу
+    не останавливаем — новый сотрудник заводится именно так.
+    """
     master = _book("master.xlsb", [])
     personal = _book("Иванов Иван.xlsb", [])
 
     plan = build_sync_plan(master, [(_entry(), personal)], _fields())
 
     assert not plan.blocked
-    assert len(plan.projections) == 1
-    assert plan.projections[0].responsible == "Иванов Иван"
-    assert plan.projections[0].rows == ()
+    assert plan.projections == []
     assert any(
-        issue.code == "empty_personal_projection"
+        issue.code == "empty_personal_without_responsible_skipped"
         and issue.severity == "info"
         for issue in plan.issues
     )

@@ -485,10 +485,18 @@ def test_distribution_volume_limit_blocks_plan(monkeypatch, tmp_path):
     )
 
 
-def test_manifest_owner_mismatch_blocks_misplaced_book(
+def test_folder_name_does_not_decide_the_owner_of_the_book(
     monkeypatch,
     tmp_path,
 ):
+    """Книга в чужой папке больше не блокирует раздачу — и не уводит строки.
+
+    Прежде совпадение имени папки с ответственным было условием раздачи,
+    и переложенная книга останавливала работу. Теперь имя папки не участвует
+    вовсе: владелец берётся из колонки «ответственный Сотрудник» внутри книги,
+    поэтому строки уезжают тому, кто в ней записан, а не тому, чьим именем
+    названа папка.
+    """
     plan = _run_plan(
         monkeypatch,
         tmp_path,
@@ -498,9 +506,8 @@ def test_manifest_owner_mismatch_blocks_misplaced_book(
         entry_employee="Петров Пётр",
     )
 
-    assert plan.blocked
-    assert not plan.rows
-    assert any(
+    assert not plan.blocked
+    assert not any(
         issue.code == "distribution_manifest_owner_mismatch"
         for issue in plan.issues
     )

@@ -342,8 +342,10 @@ def test_pult_previews_before_apply_and_reuses_the_exact_request():
             self.toasts = []
             self.refreshed = False
 
-        def _prepare_import(self, _book, _picked, *, full_registry=False):
+        def _prepare_import(self, _book, _picked, *, full_registry=False,
+                            force_test_subset=False):
             assert full_registry is True
+            assert force_test_subset is False
             return {
                 "source_kind": pult_ui.IMPORT_SOURCE_PUBLISHED_MASTER,
                 "source_proof": {"proof": "exact"},

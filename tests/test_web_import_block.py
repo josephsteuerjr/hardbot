@@ -22,10 +22,10 @@ def test_blocked_imports_return_409_before_geocoding(monkeypatch):
     monkeypatch.setattr(
         db,
         "import_grid",
+        # **_ — ожидания импорта (сверки счётчиков и отпечатков) растут;
+        # этот тест проверяет границу HTTP, а не набор аргументов ядра.
         lambda grid, *, source_kind, source_proof, require_source_proof,
-        full_registry, authoritative_employees, expected_auto_unassigned,
-        expected_auto_unassigned_digest, replace_current_visit_comments,
-        import_historical_visit_comments, expected_comment_effect_digest: (
+        full_registry, authoritative_employees, **_: (
             blocked_grid.copy()
         ),
     )
@@ -90,9 +90,7 @@ def test_consumed_import_replay_never_runs_post_import_mutator(monkeypatch):
         db,
         "import_grid",
         lambda grid, *, source_kind, source_proof, require_source_proof,
-        full_registry, authoritative_employees, expected_auto_unassigned,
-        expected_auto_unassigned_digest, replace_current_visit_comments,
-        import_historical_visit_comments, expected_comment_effect_digest: {
+        full_registry, authoritative_employees, **_: {
             "blocked": False,
             "idempotent_replay": True,
             "source_proof_digest": "a" * 64,
@@ -145,6 +143,7 @@ def test_import_preview_is_read_only_and_carries_explicit_full_flag(monkeypatch)
         preview_only,
         replace_current_visit_comments,
         import_historical_visit_comments,
+        **rest,
     ):
         calls.append(
             {
@@ -157,6 +156,7 @@ def test_import_preview_is_read_only_and_carries_explicit_full_flag(monkeypatch)
                 "preview_only": preview_only,
                 "replace_current_visit_comments": replace_current_visit_comments,
                 "import_historical_visit_comments": import_historical_visit_comments,
+                **rest,
             }
         )
         return {
@@ -208,6 +208,9 @@ def test_import_preview_is_read_only_and_carries_explicit_full_flag(monkeypatch)
             "preview_only": True,
             "replace_current_visit_comments": True,
             "import_historical_visit_comments": False,
+            # Предпросмотр не восстанавливает откреплённое вручную:
+            # это запись, а предпросмотр обязан быть без записи.
+            "restore_manual_unassigned": False,
         }
     ]
 

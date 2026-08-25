@@ -40,24 +40,28 @@ def test_default_configuration_is_complete_and_renderable():
     )
 
 
-def test_primary_groups_and_optional_hard_gph_are_config_driven():
-    bundle = load_config_bundle()
-    enabled = {
-        (root.country, group.name, group.profile, group.required)
-        for root in bundle.app.portfolio_roots
-        for group in root.groups
-        if group.enabled
-    }
+def test_groups_are_not_configured_and_layout_rules_are_explicit():
+    """Группы под корнем больше не перечисляются в настройках.
 
-    assert ("Таджикистан", "Душанбе", "hard", True) in enabled
-    assert ("Таджикистан", "Худжанд", "hard", True) in enabled
-    assert ("Узбекистан", "Ташкент", "hard", True) in enabled
-    assert ("Узбекистан", "Самарканд", "hard", True) in enabled
-    assert ("Таджикистан", "Soft", "soft", True) in enabled
-    assert ("Узбекистан", "Soft", "soft", True) in enabled
-    assert ("Таджикистан", "ГПХ Агент выезд", "hard", False) in enabled
-    assert ("Узбекистан", "ГПХ Агент выезд", "hard", True) in enabled
-    assert ("Узбекистан", "Андижан", "hard", False) not in enabled
+    Прежде каждая группа задавалась явно с профилем и признаком обязательности,
+    и незнакомая папка останавливала работу. Теперь участвуют все папки, кроме
+    архивных, а профиль книги определяется по её столбцам. Настройки должны
+    описывать только корни и правила отсева — это здесь и закреплено.
+    """
+    app = load_config_bundle().app
+
+    assert app.group_discovery_mode == "all_except_ignored"
+    assert {root.country for root in app.portfolio_roots} == {
+        "Таджикистан",
+        "Узбекистан",
+    }
+    # Ни одна группа не перечислена: перечисление в этом режиме запрещено.
+    assert all(root.groups == () for root in app.portfolio_roots)
+
+    assert app.portfolio_layout == "root/group/employee/*.xlsb"
+    assert app.active_extensions == (".xlsb",)
+    assert app.ignored_directory_prefixes == ("архив", "!архив")
+    assert app.backup_name_prefixes == ("~", "копия")
 
 
 def test_field_semantics_are_explicit_and_safe():

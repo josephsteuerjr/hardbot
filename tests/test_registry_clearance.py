@@ -265,6 +265,12 @@ def _plan_payload(snapshot_path: Path) -> Path:
                 "entry": personal["entry"],
                 "responsible": OWNER,
                 "columns": 1,
+                # Схема проекции подписывается целиком: заголовки, служебная
+                # строка типов и добавленные справа столбцы входят в неё,
+                # чтобы допуск не подтвердил план с другой геометрией книги.
+                "headers": ["Номер КД / ID"],
+                "type_tags": ["сх"],
+                "added_columns": [],
                 "rows": 1,
                 "preserved_cells": 0,
                 "employee_owned_preserved_cells": 0,
