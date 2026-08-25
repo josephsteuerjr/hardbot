@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from pathlib import Path
 
 from .config import ConfigBundle, GroupConfig
 from .models import DiscoveryReport, Issue, ManifestEntry
+from .profile_detection import WORKBOOK_PROFILE
 
 
 _KNOWN_EXCEL_WORKBOOK_EXTENSIONS = frozenset({
@@ -16,22 +16,25 @@ _KNOWN_EXCEL_WORKBOOK_EXTENSIONS = frozenset({
     ".xlsm",
     ".xlsb",
 })
+_AUDIT_MODES = frozenset({"direct", "deep"})
 
 
 def _entry_id(path: Path) -> str:
     return hashlib.sha256(str(path).casefold().encode("utf-8")).hexdigest()[:16]
 
 
-def _profile_for(path: Path, group: GroupConfig, bundle: ConfigBundle) -> str:
-    profile = group.profile
-    for rule in bundle.app.profile_rules:
-        if re.search(rule["filename_regex"], path.name, flags=re.IGNORECASE):
-            profile = rule["profile"]
-            break
-    return profile
+def _profile_for(group: GroupConfig, bundle: ConfigBundle) -> str:
+    # Names identify locations only.  The workbook profile is inferred from
+    # its columns after a stable copy is made, never from folder/file labels.
+    if bundle.app.profile_detection_mode == "workbook_columns":
+        return WORKBOOK_PROFILE
+    return group.profile
 
 
-def _ignored_directory(name: str, prefixes: tuple[str, ...]) -> bool:
+def _ignored_directory(
+    name: str,
+    prefixes: tuple[str, ...],
+) -> bool:
     folded = name.strip().casefold()
     return any(folded.startswith(prefix) for prefix in prefixes)
 
@@ -39,41 +42,36 @@ def _ignored_directory(name: str, prefixes: tuple[str, ...]) -> bool:
 def _is_active_file(
     path: Path,
     extensions: tuple[str, ...],
-    backup_pattern: re.Pattern[str],
+    backup_prefixes: tuple[str, ...],
 ) -> bool:
     return bool(
         path.is_file()
         and path.suffix.casefold() in extensions
-        and not _ignored_workbook_name(path, backup_pattern)
+        and not _ignored_workbook_name(path, backup_prefixes)
     )
 
 
 def _ignored_workbook_name(
     path: Path,
-    backup_pattern: re.Pattern[str],
+    backup_prefixes: tuple[str, ...],
 ) -> bool:
-    if path.name.startswith("~") or backup_pattern.search(path.name):
-        return True
-    # The configured historical-backup regex may mention the supported .xlsb
-    # suffix explicitly. Apply that same naming rule to anomaly formats rather
-    # than turning an old .xlsx/.xlsm/.xls backup into a false active error.
-    if path.suffix.casefold() in _KNOWN_EXCEL_WORKBOOK_EXTENSIONS:
-        canonical_name = path.with_suffix(".xlsb").name
-        return bool(backup_pattern.search(canonical_name))
-    return False
+    folded = path.name.casefold()
+    return any(folded.startswith(prefix) for prefix in backup_prefixes)
 
 
 def _is_unsupported_workbook(
     path: Path,
     bundle: ConfigBundle,
-    backup_pattern: re.Pattern[str],
+    backup_prefixes: tuple[str, ...],
 ) -> bool:
+    if bundle.app.unsupported_workbook_policy == "ignore":
+        return False
     suffix = path.suffix.casefold()
     return bool(
         path.is_file()
         and suffix in _KNOWN_EXCEL_WORKBOOK_EXTENSIONS
         and suffix not in bundle.app.active_extensions
-        and not _ignored_workbook_name(path, backup_pattern)
+        and not _ignored_workbook_name(path, backup_prefixes)
     )
 
 
@@ -89,7 +87,7 @@ def _remember_unreadable(
 def _active_files(
     folder: Path,
     extensions: tuple[str, ...],
-    backup_pattern: re.Pattern[str],
+    backup_prefixes: tuple[str, ...],
     unreadable: dict[Path, str] | None = None,
 ) -> list[Path]:
     files: list[Path] = []
@@ -99,7 +97,7 @@ def _active_files(
         _remember_unreadable(unreadable, folder, exc)
         return files
     for path in children:
-        if _is_active_file(path, extensions, backup_pattern):
+        if _is_active_file(path, extensions, backup_prefixes):
             files.append(path)
     return sorted(files, key=lambda value: value.name.casefold())
 
@@ -107,7 +105,7 @@ def _active_files(
 def _unsupported_files(
     folder: Path,
     bundle: ConfigBundle,
-    backup_pattern: re.Pattern[str],
+    backup_prefixes: tuple[str, ...],
     unreadable: dict[Path, str] | None = None,
 ) -> list[Path]:
     try:
@@ -119,7 +117,7 @@ def _unsupported_files(
         (
             path
             for path in children
-            if _is_unsupported_workbook(path, bundle, backup_pattern)
+            if _is_unsupported_workbook(path, bundle, backup_prefixes)
         ),
         key=lambda value: value.name.casefold(),
     )
@@ -128,7 +126,7 @@ def _unsupported_files(
 def _all_active_files(
     folder: Path,
     bundle: ConfigBundle,
-    backup_pattern: re.Pattern[str],
+    backup_prefixes: tuple[str, ...],
     unreadable: dict[Path, str] | None = None,
 ) -> list[Path]:
     """Audit a subtree without importing anything from unexpected depths."""
@@ -152,7 +150,7 @@ def _all_active_files(
             if _is_active_file(
                 path,
                 bundle.app.active_extensions,
-                backup_pattern,
+                backup_prefixes,
             ):
                 files.append(path)
     return sorted(files, key=lambda value: str(value).casefold())
@@ -161,7 +159,7 @@ def _all_active_files(
 def _all_unsupported_files(
     folder: Path,
     bundle: ConfigBundle,
-    backup_pattern: re.Pattern[str],
+    backup_prefixes: tuple[str, ...],
     unreadable: dict[Path, str] | None = None,
 ) -> list[Path]:
     files: list[Path] = []
@@ -181,7 +179,7 @@ def _all_unsupported_files(
                 ):
                     pending.append(path)
                 continue
-            if _is_unsupported_workbook(path, bundle, backup_pattern):
+            if _is_unsupported_workbook(path, bundle, backup_prefixes):
                 files.append(path)
     return sorted(files, key=lambda value: str(value).casefold())
 
@@ -189,7 +187,7 @@ def _all_unsupported_files(
 def _nested_active_files(
     employee_folder: Path,
     bundle: ConfigBundle,
-    backup_pattern: re.Pattern[str],
+    backup_prefixes: tuple[str, ...],
     unreadable: dict[Path, str] | None = None,
 ) -> list[Path]:
     files: list[Path] = []
@@ -210,7 +208,7 @@ def _nested_active_files(
                 _all_active_files(
                     path,
                     bundle,
-                    backup_pattern,
+                    backup_prefixes,
                     unreadable,
                 )
             )
@@ -220,7 +218,7 @@ def _nested_active_files(
 def _nested_unsupported_files(
     employee_folder: Path,
     bundle: ConfigBundle,
-    backup_pattern: re.Pattern[str],
+    backup_prefixes: tuple[str, ...],
     unreadable: dict[Path, str] | None = None,
 ) -> list[Path]:
     files: list[Path] = []
@@ -241,7 +239,7 @@ def _nested_unsupported_files(
                 _all_unsupported_files(
                     path,
                     bundle,
-                    backup_pattern,
+                    backup_prefixes,
                     unreadable,
                 )
             )
@@ -276,9 +274,9 @@ def _report_unsupported_workbook(
 ) -> None:
     report.issues.append(
         Issue(
-            "error",
+            bundle.app.unsupported_workbook_policy,
             "unsupported_active_workbook_format",
-            "активная Excel-книга имеет неподдерживаемый формат",
+            "файл пропущен: источниками служат только .xlsb",
             {
                 "path": str(path),
                 "extension": path.suffix.casefold(),
@@ -332,16 +330,69 @@ def _employee_audit_incomplete(
 def _group_has_active_files(
     group: Path,
     bundle: ConfigBundle,
-    backup_pattern: re.Pattern[str],
+    backup_prefixes: tuple[str, ...],
     unreadable: dict[Path, str] | None = None,
 ) -> bool:
     return bool(
         _all_active_files(
             group,
             bundle,
-            backup_pattern,
+            backup_prefixes,
             unreadable,
         )
+    )
+
+
+def _direct_group_workbooks(
+    group: Path,
+    bundle: ConfigBundle,
+    backup_prefixes: tuple[str, ...],
+    unreadable: dict[Path, str] | None = None,
+) -> tuple[list[Path], list[Path]]:
+    """Find only workbooks that fit ``group/employee/*.xlsb``.
+
+    The operational transfer deliberately does not crawl archive trees below an
+    employee folder. Those files are outside the configured source geometry and
+    made ordinary discovery depend on arbitrary historical folders on the share.
+    """
+    active: list[Path] = []
+    unsupported: list[Path] = []
+    try:
+        children = list(group.iterdir())
+    except OSError as exc:
+        _remember_unreadable(unreadable, group, exc)
+        return active, unsupported
+    for path in children:
+        if path.is_dir():
+            if _ignored_directory(
+                path.name,
+                bundle.app.ignored_directory_prefixes,
+            ):
+                continue
+            active.extend(
+                _active_files(
+                    path,
+                    bundle.app.active_extensions,
+                    backup_prefixes,
+                    unreadable,
+                )
+            )
+            unsupported.extend(
+                _unsupported_files(
+                    path,
+                    bundle,
+                    backup_prefixes,
+                    unreadable,
+                )
+            )
+            continue
+        if _is_active_file(path, bundle.app.active_extensions, backup_prefixes):
+            active.append(path)
+        elif _is_unsupported_workbook(path, bundle, backup_prefixes):
+            unsupported.append(path)
+    return (
+        sorted(active, key=lambda value: str(value).casefold()),
+        sorted(unsupported, key=lambda value: str(value).casefold()),
     )
 
 
@@ -350,8 +401,9 @@ def _scan_group(
     country: str,
     group: GroupConfig,
     bundle: ConfigBundle,
-    backup_pattern: re.Pattern[str],
+    backup_prefixes: tuple[str, ...],
     report: DiscoveryReport,
+    audit_mode: str,
 ) -> None:
     group_path = root / group.name
     label = f"{country} / {group.name}"
@@ -398,51 +450,65 @@ def _scan_group(
         if _is_active_file(
             path,
             bundle.app.active_extensions,
-            backup_pattern,
+            backup_prefixes,
         ):
-            _report_layout_violation(
-                report,
-                bundle,
-                path,
-                reason="active_file_directly_in_group",
-            )
-        elif _is_unsupported_workbook(path, bundle, backup_pattern):
-            _report_unsupported_workbook(report, bundle, path)
+            if group.enabled:
+                _report_layout_violation(
+                    report,
+                    bundle,
+                    path,
+                    reason="active_file_directly_in_group",
+                )
+        elif _is_unsupported_workbook(path, bundle, backup_prefixes):
+            if group.enabled:
+                _report_unsupported_workbook(report, bundle, path)
     for employee_folder in employee_folders:
         for path in _unsupported_files(
             employee_folder,
             bundle,
-            backup_pattern,
+            backup_prefixes,
             unreadable,
         ):
-            _report_unsupported_workbook(report, bundle, path)
-        for path in _nested_active_files(
-            employee_folder,
-            bundle,
-            backup_pattern,
-            unreadable,
-        ):
-            _report_layout_violation(
-                report,
+            if group.enabled:
+                _report_unsupported_workbook(report, bundle, path)
+        if audit_mode == "deep":
+            for path in _nested_active_files(
+                employee_folder,
                 bundle,
-                path,
-                reason="active_file_below_employee",
-            )
-        for path in _nested_unsupported_files(
-            employee_folder,
-            bundle,
-            backup_pattern,
-            unreadable,
-        ):
-            _report_unsupported_workbook(report, bundle, path)
+                backup_prefixes,
+                unreadable,
+            ):
+                _report_layout_violation(
+                    report,
+                    bundle,
+                    path,
+                    reason="active_file_below_employee",
+                )
+            for path in _nested_unsupported_files(
+                employee_folder,
+                bundle,
+                backup_prefixes,
+                unreadable,
+            ):
+                _report_unsupported_workbook(report, bundle, path)
 
     if not group.enabled:
-        if _group_has_active_files(
-            group_path,
-            bundle,
-            backup_pattern,
-            unreadable,
-        ):
+        active_files = (
+            _all_active_files(
+                group_path,
+                bundle,
+                backup_prefixes,
+                unreadable,
+            )
+            if audit_mode == "deep"
+            else _direct_group_workbooks(
+                group_path,
+                bundle,
+                backup_prefixes,
+                unreadable,
+            )[0]
+        )
+        if active_files:
             report.issues.append(
                 Issue(
                     "warning",
@@ -463,7 +529,7 @@ def _scan_group(
         active = _active_files(
             employee_folder,
             bundle.app.active_extensions,
-            backup_pattern,
+            backup_prefixes,
             unreadable,
         )
         if _employee_audit_incomplete(employee_folder, unreadable):
@@ -489,7 +555,7 @@ def _scan_group(
                 )
             )
         for path in active:
-            profile = _profile_for(path, group, bundle)
+            profile = _profile_for(group, bundle)
             report.entries.append(
                 ManifestEntry(
                     entry_id=_entry_id(path),
@@ -506,21 +572,22 @@ def _scan_group(
         unreadable,
         tuple(employee_folders),
     )
-    if empty_folders:
-        report.issues.append(
-            Issue(
-                "info",
-                "empty_employee_folders",
-                f"папки без активного реестра: {label} — {empty_folders}",
-                {"count": empty_folders, "path": str(group_path)},
-            )
-        )
+    # Пустые служебные папки не являются источниками и не засоряют отчёт.
 
 
-def discover(bundle: ConfigBundle) -> DiscoveryReport:
+def discover(
+    bundle: ConfigBundle,
+    *,
+    audit_mode: str | None = None,
+) -> DiscoveryReport:
     """Построить runtime-manifest и вынести любое отклонение в явный отчёт."""
+    selected_audit_mode = (
+        audit_mode or bundle.app.discovery_audit_mode
+    ).strip().casefold()
+    if selected_audit_mode not in _AUDIT_MODES:
+        raise ValueError("audit_mode должен быть 'direct' или 'deep'")
     report = DiscoveryReport()
-    backup_pattern = re.compile(bundle.app.backup_name_regex, re.IGNORECASE)
+    backup_prefixes = bundle.app.backup_name_prefixes
 
     for root_config in bundle.app.portfolio_roots:
         root = Path(bundle.render(root_config.path))
@@ -537,7 +604,7 @@ def discover(bundle: ConfigBundle) -> DiscoveryReport:
         for path in _active_files(
             root,
             bundle.app.active_extensions,
-            backup_pattern,
+            backup_prefixes,
         ):
             _report_layout_violation(
                 report,
@@ -545,7 +612,7 @@ def discover(bundle: ConfigBundle) -> DiscoveryReport:
                 path,
                 reason="active_file_directly_in_root",
             )
-        for path in _unsupported_files(root, bundle, backup_pattern):
+        for path in _unsupported_files(root, bundle, backup_prefixes):
             _report_unsupported_workbook(report, bundle, path)
         configured = {group.name.casefold(): group for group in root_config.groups}
         try:
@@ -575,21 +642,45 @@ def discover(bundle: ConfigBundle) -> DiscoveryReport:
         for group_path in discovered:
             label = f"{root_config.country} / {group_path.name}"
             report.discovered_groups.append(label)
+            if bundle.app.group_discovery_mode == "all_except_ignored":
+                _scan_group(
+                    root,
+                    root_config.country,
+                    GroupConfig(
+                        name=group_path.name,
+                        profile=WORKBOOK_PROFILE,
+                        enabled=True,
+                        required=False,
+                    ),
+                    bundle,
+                    backup_prefixes,
+                    report,
+                    selected_audit_mode,
+                )
+                continue
             if group_path.name.casefold() in configured:
                 continue
             unreadable: dict[Path, str] = {}
-            active_files = _all_active_files(
-                group_path,
-                bundle,
-                backup_pattern,
-                unreadable,
-            )
-            unsupported_files = _all_unsupported_files(
-                group_path,
-                bundle,
-                backup_pattern,
-                unreadable,
-            )
+            if selected_audit_mode == "deep":
+                active_files = _all_active_files(
+                    group_path,
+                    bundle,
+                    backup_prefixes,
+                    unreadable,
+                )
+                unsupported_files = _all_unsupported_files(
+                    group_path,
+                    bundle,
+                    backup_prefixes,
+                    unreadable,
+                )
+            else:
+                active_files, unsupported_files = _direct_group_workbooks(
+                    group_path,
+                    bundle,
+                    backup_prefixes,
+                    unreadable,
+                )
             _report_unreadable_directories(report, unreadable)
             for path in unsupported_files:
                 _report_unsupported_workbook(report, bundle, path)
@@ -616,15 +707,17 @@ def discover(bundle: ConfigBundle) -> DiscoveryReport:
                     )
                 )
 
-        for group in root_config.groups:
-            _scan_group(
-                root,
-                root_config.country,
-                group,
-                bundle,
-                backup_pattern,
-                report,
-            )
+        if bundle.app.group_discovery_mode == "configured":
+            for group in root_config.groups:
+                _scan_group(
+                    root,
+                    root_config.country,
+                    group,
+                    bundle,
+                    backup_prefixes,
+                    report,
+                    selected_audit_mode,
+                )
 
     report.entries.sort(key=lambda entry: str(entry.path).casefold())
     return report

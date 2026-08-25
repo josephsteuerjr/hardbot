@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +47,8 @@ class FieldRule:
     value_type: str = "text"
     master_conflict: str = "require_baseline"
     invalid: str = "error"
+    comparison_type: str | None = None
+    initial_master_values: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,16 +95,6 @@ class PortfolioRoot:
 
 
 @dataclass(frozen=True, slots=True)
-class OwnerDelegation:
-    country: str
-    group: str
-    book_owner: str
-    delegate_folder: str
-    enabled: bool
-    reason: str
-
-
-@dataclass(frozen=True, slots=True)
 class AppConfig:
     schema_version: int
     product_name: str
@@ -110,13 +104,18 @@ class AppConfig:
     month_names: dict[int, str]
     portfolio_roots: tuple[PortfolioRoot, ...]
     portfolio_layout: str
-    backup_name_regex: str
+    group_discovery_mode: str
+    profile_detection_mode: str
+    discovery_audit_mode: str
+    unsupported_workbook_policy: str
+    backup_name_prefixes: tuple[str, ...]
     active_extensions: tuple[str, ...]
     ignored_directory_prefixes: tuple[str, ...]
-    profile_rules: tuple[dict[str, str], ...]
     responsible_aliases: dict[str, str]
-    ownership_delegations: tuple[OwnerDelegation, ...]
     scheduler: dict[str, Any]
+    manual_upward: dict[str, Any]
+    manual_downward: dict[str, Any]
+    manual_ui: dict[str, Any]
     notifications: dict[str, Any]
     safety: dict[str, Any]
 
@@ -185,6 +184,239 @@ def _require(mapping: dict[str, Any], key: str, where: str) -> Any:
     return mapping[key]
 
 
+def _text_values(
+    mapping: Any,
+    where: str,
+    keys: tuple[str, ...],
+) -> dict[str, str]:
+    """Read operator-facing copy without silently accepting blank UI text."""
+    if not isinstance(mapping, dict):
+        raise ConfigurationError(f"{where} должен быть объектом")
+    normalized = dict(mapping)
+    for key in keys:
+        value = str(_require(mapping, key, where)).strip()
+        if not value:
+            raise ConfigurationError(f"{where}.{key} не должен быть пустым")
+        normalized[key] = value
+    return normalized
+
+
+def _parse_manual_ui(raw: Any) -> dict[str, Any]:
+    """Validate the single two-step operator experience from app.json."""
+    if not isinstance(raw, dict):
+        raise ConfigurationError("manual_ui должен быть объектом")
+    ui = dict(raw)
+    ui["window"] = _text_values(
+        raw.get("window"),
+        "manual_ui.window",
+        ("title", "subtitle"),
+    )
+    ui["actions"] = _text_values(
+        raw.get("actions"),
+        "manual_ui.actions",
+        (
+            "check_upward",
+            "check_downward",
+            "retry_upward",
+            "retry_downward",
+            "publish_upward",
+            "publish_downward",
+            "rules",
+            "open_report",
+            "details",
+            "details_hide",
+            "save",
+            "cancel",
+            "add_root",
+            "browse",
+            "remove",
+            "close",
+        ),
+    )
+    ui["sections"] = _text_values(
+        raw.get("sections"),
+        "manual_ui.sections",
+        (
+            "upward",
+            "downward",
+            "status",
+            "summary",
+            "changes",
+            "issues",
+            "details",
+            "rules",
+            "folders",
+        ),
+    )
+    ui["copy"] = _text_values(
+        raw.get("copy"),
+        "manual_ui.copy",
+        (
+            "upward",
+            "downward",
+            "rules",
+            "rules_saved",
+            "no_upward_changes",
+            "no_downward_changes",
+            "payment_scope",
+            "technical",
+            "blocked",
+            "upward_published",
+            "downward_published",
+        ),
+    )
+    ui["states"] = _text_values(
+        raw.get("states"),
+        "manual_ui.states",
+        (
+            "idle",
+            "checking",
+            "ready",
+            "no_changes",
+            "blocked",
+            "publishing",
+            "published",
+            "failed",
+        ),
+    )
+    ui["templates"] = _text_values(
+        raw.get("templates"),
+        "manual_ui.templates",
+        (
+            "source_count",
+            "change_count",
+            "portfolio_change_count",
+            "row_count",
+            "employee_payment_count",
+            "issue_count",
+            "master",
+            "baseline",
+            "progress",
+            "run",
+            "digest",
+            "report",
+            "receipt",
+            "published_files",
+            "issue_group",
+        ),
+    )
+    raw_limits = raw.get("limits")
+    if not isinstance(raw_limits, dict):
+        raise ConfigurationError("manual_ui.limits должен быть объектом")
+    ui["limits"] = {}
+    for key in ("change_preview", "issue_preview", "value_preview_chars"):
+        try:
+            value = int(_require(raw_limits, key, "manual_ui.limits"))
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(
+                f"manual_ui.limits.{key} должен быть целым числом"
+            ) from exc
+        if value < 1:
+            raise ConfigurationError(
+                f"manual_ui.limits.{key} должен быть >= 1"
+            )
+        ui["limits"][key] = value
+    raw_issue_display = raw.get("issue_display")
+    if not isinstance(raw_issue_display, dict):
+        raise ConfigurationError("manual_ui.issue_display должен быть объектом")
+    severities = tuple(
+        str(value).strip().casefold()
+        for value in raw_issue_display.get("severities", [])
+    )
+    if not severities or not set(severities) <= {"error", "warning", "info"}:
+        raise ConfigurationError(
+            "manual_ui.issue_display.severities содержит неизвестный уровень"
+        )
+    hidden_codes_raw = raw_issue_display.get("hidden_codes", [])
+    if not isinstance(hidden_codes_raw, list) or not all(
+        str(value).strip() for value in hidden_codes_raw
+    ):
+        raise ConfigurationError(
+            "manual_ui.issue_display.hidden_codes должен быть списком строк"
+        )
+    ui["issue_display"] = {
+        "severities": severities,
+        "hidden_codes": tuple(str(value).strip() for value in hidden_codes_raw),
+        "group_repeated": bool(raw_issue_display.get("group_repeated", True)),
+    }
+    confirmations = raw.get("confirmations")
+    if not isinstance(confirmations, dict):
+        raise ConfigurationError("manual_ui.confirmations должен быть объектом")
+    ui["confirmations"] = {
+        name: _text_values(
+            confirmations.get(name),
+            f"manual_ui.confirmations.{name}",
+            (
+                "title",
+                "body",
+                "input",
+                "invalid",
+                "cancelled",
+                "success_title",
+            ),
+        )
+        for name in ("upward", "downward")
+    }
+    ui["rules"] = _text_values(
+        raw.get("rules"),
+        "manual_ui.rules",
+        (
+            "country",
+            "root_path",
+            "root_hint",
+            "empty_root",
+        ),
+    )
+    return ui
+
+
+def _parse_manual_archive(raw: Any, where: str, *, layout: bool) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        raise ConfigurationError(f"{where} должен быть объектом")
+    keys = ["directory", "label", "receipt_directory"]
+    if layout:
+        keys.append("layout")
+    parsed = _text_values(raw, where, tuple(keys))
+    return parsed
+
+
+def _parse_manual_operation(raw: Any, where: str, *, layout: bool) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ConfigurationError(f"{where} должен быть объектом")
+    operation = dict(raw)
+    if not bool(operation.get("enabled", False)):
+        raise ConfigurationError(f"{where}.enabled должен быть true")
+    if bool(operation.get("automatic_publish", True)):
+        raise ConfigurationError(f"{where}.automatic_publish должен быть false")
+    if bool(operation.get("automatic_rollover", True)):
+        raise ConfigurationError(f"{where}.automatic_rollover должен быть false")
+    busy_policy = str(_require(operation, "busy_file_policy", where)).strip()
+    if busy_policy != "block":
+        raise ConfigurationError(
+            f"{where}.busy_file_policy должен быть 'block': соседние копии "
+            "и принудительное закрытие в ручном приложении запрещены"
+        )
+    phrase = str(_require(operation, "confirmation_phrase", where)).strip()
+    if not phrase:
+        raise ConfigurationError(f"{where}.confirmation_phrase не должен быть пустым")
+    conflict_policy = str(
+        _require(operation, "conflict_policy", where)
+    ).strip().casefold()
+    if conflict_policy != "employee_wins":
+        raise ConfigurationError(
+            f"{where}.conflict_policy должен быть 'employee_wins'"
+        )
+    operation["busy_file_policy"] = busy_policy
+    operation["confirmation_phrase"] = phrase
+    operation["conflict_policy"] = conflict_policy
+    operation["backup"] = _parse_manual_archive(
+        _require(operation, "backup", where),
+        f"{where}.backup",
+        layout=layout,
+    )
+    return operation
+
+
 def _parse_app(raw: dict[str, Any]) -> AppConfig:
     version = int(_require(raw, "schema_version", "app.json"))
     if version != 2:
@@ -201,6 +433,30 @@ def _parse_app(raw: dict[str, Any]) -> AppConfig:
             "discovery.portfolio_layout должен быть "
             f"{SUPPORTED_PORTFOLIO_LAYOUT!r}, получено {portfolio_layout!r}"
         )
+    group_discovery_mode = str(
+        discovery.get("group_mode", "configured")
+    ).strip().casefold()
+    if group_discovery_mode not in {"configured", "all_except_ignored"}:
+        raise ConfigurationError(
+            "discovery.group_mode должен быть 'configured' или "
+            "'all_except_ignored'"
+        )
+    profile_detection_mode = str(
+        discovery.get("profile_detection", "configured")
+    ).strip().casefold()
+    if profile_detection_mode not in {"configured", "workbook_columns"}:
+        raise ConfigurationError(
+            "discovery.profile_detection должен быть 'configured' или "
+            "'workbook_columns'"
+        )
+    if (
+        group_discovery_mode == "all_except_ignored"
+        and profile_detection_mode != "workbook_columns"
+    ):
+        raise ConfigurationError(
+            "автоматический поиск групп требует "
+            "discovery.profile_detection='workbook_columns'"
+        )
     active_extensions = tuple(
         str(ext).casefold()
         for ext in _require(
@@ -215,6 +471,43 @@ def _parse_app(raw: dict[str, Any]) -> AppConfig:
             f"{SUPPORTED_PORTFOLIO_LAYOUT!r} active_extensions должен "
             "содержать только '.xlsb'"
         )
+    ignored_prefixes_raw = _require(
+        discovery,
+        "ignored_directory_prefixes",
+        "discovery",
+    )
+    if not isinstance(ignored_prefixes_raw, list) or not all(
+        str(prefix).strip() for prefix in ignored_prefixes_raw
+    ):
+        raise ConfigurationError(
+            "discovery.ignored_directory_prefixes должен быть списком непустых строк"
+        )
+    backup_prefixes_raw = _require(
+        discovery,
+        "backup_name_prefixes",
+        "discovery",
+    )
+    if not isinstance(backup_prefixes_raw, list) or not all(
+        str(prefix).strip() for prefix in backup_prefixes_raw
+    ):
+        raise ConfigurationError(
+            "discovery.backup_name_prefixes должен быть списком непустых строк"
+        )
+    discovery_audit_mode = str(
+        _require(discovery, "audit_mode", "discovery")
+    ).strip().casefold()
+    if discovery_audit_mode not in {"direct", "deep"}:
+        raise ConfigurationError(
+            "discovery.audit_mode должен быть 'direct' или 'deep'"
+        )
+    unsupported_workbook_policy = str(
+        _require(discovery, "unsupported_workbook_policy", "discovery")
+    ).strip().casefold()
+    if unsupported_workbook_policy not in {"error", "warning", "ignore"}:
+        raise ConfigurationError(
+            "discovery.unsupported_workbook_policy должен быть 'error' "
+            "'warning' или 'ignore'"
+        )
 
     month_names = {int(key): str(value) for key, value in calendar["month_names"].items()}
     if set(month_names) != set(range(1, 13)):
@@ -222,21 +515,52 @@ def _parse_app(raw: dict[str, Any]) -> AppConfig:
 
     roots: list[PortfolioRoot] = []
     for index, item in enumerate(_require(paths, "portfolio_roots", "app.json")):
-        groups = tuple(
-            GroupConfig(
-                name=str(group["name"]),
-                profile=str(group["profile"]),
-                enabled=bool(group.get("enabled", True)),
-                required=bool(group.get("required", True)),
+        if not isinstance(item, dict):
+            raise ConfigurationError(f"paths.portfolio_roots[{index}] должен быть объектом")
+        country = str(_require(item, "country", f"paths.portfolio_roots[{index}]")).strip()
+        root_path = str(_require(item, "path", f"paths.portfolio_roots[{index}]")).strip()
+        if not country or not root_path:
+            raise ConfigurationError(
+                f"paths.portfolio_roots[{index}] должен содержать страну и путь"
             )
-            for group in item.get("groups", [])
-        )
-        if not groups:
+        group_names: set[str] = set()
+        parsed_groups: list[GroupConfig] = []
+        for group_index, group in enumerate(item.get("groups", [])):
+            where = f"paths.portfolio_roots[{index}].groups[{group_index}]"
+            if not isinstance(group, dict):
+                raise ConfigurationError(f"{where} должен быть объектом")
+            name = str(_require(group, "name", where)).strip()
+            profile = str(_require(group, "profile", where)).strip()
+            if not name or not profile:
+                raise ConfigurationError(
+                    f"{where} должен содержать непустые name и profile"
+                )
+            normalized_name = name.casefold()
+            if normalized_name in group_names:
+                raise ConfigurationError(
+                    f"paths.portfolio_roots[{index}] содержит повторяющуюся группу {name!r}"
+                )
+            group_names.add(normalized_name)
+            parsed_groups.append(
+                GroupConfig(
+                    name=name,
+                    profile=profile,
+                    enabled=bool(group.get("enabled", True)),
+                    required=bool(group.get("required", True)),
+                )
+            )
+        groups = tuple(parsed_groups)
+        if group_discovery_mode == "configured" and not groups:
             raise ConfigurationError(f"paths.portfolio_roots[{index}] не содержит groups")
+        if group_discovery_mode == "all_except_ignored" and groups:
+            raise ConfigurationError(
+                f"paths.portfolio_roots[{index}].groups не используются при "
+                "discovery.group_mode='all_except_ignored'"
+            )
         roots.append(
             PortfolioRoot(
-                country=str(item["country"]),
-                path=str(item["path"]),
+                country=country,
+                path=root_path,
                 groups=groups,
             )
         )
@@ -272,6 +596,74 @@ def _parse_app(raw: dict[str, Any]) -> AppConfig:
             "safety.force_close.unsaved_changes_policy должен быть "
             "'block', 'save_then_close' или 'discard'"
         )
+    try:
+        local_excel_attempts = int(safety.get("local_excel_attempts", 2))
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            "safety.local_excel_attempts должен быть целым числом"
+        ) from exc
+    if not 1 <= local_excel_attempts <= 3:
+        raise ConfigurationError(
+            "safety.local_excel_attempts должен быть от 1 до 3"
+        )
+    safety["local_excel_attempts"] = local_excel_attempts
+
+    manual_upward = _parse_manual_operation(
+        _require(raw, "manual_upward", "app.json"),
+        "manual_upward",
+        layout=False,
+    )
+    forbidden_titles = _require(
+        manual_upward,
+        "forbidden_master_titles",
+        "manual_upward",
+    )
+    forbidden_prefixes = _require(
+        manual_upward,
+        "forbidden_master_title_prefixes",
+        "manual_upward",
+    )
+    if not isinstance(forbidden_titles, list) or not all(
+        str(value).strip() for value in forbidden_titles
+    ):
+        raise ConfigurationError(
+            "manual_upward.forbidden_master_titles должен быть непустым списком"
+        )
+    if not isinstance(forbidden_prefixes, list) or not all(
+        str(value).strip() for value in forbidden_prefixes
+    ):
+        raise ConfigurationError(
+            "manual_upward.forbidden_master_title_prefixes должен быть "
+            "непустым списком"
+        )
+    manual_upward["forbidden_master_titles"] = [
+        str(value).strip() for value in forbidden_titles
+    ]
+    manual_upward["forbidden_master_title_prefixes"] = [
+        str(value).strip() for value in forbidden_prefixes
+    ]
+    manual_downward = _parse_manual_operation(
+        _require(raw, "manual_downward", "app.json"),
+        "manual_downward",
+        layout=True,
+    )
+    for key in (
+        "forbidden_personal_titles",
+        "forbidden_personal_title_prefixes",
+    ):
+        values = _require(manual_downward, key, "manual_downward")
+        if not isinstance(values, list) or not all(
+            str(value).strip() for value in values
+        ):
+            raise ConfigurationError(
+                f"manual_downward.{key} должен быть непустым списком"
+            )
+        manual_downward[key] = [str(value).strip() for value in values]
+    if not bool(manual_downward.get("require_zero_master_changes", False)):
+        raise ConfigurationError(
+            "manual_downward.require_zero_master_changes должен быть true"
+        )
+    manual_ui = _parse_manual_ui(_require(raw, "manual_ui", "app.json"))
 
     return AppConfig(
         schema_version=version,
@@ -282,17 +674,18 @@ def _parse_app(raw: dict[str, Any]) -> AppConfig:
         month_names=month_names,
         portfolio_roots=tuple(roots),
         portfolio_layout=portfolio_layout,
-        backup_name_regex=str(discovery["backup_name_regex"]),
+        group_discovery_mode=group_discovery_mode,
+        profile_detection_mode=profile_detection_mode,
+        discovery_audit_mode=discovery_audit_mode,
+        unsupported_workbook_policy=unsupported_workbook_policy,
+        backup_name_prefixes=tuple(
+            str(prefix).strip().casefold()
+            for prefix in backup_prefixes_raw
+        ),
         active_extensions=active_extensions,
         ignored_directory_prefixes=tuple(
-            str(prefix).casefold() for prefix in discovery["ignored_directory_prefixes"]
-        ),
-        profile_rules=tuple(
-            {
-                "filename_regex": str(rule["filename_regex"]),
-                "profile": str(rule["profile"]),
-            }
-            for rule in discovery.get("profile_rules", [])
+            str(prefix).strip().casefold()
+            for prefix in ignored_prefixes_raw
         ),
         responsible_aliases={
             str(source): str(target)
@@ -300,18 +693,10 @@ def _parse_app(raw: dict[str, Any]) -> AppConfig:
                 raw.get("responsible_aliases") or {}
             ).items()
         },
-        ownership_delegations=tuple(
-            OwnerDelegation(
-                country=str(item["country"]),
-                group=str(item["group"]),
-                book_owner=str(item["book_owner"]),
-                delegate_folder=str(item["delegate_folder"]),
-                enabled=bool(item.get("enabled", True)),
-                reason=str(item.get("reason", "")),
-            )
-            for item in raw.get("ownership_delegations", [])
-        ),
         scheduler=dict(raw.get("scheduler") or {}),
+        manual_upward=manual_upward,
+        manual_downward=manual_downward,
+        manual_ui=manual_ui,
         notifications=dict(raw.get("notifications") or {}),
         safety=safety,
     )
@@ -324,6 +709,14 @@ def _parse_fields(raw: dict[str, Any]) -> FieldConfig:
         str(name): tuple(str(tag).strip().casefold() for tag in profile["include_type_tags"])
         for name, profile in profiles_raw.items()
     }
+    def initial_master_values(item: dict[str, Any]) -> tuple[Any, ...]:
+        values = item.get("initial_master_values", [])
+        if not isinstance(values, list):
+            raise ConfigurationError(
+                "initial_master_values в fields.collect должен быть списком"
+            )
+        return tuple(values)
+
     collect = tuple(
         FieldRule(
             title=str(item["title"]),
@@ -335,6 +728,12 @@ def _parse_fields(raw: dict[str, Any]) -> FieldConfig:
                 item.get("master_conflict", "require_baseline")
             ),
             invalid=str(item.get("invalid", "error")),
+            comparison_type=(
+                str(item["comparison_type"])
+                if item.get("comparison_type") is not None
+                else None
+            ),
+            initial_master_values=initial_master_values(item),
         )
         for item in _require(raw, "collect", "fields.json")
     )
@@ -356,6 +755,12 @@ def _parse_fields(raw: dict[str, Any]) -> FieldConfig:
         if rule.value_type not in {"text", "date", "number", "literal"}:
             raise ConfigurationError(
                 f"неизвестный value_type у {rule.title!r}: {rule.value_type}"
+            )
+        comparison_type = rule.comparison_type or rule.value_type
+        if comparison_type not in {"text", "date", "number", "literal"}:
+            raise ConfigurationError(
+                f"неизвестный comparison_type у {rule.title!r}: "
+                f"{comparison_type}"
             )
         if rule.master_conflict not in {"require_baseline", "accept_superset"}:
             raise ConfigurationError(
@@ -617,16 +1022,6 @@ def load_config_bundle(config_dir: str | Path | None = None) -> ConfigBundle:
         raise ConfigurationError(
             f"группы ссылаются на неизвестные profiles: {sorted(unknown_group_profiles)}"
         )
-    unknown_rule_profiles = {
-        rule["profile"]
-        for rule in app.profile_rules
-        if rule["profile"] not in fields.profile_tags
-    }
-    if unknown_rule_profiles:
-        raise ConfigurationError(
-            "profile_rules ссылаются на неизвестные profiles: "
-            f"{sorted(unknown_rule_profiles)}"
-        )
     return ConfigBundle(
         app=app,
         fields=fields,
@@ -636,3 +1031,46 @@ def load_config_bundle(config_dir: str | Path | None = None) -> ConfigBundle:
         config_identity=config_identity,
         config_payloads=config_payloads,
     )
+
+
+def save_app_config(
+    config_dir: str | Path,
+    payload: dict[str, Any],
+) -> ConfigBundle:
+    """Validate a complete app.json candidate, then replace it atomically.
+
+    The rules editor is intentionally constrained to this function: it never
+    writes a live registry and it never leaves half of app.json on disk if a
+    new folder/name condition is invalid.
+    """
+    if not isinstance(payload, dict):
+        raise ConfigurationError("новый app.json должен быть объектом")
+    directory = Path(config_dir).resolve()
+    target = directory / "app.json"
+    if not target.is_file():
+        raise ConfigurationError(f"нет конфигурации: {target}")
+    try:
+        serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(f"app.json нельзя сохранить: {exc}") from exc
+
+    # Validate the candidate together with the exact neighbouring fields/theme
+    # files first.  A temporary sibling directory makes this work on Windows
+    # as well, without ever swapping an invalid config into place.
+    with tempfile.TemporaryDirectory(
+        prefix="registry-cycle-config-",
+        dir=directory.parent,
+    ) as temporary_directory:
+        temporary_config = Path(temporary_directory)
+        for source in directory.glob("*.json"):
+            shutil.copy2(source, temporary_config / source.name)
+        (temporary_config / "app.json").write_text(
+            serialized,
+            encoding="utf-8",
+        )
+        load_config_bundle(temporary_config)
+
+    replacement = target.with_suffix(".json.tmp")
+    replacement.write_text(serialized, encoding="utf-8")
+    os.replace(replacement, target)
+    return load_config_bundle(directory)

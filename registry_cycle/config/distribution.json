@@ -4,7 +4,6 @@
     "Тургунов Музафар": "Тургунов Музаффар"
   },
   "safety": {
-    "exclude_filename_regex": "^Копия\\s",
     "require_baseline_owner_blank": true,
     "max_total_rows": 2500,
     "max_rows_per_file": 300

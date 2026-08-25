@@ -27,6 +27,7 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import date, datetime
 from pathlib import Path
 
@@ -76,7 +77,7 @@ except Exception as _exc:                              # noqa: BLE001
            + traceback.format_exc()[-1200:])
 
 # Актуальный инстанс — hardbot2 (свежий код сервера). Ключ — X-Admin-Key.
-DEFAULT_URL = "https://hardbot2.209.222.251.112.nip.io"
+DEFAULT_URL = "https://hardbot2.166.88.185.90.nip.io"
 DEFAULT_KEY = ""
 IMPORT_SOURCE_PUBLISHED_MASTER = enrich.IMPORT_SOURCE_PUBLISHED_MASTER
 IMPORT_SOURCE_TEST_SUBSET = "test_subset"
@@ -862,6 +863,17 @@ class Pult(tk.Tk):
             font=f(9),
         )
         self.imp_full_check.pack(anchor="w", pady=(10, 0))
+        self.imp_restore_manual_var = tk.BooleanVar(value=False)
+        self.imp_restore_manual_check = tk.Checkbutton(
+            imp.inner,
+            text=("Вернуть ранее вручную снятые договоры, если они снова есть "
+                  "в выбранных строках файла с тем же ответственным"),
+            variable=self.imp_restore_manual_var,
+            command=self._imp_restore_manual_toggle,
+            bg=CARD, fg=WARN, activebackground=CARD, selectcolor=CARD,
+            font=f(9), justify="left", wraplength=760,
+        )
+        self.imp_restore_manual_check.pack(anchor="w", pady=(6, 0))
         self.imp_replace_current_comments_var = tk.BooleanVar(value=False)
         self.imp_replace_current_comments_check = tk.Checkbutton(
             imp.inner,
@@ -1033,13 +1045,18 @@ class Pult(tk.Tk):
             bool(self.imp_import_historical_comments_var.get())
             if hasattr(self, "imp_import_historical_comments_var") else False
         )
+        restore_manual = (
+            bool(self.imp_restore_manual_var.get())
+            if hasattr(self, "imp_restore_manual_var") else False
+        )
         signature = self._imp_signature()
         self._invalidate_import_preview(clear_report=True)
         self.toast(f"Проверяю импорт {Path(book['path']).name}: {len(picked)} сотр…")
 
         def work():
             prepared = self._prepare_import(
-                book, picked, full_registry=full_registry
+                book, picked, full_registry=full_registry,
+                force_test_subset=restore_manual,
             )
             body = {
                 "data_exchange_contract": enrich.DATA_EXCHANGE_CONTRACT,
@@ -1051,6 +1068,7 @@ class Pult(tk.Tk):
                     prepared["authoritative_employees"]
                     if full_registry else []
                 ),
+                "restore_manual_unassigned": restore_manual,
                 "replace_current_visit_comments": replace_current_comments,
                 "import_historical_visit_comments": import_historical_comments,
             }
@@ -1087,6 +1105,16 @@ class Pult(tk.Tk):
                 payload["body"].get("replace_current_visit_comments")
                 or payload["body"].get("import_historical_visit_comments")
             )
+            restore_digest = d.get("manual_restore_digest")
+            if restore_manual and (
+                not isinstance(restore_digest, str) or len(restore_digest) != 64
+            ):
+                self._invalidate_import_preview(clear_report=True)
+                self.toast(
+                    "Сервер не вернул точный набор возвратов — нужен новый сервер",
+                    err=True,
+                )
+                return
             if changes_comments and (
                 not isinstance(comment_effect_digest, str)
                 or len(comment_effect_digest) != 64
@@ -1101,6 +1129,8 @@ class Pult(tk.Tk):
                 **payload["body"],
                 "expected_auto_unassigned": int(d.get("auto_unassigned") or 0),
                 "expected_auto_unassigned_digest": effect_digest,
+                "expected_manual_restored": int(d.get("manual_restored") or 0),
+                "expected_manual_restore_digest": restore_digest,
                 "expected_comment_effect_digest": comment_effect_digest,
             }
             self._imp_preview_signature = payload["signature"]
@@ -1142,6 +1172,9 @@ class Pult(tk.Tk):
                 label += f" · снять {fmt_n(unassigned)}"
             if comment_changes:
                 label += f" · комментариев {fmt_n(comment_changes)}"
+            restored = int(d.get("manual_restored") or 0)
+            if restored:
+                label += f" · вернуть {fmt_n(restored)}"
             self.imp_apply_btn.configure(text=label, state="normal")
             self.toast(
                 "Предпросмотр готов"
@@ -1206,6 +1239,8 @@ class Pult(tk.Tk):
                 )
                 if d.get("auto_unassigned"):
                     message += f" / снято {fmt_n(d['auto_unassigned'])}"
+                if d.get("manual_restored"):
+                    message += f" / возвращено {fmt_n(d['manual_restored'])}"
                 self.toast(message)
             self.refresh()
 
@@ -1262,10 +1297,24 @@ class Pult(tk.Tk):
             bool(self.imp_import_historical_comments_var.get())
             if hasattr(self, "imp_import_historical_comments_var") else False
         )
+        restore_manual = (
+            bool(self.imp_restore_manual_var.get())
+            if hasattr(self, "imp_restore_manual_var") else False
+        )
         return (
             book.get("file_sha256"), tuple(sorted(self.imp_selected)), full,
-            replace_current, import_historical,
+            restore_manual, replace_current, import_historical,
         )
+
+    def _imp_restore_manual_toggle(self):
+        self._invalidate_import_preview(clear_report=True)
+        if self.imp_restore_manual_var.get():
+            self.imp_warn.configure(
+                text=("ВОЗВРАТ РУЧНЫХ СНЯТИЙ: будут возвращены только договоры, "
+                      "которые снова есть в выбранных строках с тем же сотрудником. "
+                      "Точное число пульт покажет до записи.")
+            )
+        self._imp_count()
 
     def _imp_comment_toggle(self):
         self._invalidate_import_preview(clear_report=True)
@@ -1303,6 +1352,7 @@ class Pult(tk.Tk):
         if not path:
             return
         self.imp_full_var.set(False)
+        self.imp_restore_manual_var.set(False)
         self.imp_replace_current_comments_var.set(False)
         self.imp_import_historical_comments_var.set(False)
         self._invalidate_import_preview(clear_report=True)
@@ -1322,10 +1372,9 @@ class Pult(tk.Tk):
             book.update(head=head, first=first, c_id=c_id, c_who=c_who)
             self.imp_book = book
             self.db_employees = list(book.get("db_employees") or [])
-            self.imp_selected = {
-                e["key"] for e in book["employees"] if e.get("file_count")
-            }
+            self.imp_selected = self._default_import_selection(book["employees"])
             self.imp_full_var.set(False)
+            self.imp_restore_manual_var.set(False)
             self._invalidate_import_preview(clear_report=True)
             kind = ("опубликованный master (есть расписка цикла)"
                     if book.get("published") else
@@ -1340,6 +1389,7 @@ class Pult(tk.Tk):
             self.imp_book = {}
             self.imp_selected = set()
             self.imp_full_var.set(False)
+            self.imp_restore_manual_var.set(False)
             self._invalidate_import_preview(clear_report=True)
             self._imp_render()
             self.imp_file_lbl.configure(text=f"Файл не разобран: {exc}")
@@ -1359,6 +1409,9 @@ class Pult(tk.Tk):
         tk.Label(head, text="Кого грузить (галочки):", bg=CARD, fg=MUTED,
                  font=f(9)).pack(side="left")
         btn(head, "все", lambda: self._imp_all(True)).pack(side="right")
+        btn(head, "есть в БД", self._imp_existing).pack(
+            side="right", padx=(0, 6)
+        )
         btn(head, "снять", lambda: self._imp_all(False)).pack(side="right", padx=(0, 6))
         box = tk.Frame(self.imp_pick_frame, bg=CARD, highlightbackground=BORDER,
                        highlightthickness=1)
@@ -1400,6 +1453,16 @@ class Pult(tk.Tk):
     def _imp_all(self, on):
         self.imp_selected = ({e["key"] for e in self.imp_book.get("employees") or []}
                              if on else set())
+        self._imp_sync_selection()
+
+    def _imp_existing(self):
+        """Отметить строки файла только для сотрудников, уже известных БД."""
+        self.imp_selected = self._existing_import_selection(
+            self.imp_book.get("employees") or []
+        )
+        self._imp_sync_selection()
+
+    def _imp_sync_selection(self):
         for key, var in (self._imp_vars or {}).items():
             var.set(key in self.imp_selected)
         self._invalidate_import_preview(clear_report=True)
@@ -1468,6 +1531,7 @@ class Pult(tk.Tk):
         picked: list[str],
         *,
         full_registry: bool = False,
+        force_test_subset: bool = False,
     ) -> dict:
         """Книга + отмеченные сотрудники → (source_kind, proof, sheets).
 
@@ -1494,7 +1558,7 @@ class Pult(tk.Tk):
         }
         whole = set(picked) == file_emps
 
-        if whole and book.get("published"):
+        if whole and book.get("published") and not force_test_subset:
             prepared = book["published"]
             grid = lti._validate_sheets(prepared["sheets"])
             digest = contract.validate_import_source_proof(
@@ -1511,8 +1575,13 @@ class Pult(tk.Tk):
             if not whole else book["grid"]
         )
         scope = self._scope_from_grid(grid, allow_empty=full_registry)
+        # Один и тот же файл законно импортируется повторно после изменения БД
+        # (например, оператор снял портфель и явно решил вернуть актуальные строки).
+        # Receipt одноразовый, поэтому каждая новая preview-сессия получает новый
+        # approval id; preview и apply всё равно используют один exact proof/body.
         approval = (f"pult-{Path(book['path']).stem.strip()[:60]}"
-                    f"-{book['file_sha256'][:12]}-{len(scope)}")
+                    f"-{book['file_sha256'][:12]}-{len(scope)}"
+                    f"-{uuid.uuid4().hex[:12]}")
         proof = contract.build_test_subset_source_proof(
             grid, approval_id=approval, contracts=scope)
         digest = contract.validate_import_source_proof(
@@ -1580,6 +1649,38 @@ class Pult(tk.Tk):
                 Pult._emp_key(item.get("name")),
             ),
         )
+
+    @staticmethod
+    def _existing_import_selection(employees: list[dict]) -> set[str]:
+        """Сотрудники, для которых есть и строки файла, и портфель в БД."""
+        return {
+            str(item.get("key") or "")
+            for item in employees or []
+            if item.get("key")
+            and int(item.get("file_count", item.get("count", 0)) or 0) > 0
+            and int(item.get("db_count") or 0) > 0
+        }
+
+    @staticmethod
+    def _default_import_selection(employees: list[dict]) -> set[str]:
+        """Обычный выбор — уже известные БД; в пустую БД грузим весь файл.
+
+        Пустая БД — штатный первый импорт, поэтому оставлять оператора без единой
+        галочки там неудобно. Если же портфели в БД уже есть, отсутствие
+        пересечения показываем честно и ничего нового автоматически не выбираем.
+        """
+        existing = Pult._existing_import_selection(employees)
+        database_is_populated = any(
+            int(item.get("db_count") or 0) > 0 for item in employees or []
+        )
+        if database_is_populated:
+            return existing
+        return {
+            str(item.get("key") or "")
+            for item in employees or []
+            if item.get("key")
+            and int(item.get("file_count", item.get("count", 0)) or 0) > 0
+        }
 
     @staticmethod
     def _grid_for(
@@ -1675,6 +1776,9 @@ class Pult(tk.Tk):
                 ("обновлено", d.get("updated")), ("без КД", d.get("skipped_no_id")),
                 ("дублей", d.get("duplicates")),
                 ("будет снято / снято", d.get("auto_unassigned")),
+                ("ручных снятий в выбранных строках",
+                 d.get("manual_restore_candidates")),
+                ("будет возвращено / возвращено", d.get("manual_restored")),
                 ("текущих комментариев сохранено",
                  d.get("current_comments_preserved")),
                 ("текущих комментариев заменено",
@@ -1694,6 +1798,28 @@ class Pult(tk.Tk):
     @staticmethod
     def _imp_notes(d: dict) -> list[str]:
         notes = []
+        manual_candidates = int(d.get("manual_restore_candidates") or 0)
+        manual_restored = int(d.get("manual_restored") or 0)
+        if manual_candidates:
+            by_employee = d.get("manual_restore_by_employee") or {}
+            breakdown = ", ".join(
+                f"{name}: {fmt_n(count)}" for name, count in by_employee.items()
+            )
+            if d.get("restore_manual_unassigned"):
+                notes.append(
+                    "ВОЗВРАТ РУЧНЫХ СНЯТИЙ: после применения снова будут "
+                    f"назначены {fmt_n(manual_restored)} договоров, присутствующих "
+                    "в выбранных строках с тем же ответственным."
+                    + (f" По сотрудникам: {breakdown}." if breakdown else "")
+                )
+            else:
+                notes.append(
+                    f"Ручным снятием удержано: {fmt_n(manual_candidates)} договоров. "
+                    "Файл содержит того же ответственного, но обычный импорт его "
+                    "не вернёт. Для возврата включи отдельную галочку и сделай новый "
+                    "предпросмотр."
+                    + (f" По сотрудникам: {breakdown}." if breakdown else "")
+                )
         if d.get("replace_current_visit_comments"):
             notes.append(
                 "Режим начала месяца включён: текущие комментарии заменяются "
@@ -1725,13 +1851,16 @@ class Pult(tk.Tk):
                 "сервер не сделал ни одной записи. Для нового состояния нужен "
                 "новый опубликованный master или новый утверждённый test-subset."
             )
-        if d.get("no_responsible"):
-            notes.append(f"Без ответственного: {d['no_responsible']} строк — колонка "
-                         "«ответственный Сотрудник» пуста и в файле, и в базе. Эти "
-                         "договоры в базе есть, но их не видит ни один выездник, они не "
-                         "входят в отчёты руководителей, и обогащение их результат "
-                         "никуда не запишет — личного файла у них нет. Проставь "
-                         "ответственного в реестре и импортируй ещё раз.")
+        held_manual = (
+            manual_candidates if not d.get("restore_manual_unassigned") else 0
+        )
+        other_unassigned = max(int(d.get("no_responsible") or 0) - held_manual, 0)
+        if other_unassigned:
+            notes.append(
+                f"Без ответственного вне ручных снятий: {other_unassigned} строк. "
+                "Эти договоры в базе есть, но их не видит ни один выездник. "
+                "Проверь пустые значения в колонке «ответственный Сотрудник»."
+            )
         if d.get("office_cells"):
             notes.append(f"Принято офисных правок: {d['office_cells']} ячеек по "
                          f"{d.get('office_contracts') or 0} договорам — файл видел "

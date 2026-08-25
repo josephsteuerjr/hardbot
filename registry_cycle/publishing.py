@@ -35,6 +35,7 @@ class PublishResult:
     rolled_back: list[str] = field(default_factory=list)
     issues: list[Issue] = field(default_factory=list)
     baseline: str | None = None
+    receipt: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -59,6 +60,7 @@ class PublishResult:
             "rolled_back": self.rolled_back,
             "issues": [issue.as_dict() for issue in self.issues],
             "baseline": self.baseline,
+            "receipt": self.receipt,
             "ok": self.ok,
             "complete": self.complete,
         }
@@ -166,9 +168,11 @@ def _legacy_publish_is_committed(
     ):
         return False
     start_record = tail[0]
-    # Текущий формат всегда имеет identity и обязан завершаться exact terminal.
-    # publish.json — compatibility proof только для действительно старых журналов.
-    if start_record.get("run_id") or start_record.get("plan_digest"):
+    # Новый протокол создаёт recovery manifest до первой live-записи. Если он
+    # есть, отсутствие terminal-event остаётся STOP: publish.json сам по себе
+    # не должен закрывать современный аварийный run. Старый протокол уже писал
+    # run_id/digest, но manifest и terminal-event ещё не создавал.
+    if journal_path.with_name("publish.recovery.json").exists():
         return False
     try:
         payload = json.loads(publish_path.read_text(encoding="utf-8"))
@@ -339,13 +343,14 @@ def _cleanup_temps(paths: list[Path], journal: _Journal) -> None:
             journal.append("temp_remove_failed", path=str(path), error=str(exc))
 
 
-def _unique_sibling(
+def _unique_copy_path(
     item: StagedFile,
     *,
+    directory: Path,
     label: str,
     stamp: datetime,
 ) -> Path:
-    base = item.original_path.with_name(
+    base = directory / (
         f"Копия {item.original_path.stem} "
         f"({label} {stamp:%d.%m.%y %H-%M})"
         f"{item.original_path.suffix}"
@@ -359,7 +364,22 @@ def _unique_sibling(
         if not candidate.exists():
             return candidate
     raise SafetyViolation(
-        f"не найдено свободное имя соседней копии: {item.original_path}"
+        f"не найдено свободное имя backup-копии в папке: {directory}"
+    )
+
+
+def _unique_sibling(
+    item: StagedFile,
+    *,
+    label: str,
+    stamp: datetime,
+) -> Path:
+    """Keep legacy full-cycle copies beside their live target."""
+    return _unique_copy_path(
+        item,
+        directory=item.original_path.parent,
+        label=label,
+        stamp=stamp,
     )
 
 
@@ -425,10 +445,61 @@ def atomic_publish_files(
     journal_path: str | Path | None = None,
     busy_mode: str = "block",
     force_close: Callable[[tuple[BusyFile, ...]], None] | None = None,
+    backup_directory: str | Path | None = None,
+    backup_directories: dict[str, str | Path] | None = None,
+    backup_label: str = "до ночного цикла",
+    selected_files: tuple[StagedFile, ...] | None = None,
+    guard_files: tuple[StagedFile, ...] = (),
+    commit_callback: Callable[[PublishResult], str | Path | None] | None = None,
 ) -> PublishResult:
     """Опубликовать уже проверенные файлы; пригодно для fault-injection тестов."""
-    files = _publish_order(stage)
+    files = _publish_order(stage) if selected_files is None else selected_files
+    if not files:
+        raise SafetyViolation("набор файлов для публикации пуст")
+    stage_by_target = {
+        str(item.original_path).casefold(): item
+        for item in stage.files
+    }
+    for item in (*files, *guard_files):
+        expected = stage_by_target.get(str(item.original_path).casefold())
+        if expected != item:
+            raise SafetyViolation(
+                f"цель не принадлежит проверенному staging: {item.original_path}"
+            )
     _assert_unique_targets(files)
+    _assert_unique_targets(guard_files)
+    if {
+        str(item.original_path).casefold() for item in files
+    } & {
+        str(item.original_path).casefold() for item in guard_files
+    }:
+        raise SafetyViolation("защитная цель одновременно выбрана для публикации")
+    central_backup_directory = (
+        Path(backup_directory) if backup_directory is not None else None
+    )
+    if central_backup_directory is not None and not central_backup_directory.is_dir():
+        raise SafetyViolation(
+            "папка для backup не существует или недоступна: "
+            f"{central_backup_directory}"
+        )
+    per_target_backups = {
+        str(Path(target)).casefold(): Path(directory)
+        for target, directory in (backup_directories or {}).items()
+    }
+    unknown_backup_targets = set(per_target_backups) - {
+        str(item.original_path).casefold() for item in files
+    }
+    if unknown_backup_targets:
+        raise SafetyViolation(
+            "backup-настройка содержит цель вне выбранной публикации"
+        )
+    for directory in per_target_backups.values():
+        if not directory.is_dir():
+            raise SafetyViolation(
+                f"папка для backup не существует или недоступна: {directory}"
+            )
+    if not backup_label.strip():
+        raise SafetyViolation("label для backup не должен быть пустым")
     journal = _Journal(
         Path(journal_path)
         if journal_path is not None
@@ -464,6 +535,8 @@ def atomic_publish_files(
                     f"staging изменился после validation: {item.staged_path}"
                 )
             _assert_unchanged(item)
+        for item in guard_files:
+            _assert_unchanged(item)
         journal.append("preflight_passed")
 
         for item in files:
@@ -489,9 +562,13 @@ def atomic_publish_files(
         )
         for item in files:
             _assert_unchanged(item)
+        for item in guard_files:
+            _assert_unchanged(item)
         journal.append("second_preflight_passed")
 
         for item in files:
+            for guard in guard_files:
+                _assert_unchanged(guard)
             sidecar_targets |= _busy_targets(
                 (item,),
                 mode=busy_mode,
@@ -532,19 +609,28 @@ def atomic_publish_files(
                     sidecar=str(sidecar),
                 )
                 continue
-            backup = _unique_sibling(
+            backup = _unique_copy_path(
                 item,
-                label="до ночного цикла",
+                directory=(
+                    per_target_backups.get(target_key)
+                    or central_backup_directory
+                    or item.original_path.parent
+                ),
+                label=backup_label,
                 stamp=stamp,
             )
             stable_copy(item.original_path, backup)
             if fingerprint(backup) != item.source_fingerprint:
                 raise PublishError(
-                    f"соседний backup не совпал с live: {backup}"
+                    f"backup не совпал с live: {backup}"
                 )
             result.backups.append(str(backup))
             journal.append(
-                "sibling_backup_created",
+                (
+                    "central_backup_created"
+                    if central_backup_directory is not None
+                    else "sibling_backup_created"
+                ),
                 target=str(item.original_path),
                 backup=str(backup),
             )
@@ -561,7 +647,14 @@ def atomic_publish_files(
                 )
             result.published.append(str(item.original_path))
             journal.append("target_replaced", target=str(item.original_path))
+        for item in guard_files:
+            _assert_unchanged(item)
+        result.finished_at = datetime.now().isoformat(timespec="microseconds")
+        if commit_callback is not None:
+            receipt = commit_callback(result)
+            result.receipt = str(receipt) if receipt is not None else None
     except Exception as exc:  # noqa: BLE001 — обязан запустить rollback
+        result.finished_at = None
         journal.append("publish_failed", error=str(exc))
         rollback_failures: list[str] = []
         for item in reversed(replaced):
@@ -648,7 +741,8 @@ def atomic_publish_files(
     # The import trust ledger derives its monotonic source sequence from this
     # durable timestamp. Microseconds make two legitimate consecutive
     # publications distinguishable; an actual collision still fails closed.
-    result.finished_at = datetime.now().isoformat(timespec="microseconds")
+    if result.finished_at is None:
+        result.finished_at = datetime.now().isoformat(timespec="microseconds")
     if result.sidecars:
         result.issues.append(
             Issue(
@@ -845,6 +939,9 @@ def publish_validated(
     confirmation_digest: str,
     busy_mode: str | None = None,
     allow_initial_baseline: bool = False,
+    backup_directory: str | Path | None = None,
+    backup_label: str = "до ночного цикла",
+    commit_callback: Callable[[PublishResult], str | Path | None] | None = None,
     cycle_lock: CycleLock | None = None,
 ) -> PublishResult:
     if cycle_lock is None:
@@ -857,6 +954,9 @@ def publish_validated(
                 confirmation_digest=confirmation_digest,
                 busy_mode=busy_mode,
                 allow_initial_baseline=allow_initial_baseline,
+                backup_directory=backup_directory,
+                backup_label=backup_label,
+                commit_callback=commit_callback,
                 cycle_lock=acquired,
             )
     cycle_lock.assert_owned()
@@ -942,6 +1042,8 @@ def publish_validated(
                 if selected_busy_mode == "force_close"
                 else None
             ),
+            backup_directory=backup_directory,
+            backup_label=backup_label,
         )
     except Exception:
         baseline_temp.unlink(missing_ok=True)
@@ -1008,6 +1110,9 @@ def publish_validated(
                 "active baseline изменился непосредственно перед publish replace"
             )
         os.replace(baseline_temp, target_baseline)
+        if commit_callback is not None:
+            receipt = commit_callback(result)
+            result.receipt = str(receipt) if receipt is not None else None
     except Exception as exc:
         journal = _Journal(stage.run_dir / "publish.journal.jsonl")
         journal.append("baseline_activation_failed", error=str(exc))
@@ -1120,6 +1225,86 @@ def publish_validated(
         run_id=stage.run_id,
         plan_digest=stage.plan_digest,
         baseline=str(target_baseline),
+    )
+    return result
+
+
+def publish_selected_personals_validated(
+    bundle: ConfigBundle,
+    stage: StageSet,
+    plan: SyncPlan,
+    validation: ValidationReport,
+    *,
+    selected_files: tuple[StagedFile, ...],
+    confirmation_digest: str,
+    backup_directories: dict[str, str | Path],
+    backup_label: str,
+    busy_mode: str = "block",
+    commit_callback: Callable[[PublishResult], str | Path | None] | None = None,
+    cycle_lock: CycleLock | None = None,
+) -> PublishResult:
+    """Publish only personal projections while keeping the master read-only."""
+    if cycle_lock is None:
+        with publication_cycle_lock(bundle) as acquired:
+            return publish_selected_personals_validated(
+                bundle,
+                stage,
+                plan,
+                validation,
+                selected_files=selected_files,
+                confirmation_digest=confirmation_digest,
+                backup_directories=backup_directories,
+                backup_label=backup_label,
+                busy_mode=busy_mode,
+                commit_callback=commit_callback,
+                cycle_lock=acquired,
+            )
+    cycle_lock.assert_owned()
+    _assert_stage_run_under_workspace(bundle, stage)
+    assert_no_incomplete_publications(bundle.workspace_path())
+    config_identity = str(getattr(bundle, "config_identity", "") or "")
+    if not (
+        stage.config_identity == plan.config_identity == config_identity
+    ):
+        raise SafetyViolation(
+            "plan/staging относятся к другой конфигурации; publish запрещён"
+        )
+    if plan.blocked or validation.blocked:
+        raise SafetyViolation("заблокированный план или validation нельзя публиковать")
+    if not (
+        stage.plan_digest
+        == plan.digest
+        == validation.plan_digest
+        == confirmation_digest
+    ):
+        raise SafetyViolation("digest подтверждения не совпал с планом")
+    if validation.checked_files != len(stage.files):
+        raise SafetyViolation("validation проверил не все staging-файлы")
+    if plan.changes:
+        raise SafetyViolation(
+            "раздача запрещена: общий реестр ещё требует изменений шага 1"
+        )
+    if busy_mode != "block":
+        raise SafetyViolation("раздача поддерживает только busy_mode=block")
+    if not selected_files or any(item.kind != "personal" for item in selected_files):
+        raise SafetyViolation("для раздачи должны быть выбраны личные staging-файлы")
+
+    result = atomic_publish_files(
+        stage,
+        busy_mode=busy_mode,
+        backup_directories=backup_directories,
+        backup_label=backup_label,
+        selected_files=selected_files,
+        guard_files=(stage.master,),
+        commit_callback=commit_callback,
+    )
+    _atomic_json(stage.run_dir / "publish.json", result.as_dict())
+    _Journal(stage.run_dir / "publish.journal.jsonl").append(
+        "publish_committed",
+        run_id=stage.run_id,
+        plan_digest=stage.plan_digest,
+        scope="personals_only",
+        receipt=result.receipt,
     )
     return result
 

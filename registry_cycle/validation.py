@@ -207,6 +207,15 @@ def _validate_master(
         expected_type_tags=expected_type_tags,
     ):
         return
+    if (
+        not plan.changes
+        and plan.month_rollover is None
+        and source.rows == staged.rows
+    ):
+        report.checked_master_cells += (
+            len(source.rows) * len(source.headers)
+        )
+        return
     rules = {rule.title: rule for rule in bundle.fields.collect}
     allowed = {
         (change.row, change.column): change
@@ -328,10 +337,16 @@ def _validate_projection(
         staged,
         report.issues,
         label=projection.entry.path.name,
+        expected_headers=projection.headers,
+        expected_type_tags=(
+            projection.type_tags
+            if projection.type_tags
+            else source.type_tags
+        ),
     ):
         return
     if tuple(
-        str(value or "").strip()
+        str(value or "")
         for value in staged.headers
     ) != tuple(projection.headers):
         report.issues.append(
@@ -341,6 +356,19 @@ def _validate_projection(
                 f"заголовки проекции не совпали: {projection.entry.path.name}",
             )
         )
+        return
+
+    width = len(projection.headers)
+    trailing_rows = staged.rows[len(projection.rows) :]
+    if (
+        staged.rows[: len(projection.rows)] == projection.rows
+        and all(
+            is_blank(value)
+            for row in trailing_rows
+            for value in row[:width]
+        )
+    ):
+        report.checked_projection_cells += len(projection.rows) * width
         return
 
     rules = {norm_title(rule.title): rule for rule in bundle.fields.collect}
@@ -555,6 +583,31 @@ def _validate_untouched_sheets(
                             criterion["field"] = int(
                                 criterion["field"]
                             ) + 1
+            if (
+                item.kind == "personal"
+                and bool(expected_filter.get("enabled"))
+            ):
+                assert item.entry_id is not None
+                projection = projections[item.entry_id]
+                source_snapshot = read_portfolio(
+                    item.source_copy,
+                    bundle.fields,
+                )
+                first_column = int(expected_filter["first_column"])
+                last_column = (
+                    first_column
+                    + int(expected_filter["columns"])
+                    - 1
+                )
+                if (
+                    projection.added_columns
+                    and last_column >= len(source_snapshot.headers)
+                ):
+                    expected_filter["columns"] = (
+                        max(last_column, len(projection.headers))
+                        - first_column
+                        + 1
+                    )
             expected_without_last = {
                 key: value
                 for key, value in expected_filter.items()

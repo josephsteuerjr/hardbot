@@ -251,8 +251,7 @@ hardbot/data_exchange_contract.json
 | Переименовали известную жёлтую колонку без смены смысла | добавить alias в `registry_cycle/config/fields.json` | old/new header fixtures, цвет, тип и профиль |
 | Переименовали master-колонку, которую читает bot, без смены смысла | versioned alias в `data_exchange_contract.json` | old/new master fixtures, duplicate collision и полный import |
 | Добавили заведомо служебную master-колонку | exact `allowed_ignored_headers`; только регулярная серия вроде `Оплаты за MM.YY` получает узкий pattern | positive fixture и nearby-invalid negative fixtures |
-| Добавили новую группу той же геометрии | запись в `registry_cycle/config/app.json`, без Python-ветки | required/optional, profile hard/soft, manifest |
-| Изменилась обязательность группы | только config + утверждение владельца | отсутствие required должно STOP; optional — warning |
+| Добавили новую группу той же геометрии | создать верхнеуровневую папку; discovery подхватит её автоматически | manifest, исключения архива, определение профиля по столбцам |
 | Появилась лишняя вложенность/другая геометрия | новая `app.json schema_version` и явный discovery-adapter | exact path errors, отсутствие recursive import, полный rehearsal |
 | Сменился формат `.xlsb` на `.xlsx/.xlsm/.xls` | новая версия format-adapter после отдельного решения; текущий discovery намеренно STOP | type/formula/date/color fixtures и побайтовая гарантия публикации |
 | Изменился набор жёлтых полей или их направление | новая версия `fields.json`, policy review и миграционный план | colour/type/profile/direction matrix, baseline compatibility |
@@ -262,17 +261,18 @@ hardbot/data_exchange_contract.json
 Текущая геометрия зафиксирована как `app.json schema_version=2`:
 `root/group/employee/*.xlsb`. Импорт остаётся только одноуровневым.
 Рекурсивный обход используется исключительно как аудит аномалий. Активный
-`.xlsb` прямо в корне республики, прямо в группе, глубже папки сотрудника или
-в незарегистрированной группе даёт `STOP` с точным путём; backup/`~` и
-настроенные служебные префиксы не считаются активными книгами.
+`.xlsb` прямо в корне республики, прямо в группе или глубже папки сотрудника
+даёт `STOP` с точным путём; архив, backup/`~` и настроенные служебные
+исключения не считаются активными книгами.
 
-Группы и республики не кодируются Python-ветками. `ГПХ Агент выезд` сейчас
-описывается config: в UZ как required/profile hard, в TJ как optional/profile
-hard. Добавить ту же группу в другую республику при той же геометрии — правка
-config и fixtures, а не изменение discovery. Активный `.xlsx/.xlsm/.xls`
-на любой рабочей глубине пока блокируется как
-`unsupported_active_workbook_format` с exact path: новый формат не должен
-молча выглядеть как отсутствие книг.
+Группы и республики не кодируются Python-ветками. Все верхнеуровневые папки
+внутри настроенного корня сканируются автоматически, а имя группы равно имени
+папки. `ГПХ Агент выезд`, города и курьеры не требуют отдельных веток.
+HARD/SOFT определяется после локального snapshot по набору канонических
+заголовков с aliases из `fields.json`; имя папки или файла профиль не задаёт.
+Активный `.xlsx/.xlsm/.xls` выводится как
+`unsupported_active_workbook_format` с exact path, не импортируется и не
+выглядит как `.xlsb`-источник.
 
 Фактическая master-форма проверена на сохранённом production snapshot:
 лист `Портфели`, строка заголовка 2, всего 87 колонок; 52 уникальные колонки

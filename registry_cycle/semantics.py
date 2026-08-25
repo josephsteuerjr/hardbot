@@ -13,6 +13,20 @@ from .normalize import comparable_value, json_value, parse_date, parse_number
 _LITERAL_TAG = "__registry_cycle_literal__"
 
 
+def _comparison_type(rule: FieldRule) -> str:
+    return rule.comparison_type or rule.value_type
+
+
+def _unpack_literal_baseline(value: Any) -> Any:
+    if (
+        isinstance(value, dict)
+        and isinstance(value.get(_LITERAL_TAG), str)
+        and "value" in value
+    ):
+        return value["value"]
+    return value
+
+
 def _literal_comparable(value: Any) -> tuple[str, Any]:
     """Сравнить значение без нормализации строк и распознавания дат.
 
@@ -47,7 +61,8 @@ def _literal_comparable(value: Any) -> tuple[str, Any]:
 
 
 def comparable_for_rule(value: Any, rule: FieldRule) -> tuple[str, Any]:
-    if rule.value_type == "literal":
+    comparison_type = _comparison_type(rule)
+    if comparison_type == "literal":
         if (
             isinstance(value, dict)
             and isinstance(value.get(_LITERAL_TAG), str)
@@ -55,7 +70,8 @@ def comparable_for_rule(value: Any, rule: FieldRule) -> tuple[str, Any]:
         ):
             return value[_LITERAL_TAG], value["value"]
         return _literal_comparable(value)
-    if rule.value_type == "date":
+    value = _unpack_literal_baseline(value)
+    if comparison_type == "date":
         parsed = parse_date(value)
         if parsed is not None:
             return "date", parsed.isoformat()
@@ -68,7 +84,7 @@ def comparable_for_rule(value: Any, rule: FieldRule) -> tuple[str, Any]:
         if number is None:
             return comparable_value(value)
         return "number", number
-    if rule.value_type == "number":
+    if comparison_type == "number":
         kind, normalized = comparable_value(value)
         if kind == "number":
             return kind, normalized
@@ -108,7 +124,7 @@ def same_representation(left: Any, right: Any) -> bool:
 
 
 def normalized_text(value: Any) -> str:
-    return " ".join(str(value or "").strip().split()).casefold()
+    return " ".join(str(json_value(value) or "").strip().split()).casefold()
 
 
 def is_text_superset(candidate: Any, existing: Any) -> bool:

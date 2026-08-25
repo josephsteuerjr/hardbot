@@ -11,9 +11,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<!-- Карт-библиотеки (maplibre/pmtiles/protomaps) НЕ грузим в оболочке: для заполнения
-     визита карта не нужна, а лишние внешние CDN ломали бы оффлайн-старт. Грузятся лениво
-     при открытии карты (ensureMapLibs) и кэшируются service worker'ом. -->
+<!-- Карт-библиотеки грузятся лениво, но только с нашего origin. Внешние CDN на
+     мобильной сети Узбекистана обрывались и оставляли пустую карту. -->
 <script>
 // Регистрируем service worker (кэш оболочки для оффлайна). Тихо, без влияния на онлайн.
 if("serviceWorker" in navigator){
@@ -689,7 +688,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=31;
+const SHELL_VERSION=32;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1327,30 +1326,28 @@ function drawPanel(){
   else { p.innerHTML=panelForm(d,t); setTimeout(setupFormDraft,0); }
 }
 
-// --- Карта (MapLibre GL). Базовый слой — растровый OSM; пин — наш.
-// Самохостинг вектора (Protomaps PMTiles) подключается заменой RASTER_STYLE.
+// --- Карта (MapLibre GL). Основной слой — свой Protomaps PMTiles; пин — наш.
 // Ленивая загрузка карт-библиотек: в оболочке их нет (чтобы оффлайн-старт не зависел от
-// внешних CDN). Грузим при первом открытии карты; при отсутствии сети просто вернём false
-// и карта не отрисуется (для заполнения визита это не нужно).
+// карт). Все библиотеки лежат на том же сервере: телефон больше не зависит от jsdelivr.
 let _mapLibs=null;
 function ensureMapLibs(){
   if(window.maplibregl && window.pmtiles && window.protomaps_themes_base) return Promise.resolve(true);
   if(_mapLibs) return _mapLibs;
-  const CDN="https://cdn.jsdelivr.net/npm/";
-  const addCss=(href)=>{ const l=document.createElement("link"); l.rel="stylesheet"; l.href=href; document.head.appendChild(l); };
+  const addCss=(href)=>{ if(document.querySelector(`link[href="${href}"]`)) return;
+    const l=document.createElement("link"); l.rel="stylesheet"; l.href=href; document.head.appendChild(l); };
   const addJs=(src)=>new Promise((res)=>{ const s=document.createElement("script"); s.src=src; s.onload=()=>res(true); s.onerror=()=>res(false); document.head.appendChild(s); });
   _mapLibs=(async()=>{
-    addCss(CDN+"maplibre-gl@4.7.1/dist/maplibre-gl.min.css");
-    if(!await addJs(CDN+"maplibre-gl@4.7.1/dist/maplibre-gl.min.js")){ _mapLibs=null; return false; }
-    await addJs(CDN+"pmtiles@3.2.1/dist/pmtiles.js");
-    await addJs(CDN+"protomaps-themes-base@4.4.0/dist/protomaps-themes-base.js");
+    addCss("/vendor/maplibre-gl-4.7.1.css");
+    if(!await addJs("/vendor/maplibre-gl-4.7.1.js")){ _mapLibs=null; return false; }
+    await addJs("/vendor/pmtiles-3.2.1.js");
+    await addJs("/vendor/protomaps-themes-base-4.4.0.js");
     return !!window.maplibregl;
   })();
   return _mapLibs;
 }
 let MAP=null, PROTO_REG=false;
 const RASTER_STYLE={version:8,sources:{osm:{type:"raster",
-  tiles:["https://a.tile.openstreetmap.org/{z}/{x}/{y}.png","https://b.tile.openstreetmap.org/{z}/{x}/{y}.png"],
+  tiles:["/tiles/raster/{z}/{x}/{y}.png"],
   tileSize:256,maxzoom:19,attribution:"© OpenStreetMap"}},
   layers:[{id:"osm",type:"raster",source:"osm"}]};
 function removeMap(){ if(MAP){ try{MAP.remove();}catch(e){} MAP=null; } }
@@ -1358,10 +1355,11 @@ function removeMap(){ if(MAP){ try{MAP.remove();}catch(e){} MAP=null; } }
 function vectorStyle(url){
   if(!PROTO_REG){ maplibregl.addProtocol("pmtiles", new pmtiles.Protocol().tile); PROTO_REG=true; }
   const ptb=window.protomaps_themes_base;
-  const layers = ptb.layers ? ptb.layers("protomaps","light","ru") : ptb.default("protomaps","light");
+  // Symbol-слои требуют внешних glyph/sprite с protomaps.github.io. Дороги,
+  // здания и вода полезнее подписей, которые могут снова уронить карту из-за CDN.
+  const themed = ptb.layers ? ptb.layers("protomaps","light","ru") : ptb.default("protomaps","light");
+  const layers = themed.filter(layer=>layer.type!=="symbol");
   return {version:8,
-    glyphs:"https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf",
-    sprite:"https://protomaps.github.io/basemaps-assets/sprites/v4/light",
     sources:{protomaps:{type:"vector",url:"pmtiles://"+location.origin+url,attribution:"© OpenStreetMap"}},
     layers};
 }
@@ -1858,7 +1856,7 @@ async function geoProbe(){
   }catch(e){}
 }
 
-// Голосовой комментарий: диктовка → /api/voice (Whisper на сервере) → текст в поле.
+// Голосовой комментарий: диктовка → /api/voice → текст в поле.
 // Выездники часто плохо пишут по-русски; голосом быстрее и полнее.
 let REC=null,VOICE_WAIT=false;
 async function toggleVoice(){
@@ -2462,8 +2460,8 @@ async function newMarker(){
 // Живая геопозиция (watchPosition) + камера «по курсу» (track-up, как в обычных
 // навигаторах) + линия маршрута (свой OSRM, если поднят, иначе честная прямая) +
 // нижняя плашка с расстоянием/ETA. Внешние приложения (Я/Google/2ГИС) остаются
-// для настоящей голосовой turn-by-turn навигации — это сознательное решение
-// (см. AGENTS.md), а не недоделка: здесь — живой превью-навигатор + быстрый переход.
+// для настоящей голосовой turn-by-turn навигации — это сознательное решение:
+// здесь остаются живой превью-навигатор и быстрый переход.
 let NAV = {map:null, watchId:null, follow:true, lastPos:null, lastHeading:0,
            meMarker:null, destMarker:null, routeFetched:false, refreshTimer:null,
            dest:null, bannerTimeout:null, free:false,

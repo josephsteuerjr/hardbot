@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import json
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .baseline import baseline_path
 from .config import ConfigBundle
 from .errors import SafetyViolation
 from .files import stable_copy
 from .models import DiscoveryReport, FileFingerprint, ManifestEntry
+from .profile_detection import WORKBOOK_PROFILE, infer_workbook_profile
+from .reader import read_portfolio
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +114,7 @@ def capture_sources(
     *,
     run_id: str | None = None,
     now: datetime | None = None,
+    progress: Callable[[str, int, int], None] | None = None,
 ) -> SnapshotSet:
     """Скопировать мастер и все manifest-файлы в `_local`.
 
@@ -131,6 +134,10 @@ def capture_sources(
         raise SafetyViolation(f"общий реестр не найден: {master_original}")
     master_copy = source_dir / f"master{master_original.suffix.casefold()}"
     master_fingerprint = stable_copy(master_original, master_copy)
+    total = 1 + len(discovery.entries)
+    done = 1
+    if progress is not None:
+        progress(master_original.name, done, total)
     current_baseline = baseline_path(bundle, master_original)
     baseline_copy: Path | None = None
     baseline_fingerprint: FileFingerprint | None = None
@@ -147,13 +154,29 @@ def capture_sources(
         seen_paths.add(folded)
         destination = source_dir / f"{entry.entry_id}{entry.path.suffix.casefold()}"
         source_fingerprint = stable_copy(entry.path, destination)
+        captured_entry = entry
+        if entry.profile == WORKBOOK_PROFILE:
+            try:
+                detected_profile = infer_workbook_profile(
+                    read_portfolio(destination, bundle.fields),
+                    bundle.fields,
+                )
+            except Exception as exc:
+                raise SafetyViolation(
+                    "не удалось определить профиль личного реестра "
+                    f"{entry.path}: {exc}"
+                ) from exc
+            captured_entry = replace(entry, profile=detected_profile)
         personals.append(
             CapturedPersonal(
-                entry=entry,
+                entry=captured_entry,
                 copy_path=destination,
                 fingerprint=source_fingerprint,
             )
         )
+        done += 1
+        if progress is not None:
+            progress(entry.path.name, done, total)
 
     snapshot = SnapshotSet(
         run_id=run_id,

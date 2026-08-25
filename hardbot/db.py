@@ -3302,10 +3302,13 @@ def import_grid(
     full_registry: bool = False,
     authoritative_employees: list[str] | None = None,
     preview_only: bool = False,
+    restore_manual_unassigned: bool = False,
     replace_current_visit_comments: bool = False,
     import_historical_visit_comments: bool = False,
     expected_auto_unassigned: int | None = None,
     expected_auto_unassigned_digest: str | None = None,
+    expected_manual_restored: int | None = None,
+    expected_manual_restore_digest: str | None = None,
     expected_comment_effect_digest: str | None = None,
 ) -> dict:
     """Ядро импорта опубликованного master/test subset.
@@ -3356,6 +3359,10 @@ def import_grid(
     При применении пульт передаёт увиденный ``expected_auto_unassigned``; если
     состояние БД успело измениться, импорт откатывается и требует новый preview.
 
+    Ручные снятия по умолчанию переживают импорт того же ответственного.
+    ``restore_manual_unassigned`` явно возвращает только совпавшие входные КД;
+    apply обязан повторить count+digest точного множества из preview.
+
     Комментарии имеют два независимых, выключенных по умолчанию режима:
       * текущий комментарий существующего договора сохраняется как есть; только
         ``replace_current_visit_comments`` заменяет его значением файла, включая
@@ -3391,6 +3398,14 @@ def import_grid(
               "auto_unassigned": 0,
               "auto_unassigned_by_employee": {},
               "auto_unassigned_digest": hashlib.sha256(b"[]").hexdigest(),
+              # Ручное снятие по умолчанию переживает импорт. Оператор может
+              # отдельно разрешить вернуть только те снятые договоры, которые
+              # снова присутствуют во входе с тем же ответственным.
+              "restore_manual_unassigned": bool(restore_manual_unassigned),
+              "manual_restore_candidates": 0,
+              "manual_restored": 0,
+              "manual_restore_by_employee": {},
+              "manual_restore_digest": hashlib.sha256(b"[]").hexdigest(),
               "replace_current_visit_comments": bool(
                   replace_current_visit_comments
               ),
@@ -3412,6 +3427,7 @@ def import_grid(
               "quarantined_contracts": []}
 
     for option_name, option_value in (
+        ("restore_manual_unassigned", restore_manual_unassigned),
         ("replace_current_visit_comments", replace_current_visit_comments),
         ("import_historical_visit_comments", import_historical_visit_comments),
     ):
@@ -3437,6 +3453,21 @@ def import_grid(
         )
         return report
 
+    if (
+        expected_manual_restored is not None
+        and (
+            isinstance(expected_manual_restored, bool)
+            or not isinstance(expected_manual_restored, int)
+            or expected_manual_restored < 0
+        )
+    ):
+        report["blocked"] = True
+        report["error"] = (
+            "импорт заблокирован: expected_manual_restored должен быть "
+            "неотрицательным целым"
+        )
+        return report
+
     if expected_auto_unassigned_digest is not None and (
         not isinstance(expected_auto_unassigned_digest, str)
         or len(expected_auto_unassigned_digest) != 64
@@ -3447,6 +3478,34 @@ def import_grid(
         report["error"] = (
             "импорт заблокирован: expected_auto_unassigned_digest должен быть "
             "lowercase SHA-256"
+        )
+        return report
+
+    if expected_manual_restore_digest is not None and (
+        not isinstance(expected_manual_restore_digest, str)
+        or len(expected_manual_restore_digest) != 64
+        or any(ch not in "0123456789abcdef"
+               for ch in expected_manual_restore_digest)
+    ):
+        report["blocked"] = True
+        report["error"] = (
+            "импорт заблокирован: expected_manual_restore_digest должен быть "
+            "lowercase SHA-256"
+        )
+        return report
+
+    if (
+        restore_manual_unassigned
+        and not preview_only
+        and (
+            expected_manual_restored is None
+            or expected_manual_restore_digest is None
+        )
+    ):
+        report["blocked"] = True
+        report["error"] = (
+            "импорт заблокирован: для возврата вручную снятых договоров "
+            "обязателен свежий предпросмотр точного множества возвратов"
         )
         return report
 
@@ -4020,6 +4079,7 @@ def import_grid(
         protected_cids: set[str] = set()
         isolated_call_cids: set[str] = set()
         comment_effect_rows: list[dict[str, str]] = []
+        manual_restore_effect: list[tuple[str, str]] = []
         # Владелец каждого уникального КД после duplicate preflight.
         owners: dict[str, str] = {}
         # Как ответственные УЖЕ записаны в базе — чтобы опечатка регистра в файле
@@ -4127,9 +4187,20 @@ def import_grid(
             if unassigned_reason == UNASSIGNED_REASON_ABSENT_FROM_REGISTRY:
                 data["unassigned_from"] = ""
                 data["unassigned_reason"] = ""
-            elif was_unassigned and incoming_resp == was_unassigned:
-                data["responsible"] = ""
-                incoming_resp = ""
+            elif (
+                unassigned_reason == UNASSIGNED_REASON_MANUAL
+                and was_unassigned
+                and _name_key(incoming_resp) == _name_key(was_unassigned)
+            ):
+                manual_restore_effect.append((cid, was_unassigned))
+                if restore_manual_unassigned:
+                    incoming_resp = was_unassigned
+                    data["responsible"] = was_unassigned
+                    data["unassigned_from"] = ""
+                    data["unassigned_reason"] = ""
+                else:
+                    data["responsible"] = ""
+                    incoming_resp = ""
             elif was_unassigned and incoming_resp:
                 data["unassigned_from"] = ""      # переназначили — метку снимаем
                 data["unassigned_reason"] = ""
@@ -4345,6 +4416,29 @@ def import_grid(
         # Считаем по итогу разбора всего файла, а не построчно: у одного договора в
         # реестре бывает несколько строк, и владелец может стоять в любой из них.
         report["no_responsible"] = sum(1 for owner in owners.values() if not owner)
+        manual_effect_rows = [
+            {"contract_id": cid, "employee": employee}
+            for cid, employee in sorted(manual_restore_effect)
+        ]
+        report["manual_restore_candidates"] = len(manual_effect_rows)
+        report["manual_restored"] = (
+            len(manual_effect_rows) if restore_manual_unassigned else 0
+        )
+        report["manual_restore_digest"] = hashlib.sha256(
+            json.dumps(
+                manual_effect_rows,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        manual_by_employee: dict[str, int] = {}
+        for _cid, employee in manual_restore_effect:
+            manual_by_employee[employee] = manual_by_employee.get(employee, 0) + 1
+        report["manual_restore_by_employee"] = {
+            employee: manual_by_employee[employee]
+            for employee in sorted(manual_by_employee, key=_name_key)
+        }
         auto_unassigned_effect: list[tuple[str, str]] = []
         if full_registry:
             # Отсутствие считается только по каноническим КД, разобранным тем же
@@ -4400,7 +4494,19 @@ def import_grid(
             and report["comment_effect_digest"]
             != expected_comment_effect_digest
         )
-        if stale_count or stale_digest or stale_comment_digest:
+        stale_manual_count = (
+            expected_manual_restored is not None
+            and report["manual_restored"] != expected_manual_restored
+        )
+        stale_manual_digest = (
+            expected_manual_restore_digest is not None
+            and report["manual_restore_digest"]
+            != expected_manual_restore_digest
+        )
+        if (
+            stale_count or stale_digest or stale_comment_digest
+            or stale_manual_count or stale_manual_digest
+        ):
             conn.rollback()
             report["blocked"] = True
             report["preview_stale"] = True
@@ -4411,9 +4517,13 @@ def import_grid(
             report["expected_comment_effect_digest"] = (
                 expected_comment_effect_digest
             )
+            report["expected_manual_restored"] = expected_manual_restored
+            report["expected_manual_restore_digest"] = (
+                expected_manual_restore_digest
+            )
             report["error"] = (
                 "импорт заблокирован: после предпросмотра состояние БД "
-                "изменилось; ожидаемые множества снятий/замен комментариев "
+                "изменилось; ожидаемые множества снятий/возвратов/замен комментариев "
                 "больше не совпадают с фактическими. Сделайте новый "
                 "предпросмотр"
             )

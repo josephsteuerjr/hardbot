@@ -48,6 +48,23 @@ class SourceCell:
     handoff: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class ConflictResolution:
+    """One explicit operator decision for a contested master cell.
+
+    The expected values make a decision single-use in practice: if either
+    side changes before the next preparation, the rule stops applying and the
+    operator sees a new conflict instead of silently reusing an old choice.
+    """
+
+    contract_id: str
+    title: str
+    master_value: Any
+    employee_value: Any
+    winner: str
+    reason: str = ""
+
+
 def _rules_for_profile(fields: FieldConfig, profile: str) -> tuple[FieldRule, ...]:
     return tuple(rule for rule in fields.collect if profile in rule.profiles)
 
@@ -81,15 +98,9 @@ def _column_index(
     return found[0] if len(found) == 1 else None
 
 
-def _schema_titles(
-    snapshot: WorkbookSnapshot,
-    fields: FieldConfig,
-) -> tuple[str, ...]:
-    return tuple(
-        _canonical_title(fields, value)
-        for value in snapshot.headers
-        if norm_title(value)
-    )
+def _schema_key(fields: FieldConfig, value: Any) -> str:
+    """Canonical title identity used only for column-to-column mapping."""
+    return norm_title(_canonical_title(fields, value))
 
 
 def _expected_profile_columns(
@@ -122,6 +133,37 @@ def _distinct_nonblank(
     return out
 
 
+def _is_initial_master_value(value: Any, rule: FieldRule) -> bool:
+    return any(
+        values_equal_for_rule(value, allowed, rule)
+        for allowed in rule.initial_master_values
+    )
+
+
+def _conflict_resolution_map(
+    resolutions: tuple[ConflictResolution, ...],
+) -> dict[tuple[str, str], ConflictResolution]:
+    """Validate and index explicit per-cell conflict decisions."""
+    indexed: dict[tuple[str, str], ConflictResolution] = {}
+    for resolution in resolutions:
+        key = (
+            norm_key(resolution.contract_id),
+            norm_title(resolution.title),
+        )
+        if not all(key):
+            raise ValueError("разрешение конфликта должно содержать КД и поле")
+        if resolution.winner not in {"employee", "master"}:
+            raise ValueError(
+                "winner разрешения конфликта должен быть 'employee' или 'master'"
+            )
+        if key in indexed:
+            raise ValueError(
+                "для одного КД и поля нельзя задать два разрешения конфликта"
+            )
+        indexed[key] = resolution
+    return indexed
+
+
 def build_sync_plan(
     master: WorkbookSnapshot,
     personal_books: list[tuple[ManifestEntry, WorkbookSnapshot]],
@@ -131,6 +173,9 @@ def build_sync_plan(
     responsible_aliases: dict[str, str] | None = None,
     rollover_month: str | None = None,
     config_identity: str = "",
+    include_projections: bool = True,
+    conflict_resolutions: tuple[ConflictResolution, ...] = (),
+    master_conflict_policy: str = "configured",
 ) -> SyncPlan:
     """Собрать изменения мастера и ожидаемые личные портфели.
 
@@ -141,10 +186,18 @@ def build_sync_plan(
         raise ValueError(
             "multi_owner_policy должен быть 'block' или 'master_responsible'"
         )
+    if master_conflict_policy not in {"configured", "employee_wins"}:
+        raise ValueError(
+            "master_conflict_policy должен быть 'configured' или 'employee_wins'"
+        )
     owner_norm = lambda value: canonical_responsible_name(  # noqa: E731
         value,
         responsible_aliases,
     )
+    resolution_by_key = _conflict_resolution_map(conflict_resolutions)
+    seen_resolution_keys: set[tuple[str, str]] = set()
+    resolved_conflicts: list[dict[str, Any]] = []
+    stale_resolutions: list[dict[str, Any]] = []
     plan = SyncPlan(
         master.path,
         master.fingerprint,
@@ -228,11 +281,20 @@ def build_sync_plan(
             continue
         responsibles = book.unique_responsibles(fields.responsible_title)
         responsible = resolve_book_responsible(
-            entry,
             book,
             fields.responsible_title,
         )
         if responsible is None:
+            if not responsibles and workbook_data_is_empty(book):
+                plan.issues.append(
+                    Issue(
+                        "info",
+                        "empty_personal_without_responsible_skipped",
+                        f"пустой личный файл пропущен: {entry.path.name}",
+                        {"path": str(entry.path)},
+                    )
+                )
+                continue
             plan.issues.append(
                 Issue(
                     "error",
@@ -272,32 +334,23 @@ def build_sync_plan(
 
         target_key = (entry.profile, responsible_norm)
         if target_key in seen_projection_targets:
-            plan.issues.append(
-                Issue(
-                    "error",
-                    "duplicate_projection_target",
-                    f"два файла претендуют на один портфель: {responsible}",
-                    {
-                        "first": str(seen_projection_targets[target_key]),
-                        "second": str(entry.path),
-                        "profile": entry.profile,
-                    },
+            if include_projections:
+                plan.issues.append(
+                    Issue(
+                        "error",
+                        "duplicate_projection_target",
+                        f"два файла претендуют на один портфель: {responsible}",
+                        {
+                            "first": str(seen_projection_targets[target_key]),
+                            "second": str(entry.path),
+                            "profile": entry.profile,
+                        },
+                    )
                 )
-            )
-            continue
+                continue
         else:
             seen_projection_targets[target_key] = entry.path
         book_responsibles[entry.entry_id] = responsible
-
-        if owner_norm(entry.responsible_hint) != responsible_norm:
-            plan.issues.append(
-                Issue(
-                    "warning",
-                    "filename_responsible_mismatch",
-                    f"имя файла не совпадает с ответственным: {entry.path.name}",
-                    {"responsible": responsible, "hint": entry.responsible_hint},
-                )
-            )
 
         personal_key_col = _column_index(book, fields, fields.key_title)
         personal_responsible_col = _column_index(
@@ -323,9 +376,9 @@ def build_sync_plan(
             if personal_column is None:
                 plan.issues.append(
                     Issue(
-                        "error",
+                        "warning",
                         "collect_column_missing",
-                        f"нет собираемой колонки «{rule.title}»: {entry.path.name}",
+                        f"колонка «{rule.title}» отсутствует и пропущена: {entry.path.name}",
                         {"profile": entry.profile, "path": str(entry.path)},
                     )
                 )
@@ -478,10 +531,18 @@ def build_sync_plan(
                         },
                     )
                     if removal_proved:
-                        source_is_handoff = True
-                        source_target_responsible = master_owners[
-                            canonical_owner
-                        ]
+                        if include_projections:
+                            source_is_handoff = True
+                            source_target_responsible = master_owners[
+                                canonical_owner
+                            ]
+                        else:
+                            # Manual upward transfer accepts values only from
+                            # the current master owner.  ``пред отв`` remains
+                            # useful to remove/hand off rows during the
+                            # separate downward projection, but cannot make a
+                            # former owner's values eligible for collection.
+                            continue
                     else:
                         continue
             for rule, column in rule_columns:
@@ -568,7 +629,6 @@ def build_sync_plan(
         if source_values.get(source_key):
             handoff_shadowed += 1
             continue
-        source_values[source_key].append(sources[0])
         handoff_used += 1
     if handoff_conflicts:
         plan.issues.append(
@@ -591,7 +651,7 @@ def build_sync_plan(
                 "жёлтые данные доказанных прежних владельцев включены "
                 "в перенос новому владельцу",
                 {
-                    "used_as_source": handoff_used,
+                    "available_for_projection": handoff_used,
                     "kept_current_owner_value": handoff_shadowed,
                 },
             )
@@ -815,8 +875,108 @@ def build_sync_plan(
         )
         desired_by_row: dict[int, Any] = {}
         conflicts: list[dict[str, Any]] = []
+        field_resolutions: list[dict[str, Any]] = []
 
-        if baseline_found:
+        def configured_resolution(
+            before: Any,
+            *,
+            row_number: int,
+            kind: str,
+            baseline_value: Any = None,
+        ) -> tuple[bool, Any]:
+            resolution_key = (contract_id, normalized_title)
+            resolution = resolution_by_key.get(resolution_key)
+            if resolution is None:
+                return False, None
+            seen_resolution_keys.add(resolution_key)
+            if not (
+                values_equal_for_rule(before, resolution.master_value, rule)
+                and values_equal_for_rule(
+                    after,
+                    resolution.employee_value,
+                    rule,
+                )
+            ):
+                stale_resolutions.append(
+                    {
+                        "contract_id": contract_id,
+                        "title": title,
+                        "row": row_number + 1,
+                        "kind": kind,
+                        "expected_master": resolution.master_value,
+                        "actual_master": before,
+                        "expected_employee": resolution.employee_value,
+                        "actual_employee": after,
+                        "source": str(source.entry.path),
+                    }
+                )
+                return False, None
+            desired = after if resolution.winner == "employee" else before
+            field_resolutions.append(
+                {
+                    "contract_id": contract_id,
+                    "title": title,
+                    "row": row_number + 1,
+                    "kind": kind,
+                    "winner": resolution.winner,
+                    "master": before,
+                    "employee": after,
+                    "reason": resolution.reason,
+                    "source": str(source.entry.path),
+                    "baseline": baseline_value,
+                }
+            )
+            return True, desired
+
+        if master_conflict_policy == "employee_wins":
+            personal_changed = (
+                baseline_found
+                and not values_equal_for_rule(after, baseline_value, rule)
+            )
+            for row_number, row in target_rows:
+                before = master.row_value(row, target_column)
+                desired_by_row[row_number] = after
+                if values_equal_for_rule(before, after, rule):
+                    continue
+                override_kind: str | None = None
+                if baseline_found:
+                    master_changed = not values_equal_for_rule(
+                        before,
+                        baseline_value,
+                        rule,
+                    )
+                    if master_changed:
+                        override_kind = (
+                            "both_changed"
+                            if personal_changed
+                            else "master_only"
+                        )
+                elif (
+                    not is_blank(before)
+                    and not _is_initial_master_value(before, rule)
+                    and not (
+                        rule.master_conflict == "accept_superset"
+                        and is_text_superset(after, before)
+                    )
+                ):
+                    override_kind = "no_baseline"
+                if override_kind is not None:
+                    employee_authority_overrides.append(
+                        {
+                            "contract_id": contract_id,
+                            "title": title,
+                            "row": row_number + 1,
+                            "kind": override_kind,
+                            "baseline": (
+                                baseline_value if baseline_found else None
+                            ),
+                            "master": before,
+                            "employee": after,
+                            "source": str(source.entry.path),
+                            "policy": "employee_wins",
+                        }
+                    )
+        elif baseline_found:
             personal_changed = not values_equal_for_rule(
                 after,
                 baseline_value,
@@ -845,6 +1005,15 @@ def build_sync_plan(
                         and is_text_superset(before, after)
                     ):
                         desired_by_row[row_number] = before
+                        continue
+                    resolved, desired = configured_resolution(
+                        before,
+                        row_number=row_number,
+                        kind="both_changed",
+                        baseline_value=baseline_value,
+                    )
+                    if resolved:
+                        desired_by_row[row_number] = desired
                         continue
                     conflicts.append(
                         {
@@ -887,6 +1056,7 @@ def build_sync_plan(
                 before = master.row_value(row, target_column)
                 if (
                     is_blank(before)
+                    or _is_initial_master_value(before, rule)
                     or values_equal_for_rule(before, after, rule)
                     or (
                         rule.master_conflict == "accept_superset"
@@ -900,6 +1070,14 @@ def build_sync_plan(
                     and is_text_superset(before, after)
                 ):
                     desired_by_row[row_number] = before
+                    continue
+                resolved, desired = configured_resolution(
+                    before,
+                    row_number=row_number,
+                    kind="no_baseline",
+                )
+                if resolved:
+                    desired_by_row[row_number] = desired
                     continue
                 conflicts.append(
                     {
@@ -918,6 +1096,8 @@ def build_sync_plan(
                     }
                 )
                 continue
+
+        resolved_conflicts.extend(field_resolutions)
 
         for row_number, row in target_rows:
             before = master.row_value(row, target_column)
@@ -987,19 +1167,75 @@ def build_sync_plan(
                 },
             )
         )
+    if resolved_conflicts:
+        plan.issues.append(
+            Issue(
+                "info",
+                "configured_conflict_resolutions_applied",
+                "конфликты разрешены явными решениями из конфигурации",
+                {
+                    "count": len(resolved_conflicts),
+                    "resolutions": resolved_conflicts[:100],
+                },
+            )
+        )
+    if stale_resolutions:
+        plan.issues.append(
+            Issue(
+                "error",
+                "configured_conflict_resolution_stale",
+                "настроенное решение не совпало с текущими значениями; "
+                "нужно новое подтверждение",
+                {
+                    "count": len(stale_resolutions),
+                    "resolutions": stale_resolutions[:100],
+                },
+            )
+        )
+    unused_resolution_keys = sorted(
+        set(resolution_by_key) - seen_resolution_keys
+    )
+    if unused_resolution_keys:
+        plan.issues.append(
+            Issue(
+                "warning",
+                "configured_conflict_resolution_unused",
+                "настроенное решение не потребовалось в этом запуске",
+                {
+                    "count": len(unused_resolution_keys),
+                    "resolutions": [
+                        {
+                            "contract_id": contract_id,
+                            "title": title,
+                        }
+                        for contract_id, title in unused_resolution_keys
+                    ],
+                },
+            )
+        )
     if employee_authority_overrides:
         plan.issues.append(
             Issue(
                 "warning",
                 "employee_owned_master_edits_overridden",
-                "изменения жёлтых полей только в общем реестре будут "
-                "возвращены к версии сотрудника",
+                "при расхождении с общим реестром применён приоритет "
+                "личного реестра",
                 {
                     "count": len(employee_authority_overrides),
                     "samples": employee_authority_overrides[:100],
                 },
             )
         )
+
+    if not include_projections:
+        plan.changes.sort(
+            key=lambda change: (
+                str(change.path).casefold(),
+                change.row,
+                change.column,
+            )
+        )
+        return plan
 
     preserve_titles = {
         norm_title(title): title
@@ -1021,34 +1257,155 @@ def build_sync_plan(
         responsible = book_responsibles.get(entry.entry_id)
         if not responsible:
             continue
+        target_master_rows = [
+            (row_number, row)
+            for row_number, row in enumerate(
+                master.rows,
+                start=master.data_start,
+            )
+            if owner_norm(master.row_value(row, responsible_col))
+            == owner_norm(responsible)
+        ]
         expected_columns = _expected_profile_columns(master, fields, entry.profile)
-        expected_titles = tuple(title for title, _index in expected_columns)
-        actual_raw_titles = tuple(
-            str(value or "").strip()
-            for value in book.headers
-            if norm_title(value)
-        )
-        actual_titles = _schema_titles(book, fields)
-        if tuple(map(norm_title, actual_titles)) != tuple(map(norm_title, expected_titles)):
-            actual_set = set(map(norm_title, actual_titles))
-            expected_set = set(map(norm_title, expected_titles))
+        expected_by_key: dict[str, tuple[str, int]] = {}
+        duplicate_expected: list[str] = []
+        for title, master_column in expected_columns:
+            key = _schema_key(fields, title)
+            if key in expected_by_key:
+                duplicate_expected.append(title)
+            else:
+                expected_by_key[key] = (title, master_column)
+        if duplicate_expected:
             plan.issues.append(
                 Issue(
                     "error",
-                    "personal_schema_drift",
-                    f"схема личного файла отличается от профиля {entry.profile}: {entry.path.name}",
+                    "master_profile_schema_duplicate_title",
+                    f"в профиле {entry.profile} общего реестра неоднозначные заголовки",
                     {
-                        "missing": [
-                            title for title in expected_titles if norm_title(title) not in actual_set
-                        ],
-                        "extra": [
-                            title for title in actual_titles if norm_title(title) not in expected_set
-                        ],
-                        "order_changed": actual_set == expected_set,
+                        "path": str(master.path),
+                        "titles": duplicate_expected,
                     },
                 )
             )
             continue
+
+        blank_header_columns = [
+            index + 1
+            for index, value in enumerate(book.headers)
+            if not norm_title(value)
+        ]
+        if blank_header_columns:
+            plan.issues.append(
+                Issue(
+                    "warning",
+                    "personal_unnamed_columns_preserved",
+                    f"безымянные столбцы будут сохранены только в этом личном файле: {entry.path.name}",
+                    {
+                        "path": str(entry.path),
+                        "columns": blank_header_columns,
+                    },
+                )
+            )
+
+        actual_columns: list[tuple[str, int, str]] = []
+        actual_by_key: dict[str, tuple[str, int]] = {}
+        duplicate_actual: list[str] = []
+        for personal_column, value in enumerate(book.headers):
+            # Keep the existing header byte-for-byte from Calamine. Matching
+            # ignores cosmetic whitespace, but a downward run must not rewrite
+            # the employee's established header text as a side effect.
+            raw_title = str(value or "")
+            key = _schema_key(fields, raw_title)
+            if not key:
+                actual_columns.append((raw_title, personal_column, key))
+                continue
+            if key in actual_by_key:
+                duplicate_actual.append(raw_title)
+            else:
+                actual_by_key[key] = (raw_title, personal_column)
+            actual_columns.append((raw_title, personal_column, key))
+        if duplicate_actual:
+            plan.issues.append(
+                Issue(
+                    "error",
+                    "personal_schema_duplicate_alias",
+                    f"в личном файле два заголовка означают одно поле: {entry.path.name}",
+                    {
+                        "path": str(entry.path),
+                        "titles": duplicate_actual,
+                    },
+                )
+            )
+            continue
+
+        extra_titles = [
+            raw_title
+            for raw_title, _personal_column, key in actual_columns
+            if key and key not in expected_by_key
+        ]
+        if extra_titles:
+            missing_titles = [
+                title
+                for key, (title, _master_column) in expected_by_key.items()
+                if key not in actual_by_key
+            ]
+            plan.issues.append(
+                Issue(
+                    "error",
+                    "personal_schema_drift",
+                    f"в личном файле есть столбцы вне профиля {entry.profile}: {entry.path.name}",
+                    {
+                        "missing": missing_titles,
+                        "extra": extra_titles,
+                        "order_changed": False,
+                    },
+                )
+            )
+            continue
+
+        # Existing columns stay exactly where the employee has them. Missing
+        # profile columns are appended in master order. Folder and file names,
+        # as well as cosmetic header aliases, never participate in the mapping.
+        output_columns: list[tuple[str, int | None, int | None]] = [
+            (
+                raw_title,
+                expected_by_key[key][1] if key else None,
+                personal_column,
+            )
+            for raw_title, personal_column, key in actual_columns
+        ]
+        added_columns: list[str] = []
+        for title, master_column in expected_columns:
+            key = _schema_key(fields, title)
+            if key in actual_by_key or not target_master_rows:
+                continue
+            output_columns.append((title, master_column, None))
+            added_columns.append(title)
+        output_titles = tuple(title for title, _master, _old in output_columns)
+        output_type_tags = tuple(
+            (
+                book.type_tags[personal_column]
+                if personal_column is not None
+                and personal_column < len(book.type_tags)
+                else master.type_tags[master_column]
+                if master_column is not None
+                and master_column < len(master.type_tags)
+                else None
+            )
+            for _title, master_column, personal_column in output_columns
+        )
+        if added_columns:
+            plan.issues.append(
+                Issue(
+                    "info",
+                    "personal_schema_columns_will_be_added",
+                    f"в личный файл будут добавлены столбцы из общего реестра: {entry.path.name}",
+                    {
+                        "path": str(entry.path),
+                        "titles": added_columns,
+                    },
+                )
+            )
         projection_key_col = _column_index(
             book,
             fields,
@@ -1065,12 +1422,6 @@ def build_sync_plan(
             )
             continue
 
-        target_master_rows = [
-            (row_number, row)
-            for row_number, row in enumerate(master.rows, start=master.data_start)
-            if owner_norm(master.row_value(row, responsible_col))
-            == owner_norm(responsible)
-        ]
         if (
             not target_master_rows
             and not workbook_data_is_empty(book)
@@ -1106,7 +1457,6 @@ def build_sync_plan(
             )
 
         old_by_key = book.rows_by_key(fields.key_title)
-        old_title_map = book.title_map()
         projection_rows: list[tuple[Any, ...]] = []
         preserved_cells = 0
         employee_owned_preserved_cells = 0
@@ -1121,7 +1471,7 @@ def build_sync_plan(
             output_column = next(
                 (
                     index
-                    for index, title in enumerate(expected_titles)
+                    for index, title in enumerate(output_titles)
                     if norm_title(title)
                     in _title_variants(fields, rule.title)
                 ),
@@ -1143,14 +1493,21 @@ def build_sync_plan(
             in employee_output_columns
             if normalized_title in rollover_clear_titles
         }
+        personal_only_output_columns = tuple(
+            (output_column, old_column)
+            for output_column, (
+                _title,
+                master_column,
+                old_column,
+            ) in enumerate(output_columns)
+            if master_column is None and old_column is not None
+        )
         responsible_output_column = next(
             (
                 index
-                for index, (title, _master_column) in enumerate(
-                    expected_columns
-                )
+                for index, title in enumerate(output_titles)
                 if norm_title(title)
-                == norm_title(fields.responsible_title)
+                in _title_variants(fields, fields.responsible_title)
             ),
             None,
         )
@@ -1167,11 +1524,15 @@ def build_sync_plan(
 
         for master_row_number, master_row in target_master_rows:
             row_values = []
-            for _title, master_column in expected_columns:
+            for _title, master_column, _old_column in output_columns:
                 row_values.append(
-                    changes_by_cell.get(
-                        (master_row_number, master_column),
-                        master.row_value(master_row, master_column),
+                    (
+                        changes_by_cell.get(
+                            (master_row_number, master_column),
+                            master.row_value(master_row, master_column),
+                        )
+                        if master_column is not None
+                        else None
                     )
                 )
             row_values[responsible_output_column] = responsible
@@ -1232,12 +1593,12 @@ def build_sync_plan(
                 output_column = next(
                     (
                         index
-                        for index, title in enumerate(expected_titles)
-                        if norm_title(title) == normalized_title
+                        for index, title in enumerate(output_titles)
+                        if _schema_key(fields, title) == normalized_title
                     ),
                     None,
                 )
-                old_column = old_title_map.get(normalized_title)
+                old_column = _column_index(book, fields, display_title)
                 if output_column is None or old_column is None:
                     continue
                 if not is_blank(row_values[output_column]):
@@ -1263,6 +1624,34 @@ def build_sync_plan(
                 if distinct:
                     row_values[output_column] = next(iter(distinct.values()))
                     preserved_cells += 1
+            for output_column, old_column in personal_only_output_columns:
+                old_values = [
+                    book.row_value(old_row, old_column)
+                    for _old_row_number, old_row in old_rows
+                ]
+                distinct = _distinct_nonblank(old_values)
+                if len(distinct) > 1:
+                    plan.issues.append(
+                        Issue(
+                            "error",
+                            "personal_only_value_conflict",
+                            "разные значения безымянного личного столбца "
+                            f"у КД {contract_id}",
+                            {
+                                "path": str(entry.path),
+                                "column": output_column + 1,
+                                "values": [
+                                    str(value)
+                                    for value in distinct.values()
+                                ],
+                            },
+                        )
+                    )
+                    continue
+                if distinct:
+                    row_values[output_column] = next(
+                        iter(distinct.values())
+                    )
             for output_column in rollover_output_columns:
                 if not is_blank(row_values[output_column]):
                     rollover_cleared_cells += 1
@@ -1292,8 +1681,12 @@ def build_sync_plan(
                 elif all(is_blank(value) for value in old_row):
                     continue
                 retained_values = [
-                    book.row_value(old_row, column)
-                    for column in range(len(expected_titles))
+                    (
+                        book.row_value(old_row, old_column)
+                        if old_column is not None
+                        else None
+                    )
+                    for _title, _master_column, old_column in output_columns
                 ]
                 for output_column in rollover_output_columns:
                     if not is_blank(retained_values[output_column]):
@@ -1306,9 +1699,11 @@ def build_sync_plan(
             PersonalProjection(
                 entry=entry,
                 responsible=responsible,
-                headers=actual_raw_titles,
+                headers=output_titles,
                 rows=tuple(projection_rows),
                 source_fingerprint=book.fingerprint,
+                type_tags=output_type_tags,
+                added_columns=tuple(added_columns),
                 preserved_cells=preserved_cells,
                 employee_owned_preserved_cells=(
                     employee_owned_preserved_cells

@@ -18,7 +18,6 @@ import csv
 import hashlib
 import json
 import os
-import re
 import secrets
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -57,8 +56,8 @@ from .normalize import (
 )
 from .ownership import (
     canonical_responsible_name,
-    manifest_owner_matches,
     resolve_book_responsible,
+    workbook_data_is_empty,
 )
 from .reader import read_portfolio
 from .semantics import values_equal_for_rule
@@ -74,6 +73,11 @@ from .staging import (
     _revealed_rows,
     excel_safe_value,
 )
+
+
+def _backup_name_prefixes(bundle: ConfigBundle) -> tuple[str, ...]:
+    app = getattr(bundle, "app", None)
+    return tuple(getattr(app, "backup_name_prefixes", ("~", "копия")))
 
 
 @dataclass(frozen=True, slots=True)
@@ -594,11 +598,6 @@ def build_distribution_plan(
         norm_name(source): (source, target)
         for source, target in config.responsible_aliases.items()
     }
-    excluded = re.compile(
-        str(config.safety.get("exclude_filename_regex", r"(?!x)x")),
-        flags=re.IGNORECASE,
-    )
-
     personal_targets: dict[
         tuple[str, str],
         tuple[Any, WorkbookSnapshot, str, tuple[tuple[str, int], ...]],
@@ -607,7 +606,10 @@ def build_distribution_plan(
     excluded_files = 0
     for captured in snapshot.personals:
         entry = captured.entry
-        if excluded.search(entry.path.name):
+        if any(
+            entry.path.name.casefold().startswith(prefix)
+            for prefix in _backup_name_prefixes(bundle)
+        ):
             excluded_files += 1
             continue
         try:
@@ -634,10 +636,19 @@ def build_distribution_plan(
             continue
         responsibles = book.unique_responsibles(bundle.fields.responsible_title)
         responsible = resolve_book_responsible(
-            entry,
             book,
             bundle.fields.responsible_title,
         )
+        # Downward distribution is a separate operation.  A brand-new empty
+        # target has no workbook row from which its recipient can be read, so
+        # only that legacy case keeps the captured manifest hint.  Upward
+        # planning never uses this fallback.
+        if (
+            responsible is None
+            and not responsibles
+            and workbook_data_is_empty(book)
+        ):
+            responsible = str(entry.responsible_hint or "").strip() or None
         if responsible is None:
             issues.append(
                 Issue(
@@ -645,27 +656,6 @@ def build_distribution_plan(
                     "distribution_personal_responsible_not_unique",
                     f"неоднозначный ответственный: {entry.path.name}",
                     {"responsibles": list(responsibles)},
-                )
-            )
-            continue
-        if not manifest_owner_matches(bundle, entry, responsible):
-            issues.append(
-                Issue(
-                    "error",
-                    "distribution_manifest_owner_mismatch",
-                    "ответственный внутри книги не совпал с папкой или именем файла",
-                    {
-                        "entry_id": entry.entry_id,
-                        "path": str(entry.path),
-                        "employee_folder": entry.employee_folder,
-                        "responsible_hint": entry.responsible_hint,
-                        "book_responsible": responsible,
-                        "responsible_source": (
-                            "manifest"
-                            if not responsibles
-                            else "workbook"
-                        ),
-                    },
                 )
             )
             continue

@@ -107,7 +107,10 @@
         "soft"
       ],
       "empty": "ignore",
-      "conflict": "error"
+      "conflict": "error",
+      "initial_master_values": [
+        "Не обработан"
+      ]
     },
     {
       "title": "Телефон глав",
@@ -146,7 +149,8 @@
       ],
       "empty": "ignore",
       "conflict": "error",
-      "value_type": "literal"
+      "value_type": "literal",
+      "comparison_type": "date"
     },
     {
       "title": "Комментарий текущего месяца выезда",

@@ -17,10 +17,10 @@ python _local\_deploy_hardbot2.py deploy
 набор кода. `.env`, Compose, БД, фото и production-секреты вместе с кодом не
 загружаются.
 
-## Голос: общий Whisper Praxis
+## Голос: общий сервис распознавания речи
 
-Hardbot2 не загружает собственную модель. Он обращается к уже прогретому
-`large-v3-turbo` внутри Praxis по authenticated HTTP через Unix-сокет:
+Hardbot2 не запускает локальный распознаватель. Он обращается к общему сервису
+Praxis STT по authenticated HTTP через Unix-сокет:
 
 - host socket: `/opt/praxis-stt/run/stt.sock`;
 - container socket: `/run/praxis-stt/stt.sock`;
@@ -34,7 +34,7 @@ Hardbot2 не загружает собственную модель. Он об�
 
 - проверяет authenticated `/healthz`;
 - делает timestamp-backup production Compose и `.env`;
-- удаляет mount прежней локальной модели, но не удаляет модель с диска;
+- удаляет mount прежнего локального распознавателя, но не удаляет его данные с диска;
 - добавляет read-only mounts сокета и token-файла;
 - выставляет только STT env-ключи;
 - закрепляет `mem_limit: 768m` и `memswap_limit: 1024m`;
@@ -108,6 +108,13 @@ scope. Missing, unknown и нормализованные дубли блоки�
 legacy multipart import отвечает 409. Следующая сразу за заголовком строка
 типов опубликованного master обязательна: exact `сх`/`хард`/`софт` проверяется
 по каждой распознанной колонке, а строка исключается из данных.
+
+Ручное снятие клиента сохраняется при обычном импорте того же ответственного.
+Возврат разрешается только явным `restore_manual_unassigned=true` после
+read-only preview: write-запрос обязан передать совпавшие
+`expected_manual_restored` и `expected_manual_restore_digest`. Пульт показывает
+состав по сотрудникам и для возврата создаёт новый одноразовый `test_subset`
+proof, даже если весь выбранный файл имеет publication receipt.
 
 Source proof v2 перед отправкой одноразово регистрируется локальным
 `hardbot/import_authorization.py` внутри production runtime. HTTP-endpoint для

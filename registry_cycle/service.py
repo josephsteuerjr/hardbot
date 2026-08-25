@@ -11,8 +11,7 @@ from .directions import validate_master_header_directions
 from .discovery import discover
 from .errors import SafetyViolation, WorkbookReadError
 from .models import DiscoveryReport, Issue, SyncPlan
-from .ownership import manifest_owner_matches, resolve_book_responsible
-from .planner import build_sync_plan
+from .planner import ConflictResolution, build_sync_plan
 from .reader import read_portfolio
 from .reporting import write_plan_reports
 from .rollover import resolve_rollover_month
@@ -97,6 +96,10 @@ class CycleService:
         discovery_report: DiscoveryReport,
         *,
         rollover_month: str | None = None,
+        include_projections: bool = True,
+        baseline_override: CycleBaseline | None = None,
+        conflict_resolutions: tuple[ConflictResolution, ...] = (),
+        master_conflict_policy: str = "configured",
     ) -> PreparedRun:
         assert_snapshot_config_identity(self.bundle, snapshot)
         assert_snapshot_run_dir(self.bundle, snapshot)
@@ -111,14 +114,12 @@ class CycleService:
             path=snapshot.master_original,
             fingerprint=snapshot.master_fingerprint,
         )
-        baseline = (
-            load_baseline(
+        baseline = baseline_override
+        if baseline is None and snapshot.baseline_copy is not None:
+            baseline = load_baseline(
                 snapshot.baseline_copy,
                 expected_master_path=snapshot.master_original,
             )
-            if snapshot.baseline_copy is not None
-            else None
-        )
 
         books = []
         read_issues: list[Issue] = []
@@ -132,46 +133,6 @@ class CycleService:
                         "personal_read_failed",
                         f"не прочитан личный файл: {personal.entry.path.name}",
                         {"path": str(personal.entry.path), "error": str(exc)},
-                    )
-                )
-                continue
-            responsibles = local_book.unique_responsibles(
-                self.bundle.fields.responsible_title
-            )
-            responsible = resolve_book_responsible(
-                personal.entry,
-                local_book,
-                self.bundle.fields.responsible_title,
-            )
-            if (
-                responsible is not None
-                and not manifest_owner_matches(
-                    self.bundle,
-                    personal.entry,
-                    responsible,
-                )
-            ):
-                read_issues.append(
-                    Issue(
-                        "error",
-                        "manifest_owner_mismatch",
-                        "ответственный внутри книги не совпал с папкой "
-                        "или именем файла",
-                        {
-                            "path": str(personal.entry.path),
-                            "employee_folder": (
-                                personal.entry.employee_folder
-                            ),
-                            "responsible_hint": (
-                                personal.entry.responsible_hint
-                            ),
-                            "book_responsible": responsible,
-                            "responsible_source": (
-                                "manifest"
-                                if not responsibles
-                                else "workbook"
-                            ),
-                        },
                     )
                 )
                 continue
@@ -200,6 +161,9 @@ class CycleService:
             responsible_aliases=self.bundle.app.responsible_aliases,
             rollover_month=rollover_month,
             config_identity=self.bundle.config_identity,
+            include_projections=include_projections,
+            conflict_resolutions=conflict_resolutions,
+            master_conflict_policy=master_conflict_policy,
         )
         plan.issues[:0] = [
             *discovery_report.issues,

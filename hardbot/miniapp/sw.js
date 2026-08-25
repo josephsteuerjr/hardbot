@@ -9,13 +9,17 @@
  * ВАЖНО при обновлении оболочки на сервере: поднимите версию CACHE (v1→v2), иначе у уже
  * открывавших приложение выездников останется старый index.html из кэша до смены версии.
  */
-const CACHE = "hardbot-shell-v31";
+const CACHE = "hardbot-shell-v32";
 const PRECACHE = [
   "/",
   "/vendor/telegram-web-app.js",
   "/manifest.webmanifest",
   "/vendor/icon-192.png",
   "/vendor/icon-512.png",
+  "/vendor/maplibre-gl-4.7.1.css",
+  "/vendor/maplibre-gl-4.7.1.js",
+  "/vendor/pmtiles-3.2.1.js",
+  "/vendor/protomaps-themes-base-4.4.0.js",
 ];
 
 self.addEventListener("install", (e) => {

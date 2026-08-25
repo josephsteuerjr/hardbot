@@ -26,107 +26,39 @@
     "portfolio_roots": [
       {
         "country": "Таджикистан",
-        "path": "U:\\rbr\\Развитие СНГ\\Таджикистан\\Портфели отдела взыскания РТ",
-        "groups": [
-          {
-            "name": "Душанбе",
-            "profile": "hard",
-            "enabled": true,
-            "required": true
-          },
-          {
-            "name": "Худжанд",
-            "profile": "hard",
-            "enabled": true,
-            "required": true
-          },
-          {
-            "name": "Soft",
-            "profile": "soft",
-            "enabled": true,
-            "required": true
-          },
-          {
-            "name": "ГПХ Агент выезд",
-            "profile": "hard",
-            "enabled": true,
-            "required": false
-          }
-        ]
+        "path": "U:\\rbr\\Развитие СНГ\\Таджикистан\\Портфели отдела взыскания РТ"
       },
       {
         "country": "Узбекистан",
-        "path": "U:\\rbr\\Развитие СНГ\\Узбекистан\\Портфели сотрудников УЗБ",
-        "groups": [
-          {
-            "name": "Ташкент",
-            "profile": "hard",
-            "enabled": true,
-            "required": true
-          },
-          {
-            "name": "Самарканд",
-            "profile": "hard",
-            "enabled": true,
-            "required": true
-          },
-          {
-            "name": "Soft",
-            "profile": "soft",
-            "enabled": true,
-            "required": true
-          },
-          {
-            "name": "ГПХ Агент выезд",
-            "profile": "hard",
-            "enabled": true,
-            "required": true
-          },
-          {
-            "name": "Андижан",
-            "profile": "hard",
-            "enabled": false,
-            "required": false
-          }
-        ]
+        "path": "U:\\rbr\\Развитие СНГ\\Узбекистан\\Портфели сотрудников УЗБ"
       }
     ]
   },
   "discovery": {
-    "portfolio_layout": "root/group/employee/*.xlsb",
+    "audit_mode": "direct",
+    "unsupported_workbook_policy": "ignore",
     "active_extensions": [
       ".xlsb"
     ],
     "ignored_directory_prefixes": [
-      "!",
-      "_",
-      "~"
+      "Архив",
+      "!Архив"
     ],
-    "backup_name_regex": "(?:^Копия\\s|\\s\\(до\\s[^)]*\\)\\s*\\.xlsb$)",
-    "profile_rules": [
-      {
-        "filename_regex": "^СОФТ\\s+",
-        "profile": "soft"
-      }
-    ]
+    "group_mode": "all_except_ignored",
+    "portfolio_layout": "root/group/employee/*.xlsb",
+    "backup_name_prefixes": [
+      "~",
+      "Копия "
+    ],
+    "profile_detection": "workbook_columns"
   },
   "responsible_aliases": {
     "Тургунов Музафар": "Тургунов Музаффар"
   },
-  "ownership_delegations": [
-    {
-      "country": "Узбекистан",
-      "group": "Soft",
-      "book_owner": "Турсунов Улугбек",
-      "delegate_folder": "Курбаниязов Ильхомбек",
-      "enabled": true,
-      "reason": "Временное замещение на период больничного владельца"
-    }
-  ],
   "safety": {
     "require_all_configured_groups": true,
     "block_unconfigured_groups_with_files": true,
-    "block_multiple_active_files_per_folder": false,
+    "block_multiple_active_files_per_folder": true,
     "max_master_cell_changes": 20000,
     "require_zero_forbidden_diff": true,
     "multi_owner_case_policy": "master_responsible",
@@ -143,7 +75,8 @@
       "timeout_seconds": 60
     },
     "source_stability_seconds": 3,
-    "lock_stale_seconds": 21600
+    "lock_stale_seconds": 21600,
+    "local_excel_attempts": 2
   },
   "scheduler": {
     "task_name": "Контур — цикл реестров СНГ",
@@ -162,6 +95,161 @@
     "profile": "all",
     "run_only_when_logged_on": true,
     "start_when_available": true
+  },
+  "manual_upward": {
+    "enabled": true,
+    "automatic_publish": false,
+    "automatic_rollover": false,
+    "busy_file_policy": "block",
+    "confirmation_phrase": "ПЕРЕНЕСТИ",
+    "forbidden_master_titles": [
+      "Текущие платежи"
+    ],
+    "forbidden_master_title_prefixes": [
+      "Оплаты за "
+    ],
+    "backup": {
+      "directory": "U:\\rbr\\Развитие СНГ\\!Архив общих реестров\\Резервные копии общего реестра",
+      "label": "до ручного переноса",
+      "receipt_directory": "U:\\rbr\\Развитие СНГ\\!Архив общих реестров\\Резервные копии общего реестра\\_квитанции"
+    },
+    "conflict_policy": "employee_wins"
+  },
+  "manual_downward": {
+    "automatic_publish": false,
+    "automatic_rollover": false,
+    "backup": {
+      "directory": "U:\\rbr\\Развитие СНГ\\!Архив общих реестров\\Резервные копии личных реестров",
+      "label": "до раздачи",
+      "layout": "{country}\\{group}\\{employee}",
+      "receipt_directory": "U:\\rbr\\Развитие СНГ\\!Архив общих реестров\\Резервные копии личных реестров\\_квитанции"
+    },
+    "busy_file_policy": "block",
+    "confirmation_phrase": "РАЗДАТЬ",
+    "conflict_policy": "employee_wins",
+    "enabled": true,
+    "forbidden_personal_title_prefixes": [
+      "Оплаты за "
+    ],
+    "forbidden_personal_titles": [
+      "Текущие платежи"
+    ],
+    "require_zero_master_changes": true
+  },
+  "manual_ui": {
+    "window": {
+      "title": "Перенос реестров",
+      "subtitle": "Два независимых шага: сначала вверх, затем вниз"
+    },
+    "actions": {
+      "check_downward": "Проверить шаг 2",
+      "check_upward": "Проверить шаг 1",
+      "retry_downward": "Проверить шаг 2 заново",
+      "retry_upward": "Проверить шаг 1 заново",
+      "publish_downward": "Раздать личные реестры",
+      "publish_upward": "Перенести в общий реестр",
+      "rules": "Папки источников",
+      "open_report": "Открыть отчёт",
+      "details": "Технические детали",
+      "details_hide": "Скрыть технические детали",
+      "save": "Сохранить папки",
+      "cancel": "Отмена",
+      "add_root": "Добавить корень",
+      "browse": "Выбрать",
+      "remove": "Удалить",
+      "close": "Закрыть"
+    },
+    "sections": {
+      "downward": "2. Раздать в личные реестры",
+      "status": "Состояние",
+      "summary": "Что найдено",
+      "changes": "Изменения",
+      "issues": "Замечания",
+      "details": "Технические детали",
+      "rules": "Папки источников",
+      "folders": "Папки портфелей",
+      "upward": "1. Собрать в общий реестр"
+    },
+    "copy": {
+      "downward": "Берёт свежий общий реестр и готовит личные .xlsb по ответственным. Если после шага 1 появились новые правки сотрудников, операция остановится.",
+      "downward_published": "Личные реестры обновлены. Общий реестр не изменялся.",
+      "rules": "Укажи корневые папки портфелей. Все группы и книги .xlsb внутри них находятся автоматически.",
+      "rules_saved": "Папки сохранены. Следующая проверка использует их.",
+      "no_downward_changes": "Личные реестры уже соответствуют общему.",
+      "no_upward_changes": "Новых изменений для общего реестра нет.",
+      "payment_scope": "Платежи сотрудника сохраняются в его книге; аналитические платежи остаются только в общем реестре.",
+      "technical": "Отчёт содержит полный план, проверки и пути к локальным копиям.",
+      "blocked": "Исправь отмеченные причины и запусти проверку ещё раз.",
+      "upward": "Сверяет личные .xlsb с общим реестром и готовит только изменения общего. До подтверждения живые файлы не меняются.",
+      "upward_published": "Общий реестр обновлён. Личные реестры не изменялись."
+    },
+    "states": {
+      "idle": "Готово к проверке",
+      "checking": "Проверяю изменения…",
+      "ready": "Можно переносить",
+      "no_changes": "Новых изменений нет",
+      "blocked": "Есть то, что требует внимания",
+      "publishing": "Переношу изменения…",
+      "published": "Изменения перенесены",
+      "failed": "Операция остановлена"
+    },
+    "templates": {
+      "source_count": "Источников .xlsb: {count}",
+      "change_count": "Изменений в общем реестре: {count}",
+      "employee_payment_count": "Платёжных ячеек сотрудника: {count}",
+      "issue_count": "Замечаний: {count}",
+      "issue_group": "{message} · {count}",
+      "master": "Общий реестр: {name}",
+      "portfolio_change_count": "Личных файлов с изменениями: {count}",
+      "baseline": "Сверка: {label}",
+      "progress": "{message}",
+      "run": "Запуск: {id}",
+      "digest": "Проверка: {digest}",
+      "report": "Отчёт: {path}",
+      "receipt": "Квитанция: {path}",
+      "row_count": "Строк после раздачи: {count}",
+      "published_files": "Обновлено файлов: {count}"
+    },
+    "limits": {
+      "change_preview": 10,
+      "issue_preview": 6,
+      "value_preview_chars": 92
+    },
+    "issue_display": {
+      "group_repeated": true,
+      "hidden_codes": [
+        "unsupported_active_workbook_format",
+        "configured_conflict_resolution_unused"
+      ],
+      "severities": [
+        "error",
+        "warning"
+      ]
+    },
+    "confirmations": {
+      "downward": {
+        "body": "Будут заменены только проверенные личные реестры с изменениями. Общий реестр останется без изменений.",
+        "cancelled": "Раздача отменена.",
+        "input": "Для продолжения введи «{phrase}»",
+        "invalid": "Фраза не совпала. Ничего не изменено.",
+        "success_title": "Шаг 2 завершён",
+        "title": "Подтвердить раздачу"
+      },
+      "upward": {
+        "body": "Будут внесены только проверенные изменения в общий реестр. Личные реестры останутся без изменений.",
+        "cancelled": "Перенос отменён.",
+        "input": "Для продолжения введи «{phrase}»",
+        "invalid": "Фраза не совпала. Ничего не изменено.",
+        "success_title": "Шаг 1 завершён",
+        "title": "Подтвердить перенос"
+      }
+    },
+    "rules": {
+      "country": "Страна",
+      "empty_root": "Добавь страну и путь к корню портфелей.",
+      "root_hint": "Название папки и файла не определяет сотрудника или тип реестра. Ответственный берётся из книги, тип — из её столбцов; архив пропускается.",
+      "root_path": "Корневая папка"
+    }
   },
   "notifications": {
     "enabled": true,

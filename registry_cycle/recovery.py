@@ -55,6 +55,11 @@ from .snapshot import (
 from .staging import _revealed_rows, excel_safe_value
 
 
+def _backup_name_prefixes(bundle: ConfigBundle) -> tuple[str, ...]:
+    app = getattr(bundle, "app", None)
+    return tuple(getattr(app, "backup_name_prefixes", ("~", "копия")))
+
+
 @dataclass(frozen=True, slots=True)
 class RecoveryField:
     title: str
@@ -583,10 +588,6 @@ def discover_recovery_sources(
     now = now or datetime.now().astimezone()
     descriptors: list[SourceDescriptor] = []
     issues: list[Issue] = []
-    excluded = re.compile(
-        str(config.safety.get("exclude_filename_regex", r"(?!x)x")),
-        flags=re.IGNORECASE,
-    )
     vss_points = _selected_vss_points(config)
     countries = sorted({item.entry.country for item in snapshot.personals})
     archive_files: dict[tuple[str, str, str], Path] = {}
@@ -620,7 +621,10 @@ def discover_recovery_sources(
 
     for captured in snapshot.personals:
         entry = captured.entry
-        if excluded.search(entry.path.name):
+        if any(
+            entry.path.name.casefold().startswith(prefix)
+            for prefix in _backup_name_prefixes(bundle)
+        ):
             issues.append(
                 Issue(
                     "warning",
@@ -722,7 +726,10 @@ def discover_recovery_sources(
     )
     covered = {item.entry_id for item in ordered}
     for captured in snapshot.personals:
-        if excluded.search(captured.entry.path.name):
+        if any(
+            captured.entry.path.name.casefold().startswith(prefix)
+            for prefix in _backup_name_prefixes(bundle)
+        ):
             continue
         if captured.entry.entry_id not in covered:
             issues.append(
@@ -908,10 +915,6 @@ def build_recovery_plan(
     writes: list[RecoveryWrite] = []
     blocked_entries: set[str] = set()
     workbook_cache: dict[str, WorkbookSnapshot] = {}
-    excluded = re.compile(
-        str(config.safety.get("exclude_filename_regex", r"(?!x)x")),
-        flags=re.IGNORECASE,
-    )
 
     def read_cached(path: Path, sha256: str | None = None) -> WorkbookSnapshot:
         cache_key = sha256 or str(path.resolve()).casefold()
@@ -921,7 +924,10 @@ def build_recovery_plan(
 
     for personal in snapshot.personals:
         entry = personal.entry
-        if excluded.search(entry.path.name):
+        if any(
+            entry.path.name.casefold().startswith(prefix)
+            for prefix in _backup_name_prefixes(bundle)
+        ):
             blocked_entries.add(entry.entry_id)
             continue
         history = sources_by_entry.get(entry.entry_id, [])

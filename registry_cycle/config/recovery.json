@@ -180,7 +180,6 @@
   "safety": {
     "max_writes_per_file": 300,
     "max_write_share": 0.25,
-    "exclude_filename_regex": "^Копия\\s",
     "require_same_responsible": true,
     "block_history_conflicts": true
   }

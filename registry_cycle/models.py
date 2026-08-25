@@ -224,6 +224,8 @@ class PersonalProjection:
     headers: tuple[str, ...]
     rows: tuple[tuple[Any, ...], ...]
     source_fingerprint: FileFingerprint
+    type_tags: tuple[Any, ...] = ()
+    added_columns: tuple[str, ...] = ()
     preserved_cells: int = 0
     employee_owned_preserved_cells: int = 0
     handoff_cells: int = 0
@@ -236,6 +238,9 @@ class PersonalProjection:
             "entry": self.entry.as_dict(),
             "responsible": self.responsible,
             "columns": len(self.headers),
+            "headers": list(self.headers),
+            "type_tags": _jsonify(self.type_tags),
+            "added_columns": list(self.added_columns),
             "rows": len(self.rows),
             "preserved_cells": self.preserved_cells,
             "employee_owned_preserved_cells": (

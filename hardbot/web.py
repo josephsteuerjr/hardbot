@@ -26,7 +26,7 @@ from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import parse_qsl
 
-from aiohttp import web
+from aiohttp import ClientError, ClientSession, ClientTimeout, web
 from aiohttp.abc import AbstractAccessLogger
 
 import addr_cis                       # разбор произвольного адреса для навигации
@@ -65,8 +65,8 @@ OSRM_URL = (os.getenv("OSRM_URL", "") or "").strip()
 OSRM_URL_UZ = (os.getenv("OSRM_URL_UZ", "") or "").strip()
 OSRM_URL_TJ = (os.getenv("OSRM_URL_TJ", "") or "").strip()
 VROOM_URL = (os.getenv("VROOM_URL", "") or "").strip()
-# Голос распознаёт уже прогретая модель Praxis через authenticated Unix socket.
-# Local fallback намеренно отсутствует: в лимит hardbot2 вторая модель не помещается
+# Голос распознаёт общий сервис Praxis через authenticated Unix socket.
+# Local fallback намеренно отсутствует: локальный распознаватель не помещается в лимит hardbot2
 # и пять раз приводила к cgroup OOM. Некорректный/пустой backend = фича выключена.
 VOICE_BACKEND = (os.getenv("VOICE_BACKEND", "off") or "off").strip().casefold()
 PRAXIS_STT_SOCKET = (
@@ -463,6 +463,45 @@ async def _tiles(request: web.Request) -> web.StreamResponse:
     # CORS сужен: «*» убран; заголовок ставим только при явно заданном CORS_ALLOW_ORIGIN.
     headers = {"Access-Control-Allow-Origin": CORS_ALLOW_ORIGIN} if CORS_ALLOW_ORIGIN else {}
     return web.FileResponse(TILES_FILE, headers=headers)
+
+
+async def _raster_tile(request: web.Request) -> web.Response:
+    """Same-origin fallback for devices that cannot reach OSM directly.
+
+    The request contains only public slippy-map coordinates, never an address,
+    employee identity or live GPS. Vector PMTiles remains the primary layer;
+    this bounded proxy is used only if that layer cannot be opened.
+    """
+    try:
+        zoom = int(request.match_info["z"])
+        tile_x = int(request.match_info["x"])
+        tile_y = int(request.match_info["y"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text="tile") from exc
+    tile_limit = 1 << zoom if 0 <= zoom <= 19 else 0
+    if not tile_limit or not (0 <= tile_x < tile_limit and 0 <= tile_y < tile_limit):
+        raise web.HTTPBadRequest(text="tile")
+
+    upstream = f"https://tile.openstreetmap.org/{zoom}/{tile_x}/{tile_y}.png"
+    try:
+        async with ClientSession(timeout=ClientTimeout(total=12)) as session:
+            async with session.get(
+                upstream,
+                headers={"User-Agent": "Hardbot/2 map fallback"},
+            ) as response:
+                if response.status != 200:
+                    raise web.HTTPBadGateway(text="tile upstream")
+                body = await response.read()
+                content_type = response.headers.get("Content-Type", "")
+    except (ClientError, asyncio.TimeoutError) as exc:
+        raise web.HTTPBadGateway(text="tile upstream") from exc
+    if not body or len(body) > 2 * 1024 * 1024 or not content_type.startswith("image/"):
+        raise web.HTTPBadGateway(text="tile payload")
+    return web.Response(
+        body=body,
+        content_type=content_type.split(";", 1)[0],
+        headers={"Cache-Control": "public, max-age=86400, stale-if-error=604800"},
+    )
 
 
 async def _bootstrap(request: web.Request) -> web.Response:
@@ -1434,7 +1473,7 @@ async def _photo(request: web.Request) -> web.Response:
         {"ok": True, "photos": n, **({"dup": True} if not published else {})})
 
 
-# --- Голосовой комментарий: общий прогретый Whisper Praxis по UDS ------------
+# --- Голосовой комментарий: общий сервис распознавания речи по UDS -----------
 _STT = None
 _VOICE_LOCK = asyncio.Lock()
 # Для таджикского профиль Praxis пока использует auto.
@@ -1461,7 +1500,7 @@ def _stt() -> stt_client.STTClient:
 
 
 async def _voice(request: web.Request) -> web.Response:
-    """Голосовое из миниаппа → общий Whisper Praxis → текст.
+    """Голосовое из миниаппа → общий сервис распознавания речи → текст.
 
     На границу Praxis уходят только байты и ``ru|uz|auto``: uid/ФИО/КД,
     исходное имя файла и текст формы не передаются.
@@ -1957,7 +1996,9 @@ async def _admin_import_json(request: web.Request) -> web.Response:
     import_historical_visit_comments = body.get(
         "import_historical_visit_comments", False
     )
+    restore_manual_unassigned = body.get("restore_manual_unassigned", False)
     for option_name, option_value in (
+        ("restore_manual_unassigned", restore_manual_unassigned),
         ("replace_current_visit_comments", replace_current_visit_comments),
         ("import_historical_visit_comments", import_historical_visit_comments),
     ):
@@ -1971,6 +2012,10 @@ async def _admin_import_json(request: web.Request) -> web.Response:
     expected_auto_unassigned = body.get("expected_auto_unassigned")
     expected_auto_unassigned_digest = body.get(
         "expected_auto_unassigned_digest"
+    )
+    expected_manual_restored = body.get("expected_manual_restored")
+    expected_manual_restore_digest = body.get(
+        "expected_manual_restore_digest"
     )
     expected_comment_effect_digest = body.get(
         "expected_comment_effect_digest"
@@ -1989,6 +2034,20 @@ async def _admin_import_json(request: web.Request) -> web.Response:
                        "быть неотрицательным целым")},
             status=409,
         )
+    if (
+        expected_manual_restored is not None
+        and (
+            isinstance(expected_manual_restored, bool)
+            or not isinstance(expected_manual_restored, int)
+            or expected_manual_restored < 0
+        )
+    ):
+        return web.json_response(
+            {"blocked": True,
+             "error": ("импорт заблокирован: expected_manual_restored должен "
+                       "быть неотрицательным целым")},
+            status=409,
+        )
     if full_registry and (
         expected_auto_unassigned is None
         or expected_auto_unassigned_digest is None
@@ -1997,6 +2056,17 @@ async def _admin_import_json(request: web.Request) -> web.Response:
             {"blocked": True,
              "error": ("импорт заблокирован: для полного среза обязателен "
                        "свежий предпросмотр точного множества снятий")},
+            status=409,
+        )
+    if restore_manual_unassigned and (
+        expected_manual_restored is None
+        or expected_manual_restore_digest is None
+    ):
+        return web.json_response(
+            {"blocked": True,
+             "error": ("импорт заблокирован: для возврата вручную снятых "
+                       "договоров обязателен свежий предпросмотр точного "
+                       "множества возвратов")},
             status=409,
         )
     if (
@@ -2024,10 +2094,13 @@ async def _admin_import_json(request: web.Request) -> web.Response:
         require_source_proof=True,
         full_registry=full_registry,
         authoritative_employees=authoritative_employees,
+        restore_manual_unassigned=restore_manual_unassigned,
         replace_current_visit_comments=replace_current_visit_comments,
         import_historical_visit_comments=import_historical_visit_comments,
         expected_auto_unassigned=expected_auto_unassigned,
         expected_auto_unassigned_digest=expected_auto_unassigned_digest,
+        expected_manual_restored=expected_manual_restored,
+        expected_manual_restore_digest=expected_manual_restore_digest,
         expected_comment_effect_digest=expected_comment_effect_digest,
     )
     if report.get("blocked"):
@@ -2072,7 +2145,9 @@ async def _admin_import_preview_json(request: web.Request) -> web.Response:
     import_historical_visit_comments = body.get(
         "import_historical_visit_comments", False
     )
+    restore_manual_unassigned = body.get("restore_manual_unassigned", False)
     for option_name, option_value in (
+        ("restore_manual_unassigned", restore_manual_unassigned),
         ("replace_current_visit_comments", replace_current_visit_comments),
         ("import_historical_visit_comments", import_historical_visit_comments),
     ):
@@ -2106,6 +2181,7 @@ async def _admin_import_preview_json(request: web.Request) -> web.Response:
         full_registry=full_registry,
         authoritative_employees=authoritative_employees,
         preview_only=True,
+        restore_manual_unassigned=restore_manual_unassigned,
         replace_current_visit_comments=replace_current_visit_comments,
         import_historical_visit_comments=import_historical_visit_comments,
     )
@@ -2586,6 +2662,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/manager/map", _manager_map)
     app.router.add_get("/manager/map_data", _manager_map_data)
     app.router.add_get("/tiles/basemap.pmtiles", _tiles)
+    app.router.add_get("/tiles/raster/{z}/{x}/{y}.png", _raster_tile)
     app.router.add_get("/api/bootstrap", _bootstrap)
     app.router.add_get("/api/person", _person)
     app.router.add_get("/api/cards", _cards)

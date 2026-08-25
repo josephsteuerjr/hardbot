@@ -6,10 +6,9 @@ Hardbot2 — Telegram-бот и установленная PWA для выезд
 
 Актуальные документы:
 
-- [`DEPLOY.md`](DEPLOY.md) — выкладка, общий Whisper Praxis, фото и очистка;
+- [`DEPLOY.md`](DEPLOY.md) — выкладка, сервис распознавания речи, фото и очистка;
 - [`../registry_cycle/DATA_EXCHANGE_POLICY_2026-07-29.md`](../registry_cycle/DATA_EXCHANGE_POLICY_2026-07-29.md)
   — нормативная матрица загрузки/выгрузки и организационный цикл;
-- [`AGENTS.md`](AGENTS.md) — карта кода и инженерные ограничения.
 
 ## Рабочий контур
 
@@ -38,8 +37,8 @@ provenance завершённого визита.
 
 ## Голос
 
-Hardbot2 не держит вторую модель Whisper. `hardbot/stt_client.py` обращается к
-уже прогретому `large-v3-turbo` Praxis по authenticated HTTP через Unix socket.
+Hardbot2 не запускает локальный распознаватель. `hardbot/stt_client.py`
+обращается к общему сервису Praxis STT по authenticated HTTP через Unix socket.
 TCP listener и автоматический local fallback отсутствуют; при недоступности
 голоса остаётся ручной ввод.
 
