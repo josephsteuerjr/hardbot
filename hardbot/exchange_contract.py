@@ -24,6 +24,7 @@ CONTRACT_PATH = Path(__file__).with_name("data_exchange_contract.json")
 _SUPPORTED_RAW_SHA256 = {
     1: "6a6f06af70dff45ea9b4fde2fa2f23b2fef03fd658bcaca56ab6cc6513eb60b9",
     2: "d6f2a8c46f8d490eca7c715fe9e4561201f6cb7053a89aceabcf49ed9548b7c7",
+    3: "f57137d420294851dfc40350006bb17e0cb55b13ab2371ac84a56a0c1c81bbe6",
 }
 
 

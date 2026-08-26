@@ -1,6 +1,6 @@
 {
   "schema": "hardbot.data-exchange-contract.v1",
-  "version": 2,
+  "version": 3,
   "artifacts": {
     "snapshot_kind": "hardbot_limited_test_pre_reset.v2",
     "enrichment_evidence_schema": "hardbot.pult-enrichment.v2",
@@ -20,6 +20,12 @@
     "text_keys": [
       "visit_comment",
       "tips"
+    ],
+    "amount_keys": [
+      "forecast_sum"
+    ],
+    "date_keys": [
+      "promise_date"
     ]
   },
   "workbook_shape": {
@@ -106,7 +112,10 @@
       "purpose_rf",
       "visit_comment",
       "call_comment",
-      "tips"
+      "tips",
+      "promise_date",
+      "forecast_sum",
+      "forecast"
     ],
     "legacy_read_keys": [
       "call_comment"
@@ -120,7 +129,10 @@
       "client_location",
       "purpose_rf",
       "tips",
-      "visit_comment"
+      "visit_comment",
+      "promise_date",
+      "forecast_sum",
+      "forecast"
     ]
   },
   "enrichment": {
@@ -174,6 +186,21 @@
         "source": "visit_comment",
         "target": "visit_comment",
         "merge": "preserve_text"
+      },
+      {
+        "source": "promise_date",
+        "target": "promise_date",
+        "merge": "replace"
+      },
+      {
+        "source": "forecast_sum",
+        "target": "forecast_sum",
+        "merge": "replace"
+      },
+      {
+        "source": "forecast",
+        "target": "forecast",
+        "merge": "replace"
       }
     ],
     "forbidden_targets": [
@@ -189,7 +216,10 @@
       "agreed_payment",
       "who_at_address",
       "client_location",
-      "purpose_rf"
+      "purpose_rf",
+      "promise_date",
+      "forecast_sum",
+      "forecast"
     ],
     "echo_only_keys": [
       "visit_comment"
