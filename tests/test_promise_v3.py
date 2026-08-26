@@ -136,31 +136,60 @@ def test_clear_own_promise_via_explicit_button(tmp_path, monkeypatch):
     assert not (snap.get("promise_date") or "")
 
 
-def test_finish_without_promise_forfeits_ownership(tmp_path, monkeypatch):
-    """Каждый finish перезаписывает снимок: если повторный визит не упомянул
-    обещание, оно выпадает из снимка и «Убрать» больше не срабатывает
-    (not_ours). Оболочка от этого страхуется сама — FORM_TOUCHED пересевается
-    из d.formTyped, и живое обещание уезжает в input_keys каждого визита."""
+def test_promise_survives_a_visit_that_did_not_mention_it(tmp_path, monkeypatch):
+    """Повторный визит, не сказавший про обещание, его НЕ отменяет: молчание
+    формы — не ответ. Отменяет только кнопка «Убрать»."""
     _isolated(tmp_path, monkeypatch)
     when = (date.today() + timedelta(days=7)).isoformat()
     _save(monkeypatch, _finish_body(
         {"call_status": "Обещает оплатить", "promise_date": when}))
     _save(monkeypatch, _finish_body({"call_status": "В работе"}, op_id="op2"))
+    assert db.get_client(CID)["promise_date"] == when
     out = _save(monkeypatch, {**_finish_body(
         {"call_status": "В работе", "promise_date": ""}, op_id="op3"),
         "cleared_keys": ["promise_date"]})
-    assert out["rejected"] == {"promise_date": "not_ours"}
-    assert db.get_client(CID)["promise_date"] == when
+    assert not out.get("rejected")
+    assert not (db.get_client(CID)["promise_date"] or "")
 
 
-def test_clear_of_foreign_promise_is_not_ours(tmp_path, monkeypatch):
+def test_field_agent_removes_the_office_promise(tmp_path, monkeypatch):
+    """Выездник снимает ЛЮБОЕ обещание, не только своё: он стоит перед
+    должником. Запрет на чужое означал бы, что должника со сорвавшимся
+    обещанием не вернёт в маршрут никто."""
     _isolated(tmp_path, monkeypatch)
-    db.update_fields(CID, {"promise_date": "2026-09-01"})   # офисное значение
+    _imp([_master_row(promise_date="01.09.2026")])          # обещание офиса
     out = _save(monkeypatch, {**_finish_body(
         {"call_status": "В работе", "promise_date": ""}),
         "cleared_keys": ["promise_date"]})
-    assert out["rejected"] == {"promise_date": "not_ours"}
-    assert db.get_client(CID)["promise_date"] == "2026-09-01"
+    assert not out.get("rejected")
+    assert not (db.get_client(CID)["promise_date"] or "")
+
+
+def test_removed_promise_survives_a_previsit_copy(tmp_path, monkeypatch):
+    """Снятие — это ОТВЕТ, а не молчание: копия реестра, которая визита не
+    видела, не возвращает снятое обещание. Иначе выездник снимал бы его каждый
+    день, а ночной перенос каждую ночь возвращал."""
+    _isolated(tmp_path, monkeypatch)
+    _imp([_master_row(promise_date="01.09.2026")])
+    _save(monkeypatch, {**_finish_body(
+        {"call_status": "В работе", "promise_date": ""}),
+        "cleared_keys": ["promise_date"]})
+    _imp([_master_row(promise_date="01.09.2026")])          # довизитная копия
+    assert not (db.get_client(CID)["promise_date"] or "")
+
+
+def test_office_may_set_a_new_promise_after_the_visit(tmp_path, monkeypatch):
+    """А обзвон ПОСЛЕ выезда — может: строка доказала, что видела этот визит
+    (дата выезда + эхо поля визита), и новая дата офиса принимается."""
+    _isolated(tmp_path, monkeypatch)
+    _imp([_master_row(promise_date="01.09.2026")])
+    _save(monkeypatch, _finish_body(
+        {"call_status": "В работе", "contact_with": "Должник",
+         "promise_date": ""}, cleared_keys=["promise_date"]))
+    _imp([_master_row(visit_date=TODAY, contact_with="Должник",
+                      promise_date="20.09.2026")])
+    merged = db._merged_visit(db.get_client(CID)) or {}
+    assert merged.get("promise_date") == "2026-09-20"
 
 
 # --- якорный шлюз импорта -----------------------------------------------------
@@ -305,15 +334,14 @@ def test_own_promise_removed_is_a_breakdown(tmp_path, monkeypatch):
 
 def test_office_promise_broken_at_the_visit(tmp_path, monkeypatch):
     """Ровно случай владельца: обещание было ДО выезда (его вёл офис), на
-    выезде должник его не подтвердил. Саму офисную дату сервер стереть не даёт
-    (not_ours), но показание выездника обязано доехать — «Срыв»."""
+    выезде должник его не подтвердил. Дата снимается, а факт срыва уезжает
+    офису статусом."""
     _isolated(tmp_path, monkeypatch)
     _imp([_master_row(promise_date="01.08.2026")])   # офисное обещание
-    out = _save(monkeypatch, {**_finish_body(
+    _save(monkeypatch, {**_finish_body(
         {"call_status": "В работе", "promise_date": ""}),
         "cleared_keys": ["promise_date"]})
-    assert out["rejected"] == {"promise_date": "not_ours"}
-    assert db.get_client(CID)["promise_date"] == "2026-08-01"   # дата офиса цела
+    assert not (db.get_client(CID)["promise_date"] or "")
     assert _fc() == db.FORECAST_BROKEN
 
 

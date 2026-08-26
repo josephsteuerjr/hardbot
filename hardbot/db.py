@@ -343,6 +343,12 @@ def _bot_snapshot(values, completed_at: str) -> dict | None:
             value = values[key]
         except (KeyError, TypeError):
             continue
+        if key in FORM_TYPED_KEYS and value is not None                 and str(value).strip() == "":
+            # Пустая строка по обещанию — ОТВЕТ выездника «обещания больше
+            # нет». Молчание — это отсутствие ключа; путать их нельзя, иначе
+            # снятое обещание возвращала бы первая же копия реестра.
+            out[key] = ""
+            continue
         if value in (None, ""):
             continue
         value = str(value).strip()
@@ -5332,8 +5338,7 @@ def import_grid(
                     # upsert'ом — office_cells/protected_cells не растут, и
                     # киллер-фильтр маршрута продолжает кормиться офисными
                     # обещаниями. Защищать нечего — нечего и гейтить.
-                    if key in FORM_TYPED_KEYS and not str(
-                            (merged or {}).get(key) or ""):
+                    if key in FORM_TYPED_KEYS and key not in (merged or {}):
                         continue
                     candidates[key] = data.pop(key, None)
                 # Для завершённого визита «Общий результат» тоже защищён якорем:

@@ -1272,16 +1272,11 @@ async def _save(request: web.Request) -> web.Response:
                 continue
             value = canon
         values[key] = value
-    if cleared:
-        # Очищать можно только СВОЁ: db.update_fields пишет пустую строку без
-        # проверок во ВСЕ договоры человека, и без этого правила случайное
-        # «Убрать» стёрло бы офисное обещание, которое импорт не вернёт.
-        prev_snap = db.bot_visit_snapshot(row) or {}
-        for key in list(cleared):
-            if key in typed_keys and key in values and values[key] == "" \
-                    and not str(prev_snap.get(key) or ""):
-                values.pop(key, None)
-                rejected[key] = "not_ours"
+    # Снять обещание выездник может ЛЮБОЕ, не только «своё». Он стоит перед
+    # должником, и его слово свежее любой офисной даты: запрет на чужое означал
+    # бы, что должника со сорвавшимся обещанием никто не вернёт в маршрут.
+    # Офисная дата при этом не пропадает: она остаётся в книге офиса и
+    # вернётся, если офис подтвердит её ПОСЛЕ визита (якорный шлюз импорта).
     if finish and OFFICE_RESULT_SNAPSHOT_KEY not in values:
         raise web.HTTPBadRequest(text="visit result required")
     if finish:
