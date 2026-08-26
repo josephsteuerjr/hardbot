@@ -82,6 +82,7 @@ def test_no_overdue_no_button():
     text, kb = digest.promises_view(mgr, TODAY)
     assert "нет 🎉" in text
     _, skb = digest.summary_view(mgr, TODAY)
-    assert not any(b.callback_data.startswith("dg:o:")
+    # (b.callback_data or ""): у WebApp-кнопки «в приложение» callback_data=None
+    assert not any((b.callback_data or "").startswith("dg:o:")
                    for row in skb.inline_keyboard for b in row)
     db.delete_manager(MGR)

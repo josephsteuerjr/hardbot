@@ -99,8 +99,17 @@ class CycleService:
         include_projections: bool = True,
         baseline_override: CycleBaseline | None = None,
         conflict_resolutions: tuple[ConflictResolution, ...] = (),
-        master_conflict_policy: str = "configured",
+        master_conflict_policy: str | None = None,
     ) -> PreparedRun:
+        # Правило разрешения конфликта ОДНО на все пути (владелец, 26.08.2026:
+        # «побеждает сотрудник»). Ручной перенос уже требует employee_wins в
+        # конфиге; автоматический цикл держал 'configured' и на ячейке,
+        # изменённой с обеих сторон, ронял план целиком — не публикуя НИЧЕГО.
+        # С обещанием выездника такая ячейка перестала быть редкостью: и дату,
+        # и сумму теперь пишут оба, офис и бот.
+        if master_conflict_policy is None:
+            master_conflict_policy = str(self.bundle.app.safety.get(
+                "master_conflict_policy", "employee_wins"))
         assert_snapshot_config_identity(self.bundle, snapshot)
         assert_snapshot_run_dir(self.bundle, snapshot)
         master_local = read_portfolio(snapshot.master_copy, self.bundle.fields)

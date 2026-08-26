@@ -1102,10 +1102,28 @@ def _post_request(
     except OperatorBlocked:
         raise
     except urllib.error.HTTPError as exc:
+        # Из тела 409 читаем ТОЛЬКО машиночитаемый ключ "code": свободный текст
+        # сервера наружу не печатается (контракт CLI). Отзыв, требующий свежего
+        # предпросмотра, — не поломка регистрации расписки, и отправлять
+        # оператора чинить расписку было бы диагностикой в сторону.
+        server_code = ""
+        if exc.code == 409:
+            try:
+                raw_body = exc.read()
+                parsed = json.loads(raw_body.decode("utf-8", "replace"))
+                if isinstance(parsed, dict):
+                    server_code = str(parsed.get("code") or "")
+            except Exception:
+                server_code = ""
         try:
             exc.close()
         except Exception:
             pass
+        if exc.code == 409 and server_code == "recall_preview_required":
+            raise OperatorBlocked(
+                "recall_preview_required",
+                "server requires a fresh recall preview for this workbook",
+            ) from exc
         code = (
             "authorization_not_registered"
             if exc.code == 409

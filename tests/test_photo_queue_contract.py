@@ -92,3 +92,24 @@ def test_retake_keeps_ios_user_activation_and_links_exact_failed_op():
 def test_indexeddb_write_failure_is_not_reported_as_queued():
     assert 'try{ await IDB.put("queue", entry); return true; }catch(e){ return false; }' in INDEX
     assert 'if(!(await enqueue(entry))){ toast(L().photolost); return; }' in INDEX
+
+
+def test_exif_is_read_before_the_photo_is_shrunk():
+    """shrinkPhoto стирает EXIF безвозвратно и молча — читать строго до него."""
+    up = INDEX.index("async function upPhoto(")
+    body = INDEX[up:INDEX.index("async function sendPhoto(")]
+    exif = body.index("readExifMeta(f)")
+    shrink = body.index("const small=await shrinkPhoto(f);")
+    materialize = body.index("photoBytes(small||f)")
+    clear = body.index('el.value=""')
+    assert exif < shrink < materialize < clear
+
+
+def test_photo_metadata_headers_stay_optional():
+    """Обязательный новый заголовок положил бы v12/v13 в вечную очередь (503)."""
+    i = INDEX.index("function photoHeaders(")
+    body = INDEX[i:INDEX.index("\n}", i)]
+    for h in ("X-Photo-Shot", "X-Photo-Source", "X-Photo-Exif", "X-Photo-Shrunk"):
+        assert h in body
+    assert "if(meta){" in body
+    assert 'h["X-Photo-Raw"]="1";' in body     # обязательные — прежние

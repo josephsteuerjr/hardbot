@@ -342,6 +342,10 @@ def test_pult_previews_before_apply_and_reuses_the_exact_request():
             self.toasts = []
             self.refreshed = False
 
+        # done() собирает expected_* единым статметодом Pult
+        _expected_from_preview = staticmethod(
+            pult_ui.Pult._expected_from_preview)
+
         def _prepare_import(self, _book, _picked, *, full_registry=False,
                             force_test_subset=False):
             assert full_registry is True

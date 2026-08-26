@@ -99,11 +99,18 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
     for key, value in artifacts.items():
         _string(value, label=f"artifacts.{key}")
 
-    form = _exact_dict(
-        root["form"],
-        {"protocol_version", "dropdown_keys", "text_keys"},
-        label="form",
-    )
+    # Форма бывает двух ТОЧНЫХ составов: v2 (без типизированных полей) и v3
+    # (+amount_keys/date_keys — обещание выездника). Произвольные ключи всё так
+    # же запрещены; двойной состав нужен, чтобы код волны 2 жил в рабочем
+    # дереве до атомарного бампа JSON (_local/apply_contract_v3.py) и пульт
+    # оставался совместим с живым продом v2.
+    _form_raw = root["form"]
+    _form_keys_v2 = {"protocol_version", "dropdown_keys", "text_keys"}
+    _form_keys_v3 = _form_keys_v2 | {"amount_keys", "date_keys"}
+    if isinstance(_form_raw, dict) and set(_form_raw) == _form_keys_v3:
+        form = _exact_dict(_form_raw, _form_keys_v3, label="form")
+    else:
+        form = _exact_dict(_form_raw, _form_keys_v2, label="form")
     protocol_version = form["protocol_version"]
     if (
         isinstance(protocol_version, bool)
@@ -113,8 +120,11 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
         raise ExchangeContractError("form.protocol_version must be positive")
     dropdown_keys = _strings(form["dropdown_keys"], label="form.dropdown_keys")
     text_keys = _strings(form["text_keys"], label="form.text_keys")
-    if set(dropdown_keys) & set(text_keys):
-        raise ExchangeContractError("form dropdown/text keys overlap")
+    amount_keys = _strings(form.get("amount_keys") or [], label="form.amount_keys")
+    date_keys = _strings(form.get("date_keys") or [], label="form.date_keys")
+    _all_form = [*dropdown_keys, *text_keys, *amount_keys, *date_keys]
+    if len(set(_all_form)) != len(_all_form):
+        raise ExchangeContractError("form key groups overlap")
 
     workbook = _exact_dict(
         root["workbook_shape"],
@@ -289,7 +299,7 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
         enrichment_source_keys
     ):
         raise ExchangeContractError("completion date is not exported/enriched")
-    if not set(dropdown_keys).union(text_keys) <= set(snapshot_keys):
+    if not set(dropdown_keys).union(text_keys, amount_keys, date_keys)             <= set(snapshot_keys):
         raise ExchangeContractError("form fields are not all in provenance snapshot")
     if not set(legacy_read_keys) <= set(snapshot_keys):
         raise ExchangeContractError("legacy read keys are not in provenance snapshot")
@@ -493,6 +503,12 @@ CLEARANCE_RECEIPT_SCHEMA = CONTRACT["artifacts"]["clearance_receipt_schema"]
 FORM_PROTOCOL_VERSION = CONTRACT["form"]["protocol_version"]
 FORM_DROPDOWN_KEYS = tuple(CONTRACT["form"]["dropdown_keys"])
 FORM_TEXT_KEYS = tuple(CONTRACT["form"]["text_keys"])
+# Типизированные поля формы (обещание выездника): на контракте v2 пусты —
+# сервер не отдаёт typedFields, клиент не рисует секцию, поведение прежнее.
+FORM_AMOUNT_KEYS = tuple(CONTRACT["form"].get("amount_keys") or [])
+FORM_DATE_KEYS = tuple(CONTRACT["form"].get("date_keys") or [])
+FORM_INPUT_KEYS = (*FORM_DROPDOWN_KEYS, *FORM_TEXT_KEYS,
+                   *FORM_AMOUNT_KEYS, *FORM_DATE_KEYS)
 
 WORKBOOK_SHEET_NAME = CONTRACT["workbook_shape"]["required_sheet_name"]
 WORKBOOK_HEADER_SEARCH_ROWS = CONTRACT["workbook_shape"]["header_search_rows"]

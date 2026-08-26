@@ -124,6 +124,11 @@ def save_to_db(rows: list[dict], snapshot: str) -> int:
     for r in rows:
         payload.append({
             "contract_key": db.contract_key(r.get("contract_id")),
+            # Корпус грузится из ОБЩЕГО реестра, то есть обещание здесь всегда
+            # офисное. Обещания выездника (форма, вер. 33+) сюда не попадают,
+            # но метка нужна заранее: без неё смысл признака promise_date
+            # поменялся бы молча и навсегда.
+            "promise_src": "office" if r.get("promise_date") else None,
             "debt": _to_num(r.get("debt")),
             "product_type": r.get("product_type"), "partner": r.get("partner"),
             "country": r.get("country"), "assign_date": r.get("assign_date"),

@@ -67,7 +67,10 @@ def test_photo_still_reaches_the_server_without_a_point():
     i = INDEX.index("async function sendPhoto(")
     body = INDEX[i:i + 2000]
     assert 'fetch("/api/photo?rep="' in body
-    assert "photoHeaders(geo,ext2)" in body
+    # photoHeaders получил третий (опциональный) аргумент метаданных — якорь
+    # устойчив к нему, а инвариант «гео едет заголовком» проверяется отдельно
+    assert "photoHeaders(geo,ext2" in body
+    assert 'if(geo) h["X-Photo-Geo"]' in INDEX
 
 
 def test_all_selected_files_are_read_while_the_picker_is_alive():
@@ -95,3 +98,19 @@ def test_a_broken_file_does_not_swallow_the_rest_of_the_selection():
 def test_hint_and_button_exist_in_all_three_languages():
     assert INDEX.count("fromgallery:") == 3
     assert INDEX.count("galhint:") == 3
+
+
+def test_server_refuses_the_send_point_for_a_gallery_photo():
+    """Правило владельца 26.08.2026: «координаты только по метаданным фото, не
+    отправки». До сих пор оно держалось одной строкой в оболочке — а заголовок
+    может прийти из старой очереди, чужого клиента или будущей версии, где
+    условие живёт уже не там. Сервер обязан снимать точку сам."""
+    web_src = (pathlib.Path(__file__).resolve().parent.parent
+               / "hardbot" / "web.py").read_text(encoding="utf-8")
+    i = web_src.index("async def _photo(")
+    body = web_src[i:web_src.index("\n\n\n", i)]
+    assert 'if meta.get("source") == "gallery":' in body
+    j = body.index('if meta.get("source") == "gallery":')
+    assert "geo = None" in body[j:j + 700]
+    # и снимается ДО записи строки индекса, иначе точка уже в базе
+    assert j < body.index("db.record_photo(")

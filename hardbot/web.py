@@ -13,16 +13,18 @@ aiohttp идёт в комплекте с aiogram — новых зависим�
 from __future__ import annotations
 
 import asyncio
+import collections
 import functools
 import hashlib
 import hmac
+import html as _html
 import json
 import logging
 import os
 import re
 import tempfile
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qsl
 
@@ -35,6 +37,8 @@ import debt
 import geoindex                       # офлайн-справочник координат (без похода в сеть)
 from config import ADMIN_ID, approval_required, lang_of
 from exchange_contract import (
+    FORM_AMOUNT_KEYS,
+    FORM_DATE_KEYS,
     ExchangeContractError,
     FORM_DROPDOWN_KEYS,
     FORM_PROTOCOL_VERSION,
@@ -44,11 +48,14 @@ from exchange_contract import (
     validate_contract_binding,
 )
 from fields import BY_KEY, DROPDOWNS
-from i18n import FIELD_TITLES, LANGUAGES, t, tf, tv
+from i18n import FIELD_TITLES, FORM_FIELD_TITLES, LANGUAGES, t, tf, tv
+import digest_data
 import maplink
 import routing_client
 import stt_client
 from keyboards import approve_bind_kb
+import photoaudit
+import photostore
 from photostore import PHOTO_DIR, day_photos
 
 # CORS на статике/тайлах: по умолчанию НЕ ставим «*» (миниапп и тайлы — same-origin
@@ -120,6 +127,9 @@ FORM_DROPDOWNS = list(FORM_DROPDOWN_KEYS)
 # звонка») — в выгрузке он сидел не в той колонке; легаси-сохранения ремапятся
 # в _save, старые данные перенесены миграцией на проде.
 FORM_TEXT = list(FORM_TEXT_KEYS)
+# Типизированные поля формы (обещание выездника, контракт v3; на v2 пусты).
+FORM_AMOUNTS = list(FORM_AMOUNT_KEYS)
+FORM_DATES = list(FORM_DATE_KEYS)
 # Что показываем во вкладке «Клиент» (плотные строки).
 INFO_KEYS = ["birth_date", "phone", "phone_main", "city", "address",
              "address_customer", "extra_address", "responsible", "tips"]
@@ -128,7 +138,8 @@ INFO_KEYS = ["birth_date", "phone", "phone_main", "city", "address",
 # плоский DEBT_KEYS, из-за которого миниапп рисовал ключи БД («camera_fine»).
 PROMISE_KEYS = ["agreed_payment", "promise_date", "last_payment_sum",
                 "last_payment_date", "forecast"]
-ALLOWED_SAVE = set(FORM_DROPDOWNS) | set(FORM_TEXT)
+ALLOWED_SAVE = set(FORM_DROPDOWNS) | set(FORM_TEXT) | set(FORM_AMOUNTS) \
+    | set(FORM_DATES)
 DATA_EXCHANGE_CONTRACT = contract_binding()
 
 
@@ -217,6 +228,74 @@ def _manager_scope(uid: int) -> list[str]:
     return db.manager_employees(uid, is_owner=(uid == ADMIN_ID))
 
 
+def _manager_gate(request: web.Request) -> tuple[int, dict, list[str]]:
+    """uid + mgr-словарь + состав команды для вкладки руководителя. БЕЗ acting.
+
+    _auth сюда не годится по двум причинам: он даёт 403 «not bound» руководителю
+    без сотрудников в scope и скоупит данные на ОДНОГО acting-сотрудника, а ещё
+    db.acting_employee по дороге ЗАПИСЫВАЕТ фолбэк в settings — открытие вкладки
+    не должно менять портфель, который человек смотрит.
+
+    Пускаем по факту РОЛИ, а не по размеру команды: у направленца пустой состав
+    значит «сегодня по направлению нет ответственных», а у владельца сразу после
+    сброса и до первого импорта реестр пуст — старая проверка давала бы 403 на
+    собственной вкладке (этот случай уже жёг прод, см. test_manager_app_access).
+    Пустая команда отдаётся пустым экраном, не отказом."""
+    uid = _uid(request)
+    if not uid:
+        raise web.HTTPUnauthorized(text="auth")
+    mgr = digest_data.manager_scope(uid, is_owner=(uid == ADMIN_ID))
+    if mgr is None:
+        raise web.HTTPForbidden(text="not a manager")
+    return uid, mgr, digest_data.sorted_employees(mgr)
+
+
+def _manager_date(request: web.Request) -> tuple[str, str, str, str | None]:
+    """(date, today, prev, next). Дату «сегодня» и соседние сутки считает
+    СЕРВЕР: контейнер живёт по UTC, а телефон руководителя — по +3/+5, и
+    клиентская дата в утренние часы показывала бы пустой день."""
+    today = digest_data.today_iso()
+    raw = (request.query.get("date") or "").strip()
+    d = db._as_date(raw) if raw else db._as_date(today)
+    if d is None:
+        raise web.HTTPBadRequest(text="date")
+    iso = d.isoformat()
+    prev = (d - timedelta(days=1)).isoformat()
+    nxt = None if iso >= today else (d + timedelta(days=1)).isoformat()
+    return iso, today, prev, nxt
+
+
+def _manager_employee_q(request: web.Request, team: list[str]) -> str:
+    emp = (request.query.get("employee") or "").strip()
+    if emp not in team:
+        # 404, не 403: «сотрудник не в вашей команде» — 403 остаётся ровно
+        # одним смыслом «роли нет» (клиент по нему гасит вкладку целиком).
+        raise web.HTTPNotFound(text="employee")
+    return emp
+
+
+def _manager_json(payload: dict) -> web.Response:
+    resp = web.json_response(digest_data._public(payload))
+    resp.headers["Cache-Control"] = "no-store"   # ПД не должны оседать в кэшах
+    resp.enable_compression()   # кириллица = 2 байта/символ, канал самый слабый
+    return resp
+
+
+def _manager_envelope(mgr, team, iso, today, prev, nxt, uid) -> dict:
+    frm, to = db.get_period()
+    note = ""
+    if (frm or "").strip() or (to or "").strip():
+        note = (f"окно периода {frm or '…'}—{to or '…'} к этой вкладке не "
+                "применяется: здесь все выезды за день")
+    return {"ok": True, "date": iso, "today": today,
+            "prev_date": prev, "next_date": nxt, "team": team,
+            "period_note": note,
+            "manager": {"name": mgr.get("name") or "",
+                        "scope": digest_data.scope_label(mgr),
+                        "countries": digest_data.scope_countries_info(mgr),
+                        "isOwner": uid == ADMIN_ID}}
+
+
 def _employee(uid: int) -> str | None:
     """Кем пользователь работает в приложении.
 
@@ -257,6 +336,11 @@ def _auth(request: web.Request) -> tuple[int, str]:
 
 
 # --- Формовка данных --------------------------------------------------------
+def _form_field_title(key: str, lang: str) -> str:
+    d = FORM_FIELD_TITLES.get(key) or {}
+    return d.get(lang) or d.get("ru") or _title(key, lang)
+
+
 def _title(key: str, lang: str) -> str:
     if key in FIELD_TITLES:
         return tf(key, lang)
@@ -285,6 +369,15 @@ def _meta(lang: str) -> dict:
         # предлагает обновиться САМО. 04.08.2026 обновление приходилось объяснять
         # людям словами «закройте из списка задач», и до половины оно не дошло.
         "shellVersion": _shell_version(),
+        # Типизированные поля формы: клиент рисует по ним секцию обещания;
+        # на контракте v2 список пуст и секции нет. Дату «сегодня» считает
+        # СЕРВЕР: контейнер живёт по UTC, телефон — по +3/+5, и клиентская
+        # дата в утренние часы врала бы барабану и киллер-фильтру.
+        "typedFields": [{"key": k,
+                         "kind": "date" if k in FORM_DATE_KEYS else "number",
+                         "title": _form_field_title(k, lang)}
+                        for k in (*FORM_DATES, *FORM_AMOUNTS)],
+        "today": date.today().isoformat(),
         "dataExchangeContract": DATA_EXCHANGE_CONTRACT,
         "vectorTiles": "/tiles/basemap.pmtiles" if TILES_FILE.exists() else None,
         # Микрофон показываем только при полностью заданном UDS-контракте.
@@ -336,6 +429,19 @@ def _person_full_from_rows(rows, rep: str, lang: str) -> dict | None:
                 "value": tv(_row_get(rows, k), lang) if k == "agreed_payment"
                 else (_row_get(rows, k) or "—")}
                for k in PROMISE_KEYS]
+    # Пока обещания нет в снимке — показываем офисное read-only. Как только
+    # его дал выездник, значение живёт в форме, и вторая строка теми же
+    # словами только путает.
+    if (visit or {}).get("promise_date"):
+        promise = [x for x in promise if x["key"] != "promise_date"]
+    # Типизированные поля: current — ТОЛЬКО из доказанного снимка; значение
+    # реестра едет отдельным ключом как read-only контекст («офис: 20.09»),
+    # чтобы пустое поле не читалось как «ничего не зафиксировано».
+    form_typed = {k: ((visit or {}).get(k, "") if visit is not None else "")
+                  for k in (*FORM_DATES, *FORM_AMOUNTS)}
+    form_typed_registry = {k: (_row_get(rows, k) or "")
+                           for k in (*FORM_DATES, *FORM_AMOUNTS)
+                           if k in BY_KEY}
     form = []
     for k in FORM_DROPDOWNS:
         # До первого доказанного визита форма всегда пустая. Значения HARD-полей
@@ -363,6 +469,8 @@ def _person_full_from_rows(rows, rep: str, lang: str) -> dict | None:
         "photos": sum(r["photos_count"] or 0 for r in rows),
         "contracts": contracts, "info": info, "promise": promise,
         "form": form,
+        "formTyped": form_typed,
+        "formTypedRegistry": form_typed_registry,
         # Текущий комментарий — живой совместный текст месяца: его можно
         # продолжить до завершения визита, а доказанный snapshot остаётся
         # отдельной неизменяемой историей.
@@ -510,6 +618,17 @@ async def _bootstrap(request: web.Request) -> web.Response:
     if not uid:
         raise web.HTTPUnauthorized(text="auth")
     _remember_from_init(request)     # вход в приложение — тоже знакомство
+    # Версия оболочки устройства (шлют v33+): «у него старая оболочка» —
+    # проверяемый факт, а не догадка по отсутствию заголовка. Тихо: удобство.
+    try:
+        sv = int(request.headers.get("X-Shell-Version") or 0)
+        if 0 < sv < 100_000:
+            with db.connect() as conn:
+                conn.execute("UPDATE users SET shell_version=? WHERE telegram_id=?",
+                             (sv, uid))
+                conn.commit()
+    except Exception:                                  # noqa: BLE001
+        pass
     lang = lang_of(uid)
     emp = _employee(uid)
     if not emp:
@@ -1120,19 +1239,78 @@ async def _save(request: web.Request) -> web.Response:
     # комментарий выездника старым ключом call_comment — переадресуем в visit_comment.
     if "call_comment" in raw_values and "visit_comment" not in raw_values:
         raw_values["visit_comment"] = raw_values.pop("call_comment")
+    typed_keys = set(FORM_AMOUNTS) | set(FORM_DATES)
+    if not finish:
+        # pushDraft шлёт finish:false каждые 20 секунд, а update_person пишет
+        # независимо от finish — недописанная дата уже вычёркивала бы должника
+        # из маршрута дня. Типизированные ключи принимаются только при finish.
+        raw_values = {k: v for k, v in raw_values.items()
+                      if k not in typed_keys}
+    cleared = set(body.get("cleared_keys") or []) if finish else set()
+    rejected: dict[str, str] = {}
     values = {}
     for key, raw in raw_values.items():
         if key not in ALLOWED_SAVE:
             continue
         value = str(raw or "").strip()
         if not value:
+            # Явно переданная пустота типизированного ключа — ОТВЕТ «обещания
+            # нет», но только по явной кнопке (cleared_keys): «пусто после
+            # касания» стирало бы офисное обещание во всех КД человека.
+            if key in typed_keys and key in cleared:
+                values[key] = ""
             continue
         if key in FORM_DROPDOWNS and value not in DROPDOWNS[key]:
             raise web.HTTPBadRequest(text=f"invalid {key}")
+        if key in typed_keys:
+            canon = db.canon_form_value(key, value)
+            if canon is None:
+                # НИКАКОГО 400: клиент считает любой не-2xx обрывом связи и
+                # хоронит запись очереди навсегда — пропал бы весь визит,
+                # а не сумма. Отбрасываем ПОЛЕ и говорим об этом в ответе.
+                rejected[key] = "format"
+                continue
+            value = canon
         values[key] = value
+    if cleared:
+        # Очищать можно только СВОЁ: db.update_fields пишет пустую строку без
+        # проверок во ВСЕ договоры человека, и без этого правила случайное
+        # «Убрать» стёрло бы офисное обещание, которое импорт не вернёт.
+        prev_snap = db.bot_visit_snapshot(row) or {}
+        for key in list(cleared):
+            if key in typed_keys and key in values and values[key] == "" \
+                    and not str(prev_snap.get(key) or ""):
+                values.pop(key, None)
+                rejected[key] = "not_ours"
     if finish and OFFICE_RESULT_SNAPSHOT_KEY not in values:
         raise web.HTTPBadRequest(text="visit result required")
+    if finish:
+        # «Прогноз» по итогу выезда. Колонку вёл только аналитик, и обещания
+        # выездника в неё не попадали вовсе. Считаем ЗДЕСЬ, а не в пульте:
+        # значение обязано лечь в доказанный снимок — иначе его нечем защитить
+        # от отката импортом и незачем везти в книги.
+        prev = db.bot_visit_snapshot(row) or {}
+        promise_was = str(prev.get("promise_date")
+                          or row["promise_date"] or "").strip()
+        promise_now = (str(values.get("promise_date") or "").strip()
+                       if "promise_date" in values
+                       else str(row["promise_date"] or "").strip())
+        fc = db.visit_forecast(
+            paid=values.get(OFFICE_RESULT_SNAPSHOT_KEY) == db.PAID_STATUS,
+            promise_now=promise_now, promise_was=promise_was,
+            promise_dropped="promise_date" in cleared)
+        if fc:
+            values[db.FORECAST_KEY] = fc
     db.audit_access(uid, "save_visit" if finish else "save_card", rep)
+    if finish and any(k in values for k in typed_keys):
+        # Кто и когда убрал должника из маршрута — единственный след; он же
+        # закрывает вопрос ИБ «кто трогал поле ПД».
+        prev_snap0 = db.bot_visit_snapshot(row) or {}
+        db.audit_access(uid, "promise_set", rep, json.dumps(
+            {"was": prev_snap0.get("promise_date") or "",
+             "now": values.get("promise_date", ""),
+             "sum": values.get("forecast_sum", ""),
+             "fc": values.get(db.FORECAST_KEY, "")}, ensure_ascii=False))
     if values:
         db.update_person(rep, values)  # пишется во ВСЕ договоры человека, сразу в БД
     if finish:
@@ -1221,9 +1399,13 @@ async def _save(request: web.Request) -> web.Response:
         # второй настоящий выезд в тот же день с другим исходом отбивку получить обязан.
         # Данные при этом пишутся как раньше — глушим только рассылку.
         if is_new and not same_today:
-            await _notify_group(request, notify_row, uid)
+            # Кто фактически закрыл — один раз, во все три канала: у руководителя
+            # через act_as гео-точка чужая, и без подписи гео-контроль врёт.
+            actor = _acting_actor_name(uid) or db.get_binding(uid)
+            await _notify_group(request, notify_row, uid, actor=actor)
             try:
-                await _notify_managers(request, notify_row, dist_m)
+                await _notify_managers(request, notify_row, dist_m,
+                                       geo_far=geo_far, actor=actor)
             except Exception as e:  # noqa: BLE001 — пуш не должен ломать сохранение:
                 # иначе 500 после log_visit, а повтор из очереди уже is_new=False —
                 # и пуш руководителю, и отчёт в беседу пропадут навсегда
@@ -1235,9 +1417,20 @@ async def _save(request: web.Request) -> web.Response:
                 vlon,
                 dist_m,
                 uid,
+                actor=actor,
             )
+        else:
+            # Самая частая причина «отбивка не пришла» — дедуп; без этой строки
+            # она оставалась невидимой.
+            db.log_push(db.PUSH_VISIT, db.PUSH_SKIP_DEDUP,
+                        employee=proven_row["responsible"] or "", contract_id=rep,
+                        note="повтор из очереди (op_id)" if not is_new
+                        else "повторное сохранение того же результата")
     data = _person_full(rep, lang_of(uid))
-    return web.json_response({"ok": True, "person": data})
+    out = {"ok": True, "person": data}
+    if rejected:
+        out["rejected"] = rejected
+    return web.json_response(out)
 
 
 def _photo_geo_from(request: web.Request) -> tuple | None:
@@ -1274,6 +1467,101 @@ def _photo_geo_query(q) -> tuple | None:
     except (TypeError, ValueError, OSError, OverflowError):
         pass
     return lat, lon, acc, captured
+
+
+_PHOTO_EXIF_HDR_MAX = 1024
+_PHOTO_META_STATES = {"ok", "absent", "heic", "truncated", "error", "oversize"}
+_EXIF_DT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+_EXIF_TZ_RE = re.compile(r"^[+-]\d{2}:\d{2}$")
+
+
+def _photo_meta_from(request: web.Request) -> dict:
+    """Метаданные снимка из ОПЦИОНАЛЬНЫХ заголовков (X-Photo-Shot / -Source /
+    -Exif / -Shrunk).
+
+    Ни один не обязателен: установленные v12/v13/v32 их не шлют, а legacy-ветка
+    отвечает 503 и держит очередь вечно. Отсутствие X-Photo-Exif целиком =
+    «оболочка не умеет» (meta_state остаётся NULL) и отличается от st='absent'
+    («умеет, но в файле метаданных нет»). Мусор молча игнорируем — фото важнее
+    метаданных, тот же принцип, что в _photo_geo_query.
+
+    exif_dt_norm: DateTimeOriginal — стенные часы телефона без зоны, а сервер
+    живёт в UTC; сравнивать их напрямую нельзя (у выездника в UZ/TJ разрыв
+    +5 ч — любой честный снимок выглядел бы снятым в будущем). Нормализуем в
+    серверную шкалу ТОЛЬКО когда есть OffsetTimeOriginal; иначе None и в
+    арифметику сигналов сырое время не попадает."""
+    out = {"source": None, "shot_at_client": None, "shell_version": None,
+           "meta_state": None, "exif": {}, "exif_dt_norm": None, "shrunk": None}
+    src = (request.headers.get("X-Photo-Source") or "").strip().lower()
+    if src in ("camera", "gallery"):
+        out["source"] = src
+    shr = (request.headers.get("X-Photo-Shrunk") or "").strip()
+    if shr in ("0", "1"):
+        out["shrunk"] = int(shr)
+    raw_shot = (request.headers.get("X-Photo-Shot") or "").strip()[:20]
+    if raw_shot.isdigit():
+        try:
+            ms = int(raw_shot)
+            if 0 < ms < 4_102_444_800_000:
+                out["shot_at_client"] = datetime.fromtimestamp(
+                    ms / 1000).isoformat(timespec="seconds")
+        except (ValueError, OSError, OverflowError):
+            pass
+    raw = request.headers.get("X-Photo-Exif") or ""
+    if not raw:
+        return out
+    if len(raw) > _PHOTO_EXIF_HDR_MAX:
+        out["meta_state"] = "oversize"
+        return out
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError
+    except Exception:                              # noqa: BLE001
+        out["meta_state"] = "error"
+        return out
+    st = str(data.get("st") or "")
+    out["meta_state"] = st if st in _PHOTO_META_STATES else "error"
+    sv = data.get("sv")
+    if isinstance(sv, int) and 0 < sv < 100_000:
+        out["shell_version"] = sv
+    e = {}
+    dt = str(data.get("dt") or "")[:32]
+    if _EXIF_DT_RE.match(dt):
+        e["dt"] = dt
+    tz = str(data.get("tz") or "")[:6]
+    if _EXIF_TZ_RE.match(tz):
+        e["tz"] = tz
+    if e.get("dt") and e.get("tz"):
+        try:
+            sign = 1 if e["tz"][0] == "+" else -1
+            hh, mm = int(e["tz"][1:3]), int(e["tz"][4:6])
+            local = datetime.fromisoformat(e["dt"])
+            offset = timedelta(hours=hh, minutes=mm) * sign
+            # UTC-момент съёмки; сервер (naive) живёт в UTC-шкале
+            out["exif_dt_norm"] = (local - offset).isoformat(timespec="seconds")
+        except (ValueError, OverflowError):
+            pass
+    try:
+        lat, lon = float(data["lat"]), float(data["lon"])
+        if -90 <= lat <= 90 and -180 <= lon <= 180 and \
+                (abs(lat) > 0.01 or abs(lon) > 0.01):
+            e["lat"], e["lon"] = round(lat, 6), round(lon, 6)
+    except (KeyError, TypeError, ValueError):
+        pass
+    g = str(data.get("gdt") or "")[:24]
+    if re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", g):
+        e["gps_at"] = g
+    for src_key, dst in (("mk", "make"), ("md", "model"), ("sw", "software")):
+        v = str(data.get(src_key) or "").strip()[:64]
+        v = "".join(ch for ch in v if ch.isprintable())
+        if v:
+            e[dst] = v
+    out["exif"] = e
+    return out
+
+
+_StoredPhoto = collections.namedtuple("_StoredPhoto", "path published sha256 size")
 
 
 class _PhotoBodyError(ValueError):
@@ -1366,6 +1654,9 @@ async def _store_photo(chunks, dest: Path, op: str, ext_hint: str | None):
     tmp = Path(tmp_name)
     size = 0
     head = bytearray()
+    # sha256 — в этом же цикле: файл и так проходит побайтово, лишнего прохода
+    # нет. На dup-retry хэш считается от ТЕЛА retry (диск не перечитывается).
+    digest = hashlib.sha256()
     try:
         with os.fdopen(fd, "wb") as out:
             async for chunk in chunks:
@@ -1377,6 +1668,7 @@ async def _store_photo(chunks, dest: Path, op: str, ext_hint: str | None):
                         "photo too large", actual_size=size, too_large=True)
                 if len(head) < _PHOTO_MAGIC_BYTES:
                     head.extend(chunk[:_PHOTO_MAGIC_BYTES - len(head)])
+                digest.update(chunk)
                 out.write(chunk)
         if size == 0:
             raise _PhotoBodyError("empty photo")
@@ -1396,14 +1688,14 @@ async def _store_photo(chunks, dest: Path, op: str, ext_hint: str | None):
                 None,
             )
             if old is not None:
-                return old, False
+                return _StoredPhoto(old, False, digest.hexdigest(), size)
         path = dest / f"{stem}{ext}"
         try:
             os.link(tmp, path)
             published = True
         except FileExistsError:
             published = False
-        return path, published
+        return _StoredPhoto(path, published, digest.hexdigest(), size)
     finally:
         try:
             tmp.unlink()
@@ -1430,6 +1722,7 @@ async def _photo(request: web.Request) -> web.Response:
     # доставка того же фото не создаёт второй файл и не накручивает счётчик photos_count.
     op = re.sub(r"[^A-Za-z0-9_-]", "", request.query.get("op", ""))[:64]
     geo = _photo_geo_from(request)
+    meta = _photo_meta_from(request)
     raw = request.headers.get("X-Photo-Raw", "") == "1"
     if raw:
         if request.content_type.lower() != "application/octet-stream":
@@ -1451,7 +1744,7 @@ async def _photo(request: web.Request) -> web.Response:
         ext_hint = os.path.splitext(field.filename or "")[1][:8] or None
 
     try:
-        path, published = await _store_photo(chunks, dest, op, ext_hint)
+        stored = await _store_photo(chunks, dest, op, ext_hint)
     except _PhotoBodyError as e:
         if not raw:
             raise web.HTTPServiceUnavailable(text="legacy photo retry")
@@ -1467,10 +1760,140 @@ async def _photo(request: web.Request) -> web.Response:
     # Сверяем и на первой публикации, и на duplicate. Если процесс упал после
     # hard-link, но до SQLite, committed IDB-очередь повторит op и починит счётчик.
     n = db.ensure_photos_count(rep, _permanent_photo_count(dest))
-    if geo:
-        db.add_photo_geo(rep, f"{rep}/{path.name}", uid, *geo)
+    # Строка индекса — для КАЖДОГО снимка и на dup-retry тоже (тот же принцип,
+    # что у ensure_photos_count: файл и SQLite не одна транзакция). Прежнее
+    # «if geo:» оставляло галерейные и «гео запретили» снимки вне индекса.
+    # Справочные данные должника — СНИМКОМ на момент загрузки (row уже в руках).
+    addr = None
+    if row["geo_lat"] is not None and row["geo_lon"] is not None:
+        addr = (row["geo_lat"], row["geo_lon"],
+                db.geo_tolerance_m(
+                    (row["geo_precision"] if "geo_precision" in row.keys() else "") or "",
+                    (row["geo_src"] if "geo_src" in row.keys() else "") or ""))
+    assign_d = db._as_date(row["assign_date"] if "assign_date" in row.keys() else None)
+    if meta.get("source") == "gallery":
+        # У галерейного снимка координаты берём ТОЛЬКО из метаданных файла
+        # (решение владельца 26.08.2026): точка отправки — это где человек
+        # разбирал снимки вечером, и выдавать её за место съёмки нельзя.
+        # Оболочка её и не шлёт, но правило серверное: заголовок мог прийти
+        # из чужого клиента или из очереди будущей версии.
+        geo = None
+    db.record_photo(rep, f"{rep}/{stored.path.name}", uid, geo=geo,
+                    sha256=stored.sha256, size_bytes=stored.size,
+                    addr=addr, assign_date_at=assign_d.isoformat() if assign_d else None,
+                    **meta)
     return web.json_response(
-        {"ok": True, "photos": n, **({"dup": True} if not published else {})})
+        {"ok": True, "photos": n, **({"dup": True} if not stored.published else {})})
+
+
+# --- Поиск фото по КД для руководителя (первый HTTP-выход снимков наружу) ----
+_PHOTO_MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".jpe": "image/jpeg",
+               ".jfif": "image/jpeg", ".png": "image/png", ".gif": "image/gif",
+               ".webp": "image/webp", ".heic": "image/heic", ".heif": "image/heif",
+               ".avif": "image/avif"}
+
+
+def _photo_scope_ok(uid: int, scope: list[str], contracts, rows) -> bool:
+    """Руководитель видит фото своих сотрудников И фото по договорам своих
+    сотрудников, включая ОТКРЕПЛЁННЫЕ (по unassigned_from), а также архив по
+    следу «кто загружал» (audit — у бэкфилленных строк telegram_id пуст, а
+    после законного переназначения импорт стирает метку открепления).
+    Владелец — без ограничений."""
+    if uid == ADMIN_ID:
+        return True
+    s = set(scope)
+    if not s:
+        return False
+    dirs = sorted({(c["contract_id"] or "") for c in contracts if c["contract_id"]})
+    for c in contracts:
+        resp = (c["responsible"] or "").strip()
+        if resp and resp in s:
+            return True
+        una = (c["unassigned_from"] if "unassigned_from" in c.keys() else "") or ""
+        if not resp and una.strip() in s:
+            return True
+    seen: dict[int, str | None] = {}
+    for r in rows:
+        tg = r["telegram_id"]
+        if not tg:
+            continue
+        if tg not in seen:
+            seen[tg] = db.get_binding(tg)
+        if seen[tg] and seen[tg] in s:
+            return True
+    for tg in db.photo_uploaders_for_dirs(dirs):
+        if tg not in seen:
+            seen[tg] = db.get_binding(tg)
+        if seen[tg] and seen[tg] in s:
+            return True
+    return False
+
+
+async def _manager_photos(request: web.Request) -> web.Response:
+    """Поиск фото по номеру договора: список с датами и сигналами к разбору."""
+    uid, _mgr, scope = _manager_gate(request)
+    raw = (request.query.get("contract_id") or "").strip()[:64]
+    if not raw:
+        raise web.HTTPBadRequest(text="contract_id")
+    ctx = db.photo_contract_dirs(raw)
+    rows = db.photo_index_for_dirs(ctx["dirs"])
+    files = {}
+    for d in ctx["dirs"]:
+        for pth in photostore.contract_photos(d, root=PHOTO_DIR):
+            files[photostore.photo_key(pth, root=PHOTO_DIR)] = pth
+    if not _photo_scope_ok(uid, scope, ctx["contracts"], rows):
+        # Отказ — тоже след: незалогированный перебор чужих КД — первое
+        # замечание ИБ на новой поверхности ПД.
+        db.audit_access(uid, "photo_search_denied", ctx["cid"])
+        raise web.HTTPNotFound(text="photos")   # 404: не подтверждаем существование КД
+    payload = photoaudit.build(
+        ctx, rows, files,
+        visits=db.visits_for_contracts(
+            [c["contract_id"] for c in ctx["contracts"]] or [ctx["cid"]]),
+        thresholds=photoaudit.thresholds(db.get_setting),
+        date_from=(request.query.get("from") or "")[:10],
+        date_to=(request.query.get("to") or "")[:10],
+        dup_rows=db.photo_rows_by_sha([r["sha256"] for r in rows if r["sha256"]]),
+    )
+    # Дедуп-сигналы могут называть ЧУЖОЙ договор: без права на тот альбом
+    # номер маскируется, раскрытие — отдельной строкой в журнал.
+    for item in payload["items"]:
+        for s in item["signals"]:
+            if s["code"] != "same_file_other_contract":
+                continue
+            other = s.get("other_contract") or ""
+            octx = db.photo_contract_dirs(other)
+            orows = db.photo_index_for_dirs(octx["dirs"])
+            if _photo_scope_ok(uid, scope, octx["contracts"], orows):
+                db.audit_access(uid, "photo_dup_reveal", other)
+            else:
+                s["other_contract"] = None
+                s["foreign"] = True
+    db.audit_access(uid, "photo_search", ctx["cid"], f"n={len(payload['items'])}")
+    return web.json_response({"ok": True, **payload})
+
+
+async def _manager_photo_file(request: web.Request) -> web.Response:
+    """Байты снимка. <img src> невозможен: токен в query запрещён, поэтому
+    оболочка тянет это fetch'ем с authHeaders() и делает blob:-URL."""
+    uid, _mgr, scope = _manager_gate(request)
+    key = (request.query.get("file") or "")[:220]
+    path = photostore.photo_path(key, root=PHOTO_DIR)
+    if path is None or path.suffix.lower() not in _PHOTO_SUFFIXES             or not path.is_file():
+        raise web.HTTPNotFound(text="photo")
+    ctx = db.photo_contract_dirs(key.split("/", 1)[0])
+    rows = db.photo_index_for_dirs(ctx["dirs"])
+    if not _photo_scope_ok(uid, scope, ctx["contracts"], rows):
+        db.audit_access(uid, "photo_view_denied", key)
+        raise web.HTTPNotFound(text="photo")
+    db.audit_access(uid, "photo_view", key)   # ИБ: каждый просмотр ПД — в журнал
+    resp = web.FileResponse(path)
+    resp.content_type = _PHOTO_MIME.get(path.suffix.lower(),
+                                        "application/octet-stream")
+    resp.headers["Cache-Control"] = "no-store, private"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Content-Disposition"] = "inline"
+    return resp
 
 
 # --- Голосовой комментарий: общий сервис распознавания речи по UDS -----------
@@ -1631,40 +2054,94 @@ def _acting_actor_name(uid: int) -> str:
         return "владелец"
     return ""
 
-async def _notify_group(request: web.Request, row, uid: int) -> None:
-    bot = request.app.get("bot")
-    if not bot:
-        return
+
+def _esc(v) -> str:
+    """Экранирование для parse_mode=HTML. Локальная лямбда `e = lambda v: ...`
+    рядом с `except Exception as e` — мина: Python удаляет имя после
+    except-блока, и второй адресат в цикле падал бы NameError только в проде и
+    только при уже сбоящей отправке. Имя модульное, никакой except его не затрёт."""
+    return _html.escape(str(v or ""))
+
+
+async def _notify_group(request: web.Request, row, uid: int,
+                        actor: str | None = None) -> None:
+    """Пост о визите в «принятую» беседу. Внешний try — на ВСЁ тело: до отправки
+    стоят db.log_push и чтение SQLite под busy_timeout 8000 мс; во время импорта
+    (одна транзакция на весь файл) это database is locked, а исключение отсюда
+    превращало бы сохранённый визит в HTTP 500 — и оболочка на 5xx прекращает
+    разбор всей очереди."""
     try:
-        import html as _html
-        from notify import post_to_group
-        e = lambda v: _html.escape(str(v or ""))   # бот шлёт с parse_mode=HTML
-        await post_to_group(bot, text=(
-            f"✅ Выезд отработан (миниапп)\n👤 {e(row['client'])} ({e(row['contract_id'])})\n"
-            f"🧑‍💼 id {uid}\n"
-            f"📝 {e(row['call_status']) or '—'} · {e(row['agreed_payment']) or '—'}\n"
-            f"💬 {e(row['visit_comment'] or row['call_comment']) or '—'}"))
-    except Exception:  # noqa: BLE001
-        pass
+        emp = row["responsible"] or ""
+        cid = row["contract_id"]
+        bot = request.app.get("bot")
+        if not bot:
+            db.log_push(db.PUSH_GROUP, db.PUSH_SKIP_NO_BOT, employee=emp,
+                        contract_id=cid)
+            return
+        from notify import classify_send_error, group_chat_id, post_to_group, promise_line
+        chat_id = group_chat_id()
+        if not chat_id:
+            db.log_push(db.PUSH_GROUP, db.PUSH_SKIP_NO_TARGETS, employee=emp,
+                        contract_id=cid, note="беседа не принята")
+            return
+        lines = [
+            "✅ Выезд отработан (миниапп)",
+            f"👤 {_esc(row['client'])} ({_esc(cid)})",
+            f"🧑‍💼 {_esc(emp) or f'id {uid}'}",
+            f"📝 {_esc(row['call_status']) or '—'} · {_esc(row['agreed_payment']) or '—'}",
+            f"💬 {_esc(row['visit_comment'] or row['call_comment']) or '—'}",
+        ]
+        # Кто фактически закрыл — тем же правилом, что в беседах отчётов,
+        # иначе каналы расходятся.
+        if actor and actor != emp:
+            lines.insert(1, f"👤 закрыл: {_esc(actor)} (от имени сотрудника)")
+        pline = promise_line(row)
+        if pline:
+            lines.insert(5 if actor and actor != emp else 4, pline)
+        try:
+            await post_to_group(bot, text="\n".join(lines), strict=True)
+            db.log_push(db.PUSH_GROUP, db.PUSH_SENT, target_kind="group",
+                        target_id=chat_id, employee=emp, contract_id=cid)
+        except Exception as exc:  # noqa: BLE001
+            status, err = classify_send_error(exc)
+            db.log_push(db.PUSH_GROUP, status, target_kind="group",
+                        target_id=chat_id, employee=emp, contract_id=cid, error=err)
+            logging.warning("group notify failed: chat=%s status=%s err=%s",
+                            chat_id, status, err)
+    except Exception as exc:  # noqa: BLE001 — пост не должен ломать сохранение
+        logging.warning("group notify failed: %s", exc)
 
 
 async def _notify_report_chats(request: web.Request, row, vlat, vlon,
-                               dist_m: int | None = None, uid: int = 0) -> None:
+                               dist_m: int | None = None, uid: int = 0,
+                               actor: str | None = None) -> None:
     """Отчёт о визите в закреплённые беседы (опциональная фича, настраивается
     пультом): текст по образцу постов сотрудников + фото за день + фактические
     гео-точки (закрытие визита и съёмка фото — такое не подделаешь)."""
     bot = request.app.get("bot")
     if not bot:
+        db.log_push(db.PUSH_REPORT_CHAT, db.PUSH_SKIP_NO_BOT,
+                    employee=row["responsible"] or "",
+                    contract_id=row["contract_id"])
         return
     try:
         chat_ids = db.report_chats_for(row["responsible"] or "")
         if not chat_ids:
+            db.log_push(db.PUSH_REPORT_CHAT, db.PUSH_SKIP_NO_TARGETS,
+                        employee=row["responsible"] or "",
+                        contract_id=row["contract_id"])
             return
         files = day_photos(db.person_contracts(row["contract_id"]),
                            date.today().isoformat())
         rels = [f"{p.parent.name}/{p.name}" for p in files]
         geo_map = db.photo_geo_for_files(rels)
-        pg = next(((g["lat"], g["lon"]) for r in rels if (g := geo_map.get(r))), None)
+        # photo_geo с вер. 33 — индекс ВСЕХ снимков: строка есть и без точки.
+        # sqlite3.Row истинна по __len__ независимо от NULL — без явной проверки
+        # lat галерейный снимок, приложенный последним, отбирал бы точку у
+        # камерного и подставлял в беседу ссылку pt=None,None.
+        pg = next(((g["lat"], g["lon"]) for r in rels
+                   if (g := geo_map.get(r)) is not None and g["lat"] is not None),
+                  None)
         from notify import post_visit_report, visit_report_text
         # Кто ФАКТИЧЕСКИ закрыл визит. У выездника это он сам (привязка), у
         # руководителя привязки нет — значит он работал от имени сотрудника,
@@ -1674,48 +2151,140 @@ async def _notify_report_chats(request: web.Request, row, vlat, vlon,
         # роль сильнее привязки. Иначе в одном посте оказывались три разных
         # человека — кейс сотрудника A, подпись «выездник B», а на месте был
         # руководитель C.
-        actor = _acting_actor_name(uid) or db.get_binding(uid)
+        if not actor:
+            actor = _acting_actor_name(uid) or db.get_binding(uid)
         text = visit_report_text(
             row, dist_m=dist_m,
             visit_geo=(vlat, vlon) if vlat is not None else None,
             photo_geo=pg, photos_n=len(files), actor=actor)
-        await post_visit_report(bot, chat_ids, text, files)
-    except Exception as e:  # noqa: BLE001 — пост не должен ломать сохранение визита
-        logging.warning("report chats notify failed: %s", e)
+        delivered: list[int] = []
+
+        def _on_result(chat_id, status, error=None):
+            db.log_push(db.PUSH_REPORT_CHAT, status, target_kind="chat",
+                        target_id=chat_id, employee=row["responsible"] or "",
+                        contract_id=row["contract_id"], error=error)
+            if status == db.PUSH_SENT:
+                delivered.append(chat_id)
+
+        await post_visit_report(bot, chat_ids, text, files, on_result=_on_result)
+        # Факт ВЫДАЧИ ПД (фото должника в беседы) — в append-only audit, одной
+        # строкой на визит: push_log тримится и уносится сбросом, а на вопрос
+        # ИБ «кто получал ПД за квартал» отвечает audit.
+        if delivered and files:
+            db.audit_access(0, "report_chat_push", row["contract_id"],
+                            f"chats={','.join(str(c) for c in delivered)} "
+                            f"photos={len(files)}")
+    except Exception as exc:  # noqa: BLE001 — пост не должен ломать сохранение визита
+        logging.warning("report chats notify failed: %s", exc)
 
 
-async def _notify_managers(request: web.Request, row, dist_m: int | None = None) -> None:
+async def _notify_managers(request: web.Request, row, dist_m: int | None = None,
+                           *, geo_far: bool | None = None,
+                           actor: str | None = None) -> None:
     """Реалтайм-пуш: визит закрыт → руководителям этого сотрудника в личку уходит
     сводка + фото за день альбомом. Дедуп повторов из оффлайн-очереди — снаружи
-    (is_new от log_visit). Рубильник без редеплоя: settings.visit_push = 0."""
-    bot = request.app.get("bot")
-    if not bot or (db.get_setting("visit_push") or "1").strip().lower() in ("0", "false", "off"):
-        return
-    import html as _html
-    e = lambda v: _html.escape(str(v or ""))   # бот шлёт с parse_mode=HTML
+    (is_new от log_visit). Рубильник без редеплоя: settings.visit_push = 0.
+
+    Адресация — db.managers_for_employee (обратный индекс с направленцами и
+    сравнением по _name_key): раньше сверка шла с сырым m['employees'], и
+    руководители НАПРАВЛЕНИЙ не получали визит-пуш вообще."""
     emp = row["responsible"] or ""
-    targets = [m for m in db.list_managers() if emp in (m.get("employees") or [])]
-    if not targets:
+    cid = row["contract_id"]
+    bot = request.app.get("bot")
+    if not bot:
+        db.log_push(db.PUSH_VISIT, db.PUSH_SKIP_NO_BOT, employee=emp,
+                    contract_id=cid)
         return
-    files = day_photos(db.person_contracts(row["contract_id"]), date.today().isoformat())
-    text = (f"✅ Выезд отработан\n👤 {e(row['client'])} ({e(row['contract_id'])})\n"
-            f"🧑‍💼 {e(emp)}\n"
-            f"📝 {e(row['call_status']) or '—'} · {e(row['agreed_payment']) or '—'}\n"
-            f"💬 {e(row['visit_comment'] or row['call_comment']) or '—'}"
-            + (f"\n📸 {len(files)} фото" if files else "\n📸 без фото"))
+    if not db.push_enabled("visit_push"):
+        db.log_push(db.PUSH_VISIT, db.PUSH_SKIP_DISABLED, employee=emp,
+                    contract_id=cid, note="visit_push=0")
+        return
+    if not emp:
+        # пустой responsible = открепление, это не сбой
+        db.log_push(db.PUSH_VISIT, db.PUSH_SKIP_NO_EMPLOYEE, contract_id=cid)
+        return
+    targets = db.managers_for_employee(emp)
+    if not targets:
+        db.log_push(db.PUSH_VISIT, db.PUSH_SKIP_NO_TARGETS, employee=emp,
+                    contract_id=cid)
+        return
+    from notify import classify_send_error, promise_line, send_album
+    files = day_photos(db.person_contracts(cid), date.today().isoformat())
+    lines = [f"✅ Выезд отработан",
+             f"👤 {_esc(row['client'])} ({_esc(cid)})",
+             f"🧑‍💼 {_esc(emp)}",
+             f"📝 {_esc(row['call_status']) or '—'} · {_esc(row['agreed_payment']) or '—'}"]
+    if actor and actor != emp:
+        lines.insert(1, f"👤 закрыл: {_esc(actor)} (от имени сотрудника)")
+    pline = promise_line(row)
+    if pline:
+        lines.append(pline)
+    lines.append(f"💬 {_esc(row['visit_comment'] or row['call_comment']) or '—'}")
+    lines.append(f"📸 {len(files)} фото" if files else "📸 без фото")
+    text = "\n".join(lines)
     if dist_m is not None:
         pretty = f"{dist_m / 1000:.1f} км" if dist_m >= 1000 else f"{dist_m} м"
-        text += (f"\n⚠️ Закрыт в {pretty} от адреса!" if dist_m > db.geo_alert_m()
+        # Вердикт «далеко» — СОХРАНЁННЫЙ на момент визита (тот же источник, что
+        # карточка дайджеста): иначе по одному визиту в системе два разных ответа.
+        far = geo_far if geo_far is not None else dist_m > db.geo_alert_m()
+        text += (f"\n⚠️ Закрыт в {pretty} от адреса!" if far
                  else f"\n📍 На адресе ({pretty} от точки)")
-    from notify import send_album
+    media_ids: list[str] | None = None
+    delivered: list[int] = []
     for m in targets:
+        tid = m["telegram_id"]
+        spelled = m.get("matched_as") or emp
+        note = None
+        if spelled != emp:
+            note = f"name-key: реестр «{emp}» ≠ роль «{spelled}»"
+            logging.info("visit push: сматчено по нормализованному ключу — "
+                         "реестр «%s», у руководителя %s записано «%s»",
+                         emp, tid, spelled)
         try:
             if files:
-                await send_album(bot, m["telegram_id"], files, text)
+                res = await send_album(bot, tid, files, text, media_ids=media_ids)
+                if res["ok"]:
+                    if res["media_ids"] and media_ids is None:
+                        media_ids = res["media_ids"]   # второй адресат — без повторной загрузки
+                    db.log_push(db.PUSH_VISIT, db.PUSH_SENT, target_kind="manager",
+                                target_id=tid, employee=emp, contract_id=cid, note=note)
+                    delivered.append(tid)
+                else:
+                    db.log_push(db.PUSH_VISIT, db.PUSH_FAILED, target_kind="manager",
+                                target_id=tid, employee=emp, contract_id=cid,
+                                error=res["error"], note=note)
+                    continue   # can_dm не трогаем: альбом мог упасть не из-за лички
             else:
-                await bot.send_message(m["telegram_id"], text)
-        except Exception as e:  # noqa: BLE001 — пуш не должен ломать сохранение визита
-            logging.warning("manager push failed: tid=%s err=%s", m["telegram_id"], e)
+                await bot.send_message(tid, text)
+                db.log_push(db.PUSH_VISIT, db.PUSH_SENT, target_kind="manager",
+                            target_id=tid, employee=emp, contract_id=cid, note=note)
+                delivered.append(tid)
+        except Exception as exc:  # noqa: BLE001 — пуш не должен ломать сохранение визита
+            status, err = classify_send_error(exc)
+            db.log_push(db.PUSH_VISIT, status, target_kind="manager",
+                        target_id=tid, employee=emp, contract_id=cid,
+                        error=err, note=note)
+            if status == db.PUSH_BLOCKED:
+                try:
+                    db.set_can_dm(tid, False)
+                except Exception:  # noqa: BLE001
+                    logging.warning("set_can_dm(%s, False) не записан", tid)
+            logging.warning("manager push failed: tid=%s status=%s err=%s",
+                            tid, status, err)
+            continue
+        # set_can_dm ВНЕ try отправки: его сбой (database is locked) иначе
+        # классифицировался бы как отказ Телеграма, и по доставленному пушу в
+        # журнале лежали бы и sent, и failed.
+        try:
+            db.set_can_dm(tid, True)
+        except Exception:  # noqa: BLE001
+            logging.warning("set_can_dm(%s, True) не записан", tid)
+    # Факт ВЫДАЧИ ПД (фото должника в личку) — одной строкой на визит в audit:
+    # push_log — телеметрия, он тримится и целиком уносится сбросом.
+    if delivered and files:
+        db.audit_access(0, "visit_push", cid,
+                        f"tids={','.join(str(t) for t in delivered)} "
+                        f"photos={len(files)}")
 
 
 # --- «Карта дня» руководителя (подписанная ссылка из дайджеста) --------------
@@ -1726,6 +2295,102 @@ def _map_auth(request: web.Request) -> tuple[str, str]:
         raise web.HTTPForbidden(
             text="Ссылка устарела. Откройте карту заново из дайджеста в боте.")
     return emp, d
+
+
+# --- Вкладка руководителя в приложении (/api/manager/*) ----------------------
+# Право проверяется на КАЖДОМ запросе (_manager_gate): спрятанная в JS кнопка
+# ничего не защищает. Адресация по ФИО и rep-договору — индексы ei/ci из
+# телеграм-callback наружу не выходят (у направленца состав живой, индексы
+# поехали бы между запросами). ADMIN-байпас принадлежности кейса из _person
+# здесь НЕ повторяется: у владельца нужный сотрудник и так есть в team.
+async def _manager_summary(request: web.Request) -> web.Response:
+    uid, mgr, team = _manager_gate(request)
+    iso, today, prev, nxt = _manager_date(request)
+    data = digest_data.summary_data(mgr, iso, employees=team)
+    # 'ei' — индекс телеграм-callback, во вкладке он не нужен и провоцирует
+    # клиент на него опереться.
+    for r in data.get("display", []):
+        r.pop("ei", None)
+    for g in data.get("groups", []):
+        for r in g.get("employees", []):
+            r.pop("ei", None)
+    db.audit_access(uid, "digest_view",
+                    detail=f"summary {iso} team={len(team)} "
+                           f"persons={data['totals']['persons']}")
+    return _manager_json({**_manager_envelope(mgr, team, iso, today, prev, nxt, uid),
+                          **data})
+
+
+async def _manager_employee_view(request: web.Request) -> web.Response:
+    uid, mgr, team = _manager_gate(request)
+    iso, today, prev, nxt = _manager_date(request)
+    emp = _manager_employee_q(request, team)
+    data = digest_data.employee_data(mgr, iso, emp, employees=team)
+    if data is None:
+        raise web.HTTPNotFound(text="employee")
+    # Аудит с СОСТАВОМ показанных должников: для ИБ «открывал экран» и «видел
+    # этих людей» — разные вещи (до 50 rep, дальше усечение).
+    reps = ",".join(c["rep"] for c in data["cases"][:50])
+    db.audit_access(uid, "digest_view", target=emp,
+                    detail=f"employee {iso} n={len(data['cases'])} reps={reps}")
+    return _manager_json({**_manager_envelope(mgr, team, iso, today, prev, nxt, uid),
+                          **data})
+
+
+async def _manager_person(request: web.Request) -> web.Response:
+    uid, mgr, team = _manager_gate(request)
+    iso, today, prev, nxt = _manager_date(request)
+    emp = _manager_employee_q(request, team)
+    rep = (request.query.get("rep") or "").strip()
+    row = db.get_client(rep)
+    if not row or row["responsible"] != emp:
+        raise web.HTTPNotFound(text="person")
+    data = digest_data.person_data(mgr, iso, emp, rep, employees=team)
+    if data is None:
+        raise web.HTTPNotFound(text="person")
+    db.audit_access(uid, "digest_view_card", target=rep, detail=f"{emp} {iso}")
+    return _manager_json({**_manager_envelope(mgr, team, iso, today, prev, nxt, uid),
+                          "employee": emp, **data})
+
+
+async def _manager_period(request: web.Request) -> web.Response:
+    uid, mgr, team = _manager_gate(request)
+    iso, today, prev, nxt = _manager_date(request)
+    try:
+        days = int(request.query.get("days", "7"))
+    except (TypeError, ValueError):
+        days = 7
+    data = digest_data.period_data(mgr, iso, days, employees=team)
+    db.audit_access(uid, "digest_view", detail=f"period {iso} {data['days']}")
+    return _manager_json({**_manager_envelope(mgr, team, iso, today, prev, nxt, uid),
+                          **data})
+
+
+async def _manager_promises(request: web.Request) -> web.Response:
+    uid, mgr, team = _manager_gate(request)
+    iso, today, prev, nxt = _manager_date(request)
+    data = digest_data.promises_data(mgr, iso, employees=team)
+    reps = ",".join(i["rep"] or "" for e in data["employees"]
+                    for i in e["items"][:50])[:400]
+    db.audit_access(uid, "digest_view",
+                    detail=f"promises {iso} n={data['totals']['persons']} reps={reps}")
+    return _manager_json({**_manager_envelope(mgr, team, iso, today, prev, nxt, uid),
+                          **data})
+
+
+async def _manager_app_map_data(request: web.Request) -> web.Response:
+    """Карта дня ВНУТРИ приложения: авторизация сессией, подпись не нужна.
+    Подписанный /manager/map_data остаётся для телеграм-кнопки."""
+    uid, mgr, team = _manager_gate(request)
+    iso, today, prev, nxt = _manager_date(request)
+    emp = _manager_employee_q(request, team)
+    pts = db.day_map_points(emp, iso)
+    db.audit_access(uid, "digest_view", target=emp, detail=f"map {iso}")
+    return _manager_json({**_manager_envelope(mgr, team, iso, today, prev, nxt, uid),
+                          "employee": emp, **pts,
+                          "vectorTiles": "/tiles/basemap.pmtiles"
+                          if TILES_FILE.exists() else None,
+                          "alert_m": db.geo_alert_m()})
 
 
 async def _manager_map_data(request: web.Request) -> web.Response:
@@ -1816,7 +2481,10 @@ function pin(bg,txt){const e=document.createElement("div");e.className="pin";
   };
   j.targets.forEach(p=>add(p,pin("#2F80ED"),"🏠 "+esc(p.client)));
   j.visits.forEach((p,i)=>{
-    const far=p.dist_m!=null&&p.dist_m>j.alert_m;
+    // Вердикт «далеко» — СОХРАНЁННЫЙ (visits.geo_far), как в пуше и карточке:
+    // руководитель попадает сюда кнопкой из дайджеста, и третьей версии правды
+    // по одному визиту быть не должно. Порог — только для старых записей.
+    const far = p.geo_far!=null ? !!p.geo_far : (p.dist_m!=null&&p.dist_m>j.alert_m);
     const d=p.dist_m==null?"":(p.dist_m>=1000?(p.dist_m/1000).toFixed(1)+" км":p.dist_m+" м")+" от адреса";
     add(p,pin(far?"#B0472C":"#219653",String(i+1)),
         (far?"⚠️ ":"✅ ")+esc(p.client)+(d?"<br>"+esc(d):""));
@@ -2020,6 +2688,33 @@ async def _admin_import_json(request: web.Request) -> web.Response:
     expected_comment_effect_digest = body.get(
         "expected_comment_effect_digest"
     )
+    expected_recalled = body.get("expected_recalled")
+    expected_recalled_digest = body.get("expected_recalled_digest")
+    expected_recall_restored = body.get("expected_recall_restored")
+    expected_recall_restored_digest = body.get("expected_recall_restored_digest")
+    for _nm, _cv, _dv in (
+        ("recalled", expected_recalled, expected_recalled_digest),
+        ("recall_restored", expected_recall_restored,
+         expected_recall_restored_digest),
+    ):
+        if _cv is not None and (isinstance(_cv, bool)
+                                or not isinstance(_cv, int) or _cv < 0):
+            return web.json_response(
+                {"blocked": True,
+                 "error": (f"импорт заблокирован: expected_{_nm} должен "
+                           "быть неотрицательным целым")},
+                status=409,
+            )
+        if _dv is not None and (
+            not isinstance(_dv, str) or len(_dv) != 64
+            or any(ch not in "0123456789abcdef" for ch in _dv)
+        ):
+            return web.json_response(
+                {"blocked": True,
+                 "error": (f"импорт заблокирован: expected_{_nm}_digest "
+                           "должен быть lowercase SHA-256")},
+                status=409,
+            )
     if (
         expected_auto_unassigned is not None
         and (
@@ -2102,8 +2797,16 @@ async def _admin_import_json(request: web.Request) -> web.Response:
         expected_manual_restored=expected_manual_restored,
         expected_manual_restore_digest=expected_manual_restore_digest,
         expected_comment_effect_digest=expected_comment_effect_digest,
+        expected_recalled=expected_recalled,
+        expected_recalled_digest=expected_recalled_digest,
+        expected_recall_restored=expected_recall_restored,
+        expected_recall_restored_digest=expected_recall_restored_digest,
     )
     if report.get("blocked"):
+        # Машиночитаемый код: операторский CLI различает «нужен предпросмотр
+        # отзыва» и «расписка не зарегистрирована», не разбирая свободный текст.
+        if report.get("recall_preview_required"):
+            report["code"] = "recall_preview_required"
         return web.json_response(report, status=409)
     # A consumed receipt is an exact zero-write replay. Do not run ancillary
     # mutators behind it: otherwise replaying the same import could still
@@ -2313,6 +3016,38 @@ async def _admin_unassign(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "n": n})
 
 
+async def _admin_recalled(request: web.Request) -> web.Response:
+    """Пульту: снятые с работы договоры — единственный экран, где их видно.
+    ?reason=recalled|manual|absent_from_registry, ?employee=ФИО, ?limit=N."""
+    _admin(request)
+    reason = (request.query.get("reason") or db.UNASSIGNED_REASON_RECALLED).strip()
+    if reason not in (db.UNASSIGNED_REASON_RECALLED, db.UNASSIGNED_REASON_MANUAL,
+                      db.UNASSIGNED_REASON_ABSENT_FROM_REGISTRY):
+        raise web.HTTPBadRequest(text="reason")
+    try:
+        limit = int(request.query.get("limit") or 500)
+    except ValueError:
+        raise web.HTTPBadRequest(text="limit")
+    data = db.unassigned_overview(
+        reason=reason,
+        employee=(request.query.get("employee") or "").strip(),
+        limit=limit)
+    items = [{"contract_id": r["contract_id"], "client": r["client"],
+              "employee": r["unassigned_from"] or "",
+              "recall_date": r["recall_date"] or "",
+              "recall_reason": r["recall_reason"] or "",
+              "recall_transfer": r["recall_transfer"] or "",
+              "recall_withdrawn": r["recall_withdrawn"] or "",
+              "debt": debt.contract_debt(r), "unit": debt.unit([r["partner"]])}
+             for r in data["rows"]]
+    # Оптовая выдача ПД (до 5000 ФИО с долгами) — след в журнал обязателен.
+    db.audit_access(ADMIN_ID or 0, "recalled_list", reason, str(data["shown"]))
+    return web.json_response({"reason": reason, "totals": data["totals"],
+                              "by_employee": data["by_employee"],
+                              "shown": data["shown"], "limit": data["limit"],
+                              "items": items})
+
+
 async def _admin_bind(request: web.Request) -> web.Response:
     """Предзаданная привязка из пульта: {telegram_id:int, employee:str, kind:str}.
     Создать/обновить с approved=1 — работник с этим id сразу привязан к клиентам
@@ -2421,16 +3156,27 @@ async def _admin_managers(request: web.Request) -> web.Response:
     """Экран «Руководители» в пульте: список руководителей + справочники для форм
     (города и сотрудники из реестра, карта город→команда) + настройки автопуша."""
     _admin(request)
+    today = date.today().isoformat()
+    managers = db.list_managers()
+    for m in managers:
+        # Расхождение написаний ФИО роль/реестр: у таких портфель у руководителя
+        # не открывается (доступ матчит точно), хотя отбивки приходят.
+        m["spelling_mismatch"] = len(db.manager_spelling_mismatches(m))
     return web.json_response({
-        "managers": db.list_managers(),
+        "managers": managers,
         "cities": db.cities_in_registry(),
         "employees": [{"employee": e["employee"], "contracts": e["contracts"]}
                       for e in db.employees_in_registry()],
         "city_employees": db.city_employees(),
         "digest": {
             "time": db.get_setting("digest_time") or "16:30",
-            "enabled": (db.get_setting("digest_enabled") or "1").strip().lower()
-                       not in ("0", "false", "no", "off"),
+            "enabled": db.push_enabled("digest_enabled"),
+            "promise_time": db.get_setting("promise_time") or "09:30",
+            "promise_enabled": db.push_enabled("promise_enabled"),
+            "visit_push": db.push_enabled("visit_push"),
+            "digest_last_run": db.get_setting("digest_last_run") or "",
+            "promise_last_run": db.get_setting("promise_last_run") or "",
+            "delivery": db.push_summary(today),
         },
     })
 
@@ -2473,7 +3219,9 @@ async def _admin_manager_delete(request: web.Request) -> web.Response:
 
 
 async def _admin_digest_settings(request: web.Request) -> web.Response:
-    """GET/POST настроек автопуша дайджеста: {time:"HH:MM", enabled:bool} (время по МСК)."""
+    """GET/POST настроек автопуша дайджеста: {time:"HH:MM", enabled:bool} (время по МСК).
+    GET дополнительно отдаёт защёлки, счётчики добора и сводку доставок за
+    сегодня — «не работает» становится проверяемым фактом без захода на сервер."""
     _admin(request)
     if request.method == "POST":
         b = await request.json()
@@ -2487,21 +3235,97 @@ async def _admin_digest_settings(request: web.Request) -> web.Response:
             db.set_setting("digest_enabled", "1" if b.get("enabled") else "0")
         if "promise_enabled" in b:
             db.set_setting("promise_enabled", "1" if b.get("promise_enabled") else "0")
+        # ТОЛЬКО при наличии ключа: старый пульт шлёт body без visit_push, и без
+        # охраны обычное «Сохранить» молча выключало бы отбивки по всему проду.
+        if "visit_push" in b:
+            db.set_setting("visit_push", "1" if b.get("visit_push") else "0")
+        # Личные рубильники ВЛАДЕЛЬЦА (не общие): «дайджест только, отдельно».
+        # Тот же принцип «только при наличии ключа» — старый пульт их не шлёт.
+        for key in ("owner_digest", "owner_promise"):
+            if key in b:
+                db.set_setting(key, "1" if b.get(key) else "0")
 
-    def _on(key):
-        return (db.get_setting(key) or "1").strip().lower() not in ("0", "false", "no", "off")
-
+    today = date.today().isoformat()
+    delivery = db.push_summary(today)
+    delivery["recent"] = db.push_tail(20, day=today)
     return web.json_response({
         "ok": True,
         "time": db.get_setting("digest_time") or "16:30",
-        "enabled": _on("digest_enabled"),
+        "enabled": db.push_enabled("digest_enabled"),
         "promise_time": db.get_setting("promise_time") or "09:30",
-        "promise_enabled": _on("promise_enabled"),
+        "promise_enabled": db.push_enabled("promise_enabled"),
+        "visit_push": db.push_enabled("visit_push"),
+        "owner_digest": db.push_enabled("owner_digest", "1"),
+        "owner_promise": db.push_enabled("owner_promise", "0"),
+        "digest_last_run": db.get_setting("digest_last_run") or "",
+        "promise_last_run": db.get_setting("promise_last_run") or "",
+        "digest_retry": {"day": db.get_setting("digest_retry_day") or "",
+                         "attempts": int(db.get_setting("digest_retry_n") or 0)},
+        "promise_retry": {"day": db.get_setting("promise_retry_day") or "",
+                          "attempts": int(db.get_setting("promise_retry_n") or 0)},
+        "today": today,
+        "delivery": delivery,
     })
 
 
+async def _admin_push_test(request: web.Request) -> web.Response:
+    """Пробная отправка выбранного вида конкретному адресату — с ТЕКСТОМ ошибки
+    Телеграма в ответе (весь смысл ручки в этом тексте, поэтому неудача — тоже
+    HTTP 200). Пишется отдельным видом test: иначе диагностика выключала бы то,
+    что диагностирует — push_settled_today считает улаженными sent и blocked,
+    и руководитель, по которому нажали «проверить» в 11:00, не получил бы
+    настоящую сводку в 16:30."""
+    _admin(request)
+    import digest
+    from notify import classify_send_error
+    body = await request.json()
+    kind = str(body.get("kind") or "").strip()
+    if kind not in (db.PUSH_DIGEST, db.PUSH_PROMISE, db.PUSH_VISIT):
+        raise web.HTTPBadRequest(text="kind")
+    try:
+        tid = int(body.get("telegram_id"))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text="telegram_id")
+    bot = request.app.get("bot")
+    if not bot:
+        raise web.HTTPServiceUnavailable(text="нет бота")
+    if kind in (db.PUSH_DIGEST, db.PUSH_PROMISE):
+        # ПД-граница: сводка содержит ФИО должников и суммы — слать её
+        # произвольному id нельзя. kind=visit шлёт безличный текст.
+        mgr = db.get_manager(tid)
+        if not mgr and tid == ADMIN_ID:
+            mgr = digest.owner_scope(tid)
+        if not mgr:
+            raise web.HTTPForbidden(text="not a manager")
+        on_date = digest.today_iso()
+        if kind == db.PUSH_DIGEST:
+            text, kb = digest.summary_view(mgr, on_date)
+        else:
+            text, kb = digest.promises_view(mgr, on_date)
+        payload = {"text": text, "reply_markup": kb}
+    else:
+        payload = {"text": ("🔧 Проверка доставки уведомлений. Если вы это "
+                            "видите — бот может писать вам в личку."),
+                   "reply_markup": None}
+    try:
+        await bot.send_message(tid, payload["text"],
+                               reply_markup=payload["reply_markup"])
+    except Exception as exc:  # noqa: BLE001
+        status, err = classify_send_error(exc)
+        db.log_push(db.PUSH_TEST, status, target_kind="manager", target_id=tid,
+                    note=f"push_test:{kind}", error=err)
+        if status == db.PUSH_BLOCKED:
+            db.set_can_dm(tid, False)
+        return web.json_response({"ok": False, "status": status, "error": err})
+    db.log_push(db.PUSH_TEST, db.PUSH_SENT, target_kind="manager", target_id=tid,
+                note=f"push_test:{kind}")
+    db.set_can_dm(tid, True)
+    return web.json_response({"ok": True, "status": db.PUSH_SENT})
+
+
 async def _admin_digest_preview(request: web.Request) -> web.Response:
-    """Предпросмотр сводки руководителя (текст) для пульта: ?telegram_id=."""
+    """Предпросмотр сводки руководителя (текст) для пульта: ?telegram_id=.
+    Плюс диагностика состава: почему сводка такая и дойдёт ли она."""
     _admin(request)
     import digest
     try:
@@ -2509,10 +3333,43 @@ async def _admin_digest_preview(request: web.Request) -> web.Response:
     except (TypeError, ValueError):
         raise web.HTTPBadRequest(text="telegram_id")
     mgr = db.get_manager(tid)
+    source = "explicit"
+    if mgr and (mgr.get("direction") or "").strip():
+        source = "direction"
+    if not mgr and tid == ADMIN_ID:
+        # Владелец без записи в managers — ровно его жалоба «у меня не работает»
+        mgr = digest.owner_scope(tid)
+        source = "owner_synthetic"
     if not mgr:
         raise web.HTTPNotFound(text="manager")
-    text, _ = digest.summary_view(mgr, digest.today_iso())
-    return web.json_response({"ok": True, "text": text})
+    today = digest.today_iso()
+    text, _ = digest.summary_view(mgr, today)
+    employees = digest.sorted_employees(mgr)
+    known = db.registry_name_index()
+    exact_names = set(known.values())
+    matched_exact = sum(1 for e in employees if e in exact_names)
+    matched_key = sum(1 for e in employees
+                      if e not in exact_names and db._name_key(e) in known)
+    unknown = [e for e in employees if db._name_key(e) not in known]
+    return web.json_response({"ok": True, "text": text, "diagnostics": {
+        "manager": {"telegram_id": tid, "name": mgr.get("name") or "",
+                    "direction": mgr.get("direction") or "",
+                    "can_dm": (db.get_manager(tid) or {}).get("can_dm"),
+                    "is_owner": tid == ADMIN_ID},
+        "employees": employees,
+        "employees_source": source,
+        "matched_exact": matched_exact,
+        "matched_by_name_key": matched_key,
+        "unknown_in_registry": unknown,
+        "spelling_mismatch": db.manager_spelling_mismatches(mgr),
+        "processed_today": sum(len(db.persons_processed(e, today))
+                               for e in employees),
+        "overdue_promises": sum(len(db.overdue_promises(e, today))
+                                for e in employees),
+        "report_chats": {e: db.report_chats_for(e) for e in employees},
+        "last_run": {"digest": db.get_setting("digest_last_run") or "",
+                     "promise": db.get_setting("promise_last_run") or ""},
+    }})
 
 
 async def _admin_notify(request: web.Request) -> web.Response:
@@ -2632,6 +3489,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/admin/device/enroll.json", _admin_device_enroll)
     app.router.add_get("/admin/devices.json", _admin_devices)
     app.router.add_post("/admin/device/revoke.json", _admin_device_revoke)
+    app.router.add_post("/admin/push_test", _admin_push_test)
+    app.router.add_get("/admin/recalled.json", _admin_recalled)
     app.router.add_get("/admin/chats", _admin_chats)
     app.router.add_post("/admin/chats.set", _admin_chats_set)
     app.router.add_get("/admin/export", _admin_export)
@@ -2663,6 +3522,14 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/manager/map_data", _manager_map_data)
     app.router.add_get("/tiles/basemap.pmtiles", _tiles)
     app.router.add_get("/tiles/raster/{z}/{x}/{y}.png", _raster_tile)
+    app.router.add_get("/api/manager/summary", _manager_summary)
+    app.router.add_get("/api/manager/employee", _manager_employee_view)
+    app.router.add_get("/api/manager/person", _manager_person)
+    app.router.add_get("/api/manager/period", _manager_period)
+    app.router.add_get("/api/manager/promises", _manager_promises)
+    app.router.add_get("/api/manager/map_data", _manager_app_map_data)
+    app.router.add_get("/api/manager/photos", _manager_photos)
+    app.router.add_get("/api/manager/photo", _manager_photo_file)
     app.router.add_get("/api/bootstrap", _bootstrap)
     app.router.add_get("/api/person", _person)
     app.router.add_get("/api/cards", _cards)

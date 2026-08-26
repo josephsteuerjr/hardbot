@@ -40,6 +40,10 @@ from photostore import PHOTO_DIR as DEFAULT_PHOTO_DIR
 
 
 RESET_TABLES = {
+    # Журнал доставки пушей: telegram_id руководителей и ФИО сотрудников — это
+    # ПД, переживать сброс ограниченного теста они не должны (в отличие от
+    # training_rows, где ПД нет по построению).
+    "push_log",
     "clients",
     "visits",
     "users",
@@ -89,6 +93,8 @@ EXPECTED_TABLES = RESET_TABLES | RETAINED_TABLES
 
 # Сначала зависимые/операционные сущности, затем registry и identity/config.
 DELETE_ORDER = (
+    "push_log",       # телеметрия, зависимостей нет — но не в DELETE_ORDER
+                      # значит RuntimeError «после reset остались строки»
     "report_chat_employees",
     "report_chats",
     "photo_geo",
@@ -1712,6 +1718,10 @@ def _restore_database(backup: Path) -> None:
         destination.close()
         source.close()
     _sync_database_storage()
+    # Кэш ролей: на живой процесс бота операторский CLI не влияет (контейнер
+    # остановлен по процедуре) — строка нужна внутрипроцессным прогонам pytest
+    # и на случай вызова сброса из живого приложения.
+    db.reset_role_caches()
 
 
 def _fault_point(_name: str) -> None:
@@ -1870,6 +1880,7 @@ def _apply_authorized_reset(
         finally:
             conn.close()
         _sync_database_storage()
+        db.reset_role_caches()   # managers очищены — индекс адресатов заново
         _fault_point("after_database_reset")
 
         nonzero = {name: count for name, count in post_counts.items() if count}

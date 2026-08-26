@@ -316,7 +316,17 @@ def _items_from_db() -> list[dict]:
     import db
     from exchange_contract import OFFICE_RESULT_SNAPSHOT_KEY
     with db.connect() as conn:
-        rows = conn.execute("SELECT * FROM clients").fetchall()
+        # Откреплённый договор не должен тянуть маршрут дня: у человека с двумя
+        # КД отозванный складывал долг с рабочим (группировка идёт по ФИО+ДР
+        # без responsible), а человек, у которого отозвали всё, оставался в
+        # индексе приоритета и перебивал одноимённого. Фильтр — по МЕТКЕ
+        # открепления, а не по непустому responsible: строки, у которых
+        # ответственного не было никогда, остаются в скоринге как раньше.
+        rows = conn.execute(
+            "SELECT * FROM clients "
+            "WHERE COALESCE(unassigned_reason,'') = '' "
+            "AND COALESCE(unassigned_from,'') = ''"
+        ).fetchall()
     persons = db._group_persons(rows)
     items = []
     for p in persons:

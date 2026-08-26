@@ -37,16 +37,32 @@ button,a,input,select,textarea,.pcard{touch-action:manipulation}
   /* Нативный select остаётся в DOM (по нему читают форму), но не показывается. */
   .nativesel{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
   .pick{display:block;width:100%;text-align:left;padding:13px 14px;margin-bottom:10px;
-    border:1px solid var(--bd);border-radius:10px;background:#fff;color:var(--muted);
+    border:1px solid var(--border);border-radius:10px;background:#fff;color:var(--muted);
     font-size:15px;line-height:1.2}
-  .pick.has{color:var(--ink);font-weight:600}
+  .pick.has{color:var(--text);font-weight:600}
   .pick:after{content:"⌄";float:right;color:var(--muted)}
   .picksheet{position:fixed;inset:0;z-index:60;display:flex;align-items:flex-end}
+  .wheelwrap{display:flex;gap:10px;padding:10px 14px}
+  .wheel{flex:1;height:180px;overflow-y:auto;scroll-snap-type:y mandatory;
+    -webkit-overflow-scrolling:touch;position:relative;border-radius:10px;
+    touch-action:pan-y}
+  .wheelitem{height:44px;line-height:44px;text-align:center;scroll-snap-align:center;
+    color:var(--muted);font-size:16px}
+  .wheelitem.on{color:var(--text);font-weight:700}
+  .wheelpad{height:68px}
+  .wheelband{position:absolute;left:14px;right:14px;top:calc(50% - 22px);height:44px;
+    pointer-events:none;border-top:1px solid var(--border);
+    border-bottom:1px solid var(--border);background:var(--alt);opacity:.35;
+    border-radius:8px}
+  .wheelhead{position:relative}
+  .datechips{display:flex;gap:8px;padding:0 14px 10px;flex-wrap:wrap}
+  .datechip{border:1px solid var(--border);border-radius:16px;background:#fff;
+    padding:8px 14px;font-size:14px;color:var(--text)}
   .pickbg{position:absolute;inset:0;background:rgba(0,0,0,.35)}
   .pickbody{position:relative;width:100%;max-height:70vh;overflow:auto;background:#fff;
     border-radius:14px 14px 0 0;padding:8px}
   .pickrow{display:block;width:100%;text-align:left;padding:16px 14px;border:0;
-    background:none;font-size:16px;border-bottom:1px solid var(--bd);color:var(--ink)}
+    background:none;font-size:16px;border-bottom:1px solid var(--border);color:var(--text)}
   .pickrow:last-child{border-bottom:0}
   .pickrow.on{font-weight:700;background:var(--alt)}
 .ico{display:inline-flex;flex:0 0 auto;width:18px;height:18px}
@@ -238,6 +254,7 @@ if (TG) {
 
 // --- Иконки (инлайн-SVG вместо эмодзи — единый, спокойный визуальный язык). ---
 const ICONS = {
+  chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
   nav:    '<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linejoin="round"><path d="M12 2 L20 20 L12 16 L4 20 Z"/></svg>',
   phone:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.6 10.8c1.4 2.8 3.8 5.2 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.5.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.4 21 3 13.6 3 4.1c0-.6.4-1 1-1h3.4c.6 0 1 .4 1 1 0 1.2.2 2.4.6 3.5.1.4 0 .8-.2 1L6.6 10.8Z"/></svg>',
   pin:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s7-7.4 7-12a7 7 0 1 0-14 0c0 4.6 7 12 7 12Z"/><circle cx="12" cy="9" r="2.3"/></svg>',
@@ -261,13 +278,16 @@ const I18N = {
     search:"Поиск: ФИО, договор, телефон",kd:"КД",total:"Долг всего",inwork:"В работе с",
     drive:"Доехать",call:"Позвонить",save:"Сохранить выезд",addphoto:"Добавить фото",
     mgrpending:"Не отправлено операций: {n}. Они сохранятся, но уйдут только под текущим сотрудником. Переключиться всё равно?",
-    savefailed:"визитов отклонено сервером",
+    savefailed:"записей отклонено сервером",
     mgrviewing:"Смотрю портфель сотрудника",mgrswitching:"Переключаю…",
     warmnone:"Карточки для работы без сети ещё не загружены",warmgo:"Загрузить для оффлайна",
     warmgoing:"Загружаю карточки",warmready:"Готово к работе без сети",
     warmagain:"Обновить оффлайн-копию",warmfail:"Не удалось загрузить — нужна сеть",
     routeday:"Маршрут дня",rdempty:"Нет невизитированных кейсов с точками",
     freenav:"Навигация по адресу",freenavph:"Адрес или «41.31, 69.24»",
+    digest:"Сводка", dgneednet:"Сводка руководителя доступна только при связи",
+    dgerr:"Не удалось загрузить сводку", dggone:"Доступ к сводке отозван",
+    dggoneemp:"Сотрудник больше не в вашей команде",
     freenavfail:"Адрес не распознан",freenavrough:"Точность: только до района",
     voice:"Надиктовать",voicestop:"Стоп — распознать",voicewait:"Распознаю…",voicefail:"Не распозналось, попробуйте ещё",voiceunavail:"Голос временно недоступен — введите комментарий вручную",
     comment:"Комментарий",historicalComment:"Историчный комментарий выезда",tips:"Доп. адрес / доп. номер",lastvisit:"Последний выезд",
@@ -303,13 +323,16 @@ const I18N = {
     search:"Qidirish: F.I.Sh., shartnoma, telefon",kd:"shartnoma",total:"Jami qarz",inwork:"Ish boshlandi",
     drive:"Borish",call:"Qo‘ng‘iroq",save:"Chiqishni saqlash",addphoto:"Rasm qo‘shish",
     mgrpending:"Yuborilmagan amallar: {n}. Ular saqlanadi, lekin joriy xodim nomidan ketadi. Baribir almashtirilsinmi?",
-    savefailed:"tashrif server tomonidan rad etildi",
+    savefailed:"yozuvlar server tomonidan rad etildi",
     mgrviewing:"Xodim portfelini ko‘ryapman",mgrswitching:"Almashtirilmoqda…",
     warmnone:"Tarmoqsiz ishlash uchun kartalar hali yuklanmagan",warmgo:"Oflayn uchun yuklash",
     warmgoing:"Kartalar yuklanmoqda",warmready:"Tarmoqsiz ishlashga tayyor",
     warmagain:"Oflayn nusxani yangilash",warmfail:"Yuklanmadi — tarmoq kerak",
     routeday:"Kun marshruti",rdempty:"Nuqtali ochiq ishlar yo‘q",
     freenav:"Manzil bo‘yicha navigatsiya",freenavph:"Manzil yoki «41.31, 69.24»",
+    digest:"Hisobot", dgneednet:"Rahbar hisoboti faqat aloqa bo‘lganda ochiladi",
+    dgerr:"Hisobot yuklanmadi", dggone:"Hisobotga ruxsat bekor qilindi",
+    dggoneemp:"Xodim endi jamoangizda emas",
     freenavfail:"Manzil topilmadi",freenavrough:"Aniqlik: faqat tuman darajasida",
     voice:"Ovozli izoh",voicestop:"To‘xtatish",voicewait:"Aniqlanmoqda…",voicefail:"Bo‘lmadi, yana urinib ko‘ring",voiceunavail:"Ovoz vaqtincha ishlamayapti — izohni qo‘lda kiriting",
     comment:"Izoh",historicalComment:"Oldingi tashriflar izohi",tips:"Qo‘shimcha manzil / raqam",lastvisit:"Oxirgi chiqish",
@@ -345,13 +368,16 @@ const I18N = {
     search:"Ҷустуҷӯ: НН, шартнома, телефон",kd:"шартнома",total:"Қарзи умумӣ",inwork:"Дар кор аз",
     drive:"Расидан",call:"Занг задан",save:"Сафарро захира",addphoto:"Расм илова",
     mgrpending:"Амалҳои нафиристода: {n}. Онҳо нигоҳ дошта мешаванд, вале аз номи корманди ҷорӣ мераванд. Бо вуҷуди ин иваз шавад?",
-    savefailed:"боздиди рад кардашуда",
+    savefailed:"сабтҳои радшуда аз ҷониби сервер",
     mgrviewing:"Портфели кормандро мебинам",mgrswitching:"Иваз мешавад…",
     warmnone:"Кортҳо барои кори бе шабака ҳанӯз боргирӣ нашудаанд",warmgo:"Барои офлайн боргирӣ",
     warmgoing:"Кортҳо боргирӣ мешаванд",warmready:"Барои кори бе шабака тайёр",
     warmagain:"Нусхаи офлайнро нав кунед",warmfail:"Нашуд — шабака лозим аст",
     routeday:"Масири рӯз",rdempty:"Кейси кушодаи нуқтадор нест",
     freenav:"Навигатсия аз рӯи нишонӣ",freenavph:"Нишонӣ ё «41.31, 69.24»",
+    digest:"Ҳисобот", dgneednet:"Ҳисоботи роҳбар танҳо ҳангоми алоқа дастрас аст",
+    dgerr:"Ҳисобот бор нашуд", dggone:"Дастрасӣ ба ҳисобот бекор шуд",
+    dggoneemp:"Корманд дигар дар дастаи шумо нест",
     freenavfail:"Нишонӣ шинохта нашуд",freenavrough:"Дақиқӣ: танҳо то ноҳия",
     voice:"Гуфтан",voicestop:"Ист — шинохт",voicewait:"Шинохта истодааст…",voicefail:"Нашуд, боз кӯшиш кунед",voiceunavail:"Овоз муваққатан дастнорас аст — шарҳро дастӣ нависед",
     comment:"Шарҳ",historicalComment:"Шарҳи таърихии боздид",tips:"Суроға / рақами иловагӣ",lastvisit:"Сафари охирин",
@@ -387,6 +413,9 @@ const I18N = {
 let STATE = {lang:"ru", meta:null, persons:[], cur:null, tab:"visit"};
 let FORM_VERSION=0;
 let FORM_TOUCHED=new Set();
+// Явная очистка типизированного поля (кнопка «Убрать»). «Пусто после касания»
+// очисткой НЕ считается: случайный тап стирал бы офисное обещание во всех КД.
+let FORM_CLEARED=new Set();
 const L = () => I18N[STATE.lang] || I18N.ru;
 const $ = (id) => document.getElementById(id);
 const enc = encodeURIComponent;
@@ -539,7 +568,7 @@ function hhmm(dt){ return String(dt.getHours()).padStart(2,"0")+":"+String(dt.ge
 
 async function cacheBootstrap(d){
   try{ await IDB.put("kv",{lang:d.lang,meta:d.meta,persons:d.persons,kind:d.kind,
-    employee:d.employee,at:Date.now()},"bootstrap"); }catch(e){}
+    employee:d.employee,roles:d.roles||null,at:Date.now()},"bootstrap"); }catch(e){}
 }
 async function loadBootstrapSnapshot(){ try{ return await IDB.get("kv","bootstrap"); }catch(e){ return null; } }
 async function loadCard(rep){ try{ return (await IDB.get("cards",rep))||null; }catch(e){ return null; } }
@@ -626,7 +655,7 @@ async function updateOffBar(){
     .slice(0,3).join(", ");
   // Визиты, отклонённые сервером (404/400), теперь не удаляются молча — значит
   // должны быть ВИДНЫ, иначе они просто копятся незаметно.
-  const rejected=items.filter(it=>it&&it.kind==="save"&&
+  const rejected=items.filter(it=>it&&it.kind!=="photo"&&
                                   String(it.failed||"").indexOf("server-")===0);
   const qn=items.length-failed-rejected.length;
   const off = STATE.online===false, t=L();
@@ -688,7 +717,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=32;
+const SHELL_VERSION=33;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -742,6 +771,123 @@ async function shrinkPhoto(file){
     if(file.size&&blob.size>=file.size) return null;
     return blob;
   }catch(e){ return null; }
+}
+// EXIF читаем СВОИМ кодом: в оболочке нет и не будет внешних библиотек.
+// Только ДО пережатия — shrinkPhoto уничтожает метаданные безвозвратно и
+// молча. БЕЛЫЙ СПИСОК полей: DateTimeOriginal, OffsetTimeOriginal, GPS,
+// Make, Model, Software. Всё прочее (MakerNote, миниатюры, серийники) не
+// читаем вовсе: это ПД и килобайты в заголовке.
+// HEIC (ISO-BMFF) намеренно НЕ разбираем: неверный offset дал бы не пустоту,
+// а ЛОЖНЫЕ координаты и время — сфабрикованное доказательство.
+const EXIF_HEAD=131072, EXIF_HDR_MAX=512, EXIF_MS=1500;
+function exifNone(st){ return {sv:SHELL_VERSION, st:st||"absent"}; }
+async function readExifMeta(f){
+  try{
+    const head=await f.slice(0,EXIF_HEAD).arrayBuffer();
+    const b=new Uint8Array(head), dv=new DataView(head);
+    if(b.length>11&&b[4]===0x66&&b[5]===0x74&&b[6]===0x79&&b[7]===0x70)
+      return exifNone("heic");                       // ISO-BMFF (ftyp)
+    if(b.length<4||b[0]!==0xFF||b[1]!==0xD8) return exifNone("absent");
+    let p=2, tiff=-1;
+    while(p+4<b.length){
+      if(b[p]!==0xFF){ p++; continue; }
+      const m=b[p+1];
+      if(m===0xD8||m===0x01||(m>=0xD0&&m<=0xD7)){ p+=2; continue; }
+      if(m===0xDA||m===0xD9) break;                  // SOS/EOI — метаданных дальше нет
+      if(p+4>b.length) break;
+      const len=dv.getUint16(p+2,false);
+      if(len<2) break;
+      if(m===0xE1&&p+10<=b.length&&
+         b[p+4]===0x45&&b[p+5]===0x78&&b[p+6]===0x69&&b[p+7]===0x66&&b[p+8]===0){
+        tiff=p+10; break; }                          // APP1 "Exif\0\0"
+      p+=2+len;
+    }
+    if(tiff<0) return exifNone("absent");
+    if(tiff+8>b.length) return exifNone("truncated");
+    const le=(b[tiff]===0x49&&b[tiff+1]===0x49);
+    if(!le&&!(b[tiff]===0x4D&&b[tiff+1]===0x4D)) return exifNone("error");
+    if(dv.getUint16(tiff+2,le)!==42) return exifNone("error");
+    const SZ={1:1,2:1,3:2,4:4,5:8,7:1,9:4,10:8};
+    const out={};
+    let truncated=false;
+    function rd(off,fn){ if(off<0||off>=b.length){ truncated=true; return null; }
+      try{ return fn(off); }catch(e){ truncated=true; return null; } }
+    function ascii(off,cnt){
+      let s="";
+      for(let i=0;i<cnt&&off+i<b.length;i++){ const c=b[off+i]; if(!c) break;
+        s+=String.fromCharCode(c); }
+      return s; }
+    function rational(off){
+      const n=rd(off,o=>dv.getUint32(o,le)), d=rd(off+4,o=>dv.getUint32(o,le));
+      return (n==null||d==null||!d)?null:n/d; }
+    function walk(ifdOff,handler){
+      const cntv=rd(ifdOff,o=>dv.getUint16(o,le));
+      if(cntv==null) return;
+      const cnt=Math.min(cntv,512);                  // жёсткий потолок записей
+      for(let i=0;i<cnt;i++){
+        const e=ifdOff+2+i*12;
+        const tag=rd(e,o=>dv.getUint16(o,le));
+        const typ=rd(e+2,o=>dv.getUint16(o,le));
+        const n=rd(e+4,o=>dv.getUint32(o,le));
+        if(tag==null||typ==null||n==null) return;
+        const size=(SZ[typ]||1)*n;
+        const voff=size<=4?e+8:tiff+(rd(e+8,o=>dv.getUint32(o,le))??-1);
+        if(voff<0||voff+size>b.length){ truncated=true; continue; }
+        handler(tag,typ,n,voff);
+      }
+    }
+    let exifIfd=-1, gpsIfd=-1;
+    const ifd0=tiff+dv.getUint32(tiff+4,le);
+    walk(ifd0,(tag,typ,n,voff)=>{
+      if(tag===0x010F) out.mk=ascii(voff,n).slice(0,40);
+      else if(tag===0x0110) out.md=ascii(voff,n).slice(0,40);
+      else if(tag===0x0131) out.sw=ascii(voff,n).slice(0,40);
+      else if(tag===0x8769) exifIfd=tiff+dv.getUint32(voff,le);
+      else if(tag===0x8825) gpsIfd=tiff+dv.getUint32(voff,le);
+    });
+    if(exifIfd>0) walk(exifIfd,(tag,typ,n,voff)=>{
+      if(tag===0x9003){ const s=ascii(voff,n);
+        // "YYYY:MM:DD HH:MM:SS" → ISO
+        const m2=s.match(/^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}:\d{2}:\d{2})/);
+        if(m2) out.dt=m2[1]+"-"+m2[2]+"-"+m2[3]+"T"+m2[4]; }
+      else if(tag===0x9011){ const s=ascii(voff,n);
+        if(/^[+-]\d{2}:\d{2}$/.test(s)) out.tz=s; }
+    });
+    if(gpsIfd>0){
+      let latR="",lonR="",lat=null,lon=null,gd="",gt=null;
+      walk(gpsIfd,(tag,typ,n,voff)=>{
+        if(tag===1) latR=ascii(voff,n);
+        else if(tag===2&&n>=3){ const d=rational(voff),m2=rational(voff+8),
+          s=rational(voff+16); if(d!=null&&m2!=null&&s!=null) lat=d+m2/60+s/3600; }
+        else if(tag===3) lonR=ascii(voff,n);
+        else if(tag===4&&n>=3){ const d=rational(voff),m2=rational(voff+8),
+          s=rational(voff+16); if(d!=null&&m2!=null&&s!=null) lon=d+m2/60+s/3600; }
+        else if(tag===0x1D) gd=ascii(voff,n);
+        else if(tag===7&&n>=3){ const h=rational(voff),mi=rational(voff+8),
+          se=rational(voff+16); if(h!=null&&mi!=null&&se!=null) gt=[h,mi,se]; }
+      });
+      if(lat!=null&&lon!=null){
+        if(/S/i.test(latR)) lat=-lat;
+        if(/W/i.test(lonR)) lon=-lon;
+        out.lat=Math.round(lat*1e6)/1e6; out.lon=Math.round(lon*1e6)/1e6;
+        const gm=gd.match(/^(\d{4}):(\d{2}):(\d{2})/);
+        if(gm&&gt){ const pad=x=>String(Math.floor(x)).padStart(2,"0");
+          out.gdt=gm[1]+"-"+gm[2]+"-"+gm[3]+"T"+pad(gt[0])+":"+pad(gt[1])+":"+pad(gt[2])+"Z"; }
+      }
+    }
+    const got=out.dt||out.tz||out.lat!=null||out.mk||out.md||out.sw;
+    return Object.assign(exifNone(truncated?"truncated":(got?"ok":"absent")),out);
+  }catch(e){ return exifNone("error"); }
+}
+function jsonAscii(o){ return JSON.stringify(o).replace(/[\u0080-\uffff]/g,
+  c=>"\\u"+c.charCodeAt(0).toString(16).padStart(4,"0")); } // заголовок обязан быть ASCII
+function exifHeader(m){
+  if(!m) return null;
+  let s=jsonAscii(m);
+  if(s.length>EXIF_HDR_MAX){ const c=Object.assign({},m);
+    delete c.mk; delete c.md; delete c.sw; s=jsonAscii(c); }
+  if(s.length>EXIF_HDR_MAX) s=jsonAscii(exifNone("oversize"));
+  return s;
 }
 async function photoBytes(value){
   let bytes=null;
@@ -802,15 +948,16 @@ async function flushQueue(){
       // Очередь старой оболочки не содержит списка явно затронутых полей.
       // Сервер её не сертифицирует; сохраняем запись для ручного разбора.
       if(it.kind==="save"&&it.failed==="refresh-form") continue;
-      // Визит, отклонённый сервером (404/400): держим видимым для ручного разбора,
-      // но не даём ему тормозить последующие операции.
-      if(it.kind==="save"&&String(it.failed||"").indexOf("server-")===0) continue;
+      // Запись, отклонённая сервером (404/400): держим видимой для ручного
+      // разбора, но не даём ей тормозить последующие операции.
+      if(String(it.failed||"").indexOf("server-")===0) continue;
       let ok=false, stop=false;
       try{
         let r;
         if(it.kind==="save"){
           const sbody={rep:it.rep,values:it.values,finish:true,op_id:it.op_id,
             form_version:it.form_version,input_keys:it.input_keys};
+          if(it.cleared_keys&&it.cleared_keys.length) sbody.cleared_keys=it.cleared_keys;
           if(it.geo) sbody.geo=it.geo;
           r=await fetch("/api/save",{method:"POST",headers:jsonHeaders(),
             body:JSON.stringify(sbody)});
@@ -830,7 +977,9 @@ async function flushQueue(){
           try{ bytes=await queuedPhotoBytes(it); }
           catch(e){ await markPhotoFailed(it,"retake"); STATE.online=true; continue; }
           r=await fetch("/api/photo?rep="+enc(it.rep)+"&op="+it.op_id,
-            {method:"POST",headers:photoHeaders(it.geo,it.ext),body:bytes});
+            {method:"POST",headers:photoHeaders(it.geo,it.ext,
+               {at:it.at, src:it.src, sm:it.exif&&it.exif.sm, exif:it.exif}),
+             body:bytes});
         }else{ ok=true; }   // неизвестный тип — не держим вечно
         if(r){
           if(r.ok){
@@ -855,12 +1004,12 @@ async function flushQueue(){
             await retireReplacedPhoto(it);
             STATE.online=true; continue;
           }
-          else if(it.kind==="save"){
-            // ВИЗИТ НЕ УДАЛЯЕМ. Раньше любой 4xx кроме 409 попадал в общий
-            // `else ok=true`, и заполненная в поле форма исчезала БЕЗ СЛЕДА:
-            // ни тоста, ни записи. А 404 здесь — штатная ситуация (кейс отдали
-            // другому выезднику, договор ушёл из портфеля), то есть терялась
-            // именно та работа, которую человек уже сделал.
+          else if(it.kind==="save"||it.kind==="note"||it.kind==="marker"){
+            // ЗАПИСЬ НЕ УДАЛЯЕМ. Раньше 4xx у save попадал в общий `else
+            // ok=true`, и заполненная в поле форма исчезала БЕЗ СЛЕДА; заметки
+            // и гео-метки удалялись молча ВСЕГДА — а 404 здесь штатен (договор
+            // отозвали/переназначили, пока человек был оффлайн), и терялась
+            // наводка «живёт у брата, синие ворота», которую не восстановить.
             it.failed="server-"+r.status; it.failed_at=Date.now();
             try{ await IDB.put("queue",it); }catch(e){}
             STATE.online=true; continue;
@@ -1004,12 +1153,14 @@ async function enterCode(){
   if(r===true){ toast('✓'); boot(); } else toast('✕');
 }
 
+let START_TAB, START_DATE, START_TAB_USED=false;
 function authHeaders(){
   const h = {};
   if (TG && TG.initData) h["X-Init-Data"] = TG.initData;    // внутри Телеги — подпись WebApp
   else { const t = appToken(); if(t) h["X-App-Token"]=t; }  // автономное PWA — токен от бота
   const dev = new URLSearchParams(location.search).get("dev_uid");
   if (dev) h["X-Dev-Uid"] = dev;
+  h["X-Shell-Version"]=String(SHELL_VERSION);
   return h;
 }
 async function api(path, opts){
@@ -1078,6 +1229,19 @@ async function boot(){
   geoProbe();                 // узнаём, дали ли права раньше (не спрашивает, только смотрит)
   tgGeoInit();                // внутри Телеграма — её собственный LocationManager
   if(!REDEEMED){ REDEEMED=true; await redeemFromUrl(); }   // одноразовый код из ссылки бота
+  // Диплинк из пуша (?tab=digest&d=дата): параметры вычищаются из адреса СРАЗУ
+  // — stampTokenUrl сохраняет query, а перезагрузка здесь штатная (обновление
+  // оболочки делает location.reload), и человека выбрасывало бы в сводку на
+  // дату вчерашнего пуша при каждом обновлении.
+  if(START_TAB===undefined){
+    START_TAB=null; START_DATE=null;
+    try{ const u=new URL(location.href);
+      if(u.searchParams.has("tab")||u.searchParams.has("d")){
+        START_TAB=u.searchParams.get("tab"); START_DATE=u.searchParams.get("d");
+        u.searchParams.delete("tab"); u.searchParams.delete("d");
+        history.replaceState(null,"",u.pathname+(u.search||"")+(location.hash||""));
+      } }catch(e){}
+  }
   try{
     const d = await api("/api/bootstrap");
     personalizeManifest();   // авторизация удалась → ярлык с этой страницы унесёт вход
@@ -1091,8 +1255,13 @@ async function boot(){
     // Сменился сотрудник на устройстве (перевыпуск на другого человека) — чистим кэш и
     // очередь прошлого, чтобы не смешивать ПД и не долить чужие визиты под новым токеном.
     const prev = await loadBootstrapSnapshot();
-    if(prev && prev.employee && d.employee && prev.employee !== d.employee) await clearLocalData();
-    setBottomNav("clients");   // три вкладки видны с первого экрана
+    // keepQueue: дрейф личности руководителя (acting пишет фолбэк allowed[0]
+    // при смене состава) не должен стоить выезднику неотправленной очереди.
+    if(prev && prev.employee && d.employee && prev.employee !== d.employee){
+      const left = await pendingCount();
+      await clearLocalData({keepQueue: left > 0});
+    }
+    setBottomNav("clients");   // вкладки видны с первого экрана
     setMeta(d.meta, true); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
     STATE.roles=d.roles||null;   // роль руководителя: список его сотрудников + текущий
     STATE.online=true;
@@ -1106,6 +1275,11 @@ async function boot(){
       download_ms:performance.now()-bootStarted});
     warmCards();                  // полные карточки всех клиентов в фон-кэш (онлайн)
     flushQueue();                 // досыл накопленного оффлайна (визиты/фото/метки)
+    if(!START_TAB_USED && START_TAB==="digest" && STATE.roles && STATE.roles.manager){
+      START_TAB_USED=true;        // одноразово: boot() зовётся и после actAs/setLang
+      DG.date=START_DATE||null;
+      renderDigest();
+    }
   }catch(e){
     clientMetric("boot_error", {download_ms:performance.now()-bootStarted});
     const st=+((e&&e.message)||0);
@@ -1123,6 +1297,9 @@ async function boot(){
     if(snap && snap.persons){
       STATE.lang=snap.lang||STATE.lang; renderLangs();
       setMeta(snap.meta); STATE.persons=snap.persons; STATE.kind=snap.kind||"agent";
+      // Без roles из снимка руководитель в поле терял и переключатель
+      // портфелей, и вкладку сводки — читалось как поломка приложения.
+      STATE.roles=snap.roles||null;
       STATE.online=false;
       renderList();
     }else{
@@ -1140,6 +1317,8 @@ function setBottomNav(active){
     {id:"map",     label:L().navtab, icon:"nav",  fn:"renderNav"},
     {id:"marks",   label:L().marks,  icon:"pin",  fn:"renderMarks"},
   ];
+  if(STATE.roles && STATE.roles.manager)
+    items.push({id:"digest", label:L().digest, icon:"chart", fn:"renderDigest"});
   $("bottomnavInner").innerHTML = items.map(it =>
     `<button class="${it.id===active?'on':''}" onclick="${it.fn}()">${ic(it.icon)}<span>${esc(it.label)}</span></button>`).join("");
   $("bottomnav").style.display = "block";
@@ -1280,7 +1459,7 @@ async function openP(rep){
     IDB.put("cards",d,rep).catch(()=>{});
   }
   STATE.cur=d; STATE.tab="visit";
-  FORM_TOUCHED.clear();
+  FORM_TOUCHED.clear(); FORM_CLEARED.clear();
   // ПОВТОРНОЕ открытие уже закрытого визита: считаем тронутым всё, что человек
   // видит заполненным. Иначе второе сохранение («утром Нет контакта, вечером
   // Оплачен», «поправил опечатку») отправляет только заново набранное поле, а
@@ -1291,6 +1470,10 @@ async function openP(rep){
   // отправляем ровно то, что уже было подтверждено нами же.
   if(d.visited){
     (d.form||[]).forEach(f=>{ if(f.current) FORM_TOUCHED.add(f.key); });
+    // Симметрично d.form: иначе второе сохранение выкидывало бы обещание из
+    // снимка (readForm шлёт только затронутые ключи).
+    if(d.formTyped) Object.keys(d.formTyped).forEach(k=>{
+      if(d.formTyped[k]) FORM_TOUCHED.add(k); });
     // Серверный комментарий текущего месяца показываем для продолжения, но не
     // считаем касанием формы: простое открытие/закрытие карточки не должно
     // превращать импортированный текст в доказанный результат нового визита.
@@ -1535,6 +1718,7 @@ function panelForm(d,t){
     ${sec("",t.secContact,grp(["contact_with","who_at_address"]))}
     ${sec("",t.secClient,grp(["client_location","purpose_rf"]))}
     ${sec("",t.secAgree,grp(["agreed_payment"])+rest)}
+    ${promiseSection(d)}
     <div class="fsec"><div class="fsec-h">${t.comment}</div>
       <label class="fld">${t.comment}</label><textarea id="f_visit_comment">${esc(d.visit_comment||d.call_comment||"")}</textarea>
       ${(STATE.meta&&STATE.meta.voice)?`<button class="btn line" id="micbtn" style="margin-top:8px" onclick="toggleVoice()">🎤 <span>${esc(t.voice)}</span></button>`:""}
@@ -1552,6 +1736,180 @@ function panelForm(d,t){
     </div>
     <div id="draftstat" class="draftrow" style="display:none"></div>
     <button class="btn acc big" id="savebtn" style="margin-top:12px" onclick="saveVisit()">${ic("check")}<span>${t.save}</span></button>`;
+}
+
+// --- Обещание выездника (контракт v3): дата барабаном + сумма ---------------
+// Скрытый <input data-k> — ИСТИНА (как <select> у пикера): по нему читает
+// readForm, в него восстанавливается черновик, на него подписан автосейв.
+// Барабан и чипы — только способ выбрать. Даты только сегодня-и-вперёд:
+// обещание в прошлое сразу попадало бы в «Просроченные» руководителю.
+function localToday(){ const d=new Date();
+  return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+
+         String(d.getDate()).padStart(2,"0"); }
+function srvToday(){
+  // meta.today приезжает и из ОФЛАЙН-снимка бутстрапа недельной давности —
+  // дата в прошлом дороже даты вперёд (кладёт должника в «Просроченные» и
+  // врёт киллер-фильтру), поэтому берём ПОЗДНЮЮ из серверной и локальной.
+  const s=(STATE.meta&&STATE.meta.today)||"";
+  const loc=localToday();
+  return (/^\d{4}-\d{2}-\d{2}$/.test(s)&&s>loc)?s:loc;
+}
+function typedFields(){ return (STATE.meta&&STATE.meta.typedFields)||[]; }
+function promiseSection(d){
+  const tf2=typedFields();
+  if(!tf2.length) return "";
+  const cur=(d&&d.formTyped)||{};
+  const reg=(d&&d.formTypedRegistry)||{};
+  const rows=tf2.map(f=>{
+    const v=cur[f.key]||"";
+    if(f.kind==="date"){
+      return `<label class="fld">${esc(f.title)}</label>
+        <input type="hidden" data-k="${esc(f.key)}" value="${esc(v)}">
+        <button type="button" class="pick${v?" has":""}" data-for="${esc(f.key)}"
+          onclick="openDateWheel('${esc(f.key)}')">${esc(v||"—")}</button>
+        ${reg[f.key]&&!v?`<div class="muted" style="font-size:11px;margin:-6px 0 8px">офис: ${esc(reg[f.key])}</div>`:""}`;
+    }
+    return `<label class="fld">${esc(f.title)}</label>
+      <div style="display:flex;gap:8px;margin-bottom:${reg[f.key]&&!v?"2px":"10px"}">
+        <input data-k="${esc(f.key)}" inputmode="numeric" class="search"
+          style="flex:1;margin:0" value="${esc(v)}" oninput="onMoneyInput(this)">
+        <button type="button" class="btn line" style="padding:8px 14px"
+          onclick="typedClear('${esc(f.key)}')">×</button>
+      </div>
+      ${reg[f.key]&&!v?`<div class="muted" style="font-size:11px;margin:0 0 10px">офис: ${esc(reg[f.key])}</div>`:""}`;
+  }).join("");
+  return `<div class="fsec"><div class="fsec-h">🤝</div>${rows}</div>`;
+}
+function onMoneyInput(el){
+  el.value=el.value.replace(/[^0-9]/g,"").slice(0,13);
+  if(el.value) FORM_CLEARED.delete(el.dataset.k);
+}
+function typedClear(key){
+  const el=document.querySelector('#panel [data-k="'+key+'"]');
+  if(!el) return;
+  el.value="";
+  FORM_TOUCHED.add(key); FORM_CLEARED.add(key);
+  el.dispatchEvent(new Event(el.tagName==="INPUT"&&el.type==="hidden"?"change":"input",{bubbles:true}));
+  syncPickLabels(); syncTypedLabels();
+  closePick();
+}
+function syncTypedLabels(){
+  typedFields().forEach(f=>{
+    if(f.kind!=="date") return;
+    const el=document.querySelector('#panel input[data-k="'+f.key+'"]');
+    const b=document.querySelector('#panel button.pick[data-for="'+f.key+'"]');
+    if(el&&b){ b.textContent=el.value||"—"; b.classList.toggle("has",!!el.value); }
+  });
+}
+const MONTH_NAMES=["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"];
+let WHEEL={key:null,months:[]};
+function openDateWheel(key){
+  const el=document.querySelector('#panel input[data-k="'+key+'"]');
+  if(!el) return;
+  const base=srvToday();
+  const by=+base.slice(0,4), bm=+base.slice(5,7);
+  WHEEL={key,months:[]};
+  for(let i=0;i<13;i++){                 // год вперёд
+    const m=(bm-1+i)%12, y=by+Math.floor((bm-1+i)/12);
+    WHEEL.months.push({y,m:m+1,label:MONTH_NAMES[m]+" "+y});
+  }
+  const cur=el.value&&/^\d{4}-\d{2}-\d{2}$/.test(el.value)?el.value:null;
+  const chips=[["Завтра",1],["Через неделю",7],["Через месяц",30]].map(
+    ([label,days])=>`<button type="button" class="datechip"
+      onclick="wheelChip(${days})">${label}</button>`).join("");
+  const monthRows=WHEEL.months.map((mm,i)=>
+    `<div class="wheelitem" data-i="${i}" onclick="wheelTap(this,'m')">${esc(mm.label)}</div>`).join("");
+  const box=document.createElement("div");
+  box.className="picksheet"; box.id="picksheet";
+  box.innerHTML=`<div class="pickbg" onclick="closePick()"></div>
+    <div class="pickbody">
+      <div class="datechips" style="padding-top:12px">${chips}</div>
+      <div class="wheelwrap wheelhead">
+        <div class="wheelband"></div>
+        <div class="wheel" id="wh_m"><div class="wheelpad"></div>${monthRows}<div class="wheelpad"></div></div>
+        <div class="wheel" id="wh_d"><div class="wheelpad"></div><div class="wheelpad"></div></div>
+      </div>
+      <div style="display:flex;gap:8px;padding:0 14px 14px">
+        <button type="button" class="btn line" style="flex:1" onclick="typedClear('${esc(key)}')">Убрать</button>
+        <button type="button" class="btn acc" style="flex:1" onclick="wheelDone()">Готово</button>
+      </div>
+    </div>`;
+  document.body.appendChild(box);
+  let mi=0, day=null;
+  if(cur){
+    const cy=+cur.slice(0,4), cm=+cur.slice(5,7);
+    const found=WHEEL.months.findIndex(x=>x.y===cy&&x.m===cm);
+    if(found>=0){ mi=found; day=+cur.slice(8,10); }
+  }
+  wheelFillDays(mi, day);
+  wheelScrollTo("wh_m", mi);
+  const wm=$("wh_m");
+  wm.addEventListener("scroll",()=>{ clearTimeout(wm._t);
+    wm._t=setTimeout(()=>{ const i=wheelIndex("wh_m");
+      wheelFillDays(i,null); wheelMark(); },120); },{passive:true});
+  const wd=$("wh_d");
+  wd.addEventListener("scroll",()=>{ clearTimeout(wd._t);
+    wd._t=setTimeout(wheelMark,120); },{passive:true});
+  wheelMark();
+}
+function wheelFillDays(mi, day){
+  const mm=WHEEL.months[mi]; if(!mm) return;
+  const base=srvToday();
+  const dim=new Date(mm.y,mm.m,0).getDate();
+  // первый месяц — только с сегодняшнего дня: обещание всегда вперёд
+  const from=(mm.y===+base.slice(0,4)&&mm.m===+base.slice(5,7))?+base.slice(8,10):1;
+  const rows=[];
+  for(let d2=from;d2<=dim;d2++)
+    rows.push(`<div class="wheelitem" data-d="${d2}" onclick="wheelTap(this,'d')">${d2}</div>`);
+  $("wh_d").innerHTML=`<div class="wheelpad"></div>${rows.join("")}<div class="wheelpad"></div>`;
+  if(day){
+    const idx=Math.max(0,day-from);
+    wheelScrollTo("wh_d", idx);
+  }
+}
+function wheelScrollTo(id,i){ const w=$(id); if(w) w.scrollTop=i*44; }
+function wheelIndex(id){ const w=$(id); return w?Math.round(w.scrollTop/44):0; }
+function wheelTap(el,kind){
+  const w=el.parentElement;
+  const items=[...w.querySelectorAll(".wheelitem")];
+  w.scrollTo({top:items.indexOf(el)*44,behavior:"smooth"});
+  setTimeout(wheelMark,180);
+  if(kind==="m") setTimeout(()=>{ wheelFillDays(wheelIndex("wh_m"),null); },200);
+}
+function wheelMark(){
+  ["wh_m","wh_d"].forEach(id=>{
+    const w=$(id); if(!w) return;
+    const i=wheelIndex(id);
+    [...w.querySelectorAll(".wheelitem")].forEach((el,j)=>
+      el.classList.toggle("on",j===i));
+  });
+}
+function wheelChip(days){
+  const base=srvToday();
+  const d2=new Date(+base.slice(0,4),+base.slice(5,7)-1,+base.slice(8,10)+days);
+  wheelSet(d2.getFullYear()+"-"+String(d2.getMonth()+1).padStart(2,"0")+"-"+
+           String(d2.getDate()).padStart(2,"0"));
+}
+function wheelDone(){
+  const mm=WHEEL.months[wheelIndex("wh_m")];
+  const w=$("wh_d");
+  const items=w?[...w.querySelectorAll(".wheelitem")]:[];
+  const it=items[wheelIndex("wh_d")]||items[0];
+  if(!mm||!it) return closePick();
+  wheelSet(mm.y+"-"+String(mm.m).padStart(2,"0")+"-"+
+           String(+it.dataset.d).padStart(2,"0"));
+}
+function wheelSet(iso){
+  const el=document.querySelector('#panel input[data-k="'+WHEEL.key+'"]');
+  if(el&&el.value!==iso){
+    el.value=iso;
+    FORM_CLEARED.delete(WHEEL.key);
+    // change — тот же сигнал, что у пикера: автосейв и черновик подписаны на него
+    el.dispatchEvent(new Event("change",{bubbles:true}));
+  }
+  FORM_TOUCHED.add(WHEEL.key);
+  syncTypedLabels();
+  closePick();
 }
 
 // --- Ссылки на внешнюю навигацию (последняя миля — родное приложение телефона). ---
@@ -1581,12 +1939,23 @@ function call(){ if(STATE.cur.phone) location.href="tel:"+STATE.cur.phone.replac
 // досудебки. Уходит ЗАГОЛОВКОМ (не в URL — query оседает в access-логах),
 // одинаково для онлайн-пути и оффлайн-очереди. ts — реальное время гео-фикса
 // (не момент вызова): кэшированная точка не выдаётся за точку съёмки.
-function photoHeaders(geo,ext){
+function photoHeaders(geo,ext,meta){
   const h=authHeaders();
   h["Content-Type"]="application/octet-stream";
   h["X-Photo-Raw"]="1";
   h["X-Photo-Ext"]=ext||".jpg";
-  if(geo) h["X-Photo-Geo"]=geo.lat+","+geo.lon+","+(geo.acc||0)+","+(geo.ts||Date.now());
+  // geo.ts||0: сервер трактует gat<=0 как «фикса нет». Date.now() здесь выдавал
+  // бы момент ДОСЫЛА из очереди за время съёмки.
+  if(geo) h["X-Photo-Geo"]=geo.lat+","+geo.lon+","+(geo.acc||0)+","+(geo.ts||0);
+  // Ниже — ТОЛЬКО опциональное. Обязательный новый заголовок сломал бы
+  // установленные v12/v13: legacy-ветка сервера отвечает 503 и держит
+  // очередь вечно. Нет заголовка = «не знаем», а не «нарушение».
+  if(meta){
+    if(meta.at) h["X-Photo-Shot"]=String(meta.at);
+    if(meta.src) h["X-Photo-Source"]=meta.src;
+    if(meta.sm!=null) h["X-Photo-Shrunk"]=String(meta.sm);
+    const x=exifHeader(meta.exif); if(x) h["X-Photo-Exif"]=x;
+  }
   return h;
 }
 // ДВЕ КНОПКИ, А НЕ УГАДЫВАНИЕ. Из поля просили прикладывать уже снятое — снял
@@ -1615,12 +1984,19 @@ async function upPhoto(id, live){
   try{
     for(const f of files){
       try{
+        // EXIF — ПЕРВЫМ: shrinkPhoto стирает метаданные без следа и без лога.
+        // Таймаут: медленное чтение не должно расширять окно, в котором файл
+        // живёт только в памяти (iOS выгружает PWA на любом await).
+        const exif=await Promise.race([
+          readExifMeta(f).catch(()=>exifNone("error")),
+          new Promise(r=>setTimeout(()=>r(exifNone("error")),EXIF_MS))]);
         // Жмём ДО чтения в ArrayBuffer: иначе в память и в IndexedDB ляжет
         // восьмимегабайтный оригинал, который потом всё равно не уедет.
         const small=await shrinkPhoto(f);
+        exif.sm=small?1:0;   // «пережато/оригинал»: у HEIC-оригинала разбор возможен позже
         prepared.push({bytes:await photoBytes(small||f),
                        mime:small?"image/jpeg":(f.type||"image/jpeg"),
-                       ext:small?".jpg":photoExt(f.name,f.type)});
+                       ext:small?".jpg":photoExt(f.name,f.type), exif});
       }catch(e){ toast(L().photolost); }
     }
     try{ el.value=""; }catch(e){}
@@ -1636,7 +2012,8 @@ async function sendPhoto(rep,p,live,retakeOf){
   // Сначала фиксируем единственную самостоятельную копию и ждём commit IDB.
   // Только после этого допустимы geolocation/fetch: iOS может выгрузить PWA на
   // любом await, а pageshow/следующий запуск безопасно досылает тот же op_id.
-  const entry={op_id,kind:"photo",rep,bytes,mime,ext:ext2,geo:null,at};
+  const entry={op_id,kind:"photo",rep,bytes,mime,ext:ext2,geo:null,at,
+               src:live?"camera":"gallery", exif:p.exif};
   let geo=null;
   PHOTO_PREPARING.add(op_id);
   try{
@@ -1662,7 +2039,8 @@ async function sendPhoto(rep,p,live,retakeOf){
   }
   try{
     const r=await fetch("/api/photo?rep="+enc(rep)+"&op="+op_id,
-      {method:"POST",headers:photoHeaders(geo,ext2),body:bytes});
+      {method:"POST",headers:photoHeaders(geo,ext2,
+         {at,src:entry.src,sm:p.exif&&p.exif.sm,exif:p.exif}),body:bytes});
     if(r.ok){
       const j=await r.json(); STATE.online=true;
       showPhotoCount(rep,j.photos);
@@ -1936,6 +2314,8 @@ async function saveVisit(){
     const geo=await grabGeo(4000,5000);   // свежая точка, не с прошлого адреса
     const body={rep,values,finish:true,op_id,
       form_version:FORM_VERSION,input_keys};
+    const clearedNow=[...FORM_CLEARED].filter(k=>FORM_TOUCHED.has(k));
+    if(clearedNow.length) body.cleared_keys=clearedNow;
     if(geo) body.geo=geo;
     try{
       const j=await api("/api/save",{method:"POST",body:JSON.stringify(body)});
@@ -1944,6 +2324,7 @@ async function saveVisit(){
     }catch(e){
       // Нет сети — кладём выезд в очередь, помечаем визит локально; уйдёт при связи.
       await enqueue({op_id, kind:"save", rep, values, input_keys,
+        cleared_keys:clearedNow,
         form_version:FORM_VERSION, geo, at:Date.now()});
       STATE.online=false; applyVisitLocally(rep, values);
       finishSavedUI(rep, L().savedoff);
@@ -1986,6 +2367,14 @@ function readForm(){
     values.visit_comment=cc.value.trim();
   const tp=$("f_tips");
   if(FORM_TOUCHED.has("tips")&&tp&&tp.value.trim()) values.tips=tp.value.trim();
+  typedFields().forEach(f=>{
+    if(!FORM_TOUCHED.has(f.key)) return;
+    const el=document.querySelector('#panel input[data-k="'+f.key+'"]');
+    if(!el) return;
+    const v=(el.value||"").trim();
+    if(v) values[f.key]=v;
+    else if(FORM_CLEARED.has(f.key)) values[f.key]="";  // явная очистка кнопкой
+  });
   return values;
 }
 function formVisible(){ return !!(STATE.cur && STATE.tab==="form" && $("f_visit_comment")); }
@@ -2045,7 +2434,7 @@ function restoreDraftIntoForm(){
     // call_comment — легаси-черновики, сохранённые старой оболочкой в localStorage
     if(k==="visit_comment"||k==="call_comment") el=$("f_visit_comment");
     else if(k==="tips") el=$("f_tips");
-    else el=document.querySelector('#panel select[data-k="'+k+'"]');
+    else el=document.querySelector('#panel select[data-k="'+k+'"], #panel input[data-k="'+k+'"]');
     if(el){
       FORM_TOUCHED.add(k==="call_comment"?"visit_comment":k);
       if(el.value!==val){ el.value=val; applied=true; }
@@ -2057,8 +2446,11 @@ function setupFormDraft(){
   const p=$("panel"); if(!p) return;
   restoreDraftIntoForm();
   syncPickLabels();   // черновик мог проставить значения мимо наших кнопок
-  p.querySelectorAll('select[data-k], #f_visit_comment, #f_tips').forEach(el=>{
-    el.addEventListener(el.tagName==="SELECT"?"change":"input", onFormChange);
+  syncTypedLabels();
+  p.querySelectorAll('select[data-k], input[data-k], #f_visit_comment, #f_tips').forEach(el=>{
+    el.addEventListener(
+      el.tagName==="SELECT"||(el.tagName==="INPUT"&&el.type==="hidden")
+        ?"change":"input", onFormChange);
   });
   p.addEventListener("change", e=>{ if(e.target&&e.target.matches("select[data-k]")) syncPickLabels(); });
   startAutoSync();
@@ -2098,7 +2490,10 @@ async function refreshData(){
     LAST_REFRESH=Date.now();
     if(d.needsOnboarding) return;                // экраны входа фоном не дёргаем
     const prev=await loadBootstrapSnapshot();
-    if(prev && prev.employee && d.employee && prev.employee!==d.employee) await clearLocalData();
+    if(prev && prev.employee && d.employee && prev.employee!==d.employee){
+      const left = await pendingCount();
+      await clearLocalData({keepQueue: left > 0});
+    }
     const sig=ps=>JSON.stringify((ps||[]).map(p=>[p.rep,p.visited,p.n]));
     const changed=sig(STATE.persons)!==sig(d.persons);
     setMeta(d.meta, true); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
@@ -2373,6 +2768,325 @@ async function renderMarks(){
   setBottomNav("marks");
   loadMarks(); loadNotes();
 }
+
+// ═══ Вкладка руководителя («Сводка») ══════════════════════════════════════════
+// СОДЕРЖИМОЕ русское — как весь дайджест (решение владельца): руководители
+// читают по-русски. В I18N живут только подпись вкладки и служебные состояния.
+// Данные приходят ТОЛЬКО с сервера (/api/manager/*): даты считает сервер
+// (контейнер в UTC, телефон в +3/+5 — клиентская дата утром показывала бы
+// пустой день); всё из БД проходит через esc(); в onclick уходят только
+// ЧИСЛОВЫЕ индексы состояния (esc/enc не экранируют апостроф, а он в ФИО
+// на узбекской латинице норма).
+let DG={view:"summary", date:null, today:null, prev:null, next:null,
+        emp:null, rep:null, days:7, seq:0, last:0, rows:[], cases:[], items:[]};
+function dgQ(extra){ const p=new URLSearchParams(); if(DG.date) p.set("date",DG.date);
+  Object.entries(extra||{}).forEach(([k,v])=>{ if(v!=null&&v!=="") p.set(k,v); });
+  const s=p.toString(); return s?("?"+s):""; }
+async function renderDigest(){
+  flushDraft(); stopAutoSync(); stopMeWatch(); removeMap(); STATE.cur=null;
+  PhotoAudit.free();
+  DG.view="summary"; DG.emp=null; DG.rep=null;
+  $("app").innerHTML=`<div class="h" id="dghead">${esc(L().digest)}</div>
+    <div id="dgbody" class="muted">…</div>`;
+  setBottomNav("digest");
+  dgLoad();
+}
+async function dgLoad(){
+  // Счётчик поколений вместо защёлки busy: второй тап ОТМЕНЯЕТ первый (тот же
+  // приём, что LIST_RENDER_SEQ) — иначе нажатие терялось молча, а ответ
+  // старого экрана мог отрисоваться в рендерере нового.
+  const seq=++DG.seq;
+  const b=$("dgbody"); if(b) b.innerHTML="…";
+  const url = DG.view==="summary"  ? "/api/manager/summary"+dgQ()
+            : DG.view==="employee" ? "/api/manager/employee"+dgQ({employee:DG.emp})
+            : DG.view==="person"   ? "/api/manager/person"+dgQ({employee:DG.emp,rep:DG.rep})
+            : DG.view==="period"   ? "/api/manager/period"+dgQ({days:DG.days})
+            : DG.view==="map"      ? "/api/manager/map_data"+dgQ({employee:DG.emp})
+            : DG.view==="photos"   ? null
+            :                        "/api/manager/promises"+dgQ();
+  if(url===null){ if(seq===DG.seq) dgRender({screen:"photos"}); return; }
+  let j=null;
+  try{ j=await api(url); STATE.online=true; DG.last=Date.now(); }
+  catch(e){ if(seq===DG.seq) dgFail(e); return; }
+  if(seq!==DG.seq) return;                    // устаревший ответ — молча в корзину
+  DG.date=j.date; DG.today=j.today; DG.prev=j.prev_date; DG.next=j.next_date;
+  dgRender(j);
+}
+function dgFail(e){
+  const t=L(), b=$("dgbody"); if(!b) return;
+  const st=+((e&&e.message)||0);
+  if(st===403){ // роль отозвали, пока устройство работало на старом снимке
+    STATE.roles=null; setBottomNav("clients");
+    b.innerHTML=`<div class="center">${esc(t.dggone)}</div>`; return; }
+  if(st===401){ renderAppAuthGone(!!appToken()); return; }
+  if(st===404){ b.innerHTML=`<div class="center">${esc(t.dggoneemp)}</div>
+    <button class="btn line" style="margin-top:12px" onclick="dgGo('summary')">←</button>`;
+    return; }
+  if(st===400){ DG.date=null; dgLoad(); return; }   // кривая дата → на сегодня
+  b.innerHTML=`<div class="center">${esc(!st?t.dgneednet:t.dgerr)}</div>
+    <button class="btn line" style="margin-top:12px" onclick="dgRefresh()">🔄</button>`;
+}
+function dgRefresh(){ if(Date.now()-DG.last<3000) return; dgLoad(); }
+function dgGo(view, opts){ Object.assign(DG,{view},opts||{}); removeMap();
+  PhotoAudit.free(); dgLoad(); }
+function dgPickEmp(i){ const r=DG.rows[i]; if(r) dgGo("employee",{emp:r.employee}); }
+function dgPickCase(i){ const c=DG.cases[i]; if(c) dgGo("person",{rep:c.rep}); }
+function dgDate(iso){ if(!iso) return; DG.date=iso; dgLoad(); }
+function dgHeadHTML(j,title){
+  const nav=`<div class="muted" style="margin:4px 0 10px">
+    <button class="btn line" style="padding:2px 10px" onclick="dgDate('${esc(j.prev_date||"")}')">‹</button>
+    <b style="margin:0 10px">${esc(j.date||"")}</b>
+    ${j.next_date?`<button class="btn line" style="padding:2px 10px" onclick="dgDate('${esc(j.next_date)}')">›</button>`:""}
+    <span style="margin-left:10px">обновлено в ${hhmm(new Date(DG.last||Date.now()))}</span>
+  </div>`;
+  const note=j.period_note?`<div class="muted" style="margin-bottom:8px">${esc(j.period_note)}</div>`:"";
+  const hist=(j.date&&j.today&&j.date!==j.today)
+    ?`<div class="muted" style="margin-bottom:8px">за прошлые дни считается последний выезд к человеку: повторный визит переносит его в свой день</div>`:"";
+  return `<div style="font-weight:700">${esc(title)}</div>`+nav+note+hist;
+}
+function dgRender(j){
+  const b=$("dgbody"); if(!b) return;
+  if(j.screen && j.screen!==DG.view) return;  // ответ не того экрана
+  if(DG.view==="summary") return dgSummary(j,b);
+  if(DG.view==="employee") return dgEmployee(j,b);
+  if(DG.view==="person") return dgPerson(j,b);
+  if(DG.view==="period") return dgPeriod(j,b);
+  if(DG.view==="map") return dgMap(j,b);
+  if(DG.view==="photos") return dgPhotos(b);
+  return dgPromises(j,b);
+}
+function dgSummary(j,b){
+  const t=j.totals||{};
+  DG.rows=[]; const parts=[dgHeadHTML(j,(j.manager&&j.manager.name)?j.manager.name:"Сводка")];
+  parts.push(`<div>👥 Команда: ${t.employees||0} · активны: ${t.active||0} · `+
+    `должников: <b>${t.persons||0}</b> · договоров: ${t.contracts||0}</div>`);
+  if(t.persons) parts.push(`<div>📸 С фото: ${t.with_photo||0} из ${t.persons}</div>`);
+  if(t.money_text) parts.push(`<div>💰 ${esc(t.money_text)}</div>`);
+  const btns=[];
+  (j.display||[]).forEach(r=>{
+    const i=DG.rows.push(r)-1;
+    btns.push(`<button class="btn line" style="width:100%;text-align:left;margin-top:6px"
+      onclick="dgPickEmp(${i})">${r.persons?"👤":"▫️"} ${esc(r.employee)} · ${r.persons}
+      ${r.outcomes&&r.outcomes.length?`<div class="muted" style="font-weight:400">${r.outcomes.map(o=>esc(o.emoji+" "+o.status+" "+o.n)).join(" · ")}</div>`:""}</button>`);
+  });
+  parts.push(btns.join(""));
+  if(t.overdue_promises) parts.push(`<button class="btn line" style="width:100%;margin-top:10px"
+    onclick="dgGo('promises')">⏰ Обещания просрочены: ${t.overdue_promises}</button>`);
+  parts.push(`<div style="display:flex;gap:8px;margin-top:10px">
+    <button class="btn line" style="flex:1" onclick="dgGo('period')">📅 Неделя</button>
+    <button class="btn line" style="flex:1" onclick="dgGo('photos')">📸 Фото по КД</button>
+    <button class="btn line" style="flex:1" onclick="dgRefresh()">🔄</button></div>`);
+  b.innerHTML=parts.join("");
+}
+function dgEmployee(j,b){
+  DG.cases=[];
+  const parts=[dgHeadHTML(j,j.employee||DG.emp||"")];
+  parts.push(`<div>обработано: <b>${j.persons||0}</b> должников · ${j.contracts||0} договоров · 📸 ${j.with_photo||0}/${j.persons||0}</div>`);
+  (j.outcomes||[]).forEach(o=>parts.push(`<div class="muted">${esc(o.emoji)} ${esc(o.status)} — ${o.n}</div>`));
+  if(j.money_text) parts.push(`<div>💰 ${esc(j.money_text)}</div>`);
+  const a=j.activity;
+  if(a) parts.push(`<div class="muted" style="margin-top:6px">📈 визиты 7д ${a.visits_7d||0} · 30д ${a.visits_30d||0}`+
+    ((a.markers_7d||a.markers_30d)?` · метки 7д ${a.markers_7d||0} · 30д ${a.markers_30d||0}`:"")+
+    (a.last_activity?` · активность ${esc(String(a.last_activity).slice(0,10))}`:"")+`</div>`);
+  const btns=[];
+  (j.cases||[]).forEach(c=>{
+    const i=DG.cases.push(c)-1;
+    btns.push(`<button class="btn line" style="width:100%;text-align:left;margin-top:6px"
+      onclick="dgPickCase(${i})">${esc(c.emoji)} ${esc(c.client)}${c.photos?" 📸":""}
+      <span class="muted">${esc(c.outcome||"")}</span></button>`);
+  });
+  parts.push(btns.join("")||`<div class="muted" style="margin-top:8px">Сегодня этот сотрудник ещё никого не обработал.</div>`);
+  parts.push(`<div style="display:flex;gap:8px;margin-top:10px">
+    <button class="btn line" style="flex:1" onclick="dgGo('map')">🗺 Карта дня</button>
+    <button class="btn line" style="flex:1" onclick="dgGo('summary')">← К сводке</button></div>`);
+  b.innerHTML=parts.join("");
+}
+function dgPerson(j,b){
+  const parts=[dgHeadHTML(j,j.client||"")];
+  if(j.partner) parts.push(`<div class="muted">🏢 ${esc(j.partner)}${j.birth_date?"   🎂 "+esc(j.birth_date):""}</div>`);
+  if((j.phones||[]).length) parts.push(`<div>📞 ${j.phones.map(esc).join(" · ")}</div>`);
+  if(j.address) parts.push(`<div>📍 ${esc(j.address)}</div>`);
+  if(j.money_text) parts.push(`<div>💰 <b>${esc(j.money_text)}</b></div>`);
+  parts.push(`<div style="margin-top:8px;font-weight:700">🧾 Итог выезда</div>`);
+  if(j.outcome&&j.outcome!=="—") parts.push(`<div>✅ ${esc(j.outcome)}</div>`);
+  (j.visit||[]).forEach(v=>{
+    if(!v.value) return;
+    parts.push(`<div>${esc(v.value)}${v.registry?` <span class="muted">· в реестре сейчас: ${esc(v.registry)}</span>`:""}</div>`);
+  });
+  if(j.tips) parts.push(`<div>📇 ${esc(j.tips)}</div>`);
+  if(j.comment) parts.push(`<div>💬 ${esc(j.comment)}</div>`);
+  const g=j.geo;
+  if(g){
+    if(g.by_other) parts.push(`<div>📍 визит закрыл руководитель (${esc(g.pretty)} от адреса)</div>`);
+    else if(g.far) parts.push(`<div>⚠️ Визит закрыт в ${esc(g.pretty)} от адреса!</div>`);
+    else parts.push(`<div>📍 Точка закрытия: ${esc(g.pretty)} от адреса</div>`);
+  }
+  const d=j.dates||{};
+  const tail=[d.visit_date?"🗓 "+esc(d.visit_date):"",d.reminder_date?"🔁 "+esc(d.reminder_date):"",
+              d.meeting_date?"📅 "+esc(d.meeting_date):""].filter(Boolean).join("   ");
+  if(tail) parts.push(`<div class="muted">${tail}</div>`);
+  parts.push(`<button class="btn line" style="margin-top:10px" onclick="dgGo('employee')">← ${esc(DG.emp||"")}</button>`);
+  b.innerHTML=parts.join("");
+}
+function dgPeriod(j,b){
+  const t=j.totals||{};
+  const parts=[dgHeadHTML(j,`Сводка за ${j.days} дн`)];
+  parts.push(`<div>👥 должников: <b>${t.persons||0}</b> · договоров: ${t.contracts||0}</div>`);
+  if(t.persons) parts.push(`<div>✅ Оплачен: ${t.paid||0}${t.money_paid_text?` · закрыто: ${esc(t.money_paid_text)}`:""} · 📸 ${t.with_photo||0}/${t.persons}</div>`);
+  if(t.money_text) parts.push(`<div>💰 ${esc(t.money_text)}</div>`);
+  if(j.note) parts.push(`<div class="muted">${esc(j.note)}</div>`);
+  (j.employees||[]).forEach(r=>{
+    parts.push(`<div style="margin-top:6px"><b>${esc(r.employee)}</b> — ${r.persons} · ✅ ${r.paid||0} · 📸 ${r.with_photo||0}/${r.persons||0}</div>`);
+    if(r.outcomes&&r.outcomes.length)
+      parts.push(`<div class="muted">${r.outcomes.slice(0,3).map(o=>esc(o.emoji+" "+o.status+" "+o.n)).join(" · ")}</div>`);
+  });
+  parts.push(`<div style="display:flex;gap:8px;margin-top:10px">
+    <button class="btn line" style="flex:1" onclick="dgGo('period',{days:${j.days===7?30:7}})">📅 За ${j.days===7?30:7} дней</button>
+    <button class="btn line" style="flex:1" onclick="dgGo('summary')">← К сводке</button></div>`);
+  b.innerHTML=parts.join("");
+}
+function dgPromises(j,b){
+  const t=j.totals||{};
+  const parts=[dgHeadHTML(j,"Просроченные обещания")];
+  parts.push(`<div>всего: <b>${t.persons||0}</b>`+(t.persons?` · 🟢 отработано: ${t.worked||0} · ⚪ не тронуто: ${t.untouched||0}`:"")+`</div>`);
+  if(!(j.employees||[]).length) parts.push(`<div class="muted" style="margin-top:8px">Просроченных обещаний нет 🎉</div>`);
+  (j.employees||[]).forEach(r=>{
+    parts.push(`<div style="margin-top:8px"><b>${esc(r.employee)}</b> — ${r.persons}</div>`);
+    (r.items||[]).forEach(pp=>{
+      const fresh=pp.visited_after_promise?" · 🟢 визит после обещания":(pp.last_visit?" · 🟡 визит до обещания":" · ⚪ визитов не было");
+      parts.push(`<div class="muted">🔴 ${esc(pp.client)} — обещал ${esc(pp.promise_date||"")}, ${pp.days_overdue} дн назад${pp.money_text?` · ${esc(pp.money_text)}`:""}${fresh}</div>`);
+    });
+  });
+  parts.push(`<button class="btn line" style="margin-top:10px" onclick="dgGo('summary')">← К сводке</button>`);
+  b.innerHTML=parts.join("");
+}
+async function dgMap(j,b){
+  b.innerHTML=`${dgHeadHTML(j,"🗺 "+esc(j.employee||DG.emp||""))}
+    <div id="dgmap" style="height:58vh;border-radius:12px;overflow:hidden"></div>
+    <div class="muted" id="dgleg" style="margin-top:8px"></div>
+    <button class="btn line" style="margin-top:10px" onclick="dgGo('employee')">← ${esc(j.employee||"")}</button>`;
+  if(!(await ensureMapLibs())){ $("dgleg").textContent=L().dgneednet; return; }
+  const pts=[...(j.targets||[]),...(j.visits||[]),...(j.markers||[])];
+  if(!pts.length){ $("dgleg").textContent="За этот день гео-точек нет"; return; }
+  removeMap();
+  let style=RASTER_STYLE;
+  if(j.vectorTiles&&window.pmtiles&&window.protomaps_themes_base){
+    try{ style=vectorStyle(j.vectorTiles); }catch(e){} }
+  MAP=new maplibregl.Map({container:"dgmap",style,center:[pts[0].lon,pts[0].lat],
+                          zoom:12,attributionControl:false,dragRotate:false});
+  let fb=false;
+  MAP.on("error",()=>{ if(!fb&&style!==RASTER_STYLE){fb=true;try{MAP.setStyle(RASTER_STYLE);}catch(e){}} });
+  const bnd=new maplibregl.LngLatBounds();
+  const add=(p2,color,label,html)=>{
+    const el=document.createElement("div");
+    el.style.cssText="width:20px;height:20px;border-radius:50%;border:2px solid #fff;"+
+      "box-shadow:0 1px 4px rgba(0,0,0,.4);color:#fff;font-size:10px;font-weight:700;"+
+      "display:flex;align-items:center;justify-content:center;background:"+color;
+    el.textContent=label||"";
+    new maplibregl.Marker({element:el,anchor:"center"}).setLngLat([p2.lon,p2.lat])
+      .setPopup(new maplibregl.Popup({offset:14}).setHTML(html)).addTo(MAP);
+    bnd.extend([p2.lon,p2.lat]);
+  };
+  (j.targets||[]).forEach(p2=>add(p2,"#2F6FED","","🏠 "+esc(p2.client)));
+  // Вердикт «далеко» — СОХРАНЁННЫЙ (geo_far), как в пуше и карточке; порог —
+  // только для старых записей. Визит руководителя (by_other) не красим красным.
+  (j.visits||[]).forEach((p2,i2)=>{
+    const far=p2.geo_far!=null?!!p2.geo_far:(p2.dist_m!=null&&p2.dist_m>j.alert_m);
+    const d2=p2.dist_m==null?"":(p2.dist_m>=1000?(p2.dist_m/1000).toFixed(1)+" км":p2.dist_m+" м")+" от адреса";
+    if(p2.by_other) add(p2,"#7A6FA0",String(i2+1),"📍 визит закрыл руководитель — "+esc(p2.client)+(d2?"<br>"+esc(d2):""));
+    else add(p2,far?"#B0472C":"#5B8A3C",String(i2+1),(far?"⚠️ ":"✅ ")+esc(p2.client)+(d2?"<br>"+esc(d2):""));
+  });
+  (j.markers||[]).forEach(p2=>add(p2,"#F2994A","","📍 "+esc(p2.label||"метка")+(p2.at?" · "+esc(p2.at):"")));
+  MAP.fitBounds(bnd,{padding:60,maxZoom:15});
+  $("dgleg").textContent="🔵 адрес · 🟢 визит · 🔴 далеко · 🟣 закрыл руководитель · 🟠 метка";
+}
+function dgPhotos(b){
+  b.innerHTML=`${dgHeadHTML({date:DG.date,today:DG.today,prev_date:DG.prev,next_date:null},"📸 Фото по договору")}
+    <div id="pabody"></div>
+    <button class="btn line" style="margin-top:10px" onclick="dgGo('summary')">← К сводке</button>`;
+  PhotoAudit.render($("pabody"));
+}
+
+// ═══ Фото-аудит (поиск снимков по КД) ════════════════════════════════════════
+// Экран руководителя, одноязычный по решению владельца — как digest.py.
+// Blob-URL живут в LRU на 12 записей: <img src> с токеном невозможен (токен в
+// query запрещён), поэтому байты тянутся fetch'ем с заголовками.
+const PHOTOBLOBS=new Map();
+const PHOTOBLOBS_MAX=12;
+async function photoBlobUrl(key){
+  if(PHOTOBLOBS.has(key)){ const u=PHOTOBLOBS.get(key);
+    PHOTOBLOBS.delete(key); PHOTOBLOBS.set(key,u); return u; }
+  const r=await fetch("/api/manager/photo?file="+enc(key),{headers:authHeaders()});
+  if(!r.ok) throw new Error(r.status);
+  const u=URL.createObjectURL(await r.blob());
+  PHOTOBLOBS.set(key,u);
+  while(PHOTOBLOBS.size>PHOTOBLOBS_MAX){
+    const k0=PHOTOBLOBS.keys().next().value;
+    URL.revokeObjectURL(PHOTOBLOBS.get(k0)); PHOTOBLOBS.delete(k0);
+  }
+  return u;
+}
+function photoBlobsFree(){ for(const u of PHOTOBLOBS.values()) URL.revokeObjectURL(u);
+                           PHOTOBLOBS.clear(); }
+const PA={items:[]};
+const PhotoAudit={
+  free: photoBlobsFree,
+  render(el){
+    el.innerHTML=`<div style="display:flex;gap:8px">
+      <input id="pacid" class="search" style="flex:1" placeholder="Номер КД"
+             value="${esc(PA.cid||"")}">
+      <button class="btn acc" onclick="PhotoAudit.search()">Найти</button></div>
+      <div id="palist" class="muted" style="margin-top:10px"></div>`;
+  },
+  async search(){
+    const cid=($("pacid").value||"").trim();
+    if(!cid) return;
+    PA.cid=cid;
+    const list=$("palist"); list.innerHTML="…";
+    let j=null;
+    try{ j=await api("/api/manager/photos?contract_id="+enc(cid)); }
+    catch(e){ const st=+((e&&e.message)||0);
+      list.innerHTML=esc(st===404?"По этому договору фото не найдено":
+                         (st?L().dgerr:L().dgneednet)); return; }
+    PA.items=j.items||[];
+    if(!PA.items.length){ list.innerHTML="Снимков нет"; return; }
+    const KIND={exif:"по EXIF",client:"по приложению",geo:"по гео-фиксу",
+                upload:"дата загрузки"};
+    const SRC={camera:"камера",gallery:"галерея"};
+    list.innerHTML=(j.person?`<div>👤 ${esc(j.person)} · снимков: ${PA.items.length}`+
+      (j.unknown_meta?` · без метаданных: ${j.unknown_meta}`:"")+`</div>`:"")+
+      PA.items.map((it,i)=>{
+        const sig=(it.signals||[]).map(s=>
+          `<span style="display:inline-block;margin:2px 4px 0 0;padding:2px 8px;border-radius:8px;font-size:12px;
+             background:${s.level==="review"?"#F2994A33":"#8883"};">${esc(s.text)}</span>`).join("");
+        return `<div class="card" style="margin-top:8px;padding:10px">
+          <div id="path${i}" style="min-height:40px"></div>
+          <div>Загружено: ${esc(it.uploaded_at||"—")}${it.missing?" · файла нет на диске":""}</div>
+          <div>Снято: ${esc(it.shot_at||"—")} <span class="muted">(${esc(KIND[it.shot_at_kind]||it.shot_at_kind||"")})</span>
+            ${it.shot_at_device?`<span class="muted"> · по часам телефона: ${esc(it.shot_at_device)}${it.shot_tz?" "+esc(it.shot_tz):""}</span>`:""}</div>
+          <div class="muted">${esc(SRC[it.source]||"источник неизвестен")}${it.device?" · "+esc(it.device):""}</div>
+          ${sig?`<div style="margin-top:4px">${sig}</div>`:""}
+          ${it.missing?"":`<button class="btn line" style="margin-top:6px;padding:4px 12px"
+             onclick="PhotoAudit.show(${i})">показать</button>`}
+        </div>`; }).join("");
+  },
+  async show(i){
+    const it=PA.items[i]; if(!it) return;
+    const box=$("path"+i); if(!box) return;
+    const key=(it.file||"");
+    if(/\.hei[cf]$/i.test(key)){
+      const mb=it.size_bytes?(it.size_bytes/1048576).toFixed(1)+" МБ":"";
+      if(!box.dataset.heic){ box.dataset.heic="1";
+        box.innerHTML=`<div class="muted">HEIC ${esc(mb)} — предпросмотр в этом браузере может не работать</div>`; }
+    }
+    try{
+      const u=await photoBlobUrl(key);
+      box.innerHTML=`<img src="${u}" style="max-width:100%;border-radius:8px"
+        onerror="this.outerHTML='<div class=muted>файл не отобразился</div>'">`;
+    }catch(e){ box.innerHTML=`<div class="muted">не удалось загрузить (${esc(String(e.message||e))})</div>`; }
+  }
+};
+
 
 async function loadMarks(){
   const t=L(), box=$("mklist"); if(!box) return;

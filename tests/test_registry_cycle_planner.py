@@ -964,3 +964,57 @@ def test_responsible_alias_uses_canonical_book_as_master_target():
     assert len(plan.changes) == 1
     assert plan.changes[0].after == "актуальное"
     assert plan.projections[0].rows[0][1] == canonical
+
+
+def test_employee_wins_publishes_instead_of_blocking():
+    """Решение владельца 26.08.2026: «побеждает сотрудник».
+
+    Тот же вход, что в test_three_way_merge_blocks_independent_changes: ячейку
+    изменили и офис, и сотрудник. При 'configured' план блокируется целиком и
+    не публикует НИЧЕГО — с обещанием выездника (дата и сумма пишутся обеими
+    сторонами) это стало бы обычной ночью. При 'employee_wins' план проходит,
+    а перебитое значение мастера уходит в журнал, а не в тишину.
+    """
+    master = _book(
+        "master.xlsb",
+        [["1", "Иванов Иван", None, None, "правка мастера"]],
+    )
+    personal = _book(
+        "Иванов Иван.xlsb",
+        [["1", "Иванов Иван", None, None, "правка сотрудника"]],
+    )
+
+    plan = build_sync_plan(
+        master,
+        [(_entry(), personal)],
+        _fields(),
+        baseline=_baseline("baseline"),
+        master_conflict_policy="employee_wins",
+    )
+
+    assert not plan.blocked
+    assert plan.changes[0].after == "правка сотрудника"
+    assert not any(
+        issue.code == "baseline_merge_conflicts" for issue in plan.issues
+    )
+    assert any(
+        issue.code == "employee_owned_master_edits_overridden"
+        for issue in plan.issues
+    )
+
+
+def test_service_defaults_to_employee_wins():
+    """Автоматический цикл берёт то же правило, что ручной перенос.
+
+    Раньше 'configured' был зашит в сигнатуру, и правило зависело от того,
+    каким путём запущен перенос: руками — сотрудник побеждает, ночью — план
+    падает. Значение читается из safety, чтобы правило меняли конфигом.
+    """
+    import inspect
+
+    from registry_cycle.service import CycleService
+
+    sig = inspect.signature(CycleService.prepare_snapshot)
+    assert sig.parameters["master_conflict_policy"].default is None
+    src = inspect.getsource(CycleService.prepare_snapshot)
+    assert '"master_conflict_policy", "employee_wins"' in src

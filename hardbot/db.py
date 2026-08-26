@@ -8,10 +8,12 @@
 
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
 import sqlite3
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -19,7 +21,11 @@ import country_scope
 import debt
 from exchange_contract import (
     ExchangeContractError,
+    FORM_AMOUNT_KEYS,
+    FORM_DATE_KEYS,
     FORM_DROPDOWN_KEYS,
+    FORM_INPUT_KEYS,
+    FORM_TEXT_KEYS,
     IMPORT_SOURCE_KINDS,
     IMPORT_SOURCE_PUBLISHED_MASTER,
     IMPORT_SOURCE_TEST_SUBSET,
@@ -55,6 +61,46 @@ DB_PATH = _data_dir / "hardbot.db"
 
 UNASSIGNED_REASON_MANUAL = "manual"
 UNASSIGNED_REASON_ABSENT_FROM_REGISTRY = "absent_from_registry"
+# Отзыв офисом через колонки общего реестра («Дата отзыва» и соседние).
+# Политика возврата своя: договор не возвращается НИЧЕМ, пока колонка отзыва
+# в файле непуста, — ни другим ФИО, ни галочкой возврата ручных снятий.
+UNASSIGNED_REASON_RECALLED = "recalled"
+
+# Заголовок реестра → служебная колонка отзыва. Контракт эти заголовки уже
+# знает (allowed_ignored_headers), в экспортную схему они НЕ входят.
+RECALL_TITLES = {
+    "Дата отзыва": "recall_date",
+    "Причина отзыва": "recall_reason",
+    "Передача на отзыв": "recall_transfer",
+    "Вывод из работы": "recall_withdrawn",
+}
+RECALL_KEYS = tuple(RECALL_TITLES.values())
+RECALL_TITLE_BY_KEY = {key: title for title, key in RECALL_TITLES.items()}
+
+# --- Журнал доставки уведомлений (push_log) ---------------------------------
+# Виды рассылок и статусы попыток. Всюду ТОЛЬКО эти константы — строковые
+# литералы статусов в web.py/app.py запрещены (пинится тестом): словарь,
+# скопированный по коду, разъезжается, как уже разъехались рубильники.
+PUSH_DIGEST = "digest"
+PUSH_PROMISE = "promise"
+PUSH_VISIT = "visit"
+PUSH_GROUP = "group"
+PUSH_REPORT_CHAT = "report_chat"
+PUSH_TEST = "test"          # пробная отправка из пульта: НЕ выдаёт себя за рассылку
+PUSH_KINDS = (PUSH_DIGEST, PUSH_PROMISE, PUSH_VISIT, PUSH_GROUP,
+              PUSH_REPORT_CHAT, PUSH_TEST)
+PUSH_SENT = "sent"
+PUSH_BLOCKED = "blocked"    # TelegramForbiddenError: «не нажал /start» — чинит человек
+PUSH_FAILED = "failed"
+PUSH_SKIP_NO_BOT = "skipped_no_bot"
+PUSH_SKIP_DISABLED = "skipped_disabled"
+PUSH_SKIP_NO_TARGETS = "skipped_no_targets"
+PUSH_SKIP_NO_EMPLOYEE = "skipped_no_employee"
+PUSH_SKIP_NOTHING = "skipped_nothing_to_say"
+PUSH_SKIP_DEDUP = "skipped_dedup"
+PUSH_STATUSES = (PUSH_SENT, PUSH_BLOCKED, PUSH_FAILED, PUSH_SKIP_NO_BOT,
+                 PUSH_SKIP_DISABLED, PUSH_SKIP_NO_TARGETS,
+                 PUSH_SKIP_NO_EMPLOYEE, PUSH_SKIP_NOTHING, PUSH_SKIP_DEDUP)
 
 # Служебные колонки бота (не из реестра).
 # (agent_id удалён — легаси: назначение давно идёт через responsible + agent_bind.)
@@ -94,6 +140,20 @@ BOOKKEEPING = [
     # строки отменяется при любом возвращении договора в реестр.
     ("unassigned_reason", "TEXT"),
     ("tips", "TEXT"),               # наводки выездника (староста, соседи, ориентиры)
+    # Своей колонки под сумму обещания НЕТ: и дата, и сумма — живые поля
+    # реестра (promise_date и forecast_sum, «Сумма прогноза»). Владелец
+    # 26.08.2026: «суть в переносе, она изначально должна ехать и
+    # редактироваться». Цена принята им же: форма заполняется на человека,
+    # поэтому одна сумма ложится во все договоры должника.
+    # Колонки отзыва из общего реестра (значения как их видел последний импорт).
+    ("recall_date", "TEXT"),
+    ("recall_reason", "TEXT"),
+    ("recall_transfer", "TEXT"),
+    ("recall_withdrawn", "TEXT"),
+    # Причина снятия ДО отзыва: ручное снятие оператора не должно уничтожаться
+    # циклом «офис отозвал → офис очистил» — после очистки колонок договор
+    # возвращается не в работу, а в ручное снятие.
+    ("recall_prev_reason", "TEXT"),
     ("updated_at", "TEXT"),
     # Доказательство происхождения результата визита. Обычный импорт реестра эти
     # колонки не знает и потому не может подделать завершённый визит миниаппа.
@@ -119,6 +179,107 @@ BOT_VISIT_KEYS = tuple(key for key in BOT_SNAPSHOT_KEYS if key in BY_KEY)
 BOT_VISIT_MARKER = PROVENANCE_MARKER
 BOT_DROPDOWN_KEYS = FORM_DROPDOWN_KEYS
 OFFICE_EDIT_KEYS = {OFFICE_RESULT_SNAPSHOT_KEY, *OFFICE_DIRECT_EDIT_KEYS}
+
+# Типизированные поля формы (обещание выездника; контракт v3 — на v2 пусты).
+FORM_TYPED_KEYS = frozenset(FORM_AMOUNT_KEYS) | frozenset(FORM_DATE_KEYS)
+_bookkeeping_keys = {name for name, _ in BOOKKEEPING}
+if FORM_TYPED_KEYS - set(BY_KEY) - _bookkeeping_keys:
+    raise RuntimeError(
+        "типизированное поле формы не существует ни в реестре, ни в служебных "
+        "колонках: " + ", ".join(sorted(
+            FORM_TYPED_KEYS - set(BY_KEY) - _bookkeeping_keys)))
+
+# --- Прогноз оплаты (колонка AP реестра) -------------------------------------
+# Ставили его аналитики руками, и по обещаниям выездника он молчал. Владелец
+# 26.08.2026: «при наличии обещания ставится „Ждём", а если было обещание до
+# выезда и исчезло — „Срыв"». Оценочные «ОК», «Нет» и «Сомнение» остаются за
+# аналитиками: бот их не пишет, а их правку возвращает импорт (direct_edit).
+FORECAST_KEY = "forecast"
+FORECAST_WAITING = "Ждём"       # обещание есть — ждём срока
+FORECAST_BROKEN = "Срыв"        # обещание было и не устояло
+FORECAST_PAID = "Уже"           # платёж уже прошёл, ждать нечего
+PAID_STATUS = "Оплачен"         # значение результата визита, при котором ждать нечего
+_forecast_options = set(BY_KEY[FORECAST_KEY].options or [])
+if not {FORECAST_WAITING, FORECAST_BROKEN, FORECAST_PAID} <= _forecast_options:
+    raise RuntimeError(
+        "список «Прогноза» в реестре разошёлся с ботом: "
+        + ", ".join(sorted({FORECAST_WAITING, FORECAST_BROKEN, FORECAST_PAID}
+                           - _forecast_options)))
+
+
+def visit_forecast(*, paid: bool, promise_now: str, promise_was: str,
+                   promise_dropped: bool = False) -> str | None:
+    """Прогноз по итогу ЗАКРЫТОГО визита. None — бот молчит (значение аналитика
+    остаётся как было).
+
+    promise_dropped — выездник нажал «Убрать» по обещанию. Отдельный признак,
+    а не «стало пусто»: чужое (офисное) обещание сервер стереть не даёт, но
+    сам факт «должник больше не обещает» — это показание выездника, и терять
+    его нельзя. Именно так «было обещание до выезда и исчезло» доезжает до
+    офиса даже тогда, когда сама дата остаётся офисной.
+    """
+    if paid:
+        return FORECAST_PAID
+    if promise_dropped and str(promise_was or "").strip():
+        return FORECAST_BROKEN
+    if str(promise_now or "").strip():
+        return FORECAST_WAITING
+    if str(promise_was or "").strip():
+        return FORECAST_BROKEN
+    return None
+
+
+PROMISE_YEAR_MIN, PROMISE_YEAR_MAX = 2020, 2100
+MONEY_MAX = 10 ** 12
+# Чем строка книги доказывает, что видела ЭТОТ визит. Только поля, которые
+# заполнил сам выездник: обещание офис ведёт и до визита, а прогноз бот выводит
+# сам — совпадение таких ячеек не доказывает ничего.
+_ECHO_EVIDENCE_KEYS = frozenset(FORM_INPUT_KEYS) - FORM_TYPED_KEYS
+_MONEY_RX = re.compile(r"^\d+(?:[.,]\d+)?$")
+
+
+def canon_iso_date(value) -> str | None:
+    """Дата формы → строгая ISO «ГГГГ-ММ-ДД». None — это не дата."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        iso = _excel_serial_date(value)
+        d = _as_date(iso) if iso else None
+    else:
+        s = str(value).strip()
+        d = _as_date(s)
+        if d is None and s.isdigit():
+            d = _as_date(_excel_serial_date(int(s)) or "")
+    if d is None or not (PROMISE_YEAR_MIN <= d.year <= PROMISE_YEAR_MAX):
+        return None
+    return d.isoformat()
+
+
+def canon_amount(value) -> str | None:
+    """Денежное поле формы → канонические целые «1500000». Мусор даёт None,
+    а не 0: «сто тыщ» не должно превратиться в обещание на ноль."""
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        n = int(round(value))
+    else:
+        s = str(value).replace("\u00a0", " ").replace("\u202f", " ").strip()
+        s = s.replace(" ", "").replace(",", ".")
+        if not _MONEY_RX.fullmatch(s):
+            return None
+        try:
+            n = int(round(float(s)))
+        except (ValueError, OverflowError):
+            return None
+    return str(n) if 0 <= n <= MONEY_MAX else None
+
+
+def canon_form_value(key: str, value) -> str | None:
+    if key in FORM_DATE_KEYS:
+        return canon_iso_date(value)
+    if key in FORM_AMOUNT_KEYS:
+        return canon_amount(value)
+    return None
 
 _exchange_registry_keys = (
     set(BOT_VISIT_KEYS)
@@ -189,6 +350,11 @@ def _bot_snapshot(values, completed_at: str) -> dict | None:
             continue
         if key in BOT_DROPDOWN_KEYS and value not in (BY_KEY[key].options or []):
             return None
+        if key in FORM_TYPED_KEYS:
+            canon = canon_form_value(key, value)
+            if canon is None:
+                continue    # мусор пропускает ключ, но не рушит снимок визита
+            value = canon
         out[key] = value
     return out
 
@@ -228,10 +394,24 @@ def _decode_office_edits(row) -> dict:
         return {}
     out = {}
     for key, value in fields.items():
-        if key not in OFFICE_EDIT_KEYS or value in (None, ""):
+        if key not in OFFICE_EDIT_KEYS:
+            continue
+        if value in (None, ""):
+            # Пустота у типизированного ключа — принятая офисом ОЧИСТКА
+            # обещания (снятие через якорный шлюз); у остальных — мусор.
+            if key in FORM_TYPED_KEYS:
+                out[key] = ""
             continue
         value = str(value).strip()
         if not value:
+            if key in FORM_TYPED_KEYS:
+                out[key] = ""
+            continue
+        if key in FORM_TYPED_KEYS:
+            canon = canon_form_value(key, value)
+            if canon is None:
+                continue
+            out[key] = canon
             continue
         option_key = (
             OFFICE_RESULT_SOURCE_KEY
@@ -406,6 +586,20 @@ def init_db() -> None:
         if "op_id" not in vcols:
             conn.execute("ALTER TABLE visits ADD COLUMN op_id TEXT")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_visits_op ON visits(op_id)")
+        # Вкладка руководителя превращает разовое нажатие дайджеста в регулярное
+        # открытие, а сводка на N сотрудников — это 2N проходов по clients.
+        # Составной индекс покрывает и persons_processed/overdue_promises
+        # (ведущая колонка responsible), и DISTINCT-скан направленцев
+        # (employees_by_direction: responsible, country, city — COVERING).
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_clients_resp_country_city "
+                     "ON clients(responsible, country, city)")
+        # last_visit_geo — горячий запрос обеих карточек (телеграм и вкладка),
+        # без индекса это полный SCAN visits на каждое открытие.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_visits_contract "
+                     "ON visits(contract_id)")
+        # day_map_points фильтрует визиты по created_at (карта дня).
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_visits_created "
+                     "ON visits(created_at)")
         # Гео-контроль: точка телефона в момент закрытия визита + дистанция до
         # известной точки должника (метры). NULL = точки не было (нет разрешения/сигнала).
         # geo_far — ВЕРДИКТ на момент визита, а не вычисление на лету. Точность
@@ -435,6 +629,12 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN username TEXT")
         if "last_seen" not in ucols:
             conn.execute("ALTER TABLE users ADD COLUMN last_seen TEXT")
+        # Версия оболочки на устройстве (X-Shell-Version из bootstrap): «у него
+        # старая оболочка» становится проверяемым фактом, а не догадкой по
+        # отсутствию заголовка. Новую таблицу под это заводить НЕЛЬЗЯ — она
+        # блокирует сброс ограниченного теста целиком (EXPECTED_TABLES).
+        if "shell_version" not in ucols:
+            conn.execute("ALTER TABLE users ADD COLUMN shell_version INTEGER")
         # Привязка «кто есть кто»: telegram_id → ответственный Сотрудник (одноразово).
         # kind: 'agent' (выездник) | 'courier' (ГПХ-разведчик). Разница — только в выгрузке.
         # approved: 1 — доступ открыт; 0 — ждёт аппрува ADMIN (ИБ: авторизация на этапе привязки).
@@ -585,6 +785,39 @@ def init_db() -> None:
         mgcols = {r[1] for r in conn.execute("PRAGMA table_info(managers)")}
         if "direction" not in mgcols:
             conn.execute("ALTER TABLE managers ADD COLUMN direction TEXT")
+        # can_dm — производный признак «бот может писать этому руководителю в
+        # личку». NULL = не знаем, 1 = писали и дошло, 0 = Телеграм ответил
+        # Forbidden («не нажал /start» / заблокировал). Обновляется ТОЛЬКО по
+        # факту отправки; db.guest() для этого непригоден — он true и после
+        # простого входа в миниапп, где личного чата нет вовсе.
+        for col, decl in (("can_dm", "INTEGER"), ("can_dm_at", "TEXT")):
+            if col not in mgcols:
+                conn.execute(f"ALTER TABLE managers ADD COLUMN {col} {decl}")
+        # Журнал доставки уведомлений: строка на КАЖДУЮ попытку и каждый ранний
+        # return. Ранние return сейчас молчат — именно они и есть «не работает».
+        # day = date.today() (в контейнере UTC) — та же система координат, что у
+        # visit_date и digest_last_run, иначе «сводка за сегодня» спорила бы с
+        # датой дайджеста. Телеметрия, не аудит: ПД-выдача пишется в audit.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS push_log (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ts TEXT NOT NULL,
+              day TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              target_kind TEXT,
+              target_id INTEGER,
+              employee TEXT,
+              contract_id TEXT,
+              status TEXT NOT NULL,
+              error TEXT,
+              note TEXT,
+              attempt INTEGER NOT NULL DEFAULT 1
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_push_log_day "
+                     "ON push_log(day, kind)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_push_log_target "
+                     "ON push_log(day, target_id)")
         # Автономное приложение (PWA вне Телеги): вне Телеги нет initData, поэтому вход
         # двухступенчатый. Бот шлёт ссылку (app_links, окно активации APP_LINK_DAYS,
         # до APP_LINK_MAX_USES обменов — одну ссылку открывают и в браузере Телеги, и в
@@ -622,6 +855,40 @@ def init_db() -> None:
               created_at TEXT
             )
         """)
+        # photo_geo из «гео фото» стала ИНДЕКСОМ ФОТО: строка есть у каждого
+        # снимка, гео — опциональна. Имя таблицы не меняем: оно прибито в
+        # limited_test_reset.RESET_TABLES/DELETE_ORDER и в photo_geo_for_files.
+        #
+        # Справочные данные должника (addr_*, assign_date_at) фиксируем СНИМКОМ
+        # на момент загрузки, а не читаем текущие — то же правило и по той же
+        # причине, что visits.geo_far: точка должника уезжает после каждого
+        # геокодинга, и пересчёт задним числом переписывал бы историю (честное
+        # фото понедельника становилось бы поводом к разбору в четверг).
+        # addr_tol_m = geo_tolerance_m на момент загрузки; NULL = точка не
+        # адресная, гео-сигналы не выдаются. assign_date_at = разобранная
+        # _as_date дата закрепления (ISO); NULL = не распознана, правило
+        # shot_before_assignment не применяется. exif_dt_norm = exif_dt,
+        # приведённый к серверной шкале по exif_tz; NULL = зона неизвестна,
+        # в арифметику не пускаем (в UZ/TJ разрыв со стенными часами +5 ч).
+        pgcols = {r[1] for r in conn.execute("PRAGMA table_info(photo_geo)")}
+        for col, decl in (("sha256", "TEXT"), ("size_bytes", "INTEGER"),
+                          ("source", "TEXT"), ("shot_at_client", "TEXT"),
+                          ("exif_dt", "TEXT"), ("exif_tz", "TEXT"),
+                          ("exif_dt_norm", "TEXT"),
+                          ("exif_lat", "REAL"), ("exif_lon", "REAL"),
+                          ("exif_gps_at", "TEXT"),
+                          ("exif_make", "TEXT"), ("exif_model", "TEXT"),
+                          ("exif_software", "TEXT"),
+                          ("meta_state", "TEXT"), ("shell_version", "INTEGER"),
+                          ("meta_origin", "TEXT"), ("shrunk", "INTEGER"),
+                          ("addr_lat", "REAL"), ("addr_lon", "REAL"),
+                          ("addr_tol_m", "INTEGER"), ("assign_date_at", "TEXT")):
+            if col not in pgcols:
+                conn.execute(f"ALTER TABLE photo_geo ADD COLUMN {col} {decl}")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_photo_geo_contract "
+                     "ON photo_geo(contract_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_photo_geo_sha "
+                     "ON photo_geo(sha256)")
         # Трек поездки: точки, снятые НАВИГАТОРОМ по дороге к должнику, пока визит
         # ещё не закрыт. До этого от всей поездки оставались только координата
         # фотографии и точка закрытия визита — то есть две точки на весь день.
@@ -677,6 +944,14 @@ def init_db() -> None:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_training_snapshot "
                      "ON training_rows(snapshot)")
+        # Происхождение обещания в корпусе. До вер. 33 «дата обещания» могла быть
+        # записана только офисом; после — ещё и выездником из формы. Признак модели
+        # один и тот же, а смысл разный, и без метки старые и новые строки корпуса
+        # стали бы неразличимы навсегда (training_rows переживает сброс намеренно).
+        # Колонку заводим ДО первой записи из формы — потом окно закрывается.
+        tcols = {r[1] for r in conn.execute("PRAGMA table_info(training_rows)")}
+        if "promise_src" not in tcols:
+            conn.execute("ALTER TABLE training_rows ADD COLUMN promise_src TEXT")
         # Беседы для отчётов о выездах: бот, добавленный в группу, регистрирует
         # её здесь (выключенной); пульт включает и закрепляет сотрудников (ФИО
         # из реестра). Закрытый визит сотрудника постится в его беседы.
@@ -731,6 +1006,7 @@ def init_db() -> None:
                     "UPDATE clients SET visit_value_log=? WHERE contract_id=?",
                     (_log_json(seeded), r["contract_id"]))
         conn.commit()
+    reset_role_caches()   # схема/роли могли поменяться — индекс адресатов заново
 
 
 # --- Профиль / язык ---------------------------------------------------------
@@ -976,7 +1252,43 @@ def unassign_clients(employee: str, contract_ids: list[str]) -> int:
             f"AND contract_id IN ({','.join('?' * len(ids))})",
             (employee, UNASSIGNED_REASON_MANUAL, employee, *ids))
         conn.commit()
-        return cur.rowcount
+        n = cur.rowcount
+    _bump_version()          # иначе индекс приоритета держит снятых до импорта
+    reset_role_caches()
+    return n
+
+
+def unassigned_overview(*, reason: str = UNASSIGNED_REASON_RECALLED,
+                        employee: str = "", limit: int = 500) -> dict:
+    """Кто снят с работы и почему — единственная выдача, где откреплённые видны.
+
+    Все обычные выборки сидят на responsible = ?, поэтому откреплённый договор
+    не показывает ни один экран. Здесь фильтр наоборот — по unassigned_reason.
+    Явный список колонок (не SELECT *): blob-колонки провенанса незачем гонять
+    по 500 строк на каждый клик пульта."""
+    cap = max(1, min(int(limit or 500), 5000))
+    cols = ("contract_id, client, partner, unassigned_from, "
+            "recall_date, recall_reason, recall_transfer, recall_withdrawn, "
+            "debt_total, debt_today")
+    with connect() as conn:
+        totals = {(r["reason"] or ""): r["n"] for r in conn.execute(
+            "SELECT COALESCE(unassigned_reason,'') AS reason, COUNT(*) AS n "
+            "FROM clients WHERE COALESCE(unassigned_reason,'') <> '' GROUP BY 1")}
+        by_employee = {r["who"]: r["n"] for r in conn.execute(
+            "SELECT COALESCE(unassigned_from,'') AS who, COUNT(*) AS n "
+            "FROM clients WHERE COALESCE(unassigned_reason,'') = ? "
+            "GROUP BY 1 ORDER BY 2 DESC", (reason,))}
+        sql = (f"SELECT {cols} FROM clients "
+               "WHERE COALESCE(unassigned_reason,'') = ?")
+        params: list = [reason]
+        if employee:
+            sql += " AND unassigned_from = ?"
+            params.append(employee)
+        sql += " ORDER BY unassigned_from, client, contract_id LIMIT ?"
+        params.append(cap)
+        rows = conn.execute(sql, params).fetchall()
+    return {"totals": totals, "by_employee": by_employee, "rows": rows,
+            "shown": len(rows), "limit": cap}
 
 
 def get_binding(telegram_id: int) -> str | None:
@@ -1241,7 +1553,8 @@ def _manager_dict(r: sqlite3.Row) -> dict:
     keys = r.keys()
     return {"telegram_id": r["telegram_id"], "name": r["name"] or "",
             "cities": _json_list(r["cities"]), "employees": _json_list(r["employees"]),
-            "direction": (r["direction"] or "") if "direction" in keys else ""}
+            "direction": (r["direction"] or "") if "direction" in keys else "",
+            "can_dm": r["can_dm"] if "can_dm" in keys else None}
 
 
 def set_manager(telegram_id: int, name: str, cities: list[str],
@@ -1266,6 +1579,7 @@ def set_manager(telegram_id: int, name: str, cities: list[str],
              date.today().isoformat()),
         )
         conn.commit()
+    reset_role_caches()
 
 
 def get_manager(telegram_id: int) -> dict | None:
@@ -1287,6 +1601,7 @@ def delete_manager(telegram_id: int) -> None:
     with connect() as conn:
         conn.execute("DELETE FROM managers WHERE telegram_id = ?", (telegram_id,))
         conn.commit()
+    reset_role_caches()
 
 
 def is_manager(telegram_id: int) -> bool:
@@ -1441,20 +1756,170 @@ def persons_processed_range(employee: str, date_from: str, date_to: str) -> list
 
 
 # --- Гео фото (фактическая точка съёмки) -------------------------------------
+def record_photo(contract_id: str, file: str, telegram_id: int, *,
+                 geo: tuple | None = None, sha256: str | None = None,
+                 size_bytes: int | None = None, source: str | None = None,
+                 shot_at_client: str | None = None,
+                 shell_version: int | None = None,
+                 meta_state: str | None = None, exif: dict | None = None,
+                 exif_dt_norm: str | None = None,
+                 shrunk: int | None = None,
+                 addr: tuple | None = None,
+                 assign_date_at: str | None = None,
+                 meta_origin: str = "upload",
+                 created_at: str | None = None) -> None:
+    """Индексная строка снимка. Пишется для КАЖДОГО фото (гео может не быть).
+
+    ON CONFLICT DO NOTHING: файл неизменяем (атомарная публикация), поэтому
+    первая приехавшая запись и есть запись о снимке. Амендмент запрещён
+    намеренно — иначе повторная отправка того же op с подделанным EXIF
+    затёрла бы исходные метаданные. Единственное исключение — бэкфилл
+    (см. photo_backfill: клиент строку meta_origin='backfill' создать не может).
+
+    captured_at достоверен как время гео-фикса ТОЛЬКО у строк meta_origin=
+    'upload'; у строк, заведённых обёрткой add_photo_geo и до вер. 33, он
+    равен created_at из-за фолбэка «captured_at or now» — судить по нему
+    время съёмки нельзя."""
+    lat = lon = acc = captured = None
+    if geo:
+        lat, lon, acc, captured = geo
+    a_lat = a_lon = a_tol = None
+    if addr:
+        a_lat, a_lon, a_tol = addr
+    e = exif or {}
+    now = created_at or datetime.now().isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO photo_geo (contract_id, file, telegram_id, lat, lon, "
+            "acc_m, captured_at, created_at, sha256, size_bytes, source, "
+            "shot_at_client, exif_dt, exif_tz, exif_dt_norm, exif_lat, "
+            "exif_lon, exif_gps_at, exif_make, exif_model, exif_software, "
+            "meta_state, shell_version, meta_origin, shrunk, addr_lat, "
+            "addr_lon, addr_tol_m, assign_date_at) "
+            "VALUES (" + ",".join("?" * 29) + ") ON CONFLICT(file) DO UPDATE SET "
+            "telegram_id=excluded.telegram_id, lat=excluded.lat, "
+            "lon=excluded.lon, acc_m=excluded.acc_m, "
+            "captured_at=excluded.captured_at, created_at=excluded.created_at, "
+            "sha256=excluded.sha256, size_bytes=excluded.size_bytes, "
+            "source=excluded.source, shot_at_client=excluded.shot_at_client, "
+            "exif_dt=excluded.exif_dt, exif_tz=excluded.exif_tz, "
+            "exif_dt_norm=excluded.exif_dt_norm, exif_lat=excluded.exif_lat, "
+            "exif_lon=excluded.exif_lon, exif_gps_at=excluded.exif_gps_at, "
+            "exif_make=excluded.exif_make, exif_model=excluded.exif_model, "
+            "exif_software=excluded.exif_software, "
+            "meta_state=excluded.meta_state, "
+            "shell_version=excluded.shell_version, "
+            "meta_origin=excluded.meta_origin, shrunk=excluded.shrunk, "
+            "addr_lat=excluded.addr_lat, addr_lon=excluded.addr_lon, "
+            "addr_tol_m=excluded.addr_tol_m, "
+            "assign_date_at=excluded.assign_date_at "
+            # Единственный разрешённый амендмент: настоящие метаданные загрузки
+            # перекрывают СИНТЕТИЧЕСКУЮ строку бэкфилла (гонка «бот принял фото,
+            # пока шёл бэкфилл»). Клиент строку meta_origin='backfill' создать
+            # не может (сервер пишет 'upload'), так что подделанный EXIF чужую
+            # запись не затрёт.
+            "WHERE photo_geo.meta_origin='backfill' AND excluded.meta_origin='upload'",
+            (contract_id, file, telegram_id or None, lat, lon, acc, captured,
+             now, sha256, size_bytes, source, shot_at_client, e.get("dt"),
+             e.get("tz"), exif_dt_norm, e.get("lat"), e.get("lon"),
+             e.get("gps_at"), e.get("make"), e.get("model"), e.get("software"),
+             meta_state, shell_version, meta_origin, shrunk, a_lat, a_lon,
+             a_tol, assign_date_at))
+        conn.commit()
+
+
 def add_photo_geo(contract_id: str, file: str, telegram_id: int,
                   lat: float, lon: float, acc_m: int | None,
                   captured_at: str | None = None) -> None:
     """Запомнить точку загрузки фото. file = «КД/имя файла» (уникален);
-    повторная доставка того же фото из оффлайн-очереди строк не плодит."""
+    повторная доставка того же фото из оффлайн-очереди строк не плодит.
+    Тонкая обёртка record_photo — поведение (включая фолбэк captured_at or
+    now) прибито tests/test_report_chats.py."""
     now = datetime.now().isoformat(timespec="seconds")
+    record_photo(contract_id, file, telegram_id,
+                 geo=(lat, lon, acc_m, captured_at or now))
+
+
+def photo_index_for_dirs(dirs: list[str]) -> list[sqlite3.Row]:
+    """Строки индекса по каталогам КД. Идёт по idx_photo_geo_contract."""
+    if not dirs:
+        return []
+    qs = ",".join("?" for _ in dirs)
     with connect() as conn:
-        conn.execute(
-            "INSERT INTO photo_geo (contract_id, file, telegram_id, lat, lon, "
-            "acc_m, captured_at, created_at) VALUES (?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(file) DO NOTHING",
-            (contract_id, file, telegram_id, lat, lon, acc_m,
-             captured_at or now, now))
-        conn.commit()
+        return conn.execute(
+            f"SELECT * FROM photo_geo WHERE contract_id IN ({qs}) "
+            "ORDER BY COALESCE(created_at,'') DESC", list(dirs)).fetchall()
+
+
+def photo_rows_by_sha(shas: list[str]) -> list[sqlite3.Row]:
+    """Строки индекса по хэшам содержимого (дедуп «тот же файл у разных КД»)."""
+    shas = [s for s in shas if s]
+    if not shas:
+        return []
+    out = []
+    for i in range(0, len(shas), 400):        # SQLITE_MAX_VARIABLE_NUMBER
+        chunk = shas[i:i + 400]
+        qs = ",".join("?" for _ in chunk)
+        with connect() as conn:
+            out += conn.execute(
+                f"SELECT * FROM photo_geo WHERE sha256 IN ({qs})",
+                chunk).fetchall()
+    return out
+
+
+def photo_uploaders_for_dirs(dirs: list[str]) -> set[int]:
+    """Кто ЗАГРУЖАЛ фото в эти каталоги — по следу audit (web._photo пишет
+    audit_access(uid,'photo',rep) на каждой загрузке с самого начала проекта,
+    журнал append-only). Восстанавливает доступ «по привязке того, кто снимал»
+    для архива: у бэкфилленных строк telegram_id NULL, а после законного
+    переназначения импорт стирает метку открепления."""
+    if not dirs:
+        return set()
+    qs = ",".join("?" for _ in dirs)
+    with connect() as conn:
+        return {r["actor"] for r in conn.execute(
+            f"SELECT DISTINCT actor FROM audit WHERE action='photo' "
+            f"AND target IN ({qs})", list(dirs)) if r["actor"]}
+
+
+def photo_contract_dirs(contract_id: str) -> dict:
+    """Каталоги, под которыми могут лежать фото этого договора.
+
+    НЕ через person_contracts: она фильтрует по responsible и после
+    открепления теряет договоры — весь альбом человека исчезал, хотя файлы
+    лежат на диске. Здесь группируем ТЕМ ЖЕ person_key, но без фильтра
+    ответственного."""
+    cid = canonical_contract_id(contract_id)
+    row = get_client(cid)
+    contracts, person = [], None
+    if row is not None:
+        key = person_key(row)
+        with connect() as conn:
+            cand = conn.execute("SELECT * FROM clients WHERE client IS ?",
+                                (row["client"],)).fetchall()
+        contracts = [c for c in cand if person_key(c) == key]
+        person = row["client"]
+    dirs = {cid} | {c["contract_id"] for c in contracts if c["contract_id"]}
+    return {"cid": cid, "person": person, "contracts": contracts,
+            "dirs": sorted(d for d in dirs if d)}
+
+
+def visits_for_contracts(contract_ids: list[str]) -> list[sqlite3.Row]:
+    """Все визиты по набору договоров, новые сверху (без LIMIT — visit_history
+    режет до 20, а якорь фото ищется по всей истории). Идёт по idx_visits_contract."""
+    ids = [c for c in contract_ids if c]
+    if not ids:
+        return []
+    out = []
+    for i in range(0, len(ids), 400):
+        chunk = ids[i:i + 400]
+        qs = ",".join("?" for _ in chunk)
+        with connect() as conn:
+            out += conn.execute(
+                f"SELECT * FROM visits WHERE contract_id IN ({qs}) "
+                "ORDER BY COALESCE(created_at,'') DESC, id DESC",
+                chunk).fetchall()
+    return out
 
 
 def add_track_points(session_id: str, employee: str, telegram_id: int,
@@ -1500,7 +1965,8 @@ def add_track_points(session_id: str, employee: str, telegram_id: int,
         return conn.total_changes - before
 
 
-_TRAIN_COLS = ("debt", "product_type", "partner", "country", "assign_date", "kd_date",
+_TRAIN_COLS = ("promise_src",
+               "debt", "product_type", "partner", "country", "assign_date", "kd_date",
                "promise_date", "result", "contact_with", "who", "location",
                "visits", "paid_months", "target")
 
@@ -1673,14 +2139,246 @@ def migrate_report_chat(old_id: int, new_id: int) -> None:
 
 def report_chats_for(employee: str) -> list[int]:
     """Куда постить отчёт о визите сотрудника: беседа включена, бот в ней есть,
-    ФИО закреплено."""
+    ФИО закреплено.
+
+    Сравнение по _name_key, а не SQL-равенству: одна опечатка регистра при
+    закреплении ФИО в пульте — и отчёты молча не уходили. Расхождение написаний
+    при этом делаем ГРОМКИМ (лог INFO), иначе завтрашнее «посыпались лишние
+    уведомления» будет невосстановимо."""
     if not (employee or "").strip():
         return []
+    key = _name_key(employee)
+    chat_ids = []
     with connect() as conn:
-        return [r[0] for r in conn.execute(
-            "SELECT c.chat_id FROM report_chats c "
+        rows = conn.execute(
+            "SELECT c.chat_id, e.employee FROM report_chats c "
             "JOIN report_chat_employees e ON e.chat_id = c.chat_id "
-            "WHERE c.enabled=1 AND c.removed=0 AND e.employee=?", (employee,))]
+            "WHERE c.enabled=1 AND c.removed=0").fetchall()
+    for r in rows:
+        if _name_key(r["employee"]) != key:
+            continue
+        if r["employee"] != employee:
+            logging.info("report_chats: сматчено по нормализованному ключу — "
+                         "реестр «%s», в беседе «%s» (чат %s)",
+                         employee, r["employee"], r["chat_id"])
+        chat_ids.append(r["chat_id"])
+    return sorted(dict.fromkeys(chat_ids))
+
+
+# --- Телеметрия доставки (push_log) и производные признаки -------------------
+def log_push(kind: str, status: str, *, target_kind: str = "",
+             target_id: int | None = None, employee: str | None = None,
+             contract_id: str | None = None, error: str | None = None,
+             note: str | None = None, attempt: int = 1) -> None:
+    """Строка журнала доставки. Телеметрия НЕ имеет права уронить сохранение
+    визита — весь вызов проглатывает свои ошибки (как audit_access), но потеря
+    строки не немая: logging.warning."""
+    try:
+        if status not in PUSH_STATUSES:
+            logging.warning("log_push: незнакомый статус %r (kind=%s)", status, kind)
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO push_log (ts, day, kind, target_kind, target_id, "
+                "employee, contract_id, status, error, note, attempt) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (datetime.now().isoformat(timespec="seconds"),
+                 date.today().isoformat(), kind, target_kind or "",
+                 target_id, employee, contract_id,
+                 status, (error or "")[:300] or None, (note or "")[:300] or None,
+                 int(attempt)))
+            conn.commit()
+    except Exception as exc:                               # noqa: BLE001
+        logging.warning("log_push потерян: kind=%s status=%s target=%s err=%s",
+                        kind, status, target_id, exc)
+
+
+def set_can_dm(telegram_id: int, ok: bool) -> None:
+    """Обновить признак «личка доступна» по ФАКТУ отправки. rowcount 0
+    (владелец без записи в managers) — не ошибка. Сетевой сбой can_dm не
+    трогает: он не доказывает отсутствие лички."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE managers SET can_dm=?, can_dm_at=? WHERE telegram_id=?",
+            (1 if ok else 0, datetime.now().isoformat(timespec="seconds"),
+             telegram_id))
+        conn.commit()
+
+
+def push_summary(day: str) -> dict:
+    """Сводка доставок за день: по видам, итого, заблокированные (с именем
+    ПОЛУЧАТЕЛЯ — в строках визит-пуша employee это ФИО выездника, чей визит
+    вызвал отбивку, показывать его как заблокированного нельзя), последняя ошибка."""
+    with connect() as conn:
+        by_kind: dict[str, dict[str, int]] = {}
+        for r in conn.execute(
+                "SELECT kind, status, COUNT(*) n FROM push_log WHERE day=? "
+                "GROUP BY kind, status", (day,)):
+            by_kind.setdefault(r["kind"], {})[r["status"]] = r["n"]
+        totals: dict[str, int] = {}
+        for r in conn.execute(
+                "SELECT status, COUNT(*) n FROM push_log WHERE day=? "
+                "GROUP BY status", (day,)):
+            totals[r["status"]] = r["n"]
+        blocked = [dict(r) for r in conn.execute(
+            "SELECT DISTINCT p.target_id, m.name AS target_name, p.kind, p.employee "
+            "FROM push_log p LEFT JOIN managers m ON m.telegram_id = p.target_id "
+            "WHERE p.day=? AND p.status=? AND p.target_id IS NOT NULL",
+            (day, PUSH_BLOCKED))]
+        last = conn.execute(
+            "SELECT ts, kind, target_id, status, error FROM push_log "
+            "WHERE day=? AND error IS NOT NULL ORDER BY id DESC LIMIT 1",
+            (day,)).fetchone()
+    return {"by_kind": by_kind, "totals": totals, "blocked": blocked,
+            "last_error": dict(last) if last else None}
+
+
+def push_tail(limit: int = 20, day: str | None = None,
+              kind: str | None = None) -> list[dict]:
+    """Последние строки журнала (карточка диагностики в пульте)."""
+    q, args = "SELECT * FROM push_log", []
+    conds = []
+    if day:
+        conds.append("day=?")
+        args.append(day)
+    if kind:
+        conds.append("kind=?")
+        args.append(kind)
+    if conds:
+        q += " WHERE " + " AND ".join(conds)
+    q += " ORDER BY id DESC LIMIT ?"
+    args.append(int(limit))
+    with connect() as conn:
+        return [dict(r) for r in conn.execute(q, args)]
+
+
+def push_settled_today(kind: str, day: str) -> set[int]:
+    """Кому за этот день уже не надо слать: доставлено ИЛИ Forbidden (чинит
+    человек, ретрай бессмыслен). Пробные отправки (kind=test) сюда не попадают
+    по построению — они пишутся своим видом и не могут заглушить рассылку."""
+    with connect() as conn:
+        return {r["target_id"] for r in conn.execute(
+            "SELECT DISTINCT target_id FROM push_log "
+            "WHERE day=? AND kind=? AND status IN (?,?) AND target_id IS NOT NULL",
+            (day, kind, PUSH_SENT, PUSH_BLOCKED))}
+
+
+def push_trim(keep_days: int = 60) -> int:
+    """Обрезка журнала: телеметрия, не архив. ПД-выдача живёт в audit."""
+    edge = (date.today() - timedelta(days=keep_days)).isoformat()
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM push_log WHERE day < ?", (edge,))
+        conn.commit()
+        return cur.rowcount
+
+
+def push_enabled(key: str, default: str = "1") -> bool:
+    """ЕДИНЫЙ разбор рубильников рассылок. Раньше digest_enabled понимал
+    ('0','false','no','off'), а visit_push — только три из них: visit_push='no'
+    молча НЕ выключал пуш. Один парсер — одно поведение."""
+    return (get_setting(key) or default).strip().lower() not in ("0", "false", "no", "off")
+
+
+# --- Кэш ролей: обратный индекс ФИО → руководители ---------------------------
+# _notify_managers зовётся на КАЖДОМ закрытии визита; прямой пересчёт состава
+# (у направленца — DISTINCT-скан clients) на каждый визит недопустим. Кэш живёт
+# 60 с и явно сбрасывается там, где роли/реестр меняются: init_db, set_manager,
+# delete_manager, unassign_clients, конец импорта. В _bump_version его НЕ вешать:
+# тот дёргается на каждом update_fields, и кэш стал бы бесполезен.
+_ROLE_CACHE_TTL_S = 60.0
+_registry_names_cache: tuple[float, dict] | None = None
+_managers_index_cache: tuple[float, dict] | None = None
+
+
+def reset_role_caches() -> None:
+    global _registry_names_cache, _managers_index_cache
+    _registry_names_cache = None
+    _managers_index_cache = None
+
+
+def registry_name_index() -> dict[str, str]:
+    """{_name_key(ФИО): каноническое написание в реестре} — ТОЛЬКО для
+    диагностики расхождений написаний; писать этим в clients.responsible нельзя.
+
+    Правило победителя — «больше договоров, то и написание» (детерминированно).
+    ORDER BY responsible здесь не годится: сортировка бинарная, кириллическая
+    заглавная младше строчной, и наивный проход по словарю отдал бы каноном
+    строчную опечатку с одним договором. От импортного known_resp (первый по
+    rowid) отличается намеренно — у них разные задачи."""
+    global _registry_names_cache
+    now = time.monotonic()
+    if _registry_names_cache and now - _registry_names_cache[0] < _ROLE_CACHE_TTL_S:
+        return _registry_names_cache[1]
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT responsible name, COUNT(*) c FROM clients "
+            "WHERE responsible IS NOT NULL AND TRIM(responsible) <> '' "
+            "GROUP BY responsible ORDER BY c DESC, responsible ASC").fetchall()
+    out: dict[str, str] = {}
+    for r in rows:
+        out.setdefault(_name_key(r["name"]), r["name"])
+    _registry_names_cache = (now, out)
+    return out
+
+
+def managers_by_employee_index() -> dict[str, list[dict]]:
+    """Обратный индекс: _name_key(ФИО сотрудника) → руководители, которым идут
+    его уведомления. Учитывает руководителей НАПРАВЛЕНИЙ (их явный список пуст,
+    состав живой) — дыра, из-за которой четверо направленцев не получали
+    визит-пуш вообще.
+
+    В индекс кладётся КОПИЯ dict на каждый ключ: list_managers отдаёт по одному
+    объекту на руководителя, и общий объект под тремя ключами оставил бы
+    matched_as от последнего сотрудника — каждый пуш многосоставного
+    руководителя врал бы про расхождение написаний. Значения кэша отдаются по
+    ссылке — мутировать их нельзя."""
+    global _managers_index_cache
+    now = time.monotonic()
+    if _managers_index_cache and now - _managers_index_cache[0] < _ROLE_CACHE_TTL_S:
+        return _managers_index_cache[1]
+    index: dict[str, list[dict]] = {}
+    by_direction: dict[str, list[str]] = {}
+    for mgr in list_managers():
+        direction = (mgr.get("direction") or "").strip()
+        if direction:
+            if direction not in by_direction:    # направлений максимум три
+                by_direction[direction] = employees_by_direction(direction)
+            spelled_list = by_direction[direction]
+        else:
+            spelled_list = [e for e in (mgr.get("employees") or [])
+                            if str(e).strip()]
+        for spelled in spelled_list:
+            key = _name_key(spelled)
+            if not key:
+                continue
+            index.setdefault(key, []).append({**mgr, "matched_as": spelled})
+    _managers_index_cache = (now, index)
+    return index
+
+
+def managers_for_employee(employee: str) -> list[dict]:
+    """Руководители, которым идут уведомления по этому сотруднику (каждый dict
+    несёт matched_as — написание ФИО, как оно лежит у руководителя)."""
+    key = _name_key(employee)
+    if not key:
+        return []
+    return managers_by_employee_index().get(key, [])
+
+
+def manager_spelling_mismatches(mgr: dict) -> list[dict]:
+    """Расхождения написаний ФИО между ролью и реестром — для диагностики.
+    У таких сотрудников портфель у руководителя не открывается (доступ матчит
+    точно), хотя отбивки приходят (доставка матчит по _name_key)."""
+    known = registry_name_index()
+    exact = set(known.values())
+    out = []
+    for spelled in (mgr.get("employees") or []):
+        s = str(spelled).strip()
+        if not s or s in exact:
+            continue
+        canonical = known.get(_name_key(s))
+        if canonical:
+            out.append({"в роли": s, "в реестре": canonical})
+    return out
 
 
 # Путь к .env, откуда docker-compose (env_file) и load_dotenv() берут BOT_TOKEN.
@@ -1993,8 +2691,45 @@ def overdue_promises(employee: str, on_date: str) -> list[dict]:
         last = max([d for d in visits if d], default=None)
         p["last_visit"] = last.isoformat() if last else None
         p["visited_after_promise"] = bool(last and last >= pd)
+        # Сумму обещания даёт ТОЛЬКО доказанный снимок визита (в нём же живёт
+        # офисная правка этой ячейки). Сырую «Сумму прогноза» из clients брать
+        # нельзя: она поконтрактная и до первого визита целиком офисная — ни
+        # max, ни сумма по КД там не значат ничего, а 🤝 рядом с офисным
+        # прогнозом читался бы как обещание должника. Одно значение на
+        # человека, не сумма по договорам. Ключ выдачи остаётся promised_sum:
+        # это «сколько обещал должник», а не колонка реестра.
+        p["promised_sum"] = None
+        for x in p["contracts"]:
+            snap = _merged_visit(x) or {}
+            if not snap.get("forecast_sum"):
+                continue
+            snap_pd = _as_date(snap.get("promise_date"))
+            if snap_pd is not None and snap_pd != pd:
+                continue
+            money = canon_amount(snap["forecast_sum"])
+            if money:
+                p["promised_sum"] = int(money)
+                break
     persons.sort(key=lambda p: -p["days_overdue"])
     return persons
+
+
+def deferred_promises_count(employee: str, on_date: str) -> int:
+    """Должники сотрудника с обещанием В БУДУЩЕМ. Скоринг убирает их из
+    маршрута сразу (киллер-фильтр), а видимыми для руководителя они
+    становились только после срыва — с момента, когда обещание ставит
+    выездник, эта дыра означала «маршрут можно тихо расчистить на месяц»."""
+    target = _as_date(on_date)
+    if target is None:
+        return 0
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM clients WHERE responsible = ? "
+            "AND promise_date IS NOT NULL AND TRIM(promise_date) <> ''",
+            (employee,)).fetchall()
+    future = [r for r in rows
+              if (d := _as_date(r["promise_date"])) is not None and d > target]
+    return len(_group_persons(future))
 
 
 def visit_history(contract_id: str) -> list[sqlite3.Row]:
@@ -2301,7 +3036,8 @@ def day_map_points(employee: str, on_date: str) -> dict:
     метки выездника за день и адреса обработанных должников (geo клиента)."""
     with connect() as conn:
         visits = conn.execute(
-            "SELECT v.visit_lat lat, v.visit_lon lon, v.dist_m dist_m, c.client client "
+            "SELECT v.visit_lat lat, v.visit_lon lon, v.dist_m dist_m, "
+            "v.geo_far geo_far, v.agent_id agent_id, c.client client "
             "FROM visits v JOIN clients c ON c.contract_id = v.contract_id "
             "WHERE c.responsible = ? AND v.created_at = ? AND v.visit_lat IS NOT NULL "
             "ORDER BY v.id", (employee, on_date)).fetchall()
@@ -2321,13 +3057,30 @@ def day_map_points(employee: str, on_date: str) -> dict:
         if c:
             targets.append({"lat": c["geo_lat"], "lon": c["geo_lon"],
                             "client": p["client"], "src": c["geo_src"] or ""})
+    tid_set = set(tids)
     return {
+        # geo_far — СОХРАНЁННЫЙ вердикт (единый с пушем и карточкой); by_other —
+        # визит закрыт чужим аккаунтом (руководитель через act_as): судить
+        # сотрудника по точке чужого телефона нельзя.
         "visits": [{"lat": r["lat"], "lon": r["lon"], "dist_m": r["dist_m"],
+                    "geo_far": r["geo_far"],
+                    "by_other": bool(tid_set) and r["agent_id"] not in tid_set,
                     "client": r["client"]} for r in visits],
         "markers": [{"lat": r["lat"], "lon": r["lon"], "label": r["label"] or "",
                      "at": (r["created_at"] or "")[11:16]} for r in markers],
         "targets": targets,
     }
+
+
+def agent_tids(employee: str) -> list[int]:
+    """Все telegram-привязки этого ФИО (у людей бывает два аккаунта).
+    Нужно карточке дайджеста: визит, закрытый ЧУЖИМ аккаунтом (руководитель
+    через act_as), нельзя судить как гео-нарушение сотрудника."""
+    if not (employee or "").strip():
+        return []
+    with connect() as conn:
+        return [r["telegram_id"] for r in conn.execute(
+            "SELECT telegram_id FROM agent_bind WHERE employee = ?", (employee,))]
 
 
 def last_visit_geo(contract_ids: list[str]):
@@ -2701,6 +3454,95 @@ def _scoring_only_headers() -> dict[str, str]:
     return SCORING_ONLY_HEADERS
 
 
+# --- Разбор ячейки отзыва -----------------------------------------------------
+# Мусор, который в живых реестрах пишут вместо пустоты. «Непусто = отозван»
+# без этого списка снимало бы договоры на «нет», «-», «н/д» и протянутой
+# нулевой дате (транспорт превращает её в «00:00:00»).
+_RECALL_EMPTY_TOKENS = {
+    "", "0", "00", "0.0", "0,0", "0.00", "0,00",
+    "-", "--", "---", "—", "–", "_",
+    "нет", "не", "нету", "нетотзыва",
+    "нетребуется", "отсутствует", "no", "none", "n/a", "na",
+    "н/д", "нд", "#н/д", "#n/a", "null", "nil", "false", "ложь",
+    "00:00:00", "000000", "18991230", "30121899", "19000101",
+    "нетданных", "неподлежит", "неизвестно", "неприменимо",
+}
+# Дата отзыва раньше этой границы — артефакт формата (нулевая дата Excel,
+# протянутая ячейка), а не решение офиса.
+_RECALL_DATE_FLOOR = date(2015, 1, 1)
+
+
+def _recall_token(text) -> str:
+    t = " ".join(str(text).split()).lower().replace("ё", "е")
+    return t.strip(".,;:!").replace(" ", "")
+
+
+def _recall_cell(value, *, is_date: bool = False) -> tuple[str, bool]:
+    """(что писать в БД, считается ли отзывом).
+
+    Порядок веток проверен экспериментом на транспорте: булева галочка офиса —
+    отзыв (True) / не отзыв (False) ЯВНО; нулевая протянутая дата приезжает
+    из calamine как time(0,0) → строка «00:00:00» и гасится чёрным списком;
+    float-флаг «1.0» пишется как «1», чтобы не зависеть от канала доставки."""
+    if value is None:
+        return "", False
+    if value is True:
+        return "да", True
+    if value is False:
+        return "", False
+    if isinstance(value, datetime):
+        d = value.date()
+        if d < _RECALL_DATE_FLOOR:
+            return "", False
+        return d.strftime("%Y-%m-%d"), True
+    if isinstance(value, date):
+        if value < _RECALL_DATE_FLOOR:
+            return "", False
+        return value.isoformat(), True
+    if isinstance(value, (int, float)):
+        if float(value) == 0.0:
+            return "", False
+        iso = _excel_serial_date(value)
+        if iso:
+            parsed = _as_date(iso)
+            if parsed and parsed < _RECALL_DATE_FLOOR:
+                return "", False
+            return iso, True
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value)), True
+        return str(value).strip(), True
+    text = " ".join(str(value).split())
+    if not text:
+        return "", False
+    token = _recall_token(text)
+    if token in _RECALL_EMPTY_TOKENS:
+        return "", False
+    # формы слова: «не отозван(о/ы)», «нет отзыв(а/ов)» — по корню
+    if token.startswith("неотозван") or token.startswith("нетотзыв"):
+        return "", False
+    if is_date:
+        parsed = _as_date(text)
+        if parsed:
+            if parsed < _RECALL_DATE_FLOOR:
+                return "", False
+            return parsed.isoformat(), True
+    return text, True
+
+
+def _recall_is_set(value) -> bool:
+    return _recall_cell(value)[1]
+
+
+RECALL_HEADERS: dict[str, str] = {}
+
+
+def _recall_headers() -> dict[str, str]:
+    global RECALL_HEADERS
+    if not RECALL_HEADERS:
+        RECALL_HEADERS = {_norm_title(t): k for t, k in RECALL_TITLES.items()}
+    return RECALL_HEADERS
+
+
 def _norm_title(s) -> str:
     """Нормализованный заголовок для устойчивого матчинга: регистр, пробелы (юникод-пробелы
     и неразрывный — покрываются штатным классом пробельных символов regex), невидимые
@@ -2731,6 +3573,11 @@ def _canonical_contract_id(value) -> str:
     text = str(value).strip()
     numeric_excel = re.fullmatch(r"([+-]?\d+)\.0+", text)
     return numeric_excel.group(1) if numeric_excel else text
+
+
+# Публичный алиас: поиск фото по КД обязан канонизировать номер ТОЙ ЖЕ
+# функцией, что импорт, иначе 12345 / 12345.0 / "12345.0" разъезжаются.
+canonical_contract_id = _canonical_contract_id
 
 
 def _pick_sheet(wb, _title_to_key):
@@ -3231,9 +4078,34 @@ def _authorized_import_state(
             "protected_cells",
             "protected_contracts",
             "auto_unassigned",
+            "recalled",
+            "recalled_had_owner",
+            "recalled_previously_unassigned",
+            "recalled_without_owner",
+            "recalled_future_dated",
+            "recalled_unparsed_date",
+            "recalled_unrecognized",
+            "recalled_partial_persons",
+            "recall_held",
+            "recall_restored",
+            "recall_restored_to_owner",
+            "recall_restored_without_owner",
+            "recall_restored_to_manual",
         ):
             if key in replay:
                 replay[key] = 0
+        # Повтор apply после таймаута не должен рисовать «отозвано 1469»,
+        # ничего не записав: эффектные списки и digest — к пустым значениям.
+        empty_digest = hashlib.sha256(b"[]").hexdigest()
+        for key in ("recalled_by_employee", "recall_restored_by_employee"):
+            if key in replay:
+                replay[key] = {}
+        for key in ("recalled_sample", "recalled_unrecognized_sample"):
+            if key in replay:
+                replay[key] = []
+        for key in ("recalled_digest", "recall_restored_digest"):
+            if key in replay:
+                replay[key] = empty_digest
         return replay
     if row["status"] != "pending":
         raise ExchangeContractError("import authorization is not pending")
@@ -3310,6 +4182,10 @@ def import_grid(
     expected_manual_restored: int | None = None,
     expected_manual_restore_digest: str | None = None,
     expected_comment_effect_digest: str | None = None,
+    expected_recalled: int | None = None,
+    expected_recalled_digest: str | None = None,
+    expected_recall_restored: int | None = None,
+    expected_recall_restored_digest: str | None = None,
 ) -> dict:
     """Ядро импорта опубликованного master/test subset.
 
@@ -3390,6 +4266,8 @@ def import_grid(
               "skipped_no_id": 0, "duplicates": 0, "unknown_columns": [],
               "protected_cells": 0, "protected_contracts": 0,
               "office_cells": 0, "office_contracts": 0, "office_applied": {},
+              "office_by_key": {}, "protected_by_key": {},
+              "office_promise_unparsed": 0,
               "isolated_call_cells": 0, "isolated_call_contracts": 0,
               # Строки без ответственного попадают в базу, но невидимы выезднику и не
               # входят ни в один отчёт руководителя. Раньше это не показывалось нигде,
@@ -3421,6 +4299,27 @@ def import_grid(
               "historical_comments_cleared": 0,
               "historical_comments_unchanged": 0,
               "comment_effect_digest": hashlib.sha256(b"[]").hexdigest(),
+              # --- отзыв офисом (колонки «Дата отзыва» и соседние) ---
+              "recall_columns": [],
+              "recalled": 0,
+              "recalled_had_owner": 0,
+              "recalled_without_owner": 0,
+              "recalled_previously_unassigned": 0,
+              "recalled_by_employee": {},
+              "recalled_digest": hashlib.sha256(b"[]").hexdigest(),
+              "recalled_future_dated": 0,
+              "recalled_unparsed_date": 0,
+              "recalled_unrecognized": 0,
+              "recalled_unrecognized_sample": [],
+              "recalled_partial_persons": 0,
+              "recalled_sample": [],
+              "recall_held": 0,
+              "recall_restored": 0,
+              "recall_restored_to_owner": 0,
+              "recall_restored_without_owner": 0,
+              "recall_restored_to_manual": 0,
+              "recall_restored_by_employee": {},
+              "recall_restored_digest": hashlib.sha256(b"[]").hexdigest(),
               "authoritative_employees": [],
               "source_proof_digest": None,
               "blocked": False, "duplicate_conflicts": [],
@@ -3521,6 +4420,30 @@ def import_grid(
             "lowercase SHA-256"
         )
         return report
+
+    for _name, _count_value, _digest_value in (
+        ("recalled", expected_recalled, expected_recalled_digest),
+        ("recall_restored", expected_recall_restored,
+         expected_recall_restored_digest),
+    ):
+        if _count_value is not None and (
+            isinstance(_count_value, bool)
+            or not isinstance(_count_value, int)
+            or _count_value < 0
+        ):
+            report["blocked"] = True
+            report["error"] = (f"импорт заблокирован: expected_{_name} должен "
+                               "быть неотрицательным целым")
+            return report
+        if _digest_value is not None and (
+            not isinstance(_digest_value, str)
+            or len(_digest_value) != 64
+            or any(ch not in "0123456789abcdef" for ch in _digest_value)
+        ):
+            report["blocked"] = True
+            report["error"] = (f"импорт заблокирован: expected_{_name}_digest "
+                               "должен быть lowercase SHA-256")
+            return report
     if (
         (replace_current_visit_comments or import_historical_visit_comments)
         and not preview_only
@@ -3862,6 +4785,7 @@ def import_grid(
     # читаем значения, не заводя их полями реестра. Экспортная схема, её отпечаток
     # и строка типов при этом не меняются вообще.
     scoring_cols: dict[int, str] = {}
+    recall_cols: dict[int, str] = {}
     paid_month_cols: list[int] = []
     for index, (cell, key) in enumerate(zip(rows[best_h], col_keys)):
         if key is not None or cell in (None, ""):
@@ -3870,8 +4794,22 @@ def import_grid(
         mapped = _scoring_only_headers().get(_norm_title(title))
         if mapped:
             scoring_cols[index] = mapped
-        elif _PAID_MONTH_RX.fullmatch(title):
+            continue
+        mapped = _recall_headers().get(_norm_title(title))
+        if mapped:
+            recall_cols[index] = mapped
+            continue
+        if _PAID_MONTH_RX.fullmatch(title):
             paid_month_cols.append(index)
+    # Колонки отзыва, которые РЕАЛЬНО есть в этой книге. Пустая ячейка такой
+    # колонки — «отзыва нет», отсутствие колонки — «не знаем».
+    recall_owned = set(recall_cols.values())
+    report["recall_columns"] = [RECALL_TITLE_BY_KEY[k] for k in RECALL_KEYS
+                                if k in recall_owned]
+    # Ключи РЕЕСТРА, реально присутствующие в шапке этой книги. Общий признак
+    # «колонка есть» для всех политик, различающих пустую ячейку и отсутствие
+    # колонки (отзыв здесь; снятие обещания — якорный шлюз, вер. контракта 3).
+    book_keys = {k for k in col_keys if k}
 
     # Сначала разобрать ВЕСЬ файл в памяти. Это обязательный preflight: при
     # повторе КД не должна успеть записаться ни одна предыдущая строка.
@@ -3912,6 +4850,10 @@ def import_grid(
                     # как текст «46204», и договор с такой «Датой выезда» выпадал
                     # из фильтров по дате: визит вроде есть, а в отчётах его нет.
                     data[key] = _excel_serial_date(val) or str(val).strip()
+                elif key in FORM_DATE_KEYS:
+                    text = str(val).strip()
+                    if text:
+                        data[key] = canon_iso_date(text) or text
                 else:
                     text = str(val).strip()
                     if text:
@@ -3928,6 +4870,20 @@ def import_grid(
                 number = _money_int(val)
                 if number:
                     data[target] = number
+        for index, target in recall_cols.items():
+            val = raw[index] if index < len(raw) else None
+            text, is_set = _recall_cell(val, is_date=(target == "recall_date"))
+            if is_set:
+                data[target] = text
+            elif val is not None and str(val).strip():
+                # непусто, но отзывом не признано: без счётчика провал
+                # угадывания формата неотличим от «офис ничего не отзывал»
+                report["recalled_unrecognized"] += 1
+                if len(report["recalled_unrecognized_sample"]) < 20:
+                    report["recalled_unrecognized_sample"].append({
+                        "contract_id": str(data.get("contract_id") or ""),
+                        "column": RECALL_TITLE_BY_KEY.get(target, target),
+                        "value": str(val)[:80]})
         if paid_month_cols:
             # Пустой месяц — это «не платил», а не «нет данных»: колонки помесячных
             # оплат в реестре есть всегда, поэтому ноль здесь осмысленный.
@@ -3948,6 +4904,11 @@ def import_grid(
         for key, value in data.items():
             if key in first and first[key] != value:
                 duplicate_conflicts.setdefault(cid, set()).add(key)
+            # Отзыв липкий по договору: берётся ПЕРВАЯ строка КД, и повтор без
+            # отзыва молча отменял бы решение офиса, стоящее во второй строке.
+            if (key in RECALL_KEYS and _recall_is_set(value)
+                    and not _recall_is_set(first.get(key))):
+                first[key] = value
 
     if duplicate_rows:
         # ПРЕДУПРЕЖДЕНИЕ, а не отказ (03.08.2026, решение владельца). Повторы
@@ -4057,7 +5018,8 @@ def import_grid(
         existing = {r["contract_id"]: r for r in conn.execute(
             "SELECT contract_id, client, birth_date, responsible, address, phone, "
             "visit_comment, historical_visit_comment, "
-            "unassigned_from, unassigned_reason, "
+            "unassigned_from, unassigned_reason, recall_prev_reason, "
+            "recall_date, recall_reason, recall_transfer, recall_withdrawn, "
             "bot_visit_at, bot_visit_data, office_edit_data, visit_value_log "
             "FROM clients")}
         # Визит — на человека: принятая правка разносится по всем его договорам
@@ -4080,6 +5042,11 @@ def import_grid(
         isolated_call_cids: set[str] = set()
         comment_effect_rows: list[dict[str, str]] = []
         manual_restore_effect: list[tuple[str, str]] = []
+        # Отзыв: (cid, у кого забрали, был ли живой владелец). Эффект считается
+        # на ПЕРЕХОДЕ: повторный импорт того же файла не переобъявляет снятия.
+        recall_effect: list[tuple[str, str, bool]] = []
+        recall_restore_effect: list[tuple[str, str]] = []
+        recall_sample: list[dict] = []
         # Владелец каждого уникального КД после duplicate preflight.
         owners: dict[str, str] = {}
         # Как ответственные УЖЕ записаны в базе — чтобы опечатка регистра в файле
@@ -4184,9 +5151,114 @@ def import_grid(
             if incoming_resp:
                 data["responsible"] = incoming_resp
                 known_resp.setdefault(_name_key(incoming_resp), incoming_resp)
-            if unassigned_reason == UNASSIGNED_REASON_ABSENT_FROM_REGISTRY:
+            # --- Отзыв реестром ------------------------------------------
+            # Положительное утверждение самой строки: работает и на частичной
+            # выборке, в отличие от автоснятия по отсутствию строки. Приоритет
+            # выше ВСЕХ прочих веток — строка с отзывом почти всегда ещё несёт
+            # ФИО ответственного, и ветка «переназначили» вернула бы договор
+            # на следующем же импорте.
+            row_recalled = any(_recall_is_set(data.get(k)) for k in recall_owned)
+            db_recall_set = {k for k in RECALL_KEYS
+                             if row0 is not None and _recall_is_set(row0[k])}
+            # Возврат только когда книга ВИДИТ всё, что БД считает отзывом.
+            recall_cleared = bool(recall_owned and not row_recalled
+                                  and db_recall_set <= recall_owned)
+            detached = False
+            if row_recalled:
+                taken_from = (was_unassigned or prev_resp
+                              or incoming_resp or "").strip()
+                had_owner = bool((prev_resp or "").strip())
+                data["responsible"] = ""
+                data["unassigned_from"] = taken_from
+                data["unassigned_reason"] = UNASSIGNED_REASON_RECALLED
+                # Ручное снятие оператора переживает цикл отзыва: запоминаем
+                # прежнюю причину, чтобы после очистки колонок вернуть договор
+                # не в работу, а в ручное снятие.
+                if unassigned_reason == UNASSIGNED_REASON_MANUAL and not (
+                        (row0["recall_prev_reason"] if row0 is not None else "") or ""):
+                    data["recall_prev_reason"] = UNASSIGNED_REASON_MANUAL
+                if (unassigned_reason != UNASSIGNED_REASON_RECALLED
+                        or had_owner):
+                    recall_effect.append((cid, taken_from, had_owner))
+                    if unassigned_reason and not had_owner:
+                        report["recalled_previously_unassigned"] += 1
+                    if not had_owner and not unassigned_reason:
+                        report["recalled_without_owner"] += 1
+                    if len(recall_sample) < 100:
+                        recall_sample.append({
+                            "contract_id": cid,
+                            "client": str(data.get("client")
+                                          or (row0["client"] if row0 is not None
+                                              else "") or ""),
+                            "employee": taken_from,
+                            "recall_date": str(data.get("recall_date") or ""),
+                            "recall_reason": str(data.get("recall_reason") or ""),
+                        })
+                else:
+                    # переход не случился — та же книга держит тот же отзыв
+                    report["recall_held"] += 1
+                raw_day = data.get("recall_date")
+                if raw_day:
+                    parsed_day = _as_date(raw_day)
+                    if parsed_day is None:
+                        report["recalled_unparsed_date"] += 1
+                    elif parsed_day > date.today():
+                        report["recalled_future_dated"] += 1
+                for key in recall_owned - data.keys():
+                    data[key] = None
+                incoming_resp = ""
+                detached = True
+            elif unassigned_reason == UNASSIGNED_REASON_RECALLED and recall_cleared:
+                # Офис очистил колонки отзыва. Прежнее РУЧНОЕ снятие не
+                # воскрешает договор в работу — возвращаем в ручное снятие.
+                prev_manual = ((row0["recall_prev_reason"]
+                                if row0 is not None else "") or "") \
+                    == UNASSIGNED_REASON_MANUAL
+                back_to = (incoming_resp or was_unassigned or "").strip()
+                if prev_manual:
+                    data["responsible"] = ""
+                    data["unassigned_from"] = was_unassigned or prev_resp or ""
+                    data["unassigned_reason"] = UNASSIGNED_REASON_MANUAL
+                    data["recall_prev_reason"] = None
+                    incoming_resp = ""
+                    detached = True
+                    report["recall_restored_to_manual"] += 1
+                else:
+                    data["responsible"] = back_to
+                    data["unassigned_from"] = ""
+                    data["unassigned_reason"] = ""
+                    data["recall_prev_reason"] = None
+                    incoming_resp = back_to
+                    if back_to:
+                        known_resp.setdefault(_name_key(back_to), back_to)
+                        recall_restore_effect.append((cid, back_to))
+                    else:
+                        # «возврат в никуда»: метку снимаем (иначе каждая та же
+                        # книга заново объявляла бы возврат), но в эффект не
+                        # кладём — договор не достался никому.
+                        report["recall_restored_without_owner"] += 1
+                for key in recall_owned - data.keys():
+                    data[key] = None
+            elif unassigned_reason == UNASSIGNED_REASON_RECALLED:
+                # Отзыв держится: колонок отзыва в этой книге нет или книга не
+                # видит всего, что БД считает отзывом. Непустое ФИО договор НЕ
+                # возвращает — иначе отзыв отменялся бы каждой загрузкой.
+                data["responsible"] = ""
+                data["unassigned_from"] = was_unassigned or prev_resp or ""
+                data["unassigned_reason"] = UNASSIGNED_REASON_RECALLED
+                # Пока отзыв держится, колонки отзыва в БД не переписываются:
+                # книга, где офис переименовал одну из четырёх колонок, иначе
+                # стирала бы дату отзыва, поставленную офисом.
+                for key in list(recall_owned):
+                    data.pop(key, None)
+                incoming_resp = ""
+                report["recall_held"] += 1
+                detached = True
+            elif unassigned_reason == UNASSIGNED_REASON_ABSENT_FROM_REGISTRY:
                 data["unassigned_from"] = ""
                 data["unassigned_reason"] = ""
+                for key in recall_owned - data.keys():
+                    data[key] = None
             elif (
                 unassigned_reason == UNASSIGNED_REASON_MANUAL
                 and was_unassigned
@@ -4201,10 +5273,18 @@ def import_grid(
                 else:
                     data["responsible"] = ""
                     incoming_resp = ""
-            elif was_unassigned and incoming_resp:
-                data["unassigned_from"] = ""      # переназначили — метку снимаем
-                data["unassigned_reason"] = ""
-            owners[cid] = str(incoming_resp or prev_resp or "").strip()
+                for key in recall_owned - data.keys():
+                    data[key] = None
+            else:
+                if was_unassigned and incoming_resp:
+                    data["unassigned_from"] = ""  # переназначили — метку снимаем
+                    data["unassigned_reason"] = ""
+                # Колонка отзыва в книге есть, ячейка пуста — это ответ
+                # «отзыва нет», а не «данных нет»: держим БД актуальной.
+                for key in recall_owned - data.keys():
+                    data[key] = None
+            owners[cid] = "" if detached \
+                else str(incoming_resp or prev_resp or "").strip()
             # После подтверждённого визита очередной импорт может обновлять долг,
             # адрес и прочие поля источника, а поля визита — только через якорный
             # шлюз (см. докстринг): совпавшая «Дата выезда» доказывает, что файл
@@ -4245,10 +5325,17 @@ def import_grid(
                         report["isolated_call_cells"] += 1
                         isolated_call_cids.add(cid)
 
-                candidates = {
-                    key: data.pop(key, None)
-                    for key in OFFICE_DIRECT_EDIT_KEYS
-                }
+                candidates = {}
+                for key in OFFICE_DIRECT_EDIT_KEYS:
+                    # Промис-колонки офис ведёт и ДО визита (софт-линия): пока
+                    # бот по ключу не высказался, значение файла идёт обычным
+                    # upsert'ом — office_cells/protected_cells не растут, и
+                    # киллер-фильтр маршрута продолжает кормиться офисными
+                    # обещаниями. Защищать нечего — нечего и гейтить.
+                    if key in FORM_TYPED_KEYS and not str(
+                            (merged or {}).get(key) or ""):
+                        continue
+                    candidates[key] = data.pop(key, None)
                 # Для завершённого визита «Общий результат» тоже защищён якорем:
                 # до успешной проверки убираем его из обычного master-upsert.
                 candidates[OFFICE_RESULT_SNAPSHOT_KEY] = data.pop(
@@ -4281,6 +5368,11 @@ def import_grid(
                     if sval and sval == str(merged.get(key) or ""):
                         echo_hits += 1
                 for key, raw_value in candidates.items():
+                    if key not in _ECHO_EVIDENCE_KEYS:
+                        continue    # эхо доказывают только поля, которые ввёл
+                                    # ВЫЕЗДНИК (см. комментарий выше): у промис-
+                                    # колонок и у выведенного ботом прогноза
+                                    # довизитная копия совпадёт сама собой
                     sval = str(raw_value or "").strip()
                     if not sval:
                         continue
@@ -4301,8 +5393,30 @@ def import_grid(
                         echo_hits += 1
                 for key, raw_value in candidates.items():
                     sval = str(raw_value or "").strip()
+                    if (not sval and key in FORM_TYPED_KEYS
+                            and str(merged.get(key) or "")
+                            and anchor_ok and echo_hits and key in book_keys):
+                        # Пустая ячейка промис-ключа при доказательстве той же
+                        # силы, что у результата («Дата выезда» + эхо другого
+                        # поля визита, И КОЛОНКА В КНИГЕ ЕСТЬ — book_keys
+                        # отличает «очистил человек» от «в книге нет колонки»):
+                        # офис СНИМАЕТ обещание. Без этой ветки вернуть
+                        # должника в маршрут не мог никто, кроме того
+                        # выездника, из чьего маршрута он уже исчез.
+                        office[key] = ""
+                        continue
                     if not sval:
                         continue                # пустота никогда не затирает
+                    if key in FORM_TYPED_KEYS:
+                        canon2 = canon_form_value(key, sval)
+                        if canon2 is None:
+                            # «после 20-го», «≈500000»: бот обещание давал, офис
+                            # написал не-дату/не-число. Значение бота остаётся,
+                            # но protected_cells врал бы оператору — отдельный
+                            # счётчик.
+                            report["office_promise_unparsed"] += 1
+                            continue
+                        sval = canon2
                     if not anchor_ok:
                         # Старая копия или мусорная дата: строка не доказала,
                         # что видела результат бота.
@@ -4343,6 +5457,9 @@ def import_grid(
                     if key == OFFICE_RESULT_SNAPSHOT_KEY:
                         data[OFFICE_RESULT_SOURCE_KEY] = sval
                     office[key] = sval
+                for okey in office:
+                    report["office_by_key"][okey] = \
+                        report["office_by_key"].get(okey, 0) + 1
                 if anchor_value not in (None, "") and not anchor_ok:
                     rejected += 1
                 if office:
@@ -4480,6 +5597,77 @@ def import_grid(
             employee: by_employee[employee]
             for employee in sorted(by_employee, key=_name_key)
         }
+        # --- Отзыв: счётчики, digest и частично затронутые люди --------------
+        report["recalled_sample"] = recall_sample if preview_only else []
+        for prefix, pairs in (
+            ("recalled", [(cid, emp) for cid, emp, _h in recall_effect]),
+            ("recall_restored", list(recall_restore_effect)),
+        ):
+            rows_out = [{"contract_id": cid, "employee": employee}
+                        for cid, employee in sorted(pairs)]
+            report[prefix] = len(rows_out)
+            report[prefix + "_digest"] = hashlib.sha256(json.dumps(
+                rows_out, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":")).encode("utf-8")).hexdigest()
+        report["recalled_had_owner"] = sum(1 for _c, _e, h in recall_effect if h)
+        recalled_per: dict[str, int] = {}
+        for _cid, employee, had in recall_effect:
+            if had and employee:
+                recalled_per[employee] = recalled_per.get(employee, 0) + 1
+        report["recalled_by_employee"] = {
+            employee: recalled_per[employee]
+            for employee in sorted(recalled_per, key=_name_key)}
+        report["recall_restored_to_owner"] = len(recall_restore_effect)
+        restored_per: dict[str, int] = {}
+        for _cid, employee in recall_restore_effect:
+            if employee:
+                restored_per[employee] = restored_per.get(employee, 0) + 1
+        report["recall_restored_by_employee"] = {
+            employee: restored_per[employee]
+            for employee in sorted(restored_per, key=_name_key)}
+        # Люди, у которых отозвана только ЧАСТЬ договоров: у них меняется номер
+        # представителя карточки (rep = min КД), визит из очереди вернётся с
+        # «отклонено сервером», фото выпадут из альбома руководителя.
+        if recall_effect:
+            taken_cids = {cid for cid, _e, h in recall_effect if h}
+            partial: set = set()
+            for cid in taken_cids:
+                old_row = existing.get(cid)
+                if old_row is None:
+                    continue
+                pkey = person_key(old_row)
+                for other_cid, other in existing.items():
+                    if other_cid in taken_cids or other_cid == cid:
+                        continue
+                    if person_key(other) == pkey and (
+                            str(other["responsible"] or "").strip()
+                            == str(old_row["responsible"] or "").strip()):
+                        partial.add(pkey)
+                        break
+            report["recalled_partial_persons"] = len(partial)
+        # Гейт по ФАКТУ ЭФФЕКТА: слепое массовое снятие/возвращение без свежего
+        # предпросмотра не применяется. Установившееся состояние (эффект нулевой)
+        # проходит — операторский CLI продолжает работать, хотя боевой мастер
+        # всегда несёт колонки отзыва. Расписка НЕ гасится (consume ниже по коду
+        # выполняется только после успешной сверки).
+        recall_unverified = (
+            require_source_proof and not preview_only
+            and (report["recalled"] or report["recall_restored"])
+            and (expected_recalled is None or expected_recalled_digest is None
+                 or expected_recall_restored is None
+                 or expected_recall_restored_digest is None)
+        )
+        if recall_unverified:
+            conn.rollback()
+            report["blocked"] = True
+            report["recall_preview_required"] = True
+            report["error"] = (
+                "импорт заблокирован: этот импорт снимает договоры по колонкам "
+                f"отзыва (отозвать {report['recalled']}, вернуть "
+                f"{report['recall_restored']}); нужен свежий предпросмотр "
+                "точного множества — примените через пульт"
+            )
+            return report
         stale_count = (
             expected_auto_unassigned is not None
             and report["auto_unassigned"] != expected_auto_unassigned
@@ -4503,9 +5691,28 @@ def import_grid(
             and report["manual_restore_digest"]
             != expected_manual_restore_digest
         )
+        stale_recalled = (
+            expected_recalled is not None
+            and report["recalled"] != expected_recalled
+        )
+        stale_recalled_digest = (
+            expected_recalled_digest is not None
+            and report["recalled_digest"] != expected_recalled_digest
+        )
+        stale_recall_restored = (
+            expected_recall_restored is not None
+            and report["recall_restored"] != expected_recall_restored
+        )
+        stale_recall_restored_digest = (
+            expected_recall_restored_digest is not None
+            and report["recall_restored_digest"]
+            != expected_recall_restored_digest
+        )
         if (
             stale_count or stale_digest or stale_comment_digest
             or stale_manual_count or stale_manual_digest
+            or stale_recalled or stale_recalled_digest
+            or stale_recall_restored or stale_recall_restored_digest
         ):
             conn.rollback()
             report["blocked"] = True
@@ -4521,6 +5728,12 @@ def import_grid(
             report["expected_manual_restore_digest"] = (
                 expected_manual_restore_digest
             )
+            report["expected_recalled"] = expected_recalled
+            report["expected_recalled_digest"] = expected_recalled_digest
+            report["expected_recall_restored"] = expected_recall_restored
+            report["expected_recall_restored_digest"] = (
+                expected_recall_restored_digest
+            )
             report["error"] = (
                 "импорт заблокирован: после предпросмотра состояние БД "
                 "изменилось; ожидаемые множества снятий/возвратов/замен комментариев "
@@ -4534,8 +5747,19 @@ def import_grid(
             if require_source_proof:
                 _consume_import_authorization(conn, verified_source, report)
             conn.commit()
+    # Человеку в пульте нужны заголовки реестра, а не ключи схемы: в отчёте
+    # появились «дата обещания», «Сумма прогноза» и «Прогноз», и строка вида
+    # «forecast — 12» читалась бы как чужой лог. Титулы отдаёт СЕРВЕР: пульт
+    # ходит по HTTP и своей копии реестра не имеет.
+    report["key_titles"] = {
+        key: BY_KEY[key].title
+        for key in set(report.get("office_by_key") or {})
+        | set(report.get("protected_by_key") or {})
+        if key in BY_KEY
+    }
     if not preview_only:
         _bump_version()   # массовая запись реестра → инвалидируем кэш приоритета
+        reset_role_caches()   # состав направленцев считается по clients
     return report
 
 

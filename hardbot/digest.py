@@ -1,11 +1,12 @@
 """
-Дайджест руководителя: сводка «кто кого обработал сегодня» + разбор по сотрудникам
-и карточкам клиентов. Механика бота (без миниаппа): сообщение со сводкой, под ним
-кнопки-ФИО сотрудников → список клиентов → карточка (заполненное по визиту + референс).
+Дайджест руководителя: РИСОВАЛЬЩИК телеграм-экранов поверх слоя данных.
 
-Три экрана строятся здесь (текст + инлайн-клавиатура), навигация — правкой того же
-сообщения. Источник данных — db.persons_processed (подтверждённые визиты по bot_visit_at).
-Всё на русском: руководители читают по-русски, значения статусов уже каноничные.
+Считает digest_data.py (без aiogram и разметки) — у него два потребителя:
+этот модуль (текст + инлайн-клавиатура для чата) и вкладка руководителя в
+приложении (web.py отдаёт тот же расчёт JSON'ом). Здесь живёт ТОЛЬКО
+телеграм-специфика: html-экранирование, эмодзи-разделители, бюджеты 4096
+символов (топ-3 исхода, 12 должников, обрезка полей до 900), индексы ei/ci
+в callback и клавиатуры.
 
 Callback-схема (компактная, только ASCII-индексы — ФИО в callback не попадают):
   dg:h:{date}            — домой (сводка со списком сотрудников)
@@ -22,32 +23,21 @@ from __future__ import annotations
 
 import html
 import os
-from datetime import date, datetime, timedelta
 
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
-import country_scope
-import debt
 import maplink
 import photostore
-
-_MONTHS = ["", "января", "февраля", "марта", "апреля", "мая", "июня", "июля",
-           "августа", "сентября", "октября", "ноября", "декабря"]
-
-
-def human_date(iso: str) -> str:
-    d = db._as_date(iso)
-    if not d:
-        return iso or "—"
-    return f"{d.day} {_MONTHS[d.month]}"
-
-
-def today_iso() -> str:
-    # Та же система координат, что и у visit_date (date.today() в момент завершения
-    # визита) — чтобы фильтр «за сегодня» совпадал с тем, как визиты записаны.
-    return date.today().isoformat()
+# Публичные имена дайджеста не переезжают: на них стоят tests/test_digest*,
+# tests/test_promises, app.py и handlers_manager.       # noqa: F401 ниже
+from digest_data import (  # noqa: F401
+    _outcomes, _person_status, _persons_total, _st_emoji, _totals_units, _v,
+    employee_data, human_date, manager_scope, overdue_by_employee, period_data,
+    person_data, promises_data, scope_countries_info, scope_label,
+    sorted_employees, summary_data, today_iso,
+)
 
 
 # --- утилиты значений -------------------------------------------------------
@@ -55,101 +45,10 @@ def _e(s) -> str:
     return html.escape(str(s)) if s not in (None, "") else ""
 
 
-def _v(contracts, key):
-    """Первое непустое значение поля среди договоров человека."""
-    return next((c[key] for c in contracts if c[key] not in (None, "")), None)
-
-
-_money = debt.fmt    # единая логика денег/валюты (была третья копия — card.py, web.py, здесь)
-
-
-# Эмодзи для исходов визита — чтобы сводка читалась «глазами», а не строкой текста.
-_STATUS_EMOJI = {
-    "Оплачен": "💰", "Обещает оплатить": "✅", "Рассрочка": "🤝",
-    "Отказ от оплаты": "🚫", "Нет контакта": "📵", "В работе": "⏳",
-    "Не обработан": "⬜", "Передана инф 3 лицу": "📨", "Тюрьма": "🔒",
-    "Смерть": "🕯", "Кредит не брал": "❓", "Доп. Обогащение": "➕",
-}
-
-
-def _st_emoji(s: str) -> str:
-    return _STATUS_EMOJI.get(s, "•")
-
-
-def _person_status(p: dict) -> str:
-    """Исход по человеку: сначала ДОКАЗАННЫЙ снимок визита бота, потом реестр.
-
-    Порядок был обратный, и дайджест врал в обе стороны. Форма выезда пишет
-    результат в `call_status`, а `overall_result` заполняет только импорт мастера.
-    Поэтому выезд с реальным сбором показывался как «Обещает оплатить», сводка
-    недели рапортовала «✅ Оплачен: 0 (0%)», а кейс, где в файле стоит «Оплачен»,
-    а выездник закрыл «Нет контакта», прибавлял чужой долг к «закрыто».
-
-    Мгновенная отбивка о визите при этом брала исход правильно — продукт
-    противоречил сам себе в пределах одного дня. Тот же приём, что в
-    scoring.outcome() и card.py: снимок сильнее импорта.
-    """
-    for row in p["contracts"]:
-        try:
-            snap = db.bot_visit_snapshot(row) or {}
-        except Exception:                                  # noqa: BLE001
-            snap = {}
-        v = snap.get("call_status")
-        if v not in (None, ""):
-            return v
-    return _v(p["contracts"], "overall_result") or _v(p["contracts"], "call_status") or "—"
-
-
-def _outcomes(persons: list[dict]) -> list[tuple[str, int]]:
-    """[(статус, число)] по исходам за день, по убыванию — для сводной статистики."""
-    counts: dict[str, int] = {}
-    for p in persons:
-        st = _person_status(p)
-        counts[st] = counts.get(st, 0) + 1
-    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-
-
-def _persons_total(persons: list[dict]) -> str:
-    """Сумма долга по обработанным кейсам, раздельно по валютам: «132 900 ₽ · 11 550 000 сум».
-
-    Складывать сумы ЗК с рублями Делимобиля в одно число нельзя — а именно это и
-    получалось у смешанной команды (единица при этом молча становилась пустой).
-    """
-    acc: dict[str, int] = {}
-    for p in persons:
-        for x in p["totals"]:
-            acc[x["unit"]] = acc.get(x["unit"], 0) + x["sum"]
-    return " · ".join(_money(s, u) for u, s in acc.items() if s)
-
-
-def sorted_employees(mgr: dict) -> list[str]:
-    """Детерминированный порядок для стабильной индексации в callback.
-
-    Состав спрашиваем у db.manager_employees, а НЕ у mgr["employees"]. У
-    руководителя направления сохранённый список пуст намеренно — состав считается
-    живьём по стране кейса. Пока дайджест читал сохранённое поле, все четыре
-    руководителя направлений видели пустую сводку: «Команда: 0 · обработано: 0»
-    при восемнадцати закрытых выездах у одного только Уткирова.
-
-    Точечный руководитель (список из пульта) не страдает: manager_employees
-    возвращает ему тот же явный список.
-
-    ВЛАДЕЛЕЦ — особый случай, и на нём я эту правку и сломал. У него нет записи
-    в managers: дайджест собирает ему синтетического «руководителя» со всеми
-    сотрудниками реестра прямо в mgr["employees"]. Запрос в БД по его id
-    возвращает пусто, и владелец увидел «Команда: 0 · обработано: 0» при живой
-    работе у пятерых. Поэтому пустой ответ БД — повод посмотреть в сам объект,
-    а не считать, что сотрудников нет.
-    """
-    live = db.manager_employees(mgr["telegram_id"])
-    if not live:
-        live = [e for e in (mgr.get("employees") or []) if str(e).strip()]
-    return sorted(set(live))
-
-
-def scope_label(mgr: dict) -> str:
-    cities = [c for c in (mgr.get("cities") or []) if c]
-    return " · ".join(cities) if cities else "все города"
+def owner_scope(uid: int) -> dict | None:
+    """Синтетический руководитель для владельца — автопуши и чат-дайджест.
+    Тонкий алиас: сборка одна на все контуры (digest_data.manager_scope)."""
+    return manager_scope(uid, is_owner=True)
 
 
 def scope_heading(mgr: dict) -> str:
@@ -158,20 +57,12 @@ def scope_heading(mgr: dict) -> str:
     У руководителя с обеими республиками показываем обе, а не молчим: раньше
     смешанный scope схлопывался в один город, и заказчик разделения РТ/РУ видел
     сводку вообще без признака страны."""
-    codes = country_scope.scope_countries(mgr.get("cities") or [])
+    specs = scope_countries_info(mgr)
     place = scope_label(mgr)
-    if not codes:
+    if not specs:
         return f"🏙 {_e(place)}"
-    specs = [country_scope.info(c) for c in codes]
     label = " + ".join(f"{s['flag']} <b>{s['name']}</b>" for s in specs)
     return f"{label} · 🏙 {_e(place)}"
-
-
-# --- построение сводки ------------------------------------------------------
-def _employee_persons(mgr: dict, on_date: str):
-    """[(ei, employee, persons)] — по всем сотрудникам руководителя за дату."""
-    return [(ei, emp, db.persons_processed(emp, on_date))
-            for ei, emp in enumerate(sorted_employees(mgr))]
 
 
 def _short(name: str, limit: int = 22) -> str:
@@ -179,81 +70,62 @@ def _short(name: str, limit: int = 22) -> str:
     return name if len(name) <= limit else name[:limit - 1] + "…"
 
 
+def _app_button(kb: InlineKeyboardBuilder, on_date: str) -> None:
+    """WebApp-кнопка в конец клавиатуры: пуш ведёт во вкладку приложения, но сам
+    текст остаётся полным — если приложение недоступно, руководитель ничего не
+    теряет. Кнопка ПОСЛЕДНЯЯ: существующие тесты коротят на первой совпавшей."""
+    base = (os.getenv("MINIAPP_URL", "") or "").strip()
+    if base.lower().startswith("https://"):
+        kb.button(text="📱 Открыть сводку в приложении",
+                  web_app=WebAppInfo(url=f"{base.rstrip('/')}?tab=digest&d={on_date}"))
+
+
 # --- ЭКРАН 1: сводка (со статистикой по каждому сотруднику) ------------------
 def summary_view(mgr: dict, on_date: str) -> tuple[str, InlineKeyboardMarkup]:
-    rows = _employee_persons(mgr, on_date)
-    active = [r for r in rows if r[2]]
-    total_clients = sum(len(ps) for _, _, ps in rows)
-    grand_total = _persons_total([p for _, _, ps in rows for p in ps])
-    # покрытие фото: у скольких обработанных есть снимки за этот день
-    cov = {emp: sum(1 for p in ps if photostore.day_photos(p["contracts"], on_date))
-           for _ei, emp, ps in rows}
+    d = summary_data(mgr, on_date)
+    t = d["totals"]
 
     head = [f"📊 <b>Дайджест · {human_date(on_date)}</b>",
             scope_heading(mgr),
-            f"👥 Команда: {len(rows)} · активны: {len(active)} · "
-            f"обработано: <b>{total_clients}</b>"]
-    if total_clients:
-        head.append(f"📸 С фото: {sum(cov.values())} из {total_clients}")
-    if grand_total:
-        head.append(f"💰 Сумма по кейсам дня: {grand_total}")
+            f"👥 Команда: {t['employees']} · активны: {t['active']} · "
+            f"обработано: <b>{t['persons']}</b>"]
+    if t["persons"]:
+        head.append(f"📸 С фото: {t['with_photo']} из {t['persons']}")
+    if t["money_text"]:
+        head.append(f"💰 Сумма по кейсам дня: {t['money_text']}")
     head.append("━━━━━━━━━━━━━━")
-
-    # порядок отображения: активные по убыванию числа кейсов, затем «нулевые»
-    order = sorted(rows, key=lambda x: (-len(x[2]), x[1].lower()))
 
     def _emp_lines(items):
         out = []
-        for _ei, emp, ps in items:
-            if ps:
-                oc = _outcomes(ps)
-                brief = " · ".join(f"{_st_emoji(s)} {_e(s)} {n}" for s, n in oc[:3])
-                out.append(f"👤 <b>{_e(emp)}</b> — {len(ps)} "
-                           f"{_plural(len(ps), 'кейс', 'кейса', 'кейсов')}"
-                           f" · 📸 {cov[emp]}/{len(ps)}")
+        for r in items:
+            if r["persons"]:
+                brief = " · ".join(f"{o['emoji']} {_e(o['status'])} {o['n']}"
+                                   for o in r["outcomes"][:3])   # топ-3 — бюджет чата
+                out.append(f"👤 <b>{_e(r['employee'])}</b> — {r['persons']} "
+                           f"{_plural(r['persons'], 'кейс', 'кейса', 'кейсов')}"
+                           f" · 📸 {r['with_photo']}/{r['persons']}")
                 if brief:
                     out.append(f"    {brief}")
             else:
-                out.append(f"▫️ <s>{_e(emp)}</s> — 0")
+                out.append(f"▫️ <s>{_e(r['employee'])}</s> — 0")
         return out
 
-    # У руководителя с обеими республиками сводка раньше шла общим списком — тот, кто
-    # просил разделения РТ/РУ, его как раз и не видел. Теперь при смешанном scope
-    # сотрудники разложены по странам; у одно-страновых руководителей всё как было.
-    codes = country_scope.scope_countries(mgr.get("cities") or [])
-    body, display = [], order
-    if len(codes) > 1:
-        # Таблица руководителей крошечная (единицы строк), и читаем её только когда
-        # scope действительно смешанный — на одно-страновых сводках запроса нет вовсе.
-        mapping = country_scope.employee_countries(db.list_managers())
-        groups = country_scope.split_employees([r[1] for r in order], mapping)
-        # Один и тот же ФИО может встретиться у руководителя дважды (тёзки в разных
-        # городах) — идём по очереди, а не по словарю, иначе часть строк потерялась бы.
-        pool = list(order)
-        display = []
-        for code, emps in groups:
-            spec = country_scope.info(code) if code else None
-            title = (f"{spec['flag']} <b>{spec['name']}</b>" if spec
-                     else "❔ <b>Без республики</b>")
-            picked = []
-            for name in emps:
-                idx = next((i for i, r in enumerate(pool) if r[1] == name), None)
-                if idx is not None:
-                    picked.append(pool.pop(idx))
-            if not picked:
-                continue
-            body.append(f"{title} — {len(picked)} "
-                        f"{_plural(len(picked), 'сотрудник', 'сотрудника', 'сотрудников')}")
-            body += _emp_lines(picked)
-            body.append("")
-            display += picked
-        display += pool                       # никого не потеряли
-        body += _emp_lines(pool)
+    body = []
+    if len(d["groups"]) == 1 and not d["groups"][0]["title"]:
+        body = _emp_lines(d["groups"][0]["employees"])
+    else:
+        for g in d["groups"]:
+            if g["title"]:
+                n = len(g["employees"])
+                body.append(f"{g['flag']} <b>{g['title']}</b> — {n} "
+                            f"{_plural(n, 'сотрудник', 'сотрудника', 'сотрудников')}")
+                body += _emp_lines(g["employees"])
+                body.append("")
+            else:                      # хвост без республики — без заголовка
+                body += _emp_lines(g["employees"])
         while body and not body[-1]:
             body.pop()
-    else:
-        body = _emp_lines(order)
-    if not active:
+    if not t["active"]:
         body = ["Сегодня выездов пока нет."]
 
     tail = ["━━━━━━━━━━━━━━", "Кнопки ниже — детали и кейсы сотрудника."]
@@ -261,15 +133,16 @@ def summary_view(mgr: dict, on_date: str) -> tuple[str, InlineKeyboardMarkup]:
     kb = InlineKeyboardBuilder()
     # Кнопки идут в том же порядке, что и строки текста: иначе у руководителя с обеими
     # республиками список сгруппирован по странам, а кнопки — вперемешку.
-    for ei, emp, ps in display:
-        mark = "👤" if ps else "▫️"
-        kb.button(text=f"{mark} {_short(emp)} · {len(ps)}",
-                  callback_data=f"dg:e:{on_date}:{ei}")
-    n_over = sum(len(ps) for _, ps in overdue_by_employee(mgr, on_date))
-    if n_over:
-        kb.button(text=f"⏰ Обещания просрочены: {n_over}", callback_data=f"dg:o:{on_date}")
+    for r in d["display"]:
+        mark = "👤" if r["persons"] else "▫️"
+        kb.button(text=f"{mark} {_short(r['employee'])} · {r['persons']}",
+                  callback_data=f"dg:e:{on_date}:{r['ei']}")
+    if t["overdue_promises"]:
+        kb.button(text=f"⏰ Обещания просрочены: {t['overdue_promises']}",
+                  callback_data=f"dg:o:{on_date}")
     kb.button(text="📅 Неделя", callback_data=f"dg:w:{on_date}:7")
     kb.button(text="🔄 Обновить", callback_data=f"dg:h:{on_date}")
+    _app_button(kb, on_date)
     kb.adjust(1)
     return "\n".join(head + body + tail), kb.as_markup()
 
@@ -280,26 +153,21 @@ def employee_view(mgr: dict, on_date: str, ei: int) -> tuple[str, InlineKeyboard
     if not (0 <= ei < len(emps)):
         return summary_view(mgr, on_date)
     emp = emps[ei]
-    persons = db.persons_processed(emp, on_date)
-    total = _persons_total(persons)
-    # у кого из кейсов есть фото за этот день (для статы и меток на кнопках)
-    with_ph = {ci for ci, p in enumerate(persons)
-               if photostore.day_photos(p["contracts"], on_date)}
+    d = employee_data(mgr, on_date, emp, employees=emps)
 
     lines = [f"👤 <b>{_e(emp)}</b>",
-             f"🗓 {human_date(on_date)} · обработано <b>{len(persons)}</b>"]
+             f"🗓 {human_date(on_date)} · обработано <b>{d['persons']}</b>"]
 
-    if persons:
+    if d["persons"]:
         lines.append("━━━━━━━━━━━━━━")
         lines.append("📊 <b>Исходы за день</b>")
-        for s, n in _outcomes(persons):
-            lines.append(f"  {_st_emoji(s)} {_e(s)} — {n}")
-        lines.append(f"📸 С фото: {len(with_ph)} из {len(persons)}")
-        if total:
-            lines.append(f"💰 Сумма по кейсам: {total}")
+        for o in d["outcomes"]:
+            lines.append(f"  {o['emoji']} {_e(o['status'])} — {o['n']}")
+        lines.append(f"📸 С фото: {d['with_photo']} из {d['persons']}")
+        if d["money_text"]:
+            lines.append(f"💰 Сумма по кейсам: {d['money_text']}")
 
-    # телеметрия активности — если сотрудник привязан к telegram
-    act = db.employee_activity(emp)
+    act = d["activity"]
     if act:
         lines.append("━━━━━━━━━━━━━━")
         lines.append("📈 <b>Активность</b>")
@@ -313,20 +181,19 @@ def employee_view(mgr: dict, on_date: str, ei: int) -> tuple[str, InlineKeyboard
                          + (f" · простой {idle} дн" if idle and idle >= 2 else ""))
 
     kb = InlineKeyboardBuilder()
-    if persons:
+    if d["cases"]:
         lines.append("━━━━━━━━━━━━━━")
         lines.append("Кейсы за сегодня:")
-        for ci, p in enumerate(persons):
-            st = _person_status(p)
-            kb.button(text=f"{_st_emoji(st)} {_short(p['client'], 26)}"
-                           + (" 📸" if ci in with_ph else ""),
+        for ci, c in enumerate(d["cases"]):
+            kb.button(text=f"{c['emoji']} {_short(c['client'], 26)}"
+                           + (" 📸" if c["photos"] else ""),
                       callback_data=f"dg:c:{on_date}:{ei}:{ci}")
     else:
         lines.append("━━━━━━━━━━━━━━")
         lines.append("Сегодня этот сотрудник ещё никого не обработал.")
-    nday = sum(len(photostore.day_photos(p["contracts"], on_date)) for p in persons)
-    if nday:
-        kb.button(text=f"📸 Фото за день ({nday})", callback_data=f"dg:pe:{on_date}:{ei}")
+    if d["photos_day"]:
+        kb.button(text=f"📸 Фото за день ({d['photos_day']})",
+                  callback_data=f"dg:pe:{on_date}:{ei}")
     base = (os.getenv("MINIAPP_URL", "") or "").strip()
     if base:   # карта дня — отдельная веб-страница по подписанной ссылке (48 ч)
         kb.button(text="🗺 Карта дня",
@@ -337,6 +204,27 @@ def employee_view(mgr: dict, on_date: str, ei: int) -> tuple[str, InlineKeyboard
 
 
 # --- ЭКРАН 3: карточка клиента ----------------------------------------------
+# Телеграм не принимает сообщение длиннее 4096 символов, а комментарий выезда
+# ничем не ограничен — обрезаем каждое поле (бюджет чата, во вкладке его нет).
+_CARD_FIELD_LIMIT = 900
+
+# Эмодзи и подписи известных полей визита — порядок печати как раньше.
+_CARD_VISIT_STYLE = {
+    "call_status": ("📞", "Звонок: "),
+    "agreed_payment": ("🤝", ""),
+    "contact_with": ("👥", "Контакт: "),
+    "who_at_address": ("🏠", "На адресе: "),
+    "client_location": ("🌍", ""),
+    "purpose_rf": ("🎯", "Цель в РФ: "),
+}
+
+
+def _clip(v: str) -> str:
+    if len(v) > _CARD_FIELD_LIMIT:
+        return v[:_CARD_FIELD_LIMIT].rstrip() + "… (обрезано)"
+    return v
+
+
 def person_card(mgr: dict, on_date: str, ei: int, ci: int) -> tuple[str, InlineKeyboardMarkup]:
     emps = sorted_employees(mgr)
     if not (0 <= ei < len(emps)):
@@ -345,90 +233,64 @@ def person_card(mgr: dict, on_date: str, ei: int, ci: int) -> tuple[str, InlineK
     persons = db.persons_processed(emp, on_date)
     if not (0 <= ci < len(persons)):
         return employee_view(mgr, on_date, ei)
-    p = persons[ci]
-    cs = p["contracts"]
-
-    def val(key):
-        return _v(cs, key)
+    from digest_data import _person_payload
+    d = _person_payload(persons[ci], on_date)
 
     # --- шапка: референс ---
-    head = [f"👤 <b>{_e(p['client'])}</b>" + (f"  ·  {p['n']} КД" if p["n"] > 1 else "")]
-    partner = ", ".join(p["partners"]) or (val("partner") or "")
+    head = [f"👤 <b>{_e(d['client'])}</b>" + (f"  ·  {d['n']} КД" if d["n"] > 1 else "")]
     sub = []
-    if partner:
-        sub.append(f"🏢 {_e(partner)}")
-    if val("birth_date"):
-        sub.append(f"🎂 {_e(val('birth_date'))}")
+    if d["partner"]:
+        sub.append(f"🏢 {_e(d['partner'])}")
+    if d["birth_date"]:
+        sub.append(f"🎂 {_e(d['birth_date'])}")
     if sub:
         head.append("   ".join(sub))
-    phones = [val("phone"), val("phone_main")]
-    phones = [ph for ph in phones if ph]
-    if phones:
-        head.append("📞 " + " · ".join(_e(ph) for ph in phones))
-    addr = val("address") or val("address_customer") or val("extra_address")
-    if addr:
-        head.append(f"📍 {_e(addr)}")
-    head.append(f"💰 <b>{_persons_total([p])}</b>")   # ЗК + Делимобиль → обе валюты, не их сумма
+    if d["phones"]:
+        head.append("📞 " + " · ".join(_e(ph) for ph in d["phones"]))
+    if d["address"]:
+        head.append(f"📍 {_e(d['address'])}")
+    head.append(f"💰 <b>{d['money_text']}</b>")   # обе валюты, не их сумма
 
-    # --- итог выезда: заполненное ---
+    # --- итог выезда: заполненное (из доказанного снимка; расхождение с
+    # реестром печатаем ВТОРОЙ величиной, а не прячем — правка выездника после
+    # «Сохранить выезд» ложится в сырые колонки и в снимок не попадает) ---
     body = []
+    if d["outcome"] and d["outcome"] != "—":
+        body.append(f"✅ {_e(d['outcome'])}")
+    for item in d["visit"]:
+        style = _CARD_VISIT_STYLE.get(item["key"])
+        if style is None or not item["value"]:
+            continue
+        emoji, label = style
+        line = f"{emoji} {label}{_e(_clip(item['value']))}"
+        if item["registry"]:
+            line += f" · в реестре сейчас: {_e(_clip(item['registry']))}"
+        body.append(line)
+    if d["tips"]:
+        body.append(f"📇 Доп. адрес/номер: {_e(_clip(d['tips']))}")
+    if d["comment"]:
+        body.append(f"💬 {_e(_clip(d['comment']))}")
 
-    # Телеграм не принимает сообщение длиннее 4096 символов, а комментарий выезда
-    # ничем не ограничен: длинный текст из реестра или пять-шесть диктовок подряд
-    # переваливают порог. Раньше кейс с самым подробным отчётом — ровно тот, что
-    # откроют на показе, — просто переставал открываться: ошибку глотал except.
-    _CARD_FIELD_LIMIT = 900
-
-    def add(emoji, label, key, prefix=""):
-        v = val(key)
-        if not v:
-            return
-        if len(v) > _CARD_FIELD_LIMIT:
-            v = v[:_CARD_FIELD_LIMIT].rstrip() + "… (обрезано)"
-        body.append(f"{emoji} {label}{_e(v)}" if not prefix else f"{emoji} {label}{prefix}{_e(v)}")
-
-    # Итог выезда — из доказанного снимка (как и всюду выше). Печатать здесь
-    # «overall_result» значило бы поставить рядом две противоречащие строки:
-    # офисную колонку и настоящий исход, который выездник закрыл сегодня.
-    outcome = _person_status(p)
-    if outcome and outcome != "—":
-        body.append(f"✅ {_e(outcome)}")
-    add("📞", "Звонок: ", "call_status")
-    add("🤝", "", "agreed_payment")
-    add("👥", "Контакт: ", "contact_with")
-    add("🏠", "На адресе: ", "who_at_address")
-    add("🌍", "", "client_location")
-    add("🎯", "Цель в РФ: ", "purpose_rf")
-    tips = val("tips")
-    if tips:
-        body.append(f"📇 Доп. адрес/номер: {_e(tips)}")
-    comment = val("visit_comment") or val("call_comment")   # выездник пишет в visit_comment
-    if comment:
-        body.append(f"💬 {_e(comment)}")
-
-    # гео-контроль: где реально был телефон при закрытии последнего визита
-    gv = db.last_visit_geo([c["contract_id"] for c in cs])
-    if gv and gv["dist_m"] is not None:
-        d = gv["dist_m"]
-        pretty = f"{d / 1000:.1f} км" if d >= 1000 else f"{d} м"
-        # Вердикт берём СОХРАНЁННЫЙ на момент визита, а не пересчитываем сейчас:
-        # точность точки должника меняется после каждого геокодинга, и пересчёт
-        # задним числом переписывал бы историю — честно закрытый вчера визит
-        # сегодня становился бы нарушением. Старые записи (geo_far нет) судим
-        # по прежнему общему порогу, чтобы накопленное не поехало.
-        far = gv["geo_far"] if "geo_far" in gv.keys() else None
-        if far is None:
-            far = d > db.geo_alert_m()
-        body.append(f"⚠️ Визит закрыт в {pretty} от адреса!" if far
-                    else f"📍 Точка закрытия: {pretty} от адреса")
+    # гео-контроль: где реально был телефон при закрытии последнего визита.
+    # Вердикт СОХРАНЁННЫЙ (см. digest_data): пересчёт задним числом переписывал
+    # бы историю. Визит, закрытый руководителем через act_as, не судим как
+    # нарушение сотрудника — точка снята с чужого телефона.
+    g = d["geo"]
+    if g:
+        if g.get("by_other"):
+            body.append(f"📍 визит закрыл руководитель ({g['pretty']} от адреса)")
+        elif g["far"]:
+            body.append(f"⚠️ Визит закрыт в {g['pretty']} от адреса!")
+        else:
+            body.append(f"📍 Точка закрытия: {g['pretty']} от адреса")
 
     tail = []
-    if val("visit_date"):
-        tail.append(f"🗓 Выезд: {_e(val('visit_date'))}")
-    if val("reminder_date"):
-        tail.append(f"🔁 Повтор: {_e(val('reminder_date'))}")
-    if val("meeting_date"):
-        tail.append(f"📅 Встреча: {_e(val('meeting_date'))}")
+    if d["dates"]["visit_date"]:
+        tail.append(f"🗓 Выезд: {_e(d['dates']['visit_date'])}")
+    if d["dates"]["reminder_date"]:
+        tail.append(f"🔁 Повтор: {_e(d['dates']['reminder_date'])}")
+    if d["dates"]["meeting_date"]:
+        tail.append(f"📅 Встреча: {_e(d['dates']['meeting_date'])}")
 
     text = "\n".join(head)
     text += "\n━━━━━━━━━━━━━━\n🧾 <b>Итог выезда</b>\n"
@@ -437,9 +299,8 @@ def person_card(mgr: dict, on_date: str, ei: int, ci: int) -> tuple[str, InlineK
         text += "\n" + "   ".join(tail)
 
     kb = InlineKeyboardBuilder()
-    nph = len(photostore.person_photos(cs))
-    if nph:
-        kb.button(text=f"📸 Фото ({nph})", callback_data=f"dg:p:{on_date}:{ei}:{ci}")
+    if d["photos"]:
+        kb.button(text=f"📸 Фото ({d['photos']})", callback_data=f"dg:p:{on_date}:{ei}:{ci}")
     kb.button(text="⬅️ Назад к сотруднику", callback_data=f"dg:e:{on_date}:{ei}")
     kb.button(text="🏠 К сводке", callback_data=f"dg:h:{on_date}")
     kb.adjust(1)
@@ -451,51 +312,38 @@ def period_view(mgr: dict, on_date: str,
                 days: int = 7) -> tuple[str, InlineKeyboardMarkup]:
     """Динамика команды за N дней до on_date включительно: кейсы, конверсия
     в «Оплачен», фото-дисциплина, деньги. Кнопки 7/30 переключают период."""
-    days = days if days in (7, 30) else 7
-    end = db._as_date(on_date) or date.today()
-    start = end - timedelta(days=days - 1)
-    d_from, d_to = start.isoformat(), end.isoformat()
-
-    rows = []   # (emp, persons, с фото, оплачено)
-    for emp in sorted_employees(mgr):
-        ps = db.persons_processed_range(emp, d_from, d_to)
-        ph = sum(1 for p in ps if photostore.photos_between(p["contracts"], d_from, d_to))
-        paid = [p for p in ps if _person_status(p) == "Оплачен"]
-        rows.append((emp, ps, ph, paid))
-
-    total = sum(len(ps) for _, ps, _, _ in rows)
-    total_ph = sum(ph for _, _, ph, _ in rows)
-    paid_all = [p for _, _, _, paid in rows for p in paid]
-    money_all = _persons_total([p for _, ps, _, _ in rows for p in ps])
-    money_paid = _persons_total(paid_all)
+    d = period_data(mgr, on_date, days)
+    t = d["totals"]
+    days = d["days"]
 
     def pct(a, b):
         return f" ({round(100 * a / b)}%)" if b else ""
 
-    lines = [f"📅 <b>Сводка за {days} дн · {human_date(d_from)} — {human_date(d_to)}</b>",
+    lines = [f"📅 <b>Сводка за {days} дн · {human_date(d['from'])} — {human_date(d['to'])}</b>",
              scope_heading(mgr),
-             f"👥 Обработано: <b>{total}</b>"]
-    if total:
-        lines.append(f"✅ Оплачен: {len(paid_all)}{pct(len(paid_all), total)}"
-                     + (f" · закрыто: {money_paid}" if money_paid else ""))
-        lines.append(f"📸 С фото: {total_ph} из {total}{pct(total_ph, total)}")
-    if money_all:
-        lines.append(f"💰 Долг по обработанным: {money_all}")
+             f"👥 Обработано: <b>{t['persons']}</b>"]
+    if t["persons"]:
+        lines.append(f"✅ Оплачен: {t['paid']}{pct(t['paid'], t['persons'])}"
+                     + (f" · закрыто: {t['money_paid_text']}" if t["money_paid_text"] else ""))
+        lines.append(f"📸 С фото: {t['with_photo']} из {t['persons']}"
+                     f"{pct(t['with_photo'], t['persons'])}")
+    if t["money_text"]:
+        lines.append(f"💰 Долг по обработанным: {t['money_text']}")
     lines.append("━━━━━━━━━━━━━━")
 
-    order = sorted(rows, key=lambda x: (-len(x[1]), x[0].lower()))
-    for emp, ps, ph, paid in order:
-        if not ps:
-            lines.append(f"▫️ <s>{_e(emp)}</s> — 0")
+    for r in d["employees"]:
+        if not r["persons"]:
+            lines.append(f"▫️ <s>{_e(r['employee'])}</s> — 0")
             continue
-        lines.append(f"👤 <b>{_e(emp)}</b> — {len(ps)} "
-                     f"{_plural(len(ps), 'кейс', 'кейса', 'кейсов')}"
-                     f" · ✅ {len(paid)}{pct(len(paid), len(ps))} · 📸 {ph}/{len(ps)}")
-        brief = " · ".join(f"{_st_emoji(s)} {_e(s)} {n}"
-                           for s, n in _outcomes(ps)[:3])
+        lines.append(f"👤 <b>{_e(r['employee'])}</b> — {r['persons']} "
+                     f"{_plural(r['persons'], 'кейс', 'кейса', 'кейсов')}"
+                     f" · ✅ {r['paid']}{pct(r['paid'], r['persons'])}"
+                     f" · 📸 {r['with_photo']}/{r['persons']}")
+        brief = " · ".join(f"{o['emoji']} {_e(o['status'])} {o['n']}"
+                           for o in r["outcomes"][:3])
         if brief:
             lines.append(f"    {brief}")
-    if not total:
+    if not t["persons"]:
         lines.append("За период выездов нет.")
 
     kb = InlineKeyboardBuilder()
@@ -508,57 +356,53 @@ def period_view(mgr: dict, on_date: str,
 
 
 # --- ЭКРАН 4: просроченные обещания (контроль обещаний) ----------------------
-def overdue_by_employee(mgr: dict, on_date: str) -> list[tuple[str, list[dict]]]:
-    """[(employee, люди с просроченными обещаниями)] — только у кого они есть."""
-    out = []
-    for emp in sorted_employees(mgr):
-        ps = db.overdue_promises(emp, on_date)
-        if ps:
-            out.append((emp, ps))
-    return out
-
-
 def promises_view(mgr: dict, on_date: str) -> tuple[str, InlineKeyboardMarkup]:
     """«Обещал и пропал»: promise_date в прошлом, оплаты нет. Самые тухлые сверху."""
-    items = overdue_by_employee(mgr, on_date)
-    total = sum(len(ps) for _, ps in items)
-    everyone = [p for _, ps in items for p in ps]
-    worked = sum(1 for p in everyone if p.get("visited_after_promise"))
+    d = promises_data(mgr, on_date)
+    t = d["totals"]
     lines = [f"⏰ <b>Просроченные обещания · {human_date(on_date)}</b>",
-             f"🏙 {_e(scope_label(mgr))} · всего: <b>{total}</b>"]
-    if total:
+             f"🏙 {_e(d['scope'])} · всего: <b>{t['persons']}</b>"]
+    if t["persons"]:
         # Отвечает на вопрос «обновлена информация или нет»: сколько из списка
         # реально трогали после обещания, а сколько лежит нетронутым.
-        lines.append(f"🟢 отработано после обещания: {worked} · "
-                     f"⚪ не тронуто: {total - worked}")
-    if not items:
+        lines.append(f"🟢 отработано после обещания: {t['worked']} · "
+                     f"⚪ не тронуто: {t['untouched']}")
+    if t.get("deferred"):
+        # Обещание в будущем убирает должника из маршрута сразу (киллер-фильтр),
+        # а руководителю оно было видно только после срыва — «маршрут можно
+        # тихо расчистить на месяц». Полный экран будущих обещаний — отдельная
+        # работа; здесь хотя бы число.
+        lines.append(f"🕓 отложено обещанием: {t['deferred']}")
+    if not d["employees"]:
         lines.append("━━━━━━━━━━━━━━")
         lines.append("Просроченных обещаний нет 🎉")
     # Телеграм рубит сообщение на 4096 символах, а список просрочек сам не рассасывается:
     # он копится, пока обещание не закроют. Держим бюджет и честно говорим, что урезали, —
     # молча оборванный список руководитель принял бы за полный.
     budget, hidden_p, hidden_e = 3600, 0, 0
-    items = sorted(items, key=lambda x: -len(x[1]))   # самые тухлые сотрудники первыми
-    for emp, ps in items:
-        block = ["━━━━━━━━━━━━━━", f"👤 <b>{_e(emp)}</b> — {len(ps)}"]
-        for p in ps[:12]:
-            money = _persons_total([p])
-            if p.get("visited_after_promise"):
+    for r in d["employees"]:                 # уже отсортированы: тухлые первыми
+        block = ["━━━━━━━━━━━━━━", f"👤 <b>{_e(r['employee'])}</b> — {r['persons']}"]
+        for p in r["items"][:12]:
+            money = p["money_text"]
+            if p["visited_after_promise"]:
                 fresh = f" · 🟢 визит {human_date(p['last_visit'])}"
-            elif p.get("last_visit"):
+            elif p["last_visit"]:
                 fresh = f" · 🟡 визит {human_date(p['last_visit'])}, до обещания"
             else:
                 fresh = " · ⚪ визитов не было"
+            promised = (f" · 🤝 {p['promised_sum']:,}".replace(",", " ")
+                        if p.get("promised_sum") else "")
             block.append(f"  🔴 {_e(p['client'])} — обещал {human_date(p['promise_date'])}, "
-                         f"{p['days_overdue']} дн назад" + (f" · {money}" if money else "")
+                         f"{p['days_overdue']} дн назад" + promised
+                         + (f" · {money}" if money else "")
                          + fresh)
-        if len(ps) > 12:
-            block.append(f"  …и ещё {len(ps) - 12}")
+        if r["persons"] > 12:
+            block.append(f"  …и ещё {r['persons'] - 12}")
         # Меряем ГОТОВЫЙ блок: у одного сотрудника это до 14 строк, и проверка «до»
         # позволяла перевалить лимит последним же блоком.
         if sum(len(x) + 1 for x in lines + block) > budget:
             hidden_e += 1
-            hidden_p += len(ps)
+            hidden_p += r["persons"]
             continue
         lines += block
     if hidden_e:
@@ -570,6 +414,7 @@ def promises_view(mgr: dict, on_date: str) -> tuple[str, InlineKeyboardMarkup]:
     kb = InlineKeyboardBuilder()
     kb.button(text="🔄 Обновить", callback_data=f"dg:o:{on_date}")
     kb.button(text="⬅️ К сводке", callback_data=f"dg:h:{on_date}")
+    _app_button(kb, on_date)
     kb.adjust(1)
     return "\n".join(lines), kb.as_markup()
 

@@ -159,6 +159,15 @@ def test_chat_migration_moves_settings_to_new_id():
     assert db.report_chats_for("Иванов") == [-100_500]
 
 
+def test_report_chats_match_by_name_key():
+    """Опечатка регистра при закреплении ФИО в пульте не должна глушить отчёты:
+    матч по _name_key, чужое ФИО по-прежнему не матчится."""
+    db.upsert_report_chat(-100_7, "RBR")
+    db.set_report_chat(-100_7, enabled=True, employees=["алиджон  душанбе"])
+    assert db.report_chats_for("Алиджон Душанбе") == [-100_7]
+    assert db.report_chats_for("Алиджон Худжанд") == []
+
+
 def test_visit_report_text_escapes_html():
     """Бот шлёт с parse_mode=HTML: «<» в комментарии не должен ронять доставку,
     а разметка из реестра — рендериться в беседе ссылкой/жирным."""

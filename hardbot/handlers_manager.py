@@ -44,14 +44,10 @@ def manager_menu() -> ReplyKeyboardMarkup:
 def scope(uid: int) -> dict | None:
     """Область видимости пользователя для дайджеста.
     Руководитель → его города/сотрудники. Владелец (ADMIN) без явной роли →
-    «супер-обзор»: все сотрудники реестра (быстрый путь протестировать вживую)."""
-    mgr = db.get_manager(uid)
-    if mgr:
-        return mgr
-    if uid == ADMIN_ID:
-        emps = [e["employee"] for e in db.employees_in_registry()]
-        return {"telegram_id": uid, "name": "Владелец", "cities": [], "employees": emps}
-    return None
+    «супер-обзор»: все сотрудники реестра. Сборка одна на бот, автопуши и
+    вкладку приложения — digest_data.manager_scope, иначе контуры разъезжались
+    (владелец видел нули там, где сборку забыли повторить)."""
+    return digest.manager_scope(uid, is_owner=(uid == ADMIN_ID))
 
 
 class IsManager(BaseFilter):

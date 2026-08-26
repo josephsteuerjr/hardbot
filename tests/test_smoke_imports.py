@@ -35,8 +35,9 @@ def test_compiles(path):
 #  и через импорт его зависимостей web/handlers; «selftest» мутирует HARDBOT_DATA при импорте.)
 CORE_IMPORTS = [
     "util", "gazetteer", "scoring_config", "scoring", "db", "config",
-    "fields", "i18n", "keyboards", "normalize", "geocode", "web",
+    "fields", "i18n", "keyboards", "normalize", "geocode", "web", "digest_data",
     "handlers_main", "handlers_field", "card", "notify", "synth",
+    "photoaudit", "photo_backfill",
     "geo", "routing", "planner", "build_demo",
 ]
 

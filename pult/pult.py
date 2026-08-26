@@ -1018,6 +1018,72 @@ class Pult(tk.Tk):
         self.period_cur = tk.Label(per.inner, text="—", bg=CARD, fg=MUTED, font=f(9))
         self.period_cur.pack(anchor="w", pady=(8, 0))
 
+        rec = Card(inner, "Отозванные договоры",
+                   "Кого офис снял с работы колонками отзыва в общем реестре. "
+                   "Договор остаётся в базе со всей историей, но исчезает из "
+                   "приложения выездника. Вернётся только когда офис очистит "
+                   "колонки отзыва и реестр загрузят снова.")
+        rec.pack(fill="x", pady=(12, 0))
+        rrow = tk.Frame(rec.inner, bg=CARD)
+        rrow.pack(fill="x")
+        btn(rrow, "Показать отозванных", self.load_recalled,
+            kind="accent").pack(side="left")
+        btn(rrow, "Показать все", lambda: self.load_recalled(limit=5000)
+            ).pack(side="left", padx=(8, 0))
+        tk.Label(rrow, text="Сотрудник:", bg=CARD, fg=MUTED,
+                 font=f(9)).pack(side="left", padx=(14, 4))
+        self.rec_emp_var = tk.StringVar(value="")
+        self.rec_emp_box = ttk.Combobox(rrow, textvariable=self.rec_emp_var,
+                                        width=24, state="readonly", values=[""])
+        self.rec_emp_box.pack(side="left")
+        self.rec_kvs = KVGrid(rec.inner)
+        self.rec_kvs.pack(anchor="w", pady=(8, 0))
+        cols = ("cid", "client", "emp", "date", "reason", "debt")
+        heads = ("КД", "Клиент", "Снят у", "Дата отзыва", "Причина", "Долг")
+        widths = (110, 220, 180, 100, 220, 90)
+        self.rec_tv = ttk.Treeview(rec.inner, columns=cols, show="headings",
+                                   height=14)
+        for c, h, w in zip(cols, heads, widths):
+            self.rec_tv.heading(c, text=h)
+            self.rec_tv.column(c, width=self.px(w),
+                               anchor=("e" if c == "debt" else "w"),
+                               stretch=(c in ("client", "reason")))
+        self.rec_tv.pack(fill="x", pady=(8, 0))
+
+    def load_recalled(self, limit: int = 500):
+        emp = (self.rec_emp_var.get() or "").strip()             if hasattr(self, "rec_emp_var") else ""
+        q = f"/admin/recalled.json?limit={int(limit)}"
+        if emp:
+            from urllib.parse import quote
+            q += f"&employee={quote(emp)}"
+
+        def done(d):
+            totals = d.get("totals") or {}
+            shown = int(d.get("shown") or 0)
+            total_recalled = int(totals.get("recalled") or 0)
+            self.rec_kvs.set_pairs([
+                ("отозвано реестром", totals.get("recalled")),
+                ("снято вручную", totals.get("manual")),
+                ("снято отсутствием строки", totals.get("absent_from_registry")),
+                # «1469» и «500» рядом без подписи читались бы как потеря
+                ("показано", f"{fmt_n(shown)} из {fmt_n(total_recalled)}"),
+            ])
+            by_emp = d.get("by_employee") or {}
+            names = [""] + [n for n in by_emp if n]
+            try:
+                self.rec_emp_box.configure(values=names)
+            except Exception:
+                pass
+            self.rec_tv.delete(*self.rec_tv.get_children())
+            for it in d.get("items") or []:
+                self.rec_tv.insert("", "end", values=(
+                    it.get("contract_id", ""), it.get("client", ""),
+                    it.get("employee", ""), it.get("recall_date", ""),
+                    it.get("recall_reason") or it.get("recall_transfer")
+                    or it.get("recall_withdrawn") or "",
+                    fmt_n(it.get("debt") or 0)))
+        self.bg_task(lambda: self.api("GET", q), done)
+
     # --- импорт ---
     def do_import(self):
         """Построить read-only preview. Запись доступна только отдельной кнопкой."""
@@ -1090,49 +1156,12 @@ class Pult(tk.Tk):
             if d.get("error"):
                 self._show_import_error(d)
                 return
-            effect_digest = d.get("auto_unassigned_digest")
-            if full_registry and (
-                not isinstance(effect_digest, str) or len(effect_digest) != 64
-            ):
+            expected = self._expected_from_preview(d, payload["body"])
+            if isinstance(expected, str):
                 self._invalidate_import_preview(clear_report=True)
-                self.toast(
-                    "Сервер не вернул точное множество снятий — нужен новый сервер",
-                    err=True,
-                )
+                self.toast(expected, err=True)
                 return
-            comment_effect_digest = d.get("comment_effect_digest")
-            changes_comments = bool(
-                payload["body"].get("replace_current_visit_comments")
-                or payload["body"].get("import_historical_visit_comments")
-            )
-            restore_digest = d.get("manual_restore_digest")
-            if restore_manual and (
-                not isinstance(restore_digest, str) or len(restore_digest) != 64
-            ):
-                self._invalidate_import_preview(clear_report=True)
-                self.toast(
-                    "Сервер не вернул точный набор возвратов — нужен новый сервер",
-                    err=True,
-                )
-                return
-            if changes_comments and (
-                not isinstance(comment_effect_digest, str)
-                or len(comment_effect_digest) != 64
-            ):
-                self._invalidate_import_preview(clear_report=True)
-                self.toast(
-                    "Сервер не вернул точный набор замен комментариев — нужен новый сервер",
-                    err=True,
-                )
-                return
-            self._imp_preview_body = {
-                **payload["body"],
-                "expected_auto_unassigned": int(d.get("auto_unassigned") or 0),
-                "expected_auto_unassigned_digest": effect_digest,
-                "expected_manual_restored": int(d.get("manual_restored") or 0),
-                "expected_manual_restore_digest": restore_digest,
-                "expected_comment_effect_digest": comment_effect_digest,
-            }
+            self._imp_preview_body = {**payload["body"], **expected}
             self._imp_preview_signature = payload["signature"]
             self._imp_preview_meta = payload["prepared"]
             self.imp_kvs.set_pairs(self._imp_pairs(d))
@@ -1175,6 +1204,12 @@ class Pult(tk.Tk):
             restored = int(d.get("manual_restored") or 0)
             if restored:
                 label += f" · вернуть {fmt_n(restored)}"
+            recalled_owned = int(d.get("recalled_had_owner") or 0)
+            if recalled_owned:
+                label += f" · отозвать {fmt_n(recalled_owned)}"
+            recall_back = int(d.get("recall_restored") or 0)
+            if recall_back:
+                label += f" · вернуть из отзыва {fmt_n(recall_back)}"
             self.imp_apply_btn.configure(text=label, state="normal")
             self.toast(
                 "Предпросмотр готов"
@@ -1771,6 +1806,40 @@ class Pult(tk.Tk):
         return scope
 
     @staticmethod
+    def _expected_from_preview(d: dict, body: dict) -> dict | str:
+        """expected_* для apply — или текст ошибки, если сервер не дал точных
+        множеств. Пульт fail-closed по КАЖДОМУ эффекту, который сервер объявил:
+        признак «в файле есть колонки отзыва» приходит из отчёта предпросмотра
+        (recall_columns); старый сервер такого ключа не отдаёт — требование не
+        включается, и новый пульт со старым сервером работает как раньше."""
+        needs = (
+            (bool(body.get("full_registry")), "auto_unassigned",
+             "auto_unassigned_digest",
+             "Сервер не вернул точное множество снятий"),
+            (bool(body.get("restore_manual_unassigned")), "manual_restored",
+             "manual_restore_digest",
+             "Сервер не вернул точный набор возвратов"),
+            (bool(body.get("replace_current_visit_comments")
+                  or body.get("import_historical_visit_comments")), None,
+             "comment_effect_digest",
+             "Сервер не вернул точный набор замен комментариев"),
+            (bool(d.get("recall_columns")), "recalled", "recalled_digest",
+             "Сервер не вернул точное множество отзывов"),
+            (bool(d.get("recall_columns")), "recall_restored",
+             "recall_restored_digest",
+             "Сервер не вернул точный набор возвратов из отзыва"),
+        )
+        out: dict = {}
+        for required, count_key, digest_key, message in needs:
+            digest = d.get(digest_key)
+            if required and (not isinstance(digest, str) or len(digest) != 64):
+                return message + " — нужен новый сервер"
+            out["expected_" + digest_key] = digest
+            if count_key:
+                out["expected_" + count_key] = int(d.get(count_key) or 0)
+        return out
+
+    @staticmethod
     def _imp_pairs(d: dict) -> list[tuple[str, object]]:
         return [("строк", d.get("total_rows")), ("добавлено", d.get("inserted")),
                 ("обновлено", d.get("updated")), ("без КД", d.get("skipped_no_id")),
@@ -1792,12 +1861,100 @@ class Pult(tk.Tk):
                 ("без ответственного", d.get("no_responsible")),
                 ("офисных правок", d.get("office_cells")),
                 ("call-полей изолировано", d.get("isolated_call_cells")),
+                ("отозвано реестром (у сотрудников)", d.get("recalled_had_owner")),
+                ("пришло уже отозванным", d.get("recalled_without_owner")),
+                ("отзыв держится", d.get("recall_held")),
+                ("возвращено из отзыва", d.get("recall_restored")),
                 # None (старый сервер без счётчиков) KVGrid покажет как «—», а не 0
                 ("отклонено защитой", d.get("protected_cells"))]
 
     @staticmethod
     def _imp_notes(d: dict) -> list[str]:
         notes = []
+        if "recall_columns" in d and not d.get("recall_columns"):
+            notes.append(
+                "В файле НЕТ колонок отзыва («Дата отзыва», «Причина отзыва», "
+                "«Передача на отзыв», «Вывод из работы») — открепление по "
+                "отзыву в этой книге не сработает."
+            )
+        # Поимённые разбивки защит: office_cells был нулевым всю жизнь и служил
+        # сигналом; после контракта v3 в оба счётчика попадают поля другой
+        # природы — голое число без имён полей прочтётся как авария.
+        for label, key in (("Принято офисных правок", "office_by_key"),
+                           ("Отклонено защитой", "protected_by_key")):
+            per = d.get(key) or {}
+            if per:
+                titles = d.get("key_titles") or {}
+                notes.append(label + ": " + ", ".join(
+                    f"{titles.get(name, name)} — {fmt_n(n)}"
+                    for name, n in per.items()) + ".")
+        unparsed_promise = int(d.get("office_promise_unparsed") or 0)
+        if unparsed_promise:
+            notes.append(
+                f"Офис написал в колонку обещания не-дату/не-число: "
+                f"{fmt_n(unparsed_promise)} ячеек (значение бота сохранено).")
+        recalled_owned = int(d.get("recalled_had_owner") or 0)
+        if recalled_owned:
+            by_emp = d.get("recalled_by_employee") or {}
+            breakdown = ", ".join(f"{name}: {fmt_n(n)}"
+                                  for name, n in by_emp.items())
+            notes.append(
+                f"ОТЗЫВ: снимается с сотрудников {fmt_n(recalled_owned)}."
+                + (f" По сотрудникам: {breakdown}." if breakdown else "")
+                + f" Уже были сняты ранее: "
+                  f"{fmt_n(d.get('recalled_previously_unassigned'))}."
+                + f" Пришло уже отозванным (ответственного не было): "
+                  f"{fmt_n(d.get('recalled_without_owner'))}."
+                + (f" Дата отзыва в будущем: "
+                   f"{fmt_n(d.get('recalled_future_dated'))}."
+                   if int(d.get("recalled_future_dated") or 0) else "")
+                + (f" Нераспознанная дата: "
+                   f"{fmt_n(d.get('recalled_unparsed_date'))}."
+                   if int(d.get("recalled_unparsed_date") or 0) else "")
+            )
+        unrec = int(d.get("recalled_unrecognized") or 0)
+        if unrec:
+            sample = d.get("recalled_unrecognized_sample") or []
+            examples = "; ".join(
+                f"{s.get('column')}=«{s.get('value')}» ({s.get('contract_id')})"
+                for s in sample[:5])
+            notes.append(
+                f"Значений в колонках отзыва, не признанных отзывом: {fmt_n(unrec)}"
+                + (f" (примеры: {examples})" if examples else "")
+                + ". Если их много — офис пишет туда что-то, чего предикат не знает."
+            )
+        back_owner = int(d.get("recall_restored") or 0)
+        back_none = int(d.get("recall_restored_without_owner") or 0)
+        back_manual = int(d.get("recall_restored_to_manual") or 0)
+        if back_owner or back_none or back_manual:
+            parts = []
+            if back_owner:
+                parts.append(f"{fmt_n(back_owner)} вернутся ответственным из файла")
+            if back_none:
+                parts.append(f"{fmt_n(back_none)} вышли из отзыва БЕЗ "
+                             "ответственного — в файле ФИО пусто; они не "
+                             "попадут ни в чей портфель и исчезнут из карточки "
+                             "«Отозванные», раздать их надо вручную")
+            if back_manual:
+                parts.append(f"{fmt_n(back_manual)} вернулись в РУЧНОЕ снятие "
+                             "(их снимал оператор до отзыва)")
+            notes.append("ВОЗВРАТ ИЗ ОТЗЫВА: " + "; ".join(parts) + ".")
+        partial = int(d.get("recalled_partial_persons") or 0)
+        if partial:
+            notes.append(
+                f"У {fmt_n(partial)} человек отозвана только часть договоров. "
+                "Их карточка в приложении меняет номер (представителем "
+                "становится другой КД): недосланный визит вернётся с "
+                "«отклонено сервером», а фото выпадут из альбома руководителя. "
+                "Разобрать руками."
+            )
+        if int(d.get("no_responsible") or 0) and (
+                recalled_owned or int(d.get("recall_held") or 0)):
+            notes.append(
+                "Счётчик «без ответственного» включает отозванных "
+                f"({fmt_n(recalled_owned)} + держится "
+                f"{fmt_n(d.get('recall_held'))}) — это не авария."
+            )
         manual_candidates = int(d.get("manual_restore_candidates") or 0)
         manual_restored = int(d.get("manual_restored") or 0)
         if manual_candidates:
@@ -2971,8 +3128,46 @@ class Pult(tk.Tk):
         tk.Checkbutton(rp, text="утренний пуш «обещание просрочено»",
                        variable=self.prom_enabled, bg=CARD, fg=TEXT,
                        activebackground=CARD, selectcolor=CARD, font=f(9)).pack(side="left")
+        rv = tk.Frame(dc.inner, bg=CARD)
+        rv.pack(anchor="w", pady=(6, 0))
+        self.visit_push_var = tk.BooleanVar(value=True)
+        self.visit_push_check = tk.Checkbutton(
+            rv, text="отбивки по закрытым визитам (в личку руководителям)",
+            variable=self.visit_push_var, bg=CARD, fg=TEXT,
+            activebackground=CARD, selectcolor=CARD, font=f(9))
+        self.visit_push_check.pack(side="left")
+        # Личные рубильники владельца. Общий «автопуш включён» гасит рассылку
+        # ВСЕМ руководителям сразу — отписаться самому было нечем.
+        ro = tk.Frame(dc.inner, bg=CARD)
+        ro.pack(anchor="w", pady=(6, 0))
+        tk.Label(ro, text="Лично мне:", bg=CARD, fg=MUTED, font=f(9)).pack(side="left")
+        self.owner_digest_var = tk.BooleanVar(value=True)
+        self.owner_digest_check = tk.Checkbutton(
+            ro, text="дайджест", variable=self.owner_digest_var, bg=CARD, fg=TEXT,
+            activebackground=CARD, selectcolor=CARD, font=f(9))
+        self.owner_digest_check.pack(side="left", padx=(6, 0))
+        self.owner_promise_var = tk.BooleanVar(value=False)
+        self.owner_promise_check = tk.Checkbutton(
+            ro, text="обещания", variable=self.owner_promise_var, bg=CARD, fg=TEXT,
+            activebackground=CARD, selectcolor=CARD, font=f(9))
+        self.owner_promise_check.pack(side="left")
         self.dig_out = tk.Label(dc.inner, text="", bg=CARD, fg=MUTED, font=f(9))
         self.dig_out.pack(anchor="w", pady=(6, 0))
+
+        dl = Card(inner, "Диагностика доставки",
+                  "Кому за сегодня ушли пуши, кому нет и почему. «Заблокирован» = "
+                  "руководитель не нажал /start в личке боту — это чинится только "
+                  "им самим.")
+        dl.pack(fill="x", pady=(12, 0))
+        dr = tk.Frame(dl.inner, bg=CARD)
+        dr.pack(anchor="w")
+        btn(dr, "Обновить сводку доставки", self.load_delivery,
+            kind="accent").pack(side="left")
+        self.delivery_kvs = KVGrid(dl.inner)
+        self.delivery_kvs.pack(anchor="w", pady=(8, 0))
+        self.delivery_out = tk.Label(dl.inner, text="", bg=CARD, fg=MUTED,
+                                     font=f(9), justify="left", wraplength=900)
+        self.delivery_out.pack(anchor="w", pady=(6, 0))
 
         rc = Card(inner, "Пересылка отчётов в беседы",
                   "Закрытый визит уходит постом в закреплённые беседы — как сотрудники "
@@ -3068,6 +3263,14 @@ class Pult(tk.Tk):
                 self.prom_time.delete(0, "end")
                 self.prom_time.insert(0, dig.get("promise_time") or "09:30")
                 self.prom_enabled.set(bool(dig.get("promise_enabled", True)))
+                # БЕЗ дефолта True: на старом сервере галка врала бы «включено»
+                self._show_owner_switches(dig)
+                if "visit_push" in dig:
+                    self.visit_push_var.set(bool(dig.get("visit_push")))
+                    self.visit_push_check.configure(state="normal")
+                else:
+                    self.visit_push_check.configure(state="disabled")
+                self._show_digest_state(dig)
             self.mgr_guest_combo.configure(
                 values=["— из писавших боту —"] + [self._guest_label(g) for g in self.guests])
             self.mgr_guest_combo.current(0)
@@ -3093,9 +3296,15 @@ class Pult(tk.Tk):
                      fg=MUTED, font=f(9), width=16, anchor="w").pack(side="left")
             tk.Label(row, text=str(m["telegram_id"]), bg=CARD, fg=MUTED, font=f(9),
                      width=13, anchor="w").pack(side="left")
+            if int(m.get("spelling_mismatch") or 0):
+                tk.Label(row, text="⚠ ФИО ≠ реестру", bg=CARD, fg="#B0472C",
+                         font=f(9)).pack(side="left", padx=(6, 0))
             btn(row, "удалить", lambda t=m["telegram_id"]: self.mgr_delete(t),
                 kind="danger").pack(side="right")
             btn(row, "изменить", lambda t=m["telegram_id"]: self.mgr_edit(t)).pack(
+                side="right", padx=(0, 6))
+            btn(row, "проверить доставку",
+                lambda t=m["telegram_id"]: self.push_test(t)).pack(
                 side="right", padx=(0, 6))
 
     def _render_mgr_chips(self):
@@ -3238,14 +3447,101 @@ class Pult(tk.Tk):
                 self.toast("Время в формате ЧЧ:ММ", err=True)
                 return
         body = {"time": t, "enabled": self.dig_enabled.get(),
-                "promise_time": pt, "promise_enabled": self.prom_enabled.get()}
+                "promise_time": pt, "promise_enabled": self.prom_enabled.get(),
+                "visit_push": self.visit_push_var.get()}
+        # Как и visit_push: ключ уходит только если сервер уже умеет его читать,
+        # иначе «Сохранить» на старом сервере ничего не значит, но и не врёт.
+        if self.owner_digest_check["state"] == "normal":
+            body["owner_digest"] = self.owner_digest_var.get()
+            body["owner_promise"] = self.owner_promise_var.get()
         def done(d):
-            self.dig_out.configure(
-                text=f"Дайджест {'вкл' if d.get('enabled') else 'выкл'} · {d.get('time')} МСК"
-                     f"   ·   Обещания {'вкл' if d.get('promise_enabled') else 'выкл'}"
-                     f" · {d.get('promise_time')} МСК")
+            self._show_digest_state(d)
             self.toast("Настройки сохранены")
         self.bg_task(lambda: self.api("POST", "/admin/digest_settings", body), done)
+
+    def _show_owner_switches(self, d: dict):
+        """Личные рубильники видны только на сервере, который их знает: на
+        старом чекбоксы гаснут, а не показывают выдуманное состояние."""
+        known = "owner_digest" in d
+        for var, check, key in (
+                (self.owner_digest_var, self.owner_digest_check, "owner_digest"),
+                (self.owner_promise_var, self.owner_promise_check, "owner_promise")):
+            if known:
+                var.set(bool(d.get(key)))
+            check.configure(state="normal" if known else "disabled")
+
+    def _show_digest_state(self, d: dict):
+        last_d = d.get("digest_last_run") or "—"
+        last_p = d.get("promise_last_run") or "—"
+        self.dig_out.configure(
+            text=f"Дайджест {'вкл' if d.get('enabled') else 'выкл'} · {d.get('time')} МСК"
+                 f" · последняя рассылка {last_d}"
+                 f"   ·   Обещания {'вкл' if d.get('promise_enabled') else 'выкл'}"
+                 f" · {d.get('promise_time')} МСК · последняя {last_p}")
+
+    def load_delivery(self):
+        def done(d):
+            delivery = d.get("delivery") or {}
+            by_kind = delivery.get("by_kind") or {}
+            kind_names = {"digest": "дайджест", "promise": "обещания",
+                          "visit": "визиты", "group": "группа",
+                          "report_chat": "беседы", "test": "проверки"}
+            pairs = []
+            for kind, name in kind_names.items():
+                st = by_kind.get(kind) or {}
+                if not st:
+                    continue
+                sent = st.get("sent", 0)
+                blocked = st.get("blocked", 0)
+                failed = st.get("failed", 0)
+                skipped = sum(v for k, v in st.items()
+                              if str(k).startswith("skipped"))
+                pairs.append((name, f"ушло {fmt_n(sent)} · заблок. "
+                                    f"{fmt_n(blocked)} · ошибок {fmt_n(failed)}"
+                                    f" · пропущено {fmt_n(skipped)}"))
+            if not pairs:
+                pairs = [("за сегодня", "записей доставки нет")]
+            self.delivery_kvs.set_pairs(pairs)
+            lines = []
+            blocked = delivery.get("blocked") or []
+            if blocked:
+                who = ", ".join(
+                    f"{b.get('target_name') or b.get('target_id')}"
+                    for b in blocked[:10])
+                lines.append(f"Заблокированы (нужен /start в личке боту): {who}")
+            last = delivery.get("last_error")
+            if last:
+                lines.append(f"Последняя ошибка: {last.get('kind')} → "
+                             f"{last.get('target_id')}: {last.get('error')}")
+            self.delivery_out.configure(text="\n".join(lines))
+            # рубильник и подпись — из того же ответа
+            self._show_owner_switches(d)
+            if "visit_push" in d:
+                self.visit_push_var.set(bool(d.get("visit_push")))
+                self.visit_push_check.configure(state="normal")
+            else:
+                self.visit_push_check.configure(state="disabled")
+            self._show_digest_state(d)
+        self.bg_task(lambda: self.api("GET", "/admin/digest_settings"), done)
+
+    def push_test(self, tid: int):
+        """Реальная тестовая отправка безличного текста руководителю."""
+        def done(d):
+            if d.get("ok"):
+                self.toast("Дошло")
+            else:
+                messagebox.showwarning(
+                    "Доставка",
+                    f"Не дошло ({d.get('status')}):\n{d.get('error') or ''}\n\n"
+                    "«blocked» = руководитель не нажал /start в личке боту.")
+        def work():
+            try:
+                return self.api("POST", "/admin/push_test",
+                                {"kind": "visit", "telegram_id": tid})
+            except RuntimeError as exc:
+                return {"ok": False, "status": "old_server",
+                        "error": f"Старый сервер: обновите бота ({exc})"}
+        self.bg_task(work, done)
 
     # ══ АКТИВНОСТЬ ══════════════════════════════════════════════════════
     def _build_activity(self, fr):
