@@ -453,3 +453,27 @@ def test_pult_previews_before_apply_and_reuses_the_exact_request():
     assert apply_request["expected_auto_unassigned_digest"] == "e" * 64
     assert apply_request["expected_comment_effect_digest"] == "c" * 64
     assert probe.refreshed is True
+
+
+def test_full_export_carries_the_proven_visit_not_the_import_copy(tmp_path, monkeypatch):
+    """Полная выгрузка (mode=full) — источник файлов, которыми заменяют личные
+    книги. Сырые колонки клиента хранят копию ПОСЛЕДНЕГО ИМПОРТА: пока офис по
+    кейсу не высказался, там стоит его дефолт «Не обработан». Выгрузка обязана
+    отдавать доказанный результат визита — иначе собранный из неё файл затирает
+    живые статусы дефолтом (замечено владельцем 26.08.2026).
+    """
+    import db as dbm
+    monkeypatch.setattr(dbm, "DB_PATH", tmp_path / "hardbot.db")
+    dbm.init_db()
+    with dbm.connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO clients (contract_id, client, responsible,"
+            " overall_result, call_status) VALUES ('EX-1','Клиент В.',"
+            "'Выгрузкин С.','Не обработан','Не обработан')")
+        conn.commit()
+    dbm.record_bot_visit("EX-1", {"call_status": "Обещает оплатить",
+                                  "contact_with": "Должник"},
+                         dbm.date.today().isoformat())
+    row = [r for r in dbm.registry_rows() if r["contract_id"] == "EX-1"][0]
+    assert row["call_status"] == "Обещает оплатить"
+    assert dbm.get_client("EX-1")["call_status"] == "Не обработан"  # сырое цело

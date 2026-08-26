@@ -3690,7 +3690,20 @@ def registry_rows(
                 continue
             if until and visit_date > until:
                 continue
-        result.append({f.key: row[f.key] for f in FIELDS})
+        out = {f.key: row[f.key] for f in FIELDS}
+        # Поля визита — из ДОКАЗАННОГО снимка, а не из сырых колонок. Сырые
+        # хранят копию последнего импорта: у 440 из 890 договоров с визитом там
+        # лежит офисное «Не обработан», потому что офис по этому кейсу ещё не
+        # высказывался. Карточка и дайджест всё это время показывали правду
+        # (они читают снимок), а полная выгрузка — импортную копию, и файл,
+        # собранный из неё, затирал живые статусы дефолтом. Обогащение так
+        # делало всегда (enrichment_rows), выгрузка — нет.
+        visit = _merged_visit(row)
+        if visit:
+            for key in BOT_VISIT_KEYS:
+                if key in out and key in visit:
+                    out[key] = visit[key]
+        result.append(out)
     return result
 
 
