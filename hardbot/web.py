@@ -3213,6 +3213,54 @@ async def _admin_manager_delete(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def _admin_photo_geo(request: web.Request) -> web.Response:
+    """Срок хранения координат снимков и ручка стирания.
+
+    GET  — сколько снимков с координатами, сколько уже стёрто, самая старая
+           точка и текущий срок.
+    POST — {retention_days:N} меняет срок; {forget:{before,employee,contract}}
+           стирает координаты прямо сейчас (сами файлы и индекс остаются).
+
+    Зачем ручка вообще: EXIF-точка галерейного снимка чаще всего домашний
+    адрес САМОГО сотрудника. До 27.08.2026 стереть её можно было только
+    полным сбросом теста — то есть вместе со всей работой.
+    """
+    _admin(request)
+    # Админ-API ходит под мастер-ключом или токеном устройства, личности там
+    # нет — в журнале это ADMIN_ID, как у остальных операторских действий.
+    uid = ADMIN_ID or 0
+    if request.method == "POST":
+        b = await request.json()
+        if "retention_days" in b:
+            try:
+                days = int(b.get("retention_days"))
+            except (TypeError, ValueError):
+                raise web.HTTPBadRequest(text="retention_days")
+            if not 0 <= days <= 3650:
+                raise web.HTTPBadRequest(text="retention_days range")
+            db.set_setting("photo_geo_retention_days", str(days))
+            db.audit_access(uid, "photo_geo_retention", "", str(days))
+        forget = b.get("forget")
+        if isinstance(forget, dict):
+            try:
+                cleared = db.photo_geo_forget(
+                    before=(forget.get("before") or "").strip() or None,
+                    employee=(forget.get("employee") or "").strip() or None,
+                    contract_id=(forget.get("contract") or "").strip() or None)
+            except ValueError as exc:
+                raise web.HTTPBadRequest(text=str(exc))
+            # Стирание ПД — след обязателен: это единственное доказательство,
+            # что координаты убрали по решению, а не потеряли.
+            db.audit_access(uid, "photo_geo_forget",
+                            (forget.get("contract") or "").strip(),
+                            json.dumps({**{k: forget.get(k) for k in
+                                           ("before", "employee", "contract")},
+                                        "cleared": cleared}, ensure_ascii=False))
+            return web.json_response({"ok": True, "cleared": cleared,
+                                      **db.photo_geo_stats()})
+    return web.json_response({"ok": True, **db.photo_geo_stats()})
+
+
 async def _admin_digest_settings(request: web.Request) -> web.Response:
     """GET/POST настроек автопуша дайджеста: {time:"HH:MM", enabled:bool} (время по МСК).
     GET дополнительно отдаёт защёлки, счётчики добора и сводку доставок за
@@ -3510,6 +3558,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/admin/manager_delete", _admin_manager_delete)
     app.router.add_get("/admin/digest_settings", _admin_digest_settings)
     app.router.add_post("/admin/digest_settings", _admin_digest_settings)
+    app.router.add_get("/admin/photo_geo", _admin_photo_geo)
+    app.router.add_post("/admin/photo_geo", _admin_photo_geo)
     app.router.add_get("/admin/digest_preview", _admin_digest_preview)
     app.router.add_get("/admin/period", _admin_period)
     app.router.add_post("/admin/period", _admin_period)

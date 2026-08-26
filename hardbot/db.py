@@ -888,7 +888,13 @@ def init_db() -> None:
                           ("meta_state", "TEXT"), ("shell_version", "INTEGER"),
                           ("meta_origin", "TEXT"), ("shrunk", "INTEGER"),
                           ("addr_lat", "REAL"), ("addr_lon", "REAL"),
-                          ("addr_tol_m", "INTEGER"), ("assign_date_at", "TEXT")):
+                          ("addr_tol_m", "INTEGER"), ("assign_date_at", "TEXT"),
+                          # Когда координаты стёрты (срок хранения или ручка
+                          # оператора). Отдельная отметка, а не просто NULL:
+                          # «точки не было» и «точку стёрли по сроку» — разные
+                          # факты, и руководителю нельзя показывать второе как
+                          # первое (иначе честный выезд выглядит фото без гео).
+                          ("geo_forgotten_at", "TEXT")):
             if col not in pgcols:
                 conn.execute(f"ALTER TABLE photo_geo ADD COLUMN {col} {decl}")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_photo_geo_contract "
@@ -1844,6 +1850,87 @@ def add_photo_geo(contract_id: str, file: str, telegram_id: int,
     now = datetime.now().isoformat(timespec="seconds")
     record_photo(contract_id, file, telegram_id,
                  geo=(lat, lon, acc_m, captured_at or now))
+
+
+# Сколько живут координаты снимков. Смысл срока: точка нужна, пока по выезду
+# возможен спор — это недели, не годы. Ноль выключает уборку совсем (тогда
+# остаётся только ручка оператора).
+PHOTO_GEO_RETENTION_DEFAULT = 90
+_GEO_COLS = ("lat", "lon", "acc_m", "exif_lat", "exif_lon", "exif_gps_at")
+
+
+def photo_geo_retention_days() -> int:
+    raw = (get_setting("photo_geo_retention_days") or "").strip()
+    if not raw:
+        return PHOTO_GEO_RETENTION_DEFAULT
+    try:
+        days = int(float(raw))
+    except (TypeError, ValueError):
+        return PHOTO_GEO_RETENTION_DEFAULT
+    return days if days >= 0 else PHOTO_GEO_RETENTION_DEFAULT
+
+
+def photo_geo_stats() -> dict:
+    """Что сейчас лежит: сколько снимков с координатами, сколько уже стёрто и
+    какая точка самая старая. Без этого срок хранения — слово без проверки."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) total,"
+            " SUM(CASE WHEN lat IS NOT NULL OR exif_lat IS NOT NULL"
+            "     THEN 1 ELSE 0 END) with_geo,"
+            " SUM(CASE WHEN geo_forgotten_at IS NOT NULL THEN 1 ELSE 0 END) forgotten,"
+            " MIN(CASE WHEN lat IS NOT NULL OR exif_lat IS NOT NULL"
+            "     THEN COALESCE(created_at, captured_at) END) oldest"
+            " FROM photo_geo").fetchone()
+    return {"photos": row["total"] or 0, "with_geo": row["with_geo"] or 0,
+            "forgotten": row["forgotten"] or 0, "oldest": row["oldest"] or "",
+            "retention_days": photo_geo_retention_days()}
+
+
+def photo_geo_forget(*, before: str | None = None, employee: str | None = None,
+                     contract_id: str | None = None) -> int:
+    """Стереть координаты снимков (сами файлы и индекс остаются).
+
+    Стираются ТОЛЬКО координаты: точка телефона, EXIF-точка и время GPS-фикса.
+    Хэш, размер, время съёмки и модель камеры не трогаем — они не говорят, где
+    человек живёт, и без них разбор «то же фото по другому договору» умрёт.
+    Адресная точка должника (addr_*) — данные реестра, а не о сотруднике.
+
+    Фильтры складываются: пустые = «все». Возвращает число стёртых строк.
+    """
+    where, args = ["(lat IS NOT NULL OR exif_lat IS NOT NULL)"], []
+    if before:
+        limit = _as_date(before)
+        if limit is None:
+            raise ValueError("неверная граница срока хранения")
+        where.append("COALESCE(created_at, captured_at, '') < ?")
+        args.append(limit.isoformat())
+    if contract_id:
+        where.append("contract_id = ?")
+        args.append(canonical_contract_id(contract_id))
+    if employee:
+        tids = agent_tids(employee)
+        if not tids:
+            return 0
+        where.append("telegram_id IN (%s)" % ",".join("?" for _ in tids))
+        args.extend(tids)
+    sets = ", ".join(f"{c} = NULL" for c in _GEO_COLS)
+    now = datetime.now().isoformat(timespec="seconds")
+    with connect() as conn:
+        cur = conn.execute(
+            f"UPDATE photo_geo SET {sets}, geo_forgotten_at = ? "
+            f"WHERE {' AND '.join(where)}", [now, *args])
+        conn.commit()
+    return cur.rowcount
+
+
+def photo_geo_sweep() -> int:
+    """Плановая уборка по сроку хранения. Ноль дней — уборка выключена."""
+    days = photo_geo_retention_days()
+    if days <= 0:
+        return 0
+    before = (date.today() - timedelta(days=days)).isoformat()
+    return photo_geo_forget(before=before)
 
 
 def photo_index_for_dirs(dirs: list[str]) -> list[sqlite3.Row]:

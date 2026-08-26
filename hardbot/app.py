@@ -289,6 +289,27 @@ async def promise_loop(bot: Bot):
                       _push_promises)
 
 
+async def housekeeping_loop():
+    """Уборка по сроку хранения: раз в сутки стираем координаты старых снимков.
+
+    Отдельный цикл, а не довесок к рассылкам: он обязан идти и в дни, когда
+    дайджест выключен, и не должен зависеть от того, поднялся ли Телеграм.
+    Отметка дня — та же схема, что у рассылок: сделали сегодня, значит до
+    завтра молчим (перезапуск контейнера не запускает уборку заново)."""
+    while True:
+        try:
+            today = date.today().isoformat()
+            if db.get_setting("photo_geo_sweep_day") != today:
+                cleared = db.photo_geo_sweep()
+                db.set_setting("photo_geo_sweep_day", today)
+                if cleared:
+                    logging.info("Срок хранения: стёрты координаты у %s снимков",
+                                 cleared)
+        except Exception as e:  # noqa: BLE001
+            logging.warning("housekeeping_loop: %s", e)
+        await asyncio.sleep(1800)
+
+
 async def main():
     db.init_db()
     if ADMIN_ID:
@@ -331,6 +352,7 @@ async def main():
 
     asyncio.create_task(digest_loop(bot))
     asyncio.create_task(promise_loop(bot))
+    asyncio.create_task(housekeeping_loop())
     logging.info("Бот запущен. ADMIN_ID=%s", ADMIN_ID)
     # drop_pending_updates=False: сообщения за время простоя/перезагрузки не теряются
     await dp.start_polling(bot, drop_pending_updates=False)

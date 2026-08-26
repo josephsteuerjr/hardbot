@@ -3169,6 +3169,37 @@ class Pult(tk.Tk):
                                      font=f(9), justify="left", wraplength=900)
         self.delivery_out.pack(anchor="w", pady=(6, 0))
 
+        gc = Card(inner, "Координаты фото: срок хранения",
+                  "Точка съёмки — доказательство выезда и одновременно данные о "
+                  "самом сотруднике: у снимка из галереи это чаще всего его "
+                  "домашний адрес. Через указанный срок координаты стираются "
+                  "автоматически; сами фото, их даты и хэши остаются. Ноль дней = "
+                  "автоуборка выключена.")
+        gc.pack(fill="x", pady=(12, 0))
+        gr = tk.Frame(gc.inner, bg=CARD)
+        gr.pack(anchor="w")
+        tk.Label(gr, text="Хранить (дней)", bg=CARD, fg=MUTED, font=f(9)).pack(side="left")
+        self.geo_days = entry(gr, width=6)
+        self.geo_days.pack(side="left", padx=(8, 12))
+        btn(gr, "Сохранить срок", self.save_geo_retention, kind="accent").pack(side="left")
+        btn(gr, "Обновить", self.load_geo_retention).pack(side="left", padx=(8, 0))
+        gf = tk.Frame(gc.inner, bg=CARD)
+        gf.pack(anchor="w", pady=(8, 0))
+        tk.Label(gf, text="Стереть сейчас:", bg=CARD, fg=MUTED, font=f(9)).pack(side="left")
+        tk.Label(gf, text="сотрудник", bg=CARD, fg=MUTED, font=f(9)).pack(side="left", padx=(10, 4))
+        self.geo_emp = entry(gf, width=22)
+        self.geo_emp.pack(side="left")
+        tk.Label(gf, text="КД", bg=CARD, fg=MUTED, font=f(9)).pack(side="left", padx=(10, 4))
+        self.geo_cid = entry(gf, width=14)
+        self.geo_cid.pack(side="left")
+        tk.Label(gf, text="до даты", bg=CARD, fg=MUTED, font=f(9)).pack(side="left", padx=(10, 4))
+        self.geo_before = entry(gf, width=12)
+        self.geo_before.pack(side="left")
+        btn(gf, "Стереть координаты", self.forget_geo).pack(side="left", padx=(12, 0))
+        self.geo_out = tk.Label(gc.inner, text="", bg=CARD, fg=MUTED, font=f(9),
+                                justify="left", wraplength=900)
+        self.geo_out.pack(anchor="w", pady=(6, 0))
+
         rc = Card(inner, "Пересылка отчётов в беседы",
                   "Закрытый визит уходит постом в закреплённые беседы — как сотрудники "
                   "пишут руками, только автоматически: клиент, адрес, статусы, "
@@ -3478,6 +3509,58 @@ class Pult(tk.Tk):
                  f" · последняя рассылка {last_d}"
                  f"   ·   Обещания {'вкл' if d.get('promise_enabled') else 'выкл'}"
                  f" · {d.get('promise_time')} МСК · последняя {last_p}")
+
+    def _show_geo_state(self, d: dict):
+        days = d.get("retention_days")
+        term = "автоуборка выключена" if days == 0 else f"хранение {days} дн"
+        parts = [f"снимков в индексе: {d.get('photos', 0)}",
+                 f"с координатами: {d.get('with_geo', 0)}",
+                 f"стёрто: {d.get('forgotten', 0)}", term]
+        if d.get("oldest"):
+            parts.append(f"самая старая точка: {str(d['oldest'])[:10]}")
+        if d.get("cleared") is not None:
+            parts.insert(0, f"стёрто сейчас: {d['cleared']}")
+        self.geo_out.config(text=" · ".join(parts))
+        if days is not None and not self.geo_days.get().strip():
+            self.geo_days.insert(0, str(days))
+
+    def load_geo_retention(self):
+        self.bg_task(lambda: self.api("GET", "/admin/photo_geo"),
+                     self._show_geo_state)
+
+    def save_geo_retention(self):
+        raw = self.geo_days.get().strip()
+        if not raw.isdigit():
+            self.toast("Срок — целое число дней (0 = не убирать)", err=True)
+            return
+        def done(d):
+            self._show_geo_state(d)
+            self.toast("Срок хранения сохранён")
+        self.bg_task(lambda: self.api("POST", "/admin/photo_geo",
+                                      {"retention_days": int(raw)}), done)
+
+    def forget_geo(self):
+        emp = self.geo_emp.get().strip()
+        cid = self.geo_cid.get().strip()
+        before = self.geo_before.get().strip()
+        scope = ", ".join(x for x in (
+            f"сотрудник {emp}" if emp else "",
+            f"КД {cid}" if cid else "",
+            f"загруженные до {before}" if before else "") if x) or "ВСЕ снимки"
+        # Спрашиваем всегда: стирание необратимо, а «все снимки» без фильтров —
+        # это вся доказательная база выездов разом.
+        if not messagebox.askyesno(
+                "Стереть координаты",
+                f"Стереть координаты: {scope}?"
+                "\n\n"
+                "Сами фото, даты и хэши останутся. Вернуть точки будет нельзя."):
+            return
+        def done(d):
+            self._show_geo_state(d)
+            self.toast(f"Стёрто координат: {d.get('cleared', 0)}")
+        self.bg_task(lambda: self.api("POST", "/admin/photo_geo",
+                                      {"forget": {"employee": emp, "contract": cid,
+                                                  "before": before}}), done)
 
     def load_delivery(self):
         def done(d):
