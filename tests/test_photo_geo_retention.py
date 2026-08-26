@@ -53,15 +53,23 @@ def _row(name, cid=CID):
                             (f"{cid}/{name}",)).fetchone()
 
 
-def test_default_term_is_stated_and_configurable(base):
-    assert db.photo_geo_retention_days() == db.PHOTO_GEO_RETENTION_DEFAULT
+def test_no_automatic_wipe_until_asked(base):
+    """По умолчанию координаты не стираются: доказательство выезда не должно
+    исчезать само. Срок — осознанное решение оператора."""
+    assert db.PHOTO_GEO_RETENTION_DEFAULT == 0
+    assert db.photo_geo_retention_days() == 0
+    _photo("ancient.jpg", days_ago=900)
+    assert db.photo_geo_sweep() == 0
+    assert _row("ancient.jpg")["lat"] == 41.3
     db.set_setting("photo_geo_retention_days", "30")
     assert db.photo_geo_retention_days() == 30
+    # мусор в настройке трактуем в сторону БЕЗДЕЙСТВИЯ, а не стирания
     db.set_setting("photo_geo_retention_days", "мусор")
-    assert db.photo_geo_retention_days() == db.PHOTO_GEO_RETENTION_DEFAULT
+    assert db.photo_geo_retention_days() == 0
 
 
 def test_sweep_clears_old_and_keeps_fresh(base):
+    db.set_setting("photo_geo_retention_days", "90")
     _photo("old.jpg", days_ago=200)
     _photo("fresh.jpg", days_ago=3)
     assert db.photo_geo_sweep() == 1
@@ -83,6 +91,7 @@ def test_sweep_keeps_everything_that_is_not_a_coordinate(base):
                       "a" * 64, 12345, "2026-01-01T10:00:00",
                       "2026-01-01T09:59:00", "camera", 41.0, 69.0))
         conn.commit()
+    db.set_setting("photo_geo_retention_days", "90")
     db.photo_geo_sweep()
     r = _row("keep.jpg")
     assert r["lat"] is None and r["exif_lat"] is None
@@ -132,6 +141,7 @@ def test_bad_date_is_an_error_not_a_full_wipe(base):
 
 
 def test_stats_show_what_is_stored(base):
+    db.set_setting("photo_geo_retention_days", "90")
     _photo("a.jpg", days_ago=200)
     _photo("b.jpg", days_ago=1)
     st = db.photo_geo_stats()
@@ -179,6 +189,7 @@ def test_audit_shows_forgotten_point_as_a_rule_not_a_violation(base):
     """Руководитель обязан видеть разницу: «гео не дали» и «координаты стёрты
     по сроку» — разные факты, второй не вина выездника."""
     _photo("a.jpg", days_ago=400)
+    db.set_setting("photo_geo_retention_days", "90")
     db.photo_geo_sweep()
     rows = db.photo_index_for_dirs([CID])
     out = photoaudit.build(
