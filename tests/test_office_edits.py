@@ -452,3 +452,58 @@ def test_reset_visits_clears_office_edits():
     assert db.get_client("OF-6")["office_edit_data"]
     db.reset_visits()
     assert db.get_client("OF-6")["office_edit_data"] is None
+
+
+def test_unprocessed_result_is_not_an_office_edit():
+    """«Не обработан» — довизитная пустота, а не решение офиса.
+
+    28.08.2026. Обогащение заполняет строке поля визита, но результат мог не
+    приехать. Тогда у строки есть эхо по остальным полям, якорь и echo_hits её
+    пропускают, и дефолтное «Не обработан» ложилось в office_edit_data ПОВЕРХ
+    доказанного визита. Дальше его отдавали ВСЕ пути — карточка, дайджест,
+    обогащение, полная выгрузка, — и очередное обогащение разносило пустышку по
+    живым книгам поверх настоящего результата выездника. За один прогон так
+    затёрло 107 статусов у трёх сотрудников, всего накопилось 210 строк.
+    """
+    today = date.today().isoformat()
+    _import({"contract_id": "OF-NP", "client": "Человек", "responsible": "Агент",
+             "city": "Самарканд"})
+    _complete_visit("OF-NP", today, call_status="Передана инф 3 лицу",
+                    visit_comment="бот", contact_with="Должник")
+
+    rep = _import({"contract_id": "OF-NP", "client": "Человек",
+                   "responsible": "Агент", "city": "Самарканд",
+                   "visit_date": today,          # эхо: строка видела ЭТОТ визит
+                   "visit_comment": "бот",
+                   "contact_with": "Должник",
+                   "overall_result": "Не обработан"})
+
+    assert rep["office_result_unprocessed"] == 1
+    assert rep["office_cells"] == 0
+    assert rep["protected_cells"] == 1
+
+    raw = db.get_client("OF-NP")
+    assert not str(raw["office_edit_data"] or "").strip()
+    assert db.bot_visit_snapshot(raw)["call_status"] == "Передана инф 3 лицу"
+    safe = next(r for r in db.enrichment_rows() if r["contract_id"] == "OF-NP")
+    assert safe["call_status"] == "Передана инф 3 лицу"
+
+
+def test_meaningful_result_edit_still_accepted():
+    """Осмысленный результат офиса по-прежнему проходит — гейт узкий."""
+    today = date.today().isoformat()
+    _import({"contract_id": "OF-REAL", "client": "Человек", "responsible": "Агент",
+             "city": "Самарканд"})
+    _complete_visit("OF-REAL", today, call_status="Передана инф 3 лицу",
+                    visit_comment="бот", contact_with="Должник")
+
+    rep = _import({"contract_id": "OF-REAL", "client": "Человек",
+                   "responsible": "Агент", "city": "Самарканд",
+                   "visit_date": today, "visit_comment": "бот",
+                   "contact_with": "Должник",
+                   "overall_result": "Отказ от оплаты"})
+
+    assert rep["office_result_unprocessed"] == 0
+    assert rep["office_cells"] == 1
+    assert db.bot_visit_snapshot(db.get_client("OF-REAL"))["call_status"] \
+        == "Отказ от оплаты"

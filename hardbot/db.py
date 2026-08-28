@@ -180,6 +180,11 @@ BOT_VISIT_MARKER = PROVENANCE_MARKER
 BOT_DROPDOWN_KEYS = FORM_DROPDOWN_KEYS
 OFFICE_EDIT_KEYS = {OFFICE_RESULT_SNAPSHOT_KEY, *OFFICE_DIRECT_EDIT_KEYS}
 
+# «Не обработан» — довизитный ДЕФОЛТ реестра, а не решение офиса. Тот же принцип,
+# что и в журнале вытеснения: это техническая пустота. Поэтому такой результат
+# никогда не принимается офисной правкой поверх доказанного визита.
+UNPROCESSED_RESULT = "Не обработан"
+
 # Типизированные поля формы (обещание выездника; контракт v3 — на v2 пусты).
 FORM_TYPED_KEYS = frozenset(FORM_AMOUNT_KEYS) | frozenset(FORM_DATE_KEYS)
 _bookkeeping_keys = {name for name, _ in BOOKKEEPING}
@@ -4376,6 +4381,7 @@ def import_grid(
               "office_cells": 0, "office_contracts": 0, "office_applied": {},
               "office_by_key": {}, "protected_by_key": {},
               "office_promise_unparsed": 0,
+              "office_result_unprocessed": 0,
               "isolated_call_cells": 0, "isolated_call_contracts": 0,
               # Строки без ответственного попадают в базу, но невидимы выезднику и не
               # входят ни в один отчёт руководителя. Раньше это не показывалось нигде,
@@ -5551,6 +5557,23 @@ def import_grid(
                         continue                # эхо ПРЕЖНЕГО снимка/правки: файл
                                                 # обогащён между визитами — это не
                                                 # человек, откатывать нечего
+                    if (key == OFFICE_RESULT_SNAPSHOT_KEY
+                            and sval == UNPROCESSED_RESULT):
+                        # «Не обработан» — довизитный дефолт реестра, а не
+                        # решение офиса. Обогащение заполняет строке поля визита,
+                        # но результат мог не приехать — и тогда у строки есть
+                        # эхо по остальным полям, проверка echo_hits ниже её
+                        # пропускает, и пустышка ложится в office_edit_data
+                        # ПОВЕРХ доказанного визита. Дальше _merged_visit отдаёт
+                        # её всем — карточке, дайджесту, обогащению, полной
+                        # выгрузке, — и обогащение разносит «Не обработан» по
+                        # живым книгам поверх настоящего результата выездника.
+                        # 28.08.2026 так затёрло 107 статусов у трёх сотрудников;
+                        # всего в базе накопилось 210 таких строк. Офис снимает
+                        # результат осмысленным значением, а не пустышкой.
+                        rejected += 1
+                        report["office_result_unprocessed"] += 1
+                        continue
                     if key == OFFICE_RESULT_SNAPSHOT_KEY and not echo_hits:
                         # Дошли сюда — значит это настоящее изменение результата:
                         # не эхо текущего снимка и не эхо прежнего. Но строка ни
