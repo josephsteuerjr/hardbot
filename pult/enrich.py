@@ -35,7 +35,7 @@ import shutil
 import stat
 import sys
 import tempfile
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -738,16 +738,65 @@ def visit_window(since=None, until=None) -> tuple:
     return out[0], out[1]
 
 
+# --- Реестр доставленного (ledger) -------------------------------------------
+#
+# До сентября 2026 писатель сравнивал значение сервера с ячейкой файла и, если
+# они различались, писал. Он не помнил, что САМ положил в книгу в прошлый раз,
+# поэтому любая правка офиса после прогона выглядела как «файл отстал», и
+# единственным предохранителем было окно дат, которое задаёт человек. 04.08
+# без окна пропали правки по 28 договорам; 28.08 уже с окном прогон затёр
+# 107 статусов через шлюз офисных правок.
+#
+# Теперь сервер ведёт реестр доставленного: для каждой пары (КД, поле) —
+# значение, которое обогащение последний раз записало в книгу. План строится
+# трёхсторонне (сервер S, файл F, доставлено D):
+#
+#     F == S            → ничего не делаем, реестр досеивается (D := S);
+#     D нет, F пусто    → пишем (обычное первое обогащение);
+#     D нет, F непусто  → КОНФЛИКТ без истории: не пишем, показываем;
+#                         пишем только по явной галочке server_authoritative;
+#     S == D, F != D    → правка офиса после доставки: не трогаем, показываем;
+#     S != D, F == D    → сервер обновился, файл нетронут: пишем;
+#     S != D, F != D    → правили обе стороны: КОНФЛИКТ, не пишем, показываем.
+#
+# Реестр действует только на колонки с merge «replace» (результат, дата и
+# прочие поля-состояния). Дописывающие режимы (наводки, комментарий) и так
+# ничего не уничтожают. Окно дат остаётся фильтром для скорости и обзора, а
+# не предохранителем. ``ledger=None`` — прежнее поведение без реестра
+# (evidence-run и старые вызовы), ``ledger={}`` — реестр включён, но пуст.
+
+CONFLICT_NO_HISTORY = "no_history"
+CONFLICT_BOTH_CHANGED = "both_changed"
+OFFICE_EDIT_AFTER_DELIVERY = "office_edit"
+
+
+def _ledger_value(ledger, cid: str, key: str):
+    """Что обогащение доставляло для (КД, поле); None — истории нет."""
+    if not ledger:
+        return None
+    entry = (ledger.get(cid) or {}).get(key)
+    if isinstance(entry, dict):
+        value = entry.get("value")
+    else:
+        value = entry
+    return None if value is None else cell_text(value)
+
+
 def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
-               since=None, until=None) -> dict:
+               since=None, until=None, ledger=None,
+               server_authoritative: bool = False) -> dict:
     """План обогащения. grid — лист файла как список строк (значения как есть),
     fields — схема сервера [{key,title,date,...}], rows — строки клиентов сервера.
 
-    since/until — ОКНО ДАТ ВЫЕЗДА, которое задаёт оператор. Без него прогон
-    переутверждает базу поверх всей истории визитов, а не только новых: так
-    04.08.2026 обогащение вернуло в книгу Уткирова офисные правки за 03.08,
-    сделанные уже после предыдущего прогона. Границы включительные, пустая
-    граница означает открытую сторону.
+    since/until — ОКНО ДАТ ВЫЕЗДА, которое задаёт оператор. Границы
+    включительные, пустая граница означает открытую сторону. Окно — фильтр,
+    а не предохранитель: от затирания чужих правок защищает реестр
+    доставленного (см. комментарий выше).
+
+    ledger — реестр доставленного с сервера {КД: {поле: {"value", ...}}};
+    None — прежнее поведение без реестра. server_authoritative — по явной
+    галочке оператора строки без истории доставки пишутся поверх непустых
+    значений файла (с записью в журнал вытесненного).
 
     Возвращает {sheet_writes: [(r, c, value, is_date)], ...статистика}. Индексы
     0-based относительно grid. Пишутся ТОЛЬКО ячейки визита заполненных кейсов,
@@ -785,6 +834,7 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
     filled_cases = matched_cases = changed_cases = 0
     cells_already = cells_over_nonempty = 0
     out_of_window = technical_overwrites = 0
+    cells_updated_delivered = ledger_seeded = 0
     missing: list[str] = []
     filled_contract_ids: list[str] = []
     matched_contract_ids: list[str] = []
@@ -792,6 +842,35 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
     # единственным следом оставалась резервная копия книги: чтобы узнать, что
     # затёрли, приходилось сравнивать файлы целиком.
     displaced: list[dict] = []
+    # Реестр доставленного: что НЕ пишем и почему, и что надо записать в реестр.
+    ledger_mode = ledger is not None
+    conflicts: list[dict] = []
+    office_edits: list[dict] = []
+    ledger_entries: list[dict] = []
+    seeded_keys: set[tuple[str, str]] = set()
+
+    def _note(bucket: list[dict], kind: str, cid: str, key: str, r: int,
+              cur, now, delivered, vdate) -> None:
+        bucket.append({
+            "kind": kind,
+            "contract_id": cid,
+            "key": key,
+            "column": title_by_key.get(WRITE_TARGETS.get(key, key), key),
+            "row": r + 1,                  # как видно в Excel
+            "file": cell_text(cur),
+            "server": cell_text(now),
+            "delivered": "" if delivered is None else delivered,
+            "visit_date": vdate.isoformat() if vdate else "",
+        })
+
+    def _deliver(cid: str, key: str, value, vdate, kind: str) -> None:
+        ledger_entries.append({
+            "contract_id": cid,
+            "key": key,
+            "value": cell_text(value),
+            "visit_date": vdate.isoformat() if vdate else "",
+            "kind": kind,                  # written | seed
+        })
 
     for srv in rows:
         cid = norm_cid(srv.get(CONTRACT_KEY))
@@ -834,7 +913,50 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
                         (merge_mode == "replace"
                          and _values_equal(cur, val, is_date)):
                     cells_already += 1
+                    # Файл уже показывает значение сервера — досеиваем реестр,
+                    # чтобы следующая правка офиса была отличима от «отстал».
+                    if (ledger_mode and merge_mode == "replace"
+                            and (cid, key) not in seeded_keys):
+                        delivered = _ledger_value(ledger, cid, key)
+                        if delivered is None or \
+                                not _values_equal(delivered, val, is_date):
+                            seeded_keys.add((cid, key))
+                            ledger_seeded += 1
+                            _deliver(cid, key, out_val, vdate, "seed")
                     continue
+                if ledger_mode and merge_mode == "replace":
+                    delivered = _ledger_value(ledger, cid, key)
+                    cur_txt = "" if _is_technical_empty(cur) else cell_text(cur)
+                    if delivered is None:
+                        if cur_txt != "" and not server_authoritative:
+                            # Истории доставки нет, в файле что-то стоит, и оно
+                            # не совпадает с сервером. Кто прав — неизвестно:
+                            # это либо правка офиса, либо устаревшая копия.
+                            # Решает человек, а не писатель.
+                            _note(conflicts, CONFLICT_NO_HISTORY, cid, key, r,
+                                  cur, out_val, delivered, vdate)
+                            continue
+                    else:
+                        server_changed = not _values_equal(delivered, val, is_date)
+                        file_untouched = _values_equal(cur, delivered, is_date)
+                        if not server_changed:
+                            # Сервер по-прежнему говорит то, что мы доставили,
+                            # а файл — другое: это правка офиса после прогона.
+                            _note(office_edits, OFFICE_EDIT_AFTER_DELIVERY, cid,
+                                  key, r, cur, out_val, delivered, vdate)
+                            continue
+                        if not file_untouched and cur_txt != "":
+                            _note(conflicts, CONFLICT_BOTH_CHANGED, cid, key, r,
+                                  cur, out_val, delivered, vdate)
+                            continue
+                        if file_untouched and cur_txt != "":
+                            # Заменяем СВОЮ прошлую доставку — это не вытеснение
+                            # чужого значения, журнал не засоряем.
+                            cells_updated_delivered += 1
+                            writes.append((r, c, out_val, is_date))
+                            case_changed = True
+                            _deliver(cid, key, out_val, vdate, "written")
+                            continue
                 if cell_text(cur) != "":
                     cells_over_nonempty += 1
                     # Слияние старое значение сохраняет внутри нового, замена —
@@ -856,6 +978,8 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
                         })
                 writes.append((r, c, out_val, is_date))
                 case_changed = True
+                if ledger_mode:
+                    _deliver(cid, key, out_val, vdate, "written")
         if case_changed:
             changed_cases += 1
 
@@ -874,6 +998,14 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
         "out_of_window": out_of_window,    # отсеяно окном дат оператора
         "window": {"since": since_d.isoformat() if since_d else "",
                    "until": until_d.isoformat() if until_d else ""},
+        # Реестр доставленного (см. комментарий перед build_plan).
+        "ledger_mode": ledger_mode,
+        "server_authoritative": bool(server_authoritative),
+        "conflicts": conflicts,            # НЕ записано: решает человек
+        "office_edits": office_edits,      # НЕ записано: правка офиса после доставки
+        "ledger_entries": ledger_entries,  # что записать в реестр доставленного
+        "ledger_seeded": ledger_seeded,    # досеяно без записи (файл уже = сервер)
+        "cells_updated_delivered": cells_updated_delivered,  # обновили свою доставку
         # Обратная совместимость отчётов старого пульта. Обычное обогащение
         # больше никогда не очищает комментарии; точечная починка — отдельный
         # dry-run/apply инструмент с собственным бэкапом.
@@ -937,13 +1069,15 @@ def _workbook_grid(wb, fields: list[dict]) -> tuple[object, list[list]]:
 
 
 def _plan_workbook(app, path: Path, fields: list[dict], rows: list[dict],
-                   since=None, until=None) -> dict:
+                   since=None, until=None, ledger=None,
+                   server_authoritative: bool = False) -> dict:
     """Reopen a saved workbook and recompute the enrichment plan read-only."""
 
     wb = app.books.open(str(path), update_links=False, read_only=True)
     try:
         _ws, grid = _workbook_grid(wb, fields)
-        return build_plan(grid, fields, rows, since, until)
+        return build_plan(grid, fields, rows, since, until,
+                          ledger=ledger, server_authoritative=server_authoritative)
     finally:
         wb.close()
 
@@ -1009,7 +1143,8 @@ def _co_init():
 
 def _enrich_workbook(app, path: Path, fields: list[dict], rows: list[dict],
                      log=lambda s: None, since=None, until=None,
-                     backup_root=None) -> dict:
+                     backup_root=None, ledger=None,
+                     server_authoritative: bool = False) -> dict:
     """Один файл в уже открытом Excel: бэкап → лист → план → точечная запись →
     сохранить тем же форматом. Возвращает план + backup/sheet/file.
 
@@ -1025,7 +1160,8 @@ def _enrich_workbook(app, path: Path, fields: list[dict], rows: list[dict],
         # а индексы плана — координаты ячеек листа.
         ws, grid = _workbook_grid(wb, fields)
 
-        plan = build_plan(grid, fields, rows, since, until)
+        plan = build_plan(grid, fields, rows, since, until,
+                          ledger=ledger, server_authoritative=server_authoritative)
         writes = plan["writes"]
         plan["backup"] = None
         if writes:
@@ -1168,6 +1304,8 @@ def _enrich_with_evidence(
     since=None,
     until=None,
     backup_root=None,
+    ledger=None,
+    server_authoritative: bool = False,
 ) -> dict:
     """Run the existing writer, then reopen and prove a zero second plan."""
 
@@ -1176,7 +1314,8 @@ def _enrich_with_evidence(
         raise FileNotFoundError(f"нужен обычный Excel-файл: {raw_path}")
     path = raw_path.resolve()
     pre_sha = _sha256_file(path)
-    plan = _enrich_workbook(app, path, fields, rows, log, since, until, backup_root)
+    plan = _enrich_workbook(app, path, fields, rows, log, since, until, backup_root,
+                            ledger=ledger, server_authoritative=server_authoritative)
     post_sha = _sha256_file(path)
     backup_raw = plan.get("backup")
     backup_path = Path(backup_raw).resolve() if backup_raw else None
@@ -1188,7 +1327,12 @@ def _enrich_with_evidence(
         raise RuntimeError(f"{path.name}: zero-write contract нарушен")
 
     try:
-        post_plan = _plan_workbook(app, path, fields, rows, since, until)
+        # Тот же реестр, что и при записи: записанные ячейки теперь совпадают с
+        # сервером, конфликты и правки офиса по-прежнему не пишутся — план
+        # обязан быть нулевым.
+        post_plan = _plan_workbook(app, path, fields, rows, since, until,
+                                   ledger=ledger,
+                                   server_authoritative=server_authoritative)
     except Exception as e:  # noqa: BLE001
         # Книга к этому моменту УЖЕ сохранена и её содержимое подтверждено
         # хэшами выше. Если проверку выполнить не удалось (обычно потому, что
@@ -1199,7 +1343,12 @@ def _enrich_with_evidence(
             path=str(path), pre_sha256=pre_sha, post_sha256=post_sha,
             backup_path=str(backup_path) if backup_path is not None else None,
             backup_sha256=backup_sha, cells_written=plan["cells_written"],
-            displaced=plan.get("displaced") or [], reason=str(e)) from e
+            displaced=plan.get("displaced") or [],
+            # Записанное — в книге, значит и в реестре доставленного должно быть.
+            ledger_entries=plan.get("ledger_entries") or [],
+            conflicts=plan.get("conflicts") or [],
+            office_edits=plan.get("office_edits") or [],
+            reason=str(e)) from e
     if post_plan["cells_written"] or post_plan["changed_cases"]:
         raise RuntimeError(f"{path.name}: повторный enrichment plan не нулевой")
     if (
@@ -1225,7 +1374,8 @@ def _enrich_with_evidence(
 
 def enrich_file(path: str | Path, fields: list[dict], rows: list[dict],
                 log=lambda s: None, since=None, until=None,
-                backup_root=None) -> dict:
+                backup_root=None, ledger=None,
+                server_authoritative: bool = False) -> dict:
     """Обогатить один живой файл реестра. Требует Excel."""
     _co_init()
     import xlwings as xw
@@ -1239,17 +1389,26 @@ def enrich_file(path: str | Path, fields: list[dict], rows: list[dict],
         app.screen_updating = False
         log(f"Обогащаю {path.name}…")
         return _enrich_with_evidence(app, path, fields, rows, log,
-                                     since, until, backup_root)
+                                     since, until, backup_root,
+                                     ledger=ledger,
+                                     server_authoritative=server_authoritative)
 
 
 def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
                 since=None, until=None, backup_root=None,
-                receipt_dir=None) -> list[dict]:
+                receipt_dir=None, ledger=None, on_delivered=None,
+                server_authoritative: bool = False) -> list[dict]:
     """Обогатить личные реестры пачкой, одной сессией Excel.
     jobs: [{employee, path, rows}] — каждому файлу свои строки (его кейсы).
     Ошибка одного файла не валит остальные: в результат кладётся {..., error}.
 
     since/until — окно дат выезда, которое задал оператор.
+
+    ledger — реестр доставленного с сервера (None — прежнее поведение без
+    реестра). on_delivered(payload) — колбэк пульта, который отправляет на
+    сервер {"entries": [...], "receipt_digest": ..., "receipt": ...}; его
+    провал попадает в результат как ledger_error, а не теряется в логе.
+    server_authoritative — явная галочка оператора, см. build_plan.
 
     Результат СОБИРАЕТСЯ СНАРУЖИ блока Excel. Раньше он жил внутри, и смерть
     сессии на выходе (`quit()` по мёртвому COM) уносила его целиком: книги на
@@ -1278,6 +1437,8 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
                     plan = _enrich_with_evidence(
                         app, path, fields, job["rows"], log,
                         since, until, backup_root,
+                        ledger=ledger,
+                        server_authoritative=server_authoritative,
                     )
                 except WrittenButUnverified as e:
                     # Записано, но не проверено. НЕ откатывать. Ключ error нужен,
@@ -1309,18 +1470,134 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
     if fatal:
         for r in results:
             r.setdefault("session_error", fatal)
+    receipt_path = None
     if receipt_dir:
         # Провал квитанции обязан быть виден в итоговом отчёте, а не мелькнуть в
         # строке лога, которую отчёт через мгновение перезапишет.
         try:
             path = write_batch_receipt(results, receipt_dir,
                                        since=since, until=until, fatal=fatal)
+            receipt_path = path
             for r in results:
                 r["receipt"] = str(path)
         except Exception as e:  # noqa: BLE001 — квитанция не важнее данных
             for r in results:
                 r["receipt_error"] = str(e)
+    if ledger is not None:
+        _record_deliveries(results, on_delivered, receipt_path)
     return results
+
+
+def ledger_entries_of(results: list[dict]) -> list[dict]:
+    """Записи реестра доставленного из результатов пачки, с владельцем и файлом.
+
+    Берём и книги «записано, но не проверено»: ячейки в них уже стоят, и
+    реестр обязан это знать — иначе следующий прогон увидит «файл = сервер,
+    истории нет» и досеет сам, но между прогонами правка офиса в этих ячейках
+    была бы неотличима от отставания файла.
+    """
+    entries: list[dict] = []
+    for r in results:
+        if r.get("not_attempted") or (
+            "error" in r and not r.get("written_unverified")
+        ):
+            continue
+        for e in r.get("ledger_entries") or []:
+            entries.append({**e, "responsible": r.get("employee") or "",
+                            "file": r.get("path") or r.get("file") or ""})
+    return entries
+
+
+def _record_deliveries(results: list[dict], on_delivered, receipt_path) -> None:
+    """Отправить реестр доставленного на сервер ПОСЛЕ квитанции.
+
+    Порядок важен: квитанция — локальный долговечный след с теми же записями,
+    и если сеть упала, оператор видит красную строку и может повторить отправку
+    из квитанции (replay_ledger_receipt), а не терять историю доставки.
+    """
+    entries = ledger_entries_of(results)
+    if not entries:
+        for r in results:
+            r.setdefault("ledger_recorded", 0)
+        return
+    if on_delivered is None:
+        for r in results:
+            r["ledger_error"] = "реестр доставленного некому отправить (нет on_delivered)"
+        return
+    payload = {
+        "entries": entries,
+        "receipt_digest": _sha256_file(Path(receipt_path)) if receipt_path else "",
+        "receipt": str(receipt_path or ""),
+    }
+    try:
+        outcome = on_delivered(payload)
+    except Exception as e:  # noqa: BLE001 — сеть не важнее данных, но видна
+        for r in results:
+            r["ledger_error"] = str(e)
+        return
+    recorded = outcome.get("recorded") if isinstance(outcome, dict) else None
+    for r in results:
+        r["ledger_recorded"] = len(entries) if recorded is None else recorded
+
+
+def replay_ledger_receipt(receipt_path: str | Path, on_delivered) -> dict:
+    """Повторно отправить реестр доставленного из квитанции пачки.
+
+    Нужен, когда книги записаны, квитанция лежит, а сервер в момент прогона
+    был недоступен. Идемпотентно: сервер хранит последнее значение на (КД, поле).
+    """
+    path = Path(receipt_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    entries = [e for e in data.get("ledger_entries") or [] if isinstance(e, dict)]
+    if not entries:
+        return {"recorded": 0, "entries": 0}
+    outcome = on_delivered({
+        "entries": entries,
+        "receipt_digest": _sha256_file(path),
+        "receipt": str(path),
+    })
+    recorded = outcome.get("recorded") if isinstance(outcome, dict) else None
+    return {"recorded": len(entries) if recorded is None else recorded,
+            "entries": len(entries)}
+
+
+RECEIPT_GLOB = "обогащение-*.json"
+SUGGESTED_WINDOW_MARGIN_DAYS = 7
+
+
+def last_batch_receipt(receipt_dir) -> Path | None:
+    """Самая свежая квитанция пачки в папке (по имени: в нём метка времени)."""
+    if not receipt_dir:
+        return None
+    folder = Path(receipt_dir)
+    if not folder.is_dir():
+        return None
+    candidates = sorted(p for p in folder.glob(RECEIPT_GLOB) if p.is_file())
+    return candidates[-1] if candidates else None
+
+
+def suggest_window(receipt_dir, today: date | None = None) -> tuple[str, str]:
+    """Предложить окно дат по последней квитанции: «с» = день прошлого прогона
+    минус запас, «по» = сегодня. Без квитанций — пустые строки (окно не задано,
+    и пульт обязан спросить подтверждение «вся история»).
+
+    Запас в неделю нужен потому, что выездник может сохранить визит задним
+    числом; от затирания правок защищает реестр доставленного, окно лишь
+    сужает прогон.
+    """
+    today = today or date.today()
+    receipt = last_batch_receipt(receipt_dir)
+    if receipt is None:
+        return "", ""
+    try:
+        data = json.loads(receipt.read_text(encoding="utf-8"))
+        ran_at = parse_date(str(data.get("at") or ""))
+    except (OSError, ValueError, json.JSONDecodeError):
+        ran_at = None
+    if ran_at is None:
+        return "", ""
+    since = ran_at - timedelta(days=SUGGESTED_WINDOW_MARGIN_DAYS)
+    return since.strftime("%d.%m.%Y"), today.strftime("%d.%m.%Y")
 
 
 def write_batch_receipt(results: list[dict], receipt_dir, *,
@@ -1349,12 +1626,26 @@ def write_batch_receipt(results: list[dict], receipt_dir, *,
                 "employee", "file", "path", "backup_path", "backup_sha256",
                 "pre_sha256", "post_sha256", "cells_written",
                 "cells_over_nonempty", "changed_cases", "out_of_window",
+                "ledger_mode", "server_authoritative", "ledger_seeded",
+                "cells_updated_delivered",
                 "error", "written_unverified", "not_attempted")}
             for r in results
         ],
         "displaced": [
             {**d, "employee": r.get("employee")}
             for r in results for d in (r.get("displaced") or [])
+        ],
+        # Реестр доставленного: что ушло/должно уйти на сервер, и что НЕ
+        # записано по решению трёхстороннего сравнения. Квитанция — локальный
+        # след, из которого отправку можно повторить (replay_ledger_receipt).
+        "ledger_entries": ledger_entries_of(results),
+        "conflicts": [
+            {**c, "employee": r.get("employee")}
+            for r in results for c in (r.get("conflicts") or [])
+        ],
+        "office_edits": [
+            {**c, "employee": r.get("employee")}
+            for r in results for c in (r.get("office_edits") or [])
         ],
     }
     out = folder / f"обогащение-{stamp}.json"

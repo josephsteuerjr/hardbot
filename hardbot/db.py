@@ -14,12 +14,13 @@ import re
 import secrets
 import sqlite3
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import country_scope
 import debt
 from exchange_contract import (
+    ENRICHMENT_SOURCE_KEYS,
     ExchangeContractError,
     FORM_AMOUNT_KEYS,
     FORM_DATE_KEYS,
@@ -762,6 +763,23 @@ def init_db() -> None:
               sequence INTEGER NOT NULL,
               proof_digest TEXT NOT NULL,
               imported_at TEXT NOT NULL
+            )
+        """)
+        # Реестр доставленного обогащением: что писатель пульта последний раз
+        # положил в личную книгу для пары (КД, поле). Без него писатель не
+        # отличал правку офиса после прогона от «файл отстал» и затирал её
+        # (04.08 и 28.08.2026). Трёхстороннее сравнение — pult/enrich.py.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS enrichment_ledger (
+              contract_id TEXT NOT NULL,
+              field_key TEXT NOT NULL,
+              value TEXT NOT NULL,
+              visit_date TEXT,
+              responsible TEXT,
+              file_path TEXT,
+              delivered_at TEXT NOT NULL,
+              receipt_digest TEXT,
+              PRIMARY KEY (contract_id, field_key)
             )
         """)
         receipt_cols = {
@@ -3831,6 +3849,82 @@ def enrichment_rows() -> list[dict]:
             row.update(snapshot)
         result.append(row)
     return result
+
+
+ENRICHMENT_LEDGER_KEYS = frozenset(ENRICHMENT_SOURCE_KEYS)
+ENRICHMENT_LEDGER_MAX_VALUE = 32767   # предел ячейки Excel
+
+
+def enrichment_ledger(employees: list[str] | None = None) -> dict[str, dict]:
+    """Реестр доставленного {КД: {поле: {"value", "visit_date", "at",
+    "responsible"}}}. employees — сузить до книг этих ответственных; пусто —
+    весь реестр. Пульт передаёт его в enrich.build_plan как ``ledger``."""
+    wanted = {str(e).strip().casefold() for e in (employees or []) if str(e).strip()}
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT contract_id, field_key, value, visit_date, responsible, "
+            "delivered_at FROM enrichment_ledger ORDER BY contract_id, field_key"
+        ).fetchall()
+    out: dict[str, dict] = {}
+    for r in rows:
+        if wanted and str(r["responsible"] or "").strip().casefold() not in wanted:
+            continue
+        out.setdefault(r["contract_id"], {})[r["field_key"]] = {
+            "value": r["value"],
+            "visit_date": r["visit_date"] or "",
+            "at": r["delivered_at"],
+            "responsible": r["responsible"] or "",
+        }
+    return out
+
+
+def record_enrichment_deliveries(entries: list, receipt_digest: str = "") -> int:
+    """Записать/обновить доставленные значения. Идемпотентно: последнее
+    значение на (КД, поле). Мусор — ValueError до первой записи, чтобы половина
+    реестра не осталась записанной."""
+    if not isinstance(entries, list):
+        raise ValueError("entries должен быть списком")
+    digest = str(receipt_digest or "").strip()[:128]
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    prepared: list[tuple] = []
+    for i, e in enumerate(entries):
+        if not isinstance(e, dict):
+            raise ValueError(f"запись {i}: не объект")
+        cid = str(e.get("contract_id") or "").strip()
+        key = str(e.get("key") or e.get("field_key") or "").strip()
+        value = e.get("value")
+        if not cid:
+            raise ValueError(f"запись {i}: пустой КД")
+        if key not in ENRICHMENT_LEDGER_KEYS:
+            raise ValueError(f"запись {i}: поле {key!r} не относится к обогащению")
+        if value is None:
+            raise ValueError(f"запись {i}: нет значения")
+        value = str(value)
+        if len(value) > ENRICHMENT_LEDGER_MAX_VALUE:
+            raise ValueError(f"запись {i}: значение длиннее ячейки Excel")
+        prepared.append((
+            cid, key, value,
+            str(e.get("visit_date") or "")[:32],
+            str(e.get("responsible") or "").strip()[:200],
+            str(e.get("file") or e.get("file_path") or "")[:1000],
+            now, digest,
+        ))
+    if not prepared:
+        return 0
+    with connect() as conn:
+        conn.executemany(
+            "INSERT INTO enrichment_ledger (contract_id, field_key, value, "
+            "visit_date, responsible, file_path, delivered_at, receipt_digest) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(contract_id, field_key) DO UPDATE SET "
+            "value=excluded.value, visit_date=excluded.visit_date, "
+            "responsible=excluded.responsible, file_path=excluded.file_path, "
+            "delivered_at=excluded.delivered_at, "
+            "receipt_digest=excluded.receipt_digest",
+            prepared,
+        )
+        conn.commit()
+    return len(prepared)
 
 
 def export_schema() -> list[dict]:

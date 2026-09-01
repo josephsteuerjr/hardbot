@@ -352,7 +352,7 @@ def _shell_version() -> int:
     """Номер версии оболочки из sw.js. Дублировать его в коде нельзя: разъедется."""
     try:
         text = (Path(__file__).parent / "miniapp" / "sw.js").read_text(encoding="utf-8")
-        m = re.search(r"hardbot-shell-v(\d+)", text)
+        m = re.search(r"vyezdy-shell-v(\d+)", text)
         return int(m.group(1)) if m else 0
     except OSError:
         return 0
@@ -2958,6 +2958,43 @@ async def _admin_export_json(request: web.Request) -> web.Response:
     )
 
 
+async def _admin_enrichment_ledger(request: web.Request) -> web.Response:
+    """Реестр доставленного обогащением (см. db.enrichment_ledger).
+
+    GET — забрать перед прогоном (``?employee=`` повторяемый или
+    ``?employees=А;Б``), POST — записать после прогона
+    ``{"entries": [...], "receipt_digest": "..."}``. Мусор в записях даёт 409
+    без единой записи: половинчатый реестр хуже пустого.
+    """
+    _admin(request)
+    if request.method == "GET":
+        employees = list(request.query.getall("employee", []))
+        employees += [
+            e.strip()
+            for e in (request.query.get("employees") or "").split(";")
+            if e.strip()
+        ]
+        ledger = db.enrichment_ledger(employees or None)
+        return web.json_response({
+            "data_exchange_contract": DATA_EXCHANGE_CONTRACT,
+            "ledger": ledger,
+            "count": sum(len(v) for v in ledger.values()),
+        })
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return web.json_response({"error": "тело не JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "тело не объект"}, status=400)
+    try:
+        recorded = db.record_enrichment_deliveries(
+            body.get("entries"), str(body.get("receipt_digest") or ""),
+        )
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=409)
+    return web.json_response({"ok": True, "recorded": recorded})
+
+
 async def _admin_markers_json(request: web.Request) -> web.Response:
     _admin(request)
     return web.json_response({"rows": db.markers_rows()})
@@ -3538,6 +3575,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/admin/chats.set", _admin_chats_set)
     app.router.add_get("/admin/export", _admin_export)
     app.router.add_get("/admin/export.json", _admin_export_json)
+    app.router.add_get("/admin/enrichment/ledger.json", _admin_enrichment_ledger)
+    app.router.add_post("/admin/enrichment/ledger.json", _admin_enrichment_ledger)
     app.router.add_get("/admin/markers.xlsx", _admin_markers_xlsx)
     app.router.add_get("/admin/markers.json", _admin_markers_json)
     app.router.add_get("/admin/employees", _admin_employees)
