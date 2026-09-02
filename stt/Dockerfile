@@ -1,9 +1,9 @@
-# Служба распознавания речи «Выезды»: faster-whisper на CPU за Unix-сокетом.
+# Служба распознавания речи «Хард»: faster-whisper на CPU за Unix-сокетом.
 # Модель в образ НЕ входит — скачивается при первом старте в том /models,
 # поэтому образ остаётся маленьким, а смена STT_MODEL не требует пересборки.
 FROM python:3.12-slim
 
-LABEL ru.vyezdy.service="stt"
+LABEL ru.hard.service="stt"
 
 WORKDIR /app
 COPY requirements.txt .

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#FAF9F5">
-<title>Выезды</title>
+<title>Хард</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <!-- Telegram SDK — локально (same-origin), чтобы приложение поднималось в оффлайне. -->
 <script src="/vendor/telegram-web-app.js"></script>
@@ -221,7 +221,7 @@ textarea{min-height:64px;resize:vertical}
 </head>
 <body>
 <div class="bar">
-  <span class="brand">Выезды</span>
+  <span class="brand">Хард</span>
   <div class="langs" id="langs"></div>
 </div>
 <div class="offbar" id="offbar"></div>
@@ -717,7 +717,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=34;
+const SHELL_VERSION=35;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();

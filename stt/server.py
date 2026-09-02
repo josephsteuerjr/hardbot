@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Служба распознавания речи «Выезды».
+"""Служба распознавания речи «Хард».
 
 Отдельный контейнер: faster-whisper на CPU, слушает ТОЛЬКО Unix-сокет в общем
 томе, принимает один запрос за раз, Bearer-токен читает из файла. В журнал не
@@ -45,7 +45,7 @@ ERROR_SCHEMA = "praxis.stt.error.v1"
 HARD_MAX_BYTES = 15 * 1024 * 1024        # клиент режет на том же пороге
 MULTIPART_OVERHEAD = 256 * 1024          # границы и заголовки multipart сверх аудио
 LANGUAGES: dict[str, str | None] = {"ru": "ru", "uz": "uz", "auto": None}
-TEMP_PREFIX = "vyezdy-stt-"
+TEMP_PREFIX = "hard-stt-"
 TEMP_SUFFIX = ".audio"
 
 log = logging.getLogger("stt")
@@ -559,7 +559,7 @@ async def check(settings: Settings) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Служба распознавания речи «Выезды»")
+    parser = argparse.ArgumentParser(description="Служба распознавания речи «Хард»")
     parser.add_argument("--check", action="store_true",
                         help="проверить готовность через сокет и выйти")
     args = parser.parse_args(argv)

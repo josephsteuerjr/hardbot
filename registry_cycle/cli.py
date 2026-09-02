@@ -36,7 +36,7 @@ def _print_json(payload) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="registry-cycle",
-        description="Выезды · Реестры — безопасная сборка и разборка СНГ",
+        description="Хард · Реестры — безопасная сборка и разборка СНГ",
     )
     parser.add_argument(
         "--config-dir",

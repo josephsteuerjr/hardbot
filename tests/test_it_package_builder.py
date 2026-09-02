@@ -33,7 +33,7 @@ def built(tmp_path_factory):
 
 def _inner(names):
     """Пути внутри корневой папки пакета."""
-    prefix = "vyezdy-test.1/"
+    prefix = "hard-test.1/"
     assert all(n.startswith(prefix) for n in names)
     return {n[len(prefix):] for n in names}
 
@@ -49,12 +49,12 @@ def test_package_contains_every_component(built):
         "deploy/update.sh", "deploy/backup.sh", "deploy/restore.sh", "deploy/doctor.sh",
         "deploy/README.md",
         "pult/pult.py", "pult/Пульт.pyw", "pult/app.py", "registry_cycle/__init__.py",
-        "Перенос реестров.pyw", "Выезды — Реестры.pyw",
+        "Перенос реестров.pyw", "Хард — Реестры.pyw",
         "docs/security/00-README.md", "tests/conftest.py", "tools/build_it_package.py",
         "requirements-registry-cycle.txt",
     ):
         assert expected in inner, expected
-    assert built["archive"].name.startswith("vyezdy-test.1-") and built["archive"].suffix == ".zip"
+    assert built["archive"].name.startswith("hard-test.1-") and built["archive"].suffix == ".zip"
     digest, _, name = built["checksum"].read_text(encoding="utf-8").split()[0:3:2][0], None, None
     assert len(digest) == 64
     assert built["archive"].name in built["checksum"].read_text(encoding="utf-8")
@@ -85,14 +85,14 @@ def test_shell_scripts_travel_with_lf_and_launchers_are_python(built):
     """Серверные скрипты — LF и бит исполнения; точки входа Windows — .pyw
     (pythonw, без консоли), а не .bat: cmd-окно даже на «start» мигало."""
     with zipfile.ZipFile(built["zip"]) as zf:
-        sh = zf.read("vyezdy-test.1/deploy/install.sh")
+        sh = zf.read("hard-test.1/deploy/install.sh")
         assert b"\r\n" not in sh and sh.startswith(b"#!/usr/bin/env bash")
-        assert (zf.getinfo("vyezdy-test.1/deploy/install.sh").external_attr >> 16) & 0o111
-        pyw = zf.read("vyezdy-test.1/pult/Пульт.pyw")
+        assert (zf.getinfo("hard-test.1/deploy/install.sh").external_attr >> 16) & 0o111
+        pyw = zf.read("hard-test.1/pult/Пульт.pyw")
         assert b"pult.app" in pyw and b"\r\n" not in pyw
         assert not any(n.lower().endswith(".bat") for n in zf.namelist()), \
             "в пакете не должно быть .bat: консольные окна убраны"
-        readme = zf.read("vyezdy-test.1/README.md").decode("utf-8")
+        readme = zf.read("hard-test.1/README.md").decode("utf-8")
         assert "deploy/README.md" in readme and "stt/" in readme and "pult/" in readme
         assert "Пульт.pyw" in readme and "Tkinter" not in readme
 
@@ -126,7 +126,7 @@ def test_leak_scanner_stops_the_build(tmp_path):
     (root / "server" / "db.py").write_text('line = f"BOT_TOKEN={token}"\n', encoding="utf-8")
     archive, _ = builder.build(root, tmp_path / "out4", version="0.4")
     with zipfile.ZipFile(archive) as zf:
-        assert "vyezdy-0.4/server/.env.example" in zf.namelist()
+        assert "hard-0.4/server/.env.example" in zf.namelist()
 
 
 def test_wanted_rules():

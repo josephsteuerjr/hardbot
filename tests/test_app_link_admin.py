@@ -15,7 +15,7 @@ import web
 
 KEY = {"X-Admin-Key": "master"}
 PATH = "/admin/app_link.json"
-URL = "https://vyezdy.example.org"
+URL = "https://hard.example.org"
 
 
 def _call(method, path, *, headers, json_body=None):

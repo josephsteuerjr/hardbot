@@ -35,7 +35,7 @@ def window(app, tmp_path):
 
 
 def test_window_title_and_sections(app, window):
-    assert window.windowTitle() == "Выезды · Пульт"
+    assert window.windowTitle() == "Хард · Пульт"
     assert set(window.pages) == {sec for sec, _ in SECTIONS}
     for sec, _ in SECTIONS:
         window.nav(sec)

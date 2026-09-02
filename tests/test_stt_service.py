@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def _load_server():
-    spec = importlib.util.spec_from_file_location("vyezdy_stt_server", ROOT / "stt" / "server.py")
+    spec = importlib.util.spec_from_file_location("hard_stt_server", ROOT / "stt" / "server.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)

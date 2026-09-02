@@ -1,4 +1,4 @@
-# Выезды · Пульт — окно на Qt 6 плюс работа с Excel.
+# Хард · Пульт — окно на Qt 6 плюс работа с Excel.
 # Установка: pip install -r pult\requirements.txt  (нужен установленный Excel для .xlsb)
 PySide6==6.11.2
 python-calamine==0.7.0

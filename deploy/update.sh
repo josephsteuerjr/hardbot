@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Обновление «Выезды» до версии, лежащей в соседних каталогах server/ и stt/.
+# Обновление «Хард» до версии, лежащей в соседних каталогах server/ и stt/.
 #
 #   cd deploy && ./update.sh
 #
@@ -8,7 +8,7 @@
 # Тем же скриптом применяются правки .env (например, вписанный BOT_TOKEN).
 source "$(dirname "$0")/_lib.sh"
 
-say "== Выезды: обновление =="
+say "== Хард: обновление =="
 check_docker
 [ -f .env ] || die "нет .env — сначала ./install.sh"
 [ -s secrets/stt.token ] || die "нет secrets/stt.token — сначала ./install.sh"
@@ -43,7 +43,7 @@ if voice_enabled; then
 fi
 
 # Старые слои наших образов после пересборки висят как <none>; чистим только их.
-docker image prune -f --filter "label=ru.vyezdy.service" >/dev/null 2>&1 || true
+docker image prune -f --filter "label=ru.hard.service" >/dev/null 2>&1 || true
 
 say ""
 say "== Обновлено =="

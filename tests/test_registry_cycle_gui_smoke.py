@@ -31,7 +31,7 @@ def test_public_api_is_intact():
 def test_window_and_dialogs_build(app):
     application, bundle = app
     window = gui.ManualTransferApp(bundle)
-    assert window.windowTitle() == "Выезды · Перенос реестров"
+    assert window.windowTitle() == "Хард · Перенос реестров"
     assert len(window.action_buttons) == 2            # «Проверить шаг 1», «Проверить шаг 2»
     assert window.states == {"upward": "idle", "downward": "idle"}
     window.toggle_details("upward")

@@ -19,7 +19,7 @@
 | [x] | High-DPI (Per-Monitor v2) | `main()` ctypes + `_dpi_geometry` | штатный Qt 6, ничего руками |
 | [x] | Окно 1180×800, minsize 980×660, центрирование | `_dpi_geometry` | `ui/main_window.py: Pult.__init__` |
 | [x] | Иконка окна | `icon-src.png` | `pult/icon.png`, если есть; иначе молча без иконки |
-| [x] | Заголовок окна | «Контур · Выезды» | «Выезды · Пульт» |
+| [x] | Заголовок окна | «Хард» | «Хард · Пульт» |
 | [x] | Рейка: логотип, 7 разделов, «Подключение» прижато вниз | `_build` | `ui/nav.py: NavRail` (монохромные SVG-иконки в коде) |
 | [x] | Индикатор связи: точка + «не подключено / подключено / нет связи» + хост | `_set_conn` | `NavRail.set_connection`, `Pult._set_conn` |
 | [x] | Шапка: заголовок раздела (`TITLES`), «обновлено HH:MM», кнопка «Обновить» | `_build`, `refresh` | `Pult._build_shell` |
@@ -209,13 +209,13 @@
 | | Что | Было | Стало |
 |---|---|---|---|
 | [x] | Окно с двумя операциями (вверх / вниз), состояния, прогресс, кнопки «Проверить шаг N» / «заново» | `ManualTransferApp` (Tk) | `registry_cycle/gui.py: ManualTransferApp` (QMainWindow), тема `registry_cycle/theme.py` из `config/theme.json` |
-| [x] | Заголовок окна | «Перенос реестров» | «Выезды · Перенос реестров» (`config/app.json: manual_ui.window.title`), иконка `registry_cycle/icon.png` |
+| [x] | Заголовок окна | «Перенос реестров» | «Хард · Перенос реестров» (`config/app.json: manual_ui.window.title`), иконка `registry_cycle/icon.png` |
 | [x] | Итог проверки: метрики, замечания, изменения/дельты, «Открыть отчёт», «Технические детали» | `_render_result`, `_render_details` | те же методы |
 | [x] | Подтверждение фразой перед публикацией, «Фраза не совпала» | `ask_to_publish` (Toplevel) | `PublishDialog` (QDialog, Enter = подтвердить) |
 | [x] | Диалог «Папки источников»: строки страна/путь, «Выбрать», «Удалить», «Добавить корень», «Сохранить папки» | `SourceFoldersDialog` | `SourceFoldersDialog` (QDialog) |
 | [x] | Фон → UI: прогресс, результат, ошибка с окном | `queue + after(80)` | сигналы `_Signals` + QThreadPool |
 | [x] | Публичный API `run_gui(bundle=None)`, `RegistryCycleApp`, `manual_app.main` | те же | те же (`tests/test_registry_cycle_gui_smoke.py`) |
-| [x] | Запуск двойным кликом | `Перенос реестров.bat`, `Контур — Реестры.bat` | `Перенос реестров.pyw`, `Выезды — Реестры.pyw` |
+| [x] | Запуск двойным кликом | `Перенос реестров.bat`, `Контур — Реестры.bat` | `Перенос реестров.pyw`, `Хард — Реестры.pyw` |
 | [x] | Пакет для офиса | `tools/build_registry_transfer_share.py` | + `theme`, `icon.png`, проверка `PySide6.QtWidgets` вместо `tkinter`, `PySide6` в `requirements-registry-cycle.txt` |
 
 ## Что не перенесено и почему

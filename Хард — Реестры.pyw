@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Выезды · Реестры — окно цикла реестров (`python -m registry_cycle gui`),
+"""Хард · Реестры — окно цикла реестров (`python -m registry_cycle gui`),
 запуск двойным кликом без консоли."""
 
 import sys
@@ -22,12 +22,12 @@ try:
     from registry_cycle.cli import main
 except Exception as exc:                               # noqa: BLE001
     import traceback
-    _fallback("Выезды · Реестры не запускаются",
+    _fallback("Хард · Реестры не запускаются",
               f"Не удалось загрузить приложение: {type(exc).__name__}: {exc}\n\n"
               + traceback.format_exc()[-1200:])
     raise SystemExit(1)
 
 code = main(["gui"])
 if code:
-    _fallback("Выезды · Реестры", f"Приложение завершилось с ошибкой (код {code}).")
+    _fallback("Хард · Реестры", f"Приложение завершилось с ошибкой (код {code}).")
 raise SystemExit(code)

@@ -37,6 +37,6 @@ def test_no_tkinter_in_pult_and_registry_cycle():
 
 def test_registry_transfer_has_pyw_entry_points():
     assert (ROOT / "Перенос реестров.pyw").is_file()
-    assert (ROOT / "Выезды — Реестры.pyw").is_file()
+    assert (ROOT / "Хард — Реестры.pyw").is_file()
     assert not (ROOT / "Перенос реестров.bat").exists()
     assert not (ROOT / "Контур — Реестры.bat").exists()

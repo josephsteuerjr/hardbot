@@ -1,4 +1,4 @@
-"""Сборка приложения «Выезды · Пульт».
+"""Сборка приложения «Хард · Пульт».
 
 Любая ошибка при старте — нет PySide6, нет папки `server` рядом, битые
 модули — это понятное окно с причиной, а не тишина: пульт запускается без
@@ -13,7 +13,7 @@ import traceback
 from .core import bootstrap
 from .core.bootstrap import StartupError
 
-APP_TITLE = "Выезды · Пульт"
+APP_TITLE = "Хард · Пульт"
 NO_QT_TEXT = (
     "Не установлена библиотека PySide6 (Qt 6), на которой построено окно пульта.\n\n"
     "Установи зависимости один раз:\n"
@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication.instance() or QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName(APP_TITLE)
-    app.setOrganizationName("Выезды")
+    app.setOrganizationName("Хард")
     theme.apply(app)
     try:
         bootstrap.ensure_hardbot()

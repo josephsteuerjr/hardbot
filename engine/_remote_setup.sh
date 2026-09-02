@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Серверный bootstrap движка «Контур · Выезды» (вызывается deploy.sh / deploy.ps1
+# Серверный bootstrap движка «Хард» (вызывается deploy.sh / deploy.ps1
 # после распаковки engine.tgz в /opt/kontur). Идемпотентен. ПД здесь нет — только код.
 set -euo pipefail
 

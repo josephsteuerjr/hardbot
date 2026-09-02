@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Резервная копия «Выезды».
+# Резервная копия «Хард».
 #
 #   ./backup.sh            # база + фотографии
 #   ./backup.sh --db-only  # только база (секунды; так делает update.sh)
@@ -50,7 +50,7 @@ if [ "$(health_of app)" != "нет" ] && [ "$(docker inspect -f '{{.State.Runnin
 else
   # Контейнер не работает — база не занята; читаем её одноразовым контейнером
   # из того же образа (образ есть после install.sh).
-  docker run --rm -v "$DEPLOY_DIR/data:/data:ro" vyezdy-app python -c "$SNIPPET" > "$dest/hardbot.db"
+  docker run --rm -v "$DEPLOY_DIR/data:/data:ro" hard-app python -c "$SNIPPET" > "$dest/hardbot.db"
 fi
 
 if [ ! -s "$dest/hardbot.db" ] || [ "$(head -c 15 "$dest/hardbot.db")" != "SQLite format 3" ]; then

@@ -17,7 +17,7 @@ def test_default_configuration_is_complete_and_renderable():
     assert len(bundle.config_identity) == 64
     assert int(bundle.config_identity, 16) >= 0
     assert bundle.app.schema_version == 2
-    assert bundle.app.product_name == "Выезды · Реестры"
+    assert bundle.app.product_name == "Хард · Реестры"
     assert set(bundle.fields.profile_tags) == {"hard", "soft"}
     assert bundle.master_path(datetime(2026, 7, 27)).name == "ОБЩИЙ РЕЕСТР ИЮЛЬ.xlsb"
     assert bundle.workspace_path().name == "registry_cycle_v2"

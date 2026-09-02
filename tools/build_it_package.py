@@ -1,8 +1,8 @@
-"""Сборщик пакета исходников «Выезды» для передачи ИТ-службе.
+"""Сборщик пакета исходников «Хард» для передачи ИТ-службе.
 
     python tools/build_it_package.py [--version 1.2.0] [--out dist] [--root .]
 
-Результат: ``dist/vyezdy-<версия>-<дата>.zip`` и рядом ``.sha256``. Внутри —
+Результат: ``dist/hard-<версия>-<дата>.zip`` и рядом ``.sha256``. Внутри —
 снимок исходников без git-истории: сервер (server/), служба речи (stt/),
 пульт (pult/), перенос реестров (registry_cycle/), установка (deploy/),
 документы (docs/), тесты (tests/), инструменты (tools/) и корневые файлы
@@ -29,7 +29,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parent.parent
-PACKAGE_PREFIX = "vyezdy"
+PACKAGE_PREFIX = "hard"
 
 # Что едет в пакет: каталоги целиком (после исключений) и корневые файлы.
 INCLUDE_DIRS = ("server", "stt", "pult", "registry_cycle", "deploy", "docs", "tests", "tools")
@@ -67,7 +67,7 @@ EXCLUDE_SUFFIXES = {".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sql
                     ".log", ".csv", ".jsonl", ".pmtiles", ".zip", ".7z", ".tar", ".gz", ".exe",
                     ".pem", ".key", ".ppk", ".tmp", ".part"}
 
-TEXT_SUFFIXES = {".py", ".md", ".txt", ".sh", ".yml", ".yaml", ".json", ".ini", ".cfg", ".toml",
+TEXT_SUFFIXES = {".py", ".pyw", ".md", ".txt", ".sh", ".yml", ".yaml", ".json", ".ini", ".cfg", ".toml",
                  ".bat", ".html", ".js", ".css", ".webmanifest", ".example", ""}
 TEXT_NAMES = {"Dockerfile", "Caddyfile", ".dockerignore", ".gitignore", ".gitattributes",
               ".env.example"}
@@ -227,7 +227,7 @@ def normalized_bytes(root: Path, relative: PurePosixPath) -> bytes:
 # --- README пакета -------------------------------------------------------------------------
 
 def package_readme(version: str, built: str) -> str:
-    return f"""# Выезды — пакет исходников для ИТ-службы
+    return f"""# Хард — пакет исходников для ИТ-службы
 
 Версия {version}, собрано {built}. Снимок исходников без истории изменений.
 
@@ -236,8 +236,8 @@ def package_readme(version: str, built: str) -> str:
 | Каталог / файл | Что это |
 |---|---|
 | `deploy/` | **Начинать отсюда.** Установка сервера одной командой (`install.sh`), обновление, резервные копии, диагностика. Инструкция — `deploy/README.md` |
-| `server/` | Сервер: приложение выездника (PWA), административный API для пульта, Telegram-бот (необязателен). Собирается в контейнер `vyezdy-app` |
-| `stt/` | Служба распознавания речи для голосовых комментариев. Свой контейнер `vyezdy-stt`, без внешних сервисов. Справка — `stt/README.md` |
+| `server/` | Сервер: приложение выездника (PWA), административный API для пульта, Telegram-бот (необязателен). Собирается в контейнер `hard-app` |
+| `stt/` | Служба распознавания речи для голосовых комментариев. Свой контейнер `hard-stt`, без внешних сервисов. Справка — `stt/README.md` |
 | `pult/` | Пульт аналитика — настольная программа (Windows, Python + Qt). Запуск двойным кликом `pult/Пульт.pyw`. Инструкция — `pult/README.md` |
 | `registry_cycle/` | Перенос реестров между личными книгами и общим реестром (Excel, Windows). Инструкция — `registry_cycle/README.md`, `registry_cycle/MANUAL_TRANSFER.md` |
 | `docs/security/` | Модель безопасности: архитектура, потоки данных, инвентаризация ПД, угрозы, контроли |
@@ -347,7 +347,7 @@ def build(root: Path, out_dir: Path, version: str | None = None,
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Пакет исходников «Выезды» для ИТ-службы")
+    parser = argparse.ArgumentParser(description="Пакет исходников «Хард» для ИТ-службы")
     parser.add_argument("--version", help="версия пакета (по умолчанию — из тега git)")
     parser.add_argument("--out", default=str(ROOT / "dist"), help="куда положить zip (dist/)")
     parser.add_argument("--root", default=str(ROOT), help="корень проекта")

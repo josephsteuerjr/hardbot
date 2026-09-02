@@ -1,4 +1,4 @@
-# «Выезды» — полный стек для установки ИТ-службой.
+# «Хард» — полный стек для установки ИТ-службой.
 #
 # Два базовых сервиса: приложение (app) и служба распознавания речи (stt).
 # Всё состояние приложения — в ./data, модели речи — в ./models, поэтому
@@ -8,13 +8,13 @@
 #
 # Обычно эти файлы не запускают руками: ./install.sh делает всё сам.
 
-name: vyezdy
+name: hard
 
 services:
   app:
     build: ../server
-    image: vyezdy-app
-    container_name: vyezdy-app
+    image: hard-app
+    container_name: hard-app
     restart: unless-stopped
     env_file: .env
     environment:
@@ -53,8 +53,8 @@ services:
 
   stt:
     build: ../stt
-    image: vyezdy-stt
-    container_name: vyezdy-stt
+    image: hard-stt
+    container_name: hard-stt
     restart: unless-stopped
     environment:
       STT_MODEL: ${STT_MODEL:-small}
@@ -94,7 +94,7 @@ services:
   osrm-uz:
     profiles: ["routing"]
     image: ghcr.io/project-osrm/osrm-backend:latest
-    container_name: vyezdy-osrm-uz
+    container_name: hard-osrm-uz
     restart: unless-stopped
     command: osrm-routed --algorithm mld /data/uzbekistan-latest.osrm
     volumes:
@@ -108,7 +108,7 @@ services:
   osrm-tj:
     profiles: ["routing"]
     image: ghcr.io/project-osrm/osrm-backend:latest
-    container_name: vyezdy-osrm-tj
+    container_name: hard-osrm-tj
     restart: unless-stopped
     command: osrm-routed --algorithm mld /data/tajikistan-latest.osrm
     volumes:
@@ -126,7 +126,7 @@ services:
   caddy:
     profiles: ["proxy"]
     image: caddy:2
-    container_name: vyezdy-caddy
+    container_name: hard-caddy
     restart: unless-stopped
     depends_on:
       - app

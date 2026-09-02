@@ -83,7 +83,7 @@ class NavRail(QFrame):
         logo.addWidget(mark)
         titles = QVBoxLayout()
         titles.setSpacing(0)
-        name = QLabel("Выезды")
+        name = QLabel("Хард")
         name.setFont(theme.app_font(11, bold=True))
         sub = QLabel("ПУЛЬТ")
         sub.setProperty("role", "caps")

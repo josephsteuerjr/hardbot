@@ -355,7 +355,7 @@ def _shell_version() -> int:
     """Номер версии оболочки из sw.js. Дублировать его в коде нельзя: разъедется."""
     try:
         text = (Path(__file__).parent / "miniapp" / "sw.js").read_text(encoding="utf-8")
-        m = re.search(r"vyezdy-shell-v(\d+)", text)
+        m = re.search(r"hard-shell-v(\d+)", text)
         return int(m.group(1)) if m else 0
     except OSError:
         return 0

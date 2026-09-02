@@ -1,4 +1,4 @@
-"""Главное окно «Выезды · Пульт»: рейка, шапка, стопка разделов, тост.
+"""Главное окно «Хард · Пульт»: рейка, шапка, стопка разделов, тост.
 
 `Pult` собирает разделы-примеси и держит общее: настройки, учётные данные,
 клиент API, фоновые задачи, навигацию. Имена методов и атрибутов состояния
@@ -43,7 +43,7 @@ class Pult(QMainWindow, ImportFlow, DashboardSection, RegistrySection, PriorityS
 
     def __init__(self, settings: Settings | None = None) -> None:
         super().__init__()
-        self.setWindowTitle("Выезды · Пульт")
+        self.setWindowTitle("Хард · Пульт")
         if ICON_PATH.is_file():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
         self.settings = settings if settings is not None else Settings.load()

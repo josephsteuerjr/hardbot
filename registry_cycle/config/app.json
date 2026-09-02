@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "product": {
-    "name": "Выезды · Реестры",
+    "name": "Хард · Реестры",
     "environment": "СНГ"
   },
   "calendar": {
@@ -79,7 +79,7 @@
     "local_excel_attempts": 2
   },
   "scheduler": {
-    "task_name": "Выезды — цикл реестров СНГ",
+    "task_name": "Хард — цикл реестров СНГ",
     "enabled": false,
     "publish": false,
     "time": "23:40",
@@ -138,7 +138,7 @@
   },
   "manual_ui": {
     "window": {
-      "title": "Выезды · Перенос реестров",
+      "title": "Хард · Перенос реестров",
       "subtitle": "Два независимых шага: сначала вверх, затем вниз"
     },
     "actions": {

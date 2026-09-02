@@ -2,7 +2,7 @@
 FROM python:3.12-slim
 
 # Метка — по ней update.sh чистит только НАШИ устаревшие слои (docker image prune).
-LABEL ru.vyezdy.service="app"
+LABEL ru.hard.service="app"
 
 WORKDIR /app
 COPY requirements.txt .

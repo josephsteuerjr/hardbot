@@ -23,7 +23,7 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 # Тесты, трогающие БД, работают в отдельной временной папке (НЕ рабочая БД).
-os.environ.setdefault("APP_DATA", tempfile.mkdtemp(prefix="vyezdy_pytest_"))
+os.environ.setdefault("APP_DATA", tempfile.mkdtemp(prefix="hard_pytest_"))
 
 
 @pytest.fixture(autouse=True)

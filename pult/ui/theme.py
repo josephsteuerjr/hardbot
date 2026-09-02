@@ -53,7 +53,7 @@ _CHEVRON_SVG = (
 def asset_dir() -> Path:
     """Картинки для QSS (галочка, шеврон): QSS умеет только файлы, поэтому
     пишем их во временную папку один раз за запуск."""
-    folder = Path(tempfile.gettempdir()) / "vyezdy-pult-ui"
+    folder = Path(tempfile.gettempdir()) / "hard-pult-ui"
     folder.mkdir(parents=True, exist_ok=True)
     for name, svg, color in (("check.svg", _CHECK_SVG, ON_ACCENT),
                              ("chevron.svg", _CHEVRON_SVG, MUTED)):

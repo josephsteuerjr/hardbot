@@ -1,6 +1,6 @@
 {
-  "name": "Выезды",
-  "short_name": "Выезды",
+  "name": "Хард",
+  "short_name": "Хард",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

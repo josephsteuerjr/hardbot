@@ -1,4 +1,4 @@
-# Деплой движка «Контур · Выезды» — ЧИСТЫЙ ssh/scp по ключу (без Posh-SSH).
+# Деплой движка «Хард» — ЧИСТЫЙ ssh/scp по ключу (без Posh-SSH).
 #   powershell -ExecutionPolicy Bypass -File engine\deploy.ps1
 #
 # Несёт ТОЛЬКО КОД — реальных ПД на сервере нет.
