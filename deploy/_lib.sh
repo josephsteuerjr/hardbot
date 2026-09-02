@@ -67,6 +67,17 @@ services_enabled() {
   if voice_enabled; then echo "app stt"; else echo "app"; fi
 }
 
+# Профили из .env: proxy требует DOMAIN, иначе Caddy стартует с пустым адресом.
+check_profiles() {
+  local profiles
+  profiles="$(env_get COMPOSE_PROFILES)"
+  case ",${profiles}," in
+    *,proxy,*)
+      [ -n "$(env_get DOMAIN)" ] || die "в .env включён профиль proxy, но не задан DOMAIN"
+      ;;
+  esac
+}
+
 container_id() { compose ps -q "$1" 2>/dev/null || true; }
 
 # health_of СЕРВИС → healthy | starting | unhealthy | running | exited | нет

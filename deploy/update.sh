@@ -12,6 +12,7 @@ say "== Выезды: обновление =="
 check_docker
 [ -f .env ] || die "нет .env — сначала ./install.sh"
 [ -s secrets/stt.token ] || die "нет secrets/stt.token — сначала ./install.sh"
+check_profiles
 
 say "1/4 Резервная копия базы"
 ./backup.sh --db-only

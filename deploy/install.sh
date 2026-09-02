@@ -46,6 +46,7 @@ mkdir -p data data/backups models backups
 ok "каталоги data/ models/ backups/ на месте"
 
 # --- 4. Сборка и запуск -----------------------------------------------------------
+check_profiles
 services="$(services_enabled)"
 say "Сборка образов: $services (первый раз занимает несколько минут)…"
 compose build $services

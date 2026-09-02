@@ -131,7 +131,9 @@ services:
     depends_on:
       - app
     environment:
-      DOMAIN: ${DOMAIN:?в .env не задан DOMAIN — он нужен профилю proxy}
+      # Не ${DOMAIN:?…}: compose подставляет переменные ДО отбора профилей, и
+      # обязательность ломала бы сборку даже с выключенным proxy. Проверяют скрипты.
+      DOMAIN: ${DOMAIN:-}
     ports:
       - "80:80"
       - "443:443"
