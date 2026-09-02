@@ -1,5 +1,5 @@
 {
-  "name": "Fieldwork light",
+  "name": "Выезды light",
   "colors": {
     "canvas": "#FAF9F5",
     "card": "#FFFFFF",
@@ -17,13 +17,13 @@
     "focus": "#B9B2A6"
   },
   "typography": {
-    "family": "Inter",
+    "family": "Segoe UI Variable",
     "fallback": "Segoe UI",
-    "title": 26,
-    "heading": 17,
+    "title": 17,
+    "heading": 12,
     "body": 10,
     "small": 9,
-    "metric": 23
+    "metric": 14
   },
   "layout": {
     "window_width": 980,

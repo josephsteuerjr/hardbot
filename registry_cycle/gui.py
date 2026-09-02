@@ -1,17 +1,27 @@
-"""Single calm GUI with two independent manual registry operations."""
+"""Одно спокойное окно с двумя независимыми ручными операциями (PySide6).
+
+Шаг 2 никогда не стартует сам после шага 1. У каждого шага своя проверка,
+план, подтверждение фразой, архивная копия и квитанция. Тексты — из
+`config/app.json` (`manual_ui`), цвета и размеры — из `config/theme.json`.
+"""
 
 from __future__ import annotations
 
 import copy
 import os
-import queue
-import threading
-import tkinter as tk
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame, QGridLayout,
+                               QHBoxLayout, QLabel, QLayout, QLineEdit, QMainWindow,
+                               QMessageBox, QProgressBar, QPushButton, QScrollArea,
+                               QSizePolicy, QVBoxLayout, QWidget)
+
+from . import theme
 from .config import ConfigBundle, load_config_bundle, save_app_config
 from .errors import ConfigurationError, RegistryCycleError
 from .manual_downward import (
@@ -28,6 +38,7 @@ from .manual_upward import (
 from .models import Issue
 
 OperationRun = ManualUpwardRun | ManualDownwardRun
+ICON_PATH = Path(__file__).resolve().parent / "icon.png"
 
 
 def _short(value: Any, limit: int) -> str:
@@ -35,61 +46,111 @@ def _short(value: Any, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _card(parent: tk.Misc, colors: dict[str, str], padding: int) -> tk.Frame:
-    return tk.Frame(
-        parent,
-        bg=colors["card"],
-        highlightbackground=colors["border"],
-        highlightthickness=1,
-        padx=padding,
-        pady=padding,
-    )
+def _clear(layout: QLayout) -> None:
+    while layout.count():
+        item = layout.takeAt(0)
+        w = item.widget()
+        if w is not None:
+            w.setParent(None)
+            w.deleteLater()
+        elif item.layout() is not None:
+            _clear(item.layout())
 
 
-class _ScrollablePanel(tk.Frame):
-    def __init__(self, parent: tk.Misc, colors: dict[str, str]) -> None:
-        super().__init__(parent, bg=colors["canvas"])
-        self.canvas = tk.Canvas(
-            self,
-            bg=colors["canvas"],
-            highlightthickness=0,
-            bd=0,
-        )
-        scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.content = tk.Frame(self.canvas, bg=colors["canvas"])
-        self.window = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
-        self.content.bind(
-            "<Configure>",
-            lambda _event: self.canvas.configure(scrollregion=self.canvas.bbox("all")),
-        )
-        self.canvas.bind(
-            "<Configure>",
-            lambda event: self.canvas.itemconfigure(self.window, width=event.width),
-        )
-        self.canvas.bind("<Enter>", self._bind_wheel)
-        self.canvas.bind("<Leave>", self._unbind_wheel)
+def _card(padding: int) -> tuple[QFrame, QVBoxLayout]:
+    frame = QFrame()
+    frame.setObjectName("Card")
+    lay = QVBoxLayout(frame)
+    lay.setContentsMargins(padding, padding, padding, padding)
+    lay.setSpacing(0)
+    return frame, lay
 
-    def _bind_wheel(self, _event: tk.Event[tk.Misc]) -> None:
-        self.canvas.bind_all(
-            "<MouseWheel>",
-            lambda event: self.canvas.yview_scroll(int(-event.delta / 120), "units"),
-        )
 
-    def _unbind_wheel(self, _event: tk.Event[tk.Misc]) -> None:
-        self.canvas.unbind_all("<MouseWheel>")
+def _label(text: str, font, role: str | None = None, wrap: bool = True) -> QLabel:
+    w = QLabel(text)
+    w.setFont(font)
+    w.setWordWrap(wrap)
+    w.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    if role:
+        w.setProperty("role", role)
+    return w
+
+
+def _message(icon, title: str, text: str, parent: QWidget | None, button: str) -> None:
+    box = QMessageBox(parent)
+    box.setIcon(icon)
+    box.setWindowTitle(title)
+    box.setText(text)
+    box.addButton(button, QMessageBox.ButtonRole.AcceptRole)
+    box.exec()
+
+
+# --- фоновые задачи ------------------------------------------------------------
+class _Signals(QObject):
+    progress = Signal(str, str)
+    finished = Signal(object, object)
+    failed = Signal(object)
+
+
+class _Worker(QRunnable):
+    def __init__(self, action: Callable[[], Any], success, signals: _Signals) -> None:
+        super().__init__()
+        self.action = action
+        self.success = success
+        self.signals = signals
+
+    def run(self) -> None:
+        try:
+            result = self.action()
+        except Exception as exc:  # noqa: BLE001 — показывается в UI-потоке
+            self.signals.failed.emit(exc)
+        else:
+            self.signals.finished.emit(self.success, result)
 
 
 @dataclass
 class _RootControls:
-    frame: tk.Frame
-    country: tk.StringVar
-    path: tk.StringVar
+    frame: QFrame
+    country: QLineEdit
+    path: QLineEdit
 
 
-class SourceFoldersDialog(tk.Toplevel):
+class _Scroll(QScrollArea):
+    """Прокручиваемый холст с содержимым, центрированным по content_width."""
+
+    def __init__(self, content_width: int) -> None:
+        super().__init__()
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        canvas = QWidget()
+        canvas.setObjectName("Canvas")
+        row = QHBoxLayout(canvas)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.content = QWidget()
+        self.content.setObjectName("Canvas")
+        self.content.setMaximumWidth(content_width)
+        self.body = QVBoxLayout(self.content)
+        self.body.setContentsMargins(0, 0, 0, 0)
+        self.body.setSpacing(0)
+        self.body.addStretch(1)
+        row.addStretch(1)
+        row.addWidget(self.content, 1)
+        row.addStretch(1)
+        self.setWidget(canvas)
+
+    def add(self, widget: QWidget, gap: int = 0) -> QWidget:
+        self.body.insertWidget(self.body.count() - 1, widget)
+        if gap:
+            self.body.insertSpacing(self.body.count() - 1, gap)
+        return widget
+
+    def clear(self) -> None:
+        _clear(self.body)
+        self.body.addStretch(1)
+
+
+class SourceFoldersDialog(QDialog):
     """Small config-backed folder picker; no naming expressions or rules."""
 
     def __init__(self, app: "ManualTransferApp") -> None:
@@ -98,202 +159,102 @@ class SourceFoldersDialog(tk.Toplevel):
         self.bundle = app.bundle
         self.ui = app.ui
         self.colors = app.colors
-        self.layout = app.layout
+        self.layout_ = app.layout_
         self.payload = copy.deepcopy(self.bundle.pinned_config("app.json"))
         self.rows: list[_RootControls] = []
-        self.title(self.ui["sections"]["rules"])
-        self.geometry(f"{self.layout['dialog_width']}x{self.layout['dialog_height']}")
-        self.minsize(
-            int(self.layout["dialog_minimum_width"]),
-            int(self.layout["dialog_minimum_height"]),
-        )
-        self.configure(bg=self.colors["canvas"])
-        self.transient(app)
-        self.grab_set()
+        self.setWindowTitle(self.ui["sections"]["rules"])
+        self.resize(int(self.layout_["dialog_width"]), int(self.layout_["dialog_height"]))
+        self.setMinimumSize(int(self.layout_["dialog_minimum_width"]),
+                            int(self.layout_["dialog_minimum_height"]))
+        self.setModal(True)
         self._build()
 
-    def _font(self, size: int, weight: str = "normal") -> tuple[str, int, str]:
+    def _font(self, size: int | str, weight: str = "normal"):
         return self.app.font(size, weight)
 
-    def _button(
-        self,
-        parent: tk.Misc,
-        text: str,
-        command: Callable[[], None],
-        *,
-        primary: bool = False,
-        compact: bool = False,
-    ) -> tk.Button:
-        background = self.colors["accent"] if primary else self.colors["card"]
-        foreground = self.colors["accent_text"] if primary else self.colors["text"]
-        return tk.Button(
-            parent,
-            text=text,
-            command=command,
-            bg=background,
-            fg=foreground,
-            activebackground=(
-                self.colors["accent_hover"] if primary else self.colors["alt"]
-            ),
-            activeforeground=foreground,
-            relief="flat",
-            bd=0,
-            highlightthickness=0 if primary else 1,
-            highlightbackground=self.colors["border"],
-            padx=10 if compact else 14,
-            pady=5 if compact else 9,
-            cursor="hand2",
-            font=self._font(
-                self.app.typography["small"] if compact else self.app.typography["body"],
-                "bold" if primary else "normal",
-            ),
-        )
+    def _button(self, text: str, command: Callable[[], None], *, primary: bool = False,
+                compact: bool = False) -> QPushButton:
+        return self.app._button(text, command, primary=primary, compact=compact)
 
-    def _entry(self, parent: tk.Misc, variable: tk.StringVar) -> tk.Entry:
-        return tk.Entry(
-            parent,
-            textvariable=variable,
-            bg=self.colors["card"],
-            fg=self.colors["text"],
-            insertbackground=self.colors["text"],
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground=self.colors["border"],
-            highlightcolor=self.colors["focus"],
-            font=self._font(self.app.typography["body"]),
-        )
+    def _entry(self, value: str) -> QLineEdit:
+        edit = QLineEdit(value)
+        edit.setFont(self._font("body"))
+        return edit
 
     def _build(self) -> None:
-        padding = int(self.layout["page_padding"])
-        header = tk.Frame(self, bg=self.colors["canvas"])
-        header.pack(fill="x", padx=padding, pady=(padding, 12))
-        tk.Label(
-            header,
-            text=self.ui["sections"]["rules"],
-            bg=self.colors["canvas"],
-            fg=self.colors["text"],
-            font=self._font(self.app.typography["heading"], "bold"),
-        ).pack(anchor="w")
-        tk.Label(
-            header,
-            text=self.ui["copy"]["rules"],
-            bg=self.colors["canvas"],
-            fg=self.colors["text_muted"],
-            justify="left",
-            wraplength=int(self.layout["dialog_width"]) - 2 * padding,
-            font=self._font(self.app.typography["body"]),
-        ).pack(anchor="w", pady=(5, 0))
-
-        panel = _ScrollablePanel(self, self.colors)
-        panel.pack(fill="both", expand=True, padx=padding)
-        self.rows_frame = tk.Frame(panel.content, bg=self.colors["canvas"])
-        self.rows_frame.pack(fill="x")
+        padding = int(self.layout_["page_padding"])
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(padding, padding, padding, padding)
+        lay.setSpacing(12)
+        lay.addWidget(_label(self.ui["sections"]["rules"], self._font("heading", "bold")))
+        lay.addWidget(_label(self.ui["copy"]["rules"], self._font("body"), "muted"))
+        self.scroll = _Scroll(int(self.layout_["dialog_width"]))
+        lay.addWidget(self.scroll, 1)
         for source in self.payload["paths"]["portfolio_roots"]:
             self._add_row(source)
-        self._button(
-            panel.content,
-            self.ui["actions"]["add_root"],
-            lambda: self._add_row(None),
-            compact=True,
-        ).pack(anchor="w", pady=(2, 16))
-
-        footer = tk.Frame(self, bg=self.colors["canvas"])
-        footer.pack(fill="x", padx=padding, pady=padding)
-        self._button(footer, self.ui["actions"]["cancel"], self.destroy).pack(side="right")
-        self._button(
-            footer,
-            self.ui["actions"]["save"],
-            self._save,
-            primary=True,
-        ).pack(side="right", padx=(0, 8))
+        self.add_button = self._button(self.ui["actions"]["add_root"],
+                                       lambda: self._add_row(None), compact=True)
+        self.scroll.add(self.add_button, 16)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        footer.addWidget(self._button(self.ui["actions"]["save"], self._save, primary=True))
+        footer.addWidget(self._button(self.ui["actions"]["cancel"], self.reject))
+        lay.addLayout(footer)
 
     def _add_row(self, source: dict[str, Any] | None) -> None:
         source = source or {}
-        frame = _card(self.rows_frame, self.colors, int(self.layout["card_padding"]))
-        frame.pack(fill="x", pady=(0, 10))
-        controls = _RootControls(
-            frame,
-            tk.StringVar(value=str(source.get("country", ""))),
-            tk.StringVar(value=str(source.get("path", ""))),
-        )
+        frame, body = _card(int(self.layout_["card_padding"]))
+        controls = _RootControls(frame, self._entry(str(source.get("country", ""))),
+                                 self._entry(str(source.get("path", ""))))
         self.rows.append(controls)
-        top = tk.Frame(frame, bg=self.colors["card"])
-        top.pack(fill="x")
-        tk.Label(
-            top,
-            text=self.ui["sections"]["folders"],
-            bg=self.colors["card"],
-            fg=self.colors["text"],
-            font=self._font(self.app.typography["body"], "bold"),
-        ).pack(side="left")
-        self._button(
-            top,
-            self.ui["actions"]["remove"],
-            lambda: self._remove_row(controls),
-            compact=True,
-        ).pack(side="right")
-        form = tk.Frame(frame, bg=self.colors["card"])
-        form.pack(fill="x", pady=(10, 0))
-        tk.Label(
-            form,
-            text=self.ui["rules"]["country"],
-            bg=self.colors["card"],
-            fg=self.colors["text_muted"],
-            font=self._font(self.app.typography["small"], "bold"),
-        ).grid(row=0, column=0, sticky="w")
-        tk.Label(
-            form,
-            text=self.ui["rules"]["root_path"],
-            bg=self.colors["card"],
-            fg=self.colors["text_muted"],
-            font=self._font(self.app.typography["small"], "bold"),
-        ).grid(row=0, column=1, sticky="w", padx=(12, 0))
-        self._entry(form, controls.country).grid(row=1, column=0, sticky="ew", pady=(4, 0))
-        self._entry(form, controls.path).grid(
-            row=1,
-            column=1,
-            sticky="ew",
-            padx=(12, 8),
-            pady=(4, 0),
-        )
-        self._button(
-            form,
-            self.ui["actions"]["browse"],
-            lambda: self._browse(controls),
-            compact=True,
-        ).grid(row=1, column=2, pady=(4, 0))
-        form.grid_columnconfigure(1, weight=1)
-        tk.Label(
-            frame,
-            text=self.ui["rules"]["root_hint"],
-            bg=self.colors["card"],
-            fg=self.colors["text_muted"],
-            justify="left",
-            wraplength=int(self.layout["dialog_width"]) - 120,
-            font=self._font(self.app.typography["small"]),
-        ).pack(anchor="w", pady=(9, 0))
+        top = QHBoxLayout()
+        top.addWidget(_label(self.ui["sections"]["folders"], self._font("body", "bold")))
+        top.addStretch(1)
+        top.addWidget(self._button(self.ui["actions"]["remove"],
+                                   lambda: self._remove_row(controls), compact=True))
+        body.addLayout(top)
+        body.addSpacing(10)
+        form = QGridLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(4)
+        form.addWidget(_label(self.ui["rules"]["country"], self._font("small", "bold"),
+                              "caps"), 0, 0)
+        form.addWidget(_label(self.ui["rules"]["root_path"], self._font("small", "bold"),
+                              "caps"), 0, 1)
+        form.addWidget(controls.country, 1, 0)
+        form.addWidget(controls.path, 1, 1)
+        form.addWidget(self._button(self.ui["actions"]["browse"],
+                                    lambda: self._browse(controls), compact=True), 1, 2)
+        form.setColumnStretch(1, 1)
+        body.addLayout(form)
+        body.addSpacing(9)
+        body.addWidget(_label(self.ui["rules"]["root_hint"], self._font("small"), "muted"))
+        # новая папка встаёт перед кнопкой «Добавить корень» и растяжкой
+        index = max(self.scroll.body.count() - 1, 0)
+        if hasattr(self, "add_button"):
+            index = self.scroll.body.indexOf(self.add_button)
+        self.scroll.body.insertWidget(index, frame)
+        self.scroll.body.insertSpacing(index + 1, 10)
 
     def _browse(self, controls: _RootControls) -> None:
-        selected = filedialog.askdirectory(
-            parent=self,
-            initialdir=controls.path.get().strip() or None,
-            mustexist=True,
-        )
+        selected = QFileDialog.getExistingDirectory(
+            self, self.ui["actions"]["browse"], controls.path.text().strip() or "")
         if selected:
-            controls.path.set(selected)
+            controls.path.setText(selected)
 
     def _remove_row(self, controls: _RootControls) -> None:
         if controls in self.rows:
             self.rows.remove(controls)
-        controls.frame.destroy()
+        controls.frame.setParent(None)
+        controls.frame.deleteLater()
 
     def _candidate(self) -> dict[str, Any]:
         if not self.rows:
             raise ConfigurationError(self.ui["rules"]["empty_root"])
         roots = []
         for controls in self.rows:
-            country = controls.country.get().strip()
-            path = controls.path.get().strip()
+            country = controls.country.text().strip()
+            path = controls.path.text().strip()
             if not country or not path:
                 raise ConfigurationError(self.ui["rules"]["empty_root"])
             roots.append({"country": country, "path": path})
@@ -305,13 +266,64 @@ class SourceFoldersDialog(tk.Toplevel):
         try:
             bundle = save_app_config(self.bundle.config_dir, self._candidate())
         except RegistryCycleError as exc:
-            messagebox.showerror(self.ui["sections"]["rules"], str(exc), parent=self)
+            _message(QMessageBox.Icon.Critical, self.ui["sections"]["rules"], str(exc), self,
+                     self.ui["actions"]["close"])
             return
         self.app.rules_saved(bundle)
-        self.destroy()
+        self.accept()
 
 
-class ManualTransferApp(tk.Tk):
+class PublishDialog(QDialog):
+    """Подтверждение фразой: пока она не совпала, ничего не меняется."""
+
+    def __init__(self, app: "ManualTransferApp", operation: str, phrase: str) -> None:
+        super().__init__(app)
+        self.app = app
+        self.phrase = phrase
+        self.confirmed = False
+        copy_block = app.ui["confirmations"][operation]
+        self.setWindowTitle(copy_block["title"])
+        self.setModal(True)
+        self.setFixedWidth(int(app.layout_["modal_width"]))
+        pad = int(app.layout_["modal_padding"])
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(pad, pad, pad, pad)
+        frame, body = _card(int(app.layout_["card_padding"]))
+        body.setSpacing(0)
+        body.addWidget(_label(copy_block["title"], app.font("heading", "bold")))
+        body.addSpacing(7)
+        body.addWidget(_label(copy_block["body"], app.font("body"), "muted"))
+        body.addSpacing(13)
+        body.addWidget(_label(copy_block["input"].format(phrase=phrase),
+                              app.font("body", "bold")))
+        body.addSpacing(5)
+        self.entry = QLineEdit()
+        self.entry.setFont(app.font("body"))
+        self.entry.returnPressed.connect(self._confirm)
+        body.addWidget(self.entry)
+        body.addSpacing(5)
+        self.error = _label("", app.font("small"), "danger")
+        body.addWidget(self.error)
+        body.addSpacing(15)
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        actions.addWidget(app._button(app.ui["actions"][f"publish_{operation}"],
+                                      self._confirm, primary=True))
+        actions.addWidget(app._button(app.ui["actions"]["cancel"], self.reject))
+        body.addLayout(actions)
+        outer.addWidget(frame)
+        self.invalid_text = copy_block["invalid"]
+        self.entry.setFocus()
+
+    def _confirm(self) -> None:
+        if self.entry.text().strip() != self.phrase:
+            self.error.setText(self.invalid_text)
+            return
+        self.confirmed = True
+        self.accept()
+
+
+class ManualTransferApp(QMainWindow):
     """One window; step 2 never starts automatically after step 1."""
 
     _STATE_COLORS = {
@@ -330,7 +342,7 @@ class ManualTransferApp(tk.Tk):
         self.bundle = bundle
         self.ui = bundle.app.manual_ui
         self.colors = bundle.theme["colors"]
-        self.layout = bundle.theme["layout"]
+        self.layout_ = bundle.theme["layout"]
         self.typography = bundle.theme["typography"]
         self.runs: dict[str, OperationRun | None] = {"upward": None, "downward": None}
         self.states = {"upward": "idle", "downward": "idle"}
@@ -341,194 +353,124 @@ class ManualTransferApp(tk.Tk):
         }
         self.active_operation: str | None = None
         self.busy_operation: str | None = None
-        self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
-        self.action_buttons: list[tk.Button] = []
+        self.action_buttons: list[QPushButton] = []
+        self.pool = QThreadPool.globalInstance()
+        self._signals: set[_Signals] = set()
         self._build_window()
         self._build_shell()
         self._refresh_view()
-        self.after(80, self._poll_events)
 
     @property
     def busy(self) -> bool:
         return self.busy_operation is not None
 
-    def font(self, size: int, weight: str = "normal") -> tuple[str, int, str]:
-        family = str(self.typography.get("family") or self.typography["fallback"])
-        return family, int(size), weight
+    def font(self, size: int | str, weight: str = "normal"):
+        return theme.font(self.typography, size, weight)
 
+    # --- каркас ---------------------------------------------------------------
     def _build_window(self) -> None:
-        self.title(self.ui["window"]["title"])
-        self.geometry(f"{self.layout['window_width']}x{self.layout['window_height']}")
-        self.minsize(int(self.layout["minimum_width"]), int(self.layout["minimum_height"]))
-        self.configure(bg=self.colors["canvas"])
-        style = ttk.Style(self)
-        style.theme_use("clam")
-        style.configure(
-            "Fieldwork.Horizontal.TProgressbar",
-            troughcolor=self.colors["alt"],
-            background=self.colors["accent"],
-            bordercolor=self.colors["alt"],
-            lightcolor=self.colors["accent"],
-            darkcolor=self.colors["accent"],
-        )
+        self.setWindowTitle(self.ui["window"]["title"])
+        if ICON_PATH.is_file():
+            self.setWindowIcon(QIcon(str(ICON_PATH)))
+        self.resize(int(self.layout_["window_width"]), int(self.layout_["window_height"]))
+        self.setMinimumSize(int(self.layout_["minimum_width"]),
+                            int(self.layout_["minimum_height"]))
 
     def _build_shell(self) -> None:
-        padding = int(self.layout["page_padding"])
-        header = tk.Frame(self, bg=self.colors["canvas"])
-        header.pack(fill="x", padx=padding, pady=(padding, 14))
-        title = tk.Frame(header, bg=self.colors["canvas"])
-        title.pack(side="left", fill="x", expand=True)
-        self.title_label = tk.Label(
-            title,
-            text=self.ui["window"]["title"],
-            bg=self.colors["canvas"],
-            fg=self.colors["text"],
-            font=self.font(self.typography["title"], "bold"),
-        )
-        self.title_label.pack(anchor="w")
-        self.subtitle_label = tk.Label(
-            title,
-            text=self.ui["window"]["subtitle"],
-            bg=self.colors["canvas"],
-            fg=self.colors["text_muted"],
-            font=self.font(self.typography["body"]),
-        )
-        self.subtitle_label.pack(anchor="w", pady=(3, 0))
-        self.rules_button = self._button(
-            header,
-            self.ui["actions"]["rules"],
-            self.open_rules,
-            compact=True,
-        )
-        self.rules_button.pack(side="right", padx=(14, 0), pady=(4, 0))
-        self.panel = _ScrollablePanel(self, self.colors)
-        self.panel.pack(fill="both", expand=True, padx=padding, pady=(0, padding))
-        self.content = tk.Frame(self.panel.content, bg=self.colors["canvas"])
-        self.content.pack(fill="both", expand=True)
-        self.panel.content.bind("<Configure>", self._center_content)
+        padding = int(self.layout_["page_padding"])
+        root = QWidget()
+        root.setObjectName("Canvas")
+        lay = QVBoxLayout(root)
+        lay.setContentsMargins(padding, padding, padding, padding)
+        lay.setSpacing(14)
+        header = QHBoxLayout()
+        titles = QVBoxLayout()
+        titles.setSpacing(3)
+        self.title_label = _label(self.ui["window"]["title"], self.font("title", "bold"))
+        self.subtitle_label = _label(self.ui["window"]["subtitle"], self.font("body"), "muted")
+        titles.addWidget(self.title_label)
+        titles.addWidget(self.subtitle_label)
+        header.addLayout(titles, 1)
+        self.rules_button = self._button(self.ui["actions"]["rules"], self.open_rules,
+                                         compact=True)
+        header.addWidget(self.rules_button, 0, Qt.AlignmentFlag.AlignTop)
+        lay.addLayout(header)
+        self.panel = _Scroll(int(self.layout_["content_width"]))
+        lay.addWidget(self.panel, 1)
+        self.setCentralWidget(root)
 
-    def _center_content(self, event: tk.Event[tk.Misc]) -> None:
-        padding = max(0, (event.width - int(self.layout["content_width"])) // 2)
-        self.content.pack_configure(padx=padding)
+    def _button(self, text: str, command: Callable[[], None], *, primary: bool = False,
+                compact: bool = False) -> QPushButton:
+        button = QPushButton(text)
+        button.setProperty("kind", "primary" if primary else ("compact" if compact else "ghost"))
+        button.setFont(self.font("small" if compact else "body",
+                                 "bold" if primary else "normal"))
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        button.clicked.connect(lambda _checked=False: command())
+        return button
 
-    def _button(
-        self,
-        parent: tk.Misc,
-        text: str,
-        command: Callable[[], None],
-        *,
-        primary: bool = False,
-        compact: bool = False,
-    ) -> tk.Button:
-        background = self.colors["accent"] if primary else self.colors["card"]
-        foreground = self.colors["accent_text"] if primary else self.colors["text"]
-        return tk.Button(
-            parent,
-            text=text,
-            command=command,
-            bg=background,
-            fg=foreground,
-            activebackground=(self.colors["accent_hover"] if primary else self.colors["alt"]),
-            activeforeground=foreground,
-            disabledforeground=self.colors["text_muted"],
-            relief="flat",
-            bd=0,
-            highlightthickness=0 if primary else 1,
-            highlightbackground=self.colors["border"],
-            padx=10 if compact else 15,
-            pady=5 if compact else 10,
-            cursor="hand2",
-            font=self.font(
-                self.typography["small"] if compact else self.typography["body"],
-                "bold" if primary else "normal",
-            ),
-        )
-
-    def _action(self, *args: Any, **kwargs: Any) -> tk.Button:
+    def _action(self, *args: Any, **kwargs: Any) -> QPushButton:
         button = self._button(*args, **kwargs)
         self.action_buttons.append(button)
         return button
 
-    def _heading(self, parent: tk.Misc, text: str) -> tk.Label:
-        return tk.Label(
-            parent,
-            text=text,
-            bg=self.colors["card"],
-            fg=self.colors["text"],
-            font=self.font(self.typography["heading"], "bold"),
-        )
+    def _heading(self, text: str) -> QLabel:
+        return _label(text, self.font("heading", "bold"))
 
-    def _muted(self, parent: tk.Misc, text: str) -> tk.Label:
-        return tk.Label(
-            parent,
-            text=text,
-            bg=self.colors["card"],
-            fg=self.colors["text_muted"],
-            justify="left",
-            anchor="w",
-            wraplength=int(self.layout["content_wrap"]),
-            font=self.font(self.typography["body"]),
-        )
+    def _muted(self, text: str) -> QLabel:
+        return _label(text, self.font("body"), "muted")
 
+    # --- отрисовка --------------------------------------------------------------
     def _refresh_view(self) -> None:
-        for child in self.content.winfo_children():
-            child.destroy()
+        self.panel.clear()
         self.action_buttons = []
         for operation in ("upward", "downward"):
             self._render_operation(operation)
             if self.active_operation == operation and self.runs[operation] is not None:
                 self._render_result(operation, self.runs[operation])
-        state = "disabled" if self.busy else "normal"
-        self.rules_button.configure(state=state)
+        enabled = not self.busy
+        self.rules_button.setEnabled(enabled)
         for button in self.action_buttons:
-            button.configure(state=state)
+            button.setEnabled(enabled)
 
     def _render_operation(self, operation: str) -> None:
-        gap = int(self.layout["gap"])
-        card = _card(self.content, self.colors, int(self.layout["card_padding"]))
-        card.pack(fill="x", pady=(0, gap))
-        self._heading(card, self.ui["sections"][operation]).pack(anchor="w")
-        self._muted(card, self.ui["copy"][operation]).pack(anchor="w", pady=(6, 0))
+        gap = int(self.layout_["gap"])
+        card, body = _card(int(self.layout_["card_padding"]))
+        body.addWidget(self._heading(self.ui["sections"][operation]))
+        body.addSpacing(6)
+        body.addWidget(self._muted(self.ui["copy"][operation]))
         if operation == "upward":
-            self._muted(
-                card,
-                self.ui["templates"]["master"].format(name=self.bundle.master_path().name),
-            ).pack(anchor="w", pady=(9, 0))
-        status = tk.Frame(card, bg=self.colors["card"])
-        status.pack(fill="x", pady=(12, 0))
+            body.addSpacing(9)
+            body.addWidget(self._muted(
+                self.ui["templates"]["master"].format(name=self.bundle.master_path().name)))
+        body.addSpacing(12)
         state = self.states[operation]
-        tk.Label(
-            status,
-            text="●",
-            bg=self.colors["card"],
-            fg=self.colors[self._STATE_COLORS[state]],
-            font=self.font(self.typography["body"]),
-        ).pack(side="left")
-        tk.Label(
-            status,
-            text=self.ui["states"][state],
-            bg=self.colors["card"],
-            fg=self.colors["text"],
-            font=self.font(self.typography["body"], "bold"),
-        ).pack(side="left", padx=(6, 0))
-        self._muted(card, self.status_details[operation]).pack(anchor="w", pady=(4, 0))
+        status = QHBoxLayout()
+        status.setSpacing(6)
+        dot = QLabel("●")
+        dot.setObjectName("Dot")
+        dot.setStyleSheet(f"color: {self.colors[self._STATE_COLORS[state]]};")
+        status.addWidget(dot)
+        status.addWidget(_label(self.ui["states"][state], self.font("body", "bold")))
+        status.addStretch(1)
+        body.addLayout(status)
+        body.addSpacing(4)
+        body.addWidget(self._muted(self.status_details[operation]))
         if self.busy_operation == operation:
-            progress = ttk.Progressbar(
-                card,
-                style="Fieldwork.Horizontal.TProgressbar",
-                mode="indeterminate",
-            )
-            progress.pack(fill="x", pady=(12, 0))
-            progress.start(int(self.layout["progress_interval_ms"]))
+            body.addSpacing(12)
+            progress = QProgressBar()
+            progress.setRange(0, 0)
+            progress.setTextVisible(False)
+            body.addWidget(progress)
         elif not self.busy:
             retry = self.runs[operation] is not None
             action_key = f"retry_{operation}" if retry else f"check_{operation}"
-            self._action(
-                card,
-                self.ui["actions"][action_key],
-                lambda selected=operation: self.start_check(selected),
-                primary=True,
-            ).pack(anchor="w", pady=(13, 0))
+            body.addSpacing(13)
+            body.addWidget(self._action(self.ui["actions"][action_key],
+                                        lambda selected=operation: self.start_check(selected),
+                                        primary=True), 0, Qt.AlignmentFlag.AlignLeft)
+        self.panel.add(card, gap)
 
     def _visible_issues(self, run: OperationRun) -> list[Issue]:
         issues = list(run.plan.issues)
@@ -555,30 +497,23 @@ class ManualTransferApp(tk.Tk):
         rank = {"error": 0, "warning": 1, "info": 2}
         return sorted(result, key=lambda item: (rank.get(item.severity, 9), item.message.casefold()))
 
-    def _metric(self, parent: tk.Misc, column: int, text: str) -> None:
-        metric = tk.Frame(parent, bg=self.colors["alt"], padx=10, pady=9)
-        metric.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 7, 0))
-        tk.Label(
-            metric,
-            text=text,
-            bg=self.colors["alt"],
-            fg=self.colors["text"],
-            anchor="w",
-            justify="left",
-            wraplength=int(self.layout["metric_wrap"]),
-            font=self.font(self.typography["body"], "bold"),
-        ).pack(anchor="w")
-        parent.grid_columnconfigure(column, weight=1)
+    def _metric(self, row: QHBoxLayout, text: str) -> None:
+        metric = QFrame()
+        metric.setObjectName("Metric")
+        lay = QVBoxLayout(metric)
+        lay.setContentsMargins(10, 9, 10, 9)
+        lay.addWidget(_label(text, self.font("body", "bold")))
+        row.addWidget(metric, 1)
 
     def _render_result(self, operation: str, run: OperationRun) -> None:
-        gap = int(self.layout["gap"])
-        padding = int(self.layout["card_padding"])
+        gap = int(self.layout_["gap"])
+        padding = int(self.layout_["card_padding"])
         issues = self._visible_issues(run)
-        summary = _card(self.content, self.colors, padding)
-        summary.pack(fill="x", pady=(0, gap))
-        self._heading(summary, self.ui["sections"]["summary"]).pack(anchor="w")
-        metrics = tk.Frame(summary, bg=self.colors["card"])
-        metrics.pack(fill="x", pady=(11, 0))
+        summary, body = _card(padding)
+        body.addWidget(self._heading(self.ui["sections"]["summary"]))
+        body.addSpacing(11)
+        metrics = QHBoxLayout()
+        metrics.setSpacing(7)
         if operation == "upward":
             values = (
                 self.ui["templates"]["source_count"].format(count=len(run.snapshot.personals)),
@@ -594,111 +529,99 @@ class ManualTransferApp(tk.Tk):
                     count=sum(item.employee_payment_cells for item in run.deltas)
                 ),
             )
-        for column, value in enumerate(values):
-            self._metric(metrics, column, value)
-        self._muted(summary, self.ui["copy"]["payment_scope"]).pack(anchor="w", pady=(11, 0))
+        for value in values:
+            self._metric(metrics, value)
+        body.addLayout(metrics)
+        body.addSpacing(11)
+        body.addWidget(self._muted(self.ui["copy"]["payment_scope"]))
+        self.panel.add(summary, gap)
 
         if issues:
-            issue_card = _card(self.content, self.colors, padding)
-            issue_card.pack(fill="x", pady=(0, gap))
-            self._heading(issue_card, self.ui["sections"]["issues"]).pack(anchor="w")
+            issue_card, ibody = _card(padding)
+            ibody.addWidget(self._heading(self.ui["sections"]["issues"]))
             for issue in issues[: int(self.ui["limits"]["issue_preview"])]:
-                self._issue_row(issue_card, issue)
+                self._issue_row(ibody, issue)
+            self.panel.add(issue_card, gap)
 
         if operation == "upward" and run.plan.changes:
-            changes = _card(self.content, self.colors, padding)
-            changes.pack(fill="x", pady=(0, gap))
-            self._heading(changes, self.ui["sections"]["changes"]).pack(anchor="w")
+            changes, cbody = _card(padding)
+            cbody.addWidget(self._heading(self.ui["sections"]["changes"]))
             for change in run.plan.changes[: int(self.ui["limits"]["change_preview"])]:
                 self._change_row(
-                    changes,
+                    cbody,
                     f"{change.contract_id} · {change.title}",
                     f"{_short(change.before, self.ui['limits']['value_preview_chars'])}  →  "
                     f"{_short(change.after, self.ui['limits']['value_preview_chars'])}",
                 )
+            self.panel.add(changes, gap)
         elif operation == "downward":
             assert isinstance(run, ManualDownwardRun)
             if run.changed_deltas:
-                changes = _card(self.content, self.colors, padding)
-                changes.pack(fill="x", pady=(0, gap))
-                self._heading(changes, self.ui["sections"]["changes"]).pack(anchor="w")
+                changes, cbody = _card(padding)
+                cbody.addWidget(self._heading(self.ui["sections"]["changes"]))
                 for delta in run.changed_deltas[: int(self.ui["limits"]["change_preview"])]:
-                    self._delta_row(changes, delta)
+                    self._delta_row(cbody, delta)
+                self.panel.add(changes, gap)
 
-        actions = _card(self.content, self.colors, padding)
-        actions.pack(fill="x", pady=(0, gap))
+        actions, abody = _card(padding)
+        abody.setSpacing(8)
         can_publish = run.ready_to_publish and (
             operation == "downward" or bool(run.plan.changes)
         )
         if can_publish and not self.busy:
-            self._action(
-                actions,
+            abody.addWidget(self._action(
                 self.ui["actions"][f"publish_{operation}"],
                 lambda selected=operation: self.ask_to_publish(selected),
-                primary=True,
-            ).pack(anchor="w")
-        self._action(
-            actions,
+                primary=True), 0, Qt.AlignmentFlag.AlignLeft)
+        abody.addWidget(self._action(
             self.ui["actions"]["open_report"],
-            lambda selected=operation: self.open_report(selected),
-        ).pack(anchor="w", pady=((8 if can_publish else 0), 0))
-        self._action(
-            actions,
-            self.ui["actions"]["details_hide"] if self.details[operation] else self.ui["actions"]["details"],
-            lambda selected=operation: self.toggle_details(selected),
-        ).pack(anchor="w", pady=(8, 0))
+            lambda selected=operation: self.open_report(selected)), 0,
+            Qt.AlignmentFlag.AlignLeft)
+        abody.addWidget(self._action(
+            self.ui["actions"]["details_hide"] if self.details[operation]
+            else self.ui["actions"]["details"],
+            lambda selected=operation: self.toggle_details(selected)), 0,
+            Qt.AlignmentFlag.AlignLeft)
+        self.panel.add(actions, gap)
         if self.details[operation]:
             self._render_details(run, gap, padding, operation)
 
-    def _issue_row(self, parent: tk.Misc, issue: Issue) -> None:
+    def _issue_row(self, body: QVBoxLayout, issue: Issue) -> None:
         color = self.colors["danger" if issue.severity == "error" else "warning"]
-        row = tk.Frame(parent, bg=self.colors["card"])
-        row.pack(fill="x", pady=(9, 0))
-        tk.Frame(row, bg=color, width=3).pack(side="left", fill="y")
-        tk.Label(
-            row,
-            text=issue.message,
-            bg=self.colors["card"],
-            fg=self.colors["text"],
-            anchor="w",
-            justify="left",
-            wraplength=int(self.layout["issue_wrap"]),
-            font=self.font(self.typography["body"]),
-        ).pack(side="left", fill="x", expand=True, padx=(9, 0))
+        row = QHBoxLayout()
+        row.setSpacing(9)
+        bar = QFrame()
+        bar.setFixedWidth(3)
+        bar.setStyleSheet(f"background: {color}; border-radius: 1px;")
+        row.addWidget(bar)
+        row.addWidget(_label(issue.message, self.font("body")), 1)
+        body.addSpacing(9)
+        body.addLayout(row)
 
-    def _change_row(self, parent: tk.Misc, title: str, detail: str) -> None:
-        row = tk.Frame(parent, bg=self.colors["card"], pady=8)
-        row.pack(fill="x")
-        tk.Label(
-            row,
-            text=title,
-            bg=self.colors["card"],
-            fg=self.colors["text"],
-            anchor="w",
-            font=self.font(self.typography["body"], "bold"),
-        ).pack(anchor="w")
-        tk.Label(
-            row,
-            text=detail,
-            bg=self.colors["card"],
-            fg=self.colors["text_muted"],
-            anchor="w",
-            font=self.font(self.typography["small"]),
-        ).pack(anchor="w", pady=(2, 0))
-        tk.Frame(parent, bg=self.colors["alt"], height=1).pack(fill="x")
+    def _change_row(self, body: QVBoxLayout, title: str, detail: str) -> None:
+        body.addSpacing(8)
+        body.addWidget(_label(title, self.font("body", "bold")))
+        body.addSpacing(2)
+        body.addWidget(_label(detail, self.font("small"), "muted"))
+        body.addSpacing(8)
+        rule = QFrame()
+        rule.setObjectName("Rule")
+        rule.setFixedHeight(1)
+        body.addWidget(rule)
 
-    def _delta_row(self, parent: tk.Misc, delta: ProjectionDelta) -> None:
+    def _delta_row(self, body: QVBoxLayout, delta: ProjectionDelta) -> None:
         self._change_row(
-            parent,
+            body,
             f"{delta.employee} · {delta.path.name}",
             f"Строк: {delta.rows_before} → {delta.rows_after} · ячеек: {delta.changed_cells}",
         )
 
     def _render_details(self, run: OperationRun, gap: int, padding: int, operation: str) -> None:
-        details = _card(self.content, self.colors, padding)
-        details.pack(fill="x", pady=(0, gap))
-        self._heading(details, self.ui["sections"]["details"]).pack(anchor="w")
-        self._muted(details, self.ui["copy"]["technical"]).pack(anchor="w", pady=(5, 8))
+        details, body = _card(padding)
+        body.addWidget(self._heading(self.ui["sections"]["details"]))
+        body.addSpacing(5)
+        body.addWidget(self._muted(self.ui["copy"]["technical"]))
+        body.addSpacing(8)
         report = run.snapshot.run_dir / ("plan.txt" if operation == "upward" else "downward.txt")
         values = [
             self.ui["templates"]["run"].format(id=run.snapshot.run_id),
@@ -716,8 +639,11 @@ class ManualTransferApp(tk.Tk):
                     self.ui["templates"]["receipt"].format(path=run.publication.receipt)
                 )
         for value in values:
-            self._muted(details, value).pack(anchor="w", pady=(3, 0))
+            body.addSpacing(3)
+            body.addWidget(self._muted(value))
+        self.panel.add(details, gap)
 
+    # --- операции -------------------------------------------------------------
     def start_check(self, operation: str) -> None:
         if self.busy:
             return
@@ -729,12 +655,14 @@ class ManualTransferApp(tk.Tk):
         self.busy_operation = operation
         bundle = self.bundle
         prepare = prepare_manual_upward if operation == "upward" else prepare_manual_downward
+        signals = self._new_signals()
         self._run_async(
             lambda: prepare(
                 bundle,
-                progress=lambda message: self.events.put(("progress", (operation, message))),
+                progress=lambda message: signals.progress.emit(operation, message),
             ),
             lambda run: self._prepared(operation, run),
+            signals,
         )
         self._refresh_view()
 
@@ -765,77 +693,15 @@ class ManualTransferApp(tk.Tk):
         run = self.runs[operation]
         if self.busy or run is None or not run.ready_to_publish:
             return
-        copy_block = self.ui["confirmations"][operation]
         settings = (
             self.bundle.app.manual_upward
             if operation == "upward"
             else self.bundle.app.manual_downward
         )
-        phrase = str(settings["confirmation_phrase"])
-        dialog = tk.Toplevel(self)
-        dialog.title(copy_block["title"])
-        dialog.configure(bg=self.colors["canvas"])
-        dialog.transient(self)
-        dialog.resizable(False, False)
-        dialog.geometry(f"{self.layout['modal_width']}x{self.layout['modal_height']}")
-        dialog.grab_set()
-        body = _card(dialog, self.colors, int(self.layout["card_padding"]))
-        body.pack(
-            fill="both",
-            expand=True,
-            padx=int(self.layout["modal_padding"]),
-            pady=int(self.layout["modal_padding"]),
-        )
-        self._heading(body, copy_block["title"]).pack(anchor="w")
-        self._muted(body, copy_block["body"]).pack(anchor="w", pady=(7, 13))
-        tk.Label(
-            body,
-            text=copy_block["input"].format(phrase=phrase),
-            bg=self.colors["card"],
-            fg=self.colors["text"],
-            font=self.font(self.typography["body"], "bold"),
-        ).pack(anchor="w")
-        answer = tk.StringVar()
-        entry = tk.Entry(
-            body,
-            textvariable=answer,
-            bg=self.colors["card"],
-            fg=self.colors["text"],
-            insertbackground=self.colors["text"],
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground=self.colors["border"],
-            highlightcolor=self.colors["focus"],
-            font=self.font(self.typography["body"]),
-        )
-        entry.pack(fill="x", pady=(5, 0))
-        error = tk.Label(
-            body,
-            text="",
-            bg=self.colors["card"],
-            fg=self.colors["danger"],
-            font=self.font(self.typography["small"]),
-        )
-        error.pack(anchor="w", pady=(5, 0))
-        actions = tk.Frame(body, bg=self.colors["card"])
-        actions.pack(fill="x", pady=(15, 0))
-
-        def confirm() -> None:
-            if answer.get().strip() != phrase:
-                error.configure(text=copy_block["invalid"])
-                return
-            dialog.destroy()
+        dialog = PublishDialog(self, operation, str(settings["confirmation_phrase"]))
+        dialog.exec()
+        if dialog.confirmed:
             self._publish(operation, run)
-
-        self._button(actions, self.ui["actions"]["cancel"], dialog.destroy).pack(side="right")
-        self._button(
-            actions,
-            self.ui["actions"][f"publish_{operation}"],
-            confirm,
-            primary=True,
-        ).pack(side="right", padx=(0, 8))
-        dialog.bind("<Return>", lambda _event: confirm())
-        entry.focus_set()
 
     def _publish(self, operation: str, run: OperationRun) -> None:
         if self.busy:
@@ -852,6 +718,7 @@ class ManualTransferApp(tk.Tk):
         self._run_async(
             lambda: publish(bundle, run, confirmation_digest=run.plan.digest),
             lambda result: self._published(operation, result),
+            self._new_signals(),
         )
         self._refresh_view()
 
@@ -871,50 +738,48 @@ class ManualTransferApp(tk.Tk):
             self.status_details["downward"] = self.ui["copy"]["downward"]
         self._refresh_view()
         confirmation = self.ui["confirmations"][operation]
-        messagebox.showinfo(
-            confirmation["success_title"],
-            self.ui["copy"][f"{operation}_published"],
-            parent=self,
-        )
+        _message(QMessageBox.Icon.Information, confirmation["success_title"],
+                 self.ui["copy"][f"{operation}_published"], self, self.ui["actions"]["close"])
 
-    def _run_async(self, action: Callable[[], Any], success: Callable[[Any], None]) -> None:
-        def worker() -> None:
-            try:
-                result = action()
-            except Exception as exc:  # noqa: BLE001 — shown on Tk thread
-                self.events.put(("failed", exc))
-            else:
-                self.events.put(("finished", (success, result)))
+    # --- фон → UI ---------------------------------------------------------------
+    def _new_signals(self) -> _Signals:
+        signals = _Signals(self)
+        self._signals.add(signals)
+        signals.progress.connect(self._on_progress)
+        signals.finished.connect(lambda success, result: self._on_finished(signals, success, result))
+        signals.failed.connect(lambda exc: self._on_failed(signals, exc))
+        return signals
 
-        threading.Thread(target=worker, daemon=True).start()
+    def _release(self, signals: _Signals) -> None:
+        self._signals.discard(signals)
+        signals.deleteLater()
 
-    def _poll_events(self) -> None:
-        try:
-            while True:
-                kind, payload = self.events.get_nowait()
-                if kind == "progress":
-                    operation, message = payload
-                    self.status_details[operation] = self.ui["templates"]["progress"].format(
-                        message=message
-                    )
-                    self._refresh_view()
-                    continue
-                operation = self.busy_operation
-                self.busy_operation = None
-                if kind == "finished":
-                    success, result = payload
-                    success(result)
-                    continue
-                if operation is not None:
-                    self.states[operation] = "failed"
-                    self.status_details[operation] = str(payload)
-                    self.active_operation = operation
-                self._refresh_view()
-                messagebox.showerror(self.ui["window"]["title"], str(payload), parent=self)
-        except queue.Empty:
-            pass
-        self.after(80, self._poll_events)
+    def _run_async(self, action: Callable[[], Any], success: Callable[[Any], None],
+                   signals: _Signals | None = None) -> None:
+        self.pool.start(_Worker(action, success, signals or self._new_signals()))
 
+    def _on_progress(self, operation: str, message: str) -> None:
+        self.status_details[operation] = self.ui["templates"]["progress"].format(message=message)
+        self._refresh_view()
+
+    def _on_finished(self, signals: _Signals, success, result) -> None:
+        self._release(signals)
+        self.busy_operation = None
+        success(result)
+
+    def _on_failed(self, signals: _Signals, exc: BaseException) -> None:
+        self._release(signals)
+        operation = self.busy_operation
+        self.busy_operation = None
+        if operation is not None:
+            self.states[operation] = "failed"
+            self.status_details[operation] = str(exc)
+            self.active_operation = operation
+        self._refresh_view()
+        _message(QMessageBox.Icon.Critical, self.ui["window"]["title"], str(exc), self,
+                 self.ui["actions"]["close"])
+
+    # --- прочее -------------------------------------------------------------------
     def toggle_details(self, operation: str) -> None:
         self.details[operation] = not self.details[operation]
         self._refresh_view()
@@ -927,11 +792,12 @@ class ManualTransferApp(tk.Tk):
         try:
             os.startfile(str(path))  # type: ignore[attr-defined]
         except OSError as exc:
-            messagebox.showerror(self.ui["window"]["title"], str(exc), parent=self)
+            _message(QMessageBox.Icon.Critical, self.ui["window"]["title"], str(exc), self,
+                     self.ui["actions"]["close"])
 
     def open_rules(self) -> None:
         if not self.busy:
-            SourceFoldersDialog(self)
+            SourceFoldersDialog(self).exec()
 
     def rules_saved(self, bundle: ConfigBundle) -> None:
         self.bundle = bundle
@@ -944,10 +810,10 @@ class ManualTransferApp(tk.Tk):
             "downward": self.ui["copy"]["downward"],
         }
         self.active_operation = None
-        self.title(self.ui["window"]["title"])
-        self.title_label.configure(text=self.ui["window"]["title"])
-        self.subtitle_label.configure(text=self.ui["window"]["subtitle"])
-        self.rules_button.configure(text=self.ui["actions"]["rules"])
+        self.setWindowTitle(self.ui["window"]["title"])
+        self.title_label.setText(self.ui["window"]["title"])
+        self.subtitle_label.setText(self.ui["window"]["subtitle"])
+        self.rules_button.setText(self.ui["actions"]["rules"])
         self._refresh_view()
 
 
@@ -955,4 +821,10 @@ RegistryCycleApp = ManualTransferApp
 
 
 def run_gui(bundle: ConfigBundle | None = None) -> None:
-    ManualTransferApp(bundle or load_config_bundle()).mainloop()
+    bundle = bundle or load_config_bundle()
+    app = QApplication.instance() or QApplication(sys.argv)
+    app.setApplicationName(bundle.app.manual_ui["window"]["title"])
+    theme.apply(app, bundle.theme)
+    window = ManualTransferApp(bundle)
+    window.show()
+    app.exec()

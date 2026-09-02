@@ -1,4 +1,7 @@
-"""Build the small, sanitized click-to-run registry transfer package."""
+"""Build the small, sanitized click-to-run registry transfer package.
+
+Окно переноса — на PySide6, поэтому в пакет едут `registry_cycle/theme.py`,
+иконка и `PySide6` в requirements; лаунчер проверяет именно Qt, а не tkinter."""
 
 from __future__ import annotations
 
@@ -52,6 +55,7 @@ RUNTIME_MODULES = (
     "service",
     "snapshot",
     "staging",
+    "theme",
     "validation",
 )
 
@@ -64,6 +68,7 @@ COPY_FILES: tuple[tuple[Path, Path], ...] = (
     (Path("registry_cycle/config/app.json"), Path("_app/registry_cycle/config/app.json")),
     (Path("registry_cycle/config/fields.json"), Path("_app/registry_cycle/config/fields.json")),
     (Path("registry_cycle/config/theme.json"), Path("_app/registry_cycle/config/theme.json")),
+    (Path("registry_cycle/icon.png"), Path("_app/registry_cycle/icon.png")),
     (Path("hardbot/exchange_contract.py"), Path("_app/hardbot/exchange_contract.py")),
     (Path("hardbot/fields.py"), Path("_app/hardbot/fields.py")),
     (
@@ -82,7 +87,7 @@ if exist ".venv\Scripts\python.exe" goto check_venv
 goto check_py
 
 :check_venv
-".venv\Scripts\python.exe" -c "import tkinter, python_calamine, xlwings, win32com.client" >nul 2>&1
+".venv\Scripts\python.exe" -c "import PySide6.QtWidgets, python_calamine, xlwings, win32com.client" >nul 2>&1
 if errorlevel 1 goto not_ready
 if /I "%REGISTRY_TRANSFER_SMOKE_TEST%"=="1" goto smoke_venv
 start "" ".venv\Scripts\pythonw.exe" -m registry_cycle.manual_app
@@ -95,7 +100,7 @@ exit /b %errorlevel%
 :check_py
 where py >nul 2>&1
 if errorlevel 1 goto check_python
-py -3 -c "import tkinter, python_calamine, xlwings, win32com.client" >nul 2>&1
+py -3 -c "import PySide6.QtWidgets, python_calamine, xlwings, win32com.client" >nul 2>&1
 if errorlevel 1 goto check_python
 if /I "%REGISTRY_TRANSFER_SMOKE_TEST%"=="1" goto smoke_py
 where pyw >nul 2>&1
@@ -114,7 +119,7 @@ exit /b %errorlevel%
 :check_python
 where python >nul 2>&1
 if errorlevel 1 goto not_ready
-python -c "import tkinter, python_calamine, xlwings, win32com.client" >nul 2>&1
+python -c "import PySide6.QtWidgets, python_calamine, xlwings, win32com.client" >nul 2>&1
 if errorlevel 1 goto not_ready
 if /I "%REGISTRY_TRANSFER_SMOKE_TEST%"=="1" goto smoke_python
 where pythonw >nul 2>&1
@@ -171,7 +176,7 @@ if errorlevel 1 goto failed
 echo Устанавливаю зависимости...
 "_app\.venv\Scripts\python.exe" -m pip install -r "_app\requirements.txt"
 if errorlevel 1 goto failed
-"_app\.venv\Scripts\python.exe" -c "import tkinter, python_calamine, xlwings, win32com.client"
+"_app\.venv\Scripts\python.exe" -c "import PySide6.QtWidgets, python_calamine, xlwings, win32com.client"
 if errorlevel 1 goto failed
 echo.
 echo Готово. Теперь запустите «Перенос реестров.bat».
@@ -200,7 +205,7 @@ README = """ПЕРЕНОС РЕЕСТРОВ
 
 1. Распакуйте всю папку на локальный диск. Из ZIP и прямо с сетевой папки не запускайте.
 2. Если приложение ещё не устанавливалось, один раз откройте «Установить.bat».
-3. Открывайте «Перенос реестров.bat» двойным кликом.
+3. Открывайте «Перенос реестров.bat» двойным кликом — окно без консоли.
 4. В приложении выберите корневые папки портфелей.
 5. Сначала проверьте и выполните шаг 1 — в общий реестр. Затем отдельно шаг 2 — в личные.
 
