@@ -19,6 +19,22 @@ from config import GROUP_CHAT_ID
 
 ALBUM = 10   # лимит Телеграма на медиагруппу
 
+# Режим без Telegram (BOT_TOKEN пуст): bot=None везде. Предупреждаем один раз
+# за процесс — каждое сохранение визита не должно рожать строку в журнале.
+_NO_BOT_WARNED = False
+
+
+def bot_missing(bot) -> bool:
+    """True, если Telegram отключён; первое обращение оставляет одну строку warning."""
+    global _NO_BOT_WARNED
+    if bot is not None:
+        return False
+    if not _NO_BOT_WARNED:
+        _NO_BOT_WARNED = True
+        logging.warning("Telegram отключён: уведомления и сводки не отправляются "
+                        "(BOT_TOKEN пуст)")
+    return True
+
 
 def classify_send_error(exc: Exception) -> tuple[str, str]:
     """(статус для push_log, короткий текст) — ЕДИНСТВЕННЫЙ классификатор
@@ -92,7 +108,7 @@ async def post_to_group(bot: Bot, text: str | None = None,
     """strict=True — пробросить ошибку наверх (телеметрии нужен настоящий
     статус); дефолт False сохраняет поведение существующих вызовов."""
     chat_id = group_chat_id()
-    if not chat_id:
+    if not chat_id or bot_missing(bot):
         return False
     try:
         if document_path:
@@ -176,6 +192,11 @@ async def post_visit_report(bot: Bot, chat_ids, text: str, files,
         except Exception as exc:  # noqa: BLE001 — телеметрия не роняет доставку
             logging.warning("visit report telemetry failed: %s", exc)
 
+    if bot_missing(bot):
+        for chat_id in chat_ids:
+            _report(chat_id, db.PUSH_SKIP_NO_BOT)
+        return
+
     async def _send(chat_id):
         if files:
             res = await send_album(bot, chat_id, files, text)
@@ -225,6 +246,8 @@ async def send_album(bot: Bot, chat_id: int, files, caption: str | None = None,
     Если не ушла НИ ОДНА пачка — caption отправляется обычным сообщением:
     текст визита важнее фото, а подпись едет на первом элементе альбома, и при
     провале альбома руководитель не узнал бы даже, чей это визит."""
+    if bot_missing(bot):
+        return {"ok": False, "media_ids": [], "error": "Telegram отключён"}
     long_caption = None
     if caption and len(caption) > CAPTION_MAX:
         long_caption, caption = caption, None

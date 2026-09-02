@@ -3371,7 +3371,15 @@ async def _admin_push_test(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="telegram_id")
     bot = request.app.get("bot")
     if not bot:
-        raise web.HTTPServiceUnavailable(text="нет бота")
+        # Telegram отключён — это не сбой, а состояние; отчитываемся тем же
+        # JSON, что и о любой неудаче доставки, и оставляем след в push_log.
+        from notify import bot_missing
+        bot_missing(bot)
+        db.log_push(db.PUSH_TEST, db.PUSH_SKIP_NO_BOT, target_kind="manager",
+                    target_id=tid, note=f"push_test:{kind}")
+        return web.json_response({"ok": False, "status": db.PUSH_SKIP_NO_BOT,
+                                  "delivery": "off",
+                                  "error": "Telegram отключён: BOT_TOKEN пуст"})
     if kind in (db.PUSH_DIGEST, db.PUSH_PROMISE):
         # ПД-граница: сводка содержит ФИО должников и суммы — слать её
         # произвольному id нельзя. kind=visit шлёт безличный текст.
@@ -3465,11 +3473,15 @@ async def _admin_notify(request: web.Request) -> web.Response:
     if not text:
         raise web.HTTPBadRequest(text="text required")
     bot = request.app.get("bot")
-    if not bot or not ADMIN_ID:
-        raise web.HTTPServiceUnavailable(text="нет бота или не задан ADMIN_ID")
+    if not bot:
+        from notify import bot_missing
+        bot_missing(bot)
+        return web.json_response({"ok": True, "delivery": "off"})
+    if not ADMIN_ID:
+        raise web.HTTPServiceUnavailable(text="не задан ADMIN_ID")
     import html as _html
     await bot.send_message(ADMIN_ID, _html.escape(text[:3500]))
-    return web.json_response({"ok": True})
+    return web.json_response({"ok": True, "delivery": "sent"})
 
 
 async def _admin_restart(request: web.Request) -> web.Response:
