@@ -1,0 +1,5 @@
+# Распознаватель: faster-whisper тянет ctranslate2, huggingface-hub, tokenizers,
+# onnxruntime (VAD) и PyAV (декодирование аудио со встроенным ffmpeg —
+# системный ffmpeg не нужен).
+faster-whisper>=1.1,<2
+aiohttp>=3.9,<4
