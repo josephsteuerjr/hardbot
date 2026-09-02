@@ -337,8 +337,9 @@ def test_receipt_failure_reaches_the_final_report():
     body = src[i:src.index("def write_batch_receipt(")]
     assert 'r["receipt_error"] = str(e)' in body
     assert 'r["receipt"] = str(path)' in body
-    pult = (Path(enrich.__file__).parent / "pult.py").read_text(encoding="utf-8")
-    assert "КВИТАНЦИЯ НЕ ЗАПИСАНА" in pult
+    report = (Path(enrich.__file__).parent / "core" / "enrichment.py").read_text(
+        encoding="utf-8")
+    assert "КВИТАНЦИЯ НЕ ЗАПИСАНА" in report
 
 
 def test_receipt_records_the_applied_window_not_the_typed_text(tmp_path):
