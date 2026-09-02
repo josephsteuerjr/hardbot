@@ -1,9 +1,15 @@
 """Тесты безопасности O3: аппрув привязки, аудит, auth движка."""
 import itertools
+from pathlib import Path
 
 import pytest
 
 import db
+
+# Движок engine/ в пакет для ИТ не входит — его проверки пропускаются.
+needs_engine = pytest.mark.skipif(
+    not (Path(__file__).resolve().parent.parent / "engine").is_dir(),
+    reason="engine/ не входит в этот пакет")
 
 _uid = itertools.count(700000)
 
@@ -57,6 +63,7 @@ def test_audit_appends():
 
 
 # --- Auth API движка -------------------------------------------------------
+@needs_engine
 def test_engine_auth_open_for_synthetic():
     import app.main as engine_main
     engine_main.ENGINE_API_TOKEN = ""
@@ -64,6 +71,7 @@ def test_engine_auth_open_for_synthetic():
     assert engine_main._engine_auth("") is None      # демо без ПД — открыто
 
 
+@needs_engine
 def test_engine_auth_requires_token_for_real_db():
     import app.main as engine_main
     from fastapi import HTTPException
@@ -74,6 +82,7 @@ def test_engine_auth_requires_token_for_real_db():
     assert engine_main._engine_auth("s3cret") is None
 
 
+@needs_engine
 def test_all_api_routes_require_engine_token():
     """Токен-auth висит на ВСЕХ /api/* движка (никто не забыт)."""
     import app.main as engine_main
@@ -85,6 +94,7 @@ def test_all_api_routes_require_engine_token():
         assert engine_main._engine_auth in calls, f"{r.path} без _engine_auth!"
 
 
+@needs_engine
 def test_startup_guard_blocks_real_db_without_token(monkeypatch):
     import app.main as engine_main
     monkeypatch.setattr(engine_main, "_REAL_DB", True)
@@ -93,6 +103,7 @@ def test_startup_guard_blocks_real_db_without_token(monkeypatch):
         engine_main._enforce_startup_safety()
 
 
+@needs_engine
 def test_startup_guard_blocks_public_bind(monkeypatch):
     import app.main as engine_main
     monkeypatch.setattr(engine_main, "_REAL_DB", True)
@@ -102,6 +113,7 @@ def test_startup_guard_blocks_public_bind(monkeypatch):
         engine_main._enforce_startup_safety()
 
 
+@needs_engine
 def test_startup_guard_ok_for_synthetic(monkeypatch):
     import app.main as engine_main
     monkeypatch.setattr(engine_main, "_REAL_DB", False)

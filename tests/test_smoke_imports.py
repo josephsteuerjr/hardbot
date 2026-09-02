@@ -9,7 +9,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-PY_DIRS = [ROOT / "hardbot", ROOT / "engine"]
+# engine/ в пакете для ИТ отсутствует — тогда проверяем только hardbot/.
+ENGINE = (ROOT / "engine").is_dir()
+PY_DIRS = [d for d in (ROOT / "hardbot", ROOT / "engine") if d.is_dir()]
 
 # Модули с тяжёлыми/побочными импортами (Tk-окно, локальные пути запуска) — только компиляция.
 SKIP_IMPORT = {"gui", "theme", "miniapp_dev", "_dev_seed"}
@@ -38,8 +40,9 @@ CORE_IMPORTS = [
     "fields", "i18n", "keyboards", "normalize", "geocode", "web", "digest_data",
     "handlers_main", "handlers_field", "card", "notify", "synth",
     "photoaudit", "photo_backfill",
-    "geo", "routing", "planner", "build_demo",
 ]
+if ENGINE:
+    CORE_IMPORTS += ["geo", "routing", "planner", "build_demo"]
 
 
 @pytest.mark.parametrize("mod", CORE_IMPORTS)
@@ -47,5 +50,6 @@ def test_imports(mod):
     importlib.import_module(mod)
 
 
+@pytest.mark.skipif(not ENGINE, reason="engine/ не входит в этот пакет")
 def test_engine_app_imports():
     importlib.import_module("app.main")    # FastAPI-движок (engine/app/main.py)

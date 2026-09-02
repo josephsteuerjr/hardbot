@@ -1,7 +1,13 @@
 """Тесты оптимизатора объезда: 2-opt не ухудшает, дельта == полному пересчёту, фолбэк."""
 import random
+from pathlib import Path
 
-import routing
+import pytest
+
+if not (Path(__file__).resolve().parent.parent / "engine").is_dir():
+    pytest.skip("engine/ (routing.py) не входит в этот пакет", allow_module_level=True)
+
+import routing  # noqa: E402
 
 
 def _old_two_opt(order, mat, rounds=60):
