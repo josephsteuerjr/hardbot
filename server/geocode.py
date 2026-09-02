@@ -34,7 +34,7 @@ import geoindex                                           # иерархичес
 import normalize                                          # слой 1: libpostal/офлайн-нормализация
 import scoring                                            # источник истины по городам Согда (parse_city)
 
-GEO_DIR = Path(os.getenv("HARDBOT_DATA", Path(__file__).parent)) / "geonames"
+GEO_DIR = Path(os.getenv("APP_DATA") or os.getenv("HARDBOT_DATA") or Path(__file__).parent) / "geonames"
 COUNTRIES = ["TJ", "UZ"]
 UA = "hardbot-geocoder/0.1 (internal collection-agency tool)"
 YANDEX_KEY = os.getenv("YANDEX_GEOCODER_KEY", "").strip()

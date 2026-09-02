@@ -58,7 +58,7 @@ Unix-сокет с токеном:
 Обычный `deploy` откажется без готовой службы речи и точной конфигурации.
 После пересборки он проверяет authenticated health, затем распознаёт
 неперсональную синтетическую русскую запись именно через
-`hardbot.stt_client.STTClient` и проверяет свежие логи.
+`stt_client.STTClient` и проверяет свежие логи.
 
 Минимальные production env-ключи голоса (на контуре владельца остаются
 прежние имена; нейтральные `VOICE_BACKEND=stt`, `STT_SOCKET`,
@@ -98,7 +98,7 @@ Legacy multipart остаётся только для очередей стар�
 3. Вручную опубликовать единый доказанный Excel-пакет.
 4. Импортировать опубликованный master только с exact contract binding и
    source proof его publication receipt, file SHA и переданного grid.
-5. Снять safe export из hardbot.
+5. Снять safe export с сервера.
 6. Выполнить evidence-bound обогащение личных реестров без очистки ручного
    текста; legacy Tk write-кнопки на ограниченный тест закрыты.
 7. Провести следующий `registry_cycle` и сразу выполнить нулевой dry-run.
@@ -115,7 +115,7 @@ baseline. Частичный пакет, конфликт дублей КД, о�
 `python -m registry_cycle reconcile-publish --run-dir ... --mode auto`;
 auto выбирает all-new только если все live-файлы уже точно равны staging,
 иначе выполняет verified all-old из snapshot-backups. Personal-файлы в
-hardbot напрямую не импортируются.
+на сервер напрямую не импортируются.
 
 Admin JSON-import требует exact лист `Портфели`. Для published master
 обязательны все поля текущей versioned export-schema; для test subset — точные
@@ -205,7 +205,7 @@ snapshot; вторая отдельно разрешает destructive шаг. A
 имеет собственную schema и не принимается обычным `apply`, а
 `registry-clearance.json` не принимается `apply-archive-only`. Registry lease
 в этом режиме не берётся, потому что registry publication исключена решением
-владельца; hardbot ops lock, остановка exact container/image, watchdog,
+владельца; ops lock сервера, остановка exact container/image, watchdog,
 DB/photo drift-check, durable apply-started/post/recovery receipts и rollback
 остаются обязательными.
 
@@ -247,7 +247,7 @@ receipts и source heads не очищаются; их counts/digests незав
 
 До destructive шага сохраняется digest-bound `apply_started` receipt. Успех и
 восстановление завершаются отдельными signed receipts с той же привязкой.
-Registry clearance lease и hardbot ops lock остаются удержанными до
+Registry clearance lease и ops lock сервера остаются удержанными до
 подтверждённого post-state либо полного recovery, поэтому прямой запуск
 внутреннего reset-командного контейнера не является операторским путём.
 После запуска повторно проверяются пустое operational-состояние, SQLite и

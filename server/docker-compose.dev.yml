@@ -13,8 +13,8 @@ services:
     image: hardbot-web:dev
     command: python web.py
     environment:
-      HARDBOT_DEV: "1"            # разрешить дев-обход миниаппа (?dev_uid=)
-      HARDBOT_DATA: /data
+      APP_DEV: "1"            # разрешить дев-обход миниаппа (?dev_uid=)
+      APP_DATA: /data
       MINIAPP_PORT: "8080"
       ADMIN_API_KEY: "${ADMIN_API_KEY:?set ADMIN_API_KEY in local environment}"
       PYTHONUNBUFFERED: "1"

@@ -11,7 +11,7 @@ services:
     image: hardbot:local
     env_file: .env                # BOT_TOKEN, ADMIN_ID, GROUP_CHAT_ID
     environment:
-      HARDBOT_DATA: /data
+      APP_DATA: /data
       ADMIN_API_KEY: "${ADMIN_API_KEY:?set ADMIN_API_KEY in untracked .env}"
       PYTHONUNBUFFERED: "1"
     volumes:

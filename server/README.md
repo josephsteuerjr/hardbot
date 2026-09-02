@@ -129,7 +129,7 @@ Terminal журнала обязан совпасть с последним `pub
 
 ```powershell
 python -m pytest -q
-python -m compileall -q hardbot pult registry_cycle
+python -m compileall -q server pult registry_cycle
 ```
 
 Для локального запуска скопируйте `.env.example` в `.env`, заполните только

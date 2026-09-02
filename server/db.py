@@ -55,8 +55,8 @@ from exchange_contract import (
 from fields import FIELDS, BY_KEY
 from util import num as _money_int   # единый разбор чисел (был дубль локальной логики)
 
-# БД лежит рядом со скриптом, либо в каталоге HARDBOT_DATA (том в Docker)
-_data_dir = Path(os.getenv("HARDBOT_DATA", Path(__file__).parent))
+# БД лежит рядом со скриптом, либо в каталоге APP_DATA (том в Docker; старое имя HARDBOT_DATA принимается)
+_data_dir = Path(os.getenv("APP_DATA") or os.getenv("HARDBOT_DATA") or Path(__file__).parent)
 _data_dir.mkdir(parents=True, exist_ok=True)
 DB_PATH = _data_dir / "hardbot.db"
 
@@ -2544,7 +2544,7 @@ def manager_spelling_mismatches(mgr: dict) -> list[dict]:
 # Путь к .env, откуда docker-compose (env_file) и load_dotenv() берут BOT_TOKEN.
 # Лежит рядом с кодом; в контейнере — /data не подходит (env_file читает .env билда),
 # поэтому пишем в файл рядом со скриптами. HARDBOT_ENV — переопределение пути на всякий.
-_ENV_PATH = Path(os.getenv("HARDBOT_ENV", Path(__file__).parent / ".env"))
+_ENV_PATH = Path(os.getenv("APP_ENV_FILE") or os.getenv("HARDBOT_ENV") or Path(__file__).parent / ".env")
 
 
 def set_bot_token(token: str) -> None:

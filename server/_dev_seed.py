@@ -18,7 +18,7 @@ if __name__ == "__main__":
     src = sys.argv[1] if len(sys.argv) > 1 else DEFAULT
     data_dir = Path(__file__).parent / "data_dev"
     data_dir.mkdir(exist_ok=True)
-    os.environ["HARDBOT_DATA"] = str(data_dir)
+    os.environ["APP_DATA"] = str(data_dir)
 
     import db
     db.init_db()

@@ -13,7 +13,7 @@ import random
 import sys
 import tempfile
 
-os.environ["HARDBOT_DATA"] = tempfile.mkdtemp(prefix="hardbot_selftest_")
+os.environ["APP_DATA"] = tempfile.mkdtemp(prefix="hardbot_selftest_")
 
 import db        # noqa: E402
 import synth     # noqa: E402
@@ -75,10 +75,10 @@ def main():
 
     # 6) round-trip: export → reimport в чистую БД → побитовая сверка
     before = snapshot()
-    export_path = os.path.join(os.environ["HARDBOT_DATA"], "roundtrip.xlsx")
+    export_path = os.path.join(os.environ["APP_DATA"], "roundtrip.xlsx")
     db.export_xlsx(export_path)
 
-    os.environ["HARDBOT_DATA"] = tempfile.mkdtemp(prefix="hardbot_rt_")
+    os.environ["APP_DATA"] = tempfile.mkdtemp(prefix="hardbot_rt_")
     import importlib
     importlib.reload(db)
     db.init_db()

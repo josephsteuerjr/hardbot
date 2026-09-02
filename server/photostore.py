@@ -14,7 +14,7 @@ import re
 from datetime import date
 from pathlib import Path
 
-PHOTO_DIR = Path(os.getenv("HARDBOT_DATA", Path(__file__).parent)) / "photos"
+PHOTO_DIR = Path(os.getenv("APP_DATA") or os.getenv("HARDBOT_DATA") or Path(__file__).parent) / "photos"
 
 
 def contract_photos(contract_id: str, root: Path | None = None) -> list[Path]:

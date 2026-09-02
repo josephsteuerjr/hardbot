@@ -45,7 +45,7 @@ import addr_cis
 # а модуль смотрел только в /data/geonames и молча грузил половину справочника
 # (20 016 ключей вместо 40 118, ноль улиц) — без единой ошибки в логах.
 GEO_DIRS = tuple(dict.fromkeys([
-    Path(os.getenv("HARDBOT_DATA", Path(__file__).parent)) / "geonames",
+    Path(os.getenv("APP_DATA") or os.getenv("HARDBOT_DATA") or Path(__file__).parent) / "geonames",
     Path(__file__).parent / "geonames",
 ]))
 GEO_DIR = GEO_DIRS[0]          # куда качать дампы (совместимость)

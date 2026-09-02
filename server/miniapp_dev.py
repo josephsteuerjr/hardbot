@@ -11,8 +11,8 @@ import threading
 import webbrowser
 
 _here = os.path.dirname(os.path.abspath(__file__))
-os.environ["HARDBOT_DATA"] = os.path.join(_here, "_devdata")
-os.environ["HARDBOT_DEV"] = "1"
+os.environ["APP_DATA"] = os.path.join(_here, "_devdata")
+os.environ["APP_DEV"] = "1"
 os.environ.setdefault("BOT_TOKEN", "dev")
 
 import db        # noqa: E402
@@ -31,7 +31,7 @@ db.bind_agent(111, synth.DEV_EMPLOYEE)
 
 PORT = int(os.getenv("MINIAPP_PORT", "8080"))
 URL = f"http://127.0.0.1:{PORT}/?dev_uid=111"
-if os.getenv("HARDBOT_NO_BROWSER") != "1":
+if (os.getenv("APP_NO_BROWSER") or os.getenv("HARDBOT_NO_BROWSER")) != "1":
     threading.Timer(1.2, lambda: webbrowser.open(URL)).start()
 print("Миниапп (дев-режим):", URL)
 aw.run_app(web.build_app(), host="127.0.0.1", port=PORT)

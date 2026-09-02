@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # БД и выгрузки складываем в /data (монтируется томом — переживает пересборку)
-ENV HARDBOT_DATA=/data
+ENV APP_DATA=/data
 # Логи сразу в stdout, без буферизации — видно в `docker compose logs`
 ENV PYTHONUNBUFFERED=1
 HEALTHCHECK --interval=10s --timeout=4s --start-period=30s --retries=6 \

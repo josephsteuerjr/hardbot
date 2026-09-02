@@ -18,7 +18,7 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      HARDBOT_DATA: /data
+      APP_DATA: /data
       MINIAPP_PORT: "8080"
       # Голос: сокет и токен службы речи внутри контейнера (см. VOICE_BACKEND в .env)
       STT_SOCKET: /run/stt/stt.sock

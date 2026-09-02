@@ -5,7 +5,7 @@ aiohttp идёт в комплекте с aiogram — новых зависим�
 ./miniapp и небольшое JSON-API поверх db.py.
 
 Личность выездника берётся из подписи Telegram WebApp (`initData`, HMAC по токену
-бота) — клиенту доверять не нужно. Локальный дев-режим (`HARDBOT_DEV=1`) разрешает
+бота) — клиенту доверять не нужно. Локальный дев-режим (`APP_DEV=1`, старое имя `HARDBOT_DEV`) разрешает
 открыть миниапп в обычном браузере, подставив telegram_id (заголовок `X-Dev-Uid`
 или `?dev_uid=`). В боевом режиме дев-обход выключен.
 """
@@ -64,7 +64,7 @@ CORS_ALLOW_ORIGIN = os.getenv("CORS_ALLOW_ORIGIN", "").strip()
 
 MINIAPP_DIR = Path(__file__).parent / "miniapp"
 # Свой вектор-тайлсет (Protomaps PMTiles). Если файла нет — карта на растровом OSM.
-TILES_FILE = Path(os.getenv("HARDBOT_DATA", Path(__file__).parent)) / "basemap.pmtiles"
+TILES_FILE = Path(os.getenv("APP_DATA") or os.getenv("HARDBOT_DATA") or Path(__file__).parent) / "basemap.pmtiles"
 # Маршрутизаторы UZ/TJ проверяются по расстоянию привязки к дорожному графу: соседний
 # граф тоже может вернуть Ok, но «притянуть» точку на десятки километров к границе.
 # OSRM_URL оставлен как совместимый одиночный фолбэк.
@@ -96,7 +96,7 @@ try:
     )
 except (TypeError, ValueError):
     VOICE_TIMEOUT_SECONDS = 60.0
-DEV = (os.getenv("HARDBOT_DEV", "") or "").lower() not in ("", "0", "false", "no")
+DEV = (os.getenv("APP_DEV") or os.getenv("HARDBOT_DEV") or "").lower() not in ("", "0", "false", "no")
 _MAX_AGE = 24 * 3600  # initData не старше суток
 
 # Фото с iPhone после сна PWA раньше повторно уходило как File из IndexedDB через
@@ -3740,6 +3740,6 @@ async def start_site(bot=None, host: str = "0.0.0.0", port: int = 8080):
 
 
 if __name__ == "__main__":
-    # Автономный запуск для локального теста миниаппа без бота: HARDBOT_DEV=1 python web.py
+    # Автономный запуск для локального теста миниаппа без бота: APP_DEV=1 python web.py
     db.init_db()
     web.run_app(build_app(), host="127.0.0.1", port=int(os.getenv("MINIAPP_PORT", "8080")))

@@ -1113,9 +1113,9 @@ def load_settings() -> dict:
 def credentials(args, report: dict | None = None) -> tuple[str, str]:
     settings = load_settings()
     url = args.url or (report or {}).get("server_url") or settings.get("url") or DEFAULT_URL
-    key = args.key or os.getenv("HARDBOT_ADMIN_KEY") or settings.get("key") or ""
+    key = args.key or (os.getenv("APP_ADMIN_KEY") or os.getenv("HARDBOT_ADMIN_KEY")) or settings.get("key") or ""
     if not key:
-        raise ValueError("нет admin key: сохрани его в настройках пульта или HARDBOT_ADMIN_KEY")
+        raise ValueError("нет admin key: сохрани его в настройках пульта или APP_ADMIN_KEY")
     return str(url), str(key)
 
 
