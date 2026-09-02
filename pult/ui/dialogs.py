@@ -10,6 +10,41 @@ from __future__ import annotations
 from PySide6.QtWidgets import QFileDialog, QInputDialog, QLineEdit, QMessageBox, QWidget
 
 
+def show_link(title: str, url: str, note: str = "", parent: QWidget | None = None) -> None:
+    """Показать ссылку так, чтобы её можно было скопировать одной кнопкой:
+    QMessageBox текст не выделяет, а ссылку входа надо отправить человеку."""
+    from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QLabel,
+                                   QPushButton, QVBoxLayout)
+
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    dialog.setMinimumWidth(560)
+    layout = QVBoxLayout(dialog)
+    if note:
+        text = QLabel(note)
+        text.setWordWrap(True)
+        layout.addWidget(text)
+    field = QLineEdit(url)
+    field.setReadOnly(True)
+    field.setCursorPosition(0)
+    layout.addWidget(field)
+    buttons = QDialogButtonBox()
+    copy = QPushButton("Скопировать")
+    close = QPushButton("Закрыть")
+    buttons.addButton(copy, QDialogButtonBox.ButtonRole.ActionRole)
+    buttons.addButton(close, QDialogButtonBox.ButtonRole.AcceptRole)
+
+    def _copy() -> None:
+        QApplication.clipboard().setText(url)
+        copy.setText("Скопировано")
+
+    copy.clicked.connect(_copy)
+    close.clicked.connect(dialog.accept)
+    layout.addWidget(buttons)
+    field.selectAll()
+    dialog.exec()
+
+
 def _box(icon, title: str, text: str, parent: QWidget | None) -> QMessageBox:
     box = QMessageBox(parent)
     box.setIcon(icon)

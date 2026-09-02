@@ -2033,6 +2033,65 @@ async def _admin_app_revoke(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "revoked": n})
 
 
+async def _admin_app_link(request: web.Request) -> web.Response:
+    """Ссылка входа в приложение из пульта — без Telegram.
+
+    Тело: ``{"employee": ФИО, "kind": "agent"|"courier"}`` либо
+    ``{"telegram_id": id}``. У сотрудника без привязки создаётся служебная
+    личность (db.local_identity_for), у привязанного — используется его id.
+    Ссылка та же, что выдаёт бот на слово «ссылка»: многоразовая в окне
+    активации, открывается на телефоне, приложение ставится на экран.
+    """
+    _admin(request)
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return web.json_response({"error": "тело не JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "тело не объект"}, status=400)
+    base = os.getenv("MINIAPP_URL", "").strip().rstrip("/")
+    if not base:
+        return web.json_response(
+            {"error": "MINIAPP_URL не задан на сервере: без публичного адреса "
+                      "ссылку входа не собрать"},
+            status=409,
+        )
+    employee = str(body.get("employee") or "").strip()
+    kind = "courier" if body.get("kind") == "courier" else "agent"
+    created = False
+    raw_tid = body.get("telegram_id")
+    if raw_tid not in (None, ""):
+        try:
+            tid = int(raw_tid)
+        except (TypeError, ValueError):
+            return web.json_response({"error": "telegram_id"}, status=400)
+        bound = db.get_binding(tid)
+        if not bound and employee:
+            db.set_bind(tid, employee, kind)
+            bound = employee
+        if not bound:
+            return web.json_response(
+                {"error": f"id {tid} никому не привязан: укажи сотрудника"},
+                status=409,
+            )
+        employee = bound
+    else:
+        if not employee:
+            return web.json_response({"error": "employee required"}, status=400)
+        tid, created = db.local_identity_for(employee, kind)
+    code = db.create_app_link(tid)
+    db.audit_access(tid, "app_link_issued_admin", detail=employee)
+    return web.json_response({
+        "ok": True,
+        "telegram_id": tid,
+        "employee": employee,
+        "url": f"{base}/#link={code}",
+        "days": db.APP_LINK_DAYS,
+        "local_identity": db.is_local_uid(tid),
+        "created": created,
+    })
+
+
 async def _lang(request: web.Request) -> web.Response:
     uid, _ = _auth(request)
     lang = (await request.json()).get("lang", "")
@@ -3646,6 +3705,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/lang", _lang)
     app.router.add_post("/api/redeem", _redeem)
     app.router.add_post("/admin/app_revoke", _admin_app_revoke)
+    app.router.add_post("/admin/app_link.json", _admin_app_link)
     app.router.add_post("/api/bind", _bind)
     app.router.add_post("/api/marker", _marker)
     app.router.add_get("/api/markers", _markers)

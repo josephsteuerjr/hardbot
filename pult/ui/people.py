@@ -9,9 +9,10 @@ from PySide6.QtWidgets import QGridLayout, QWidget
 
 from ..core.devices import valid_telegram_id
 from ..core.people import (GUEST_PLACEHOLDER, KIND_LABELS, client_debt, client_label,
-                           guest_label, kind_from_label, kind_index, kind_text, role_status,
-                           unassign_text)
+                           guest_label, kind_from_label, kind_index, kind_text, link_note,
+                           role_status, unassign_text)
 from ..core.text import fmt_n
+from .dialogs import show_link
 from .widgets import Button, Card, CheckList, Combo, Field, Note, Page, Rows, label, vcol
 
 
@@ -71,7 +72,7 @@ class PeopleSection:
             grid.setHorizontalSpacing(10)
             grid.setVerticalSpacing(6)
             for col, text in enumerate(("СОТРУДНИК", "ДОГОВОРОВ", "TELEGRAM ID",
-                                        "ТИП", "СТАТУС", "")):
+                                        "ТИП", "СТАТУС", "", "ВХОД")):
                 grid.addWidget(label(text, "caps"), 0, col)
             glabels = [guest_label(g) for g in self.guests]
             self._role_rows = []
@@ -95,8 +96,14 @@ class PeopleSection:
                                       lambda emp=e["employee"], t=tid, k=kind:
                                       self.bind_role(emp, t, k), kind="accent"),
                                r, 5, Qt.AlignmentFlag.AlignTop)
+                # Ссылка входа без Telegram: сервер сам выдаст сотруднику
+                # служебную личность, если привязки ещё нет.
+                grid.addWidget(Button("Ссылка входа",
+                                      lambda emp=e["employee"], k=kind:
+                                      self.issue_link(employee=emp, kind_combo=k)),
+                               r, 6, Qt.AlignmentFlag.AlignTop)
                 self._role_rows.append((combo, tid, kind))
-            grid.setColumnStretch(6, 1)
+            grid.setColumnStretch(7, 1)
             frame.add(holder)
         self.bg_task(work, done)
 
@@ -127,8 +134,32 @@ class PeopleSection:
             name = label(b["employee"])
             name.setFixedWidth(240)
             frame.add_row(tid, name, Note(kind_text(b), "badge", wrap=False), None,
+                          Button("ссылка входа",
+                                 lambda t=b["telegram_id"], e=b["employee"]:
+                                 self.issue_link(telegram_id=t, employee=e)),
                           Button("сбросить", lambda t=b["telegram_id"]: self.unbind(t),
                                  kind="danger"), stretch=False)
+
+    def issue_link(self, employee=None, telegram_id=None, kind_combo=None):
+        """Персональная ссылка входа — та же, что бот даёт на слово «ссылка»,
+        но из пульта и без Telegram. Показывается окном с кнопкой «Скопировать»."""
+        body = {}
+        if telegram_id:
+            body["telegram_id"] = telegram_id
+        if employee:
+            body["employee"] = employee
+        if kind_combo is not None:
+            body["kind"] = kind_from_label(kind_combo.get())
+
+        def done(d):
+            if not isinstance(d, dict) or not d.get("url"):
+                self.toast(str((d or {}).get("error") or "Сервер не выдал ссылку"), err=True)
+                return
+            show_link("Ссылка входа", d["url"], link_note(d), parent=self)
+            if d.get("created"):
+                self.refresh()
+
+        self.bg_task(lambda: self.api("POST", "/admin/app_link.json", body), done)
 
     def unbind(self, tid):
         if not self.ask_yes_no("Сброс привязки", f"Сбросить выбор для {tid}?"):

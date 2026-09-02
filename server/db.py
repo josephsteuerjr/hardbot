@@ -1432,6 +1432,48 @@ APP_LINK_MAX_USES = 10  # обменов на токен с одной ссыл�
 APP_TOKEN_DAYS = 30     # скользящий срок токена: продлевается при каждом использовании
 
 
+# Личности без Telegram. Вся идентификация в системе — целый id пользователя
+# (исторически telegram_id). Если Telegram не используется, пульт выдаёт
+# сотруднику служебный id из диапазона выше любого настоящего Telegram-id и
+# сразу привязывает его к ФИО; ссылка входа для такого id работает как обычная.
+LOCAL_UID_BASE = 900_000_000_000
+
+
+def is_local_uid(uid: int) -> bool:
+    return int(uid or 0) >= LOCAL_UID_BASE
+
+
+def local_identity_for(employee: str, kind: str = "agent") -> tuple[int, bool]:
+    """(id, создана_ли_сейчас) для ФИО. Существующая привязка ФИО — любая, в том
+    числе на настоящий Telegram — переиспользуется: у сотрудника один вход."""
+    employee = (employee or "").strip()
+    if not employee:
+        raise ValueError("пустое ФИО")
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT telegram_id FROM agent_bind WHERE employee = ? "
+            "ORDER BY approved DESC, telegram_id LIMIT 1",
+            (employee,),
+        ).fetchone()
+        if row:
+            return int(row["telegram_id"]), False
+        used = [
+            conn.execute(
+                f"SELECT MAX(telegram_id) FROM {table} WHERE telegram_id >= ?",
+                (LOCAL_UID_BASE,),
+            ).fetchone()[0] or 0
+            for table in ("agent_bind", "users")
+        ]
+        uid = max(LOCAL_UID_BASE - 1, *used) + 1
+        conn.execute(
+            "INSERT OR IGNORE INTO users (telegram_id, name, created_at) VALUES (?,?,?)",
+            (uid, employee, datetime.now().isoformat(timespec="seconds")),
+        )
+        conn.commit()
+    set_bind(uid, employee, kind)
+    return uid, True
+
+
 def create_app_link(telegram_id: int) -> str:
     """Код входа для автономного PWA (бот шлёт ссылкой). Прежние НЕОТКРЫТЫЕ коды
     юзера гасим (из неоткрытых жива только последняя ссылка; уже открытые доживают

@@ -53,6 +53,20 @@ def client_debt(c: dict) -> str:
     return fmt_n(c.get("debt")) + (f' {c["unit"]}' if c.get("unit") else "")
 
 
+def link_note(d: dict) -> str:
+    """Пояснение к выданной ссылке входа (ответ /admin/app_link.json)."""
+    days = d.get("days") or 7
+    lines = [
+        f"Сотрудник: {d.get('employee') or '—'}",
+        f"Ссылку открыть на телефоне сотрудника и добавить приложение на экран. "
+        f"Действует {days} дн., открывать можно несколько раз.",
+    ]
+    if d.get("local_identity"):
+        lines.append("Вход без Telegram: у сотрудника служебная личность, "
+                     "сообщения и сводки в Telegram ему не приходят.")
+    return "\n".join(lines)
+
+
 def unassign_text(n: int, emp: str) -> str:
     return (f"Снять {n} договор(ов) с «{emp}»?\n\nКлиенты останутся в "
             "реестре без ответственного и пропадут из приложения сотрудника.")
