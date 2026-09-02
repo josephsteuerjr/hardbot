@@ -784,7 +784,7 @@ def _ledger_value(ledger, cid: str, key: str):
 
 def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
                since=None, until=None, ledger=None,
-               server_authoritative: bool = False) -> dict:
+               server_authoritative: bool = False, decisions=None) -> dict:
     """План обогащения. grid — лист файла как список строк (значения как есть),
     fields — схема сервера [{key,title,date,...}], rows — строки клиентов сервера.
 
@@ -797,6 +797,12 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
     None — прежнее поведение без реестра. server_authoritative — по явной
     галочке оператора строки без истории доставки пишутся поверх непустых
     значений файла (с записью в журнал вытесненного).
+
+    decisions — решения оператора по конфликтам {(КД, поле): "server"|"file"}:
+    «server» — записать значение сервера (с журналом вытесненного), «file» —
+    оставить как в книге и запомнить в реестре доставленного значение сервера,
+    чтобы дальше эта ячейка считалась правкой офиса, а не конфликтом. Ячейки
+    без решения остаются конфликтами и не пишутся.
 
     Возвращает {sheet_writes: [(r, c, value, is_date)], ...статистика}. Индексы
     0-based относительно grid. Пишутся ТОЛЬКО ячейки визита заполненных кейсов,
@@ -846,8 +852,11 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
     ledger_mode = ledger is not None
     conflicts: list[dict] = []
     office_edits: list[dict] = []
+    resolved: list[dict] = []          # конфликты, решённые оператором
+    resolved_file = resolved_server = 0
     ledger_entries: list[dict] = []
     seeded_keys: set[tuple[str, str]] = set()
+    decisions = decisions or {}
 
     def _note(bucket: list[dict], kind: str, cid: str, key: str, r: int,
               cur, now, delivered, vdate) -> None:
@@ -927,15 +936,29 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
                 if ledger_mode and merge_mode == "replace":
                     delivered = _ledger_value(ledger, cid, key)
                     cur_txt = "" if _is_technical_empty(cur) else cell_text(cur)
+                    decision = decisions.get((cid, key))
                     if delivered is None:
-                        if cur_txt != "" and not server_authoritative:
+                        if cur_txt != "" and not server_authoritative \
+                                and decision != "server":
                             # Истории доставки нет, в файле что-то стоит, и оно
                             # не совпадает с сервером. Кто прав — неизвестно:
                             # это либо правка офиса, либо устаревшая копия.
                             # Решает человек, а не писатель.
-                            _note(conflicts, CONFLICT_NO_HISTORY, cid, key, r,
-                                  cur, out_val, delivered, vdate)
+                            if decision == "file":
+                                _note(resolved, CONFLICT_NO_HISTORY, cid, key, r,
+                                      cur, out_val, delivered, vdate)
+                                resolved[-1]["decision"] = "file"
+                                resolved_file += 1
+                                _deliver(cid, key, out_val, vdate, "kept_file")
+                            else:
+                                _note(conflicts, CONFLICT_NO_HISTORY, cid, key, r,
+                                      cur, out_val, delivered, vdate)
                             continue
+                        if cur_txt != "" and decision == "server":
+                            _note(resolved, CONFLICT_NO_HISTORY, cid, key, r,
+                                  cur, out_val, delivered, vdate)
+                            resolved[-1]["decision"] = "server"
+                            resolved_server += 1
                     else:
                         server_changed = not _values_equal(delivered, val, is_date)
                         file_untouched = _values_equal(cur, delivered, is_date)
@@ -946,9 +969,23 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
                                   key, r, cur, out_val, delivered, vdate)
                             continue
                         if not file_untouched and cur_txt != "":
-                            _note(conflicts, CONFLICT_BOTH_CHANGED, cid, key, r,
-                                  cur, out_val, delivered, vdate)
-                            continue
+                            if decision == "server":
+                                _note(resolved, CONFLICT_BOTH_CHANGED, cid, key, r,
+                                      cur, out_val, delivered, vdate)
+                                resolved[-1]["decision"] = "server"
+                                resolved_server += 1
+                                # дальше — обычная запись с журналом вытесненного
+                            elif decision == "file":
+                                _note(resolved, CONFLICT_BOTH_CHANGED, cid, key, r,
+                                      cur, out_val, delivered, vdate)
+                                resolved[-1]["decision"] = "file"
+                                resolved_file += 1
+                                _deliver(cid, key, out_val, vdate, "kept_file")
+                                continue
+                            else:
+                                _note(conflicts, CONFLICT_BOTH_CHANGED, cid, key, r,
+                                      cur, out_val, delivered, vdate)
+                                continue
                         if file_untouched and cur_txt != "":
                             # Заменяем СВОЮ прошлую доставку — это не вытеснение
                             # чужого значения, журнал не засоряем.
@@ -1003,6 +1040,9 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
         "server_authoritative": bool(server_authoritative),
         "conflicts": conflicts,            # НЕ записано: решает человек
         "office_edits": office_edits,      # НЕ записано: правка офиса после доставки
+        "resolved": resolved,              # конфликты с решением оператора
+        "resolved_file": resolved_file,    # оставлено как в книге
+        "resolved_server": resolved_server,  # записан сервер по решению
         "ledger_entries": ledger_entries,  # что записать в реестр доставленного
         "ledger_seeded": ledger_seeded,    # досеяно без записи (файл уже = сервер)
         "cells_updated_delivered": cells_updated_delivered,  # обновили свою доставку
@@ -1070,14 +1110,15 @@ def _workbook_grid(wb, fields: list[dict]) -> tuple[object, list[list]]:
 
 def _plan_workbook(app, path: Path, fields: list[dict], rows: list[dict],
                    since=None, until=None, ledger=None,
-                   server_authoritative: bool = False) -> dict:
+                   server_authoritative: bool = False, decisions=None) -> dict:
     """Reopen a saved workbook and recompute the enrichment plan read-only."""
 
     wb = app.books.open(str(path), update_links=False, read_only=True)
     try:
         _ws, grid = _workbook_grid(wb, fields)
         return build_plan(grid, fields, rows, since, until,
-                          ledger=ledger, server_authoritative=server_authoritative)
+                          ledger=ledger, server_authoritative=server_authoritative,
+                          decisions=decisions)
     finally:
         wb.close()
 
@@ -1144,7 +1185,7 @@ def _co_init():
 def _enrich_workbook(app, path: Path, fields: list[dict], rows: list[dict],
                      log=lambda s: None, since=None, until=None,
                      backup_root=None, ledger=None,
-                     server_authoritative: bool = False) -> dict:
+                     server_authoritative: bool = False, decisions=None) -> dict:
     """Один файл в уже открытом Excel: бэкап → лист → план → точечная запись →
     сохранить тем же форматом. Возвращает план + backup/sheet/file.
 
@@ -1161,7 +1202,8 @@ def _enrich_workbook(app, path: Path, fields: list[dict], rows: list[dict],
         ws, grid = _workbook_grid(wb, fields)
 
         plan = build_plan(grid, fields, rows, since, until,
-                          ledger=ledger, server_authoritative=server_authoritative)
+                          ledger=ledger, server_authoritative=server_authoritative,
+                          decisions=decisions)
         writes = plan["writes"]
         plan["backup"] = None
         if writes:
@@ -1306,6 +1348,7 @@ def _enrich_with_evidence(
     backup_root=None,
     ledger=None,
     server_authoritative: bool = False,
+    decisions=None,
 ) -> dict:
     """Run the existing writer, then reopen and prove a zero second plan."""
 
@@ -1315,7 +1358,8 @@ def _enrich_with_evidence(
     path = raw_path.resolve()
     pre_sha = _sha256_file(path)
     plan = _enrich_workbook(app, path, fields, rows, log, since, until, backup_root,
-                            ledger=ledger, server_authoritative=server_authoritative)
+                            ledger=ledger, server_authoritative=server_authoritative,
+                            decisions=decisions)
     post_sha = _sha256_file(path)
     backup_raw = plan.get("backup")
     backup_path = Path(backup_raw).resolve() if backup_raw else None
@@ -1332,7 +1376,8 @@ def _enrich_with_evidence(
         # обязан быть нулевым.
         post_plan = _plan_workbook(app, path, fields, rows, since, until,
                                    ledger=ledger,
-                                   server_authoritative=server_authoritative)
+                                   server_authoritative=server_authoritative,
+                                   decisions=decisions)
     except Exception as e:  # noqa: BLE001
         # Книга к этому моменту УЖЕ сохранена и её содержимое подтверждено
         # хэшами выше. Если проверку выполнить не удалось (обычно потому, что
@@ -1348,6 +1393,7 @@ def _enrich_with_evidence(
             ledger_entries=plan.get("ledger_entries") or [],
             conflicts=plan.get("conflicts") or [],
             office_edits=plan.get("office_edits") or [],
+            resolved=plan.get("resolved") or [],
             reason=str(e)) from e
     if post_plan["cells_written"] or post_plan["changed_cases"]:
         raise RuntimeError(f"{path.name}: повторный enrichment plan не нулевой")
@@ -1375,7 +1421,7 @@ def _enrich_with_evidence(
 def enrich_file(path: str | Path, fields: list[dict], rows: list[dict],
                 log=lambda s: None, since=None, until=None,
                 backup_root=None, ledger=None,
-                server_authoritative: bool = False) -> dict:
+                server_authoritative: bool = False, decisions=None) -> dict:
     """Обогатить один живой файл реестра. Требует Excel."""
     _co_init()
     import xlwings as xw
@@ -1391,13 +1437,14 @@ def enrich_file(path: str | Path, fields: list[dict], rows: list[dict],
         return _enrich_with_evidence(app, path, fields, rows, log,
                                      since, until, backup_root,
                                      ledger=ledger,
-                                     server_authoritative=server_authoritative)
+                                     server_authoritative=server_authoritative,
+                                     decisions=decisions)
 
 
 def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
                 since=None, until=None, backup_root=None,
                 receipt_dir=None, ledger=None, on_delivered=None,
-                server_authoritative: bool = False) -> list[dict]:
+                server_authoritative: bool = False, decisions=None) -> list[dict]:
     """Обогатить личные реестры пачкой, одной сессией Excel.
     jobs: [{employee, path, rows}] — каждому файлу свои строки (его кейсы).
     Ошибка одного файла не валит остальные: в результат кладётся {..., error}.
@@ -1409,6 +1456,8 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
     сервер {"entries": [...], "receipt_digest": ..., "receipt": ...}; его
     провал попадает в результат как ledger_error, а не теряется в логе.
     server_authoritative — явная галочка оператора, см. build_plan.
+    decisions — решения оператора по конфликтам {(КД, поле): "server"|"file"},
+    обычно собранные в пульте после preview_many.
 
     Результат СОБИРАЕТСЯ СНАРУЖИ блока Excel. Раньше он жил внутри, и смерть
     сессии на выходе (`quit()` по мёртвому COM) уносила его целиком: книги на
@@ -1439,6 +1488,7 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
                         since, until, backup_root,
                         ledger=ledger,
                         server_authoritative=server_authoritative,
+                        decisions=decisions,
                     )
                 except WrittenButUnverified as e:
                     # Записано, но не проверено. НЕ откатывать. Ключ error нужен,
@@ -1485,6 +1535,41 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
                 r["receipt_error"] = str(e)
     if ledger is not None:
         _record_deliveries(results, on_delivered, receipt_path)
+    return results
+
+
+def preview_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
+                 since=None, until=None, ledger=None,
+                 server_authoritative: bool = False, decisions=None) -> list[dict]:
+    """План обогащения по каждой книге БЕЗ Excel и БЕЗ записи.
+
+    Книга читается стабильной копией через calamine (как при импорте), план
+    строится тем же build_plan, что и при записи. Нужен, чтобы оператор увидел
+    конфликты и решил их в пульте ДО того, как Excel откроет живые файлы.
+    Возвращает по файлу тот же словарь, что и план, без списка writes.
+    """
+    visit_window(since, until)
+    results: list[dict] = []
+    for i, job in enumerate(jobs, 1):
+        path = Path(job["path"])
+        log(f"[{i}/{len(jobs)}] проверяю {job['employee']} — {path.name}…")
+        try:
+            book = read_stable_workbook(path)
+            sheet = next((s for s in book["sheets"] if s["name"] == SHEET_NAME), None)
+            if sheet is None:
+                raise ValueError(f"обязательный лист «{SHEET_NAME}» отсутствует")
+            plan = build_plan(sheet["grid"], fields, job["rows"], since, until,
+                              ledger=ledger, server_authoritative=server_authoritative,
+                              decisions=decisions)
+            plan.pop("writes", None)
+            plan["file_sha256"] = book["file_sha256"]
+        except Exception as e:  # noqa: BLE001 — одна книга не валит проверку
+            plan = {"error": str(e)}
+        plan["file"] = str(path)
+        plan["path"] = str(path)
+        plan["employee"] = job["employee"]
+        plan["preview"] = True
+        results.append(plan)
     return results
 
 
@@ -1627,7 +1712,7 @@ def write_batch_receipt(results: list[dict], receipt_dir, *,
                 "pre_sha256", "post_sha256", "cells_written",
                 "cells_over_nonempty", "changed_cases", "out_of_window",
                 "ledger_mode", "server_authoritative", "ledger_seeded",
-                "cells_updated_delivered",
+                "cells_updated_delivered", "resolved_file", "resolved_server",
                 "error", "written_unverified", "not_attempted")}
             for r in results
         ],
@@ -1646,6 +1731,10 @@ def write_batch_receipt(results: list[dict], receipt_dir, *,
         "office_edits": [
             {**c, "employee": r.get("employee")}
             for r in results for c in (r.get("office_edits") or [])
+        ],
+        "resolved": [
+            {**c, "employee": r.get("employee")}
+            for r in results for c in (r.get("resolved") or [])
         ],
     }
     out = folder / f"обогащение-{stamp}.json"

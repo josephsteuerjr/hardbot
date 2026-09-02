@@ -14,7 +14,8 @@ from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFrame,
                                QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLayout,
                                QLineEdit, QPushButton, QScrollArea, QSizePolicy, QSlider,
-                               QTableView, QVBoxLayout, QWidget)
+                               QTableView, QTableWidget, QTableWidgetItem, QVBoxLayout,
+                               QWidget)
 
 from . import theme
 from ..core.text import fmt_n, today_text
@@ -638,6 +639,97 @@ class Table(QTableView):
 
     def clear(self) -> None:
         self.set_rows([])
+
+
+class DecisionTable(QTableWidget):
+    """Таблица конфликтов с выбором решения в последней колонке.
+
+    columns — как у Table ((ключ, заголовок, ширина), …); в каждой строке
+    справа выпадашка с вариантами labels (ключ → подпись). decisions() отдаёт
+    {(КД, поле): ключ решения} — ровно то, что ждёт enrich.build_plan."""
+
+    ROW_H = 32
+    DECISION_W = 210
+
+    def __init__(self, columns, labels: dict, order: tuple, default: str,
+                 stretch=(), visible_rows: int = 12, parent: QWidget | None = None) -> None:
+        super().__init__(0, len(columns) + 1, parent)
+        self.columns = list(columns)
+        self.labels = dict(labels)
+        self.order = tuple(order)
+        self.default = default
+        self.visible_rows = visible_rows
+        self.records: list[dict] = []
+        self.setHorizontalHeaderLabels([c[1] for c in columns] + ["Решение"])
+        self.verticalHeader().setVisible(False)
+        self.verticalHeader().setDefaultSectionSize(self.ROW_H)
+        self.setShowGrid(False)
+        self.setWordWrap(False)
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        header = self.horizontalHeader()
+        header.setHighlightSections(False)
+        header.setStretchLastSection(False)
+        header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        for i, (key, _title, width) in enumerate(columns):
+            if key in set(stretch):
+                header.setSectionResizeMode(i, QHeaderView.ResizeMode.Stretch)
+            else:
+                header.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
+                self.setColumnWidth(i, int(width))
+        last = len(columns)
+        header.setSectionResizeMode(last, QHeaderView.ResizeMode.Fixed)
+        self.setColumnWidth(last, self.DECISION_W)
+        self._fit(0)
+
+    def _fit(self, n_rows: int) -> None:
+        n = min(max(n_rows, 2), self.visible_rows)
+        self.setFixedHeight(self.horizontalHeader().sizeHint().height() + n * self.ROW_H + 4)
+
+    def set_conflicts(self, conflicts: list[dict], rows: list[tuple]) -> None:
+        """conflicts — словари конфликтов, rows — их строки для показа (та же
+        длина и порядок)."""
+        self.setRowCount(0)
+        self.records = list(conflicts)
+        for i, (record, row) in enumerate(zip(conflicts, rows)):
+            self.insertRow(i)
+            for j, value in enumerate(row):
+                item = QTableWidgetItem(str(value))
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                item.setToolTip(str(value))
+                self.setItem(i, j, item)
+            combo = QComboBox()
+            for key in self.order:
+                combo.addItem(self.labels.get(key, key), key)
+            current = str(record.get("decision") or self.default)
+            combo.setCurrentIndex(max(self.order.index(current), 0)
+                                  if current in self.order else 0)
+            self.setCellWidget(i, len(row), combo)
+        self._fit(len(conflicts))
+
+    def set_all(self, choice: str) -> None:
+        if choice not in self.order:
+            return
+        idx = self.order.index(choice)
+        for i in range(self.rowCount()):
+            combo = self.cellWidget(i, self.columnCount() - 1)
+            if combo is not None:
+                combo.setCurrentIndex(idx)
+
+    def decisions(self) -> dict:
+        out: dict = {}
+        for i, record in enumerate(self.records):
+            combo = self.cellWidget(i, self.columnCount() - 1)
+            if combo is None:
+                continue
+            out[(str(record.get("contract_id") or ""),
+                 str(record.get("key") or ""))] = str(combo.currentData() or self.default)
+        return out
+
+    def clear(self) -> None:
+        self.set_conflicts([], [])
 
 
 # --- список с галочками ---------------------------------------------------------

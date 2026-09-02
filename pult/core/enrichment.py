@@ -41,6 +41,62 @@ CONFLICT_COLUMNS = (
 CONFLICT_KINDS = {"no_history": "нет истории", "both_changed": "правили обе стороны",
                   "office_edit": "правка офиса"}
 
+# Решения по конфликтам. «Оставить как в книге» — безопасный выбор по умолчанию:
+# в книгу ничего не пишется, а сервер запоминает своё значение как доставленное,
+# и дальше эта ячейка считается правкой офиса, а не конфликтом.
+DECISION_FILE = "file"
+DECISION_SERVER = "server"
+DECISION_ORDER = (DECISION_FILE, DECISION_SERVER)
+DECISION_LABELS = {DECISION_FILE: "оставить как в книге",
+                   DECISION_SERVER: "записать сервер"}
+DECISION_DEFAULT = DECISION_FILE
+DECISION_HINT = ("По каждой строке выбери, что делать: оставить значение книги "
+                 "(сервер его запомнит и больше не будет спорить) или записать "
+                 "значение сервера поверх (с журналом вытесненного). Кнопки "
+                 "«везде…» ставят один ответ на все строки; потом нажми «Записать».")
+
+
+def conflict_key(c: dict) -> tuple[str, str]:
+    return (str(c.get("contract_id") or ""), str(c.get("key") or ""))
+
+
+def decisions_summary(decisions: dict) -> tuple[int, int]:
+    """(оставить как в книге, записать сервер)."""
+    values = list((decisions or {}).values())
+    return values.count(DECISION_FILE), values.count(DECISION_SERVER)
+
+
+def preview_kwargs(*, since: str, until: str, ledger: dict | None,
+                   decisions: dict | None = None) -> dict:
+    """Именованные аргументы `enrich.preview_many`."""
+    return {"since": since, "until": until, "ledger": ledger,
+            "decisions": dict(decisions or {})}
+
+
+def preview_lines(results: list[dict]) -> list[str]:
+    """Итог проверки без записи: что будет дописано, что спорно."""
+    ok = [r for r in results if "error" not in r]
+    bad = [r for r in results if "error" in r]
+    cells = sum(r.get("cells_written") or 0 for r in ok)
+    conflicts, office = collect_conflicts(results)
+    resolved_file = sum(r.get("resolved_file") or 0 for r in ok)
+    resolved_server = sum(r.get("resolved_server") or 0 for r in ok)
+    lines = [f"Проверено без записи: файлов {len(ok)} из {len(results)} · "
+             f"будет дописано ячеек: {cells}"]
+    if conflicts:
+        lines.append(f"Конфликтов: {len(conflicts)} — реши их в таблице ниже, "
+                     "иначе эти ячейки останутся как в книге и попадут в отчёт снова.")
+    else:
+        lines.append("Конфликтов нет.")
+    if resolved_file or resolved_server:
+        lines.append(f"Решено: оставить как в книге {resolved_file}, "
+                     f"записать сервер {resolved_server}.")
+    if office:
+        lines.append(f"Правок офиса после доставки: {len(office)} — не трогаются.")
+    for r in bad:
+        lines.append(f"  ⚠ {r.get('employee', '')} — {Path(r['file']).name}: {r['error']}")
+    return lines
+
 
 # --- подбор файлов ----------------------------------------------------------
 def personal_files(entries, emp) -> list[Path]:
@@ -212,14 +268,36 @@ def ledger_query(employees: list[str]) -> str:
 
 def enrich_many_kwargs(*, since: str, until: str, backup_root: str | None,
                        receipt_dir: str | None, ledger: dict | None,
-                       on_delivered, server_authoritative: bool) -> dict:
+                       on_delivered, server_authoritative: bool,
+                       decisions: dict | None = None) -> dict:
     """Именованные аргументы `enrich.enrich_many` одним словарём: `ledger` —
     ответ сервера (`{contract_id: {key: {value, at}}}`), `on_delivered` —
-    колбэк, который пульт реализует как POST реестра доставленного."""
+    колбэк, который пульт реализует как POST реестра доставленного,
+    `decisions` — решения оператора по конфликтам {(КД, поле): file|server}."""
     return {"since": since, "until": until, "backup_root": backup_root,
             "receipt_dir": receipt_dir, "ledger": ledger,
             "on_delivered": on_delivered,
-            "server_authoritative": bool(server_authoritative)}
+            "server_authoritative": bool(server_authoritative),
+            "decisions": dict(decisions or {})}
+
+
+NO_CHECK_NOTE = ("Проверка конфликтов для этого набора не делалась: спорные ячейки "
+                 "останутся как в книге и попадут в отчёт. Чтобы решить их сейчас, "
+                 "сначала нажми «Проверить конфликты».")
+
+
+def confirm_decisions_note(decisions: dict | None, pending_conflicts: int) -> str:
+    """Строка подтверждения про конфликты: сколько решено и как, сколько
+    останется как в книге без решения."""
+    keep, write = decisions_summary(decisions or {})
+    parts = []
+    if keep or write:
+        parts.append(f"Решения по конфликтам: оставить как в книге {keep}, "
+                     f"записать сервер {write}.")
+    if pending_conflicts:
+        parts.append(f"Без решения останутся {pending_conflicts} конфликт(ов): в книгу "
+                     "они не запишутся и попадут в отчёт.")
+    return "\n".join(parts)
 
 
 def replay_receipt(receipt_path, on_delivered) -> dict:
@@ -286,6 +364,11 @@ def report_lines(results: list[dict]) -> list[str]:
         if len(displaced) > 12:
             lines.append(f"  … и ещё {len(displaced) - 12}; полный список в квитанции")
     conflicts, office = collect_conflicts(results)
+    resolved_file = sum(r.get("resolved_file") or 0 for r in ok)
+    resolved_server = sum(r.get("resolved_server") or 0 for r in ok)
+    if resolved_file or resolved_server:
+        lines.append(f"КОНФЛИКТЫ РЕШЕНЫ: оставлено как в книге {resolved_file}, "
+                     f"записан сервер {resolved_server}.")
     if conflicts:
         lines.append(f"КОНФЛИКТЫ ({len(conflicts)}): значение в книге отличается и от "
                      "сервера, и от доставленного ранее — в книгу не записано, "

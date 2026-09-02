@@ -18,8 +18,8 @@ from ..core.dashboard import period_text
 from ..core.export import export_confirm_text, write_markers_xlsx, write_registry_xlsx
 from ..core.text import fmt_n, to_iso, today_text
 from . import dialogs
-from .widgets import (Button, Card, CheckList, Combo, DateField, Field, KVGrid, Note,
-                      Page, Rows, Table, WrapCheck, hrow, label)
+from .widgets import (Button, Card, CheckList, Combo, DateField, DecisionTable, Field,
+                      KVGrid, Note, Page, Rows, Table, WrapCheck, hrow, label)
 
 
 class RegistrySection:
@@ -97,21 +97,42 @@ class RegistrySection:
                     Button("Из квитанции", self._enr_suggest_window),
                     spacing_before=4)
         self.enr_window_note = enr.add(Note("", "tiny"))
-        self.enr_server_auth = enr.add(WrapCheck(
-            en.SERVER_AUTHORITATIVE_LABEL, on_toggle=self._enr_server_auth_toggle,
-            role="text"), spacing_before=4)
-        self.enr_server_auth_warn = enr.add(Note(en.SERVER_AUTHORITATIVE_WARNING, "warn"))
-        self.enr_server_auth_warn.hide()
         self.enr_kvs = enr.add(KVGrid(), spacing_before=4)
         self.enr_warn = enr.add(Note("", "warn"))
         self.enr_pick_frame = enr.add(Rows(spacing=4))
-        self.enr_apply_sel_btn = Button("Обогатить выбранных (0)",
-                                        lambda: self.enr_apply("selected"), kind="accent")
-        self.enr_apply_all_btn = Button("Обогатить всех", lambda: self.enr_apply("all"))
+        # Порядок работы: «Проверить конфликты» строит план без Excel и без
+        # записи, конфликты решаются в таблице ниже, и только «Записать»
+        # открывает живые книги. Прежняя галочка «сервер главнее для всех
+        # строк без истории» заменена решениями по каждой строке.
+        self.enr_check_btn = Button("Проверить конфликты (без записи)", self.enr_check,
+                                    kind="accent")
+        self.enr_apply_sel_btn = Button("Записать выбранных (0)",
+                                        lambda: self.enr_apply("selected"))
+        self.enr_apply_all_btn = Button("Записать всех", lambda: self.enr_apply("all"))
         self.enr_apply_row = QWidget()
-        self.enr_apply_row.setLayout(hrow(self.enr_apply_sel_btn, self.enr_apply_all_btn))
+        self.enr_apply_row.setLayout(hrow(self.enr_check_btn, self.enr_apply_sel_btn,
+                                          self.enr_apply_all_btn))
         enr.add(self.enr_apply_row, spacing_before=4)
         self.enr_apply_row.hide()
+        self.enr_preview_out = enr.add(Note("", "small"), spacing_before=4)
+        self.enr_decisions_title = enr.add(label("Конфликты — реши, что писать", bold=True),
+                                           spacing_before=4)
+        self.enr_decisions_hint = enr.add(Note(en.DECISION_HINT, "tiny"))
+        self.enr_decisions_all_file = Button("Везде оставить как в книге",
+                                             lambda: self.enr_decisions.set_all(en.DECISION_FILE))
+        self.enr_decisions_all_server = Button("Везде записать сервер",
+                                               lambda: self.enr_decisions.set_all(en.DECISION_SERVER))
+        self.enr_decisions_row = QWidget()
+        self.enr_decisions_row.setLayout(hrow(self.enr_decisions_all_file,
+                                              self.enr_decisions_all_server, stretch=False))
+        enr.add(self.enr_decisions_row)
+        self.enr_decisions = enr.add(DecisionTable(
+            en.CONFLICT_COLUMNS, en.DECISION_LABELS, en.DECISION_ORDER, en.DECISION_DEFAULT,
+            stretch=("file", "server", "delivered"), visible_rows=12))
+        for w in (self.enr_decisions_title, self.enr_decisions_hint,
+                  self.enr_decisions_row, self.enr_decisions):
+            w.hide()
+        self._enr_preview = None          # {"keys", "since", "until"} последней проверки
         self.enrich_out = enr.add(Note("", "small"), spacing_before=4)
         self.enr_ledger_err = Note("", "danger")
         self.enr_replay_btn = Button("Повторить отправку из квитанции", self.enr_replay_ledger)
@@ -390,7 +411,7 @@ class RegistrySection:
 
     def _enr_seln(self):
         n = sum(1 for m in self.enr_matched if m["key"] in self.enr_selected)
-        self.enr_apply_sel_btn.configure(text=f"Обогатить выбранных ({n})",
+        self.enr_apply_sel_btn.configure(text=f"Записать выбранных ({n})",
                                          state="normal" if n else "disabled")
 
     def _enr_window_today(self):
@@ -423,8 +444,63 @@ class RegistrySection:
             if not quiet:
                 self.toast("Квитанций нет — окно не подставлено", err=True)
 
-    def _enr_server_auth_toggle(self):
-        self.enr_server_auth_warn.setVisible(self.enr_server_auth.get())
+    def _enr_picked(self, which: str) -> list[dict]:
+        return [m for m in self.enr_matched
+                if which == "all" or m["key"] in self.enr_selected]
+
+    def _ledger_for(self, employees: list[str]) -> dict:
+        # Реестр доставленного: сервер помнит, что пульт сам положил в книгу;
+        # без него отличие файла от сервера неотличимо от правки офиса.
+        answer = self.api("GET", en.ledger_query(employees), timeout=120) or {}
+        return dict(answer.get("ledger") or {})
+
+    def enr_check(self, which: str = "all"):
+        """Проверка без Excel и без записи: план по книгам, конфликты — в таблицу
+        решений. Живые книги при этом не открываются."""
+        picked = self._enr_picked(which)
+        if not picked:
+            self.toast("Никто не выбран", err=True)
+            return
+        jobs = en.build_jobs(picked)
+        since, until = self._enr_window()
+        fields = self._enr_fields
+        employees = [m["employee"] for m in picked]
+        keys = frozenset(m["key"] for m in picked)
+        log = lambda s: self.ui_call(lambda: self.enr_preview_out.setText(s))  # noqa: E731
+
+        def work():
+            ledger = self._ledger_for(employees)
+            kwargs = en.preview_kwargs(since=since, until=until, ledger=ledger)
+            return enrich.preview_many(jobs, fields, log, **kwargs)
+
+        def done(results):
+            self._enr_preview = {"keys": keys, "since": since, "until": until}
+            self.enr_preview_out.setText("\n".join(en.preview_lines(results)))
+            conflicts, office = en.collect_conflicts(results)
+            self.enr_decisions.set_conflicts(conflicts, [en.conflict_row(c) for c in conflicts])
+            for w in (self.enr_decisions_title, self.enr_decisions_hint,
+                      self.enr_decisions_row, self.enr_decisions):
+                w.setVisible(bool(conflicts))
+            self.enr_decisions_title.setText(f"Конфликты — реши, что писать ({len(conflicts)})")
+            self.enr_office.set_rows([en.conflict_row(c) for c in office])
+            self.enr_office_title.setText(f"Правки офиса ({len(office)})")
+            self.enr_office_title.setVisible(bool(office))
+            self.enr_office.setVisible(bool(office))
+            self.enr_conflicts_title.hide()
+            self.enr_conflicts.hide()
+            self.toast(f"Проверено: конфликтов {len(conflicts)}", err=False)
+
+        self.bg_task(work, done, lambda e: (self.enr_preview_out.setText(f"Ошибка: {e}"),
+                                            self.toast(str(e), err=True)))
+
+    def _enr_decisions_for(self, picked: list[dict], since: str, until: str) -> dict:
+        """Решения из таблицы — только если проверка делалась для того же
+        набора сотрудников и того же окна; иначе решений нет."""
+        keys = frozenset(m["key"] for m in picked)
+        pv = self._enr_preview
+        if not pv or pv["keys"] != keys or (pv["since"], pv["until"]) != (since, until):
+            return {}
+        return self.enr_decisions.decisions()
 
     def _enr_backup_root(self):
         return en.backup_root(self.scatter_base)
@@ -434,8 +510,7 @@ class RegistrySection:
             self.enr_warn.configure(text=LIMITED_TEST_ENRICH_DISABLED_MESSAGE)
             self.toast(LIMITED_TEST_ENRICH_DISABLED_MESSAGE, err=True)
             return
-        picked = [m for m in self.enr_matched
-                  if which == "all" or m["key"] in self.enr_selected]
+        picked = self._enr_picked(which)
         if not picked:
             self.toast("Никто не выбран", err=True)
             return
@@ -444,28 +519,28 @@ class RegistrySection:
         if not (since or until) and not self.ask_yes_no(en.WHOLE_HISTORY_TITLE,
                                                         en.WHOLE_HISTORY_TEXT):
             return
+        decisions = self._enr_decisions_for(picked, since, until)
+        note = (en.confirm_decisions_note(decisions, 0) if decisions
+                else en.NO_CHECK_NOTE)
         if not self.ask_yes_no("Обогащение реестров",
-                               en.confirm_text(len(picked), len(jobs), since, until)):
+                               en.confirm_text(len(picked), len(jobs), since, until)
+                               + (("\n\n" + note) if note else "")):
             return
         fields = self._enr_fields
         log = lambda s: self.ui_call(lambda: self.enrich_out.setText(s))  # noqa: E731
         backup_root = self._enr_backup_root()
         receipts = self._enr_receipt_dir()
-        server_authoritative = bool(self.enr_server_auth.get())
         employees = [m["employee"] for m in picked]
 
         def on_delivered(payload: dict):
             return self.api("POST", "/admin/enrichment/ledger.json", payload, timeout=120)
 
         def work():
-            # Реестр доставленного: сервер помнит, что пульт сам положил в книгу;
-            # без него отличие файла от сервера неотличимо от правки офиса.
-            answer = self.api("GET", en.ledger_query(employees), timeout=120) or {}
-            ledger = dict(answer.get("ledger") or {})
+            ledger = self._ledger_for(employees)
             kwargs = en.enrich_many_kwargs(
                 since=since, until=until, backup_root=backup_root, receipt_dir=receipts,
                 ledger=ledger, on_delivered=on_delivered,
-                server_authoritative=server_authoritative)
+                server_authoritative=False, decisions=decisions)
             return enrich.enrich_many(jobs, fields, log, **kwargs)
 
         self.bg_task(work, self._enr_done,
@@ -476,6 +551,12 @@ class RegistrySection:
         self.enrich_out.setText("\n".join(en.report_lines(results)))
         self._enr_last_receipt = next((r.get("receipt") for r in results if r.get("receipt")),
                                       None)
+        # Решения применены — таблица решений больше не актуальна.
+        self._enr_preview = None
+        self.enr_decisions.clear()
+        for w in (self.enr_decisions_title, self.enr_decisions_hint,
+                  self.enr_decisions_row, self.enr_decisions):
+            w.hide()
         err = en.ledger_error(results)
         self.enr_ledger_err.setText(err)
         self.enr_ledger_row.setVisible(bool(err))

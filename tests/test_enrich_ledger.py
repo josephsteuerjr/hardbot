@@ -266,7 +266,7 @@ def _run_batch(monkeypatch, tmp_path, *, plans, on_delivered=None, ledger=None):
     calls = iter(plans)
 
     def fake_evidence(app, path, fields, rows, log, since, until, backup_root,
-                      ledger=None, server_authoritative=False):
+                      ledger=None, server_authoritative=False, decisions=None):
         plan = next(calls)
         if isinstance(plan, Exception):
             raise plan

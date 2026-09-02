@@ -101,10 +101,34 @@ def test_suggest_window_from_last_receipt(tmp_path):
 def test_enrich_many_kwargs_match_the_real_signature():
     kwargs = en.enrich_many_kwargs(since="01.08.2026", until="", backup_root="b",
                                    receipt_dir="r", ledger={}, on_delivered=print,
-                                   server_authoritative=1)
+                                   server_authoritative=1,
+                                   decisions={("A", "call_status"): "file"})
     accepted = inspect.signature(enrich.enrich_many).parameters
     assert set(kwargs) <= set(accepted)
     assert kwargs["server_authoritative"] is True and kwargs["ledger"] == {}
+    assert kwargs["decisions"] == {("A", "call_status"): "file"}
+    pk = en.preview_kwargs(since="", until="", ledger={})
+    assert set(pk) <= set(inspect.signature(enrich.preview_many).parameters)
+
+
+def test_decisions_helpers_and_preview_lines():
+    assert en.conflict_key({"contract_id": "A", "key": "call_status"}) == ("A", "call_status")
+    assert en.decisions_summary({("A", "k"): "file", ("B", "k"): "server",
+                                 ("C", "k"): "file"}) == (2, 1)
+    note = en.confirm_decisions_note({("A", "k"): "file"}, 0)
+    assert "оставить как в книге 1" in note and "записать сервер 0" in note
+    assert "Проверить конфликты" in en.NO_CHECK_NOTE
+    results = [
+        {"employee": "И", "file": "a.xlsb", "cells_written": 4, "conflicts": [
+            {"contract_id": "A", "key": "call_status", "kind": "no_history"}],
+         "office_edits": [], "resolved_file": 1, "resolved_server": 0},
+        {"employee": "П", "file": "b.xlsb", "error": "занят"},
+    ]
+    text = "\n".join(en.preview_lines(results))
+    assert "файлов 1 из 2" in text and "будет дописано ячеек: 4" in text
+    assert "Конфликтов: 1" in text and "оставить как в книге 1" in text
+    assert "b.xlsb: занят" in text
+    assert en.DECISION_LABELS[en.DECISION_DEFAULT] == "оставить как в книге"
 
 
 def test_ledger_query_joins_names_with_semicolon():
