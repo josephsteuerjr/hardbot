@@ -72,20 +72,23 @@ OSRM_URL = (os.getenv("OSRM_URL", "") or "").strip()
 OSRM_URL_UZ = (os.getenv("OSRM_URL_UZ", "") or "").strip()
 OSRM_URL_TJ = (os.getenv("OSRM_URL_TJ", "") or "").strip()
 VROOM_URL = (os.getenv("VROOM_URL", "") or "").strip()
-# Голос распознаёт общий сервис Praxis через authenticated Unix socket.
-# Local fallback намеренно отсутствует: локальный распознаватель не помещается в лимит hardbot2
-# и пять раз приводила к cgroup OOM. Некорректный/пустой backend = фича выключена.
+# Голос распознаёт отдельная служба (контейнер stt/) через Unix-сокет с токеном.
+# Локального фолбэка намеренно нет: распознаватель внутри процесса не помещался
+# в лимит памяти и пять раз приводил к cgroup OOM. Некорректный/пустой backend =
+# фича выключена. VOICE_BACKEND=stt — штатное значение; «praxis» — прежнее имя,
+# оставлено рабочим для уже настроенного прода.
 VOICE_BACKEND = (os.getenv("VOICE_BACKEND", "off") or "off").strip().casefold()
-PRAXIS_STT_SOCKET = (
-    os.getenv("PRAXIS_STT_SOCKET", "/run/praxis-stt/stt.sock") or ""
-).strip()
-PRAXIS_STT_TOKEN_FILE = (
-    os.getenv(
-        "PRAXIS_STT_TOKEN_FILE",
-        "/run/secrets/praxis-stt-client.token",
-    )
-    or ""
-).strip()
+VOICE_BACKENDS = {"stt", "praxis"}
+
+
+def _stt_env(new: str, old: str, default: str, environ=None) -> str:
+    """Нейтральный ключ STT_* главнее; старый PRAXIS_STT_* остаётся рабочим (прод)."""
+    env = os.environ if environ is None else environ
+    return ((env.get(new) or "").strip() or (env.get(old) or "").strip() or default)
+
+
+STT_SOCKET = _stt_env("STT_SOCKET", "PRAXIS_STT_SOCKET", "/run/stt/stt.sock")
+STT_TOKEN_FILE = _stt_env("STT_TOKEN_FILE", "PRAXIS_STT_TOKEN_FILE", "/run/secrets/stt.token")
 try:
     VOICE_TIMEOUT_SECONDS = max(
         5.0,
@@ -1891,18 +1894,18 @@ async def _manager_photo_file(request: web.Request) -> web.Response:
     return resp
 
 
-# --- Голосовой комментарий: общий сервис распознавания речи по UDS -----------
+# --- Голосовой комментарий: служба распознавания речи по Unix-сокету --------
 _STT = None
 _VOICE_LOCK = asyncio.Lock()
-# Для таджикского профиль Praxis пока использует auto.
+# Для таджикского служба пока использует auto.
 _VOICE_LANG = {"ru": "ru", "uz": "uz"}
 
 
 def _voice_configured() -> bool:
     return (
-        VOICE_BACKEND == "praxis"
-        and bool(PRAXIS_STT_SOCKET)
-        and bool(PRAXIS_STT_TOKEN_FILE)
+        VOICE_BACKEND in VOICE_BACKENDS
+        and bool(STT_SOCKET)
+        and bool(STT_TOKEN_FILE)
     )
 
 
@@ -1910,17 +1913,17 @@ def _stt() -> stt_client.STTClient:
     global _STT
     if _STT is None:
         _STT = stt_client.STTClient(
-            unix_socket=PRAXIS_STT_SOCKET,
-            token_file=PRAXIS_STT_TOKEN_FILE,
+            unix_socket=STT_SOCKET,
+            token_file=STT_TOKEN_FILE,
             timeout_seconds=VOICE_TIMEOUT_SECONDS,
         )
     return _STT
 
 
 async def _voice(request: web.Request) -> web.Response:
-    """Голосовое из миниаппа → общий сервис распознавания речи → текст.
+    """Голосовое из миниаппа → служба распознавания речи → текст.
 
-    На границу Praxis уходят только байты и ``ru|uz|auto``: uid/ФИО/КД,
+    На границу службы уходят только байты и ``ru|uz|auto``: uid/ФИО/КД,
     исходное имя файла и текст формы не передаются.
     """
     uid, _emp = _auth(request)
@@ -1960,7 +1963,7 @@ async def _voice(request: web.Request) -> web.Response:
             raise web.HTTPUnprocessableEntity(text="empty transcript")
     except stt_client.STTError as exc:
         logging.warning(
-            "praxis stt failed: status=%s retryable=%s",
+            "служба распознавания речи: сбой status=%s retryable=%s",
             exc.status,
             exc.retryable,
         )
@@ -1989,7 +1992,7 @@ async def _voice(request: web.Request) -> web.Response:
     except (AssertionError, OSError, ValueError):
         raise web.HTTPBadRequest(text="bad voice body")
     except Exception:  # noqa: BLE001 — отсутствие UDS/неожиданный client failure
-        logging.exception("praxis stt unexpected client failure")
+        logging.exception("служба распознавания речи: неожиданный сбой клиента")
         raise web.HTTPServiceUnavailable(text="voice temporarily unavailable")
     finally:
         if tmp is not None:

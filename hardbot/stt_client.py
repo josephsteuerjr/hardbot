@@ -1,8 +1,8 @@
-"""Клиент общего сервиса распознавания речи через authenticated Unix socket.
+"""Клиент службы распознавания речи (контейнер ``stt/``) через Unix-сокет с токеном.
 
-Hardbot не запускает локальный распознаватель и не имеет автоматического local fallback. В запрос
-не передаются telegram_id, ФИО, КД, имя исходного файла или текст формы: только
-байты аудио и язык ``ru|uz|auto``.
+Сервер приложения не запускает распознаватель внутри себя и не имеет
+автоматического локального фолбэка. В запрос не передаются telegram_id, ФИО,
+КД, имя исходного файла или текст формы: только байты аудио и язык ``ru|uz|auto``.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import aiohttp
 
 MAX_AUDIO_BYTES = 15 * 1024 * 1024
 LANGUAGES = {"ru", "uz", "auto"}
-DEFAULT_BASE_URL = "http://praxis-stt"
+DEFAULT_BASE_URL = "http://stt"
 
 
 @dataclass(slots=True)
@@ -57,18 +57,18 @@ class STTClient:
             raw = self.token_file.read_bytes()
         except OSError as exc:
             raise STTError(
-                "Praxis STT token недоступен",
+                "Токен службы распознавания речи недоступен",
                 retryable=True,
             ) from exc
         try:
             token = raw.decode("ascii").strip()
         except UnicodeDecodeError as exc:
-            raise STTError("Praxis STT token имеет неверный формат") from exc
+            raise STTError("Токен службы распознавания речи имеет неверный формат") from exc
         if (
             len(token) < 32
             or any(ord(char) < 33 or ord(char) > 126 for char in token)
         ):
-            raise STTError("Praxis STT token имеет неверный формат")
+            raise STTError("Токен службы распознавания речи имеет неверный формат")
         return token
 
     def _connector(self) -> aiohttp.BaseConnector:
@@ -92,13 +92,13 @@ class STTClient:
             payload = await response.json(content_type=None)
         except (aiohttp.ClientError, json.JSONDecodeError, ValueError) as exc:
             raise STTError(
-                "Praxis STT вернул некорректный ответ",
+                "Служба распознавания речи вернула некорректный ответ",
                 status=response.status,
                 retryable=response.status >= 500,
             ) from exc
         if not isinstance(payload, dict):
             raise STTError(
-                "Praxis STT вернул некорректный ответ",
+                "Служба распознавания речи вернула некорректный ответ",
                 status=response.status,
                 retryable=response.status >= 500,
             )
@@ -130,7 +130,7 @@ class STTClient:
                     ):
                         return payload
                     raise STTError(
-                        "Praxis STT ещё не готов",
+                        "Служба распознавания речи ещё не готова",
                         status=response.status,
                         retryable=response.status in {429, 503},
                         retry_after=self._retry_after(response),
@@ -139,7 +139,7 @@ class STTClient:
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
             raise STTError(
-                "Praxis STT недоступен",
+                "Служба распознавания речи недоступна",
                 retryable=True,
             ) from exc
 
@@ -159,8 +159,8 @@ class STTClient:
 
         headers = {"Authorization": f"Bearer {self._token()}"}
         form = aiohttp.FormData()
-        # Имя намеренно константное: временный путь hardbot и исходное имя
-        # браузерного файла не должны пересекать процессную границу Praxis.
+        # Имя намеренно константное: временный путь сервера и исходное имя
+        # браузерного файла не должны пересекать границу службы.
         stream = path.open("rb")
         form.add_field(
             "audio",
@@ -191,11 +191,11 @@ class STTClient:
                         response.status >= 500
                     )
                     raise STTError(
-                        "Praxis STT не распознал аудио"
+                        "Служба распознавания речи не распознала аудио"
                         if response.status == 422
-                        else "Praxis STT временно недоступен"
+                        else "Служба распознавания речи временно недоступна"
                         if retryable
-                        else "Praxis STT отклонил аудио",
+                        else "Служба распознавания речи отклонила аудио",
                         status=response.status,
                         retryable=retryable,
                         retry_after=self._retry_after(response),
@@ -204,7 +204,7 @@ class STTClient:
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
             raise STTError(
-                "Praxis STT недоступен",
+                "Служба распознавания речи недоступна",
                 retryable=True,
             ) from exc
         finally:
