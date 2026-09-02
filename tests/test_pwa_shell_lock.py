@@ -40,6 +40,6 @@ def test_shell_cache_was_bumped_for_new_index():
     text = (ROOT / "server" / "miniapp" / "index.html").read_text("utf-8")
     index_sha = hashlib.sha256(text.replace(chr(13) + chr(10), chr(10)).encode("utf-8")).hexdigest()
     assert index_sha == (
-        "88d17a256692b443675fafa8b31229a95c64ad814704aeb3d03ed937b65bee83"
+        "b7cb7f7615fffdf6cd6ce5c98c3ab6c1465ae8f4c89c7b9c249c685e3e68c843"
     ), "оболочка изменилась — обнови этот хэш И версию CACHE в sw.js"
-    assert 'const CACHE = "hard-shell-v35";' in SW
+    assert 'const CACHE = "hard-shell-v36";' in SW

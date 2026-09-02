@@ -405,6 +405,22 @@ def _row_get(rows, key):
     return next((r[key] for r in rows if r[key] not in (None, "")), None)
 
 
+def _fmt_date_ru(iso: str) -> str:
+    """«2026-09-15» → «15.09.2026»; всё остальное — как есть."""
+    try:
+        return date.fromisoformat(str(iso)[:10]).strftime("%d.%m.%Y")
+    except ValueError:
+        return str(iso)
+
+
+def _fmt_money_ru(value) -> str:
+    """Сумма → «15 000»; мусор и пустота → пустая строка."""
+    canon = db.canon_amount(value)
+    if canon is None:
+        return str(value or "").strip()
+    return f"{int(canon):,}".replace(",", " ")
+
+
 def _person_full_from_rows(rows, rep: str, lang: str) -> dict | None:
     """Полная карточка из уже выбранных строк одного человека.
 
@@ -432,11 +448,22 @@ def _person_full_from_rows(rows, rep: str, lang: str) -> dict | None:
                 "value": tv(_row_get(rows, k), lang) if k == "agreed_payment"
                 else (_row_get(rows, k) or "—")}
                for k in PROMISE_KEYS]
-    # Пока обещания нет в снимке — показываем офисное read-only. Как только
-    # его дал выездник, значение живёт в форме, и вторая строка теми же
-    # словами только путает.
-    if (visit or {}).get("promise_date"):
-        promise = [x for x in promise if x["key"] != "promise_date"]
+    # Обещание выездника — из доказанного снимка: дата и сумма. Раньше сумма в
+    # сводке не показывалась вовсе (её не было в PROMISE_KEYS), а дата при
+    # наличии снимка убиралась «чтобы не дублировать форму» — и выездник,
+    # набрав сумму, нигде её потом не видел. Пока снимка нет — офисные
+    # значения read-only.
+    snap_date = str((visit or {}).get("promise_date") or "").strip()
+    snap_sum = str((visit or {}).get("forecast_sum") or "").strip()
+    for x in promise:
+        if x["key"] == "promise_date" and snap_date:
+            x["value"] = _fmt_date_ru(snap_date)
+    sum_value = _fmt_money_ru(snap_sum) if snap_sum else (
+        _fmt_money_ru(_row_get(rows, "forecast_sum")) or "—")
+    idx = next((i for i, x in enumerate(promise) if x["key"] == "promise_date"), 0)
+    promise.insert(idx + 1, {"key": "forecast_sum",
+                             "title": _form_field_title("forecast_sum", lang),
+                             "value": sum_value})
     # Типизированные поля: current — ТОЛЬКО из доказанного снимка; значение
     # реестра едет отдельным ключом как read-only контекст («офис: 20.09»),
     # чтобы пустое поле не читалось как «ничего не зафиксировано».

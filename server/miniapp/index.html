@@ -154,6 +154,14 @@ textarea{min-height:64px;resize:vertical}
 .fsec.key{border-color:var(--accent);box-shadow:0 2px 10px rgba(43,40,37,.10)}
 .fsec.key .fsec-h{color:var(--accent)}
 .fsec select{min-height:50px}
+.money{flex:1;min-width:0;min-height:50px;padding:12px 14px;border:1px solid var(--border);
+  border-radius:10px;background:#fff;color:var(--text);font-size:19px;font-weight:600;
+  font-family:inherit;font-variant-numeric:tabular-nums;letter-spacing:.2px;margin:0}
+.money::placeholder{color:var(--faint);font-weight:400}
+.money:focus{outline:none;border-color:var(--accent)}
+.moneyrow{display:flex;gap:8px;align-items:stretch}
+.xbtn{flex:0 0 50px;min-height:50px;border:1px solid var(--border);border-radius:10px;
+  background:#fff;color:var(--muted);font-size:22px;line-height:1;font-family:inherit;padding:0;margin:0}
 .btn.acc.big{padding:16px;font-size:16px;font-weight:600;border-radius:14px;
   box-shadow:0 4px 14px rgba(43,40,37,.22)}
 .draftrow{display:flex;align-items:center;gap:7px;font-size:12.5px;margin:2px 2px 0}
@@ -717,7 +725,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=35;
+const SHELL_VERSION=36;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1770,18 +1778,24 @@ function promiseSection(d){
         ${reg[f.key]&&!v?`<div class="muted" style="font-size:11px;margin:-6px 0 8px">офис: ${esc(reg[f.key])}</div>`:""}`;
     }
     return `<label class="fld">${esc(f.title)}</label>
-      <div style="display:flex;gap:8px;margin-bottom:${reg[f.key]&&!v?"2px":"10px"}">
-        <input data-k="${esc(f.key)}" inputmode="numeric" class="search"
-          style="flex:1;margin:0" value="${esc(v)}" oninput="onMoneyInput(this)">
-        <button type="button" class="btn line" style="padding:8px 14px"
+      <div class="moneyrow" style="margin-bottom:${reg[f.key]&&!v?"2px":"10px"}">
+        <input data-k="${esc(f.key)}" inputmode="numeric" class="money" placeholder="0"
+          value="${esc(fmtMoneyInput(v))}" oninput="onMoneyInput(this)">
+        <button type="button" class="xbtn" aria-label="очистить"
           onclick="typedClear('${esc(f.key)}')">×</button>
       </div>
       ${reg[f.key]&&!v?`<div class="muted" style="font-size:11px;margin:0 0 10px">офис: ${esc(reg[f.key])}</div>`:""}`;
   }).join("");
   return `<div class="fsec"><div class="fsec-h">🤝</div>${rows}</div>`;
 }
+// Сумма: храним и шлём только цифры, показываем с разрядами («15 000»).
+function fmtMoneyInput(v){
+  const d=String(v==null?"":v).replace(/[^0-9]/g,"").slice(0,13);
+  return d.replace(/\B(?=(\d{3})+(?!\d))/g," ");
+}
 function onMoneyInput(el){
-  el.value=el.value.replace(/[^0-9]/g,"").slice(0,13);
+  const shown=fmtMoneyInput(el.value);
+  if(el.value!==shown) el.value=shown;
   if(el.value) FORM_CLEARED.delete(el.dataset.k);
 }
 function typedClear(key){
@@ -2371,7 +2385,7 @@ function readForm(){
     if(!FORM_TOUCHED.has(f.key)) return;
     const el=document.querySelector('#panel input[data-k="'+f.key+'"]');
     if(!el) return;
-    const v=(el.value||"").trim();
+    const v=f.kind==="date"?(el.value||"").trim():(el.value||"").replace(/[^0-9]/g,"");
     if(v) values[f.key]=v;
     else if(FORM_CLEARED.has(f.key)) values[f.key]="";  // явная очистка кнопкой
   });
