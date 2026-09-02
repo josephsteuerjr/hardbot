@@ -594,6 +594,12 @@ async def _manifest(request: web.Request) -> web.StreamResponse:
                         headers={"Cache-Control": "no-store"})
 
 
+async def _apple_touch_icon(request: web.Request) -> web.StreamResponse:
+    """Иконка для ярлыка iOS и вкладки браузера — та же, что в манифесте."""
+    return web.FileResponse(MINIAPP_DIR / "vendor" / "icon-192.png",
+                            headers={"Cache-Control": "public, max-age=86400"})
+
+
 async def _tiles(request: web.Request) -> web.StreamResponse:
     if not TILES_FILE.exists():
         raise web.HTTPNotFound()
@@ -3659,6 +3665,11 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/version.json", _version)
     app.router.add_get("/sw.js", _sw)
     app.router.add_get("/manifest.webmanifest", _manifest)
+    # iOS при «На экран Домой» ищет apple-touch-icon; без него ярлык получает
+    # скриншот страницы вместо иконки «Хард».
+    app.router.add_get("/apple-touch-icon.png", _apple_touch_icon)
+    app.router.add_get("/apple-touch-icon-precomposed.png", _apple_touch_icon)
+    app.router.add_get("/favicon.ico", _apple_touch_icon)
     # Локально захостенные ассеты оболочки (Telegram SDK, иконки PWA) — same-origin,
     # чтобы миниапп поднимался в оффлайне без внешних CDN (их кэширует service worker).
     app.router.add_static("/vendor/", path=str(MINIAPP_DIR / "vendor"))

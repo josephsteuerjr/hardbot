@@ -5,7 +5,27 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#FAF9F5">
 <title>Хард</title>
-<link rel="manifest" href="/manifest.webmanifest">
+<!-- Манифест PWA подключается СКРИПТОМ, а не статичным <link>: Safari скачивает
+     манифест при загрузке страницы (до входа) и при «На экран Домой» его не
+     перечитывает. Если токен уже известен (localStorage или #t= в адресе),
+     ссылка на манифест сразу персональная (?t=…), и ярлык рождается со
+     стартовым адресом, несущим вход. 02.09.2026: переустановленный ярлык
+     открывался без токена и получал 401 — стартовый адрес был «/». -->
+<script>
+(function(){
+  var t="";
+  try{ t=localStorage.getItem("app_token")||""; }catch(e){}
+  if(!t){ try{ var m=/[#&]t=([^&]+)/.exec(location.hash||""); if(m) t=decodeURIComponent(m[1]); }catch(e){} }
+  window.MANIFEST_PERSONAL=!!t;
+  var l=document.createElement("link"); l.rel="manifest";
+  l.href="/manifest.webmanifest"+(t?"?t="+encodeURIComponent(t):"");
+  document.head.appendChild(l);
+})();
+</script>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Хард">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="apple-touch-icon" href="/vendor/icon-192.png">
 <!-- Telegram SDK — локально (same-origin), чтобы приложение поднималось в оффлайне. -->
 <script src="/vendor/telegram-web-app.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -725,7 +745,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=36;
+const SHELL_VERSION=37;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1119,7 +1139,16 @@ async function redeemFromUrl(){
     if(u.hash) code=new URLSearchParams(u.hash.replace(/^#/,'')).get('link');
     if(!code) code=u.searchParams.get('link');
   }catch(e){}
-  if(code) await redeemCode(code, true);
+  if(!code) return null;
+  const r=await redeemCode(code, true);
+  // Первый вход по ссылке вне Телеги: манифест уже скачан без токена (Safari
+  // берёт его при загрузке страницы и при «На экран Домой» не перечитывает).
+  // Один раз перезагружаемся с #t=<токен> в адресе — после этого манифест
+  // подключается персональным, и ярлык унесёт вход с собой.
+  if(r===true && !(TG&&TG.initData) && !window.MANIFEST_PERSONAL){
+    stampTokenUrl(); location.reload(); return "reload";
+  }
+  return r;
 }
 // Новая ссылка открылась в УЖЕ живой вкладке приложения: переход «/» → «/#link=…»
 // меняет только фрагмент, страница НЕ перезагружается и boot() сам не стартует.
@@ -1236,7 +1265,8 @@ async function boot(){
   renderLangs(); hideBottomNav();
   geoProbe();                 // узнаём, дали ли права раньше (не спрашивает, только смотрит)
   tgGeoInit();                // внутри Телеграма — её собственный LocationManager
-  if(!REDEEMED){ REDEEMED=true; await redeemFromUrl(); }   // одноразовый код из ссылки бота
+  if(!REDEEMED){ REDEEMED=true;                          // код из ссылки бота
+    if((await redeemFromUrl())==="reload") return; }        // страница перезагружается
   // Диплинк из пуша (?tab=digest&d=дата): параметры вычищаются из адреса СРАЗУ
   // — stampTokenUrl сохраняет query, а перезагрузка здесь штатная (обновление
   // оболочки делает location.reload), и человека выбрасывало бы в сводку на
