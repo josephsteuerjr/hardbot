@@ -204,8 +204,26 @@
 | [x] | `messagebox` (для monkeypatch в тестах) | `ui/dialogs.py` |
 | [x] | `Pult`, `main`, `DEFAULT_URL`, `DEFAULT_KEY`, `SETTINGS_PATH`, `APP_DIR`, `HARDBOT_DIR` | `ui/main_window.py`, `app.py`, `core/*` |
 
+## 13. Перенос реестров (`registry_cycle/gui.py`)
+
+| | Что | Было | Стало |
+|---|---|---|---|
+| [x] | Окно с двумя операциями (вверх / вниз), состояния, прогресс, кнопки «Проверить шаг N» / «заново» | `ManualTransferApp` (Tk) | `registry_cycle/gui.py: ManualTransferApp` (QMainWindow), тема `registry_cycle/theme.py` из `config/theme.json` |
+| [x] | Заголовок окна | «Перенос реестров» | «Выезды · Перенос реестров» (`config/app.json: manual_ui.window.title`), иконка `registry_cycle/icon.png` |
+| [x] | Итог проверки: метрики, замечания, изменения/дельты, «Открыть отчёт», «Технические детали» | `_render_result`, `_render_details` | те же методы |
+| [x] | Подтверждение фразой перед публикацией, «Фраза не совпала» | `ask_to_publish` (Toplevel) | `PublishDialog` (QDialog, Enter = подтвердить) |
+| [x] | Диалог «Папки источников»: строки страна/путь, «Выбрать», «Удалить», «Добавить корень», «Сохранить папки» | `SourceFoldersDialog` | `SourceFoldersDialog` (QDialog) |
+| [x] | Фон → UI: прогресс, результат, ошибка с окном | `queue + after(80)` | сигналы `_Signals` + QThreadPool |
+| [x] | Публичный API `run_gui(bundle=None)`, `RegistryCycleApp`, `manual_app.main` | те же | те же (`tests/test_registry_cycle_gui_smoke.py`) |
+| [x] | Запуск двойным кликом | `Перенос реестров.bat`, `Контур — Реестры.bat` | `Перенос реестров.pyw`, `Выезды — Реестры.pyw` |
+| [x] | Пакет для офиса | `tools/build_registry_transfer_share.py` | + `theme`, `icon.png`, проверка `PySide6.QtWidgets` вместо `tkinter`, `PySide6` в `requirements-registry-cycle.txt` |
+
 ## Что не перенесено и почему
 
 - Виджеты Tk `Card`, `btn`, `entry`, `ChipFlow`, `KVGrid` — заменены Qt-аналогами
   в `ui/widgets.py`; Tk-имена не реэкспортируются (на них никто не ссылается).
 - `_dpi_geometry`/`_styles`/DPI-awareness через ctypes — не нужны, Qt 6 масштабирует сам.
+- Подтверждения по умолчанию отвечают «Нет» (в Tk `askyesno` подсвечивал «Да»):
+  Enter по случайности больше не стирает координаты и не отзывает устройство.
+- `docs/security/01-architecture.md` всё ещё называет пульт Tkinter-приложением —
+  папка `docs/` вне рамок этой ветки.
