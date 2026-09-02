@@ -1,12 +1,27 @@
-# Hardbot2 — приложение выездной службы
+# Выезды — сервер приложения выездной службы
 
-Hardbot2 — Telegram-бот и установленная PWA для выездников, плюс
-административный контур. Production расположен в `/opt/hardbot2`; БД и фото
-хранятся в bind-mount `/opt/hardbot2/data`.
+«Выезды» — установленная PWA для выездников, административный API для пульта
+и необязательный Telegram-бот, всё в одном процессе (`app.py`) на одной
+SQLite. Production владельца расположен в `/opt/hardbot2`; БД и фото хранятся
+в bind-mount `/opt/hardbot2/data` (историческое имя каталога, не продукта).
+
+## Установка
+
+Два пути, не смешивать:
+
+- **Выкладка владельцем** на его сервер — только локальным owner-скриптом из
+  `_local/` (в репозиторий не входит), порядок в [`DEPLOY.md`](DEPLOY.md).
+- **Установка ИТ-службой** с нуля на свой сервер — `docker compose` из
+  [`../deploy/README.md`](../deploy/README.md): приложение и своя служба
+  распознавания речи (`../stt/`), одной командой `./install.sh`.
+
+Telegram необязателен: с пустым `BOT_TOKEN` сервер поднимает только
+приложение (см. `app.py`).
 
 Актуальные документы:
 
-- [`DEPLOY.md`](DEPLOY.md) — выкладка, сервис распознавания речи, фото и очистка;
+- [`DEPLOY.md`](DEPLOY.md) — выкладка владельцем, голос, фото и очистка;
+- [`../deploy/README.md`](../deploy/README.md) — установка и сопровождение ИТ-службой;
 - [`../registry_cycle/DATA_EXCHANGE_POLICY_2026-07-29.md`](../registry_cycle/DATA_EXCHANGE_POLICY_2026-07-29.md)
   — нормативная матрица загрузки/выгрузки и организационный цикл;
 
@@ -37,10 +52,13 @@ provenance завершённого визита.
 
 ## Голос
 
-Hardbot2 не запускает локальный распознаватель. `hardbot/stt_client.py`
-обращается к общему сервису Praxis STT по authenticated HTTP через Unix socket.
-TCP listener и автоматический local fallback отсутствуют; при недоступности
-голоса остаётся ручной ввод.
+Сервер не запускает распознаватель внутри своего процесса.
+`hardbot/stt_client.py` обращается к службе распознавания речи (контейнер
+`../stt/`, или совместимый по контракту сервис на хосте владельца) по HTTP
+через Unix-сокет с токеном: `VOICE_BACKEND=stt`, `STT_SOCKET`,
+`STT_TOKEN_FILE` (старые имена `VOICE_BACKEND=praxis`, `PRAXIS_STT_*`
+продолжают работать). TCP-listener и автоматический локальный фолбэк
+отсутствуют; при недоступности голоса остаётся ручной ввод.
 
 ## Фото
 
@@ -120,8 +138,8 @@ python -m compileall -q hardbot pult registry_cycle
 
 ## Ограниченный тест
 
-Перед очисткой обязательны успешные Praxis/hardbot deploy-canaries и финальный
-полный export. `hardbot/limited_test_reset.py` создаёт online SQLite backup,
+Перед очисткой обязательны успешные deploy-canaries сервера и службы речи и
+финальный полный export. `hardbot/limited_test_reset.py` создаёт online SQLite backup,
 safe/raw exports, schema, photo manifest и полный фотоархив; очищает только
 точно известные application tables и pending-разрешения импорта; consumed
 receipts и source heads сохраняет как anti-replay audit. Фото перемещает в

@@ -1,8 +1,8 @@
-# SECURITY.md — «Контур · Выезды»
+# SECURITY.md — «Выезды»
 
 Операционная памятка по безопасному запуску. Полная модель ИБ — в
-[`БЕЗОПАСНОСТЬ-1 …md`](БЕЗОПАСНОСТЬ-1%20—%20Архитектура,%20потоки%20данных,%20модель%20угроз.md)
-и [`docs/security/`](docs/security/00-README.md).
+[`docs/security/`](docs/security/00-README.md) (архитектура, потоки данных,
+инвентаризация ПД, модель угроз, контроли).
 
 ## Главный принцип
 **Реальные ПД должников НИКОГДА не покидают периметр компании.** Обработка — он-прем, на
@@ -20,8 +20,9 @@ uvicorn app.main:app --app-dir engine --host 127.0.0.1 --port 8090
 
 ### PROD-ПД — реальные данные (только он-прем, в юрисдикции)
 ```bash
-# Бот + миниапп (читает .env: BOT_TOKEN, ADMIN_ID):
+# Сервер приложения (+ бот, если задан BOT_TOKEN; читает .env: ADMIN_ID, ADMIN_API_KEY):
 cd hardbot && python app.py
+# Установка ИТ-службой целиком: deploy/README.md (docker compose, HTTPS, служба речи)
 # Движок с реальной БД — ОБЯЗАТЕЛЬНО с токеном и только на localhost:
 HARDBOT_DB=/path/to/hardbot.db ENGINE_API_TOKEN=<секрет> \
   uvicorn app.main:app --app-dir engine --host 127.0.0.1 --port 8090
@@ -55,7 +56,7 @@ HARDBOT_DB=/path/to/hardbot.db ENGINE_API_TOKEN=<секрет> \
 - ❌ Публиковать порт движка/OSRM/VROOM наружу — только `127.0.0.1` + Caddy.
 - ❌ Трогать контейнер `amnezia-awg2`. Запускать второй поллер с тем же `BOT_TOKEN` (ошибка 409).
 
-## Проверки перед go-live (см. docs/security/08, БЕЗОПАСНОСТЬ-1 §9)
+## Проверки перед go-live (см. docs/security/08 и 10)
 Шифрование БД at-rest (BitLocker/LUKS) · MFA на привилегиях · rate-limit · tamper-evident
 аудит + SIEM · независимый пентест · retention/IR-регламенты · регистрации (РКН/Госреестр УЗ).
 
