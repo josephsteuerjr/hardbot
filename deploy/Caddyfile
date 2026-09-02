@@ -1,0 +1,13 @@
+# Профиль proxy: HTTPS для приложения «Выезды» без своего nginx.
+# DOMAIN подставляется из .env; сертификат Caddy получает и продлевает сам.
+{$DOMAIN} {
+    encode gzip
+    request_body {
+        max_size 30MB
+    }
+    reverse_proxy app:8080 {
+        transport http {
+            read_timeout 120s
+        }
+    }
+}

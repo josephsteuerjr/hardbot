@@ -25,8 +25,12 @@ pytestmark = pytest.mark.skipif(
                .read_text(encoding="utf-8"))["version"] != 2,
     reason="живой контракт уже не v2 — переход был проверен до бампа")
 
-_spec = importlib.util.spec_from_file_location(
-    "apply_contract_v3", ROOT / "_local" / "apply_contract_v3.py")
+_BUMP = ROOT / "_local" / "apply_contract_v3.py"
+if not _BUMP.is_file():
+    # owner-скрипт лежит в _local/ — его нет ни в пакете для ИТ, ни в чистом клоне
+    pytest.skip("нет _local/apply_contract_v3.py", allow_module_level=True)
+
+_spec = importlib.util.spec_from_file_location("apply_contract_v3", _BUMP)
 bumpmod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(bumpmod)
 

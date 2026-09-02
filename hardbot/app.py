@@ -1,8 +1,11 @@
 """
-Бот выездного взыскания — точка входа.
+«Выезды» — точка входа сервера: приложение выездника (aiohttp) плюс, если задан
+BOT_TOKEN, Telegram-бот на том же цикле событий.
 
-Управление (доверенные лица, конфиг, импорт, дев-режим) — в Tkinter-пульте `gui.py`.
-Сам бот обслуживает только выездников (whitelist). Запуск: python app.py
+Telegram — необязательный канал. Пустой BOT_TOKEN (и нет `bot_token` в
+settings) — сервер поднимает только приложение: визиты, фото, пульт работают,
+пуши и сводки не отправляются (каждый пропуск оставляет строку в push_log).
+Запуск: python app.py
 """
 
 import asyncio
@@ -142,11 +145,16 @@ def _held(kind: str, tid: int) -> bool:
     return until is not None and _time.monotonic() < until
 
 
-async def _send_daily(kind: str, bot: Bot, on_date: str, attempt: int,
+async def _send_daily(kind: str, bot: Bot | None, on_date: str, attempt: int,
                       build) -> int:
     """Общий каркас дневной рассылки (дайджест/обещания). build(mgr) -> (text,
     kb) | None (None = этому адресату нечего слать). Возвращает число
     НЕулаженных (failed) адресатов."""
+    if notify.bot_missing(bot):
+        # Telegram отключён: слать некуда и нечем, ретраи бессмысленны — день
+        # улажен одной строкой телеметрии.
+        db.log_push(kind, db.PUSH_SKIP_NO_BOT, attempt=attempt)
+        return 0
     targets = _digest_targets(kind)
     if not targets:
         db.log_push(kind, db.PUSH_SKIP_NO_TARGETS, attempt=attempt)
@@ -272,7 +280,7 @@ async def _daily_loop(bot: Bot, kind: str, enabled_key: str, time_key: str,
         await asyncio.sleep(45)
 
 
-async def digest_loop(bot: Bot):
+async def digest_loop(bot: Bot | None):
     """Автопуш дайджеста руководителям в конце дня (по умолчанию 16:30 МСК).
     Дата дайджеста = date.today() (та же система, что и visit_date)."""
     await _daily_loop(bot, db.PUSH_DIGEST, "digest_enabled", "digest_time",
@@ -280,7 +288,7 @@ async def digest_loop(bot: Bot):
                       _push_digests)
 
 
-async def promise_loop(bot: Bot):
+async def promise_loop(bot: Bot | None):
     """Утренний контроль обещаний (по умолчанию 09:30 МСК): каждому руководителю —
     список ПРОСРОЧЕННЫХ обещаний его сотрудников (promise_date прошла, оплаты
     нет). Дни без просрочек не шумят — пуш не уходит."""
@@ -310,23 +318,53 @@ async def housekeeping_loop():
         await asyncio.sleep(1800)
 
 
-async def main():
-    db.init_db()
-    if ADMIN_ID:
-        db.ensure_owner(ADMIN_ID)
-    # Токен: сперва durable-настройка в БД (том /data — переживает рестарт и пересборку
-    # контейнера), иначе .env. Так «переключение на другой бот» из пульта
-    # (POST /admin/bot_token пишет токен в settings) применяется после рестарта процесса,
-    # даже если env контейнера ещё держит старый токен из env_file.
-    token = db.get_setting("bot_token") or os.getenv("BOT_TOKEN")
-    if not token:
-        raise SystemExit("Не задан BOT_TOKEN (.env). Токен берётся у @BotFather.")
+NO_TELEGRAM_NOTE = "Telegram отключён: BOT_TOKEN пуст, работает только приложение"
+
+
+def bot_token() -> str:
+    """Токен: сперва durable-настройка в БД (том /data — переживает рестарт и
+    пересборку контейнера), иначе .env. Так «переключение на другой бот» из
+    пульта (POST /admin/bot_token пишет токен в settings) применяется после
+    рестарта процесса, даже если env контейнера ещё держит старый токен из
+    env_file. Пусто — режим без Telegram."""
+    return (db.get_setting("bot_token") or os.getenv("BOT_TOKEN") or "").strip()
+
+
+def _geocode_on_startup() -> None:
     try:
         import scoring
         got = scoring.geocode_city_centroids()
         logging.info("Геокодинг по центроидам: %s точек", got)
     except Exception as e:  # noqa: BLE001
         logging.warning("geocode on startup: %s", e)
+
+
+async def _wait_forever() -> None:
+    await asyncio.Event().wait()
+
+
+async def main():
+    db.init_db()
+    if ADMIN_ID:
+        db.ensure_owner(ADMIN_ID)
+    token = bot_token()
+    _geocode_on_startup()
+
+    host = os.getenv("MINIAPP_HOST", "0.0.0.0")
+    port = int(os.getenv("MINIAPP_PORT", "8080"))
+    if not token:
+        # Только приложение. Циклы рассылок всё равно крутятся: они оставляют
+        # в push_log строку «skipped_no_bot» раз в день — пульт видит, почему
+        # сводки не приходят, а включение токена через пульт + рестарт
+        # поднимает бота без правки этого кода.
+        logging.info(NO_TELEGRAM_NOTE)
+        await web.start_site(None, host=host, port=port)
+        logging.info("Приложение слушает %s:%s", host, port)
+        asyncio.create_task(digest_loop(None))
+        asyncio.create_task(promise_loop(None))
+        asyncio.create_task(housekeeping_loop())
+        await _wait_forever()
+        return
 
     bot = Bot(token, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher(storage=MemoryStorage())
@@ -337,8 +375,6 @@ async def main():
     dp.include_router(handlers_field.router)
 
     # Веб-сервер миниаппа рядом с поллингом (один loop, общая БД).
-    host = os.getenv("MINIAPP_HOST", "0.0.0.0")
-    port = int(os.getenv("MINIAPP_PORT", "8080"))
     await web.start_site(bot, host=host, port=port)
     logging.info("Миниапп слушает %s:%s", host, port)
 

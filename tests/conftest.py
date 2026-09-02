@@ -11,7 +11,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "hardbot"))
-sys.path.insert(0, str(ROOT / "engine"))
+# engine/ (аналитический движок) в пакет для ИТ не входит — его тесты пропускаются сами.
+if (ROOT / "engine").is_dir():
+    sys.path.insert(0, str(ROOT / "engine"))
 
 # Вывод кириллицы/эмодзи при фейлах на cp1251-консоли — не падать в UnicodeEncodeError.
 for _s in (sys.stdout, sys.stderr):

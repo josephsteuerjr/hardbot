@@ -1,4 +1,4 @@
-"""Голос hardbot: только общий Praxis STT по UDS, без local Whisper fallback."""
+"""Голос: только служба распознавания речи по Unix-сокету, без локального фолбэка."""
 
 import asyncio
 from pathlib import Path
@@ -15,14 +15,10 @@ import stt_client
 import web
 
 
-def _enable(monkeypatch):
-    monkeypatch.setattr(web, "VOICE_BACKEND", "praxis")
-    monkeypatch.setattr(web, "PRAXIS_STT_SOCKET", "/run/praxis-stt/stt.sock")
-    monkeypatch.setattr(
-        web,
-        "PRAXIS_STT_TOKEN_FILE",
-        "/run/secrets/praxis-stt-client.token",
-    )
+def _enable(monkeypatch, backend="stt"):
+    monkeypatch.setattr(web, "VOICE_BACKEND", backend)
+    monkeypatch.setattr(web, "STT_SOCKET", "/run/stt/stt.sock")
+    monkeypatch.setattr(web, "STT_TOKEN_FILE", "/run/secrets/stt.token")
 
 
 def _identity(monkeypatch):
@@ -43,15 +39,31 @@ def _identity(monkeypatch):
     return uid, rep
 
 
-def test_meta_voice_flag_requires_complete_praxis_config(monkeypatch):
+def test_meta_voice_flag_requires_complete_stt_config(monkeypatch):
     db.init_db()
     monkeypatch.setattr(web, "VOICE_BACKEND", "off")
     assert web._meta("ru")["voice"] is False
 
     _enable(monkeypatch)
     assert web._meta("ru")["voice"] is True
-    monkeypatch.setattr(web, "PRAXIS_STT_SOCKET", "")
+    monkeypatch.setattr(web, "STT_SOCKET", "")
     assert web._meta("ru")["voice"] is False
+
+
+def test_legacy_backend_name_and_env_keys_still_work(monkeypatch):
+    """Прод настроен старыми именами (VOICE_BACKEND=praxis, PRAXIS_STT_*) —
+    переименование контракта не имеет права выключить голос в поле."""
+    db.init_db()
+    _enable(monkeypatch, backend="praxis")
+    assert web._meta("ru")["voice"] is True
+
+    legacy = {"PRAXIS_STT_SOCKET": "/run/praxis-stt/stt.sock"}
+    assert web._stt_env("STT_SOCKET", "PRAXIS_STT_SOCKET", "/run/stt/stt.sock",
+                        legacy) == "/run/praxis-stt/stt.sock"
+    both = {"STT_SOCKET": "/run/stt/stt.sock", "PRAXIS_STT_SOCKET": "/old.sock"}
+    assert web._stt_env("STT_SOCKET", "PRAXIS_STT_SOCKET", "/x", both) == "/run/stt/stt.sock"
+    assert web._stt_env("STT_SOCKET", "PRAXIS_STT_SOCKET", "/run/stt/stt.sock", {}) \
+        == "/run/stt/stt.sock"
 
 
 def test_voice_503_when_disabled(monkeypatch):
@@ -63,7 +75,7 @@ def test_voice_503_when_disabled(monkeypatch):
         asyncio.run(web._voice(request))
 
 
-def test_voice_uses_praxis_client_and_deletes_temp(monkeypatch):
+def test_voice_uses_stt_client_and_deletes_temp(monkeypatch):
     _enable(monkeypatch)
     uid, rep = _identity(monkeypatch)
     seen = {}
@@ -75,7 +87,7 @@ def test_voice_uses_praxis_client_and_deletes_temp(monkeypatch):
             seen["path"] = source
             seen["bytes"] = source.read_bytes()
             seen["language"] = language
-            return "  распознано Praxis  "
+            return "  распознано службой  "
 
     monkeypatch.setattr(web, "_STT", FakeSTT())
 
@@ -98,7 +110,7 @@ def test_voice_uses_praxis_client_and_deletes_temp(monkeypatch):
             assert response.status == 200
             assert await response.json() == {
                 "ok": True,
-                "text": "распознано Praxis",
+                "text": "распознано службой",
             }
         finally:
             await client.close()
@@ -110,7 +122,7 @@ def test_voice_uses_praxis_client_and_deletes_temp(monkeypatch):
     assert not seen["path"].exists()
 
 
-def test_voice_maps_praxis_busy_to_retryable_503(monkeypatch):
+def test_voice_maps_stt_busy_to_retryable_503(monkeypatch):
     _enable(monkeypatch)
     uid, rep = _identity(monkeypatch)
 
@@ -145,7 +157,7 @@ def test_voice_maps_praxis_busy_to_retryable_503(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_empty_voice_is_422_and_never_calls_praxis(monkeypatch):
+def test_empty_voice_is_422_and_never_calls_stt(monkeypatch):
     _enable(monkeypatch)
     uid, rep = _identity(monkeypatch)
 

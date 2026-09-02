@@ -151,7 +151,7 @@ def test_local_validation_rejects_bad_token_language_and_size(tmp_path):
     )
     with pytest.raises(STTError, match="язык"):
         asyncio.run(client.transcribe(audio, "tg"))
-    with pytest.raises(STTError, match="token"):
+    with pytest.raises(STTError, match="[Тт]окен"):
         asyncio.run(client.transcribe(audio, "ru"))
 
     large = tmp_path / "large"
