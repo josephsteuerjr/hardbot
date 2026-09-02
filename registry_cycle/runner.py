@@ -75,7 +75,7 @@ def _summary(outcome: CycleOutcome) -> str:
     plan = outcome.prepared.plan
     errors = sum(issue.severity == "error" for issue in plan.issues)
     lines = [
-        f"Контур · Реестры — {outcome.status}",
+        f"Выезды · Реестры — {outcome.status}",
         f"Запуск: {outcome.prepared.snapshot.run_id}",
         f"Изменений мастера: {len(plan.changes)}",
         f"Портфелей: {len(plan.projections)}",
@@ -237,7 +237,7 @@ def execute_cycle(
             return outcome
     except Exception as exc:
         notifier.send(
-            "Контур · Реестры — СБОЙ\n"
+            "Выезды · Реестры — СБОЙ\n"
             f"{datetime.now():%d.%m.%Y %H:%M}\n"
             f"{type(exc).__name__}: {exc}"
         )
