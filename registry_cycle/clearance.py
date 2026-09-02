@@ -70,7 +70,7 @@ VISIT_KEYS = SNAPSHOT_KEYS
 
 if Path(hardbot_reset.__file__).resolve() != (
     Path(__file__).resolve().parents[1]
-    / "hardbot"
+    / "server"
     / "limited_test_reset.py"
 ).resolve():
     raise RuntimeError("limited_test_reset imported outside this checkout")

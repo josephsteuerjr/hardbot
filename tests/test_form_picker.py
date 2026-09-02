@@ -13,7 +13,7 @@
 import pathlib
 
 INDEX = (pathlib.Path(__file__).resolve().parent.parent
-         / "hardbot" / "miniapp" / "index.html").read_text(encoding="utf-8")
+         / "server" / "miniapp" / "index.html").read_text(encoding="utf-8")
 
 
 def test_native_select_is_still_in_the_dom():

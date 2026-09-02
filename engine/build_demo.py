@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).parent
-sys.path.insert(0, str(HERE.parent / "hardbot"))   # переиспользуем модули бота
+sys.path.insert(0, str(HERE.parent / "server"))   # переиспользуем модули бота
 import geo, routing                                  # noqa: E402
 import scoring                                       # ЕДИНЫЙ скоринг (был дубль build_demo.score)
 

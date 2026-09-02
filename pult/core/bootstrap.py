@@ -1,7 +1,7 @@
 """Пути и стартовые проверки пульта.
 
-Пульт делит с ботом контракт обмена и схему полей — они живут в `hardbot/`
-рядом. Если папку `hardbot` не скопировали вместе с пультом, всё разваливалось
+Пульт делит с ботом контракт обмена и схему полей — они живут в `server/`
+рядом. Если папку `server` не скопировали вместе с пультом, всё разваливалось
 на `ModuleNotFoundError: exchange_contract` ещё до первого окна. А запускается
 пульт без консоли — значит трейсбек уходил в никуда, и со стороны это
 выглядело как «ярлык нажал, ничего не произошло». Поэтому проверка живёт
@@ -15,7 +15,7 @@ from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parents[1]        # …/pult
 ROOT_DIR = APP_DIR.parent
-HARDBOT_DIR = ROOT_DIR / "hardbot"
+HARDBOT_DIR = ROOT_DIR / "server"
 
 
 class StartupError(RuntimeError):
@@ -29,10 +29,10 @@ class StartupError(RuntimeError):
 
 def hardbot_missing_text() -> str:
     return (
-        "Рядом с пультом нет папки «hardbot».\n\n"
+        "Рядом с пультом нет папки «server».\n\n"
         f"Ожидается здесь:\n{HARDBOT_DIR}\n\n"
         "Пульт использует общий с ботом контракт обмена и схему полей, "
-        "поэтому папку «hardbot» надо копировать вместе с папкой «pult» — "
+        "поэтому папку «server» надо копировать вместе с папкой «pult» — "
         "они должны лежать рядом, внутри одной папки проекта."
     )
 
@@ -43,7 +43,7 @@ def ensure_hardbot() -> None:
 
 
 def ensure_paths() -> None:
-    """`enrich`, `razbros`, `limited_test_import` и модули `hardbot` — модули
+    """`enrich`, `razbros`, `limited_test_import` и модули `server` — модули
     верхнего уровня; так их видит запуск скриптом, так их импортируют тесты.
 
     Дописываем в конец, а не в начало: в `pult/` лежит `app.py`, и впереди

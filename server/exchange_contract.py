@@ -1,4 +1,4 @@
-"""Versioned machine contract for hardbot/Excel data exchange.
+"""Versioned machine contract for server/Excel data exchange.
 
 The JSON file is the single semantic source for the bot, the enrichment
 operator and the reset-clearance gate.  The raw SHA allow-list is deliberate:

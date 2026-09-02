@@ -21,7 +21,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 
 pytestmark = pytest.mark.skipif(
-    json.loads((ROOT / "hardbot" / "data_exchange_contract.json")
+    json.loads((ROOT / "server" / "data_exchange_contract.json")
                .read_text(encoding="utf-8"))["version"] != 2,
     reason="живой контракт уже не v2 — переход был проверен до бампа")
 
@@ -38,8 +38,8 @@ _spec.loader.exec_module(bumpmod)
 def _copies(tmp_path):
     c = tmp_path / "data_exchange_contract.json"
     m = tmp_path / "exchange_contract.py"
-    shutil.copy(ROOT / "hardbot" / "data_exchange_contract.json", c)
-    shutil.copy(ROOT / "hardbot" / "exchange_contract.py", m)
+    shutil.copy(ROOT / "server" / "data_exchange_contract.json", c)
+    shutil.copy(ROOT / "server" / "exchange_contract.py", m)
     return c, m
 
 
@@ -82,7 +82,7 @@ def test_apply_produces_a_valid_v3_contract(tmp_path):
     # офисный шаблон не тронут
     import db
     assert data["workbook_shape"]["export_schema_sha256"] == \
-        json.loads((ROOT / "hardbot" / "data_exchange_contract.json")
+        json.loads((ROOT / "server" / "data_exchange_contract.json")
                    .read_text(encoding="utf-8"))["workbook_shape"]["export_schema_sha256"]
     # sha вписан в модуль
     assert f'3: "{res["sha256"]}"' in m.read_text(encoding="utf-8")

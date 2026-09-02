@@ -14,7 +14,7 @@
 
 | | Что | Было (`Pult.…`) | Стало |
 |---|---|---|---|
-| [x] | Проверка папки `hardbot` рядом, понятное окно и выход | модульный `_fatal`, проверка `HARDBOT_DIR` | `core/bootstrap.py: ensure_hardbot`, `app.py: fatal` (QMessageBox; без PySide6 — MessageBoxW) |
+| [x] | Проверка папки `server` рядом, понятное окно и выход | модульный `_fatal`, проверка `HARDBOT_DIR` | `core/bootstrap.py: ensure_hardbot`, `app.py: fatal` (QMessageBox; без PySide6 — MessageBoxW) |
 | [x] | Загрузка `enrich`, `razbros` с окном при ошибке | модульный try/except | `app.py: main` (StartupError / Exception → fatal) |
 | [x] | High-DPI (Per-Monitor v2) | `main()` ctypes + `_dpi_geometry` | штатный Qt 6, ничего руками |
 | [x] | Окно 1180×800, minsize 980×660, центрирование | `_dpi_geometry` | `ui/main_window.py: Pult.__init__` |

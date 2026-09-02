@@ -13,8 +13,8 @@ import pathlib
 import re
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-INDEX = (ROOT / "hardbot" / "miniapp" / "index.html").read_text(encoding="utf-8")
-SW = (ROOT / "hardbot" / "miniapp" / "sw.js").read_text(encoding="utf-8")
+INDEX = (ROOT / "server" / "miniapp" / "index.html").read_text(encoding="utf-8")
+SW = (ROOT / "server" / "miniapp" / "sw.js").read_text(encoding="utf-8")
 
 
 def _sw_version() -> int:
@@ -32,7 +32,7 @@ def test_shell_version_matches_between_index_and_sw():
 
 
 def test_server_reads_the_version_from_sw_and_does_not_duplicate_it():
-    web = (ROOT / "hardbot" / "web.py").read_text(encoding="utf-8")
+    web = (ROOT / "server" / "web.py").read_text(encoding="utf-8")
     assert "def _shell_version()" in web
     assert "vyezdy-shell-v" in web, "сервер должен читать версию из sw.js"
     assert '"shellVersion": _shell_version()' in web

@@ -6,7 +6,7 @@ FastAPI-оркестратор движка «Контур · Выезды».
   - реальная БД бота, если задан HARDBOT_DB (SQLite, на сервере/машине владельца);
   - синтетика (демо), если БД нет — ПД при этом не участвуют.
 
-Скоринг — ЕДИНЫЙ модуль бота hardbot/scoring.py (score_items); геокод/маршрут —
+Скоринг — ЕДИНЫЙ модуль бота server/scoring.py (score_items); геокод/маршрут —
 geo/routing. Дубля скоринга (бывш. build_demo.score) больше нет — один источник истины.
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse
 
 ENGINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ENGINE))
-sys.path.insert(0, str(ENGINE.parent / "hardbot"))   # единый скоринг/газеттир/util
+sys.path.insert(0, str(ENGINE.parent / "server"))   # единый скоринг/газеттир/util
 import geo, routing                      # noqa: E402
 import scoring                           # noqa: E402  — ЕДИНЫЙ скоринг (был build_demo.score)
 from build_demo import gen               # noqa: E402  — синтетика

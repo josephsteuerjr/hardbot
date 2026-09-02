@@ -220,7 +220,7 @@ legacy-задач проверяется отдельно; перед пилот
 семантики bot ↔ Excel:
 
 ```text
-hardbot/data_exchange_contract.json
+server/data_exchange_contract.json
 ```
 
 Его одновременно читают hardbot, `pult/enrich.py`, snapshot/reset и
@@ -332,13 +332,13 @@ Read-only/dry-run старых инструментов допускается �
   сети; повторный guard внутри `apply_plan()`;
 - legacy `pult/razbros.py`: write-функция fail-closed до открытия Excel,
   apply-кнопки пульта заблокированы;
-- `hardbot/db.py` и admin API: import без явного `published_master`/
+- `server/db.py` и admin API: import без явного `published_master`/
   `test_subset`, exact contract binding и source proof блокируется до записи;
   legacy multipart отвечает 409; любой повтор канонического КД
   блокирует весь import, одинаковые и дополняющие строки не сливаются;
   root-only pre-registration, TTL, one-shot consume и monotonic source head
   образуют серверный anti-replay ledger;
-- `hardbot/data_exchange_contract.json`: version+SHA-locked единая семантика
+- `server/data_exchange_contract.json`: version+SHA-locked единая семантика
   формы, workbook shape/aliases/ignored columns, provenance, Excel mapping,
   office overlay, DB source kinds и source-proof schemas;
   несовместимый snapshot/file-map/evidence/clearance блокируется до записи;
@@ -365,10 +365,10 @@ Read-only/dry-run старых инструментов допускается �
 - `registry_cycle/cycle_lock.py`: уникальный owner token, OS-serialized stale
   claim в audit-tombstone и compare-before-release; один lock используется
   всеми publication entrypoint;
-- `hardbot/web.py` и PWA v15: до proven snapshot форма пуста, local draft
+- `server/web.py` и PWA v15: до proven snapshot форма пуста, local draft
   отделён от raw, finish принимает только явно затронутые поля и обязательный
   результат; log/snapshot/notifications не дочитывают пропущенные HARD-поля;
-- `hardbot/limited_test_reset.py`: отдельный операторский контур делает
+- `server/limited_test_reset.py`: отдельный операторский контур делает
   SQLite backup, safe/raw exports, export schema и хэшированный photo
   manifest, проверяет неизменность состояния и только затем по confirm-token
   очищает все application tables и pending authorizations; consumed receipts

@@ -8,7 +8,7 @@ import pathlib
 import re
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-INDEX = (ROOT / "hardbot" / "miniapp" / "index.html").read_text("utf-8")
+INDEX = (ROOT / "server" / "miniapp" / "index.html").read_text("utf-8")
 
 
 def _tab_section():

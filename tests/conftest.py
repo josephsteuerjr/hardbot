@@ -1,5 +1,5 @@
 """
-Общая настройка тестов: пути к hardbot/ и engine/, UTF-8 вывод (консоль бывает cp1251),
+Общая настройка тестов: пути к server/ и engine/, UTF-8 вывод (консоль бывает cp1251),
 изолированная временная БД (рабочую hardbot.db не трогаем).
 """
 import os
@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "hardbot"))
+sys.path.insert(0, str(ROOT / "server"))
 # engine/ (аналитический движок) в пакет для ИТ не входит — его тесты пропускаются сами.
 if (ROOT / "engine").is_dir():
     sys.path.insert(0, str(ROOT / "engine"))

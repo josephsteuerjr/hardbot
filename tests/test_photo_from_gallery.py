@@ -20,7 +20,7 @@ import pathlib
 import re
 
 INDEX = (pathlib.Path(__file__).resolve().parent.parent
-         / "hardbot" / "miniapp" / "index.html").read_text(encoding="utf-8")
+         / "server" / "miniapp" / "index.html").read_text(encoding="utf-8")
 
 
 def _photo_section() -> str:
@@ -106,7 +106,7 @@ def test_server_refuses_the_send_point_for_a_gallery_photo():
     может прийти из старой очереди, чужого клиента или будущей версии, где
     условие живёт уже не там. Сервер обязан снимать точку сам."""
     web_src = (pathlib.Path(__file__).resolve().parent.parent
-               / "hardbot" / "web.py").read_text(encoding="utf-8")
+               / "server" / "web.py").read_text(encoding="utf-8")
     i = web_src.index("async def _photo(")
     body = web_src[i:web_src.index("\n\n\n", i)]
     assert 'if meta.get("source") == "gallery":' in body

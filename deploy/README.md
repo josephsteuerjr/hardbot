@@ -83,7 +83,7 @@ server {
 ## Установка одной командой
 
 ```bash
-# 1. Распаковать пакет; рядом должны лежать hardbot/, stt/ и deploy/
+# 1. Распаковать пакет; рядом должны лежать server/, stt/ и deploy/
 cd deploy
 
 # 2. Установить: проверит Docker, создаст .env и секреты, соберёт, запустит,
@@ -131,7 +131,7 @@ nano .env          # ADMIN_ID, MINIAPP_URL; BOT_TOKEN — если нужен Te
 
 ```bash
 cd deploy
-# заменить содержимое ../hardbot и ../stt новой версией (deploy/ — тоже, кроме .env и secrets/)
+# заменить содержимое ../server и ../stt новой версией (deploy/ — тоже, кроме .env и secrets/)
 ./update.sh
 ```
 

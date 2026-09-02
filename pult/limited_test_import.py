@@ -26,7 +26,7 @@ from typing import Any, BinaryIO
 
 
 PULT_DIR = Path(__file__).resolve().parent
-HARDBOT_DIR = PULT_DIR.parent / "hardbot"
+HARDBOT_DIR = PULT_DIR.parent / "server"
 for _module_dir in (PULT_DIR, HARDBOT_DIR):
     if str(_module_dir) not in sys.path:
         sys.path.insert(0, str(_module_dir))

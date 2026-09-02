@@ -225,7 +225,7 @@ def test_historical_comment_is_read_only_and_rendered_on_third_tab(
 
     card = web._person_full("COMMENTS-READONLY", "ru")
     miniapp = (
-        Path(__file__).parents[1] / "hardbot" / "miniapp" / "index.html"
+        Path(__file__).parents[1] / "server" / "miniapp" / "index.html"
     ).read_text(encoding="utf-8")
 
     assert card["historical_visit_comment"] == "раньше обещал оплатить"

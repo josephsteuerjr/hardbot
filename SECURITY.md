@@ -21,7 +21,7 @@ uvicorn app.main:app --app-dir engine --host 127.0.0.1 --port 8090
 ### PROD-ПД — реальные данные (только он-прем, в юрисдикции)
 ```bash
 # Сервер приложения (+ бот, если задан BOT_TOKEN; читает .env: ADMIN_ID, ADMIN_API_KEY):
-cd hardbot && python app.py
+cd server && python app.py
 # Установка ИТ-службой целиком: deploy/README.md (docker compose, HTTPS, служба речи)
 # Движок с реальной БД — ОБЯЗАТЕЛЬНО с токеном и только на localhost:
 HARDBOT_DB=/path/to/hardbot.db ENGINE_API_TOKEN=<секрет> \
@@ -40,8 +40,8 @@ HARDBOT_DB=/path/to/hardbot.db ENGINE_API_TOKEN=<секрет> \
 ## Секреты (env) — где и что
 | Переменная | Назначение | Хранение |
 |---|---|---|
-| `BOT_TOKEN` | токен Telegram-бота | `hardbot/.env` (gitignored) |
-| `ADMIN_ID` | владелец/админ | `hardbot/.env` |
+| `BOT_TOKEN` | токен Telegram-бота | `server/.env` (gitignored) |
+| `ADMIN_ID` | владелец/админ | `server/.env` |
 | `ADMIN_API_KEY` | admin-API пульта (`X-Admin-Key`) | `.env` |
 | `ENGINE_API_TOKEN` | API движка (`X-Engine-Token`) | env движка |
 | `CORS_ALLOW_ORIGIN` | сузить CORS (пусто = same-origin) | env |

@@ -1,5 +1,5 @@
 """
-Smoke: каждый .py в hardbot/ и engine/ КОМПИЛИРУЕТСЯ (ловит рассинхрон/битый файл сразу),
+Smoke: каждый .py в server/ и engine/ КОМПИЛИРУЕТСЯ (ловит рассинхрон/битый файл сразу),
 а ключевые модули ИМПОРТИРУЮТСЯ без ошибок (ловит обрыв связей после рефактора).
 """
 import importlib
@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-# engine/ в пакете для ИТ отсутствует — тогда проверяем только hardbot/.
+# engine/ в пакете для ИТ отсутствует — тогда проверяем только server/.
 ENGINE = (ROOT / "engine").is_dir()
-PY_DIRS = [d for d in (ROOT / "hardbot", ROOT / "engine") if d.is_dir()]
+PY_DIRS = [d for d in (ROOT / "server", ROOT / "engine") if d.is_dir()]
 
 # Модули с тяжёлыми/побочными импортами (Tk-окно, локальные пути запуска) — только компиляция.
 SKIP_IMPORT = {"gui", "theme", "miniapp_dev", "_dev_seed"}
@@ -33,7 +33,7 @@ def test_compiles(path):
 
 
 # Импортируемые «безопасные» модули — ядро бота и движка.
-# («app» опущен: имя коллизирует с пакетом engine/app — hardbot/app.py покрыт компиляцией
+# («app» опущен: имя коллизирует с пакетом engine/app — server/app.py покрыт компиляцией
 #  и через импорт его зависимостей web/handlers; «selftest» мутирует HARDBOT_DATA при импорте.)
 CORE_IMPORTS = [
     "util", "gazetteer", "scoring_config", "scoring", "db", "config",

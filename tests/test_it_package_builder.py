@@ -42,13 +42,14 @@ def test_package_contains_every_component(built):
     inner = _inner(built["names"])
     for expected in (
         "README.md", "VERSION", "pytest.ini", "SECURITY.md",
-        "hardbot/app.py", "hardbot/web.py", "hardbot/Dockerfile", "hardbot/.env.example",
-        "hardbot/miniapp/index.html",
+        "server/app.py", "server/web.py", "server/Dockerfile", "server/.env.example",
+        "server/miniapp/index.html",
         "stt/server.py", "stt/Dockerfile", "stt/README.md", "stt/requirements.txt",
         "deploy/docker-compose.yml", "deploy/.env.example", "deploy/install.sh",
         "deploy/update.sh", "deploy/backup.sh", "deploy/restore.sh", "deploy/doctor.sh",
         "deploy/README.md",
-        "pult/pult.py", "pult/Пульт.bat", "registry_cycle/__init__.py",
+        "pult/pult.py", "pult/Пульт.pyw", "pult/app.py", "registry_cycle/__init__.py",
+        "Перенос реестров.pyw", "Выезды — Реестры.pyw",
         "docs/security/00-README.md", "tests/conftest.py", "tools/build_it_package.py",
         "requirements-registry-cycle.txt",
     ):
@@ -62,10 +63,10 @@ def test_package_contains_every_component(built):
 def test_package_excludes_data_secrets_and_legacy(built):
     inner = _inner(built["names"])
     forbidden_prefixes = ("_local/", "_infra/", "!Архив проекта/", "engine/", "outputs/",
-                          "ДЛЯ ШАРЫ/", "скрины бота/", "hardbot/_devdata/", "hardbot/data_dev/",
-                          "hardbot/data/", "pult/src-tauri/", "pult/node_modules/")
-    forbidden_exact = {"hardbot/gui.py", "hardbot/run.bat", "hardbot/_dev_seed.py",
-                       "hardbot/miniapp_dev.py", "hardbot/miniapp_dev.bat", "hardbot/.env",
+                          "ДЛЯ ШАРЫ/", "скрины бота/", "server/_devdata/", "server/data_dev/",
+                          "server/data/", "pult/src-tauri/", "pult/node_modules/")
+    forbidden_exact = {"server/gui.py", "server/run.bat", "server/_dev_seed.py",
+                       "server/miniapp_dev.py", "server/miniapp_dev.bat", "server/.env",
                        "deploy/.env", "plink.exe", "start_server_proxy.bat",
                        "tools/build_registry_transfer_share.py"}
     for name in inner:
@@ -80,30 +81,35 @@ def test_package_excludes_data_secrets_and_legacy(built):
             assert not lower.endswith(suffix), name
 
 
-def test_shell_scripts_travel_with_lf_and_bat_with_crlf(built):
+def test_shell_scripts_travel_with_lf_and_launchers_are_python(built):
+    """Серверные скрипты — LF и бит исполнения; точки входа Windows — .pyw
+    (pythonw, без консоли), а не .bat: cmd-окно даже на «start» мигало."""
     with zipfile.ZipFile(built["zip"]) as zf:
         sh = zf.read("vyezdy-test.1/deploy/install.sh")
         assert b"\r\n" not in sh and sh.startswith(b"#!/usr/bin/env bash")
         assert (zf.getinfo("vyezdy-test.1/deploy/install.sh").external_attr >> 16) & 0o111
-        bat = zf.read("vyezdy-test.1/pult/Пульт.bat")
-        assert b"\r\n" in bat
+        pyw = zf.read("vyezdy-test.1/pult/Пульт.pyw")
+        assert b"pult.app" in pyw and b"\r\n" not in pyw
+        assert not any(n.lower().endswith(".bat") for n in zf.namelist()), \
+            "в пакете не должно быть .bat: консольные окна убраны"
         readme = zf.read("vyezdy-test.1/README.md").decode("utf-8")
         assert "deploy/README.md" in readme and "stt/" in readme and "pult/" in readme
+        assert "Пульт.pyw" in readme and "Tkinter" not in readme
 
 
 def test_leak_scanner_stops_the_build(tmp_path):
     root = tmp_path / "proj"
-    (root / "hardbot").mkdir(parents=True)
-    (root / "hardbot" / "ok.py").write_text("X = 1\n", encoding="utf-8")
+    (root / "server").mkdir(parents=True)
+    (root / "server" / "ok.py").write_text("X = 1\n", encoding="utf-8")
     (root / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
     archive, _ = builder.build(root, tmp_path / "out", version="0.1")
     assert archive.exists()
 
-    leaky = root / "hardbot" / "settings.py"
+    leaky = root / "server" / "settings.py"
     leaky.write_text('TOKEN = "123456789:' + "A" * 35 + '"\n', encoding="utf-8")
     with pytest.raises(builder.BuildStop) as stop:
         builder.build(root, tmp_path / "out2", version="0.2")
-    assert "hardbot/settings.py" in str(stop.value)
+    assert "server/settings.py" in str(stop.value)
     leaky.unlink()
 
     # Образцы собираются из кусков: иначе сканер поймал бы сам этот файл тестов.
@@ -116,24 +122,24 @@ def test_leak_scanner_stops_the_build(tmp_path):
     leaky.unlink()
 
     # Пустой BOT_TOKEN= в примере настроек и код, собирающий строку, — не утечка.
-    (root / "hardbot" / ".env.example").write_text("BOT_TOKEN=\nADMIN_ID=\n", encoding="utf-8")
-    (root / "hardbot" / "db.py").write_text('line = f"BOT_TOKEN={token}"\n', encoding="utf-8")
+    (root / "server" / ".env.example").write_text("BOT_TOKEN=\nADMIN_ID=\n", encoding="utf-8")
+    (root / "server" / "db.py").write_text('line = f"BOT_TOKEN={token}"\n', encoding="utf-8")
     archive, _ = builder.build(root, tmp_path / "out4", version="0.4")
     with zipfile.ZipFile(archive) as zf:
-        assert "vyezdy-0.4/hardbot/.env.example" in zf.namelist()
+        assert "vyezdy-0.4/server/.env.example" in zf.namelist()
 
 
 def test_wanted_rules():
     P = builder.PurePosixPath
-    assert builder.wanted(P("hardbot/app.py"))
+    assert builder.wanted(P("server/app.py"))
     assert builder.wanted(P("deploy/.env.example"))
     assert builder.wanted(P("requirements-registry-cycle.txt"))
     assert not builder.wanted(P("deploy/.env"))
     assert not builder.wanted(P("deploy/data/hardbot.db"))
-    assert not builder.wanted(P("hardbot/gui.py"))
+    assert not builder.wanted(P("server/gui.py"))
     assert not builder.wanted(P("engine/app/main.py"))
     assert not builder.wanted(P("_local/anything.py"))
     assert not builder.wanted(P("pult/настройки пульта.json"))
-    assert not builder.wanted(P("hardbot/__pycache__/x.pyc"))
+    assert not builder.wanted(P("server/__pycache__/x.pyc"))
     assert not builder.wanted(P("Хард.xlsb"))
     assert not builder.wanted(P("docs/report.docx"))

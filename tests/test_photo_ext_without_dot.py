@@ -28,7 +28,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 JPEG = b"\xff\xd8\xff\xe0" + b"synthetic-jpeg"
 INDEX = (pathlib.Path(__file__).resolve().parent.parent
-         / "hardbot" / "miniapp" / "index.html").read_text(encoding="utf-8")
+         / "server" / "miniapp" / "index.html").read_text(encoding="utf-8")
 
 
 def _identity(monkeypatch, tmp_path):

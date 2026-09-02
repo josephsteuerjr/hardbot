@@ -59,7 +59,7 @@ def _find(name: str) -> Path | None:
             return candidate
     return None
 UA = "hardbot-geocoder/0.2 (internal collection-agency tool)"
-# RU здесь — это НЕ вся Россия. В hardbot/geonames/RU.txt лежит только Самарская
+# RU здесь — это НЕ вся Россия. В server/geonames/RU.txt лежит только Самарская
 # область (adm1=65, 2010 записей, 300 КБ): владелец тестирует навигатор со своего
 # адреса, а полный дамп на 412 тысяч строк ради этого возить незачем. Понадобится
 # другой регион — доложить строки тем же фильтром и расширить _NO_COVERAGE в geocode.

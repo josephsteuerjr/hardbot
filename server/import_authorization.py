@@ -4,7 +4,7 @@
 Она работает только с ``db.DB_PATH`` текущего hardbot runtime:
 
     python import_authorization.py register \
-        --source-kind published_master --proof /run/hardbot/proof.json
+        --source-kind published_master --proof /run/server/proof.json
     python import_authorization.py status \
         --source-kind published_master --proof-digest <sha256>
     python import_authorization.py clear-pending --confirm-clear-pending

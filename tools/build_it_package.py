@@ -3,7 +3,7 @@
     python tools/build_it_package.py [--version 1.2.0] [--out dist] [--root .]
 
 Результат: ``dist/vyezdy-<версия>-<дата>.zip`` и рядом ``.sha256``. Внутри —
-снимок исходников без git-истории: сервер (hardbot/), служба речи (stt/),
+снимок исходников без git-истории: сервер (server/), служба речи (stt/),
 пульт (pult/), перенос реестров (registry_cycle/), установка (deploy/),
 документы (docs/), тесты (tests/), инструменты (tools/) и корневые файлы
 проекта, плюс README пакета с картой, что где лежит.
@@ -32,9 +32,9 @@ ROOT = Path(__file__).resolve().parent.parent
 PACKAGE_PREFIX = "vyezdy"
 
 # Что едет в пакет: каталоги целиком (после исключений) и корневые файлы.
-INCLUDE_DIRS = ("hardbot", "stt", "pult", "registry_cycle", "deploy", "docs", "tests", "tools")
+INCLUDE_DIRS = ("server", "stt", "pult", "registry_cycle", "deploy", "docs", "tests", "tools")
 INCLUDE_ROOT_FILES = ("pytest.ini", "SECURITY.md")
-INCLUDE_ROOT_GLOBS = ("requirements-*.txt",)
+INCLUDE_ROOT_GLOBS = ("requirements-*.txt", "*.pyw")   # .pyw — точки входа без консоли
 
 # Каталоги проекта, которых в пакете быть не должно ни при каком раскладе.
 EXCLUDE_TOP = {"_local", "_infra", "!Архив проекта", "engine", "outputs", "ДЛЯ ШАРЫ",
@@ -50,17 +50,17 @@ EXCLUDE_FILE_NAMES = {"plink.exe", "start_server_proxy.bat", "Сервер.txt",
                       ".DS_Store"}
 # Точечные исключения (относительные POSIX-пути от корня проекта).
 EXCLUDE_PATHS = {
-    "hardbot/gui.py",             # устаревший Tk-пульт; актуальный — pult/
-    "hardbot/run.bat",
-    "hardbot/_dev_seed.py",
-    "hardbot/miniapp_dev.py",
-    "hardbot/miniapp_dev.bat",
-    "hardbot/docker-compose.dev.yml",
-    "hardbot/docker-compose.local.yml",
+    "server/gui.py",             # устаревший Tk-пульт; актуальный — pult/
+    "server/run.bat",
+    "server/_dev_seed.py",
+    "server/miniapp_dev.py",
+    "server/miniapp_dev.bat",
+    "server/docker-compose.dev.yml",
+    "server/docker-compose.local.yml",
     "tools/build_registry_transfer_share.py",   # собирает локальную папку «ДЛЯ ШАРЫ»
 }
-EXCLUDE_PATH_GLOBS = ("hardbot/_devdata/*", "hardbot/data_dev/*", "hardbot/miniapp_dev.*",
-                      "hardbot/*.backup-*", "hardbot/.deploy-*")
+EXCLUDE_PATH_GLOBS = ("server/_devdata/*", "server/data_dev/*", "server/miniapp_dev.*",
+                      "server/*.backup-*", "server/.deploy-*")
 # Расширения, которым в пакете не место: данные, секреты, офисные файлы, бинарники.
 EXCLUDE_SUFFIXES = {".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite3",
                     ".xlsb", ".xlsx", ".xlsm", ".xls", ".docx", ".doc", ".pptx", ".pyc", ".pyo",
@@ -236,9 +236,9 @@ def package_readme(version: str, built: str) -> str:
 | Каталог / файл | Что это |
 |---|---|
 | `deploy/` | **Начинать отсюда.** Установка сервера одной командой (`install.sh`), обновление, резервные копии, диагностика. Инструкция — `deploy/README.md` |
-| `hardbot/` | Сервер: приложение выездника (PWA), административный API для пульта, Telegram-бот (необязателен). Собирается в контейнер `vyezdy-app` |
+| `server/` | Сервер: приложение выездника (PWA), административный API для пульта, Telegram-бот (необязателен). Собирается в контейнер `vyezdy-app` |
 | `stt/` | Служба распознавания речи для голосовых комментариев. Свой контейнер `vyezdy-stt`, без внешних сервисов. Справка — `stt/README.md` |
-| `pult/` | Пульт аналитика — настольная программа (Windows, Python/Tkinter). Запуск `Пульт.bat`. Инструкция — `pult/README.md` |
+| `pult/` | Пульт аналитика — настольная программа (Windows, Python + Qt). Запуск двойным кликом `pult/Пульт.pyw`. Инструкция — `pult/README.md` |
 | `registry_cycle/` | Перенос реестров между личными книгами и общим реестром (Excel, Windows). Инструкция — `registry_cycle/README.md`, `registry_cycle/MANUAL_TRANSFER.md` |
 | `docs/security/` | Модель безопасности: архитектура, потоки данных, инвентаризация ПД, угрозы, контроли |
 | `SECURITY.md` | Памятка по безопасному запуску и обращению с секретами |
@@ -264,13 +264,14 @@ nano .env             # ADMIN_ID, MINIAPP_URL; BOT_TOKEN — по желанию
 
 ## Пульт и перенос реестров
 
-Обе программы — настольные, для Windows с установленным Python 3.11+.
+Обе программы — настольные, для Windows с установленным Python 3.12+ и Excel.
+Консольных окон у них нет: точки входа — файлы `.pyw`, их открывает `pythonw`.
 
-- Пульт: `pip install -r requirements-registry-cycle.txt` не нужен; пульту
-  хватает стандартной библиотеки. Запуск — `pult/Пульт.bat`. При первом
-  запуске указать адрес сервера (`https://…`) и `ADMIN_API_KEY` из `deploy/.env`.
-- Перенос реестров: `pip install -r requirements-registry-cycle.txt`, запуск —
-  `python -m registry_cycle.manual_app` из корня пакета (нужен Excel).
+- Пульт: `pip install -r pult/requirements.txt` один раз, затем двойной клик по
+  `pult/Пульт.pyw`. При первом запуске указать адрес сервера (`https://…`) и
+  `ADMIN_API_KEY` из `deploy/.env`, привязать это устройство (`pult/УСТРОЙСТВА.md`).
+- Перенос реестров: `pip install -r requirements-registry-cycle.txt`, затем
+  двойной клик по `Перенос реестров.pyw` в корне пакета.
 
 ## Тесты
 
@@ -327,7 +328,7 @@ def build(root: Path, out_dir: Path, version: str | None = None,
                 info = zipfile.ZipInfo(f"{folder}/{relative.as_posix()}",
                                        date_time=(2026, 1, 1, 0, 0, 0))
                 info.compress_type = zipfile.ZIP_DEFLATED
-                if relative.suffix.lower() in {".sh"} or relative.name in {"Пульт.bat"}:
+                if relative.suffix.lower() in {".sh"}:
                     info.external_attr = 0o755 << 16
                 else:
                     info.external_attr = 0o644 << 16

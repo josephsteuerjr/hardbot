@@ -140,7 +140,7 @@ def test_form_snapshot_enrichment_and_import_semantics_cannot_drift_apart():
         assert target in db.BY_KEY
 
     miniapp = (
-        Path(__file__).parents[1] / "hardbot" / "miniapp" / "index.html"
+        Path(__file__).parents[1] / "server" / "miniapp" / "index.html"
     ).read_text(encoding="utf-8")
     assert "const FORM_VERSION=2" not in miniapp
     assert "STATE.meta.formProtocolVersion" in miniapp

@@ -7,7 +7,7 @@
 язык и длительность.
 
 Проводной контракт (схемы ``praxis.stt.*``) сохранён ради клиента
-``hardbot/stt_client.py``: это версия формата ответа, а не имя продукта.
+``server/stt_client.py``: это версия формата ответа, а не имя продукта.
 
     GET  /healthz            → 200 {"schema":"praxis.stt.health.v1","ready":true,...}
     POST /v1/transcriptions  → 200 {"schema":"praxis.stt.v1","text":"..."}

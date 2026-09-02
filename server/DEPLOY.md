@@ -134,7 +134,7 @@ read-only preview: write-запрос обязан передать совпав
 proof, даже если весь выбранный файл имеет publication receipt.
 
 Source proof v2 перед отправкой одноразово регистрируется локальным
-`hardbot/import_authorization.py` внутри production runtime. HTTP-endpoint для
+`server/import_authorization.py` внутри production runtime. HTTP-endpoint для
 регистрации отсутствует. Регистратор сверяет весь proof с активным контрактом,
 TTL и монотонной последовательностью публикаций; import атомарно consume-ит
 receipt и продвигает source head. Старый head, collision одной sequence с

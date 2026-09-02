@@ -69,11 +69,11 @@ COPY_FILES: tuple[tuple[Path, Path], ...] = (
     (Path("registry_cycle/config/fields.json"), Path("_app/registry_cycle/config/fields.json")),
     (Path("registry_cycle/config/theme.json"), Path("_app/registry_cycle/config/theme.json")),
     (Path("registry_cycle/icon.png"), Path("_app/registry_cycle/icon.png")),
-    (Path("hardbot/exchange_contract.py"), Path("_app/hardbot/exchange_contract.py")),
-    (Path("hardbot/fields.py"), Path("_app/hardbot/fields.py")),
+    (Path("server/exchange_contract.py"), Path("_app/server/exchange_contract.py")),
+    (Path("server/fields.py"), Path("_app/server/fields.py")),
     (
-        Path("hardbot/data_exchange_contract.json"),
-        Path("_app/hardbot/data_exchange_contract.json"),
+        Path("server/data_exchange_contract.json"),
+        Path("_app/server/data_exchange_contract.json"),
     ),
 )
 

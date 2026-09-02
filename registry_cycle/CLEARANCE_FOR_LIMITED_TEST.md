@@ -71,7 +71,7 @@ python pult\enrich.py evidence-run `
 пересобирать его из счётчиков нельзя.
 
 Snapshot, file-map, enrichment receipt и итоговый clearance связаны с exact
-`hardbot/data_exchange_contract.json` (schema, version, SHA-256). Артефакт
+`server/data_exchange_contract.json` (schema, version, SHA-256). Артефакт
 старой/другой версии блокируется до открытия Excel и тем более до очистки БД.
 
 После этого оператор отдельно продолжает существующий порядок:

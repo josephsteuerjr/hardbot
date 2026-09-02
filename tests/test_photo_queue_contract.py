@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-INDEX = (ROOT / "hardbot" / "miniapp" / "index.html").read_text("utf-8")
+INDEX = (ROOT / "server" / "miniapp" / "index.html").read_text("utf-8")
 
 
 def test_selected_file_is_materialized_before_geolocation_wait():

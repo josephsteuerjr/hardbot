@@ -22,7 +22,7 @@ SUPPORTED_PORTFOLIO_LAYOUT = "root/group/employee/*.xlsb"
 # Registry-cycle owns personal↔master execution, while this machine contract
 # owns the shared workbook boundary.  Loading it read-only here catches a
 # sheet/header/mapping drift before discovery or Excel is touched.
-_HARDBOT_DIR = Path(__file__).resolve().parents[1] / "hardbot"
+_HARDBOT_DIR = Path(__file__).resolve().parents[1] / "server"
 if str(_HARDBOT_DIR) not in sys.path:
     sys.path.insert(0, str(_HARDBOT_DIR))
 import exchange_contract as _exchange_contract  # noqa: E402

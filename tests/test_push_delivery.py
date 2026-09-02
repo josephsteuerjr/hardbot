@@ -20,7 +20,7 @@ import notify
 import photostore
 import web
 
-# hardbot/app.py нельзя импортировать как «app»: это имя занято пакетом
+# server/app.py нельзя импортировать как «app»: это имя занято пакетом
 # engine/app (test_engine_app_imports). Грузим по пути под своим именем.
 _spec = importlib.util.spec_from_file_location(
     "hardbot_app", Path(web.__file__).with_name("app.py"))

@@ -4,8 +4,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-INDEX = (ROOT / "hardbot" / "miniapp" / "index.html").read_text("utf-8")
-SW = (ROOT / "hardbot" / "miniapp" / "sw.js").read_text("utf-8")
+INDEX = (ROOT / "server" / "miniapp" / "index.html").read_text("utf-8")
+SW = (ROOT / "server" / "miniapp" / "sw.js").read_text("utf-8")
 
 
 def test_telegram_vertical_swipe_is_disabled():
@@ -37,7 +37,7 @@ def test_shell_cache_was_bumped_for_new_index():
     # Хэшируем СОДЕРЖИМОЕ, а не байты: git переписывает переводы строк при
     # коммите (core.autocrlf), и проверка по сырым байтам падала ложно после
     # каждого коммита, ничего не говоря о самой оболочке.
-    text = (ROOT / "hardbot" / "miniapp" / "index.html").read_text("utf-8")
+    text = (ROOT / "server" / "miniapp" / "index.html").read_text("utf-8")
     index_sha = hashlib.sha256(text.replace(chr(13) + chr(10), chr(10)).encode("utf-8")).hexdigest()
     assert index_sha == (
         "a351e92890a418477a0213d696ca274ed93ce730e44271f8df6ec47a030a1477"

@@ -34,7 +34,7 @@ LIMITED_TEST_MASTER_IMPORT_DISABLED_MESSAGE = (
 LIMITED_TEST_RESET_DISABLED_MESSAGE = (
     "Сброс через пульт отключён на период ограниченного теста: он обходит "
     "обязательные snapshot, export и registry clearance. Используйте только "
-    "evidence-bound limited-test reset из hardbot/DEPLOY.md."
+    "evidence-bound limited-test reset из server/DEPLOY.md."
 )
 
 __all__ = [

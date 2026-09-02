@@ -53,7 +53,7 @@ provenance завершённого визита.
 ## Голос
 
 Сервер не запускает распознаватель внутри своего процесса.
-`hardbot/stt_client.py` обращается к службе распознавания речи (контейнер
+`server/stt_client.py` обращается к службе распознавания речи (контейнер
 `../stt/`, или совместимый по контракту сервис на хосте владельца) по HTTP
 через Unix-сокет с токеном: `VOICE_BACKEND=stt`, `STT_SOCKET`,
 `STT_TOKEN_FILE` (старые имена `VOICE_BACKEND=praxis`, `PRAXIS_STT_*`
@@ -133,13 +133,13 @@ python -m compileall -q hardbot pult registry_cycle
 ```
 
 Для локального запуска скопируйте `.env.example` в `.env`, заполните только
-локальные значения и запустите `python hardbot/app.py`. Production `.env`, БД,
+локальные значения и запустите `python server/app.py`. Production `.env`, БД,
 фото и выгрузки не добавляются в Git.
 
 ## Ограниченный тест
 
 Перед очисткой обязательны успешные deploy-canaries сервера и службы речи и
-финальный полный export. `hardbot/limited_test_reset.py` создаёт online SQLite backup,
+финальный полный export. `server/limited_test_reset.py` создаёт online SQLite backup,
 safe/raw exports, schema, photo manifest и полный фотоархив; очищает только
 точно известные application tables и pending-разрешения импорта; consumed
 receipts и source heads сохраняет как anti-replay audit. Фото перемещает в

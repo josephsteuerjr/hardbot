@@ -42,7 +42,7 @@ from typing import Any
 # Один JSON-контракт живёт в build-context hardbot и теми же байтами читается
 # операторским пультом. Жёстко проверяем origin модуля, чтобы окружение Python
 # не подсунуло одноимённый пакет раньше checkout.
-_HARDBOT_DIR = Path(__file__).resolve().parents[1] / "hardbot"
+_HARDBOT_DIR = Path(__file__).resolve().parents[1] / "server"
 if str(_HARDBOT_DIR) not in sys.path:
     sys.path.insert(0, str(_HARDBOT_DIR))
 

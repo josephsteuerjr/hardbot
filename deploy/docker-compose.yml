@@ -12,7 +12,7 @@ name: vyezdy
 
 services:
   app:
-    build: ../hardbot
+    build: ../server
     image: vyezdy-app
     container_name: vyezdy-app
     restart: unless-stopped

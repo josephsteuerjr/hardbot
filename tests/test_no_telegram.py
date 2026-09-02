@@ -26,8 +26,8 @@ KEY = {"X-Admin-Key": "master"}
 
 
 def _load_entrypoint():
-    """hardbot/app.py под своим именем: пакет engine/app перекрывает `import app`."""
-    spec = importlib.util.spec_from_file_location("hardbot_entrypoint", ROOT / "hardbot" / "app.py")
+    """server/app.py под своим именем: пакет engine/app перекрывает `import app`."""
+    spec = importlib.util.spec_from_file_location("hardbot_entrypoint", ROOT / "server" / "app.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
