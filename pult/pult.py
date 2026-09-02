@@ -21,6 +21,17 @@ APP_DIR = Path(__file__).resolve().parent
 # папки `pult/`, sys.path[0] — она сама, и `import pult` попал бы сюда же.
 if str(APP_DIR.parent) not in sys.path:
     sys.path.insert(0, str(APP_DIR.parent))
+if __name__ == "pult":
+    # Папка pult/ стояла в sys.path раньше корня (так делают тесты и запуск
+    # скриптом), и `import pult` нашёл этот файл вместо пакета. Подменяем себя
+    # настоящим пакетом: importlib берёт из sys.modules то, что лежит там ПОСЛЕ
+    # выполнения модуля, поэтому `from pult.core import …` у вызывающего сработает.
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location(
+        "pult", APP_DIR / "__init__.py", submodule_search_locations=[str(APP_DIR)])
+    _pkg = importlib.util.module_from_spec(_spec)
+    sys.modules["pult"] = _pkg
+    _spec.loader.exec_module(_pkg)
 
 from pult.app import fatal, main  # noqa: E402
 

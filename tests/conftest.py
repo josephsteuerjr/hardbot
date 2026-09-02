@@ -7,6 +7,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "hardbot"))
 sys.path.insert(0, str(ROOT / "engine"))
@@ -20,3 +22,17 @@ for _s in (sys.stdout, sys.stderr):
 
 # Тесты, трогающие БД, работают в отдельной временной папке (НЕ рабочая БД).
 os.environ.setdefault("HARDBOT_DATA", tempfile.mkdtemp(prefix="hardbot_pytest_"))
+
+
+@pytest.fixture(autouse=True)
+def _engine_stays_first():
+    """Тесты пульта вставляют `pult/` в начало sys.path, а там лежит `pult/app.py` —
+    впереди всех он затенял бы пакет движка `app` (engine/app), и `import app.main`
+    в тестах движка получал бы сборку пульта. Держим engine/ первым, как и задумано
+    выше: остальным папкам достаточно просто быть в пути."""
+    engine = str(ROOT / "engine")
+    if sys.path[:1] != [engine]:
+        while engine in sys.path:
+            sys.path.remove(engine)
+        sys.path.insert(0, engine)
+    yield

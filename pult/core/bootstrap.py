@@ -44,7 +44,10 @@ def ensure_hardbot() -> None:
 
 def ensure_paths() -> None:
     """`enrich`, `razbros`, `limited_test_import` и модули `hardbot` — модули
-    верхнего уровня; так их видит запуск скриптом, так их импортируют тесты."""
+    верхнего уровня; так их видит запуск скриптом, так их импортируют тесты.
+
+    Дописываем в конец, а не в начало: в `pult/` лежит `app.py`, и впереди
+    всех он затенял бы одноимённый пакет движка (`engine/app`)."""
     for folder in (HARDBOT_DIR, APP_DIR):
         if str(folder) not in sys.path:
-            sys.path.insert(0, str(folder))
+            sys.path.append(str(folder))
