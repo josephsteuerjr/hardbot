@@ -130,8 +130,9 @@ class ManagersSection:
         page.add(rc)
 
         mc = Card("Руководители",
-                  "Каждый привязан к городам (подпись сводки) и своим сотрудникам "
-                  "(по ним считается дайджест).")
+                  "Руководитель направления видит всех сотрудников своей страны "
+                  "(СНГ — всех), состав считается живьём. Остальные привязаны к "
+                  "городам (подпись сводки) и к списку сотрудников.")
         self.mgr_list = mc.add(Rows(spacing=4))
         self.mgr_list.set_empty("Пока никого — добавьте ниже")
         page.add(mc)
@@ -146,6 +147,14 @@ class ManagersSection:
         self.mgr_name = Field(width_chars=26)
         fc.add_row(label("Telegram ID", "small"), self.mgr_tid, 8,
                    label("Имя (для приветствия)", "small"), self.mgr_name, spacing_before=4)
+        # Направление: состав сотрудников сервер считает живьём по стране
+        # реестра. Раньше пульт про направления не знал и требовал отметить
+        # сотрудников вручную — замороженный список устаревал с каждым разбросом.
+        self.mgr_direction = Combo([lbl for _code, lbl in mg.DIRECTION_OPTIONS],
+                                   width_chars=34)
+        self.mgr_direction.on_select(self._mgr_direction_changed)
+        fc.add_row(label("Направление", "small"), self.mgr_direction,
+                   Note(mg.DIRECTION_HINT, "tiny"), spacing_before=6, stretch=False)
         fc.add(label("ГОРОДА (ПОДПИСЬ СВОДКИ)", "caps"), spacing_before=8)
         self.mgr_city_chips = fc.add(ChipFlow())
         self.mgr_city_add = Field(width_chars=24)
@@ -328,6 +337,8 @@ class ManagersSection:
                          "employees": set(m.get("employees") or [])}
         self.mgr_tid.set(str(tid))
         self.mgr_name.set(m.get("name") or "")
+        self.mgr_direction.set_current(mg.direction_index(m.get("direction") or ""))
+        self._mgr_direction_changed()
         self._render_mgr_chips()
 
     def _mgr_form_reset(self):
@@ -336,15 +347,25 @@ class ManagersSection:
         self.mgr_name.set("")
         self.mgr_city_add.set("")
         self.mgr_guest_combo.set_current(0)
+        self.mgr_direction.set_current(0)
+        self._mgr_direction_changed()
         self._render_mgr_chips()
+
+    def _mgr_direction(self) -> str:
+        return mg.direction_code(self.mgr_direction.current())
+
+    def _mgr_direction_changed(self, *_args):
+        code = self._mgr_direction()
+        self.mgr_emp_hint.setText(mg.direction_employees_note(code))
 
     def save_manager(self):
         tid = self.mgr_tid.get().strip()
         if not valid_telegram_id(tid):
             self.toast("Впиши Telegram ID руководителя (или выбери из списка)", err=True)
             return
-        if not self.mgr_form["employees"]:
-            self.toast("Отметь хотя бы одного сотрудника", err=True)
+        direction = self._mgr_direction()
+        if not direction and not self.mgr_form["employees"]:
+            self.toast("Выбери направление или отметь хотя бы одного сотрудника", err=True)
             return
         # Права получает ВЛАДЕЛЕЦ telegram_id, а не тот, чьё имя вписали в форму.
         # Если такой id боту ни разу не писал, сверить некому — спрашиваем явно.
@@ -352,7 +373,7 @@ class ManagersSection:
         if not known and not self.ask_yes_no("Незнакомый аккаунт", mg.unknown_account_text(tid)):
             return
         body = mg.manager_body(tid, self.mgr_name.get(), self.mgr_form["cities"],
-                               self.mgr_form["employees"])
+                               self.mgr_form["employees"], direction)
 
         def done(d):
             # Показываем НЕ то, что напечатал оператор, а кого сервер увидел за этим id.

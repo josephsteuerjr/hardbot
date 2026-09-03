@@ -136,11 +136,48 @@ def chat_employees_text(emps: list[str]) -> str:
 
 
 # --- руководители ------------------------------------------------------------------
+# Направления руководителей — те же коды, что у сервера (db.DIRECTIONS).
+# Пустой код — обычный руководитель со списком сотрудников.
+DIRECTION_OPTIONS = (
+    ("", "— по списку сотрудников —"),
+    ("tj", "Таджикистан"),
+    ("uz", "Узбекистан"),
+    ("all", "СНГ (все сотрудники)"),
+)
+DIRECTION_TITLES = {code: title for code, title in DIRECTION_OPTIONS if code}
+DIRECTION_HINT = ("Состав сотрудников направления сервер считает живьём по стране "
+                  "реестра; отмечать их вручную не нужно.")
+
+
+def direction_index(code: str) -> int:
+    codes = [c for c, _t in DIRECTION_OPTIONS]
+    return codes.index(code) if code in codes else 0
+
+
+def direction_code(index: int) -> str:
+    try:
+        return DIRECTION_OPTIONS[int(index)][0]
+    except (IndexError, ValueError, TypeError):
+        return ""
+
+
+def direction_employees_note(code: str) -> str:
+    if not code:
+        return ""
+    return (f"направление «{DIRECTION_TITLES.get(code, code)}»: сотрудники считаются "
+            "автоматически, галочки ниже не нужны")
+
+
 def manager_row(m: dict) -> dict:
+    direction = (m.get("direction") or "").strip()
+    if direction:
+        employees = f"направление: {DIRECTION_TITLES.get(direction, direction)}"
+    else:
+        employees = f"сотрудников: {len(m.get('employees') or [])}"
     return {
         "name": m.get("name") or "без имени",
         "cities": " · ".join(m.get("cities") or []) or "—",
-        "employees": f"сотрудников: {len(m.get('employees') or [])}",
+        "employees": employees,
         "tid": str(m["telegram_id"]),
         "mismatch": bool(int(m.get("spelling_mismatch") or 0)),
     }
@@ -156,9 +193,14 @@ def emp_chip_text(emp: str, employees: list[dict]) -> str:
     return f"{emp} {cnt}" if cnt else emp
 
 
-def manager_body(tid: str, name: str, cities: set[str], employees: set[str]) -> dict:
+def manager_body(tid: str, name: str, cities: set[str], employees: set[str],
+                 direction: str = "") -> dict:
+    """Тело POST /admin/manager. direction всегда уходит явно: пустая строка
+    снимает направление, иначе сервер сохранил бы прежнее (он подставляет
+    старое значение только когда ключа нет вовсе)."""
     return {"telegram_id": int(tid), "name": (name or "").strip(),
-            "cities": sorted(cities), "employees": sorted(employees)}
+            "cities": sorted(cities), "employees": sorted(employees),
+            "direction": (direction or "").strip()}
 
 
 def unknown_account_text(tid: str) -> str:
