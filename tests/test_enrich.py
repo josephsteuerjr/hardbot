@@ -808,3 +808,49 @@ def test_machine_evidence_run_accepts_zero_completed_without_starting_excel(
     assert receipt["expected_files"] == []
     assert receipt["files"] == []
     assert output.is_file()
+
+
+def test_orphan_warning_says_when_those_visits_happened():
+    """Счётчик сирот идёт по всей базе, а окно дат — только по обогащению.
+
+    08.09.2026 владелец увидел «визитов без ответственного: 342» рядом с окном
+    «сегодня» и решил, что сломалась сегодняшняя загрузка. На деле это визиты
+    3 августа — 3 сентября: договоры сняли прежние полные срезы реестра.
+    """
+    from pult.core import enrichment as en
+
+    rows = [
+        {"contract_id": "A", "responsible": "", "visit_date": "2026-08-03",
+         enrich.FILLED_MARKER: True},
+        {"contract_id": "B", "responsible": "", "visit_date": "2026-09-03",
+         enrich.FILLED_MARKER: True},
+        {"contract_id": "C", "responsible": "", "visit_date": ""},   # без визита
+        {"contract_id": "D", "responsible": "Иванов И.", "visit_date": "2026-09-08",
+         enrich.FILLED_MARKER: True},
+    ]
+    by_emp = enrich.split_by_employee(rows)
+    assert by_emp.orphan_filled == 2 and by_emp.orphan_rows == 3
+    assert by_emp.orphan_dates == ("03.08.2026", "03.09.2026")
+    warn = en.preview_warning(by_emp, [], [], [])
+    assert "03.08.2026 — 03.09.2026" in warn
+    assert "окна обогащения это не касается" in warn
+
+
+def test_orphan_warning_for_a_single_day_says_one_date():
+    from pult.core import enrichment as en
+
+    by_emp = enrich.split_by_employee(
+        [{"contract_id": "A", "responsible": "", "visit_date": "2026-08-03",
+          enrich.FILLED_MARKER: True}])
+    assert by_emp.orphan_dates == ("03.08.2026", "03.08.2026")
+    assert "(выезды 03.08.2026)" in en.preview_warning(by_emp, [], [], [])
+
+
+def test_no_orphans_no_period():
+    from pult.core import enrichment as en
+
+    by_emp = enrich.split_by_employee(
+        [{"contract_id": "D", "responsible": "Иванов И.", "visit_date": "2026-09-08",
+          enrich.FILLED_MARKER: True}])
+    assert by_emp.orphan_dates is None
+    assert "без ответственного" not in en.preview_warning(by_emp, [], [], [])

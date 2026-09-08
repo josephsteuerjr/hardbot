@@ -999,6 +999,12 @@ def init_db() -> None:
               added_at TEXT
             )
         """)
+        # Направление беседы (tj/uz/all): состав считается живьём, как у
+        # руководителя направления. Поимённое закрепление остаётся и работает
+        # вместе с направлением — беседа отдела плюс пара чужих сотрудников.
+        rc_cols = {r[1] for r in conn.execute("PRAGMA table_info(report_chats)")}
+        if "direction" not in rc_cols:
+            conn.execute("ALTER TABLE report_chats ADD COLUMN direction TEXT")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS report_chat_employees (
               chat_id INTEGER,
@@ -2269,6 +2275,7 @@ def upsert_report_chat(chat_id: int, title: str) -> None:
             "ELSE report_chats.enabled END, removed=0",
             (chat_id, title, datetime.now().isoformat(timespec="seconds")))
         conn.commit()
+    reset_role_caches()
 
 
 def remove_report_chat(chat_id: int) -> None:
@@ -2276,6 +2283,7 @@ def remove_report_chat(chat_id: int) -> None:
     with connect() as conn:
         conn.execute("UPDATE report_chats SET removed=1 WHERE chat_id=?", (chat_id,))
         conn.commit()
+    reset_role_caches()
 
 
 def list_report_chats() -> list[dict]:
@@ -2288,16 +2296,26 @@ def list_report_chats() -> list[dict]:
     return [{"chat_id": r["chat_id"], "title": r["title"] or "",
              "enabled": bool(r["enabled"]), "removed": bool(r["removed"]),
              "added_at": r["added_at"] or "",
+             "direction": (r["direction"] if "direction" in r.keys() else "") or "",
              "employees": sorted(emps.get(r["chat_id"], []))} for r in chats]
 
 
 def set_report_chat(chat_id: int, enabled: bool | None = None,
-                    employees: list[str] | None = None) -> None:
-    """Настройка из пульта: включённость и/или список ФИО (None = не трогать)."""
+                    employees: list[str] | None = None,
+                    direction: str | None = None) -> None:
+    """Настройка из пульта: включённость, направление и/или список ФИО
+    (None = не трогать; пустая строка в direction снимает направление).
+
+    Направление и поимённый список складываются: беседа отдела по республике
+    плюс пара приглашённых из соседней."""
     with connect() as conn:
         if enabled is not None:
             conn.execute("UPDATE report_chats SET enabled=? WHERE chat_id=?",
                          (1 if enabled else 0, chat_id))
+        if direction is not None:
+            code = (direction or "").strip()
+            conn.execute("UPDATE report_chats SET direction=? WHERE chat_id=?",
+                         (code if code in DIRECTIONS else None, chat_id))
         if employees is not None:
             conn.execute("DELETE FROM report_chat_employees WHERE chat_id=?",
                          (chat_id,))
@@ -2306,6 +2324,7 @@ def set_report_chat(chat_id: int, enabled: bool | None = None,
                 "VALUES (?,?)",
                 [(chat_id, e.strip()) for e in employees if e and e.strip()])
         conn.commit()
+    reset_role_caches()   # индекс бесед живёт в том же кэше, что и роли
 
 
 def migrate_report_chat(old_id: int, new_id: int) -> None:
@@ -2328,11 +2347,48 @@ def migrate_report_chat(old_id: int, new_id: int) -> None:
                          "(chat_id, employee) VALUES (?,?)", (new_id, r["employee"]))
         conn.execute("DELETE FROM report_chat_employees WHERE chat_id=?", (old_id,))
         conn.commit()
+    reset_role_caches()
+
+
+def chats_by_employee_index() -> dict[str, list[int]]:
+    """Обратный индекс _name_key(ФИО) → беседы отчётов. Кэш — как у ролей:
+    ручка зовётся на КАЖДОМ закрытии визита, а состав направления считается
+    DISTINCT-сканом clients."""
+    global _chats_index_cache
+    now = time.monotonic()
+    if _chats_index_cache and now - _chats_index_cache[0] < _ROLE_CACHE_TTL_S:
+        return _chats_index_cache[1]
+    index: dict[str, list[int]] = {}
+    by_direction: dict[str, list[str]] = {}
+    with connect() as conn:
+        chats = conn.execute(
+            "SELECT chat_id, direction FROM report_chats "
+            "WHERE enabled=1 AND removed=0").fetchall()
+        named = conn.execute(
+            "SELECT e.chat_id, e.employee FROM report_chat_employees e "
+            "JOIN report_chats c ON c.chat_id = e.chat_id "
+            "WHERE c.enabled=1 AND c.removed=0").fetchall()
+    for c in chats:
+        direction = ((c["direction"] if "direction" in c.keys() else "") or "").strip()
+        if not direction:
+            continue
+        if direction not in by_direction:        # направлений максимум три
+            by_direction[direction] = employees_by_direction(direction)
+        for spelled in by_direction[direction]:
+            key = _name_key(spelled)
+            if key:
+                index.setdefault(key, []).append(c["chat_id"])
+    for r in named:
+        key = _name_key(r["employee"])
+        if key:
+            index.setdefault(key, []).append(r["chat_id"])
+    _chats_index_cache = (now, index)
+    return index
 
 
 def report_chats_for(employee: str) -> list[int]:
     """Куда постить отчёт о визите сотрудника: беседа включена, бот в ней есть,
-    ФИО закреплено.
+    и сотрудник в неё попадает — по НАПРАВЛЕНИЮ беседы либо поимённо.
 
     Сравнение по _name_key, а не SQL-равенству: одна опечатка регистра при
     закреплении ФИО в пульте — и отчёты молча не уходили. Расхождение написаний
@@ -2341,20 +2397,13 @@ def report_chats_for(employee: str) -> list[int]:
     if not (employee or "").strip():
         return []
     key = _name_key(employee)
-    chat_ids = []
-    with connect() as conn:
-        rows = conn.execute(
-            "SELECT c.chat_id, e.employee FROM report_chats c "
-            "JOIN report_chat_employees e ON e.chat_id = c.chat_id "
-            "WHERE c.enabled=1 AND c.removed=0").fetchall()
-    for r in rows:
-        if _name_key(r["employee"]) != key:
-            continue
-        if r["employee"] != employee:
+    chat_ids = chats_by_employee_index().get(key, [])
+    if chat_ids:
+        canonical = registry_name_index().get(key)
+        if canonical and canonical != employee:
             logging.info("report_chats: сматчено по нормализованному ключу — "
-                         "реестр «%s», в беседе «%s» (чат %s)",
-                         employee, r["employee"], r["chat_id"])
-        chat_ids.append(r["chat_id"])
+                         "реестр «%s», канон «%s» (чаты %s)",
+                         employee, canonical, chat_ids)
     return sorted(dict.fromkeys(chat_ids))
 
 
@@ -2480,12 +2529,14 @@ def push_enabled(key: str, default: str = "1") -> bool:
 _ROLE_CACHE_TTL_S = 60.0
 _registry_names_cache: tuple[float, dict] | None = None
 _managers_index_cache: tuple[float, dict] | None = None
+_chats_index_cache: tuple[float, dict] | None = None
 
 
 def reset_role_caches() -> None:
-    global _registry_names_cache, _managers_index_cache
+    global _registry_names_cache, _managers_index_cache, _chats_index_cache
     _registry_names_cache = None
     _managers_index_cache = None
+    _chats_index_cache = None
 
 
 def registry_name_index() -> dict[str, str]:

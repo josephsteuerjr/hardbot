@@ -21,7 +21,7 @@ def test_chat_lifecycle_add_configure_remove_readd():
     assert len(chats) == 1
     assert chats[0]["added_at"]                       # дата видна в пульте
     assert {k: v for k, v in chats[0].items() if k != "added_at"} == {
-        "chat_id": -100_1, "title": "RBR Tajikistan",
+        "chat_id": -100_1, "title": "RBR Tajikistan", "direction": "",
         "enabled": False, "removed": False, "employees": []}
 
     db.set_report_chat(-100_1, enabled=True, employees=["Алиджон Душанбе", "Второй"])
@@ -187,3 +187,66 @@ def test_visit_report_text_minimal_and_km():
     text2 = notify.visit_report_text({"contract_id": "KD-0"}, dist_m=2500,
                                      visit_geo=(1.0, 2.0))
     assert "(2.5 км от адреса)" in text2
+
+
+# --- закрепление беседы за НАПРАВЛЕНИЕМ ---------------------------------------
+def _import_rows(rows):
+    """Страну направления сервер выводит из города реестра — как в
+    test_manager_directions: отдельной колонки «Страна» у импорта нет."""
+    grid = [[f.title for f in db.FIELDS], [f.source for f in db.FIELDS]]
+    for cid, responsible, city in rows:
+        grid.append([{"contract_id": cid, "client": "К", "birth_date": "1990-01-01",
+                      "responsible": responsible, "city": city,
+                      "address": city, "debt_total": "1000"}.get(f.key)
+                     for f in db.FIELDS])
+    db.import_grid(grid, source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
+
+
+def test_chat_scoped_by_direction_follows_the_registry():
+    """Просьба владельца 09.09.2026: беседы Тадж/Узб (или обе), а не список ФИО.
+
+    Состав направления считается живьём — новый выездник начинает постить в
+    беседу своего отдела сам, без правки настроек."""
+    _import_rows([("CH-1", "Таджиков Т.", "Худжанд"),
+                  ("CH-2", "Узбеков У.", "Ташкент")])
+    db.upsert_report_chat(-200_1, "Выезды РТ")
+    db.set_report_chat(-200_1, enabled=True, direction="tj")
+    assert db.report_chats_for("Таджиков Т.") == [-200_1]
+    assert db.report_chats_for("Узбеков У.") == []
+
+    _import_rows([("CH-3", "Новичок Н.", "Душанбе")])
+    assert db.report_chats_for("Новичок Н.") == [-200_1], "состав направления живой"
+
+
+def test_direction_and_named_employees_add_up():
+    _import_rows([("CH-1", "Таджиков Т.", "Худжанд"),
+                  ("CH-2", "Узбеков У.", "Ташкент")])
+    db.upsert_report_chat(-200_2, "Выезды СНГ")
+    db.set_report_chat(-200_2, enabled=True, direction="tj",
+                       employees=["Узбеков У."])
+    assert db.report_chats_for("Таджиков Т.") == [-200_2]
+    assert db.report_chats_for("Узбеков У.") == [-200_2], "поимённый плюсом к направлению"
+
+    db.set_report_chat(-200_2, direction="all")
+    assert db.report_chats_for("Узбеков У.") == [-200_2]
+
+    db.set_report_chat(-200_2, direction="")      # снять направление
+    assert db.report_chats_for("Таджиков Т.") == []
+    assert db.report_chats_for("Узбеков У.") == [-200_2]
+
+
+def test_unknown_direction_is_refused_not_stored():
+    db.upsert_report_chat(-200_3, "Мусор")
+    db.set_report_chat(-200_3, enabled=True, direction="нечто")
+    assert db.list_report_chats()[0]["direction"] == ""
+
+
+def test_disabled_or_removed_chat_gets_nothing_even_with_direction():
+    _import_rows([("CH-1", "Таджиков Т.", "Худжанд")])
+    db.upsert_report_chat(-200_4, "Выключенная")
+    db.set_report_chat(-200_4, enabled=False, direction="tj")
+    assert db.report_chats_for("Таджиков Т.") == []
+    db.set_report_chat(-200_4, enabled=True)
+    assert db.report_chats_for("Таджиков Т.") == [-200_4]
+    db.remove_report_chat(-200_4)
+    assert db.report_chats_for("Таджиков Т.") == []

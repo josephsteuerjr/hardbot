@@ -34,6 +34,8 @@ import photostore
 # tests/test_promises, app.py и handlers_manager.       # noqa: F401 ниже
 from digest_data import (  # noqa: F401
     _outcomes, _person_status, _persons_total, _st_emoji, _totals_units, _v,
+    daily_report_caption, daily_report_data, daily_report_filename,
+    daily_report_xlsx,
     employee_data, human_date, manager_scope, overdue_by_employee, period_data,
     person_data, promises_data, scope_countries_info, scope_label,
     sorted_employees, summary_data, today_iso,
@@ -81,6 +83,22 @@ def _app_button(kb: InlineKeyboardBuilder, on_date: str) -> None:
 
 
 # --- ЭКРАН 1: сводка (со статистикой по каждому сотруднику) ------------------
+def daily_report_view(mgr: dict, on_date: str):
+    """Сводка руководителю ФАЙЛОМ: (подпись, клавиатура, (имя файла, байты)).
+
+    Решение владельца 08.09.2026: длинный текст дайджеста руководителям больше
+    не нужен — нужна одна таблица по всем сотрудникам («закреплено, отработано
+    сегодня, отработано всего»), а разбор по дням и карточки живут во вкладке
+    приложения. Текстовый дайджест остаётся кнопкой в боте и фолбэком, если
+    книга почему-то не собралась."""
+    data = daily_report_data(mgr, on_date)
+    kb = InlineKeyboardBuilder()
+    _app_button(kb, on_date)
+    return (daily_report_caption(data), kb.as_markup(),
+            (daily_report_filename(on_date),
+             daily_report_xlsx(mgr, on_date, data=data)))
+
+
 def summary_view(mgr: dict, on_date: str) -> tuple[str, InlineKeyboardMarkup]:
     d = summary_data(mgr, on_date)
     t = d["totals"]

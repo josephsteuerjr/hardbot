@@ -630,9 +630,14 @@ def _snapshot_day(p: dict) -> str:
                  for c in p["contracts"] if c["bot_visit_at"]), "")
 
 
-def _employee_stats(emp: str, d_from: str, d_to: str) -> dict:
+def _employee_stats(emp: str, d_from: str, d_to: str, *,
+                    with_photos: bool = True) -> dict:
     """Строка сотрудника за окно. «_entries» — выезды по дням (человек-день),
-    новые в конце; «_paid» — люди, чей последний исход в окне «Оплачен»."""
+    новые в конце; «_paid» — люди, чей последний исход в окне «Оплачен».
+
+    with_photos=False пропускает подсчёт снимков: он ходит в файловую систему
+    по каждому человеку, а окну «за всё время» это стоило бы сотен обращений
+    ради колонки, которой в сводном отчёте нет."""
     persons = db._group_persons(db.contracts_of_responsible(emp))
     by_cid = {c["contract_id"]: p for p in persons for c in p["contracts"]}
     # (день, человек) → последняя запись журнала этого дня: повторное нажатие
@@ -671,8 +676,9 @@ def _employee_stats(emp: str, d_from: str, d_to: str) -> dict:
         # Просрочка — на конец окна, но не из будущего: у пресета «Месяц» конец
         # 30-е число, и обещания «до 25-го» оказывались бы просроченными сегодня.
         "overdue": len(db.overdue_promises(emp, min(d_to, today_iso()))),
-        "with_photo": sum(1 for p in people
-                          if photostore.photos_between(p["contracts"], d_from, d_to)),
+        "with_photo": (sum(1 for p in people
+                           if photostore.photos_between(p["contracts"], d_from, d_to))
+                       if with_photos else 0),
         "money": _totals_units(people), "money_text": _persons_total(people),
         "money_paid": _totals_units(paid), "money_paid_text": _persons_total(paid),
         "outcomes": [{"status": s, "n": n, "emoji": _st_emoji(s)}
@@ -822,3 +828,146 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
     buf = BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+# --- Сводный отчёт руководителю: закреплено / сегодня / всего ----------------
+# Просьба руководителей 08.09.2026: «общей таблицей по всем сотрудникам —
+# закреплено, отработано сегодня, отработано всего по нарастающей», причём
+# Таджикистан и Узбекистан вместе. Вместе они и так: направление «СНГ» видит
+# обе республики, а колонка «Республика» разделяет их внутри одной таблицы.
+DAILY_REPORT_COLUMNS = (
+    ("employee", "Сотрудник", 28),
+    ("country_name", "Республика", 14),
+    ("assigned_persons", "Закреплено должников", 20),
+    ("assigned_contracts", "Закреплено договоров", 20),
+    ("today_persons", "Отработано сегодня", 18),
+    ("today_visits", "Выездов сегодня", 16),
+    ("today_paid", "Оплачен сегодня", 16),
+    ("today_promised", "Обещают сегодня", 16),
+    ("today_photo", "С фото сегодня", 15),
+    ("total_persons", "Отработано всего", 17),
+    ("total_visits", "Выездов всего", 14),
+    ("overdue", "Просрочено обещаний", 19),
+    ("first_day", "Первый выезд", 13),
+    ("assigned_money", "Долг закреплённый", 20),
+)
+# «Всего» считается с этой даты — раньше боевых выездов не было, а вычитать
+# демо-строки из отчёта руководителя не за чем.
+TOTALS_SINCE = "2026-01-01"
+
+
+def daily_report_data(mgr: dict, on_date: str,
+                      employees: list[str] | None = None) -> dict:
+    """Строки сводного отчёта. Порядок — по отработанному сегодня, затем по
+    имени: сверху те, кто сегодня работал."""
+    employees = employees if employees is not None else sorted_employees(mgr)
+    country = _employee_country_index()
+    rows = []
+    for emp in employees:
+        today = _employee_stats(emp, on_date, on_date)
+        total = _employee_stats(emp, TOTALS_SINCE, on_date, with_photos=False)
+        assigned = db._group_persons(db.contracts_of_responsible(emp))
+        first = min((e["date"] for e in total["_entries"]), default="")
+        code = country.get(emp)
+        rows.append({
+            "employee": emp,
+            "country": code,
+            "country_name": country_scope.info(code)["name"] if code else "",
+            "assigned_persons": len(assigned),
+            "assigned_contracts": sum(p["n"] for p in assigned),
+            "assigned_money": _persons_total(assigned),
+            "today_persons": today["persons"], "today_visits": today["visits"],
+            "today_paid": today["paid"], "today_promised": today["promised"],
+            "today_photo": today["with_photo"],
+            "total_persons": total["persons"], "total_visits": total["visits"],
+            "total_paid": total["paid"],
+            "overdue": today["overdue"],
+            "first_day": first,
+            "outcomes": today["outcomes"],
+        })
+    rows.sort(key=lambda r: (-r["today_persons"], -r["total_persons"],
+                             r["employee"].lower()))
+    keys = ("assigned_persons", "assigned_contracts", "today_persons", "today_visits",
+            "today_paid", "today_promised", "today_photo", "total_persons",
+            "total_visits", "total_paid", "overdue")
+    totals = {k: sum(r[k] for r in rows) for k in keys}
+    totals["employees"] = len(rows)
+    totals["active"] = sum(1 for r in rows if r["today_persons"])
+    return {"screen": "daily_report", "date": on_date, "rows": rows,
+            "totals": totals, "scope": scope_label(mgr),
+            "manager_name": mgr.get("name") or "",
+            "countries": [{"code": c, **{k: country_scope.info(c)[k]
+                                         for k in ("name", "short", "flag")},
+                           "employees": sum(1 for r in rows if r["country"] == c)}
+                          for c in sorted({r["country"] for r in rows if r["country"]},
+                                          key=lambda x: [s["code"] for s in
+                                                         country_scope.COUNTRIES].index(x))]}
+
+
+def daily_report_caption(data: dict) -> str:
+    """Подпись к файлу: 1024 символа — предел Telegram, поэтому только итог."""
+    t = data["totals"]
+    parts = [f"📊 <b>Сводка за {human_date(data['date'])}</b>"]
+    if data["scope"]:
+        parts.append(data["scope"])
+    parts.append(f"👥 Команда: {t['employees']} · сегодня работали: {t['active']}")
+    parts.append(f"🗓 Отработано сегодня: <b>{t['today_persons']}</b> "
+                 f"должников за {t['today_visits']} выездов")
+    parts.append(f"📈 Всего с начала работы: <b>{t['total_persons']}</b> должников "
+                 f"({t['total_visits']} выездов)")
+    parts.append(f"📌 Закреплено: {t['assigned_persons']} должников "
+                 f"({t['assigned_contracts']} договоров)")
+    if t["overdue"]:
+        parts.append(f"⏰ Просрочено обещаний: {t['overdue']}")
+    parts.append("Таблица по каждому сотруднику — в файле; "
+                 "разбор по дням и карточки — во вкладке «Сводка» приложения.")
+    return "\n".join(parts)
+
+
+def daily_report_xlsx(mgr: dict, on_date: str,
+                      employees: list[str] | None = None,
+                      data: dict | None = None) -> bytes:
+    from io import BytesIO
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font
+
+    data = data if data is not None else daily_report_data(mgr, on_date, employees)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Сводка"
+    ws.append([f"Выезды · сводка на {human_date(on_date)} ({on_date})"
+               + (f" · {data['scope']}" if data["scope"] else "")])
+    ws["A1"].font = Font(bold=True, size=13)
+    ws.append([])
+    ws.append([title for _key, title, _w in DAILY_REPORT_COLUMNS])
+    for cell in ws[3]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
+    for r in data["rows"]:
+        ws.append([r.get(key, "") for key, _t, _w in DAILY_REPORT_COLUMNS])
+    t = data["totals"]
+    ws.append(["Итого", ""] + [t.get(key, "") for key, _t, _w in DAILY_REPORT_COLUMNS[2:]])
+    for cell in ws[ws.max_row]:
+        cell.font = Font(bold=True)
+    for i, (_key, _title, width) in enumerate(DAILY_REPORT_COLUMNS):
+        ws.column_dimensions[chr(ord("A") + i)].width = width
+    ws.freeze_panes = "C4"
+
+    ws2 = wb.create_sheet("Исходы за день")
+    ws2.append(["Сотрудник", "Исход", "Должников"])
+    for cell in ws2[1]:
+        cell.font = Font(bold=True)
+    for r in data["rows"]:
+        for o in r["outcomes"]:
+            ws2.append([r["employee"], o["status"], o["n"]])
+    for col, w in zip("ABC", (28, 28, 12)):
+        ws2.column_dimensions[col].width = w
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def daily_report_filename(on_date: str) -> str:
+    return f"Сводка выездов {on_date}.xlsx"

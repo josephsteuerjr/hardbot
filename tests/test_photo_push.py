@@ -26,7 +26,7 @@ class FakeBot:
     async def send_photo(self, chat_id, photo, caption=None):
         self.calls.append(("photo", chat_id, 1, caption))
 
-    async def send_document(self, chat_id, doc, caption=None):
+    async def send_document(self, chat_id, doc, caption=None, reply_markup=None):
         self.calls.append(("doc", chat_id, 1, caption))
 
     async def send_message(self, chat_id, text):

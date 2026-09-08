@@ -162,6 +162,13 @@ def visit_report_text(row, dist_m=None, visit_geo=None, photo_geo=None,
     comment = g("visit_comment") or g("call_comment")
     if comment:
         lines.append(f"💬 {comment}")
+    # Доп. адрес / доп. номер: выездник записывает туда телефон родственника и
+    # второй адрес — то, ради чего руководитель и открывает карточку. Поле
+    # bot-only (в реестр не уходит), и до 08.09.2026 его не было ни в одной из
+    # трёх карточек: люди жаловались, что «в отчёте нет доп. адреса и номера».
+    tips = g("tips")
+    if tips:
+        lines.append(f"📇 {tips}")
     if visit_geo:
         s = f"📍 Точка закрытия: {_maps_link(*visit_geo)}"
         if dist_m is not None:

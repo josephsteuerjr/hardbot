@@ -59,7 +59,7 @@ class FakeBot:
         self.calls.append(("photo", chat_id, photo))
         return SimpleNamespace(photo=[SimpleNamespace(file_id="fid0")])
 
-    async def send_document(self, chat_id, doc, caption=None):
+    async def send_document(self, chat_id, doc, caption=None, reply_markup=None):
         self._maybe_fail(chat_id)
         self.calls.append(("doc", chat_id, doc))
 
@@ -409,7 +409,7 @@ def test_album_failure_is_not_reported_as_sent():
         async def send_photo(self, chat_id, photo, caption=None):
             raise TelegramAPIError(method=SimpleNamespace(), message="bad photo")
 
-        async def send_document(self, chat_id, doc, caption=None):
+        async def send_document(self, chat_id, doc, caption=None, reply_markup=None):
             raise TelegramAPIError(method=SimpleNamespace(), message="bad doc")
 
     bot = HalfBot()

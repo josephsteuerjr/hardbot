@@ -657,7 +657,8 @@ class EmployeeSplit(dict):
         orphan_rows   — строк сервера без «ответственного Сотрудника»;
         orphan_filled — из них с завершённым визитом бота: именно эти результаты
                         не попадут ни в один личный реестр, писать их некуда;
-        orphan_cids   — первые ORPHAN_SAMPLE номеров КД таких визитов.
+        orphan_cids   — первые ORPHAN_SAMPLE номеров КД таких визитов;
+        orphan_dates  — (самый ранний, самый поздний) выезд среди них.
     """
 
     def __init__(self, *args, **kwargs):
@@ -665,6 +666,7 @@ class EmployeeSplit(dict):
         self.orphan_rows = 0
         self.orphan_filled = 0
         self.orphan_cids: list[str] = []
+        self.orphan_dates: tuple[str, str] | None = None
 
 
 def split_by_employee(rows: list[dict]) -> EmployeeSplit:
@@ -676,12 +678,20 @@ def split_by_employee(rows: list[dict]) -> EmployeeSplit:
     из выгрузки выпали 173 завершённых визита за 09-17.07, и жалоба Ильи о
     пропавших комментариях неделю висела без объяснения. Теперь они считаются."""
     out = EmployeeSplit()
+    # Счётчик сирот идёт по ВСЕЙ базе, а окно дат — только по обогащению. Рядом
+    # с окном «сегодня» число читалось как сегодняшняя авария (08.09.2026 так и
+    # вышло: 342 августовских визита выглядели свежей поломкой), поэтому вместе
+    # с числом запоминаем период самих выездов.
+    seen_dates: list[str] = []
     for r in rows:
         emp = str(r.get("responsible") or "").strip()
         if not emp:
             out.orphan_rows += 1
             if is_filled(r):
                 out.orphan_filled += 1
+                d = parse_date(r.get("visit_date"))
+                if d is not None:
+                    seen_dates.append(d.strftime("%d.%m.%Y"))
                 if len(out.orphan_cids) < ORPHAN_SAMPLE:
                     out.orphan_cids.append(norm_cid(r.get(CONTRACT_KEY)))
             continue
@@ -689,6 +699,9 @@ def split_by_employee(rows: list[dict]) -> EmployeeSplit:
         e["rows"].append(r)
         if is_filled(r):
             e["filled"] += 1
+    if seen_dates:
+        order = sorted(seen_dates, key=lambda s: (s[6:], s[3:5], s[:2]))
+        out.orphan_dates = (order[0], order[-1])
     return out
 
 

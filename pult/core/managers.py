@@ -15,10 +15,14 @@ def valid_time(value: str) -> bool:
 
 def digest_body(*, time: str, enabled: bool, promise_time: str, promise_enabled: bool,
                 visit_push: bool, owner_known: bool, owner_digest: bool,
-                owner_promise: bool) -> dict:
+                owner_promise: bool, xlsx_known: bool = False,
+                digest_xlsx: bool = True) -> dict:
     body = {"time": time, "enabled": enabled,
             "promise_time": promise_time, "promise_enabled": promise_enabled,
             "visit_push": visit_push}
+    # Как visit_push: ключ уходит только на сервер, который его понимает.
+    if xlsx_known:
+        body["digest_xlsx"] = digest_xlsx
     # Как и visit_push: ключ уходит только если сервер уже умеет его читать,
     # иначе «Сохранить» на старом сервере ничего не значит, но и не врёт.
     if owner_known:
@@ -110,6 +114,39 @@ def geo_state_text(d: dict) -> str:
 
 
 # --- беседы ------------------------------------------------------------------------
+# Беседа закрепляется за НАПРАВЛЕНИЕМ (состав считается живьём) либо за списком
+# ФИО; одно другому не мешает. Коды те же, что у руководителей.
+CHAT_DIRECTION_OPTIONS = (
+    ("", "— по списку сотрудников —"),
+    ("tj", "Таджикистан"),
+    ("uz", "Узбекистан"),
+    ("all", "СНГ (все сотрудники)"),
+)
+
+
+def chat_direction_index(code: str) -> int:
+    codes = [c for c, _t in CHAT_DIRECTION_OPTIONS]
+    return codes.index(code) if code in codes else 0
+
+
+def chat_direction_code(index: int) -> str:
+    try:
+        return CHAT_DIRECTION_OPTIONS[int(index)][0]
+    except (IndexError, ValueError, TypeError):
+        return ""
+
+
+def chat_scope_text(c: dict) -> str:
+    """Подпись «кого постим» под беседой: направление сильнее списка."""
+    code = (c.get("direction") or "").strip()
+    emps = c.get("employees") or []
+    if code:
+        title = DIRECTION_TITLES.get(code, code)
+        tail = f" + {len(emps)} вручную" if emps else ""
+        return f"направление: {title}{tail}"
+    return chat_employees_text(emps)
+
+
 def chat_label(c: dict, duplicate: bool) -> str:
     title = c.get("title") or "(без названия)"
     label = f"{title}  ·  id {c.get('chat_id')}"

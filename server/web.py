@@ -405,6 +405,15 @@ def _row_get(rows, key):
     return next((r[key] for r in rows if r[key] not in (None, "")), None)
 
 
+def _cell(row, key):
+    """Поле ОДНОЙ строки клиента. dict и sqlite3.Row ведут себя по-разному, а
+    отсутствующий ключ (урезанный словарь в тестах, старый снимок) — не ошибка."""
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
 def _fmt_date_ru(iso: str) -> str:
     """«2026-09-15» → «15.09.2026»; всё остальное — как есть."""
     try:
@@ -2181,6 +2190,8 @@ async def _notify_group(request: web.Request, row, uid: int,
             f"📝 {_esc(row['call_status']) or '—'} · {_esc(row['agreed_payment']) or '—'}",
             f"💬 {_esc(row['visit_comment'] or row['call_comment']) or '—'}",
         ]
+        if _cell(row, "tips"):
+            lines.append(f"📇 {_esc(_cell(row, 'tips'))}")
         # Кто фактически закрыл — тем же правилом, что в беседах отчётов,
         # иначе каналы расходятся.
         if actor and actor != emp:
@@ -2310,6 +2321,8 @@ async def _notify_managers(request: web.Request, row, dist_m: int | None = None,
     if pline:
         lines.append(pline)
     lines.append(f"💬 {_esc(row['visit_comment'] or row['call_comment']) or '—'}")
+    if _cell(row, "tips"):
+        lines.append(f"📇 {_esc(_cell(row, 'tips'))}")
     lines.append(f"📸 {len(files)} фото" if files else "📸 без фото")
     text = "\n".join(lines)
     if dist_m is not None:
@@ -3065,10 +3078,12 @@ async def _admin_chats_set(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="chat_id")
     enabled = body.get("enabled")
     employees = body.get("employees")
+    direction = body.get("direction")
     db.set_report_chat(
         chat_id,
         enabled=None if enabled is None else bool(enabled),
-        employees=None if employees is None else [str(e) for e in employees])
+        employees=None if employees is None else [str(e) for e in employees],
+        direction=None if direction is None else str(direction))
     return web.json_response({"ok": True, "chats": db.list_report_chats()})
 
 
@@ -3477,6 +3492,10 @@ async def _admin_digest_settings(request: web.Request) -> web.Response:
         # охраны обычное «Сохранить» молча выключало бы отбивки по всему проду.
         if "visit_push" in b:
             db.set_setting("visit_push", "1" if b.get("visit_push") else "0")
+        # Сводка руководителям книгой Excel вместо длинного текста (решение
+        # владельца 08.09.2026). Тот же принцип «только при наличии ключа».
+        if "digest_xlsx" in b:
+            db.set_setting("digest_xlsx", "1" if b.get("digest_xlsx") else "0")
         # Личные рубильники ВЛАДЕЛЬЦА (не общие): «дайджест только, отдельно».
         # Тот же принцип «только при наличии ключа» — старый пульт их не шлёт.
         for key in ("owner_digest", "owner_promise"):
@@ -3493,6 +3512,7 @@ async def _admin_digest_settings(request: web.Request) -> web.Response:
         "promise_time": db.get_setting("promise_time") or "09:30",
         "promise_enabled": db.push_enabled("promise_enabled"),
         "visit_push": db.push_enabled("visit_push"),
+        "digest_xlsx": db.push_enabled("digest_xlsx"),
         "owner_digest": db.push_enabled("owner_digest", "1"),
         "owner_promise": db.push_enabled("owner_promise", "0"),
         "digest_last_run": db.get_setting("digest_last_run") or "",

@@ -78,6 +78,13 @@ class ManagersSection:
         self.visit_push_check = Check("отбивки по закрытым визитам (в личку руководителям)", True)
         self.visit_push_var = self.visit_push_check
         dc.add_row(self.visit_push_check)
+        # Решение владельца 08.09.2026: руководителям нужна ОДНА таблица по всем
+        # сотрудникам, а разбор по дням живёт во вкладке приложения.
+        self.digest_xlsx_check = Check(
+            "сводку слать книгой Excel (закреплено · сегодня · всего), а не длинным текстом",
+            True)
+        self.digest_xlsx_var = self.digest_xlsx_check
+        dc.add_row(self.digest_xlsx_check)
         # Личные рубильники владельца. Общий «автопуш включён» гасит рассылку
         # ВСЕМ руководителям сразу — отписаться самому было нечем.
         self.owner_digest_check = Check("дайджест", True)
@@ -193,8 +200,16 @@ class ManagersSection:
                           role="warn" if dup else None)
             check.toggled.connect(lambda on, cid=c["chat_id"]: self._chat_toggle(cid, on))
             emps = c.get("employees") or []
+            combo = Combo([lbl for _code, lbl in mg.CHAT_DIRECTION_OPTIONS],
+                          width_chars=24)
+            combo.set_current(mg.chat_direction_index(c.get("direction") or ""))
+            # activated — только выбор ЧЕЛОВЕКОМ: перерисовка списка не должна
+            # сама отправлять настройку обратно на сервер.
+            combo.activated.connect(
+                lambda i, cid=c["chat_id"]: self._chat_direction(cid, i))
             self.chats_list.add_row(
-                check, Note(mg.chat_employees_text(emps), "tiny", wrap=False), None,
+                check, Note(mg.chat_scope_text(c), "tiny", wrap=False), None,
+                combo,
                 Button(f"Сотрудники ({len(emps)})", lambda c=c: self._chat_emps_dialog(c)),
                 stretch=False)
 
@@ -206,6 +221,20 @@ class ManagersSection:
                      lambda d: self.toast("Беседа включена" if on else "Беседа выключена"),
                      lambda e: (self.toast(f"Не сохранилось: {e}", err=True),
                                 self.chats_refresh()))
+
+    def _chat_direction(self, chat_id, index):
+        """Направление беседы: состав считается живьём, как у руководителя.
+
+        При сбое перечитываем список — галочка и подпись не имеют права
+        показывать настройку, которой на сервере нет."""
+        code = mg.chat_direction_code(index)
+        self.bg_task(
+            lambda: self.api("POST", "/admin/chats.set",
+                             {"chat_id": chat_id, "direction": code}),
+            lambda d: (self.toast("Направление беседы сохранено"),
+                       self._render_chats(d.get("chats") or [])),
+            lambda e: (self.toast(f"Не сохранилось: {e}", err=True),
+                       self.chats_refresh()))
 
     def _chat_emps_dialog(self, chat):
         ChatEmployeesDialog(self, chat, self._chats_emp or []).show()
@@ -420,7 +449,9 @@ class ManagersSection:
             promise_enabled=self.prom_enabled.get(), visit_push=self.visit_push_var.get(),
             owner_known=self.owner_digest_check.isEnabled(),
             owner_digest=self.owner_digest_var.get(),
-            owner_promise=self.owner_promise_var.get())
+            owner_promise=self.owner_promise_var.get(),
+            xlsx_known=self.digest_xlsx_check.isEnabled(),
+            digest_xlsx=self.digest_xlsx_var.get())
 
         def done(d):
             self._show_digest_state(d)
@@ -444,6 +475,12 @@ class ManagersSection:
             self.visit_push_check.configure(state="normal")
         else:
             self.visit_push_check.configure(state="disabled")
+        # На старом сервере галочка гаснет, а не врёт «включено».
+        if "digest_xlsx" in d:
+            self.digest_xlsx_var.set(bool(d.get("digest_xlsx")))
+            self.digest_xlsx_check.configure(state="normal")
+        else:
+            self.digest_xlsx_check.configure(state="disabled")
 
     def _show_digest_state(self, d: dict):
         self.dig_out.setText(mg.digest_state_text(d))

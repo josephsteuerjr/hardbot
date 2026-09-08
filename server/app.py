@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import MenuButtonWebApp, WebAppInfo
+from aiogram.types import BufferedInputFile, MenuButtonWebApp, WebAppInfo
 
 import db
 import digest
@@ -148,8 +148,8 @@ def _held(kind: str, tid: int) -> bool:
 async def _send_daily(kind: str, bot: Bot | None, on_date: str, attempt: int,
                       build) -> int:
     """Общий каркас дневной рассылки (дайджест/обещания). build(mgr) -> (text,
-    kb) | None (None = этому адресату нечего слать). Возвращает число
-    НЕулаженных (failed) адресатов."""
+    kb) | (text, kb, (имя файла, байты)) | None (None = этому адресату нечего
+    слать). Возвращает число НЕулаженных (failed) адресатов."""
     if notify.bot_missing(bot):
         # Telegram отключён: слать некуда и нечем, ретраи бессмысленны — день
         # улажен одной строкой телеметрии.
@@ -188,9 +188,16 @@ async def _send_daily(kind: str, bot: Bot | None, on_date: str, attempt: int,
                         target_id=tid, attempt=attempt)
             _mark_settled(kind, on_date, tid)
             continue
-        text, kb = built
+        text, kb, doc = built if len(built) == 3 else (*built, None)
         try:
-            await bot.send_message(tid, text, reply_markup=kb)
+            if doc:
+                # Подпись документа ограничена 1024 символами — сводка в неё
+                # укладывается намеренно, всё остальное лежит в самой книге.
+                await bot.send_document(
+                    tid, BufferedInputFile(doc[1], filename=doc[0]),
+                    caption=text, reply_markup=kb)
+            else:
+                await bot.send_message(tid, text, reply_markup=kb)
         except Exception as exc:  # noqa: BLE001
             status, err = notify.classify_send_error(exc)
             db.log_push(kind, status, target_kind=target_kind, target_id=tid,
@@ -235,11 +242,26 @@ def _digest_time() -> tuple[int, int]:
     return _setting_time("digest_time", 16, 30)
 
 
+def _digest_build(mgr, on_date: str):
+    """Сводка руководителю: книгой, а при сбое сборки — прежним текстом.
+
+    Падение сборки книги не имеет права оставить руководителя вообще без
+    сводки: рассылка идёт раз в день, и «сегодня ничего не пришло» замечают
+    только назавтра. Рубильник digest_xlsx=0 возвращает прежний текст без
+    выкладки."""
+    if db.push_enabled("digest_xlsx"):
+        try:
+            return digest.daily_report_view(mgr, on_date)
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("сводка книгой не собралась (%s) — шлём текстом", exc)
+    return digest.summary_view(mgr, on_date)
+
+
 async def _push_digests(bot: Bot, on_date: str, attempt: int = 1) -> int:
     """Разослать дайджест; вернуть число НЕулаженных адресатов."""
     return await _send_daily(
         db.PUSH_DIGEST, bot, on_date, attempt,
-        lambda mgr: digest.summary_view(mgr, on_date))
+        lambda mgr: _digest_build(mgr, on_date))
 
 
 async def _push_promises(bot: Bot, on_date: str, attempt: int = 1) -> int:

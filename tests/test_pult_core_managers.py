@@ -40,3 +40,31 @@ def test_direction_note_explains_that_checkboxes_are_not_needed():
     assert mg.direction_employees_note("") == ""
     note = mg.direction_employees_note("tj")
     assert "Таджикистан" in note and "автоматически" in note
+
+
+def test_chat_direction_options_match_the_server():
+    assert [c for c, _ in mg.CHAT_DIRECTION_OPTIONS] == ["", "tj", "uz", "all"]
+    assert mg.chat_direction_index("uz") == 2 and mg.chat_direction_index("нет") == 0
+    assert mg.chat_direction_code(3) == "all" and mg.chat_direction_code(99) == ""
+
+
+def test_chat_scope_text_prefers_direction():
+    assert mg.chat_scope_text({"direction": "tj", "employees": []}) == \
+        "направление: Таджикистан"
+    assert mg.chat_scope_text({"direction": "uz", "employees": ["А", "Б"]}) == \
+        "направление: Узбекистан + 2 вручную"
+    assert mg.chat_scope_text({"direction": "", "employees": []}) == \
+        "сотрудники не закреплены — посты не идут"
+    assert mg.chat_scope_text({"direction": "", "employees": ["А"]}) == "А"
+
+
+def test_digest_body_sends_xlsx_switch_only_to_a_server_that_knows_it():
+    body = mg.digest_body(time="16:30", enabled=True, promise_time="09:30",
+                          promise_enabled=True, visit_push=True, owner_known=False,
+                          owner_digest=True, owner_promise=False)
+    assert "digest_xlsx" not in body, "старый сервер не должен получать незнакомый ключ"
+    body2 = mg.digest_body(time="16:30", enabled=True, promise_time="09:30",
+                           promise_enabled=True, visit_push=True, owner_known=False,
+                           owner_digest=True, owner_promise=False,
+                           xlsx_known=True, digest_xlsx=False)
+    assert body2["digest_xlsx"] is False
