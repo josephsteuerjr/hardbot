@@ -1,4 +1,5 @@
-"""Раздел «Люди»: роли, привязки, снятие клиентов у сотрудника."""
+"""Раздел «Сотрудники»: активность и вход одной таблицей, роли, привязки,
+снятие клиентов. Слиты бывшие «Люди» и «Активность» — это одни и те же люди."""
 
 from __future__ import annotations
 
@@ -7,18 +8,47 @@ import urllib.parse
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QGridLayout, QWidget
 
+from ..core import activity as act
 from ..core.devices import valid_telegram_id
 from ..core.people import (GUEST_PLACEHOLDER, KIND_LABELS, client_debt, client_label,
                            guest_label, kind_from_label, kind_index, kind_text, link_note,
                            role_status, unassign_text)
 from ..core.text import fmt_n
 from .dialogs import show_link
-from .widgets import Button, Card, CheckList, Combo, Field, Note, Page, Rows, label, vcol
+from .widgets import (Button, Card, CheckList, ChipFlow, Combo, Field, Note, Page, Rows,
+                      Table, label, vcol)
 
 
 class PeopleSection:
     def build_people(self) -> Page:
         page = Page()
+
+        ac = Card("Активность и вход",
+                  "Каждый визит, метка, фото и вход в приложение пишутся в базу — здесь "
+                  "сводка. Клик по заголовку сортирует, поле ищет по любой колонке, "
+                  "чипы фильтруют. Выбери строку — кнопки ниже действуют на неё.")
+        self.act_summary = ac.add(Note("", "small"))
+        self.act_search = Field(width_chars=30, placeholder="поиск по ФИО, статусу…")
+        self.act_search.textChanged.connect(lambda t: self.act_tv.set_filter(t))
+        self.act_filters = ChipFlow()
+        ac.add_row(self.act_search, 8, self.act_filters, spacing_before=4, stretch=False)
+        self.act_tv = ac.add(Table(act.ACTIVITY_COLUMNS, numeric=act.NUMERIC,
+                                   stretch=("emp", "status"), visible_rows=16),
+                             spacing_before=4)
+        self.act_tv.on_select(self._act_selected)
+        self.act_pick = Note("", "tiny")
+        self.act_link_btn = Button("Ссылка входа", self._act_link)
+        self.act_unassign_btn = Button("Снять клиентов…", self._act_unassign)
+        for b in (self.act_link_btn, self.act_unassign_btn):
+            b.setEnabled(False)
+        ac.add_row(self.act_link_btn, self.act_unassign_btn, self.act_pick,
+                   None, Button("Обновить", self.load_people), spacing_before=4,
+                   stretch=False)
+        page.add(ac)
+        self._act_workers: list[dict] = []
+        self._act_filter = "all"
+        self._act_row: tuple | None = None
+
         rc = Card("Назначение ролей",
                   "ФИО берутся из реестра (колонка «ответственный»). Впиши Telegram ID "
                   "сотруднику (или выбери из писавших боту), тип — и «Привязать»: работник "
@@ -48,6 +78,58 @@ class PeopleSection:
 
     _guest_label = staticmethod(guest_label)
 
+    # --- активность -------------------------------------------------------------
+    def load_people(self):
+        self.load_activity()
+        self.load_roles()
+
+    def load_activity(self):
+        def done(d):
+            self._act_workers = list(d.get("workers") or [])
+            self._render_activity()
+        self.bg_task(lambda: self.api("GET", "/admin/activity"), done)
+
+    def _render_activity(self):
+        workers = self._act_workers
+        latest = act.latest_shell(workers)
+        counts = act.filter_counts(workers)
+        self.act_filters.set_chips(
+            [(f"{title} · {counts.get(key, 0)}", key == self._act_filter,
+              lambda k=key: self._act_set_filter(k)) for key, title in act.FILTERS])
+        rows = [act.activity_row(w) for w in workers if act.matches(w, self._act_filter, latest)]
+        self.act_tv.set_rows(rows)
+        self.act_tv.set_filter(self.act_search.get())
+        self.act_summary.setText(act.summary_text(workers))
+        self._act_selected(None)
+
+    def _act_set_filter(self, key):
+        self._act_filter = key
+        self._render_activity()
+
+    def _act_selected(self, row):
+        self._act_row = row
+        on = bool(row)
+        self.act_link_btn.setEnabled(on)
+        self.act_unassign_btn.setEnabled(on)
+        self.act_pick.setText(f"выбран: {row[0]}" if row else "")
+
+    def _act_link(self):
+        if self._act_row:
+            self.issue_link(employee=self._act_row[0])
+
+    def _act_unassign(self):
+        if not self._act_row:
+            return
+        emp = self._act_row[0]
+        values = [self.un_emp.itemText(i) for i in range(self.un_emp.count())]
+        if emp in values:
+            self.un_emp.set_current(values.index(emp))
+            self.load_emp_clients()
+            self.pages["people"].scroll_to(self.un_frame)
+        else:
+            self.toast(f"«{emp}» нет в реестре как ответственного", err=True)
+
+    # --- роли -------------------------------------------------------------------
     def load_roles(self):
         def work():
             try:

@@ -1,147 +1,30 @@
-"""Раздел «Руководители»: автосводка, диагностика доставки, координаты фото,
-беседы отчётов, список руководителей и форма."""
+"""Раздел «Руководители»: список с личными рубильниками и форма.
+
+Рассылки, диагностика доставки и беседы — в разделе «Каналы»; координаты
+фото — в «Подключении»."""
 
 from __future__ import annotations
-
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 
 from ..core import managers as mg
 from ..core.devices import valid_telegram_id
 from ..core.people import GUEST_PLACEHOLDER, guest_label
 from ..core.text import names_look_different
 from . import dialogs
-from .widgets import (Button, Card, Check, ChipFlow, Combo, Field, KVGrid, Note, Page,
-                      Rows, label)
+from .widgets import (Button, Card, Check, ChipFlow, Combo, Field, Note, Page, Rows,
+                      label)
 
 MGR_FORM_TITLE = "Добавить / изменить руководителя"
-
-
-class ChatEmployeesDialog(QDialog):
-    """«Чьи визиты постить в эту беседу» — галочки в две колонки."""
-
-    def __init__(self, host, chat: dict, employees: list[str]) -> None:
-        super().__init__(host)
-        self.host = host
-        self.chat = chat
-        self.setWindowTitle(chat.get("title") or str(chat.get("chat_id")))
-        self.setModal(True)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 16, 16, 16)
-        lay.setSpacing(8)
-        lay.addWidget(label("Чьи визиты постить в эту беседу:", bold=True))
-        if not employees:
-            lay.addWidget(Note("Реестр пуст — сотрудников нет", "small"))
-        sel = set(chat.get("employees") or [])
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(4)
-        rows_per_col = max(1, (len(employees) + 1) // 2)
-        self.checks: dict[str, Check] = {}
-        for i, e in enumerate(employees):
-            c = Check(e, e in sel)
-            self.checks[e] = c
-            grid.addWidget(c, i % rows_per_col, i // rows_per_col, Qt.AlignmentFlag.AlignLeft)
-        lay.addLayout(grid)
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        buttons.addWidget(Button("Отмена", self.reject))
-        buttons.addWidget(Button("Сохранить", self.save, kind="accent"))
-        lay.addLayout(buttons)
-
-    def save(self) -> None:
-        chosen = [e for e, c in self.checks.items() if c.get()]
-
-        def done(d):
-            self.host.toast("Сотрудники беседы сохранены")
-            self.accept()
-            self.host._render_chats(d.get("chats") or [])
-        self.host.bg_task(lambda: self.host.api(
-            "POST", "/admin/chats.set",
-            {"chat_id": self.chat["chat_id"], "employees": chosen}), done)
 
 
 class ManagersSection:
     def build_mgrs(self) -> Page:
         page = Page()
 
-        dc = Card("Автосводка руководителям",
-                  "В конце дня (по Москве) каждый руководитель получает дайджест по своим "
-                  "сотрудникам. Реалтайм — кнопка «Дайджест за сегодня» в боте.")
-        self.dig_time = Field("16:30", width_chars=7)
-        self.dig_enabled = Check("автопуш включён", True)
-        dc.add_row(label("Время (МСК)", "small"), self.dig_time, 4, self.dig_enabled, 4,
-                   Button("Сохранить", self.save_digest, kind="accent"))
-        self.prom_time = Field("09:30", width_chars=7)
-        self.prom_enabled = Check("утренний пуш «обещание просрочено»", True)
-        dc.add_row(label("Обещания (МСК)", "small"), self.prom_time, 4, self.prom_enabled)
-        self.visit_push_check = Check("отбивки по закрытым визитам (в личку руководителям)", True)
-        self.visit_push_var = self.visit_push_check
-        dc.add_row(self.visit_push_check)
-        # Решение владельца 08.09.2026: руководителям нужна ОДНА таблица по всем
-        # сотрудникам, а разбор по дням живёт во вкладке приложения.
-        self.digest_xlsx_check = Check(
-            "сводку слать книгой Excel (закреплено · сегодня · всего), а не длинным текстом",
-            True)
-        self.digest_xlsx_var = self.digest_xlsx_check
-        dc.add_row(self.digest_xlsx_check)
-        # Личные рубильники владельца. Общий «автопуш включён» гасит рассылку
-        # ВСЕМ руководителям сразу — отписаться самому было нечем.
-        self.owner_digest_check = Check("дайджест", True)
-        self.owner_digest_var = self.owner_digest_check
-        self.owner_promise_check = Check("обещания", False)
-        self.owner_promise_var = self.owner_promise_check
-        dc.add_row(label("Лично мне:", "small"), self.owner_digest_check,
-                   self.owner_promise_check)
-        self.dig_out = dc.add(Note("", "small"))
-        page.add(dc)
-
-        dl = Card("Диагностика доставки",
-                  "Кому за сегодня ушли пуши, кому нет и почему. «Заблокирован» = "
-                  "руководитель не нажал /start в личке боту — это чинится только "
-                  "им самим.")
-        dl.add_row(Button("Обновить сводку доставки", self.load_delivery, kind="accent"))
-        self.delivery_kvs = dl.add(KVGrid(), spacing_before=4)
-        self.delivery_out = dl.add(Note("", "small"))
-        page.add(dl)
-
-        gc = Card("Координаты фото",
-                  "Точка съёмки — доказательство выезда и одновременно данные о "
-                  "самом сотруднике: у снимка из галереи это чаще всего его "
-                  "домашний адрес. Стереть можно точечно — по сотруднику, "
-                  "договору или дате загрузки; сами фото, их даты и хэши "
-                  "остаются. Автоуборки по умолчанию НЕТ: срок в днях включает "
-                  "её, если однажды потребуется регламент (0 = не убирать).")
-        self.geo_days = Field(width_chars=6)
-        gc.add_row(label("Хранить (дней)", "small"), self.geo_days, 4,
-                   Button("Сохранить срок", self.save_geo_retention, kind="accent"),
-                   Button("Обновить", self.load_geo_retention))
-        self.geo_emp = Field(width_chars=22)
-        self.geo_cid = Field(width_chars=14)
-        self.geo_before = Field(width_chars=12, placeholder="ДД.ММ.ГГГГ")
-        gc.add_row(label("Стереть сейчас:", "small"), 2, label("сотрудник", "small"),
-                   self.geo_emp, 2, label("КД", "small"), self.geo_cid, 2,
-                   label("до даты", "small"), self.geo_before, 4,
-                   Button("Стереть координаты", self.forget_geo), spacing_before=4)
-        self.geo_out = gc.add(Note("", "small"))
-        page.add(gc)
-
-        rc = Card("Пересылка отчётов в беседы",
-                  "Закрытый визит уходит постом в закреплённые беседы — как сотрудники "
-                  "пишут руками, только автоматически: клиент, адрес, статусы, "
-                  "комментарий, фото и фактические гео-точки (закрытие визита и съёмка "
-                  "фото). Добавь бота в беседу — она появится в списке; включи её и "
-                  "закрепи сотрудников (ФИО из реестра = их привязанные телеграмы).")
-        rc.add_row(Button("Обновить список бесед", self.chats_refresh))
-        self.chats_list = rc.add(Rows(spacing=4), spacing_before=4)
-        self.chats_list.set_empty("Список загрузится при открытии вкладки…")
-        self._chats_emp: list[str] = []
-        page.add(rc)
-
         mc = Card("Руководители",
-                  "Руководитель направления видит всех сотрудников своей страны "
-                  "(СНГ — всех), состав считается живьём. Остальные привязаны к "
-                  "городам (подпись сводки) и к списку сотрудников.")
+                  "Руководитель направления видит всех сотрудников своей республики "
+                  "(СНГ — всех), состав считается живьём. Галочки в строке — что ему "
+                  "слать: карточку по каждому визиту, сводку в конце дня, утренние "
+                  "обещания. Гендиру обычно хватает одной сводки.")
         self.mgr_list = mc.add(Rows(spacing=4))
         self.mgr_list.set_empty("Пока никого — добавьте ниже")
         page.add(mc)
@@ -180,65 +63,6 @@ class ManagersSection:
         page.add(fc)
         return page
 
-    # --- беседы отчётов о выездах ---
-    def chats_refresh(self):
-        def done(d):
-            self._chats_emp = d.get("employees") or []
-            self._render_chats(d.get("chats") or [])
-        self.bg_task(lambda: self.api("GET", "/admin/chats"), done)
-
-    def _render_chats(self, chats):
-        self.chats_list.clear()
-        if not chats:
-            self.chats_list.set_empty(
-                "Бесед пока нет — добавь бота в группу, и она появится здесь")
-            return
-        dups = mg.chat_duplicates(chats)
-        for c in chats:
-            dup = (c.get("title") or "").strip().lower() in dups
-            check = Check(mg.chat_label(c, dup), c.get("enabled", False),
-                          role="warn" if dup else None)
-            check.toggled.connect(lambda on, cid=c["chat_id"]: self._chat_toggle(cid, on))
-            emps = c.get("employees") or []
-            combo = Combo([lbl for _code, lbl in mg.CHAT_DIRECTION_OPTIONS],
-                          width_chars=24)
-            combo.set_current(mg.chat_direction_index(c.get("direction") or ""))
-            # activated — только выбор ЧЕЛОВЕКОМ: перерисовка списка не должна
-            # сама отправлять настройку обратно на сервер.
-            combo.activated.connect(
-                lambda i, cid=c["chat_id"]: self._chat_direction(cid, i))
-            self.chats_list.add_row(
-                check, Note(mg.chat_scope_text(c), "tiny", wrap=False), None,
-                combo,
-                Button(f"Сотрудники ({len(emps)})", lambda c=c: self._chat_emps_dialog(c)),
-                stretch=False)
-
-    def _chat_toggle(self, chat_id, on):
-        # При сбое чекбокс НЕ должен показывать выключенное при включённом
-        # сервере (посты с ПД продолжались бы «невидимо») — перечитываем правду.
-        self.bg_task(lambda: self.api("POST", "/admin/chats.set",
-                                      {"chat_id": chat_id, "enabled": on}),
-                     lambda d: self.toast("Беседа включена" if on else "Беседа выключена"),
-                     lambda e: (self.toast(f"Не сохранилось: {e}", err=True),
-                                self.chats_refresh()))
-
-    def _chat_direction(self, chat_id, index):
-        """Направление беседы: состав считается живьём, как у руководителя.
-
-        При сбое перечитываем список — галочка и подпись не имеют права
-        показывать настройку, которой на сервере нет."""
-        code = mg.chat_direction_code(index)
-        self.bg_task(
-            lambda: self.api("POST", "/admin/chats.set",
-                             {"chat_id": chat_id, "direction": code}),
-            lambda d: (self.toast("Направление беседы сохранено"),
-                       self._render_chats(d.get("chats") or [])),
-            lambda e: (self.toast(f"Не сохранилось: {e}", err=True),
-                       self.chats_refresh()))
-
-    def _chat_emps_dialog(self, chat):
-        ChatEmployeesDialog(self, chat, self._chats_emp or []).show()
-
     # --- загрузка ---
     def load_managers(self):
         def work():
@@ -255,18 +79,7 @@ class ManagersSection:
             self.mgrs = d.get("managers") or []
             self.mgr_cities = d.get("cities") or []
             self.mgr_emps = d.get("employees") or []
-            self.chats_refresh()   # карточка бесед не должна висеть пустой
             self.mgr_city_emps = d.get("city_employees") or {}
-            dig = d.get("digest") or {}
-            if dig:
-                self.dig_time.set(dig.get("time") or "16:30")
-                self.dig_enabled.set(bool(dig.get("enabled")))
-                self.prom_time.set(dig.get("promise_time") or "09:30")
-                self.prom_enabled.set(bool(dig.get("promise_enabled", True)))
-                # БЕЗ дефолта True: на старом сервере галка врала бы «включено»
-                self._show_owner_switches(dig)
-                self._show_visit_push(dig)
-                self._show_digest_state(dig)
             self.mgr_guest_combo.set_values(
                 [GUEST_PLACEHOLDER] + [guest_label(g) for g in self.guests])
             self.mgr_guest_combo.set_current(0)
@@ -284,13 +97,15 @@ class ManagersSection:
             name = label(row["name"], bold=True)
             name.setFixedWidth(180)
             cities = Note(row["cities"], "small", wrap=False)
-            cities.setFixedWidth(240)
+            cities.setFixedWidth(200)
             emps = Note(row["employees"], "small", wrap=False)
-            emps.setFixedWidth(130)
+            emps.setFixedWidth(150)
             tid = Note(row["tid"], "small", wrap=False)
             items = [name, cities, emps, tid]
             if row["mismatch"]:
                 items.append(Note("⚠ ФИО ≠ реестру", "danger", wrap=False))
+            if m.get("can_dm") is None:
+                items.append(Note("⚠ не писал боту — ничего не дойдёт", "danger", wrap=False))
             # Тумблеры прямо в строке: «гендиру не нужны 225 карточек в день»
             # решалось тем, что он уносил чат в архив. Сохраняем сразу — форму
             # ради одной галочки открывать незачем.
@@ -463,104 +278,6 @@ class ManagersSection:
             return
         self.bg_task(lambda: self.api("POST", "/admin/manager_delete", {"telegram_id": tid}),
                      lambda _d: (self.toast("Удалён"), self.load_managers()))
-
-    # --- дайджест ---
-    def save_digest(self):
-        t = self.dig_time.get().strip()
-        pt = self.prom_time.get().strip()
-        for v in (t, pt):
-            if not mg.valid_time(v):
-                self.toast("Время в формате ЧЧ:ММ", err=True)
-                return
-        body = mg.digest_body(
-            time=t, enabled=self.dig_enabled.get(), promise_time=pt,
-            promise_enabled=self.prom_enabled.get(), visit_push=self.visit_push_var.get(),
-            owner_known=self.owner_digest_check.isEnabled(),
-            owner_digest=self.owner_digest_var.get(),
-            owner_promise=self.owner_promise_var.get(),
-            xlsx_known=self.digest_xlsx_check.isEnabled(),
-            digest_xlsx=self.digest_xlsx_var.get())
-
-        def done(d):
-            self._show_digest_state(d)
-            self.toast("Настройки сохранены")
-        self.bg_task(lambda: self.api("POST", "/admin/digest_settings", body), done)
-
-    def _show_owner_switches(self, d: dict):
-        """Личные рубильники видны только на сервере, который их знает: на
-        старом чекбоксы гаснут, а не показывают выдуманное состояние."""
-        known = "owner_digest" in d
-        for var, check, key in (
-                (self.owner_digest_var, self.owner_digest_check, "owner_digest"),
-                (self.owner_promise_var, self.owner_promise_check, "owner_promise")):
-            if known:
-                var.set(bool(d.get(key)))
-            check.configure(state="normal" if known else "disabled")
-
-    def _show_visit_push(self, d: dict):
-        if "visit_push" in d:
-            self.visit_push_var.set(bool(d.get("visit_push")))
-            self.visit_push_check.configure(state="normal")
-        else:
-            self.visit_push_check.configure(state="disabled")
-        # На старом сервере галочка гаснет, а не врёт «включено».
-        if "digest_xlsx" in d:
-            self.digest_xlsx_var.set(bool(d.get("digest_xlsx")))
-            self.digest_xlsx_check.configure(state="normal")
-        else:
-            self.digest_xlsx_check.configure(state="disabled")
-
-    def _show_digest_state(self, d: dict):
-        self.dig_out.setText(mg.digest_state_text(d))
-
-    # --- координаты фото ---
-    def _show_geo_state(self, d: dict):
-        self.geo_out.setText(mg.geo_state_text(d))
-        days = d.get("retention_days")
-        if days is not None and not self.geo_days.get().strip():
-            self.geo_days.set(str(days))
-
-    def load_geo_retention(self):
-        self.bg_task(lambda: self.api("GET", "/admin/photo_geo"), self._show_geo_state)
-
-    def save_geo_retention(self):
-        raw = self.geo_days.get().strip()
-        if not raw.isdigit():
-            self.toast("Срок — целое число дней (0 = не убирать)", err=True)
-            return
-
-        def done(d):
-            self._show_geo_state(d)
-            self.toast("Срок хранения сохранён")
-        self.bg_task(lambda: self.api("POST", "/admin/photo_geo",
-                                      {"retention_days": int(raw)}), done)
-
-    def forget_geo(self):
-        emp = self.geo_emp.get().strip()
-        cid = self.geo_cid.get().strip()
-        before = self.geo_before.get().strip()
-        # Спрашиваем всегда: стирание необратимо, а «все снимки» без фильтров —
-        # это вся доказательная база выездов разом.
-        if not self.ask_yes_no("Стереть координаты", mg.geo_confirm_text(emp, cid, before)):
-            return
-
-        def done(d):
-            self._show_geo_state(d)
-            self.toast(f"Стёрто координат: {d.get('cleared', 0)}")
-        self.bg_task(lambda: self.api("POST", "/admin/photo_geo",
-                                      {"forget": {"employee": emp, "contract": cid,
-                                                  "before": before}}), done)
-
-    # --- доставка ---
-    def load_delivery(self):
-        def done(d):
-            self.delivery_kvs.set_pairs(mg.delivery_pairs(d))
-            self.delivery_out.setText("\n".join(mg.delivery_lines(d)))
-            # рубильник и подпись — из того же ответа
-            self._show_owner_switches(d)
-            self._show_visit_push(d)
-            self._show_digest_state(d)
-        self.bg_task(lambda: self.api("GET", "/admin/digest_settings"), done)
 
     def push_test(self, tid: int):
         """Реальная тестовая отправка безличного текста руководителю."""

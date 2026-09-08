@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from .text import fmt_n
 
-WEIGHTS = (("debt", "Долг", 50), ("cluster", "Кластер", 30), ("fresh", "Свежесть", 20))
+# Долг и свежесть считает модель, и ползунки по ним ни на что не влияли — но
+# крутились. Оставлен один, который влияет: кластер (стоимость объезда).
+WEIGHTS = (("cluster", "Кластер", 30),)
+_FIXED = {"debt": 50, "fresh": 20}
 
 # «Ожидание» — главная колонка: сколько денег принесёт выезд. Score оставлен
 # как относительная шкала 0–100 внутри текущей выборки.
@@ -17,9 +20,10 @@ NUMERIC = {"debt", "exp", "visits", "score", "n"}
 
 
 def priority_query(weights: dict, limit: int = 40) -> str:
-    return (f"?w_debt={int(weights['debt'])}"
-            f"&w_cluster={int(weights['cluster'])}"
-            f"&w_fresh={int(weights['fresh'])}&limit={int(limit)}")
+    w = {**_FIXED, **weights}
+    return (f"?w_debt={int(w['debt'])}"
+            f"&w_cluster={int(w['cluster'])}"
+            f"&w_fresh={int(w['fresh'])}&limit={int(limit)}")
 
 
 def cluster_chips(cities: list[dict]) -> list[str]:

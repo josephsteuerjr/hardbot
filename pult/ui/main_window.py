@@ -21,7 +21,7 @@ from ..core.constants import DEFAULT_KEY, DEFAULT_URL
 from ..core.import_flow import ImportFlow
 from ..core.settings import Settings
 from . import dialogs
-from .activity import ActivitySection
+from .channels import ChannelsSection
 from .connection import ConnectionSection
 from .dashboard import DashboardSection
 from .managers import ManagersSection
@@ -33,12 +33,12 @@ from .tasks import TaskRunner
 from .widgets import Button, Note, Toast, label
 
 ICON_PATH = APP_DIR / "icon.png"
-LAZY = {"prio": "load_priority", "activity": "load_activity",
-        "people": "load_roles", "mgrs": "load_managers"}
+LAZY = {"dash": "load_today", "prio": "load_priority", "people": "load_people",
+        "mgrs": "load_managers", "channels": "load_channels"}
 
 
 class Pult(QMainWindow, ImportFlow, DashboardSection, RegistrySection, PrioritySection,
-           PeopleSection, ManagersSection, ActivitySection, ConnectionSection):
+           PeopleSection, ManagersSection, ChannelsSection, ConnectionSection):
     invoke = Signal(object)
 
     def __init__(self, settings: Settings | None = None) -> None:
@@ -111,7 +111,7 @@ class Pult(QMainWindow, ImportFlow, DashboardSection, RegistrySection, PriorityS
         col.setSpacing(0)
         bar = QHBoxLayout()
         bar.setContentsMargins(26, 14, 26, 10)
-        self.sec_title = label("Сводка", "h1")
+        self.sec_title = label("Сегодня", "h1")
         bar.addWidget(self.sec_title)
         bar.addStretch(1)
         self.upd_lbl = Note("", "tiny", wrap=False)

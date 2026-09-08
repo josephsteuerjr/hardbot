@@ -8,8 +8,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import (QAbstractTableModel, QModelIndex, QPoint, QRect, QSize, Qt,
-                            QTimer)
+from PySide6.QtCore import (QAbstractTableModel, QModelIndex, QPoint, QRect, QSize,
+                            QSortFilterProxyModel, Qt, QTimer)
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFrame,
                                QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLayout,
@@ -535,6 +535,54 @@ class ChipFlow(QWidget):
         self.updateGeometry()
 
 
+class Bars(QWidget):
+    """Столбики по дням: значение над столбиком, число дня под ним. Выходные
+    бледнее, последний день (сегодня) — зелёный."""
+
+    H = 96
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._items: list[dict] = []
+        self.setFixedHeight(self.H)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_series(self, items: list[dict]) -> None:
+        self._items = list(items or [])
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        items = self._items
+        if not items:
+            p.setPen(QColor(theme.MUTED))
+            p.drawText(self.rect(), int(Qt.AlignmentFlag.AlignCenter), "нет данных")
+            return
+        w, h = self.width(), self.height()
+        top, bottom = 16, 18
+        gap = 6
+        bw = max(4, (w - gap * (len(items) - 1)) / len(items))
+        mx = max(1, max(int(it.get("value") or 0) for it in items))
+        p.setFont(theme.app_font(theme.TINY_PT))
+        for i, it in enumerate(items):
+            v = int(it.get("value") or 0)
+            x = i * (bw + gap)
+            bh = max(2, (h - top - bottom) * v / mx)
+            color = (theme.SUCCESS if i == len(items) - 1
+                     else "#C9C3B6" if it.get("weekend") else theme.ACCENT)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(color))
+            p.drawRoundedRect(QRect(int(x), int(h - bottom - bh), int(bw), int(bh)), 3, 3)
+            p.setPen(QColor(theme.TEXT if v else theme.MUTED))
+            if v:
+                p.drawText(QRect(int(x) - 8, int(h - bottom - bh) - 15, int(bw) + 16, 14),
+                           int(Qt.AlignmentFlag.AlignCenter), str(v))
+            p.setPen(QColor(theme.MUTED))
+            p.drawText(QRect(int(x) - 8, h - bottom + 2, int(bw) + 16, 14),
+                       int(Qt.AlignmentFlag.AlignCenter), str(it.get("label") or ""))
+
+
 class Meter(QWidget):
     """Полоса покрытия: 8 px, без градиентов."""
 
@@ -588,6 +636,11 @@ class RowsModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.ToolTipRole:
             row = self.rows[index.row()]
             return "" if index.column() >= len(row) else str(row[index.column()])
+        if role == Qt.ItemDataRole.UserRole:
+            # ключ сортировки: «1 234» и «12%» сортируются как числа, остальное —
+            # как текст без учёта регистра
+            row = self.rows[index.row()]
+            return sort_key(None if index.column() >= len(row) else row[index.column()])
         return None
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):  # noqa: N802
@@ -601,9 +654,23 @@ class RowsModel(QAbstractTableModel):
         self.endResetModel()
 
 
+def sort_key(value):
+    """Число — числом, строка — строкой без регистра, пусто — в конец."""
+    if value is None or value == "":
+        return (2, 0.0, "")
+    if isinstance(value, (int, float)):
+        return (0, float(value), "")
+    s = str(value).replace("\u00a0", "").replace(" ", "").rstrip("%₽")
+    try:
+        return (0, float(s.replace(",", ".")), "")
+    except ValueError:
+        return (1, 0.0, str(value).casefold())
+
+
 class Table(QTableView):
-    """Таблица на модели. columns: ((ключ, заголовок, ширина), …);
-    numeric — ключи с выравниванием вправо; stretch — ключи, тянущиеся по ширине."""
+    """Таблица на модели с сортировкой кликом по заголовку и поиском по всем
+    колонкам. columns: ((ключ, заголовок, ширина), …); numeric — ключи с
+    выравниванием вправо; stretch — ключи, тянущиеся по ширине."""
 
     ROW_H = 28
 
@@ -614,7 +681,15 @@ class Table(QTableView):
         self.visible_rows = visible_rows
         numeric_idx = {i for i, c in enumerate(columns) if c[0] in set(numeric)}
         self.model_ = RowsModel([c[1] for c in columns], numeric_idx, self)
-        self.setModel(self.model_)
+        self.proxy = QSortFilterProxyModel(self)
+        self.proxy.setSourceModel(self.model_)
+        self.proxy.setSortRole(Qt.ItemDataRole.UserRole)
+        self.proxy.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.proxy.setFilterKeyColumn(-1)
+        self.setModel(self.proxy)
+        self.setSortingEnabled(True)
+        self.proxy.sort(-1)              # исходный порядок, пока не кликнули
+        self._on_select = None
         self.verticalHeader().setVisible(False)
         self.verticalHeader().setDefaultSectionSize(self.ROW_H)
         self.setShowGrid(False)
@@ -639,8 +714,30 @@ class Table(QTableView):
 
     def set_rows(self, rows: list[tuple]) -> None:
         self.model_.set_rows(rows)
-        n = min(max(len(rows), 2), self.visible_rows)
+        self._fit(len(rows))
+
+    def _fit(self, n_rows: int) -> None:
+        n = min(max(n_rows, 2), self.visible_rows)
         self.setFixedHeight(self.horizontalHeader().sizeHint().height() + n * self.ROW_H + 4)
+
+    def set_filter(self, text: str) -> None:
+        self.proxy.setFilterFixedString((text or "").strip())
+        self._fit(self.proxy.rowCount())
+
+    def visible_count(self) -> int:
+        return self.proxy.rowCount()
+
+    def selected_row(self) -> tuple | None:
+        idx = self.currentIndex()
+        if not idx.isValid():
+            return None
+        src = self.proxy.mapToSource(idx)
+        return self.model_.rows[src.row()] if 0 <= src.row() < len(self.model_.rows) else None
+
+    def on_select(self, fn) -> None:
+        """fn(row | None) при смене выбранной строки."""
+        self._on_select = fn
+        self.selectionModel().currentRowChanged.connect(lambda _c, _p: fn(self.selected_row()))
 
     def clear(self) -> None:
         self.set_rows([])

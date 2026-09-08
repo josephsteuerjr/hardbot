@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import country_scope
 import db
@@ -971,3 +971,96 @@ def daily_report_xlsx(mgr: dict, on_date: str,
 
 def daily_report_filename(on_date: str) -> str:
     return f"Сводка выездов {on_date}.xlsx"
+
+
+# --- Экран «Сегодня» в пульте --------------------------------------------------
+# Пульт показывал состояние склада (сколько загружено), а не работы (сколько
+# сделано). Этот срез — про день: выезды сегодня/вчера/за неделю, столбики,
+# кто молчит, дошли ли карточки, когда обогащали.
+def today_overview(on_date: str | None = None, days: int = 14) -> dict:
+    on_date = on_date or today_iso()
+    end = db._as_date(on_date)
+    start = end - timedelta(days=days - 1)
+    employees = [e["employee"] for e in db.employees_in_registry()]
+    # выезды по дням — человек-день по всей базе, одним запросом
+    with db.connect() as conn:
+        per_day = {r["d"]: r["n"] for r in conn.execute(
+            "SELECT substr(created_at,1,10) d, COUNT(DISTINCT contract_id) n FROM visits "
+            "WHERE substr(created_at,1,10) BETWEEN ? AND ? GROUP BY d",
+            (start.isoformat(), end.isoformat()))}
+        reasons = {(r["reason"] or "(нет)"): r["n"] for r in conn.execute(
+            "SELECT unassigned_reason reason, COUNT(*) n FROM clients "
+            "WHERE IFNULL(TRIM(responsible),'')='' GROUP BY unassigned_reason")}
+        ledger = conn.execute(
+            "SELECT COUNT(*) cells, COUNT(DISTINCT contract_id) contracts, "
+            "MAX(delivered_at) last FROM enrichment_ledger").fetchone()
+        total_clients = conn.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
+        visited = conn.execute(
+            "SELECT COUNT(*) FROM clients WHERE IFNULL(TRIM(bot_visit_at),'')<>''").fetchone()[0]
+    series = []
+    d = start
+    while d <= end:
+        iso = d.isoformat()
+        series.append({"date": iso, "day": d.day, "label": _short_date(d),
+                       "weekend": d.weekday() >= 5, "visits": per_day.get(iso, 0)})
+        d += timedelta(days=1)
+    yesterday = (end - timedelta(days=1)).isoformat()
+    week_from = (end - timedelta(days=6)).isoformat()
+
+    rows, silent = [], []
+    activity = {a["employee"]: a for a in db.activity_stats()}
+    for emp in employees:
+        r = _employee_stats(emp, on_date, on_date)
+        assigned = db._group_persons(db.contracts_of_responsible(emp))
+        act = activity.get(emp) or {}
+        row = {"employee": emp, "today": r["visits"], "paid": r["paid"],
+               "promised": r["promised"], "with_photo": r["with_photo"],
+               "overdue": r["overdue"], "portfolio": len(assigned),
+               "last_activity": act.get("last_activity"),
+               "idle_days": act.get("idle_days"),
+               "entry": act.get("entry", "none"), "bound": bool(act)}
+        rows.append(row)
+        if r["visits"] == 0 and assigned:
+            silent.append(row)
+    silent.sort(key=lambda x: (x["idle_days"] is None, -(x["idle_days"] or 0), x["employee"]))
+    delivery = db.push_summary(on_date)
+    by_kind = delivery.get("by_kind") or {}
+
+    def kind_counts(kind):
+        st = by_kind.get(kind) or {}
+        return {"sent": st.get(db.PUSH_SENT, 0),
+                "failed": st.get(db.PUSH_FAILED, 0) + st.get(db.PUSH_BLOCKED, 0),
+                "skipped": sum(v for k, v in st.items() if str(k).startswith("skipped"))}
+
+    managers = db.list_managers()
+    return {
+        "date": on_date, "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "days": series,
+        "kpi": {
+            "visits_today": per_day.get(on_date, 0),
+            "visits_yesterday": per_day.get(yesterday, 0),
+            "visits_7d": sum(x["visits"] for x in series if x["date"] >= week_from),
+            "employees_total": len(rows),
+            "employees_active": sum(1 for x in rows if x["today"]),
+            "paid_today": sum(x["paid"] for x in rows),
+            "promised_today": sum(x["promised"] for x in rows),
+            "with_photo_today": sum(x["with_photo"] for x in rows),
+            "overdue": sum(x["overdue"] for x in rows),
+        },
+        "rows": rows,
+        "silent": silent,
+        "delivery": {"visit": kind_counts(db.PUSH_VISIT),
+                     "digest": kind_counts(db.PUSH_DIGEST),
+                     "promise": kind_counts(db.PUSH_PROMISE),
+                     "report_chat": kind_counts(db.PUSH_REPORT_CHAT),
+                     "blocked": delivery.get("blocked") or [],
+                     "last_error": delivery.get("last_error")},
+        "enrichment": {"ledger_cells": ledger["cells"] or 0,
+                       "ledger_contracts": ledger["contracts"] or 0,
+                       "last_delivered_at": ledger["last"] or ""},
+        "registry": {"clients": total_clients, "visited": visited,
+                     "assigned": total_clients - sum(reasons.values()),
+                     "unassigned": reasons, "employees": len(employees)},
+        "managers": {"total": len(managers),
+                     "no_dm": [m["name"] for m in managers if not m.get("can_dm")]},
+    }

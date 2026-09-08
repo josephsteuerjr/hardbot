@@ -3349,6 +3349,15 @@ async def _admin_priority(request: web.Request) -> web.Response:
     return web.json_response(res)
 
 
+async def _admin_today(request: web.Request) -> web.Response:
+    """Экран «Сегодня» в пульте: выезды по дням, кто молчит, доставка,
+    обогащение, реестр — одной ручкой, чтобы владелец не ходил по SSH."""
+    _admin(request)
+    data = await asyncio.get_event_loop().run_in_executor(
+        None, digest_data.today_overview)
+    return web.json_response(data)
+
+
 async def _admin_activity(request: web.Request) -> web.Response:
     """Активность работников (визиты/метки за 7/30 дней, простой) — вкладка
     «Активность» в пульте. Считается на лету из visits/markers по created_at."""
@@ -3792,6 +3801,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/admin/geocode", _admin_geocode)
     app.router.add_get("/admin/priority", _admin_priority)
     app.router.add_get("/admin/activity", _admin_activity)
+    app.router.add_get("/admin/today", _admin_today)
     app.router.add_post("/admin/notify", _admin_notify)
     app.router.add_post("/admin/restart", _admin_restart)
     app.router.add_post("/admin/reset", _admin_reset)

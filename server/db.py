@@ -3117,6 +3117,26 @@ def activity_stats() -> list[dict]:
             "SELECT responsible, SUM(COALESCE(photos_count,0)) ph FROM clients "
             "WHERE responsible IS NOT NULL AND TRIM(responsible) <> '' GROUP BY responsible")}
         binds = conn.execute("SELECT * FROM agent_bind ORDER BY employee").fetchall()
+        # Чем и когда человек заходил — то, что 08.09.2026 пришлось доставать
+        # из базы по SSH, чтобы ответить на «у Хайдарова тормозит телефон».
+        today_iso = today.isoformat()
+        users = {r["telegram_id"]: r for r in conn.execute(
+            "SELECT telegram_id, last_seen, shell_version FROM users")}
+        pwa = {r["telegram_id"] for r in conn.execute(
+            "SELECT DISTINCT telegram_id FROM app_tokens WHERE expires_at >= ?",
+            (datetime.now().isoformat(timespec="seconds"),))}
+        vis_today = {r["agent_id"]: r["n"] for r in conn.execute(
+            "SELECT agent_id, COUNT(DISTINCT contract_id) n FROM visits "
+            "WHERE substr(created_at,1,10)=? GROUP BY agent_id", (today_iso,))}
+        photos7 = {r["telegram_id"]: r["n"] for r in conn.execute(
+            "SELECT telegram_id, COUNT(*) n FROM photo_geo "
+            "WHERE substr(created_at,1,10) >= ? GROUP BY telegram_id", (cut7,))}
+        portfolio = {r["responsible"]: (r["contracts"], r["persons"]) for r in conn.execute(
+            "SELECT responsible, COUNT(*) contracts, "
+            "COUNT(DISTINCT client || '|' || IFNULL(birth_date,'') || '|' || "
+            "CASE WHEN IFNULL(birth_date,'')='' THEN IFNULL(address,'') ELSE '' END) persons "
+            "FROM clients WHERE responsible IS NOT NULL AND TRIM(responsible) <> '' "
+            "GROUP BY responsible")}
     # ФИО, которые реально встречаются в реестре как ответственные. Привязка на
     # имя вне этого списка — осиротевшая: сотрудника переименовали, и портфель
     # обнулился молча.
@@ -3143,6 +3163,20 @@ def activity_stats() -> list[dict]:
             # осиротевшей привязки не видно ни на одном экране. Отдаём признак,
             # чтобы пульт мог показать её человеку.
             "orphaned": b["employee"] not in known,
+            # --- вход и портфель (для экрана «Сотрудники» в пульте) ---
+            "last_seen": (users[b["telegram_id"]]["last_seen"]
+                          if b["telegram_id"] in users else None),
+            "shell_version": (users[b["telegram_id"]]["shell_version"]
+                              if b["telegram_id"] in users else None),
+            # «pwa» — есть живой токен приложения; «telegram» — заходил, но
+            # только через Телеграм; «none» — ни разу не открывал.
+            "entry": ("pwa" if b["telegram_id"] in pwa
+                      else "telegram" if b["telegram_id"] in users
+                      and users[b["telegram_id"]]["last_seen"] else "none"),
+            "visits_today": vis_today.get(b["telegram_id"], 0),
+            "photos_7d": photos7.get(b["telegram_id"], 0),
+            "portfolio_contracts": portfolio.get(b["employee"], (0, 0))[0],
+            "portfolio_persons": portfolio.get(b["employee"], (0, 0))[1],
         })
     out.sort(key=lambda w: (w["idle_days"] is not None, -(w["idle_days"] or 0), w["employee"]))
     return out

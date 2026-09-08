@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ..core import devices as dv
+from ..core import managers as mg
 from . import dialogs
 from .widgets import Button, Card, Field, Note, Page, Rows, label
 
@@ -43,7 +44,65 @@ class ConnectionSection:
                    Note("формат: цифры : буквы/цифры (≥30 символов)", "tiny", wrap=False),
                    spacing_before=4)
         page.add(tc)
+
+        gc = Card("Координаты фото",
+                  "Точка съёмки — доказательство выезда и одновременно данные о "
+                  "самом сотруднике: у снимка из галереи это чаще всего его домашний "
+                  "адрес. Стереть можно точечно — по сотруднику, договору или дате "
+                  "загрузки; сами фото, их даты и хэши остаются. Автоуборки по "
+                  "умолчанию НЕТ: срок в днях включает её (0 = не убирать).")
+        self.geo_days = Field(width_chars=6)
+        gc.add_row(label("Хранить (дней)", "small"), self.geo_days, 4,
+                   Button("Сохранить срок", self.save_geo_retention, kind="accent"),
+                   Button("Обновить", self.load_geo_retention))
+        self.geo_emp = Field(width_chars=22)
+        self.geo_cid = Field(width_chars=14)
+        self.geo_before = Field(width_chars=12, placeholder="ДД.ММ.ГГГГ")
+        gc.add_row(label("Стереть сейчас:", "small"), 2, label("сотрудник", "small"),
+                   self.geo_emp, 2, label("КД", "small"), self.geo_cid, 2,
+                   label("до даты", "small"), self.geo_before, 4,
+                   Button("Стереть координаты", self.forget_geo), spacing_before=4)
+        self.geo_out = gc.add(Note("", "small"))
+        page.add(gc)
         return page
+
+    # --- координаты фото -------------------------------------------------------
+    def _show_geo_state(self, d: dict):
+        self.geo_out.setText(mg.geo_state_text(d))
+        days = d.get("retention_days")
+        if days is not None and not self.geo_days.get().strip():
+            self.geo_days.set(str(days))
+
+    def load_geo_retention(self):
+        self.bg_task(lambda: self.api("GET", "/admin/photo_geo"), self._show_geo_state)
+
+    def save_geo_retention(self):
+        raw = self.geo_days.get().strip()
+        if not raw.isdigit():
+            self.toast("Срок — целое число дней (0 = не убирать)", err=True)
+            return
+
+        def done(d):
+            self._show_geo_state(d)
+            self.toast("Срок хранения сохранён")
+        self.bg_task(lambda: self.api("POST", "/admin/photo_geo",
+                                      {"retention_days": int(raw)}), done)
+
+    def forget_geo(self):
+        emp = self.geo_emp.get().strip()
+        cid = self.geo_cid.get().strip()
+        before = self.geo_before.get().strip()
+        # Спрашиваем всегда: стирание необратимо, а «все снимки» без фильтров —
+        # это вся доказательная база выездов разом.
+        if not self.ask_yes_no("Стереть координаты", mg.geo_confirm_text(emp, cid, before)):
+            return
+
+        def done(d):
+            self._show_geo_state(d)
+            self.toast(f"Стёрто координат: {d.get('cleared', 0)}")
+        self.bg_task(lambda: self.api("POST", "/admin/photo_geo",
+                                      {"forget": {"employee": emp, "contract": cid,
+                                                  "before": before}}), done)
 
     # --- привязка устройства -------------------------------------------------
     device_fingerprint = staticmethod(dv.device_fingerprint)
