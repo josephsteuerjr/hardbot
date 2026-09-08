@@ -209,3 +209,62 @@ def test_app_map_needs_no_signature_and_returns_geo_far(monkeypatch):
     assert j["employee"] == EMP_A and "alert_m" in j
     assert all("geo_far" in v for v in j["visits"])
     assert resp.headers["Cache-Control"] == "no-store"
+
+
+# --- личные рубильники руководителя ------------------------------------------
+def test_personal_switches_default_to_on_and_survive_a_plain_save():
+    """Включение роли не имеет права молча отобрать уже работающие пуши."""
+    _seed()
+    m = db.get_manager(MGR)
+    assert (m["push_visits"], m["push_digest"], m["push_promises"]) == (True, True, True)
+    db.set_manager_pushes(MGR, {"push_visits": False})
+    db.set_manager(MGR, "Рук", [], [EMP_A, EMP_B])          # обычное «Сохранить»
+    assert db.get_manager(MGR)["push_visits"] is False, "тихое сохранение вернуло пуши"
+    db.set_manager_pushes(MGR, {"push_visits": True})
+
+
+def test_visit_cards_stop_for_a_manager_who_switched_them_off():
+    _seed()
+    assert any(x["telegram_id"] == MGR for x in db.managers_for_employee(EMP_A))
+    db.set_manager_pushes(MGR, {"push_visits": False})
+    assert db.managers_for_employee(EMP_A) == [], "карточки продолжают идти"
+    db.set_manager_pushes(MGR, {"push_visits": True})
+    assert any(x["telegram_id"] == MGR for x in db.managers_for_employee(EMP_A))
+
+
+def test_digest_and_promises_switches_filter_the_broadcast(monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "hardbot_app_switches", Path(web.__file__).with_name("app.py"))
+    botapp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(botapp)
+    _seed()
+    ids = lambda kind: [m["telegram_id"] for m in botapp._digest_targets(kind)]  # noqa: E731
+    assert MGR in ids(db.PUSH_DIGEST) and MGR in ids(db.PUSH_PROMISE)
+    db.set_manager_pushes(MGR, {"push_digest": False})
+    assert MGR not in ids(db.PUSH_DIGEST)
+    assert MGR in ids(db.PUSH_PROMISE), "рубильники независимы"
+    db.set_manager_pushes(MGR, {"push_digest": True})
+
+
+def test_endpoint_touches_only_the_keys_it_was_given(monkeypatch):
+    _seed()
+    db.set_manager_pushes(MGR, {"push_promises": False})
+    asyncio.run(_post_manager({"telegram_id": MGR, "name": "Рук", "cities": [],
+                               "employees": [EMP_A], "direction": ""}, monkeypatch))
+    assert db.get_manager(MGR)["push_promises"] is False, "старый пульт всё переключил"
+    asyncio.run(_post_manager({"telegram_id": MGR, "name": "Рук", "cities": [],
+                               "employees": [EMP_A], "direction": "",
+                               "push_promises": True}, monkeypatch))
+    assert db.get_manager(MGR)["push_promises"] is True
+
+
+def _post_manager(body, monkeypatch):
+    monkeypatch.setattr(web, "_admin", lambda _r: None)
+
+    class _Req:
+        async def json(self):
+            return body
+
+    return web._admin_manager_save(_Req())

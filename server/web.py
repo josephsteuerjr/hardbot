@@ -3404,7 +3404,11 @@ async def _admin_manager_save(request: web.Request) -> web.Response:
     if direction is None:
         prev = db.get_manager(tid)
         direction = (prev or {}).get("direction") or None
-    db.set_manager(tid, name, cities, employees, direction=direction)
+    # Личные рубильники приходят только теми ключами, что прислал пульт:
+    # старый пульт их не шлёт, и «Сохранить» не должно ничего переключать.
+    pushes = {k: bool(body[k]) for k in db.MANAGER_PUSH_KEYS if k in body}
+    db.set_manager(tid, name, cities, employees, direction=direction,
+                   pushes=pushes or None)
     # account — КТО владеет этим telegram_id по данным бота (или null, если бот его
     # не видел). «name» — всего лишь подпись оператора, права получает владелец id;
     # пульт сверяет одно с другим и показывает расхождение сразу, а не через неделю.

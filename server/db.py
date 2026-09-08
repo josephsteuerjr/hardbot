@@ -1005,6 +1005,13 @@ def init_db() -> None:
         rc_cols = {r[1] for r in conn.execute("PRAGMA table_info(report_chats)")}
         if "direction" not in rc_cols:
             conn.execute("ALTER TABLE report_chats ADD COLUMN direction TEXT")
+        # Личные рубильники руководителя. Значение по умолчанию 1: миграция
+        # существующих строк не имеет права молча выключить рассылку.
+        mgr_cols = {r[1] for r in conn.execute("PRAGMA table_info(managers)")}
+        for col in MANAGER_PUSH_KEYS:
+            if col not in mgr_cols:
+                conn.execute(f"ALTER TABLE managers ADD COLUMN {col} "
+                             f"INTEGER NOT NULL DEFAULT 1")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS report_chat_employees (
               chat_id INTEGER,
@@ -1595,6 +1602,12 @@ def _json_list(s) -> list[str]:
     return [str(x).strip() for x in v if str(x).strip()] if isinstance(v, list) else []
 
 
+# Персональные рубильники руководителя. Раньше рубильник был ОДИН на всех
+# (settings.visit_push), и «гендиру не нужны 225 карточек в день» решалось
+# только тем, что он уносил чат в архив. Значение по умолчанию — 1: включение
+# роли не должно молча отбирать уже работающие уведомления.
+MANAGER_PUSH_KEYS = ("push_visits", "push_digest", "push_promises")
+
 DIRECTIONS = {
     "tj": ("Таджикистан", ("Таджикистан",)),
     "uz": ("Узбекистан", ("Узбекистан",)),
@@ -1634,18 +1647,38 @@ def employees_by_direction(direction: str) -> list[str]:
 
 def _manager_dict(r: sqlite3.Row) -> dict:
     keys = r.keys()
-    return {"telegram_id": r["telegram_id"], "name": r["name"] or "",
-            "cities": _json_list(r["cities"]), "employees": _json_list(r["employees"]),
-            "direction": (r["direction"] or "") if "direction" in keys else "",
-            "can_dm": r["can_dm"] if "can_dm" in keys else None}
+    out = {"telegram_id": r["telegram_id"], "name": r["name"] or "",
+           "cities": _json_list(r["cities"]), "employees": _json_list(r["employees"]),
+           "direction": (r["direction"] or "") if "direction" in keys else "",
+           "can_dm": r["can_dm"] if "can_dm" in keys else None}
+    for key in MANAGER_PUSH_KEYS:
+        out[key] = bool(r[key]) if key in keys and r[key] is not None else True
+    return out
+
+
+def set_manager_pushes(telegram_id: int, pushes: dict) -> None:
+    """Личные рубильники руководителя: {push_visits|push_digest|push_promises: bool}.
+    Ключи, которых нет в словаре, не трогаются."""
+    fields = {k: 1 if pushes[k] else 0 for k in MANAGER_PUSH_KEYS if k in pushes}
+    if not fields:
+        return
+    sets = ", ".join(f"{k}=?" for k in fields)
+    with connect() as conn:
+        conn.execute(f"UPDATE managers SET {sets} WHERE telegram_id=?",
+                     (*fields.values(), telegram_id))
+        conn.commit()
+    reset_role_caches()
 
 
 def set_manager(telegram_id: int, name: str, cities: list[str],
-                employees: list[str], direction: str | None = None) -> None:
+                employees: list[str], direction: str | None = None,
+                pushes: dict | None = None) -> None:
     """Создать/обновить руководителя (upsert по telegram_id). cities — ярлык-подпись
     (свободный ввод), employees — ФИО из реестра (кого он видит в дайджесте).
 
     direction (tj/uz/all) — руководитель НАПРАВЛЕНИЯ: сотрудники считаются живьём.
+    pushes — личные рубильники; None означает «не трогать» (у новой записи
+    остаются значения по умолчанию — всё включено).
     """
     with connect() as conn:
         conn.execute(
@@ -1662,6 +1695,8 @@ def set_manager(telegram_id: int, name: str, cities: list[str],
              date.today().isoformat()),
         )
         conn.commit()
+    if pushes:
+        set_manager_pushes(telegram_id, pushes)
     reset_role_caches()
 
 
@@ -2590,6 +2625,8 @@ def managers_by_employee_index() -> dict[str, list[dict]]:
         else:
             spelled_list = [e for e in (mgr.get("employees") or [])
                             if str(e).strip()]
+        if not mgr.get("push_visits", True):
+            continue          # личный рубильник: карточки визитов ему не нужны
         for spelled in spelled_list:
             key = _name_key(spelled)
             if not key:

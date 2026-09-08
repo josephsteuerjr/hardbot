@@ -77,6 +77,10 @@ OWNER_PUSH_KEYS = {db.PUSH_DIGEST: "owner_digest",
 # рассылку выключал только общий рубильник — вместе со всеми руководителями.
 # Обещания ему по умолчанию не идут: «дайджест только, отдельно».
 OWNER_PUSH_DEFAULTS = {db.PUSH_DIGEST: "1", db.PUSH_PROMISE: "0"}
+# Те же рассылки, но рубильник личный у КАЖДОГО руководителя (колонка в
+# managers), а не один общий на всех.
+MANAGER_PUSH_KEYS = {db.PUSH_DIGEST: "push_digest",
+                     db.PUSH_PROMISE: "push_promises"}
 
 
 def _digest_targets(kind: str | None = None) -> list[dict]:
@@ -96,6 +100,12 @@ def _digest_targets(kind: str | None = None) -> list[dict]:
     if key and ADMIN_ID and not db.push_enabled(
             key, OWNER_PUSH_DEFAULTS.get(kind or "", "1")):
         targets = [m for m in targets if m["telegram_id"] != ADMIN_ID]
+    # Личный рубильник руководителя. Владельца он не касается: у него свои
+    # ключи выше, а записи в managers у него может не быть вовсе.
+    flag = MANAGER_PUSH_KEYS.get(kind or "")
+    if flag:
+        targets = [m for m in targets
+                   if m["telegram_id"] == ADMIN_ID or m.get(flag, True)]
     return targets
 
 

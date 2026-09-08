@@ -205,6 +205,24 @@ def direction_employees_note(code: str) -> str:
             "автоматически, галочки ниже не нужны")
 
 
+# Личные рубильники руководителя: что ему шлём. Порядок — как в строке списка.
+MANAGER_PUSH_SWITCHES = (
+    ("push_visits", "карточки", "карточка по каждому закрытому визиту, сразу"),
+    ("push_digest", "сводка", "книга-сводка в конце дня"),
+    ("push_promises", "обещания", "утренний список просроченных обещаний"),
+)
+
+
+def manager_pushes(m: dict) -> dict:
+    """Состояние рубильников; на старом сервере ключей нет — считаем включённым."""
+    return {key: bool(m.get(key, True)) for key, _t, _h in MANAGER_PUSH_SWITCHES}
+
+
+def pushes_text(m: dict) -> str:
+    on = [title for key, title, _h in MANAGER_PUSH_SWITCHES if m.get(key, True)]
+    return "шлём: " + (" · ".join(on) if on else "ничего")
+
+
 def manager_row(m: dict) -> dict:
     direction = (m.get("direction") or "").strip()
     if direction:
@@ -231,13 +249,18 @@ def emp_chip_text(emp: str, employees: list[dict]) -> str:
 
 
 def manager_body(tid: str, name: str, cities: set[str], employees: set[str],
-                 direction: str = "") -> dict:
+                 direction: str = "", pushes: dict | None = None) -> dict:
     """Тело POST /admin/manager. direction всегда уходит явно: пустая строка
     снимает направление, иначе сервер сохранил бы прежнее (он подставляет
-    старое значение только когда ключа нет вовсе)."""
-    return {"telegram_id": int(tid), "name": (name or "").strip(),
+    старое значение только когда ключа нет вовсе). Рубильники — наоборот:
+    уходят только если их прислали, иначе сервер оставит свои."""
+    body = {"telegram_id": int(tid), "name": (name or "").strip(),
             "cities": sorted(cities), "employees": sorted(employees),
             "direction": (direction or "").strip()}
+    for key, _t, _h in MANAGER_PUSH_SWITCHES:
+        if pushes and key in pushes:
+            body[key] = bool(pushes[key])
+    return body
 
 
 def unknown_account_text(tid: str) -> str:

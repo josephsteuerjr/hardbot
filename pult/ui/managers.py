@@ -291,6 +291,15 @@ class ManagersSection:
             items = [name, cities, emps, tid]
             if row["mismatch"]:
                 items.append(Note("⚠ ФИО ≠ реестру", "danger", wrap=False))
+            # Тумблеры прямо в строке: «гендиру не нужны 225 карточек в день»
+            # решалось тем, что он уносил чат в архив. Сохраняем сразу — форму
+            # ради одной галочки открывать незачем.
+            for key, title, hint in mg.MANAGER_PUSH_SWITCHES:
+                sw = Check(title, m.get(key, True))
+                sw.setToolTip(hint)
+                sw.toggled.connect(
+                    lambda on, t=m["telegram_id"], k=key: self._mgr_push(t, k, on))
+                items.append(sw)
             items += [None,
                       Button("проверить доставку",
                              lambda t=m["telegram_id"]: self.push_test(t)),
@@ -298,6 +307,25 @@ class ManagersSection:
                       Button("удалить", lambda t=m["telegram_id"]: self.mgr_delete(t),
                              kind="danger")]
             self.mgr_list.add_row(*items, stretch=False)
+
+    def _mgr_push(self, tid, key, on):
+        """Один рубильник одного руководителя. При сбое перечитываем список:
+        галочка не имеет права показывать состояние, которого нет на сервере."""
+        m = next((x for x in self.mgrs if str(x["telegram_id"]) == str(tid)), None)
+        if m is None:
+            return
+        m[key] = bool(on)
+        body = mg.manager_body(str(tid), m.get("name") or "",
+                               set(m.get("cities") or []),
+                               set(m.get("employees") or []),
+                               m.get("direction") or "", mg.manager_pushes(m))
+        title = next(t for k, t, _h in mg.MANAGER_PUSH_SWITCHES if k == key)
+        self.bg_task(
+            lambda: self.api("POST", "/admin/manager", body),
+            lambda _d: self.toast(f"{m.get('name') or tid}: {title} "
+                                  f"{'включены' if on else 'выключены'}"),
+            lambda e: (self.toast(f"Не сохранилось: {e}", err=True),
+                       self.load_managers()))
 
     def _render_mgr_chips(self):
         form = self.mgr_form
