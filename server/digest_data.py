@@ -1015,6 +1015,7 @@ def today_overview(on_date: str | None = None, days: int = 14) -> dict:
         assigned = db._group_persons(db.contracts_of_responsible(emp))
         act = activity.get(emp) or {}
         row = {"employee": emp, "country": country.get(emp),
+               "outcomes": r["outcomes"],
                "today": r["visits"], "paid": r["paid"],
                "promised": r["promised"], "with_photo": r["with_photo"],
                "overdue": r["overdue"], "portfolio": len(assigned),
@@ -1043,7 +1044,13 @@ def today_overview(on_date: str | None = None, days: int = 14) -> dict:
         mine = [x for x in rows if x["country"] == spec["code"]]
         if not mine:
             continue
+        outcomes: dict[str, int] = {}
+        for x in mine:
+            for o in x["outcomes"]:
+                outcomes[o["status"]] = outcomes.get(o["status"], 0) + o["n"]
         countries.append({
+            "outcomes": [{"status": s_, "n": n_, "emoji": _st_emoji(s_)}
+                         for s_, n_ in sorted(outcomes.items(), key=lambda kv: (-kv[1], kv[0]))],
             "code": spec["code"], "name": spec["name"], "flag": spec["flag"],
             "employees": len(mine), "active": sum(1 for x in mine if x["today"]),
             "visits_today": sum(x["today"] for x in mine),

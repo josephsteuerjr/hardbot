@@ -102,7 +102,8 @@ def test_today_overview_has_day_series_silent_delivery_and_registry():
         assert e["ledger_cells"] >= 1 and e["last_delivered_at"]
         assert isinstance(d["countries"], list)
         for c in d["countries"]:
-            assert {"code", "name", "employees", "active", "visits_today", "portfolio"} <= set(c)
+            assert {"code", "name", "employees", "active", "visits_today",
+                    "portfolio", "outcomes"} <= set(c)
         json.dumps(d)
     finally:
         _cleanup()

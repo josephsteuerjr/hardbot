@@ -6,7 +6,8 @@ from __future__ import annotations
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from ..core.dashboard import (COUNTRIES, SILENT_COLUMNS, SILENT_NUMERIC, TILES, bars,
-                              country_pairs, country_today_pairs, delivery_note,
+                              country_outcome_chips, country_pairs, country_today_pairs,
+                              delivery_note,
                               delivery_pairs, metric_values, outcome_chips, registry_note,
                               registry_pairs, silent_note, silent_row, tile_values)
 from .widgets import Bars, Button, Card, ChipFlow, KVGrid, Note, Page, Table, label
@@ -123,6 +124,7 @@ class DashboardSection:
         for c in d.get("countries") or []:
             if c.get("code") in self.country_kv:
                 self.country_kv[c["code"]].set_pairs(country_today_pairs(c), cols=5)
+                self.country_results[c["code"]].set_chips(country_outcome_chips(c))
 
     def _silent_link(self):
         row = self.silent_tv.selected_row()
@@ -141,9 +143,12 @@ class DashboardSection:
             c = country_rows.get(code) or {}
             # цифры дня уже стоят из /admin/today — /admin/stats добавляет только
             # исходы; его собственные счётчики по спискам руководителей нули
+            # /admin/stats считает республики по спискам сотрудников у
+            # руководителей, а у направленцев они пусты — цифры и исходы дня
+            # берём из /admin/today, этот ответ нужен только до первой загрузки.
             if not self._today:
                 self.country_kv[code].set_pairs(country_pairs(c))
-            self.country_results[code].set_chips(
-                outcome_chips(c.get("by_result"), "исходов за день пока нет"))
+                self.country_results[code].set_chips(
+                    outcome_chips(c.get("by_result"), "исходов за день пока нет"))
         self.res_chips.set_chips(outcome_chips(d.get("by_result"),
                                                "визитов с исходом пока нет"))

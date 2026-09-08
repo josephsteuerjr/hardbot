@@ -40,6 +40,11 @@ TODAY = {
                  "unassigned": {"absent_from_registry": 2845, "manual": 1295, "recalled": 910},
                  "employees": 29},
     "managers": {"total": 7, "no_dm": []},
+    "countries": [{"code": "tj", "name": "Таджикистан", "flag": "🇹🇯", "employees": 15,
+                   "active": 15, "visits_today": 125, "paid_today": 0, "promised_today": 33,
+                   "portfolio": 2090, "overdue": 35,
+                   "outcomes": [{"status": "Обещает оплатить", "n": 33, "emoji": "✅"},
+                                {"status": "Нет контакта", "n": 12, "emoji": "📵"}]}],
 }
 WORKERS = [
     {"employee": "Актив А.", "kind": "agent", "telegram_id": 1, "visits_7d": 12, "visits_30d": 40,
@@ -107,6 +112,10 @@ def test_today_screen_renders_day_payload(app, window):
     assert "нет в срезе реестра 2 845" in window.registry_note.text()
     assert "4 085 ячеек" in window.registry_note.text()
     assert len(window.day_bars._items) == 9
+    # республики — из /admin/today, а не из /admin/stats (там системные нули)
+    assert dash.country_today_pairs(TODAY["countries"][0])[0] == ("выездов сегодня", 125)
+    assert dash.country_outcome_chips(TODAY["countries"][0])[0] == "✅ Обещает оплатить  33"
+    assert dash.country_outcome_chips({})[0] == "выездов сегодня не было"
 
 
 def test_employees_table_filters_and_sorts(app, window):
