@@ -3379,6 +3379,10 @@ async def _admin_managers(request: web.Request) -> web.Response:
             "promise_time": db.get_setting("promise_time") or "09:30",
             "promise_enabled": db.push_enabled("promise_enabled"),
             "visit_push": db.push_enabled("visit_push"),
+            # Ключ обязан быть и здесь: экран «Руководители» читает настройки
+            # из /admin/managers, а не из /admin/digest_settings, и без него
+            # галочка «сводка книгой» гаснет как «сервер её не знает».
+            "digest_xlsx": db.push_enabled("digest_xlsx"),
             "digest_last_run": db.get_setting("digest_last_run") or "",
             "promise_last_run": db.get_setting("promise_last_run") or "",
             "delivery": db.push_summary(today),

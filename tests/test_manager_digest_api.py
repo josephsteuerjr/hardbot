@@ -268,3 +268,13 @@ def _post_manager(body, monkeypatch):
             return body
 
     return web._admin_manager_save(_Req())
+
+
+def test_managers_screen_carries_the_xlsx_switch(monkeypatch):
+    """Экран «Руководители» читает настройки из /admin/managers: без ключа
+    галочка «сводка книгой» гаснет как «старый сервер»."""
+    _seed()
+    monkeypatch.setattr(web, "_admin", lambda _r: None)
+    req = make_mocked_request("GET", "/admin/managers")
+    j = json.loads(asyncio.run(web._admin_managers(req)).body.decode())
+    assert "digest_xlsx" in j["digest"] and "visit_push" in j["digest"]
