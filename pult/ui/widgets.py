@@ -417,6 +417,11 @@ class Page(QScrollArea):
     def scroll_top(self) -> None:
         self.verticalScrollBar().setValue(0)
 
+    def scroll_to(self, widget: QWidget) -> None:
+        """Показать карточку, лежащую ниже видимой области."""
+        self.inner.layout().activate()
+        self.verticalScrollBar().setValue(max(0, widget.y() - 8))
+
 
 # --- плашки, чипсы, полоса -------------------------------------------------------
 class KVGrid(QWidget):

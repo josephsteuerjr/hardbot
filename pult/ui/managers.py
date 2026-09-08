@@ -14,6 +14,8 @@ from . import dialogs
 from .widgets import (Button, Card, Check, ChipFlow, Combo, Field, KVGrid, Note, Page,
                       Rows, label)
 
+MGR_FORM_TITLE = "Добавить / изменить руководителя"
+
 
 class ChatEmployeesDialog(QDialog):
     """«Чьи визиты постить в эту беседу» — галочки в две колонки."""
@@ -137,7 +139,7 @@ class ManagersSection:
         self.mgr_list.set_empty("Пока никого — добавьте ниже")
         page.add(mc)
 
-        fc = Card("Добавить / изменить руководителя")
+        fc = Card(MGR_FORM_TITLE)
         self.mgr_form_card = fc
         fc.add(label("Кто это (из писавших боту)", "small"))
         self.mgr_guest_combo = Combo(["— никто ещё не писал боту —"], width_chars=58)
@@ -282,8 +284,15 @@ class ManagersSection:
             [(mg.emp_chip_text(e, self.mgr_emps), e in form["employees"],
               lambda e=e: self._mgr_toggle_emp(e)) for e in emps]
             or ["сотрудников в реестре нет — импортируйте реестр"])
-        self.mgr_emp_hint.setText(
-            f"выбрано: {len(form['employees'])}" if form["employees"] else "")
+        # У руководителя направления состав считает сервер: галочки гаснут, а
+        # подсказка про это НЕ затирается счётчиком «выбрано».
+        code = self._mgr_direction()
+        self.mgr_emp_chips.setEnabled(not code)
+        if code:
+            self.mgr_emp_hint.setText(mg.direction_employees_note(code))
+        else:
+            self.mgr_emp_hint.setText(
+                f"выбрано: {len(form['employees'])}" if form["employees"] else "")
 
     def _mgr_pick_guest(self, *_args):
         """Из выбранного аккаунта берём и id, И имя.
@@ -338,8 +347,13 @@ class ManagersSection:
         self.mgr_tid.set(str(tid))
         self.mgr_name.set(m.get("name") or "")
         self.mgr_direction.set_current(mg.direction_index(m.get("direction") or ""))
-        self._mgr_direction_changed()
         self._render_mgr_chips()
+        # Форма — в самом низу длинной страницы. Без прокрутки клик по
+        # «изменить» выглядит так, будто ничего не произошло.
+        who = m.get("name") or str(tid)
+        self.mgr_form_card.title.setText(f"Изменить руководителя · {who}")
+        self.pages["mgrs"].scroll_to(self.mgr_form_card)
+        self.toast(f"Форма заполнена: {who} — правь и нажми «Сохранить руководителя»")
 
     def _mgr_form_reset(self):
         self.mgr_form = {"tid": "", "cities": set(), "employees": set()}
@@ -348,15 +362,14 @@ class ManagersSection:
         self.mgr_city_add.set("")
         self.mgr_guest_combo.set_current(0)
         self.mgr_direction.set_current(0)
-        self._mgr_direction_changed()
+        self.mgr_form_card.title.setText(MGR_FORM_TITLE)
         self._render_mgr_chips()
 
     def _mgr_direction(self) -> str:
         return mg.direction_code(self.mgr_direction.current())
 
     def _mgr_direction_changed(self, *_args):
-        code = self._mgr_direction()
-        self.mgr_emp_hint.setText(mg.direction_employees_note(code))
+        self._render_mgr_chips()
 
     def save_manager(self):
         tid = self.mgr_tid.get().strip()
