@@ -89,6 +89,13 @@ def delivery_note(d: dict) -> str:
     return "\n".join(parts) or "Сбоев доставки сегодня нет."
 
 
+def country_today_pairs(c: dict) -> list[tuple[str, object]]:
+    return [("выездов сегодня", c.get("visits_today")),
+            ("в работе", f"{fmt_n(c.get('active'))} / {fmt_n(c.get('employees'))}"),
+            ("обещают", c.get("promised_today")), ("просрочено", c.get("overdue")),
+            ("должников закреплено", c.get("portfolio"))]
+
+
 def registry_pairs(d: dict) -> list[tuple[str, object]]:
     r = d.get("registry") or {}
     return [("договоров", r.get("clients")), ("закреплено", r.get("assigned")),

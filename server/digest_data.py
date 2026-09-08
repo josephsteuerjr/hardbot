@@ -1009,11 +1009,13 @@ def today_overview(on_date: str | None = None, days: int = 14) -> dict:
 
     rows, silent = [], []
     activity = {a["employee"]: a for a in db.activity_stats()}
+    country = _employee_country_index()
     for emp in employees:
         r = _employee_stats(emp, on_date, on_date)
         assigned = db._group_persons(db.contracts_of_responsible(emp))
         act = activity.get(emp) or {}
-        row = {"employee": emp, "today": r["visits"], "paid": r["paid"],
+        row = {"employee": emp, "country": country.get(emp),
+               "today": r["visits"], "paid": r["paid"],
                "promised": r["promised"], "with_photo": r["with_photo"],
                "overdue": r["overdue"], "portfolio": len(assigned),
                "last_activity": act.get("last_activity"),
@@ -1033,9 +1035,27 @@ def today_overview(on_date: str | None = None, days: int = 14) -> dict:
                 "skipped": sum(v for k, v in st.items() if str(k).startswith("skipped"))}
 
     managers = db.list_managers()
+    # Республики — по стране кейсов, как у направлений. Старая «Сводка» брала
+    # их из списков руководителей, а у направленцев списки пусты — и карточка
+    # показывала нули при 29 работающих людях.
+    countries = []
+    for spec in country_scope.COUNTRIES:
+        mine = [x for x in rows if x["country"] == spec["code"]]
+        if not mine:
+            continue
+        countries.append({
+            "code": spec["code"], "name": spec["name"], "flag": spec["flag"],
+            "employees": len(mine), "active": sum(1 for x in mine if x["today"]),
+            "visits_today": sum(x["today"] for x in mine),
+            "paid_today": sum(x["paid"] for x in mine),
+            "promised_today": sum(x["promised"] for x in mine),
+            "portfolio": sum(x["portfolio"] for x in mine),
+            "overdue": sum(x["overdue"] for x in mine),
+        })
     return {
         "date": on_date, "generated_at": datetime.now().isoformat(timespec="seconds"),
         "days": series,
+        "countries": countries,
         "kpi": {
             "visits_today": per_day.get(on_date, 0),
             "visits_yesterday": per_day.get(yesterday, 0),

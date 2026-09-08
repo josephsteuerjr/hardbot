@@ -5,7 +5,7 @@ from __future__ import annotations
 from .text import fmt_n
 
 ACTIVITY_COLUMNS = (
-    ("emp", "Сотрудник", 180), ("role", "Роль", 66), ("entry", "Вход", 74),
+    ("emp", "Сотрудник", 180), ("role", "Роль", 78), ("entry", "Вход", 74),
     ("shell", "Обол.", 52), ("seen", "Последний вход", 112),
     ("persons", "Должн.", 60), ("contracts", "Догов.", 60),
     ("today", "Сегодня", 62), ("v7", "7д", 44), ("v30", "30д", 46),

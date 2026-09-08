@@ -127,7 +127,7 @@ class ChannelsSection:
                 self._show_owner_switches(d)
                 self._show_visit_push(d)
                 self._show_digest_state(d)
-                self.delivery_kvs.set_pairs(mg.delivery_pairs(d))
+                self.delivery_kvs.set_pairs(mg.delivery_pairs(d), cols=2)
                 self.delivery_out.setText("\n".join(mg.delivery_lines(d)))
             self.chats_refresh()
         self.bg_task(lambda: self.api("GET", "/admin/digest_settings"), done)
@@ -183,7 +183,7 @@ class ChannelsSection:
     # --- доставка ---
     def load_delivery(self):
         def done(d):
-            self.delivery_kvs.set_pairs(mg.delivery_pairs(d))
+            self.delivery_kvs.set_pairs(mg.delivery_pairs(d), cols=2)
             self.delivery_out.setText("\n".join(mg.delivery_lines(d)))
             self._show_owner_switches(d)
             self._show_visit_push(d)
