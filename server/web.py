@@ -2468,6 +2468,69 @@ async def _manager_promises(request: web.Request) -> web.Response:
                           **data})
 
 
+def _stats_range_q(request: web.Request) -> dict:
+    """Окно статистики из query: preset+shift либо from/to (+shift). Кривая
+    дата или сдвиг — 400, как и у _manager_date: клиент тогда откатывается на
+    «сегодня», а не показывает пустой экран."""
+    q = request.query
+    try:
+        shift = int(q.get("shift") or 0)
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text="shift")
+    frm, to = (q.get("from") or "").strip(), (q.get("to") or "").strip()
+    if (frm and db._as_date(frm) is None) or (to and db._as_date(to) is None):
+        raise web.HTTPBadRequest(text="date")
+    return digest_data.stats_range(q.get("preset"), shift, frm or None, to or None)
+
+
+def _stats_envelope(mgr, team, rng, uid) -> dict:
+    """Конверт статистики: дата/соседи — по концу окна, чтобы карточка
+    человека и карта дня из этого экрана открывались теми же ручками."""
+    today = rng["today"]
+    return _manager_envelope(mgr, team, rng["to"], today, rng["prev"]["to"],
+                             None if rng["to"] >= today else rng["next"]["to"], uid)
+
+
+async def _manager_stats(request: web.Request) -> web.Response:
+    uid, mgr, team = _manager_gate(request)
+    rng = _stats_range_q(request)
+    data = digest_data.stats_data(mgr, rng, employees=team)
+    db.audit_access(uid, "digest_view",
+                    detail=f"stats {rng['from']}..{rng['to']} team={len(team)} "
+                           f"visits={data['totals']['visits']}")
+    return _manager_json({**_stats_envelope(mgr, team, rng, uid), **data})
+
+
+async def _manager_stats_employee(request: web.Request) -> web.Response:
+    uid, mgr, team = _manager_gate(request)
+    rng = _stats_range_q(request)
+    emp = _manager_employee_q(request, team)
+    data = digest_data.stats_employee_data(mgr, rng, emp, employees=team)
+    if data is None:
+        raise web.HTTPNotFound(text="employee")
+    reps = ",".join(c["rep"] for c in data["cases"][:50])
+    db.audit_access(uid, "digest_view", target=emp,
+                    detail=f"stats_employee {rng['from']}..{rng['to']} "
+                           f"n={len(data['cases'])} reps={reps}")
+    return _manager_json({**_stats_envelope(mgr, team, rng, uid), **data})
+
+
+async def _manager_stats_xlsx(request: web.Request) -> web.Response:
+    """Та же статистика книгой Excel. Токен — только в заголовке (как у фото):
+    ссылка с токеном осела бы в истории браузера."""
+    uid, mgr, team = _manager_gate(request)
+    rng = _stats_range_q(request)
+    body = digest_data.stats_xlsx(mgr, rng, employees=team)
+    db.audit_access(uid, "digest_export",
+                    detail=f"stats.xlsx {rng['from']}..{rng['to']} team={len(team)}")
+    return web.Response(
+        body=body,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition":
+                 f"attachment; filename=stats_{rng['from']}_{rng['to']}.xlsx",
+                 "Cache-Control": "no-store"})
+
+
 async def _manager_app_map_data(request: web.Request) -> web.Response:
     """Карта дня ВНУТРИ приложения: авторизация сессией, подпись не нужна.
     Подписанный /manager/map_data остаётся для телеграм-кнопки."""
@@ -3726,6 +3789,9 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/manager/map_data", _manager_app_map_data)
     app.router.add_get("/api/manager/photos", _manager_photos)
     app.router.add_get("/api/manager/photo", _manager_photo_file)
+    app.router.add_get("/api/manager/stats", _manager_stats)
+    app.router.add_get("/api/manager/stats_employee", _manager_stats_employee)
+    app.router.add_get("/api/manager/stats.xlsx", _manager_stats_xlsx)
     app.router.add_get("/api/bootstrap", _bootstrap)
     app.router.add_get("/api/person", _person)
     app.router.add_get("/api/cards", _cards)

@@ -17,12 +17,14 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta
 
 import country_scope
 import db
 import debt
 import photostore
+from i18n import tf
 
 _MONTHS = ["", "января", "февраля", "марта", "апреля", "мая", "июня", "июля",
            "августа", "сентября", "октября", "ноября", "декабря"]
@@ -364,7 +366,9 @@ def _person_payload(p: dict, on_date: str) -> dict:
     for key in _visit_keys():
         val = pick(key)
         raw = rawv(key)
-        visit.append({"key": key, "value": val,
+        # title — подпись поля: без неё карточка была столбиком голых значений
+        # («3 лицо», «Ждём», «17512»), и что есть что — угадывай.
+        visit.append({"key": key, "value": val, "title": tf(key, "ru"),
                       "registry": raw if (raw and val and raw != val) else None})
 
     comment = pick("visit_comment") or pick("call_comment")
@@ -418,6 +422,13 @@ def person_data(mgr: dict, on_date: str, employee: str, rep: str,
         return None
     persons = db.persons_processed(employee, on_date)
     p = next((x for x in persons if x["rep"] == rep), None)
+    if p is None:
+        # Экран статистики ведёт в карточку и по ПРОШЛОМУ выезду: человек, к
+        # которому с тех пор съездили ещё раз, в persons_processed того дня уже
+        # не значится. Карточка показывает текущее состояние — снимок сильнее.
+        rows = db.person_contracts(rep)
+        if rows and (rows[0]["responsible"] or "") == employee:
+            p = next(iter(db._group_persons(rows)), None)
     if p is None:
         return None
     return _person_payload(p, on_date)
@@ -496,3 +507,318 @@ def period_data(mgr: dict, on_date: str, days: int = 7,
         "employees": sorted(rows, key=lambda r: (-r["persons"], r["employee"].lower())),
         "note": "человек попадает в период один раз — по дате последнего выезда",
     }
+
+
+# --- ЭКРАН 6: статистика за произвольный период ------------------------------
+# Считается по ЖУРНАЛУ выездов (db.visits), а не по последнему снимку: человек,
+# к которому съездили 2-го и 9-го, виден в оба дня, каждый — со своим
+# результатом. Исход дня берётся из записи журнала (текст web._save «Статус: …;
+# Договорённость: …;»); для последнего выезда человека — из доказанного снимка,
+# в котором живут и принятые офисные правки.
+_MONTHS_SHORT = ["", "янв", "фев", "мар", "апр", "мая", "июн", "июл",
+                 "авг", "сен", "окт", "ноя", "дек"]
+_PAYLOAD_STATUS = re.compile(r"Статус:\s*(.*?);\s*Договорённость:\s*(.*?);", re.S)
+STATS_PRESETS = ("today", "yesterday", "7d", "30d", "month", "custom")
+_PRESET_DAYS = {"today": 1, "7d": 7, "30d": 30}
+STATS_MAX_DAYS = 366
+OUTCOME_PAID = "Оплачен"
+OUTCOME_PROMISE = "Обещает оплатить"
+
+
+def _short_date(d: date) -> str:
+    return f"{d.day} {_MONTHS_SHORT[d.month]}"
+
+
+def range_label(d_from: date, d_to: date) -> str:
+    if d_from == d_to:
+        return f"{d_from.day} {_MONTHS[d_from.month]}"
+    if (d_from.year, d_from.month) == (d_to.year, d_to.month):
+        return f"{d_from.day}–{d_to.day} {_MONTHS[d_from.month]}"
+    if d_from.year != d_to.year:
+        return f"{_short_date(d_from)} {d_from.year} – {_short_date(d_to)} {d_to.year}"
+    return f"{_short_date(d_from)} – {_short_date(d_to)}"
+
+
+def _month_shift(d: date, n: int) -> date:
+    """Первое число месяца, отстоящего на n месяцев от месяца d."""
+    m = d.month - 1 + n
+    return date(d.year + m // 12, m % 12 + 1, 1)
+
+
+def stats_range(preset: str | None, shift: int = 0, frm: str | None = None,
+                to: str | None = None, today: date | None = None) -> dict:
+    """Окно статистики. Даты считает СЕРВЕР: клиент шлёт только пресет и число
+    сдвигов (или две строки из полей «с/по») и ни разу не строит дату сам —
+    контейнер живёт по UTC, телефон руководителя по +3/+5.
+
+    today/7d/30d — окно, прикнутое к сегодня, shift двигает его на свою длину
+    (в будущее — нет). yesterday — синоним today со сдвигом −1. month —
+    календарный месяц, shift в месяцах. custom — как ввели, не длиннее
+    STATS_MAX_DAYS; сдвиг применяется сразу и в ответе обнуляется."""
+    today = today or db._as_date(today_iso())
+    preset = preset if preset in STATS_PRESETS else None
+    lo = db._as_date(frm) if frm else None
+    hi = db._as_date(to) if to else None
+    try:
+        shift = max(-1000, min(1000, int(shift or 0)))
+    except (TypeError, ValueError):
+        shift = 0
+    if preset == "custom" or (preset is None and (lo or hi)):
+        preset = "custom"
+        lo = lo or hi or today
+        hi = hi or lo
+        if lo > hi:
+            lo, hi = hi, lo
+        if (hi - lo).days + 1 > STATS_MAX_DAYS:
+            lo = hi - timedelta(days=STATS_MAX_DAYS - 1)
+        n = (hi - lo).days + 1
+        lo, hi = lo + timedelta(days=n * shift), hi + timedelta(days=n * shift)
+        shift = 0
+    elif preset == "month":
+        shift = min(shift, 0)
+        lo = _month_shift(today.replace(day=1), shift)
+        hi = _month_shift(lo, 1) - timedelta(days=1)
+    else:
+        if preset == "yesterday":
+            preset, shift = "today", shift - 1
+        preset = preset or "today"
+        shift = min(shift, 0)
+        n = _PRESET_DAYS[preset]
+        hi = today + timedelta(days=n * shift)
+        lo = hi - timedelta(days=n - 1)
+    days = (hi - lo).days + 1
+
+    def window(k: int) -> tuple[date, date]:
+        if preset == "month":
+            f = _month_shift(lo, k)
+            return f, _month_shift(f, 1) - timedelta(days=1)
+        return lo + timedelta(days=days * k), hi + timedelta(days=days * k)
+
+    p_lo, p_hi = window(-1)
+    n_lo, n_hi = window(1)
+    return {
+        "preset": preset, "shift": shift,
+        "from": lo.isoformat(), "to": hi.isoformat(), "days": days,
+        "label": range_label(lo, hi), "today": today.isoformat(),
+        "is_today": lo == hi == today,
+        "prev": {"from": p_lo.isoformat(), "to": p_hi.isoformat()},
+        "next": None if hi >= today else {"from": n_lo.isoformat(),
+                                          "to": n_hi.isoformat()},
+    }
+
+
+def _range_days(rng: dict) -> list[dict]:
+    lo, hi = db._as_date(rng["from"]), db._as_date(rng["to"])
+    out = []
+    d = lo
+    while d <= hi:
+        out.append({"date": d.isoformat(), "day": d.day, "label": _short_date(d),
+                    "weekend": d.weekday() >= 5})
+        d += timedelta(days=1)
+    return out
+
+
+def _payload_status(payload) -> tuple[str, str]:
+    m = _PAYLOAD_STATUS.search(str(payload or ""))
+    if not m:
+        return "", ""
+    return m.group(1).strip(), m.group(2).strip()
+
+
+def _snapshot_day(p: dict) -> str:
+    return next((str(c["bot_visit_at"] or "")[:10]
+                 for c in p["contracts"] if c["bot_visit_at"]), "")
+
+
+def _employee_stats(emp: str, d_from: str, d_to: str) -> dict:
+    """Строка сотрудника за окно. «_entries» — выезды по дням (человек-день),
+    новые в конце; «_paid» — люди, чей последний исход в окне «Оплачен»."""
+    persons = db._group_persons(db.contracts_of_responsible(emp))
+    by_cid = {c["contract_id"]: p for p in persons for c in p["contracts"]}
+    # (день, человек) → последняя запись журнала этого дня: повторное нажатие
+    # «Сохранить выезд» рождает вторую строку, но это тот же выезд.
+    entries: dict[tuple[str, str], dict] = {}
+    for v in db.visits_for_employee(emp, d_from, d_to):
+        p = by_cid.get(v["contract_id"])
+        if p is None:
+            continue
+        status, agreed = _payload_status(v["payload"])
+        entries[(v["created_at"], p["rep"])] = {
+            "date": v["created_at"], "person": p, "status": status, "agreed": agreed}
+    ordered = sorted(entries.values(), key=lambda e: (e["date"], e["person"]["client"]))
+    for e in ordered:
+        p = e["person"]
+        if e["date"] == _snapshot_day(p) or not e["status"]:
+            e["status"] = _person_status(p)
+    last: dict[str, dict] = {}
+    for e in ordered:
+        last[e["person"]["rep"]] = e
+    people = [e["person"] for e in last.values()]
+    paid = [e["person"] for e in last.values() if e["status"] == OUTCOME_PAID]
+    promised = [e for e in last.values() if e["status"] == OUTCOME_PROMISE]
+    counts: dict[str, int] = {}
+    for e in last.values():
+        counts[e["status"]] = counts.get(e["status"], 0) + 1
+    by_day: dict[str, int] = {}
+    for e in ordered:
+        by_day[e["date"]] = by_day.get(e["date"], 0) + 1
+    act = db.employee_activity(emp)
+    return {
+        "employee": emp,
+        "visits": len(ordered), "persons": len(people),
+        "contracts": _contracts_of(people),
+        "paid": len(paid), "promised": len(promised),
+        # Просрочка — на конец окна, но не из будущего: у пресета «Месяц» конец
+        # 30-е число, и обещания «до 25-го» оказывались бы просроченными сегодня.
+        "overdue": len(db.overdue_promises(emp, min(d_to, today_iso()))),
+        "with_photo": sum(1 for p in people
+                          if photostore.photos_between(p["contracts"], d_from, d_to)),
+        "money": _totals_units(people), "money_text": _persons_total(people),
+        "money_paid": _totals_units(paid), "money_paid_text": _persons_total(paid),
+        "outcomes": [{"status": s, "n": n, "emoji": _st_emoji(s)}
+                     for s, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))],
+        "activity": {k: act.get(k) for k in _ACTIVITY_KEYS} if act else None,
+        "portfolio": len(persons),
+        "_by_day": by_day, "_entries": ordered, "_paid": paid,
+    }
+
+
+def _employee_country_index() -> dict[str, str]:
+    """ФИО → tj/uz по стране кейсов (как у направлений). Сотрудник, чьи кейсы
+    в обеих странах, остаётся в первой — статистика не задваивается."""
+    out: dict[str, str] = {}
+    for code in ("tj", "uz"):
+        for emp in db.employees_by_direction(code):
+            out.setdefault(emp, code)
+    return out
+
+
+def stats_data(mgr: dict, rng: dict, employees: list[str] | None = None) -> dict:
+    employees = employees if employees is not None else sorted_employees(mgr)
+    d_from, d_to = rng["from"], rng["to"]
+    country = _employee_country_index()
+    days = _range_days(rng)
+    rows = []
+    for emp in employees:
+        r = _employee_stats(emp, d_from, d_to)
+        r["country"] = country.get(emp)
+        r["by_day"] = [r["_by_day"].get(x["date"], 0) for x in days]
+        rows.append(r)
+    for i, x in enumerate(days):
+        x["visits"] = sum(r["by_day"][i] for r in rows)
+    people = [e["person"] for r in rows for e in
+              {e["person"]["rep"]: e for e in r["_entries"]}.values()]
+    paid = [p for r in rows for p in r["_paid"]]
+    order = [spec["code"] for spec in country_scope.COUNTRIES]
+    codes = sorted({r["country"] for r in rows if r["country"]}, key=order.index)
+    return {
+        "screen": "stats",
+        "range": rng,
+        "totals": {
+            "employees": len(rows),
+            "active": sum(1 for r in rows if r["visits"]),
+            "visits": sum(r["visits"] for r in rows),
+            "persons": len(people),
+            "contracts": _contracts_of(people),
+            "paid": sum(r["paid"] for r in rows),
+            "promised": sum(r["promised"] for r in rows),
+            "overdue": sum(r["overdue"] for r in rows),
+            "with_photo": sum(r["with_photo"] for r in rows),
+            "money": _totals_units(people), "money_text": _persons_total(people),
+            "money_paid": _totals_units(paid), "money_paid_text": _persons_total(paid),
+        },
+        "by_day": days,
+        "employees": sorted(rows, key=lambda r: (-r["visits"], r["employee"].lower())),
+        "countries": [{"code": c,
+                       **{k: country_scope.info(c)[k] for k in ("name", "short", "flag")},
+                       "employees": sum(1 for r in rows if r["country"] == c)}
+                      for c in codes],
+        "scope": scope_label(mgr),
+        "manager_name": mgr.get("name") or "",
+    }
+
+
+def stats_employee_data(mgr: dict, rng: dict, employee: str,
+                        employees: list[str] | None = None) -> dict | None:
+    employees = employees if employees is not None else sorted_employees(mgr)
+    if employee not in employees:
+        return None
+    r = _employee_stats(employee, rng["from"], rng["to"])
+    days = _range_days(rng)
+    for x in days:
+        x["visits"] = r["_by_day"].get(x["date"], 0)
+    cases = []
+    for e in reversed(r["_entries"]):          # новые сверху
+        p = e["person"]
+        cases.append({
+            "date": e["date"], "day_label": _short_date(db._as_date(e["date"])),
+            "rep": p["rep"], "client": p["client"], "n": p["n"],
+            "outcome": e["status"], "emoji": _st_emoji(e["status"]),
+            "agreed": e["agreed"],
+            "money": _totals_units([p]), "money_text": _persons_total([p]),
+            "photos": len(photostore.day_photos(p["contracts"], e["date"])),
+        })
+    return {"screen": "emp", "range": rng, **r, "by_day": days, "cases": cases}
+
+
+def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> bytes:
+    """Та же статистика книгой: «Сотрудники», «Выезды» (человек-день), «По дням»."""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    data = stats_data(mgr, rng, employees)
+    names = {c["code"]: c["name"] for c in data["countries"]}
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Сотрудники"
+    ws.append([f"Статистика выездов · {data['scope']} · {rng['label']} "
+               f"({rng['from']} — {rng['to']})"])
+    ws["A1"].font = Font(bold=True)
+    ws.append([])
+    head = ["Сотрудник", "Страна", "Выездов", "Должников", "Договоров", "Оплачен",
+            "Обещает оплатить", "Просрочено обещаний", "С фото", "Долг",
+            "Закрыто (оплачен)", "Исходы"]
+    ws.append(head)
+    for r in data["employees"]:
+        ws.append([r["employee"], names.get(r["country"], ""), r["visits"], r["persons"],
+                   r["contracts"], r["paid"], r["promised"], r["overdue"], r["with_photo"],
+                   r["money_text"], r["money_paid_text"],
+                   " · ".join(f"{o['status']} {o['n']}" for o in r["outcomes"])])
+    t = data["totals"]
+    ws.append(["Итого", "", t["visits"], t["persons"], t["contracts"], t["paid"],
+               t["promised"], t["overdue"], t["with_photo"], t["money_text"],
+               t["money_paid_text"], ""])
+    for cell in ws[3]:
+        cell.font = Font(bold=True)
+    for cell in ws[ws.max_row]:
+        cell.font = Font(bold=True)
+    widths = [28, 12, 9, 10, 10, 9, 16, 18, 8, 22, 22, 60]
+    for i, w in enumerate(widths):
+        ws.column_dimensions[chr(ord("A") + i)].width = w
+
+    ws2 = wb.create_sheet("Выезды")
+    ws2.append(["Дата", "Сотрудник", "Клиент", "Договоров", "Результат",
+                "Договорённость", "Долг"])
+    for cell in ws2[1]:
+        cell.font = Font(bold=True)
+    for r in data["employees"]:
+        for e in r["_entries"]:
+            p = e["person"]
+            ws2.append([e["date"], r["employee"], p["client"], p["n"], e["status"],
+                        e["agreed"], _persons_total([p])])
+    for col, w in zip("ABCDEFG", (12, 28, 32, 10, 22, 22, 18)):
+        ws2.column_dimensions[col].width = w
+
+    ws3 = wb.create_sheet("По дням")
+    ws3.append(["Дата", "Выездов"] + [r["employee"] for r in data["employees"]])
+    for cell in ws3[1]:
+        cell.font = Font(bold=True)
+    for i, x in enumerate(data["by_day"]):
+        ws3.append([x["date"], x["visits"]] + [r["by_day"][i] for r in data["employees"]])
+    ws3.column_dimensions["A"].width = 12
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()

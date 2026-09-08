@@ -245,6 +245,46 @@ textarea{min-height:64px;resize:vertical}
 .navbanner .ico{width:15px;height:15px;flex:0 0 auto;color:var(--danger)}
 .navme{width:30px;height:30px;color:var(--navblue);filter:drop-shadow(0 1px 4px rgba(0,0,0,.45))}
 .navme svg{width:100%;height:100%;display:block}
+
+/* --- вкладка руководителя: статистика (на компьютере шире телефона) --- */
+.wrap.wide{max-width:920px}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+.chip{border:1px solid var(--border);border-radius:16px;background:var(--card);padding:6px 12px;
+  font-size:13px;color:var(--text);font-family:inherit;white-space:nowrap;display:inline-flex;gap:5px;align-items:center}
+.chip.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+.pnav{display:flex;align-items:center;gap:8px;margin:6px 0}
+.pnav .arr{width:40px;height:38px;border:1px solid var(--border);border-radius:10px;background:var(--card);
+  font-size:18px;font-family:inherit;color:var(--text);flex:0 0 auto}
+.pnav .arr:disabled{opacity:.35}
+.pnav .lbl{flex:1;text-align:center;font-weight:700;font-size:15px}
+.dates{display:flex;gap:8px;align-items:center;margin:2px 0 8px}
+.dates input{flex:1;min-width:0;padding:9px 10px;border:1px solid var(--border);border-radius:10px;
+  font:inherit;background:var(--card);color:var(--text)}
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0 6px}
+.kpi{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:10px 12px}
+.kpi .n{font-size:20px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums}
+.kpi .l{font-size:11px;color:var(--muted);margin-top:3px}
+.bars{display:flex;align-items:flex-end;gap:2px;height:56px;margin:10px 0 2px}
+.bars button{flex:1;border:0;background:var(--accent2);border-radius:3px 3px 0 0;min-height:3px;padding:0;
+  cursor:pointer;opacity:.85}
+.bars button.we{background:#C9C3B6}
+.stwrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -14px;padding:0 14px}
+.stt{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}
+.stt th{cursor:pointer;color:var(--muted);font-weight:600;text-align:right;padding:8px 6px;
+  border-bottom:1px solid var(--border);white-space:nowrap;font-size:12px;user-select:none}
+.stt th.on{color:var(--text)}
+.stt th.l,.stt td.l{text-align:left}
+.stt td{padding:9px 6px;border-bottom:1px solid var(--alt);text-align:right;white-space:nowrap}
+.stt td.l{white-space:normal;min-width:120px}
+.stt tbody tr{cursor:pointer}
+.stt tbody tr:active{background:var(--alt)}
+.stt tr.z td{color:var(--muted)}
+.stt tr.tot td{font-weight:700;border-top:2px solid var(--border);border-bottom:0}
+.chips.nowrap{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:2px;
+  margin-left:-14px;margin-right:-14px;padding-left:14px;padding-right:14px}
+.barlbl{display:flex;gap:2px;font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums}
+.barlbl span{flex:1;text-align:center;overflow:hidden}
+@media (max-width:640px){ .stt .md{display:none} .stt td,.stt th{padding:9px 4px} .stt td.l{min-width:104px} }
 </style>
 </head>
 <body>
@@ -745,7 +785,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=37;
+const SHELL_VERSION=38;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1360,6 +1400,8 @@ function setBottomNav(active){
   $("bottomnavInner").innerHTML = items.map(it =>
     `<button class="${it.id===active?'on':''}" onclick="${it.fn}()">${ic(it.icon)}<span>${esc(it.label)}</span></button>`).join("");
   $("bottomnav").style.display = "block";
+  // Статистика — таблица: на компьютере ей тесно в телефонной колонке.
+  $("app").classList.toggle("wide", active==="digest");
   updateOffBar();
 }
 function hideBottomNav(){ $("bottomnav").style.display = "none"; }
@@ -2813,23 +2855,35 @@ async function renderMarks(){
   loadMarks(); loadNotes();
 }
 
-// ═══ Вкладка руководителя («Сводка») ══════════════════════════════════════════
+// ═══ Вкладка руководителя («Сводка» → экран статистики) ═══════════════════════
 // СОДЕРЖИМОЕ русское — как весь дайджест (решение владельца): руководители
 // читают по-русски. В I18N живут только подпись вкладки и служебные состояния.
-// Данные приходят ТОЛЬКО с сервера (/api/manager/*): даты считает сервер
-// (контейнер в UTC, телефон в +3/+5 — клиентская дата утром показывала бы
-// пустой день); всё из БД проходит через esc(); в onclick уходят только
-// ЧИСЛОВЫЕ индексы состояния (esc/enc не экранируют апостроф, а он в ФИО
-// на узбекской латинице норма).
-let DG={view:"summary", date:null, today:null, prev:null, next:null,
-        emp:null, rep:null, days:7, seq:0, last:0, rows:[], cases:[], items:[]};
+// Данные приходят ТОЛЬКО с сервера (/api/manager/*): даты и окна периода
+// считает сервер (контейнер в UTC, телефон в +3/+5 — клиентская дата утром
+// показывала бы пустой день); клиент шлёт пресет и число сдвигов либо две
+// строки из полей «с/по» и сам дат не строит. Всё из БД проходит через esc();
+// в onclick уходят только ЧИСЛОВЫЕ индексы состояния (esc/enc не экранируют
+// апостроф, а он в ФИО на узбекской латинице норма).
+let DG={view:"stats", date:null, today:null, prev:null, next:null,
+        preset:"today", shift:0, from:null, to:null, range:null,
+        emp:null, rep:null, seq:0, last:0, rows:[], cases:[], items:[], days:[],
+        sort:"visits", dir:-1, country:"", q:"", stats:null};
 function dgQ(extra){ const p=new URLSearchParams(); if(DG.date) p.set("date",DG.date);
   Object.entries(extra||{}).forEach(([k,v])=>{ if(v!=null&&v!=="") p.set(k,v); });
   const s=p.toString(); return s?("?"+s):""; }
+function dgRangeQ(extra){
+  const p=new URLSearchParams();
+  if(DG.preset==="custom"){ if(DG.from) p.set("from",DG.from); if(DG.to) p.set("to",DG.to); }
+  else p.set("preset",DG.preset||"today");
+  if(DG.shift) p.set("shift",DG.shift);
+  Object.entries(extra||{}).forEach(([k,v])=>{ if(v!=null&&v!=="") p.set(k,v); });
+  return "?"+p.toString(); }
 async function renderDigest(){
   flushDraft(); stopAutoSync(); stopMeWatch(); removeMap(); STATE.cur=null;
   PhotoAudit.free();
-  DG.view="summary"; DG.emp=null; DG.rep=null;
+  DG.view="stats"; DG.emp=null; DG.rep=null;
+  if(DG.date){ // диплинк из дайджеста (?tab=digest&d=…): окно ровно на этот день
+    DG.preset="custom"; DG.from=DG.date; DG.to=DG.date; DG.shift=0; DG.date=null; }
   $("app").innerHTML=`<div class="h" id="dghead">${esc(L().digest)}</div>
     <div id="dgbody" class="muted">…</div>`;
   setBottomNav("digest");
@@ -2841,10 +2895,9 @@ async function dgLoad(){
   // старого экрана мог отрисоваться в рендерере нового.
   const seq=++DG.seq;
   const b=$("dgbody"); if(b) b.innerHTML="…";
-  const url = DG.view==="summary"  ? "/api/manager/summary"+dgQ()
-            : DG.view==="employee" ? "/api/manager/employee"+dgQ({employee:DG.emp})
+  const url = DG.view==="stats"    ? "/api/manager/stats"+dgRangeQ()
+            : DG.view==="emp"      ? "/api/manager/stats_employee"+dgRangeQ({employee:DG.emp})
             : DG.view==="person"   ? "/api/manager/person"+dgQ({employee:DG.emp,rep:DG.rep})
-            : DG.view==="period"   ? "/api/manager/period"+dgQ({days:DG.days})
             : DG.view==="map"      ? "/api/manager/map_data"+dgQ({employee:DG.emp})
             : DG.view==="photos"   ? null
             :                        "/api/manager/promises"+dgQ();
@@ -2854,6 +2907,8 @@ async function dgLoad(){
   catch(e){ if(seq===DG.seq) dgFail(e); return; }
   if(seq!==DG.seq) return;                    // устаревший ответ — молча в корзину
   DG.date=j.date; DG.today=j.today; DG.prev=j.prev_date; DG.next=j.next_date;
+  if(j.range){ DG.range=j.range; DG.preset=j.range.preset; DG.shift=j.range.shift||0;
+               DG.from=j.range.from; DG.to=j.range.to; }
   dgRender(j);
 }
 function dgFail(e){
@@ -2864,17 +2919,30 @@ function dgFail(e){
     b.innerHTML=`<div class="center">${esc(t.dggone)}</div>`; return; }
   if(st===401){ renderAppAuthGone(!!appToken()); return; }
   if(st===404){ b.innerHTML=`<div class="center">${esc(t.dggoneemp)}</div>
-    <button class="btn line" style="margin-top:12px" onclick="dgGo('summary')">←</button>`;
+    <button class="btn line" style="margin-top:12px" onclick="dgGo('stats')">←</button>`;
     return; }
-  if(st===400){ DG.date=null; dgLoad(); return; }   // кривая дата → на сегодня
+  if(st===400){ DG.date=null; DG.preset="today"; DG.shift=0; dgLoad(); return; }   // кривая дата → на сегодня
   b.innerHTML=`<div class="center">${esc(!st?t.dgneednet:t.dgerr)}</div>
     <button class="btn line" style="margin-top:12px" onclick="dgRefresh()">🔄</button>`;
 }
 function dgRefresh(){ if(Date.now()-DG.last<3000) return; dgLoad(); }
 function dgGo(view, opts){ Object.assign(DG,{view},opts||{}); removeMap();
   PhotoAudit.free(); dgLoad(); }
-function dgPickEmp(i){ const r=DG.rows[i]; if(r) dgGo("employee",{emp:r.employee}); }
-function dgPickCase(i){ const c=DG.cases[i]; if(c) dgGo("person",{rep:c.rep}); }
+// --- окно периода: пресет, сдвиг, свои даты, день из столбика ---
+function dgPreset(p){ DG.preset=p; DG.shift=0; DG.from=null; DG.to=null; dgLoad(); }
+function dgShift(n){ if(DG.preset==="custom") DG.shift=n; else DG.shift=(DG.shift||0)+n; dgLoad(); }
+function dgCustom(){ const f=$("dgfrom"), t=$("dgto"); if(!f||!t||!f.value||!t.value) return;
+  DG.preset="custom"; DG.from=f.value; DG.to=t.value; DG.shift=0; dgLoad(); }
+function dgDay(i){ const d=DG.days[i]; if(!d) return;
+  DG.preset="custom"; DG.from=d.date; DG.to=d.date; DG.shift=0; dgLoad(); }
+// --- таблица: сортировка, страна, поиск ---
+function dgSort(k){ if(DG.sort===k) DG.dir=-DG.dir; else { DG.sort=k; DG.dir=(k==="employee")?1:-1; } dgDrawTable(); }
+function dgCountry(c){ DG.country=c; dgDrawTable(); }
+function dgSearch(v){ DG.q=(v||"").trim().toLowerCase(); dgDrawTable(); }
+function dgPickEmp(i){ const r=DG.rows[i]; if(r) dgGo("emp",{emp:r.employee}); }
+function dgPickCase(i){ const c=DG.cases[i]; if(c){ DG.date=c.date; dgGo("person",{rep:c.rep}); } }
+function dgOpenMap(i){ const d=DG.days[i]; if(d){ DG.date=d.date; dgGo("map"); } }
+function dgOpenPromises(){ DG.date=DG.to; dgGo("promises"); }
 function dgDate(iso){ if(!iso) return; DG.date=iso; dgLoad(); }
 function dgHeadHTML(j,title){
   const nav=`<div class="muted" style="margin:4px 0 10px">
@@ -2883,67 +2951,151 @@ function dgHeadHTML(j,title){
     ${j.next_date?`<button class="btn line" style="padding:2px 10px" onclick="dgDate('${esc(j.next_date)}')">›</button>`:""}
     <span style="margin-left:10px">обновлено в ${hhmm(new Date(DG.last||Date.now()))}</span>
   </div>`;
-  const note=j.period_note?`<div class="muted" style="margin-bottom:8px">${esc(j.period_note)}</div>`:"";
-  const hist=(j.date&&j.today&&j.date!==j.today)
-    ?`<div class="muted" style="margin-bottom:8px">за прошлые дни считается последний выезд к человеку: повторный визит переносит его в свой день</div>`:"";
-  return `<div style="font-weight:700">${esc(title)}</div>`+nav+note+hist;
+  return `<div style="font-weight:700">${esc(title)}</div>`+nav;
+}
+function dgTop(title, sub){
+  return `<div style="font-weight:700;font-size:16px">${esc(title)}</div>
+    <div class="muted" style="font-size:12px;margin-bottom:4px">${sub?esc(sub)+" · ":""}обновлено в ${hhmm(new Date(DG.last||Date.now()))}</div>`;
 }
 function dgRender(j){
   const b=$("dgbody"); if(!b) return;
   if(j.screen && j.screen!==DG.view) return;  // ответ не того экрана
-  if(DG.view==="summary") return dgSummary(j,b);
-  if(DG.view==="employee") return dgEmployee(j,b);
+  if(DG.view==="stats") return dgStats(j,b);
+  if(DG.view==="emp") return dgEmp(j,b);
   if(DG.view==="person") return dgPerson(j,b);
-  if(DG.view==="period") return dgPeriod(j,b);
   if(DG.view==="map") return dgMap(j,b);
   if(DG.view==="photos") return dgPhotos(b);
   return dgPromises(j,b);
 }
-function dgSummary(j,b){
-  const t=j.totals||{};
-  DG.rows=[]; const parts=[dgHeadHTML(j,(j.manager&&j.manager.name)?j.manager.name:"Сводка")];
-  parts.push(`<div>👥 Команда: ${t.employees||0} · активны: ${t.active||0} · `+
-    `должников: <b>${t.persons||0}</b> · договоров: ${t.contracts||0}</div>`);
-  if(t.persons) parts.push(`<div>📸 С фото: ${t.with_photo||0} из ${t.persons}</div>`);
-  if(t.money_text) parts.push(`<div>💰 ${esc(t.money_text)}</div>`);
-  const btns=[];
-  (j.display||[]).forEach(r=>{
-    const i=DG.rows.push(r)-1;
-    btns.push(`<button class="btn line" style="width:100%;text-align:left;margin-top:6px"
-      onclick="dgPickEmp(${i})">${r.persons?"👤":"▫️"} ${esc(r.employee)} · ${r.persons}
-      ${r.outcomes&&r.outcomes.length?`<div class="muted" style="font-weight:400">${r.outcomes.map(o=>esc(o.emoji+" "+o.status+" "+o.n)).join(" · ")}</div>`:""}</button>`);
-  });
-  parts.push(btns.join(""));
-  if(t.overdue_promises) parts.push(`<button class="btn line" style="width:100%;margin-top:10px"
-    onclick="dgGo('promises')">⏰ Обещания просрочены: ${t.overdue_promises}</button>`);
-  parts.push(`<div style="display:flex;gap:8px;margin-top:10px">
-    <button class="btn line" style="flex:1" onclick="dgGo('period')">📅 Неделя</button>
-    <button class="btn line" style="flex:1" onclick="dgGo('photos')">📸 Фото по КД</button>
-    <button class="btn line" style="flex:1" onclick="dgRefresh()">🔄</button></div>`);
-  b.innerHTML=parts.join("");
+// --- общие куски экранов статистики ---
+const DG_PRESETS=[["today","Сегодня"],["yesterday","Вчера"],["7d","7 дней"],["30d","30 дней"],["month","Месяц"],["custom","Даты…"]];
+function dgPeriodBar(rg){
+  const cur=(rg.preset==="today"&&rg.shift===-1)?"yesterday":rg.preset;
+  const chips=DG_PRESETS.map(([k,l])=>`<button class="chip${cur===k?" on":""}" onclick="dgPreset('${k}')">${l}</button>`).join("");
+  const custom=cur==="custom"?`<div class="dates"><input type="date" id="dgfrom" value="${esc(rg.from||"")}">
+      <span class="muted">—</span><input type="date" id="dgto" value="${esc(rg.to||"")}">
+      <button class="chip on" onclick="dgCustom()">OK</button></div>`:"";
+  return `<div class="chips nowrap">${chips}</div>${custom}
+    <div class="pnav"><button class="arr" onclick="dgShift(-1)">‹</button>
+      <div class="lbl">${esc(rg.label||"")}${rg.days>1?` <span class="muted" style="font-weight:400">· ${rg.days} дн</span>`:""}</div>
+      <button class="arr" ${rg.next?"":"disabled"} onclick="dgShift(1)">›</button></div>`;
 }
-function dgEmployee(j,b){
-  DG.cases=[];
-  const parts=[dgHeadHTML(j,j.employee||DG.emp||"")];
-  parts.push(`<div>обработано: <b>${j.persons||0}</b> должников · ${j.contracts||0} договоров · 📸 ${j.with_photo||0}/${j.persons||0}</div>`);
-  (j.outcomes||[]).forEach(o=>parts.push(`<div class="muted">${esc(o.emoji)} ${esc(o.status)} — ${o.n}</div>`));
-  if(j.money_text) parts.push(`<div>💰 ${esc(j.money_text)}</div>`);
+function dgKpis(t,rg){
+  const k=(n,l)=>`<div class="kpi"><div class="n">${n}</div><div class="l">${l}</div></div>`;
+  const multi=(rg&&rg.days>1);
+  // За один день «должников» = «выездов»: шестая плашка тогда — состав команды
+  // (или договоры у сотрудника); за период — уникальные должники.
+  const sixth=multi?k(t.persons||0,"должников")
+             :(t.employees!=null?k((t.active||0)+"/"+t.employees,"в работе"):k(t.contracts||0,"договоров"));
+  const line=[];
+  if(multi&&t.employees!=null) line.push(`👥 в работе ${t.active||0} из ${t.employees}`);
+  if(t.money_text) line.push(`💰 долг ${esc(t.money_text)}`);
+  if(t.money_paid_text) line.push(`✅ закрыто ${esc(t.money_paid_text)}`);
+  return `<div class="kpis">
+    ${k(t.visits||0,"выездов")}${k(t.paid||0,"оплачен")}${k(t.promised||0,"обещают")}
+    ${k(t.overdue||0,"обещаний просрочено")}${k((t.with_photo||0)+"/"+(t.persons||0),"с фото")}${sixth}
+  </div>${line.length?`<div class="muted" style="font-size:13px">${line.join(" · ")}</div>`:""}`;
+}
+function dgBars(days){
+  const mx=Math.max(1,...days.map(d=>d.visits||0));
+  const bars=days.map((d,i)=>`<button class="${d.weekend?"we":""}" title="${esc(d.label)}: ${d.visits||0}"
+      style="height:${Math.max(3,Math.round((d.visits||0)/mx*52))}px" onclick="dgDay(${i})"></button>`).join("");
+  const lbl=days.length<=31?`<div class="barlbl">${days.map(d=>`<span>${d.day}</span>`).join("")}</div>`:"";
+  return `<div class="bars">${bars}</div>${lbl}
+    <div class="muted" style="display:flex;justify-content:space-between;font-size:11px;margin-top:2px">
+      <span>${esc(days[0].label)}</span><span>выезды по дням · тап по столбику — открыть день</span><span>${esc(days[days.length-1].label)}</span></div>`;
+}
+function dgIdle(r){
+  const a=r.activity; if(!a) return "телеметрии нет";
+  if(a.idle_days!=null) return `простой ${a.idle_days} дн`;
+  return a.last_activity?`активность ${String(a.last_activity).slice(0,10)}`:"без активности";
+}
+function dgNum(r,k){ return k==="money"?(r.money||[]).reduce((s,x)=>s+(x.sum||0),0):(r[k]||0); }
+// --- ЭКРАН: статистика по команде ---
+function dgStats(j,b){
+  DG.stats=j; DG.rows=[]; DG.days=j.by_day||[];
+  const rg=j.range||{}, t=j.totals||{};
+  const parts=[dgTop((j.manager&&j.manager.name)?j.manager.name:"Статистика", j.scope)];
+  parts.push(dgPeriodBar(rg));
+  parts.push(dgKpis(t,rg));
+  if(DG.days.length>1) parts.push(dgBars(DG.days));
+  parts.push(`<div class="searchwrap" style="margin:10px 0 0">${ic("search")}
+    <input class="search" placeholder="Поиск сотрудника" value="${esc(DG.q)}" oninput="dgSearch(this.value)"></div>
+    <div id="dgtable"></div>`);
+  parts.push(`<div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+    <button class="btn line" style="flex:1" onclick="dgOpenPromises()">⏰ Просрочено: ${t.overdue||0}</button>
+    <button class="btn line" style="flex:1" onclick="dgGo('photos')">📸 Фото по КД</button>
+    <button class="btn line" style="flex:1" onclick="dgExcel()">⬇️ Excel</button></div>`);
+  b.innerHTML=parts.join("");
+  dgDrawTable();
+}
+function dgDrawTable(){
+  const j=DG.stats, el=$("dgtable"); if(!j||!el) return;
+  let rows=(j.employees||[]).slice();
+  if(DG.country) rows=rows.filter(r=>r.country===DG.country);
+  if(DG.q) rows=rows.filter(r=>String(r.employee||"").toLowerCase().includes(DG.q));
+  const k=DG.sort, dir=DG.dir;
+  rows.sort((a,b2)=>{ if(k==="employee") return dir*String(a.employee).localeCompare(String(b2.employee),"ru");
+    const va=dgNum(a,k), vb=dgNum(b2,k);
+    return va===vb?String(a.employee).localeCompare(String(b2.employee),"ru"):dir*(va-vb); });
+  DG.rows=rows;
+  const cs=j.countries||[];
+  const ctry=cs.length>1?`<div class="chips" style="margin:8px 0 0">
+    <button class="chip${!DG.country?" on":""}" onclick="dgCountry('')">Все · ${(j.totals||{}).employees||0}</button>
+    ${cs.map(c=>`<button class="chip${DG.country===c.code?" on":""}" onclick="dgCountry('${esc(c.code)}')">${esc(c.flag)} ${esc(c.short)} · ${c.employees}</button>`).join("")}</div>`:"";
+  const th=(key,label,cls)=>`<th class="${cls||""}${DG.sort===key?" on":""}" onclick="dgSort('${key}')">${label}${DG.sort===key?(DG.dir<0?" ↓":" ↑"):""}</th>`;
+  const trs=rows.map((r,i)=>`<tr class="${r.visits?"":"z"}" onclick="dgPickEmp(${i})">
+    <td class="l"><div class="pname">${esc(r.employee)}</div>${r.visits?"":`<div class="psub">${esc(dgIdle(r))}</div>`}</td>
+    <td>${r.visits||0}</td><td class="md">${r.persons||0}</td><td>${r.paid||0}</td><td>${r.promised||0}</td>
+    <td>${r.overdue||0}</td><td>${r.with_photo||0}</td><td class="md">${esc(r.money_text||"")}</td></tr>`).join("");
+  const T={}; rows.forEach(r=>["visits","persons","paid","promised","overdue","with_photo"].forEach(x=>T[x]=(T[x]||0)+(r[x]||0)));
+  el.innerHTML=`${ctry}<div class="stwrap"><table class="stt"><thead><tr>
+      ${th("employee","Сотрудник","l")}${th("visits","Выезд.")}${th("persons","Долж.","md")}${th("paid","Опл.")}
+      ${th("promised","Обещ.")}${th("overdue","Проср.")}${th("with_photo","Фото")}${th("money","Долг","md")}</tr></thead>
+    <tbody>${trs||`<tr><td class="l muted" colspan="8">Никого не найдено</td></tr>`}</tbody>
+    <tfoot><tr class="tot"><td class="l">Итого · ${rows.length}</td><td>${T.visits||0}</td><td class="md">${T.persons||0}</td>
+      <td>${T.paid||0}</td><td>${T.promised||0}</td><td>${T.overdue||0}</td><td>${T.with_photo||0}</td><td class="md"></td></tr></tfoot></table></div>`;
+}
+// --- ЭКРАН: сотрудник за период ---
+function dgEmp(j,b){
+  DG.cases=[]; DG.days=j.by_day||[];
+  const rg=j.range||{};
+  const parts=[`<button class="back" onclick="dgGo('stats')">‹ к сотрудникам</button>`,
+               dgTop(j.employee||DG.emp||"", rg.label)];
+  parts.push(dgPeriodBar(rg));
+  parts.push(dgKpis(j,rg));
   const a=j.activity;
-  if(a) parts.push(`<div class="muted" style="margin-top:6px">📈 визиты 7д ${a.visits_7d||0} · 30д ${a.visits_30d||0}`+
-    ((a.markers_7d||a.markers_30d)?` · метки 7д ${a.markers_7d||0} · 30д ${a.markers_30d||0}`:"")+
-    (a.last_activity?` · активность ${esc(String(a.last_activity).slice(0,10))}`:"")+`</div>`);
-  const btns=[];
+  if(a) parts.push(`<div class="muted" style="font-size:13px;margin-top:4px">📈 визиты 7д ${a.visits_7d||0} · 30д ${a.visits_30d||0}`+
+    (a.last_activity?` · активность ${esc(String(a.last_activity).slice(0,10))}`:"")+
+    (a.idle_days!=null?` · простой ${a.idle_days} дн`:"")+`</div>`);
+  if((j.outcomes||[]).length) parts.push(`<div class="chips">${j.outcomes.map(o=>`<span class="chip">${esc(o.emoji+" "+o.status)} <b>${o.n}</b></span>`).join("")}</div>`);
+  if(DG.days.length>1) parts.push(dgBars(DG.days));
+  if(rg.days===1) parts.push(`<button class="btn line" onclick="dgOpenMap(0)">🗺 Карта дня</button>`);
+  let cur=null; const items=[];
   (j.cases||[]).forEach(c=>{
     const i=DG.cases.push(c)-1;
-    btns.push(`<button class="btn line" style="width:100%;text-align:left;margin-top:6px"
-      onclick="dgPickCase(${i})">${esc(c.emoji)} ${esc(c.client)}${c.photos?" 📸":""}
-      <span class="muted">${esc(c.outcome||"")}</span></button>`);
+    if(c.date!==cur){ cur=c.date; const di=DG.days.findIndex(d=>d.date===c.date);
+      items.push(`<div class="fsec-h" style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
+        <span>${esc(c.day_label||c.date)}</span>${(rg.days>1&&di>=0)?`<button class="toolbtn" onclick="dgOpenMap(${di})">🗺 карта</button>`:""}</div>`); }
+    items.push(`<div class="pcard" onclick="dgPickCase(${i})"><div class="pinfo">
+      <div class="pname">${esc(c.emoji)} ${esc(c.client)}${c.photos?" 📸":""}</div>
+      <div class="psub">${esc(c.outcome||"")}${c.agreed?" · "+esc(c.agreed):""}${c.n>1?` · договоров ${c.n}`:""}</div></div>
+      <div class="pamt">${esc(c.money_text||"")}</div></div>`);
   });
-  parts.push(btns.join("")||`<div class="muted" style="margin-top:8px">Сегодня этот сотрудник ещё никого не обработал.</div>`);
-  parts.push(`<div style="display:flex;gap:8px;margin-top:10px">
-    <button class="btn line" style="flex:1" onclick="dgGo('map')">🗺 Карта дня</button>
-    <button class="btn line" style="flex:1" onclick="dgGo('summary')">← К сводке</button></div>`);
+  parts.push(items.join("")||`<div class="muted" style="margin-top:12px">За этот период выездов не было.</div>`);
   b.innerHTML=parts.join("");
+}
+async function dgExcel(){
+  // Токен — только в заголовке (как у фото), поэтому не ссылка, а fetch → blob.
+  toast("Готовлю Excel…");
+  try{
+    const r=await fetch("/api/manager/stats.xlsx"+dgRangeQ(),{headers:authHeaders()});
+    if(!r.ok) throw new Error(r.status);
+    const u=URL.createObjectURL(await r.blob());
+    const a=document.createElement("a"); a.href=u; a.download=`статистика ${DG.from||""} — ${DG.to||""}.xlsx`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(u),60000);
+  }catch(e){ toast("Не удалось выгрузить"); }
 }
 function dgPerson(j,b){
   const parts=[dgHeadHTML(j,j.client||"")];
@@ -2955,7 +3107,7 @@ function dgPerson(j,b){
   if(j.outcome&&j.outcome!=="—") parts.push(`<div>✅ ${esc(j.outcome)}</div>`);
   (j.visit||[]).forEach(v=>{
     if(!v.value) return;
-    parts.push(`<div>${esc(v.value)}${v.registry?` <span class="muted">· в реестре сейчас: ${esc(v.registry)}</span>`:""}</div>`);
+    parts.push(`<div>${v.title?`<span class="muted">${esc(v.title)}:</span> `:""}${esc(v.value)}${v.registry?` <span class="muted">· в реестре сейчас: ${esc(v.registry)}</span>`:""}</div>`);
   });
   if(j.tips) parts.push(`<div>📇 ${esc(j.tips)}</div>`);
   if(j.comment) parts.push(`<div>💬 ${esc(j.comment)}</div>`);
@@ -2969,24 +3121,7 @@ function dgPerson(j,b){
   const tail=[d.visit_date?"🗓 "+esc(d.visit_date):"",d.reminder_date?"🔁 "+esc(d.reminder_date):"",
               d.meeting_date?"📅 "+esc(d.meeting_date):""].filter(Boolean).join("   ");
   if(tail) parts.push(`<div class="muted">${tail}</div>`);
-  parts.push(`<button class="btn line" style="margin-top:10px" onclick="dgGo('employee')">← ${esc(DG.emp||"")}</button>`);
-  b.innerHTML=parts.join("");
-}
-function dgPeriod(j,b){
-  const t=j.totals||{};
-  const parts=[dgHeadHTML(j,`Сводка за ${j.days} дн`)];
-  parts.push(`<div>👥 должников: <b>${t.persons||0}</b> · договоров: ${t.contracts||0}</div>`);
-  if(t.persons) parts.push(`<div>✅ Оплачен: ${t.paid||0}${t.money_paid_text?` · закрыто: ${esc(t.money_paid_text)}`:""} · 📸 ${t.with_photo||0}/${t.persons}</div>`);
-  if(t.money_text) parts.push(`<div>💰 ${esc(t.money_text)}</div>`);
-  if(j.note) parts.push(`<div class="muted">${esc(j.note)}</div>`);
-  (j.employees||[]).forEach(r=>{
-    parts.push(`<div style="margin-top:6px"><b>${esc(r.employee)}</b> — ${r.persons} · ✅ ${r.paid||0} · 📸 ${r.with_photo||0}/${r.persons||0}</div>`);
-    if(r.outcomes&&r.outcomes.length)
-      parts.push(`<div class="muted">${r.outcomes.slice(0,3).map(o=>esc(o.emoji+" "+o.status+" "+o.n)).join(" · ")}</div>`);
-  });
-  parts.push(`<div style="display:flex;gap:8px;margin-top:10px">
-    <button class="btn line" style="flex:1" onclick="dgGo('period',{days:${j.days===7?30:7}})">📅 За ${j.days===7?30:7} дней</button>
-    <button class="btn line" style="flex:1" onclick="dgGo('summary')">← К сводке</button></div>`);
+  parts.push(`<button class="btn line" style="margin-top:10px" onclick="dgGo('emp')">← ${esc(DG.emp||"")}</button>`);
   b.innerHTML=parts.join("");
 }
 function dgPromises(j,b){
@@ -3001,14 +3136,14 @@ function dgPromises(j,b){
       parts.push(`<div class="muted">🔴 ${esc(pp.client)} — обещал ${esc(pp.promise_date||"")}, ${pp.days_overdue} дн назад${pp.money_text?` · ${esc(pp.money_text)}`:""}${fresh}</div>`);
     });
   });
-  parts.push(`<button class="btn line" style="margin-top:10px" onclick="dgGo('summary')">← К сводке</button>`);
+  parts.push(`<button class="btn line" style="margin-top:10px" onclick="dgGo('stats')">← К статистике</button>`);
   b.innerHTML=parts.join("");
 }
 async function dgMap(j,b){
   b.innerHTML=`${dgHeadHTML(j,"🗺 "+esc(j.employee||DG.emp||""))}
     <div id="dgmap" style="height:58vh;border-radius:12px;overflow:hidden"></div>
     <div class="muted" id="dgleg" style="margin-top:8px"></div>
-    <button class="btn line" style="margin-top:10px" onclick="dgGo('employee')">← ${esc(j.employee||"")}</button>`;
+    <button class="btn line" style="margin-top:10px" onclick="dgGo('emp')">← ${esc(j.employee||"")}</button>`;
   if(!(await ensureMapLibs())){ $("dgleg").textContent=L().dgneednet; return; }
   const pts=[...(j.targets||[]),...(j.visits||[]),...(j.markers||[])];
   if(!pts.length){ $("dgleg").textContent="За этот день гео-точек нет"; return; }
@@ -3047,7 +3182,7 @@ async function dgMap(j,b){
 function dgPhotos(b){
   b.innerHTML=`${dgHeadHTML({date:DG.date,today:DG.today,prev_date:DG.prev,next_date:null},"📸 Фото по договору")}
     <div id="pabody"></div>
-    <button class="btn line" style="margin-top:10px" onclick="dgGo('summary')">← К сводке</button>`;
+    <button class="btn line" style="margin-top:10px" onclick="dgGo('stats')">← К статистике</button>`;
   PhotoAudit.render($("pabody"));
 }
 

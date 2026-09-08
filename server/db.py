@@ -1832,6 +1832,39 @@ def persons_processed_range(employee: str, date_from: str, date_to: str) -> list
     return _group_persons(rows)
 
 
+def visits_for_employee(employee: str, date_from: str, date_to: str) -> list[sqlite3.Row]:
+    """Журнал завершённых выездов сотрудника за [date_from..date_to] (ISO,
+    включительно): строки visits, чей договор сейчас закреплён за этим ФИО.
+
+    Это ИСТОРИЯ, а не последний снимок: человек, к которому съездили 2-го и
+    9-го, виден в оба дня. persons_processed_range такого не умеет — он смотрит
+    на bot_visit_at, а повторный выезд переносит человека в свой день целиком.
+    created_at режется до даты: старые строки могли нести время."""
+    lo, hi = _as_date(date_from), _as_date(date_to)
+    if lo is None or hi is None:
+        return []
+    with connect() as conn:
+        return conn.execute(
+            "SELECT v.id id, v.contract_id contract_id, "
+            "substr(v.created_at, 1, 10) created_at, v.payload payload, "
+            "v.agent_id agent_id "
+            "FROM visits v JOIN clients c ON c.contract_id = v.contract_id "
+            "WHERE c.responsible = ? AND substr(v.created_at, 1, 10) BETWEEN ? AND ? "
+            "ORDER BY v.id",
+            (employee, lo.isoformat(), hi.isoformat()),
+        ).fetchall()
+
+
+def contracts_of_responsible(employee: str) -> list[sqlite3.Row]:
+    """Все договоры ответственного целиком — без окна периода витрины (оно про
+    дату закрепления и к статистике выездов отношения не имеет)."""
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM clients WHERE responsible = ? ORDER BY client, contract_id",
+            (employee,),
+        ).fetchall()
+
+
 # --- Гео фото (фактическая точка съёмки) -------------------------------------
 def record_photo(contract_id: str, file: str, telegram_id: int, *,
                  geo: tuple | None = None, sha256: str | None = None,
