@@ -72,11 +72,16 @@ def _retry_bump(kind: str, today: str) -> int:
 
 
 OWNER_PUSH_KEYS = {db.PUSH_DIGEST: "owner_digest",
-                   db.PUSH_PROMISE: "owner_promise"}
+                   db.PUSH_PROMISE: "owner_promise",
+                   db.PUSH_VISIT: "owner_visits"}
 # Владелец получает СВОЙ дайджест отдельным ключом (26.08.2026): раньше его
 # рассылку выключал только общий рубильник — вместе со всеми руководителями.
 # Обещания ему по умолчанию не идут: «дайджест только, отдельно».
-OWNER_PUSH_DEFAULTS = {db.PUSH_DIGEST: "1", db.PUSH_PROMISE: "0"}
+# Карточки по визитам (09.09.2026): раньше своего ключа у владельца не было
+# вовсе — он их просто не получал, потому что не входит в managers, и включить
+# себе их было нечем. Умолчание «выключено» сохраняет прежнее поведение.
+OWNER_PUSH_DEFAULTS = {db.PUSH_DIGEST: "1", db.PUSH_PROMISE: "0",
+                       db.PUSH_VISIT: "0"}
 # Те же рассылки, но рубильник личный у КАЖДОГО руководителя (колонка в
 # managers), а не один общий на всех.
 MANAGER_PUSH_KEYS = {db.PUSH_DIGEST: "push_digest",

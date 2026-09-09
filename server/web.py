@@ -2352,6 +2352,13 @@ async def _notify_managers(request: web.Request, row, dist_m: int | None = None,
         db.log_push(db.PUSH_VISIT, db.PUSH_SKIP_NO_EMPLOYEE, contract_id=cid)
         return
     targets = db.managers_for_employee(emp)
+    # Владелец — не руководитель и в managers его может не быть вовсе, поэтому
+    # карточки по визитам ему не приходили никогда и включить их было нечем.
+    # Отдельный ключ (по умолчанию выключен) даёт ему тот же выбор, что и
+    # руководителям, не заводя лишней роли.
+    if (ADMIN_ID and db.push_enabled("owner_visits", "0")
+            and all(m["telegram_id"] != ADMIN_ID for m in targets)):
+        targets = [*targets, {"telegram_id": ADMIN_ID, "matched_as": emp}]
     if not targets:
         db.log_push(db.PUSH_VISIT, db.PUSH_SKIP_NO_TARGETS, employee=emp,
                     contract_id=cid)
@@ -3610,7 +3617,7 @@ async def _admin_digest_settings(request: web.Request) -> web.Response:
             db.set_setting("digest_xlsx", "1" if b.get("digest_xlsx") else "0")
         # Личные рубильники ВЛАДЕЛЬЦА (не общие): «дайджест только, отдельно».
         # Тот же принцип «только при наличии ключа» — старый пульт их не шлёт.
-        for key in ("owner_digest", "owner_promise"):
+        for key in ("owner_digest", "owner_promise", "owner_visits"):
             if key in b:
                 db.set_setting(key, "1" if b.get(key) else "0")
 
@@ -3627,6 +3634,7 @@ async def _admin_digest_settings(request: web.Request) -> web.Response:
         "digest_xlsx": db.push_enabled("digest_xlsx"),
         "owner_digest": db.push_enabled("owner_digest", "1"),
         "owner_promise": db.push_enabled("owner_promise", "0"),
+        "owner_visits": db.push_enabled("owner_visits", "0"),
         "digest_last_run": db.get_setting("digest_last_run") or "",
         "promise_last_run": db.get_setting("promise_last_run") or "",
         "digest_retry": {"day": db.get_setting("digest_retry_day") or "",

@@ -56,7 +56,8 @@ def test_manager_dm_and_group_cards_have_tips(monkeypatch):
     monkeypatch.setattr(web.db, "person_contracts", lambda *_a, **_k: [])
     monkeypatch.setattr(web.db, "managers_for_employee",
                         lambda _e: [{"telegram_id": 7001, "matched_as": None}])
-    monkeypatch.setattr(web.db, "push_enabled", lambda _k: True)
+    # Подпись с умолчанием: у части рубильников оно своё (owner_visits — "0").
+    monkeypatch.setattr(web.db, "push_enabled", lambda _k, _default="1": True)
     monkeypatch.setattr(web.db, "log_push", lambda *_a, **_k: None)
     monkeypatch.setattr(web.db, "same_visit_logged_today", lambda *_a, **_k: False)
     monkeypatch.setattr(web.notify_module if hasattr(web, "notify_module") else notify,

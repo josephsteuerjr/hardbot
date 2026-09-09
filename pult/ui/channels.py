@@ -87,8 +87,10 @@ class ChannelsSection:
         self.owner_digest_var = self.owner_digest_check
         self.owner_promise_check = Check("обещания", False)
         self.owner_promise_var = self.owner_promise_check
+        self.owner_visits_check = Check("карточки по визитам", False)
+        self.owner_visits_var = self.owner_visits_check
         dc.add_row(label("Лично мне:", "small"), self.owner_digest_check,
-                   self.owner_promise_check)
+                   self.owner_promise_check, self.owner_visits_check)
         dc.add_row(Button("Сохранить", self.save_digest, kind="accent"), spacing_before=4)
         self.dig_out = dc.add(Note("", "small"))
         page.add(dc)
@@ -146,6 +148,8 @@ class ChannelsSection:
             owner_known=self.owner_digest_check.isEnabled(),
             owner_digest=self.owner_digest_var.get(),
             owner_promise=self.owner_promise_var.get(),
+            owner_visits_known=self.owner_visits_check.isEnabled(),
+            owner_visits=self.owner_visits_var.get(),
             xlsx_known=self.digest_xlsx_check.isEnabled(),
             digest_xlsx=self.digest_xlsx_var.get())
 
@@ -164,6 +168,13 @@ class ChannelsSection:
             if known:
                 var.set(bool(d.get(key)))
             check.configure(state="normal" if known else "disabled")
+        # Карточки по визитам появились позже остальных, поэтому свой признак
+        # «сервер этот ключ знает»: на старом галочка гаснет, а не врёт.
+        visits_known = "owner_visits" in d
+        if visits_known:
+            self.owner_visits_var.set(bool(d.get("owner_visits")))
+        self.owner_visits_check.configure(
+            state="normal" if visits_known else "disabled")
 
     def _show_visit_push(self, d: dict):
         if "visit_push" in d:

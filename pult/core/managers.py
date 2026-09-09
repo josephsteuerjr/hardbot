@@ -16,7 +16,8 @@ def valid_time(value: str) -> bool:
 def digest_body(*, time: str, enabled: bool, promise_time: str, promise_enabled: bool,
                 visit_push: bool, owner_known: bool, owner_digest: bool,
                 owner_promise: bool, xlsx_known: bool = False,
-                digest_xlsx: bool = True) -> dict:
+                digest_xlsx: bool = True, owner_visits_known: bool = False,
+                owner_visits: bool = False) -> dict:
     body = {"time": time, "enabled": enabled,
             "promise_time": promise_time, "promise_enabled": promise_enabled,
             "visit_push": visit_push}
@@ -28,6 +29,10 @@ def digest_body(*, time: str, enabled: bool, promise_time: str, promise_enabled:
     if owner_known:
         body["owner_digest"] = owner_digest
         body["owner_promise"] = owner_promise
+    # Карточки по визитам лично владельцу — ключ появился позже остальных, и
+    # старый сервер его не знает: шлём только тому, кто уже умеет его читать.
+    if owner_visits_known:
+        body["owner_visits"] = owner_visits
     return body
 
 
