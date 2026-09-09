@@ -74,6 +74,8 @@ def render_person(rep_cid: str, lang: str) -> str | None:
     shown: dict[str, str] = {}
     for items in extras.values():
         for item in items:
+            if not item.get("show_in_card", True):
+                continue
             shown.setdefault(item["label"], item["value"])
     if shown:
         lines += ["", f"<i>{t('card_extra', lang)}:</i>"]

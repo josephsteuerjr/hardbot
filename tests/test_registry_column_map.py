@@ -38,19 +38,25 @@ def _grid(rows, header=None, types=None, extra_headers=()):
     return out
 
 
+# Тестовая база общая на весь прогон, поэтому убираем за собой И ДО, И ПОСЛЕ:
+# оставленный «наш» сотрудник виден соседним тестам, которые считают состав
+# реестра целиком.
+def _wipe(conn):
+    conn.execute("DELETE FROM clients WHERE contract_id LIKE 'CM-%'")
+    conn.execute("DELETE FROM client_extra WHERE contract_id LIKE 'CM-%'")
+    conn.execute("DELETE FROM settings WHERE key = ?",
+                 (db.REGISTRY_COLUMN_MAP_SETTING,))
+
+
 @pytest.fixture(autouse=True)
 def _clean():
     db.init_db()
     with db.connect() as conn:
-        conn.execute("DELETE FROM clients WHERE contract_id LIKE 'CM-%'")
-        conn.execute("DELETE FROM client_extra WHERE contract_id LIKE 'CM-%'")
-        conn.execute("DELETE FROM settings WHERE key = ?",
-                     (db.REGISTRY_COLUMN_MAP_SETTING,))
+        _wipe(conn)
         conn.commit()
     yield
     with db.connect() as conn:
-        conn.execute("DELETE FROM settings WHERE key = ?",
-                     (db.REGISTRY_COLUMN_MAP_SETTING,))
+        _wipe(conn)
         conn.commit()
 
 
@@ -65,12 +71,12 @@ def test_contract_knows_the_september_rename():
     header[header.index("Дата закрепления")] = "Дата закрепления ХАРД"
     report = db.import_grid(
         _grid([{"contract_id": "CM-1", "client": "Тест К.",
-                "responsible": "Иванов И.", "assign_date": "2026-09-01"}],
+                "responsible": "Колонкин К.", "assign_date": "2026-09-01"}],
               header=header),
         source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
     assert not report.get("blocked"), report.get("error")
     row = db.get_client("CM-1")
-    assert row["responsible"] == "Иванов И."
+    assert row["responsible"] == "Колонкин К."
     assert row["assign_date"] == "2026-09-01"
 
 
@@ -81,7 +87,7 @@ def test_soft_twins_are_ignored_without_noise():
     которые боту не нужны и никогда не понадобятся.
     """
     report = db.import_grid(
-        _grid([{"contract_id": "CM-2", "responsible": "Иванов И."}],
+        _grid([{"contract_id": "CM-2", "responsible": "Колонкин К."}],
               extra_headers=("ответственный Сотрудник СОФТ", "Дата закрепления СОФТ")),
         source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
     assert not report.get("blocked"), report.get("error")
@@ -98,7 +104,7 @@ def test_operator_alias_unblocks_a_renamed_required_column():
     """
     header = [f.title for f in FIELDS]
     header[header.index("ответственный Сотрудник")] = "Сотрудник выезда"
-    grid = _grid([{"contract_id": "CM-3", "responsible": "Петров П."}],
+    grid = _grid([{"contract_id": "CM-3", "responsible": "Колонкина М."}],
                  header=header)
 
     blocked = db.import_grid(grid, source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
@@ -108,7 +114,7 @@ def test_operator_alias_unblocks_a_renamed_required_column():
                                 author="пульт Егора")
     report = db.import_grid(grid, source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
     assert not report.get("blocked"), report.get("error")
-    assert db.get_client("CM-3")["responsible"] == "Петров П."
+    assert db.get_client("CM-3")["responsible"] == "Колонкина М."
     assert report["operator_aliases"] == [
         "Сотрудник выезда → ответственный Сотрудник"]
 
@@ -126,7 +132,7 @@ def test_new_column_becomes_an_extra_field_and_reaches_the_card():
         author="пульт Егора")
     report = db.import_grid(
         _grid([{"contract_id": "CM-4", "client": "Тест К.",
-                "responsible": "Иванов И.",
+                "responsible": "Колонкин К.",
                 "условия акции": "Прощение до 50% процентов",
                 "сумма акции": 14500.0,
                 "начало акции": "2026-08-19"}],
@@ -150,14 +156,14 @@ def test_extra_value_disappears_when_the_cell_empties():
     db.save_registry_column_map({"extras": [{"title": "условия акции",
                                              "label": "Акция"}]})
     db.import_grid(
-        _grid([{"contract_id": "CM-5", "responsible": "Иванов И.",
+        _grid([{"contract_id": "CM-5", "responsible": "Колонкин К.",
                 "условия акции": "Прощение"}],
               extra_headers=("условия акции",)),
         source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
     assert db.registry_extra_values(["CM-5"])
 
     db.import_grid(
-        _grid([{"contract_id": "CM-5", "responsible": "Иванов И.",
+        _grid([{"contract_id": "CM-5", "responsible": "Колонкин К.",
                 "условия акции": ""}],
               extra_headers=("условия акции",)),
         source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
@@ -167,7 +173,7 @@ def test_extra_value_disappears_when_the_cell_empties():
 def test_hidden_column_stops_being_reported_as_unknown():
     db.save_registry_column_map({"ignored": ["служебная метка офиса"]})
     report = db.import_grid(
-        _grid([{"contract_id": "CM-6", "responsible": "Иванов И."}],
+        _grid([{"contract_id": "CM-6", "responsible": "Колонкин К."}],
               extra_headers=("служебная метка офиса",)),
         source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
     assert report["unknown_columns"] == []
@@ -183,7 +189,7 @@ def test_column_removed_from_the_map_disappears_from_the_card():
     db.save_registry_column_map({"extras": [{"title": "условия акции",
                                              "label": "Акция"}]})
     db.import_grid(
-        _grid([{"contract_id": "CM-7", "responsible": "Иванов И.",
+        _grid([{"contract_id": "CM-7", "responsible": "Колонкин К.",
                 "условия акции": "Прощение"}],
               extra_headers=("условия акции",)),
         source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
@@ -225,7 +231,7 @@ def test_broken_setting_does_not_break_the_import():
     db.set_setting(db.REGISTRY_COLUMN_MAP_SETTING, "{это не json")
     assert db.registry_column_map()["aliases"] == {}
     report = db.import_grid(
-        _grid([{"contract_id": "CM-8", "responsible": "Иванов И."}]),
+        _grid([{"contract_id": "CM-8", "responsible": "Колонкин К."}]),
         source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
     assert not report.get("blocked"), report.get("error")
 
@@ -249,7 +255,7 @@ def test_extra_columns_have_a_ceiling():
 def test_extra_values_are_trimmed():
     db.save_registry_column_map({"extras": [{"title": "длинная", "label": "Длинная"}]})
     db.import_grid(
-        _grid([{"contract_id": "CM-9", "responsible": "Иванов И.",
+        _grid([{"contract_id": "CM-9", "responsible": "Колонкин К.",
                 "длинная": "я" * (db.MAX_EXTRA_VALUE_LEN + 50)}],
               extra_headers=("длинная",)),
         source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
@@ -264,3 +270,30 @@ def test_extra_field_title_is_not_a_registry_key():
         columns = {row[1] for row in conn.execute("PRAGMA table_info(clients)")}
     assert "условия акции" not in columns
     assert set(BY_KEY) <= columns
+
+
+def test_hidden_extra_stays_out_of_both_cards():
+    """`show_in_card: false` — «читай, но выезднику не показывай». Обе карточки
+    (приложение и Telegram) обязаны понимать это одинаково."""
+    import card
+    import web
+
+    db.save_registry_column_map({"extras": [
+        {"title": "условия акции", "label": "Акция", "show_in_card": True},
+        {"title": "служебный код", "label": "Код", "show_in_card": False},
+    ]})
+    db.import_grid(
+        _grid([{"contract_id": "CM-10", "client": "Тест К.",
+                "responsible": "Колонкин К.", "условия акции": "Прощение",
+                "служебный код": "X-42"}],
+              extra_headers=("условия акции", "служебный код")),
+        source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
+
+    stored = {item["label"] for item in db.registry_extra_values(["CM-10"])["CM-10"]}
+    assert stored == {"Акция", "Код"}          # прочитано и лежит в базе
+
+    rows = db.person_contracts("CM-10")
+    full = web._person_full_from_rows(rows, "CM-10", "ru")
+    assert [item["title"] for item in full["extra"]] == ["Акция"]
+    text = card.render_person("CM-10", "ru")
+    assert "Акция: Прощение" in text and "X-42" not in text
