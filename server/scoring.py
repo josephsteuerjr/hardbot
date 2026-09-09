@@ -413,24 +413,54 @@ def priority_from_db(weights: dict, audience: str = "courier", limit: int | None
 
 
 _PRIORITY_CACHE: dict = {}   # (data_version, audience, weights) -> индекс приоритета
+# Последний посчитанный индекс, даже если он уже устарел. Нужен, чтобы открытие
+# приложения никогда не ждало пересчёта: см. priority_index(allow_stale=True).
+_PRIORITY_LAST: dict = {}    # (audience, weights) -> индекс предыдущей версии данных
 
 
-def priority_index(weights: dict | None = None, audience: str = "courier") -> dict:
-    """{client|birth -> {score, reason, city, mode}} для подсветки списка/карты в миниаппе.
-    Кэшируется по версии данных БД — миниапп дёргает bootstrap часто, а реестр меняется
-    редко, поэтому пересчёт только при реальном изменении (инвалидация — db._bump_version)."""
+def priority_index_is_fresh(weights: dict | None = None,
+                            audience: str = "courier") -> bool:
+    """Актуален ли готовый индекс для текущей версии данных."""
     import db
     w = weights or {"debt": 50, "cluster": 30, "fresh": 20}
     key = (db.data_version(), audience, tuple(sorted(w.items())))
+    return key in _PRIORITY_CACHE
+
+
+def priority_index(weights: dict | None = None, audience: str = "courier",
+                   *, allow_stale: bool = False) -> dict:
+    """{client|birth -> {score, reason, city, mode}} для подсветки списка/карты в миниаппе.
+
+    Кэшируется по версии данных БД. Пересчёт стоит около двух секунд на боевом
+    портфеле (14 тысяч договоров), а версия данных поднимается на КАЖДУЮ запись
+    в карточку — включая автосохранение черновика раз в 20 секунд у любого
+    выездника. Поэтому кэш почти всегда холодный, и синхронный пересчёт в
+    обработчике останавливал весь сервер: aiohttp однопоточный, и эти две
+    секунды ждали все остальные запросы.
+
+    ``allow_stale=True`` — отдать предыдущий индекс немедленно, если свежего
+    ещё нет. Для подсветки списка это честный компромисс: приоритет отстаёт на
+    один пересчёт, зато приложение открывается мгновенно. Вызывающий сам решает,
+    пересчитать ли свежий в фоне (см. priority_index_is_fresh).
+    """
+    import db
+    w = weights or {"debt": 50, "cluster": 30, "fresh": 20}
+    shape = (audience, tuple(sorted(w.items())))
+    key = (db.data_version(), *shape)
     cached = _PRIORITY_CACHE.get(key)
     if cached is not None:
         return cached
+    if allow_stale:
+        stale = _PRIORITY_LAST.get(shape)
+        if stale is not None:
+            return stale
     res = compute_priority(_items_from_db(), w, audience)
     idx = {f"{it.get('client') or ''}|{it.get('birth') or ''}":
            {"score": it["score"], "reason": it["reason"],
             "city": it["city"], "mode": it["mode"]} for it in res["items"]}
     _PRIORITY_CACHE.clear()         # держим только актуальную версию (ограничиваем память)
     _PRIORITY_CACHE[key] = idx
+    _PRIORITY_LAST[shape] = idx
     return idx
 
 

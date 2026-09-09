@@ -679,6 +679,29 @@ async def _raster_tile(request: web.Request) -> web.Response:
     )
 
 
+_priority_refresh_task: asyncio.Task | None = None
+
+
+def _priority_index_nonblocking() -> dict:
+    """Индекс приоритета, который никогда не заставляет ждать пересчёта.
+
+    Свежий есть — отдаём его. Нет — отдаём предыдущий и заводим пересчёт в
+    отдельном потоке: две секунды счёта в обработчике останавливали весь
+    сервер, потому что цикл событий один на всех. Параллельных пересчётов не
+    заводим: следующий запрос всё равно получит результат первого.
+    """
+    global _priority_refresh_task
+    import scoring
+
+    idx = scoring.priority_index(allow_stale=True)
+    if not scoring.priority_index_is_fresh():
+        task = _priority_refresh_task
+        if task is None or task.done():
+            _priority_refresh_task = asyncio.create_task(
+                asyncio.to_thread(scoring.priority_index))
+    return idx
+
+
 async def _bootstrap(request: web.Request) -> web.Response:
     started = time.perf_counter()
     uid = _uid(request)
@@ -711,8 +734,7 @@ async def _bootstrap(request: web.Request) -> web.Response:
     grouped = db.persons_for_employee(emp)
     persons = [_person_brief(p) for p in grouped]
     try:
-        import scoring
-        idx = scoring.priority_index()
+        idx = _priority_index_nonblocking()
         for pb, p in zip(persons, grouped):
             s = idx.get(f"{p['client'] or ''}|{p['birth_date'] or ''}")
             if s:
@@ -787,8 +809,7 @@ async def _route_day(request: web.Request) -> web.Response:
     grouped = db.persons_for_employee(emp)
     persons = [_person_brief(p) for p in grouped]
     try:
-        import scoring
-        idx = scoring.priority_index()
+        idx = _priority_index_nonblocking()
         for pb, p in zip(persons, grouped):
             s = idx.get(f"{p['client'] or ''}|{p['birth_date'] or ''}")
             if s:
