@@ -86,3 +86,41 @@ def test_closing_never_stores_the_master_key(app, tmp_path):
     w.close()
     saved = Settings.load(tmp_path / "настройки пульта.json")
     assert saved["device_token"] == "tok" and saved["url"] == "https://h"
+
+
+def test_registry_columns_screen_renders_a_decision_per_unknown_header(app, window):
+    """Экран «Колонки реестра» обязан открываться и на книге, которую импорт
+    принять пока не может: иначе оператор не увидит, что именно сломалось."""
+    from pult.core import header_map as hm
+    from pult.core import registry_import as ri
+
+    window.nav("registry")
+    hm.forget()
+    window._col_path = "ОБЩИЙ РЕЕСТР.xlsb"
+    window._col_analysis = {
+        "header_row": 2, "has_contract_key": True,
+        "recognized": [{"column": 5, "title": "Номер КД / ID", "key": "contract_id",
+                        "field_title": "Номер КД / ID", "by_operator": False}],
+        "missing": [{"key": "responsible", "title": "ответственный Сотрудник",
+                     "required": True}],
+        "missing_required": [{"key": "responsible",
+                              "title": "ответственный Сотрудник", "required": True}],
+        "unknown": [{"column": 10, "title": "ответственный Сотрудник ОТДЕЛ",
+                     "suggest": "responsible"},
+                    {"column": 90, "title": "условия акции", "suggest": ""}],
+        "ignored": [], "extras": [],
+    }
+    window._columns_render()
+
+    assert window.col_table.isVisible() or window.col_table.rowCount() == 2
+    assert "Не хватает обязательных колонок" in window.col_state.text()
+    decisions = window.col_table.decisions()
+    assert decisions[0]["decision"] == "field:responsible"   # подсказка подставлена
+    assert decisions[1]["decision"] == "skip"                # догадок не строим
+
+    decisions[1] = {"title": "условия акции", "decision": "extra", "label": "Акция"}
+    new_map = hm.apply_decisions(hm.current_map(), decisions)
+    assert new_map["aliases"]["responsible"] == ["ответственный Сотрудник ОТДЕЛ"]
+    assert new_map["extras"][0]["label"] == "Акция"
+    assert ri.columns_caption("книга.xlsb", window._col_analysis).startswith("книга.xlsb")
+    hm.forget()
