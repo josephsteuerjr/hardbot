@@ -45,6 +45,20 @@ ALLOWED_SHEETS = {"Портфели", "Статусы", "Статистика"}
 HEADER_ROW_NAMES = 2          # строка с названиями колонок (1-based)
 DATA_START_ROW = 4            # первая строка данных (после блоков/заголовков/типов)
 TARGET_COLUMN_NAME = "ответственный Сотрудник"
+# Офис вправе переименовать колонку в общем реестре и в сентябре 2026 так и
+# сделал: «ответственный Сотрудник» → «ответственный Сотрудник ХАРД» (парная
+# колонка СОФТ — это колл-центр, не наш). Ищем колонку по всем известным
+# написаниям, чтобы разбор файла не останавливался на переименовании.
+TARGET_COLUMN_ALIASES = ("ответственный Сотрудник ХАРД",)
+
+
+def _target_column_index(headers: list) -> int:
+    """Индекс колонки ответственного среди уже нормализованных заголовков."""
+    for title in (TARGET_COLUMN_NAME, *TARGET_COLUMN_ALIASES):
+        want = _norm(title)
+        if want in headers:
+            return headers.index(want)
+    return -1
 LEGACY_SCATTER_ENABLED = False
 LEGACY_SCATTER_DISABLED_MESSAGE = (
     "Legacy-разброс отключён: он пересобирает личные книги из полного экспорта "
@@ -270,10 +284,9 @@ def read_source_employees(source: Path) -> list[str]:
     if len(df) < HEADER_ROW_NAMES:
         raise ValueError("В источнике нет строки заголовков")
     headers = [_norm(v) if pd.notna(v) else "" for v in df.iloc[HEADER_ROW_NAMES - 1]]
-    want = _norm(TARGET_COLUMN_NAME)
-    if want not in headers:
+    tgt = _target_column_index(headers)
+    if tgt < 0:
         raise ValueError(f"В источнике (строка {HEADER_ROW_NAMES}) нет колонки «{TARGET_COLUMN_NAME}»")
-    tgt = headers.index(want)
     seen, employees = set(), []
     for v in df.iloc[DATA_START_ROW - 1:, tgt]:
         name = str(v).strip()
@@ -451,9 +464,11 @@ def _transfer_stats_and_filter(app, file_path: Path, emp_name: str, old_path):
     wb = app.books.open(str(file_path))
     ws = wb.sheets[SHEET_NAME]
     headers = ws.range(f"{HEADER_ROW_NAMES}:{HEADER_ROW_NAMES}").value
-    if TARGET_COLUMN_NAME not in headers:
+    normalized = [_norm(v) if v is not None else "" for v in headers]
+    found = _target_column_index(normalized)
+    if found < 0:
         wb.save(); wb.close(); return
-    tgt = headers.index(TARGET_COLUMN_NAME) + 1
+    tgt = found + 1
     last_row = ws.api.UsedRange.Rows.Count
     max_col = ws.api.UsedRange.Columns.Count
     if last_row >= DATA_START_ROW:

@@ -21,14 +21,15 @@ def _body(response):
 
 def test_bulk_cards_reuses_the_grouped_contract_rows(monkeypatch):
     """Один запрос группировки, без отдельного SQLite-вызова на человека."""
-    contracts_a = [object(), object()]
-    contracts_b = [object()]
+    contracts_a = [{"contract_id": "A1"}, {"contract_id": "A2"}]
+    contracts_b = [{"contract_id": "B1"}]
     grouped = [
         {"rep": "A", "contracts": contracts_a},
         {"rep": "B", "contracts": contracts_b},
     ]
     seen = []
     audit = []
+    extras_calls = []
 
     monkeypatch.setattr(web, "_auth", lambda _request: (77, "Сотрудник"))
     monkeypatch.setattr(web, "lang_of", lambda _uid: "ru")
@@ -37,9 +38,16 @@ def test_bulk_cards_reuses_the_grouped_contract_rows(monkeypatch):
         web.db, "person_contracts",
         lambda _rep: pytest.fail("N+1: повторно запросили договоры карточки"),
     )
+    # Дополнительные поля реестра тоже читаются оптом: один запрос на весь
+    # портфель, а не по одному на карточку.
+    monkeypatch.setattr(
+        web.db, "registry_extra_values",
+        lambda ids: extras_calls.append(list(ids)) or {},
+    )
     monkeypatch.setattr(
         web, "_person_full_from_rows",
-        lambda rows, rep, lang: seen.append((rows, rep, lang)) or {"rep": rep},
+        lambda rows, rep, lang, extras=None: seen.append((rows, rep, lang))
+        or {"rep": rep},
     )
     monkeypatch.setattr(
         web.db, "audit_access", lambda *args, **kwargs: audit.append((args, kwargs)),
@@ -56,6 +64,7 @@ def test_bulk_cards_reuses_the_grouped_contract_rows(monkeypatch):
     assert response.compression is True
     assert audit[0][1]["target"] == "Сотрудник"
     assert json.loads(audit[0][1]["detail"])["contracts"] == 3
+    assert extras_calls == [["A1", "A2", "B1"]]
 
 
 def test_loading_metrics_accept_only_bounded_numbers(monkeypatch):

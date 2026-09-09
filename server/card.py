@@ -68,6 +68,16 @@ def render_person(rep_cid: str, lang: str) -> str | None:
         lines += [f"  ▫️ {v}" for v in details if v]
     if first("reminder_date"):
         lines += ["", f"{t('card_replan', lang)}: <b>{first('reminder_date')}</b>"]
+    # Дополнительные колонки реестра (карта колонок). Их состав задаёт оператор,
+    # поэтому показываем как есть, подписью из карты — переводить нечего.
+    extras = db.registry_extra_values([r["contract_id"] for r in rows])
+    shown: dict[str, str] = {}
+    for items in extras.values():
+        for item in items:
+            shown.setdefault(item["label"], item["value"])
+    if shown:
+        lines += ["", f"<i>{t('card_extra', lang)}:</i>"]
+        lines += [f"  ▫️ {label}: {value}" for label, value in shown.items()]
     return "\n".join(lines)
 
 

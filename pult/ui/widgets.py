@@ -834,6 +834,104 @@ class DecisionTable(QTableWidget):
         self.set_conflicts([], [])
 
 
+class ColumnMapTable(QTableWidget):
+    """Таблица «колонка файла → что с ней делать» для экрана «Колонки реестра».
+
+    Строка = заголовок, который есть в книге, но бот его не читает. Оператор
+    выбирает решение (не читать / связать с полем / дополнительное поле /
+    скрыть) и, для дополнительного поля, задаёт подпись для карточки выездника.
+    Подпись включается только там, где она осмысленна: у остальных решений
+    поле неактивно, чтобы человек не заполнял его впустую.
+    """
+
+    ROW_H = 32
+    DECISION_W = 260
+    LABEL_W = 200
+
+    def __init__(self, parent: QWidget | None = None, visible_rows: int = 10) -> None:
+        super().__init__(0, 4, parent)
+        self.visible_rows = visible_rows
+        self.records: list[dict] = []
+        self.options: list[tuple[str, str]] = []
+        self.setHorizontalHeaderLabels(
+            ["Кол.", "Заголовок в файле", "Что делать", "Подпись в карточке"])
+        self.verticalHeader().setVisible(False)
+        self.verticalHeader().setDefaultSectionSize(self.ROW_H)
+        self.setShowGrid(False)
+        self.setWordWrap(False)
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        header = self.horizontalHeader()
+        header.setHighlightSections(False)
+        header.setStretchLastSection(False)
+        header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.setColumnWidth(0, 48)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.setColumnWidth(2, self.DECISION_W)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.setColumnWidth(3, self.LABEL_W)
+        self._fit(0)
+
+    def _fit(self, n_rows: int) -> None:
+        n = min(max(n_rows, 2), self.visible_rows)
+        self.setFixedHeight(
+            self.horizontalHeader().sizeHint().height() + n * self.ROW_H + 4)
+
+    def set_rows(self, records: list[dict], options: list[tuple[str, str]]) -> None:
+        """records — [{column, title, decision, label}], options — [(ключ, подпись)]."""
+        self.setRowCount(0)
+        self.records = list(records)
+        self.options = list(options)
+        for i, record in enumerate(self.records):
+            self.insertRow(i)
+            for j, value in enumerate((record.get("column", ""), record["title"])):
+                item = QTableWidgetItem(str(value))
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                item.setToolTip(str(value))
+                self.setItem(i, j, item)
+            combo = QComboBox()
+            for key, label_text in self.options:
+                combo.addItem(label_text, key)
+            current = str(record.get("decision") or "skip")
+            index = next((n for n, (key, _) in enumerate(self.options)
+                          if key == current), 0)
+            combo.setCurrentIndex(index)
+            self.setCellWidget(i, 2, combo)
+            edit = QLineEdit(str(record.get("label") or record["title"]))
+            self.setCellWidget(i, 3, edit)
+            combo.currentIndexChanged.connect(
+                lambda _n=0, row=i: self._sync_label(row))
+            self._sync_label(i)
+        self._fit(len(self.records))
+
+    def _sync_label(self, row: int) -> None:
+        combo = self.cellWidget(row, 2)
+        edit = self.cellWidget(row, 3)
+        if combo is None or edit is None:
+            return
+        edit.setEnabled(str(combo.currentData() or "") == "extra")
+
+    def decisions(self) -> list[dict]:
+        """[{title, decision, label}] — по одной записи на строку таблицы."""
+        out: list[dict] = []
+        for i, record in enumerate(self.records):
+            combo = self.cellWidget(i, 2)
+            edit = self.cellWidget(i, 3)
+            out.append({
+                "title": record["title"],
+                "decision": str(combo.currentData() or "skip") if combo else "skip",
+                "label": edit.text().strip() if edit else record["title"],
+            })
+        return out
+
+    def clear_rows(self) -> None:
+        self.set_rows([], self.options)
+
+
 # --- список с галочками ---------------------------------------------------------
 class CheckList(Pane):
     """Рамка со строками «галочка · подпись · (справа)». Строит `set_items`,

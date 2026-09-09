@@ -430,13 +430,18 @@ def _fmt_money_ru(value) -> str:
     return f"{int(canon):,}".replace(",", " ")
 
 
-def _person_full_from_rows(rows, rep: str, lang: str) -> dict | None:
+def _person_full_from_rows(rows, rep: str, lang: str,
+                           extras: dict[str, list[dict]] | None = None) -> dict | None:
     """Полная карточка из уже выбранных строк одного человека.
 
     `/api/cards` получает все группы одним запросом. Повторный
     `db.person_contracts(rep)` на каждую карточку создавал N+1 SQLite-запросов:
     у Фирдавса 270 карточек строились сотнями отдельных соединений. Точечный
     `/api/person` по-прежнему выбирает только своего человека и делегирует сюда.
+
+    ``extras`` — уже прочитанные дополнительные поля реестра по всему портфелю
+    (та же причина: не открывать соединение на каждую карточку). None означает
+    «прочитай сам для этих строк».
     """
     rows = list(rows or [])
     if not rows:
@@ -523,7 +528,24 @@ def _person_full_from_rows(rows, rep: str, lang: str) -> dict | None:
         # оболочкой; сырой master-комментарий форму не префиллит.
         "call_comment": (visit or {}).get("call_comment") or "",
         "tips": (visit or {}).get("tips") or "",
+        # Дополнительные колонки реестра (карта колонок пульта). Состав и
+        # подписи задаёт оператор, поэтому это плоский список, а не схема.
+        "extra": _person_extra(rows, extras),
     }
+
+
+def _person_extra(rows, extras: dict[str, list[dict]] | None) -> list[dict]:
+    """Дополнительные поля человека: по подписи, первое непустое значение."""
+    ids = [r["contract_id"] for r in rows]
+    source = (db.registry_extra_values(ids) if extras is None
+              else {cid: extras.get(cid, []) for cid in ids})
+    shown: dict[str, str] = {}
+    for cid in ids:
+        for item in source.get(cid) or []:
+            if item.get("show_in_card") is False:
+                continue
+            shown.setdefault(item["label"], item["value"])
+    return [{"title": label, "value": value} for label, value in shown.items()]
 
 
 def _person_full(rep: str, lang: str) -> dict | None:
@@ -1175,10 +1197,14 @@ async def _cards(request: web.Request) -> web.Response:
     lang = lang_of(uid)
     cards = {}
     grouped = db.persons_for_employee(emp)
+    # Дополнительные поля всего портфеля — одним запросом по той же причине,
+    # что и сами договоры: карточек бывает под три сотни.
+    all_extras = db.registry_extra_values(
+        [r["contract_id"] for p in grouped for r in p["contracts"]])
     for p in grouped:
         # persons_for_employee уже принёс все строки договоров. Не открываем
         # отдельное SQLite-соединение для каждой карточки.
-        full = _person_full_from_rows(p["contracts"], p["rep"], lang)
+        full = _person_full_from_rows(p["contracts"], p["rep"], lang, all_extras)
         if full:
             cards[p["rep"]] = full
     # ИБ: точечный просмотр карточки логируется в _person (view_card). Здесь — оптовый
@@ -2775,6 +2801,54 @@ IMPORT_REGISTRAR_HTTP = os.getenv("IMPORT_REGISTRAR_HTTP", "").strip() in (
     "1", "true", "yes")
 
 
+async def _admin_registry_columns(request: web.Request) -> web.Response:
+    """Карта колонок реестра + всё, что нужно экрану пульта для сопоставления.
+
+    Отдаём вместе со схемой и контрактными правилами: пульт должен показывать
+    ровно тот разбор заголовков, который потом сделает импорт, а не свою
+    приблизительную копию.
+    """
+    _admin(request)
+    return web.json_response({
+        "map": db.registry_column_map(),
+        "schema": [{"key": f["key"], "title": f["title"], "block": f["block"],
+                    "source": f["source"]} for f in db.export_schema()],
+        "contract_aliases": {k: list(v) for k, v
+                             in db.WORKBOOK_HEADER_ALIASES.items()},
+        "contract_ignored": list(db.WORKBOOK_ALLOWED_IGNORED_HEADERS),
+        "contract_ignored_patterns": list(
+            db.WORKBOOK_ALLOWED_IGNORED_HEADER_PATTERNS),
+        "required_keys": list(db.WORKBOOK_TEST_SUBSET_REQUIRED_KEYS),
+        "limits": {"aliases": db.MAX_COLUMN_MAP_ALIASES,
+                   "ignored": db.MAX_COLUMN_MAP_IGNORED,
+                   "extras": db.MAX_COLUMN_MAP_EXTRAS},
+    })
+
+
+async def _admin_registry_columns_save(request: web.Request) -> web.Response:
+    """Сохранить карту колонок. Ошибка валидации — 409 с человеческим текстом.
+
+    Карта меняет то, как читается боевой реестр, поэтому запись логируется в
+    журнал доступа: по нему видно, кто и когда переопределил колонку.
+    """
+    _admin(request)
+    body = await request.json()
+    device = db.admin_device_by_token(request.headers.get("X-Device-Token") or "")
+    author = (device["name"] if device else "мастер-ключ")
+    try:
+        saved = db.save_registry_column_map(body.get("map") or body, author=author)
+    except (ValueError, TypeError) as exc:
+        return web.json_response({"error": str(exc)}, status=409)
+    db.audit_access(
+        0, "registry_columns_save", target=author,
+        detail=json.dumps(
+            {"aliases": sum(len(v) for v in saved["aliases"].values()),
+             "ignored": len(saved["ignored"]), "extras": len(saved["extras"])},
+            ensure_ascii=False, separators=(",", ":")),
+    )
+    return web.json_response({"ok": True, "map": saved})
+
+
 async def _admin_import_authorize(request: web.Request) -> web.Response:
     """Зарегистрировать один exact proof (если ручка включена)."""
     _admin(request)
@@ -3778,6 +3852,9 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/admin/import.json", _admin_import_json)
     app.router.add_post("/admin/import/preview.json", _admin_import_preview_json)
     app.router.add_post("/admin/import/authorize.json", _admin_import_authorize)
+    app.router.add_get("/admin/registry_columns.json", _admin_registry_columns)
+    app.router.add_post("/admin/registry_columns.json",
+                        _admin_registry_columns_save)
     app.router.add_post("/admin/device/enroll.json", _admin_device_enroll)
     app.router.add_get("/admin/devices.json", _admin_devices)
     app.router.add_post("/admin/device/revoke.json", _admin_device_revoke)

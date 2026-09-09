@@ -738,6 +738,21 @@ def init_db() -> None:
               value TEXT
             )
         """)
+        # Дополнительные колонки реестра (карта колонок, см. registry_column_map).
+        # Отдельная таблица, а не новые колонки clients: офис добавляет столбцы
+        # когда захочет, а экспортная схема и её отпечаток должны оставаться
+        # ровно теми, под которые сделаны шаблоны офиса и registry_cycle.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS client_extra (
+              contract_id TEXT NOT NULL,
+              slot TEXT NOT NULL,
+              title TEXT NOT NULL,
+              label TEXT NOT NULL,
+              value TEXT,
+              updated_at TEXT,
+              PRIMARY KEY (contract_id, slot)
+            )
+        """)
         # Доверенная граница внешнего импорта. HTTP-клиент не может создавать
         # эти записи: exact proof заранее регистрируется локальным/root CLI.
         # Head переживает application reset и не даёт переиграть старый master.
@@ -3769,6 +3784,238 @@ def _scoring_only_headers() -> dict[str, str]:
     return SCORING_ONLY_HEADERS
 
 
+# --- Карта колонок реестра (правится оператором, без правки кода) -------------
+# Зачем: общий реестр живёт своей жизнью. В сентябре 2026 офис разделил
+# «ответственный Сотрудник» на «…ХАРД» и «…СОФТ», «Дата закрепления» — так же,
+# и добавил блок акции. Обязательная колонка исчезла по имени — импорт встал
+# целиком, и починить его можно было только правкой кода и выкладкой.
+#
+# Карта снимает это с кода и отдаёт оператору. Три вида решений:
+#   * alias   — «эта колонка файла и есть вот это поле реестра» (переименование);
+#   * ignore  — «эта колонка нам не нужна, не шуми ею в отчёте»;
+#   * extra   — «читай её как дополнительное поле» (новая колонка попадает в БД
+#               и в карточку, не меняя экспортную схему и её отпечаток).
+# Схема полей (fields.py), контракт обмена и форма файла при этом НЕ меняются:
+# карта живёт в settings рабочей базы и накладывается поверх контракта.
+REGISTRY_COLUMN_MAP_SETTING = "registry_column_map"
+REGISTRY_COLUMN_MAP_VERSION = 1
+# Границы намеренно тесные: карта — инструмент оператора, а не второй схемы.
+MAX_COLUMN_MAP_ALIASES = 64
+MAX_COLUMN_MAP_IGNORED = 128
+MAX_COLUMN_MAP_EXTRAS = 24
+MAX_COLUMN_TITLE_LEN = 160
+MAX_EXTRA_VALUE_LEN = 500
+
+
+def _empty_column_map() -> dict:
+    return {"version": REGISTRY_COLUMN_MAP_VERSION, "aliases": {},
+            "ignored": [], "extras": [], "updated_at": "", "updated_by": ""}
+
+
+def _clean_title(value) -> str:
+    """Заголовок как его написал офис: схлопнутые пробелы, без хвостов."""
+    return " ".join(str(value or "").split())[:MAX_COLUMN_TITLE_LEN]
+
+
+def _extra_slot(title: str) -> str:
+    """Ключ доп. поля в БД — нормализованный заголовок.
+
+    Именно нормализованный: офис правит регистр и пробелы, а история значений
+    должна остаться той же самой колонкой, а не завестись заново.
+    """
+    return _norm_title(title)
+
+
+def validate_registry_column_map(payload) -> dict:
+    """Проверить и нормализовать карту. ValueError — с человеческим текстом.
+
+    Правила, которые важнее удобства:
+      * alias ведёт только на существующее поле схемы;
+      * один заголовок — одно решение (alias / ignore / extra, не два сразу);
+      * заголовок, который уже канонический для другого поля, алиасом не
+        перебивается: иначе импорт получил бы два источника одного ключа и
+        отбился бы как дубль — но уже на боевом файле и без объяснений.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("карта колонок должна быть объектом")
+    out = _empty_column_map()
+
+    canonical = {_norm_title(f.title): f.key for f in FIELDS}
+    reserved = dict(canonical)
+    for title, key in _SCORING_ONLY_TITLES.items():
+        reserved.setdefault(_norm_title(title), key)
+    for title, key in RECALL_TITLES.items():
+        reserved.setdefault(_norm_title(title), key)
+
+    decided: dict[str, str] = {}          # нормализованный заголовок → решение
+
+    aliases_raw = payload.get("aliases") or {}
+    if not isinstance(aliases_raw, dict):
+        raise ValueError("aliases должен быть объектом «поле → заголовки»")
+    total_aliases = 0
+    for key, titles in aliases_raw.items():
+        key = str(key or "").strip()
+        if key not in BY_KEY:
+            raise ValueError(f"поля «{key}» нет в схеме реестра")
+        if isinstance(titles, str):
+            titles = [titles]
+        if not isinstance(titles, list):
+            raise ValueError(f"aliases.{key} должен быть списком заголовков")
+        cleaned: list[str] = []
+        for title in titles:
+            title = _clean_title(title)
+            if not title:
+                continue
+            slot = _norm_title(title)
+            if not slot:
+                continue
+            owner = reserved.get(slot)
+            if owner is not None and owner != key:
+                raise ValueError(
+                    f"«{title}» — это штатный заголовок поля «{owner}»; "
+                    "его нельзя назначить другому полю"
+                )
+            if slot in decided and decided[slot] != f"alias:{key}":
+                raise ValueError(
+                    f"«{title}» уже занят другим решением карты колонок"
+                )
+            decided[slot] = f"alias:{key}"
+            if title not in cleaned:
+                cleaned.append(title)
+                total_aliases += 1
+        if cleaned:
+            out["aliases"][key] = cleaned
+    if total_aliases > MAX_COLUMN_MAP_ALIASES:
+        raise ValueError(f"слишком много алиасов (максимум {MAX_COLUMN_MAP_ALIASES})")
+
+    ignored_raw = payload.get("ignored") or []
+    if not isinstance(ignored_raw, list):
+        raise ValueError("ignored должен быть списком заголовков")
+    for title in ignored_raw:
+        title = _clean_title(title)
+        if not title:
+            continue
+        slot = _norm_title(title)
+        if not slot:
+            continue
+        if slot in reserved:
+            raise ValueError(
+                f"«{title}» — штатная колонка реестра, её нельзя выключить"
+            )
+        if slot in decided and decided[slot] != "ignore":
+            raise ValueError(f"«{title}» уже занят другим решением карты колонок")
+        decided[slot] = "ignore"
+        if title not in out["ignored"]:
+            out["ignored"].append(title)
+    if len(out["ignored"]) > MAX_COLUMN_MAP_IGNORED:
+        raise ValueError(f"слишком много скрытых колонок (максимум {MAX_COLUMN_MAP_IGNORED})")
+
+    extras_raw = payload.get("extras") or []
+    if not isinstance(extras_raw, list):
+        raise ValueError("extras должен быть списком колонок")
+    seen_slots: set[str] = set()
+    for item in extras_raw:
+        if isinstance(item, str):
+            item = {"title": item}
+        if not isinstance(item, dict):
+            raise ValueError("каждая дополнительная колонка — объект {title, label}")
+        title = _clean_title(item.get("title"))
+        if not title:
+            continue
+        slot = _norm_title(title)
+        if not slot:
+            continue
+        if slot in reserved:
+            raise ValueError(
+                f"«{title}» — штатная колонка реестра; дополнительной она быть не может"
+            )
+        if slot in decided and decided[slot] != "extra":
+            raise ValueError(f"«{title}» уже занят другим решением карты колонок")
+        if slot in seen_slots:
+            continue
+        decided[slot] = "extra"
+        seen_slots.add(slot)
+        label = _clean_title(item.get("label")) or title
+        show = bool(item.get("show_in_card", True))
+        out["extras"].append({"title": title, "label": label,
+                              "show_in_card": show})
+    if len(out["extras"]) > MAX_COLUMN_MAP_EXTRAS:
+        raise ValueError(f"слишком много дополнительных колонок (максимум {MAX_COLUMN_MAP_EXTRAS})")
+    return out
+
+
+def registry_column_map() -> dict:
+    """Карта из рабочей базы. Битая запись — не авария: возвращаем пустую.
+
+    Импорт обязан пережить испорченную настройку: без карты он просто ведёт
+    себя как до её появления, а не отказывается работать целиком.
+    """
+    raw = get_setting(REGISTRY_COLUMN_MAP_SETTING)
+    if not raw:
+        return _empty_column_map()
+    try:
+        stored = json.loads(raw)
+        out = validate_registry_column_map(stored)
+    except (ValueError, TypeError):
+        return _empty_column_map()
+    out["updated_at"] = str((stored or {}).get("updated_at") or "")
+    out["updated_by"] = str((stored or {}).get("updated_by") or "")
+    return out
+
+
+def save_registry_column_map(payload, *, author: str = "") -> dict:
+    """Сохранить проверенную карту. Возвращает то, что реально записано."""
+    out = validate_registry_column_map(payload)
+    out["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    out["updated_by"] = _clean_title(author)
+    set_setting(REGISTRY_COLUMN_MAP_SETTING,
+                json.dumps(out, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":")))
+    return out
+
+
+def registry_extra_values(contract_ids) -> dict[str, list[dict]]:
+    """{КД: [{slot, title, label, value}]} — дополнительные поля из реестра.
+
+    Порядок и подписи берутся из ТЕКУЩЕЙ карты колонок, а не из строки в базе:
+    оператор может переименовать подпись или скрыть колонку из карточки, и это
+    должно сработать сразу, не дожидаясь следующего импорта. Колонку, которую
+    из карты убрали совсем, не показываем — значения остаются в базе до
+    ближайшего импорта, но карточка о них больше не знает.
+    """
+    ids = [str(c) for c in contract_ids if c]
+    if not ids:
+        return {}
+    declared = {}
+    for index, item in enumerate(registry_column_map()["extras"]):
+        declared[_extra_slot(item["title"])] = (index, item)
+    if not declared:
+        return {}
+    out: dict[str, list[dict]] = {}
+    with connect() as conn:
+        marks = ",".join("?" for _ in ids)
+        rows = conn.execute(
+            f"SELECT contract_id, slot, title, label, value FROM client_extra "
+            f"WHERE contract_id IN ({marks}) AND COALESCE(value,'') <> ''",
+            tuple(ids),
+        ).fetchall()
+    for row in rows:
+        found = declared.get(row["slot"])
+        if not found:
+            continue
+        index, item = found
+        out.setdefault(row["contract_id"], []).append({
+            "slot": row["slot"], "title": item["title"], "label": item["label"],
+            "value": row["value"], "show_in_card": bool(item["show_in_card"]),
+            "_order": index,
+        })
+    for items in out.values():
+        items.sort(key=lambda item: (item["_order"], item["label"]))
+        for item in items:
+            item.pop("_order", None)
+    return out
+
+
 # --- Разбор ячейки отзыва -----------------------------------------------------
 # Мусор, который в живых реестрах пишут вместо пустоты. «Непусто = отозван»
 # без этого списка снимало бы договоры на «нет», «-», «н/д» и протянутой
@@ -4668,6 +4915,9 @@ def import_grid(
               "preview_only": bool(preview_only),
               "total_rows": 0, "inserted": 0, "updated": 0,
               "skipped_no_id": 0, "duplicates": 0, "unknown_columns": [],
+              # Карта колонок: что оператор связал руками и что прочитано как
+              # дополнительные поля. Видно в том же отчёте, что и всё остальное.
+              "operator_aliases": [], "extra_columns": [], "extra_cells": 0,
               "protected_cells": 0, "protected_contracts": 0,
               "office_cells": 0, "office_contracts": 0, "office_applied": {},
               "office_by_key": {}, "protected_by_key": {},
@@ -4935,6 +5185,19 @@ def import_grid(
                     f"{alias!r} -> {prior}/{alias_key}"
                 )
             title_to_key[normalized] = alias_key
+    # Карта колонок оператора ложится ПОВЕРХ контракта. Она не может перебить
+    # штатный заголовок чужого поля (это проверено при сохранении), поэтому
+    # добавляет только то, чего контракт про этот файл ещё не знает.
+    column_map = registry_column_map()
+    operator_aliases: list[str] = []
+    for alias_key, aliases in column_map["aliases"].items():
+        for alias in aliases:
+            normalized = _norm_title(alias)
+            if not normalized or title_to_key.get(normalized) == alias_key:
+                continue
+            title_to_key[normalized] = alias_key
+            operator_aliases.append(f"{alias} → {BY_KEY[alias_key].title}")
+    report["operator_aliases"] = operator_aliases
     if not rows or len(rows) < 2:
         report["blocked"] = True
         report["error"] = "импорт заблокирован: книга не содержит данных и заголовков"
@@ -5046,19 +5309,33 @@ def import_grid(
     allowed_ignored_titles = {
         _norm_title(title) for title in WORKBOOK_ALLOWED_IGNORED_HEADERS
     }
+    # Скрытые оператором колонки — такие же «известные лишние», как в контракте.
+    allowed_ignored_titles |= {
+        _norm_title(title) for title in column_map["ignored"]
+    }
+    # Дополнительные колонки: оператор решил их читать.
+    extra_by_slot = {
+        _extra_slot(item["title"]): item for item in column_map["extras"]
+    }
     allowed_ignored_patterns = tuple(
         re.compile(pattern)
         for pattern in WORKBOOK_ALLOWED_IGNORED_HEADER_PATTERNS
     )
     ignored_columns: list[str] = []
     unknown_columns: list[str] = []
-    for cell, key in zip(rows[best_h], col_keys):
+    extra_columns: list[str] = []
+    extra_cols: dict[int, dict] = {}
+    for index, (cell, key) in enumerate(zip(rows[best_h], col_keys)):
         if cell in (None, "") or key is not None:
             continue
         title = str(cell).strip()
         if not title:
             continue
-        if (
+        extra = extra_by_slot.get(_extra_slot(title))
+        if extra is not None:
+            extra_cols[index] = extra
+            extra_columns.append(extra["label"])
+        elif (
             _norm_title(title) in allowed_ignored_titles
             or any(pattern.fullmatch(title) for pattern in allowed_ignored_patterns)
         ):
@@ -5067,6 +5344,7 @@ def import_grid(
             unknown_columns.append(title)
     report["ignored_columns"] = ignored_columns
     report["unknown_columns"] = unknown_columns
+    report["extra_columns"] = extra_columns
     if report["unknown_columns"]:
         # ПРЕДУПРЕЖДЕНИЕ, а не отказ (03.08.2026, решение владельца). Раньше одна
         # незнакомая колонка отбивала весь файл: в боевом реестре 88+ колонок,
@@ -5074,8 +5352,8 @@ def import_grid(
         # который боту вообще не нужен. Колонки по-прежнему не читаются — они
         # просто не мешают, и их видно в отчёте.
         report["warnings"] = report.get("warnings", []) + [
-            "незнакомые заголовки пропущены (нужен alias или новая версия "
-            "контракта, чтобы бот начал их читать): "
+            "незнакомые заголовки пропущены — свяжи их с полем или включи как "
+            "дополнительные на экране «Колонки реестра»: "
             + ", ".join(report["unknown_columns"][:20])
         ]
 
@@ -5219,6 +5497,7 @@ def import_grid(
     # Сначала разобрать ВЕСЬ файл в памяти. Это обязательный preflight: при
     # повторе КД не должна успеть записаться ни одна предыдущая строка.
     grouped: dict[str, dict] = {}
+    extra_values: dict[str, dict[str, str]] = {}
     duplicate_conflicts: dict[str, set[str]] = {}
     duplicate_rows: dict[str, list[int]] = {}
     first_rows: dict[str, int] = {}
@@ -5299,6 +5578,26 @@ def import_grid(
         if not cid:
             report["skipped_no_id"] += 1
             continue
+        if extra_cols:
+            # Дополнительные поля сохраняем как ТЕКСТ, как он стоит в файле:
+            # смысл новой колонки боту неизвестен, и любое «умное» приведение
+            # типа здесь означало бы догадку о чужих данных.
+            slot_values = extra_values.setdefault(cid, {})
+            for index, item in extra_cols.items():
+                val = raw[index] if index < len(raw) else None
+                if val is None:
+                    continue
+                if isinstance(val, datetime):
+                    text = val.strftime("%Y-%m-%d")
+                elif isinstance(val, date):
+                    text = val.isoformat()
+                elif isinstance(val, float) and val.is_integer():
+                    text = str(int(val))
+                else:
+                    text = str(val).strip()
+                if text:
+                    slot_values.setdefault(_extra_slot(item["title"]),
+                                           text[:MAX_EXTRA_VALUE_LEN])
         if cid not in grouped:
             grouped[cid] = data
             first_rows[cid] = offset
@@ -5937,6 +6236,38 @@ def import_grid(
                 tuple(data.values()),
             )
             report["updated" if is_update else "inserted"] += 1
+            slot_values = extra_values.get(cid) or {}
+            if extra_cols:
+                # Пустая ячейка дополнительной колонки — это «значения больше
+                # нет» (акция закончилась), поэтому строки, которых нет во
+                # входе, удаляем: иначе карточка вечно показывала бы прошлое.
+                keep = tuple(slot_values)
+                if keep:
+                    marks = ",".join("?" for _ in keep)
+                    conn.execute(
+                        "DELETE FROM client_extra WHERE contract_id=? "
+                        f"AND slot NOT IN ({marks})",
+                        (cid, *keep),
+                    )
+                else:
+                    conn.execute(
+                        "DELETE FROM client_extra WHERE contract_id=?", (cid,))
+                for item in extra_cols.values():
+                    slot = _extra_slot(item["title"])
+                    value = slot_values.get(slot)
+                    if not value:
+                        continue
+                    conn.execute(
+                        "INSERT INTO client_extra "
+                        "(contract_id, slot, title, label, value, updated_at) "
+                        "VALUES (?,?,?,?,?,?) "
+                        "ON CONFLICT(contract_id, slot) DO UPDATE SET "
+                        "title=excluded.title, label=excluded.label, "
+                        "value=excluded.value, updated_at=excluded.updated_at",
+                        (cid, slot, item["title"], item["label"], value,
+                         date.today().isoformat()),
+                    )
+                    report["extra_cells"] += 1
         report["office_contracts"] = len(office_cids)        # договоры, не строки
         report["protected_contracts"] = len(protected_cids)
         report["isolated_call_contracts"] = len(isolated_call_cids)

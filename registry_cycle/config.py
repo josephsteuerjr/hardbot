@@ -78,6 +78,19 @@ class FieldConfig:
     strict_header_color_validation: bool = False
     month_rollover: MonthRolloverConfig | None = None
 
+    def title_variants(self, title: str) -> set[str]:
+        """Нормализованные написания колонки: каноническое + все алиасы.
+
+        Офис переименовывает колонки общего реестра, не спрашивая никого (в
+        сентябре 2026 «ответственный Сотрудник» стал «…ХАРД»). Искать колонку
+        по одному буквальному заголовку — значит останавливать перенос личных
+        реестров на каждом таком переименовании.
+        """
+        return {
+            norm_title(title),
+            *(norm_title(alias) for alias in self.aliases.get(title, ())),
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class GroupConfig:
@@ -781,10 +794,22 @@ def _parse_fields(raw: dict[str, Any]) -> FieldConfig:
         for canonical, values in (raw.get("aliases") or {}).items()
     }
     collect_titles = {rule.title for rule in collect}
-    unknown_alias_targets = set(aliases) - collect_titles
+    # Колонки границы (ключ, ответственный, прежний ответственный) в collect не
+    # входят — цикл их не собирает вверх, а только читает. Но переименовать их
+    # офис может ровно так же, поэтому алиас для них законен. Как и для любой
+    # другой колонки реестра: вниз, к сотруднику, цикл переносит весь профиль,
+    # и сопоставление колонок master ↔ personal идёт по тем же заголовкам.
+    boundary_titles = {
+        str(schema.get("key_title") or ""),
+        str(schema.get("responsible_title") or ""),
+        str(schema.get("previous_responsible_title") or ""),
+    } - {""}
+    registry_titles = {field.title for field in _hardbot_fields.FIELDS}
+    unknown_alias_targets = (
+        set(aliases) - collect_titles - boundary_titles - registry_titles)
     if unknown_alias_targets:
         raise ConfigurationError(
-            "aliases ссылаются на поля вне collect: "
+            "aliases ссылаются на поля вне collect и границы: "
             f"{sorted(unknown_alias_targets)}"
         )
 

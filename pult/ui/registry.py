@@ -11,6 +11,7 @@ import razbros
 from PySide6.QtWidgets import QWidget
 
 from ..core import enrichment as en
+from ..core import header_map as hm
 from ..core import registry_import as ri
 from ..core.constants import (LIMITED_TEST_ENRICH_DISABLED_MESSAGE,
                               LIMITED_TEST_ENRICH_WRITES_ENABLED)
@@ -18,14 +19,16 @@ from ..core.dashboard import period_text
 from ..core.export import export_confirm_text, write_markers_xlsx, write_registry_xlsx
 from ..core.text import fmt_n, to_iso, today_text
 from . import dialogs
-from .widgets import (Button, Card, CheckList, Combo, DateField, DecisionTable, Field,
-                      KVGrid, Note, Page, Rows, Table, WrapCheck, hrow, label)
+from .widgets import (Button, Card, CheckList, ColumnMapTable, Combo, DateField,
+                      DecisionTable, Field, KVGrid, Note, Page, Rows, Table, WrapCheck,
+                      hrow, label)
 
 
 class RegistrySection:
     # ── сборка ────────────────────────────────────────────────────────────
     def build_registry(self) -> Page:
         page = Page()
+        page.add(self._card_columns())
         page.add(self._card_import())
         page.add(self._card_enrich())
         page.add(self._card_export())
@@ -36,6 +39,30 @@ class RegistrySection:
         self.reset_out.hide()
         self._scatter_restore()
         return page
+
+    def _card_columns(self) -> Card:
+        col = Card("Колонки реестра",
+                   "Что делать, когда офис переименовал колонку или добавил "
+                   "новую. Открой книгу — пульт покажет, какие заголовки бот "
+                   "не читает, и предложит связать их с полем. Правка "
+                   "сохраняется на сервере и действует для всех загрузок: "
+                   "менять код и обновлять сервер для этого не нужно.")
+        col.add_row(Button("Проверить книгу…", self.columns_check, kind="accent"),
+                    Button("Обновить карту с сервера", self.columns_reload))
+        self.col_file_lbl = col.add(Note("", "small"))
+        self.col_state = col.add(Note("", "warn"))
+        self.col_table = col.add(ColumnMapTable(), spacing_before=4)
+        self.col_table.hide()
+        self.col_save_btn = Button("Сохранить карту на сервере", self.columns_save,
+                                   kind="accent")
+        self.col_save_row = QWidget()
+        self.col_save_row.setLayout(hrow(self.col_save_btn))
+        col.add(self.col_save_row, spacing_before=4)
+        self.col_save_row.hide()
+        self.col_summary = col.add(Note("", "tiny"))
+        self._col_analysis = None
+        self._col_path = ""
+        return col
 
     def _card_import(self) -> Card:
         imp = Card("Импорт реестра",
@@ -216,6 +243,101 @@ class RegistrySection:
             self.rec_tv.set_rows([ri.recalled_row(it) for it in d.get("items") or []])
         self.bg_task(lambda: self.api("GET", q), done)
 
+    # ── колонки реестра ─────────────────────────────────────────────────────
+    def columns_reload(self, *, quiet: bool = False, then=None):
+        """Забрать карту колонок и схему с сервера. Без неё пульт разбирает
+        книгу по одному контракту — как до появления карты."""
+        def done(payload):
+            hm.remember(payload)
+            self.col_summary.setText(hm.map_summary(hm.current_map()))
+            if not quiet:
+                self.toast("Карта колонок обновлена")
+            if then:
+                then()
+
+        def fail(exc):
+            # Старый сервер такой ручки не знает: это не авария, просто карту
+            # редактировать негде — работаем по контракту.
+            self.col_summary.setText(f"Карта колонок недоступна: {exc}")
+            if not quiet:
+                self.toast(str(exc), err=True)
+            if then:
+                then()
+
+        self.bg_task(lambda: self.api("GET", "/admin/registry_columns.json"),
+                     done, fail)
+
+    def columns_check(self):
+        """Разобрать шапку выбранной книги и показать нерешённые колонки."""
+        path = dialogs.askopenfilename(
+            "Реестр", [("Excel", "*.xlsx *.xlsm *.xlsb *.xls")], parent=self)
+        if not path:
+            return
+        self._col_path = path
+        self.col_file_lbl.setText("Читаю шапку " + Path(path).name + "…")
+        self.col_table.hide()
+        self.col_save_row.hide()
+
+        def work():
+            payload = self.api("GET", "/admin/registry_columns.json")
+            hm.remember(payload)
+            return hm.analyze(hm.read_header_grid(path))
+
+        def done(analysis):
+            self._col_analysis = analysis
+            self._columns_render()
+
+        def fail(exc):
+            self._col_analysis = None
+            self.col_file_lbl.setText(f"Шапка не разобрана: {exc}")
+            self.col_state.setText("")
+            self.toast("Книга не прочитана", err=True)
+
+        self.bg_task(work, done, fail)
+
+    def _columns_render(self):
+        analysis = self._col_analysis or {}
+        self.col_file_lbl.setText(ri.columns_caption(self._col_path, analysis))
+        self.col_state.setText(ri.columns_state_text(analysis))
+        rows = hm.decisions_from_map(analysis.get("unknown") or [])
+        options = hm.decision_options(analysis.get("missing") or [])
+        self.col_table.set_rows(rows, options)
+        self.col_table.setVisible(bool(rows))
+        self.col_save_row.setVisible(bool(rows))
+        self.col_summary.setText(hm.map_summary(hm.current_map()))
+
+    def columns_save(self):
+        """Отправить решения оператора на сервер и перечитать книгу."""
+        if not self._col_analysis:
+            self.toast("Сначала проверь книгу", err=True)
+            return
+        decisions = self.col_table.decisions()
+        new_map = hm.apply_decisions(hm.current_map(), decisions)
+        self.col_save_btn.configure(state="disabled")
+
+        def work():
+            answer = self.api("POST", "/admin/registry_columns.json",
+                              {"map": new_map})
+            if isinstance(answer, dict) and answer.get("error"):
+                raise RuntimeError(answer["error"])
+            hm.update_map(answer.get("map"))
+            if self._col_path:
+                return hm.analyze(hm.read_header_grid(self._col_path))
+            return None
+
+        def done(analysis):
+            self.col_save_btn.configure(state="normal")
+            if analysis is not None:
+                self._col_analysis = analysis
+                self._columns_render()
+            self.toast("Карта колонок сохранена")
+
+        def fail(exc):
+            self.col_save_btn.configure(state="normal")
+            self.toast(str(exc), err=True)
+
+        self.bg_task(work, done, fail)
+
     # ── импорт: выбор книги и галочки ───────────────────────────────────────
     def _imp_vars_reset(self):
         for var in (self.imp_full_var, self.imp_restore_manual_var,
@@ -234,6 +356,12 @@ class RegistrySection:
         self.imp_file_lbl.setText("Читаю " + Path(path).name + "…")
 
         def work():
+            # Карта колонок нужна ДО разбора книги: именно она отвечает, какая
+            # колонка файла является ответственным, если офис её переименовал.
+            try:
+                hm.remember(self.api("GET", "/admin/registry_columns.json"))
+            except Exception:                              # noqa: BLE001
+                pass          # старый сервер — читаем книгу по одному контракту
             book = ri.read_registry(path)
             stats = self.api("GET", "/admin/stats")
             book["db_employees"] = list(stats.get("employees") or [])
@@ -260,7 +388,9 @@ class RegistrySection:
             self.imp_restore_manual_var.set(False)
             self._invalidate_import_preview(clear_report=True)
             self._imp_render()
-            self.imp_file_lbl.setText(f"Файл не разобран: {exc}")
+            self.imp_file_lbl.setText(
+                f"Файл не разобран: {exc}\nЕсли офис переименовал колонку — "
+                "открой «Колонки реестра» выше и свяжи новый заголовок с полем.")
             self.toast("Реестр не прочитан", err=True)
 
         self.bg_task(work, done, fail)

@@ -142,19 +142,31 @@ def grid_layout(grid: list[list]) -> tuple[int, int, int, int]:
     """
     import exchange_contract as contract
 
-    head = None
-    for i, row in enumerate(grid[:10]):
-        titles = {enrich.norm_title(c) for c in row}
-        if enrich.norm_title("Номер КД / ID") in titles:
+    from . import header_map
+
+    # Колонки ищем НЕ по буквальному заголовку, а по ключу поля: офис вправе
+    # переименовать колонку, и с сентября 2026 так и сделал («ответственный
+    # Сотрудник» → «…ХАРД»). Карта колонок и алиасы контракта отвечают на
+    # вопрос «какая колонка файла и есть это поле» — здесь мы просто их
+    # спрашиваем, теми же правилами, что применит сервер при импорте.
+    mapping = header_map.title_to_key()
+    key_title = contract.WORKBOOK_CONTRACT_TITLE
+    who_title = contract.WORKBOOK_RESPONSIBLE_TITLE
+    head = c_id = c_who = None
+    for i, row in enumerate(grid[:contract.WORKBOOK_HEADER_SEARCH_ROWS]):
+        keys = [mapping.get(enrich.norm_title(c)) for c in row]
+        if contract.WORKBOOK_CONTRACT_KEY in keys:
             head = i
+            c_id = keys.index(contract.WORKBOOK_CONTRACT_KEY)
+            c_who = (keys.index(contract.WORKBOOK_RESPONSIBLE_KEY)
+                     if contract.WORKBOOK_RESPONSIBLE_KEY in keys else None)
             break
     if head is None:
-        raise ValueError("в книге нет колонки «Номер КД / ID»")
-    cols = {enrich.norm_title(c): j for j, c in enumerate(grid[head]) if c}
-    c_id = cols[enrich.norm_title("Номер КД / ID")]
-    c_who = cols.get(enrich.norm_title("ответственный Сотрудник"))
+        raise ValueError(f"в книге нет колонки «{key_title}»")
     if c_who is None:
-        raise ValueError("в книге нет колонки «ответственный Сотрудник»")
+        raise ValueError(
+            f"в книге нет колонки «{who_title}». Если офис её переименовал — "
+            "свяжи новый заголовок с полем на экране «Колонки реестра»")
     first = head + 1
     type_row_index = head + contract.WORKBOOK_TYPE_ROW_OFFSET
     tags = {enrich.norm_title(t) for t in contract.WORKBOOK_TYPE_ROW_TAGS}
@@ -253,6 +265,47 @@ def read_registry(path: str) -> dict:
             "file_sha256": stable["file_sha256"], "scope": rows,
             "employees": employees,
             "published": published, "no_receipt": no_receipt}
+
+
+# --- экран «Колонки реестра» -------------------------------------------------
+def columns_caption(path: str, analysis: dict) -> str:
+    """Подпись под кнопкой: файл, строка шапки, что нашлось."""
+    if not analysis:
+        return ""
+    return (f"{Path(path).name} · шапка в строке {analysis['header_row']} · "
+            f"распознано полей: {len(analysis['recognized'])} · "
+            f"не читается колонок: {len(analysis['unknown'])} · "
+            f"дополнительных: {len(analysis['extras'])}")
+
+
+def columns_state_text(analysis: dict) -> str:
+    """Главное сообщение экрана: пройдёт ли импорт и что решать человеку."""
+    if not analysis:
+        return ""
+    lines: list[str] = []
+    if not analysis.get("has_contract_key"):
+        lines.append(
+            "В книге не нашлась колонка-ключ «Номер КД / ID». Импорт "
+            "невозможен, пока она не будет связана с полем ниже.")
+    missing_required = analysis.get("missing_required") or []
+    if missing_required:
+        lines.append(
+            "Не хватает обязательных колонок: "
+            + ", ".join(item["title"] for item in missing_required)
+            + ". Импорт заблокируется, пока они не найдены. Если офис их "
+            "переименовал — выбери новый заголовок в таблице ниже.")
+    unknown = analysis.get("unknown") or []
+    if unknown:
+        suggested = [item for item in unknown if item.get("suggest")]
+        lines.append(
+            f"Бот не читает {len(unknown)} колонок книги."
+            + (f" Для {len(suggested)} из них подсказано поле — проверь и сохрани."
+               if suggested else
+               " Если какая-то из них нужна выезднику, включи её как "
+               "дополнительное поле."))
+    if not lines:
+        lines.append("Все колонки книги разобраны: решать нечего.")
+    return "\n".join(lines)
 
 
 def source_kind_text(book: dict) -> str:
@@ -581,8 +634,18 @@ def import_notes(d: dict) -> list[str]:
     unk = d.get("unknown_columns") or []
     if unk:
         notes.append(
-            "Незнакомые колонки требуют новой версии контракта: "
-            + ", ".join(unk)
+            "Бот не читает эти колонки файла: " + ", ".join(unk)
+            + ". Реши, что с ними делать, на экране «Колонки реестра»: связать "
+            "с полем, включить как дополнительные или скрыть."
+        )
+    aliases = d.get("operator_aliases") or []
+    if aliases:
+        notes.append("Связано вручную (карта колонок): " + ", ".join(aliases))
+    extra_columns = d.get("extra_columns") or []
+    if extra_columns:
+        notes.append(
+            "Дополнительные колонки прочитаны: " + ", ".join(extra_columns)
+            + f" · значений {fmt_n(d.get('extra_cells'))}."
         )
     ignored = d.get("ignored_columns") or []
     if ignored:

@@ -1,6 +1,6 @@
 {
   "schema": "hardbot.data-exchange-contract.v1",
-  "version": 3,
+  "version": 4,
   "artifacts": {
     "snapshot_kind": "hardbot_limited_test_pre_reset.v2",
     "enrichment_evidence_schema": "hardbot.pult-enrichment.v2",
@@ -63,10 +63,18 @@
     "header_aliases": {
       "last_payment_sum": [
         "Блок оплат и обещаний"
+      ],
+      "responsible": [
+        "ответственный Сотрудник ХАРД"
+      ],
+      "assign_date": [
+        "Дата закрепления ХАРД"
       ]
     },
     "allowed_ignored_headers": [
       "Страна",
+      "ответственный Сотрудник СОФТ",
+      "Дата закрепления СОФТ",
       "Подразделение",
       "ФИО кириллица",
       "пред отв",

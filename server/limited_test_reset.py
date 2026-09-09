@@ -45,6 +45,10 @@ RESET_TABLES = {
     # training_rows, где ПД нет по построению).
     "push_log",
     "clients",
+    # Дополнительные поля реестра привязаны к КД (client_extra.contract_id).
+    # Кейсы сброс уносит, значит и их дополнительные значения — иначе после
+    # следующего импорта в карточке всплыли бы данные исчезнувшего договора.
+    "client_extra",
     "visits",
     "users",
     "agent_bind",
@@ -115,6 +119,7 @@ DELETE_ORDER = (
     "agent_bind",
     "users",
     "visits",
+    "client_extra",
     "clients",
     "settings",
 )

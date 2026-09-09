@@ -21,12 +21,16 @@ def _trim_width(rows: list[list[Any]], header_row: int) -> int:
 
 
 def _find_header(rows: list[list[Any]], fields: FieldConfig) -> int:
-    key = norm_title(fields.key_title)
-    responsible = norm_title(fields.responsible_title)
+    # Колонки границы ищем по всем известным написаниям: переименование в общем
+    # реестре («ответственный Сотрудник» → «…ХАРД») не должно останавливать
+    # перенос личных реестров.
+    key = fields.title_variants(fields.key_title)
+    responsible = fields.title_variants(fields.responsible_title)
     candidates: list[tuple[bool, int, int]] = []
     for index, row in enumerate(rows[: fields.header_search_rows]):
-        titles = [norm_title(value) for value in row]
-        candidates.append((key in titles, int(responsible in titles), index))
+        titles = {norm_title(value) for value in row}
+        candidates.append((bool(key & titles), int(bool(responsible & titles)),
+                           index))
     with_key = [candidate for candidate in candidates if candidate[0]]
     if not with_key:
         raise WorkbookReadError(
@@ -50,7 +54,7 @@ def _validate_headers(headers: tuple[Any, ...], fields: FieldConfig) -> None:
         raise WorkbookReadError(
             "повторяющиеся заголовки: " + ", ".join(sorted(set(duplicates)))
         )
-    if norm_title(fields.responsible_title) not in seen:
+    if not (fields.title_variants(fields.responsible_title) & set(seen)):
         raise WorkbookReadError(f"нет колонки «{fields.responsible_title}»")
 
 
