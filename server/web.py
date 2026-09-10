@@ -33,6 +33,7 @@ from aiohttp.abc import AbstractAccessLogger
 
 import addr_cis                       # разбор произвольного адреса для навигации
 import db
+import ops_panel
 import debt
 import geoindex                       # офлайн-справочник координат (без похода в сеть)
 from config import ADMIN_ID, approval_required, lang_of
@@ -3061,6 +3062,42 @@ async def _admin_device_redeem(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, **made})
 
 
+async def _ops_page(request: web.Request) -> web.Response:
+    """Страница панели. Отдаётся БЕЗ проверки роли — и это не упущение.
+
+    Браузер не умеет присылать заголовок с токеном на обычный переход по ссылке,
+    поэтому закрытая страница означала бы, что панель нельзя открыть вовсе.
+    В самой странице нет ни строчки данных: это разметка и скрипт, который сперва
+    просит код привязки, обменивает его на токен устройства и только потом
+    обращается к ручкам. Все ручки с данными закрыты ролью, как и были.
+    """
+    return web.Response(text=ops_panel.page(), content_type="text/html", charset="utf-8")
+
+
+async def _ops_state(request: web.Request) -> web.Response:
+    return await ops_panel.state(request, _engineer(request))
+
+
+async def _ops_run(request: web.Request) -> web.Response:
+    return await ops_panel.run(request, _engineer(request))
+
+
+async def _ops_result(request: web.Request) -> web.Response:
+    return await ops_panel.result(request, _engineer(request))
+
+
+async def _ops_devices(request: web.Request) -> web.Response:
+    return await ops_panel.devices(request, _engineer(request))
+
+
+async def _ops_code(request: web.Request) -> web.Response:
+    return await ops_panel.issue_code(request, _engineer(request))
+
+
+async def _ops_revoke(request: web.Request) -> web.Response:
+    return await ops_panel.revoke(request, _engineer(request))
+
+
 async def _admin_key_check(request: web.Request) -> web.Response:
     """Жив ли мастер-ключ. Ничего не отдаёт, кроме «да».
 
@@ -4201,6 +4238,16 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/admin/device/enroll.json", _admin_device_enroll)
     app.router.add_post("/admin/device/redeem.json", _admin_device_redeem)
     app.router.add_get("/admin/key_check.json", _admin_key_check)
+
+    # Панель обслуживания. Отдельный путь и отдельная роль: сюда не пускают ни
+    # мастер-ключом, ни токеном пульта. Ни одна ручка здесь не читает должников.
+    app.router.add_get("/ops/", _ops_page)
+    app.router.add_get("/ops/state.json", _ops_state)
+    app.router.add_post("/ops/run.json", _ops_run)
+    app.router.add_get("/ops/result.json", _ops_result)
+    app.router.add_get("/ops/devices.json", _ops_devices)
+    app.router.add_post("/ops/code.json", _ops_code)
+    app.router.add_post("/ops/device/revoke.json", _ops_revoke)
     app.router.add_get("/admin/devices.json", _admin_devices)
     app.router.add_post("/admin/device/revoke.json", _admin_device_revoke)
     app.router.add_post("/admin/push_test", _admin_push_test)

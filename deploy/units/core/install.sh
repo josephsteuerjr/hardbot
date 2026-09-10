@@ -119,6 +119,55 @@ else
   say "  маршруты по дорогам не подключены — расстояния считаются по прямой (допустимый режим)."
 fi
 
+# --- 5б. Помощник панели инженера ---------------------------------------------
+# Панель обслуживания живёт в контейнере и докера не видит — намеренно. Работу за
+# неё делает helper на хосте, с закрытым списком действий. Без него панель
+# честно скажет «помощник не отвечает» и ничего не запустит; система при этом
+# работает полностью, просто обслуживать её придётся руками.
+install_ops_agent() {
+  local agent="$DEPLOY_DIR/ops-agent.sh"
+  [ -f "$agent" ] || { warn "нет $agent — панель инженера работать не будет"; return 0; }
+  chmod +x "$agent" 2>/dev/null || true
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    say "  systemd не найден — помощника панели запустите сами, одной строкой:"
+    say "      nohup $agent >> $DEPLOY_DIR/ops-agent.log 2>&1 &"
+    say "      (и добавьте её в автозапуск, иначе после перезагрузки панель онемеет)"
+    return 0
+  fi
+
+  local unit_file=/etc/systemd/system/hard-ops-agent.service
+  if [ ! -w /etc/systemd/system ] && [ "$(id -u)" != "0" ]; then
+    warn "нет прав записать $unit_file — запустите install.sh от root или поставьте службу сами"
+    return 0
+  fi
+  cat > "$unit_file" <<UNIT
+[Unit]
+Description=Хард: помощник панели инженера
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+ExecStart=$agent
+Restart=always
+RestartSec=5
+# Помощник запускает docker compose, поэтому работает от того же пользователя,
+# что и установка. Своих прав сверх этого ему не нужно.
+WorkingDirectory=$DEPLOY_DIR
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  if systemctl enable --now hard-ops-agent >/dev/null 2>&1; then
+    ok "помощник панели инженера запущен (служба hard-ops-agent)"
+  else
+    warn "служба hard-ops-agent не запустилась — systemctl status hard-ops-agent"
+  fi
+}
+install_ops_agent
+
 # --- 6. Что дальше -----------------------------------------------------------
 say ""
 say "==== Ядро установлено ===="
@@ -139,4 +188,6 @@ say "  $n. Любые правки .env применяются одной ком
 say "  $n. HTTPS обязателен: поставьте перед приложением свой nginx на http://127.0.0.1:${port}/"
 say "     или включите встроенный: COMPOSE_PROFILES=proxy и DOMAIN в .env, затем ./update.sh"; n=$((n+1))
 say "  $n. Пульту аналитика нужны адрес сервера и ADMIN_API_KEY из .env."; n=$((n+1))
-say "  $n. Копия базы: ./backup.sh   Состояние всей системы: $DEPLOY_DIR/doctor.sh"
+say "  $n. Копия базы: ./backup.sh   Состояние всей системы: $DEPLOY_DIR/doctor.sh"; n=$((n+1))
+say "  $n. Панель обслуживания: https://ваш-адрес/ops/ — вход по одноразовому коду:"
+say "     docker compose exec -T app python /app/admin_access.py issue --name \"Инженер\" --role engineer"
