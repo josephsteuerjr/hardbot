@@ -708,6 +708,17 @@ def init_db() -> None:
               used_by_device TEXT          -- отпечаток машины, обменявшей код
             )
         """)
+        # Роль устройства. Оператор — пульт аналитика, он видит должников. Инженер —
+        # панель обслуживания сервера, она должников не видит НИКОГДА и умеет
+        # только закрытый список операций. Роли не пересекаются: токен инженера
+        # на ручках пульта не работает и наоборот. Новую таблицу под это заводить
+        # нельзя — она блокирует сброс ограниченного теста целиком.
+        dcols = {r[1] for r in conn.execute("PRAGMA table_info(admin_devices)")}
+        if "role" not in dcols:
+            conn.execute("ALTER TABLE admin_devices ADD COLUMN role TEXT DEFAULT 'operator'")
+        ccols = {r[1] for r in conn.execute("PRAGMA table_info(admin_enroll_codes)")}
+        if "role" not in ccols:
+            conn.execute("ALTER TABLE admin_enroll_codes ADD COLUMN role TEXT DEFAULT 'operator'")
         # Метки: и привязанные к кейсу (client_rep), и отдельные «разведочные» (rep пуст).
         conn.execute("""
             CREATE TABLE IF NOT EXISTS markers (
@@ -3266,7 +3277,7 @@ def admin_bootstrap_done() -> bool:
     return True
 
 
-def enroll_admin_device(device_id: str, name: str = "") -> dict:
+def enroll_admin_device(device_id: str, name: str = "", role: str = "operator") -> dict:
     """Привязать устройство и выдать ему токен. Токен возвращается ОДИН раз.
 
     Повторный enroll с той же машины не плодит записи, а отзывает прежний токен и
@@ -3276,24 +3287,29 @@ def enroll_admin_device(device_id: str, name: str = "") -> dict:
     token = secrets.token_urlsafe(32)
     now = datetime.now().isoformat(timespec="seconds")
     device_id = str(device_id or "").strip()[:128]
+    role = _role(role)
     if not device_id:
         raise ValueError("device_id обязателен")
     with connect() as conn:
+        # Гасим прежний токен ТОЙ ЖЕ роли с той же машины. Одна машина может быть
+        # одновременно и пультом аналитика, и панелью инженера — это разные
+        # доступы, и отзывать их надо порознь.
         conn.execute(
-            "UPDATE admin_devices SET revoked_at=? WHERE device_id=? AND revoked_at IS NULL",
-            (now, device_id))
+            "UPDATE admin_devices SET revoked_at=? "
+            "WHERE device_id=? AND role=? AND revoked_at IS NULL",
+            (now, device_id, role))
         conn.execute(
-            "INSERT INTO admin_devices (token_hash, device_id, name, created_at) "
-            "VALUES (?,?,?,?)",
-            (_device_token_hash(token), device_id, str(name or "").strip()[:80], now))
+            "INSERT INTO admin_devices (token_hash, device_id, name, created_at, role) "
+            "VALUES (?,?,?,?,?)",
+            (_device_token_hash(token), device_id, str(name or "").strip()[:80], now, role))
         row = conn.execute("SELECT id FROM admin_devices WHERE token_hash=?",
                            (_device_token_hash(token),)).fetchone()
         conn.commit()
     if not admin_bootstrap_done():
         set_setting(ADMIN_BOOTSTRAP_KEY, "1")
         audit_access(0, "admin_bootstrap_closed", str(row["id"]))
-    audit_access(0, "device_enroll", str(row["id"]), name or device_id[:16])
-    return {"id": row["id"], "token": token, "created_at": now}
+    audit_access(0, "device_enroll", str(row["id"]), f"{role}: {name or device_id[:16]}")
+    return {"id": row["id"], "token": token, "created_at": now, "role": role}
 
 
 def admin_device_by_token(token: str, device_id: str | None = None) -> dict | None:
@@ -3314,7 +3330,7 @@ def admin_device_by_token(token: str, device_id: str | None = None) -> dict | No
     now = datetime.now().isoformat(timespec="seconds")
     with connect() as conn:
         row = conn.execute(
-            "SELECT id, device_id, name, created_at, last_seen FROM admin_devices "
+            "SELECT id, device_id, name, created_at, last_seen, role FROM admin_devices "
             "WHERE token_hash=? AND revoked_at IS NULL", (digest,)).fetchone()
         if row is None:
             return None
@@ -3328,18 +3344,20 @@ def admin_device_by_token(token: str, device_id: str | None = None) -> dict | No
         conn.execute("UPDATE admin_devices SET last_seen=? WHERE id=?", (now, row["id"]))
         conn.commit()
     return {"id": row["id"], "device_id": row["device_id"], "name": row["name"] or "",
-            "created_at": row["created_at"], "last_seen": row["last_seen"] or ""}
+            "created_at": row["created_at"], "last_seen": row["last_seen"] or "",
+            "role": row["role"] or "operator"}
 
 
 def list_admin_devices(include_revoked: bool = False) -> list[dict]:
     where = "" if include_revoked else " WHERE revoked_at IS NULL"
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id, device_id, name, created_at, last_seen, revoked_at "
+            "SELECT id, device_id, name, created_at, last_seen, revoked_at, role "
             f"FROM admin_devices{where} ORDER BY id DESC").fetchall()
     return [{"id": r["id"], "device_id": (r["device_id"] or "")[:12],
              "name": r["name"] or "", "created_at": r["created_at"] or "",
-             "last_seen": r["last_seen"] or "", "revoked_at": r["revoked_at"] or ""}
+             "last_seen": r["last_seen"] or "", "revoked_at": r["revoked_at"] or "",
+             "role": r["role"] or "operator"}
             for r in rows]
 
 
@@ -3364,19 +3382,35 @@ def _enroll_code_hash(code: str) -> str:
     return hashlib.sha256(("enroll:" + str(code or "").strip()).encode("utf-8")).hexdigest()
 
 
-def issue_enroll_code(name: str = "") -> dict:
-    """Выдать одноразовый код привязки. Сам код возвращается ОДИН раз."""
+DEVICE_ROLES = ("operator", "engineer")
+
+
+def _role(value: str | None) -> str:
+    role = str(value or "operator").strip().lower()
+    if role not in DEVICE_ROLES:
+        raise ValueError(f"роль должна быть одной из {', '.join(DEVICE_ROLES)}")
+    return role
+
+
+def issue_enroll_code(name: str = "", role: str = "operator") -> dict:
+    """Выдать одноразовый код привязки. Сам код возвращается ОДИН раз.
+
+    Роль вписана в КОД, а не выбирается при обмене: иначе тот, кому выдали код
+    для пульта, привязал бы себе панель обслуживания сервера.
+    """
+    role = _role(role)
     code = secrets.token_urlsafe(24)
     now = datetime.now().isoformat(timespec="seconds")
     with connect() as conn:
         conn.execute(
-            "INSERT INTO admin_enroll_codes (code_hash, name, created_at) VALUES (?,?,?)",
-            (_enroll_code_hash(code), str(name or "").strip()[:80], now))
+            "INSERT INTO admin_enroll_codes (code_hash, name, created_at, role) "
+            "VALUES (?,?,?,?)",
+            (_enroll_code_hash(code), str(name or "").strip()[:80], now, role))
         row = conn.execute("SELECT id FROM admin_enroll_codes WHERE code_hash=?",
                            (_enroll_code_hash(code),)).fetchone()
         conn.commit()
-    audit_access(0, "enroll_code_issued", str(row["id"]), str(name or "")[:80])
-    return {"id": row["id"], "code": code, "created_at": now}
+    audit_access(0, "enroll_code_issued", str(row["id"]), f"{role}: {str(name or '')[:60]}")
+    return {"id": row["id"], "code": code, "created_at": now, "role": role}
 
 
 def redeem_enroll_code(code: str, device_id: str, name: str = "") -> dict:
@@ -3393,7 +3427,7 @@ def redeem_enroll_code(code: str, device_id: str, name: str = "") -> dict:
     now = datetime.now().isoformat(timespec="seconds")
     with connect() as conn:
         row = conn.execute(
-            "SELECT id, name, used_at FROM admin_enroll_codes WHERE code_hash=?",
+            "SELECT id, name, used_at, role FROM admin_enroll_codes WHERE code_hash=?",
             (digest,)).fetchone()
         if row is None:
             raise ValueError("код не найден")
@@ -3407,7 +3441,8 @@ def redeem_enroll_code(code: str, device_id: str, name: str = "") -> dict:
             raise ValueError("код уже использован")
         conn.commit()
         code_name = row["name"] or ""
-    made = enroll_admin_device(device_id, str(name or "").strip() or code_name)
+        code_role = row["role"] or "operator"
+    made = enroll_admin_device(device_id, str(name or "").strip() or code_name, code_role)
     audit_access(0, "enroll_code_redeemed", str(row["id"]), device_id[:16])
     return made
 
@@ -3416,11 +3451,12 @@ def list_enroll_codes(include_used: bool = False) -> list[dict]:
     where = "" if include_used else " WHERE used_at IS NULL"
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id, name, created_at, used_at, used_by_device "
+            "SELECT id, name, created_at, used_at, used_by_device, role "
             f"FROM admin_enroll_codes{where} ORDER BY id DESC").fetchall()
     return [{"id": r["id"], "name": r["name"] or "", "created_at": r["created_at"] or "",
              "used_at": r["used_at"] or "",
-             "used_by_device": (r["used_by_device"] or "")[:12]}
+             "used_by_device": (r["used_by_device"] or "")[:12],
+             "role": r["role"] or "operator"}
             for r in rows]
 
 

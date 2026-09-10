@@ -2842,8 +2842,12 @@ def _admin(request: web.Request) -> None:
     иначе скопированный файл настроек продолжал бы работать на чужой машине.
     """
     token = request.headers.get("X-Device-Token") or ""
-    if token and db.admin_device_by_token(token,
-                                          request.headers.get("X-Device-Id") or ""):
+    device = db.admin_device_by_token(
+        token, request.headers.get("X-Device-Id") or "") if token else None
+    # Роль сверяем явно: устройство инженера сюда не пускаем. Панель обслуживания
+    # не должна видеть должников ни при каких обстоятельствах, а «токен есть —
+    # значит свой» стёрло бы эту границу молча.
+    if device and device.get("role", "operator") == "operator":
         _admin_auth_ok(request)
         return
     # До самой первой привязки ключ работает как обычный доступ: иначе первый
@@ -2898,6 +2902,25 @@ def _admin_too_many_fails(request: web.Request) -> None:
     if len(fails) >= _ADMIN_FAIL_LIMIT:
         raise web.HTTPTooManyRequests(text="too many attempts",
                                       headers={"Retry-After": "60"})
+
+
+def _engineer(request: web.Request) -> dict:
+    """Панель обслуживания: только устройство с ролью «инженер».
+
+    Отдельная роль, а не флаг у оператора: отозвать пульт аналитика и отозвать
+    панель инженера — разные действия, и путать их нельзя. Мастер-ключ сюда не
+    пускается вовсе: панель умеет перезапускать сервер, и открывать её строкой
+    из .env значило бы вернуть ровно то, что мы только что убрали.
+    """
+    _admin_too_many_fails(request)
+    token = request.headers.get("X-Device-Token") or ""
+    device = db.admin_device_by_token(
+        token, request.headers.get("X-Device-Id") or "") if token else None
+    if device and device.get("role") == "engineer":
+        _admin_auth_ok(request)
+        return device
+    _admin_auth_failed(request)
+    raise web.HTTPUnauthorized(text="engineer")
 
 
 def _admin_master_key_only(request: web.Request) -> None:

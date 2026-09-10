@@ -36,15 +36,17 @@ def _out(text: str) -> None:
 
 
 def cmd_issue(args: argparse.Namespace) -> int:
-    made = db.issue_enroll_code(args.name or "")
+    made = db.issue_enroll_code(args.name or "", args.role)
     _out("")
     _out("Код привязки (показывается один раз):")
     _out("")
     _out("    " + made["code"])
     _out("")
-    _out(f"Выдан {made['created_at']}" + (f" для «{args.name}»" if args.name else ""))
-    _out("Передайте его тому, кто ставит пульт. В пульте: вкладка «Сервер» →")
-    _out("«Привязать по коду». Код погаснет при первом же обмене.")
+    target = "панели инженера" if made["role"] == "engineer" else "пульта"
+    _out(f"Выдан {made['created_at']}" + (f" для «{args.name}»" if args.name else "")
+         + f", роль: {made['role']}")
+    _out(f"Код годится ТОЛЬКО для {target}: роль вписана в сам код, при обмене её")
+    _out("выбрать нельзя. Код погаснет при первом же обмене.")
     return 0
 
 
@@ -55,7 +57,8 @@ def cmd_codes(args: argparse.Namespace) -> int:
         return 0
     for r in rows:
         state = f"обменян {r['used_at']} (устройство {r['used_by_device']})" if r["used_at"] else "ждёт обмена"
-        _out(f"  #{r['id']:<4} {r['name'] or '(без имени)':<28} выдан {r['created_at']}  ·  {state}")
+        _out(f"  #{r['id']:<4} [{r['role']:<8}] {r['name'] or '(без имени)':<26} "
+             f"выдан {r['created_at']}  ·  {state}")
     return 0
 
 
@@ -66,7 +69,8 @@ def cmd_devices(args: argparse.Namespace) -> int:
         return 0
     for r in rows:
         state = f"ОТОЗВАНО {r['revoked_at']}" if r["revoked_at"] else f"на связи: {r['last_seen'] or 'ни разу'}"
-        _out(f"  #{r['id']:<4} {r['name'] or '(без имени)':<28} привязано {r['created_at']}  ·  {state}")
+        _out(f"  #{r['id']:<4} [{r['role']:<8}] {r['name'] or '(без имени)':<26} "
+             f"привязано {r['created_at']}  ·  {state}")
     return 0
 
 
@@ -85,6 +89,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p_issue = sub.add_parser("issue", help="выдать одноразовый код привязки")
     p_issue.add_argument("--name", default="", help="для кого: «Ноут дома»")
+    p_issue.add_argument("--role", default="operator", choices=("operator", "engineer"),
+                         help="operator — пульт аналитика (по умолчанию), "
+                              "engineer — панель обслуживания сервера")
     p_issue.set_defaults(func=cmd_issue)
 
     p_codes = sub.add_parser("codes", help="показать коды")
