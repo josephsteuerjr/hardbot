@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hmac
+import json
 import logging
 import math
 import os
@@ -48,6 +49,9 @@ LANGUAGES: dict[str, str | None] = {"ru": "ru", "uz": "uz", "auto": None}
 TEMP_PREFIX = "hard-stt-"
 TEMP_SUFFIX = ".audio"
 
+# Манифест запечённой в образ модели — его пишет tools/prepare_stt_model.py.
+MODEL_MANIFEST = "hard-model.json"
+
 log = logging.getLogger("stt")
 
 
@@ -55,6 +59,10 @@ log = logging.getLogger("stt")
 
 class ConfigError(RuntimeError):
     """Служба поднята с небезопасной или неполной конфигурацией."""
+
+
+class StartupFailed(RuntimeError):
+    """Служба стартовала, но работать не сможет: модель не загрузилась."""
 
 
 def _int_env(env: Mapping[str, str], name: str, default: int, lo: int, hi: int) -> int:
@@ -70,16 +78,30 @@ def _int_env(env: Mapping[str, str], name: str, default: int, lo: int, hi: int) 
     return value
 
 
+def _flag_env(env: Mapping[str, str], name: str, default: bool = False) -> bool:
+    raw = (env.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigError(f"{name}: ожидается 1 или 0")
+
+
 @dataclass(frozen=True)
 class Settings:
-    model: str = "small"
+    model: str = "large-v3-turbo"
     compute_type: str = "int8"
     device: str = "cpu"
     threads: int = 0                      # 0 = по числу ядер, но не больше 4
     beam_size: int = 5
     models_dir: Path = Path("/models")
+    baked_model_dir: Path = Path("/opt/hard/stt-model")
+    allow_download: bool = False
     socket: Path = Path("/run/stt/stt.sock")
     token_file: Path = Path("/run/secrets/stt.token")
+    token_insecure_ok: bool = False
     max_bytes: int = HARD_MAX_BYTES
     rate_per_minute: int = 6
     burst: int = 2
@@ -89,7 +111,7 @@ class Settings:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
         env = os.environ if env is None else env
-        model = (env.get("STT_MODEL") or "small").strip()
+        model = (env.get("STT_MODEL") or "large-v3-turbo").strip()
         return cls(
             model=model,
             compute_type=(env.get("STT_COMPUTE_TYPE") or "int8").strip(),
@@ -97,8 +119,12 @@ class Settings:
             threads=_int_env(env, "STT_THREADS", 0, 0, 64),
             beam_size=_int_env(env, "STT_BEAM_SIZE", 5, 1, 10),
             models_dir=Path((env.get("STT_MODELS_DIR") or "/models").strip()),
+            baked_model_dir=Path(
+                (env.get("STT_BAKED_MODEL_DIR") or "/opt/hard/stt-model").strip()),
+            allow_download=_flag_env(env, "STT_ALLOW_DOWNLOAD"),
             socket=Path((env.get("STT_SOCKET") or "/run/stt/stt.sock").strip()),
             token_file=Path((env.get("STT_TOKEN_FILE") or "/run/secrets/stt.token").strip()),
+            token_insecure_ok=_flag_env(env, "STT_TOKEN_INSECURE_OK"),
             max_bytes=_int_env(env, "STT_MAX_BYTES", HARD_MAX_BYTES, 1, HARD_MAX_BYTES),
             rate_per_minute=_int_env(env, "STT_RATE_PER_MINUTE", 6, 1, 120),
             burst=_int_env(env, "STT_BURST", 2, 1, 20),
@@ -111,8 +137,107 @@ class Settings:
             return self.threads
         return max(1, min(4, os.cpu_count() or 1))
 
+    def resolve_model(self) -> str:
+        """Что на самом деле отдать faster-whisper: путь к модели или её имя.
 
-def read_token(path: Path) -> str:
+        STT_MODEL — это по-прежнему ИМЯ («large-v3-turbo»), а не путь: инженеру
+        не надо знать, куда мы её запекли. Здесь имя превращается в путь, если
+        в образе лежит ровно эта модель. Так смена модели остаётся правкой одной
+        строчки в .env, а запечённая подхватывается сама и без сети.
+        """
+        asked = self.model
+        if not asked:
+            raise ConfigError("STT_MODEL пуст")
+        if Path(asked).is_dir():                       # явный путь — уважаем как есть
+            return asked
+        manifest = baked_manifest(self.baked_model_dir)
+        if manifest is None:
+            return asked
+        source = manifest.get("source") or {}
+        known = {str(manifest.get("name", "")).lower(), str(source.get("repo", "")).lower()}
+        if asked.lower() in known - {""}:
+            check_baked_files(self.baked_model_dir, manifest)
+            return str(self.baked_model_dir)
+        return asked
+
+
+def baked_manifest(directory: Path) -> dict | None:
+    """Манифест запечённой модели или None, если модель в образ не попала."""
+    try:
+        data = json.loads((directory / MODEL_MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and isinstance(data.get("files"), list) else None
+
+
+def check_baked_files(directory: Path, manifest: dict) -> None:
+    """Сверка размеров с манифестом — дешёвая проверка «модель довезли целиком».
+
+    Полный SHA-256 гигабайта весов на каждом старте — это лишние секунды при
+    каждом перезапуске; размер ловит ровно тот случай, который в жизни и
+    случается: файл скопировали по сети и копирование оборвалось. Кому нужна
+    настоящая сверка сумм — ``python tools/prepare_stt_model.py --verify``.
+    """
+    for item in manifest.get("files", []):
+        name = str(item.get("name", ""))
+        try:
+            size = (directory / name).stat().st_size
+        except OSError:
+            raise ConfigError(
+                f"в запечённой модели нет файла {name} — образ собран с неполной моделью, "
+                "проверьте её командой tools/prepare_stt_model.py --verify") from None
+        if size != item.get("size"):
+            raise ConfigError(
+                f"файл модели {name}: {size} байт вместо {item.get('size')} — модель довезена "
+                "не целиком; подготовьте её заново (tools/prepare_stt_model.py)")
+
+
+def _tighten_token(path: Path, *, announce: bool) -> None:
+    """Файл токена читается всеми — разобраться, правда ли это, и сузить права.
+
+    ПОЧЕМУ ЗДЕСЬ ЦЕЛАЯ ФУНКЦИЯ, А НЕ ОДНА СТРОЧКА. Проверка «токен не должен
+    читаться всеми» на Linux осмысленна и остаётся. Но не всякая файловая
+    система вообще хранит права: bind-mount с Windows (drvfs/9p, gRPC-FUSE)
+    показывает у любого файла 0777 просто потому, что взять права ему неоткуда.
+    Прежний код видел это число, считал его решением администратора и отказывался
+    стартовать — служба уходила в вечный цикл перезапусков, а в журнале стояло
+    «нужен chmod 640», который ничего не менял. Проверка была верной по букве и
+    бессмысленной по сути: она читала цифру, которой никто не устанавливал.
+
+    Отличить настоящие права от выдуманных чтением нельзя — только действием.
+    Поэтому мы не спрашиваем «какой режим», а говорим «поставь 0640» и смотрим,
+    что вышло. Ответов ровно три, и каждый — это разная ситуация:
+
+      * получилось — права были настоящие, теперь файл закрыт; цель проверки
+        достигнута лучше, чем отказом: секрет защищён, и служба работает;
+      * chmod не сработал (только чтение, чужой владелец) — права настоящие, а
+        починить их мы не можем: отказываемся, как и раньше;
+      * chmod «удался», но режим не изменился — файловая система прав не хранит,
+        и число 0777 не значит ничего. Отказываться по нему — та же фикция;
+        пишем в журнал предупреждение и работаем дальше.
+
+    Аварийный выключатель STT_TOKEN_INSECURE_OK=1 остаётся на четвёртый,
+    непредусмотренный случай и кричит об этом в журнал при каждом старте.
+    """
+    try:
+        os.chmod(path, 0o640)
+    except OSError as exc:
+        raise ConfigError(
+            "файл токена доступен всем на чтение, и сузить права не вышло "
+            f"({type(exc).__name__}) — нужен chmod 640 на файле {path}") from exc
+    if not path.lstat().st_mode & 0o004:
+        if announce:
+            log.warning("файл токена был доступен всем на чтение; права сужены до 0640")
+        return
+    if announce:
+        log.warning("файловая система не хранит права доступа (chmod ничего не меняет): "
+                    "режим 0%o у файла токена ничего не означает и не проверяется. "
+                    "Так бывает у bind-mount с Windows. Секрет здесь защищён только тем, "
+                    "кто вообще может добраться до этого каталога.",
+                    stat.S_IMODE(path.lstat().st_mode))
+
+
+def read_token(path: Path, *, insecure_ok: bool = False, announce: bool = True) -> str:
     """Токен: обычный файл, не читаемый всеми, 32..4096 печатных ASCII-символов."""
     try:
         info = path.lstat()
@@ -121,7 +246,12 @@ def read_token(path: Path) -> str:
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise ConfigError("файл токена должен быть обычным файлом, не ссылкой")
     if os.name == "posix" and info.st_mode & 0o004:
-        raise ConfigError("файл токена доступен всем на чтение — нужен chmod 640")
+        if insecure_ok:
+            if announce:
+                log.error("ВНИМАНИЕ: STT_TOKEN_INSECURE_OK=1 — проверка прав на файле токена "
+                          "выключена вручную, файл читается всеми. Это временная мера.")
+        else:
+            _tighten_token(path, announce=announce)
     if not 32 <= info.st_size <= 4096:
         raise ConfigError("длина токена вне допустимого диапазона (32..4096 байт)")
     try:
@@ -191,30 +321,103 @@ class WhisperBackend:
         self._run_lock = threading.Lock()
 
     def load(self) -> None:
-        """Блокирующая загрузка (первый запуск скачивает модель в models_dir)."""
+        """Блокирующая загрузка модели: из образа, а при STT_ALLOW_DOWNLOAD=1 — из сети."""
+        settings = self.settings
+        source = settings.resolve_model()
+        # Запрет на сеть выставляем ДО импорта: huggingface_hub читает эти
+        # переменные один раз, когда его импортируют, и позже менять их поздно.
+        # Двойная страховка (переменная окружения + local_files_only в вызове)
+        # тут не паранойя: обе выключают разные слои — сам hub и обёртку
+        # faster-whisper, и любой из них поодиночке может однажды передумать.
+        os.environ["HF_HUB_OFFLINE"] = "0" if settings.allow_download else "1"
+        os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
         try:
             from faster_whisper import WhisperModel
         except ImportError as exc:  # pragma: no cover — в образе пакет есть всегда
             self._load_error = "faster-whisper не установлен"
             raise ConfigError(self._load_error) from exc
-        settings = self.settings
         started = time.monotonic()
-        log.info("модель %s (%s, %s, потоков %s): загрузка", settings.model,
-                 settings.device, settings.compute_type, settings.cpu_threads())
+        log.info("модель %s (%s, %s, потоков %s, %s): загрузка", settings.model,
+                 settings.device, settings.compute_type, settings.cpu_threads(),
+                 "из образа" if source != settings.model else "из кэша")
         try:
-            self._model = WhisperModel(
-                settings.model,
-                device=settings.device,
-                compute_type=settings.compute_type,
-                cpu_threads=settings.cpu_threads(),
-                num_workers=1,
-                download_root=str(settings.models_dir),
-            )
+            self._model = self._open(WhisperModel, source)
         except Exception as exc:  # noqa: BLE001 — причина уходит в журнал без путей
-            self._load_error = type(exc).__name__
             log.error("модель не загрузилась: %s", type(exc).__name__)
-            raise
+            spare = self._spare_model(source)
+            if spare is None:
+                self._load_error = type(exc).__name__
+                self._explain_failure(source)
+                raise
+            log.warning("беру модель, запечённую в образ, вместо «%s»: её не нашлось ни в "
+                        "образе, ни в кэше, а качать запрещено. Служба речи будет работать, "
+                        "но моделью «%s». Хотите именно «%s» — либо подготовьте её "
+                        "(tools/prepare_stt_model.py --name %s) и пересоберите образ, либо "
+                        "разрешите скачивание: STT_ALLOW_DOWNLOAD=1.",
+                        settings.model, spare[1], settings.model, settings.model)
+            try:
+                self._model = self._open(WhisperModel, spare[0])
+            except Exception as second:  # noqa: BLE001
+                self._load_error = type(second).__name__
+                log.error("запечённая модель тоже не загрузилась: %s", type(second).__name__)
+                raise
         log.info("модель готова за %.0f с", time.monotonic() - started)
+
+    def _open(self, whisper_model, source: str):
+        settings = self.settings
+        return whisper_model(
+            source,
+            device=settings.device,
+            compute_type=settings.compute_type,
+            cpu_threads=settings.cpu_threads(),
+            num_workers=1,
+            download_root=str(settings.models_dir),
+            local_files_only=not settings.allow_download,
+        )
+
+    def _spare_model(self, source: str) -> tuple[str, str] | None:
+        """Запечённая модель как замена ненайденной — (путь, имя) или None.
+
+        ЗАЧЕМ ПОДМЕНА, А НЕ ЧЕСТНЫЙ ОТКАЗ. Имя модели живёт в .env единицы речи,
+        а модель — в образе; разъехаться им проще простого (например, в .env
+        остался старый STT_MODEL от прошлой сборки). Отказ означает «голоса нет
+        совсем» и разбирательство на объекте; подмена означает «голос работает,
+        но не той моделью» и строчку в журнале, которая прямо говорит, что
+        произошло и как это поправить. Для системы, которую разворачивает чужая
+        ИТ-служба, второе лучше.
+
+        Порядок важен: сюда попадают только ПОСЛЕ того, как faster-whisper не
+        нашёл запрошенную модель. Значит подмена не перебивает ни явный путь, ни
+        модель, заранее положенную в кэш /models, — она только заполняет пустоту.
+        """
+        settings = self.settings
+        if settings.allow_download or source == str(settings.baked_model_dir):
+            return None
+        manifest = baked_manifest(settings.baked_model_dir)
+        if manifest is None:
+            return None
+        try:
+            check_baked_files(settings.baked_model_dir, manifest)
+        except ConfigError as exc:
+            log.error("запечённая модель тоже не годится: %s", exc)
+            return None
+        return str(settings.baked_model_dir), str(manifest.get("name", "?"))
+
+    def _explain_failure(self, source: str) -> None:
+        """Заменить нечем: сказать словами, что делать дальше."""
+        settings = self.settings
+        if settings.allow_download:
+            log.error("скачивание разрешено (STT_ALLOW_DOWNLOAD=1), но модель не пришла — "
+                      "проверьте, доступен ли с этой машины huggingface.co.")
+            return
+        if source != str(settings.baked_model_dir):
+            log.error("в образе модели нет, а скачивание выключено. Подготовьте модель "
+                      "командой `python tools/prepare_stt_model.py` и пересоберите образ "
+                      "службы речи (docker compose build stt).")
+        else:
+            log.error("модель в образе есть, но открыть её не удалось. Сверьте файлы: "
+                      "`python tools/prepare_stt_model.py --verify` — и, если ругается, "
+                      "подготовьте модель заново и пересоберите образ.")
 
     @property
     def ready(self) -> bool:
@@ -496,8 +699,15 @@ def prepare_temp_dir(path: Path) -> int:
 
 async def serve(settings: Settings, backend: Backend | None = None,
                 token: str | None = None) -> None:
-    token = token if token is not None else read_token(settings.token_file)
-    backend = backend if backend is not None else WhisperBackend(settings)
+    if token is None:
+        token = read_token(settings.token_file, insecure_ok=settings.token_insecure_ok)
+    if backend is None:
+        # Разбираемся с моделью ДО того, как открыли сокет: обрезанный файл или
+        # имя, которого нет ни в образе, ни в кэше, — это ошибка конфигурации.
+        # Пусть контейнер выйдет с внятным сообщением, а не встанет «прогревающимся»
+        # навсегда, заставляя инженера ждать и гадать.
+        settings.resolve_model()
+        backend = WhisperBackend(settings)
     service = Service(settings, backend, token)
 
     settings.socket.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
@@ -507,9 +717,27 @@ async def serve(settings: Settings, backend: Backend | None = None,
         log.info("убрано недоделанных временных файлов: %d", removed)
 
     loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    failure: list[BaseException] = []
     loader = None
     if isinstance(backend, WhisperBackend):
         loader = loop.run_in_executor(None, backend.load)
+
+        def _loaded(task) -> None:
+            """Модель не загрузилась — служба останавливается, а не «греется» вечно.
+
+            Раньше сокет продолжал отвечать «warming», и снаружи это выглядело
+            одинаково и когда модель ещё грузится, и когда её нет и не будет:
+            healthcheck молчал весь start-period, инженер ждал. Работать без
+            модели служба всё равно не может, а ядро отсутствие речи переживает
+            (сотрудник вводит текст руками). Значит честнее упасть сразу — тогда
+            и compose, и install.sh покажут причину в первую же минуту.
+            """
+            if not task.cancelled() and task.exception() is not None:
+                failure.append(task.exception())
+                loop.call_soon_threadsafe(stop.set)
+
+        loader.add_done_callback(_loaded)
 
     runner = web.AppRunner(service.app, access_log=None)
     await runner.setup()
@@ -518,7 +746,6 @@ async def serve(settings: Settings, backend: Backend | None = None,
     os.chmod(settings.socket, 0o660)
     log.info("служба распознавания речи слушает %s (модель %s)", settings.socket, settings.model)
 
-    stop = asyncio.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
             loop.add_signal_handler(sig, stop.set)
@@ -533,12 +760,19 @@ async def serve(settings: Settings, backend: Backend | None = None,
             settings.socket.unlink(missing_ok=True)
         if loader is not None and not loader.done():
             loader.cancel()
+    if failure:
+        raise StartupFailed(
+            f"служба остановлена: модель не загрузилась ({type(failure[0]).__name__}), "
+            "причина строкой выше")
 
 
 async def check(settings: Settings) -> int:
     """Проверка живости через сокет с токеном: 0 — готова, 1 — нет."""
     try:
-        token = read_token(settings.token_file)
+        # announce=False: проверка живости бежит каждые 30 секунд, и предупреждение
+        # о правах, уместное один раз при старте, в журнале превратилось бы в шум.
+        token = read_token(settings.token_file, insecure_ok=settings.token_insecure_ok,
+                           announce=False)
     except ConfigError as exc:
         print(f"токен: {exc}")
         return 1
@@ -573,6 +807,9 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         log.error("конфигурация: %s", exc)
         return 2
+    except StartupFailed as exc:
+        log.error("%s", exc)
+        return 3
     return 0
 
 

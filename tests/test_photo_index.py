@@ -191,8 +191,17 @@ def test_same_sha_other_contract_review():
 
 
 def test_shot_before_assignment_uses_snapshot_date():
+    """Дата закрепления считается ОТ «сейчас», а не вписана числом.
+
+    Раньше в этой строке стояло 2026-08-01 против «сейчас минус 40 дней». Эти
+    две даты сходились ровно один день в истории — 10.09.2026, — и в этот день
+    тест упал. Мина такого рода не ловится ничем, кроме календаря: правило
+    «снимок раньше закрепления» проверяется ПОРЯДКОМ дат, поэтому обе даты
+    теперь относительные и порядок между ними неизменен в любой день.
+    """
     r = _row(exif_dt_norm=(NOW - timedelta(days=40)).isoformat(),
-             assign_date_at="2026-08-01", meta_state="ok")
+             assign_date_at=(NOW - timedelta(days=10)).date().isoformat(),
+             meta_state="ok")
     out = _build([r])
     assert any(s["code"] == "shot_before_assignment"
                for s in out["items"][0]["signals"])

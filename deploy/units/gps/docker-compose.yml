@@ -1,0 +1,111 @@
+# ЕДИНИЦА «GPS» — порядок объезда по реальным дорогам.
+# Это надстройка: без неё система работает полностью, только расстояния
+# считаются по прямой, а порядок точек — упрощённым алгоритмом.
+#
+# КАК ОНА СВЯЗАНА С ЯДРОМ. По HTTP через общую сеть hard-net, по именам
+# сервисов: http://osrm-uz:5000, http://vroom:3000. Адреса вписываются в .env
+# ядра (OSRM_URL_UZ, VROOM_URL и т. д.). Ничего, кроме этих адресов, ядру о
+# маршрутизаторах знать не нужно, а если они отвечают ошибкой или их нет —
+# ядро молча падает на упрощённый расчёт и продолжает работать.
+#
+# ЧТО НУЖНО ПОДГОТОВИТЬ ЗАРАНЕЕ: дорожный граф на каждую страну — их собирают
+# рецептом из deploy/geo/README.md (несколько часов машинного времени и порядка
+# 10 ГБ диска). Готовый граф кладётся в ./osrm/<страна>/, имя файла — в .env.
+# Страна включается профилем: COMPOSE_PROFILES=uz,tj — только эти два графа.
+#
+# ПАМЯТЬ. Граф не читается в память целиком, процесс держит примерно половину
+# объёма файлов (замерено: узбекский граф — около 540 МБ при 927 МБ файлов).
+# Лимитов памяти здесь нет намеренно: на бою их тоже нет.
+
+name: hard-gps
+
+services:
+  osrm-uz:
+    profiles: ["uz"]
+    image: ghcr.io/project-osrm/osrm-backend:latest
+    restart: unless-stopped
+    command: osrm-routed --algorithm mld /data/${OSRM_GRAPH_UZ:-uzbekistan-latest.osrm}
+    volumes:
+      - ./osrm/uz:/data:ro
+    ports:
+      # Только localhost и только для проверки руками (curl). Ядро ходит не
+      # сюда, а по имени сервиса внутри сети hard-net.
+      - "127.0.0.1:${OSRM_PORT_UZ:-5002}:5000"
+    networks:
+      - hard
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  osrm-tj:
+    profiles: ["tj"]
+    image: ghcr.io/project-osrm/osrm-backend:latest
+    restart: unless-stopped
+    command: osrm-routed --algorithm mld /data/${OSRM_GRAPH_TJ:-tajikistan-latest.osrm}
+    volumes:
+      - ./osrm/tj:/data:ro
+    ports:
+      - "127.0.0.1:${OSRM_PORT_TJ:-5001}:5000"
+    networks:
+      - hard
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  osrm-ru:
+    profiles: ["ru"]
+    image: ghcr.io/project-osrm/osrm-backend:latest
+    restart: unless-stopped
+    command: osrm-routed --algorithm mld /data/${OSRM_GRAPH_RU:-samara_oblast.osrm}
+    volumes:
+      - ./osrm/ru:/data:ro
+    ports:
+      - "127.0.0.1:${OSRM_PORT_RU:-5003}:5000"
+    networks:
+      - hard
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  # Оптимизатор порядка объезда. Один на все страны, графов не требует:
+  # матрицу времён ядро считает само по нужному графу и передаёт готовой.
+  # Поэтому маршрутизатор в его конфиге (vroom/config.yml) роли не играет.
+  vroom:
+    # Тег зафиксирован намеренно. У этого образа на Docker Hub НЕТ тега latest —
+    # публикуются только версионные (v1.13.0 и т.п.), поэтому «:latest» даёт
+    # отказ ещё на docker pull, до всякой сборки, и выглядит как поломка всей
+    # системы. Заодно фиксация избавляет от сюрприза «через год приехала другая
+    # версия vroom и конфиг ей не подошёл».
+    image: vroomvrp/vroom-docker:v1.13.0
+    restart: unless-stopped
+    volumes:
+      # НА ЗАПИСЬ, И ЭТО НЕ НЕДОСМОТР. Точка входа образа сама хозяйничает в
+      # /conf: копирует туда config.yml, если его нет, и создаёт access.log.
+      # С «:ro» первое же действие получает «Read-only file system», и контейнер
+      # уходит в цикл перезапусков — по журналу это выглядит как поломка vroom,
+      # хотя дело в правах на каталог. Секретов в vroom/ нет, писать сюда
+      # безопасно; рядом с config.yml появится пустой access.log — так и надо.
+      - ./vroom:/conf
+    ports:
+      - "127.0.0.1:${VROOM_PORT:-3000}:3000"
+    networks:
+      - hard
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+networks:
+  # Общая сеть трёх единиц. Внешняя и с фиксированным именем — иначе имена
+  # сервисов не разрешались бы из ядра, поднятого отдельным проектом.
+  #   docker network create hard-net
+  hard:
+    external: true
+    name: hard-net

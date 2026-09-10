@@ -32,7 +32,8 @@ import razbros
 
 APP_DIR = Path(__file__).resolve().parent
 SETTINGS_PATH = APP_DIR / "настройки пульта.json"
-DEFAULT_URL = "https://hardbot2.166.88.185.90.nip.io"
+# Пусто: адрес берётся из настроек пульта, как и папка с республиками.
+DEFAULT_URL = ""
 DEFAULT_KEY = ""
 
 try:  # русские буквы в консоли Windows
@@ -248,14 +249,20 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
 
     base = a.base
-    if not base and SETTINGS_PATH.exists():
-        base = json.loads(SETTINGS_PATH.read_text(encoding="utf-8")).get("scatterBase", "")
+    url = a.url
+    if (not base or not url) and SETTINGS_PATH.exists():
+        saved = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        base = base or saved.get("scatterBase", "")
+        url = url or saved.get("url", "")
+    if not url:
+        print("не задан адрес сервера: --url или поле «Сервер» в настройках пульта")
+        return 2
     if not base:
         print("Не задана папка с республиками: --base \"...\" (или выбери её один раз в пульте)")
         return 2
 
-    print(f"Сервер: {a.url}\nПапка: {base}")
-    d = api_export(a.url, a.key)
+    print(f"Сервер: {url}\nПапка: {base}")
+    d = api_export(url, a.key)
     fields, rows = d["fields"], d["rows"]
     jobs, warn = collect_jobs(base, fields, rows)
     for w in warn:

@@ -38,6 +38,28 @@ def _inner(names):
     return {n[len(prefix):] for n in names}
 
 
+# Каталоги внутри deploy/, которые рождаются ПРИ установке и в пакет не едут:
+# база и фото, копии, скачанная модель речи, дорожные графы.
+DEPLOY_RUNTIME_DIRS = {"data", "backups", "models", "osrm", "secrets", "__pycache__"}
+
+
+def _deploy_files_that_must_ship():
+    """Всё содержимое deploy/, кроме рабочих каталогов, — список СЧИТАН с диска.
+
+    Раньше здесь стояли вписанные руками пути (`deploy/docker-compose.yml` и
+    прочие). Разрез deploy/ на три единицы сделал такой список неправдой в тот
+    же день: файл переехал, тест покраснел, хотя пакет собран правильно.
+    Проверка обязана ловить «сборщик потерял файл», а не «файл переименовали».
+    """
+    base = ROOT / "deploy"
+    for path in sorted(base.rglob("*")):
+        if not path.is_file() or path.suffix in (".pyc",):
+            continue
+        if set(path.relative_to(base).parts[:-1]) & DEPLOY_RUNTIME_DIRS:
+            continue
+        yield path.relative_to(ROOT).as_posix()
+
+
 def test_package_contains_every_component(built):
     inner = _inner(built["names"])
     for expected in (
@@ -45,15 +67,21 @@ def test_package_contains_every_component(built):
         "server/app.py", "server/web.py", "server/Dockerfile", "server/.env.example",
         "server/miniapp/index.html",
         "stt/server.py", "stt/Dockerfile", "stt/README.md", "stt/requirements.txt",
-        "deploy/docker-compose.yml", "deploy/.env.example", "deploy/install.sh",
-        "deploy/update.sh", "deploy/backup.sh", "deploy/restore.sh", "deploy/doctor.sh",
-        "deploy/README.md",
         "pult/pult.py", "pult/Пульт.pyw", "pult/app.py", "registry_cycle/__init__.py",
         "Перенос реестров.pyw", "Хард — Реестры.pyw",
         "docs/security/00-README.md", "tests/conftest.py", "tools/build_it_package.py",
-        "requirements-registry-cycle.txt",
+        "requirements-registry-cycle.txt", "requirements-dev.txt",
     ):
         assert expected in inner, expected
+
+    deploy_files = list(_deploy_files_that_must_ship())
+    for expected in deploy_files:
+        assert expected in inner, expected
+    # Страховка от вырожденного случая «в deploy/ ничего не нашлось»: установка
+    # без compose-файла и без скрипта — это пустой пакет, а не зелёный тест.
+    assert any(n.endswith("docker-compose.yml") for n in deploy_files)
+    assert any(n.endswith("install.sh") for n in deploy_files)
+    assert any(n.endswith(".env.example") for n in deploy_files)
     assert built["archive"].name.startswith("hard-test.1-") and built["archive"].suffix == ".zip"
     digest, _, name = built["checksum"].read_text(encoding="utf-8").split()[0:3:2][0], None, None
     assert len(digest) == 64
@@ -85,9 +113,27 @@ def test_shell_scripts_travel_with_lf_and_launchers_are_python(built):
     """Серверные скрипты — LF и бит исполнения; точки входа Windows — .pyw
     (pythonw, без консоли), а не .bat: cmd-окно даже на «start» мигало."""
     with zipfile.ZipFile(built["zip"]) as zf:
-        sh = zf.read("hard-test.1/deploy/install.sh")
-        assert b"\r\n" not in sh and sh.startswith(b"#!/usr/bin/env bash")
-        assert (zf.getinfo("hard-test.1/deploy/install.sh").external_attr >> 16) & 0o111
+        # Проверяем ВСЕ .sh в пакете, а не один вписанный руками путь. Прежде
+        # здесь стоял deploy/install.sh — при разрезе deploy/ на единицы файл
+        # переехал, и тест упал на KeyError, хотя пакет был собран правильно.
+        # Смысл проверки — «скрипты доехали пригодными к запуску», и он не
+        # должен зависеть от того, как сегодня называются каталоги.
+        scripts = [n for n in zf.namelist() if n.endswith(".sh")]
+        assert scripts, "в пакете нет ни одного .sh — установщики не доехали"
+        for name in scripts:
+            body = zf.read(name)
+            assert b"\r\n" not in body, f"{name}: CRLF — на Linux это «bad interpreter: ...^M»"
+            # Рецепты сборки графов (deploy/geo/) запускают как `bash файл` или
+            # копируют в консоль кусками — шебанга у них нет намеренно, и это
+            # написано в deploy/geo/README.md. Строку запуска и бит исполнения
+            # требуем от того, что инженер вызывает по имени: ./install.sh и т. п.
+            if "/deploy/geo/" in name:
+                continue
+            assert body.startswith(b"#!"), f"{name}: нет строки запуска (#!)"
+            assert (zf.getinfo(name).external_attr >> 16) & 0o111, f"{name}: нет бита исполнения"
+        # Точка входа установки обязана быть на месте под известным именем:
+        # с неё начинается инструкция, и её отсутствие — не переименование.
+        assert "hard-test.1/deploy/units/core/install.sh" in scripts
         pyw = zf.read("hard-test.1/pult/Пульт.pyw")
         assert b"pult.app" in pyw and b"\r\n" not in pyw
         assert not any(n.lower().endswith(".bat") for n in zf.namelist()), \

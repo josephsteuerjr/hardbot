@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Восстановление «Хард» из копии, снятой backup.sh.
+# Восстановление ЯДРА из копии, снятой ./backup.sh (речь и маршруты
+# восстанавливать не из чего — они не хранят данных, их просто ставят заново).
 #
+#   cd deploy/units/core
 #   ./restore.sh backups/20260902T120000            # только база
 #   ./restore.sh backups/20260902T120000 --photos   # база + фотографии из зеркала
 #   добавьте --yes, чтобы не спрашивать подтверждения
@@ -10,10 +12,15 @@
 # — если восстановили не то, её можно вернуть тем же скриптом.
 # Файлы в data/ принадлежат root (их создаёт контейнер): запускайте от root
 # или через sudo.
-source "$(dirname "$0")/_lib.sh"
+source "$(dirname "$0")/../../_lib.sh"
+source "$DEPLOY_DIR/_actions.sh"
 
 src="${1:-}"
-[ -n "$src" ] || die "укажите каталог копии: ./restore.sh backups/<дата-время> [--photos] [--yes]"
+if [ -z "$src" ]; then
+  say "Доступные копии:"
+  ls -1d backups/[0-9]*T[0-9]* 2>/dev/null | sed 's/^/  /' || say "  копий нет — снимите: ./backup.sh"
+  die "укажите, какую копию восстанавливать: ./restore.sh backups/<дата-время> [--photos] [--yes]"
+fi
 photos=0; yes=0
 for arg in "${@:2}"; do
   case "$arg" in
@@ -26,7 +33,8 @@ done
 check_docker
 db_file="$src/hardbot.db"
 [ -f "$db_file" ] || db_file="$src"      # можно указать сам файл базы
-[ -f "$db_file" ] || die "в $src нет hardbot.db"
+[ -f "$db_file" ] || die "в «$src» нет файла hardbot.db.
+Что сделать: укажите каталог копии целиком, например ./restore.sh backups/20260902T120000 (список: ls backups/)."
 [ "$(head -c 15 "$db_file")" = "SQLite format 3" ] || die "$db_file — не база SQLite"
 if [ "$photos" -eq 1 ] && [ ! -d backups/photos ]; then
   die "зеркала фотографий backups/photos нет — нечего восстанавливать"
@@ -70,6 +78,8 @@ if wait_healthy app 180; then
   ok "app: $(health_of app)"
 else
   compose logs --tail=40 app || true
-  die "приложение не поднялось после восстановления"
+  die "приложение не поднялось после восстановления.
+Что сделать: прежняя база не потеряна — она рядом, data/hardbot.db.before-restore-$stamp.
+Вернуть её: cp data/hardbot.db.before-restore-$stamp data/hardbot.db && docker compose start app"
 fi
 say "Готово"

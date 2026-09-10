@@ -306,7 +306,12 @@ def test_read_token_validation(tmp_path):
 
 def test_settings_from_env_defaults_and_bounds():
     defaults = stt.Settings.from_env({})
-    assert (defaults.model, defaults.compute_type, defaults.device) == ("small", "int8", "cpu")
+    # Умолчание сменилось со small на large-v3-turbo осознанно: модель теперь
+    # запекается в образ речи, и запекается именно turbo. Умолчание обязано
+    # совпадать с тем, что лежит внутри образа, иначе служба на каждом старте
+    # пишет ERROR «нет такой модели» и откатывается на запечённую — для чужого
+    # инженера это выглядит поломкой. Тест сторожит это совпадение.
+    assert (defaults.model, defaults.compute_type, defaults.device) == ("large-v3-turbo", "int8", "cpu")
     assert defaults.socket == Path("/run/stt/stt.sock")
     assert defaults.token_file == Path("/run/secrets/stt.token")
     assert (defaults.max_bytes, defaults.rate_per_minute, defaults.burst, defaults.upload_timeout) \

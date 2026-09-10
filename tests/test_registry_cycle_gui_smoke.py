@@ -8,7 +8,9 @@ import os
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+QtWidgets = pytest.importorskip(
+    "PySide6.QtWidgets", exc_type=ImportError,
+    reason="нет работающего PySide6 (pip install -r requirements-dev.txt; на голом Linux Qt дополнительно требует системную libGL)")
 
 from registry_cycle import gui, manual_app, theme  # noqa: E402
 from registry_cycle.config import load_config_bundle  # noqa: E402

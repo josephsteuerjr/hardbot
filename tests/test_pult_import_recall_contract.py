@@ -9,8 +9,22 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
 import sys
 from pathlib import Path
+
+import pytest
+
+# Пульт — окно на PySide6. На сервере, где ставят только ядро, Qt нет и не нужен:
+# без этой строки модуль падал на ImportError ещё на сборе тестов, и «одна команда
+# pytest» краснела целиком из-за десктопной зависимости. Ставим offscreen до
+# импорта — иначе Qt ищет экран, которого на сервере тоже нет.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+pytest.importorskip(
+    "PySide6.QtWidgets", exc_type=ImportError,
+    reason="нет работающего PySide6 (pip install -r requirements-dev.txt; "
+           "на голом Linux Qt дополнительно требует системную libGL)")
+
 
 ROOT = Path(__file__).resolve().parent.parent
 PULT_DIR = ROOT / "pult"

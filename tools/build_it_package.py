@@ -19,6 +19,7 @@ import argparse
 import datetime as _dt
 import fnmatch
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -60,12 +61,51 @@ EXCLUDE_PATHS = {
     "tools/build_registry_transfer_share.py",   # собирает локальную папку «ДЛЯ ШАРЫ»
 }
 EXCLUDE_PATH_GLOBS = ("server/_devdata/*", "server/data_dev/*", "server/miniapp_dev.*",
-                      "server/*.backup-*", "server/.deploy-*")
+                      "server/*.backup-*", "server/.deploy-*",
+                      # Готовый офлайн-пакет (образы, модель, колёса) — это гигабайты,
+                      # он едет на флешке, а не внутри архива с исходниками. Сами
+                      # скрипты его сборки в пакет попадают, содержимое out/ — нет.
+                      "deploy/offline/out/*")
 # Расширения, которым в пакете не место: данные, секреты, офисные файлы, бинарники.
 EXCLUDE_SUFFIXES = {".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite3",
                     ".xlsb", ".xlsx", ".xlsm", ".xls", ".docx", ".doc", ".pptx", ".pyc", ".pyo",
                     ".log", ".csv", ".jsonl", ".pmtiles", ".zip", ".7z", ".tar", ".gz", ".exe",
                     ".pem", ".key", ".ppk", ".tmp", ".part"}
+
+# --- поставка без интернета ---------------------------------------------------------
+# Правила выше вырезают каталог «models» на любой глубине и любые архивы. Для
+# рабочих каталогов это верно: там лежит скачанный кэш моделей и чей-то zip с
+# данными. Но ровно эти же правила молча съедали и то, ради чего офлайн-поставка
+# существует, — модель речи и архивы образов, положенные для ИТ-службы.
+#
+# Послабление сделано узким: только внутри deploy/offline/, только для каталога
+# «models» и только для архивных суффиксов. Всё остальное там действует как
+# везде — .env, ключи, базы, секреты и сканер утечек. То, что вырезано этими
+# двумя правилами ГДЕ-ТО ЕЩЁ, сборщик не молчит, а перечисляет в конце работы:
+# «молча не доехало» — худший из возможных исходов.
+OFFLINE_PREFIX = "deploy/offline/"
+PAYLOAD_DIR_NAMES = {"models"}
+PAYLOAD_SUFFIXES = (".zip", ".tar", ".gz", ".tgz")
+
+# --- подготовленная модель речи -----------------------------------------------------
+# Каталог с весами, которые запекаются в образ службы речи. Он НАМЕРЕННО закрыт
+# собственным .gitignore: гигабайту весов не место в истории репозитория. Но
+# список кандидатов сборщик берёт у git (`ls-files --others --exclude-standard`),
+# а git про игнорируемое молчит — и модель не доезжала до ИТ-службы БЕЗ ЕДИНОГО
+# СЛОВА. На месте это выглядело так: образ речи собирается, контейнер уходит в
+# цикл перезапусков «в образе модели нет, а скачивание выключено», и инженер
+# ищет поломку там, где её нет. Поэтому каталог добавляется к кандидатам прямо
+# с диска, а собранный пакет в конце работы говорит вслух, есть в нём модель
+# или нет.
+#
+# Байт в байт и без сканера: в hard-model.json записаны РАЗМЕРЫ и SHA-256 каждого
+# файла, служба сверяет их при старте. Замена переводов строк (нормализация
+# текста) изменила бы размер — и служба честно отказалась бы работать с
+# «недовезённой» моделью. Сканер утечек здесь тоже не нужен и вреден: словарь на
+# три мегабайта он читает как текст, медленно и с шансом ложного срабатывания.
+BAKED_MODEL_DIR = "stt/model"
+BAKED_MODEL_WEIGHTS = "stt/model/model.bin"
+BAKED_MODEL_MANIFEST = "stt/model/hard-model.json"
 
 TEXT_SUFFIXES = {".py", ".pyw", ".md", ".txt", ".sh", ".yml", ".yaml", ".json", ".ini", ".cfg", ".toml",
                  ".bat", ".html", ".js", ".css", ".webmanifest", ".example", ""}
@@ -81,6 +121,9 @@ LEAK_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # ловил сам себя; в сообщении о находке печатается только номер правила.
     ("адрес боевого сервера (№1)", re.compile(r"209\.222\.251\.112")),
     ("адрес боевого сервера (№2)", re.compile(r"38\.135\.54\.29")),
+    # Прежний адрес, снятый провайдером в августе. Ловим не потому, что он
+    # ещё живой, а потому что один раз он уже уехал в пакет в geo/caddy.sh.
+    ("адрес боевого сервера (№3, прежний)", re.compile(r"166\.88\.185\.90")),
     ("пароль в открытом виде",
      re.compile(r"(?im)^[^\n#]*(?:password|passwd|пароль)\s*[:=]\s*['\"]?[^\s'\"]{6,}")),
     ("приватный ключ", re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----")),
@@ -129,7 +172,14 @@ def candidate_files(root: Path) -> list[Path]:
     if listing is not None:
         names = [n for n in listing.split("\0") if n]
         paths = [root / Path(*PurePosixPath(n).parts) for n in names]
-        return [p for p in paths if p.is_file()]
+        found = [p for p in paths if p.is_file()]
+        # Модель речи git не показывает (см. BAKED_MODEL_DIR) — берём её с диска.
+        seen = {p.resolve() for p in found}
+        model_dir = root / Path(*PurePosixPath(BAKED_MODEL_DIR).parts)
+        if model_dir.is_dir():
+            found.extend(p for p in sorted(model_dir.rglob("*"))
+                         if p.is_file() and p.resolve() not in seen)
+        return found
     found: list[Path] = []
     for base in INCLUDE_DIRS:
         base_path = root / base
@@ -143,7 +193,11 @@ def candidate_files(root: Path) -> list[Path]:
     return found
 
 
-def wanted(relative: PurePosixPath) -> bool:
+def wanted(relative: PurePosixPath, *, payload_anywhere: bool = False) -> bool:
+    """Едет ли файл в пакет. ``payload_anywhere`` — служебный режим для отчёта о
+    пропущенном: он снимает послабление с привязки к deploy/offline/, и разница
+    между двумя вызовами показывает, что вырезано именно правилами о моделях и
+    архивах, а не по другой причине."""
     parts = relative.parts
     if not parts:
         return False
@@ -155,21 +209,38 @@ def wanted(relative: PurePosixPath) -> bool:
             fnmatch.fnmatch(top, g) for g in INCLUDE_ROOT_GLOBS)
     if top not in INCLUDE_DIRS:
         return False
-    if any(part in EXCLUDE_DIR_NAMES for part in parts[:-1]):
-        return False
+    text = relative.as_posix()
+    payload = payload_anywhere or text.startswith(OFFLINE_PREFIX)
+    for part in parts[:-1]:
+        if part in EXCLUDE_DIR_NAMES and not (payload and part in PAYLOAD_DIR_NAMES):
+            return False
     name = parts[-1]
     if name in EXCLUDE_FILE_NAMES:
         return False
     if name.startswith(".env") and name != ".env.example":
         return False
-    text = relative.as_posix()
     if text in EXCLUDE_PATHS or any(fnmatch.fnmatch(text, g) for g in EXCLUDE_PATH_GLOBS):
         return False
     lower = name.lower()
     for suffix in EXCLUDE_SUFFIXES:
-        if lower.endswith(suffix):
+        if lower.endswith(suffix) and not (payload and suffix in PAYLOAD_SUFFIXES):
             return False
     return True
+
+
+def skipped_payload(root: Path) -> list[PurePosixPath]:
+    """Файлы, вырезанные ТОЛЬКО правилами «каталог models» и «архив». Их надо
+    показать человеку: если это привезённая модель или образ, они нужны, просто
+    лежат не там, где сборщик их пропускает."""
+    found: list[PurePosixPath] = []
+    for path in candidate_files(root):
+        try:
+            relative = PurePosixPath(path.relative_to(root).as_posix())
+        except ValueError:
+            continue
+        if not wanted(relative) and wanted(relative, payload_anywhere=True):
+            found.append(relative)
+    return sorted(found, key=lambda p: p.as_posix().casefold())
 
 
 def select_files(root: Path) -> list[PurePosixPath]:
@@ -189,6 +260,12 @@ def select_files(root: Path) -> list[PurePosixPath]:
 # --- утечки и нормализация ---------------------------------------------------------------
 
 def is_text(relative: PurePosixPath) -> bool:
+    posix = relative.as_posix()
+    # Файлы модели едут байт в байт: их размеры и суммы записаны в манифест,
+    # который служба сверяет на старте (см. BAKED_MODEL_DIR). README каталога —
+    # обычный текст и проверяется как везде.
+    if posix.startswith(BAKED_MODEL_DIR + "/") and relative.suffix.lower() != ".md":
+        return False
     name = relative.name
     return name in TEXT_NAMES or relative.suffix.lower() in TEXT_SUFFIXES
 
@@ -236,6 +313,8 @@ def package_readme(version: str, built: str) -> str:
 | Каталог / файл | Что это |
 |---|---|
 | `deploy/` | **Начинать отсюда.** Установка сервера одной командой (`install.sh`), обновление, резервные копии, диагностика. Инструкция — `deploy/README.md` |
+| `deploy/offline/` | Установка и обновление **без интернета**: образы собираются на машине с сетью и увозятся файлом. Инструкция — `deploy/offline/README.md` |
+| `deploy/MIGRATION.md` | Переезд **работающей** системы на другой сервер: база, фотографии, портфели. Обычным копированием базы переезжать нельзя — там же сказано, почему |
 | `server/` | Сервер: приложение выездника (PWA), административный API для пульта, Telegram-бот (необязателен). Собирается в контейнер `hard-app` |
 | `stt/` | Служба распознавания речи для голосовых комментариев. Свой контейнер `hard-stt`, без внешних сервисов. Справка — `stt/README.md` |
 | `pult/` | Пульт аналитика — настольная программа (Windows, Python + Qt). Запуск двойным кликом `pult/Пульт.pyw`. Инструкция — `pult/README.md` |
@@ -252,12 +331,21 @@ def package_readme(version: str, built: str) -> str:
 обязателен — без него приложение на телефонах не работает).
 
 ```bash
-cd deploy
-./install.sh          # создаст .env, секреты, соберёт и запустит app + stt
+cd deploy/units/core
+./install.sh          # создаст .env, соберёт и запустит приложение
 nano .env             # ADMIN_ID, MINIAPP_URL; BOT_TOKEN — по желанию
 ./update.sh           # применить правки .env
 ./doctor.sh           # состояние
 ```
+
+Голос и маршруты — отдельные единицы (`deploy/units/stt`, `deploy/units/gps`),
+ставятся тем же `./install.sh` в своём каталоге и в любом порядке: приложение
+работает и без них.
+
+**Если интернета на сервере нет** — сборка образов там не пройдёт в принципе.
+Тогда сначала `deploy/offline/README.md`: образы собираются на машине с сетью
+одной командой, увозятся файлом и заносятся на месте (`./load.sh`), а установка
+дальше идёт как обычно.
 
 Подробности, требования к памяти, HTTPS, резервные копии, включение и
 выключение Telegram и голоса — в `deploy/README.md`.
@@ -269,7 +357,7 @@ nano .env             # ADMIN_ID, MINIAPP_URL; BOT_TOKEN — по желанию
 
 - Пульт: `pip install -r pult/requirements.txt` один раз, затем двойной клик по
   `pult/Пульт.pyw`. При первом запуске указать адрес сервера (`https://…`) и
-  `ADMIN_API_KEY` из `deploy/.env`, привязать это устройство (`pult/УСТРОЙСТВА.md`).
+  `ADMIN_API_KEY` из `deploy/units/core/.env`, привязать это устройство (`pult/УСТРОЙСТВА.md`).
 - Перенос реестров: `pip install -r requirements-registry-cycle.txt`, затем
   двойной клик по `Перенос реестров.pyw` в корне пакета.
 
@@ -278,9 +366,14 @@ nano .env             # ADMIN_ID, MINIAPP_URL; BOT_TOKEN — по желанию
 Из корня пакета, Python 3.12+:
 
 ```bash
-pip install aiohttp aiogram openpyxl python-dotenv pytest
+pip install -r requirements-dev.txt
 python -m pytest -q
 ```
+
+Ставить зависимости по одной не надо: `requirements-dev.txt` — это ровно тот
+набор, на котором прогон зелёный. Одного `server/requirements.txt` мало: он
+описывает сервер, а тесты покрывают ещё пульт (Qt), перенос реестров (Excel) и
+движок, и без них сбор тестов падает на полусотне файлов ещё до первой проверки.
 
 Тесты, требующие модели распознавания речи или Excel, пропускаются, если
 их нет. Аналитический движок `engine/` в пакет не входит — его тесты
@@ -289,7 +382,7 @@ python -m pytest -q
 ## Что важно знать
 
 - В пакете нет ни одного секрета и ни одной записи с персональными данными:
-  `.env` создаётся при установке, база и фотографии живут в `deploy/data/`.
+  `.env` создаётся при установке, база и фотографии живут в `deploy/units/core/data/`.
 - Внутренние идентификаторы (имена таблиц, заголовки версий оболочки) могут
   содержать историческое имя `hardbot` — это не отдельный продукт.
 """
@@ -303,6 +396,35 @@ def sha256_of(path: Path) -> str:
         for block in iter(lambda: stream.read(1 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def baked_model_report(root: Path) -> list[str]:
+    """Что сказать про модель речи: она едет или её нет. Молчать нельзя ни в том,
+    ни в другом случае — молчание здесь и есть та поломка, которую ловим."""
+    weights = root / Path(*PurePosixPath(BAKED_MODEL_WEIGHTS).parts)
+    manifest_path = root / Path(*PurePosixPath(BAKED_MODEL_MANIFEST).parts)
+    ready = (weights.is_file() and manifest_path.is_file()
+             and wanted(PurePosixPath(BAKED_MODEL_WEIGHTS))
+             and wanted(PurePosixPath(BAKED_MODEL_MANIFEST)))
+    if ready:
+        name = "?"
+        try:
+            name = str(json.loads(manifest_path.read_text("utf-8")).get("name", "?"))
+        except (OSError, ValueError):
+            pass
+        size = weights.stat().st_size / 1e9
+        return [f"Модель речи: «{name}», {size:.2f} ГБ — едет в пакете, "
+                f"единица stt поднимется без интернета."]
+    return [
+        "ВНИМАНИЕ: модели речи в пакете НЕТ.",
+        "  Единица stt на месте установки НЕ ПОДНИМЕТСЯ: образ соберётся пустым, и",
+        "  контейнер уйдёт в цикл перезапусков — «в образе модели нет, а скачивание",
+        "  выключено». Скачать её там нечем: служба в сеть не ходит намеренно.",
+        "  Что сделать ДО сборки пакета:  python tools/prepare_stt_model.py",
+        "  (нужен интернет и около получаса; подробности — stt/README.md).",
+        "  Если голос компании не нужен — так и надо: единицу stt не ставят, а в",
+        "  .env ядра оставляют VOICE_BACKEND=off.",
+    ]
 
 
 def build(root: Path, out_dir: Path, version: str | None = None,
@@ -327,7 +449,14 @@ def build(root: Path, out_dir: Path, version: str | None = None,
             for relative in files:
                 info = zipfile.ZipInfo(f"{folder}/{relative.as_posix()}",
                                        date_time=(2026, 1, 1, 0, 0, 0))
-                info.compress_type = zipfile.ZIP_DEFLATED
+                # Веса модели кладём без сжатия. Они уже квантованы в int8 —
+                # сжимаются на единицы процентов, а времени это стоит полминуты
+                # на каждой сборке пакета И на каждом прогоне тестов, которые
+                # пакет собирают. Дешёвый обмен не в ту сторону.
+                if relative.as_posix() == BAKED_MODEL_WEIGHTS:
+                    info.compress_type = zipfile.ZIP_STORED
+                else:
+                    info.compress_type = zipfile.ZIP_DEFLATED
                 if relative.suffix.lower() in {".sh"}:
                     info.external_attr = 0o755 << 16
                 else:
@@ -362,6 +491,24 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Пакет:   {archive}")
     print(f"SHA-256: {checksum.read_text(encoding='utf-8').split()[0]}")
     print(f"Файлов:  {count}, размер {archive.stat().st_size:,} байт".replace(",", " "))
+
+    print("")
+    for line in baked_model_report(Path(args.root).resolve()):
+        print(line)
+
+    # Тишина здесь опаснее лишней строки: раньше модель речи и архивы образов
+    # вырезались без единого слова, и обнаруживалось это уже у ИТ-службы.
+    missed = skipped_payload(Path(args.root))
+    if missed:
+        print("")
+        print("Не поехало — правила «каталог models» и «архивы»:")
+        for relative in missed[:10]:
+            print(f"  {relative}")
+        if len(missed) > 10:
+            print(f"  … и ещё {len(missed) - 10}")
+        print("Если это модель речи или образы для установки без интернета — их место")
+        print("в deploy/offline/ (см. deploy/offline/README.md), оттуда они едут в пакет.")
+        print("Если это рабочий кэш или чей-то архив — всё правильно, так и надо.")
     return 0
 
 

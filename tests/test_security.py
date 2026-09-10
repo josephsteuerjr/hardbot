@@ -1,4 +1,5 @@
 """Тесты безопасности O3: аппрув привязки, аудит, auth движка."""
+import importlib
 import itertools
 from pathlib import Path
 
@@ -7,9 +8,28 @@ import pytest
 import db
 
 # Движок engine/ в пакет для ИТ не входит — его проверки пропускаются.
+#
+# Проверять один каталог мало: engine/app/main.py — приложение на FastAPI, а
+# fastapi нет ни в server/requirements.txt, ни в образе ядра. На машине, где
+# каталог лежит, а библиотеки нет, эти семь тестов не пропускались, а падали
+# на ImportError — то есть «пропускаются сами» было неправдой. Условие теперь
+# честное: нужен и каталог, и то, чем он написан.
+_ENGINE_DIR = Path(__file__).resolve().parent.parent / "engine"
+
+
+def _importable(name: str) -> bool:
+    """Именно импорт, а не поиск файла: библиотека бывает установлена и при этом
+    не поднимается (Qt без системной libGL — ровно такой случай)."""
+    try:
+        importlib.import_module(name)
+    except Exception:      # noqa: BLE001 — любая поломка импорта = «нет её»
+        return False
+    return True
+
+
 needs_engine = pytest.mark.skipif(
-    not (Path(__file__).resolve().parent.parent / "engine").is_dir(),
-    reason="engine/ не входит в этот пакет")
+    not (_ENGINE_DIR.is_dir() and _importable("fastapi")),
+    reason="нет engine/ или не установлен fastapi (pip install -r requirements-dev.txt)")
 
 _uid = itertools.count(700000)
 

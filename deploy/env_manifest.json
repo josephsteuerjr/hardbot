@@ -1,0 +1,669 @@
+{
+  "_": [
+    "Единственный источник правды по переменным окружения «Харда».",
+    "Из него порождаются .env.example всех единиц: python deploy/env_manifest.py write.",
+    "Им же проверяется, что код не читает ничего сверх описанного здесь:",
+    "python deploy/env_manifest.py check  (то же гоняет tests/test_env_manifest.py).",
+    "",
+    "Поля переменной:",
+    "  name            имя в окружении;",
+    "  unit            чьё это хозяйство: core / stt / gps — единицы поставки;",
+    "                  engine, pult, registry-cycle — то, что ИТ-службе не ставят;",
+    "                  система — не настройка, а то, что даёт сама ОС;",
+    "  section         раздел .env.example (только для core/stt/gps);",
+    "  in_env_example  попадает ли в .env.example. false = тонкая настройка:",
+    "                  описана здесь, но в файл оператора не лезет, чтобы не пугать;",
+    "  required        без неё система работает не так, как задумано;",
+    "  default         что будет, если переменную не задать;",
+    "  example         что подставить в .env.example (обычно = default или пусто);",
+    "  readers         где именно код её читает — чтобы не искать грепом.",
+    "                  Номер строки здесь подсказка, а не контракт: он стареет,",
+    "                  путь к файлу — нет. Актуальный список всегда можно",
+    "                  получить: python deploy/env_manifest.py table;",
+    "  why             зачем она и что будет, если ошибиться."
+  ],
+
+  "units": {
+    "core": {
+      "title": "ядро: приложение, админ-API, PWA, база, фото",
+      "header": "Настройки единицы CORE (приложение). ./install.sh копирует этот файл в .env и дальше читает .env. В .env лежат секреты — не класть в систему контроля версий, права 600.\n\nЭтот файл ПОРОЖДЁН из deploy/env_manifest.json. Правьте манифест и выполняйте `python deploy/env_manifest.py write`, иначе правка потеряется при следующей генерации.\n\nНастройки речи (какая модель, сколько потоков) живут не здесь, а в deploy/units/stt/.env. Здесь — только «включён ли голос вообще».",
+      "sections": [
+        {"id": "required", "title": "ОБЯЗАТЕЛЬНО"},
+        {"id": "telegram", "title": "TELEGRAM (необязательно)"},
+        {"id": "voice", "title": "ГОЛОС"},
+        {"id": "net", "title": "СЕТЬ"},
+        {"id": "access", "title": "ДОСТУП"},
+        {"id": "routes", "title": "МАРШРУТЫ (единица gps)"},
+        {"id": "backup", "title": "РЕЗЕРВНЫЕ КОПИИ"}
+      ]
+    },
+    "stt": {
+      "title": "речь: распознавание голосовых комментариев",
+      "header": "Настройки единицы STT (распознавание речи). ./install.sh копирует этот файл в .env и дальше читает .env.\n\nЭтот файл ПОРОЖДЁН из deploy/env_manifest.json. Правьте манифест и выполняйте `python deploy/env_manifest.py write`.\n\nСекретов здесь нет: токен службы создаётся сам и живёт внутри общего тома. Включение голоса в приложении — не здесь, а в .env ядра: VOICE_BACKEND=stt.",
+      "sections": [
+        {"id": "model", "title": "МОДЕЛЬ"},
+        {"id": "limits", "title": "ОГРАНИЧЕНИЯ"}
+      ]
+    },
+    "gps": {
+      "title": "маршруты: OSRM по странам и оптимизатор VROOM",
+      "header": "Настройки единицы GPS (маршруты по дорогам). ./install.sh копирует этот файл в .env и дальше читает .env. Секретов здесь нет.\n\nЭтот файл ПОРОЖДЁН из deploy/env_manifest.json. Правьте манифест и выполняйте `python deploy/env_manifest.py write`.\n\nВАЖНО: сама по себе эта единица ядру ничего не сообщает. После установки впишите её адреса в .env ЯДРА и выполните там ./update.sh:\nOSRM_URL_UZ=http://osrm-uz:5000\nOSRM_URL_TJ=http://osrm-tj:5000\nOSRM_URL_RU=http://osrm-ru:5000\nVROOM_URL=http://vroom:3000\nСтроки тех стран, которых нет, оставьте пустыми.",
+      "sections": [
+        {"id": "countries", "title": "КАКИЕ СТРАНЫ ПОДНИМАТЬ"},
+        {"id": "graphs", "title": "ФАЙЛЫ ГРАФОВ"},
+        {"id": "ports", "title": "ПОРТЫ ДЛЯ ПРОВЕРКИ РУКАМИ"}
+      ]
+    }
+  },
+
+  "variables": [
+    {
+      "name": "ADMIN_ID",
+      "unit": "core", "section": "required", "required": true,
+      "default": "", "example": "",
+      "readers": ["server/config.py:21"],
+      "why": "Telegram-id владельца системы: он всегда администратор, ему приходят заявки сотрудников на доступ и сводки. Как узнать: написать боту /whoami (или посмотреть в любом боте вроде @userinfobot).\nПусто — аппрув привязки автоматически отключается: одобрять некому, иначе выездники были бы заперты навсегда."
+    },
+    {
+      "name": "MINIAPP_URL",
+      "unit": "core", "section": "required", "required": true,
+      "default": "", "example": "",
+      "readers": ["server/app.py:418", "server/digest.py:79", "server/handlers_main.py:55"],
+      "why": "Публичный HTTPS-адрес приложения. ИМЕННО HTTPS — по http приложение не работает: без него браузер молча отбирает камеру, гео и офлайн. Пример: https://hard.company.ru\nПусто — кнопка «Приложение» в боте не появится и ссылки в сводках будут без адреса."
+    },
+    {
+      "name": "ADMIN_API_KEY",
+      "unit": "core", "section": "required", "required": true,
+      "default": "", "example": "",
+      "readers": ["server/web.py:2728", "server/web.py:2743"],
+      "why": "Ключ доступа к административному API — им подключается пульт аналитика. install.sh генерирует его сам, если поле пустое. Пусто = пульт не подключится."
+    },
+    {
+      "name": "BOT_TOKEN",
+      "unit": "core", "section": "telegram", "required": false,
+      "default": "", "example": "",
+      "readers": ["server/app.py:367", "server/maplink.py:23", "server/web.py:182"],
+      "why": "Токен бота от @BotFather. Пусто — сервер работает БЕЗ Telegram: приложение, фото, пульт работают; пуши руководителям и сводки не отправляются. Заполнить и перезапустить (./update.sh) можно в любой момент.\nЕсли токен сохранён через пульт, он лежит в базе и главнее этой переменной."
+    },
+    {
+      "name": "GROUP_CHAT_ID",
+      "unit": "core", "section": "telegram", "required": false,
+      "default": "", "example": "",
+      "readers": ["server/config.py:22"],
+      "why": "Беседа для сводок и пересылки. Пусто — не используется. Как узнать: команда /chatid в нужной беседе."
+    },
+    {
+      "name": "VOICE_BACKEND",
+      "unit": "core", "section": "voice", "required": false,
+      "default": "off", "example": "off",
+      "readers": ["server/web.py:80"],
+      "why": "Голосовые комментарии: stt — включено, off — выключено (сотрудники вводят текст руками).\nВключать имеет смысл, только если поставлена единица речи (deploy/units/stt) — приложение ходит к ней через общий том, а не по сети. Если включить без неё, всё остальное работает, а на голосовое сообщение сотрудник получит понятный отказ.\nЗначение «praxis» — прежнее имя того же режима, оставлено рабочим для уже настроенного прода."
+    },
+    {
+      "name": "VOICE_TIMEOUT_SECONDS",
+      "unit": "core", "section": "voice", "required": false,
+      "default": "60", "example": "60",
+      "readers": ["server/web.py:95"],
+      "why": "Сколько ждать ответа от службы речи, секунд. Значения вне 5..70 подтягиваются к границам: минута молчания на экране — это уже отказ, а не ожидание."
+    },
+    {
+      "name": "APP_PORT",
+      "unit": "core", "section": "net", "required": false,
+      "default": "8080", "example": "8080",
+      "readers": ["deploy/units/core/docker-compose.yml"],
+      "why": "Порт на localhost, на котором приложение ждёт обратный прокси. Читает не код, а compose: внутри контейнера приложение всегда слушает 8080."
+    },
+    {
+      "name": "DOMAIN",
+      "unit": "core", "section": "net", "required": false,
+      "default": "", "example": "",
+      "readers": ["deploy/units/core/docker-compose.yml", "deploy/units/core/Caddyfile"],
+      "why": "Домен — нужен только профилю proxy (встроенный Caddy с автоматическим TLS). При своём nginx оставить пустым."
+    },
+    {
+      "name": "COMPOSE_PROFILES",
+      "unit": "core", "section": "net", "required": false,
+      "default": "", "example": "",
+      "readers": ["deploy/units/core/unit.conf", "deploy/_lib.sh"],
+      "why": "Профили compose этой единицы через запятую. Сейчас поддерживается один: proxy — встроенный HTTPS через Caddy. Пусто — только приложение."
+    },
+    {
+      "name": "BIND_APPROVAL",
+      "unit": "core", "section": "access", "required": false,
+      "default": "1", "example": "1",
+      "readers": ["server/config.py:26"],
+      "why": "Подтверждение привязки сотрудника владельцем.\n1 — сотрудник запрашивает доступ, владелец подтверждает (по умолчанию).\n0 — доступ выдаётся сразу. Только для пилота."
+    },
+    {
+      "name": "CORS_ALLOW_ORIGIN",
+      "unit": "core", "section": "access", "required": false,
+      "default": "", "example": "",
+      "readers": ["server/web.py:63", "engine/app/main.py:38"],
+      "why": "Домен, которому разрешены кросс-доменные обращения к API и тайлам. Пусто = только собственный домен. Так безопаснее, менять без нужды не надо."
+    },
+    {
+      "name": "OSRM_URL_UZ",
+      "unit": "core", "section": "routes", "required": false,
+      "default": "", "example": "",
+      "readers": ["server/routing_client.py:34", "server/web.py:72"],
+      "why": "Адрес маршрутизатора по Узбекистану. Заполняется, ТОЛЬКО если поставлена единица gps: имя берётся из её compose-файла и видно через общую сеть hard-net (http://osrm-uz:5000). Пусто — расстояния считаются по прямой, а порядок объезда локальным алгоритмом; система при этом работает полностью.\nПо одному адресу на страну: точка проверяется по каждому графу, и берётся тот, где ВСЕ точки легли близко к дорогам. Лишний адрес маршрут не портит."
+    },
+    {
+      "name": "OSRM_URL_TJ",
+      "unit": "core", "section": "routes", "required": false,
+      "default": "", "example": "",
+      "readers": ["server/routing_client.py:35", "server/web.py:73"],
+      "why": "То же для Таджикистана (http://osrm-tj:5000)."
+    },
+    {
+      "name": "OSRM_URL_RU",
+      "unit": "core", "section": "routes", "required": false,
+      "default": "", "example": "",
+      "readers": ["server/routing_client.py:39"],
+      "why": "То же для России, отдельный граф — Самарская область (http://osrm-ru:5000).\nДо появления этого манифеста переменная существовала ровно в одной строке кода и не была описана НИГДЕ: маршруты по РФ молча считались по прямой, и понять почему было неоткуда."
+    },
+    {
+      "name": "OSRM_URL",
+      "unit": "core", "section": "routes", "required": false,
+      "default": "", "example": "",
+      "readers": ["server/routing_client.py:40", "server/web.py:71", "engine/routing.py:165"],
+      "why": "Запасной адрес OSRM: используется, если ни один страновой не подошёл."
+    },
+    {
+      "name": "VROOM_URL",
+      "unit": "core", "section": "routes", "required": false,
+      "default": "", "example": "",
+      "readers": ["server/routing_client.py:247", "server/web.py:74", "engine/planner.py:161"],
+      "why": "Оптимизатор порядка объезда (http://vroom:3000). Пусто — порядок считает локальный алгоритм."
+    },
+    {
+      "name": "OSRM_MAX_SNAP_M",
+      "unit": "core", "section": "routes", "required": false,
+      "default": "5000", "example": "5000",
+      "readers": ["server/routing_client.py:70"],
+      "why": "Максимальное расстояние от точки до дороги, метров. Если точка легла дальше, граф считается «не тем» и берётся следующий: соседний граф тоже отвечает Ok, но притягивает точку на десятки километров к границе."
+    },
+    {
+      "name": "BACKUP_KEEP",
+      "unit": "core", "section": "backup", "required": false,
+      "default": "14", "example": "14",
+      "readers": ["deploy/units/core/backup.sh"],
+      "why": "Сколько последних копий базы хранить в ./backups (backup.sh удаляет старые)."
+    },
+
+    {
+      "name": "APP_DATA",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "каталог рядом с кодом",
+      "readers": ["server/db.py:59", "server/geocode.py:37", "server/geoindex.py:48", "server/photostore.py:17", "server/web.py:67"],
+      "why": "Каталог данных: база, фото, справочник GeoNames, файл тайлов. В контейнере это /data — том, который переживает обновление. Задаёт compose; руками менять незачем."
+    },
+    {
+      "name": "HARDBOT_DATA",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["server/db.py:59", "server/geocode.py:37", "server/geoindex.py:48"],
+      "why": "Прежнее имя APP_DATA. Принимается, если APP_DATA не задана, — чтобы старые установки не потеряли данные при обновлении."
+    },
+    {
+      "name": "APP_ENV_FILE",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": ".env рядом с кодом",
+      "readers": ["server/db.py:2683"],
+      "why": "Куда писать BOT_TOKEN при смене бота из пульта. По умолчанию .env рядом со скриптами — именно его читает env_file в compose. Переопределение на всякий случай."
+    },
+    {
+      "name": "HARDBOT_ENV",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["server/db.py:2683"],
+      "why": "Прежнее имя APP_ENV_FILE, принимается для совместимости."
+    },
+    {
+      "name": "MINIAPP_HOST",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "0.0.0.0",
+      "readers": ["server/app.py:390"],
+      "why": "Интерфейс, на котором приложение слушает ВНУТРИ контейнера. 0.0.0.0 здесь безопасно: наружу порт публикует compose, и только на localhost."
+    },
+    {
+      "name": "MINIAPP_PORT",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "8080",
+      "readers": ["server/app.py:391", "server/web.py:3993", "server/miniapp_dev.py:32"],
+      "why": "Порт приложения ВНУТРИ контейнера. Наружный порт — APP_PORT, это разные вещи."
+    },
+    {
+      "name": "STT_SOCKET",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "/run/stt/stt.sock",
+      "readers": ["server/web.py:90", "stt/server.py:100"],
+      "why": "Путь к Unix-сокету службы речи внутри общего тома hard-stt-run. Это контракт между единицами core и stt: меняется только в обеих сразу."
+    },
+    {
+      "name": "STT_TOKEN_FILE",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "/run/secrets/stt.token",
+      "readers": ["server/web.py:91", "stt/server.py:101"],
+      "why": "Файл с токеном службы речи. В сборке по единицам он лежит в том же общем томе (/run/stt/stt.token) и создаётся одноразовым контейнером stt-token — задаёт compose обеих единиц."
+    },
+    {
+      "name": "PRAXIS_STT_SOCKET",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["server/web.py:90"],
+      "why": "Прежнее имя STT_SOCKET. Работает, если новое не задано: на действующем проде переменные назывались так."
+    },
+    {
+      "name": "PRAXIS_STT_TOKEN_FILE",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["server/web.py:91"],
+      "why": "Прежнее имя STT_TOKEN_FILE, принимается для совместимости."
+    },
+    {
+      "name": "IMPORT_REGISTRAR_HTTP",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["server/web.py:2828"],
+      "why": "1 — разрешить разрешение импорта реестра прямо по HTTP, без шага в терминале сервера. Осознанный размен владельца: второй фактор при загрузке исчезает, admin-ключа становится достаточно. По умолчанию ВЫКЛЮЧЕНО; выключение возвращает исходный порядок целиком."
+    },
+    {
+      "name": "GEOCODER_ALLOW_PUBLIC",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["server/web.py:3422"],
+      "why": "1 — разрешить серверу ходить в публичные геокодеры. По умолчанию ВЫКЛЮЧЕНО: адреса должников с прода наружу не уходят, сервер считает только офлайн-справочником. Точный геокодинг живёт в пульте, на машине владельца."
+    },
+    {
+      "name": "GEOCODER_COUNTRIES",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "tj,uz,ru",
+      "readers": ["server/geocode.py:46"],
+      "why": "Каким странам разрешено отдавать координаты. Без ограничения «Похтачи» уезжает в «Потаниху» под Казанью."
+    },
+    {
+      "name": "GEOCODER_MAX_KM",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "60",
+      "readers": ["server/geocode.py:50"],
+      "why": "Насколько далеко от известного центра города разрешено лечь точному попаданию, километров. 60 км покрывает город с пригородом; больше — начинается фаззи-снос в соседнюю страну."
+    },
+    {
+      "name": "GEOINDEX_COUNTRIES",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "TJ,UZ,RU",
+      "readers": ["server/geoindex.py:68"],
+      "why": "Какие страновые дампы GeoNames грузить в офлайн-справочник."
+    },
+    {
+      "name": "GEOINDEX_DOWNLOAD",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["server/geoindex.py:531"],
+      "why": "1 — разрешить докачивать дампы справочника из интернета. По умолчанию ВЫКЛЮЧЕНО: молчаливая докачка превратила бы первый же запрос навигации в неожиданный исходящий коннект с прода."
+    },
+    {
+      "name": "NOMINATIM_URL",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "https://nominatim.openstreetmap.org/search",
+      "readers": ["server/geocode.py:43"],
+      "why": "Адрес точного геокодера. Переключается на свой он-прем одной строкой — тогда адреса не уходят наружу вообще."
+    },
+    {
+      "name": "PHOTON_URL",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "https://photon.komoot.io/api",
+      "readers": ["server/geocode.py:44"],
+      "why": "Второй точный геокодер, тот же смысл, что у NOMINATIM_URL."
+    },
+    {
+      "name": "YANDEX_GEOCODER_KEY",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["server/geocode.py:40"],
+      "why": "Ключ геокодера Яндекса. Пусто — слой не используется."
+    },
+    {
+      "name": "LIBPOSTAL_URL",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["server/normalize.py:26"],
+      "why": "Адрес libpostal-rest для нормализации кривых адресов. Пусто — работает офлайн-фолбэк нормализации, этого достаточно."
+    },
+    {
+      "name": "SCORING_MODEL",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "server/scoring_model.json",
+      "readers": ["server/scoring_model.py:45"],
+      "why": "Путь к файлу модели ожидаемого сбора. Нет файла — приоритет считается правилами без модели."
+    },
+    {
+      "name": "ROUTING_SIDECAR_PORT",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "8082",
+      "readers": ["server/route_sidecar.py:33"],
+      "why": "Порт вспомогательной службы маршрутов при отдельном запуске. В сборке по единицам не используется."
+    },
+    {
+      "name": "APP_DEV",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["server/web.py:99", "server/miniapp_dev.py:15"],
+      "why": "Режим разработчика: приложение открывается без Telegram-подписи. На бою НЕ ставить — это обход входа."
+    },
+    {
+      "name": "HARDBOT_DEV",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["server/web.py:99"],
+      "why": "Прежнее имя APP_DEV. Такой же обход входа — на бою не ставить."
+    },
+    {
+      "name": "APP_NO_BROWSER",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["server/miniapp_dev.py:34"],
+      "why": "1 — при локальном запуске dev-миниаппа не открывать браузер. К серверу отношения не имеет."
+    },
+    {
+      "name": "HARDBOT_NO_BROWSER",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["server/miniapp_dev.py:34"],
+      "why": "Прежнее имя APP_NO_BROWSER."
+    },
+
+    {
+      "name": "STT_MODEL",
+      "unit": "stt", "section": "model", "required": false,
+      "default": "large-v3-turbo", "example": "large-v3-turbo",
+      "readers": ["stt/server.py:92", "deploy/units/stt/docker-compose.yml"],
+      "why": "Модель распознавания. Здесь должно стоять имя модели, ЗАПЕЧЁННОЙ В ОБРАЗ: она едет вместе с исходниками, поэтому служба поднимается за секунды и без интернета. По умолчанию large-v3-turbo — ≈ 0,8 ГБ в образе, ≈ 1,3 ГБ памяти.\nВпишете другое имя — служба переживёт (возьмёт запечённую), но при каждом старте напишет ERROR и WARNING: журнал, который пугает без причины, хуже, чем никакого.\nСменить модель по-настоящему — две команды на машине сборщика, а не правка этой строки:\npython tools/prepare_stt_model.py --repo <репозиторий> --name <имя>\ncd deploy/units/stt && ./update.sh"
+    },
+    {
+      "name": "STT_COMPUTE_TYPE",
+      "unit": "stt", "section": "model", "required": false,
+      "default": "int8", "example": "int8",
+      "readers": ["stt/server.py:95", "deploy/units/stt/docker-compose.yml"],
+      "why": "Точность вычислений. int8 — быстро и достаточно; float32 — медленнее и заметно прожорливее по памяти. Менять без нужды не надо."
+    },
+    {
+      "name": "STT_THREADS",
+      "unit": "stt", "section": "model", "required": false,
+      "default": "0", "example": "0",
+      "readers": ["stt/server.py:97", "deploy/units/stt/docker-compose.yml"],
+      "why": "Потоков процессора на распознавание: 0 = по числу ядер, но не больше 4."
+    },
+    {
+      "name": "STT_RATE_PER_MINUTE",
+      "unit": "stt", "section": "limits", "required": false,
+      "default": "6", "example": "6",
+      "readers": ["stt/server.py:103", "deploy/units/stt/docker-compose.yml"],
+      "why": "Сколько распознаваний в минуту принимать — защита от случайного шквала."
+    },
+    {
+      "name": "STT_BURST",
+      "unit": "stt", "section": "limits", "required": false,
+      "default": "2", "example": "2",
+      "readers": ["stt/server.py:104", "deploy/units/stt/docker-compose.yml"],
+      "why": "Какой всплеск разрешить сверх минутной нормы."
+    },
+    {
+      "name": "STT_MEM_LIMIT",
+      "unit": "stt", "section": "limits", "required": false,
+      "default": "2000m", "example": "2000m",
+      "readers": ["deploy/units/stt/docker-compose.yml"],
+      "why": "Лимит памяти контейнера речи. 2000m — запечённая large-v3-turbo с запасом (в покое она держит около 1,3 ГБ). Ставите модель крупнее — поднимите и это число: тесный лимит убивает контейнер по OOM молча, без единой строки в журнале службы, и это выглядит как беспричинный перезапуск.\n0 = без лимита, но тогда утечка в службе речи положит весь сервер, а не только речь."
+    },
+    {
+      "name": "STT_DEVICE",
+      "unit": "stt", "in_env_example": false, "required": false,
+      "default": "cpu",
+      "readers": ["stt/server.py:96"],
+      "why": "cpu или cuda. Образ собран под CPU: значение cuda без видеокарты и без своей сборки не заработает."
+    },
+    {
+      "name": "STT_BEAM_SIZE",
+      "unit": "stt", "in_env_example": false, "required": false,
+      "default": "5",
+      "readers": ["stt/server.py:98"],
+      "why": "Ширина луча декодера, 1..10. Больше — чуть точнее и заметно медленнее."
+    },
+    {
+      "name": "STT_MODELS_DIR",
+      "unit": "stt", "in_env_example": false, "required": false,
+      "default": "/models",
+      "readers": ["stt/server.py:99"],
+      "why": "Куда класть скачанную модель внутри контейнера. Совпадает с томом ./models; менять незачем."
+    },
+    {
+      "name": "STT_MAX_BYTES",
+      "unit": "stt", "in_env_example": false, "required": false,
+      "default": "предел, зашитый в код",
+      "readers": ["stt/server.py:102"],
+      "why": "Максимальный размер принимаемого аудио. Выше зашитого предела поднять нельзя."
+    },
+    {
+      "name": "STT_UPLOAD_TIMEOUT",
+      "unit": "stt", "in_env_example": false, "required": false,
+      "default": "30",
+      "readers": ["stt/server.py:105"],
+      "why": "Сколько секунд ждать загрузку файла от ядра."
+    },
+    {
+      "name": "STT_TEMP_DIR",
+      "unit": "stt", "in_env_example": false, "required": false,
+      "default": "/tmp/stt",
+      "readers": ["stt/server.py:106"],
+      "why": "Каталог для временных файлов распознавания внутри контейнера."
+    },
+    {
+      "name": "STT_ALLOW_DOWNLOAD",
+      "unit": "stt", "section": "model", "required": false,
+      "default": "0", "example": "0",
+      "readers": ["stt/server.py:124", "deploy/units/stt/docker-compose.yml"],
+      "why": "Разрешить службе речи качать модель из интернета (с huggingface.co). По умолчанию 0 — модель едет внутри образа, и в сеть служба не ходит вообще: на объекте интернета может не быть, а первый старт со скачиванием полутора гигабайт выглядит как зависание.\n1 нужен ровно в одном случае: вам нужна модель, которой в образе нет, и вы не хотите пересобирать образ. Тогда первый старт длится столько, сколько качается модель, — и ожидание в скриптах (UNIT_WAIT_SECONDS) надо увеличить."
+    },
+    {
+      "name": "STT_BAKED_MODEL_DIR",
+      "unit": "stt", "in_env_example": false, "required": false,
+      "default": "/opt/hard/stt-model",
+      "readers": ["stt/server.py:123", "stt/Dockerfile"],
+      "why": "Где внутри образа лежит запечённая модель. Путь намеренно не /models: на /models compose вешает том под кэш скачивания, а том перекрыл бы запечённую модель — она бы просто исчезла, и понять почему было бы нельзя. Менять незачем."
+    },
+    {
+      "name": "STT_TOKEN_INSECURE_OK",
+      "unit": "stt", "in_env_example": false, "required": false,
+      "default": "0",
+      "readers": ["stt/server.py:127"],
+      "why": "Аварийный выключатель проверки прав на файле токена. 1 — служба стартует, даже если токен читается всеми, и кричит об этом в журнал при каждом старте. Нужен только на файловых системах, которые прав не хранят; в обычной установке токен лежит внутри docker-тома, и этот случай не наступает."
+    },
+    {
+      "name": "HF_HUB_OFFLINE",
+      "unit": "stt", "in_env_example": false, "required": false,
+      "default": "1",
+      "readers": ["stt/server.py:332", "stt/Dockerfile"],
+      "why": "Запрет библиотеке huggingface_hub ходить в сеть. Это не настройка оператора: служба речи выставляет её сама по STT_ALLOW_DOWNLOAD, до импорта библиотеки (позже поздно — hub читает её один раз). В образе она зашита в 1.\nЗнать о ней надо тем, кто готовит модель или собирает офлайн-пакет: любая команда `docker run … hard-stt`, которой НУЖНО скачать модель, обязана передать -e HF_HUB_OFFLINE=0, иначе получит LocalEntryNotFoundError на пустом месте."
+    },
+    {
+      "name": "HF_HUB_DISABLE_TELEMETRY",
+      "unit": "stt", "in_env_example": false, "required": false,
+      "default": "1",
+      "readers": ["stt/server.py:333", "stt/Dockerfile"],
+      "why": "Запрет huggingface_hub отправлять статистику использования. Ставится в 1 и кодом, и образом: наружу эта система не отчитывается ни перед кем."
+    },
+    {
+      "name": "HF_HOME",
+      "unit": "stt", "in_env_example": false, "required": false,
+      "default": "/models",
+      "readers": ["tools/prepare_stt_model.py:282", "stt/Dockerfile", "deploy/offline/bundle.sh"],
+      "why": "Куда huggingface_hub складывает скачанное. Нужна подготовщику модели и сборщику офлайн-пакета: они запускают контейнер речи вручную и монтируют сюда каталог, чтобы полтора гигабайта не качались заново при каждом запуске."
+    },
+
+    {
+      "name": "COMPOSE_PROFILES",
+      "unit": "gps", "section": "countries", "required": false,
+      "default": "", "example": "",
+      "readers": ["deploy/units/gps/unit.conf", "deploy/_lib.sh"],
+      "why": "Через запятую, из списка: uz, tj, ru. Поднимается ровно то, что перечислено, и только если граф этой страны уже лежит в ./osrm/<страна>/. Пусто — поднимется один оптимизатор порядка (vroom), без дорожных графов.\nИмя то же, что у ядра, а смысл другой: у каждой единицы свой .env, и профили в них не пересекаются."
+    },
+    {
+      "name": "OSRM_GRAPH_UZ",
+      "unit": "gps", "section": "graphs", "required": false,
+      "default": "uzbekistan-latest.osrm", "example": "uzbekistan-latest.osrm",
+      "readers": ["deploy/units/gps/docker-compose.yml"],
+      "why": "Имя файла графа внутри ./osrm/uz/. Рядом с ним лежит десяток файлов с тем же именем и разными расширениями — это нормально, указывается только основной .osrm. Сборка графов: deploy/geo/README.md."
+    },
+    {
+      "name": "OSRM_GRAPH_TJ",
+      "unit": "gps", "section": "graphs", "required": false,
+      "default": "tajikistan-latest.osrm", "example": "tajikistan-latest.osrm",
+      "readers": ["deploy/units/gps/docker-compose.yml"],
+      "why": "То же для ./osrm/tj/."
+    },
+    {
+      "name": "OSRM_GRAPH_RU",
+      "unit": "gps", "section": "graphs", "required": false,
+      "default": "samara_oblast.osrm", "example": "samara_oblast.osrm",
+      "readers": ["deploy/units/gps/docker-compose.yml"],
+      "why": "То же для ./osrm/ru/. По РФ граф взят по одной области — полный дамп страны ради нескольких адресов возить незачем."
+    },
+    {
+      "name": "OSRM_PORT_UZ",
+      "unit": "gps", "section": "ports", "required": false,
+      "default": "5002", "example": "5002",
+      "readers": ["deploy/units/gps/docker-compose.yml"],
+      "why": "Публикуется только на 127.0.0.1 и нужен лишь для диагностики (curl). Ядро ходит не по порту, а по имени сервиса в общей сети."
+    },
+    {
+      "name": "OSRM_PORT_TJ",
+      "unit": "gps", "section": "ports", "required": false,
+      "default": "5001", "example": "5001",
+      "readers": ["deploy/units/gps/docker-compose.yml"],
+      "why": "То же для Таджикистана."
+    },
+    {
+      "name": "OSRM_PORT_RU",
+      "unit": "gps", "section": "ports", "required": false,
+      "default": "5003", "example": "5003",
+      "readers": ["deploy/units/gps/docker-compose.yml"],
+      "why": "То же для России."
+    },
+    {
+      "name": "VROOM_PORT",
+      "unit": "gps", "section": "ports", "required": false,
+      "default": "3000", "example": "3000",
+      "readers": ["deploy/units/gps/docker-compose.yml"],
+      "why": "То же для оптимизатора порядка объезда."
+    },
+    {
+      "name": "VROOM_SERVICE_SEC",
+      "unit": "gps", "in_env_example": false, "required": false,
+      "default": "1200",
+      "readers": ["engine/planner.py:28"],
+      "why": "Сколько времени закладывать на один адрес, секунд. 20 минут — замер по факту."
+    },
+    {
+      "name": "VROOM_DAY_START",
+      "unit": "gps", "in_env_example": false, "required": false,
+      "default": "по 230-ФЗ: будни 08:00, выходные 09:00",
+      "readers": ["engine/planner.py:36"],
+      "why": "Начало рабочего окна, секунд от полуночи. Окно можно только СУЗИТЬ: расширить за рамки 230-ФЗ код не даст."
+    },
+    {
+      "name": "VROOM_DAY_END",
+      "unit": "gps", "in_env_example": false, "required": false,
+      "default": "по 230-ФЗ: будни 22:00, выходные 20:00",
+      "readers": ["engine/planner.py:37"],
+      "why": "Конец рабочего окна, секунд от полуночи. Тоже только сужение."
+    },
+
+    {
+      "name": "HARDBOT_DB",
+      "unit": "engine", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["engine/app/main.py:35", "engine/app/main.py:70"],
+      "why": "Путь к боевой базе для аналитического движка. Если задан и файл существует, движок считается работающим с ПД: без ENGINE_API_TOKEN он не стартует и на 0.0.0.0 не публикуется."
+    },
+    {
+      "name": "ENGINE_API_TOKEN",
+      "unit": "engine", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["engine/app/main.py:34"],
+      "why": "Токен API движка. Обязателен, когда движок поднят на реальной базе: без него старт запрещён намеренно."
+    },
+    {
+      "name": "ENGINE_HOST",
+      "unit": "engine", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["engine/app/main.py:51"],
+      "why": "Интерфейс движка. Значение 0.0.0.0 при реальной базе запрещено: наружу только через прокси или SSH-туннель."
+    },
+    {
+      "name": "PMTILES_UPSTREAM",
+      "unit": "engine", "in_env_example": false, "required": false,
+      "default": "внешний адрес витрины тайлов",
+      "readers": ["engine/app/main.py:186"],
+      "why": "Откуда движок берёт файл базовой карты, если своего нет."
+    },
+
+    {
+      "name": "APP_ADMIN_KEY",
+      "unit": "pult", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["pult/repair_false_enrichment.py:1116"],
+      "why": "Admin-ключ сервера для служебных скриптов пульта, если не хочется класть его в настройки пульта. То же значение, что ADMIN_API_KEY на сервере."
+    },
+    {
+      "name": "HARDBOT_ADMIN_KEY",
+      "unit": "pult", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["pult/repair_false_enrichment.py:1116"],
+      "why": "Прежнее имя APP_ADMIN_KEY."
+    },
+    {
+      "name": "HARDBOT_LIMITED_TEST_ALLOW_LOCAL_HTTP",
+      "unit": "pult", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["pult/limited_test_import.py:1030"],
+      "why": "1 — разрешить пульту ходить к серверу по http на localhost. Только для проверок на своей машине: обычный запрет «только https» защищает реестр от утечки по дороге."
+    },
+
+    {
+      "name": "USERDOMAIN",
+      "unit": "система", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["registry_cycle/scheduler.py:37"],
+      "why": "Домен пользователя Windows — его подставляет сама ОС. Нужен, чтобы задача в планировщике завелась от имени того, кто её создал. Не настройка."
+    },
+    {
+      "name": "USERNAME",
+      "unit": "система", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["registry_cycle/scheduler.py:38"],
+      "why": "Имя пользователя Windows — его подставляет сама ОС. Не настройка."
+    },
+    {
+      "name": "HOSTNAME",
+      "unit": "система", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["tools/export_for_handover.py:273"],
+      "why": "Имя машины — его подставляет сама ОС. Попадает в опись выгрузки при передаче, чтобы потом было видно, с какого сервера её сняли. Не настройка: задавать руками не надо."
+    },
+    {
+      "name": "RUN_EXCEL_COM_TEST",
+      "unit": "тесты", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["tests/test_repair_false_enrichment.py:285"],
+      "why": "1 — запустить ручной e2e-тест против настоящего Excel через COM. По умолчанию такой тест пропускается: он требует установленного Excel и правит файлы на диске."
+    },
+    {
+      "name": "QT_QPA_PLATFORM",
+      "unit": "тесты", "in_env_example": false, "required": false,
+      "default": "offscreen (ставят сами тесты)",
+      "readers": ["tests/test_pult_ui_smoke.py:10", "tests/test_registry_cycle_gui_smoke.py:10"],
+      "why": "Как Qt рисует окна. Тесты окон ставят offscreen сами: иначе на сервере без экрана они не запустились бы вовсе."
+    }
+  ]
+}

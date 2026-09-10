@@ -5,8 +5,10 @@ from __future__ import annotations
 
 from exchange_contract import IMPORT_SOURCE_PUBLISHED_MASTER
 
-# Актуальный инстанс — hardbot2 (свежий код сервера). Ключ — X-Admin-Key.
-DEFAULT_URL = "https://hardbot2.166.88.185.90.nip.io"
+# Адрес сервера вводит оператор на вкладке «Сервер» — он у каждой установки
+# свой. Значения по умолчанию нет намеренно: прежнее указывало на адрес,
+# снятый провайдером, и пульт молча стучался в никуда. Ключ — X-Admin-Key.
+DEFAULT_URL = ""
 DEFAULT_KEY = ""
 
 IMPORT_SOURCE_TEST_SUBSET = "test_subset"

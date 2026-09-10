@@ -11,6 +11,23 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 # engine/ в пакете для ИТ отсутствует — тогда проверяем только server/.
 ENGINE = (ROOT / "engine").is_dir()
+
+
+def _importable(name: str) -> bool:
+    """Именно импорт, а не поиск файла: библиотека бывает установлена и всё
+    равно не поднимается."""
+    try:
+        importlib.import_module(name)
+    except Exception:      # noqa: BLE001 — любая поломка импорта = «нет её»
+        return False
+    return True
+
+
+# Само приложение движка написано на FastAPI, а его нет ни в зависимостях
+# сервера, ни в образе ядра. Каталог есть, библиотеки нет — импорт не
+# «пропускается сам», а падает на ImportError. Поэтому у веб-части движка
+# условие своё, а компиляция и лёгкие модули (geo/routing/planner) остаются.
+ENGINE_APP = ENGINE and _importable("fastapi")
 PY_DIRS = [d for d in (ROOT / "server", ROOT / "engine") if d.is_dir()]
 
 # Модули с тяжёлыми/побочными импортами (Tk-окно, локальные пути запуска) — только компиляция.
@@ -50,6 +67,6 @@ def test_imports(mod):
     importlib.import_module(mod)
 
 
-@pytest.mark.skipif(not ENGINE, reason="engine/ не входит в этот пакет")
+@pytest.mark.skipif(not ENGINE_APP, reason="нет engine/ или не установлен fastapi")
 def test_engine_app_imports():
     importlib.import_module("app.main")    # FastAPI-движок (engine/app/main.py)

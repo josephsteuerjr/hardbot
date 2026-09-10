@@ -1,11 +1,31 @@
 #!/usr/bin/env bash
 # Общие функции скриптов установки «Хард». Подключается через source,
 # сам по себе не запускается.
+#
+# Библиотека одна на три единицы (core, stt, gps). Единица — это каталог с
+# docker-compose.yml, .env и unit.conf; скрипты лежат ВНУТРИ него и подключают
+# библиотеку так:  source "$(dirname "$0")/../../_lib.sh"
+#
+# Отсюда правило: рабочим каталогом становится каталог ВЫЗЫВАЮЩЕГО скрипта, а
+# не каталог библиотеки — иначе `docker compose` брал бы чужой compose-файл и
+# чужой .env. Чем единицы отличаются друг от друга, описано в их unit.conf.
 set -euo pipefail
 
+# DEPLOY_DIR — каталог самой библиотеки (общее для всех единиц: geo/, README).
+# ВНИМАНИЕ: данные единицы лежат НЕ здесь, а в UNIT_DIR. Пути вида
+# "$DEPLOY_DIR/data" теперь ошибочны и опасны молчанием: docker создаст пустой
+# каталог и копия окажется пустой. Для данных всегда UNIT_DIR.
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$DEPLOY_DIR"
-ENV_FILE="$DEPLOY_DIR/.env"
+# Каталог единицы: где лежит скрипт, который нас подключил. HARD_UNIT_DIR —
+# ручной обход для нестандартных случаев (запуск библиотеки из другого места).
+UNIT_DIR="${HARD_UNIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[1]:-$0}")" && pwd)}"
+cd "$UNIT_DIR"
+ENV_FILE="$UNIT_DIR/.env"
+
+# Общие имена, по которым единицы находят друг друга. Менять их нельзя:
+# они прописаны в compose-файлах всех трёх единиц.
+SHARED_NET="hard-net"          # сеть: ядро → маршрутизаторы (по HTTP)
+SHARED_STT_VOLUME="hard-stt-run"  # том: ядро ↔ служба речи (Unix-сокет и токен)
 
 say()  { printf '%s\n' "$*"; }
 ok()   { printf '  [ок] %s\n' "$*"; }
@@ -62,9 +82,32 @@ voice_enabled() {
   case "$voice" in stt|praxis) return 0 ;; *) return 1 ;; esac
 }
 
-# Базовые сервисы, которые должны работать: stt — только при включённом голосе.
+# Сервисы, которые должны работать после установки. Это свойство единицы:
+# список объявлен в её unit.conf (там же учитываются профили — встроенный
+# HTTPS у ядра, страны у маршрутов). Если unit.conf почему-то не задал список,
+# спрашиваем сам compose: он знает состав с учётом включённых профилей.
 services_enabled() {
-  if voice_enabled; then echo "app stt"; else echo "app"; fi
+  if [ -n "${UNIT_SERVICES:-}" ]; then
+    printf '%s\n' "$UNIT_SERVICES"
+    return 0
+  fi
+  compose config --services 2>/dev/null | tr '\n' ' '
+}
+
+# Общие сеть и том с фиксированными именами. Создаются при установке ЛЮБОЙ из
+# единиц — потому и порядок установки не важен: кто пришёл первым, тот и создал.
+# Обе команды безвредны при повторе.
+ensure_shared() {
+  if [ "${UNIT_NEEDS_NET:-0}" = "1" ] && ! docker network inspect "$SHARED_NET" >/dev/null 2>&1; then
+    docker network create "$SHARED_NET" >/dev/null \
+      || die "не удалось создать общую сеть $SHARED_NET"
+    ok "создана общая сеть $SHARED_NET"
+  fi
+  if [ "${UNIT_NEEDS_STT_VOL:-0}" = "1" ] && ! docker volume inspect "$SHARED_STT_VOLUME" >/dev/null 2>&1; then
+    docker volume create "$SHARED_STT_VOLUME" >/dev/null \
+      || die "не удалось создать общий том $SHARED_STT_VOLUME"
+    ok "создан общий том $SHARED_STT_VOLUME"
+  fi
 }
 
 # Профили из .env: proxy требует DOMAIN, иначе Caddy стартует с пустым адресом.
@@ -89,16 +132,47 @@ health_of() {
     || echo "нет"
 }
 
+# inspect_field СЕРВИС ШАБЛОН → поле docker inspect, пусто если контейнера нет
+inspect_field() {
+  local id
+  id="$(container_id "$1")"
+  [ -n "$id" ] || return 0
+  docker inspect -f "$2" "$id" 2>/dev/null || true
+}
+
 # wait_healthy СЕРВИС СЕКУНДЫ — ждать healthy (или running, если healthcheck нет)
+#
+# Отдельно ловим цикл перезапусков. Контейнер, который стартует и сразу падает,
+# со стороны healthcheck выглядит как «ещё греется»: статус starting, ошибок
+# нет. Раньше на этом молча выжидались все 15 минут — типовой случай для службы
+# речи с испорченным токеном. Признаков два: состояние restarting и счётчик
+# перезапусков, выросший за время ожидания (старые перезапуски не в счёт —
+# контейнер мог законно перезапускаться неделю назад).
 wait_healthy() {
-  local svc="$1" limit="${2:-120}" waited=0 status
+  local svc="$1" limit="${2:-120}" waited=0 status state restarts base=""
   while :; do
     status="$(health_of "$svc")"
     case "$status" in
       healthy|running) return 0 ;;
-      exited|dead|нет) return 1 ;;
+      exited|dead|нет)
+        warn "$svc: контейнер остановился ($status) — смотрите журнал: docker compose logs --tail=50 $svc"
+        return 1 ;;
     esac
-    [ "$waited" -ge "$limit" ] && return 1
+
+    state="$(inspect_field "$svc" '{{.State.Status}}')"
+    restarts="$(inspect_field "$svc" '{{.RestartCount}}')"
+    [ -n "$base" ] || base="${restarts:-0}"
+    if [ "$state" = "restarting" ] || [ "${restarts:-0}" -gt "${base:-0}" ]; then
+      warn "$svc: контейнер падает и перезапускается по кругу (перезапусков: ${restarts:-?})."
+      warn "Ждать бесполезно — это почти всегда ошибка настройки. Причина в последних строках:"
+      warn "  docker compose logs --tail=50 $svc"
+      return 1
+    fi
+
+    [ "$waited" -ge "$limit" ] && {
+      warn "$svc: не дождались готовности за $limit с (состояние: $status)"
+      return 1
+    }
     sleep 5
     waited=$((waited + 5))
     if [ $((waited % 60)) -eq 0 ]; then
@@ -116,3 +190,15 @@ app_port() {
 human_size() {  # human_size ПУТЬ → «1,2G» или «—»
   if [ -e "$1" ]; then du -sh "$1" 2>/dev/null | cut -f1; else echo "—"; fi
 }
+
+# --- Свойства единицы -------------------------------------------------------
+# Подключается последним: unit.conf пользуется функциями выше (env_get), чтобы
+# учитывать профили из .env. Если файла нет — работаем как раньше, состав
+# сервисов тогда спросим у compose.
+if [ -f "$UNIT_DIR/unit.conf" ]; then
+  # shellcheck source=/dev/null
+  . "$UNIT_DIR/unit.conf"
+fi
+UNIT_NAME="${UNIT_NAME:-$(basename "$UNIT_DIR")}"
+UNIT_TITLE="${UNIT_TITLE:-$UNIT_NAME}"
+UNIT_WAIT_SECONDS="${UNIT_WAIT_SECONDS:-180}"
