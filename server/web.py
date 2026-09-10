@@ -4047,6 +4047,7 @@ async def _admin_digest_preview(request: web.Request) -> web.Response:
     matched_key = sum(1 for e in employees
                       if e not in exact_names and db._name_key(e) in known)
     unknown = [e for e in employees if db._name_key(e) not in known]
+    _pw = db.promise_window()
     return web.json_response({"ok": True, "text": text, "diagnostics": {
         "manager": {"telegram_id": tid, "name": mgr.get("name") or "",
                     "direction": mgr.get("direction") or "",
@@ -4060,8 +4061,11 @@ async def _admin_digest_preview(request: web.Request) -> web.Response:
         "spelling_mismatch": db.manager_spelling_mismatches(mgr),
         "processed_today": sum(len(db.persons_processed(e, today))
                                for e in employees),
-        "overdue_promises": sum(len(db.overdue_promises(e, today))
-                                for e in employees),
+        # То же окно, что в рассылке и в приложении (db.promise_window):
+        # диагностика в пульте обязана показывать ровно то, что уйдёт людям.
+        "overdue_promises": sum(
+            len(db.overdue_promises(e, today, max_days=_pw[0], agent_only=_pw[1]))
+            for e in employees),
         "report_chats": {e: db.report_chats_for(e) for e in employees},
         "last_run": {"digest": db.get_setting("digest_last_run") or "",
                      "promise": db.get_setting("promise_last_run") or ""},

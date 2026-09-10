@@ -198,13 +198,25 @@ def _employee_row(emp: str, on_date: str) -> dict:
 
 def _overdue_rows(mgr: dict, on_date: str,
                   employees: list[str]) -> list[tuple[str, list[dict]]]:
-    """[(employee, люди с просроченными обещаниями)] — только у кого они есть."""
+    """[(employee, люди с просроченными обещаниями)] — только у кого они есть.
+
+    Окно и источник — один на весь продукт (db.promise_window): рассылка,
+    кнопка в дайджесте, вкладка руководителя и счётчик в сводке обязаны
+    показывать ОДНО число, иначе «просрочено 54» в сводке и три строки в
+    списке — это баг в глазах руководителя, а не фильтр."""
+    max_days, agent_only = db.promise_window()
     out = []
     for emp in employees:
-        ps = db.overdue_promises(emp, on_date)
+        ps = db.overdue_promises(emp, on_date, max_days=max_days,
+                                 agent_only=agent_only)
         if ps:
             out.append((emp, ps))
     return out
+
+
+def _promise_window_kwargs() -> dict:
+    max_days, agent_only = db.promise_window()
+    return {"max_days": max_days, "agent_only": agent_only}
 
 
 def overdue_by_employee(mgr: dict, on_date: str) -> list[tuple[str, list[dict]]]:
@@ -675,7 +687,8 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
         "paid": len(paid), "promised": len(promised),
         # Просрочка — на конец окна, но не из будущего: у пресета «Месяц» конец
         # 30-е число, и обещания «до 25-го» оказывались бы просроченными сегодня.
-        "overdue": len(db.overdue_promises(emp, min(d_to, today_iso()))),
+        "overdue": len(db.overdue_promises(emp, min(d_to, today_iso()),
+                                           **_promise_window_kwargs())),
         "with_photo": (sum(1 for p in people
                            if photostore.photos_between(p["contracts"], d_from, d_to))
                        if with_photos else 0),

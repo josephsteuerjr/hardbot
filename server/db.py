@@ -2986,11 +2986,41 @@ def due_reminders(on_date: str) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def overdue_promises(employee: str, on_date: str) -> list[dict]:
+# Окно и источник просроченных обещаний — настройками, без переката кода.
+# 10.09.2026 рассылка ушла со 211 позициями, из них 8 просрочены накануне, а 165
+# старше двух недель: самому старому обещанию было 100 дней. Читалось это как
+# архив, а не как список работы на день. Решение владельца: неделя и только те
+# обещания, которые взял ВЫЕЗДНИК на выезде.
+PROMISE_MAX_DAYS_DEFAULT = 7
+PROMISE_AGENT_ONLY_DEFAULT = "1"
+
+
+def promise_window() -> tuple[int | None, bool]:
+    """(сколько дней просрочки показываем, только ли обещания выездника).
+    max_days=None — без ограничения (settings['promise_max_days']=0)."""
+    raw = (get_setting("promise_max_days") or "").strip()
+    try:
+        days = int(raw) if raw else PROMISE_MAX_DAYS_DEFAULT
+    except ValueError:
+        days = PROMISE_MAX_DAYS_DEFAULT
+    agent_only = push_enabled("promise_agent_only", PROMISE_AGENT_ONLY_DEFAULT)
+    return (days if days > 0 else None), agent_only
+
+
+def overdue_promises(employee: str, on_date: str, *,
+                     max_days: int | None = None,
+                     agent_only: bool = False) -> list[dict]:
     """Люди сотрудника с ПРОСРОЧЕННЫМ обещанием: promise_date (реестр) в прошлом,
     кейс не «Оплачен» и после даты обещания платежа не было (last_payment_date).
     Группировка по людям; в каждом — promise_date (самая ранняя просроченная)
-    и days_overdue. Самые «тухлые» сверху."""
+    и days_overdue. Самые «тухлые» сверху.
+
+    max_days — не показывать просрочку старше стольких дней. agent_only —
+    только обещания, зафиксированные выездником на выезде (`by_agent`);
+    остальные приходят из колонки реестра «дата обещания», её заполняет офис по
+    телефону, и к таким должникам выездник чаще всего вообще не приезжал.
+    Оба фильтра по умолчанию выключены: вызывающий решает сам (см.
+    promise_window)."""
     target = _as_date(on_date)
     if target is None:
         return []
@@ -3030,6 +3060,13 @@ def overdue_promises(employee: str, on_date: str) -> list[dict]:
         # прогнозом читался бы как обещание должника. Одно значение на
         # человека, не сумма по договорам. Ключ выдачи остаётся promised_sum:
         # это «сколько обещал должник», а не колонка реестра.
+        # Кто взял обещание. Снимок визита — единственное доказательство, что
+        # дату назвал должник ВЫЕЗДНИКУ: колонку реестра «дата обещания»
+        # заполняет ещё и офис по телефону, и такие обещания выглядели в
+        # рассылке точно так же, хотя выездник к человеку не приезжал.
+        p["by_agent"] = any(
+            _as_date((_merged_visit(x) or {}).get("promise_date")) == pd
+            for x in p["contracts"])
         p["promised_sum"] = None
         for x in p["contracts"]:
             snap = _merged_visit(x) or {}
@@ -3042,6 +3079,10 @@ def overdue_promises(employee: str, on_date: str) -> list[dict]:
             if money:
                 p["promised_sum"] = int(money)
                 break
+    if max_days is not None:
+        persons = [p for p in persons if p["days_overdue"] <= max_days]
+    if agent_only:
+        persons = [p for p in persons if p["by_agent"]]
     persons.sort(key=lambda p: -p["days_overdue"])
     return persons
 

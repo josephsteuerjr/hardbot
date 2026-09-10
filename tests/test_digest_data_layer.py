@@ -142,16 +142,27 @@ def test_units_persons_vs_contracts():
 
 
 def test_promises_data_is_not_truncated():
+    """Слой данных отдаёт ВСЕХ, срез до 12 строк — дело рисовальщика.
+
+    Окно списка на время проверки снимаем: по умолчанию в рассылку идёт неделя
+    и только обещания выездника (db.promise_window), а тут важно, что двадцать
+    позиций доходят до рисовальщика целиком."""
     _seed()
     for i in range(20):
         _add(f"P-{i}", f"Обещал {i}", "Слоев Дата",
              promise_date="2026-01-01")
     mgr = db.get_manager(MGR_TID)
-    d = digest_data.promises_data(mgr, TODAY)
-    emp = next(e for e in d["employees"] if e["employee"] == "Слоев Дата")
-    assert len(emp["items"]) == 20               # телеграм-срез 12 — в рисовальщике
-    text, _ = digest.promises_view(mgr, TODAY)
-    assert "…и ещё" in text
+    db.set_setting("promise_max_days", "0")
+    db.set_setting("promise_agent_only", "0")
+    try:
+        d = digest_data.promises_data(mgr, TODAY)
+        emp = next(e for e in d["employees"] if e["employee"] == "Слоев Дата")
+        assert len(emp["items"]) == 20           # телеграм-срез 12 — в рисовальщике
+        text, _ = digest.promises_view(mgr, TODAY)
+        assert "…и ещё" in text
+    finally:
+        db.set_setting("promise_max_days", "")
+        db.set_setting("promise_agent_only", "")
 
 
 def test_manager_scope_synthesizes_the_owner():

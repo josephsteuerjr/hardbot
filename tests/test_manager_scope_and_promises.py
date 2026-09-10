@@ -70,6 +70,10 @@ def test_promise_freshness_marks_visits_after_promise():
 
 
 def test_promises_view_shows_freshness_summary():
+    """Рисовальщик показывает оба состояния — «съездили после обещания» и «не
+    тронуто». Окно списка на время проверки снимаем: по умолчанию оно оставляет
+    только неделю и только обещания выездника (db.promise_window), а здесь
+    проверяется сам текст, а не отбор."""
     db.init_db()
     with db.connect() as conn:
         conn.execute("DELETE FROM clients WHERE responsible = ?", (EMP,))
@@ -77,8 +81,17 @@ def test_promises_view_shows_freshness_summary():
     _seed_promise("PR-V1", promise_days_ago=8, visit_days_ago=2)
     _seed_promise("PR-V2", promise_days_ago=8)
     db.set_manager(MGR_ONE, "Тестовый", ["Худжанд"], [EMP])
-    text, _kb = digest.promises_view(db.get_manager(MGR_ONE), TODAY.isoformat())
-    assert "отработано после обещания: 1" in text
-    assert "не тронуто: 1" in text
-    assert "🟢 визит" in text and "⚪ визитов не было" in text
+    db.set_setting("promise_max_days", "0")
+    db.set_setting("promise_agent_only", "0")
+    try:
+        text, _kb = digest.promises_view(db.get_manager(MGR_ONE), TODAY.isoformat())
+        assert "отработано после обещания: 1" in text
+        assert "не тронуто: 1" in text
+        assert "🟢 визит" in text and "⚪ визитов не было" in text
+    finally:
+        db.set_setting("promise_max_days", "")
+        db.set_setting("promise_agent_only", "")
+    # А с окном по умолчанию таких в рассылке нет вовсе: обещаниям 8 дней, и
+    # ни одно из них не взято выездником на выезде.
+    assert digest.overdue_by_employee(db.get_manager(MGR_ONE), TODAY.isoformat()) == []
     db.delete_manager(MGR_ONE)
