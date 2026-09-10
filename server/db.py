@@ -2912,6 +2912,15 @@ def record_bot_visit(rep_contract_id: str, values: dict,
     contracts = person_contracts(rep_contract_id)
     if not contracts:
         return 0
+    # Выезд, доехавший из оффлайна ПОЗЖЕ более свежего визита, не имеет права
+    # затереть его снимок: иначе вчерашняя доставка «нет контакта» отменила бы
+    # сегодняшнее «обещает оплатить». Строку в visits такой выезд пишет всегда —
+    # это история, — но текущим снимком человека остаётся самый поздний выезд.
+    newest = max((d for r in contracts
+                  if (d := _as_date(r["bot_visit_at"])) is not None),
+                 default=None)
+    if newest is not None and _as_date(completed_at) and newest > _as_date(completed_at):
+        return 0
     payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
     now = date.today().isoformat()
     with connect() as conn:
@@ -3484,19 +3493,22 @@ def audit_tail(limit: int = 200) -> list[sqlite3.Row]:
 def log_visit(contract_id: str, agent_id: int, payload: str,
               op_id: str | None = None, lat: float | None = None,
               lon: float | None = None, dist_m: int | None = None,
-              geo_far: bool | None = None) -> bool:
+              geo_far: bool | None = None, on_date: str | None = None) -> bool:
     """Записать выезд в историю. op_id — идемпотентный ключ (uuid от клиента): повторная
     доставка того же выезда из оффлайн-очереди НЕ создаёт дубль. Возвращает True, если
     строка реально добавлена (значит, можно слать уведомление в группу); False — если это
     повтор уже сохранённого выезда. Без op_id (старый путь) — всегда True (новая строка).
     lat/lon/dist_m — гео-контроль: точка закрытия и дистанция до точки должника.
-    geo_far — вердикт «далеко» с учётом допуска по точности адреса; None — не судили."""
+    geo_far — вердикт «далеко» с учётом допуска по точности адреса; None — не судили.
+    on_date — ДЕНЬ ВЫЕЗДА (ISO). Выезд, отработанный без сети, доезжает до сервера
+    позже — иногда через двое суток, — и днём досыла он ложился в чужой день:
+    сотрудник из Худжанда откатал адреса 8.09, а в системе они появились 10.09."""
     with connect() as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO visits (contract_id, agent_id, created_at, payload, "
             "op_id, visit_lat, visit_lon, dist_m, geo_far) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (contract_id, agent_id, date.today().isoformat(), payload, op_id,
+            (contract_id, agent_id, on_date or date.today().isoformat(), payload, op_id,
              lat, lon, dist_m, None if geo_far is None else int(bool(geo_far))),
         )
         conn.commit()

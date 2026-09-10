@@ -788,7 +788,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=40;
+const SHELL_VERSION=41;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1038,6 +1038,9 @@ async function flushQueue(){
           // по времени события, и фото этого визита к этому моменту уже ушли.
           const sbody={rep:it.rep,values:it.values,finish:true,op_id:it.op_id,
             photos_pending:await pendingPhotos(it.rep),
+            // Записи старых оболочек occurred_at не имеют — тогда сгодится at,
+            // время постановки в очередь: это тот же момент выезда.
+            occurred_at:it.occurred_at||it.at||undefined,
             form_version:it.form_version,input_keys:it.input_keys};
           if(it.cleared_keys&&it.cleared_keys.length) sbody.cleared_keys=it.cleared_keys;
           if(it.geo) sbody.geo=it.geo;
@@ -1109,7 +1112,7 @@ async function flushQueue(){
 function applyVisitLocally(rep, values){
   const d=STATE.cur;
   if(d && d.rep===rep){
-    d.visited=true; d.visit_date=(new Date()).toISOString().slice(0,10);
+    d.visited=true; d.visit_date=(new Date()).toISOString().slice(0,10);   // день выезда
     if(d.form) d.form.forEach(f=>{ if(values[f.key]!=null) f.current=values[f.key]; });
     if(values.visit_comment!=null) d.visit_comment=values.visit_comment;
     if(values.call_comment!=null) d.visit_comment=values.call_comment;  // легаси-черновики
@@ -2469,7 +2472,12 @@ async function saveVisit(){
     // Сначала фото, потом карточка: иначе руководителю уйдёт «📸 без фото» по
     // визиту, снимок которого догрузится через пару секунд.
     const photos_pending=await waitPhotosSettled(rep);
-    const body={rep,values,finish:true,op_id,photos_pending,
+    // occurred_at — КОГДА выезд отработан. Онлайн это «сейчас», но та же форма
+    // уходит в очередь и может доехать через сутки-двое (в горах под Худжандом
+    // глушат интернет), и сервер без этой отметки датировал бы визит днём
+    // доставки. Шлём всегда, чтобы оба пути были одинаковы.
+    const occurred_at=Date.now();
+    const body={rep,values,finish:true,op_id,photos_pending,occurred_at,
       form_version:FORM_VERSION,input_keys};
     const clearedNow=[...FORM_CLEARED].filter(k=>FORM_TOUCHED.has(k));
     if(clearedNow.length) body.cleared_keys=clearedNow;
@@ -2481,8 +2489,8 @@ async function saveVisit(){
     }catch(e){
       // Нет сети — кладём выезд в очередь, помечаем визит локально; уйдёт при связи.
       await enqueue({op_id, kind:"save", rep, values, input_keys,
-        cleared_keys:clearedNow, photos_pending,
-        form_version:FORM_VERSION, geo, at:Date.now()});
+        cleared_keys:clearedNow, photos_pending, occurred_at,
+        form_version:FORM_VERSION, geo, at:occurred_at});
       STATE.online=false; applyVisitLocally(rep, values);
       finishSavedUI(rep, L().savedoff);
     }

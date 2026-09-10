@@ -1401,8 +1401,12 @@ async def _save(request: web.Request) -> web.Response:
     if values:
         db.update_person(rep, values)  # пишется во ВСЕ договоры человека, сразу в БД
     if finish:
-        completed_at = date.today().isoformat()
-        db.update_person(rep, {"visit_date": completed_at})
+        completed_at = _occurred_on(body)
+        # visit_date НАЗАД не двигаем: у человека это дата последнего выезда, и
+        # доставка позавчерашнего визита не должна отменять вчерашний.
+        prev_visit = db._as_date(row["visit_date"])
+        if prev_visit is None or prev_visit <= date.fromisoformat(completed_at):
+            db.update_person(rep, {"visit_date": completed_at})
         cur = db.get_client(rep)
         op_id = (str(body.get("op_id") or "")).strip() or None
         # Гео-контроль: точка телефона в момент закрытия vs известная точка должника.
@@ -1465,10 +1469,13 @@ async def _save(request: web.Request) -> web.Response:
             f"{values.get('visit_comment', '')}"
         )
         # Считаем ДО log_visit, иначе своя же свежая строка себя и заглушит.
-        same_today = db.same_visit_logged_today(rep, uid, payload)
+        # Дедуп отбивок — по ДНЮ ВЫЕЗДА: два визита к одному должнику в разные
+        # дни, доехавшие одной пачкой, — это два разных выезда.
+        same_today = db.same_visit_logged_today(rep, uid, payload,
+                                                on_date=completed_at)
         is_new = db.log_visit(rep, uid, payload,
                               op_id=op_id, lat=vlat, lon=vlon, dist_m=dist_m,
-                              geo_far=geo_far)
+                              geo_far=geo_far, on_date=completed_at)
         # Снимок строится только из values этого POST, а не из сырых HARD-полей
         # clients. При ретрае после редкого падения между log_visit и этой записью
         # восстанавливаем отсутствующий снимок; старый дубль новый снимок не откатывает.
@@ -2199,6 +2206,57 @@ def _esc(v) -> str:
     return _html.escape(str(v or ""))
 
 
+# --- День выезда, а не день досыла ------------------------------------------
+# Выезд, отработанный без сети, лежит в очереди телефона до связи. Сотрудник из
+# Худжанда откатал адреса во вторник 8.09.2026, уехал в горы, где глушат
+# интернет, и в четверг 10.09 все его визиты подгрузились ЧЕТВЕРГОМ: сервер
+# ставил дату по моменту доставки. Для руководителя это выглядит как выезды,
+# которых во вторник не было, и как всплеск в четверг.
+#
+# Телефон знает время события (в очереди у записи есть `at`) и присылает его в
+# occurred_at. Дату считаем ПО СЕРВЕРУ, как и всё остальное в системе:
+# контейнер живёт по UTC, телефон — по +3/+5, и клиентская дата в утренние часы
+# врала бы барабану и киллер-фильтру (см. _meta).
+OCCURRED_MAX_AGE_DAYS = 14
+
+
+def _late_visit_line(visit_day: str | None) -> str | None:
+    """«Этот выезд был не сегодня» — строка для всех трёх карточек.
+
+    Без неё доставленный из оффлайна визит выглядит как сегодняшний, и
+    руководитель либо считает его свежим, либо не понимает, почему в сводке за
+    тот день его не было."""
+    if not visit_day or visit_day == date.today().isoformat():
+        return None
+    try:
+        pretty = date.fromisoformat(visit_day).strftime("%d.%m")
+    except ValueError:
+        return None
+    return f"🕓 Выезд от {pretty} — доставлен из оффлайна"
+
+
+def _occurred_on(body) -> str:
+    """День выезда из occurred_at (мс эпохи) — или сегодня, если его нет.
+
+    Клиенту доверяем ограниченно: будущим днём визит не датируется никогда, а
+    слишком старый (больше двух недель) — это не оффлайн, а сбитые часы или
+    очередь, пролежавшая с прошлой жизни телефона."""
+    today = date.today()
+    raw = body.get("occurred_at")
+    if raw is None:
+        return today.isoformat()
+    try:
+        moment = datetime.fromtimestamp(float(raw) / 1000.0)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return today.isoformat()
+    day = moment.date()
+    if day >= today:
+        return today.isoformat()
+    if (today - day).days > OCCURRED_MAX_AGE_DAYS:
+        return today.isoformat()
+    return day.isoformat()
+
+
 # --- Догон фото: карточка визита ждёт снимки, которые ещё едут ---------------
 # Карточка уходила МГНОВЕННО по закрытию визита, а снимок ехал своим запросом.
 # По журналу за 8–10.09.2026: из 293 карточек 48 ушли с «📸 без фото», хотя фото
@@ -2291,18 +2349,21 @@ async def _visit_notify(request: web.Request, notify_row, uid: int,
     (бот) — обращаться к нему после ответа безопасно. Своё исключение фоновая
     задача обязана съесть сама: наверх его принимать некому."""
     try:
-        await _await_visit_photos(notify_row["contract_id"], day, pending)
+        # Снимки офлайн-визита приезжают ВМЕСТЕ с ним, то есть сегодня: ждём их
+        # по дню доставки, а не по дню выезда (day здесь — день выезда).
+        await _await_visit_photos(notify_row["contract_id"],
+                                  date.today().isoformat(), pending)
     except Exception as exc:  # noqa: BLE001 — догон не должен съесть рассылку
         logging.warning("photo grace failed: %s", exc)
     try:
-        await _notify_group(request, notify_row, uid, actor=actor)
+        await _notify_group(request, notify_row, uid, actor=actor, visit_day=day)
         try:
             await _notify_managers(request, notify_row, dist_m,
-                                   geo_far=geo_far, actor=actor)
+                                   geo_far=geo_far, actor=actor, visit_day=day)
         except Exception as e:  # noqa: BLE001 — сбой лички не отменяет беседу
             logging.warning("manager notify failed: %s", e)
         await _notify_report_chats(request, notify_row, vlat, vlon, dist_m,
-                                   uid, actor=actor)
+                                   uid, actor=actor, visit_day=day)
     except Exception as exc:  # noqa: BLE001
         logging.warning("visit notify failed: %s", exc)
 
@@ -2315,7 +2376,8 @@ async def wait_visit_notify(timeout: float = 30.0) -> None:
 
 
 async def _notify_group(request: web.Request, row, uid: int,
-                        actor: str | None = None) -> None:
+                        actor: str | None = None,
+                        visit_day: str | None = None) -> None:
     """Пост о визите в «принятую» беседу. Внешний try — на ВСЁ тело: до отправки
     стоят db.log_push и чтение SQLite под busy_timeout 8000 мс; во время импорта
     (одна транзакция на весь файл) это database is locked, а исключение отсюда
@@ -2367,7 +2429,8 @@ async def _notify_group(request: web.Request, row, uid: int,
 
 async def _notify_report_chats(request: web.Request, row, vlat, vlon,
                                dist_m: int | None = None, uid: int = 0,
-                               actor: str | None = None) -> None:
+                               actor: str | None = None,
+                               visit_day: str | None = None) -> None:
     """Отчёт о визите в закреплённые беседы (опциональная фича, настраивается
     пультом): текст по образцу постов сотрудников + фото за день + фактические
     гео-точки (закрытие визита и съёмка фото — такое не подделаешь)."""
@@ -2409,7 +2472,8 @@ async def _notify_report_chats(request: web.Request, row, vlat, vlon,
         text = visit_report_text(
             row, dist_m=dist_m,
             visit_geo=(vlat, vlon) if vlat is not None else None,
-            photo_geo=pg, photos_n=len(files), actor=actor)
+            photo_geo=pg, photos_n=len(files), actor=actor,
+            late_line=_late_visit_line(visit_day))
         delivered: list[int] = []
 
         def _on_result(chat_id, status, error=None):
@@ -2433,7 +2497,8 @@ async def _notify_report_chats(request: web.Request, row, vlat, vlon,
 
 async def _notify_managers(request: web.Request, row, dist_m: int | None = None,
                            *, geo_far: bool | None = None,
-                           actor: str | None = None) -> None:
+                           actor: str | None = None,
+                           visit_day: str | None = None) -> None:
     """Реалтайм-пуш: визит закрыт → руководителям этого сотрудника в личку уходит
     сводка + фото за день альбомом. Дедуп повторов из оффлайн-очереди — снаружи
     (is_new от log_visit). Рубильник без редеплоя: settings.visit_push = 0.
@@ -2483,6 +2548,9 @@ async def _notify_managers(request: web.Request, row, dist_m: int | None = None,
     if _cell(row, "tips"):
         lines.append(f"📇 {_esc(_cell(row, 'tips'))}")
     lines.append(f"📸 {len(files)} фото" if files else "📸 без фото")
+    late = _late_visit_line(visit_day)
+    if late:
+        lines.append(late)
     text = "\n".join(lines)
     if dist_m is not None:
         pretty = f"{dist_m / 1000:.1f} км" if dist_m >= 1000 else f"{dist_m} м"
