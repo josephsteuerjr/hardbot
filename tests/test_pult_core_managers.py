@@ -21,10 +21,34 @@ def test_direction_options_match_server_codes():
 def test_manager_body_always_sends_direction():
     body = mg.manager_body("807070009", " Альберт ", {"Таджикистан"}, set(), "tj")
     assert body == {"telegram_id": 807070009, "name": "Альберт",
-                    "cities": ["Таджикистан"], "employees": [], "direction": "tj"}
+                    "cities": ["Таджикистан"], "employees": [], "direction": "tj",
+                    "office_cities": []}
     plain = mg.manager_body("1", "Имя", set(), {"Б", "А"})
     assert plain["direction"] == "" and plain["employees"] == ["А", "Б"], \
         "пустая строка снимает направление, а не оставляет прежнее"
+
+
+def test_manager_body_sends_offices_explicitly():
+    """Офисы уходят по тому же правилу, что направление: явно и всегда.
+
+    Сервер понимает отсутствие ключа как «не трогать» (старый пульт его не
+    шлёт), поэтому снятие последнего офиса обязано доехать пустым списком."""
+    body = mg.manager_body("1", "Старший спец", set(), set(),
+                           office_cities={"Душанбе"})
+    assert body["office_cities"] == ["Душанбе"]
+    assert mg.manager_body("1", "Имя", set(), set())["office_cities"] == []
+
+
+def test_manager_row_shows_office_scope():
+    """У руководителя по офису состав живой — строка не должна врать «0»."""
+    row = mg.manager_row({"telegram_id": 1, "name": "Спец", "cities": [],
+                          "employees": [], "direction": "",
+                          "office_cities": ["Душанбе"]})
+    assert row["employees"] == "офис: Душанбе"
+    row = mg.manager_row({"telegram_id": 2, "name": "Спец", "cities": [],
+                          "employees": ["А"], "direction": "",
+                          "office_cities": ["Душанбе", "Худжанд"]})
+    assert row["employees"] == "офис: Душанбе · Худжанд + 1 поимённо"
 
 
 def test_manager_row_shows_direction_instead_of_frozen_count():

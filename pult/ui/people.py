@@ -19,9 +19,14 @@ from .widgets import (Button, Card, CheckList, ChipFlow, Combo, Field, Note, Pag
                       Table, label, vcol)
 
 
+OFFICE_NONE = "— не задан —"
+
+
 class PeopleSection:
     def build_people(self) -> Page:
         page = Page()
+        self._offices: dict[str, str] = {}
+        self._office_known: list[str] = []
 
         ac = Card("Активность и вход",
                   "Каждый визит, метка, фото и вход в приложение пишутся в базу — здесь "
@@ -52,7 +57,9 @@ class PeopleSection:
         rc = Card("Назначение ролей",
                   "ФИО берутся из реестра (колонка «ответственный»). Впиши Telegram ID "
                   "сотруднику (или выбери из писавших боту), тип — и «Привязать»: работник "
-                  "с этим ID сразу привязан к своим клиентам. Можно переназначать.")
+                  "с этим ID сразу привязан к своим клиентам. Можно переназначать. "
+                  "«Офис» — где сидит сам сотрудник (Душанбе, Худжанд, Ташкент…): "
+                  "по нему считается штат руководителя города, сохраняется сразу.")
         self.roles_frame = rc.add(Rows(spacing=4))
         self.roles_frame.set_empty("Нет данных — импортируй реестр и нажми «Обновить»")
         page.add(rc)
@@ -137,11 +144,17 @@ class PeopleSection:
             except RuntimeError:
                 guests = []
             emps = self.api("GET", "/admin/employees").get("employees") or []
-            return guests, emps
+            try:
+                offices = self.api("GET", "/admin/employee_cities.json")
+            except RuntimeError:
+                offices = {}      # старый сервер про офисы не знает
+            return guests, emps, offices
 
         def done(res):
             self._loaded.add("people")
-            self.guests, emps = res
+            self.guests, emps, offices = res
+            self._offices = dict(offices.get("cities") or {})
+            self._office_known = list(offices.get("known") or [])
             self.un_emp.set_values([e["employee"] for e in emps])
             frame = self.roles_frame
             frame.clear()
@@ -153,7 +166,7 @@ class PeopleSection:
             grid.setContentsMargins(0, 0, 0, 0)
             grid.setHorizontalSpacing(10)
             grid.setVerticalSpacing(6)
-            for col, text in enumerate(("СОТРУДНИК", "ДОГОВОРОВ", "TELEGRAM ID",
+            for col, text in enumerate(("СОТРУДНИК", "ДОГОВОРОВ", "ОФИС", "TELEGRAM ID",
                                         "ТИП", "СТАТУС", "", "ВХОД")):
                 grid.addWidget(label(text, "caps"), 0, col)
             glabels = [guest_label(g) for g in self.guests]
@@ -162,32 +175,59 @@ class PeopleSection:
                 grid.addWidget(label(e["employee"]), r, 0, Qt.AlignmentFlag.AlignTop)
                 grid.addWidget(label(fmt_n(e.get("contracts"))), r, 1,
                                Qt.AlignmentFlag.AlignTop)
+                # Офис. Из данных он не выводится: город в реестре — это где живёт
+                # ДОЛЖНИК. На офисе держится охват руководителя по городу, поэтому
+                # он правится прямо здесь и сохраняется сразу по выбору.
+                office = Combo([OFFICE_NONE] + self._office_known, width_chars=13)
+                office.setEditable(True)
+                office.setCurrentText(self._offices.get(e["employee"]) or OFFICE_NONE)
+                office.on_select(lambda emp=e["employee"], c=office: self.set_office(emp, c))
+                office.lineEdit().editingFinished.connect(
+                    lambda emp=e["employee"], c=office: self.set_office(emp, c))
+                grid.addWidget(office, r, 2, Qt.AlignmentFlag.AlignTop)
                 combo = Combo([GUEST_PLACEHOLDER] + glabels, width_chars=40)
                 tid = Field(width_chars=16)
                 if e.get("telegram_id"):
                     tid.set(str(e["telegram_id"]))
                 combo.on_select(lambda c=combo, t=tid: self._pick_guest(c, t))
-                grid.addLayout(vcol(combo, tid, spacing=2), r, 2)
+                grid.addLayout(vcol(combo, tid, spacing=2), r, 3)
                 kind = Combo(KIND_LABELS, width_chars=11)
                 kind.set_current(kind_index(e))
-                grid.addWidget(kind, r, 3, Qt.AlignmentFlag.AlignTop)
+                grid.addWidget(kind, r, 4, Qt.AlignmentFlag.AlignTop)
                 status_text, bound = role_status(e)
                 grid.addWidget(Note(status_text, "success" if bound else "small", wrap=False),
-                               r, 4, Qt.AlignmentFlag.AlignTop)
+                               r, 5, Qt.AlignmentFlag.AlignTop)
                 grid.addWidget(Button("Привязать",
                                       lambda emp=e["employee"], t=tid, k=kind:
                                       self.bind_role(emp, t, k), kind="accent"),
-                               r, 5, Qt.AlignmentFlag.AlignTop)
+                               r, 6, Qt.AlignmentFlag.AlignTop)
                 # Ссылка входа без Telegram: сервер сам выдаст сотруднику
                 # служебную личность, если привязки ещё нет.
                 grid.addWidget(Button("Ссылка входа",
                                       lambda emp=e["employee"], k=kind:
                                       self.issue_link(employee=emp, kind_combo=k)),
-                               r, 6, Qt.AlignmentFlag.AlignTop)
+                               r, 7, Qt.AlignmentFlag.AlignTop)
                 self._role_rows.append((combo, tid, kind))
-            grid.setColumnStretch(7, 1)
+            grid.setColumnStretch(8, 1)
             frame.add(holder)
         self.bg_task(work, done)
+
+    def set_office(self, employee: str, combo) -> None:
+        """Записать офис сотрудника. Сохраняем сразу по выбору: отдельная кнопка
+        на каждую из тридцати строк — это тридцать поводов забыть нажать."""
+        city = (combo.get() or "").strip()
+        if city == OFFICE_NONE:
+            city = ""
+        if city == (self._offices.get(employee) or ""):
+            return                      # ничего не изменилось — молчим
+
+        def done(d):
+            self._offices = dict((d or {}).get("cities") or {})
+            self._office_known = list((d or {}).get("known") or [])
+            self.toast(f"{employee}: офис {city}" if city else f"{employee}: офис снят")
+
+        self.bg_task(lambda: self.api("POST", "/admin/employee_cities.json",
+                                      {"cities": {employee: city}}), done)
 
     def _pick_guest(self, combo, tid_entry):
         i = combo.current()

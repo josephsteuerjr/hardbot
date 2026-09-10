@@ -133,7 +133,8 @@ def test_save_sends_direction_and_resets_form(app, window):
     posts = [c for c in window.calls if c[0] == "POST"]
     assert posts == [("POST", "/admin/manager",
                       {"telegram_id": 8539622577, "name": "Рук ТЖ",
-                       "cities": ["Таджикистан"], "employees": [], "direction": "tj"})]
+                       "cities": ["Таджикистан"], "employees": [], "direction": "tj",
+                       "office_cities": []})]
     assert ("GET", "/admin/managers", None) in window.calls, "после записи список перечитан"
     assert window.mgr_tid.get() == "" and window.mgr_form_card.title.text() == MGR_FORM_TITLE
     assert window.mgr_emp_chips.isEnabled() and window.mgr_emp_hint.text() == ""

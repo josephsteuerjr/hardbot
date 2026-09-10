@@ -83,3 +83,29 @@ def _admin_access_starts_fresh():
     except (ImportError, AttributeError):
         pass
     yield
+
+
+@pytest.fixture(autouse=True)
+def _pult_settings_stay_untouched():
+    """Рабочие настройки пульта не должны переживать тесты.
+
+    `Settings(...)` без явного пути указывает на боевой
+    `pult/настройки пульта.json`, а окно пульта сохраняет настройки при закрытии.
+    10.09.2026 тест, забывший про tmp_path, затёр владельцу адрес сервера, токен
+    устройства и путь к папкам портфелей — пульт перестал ходить на сервер, и
+    выяснилось это только через полчаса. Сторож возвращает файл на место и сразу
+    называет виноватый тест.
+    """
+    path = ROOT / "pult" / "настройки пульта.json"
+    before = path.read_bytes() if path.is_file() else None
+    yield
+    after = path.read_bytes() if path.is_file() else None
+    if after == before:
+        return
+    if before is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_bytes(before)
+    raise AssertionError(
+        "тест изменил pult/настройки пульта.json — передавай путь явно: "
+        "Settings({...}, tmp_path / 'настройки пульта.json')")

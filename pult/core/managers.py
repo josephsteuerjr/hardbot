@@ -230,8 +230,16 @@ def pushes_text(m: dict) -> str:
 
 def manager_row(m: dict) -> dict:
     direction = (m.get("direction") or "").strip()
+    offices = [c for c in (m.get("office_cities") or []) if str(c).strip()]
     if direction:
         employees = f"направление: {DIRECTION_TITLES.get(direction, direction)}"
+    elif offices:
+        # Штат офиса — тоже живой состав, и в списке это должно быть видно так
+        # же явно, как направление: иначе строка выглядит «сотрудников: 0».
+        employees = "офис: " + " · ".join(offices)
+        named = len(m.get("employees") or [])
+        if named:
+            employees += f" + {named} поимённо"
     else:
         employees = f"сотрудников: {len(m.get('employees') or [])}"
     return {
@@ -254,18 +262,43 @@ def emp_chip_text(emp: str, employees: list[dict]) -> str:
 
 
 def manager_body(tid: str, name: str, cities: set[str], employees: set[str],
-                 direction: str = "", pushes: dict | None = None) -> dict:
+                 direction: str = "", pushes: dict | None = None,
+                 office_cities: set[str] | None = None) -> dict:
     """Тело POST /admin/manager. direction всегда уходит явно: пустая строка
     снимает направление, иначе сервер сохранил бы прежнее (он подставляет
     старое значение только когда ключа нет вовсе). Рубильники — наоборот:
-    уходят только если их прислали, иначе сервер оставит свои."""
+    уходят только если их прислали, иначе сервер оставит свои.
+
+    office_cities — офисы, чей штат он ведёт. Уходит по тому же правилу, что
+    direction: явно, чтобы снятие последнего офиса доехало до сервера."""
     body = {"telegram_id": int(tid), "name": (name or "").strip(),
             "cities": sorted(cities), "employees": sorted(employees),
-            "direction": (direction or "").strip()}
+            "direction": (direction or "").strip(),
+            "office_cities": sorted(office_cities or ())}
     for key, _t, _h in MANAGER_PUSH_SWITCHES:
         if pushes and key in pushes:
             body[key] = bool(pushes[key])
     return body
+
+
+OFFICE_HINT = ("Офис — это где сидит СОТРУДНИК, а не где живёт должник: "
+               "душанбинский выездник ездит в Ёвон, Хисор и Вахдат. "
+               "Состав живой: нового человека в офисе вписывать не нужно.")
+
+
+def office_chip_text(city: str, staff: dict) -> str:
+    n = len(staff.get(city) or [])
+    return f"{city} {n}" if n else city
+
+
+def office_note(offices, staff: dict) -> str:
+    """Подпись под чипами офисов: кого именно сервер посчитает штатом."""
+    people = sorted({e for c in offices for e in (staff.get(c) or [])})
+    if not offices:
+        return ""
+    if not people:
+        return "в этих офисах ещё никого нет — проставь офис на вкладке «Сотрудники»"
+    return f"штат: {len(people)} — " + ", ".join(people[:6]) + ("…" if len(people) > 6 else "")
 
 
 def unknown_account_text(tid: str) -> str:

@@ -19,6 +19,8 @@ MGR_FORM_TITLE = "Добавить / изменить руководителя"
 class ManagersSection:
     def build_mgrs(self) -> Page:
         page = Page()
+        # До первой загрузки карта офисов пуста, но чипы уже рисуются (сброс формы).
+        self.mgr_office_staff: dict[str, list[str]] = {}
 
         mc = Card("Руководители",
                   "Руководитель направления видит всех сотрудников своей республики "
@@ -47,6 +49,14 @@ class ManagersSection:
         self.mgr_direction.on_select(self._mgr_direction_changed)
         fc.add_row(label("Направление", "small"), self.mgr_direction,
                    Note(mg.DIRECTION_HINT, "tiny"), spacing_before=6, stretch=False)
+        # Офисы — НАСТОЯЩИЙ охват (живой состав), в отличие от городов ниже,
+        # которые остаются подписью сводки. Разводим их визуально и словами:
+        # иначе оператор отмечает город и ждёт, что состав подтянется сам.
+        self.mgr_office_hint = Note("", "tiny", wrap=True)
+        fc.add_row(label("ОФИСЫ — ЧЕЙ ШТАТ ОН ВЕДЁТ", "caps"), None,
+                   Note(mg.OFFICE_HINT, "tiny"), spacing_before=8, stretch=False)
+        self.mgr_office_chips = fc.add(ChipFlow())
+        fc.add(self.mgr_office_hint)
         fc.add(label("ГОРОДА (ПОДПИСЬ СВОДКИ)", "caps"), spacing_before=8)
         self.mgr_city_chips = fc.add(ChipFlow())
         self.mgr_city_add = Field(width_chars=24)
@@ -71,11 +81,19 @@ class ManagersSection:
             except RuntimeError:
                 guests = []
             d = self.api("GET", "/admin/managers")
-            return guests, d
+            try:
+                offices = self.api("GET", "/admin/employee_cities.json")
+            except RuntimeError:
+                offices = {}      # старый сервер про офисы не знает
+            return guests, d, offices
 
         def done(res):
             self._loaded.add("mgrs")
-            self.guests, d = res
+            self.guests, d, offices = res
+            staff: dict[str, list[str]] = {}
+            for emp, city in (offices.get("cities") or {}).items():
+                staff.setdefault(city, []).append(emp)
+            self.mgr_office_staff = {c: sorted(v) for c, v in staff.items()}
             self.mgrs = d.get("managers") or []
             self.mgr_cities = d.get("cities") or []
             self.mgr_emps = d.get("employees") or []
@@ -150,6 +168,13 @@ class ManagersSection:
             [(mg.city_chip_text(c, self.mgr_cities), c in form["cities"],
               lambda c=c: self._mgr_toggle_city(c)) for c in cities]
             or ["городов в реестре нет — добавьте вручную"])
+        offices = sorted(set(self.mgr_office_staff) | form["offices"])
+        self.mgr_office_chips.set_chips(
+            [(mg.office_chip_text(c, self.mgr_office_staff), c in form["offices"],
+              lambda c=c: self._mgr_toggle_office(c)) for c in offices]
+            or ["офисы ещё не проставлены — вкладка «Сотрудники», колонка «Офис»"])
+        self.mgr_office_hint.setText(
+            mg.office_note(form["offices"], self.mgr_office_staff))
         reg_e = [e["employee"] for e in self.mgr_emps]
         emps = reg_e + [e for e in sorted(form["employees"]) if e not in reg_e]
         self.mgr_emp_chips.set_chips(
@@ -200,6 +225,11 @@ class ManagersSection:
             self.mgr_form["employees"].add(e)
         self._render_mgr_chips()
 
+    def _mgr_toggle_office(self, c):
+        form = self.mgr_form
+        form["offices"].discard(c) if c in form["offices"] else form["offices"].add(c)
+        self._render_mgr_chips()
+
     def _mgr_toggle_emp(self, e):
         form = self.mgr_form
         form["employees"].discard(e) if e in form["employees"] else form["employees"].add(e)
@@ -215,7 +245,8 @@ class ManagersSection:
         if not m:
             return
         self.mgr_form = {"tid": str(tid), "cities": set(m.get("cities") or []),
-                         "employees": set(m.get("employees") or [])}
+                         "employees": set(m.get("employees") or []),
+                         "offices": set(m.get("office_cities") or [])}
         self.mgr_tid.set(str(tid))
         self.mgr_name.set(m.get("name") or "")
         self.mgr_direction.set_current(mg.direction_index(m.get("direction") or ""))
@@ -228,7 +259,8 @@ class ManagersSection:
         self.toast(f"Форма заполнена: {who} — правь и нажми «Сохранить руководителя»")
 
     def _mgr_form_reset(self):
-        self.mgr_form = {"tid": "", "cities": set(), "employees": set()}
+        self.mgr_form = {"tid": "", "cities": set(), "employees": set(),
+                         "offices": set()}
         self.mgr_tid.set("")
         self.mgr_name.set("")
         self.mgr_city_add.set("")
@@ -249,8 +281,10 @@ class ManagersSection:
             self.toast("Впиши Telegram ID руководителя (или выбери из списка)", err=True)
             return
         direction = self._mgr_direction()
-        if not direction and not self.mgr_form["employees"]:
-            self.toast("Выбери направление или отметь хотя бы одного сотрудника", err=True)
+        if (not direction and not self.mgr_form["employees"]
+                and not self.mgr_form["offices"]):
+            self.toast("Выбери направление, офис или отметь хотя бы одного сотрудника",
+                       err=True)
             return
         # Права получает ВЛАДЕЛЕЦ telegram_id, а не тот, чьё имя вписали в форму.
         # Если такой id боту ни разу не писал, сверить некому — спрашиваем явно.
@@ -258,7 +292,8 @@ class ManagersSection:
         if not known and not self.ask_yes_no("Незнакомый аккаунт", mg.unknown_account_text(tid)):
             return
         body = mg.manager_body(tid, self.mgr_name.get(), self.mgr_form["cities"],
-                               self.mgr_form["employees"], direction)
+                               self.mgr_form["employees"], direction,
+                               office_cities=self.mgr_form["offices"])
 
         def done(d):
             # Показываем НЕ то, что напечатал оператор, а кого сервер увидел за этим id.

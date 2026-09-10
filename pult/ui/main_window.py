@@ -66,7 +66,8 @@ class Pult(QMainWindow, ImportFlow, DashboardSection, RegistrySection, PriorityS
         self.mgr_cities: list[dict] = []
         self.mgr_emps: list[dict] = []
         self.mgr_city_emps: dict = {}
-        self.mgr_form = {"tid": "", "cities": set(), "employees": set()}
+        self.mgr_form = {"tid": "", "cities": set(), "employees": set(),
+                         "offices": set()}
         self.scatter_matched: list[dict] = []
         self.scatter_selected: set[str] = set()
         self.scatter_roots: list[str] = []
