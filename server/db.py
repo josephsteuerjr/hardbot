@@ -3249,8 +3249,21 @@ def admin_bootstrap_done() -> bool:
     Флаг намеренно односторонний. Если бы он снимался вместе с последним
     устройством, обладатель ключа отозвал бы все устройства и вернул себе полный
     доступ — то есть «один ключ открывает всё» вернулось бы через два шага.
+
+    На УЖЕ РАБОТАЮЩЕМ сервере флага в настройках нет: устройства там привязаны
+    давно, а строка появилась только сейчас. Поэтому если записей об устройствах
+    хоть одна — считаем бутстрап закрытым и запоминаем это. Без такой сверки
+    обновление молча оставило бы боевому серверу прежнее поведение, и вся правка
+    подействовала бы только на новые установки.
     """
-    return get_setting(ADMIN_BOOTSTRAP_KEY) == "1"
+    if get_setting(ADMIN_BOOTSTRAP_KEY) == "1":
+        return True
+    with connect() as conn:
+        row = conn.execute("SELECT 1 FROM admin_devices LIMIT 1").fetchone()
+    if row is None:
+        return False
+    set_setting(ADMIN_BOOTSTRAP_KEY, "1")
+    return True
 
 
 def enroll_admin_device(device_id: str, name: str = "") -> dict:

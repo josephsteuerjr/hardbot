@@ -228,3 +228,23 @@ def test_unknown_enroll_code_is_refused(monkeypatch):
     status, body = _call("POST", "/admin/device/redeem.json", headers={},
                          json_body={"code": "нет-такого", "device_id": "fp-1"})
     assert status == 400 and "error" in body
+
+
+def test_existing_install_loses_the_key_power_on_upgrade(monkeypatch):
+    """Обновление боевого сервера, где устройства привязаны давно.
+
+    Строки в настройках там нет — она появилась только сейчас. Если бы флаг
+    смотрел только на неё, обновлённый сервер молча сохранил бы прежнее
+    поведение, и правка подействовала бы только на новые установки.
+    """
+    _fresh(monkeypatch)
+    import db
+    db.enroll_admin_device("fp-старый", "Привязан до обновления")
+    # Убираем именно флаг, оставляя устройство: так выглядит база после апдейта.
+    with db.connect() as conn:
+        conn.execute("DELETE FROM settings WHERE key=?", (db.ADMIN_BOOTSTRAP_KEY,))
+        conn.commit()
+
+    status, _ = _call("GET", "/admin/stats", headers=KEY)
+    assert status == 401, "после обновления ключ всё ещё открывает данные"
+    assert db.admin_bootstrap_done(), "флаг не проставился по факту устройств"
