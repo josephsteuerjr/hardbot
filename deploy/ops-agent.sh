@@ -8,10 +8,10 @@
 # Чтобы контейнер умел перезапускать соседей и снимать копии, ему пришлось бы
 # отдать /var/run/docker.sock, а это root на ВСЁМ сервере, включая чужие
 # проекты рядом. Поэтому панель кладёт заявку в общий каталог, а исполняет её
-# этот скрипт — и умеет ровно пять действий.
+# этот скрипт — и умеет ровно шесть действий, ни одним больше.
 #
 # ГЛАВНОЕ ПРАВИЛО: ни один символ из заявки не попадает в оболочку. Действие
-# выбирается case-ом из пяти веток, параметры проверяются шаблоном, команда
+# выбирается case-ом из закрытого списка, параметры проверяются шаблоном, команда
 # собирается здесь, в коде. Заявка не может ни добавить аргумент, ни подставить
 # путь, ни выполнить свою строку.
 set -u
@@ -59,7 +59,7 @@ write_result() {  # write_result ID КОД ТЕКСТ
 # --- исполнение --------------------------------------------------------------
 run_request() {
   local file="$1"
-  local id action unit backup photos db_only out code dir
+  local id action unit backup photos db_only lines out code dir
   id="$(json_field "$file" id)"
   action="$(json_field "$file" action)"
   unit="$(json_field "$file" unit)"
@@ -78,6 +78,15 @@ run_request() {
   case "$action" in
     doctor)
       out="$(cd "$dir" && ./doctor.sh 2>&1)"; code=$? ;;
+    logs)
+      lines="$(json_field "$file" lines)"
+      # Число, и только число: строка отсюда идёт аргументом докеру. Диапазон
+      # ограничен сверху, чтобы «покажи журнал» не превращалось в выгрузку всего.
+      case "$lines" in
+        ''|*[!0-9]*) lines=200 ;;
+        *) [ "$lines" -gt 2000 ] && lines=2000; [ "$lines" -lt 10 ] && lines=10 ;;
+      esac
+      out="$(cd "$dir" && docker compose logs --no-color --tail "$lines" 2>&1)"; code=$? ;;
     backup)
       db_only="$(json_field "$file" db_only)"
       if [ "$db_only" = "1" ]; then
@@ -117,8 +126,40 @@ run_request() {
   rm -f "$file"
 }
 
+# --- опись хозяйства ----------------------------------------------------------
+# Панель сидит в контейнере и видит ровно один каталог — свои данные. Ни списка
+# копий, ни соседних единиц, ни свободного места на диске оттуда не видно: всё
+# это лежит на хосте. Помощник кладёт опись рядом с заявками каждый круг, и
+# панель показывает её вместо того, чтобы запрашивать отдельной заявкой и ждать.
+write_inventory() {
+  local tmp="$OPS/.inventory.part" first=1 unit backups b
+  {
+    printf '{"schema":"hard.ops.inventory.v1","at":"%s","units":[' \
+      "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    for unit in core stt gps; do
+      [ -d "$UNITS_DIR/$unit" ] || continue
+      [ "$first" = 1 ] || printf ','
+      first=0
+      printf '{"unit":"%s","installed":true,"backups":[' "$unit"
+      backups=""
+      if [ -d "$UNITS_DIR/$unit/backups" ]; then
+        # Только каталоги-метки времени: всё остальное копией не является.
+        backups="$(ls -1 "$UNITS_DIR/$unit/backups" 2>/dev/null \
+          | grep -E '^[0-9]{8}T[0-9]{6}$' | sort -r | head -n 40)"
+      fi
+      local sep=""
+      for b in $backups; do printf '%s"%s"' "$sep" "$b"; sep=","; done
+      printf ']}'
+    done
+    printf '],"disk_free":"%s"}\n' \
+      "$(df -h "$UNITS_DIR" 2>/dev/null | tail -n 1 | awk '{print $4}')"
+  } > "$tmp"
+  mv "$tmp" "$OPS/inventory.json"
+}
+
 sweep() {
   touch "$OPS/heartbeat" 2>/dev/null || true
+  write_inventory
   for file in "$OPS"/requests/*.json; do
     [ -f "$file" ] || continue
     # Забираем заявку себе ДО исполнения: если помощник запущен дважды, работу

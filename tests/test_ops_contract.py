@@ -26,9 +26,13 @@ def _ops_dir(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_only_five_actions_exist():
-    """Список действий — не «пока такой», а весь. Расширение — решение владельца."""
-    assert ops.ACTIONS == ("doctor", "backup", "restore", "restart", "update")
+def test_action_list_is_closed():
+    """Список действий — не «пока такой», а весь. Расширение — решение владельца.
+
+    Тест намеренно сравнивает с литералом: если кто-то добавит действие «просто
+    выполнить команду», прогон обязан покраснеть, а не молча принять его.
+    """
+    assert ops.ACTIONS == ("doctor", "logs", "backup", "restore", "restart", "update")
 
 
 @pytest.mark.parametrize("action", ["shell", "exec", "psql", "", "doctor;rm -rf /"])

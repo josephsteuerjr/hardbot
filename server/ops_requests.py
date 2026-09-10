@@ -4,7 +4,7 @@
 Чтобы контейнер мог перезапустить сам себя или снять копию базы, ему пришлось бы
 отдать ``/var/run/docker.sock``, а это root на ВСЁМ сервере, включая соседние
 проекты. Вместо этого панель кладёт заявку в общий каталог, а помощник на хосте
-(``deploy/ops-agent.sh``) её исполняет — и умеет ровно пять действий, ни одним
+(``deploy/ops-agent.sh``) её исполняет — и умеет ровно шесть действий, ни одним
 больше. Ни строки из заявки не попадают в оболочку: действие выбирается из
 таблицы, параметры проверяются шаблоном.
 
@@ -26,10 +26,10 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Пять действий, и это ВЕСЬ список. Расширять его — отдельное решение владельца,
+# Шесть действий, и это ВЕСЬ список. Расширять его — отдельное решение владельца,
 # а не побочный эффект удобства: каждое новое действие исполняется на хосте с
 # правами, которых у контейнера нет.
-ACTIONS = ("doctor", "backup", "restore", "restart", "update")
+ACTIONS = ("doctor", "logs", "backup", "restore", "restart", "update")
 
 # Единицы, к которым действие применимо.
 UNITS = ("core", "stt", "gps")
@@ -76,6 +76,15 @@ def validate(action: str, params: dict | None) -> dict:
         clean["photos"] = "1" if params.get("photos") else "0"
         if unit != "core":
             raise ValueError("восстановление есть только у единицы core")
+
+    if action == "logs":
+        # Число строк проверяем здесь И в помощнике: оно уходит аргументом
+        # докеру, и «сколько угодно» означало бы выгрузку всего журнала разом.
+        try:
+            lines = int(params.get("lines") or 200)
+        except (TypeError, ValueError):
+            raise ValueError("число строк должно быть числом") from None
+        clean["lines"] = str(max(10, min(2000, lines)))
 
     if action == "backup":
         clean["db_only"] = "1" if params.get("db_only") else "0"
@@ -147,6 +156,20 @@ def pending() -> list[dict]:
         if isinstance(data, dict):
             out.append(data)
     return out
+
+
+def inventory() -> dict:
+    """Опись хозяйства, которую кладёт помощник: единицы, копии, место на диске.
+
+    Панель видит из контейнера ровно один каталог — свои данные. Списка копий и
+    соседних единиц оттуда не видно вовсе, поэтому опись приходит с хоста.
+    """
+    path = ops_dir() / "inventory.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")[:_RESULT_MAX])
+    except (OSError, ValueError):
+        return {"units": [], "disk_free": "", "at": ""}
+    return data if isinstance(data, dict) else {"units": [], "disk_free": "", "at": ""}
 
 
 def agent_alive() -> dict:
