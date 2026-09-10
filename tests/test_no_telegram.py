@@ -111,10 +111,19 @@ def _save(rep, op_id, monkeypatch):
     async def _json():
         submitted = {"call_status": "В работе"}
         return {"rep": rep, "finish": True, "op_id": op_id, "values": submitted,
-                "form_version": webmod.FORM_PROTOCOL_VERSION, "input_keys": list(submitted)}
+                "form_version": webmod.FORM_PROTOCOL_VERSION, "input_keys": list(submitted),
+                "photos_pending": 0}
 
     request.json = _json
-    return asyncio.run(webmod._save(request))
+
+    async def _run():
+        # Рассылка теперь фоновая — ждём её, иначе журнал пушей пуст (см.
+        # комментарий в test_visit_push_dedup).
+        result = await webmod._save(request)
+        await webmod.wait_visit_notify()
+        return result
+
+    return asyncio.run(_run())
 
 
 def test_save_visit_without_bot_succeeds_and_logs_skip_once(monkeypatch, caplog):

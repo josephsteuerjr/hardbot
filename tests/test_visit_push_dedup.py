@@ -75,10 +75,22 @@ def _finish(rep, op_id, bot, monkeypatch, values=None):
             "values": submitted,
             "form_version": webmod.FORM_PROTOCOL_VERSION,
             "input_keys": list(submitted),
+            # «Снимать нечего» — иначе карточка ждала бы опоздавшее фото
+            # (web._await_visit_photos), и тест простоял бы это окно зря.
+            "photos_pending": 0,
         }
 
     request.json = _json
-    return asyncio.run(webmod._save(request))
+
+    async def _run():
+        # Рассылка по визиту ушла из запроса выездника в фон: ответ приходит
+        # сразу, а отбивка руководителю уходит следом. Тест ждёт её явно —
+        # иначе asyncio.run закроет цикл вместе с неотправленной карточкой.
+        result = await webmod._save(request)
+        await webmod.wait_visit_notify()
+        return result
+
+    return asyncio.run(_run())
 
 
 def test_repeat_taps_write_history_but_notify_once(monkeypatch):

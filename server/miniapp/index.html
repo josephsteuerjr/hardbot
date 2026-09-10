@@ -376,6 +376,7 @@ const I18N = {
     resultreq:"Сначала выберите результат выезда",
     offline:"Оффлайн",datao:"данные на",pend:"ждут отправки",sending:"Отправляю…",
     savedoff:"Сохранено — уйдёт при связи",queuedn:"в очереди",
+    photosending:"Отправляю фото — не закрывайте…",
     photoretake:"фото нужно переснять",photolost:"Фото не сохранилось — снимите его ещё раз",
     fromgallery:"Выбрать из галереи",
     galhint:"Снимок из галереи прикрепится без точки съёмки — она снимается только камерой в приложении",
@@ -421,6 +422,7 @@ const I18N = {
     resultreq:"Avval chiqish natijasini tanlang",
     offline:"Oflayn",datao:"ma’lumot",pend:"yuboriladi",sending:"Yuborilmoqda…",
     savedoff:"Saqlandi — aloqa paydo bo‘lsa yuboriladi",queuedn:"navbatda",
+    photosending:"Rasm yuborilmoqda — yopmang…",
     photoretake:"rasmni qayta olish kerak",photolost:"Rasm saqlanmadi — qayta oling",
     fromgallery:"Galereyadan tanlash",
     galhint:"Galereyadagi rasm suratga olingan nuqtasiz biriktiriladi — nuqta faqat ilovadagi kamera bilan olinadi",
@@ -466,6 +468,7 @@ const I18N = {
     resultreq:"Аввал натиҷаи сафарро интихоб кунед",
     offline:"Офлайн",datao:"додаҳо аз",pend:"дар навбат",sending:"Фиристода мешавад…",
     savedoff:"Захира шуд — ҳангоми алоқа фиристода мешавад",queuedn:"дар навбат",
+    photosending:"Расм фиристода мешавад — пӯшед накунед…",
     photoretake:"расмро аз нав гирифтан лозим",photolost:"Расм захира нашуд — аз нав гиред",
     fromgallery:"Аз галерея интихоб",
     galhint:"Расм аз галерея бе нуқтаи аксбардорӣ замима мешавад — нуқта танҳо бо камераи барнома гирифта мешавад",
@@ -785,10 +788,14 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=39;
+const SHELL_VERSION=40;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
+// Снимок durable в IDB, и прямо СЕЙЧАС по нему идёт POST /api/photo. Нужен для
+// двух вещей: flushQueue не шлёт его вторым запросом параллельно, и «Сохранить
+// выезд» знает, что фото ещё в пути (см. waitPhotosSettled).
+const PHOTO_INFLIGHT=new Set();
 // Выбор файла открыт / снимок читается и жмётся. До PHOTO_PREPARING тут ещё
 // ничего нет, а перезагружаться уже нельзя: файл живёт только в памяти.
 let PHOTO_BUSY=0;
@@ -1010,6 +1017,10 @@ async function flushQueue(){
     items.sort((a,b)=>(a.at||0)-(b.at||0));   // порядок как случилось в поле
     for(const it of items){
       if(it.kind==="photo"&&PHOTO_PREPARING.has(it.op_id)) continue;
+      // По этому снимку прямо сейчас идёт свой POST (sendPhoto). Второй запрос
+      // тем же op_id сервер отобьёт как дубль, но пока он едет, «Сохранить
+      // выезд» считает фото неотправленным и ждёт его зря.
+      if(it.kind==="photo"&&PHOTO_INFLIGHT.has(it.op_id)) continue;
       // Нечитаемое/отклонённое фото остаётся видимым для пересъёмки, но не держит
       // за собой более поздние визиты, метки и фото.
       if(it.kind==="photo"&&it.failed) continue;
@@ -1023,7 +1034,10 @@ async function flushQueue(){
       try{
         let r;
         if(it.kind==="save"){
+          // Считаем СЕЙЧАС, а не берём записанное в поле: очередь отсортирована
+          // по времени события, и фото этого визита к этому моменту уже ушли.
           const sbody={rep:it.rep,values:it.values,finish:true,op_id:it.op_id,
+            photos_pending:await pendingPhotos(it.rep),
             form_version:it.form_version,input_keys:it.input_keys};
           if(it.cleared_keys&&it.cleared_keys.length) sbody.cleared_keys=it.cleared_keys;
           if(it.geo) sbody.geo=it.geo;
@@ -2132,6 +2146,7 @@ async function sendPhoto(rep,p,live,retakeOf){
   }finally{
     PHOTO_PREPARING.delete(op_id);
   }
+  PHOTO_INFLIGHT.add(op_id);
   try{
     const r=await fetch("/api/photo?rep="+enc(rep)+"&op="+op_id,
       {method:"POST",headers:photoHeaders(geo,ext2,
@@ -2162,6 +2177,8 @@ async function sendPhoto(rep,p,live,retakeOf){
       if(el) el.textContent=L().photos+": "+STATE.cur.photos+" ("+L().queuedn+")";
     }
     toast(L().savedoff); updateOffBar();
+  }finally{
+    PHOTO_INFLIGHT.delete(op_id);
   }
 }
 // --- Геопозиция --------------------------------------------------------------
@@ -2387,6 +2404,48 @@ async function toggleVoice(){
   setTimeout(()=>{ if(REC){ try{REC.stop();}catch(e){} } }, 60000);   // предохранитель
 }
 
+// --- Фото должны уехать РАНЬШЕ карточки визита -------------------------------
+// Карточка «Выезд отработан» уходит руководителю в момент закрытия визита, а
+// снимок едет своим запросом. /api/save — короткий JSON, /api/photo — сотни
+// килобайт: по журналу за 8–10.09.2026 из 293 карточек 48 ушли с «📸 без фото»
+// при том, что фото появлялось на сервере в среднем через 2 секунды. Человек
+// просто жал «Сохранить выезд», не дожидаясь, пока снимок догрузится.
+//
+// Поэтому сохранение сначала дожидается своих фото. Ждём ограниченно: без сети
+// ждать нечего (визит и снимки уедут очередью в правильном порядке — она
+// отсортирована по времени события), а держать человека у чужого подъезда
+// нельзя. Что не успело — уходит в photos_pending, и сервер довешивает столько
+// же ожидания уже у себя.
+const PHOTO_SETTLE_MS=25000, PHOTO_SETTLE_STEP_MS=500;
+
+// Снимки этого КД, которые сервер ещё не подтвердил. failed — отклонённые
+// сервером (их ждать бессмысленно, они ждут пересъёмки).
+async function pendingPhotos(rep){
+  let items=[]; try{ items=(await IDB.all("queue"))||[]; }catch(e){ return 0; }
+  return items.filter(it=>it.kind==="photo"&&it.rep===rep&&!it.failed).length;
+}
+
+async function waitPhotosSettled(rep){
+  let left=await pendingPhotos(rep);
+  if(!left&&!PHOTO_BUSY&&!PHOTO_PREPARING.size) return 0;
+  const until=Date.now()+PHOTO_SETTLE_MS;
+  let told=false;
+  while(Date.now()<until){
+    if(!PHOTO_BUSY&&!PHOTO_PREPARING.size&&!PHOTO_INFLIGHT.size){
+      // Всё, что можно было отдать, отдано или лежит в очереди — толкаем её.
+      await flushQueue();
+      // Очередь не сдвинулась из-за отсутствия сети: ждать нет смысла, дальше
+      // порядок держит сама очередь (фото записано раньше визита).
+      if(!STATE.online) break;
+    }
+    left=await pendingPhotos(rep);
+    if(!left&&!PHOTO_BUSY&&!PHOTO_PREPARING.size&&!PHOTO_INFLIGHT.size) return 0;
+    if(!told){ told=true; toast(L().photosending); }
+    await new Promise(r=>setTimeout(r,PHOTO_SETTLE_STEP_MS));
+  }
+  return await pendingPhotos(rep);
+}
+
 // Кнопка гасится на всё время отправки: grabGeo ждёт точку до 4 секунд, и за эту паузу
 // палец успевает нажать ещё раз. Каждое нажатие — новый op_id, то есть отдельный выезд и
 // отдельная отбивка руководителю (в проде так набралось 34 записи по одному договору).
@@ -2407,7 +2466,10 @@ async function saveVisit(){
   try{
     const rep=STATE.cur.rep, op_id=uuid();
     const geo=await grabGeo(4000,5000);   // свежая точка, не с прошлого адреса
-    const body={rep,values,finish:true,op_id,
+    // Сначала фото, потом карточка: иначе руководителю уйдёт «📸 без фото» по
+    // визиту, снимок которого догрузится через пару секунд.
+    const photos_pending=await waitPhotosSettled(rep);
+    const body={rep,values,finish:true,op_id,photos_pending,
       form_version:FORM_VERSION,input_keys};
     const clearedNow=[...FORM_CLEARED].filter(k=>FORM_TOUCHED.has(k));
     if(clearedNow.length) body.cleared_keys=clearedNow;
@@ -2419,7 +2481,7 @@ async function saveVisit(){
     }catch(e){
       // Нет сети — кладём выезд в очередь, помечаем визит локально; уйдёт при связи.
       await enqueue({op_id, kind:"save", rep, values, input_keys,
-        cleared_keys:clearedNow,
+        cleared_keys:clearedNow, photos_pending,
         form_version:FORM_VERSION, geo, at:Date.now()});
       STATE.online=false; applyVisitLocally(rep, values);
       finishSavedUI(rep, L().savedoff);

@@ -1489,23 +1489,13 @@ async def _save(request: web.Request) -> web.Response:
             # Кто фактически закрыл — один раз, во все три канала: у руководителя
             # через act_as гео-точка чужая, и без подписи гео-контроль врёт.
             actor = _acting_actor_name(uid) or db.get_binding(uid)
-            await _notify_group(request, notify_row, uid, actor=actor)
-            try:
-                await _notify_managers(request, notify_row, dist_m,
-                                       geo_far=geo_far, actor=actor)
-            except Exception as e:  # noqa: BLE001 — пуш не должен ломать сохранение:
-                # иначе 500 после log_visit, а повтор из очереди уже is_new=False —
-                # и пуш руководителю, и отчёт в беседу пропадут навсегда
-                logging.warning("manager notify failed: %s", e)
-            await _notify_report_chats(
-                request,
-                notify_row,
-                vlat,
-                vlon,
-                dist_m,
-                uid,
-                actor=actor,
-            )
+            # Рассылка ушла из запроса выездника в фон — см. _visit_notify.
+            # Она и раньше занимала львиную долю ответа (альбом фото каждому
+            # руководителю грузится внутри HTTP-запроса телефона), а теперь ещё
+            # и ждёт опоздавшие снимки.
+            _spawn_visit_notify(_visit_notify(
+                request, notify_row, uid, dist_m, geo_far, actor, vlat, vlon,
+                completed_at, _photos_pending(body)))
         else:
             # Самая частая причина «отбивка не пришла» — дедуп; без этой строки
             # она оставалась невидимой.
@@ -2207,6 +2197,121 @@ def _esc(v) -> str:
     except-блока, и второй адресат в цикле падал бы NameError только в проде и
     только при уже сбоящей отправке. Имя модульное, никакой except его не затрёт."""
     return _html.escape(str(v or ""))
+
+
+# --- Догон фото: карточка визита ждёт снимки, которые ещё едут ---------------
+# Карточка уходила МГНОВЕННО по закрытию визита, а снимок ехал своим запросом.
+# По журналу за 8–10.09.2026: из 293 карточек 48 ушли с «📸 без фото», хотя фото
+# появлялось на сервере в среднем через 2 секунды после отправки карточки
+# (42 случая из 48 — в пределах минуты). Дело не в связи, а в гонке: /api/save —
+# короткий JSON, /api/photo — сотни килобайт, и человек жмёт «Сохранить выезд»,
+# пока снимок ещё грузится. Руководитель получал «без фото» по визиту, у
+# которого фото есть, и переставал верить карточкам вообще.
+#
+# Чиним с двух сторон. Оболочка (v40) сама дожидается своих загрузок и говорит,
+# сколько снимков ещё в пути (photos_pending) — это убирает гонку в источнике.
+# Здесь — серверная страховка: она работает и со старой оболочкой на телефоне,
+# и когда приложение выгрузили из памяти на полпути.
+PHOTO_GRACE_S = 60          # потолок ожидания, настройка settings['photo_grace_s']
+# Оболочка до v40 счётчик не шлёт, и «фото нет» для неё неотличимо от «фото
+# ещё едет». Ждать там полное окно значит задерживать на минуту и честную
+# карточку без фото («нет контакта»), поэтому вслепую ждём заметно меньше:
+# по журналу прода этого хватает на 40 случаев из 48.
+PHOTO_GRACE_BLIND_S = 25
+_PHOTO_GRACE_POLL_S = 1.0
+
+
+def _photo_grace_s() -> int:
+    """Сколько ждать опоздавшее фото. 0 в настройке полностью отключает догон."""
+    raw = (db.get_setting("photo_grace_s") or "").strip()
+    if not raw:
+        return PHOTO_GRACE_S
+    try:
+        return max(0, min(int(raw), 600))
+    except ValueError:
+        return PHOTO_GRACE_S
+
+
+def _photos_pending(body) -> int | None:
+    """Сколько снимков по этому договору оболочка ещё не отдала серверу.
+    None — оболочка до v40 (поля нет), тогда судим по самим файлам."""
+    raw = body.get("photos_pending")
+    if raw is None:
+        return None
+    try:
+        return max(0, min(int(raw), 50))
+    except (TypeError, ValueError):
+        return None
+
+
+async def _await_visit_photos(cid: str, day: str, pending: int | None) -> None:
+    """Подождать снимки визита, но не дольше окна догона.
+
+    pending=0 — оболочка ЗНАЕТ, что фото не будет («нет контакта», дверь никто
+    не открыл): такая карточка обязана уйти сразу, ждать нечего. pending>0 —
+    ждём ровно столько снимков, сколько обещано. None (старая оболочка) — ждём
+    только если фото за день нет вовсе; лишний снимок к уже имеющимся так не
+    поймать, но и карточку с фото это не задержит."""
+    if pending == 0:
+        return
+    grace = _photo_grace_s()
+    if grace <= 0:
+        return
+    contracts = db.person_contracts(cid)
+    have = len(day_photos(contracts, day))
+    if pending is None:
+        if have:
+            return
+        grace = min(grace, PHOTO_GRACE_BLIND_S)
+    target = have + (pending or 1)
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        await asyncio.sleep(_PHOTO_GRACE_POLL_S)
+        if len(day_photos(contracts, day)) >= target:
+            return
+
+
+# Ссылку на фоновую задачу держим сами: asyncio хранит только слабую, и
+# сборщик вправе унести задачу вместе с неотправленной карточкой.
+_VISIT_NOTIFY_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn_visit_notify(coro) -> None:
+    task = asyncio.create_task(coro)
+    _VISIT_NOTIFY_TASKS.add(task)
+    task.add_done_callback(_VISIT_NOTIFY_TASKS.discard)
+
+
+async def _visit_notify(request: web.Request, notify_row, uid: int,
+                        dist_m, geo_far, actor, vlat, vlon,
+                        day: str, pending: int | None) -> None:
+    """Все три канала по закрытому визиту — в фоне, после догона фото.
+
+    Тело запроса здесь уже прочитано, а request нужен только ради request.app
+    (бот) — обращаться к нему после ответа безопасно. Своё исключение фоновая
+    задача обязана съесть сама: наверх его принимать некому."""
+    try:
+        await _await_visit_photos(notify_row["contract_id"], day, pending)
+    except Exception as exc:  # noqa: BLE001 — догон не должен съесть рассылку
+        logging.warning("photo grace failed: %s", exc)
+    try:
+        await _notify_group(request, notify_row, uid, actor=actor)
+        try:
+            await _notify_managers(request, notify_row, dist_m,
+                                   geo_far=geo_far, actor=actor)
+        except Exception as e:  # noqa: BLE001 — сбой лички не отменяет беседу
+            logging.warning("manager notify failed: %s", e)
+        await _notify_report_chats(request, notify_row, vlat, vlon, dist_m,
+                                   uid, actor=actor)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("visit notify failed: %s", exc)
+
+
+async def wait_visit_notify(timeout: float = 30.0) -> None:
+    """Дождаться фоновых рассылок (остановка сервера, тесты)."""
+    if not _VISIT_NOTIFY_TASKS:
+        return
+    await asyncio.wait(set(_VISIT_NOTIFY_TASKS), timeout=timeout)
 
 
 async def _notify_group(request: web.Request, row, uid: int,
@@ -4076,6 +4181,11 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/note", _note_add)
     app.router.add_get("/api/notes", _notes)
     app.router.add_post("/api/note_delete", _note_delete)
+    # Карточка визита теперь может ждать опоздавшее фото до минуты. При
+    # остановке (выкладка — это перезапуск контейнера) даём фоновым рассылкам
+    # договорить: иначе выкладка в разгар рабочего дня молча съедала бы
+    # карточки визитов, закрытых в последнюю минуту.
+    app.on_cleanup.append(lambda _app: wait_visit_notify())
     return app
 
 
