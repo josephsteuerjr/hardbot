@@ -462,8 +462,17 @@ def build(root: Path, out_dir: Path, version: str | None = None,
                 else:
                     info.external_attr = 0o644 << 16
                 zf.writestr(info, normalized_bytes(root, relative))
-            zf.writestr(f"{folder}/README.md", package_readme(version, day))
-            zf.writestr(f"{folder}/VERSION", f"{version}\n{day}\n{commit}\n")
+            # Эти два файла тоже кладём с фиксированной датой. Без ZipInfo writestr
+            # берёт ТЕКУЩЕЕ время, и две сборки одного коммита давали разные
+            # SHA-256: по сумме нельзя было ответить «тот ли пакет мне привезли»,
+            # только «не побился ли он в дороге».
+            for extra_name, extra_body in (
+                    (f"{folder}/README.md", package_readme(version, day)),
+                    (f"{folder}/VERSION", f"{version}\n{day}\n{commit}\n")):
+                extra = zipfile.ZipInfo(extra_name, date_time=(2026, 1, 1, 0, 0, 0))
+                extra.compress_type = zipfile.ZIP_DEFLATED
+                extra.external_attr = 0o644 << 16
+                zf.writestr(extra, extra_body)
             bad = zf.testzip()
             if bad:
                 raise BuildStop(f"ZIP не прошёл проверку CRC: {bad}")

@@ -1,5 +1,6 @@
 """Сборщик пакета для ИТ (tools/build_it_package.py): состав, исключения, утечки."""
 
+import fnmatch
 import importlib.util
 import sys
 import zipfile
@@ -38,26 +39,110 @@ def _inner(names):
     return {n[len(prefix):] for n in names}
 
 
-# Каталоги внутри deploy/, которые рождаются ПРИ установке и в пакет не едут:
-# база и фото, копии, скачанная модель речи, дорожные графы.
-DEPLOY_RUNTIME_DIRS = {"data", "backups", "models", "osrm", "secrets", "__pycache__"}
+# Каталоги внутри deploy/, которые рождаются ПРИ УСТАНОВКЕ и в пакет не едут:
+# база и фото, копии, архивы переезда (handover/), скачанная модель речи,
+# дорожные графы, готовый офлайн-пакет (offline/out/).
+DEPLOY_RUNTIME_DIRS = {"data", "backups", "models", "osrm", "secrets", "__pycache__",
+                       "handover", "out"}
+# Отдельные файлы того же рода: .env с секретами (в пакет едет только
+# .env.example) и отметка закрытого контура deploy/offline/OFFLINE.
+DEPLOY_RUNTIME_FILES = {"OFFLINE"}
+
+
+def _tracked_deploy_files():
+    """Пути внутри deploy/, которые git считает частью исходников.
+
+    None — git недоступен: так выглядит РАСПАКОВАННЫЙ ПАКЕТ, репозитория там
+    нет. В этом случае рабочие файлы отсеиваются списками выше и правилами
+    .gitignore, доехавшими внутри самого deploy/ (см. ниже).
+    """
+    listing = builder._git(ROOT, "ls-files", "-z", "--cached", "--", "deploy")
+    if listing is None:
+        return None
+    return {name for name in listing.split("\0") if name}
+
+
+def _ignore_rules_inside_deploy():
+    """Правила .gitignore, лежащие ВНУТРИ deploy/ и доезжающие в пакете.
+
+    Нужны только там, где git спросить не у кого, — в распакованном пакете.
+    Рабочие файлы заводятся и там: каталог настроек единицы gps монтируется в
+    контейнер целиком, и vroom пишет в него свой журнал обращений
+    (`deploy/units/gps/vroom/access.log`). Тест требовал, чтобы такой журнал
+    оказался в пакете, и падал у того, кто сделал ровно то, что велит README:
+    сначала поставил три единицы, потом запустил тесты. Хуже того, сообщение
+    «AssertionError: …/access.log» читалось как требование положить рабочие
+    файлы установки в пакет для чужой ИТ-службы.
+
+    Второй список имён в тесте эту ловушку закрыл бы ровно один раз: следующий
+    контейнер, который что-то допишет в свой каталог, снова уронил бы прогон.
+    Поэтому спрашиваем не список, а сами правила: «это рабочий файл» уже
+    записано в deploy/units/gps/vroom/.gitignore, и записано там намеренно —
+    каталог отвечает за себя сам, потому что переезжает вместе с единицей.
+    Поддерживаем простое подмножество .gitignore: строки без отрицания,
+    с шаблоном по имени файла или по пути от каталога с правилом.
+    """
+    rules = []
+    for ignore_file in sorted((ROOT / "deploy").rglob(".gitignore")):
+        folder = ignore_file.parent
+        for line in ignore_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("!"):
+                continue
+            rules.append((folder, line.rstrip("/")))
+    return rules
+
+
+def _ignored_inside_deploy(path, rules):
+    for folder, pattern in rules:
+        if folder != path.parent and folder not in path.parents:
+            continue
+        inside = path.relative_to(folder).as_posix()
+        target = inside if "/" in pattern else path.name
+        if fnmatch.fnmatch(target, pattern):
+            return True
+    return False
 
 
 def _deploy_files_that_must_ship():
-    """Всё содержимое deploy/, кроме рабочих каталогов, — список СЧИТАН с диска.
+    """Содержимое deploy/ БЕЗ рождённого установкой — список СЧИТАН с диска.
 
     Раньше здесь стояли вписанные руками пути (`deploy/docker-compose.yml` и
     прочие). Разрез deploy/ на три единицы сделал такой список неправдой в тот
     же день: файл переехал, тест покраснел, хотя пакет собран правильно.
     Проверка обязана ловить «сборщик потерял файл», а не «файл переименовали».
+
+    Но «всё, что лежит в deploy/» — тоже неправда, и хуже: установка САМА
+    кладёт туда .env с токеном бота, архив переезда, отметку офлайн-режима. На
+    установленной системе тест падал с «AssertionError: deploy/units/core/.env»
+    и читался как требование положить секреты в пакет, отдаваемый чужой ИТ-
+    службе. А README пакета ставит установку РАНЬШЕ тестов — то есть красный
+    прогон получался при нормальном порядке действий.
+
+    Поэтому спрашиваем не диск, а git: обязан доехать тот файл, который лежит
+    в РЕПОЗИТОРИИ. Источник по-прежнему независим от правил сборщика, так что
+    «сборщик потерял файл» ловится как раньше; рождённое установкой git не
+    показывает вовсе.
     """
     base = ROOT / "deploy"
+    tracked = _tracked_deploy_files()
+    ignore_rules = [] if tracked is not None else _ignore_rules_inside_deploy()
     for path in sorted(base.rglob("*")):
         if not path.is_file() or path.suffix in (".pyc",):
             continue
-        if set(path.relative_to(base).parts[:-1]) & DEPLOY_RUNTIME_DIRS:
+        inside = path.relative_to(base)
+        if set(inside.parts[:-1]) & DEPLOY_RUNTIME_DIRS:
             continue
-        yield path.relative_to(ROOT).as_posix()
+        if inside.name in DEPLOY_RUNTIME_FILES:
+            continue
+        if inside.name.startswith(".env") and inside.name != ".env.example":
+            continue
+        if _ignored_inside_deploy(path, ignore_rules):
+            continue
+        relative = path.relative_to(ROOT).as_posix()
+        if tracked is not None and relative not in tracked:
+            continue
+        yield relative
 
 
 def test_package_contains_every_component(built):
@@ -76,7 +161,11 @@ def test_package_contains_every_component(built):
 
     deploy_files = list(_deploy_files_that_must_ship())
     for expected in deploy_files:
-        assert expected in inner, expected
+        assert expected in inner, (
+            f"{expected}: файл установки есть в исходниках, но не доехал в пакет — "
+            "либо его потерял сборщик, либо это рабочий файл, рождённый установкой, "
+            "и тогда его место в .gitignore рядом с ним, а не в пакете"
+        )
     # Страховка от вырожденного случая «в deploy/ ничего не нашлось»: установка
     # без compose-файла и без скрипта — это пустой пакет, а не зелёный тест.
     assert any(n.endswith("docker-compose.yml") for n in deploy_files)

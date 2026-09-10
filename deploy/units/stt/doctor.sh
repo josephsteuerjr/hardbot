@@ -72,7 +72,7 @@ fi
 step "Место на диске"
 df -h "$UNIT_DIR" | tail -n 1 | awk '{printf "  свободно %s из %s (занято %s)\n", $4, $2, $5}'
 # Модель лежит в образе, а не здесь: ноль в этой строке — норма, а не пропажа.
-printf '  %-22s %s\n' "models (кэш скачанных)" "$(human_size models)"
+printf '  %-22s %s\n' "models (кэш, обычно пуст)" "$(human_size models)"
 
 doctor_errors stt
 doctor_tail

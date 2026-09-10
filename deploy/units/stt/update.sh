@@ -45,4 +45,14 @@ docker image prune -f --filter "label=ru.hard.service" >/dev/null 2>&1 || true
 say ""
 say "==== Служба речи обновлена ===="
 compose ps | sed 's/^/  /'
-say "  модель: $(env_get STT_MODEL), каталог models/ занимает $(human_size models)"
+# Итог говорит о том, что служба ЗАГРУЗИЛА, а не о том, что ей велели в .env.
+# Эти две вещи расходятся молча: при незнакомом имени служба берёт запечённую
+# модель и честно пишет об этом в журнал, а итоговая строка скрипта повторяла
+# имя из .env — и инженер уходил уверенным, что везёт одну модель, а вёз другую.
+want="$(env_get STT_MODEL)"
+if compose logs --no-color --tail=200 stt 2>/dev/null      | grep -q "беру модель, запечённую в образ"; then
+  say "  модель: в .env указана «$want», но служба взяла ЗАПЕЧЁННУЮ в образ"
+  say "          почему именно — docker compose logs --tail=20 stt"
+else
+  say "  модель: $want, каталог models/ занимает $(human_size models)"
+fi

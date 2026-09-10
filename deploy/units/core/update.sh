@@ -45,11 +45,19 @@ fi
 
 port="$(app_port)"
 if command -v curl >/dev/null 2>&1; then
-  if curl -fsS -o /dev/null --max-time 10 "http://127.0.0.1:${port}/"; then
-    ok "http://127.0.0.1:${port}/ отвечает"
-  else
-    warn "контейнер здоров, но http://127.0.0.1:${port}/ не отвечает — проверьте APP_PORT в .env"
-  fi
+  # Тот же разбор, что и в install.sh: приговор выносится по коду ответа.
+  # Ненулевой код возврата curl сам по себе ничего не значит — он бывает и при
+  # неудачной записи тела («curl: (23) ...») уже после ответа 200.
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:${port}/" 2>/dev/null)" || true
+  case "${code:-000}" in
+    000)
+      warn "контейнер здоров, но http://127.0.0.1:${port}/ не отвечает — проверьте APP_PORT в .env" ;;
+    2??|3??)
+      ok "http://127.0.0.1:${port}/ отвечает (HTTP ${code})" ;;
+    *)
+      warn "http://127.0.0.1:${port}/ отвечает, но кодом ${code} — это не похоже на рабочее приложение"
+      warn "последние строки журнала: docker compose logs --tail=50" ;;
+  esac
 fi
 
 # Старые слои нашего образа после пересборки висят как <none>. Чистим ТОЛЬКО

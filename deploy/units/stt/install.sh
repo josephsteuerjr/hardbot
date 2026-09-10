@@ -107,5 +107,6 @@ compose ps | sed 's/^/  /'
 say ""
 say "Полезное:"
 say "  проверка:        ./doctor.sh"
-say "  сменить модель:  STT_MODEL в .env, затем ./update.sh"
+say "  сменить модель:  python tools/prepare_stt_model.py --repo <репозиторий> --name <имя>,"
+say "                   потом STT_MODEL в .env и ./update.sh — образ пересоберётся"
 say "  сменить токен:   docker run --rm -v $SHARED_STT_VOLUME:/run/stt hard-stt rm -f /run/stt/stt.token && ./update.sh"
