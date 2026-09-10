@@ -116,7 +116,7 @@ def test_device_token_is_enough(monkeypatch):
         conn.commit()
     _s, made = _call("POST", "/admin/device/enroll.json", headers=KEY,
                      json_body={"device_id": "fp", "name": "Ноут"})
-    token = {"X-Device-Token": made["token"]}
+    token = {"X-Device-Token": made["token"], "X-Device-Id": "fp"}
     status, body = _call("POST", PATH, headers=token, json_body={"entries": [
         {"contract_id": "A", "key": "call_status", "value": "ok"}]})
     assert status == 200 and body["recorded"] == 1

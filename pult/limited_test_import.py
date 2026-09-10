@@ -972,29 +972,54 @@ def _confirmed_digest(value: Any) -> str:
     return value
 
 
-def _settings(payload: Any) -> tuple[str, str]:
+def _credential(payload: Any, name: str) -> str:
+    """Одно поле доступа из настроек: строка без управляющих символов или пусто."""
+    value = payload.get(name)
+    if value is None or value == "":
+        return ""
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or _CONTROL_RE.search(value)
+    ):
+        raise OperatorBlocked(
+            "settings_invalid",
+            f"settings JSON field {name} must be a trimmed string without control characters",
+        )
+    return value
+
+
+def _settings(payload: Any) -> tuple[str, str, str]:
+    """Адрес и доступ. Годится ЛЮБОЙ из двух: токен устройства или мастер-ключ.
+
+    Раньше ключ был обязателен. После того как мастер-ключ перестал открывать
+    данные, у штатно привязанного пульта его в настройках просто нет — и
+    загрузка реестра падала бы на проверке настроек, ещё не дойдя до сервера.
+    """
     if not isinstance(payload, dict):
         raise OperatorBlocked(
             "settings_invalid",
             "settings JSON must contain an object",
         )
     url = payload.get("url")
-    key = payload.get("key")
     if (
         not isinstance(url, str)
         or not url
         or url != url.strip()
         or _CONTROL_RE.search(url)
-        or not isinstance(key, str)
-        or not key
-        or key != key.strip()
-        or _CONTROL_RE.search(key)
     ):
         raise OperatorBlocked(
             "settings_invalid",
-            "settings JSON must contain trimmed nonblank url and key strings",
+            "settings JSON must contain a trimmed nonblank url string",
         )
-    return url, key
+    key = _credential(payload, "key")
+    device_token = _credential(payload, "device_token")
+    if not key and not device_token:
+        raise OperatorBlocked(
+            "settings_invalid",
+            "settings JSON must contain device_token or key",
+        )
+    return url, key, device_token
 
 
 def _base_url(value: str) -> tuple[str, str]:
@@ -1072,16 +1097,19 @@ def _post_request(
     key: str,
     payload: dict[str, Any],
     proof_digest: str,
+    device_token: str = "",
 ) -> dict[str, Any]:
     body = _canonical_json_bytes(payload)
+    # Тем же, чем ходит пульт: токен устройства с отпечатком машины, а мастер-ключ
+    # только если устройство ещё не привязано.
+    from core.api import auth_headers
+    headers = {"Content-Type": "application/json"}
+    headers.update(auth_headers(key, device_token))
     request = urllib.request.Request(
         base_url + IMPORT_PATH,
         data=body,
         method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Admin-Key": key,
-        },
+        headers=headers,
     )
     try:
         with _urlopen_no_redirect(request, timeout=120) as response:
@@ -1183,11 +1211,12 @@ def _apply(args: argparse.Namespace) -> dict[str, Any]:
         maximum=MAX_SETTINGS_BYTES,
         require_private=True,
     )
-    url, key = _settings(settings_payload)
+    url, key, device_token = _settings(settings_payload)
     base_url, endpoint = _base_url(url)
     result = _post_request(
         base_url=base_url,
         key=key,
+        device_token=device_token,
         payload=request_payload,
         proof_digest=proof_digest,
     )

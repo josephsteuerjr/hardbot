@@ -52,3 +52,34 @@ def _engine_stays_first():
             sys.path.remove(engine)
         sys.path.insert(0, engine)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _admin_access_starts_fresh():
+    """Каждый тест начинает с сервера, где ещё не привязано ни одного устройства.
+
+    Мастер-ключ открывает данные только до самой ПЕРВОЙ привязки, и флаг об этом
+    односторонний — иначе обладатель ключа отзывал бы все устройства и возвращал
+    себе полный доступ. База у прогона одна на всех, поэтому без сброса первый же
+    тест, привязавший устройство, отбирал бы ключ у всех следующих: падения
+    выглядели бы как поломка доступа, а на деле это соседний тест.
+    """
+    try:
+        import db
+    except ImportError:
+        yield
+        return
+    try:
+        with db.connect() as conn:
+            conn.execute("DELETE FROM settings WHERE key=?", (db.ADMIN_BOOTSTRAP_KEY,))
+            conn.execute("DELETE FROM admin_devices")
+            conn.execute("DELETE FROM admin_enroll_codes")
+            conn.commit()
+    except Exception:  # noqa: BLE001 — таблиц может ещё не быть: тест их и создаёт
+        pass
+    try:
+        import web
+        web._ADMIN_FAILS.clear()
+    except (ImportError, AttributeError):
+        pass
+    yield

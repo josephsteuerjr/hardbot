@@ -17,17 +17,20 @@ class ConnectionSection:
         sc.add(label("Admin-ключ", "small"), spacing_before=4)
         self.key_entry = Field(self.key, secret=True)
         sc.add_row(self.key_entry, Button("👁", self._toggle_key, kind="icon"), stretch=False)
-        sc.add_row(Button("Привязать это устройство", self.device_enroll, kind="accent"),
-                   Button("Подключиться", self._connect),
+        sc.add_row(Button("Привязать по коду", self.device_redeem, kind="accent"),
+                   Button("Подключиться", self._connect), spacing_before=4)
+        sc.add_row(Button("Привязать мастер-ключом", self.device_enroll),
                    Button("Отвязать это устройство", self.device_unbind), spacing_before=4)
         self.key_out = sc.add(Note("", "tiny"), spacing_before=4)
         self._key_state()
         page.add(sc)
 
         dv_card = Card("Привязанные устройства",
-                       "Каждое устройство ходит своим токеном. Потерянный ноутбук "
-                       "отзывается по одному — мастер-ключ менять не надо, остальные "
-                       "продолжают работать. Отзыв возможен только мастер-ключом.")
+                       "Каждое устройство ходит своим токеном и работает только с "
+                       "той машины, где его получили. Потерянный ноутбук отзывается "
+                       "по одному — остальные продолжают работать. Обычный путь "
+                       "привязки — одноразовый код, который выдают на сервере; "
+                       "мастер-ключ нужен только когда привязывать некому.")
         dv_card.add_row(Button("Обновить список", self.devices_load))
         self.dev_frame = dv_card.add(Rows(spacing=4), spacing_before=4)
         page.add(dv_card)
@@ -111,6 +114,70 @@ class ConnectionSection:
     def _key_state(self):
         self.key_out.configure(text=dv.key_state_text(self.device_token))
 
+    def device_redeem(self):
+        """Обменять одноразовый код на токен этой машины.
+
+        Обычный путь. Код выдают на сервере командой admin_access.py issue, он
+        гаснет при первом обмене, и мастер-ключ для этого не нужен вовсе — в
+        этом и смысл: право впустить новое устройство привязано к доступу к
+        серверу, а не к знанию строки из .env.
+        """
+        code = dialogs.askstring(
+            "Код привязки",
+            "Вставь одноразовый код.\n\n"
+            "Его выдают на сервере командой:\n"
+            "    docker compose exec -T app python /app/admin_access.py issue --name «имя»\n\n"
+            "Код срабатывает один раз и гаснет.",
+            parent=self)
+        if not code or not code.strip():
+            return
+        name = dialogs.askstring(
+            "Имя устройства", "Как назвать это устройство?\n"
+            "Оно будет видно в списке привязанных.",
+            initialvalue=self.device_default_name(), parent=self)
+        if name is None:
+            return
+        fingerprint = self.device_fingerprint()
+        code = code.strip()
+
+        def work():
+            # Ни ключа, ни токена: код сам себе доступ.
+            return self.api("POST", "/admin/device/redeem.json",
+                            {"code": code, "device_id": fingerprint,
+                             "name": name.strip()})
+
+        def done(d):
+            token = (d or {}).get("token") or ""
+            if not token:
+                self.toast("Сервер не выдал токен", err=True)
+                return
+            self._device_bound(token, "Устройство привязано по коду")
+
+        def fail(exc):
+            self.key, self.device_token = saved_key, saved_token
+            self.toast(str(exc), err=True)
+
+        # На время обмена ходим «никем»: коду не нужен ни ключ, ни прежний токен,
+        # а прежний токен мог бы увести запрос не туда, если он уже отозван.
+        saved_key, saved_token = self.key, self.device_token
+        self.key, self.device_token = "", ""
+        self.bg_task(work, done, fail)
+
+    def _device_bound(self, token: str, message: str) -> None:
+        """Общий хвост обеих привязок: сохранить токен и забыть ключ."""
+        self.device_token = token
+        self.settings["device_token"] = token
+        # Ключ НЕ сохраняем — в этом весь смысл: на диске остаётся токен,
+        # который отзывается по одному и работает только с этой машины.
+        self.settings.pop("key", None)
+        self.key = ""
+        self.key_entry.set("")
+        self._save_settings()
+        self._key_state()
+        self.toast(message)
+        self.devices_load()
+        self.refresh()
+
     def device_enroll(self):
         key = self.key_entry.get().strip()
         if not key:
@@ -136,18 +203,7 @@ class ConnectionSection:
             if not token:
                 self.toast("Сервер не выдал токен", err=True)
                 return
-            self.device_token = token
-            self.settings["device_token"] = token
-            # Ключ НЕ сохраняем — в этом весь смысл: на диске остаётся токен,
-            # который отзывается по одному и работает только с этой машины.
-            self.settings.pop("key", None)
-            self.key = ""
-            self.key_entry.set("")
-            self._save_settings()
-            self._key_state()
-            self.toast("Устройство привязано — ключ больше не хранится")
-            self.devices_load()
-            self.refresh()
+            self._device_bound(token, "Устройство привязано — ключ больше не хранится")
 
         def fail(exc):
             self.key = key

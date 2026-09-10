@@ -7,6 +7,7 @@
 """
 
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -690,6 +691,21 @@ def init_db() -> None:
               created_at TEXT,
               last_seen TEXT,
               revoked_at TEXT
+            )
+        """)
+        # Коды привязки. Мастер-ключ перестал быть тем, чем привязывают: теперь
+        # код рождается НА МЕСТЕ У СЕРВЕРА (server/admin_access.py, как и
+        # регистратор импорта — без HTTP-входа) и гаснет при первом же обмене.
+        # Храним хэш: дамп таблицы кода не даёт. Срока жизни у кода намеренно
+        # нет — одноразовости достаточно, а лишний таймер владелец отверг.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS admin_enroll_codes (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              code_hash TEXT NOT NULL UNIQUE,
+              name TEXT,                   -- для кого выдан: «Ноут дома»
+              created_at TEXT,
+              used_at TEXT,                -- NULL = ещё не обменян
+              used_by_device TEXT          -- отпечаток машины, обменявшей код
             )
         """)
         # Метки: и привязанные к кейсу (client_rep), и отдельные «разведочные» (rep пуст).
@@ -3219,6 +3235,24 @@ def _device_token_hash(token: str) -> str:
     return hashlib.sha256(str(token or "").strip().encode("utf-8")).hexdigest()
 
 
+ADMIN_BOOTSTRAP_KEY = "admin_bootstrap_done"
+
+
+def admin_bootstrap_done() -> bool:
+    """Была ли на этом сервере хоть одна привязка устройства.
+
+    Пока не было — мастер-ключ работает как обычный доступ: иначе первый пульт
+    неоткуда взять, а данных в свежей базе всё равно нет. Как только устройство
+    привязано хоть раз, ключ теряет это право НАВСЕГДА и умеет только привязать
+    и отозвать.
+
+    Флаг намеренно односторонний. Если бы он снимался вместе с последним
+    устройством, обладатель ключа отозвал бы все устройства и вернул себе полный
+    доступ — то есть «один ключ открывает всё» вернулось бы через два шага.
+    """
+    return get_setting(ADMIN_BOOTSTRAP_KEY) == "1"
+
+
 def enroll_admin_device(device_id: str, name: str = "") -> dict:
     """Привязать устройство и выдать ему токен. Токен возвращается ОДИН раз.
 
@@ -3242,12 +3276,25 @@ def enroll_admin_device(device_id: str, name: str = "") -> dict:
         row = conn.execute("SELECT id FROM admin_devices WHERE token_hash=?",
                            (_device_token_hash(token),)).fetchone()
         conn.commit()
+    if not admin_bootstrap_done():
+        set_setting(ADMIN_BOOTSTRAP_KEY, "1")
+        audit_access(0, "admin_bootstrap_closed", str(row["id"]))
     audit_access(0, "device_enroll", str(row["id"]), name or device_id[:16])
     return {"id": row["id"], "token": token, "created_at": now}
 
 
-def admin_device_by_token(token: str) -> dict | None:
-    """Живое устройство по токену; заодно отмечаем, что оно на связи."""
+def admin_device_by_token(token: str, device_id: str | None = None) -> dict | None:
+    """Живое устройство по токену; заодно отмечаем, что оно на связи.
+
+    ``device_id`` — отпечаток машины, который пульт присылает КАЖДЫМ запросом.
+    Раньше отпечаток проверялся только при выдаче токена, а дальше токен был
+    предъявительским: скопировал файл настроек на другую машину — и работает.
+    Теперь несовпадение отпечатка означает отказ.
+
+    ``None`` (а не пустая строка) отключает сверку — так ходят внутренние
+    вызовы и старые тесты. Веб-слой всегда передаёт строку, поэтому запрос без
+    заголовка отпечатка получает пустую строку и не проходит.
+    """
     if not str(token or "").strip():
         return None
     digest = _device_token_hash(token)
@@ -3257,6 +3304,13 @@ def admin_device_by_token(token: str) -> dict | None:
             "SELECT id, device_id, name, created_at, last_seen FROM admin_devices "
             "WHERE token_hash=? AND revoked_at IS NULL", (digest,)).fetchone()
         if row is None:
+            return None
+        if device_id is not None and not hmac.compare_digest(
+                str(row["device_id"] or "").encode("utf-8"),
+                str(device_id or "").strip()[:128].encode("utf-8")):
+            # Сравниваем БАЙТЫ, а не строки: compare_digest на str падает, если
+            # в них есть не-ASCII, — и присланный кем угодно заголовок с
+            # кириллицей ронял бы ручку пятисоткой вместо честного отказа.
             return None
         conn.execute("UPDATE admin_devices SET last_seen=? WHERE id=?", (now, row["id"]))
         conn.commit()
@@ -3286,6 +3340,75 @@ def revoke_admin_device(device_row_id: int) -> bool:
     if changed:
         audit_access(0, "device_revoke", str(device_row_id))
     return bool(changed)
+
+
+# --- Коды привязки -----------------------------------------------------------
+# Смысл: мастер-ключ перестаёт быть тем, чем каждый день привязывают устройства.
+# Код рождается на месте у сервера, живёт до первого обмена и гаснет. Утёкший код
+# либо уже использован (и бесполезен), либо виден в списке как неиспользованный.
+
+def _enroll_code_hash(code: str) -> str:
+    return hashlib.sha256(("enroll:" + str(code or "").strip()).encode("utf-8")).hexdigest()
+
+
+def issue_enroll_code(name: str = "") -> dict:
+    """Выдать одноразовый код привязки. Сам код возвращается ОДИН раз."""
+    code = secrets.token_urlsafe(24)
+    now = datetime.now().isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO admin_enroll_codes (code_hash, name, created_at) VALUES (?,?,?)",
+            (_enroll_code_hash(code), str(name or "").strip()[:80], now))
+        row = conn.execute("SELECT id FROM admin_enroll_codes WHERE code_hash=?",
+                           (_enroll_code_hash(code),)).fetchone()
+        conn.commit()
+    audit_access(0, "enroll_code_issued", str(row["id"]), str(name or "")[:80])
+    return {"id": row["id"], "code": code, "created_at": now}
+
+
+def redeem_enroll_code(code: str, device_id: str, name: str = "") -> dict:
+    """Обменять код на токен устройства. Код гаснет в той же транзакции.
+
+    Гашение и выдача идут вместе намеренно: иначе два одновременных обмена
+    одного кода дали бы два действующих токена, и «одноразовый» перестало бы
+    что-либо значить.
+    """
+    device_id = str(device_id or "").strip()[:128]
+    if not device_id:
+        raise ValueError("не передан отпечаток устройства")
+    digest = _enroll_code_hash(code)
+    now = datetime.now().isoformat(timespec="seconds")
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id, name, used_at FROM admin_enroll_codes WHERE code_hash=?",
+            (digest,)).fetchone()
+        if row is None:
+            raise ValueError("код не найден")
+        if row["used_at"]:
+            raise ValueError("код уже использован")
+        changed = conn.execute(
+            "UPDATE admin_enroll_codes SET used_at=?, used_by_device=? "
+            "WHERE id=? AND used_at IS NULL",
+            (now, device_id, row["id"])).rowcount
+        if not changed:
+            raise ValueError("код уже использован")
+        conn.commit()
+        code_name = row["name"] or ""
+    made = enroll_admin_device(device_id, str(name or "").strip() or code_name)
+    audit_access(0, "enroll_code_redeemed", str(row["id"]), device_id[:16])
+    return made
+
+
+def list_enroll_codes(include_used: bool = False) -> list[dict]:
+    where = "" if include_used else " WHERE used_at IS NULL"
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT id, name, created_at, used_at, used_by_device "
+            f"FROM admin_enroll_codes{where} ORDER BY id DESC").fetchall()
+    return [{"id": r["id"], "name": r["name"] or "", "created_at": r["created_at"] or "",
+             "used_at": r["used_at"] or "",
+             "used_by_device": (r["used_by_device"] or "")[:12]}
+            for r in rows]
 
 
 def audit_access(actor: int, action: str, target: str | None = None,

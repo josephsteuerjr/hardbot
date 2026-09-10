@@ -107,7 +107,11 @@ def fetch_rows(settings: dict, log):
     import urllib.request
 
     url = settings["url"].rstrip("/") + "/admin/export.json?mode=full"
-    req = urllib.request.Request(url, headers={"X-Admin-Key": settings.get("key", "")})
+# Мастер-ключ больше не открывает данные после первой привязки — ходим
+# тем же, чем ходит сам пульт: токеном устройства плюс отпечаток машины.
+    from core.api import auth_headers
+    req = urllib.request.Request(url, headers=auth_headers(
+        settings.get("key", ""), settings.get("device_token", "")))
     with urllib.request.urlopen(req, timeout=300) as r:
         data = json.loads(r.read().decode("utf-8"))
     log(f"Из бота получено строк: {len(data.get('rows') or [])}")

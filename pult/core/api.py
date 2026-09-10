@@ -18,7 +18,16 @@ BAD_KEY_TEXT = "Неверный мастер-ключ"
 
 
 def auth_headers(key: str = "", device_token: str = "") -> dict[str, str]:
-    return {"X-Device-Token": device_token} if device_token else {"X-Admin-Key": key}
+    """Чем представляемся серверу.
+
+    К токену обязательно прикладывается отпечаток машины: сервер сверяет его на
+    КАЖДОМ запросе, а не только при выдаче. Без этого файл настроек, скопированный
+    на другую машину, продолжал бы работать — а это обычный JSON на диске.
+    """
+    if device_token:
+        from .devices import device_fingerprint
+        return {"X-Device-Token": device_token, "X-Device-Id": device_fingerprint()}
+    return {"X-Admin-Key": key}
 
 
 def host_of(url: str) -> str:

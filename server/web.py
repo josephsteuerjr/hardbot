@@ -2725,13 +2725,74 @@ function pin(bg,txt){const e=document.createElement("div");e.className="pin";
 # Смысл разделения: утёкший мастер-ключ перестаёт быть «загрузи что угодно
 # откуда угодно», а потерянный ноут отзывается, не меняя ключ всем остальным.
 def _admin(request: web.Request) -> None:
-    key = os.getenv("ADMIN_API_KEY", "")
-    if key and hmac.compare_digest(request.headers.get("X-Admin-Key") or "", key):
-        return
+    """Обычные админ-ручки: ТОЛЬКО токен устройства, и только со своей машины.
+
+    Мастер-ключ здесь больше не принимается. Раньше он открывал всё: знание одной
+    строки из .env означало «загрузи что угодно откуда угодно», и утечка этой
+    строки была неотличима от нормальной работы. Теперь мастер-ключ умеет ровно
+    две вещи — привязать устройство и отозвать устройство, — а данные ходят
+    только через устройство, которое видно в списке поимённо и гасится по одному.
+
+    Отпечаток машины сверяется на КАЖДОМ запросе, а не только при выдаче токена:
+    иначе скопированный файл настроек продолжал бы работать на чужой машине.
+    """
     token = request.headers.get("X-Device-Token") or ""
-    if token and db.admin_device_by_token(token):
+    if token and db.admin_device_by_token(token,
+                                          request.headers.get("X-Device-Id") or ""):
+        _admin_auth_ok(request)
         return
+    # До самой первой привязки ключ работает как обычный доступ: иначе первый
+    # пульт неоткуда взять. После неё — никогда, даже если все устройства
+    # отозвали (см. db.admin_bootstrap_done).
+    if not db.admin_bootstrap_done():
+        key = os.getenv("ADMIN_API_KEY", "")
+        if key and hmac.compare_digest(
+                (request.headers.get("X-Admin-Key") or "").encode("utf-8"),
+                key.encode("utf-8")):
+            _admin_auth_ok(request)
+            return
+    _admin_auth_failed(request)
     raise web.HTTPUnauthorized(text="admin")
+
+
+# Защита от перебора кодов и токенов. Считаем только НЕУДАЧНЫЕ попытки: общий
+# лимит на частоту мешал бы штатной пакетной работе пульта, а перебор он всё
+# равно почти не замедляет. Память процесса, без базы: перезапуск обнуляет —
+# этого достаточно, чтобы подбор перестал быть дешёвым.
+_ADMIN_FAILS: dict[str, list[float]] = {}
+_ADMIN_FAIL_WINDOW = 300.0   # секунд
+_ADMIN_FAIL_LIMIT = 20       # неудач за окно с одного адреса
+
+
+def _admin_peer(request: web.Request) -> str:
+    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    return forwarded or (request.remote or "?")
+
+
+def _admin_auth_ok(request: web.Request) -> None:
+    _ADMIN_FAILS.pop(_admin_peer(request), None)
+
+
+def _admin_auth_failed(request: web.Request) -> None:
+    peer = _admin_peer(request)
+    now = time.monotonic()
+    fails = [t for t in _ADMIN_FAILS.get(peer, []) if now - t < _ADMIN_FAIL_WINDOW]
+    fails.append(now)
+    _ADMIN_FAILS[peer] = fails
+    if len(_ADMIN_FAILS) > 1000:      # чтобы словарь не рос от случайного шума
+        for stale in [k for k, v in _ADMIN_FAILS.items()
+                      if not v or now - v[-1] > _ADMIN_FAIL_WINDOW]:
+            _ADMIN_FAILS.pop(stale, None)
+
+
+def _admin_too_many_fails(request: web.Request) -> None:
+    peer = _admin_peer(request)
+    now = time.monotonic()
+    fails = [t for t in _ADMIN_FAILS.get(peer, []) if now - t < _ADMIN_FAIL_WINDOW]
+    _ADMIN_FAILS[peer] = fails
+    if len(fails) >= _ADMIN_FAIL_LIMIT:
+        raise web.HTTPTooManyRequests(text="too many attempts",
+                                      headers={"Retry-After": "60"})
 
 
 def _admin_master_key_only(request: web.Request) -> None:
@@ -2740,9 +2801,16 @@ def _admin_master_key_only(request: web.Request) -> None:
     Иначе токен устройства мог бы привязать ещё одно устройство и отозвать
     остальные: укравший ноут заперновладельца снаружи, а сам остался бы внутри.
     """
+    _admin_too_many_fails(request)
     key = os.getenv("ADMIN_API_KEY", "")
-    if not key or not hmac.compare_digest(request.headers.get("X-Admin-Key") or "", key):
+    # Сравниваем БАЙТЫ: compare_digest на str падает при не-ASCII, и заголовок
+    # с кириллицей отвечал пятисоткой вместо честного «не тот ключ».
+    if not key or not hmac.compare_digest(
+            (request.headers.get("X-Admin-Key") or "").encode("utf-8"),
+            key.encode("utf-8")):
+        _admin_auth_failed(request)
         raise web.HTTPUnauthorized(text="master key required")
+    _admin_auth_ok(request)
 
 
 async def _admin_device_enroll(request: web.Request) -> web.Response:
@@ -2758,9 +2826,55 @@ async def _admin_device_enroll(request: web.Request) -> web.Response:
 
 
 async def _admin_devices(request: web.Request) -> web.Response:
-    _admin(request)
+    """Список устройств. Пускаем и по токену, и по мастер-ключу.
+
+    Мастер-ключом — потому что это единственный экран, который нужен, когда все
+    токены отозваны: иначе владелец не увидит, что именно отзывать и что
+    привязывать заново.
+    """
+    try:
+        _admin(request)
+    except web.HTTPUnauthorized:
+        _admin_master_key_only(request)
     return web.json_response({"devices": db.list_admin_devices(
         include_revoked=request.rel_url.query.get("all") == "1")})
+
+
+async def _admin_device_redeem(request: web.Request) -> web.Response:
+    """Обменять ОДНОРАЗОВЫЙ КОД на токен этой машины. Токен показывается раз.
+
+    Мастер-ключ здесь не нужен и не принимается: в этом весь смысл. Код выдаётся
+    на месте у сервера (``server/admin_access.py``) и гаснет при первом обмене,
+    поэтому перехваченный код либо уже мёртв, либо виден в списке невыданным.
+    """
+    _admin_too_many_fails(request)
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return web.json_response({"error": "тело не JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "тело не объект"}, status=400)
+    try:
+        made = db.redeem_enroll_code(str(body.get("code") or ""),
+                                     str(body.get("device_id") or ""),
+                                     str(body.get("name") or ""))
+    except ValueError as exc:
+        _admin_auth_failed(request)
+        return web.json_response({"error": str(exc)}, status=400)
+    _admin_auth_ok(request)
+    return web.json_response({"ok": True, **made})
+
+
+async def _admin_key_check(request: web.Request) -> web.Response:
+    """Жив ли мастер-ключ. Ничего не отдаёт, кроме «да».
+
+    Нужна ротации ключа: она обязана убедиться, что новый ключ принят, а старый
+    больше нет. Раньше она проверяла это на ``/admin/stats`` — то есть на ручке
+    с персональными данными, и это была ровно та привилегия, которую мы у
+    мастер-ключа отбираем.
+    """
+    _admin_master_key_only(request)
+    return web.json_response({"ok": True})
 
 
 async def _admin_device_revoke(request: web.Request) -> web.Response:
@@ -3885,6 +3999,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/admin/registry_columns.json",
                         _admin_registry_columns_save)
     app.router.add_post("/admin/device/enroll.json", _admin_device_enroll)
+    app.router.add_post("/admin/device/redeem.json", _admin_device_redeem)
+    app.router.add_get("/admin/key_check.json", _admin_key_check)
     app.router.add_get("/admin/devices.json", _admin_devices)
     app.router.add_post("/admin/device/revoke.json", _admin_device_revoke)
     app.router.add_post("/admin/push_test", _admin_push_test)

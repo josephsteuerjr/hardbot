@@ -42,9 +42,12 @@ except Exception:  # noqa: BLE001
     pass
 
 
-def api_export(url: str, key: str) -> dict:
+def api_export(url: str, key: str, device_token: str = "") -> dict:
+        # Мастер-ключ больше не открывает данные после первой привязки — ходим
+    # тем же, чем ходит сам пульт: токеном устройства плюс отпечаток машины.
+    from core.api import auth_headers
     req = urllib.request.Request(url.rstrip("/") + "/admin/export.json",
-                                 headers={"X-Admin-Key": key})
+                                 headers=auth_headers(key, device_token))
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
             return json.load(r)

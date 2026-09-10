@@ -201,8 +201,12 @@ def logical_equal(left: Any, right: Any) -> bool:
 # Сервер: безопасный и raw-снимок одновременно
 
 
-def _request_json(url: str, key: str, timeout: int = 120) -> dict:
-    req = urllib.request.Request(url, headers={"X-Admin-Key": key})
+def _request_json(url: str, key: str, timeout: int = 120,
+                  device_token: str = "") -> dict:
+        # Мастер-ключ больше не открывает данные после первой привязки — ходим
+    # тем же, чем ходит сам пульт: токеном устройства плюс отпечаток машины.
+    from core.api import auth_headers
+    req = urllib.request.Request(url, headers=auth_headers(key, device_token))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
             return json.load(response)

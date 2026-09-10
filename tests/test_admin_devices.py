@@ -35,7 +35,9 @@ def _fresh(monkeypatch):
     db.init_db()
     with db.connect() as conn:
         conn.execute("DELETE FROM admin_devices")
+        conn.execute("DELETE FROM admin_enroll_codes")
         conn.commit()
+    web._ADMIN_FAILS.clear()   # счётчик неудач общий на процесс
 
 
 def test_enroll_returns_token_that_then_works(monkeypatch):
@@ -46,7 +48,7 @@ def test_enroll_returns_token_that_then_works(monkeypatch):
     token = body["token"]
 
     status, _ = _call("GET", "/admin/devices.json",
-                      headers={"X-Device-Token": token})
+                      headers={"X-Device-Token": token, "X-Device-Id": "fp-1"})
     assert status == 200, "токен не пустили туда, куда пускает ключ"
 
 
@@ -100,10 +102,10 @@ def test_reenroll_replaces_old_token_of_the_same_machine(monkeypatch):
     assert new["token"] != old["token"]
 
     status, _ = _call("GET", "/admin/devices.json",
-                      headers={"X-Device-Token": old["token"]})
+                      headers={"X-Device-Token": old["token"], "X-Device-Id": "fp-1"})
     assert status == 401, "старый токен машины пережил перепривязку"
     status, body = _call("GET", "/admin/devices.json",
-                         headers={"X-Device-Token": new["token"]})
+                         headers={"X-Device-Token": new["token"], "X-Device-Id": "fp-1"})
     assert status == 200
     assert [d["name"] for d in body["devices"]] == ["После"]
 
@@ -125,3 +127,104 @@ def test_garbage_token_is_refused(monkeypatch):
         status, _ = _call("GET", "/admin/devices.json",
                           headers={"X-Device-Token": bad})
         assert status == 401, bad
+
+
+def test_token_alone_is_not_enough_without_the_fingerprint(monkeypatch):
+    """Скопировали файл настроек на другую машину — токен там не работает.
+
+    До этой правки отпечаток сверялся только при выдаче, а дальше токен был
+    предъявительским: файл настроек пульта — обычный JSON на диске.
+    """
+    _fresh(monkeypatch)
+    _s, dev = _call("POST", "/admin/device/enroll.json", headers=KEY,
+                    json_body={"device_id": "fp-свой", "name": "Ноут"})
+    tok = dev["token"]
+
+    status, _ = _call("GET", "/admin/devices.json", headers={"X-Device-Token": tok})
+    assert status == 401, "токен пустили вообще без отпечатка"
+
+    status, _ = _call("GET", "/admin/devices.json",
+                      headers={"X-Device-Token": tok, "X-Device-Id": "fp-чужой"})
+    assert status == 401, "токен пустили с чужой машины"
+
+    status, _ = _call("GET", "/admin/devices.json",
+                      headers={"X-Device-Token": tok, "X-Device-Id": "fp-свой"})
+    assert status == 200, "своя машина перестала работать"
+
+
+def test_master_key_opens_data_only_until_the_first_device(monkeypatch):
+    """Главное изменение: после первой же привязки ключ перестаёт давать данные.
+
+    До неё он работает — иначе первый пульт неоткуда взять, а в свежей базе и
+    данных ещё нет.
+    """
+    _fresh(monkeypatch)
+    status, _ = _call("GET", "/admin/stats", headers=KEY)
+    assert status == 200, "до первой привязки ключ должен работать"
+
+    _call("POST", "/admin/device/enroll.json", headers=KEY,
+          json_body={"device_id": "fp-1", "name": "Первый"})
+
+    for path in ("/admin/stats", "/admin/export.json"):
+        status, _ = _call("GET", path, headers=KEY)
+        assert status == 401, f"мастер-ключ всё ещё открывает {path}"
+
+
+def test_revoking_everything_does_not_give_the_key_its_power_back(monkeypatch):
+    """Дыра, которую закрывает односторонний флаг.
+
+    Иначе обладатель ключа отзывал бы все устройства (а отзыв ключу разрешён) и
+    возвращал себе полный доступ — «один ключ открывает всё» вернулось бы через
+    два шага и выглядело бы как штатное восстановление.
+    """
+    _fresh(monkeypatch)
+    _s, dev = _call("POST", "/admin/device/enroll.json", headers=KEY,
+                    json_body={"device_id": "fp-1", "name": "Единственный"})
+    _call("POST", "/admin/device/revoke.json", headers=KEY, json_body={"id": dev["id"]})
+
+    status, _ = _call("GET", "/admin/stats", headers=KEY)
+    assert status == 401, "отзыв всех устройств вернул ключу доступ к данным"
+
+    # Привязать заново ключ по-прежнему может — это и есть путь восстановления.
+    status, body = _call("POST", "/admin/device/enroll.json", headers=KEY,
+                         json_body={"device_id": "fp-1", "name": "Заново"})
+    assert status == 200 and body["token"]
+
+
+def test_master_key_check_endpoint_answers_only_the_key(monkeypatch):
+    """Ротации ключа нужно место, где она убедится, что новый ключ принят.
+
+    Раньше она проверяла это на /admin/stats — то есть на ручке с ПД.
+    """
+    _fresh(monkeypatch)
+    status, body = _call("GET", "/admin/key_check.json", headers=KEY)
+    assert status == 200 and body["ok"] is True
+    status, _ = _call("GET", "/admin/key_check.json", headers={"X-Admin-Key": "не тот"})
+    assert status == 401
+
+
+def test_enroll_code_is_one_time_and_binds_to_the_machine(monkeypatch):
+    """Обмен кода на токен — без мастер-ключа, и ровно один раз."""
+    _fresh(monkeypatch)
+    import db
+    code = db.issue_enroll_code("Ноут дома")["code"]
+
+    status, body = _call("POST", "/admin/device/redeem.json", headers={},
+                         json_body={"code": code, "device_id": "fp-1", "name": "Ноут"})
+    assert status == 200 and body["token"], "код не обменялся на токен"
+    token = body["token"]
+
+    status, _ = _call("GET", "/admin/devices.json",
+                      headers={"X-Device-Token": token, "X-Device-Id": "fp-1"})
+    assert status == 200, "выданный по коду токен не работает"
+
+    status, body = _call("POST", "/admin/device/redeem.json", headers={},
+                         json_body={"code": code, "device_id": "fp-2"})
+    assert status == 400 and "использован" in body["error"], "код обменялся дважды"
+
+
+def test_unknown_enroll_code_is_refused(monkeypatch):
+    _fresh(monkeypatch)
+    status, body = _call("POST", "/admin/device/redeem.json", headers={},
+                         json_body={"code": "нет-такого", "device_id": "fp-1"})
+    assert status == 400 and "error" in body

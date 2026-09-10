@@ -114,8 +114,12 @@ def load_settings() -> dict:
 def api(settings: dict, method: str, path: str, body: dict | None = None, timeout=180):
     url = settings["url"].rstrip("/") + path
     data = json.dumps(body).encode("utf-8") if body is not None else None
+# Мастер-ключ больше не открывает данные после первой привязки — ходим
+# тем же, чем ходит сам пульт: токеном устройства плюс отпечаток машины.
+    from core.api import auth_headers
     req = urllib.request.Request(url, data=data, method=method,
-                                 headers={"X-Admin-Key": settings.get("key", "")})
+                                 headers=auth_headers(settings.get("key", ""),
+                                                      settings.get("device_token", "")))
     if data:
         req.add_header("Content-Type", "application/json")
     with urllib.request.urlopen(req, timeout=timeout) as r:
