@@ -300,7 +300,10 @@ def main(argv=None) -> int:
             b = oldest_backup(path)
             bmap = backup_call_map(b, fields) if b else {}
             try:
-                wb = app.books.open(str(path))
+                # Занятую книгу Excel отдаёт только для чтения и сохраняет её
+                # молча «в никуда»: без этой двери починка отчиталась бы
+                # «изменено», не изменив на диске ничего.
+                wb = enrich.open_for_write(app, path)
                 try:
                     ws = enrich._pick_sheet(wb, fields)
                     last = ws.used_range.last_cell

@@ -93,6 +93,13 @@ def preview_lines(results: list[dict]) -> list[str]:
                      f"записать сервер {resolved_server}.")
     if office:
         lines.append(f"Правок офиса после доставки: {len(office)} — не трогаются.")
+    for r in results:
+        if not r.get("busy"):
+            continue
+        owner = r.get("busy_owner") or ""
+        who = f" у {owner}" if owner else ""
+        lines.append(f"  ⚠ {r.get('employee', '')} — {Path(r['file']).name}: книга "
+                     f"открыта{who}; запись в неё не пройдёт, пока её не закроют.")
     for r in bad:
         lines.append(f"  ⚠ {r.get('employee', '')} — {Path(r['file']).name}: {r['error']}")
     return lines

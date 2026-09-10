@@ -241,6 +241,9 @@ def verify_applied(path: Path, backup: Path, plan: dict, fields: list[dict]) -> 
 def apply_plan(app, path: Path, plan: dict, fields: list[dict], log) -> int:
     """Записать план в файл. Копия делается ДО первой записи, как в обогащении."""
     require_legacy_write_enabled()
+    # Занятость проверяем ДО копии: иначе рядом с книгой останется копия от
+    # прогона, который не записал ни одной ячейки.
+    enrich.assert_writable(path)
     stamp = datetime.now().strftime("%d.%m.%y %H-%M")
     keep = path.with_name(f"{path.stem} (до возврата {stamp}){path.suffix}")
     n = 1

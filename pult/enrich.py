@@ -1155,6 +1155,156 @@ def _excel_safe(value):
     return v
 
 
+# --- Занятая книга -----------------------------------------------------------
+# Книгу, которую уже держит открытой другой человек, Excel отдаёт ТОЛЬКО для
+# чтения, а `wb.save()` при `display_alerts = False` в этом случае молча не
+# делает ничего: диалог «сохранить как копию» подавлен, правки остаются в
+# памяти и умирают вместе с книгой. Так прошло обогащение Бозорова 10.09.2026:
+# книга была открыта у сотрудника с 10:56, план насчитал записи, копия легла,
+# ячейки «записались» — а файл на диске остался прежним. Ловил это только
+# контракт pre/post, уже после копии и записи, и сообщение не называло ни
+# причину, ни виновника. Поэтому спрашиваем у Windows, свободна ли книга, ДО
+# открытия и проверяем режим книги сразу после — обе проверки дешёвые, обе
+# срабатывают раньше копии и первой записи.
+_LOCK_ANSI_FIELD = 54          # ANSI-имя в `~$Имя` добито пробелами до 54 байт
+
+
+def excel_owner_file(path: str | Path) -> Path:
+    """Служебный файл Excel рядом с книгой: `~$Имя.xlsb`."""
+    path = Path(path)
+    return path.with_name(f"~${path.name}")
+
+
+def _read_shared(path: Path, limit: int = 512) -> bytes:
+    """Прочитать файл, который кто-то держит открытым (Windows).
+
+    Excel держит `~$Имя` открытым всё время, пока открыта книга, и делится им
+    только вместе с правом удаления. Обычный `open()` такого не просит, и
+    Windows отвечает «Permission denied», поэтому идём через CreateFileW с
+    полным share-режимом. Пусто — прочитать не удалось.
+    """
+    if os.name != "nt":
+        return b""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        ]
+        handle = kernel32.CreateFileW(
+            str(path),
+            0x80000000,                    # GENERIC_READ
+            0x1 | 0x2 | 0x4,               # FILE_SHARE_READ | WRITE | DELETE
+            None, 3, 0x80, None,           # OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL
+        )
+        if handle in (None, 0, ctypes.c_void_p(-1).value):
+            return b""
+        try:
+            buffer = ctypes.create_string_buffer(limit)
+            read = wintypes.DWORD()
+            if not kernel32.ReadFile(handle, buffer, limit,
+                                     ctypes.byref(read), None):
+                return b""
+            return buffer.raw[:read.value]
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:  # noqa: BLE001 — имя владельца не стоит падения прогона
+        return b""
+
+
+def parse_lock_owner(blob: bytes) -> str:
+    """Имя из `~$Имя`: длина + ANSI-имя, следом длина + то же имя в UTF-16.
+
+    Берём UTF-16-копию: ANSI-копия зависит от кодовой страницы и портит
+    кириллические имена. Пусто — формат не распознан.
+    """
+    if not blob:
+        return ""
+    wide_at = 1 + _LOCK_ANSI_FIELD
+    if len(blob) >= wide_at + 2:
+        count = int.from_bytes(blob[wide_at:wide_at + 2], "little")
+        end = wide_at + 2 + 2 * count
+        if count and end <= len(blob):
+            name = blob[wide_at + 2:end].decode("utf-16-le", "replace").strip()
+            if name:
+                return name
+    ansi_len = blob[0]
+    if 0 < ansi_len < len(blob):
+        codec = "mbcs" if os.name == "nt" else "cp1251"
+        return blob[1:1 + ansi_len].decode(codec, "replace").strip()
+    return ""
+
+
+def workbook_lock_owner(path: str | Path) -> str:
+    """Кто держит книгу открытой. Пустая строка — узнать не удалось."""
+    return parse_lock_owner(_read_shared(excel_owner_file(path)))
+
+
+def workbook_busy_owner(path: str | Path) -> str | None:
+    """None — книгу можно писать; строка — кто её держит («» — имя не узнать).
+
+    Просим у Windows ровно тот доступ, который понадобится Excel при
+    сохранении, и сразу отпускаем: файл при этом не меняется.
+    """
+    try:
+        with open(path, "r+b"):
+            return None
+    except PermissionError:
+        return workbook_lock_owner(path)
+    except OSError:
+        return None      # нет файла и прочее — расскажет открытие книги
+
+
+def _busy_reason(path: Path, owner: str) -> str:
+    if not owner and not os.access(path, os.W_OK):
+        # Не занята, а помечена «только для чтения»: лечится не ожиданием.
+        return (f"{path.name}: файл помечен «только для чтения» — прав на запись "
+                "нет, ничего не записано")
+    who = f" — её держит открытой {owner}" if owner else ""
+    return (f"{path.name}: книга занята{who}. Excel отдаёт занятую книгу только "
+            "для чтения и сохраняет её молча «в никуда» — ничего не записано; "
+            "прогони заново, когда книгу закроют")
+
+
+def assert_writable(path: str | Path) -> None:
+    """Отказаться до копии и до первой записи, если книга занята."""
+    path = Path(path)
+    owner = workbook_busy_owner(path)
+    if owner is not None:
+        raise RuntimeError(_busy_reason(path, owner))
+
+
+def _opened_read_only(wb) -> bool:
+    """Excel отдал книгу только для чтения (занята, помечена, нет прав)."""
+    return bool(getattr(getattr(wb, "api", None), "ReadOnly", False))
+
+
+def open_for_write(app, path: str | Path):
+    """Открыть книгу на запись — или отказаться, назвав, кто её держит.
+
+    Единственная дверь для инструментов, которые пишут в живые книги: молчаливое
+    «сохранил в никуда» неотличимо от успеха, а отказ до первой записи — нет.
+    """
+    path = Path(path)
+    assert_writable(path)
+    wb = app.books.open(str(path))
+    if _opened_read_only(wb):
+        # Книгу успели открыть между проверкой и открытием, либо Excel отдал её
+        # только для чтения по другой причине. Дальше идти нельзя: правки уйдут
+        # в память, а сохранение молча не сработает.
+        reason = _busy_reason(path, workbook_lock_owner(path))
+        try:
+            wb.close()
+        except Exception:  # noqa: BLE001 — закрыть не вышло, важна причина
+            pass
+        raise RuntimeError(reason)
+    return wb
+
+
 def backup_copy(path: Path, root: str | Path | None = None) -> Path:
     """Копия «Имя (до обогащения 13.07.2026 14-05).xlsb». Откат = переименовать.
 
@@ -1199,8 +1349,9 @@ def _enrich_workbook(app, path: Path, fields: list[dict], rows: list[dict],
                      log=lambda s: None, since=None, until=None,
                      backup_root=None, ledger=None,
                      server_authoritative: bool = False, decisions=None) -> dict:
-    """Один файл в уже открытом Excel: бэкап → лист → план → точечная запись →
-    сохранить тем же форматом. Возвращает план + backup/sheet/file.
+    """Один файл в уже открытом Excel: книга свободна? → лист → план → бэкап →
+    точечная запись → сохранить тем же форматом. Возвращает план +
+    backup/sheet/file.
 
     Осознанно ОДНОсторонний поток (бот → файл): идея «синхронизировать файл в БД
     перед записью» отклонена пользователем и ревью 23.07 — скрытый импорт при
@@ -1208,7 +1359,7 @@ def _enrich_workbook(app, path: Path, fields: list[dict], rows: list[dict],
     скелетные КД прошлых сессий. Офисные правки идут только personal →
     registry_cycle → опубликованный master → explicit master import; прямого
     personal → bot gateway нет."""
-    wb = app.books.open(str(path))
+    wb = open_for_write(app, path)
     try:
         # Читаем строго от A1: used_range может начинаться не с A1,
         # а индексы плана — координаты ячеек листа.
@@ -1378,8 +1529,22 @@ def _enrich_with_evidence(
     backup_path = Path(backup_raw).resolve() if backup_raw else None
     backup_sha = _sha256_file(backup_path) if backup_path is not None else None
     if plan["cells_written"]:
-        if backup_path is None or backup_sha != pre_sha or pre_sha == post_sha:
-            raise RuntimeError(f"{path.name}: backup/pre/post contract нарушен")
+        # Сообщение обязано называть нарушенный инвариант. 10.09.2026 глухое
+        # «контракт нарушен» стоило вечера разбора: по нему неотличимы
+        # «копии нет», «копия не от этого прогона» и «Excel не сохранил книгу».
+        broken = []
+        if backup_path is None:
+            broken.append("копия до записи не создана")
+        elif backup_sha != pre_sha:
+            broken.append("копия не совпадает с файлом до записи")
+        if pre_sha == post_sha:
+            broken.append(
+                f"файл на диске не изменился, хотя записано ячеек: "
+                f"{plan['cells_written']} — Excel не сохранил книгу "
+                "(обычно её держит открытой другой пользователь)")
+        if broken:
+            raise RuntimeError(f"{path.name}: backup/pre/post contract нарушен — "
+                               + "; ".join(broken))
     elif backup_path is not None or pre_sha != post_sha:
         raise RuntimeError(f"{path.name}: zero-write contract нарушен")
 
@@ -1582,6 +1747,12 @@ def preview_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
         plan["path"] = str(path)
         plan["employee"] = job["employee"]
         plan["preview"] = True
+        # Проверка читает стабильную копию и занятой книги не замечает — а
+        # запись в неё не пройдёт. Пусть оператор узнает об этом ДО прогона,
+        # а не из красной строки в отчёте после него.
+        owner = workbook_busy_owner(path)
+        plan["busy"] = owner is not None
+        plan["busy_owner"] = owner or ""
         results.append(plan)
     return results
 
