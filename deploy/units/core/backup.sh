@@ -91,7 +91,12 @@ else
   # to open database file». То есть с «:ro» копия не снималась ровно в том
   # случае, ради которого этот путь и написан. Сама база при этом не меняется:
   # соединение открыто как mode=ro, писать в неё сниппету нечем.
-  docker run --rm -v "$UNIT_DIR/data:/data" hard-app python -c "$SNIPPET" > "$tmp_db" 2>"$err_log" || backup_failed
+  # Берём том ИЗ COMPOSE, а не собираем «-v путь:/data» руками. Под Git Bash на
+  # Windows MSYS переписывает пути в аргументах: «:/data» превращалось в
+  # «C:/Program Files/Git/data», контейнер монтировал пустоту и sqlite честно
+  # отвечал «unable to open database file». Ошибка выглядела как поломка базы,
+  # хотя база была цела. У compose путь берётся из файла и через MSYS не идёт.
+  compose run --rm --no-deps -T app python -c "$SNIPPET" > "$tmp_db" 2>"$err_log" || backup_failed
 fi
 
 if [ ! -s "$tmp_db" ] || [ "$(head -c 15 "$tmp_db")" != "SQLite format 3" ]; then

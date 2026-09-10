@@ -42,6 +42,13 @@ hostpath() {
   if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
 }
 
+# hostpath чинит ЛЕВУЮ половину «-v путь:/цель». Правую MSYS ломает отдельно:
+# «:/models» приезжает в докер как «C:/Program Files/Git/models», и контейнер
+# монтирует не туда, снова без единой ошибки. Эти две переменные выключают
+# подмену для всех аргументов; на Linux и macOS они просто ни на что не влияют.
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL='*' 
+
 # --- разбор аргументов ---------------------------------------------------------
 VERSION=""
 OUT_BASE="$HERE/out"

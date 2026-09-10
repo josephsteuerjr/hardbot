@@ -44,13 +44,31 @@ def test_data_volume_never_mounted_read_only():
 
 def test_backup_takes_snapshot_without_running_app():
     text = (CORE / "backup.sh").read_text(encoding="utf-8")
-    assert "docker run --rm -v \"$UNIT_DIR/data:/data\"" in text, (
-        "backup.sh больше не снимает копию одноразовым контейнером с томом на запись"
+    assert "--no-deps" in text and "compose run" in text, (
+        "backup.sh больше не снимает копию одноразовым контейнером — при "
+        "остановленном приложении копию будет нечем снять"
     )
     assert "mode=ro" in text, (
         "соединение с базой должно оставаться mode=ro: на запись монтируется том, "
         "а не открывается база"
     )
+
+
+def test_backup_does_not_build_host_paths_by_hand():
+    """Второй урок, дороже первого: путь в аргументах докера ломает Git Bash.
+
+    MSYS переписывает пути в аргументах команды, и «-v путь:/data» приезжало в
+    докер как «C:/Program Files/Git/data»: контейнер монтировал пустоту, а
+    sqlite отвечал «unable to open database file» — то есть ровно так же, как
+    при «:ro», и отличить одно от другого по сообщению нельзя. Том берём из
+    compose, чтобы путей в командной строке не было вовсе.
+    """
+    text = (CORE / "backup.sh").read_text(encoding="utf-8")
+    for number, line in enumerate(text.splitlines(), 1):
+        code = line.split("#", 1)[0]
+        assert not re.search(r"docker\s+run[^|]*-v\s", code), (
+            f"backup.sh:{number} снова собирает «-v путь:цель» руками: {line.strip()}"
+        )
 
 
 def test_failed_backup_leaves_no_empty_copy():
