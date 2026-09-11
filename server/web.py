@@ -389,6 +389,34 @@ def _meta(lang: str) -> dict:
     }
 
 
+# Телефон в реестре живёт как придётся: «+998 90 123-45-67» — один номер сквозь
+# пробелы и дефисы, а «987064552 - раис джамаата 918436099 - хаким улицы» — два
+# разных, разделённых словами. Поэтому режем по БУКВАМ и явным разделителям, а
+# внутри куска цифры склеиваем: иначе один номер рассыпался бы на «998», «90»,
+# «123», а два чужих слиплись бы в один несуществующий.
+_TEL_SPLIT_RE = re.compile(r"[^\W\d_]+|[,;/|]+", re.UNICODE)
+_DIGITS_RE = re.compile(r"\d+")
+
+
+def _search_ids(rows) -> list[str]:
+    """Номера договоров человека — для поиска по списку."""
+    ids = {str(_cell(r, "contract_id") or "").strip() for r in rows}
+    return sorted(i for i in ids if i)
+
+
+def _search_tels(rows) -> list[str]:
+    """Телефоны человека, одними цифрами — искать будут набором подряд."""
+    tels: set[str] = set()
+    for r in rows:
+        for key in ("phone", "phone_main"):
+            for chunk in _TEL_SPLIT_RE.split(str(_cell(r, key) or "")):
+                digits = "".join(_DIGITS_RE.findall(chunk))
+                # «2», «-», «0» в графе телефона — пометки оператора, а не номер.
+                if len(digits) >= 5:
+                    tels.add(digits)
+    return sorted(tels)
+
+
 def _person_brief(p: dict) -> dict:
     visited = any(db.bot_visit_snapshot(c) is not None for c in p["contracts"])
     lat = lon = None
@@ -399,7 +427,13 @@ def _person_brief(p: dict) -> dict:
     return {"rep": p["rep"], "client": p["client"], "n": p["n"],
             "total": p["total"], "unit": debt.unit(p["partners"]),
             "totals": p["totals"],   # ЗК + Делимобиль → «11 550 000 сум · 132 900 ₽»
-            "visited": visited, "lat": lat, "lon": lon}
+            "visited": visited, "lat": lat, "lon": lon,
+            # Поле поиска обещает «ФИО, договор, телефон», а список знал только
+            # имя: номера и телефоны лежали в полных карточках, куда фильтру
+            # не дотянуться. Кладём их рядом со списком — те же данные того же
+            # портфеля, которые уже уехали на телефон в /api/cards.
+            "ids": _search_ids(p["contracts"]),
+            "tels": _search_tels(p["contracts"])}
 
 
 def _row_get(rows, key):
