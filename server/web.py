@@ -2766,10 +2766,16 @@ def _stats_envelope(mgr, team, rng, uid) -> dict:
                              None if rng["to"] >= today else rng["next"]["to"], uid)
 
 
+# Свод команды — это проход по портфелю каждого сотрудника: на 63 людях он
+# занимает около шести секунд. В цикле событий это шесть секунд, на которые
+# встаёт ВЕСЬ сервер: выездник в поле в этот момент не может ни открыть
+# карточку, ни сохранить выезд. Та же ошибка уже была с индексом приоритета
+# (9 сентября) — считаем в отдельном потоке, соединение SQLite у него своё.
 async def _manager_stats(request: web.Request) -> web.Response:
     uid, mgr, team = _manager_gate(request)
     rng = _stats_range_q(request)
-    data = digest_data.stats_data(mgr, rng, employees=team)
+    data = await asyncio.to_thread(
+        functools.partial(digest_data.stats_data, mgr, rng, employees=team))
     db.audit_access(uid, "digest_view",
                     detail=f"stats {rng['from']}..{rng['to']} team={len(team)} "
                            f"visits={data['totals']['visits']}")
@@ -2780,7 +2786,9 @@ async def _manager_stats_employee(request: web.Request) -> web.Response:
     uid, mgr, team = _manager_gate(request)
     rng = _stats_range_q(request)
     emp = _manager_employee_q(request, team)
-    data = digest_data.stats_employee_data(mgr, rng, emp, employees=team)
+    data = await asyncio.to_thread(
+        functools.partial(digest_data.stats_employee_data, mgr, rng, emp,
+                          employees=team))
     if data is None:
         raise web.HTTPNotFound(text="employee")
     reps = ",".join(c["rep"] for c in data["cases"][:50])
@@ -2796,7 +2804,9 @@ async def _manager_cases(request: web.Request) -> web.Response:
     rng = _stats_range_q(request)
     metric = (request.query.get("metric") or "visits").strip()
     country = (request.query.get("country") or "").strip()[:8]
-    data = digest_data.cases_data(mgr, rng, metric, country, employees=team)
+    data = await asyncio.to_thread(
+        functools.partial(digest_data.cases_data, mgr, rng, metric, country,
+                          employees=team))
     reps = ",".join(c["rep"] for c in data["cases"][:50])
     db.audit_access(uid, "digest_view",
                     detail=f"cases {data['metric']} {rng['from']}..{rng['to']} "
@@ -2809,7 +2819,8 @@ async def _manager_stats_xlsx(request: web.Request) -> web.Response:
     ссылка с токеном осела бы в истории браузера."""
     uid, mgr, team = _manager_gate(request)
     rng = _stats_range_q(request)
-    body = digest_data.stats_xlsx(mgr, rng, employees=team)
+    body = await asyncio.to_thread(
+        functools.partial(digest_data.stats_xlsx, mgr, rng, employees=team))
     db.audit_access(uid, "digest_export",
                     detail=f"stats.xlsx {rng['from']}..{rng['to']} team={len(team)}")
     return web.Response(
