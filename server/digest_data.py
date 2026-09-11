@@ -429,9 +429,13 @@ def _person_payload(p: dict, on_date: str) -> dict:
                       "on_visit": taken == on_date})
     shots.sort(key=lambda x: (not x["on_visit"], x["date"]), reverse=False)
 
+    last_row = db.last_visit_row([c["contract_id"] for c in cs])
     return {
         "screen": "person",
         "rep": p["rep"], "client": p["client"], "n": p["n"],
+        # Сколько человек пробыл на карточке этого должника — граница измерения
+        # честная: от открытия карточки до «Сохранить выезд».
+        "fill_text": _fill_text(_cell_of(last_row, "fill_seconds")),
         # «photos» ниже — счётчик снимков, он был здесь раньше; список файлов
         # для показа в карточке кладём отдельным ключом.
         "shots": shots,
@@ -524,6 +528,7 @@ def cases_data(mgr: dict, rng: dict, metric: str, country: str = "",
                 "outcome": e["status"], "emoji": _st_emoji(e["status"]),
                 "agreed": e["agreed"], "photos": photos,
                 "late_days": e.get("late_days"), "geo": bool(e.get("geo")),
+                "fill_text": _fill_text(e.get("fill_seconds")),
                 "money": _totals_units([p]), "money_text": _persons_total([p]),
             })
     items.sort(key=lambda c: (c["date"], c["client"]), reverse=True)
@@ -767,6 +772,24 @@ def _cell_of(row, key):
         return None
 
 
+def _avg_fill(values) -> int | None:
+    """Среднее время на карточке, сек. None — мерить было нечего."""
+    good = [int(v) for v in values or () if isinstance(v, (int, float)) and v >= 0]
+    return round(sum(good) / len(good)) if good else None
+
+
+def _fill_text(seconds) -> str:
+    """«4 мин», «45 с», «1 ч 10 мин» — для книги и карточки."""
+    if not isinstance(seconds, (int, float)) or seconds < 0:
+        return ""
+    seconds = int(seconds)
+    if seconds < 90:
+        return f"{seconds} с"
+    if seconds < 3600:
+        return f"{round(seconds / 60)} мин"
+    return f"{seconds // 3600} ч {round((seconds % 3600) / 60)} мин"
+
+
 def _late_days(visit_day: str, received_at) -> int | None:
     """На сколько дней выезд доехал позже своего дня. None — нечем судить.
 
@@ -813,6 +836,7 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
             "received_at": _cell_of(v, "received_at"),
             "late_days": _late_days(v["created_at"], _cell_of(v, "received_at")),
             "geo": _cell_of(v, "visit_lat") is not None,
+            "fill_seconds": _cell_of(v, "fill_seconds"),
             "agent_id": _cell_of(v, "agent_id")}
     ordered = sorted(entries.values(), key=lambda e: (e["date"], e["person"]["client"]))
     for e in ordered:
@@ -856,6 +880,8 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
         # Сколько выездов доехало не в свой день и сколько закрыто без точки
         # телефона — два счётчика контроля рядом с остальными.
         "office": db.employee_cities().get(emp, ""),
+        # Среднее время на карточке — по тем выездам, где его удалось измерить.
+        "fill_avg": _avg_fill([e.get("fill_seconds") for e in ordered]),
         "plan_per_day": db.visit_plan_for(emp),
         "late": sum(1 for e in ordered if (e.get("late_days") or 0) > 0),
         "no_geo": sum(1 for e in ordered if not e.get("geo")),
@@ -909,6 +935,7 @@ def _totals_of(rows: list[dict], days: int) -> dict:
         # закрыто без точки телефона.
         "late": sum(r.get("late", 0) for r in rows),
         "no_geo": sum(r.get("no_geo", 0) for r in rows),
+        "fill_avg": _avg_fill([r.get("fill_avg") for r in rows]),
         "money": _totals_units(people), "money_text": _persons_total(people),
         "money_paid": _totals_units(paid), "money_paid_text": _persons_total(paid),
         "plan_per_day": per_day,
@@ -977,6 +1004,7 @@ def stats_employee_data(mgr: dict, rng: dict, employee: str,
             "outcome": e["status"], "emoji": _st_emoji(e["status"]),
             "agreed": e["agreed"],
             "late_days": e.get("late_days"), "geo": bool(e.get("geo")),
+            "fill_text": _fill_text(e.get("fill_seconds")),
             "money": _totals_units([p]), "money_text": _persons_total([p]),
             "photos": len(photostore.day_photos(p["contracts"], e["date"])),
         })
@@ -1028,7 +1056,8 @@ def _book_line(label: str, country: str, stats: dict, by_outcome: dict,
     line = [label, country, office, stats["visits"], plan or "", done,
             stats["persons"], stats["contracts"], stats["overdue"],
             stats["with_photo"], stats.get("late") or "", stats.get("no_geo") or "",
-            stats["money_text"], stats["money_paid_text"]]
+            _fill_text(stats.get("fill_avg")), stats["money_text"],
+            stats["money_paid_text"]]
     holder = {"by_outcome": by_outcome}
     for block in layout:
         cells, total_n, units = _outcome_cells(holder, block["statuses"])
@@ -1056,8 +1085,9 @@ def _outcome_cells(row: dict, statuses: list[str]) -> tuple[list, int, list]:
 
 BOOK_BASE_HEAD = ("Сотрудник", "Страна", "Офис", "Выездов", "План", "% плана",
                   "Должников", "Договоров", "Просрочено обещаний", "С фото",
-                  "Внесено позже", "Без гео", "Долг", "Закрыто (оплачен)")
-BOOK_BASE_WIDTH = (28, 14, 14, 9, 8, 9, 11, 11, 19, 8, 15, 10, 22, 22)
+                  "Внесено позже", "Без гео", "На карточке, среднее",
+                  "Долг", "Закрыто (оплачен)")
+BOOK_BASE_WIDTH = (28, 14, 14, 9, 8, 9, 11, 11, 19, 8, 15, 10, 20, 22, 22)
 
 
 def _book_head(layout: list[dict]) -> tuple[list, list, list, list]:
@@ -1207,8 +1237,8 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
     # занесённый назавтра «потому что не было связи», закрытый без точки
     # телефона или закрытый руководителем за сотрудника, виден строкой.
     ws2.append(["Дата", "Республика", "Офис", "Сотрудник", "Клиент", "Договоров",
-                "Выезд", "Результат", "Договорённость", "Внесён", "Гео", "Закрыл",
-                "Долг"])
+                "Выезд", "Результат", "Договорённость", "На карточке", "Внесён",
+                "Гео", "Закрыл", "Долг"])
     for cell in ws2[1]:
         cell.font = Font(bold=True)
     for r in rows:
@@ -1225,18 +1255,19 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
             ws2.append([e["date"], names.get(r["country"], ""), r.get("office") or "",
                         r["employee"], p["client"], p["n"],
                         OUTCOME_GROUP_LABEL[group], e["status"],
-                        e["agreed"], when, "есть" if e.get("geo") else "нет", who,
+                        e["agreed"], _fill_text(e.get("fill_seconds")), when,
+                        "есть" if e.get("geo") else "нет", who,
                         _persons_total([p])])
             ws2.cell(row=row_at, column=7).fill = fills[group]
             if late:
-                ws2.cell(row=row_at, column=10).fill = fills["fail"]
-            if not e.get("geo"):
                 ws2.cell(row=row_at, column=11).fill = fills["fail"]
-    for col, w in zip("ABCDEFGHIJKLM",
-                      (12, 14, 14, 28, 32, 10, 14, 22, 22, 16, 8, 14, 18)):
+            if not e.get("geo"):
+                ws2.cell(row=row_at, column=12).fill = fills["fail"]
+    for col, w in zip("ABCDEFGHIJKLMN",
+                      (12, 14, 14, 28, 32, 10, 14, 22, 22, 14, 16, 8, 14, 18)):
         ws2.column_dimensions[col].width = w
     if ws2.max_row > 1:
-        ws2.auto_filter.ref = f"A1:M{ws2.max_row}"
+        ws2.auto_filter.ref = f"A1:N{ws2.max_row}"
     ws2.freeze_panes = "A2"
 
     ws3 = wb.create_sheet("По дням")

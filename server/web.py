@@ -1526,7 +1526,8 @@ async def _save(request: web.Request) -> web.Response:
                                                 on_date=completed_at)
         is_new = db.log_visit(rep, uid, payload,
                               op_id=op_id, lat=vlat, lon=vlon, dist_m=dist_m,
-                              geo_far=geo_far, on_date=completed_at)
+                              geo_far=geo_far, on_date=completed_at,
+                              fill_seconds=_fill_seconds(body))
         # Снимок строится только из values этого POST, а не из сырых HARD-полей
         # clients. При ретрае после редкого падения между log_visit и этой записью
         # восстанавливаем отсутствующий снимок; старый дубль новый снимок не откатывает.
@@ -2284,6 +2285,30 @@ def _late_visit_line(visit_day: str | None) -> str | None:
     except ValueError:
         return None
     return f"🕓 Выезд от {pretty} — доставлен из оффлайна"
+
+
+# Дольше половины суток на одной карточке — это не выезд, а забытое открытым
+# приложение: такие значения не считаем вовсе, чтобы средние не врали.
+FILL_SECONDS_MAX = 12 * 3600
+
+
+def _fill_seconds(body) -> int | None:
+    """Сколько человек пробыл на карточке: от её открытия до «Сохранить выезд».
+
+    Офис просил видеть время на адресе (Худжанд, 11.09.2026). Честная граница
+    измерения — именно карточка: приложение не знает, когда человек подошёл к
+    подъезду, но знает, когда открыл карточку должника и когда закрыл выезд.
+    Часы телефона могут врать, поэтому берём РАЗНИЦУ двух его же отметок.
+    """
+    try:
+        opened = float(body.get("opened_at"))
+        done = float(body.get("occurred_at") or 0) or opened
+    except (TypeError, ValueError):
+        return None
+    seconds = int((done - opened) / 1000)
+    if seconds < 0 or seconds > FILL_SECONDS_MAX:
+        return None
+    return seconds
 
 
 def _occurred_on(body) -> str:

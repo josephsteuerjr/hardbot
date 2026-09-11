@@ -627,7 +627,7 @@ def init_db() -> None:
         # каждый раз пришлось бы вручную.
         for col, decl in (("visit_lat", "REAL"), ("visit_lon", "REAL"),
                           ("dist_m", "INTEGER"), ("geo_far", "INTEGER"),
-                          ("received_at", "TEXT")):
+                          ("received_at", "TEXT"), ("fill_seconds", "INTEGER")):
             if col not in vcols:
                 conn.execute(f"ALTER TABLE visits ADD COLUMN {col} {decl}")
         # Профиль пользователя (язык). Whitelist теперь = привязка к сотруднику.
@@ -2020,7 +2020,8 @@ def visits_for_employee(employee: str, date_from: str, date_to: str) -> list[sql
             "SELECT v.id id, v.contract_id contract_id, "
             "substr(v.created_at, 1, 10) created_at, v.payload payload, "
             "v.agent_id agent_id, v.received_at received_at, "
-            "v.visit_lat visit_lat, v.geo_far geo_far "
+            "v.visit_lat visit_lat, v.geo_far geo_far, "
+            "v.fill_seconds fill_seconds "
             "FROM visits v JOIN clients c ON c.contract_id = v.contract_id "
             "WHERE c.responsible = ? AND substr(v.created_at, 1, 10) BETWEEN ? AND ? "
             "ORDER BY v.id",
@@ -3628,7 +3629,8 @@ def audit_tail(limit: int = 200) -> list[sqlite3.Row]:
 def log_visit(contract_id: str, agent_id: int, payload: str,
               op_id: str | None = None, lat: float | None = None,
               lon: float | None = None, dist_m: int | None = None,
-              geo_far: bool | None = None, on_date: str | None = None) -> bool:
+              geo_far: bool | None = None, on_date: str | None = None,
+              fill_seconds: int | None = None) -> bool:
     """Записать выезд в историю. op_id — идемпотентный ключ (uuid от клиента): повторная
     доставка того же выезда из оффлайн-очереди НЕ создаёт дубль. Возвращает True, если
     строка реально добавлена (значит, можно слать уведомление в группу); False — если это
@@ -3641,11 +3643,12 @@ def log_visit(contract_id: str, agent_id: int, payload: str,
     with connect() as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO visits (contract_id, agent_id, created_at, payload, "
-            "op_id, visit_lat, visit_lon, dist_m, geo_far, received_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "op_id, visit_lat, visit_lon, dist_m, geo_far, received_at, "
+            "fill_seconds) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (contract_id, agent_id, on_date or date.today().isoformat(), payload, op_id,
              lat, lon, dist_m, None if geo_far is None else int(bool(geo_far)),
-             datetime.now().isoformat(timespec="seconds")),
+             datetime.now().isoformat(timespec="seconds"), fill_seconds),
         )
         conn.commit()
         return cur.rowcount > 0
@@ -3731,6 +3734,22 @@ def agent_tids(employee: str) -> list[int]:
     with connect() as conn:
         return [r["telegram_id"] for r in conn.execute(
             "SELECT telegram_id FROM agent_bind WHERE employee = ?", (employee,))]
+
+
+def last_visit_row(contract_ids: list[str]):
+    """Последний визит по любому из договоров человека — вся строка.
+
+    last_visit_geo ниже берёт последний визит С ДИСТАНЦИЕЙ (ему нужна гео), а
+    карточке нужно время на карточке и у визита без точки телефона.
+    """
+    ids = [c for c in contract_ids if c]
+    if not ids:
+        return None
+    qs = ",".join("?" for _ in ids)
+    with connect() as conn:
+        return conn.execute(
+            f"SELECT * FROM visits WHERE contract_id IN ({qs}) "
+            "ORDER BY id DESC LIMIT 1", tuple(ids)).fetchone()
 
 
 def last_visit_geo(contract_ids: list[str]):

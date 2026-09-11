@@ -143,9 +143,10 @@ def book():
 def test_visits_sheet_marks_each_visit(book):
     ws = book["Выезды"]
     head = [c.value for c in ws[1]]
-    assert head[9:12] == ["Внесён", "Гео", "Закрыл"]
+    assert head[9] == "На карточке"
+    assert head[10:13] == ["Внесён", "Гео", "Закрыл"]
     rows = {ws.cell(row=r, column=5).value: [ws.cell(row=r, column=c).value
-                                             for c in (10, 11, 12)]
+                                             for c in (11, 12, 13)]
             for r in range(2, ws.max_row + 1)}
     assert rows["Клиент Вовремя"] == ["в день выезда", "есть", "сам"]
     assert rows["Клиент Задним"] == ["позже на 1 дн", "есть", "сам"]
@@ -157,3 +158,47 @@ def test_employee_sheet_counts_them_too(book):
     head = {str(c.value): c.column for c in ws[4] if c.value}
     assert ws.cell(row=5, column=head["Внесено позже"]).value == 1
     assert ws.cell(row=5, column=head["Без гео"]).value == 1
+
+
+# --- время на карточке --------------------------------------------------------
+def test_time_on_card_is_measured_between_two_phone_marks():
+    """Часы телефона врут, поэтому берём РАЗНИЦУ двух его же отметок."""
+    import web
+    opened = 1_700_000_000_000
+    assert web._fill_seconds({"opened_at": opened,
+                              "occurred_at": opened + 240_000}) == 240
+    assert web._fill_seconds({"opened_at": opened}) == 0, "без occurred_at — момент"
+    assert web._fill_seconds({}) is None
+    assert web._fill_seconds({"opened_at": opened,
+                              "occurred_at": opened - 5_000}) is None, "назад не идём"
+    assert web._fill_seconds({"opened_at": opened,
+                              "occurred_at": opened + 13 * 3600 * 1000}) is None, \
+        "полсуток на карточке — забытое открытым приложение, а не выезд"
+
+
+def test_fill_text_reads_like_a_human():
+    assert dd._fill_text(45) == "45 с"
+    assert dd._fill_text(240) == "4 мин"
+    assert dd._fill_text(4200) == "1 ч 10 мин"
+    assert dd._fill_text(None) == "" and dd._fill_text(-5) == ""
+
+
+def test_average_skips_unmeasured_visits():
+    assert dd._avg_fill([120, 240, None]) == 180
+    assert dd._avg_fill([None, None]) is None
+
+
+def test_book_shows_time_on_card():
+    with db.connect() as conn:
+        conn.execute("UPDATE visits SET fill_seconds=300 WHERE contract_id='KT-1'")
+        conn.commit()
+    blob = dd.stats_xlsx(db.get_manager(MGR), dd.stats_range("7d", 0, today=TODAY),
+                         employees=[EMP])
+    wb = load_workbook(io.BytesIO(blob))
+    ws = wb["Выезды"]
+    by_client = {ws.cell(row=r, column=5).value: ws.cell(row=r, column=10).value
+                 for r in range(2, ws.max_row + 1)}
+    assert by_client["Клиент Вовремя"] == "5 мин"
+    people = wb["Сотрудники"]
+    head = {str(c.value): c.column for c in people[4] if c.value}
+    assert people.cell(row=5, column=head["На карточке, среднее"]).value == "5 мин"
