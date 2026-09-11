@@ -105,6 +105,20 @@ def _totals_units(persons: list[dict]) -> list[dict]:
     return [{"unit": u, "sum": s} for u, s in acc.items() if s]
 
 
+def _merge_units(chunks) -> list[dict]:
+    """Сложить несколько наборов [{'unit','sum'}] в один, по валютам."""
+    acc: dict[str, int] = {}
+    for chunk in chunks:
+        for x in chunk or ():
+            acc[x["unit"]] = acc.get(x["unit"], 0) + x["sum"]
+    return [{"unit": u, "sum": v} for u, v in acc.items() if v]
+
+
+def _units_text(units: list[dict]) -> str:
+    """«132 900 ₽ · 11 550 000 сум» — из уже посчитанных сумм по валютам."""
+    return " · ".join(_money(x["sum"], x["unit"]) for x in units or ())
+
+
 def _persons_total(persons: list[dict]) -> str:
     """«132 900 ₽ · 11 550 000 сум» — раздельно по валютам, как и было."""
     return " · ".join(_money(x["sum"], x["unit"]) for x in _totals_units(persons))
@@ -603,6 +617,34 @@ _PAYLOAD_STATUS = re.compile(r"Статус:\s*(.*?);\s*Договорённос
 STATS_PRESETS = ("today", "yesterday", "7d", "30d", "month", "custom")
 _PRESET_DAYS = {"today": 1, "7d": 7, "30d": 30}
 STATS_MAX_DAYS = 366
+# Деление исходов на успешные и неуспешные — решение офиса (Илья Павлюк,
+# 11.09.2026): выезд считается успешным, если человека нашли и с ним есть
+# результат, хоть бы и отказ. «Рассрочка» в списке офиса не названа, но это
+# договорённость об оплате — она рядом с «Обещает оплатить».
+# «Не обработан» — это отсутствие выезда, и он стоит рядом с «нет контакта».
+# Всё остальное («Тюрьма», «Смерть», «Кредит не брал», любой новый статус)
+# идёт в «прочие»: относить смерть должника к успеху или неуспеху — не наше
+# решение, а терять её в отчёте нельзя.
+OUTCOME_SUCCESS = ("В работе", "Обещает оплатить", "Оплачен", "Рассрочка",
+                   "Передана инф 3 лицу", "Отказ от оплаты")
+OUTCOME_FAIL = ("Нет контакта", "Не обработан")
+OUTCOME_GROUPS = (("success", "Успешный выезд", OUTCOME_SUCCESS),
+                  ("fail", "Не успешный выезд", OUTCOME_FAIL),
+                  ("other", "Прочие исходы", ()))
+OUTCOME_GROUP_LABEL = {"success": "успешный", "fail": "не успешный",
+                       "other": "прочее"}
+
+
+def outcome_group(status: str) -> str:
+    """success / fail / other по исходу выезда."""
+    text = (status or "").strip()
+    if text in OUTCOME_SUCCESS:
+        return "success"
+    if text in OUTCOME_FAIL or not text:
+        return "fail"
+    return "other"
+
+
 OUTCOME_PAID = "Оплачен"
 OUTCOME_PROMISE = "Обещает оплатить"
 
@@ -744,8 +786,10 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
     paid = [e["person"] for e in last.values() if e["status"] == OUTCOME_PAID]
     promised = [e for e in last.values() if e["status"] == OUTCOME_PROMISE]
     counts: dict[str, int] = {}
+    by_status: dict[str, list] = {}
     for e in last.values():
         counts[e["status"]] = counts.get(e["status"], 0) + 1
+        by_status.setdefault(e["status"], []).append(e["person"])
     by_day: dict[str, int] = {}
     for e in ordered:
         by_day[e["date"]] = by_day.get(e["date"], 0) + 1
@@ -766,6 +810,13 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
         "money_paid": _totals_units(paid), "money_paid_text": _persons_total(paid),
         "outcomes": [{"status": s, "n": n, "emoji": _st_emoji(s)}
                      for s, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))],
+        # Исход → сколько людей и сколько на них долга. Считается по ПОСЛЕДНЕМУ
+        # исходу человека за окно — ровно как плашки сводки, поэтому суммы
+        # колонок сходятся с «Должников», а деньги не задваиваются.
+        "by_outcome": {
+            status: {"n": len(ps), "money": _totals_units(ps),
+                     "money_text": _persons_total(ps)}
+            for status, ps in by_status.items()},
         "activity": {k: act.get(k) for k in _ACTIVITY_KEYS} if act else None,
         "portfolio": len(persons),
         "_by_day": by_day, "_entries": ordered, "_paid": paid,
@@ -871,15 +922,62 @@ def stats_employee_data(mgr: dict, rng: dict, employee: str,
             "plan_per_day": per_day, "plan": per_day * max(1, len(days))}
 
 
+def _outcome_layout(rows: list[dict]) -> list[dict]:
+    """Колонки исходов: блок → статусы внутри него, в порядке отображения.
+
+    Известные статусы стоят на своих местах всегда — даже если за окно ни разу
+    не встретились: колонка, которая то появляется, то исчезает, ломает и
+    сравнение двух выгрузок, и формулы, написанные поверх одной из них.
+    «Прочие» собираются по факту, из того, что реально было.
+    """
+    seen: set[str] = set()
+    for r in rows:
+        seen.update(r.get("by_outcome") or {})
+    known = set(OUTCOME_SUCCESS) | set(OUTCOME_FAIL)
+    others = sorted(st for st in seen if st and st not in known)
+    out = []
+    for code, title, statuses in OUTCOME_GROUPS:
+        out.append({"code": code, "title": title,
+                    "statuses": list(statuses) if code != "other" else others})
+    return out
+
+
+def _outcome_cells(row: dict, statuses: list[str]) -> tuple[list, int, list]:
+    """Ячейки «чел./сумма» по статусам плюс итог группы (людей и деньги)."""
+    by = row.get("by_outcome") or {}
+    cells: list = []
+    total_n = 0
+    units: list = []
+    for status in statuses:
+        item = by.get(status) or {"n": 0, "money": [], "money_text": ""}
+        cells.extend([item["n"] or "", item["money_text"] or ""])
+        total_n += item["n"]
+        units.append(item["money"])
+    return cells, total_n, _merge_units(units)
+
+
 def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> bytes:
-    """Та же статистика книгой: «Сотрудники», «Выезды» (человек-день), «По дням»."""
+    """Та же статистика книгой: «Сотрудники», «Выезды» (человек-день), «По дням».
+
+    Лист «Сотрудники» раскладывает исходы по столбцам — количество и деньги по
+    каждому, — а столбцы собраны в блоки «Успешный выезд» и «Не успешный выезд»
+    (просьба офиса 11.09.2026). Раньше исходы ехали одной строкой текста
+    «Передана инф 3 лицу 8 · Нет контакта 3»: ни сложить, ни отсортировать.
+    """
     from io import BytesIO
 
     from openpyxl import Workbook
-    from openpyxl.styles import Font
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
 
     data = stats_data(mgr, rng, employees)
     names = {c["code"]: c["name"] for c in data["countries"]}
+    rows = data["employees"]
+    layout = _outcome_layout(rows)
+    fills = {"success": PatternFill("solid", fgColor="E3F2E1"),
+             "fail": PatternFill("solid", fgColor="FAE3E0"),
+             "other": PatternFill("solid", fgColor="EFEFEF")}
+
     wb = Workbook()
     ws = wb.active
     ws.title = "Сотрудники"
@@ -887,46 +985,107 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
                f"({rng['from']} — {rng['to']})"])
     ws["A1"].font = Font(bold=True)
     ws.append([])
-    head = ["Сотрудник", "Страна", "Выездов", "Должников", "Договоров", "Оплачен",
-            "Обещает оплатить", "Просрочено обещаний", "С фото", "Долг",
-            "Закрыто (оплачен)", "Исходы"]
-    ws.append(head)
-    for r in data["employees"]:
-        ws.append([r["employee"], names.get(r["country"], ""), r["visits"], r["persons"],
-                   r["contracts"], r["paid"], r["promised"], r["overdue"], r["with_photo"],
-                   r["money_text"], r["money_paid_text"],
-                   " · ".join(f"{o['status']} {o['n']}" for o in r["outcomes"])])
+
+    base_head = ["Сотрудник", "Страна", "Выездов", "Должников", "Договоров",
+                 "Просрочено обещаний", "С фото", "Долг", "Закрыто (оплачен)"]
+    base_width = [28, 12, 9, 11, 11, 19, 8, 22, 22]
+    block_row: list = [""] * len(base_head)
+    head_row: list = list(base_head)
+    widths: list = list(base_width)
+    spans: list = []                      # (код блока, первая колонка, последняя)
+    for block in layout:
+        first = len(head_row) + 1
+        head_row.extend([f"{block['title']}: всего, чел.",
+                         f"{block['title']}: всего, сумма"])
+        widths.extend([22, 24])
+        for status in block["statuses"]:
+            head_row.extend([f"{status}, чел.", f"{status}, сумма"])
+            widths.extend([max(12, len(status) + 3), 20])
+        if block["code"] == "other":
+            head_row.append("Какие исходы")
+            widths.append(34)
+        block_row.extend([block["title"]] + [""] * (len(head_row) - len(block_row) - 1))
+        spans.append((block["code"], first, len(head_row)))
+    ws.append(block_row)
+    ws.append(head_row)
+
+    totals_by_status: dict[str, dict] = {}
+    for r in rows:
+        line = [r["employee"], names.get(r["country"], ""), r["visits"], r["persons"],
+                r["contracts"], r["overdue"], r["with_photo"],
+                r["money_text"], r["money_paid_text"]]
+        for block in layout:
+            cells, total_n, units = _outcome_cells(r, block["statuses"])
+            line.extend([total_n or "", _units_text(units) or ""])
+            line.extend(cells)
+            if block["code"] == "other":
+                by = r.get("by_outcome") or {}
+                line.append(" · ".join(f"{st} {by[st]['n']}" for st in block["statuses"]
+                                       if by.get(st)))
+        ws.append(line)
+        for status, item in (r.get("by_outcome") or {}).items():
+            acc = totals_by_status.setdefault(status, {"n": 0, "money": []})
+            acc["n"] += item["n"]
+            acc["money"].append(item["money"])
+
     t = data["totals"]
-    ws.append(["Итого", "", t["visits"], t["persons"], t["contracts"], t["paid"],
-               t["promised"], t["overdue"], t["with_photo"], t["money_text"],
-               t["money_paid_text"], ""])
-    for cell in ws[3]:
+    total_row = {"by_outcome": {st: {"n": acc["n"], "money": _merge_units(acc["money"]),
+                                     "money_text": _units_text(_merge_units(acc["money"]))}
+                                for st, acc in totals_by_status.items()}}
+    line = ["Итого", "", t["visits"], t["persons"], t["contracts"], t["overdue"],
+            t["with_photo"], t["money_text"], t["money_paid_text"]]
+    for block in layout:
+        cells, total_n, units = _outcome_cells(total_row, block["statuses"])
+        line.extend([total_n or "", _units_text(units) or ""])
+        line.extend(cells)
+        if block["code"] == "other":
+            by = total_row["by_outcome"]
+            line.append(" · ".join(f"{st} {by[st]['n']}" for st in block["statuses"]
+                                   if by.get(st)))
+    ws.append(line)
+
+    for cell in ws[4]:
         cell.font = Font(bold=True)
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
     for cell in ws[ws.max_row]:
         cell.font = Font(bold=True)
-    widths = [28, 12, 9, 10, 10, 9, 16, 18, 8, 22, 22, 60]
-    for i, w in enumerate(widths):
-        ws.column_dimensions[chr(ord("A") + i)].width = w
+    for code, first, last in spans:
+        if last > first:
+            ws.merge_cells(start_row=3, start_column=first, end_row=3, end_column=last)
+        head = ws.cell(row=3, column=first)
+        head.font = Font(bold=True)
+        head.alignment = Alignment(horizontal="center")
+        for col in range(first, last + 1):
+            ws.cell(row=3, column=col).fill = fills[code]
+            ws.cell(row=4, column=col).fill = fills[code]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = "C5"      # ФИО и страна остаются на виду при прокрутке вправо
 
     ws2 = wb.create_sheet("Выезды")
-    ws2.append(["Дата", "Сотрудник", "Клиент", "Договоров", "Результат",
+    ws2.append(["Дата", "Сотрудник", "Клиент", "Договоров", "Выезд", "Результат",
                 "Договорённость", "Долг"])
     for cell in ws2[1]:
         cell.font = Font(bold=True)
-    for r in data["employees"]:
+    for r in rows:
         for e in r["_entries"]:
             p = e["person"]
-            ws2.append([e["date"], r["employee"], p["client"], p["n"], e["status"],
-                        e["agreed"], _persons_total([p])])
-    for col, w in zip("ABCDEFG", (12, 28, 32, 10, 22, 22, 18)):
+            group = outcome_group(e["status"])
+            row_at = ws2.max_row + 1
+            ws2.append([e["date"], r["employee"], p["client"], p["n"],
+                        OUTCOME_GROUP_LABEL[group], e["status"], e["agreed"],
+                        _persons_total([p])])
+            ws2.cell(row=row_at, column=5).fill = fills[group]
+    for col, w in zip("ABCDEFGH", (12, 28, 32, 10, 14, 22, 22, 18)):
         ws2.column_dimensions[col].width = w
+    ws2.freeze_panes = "A2"
 
     ws3 = wb.create_sheet("По дням")
-    ws3.append(["Дата", "Выездов"] + [r["employee"] for r in data["employees"]])
+    ws3.append(["Дата", "Выездов"] + [r["employee"] for r in rows])
     for cell in ws3[1]:
         cell.font = Font(bold=True)
     for i, x in enumerate(data["by_day"]):
-        ws3.append([x["date"], x["visits"]] + [r["by_day"][i] for r in data["employees"]])
+        ws3.append([x["date"], x["visits"]] + [r["by_day"][i] for r in rows])
     ws3.column_dimensions["A"].width = 12
 
     buf = BytesIO()
