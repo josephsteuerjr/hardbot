@@ -143,9 +143,9 @@ def book():
 def test_visits_sheet_marks_each_visit(book):
     ws = book["Выезды"]
     head = [c.value for c in ws[1]]
-    assert head[8:11] == ["Внесён", "Гео", "Закрыл"]
-    rows = {ws.cell(row=r, column=4).value: [ws.cell(row=r, column=c).value
-                                             for c in (9, 10, 11)]
+    assert head[9:12] == ["Внесён", "Гео", "Закрыл"]
+    rows = {ws.cell(row=r, column=5).value: [ws.cell(row=r, column=c).value
+                                             for c in (10, 11, 12)]
             for r in range(2, ws.max_row + 1)}
     assert rows["Клиент Вовремя"] == ["в день выезда", "есть", "сам"]
     assert rows["Клиент Задним"] == ["позже на 1 дн", "есть", "сам"]

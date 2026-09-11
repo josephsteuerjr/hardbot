@@ -3803,6 +3803,39 @@ def promise_ahead_days() -> int:
     return value if 0 <= value <= 365 else PROMISE_AHEAD_DEFAULT
 
 
+def visit_plan_map() -> dict[str, int]:
+    """{ФИО: личная норма выездов в день}. Пусто — у всех общая норма.
+
+    Офис делит выездников на группы по фактической выработке — 8, 10 и 12
+    выездов в операционный день (решение рабочей встречи 11.09.2026). Норма
+    живёт рядом с человеком, а не в коде: состав групп меняет офис.
+    """
+    import json as _json
+    raw = (get_setting("visit_plan_by_employee") or "").strip()
+    if not raw:
+        return {}
+    try:
+        data = _json.loads(raw)
+    except ValueError:
+        return {}
+    out: dict[str, int] = {}
+    if isinstance(data, dict):
+        for employee, norm in data.items():
+            try:
+                value = int(norm)
+            except (TypeError, ValueError):
+                continue
+            if 0 < value <= 100 and str(employee).strip():
+                out[str(employee).strip()] = value
+    return out
+
+
+def visit_plan_for(employee: str, plan_map: dict[str, int] | None = None) -> int:
+    """Норма конкретного сотрудника: личная, иначе общая."""
+    plan_map = visit_plan_map() if plan_map is None else plan_map
+    return plan_map.get((employee or "").strip()) or visit_plan_per_day()
+
+
 VISIT_PLAN_DEFAULT = 10
 
 

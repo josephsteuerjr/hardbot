@@ -174,10 +174,10 @@ def test_each_visit_is_marked_successful_or_not(sheet):
     wb, _ws = sheet
     ws2 = wb["Выезды"]
     head = [c.value for c in ws2[1]]
-    assert head[5] == "Выезд" and head[1] == "Республика"
+    assert head[6] == "Выезд" and head[1] == "Республика" and head[2] == "Офис"
     marks = {}
     for r in range(2, ws2.max_row + 1):
-        marks[ws2.cell(row=r, column=7).value] = ws2.cell(row=r, column=6).value
+        marks[ws2.cell(row=r, column=8).value] = ws2.cell(row=r, column=7).value
     assert marks["Оплачен"] == "успешный"
     assert marks["Нет контакта"] == "не успешный"
     assert marks["Тюрьма"] == "прочее"

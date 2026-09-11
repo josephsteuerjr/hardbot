@@ -2820,9 +2820,10 @@ async def _manager_cases(request: web.Request) -> web.Response:
     rng = _stats_range_q(request)
     metric = (request.query.get("metric") or "visits").strip()
     country = (request.query.get("country") or "").strip()[:8]
+    office = (request.query.get("office") or "").strip()[:64]
     data = await asyncio.to_thread(
         functools.partial(digest_data.cases_data, mgr, rng, metric, country,
-                          employees=team))
+                          employees=team, office=office))
     reps = ",".join(c["rep"] for c in data["cases"][:50])
     db.audit_access(uid, "digest_view",
                     detail=f"cases {data['metric']} {rng['from']}..{rng['to']} "

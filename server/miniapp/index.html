@@ -790,7 +790,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=46;
+const SHELL_VERSION=47;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -3051,7 +3051,7 @@ async function dgLoad(){
             : DG.view==="emp"      ? "/api/manager/stats_employee"+dgRangeQ({employee:DG.emp})
             : DG.view==="person"   ? "/api/manager/person"+dgQ({employee:DG.emp,rep:DG.rep})
             : DG.view==="cases"    ? "/api/manager/cases"+dgRangeQ({metric:DG.metric||"visits",
-                                       country:DG.country||""})
+                                       country:DG.country||"", office:DG.office||""})
             : DG.view==="map"      ? "/api/manager/map_data"+dgQ({employee:DG.emp})
             : DG.view==="photos"   ? null
             :                        "/api/manager/promises"+dgQ();
@@ -3091,7 +3091,10 @@ function dgDay(i){ const d=DG.days[i]; if(!d) return;
   DG.preset="custom"; DG.from=d.date; DG.to=d.date; DG.shift=0; dgLoad(); }
 // --- таблица: сортировка, страна, поиск ---
 function dgSort(k){ if(DG.sort===k) DG.dir=-DG.dir; else { DG.sort=k; DG.dir=(k==="employee")?1:-1; } dgDrawTable(); }
-function dgCountry(c){ DG.country=c; dgDrawKpis(); dgDrawTable(); }
+// Страна и офис — два среза одного списка, и выбираются по очереди: «Худжанд
+// внутри Таджикистана» на экране телефона читается хуже, чем просто «Худжанд».
+function dgCountry(c){ DG.country=c; DG.office=""; dgDrawKpis(); dgDrawTable(); }
+function dgOffice(o){ DG.office=o; DG.country=""; dgDrawKpis(); dgDrawTable(); }
 function dgCases(metric){ dgGo("cases",{metric}); }
 function dgSearch(v){ DG.q=(v||"").trim().toLowerCase(); dgDrawTable(); }
 function dgPickEmp(i){ const r=DG.rows[i]; if(r) dgGo("emp",{emp:r.employee}); }
@@ -3209,6 +3212,10 @@ function dgStats(j,b){
 // плашки и таблица всегда об одном и том же наборе людей.
 function dgCountryTotals(){
   const j=DG.stats||{};
+  if(DG.office){
+    const o=(j.offices||[]).find(x=>x.code===DG.office);
+    return (o&&o.totals)||j.totals||{};
+  }
   if(!DG.country) return j.totals||{};
   const c=(j.countries||[]).find(x=>x.code===DG.country);
   return (c&&c.totals)||j.totals||{};
@@ -3221,6 +3228,7 @@ function dgDrawTable(){
   const j=DG.stats, el=$("dgtable"); if(!j||!el) return;
   let rows=(j.employees||[]).slice();
   if(DG.country) rows=rows.filter(r=>r.country===DG.country);
+  if(DG.office) rows=rows.filter(r=>(r.office||"")===DG.office);
   if(DG.q) rows=rows.filter(r=>String(r.employee||"").toLowerCase().includes(DG.q));
   const k=DG.sort, dir=DG.dir;
   rows.sort((a,b2)=>{ if(k==="employee") return dir*String(a.employee).localeCompare(String(b2.employee),"ru");
@@ -3231,13 +3239,17 @@ function dgDrawTable(){
   const ctry=cs.length>1?`<div class="chips" style="margin:8px 0 0">
     <button class="chip${!DG.country?" on":""}" onclick="dgCountry('')">Все · ${(j.totals||{}).employees||0}</button>
     ${cs.map(c=>`<button class="chip${DG.country===c.code?" on":""}" onclick="dgCountry('${esc(c.code)}')">${esc(c.flag)} ${esc(c.short)} · ${c.employees}</button>`).join("")}</div>`:"";
+  const offs=j.offices||[];
+  const offc=offs.length>1?`<div class="chips" style="margin:6px 0 0">
+    <button class="chip${!DG.office?" on":""}" onclick="dgOffice('')">Все офисы</button>
+    ${offs.map(o=>`<button class="chip${DG.office===o.code?" on":""}" onclick="dgOffice('${esc(o.code)}')">🏢 ${esc(o.name)} · ${o.employees}</button>`).join("")}</div>`:"";
   const th=(key,label,cls)=>`<th class="${cls||""}${DG.sort===key?" on":""}" onclick="dgSort('${key}')">${label}${DG.sort===key?(DG.dir<0?" ↓":" ↑"):""}</th>`;
   const trs=rows.map((r,i)=>`<tr class="${r.visits?"":"z"}" onclick="dgPickEmp(${i})">
     <td class="l"><div class="pname">${esc(r.employee)}</div>${r.visits?"":`<div class="psub">${esc(dgIdle(r))}</div>`}</td>
     <td>${r.visits||0}</td><td class="md">${r.persons||0}</td><td>${r.paid||0}</td><td>${r.promised||0}</td>
     <td>${r.overdue||0}</td><td>${r.with_photo||0}</td><td class="md">${esc(r.money_text||"")}</td></tr>`).join("");
   const T={}; rows.forEach(r=>["visits","persons","paid","promised","overdue","with_photo"].forEach(x=>T[x]=(T[x]||0)+(r[x]||0)));
-  el.innerHTML=`${ctry}<div class="stwrap"><table class="stt"><thead><tr>
+  el.innerHTML=`${ctry}${offc}<div class="stwrap"><table class="stt"><thead><tr>
       ${th("employee","Сотрудник","l")}${th("visits","Выезд.")}${th("persons","Долж.","md")}${th("paid","Опл.")}
       ${th("promised","Обещ.")}${th("overdue","Проср.")}${th("with_photo","Фото")}${th("money","Долг","md")}</tr></thead>
     <tbody>${trs||`<tr><td class="l muted" colspan="8">Никого не найдено</td></tr>`}</tbody>

@@ -482,7 +482,7 @@ CASES_LIMIT = 300
 
 
 def cases_data(mgr: dict, rng: dict, metric: str, country: str = "",
-               employees: list[str] | None = None) -> dict:
+               employees: list[str] | None = None, office: str = "") -> dict:
     """Список выездов за окно по одной метрике сводки.
 
     Плашки «выездов / оплачен / обещают / с фото» были голыми числами: за
@@ -494,6 +494,9 @@ def cases_data(mgr: dict, rng: dict, metric: str, country: str = "",
     country_of = _employee_country_index()
     if country:
         employees = [e for e in employees if country_of.get(e) == country]
+    if office:
+        by_office = db.employee_cities()
+        employees = [e for e in employees if by_office.get(e, "") == office]
     items = []
     for emp in employees:
         r = _employee_stats(emp, rng["from"], rng["to"], with_photos=False)
@@ -526,6 +529,7 @@ def cases_data(mgr: dict, rng: dict, metric: str, country: str = "",
     items.sort(key=lambda c: (c["date"], c["client"]), reverse=True)
     return {
         "screen": "cases", "range": rng, "metric": metric, "country": country,
+        "office": office,
         "total": len(items), "cases": items[:CASES_LIMIT],
         "limit": CASES_LIMIT,
     }
@@ -851,6 +855,8 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
         # колонок сходятся с «Должников», а деньги не задваиваются.
         # Сколько выездов доехало не в свой день и сколько закрыто без точки
         # телефона — два счётчика контроля рядом с остальными.
+        "office": db.employee_cities().get(emp, ""),
+        "plan_per_day": db.visit_plan_for(emp),
         "late": sum(1 for e in ordered if (e.get("late_days") or 0) > 0),
         "no_geo": sum(1 for e in ordered if not e.get("geo")),
         "by_outcome": {
@@ -885,6 +891,10 @@ def _totals_of(rows: list[dict], days: int) -> dict:
               {e["person"]["rep"]: e for e in r["_entries"]}.values()]
     paid = [p for r in rows for p in r["_paid"]]
     per_day = db.visit_plan_per_day()
+    plan_map = db.visit_plan_map()
+    # План команды — СУММА личных норм: в группах 8/10/12 умножение общей нормы
+    # на число людей дало бы цифру, которой никто не ставил.
+    plan_total = sum(db.visit_plan_for(r["employee"], plan_map) for r in rows)
     return {
         "employees": len(rows),
         "active": sum(1 for r in rows if r["visits"]),
@@ -902,7 +912,7 @@ def _totals_of(rows: list[dict], days: int) -> dict:
         "money": _totals_units(people), "money_text": _persons_total(people),
         "money_paid": _totals_units(paid), "money_paid_text": _persons_total(paid),
         "plan_per_day": per_day,
-        "plan": per_day * len(rows) * max(1, days),
+        "plan": plan_total * max(1, days),
     }
 
 
@@ -930,6 +940,14 @@ def stats_data(mgr: dict, rng: dict, employees: list[str] | None = None) -> dict
         # Итоги КАЖДОЙ страны считаются той же функцией, что и общий свод.
         # Фильтр «Тадж/Узб» переключает не только таблицу: руководитель
         # направления смотрел на плашки всего СНГ и видел там чужие цифры.
+        # Разбивка по офисам — просьба офиса «Худжанд»: у направления два города,
+        # и руководителю нужен свой. Офис сотрудника ведёт оператор
+        # (db.employee_city), из данных он не выводится.
+        "offices": [{"code": office, "name": office,
+                     "employees": sum(1 for r in rows if (r.get("office") or "") == office),
+                     "totals": _totals_of([r for r in rows
+                                           if (r.get("office") or "") == office], len(days))}
+                    for office in sorted({(r.get("office") or "") for r in rows} - {""})],
         "countries": [{"code": c,
                        **{k: country_scope.info(c)[k] for k in ("name", "short", "flag")},
                        "employees": sum(1 for r in rows if r["country"] == c),
@@ -962,7 +980,7 @@ def stats_employee_data(mgr: dict, rng: dict, employee: str,
             "money": _totals_units([p]), "money_text": _persons_total([p]),
             "photos": len(photostore.day_photos(p["contracts"], e["date"])),
         })
-    per_day = db.visit_plan_per_day()
+    per_day = db.visit_plan_for(employee)
     return {"screen": "emp", "range": rng, **r, "by_day": days, "cases": cases,
             "plan_per_day": per_day, "plan": per_day * max(1, len(days))}
 
@@ -1004,10 +1022,10 @@ def _outcome_totals(rows: list[dict]) -> dict:
 
 
 def _book_line(label: str, country: str, stats: dict, by_outcome: dict,
-               layout: list[dict], plan: int) -> list:
+               layout: list[dict], plan: int, office: str = "") -> list:
     """Строка книги: метрики, план, затем исходы блоками."""
     done = f"{round((stats['visits'] or 0) / plan * 100)}%" if plan else ""
-    line = [label, country, stats["visits"], plan or "", done,
+    line = [label, country, office, stats["visits"], plan or "", done,
             stats["persons"], stats["contracts"], stats["overdue"],
             stats["with_photo"], stats.get("late") or "", stats.get("no_geo") or "",
             stats["money_text"], stats["money_paid_text"]]
@@ -1036,10 +1054,10 @@ def _outcome_cells(row: dict, statuses: list[str]) -> tuple[list, int, list]:
     return cells, total_n, _merge_units(units)
 
 
-BOOK_BASE_HEAD = ("Сотрудник", "Страна", "Выездов", "План", "% плана", "Должников",
-                  "Договоров", "Просрочено обещаний", "С фото", "Внесено позже",
-                  "Без гео", "Долг", "Закрыто (оплачен)")
-BOOK_BASE_WIDTH = (28, 14, 9, 8, 9, 11, 11, 19, 8, 15, 10, 22, 22)
+BOOK_BASE_HEAD = ("Сотрудник", "Страна", "Офис", "Выездов", "План", "% плана",
+                  "Должников", "Договоров", "Просрочено обещаний", "С фото",
+                  "Внесено позже", "Без гео", "Долг", "Закрыто (оплачен)")
+BOOK_BASE_WIDTH = (28, 14, 14, 9, 8, 9, 11, 11, 19, 8, 15, 10, 22, 22)
 
 
 def _book_head(layout: list[dict]) -> tuple[list, list, list, list]:
@@ -1125,9 +1143,13 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
     ws.append([])
     ws.append(block_row)
     ws.append(head_row)
+    plan_map = db.visit_plan_map()
     for r in rows:
         ws.append(_book_line(r["employee"], names.get(r["country"], ""), r,
-                             r.get("by_outcome") or {}, layout, emp_plan))
+                             r.get("by_outcome") or {}, layout,
+                             db.visit_plan_for(r["employee"], plan_map)
+                             * max(1, len(data["by_day"])),
+                             office=r.get("office") or ""))
     last_employee_row = ws.max_row
     ws.append(_book_line("Итого", "", data["totals"], _outcome_totals(rows),
                          layout, data["totals"].get("plan") or 0))
@@ -1154,12 +1176,39 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
     dress(ws_c, head_top=3, last_data_row=last_country_row)
     ws_c.freeze_panes = "B5"
 
+    # --- Офисы: та же раскладка по городам, где сидит штат -------------------
+    if data.get("offices"):
+        ws_o = wb.create_sheet("Офисы")
+        ws_o.append([f"По офисам · {rng['label']} ({rng['from']} — {rng['to']})"])
+        ws_o["A1"].font = Font(bold=True)
+        ws_o.append([])
+        ws_o.append(block_row)
+        ws_o.append(["Офис"] + list(head_row[1:]))
+        for office in data["offices"]:
+            mine = [r for r in rows if (r.get("office") or "") == office["code"]]
+            ws_o.append(_book_line(office["name"], f"сотрудников {office['employees']}",
+                                   office["totals"], _outcome_totals(mine), layout,
+                                   office["totals"].get("plan") or 0))
+        last_office_row = ws_o.max_row
+        no_office = [r for r in rows if not (r.get("office") or "")]
+        if no_office:
+            ws_o.append(_book_line("Без офиса", f"сотрудников {len(no_office)}",
+                                   _totals_of(no_office, len(data["by_day"])),
+                                   _outcome_totals(no_office), layout, 0))
+            last_office_row = ws_o.max_row
+        ws_o.append(_book_line("Итого", f"сотрудников {data['totals']['employees']}",
+                               data["totals"], _outcome_totals(rows), layout,
+                               data["totals"].get("plan") or 0))
+        dress(ws_o, head_top=3, last_data_row=last_office_row)
+        ws_o.freeze_panes = "B5"
+
     ws2 = wb.create_sheet("Выезды")
     # «Внесён», «Гео» и «Закрыл» — контроль, о котором просил офис: выезд,
     # занесённый назавтра «потому что не было связи», закрытый без точки
     # телефона или закрытый руководителем за сотрудника, виден строкой.
-    ws2.append(["Дата", "Республика", "Сотрудник", "Клиент", "Договоров", "Выезд",
-                "Результат", "Договорённость", "Внесён", "Гео", "Закрыл", "Долг"])
+    ws2.append(["Дата", "Республика", "Офис", "Сотрудник", "Клиент", "Договоров",
+                "Выезд", "Результат", "Договорённость", "Внесён", "Гео", "Закрыл",
+                "Долг"])
     for cell in ws2[1]:
         cell.font = Font(bold=True)
     for r in rows:
@@ -1173,20 +1222,21 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
                     else f"позже на {late} дн" if late else "неизвестно")
             who = ("сам" if not own or e.get("agent_id") in own
                    else "руководитель")
-            ws2.append([e["date"], names.get(r["country"], ""), r["employee"],
-                        p["client"], p["n"], OUTCOME_GROUP_LABEL[group], e["status"],
+            ws2.append([e["date"], names.get(r["country"], ""), r.get("office") or "",
+                        r["employee"], p["client"], p["n"],
+                        OUTCOME_GROUP_LABEL[group], e["status"],
                         e["agreed"], when, "есть" if e.get("geo") else "нет", who,
                         _persons_total([p])])
-            ws2.cell(row=row_at, column=6).fill = fills[group]
+            ws2.cell(row=row_at, column=7).fill = fills[group]
             if late:
-                ws2.cell(row=row_at, column=9).fill = fills["fail"]
-            if not e.get("geo"):
                 ws2.cell(row=row_at, column=10).fill = fills["fail"]
-    for col, w in zip("ABCDEFGHIJKL",
-                      (12, 14, 28, 32, 10, 14, 22, 22, 16, 8, 14, 18)):
+            if not e.get("geo"):
+                ws2.cell(row=row_at, column=11).fill = fills["fail"]
+    for col, w in zip("ABCDEFGHIJKLM",
+                      (12, 14, 14, 28, 32, 10, 14, 22, 22, 16, 8, 14, 18)):
         ws2.column_dimensions[col].width = w
     if ws2.max_row > 1:
-        ws2.auto_filter.ref = f"A1:L{ws2.max_row}"
+        ws2.auto_filter.ref = f"A1:M{ws2.max_row}"
     ws2.freeze_panes = "A2"
 
     ws3 = wb.create_sheet("По дням")
