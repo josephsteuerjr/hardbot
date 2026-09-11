@@ -249,14 +249,14 @@ def test_employee_endpoint_scopes_and_audits(monkeypatch):
     assert "ST-0" in row["detail"] and row["target"] == EMP_A
 
 
-def test_xlsx_is_a_workbook_with_three_sheets(monkeypatch):
+def test_xlsx_is_a_workbook_with_four_sheets(monkeypatch):
     _seed()
     resp = _call(web._manager_stats_xlsx, MGR, "?preset=30d", monkeypatch=monkeypatch)
     assert resp.body[:2] == b"PK"
     assert "attachment" in resp.headers["Content-Disposition"]
     from openpyxl import load_workbook
     wb = load_workbook(io.BytesIO(resp.body))
-    assert wb.sheetnames == ["Сотрудники", "Выезды", "По дням"]
+    assert wb.sheetnames == ["Сотрудники", "Республики", "Выезды", "По дням"]
     ws = wb["Сотрудники"]
     names = [ws.cell(row=r, column=1).value for r in range(4, ws.max_row + 1)]
     assert EMP_A in names and names[-1] == "Итого"

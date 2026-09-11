@@ -942,6 +942,40 @@ def _outcome_layout(rows: list[dict]) -> list[dict]:
     return out
 
 
+def _outcome_totals(rows: list[dict]) -> dict:
+    """Свести разбивку по исходам с нескольких сотрудников в одну."""
+    acc: dict[str, dict] = {}
+    for r in rows:
+        for status, item in (r.get("by_outcome") or {}).items():
+            slot = acc.setdefault(status, {"n": 0, "money": []})
+            slot["n"] += item["n"]
+            slot["money"].append(item["money"])
+    out = {}
+    for status, slot in acc.items():
+        units = _merge_units(slot["money"])
+        out[status] = {"n": slot["n"], "money": units,
+                       "money_text": _units_text(units)}
+    return out
+
+
+def _book_line(label: str, country: str, stats: dict, by_outcome: dict,
+               layout: list[dict], plan: int) -> list:
+    """Строка книги: метрики, план, затем исходы блоками."""
+    done = f"{round((stats['visits'] or 0) / plan * 100)}%" if plan else ""
+    line = [label, country, stats["visits"], plan or "", done,
+            stats["persons"], stats["contracts"], stats["overdue"],
+            stats["with_photo"], stats["money_text"], stats["money_paid_text"]]
+    holder = {"by_outcome": by_outcome}
+    for block in layout:
+        cells, total_n, units = _outcome_cells(holder, block["statuses"])
+        line.extend([total_n or "", _units_text(units) or ""])
+        line.extend(cells)
+        if block["code"] == "other":
+            line.append(" · ".join(f"{st} {by_outcome[st]['n']}"
+                                   for st in block["statuses"] if by_outcome.get(st)))
+    return line
+
+
 def _outcome_cells(row: dict, statuses: list[str]) -> tuple[list, int, list]:
     """Ячейки «чел./сумма» по статусам плюс итог группы (людей и деньги)."""
     by = row.get("by_outcome") or {}
@@ -956,43 +990,18 @@ def _outcome_cells(row: dict, statuses: list[str]) -> tuple[list, int, list]:
     return cells, total_n, _merge_units(units)
 
 
-def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> bytes:
-    """Та же статистика книгой: «Сотрудники», «Выезды» (человек-день), «По дням».
+BOOK_BASE_HEAD = ("Сотрудник", "Страна", "Выездов", "План", "% плана", "Должников",
+                  "Договоров", "Просрочено обещаний", "С фото", "Долг",
+                  "Закрыто (оплачен)")
+BOOK_BASE_WIDTH = (28, 14, 9, 8, 9, 11, 11, 19, 8, 22, 22)
 
-    Лист «Сотрудники» раскладывает исходы по столбцам — количество и деньги по
-    каждому, — а столбцы собраны в блоки «Успешный выезд» и «Не успешный выезд»
-    (просьба офиса 11.09.2026). Раньше исходы ехали одной строкой текста
-    «Передана инф 3 лицу 8 · Нет контакта 3»: ни сложить, ни отсортировать.
-    """
-    from io import BytesIO
 
-    from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Font, PatternFill
-    from openpyxl.utils import get_column_letter
-
-    data = stats_data(mgr, rng, employees)
-    names = {c["code"]: c["name"] for c in data["countries"]}
-    rows = data["employees"]
-    layout = _outcome_layout(rows)
-    fills = {"success": PatternFill("solid", fgColor="E3F2E1"),
-             "fail": PatternFill("solid", fgColor="FAE3E0"),
-             "other": PatternFill("solid", fgColor="EFEFEF")}
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Сотрудники"
-    ws.append([f"Статистика выездов · {data['scope']} · {rng['label']} "
-               f"({rng['from']} — {rng['to']})"])
-    ws["A1"].font = Font(bold=True)
-    ws.append([])
-
-    base_head = ["Сотрудник", "Страна", "Выездов", "Должников", "Договоров",
-                 "Просрочено обещаний", "С фото", "Долг", "Закрыто (оплачен)"]
-    base_width = [28, 12, 9, 11, 11, 19, 8, 22, 22]
-    block_row: list = [""] * len(base_head)
-    head_row: list = list(base_head)
-    widths: list = list(base_width)
-    spans: list = []                      # (код блока, первая колонка, последняя)
+def _book_head(layout: list[dict]) -> tuple[list, list, list, list]:
+    """Шапка книги: строка блоков, строка колонок, ширины, границы блоков."""
+    block_row: list = [""] * len(BOOK_BASE_HEAD)
+    head_row: list = list(BOOK_BASE_HEAD)
+    widths: list = list(BOOK_BASE_WIDTH)
+    spans: list = []
     for block in layout:
         first = len(head_row) + 1
         head_row.extend([f"{block['title']}: всего, чел.",
@@ -1006,65 +1015,102 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
             widths.append(34)
         block_row.extend([block["title"]] + [""] * (len(head_row) - len(block_row) - 1))
         spans.append((block["code"], first, len(head_row)))
+    return block_row, head_row, widths, spans
+
+
+def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> bytes:
+    """Та же статистика книгой: «Сотрудники», «Республики», «Выезды», «По дням».
+
+    Исходы разложены по столбцам — количество и деньги по каждому, — а столбцы
+    собраны в блоки «Успешный выезд» и «Не успешный выезд» (просьба офиса
+    11.09.2026). Раньше исходы ехали одной строкой текста «Передана инф 3 лицу 8
+    · Нет контакта 3»: ни сложить, ни отсортировать. Лист «Республики» повторяет
+    тот же расклад по странам: направленцу нужен свод именно по своей.
+    """
+    from io import BytesIO
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    data = stats_data(mgr, rng, employees)
+    names = {c["code"]: c["name"] for c in data["countries"]}
+    rows = data["employees"]
+    layout = _outcome_layout(rows)
+    block_row, head_row, widths, spans = _book_head(layout)
+    fills = {"success": PatternFill("solid", fgColor="E3F2E1"),
+             "fail": PatternFill("solid", fgColor="FAE3E0"),
+             "other": PatternFill("solid", fgColor="EFEFEF")}
+    per_day = data["totals"].get("plan_per_day") or 0
+    emp_plan = per_day * max(1, len(data["by_day"]))
+
+    def dress(ws, head_top: int, last_data_row: int) -> None:
+        """Шапка-блоки, жирные заголовки, заливка, ширины — одинаково на листах."""
+        for cell in ws[head_top + 1]:
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(wrap_text=True, vertical="center")
+        for cell in ws[ws.max_row]:
+            cell.font = Font(bold=True)
+        for code, first, last in spans:
+            if last > first:
+                ws.merge_cells(start_row=head_top, start_column=first,
+                               end_row=head_top, end_column=last)
+            head = ws.cell(row=head_top, column=first)
+            head.font = Font(bold=True)
+            head.alignment = Alignment(horizontal="center")
+            for col in range(first, last + 1):
+                ws.cell(row=head_top, column=col).fill = fills[code]
+                ws.cell(row=head_top + 1, column=col).fill = fills[code]
+        for i, w in enumerate(widths, start=1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+        # Фильтр по «Стране» — чтобы руководитель направления мог оставить свою
+        # республику прямо в листе сотрудников; строку «Итого» в диапазон не
+        # берём, иначе она уедет вместе с фильтром.
+        if last_data_row > head_top + 1:
+            ws.auto_filter.ref = (f"A{head_top + 1}:"
+                                  f"{get_column_letter(len(head_row))}{last_data_row}")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Сотрудники"
+    ws.append([f"Статистика выездов · {data['scope']} · {rng['label']} "
+               f"({rng['from']} — {rng['to']})"])
+    ws["A1"].font = Font(bold=True)
+    ws.append([])
     ws.append(block_row)
     ws.append(head_row)
-
-    totals_by_status: dict[str, dict] = {}
     for r in rows:
-        line = [r["employee"], names.get(r["country"], ""), r["visits"], r["persons"],
-                r["contracts"], r["overdue"], r["with_photo"],
-                r["money_text"], r["money_paid_text"]]
-        for block in layout:
-            cells, total_n, units = _outcome_cells(r, block["statuses"])
-            line.extend([total_n or "", _units_text(units) or ""])
-            line.extend(cells)
-            if block["code"] == "other":
-                by = r.get("by_outcome") or {}
-                line.append(" · ".join(f"{st} {by[st]['n']}" for st in block["statuses"]
-                                       if by.get(st)))
-        ws.append(line)
-        for status, item in (r.get("by_outcome") or {}).items():
-            acc = totals_by_status.setdefault(status, {"n": 0, "money": []})
-            acc["n"] += item["n"]
-            acc["money"].append(item["money"])
-
-    t = data["totals"]
-    total_row = {"by_outcome": {st: {"n": acc["n"], "money": _merge_units(acc["money"]),
-                                     "money_text": _units_text(_merge_units(acc["money"]))}
-                                for st, acc in totals_by_status.items()}}
-    line = ["Итого", "", t["visits"], t["persons"], t["contracts"], t["overdue"],
-            t["with_photo"], t["money_text"], t["money_paid_text"]]
-    for block in layout:
-        cells, total_n, units = _outcome_cells(total_row, block["statuses"])
-        line.extend([total_n or "", _units_text(units) or ""])
-        line.extend(cells)
-        if block["code"] == "other":
-            by = total_row["by_outcome"]
-            line.append(" · ".join(f"{st} {by[st]['n']}" for st in block["statuses"]
-                                   if by.get(st)))
-    ws.append(line)
-
-    for cell in ws[4]:
-        cell.font = Font(bold=True)
-        cell.alignment = Alignment(wrap_text=True, vertical="center")
-    for cell in ws[ws.max_row]:
-        cell.font = Font(bold=True)
-    for code, first, last in spans:
-        if last > first:
-            ws.merge_cells(start_row=3, start_column=first, end_row=3, end_column=last)
-        head = ws.cell(row=3, column=first)
-        head.font = Font(bold=True)
-        head.alignment = Alignment(horizontal="center")
-        for col in range(first, last + 1):
-            ws.cell(row=3, column=col).fill = fills[code]
-            ws.cell(row=4, column=col).fill = fills[code]
-    for i, w in enumerate(widths, start=1):
-        ws.column_dimensions[get_column_letter(i)].width = w
+        ws.append(_book_line(r["employee"], names.get(r["country"], ""), r,
+                             r.get("by_outcome") or {}, layout, emp_plan))
+    last_employee_row = ws.max_row
+    ws.append(_book_line("Итого", "", data["totals"], _outcome_totals(rows),
+                         layout, data["totals"].get("plan") or 0))
+    dress(ws, head_top=3, last_data_row=last_employee_row)
     ws.freeze_panes = "C5"      # ФИО и страна остаются на виду при прокрутке вправо
 
+    # --- Республики: тот же расклад, но по странам --------------------------
+    ws_c = wb.create_sheet("Республики")
+    ws_c.append([f"По республикам · {rng['label']} ({rng['from']} — {rng['to']})"])
+    ws_c["A1"].font = Font(bold=True)
+    ws_c.append([])
+    country_head = ["Республика"] + list(head_row[1:])
+    ws_c.append(block_row)
+    ws_c.append(country_head)
+    for c in data["countries"]:
+        mine = [r for r in rows if r["country"] == c["code"]]
+        ws_c.append(_book_line(c["name"], f"сотрудников {c['employees']}",
+                               c["totals"], _outcome_totals(mine), layout,
+                               c["totals"].get("plan") or 0))
+    last_country_row = ws_c.max_row
+    ws_c.append(_book_line("Итого", f"сотрудников {data['totals']['employees']}",
+                           data["totals"], _outcome_totals(rows), layout,
+                           data["totals"].get("plan") or 0))
+    dress(ws_c, head_top=3, last_data_row=last_country_row)
+    ws_c.freeze_panes = "B5"
+
     ws2 = wb.create_sheet("Выезды")
-    ws2.append(["Дата", "Сотрудник", "Клиент", "Договоров", "Выезд", "Результат",
-                "Договорённость", "Долг"])
+    ws2.append(["Дата", "Республика", "Сотрудник", "Клиент", "Договоров", "Выезд",
+                "Результат", "Договорённость", "Долг"])
     for cell in ws2[1]:
         cell.font = Font(bold=True)
     for r in rows:
@@ -1072,12 +1118,14 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
             p = e["person"]
             group = outcome_group(e["status"])
             row_at = ws2.max_row + 1
-            ws2.append([e["date"], r["employee"], p["client"], p["n"],
-                        OUTCOME_GROUP_LABEL[group], e["status"], e["agreed"],
-                        _persons_total([p])])
-            ws2.cell(row=row_at, column=5).fill = fills[group]
-    for col, w in zip("ABCDEFGH", (12, 28, 32, 10, 14, 22, 22, 18)):
+            ws2.append([e["date"], names.get(r["country"], ""), r["employee"],
+                        p["client"], p["n"], OUTCOME_GROUP_LABEL[group], e["status"],
+                        e["agreed"], _persons_total([p])])
+            ws2.cell(row=row_at, column=6).fill = fills[group]
+    for col, w in zip("ABCDEFGHI", (12, 14, 28, 32, 10, 14, 22, 22, 18)):
         ws2.column_dimensions[col].width = w
+    if ws2.max_row > 1:
+        ws2.auto_filter.ref = f"A1:I{ws2.max_row}"
     ws2.freeze_panes = "A2"
 
     ws3 = wb.create_sheet("По дням")

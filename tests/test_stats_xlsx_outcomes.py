@@ -174,10 +174,55 @@ def test_each_visit_is_marked_successful_or_not(sheet):
     wb, _ws = sheet
     ws2 = wb["Выезды"]
     head = [c.value for c in ws2[1]]
-    assert head[4] == "Выезд"
+    assert head[5] == "Выезд" and head[1] == "Республика"
     marks = {}
     for r in range(2, ws2.max_row + 1):
-        marks[ws2.cell(row=r, column=6).value] = ws2.cell(row=r, column=5).value
+        marks[ws2.cell(row=r, column=7).value] = ws2.cell(row=r, column=6).value
     assert marks["Оплачен"] == "успешный"
     assert marks["Нет контакта"] == "не успешный"
     assert marks["Тюрьма"] == "прочее"
+
+
+# --- разделение по республикам ------------------------------------------------
+def test_countries_sheet_repeats_the_same_split(sheet):
+    """Направленцу нужен свод по своей республике, а не по всему СНГ."""
+    wb, _ws = sheet
+    ws = wb["Республики"]
+    head = {str(c.value): c.column for c in ws[4] if c.value}
+    assert ws.cell(row=4, column=1).value == "Республика"
+    labels = [ws.cell(row=r, column=1).value for r in range(5, ws.max_row + 1)]
+    assert labels == ["Таджикистан", "Итого"], "обе строки: страна и общий итог"
+    row = 5
+    assert ws.cell(row=row, column=head["Выездов"]).value == 5
+    assert ws.cell(row=row, column=head["Успешный выезд: всего, чел."]).value == 3
+    assert ws.cell(row=row, column=head["Не успешный выезд: всего, чел."]).value == 1
+    assert ws.cell(row=row, column=head["Прочие исходы: всего, чел."]).value == 1
+
+
+def test_country_rows_add_up_to_the_total(sheet):
+    wb, _ws = sheet
+    ws = wb["Республики"]
+    head = {str(c.value): c.column for c in ws[4] if c.value}
+    last = ws.max_row
+    for name in ("Выездов", "Должников", "Успешный выезд: всего, чел."):
+        by_country = sum(ws.cell(row=r, column=head[name]).value or 0
+                         for r in range(5, last))
+        assert by_country == ws.cell(row=last, column=head[name]).value, name
+
+
+def test_plan_travels_into_the_book(sheet):
+    """«План 10 на сотрудника» — та же цифра, что в приложении."""
+    _wb, ws = sheet
+    head = {str(c.value): c.column for c in ws[4] if c.value}
+    last = ws.max_row
+    assert ws.cell(row=last, column=head["План"]).value == 20, "двое за один день"
+    assert ws.cell(row=last, column=head["% плана"]).value == "25%", "5 выездов из 20"
+
+
+def test_employee_sheet_can_be_filtered_by_country(sheet):
+    """Фильтр стоит на шапке и НЕ захватывает строку «Итого»."""
+    _wb, ws = sheet
+    assert ws.auto_filter.ref is not None
+    first, last = ws.auto_filter.ref.split(":")
+    assert first.endswith("4"), "фильтр начинается со строки заголовков"
+    assert int("".join(ch for ch in last if ch.isdigit())) == ws.max_row - 1
