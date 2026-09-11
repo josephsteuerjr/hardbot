@@ -61,6 +61,9 @@ RESET_TABLES = {
     "notes",
     "settings",
     "managers",
+    # Офисы сотрудников — такой же служебный факт, как состав руководителей:
+    # ограниченный тест начинается с чистого штата.
+    "employee_city",
     "app_links",
     "app_tokens",
     "photo_geo",
@@ -118,6 +121,7 @@ DELETE_ORDER = (
     "app_tokens",
     "app_links",
     "managers",
+    "employee_city",
     "markers",
     "audit",
     "agent_bind",

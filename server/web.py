@@ -382,6 +382,10 @@ def _meta(lang: str) -> dict:
                          "title": _form_field_title(k, lang)}
                         for k in (*FORM_DATES, *FORM_AMOUNTS)],
         "today": date.today().isoformat(),
+        # Предел обещания оплаты (дней от дня выезда). Колесо дат в приложении
+        # дальше этой даты не пускает, сервер проверяет то же самое ещё раз:
+        # оболочка на телефоне бывает старая, а очередь доносит визиты сутками.
+        "promiseMaxDays": db.promise_ahead_days(),
         "dataExchangeContract": DATA_EXCHANGE_CONTRACT,
         "vectorTiles": "/tiles/basemap.pmtiles" if TILES_FILE.exists() else None,
         # Микрофон показываем только при полностью заданном UDS-контракте.
@@ -1406,6 +1410,18 @@ async def _save(request: web.Request) -> web.Response:
     # вернётся, если офис подтвердит её ПОСЛЕ визита (якорный шлюз импорта).
     if finish and OFFICE_RESULT_SNAPSHOT_KEY not in values:
         raise web.HTTPBadRequest(text="visit result required")
+    if finish and values.get("promise_date"):
+        # Обещание дальше предела офиса НЕ роняет весь визит: клиент считает
+        # не-2xx обрывом и хоронит запись очереди целиком — пропала бы вся
+        # карточка, а не дата. Отбрасываем ПОЛЕ и говорим об этом в ответе,
+        # тем же способом, что и про нечитаемую сумму.
+        limit = db.promise_ahead_days()
+        if limit:
+            edge = date.fromisoformat(_occurred_on(body)) + timedelta(days=limit)
+            if db._as_date(values["promise_date"]) and \
+                    db._as_date(values["promise_date"]) > edge:
+                rejected["promise_date"] = f"too_far:{limit}"
+                values.pop("promise_date", None)
     if finish:
         # «Прогноз» по итогу выезда. Колонку вёл только аналитик, и обещания
         # выездника в неё не попадали вовсе. Считаем ЗДЕСЬ, а не в пульте:
@@ -3907,6 +3923,32 @@ async def _admin_managers(request: web.Request) -> web.Response:
     })
 
 
+async def _admin_employee_cities(request: web.Request) -> web.Response:
+    """Офисы сотрудников: GET — карта {ФИО: город} плюс сам список сотрудников,
+    POST {cities:{ФИО: город}} — записать (пустая строка снимает закрепление).
+
+    Зачем отдельный факт: города в clients — это где живёт ДОЛЖНИК, а
+    душанбинский выездник ездит в Ёвон, Хисор и Вахдат. Штат офиса из данных не
+    выводится, его заводит оператор — и на нём держится охват руководителя по
+    городу (managers.cities)."""
+    _admin(request)
+    if request.method == "POST":
+        body = await request.json()
+        pairs = body.get("cities")
+        if not isinstance(pairs, dict):
+            raise web.HTTPBadRequest(text="cities")
+        for employee, city in pairs.items():
+            db.set_employee_city(str(employee), str(city or ""))
+        db.audit_access(0, "employee_cities", detail=f"changed={len(pairs)}")
+    return web.json_response({
+        "ok": True,
+        "cities": db.employee_cities(),
+        "employees": [e["employee"] for e in db.employees_in_registry()],
+        # Города, уже назначенные хоть кому-то, — подсказка для выбора в пульте.
+        "known": sorted({c for c in db.employee_cities().values() if c}),
+    })
+
+
 async def _admin_manager_save(request: web.Request) -> web.Response:
     """Создать/обновить руководителя: {telegram_id:int, name:str, cities:[str], employees:[str]}."""
     _admin(request)
@@ -3928,8 +3970,13 @@ async def _admin_manager_save(request: web.Request) -> web.Response:
     # Личные рубильники приходят только теми ключами, что прислал пульт:
     # старый пульт их не шлёт, и «Сохранить» не должно ничего переключать.
     pushes = {k: bool(body[k]) for k in db.MANAGER_PUSH_KEYS if k in body}
+    # Офисы — отдельный факт. Здесь они необязательны (старый пульт про них не
+    # знает и не должен затирать заведённые офисы); пустой список снимает все.
+    offices = body.get("office_cities")
+    if offices is not None:
+        offices = [str(c).strip() for c in offices if str(c).strip()]
     db.set_manager(tid, name, cities, employees, direction=direction,
-                   pushes=pushes or None)
+                   pushes=pushes or None, office_cities=offices)
     # account — КТО владеет этим telegram_id по данным бота (или null, если бот его
     # не видел). «name» — всего лишь подпись оператора, права получает владелец id;
     # пульт сверяет одно с другим и показывает расхождение сразу, а не через неделю.
@@ -4333,6 +4380,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/admin/notify", _admin_notify)
     app.router.add_post("/admin/restart", _admin_restart)
     app.router.add_post("/admin/reset", _admin_reset)
+    app.router.add_get("/admin/employee_cities.json", _admin_employee_cities)
+    app.router.add_post("/admin/employee_cities.json", _admin_employee_cities)
     app.router.add_get("/admin/managers", _admin_managers)
     app.router.add_post("/admin/manager", _admin_manager_save)
     app.router.add_post("/admin/manager_delete", _admin_manager_delete)

@@ -13,6 +13,8 @@
 """
 from datetime import date, timedelta
 
+import pytest
+
 import db
 import digest
 
@@ -21,6 +23,17 @@ D = lambda n: (date.today() - timedelta(days=n)).isoformat()  # noqa: E731
 MGR = 700002
 EMP = "Обещалкин Тест"
 
+
+
+@pytest.fixture(autouse=True)
+def _no_promise_limit(monkeypatch):
+    """Здесь проверяется МЕХАНИКА обещаний, а не предел офиса.
+
+    Предел («не дальше трёх дней от выезда») живёт в своём файле
+    test_promise_window_limit.py. Без этой фикстуры каждая дата «через неделю»
+    в тестах ниже стала бы проверкой чужого правила и молча съедала бы поле.
+    """
+    monkeypatch.setattr(db, "promise_ahead_days", lambda: 0)
 
 def _add(cid, client, **f):
     row = dict(contract_id=cid, client=client, responsible=EMP,

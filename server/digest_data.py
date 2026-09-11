@@ -520,6 +520,7 @@ def cases_data(mgr: dict, rng: dict, metric: str, country: str = "",
                 "rep": p["rep"], "client": p["client"], "n": p["n"],
                 "outcome": e["status"], "emoji": _st_emoji(e["status"]),
                 "agreed": e["agreed"], "photos": photos,
+                "late_days": e.get("late_days"), "geo": bool(e.get("geo")),
                 "money": _totals_units([p]), "money_text": _persons_total([p]),
             })
     items.sort(key=lambda c: (c["date"], c["client"]), reverse=True)
@@ -754,6 +755,33 @@ def _snapshot_day(p: dict) -> str:
                  for c in p["contracts"] if c["bot_visit_at"]), "")
 
 
+def _cell_of(row, key):
+    """Поле строки визита; у старых снимков и урезанных словарей его может не быть."""
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _late_days(visit_day: str, received_at) -> int | None:
+    """На сколько дней выезд доехал позже своего дня. None — нечем судить.
+
+    Ноль значит «в тот же день»: столько выездов и должно быть. Всё, что больше,
+    — это работа, занесённая задним числом, и её офис просил видеть отдельно.
+    """
+    day, got = _as_day(visit_day), _as_day(received_at)
+    if day is None or got is None:
+        return None
+    return max(0, (got - day).days)
+
+
+def _as_day(value):
+    try:
+        return db._as_date(str(value or "")[:10])
+    except (TypeError, ValueError):
+        return None
+
+
 def _employee_stats(emp: str, d_from: str, d_to: str, *,
                     with_photos: bool = True) -> dict:
     """Строка сотрудника за окно. «_entries» — выезды по дням (человек-день),
@@ -773,7 +801,15 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
             continue
         status, agreed = _payload_status(v["payload"])
         entries[(v["created_at"], p["rep"])] = {
-            "date": v["created_at"], "person": p, "status": status, "agreed": agreed}
+            "date": v["created_at"], "person": p, "status": status, "agreed": agreed,
+            # Три пометки контроля, о которых просил офис 11.09.2026:
+            # когда выезд доехал до сервера (работа в поле или занесённая
+            # назавтра «не было связи»), была ли точка телефона и кто закрыл —
+            # сам выездник или руководитель от его имени.
+            "received_at": _cell_of(v, "received_at"),
+            "late_days": _late_days(v["created_at"], _cell_of(v, "received_at")),
+            "geo": _cell_of(v, "visit_lat") is not None,
+            "agent_id": _cell_of(v, "agent_id")}
     ordered = sorted(entries.values(), key=lambda e: (e["date"], e["person"]["client"]))
     for e in ordered:
         p = e["person"]
@@ -813,6 +849,10 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
         # Исход → сколько людей и сколько на них долга. Считается по ПОСЛЕДНЕМУ
         # исходу человека за окно — ровно как плашки сводки, поэтому суммы
         # колонок сходятся с «Должников», а деньги не задваиваются.
+        # Сколько выездов доехало не в свой день и сколько закрыто без точки
+        # телефона — два счётчика контроля рядом с остальными.
+        "late": sum(1 for e in ordered if (e.get("late_days") or 0) > 0),
+        "no_geo": sum(1 for e in ordered if not e.get("geo")),
         "by_outcome": {
             status: {"n": len(ps), "money": _totals_units(ps),
                      "money_text": _persons_total(ps)}
@@ -855,6 +895,10 @@ def _totals_of(rows: list[dict], days: int) -> dict:
         "promised": sum(r["promised"] for r in rows),
         "overdue": sum(r["overdue"] for r in rows),
         "with_photo": sum(r["with_photo"] for r in rows),
+        # Контроль офиса: сколько выездов доехало не в свой день и сколько
+        # закрыто без точки телефона.
+        "late": sum(r.get("late", 0) for r in rows),
+        "no_geo": sum(r.get("no_geo", 0) for r in rows),
         "money": _totals_units(people), "money_text": _persons_total(people),
         "money_paid": _totals_units(paid), "money_paid_text": _persons_total(paid),
         "plan_per_day": per_day,
@@ -914,6 +958,7 @@ def stats_employee_data(mgr: dict, rng: dict, employee: str,
             "rep": p["rep"], "client": p["client"], "n": p["n"],
             "outcome": e["status"], "emoji": _st_emoji(e["status"]),
             "agreed": e["agreed"],
+            "late_days": e.get("late_days"), "geo": bool(e.get("geo")),
             "money": _totals_units([p]), "money_text": _persons_total([p]),
             "photos": len(photostore.day_photos(p["contracts"], e["date"])),
         })
@@ -964,7 +1009,8 @@ def _book_line(label: str, country: str, stats: dict, by_outcome: dict,
     done = f"{round((stats['visits'] or 0) / plan * 100)}%" if plan else ""
     line = [label, country, stats["visits"], plan or "", done,
             stats["persons"], stats["contracts"], stats["overdue"],
-            stats["with_photo"], stats["money_text"], stats["money_paid_text"]]
+            stats["with_photo"], stats.get("late") or "", stats.get("no_geo") or "",
+            stats["money_text"], stats["money_paid_text"]]
     holder = {"by_outcome": by_outcome}
     for block in layout:
         cells, total_n, units = _outcome_cells(holder, block["statuses"])
@@ -991,9 +1037,9 @@ def _outcome_cells(row: dict, statuses: list[str]) -> tuple[list, int, list]:
 
 
 BOOK_BASE_HEAD = ("Сотрудник", "Страна", "Выездов", "План", "% плана", "Должников",
-                  "Договоров", "Просрочено обещаний", "С фото", "Долг",
-                  "Закрыто (оплачен)")
-BOOK_BASE_WIDTH = (28, 14, 9, 8, 9, 11, 11, 19, 8, 22, 22)
+                  "Договоров", "Просрочено обещаний", "С фото", "Внесено позже",
+                  "Без гео", "Долг", "Закрыто (оплачен)")
+BOOK_BASE_WIDTH = (28, 14, 9, 8, 9, 11, 11, 19, 8, 15, 10, 22, 22)
 
 
 def _book_head(layout: list[dict]) -> tuple[list, list, list, list]:
@@ -1109,23 +1155,38 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
     ws_c.freeze_panes = "B5"
 
     ws2 = wb.create_sheet("Выезды")
+    # «Внесён», «Гео» и «Закрыл» — контроль, о котором просил офис: выезд,
+    # занесённый назавтра «потому что не было связи», закрытый без точки
+    # телефона или закрытый руководителем за сотрудника, виден строкой.
     ws2.append(["Дата", "Республика", "Сотрудник", "Клиент", "Договоров", "Выезд",
-                "Результат", "Договорённость", "Долг"])
+                "Результат", "Договорённость", "Внесён", "Гео", "Закрыл", "Долг"])
     for cell in ws2[1]:
         cell.font = Font(bold=True)
     for r in rows:
+        own = set(db.agent_tids(r["employee"]) or ())
         for e in r["_entries"]:
             p = e["person"]
             group = outcome_group(e["status"])
+            late = e.get("late_days")
             row_at = ws2.max_row + 1
+            when = ("в день выезда" if late == 0
+                    else f"позже на {late} дн" if late else "неизвестно")
+            who = ("сам" if not own or e.get("agent_id") in own
+                   else "руководитель")
             ws2.append([e["date"], names.get(r["country"], ""), r["employee"],
                         p["client"], p["n"], OUTCOME_GROUP_LABEL[group], e["status"],
-                        e["agreed"], _persons_total([p])])
+                        e["agreed"], when, "есть" if e.get("geo") else "нет", who,
+                        _persons_total([p])])
             ws2.cell(row=row_at, column=6).fill = fills[group]
-    for col, w in zip("ABCDEFGHI", (12, 14, 28, 32, 10, 14, 22, 22, 18)):
+            if late:
+                ws2.cell(row=row_at, column=9).fill = fills["fail"]
+            if not e.get("geo"):
+                ws2.cell(row=row_at, column=10).fill = fills["fail"]
+    for col, w in zip("ABCDEFGHIJKL",
+                      (12, 14, 28, 32, 10, 14, 22, 22, 16, 8, 14, 18)):
         ws2.column_dimensions[col].width = w
     if ws2.max_row > 1:
-        ws2.auto_filter.ref = f"A1:I{ws2.max_row}"
+        ws2.auto_filter.ref = f"A1:L{ws2.max_row}"
     ws2.freeze_panes = "A2"
 
     ws3 = wb.create_sheet("По дням")

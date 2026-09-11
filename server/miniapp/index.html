@@ -790,7 +790,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=45;
+const SHELL_VERSION=46;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1904,6 +1904,18 @@ function srvToday(){
   return (/^\d{4}-\d{2}-\d{2}$/.test(s)&&s>loc)?s:loc;
 }
 function typedFields(){ return (STATE.meta&&STATE.meta.typedFields)||[]; }
+// Предел обещания оплаты — решение офиса: «не более трёх дней + к дню выезда».
+// Ноль значит «без предела». Считаем от СЕРВЕРНОГО сегодня: часы телефона врут,
+// а обещание, уехавшее за предел из-за сбитой даты, вернётся отказом сервера.
+function promiseMaxDays(){ const n=+((STATE.meta||{}).promiseMaxDays||0);
+  return Number.isFinite(n)&&n>0?n:0; }
+function promiseMaxDate(){
+  const n=promiseMaxDays(); if(!n) return "";
+  const b=srvToday();
+  const d=new Date(+b.slice(0,4),+b.slice(5,7)-1,+b.slice(8,10)+n);
+  return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+
+         String(d.getDate()).padStart(2,"0");
+}
 function promiseSection(d){
   const tf2=typedFields();
   if(!tf2.length) return "";
@@ -1912,10 +1924,12 @@ function promiseSection(d){
   const rows=tf2.map(f=>{
     const v=cur[f.key]||"";
     if(f.kind==="date"){
+      const lim=(f.key==="promise_date")?promiseMaxDays():0;
       return `<label class="fld">${esc(f.title)}</label>
         <input type="hidden" data-k="${esc(f.key)}" value="${esc(v)}">
         <button type="button" class="pick${v?" has":""}" data-for="${esc(f.key)}"
           onclick="openDateWheel('${esc(f.key)}')">${esc(v||"—")}</button>
+        ${lim?`<div class="muted" style="font-size:11px;margin:-6px 0 8px">не дальше ${esc(promiseMaxDate())} (${lim} дн от выезда)</div>`:""}
         ${reg[f.key]&&!v?`<div class="muted" style="font-size:11px;margin:-6px 0 8px">офис: ${esc(reg[f.key])}</div>`:""}`;
     }
     return `<label class="fld">${esc(f.title)}</label>
@@ -1963,13 +1977,19 @@ function openDateWheel(key){
   if(!el) return;
   const base=srvToday();
   const by=+base.slice(0,4), bm=+base.slice(5,7);
-  WHEEL={key,months:[]};
-  for(let i=0;i<13;i++){                 // год вперёд
+  // Предел офиса действует только на дату обещания: встреча и напоминание
+  // могут стоять сколь угодно далеко.
+  WHEEL={key,months:[],max:(key==="promise_date")?promiseMaxDate():""};
+  const lim=WHEEL.max?promiseMaxDays():0;
+  const span=WHEEL.max?((+WHEEL.max.slice(0,4)-by)*12+(+WHEEL.max.slice(5,7)-bm)+1):13;
+  for(let i=0;i<span;i++){                 // год вперёд, а с пределом — до него
     const m=(bm-1+i)%12, y=by+Math.floor((bm-1+i)/12);
     WHEEL.months.push({y,m:m+1,label:MONTH_NAMES[m]+" "+y});
   }
   const cur=el.value&&/^\d{4}-\d{2}-\d{2}$/.test(el.value)?el.value:null;
-  const chips=[["Завтра",1],["Через неделю",7],["Через месяц",30]].map(
+  const preset=lim?[["Завтра",1],["Послезавтра",2],["Через 3 дня",3]].filter(x=>x[1]<=lim)
+                  :[["Завтра",1],["Через неделю",7],["Через месяц",30]];
+  const chips=preset.map(
     ([label,days])=>`<button type="button" class="datechip"
       onclick="wheelChip(${days})">${label}</button>`).join("");
   const monthRows=WHEEL.months.map((mm,i)=>
@@ -2010,9 +2030,12 @@ function openDateWheel(key){
 function wheelFillDays(mi, day){
   const mm=WHEEL.months[mi]; if(!mm) return;
   const base=srvToday();
-  const dim=new Date(mm.y,mm.m,0).getDate();
+  let dim=new Date(mm.y,mm.m,0).getDate();
   // первый месяц — только с сегодняшнего дня: обещание всегда вперёд
   const from=(mm.y===+base.slice(0,4)&&mm.m===+base.slice(5,7))?+base.slice(8,10):1;
+  // последний месяц предела — только до предельного числа включительно
+  if(WHEEL.max&&mm.y===+WHEEL.max.slice(0,4)&&mm.m===+WHEEL.max.slice(5,7))
+    dim=Math.min(dim,+WHEEL.max.slice(8,10));
   const rows=[];
   for(let d2=from;d2<=dim;d2++)
     rows.push(`<div class="wheelitem" data-d="${d2}" onclick="wheelTap(this,'d')">${d2}</div>`);
@@ -2529,6 +2552,13 @@ async function saveVisit(){
       const j=await api("/api/save",{method:"POST",body:JSON.stringify(body)});
       STATE.online=true; STATE.cur=j.person; IDB.put("cards",j.person,rep).catch(()=>{});
       finishSavedUI(rep, L().saved);
+      // Визит сохранён, но поле сервер не принял (дата обещания за пределом,
+      // нечитаемая сумма). Молчать нельзя: человек уедет с адреса уверенным,
+      // что записал дату.
+      const bad=j.rejected||null;
+      if(bad&&bad.promise_date) toast("Дата обещания не принята: не дальше "+
+        (promiseMaxDays()||3)+" дн от выезда");
+      else if(bad) toast("Часть полей не принята: "+Object.keys(bad).join(", "));
     }catch(e){
       // Нет сети — кладём выезд в очередь, помечаем визит локально; уйдёт при связи.
       await enqueue({op_id, kind:"save", rep, values, input_keys,
@@ -3130,6 +3160,10 @@ function dgKpis(t,rg){
   if(t.plan) line.push(`🎯 план ${t.plan} (${t.plan_per_day} на человека) · `+
     `<b>${Math.round((t.visits||0)/t.plan*100)}%</b>`);
   if(multi&&team) line.push(`👥 в работе ${t.active||0} из ${t.employees}`);
+  // Контроль, о котором просил офис: выезды, внесённые не в свой день, и
+  // выезды без точки телефона. Ноль не показываем — строка и так длинная.
+  if(t.late) line.push(`⏱ внесено позже: <b>${t.late}</b>`);
+  if(t.no_geo) line.push(`📍 без гео: <b>${t.no_geo}</b>`);
   if(t.money_text) line.push(`💰 долг ${esc(t.money_text)}`);
   if(t.money_paid_text) line.push(`✅ закрыто ${esc(t.money_paid_text)}`);
   return `<div class="kpis">
@@ -3233,7 +3267,7 @@ function dgEmp(j,b){
         <span>${esc(c.day_label||c.date)}</span>${(rg.days>1&&di>=0)?`<button class="toolbtn" onclick="dgOpenMap(${di})">🗺 карта</button>`:""}</div>`); }
     items.push(`<div class="pcard" onclick="dgPickCase(${i})"><div class="pinfo">
       <div class="pname">${esc(c.emoji)} ${esc(c.client)}${c.photos?" 📸":""}</div>
-      <div class="psub">${esc(c.outcome||"")}${c.agreed?" · "+esc(c.agreed):""}${c.n>1?` · договоров ${c.n}`:""}</div></div>
+      <div class="psub">${esc(c.outcome||"")}${c.agreed?" · "+esc(c.agreed):""}${c.n>1?` · договоров ${c.n}`:""}${caseMarks(c)}</div></div>
       <div class="pamt">${esc(c.money_text||"")}</div></div>`);
   });
   parts.push(items.join("")||`<div class="muted" style="margin-top:12px">За этот период выездов не было.</div>`);
@@ -3381,6 +3415,13 @@ async function dgMap(j,b){
   MAP.fitBounds(bnd,{padding:60,maxZoom:15});
   $("dgleg").textContent="🔵 адрес · 🟢 визит · 🔴 далеко · 🟣 закрыл руководитель · 🟠 метка";
 }
+// Пометки контроля у выезда: доехал не в свой день, закрыт без точки телефона.
+function caseMarks(c){
+  const out=[];
+  if(c.late_days) out.push("⏱ +"+c.late_days+" дн");
+  if(c.geo===false) out.push("📍 без гео");
+  return out.length?" · "+out.join(" · "):"";
+}
 const DG_METRIC_TITLE={visits:"Выезды",paid:"Оплачено",promised:"Обещают оплатить",
   with_photo:"Выезды с фото",persons:"Должники"};
 function dgCasesScreen(j,b){
@@ -3400,7 +3441,7 @@ function dgCasesScreen(j,b){
     items.push(`<div class="pcard" onclick="dgPickCase(${i})"><div class="pinfo">
       <div class="pname">${esc(c.emoji||"")} ${esc(c.client)}</div>
       <div class="psub">${esc(c.employee||"")}${c.money_text?" · "+esc(c.money_text):""}`+
-      `${c.photos?" · 📸 "+c.photos:""}${c.agreed?" · "+esc(c.agreed):""}</div>
+      `${c.photos?" · 📸 "+c.photos:""}${caseMarks(c)}${c.agreed?" · "+esc(c.agreed):""}</div>
       </div><span class="pchev">${ic("chevR")}</span></div>`);
   });
   parts.push(items.join("")||`<div class="center">Ничего не найдено</div>`);

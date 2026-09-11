@@ -23,6 +23,17 @@ EMP = "Обещалкин Тест"
 CID = "PV-1"
 
 
+
+@pytest.fixture(autouse=True)
+def _no_promise_limit(monkeypatch):
+    """Здесь проверяется МЕХАНИКА обещаний, а не предел офиса.
+
+    Предел («не дальше трёх дней от выезда») живёт в своём файле
+    test_promise_window_limit.py. Без этой фикстуры каждая дата «через неделю»
+    в тестах ниже стала бы проверкой чужого правила и молча съедала бы поле.
+    """
+    monkeypatch.setattr(db, "promise_ahead_days", lambda: 0)
+
 def _isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "hardbot.db")
     db.init_db()

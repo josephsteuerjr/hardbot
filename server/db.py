@@ -619,8 +619,15 @@ def init_db() -> None:
         # точки должника может измениться после следующего геокодинга, и тогда
         # пересчёт задним числом переписал бы историю: визит, закрытый честно,
         # завтра стал бы нарушением. NULL = не судили (точка не адресная).
+        # received_at — КОГДА выезд доехал до сервера. created_at хранит ДЕНЬ
+        # ВЫЕЗДА (см. log_visit), и по нему нельзя отличить работу в поле от
+        # занесённой назавтра «потому что не было связи»: офис попросил такой
+        # контроль прямо (Худжанд, 11.09.2026). Точное время приёма лежало
+        # только в append-only audit — сопоставлять его со строкой визита
+        # каждый раз пришлось бы вручную.
         for col, decl in (("visit_lat", "REAL"), ("visit_lon", "REAL"),
-                          ("dist_m", "INTEGER"), ("geo_far", "INTEGER")):
+                          ("dist_m", "INTEGER"), ("geo_far", "INTEGER"),
+                          ("received_at", "TEXT")):
             if col not in vcols:
                 conn.execute(f"ALTER TABLE visits ADD COLUMN {col} {decl}")
         # Профиль пользователя (язык). Whitelist теперь = привязка к сотруднику.
@@ -668,6 +675,15 @@ def init_db() -> None:
             conn.execute("ALTER TABLE agent_bind ADD COLUMN approved INTEGER DEFAULT 1")
         # Аудит-лог доступа к карточке должника (ИБ: кто-что-когда смотрел/менял ПД).
         # Append-only: только INSERT, без UPDATE/DELETE из кода (tamper-evident-каркас).
+        # Офис сотрудника. В реестре этого факта нет: город там — это где живёт
+        # ДОЛЖНИК, а колонка «Подразделение» про Хард/Софт. Заводит оператор.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS employee_city (
+              employee   TEXT PRIMARY KEY,
+              city       TEXT NOT NULL,
+              updated_at TEXT
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS audit (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -864,6 +880,12 @@ def init_db() -> None:
         for col, decl in (("can_dm", "INTEGER"), ("can_dm_at", "TEXT")):
             if col not in mgcols:
                 conn.execute(f"ALTER TABLE managers ADD COLUMN {col} {decl}")
+        # office_cities — охват ПО ОФИСАМ сотрудников (живой состав, как у
+        # направления). Отдельно от cities: та колонка означает города ДОЛЖНИКОВ
+        # и на состав не влияет — «точечный список не расширяется сам» это
+        # заявленный контракт, на нём стоит тест.
+        if "office_cities" not in mgcols:
+            conn.execute("ALTER TABLE managers ADD COLUMN office_cities TEXT")
         # Журнал доставки уведомлений: строка на КАЖДУЮ попытку и каждый ранний
         # return. Ранние return сейчас молчат — именно они и есть «не работает».
         # day = date.today() (в контейнере UTC) — та же система координат, что у
@@ -1657,6 +1679,58 @@ DIRECTIONS = {
 }
 
 
+# --- Город СОТРУДНИКА (офис), а не города его клиентов -----------------------
+# Руководителю в Душанбе нужны отбивки по своему штату. Вывести это из данных
+# нельзя: город в clients — это где живёт ДОЛЖНИК, и душанбинский выездник ездит
+# в Ёвон, Хисор и Вахдат, а не «в Душанбе» (в самом Душанбе всего 35 кейсов на
+# всю базу). Принадлежность человека к офису — отдельный факт, его заводит
+# оператор; в реестре его нет вовсе (колонка «Подразделение» там про Хард/Софт).
+def set_employee_city(employee: str, city: str) -> None:
+    """Закрепить сотрудника за офисом. Пустой город — снять закрепление."""
+    employee = (employee or "").strip()
+    if not employee:
+        return
+    city = (city or "").strip()
+    with connect() as conn:
+        if city:
+            conn.execute(
+                "INSERT INTO employee_city (employee, city, updated_at) VALUES (?,?,?) "
+                "ON CONFLICT(employee) DO UPDATE SET city=excluded.city, "
+                "updated_at=excluded.updated_at",
+                (employee, city, date.today().isoformat()))
+        else:
+            conn.execute("DELETE FROM employee_city WHERE employee = ?", (employee,))
+        conn.commit()
+    reset_role_caches()
+
+
+def employee_cities() -> dict[str, str]:
+    """{ФИО сотрудника: город}. Только заполненные."""
+    with connect() as conn:
+        return {r["employee"]: r["city"] for r in conn.execute(
+            "SELECT employee, city FROM employee_city WHERE TRIM(city) <> ''")}
+
+
+def employees_by_cities(cities) -> list[str]:
+    """Сотрудники перечисленных офисов — состав ЖИВОЙ, как у направления.
+
+    Сверяем по _name_key: в роли и в реестре ФИО пишут по-разному, и точное
+    сравнение строк уже однажды оставило руководителей направлений без пушей."""
+    wanted = {(c or "").strip().casefold() for c in (cities or []) if str(c).strip()}
+    if not wanted:
+        return []
+    mapping = employee_cities()
+    known = {_name_key(r["employee"]): r["employee"]
+             for r in employees_in_registry()}
+    out: dict[str, None] = {}
+    for employee, city in mapping.items():
+        if (city or "").strip().casefold() not in wanted:
+            continue
+        # Отдаём написание РЕЕСТРА: под ним живут портфели, визиты и пуши.
+        out.setdefault(known.get(_name_key(employee), employee), None)
+    return sorted(out)
+
+
 def employees_by_direction(direction: str) -> list[str]:
     """Сотрудники направления — СЧИТАЕМ ЖИВЬЁМ, а не замораживаем списком.
 
@@ -1692,6 +1766,8 @@ def _manager_dict(r: sqlite3.Row) -> dict:
     out = {"telegram_id": r["telegram_id"], "name": r["name"] or "",
            "cities": _json_list(r["cities"]), "employees": _json_list(r["employees"]),
            "direction": (r["direction"] or "") if "direction" in keys else "",
+           "office_cities": (_json_list(r["office_cities"])
+                             if "office_cities" in keys else []),
            "can_dm": r["can_dm"] if "can_dm" in keys else None}
     for key in MANAGER_PUSH_KEYS:
         out[key] = bool(r[key]) if key in keys and r[key] is not None else True
@@ -1714,27 +1790,36 @@ def set_manager_pushes(telegram_id: int, pushes: dict) -> None:
 
 def set_manager(telegram_id: int, name: str, cities: list[str],
                 employees: list[str], direction: str | None = None,
-                pushes: dict | None = None) -> None:
+                pushes: dict | None = None,
+                office_cities: list[str] | None = None) -> None:
     """Создать/обновить руководителя (upsert по telegram_id). cities — ярлык-подпись
     (свободный ввод), employees — ФИО из реестра (кого он видит в дайджесте).
+    office_cities — офисы, чей штат он ведёт: состав живой (db.employee_city),
+    складывается с employees. None — «не трогать» (старый пульт поля не шлёт).
 
     direction (tj/uz/all) — руководитель НАПРАВЛЕНИЯ: сотрудники считаются живьём.
     pushes — личные рубильники; None означает «не трогать» (у новой записи
     остаются значения по умолчанию — всё включено).
     """
     with connect() as conn:
+        # office_cities=None означает «не трогать»: старый пульт этого поля не
+        # шлёт, и сохранение руководителя не должно молча снимать ему охват.
+        keep_offices = office_cities is None
         conn.execute(
             "INSERT INTO managers "
-            "(telegram_id, name, cities, employees, direction, created_at) "
-            "VALUES (?,?,?,?,?,?) "
+            "(telegram_id, name, cities, employees, direction, office_cities, created_at) "
+            "VALUES (?,?,?,?,?,?,?) "
             "ON CONFLICT(telegram_id) DO UPDATE SET "
             "name=excluded.name, cities=excluded.cities, employees=excluded.employees, "
-            "direction=excluded.direction",
+            "direction=excluded.direction, "
+            "office_cities=CASE WHEN ? THEN managers.office_cities "
+            "ELSE excluded.office_cities END",
             (telegram_id, (name or "").strip(),
              json.dumps(list(cities or []), ensure_ascii=False),
              json.dumps(list(employees or []), ensure_ascii=False),
              (direction or "").strip() or None,
-             date.today().isoformat()),
+             json.dumps(list(office_cities or []), ensure_ascii=False),
+             date.today().isoformat(), 1 if keep_offices else 0),
         )
         conn.commit()
     if pushes:
@@ -1790,6 +1875,10 @@ def manager_employees(telegram_id: int, *, is_owner: bool = False) -> list[str]:
         if direction:                      # руководитель направления — список живой
             return employees_by_direction(direction)
         allowed = [e for e in mgr.get("employees") or [] if str(e).strip()]
+        # Офис — живой состав, а не поимённый: в портфеле выездника из другого
+        # города ничего нет, а руководителю офиса сотрудник добавляется в тот
+        # же день, когда его заводит оператор.
+        allowed += employees_by_cities(mgr.get("office_cities"))
         return sorted(dict.fromkeys(allowed))
     if is_owner:
         return [r["employee"] for r in employees_in_registry()]
@@ -1930,7 +2019,8 @@ def visits_for_employee(employee: str, date_from: str, date_to: str) -> list[sql
         return conn.execute(
             "SELECT v.id id, v.contract_id contract_id, "
             "substr(v.created_at, 1, 10) created_at, v.payload payload, "
-            "v.agent_id agent_id "
+            "v.agent_id agent_id, v.received_at received_at, "
+            "v.visit_lat visit_lat, v.geo_far geo_far "
             "FROM visits v JOIN clients c ON c.contract_id = v.contract_id "
             "WHERE c.responsible = ? AND substr(v.created_at, 1, 10) BETWEEN ? AND ? "
             "ORDER BY v.id",
@@ -2667,6 +2757,10 @@ def managers_by_employee_index() -> dict[str, list[dict]]:
         else:
             spelled_list = [e for e in (mgr.get("employees") or [])
                             if str(e).strip()]
+            # Тот же принцип, что в manager_employees: иначе руководитель по
+            # офису открывал бы портфели своего города, но карточек по визитам
+            # не получал — ровно та дыра, что была у направленцев.
+            spelled_list += employees_by_cities(mgr.get("office_cities"))
         if not mgr.get("push_visits", True):
             continue          # личный рубильник: карточки визитов ему не нужны
         for spelled in spelled_list:
@@ -3547,10 +3641,11 @@ def log_visit(contract_id: str, agent_id: int, payload: str,
     with connect() as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO visits (contract_id, agent_id, created_at, payload, "
-            "op_id, visit_lat, visit_lon, dist_m, geo_far) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "op_id, visit_lat, visit_lon, dist_m, geo_far, received_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (contract_id, agent_id, on_date or date.today().isoformat(), payload, op_id,
-             lat, lon, dist_m, None if geo_far is None else int(bool(geo_far))),
+             lat, lon, dist_m, None if geo_far is None else int(bool(geo_far)),
+             datetime.now().isoformat(timespec="seconds")),
         )
         conn.commit()
         return cur.rowcount > 0
@@ -3681,6 +3776,31 @@ def geo_tolerance_m(precision: str | None, src: str | None = None) -> int | None
     if (src or "").strip().lower() == "manual":
         return _GEO_TOLERANCE_M["manual"]
     return _GEO_TOLERANCE_M.get((precision or "").strip().lower())
+
+
+PROMISE_AHEAD_DEFAULT = 3
+
+
+def promise_ahead_days() -> int:
+    """На сколько дней ВПЕРЁД выездник может поставить обещание оплаты.
+
+    Решение офиса (Худжанд, 11.09.2026): «не более чем на три дня + к дню
+    выезда». Смысл — в контроле: обещание «через месяц» нельзя ни проверить на
+    этой неделе, ни вернуть должника в маршрут вовремя. Ноль отключает предел —
+    это настройка офиса, а не константа кода.
+
+    НЕ ПУТАТЬ с `promise_window()`: там окно ПОКАЗА уже просроченных обещаний
+    («не старше недели»), и ключ настройки у него свой — promise_max_days.
+    Имена однажды совпали, и рассылка руководителю молча похудела до трёх дней.
+    """
+    raw = str(get_setting("promise_ahead_days") or "").strip()
+    if not raw:
+        return PROMISE_AHEAD_DEFAULT
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return PROMISE_AHEAD_DEFAULT
+    return value if 0 <= value <= 365 else PROMISE_AHEAD_DEFAULT
 
 
 VISIT_PLAN_DEFAULT = 10
