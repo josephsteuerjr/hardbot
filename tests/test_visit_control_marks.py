@@ -143,10 +143,11 @@ def book():
 def test_visits_sheet_marks_each_visit(book):
     ws = book["Выезды"]
     head = [c.value for c in ws[1]]
-    assert head[9] == "На карточке"
-    assert head[10:13] == ["Внесён", "Гео", "Закрыл"]
+    assert head[9] == "Заполнение карточки"
+    assert head[10:12] == ["Сохранён в приложении", "Принят сервером"],         "сохранение в приложении и приём сервером — разные моменты"
+    assert head[12:15] == ["Внесён", "Гео", "Закрыл"]
     rows = {ws.cell(row=r, column=5).value: [ws.cell(row=r, column=c).value
-                                             for c in (11, 12, 13)]
+                                             for c in (13, 14, 15)]
             for r in range(2, ws.max_row + 1)}
     assert rows["Клиент Вовремя"] == ["в день выезда", "есть", "сам"]
     assert rows["Клиент Задним"] == ["позже на 1 дн", "есть", "сам"]
@@ -201,4 +202,31 @@ def test_book_shows_time_on_card():
     assert by_client["Клиент Вовремя"] == "5 мин"
     people = wb["Сотрудники"]
     head = {str(c.value): c.column for c in people[4] if c.value}
-    assert people.cell(row=5, column=head["На карточке, среднее"]).value == "5 мин"
+    assert people.cell(row=5,
+                       column=head["Заполнение карточки, среднее"]).value == "5 мин"
+
+
+def test_two_stamps_of_one_visit_are_separate():
+    """День выезда, отметка телефона и приём сервером — три разных факта."""
+    with db.connect() as conn:
+        conn.execute("UPDATE visits SET saved_at=?, received_at=? "
+                     "WHERE contract_id='KT-2'",
+                     (YESTERDAY + "T18:40:00", T + "T09:05:00"))
+        conn.commit()
+    blob = dd.stats_xlsx(db.get_manager(MGR), dd.stats_range("7d", 0, today=TODAY),
+                         employees=[EMP])
+    ws = load_workbook(io.BytesIO(blob))["Выезды"]
+    row = next(r for r in range(2, ws.max_row + 1)
+               if ws.cell(row=r, column=5).value == "Клиент Задним")
+    assert ws.cell(row=row, column=1).value == YESTERDAY, "день выезда — вчерашний"
+    assert ws.cell(row=row, column=11).value.endswith("18:40"), "нажал вчера вечером"
+    assert ws.cell(row=row, column=12).value.endswith("09:05"), "сервер принял утром"
+    assert ws.cell(row=row, column=13).value == "позже на 1 дн"
+
+
+def test_saved_stamp_comes_from_the_phone():
+    import web
+    moment = 1_757_600_000_000
+    got = web._saved_at({"occurred_at": moment})
+    assert got and len(got) == 19 and "T" in got
+    assert web._saved_at({}) is None

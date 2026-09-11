@@ -1527,7 +1527,8 @@ async def _save(request: web.Request) -> web.Response:
         is_new = db.log_visit(rep, uid, payload,
                               op_id=op_id, lat=vlat, lon=vlon, dist_m=dist_m,
                               geo_far=geo_far, on_date=completed_at,
-                              fill_seconds=_fill_seconds(body))
+                              fill_seconds=_fill_seconds(body),
+                              saved_at=_saved_at(body))
         # Снимок строится только из values этого POST, а не из сырых HARD-полей
         # clients. При ретрае после редкого падения между log_visit и этой записью
         # восстанавливаем отсутствующий снимок; старый дубль новый снимок не откатывает.
@@ -2309,6 +2310,20 @@ def _fill_seconds(body) -> int | None:
     if seconds < 0 or seconds > FILL_SECONDS_MAX:
         return None
     return seconds
+
+
+def _saved_at(body) -> str | None:
+    """Когда человек нажал «Сохранить выезд», по часам его телефона.
+
+    Отдельно от приёма сервером: в поле без связи между этими двумя моментами
+    бывают сутки, и раньше — когда днём выезда был день загрузки — работа
+    целого дня ложилась в чужой день.
+    """
+    try:
+        moment = datetime.fromtimestamp(float(body.get("occurred_at")) / 1000.0)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+    return moment.isoformat(timespec="seconds")
 
 
 def _occurred_on(body) -> str:

@@ -778,6 +778,14 @@ def _avg_fill(values) -> int | None:
     return round(sum(good) / len(good)) if good else None
 
 
+def _stamp(value) -> str:
+    """«11.09 14:32» — отметка времени без года и секунд, для книги."""
+    text = str(value or "")
+    if len(text) < 16:
+        return ""
+    return f"{text[8:10]}.{text[5:7]} {text[11:16]}"
+
+
 def _fill_text(seconds) -> str:
     """«4 мин», «45 с», «1 ч 10 мин» — для книги и карточки."""
     if not isinstance(seconds, (int, float)) or seconds < 0:
@@ -834,6 +842,7 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
             # назавтра «не было связи»), была ли точка телефона и кто закрыл —
             # сам выездник или руководитель от его имени.
             "received_at": _cell_of(v, "received_at"),
+            "saved_at": _cell_of(v, "saved_at"),
             "late_days": _late_days(v["created_at"], _cell_of(v, "received_at")),
             "geo": _cell_of(v, "visit_lat") is not None,
             "fill_seconds": _cell_of(v, "fill_seconds"),
@@ -1085,7 +1094,7 @@ def _outcome_cells(row: dict, statuses: list[str]) -> tuple[list, int, list]:
 
 BOOK_BASE_HEAD = ("Сотрудник", "Страна", "Офис", "Выездов", "План", "% плана",
                   "Должников", "Договоров", "Просрочено обещаний", "С фото",
-                  "Внесено позже", "Без гео", "На карточке, среднее",
+                  "Внесено позже", "Без гео", "Заполнение карточки, среднее",
                   "Долг", "Закрыто (оплачен)")
 BOOK_BASE_WIDTH = (28, 14, 14, 9, 8, 9, 11, 11, 19, 8, 15, 10, 20, 22, 22)
 
@@ -1236,9 +1245,13 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
     # «Внесён», «Гео» и «Закрыл» — контроль, о котором просил офис: выезд,
     # занесённый назавтра «потому что не было связи», закрытый без точки
     # телефона или закрытый руководителем за сотрудника, виден строкой.
+    # Три момента выезда разведены: что человек нажал в приложении, что дошло до
+    # сервера и в чей день это легло. Раньше днём выезда был день загрузки, и
+    # работа целого дня без связи попадала в чужой день.
     ws2.append(["Дата", "Республика", "Офис", "Сотрудник", "Клиент", "Договоров",
-                "Выезд", "Результат", "Договорённость", "На карточке", "Внесён",
-                "Гео", "Закрыл", "Долг"])
+                "Выезд", "Результат", "Договорённость", "Заполнение карточки",
+                "Сохранён в приложении", "Принят сервером", "Внесён", "Гео",
+                "Закрыл", "Долг"])
     for cell in ws2[1]:
         cell.font = Font(bold=True)
     for r in rows:
@@ -1255,19 +1268,20 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
             ws2.append([e["date"], names.get(r["country"], ""), r.get("office") or "",
                         r["employee"], p["client"], p["n"],
                         OUTCOME_GROUP_LABEL[group], e["status"],
-                        e["agreed"], _fill_text(e.get("fill_seconds")), when,
-                        "есть" if e.get("geo") else "нет", who,
+                        e["agreed"], _fill_text(e.get("fill_seconds")),
+                        _stamp(e.get("saved_at")), _stamp(e.get("received_at")),
+                        when, "есть" if e.get("geo") else "нет", who,
                         _persons_total([p])])
             ws2.cell(row=row_at, column=7).fill = fills[group]
             if late:
-                ws2.cell(row=row_at, column=11).fill = fills["fail"]
+                ws2.cell(row=row_at, column=13).fill = fills["fail"]
             if not e.get("geo"):
-                ws2.cell(row=row_at, column=12).fill = fills["fail"]
-    for col, w in zip("ABCDEFGHIJKLMN",
-                      (12, 14, 14, 28, 32, 10, 14, 22, 22, 14, 16, 8, 14, 18)):
+                ws2.cell(row=row_at, column=14).fill = fills["fail"]
+    for col, w in zip("ABCDEFGHIJKLMNOP",
+                      (12, 14, 14, 28, 32, 10, 14, 22, 22, 18, 19, 18, 16, 8, 14, 18)):
         ws2.column_dimensions[col].width = w
     if ws2.max_row > 1:
-        ws2.auto_filter.ref = f"A1:N{ws2.max_row}"
+        ws2.auto_filter.ref = f"A1:P{ws2.max_row}"
     ws2.freeze_panes = "A2"
 
     ws3 = wb.create_sheet("По дням")

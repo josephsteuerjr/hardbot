@@ -790,7 +790,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=48;
+const SHELL_VERSION=49;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -3325,8 +3325,11 @@ function dgPerson(j,b){
     else if(g.far) parts.push(`<div>⚠️ Визит закрыт в ${esc(g.pretty)} от адреса!</div>`);
     else parts.push(`<div>📍 Точка закрытия: ${esc(g.pretty)} от адреса</div>`);
   }
-  if(j.fill_text) parts.push(`<div class="muted">⏱ на карточке: ${esc(j.fill_text)} `+
-    `<span style="font-size:11px">(от открытия до «Сохранить выезд»)</span></div>`);
+  // Это НЕ время на адресе: карточку могли открыть заранее, из любопытства, и
+  // закрыть визит через час. Пишем ровно то, что измерено, — иначе цифру начнут
+  // читать как «стоял у двери четыре минуты».
+  if(j.fill_text) parts.push(`<div class="muted">⏱ заполнение карточки: ${esc(j.fill_text)} `+
+    `<span style="font-size:11px">(от открытия карточки до «Сохранить выезд» — не время на адресе)</span></div>`);
   const d=j.dates||{};
   const tail=[d.visit_date?"🗓 "+esc(d.visit_date):"",d.reminder_date?"🔁 "+esc(d.reminder_date):"",
               d.meeting_date?"📅 "+esc(d.meeting_date):""].filter(Boolean).join("   ");
@@ -3442,7 +3445,7 @@ function caseMarks(c){
   const out=[];
   if(c.late_days) out.push("⏱ +"+c.late_days+" дн");
   if(c.geo===false) out.push("📍 без гео");
-  if(c.fill_text) out.push("⏱ "+c.fill_text);
+  if(c.fill_text) out.push("⏱ карточка "+c.fill_text);
   return out.length?" · "+out.join(" · "):"";
 }
 const DG_METRIC_TITLE={visits:"Выезды",paid:"Оплачено",promised:"Обещают оплатить",
