@@ -788,7 +788,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=42;
+const SHELL_VERSION=43;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1539,8 +1539,34 @@ function drawList(items){
 // Номера и телефоны приходят вместе со списком (persons[].ids/tels), телефоны —
 // одними цифрами: «+998 90 123-45-67» набирают подряд, и сырую строку реестра
 // такой набор никогда не совпадёт.
-function personMatches(p,q,qd){
-  if(String(p.client||"").toLowerCase().includes(q)) return true;
+// ФИО должников в реестре записаны ЛАТИНИЦЕЙ («TUKHTASINOV NUSRATULLO»), а
+// ищут их набором по-русски — «Тухтасинов». Совпадения не было ни одного, и
+// человек в поле видел пустой экран при живом клиенте в портфеле. Сводим обе
+// стороны к общему звуковому скелету: сначала кириллица в латиницу, затем
+// гасим разнобой самой латиницы. Один и тот же узбекский звук пишут
+// по-разному, и это не опечатки, а две живые традиции записи:
+// х = kh или x, ж = j или zh, қ = q или k, Мирзаев = Mirzaev или Mirzayev.
+const FOLD_MAP={"а":"a","б":"b","в":"v","г":"g","ғ":"g","д":"d","е":"e","ё":"yo",
+  "ж":"j","з":"z","и":"i","й":"y","к":"k","қ":"q","л":"l","м":"m","н":"n","о":"o",
+  "п":"p","р":"r","с":"s","т":"t","у":"u","ў":"u","ф":"f","х":"x","ҳ":"h","ц":"ts",
+  "ч":"ch","ш":"sh","щ":"sh","ъ":"","ы":"i","ь":"","э":"e","ю":"yu","я":"ya"};
+function fold(s){
+  let t=String(s||"").toLowerCase();
+  t=t.replace(/[Ѐ-ӿ]/g,c=>FOLD_MAP[c]!==undefined?FOLD_MAP[c]:c);
+  t=t.replace(/['`‘’ʻʼ]/g,"");   // o', g', ʻ — украшения письма
+  // Порядок важен: kh гасим ДО одиночного x, иначе из «kh» вышло бы «hh».
+  t=t.replace(/zh/g,"j").replace(/kh/g,"h").replace(/x/g,"h").replace(/gh/g,"g")
+     .replace(/ts/g,"s").replace(/q/g,"k").replace(/ye/g,"e")
+     .replace(/yo/g,"o").replace(/yu/g,"u").replace(/ya/g,"a").replace(/w/g,"v");
+  t=t.replace(/(.)\1+/g,"$1");                        // Tojiddinov = Tojidinov
+  return t.replace(/[^a-z0-9]+/g," ").replace(/\s+/g," ").trim();
+}
+function personMatches(p,q,qd,qf){
+  const name=String(p.client||"").toLowerCase();
+  if(name.includes(q)) return true;
+  // Скелет считаем ОДИН раз на человека и держим при нём: пересчитывать 760
+  // имён на каждую набранную букву — заметная пауза на телефоне в поле.
+  if(qf && (p._fold||(p._fold=fold(p.client))).includes(qf)) return true;
   if(!qd) return false;
   if((p.ids||[]).some(id=>id.includes(qd))) return true;
   // Одна-две цифры — это ещё не телефон: по ним совпал бы весь портфель.
@@ -1549,8 +1575,8 @@ function personMatches(p,q,qd){
 function filterList(){
   const raw=$("q").value.trim();
   if(!raw){ drawList(STATE.persons); return; }
-  const q=raw.toLowerCase(), qd=raw.replace(/\D+/g,"");
-  drawList(STATE.persons.filter(p=>personMatches(p,q,qd)));
+  const q=raw.toLowerCase(), qd=raw.replace(/\D+/g,""), qf=fold(raw);
+  drawList(STATE.persons.filter(p=>personMatches(p,q,qd,qf)));
 }
 
 async function openP(rep){
