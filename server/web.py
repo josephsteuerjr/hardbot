@@ -2033,6 +2033,11 @@ async def _manager_photo_file(request: web.Request) -> web.Response:
     return resp
 
 
+# Группы выработки, которые назвал офис: 8, 10 и 12 выездов в операционный день.
+# Список — подсказка для кнопок, любое другое число тоже принимается.
+VISIT_PLAN_GROUPS = (8, 10, 12)
+
+
 # --- Голосовой комментарий: служба распознавания речи по Unix-сокету --------
 _STT = None
 _VOICE_LOCK = asyncio.Lock()
@@ -2852,6 +2857,40 @@ async def _manager_stats_employee(request: web.Request) -> web.Response:
                     detail=f"stats_employee {rng['from']}..{rng['to']} "
                            f"n={len(data['cases'])} reps={reps}")
     return _manager_json({**_stats_envelope(mgr, team, rng, uid), **data})
+
+
+async def _manager_plan(request: web.Request) -> web.Response:
+    """Нормы выездов команды: GET — список, POST {plan:{ФИО: норма}} — записать.
+
+    Правит РУКОВОДИТЕЛЬ прямо из приложения: офис делит выездников на группы
+    8/10/12 по фактической выработке, состав групп меняется чаще, чем выходят
+    выкладки. Чужих людей через эту ручку не тронуть — только свою команду.
+    """
+    uid, mgr, team = _manager_gate(request)
+    if request.method == "POST":
+        body = await request.json()
+        plan = body.get("plan")
+        if not isinstance(plan, dict):
+            raise web.HTTPBadRequest(text="plan")
+        allowed = set(team)
+        changed = []
+        for employee, norm in plan.items():
+            name = str(employee).strip()
+            if name not in allowed:
+                # Не 403 на весь запрос: руководитель мог сохранять список,
+                # пока состав команды менялся. Пишем своих, чужих пропускаем.
+                continue
+            db.set_visit_plan(name, norm)
+            changed.append(name)
+        db.audit_access(uid, "visit_plan", detail=f"changed={len(changed)}")
+    plan_map = db.visit_plan_map()
+    common = db.visit_plan_per_day()
+    return _manager_json({
+        "ok": True, "screen": "plan", "common": common,
+        "groups": VISIT_PLAN_GROUPS,
+        "employees": [{"employee": e, "plan": plan_map.get(e) or common,
+                       "personal": e in plan_map} for e in team],
+    })
 
 
 async def _manager_cases(request: web.Request) -> web.Response:
@@ -3756,7 +3795,35 @@ async def _admin_employees(request: web.Request) -> web.Response:
     """Список ФИО из реестра с уже проставленной привязкой — для экрана «Роли»
     в пульте. Заказчик вписывает telegram_id каждому ФИО, тип (выездник/курьер)."""
     _admin(request)
-    return web.json_response({"employees": db.employees_with_bindings()})
+    # Норма выездов едет вместе со списком: в пульте она стоит колонкой рядом
+    # с офисом, и отдельный запрос на каждую строку был бы тридцатью запросами.
+    plan_map = db.visit_plan_map()
+    common = db.visit_plan_per_day()
+    rows = []
+    for row in db.employees_with_bindings():
+        item = dict(row)
+        personal = plan_map.get(item.get("employee") or "")
+        item["plan"] = personal or common
+        item["plan_personal"] = bool(personal)
+        rows.append(item)
+    return web.json_response({"employees": rows, "plan_common": common,
+                              "plan_groups": list(VISIT_PLAN_GROUPS)})
+
+
+async def _admin_visit_plan(request: web.Request) -> web.Response:
+    """Нормы выездов из пульта: POST {plan:{ФИО: норма}}; 0 — вернуть к общей."""
+    _admin(request)
+    body = await request.json()
+    plan = body.get("plan")
+    if not isinstance(plan, dict):
+        raise web.HTTPBadRequest(text="plan")
+    for employee, norm in plan.items():
+        db.set_visit_plan(str(employee), norm)
+    db.audit_access(0, "visit_plan", detail=f"changed={len(plan)}")
+    common = db.visit_plan_per_day()
+    plan_map = db.visit_plan_map()
+    return web.json_response({"ok": True, "plan": plan_map, "common": common,
+                              "groups": list(VISIT_PLAN_GROUPS)})
 
 
 async def _admin_emp_clients(request: web.Request) -> web.Response:
@@ -4408,6 +4475,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/admin/markers.xlsx", _admin_markers_xlsx)
     app.router.add_get("/admin/markers.json", _admin_markers_json)
     app.router.add_get("/admin/employees", _admin_employees)
+    app.router.add_post("/admin/visit_plan.json", _admin_visit_plan)
     app.router.add_get("/admin/emp_clients", _admin_emp_clients)
     app.router.add_post("/admin/unassign", _admin_unassign)
     app.router.add_get("/admin/guests", _admin_guests)
@@ -4447,6 +4515,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/manager/photo", _manager_photo_file)
     app.router.add_get("/api/manager/stats", _manager_stats)
     app.router.add_get("/api/manager/stats_employee", _manager_stats_employee)
+    app.router.add_get("/api/manager/plan", _manager_plan)
+    app.router.add_post("/api/manager/plan", _manager_plan)
     app.router.add_get("/api/manager/cases", _manager_cases)
     app.router.add_get("/api/manager/stats.xlsx", _manager_stats_xlsx)
     app.router.add_get("/api/bootstrap", _bootstrap)

@@ -3851,6 +3851,30 @@ def visit_plan_map() -> dict[str, int]:
     return out
 
 
+def set_visit_plan(employee: str, norm) -> None:
+    """Личная норма сотрудника. Пусто или 0 — вернуть его к общей норме.
+
+    Карта целиком лежит в одной настройке, поэтому пишем её под чтение-запись
+    одним куском: правок тут единицы в месяц, а гонка двух руководителей за
+    разных людей стоила бы потерянной нормы.
+    """
+    import json as _json
+    employee = (employee or "").strip()
+    if not employee:
+        return
+    try:
+        value = int(norm)
+    except (TypeError, ValueError):
+        value = 0
+    plan_map = visit_plan_map()
+    if 0 < value <= 100:
+        plan_map[employee] = value
+    else:
+        plan_map.pop(employee, None)
+    set_setting("visit_plan_by_employee",
+                _json.dumps(plan_map, ensure_ascii=False))
+
+
 def visit_plan_for(employee: str, plan_map: dict[str, int] | None = None) -> int:
     """Норма конкретного сотрудника: личная, иначе общая."""
     plan_map = visit_plan_map() if plan_map is None else plan_map

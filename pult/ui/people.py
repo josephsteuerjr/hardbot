@@ -19,6 +19,7 @@ from .widgets import (Button, Card, CheckList, ChipFlow, Combo, Field, Note, Pag
                       Table, label, vcol)
 
 
+PLAN_COMMON = "общая"
 OFFICE_NONE = "— не задан —"
 
 
@@ -143,18 +144,21 @@ class PeopleSection:
                 guests = self.api("GET", "/admin/guests").get("guests") or []
             except RuntimeError:
                 guests = []
-            emps = self.api("GET", "/admin/employees").get("employees") or []
+            emps_payload = self.api("GET", "/admin/employees")
+            emps = emps_payload.get("employees") or []
             try:
                 offices = self.api("GET", "/admin/employee_cities.json")
             except RuntimeError:
                 offices = {}      # старый сервер про офисы не знает
-            return guests, emps, offices
+            return guests, emps, offices, emps_payload
 
         def done(res):
             self._loaded.add("people")
-            self.guests, emps, offices = res
+            self.guests, emps, offices, emps_meta = res
             self._offices = dict(offices.get("cities") or {})
             self._office_known = list(offices.get("known") or [])
+            self._plan_groups = list(emps_meta.get("plan_groups") or (8, 10, 12))
+            self._plan_common = emps_meta.get("plan_common") or 10
             self.un_emp.set_values([e["employee"] for e in emps])
             frame = self.roles_frame
             frame.clear()
@@ -166,8 +170,8 @@ class PeopleSection:
             grid.setContentsMargins(0, 0, 0, 0)
             grid.setHorizontalSpacing(10)
             grid.setVerticalSpacing(6)
-            for col, text in enumerate(("СОТРУДНИК", "ДОГОВОРОВ", "ОФИС", "TELEGRAM ID",
-                                        "ТИП", "СТАТУС", "", "ВХОД")):
+            for col, text in enumerate(("СОТРУДНИК", "ДОГОВОРОВ", "ОФИС", "НОРМА",
+                                        "TELEGRAM ID", "ТИП", "СТАТУС", "", "ВХОД")):
                 grid.addWidget(label(text, "caps"), 0, col)
             glabels = [guest_label(g) for g in self.guests]
             self._role_rows = []
@@ -185,18 +189,29 @@ class PeopleSection:
                 office.lineEdit().editingFinished.connect(
                     lambda emp=e["employee"], c=office: self.set_office(emp, c))
                 grid.addWidget(office, r, 2, Qt.AlignmentFlag.AlignTop)
+                # Норма выездов в день. Офис делит людей на группы по фактической
+                # выработке (8/10/12), и от неё считается план в сводке.
+                norm = Combo([PLAN_COMMON] + [str(n) for n in self._plan_groups],
+                             width_chars=9)
+                norm.setEditable(True)
+                norm.setCurrentText(str(e["plan"]) if e.get("plan_personal")
+                                    else PLAN_COMMON)
+                norm.on_select(lambda emp=e["employee"], c=norm: self.set_plan(emp, c))
+                norm.lineEdit().editingFinished.connect(
+                    lambda emp=e["employee"], c=norm: self.set_plan(emp, c))
+                grid.addWidget(norm, r, 3, Qt.AlignmentFlag.AlignTop)
                 combo = Combo([GUEST_PLACEHOLDER] + glabels, width_chars=40)
                 tid = Field(width_chars=16)
                 if e.get("telegram_id"):
                     tid.set(str(e["telegram_id"]))
                 combo.on_select(lambda c=combo, t=tid: self._pick_guest(c, t))
-                grid.addLayout(vcol(combo, tid, spacing=2), r, 3)
+                grid.addLayout(vcol(combo, tid, spacing=2), r, 4)
                 kind = Combo(KIND_LABELS, width_chars=11)
                 kind.set_current(kind_index(e))
-                grid.addWidget(kind, r, 4, Qt.AlignmentFlag.AlignTop)
+                grid.addWidget(kind, r, 5, Qt.AlignmentFlag.AlignTop)
                 status_text, bound = role_status(e)
                 grid.addWidget(Note(status_text, "success" if bound else "small", wrap=False),
-                               r, 5, Qt.AlignmentFlag.AlignTop)
+                               r, 8, Qt.AlignmentFlag.AlignTop)
                 grid.addWidget(Button("Привязать",
                                       lambda emp=e["employee"], t=tid, k=kind:
                                       self.bind_role(emp, t, k), kind="accent"),
@@ -208,7 +223,7 @@ class PeopleSection:
                                       self.issue_link(employee=emp, kind_combo=k)),
                                r, 7, Qt.AlignmentFlag.AlignTop)
                 self._role_rows.append((combo, tid, kind))
-            grid.setColumnStretch(8, 1)
+            grid.setColumnStretch(9, 1)
             frame.add(holder)
         self.bg_task(work, done)
 
@@ -228,6 +243,23 @@ class PeopleSection:
 
         self.bg_task(lambda: self.api("POST", "/admin/employee_cities.json",
                                       {"cities": {employee: city}}), done)
+
+    def set_plan(self, employee: str, combo) -> None:
+        """Записать норму выездов. Сохраняем сразу по выбору — как и офис."""
+        raw = (combo.get() or "").strip()
+        norm = 0 if raw in ("", PLAN_COMMON) else raw
+        try:
+            norm = int(norm)
+        except (TypeError, ValueError):
+            self.toast(f"{employee}: норма — это число (или «{PLAN_COMMON}»)")
+            return
+
+        def done(_d):
+            self.toast(f"{employee}: норма {norm} в день" if norm
+                       else f"{employee}: норма общая")
+
+        self.bg_task(lambda: self.api("POST", "/admin/visit_plan.json",
+                                      {"plan": {employee: norm}}), done)
 
     def _pick_guest(self, combo, tid_entry):
         i = combo.current()

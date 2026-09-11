@@ -790,7 +790,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=49;
+const SHELL_VERSION=50;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -3058,6 +3058,7 @@ async function dgLoad(){
   const url = DG.view==="stats"    ? "/api/manager/stats"+dgRangeQ()
             : DG.view==="emp"      ? "/api/manager/stats_employee"+dgRangeQ({employee:DG.emp})
             : DG.view==="person"   ? "/api/manager/person"+dgQ({employee:DG.emp,rep:DG.rep})
+            : DG.view==="plan"     ? "/api/manager/plan"
             : DG.view==="cases"    ? "/api/manager/cases"+dgRangeQ({metric:DG.metric||"visits",
                                        country:DG.country||"", office:DG.office||""})
             : DG.view==="map"      ? "/api/manager/map_data"+dgQ({employee:DG.emp})
@@ -3136,6 +3137,7 @@ function dgRender(j){
   if(DG.view==="map") return dgMap(j,b);
   if(DG.view==="photos") return dgPhotos(b);
   if(DG.view==="cases") return dgCasesScreen(j,b);
+  if(DG.view==="plan") return dgPlanScreen(j,b);
   return dgPromises(j,b);
 }
 // --- общие куски экранов статистики ---
@@ -3211,6 +3213,7 @@ function dgStats(j,b){
   parts.push(`<div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
     <button class="btn line" style="flex:1" onclick="dgOpenPromises()">⏰ Просрочено: ${t.overdue||0}</button>
     <button class="btn line" style="flex:1" onclick="dgGo('photos')">📸 Фото по КД</button>
+    <button class="btn line" style="flex:1" onclick="dgGo('plan')">🎯 Нормы</button>
     <button class="btn line" style="flex:1" onclick="dgExcel()">⬇️ Excel</button></div>`);
   b.innerHTML=parts.join("");
   dgDrawKpis();
@@ -3447,6 +3450,47 @@ function caseMarks(c){
   if(c.geo===false) out.push("📍 без гео");
   if(c.fill_text) out.push("⏱ карточка "+c.fill_text);
   return out.length?" · "+out.join(" · "):"";
+}
+// Норму правит сам руководитель: офис делит людей на группы 8/10/12 по
+// фактической выработке, и состав групп меняется чаще, чем выходят выкладки.
+// Сохраняем СРАЗУ по нажатию: отдельная кнопка «сохранить» на каждой из
+// тридцати строк — это тридцать поводов забыть её нажать.
+function dgPlanScreen(j,b){
+  DG.plan=j;
+  const groups=j.groups||[8,10,12];
+  const rows=(j.employees||[]).map((e,i)=>{
+    const chips=groups.map(n=>`<button class="chip${e.plan===n?" on":""}"
+      onclick="dgSetPlan(${i},${n})">${n}</button>`).join("")+
+      `<button class="chip${e.personal?"":" on"}" onclick="dgSetPlan(${i},0)">общая ${j.common}</button>`;
+    return `<div class="card" style="padding:10px;margin-top:8px">
+      <div class="pname">${esc(e.employee)}</div>
+      <div class="chips" style="margin-top:6px">${chips}</div></div>`;
+  }).join("");
+  b.innerHTML=`<button class="back" onclick="dgGo('stats')">‹ к сводке</button>`+
+    dgTop("Нормы выездов","сколько выездов в день ждём от человека")+
+    `<div class="muted" style="font-size:13px">Общая норма — ${j.common} в день. `+
+    `Личная перебивает общую; план команды считается их суммой.</div>`+
+    (rows||`<div class="center">Команда пуста</div>`)+
+    `<div id="dgplanmsg" class="muted" style="margin-top:10px;font-size:12px"></div>`;
+}
+async function dgSetPlan(i,norm){
+  const j=DG.plan||{}, row=(j.employees||[])[i];
+  if(!row) return;
+  const was=row.plan, wasOwn=row.personal;
+  row.plan=norm||j.common; row.personal=!!norm;      // рисуем сразу, ответа не ждём
+  dgPlanScreen(j,$("dgbody"));
+  const msg=$("dgplanmsg"); if(msg) msg.textContent="сохраняю…";
+  try{
+    const out=await api("/api/manager/plan",{method:"POST",headers:jsonHeaders(),
+      body:JSON.stringify({plan:{[row.employee]:norm}})});
+    DG.plan=out; dgPlanScreen(out,$("dgbody"));
+    const m2=$("dgplanmsg"); if(m2) m2.textContent="сохранено";
+  }catch(e){
+    row.plan=was; row.personal=wasOwn;               // не сохранилось — не врём
+    dgPlanScreen(j,$("dgbody"));
+    const m2=$("dgplanmsg");
+    if(m2) m2.textContent="не сохранилось: "+String((e&&e.message)||e)+" — попробуйте при связи";
+  }
 }
 const DG_METRIC_TITLE={visits:"Выезды",paid:"Оплачено",promised:"Обещают оплатить",
   with_photo:"Выезды с фото",persons:"Должники"};
