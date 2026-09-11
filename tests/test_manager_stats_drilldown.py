@@ -21,6 +21,8 @@ import digest_data as dd
 import photostore
 import web
 
+ROOT = __import__("pathlib").Path(__file__).resolve().parent.parent
+
 MGR = 559001
 EMP_TJ, EMP_UZ = "Дртаджиков Т.", "Друзбеков У."
 TODAY = date.today()
@@ -203,6 +205,26 @@ def test_person_card_without_photos_says_so(monkeypatch):
     data = dd.person_data(db.get_manager(MGR), T, EMP_TJ, "DR-1",
                           employees=[EMP_TJ, EMP_UZ])
     assert data["shots"] == []
+
+
+# --- оболочка: снимки видно сразу --------------------------------------------
+SHELL = (ROOT / "server" / "miniapp" / "index.html").read_text(encoding="utf-8")
+
+
+def test_card_loads_visit_photos_without_a_tap():
+    """Кнопка «показать» читалась как «фоток нет»: на экране слово «Фото · 1»
+    и больше ничего. Снимки дня выезда грузятся сами."""
+    body = SHELL[SHELL.index("function dgPerson("):SHELL.index("async function dgShotsAuto(")]
+    assert "dgShotsAuto();" in body, "автозагрузка снимков не вызывается"
+    assert 'id="shot${i}"' in body, "нет места под снимок"
+    assert "sh.on_visit" in body, "снимки дня выезда не отбираются"
+
+
+def test_extra_photos_stay_behind_a_tap():
+    """Альбом на десяток кадров в поле грузился бы минутами."""
+    assert "const DG_SHOTS_AUTO=3;" in SHELL
+    body = SHELL[SHELL.index("function dgPerson("):SHELL.index("async function dgShotsAuto(")]
+    assert "rest.map" in body and "dgShot(" in body
 
 
 # --- ручка -------------------------------------------------------------------

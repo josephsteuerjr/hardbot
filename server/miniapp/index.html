@@ -790,7 +790,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=44;
+const SHELL_VERSION=45;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -3275,22 +3275,48 @@ function dgPerson(j,b){
   const tail=[d.visit_date?"🗓 "+esc(d.visit_date):"",d.reminder_date?"🔁 "+esc(d.reminder_date):"",
               d.meeting_date?"📅 "+esc(d.meeting_date):""].filter(Boolean).join("   ");
   if(tail) parts.push(`<div class="muted">${tail}</div>`);
+  // Снимки ПОКАЗЫВАЕМ, а не предлагаем открыть. Руководитель заходит в карточку
+  // именно посмотреть фото-фиксацию, и кнопка «показать» читалась как «фоток
+  // нет»: на экране было слово «Фото · 1» и ничего больше.
   const shots=j.shots||[];
+  const auto=shots.filter(sh=>sh.on_visit).slice(0,DG_SHOTS_AUTO);
+  const rest=shots.filter(sh=>auto.indexOf(sh)<0);
+  DG.shots=auto.concat(rest);            // индексы кнопок = порядок в DG.shots
   if(shots.length){
     parts.push(`<div style="margin-top:10px;font-weight:700">📸 Фото · ${shots.length}</div>`);
-    parts.push(`<div id="dgshots" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px">`+
-      shots.map((sh,i)=>`<button class="btn line" style="padding:4px 10px" onclick="dgShot(${i})">
-        ${esc(sh.date||"")}${sh.on_visit?" · выезд":""}</button>`).join("")+
-      `</div><div id="dgshot"></div>`);
+    parts.push(auto.map((sh,i)=>`<div id="shot${i}" class="muted" style="margin-top:8px">загружаю снимок…</div>`).join(""));
+    // Остальные (другие даты или снимки сверх первых трёх) — по тапу: альбом на
+    // десяток кадров в поле грузился бы минутами.
+    if(rest.length) parts.push(`<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">`+
+      rest.map((sh,i)=>`<button class="btn line" style="padding:4px 10px" onclick="dgShot(${auto.length+i})">
+        ${esc(sh.date||"")}${sh.on_visit?" · выезд":""}</button>`).join("")+`</div>`);
+    parts.push(`<div id="dgshot"></div>`);
   }else{
     parts.push(`<div class="muted" style="margin-top:10px">📸 фото по этому клиенту нет</div>`);
   }
-  DG.shots=shots;
   parts.push(`<button class="btn line" style="margin-top:10px" onclick="dgGo('emp')">← ${esc(DG.emp||"")}</button>`);
   b.innerHTML=parts.join("");
+  dgShotsAuto();
 }
 // Снимок тянется fetch'ем с заголовком авторизации (токен в query запрещён) и
 // живёт в том же LRU блобов, что и фото-аудит.
+const DG_SHOTS_AUTO=3;
+async function dgShotsAuto(){
+  for(let i=0;i<DG_SHOTS_AUTO;i++){
+    const sh=(DG.shots||[])[i], box=$("shot"+i);
+    if(!sh||!box) return;                 // экран сменился или снимков меньше
+    try{
+      const u=await photoBlobUrl(sh.file);
+      const el=$("shot"+i); if(!el) return;
+      el.className="";
+      el.innerHTML=`<img src="${u}" style="max-width:100%;border-radius:10px"
+        onerror="this.outerHTML='<div class=muted>файл не отобразился</div>'">
+        <div class="muted" style="font-size:11px;margin-top:2px">${esc(sh.date||"")}${sh.on_visit?" · в день выезда":""}</div>`;
+    }catch(e){
+      const el=$("shot"+i); if(el) el.textContent="снимок не загрузился ("+String(e.message||e)+")";
+    }
+  }
+}
 async function dgShot(i){
   const sh=(DG.shots||[])[i], box=$("dgshot"); if(!sh||!box) return;
   box.innerHTML=`<div class="muted" style="margin-top:8px">…</div>`;
