@@ -402,9 +402,25 @@ def _person_payload(p: dict, on_date: str) -> dict:
                "pretty": f"{d / 1000:.1f} км" if d >= 1000 else f"{d} м",
                "far": bool(far), "source": source, "by_other": by_other}
 
+    # Снимки — В КАРТОЧКЕ. Раньше они жили только на отдельном экране «Фото по
+    # КД», и руководитель, открыв отчёт по клиенту, которого сам же просил
+    # сфотографировать, фото не находил и считал, что его нет.
+    shots = []
+    for path in photostore.person_photos(cs)[:12]:
+        try:
+            taken = date.fromtimestamp(path.stat().st_mtime).isoformat()
+        except OSError:
+            continue
+        shots.append({"file": photostore.photo_key(path), "date": taken,
+                      "on_visit": taken == on_date})
+    shots.sort(key=lambda x: (not x["on_visit"], x["date"]), reverse=False)
+
     return {
         "screen": "person",
         "rep": p["rep"], "client": p["client"], "n": p["n"],
+        # «photos» ниже — счётчик снимков, он был здесь раньше; список файлов
+        # для показа в карточке кладём отдельным ключом.
+        "shots": shots,
         "birth_date": rawv("birth_date"),
         "partners": list(p.get("partners") or []),
         "partner": ", ".join(p.get("partners") or []) or (rawv("partner") or ""),
@@ -444,6 +460,60 @@ def person_data(mgr: dict, on_date: str, employee: str, rep: str,
     if p is None:
         return None
     return _person_payload(p, on_date)
+
+
+# --- ЭКРАН: случаи за окном (тап по плашке сводки) ---------------------------
+CASE_METRICS = {"visits", "paid", "promised", "with_photo", "persons"}
+CASES_LIMIT = 300
+
+
+def cases_data(mgr: dict, rng: dict, metric: str, country: str = "",
+               employees: list[str] | None = None) -> dict:
+    """Список выездов за окно по одной метрике сводки.
+
+    Плашки «выездов / оплачен / обещают / с фото» были голыми числами: за
+    вопросом «а кто это» руководителю приходилось перебирать сотрудников по
+    одному. Здесь тот же набор, из которого сложилась цифра.
+    """
+    employees = employees if employees is not None else sorted_employees(mgr)
+    metric = metric if metric in CASE_METRICS else "visits"
+    country_of = _employee_country_index()
+    if country:
+        employees = [e for e in employees if country_of.get(e) == country]
+    items = []
+    for emp in employees:
+        r = _employee_stats(emp, rng["from"], rng["to"], with_photos=False)
+        entries = r["_entries"]
+        # «Оплачен», «обещают» и «должников» — это ПОСЛЕДНЕЕ состояние человека
+        # за окно, ровно как в плашках; «выездов» — каждый человеко-день.
+        if metric != "visits":
+            last = {}
+            for e in entries:
+                last[e["person"]["rep"]] = e
+            entries = list(last.values())
+        if metric == "paid":
+            entries = [e for e in entries if e["status"] == OUTCOME_PAID]
+        elif metric == "promised":
+            entries = [e for e in entries if e["status"] == OUTCOME_PROMISE]
+        for e in entries:
+            p = e["person"]
+            photos = len(photostore.day_photos(p["contracts"], e["date"]))
+            if metric == "with_photo" and not photos:
+                continue
+            items.append({
+                "employee": emp, "date": e["date"],
+                "day_label": _short_date(db._as_date(e["date"])),
+                "rep": p["rep"], "client": p["client"], "n": p["n"],
+                "outcome": e["status"], "emoji": _st_emoji(e["status"]),
+                "agreed": e["agreed"], "photos": photos,
+                "money": _totals_units([p]), "money_text": _persons_total([p]),
+            })
+    items.sort(key=lambda c: (c["date"], c["client"]), reverse=True)
+    return {
+        "screen": "cases", "range": rng, "metric": metric, "country": country,
+        "total": len(items), "cases": items[:CASES_LIMIT],
+        "limit": CASES_LIMIT,
+    }
 
 
 # --- ЭКРАН 4: просроченные обещания -----------------------------------------
@@ -712,6 +782,35 @@ def _employee_country_index() -> dict[str, str]:
     return out
 
 
+def _totals_of(rows: list[dict], days: int) -> dict:
+    """Свод по набору строк сотрудников. Набор — вся команда или одна страна.
+
+    План считается от нормы на человека в день (settings visit_plan_per_day,
+    по умолчанию 10): офис ставит задачу именно так — «10 выездов на
+    сотрудника», — и без плана в сводке процент проработки каждый день
+    складывали на бумаге.
+    """
+    people = [e["person"] for r in rows for e in
+              {e["person"]["rep"]: e for e in r["_entries"]}.values()]
+    paid = [p for r in rows for p in r["_paid"]]
+    per_day = db.visit_plan_per_day()
+    return {
+        "employees": len(rows),
+        "active": sum(1 for r in rows if r["visits"]),
+        "visits": sum(r["visits"] for r in rows),
+        "persons": len(people),
+        "contracts": _contracts_of(people),
+        "paid": sum(r["paid"] for r in rows),
+        "promised": sum(r["promised"] for r in rows),
+        "overdue": sum(r["overdue"] for r in rows),
+        "with_photo": sum(r["with_photo"] for r in rows),
+        "money": _totals_units(people), "money_text": _persons_total(people),
+        "money_paid": _totals_units(paid), "money_paid_text": _persons_total(paid),
+        "plan_per_day": per_day,
+        "plan": per_day * len(rows) * max(1, days),
+    }
+
+
 def stats_data(mgr: dict, rng: dict, employees: list[str] | None = None) -> dict:
     employees = employees if employees is not None else sorted_employees(mgr)
     d_from, d_to = rng["from"], rng["to"]
@@ -725,32 +824,22 @@ def stats_data(mgr: dict, rng: dict, employees: list[str] | None = None) -> dict
         rows.append(r)
     for i, x in enumerate(days):
         x["visits"] = sum(r["by_day"][i] for r in rows)
-    people = [e["person"] for r in rows for e in
-              {e["person"]["rep"]: e for e in r["_entries"]}.values()]
-    paid = [p for r in rows for p in r["_paid"]]
     order = [spec["code"] for spec in country_scope.COUNTRIES]
     codes = sorted({r["country"] for r in rows if r["country"]}, key=order.index)
     return {
         "screen": "stats",
         "range": rng,
-        "totals": {
-            "employees": len(rows),
-            "active": sum(1 for r in rows if r["visits"]),
-            "visits": sum(r["visits"] for r in rows),
-            "persons": len(people),
-            "contracts": _contracts_of(people),
-            "paid": sum(r["paid"] for r in rows),
-            "promised": sum(r["promised"] for r in rows),
-            "overdue": sum(r["overdue"] for r in rows),
-            "with_photo": sum(r["with_photo"] for r in rows),
-            "money": _totals_units(people), "money_text": _persons_total(people),
-            "money_paid": _totals_units(paid), "money_paid_text": _persons_total(paid),
-        },
+        "totals": _totals_of(rows, len(days)),
         "by_day": days,
         "employees": sorted(rows, key=lambda r: (-r["visits"], r["employee"].lower())),
+        # Итоги КАЖДОЙ страны считаются той же функцией, что и общий свод.
+        # Фильтр «Тадж/Узб» переключает не только таблицу: руководитель
+        # направления смотрел на плашки всего СНГ и видел там чужие цифры.
         "countries": [{"code": c,
                        **{k: country_scope.info(c)[k] for k in ("name", "short", "flag")},
-                       "employees": sum(1 for r in rows if r["country"] == c)}
+                       "employees": sum(1 for r in rows if r["country"] == c),
+                       "totals": _totals_of([r for r in rows if r["country"] == c],
+                                            len(days))}
                       for c in codes],
         "scope": scope_label(mgr),
         "manager_name": mgr.get("name") or "",
@@ -777,7 +866,9 @@ def stats_employee_data(mgr: dict, rng: dict, employee: str,
             "money": _totals_units([p]), "money_text": _persons_total([p]),
             "photos": len(photostore.day_photos(p["contracts"], e["date"])),
         })
-    return {"screen": "emp", "range": rng, **r, "by_day": days, "cases": cases}
+    per_day = db.visit_plan_per_day()
+    return {"screen": "emp", "range": rng, **r, "by_day": days, "cases": cases,
+            "plan_per_day": per_day, "plan": per_day * max(1, len(days))}
 
 
 def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> bytes:

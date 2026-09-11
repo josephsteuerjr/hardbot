@@ -261,7 +261,9 @@ textarea{min-height:64px;resize:vertical}
 .dates input{flex:1;min-width:0;padding:9px 10px;border:1px solid var(--border);border-radius:10px;
   font:inherit;background:var(--card);color:var(--text)}
 .kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0 6px}
-.kpi{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:10px 12px}
+.kpi{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:10px 12px;
+  text-align:left;width:100%;font:inherit;color:inherit}
+button.kpi:active{background:var(--alt)}
 .kpi .n{font-size:20px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums}
 .kpi .l{font-size:11px;color:var(--muted);margin-top:3px}
 .bars{display:flex;align-items:flex-end;gap:2px;height:56px;margin:10px 0 2px}
@@ -788,7 +790,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=43;
+const SHELL_VERSION=44;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -3018,6 +3020,8 @@ async function dgLoad(){
   const url = DG.view==="stats"    ? "/api/manager/stats"+dgRangeQ()
             : DG.view==="emp"      ? "/api/manager/stats_employee"+dgRangeQ({employee:DG.emp})
             : DG.view==="person"   ? "/api/manager/person"+dgQ({employee:DG.emp,rep:DG.rep})
+            : DG.view==="cases"    ? "/api/manager/cases"+dgRangeQ({metric:DG.metric||"visits",
+                                       country:DG.country||""})
             : DG.view==="map"      ? "/api/manager/map_data"+dgQ({employee:DG.emp})
             : DG.view==="photos"   ? null
             :                        "/api/manager/promises"+dgQ();
@@ -3057,10 +3061,15 @@ function dgDay(i){ const d=DG.days[i]; if(!d) return;
   DG.preset="custom"; DG.from=d.date; DG.to=d.date; DG.shift=0; dgLoad(); }
 // --- таблица: сортировка, страна, поиск ---
 function dgSort(k){ if(DG.sort===k) DG.dir=-DG.dir; else { DG.sort=k; DG.dir=(k==="employee")?1:-1; } dgDrawTable(); }
-function dgCountry(c){ DG.country=c; dgDrawTable(); }
+function dgCountry(c){ DG.country=c; dgDrawKpis(); dgDrawTable(); }
+function dgCases(metric){ dgGo("cases",{metric}); }
 function dgSearch(v){ DG.q=(v||"").trim().toLowerCase(); dgDrawTable(); }
 function dgPickEmp(i){ const r=DG.rows[i]; if(r) dgGo("emp",{emp:r.employee}); }
-function dgPickCase(i){ const c=DG.cases[i]; if(c){ DG.date=c.date; dgGo("person",{rep:c.rep}); } }
+function dgPickCase(i){ const c=DG.cases[i]; if(!c) return;
+  DG.date=c.date;
+  // В общем списке случаи разных сотрудников: карточку открываем от имени того,
+  // за кем закреплён договор, иначе сервер честно ответит «не ваш человек».
+  dgGo("person",{rep:c.rep, emp:c.employee||DG.emp}); }
 function dgOpenMap(i){ const d=DG.days[i]; if(d){ DG.date=d.date; dgGo("map"); } }
 function dgOpenPromises(){ DG.date=DG.to; dgGo("promises"); }
 function dgDate(iso){ if(!iso) return; DG.date=iso; dgLoad(); }
@@ -3085,6 +3094,7 @@ function dgRender(j){
   if(DG.view==="person") return dgPerson(j,b);
   if(DG.view==="map") return dgMap(j,b);
   if(DG.view==="photos") return dgPhotos(b);
+  if(DG.view==="cases") return dgCasesScreen(j,b);
   return dgPromises(j,b);
 }
 // --- общие куски экранов статистики ---
@@ -3101,19 +3111,30 @@ function dgPeriodBar(rg){
       <button class="arr" ${rg.next?"":"disabled"} onclick="dgShift(1)">›</button></div>`;
 }
 function dgKpis(t,rg){
-  const k=(n,l)=>`<div class="kpi"><div class="n">${n}</div><div class="l">${l}</div></div>`;
+  // Плашка — кнопка: тап открывает те самые случаи, из которых сложилось число.
+  // Прежде это были голые цифры, и на вопрос «а кто это» руководитель перебирал
+  // сотрудников по одному.
+  const k=(n,l,go)=>go
+    ?`<button class="kpi" onclick="${go}"><div class="n">${n}</div><div class="l">${l} ›</div></button>`
+    :`<div class="kpi"><div class="n">${n}</div><div class="l">${l}</div></div>`;
   const multi=(rg&&rg.days>1);
+  const team=(t.employees!=null);      // сводка команды, а не одного сотрудника
+  const c=(m)=>team?`dgCases('${m}')`:"";
   // За один день «должников» = «выездов»: шестая плашка тогда — состав команды
   // (или договоры у сотрудника); за период — уникальные должники.
-  const sixth=multi?k(t.persons||0,"должников")
-             :(t.employees!=null?k((t.active||0)+"/"+t.employees,"в работе"):k(t.contracts||0,"договоров"));
+  const sixth=multi?k(t.persons||0,"должников",c("persons"))
+             :(team?k((t.active||0)+"/"+t.employees,"в работе"):k(t.contracts||0,"договоров"));
   const line=[];
-  if(multi&&t.employees!=null) line.push(`👥 в работе ${t.active||0} из ${t.employees}`);
+  // План офиса — «10 выездов на сотрудника в день». Без него процент
+  // проработки каждый день складывали на бумаге и присылали в чат руками.
+  if(t.plan) line.push(`🎯 план ${t.plan} (${t.plan_per_day} на человека) · `+
+    `<b>${Math.round((t.visits||0)/t.plan*100)}%</b>`);
+  if(multi&&team) line.push(`👥 в работе ${t.active||0} из ${t.employees}`);
   if(t.money_text) line.push(`💰 долг ${esc(t.money_text)}`);
   if(t.money_paid_text) line.push(`✅ закрыто ${esc(t.money_paid_text)}`);
   return `<div class="kpis">
-    ${k(t.visits||0,"выездов")}${k(t.paid||0,"оплачен")}${k(t.promised||0,"обещают")}
-    ${k(t.overdue||0,"обещаний просрочено")}${k((t.with_photo||0)+"/"+(t.persons||0),"с фото")}${sixth}
+    ${k(t.visits||0,"выездов",c("visits"))}${k(t.paid||0,"оплачен",c("paid"))}${k(t.promised||0,"обещают",c("promised"))}
+    ${k(t.overdue||0,"обещаний просрочено",team?"dgOpenPromises()":"")}${k((t.with_photo||0)+"/"+(t.persons||0),"с фото",c("with_photo"))}${sixth}
   </div>${line.length?`<div class="muted" style="font-size:13px">${line.join(" · ")}</div>`:""}`;
 }
 function dgBars(days){
@@ -3137,7 +3158,7 @@ function dgStats(j,b){
   const rg=j.range||{}, t=j.totals||{};
   const parts=[dgTop((j.manager&&j.manager.name)?j.manager.name:"Статистика", j.scope)];
   parts.push(dgPeriodBar(rg));
-  parts.push(dgKpis(t,rg));
+  parts.push(`<div id="dgkpis"></div>`);
   if(DG.days.length>1) parts.push(dgBars(DG.days));
   parts.push(`<div class="searchwrap" style="margin:10px 0 0">${ic("search")}
     <input class="search" placeholder="Поиск сотрудника" value="${esc(DG.q)}" oninput="dgSearch(this.value)"></div>
@@ -3147,7 +3168,20 @@ function dgStats(j,b){
     <button class="btn line" style="flex:1" onclick="dgGo('photos')">📸 Фото по КД</button>
     <button class="btn line" style="flex:1" onclick="dgExcel()">⬇️ Excel</button></div>`);
   b.innerHTML=parts.join("");
+  dgDrawKpis();
   dgDrawTable();
+}
+// Итоги выбранной страны сервер считает той же функцией, что и общий свод, —
+// плашки и таблица всегда об одном и том же наборе людей.
+function dgCountryTotals(){
+  const j=DG.stats||{};
+  if(!DG.country) return j.totals||{};
+  const c=(j.countries||[]).find(x=>x.code===DG.country);
+  return (c&&c.totals)||j.totals||{};
+}
+function dgDrawKpis(){
+  const el=$("dgkpis"); if(!el||!DG.stats) return;
+  el.innerHTML=dgKpis(dgCountryTotals(), DG.stats.range||{});
 }
 function dgDrawTable(){
   const j=DG.stats, el=$("dgtable"); if(!j||!el) return;
@@ -3241,8 +3275,30 @@ function dgPerson(j,b){
   const tail=[d.visit_date?"🗓 "+esc(d.visit_date):"",d.reminder_date?"🔁 "+esc(d.reminder_date):"",
               d.meeting_date?"📅 "+esc(d.meeting_date):""].filter(Boolean).join("   ");
   if(tail) parts.push(`<div class="muted">${tail}</div>`);
+  const shots=j.shots||[];
+  if(shots.length){
+    parts.push(`<div style="margin-top:10px;font-weight:700">📸 Фото · ${shots.length}</div>`);
+    parts.push(`<div id="dgshots" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px">`+
+      shots.map((sh,i)=>`<button class="btn line" style="padding:4px 10px" onclick="dgShot(${i})">
+        ${esc(sh.date||"")}${sh.on_visit?" · выезд":""}</button>`).join("")+
+      `</div><div id="dgshot"></div>`);
+  }else{
+    parts.push(`<div class="muted" style="margin-top:10px">📸 фото по этому клиенту нет</div>`);
+  }
+  DG.shots=shots;
   parts.push(`<button class="btn line" style="margin-top:10px" onclick="dgGo('emp')">← ${esc(DG.emp||"")}</button>`);
   b.innerHTML=parts.join("");
+}
+// Снимок тянется fetch'ем с заголовком авторизации (токен в query запрещён) и
+// живёт в том же LRU блобов, что и фото-аудит.
+async function dgShot(i){
+  const sh=(DG.shots||[])[i], box=$("dgshot"); if(!sh||!box) return;
+  box.innerHTML=`<div class="muted" style="margin-top:8px">…</div>`;
+  try{
+    const u=await photoBlobUrl(sh.file);
+    box.innerHTML=`<img src="${u}" style="max-width:100%;border-radius:10px;margin-top:8px"
+      onerror="this.outerHTML='<div class=muted>файл не отобразился</div>'">`;
+  }catch(e){ box.innerHTML=`<div class="muted" style="margin-top:8px">не удалось загрузить (${esc(String(e.message||e))})</div>`; }
 }
 function dgPromises(j,b){
   const t=j.totals||{};
@@ -3298,6 +3354,31 @@ async function dgMap(j,b){
   (j.markers||[]).forEach(p2=>add(p2,"#F2994A","","📍 "+esc(p2.label||"метка")+(p2.at?" · "+esc(p2.at):"")));
   MAP.fitBounds(bnd,{padding:60,maxZoom:15});
   $("dgleg").textContent="🔵 адрес · 🟢 визит · 🔴 далеко · 🟣 закрыл руководитель · 🟠 метка";
+}
+const DG_METRIC_TITLE={visits:"Выезды",paid:"Оплачено",promised:"Обещают оплатить",
+  with_photo:"Выезды с фото",persons:"Должники"};
+function dgCasesScreen(j,b){
+  DG.cases=[]; DG.days=j.by_day||DG.days||[];
+  const rg=j.range||{}, cs=j.cases||[];
+  const country=(DG.stats&&(DG.stats.countries||[]).find(x=>x.code===j.country))||null;
+  const parts=[`<button class="back" onclick="dgGo('stats')">‹ к сводке</button>`,
+               dgTop(DG_METRIC_TITLE[j.metric]||"Случаи",
+                     [rg.label, country?country.name:""].filter(Boolean).join(" · "))];
+  parts.push(`<div class="muted" style="font-size:13px;margin-bottom:6px">всего: <b>${j.total||0}</b>`+
+    (j.total>cs.length?` · показаны первые ${cs.length}`:"")+`</div>`);
+  let cur=null; const items=[];
+  cs.forEach(c=>{
+    const i=DG.cases.push(c)-1;
+    if(c.date!==cur){ cur=c.date;
+      items.push(`<div class="fsec-h" style="margin-top:14px">${esc(c.day_label||c.date)}</div>`); }
+    items.push(`<div class="pcard" onclick="dgPickCase(${i})"><div class="pinfo">
+      <div class="pname">${esc(c.emoji||"")} ${esc(c.client)}</div>
+      <div class="psub">${esc(c.employee||"")}${c.money_text?" · "+esc(c.money_text):""}`+
+      `${c.photos?" · 📸 "+c.photos:""}${c.agreed?" · "+esc(c.agreed):""}</div>
+      </div><span class="pchev">${ic("chevR")}</span></div>`);
+  });
+  parts.push(items.join("")||`<div class="center">Ничего не найдено</div>`);
+  b.innerHTML=parts.join("");
 }
 function dgPhotos(b){
   b.innerHTML=`${dgHeadHTML({date:DG.date,today:DG.today,prev_date:DG.prev,next_date:null},"📸 Фото по договору")}

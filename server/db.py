@@ -3683,6 +3683,24 @@ def geo_tolerance_m(precision: str | None, src: str | None = None) -> int | None
     return _GEO_TOLERANCE_M.get((precision or "").strip().lower())
 
 
+VISIT_PLAN_DEFAULT = 10
+
+
+def visit_plan_per_day() -> int:
+    """Сколько выездов в день офис ждёт от одного сотрудника.
+
+    Норму ставит офис («план 10 на сотрудника»), и меняться она будет без нас —
+    поэтому настройка, а не константа в коде. Мусор и ноль трактуем как
+    «плана нет по умолчанию» и возвращаем базовые 10: сводка без плана снова
+    заставила бы считать процент проработки на бумаге.
+    """
+    try:
+        value = int(str(get_setting("visit_plan_per_day") or "").strip() or 0)
+    except (TypeError, ValueError):
+        return VISIT_PLAN_DEFAULT
+    return value if 0 < value <= 1000 else VISIT_PLAN_DEFAULT
+
+
 def geo_alert_m() -> int:
     """Порог «далеко от адреса» в метрах (settings.geo_alert_m, дефолт 1000).
 

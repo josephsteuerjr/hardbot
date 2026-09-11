@@ -172,8 +172,13 @@ def test_foreign_employee_is_none_and_country_index_is_live():
                                   employees=[EMP_A, EMP_B]) is None
     data = dd.stats_data(db.get_manager(MGR), _rng(), employees=[EMP_A, EMP_B])
     assert all(r["country"] == "tj" for r in data["employees"])
-    assert data["countries"] == [{"code": "tj", "name": "Таджикистан", "short": "Тадж",
-                                  "flag": "🇹🇯", "employees": 2}]
+    keys = ("code", "name", "short", "flag", "employees")
+    assert [{k: c[k] for k in keys} for c in data["countries"]] == [
+        {"code": "tj", "name": "Таджикистан", "short": "Тадж",
+         "flag": "🇹🇯", "employees": 2}]
+    # У страны теперь свои итоги — плашки сводки слушают фильтр «Тадж/Узб».
+    # Команда целиком таджикская, поэтому её свод равен общему.
+    assert data["countries"][0]["totals"]["visits"] == data["totals"]["visits"]
 
 
 def test_person_card_opens_for_a_past_visit_day():

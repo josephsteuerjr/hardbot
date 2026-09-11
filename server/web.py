@@ -2790,6 +2790,20 @@ async def _manager_stats_employee(request: web.Request) -> web.Response:
     return _manager_json({**_stats_envelope(mgr, team, rng, uid), **data})
 
 
+async def _manager_cases(request: web.Request) -> web.Response:
+    """Случаи за окном по одной плашке сводки: тап по числу — и вот из чего оно."""
+    uid, mgr, team = _manager_gate(request)
+    rng = _stats_range_q(request)
+    metric = (request.query.get("metric") or "visits").strip()
+    country = (request.query.get("country") or "").strip()[:8]
+    data = digest_data.cases_data(mgr, rng, metric, country, employees=team)
+    reps = ",".join(c["rep"] for c in data["cases"][:50])
+    db.audit_access(uid, "digest_view",
+                    detail=f"cases {data['metric']} {rng['from']}..{rng['to']} "
+                           f"country={country or '-'} n={data['total']} reps={reps}")
+    return _manager_json({**_stats_envelope(mgr, team, rng, uid), **data})
+
+
 async def _manager_stats_xlsx(request: web.Request) -> web.Response:
     """Та же статистика книгой Excel. Токен — только в заголовке (как у фото):
     ссылка с токеном осела бы в истории браузера."""
@@ -4332,6 +4346,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/manager/photo", _manager_photo_file)
     app.router.add_get("/api/manager/stats", _manager_stats)
     app.router.add_get("/api/manager/stats_employee", _manager_stats_employee)
+    app.router.add_get("/api/manager/cases", _manager_cases)
     app.router.add_get("/api/manager/stats.xlsx", _manager_stats_xlsx)
     app.router.add_get("/api/bootstrap", _bootstrap)
     app.router.add_get("/api/person", _person)
