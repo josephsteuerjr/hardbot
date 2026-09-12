@@ -144,6 +144,9 @@ button,a,input,select,textarea,.pcard{touch-action:manipulation}
 .btn.acc{background:var(--accent);color:var(--bg);border:none}
 .btn.ghost{background:transparent}
 .btn.line{margin-top:8px}
+/* Замороженная кнопка: видно, что средство есть, но сейчас не работает. Прятать
+   её нельзя — человек в поле не отличит «у меня другое приложение» от «сломалось». */
+.btn.frozen{opacity:.45;cursor:default}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .providers{display:flex;gap:8px;margin-bottom:10px}
 .providers a{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;
@@ -360,6 +363,7 @@ const I18N = {
     dggoneemp:"Сотрудник больше не в вашей команде",
     freenavfail:"Адрес не распознан",freenavrough:"Точность: только до района",
     voice:"Надиктовать",voicestop:"Стоп — распознать",voicewait:"Распознаю…",voicefail:"Не распозналось, попробуйте ещё",voiceunavail:"Голос временно недоступен — введите комментарий вручную",
+    voiceoff:"Распознавание речи не подключено — введите комментарий вручную",
     comment:"Комментарий",extraFields:"Из реестра",historicalComment:"Историчный комментарий выезда",tips:"Доп. адрес / доп. номер",lastvisit:"Последний выезд",
     status:"Статус",saved:"Сохранено",none:"Точка не задана",geook:"Точка проверена",
     nocl:"За вами пока никто не закреплён",photos:"Фото",contracts:"Договоры",promise:"Обещания",born:"Дата рождения",
@@ -406,6 +410,7 @@ const I18N = {
     dggoneemp:"Xodim endi jamoangizda emas",
     freenavfail:"Manzil topilmadi",freenavrough:"Aniqlik: faqat tuman darajasida",
     voice:"Ovozli izoh",voicestop:"To‘xtatish",voicewait:"Aniqlanmoqda…",voicefail:"Bo‘lmadi, yana urinib ko‘ring",voiceunavail:"Ovoz vaqtincha ishlamayapti — izohni qo‘lda kiriting",
+    voiceoff:"Nutqni aniqlash ulanmagan — izohni qo‘lda kiriting",
     comment:"Izoh",extraFields:"Reyestrdan",historicalComment:"Oldingi tashriflar izohi",tips:"Qo‘shimcha manzil / raqam",lastvisit:"Oxirgi chiqish",
     status:"Holat",saved:"Saqlandi",none:"Nuqta yo‘q",geook:"Nuqta tekshirildi",
     nocl:"Sizga hali mijoz biriktirilmagan",photos:"Rasm",contracts:"Shartnomalar",promise:"Va’dalar",born:"Tug‘ilgan sana",
@@ -452,6 +457,7 @@ const I18N = {
     dggoneemp:"Корманд дигар дар дастаи шумо нест",
     freenavfail:"Нишонӣ шинохта нашуд",freenavrough:"Дақиқӣ: танҳо то ноҳия",
     voice:"Гуфтан",voicestop:"Ист — шинохт",voicewait:"Шинохта истодааст…",voicefail:"Нашуд, боз кӯшиш кунед",voiceunavail:"Овоз муваққатан дастнорас аст — шарҳро дастӣ нависед",
+    voiceoff:"Шинохти нутқ пайваст нест — шарҳро дастӣ нависед",
     comment:"Шарҳ",extraFields:"Аз феҳрист",historicalComment:"Шарҳи таърихии боздид",tips:"Суроға / рақами иловагӣ",lastvisit:"Сафари охирин",
     status:"Ҳолат",saved:"Захира шуд",none:"Нуқта нест",geook:"Нуқта тасдиқ шуд",
     nocl:"Ба шумо ҳоло мизоҷе вобаста нашудааст",photos:"Расм",contracts:"Шартномаҳо",promise:"Ваъдаҳо",born:"Санаи таваллуд",
@@ -790,7 +796,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=50;
+const SHELL_VERSION=51;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1876,7 +1882,11 @@ function panelForm(d,t){
     ${promiseSection(d)}
     <div class="fsec"><div class="fsec-h">${t.comment}</div>
       <label class="fld">${t.comment}</label><textarea id="f_visit_comment">${esc(d.visit_comment||d.call_comment||"")}</textarea>
-      ${(STATE.meta&&STATE.meta.voice)?`<button class="btn line" id="micbtn" style="margin-top:8px" onclick="toggleVoice()">🎤 <span>${esc(t.voice)}</span></button>`:""}
+      ${(STATE.meta&&STATE.meta.voice)
+        ?`<button class="btn line" id="micbtn" style="margin-top:8px" onclick="toggleVoice()">🎤 <span>${esc(t.voice)}</span></button>`
+        :`<button class="btn line frozen" id="micbtn" style="margin-top:8px" disabled
+            title="${esc(t.voiceoff)}">🎤 <span>${esc(t.voice)}</span></button>
+          <div class="muted" style="font-size:11px;margin-top:2px">${esc(t.voiceoff)}</div>`}
       <label class="fld">${t.tips}</label><textarea id="f_tips">${esc(d.tips||"")}</textarea>
     </div>
     <div class="fsec"><div class="fsec-h">${t.photos}</div>
