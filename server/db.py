@@ -1318,6 +1318,48 @@ def employees_with_bindings() -> list[dict]:
     return out
 
 
+def team_bindings(employees: list[str]) -> dict:
+    """Аккаунты команды: {"bound": {ФИО: [аккаунты]}, "pending": [заявки]}.
+
+    Один запрос на всю команду, а не тридцать по одному ФИО: экран открывают с
+    телефона в поле.
+
+    Имя профиля и ник тянем из users — ими чужого и опознают: «Bahrom Sharifov»
+    на ФИО «Бахтиёров Юсуфхон» видно сразу, а по голому telegram_id не видно
+    ничего. За ФИО возвращается СПИСОК, а не одна привязка: два одобренных
+    устройства на одном имени в базе возможны (аппрув из бота прежнее не
+    вытеснял), и прятать это от руководителя — значит прятать ровно то, что он
+    должен починить.
+    """
+    names = [str(e).strip() for e in (employees or []) if str(e).strip()]
+    if not names:
+        return {"bound": {}, "pending": []}
+    holes = ",".join("?" * len(names))
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT b.telegram_id, b.employee, b.kind, b.approved, b.created_at, "
+            "u.name, u.username, u.last_seen "
+            "FROM agent_bind b LEFT JOIN users u ON u.telegram_id = b.telegram_id "
+            f"WHERE b.employee IN ({holes}) ORDER BY b.created_at, b.telegram_id",
+            names).fetchall()
+    bound: dict[str, list] = {}
+    pending: list = []
+    for r in rows:
+        item = {"telegram_id": r["telegram_id"], "employee": r["employee"],
+                "kind": r["kind"] or "agent", "since": r["created_at"],
+                "profile": (r["name"] or "").strip() or None,
+                "username": (r["username"] or "").strip() or None,
+                "last_seen": r["last_seen"],
+                # Вход без телеграма (служебный id из пульта): показывать «id
+                # 900000000012» человеку незачем — это не его телеграм.
+                "local": is_local_uid(r["telegram_id"])}
+        if r["approved"]:
+            bound.setdefault(r["employee"], []).append(item)
+        else:
+            pending.append(item)
+    return {"bound": bound, "pending": pending}
+
+
 def clients_of_employee(employee: str) -> list:
     """Все договоры, закреплённые за сотрудником, — для «убрать клиентов» в пульте.
     Без фильтра по периоду: снимают из ПОЛНОГО текущего портфеля, а не из витрины."""
@@ -1421,6 +1463,20 @@ def pending_binding(telegram_id: int) -> sqlite3.Row | None:
         return conn.execute(
             "SELECT * FROM agent_bind WHERE telegram_id = ? AND approved = 0", (telegram_id,)
         ).fetchone()
+
+
+def binding_of(telegram_id: int) -> sqlite3.Row | None:
+    """Строка привязки аккаунта — одобренная ИЛИ заявка, что найдётся.
+
+    get_binding отдаёт только одобренную, pending_binding — только заявку, а
+    руководителю на экране «кто есть кто» нужно ровно одно: за каким ФИО этот
+    аккаунт числится СЕЙЧАС. По этому ФИО и проверяется, свой ли это человек:
+    аккаунта без строки в agent_bind руководителю не видно вовсе, и тронуть
+    его он не может.
+    """
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM agent_bind WHERE telegram_id = ?", (telegram_id,)).fetchone()
 
 
 def approve_binding(telegram_id: int) -> str | None:

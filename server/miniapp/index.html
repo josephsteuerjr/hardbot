@@ -796,7 +796,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=52;
+const SHELL_VERSION=53;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -3024,7 +3024,8 @@ async function renderMarks(){
 let DG={view:"stats", date:null, today:null, prev:null, next:null,
         preset:"today", shift:0, from:null, to:null, range:null,
         emp:null, rep:null, seq:0, last:0, rows:[], cases:[], items:[], days:[],
-        sort:"visits", dir:-1, country:"", q:"", stats:null};
+        sort:"visits", dir:-1, country:"", q:"", stats:null,
+        binds:null, baccs:[], bindacc:null, bindq:"", btargets:[]};
 function dgQ(extra){ const p=new URLSearchParams(); if(DG.date) p.set("date",DG.date);
   Object.entries(extra||{}).forEach(([k,v])=>{ if(v!=null&&v!=="") p.set(k,v); });
   const s=p.toString(); return s?("?"+s):""; }
@@ -3038,7 +3039,7 @@ function dgRangeQ(extra){
 async function renderDigest(){
   flushDraft(); stopAutoSync(); stopMeWatch(); removeMap(); STATE.cur=null;
   PhotoAudit.free();
-  DG.view="stats"; DG.emp=null; DG.rep=null;
+  DG.view="stats"; DG.emp=null; DG.rep=null; DG.bindacc=null;
   if(DG.date){ // диплинк из дайджеста (?tab=digest&d=…): окно ровно на этот день
     DG.preset="custom"; DG.from=DG.date; DG.to=DG.date; DG.shift=0; DG.date=null; }
   $("app").innerHTML=`<div class="h" id="dghead">${esc(L().digest)}</div>
@@ -3056,6 +3057,7 @@ async function dgLoad(){
             : DG.view==="emp"      ? "/api/manager/stats_employee"+dgRangeQ({employee:DG.emp})
             : DG.view==="person"   ? "/api/manager/person"+dgQ({employee:DG.emp,rep:DG.rep})
             : DG.view==="plan"     ? "/api/manager/plan"
+            : DG.view==="binds"    ? "/api/manager/binds"
             : DG.view==="cases"    ? "/api/manager/cases"+dgRangeQ({metric:DG.metric||"visits",
                                        country:DG.country||"", office:DG.office||""})
             : DG.view==="map"      ? "/api/manager/map_data"+dgQ({employee:DG.emp})
@@ -3086,7 +3088,7 @@ function dgFail(e){
     <button class="btn line" style="margin-top:12px" onclick="dgRefresh()">🔄</button>`;
 }
 function dgRefresh(){ if(Date.now()-DG.last<3000) return; dgLoad(); }
-function dgGo(view, opts){ Object.assign(DG,{view},opts||{}); removeMap();
+function dgGo(view, opts){ Object.assign(DG,{view},opts||{}); DG.bindacc=null; removeMap();
   PhotoAudit.free(); dgLoad(); }
 // --- окно периода: пресет, сдвиг, свои даты, день из столбика ---
 function dgPreset(p){ DG.preset=p; DG.shift=0; DG.from=null; DG.to=null; dgLoad(); }
@@ -3135,6 +3137,7 @@ function dgRender(j){
   if(DG.view==="photos") return dgPhotos(b);
   if(DG.view==="cases") return dgCasesScreen(j,b);
   if(DG.view==="plan") return dgPlanScreen(j,b);
+  if(DG.view==="binds") return dgBindsScreen(j,b);
   return dgPromises(j,b);
 }
 // --- общие куски экранов статистики ---
@@ -3211,6 +3214,7 @@ function dgStats(j,b){
     <button class="btn line" style="flex:1" onclick="dgOpenPromises()">⏰ Просрочено: ${t.overdue||0}</button>
     <button class="btn line" style="flex:1" onclick="dgGo('photos')">📸 Фото по КД</button>
     <button class="btn line" style="flex:1" onclick="dgGo('plan')">🎯 Нормы</button>
+    <button class="btn line" style="flex:1" onclick="dgGo('binds')">👤 Кто есть кто${(+j.bind_requests>0)?" · "+(+j.bind_requests):""}</button>
     <button class="btn line" style="flex:1" onclick="dgExcel()">⬇️ Excel</button></div>`);
   b.innerHTML=parts.join("");
   dgDrawKpis();
@@ -3487,6 +3491,143 @@ async function dgSetPlan(i,norm){
     dgPlanScreen(j,$("dgbody"));
     const m2=$("dgplanmsg");
     if(m2) m2.textContent="не сохранилось: "+String((e&&e.message)||e)+" — попробуйте при связи";
+  }
+}
+// --- ЭКРАН: кто есть кто (аккаунты команды) ----------------------------------
+// 14.09.2026 три человека подряд зашли под чужим ФИО: самовыбор одноразовый,
+// список строится из реестра, соседние фамилии похожи. Пока это не поправлено,
+// человек работает в ЧУЖОМ портфеле, а поправить мог только владелец за пультом.
+// Теперь правит руководитель — он один знает своих людей в лицо; сервер на
+// каждом действии проверяет, что и ФИО, и аккаунт из его команды.
+function dgWhen(s){ const d=String(s||"").slice(0,10);
+  return d.length===10?d.slice(8,10)+"."+d.slice(5,7)+"."+d.slice(0,4):""; }
+// Чем опознают чужого: имя профиля и ник. По голому telegram_id не видно ничего,
+// а «Bahrom Sharifov» на ФИО «Бахтиёров Юсуфхон» видно сразу.
+function dgWho(a){ return [a.profile||"без имени в профиле", a.username?"@"+a.username:"",
+  a.local?"вход без телеграма":"id "+a.telegram_id].filter(Boolean).join(" · "); }
+function dgHolder(emp){
+  const e=((DG.binds||{}).employees||[]).find(x=>x.employee===emp);
+  return (e&&(e.accounts||[])[0])||null;
+}
+function dgBindsScreen(j,b){
+  if(!b) return;
+  DG.binds=j;
+  if(DG.bindacc) return dgBindPicker(b);
+  DG.baccs=[];
+  const pend=j.pending||[], team=j.employees||[];
+  const parts=[`<button class="back" onclick="dgGo('stats')">‹ к сводке</button>`,
+               dgTop("Кто есть кто","какое устройство работает под каким ФИО")];
+  if(pend.length){
+    parts.push(`<div style="font-weight:600;margin:12px 0 4px">Заявки на вход · ${pend.length}</div>`);
+    parts.push(pend.map(a=>dgBindCard(a,a.employee,true,false)).join(""));
+  }
+  parts.push(`<div style="font-weight:600;margin:14px 0 4px">Команда · ${team.length}</div>`);
+  const rows=team.map(e=>{
+    const accs=e.accounts||[];
+    if(!accs.length) return `<div class="box"><div class="pname">${esc(e.employee)}</div>
+      <div class="psub">устройства нет — человек выберет себя сам при входе</div></div>`;
+    return accs.map(a=>dgBindCard(a,e.employee,false,accs.length>1)).join("");
+  }).join("");
+  parts.push(rows||`<div class="center">Команда пуста</div>`);
+  parts.push(`<div class="muted" style="margin-top:10px;font-size:12px">
+    Одно ФИО — одно устройство. «Снять» закрывает вход в приложение; сделанные выезды остаются.</div>`);
+  parts.push(`<div id="dgbindmsg" class="muted" style="margin-top:6px;font-size:12px"></div>`);
+  b.innerHTML=parts.join("");
+}
+// В onclick уходит только индекс в DG.baccs: ФИО на узбекской латинице содержит
+// апостроф, а esc его не экранирует (то же правило, что на всей вкладке).
+function dgBindCard(a,emp,pending,dup){
+  const i=DG.baccs.length, holder=pending?dgHolder(emp):null, who=dgWho(a);
+  DG.baccs.push({tid:a.telegram_id, employee:emp, pending:!!pending, who:who,
+                 taken:holder?dgWho(holder):""});
+  const when=[a.last_seen?"вход "+dgWhen(a.last_seen):"ни разу не заходил",
+              a.since?"привязан "+dgWhen(a.since):""].filter(Boolean).join(" · ");
+  const btns=pending
+    ?`<button class="chip" onclick="dgBindDo(${i},'approve')">✅ Это он</button>
+      <button class="chip" onclick="dgBindPick(${i})">🔁 Другое ФИО</button>
+      <button class="chip" onclick="dgBindDo(${i},'unbind')">✖ Отклонить</button>`
+    :`<button class="chip" onclick="dgBindPick(${i})">🔁 Другое ФИО</button>
+      <button class="chip" onclick="dgBindDo(${i},'unbind')">✖ Снять</button>`;
+  return `<div class="box">
+    <div class="pname">${pending?"просит: ":""}${esc(emp)}${dup?" · два устройства":""}</div>
+    <div class="psub">${esc(who)}</div>
+    <div class="psub">${esc(when)}</div>
+    ${holder?`<div class="psub">сейчас работает: ${esc(dgWho(holder))}</div>`:""}
+    <div class="chips" style="margin-bottom:0">${btns}</div></div>`;
+}
+// Список ФИО для перестановки. Занятые показываем, но не даём нажать: вытеснение
+// чужого устройства — отдельное осознанное действие («Это он» под заявкой), и
+// молча из этого списка оно происходить не должно.
+function dgBindPicker(b){
+  const a=DG.bindacc;
+  b.innerHTML=`<button class="back" onclick="dgBindBack()">‹ назад</button>`+
+    dgTop("Переставить на другое ФИО", a.who)+
+    `<div class="searchwrap" style="margin:10px 0 0">${ic("search")}
+      <input class="search" placeholder="Поиск сотрудника" value="${esc(DG.bindq||"")}"
+             oninput="dgBindSearch(this.value)"></div>
+     <div class="muted" style="margin:8px 0 2px;font-size:12px">
+       Выезды, сделанные под прежним ФИО, останутся там: они лежат на договорах
+       того человека. Перенести их может только владелец.</div>
+     <div id="dgbindlist"></div>
+     <div id="dgbindmsg" class="muted" style="margin-top:6px;font-size:12px"></div>`;
+  dgBindList();
+}
+function dgBindList(){
+  const el=$("dgbindlist"); if(!el) return;
+  const a=DG.bindacc||{}, q=DG.bindq||"";
+  DG.btargets=[];
+  const rows=((DG.binds||{}).employees||[])
+    .filter(e=>!q||String(e.employee).toLowerCase().includes(q))
+    .map(e=>{
+      const busy=(e.accounts||[]).filter(x=>x.telegram_id!==a.tid);
+      if(busy.length) return `<div class="box" style="opacity:.55">
+        <div class="pname">${esc(e.employee)}</div>
+        <div class="psub">занято: ${esc(dgWho(busy[0]))}</div></div>`;
+      const k=DG.btargets.length, cur=(e.accounts||[]).some(x=>x.telegram_id===a.tid);
+      DG.btargets.push(e.employee);
+      return `<button class="btn line" onclick="dgBindTarget(${k})">${esc(e.employee)}${cur?" · сейчас":""}</button>`;
+    }).join("");
+  el.innerHTML=rows||`<div class="center">Никого не нашли</div>`;
+}
+function dgBindPick(i){ const a=DG.baccs[i]; if(!a) return;
+  DG.bindacc=a; DG.bindq=""; dgBindsScreen(DG.binds,$("dgbody")); }
+function dgBindBack(){ DG.bindacc=null; dgBindsScreen(DG.binds,$("dgbody")); }
+function dgBindSearch(v){ DG.bindq=(v||"").trim().toLowerCase(); dgBindList(); }
+async function dgBindTarget(k){
+  const a=DG.bindacc, emp=(DG.btargets||[])[k];
+  if(!a||!emp) return;
+  // Тап по своему же ФИО у работающего аккаунта — это «передумал», а не правка.
+  // У заявки наоборот: её собственное ФИО в списке означает «да, это он».
+  if(!a.pending && emp===a.employee) return dgBindBack();
+  await dgBindPost({action:"reassign", telegram_id:a.tid, employee:emp});
+}
+// Снятие и вытеснение спрашиваем вслух: оба закрывают человеку вход, и оба — с
+// одного тапа. Отмена ничего не шлёт.
+async function dgBindDo(i,action){
+  const a=DG.baccs[i]; if(!a) return;
+  if(action==="unbind" && !confirm(a.pending
+      ?"Отклонить заявку? Человек сможет выбрать себя заново."
+      :"Снять «"+a.employee+"» с этого устройства? Вход в приложение закроется, сделанные выезды останутся."))
+    return;
+  if(action==="approve" && a.taken && !confirm(
+      "Под «"+a.employee+"» уже работает "+a.taken+
+      ". Одобрить — значит переставить ФИО на новое устройство, прежнее потеряет доступ. Продолжить?"))
+    return;
+  await dgBindPost({action:action, telegram_id:a.tid});
+}
+async function dgBindPost(body){
+  const msg=$("dgbindmsg"); if(msg) msg.textContent="сохраняю…";
+  try{
+    const out=await api("/api/manager/binds",{method:"POST",body:JSON.stringify(body)});
+    DG.bindacc=null; DG.bindq="";
+    dgBindsScreen(out,$("dgbody"));
+    const m=$("dgbindmsg");
+    if(m) m.textContent=out.ok?"готово":(out.error||"не вышло");
+  }catch(e){
+    const st=+((e&&e.message)||0), m=$("dgbindmsg");
+    if(m) m.textContent=(st===404)
+      ?"этого человека уже нет в вашей команде — обновите экран"
+      :"не сохранилось: "+String((e&&e.message)||e)+" — попробуйте при связи";
   }
 }
 const DG_METRIC_TITLE={visits:"Выезды",paid:"Оплачено",promised:"Обещают оплатить",

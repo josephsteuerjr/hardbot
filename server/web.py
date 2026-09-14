@@ -2840,7 +2840,10 @@ async def _manager_stats(request: web.Request) -> web.Response:
     db.audit_access(uid, "digest_view",
                     detail=f"stats {rng['from']}..{rng['to']} team={len(team)} "
                            f"visits={data['totals']['visits']}")
-    return _manager_json({**_stats_envelope(mgr, team, rng, uid), **data})
+    # Счётчик висящих заявок на вход — прямо на сводке. 14.09.2026 две заявки
+    # провисели день: увидеть их было негде, кроме как у владельца в пульте.
+    return _manager_json({**_stats_envelope(mgr, team, rng, uid), **data,
+                          "bind_requests": len(db.team_bindings(team)["pending"])})
 
 
 async def _manager_stats_employee(request: web.Request) -> web.Response:
@@ -2891,6 +2894,119 @@ async def _manager_plan(request: web.Request) -> web.Response:
         "employees": [{"employee": e, "plan": plan_map.get(e) or common,
                        "personal": e in plan_map} for e in team],
     })
+
+
+# --- Кто есть кто: аккаунты команды правит руководитель ----------------------
+# 14.09.2026 три человека подряд зашли под чужим ФИО: самовыбор одноразовый,
+# список строится из реестра, соседние фамилии похожи. До починки человек
+# работает в ЧУЖОМ портфеле — его выезды ложатся на чужие договоры, — а починить
+# это мог только владелец за пультом, то есть не в поле и не в тот же час.
+# Чинит теперь руководитель: он единственный, кто знает своих людей в лицо.
+#
+# Границы жёсткие: и ФИО, и сам аккаунт обязаны принадлежать команде. Без
+# второго условия со своего экрана можно было бы снять устройство человека из
+# чужой команды, зная только его telegram_id. Аккаунт без строки в agent_bind
+# руководителю не виден вовсе — «чужого» из воздуха не создать.
+_BIND_ACTIONS = ("approve", "reassign", "unbind")
+
+
+def _binds_payload(team: list[str]) -> dict:
+    data = db.team_bindings(team)
+    return {"ok": True, "screen": "binds",
+            "employees": [{"employee": e, "accounts": data["bound"].get(e, [])}
+                          for e in team],
+            "pending": data["pending"]}
+
+
+async def _tell_bind_changed(request: web.Request, uid: int, key: str, **kw) -> None:
+    """Сказать человеку, что с его доступом произошло. Телеграм в контуре
+    необязателен: без бота (и у входа без телеграма) молчим — сообщение это
+    вежливость, а не условие привязки."""
+    bot = request.app.get("bot")
+    if not bot or not uid or db.is_local_uid(uid):
+        return
+    try:
+        await bot.send_message(uid, t(key, lang_of(uid), **kw))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _manager_binds(request: web.Request) -> web.Response:
+    """GET — состав команды с аккаунтами и отдельный список заявок.
+    POST {action, telegram_id[, employee]} — approve | reassign | unbind.
+
+    approve — одобрить заявку. Это И ЕСТЬ смена устройства: правило «одно ФИО —
+    одно устройство» остаётся, поэтому прежний телефон теряет и привязку, и
+    токены приложения. Клиент об этом предупреждает до нажатия — он видит, занято
+    ли ФИО.
+
+    reassign — переставить аккаунт на другое ФИО (тот самый промах при
+    самовыборе). Занятое ФИО отказываем НАЗЫВАЯ причину, а не вытесняем молча:
+    вытеснение — осознанное действие, у него своя кнопка.
+
+    unbind — снять привязку (и отклонить заявку: строка одна и та же). Доступ
+    приложения закрывается вместе с ней — иначе девайс-токен жил бы ещё 30 дней.
+
+    Отказ по существу («ФИО занято») отдаётся 200 + ok:false + error и свежим
+    списком: руководителю нужен текст на экране, а не номер статуса. Кодами
+    остаются кривой запрос (400) и чужой человек (404).
+    """
+    uid, mgr, team = _manager_gate(request)
+    if request.method != "POST":
+        db.audit_access(uid, "digest_view", detail=f"binds team={len(team)}")
+        return _manager_json(_binds_payload(team))
+    body = await request.json()
+    action = str(body.get("action") or "").strip()
+    if action not in _BIND_ACTIONS:
+        raise web.HTTPBadRequest(text="action")
+    try:
+        tid = int(body.get("telegram_id"))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text="telegram_id")
+    row = db.binding_of(tid)
+    if row is None or row["employee"] not in team:
+        # 404, как у _manager_employee_q: 403 остаётся одним смыслом «роли нет»
+        # (по нему клиент гасит вкладку целиком).
+        raise web.HTTPNotFound(text="account")
+    was, kind = row["employee"], (row["kind"] or "agent")
+    error = None
+    if action == "unbind":
+        db.unbind(tid)
+        db.audit_access(uid, "mgr_unbind", str(tid),
+                        f"{was} pending={0 if row['approved'] else 1}")
+        if not row["approved"]:
+            await _tell_bind_changed(request, tid, "bind_rejected_user")
+    elif action == "approve":
+        if row["approved"]:
+            error = "заявки нет: этот аккаунт уже работает"
+        else:
+            prev = db.employee_taken_by(was, exclude_telegram_id=tid)
+            db.set_bind(tid, was, kind)
+            if prev:
+                # Привязку прежнего устройства set_bind уже убрал; здесь
+                # закрываем ему и вход в приложение — «сменили устройство»
+                # значит сменили, а не «теперь работают оба».
+                db.unbind(prev)
+            db.audit_access(uid, "mgr_approve_bind", str(tid),
+                            f"{was} prev={prev or '—'}")
+            await _tell_bind_changed(request, tid, "bind_approved_user", emp=was)
+    else:
+        target = (body.get("employee") or "").strip()
+        if target not in team:
+            raise web.HTTPNotFound(text="employee")
+        taken = db.employee_taken_by(target, exclude_telegram_id=tid)
+        if taken:
+            error = f"за «{target}» уже закреплено устройство — сначала снимите его"
+        elif target == was and row["approved"]:
+            error = "этот аккаунт уже работает под этим ФИО"
+        else:
+            db.set_bind(tid, target, kind)
+            db.audit_access(uid, "mgr_rebind", str(tid), f"{was} -> {target}")
+            await _tell_bind_changed(request, tid, "bind_approved_user", emp=target)
+    payload = _binds_payload(team)
+    if error:
+        payload["ok"], payload["error"] = False, error
+    return _manager_json(payload)
 
 
 async def _manager_cases(request: web.Request) -> web.Response:
@@ -4517,6 +4633,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/manager/stats_employee", _manager_stats_employee)
     app.router.add_get("/api/manager/plan", _manager_plan)
     app.router.add_post("/api/manager/plan", _manager_plan)
+    app.router.add_get("/api/manager/binds", _manager_binds)
+    app.router.add_post("/api/manager/binds", _manager_binds)
     app.router.add_get("/api/manager/cases", _manager_cases)
     app.router.add_get("/api/manager/stats.xlsx", _manager_stats_xlsx)
     app.router.add_get("/api/bootstrap", _bootstrap)
