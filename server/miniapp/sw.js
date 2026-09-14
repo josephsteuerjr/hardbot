@@ -9,7 +9,7 @@
  * ВАЖНО при обновлении оболочки на сервере: поднимите версию CACHE (v1→v2), иначе у уже
  * открывавших приложение выездников останется старый index.html из кэша до смены версии.
  */
-const CACHE = "hard-shell-v51";
+const CACHE = "hard-shell-v52";
 const PRECACHE = [
   "/",
   "/vendor/telegram-web-app.js",
