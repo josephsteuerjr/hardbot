@@ -93,6 +93,7 @@ def preview_lines(results: list[dict]) -> list[str]:
                      f"записать сервер {resolved_server}.")
     if office:
         lines.append(f"Правок офиса после доставки: {len(office)} — не трогаются.")
+    lines.extend(comment_cleared_lines(ok))
     for r in results:
         if not r.get("busy"):
             continue
@@ -347,6 +348,31 @@ def conflict_row(c: dict) -> tuple:
             CONFLICT_KINDS.get(str(c.get("kind") or ""), str(c.get("kind") or "")))
 
 
+def comment_cleared_lines(results: list[dict]) -> list[str]:
+    """«Комментарий есть у бота, а везти нечего» — вслух, а не молчанием.
+
+    Обогащение возит ЖИВОЕ значение комментария, и пустое в план не попадает.
+    Если живое поле очистили поверх доказанного визита (так вышло 10.09.2026
+    после загрузки реестра с заменой комментариев), прогон отрабатывал «успешно»
+    и просто не привозил текст. Теперь такие кейсы названы поимённо: чинятся они
+    на сервере, а не в книге.
+    """
+    hits = [(r.get("employee") or "", cid)
+            for r in results
+            for cid in (r.get("comment_cleared_cids") or [])]
+    total = sum(int(r.get("comment_cleared") or 0) for r in results)
+    if not total:
+        return []
+    lines = [f"КОММЕНТАРИЙ НЕ ПОЕДЕТ ({total}): у кейса есть комментарий выезда, "
+             "а живое поле сервера пусто — его очистили поверх визита. "
+             "Лечится на сервере, книга тут ни при чём."]
+    for emp, cid in hits[:12]:
+        lines.append(f"  {emp} · КД {cid}")
+    if total > len(hits[:12]):
+        lines.append(f"  … и ещё {total - len(hits[:12])}")
+    return lines
+
+
 def report_lines(results: list[dict]) -> list[str]:
     s = summarize(results)
     ok, unver, bad = s["ok"], s["unverified"], s["bad"]
@@ -377,6 +403,7 @@ def report_lines(results: list[dict]) -> list[str]:
                          f"«{d['was']}» → «{d['now']}» (выезд {d['visit_date']})")
         if len(displaced) > 12:
             lines.append(f"  … и ещё {len(displaced) - 12}; полный список в квитанции")
+    lines.extend(comment_cleared_lines(ok))
     conflicts, office = collect_conflicts(results)
     resolved_file = sum(r.get("resolved_file") or 0 for r in ok)
     resolved_server = sum(r.get("resolved_server") or 0 for r in ok)

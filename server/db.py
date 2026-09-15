@@ -179,6 +179,10 @@ BOOKKEEPING = [
 BOT_SNAPSHOT_KEYS = SNAPSHOT_KEYS
 BOT_VISIT_KEYS = tuple(key for key in BOT_SNAPSHOT_KEYS if key in BY_KEY)
 BOT_VISIT_MARKER = PROVENANCE_MARKER
+# Комментарий выездник написал, а живое поле пусто: его очистили поверх визита
+# (импорт с заменой комментариев). Обогащение возит ЖИВОЕ значение, то есть
+# такой кейс оно молча пропустит — пусть пульт хотя бы назовёт его вслух.
+VISIT_COMMENT_CLEARED_MARKER = "_visit_comment_cleared"
 BOT_DROPDOWN_KEYS = FORM_DROPDOWN_KEYS
 OFFICE_EDIT_KEYS = {OFFICE_RESULT_SNAPSHOT_KEY, *OFFICE_DIRECT_EDIT_KEYS}
 
@@ -500,6 +504,37 @@ def _merged_visit(row) -> dict | None:
     except (KeyError, IndexError):
         pass
     return merged
+
+
+def _clearing_would_destroy_last_copy(row, file_visit_date, delivered: bool) -> bool:
+    """Пустая ячейка файла стёрла бы ЕДИНСТВЕННЫЙ экземпляр текста выездника.
+
+    «Начало месяца» — инструмент аналитика, и очищать комментарий прошлого
+    месяца он вправе: этот текст уже лежит и в книге, и в общем реестре. Но
+    10.09.2026 та же галочка очистила комментарии выездов ТОГО ЖЕ ДНЯ: файл был
+    снят раньше выезда, обогащение в книгу их ещё не возило, и пустая ячейка
+    означала не решение, а отставшую копию. Текст остался только в снимке, а
+    обогащение возит живое значение — и молча перестало возить что-либо.
+
+    Поэтому очистку не пускаем, когда сходится всё сразу:
+      * в файле пусто, а живое значение — ровно текст бота (офис его не
+        переписывал: свой текст офис вправе и стереть);
+      * строка файла не видела этого выезда («Дата выезда» не совпала со
+        снимком) — иначе аналитик смотрит именно на этот визит и решает сам;
+      * обогащение этот комментарий никогда не доставляло, то есть в книгах и
+        в реестре его нет.
+    Замена непустым текстом работает как раньше: там ничего не пропадает.
+    """
+    if row is None or delivered:
+        return False
+    snapshot = _decode_bot_snapshot(row)
+    if snapshot is None:
+        return False
+    written = str(snapshot.get("visit_comment") or "").strip()
+    if not written or written != str(row["visit_comment"] or "").strip():
+        return False
+    visit = _as_date(snapshot.get("visit_date"))
+    return visit is not None and _as_date(file_visit_date) != visit
 
 
 def _backfill_bot_visit_snapshots(conn: sqlite3.Connection) -> int:
@@ -4980,6 +5015,12 @@ def enrichment_rows() -> list[dict]:
                 row[key] = None
         snapshot = _merged_visit(raw)
         row[BOT_VISIT_MARKER] = snapshot is not None
+        bot_snapshot = _decode_bot_snapshot(raw)
+        row[VISIT_COMMENT_CLEARED_MARKER] = bool(
+            snapshot is not None
+            and str((bot_snapshot or {}).get("visit_comment") or "").strip()
+            and not str(snapshot.get("visit_comment") or "").strip()
+        )
         if snapshot:
             # Снимки, созданные до фикса маппинга 24.07, ещё не содержат ``tips``.
             # Сама колонка bot-owned (import_grid её не знает и не пишет), поэтому
@@ -5592,7 +5633,9 @@ def import_grid(
     Комментарии имеют два независимых, выключенных по умолчанию режима:
       * текущий комментарий существующего договора сохраняется как есть; только
         ``replace_current_visit_comments`` заменяет его значением файла, включая
-        пустую ячейку;
+        пустую ячейку — но НЕ у договора с доказанным визитом, строка которого
+        в файле этого визита не видела (``current_comments_protected``): такая
+        ячейка не решение аналитика, а отставшая копия;
       * историчный комментарий вообще не импортируется без явного
         ``import_historical_visit_comments`` и никогда не входит в форму/обратную
         запись сотрудника.
@@ -5648,6 +5691,8 @@ def import_grid(
               "current_comments_replaced": 0,
               "current_comments_cleared": 0,
               "current_comments_unchanged": 0,
+              # Замену комментария не пустили: строка файла не видела визита.
+              "current_comments_protected": 0,
               "historical_comments_preserved": 0,
               "historical_comments_imported": 0,
               "historical_comments_cleared": 0,
@@ -6425,6 +6470,13 @@ def import_grid(
             "recall_date, recall_reason, recall_transfer, recall_withdrawn, "
             "bot_visit_at, bot_visit_data, office_edit_data, visit_value_log "
             "FROM clients")}
+        # Кому обогащение уже возило комментарий выезда. Единственный честный
+        # ответ на вопрос «есть ли этот текст в книгах и в общем реестре»:
+        # если не возило, пустая ячейка файла про него ничего не знает.
+        delivered_comments = {
+            r["contract_id"] for r in conn.execute(
+                "SELECT contract_id FROM enrichment_ledger "
+                "WHERE field_key = 'visit_comment'")}
         # Визит — на человека: принятая правка разносится по всем его договорам
         # с тем же визитом, иначе карточка/дайджест (первый КД человека) её не
         # увидят, а файлы разъедутся построчно.
@@ -6479,10 +6531,16 @@ def import_grid(
                     str(row0["visit_comment"] or "").strip()
                     if row0 is not None else ""
                 )
-                comment_updates["visit_comment"] = incoming_current
-                if previous_current == incoming_current:
+                if not incoming_current and _clearing_would_destroy_last_copy(
+                        row0, data.get("visit_date"),
+                        cid in delivered_comments):
+                    # Единственный экземпляр текста выездника — не стираем.
+                    report["current_comments_protected"] += 1
+                elif previous_current == incoming_current:
+                    comment_updates["visit_comment"] = incoming_current
                     report["current_comments_unchanged"] += 1
                 else:
+                    comment_updates["visit_comment"] = incoming_current
                     key = (
                         "current_comments_cleared"
                         if not incoming_current

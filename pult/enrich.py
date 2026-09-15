@@ -87,6 +87,12 @@ MERGE_MODES = {
     for source, _target, merge in ENRICHMENT_WRITE_RULES
 }
 FILLED_MARKER = PROVENANCE_MARKER
+# Диагностический маркер сервера (`db.VISIT_COMMENT_CLEARED_MARKER`): выездник
+# комментарий написал, а живое поле пусто — его очистили поверх визита. В план
+# такой комментарий не попадёт никогда (пустое значение не пишем), поэтому
+# считаем такие кейсы отдельно и называем вслух. В контракт обмена маркер не
+# входит: старый сервер его не отдаёт, и счётчик просто остаётся нулём.
+COMMENT_CLEARED_MARKER = "_visit_comment_cleared"
 EVIDENCE_SCHEMA = ENRICHMENT_EVIDENCE_SCHEMA
 FILE_MAP_SCHEMA = ENRICHMENT_FILE_MAP_SCHEMA
 DATA_EXCHANGE_CONTRACT = contract_binding()
@@ -857,6 +863,8 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
     missing: list[str] = []
     filled_contract_ids: list[str] = []
     matched_contract_ids: list[str] = []
+    comment_cleared = 0
+    comment_cleared_cids: list[str] = []
     # Что именно вытесняем. Раньше старое значение не сохранялось нигде, и
     # единственным следом оставалась резервная копия книги: чтобы узнать, что
     # затёрли, приходилось сравнивать файлы целиком.
@@ -912,6 +920,11 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
             continue
         matched_cases += 1
         matched_contract_ids.append(cid)
+        if srv.get(COMMENT_CLEARED_MARKER):
+            # Строка в книге есть, комментарий выездника есть — но везти нечего.
+            comment_cleared += 1
+            if len(comment_cleared_cids) < ORPHAN_SAMPLE:
+                comment_cleared_cids.append(cid)
         case_changed = False
         for key, val in values.items():
             c = col_map[key]
@@ -1064,6 +1077,10 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
         # dry-run/apply инструмент с собственным бэкапом.
         "poison_cleared": 0,
         "missing": missing,                # заполнены ботом, но строки в файле нет
+        # Комментарий выездника есть в снимке, а живое поле сервера пусто:
+        # обогащение такой комментарий не повезёт — лечится на сервере.
+        "comment_cleared": comment_cleared,
+        "comment_cleared_cids": comment_cleared_cids,
         "filled_contract_ids": filled_contract_ids,
         "matched_contract_ids": matched_contract_ids,
         "visit_cols_absent": visit_cols_absent,      # колонок визита нет в файле

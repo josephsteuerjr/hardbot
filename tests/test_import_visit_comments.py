@@ -147,8 +147,15 @@ def test_month_reset_does_not_rewrite_proven_visit_snapshot_or_history(
     before = db.get_client("COMMENTS-PROOF")
     immutable_before = before["bot_visit_data"]
 
+    # «Дата выезда» в файле — это и есть месячный сброс: реестр видел ЭТОТ
+    # выезд, значит пустая ячейка комментария — решение аналитика. Строку без
+    # даты выезда (копия старше визита) с 15.09.2026 разбирает отдельный тест:
+    # стирать последний экземпляр текста выездника импорт не вправе.
+    month_reset_row = _row("COMMENTS-PROOF", None, "история из реестра")
+    month_reset_row["visit_date"] = "2026-08-05"
+
     _preview_and_apply(
-        _grid(_row("COMMENTS-PROOF", None, "история из реестра")),
+        _grid(month_reset_row),
         replace_current=True,
         import_historical=True,
     )
@@ -237,3 +244,80 @@ def test_historical_comment_is_read_only_and_rendered_on_third_tab(
     ) < miniapp.index("function panelDebt")
     assert 'FORM_TOUCHED.add("historical_visit_comment")' not in miniapp
     assert 'if(d.visit_comment) FORM_TOUCHED.add("visit_comment")' not in miniapp
+
+
+# --- замена комментариев не откатывает доказанный визит -------------------------
+# 10.09.2026: загрузка «ОБЩИЙ РЕЕСТР СЕНТЯБРЬ» с заменой комментариев очистила
+# живой комментарий у выездов того же дня — файл их ещё не видел. Обогащение
+# после этого молчало: пустое значение в план не попадает.
+def _visit_row(cid: str, current: str | None, visit_date: str | None) -> dict:
+    row = _row(cid, current, None)
+    row["visit_date"] = visit_date
+    return row
+
+
+def test_replace_does_not_clear_comment_of_visit_file_has_not_seen(
+    tmp_path, monkeypatch
+):
+    _init(tmp_path, monkeypatch)
+    _seed(_visit_row("COMMENTS-FRESH", None, None))
+    db.record_bot_visit(
+        "COMMENTS-FRESH",
+        {"call_status": "В работе", "visit_comment": "приехал, вышла мать"},
+        "2026-09-10",
+    )
+
+    # В файле у строки нет ни выезда, ни комментария: копия старше визита.
+    preview, applied = _preview_and_apply(
+        _grid(_visit_row("COMMENTS-FRESH", None, None)),
+        replace_current=True,
+        import_historical=False,
+    )
+
+    saved = db.get_client("COMMENTS-FRESH")
+    assert preview["current_comments_protected"] == 1
+    assert applied["current_comments_protected"] == 1
+    assert applied["current_comments_cleared"] == 0
+    assert saved["visit_comment"] == "приехал, вышла мать"
+    assert db.bot_visit_snapshot(saved)["visit_comment"] == "приехал, вышла мать"
+
+
+def test_replace_still_clears_comment_when_file_saw_the_visit(tmp_path, monkeypatch):
+    _init(tmp_path, monkeypatch)
+    _seed(_visit_row("COMMENTS-MONTH", None, None))
+    db.record_bot_visit(
+        "COMMENTS-MONTH",
+        {"call_status": "В работе", "visit_comment": "августовский текст"},
+        "2026-08-20",
+    )
+
+    # Начало месяца: файл видел тот самый выезд, пустая ячейка — решение аналитика.
+    _preview, applied = _preview_and_apply(
+        _grid(_visit_row("COMMENTS-MONTH", None, "2026-08-20")),
+        replace_current=True,
+        import_historical=False,
+    )
+
+    saved = db.get_client("COMMENTS-MONTH")
+    assert applied["current_comments_cleared"] == 1
+    assert applied["current_comments_protected"] == 0
+    assert str(saved["visit_comment"] or "") == ""
+
+
+def test_enrichment_row_names_the_cleared_comment(tmp_path, monkeypatch):
+    _init(tmp_path, monkeypatch)
+    _seed(_visit_row("COMMENTS-MARKER", None, None))
+    db.record_bot_visit(
+        "COMMENTS-MARKER",
+        {"call_status": "В работе", "visit_comment": "текст выездника"},
+        "2026-09-10",
+    )
+    db.update_fields("COMMENTS-MARKER", {"visit_comment": ""})
+
+    row = next(r for r in db.enrichment_rows()
+               if r["contract_id"] == "COMMENTS-MARKER")
+
+    # Комментарий возить нечем, но кейс назван вслух: чинить на сервере.
+    assert row[db.BOT_VISIT_MARKER] is True
+    assert row[db.VISIT_COMMENT_CLEARED_MARKER] is True
+    assert str(row["visit_comment"] or "") == ""
