@@ -3355,6 +3355,7 @@ function dgKpis(t,rg){
   // Подтверждение выезда: по всем следам телефона, а не по одной точке
   // закрытия. Тап по числу — те самые случаи.
   const evl=[["confirmed","🛡 на адресе"],["far","⚠️ у адреса не был"],
+             ["saved_away","✍️ заполнено не на адресе"],
              ["unverified","❔ нечем проверить"],["series","🧾 признаки серии"]]
     .filter(([k])=>t[k]).map(([k,l])=>team
       ?`<a href="#" onclick="dgCases('${k}');return false">${l}: <b>${t[k]}</b></a>`
@@ -3646,6 +3647,7 @@ function caseMarks(c){
   // Подтверждение выезда — одним словом, как в карточке руководителю.
   const ev=DG_EV[c.evidence_level];
   if(ev) out.push(ev+((c.evidence_level==="confirmed"&&c.near_min)?" "+c.near_min+" мин":""));
+  if(c.saved_away) out.push("✍️ заполнен не на адресе");
   if(c.series) out.push("🧾 "+c.series);
   return out.length?" · "+out.join(" · "):"";
 }
@@ -3835,6 +3837,7 @@ async function dgBindPost(body){
 const DG_METRIC_TITLE={visits:"Выезды",paid:"Оплачено",promised:"Обещают оплатить",
   with_photo:"Выезды с фото",persons:"Должники",
   confirmed:"Подтверждены на адресе",far:"У адреса не был",
+  saved_away:"Заполнены не на адресе",
   unverified:"Нечем проверить",series:"Признаки серии"};
 function dgCasesScreen(j,b){
   DG.cases=[]; DG.days=j.by_day||DG.days||[];

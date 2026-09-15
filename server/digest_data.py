@@ -489,7 +489,8 @@ def _evidence_view(ev: dict | None, level: str | None) -> dict | None:
     if ev.get("saved"):
         rows.append(f"«Сохранить выезд» в {ev['saved']}"
                     + (f", в {_pretty_m(ev['save_dist_m'])} от адреса"
-                       if ev.get("save_dist_m") is not None else ""))
+                       if ev.get("save_dist_m") is not None else "")
+                    + (" — заполнен не на адресе" if ev.get("saved_away") else ""))
     if ev.get("online_save") is True:
         rows.append("связь при сохранении была")
     elif ev.get("online_save") is False:
@@ -536,8 +537,8 @@ def person_data(mgr: dict, on_date: str, employee: str, rep: str,
 # --- ЭКРАН: случаи за окном (тап по плашке сводки) ---------------------------
 CASE_METRICS = {"visits", "paid", "promised", "with_photo", "persons",
                 # Подтверждение выезда: подтверждён / у адреса не был /
-                # проверить нечем / признаки серии.
-                "confirmed", "far", "unverified", "series"}
+                # проверить нечем / признаки серии / заполнен не на адресе.
+                "confirmed", "far", "unverified", "series", "saved_away"}
 CASES_LIMIT = 300
 
 
@@ -579,6 +580,8 @@ def cases_data(mgr: dict, rng: dict, metric: str, country: str = "",
                        if e.get("evidence_level") in evidence.UNVERIFIED]
         elif metric == "series":
             entries = [e for e in entries if evidence.is_series(e.get("series"))]
+        elif metric == "saved_away":
+            entries = [e for e in entries if (e.get("ev") or {}).get("saved_away")]
         for e in entries:
             p = e["person"]
             photos = len(photostore.day_photos(p["contracts"], e["date"]))
@@ -903,6 +906,7 @@ def _case_marks(e: dict) -> dict:
     return {"evidence_level": e.get("evidence_level"),
             "evidence_note": ev.get("note") or "",
             "near_min": ev.get("near_min"),
+            "saved_away": bool(ev.get("saved_away")),
             "series": evidence.series_text(e.get("series"))}
 
 
@@ -1003,6 +1007,8 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
         "unverified": sum(1 for e in ordered
                           if e.get("evidence_level") in evidence.UNVERIFIED),
         "series": sum(1 for e in ordered if evidence.is_series(e.get("series"))),
+        # Был у адреса, а «Сохранить выезд» нажал не там — отдельный счёт.
+        "saved_away": sum(1 for e in ordered if (e.get("ev") or {}).get("saved_away")),
         "near_avg": _avg_fill([(e.get("ev") or {}).get("near_min") * 60
                                for e in ordered
                                if isinstance((e.get("ev") or {}).get("near_min"), int)
@@ -1061,6 +1067,7 @@ def _totals_of(rows: list[dict], days: int) -> dict:
         "far": sum(r.get("far", 0) for r in rows),
         "unverified": sum(r.get("unverified", 0) for r in rows),
         "series": sum(r.get("series", 0) for r in rows),
+        "saved_away": sum(r.get("saved_away", 0) for r in rows),
         "near_avg": _avg_fill([r.get("near_avg") for r in rows]),
         "fill_avg": _avg_fill([r.get("fill_avg") for r in rows]),
         "money": _totals_units(people), "money_text": _persons_total(people),
@@ -1186,6 +1193,7 @@ def _book_line(label: str, country: str, stats: dict, by_outcome: dict,
             stats["with_photo"], stats.get("late") or "", stats.get("no_geo") or "",
             stats.get("confirmed") or "", stats.get("far") or "",
             stats.get("unverified") or "", stats.get("series") or "",
+            stats.get("saved_away") or "",
             _fill_text(stats.get("near_avg")),
             _fill_text(stats.get("fill_avg")), stats["money_text"],
             stats["money_paid_text"]]
@@ -1220,11 +1228,12 @@ BOOK_BASE_HEAD = ("Сотрудник", "Страна", "Офис", "Выезд�
                   # Подтверждение выезда (evidence.py): четыре счётчика и
                   # среднее время у адреса — по подтверждённым выездам.
                   "Подтверждено на адресе", "У адреса не был",
-                  "Нечем проверить", "Признаки серии", "У адреса, среднее",
+                  "Нечем проверить", "Признаки серии", "Заполнен не на адресе",
+                  "У адреса, среднее",
                   "Заполнение карточки, среднее",
                   "Долг", "Закрыто (оплачен)")
 BOOK_BASE_WIDTH = (28, 14, 14, 9, 8, 9, 11, 11, 19, 8, 15, 10,
-                   16, 14, 14, 14, 16, 20, 22, 22)
+                   16, 14, 14, 14, 16, 16, 20, 22, 22)
 
 
 def _book_head(layout: list[dict]) -> tuple[list, list, list, list]:
@@ -1382,7 +1391,8 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
                 "Выезд", "Результат", "Договорённость", "Заполнение карточки",
                 "Сохранён в приложении", "Принят сервером", "Внесён", "Гео",
                 "Закрыл", "Долг", "Подтверждение", "У адреса, мин", "У адреса с",
-                "У адреса до", "Связь при сохранении", "Признаки серии"])
+                "У адреса до", "Связь при сохранении", "Признаки серии",
+                "Где заполнен"])
     for cell in ws2[1]:
         cell.font = Font(bold=True)
     for r in rows:
@@ -1410,7 +1420,9 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
                         ev.get("near_min") if ev.get("near_min") is not None else "",
                         ev.get("near_first") or "", ev.get("near_last") or "",
                         "" if online is None else ("была" if online else "не было"),
-                        evidence.series_text(e.get("series"))])
+                        evidence.series_text(e.get("series")),
+                        ("" if ev.get("saved_away") is None
+                         else "не на адресе" if ev.get("saved_away") else "на адресе")])
             ws2.cell(row=row_at, column=7).fill = fills[group]
             if late:
                 ws2.cell(row=row_at, column=13).fill = fills["fail"]
@@ -1422,11 +1434,13 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
                 ws2.cell(row=row_at, column=17).fill = fills["fail"]
             if evidence.is_series(e.get("series")):
                 ws2.cell(row=row_at, column=22).fill = fills["fail"]
+            if ev.get("saved_away"):
+                ws2.cell(row=row_at, column=23).fill = fills["fail"]
     for i, w in enumerate((12, 14, 14, 28, 32, 10, 14, 22, 22, 18, 19, 18, 16, 8, 14, 18,
-                           26, 12, 11, 11, 18, 24), start=1):
+                           26, 12, 11, 11, 18, 24, 14), start=1):
         ws2.column_dimensions[get_column_letter(i)].width = w
     if ws2.max_row > 1:
-        ws2.auto_filter.ref = f"A1:V{ws2.max_row}"
+        ws2.auto_filter.ref = f"A1:W{ws2.max_row}"
     ws2.freeze_panes = "A2"
 
     ws3 = wb.create_sheet("По дням")
@@ -1501,13 +1515,14 @@ def daily_report_data(mgr: dict, on_date: str,
             "outcomes": today["outcomes"],
             "confirmed": today.get("confirmed", 0), "far": today.get("far", 0),
             "unverified": today.get("unverified", 0), "series": today.get("series", 0),
+            "saved_away": today.get("saved_away", 0),
         })
     rows.sort(key=lambda r: (-r["today_persons"], -r["total_persons"],
                              r["employee"].lower()))
     keys = ("assigned_persons", "assigned_contracts", "today_persons", "today_visits",
             "today_paid", "today_promised", "today_photo", "total_persons",
             "total_visits", "total_paid", "overdue",
-            "confirmed", "far", "unverified", "series")
+            "confirmed", "far", "unverified", "series", "saved_away")
     totals = {k: sum(r[k] for r in rows) for k in keys}
     totals["employees"] = len(rows)
     totals["active"] = sum(1 for r in rows if r["today_persons"])
@@ -1543,6 +1558,8 @@ def daily_report_caption(data: dict) -> str:
         parts.append(f"🛡 На адресе подтверждено: <b>{t.get('confirmed', 0)}</b> · "
                      f"у адреса не был: <b>{t.get('far', 0)}</b> · "
                      f"нечем проверить: {t.get('unverified', 0)}"
+                     + (f" · заполнено не на адресе: {t['saved_away']}"
+                        if t.get("saved_away") else "")
                      + (f" · признаки серии: {t['series']}" if t.get("series") else ""))
     parts.append("Таблица по каждому сотруднику — в файле; "
                  "разбор по дням и карточки — во вкладке «Сводка» приложения.")

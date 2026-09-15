@@ -233,6 +233,14 @@ def build(samples: list[dict], addr: tuple[float, float] | None,
 
     near_first = near[0]["ts"] if near else None
     near_last = near[-1]["ts"] if near else None
+    # «Был у адреса, но заполнил не там»: выезд подтверждён следами, а
+    # «Сохранить выезд» нажато за пределами допуска — в машине, в кафе, в
+    # офисе. Руководству это отдельный вопрос, поэтому отдельный признак,
+    # а не понижение вердикта: человек на адресе был.
+    save_s = next((s for s, d in dists if s.get("k") == "save" and d is not None), None)
+    saved_away = None
+    if level == "confirmed" and save_s is not None:
+        saved_away = _dist(save_s, addr) > tolerance + (save_s.get("acc") or 0)
     ev = {
         "level": level,
         "addr": addr is not None,
@@ -244,6 +252,7 @@ def build(samples: list[dict], addr: tuple[float, float] | None,
         "min_dist_m": None if min_dist is None else int(round(min_dist)),
         "open_dist_m": None if _of("open") is None else int(round(_of("open"))),
         "save_dist_m": None if _of("save") is None else int(round(_of("save"))),
+        "saved_away": saved_away,
         "tolerance_m": tolerance,
         "precision": precision or "",
         "samples": len(samples), "geo_samples": len(geo), "usable": len(usable),
@@ -283,6 +292,9 @@ def note(ev: dict) -> str:
             head = f"На адресе {first}–{last} ({mins} мин)"
         else:
             head = f"На адресе в {first}" if first else "На адресе"
+        if ev.get("saved_away"):
+            head += (f" · заполнен не на адресе: в {_pretty_m(ev.get('save_dist_m'))}"
+                     + (f" в {ev['saved']}" if ev.get("saved") else ""))
         return " · ".join([head, *tail])
     if level == "far":
         head = f"У адреса не был: ближе {_pretty_m(ev.get('min_dist_m'))} не подходил"

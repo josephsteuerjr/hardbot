@@ -174,6 +174,33 @@ def test_far_visit_gets_far_verdict(monkeypatch):
                             (CID_FAR,)).fetchone()[0] == 0
 
 
+def test_saved_elsewhere_after_a_real_visit_is_counted_separately(monkeypatch):
+    """Был у адреса 10 минут, карточку сохранил в 4 км — в сводке это своя
+    строка «заполнено не на адресе», а не «подтверждён» без оговорок."""
+    away = (40.31, 69.65)
+    body = _finish_body(CID_NEAR, "ev-away-1",
+                        [_near(30, k="open"), _near(25), _near(20)],
+                        geo={"lat": away[0], "lon": away[1], "acc": 10})
+    _post(body, monkeypatch)
+    row = _visit(CID_NEAR)
+    ev = evidence.parse(row["evidence"])
+    assert row["evidence_level"] == "confirmed" and ev["saved_away"] is True
+    mgr = db.get_manager(MGR)
+    cases = dd.cases_data(mgr, dd.stats_range("today", 0), "saved_away", "", employees=[EMP])
+    assert [c["rep"] for c in cases["cases"]] == [CID_NEAR]
+    assert cases["cases"][0]["saved_away"] is True
+    stats = dd.stats_data(mgr, dd.stats_range("today", 0), employees=[EMP])
+    assert stats["totals"]["saved_away"] == 1
+    # книга: колонка «Где заполнен»
+    blob = dd.stats_xlsx(mgr, dd.stats_range("today", 0), employees=[EMP])
+    ws2 = load_workbook(io.BytesIO(blob))["Выезды"]
+    head2 = {ws2.cell(row=1, column=c).value: c for c in range(1, ws2.max_column + 1)}
+    where = {ws2.cell(row=r, column=head2["Клиент"]).value:
+             ws2.cell(row=r, column=head2["Где заполнен"]).value
+             for r in range(2, ws2.max_row + 1)}
+    assert where["Ближний Б."] == "не на адресе"
+
+
 def test_city_level_address_is_reported_as_unverifiable(monkeypatch):
     body = _finish_body(CID_CITY, "ev-city-1", [_near(3)],
                         geo={"lat": ADDR[0], "lon": ADDR[1], "acc": 10})

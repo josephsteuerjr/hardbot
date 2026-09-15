@@ -76,6 +76,22 @@ def test_curiosity_open_far_away_does_not_spoil_confirmation():
     assert ev["open_dist_m"] > 5000 and ev["card_min"] == 70
 
 
+def test_was_at_address_but_saved_elsewhere_is_flagged_not_demoted():
+    """Стоял у двери 12 минут, а «Сохранить выезд» нажал в трёх километрах —
+    выезд был, но руководству важно и то, ГДЕ заполнили карточку."""
+    ev = _build([_s(0, k="open"), _s(720), _s(2400, lat=40.30, lon=69.65, k="save")],
+                saved_ms=T0 + 2_400_000, received_ms=T0 + 2_410_000)
+    assert ev["level"] == "confirmed" and ev["saved_away"] is True
+    assert ev["save_dist_m"] > 2000
+    assert "заполнен не на адресе" in ev["note"] and "На адресе" in ev["note"]
+    # сохранил там же, где стоял, — признака нет
+    ev2 = _build([_s(0), _s(600, k="save")])
+    assert ev2["saved_away"] is False
+    # у адреса не был — признак не ставится (вердикт и так «не был»)
+    ev3 = _build([_s(0, lat=40.30, lon=69.65, k="save")])
+    assert ev3["level"] == "far" and ev3["saved_away"] is None
+
+
 def test_served_draft_points_are_counted_as_online_proof():
     ev = _build([_s(0, k="draft"), _s(20, k="draft"), _s(60, k="save")])
     assert ev["served"] == 2
