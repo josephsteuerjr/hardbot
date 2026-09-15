@@ -625,10 +625,15 @@ def init_db() -> None:
         # контроль прямо (Худжанд, 11.09.2026). Точное время приёма лежало
         # только в append-only audit — сопоставлять его со строкой визита
         # каждый раз пришлось бы вручную.
+        # session_id / evidence_level / evidence — подтверждение выезда
+        # (evidence.py): к какой сессии карточки относятся следы телефона и
+        # вердикт «был ли у адреса», СОХРАНЁННЫЙ на момент визита по той же
+        # причине, что и geo_far.
         for col, decl in (("visit_lat", "REAL"), ("visit_lon", "REAL"),
                           ("dist_m", "INTEGER"), ("geo_far", "INTEGER"),
                           ("received_at", "TEXT"), ("fill_seconds", "INTEGER"),
-                          ("saved_at", "TEXT")):
+                          ("saved_at", "TEXT"), ("session_id", "TEXT"),
+                          ("evidence_level", "TEXT"), ("evidence", "TEXT")):
             if col not in vcols:
                 conn.execute(f"ALTER TABLE visits ADD COLUMN {col} {decl}")
         # Профиль пользователя (язык). Whitelist теперь = привязка к сотруднику.
@@ -1019,6 +1024,52 @@ def init_db() -> None:
                      "ON track_points(session_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_track_emp_ts "
                      "ON track_points(employee, ts)")
+        # Следы выезда: точки телефона, пока открыта карточка должника
+        # (evidence.py). В отличие от трека это следы ПРО КЕЙС — они и живут
+        # с кейсом: сброс ограниченного теста уносит их вместе с visits.
+        # received_at NULL у точек, доехавших пачкой вместе с визитом;
+        # у точек с автосохранения черновика он есть — это серверное
+        # свидетельство связи на месте. UNIQUE — против повторной доставки
+        # той же пачки из оффлайн-очереди.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS visit_presence (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              session_id TEXT NOT NULL,
+              contract_id TEXT,
+              employee TEXT,
+              telegram_id INTEGER,
+              ts TEXT NOT NULL,
+              received_at TEXT,
+              lat REAL, lon REAL, acc_m INTEGER,
+              online INTEGER, visible INTEGER,
+              kind TEXT,
+              UNIQUE(session_id, ts, kind)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_presence_session "
+                     "ON visit_presence(session_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_presence_contract "
+                     "ON visit_presence(contract_id, ts)")
+        # Адрес, уточнённый по подтверждённому выезду (addr_learn.py): куда
+        # выездник реально дошёл и застал должника. Кандидат хранится вместе с
+        # тем, что было в карточке до него, — чтобы правку можно было понять и
+        # откатить, а не только увидеть новую точку.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS addr_candidates (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              contract_id TEXT NOT NULL,
+              visit_op TEXT,
+              employee TEXT,
+              lat REAL NOT NULL, lon REAL NOT NULL, acc_m INTEGER,
+              reason TEXT,
+              created_at TEXT,
+              applied_at TEXT,
+              prev_src TEXT, prev_precision TEXT,
+              prev_lat REAL, prev_lon REAL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_addr_candidates_contract "
+                     "ON addr_candidates(contract_id)")
         # КОРПУС ДЛЯ ОБУЧЕНИЯ СКОРИНГА. Отдельная сущность от портфелей выездников:
         # сюда загружается ОБЩИЙ реестр целиком (17 тыс договоров), а не то, что
         # роздано на выезд. Живёт своей жизнью и переживает сброс портфелей —
@@ -2077,8 +2128,10 @@ def visits_for_employee(employee: str, date_from: str, date_to: str) -> list[sql
             "SELECT v.id id, v.contract_id contract_id, "
             "substr(v.created_at, 1, 10) created_at, v.payload payload, "
             "v.agent_id agent_id, v.received_at received_at, "
-            "v.visit_lat visit_lat, v.geo_far geo_far, "
-            "v.fill_seconds fill_seconds, v.saved_at saved_at "
+            "v.visit_lat visit_lat, v.visit_lon visit_lon, v.geo_far geo_far, "
+            "v.dist_m dist_m, v.fill_seconds fill_seconds, v.saved_at saved_at, "
+            "v.op_id op_id, v.evidence_level evidence_level, v.evidence evidence, "
+            "c.geo_lat addr_lat, c.geo_lon addr_lon "
             "FROM visits v JOIN clients c ON c.contract_id = v.contract_id "
             "WHERE c.responsible = ? AND substr(v.created_at, 1, 10) BETWEEN ? AND ? "
             "ORDER BY v.id",
@@ -2261,6 +2314,8 @@ def photo_geo_sweep() -> int:
     if days <= 0:
         return 0
     before = (date.today() - timedelta(days=days)).isoformat()
+    # Следы выезда — те же перемещения сотрудника, срок хранения один.
+    presence_sweep(days)
     return photo_geo_forget(before=before)
 
 
@@ -3687,7 +3742,9 @@ def log_visit(contract_id: str, agent_id: int, payload: str,
               op_id: str | None = None, lat: float | None = None,
               lon: float | None = None, dist_m: int | None = None,
               geo_far: bool | None = None, on_date: str | None = None,
-              fill_seconds: int | None = None, saved_at: str | None = None) -> bool:
+              fill_seconds: int | None = None, saved_at: str | None = None,
+              session_id: str | None = None, evidence_level: str | None = None,
+              evidence: str | None = None) -> bool:
     """Записать выезд в историю. op_id — идемпотентный ключ (uuid от клиента): повторная
     доставка того же выезда из оффлайн-очереди НЕ создаёт дубль. Возвращает True, если
     строка реально добавлена (значит, можно слать уведомление в группу); False — если это
@@ -3701,12 +3758,12 @@ def log_visit(contract_id: str, agent_id: int, payload: str,
         cur = conn.execute(
             "INSERT OR IGNORE INTO visits (contract_id, agent_id, created_at, payload, "
             "op_id, visit_lat, visit_lon, dist_m, geo_far, received_at, "
-            "fill_seconds, saved_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "fill_seconds, saved_at, session_id, evidence_level, evidence) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (contract_id, agent_id, on_date or date.today().isoformat(), payload, op_id,
              lat, lon, dist_m, None if geo_far is None else int(bool(geo_far)),
              datetime.now().isoformat(timespec="seconds"), fill_seconds,
-             saved_at),
+             saved_at, session_id, evidence_level, evidence),
         )
         conn.commit()
         return cur.rowcount > 0
@@ -3833,6 +3890,9 @@ def last_visit_geo(contract_ids: list[str]):
 # None = «точка не адресная, мерить нечего». Молчание здесь честнее числа.
 _GEO_TOLERANCE_M = {
     "manual": 150,      # метку поставил выездник у двери — это самое точное, что есть
+    # Точка, выученная по подтверждённому выезду (addr_learn.py): где выездник
+    # стоял, когда застал должника. Погрешность — телефона, а не справочника.
+    "visit": 250,
     "exact": 300,       # дом от точного геокодера
     "house": 300,
     "street": 700,      # сетка справочника 110 м + длина отрезка улицы
@@ -3850,9 +3910,151 @@ _GEO_TOLERANCE_M = {
 
 def geo_tolerance_m(precision: str | None, src: str | None = None) -> int | None:
     """Допуск для «далеко от адреса» или None, если судить не по чему."""
-    if (src or "").strip().lower() == "manual":
-        return _GEO_TOLERANCE_M["manual"]
+    source = (src or "").strip().lower()
+    if source in ("manual", "visit"):
+        return _GEO_TOLERANCE_M[source]
     return _GEO_TOLERANCE_M.get((precision or "").strip().lower())
+
+
+# --- Следы выезда и уточнённые адреса (evidence.py, addr_learn.py) ------------
+def add_presence(session_id: str, employee: str, telegram_id: int,
+                 contract_id: str | None, samples: list[dict], *,
+                 received_at: str | None = None) -> int:
+    """Дописать следы телефона одной сессии карточки. Возвращает число
+    действительно новых строк; повтор той же пачки из оффлайн-очереди дублей
+    не создаёт (UNIQUE по session_id, ts, kind)."""
+    session_id = (session_id or "").strip()[:64]
+    if not session_id or not samples:
+        return 0
+    rows = []
+    for s in samples:
+        ts = s.get("ts")
+        if ts is None:
+            continue
+        rows.append((session_id, contract_id, employee, telegram_id,
+                     datetime.fromtimestamp(int(ts) / 1000.0, timezone.utc)
+                     .replace(tzinfo=None).isoformat(timespec="seconds"),
+                     received_at, s.get("lat"), s.get("lon"), s.get("acc"),
+                     None if s.get("on") is None else int(bool(s.get("on"))),
+                     None if s.get("vis") is None else int(bool(s.get("vis"))),
+                     (s.get("k") or "sample")[:12]))
+    if not rows:
+        return 0
+    with connect() as conn:
+        before = conn.total_changes
+        conn.executemany(
+            "INSERT INTO visit_presence (session_id, contract_id, employee, telegram_id, "
+            "ts, received_at, lat, lon, acc_m, online, visible, kind) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(session_id, ts, kind) DO NOTHING", rows)
+        conn.commit()
+        return conn.total_changes - before
+
+
+def presence_for_session(session_id: str) -> list[dict]:
+    """Следы сессии в виде, который понимает evidence.build (ts — мс эпохи)."""
+    session_id = (session_id or "").strip()
+    if not session_id:
+        return []
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM visit_presence WHERE session_id = ? ORDER BY ts",
+            (session_id,)).fetchall()
+    out = []
+    for r in rows:
+        try:
+            ts = int(datetime.fromisoformat(r["ts"]).replace(tzinfo=timezone.utc)
+                     .timestamp() * 1000)
+        except (TypeError, ValueError):
+            continue
+        out.append({"ts": ts, "lat": r["lat"], "lon": r["lon"], "acc": r["acc_m"] or 0,
+                    "on": None if r["online"] is None else bool(r["online"]),
+                    "vis": None if r["visible"] is None else bool(r["visible"]),
+                    "k": r["kind"] or "sample", "served": r["received_at"] is not None})
+    return out
+
+
+def update_visit_evidence(op_id: str, level: str, data: str) -> int:
+    """Переписать вердикт визита после догона фото (снимок у двери подтверждает
+    выезд). Единственный законный случай перезаписи: следы те же, просто
+    доехали позже."""
+    if not op_id:
+        return 0
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE visits SET evidence_level=?, evidence=? WHERE op_id=?",
+            (level, data, op_id))
+        conn.commit()
+    return cur.rowcount
+
+
+def presence_sweep(days: int) -> int:
+    """Стереть следы старше срока хранения (тем же сроком, что у координат
+    фото — это тоже перемещения сотрудника, а не данные реестра)."""
+    if days <= 0:
+        return 0
+    before = (date.today() - timedelta(days=days)).isoformat()
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM visit_presence WHERE ts < ?", (before,))
+        conn.commit()
+    return cur.rowcount
+
+
+def presence_stats() -> dict:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) n, COUNT(DISTINCT session_id) sessions, "
+            "SUM(received_at IS NOT NULL) served, MIN(ts) oldest FROM visit_presence"
+        ).fetchone()
+    return {"points": row["n"] or 0, "sessions": row["sessions"] or 0,
+            "served": row["served"] or 0, "oldest": row["oldest"] or ""}
+
+
+def add_addr_candidate(contract_id: str, lat: float, lon: float, acc_m: int | None,
+                       *, employee: str = "", visit_op: str | None = None,
+                       reason: str = "", prev: dict | None = None,
+                       applied: bool = False) -> int:
+    prev = prev or {}
+    now = datetime.now().isoformat(timespec="seconds")
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO addr_candidates (contract_id, visit_op, employee, lat, lon, "
+            "acc_m, reason, created_at, applied_at, prev_src, prev_precision, "
+            "prev_lat, prev_lon) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (contract_id, visit_op, employee, lat, lon, acc_m, reason, now,
+             now if applied else None, prev.get("src"), prev.get("precision"),
+             prev.get("lat"), prev.get("lon")))
+        conn.commit()
+        return cur.lastrowid
+
+
+def apply_learned_point(contract_ids: list[str], lat: float, lon: float) -> int:
+    """Поставить выученную точку всем договорам человека. Ручную метку
+    выездника (manual) не трогаем: он стоял у двери, точнее не бывает."""
+    ids = [c for c in contract_ids if c]
+    if not ids:
+        return 0
+    qs = ",".join("?" for _ in ids)
+    with connect() as conn:
+        cur = conn.execute(
+            f"UPDATE clients SET geo_lat=?, geo_lon=?, geo_src='visit', "
+            f"geo_precision='visit' WHERE contract_id IN ({qs}) "
+            "AND COALESCE(geo_src,'') <> 'manual'",
+            (round(float(lat), 6), round(float(lon), 6), *ids))
+        conn.commit()
+    _bump_version()
+    return cur.rowcount
+
+
+def addr_candidates_stats() -> dict:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) n, SUM(applied_at IS NOT NULL) applied, "
+            "COUNT(DISTINCT contract_id) contracts FROM addr_candidates").fetchone()
+        learned = conn.execute(
+            "SELECT COUNT(*) FROM clients WHERE geo_src='visit'").fetchone()[0]
+    return {"candidates": row["n"] or 0, "applied": row["applied"] or 0,
+            "contracts": row["contracts"] or 0, "learned_points": learned or 0}
 
 
 PROMISE_AHEAD_DEFAULT = 3

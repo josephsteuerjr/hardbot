@@ -67,7 +67,15 @@ def test_list_shows_common_norm_until_a_personal_one_is_set(monkeypatch):
     assert out["ok"] and out["common"] == 10 and out["groups"] == [8, 10, 12]
     by_name = {e["employee"]: e for e in out["employees"]}
     assert set(by_name) == {EMP_A, EMP_B}, "только своя команда"
-    assert by_name[EMP_A] == {"employee": EMP_A, "plan": 10, "personal": False}
+    assert _norm(by_name[EMP_A]) == {"employee": EMP_A, "plan": 10, "personal": False}
+    # Рядом с ручной нормой — подсказка по расчёту (workload.py); у команды
+    # без адресов на карте её нет, но ключ в ответе есть всегда.
+    assert "suggested" in by_name[EMP_A] and "why" in by_name[EMP_A]
+
+
+def _norm(e: dict) -> dict:
+    """Ручная часть строки нормы — без подсказки по расчёту."""
+    return {k: e[k] for k in ("employee", "plan", "personal")}
 
 
 # --- запись ------------------------------------------------------------------
@@ -83,7 +91,7 @@ def test_zero_returns_a_person_to_the_common_norm(monkeypatch):
     _call("POST", {"plan": {EMP_A: 8}}, monkeypatch)
     out = _call("POST", {"plan": {EMP_A: 0}}, monkeypatch)
     by_name = {e["employee"]: e for e in out["employees"]}
-    assert by_name[EMP_A] == {"employee": EMP_A, "plan": 10, "personal": False}
+    assert _norm(by_name[EMP_A]) == {"employee": EMP_A, "plan": 10, "personal": False}
     assert db.visit_plan_map() == {}
 
 

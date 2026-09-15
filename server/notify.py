@@ -129,7 +129,8 @@ def _maps_link(lat, lon) -> str:
 
 def visit_report_text(row, dist_m=None, visit_geo=None, photo_geo=None,
                       photos_n: int = 0, actor: str | None = None,
-                      late_line: str | None = None) -> str:
+                      late_line: str | None = None,
+                      evidence_line: str | None = None) -> str:
     """Отчёт о выезде для беседы — по образцу постов сотрудников (клиент, адрес,
     рассказ), но с доказуемыми точками: гео закрытия визита и гео съёмки фото.
     row — клиент ПОСЛЕ сохранения (sqlite.Row или dict). Бот шлёт с
@@ -185,6 +186,10 @@ def visit_report_text(row, dist_m=None, visit_geo=None, photo_geo=None,
     # выглядит сегодняшним, а в сводке за тот день его нет.
     if late_line:
         lines.append(late_line)
+    # Подтверждение по всем следам выезда (evidence.py): руководителю в беседе
+    # нужно одно слово — был у адреса или нет, — а не две ссылки на карту.
+    if evidence_line:
+        lines.append(html.escape(evidence_line, quote=False))
     return "\n".join(lines)
 
 

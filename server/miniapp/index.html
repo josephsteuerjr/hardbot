@@ -379,6 +379,8 @@ const I18N = {
     geoslow:"Не успели ответить на запрос. Нажмите ещё раз и выберите «Разрешить».",
     go:"Поехать",exit:"Выйти",finishvisit:"Отметить визит",mins:"мин",
     draftwait:"черновик не отправлен на сервер",draftsent:"черновик сохранён на сервере",
+    geooffvisit:"Геолокация выключена — выезд не будет подтверждён руководителю.",
+    draftsleft:"Незавершённые карточки (заполнены, но «Сохранить выезд» не нажато)",
     resultreq:"Сначала выберите результат выезда",
     offline:"Оффлайн",datao:"данные на",pend:"ждут отправки",sending:"Отправляю…",
     savedoff:"Сохранено — уйдёт при связи",queuedn:"в очереди",
@@ -426,6 +428,8 @@ const I18N = {
     geoslow:"So‘rovga javob bermadingiz. Yana bosing va «Ruxsat berish»ni tanlang.",
     go:"Yo‘lga chiqish",exit:"Yopish",finishvisit:"Tashrifni belgilash",mins:"daq",
     draftwait:"qoralama serverga yuborilmadi",draftsent:"qoralama serverda saqlandi",
+    geooffvisit:"Geolokatsiya o‘chirilgan — chiqish rahbarga tasdiqlanmaydi.",
+    draftsleft:"Tugallanmagan kartochkalar (to‘ldirilgan, lekin «Chiqishni saqlash» bosilmagan)",
     resultreq:"Avval chiqish natijasini tanlang",
     offline:"Oflayn",datao:"ma’lumot",pend:"yuboriladi",sending:"Yuborilmoqda…",
     savedoff:"Saqlandi — aloqa paydo bo‘lsa yuboriladi",queuedn:"navbatda",
@@ -473,6 +477,8 @@ const I18N = {
     geoslow:"Ба дархост ҷавоб надодед. Боз пахш кунед ва «Иҷозат» -ро интихоб кунед.",
     go:"Ба роҳ баромадан",exit:"Бастан",finishvisit:"Сафарро қайд кардан",mins:"дақ",
     draftwait:"нусха ба сервер нафиристода шуд",draftsent:"нусха дар сервер захира шуд",
+    geooffvisit:"Геомавқеъ хомӯш аст — сафар ба роҳбар тасдиқ намешавад.",
+    draftsleft:"Корҳои нотамом (пур карда шуд, вале «Сафарро захира кардан» пахш нашуд)",
     resultreq:"Аввал натиҷаи сафарро интихоб кунед",
     offline:"Офлайн",datao:"додаҳо аз",pend:"дар навбат",sending:"Фиристода мешавад…",
     savedoff:"Захира шуд — ҳангоми алоқа фиристода мешавад",queuedn:"дар навбат",
@@ -796,7 +802,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=53;
+const SHELL_VERSION=54;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1053,6 +1059,7 @@ async function flushQueue(){
             form_version:it.form_version,input_keys:it.input_keys};
           if(it.cleared_keys&&it.cleared_keys.length) sbody.cleared_keys=it.cleared_keys;
           if(it.geo) sbody.geo=it.geo;
+          if(it.pr) Object.assign(sbody, it.pr);     // следы выезда из очереди
           r=await fetch("/api/save",{method:"POST",headers:jsonHeaders(),
             body:JSON.stringify(sbody)});
         }else if(it.kind==="marker"){
@@ -1133,6 +1140,7 @@ function applyVisitLocally(rep, values){
 }
 function finishSavedUI(rep, msg){
   clearDraft(rep); draftDirty=false; FORM_TOUCHED.clear(); stopAutoSync(); toast(msg);
+  prStop(); prClear(rep);        // следы ушли вместе с визитом (или лежат в очереди)
   if(TG&&TG.HapticFeedback) TG.HapticFeedback.notificationOccurred("success");
   const p=STATE.persons.find(x=>x.rep===rep); if(p) p.visited=true;
   STATE.tab="visit"; renderDetail();
@@ -1447,9 +1455,10 @@ async function doBind(){
 function renderList(){
   stopMeWatch();
   flushDraft(); stopAutoSync();   // уход с карточки через нижнюю навигацию — не потерять черновик
-  STATE.cur=null; removeMap();
+  STATE.cur=null; removeMap(); prStop();
   const t=L();
-  const bar=`<div class="muted" style="margin-bottom:10px">${t.my}: ${STATE.persons.length}</div>`;
+  const bar=`<div class="muted" style="margin-bottom:10px">${t.my}: ${STATE.persons.length}</div>`+
+    draftsLeftHTML(t);
   // Пустой портфель — штатное состояние: сотрудника открепили, период отсёк,
   // переименовали в реестре. Раньше здесь был ранний return ДО переключателя
   // сотрудников, и руководитель, переключившийся на такого человека, залипал на
@@ -1598,6 +1607,7 @@ async function openP(rep){
   // подошёл к подъезду, но знает, когда открыл должника и когда закрыл выезд.
   // Повторное открытие того же КД начинает отсчёт заново.
   STATE.openedAt=Date.now();
+  prStart(rep);      // следы выезда: где телефон, пока открыта эта карточка
   FORM_TOUCHED.clear(); FORM_CLEARED.clear();
   // ПОВТОРНОЕ открытие уже закрытого визита: считаем тронутым всё, что человек
   // видит заполненным. Иначе второе сохранение («утром Нет контакта, вечером
@@ -1730,6 +1740,7 @@ function routeOrder(pts){
 // initClientsMap удалён вместе с renderMap: точки клиентов рисует initNavTabMap.
 function panelVisit(d,t){
   return `
+   ${geoOffVisitHTML(t)}
    <div class="mapwrap">
      <div class="map" id="map" onclick="openCaseOnMap()"
           style="cursor:pointer" title="${esc(t.openmap)}"></div>
@@ -2418,6 +2429,115 @@ async function geoProbe(){
   }catch(e){}
 }
 
+// --- Подтверждение выезда: следы телефона, пока открыта карточка --------------
+// Раньше от выезда оставалась одна точка — где нажали «Сохранить выезд», — и её
+// можно было нажать за квартал от адреса. Теперь, пока открыта карточка
+// должника, телефон тихо отмечает, где он (шаг ≥30 с или ≥25 м), и всё это
+// уезжает на сервер вместе с визитом — и онлайн, и через оффлайн-очередь.
+// Черновик раз в 20 с несёт свежую точку отдельно: у неё будет серверное время
+// приёма — доказательство связи на месте, которое с телефона не подделать.
+// Буфер живёт в localStorage: iOS выгружает приложение, а следы терять нельзя.
+const PR={rep:null,session:null,buf:[],watch:null,timer:null,last:null,lastTs:0,
+          openedAt:0,fgSince:0,fgMs:0,openGeo:null,onlineOpen:null};
+const PR_MAX=240, PR_MIN_MS=30000, PR_MIN_M=25;
+function prKey(rep){ return "hb_presence:"+currentUid()+":"+rep; }
+function prLoad(rep){ try{ const s=localStorage.getItem(prKey(rep)); return s?JSON.parse(s):null; }catch(e){ return null; } }
+function prClear(rep){ try{ localStorage.removeItem(prKey(rep)); }catch(e){} }
+function prOnline(){ return STATE.online!==false && (typeof navigator.onLine!=="boolean" || navigator.onLine); }
+function prFg(){ return PR.fgMs+(PR.fgSince?Date.now()-PR.fgSince:0); }
+function prSave(){
+  if(!PR.rep) return;
+  try{ localStorage.setItem(prKey(PR.rep), JSON.stringify({session:PR.session, opened_at:PR.openedAt,
+    open_geo:PR.openGeo, online_open:PR.onlineOpen, fg_ms:prFg(), buf:PR.buf.slice(-PR_MAX)})); }catch(e){}
+}
+function prPush(p, kind){
+  if(!PR.rep || !p || typeof p.lat!=="number" || typeof p.lon!=="number") return;
+  const ts=p.ts||Date.now();
+  // Стоящий на месте телефон шлёт точку каждую секунду — держим шаг.
+  if(kind==="sample" && PR.last && ts-PR.lastTs<PR_MIN_MS && haversineKm(PR.last,p)*1000<PR_MIN_M) return;
+  PR.last={lat:p.lat,lon:p.lon}; PR.lastTs=ts;
+  PR.buf.push({ts, lat:+p.lat.toFixed(6), lon:+p.lon.toFixed(6), acc:Math.round(p.acc||0),
+               on:prOnline()?1:0, vis:document.hidden?0:1, k:kind});
+  if(PR.buf.length>PR_MAX) PR.buf.splice(0, PR.buf.length-PR_MAX);
+  prSave();
+}
+function prOnPos(p){
+  const g={lat:p.coords.latitude, lon:p.coords.longitude,
+           acc:Math.round(p.coords.accuracy||0), ts:p.timestamp||Date.now()};
+  GEO.state="granted"; GEO.last=g;
+  prPush(g,"sample");
+}
+async function prStart(rep){
+  prStop();
+  const prev=prLoad(rep);   // карточку уже открывали, приложение выгружали — та же сессия
+  PR.rep=rep; PR.session=(prev&&prev.session)||uuid(); PR.buf=(prev&&prev.buf)||[];
+  PR.openedAt=(prev&&prev.opened_at)||Date.now(); PR.fgMs=(prev&&prev.fg_ms)||0;
+  PR.fgSince=document.hidden?0:Date.now(); PR.openGeo=(prev&&prev.open_geo)||null;
+  PR.onlineOpen=(prev&&prev.online_open!=null)?prev.online_open:(prOnline()?1:0);
+  PR.last=null; PR.lastTs=0; prSave();
+  // Точка открытия — только если права уже есть: системный диалог по открытию
+  // карточки человек не ждёт, для него есть кнопка «Включить геопозицию».
+  if(GEO.state==="granted"||GEO.last||TGLOC){
+    const g=await grabGeo(8000,15000);
+    if(g && PR.rep===rep && !PR.openGeo){
+      PR.openGeo={lat:g.lat,lon:g.lon,acc:g.acc||0,ts:g.ts||Date.now()}; prPush(PR.openGeo,"open"); }
+  }
+  if(PR.rep!==rep) return;
+  if(navigator.geolocation && GEO.state==="granted"){
+    try{ PR.watch=navigator.geolocation.watchPosition(prOnPos, ()=>{},
+           {enableHighAccuracy:true, maximumAge:15000, timeout:30000}); }catch(e){}
+  }else if(TGLOC){
+    PR.timer=setInterval(async()=>{ const p=await tgGetLocation(); if(p) prPush(p,"sample"); }, 60000);
+  }
+}
+function prStop(){
+  if(PR.watch!=null && navigator.geolocation){ try{ navigator.geolocation.clearWatch(PR.watch); }catch(e){} }
+  PR.watch=null;
+  if(PR.timer){ clearInterval(PR.timer); PR.timer=null; }
+  if(PR.fgSince){ PR.fgMs+=Date.now()-PR.fgSince; PR.fgSince=0; }
+  prSave();
+  PR.rep=null; PR.session=null; PR.buf=[]; PR.openGeo=null;
+}
+// Что уезжает с «Сохранить выезд» (и в очередь): сессия, следы, точка открытия,
+// связь при открытии и сколько минут приложение было на экране.
+function prPayload(rep){
+  let d;
+  if(PR.rep===rep) d={session:PR.session, buf:PR.buf, open_geo:PR.openGeo, online_open:PR.onlineOpen, fg_ms:prFg()};
+  else d=prLoad(rep)||{};
+  return {session_id:d.session||uuid(), presence:(d.buf||[]).slice(-PR_MAX), open_geo:d.open_geo||null,
+          online_at_open:d.online_open==null?null:d.online_open, foreground_ms:Math.round(d.fg_ms||0)};
+}
+document.addEventListener("visibilitychange", ()=>{
+  if(!PR.rep) return;
+  if(document.hidden){ if(PR.fgSince){ PR.fgMs+=Date.now()-PR.fgSince; PR.fgSince=0; } prSave(); }
+  else PR.fgSince=Date.now();
+});
+// Гео выключена — выезд не подтвердится. Говорим об этом в карточке, а не только
+// плашкой в списке: там её давно перестали замечать.
+function geoOffVisitHTML(t){
+  if(GEO.state!=="denied") return "";
+  return `<div class="box" style="border-color:var(--danger);margin-bottom:10px">
+    <div>📵 ${esc(t.geooffvisit)}</div>
+    <button class="btn line" style="margin-top:8px" onclick="geoEnable()">${esc(t.geoon)}</button></div>`;
+}
+// Заполненные, но не закрытые карточки: за четыре дня теста таких набралось 16 —
+// человек уезжал с адреса, думая, что выезд записан.
+function draftsLeft(){
+  const out=[];
+  for(const p of (STATE.persons||[])){
+    if(p.visited) continue;
+    const d=loadDraft(p.rep);
+    if(d && d.v && Object.keys(d.v).length) out.push(p);
+  }
+  return out;
+}
+function draftsLeftHTML(t){
+  const ds=draftsLeft(); if(!ds.length) return "";
+  return `<div class="box" style="border-color:var(--danger);margin-bottom:10px">
+    <div>✍️ ${esc(t.draftsleft)}: <b>${ds.length}</b></div>
+    ${ds.slice(0,5).map(p=>`<button class="btn line" style="margin-top:6px" onclick="openP(decodeURIComponent('${enc(p.rep)}'))">${esc(p.client)} ›</button>`).join("")}</div>`;
+}
+
 // Голосовой комментарий: диктовка → /api/voice → текст в поле.
 // Выездники часто плохо пишут по-русски; голосом быстрее и полнее.
 let REC=null,VOICE_WAIT=false;
@@ -2552,6 +2672,10 @@ async function saveVisit(){
     const clearedNow=[...FORM_CLEARED].filter(k=>FORM_TOUCHED.has(k));
     if(clearedNow.length) body.cleared_keys=clearedNow;
     if(geo) body.geo=geo;
+    // Следы выезда (сессия карточки, точки, точка открытия, связь, экран) —
+    // одинаково в онлайн-тело и в запись очереди: pr снимается СЕЙЧАС.
+    const pr=prPayload(rep);
+    Object.assign(body, pr);
     try{
       const j=await api("/api/save",{method:"POST",body:JSON.stringify(body)});
       STATE.online=true; STATE.cur=j.person; IDB.put("cards",j.person,rep).catch(()=>{});
@@ -2568,7 +2692,7 @@ async function saveVisit(){
       await enqueue({op_id, kind:"save", rep, values, input_keys,
         cleared_keys:clearedNow, photos_pending, occurred_at,
         opened_at:STATE.openedAt||occurred_at,
-        form_version:FORM_VERSION, geo, at:occurred_at});
+        form_version:FORM_VERSION, geo, pr, at:occurred_at});
       STATE.online=false; applyVisitLocally(rep, values);
       finishSavedUI(rep, L().savedoff);
     }
@@ -2709,7 +2833,11 @@ async function pushDraft(){
   try{
     await api("/api/save",{method:"POST",body:JSON.stringify({
       rep:STATE.cur.rep,values,finish:false,
-      form_version:FORM_VERSION,input_keys})});
+      form_version:FORM_VERSION,input_keys,
+      // Следы выезда: сессия карточки и свежая точка. У неё будет серверное
+      // время приёма — доказательство связи на месте, его с телефона не подделать.
+      session_id:(PR.rep===STATE.cur.rep)?PR.session:undefined,
+      geo:(GEO.last && Date.now()-(GEO.last.ts||0)<90000)?GEO.last:undefined})});
     draftDirty=false; markDraftBadge(false);   // localStorage НЕ чистим — кэш до явного finish:true
   }catch(e){}   // сеть/ошибка — черновик остаётся, повтор на следующем интервале
 }
@@ -2815,7 +2943,7 @@ function openCaseOnMap(){
 }
 
 async function renderNav(focus){
-  flushDraft(); stopAutoSync(); stopMeWatch();
+  flushDraft(); stopAutoSync(); stopMeWatch(); prStop();
   removeMap(); STATE.cur=null; NAVPICK=null;
   const t=L();
   $("app").innerHTML=`
@@ -2996,7 +3124,7 @@ function stopMeWatch(){
 // Метка — это «я был вот здесь». Заметка — «вот что я об этом думаю»: в форму
 // визита на ходу влезает не всё, а вечером вспомнить уже нечего.
 async function renderMarks(){
-  flushDraft(); stopAutoSync(); stopMeWatch();
+  flushDraft(); stopAutoSync(); stopMeWatch(); prStop();
   removeMap(); STATE.cur=null;
   const t=L();
   $("app").innerHTML=`
@@ -3037,7 +3165,7 @@ function dgRangeQ(extra){
   Object.entries(extra||{}).forEach(([k,v])=>{ if(v!=null&&v!=="") p.set(k,v); });
   return "?"+p.toString(); }
 async function renderDigest(){
-  flushDraft(); stopAutoSync(); stopMeWatch(); removeMap(); STATE.cur=null;
+  flushDraft(); stopAutoSync(); stopMeWatch(); removeMap(); STATE.cur=null; prStop();
   PhotoAudit.free();
   DG.view="stats"; DG.emp=null; DG.rep=null; DG.bindacc=null;
   if(DG.date){ // диплинк из дайджеста (?tab=digest&d=…): окно ровно на этот день
@@ -3057,6 +3185,7 @@ async function dgLoad(){
             : DG.view==="emp"      ? "/api/manager/stats_employee"+dgRangeQ({employee:DG.emp})
             : DG.view==="person"   ? "/api/manager/person"+dgQ({employee:DG.emp,rep:DG.rep})
             : DG.view==="plan"     ? "/api/manager/plan"
+            : DG.view==="workload" ? "/api/manager/workload"+dgRangeQ(DG.wemp?{employee:DG.wemp}:{})
             : DG.view==="binds"    ? "/api/manager/binds"
             : DG.view==="cases"    ? "/api/manager/cases"+dgRangeQ({metric:DG.metric||"visits",
                                        country:DG.country||"", office:DG.office||""})
@@ -3137,8 +3266,54 @@ function dgRender(j){
   if(DG.view==="photos") return dgPhotos(b);
   if(DG.view==="cases") return dgCasesScreen(j,b);
   if(DG.view==="plan") return dgPlanScreen(j,b);
+  if(DG.view==="workload") return dgWorkloadScreen(j,b);
   if(DG.view==="binds") return dgBindsScreen(j,b);
   return dgPromises(j,b);
+}
+// --- ЭКРАН: нагрузка — норма по расчёту против ручной, разбор дней ------------
+// Норма «10 на всех» не различает портфель в трёх кварталах и портфель по
+// кишлакам за 60 км. Здесь видно, сколько выездов помещается в день у каждого
+// (дорога по портфелю + измеренное время у адреса), и как прошли дни:
+// у адресов, в дороге, простой.
+let DG_WL=[];
+function dgWlNum(v,suf){ return (v==null)?"—":(v+(suf||"")); }
+function dgWorkloadScreen(j,b){
+  const rg=j.range||{};
+  if(j.employee){
+    const s=j.summary||{};
+    const parts=[`<button class="back" onclick="dgGo('workload',{wemp:null})">‹ к нагрузке</button>`,
+                 dgTop(j.employee, "как прошли дни · "+(rg.label||""))];
+    parts.push(`<div class="muted" style="font-size:13px">📐 норма по расчёту <b>${dgWlNum(s.norm_suggested)}</b> `+
+      `(сейчас ${dgWlNum(s.norm_now)}) · в среднем <b>${dgWlNum(s.visits_per_day)}</b> выездов в рабочий день · `+
+      `у адреса ${dgWlNum(s.visit_min," мин")}${s.visit_min_measured?" (измерено)":" (норма офиса)"} · `+
+      `дорога ${dgWlNum(s.travel_min," мин")} на выезд · радиус портфеля ${dgWlNum(s.radius_km," км")}</div>`);
+    const rows=(j.days||[]).map(d=>`<tr><td class="l">${esc(d.label||d.date)}</td><td>${d.visits}</td>
+      <td>${esc(d.first||"")}–${esc(d.last||"")}</td><td>${dgWlNum(d.address_min)}</td>
+      <td>${dgWlNum(d.travel_min)}</td><td>${dgWlNum(d.idle_min)}</td><td>${dgWlNum(d.km)}</td></tr>`).join("");
+    parts.push(`<div class="stwrap"><table class="stt"><thead><tr><th class="l">День</th><th>Выезд.</th>
+      <th>С – по</th><th>У адр., мин</th><th>Дорога, мин</th><th>Простой, мин</th><th>км</th></tr></thead>
+      <tbody>${rows||`<tr><td class="l muted" colspan="7">выездов не было</td></tr>`}</tbody></table></div>`);
+    parts.push(`<div class="muted" style="font-size:11px;margin-top:6px">У адресов — по подтверждённым выездам (иначе по времени на карточке); дорога — между точками сохранения; простой — остальное время от первой карточки до последнего сохранения.</div>`);
+    b.innerHTML=parts.join(""); return;
+  }
+  const d=j.defaults||{}, t=j.totals||{};
+  DG_WL=(j.rows||[]).map(r=>r.employee);
+  const parts=[`<button class="back" onclick="dgGo('stats')">‹ к сводке</button>`,
+               dgTop("Нагрузка","норма по географии портфеля и фактическому темпу")];
+  parts.push(`<div class="muted" style="font-size:13px">Рабочий день ${d.work_min} мин, у адреса ${d.visit_min} мин `+
+    `(или измеренное), дорога — по ${esc(d.travel_src||"прямой")}. Норма = сколько таких выездов помещается в день. `+
+    `Сумма норм: по расчёту <b>${t.norm_suggested||0}</b>, сейчас <b>${t.norm_now||0}</b>; `+
+    `завышена у ${t.under||0}, занижена у ${t.over||0}.</div>`);
+  const rows=(j.rows||[]).map((r,i)=>`<tr onclick="dgGo('workload',{wemp:DG_WL[${i}]})">
+    <td class="l"><div class="pname">${esc(r.employee)}</div>
+      <div class="psub">${esc(r.office||"")}${r.portfolio_points?` · на карте ${r.portfolio_points} из ${r.portfolio_total}`:""}</div></td>
+    <td>${dgWlNum(r.radius_km)}</td><td>${dgWlNum(r.travel_min)}</td><td>${dgWlNum(r.visit_min)}${r.visit_min_measured?"*":""}</td>
+    <td><b>${dgWlNum(r.norm_suggested)}</b></td><td>${dgWlNum(r.norm_now)}</td><td>${dgWlNum(r.visits_per_day)}</td></tr>`).join("");
+  parts.push(`<div class="stwrap"><table class="stt"><thead><tr><th class="l">Сотрудник</th><th>Радиус, км</th>
+    <th>Дорога, мин</th><th>У адр., мин</th><th>Норма расч.</th><th>Норма сейчас</th><th>Факт/день</th></tr></thead>
+    <tbody>${rows||`<tr><td class="l muted" colspan="7">Команда пуста</td></tr>`}</tbody></table></div>
+    <div class="muted" style="font-size:11px;margin-top:6px">* — время у адреса измерено по подтверждённым выездам этого человека. Тап по строке — разбор дней.</div>`);
+  b.innerHTML=parts.join("");
 }
 // --- общие куски экранов статистики ---
 const DG_PRESETS=[["today","Сегодня"],["yesterday","Вчера"],["7d","7 дней"],["30d","30 дней"],["month","Месяц"],["custom","Даты…"]];
@@ -3177,6 +3352,14 @@ function dgKpis(t,rg){
   // выезды без точки телефона. Ноль не показываем — строка и так длинная.
   if(t.late) line.push(`⏱ внесено позже: <b>${t.late}</b>`);
   if(t.no_geo) line.push(`📍 без гео: <b>${t.no_geo}</b>`);
+  // Подтверждение выезда: по всем следам телефона, а не по одной точке
+  // закрытия. Тап по числу — те самые случаи.
+  const evl=[["confirmed","🛡 на адресе"],["far","⚠️ у адреса не был"],
+             ["unverified","❔ нечем проверить"],["series","🧾 признаки серии"]]
+    .filter(([k])=>t[k]).map(([k,l])=>team
+      ?`<a href="#" onclick="dgCases('${k}');return false">${l}: <b>${t[k]}</b></a>`
+      :`${l}: <b>${t[k]}</b>`);
+  if(evl.length) line.push(evl.join(" · "));
   if(t.money_text) line.push(`💰 долг ${esc(t.money_text)}`);
   if(t.money_paid_text) line.push(`✅ закрыто ${esc(t.money_paid_text)}`);
   return `<div class="kpis">
@@ -3214,6 +3397,7 @@ function dgStats(j,b){
     <button class="btn line" style="flex:1" onclick="dgOpenPromises()">⏰ Просрочено: ${t.overdue||0}</button>
     <button class="btn line" style="flex:1" onclick="dgGo('photos')">📸 Фото по КД</button>
     <button class="btn line" style="flex:1" onclick="dgGo('plan')">🎯 Нормы</button>
+    <button class="btn line" style="flex:1" onclick="dgGo('workload',{wemp:null})">📐 Нагрузка</button>
     <button class="btn line" style="flex:1" onclick="dgGo('binds')">👤 Кто есть кто${(+j.bind_requests>0)?" · "+(+j.bind_requests):""}</button>
     <button class="btn line" style="flex:1" onclick="dgExcel()">⬇️ Excel</button></div>`);
   b.innerHTML=parts.join("");
@@ -3334,6 +3518,14 @@ function dgPerson(j,b){
   // читать как «стоял у двери четыре минуты».
   if(j.fill_text) parts.push(`<div class="muted">⏱ заполнение карточки: ${esc(j.fill_text)} `+
     `<span style="font-size:11px">(от открытия карточки до «Сохранить выезд» — не время на адресе)</span></div>`);
+  // Подтверждение выезда: вердикт и разбор по следам — открытие карточки,
+  // минуты у адреса, сохранение, связь, снимок.
+  const ev=j.evidence;
+  if(ev){
+    parts.push(`<div style="margin-top:8px;font-weight:700">${esc(ev.emoji||"")} Подтверждение выезда: ${esc(ev.title||"")}</div>`);
+    if(ev.rows&&ev.rows.length) parts.push(`<div class="muted" style="font-size:13px">${ev.rows.map(r=>"· "+esc(r)).join("<br>")}</div>`);
+  }
+  if(j.learned_point) parts.push(`<div class="muted" style="font-size:12px">📍 адрес уточнён по выезду — точка «где застали»</div>`);
   const d=j.dates||{};
   const tail=[d.visit_date?"🗓 "+esc(d.visit_date):"",d.reminder_date?"🔁 "+esc(d.reminder_date):"",
               d.meeting_date?"📅 "+esc(d.meeting_date):""].filter(Boolean).join("   ");
@@ -3445,11 +3637,16 @@ async function dgMap(j,b){
   $("dgleg").textContent="🔵 адрес · 🟢 визит · 🔴 далеко · 🟣 закрыл руководитель · 🟠 метка";
 }
 // Пометки контроля у выезда: доехал не в свой день, закрыт без точки телефона.
+const DG_EV={confirmed:"🛡 на адресе",far:"⚠️ у адреса не был",nofix:"❔ точка неточная",coarse:"❔ адрес неточный"};
 function caseMarks(c){
   const out=[];
   if(c.late_days) out.push("⏱ +"+c.late_days+" дн");
   if(c.geo===false) out.push("📍 без гео");
   if(c.fill_text) out.push("⏱ карточка "+c.fill_text);
+  // Подтверждение выезда — одним словом, как в карточке руководителю.
+  const ev=DG_EV[c.evidence_level];
+  if(ev) out.push(ev+((c.evidence_level==="confirmed"&&c.near_min)?" "+c.near_min+" мин":""));
+  if(c.series) out.push("🧾 "+c.series);
   return out.length?" · "+out.join(" · "):"";
 }
 // Норму правит сам руководитель: офис делит людей на группы 8/10/12 по
@@ -3462,10 +3659,15 @@ function dgPlanScreen(j,b){
   const rows=(j.employees||[]).map((e,i)=>{
     const chips=groups.map(n=>`<button class="chip${e.plan===n?" on":""}"
       onclick="dgSetPlan(${i},${n})">${n}</button>`).join("")+
-      `<button class="chip${e.personal?"":" on"}" onclick="dgSetPlan(${i},0)">общая ${j.common}</button>`;
+      `<button class="chip${e.personal?"":" on"}" onclick="dgSetPlan(${i},0)">общая ${j.common}</button>`+
+      // Норма по расчёту — отдельной кнопкой: география портфеля плюс
+      // измеренное время у адреса. Руководитель решает сам, ставить ли её.
+      ((e.suggested&&groups.indexOf(e.suggested)<0)?`<button class="chip${e.plan===e.suggested?" on":""}"
+        onclick="dgSetPlan(${i},${e.suggested})">📐 ${e.suggested}</button>`:"");
     return `<div class="card" style="padding:10px;margin-top:8px">
       <div class="pname">${esc(e.employee)}</div>
-      <div class="chips" style="margin-top:6px">${chips}</div></div>`;
+      <div class="chips" style="margin-top:6px">${chips}</div>
+      ${e.suggested?`<div class="muted" style="font-size:12px;margin-top:4px">📐 по расчёту ${e.suggested} в день${e.why?" — "+esc(e.why):""}</div>`:""}</div>`;
   }).join("");
   b.innerHTML=`<button class="back" onclick="dgGo('stats')">‹ к сводке</button>`+
     dgTop("Нормы выездов","сколько выездов в день ждём от человека")+
@@ -3631,7 +3833,9 @@ async function dgBindPost(body){
   }
 }
 const DG_METRIC_TITLE={visits:"Выезды",paid:"Оплачено",promised:"Обещают оплатить",
-  with_photo:"Выезды с фото",persons:"Должники"};
+  with_photo:"Выезды с фото",persons:"Должники",
+  confirmed:"Подтверждены на адресе",far:"У адреса не был",
+  unverified:"Нечем проверить",series:"Признаки серии"};
 function dgCasesScreen(j,b){
   DG.cases=[]; DG.days=j.by_day||DG.days||[];
   const rg=j.range||{}, cs=j.cases||[];

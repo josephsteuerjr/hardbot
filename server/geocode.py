@@ -294,7 +294,9 @@ def geocode_all(overwrite: bool = False, use_precise: bool = True,
     rows = db.all_clients(limit=limit)
     stat = {"total": len(rows), "precise": 0, "aul": 0, "skip": 0, "fail": 0}
     for i, r in enumerate(rows):
-        if r["geo_src"] == "manual":                   # точку поставил выездник — свято
+        # Точку поставил выездник (manual) или она выучена по выезду, на котором
+        # должника застали (visit, см. addr_learn.py) — свято: точнее не бывает.
+        if r["geo_src"] in ("manual", "visit"):
             stat["skip"] += 1
         elif r["geo_lat"] and not overwrite:
             stat["skip"] += 1

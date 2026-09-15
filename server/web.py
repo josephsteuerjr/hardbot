@@ -50,9 +50,12 @@ from exchange_contract import (
 )
 from fields import BY_KEY, DROPDOWNS
 from i18n import FIELD_TITLES, FORM_FIELD_TITLES, LANGUAGES, t, tf, tv
+import addr_learn
 import digest_data
+import evidence
 import maplink
 import routing_client
+import workload
 import stt_client
 from keyboards import approve_bind_kb
 import photoaudit
@@ -1440,6 +1443,11 @@ async def _save(request: web.Request) -> web.Response:
         if fc:
             values[db.FORECAST_KEY] = fc
     db.audit_access(uid, "save_visit" if finish else "save_card", rep)
+    if not finish:
+        # Автосохранение черновика несёт точку телефона: у неё есть серверное
+        # время приёма, то есть это свидетельство СВЯЗИ и места разом — с
+        # телефона такое не подделать (evidence.py, следы вида draft).
+        _presence_from_draft(body, uid, emp, rep)
     if finish and any(k in values for k in typed_keys):
         # Кто и когда убрал должника из маршрута — единственный след; он же
         # закрывает вопрос ИБ «кто трогал поле ПД».
@@ -1511,6 +1519,18 @@ async def _save(request: web.Request) -> web.Response:
                 and tolerance is not None:
             dist_m = round(_haversine_km(vlat, vlon, cur["geo_lat"], cur["geo_lon"]) * 1000)
             geo_far = dist_m > tolerance + max(acc, 0.0)
+        # Подтверждение выезда: точка закрытия — лишь один из следов. Сюда же
+        # ложатся точка открытия карточки, точки за время работы с ней, точки
+        # с автосохранений (у них серверное время приёма) и точки снимков.
+        # Вердикт хранится на визите, как geo_far, и не пересчитывается.
+        session_id = (str(body.get("session_id") or "").strip()[:64]
+                      or (f"srv-{op_id}" if op_id else None))
+        ev_ctx = {"opened_ms": body.get("opened_at"), "saved_ms": body.get("occurred_at"),
+                  "online_open": body.get("online_at_open"),
+                  "foreground_ms": body.get("foreground_ms"),
+                  "tolerance": tolerance, "precision": precision}
+        _presence_from_save(body, uid, emp, rep, session_id, vlat, vlon, acc)
+        ev = _build_evidence(session_id, rep, cur, completed_at, ev_ctx)
         # История визита строится из явного тела этой формы. Сырые HARD-поля
         # clients/master запрещено дочитывать даже для текста журнала.
         payload = (
@@ -1528,7 +1548,23 @@ async def _save(request: web.Request) -> web.Response:
                               op_id=op_id, lat=vlat, lon=vlon, dist_m=dist_m,
                               geo_far=geo_far, on_date=completed_at,
                               fill_seconds=_fill_seconds(body),
-                              saved_at=_saved_at(body))
+                              saved_at=_saved_at(body),
+                              session_id=session_id,
+                              evidence_level=ev["level"] if ev else None,
+                              evidence=evidence.dumps(ev) if ev else None)
+        # Адрес уточняется по выезду, на котором должника застали (addr_learn):
+        # только у нового визита — повтор из очереди адрес не переучивает.
+        if is_new:
+            try:
+                learned = addr_learn.consider(
+                    cur, values, ev, db.presence_for_session(session_id) if session_id else [],
+                    employee=emp, op_id=op_id)
+                if learned and learned.get("applied"):
+                    db.audit_access(uid, "addr_learned", rep,
+                                    f"{learned['lat']},{learned['lon']} ±{learned['acc_m']} м: "
+                                    f"{learned['reason']}")
+            except Exception as exc:  # noqa: BLE001 — обучение не должно ломать визит
+                logging.warning("addr_learn failed: %s", exc)
         # Снимок строится только из values этого POST, а не из сырых HARD-полей
         # clients. При ретрае после редкого падения между log_visit и этой записью
         # восстанавливаем отсутствующий снимок; старый дубль новый снимок не откатывает.
@@ -1555,7 +1591,9 @@ async def _save(request: web.Request) -> web.Response:
             # и ждёт опоздавшие снимки.
             _spawn_visit_notify(_visit_notify(
                 request, notify_row, uid, dist_m, geo_far, actor, vlat, vlon,
-                completed_at, _photos_pending(body)))
+                completed_at, _photos_pending(body),
+                evidence_ctx={"session_id": session_id, "op_id": op_id,
+                              "rep": rep, "ev": ev, **ev_ctx}))
         else:
             # Самая частая причина «отбивка не пришла» — дедуп; без этой строки
             # она оставалась невидимой.
@@ -1568,6 +1606,89 @@ async def _save(request: web.Request) -> web.Response:
     if rejected:
         out["rejected"] = rejected
     return web.json_response(out)
+
+
+# --- Подтверждение выезда: следы телефона → вердикт (evidence.py) ------------
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _presence_from_draft(body, uid: int, emp: str, rep: str) -> None:
+    """Точка с автосохранения черновика — со временем приёма сервером."""
+    session_id = str(body.get("session_id") or "").strip()[:64]
+    g = body.get("geo")
+    if not session_id or not isinstance(g, dict):
+        return
+    samples = evidence.normalize_samples(
+        [{**g, "ts": g.get("ts") or _now_ms(), "k": "draft", "on": 1, "vis": 1}])
+    if samples:
+        try:
+            db.add_presence(session_id, emp, uid, rep, samples,
+                            received_at=datetime.now().isoformat(timespec="seconds"))
+        except Exception as exc:  # noqa: BLE001 — след не должен ломать черновик
+            logging.warning("presence(draft) failed: %s", exc)
+
+
+def _presence_from_save(body, uid: int, emp: str, rep: str, session_id: str | None,
+                        vlat, vlon, acc: float) -> None:
+    """Следы, приехавшие вместе с «Сохранить выезд»: точки за время работы с
+    карточкой, точка открытия и точка закрытия. Повтор из очереди дублей не
+    создаёт (UNIQUE в visit_presence)."""
+    if not session_id:
+        return
+    raw = list(body.get("presence") or []) if isinstance(body.get("presence"), list) else []
+    og = body.get("open_geo")
+    if isinstance(og, dict) and og.get("lat") is not None:
+        raw.append({**og, "ts": og.get("ts") or body.get("opened_at"), "k": "open"})
+    if vlat is not None:
+        raw.append({"lat": vlat, "lon": vlon, "acc": acc,
+                    "ts": body.get("occurred_at") or _now_ms(), "k": "save"})
+    samples = evidence.normalize_samples(raw)
+    if samples:
+        try:
+            db.add_presence(session_id, emp, uid, rep, samples)
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("presence(save) failed: %s", exc)
+
+
+def _photo_samples(rep: str, day: str) -> list[dict]:
+    """Точки съёмки снимков этого человека за день выезда."""
+    out = []
+    try:
+        ids = [c["contract_id"] for c in db.person_contracts(rep)] or [rep]
+        for r in db.photo_index_for_dirs(ids):
+            if r["lat"] is None:
+                continue
+            when = r["captured_at"] or r["created_at"] or ""
+            if not str(when).startswith(day):
+                continue
+            out.append({"ts": when, "lat": r["lat"], "lon": r["lon"],
+                        "acc": r["acc_m"] or 0, "k": "photo"})
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("photo samples failed: %s", exc)
+    return out
+
+
+def _build_evidence(session_id: str | None, rep: str, cur, day: str,
+                    ctx: dict) -> dict | None:
+    """Вердикт по всем следам сессии плюс снимкам дня. Считается при
+    сохранении и ещё раз после догона фото — снимок у двери подтверждает
+    выезд не хуже точки телефона."""
+    try:
+        samples = db.presence_for_session(session_id) if session_id else []
+        samples += _photo_samples(rep, day)
+        samples = evidence.normalize_samples(samples)
+        addr = None
+        if cur["geo_lat"] is not None and cur["geo_lon"] is not None:
+            addr = (float(cur["geo_lat"]), float(cur["geo_lon"]))
+        return evidence.build(samples, addr, ctx.get("tolerance"),
+                              precision=ctx.get("precision") or "",
+                              opened_ms=ctx.get("opened_ms"), saved_ms=ctx.get("saved_ms"),
+                              received_ms=_now_ms(), online_open=ctx.get("online_open"),
+                              foreground_ms=ctx.get("foreground_ms"))
+    except Exception as exc:  # noqa: BLE001 — вердикт не должен ломать визит
+        logging.warning("evidence failed: %s", exc)
+        return None
 
 
 def _photo_geo_from(request: web.Request) -> tuple | None:
@@ -2438,7 +2559,8 @@ def _spawn_visit_notify(coro) -> None:
 
 async def _visit_notify(request: web.Request, notify_row, uid: int,
                         dist_m, geo_far, actor, vlat, vlon,
-                        day: str, pending: int | None) -> None:
+                        day: str, pending: int | None,
+                        evidence_ctx: dict | None = None) -> None:
     """Все три канала по закрытому визиту — в фоне, после догона фото.
 
     Тело запроса здесь уже прочитано, а request нужен только ради request.app
@@ -2451,15 +2573,34 @@ async def _visit_notify(request: web.Request, notify_row, uid: int,
                                   date.today().isoformat(), pending)
     except Exception as exc:  # noqa: BLE001 — догон не должен съесть рассылку
         logging.warning("photo grace failed: %s", exc)
+    ev = (evidence_ctx or {}).get("ev")
+    if evidence_ctx and pending:
+        # Снимки доехали после вердикта — пересчитать с ними: кадр у двери
+        # подтверждает выезд не хуже точки телефона.
+        try:
+            cur = db.get_client(evidence_ctx["rep"])
+            fresh = await asyncio.to_thread(
+                _build_evidence, evidence_ctx.get("session_id"), evidence_ctx["rep"],
+                cur, day, evidence_ctx)
+            if fresh and evidence_ctx.get("op_id"):
+                db.update_visit_evidence(evidence_ctx["op_id"], fresh["level"],
+                                         evidence.dumps(fresh))
+                ev = fresh
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("evidence refresh failed: %s", exc)
+    ev_line = evidence.line(ev)
     try:
-        await _notify_group(request, notify_row, uid, actor=actor, visit_day=day)
+        await _notify_group(request, notify_row, uid, actor=actor, visit_day=day,
+                            evidence_line=ev_line)
         try:
             await _notify_managers(request, notify_row, dist_m,
-                                   geo_far=geo_far, actor=actor, visit_day=day)
+                                   geo_far=geo_far, actor=actor, visit_day=day,
+                                   evidence_line=ev_line)
         except Exception as e:  # noqa: BLE001 — сбой лички не отменяет беседу
             logging.warning("manager notify failed: %s", e)
         await _notify_report_chats(request, notify_row, vlat, vlon, dist_m,
-                                   uid, actor=actor, visit_day=day)
+                                   uid, actor=actor, visit_day=day,
+                                   evidence_line=ev_line)
     except Exception as exc:  # noqa: BLE001
         logging.warning("visit notify failed: %s", exc)
 
@@ -2473,7 +2614,8 @@ async def wait_visit_notify(timeout: float = 30.0) -> None:
 
 async def _notify_group(request: web.Request, row, uid: int,
                         actor: str | None = None,
-                        visit_day: str | None = None) -> None:
+                        visit_day: str | None = None,
+                        evidence_line: str | None = None) -> None:
     """Пост о визите в «принятую» беседу. Внешний try — на ВСЁ тело: до отправки
     стоят db.log_push и чтение SQLite под busy_timeout 8000 мс; во время импорта
     (одна транзакция на весь файл) это database is locked, а исключение отсюда
@@ -2509,6 +2651,8 @@ async def _notify_group(request: web.Request, row, uid: int,
         pline = promise_line(row)
         if pline:
             lines.insert(5 if actor and actor != emp else 4, pline)
+        if evidence_line:
+            lines.append(evidence_line)
         try:
             await post_to_group(bot, text="\n".join(lines), strict=True)
             db.log_push(db.PUSH_GROUP, db.PUSH_SENT, target_kind="group",
@@ -2526,7 +2670,8 @@ async def _notify_group(request: web.Request, row, uid: int,
 async def _notify_report_chats(request: web.Request, row, vlat, vlon,
                                dist_m: int | None = None, uid: int = 0,
                                actor: str | None = None,
-                               visit_day: str | None = None) -> None:
+                               visit_day: str | None = None,
+                               evidence_line: str | None = None) -> None:
     """Отчёт о визите в закреплённые беседы (опциональная фича, настраивается
     пультом): текст по образцу постов сотрудников + фото за день + фактические
     гео-точки (закрытие визита и съёмка фото — такое не подделаешь)."""
@@ -2569,7 +2714,8 @@ async def _notify_report_chats(request: web.Request, row, vlat, vlon,
             row, dist_m=dist_m,
             visit_geo=(vlat, vlon) if vlat is not None else None,
             photo_geo=pg, photos_n=len(files), actor=actor,
-            late_line=_late_visit_line(visit_day))
+            late_line=_late_visit_line(visit_day),
+            evidence_line=evidence_line)
         delivered: list[int] = []
 
         def _on_result(chat_id, status, error=None):
@@ -2594,7 +2740,8 @@ async def _notify_report_chats(request: web.Request, row, vlat, vlon,
 async def _notify_managers(request: web.Request, row, dist_m: int | None = None,
                            *, geo_far: bool | None = None,
                            actor: str | None = None,
-                           visit_day: str | None = None) -> None:
+                           visit_day: str | None = None,
+                           evidence_line: str | None = None) -> None:
     """Реалтайм-пуш: визит закрыт → руководителям этого сотрудника в личку уходит
     сводка + фото за день альбомом. Дедуп повторов из оффлайн-очереди — снаружи
     (is_new от log_visit). Рубильник без редеплоя: settings.visit_push = 0.
@@ -2655,6 +2802,10 @@ async def _notify_managers(request: web.Request, row, dist_m: int | None = None,
         far = geo_far if geo_far is not None else dist_m > db.geo_alert_m()
         text += (f"\n⚠️ Закрыт в {pretty} от адреса!" if far
                  else f"\n📍 На адресе ({pretty} от точки)")
+    # Подтверждение по ВСЕМ следам выезда (открытие карточки, точки за время
+    # работы, снимки), а не по одной точке закрытия — см. evidence.py.
+    if evidence_line:
+        text += f"\n{evidence_line}"
     media_ids: list[str] | None = None
     delivered: list[int] = []
     for m in targets:
@@ -2888,12 +3039,44 @@ async def _manager_plan(request: web.Request) -> web.Response:
         db.audit_access(uid, "visit_plan", detail=f"changed={len(changed)}")
     plan_map = db.visit_plan_map()
     common = db.visit_plan_per_day()
+    # Норма по расчёту (workload.py) — подсказка рядом с ручной: по географии
+    # портфеля и измеренному времени у адреса. Считается в потоке: дорожная
+    # матрица на команду — не для цикла событий.
+    rng = digest_data.stats_range("30d", 0)
+    suggested = await asyncio.to_thread(
+        workload.suggested_map, team, rng["from"], rng["to"],
+        backends=_routing_backends(), vroom_url=VROOM_URL)
     return _manager_json({
         "ok": True, "screen": "plan", "common": common,
         "groups": VISIT_PLAN_GROUPS,
         "employees": [{"employee": e, "plan": plan_map.get(e) or common,
-                       "personal": e in plan_map} for e in team],
+                       "personal": e in plan_map,
+                       "suggested": (suggested.get(e) or {}).get("norm"),
+                       "why": (suggested.get(e) or {}).get("why", "")} for e in team],
     })
+
+
+async def _manager_workload(request: web.Request) -> web.Response:
+    """Нагрузка команды: норма по расчёту против ручной, темп, разбор дней
+    одного сотрудника (?employee=)."""
+    uid, mgr, team = _manager_gate(request)
+    rng = _stats_range_q(request)
+    refresh = (request.query.get("refresh") or "") == "1"
+    emp = (request.query.get("employee") or "").strip()
+    if emp:
+        if emp not in team:
+            raise web.HTTPNotFound(text="employee")
+        data = await asyncio.to_thread(
+            functools.partial(workload.employee_data, emp, rng,
+                              backends=_routing_backends(), vroom_url=VROOM_URL))
+    else:
+        data = await asyncio.to_thread(
+            functools.partial(workload.workload_data, mgr, rng, team,
+                              backends=_routing_backends(), vroom_url=VROOM_URL,
+                              refresh=refresh))
+    db.audit_access(uid, "digest_view",
+                    detail=f"workload {rng['from']}..{rng['to']} emp={emp or '-'}")
+    return _manager_json({**_stats_envelope(mgr, team, rng, uid), **data})
 
 
 # --- Кто есть кто: аккаунты команды правит руководитель ----------------------
@@ -4633,6 +4816,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/manager/stats_employee", _manager_stats_employee)
     app.router.add_get("/api/manager/plan", _manager_plan)
     app.router.add_post("/api/manager/plan", _manager_plan)
+    app.router.add_get("/api/manager/workload", _manager_workload)
     app.router.add_get("/api/manager/binds", _manager_binds)
     app.router.add_post("/api/manager/binds", _manager_binds)
     app.router.add_get("/api/manager/cases", _manager_cases)

@@ -23,6 +23,7 @@ from datetime import date, datetime, timedelta
 import country_scope
 import db
 import debt
+import evidence
 import photostore
 from i18n import tf
 
@@ -430,12 +431,18 @@ def _person_payload(p: dict, on_date: str) -> dict:
     shots.sort(key=lambda x: (not x["on_visit"], x["date"]), reverse=False)
 
     last_row = db.last_visit_row([c["contract_id"] for c in cs])
+    last_ev = evidence.parse(_cell_of(last_row, "evidence"))
     return {
         "screen": "person",
         "rep": p["rep"], "client": p["client"], "n": p["n"],
         # Сколько человек пробыл на карточке этого должника — граница измерения
         # честная: от открытия карточки до «Сохранить выезд».
         "fill_text": _fill_text(_cell_of(last_row, "fill_seconds")),
+        # Подтверждение последнего выезда — вердикт и его разбор по следам.
+        "evidence": _evidence_view(last_ev, _cell_of(last_row, "evidence_level")),
+        # Адрес, уточнённый по выезду: руководитель должен видеть, что точка
+        # на карте — не из справочника, а «где застали».
+        "learned_point": (rawv("geo_src") or "") == "visit",
         # «photos» ниже — счётчик снимков, он был здесь раньше; список файлов
         # для показа в карточке кладём отдельным ключом.
         "shots": shots,
@@ -461,6 +468,52 @@ def _person_payload(p: dict, on_date: str) -> dict:
     }
 
 
+def _evidence_view(ev: dict | None, level: str | None) -> dict | None:
+    """Вердикт для экрана: заголовок, строка, разбор по пунктам."""
+    level = level or (ev or {}).get("level")
+    if not level:
+        return None
+    ev = ev or {}
+    rows = []
+    if ev.get("opened"):
+        rows.append(f"карточка открыта в {ev['opened']}"
+                    + (f", в {_pretty_m(ev['open_dist_m'])} от адреса"
+                       if ev.get("open_dist_m") is not None else ""))
+    if ev.get("near_first"):
+        span = (f"{ev['near_first']}–{ev['near_last']} ({ev.get('near_min') or 0} мин)"
+                if ev.get("near_last") and ev["near_last"] != ev["near_first"]
+                else f"в {ev['near_first']}")
+        rows.append(f"у адреса {span}")
+    elif ev.get("min_dist_m") is not None and level == "far":
+        rows.append(f"ближе всего к адресу: {_pretty_m(ev['min_dist_m'])}")
+    if ev.get("saved"):
+        rows.append(f"«Сохранить выезд» в {ev['saved']}"
+                    + (f", в {_pretty_m(ev['save_dist_m'])} от адреса"
+                       if ev.get("save_dist_m") is not None else ""))
+    if ev.get("online_save") is True:
+        rows.append("связь при сохранении была")
+    elif ev.get("online_save") is False:
+        rows.append("сохранён без связи, доехал позже")
+    if ev.get("served"):
+        rows.append(f"сервер видел телефон на месте {ev['served']} раз(а) во время визита")
+    if ev.get("photo_near") is True:
+        rows.append("снимок сделан у адреса")
+    elif ev.get("photo_near") is False:
+        rows.append("снимок сделан не у адреса")
+    if ev.get("foreground_min") is not None:
+        rows.append(f"приложение было на экране {ev['foreground_min']} мин")
+    return {"level": level, "title": evidence.LEVEL_TEXT.get(level, level),
+            "emoji": evidence.LEVEL_EMOJI.get(level, "❔"),
+            "note": ev.get("note") or "", "rows": rows,
+            "geo_samples": ev.get("geo_samples")}
+
+
+def _pretty_m(m) -> str:
+    if m is None:
+        return "—"
+    return f"{m / 1000:.1f} км" if m >= 1000 else f"{int(m)} м"
+
+
 def person_data(mgr: dict, on_date: str, employee: str, rep: str,
                 employees: list[str] | None = None) -> dict | None:
     employees = employees if employees is not None else sorted_employees(mgr)
@@ -481,7 +534,10 @@ def person_data(mgr: dict, on_date: str, employee: str, rep: str,
 
 
 # --- ЭКРАН: случаи за окном (тап по плашке сводки) ---------------------------
-CASE_METRICS = {"visits", "paid", "promised", "with_photo", "persons"}
+CASE_METRICS = {"visits", "paid", "promised", "with_photo", "persons",
+                # Подтверждение выезда: подтверждён / у адреса не был /
+                # проверить нечем / признаки серии.
+                "confirmed", "far", "unverified", "series"}
 CASES_LIMIT = 300
 
 
@@ -516,6 +572,13 @@ def cases_data(mgr: dict, rng: dict, metric: str, country: str = "",
             entries = [e for e in entries if e["status"] == OUTCOME_PAID]
         elif metric == "promised":
             entries = [e for e in entries if e["status"] == OUTCOME_PROMISE]
+        elif metric in ("confirmed", "far"):
+            entries = [e for e in entries if e.get("evidence_level") == metric]
+        elif metric == "unverified":
+            entries = [e for e in entries
+                       if e.get("evidence_level") in evidence.UNVERIFIED]
+        elif metric == "series":
+            entries = [e for e in entries if evidence.is_series(e.get("series"))]
         for e in entries:
             p = e["person"]
             photos = len(photostore.day_photos(p["contracts"], e["date"]))
@@ -530,6 +593,7 @@ def cases_data(mgr: dict, rng: dict, metric: str, country: str = "",
                 "late_days": e.get("late_days"), "geo": bool(e.get("geo")),
                 "fill_text": _fill_text(e.get("fill_seconds")),
                 "money": _totals_units([p]), "money_text": _persons_total([p]),
+                **_case_marks(e),
             })
     items.sort(key=lambda c: (c["date"], c["client"]), reverse=True)
     return {
@@ -817,6 +881,31 @@ def _as_day(value):
         return None
 
 
+def _mark_series(ordered: list[dict]) -> None:
+    """Признаки серии — по дням: три сохранения за десять минут, одна точка на
+    разные адреса, невозможная скорость. Считается по сохранённым фактам, а
+    не хранится: точки и время сохранения не меняются, а вот правило может."""
+    by_day: dict[str, list[dict]] = {}
+    for e in ordered:
+        by_day.setdefault(e["date"], []).append(e)
+    for items in by_day.values():
+        flags = evidence.series_flags([
+            {"id": e["_vid"], "ms": e.get("_ms"),
+             "lat": e["_pt"][0], "lon": e["_pt"][1],
+             "alat": e["_addr"][0], "alon": e["_addr"][1]} for e in items])
+        for e in items:
+            e["series"] = flags.get(e["_vid"])
+
+
+def _case_marks(e: dict) -> dict:
+    """Общие для карточки-случая поля подтверждения (экран и список случаев)."""
+    ev = e.get("ev") or {}
+    return {"evidence_level": e.get("evidence_level"),
+            "evidence_note": ev.get("note") or "",
+            "near_min": ev.get("near_min"),
+            "series": evidence.series_text(e.get("series"))}
+
+
 def _employee_stats(emp: str, d_from: str, d_to: str, *,
                     with_photos: bool = True) -> dict:
     """Строка сотрудника за окно. «_entries» — выезды по дням (человек-день),
@@ -835,6 +924,7 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
         if p is None:
             continue
         status, agreed = _payload_status(v["payload"])
+        ev = evidence.parse(_cell_of(v, "evidence"))
         entries[(v["created_at"], p["rep"])] = {
             "date": v["created_at"], "person": p, "status": status, "agreed": agreed,
             # Три пометки контроля, о которых просил офис 11.09.2026:
@@ -846,8 +936,18 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
             "late_days": _late_days(v["created_at"], _cell_of(v, "received_at")),
             "geo": _cell_of(v, "visit_lat") is not None,
             "fill_seconds": _cell_of(v, "fill_seconds"),
-            "agent_id": _cell_of(v, "agent_id")}
+            "agent_id": _cell_of(v, "agent_id"),
+            # Подтверждение выезда (evidence.py): вердикт, сохранённый на
+            # момент визита, и сырьё для признаков серии — точка и момент
+            # сохранения, адрес должника.
+            "evidence_level": _cell_of(v, "evidence_level") or (ev or {}).get("level"),
+            "ev": ev,
+            "_vid": v["id"],
+            "_pt": (_cell_of(v, "visit_lat"), _cell_of(v, "visit_lon")),
+            "_addr": (_cell_of(v, "addr_lat"), _cell_of(v, "addr_lon")),
+            "_ms": _cell_of(v, "saved_at") or _cell_of(v, "received_at")}
     ordered = sorted(entries.values(), key=lambda e: (e["date"], e["person"]["client"]))
+    _mark_series(ordered)
     for e in ordered:
         p = e["person"]
         if e["date"] == _snapshot_day(p) or not e["status"]:
@@ -894,6 +994,19 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
         "plan_per_day": db.visit_plan_for(emp),
         "late": sum(1 for e in ordered if (e.get("late_days") or 0) > 0),
         "no_geo": sum(1 for e in ordered if not e.get("geo")),
+        # Подтверждение выезда: сколько подтверждено на адресе, сколько «у
+        # адреса не был», сколько проверить нечем (адрес неточный, точка
+        # неточная, без гео) и сколько с признаками серии — пачкой, с одной
+        # точки на разные адреса, с невозможной скоростью между точками.
+        "confirmed": sum(1 for e in ordered if e.get("evidence_level") == "confirmed"),
+        "far": sum(1 for e in ordered if e.get("evidence_level") == "far"),
+        "unverified": sum(1 for e in ordered
+                          if e.get("evidence_level") in evidence.UNVERIFIED),
+        "series": sum(1 for e in ordered if evidence.is_series(e.get("series"))),
+        "near_avg": _avg_fill([(e.get("ev") or {}).get("near_min") * 60
+                               for e in ordered
+                               if isinstance((e.get("ev") or {}).get("near_min"), int)
+                               and e.get("evidence_level") == "confirmed"]),
         "by_outcome": {
             status: {"n": len(ps), "money": _totals_units(ps),
                      "money_text": _persons_total(ps)}
@@ -944,6 +1057,11 @@ def _totals_of(rows: list[dict], days: int) -> dict:
         # закрыто без точки телефона.
         "late": sum(r.get("late", 0) for r in rows),
         "no_geo": sum(r.get("no_geo", 0) for r in rows),
+        "confirmed": sum(r.get("confirmed", 0) for r in rows),
+        "far": sum(r.get("far", 0) for r in rows),
+        "unverified": sum(r.get("unverified", 0) for r in rows),
+        "series": sum(r.get("series", 0) for r in rows),
+        "near_avg": _avg_fill([r.get("near_avg") for r in rows]),
         "fill_avg": _avg_fill([r.get("fill_avg") for r in rows]),
         "money": _totals_units(people), "money_text": _persons_total(people),
         "money_paid": _totals_units(paid), "money_paid_text": _persons_total(paid),
@@ -1016,6 +1134,7 @@ def stats_employee_data(mgr: dict, rng: dict, employee: str,
             "fill_text": _fill_text(e.get("fill_seconds")),
             "money": _totals_units([p]), "money_text": _persons_total([p]),
             "photos": len(photostore.day_photos(p["contracts"], e["date"])),
+            **_case_marks(e),
         })
     per_day = db.visit_plan_for(employee)
     return {"screen": "emp", "range": rng, **r, "by_day": days, "cases": cases,
@@ -1065,6 +1184,9 @@ def _book_line(label: str, country: str, stats: dict, by_outcome: dict,
     line = [label, country, office, stats["visits"], plan or "", done,
             stats["persons"], stats["contracts"], stats["overdue"],
             stats["with_photo"], stats.get("late") or "", stats.get("no_geo") or "",
+            stats.get("confirmed") or "", stats.get("far") or "",
+            stats.get("unverified") or "", stats.get("series") or "",
+            _fill_text(stats.get("near_avg")),
             _fill_text(stats.get("fill_avg")), stats["money_text"],
             stats["money_paid_text"]]
     holder = {"by_outcome": by_outcome}
@@ -1094,9 +1216,15 @@ def _outcome_cells(row: dict, statuses: list[str]) -> tuple[list, int, list]:
 
 BOOK_BASE_HEAD = ("Сотрудник", "Страна", "Офис", "Выездов", "План", "% плана",
                   "Должников", "Договоров", "Просрочено обещаний", "С фото",
-                  "Внесено позже", "Без гео", "Заполнение карточки, среднее",
+                  "Внесено позже", "Без гео",
+                  # Подтверждение выезда (evidence.py): четыре счётчика и
+                  # среднее время у адреса — по подтверждённым выездам.
+                  "Подтверждено на адресе", "У адреса не был",
+                  "Нечем проверить", "Признаки серии", "У адреса, среднее",
+                  "Заполнение карточки, среднее",
                   "Долг", "Закрыто (оплачен)")
-BOOK_BASE_WIDTH = (28, 14, 14, 9, 8, 9, 11, 11, 19, 8, 15, 10, 20, 22, 22)
+BOOK_BASE_WIDTH = (28, 14, 14, 9, 8, 9, 11, 11, 19, 8, 15, 10,
+                   16, 14, 14, 14, 16, 20, 22, 22)
 
 
 def _book_head(layout: list[dict]) -> tuple[list, list, list, list]:
@@ -1248,10 +1376,13 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
     # Три момента выезда разведены: что человек нажал в приложении, что дошло до
     # сервера и в чей день это легло. Раньше днём выезда был день загрузки, и
     # работа целого дня без связи попадала в чужой день.
+    # Подтверждение выезда — четырьмя колонками справа от прежних: вердикт,
+    # сколько минут у адреса и когда, связь при сохранении, признаки серии.
     ws2.append(["Дата", "Республика", "Офис", "Сотрудник", "Клиент", "Договоров",
                 "Выезд", "Результат", "Договорённость", "Заполнение карточки",
                 "Сохранён в приложении", "Принят сервером", "Внесён", "Гео",
-                "Закрыл", "Долг"])
+                "Закрыл", "Долг", "Подтверждение", "У адреса, мин", "У адреса с",
+                "У адреса до", "Связь при сохранении", "Признаки серии"])
     for cell in ws2[1]:
         cell.font = Font(bold=True)
     for r in rows:
@@ -1265,23 +1396,37 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
                     else f"позже на {late} дн" if late else "неизвестно")
             who = ("сам" if not own or e.get("agent_id") in own
                    else "руководитель")
+            ev = e.get("ev") or {}
+            level = e.get("evidence_level") or ""
+            online = ev.get("online_save")
             ws2.append([e["date"], names.get(r["country"], ""), r.get("office") or "",
                         r["employee"], p["client"], p["n"],
                         OUTCOME_GROUP_LABEL[group], e["status"],
                         e["agreed"], _fill_text(e.get("fill_seconds")),
                         _stamp(e.get("saved_at")), _stamp(e.get("received_at")),
                         when, "есть" if e.get("geo") else "нет", who,
-                        _persons_total([p])])
+                        _persons_total([p]),
+                        evidence.LEVEL_TEXT.get(level, "") if level else "",
+                        ev.get("near_min") if ev.get("near_min") is not None else "",
+                        ev.get("near_first") or "", ev.get("near_last") or "",
+                        "" if online is None else ("была" if online else "не было"),
+                        evidence.series_text(e.get("series"))])
             ws2.cell(row=row_at, column=7).fill = fills[group]
             if late:
                 ws2.cell(row=row_at, column=13).fill = fills["fail"]
             if not e.get("geo"):
                 ws2.cell(row=row_at, column=14).fill = fills["fail"]
-    for col, w in zip("ABCDEFGHIJKLMNOP",
-                      (12, 14, 14, 28, 32, 10, 14, 22, 22, 18, 19, 18, 16, 8, 14, 18)):
-        ws2.column_dimensions[col].width = w
+            if level == "confirmed":
+                ws2.cell(row=row_at, column=17).fill = fills["success"]
+            elif level == "far":
+                ws2.cell(row=row_at, column=17).fill = fills["fail"]
+            if evidence.is_series(e.get("series")):
+                ws2.cell(row=row_at, column=22).fill = fills["fail"]
+    for i, w in enumerate((12, 14, 14, 28, 32, 10, 14, 22, 22, 18, 19, 18, 16, 8, 14, 18,
+                           26, 12, 11, 11, 18, 24), start=1):
+        ws2.column_dimensions[get_column_letter(i)].width = w
     if ws2.max_row > 1:
-        ws2.auto_filter.ref = f"A1:P{ws2.max_row}"
+        ws2.auto_filter.ref = f"A1:V{ws2.max_row}"
     ws2.freeze_panes = "A2"
 
     ws3 = wb.create_sheet("По дням")
@@ -1315,6 +1460,9 @@ DAILY_REPORT_COLUMNS = (
     ("total_persons", "Отработано всего", 17),
     ("total_visits", "Выездов всего", 14),
     ("overdue", "Просрочено обещаний", 19),
+    ("confirmed", "На адресе подтверждено", 16),
+    ("far", "У адреса не был", 14),
+    ("unverified", "Нечем проверить", 14),
     ("first_day", "Первый выезд", 13),
     ("assigned_money", "Долг закреплённый", 20),
 )
@@ -1351,12 +1499,15 @@ def daily_report_data(mgr: dict, on_date: str,
             "overdue": today["overdue"],
             "first_day": first,
             "outcomes": today["outcomes"],
+            "confirmed": today.get("confirmed", 0), "far": today.get("far", 0),
+            "unverified": today.get("unverified", 0), "series": today.get("series", 0),
         })
     rows.sort(key=lambda r: (-r["today_persons"], -r["total_persons"],
                              r["employee"].lower()))
     keys = ("assigned_persons", "assigned_contracts", "today_persons", "today_visits",
             "today_paid", "today_promised", "today_photo", "total_persons",
-            "total_visits", "total_paid", "overdue")
+            "total_visits", "total_paid", "overdue",
+            "confirmed", "far", "unverified", "series")
     totals = {k: sum(r[k] for r in rows) for k in keys}
     totals["employees"] = len(rows)
     totals["active"] = sum(1 for r in rows if r["today_persons"])
@@ -1386,6 +1537,13 @@ def daily_report_caption(data: dict) -> str:
                  f"({t['assigned_contracts']} договоров)")
     if t["overdue"]:
         parts.append(f"⏰ Просрочено обещаний: {t['overdue']}")
+    # Подтверждение выезда — одной строкой: на адресе / не был / нечем
+    # проверить. Ноль по всем трём — строки нет (старые оболочки).
+    if t.get("confirmed") or t.get("far") or t.get("unverified"):
+        parts.append(f"🛡 На адресе подтверждено: <b>{t.get('confirmed', 0)}</b> · "
+                     f"у адреса не был: <b>{t.get('far', 0)}</b> · "
+                     f"нечем проверить: {t.get('unverified', 0)}"
+                     + (f" · признаки серии: {t['series']}" if t.get("series") else ""))
     parts.append("Таблица по каждому сотруднику — в файле; "
                  "разбор по дням и карточки — во вкладке «Сводка» приложения.")
     return "\n".join(parts)
