@@ -232,6 +232,17 @@ def test_shell_scripts_travel_with_lf_and_launchers_are_python(built):
         assert "Пульт.pyw" in readme and "Tkinter" not in readme
 
 
+def test_checksum_file_travels_with_lf(built):
+    """Файл суммы — тоже поставка, и читает его `sha256sum -c` на Linux. CRLF
+    здесь означает имя архива, кончающееся на возврате каретки: проверка
+    целостности падает на исправном архиве, и выглядит это как «побился в дороге»."""
+    raw = built["checksum"].read_bytes()
+    assert b"\r" not in raw, "CRLF в файле суммы — sha256sum -c не найдёт архив"
+    assert raw.endswith(b"\n"), "без перевода строки в конце coreutils ругается на формат"
+    digest, name = raw.decode("utf-8").split()
+    assert len(digest) == 64 and name == built["archive"].name
+
+
 def test_leak_scanner_stops_the_build(tmp_path):
     root = tmp_path / "proj"
     (root / "server").mkdir(parents=True)

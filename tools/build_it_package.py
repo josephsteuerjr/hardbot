@@ -507,7 +507,14 @@ def build(root: Path, out_dir: Path, version: str | None = None,
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
-    checksum.write_text(f"{sha256_of(archive)}  {archive.name}\n", encoding="utf-8")
+    # newline="\n" обязателен: файл суммы читает `sha256sum -c` на Linux, а под
+    # Windows write_text молча ставит CRLF. Имя архива тогда кончается на \r, и
+    # проверка падает на ИСПРАВНОМ архиве словами «sha256sum: 'hard-….zip'$'\r':
+    # No such file or directory» — это первое, что делает ИТ-служба, открыв пакет,
+    # и выглядит это как «архив побился в дороге». LF внутри пакета мы держим
+    # давно (normalized_bytes и тест про .sh); файл рядом с ним из правила выпал.
+    checksum.write_text(f"{sha256_of(archive)}  {archive.name}\n", encoding="utf-8",
+                        newline="\n")
     return archive, checksum
 
 
