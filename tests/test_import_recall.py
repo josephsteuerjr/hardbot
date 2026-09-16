@@ -149,14 +149,59 @@ def test_boolean_true_is_a_recall_and_false_is_not(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("col,val", [("Причина отзыва", "Погашение"),
-                                     ("Передача на отзыв", "да"),
-                                     ("Вывод из работы", "x")])
-def test_any_meaningful_value_in_any_of_four_columns_is_a_recall(tmp_path, monkeypatch, col, val):
+                                     ("Передача на отзыв", "да")])
+def test_any_meaningful_value_in_a_deciding_column_is_a_recall(tmp_path, monkeypatch, col, val):
     _isolated_db(tmp_path, monkeypatch)
     _imp([_row()])
     rep = _imp([_row(**{col: val})])
     assert rep["recalled"] == 1
     assert db.get_client(CID)["responsible"] == ""
+
+
+# --- «Вывод из работы» — пометка, а не отзыв ---------------------------------
+def test_withdrawal_column_does_not_detach(tmp_path, monkeypatch):
+    """Коды «4» и «5» значат «отзовём в конце месяца», а не «отозван».
+
+    Договор всё это время в реестре, с ФИО ответственного, и выездник по нему
+    работает. Пока колонка считалась отзывом, она молча забирала договоры —
+    16.09.2026 так снято 84 КД у 19 человек.
+    """
+    _isolated_db(tmp_path, monkeypatch)
+    _imp([_row()])
+    for code in ("4", "5"):
+        rep = _imp([_row(**{"Вывод из работы": code})])
+        assert rep["recalled"] == 0, f"код «{code}» не отзыв"
+        row = db.get_client(CID)
+        assert row["responsible"] == EMP, "договор остаётся у выездника"
+        assert row["recall_withdrawn"] == code, "пометку офиса всё равно храним"
+
+
+def test_withdrawal_does_not_shield_a_real_recall(tmp_path, monkeypatch):
+    """Рядом с настоящим отзывом пометка ничего не отменяет."""
+    _isolated_db(tmp_path, monkeypatch)
+    _imp([_row()])
+    rep = _imp([_row(**{"Вывод из работы": "4", "Причина отзыва": "Погашение"})])
+    assert rep["recalled"] == 1
+    assert db.get_client(CID)["responsible"] == ""
+
+
+def test_contract_detached_by_the_old_rule_comes_back(tmp_path, monkeypatch):
+    """Снятые прежним правилом возвращаются сами — обычным импортом.
+
+    Иначе пришлось бы чинить руками 84 договора; возврат идёт штатной веткой
+    «офис очистил колонки отзыва».
+    """
+    _isolated_db(tmp_path, monkeypatch)
+    _imp([_row()])
+    with db.connect() as conn:            # как если бы сняло старое правило
+        conn.execute("UPDATE clients SET responsible='', unassigned_from=?, "
+                     "unassigned_reason=?, recall_withdrawn='4' WHERE contract_id=?",
+                     (EMP, db.UNASSIGNED_REASON_RECALLED, CID))
+        conn.commit()
+    rep = _imp([_row(**{"Вывод из работы": "4"})])
+    assert rep["recall_restored"] == 1
+    row = db.get_client(CID)
+    assert row["responsible"] == EMP and not (row["unassigned_reason"] or "")
 
 
 def test_excel_serial_recall_date_is_stored_as_iso(tmp_path, monkeypatch):

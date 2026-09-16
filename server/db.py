@@ -79,6 +79,17 @@ RECALL_TITLES = {
 RECALL_KEYS = tuple(RECALL_TITLES.values())
 RECALL_TITLE_BY_KEY = {key: title for title, key in RECALL_TITLES.items()}
 
+# Какие из них ОТКРЕПЛЯЮТ договор прямо сейчас. «Вывод из работы» — не из них:
+# офис ставит туда коды «4» и «5», и это пометка «отзовём в конце месяца», а не
+# «отозван». Строка всё это время живёт в реестре с ФИО ответственного, выездник
+# по ней работает, и отзыв случится сам — договор просто исчезнет из реестра
+# концом месяца, а это уже отработанный путь `absent_from_registry`.
+# Пока колонка считалась отзывом, она молча забирала договоры: 16.09.2026 так
+# снято 84 КД у 19 человек (у Патиева 18 — отсюда жалоба «не вижу клиента»).
+# Читать и хранить её мы продолжаем: пометка офиса видна в данных, просто не
+# решает судьбу договора.
+RECALL_DECISION_KEYS = ("recall_date", "recall_reason", "recall_transfer")
+
 # --- Журнал доставки уведомлений (push_log) ---------------------------------
 # Виды рассылок и статусы попыток. Всюду ТОЛЬКО эти константы — строковые
 # литералы статусов в web.py/app.py запрещены (пинится тестом): словарь,
@@ -6618,12 +6629,15 @@ def import_grid(
             # выше ВСЕХ прочих веток — строка с отзывом почти всегда ещё несёт
             # ФИО ответственного, и ветка «переназначили» вернула бы договор
             # на следующем же импорте.
-            row_recalled = any(_recall_is_set(data.get(k)) for k in recall_owned)
-            db_recall_set = {k for k in RECALL_KEYS
+            # Решают только колонки ИЗ RECALL_DECISION_KEYS: «Вывод из работы»
+            # читается и хранится, но договор не откручивает (см. константу).
+            recall_decide = recall_owned & set(RECALL_DECISION_KEYS)
+            row_recalled = any(_recall_is_set(data.get(k)) for k in recall_decide)
+            db_recall_set = {k for k in RECALL_DECISION_KEYS
                              if row0 is not None and _recall_is_set(row0[k])}
             # Возврат только когда книга ВИДИТ всё, что БД считает отзывом.
-            recall_cleared = bool(recall_owned and not row_recalled
-                                  and db_recall_set <= recall_owned)
+            recall_cleared = bool(recall_decide and not row_recalled
+                                  and db_recall_set <= recall_decide)
             detached = False
             if row_recalled:
                 taken_from = (was_unassigned or prev_resp
