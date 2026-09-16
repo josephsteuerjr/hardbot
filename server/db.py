@@ -5578,7 +5578,6 @@ def import_grid(
     preview_only: bool = False,
     restore_manual_unassigned: bool = False,
     replace_current_visit_comments: bool = False,
-    import_historical_visit_comments: bool = False,
     expected_auto_unassigned: int | None = None,
     expected_auto_unassigned_digest: str | None = None,
     expected_manual_restored: int | None = None,
@@ -5647,9 +5646,13 @@ def import_grid(
         пустую ячейку — но НЕ у договора с доказанным визитом, строка которого
         в файле этого визита не видела (``current_comments_protected``): такая
         ячейка не решение аналитика, а отставшая копия;
-      * историчный комментарий вообще не импортируется без явного
-        ``import_historical_visit_comments`` и никогда не входит в форму/обратную
-        запись сотрудника.
+      * историчный комментарий импортируется ВСЕГДА, когда колонка есть в файле.
+        Отдельного разрешения у него больше нет: забытая галочка оставляла
+        выездника без истории вовсе — и у нового договора тоже, потому что
+        историчный текст выбрасывался даже при вставке строки. Значение
+        повторяет файл точно, пустая ячейка очищает; колонки в файле нет —
+        текст в базе не трогается. В форму и в обратную запись сотрудника
+        историчный текст не входит никогда.
     Точный набор замен связывается preview/apply через
     ``expected_comment_effect_digest`` так же, как набор автоснятий.
 
@@ -5695,9 +5698,9 @@ def import_grid(
               "replace_current_visit_comments": bool(
                   replace_current_visit_comments
               ),
-              "import_historical_visit_comments": bool(
-                  import_historical_visit_comments
-              ),
+              # Не решение оператора, а факт файла: есть ли в нём колонка
+              # историчного комментария. По ней и работает импорт истории.
+              "historical_comments_column": False,
               "current_comments_preserved": 0,
               "current_comments_replaced": 0,
               "current_comments_cleared": 0,
@@ -5738,7 +5741,6 @@ def import_grid(
     for option_name, option_value in (
         ("restore_manual_unassigned", restore_manual_unassigned),
         ("replace_current_visit_comments", replace_current_visit_comments),
-        ("import_historical_visit_comments", import_historical_visit_comments),
     ):
         if type(option_value) is not bool:
             report["blocked"] = True
@@ -5855,7 +5857,7 @@ def import_grid(
                                "должен быть lowercase SHA-256")
             return report
     if (
-        (replace_current_visit_comments or import_historical_visit_comments)
+        replace_current_visit_comments
         and not preview_only
         and expected_comment_effect_digest is None
     ):
@@ -6028,14 +6030,11 @@ def import_grid(
         return report
 
     present_keys = {key for key in col_keys if key}
-    requested_comment_headers = {
-        key
-        for key, requested in (
-            ("visit_comment", replace_current_visit_comments),
-            ("historical_visit_comment", import_historical_visit_comments),
-        )
-        if requested
-    }
+    # Решение оператора по комментариям осталось ровно одно — замена текущих;
+    # у историчных решения нет, есть колонка.
+    requested_comment_headers = (
+        {"visit_comment"} if replace_current_visit_comments else set()
+    )
     missing_comment_headers = sorted(requested_comment_headers - present_keys)
     if missing_comment_headers:
         report["blocked"] = True
@@ -6046,6 +6045,12 @@ def import_grid(
             + ", ".join(BY_KEY[key].title for key in missing_comment_headers)
         )
         return report
+    # Историчный комментарий грузится по колонке, а не по галочке. Само по себе
+    # наличие колонки ничего не блокирует: боевой мастер несёт её всегда, и
+    # требовать предпросмотр на каждый импорт значило бы остановить обычную
+    # работу. Гейт стоит ниже — по ФАКТУ эффекта, как у колонок отзыва.
+    historical_column_present = "historical_visit_comment" in present_keys
+    report["historical_comments_column"] = historical_column_present
     required_keys = (
         {item["key"] for item in schema}
         if source_kind == IMPORT_SOURCE_PUBLISHED_MASTER
@@ -6572,7 +6577,7 @@ def import_grid(
                     report["current_comments_preserved"] += 1
                 data.pop("visit_comment", None)
 
-            if import_historical_visit_comments:
+            if historical_column_present:
                 incoming_historical = str(
                     data.pop("historical_visit_comment", "") or ""
                 ).strip()
@@ -6599,10 +6604,11 @@ def import_grid(
                         "after": incoming_historical,
                     })
             else:
-                if row0 is not None and "historical_visit_comment" in present_keys:
+                # Колонки в файле нет — сказать про историю нечего, и молчание
+                # файла не повод стирать текст в базе.
+                if row0 is not None and str(
+                        row0["historical_visit_comment"] or "").strip():
                     report["historical_comments_preserved"] += 1
-                # Историчный текст по природе односторонний и не возникает в БД
-                # даже у новой строки без отдельного решения аналитика.
                 data.pop("historical_visit_comment", None)
 
             # Пустой владелец = кейс в базе есть, а у выездника его нет.
@@ -7189,6 +7195,28 @@ def import_grid(
                 f"отзыва (отозвать {report['recalled']}, вернуть "
                 f"{report['recall_restored']}); нужен свежий предпросмотр "
                 "точного множества — примените через пульт"
+            )
+            return report
+        # Тот же гейт по факту эффекта — для историчных комментариев. Своей
+        # галочки у них больше нет (забытая галочка оставляла выездника без
+        # истории вовсе), поэтому слепая массовая очистка истории стала ближе,
+        # чем была: достаточно принести файл с пустой колонкой. Нулевой эффект
+        # проходит молча — файл, повторяющий базу, работе не мешает.
+        historical_unverified = (
+            require_source_proof and not preview_only
+            and (report["historical_comments_imported"]
+                 or report["historical_comments_cleared"])
+            and expected_comment_effect_digest is None
+        )
+        if historical_unverified:
+            conn.rollback()
+            report["blocked"] = True
+            report["comment_preview_required"] = True
+            report["error"] = (
+                "импорт заблокирован: этот импорт меняет историчные комментарии "
+                f"(загрузить {report['historical_comments_imported']}, очистить "
+                f"{report['historical_comments_cleared']}); нужен свежий "
+                "предпросмотр точного множества — примените через пульт"
             )
             return report
         stale_count = (

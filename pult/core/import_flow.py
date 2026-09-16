@@ -8,8 +8,7 @@
   `exp_selected`, `_imp_preview_body`, `_imp_preview_signature`,
   `_imp_preview_meta`, `_proof_path`;
 * переключатели с `.get()`: `imp_full_var`, `imp_restore_manual_var`,
-  `imp_replace_current_comments_var`, `imp_import_historical_comments_var`;
-  поля с `.get()`: `exp_since`, `exp_until`;
+  `imp_replace_current_comments_var`; поля с `.get()`: `exp_since`, `exp_until`;
 * виджеты вывода: `imp_kvs.set_pairs(pairs)`, `imp_warn.configure(text=…)`,
   `imp_apply_btn.configure(text=…, state=…)`, `reset_out.configure(text=…)`;
 * методы окна: `toast(text, err=False)`, `bg_task(fn, done, fail)`,
@@ -56,7 +55,6 @@ class ImportFlow:
             book.get("file_sha256"), tuple(sorted(self.imp_selected)),
             _toggle(self, "imp_full_var"), _toggle(self, "imp_restore_manual_var"),
             _toggle(self, "imp_replace_current_comments_var"),
-            _toggle(self, "imp_import_historical_comments_var"),
         )
 
     def _invalidate_import_preview(self, *, clear_report: bool):
@@ -97,7 +95,6 @@ class ImportFlow:
             return
         full_registry = bool(self.imp_full_var.get())
         replace_current_comments = _toggle(self, "imp_replace_current_comments_var")
-        import_historical_comments = _toggle(self, "imp_import_historical_comments_var")
         restore_manual = _toggle(self, "imp_restore_manual_var")
         signature = self._imp_signature()
         self._invalidate_import_preview(clear_report=True)
@@ -111,7 +108,6 @@ class ImportFlow:
             body = ri.preview_body(
                 prepared, full_registry=full_registry, restore_manual=restore_manual,
                 replace_current_comments=replace_current_comments,
-                import_historical_comments=import_historical_comments,
             )
             result = self.api("POST", "/admin/import/preview.json", body, timeout=180)
             return {"report": result, "body": body, "prepared": prepared,

@@ -345,7 +345,6 @@ def test_pult_previews_before_apply_and_reuses_the_exact_request():
             self.imp_selected = {"егор"}
             self.imp_full_var = _BoolVar(True)
             self.imp_replace_current_comments_var = _BoolVar(True)
-            self.imp_import_historical_comments_var = _BoolVar(True)
             self.imp_kvs = _KV()
             self.imp_warn = _Widget()
             self.imp_apply_btn = _Widget()
@@ -384,7 +383,7 @@ def test_pult_previews_before_apply_and_reuses_the_exact_request():
                     "auto_unassigned_by_employee": {"Егор": 3},
                     "auto_unassigned_digest": "e" * 64,
                     "replace_current_visit_comments": True,
-                    "import_historical_visit_comments": True,
+                    "historical_comments_column": True,
                     "current_comments_replaced": 1,
                     "historical_comments_imported": 1,
                     "comment_effect_digest": "c" * 64,
@@ -445,7 +444,9 @@ def test_pult_previews_before_apply_and_reuses_the_exact_request():
     assert preview_request["full_registry"] is True
     assert preview_request["authoritative_employees"] == ["Егор"]
     assert preview_request["replace_current_visit_comments"] is True
-    assert preview_request["import_historical_visit_comments"] is True
+    # Историчный комментарий решением оператора не является и в запросе не едет:
+    # сервер грузит его по колонке файла.
+    assert "import_historical_visit_comments" not in preview_request
     assert "expected_auto_unassigned" not in preview_request
     assert probe._imp_preview_body["expected_auto_unassigned"] == 3
     assert probe._imp_preview_body["expected_auto_unassigned_digest"] == "e" * 64

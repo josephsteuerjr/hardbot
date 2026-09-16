@@ -142,7 +142,6 @@ def test_import_preview_is_read_only_and_carries_explicit_full_flag(monkeypatch)
         authoritative_employees,
         preview_only,
         replace_current_visit_comments,
-        import_historical_visit_comments,
         **rest,
     ):
         calls.append(
@@ -155,7 +154,6 @@ def test_import_preview_is_read_only_and_carries_explicit_full_flag(monkeypatch)
                 "authoritative_employees": authoritative_employees,
                 "preview_only": preview_only,
                 "replace_current_visit_comments": replace_current_visit_comments,
-                "import_historical_visit_comments": import_historical_visit_comments,
                 **rest,
             }
         )
@@ -187,6 +185,8 @@ def test_import_preview_is_read_only_and_carries_explicit_full_flag(monkeypatch)
                     "full_registry": True,
                     "authoritative_employees": ["Егор"],
                     "replace_current_visit_comments": True,
+                    # Ключ старого пульта: сервер его больше не знает и обязан
+                    # молча пройти мимо, а не упасть на неизвестном поле.
                     "import_historical_visit_comments": False,
                 },
                 headers={"X-Admin-Key": "test-admin-key"},
@@ -207,7 +207,6 @@ def test_import_preview_is_read_only_and_carries_explicit_full_flag(monkeypatch)
             "authoritative_employees": ["Егор"],
             "preview_only": True,
             "replace_current_visit_comments": True,
-            "import_historical_visit_comments": False,
             # Предпросмотр не восстанавливает откреплённое вручную:
             # это запись, а предпросмотр обязан быть без записи.
             "restore_manual_unassigned": False,

@@ -153,7 +153,6 @@ class FakeView(ImportFlow):
         self.imp_full_var = _Var(True)
         self.imp_restore_manual_var = _Var(False)
         self.imp_replace_current_comments_var = _Var(False)
-        self.imp_import_historical_comments_var = _Var(False)
         self.imp_kvs = _Out()
         self.imp_warn = _Out()
         self.imp_apply_btn = _Out()
@@ -297,4 +296,4 @@ def test_guards_stay_fail_closed():
 def test_signature_tolerates_missing_toggles():
     view = FakeView(PREVIEW)
     del view.imp_restore_manual_var
-    assert view._imp_signature() == ("a" * 64, ("егор",), True, False, False, False)
+    assert view._imp_signature() == ("a" * 64, ("егор",), True, False, False)

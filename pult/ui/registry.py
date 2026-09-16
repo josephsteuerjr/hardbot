@@ -74,22 +74,29 @@ class RegistrySection:
         imp.add_row(Button("Выбрать реестр…", self.pick_registry, kind="accent"))
         self.imp_file_lbl = imp.add(Note("", "small"))
         self.imp_pick_frame = imp.add(Rows(spacing=4))
+        # Две первые галочки стоят по умолчанию (решение владельца 16.09.2026):
+        # обычный прогон идёт с полным срезом и возвратом ручных снятий, а
+        # снимают их под конкретный неполный файл. Третья — очистка текущих
+        # комментариев — по умолчанию снята и остаётся решением оператора.
         self.imp_full_var = imp.add(WrapCheck(
             "Для выбранных сотрудников это полный срез — снять у них договоры, "
             "которых нет в выбранных строках файла",
-            on_toggle=self._imp_full_toggle), spacing_before=4)
+            value=True, on_toggle=self._imp_full_toggle), spacing_before=4)
         self.imp_restore_manual_var = imp.add(WrapCheck(
             "Вернуть ранее вручную снятые договоры, если они снова есть "
             "в выбранных строках файла с тем же ответственным",
-            on_toggle=self._imp_restore_manual_toggle))
+            value=True, on_toggle=self._imp_restore_manual_toggle))
         self.imp_replace_current_comments_var = imp.add(WrapCheck(
             "Начало месяца: заменить текущие комментарии значениями файла "
             "(пустая ячейка очистит комментарий)",
             on_toggle=self._imp_comment_toggle))
-        self.imp_import_historical_comments_var = imp.add(WrapCheck(
-            "Разово загрузить историчные комментарии из файла "
-            "(пустая ячейка очистит историчный комментарий)",
-            on_toggle=self._imp_comment_toggle))
+        # Историчный комментарий галочки больше не имеет: забытая галочка
+        # оставляла выездника без истории вовсе — и у нового договора тоже.
+        imp.add(Note(
+            "Историчные комментарии грузятся сами, если колонка есть в файле: "
+            "значение повторяет файл точно, пустая ячейка очищает. Нет колонки — "
+            "текст в базе не трогается. Сколько загружено и сколько очищено, "
+            "видно в предпросмотре до записи.", "tiny"))
         self.imp_go_btn = Button("Предпросмотр выбранных (0)", self.do_import, kind="accent")
         self.imp_apply_btn = Button("Применить импорт", self.apply_import)
         self.imp_apply_btn.setEnabled(False)
@@ -99,6 +106,9 @@ class RegistrySection:
         self.imp_go_row.hide()
         self.imp_kvs = imp.add(KVGrid(), spacing_before=4)
         self.imp_warn = imp.add(Note("", "warn"))
+        # Галочки стоят с первого показа экрана — значит и объяснение, что они
+        # сделают, должно стоять с первого показа, а не после выбора книги.
+        self._imp_notes_refresh()
         return imp
 
     def _card_enrich(self) -> Card:
@@ -340,10 +350,16 @@ class RegistrySection:
 
     # ── импорт: выбор книги и галочки ───────────────────────────────────────
     def _imp_vars_reset(self):
-        for var in (self.imp_full_var, self.imp_restore_manual_var,
-                    self.imp_replace_current_comments_var,
-                    self.imp_import_historical_comments_var):
-            var.set(False)
+        """Новая книга — галочки в состояние по умолчанию: две стоят, очистка
+        текущих комментариев снята. `set` не будит on_toggle (сигналы там
+        блокируются), поэтому предупреждение про полный срез показываем сами:
+        включённая галочка без единого слова рядом — это и есть та тишина,
+        из-за которой договоры снимаются пачками «неожиданно»."""
+        for var, default in ((self.imp_full_var, True),
+                             (self.imp_restore_manual_var, True),
+                             (self.imp_replace_current_comments_var, False)):
+            var.set(default)
+        self._imp_notes_refresh()
 
     def pick_registry(self):
         """Шаг 1: выбрать книгу и показать, кто в ней есть. Ничего не отправляет."""
@@ -351,8 +367,11 @@ class RegistrySection:
             "Реестр", [("Excel", "*.xlsx *.xlsm *.xlsb *.xls")], parent=self)
         if not path:
             return
-        self._imp_vars_reset()
+        # Сброс галочек — ПОСЛЕ гашения предпросмотра: гашение чистит поле
+        # предупреждений, и в обратном порядке оно стирало бы только что
+        # написанное «полный срез включён».
         self._invalidate_import_preview(clear_report=True)
+        self._imp_vars_reset()
         self.imp_file_lbl.setText("Читаю " + Path(path).name + "…")
 
         def work():
@@ -445,36 +464,45 @@ class RegistrySection:
                                         self.imp_full_var.get()),
             state="normal" if self.imp_selected else "disabled")
 
+    def _imp_notes_refresh(self):
+        """Одно поле предупреждений на все галочки сразу.
+
+        Раньше каждая галочка писала своё поверх чужого: включённый полный срез
+        исчезал с экрана, стоило тронуть комментарии, — а он самый опасный из
+        трёх. Теперь на экране всегда всё, что сделает этот импорт. Снятая
+        галочка исчезает из списка, поэтому пустое поле означает ровно
+        «ничего сверх обычного обновления», а не «пульт промолчал»."""
+        notes = []
+        if self.imp_full_var.get():
+            notes.append(
+                "ПОЛНЫЙ СРЕЗ: у выбранных сотрудников будут сняты договоры, "
+                "которых нет среди их выбранных строк. Остальные сотрудники "
+                "не затрагиваются. Файл неполный — сними галочку.")
+        if self.imp_restore_manual_var.get():
+            notes.append(
+                "ВОЗВРАТ РУЧНЫХ СНЯТИЙ: вернутся только договоры, которые снова "
+                "есть в выбранных строках с тем же сотрудником.")
+        if self.imp_replace_current_comments_var.get():
+            notes.append(
+                "Текущие комментарии будут заменены значениями файла, включая пустые.")
+        if notes:
+            notes.append("Точные числа пульт покажет в предпросмотре до записи.")
+        self.imp_warn.configure(text="\n".join(notes))
+
     def _imp_restore_manual_toggle(self):
         self._invalidate_import_preview(clear_report=True)
-        if self.imp_restore_manual_var.get():
-            self.imp_warn.configure(
-                text=("ВОЗВРАТ РУЧНЫХ СНЯТИЙ: будут возвращены только договоры, "
-                      "которые снова есть в выбранных строках с тем же сотрудником. "
-                      "Точное число пульт покажет до записи."))
+        self._imp_notes_refresh()
         self._imp_count()
 
     def _imp_comment_toggle(self):
         self._invalidate_import_preview(clear_report=True)
-        notes = []
-        if self.imp_replace_current_comments_var.get():
-            notes.append(
-                "Текущие комментарии будут заменены значениями файла, включая пустые.")
-        if self.imp_import_historical_comments_var.get():
-            notes.append(
-                "Историчные комментарии будут разово загружены из файла, включая пустые.")
-        if notes:
-            notes.append("Перед записью пульт покажет точный предпросмотр изменений.")
-            self.imp_warn.configure(text="\n".join(notes))
+        self._imp_notes_refresh()
         self._imp_count()
 
     def _imp_full_toggle(self):
         self._invalidate_import_preview(clear_report=True)
+        self._imp_notes_refresh()
         if self.imp_full_var.get():
-            self.imp_warn.configure(text=(
-                "ПОЛНЫЙ СРЕЗ: у выбранных сотрудников будут сняты договоры, "
-                "которых нет среди их выбранных строк. Остальные сотрудники "
-                "не затрагиваются."))
             self.toast("Полный режим включён для выбранных сотрудников")
         self._imp_count()
 

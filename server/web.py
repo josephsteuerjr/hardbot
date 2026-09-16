@@ -3739,14 +3739,10 @@ async def _admin_import_json(request: web.Request) -> web.Response:
     replace_current_visit_comments = body.get(
         "replace_current_visit_comments", False
     )
-    import_historical_visit_comments = body.get(
-        "import_historical_visit_comments", False
-    )
     restore_manual_unassigned = body.get("restore_manual_unassigned", False)
     for option_name, option_value in (
         ("restore_manual_unassigned", restore_manual_unassigned),
         ("replace_current_visit_comments", replace_current_visit_comments),
-        ("import_historical_visit_comments", import_historical_visit_comments),
     ):
         if type(option_value) is not bool:
             return web.json_response(
@@ -3842,8 +3838,10 @@ async def _admin_import_json(request: web.Request) -> web.Response:
                        "множества возвратов")},
             status=409,
         )
+    # Историчный комментарий сюда не входит: он грузится по наличию колонки, и
+    # свежий предпросмотр для него требует сам импорт — там видно состав файла.
     if (
-        (replace_current_visit_comments or import_historical_visit_comments)
+        replace_current_visit_comments
         and expected_comment_effect_digest is None
     ):
         return web.json_response(
@@ -3869,7 +3867,6 @@ async def _admin_import_json(request: web.Request) -> web.Response:
         authoritative_employees=authoritative_employees,
         restore_manual_unassigned=restore_manual_unassigned,
         replace_current_visit_comments=replace_current_visit_comments,
-        import_historical_visit_comments=import_historical_visit_comments,
         expected_auto_unassigned=expected_auto_unassigned,
         expected_auto_unassigned_digest=expected_auto_unassigned_digest,
         expected_manual_restored=expected_manual_restored,
@@ -3923,14 +3920,10 @@ async def _admin_import_preview_json(request: web.Request) -> web.Response:
     replace_current_visit_comments = body.get(
         "replace_current_visit_comments", False
     )
-    import_historical_visit_comments = body.get(
-        "import_historical_visit_comments", False
-    )
     restore_manual_unassigned = body.get("restore_manual_unassigned", False)
     for option_name, option_value in (
         ("restore_manual_unassigned", restore_manual_unassigned),
         ("replace_current_visit_comments", replace_current_visit_comments),
-        ("import_historical_visit_comments", import_historical_visit_comments),
     ):
         if type(option_value) is not bool:
             return web.json_response(
@@ -3964,7 +3957,6 @@ async def _admin_import_preview_json(request: web.Request) -> web.Response:
         preview_only=True,
         restore_manual_unassigned=restore_manual_unassigned,
         replace_current_visit_comments=replace_current_visit_comments,
-        import_historical_visit_comments=import_historical_visit_comments,
     )
     if report.get("blocked"):
         return web.json_response(report, status=409)

@@ -391,8 +391,7 @@ def prepare_import(book: dict, picked: list[str], *, full_registry: bool = False
 
 
 def preview_body(prepared: dict, *, full_registry: bool, restore_manual: bool,
-                 replace_current_comments: bool,
-                 import_historical_comments: bool) -> dict:
+                 replace_current_comments: bool) -> dict:
     return {
         "data_exchange_contract": enrich.DATA_EXCHANGE_CONTRACT,
         "source_kind": prepared["source_kind"],
@@ -404,7 +403,6 @@ def preview_body(prepared: dict, *, full_registry: bool, restore_manual: bool,
         ),
         "restore_manual_unassigned": restore_manual,
         "replace_current_visit_comments": replace_current_comments,
-        "import_historical_visit_comments": import_historical_comments,
     }
 
 
@@ -421,8 +419,13 @@ def expected_from_preview(d: dict, body: dict) -> dict | str:
         (bool(body.get("restore_manual_unassigned")), "manual_restored",
          "manual_restore_digest",
          "Сервер не вернул точный набор возвратов"),
+        # Историчный комментарий грузится по наличию колонки, а не по решению
+        # оператора, — поэтому повод для требования приходит из отчёта
+        # предпросмотра (historical_comments_column), как и по отзыву. Старый
+        # сервер такого ключа не отдаёт: требование не включается, и новый
+        # пульт со старым сервером работает как раньше.
         (bool(body.get("replace_current_visit_comments")
-              or body.get("import_historical_visit_comments")), None,
+              or d.get("historical_comments_column")), None,
          "comment_effect_digest",
          "Сервер не вернул точный набор замен комментариев"),
         (bool(d.get("recall_columns")), "recalled", "recalled_digest",
@@ -594,17 +597,18 @@ def import_notes(d: dict) -> list[str]:
             "Текущие комментарии существующих договоров защищены: "
             f"сохранено как есть {fmt_n(d.get('current_comments_preserved'))}."
         )
-    if d.get("import_historical_visit_comments"):
+    if d.get("historical_comments_column"):
         notes.append(
-            "Разовый импорт историчных комментариев включён: "
+            "Историчные комментарии берутся из файла (колонка есть, галочки "
+            "для них нет): "
             f"загружено {fmt_n(d.get('historical_comments_imported'))}, "
             f"очищено {fmt_n(d.get('historical_comments_cleared'))}, "
             f"без изменений {fmt_n(d.get('historical_comments_unchanged'))}."
         )
     else:
         notes.append(
-            "Историчные комментарии этим импортом не трогаются: "
-            f"сохранено {fmt_n(d.get('historical_comments_preserved'))}."
+            "Колонки историчного комментария в файле нет — текст в базе не "
+            f"тронут: сохранено {fmt_n(d.get('historical_comments_preserved'))}."
         )
     if d.get("idempotent_replay"):
         notes.append(

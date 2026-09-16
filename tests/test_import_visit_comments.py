@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import db
+import exchange_contract as contract
 import web
 
 
@@ -40,28 +41,30 @@ def _seed(*rows: dict) -> dict:
 
 
 def _preview_and_apply(
-    grid: list[list], *, replace_current: bool, import_historical: bool
+    grid: list[list], *, replace_current: bool
 ) -> tuple[dict, dict]:
     preview = db.import_grid(
         grid,
         source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
         preview_only=True,
         replace_current_visit_comments=replace_current,
-        import_historical_visit_comments=import_historical,
     )
     assert preview["blocked"] is False
     applied = db.import_grid(
         grid,
         source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
         replace_current_visit_comments=replace_current,
-        import_historical_visit_comments=import_historical,
         expected_comment_effect_digest=preview["comment_effect_digest"],
     )
     assert applied["blocked"] is False
     return preview, applied
 
 
-def test_ordinary_import_preserves_both_existing_comments(tmp_path, monkeypatch):
+def test_ordinary_import_keeps_current_and_takes_history_from_file(
+    tmp_path, monkeypatch
+):
+    """Обычный импорт: текущий комментарий — совместный, его не трогаем;
+    историчный односторонний, он приходит из файла и повторяет файл."""
     _init(tmp_path, monkeypatch)
     _seed(_row("COMMENTS-KEEP", "текущий БД", None))
     db.update_fields(
@@ -77,22 +80,50 @@ def test_ordinary_import_preserves_both_existing_comments(tmp_path, monkeypatch)
     saved = db.get_client("COMMENTS-KEEP")
     assert report["blocked"] is False
     assert report["current_comments_preserved"] == 1
-    assert report["historical_comments_preserved"] == 1
+    assert report["historical_comments_column"] is True
+    assert report["historical_comments_imported"] == 1
     assert saved["visit_comment"] == "текущий БД"
-    assert saved["historical_visit_comment"] == "история БД"
+    assert saved["historical_visit_comment"] == "история файла"
 
 
-def test_new_contract_accepts_current_but_not_historical_without_opt_in(
+def test_history_without_its_column_in_the_file_is_left_alone(
     tmp_path, monkeypatch
 ):
+    """Молчание файла — не приказ стереть. Колонки нет — история в базе цела,
+    и импорт из-за неё не блокируется."""
+    _init(tmp_path, monkeypatch)
+    _seed(_row("COMMENTS-NOCOL", "текущий", None))
+    db.update_fields("COMMENTS-NOCOL", {"historical_visit_comment": "история БД"})
+
+    report = db.import_grid(
+        [
+            ["Номер КД / ID", "ответственный Сотрудник"],
+            ["сх", "сх"],
+            ["COMMENTS-NOCOL", "Тестов Сотрудник"],
+        ],
+        source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
+    )
+
+    assert report["blocked"] is False
+    assert report["historical_comments_column"] is False
+    assert report["historical_comments_preserved"] == 1
+    assert db.get_client("COMMENTS-NOCOL")[
+        "historical_visit_comment"
+    ] == "история БД"
+
+
+def test_new_contract_gets_its_history_without_any_toggle(tmp_path, monkeypatch):
+    """Ради чего всё и сделано: раньше историчный текст выбрасывался и у новой
+    строки тоже. Выездник получал сорок договоров без единой строки истории —
+    и узнать об этом было неоткуда: галочку просто забывали."""
     _init(tmp_path, monkeypatch)
 
-    report = _seed(_row("COMMENTS-NEW", "свежий офисный", "не грузить"))
+    report = _seed(_row("COMMENTS-NEW", "свежий офисный", "обещал 10-го, не оплатил"))
 
     saved = db.get_client("COMMENTS-NEW")
     assert report["inserted"] == 1
     assert saved["visit_comment"] == "свежий офисный"
-    assert not (saved["historical_visit_comment"] or "")
+    assert saved["historical_visit_comment"] == "обещал 10-го, не оплатил"
 
 
 def test_explicit_modes_replace_and_clear_exact_file_values(tmp_path, monkeypatch):
@@ -114,9 +145,7 @@ def test_explicit_modes_replace_and_clear_exact_file_values(tmp_path, monkeypatc
         _row("COMMENTS-CLEAR", None, None),
     )
 
-    preview, applied = _preview_and_apply(
-        grid, replace_current=True, import_historical=True
-    )
+    preview, applied = _preview_and_apply(grid, replace_current=True)
 
     assert preview["current_comments_replaced"] == 1
     assert preview["current_comments_cleared"] == 1
@@ -154,11 +183,7 @@ def test_month_reset_does_not_rewrite_proven_visit_snapshot_or_history(
     month_reset_row = _row("COMMENTS-PROOF", None, "история из реестра")
     month_reset_row["visit_date"] = "2026-08-05"
 
-    _preview_and_apply(
-        _grid(month_reset_row),
-        replace_current=True,
-        import_historical=True,
-    )
+    _preview_and_apply(_grid(month_reset_row), replace_current=True)
 
     after = db.get_client("COMMENTS-PROOF")
     assert after["visit_comment"] == ""
@@ -202,6 +227,10 @@ def test_apply_blocks_when_comment_state_changed_after_preview(
 
 
 def test_requested_comment_action_requires_its_real_header(tmp_path, monkeypatch):
+    """Замена текущих комментариев — решение оператора, и без своей колонки оно
+    бессмысленно: «заменить значениями файла», которых в файле нет, очистило бы
+    всё подряд. Историчный комментарий сюда не входит: у него решения нет,
+    есть колонка — грузится, нет колонки — тишина."""
     _init(tmp_path, monkeypatch)
     grid = [
         ["Номер КД / ID", "ответственный Сотрудник"],
@@ -213,11 +242,11 @@ def test_requested_comment_action_requires_its_real_header(tmp_path, monkeypatch
         grid,
         source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
         preview_only=True,
-        import_historical_visit_comments=True,
+        replace_current_visit_comments=True,
     )
 
     assert report["blocked"] is True
-    assert report["missing_comment_headers"] == ["historical_visit_comment"]
+    assert report["missing_comment_headers"] == ["visit_comment"]
 
 
 def test_historical_comment_is_read_only_and_rendered_on_third_tab(
@@ -271,7 +300,6 @@ def test_replace_does_not_clear_comment_of_visit_file_has_not_seen(
     preview, applied = _preview_and_apply(
         _grid(_visit_row("COMMENTS-FRESH", None, None)),
         replace_current=True,
-        import_historical=False,
     )
 
     saved = db.get_client("COMMENTS-FRESH")
@@ -295,13 +323,46 @@ def test_replace_still_clears_comment_when_file_saw_the_visit(tmp_path, monkeypa
     _preview, applied = _preview_and_apply(
         _grid(_visit_row("COMMENTS-MONTH", None, "2026-08-20")),
         replace_current=True,
-        import_historical=False,
     )
 
     saved = db.get_client("COMMENTS-MONTH")
     assert applied["current_comments_cleared"] == 1
     assert applied["current_comments_protected"] == 0
     assert str(saved["visit_comment"] or "") == ""
+
+
+def test_history_change_without_a_fresh_preview_is_blocked(tmp_path, monkeypatch):
+    """Галочки у истории больше нет — значит слепая массовая очистка стала
+    ближе: хватит файла с пустой колонкой. Гейт тот же, что у колонок отзыва:
+    есть эффект и нет свежего предпросмотра — импорт не применяется, история
+    остаётся на месте."""
+    _init(tmp_path, monkeypatch)
+    _seed(_row("COMMENTS-GATE", "текущий", None))
+    db.update_fields("COMMENTS-GATE", {"historical_visit_comment": "история БД"})
+
+    grid = _grid(_row("COMMENTS-GATE", "текущий", None))
+    proof = contract.build_test_subset_source_proof(
+        grid,
+        approval_id="limited-test-comments-20260916",
+        contracts=[{"contract_id": "COMMENTS-GATE",
+                    "responsible": "Тестов Сотрудник"}],
+    )
+    db.register_import_authorization(
+        proof, source_kind=db.IMPORT_SOURCE_TEST_SUBSET)
+
+    blocked = db.import_grid(
+        grid,
+        source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
+        source_proof=proof,
+        require_source_proof=True,
+    )
+
+    assert blocked["blocked"] is True
+    assert blocked["comment_preview_required"] is True
+    assert blocked["historical_comments_cleared"] == 1
+    assert db.get_client("COMMENTS-GATE")[
+        "historical_visit_comment"
+    ] == "история БД"
 
 
 def test_enrichment_row_names_the_cleared_comment(tmp_path, monkeypatch):
