@@ -542,6 +542,38 @@ CASE_METRICS = {"visits", "paid", "promised", "with_photo", "persons",
                 "confirmed", "far", "unverified", "series", "saved_away"}
 CASES_LIMIT = 300
 
+# Сотрудник без офиса не исчезает: у него свой чип «Без офиса». Пока чипа не
+# было, новый выездник из реестра числился только во «Всех офисах», и
+# руководитель Худжанда прочитал это как «списки не обновлены» — так и написал
+# 16.09.2026, когда Калонов Абдухафиз и Рустамов Алишер работали уже неделю.
+# Офис человеку ставит оператор, из данных он не выводится, и промолчать о
+# незакреплённых нельзя: их не видно ровно там, где на них смотрят.
+# Код-метка не может совпасть с городом — города не начинаются с «!».
+NO_OFFICE = "!none"
+NO_OFFICE_NAME = "Без офиса"
+
+
+def _in_office(row: dict, code: str) -> bool:
+    """Строка сводки принадлежит офису (или «Без офиса» для незакреплённых)."""
+    office = row.get("office") or ""
+    return not office if code == NO_OFFICE else office == code
+
+
+def _offices_of(rows: list[dict], days: int) -> list[dict]:
+    codes = sorted({(r.get("office") or "") for r in rows} - {""})
+    out = [{"code": c, "name": c,
+            "employees": sum(1 for r in rows if _in_office(r, c)),
+            "totals": _totals_of([r for r in rows if _in_office(r, c)], days)}
+           for c in codes]
+    orphans = [r for r in rows if not (r.get("office") or "")]
+    # Одинокий чип «Без офиса» бессмыслен: если офисов нет ни у кого, делить
+    # нечего, и строка чипов в сводке не показывается вовсе.
+    if out and orphans:
+        out.append({"code": NO_OFFICE, "name": NO_OFFICE_NAME,
+                    "employees": len(orphans),
+                    "totals": _totals_of(orphans, days)})
+    return out
+
 
 def cases_data(mgr: dict, rng: dict, metric: str, country: str = "",
                employees: list[str] | None = None, office: str = "") -> dict:
@@ -558,7 +590,8 @@ def cases_data(mgr: dict, rng: dict, metric: str, country: str = "",
         employees = [e for e in employees if country_of.get(e) == country]
     if office:
         by_office = db.employee_cities()
-        employees = [e for e in employees if by_office.get(e, "") == office]
+        employees = [e for e in employees
+                     if _in_office({"office": by_office.get(e, "")}, office)]
     items = []
     for emp in employees:
         r = _employee_stats(emp, rng["from"], rng["to"], with_photos=False)
@@ -1240,12 +1273,9 @@ def stats_data(mgr: dict, rng: dict, employees: list[str] | None = None) -> dict
         # направления смотрел на плашки всего СНГ и видел там чужие цифры.
         # Разбивка по офисам — просьба офиса «Худжанд»: у направления два города,
         # и руководителю нужен свой. Офис сотрудника ведёт оператор
-        # (db.employee_city), из данных он не выводится.
-        "offices": [{"code": office, "name": office,
-                     "employees": sum(1 for r in rows if (r.get("office") or "") == office),
-                     "totals": _totals_of([r for r in rows
-                                           if (r.get("office") or "") == office], len(days))}
-                    for office in sorted({(r.get("office") or "") for r in rows} - {""})],
+        # (db.employee_city), из данных он не выводится, поэтому последним идёт
+        # чип «Без офиса» — незакреплённые обязаны быть видны, а не пропадать.
+        "offices": _offices_of(rows, len(days)),
         "countries": [{"code": c,
                        **{k: country_scope.info(c)[k] for k in ("name", "short", "flag")},
                        "employees": sum(1 for r in rows if r["country"] == c),
@@ -1737,18 +1767,14 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
         ws_o.append([])
         ws_o.append(block_row)
         ws_o.append(["Офис"] + list(head_row[1:]))
+        # «Без офиса» приходит последней строкой в самом data["offices"] —
+        # отдельным блоком его считать больше не нужно, иначе задвоится.
         for office in data["offices"]:
-            mine = [r for r in rows if (r.get("office") or "") == office["code"]]
+            mine = [r for r in rows if _in_office(r, office["code"])]
             ws_o.append(_book_line(office["name"], f"сотрудников {office['employees']}",
                                    office["totals"], _outcome_totals(mine), layout,
                                    office["totals"].get("plan") or 0))
         last_office_row = ws_o.max_row
-        no_office = [r for r in rows if not (r.get("office") or "")]
-        if no_office:
-            ws_o.append(_book_line("Без офиса", f"сотрудников {len(no_office)}",
-                                   _totals_of(no_office, len(data["by_day"])),
-                                   _outcome_totals(no_office), layout, 0))
-            last_office_row = ws_o.max_row
         ws_o.append(_book_line("Итого", f"сотрудников {data['totals']['employees']}",
                                data["totals"], _outcome_totals(rows), layout,
                                data["totals"].get("plan") or 0))

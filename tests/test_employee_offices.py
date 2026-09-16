@@ -133,11 +133,48 @@ def test_summary_splits_by_office():
     data = dd.stats_data(db.get_manager(MGR), dd.stats_range("today", 0),
                          employees=[EMP_HERE, EMP_THERE])
     offices = {o["code"]: o for o in data["offices"]}
-    assert list(offices) == [CITY], "офис только у закреплённого"
+    assert list(offices) == [CITY, dd.NO_OFFICE], "город, а следом незакреплённые"
     assert offices[CITY]["employees"] == 1
     assert offices[CITY]["totals"]["employees"] == 1
     rows = {r["employee"]: r.get("office") for r in data["employees"]}
     assert rows[EMP_HERE] == CITY and rows[EMP_THERE] == ""
+
+
+def test_staff_without_an_office_gets_its_own_chip():
+    """Жалоба Худжанда 16.09.2026: «есть в общем, но нет в офисе».
+
+    Человек без закрепления не исчезает — он в чипе «Без офиса», с именем и
+    числом. Иначе новый выездник неделю работает, а руководитель его не видит.
+    """
+    import digest_data as dd
+    db.set_employee_city(EMP_HERE, CITY)
+    db.set_manager(MGR, "Старший", [], [EMP_HERE, EMP_THERE])
+    data = dd.stats_data(db.get_manager(MGR), dd.stats_range("today", 0),
+                         employees=[EMP_HERE, EMP_THERE])
+    none = [o for o in data["offices"] if o["code"] == dd.NO_OFFICE]
+    assert len(none) == 1 and none[0]["name"] == "Без офиса"
+    assert none[0]["employees"] == 1, "незакреплённый ровно один"
+    assert none[0]["totals"]["employees"] == 1
+
+
+def test_no_lonely_chip_when_nobody_has_an_office():
+    """Делить нечего — чипов нет вовсе, а не один на всех."""
+    import digest_data as dd
+    db.set_manager(MGR, "Старший", [], [EMP_HERE, EMP_THERE])
+    data = dd.stats_data(db.get_manager(MGR), dd.stats_range("today", 0),
+                         employees=[EMP_HERE, EMP_THERE])
+    assert data["offices"] == []
+
+
+def test_cases_can_be_narrowed_to_staff_without_an_office():
+    import digest_data as dd
+    db.set_employee_city(EMP_HERE, CITY)
+    db.set_manager(MGR, "Старший", [], [EMP_HERE, EMP_THERE])
+    cases = dd.cases_data(db.get_manager(MGR), dd.stats_range("today", 0),
+                          "visits", "", employees=[EMP_HERE, EMP_THERE],
+                          office=dd.NO_OFFICE)
+    assert cases["office"] == dd.NO_OFFICE
+    assert all(c["employee"] == EMP_THERE for c in cases["cases"])
 
 
 def test_cases_can_be_narrowed_to_one_office():
@@ -164,6 +201,7 @@ def test_office_sheet_appears_in_the_book():
     ws = wb["Офисы"]
     labels = [ws.cell(row=r, column=1).value for r in range(5, ws.max_row + 1)]
     assert labels == [CITY, "Без офиса", "Итого"], "штат без офиса не теряется"
+    assert labels.count("Без офиса") == 1, "строка не задваивается"
 
 
 # --- личная норма выездов -----------------------------------------------------

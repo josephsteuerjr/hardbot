@@ -802,7 +802,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=54;
+const SHELL_VERSION=55;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -3232,6 +3232,10 @@ function dgSort(k){ if(DG.sort===k) DG.dir=-DG.dir; else { DG.sort=k; DG.dir=(k=
 // внутри Таджикистана» на экране телефона читается хуже, чем просто «Худжанд».
 function dgCountry(c){ DG.country=c; DG.office=""; dgDrawKpis(); dgDrawTable(); }
 function dgOffice(o){ DG.office=o; DG.country=""; dgDrawKpis(); dgDrawTable(); }
+// Чип незакреплённых. Код приходит с сервера (digest_data.NO_OFFICE) и городом
+// быть не может: у человека без офиса поле пустое, и сравнивать надо с пустотой.
+const DG_NOOFF="!none";
+function dgInOffice(r,code){ const o=r.office||""; return code===DG_NOOFF?!o:o===code; }
 function dgCases(metric){ dgGo("cases",{metric}); }
 function dgSearch(v){ DG.q=(v||"").trim().toLowerCase(); dgDrawTable(); }
 function dgPickEmp(i){ const r=DG.rows[i]; if(r) dgGo("emp",{emp:r.employee}); }
@@ -3425,7 +3429,7 @@ function dgDrawTable(){
   const j=DG.stats, el=$("dgtable"); if(!j||!el) return;
   let rows=(j.employees||[]).slice();
   if(DG.country) rows=rows.filter(r=>r.country===DG.country);
-  if(DG.office) rows=rows.filter(r=>(r.office||"")===DG.office);
+  if(DG.office) rows=rows.filter(r=>dgInOffice(r,DG.office));
   if(DG.q) rows=rows.filter(r=>String(r.employee||"").toLowerCase().includes(DG.q));
   const k=DG.sort, dir=DG.dir;
   rows.sort((a,b2)=>{ if(k==="employee") return dir*String(a.employee).localeCompare(String(b2.employee),"ru");
@@ -3439,7 +3443,7 @@ function dgDrawTable(){
   const offs=j.offices||[];
   const offc=offs.length>1?`<div class="chips" style="margin:6px 0 0">
     <button class="chip${!DG.office?" on":""}" onclick="dgOffice('')">Все офисы</button>
-    ${offs.map(o=>`<button class="chip${DG.office===o.code?" on":""}" onclick="dgOffice('${esc(o.code)}')">🏢 ${esc(o.name)} · ${o.employees}</button>`).join("")}</div>`:"";
+    ${offs.map(o=>`<button class="chip${DG.office===o.code?" on":""}" onclick="dgOffice('${esc(o.code)}')">${o.code===DG_NOOFF?"❔":"🏢"} ${esc(o.name)} · ${o.employees}</button>`).join("")}</div>`:"";
   const th=(key,label,cls)=>`<th class="${cls||""}${DG.sort===key?" on":""}" onclick="dgSort('${key}')">${label}${DG.sort===key?(DG.dir<0?" ↓":" ↑"):""}</th>`;
   const trs=rows.map((r,i)=>`<tr class="${r.visits?"":"z"}" onclick="dgPickEmp(${i})">
     <td class="l"><div class="pname">${esc(r.employee)}</div>${r.visits?"":`<div class="psub">${esc(dgIdle(r))}</div>`}</td>
