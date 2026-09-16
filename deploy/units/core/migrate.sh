@@ -11,6 +11,18 @@
 #     ./migrate.sh take --db-only        # только базу (фото повезут отдельно)
 #     ./migrate.sh take --with-people    # вместе с людьми (см. ниже и MIGRATION.md)
 #
+#   ЕСЛИ СТАРЫЙ СЕРВЕР — НЕ ТАКАЯ ЖЕ УСТАНОВКА. Данные бывают в контуре, который
+#   ставили до этих скриптов: свой каталог, свой образ, имена другие. Снимать
+#   оттуда — та же операция, надо только показать, ОТКУДА брать:
+#
+#     ./migrate.sh take --from-container hardbot2-bot-1
+#
+#   Скрипт спросит у самого контейнера, какой у него образ и какой каталог хоста
+#   подключён как /data, — то есть не даст перепутать каталог и снять копию
+#   чужой или пустой базы. Контейнер может быть и остановлен: `docker inspect`
+#   отвечает и про такой. Если контейнера нет вовсе, путь и образ задаются
+#   руками: --data КАТАЛОГ --image ОБРАЗ.
+#
 #   НА НОВОМ СЕРВЕРЕ:
 #     ./migrate.sh check   handover/hard-handover-*.tar   # только проверить
 #     ./migrate.sh receive handover/hard-handover-*.tar   # проверить и поставить
@@ -34,6 +46,12 @@ TOOL="$DEPLOY_DIR/../tools/export_for_handover.py"
 ARCHIVE_ROOT="hard-handover"
 UNPACK_DIR="$UNIT_DIR/.migrate-in"
 
+# Откуда берём данные и чем их читаем. По умолчанию — эта самая установка;
+# снятие с чужого контура меняет обе строки (--from-container / --data --image).
+# Приём всегда идёт в СВОЮ единицу: принимать «куда-нибудь» нельзя.
+APP_IMAGE="hard-app"
+DATA_DIR="$UNIT_DIR/data"
+
 # Подсказка — это шапка самого файла: одно место вместо двух, которые
 # расходятся. Печатаем комментарий со второй строки до первой строки кода,
 # поэтому правка шапки не требует правки номеров строк.
@@ -49,8 +67,34 @@ need_tool() {
 
 need_image() {
   check_docker
-  docker image inspect hard-app >/dev/null 2>&1 \
-    || die "нет образа hard-app. Сначала поставьте ядро: ./install.sh"
+  docker image inspect "$APP_IMAGE" >/dev/null 2>&1 \
+    || if [ "$APP_IMAGE" = "hard-app" ]; then
+         die "нет образа hard-app. Сначала поставьте ядро: ./install.sh"
+       else
+         die "нет образа $APP_IMAGE — проверьте: docker image ls"
+       fi
+}
+
+# Спросить у контейнера, где его данные и каким образом их читать. Ошибиться
+# каталогом здесь дороже всего: копия снимется с ЧУЖОЙ или пустой базы и будет
+# выглядеть совершенно нормально, пока её не откроют на новом сервере.
+from_container() {
+  local name="$1"
+  check_docker
+  docker inspect "$name" >/dev/null 2>&1 \
+    || die "нет контейнера $name — посмотрите список: docker ps -a"
+  APP_IMAGE="$(docker inspect "$name" --format '{{.Config.Image}}' 2>/dev/null)"
+  [ -n "$APP_IMAGE" ] || die "у контейнера $name не читается образ"
+  # Приложение держит данные в /data при любой версии установки (APP_DATA=/data
+  # в образе), поэтому ищем ровно эту точку монтирования.
+  DATA_DIR="$(docker inspect "$name" \
+    --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)"
+  [ -n "$DATA_DIR" ] \
+    || die "у контейнера $name нет каталога, подключённого как /data.
+Значит данные лежат где-то ещё — укажите путь руками: --data КАТАЛОГ --image ОБРАЗ"
+  say "Источник: контейнер $name"
+  say "  данные: $DATA_DIR"
+  say "  образ:  $APP_IMAGE"
 }
 
 # in_app КОМАНДА… — выполнить инструмент переноса ОДНОРАЗОВЫМ контейнером из
@@ -71,31 +115,35 @@ need_image() {
 # Сам инструмент подаётся в контейнер через stdin: на сервере может не быть
 # питона, а образ приложения есть всегда.
 in_app() {
-  docker run --rm -i -v "$UNIT_DIR/data:/data" hard-app python - "$@" < "$TOOL"
+  docker run --rm -i -v "$DATA_DIR:/data" "$APP_IMAGE" python - "$@" < "$TOOL"
 }
 
 # То же, плюс том с распакованным архивом (только чтение).
 in_app_with_archive() {
-  docker run --rm -i -v "$UNIT_DIR/data:/data" -v "$UNPACK_DIR:/in:ro" \
-    hard-app python - "$@" < "$TOOL"
+  docker run --rm -i -v "$DATA_DIR:/data" -v "$UNPACK_DIR:/in:ro" \
+    "$APP_IMAGE" python - "$@" < "$TOOL"
 }
 
 # --- СНЯТИЕ -----------------------------------------------------------------
 
 cmd_take() {
-  local with_people=0 db_only=0 out="$UNIT_DIR/handover"
+  local with_people=0 db_only=0 out="$UNIT_DIR/handover" container=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --with-people) with_people=1 ;;
-      --db-only)     db_only=1 ;;
-      --out)         out="${2:-}"; shift; [ -n "$out" ] || die "--out без каталога" ;;
+      --with-people)   with_people=1 ;;
+      --db-only)       db_only=1 ;;
+      --out)           out="${2:-}"; shift; [ -n "$out" ] || die "--out без каталога" ;;
+      --from-container) container="${2:-}"; shift; [ -n "$container" ] || die "--from-container без имени" ;;
+      --data)          DATA_DIR="${2:-}"; shift; [ -n "$DATA_DIR" ] || die "--data без каталога" ;;
+      --image)         APP_IMAGE="${2:-}"; shift; [ -n "$APP_IMAGE" ] || die "--image без образа" ;;
       *) die "неизвестный параметр: $1 (см. ./migrate.sh без параметров)" ;;
     esac
     shift
   done
+  [ -n "$container" ] && from_container "$container"
 
   need_tool; need_image
-  [ -f "$UNIT_DIR/data/hardbot.db" ] || die "нет data/hardbot.db — переносить нечего"
+  [ -f "$DATA_DIR/hardbot.db" ] || die "нет $DATA_DIR/hardbot.db — переносить нечего"
   need_cmd sha256sum "он есть в coreutils"
 
   local flags=(); [ "$with_people" -eq 1 ] && flags+=(--with-people)
@@ -182,15 +230,27 @@ unpack_and_verify() {
   say "---------------"
   # Проверяем архив ДО того, как что-то трогаем в data/. Порченая база должна
   # остановить перенос здесь, а не после подмены рабочего файла.
-  if ! docker run --rm -i -v "$UNPACK_DIR:/in:ro" hard-app \
+  if ! docker run --rm -i -v "$UNPACK_DIR:/in:ro" "$APP_IMAGE" \
         python - verify --dir "/in/$ARCHIVE_ROOT" < "$TOOL"; then
     die "архив не принят (см. список выше). data/ не тронут."
   fi
 }
 
 cmd_check() {
+  # Проверять архив полезно и на СТАРОМ сервере, сразу после снятия: там нет
+  # образа hard-app, поэтому читать архив нечем — кроме образа того самого
+  # приложения, которым его сняли.
+  local archive=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --image)          APP_IMAGE="${2:-}"; shift; [ -n "$APP_IMAGE" ] || die "--image без образа" ;;
+      --from-container) from_container "${2:-}"; shift ;;
+      -*)               die "неизвестный параметр: $1" ;;
+      *)                archive="$1" ;;
+    esac
+    shift
+  done
   need_tool; need_image
-  local archive="${1:-}"
   [ -n "$archive" ] || die "укажите архив: ./migrate.sh check handover/$ARCHIVE_ROOT-*.tar"
   unpack_and_verify "$archive"
   say ""
