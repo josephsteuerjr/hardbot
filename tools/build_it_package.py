@@ -484,6 +484,12 @@ def build(root: Path, out_dir: Path, version: str | None = None,
                     info.compress_type = zipfile.ZIP_STORED
                 else:
                     info.compress_type = zipfile.ZIP_DEFLATED
+                # Права переживают распаковку на Linux только если запись
+                # помечена как сделанная в UNIX. По умолчанию zipfile на
+                # Windows ставит create_system=0 (FAT), и unzip тогда режимы
+                # из external_attr игнорирует: скрипты приезжают без бита
+                # запуска, а установка встаёт на первом же ./install.sh.
+                info.create_system = 3
                 if relative.suffix.lower() in {".sh"}:
                     info.external_attr = 0o755 << 16
                 else:
@@ -498,6 +504,7 @@ def build(root: Path, out_dir: Path, version: str | None = None,
                     (f"{folder}/VERSION", f"{version}\n{day}\n{commit}\n")):
                 extra = zipfile.ZipInfo(extra_name, date_time=(2026, 1, 1, 0, 0, 0))
                 extra.compress_type = zipfile.ZIP_DEFLATED
+                extra.create_system = 3
                 extra.external_attr = 0o644 << 16
                 zf.writestr(extra, extra_body)
             bad = zf.testzip()
