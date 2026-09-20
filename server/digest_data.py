@@ -27,6 +27,7 @@ import evidence
 import funnel
 import photostore
 from i18n import tf
+from util import num as _num
 
 _MONTHS = ["", "января", "февраля", "марта", "апреля", "мая", "июня", "июля",
            "августа", "сентября", "октября", "ноября", "декабря"]
@@ -119,6 +120,28 @@ def _merge_units(chunks) -> list[dict]:
 def _units_text(units: list[dict]) -> str:
     """«132 900 ₽ · 11 550 000 сум» — из уже посчитанных сумм по валютам."""
     return " · ".join(_money(x["sum"], x["unit"]) for x in units or ())
+
+
+def _units_num(units: list[dict]) -> tuple[int | None, str]:
+    """(число, валюта), если деньги одной валюты; иначе (None, '').
+
+    Смешанные валюты числом не бывают (см. _totals_units) — «132 900 ₽ ·
+    11 млн сум» остаётся текстом. А одна валюта кладётся в книгу ЧИСЛОМ:
+    текст «1 508 299 ₽» SUM не складывает, и руководитель складывает колонку
+    руками (жалоба Альберта 20.09.2026)."""
+    units = list(units or ())
+    if not units:
+        return None, ""
+    labels = {str(x.get("unit") or "") for x in units}
+    if len(labels) > 1:
+        return None, ""
+    return sum(int(x.get("sum") or 0) for x in units), labels.pop()
+
+
+def _money_fmt(unit: str) -> str:
+    """Формат ячейки денег: «47 199 614 ₽» как во всём боте, но валюта — в
+    формате, а не внутри строки."""
+    return f'#,##0" {unit}"' if unit else "#,##0"
 
 
 def _persons_total(persons: list[dict]) -> str:
@@ -538,8 +561,17 @@ def person_data(mgr: dict, on_date: str, employee: str, rep: str,
 # --- ЭКРАН: случаи за окном (тап по плашке сводки) ---------------------------
 CASE_METRICS = {"visits", "paid", "promised", "with_photo", "persons",
                 # Подтверждение выезда: подтверждён / у адреса не был /
-                # проверить нечем / признаки серии / заполнен не на адресе.
-                "confirmed", "far", "unverified", "series", "saved_away"}
+                # проверить нечем / признаки серии / заполнено не на адресе.
+                "confirmed", "far", "unverified", "series", "saved_away",
+                # Ступени воронки Collection (funnel.py): экран приложения
+                # рисует лестницу, и тап по ступени показывает те самые выезды.
+                "carded", "contacts", "dead", "rpc", "third", "ptp",
+                "promise_third"}
+
+# Ступени считают ВЫЕЗДЫ, а не последние состояния людей — дедупликацию
+# «по человеку» (ветка metric != visits ниже) для них делать нельзя.
+FUNNEL_CASE_METRICS = {"carded", "contacts", "dead", "rpc", "third",
+                       "ptp", "promise_third"}
 CASES_LIMIT = 300
 
 # Сотрудник без офиса не исчезает: у него свой чип «Без офиса». Пока чипа не
@@ -576,14 +608,19 @@ def _offices_of(rows: list[dict], days: int) -> list[dict]:
 
 
 def cases_data(mgr: dict, rng: dict, metric: str, country: str = "",
-               employees: list[str] | None = None, office: str = "") -> dict:
+               employees: list[str] | None = None, office: str = "",
+               employee: str = "") -> dict:
     """Список выездов за окно по одной метрике сводки.
 
     Плашки «выездов / оплачен / обещают / с фото» были голыми числами: за
     вопросом «а кто это» руководителю приходилось перебирать сотрудников по
-    одному. Здесь тот же набор, из которого сложилась цифра.
+    одному. Здесь тот же набор, из которого сложилась цифра. employee сужает
+    список до одного человека — так ступень воронки в карточке сотрудника
+    показывает его выезды, а не всей команды.
     """
     employees = employees if employees is not None else sorted_employees(mgr)
+    if employee:
+        employees = [e for e in employees if e == employee]
     metric = metric if metric in CASE_METRICS else "visits"
     country_of = _employee_country_index()
     if country:
@@ -597,8 +634,9 @@ def cases_data(mgr: dict, rng: dict, metric: str, country: str = "",
         r = _employee_stats(emp, rng["from"], rng["to"], with_photos=False)
         entries = r["_entries"]
         # «Оплачен», «обещают» и «должников» — это ПОСЛЕДНЕЕ состояние человека
-        # за окно, ровно как в плашках; «выездов» — каждый человеко-день.
-        if metric != "visits":
+        # за окно, ровно как в плашках; «выездов» и ступени воронки — каждый
+        # человеко-день: ступень считает выезды, дедупликация её порвала бы.
+        if metric != "visits" and metric not in FUNNEL_CASE_METRICS:
             last = {}
             for e in entries:
                 last[e["person"]["rep"]] = e
@@ -616,6 +654,26 @@ def cases_data(mgr: dict, rng: dict, metric: str, country: str = "",
             entries = [e for e in entries if evidence.is_series(e.get("series"))]
         elif metric == "saved_away":
             entries = [e for e in entries if (e.get("ev") or {}).get("saved_away")]
+        elif metric in FUNNEL_CASE_METRICS:
+            # Классификация — та же, что считает ступени в _funnel_of: два
+            # правила на одну ступень разъехались бы в первый же день.
+            def _picked(metric, e):
+                contact = funnel.contact_kind(e.get("contact_with"))
+                promise = funnel.promise_kind(e.get("agreed"))
+                if metric == "carded":
+                    return bool(contact)
+                if metric == "contacts":
+                    return contact in ("client", "third")
+                if metric == "dead":
+                    return contact == "none"
+                if metric == "rpc":
+                    return contact == "client"
+                if metric == "third":
+                    return contact == "third"
+                if metric == "ptp":
+                    return contact == "client" and promise == "client"
+                return promise == "third"          # promise_third
+            entries = [e for e in entries if _picked(metric, e)]
         for e in entries:
             p = e["person"]
             photos = len(photostore.day_photos(p["contracts"], e["date"]))
@@ -635,7 +693,7 @@ def cases_data(mgr: dict, rng: dict, metric: str, country: str = "",
     items.sort(key=lambda c: (c["date"], c["client"]), reverse=True)
     return {
         "screen": "cases", "range": rng, "metric": metric, "country": country,
-        "office": office,
+        "office": office, "employee": employee,
         "total": len(items), "cases": items[:CASES_LIMIT],
         "limit": CASES_LIMIT,
     }
@@ -1352,9 +1410,26 @@ def _outcome_totals(rows: list[dict]) -> dict:
 
 
 def _book_line(label: str, country: str, stats: dict, by_outcome: dict,
-               layout: list[dict], plan: int, office: str = "") -> list:
-    """Строка книги: метрики, план, затем исходы блоками."""
-    done = f"{round((stats['visits'] or 0) / plan * 100)}%" if plan else ""
+               layout: list[dict], plan: int, office: str = "") -> tuple[list, dict]:
+    """Строка книги: метрики, план, затем исходы блоками.
+
+    Возвращает (строка, форматы). Деньги и «% плана» кладутся ЧИСЛАМИ, а ₽ и
+    знак процента живут в формате ячейки: по тексту «1 508 299 ₽» SUM молча
+    даёт ноль, и колонку складывают руками (жалоба Альберта 20.09.2026).
+    Форматы — {позиция с нуля: формат}; смешанные валюты остаются текстом."""
+    fmts: dict[int, str] = {}
+
+    def money(pos: int, units, text: str):
+        num, unit = _units_num(units)
+        if num is None:
+            return text or ""
+        fmts[pos] = _money_fmt(unit)
+        return num
+
+    done = ""
+    if plan:
+        done = round((stats["visits"] or 0) / plan, 2)
+        fmts[5] = "0%"
     line = [label, country, office, stats["visits"], plan or "", done,
             stats["persons"], stats["contracts"], stats["overdue"],
             stats["with_photo"], stats.get("late") or "", stats.get("no_geo") or "",
@@ -1362,17 +1437,24 @@ def _book_line(label: str, country: str, stats: dict, by_outcome: dict,
             stats.get("unverified") or "", stats.get("series") or "",
             stats.get("saved_away") or "",
             _fill_text(stats.get("near_avg")),
-            _fill_text(stats.get("fill_avg")), stats["money_text"],
-            stats["money_paid_text"]]
+            _fill_text(stats.get("fill_avg")),
+            money(19, stats.get("money"), stats["money_text"]),
+            money(20, stats.get("money_paid"), stats["money_paid_text"])]
     holder = {"by_outcome": by_outcome}
     for block in layout:
         cells, total_n, units = _outcome_cells(holder, block["statuses"])
-        line.extend([total_n or "", _units_text(units) or ""])
-        line.extend(cells)
+        base = len(line)
+        line.append(total_n or "")
+        line.append(money(base + 1, units, _units_text(units)))
+        for i, status in enumerate(block["statuses"]):
+            line.append(cells[2 * i])
+            item = (by_outcome or {}).get(status) or {}
+            line.append(money(base + 3 + 2 * i, item.get("money"),
+                              item.get("money_text") or ""))
         if block["code"] == "other":
             line.append(" · ".join(f"{st} {by_outcome[st]['n']}"
                                    for st in block["statuses"] if by_outcome.get(st)))
-    return line
+    return line, fmts
 
 
 def _outcome_cells(row: dict, statuses: list[str]) -> tuple[list, int, list]:
@@ -1505,6 +1587,7 @@ def _promise_rows(rows: list[dict], names: dict) -> list[dict]:
                 continue
             p, pr = e["person"], e["promise"]
             last_day = _last_payment_day(p)
+            debt_val, debt_unit = _units_num(p["totals"])
             out.append({
                 "date": e["date"], "country": names.get(r["country"], ""),
                 "office": r.get("office") or "", "employee": r["employee"],
@@ -1516,6 +1599,9 @@ def _promise_rows(rows: list[dict], names: dict) -> list[dict]:
                 "bucket": funnel.amount_bucket(pr["sum"]),
                 "debt": _persons_total([p]),
                 "debt_num": sum(x["sum"] for x in p["totals"]),
+                # Та же пара, что и у остальных денег книги: числом — только
+                # одну валюту (см. _units_num), иначе текст.
+                "debt_val": debt_val, "debt_unit": debt_unit,
                 "state": pr["state"],
                 "days_overdue": pr["days_overdue"],
                 "overdue_bucket": funnel.overdue_bucket(pr["days_overdue"]),
@@ -1621,13 +1707,17 @@ def _funnel_sheets(wb, data: dict, rows: list[dict], names: dict,
         ws2.append([x["date"], x["country"], x["office"], x["employee"],
                     x["client"], x["contracts"], x["contact_with"],
                     x["who_at_address"], x["agreed"], x["promise_day"],
-                    x["sum"] or "", x["bucket"], x["debt"],
+                    x["sum"] or "", x["bucket"],
+                    x["debt_val"] if x["debt_val"] is not None else x["debt"],
                     funnel.PROMISE_STATE_TEXT.get(x["state"], ""),
                     x["days_overdue"] or "", x["overdue_bucket"],
-                    x["last_payment"], x["last_payment_sum"], x["status"],
-                    "да" if x["counted"] else "нет"])
+                    x["last_payment"], _num(x["last_payment_sum"]) or "",
+                    x["status"], "да" if x["counted"] else "нет"])
         at = ws2.max_row
         ws2.cell(row=at, column=11).number_format = money_fmt
+        if x["debt_val"] is not None:
+            ws2.cell(row=at, column=13).number_format = _money_fmt(x["debt_unit"])
+        ws2.cell(row=at, column=18).number_format = money_fmt
         if x["state"] == funnel.PROMISE_KEPT:
             ws2.cell(row=at, column=14).fill = PatternFill("solid", fgColor="E3F2E1")
         elif x["state"] == funnel.PROMISE_BROKEN:
@@ -1728,14 +1818,20 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
     ws.append(head_row)
     plan_map = db.visit_plan_map()
     for r in rows:
-        ws.append(_book_line(r["employee"], names.get(r["country"], ""), r,
-                             r.get("by_outcome") or {}, layout,
-                             db.visit_plan_for(r["employee"], plan_map)
-                             * max(1, len(data["by_day"])),
-                             office=r.get("office") or ""))
+        line, fmts = _book_line(r["employee"], names.get(r["country"], ""), r,
+                                r.get("by_outcome") or {}, layout,
+                                db.visit_plan_for(r["employee"], plan_map)
+                                * max(1, len(data["by_day"])),
+                                office=r.get("office") or "")
+        ws.append(line)
+        for pos, fmt in fmts.items():
+            ws.cell(row=ws.max_row, column=pos + 1).number_format = fmt
     last_employee_row = ws.max_row
-    ws.append(_book_line("Итого", "", data["totals"], _outcome_totals(rows),
-                         layout, data["totals"].get("plan") or 0))
+    line, fmts = _book_line("Итого", "", data["totals"], _outcome_totals(rows),
+                            layout, data["totals"].get("plan") or 0)
+    ws.append(line)
+    for pos, fmt in fmts.items():
+        ws.cell(row=ws.max_row, column=pos + 1).number_format = fmt
     dress(ws, head_top=3, last_data_row=last_employee_row)
     ws.freeze_panes = "C5"      # ФИО и страна остаются на виду при прокрутке вправо
 
@@ -1749,13 +1845,19 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
     ws_c.append(country_head)
     for c in data["countries"]:
         mine = [r for r in rows if r["country"] == c["code"]]
-        ws_c.append(_book_line(c["name"], f"сотрудников {c['employees']}",
-                               c["totals"], _outcome_totals(mine), layout,
-                               c["totals"].get("plan") or 0))
+        line, fmts = _book_line(c["name"], f"сотрудников {c['employees']}",
+                                c["totals"], _outcome_totals(mine), layout,
+                                c["totals"].get("plan") or 0)
+        ws_c.append(line)
+        for pos, fmt in fmts.items():
+            ws_c.cell(row=ws_c.max_row, column=pos + 1).number_format = fmt
     last_country_row = ws_c.max_row
-    ws_c.append(_book_line("Итого", f"сотрудников {data['totals']['employees']}",
-                           data["totals"], _outcome_totals(rows), layout,
-                           data["totals"].get("plan") or 0))
+    line, fmts = _book_line("Итого", f"сотрудников {data['totals']['employees']}",
+                            data["totals"], _outcome_totals(rows), layout,
+                            data["totals"].get("plan") or 0)
+    ws_c.append(line)
+    for pos, fmt in fmts.items():
+        ws_c.cell(row=ws_c.max_row, column=pos + 1).number_format = fmt
     dress(ws_c, head_top=3, last_data_row=last_country_row)
     ws_c.freeze_panes = "B5"
 
@@ -1771,13 +1873,19 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
         # отдельным блоком его считать больше не нужно, иначе задвоится.
         for office in data["offices"]:
             mine = [r for r in rows if _in_office(r, office["code"])]
-            ws_o.append(_book_line(office["name"], f"сотрудников {office['employees']}",
-                                   office["totals"], _outcome_totals(mine), layout,
-                                   office["totals"].get("plan") or 0))
+            line, fmts = _book_line(office["name"], f"сотрудников {office['employees']}",
+                                    office["totals"], _outcome_totals(mine), layout,
+                                    office["totals"].get("plan") or 0)
+            ws_o.append(line)
+            for pos, fmt in fmts.items():
+                ws_o.cell(row=ws_o.max_row, column=pos + 1).number_format = fmt
         last_office_row = ws_o.max_row
-        ws_o.append(_book_line("Итого", f"сотрудников {data['totals']['employees']}",
-                               data["totals"], _outcome_totals(rows), layout,
-                               data["totals"].get("plan") or 0))
+        line, fmts = _book_line("Итого", f"сотрудников {data['totals']['employees']}",
+                                data["totals"], _outcome_totals(rows), layout,
+                                data["totals"].get("plan") or 0)
+        ws_o.append(line)
+        for pos, fmt in fmts.items():
+            ws_o.cell(row=ws_o.max_row, column=pos + 1).number_format = fmt
         dress(ws_o, head_top=3, last_data_row=last_office_row)
         ws_o.freeze_panes = "B5"
 
@@ -1812,13 +1920,14 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
             ev = e.get("ev") or {}
             level = e.get("evidence_level") or ""
             online = ev.get("online_save")
+            debt_num, debt_unit = _units_num(p.get("totals"))
             ws2.append([e["date"], names.get(r["country"], ""), r.get("office") or "",
                         r["employee"], p["client"], p["n"],
                         OUTCOME_GROUP_LABEL[group], e["status"],
                         e["agreed"], _fill_text(e.get("fill_seconds")),
                         _stamp(e.get("saved_at")), _stamp(e.get("received_at")),
                         when, "есть" if e.get("geo") else "нет", who,
-                        _persons_total([p]),
+                        debt_num if debt_num is not None else _persons_total([p]),
                         evidence.LEVEL_TEXT.get(level, "") if level else "",
                         ev.get("near_min") if ev.get("near_min") is not None else "",
                         ev.get("near_first") or "", ev.get("near_last") or "",
@@ -1827,6 +1936,8 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
                         ("" if ev.get("saved_away") is None
                          else "не на адресе" if ev.get("saved_away") else "на адресе")])
             ws2.cell(row=row_at, column=7).fill = fills[group]
+            if debt_num is not None:
+                ws2.cell(row=row_at, column=16).number_format = _money_fmt(debt_unit)
             if late:
                 ws2.cell(row=row_at, column=13).fill = fills["fail"]
             if not e.get("geo"):
@@ -1905,6 +2016,7 @@ def daily_report_data(mgr: dict, on_date: str,
         assigned = db._group_persons(db.contracts_of_responsible(emp))
         first = min((e["date"] for e in total["_entries"]), default="")
         code = country.get(emp)
+        money_val, money_unit = _units_num(_totals_units(assigned))
         rows.append({
             "employee": emp,
             "country": code,
@@ -1912,6 +2024,7 @@ def daily_report_data(mgr: dict, on_date: str,
             "assigned_persons": len(assigned),
             "assigned_contracts": sum(p["n"] for p in assigned),
             "assigned_money": _persons_total(assigned),
+            "assigned_money_val": money_val, "assigned_money_unit": money_unit,
             "today_persons": today["persons"], "today_visits": today["visits"],
             "today_paid": today["paid"], "today_promised": today["promised"],
             "today_photo": today["with_photo"],
@@ -1933,6 +2046,12 @@ def daily_report_data(mgr: dict, on_date: str,
     totals = {k: sum(r[k] for r in rows) for k in keys}
     totals["employees"] = len(rows)
     totals["active"] = sum(1 for r in rows if r["today_persons"])
+    # Числовой итог по деньгам — только когда у всех одна и та же валюта:
+    # сумма, в которой ₽ склеены с сумами, хуже отсутствия суммы.
+    units = {r["assigned_money_unit"] for r in rows}
+    if rows and len(units) == 1 and next(iter(units), ""):
+        totals["assigned_money_val"] = sum(r["assigned_money_val"] for r in rows)
+        totals["assigned_money_unit"] = units.pop()
     return {"screen": "daily_report", "date": on_date, "rows": rows,
             "totals": totals, "scope": scope_label(mgr),
             "manager_name": mgr.get("name") or "",
@@ -1982,6 +2101,16 @@ def daily_report_xlsx(mgr: dict, on_date: str,
     from openpyxl.styles import Alignment, Font
 
     data = data if data is not None else daily_report_data(mgr, on_date, employees)
+    money_col = 1 + next(i for i, (key, _t, _w) in enumerate(DAILY_REPORT_COLUMNS)
+                         if key == "assigned_money")
+
+    def _put_money(ws, at_row: int, val, unit, text) -> None:
+        if val is None:
+            ws.cell(row=at_row, column=money_col, value=text or "")
+            return
+        cell = ws.cell(row=at_row, column=money_col, value=val)
+        cell.number_format = _money_fmt(unit)
+
     wb = Workbook()
     ws = wb.active
     ws.title = "Сводка"
@@ -1995,8 +2124,12 @@ def daily_report_xlsx(mgr: dict, on_date: str,
         cell.alignment = Alignment(wrap_text=True, vertical="center")
     for r in data["rows"]:
         ws.append([r.get(key, "") for key, _t, _w in DAILY_REPORT_COLUMNS])
+        _put_money(ws, ws.max_row, r.get("assigned_money_val"),
+                   r.get("assigned_money_unit") or "", r.get("assigned_money"))
     t = data["totals"]
     ws.append(["Итого", ""] + [t.get(key, "") for key, _t, _w in DAILY_REPORT_COLUMNS[2:]])
+    _put_money(ws, ws.max_row, t.get("assigned_money_val"),
+               t.get("assigned_money_unit") or "", "")
     for cell in ws[ws.max_row]:
         cell.font = Font(bold=True)
     for i, (_key, _title, width) in enumerate(DAILY_REPORT_COLUMNS):

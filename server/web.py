@@ -3202,19 +3202,27 @@ async def _manager_binds(request: web.Request) -> web.Response:
 
 
 async def _manager_cases(request: web.Request) -> web.Response:
-    """Случаи за окном по одной плашке сводки: тап по числу — и вот из чего оно."""
+    """Случаи за окно по одной плашке сводки: тап по числу — и вот из чего оно.
+
+    employee сужает до одного человека: ступень воронки в карточке сотрудника
+    открывает его выезды, а не всей команды."""
     uid, mgr, team = _manager_gate(request)
     rng = _stats_range_q(request)
     metric = (request.query.get("metric") or "visits").strip()
     country = (request.query.get("country") or "").strip()[:8]
     office = (request.query.get("office") or "").strip()[:64]
+    employee = ((request.query.get("employee") or "").strip()
+                if "employee" in request.query else "")
+    if employee and employee not in team:
+        raise web.HTTPNotFound(text="employee")
     data = await asyncio.to_thread(
         functools.partial(digest_data.cases_data, mgr, rng, metric, country,
-                          employees=team, office=office))
+                          employees=team, office=office, employee=employee))
     reps = ",".join(c["rep"] for c in data["cases"][:50])
     db.audit_access(uid, "digest_view",
                     detail=f"cases {data['metric']} {rng['from']}..{rng['to']} "
-                           f"country={country or '-'} n={data['total']} reps={reps}")
+                           f"country={country or '-'} employee={employee or '-'} "
+                           f"n={data['total']} reps={reps}")
     return _manager_json({**_stats_envelope(mgr, team, rng, uid), **data})
 
 

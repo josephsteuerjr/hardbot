@@ -377,3 +377,61 @@ def test_every_sheet_row_is_as_wide_as_its_header():
         assert [c[0] for c in columns] == [c.value for c in ws[3]]
         for r in range(4, ws.max_row + 1):
             assert len(ws[r]) == len(columns), f"{sheet}, строка {r}"
+
+
+# --- Экран воронки: тап по ступени показывает те самые выезды -----------------
+
+def _cases(metric, **kw):
+    rng = dd.stats_range("30d")
+    mgr = {"name": "Рук", "employees": [EMP], "cities": [], "direction": ""}
+    return dd.cases_data(mgr, rng, metric, employees=[EMP], **kw)
+
+
+def _reps(data):
+    return sorted(c["client"] for c in data["cases"])
+
+
+def test_every_funnel_step_opens_its_own_visits():
+    """Классификация случаев — та же, что считает ступени (_funnel_of): два
+    правила на одну ступень разъехались бы в первый же день."""
+    _seed()
+    assert _reps(_cases("visits")) == sorted(
+        ["Кл Семь", "Кл Три", "Кл Четыре", "Кл Два", "Кл Пять", "Кл Шесть", "Кл Один"])
+    # анкета заполнена — шестеро, старый выезд «Кл Семь» без анкеты не судим
+    assert "Кл Семь" not in _reps(_cases("carded"))
+    assert _reps(_cases("dead")) == ["Кл Шесть"]
+    assert _reps(_cases("third")) == ["Кл Пять"]
+    assert _reps(_cases("rpc")) == sorted(
+        ["Кл Один", "Кл Два", "Кл Три", "Кл Четыре"])
+    assert _reps(_cases("ptp")) == sorted(["Кл Один", "Кл Два", "Кл Три"])
+    assert _reps(_cases("promise_third")) == ["Кл Пять"]
+
+
+def test_funnel_steps_count_visits_not_last_states():
+    """Ступень «обещания клиента» обязана показать оба выезда «Кл Десять»:
+    дедупликация «по человеку» (как у плашки „обещают“) рвала бы лестницу."""
+    _wipe()
+    _client("FN-10", "Кл Десять", EMP, "100 000", promise_date=_day(1))
+    card = _payload("Обещает оплатить", "Обещает оплатить клиент",
+                    "Должник", "По адресу проживает клиент")
+    _visit("FN-10", _day(5), card)
+    _visit("FN-10", _day(3), card)
+    db.set_manager(MGR, "Рук", [], [EMP])
+    db.reset_role_caches()
+    assert len(_cases("ptp")["cases"]) == 2
+
+
+def test_cases_narrow_to_one_employee():
+    """Ступень воронки в карточке сотрудника — его выезды, а не всей команды."""
+    _seed()
+    _client("FN-20", "Кл Двадцать", EMP2, "100 000")
+    _visit("FN-20", T, _payload("Нет контакта", "",
+                                "Контакт не установлен/ должника не знают",
+                                "По адресу клиента не знают/ не общаются"))
+    rng = dd.stats_range("30d")
+    mgr = {"name": "Рук", "employees": [EMP, EMP2], "cities": [], "direction": ""}
+    data = dd.cases_data(mgr, rng, "dead", employees=[EMP, EMP2], employee=EMP2)
+    assert _reps(data) == ["Кл Двадцать"]
+    assert data["employee"] == EMP2
+    without = dd.cases_data(mgr, rng, "dead", employees=[EMP, EMP2])
+    assert _reps(without) == ["Кл Двадцать", "Кл Шесть"]

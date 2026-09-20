@@ -289,6 +289,24 @@ button.kpi:active{background:var(--alt)}
   margin-left:-14px;margin-right:-14px;padding-left:14px;padding-right:14px}
 .barlbl{display:flex;gap:2px;font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums}
 .barlbl span{flex:1;text-align:center;overflow:hidden}
+/* Воронка Collection: лестница выезд → контакт → клиент → обещание → оплата */
+.fcard{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:4px 12px;margin:10px 0}
+.fhead{font-size:12px;font-weight:700;color:var(--muted);padding:8px 0 2px;text-transform:uppercase;
+  letter-spacing:.4px}
+.frow{display:flex;align-items:center;gap:10px;padding:6px 0;border:0;background:none;width:100%;
+  font:inherit;color:inherit;text-align:left;cursor:pointer}
+.frow:active{background:var(--alt);border-radius:8px}
+.frow.plain{cursor:default}
+.frow.plain:active{background:none}
+.fbar{flex:0 0 56px;height:8px;border-radius:4px;background:var(--alt);overflow:hidden}
+.fbar i{display:block;height:100%;border-radius:4px;background:var(--accent2)}
+.fbar.dim i{background:#C9C3B6}
+.fl{flex:1;min-width:0}
+.fl b{font-size:13px;display:block}
+.fsub{font-size:11px;color:var(--muted)}
+.fv{font-weight:700;font-variant-numeric:tabular-nums}
+.fp{flex:0 0 86px;text-align:right;font-variant-numeric:tabular-nums;font-size:12px;color:var(--muted)}
+.fp b{color:var(--text)}
 @media (max-width:640px){ .stt .md{display:none} .stt td,.stt th{padding:9px 4px} .stt td.l{min-width:104px} }
 </style>
 </head>
@@ -802,7 +820,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=55;
+const SHELL_VERSION=56;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -3188,7 +3206,8 @@ async function dgLoad(){
             : DG.view==="workload" ? "/api/manager/workload"+dgRangeQ(DG.wemp?{employee:DG.wemp}:{})
             : DG.view==="binds"    ? "/api/manager/binds"
             : DG.view==="cases"    ? "/api/manager/cases"+dgRangeQ({metric:DG.metric||"visits",
-                                       country:DG.country||"", office:DG.office||""})
+                                       country:DG.country||"", office:DG.office||"",
+                                       employee:DG.femp||""})
             : DG.view==="map"      ? "/api/manager/map_data"+dgQ({employee:DG.emp})
             : DG.view==="photos"   ? null
             :                        "/api/manager/promises"+dgQ();
@@ -3236,6 +3255,9 @@ function dgOffice(o){ DG.office=o; DG.country=""; dgDrawKpis(); dgDrawTable(); }
 // быть не может: у человека без офиса поле пустое, и сравнивать надо с пустотой.
 const DG_NOOFF="!none";
 function dgInOffice(r,code){ const o=r.office||""; return code===DG_NOOFF?!o:o===code; }
+// Ступени воронки и плашки с карточки сотрудника ведут в «случаи» ЕГО выездов:
+// DG.femp держит этот контекст (на сводке команды — null). В onclick ФИО не
+// ездят — только числовые индексы, поэтому контекст живёт в состоянии.
 function dgCases(metric){ dgGo("cases",{metric}); }
 function dgSearch(v){ DG.q=(v||"").trim().toLowerCase(); dgDrawTable(); }
 function dgPickEmp(i){ const r=DG.rows[i]; if(r) dgGo("emp",{emp:r.employee}); }
@@ -3372,6 +3394,43 @@ function dgKpis(t,rg){
     ${k(t.overdue||0,"обещаний просрочено",team?"dgOpenPromises()":"")}${k((t.with_photo||0)+"/"+(t.persons||0),"с фото",c("with_photo"))}${sixth}
   </div>${line.length?`<div class="muted" style="font-size:13px">${line.join(" · ")}</div>`:""}`;
 }
+// --- Воронка Collection: лестница выезд → контакт → клиент → обещание → оплата ---
+// Счётчики приезжают из того же stats_data, что считает книгу (totals.funnel),
+// проценты — те же пары «числитель/знаменатель», что в funnel.RATES на сервере.
+// «—» значит «знаменателя не было», «0» значит «делали и не вышло» — путать их
+// нельзя, это правило Альберта из книги. Тап по ступени — те самые выезды.
+function dgFRate(n,d){ n=+n||0; d=+d||0; return d?Math.round(n/d*1000)/10:null; }
+function dgFPos(v){ return v==null?"—":String(v).replace(".",","); }
+function dgFunnel(t,rg){
+  const f=t&&t.funnel; if(!f||!(+f.visits)) return "";
+  const plan=+t.plan||0, mx=+f.visits||1;
+  const nocard=(+f.visits)-(+f.carded||0);
+  const row=(label,sub,val,go,rateHTML,bar,dim)=>`<${go?"button":"div"} class="frow${go?"":" plain"}"${go?` onclick="${go}"`:""}>
+    <div class="fbar${dim?" dim":""}"><i style="width:${Math.min(100,Math.round((bar||0)/mx*100))}%"></i></div>
+    <div class="fl"><b>${label}</b>${sub?`<span class="fsub">${sub}</span>`:""}</div>
+    <div class="fv">${val}</div>${rateHTML||""}</${go?"button":"div"}>`;
+  const pct=(n,d,lbl)=>{const v=dgFRate(n,d);return `<span class="fp">${lbl}<br><b>${dgFPos(v)}</b> %</span>`;};
+  const rows=[
+    row("Выезды", plan?`задание ${plan}${nocard?" · без анкеты "+nocard:""}`:(nocard?"без анкеты "+nocard:""),
+        f.visits,"dgCases('visits')",plan?pct(f.visits,plan,"Penetration"):"",f.visits),
+    row("Контакты", (+f.dead||0)?`мёртвых адресов ${f.dead}`:"", f.contacts,"dgCases('contacts')",
+        pct(f.contacts,f.carded,"Contact Rate"),f.contacts),
+    row("Контакт с клиентом", `3-е лицо ${f.third||0} · родственники ${f.relatives||0}`, f.rpc,"dgCases('rpc')",
+        pct(f.rpc,f.contacts,"RPC"),f.rpc),
+    row("Обещание клиента", (+f.promise_third||0)?`обещания 3-х лиц ${f.promise_third}`:"", f.ptp,"dgCases('ptp')",
+        pct(f.ptp,f.rpc,"PTP"),f.ptp),
+    row("Исполнено обещаний", `сорвано ${f.broken||0} · ждём срока ${f.pending||0} · без даты ${f.nodate||0}`,
+        f.kept,null,
+        `<span class="fp">KP<br><b>${dgFPos(dgFRate(f.kept,f.ptp_persons))}</b> %<br>BP ${dgFPos(dgFRate(f.broken,f.ptp_persons))} %</span>`,
+        f.kept,true)];
+  // До 15.09.2026 анкета контакта жила только в снимке последнего визита:
+  // у старых выездов ступени контактов неполные, и молчать об этом значило бы
+  // показать заниженный Contact Rate без объяснения.
+  const partial=rg&&rg.from&&rg.from<"2026-09-15";
+  return `<div class="fcard"><div class="fhead">🪜 Воронка Collection</div>${rows.join("")}
+    <div class="fsub" style="padding:4px 0 8px">ступени считают выезды; исполнение — людей
+    (обещавших: ${f.ptp_persons||0})${partial?" · до 15.09 анкета есть только у последних выездов":""}</div></div>`;
+}
 function dgBars(days){
   const mx=Math.max(1,...days.map(d=>d.visits||0));
   const bars=days.map((d,i)=>`<button class="${d.weekend?"we":""}" title="${esc(d.label)}: ${d.visits||0}"
@@ -3389,11 +3448,11 @@ function dgIdle(r){
 function dgNum(r,k){ return k==="money"?(r.money||[]).reduce((s,x)=>s+(x.sum||0),0):(r[k]||0); }
 // --- ЭКРАН: статистика по команде ---
 function dgStats(j,b){
-  DG.stats=j; DG.rows=[]; DG.days=j.by_day||[];
+  DG.stats=j; DG.rows=[]; DG.days=j.by_day||[]; DG.femp=null;
   const rg=j.range||{}, t=j.totals||{};
   const parts=[dgTop((j.manager&&j.manager.name)?j.manager.name:"Статистика", j.scope)];
   parts.push(dgPeriodBar(rg));
-  parts.push(`<div id="dgkpis"></div>`);
+  parts.push(`<div id="dgkpis"></div><div id="dgfunnel"></div>`);
   if(DG.days.length>1) parts.push(dgBars(DG.days));
   parts.push(`<div class="searchwrap" style="margin:10px 0 0">${ic("search")}
     <input class="search" placeholder="Поиск сотрудника" value="${esc(DG.q)}" oninput="dgSearch(this.value)"></div>
@@ -3424,6 +3483,9 @@ function dgCountryTotals(){
 function dgDrawKpis(){
   const el=$("dgkpis"); if(!el||!DG.stats) return;
   el.innerHTML=dgKpis(dgCountryTotals(), DG.stats.range||{});
+  // Воронка следует за выбранной страной/офисом — тем же тоталом, что плашки.
+  const fl=$("dgfunnel");
+  if(fl) fl.innerHTML=dgFunnel(dgCountryTotals(), DG.stats.range||{});
 }
 function dgDrawTable(){
   const j=DG.stats, el=$("dgtable"); if(!j||!el) return;
@@ -3459,7 +3521,7 @@ function dgDrawTable(){
 }
 // --- ЭКРАН: сотрудник за период ---
 function dgEmp(j,b){
-  DG.cases=[]; DG.days=j.by_day||[];
+  DG.cases=[]; DG.days=j.by_day||[]; DG.femp=j.employee||DG.emp||null;
   const rg=j.range||{};
   const parts=[`<button class="back" onclick="dgGo('stats')">‹ к сотрудникам</button>`,
                dgTop(j.employee||DG.emp||"", rg.label)];
@@ -3470,6 +3532,7 @@ function dgEmp(j,b){
     (a.last_activity?` · активность ${esc(String(a.last_activity).slice(0,10))}`:"")+
     (a.idle_days!=null?` · простой ${a.idle_days} дн`:"")+`</div>`);
   if((j.outcomes||[]).length) parts.push(`<div class="chips">${j.outcomes.map(o=>`<span class="chip">${esc(o.emoji+" "+o.status)} <b>${o.n}</b></span>`).join("")}</div>`);
+  parts.push(dgFunnel(j,rg));
   if(DG.days.length>1) parts.push(dgBars(DG.days));
   if(rg.days===1) parts.push(`<button class="btn line" onclick="dgOpenMap(0)">🗺 Карта дня</button>`);
   let cur=null; const items=[];
@@ -3842,14 +3905,19 @@ const DG_METRIC_TITLE={visits:"Выезды",paid:"Оплачено",promised:"�
   with_photo:"Выезды с фото",persons:"Должники",
   confirmed:"Подтверждены на адресе",far:"У адреса не был",
   saved_away:"Заполнены не на адресе",
-  unverified:"Нечем проверить",series:"Признаки серии"};
+  unverified:"Нечем проверить",series:"Признаки серии",
+  carded:"Воронка · анкета заполнена",contacts:"Воронка · контакты",
+  dead:"Воронка · мёртвые адреса",rpc:"Воронка · контакт с клиентом",
+  third:"Воронка · контакт с 3-м лицом",ptp:"Воронка · обещания клиента",
+  promise_third:"Воронка · обещания 3-х лиц"};
 function dgCasesScreen(j,b){
   DG.cases=[]; DG.days=j.by_day||DG.days||[];
   const rg=j.range||{}, cs=j.cases||[];
   const country=(DG.stats&&(DG.stats.countries||[]).find(x=>x.code===j.country))||null;
-  const parts=[`<button class="back" onclick="dgGo('stats')">‹ к сводке</button>`,
+  const parts=[`<button class="back" onclick="dgGo('${DG.femp?"emp":"stats"}')">
+      ‹ ${DG.femp?"к сотруднику":"к сводке"}</button>`,
                dgTop(DG_METRIC_TITLE[j.metric]||"Случаи",
-                     [rg.label, country?country.name:""].filter(Boolean).join(" · "))];
+                     [rg.label, country?country.name:"", j.employee||""].filter(Boolean).join(" · "))];
   parts.push(`<div class="muted" style="font-size:13px;margin-bottom:6px">всего: <b>${j.total||0}</b>`+
     (j.total>cs.length?` · показаны первые ${cs.length}`:"")+`</div>`);
   let cur=null; const items=[];

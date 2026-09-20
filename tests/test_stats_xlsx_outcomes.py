@@ -131,10 +131,12 @@ def test_counts_and_money_stand_in_their_own_cells(sheet):
     head = _head(ws)
     row = _row_of(ws, EMP_A)
     assert ws.cell(row=row, column=head["Оплачен, чел."]).value == 1
-    assert "100 000" in str(ws.cell(row=row, column=head["Оплачен, сумма"]).value)
+    cell = ws.cell(row=row, column=head["Оплачен, сумма"])
+    assert cell.value == 100000, "деньги — числом, а не текстом «100 000 ₽»"
+    assert "₽" in cell.number_format, "валюта живёт в формате ячейки"
     assert ws.cell(row=row, column=head["Обещает оплатить, чел."]).value == 1
     assert ws.cell(row=row, column=head["Нет контакта, чел."]).value == 1
-    assert "300 000" in str(ws.cell(row=row, column=head["Нет контакта, сумма"]).value)
+    assert ws.cell(row=row, column=head["Нет контакта, сумма"]).value == 300000
 
 
 def test_block_totals_sum_their_statuses(sheet):
@@ -143,8 +145,25 @@ def test_block_totals_sum_their_statuses(sheet):
     row = _row_of(ws, EMP_A)
     assert ws.cell(row=row, column=head["Успешный выезд: всего, чел."]).value == 2
     assert ws.cell(row=row, column=head["Не успешный выезд: всего, чел."]).value == 1
-    money = str(ws.cell(row=row, column=head["Успешный выезд: всего, сумма"]).value)
-    assert "300 000" in money, "100 000 + 200 000 по успешным"
+    money = ws.cell(row=row, column=head["Успешный выезд: всего, сумма"])
+    assert money.value == 300000, "100 000 + 200 000 по успешным"
+
+
+def test_money_columns_sum_like_excel_does(sheet):
+    """Жалоба Альберта 20.09.2026: «суммы прописаны с рублями, потому не
+    складываются». Колонка «Долг» обязана складываться SUM-ом — значит, в ячейках
+    числа, а ₽ ездит в формате."""
+    _wb, ws = sheet
+    head = _head(ws)
+    last = ws.max_row
+    vals = [ws.cell(row=r, column=head["Долг"]).value for r in range(5, last + 1)]
+    assert all(isinstance(v, int) for v in vals), vals
+    assert sum(vals[:-1]) == vals[-1], "сумма строк сходится с «Итого»"
+    debt = ws.cell(row=last, column=head["Долг"])
+    assert debt.value == 1_500_000, "100k + 200k + 300k + 400k + 500k"
+    assert "₽" in debt.number_format
+    paid = ws.cell(row=_row_of(ws, EMP_A), column=head["Закрыто (оплачен)"])
+    assert paid.value == 100000 and "₽" in paid.number_format
 
 
 def test_outcome_columns_add_up_to_debtors(sheet):
@@ -216,7 +235,9 @@ def test_plan_travels_into_the_book(sheet):
     head = {str(c.value): c.column for c in ws[4] if c.value}
     last = ws.max_row
     assert ws.cell(row=last, column=head["План"]).value == 20, "двое за один день"
-    assert ws.cell(row=last, column=head["% плана"]).value == "25%", "5 выездов из 20"
+    done = ws.cell(row=last, column=head["% плана"])
+    assert done.value == 0.25, "5 выездов из 20 — настоящим процентом Excel"
+    assert done.number_format == "0%"
 
 
 def test_employee_sheet_can_be_filtered_by_country(sheet):
