@@ -98,9 +98,9 @@ mkdir -p "$BUNDLE/images"
 # --- 1. Наши образы ------------------------------------------------------------
 say ""
 say "1/5 Сборка наших образов (несколько минут при первом запуске)"
-docker build -t "hard-app:latest" -t "hard-app:$VERSION" "$ROOT/server"
+docker build -t "hard-app:latest" -t "hard-app:$VERSION" "$(hostpath "$ROOT/server")"
 ok "hard-app:latest и hard-app:$VERSION"
-docker build -t "hard-stt:latest" -t "hard-stt:$VERSION" "$ROOT/stt"
+docker build -t "hard-stt:latest" -t "hard-stt:$VERSION" "$(hostpath "$ROOT/stt")"
 ok "hard-stt:latest и hard-stt:$VERSION"
 
 # --- 2. Чужие образы -----------------------------------------------------------
@@ -140,7 +140,7 @@ file_for() { printf '%s' "$1" | tr '/:' '__'; }
 save_image() {   # save_image ССЫЛКА [ДОП.ССЫЛКА…] — все ссылки в один файл
   local primary="$1" file
   file="images/$(file_for "$primary").tar"
-  docker save -o "$BUNDLE/$file" "$@"
+  docker save -o "$(hostpath "$BUNDLE/$file")" "$@"
   ok "$(printf '%-46s %s' "$*" "$(du -h "$BUNDLE/$file" | cut -f1)")"
 }
 save_image "hard-app:latest" "hard-app:$VERSION"
