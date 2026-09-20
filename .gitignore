@@ -132,3 +132,6 @@ pult/src-tauri/
 *.pptx
 # Пакеты для ИТ, собранные tools/build_it_package.py
 dist/
+
+# Собранный офлайн-пакет образов: гигабайты, собираются заново из исходников
+deploy/offline/out/
