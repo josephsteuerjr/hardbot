@@ -112,7 +112,7 @@ ok "hard-stt:latest и hard-stt:$VERSION"
 THIRD=()
 if [ "$WITH_PROXY" = 1 ]; then THIRD+=("caddy:2"); fi
 if [ "$WITH_GPS" = 1 ]; then
-  THIRD+=("ghcr.io/project-osrm/osrm-backend:latest" "vroomvrp/vroom-docker:v1.13.0")
+  THIRD+=("ghcr.io/project-osrm/osrm-backend@sha256:7e2d775e5dd1f6752f679621e79dcff3b6bc37266733c771a360af9b3d652205" "vroomvrp/vroom-docker:v1.13.0")
 fi
 if [ "$WITH_WHEELS" = 1 ]; then
   # Для сборки из колёс на закрытой машине нужен и базовый образ Python:

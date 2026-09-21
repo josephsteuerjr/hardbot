@@ -22,7 +22,8 @@ name: hard-gps
 services:
   osrm-uz:
     profiles: ["uz"]
-    image: ghcr.io/project-osrm/osrm-backend:latest
+    # Образ ПРИВЯЗАН К ДАЙДЖЕСТУ намеренно: формат хранения графов меняется между версиями osrm, и «latest» однажды отказался читать июльские графы («osrm_fingerprint.meta: Datatype size does not match»). Поднимать версию — только вместе с пересборкой графов (deploy/geo/osrm_build.sh).
+    image: ghcr.io/project-osrm/osrm-backend@sha256:7e2d775e5dd1f6752f679621e79dcff3b6bc37266733c771a360af9b3d652205
     restart: unless-stopped
     command: osrm-routed --algorithm mld /data/${OSRM_GRAPH_UZ:-uzbekistan-latest.osrm}
     volumes:
@@ -41,7 +42,7 @@ services:
 
   osrm-tj:
     profiles: ["tj"]
-    image: ghcr.io/project-osrm/osrm-backend:latest
+    image: ghcr.io/project-osrm/osrm-backend@sha256:7e2d775e5dd1f6752f679621e79dcff3b6bc37266733c771a360af9b3d652205
     restart: unless-stopped
     command: osrm-routed --algorithm mld /data/${OSRM_GRAPH_TJ:-tajikistan-latest.osrm}
     volumes:
@@ -58,7 +59,7 @@ services:
 
   osrm-ru:
     profiles: ["ru"]
-    image: ghcr.io/project-osrm/osrm-backend:latest
+    image: ghcr.io/project-osrm/osrm-backend@sha256:7e2d775e5dd1f6752f679621e79dcff3b6bc37266733c771a360af9b3d652205
     restart: unless-stopped
     command: osrm-routed --algorithm mld /data/${OSRM_GRAPH_RU:-samara_oblast.osrm}
     volumes:

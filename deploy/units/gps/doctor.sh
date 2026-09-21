@@ -26,10 +26,14 @@ fi
 for c in $countries; do
   key="OSRM_GRAPH_$(printf '%s' "$c" | tr '[:lower:]' '[:upper:]')"
   graph="$(env_get "$key")"
-  if [ -f "osrm/$c/$graph" ]; then
+  # Базовой файл <граф>.osrm у MLD-датасета не обязателен: osrm-routed с
+  # --algorithm mld читает только вспомогательные <граф>.osrm.* (ebg, cells,
+  # mldgr…), и живой прод месяцами работает без базового. Проверяем то, без
+  # чего маршрутизатор точно не поднимется.
+  if [ -f "osrm/$c/$graph.ebg" ] && [ -f "osrm/$c/$graph.mldgr" ]; then
     ok "$c: $graph ($(human_size "osrm/$c"))"
   else
-    problem "$c: нет файла графа osrm/$c/$graph — маршрутизатор этой страны работать не будет"
+    problem "$c: нет файлов графа osrm/$c/$graph.ebg/.mldgr — маршрутизатор этой страны работать не будет"
     hint "положите готовый граф в osrm/$c/ или соберите его по $DEPLOY_DIR/geo/README.md"
     hint "если страна не нужна — уберите «$c» из COMPOSE_PROFILES в .env и ./update.sh"
   fi

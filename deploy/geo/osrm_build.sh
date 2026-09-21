@@ -1,7 +1,7 @@
 set -e
 mkdir -p /opt/kontur/osrm && cd /opt/kontur/osrm
 [ -f tajikistan.osm.pbf ] || curl -sL -o tajikistan.osm.pbf https://download.geofabrik.de/asia/tajikistan-latest.osm.pbf
-IMG=ghcr.io/project-osrm/osrm-backend
+IMG=ghcr.io/project-osrm/osrm-backend@sha256:7e2d775e5dd1f6752f679621e79dcff3b6bc37266733c771a360af9b3d652205
 docker pull $IMG
 docker run --rm -v /opt/kontur/osrm:/data $IMG osrm-extract -p /opt/car.lua /data/tajikistan.osm.pbf
 docker run --rm -v /opt/kontur/osrm:/data $IMG osrm-partition /data/tajikistan.osrm
