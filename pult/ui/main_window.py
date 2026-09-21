@@ -24,6 +24,7 @@ from . import dialogs
 from .channels import ChannelsSection
 from .connection import ConnectionSection
 from .dashboard import DashboardSection
+from .links import LinksSection
 from .managers import ManagersSection
 from .nav import SECTIONS, TITLES, NavRail
 from .people import PeopleSection
@@ -34,11 +35,12 @@ from .widgets import Button, Note, Toast, label
 
 ICON_PATH = APP_DIR / "icon.png"
 LAZY = {"dash": "load_today", "prio": "load_priority", "people": "load_people",
-        "mgrs": "load_managers", "channels": "load_channels"}
+        "links": "load_links", "mgrs": "load_managers", "channels": "load_channels"}
 
 
 class Pult(QMainWindow, ImportFlow, DashboardSection, RegistrySection, PrioritySection,
-           PeopleSection, ManagersSection, ChannelsSection, ConnectionSection):
+           LinksSection, PeopleSection, ManagersSection, ChannelsSection,
+           ConnectionSection):
     invoke = Signal(object)
 
     def __init__(self, settings: Settings | None = None) -> None:

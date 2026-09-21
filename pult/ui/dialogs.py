@@ -10,11 +10,37 @@ from __future__ import annotations
 from PySide6.QtWidgets import QFileDialog, QInputDialog, QLineEdit, QMessageBox, QWidget
 
 
-def show_link(title: str, url: str, note: str = "", parent: QWidget | None = None) -> None:
-    """Показать ссылку так, чтобы её можно было скопировать одной кнопкой:
-    QMessageBox текст не выделяет, а ссылку входа надо отправить человеку."""
+def qr_pixmap(url: str, size: int = 300):
+    """QR-картинка ссылки или None, если segno не установлен.
+
+    Телефону проще отсканировать QR с экрана пульта, чем аналитику
+    пересылать ссылку; белая подложка — ради сканируемости в любой теме."""
+    try:
+        import io
+
+        import segno
+    except ImportError:
+        return None
+    qr = segno.make(url, error="m")
+    modules = len(qr.matrix)
+    scale = max(4, round(size / (modules + 4)))
+    buf = io.BytesIO()
+    qr.save(buf, kind="png", scale=scale, border=2,
+            dark="#101418", light="#ffffff")
+    from PySide6.QtGui import QPixmap
+
+    px = QPixmap()
+    px.loadFromData(buf.getvalue(), "PNG")
+    return px
+
+
+def _build_link_dialog(title: str, url: str, note: str = "",
+                       parent: QWidget | None = None):
+    """Диалог ссылки: QR, адрес, копирование. `show_link` показывает его
+    модально; отдельный строитель — ради тестов без exec()."""
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QLabel,
-                                   QPushButton, QVBoxLayout)
+                                   QLineEdit, QPushButton, QVBoxLayout)
 
     dialog = QDialog(parent)
     dialog.setWindowTitle(title)
@@ -24,6 +50,18 @@ def show_link(title: str, url: str, note: str = "", parent: QWidget | None = Non
         text = QLabel(note)
         text.setWordWrap(True)
         layout.addWidget(text)
+    qr_px = qr_pixmap(url)
+    if qr_px is not None:
+        qr_holder = QLabel()
+        qr_holder.setObjectName("LinkQR")
+        qr_holder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        qr_holder.setPixmap(qr_px)
+        layout.addWidget(qr_holder, 0, Qt.AlignmentFlag.AlignHCenter)
+    else:
+        hint = QLabel("QR не показан: пульту не хватает модуля segno "
+                      "(pip install segno) — ссылку можно только скопировать.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
     field = QLineEdit(url)
     field.setReadOnly(True)
     field.setCursorPosition(0)
@@ -42,7 +80,14 @@ def show_link(title: str, url: str, note: str = "", parent: QWidget | None = Non
     close.clicked.connect(dialog.accept)
     layout.addWidget(buttons)
     field.selectAll()
-    dialog.exec()
+    return dialog
+
+
+def show_link(title: str, url: str, note: str = "", parent: QWidget | None = None) -> None:
+    """Показать ссылку так, чтобы её можно было забрать на телефон:
+    QR с экрана, копирование одной кнопкой — QMessageBox текст не выделяет,
+    а ссылку входа надо отдать человеку."""
+    _build_link_dialog(title, url, note, parent).exec()
 
 
 def _box(icon, title: str, text: str, parent: QWidget | None) -> QMessageBox:

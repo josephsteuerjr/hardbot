@@ -5,3 +5,4 @@ python-calamine==0.7.0
 openpyxl>=3.1,<4
 xlwings==0.36.8
 pywin32==312
+segno==1.6.6   # QR ссылок входа в разделе «Вход»

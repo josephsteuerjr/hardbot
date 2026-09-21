@@ -90,8 +90,11 @@ def window(app, tmp_path):
 
 def test_sections_are_reorganised(app, window):
     keys = [s for s, _ in SECTIONS]
-    assert keys == ["dash", "people", "mgrs", "channels", "registry", "prio", "conn"]
+    assert keys == ["dash", "links", "people", "mgrs", "channels", "registry",
+                    "prio", "conn"]
     assert "activity" not in keys, "«Активность» слилась с «Сотрудниками»"
+    assert keys.index("links") < keys.index("people"), (
+        "«Вход» стоит раньше «Сотрудников»: без Telegram выдача ссылок — главное действие")
     assert set(window.pages) == set(keys)
     assert LAZY["dash"] == "load_today" and LAZY["channels"] == "load_channels"
     window.nav("channels")

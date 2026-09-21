@@ -56,17 +56,18 @@ class PeopleSection:
         self._act_row: tuple | None = None
 
         rc = Card("Назначение ролей",
-                  "ФИО берутся из реестра (колонка «ответственный»). Впиши Telegram ID "
-                  "сотруднику (или выбери из писавших боту), тип — и «Привязать»: работник "
-                  "с этим ID сразу привязан к своим клиентам. Можно переназначать. "
+                  "ФИО берутся из реестра (колонка «ответственный»). Основной путь — "
+                  "«Ссылка входа»: сервер сам заведёт служебную личность, Telegram не "
+                  "нужен. Telegram ID впиши, только если сотрудник уже писал боту. "
                   "«Офис» — где сидит сам сотрудник (Душанбе, Худжанд, Ташкент…): "
                   "по нему считается штат руководителя города, сохраняется сразу.")
         self.roles_frame = rc.add(Rows(spacing=4))
         self.roles_frame.set_empty("Нет данных — импортируй реестр и нажми «Обновить»")
         page.add(rc)
 
-        bc = Card("Кто вошёл в бот",
-                  "Активные привязки telegram_id → сотрудник. «Сбросить» — отвязать.")
+        bc = Card("Привязки входа",
+                  "Кто уже может входить: устройство по ссылке или Telegram-аккаунт. "
+                  "«Сбросить» — отвязать.")
         self.binds_frame = bc.add(Rows())
         page.add(bc)
 
@@ -294,9 +295,10 @@ class PeopleSection:
                           Button("сбросить", lambda t=b["telegram_id"]: self.unbind(t),
                                  kind="danger"), stretch=False)
 
-    def issue_link(self, employee=None, telegram_id=None, kind_combo=None):
-        """Персональная ссылка входа — та же, что бот даёт на слово «ссылка»,
-        но из пульта и без Telegram. Показывается окном с кнопкой «Скопировать»."""
+    def issue_link(self, employee=None, telegram_id=None, kind_combo=None, kind=None):
+        """Персональная ссылка входа — тот же механизм, что бот, но из пульта.
+        Основной путь в контуре без Telegram: `kind` строкой из раздела «Вход»,
+        `kind_combo` — из грида ролей. Показывается окно с QR и копированием."""
         body = {}
         if telegram_id:
             body["telegram_id"] = telegram_id
@@ -304,6 +306,8 @@ class PeopleSection:
             body["employee"] = employee
         if kind_combo is not None:
             body["kind"] = kind_from_label(kind_combo.get())
+        elif kind:
+            body["kind"] = kind
 
         def done(d):
             if not isinstance(d, dict) or not d.get("url"):
