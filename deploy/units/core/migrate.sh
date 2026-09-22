@@ -11,6 +11,19 @@
 #     ./migrate.sh take --db-only        # только базу (фото повезут отдельно)
 #     ./migrate.sh take --with-people    # вместе с людьми (см. ниже и MIGRATION.md)
 #
+#   ПЕРЕНОС ПОРТФЕЛЕЙ НЕСКОЛЬКИХ СОТРУДНИКОВ (не всей системы). Отдельная
+#   операция: с рабочего сервера снимается ЧАСТЬ, а на принимающей машине она
+#   ДОЛИВАЕТСЯ в то, что там уже есть, — ничего не заменяя и ничего не стирая.
+#
+#     ./migrate.sh employees                                  # чьи ФИО в реестре
+#     ./migrate.sh take --only-employees "Фамилия Имя;Фамилия Имя"
+#     ./migrate.sh compat  handover/hard-subset-*.tar         # сверить схемы
+#     ./migrate.sh receive handover/hard-subset-*.tar --merge  # долить
+#
+#   Сочетается с --from-container и --db-only. ФИО, которого нет в базе, — это
+#   отказ со списком похожих, а не пустой архив: опечатка в фамилии иначе
+#   обнаружилась бы уже на другой машине.
+#
 #   ЕСЛИ СТАРЫЙ СЕРВЕР — НЕ ТАКАЯ ЖЕ УСТАНОВКА. Данные бывают в контуре, который
 #   ставили до этих скриптов: свой каталог, свой образ, имена другие. Снимать
 #   оттуда — та же операция, надо только показать, ОТКУДА брать:
@@ -43,7 +56,12 @@
 source "$(dirname "$0")/../../_lib.sh"
 
 TOOL="$DEPLOY_DIR/../tools/export_for_handover.py"
+# Перенос портфелей живёт в server/, а не в tools/, по одной причине: его
+# запускают ВНУТРИ образа приложения, и там он оказывается сам собой — даже
+# если каталог tools/ на эту машину не привозили.
+SUBSET_TOOL="$DEPLOY_DIR/../server/subset_handover.py"
 ARCHIVE_ROOT="hard-handover"
+SUBSET_ROOT="hard-subset"
 UNPACK_DIR="$UNIT_DIR/.migrate-in"
 
 # Откуда берём данные и чем их читаем. По умолчанию — эта самая установка;
@@ -62,6 +80,12 @@ usage() {
 
 need_tool() {
   [ -f "$TOOL" ] || die "не найден $TOOL — рядом с deploy/ должен лежать каталог tools/ из того же пакета"
+  need_cmd tar "он есть в любом дистрибутиве: apt install tar"
+}
+
+need_subset_tool() {
+  [ -f "$SUBSET_TOOL" ] \
+    || die "не найден $SUBSET_TOOL — рядом с deploy/ должен лежать каталог server/ из того же пакета"
   need_cmd tar "он есть в любом дистрибутиве: apt install tar"
 }
 
@@ -124,14 +148,28 @@ in_app_with_archive() {
     "$APP_IMAGE" python - "$@" < "$TOOL"
 }
 
+# Те же две функции для переноса портфелей. Отдельные, а не «ещё один параметр»:
+# инструмент подаётся в контейнер через stdin, и подменить файл на лету нечем.
+# Важно, что это работает и со СТАРЫМ образом чужого контура: в него ничего не
+# добавляли, python в нём есть, а сам инструмент приезжает потоком.
+in_subset() {
+  docker run --rm -i -v "$DATA_DIR:/data" "$APP_IMAGE" python - "$@" < "$SUBSET_TOOL"
+}
+
+in_subset_with_archive() {
+  docker run --rm -i -v "$DATA_DIR:/data" -v "$UNPACK_DIR:/in:ro" \
+    "$APP_IMAGE" python - "$@" < "$SUBSET_TOOL"
+}
+
 # --- СНЯТИЕ -----------------------------------------------------------------
 
 cmd_take() {
-  local with_people=0 db_only=0 out="$UNIT_DIR/handover" container=""
+  local with_people=0 db_only=0 out="$UNIT_DIR/handover" container="" only=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --with-people)   with_people=1 ;;
       --db-only)       db_only=1 ;;
+      --only-employees) only="${2:-}"; shift; [ -n "$only" ] || die "--only-employees без ФИО" ;;
       --out)           out="${2:-}"; shift; [ -n "$out" ] || die "--out без каталога" ;;
       --from-container) container="${2:-}"; shift; [ -n "$container" ] || die "--from-container без имени" ;;
       --data)          DATA_DIR="${2:-}"; shift; [ -n "$DATA_DIR" ] || die "--data без каталога" ;;
@@ -142,17 +180,30 @@ cmd_take() {
   done
   [ -n "$container" ] && from_container "$container"
 
-  need_tool; need_image
+  if [ -n "$only" ] && [ "$with_people" -eq 1 ]; then
+    die "--with-people и --only-employees вместе не имеют смысла: портфель без
+своего человека бесполезен, поэтому привязки выбранных сотрудников едут всегда."
+  fi
+
+  need_image
   [ -f "$DATA_DIR/hardbot.db" ] || die "нет $DATA_DIR/hardbot.db — переносить нечего"
   need_cmd sha256sum "он есть в coreutils"
 
-  local flags=(); [ "$with_people" -eq 1 ] && flags+=(--with-people)
+  local flags=() root="$ARCHIVE_ROOT"
+  if [ -n "$only" ]; then
+    need_subset_tool
+    root="$SUBSET_ROOT"
+    flags+=(--only-employees "$only")
+  else
+    need_tool
+    [ "$with_people" -eq 1 ] && flags+=(--with-people)
+  fi
   [ "$db_only" -eq 1 ] && flags+=(--db-only)
 
   mkdir -p "$out"
   local stamp name tmp
   stamp="$(date +%Y%m%dT%H%M%S)"
-  name="$ARCHIVE_ROOT-$stamp.tar"
+  name="$root-$stamp.tar"
   tmp="$out/.$name.part"
 
   say "Снимаю копию. Приложение останавливать не надо — и не надо, если оно"
@@ -160,8 +211,15 @@ cmd_take() {
 
   # Ошибку контейнера ловим сами: при set -e недописанный .part иначе
   # остался бы лежать и выглядел бы как готовый архив.
-  if ! in_app take --data /data --host "$(hostname 2>/dev/null || echo сервер)" \
-        "${flags[@]}" > "$tmp"; then
+  local rc=0
+  if [ -n "$only" ]; then
+    in_subset take --data /data --host "$(hostname 2>/dev/null || echo сервер)" \
+      "${flags[@]}" > "$tmp" || rc=$?
+  else
+    in_app take --data /data --host "$(hostname 2>/dev/null || echo сервер)" \
+      "${flags[@]}" > "$tmp" || rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
     rm -f "$tmp"
     die "снять копию не удалось (текст ошибки выше)"
   fi
@@ -197,13 +255,43 @@ cmd_take() {
   say ""
   say "Везите на новый сервер ОБА файла (архив и .sha256), например:"
   say "  scp $out/$name $out/$name.sha256 root@НОВЫЙ:/opt/hard/deploy/units/core/handover/"
-  say "Там: ./migrate.sh receive handover/$name"
+  if [ -n "$only" ]; then
+    say "Там: ./migrate.sh compat  handover/$name   # сверить схемы"
+    say "     ./migrate.sh receive handover/$name --merge"
+  else
+    say "Там: ./migrate.sh receive handover/$name"
+  fi
+}
+
+# --- КТО ЕСТЬ В РЕЕСТРЕ -----------------------------------------------------
+# Отдельная команда, потому что весь перенос портфелей держится на точном
+# написании ФИО, а пишут их руками — и в реестре, и в заявке на перенос.
+cmd_employees() {
+  local container=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --from-container) container="${2:-}"; shift; [ -n "$container" ] || die "--from-container без имени" ;;
+      --data)  DATA_DIR="${2:-}"; shift; [ -n "$DATA_DIR" ] || die "--data без каталога" ;;
+      --image) APP_IMAGE="${2:-}"; shift; [ -n "$APP_IMAGE" ] || die "--image без образа" ;;
+      *) die "неизвестный параметр: $1" ;;
+    esac
+    shift
+  done
+  [ -n "$container" ] && from_container "$container"
+  need_subset_tool; need_image
+  [ -f "$DATA_DIR/hardbot.db" ] || die "нет $DATA_DIR/hardbot.db"
+  in_subset employees --data /data
 }
 
 # --- ПРИЁМ ------------------------------------------------------------------
 
 unpack_and_verify() {
-  local archive="$1"
+  # $2 — вид архива: "full" (вся система) или "subset" (портфели сотрудников).
+  # Их нельзя перепутать: внутри разные каталоги и разные имена базы, а
+  # инструмент проверки у каждого свой.
+  local archive="$1" kind="${2:-full}" root tool
+  if [ "$kind" = "subset" ]; then root="$SUBSET_ROOT"; tool="$SUBSET_TOOL"
+  else                            root="$ARCHIVE_ROOT"; tool="$TOOL"; fi
   [ -f "$archive" ] || die "нет файла $archive"
 
   if [ -f "$archive.sha256" ]; then
@@ -223,7 +311,16 @@ unpack_and_verify() {
   mkdir -p "$UNPACK_DIR"
   say "Распаковываю…"
   tar -xf "$archive" -C "$UNPACK_DIR" || die "архив не распаковался"
-  [ -d "$UNPACK_DIR/$ARCHIVE_ROOT" ] || die "в архиве нет каталога $ARCHIVE_ROOT"
+  if [ ! -d "$UNPACK_DIR/$root" ]; then
+    if [ "$kind" = "subset" ] && [ -d "$UNPACK_DIR/$ARCHIVE_ROOT" ]; then
+      die "это архив ПОЛНОГО переезда, а не портфелей: принимать его надо без --merge"
+    fi
+    if [ "$kind" = "full" ] && [ -d "$UNPACK_DIR/$SUBSET_ROOT" ]; then
+      die "это архив ПОРТФЕЛЕЙ сотрудников: принимать его надо с --merge,
+иначе он заменил бы всю базу вместо доливки"
+    fi
+    die "в архиве нет каталога $root"
+  fi
 
   say ""
   say "ПРОВЕРКА АРХИВА"
@@ -231,7 +328,7 @@ unpack_and_verify() {
   # Проверяем архив ДО того, как что-то трогаем в data/. Порченая база должна
   # остановить перенос здесь, а не после подмены рабочего файла.
   if ! docker run --rm -i -v "$UNPACK_DIR:/in:ro" "$APP_IMAGE" \
-        python - verify --dir "/in/$ARCHIVE_ROOT" < "$TOOL"; then
+        python - verify --dir "/in/$root" < "$tool"; then
     die "архив не принят (см. список выше). data/ не тронут."
   fi
 }
@@ -258,11 +355,120 @@ cmd_check() {
   rm -rf "$UNPACK_DIR"
 }
 
+# --- СВЕРКА СХЕМ ------------------------------------------------------------
+# Отдельная команда, потому что её задают ДО переноса и на чужой машине:
+# «влезет ли это туда вообще». Ответ бывает нужен раньше, чем архив привезут.
+cmd_compat() {
+  local archive=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -*) die "неизвестный параметр: $1" ;;
+      *)  archive="$1" ;;
+    esac
+    shift
+  done
+  [ -n "$archive" ] || die "укажите архив: ./migrate.sh compat handover/$SUBSET_ROOT-*.tar"
+  need_subset_tool; need_image; check_docker
+  [ -f "$UNIT_DIR/data/hardbot.db" ] \
+    || die "на этой машине ещё нет базы — сначала ./install.sh и один запуск: схему заводит приложение"
+  unpack_and_verify "$archive" subset
+  say ""
+  in_subset_with_archive compat --data /data --archive "/in/$SUBSET_ROOT"
+  rm -rf "$UNPACK_DIR"
+  say ""
+  say "Это была только сверка. Долить: ./migrate.sh receive $archive --merge"
+}
+
+# --- ДОЛИВКА ПОРТФЕЛЕЙ ------------------------------------------------------
+# Отличается от приёма целой системы ровно тем, ради чего и сделана: ничего не
+# заменяется. Прежняя база не отодвигается в сторону, а дополняется, поэтому
+# копию перед доливкой снимаем сами — откатываться иначе будет не на что.
+receive_merge() {
+  local archive="$1" yes="$2"
+  need_subset_tool; need_image; check_docker
+  [ -f "$UNIT_DIR/data/hardbot.db" ] \
+    || die "на этой машине ещё нет базы — сначала ./install.sh и один запуск: схему заводит приложение"
+
+  unpack_and_verify "$archive" subset
+
+  say ""
+  say "СВЕРКА СХЕМ"
+  say "-----------"
+  in_subset_with_archive compat --data /data --archive "/in/$SUBSET_ROOT" \
+    || { rm -rf "$UNPACK_DIR"; die "схемы несовместимы — доливка не начата, data/ не тронут"; }
+
+  # Кто именно приезжает — ДО вопроса «продолжить?». Числа проверка уже
+  # показала, а вот фамилии видно только здесь, и перепутанный архив узнаётся
+  # по ним за секунду. Печатаем голову описи, до раздела «ФАЙЛЫ».
+  say ""
+  say "КТО ПРИЕЗЖАЕТ"
+  say "-------------"
+  awk '/^ФАЙЛЫ:/ { exit } { print "  " $0 }' \
+    "$UNPACK_DIR/$SUBSET_ROOT/ОПИСЬ.txt" 2>/dev/null || true
+
+  local mstamp aside; mstamp="$(date +%Y%m%dT%H%M%S)"
+  aside="$UNIT_DIR/backups/before-merge-$mstamp"
+  say ""
+  say "БУДЕТ СДЕЛАНО"
+  say "-------------"
+  say "  • приложение остановится"
+  say "  • копия нынешней базы уедет в ${aside#$UNIT_DIR/} (ничего не удаляется)"
+  say "  • портфели из архива ДОЛЬЮТСЯ в базу: что уже есть — останется"
+  say "  • фотографии из архива добавятся к тем, что лежат в data/photos"
+  say "  • приложение запустится, и будет напечатано «было → стало»"
+  if [ "$yes" -ne 1 ]; then
+    printf 'Продолжить? [y/N] '
+    read -r answer
+    case "$answer" in y|Y|д|Д) ;; *) rm -rf "$UNPACK_DIR"; say "Отменено"; exit 0 ;; esac
+  fi
+
+  say ""
+  say "Останавливаю приложение…"
+  # Приложение останавливаем не из-за SQLite (WAL допускает двух писателей), а
+  # ради простоты разбора: если что-то пойдёт не так, состояние базы будет
+  # определяться одной нашей транзакцией, а не гонкой с живыми запросами.
+  compose stop app >/dev/null 2>&1 || true
+
+  mkdir -p "$aside"
+  cp -a "$UNIT_DIR/data/hardbot.db" "$aside/hardbot.db"
+  for spare in "$UNIT_DIR"/data/hardbot.db-wal "$UNIT_DIR"/data/hardbot.db-shm; do
+    [ -f "$spare" ] && cp -a "$spare" "$aside/"
+  done
+  ok "копия базы отложена: ${aside#$UNIT_DIR/}/hardbot.db"
+
+  say ""
+  local rc=0
+  in_subset_with_archive merge --data /data --archive "/in/$SUBSET_ROOT" || rc=$?
+
+  say ""
+  say "Запускаю приложение…"
+  compose up -d >/dev/null
+  if ! wait_healthy app "$UNIT_WAIT_SECONDS"; then
+    compose logs --tail=40 app || true
+    die "приложение не поднялось после доливки. Копия базы до неё: ${aside#$UNIT_DIR/}"
+  fi
+  ok "приложение: $(health_of app)"
+
+  rm -rf "$UNPACK_DIR"
+  if [ "$rc" -ne 0 ]; then
+    die "доливка не выполнена (текст ошибки выше). База осталась прежней:
+вся доливка идёт одной транзакцией, поэтому «наполовину» не бывает."
+  fi
+  say ""
+  say "ЧТО СДЕЛАТЬ ДАЛЬШЕ:"
+  say "  • пульт, раздел «Вход»: выдать ссылки приехавшим сотрудникам;"
+  say "  • сверить числа выше с ОПИСЬ.txt из архива;"
+  say "  • копию базы до доливки (${aside#$UNIT_DIR/}) удалить, когда всё сойдётся."
+  say ""
+  say "Готово."
+}
+
 cmd_receive() {
-  local archive="" replace=0 yes=0
+  local archive="" replace=0 yes=0 merge=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --replace) replace=1 ;;
+      --merge)   merge=1 ;;
       --yes)     yes=1 ;;
       -*)        die "неизвестный параметр: $1" ;;
       *)         archive="$1" ;;
@@ -270,6 +476,12 @@ cmd_receive() {
     shift
   done
   [ -n "$archive" ] || die "укажите архив: ./migrate.sh receive handover/$ARCHIVE_ROOT-*.tar"
+  if [ "$merge" -eq 1 ]; then
+    [ "$replace" -eq 0 ] \
+      || die "--merge и --replace исключают друг друга: доливка НЕ заменяет базу"
+    receive_merge "$archive" "$yes"
+    return 0
+  fi
 
   need_tool; need_image; check_docker
   mkdir -p "$UNIT_DIR/data"
@@ -410,9 +622,11 @@ cmd_receive() {
 # ----------------------------------------------------------------------------
 
 case "${1:-}" in
-  take)    shift; cmd_take "$@" ;;
-  check)   shift; cmd_check "$@" ;;
-  receive) shift; cmd_receive "$@" ;;
+  take)      shift; cmd_take "$@" ;;
+  check)     shift; cmd_check "$@" ;;
+  compat)    shift; cmd_compat "$@" ;;
+  employees) shift; cmd_employees "$@" ;;
+  receive)   shift; cmd_receive "$@" ;;
   help|--help|-h) usage 0 ;;
   "")      usage 1 ;;
   *)       say "Неизвестная команда: $1"; say ""; usage 1 ;;
