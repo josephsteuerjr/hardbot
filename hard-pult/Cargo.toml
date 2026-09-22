@@ -1,0 +1,24 @@
+[package]
+name = "hard-pult"
+version = "0.1.0"
+edition = "2021"
+description = "Хард — пульт руководителя одним бинарником: без питона и Qt"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process", "time", "fs", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# TLS — только native-tls (schannel): не тянет C-кода, а значит собирается
+# машиной без компилятора C. rustls тянул ring — на нём сборка и падала.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls"] }
+rust-embed = "8"
+mime_guess = "2"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+rand = "0.8"
+base64 = "0.22"
+
+[profile.release]
+# Обычный релиз без strip/LTO: Kaspersky съедал обрезанный LTO-бинарник как
+# «подозрительный», а выигрыш от агрессивного сжатия — полмегабайта.
+opt-level = 2
