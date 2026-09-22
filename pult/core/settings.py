@@ -3,7 +3,8 @@
 
 Файл: `pult/настройки пульта.json`. Ключи: `url`, `key` (только пока
 устройство не привязано), `device_token`, `sec` (открытый раздел),
-`scatterBase`, `scatterSource`, `enrich_file`.
+`scatterBase`, `scatterSource`, `enrich_file`, `miniapp` (публичный адрес
+приложения, запомненный с последней выданной ссылки входа).
 """
 
 from __future__ import annotations

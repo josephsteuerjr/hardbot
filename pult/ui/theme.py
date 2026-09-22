@@ -1,8 +1,20 @@
 """Тема пульта: токены и QSS.
 
-Тёплая слоновая кость, белые карточки с тонкой рамкой, графитовый акцент.
-Сетка 8 px, скругления 10 px, без градиентов и теней. Шрифт — Segoe UI
-Variable, иначе Segoe UI. Размеры в pt: Qt 6 сам масштабирует их под DPI.
+Переодето 21.09.2026 в общий язык обоих пультов («одна панель»): у аналитика
+и у руководителя разные приложения и разные языки — питон и раст, — но
+выглядеть они обязаны одним продуктом.
+
+Три правила этого языка, ради которых тема и переписана:
+  1. Поверхность одна. Не россыпь белых карточек на бежевом, а один белый
+     лист: рейка слева, содержимое справа, между ними волосяная линия.
+  2. Разделы отбиты линиями и воздухом, а не рамками. `QFrame#Card` больше
+     не карточка: это секция без фона и без рамки, с волосяной чертой сверху.
+  3. Цвет один и смысловой. Глубокий зелёный метит выбранное и главное
+     действие; хорошо/внимание/плохо — только в состояниях.
+
+Крупнее прежнего: база 11pt вместо 10, заголовок раздела 19pt, число 26pt.
+Шрифт — Segoe UI Variable, иначе Segoe UI. Размеры в pt: Qt 6 сам масштабирует
+их под DPI.
 """
 
 from __future__ import annotations
@@ -13,30 +25,31 @@ from pathlib import Path
 from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import QApplication
 
-BG = "#FAF9F5"          # фон окна
-RAIL = "#F4F2EC"        # рейка навигации
-CARD = "#FFFFFF"        # карточка
-ALT = "#F5F3EC"         # вторичная заливка (плашки, чипсы)
-BORDER = "#E6E2D9"      # рамка
-TEXT = "#2B2825"        # чернила
-MUTED = "#6B6660"       # приглушённый текст
-ACCENT = "#36332E"      # графит
-ACCENT_H = "#4A463F"    # графит при наведении
-ACCENT_DIM = "#A9A59E"  # графит выключенной кнопки
-ON_ACCENT = "#FAF9F5"   # текст на графите
-SUCCESS = "#5B8A3C"
-WARN = "#8A6D00"
-DANGER = "#B0472C"
-DANGER_SOFT = "#F5E3DD"
-SCROLL = "#D8D3C8"
-SCROLL_H = "#C4BEB2"
+BG = "#FFFFFF"          # лист: окно и содержимое — одна поверхность
+RAIL = "#FFFFFF"        # рейка навигации — часть того же листа
+CARD = "#FFFFFF"        # секция (фона своего не имеет, цвет нужен вложенным)
+ALT = "#F3F5F8"         # вторичная заливка (плашки, чипсы, поля ввода)
+BORDER = "#E4E8EE"      # волосяная линия — единственный разделитель
+TEXT = "#10141B"        # чернила
+MUTED = "#5C6775"       # приглушённый текст
+ACCENT = "#166552"      # глубокий зелёный
+ACCENT_H = "#1C7B64"    # он же при наведении
+ACCENT_SOFT = "#E7F0ED" # его же тинт: выбранный раздел, мягкая подсветка
+ACCENT_DIM = "#A9BDB6"  # выключенная акцентная кнопка
+ON_ACCENT = "#FFFFFF"   # текст на акценте
+SUCCESS = "#15663F"
+WARN = "#8A5B00"
+DANGER = "#A82F24"
+DANGER_SOFT = "#FBE6E3"
+SCROLL = "#D5DAE2"
+SCROLL_H = "#BFC6D1"
 
 FONT_STACK = ["Segoe UI Variable", "Segoe UI", "Inter", "Arial"]
-BASE_PT = 10
-SMALL_PT = 9
-TINY_PT = 8
+BASE_PT = 11
+SMALL_PT = 10
+TINY_PT = 9
 GRID = 8
-RADIUS = 10
+RADIUS = 14
 
 _CHECK_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
@@ -76,25 +89,33 @@ QAbstractScrollArea {{ border: none; }}
 QScrollArea > QWidget > QWidget {{ background: transparent; }}
 
 QFrame#Rail {{ background: {RAIL}; border-right: 1px solid {BORDER}; }}
-QFrame#Card {{ background: {CARD}; border: 1px solid {BORDER}; border-radius: {RADIUS}px; }}
-QFrame#Pane {{ background: {CARD}; border: 1px solid {BORDER}; border-radius: 8px; }}
-QFrame#Tile {{ background: {ALT}; border-radius: 8px; }}
+/* Секция, а не карточка: фона и рамки у неё нет, от соседки её отделяет
+   волосяная черта сверху. Это и есть «одна панель» — экран перестал быть
+   стопкой белых коробок на цветном. */
+QFrame#Card {{ background: transparent; border: none; border-top: 1px solid {BORDER};
+    border-radius: 0; }}
+QFrame#Card[first="true"] {{ border-top: none; }}
+QFrame#Pane {{ background: {ALT}; border: none; border-radius: {RADIUS}px; }}
+QFrame#Tile {{ background: {ALT}; border-radius: {RADIUS}px; }}
 QFrame#Divider {{ background: {BORDER}; max-height: 1px; min-height: 1px; border: none; }}
 QFrame#Card QLabel, QFrame#Pane QLabel, QFrame#Tile QLabel {{ background: transparent; }}
+
+QLabel {{ background: transparent; }}
 
 QLabel {{ background: transparent; }}
 QLabel[role="muted"] {{ color: {MUTED}; }}
 QLabel[role="small"] {{ color: {MUTED}; font-size: {SMALL_PT}pt; }}
 QLabel[role="tiny"] {{ color: {MUTED}; font-size: {TINY_PT}pt; }}
-QLabel[role="caps"] {{ color: {MUTED}; font-size: {TINY_PT}pt; font-weight: 600; }}
+QLabel[role="caps"] {{ color: {MUTED}; font-size: {TINY_PT}pt; font-weight: 600;
+    letter-spacing: 1px; }}
 QLabel[role="warn"] {{ color: {WARN}; font-size: {SMALL_PT}pt; }}
 QLabel[role="danger"] {{ color: {DANGER}; font-size: {SMALL_PT}pt; }}
 QLabel[role="success"] {{ color: {SUCCESS}; font-size: {SMALL_PT}pt; }}
-QLabel[role="title"] {{ font-weight: 600; }}
-QLabel[role="h1"] {{ font-size: 15pt; font-weight: 600; }}
-QLabel[role="metric"] {{ font-size: 17pt; font-weight: 600; }}
-QLabel[role="kv"] {{ font-size: 11pt; font-weight: 600; }}
-QLabel[role="chip"] {{ background: {ALT}; border-radius: 11px; padding: 3px 10px;
+QLabel[role="title"] {{ font-size: 13pt; font-weight: 600; letter-spacing: -0.2px; }}
+QLabel[role="h1"] {{ font-size: 19pt; font-weight: 600; letter-spacing: -0.4px; }}
+QLabel[role="metric"] {{ font-size: 26pt; font-weight: 600; letter-spacing: -0.8px; }}
+QLabel[role="kv"] {{ font-size: 13pt; font-weight: 600; }}
+QLabel[role="chip"] {{ background: {ALT}; border-radius: 14px; padding: 5px 13px;
     font-size: {SMALL_PT}pt; }}
 QLabel[role="badge"] {{ background: {ALT}; color: {MUTED}; border-radius: 6px;
     padding: 2px 8px; font-size: {TINY_PT}pt; }}
@@ -105,7 +126,7 @@ QLabel#LogoMark {{ background: {ACCENT}; color: {ON_ACCENT}; border-radius: 6px;
     font-weight: 700; font-size: 11pt; }}
 
 QPushButton {{ background: {CARD}; color: {TEXT}; border: 1px solid {BORDER};
-    border-radius: 8px; padding: 6px 14px; font-size: {SMALL_PT}pt; }}
+    border-radius: 16px; padding: 8px 18px; font-size: {BASE_PT}pt; }}
 QPushButton:hover {{ background: {ALT}; }}
 QPushButton:pressed {{ background: {BORDER}; }}
 QPushButton:disabled {{ color: {MUTED}; background: {BG}; }}
@@ -116,24 +137,27 @@ QPushButton[kind="accent"]:disabled {{ background: {ACCENT_DIM}; border-color: {
     color: {ON_ACCENT}; }}
 QPushButton[kind="danger"] {{ color: {DANGER}; }}
 QPushButton[kind="danger"]:hover {{ background: {DANGER_SOFT}; }}
-QPushButton[kind="chip"] {{ border-radius: 11px; padding: 3px 10px; color: {MUTED};
-    background: {CARD}; }}
+QPushButton[kind="chip"] {{ border-radius: 15px; padding: 5px 13px; color: {MUTED};
+    background: {CARD}; font-size: {SMALL_PT}pt; }}
 QPushButton[kind="chip"]:hover {{ background: {ALT}; color: {TEXT}; }}
 QPushButton[kind="chip"]:checked {{ background: {ACCENT}; color: {ON_ACCENT};
     border-color: {ACCENT}; }}
-QPushButton[kind="nav"] {{ background: transparent; border: none; border-radius: 8px;
-    text-align: left; padding: 7px 12px; color: {MUTED}; font-size: {BASE_PT}pt; }}
+QPushButton[kind="nav"] {{ background: transparent; border: none; border-radius: 16px;
+    text-align: left; padding: 10px 14px; color: {MUTED}; font-size: {BASE_PT}pt; }}
 QPushButton[kind="nav"]:hover {{ background: {ALT}; color: {TEXT}; }}
-QPushButton[kind="nav"]:checked {{ background: {ACCENT}; color: {ON_ACCENT}; }}
+/* Выбранный раздел — тинтом акцента, а не заливкой: сплошная тёмная плашка в
+   рейке перетягивала на себя весь экран и спорила с содержимым. */
+QPushButton[kind="nav"]:checked {{ background: {ACCENT_SOFT}; color: {ACCENT};
+    font-weight: 600; }}
 QPushButton[kind="icon"] {{ padding: 5px 8px; }}
 
-QLineEdit {{ background: {CARD}; border: 1px solid {BORDER}; border-radius: 8px;
-    padding: 5px 8px; selection-background-color: {ACCENT}; selection-color: {ON_ACCENT}; }}
+QLineEdit {{ background: {ALT}; border: 1px solid transparent; border-radius: {RADIUS}px;
+    padding: 8px 12px; selection-background-color: {ACCENT}; selection-color: {ON_ACCENT}; }}
 QLineEdit:focus {{ border-color: {ACCENT}; }}
 QLineEdit:disabled {{ color: {MUTED}; background: {BG}; }}
 
-QComboBox {{ background: {CARD}; border: 1px solid {BORDER}; border-radius: 8px;
-    padding: 5px 26px 5px 8px; }}
+QComboBox {{ background: {ALT}; border: 1px solid transparent; border-radius: {RADIUS}px;
+    padding: 8px 28px 8px 12px; }}
 QComboBox:focus {{ border-color: {ACCENT}; }}
 QComboBox::drop-down {{ border: none; width: 22px; subcontrol-origin: padding;
     subcontrol-position: center right; }}
@@ -142,8 +166,9 @@ QComboBox QAbstractItemView {{ background: {CARD}; border: 1px solid {BORDER};
     selection-background-color: {ALT}; selection-color: {TEXT}; outline: 0; padding: 4px; }}
 
 QCheckBox {{ spacing: 8px; background: transparent; }}
-QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid #C9C4BA;
-    border-radius: 4px; background: {CARD}; }}
+QCheckBox {{ spacing: 10px; }}
+QCheckBox::indicator {{ width: 20px; height: 20px; border: 1px solid #C6CCD6;
+    border-radius: 6px; background: {CARD}; }}
 QCheckBox::indicator:hover {{ border-color: {ACCENT}; }}
 QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT};
     image: url("{check}"); }}
@@ -158,13 +183,15 @@ QSlider::handle:horizontal {{ width: 16px; height: 16px; margin: -6px 0;
     background: {ACCENT}; border-radius: 8px; }}
 QSlider::handle:horizontal:hover {{ background: {ACCENT_H}; }}
 
-QTableView {{ background: {CARD}; border: 1px solid {BORDER}; border-radius: 8px;
-    gridline-color: {BG}; selection-background-color: {ALT}; selection-color: {TEXT};
-    font-size: {SMALL_PT}pt; }}
-QTableView::item {{ padding: 2px 6px; border: none; }}
+QTableView {{ background: {CARD}; border: none; gridline-color: transparent;
+    selection-background-color: {ACCENT_SOFT}; selection-color: {TEXT};
+    font-size: {BASE_PT}pt; }}
+QTableView::item {{ padding: 12px 10px; border: none;
+    border-bottom: 1px solid {BORDER}; }}
 QHeaderView {{ background: {CARD}; }}
 QHeaderView::section {{ background: {CARD}; color: {MUTED}; font-size: {TINY_PT}pt;
-    font-weight: 600; border: none; border-bottom: 1px solid {BORDER}; padding: 6px; }}
+    font-weight: 600; letter-spacing: 1px; border: none;
+    border-bottom: 1px solid {BORDER}; padding: 10px 8px; }}
 QTableCornerButton::section {{ background: {CARD}; border: none; }}
 
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}

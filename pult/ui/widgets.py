@@ -321,15 +321,22 @@ def vcol(*items, spacing: int = 6) -> QVBoxLayout:
 
 
 class Card(QFrame):
-    """Белая карточка с рамкой, заголовком и опц. описанием."""
+    """Секция экрана: заголовок, необязательное описание и содержимое.
+
+    Рамки и фона у неё нет — от соседней секции её отделяет волосяная черта
+    сверху (см. theme.qss). До 21.09.2026 это была белая карточка с рамкой, и
+    экран из пяти таких карточек читался как стопка коробок, а не как одна
+    страница. Отступы по горизонтали нулевые: содержимое секции выравнивается
+    по общему полю страницы, и колонки разных секций стоят друг под другом.
+    """
 
     def __init__(self, title: str, desc: str | None = None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("Card")
         self.body = QVBoxLayout(self)
-        self.body.setContentsMargins(16, 14, 16, 16)
-        self.body.setSpacing(8)
+        self.body.setContentsMargins(0, 22, 0, 26)
+        self.body.setSpacing(10)
         self.title = QLabel(title)
         self.title.setProperty("role", "title")
         self.body.addWidget(self.title)
@@ -405,12 +412,18 @@ class Page(QScrollArea):
         self.inner = QWidget()
         self.inner.setObjectName("PageBody")
         self.body = QVBoxLayout(self.inner)
-        self.body.setContentsMargins(26, 4, 26, 30)
-        self.body.setSpacing(12)
+        self.body.setContentsMargins(34, 6, 34, 44)
+        # Ноль: секции сами держат воздух отступами и отбиты чертой. Со
+        # спейсингом между ними черта повисала в пустоте отдельной линией.
+        self.body.setSpacing(0)
         self.body.addStretch(1)
         self.setWidget(self.inner)
 
     def add(self, widget: QWidget) -> QWidget:
+        # Первая секция на странице живёт без черты сверху: линия под самым
+        # заголовком экрана выглядит как обрезанная шапка.
+        if widget.objectName() == "Card" and self.body.count() == 1:
+            widget.setProperty("first", "true")
         self.body.insertWidget(self.body.count() - 1, widget)
         return widget
 
@@ -425,7 +438,13 @@ class Page(QScrollArea):
 
 # --- плашки, чипсы, полоса -------------------------------------------------------
 class KVGrid(QWidget):
-    """Плашки «показатель → число». Больше COLS в ряд не влезает — переносим."""
+    """Показатели: число крупно, подпись словом под ним.
+
+    До 21.09.2026 это были серые плашки с числом в 13pt — они читались как
+    подписи, а не как ответ на вопрос. В общем языке обоих пультов число и есть
+    главное: 26pt, без коробки, подпись под ним мелким. Больше COLS в ряд не
+    влезает — переносим.
+    """
 
     COLS = 6
 
@@ -433,8 +452,8 @@ class KVGrid(QWidget):
         super().__init__(parent)
         self.grid = QGridLayout(self)
         self.grid.setContentsMargins(0, 0, 0, 0)
-        self.grid.setHorizontalSpacing(6)
-        self.grid.setVerticalSpacing(6)
+        self.grid.setHorizontalSpacing(40)
+        self.grid.setVerticalSpacing(18)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
     def set_pairs(self, pairs, cols: int | None = None) -> None:
@@ -443,12 +462,11 @@ class KVGrid(QWidget):
         for i, (k, v) in enumerate(pairs):
             row, col = divmod(i, cols)
             tile = QFrame()
-            tile.setObjectName("Tile")
             lay = QVBoxLayout(tile)
-            lay.setContentsMargins(10, 6, 10, 6)
+            lay.setContentsMargins(0, 0, 0, 0)
             lay.setSpacing(0)
-            lay.addWidget(label(str(k), "tiny"))
-            lay.addWidget(label(fmt_n(v), "kv"))
+            lay.addWidget(label(fmt_n(v), "metric"))
+            lay.addWidget(label(str(k), "small"))
             self.grid.addWidget(tile, row, col, Qt.AlignmentFlag.AlignLeft)
         self.grid.setColumnStretch(cols, 1)
 
@@ -611,10 +629,16 @@ class Meter(QWidget):
 
 # --- таблицы --------------------------------------------------------------------
 class RowsModel(QAbstractTableModel):
-    def __init__(self, titles: list[str], numeric: set[int], parent=None) -> None:
+    def __init__(self, titles: list[str], numeric: set[int], parent=None,
+                 tint=None, tint_cols: set[int] | None = None) -> None:
         super().__init__(parent)
         self.titles = titles
         self.numeric = numeric
+        # Необязательная раскраска: tint(строка) → цвет (hex) или None. Нужна
+        # там, где состояние — главное в строке («Вход»); по умолчанию выключена,
+        # чтобы остальные таблицы остались слово в слово прежними.
+        self.tint = tint
+        self.tint_cols = set(tint_cols or ())
         self.rows: list[tuple] = []
 
     def rowCount(self, parent=QModelIndex()) -> int:  # noqa: N802
@@ -641,6 +665,10 @@ class RowsModel(QAbstractTableModel):
             # как текст без учёта регистра
             row = self.rows[index.row()]
             return sort_key(None if index.column() >= len(row) else row[index.column()])
+        if role == Qt.ItemDataRole.ForegroundRole and self.tint is not None:
+            if not self.tint_cols or index.column() in self.tint_cols:
+                color = self.tint(self.rows[index.row()])
+                return QColor(color) if color else None
         return None
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):  # noqa: N802
@@ -675,12 +703,14 @@ class Table(QTableView):
     ROW_H = 28
 
     def __init__(self, columns, numeric=(), stretch=(), visible_rows: int = 14,
-                 parent: QWidget | None = None) -> None:
+                 tint=None, tint_cols=(), parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.keys = [c[0] for c in columns]
         self.visible_rows = visible_rows
         numeric_idx = {i for i, c in enumerate(columns) if c[0] in set(numeric)}
-        self.model_ = RowsModel([c[1] for c in columns], numeric_idx, self)
+        tint_idx = {i for i, c in enumerate(columns) if c[0] in set(tint_cols)}
+        self.model_ = RowsModel([c[1] for c in columns], numeric_idx, self,
+                                tint=tint, tint_cols=tint_idx)
         self.proxy = QSortFilterProxyModel(self)
         self.proxy.setSourceModel(self.model_)
         self.proxy.setSortRole(Qt.ItemDataRole.UserRole)
@@ -738,6 +768,18 @@ class Table(QTableView):
         """fn(row | None) при смене выбранной строки."""
         self._on_select = fn
         self.selectionModel().currentRowChanged.connect(lambda _c, _p: fn(self.selected_row()))
+
+    def select_key(self, value, col: int = 0) -> bool:
+        """Выбрать строку по значению колонки. Нужно после перезагрузки списка:
+        оператор нажал кнопку на строке — строка не должна убегать из-под руки."""
+        for i, row in enumerate(self.model_.rows):
+            if len(row) > col and row[col] == value:
+                idx = self.proxy.mapFromSource(self.model_.index(i, col))
+                if idx.isValid():
+                    self.setCurrentIndex(idx)
+                    return True
+                return False
+        return False
 
     def clear(self) -> None:
         self.set_rows([])

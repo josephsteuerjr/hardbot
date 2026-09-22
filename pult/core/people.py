@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from . import links
 from .text import fmt_n
 
 KIND_LABELS = ["Выездник", "Курьер ГПХ"]
@@ -54,19 +55,12 @@ def client_debt(c: dict) -> str:
 
 
 def link_note(d: dict) -> str:
-    """Пояснение к выданной ссылке входа (ответ /admin/app_link.json)."""
-    days = d.get("days") or 7
-    lines = [
-        f"Сотрудник: {d.get('employee') or '—'}",
-        f"Ссылка персональная: открывший попадает сразу в свой портфель. "
-        f"Покажи QR с экрана или перешли ссылку — на телефоне пусть добавит "
-        f"приложение на экран «Домой». Действует {days} дн., открывать "
-        f"можно несколько раз.",
-    ]
-    if d.get("local_identity"):
-        lines.append("Вход без Telegram: у сотрудника служебная личность, "
-                     "для работы нужен только телефон со ссылкой.")
-    return "\n".join(lines)
+    """Пояснение к выданной ссылке входа (ответ /admin/app_link.json).
+
+    Текст один на весь пульт: раздел «Вход» показывает его же под QR.
+    Правила у ссылки одни, и рассказывать их в двух местах по-разному
+    нельзя — про «сколько раз открывать» сотрудник как раз и спрашивает."""
+    return links.issue_note(links.fresh_row(d))
 
 
 def unassign_text(n: int, emp: str) -> str:

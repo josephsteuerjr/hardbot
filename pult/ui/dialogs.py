@@ -7,7 +7,17 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QFileDialog, QInputDialog, QLineEdit, QMessageBox, QWidget
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QInputDialog,
+                               QLabel, QLineEdit, QMessageBox, QVBoxLayout, QWidget)
+
+from .widgets import Button, Field, Note
+
+
+def copy_text(text: str) -> None:
+    """Положить в буфер обмена. Отдельной функцией — чтобы разделы не тянули
+    QApplication ради одной строки."""
+    QApplication.clipboard().setText(text or "")
 
 
 def qr_pixmap(url: str, size: int = 300):
@@ -34,52 +44,89 @@ def qr_pixmap(url: str, size: int = 300):
     return px
 
 
-def _build_link_dialog(title: str, url: str, note: str = "",
-                       parent: QWidget | None = None):
-    """Диалог ссылки: QR, адрес, копирование. `show_link` показывает его
-    модально; отдельный строитель — ради тестов без exec()."""
-    from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QLabel,
-                                   QLineEdit, QPushButton, QVBoxLayout)
+QR_MISSING = ("QR не показан: пульту не хватает модуля segno "
+              "(pip install segno) — ссылку можно только скопировать.")
 
-    dialog = QDialog(parent)
-    dialog.setWindowTitle(title)
-    dialog.setMinimumWidth(560)
-    layout = QVBoxLayout(dialog)
-    if note:
-        text = QLabel(note)
-        text.setWordWrap(True)
-        layout.addWidget(text)
-    qr_px = qr_pixmap(url)
+
+def link_panel(url: str, lines=(), size: int = 300, side: bool = False,
+               parent: QWidget | None = None) -> QWidget:
+    """Панель ссылки: крупный QR, короткий адрес, «Скопировать» и подписи.
+
+    Одна и та же панель стоит и в карточке раздела «Вход», и в модальном окне:
+    оператор показывает телефону то же самое, где бы её ни открыл, и
+    переучиваться при переходе в окно не приходится.
+
+    `lines` — подписи (роль темы, текст). `side` кладёт QR слева от подписей:
+    в карточке места по ширине больше, чем по высоте, а в окне — наоборот.
+    """
+    panel = QWidget(parent)
+    root = QHBoxLayout(panel) if side else QVBoxLayout(panel)
+    root.setContentsMargins(0, 0, 0, 0)
+    root.setSpacing(16 if side else 10)
+
+    qr_px = qr_pixmap(url, size)
     if qr_px is not None:
         qr_holder = QLabel()
         qr_holder.setObjectName("LinkQR")
         qr_holder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         qr_holder.setPixmap(qr_px)
-        layout.addWidget(qr_holder, 0, Qt.AlignmentFlag.AlignHCenter)
+        root.addWidget(qr_holder, 0, Qt.AlignmentFlag.AlignTop if side
+                       else Qt.AlignmentFlag.AlignHCenter)
     else:
-        hint = QLabel("QR не показан: пульту не хватает модуля segno "
-                      "(pip install segno) — ссылку можно только скопировать.")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-    field = QLineEdit(url)
+        root.addWidget(Note(QR_MISSING, "warn"))
+
+    column = QVBoxLayout()
+    column.setContentsMargins(0, 0, 0, 0)
+    column.setSpacing(8)
+    address = QHBoxLayout()
+    address.setContentsMargins(0, 0, 0, 0)
+    address.setSpacing(8)
+    field = Field(url)
     field.setReadOnly(True)
     field.setCursorPosition(0)
-    layout.addWidget(field)
-    buttons = QDialogButtonBox()
-    copy = QPushButton("Скопировать")
-    close = QPushButton("Закрыть")
-    buttons.addButton(copy, QDialogButtonBox.ButtonRole.ActionRole)
-    buttons.addButton(close, QDialogButtonBox.ButtonRole.AcceptRole)
+    copy = Button("Скопировать", kind="accent")
 
     def _copy() -> None:
-        QApplication.clipboard().setText(url)
+        copy_text(url)
         copy.setText("Скопировано")
+        # Подпись возвращаем: панель живёт на экране долго, и «Скопировано»
+        # навсегда перестаёт выглядеть как кнопка.
+        QTimer.singleShot(1800, lambda: copy.setText("Скопировать"))
 
-    copy.clicked.connect(_copy)
+    copy.clicked.connect(lambda _checked=False: _copy())
+    address.addWidget(field, 1)
+    address.addWidget(copy, 0)
+    column.addLayout(address)
+    for role, text in lines or ():
+        if text:
+            column.addWidget(Note(text, role))
+    column.addStretch(1)
+    root.addLayout(column, 1)
+    if not side:
+        # В окне адрес выделен целиком — его забирают Ctrl+C. В карточке та же
+        # подсветка выглядела бы так, будто в поле что-то печатают.
+        field.selectAll()
+    return panel
+
+
+def _build_link_dialog(title: str, url: str, note: str = "",
+                       parent: QWidget | None = None):
+    """Диалог ссылки: QR, адрес, копирование. `show_link` показывает его
+    модально; отдельный строитель — ради тестов без exec()."""
+    from PySide6.QtWidgets import QDialog, QDialogButtonBox, QPushButton
+
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    dialog.setMinimumWidth(560)
+    layout = QVBoxLayout(dialog)
+    lines = [("small", part) for part in str(note or "").split("\n") if part.strip()]
+    dialog.panel = link_panel(url, lines, size=320, parent=dialog)
+    layout.addWidget(dialog.panel)
+    buttons = QDialogButtonBox()
+    close = QPushButton("Закрыть")
+    buttons.addButton(close, QDialogButtonBox.ButtonRole.AcceptRole)
     close.clicked.connect(dialog.accept)
     layout.addWidget(buttons)
-    field.selectAll()
     return dialog
 
 
