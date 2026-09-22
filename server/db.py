@@ -63,13 +63,21 @@ DB_PATH = _data_dir / "hardbot.db"
 
 UNASSIGNED_REASON_MANUAL = "manual"
 UNASSIGNED_REASON_ABSENT_FROM_REGISTRY = "absent_from_registry"
-# Отзыв офисом через колонки общего реестра («Дата отзыва» и соседние).
-# Политика возврата своя: договор не возвращается НИЧЕМ, пока колонка отзыва
-# в файле непуста, — ни другим ФИО, ни галочкой возврата ручных снятий.
+# ЛЕГАСИ-метка правила «колонки отзыва открепляют договор» (отменено
+# 22.09.2026). Новых строк с ней не появляется: первую же строку файла
+# с ответственным импорт возвращает в работу (см. import_grid).
 UNASSIGNED_REASON_RECALLED = "recalled"
 
 # Заголовок реестра → служебная колонка отзыва. Контракт эти заголовки уже
 # знает (allowed_ignored_headers), в экспортную схему они НЕ входят.
+# НИКАКАЯ из них не открепляет договор — решение владельца 22.09.2026.
+# Отзыв делают люди, а не файл: в конце месяца аналитик удаляет строку из
+# реестра (это путь `absent_from_registry`), а сразу после отзыва руководитель
+# снимает ответственного в пульте (ручное снятие, оно держится). Пока колонки
+# решали, они молча забирали договоры: 16.09 «Вывод из работы» снял 84 КД
+# у 19 человек, а 22.09 «Дата отзыва»/«Причина отзыва» — ещё 227 у 39,
+# включая 69 у тестовой пятёрки. Читать и хранить продолжаем: пометка офиса
+# видна в данных, но судьбу договора не решает.
 RECALL_TITLES = {
     "Дата отзыва": "recall_date",
     "Причина отзыва": "recall_reason",
@@ -78,17 +86,6 @@ RECALL_TITLES = {
 }
 RECALL_KEYS = tuple(RECALL_TITLES.values())
 RECALL_TITLE_BY_KEY = {key: title for title, key in RECALL_TITLES.items()}
-
-# Какие из них ОТКРЕПЛЯЮТ договор прямо сейчас. «Вывод из работы» — не из них:
-# офис ставит туда коды «4» и «5», и это пометка «отзовём в конце месяца», а не
-# «отозван». Строка всё это время живёт в реестре с ФИО ответственного, выездник
-# по ней работает, и отзыв случится сам — договор просто исчезнет из реестра
-# концом месяца, а это уже отработанный путь `absent_from_registry`.
-# Пока колонка считалась отзывом, она молча забирала договоры: 16.09.2026 так
-# снято 84 КД у 19 человек (у Патиева 18 — отсюда жалоба «не вижу клиента»).
-# Читать и хранить её мы продолжаем: пометка офиса видна в данных, просто не
-# решает судьбу договора.
-RECALL_DECISION_KEYS = ("recall_date", "recall_reason", "recall_transfer")
 
 # --- Журнал доставки уведомлений (push_log) ---------------------------------
 # Виды рассылок и статусы попыток. Всюду ТОЛЬКО эти константы — строковые
@@ -5047,6 +5044,11 @@ def _recall_cell(value, *, is_date: bool = False) -> tuple[str, bool]:
 
 
 def _recall_is_set(value) -> bool:
+    """Значение колонки отзыва осмысленно (не пустота и не мусор).
+
+    Судьбу договора это больше не решает; нужно для слияния повторных строк
+    КД: пометка офиса из второй строки не должна молча теряться при хранении.
+    """
     return _recall_cell(value)[1]
 
 
@@ -6578,8 +6580,9 @@ def import_grid(
         for key, value in data.items():
             if key in first and first[key] != value:
                 duplicate_conflicts.setdefault(cid, set()).add(key)
-            # Отзыв липкий по договору: берётся ПЕРВАЯ строка КД, и повтор без
-            # отзыва молча отменял бы решение офиса, стоящее во второй строке.
+            # Пометка отзыва липкая по договору: берётся ПЕРВАЯ строка КД, и
+            # повтор без пометки молча затирал бы значение офиса из второй
+            # строки (это данные, судьбу договора они не решают).
             if (key in RECALL_KEYS and _recall_is_set(value)
                     and not _recall_is_set(first.get(key))):
                 first[key] = value
@@ -6723,11 +6726,9 @@ def import_grid(
         isolated_call_cids: set[str] = set()
         comment_effect_rows: list[dict[str, str]] = []
         manual_restore_effect: list[tuple[str, str]] = []
-        # Отзыв: (cid, у кого забрали, был ли живой владелец). Эффект считается
-        # на ПЕРЕХОДЕ: повторный импорт того же файла не переобъявляет снятия.
-        recall_effect: list[tuple[str, str, bool]] = []
+        # Возврат легаси-отозванных: (cid, кому вернули). Эффект считается
+        # на ПЕРЕХОДЕ: повторный импорт того же файла не переобъявляет возврат.
         recall_restore_effect: list[tuple[str, str]] = []
-        recall_sample: list[dict] = []
         # Владелец каждого уникального КД после duplicate preflight.
         owners: dict[str, str] = {}
         # Как ответственные УЖЕ записаны в базе — чтобы опечатка регистра в файле
@@ -6840,111 +6841,21 @@ def import_grid(
                 data["responsible"] = incoming_resp
                 known_resp.setdefault(_name_key(incoming_resp), incoming_resp)
             # --- Отзыв реестром ------------------------------------------
-            # Положительное утверждение самой строки: работает и на частичной
-            # выборке, в отличие от автоснятия по отсутствию строки. Приоритет
-            # выше ВСЕХ прочих веток — строка с отзывом почти всегда ещё несёт
-            # ФИО ответственного, и ветка «переназначили» вернула бы договор
-            # на следующем же импорте.
-            # Решают только колонки ИЗ RECALL_DECISION_KEYS: «Вывод из работы»
-            # читается и хранится, но договор не откручивает (см. константу).
-            recall_decide = recall_owned & set(RECALL_DECISION_KEYS)
-            row_recalled = any(_recall_is_set(data.get(k)) for k in recall_decide)
-            db_recall_set = {k for k in RECALL_DECISION_KEYS
-                             if row0 is not None and _recall_is_set(row0[k])}
-            # Возврат только когда книга ВИДИТ всё, что БД считает отзывом.
-            recall_cleared = bool(recall_decide and not row_recalled
-                                  and db_recall_set <= recall_decide)
+            # НИЧЕГО не решаем по колонкам отзыва: они читаются и хранятся
+            # как данные (см. RECALL_TITLES). Сюда попадает только ЛЕГАСИ-
+            # отметка «отозван» из баз времён, когда колонки открепляли
+            # договор. Возврат — по строке файла: имя ответственного есть —
+            # договор возвращается ему (какой бы ни была ячейка отзыва);
+            # имени нет — договор остаётся без владельца до решения человека.
             detached = False
-            if row_recalled:
-                taken_from = (was_unassigned or prev_resp
-                              or incoming_resp or "").strip()
-                had_owner = bool((prev_resp or "").strip())
-                data["responsible"] = ""
-                data["unassigned_from"] = taken_from
-                data["unassigned_reason"] = UNASSIGNED_REASON_RECALLED
-                # Ручное снятие оператора переживает цикл отзыва: запоминаем
-                # прежнюю причину, чтобы после очистки колонок вернуть договор
-                # не в работу, а в ручное снятие.
-                if unassigned_reason == UNASSIGNED_REASON_MANUAL and not (
-                        (row0["recall_prev_reason"] if row0 is not None else "") or ""):
-                    data["recall_prev_reason"] = UNASSIGNED_REASON_MANUAL
-                if (unassigned_reason != UNASSIGNED_REASON_RECALLED
-                        or had_owner):
-                    recall_effect.append((cid, taken_from, had_owner))
-                    if unassigned_reason and not had_owner:
-                        report["recalled_previously_unassigned"] += 1
-                    if not had_owner and not unassigned_reason:
-                        report["recalled_without_owner"] += 1
-                    if len(recall_sample) < 100:
-                        recall_sample.append({
-                            "contract_id": cid,
-                            "client": str(data.get("client")
-                                          or (row0["client"] if row0 is not None
-                                              else "") or ""),
-                            "employee": taken_from,
-                            "recall_date": str(data.get("recall_date") or ""),
-                            "recall_reason": str(data.get("recall_reason") or ""),
-                        })
-                else:
-                    # переход не случился — та же книга держит тот же отзыв
-                    report["recall_held"] += 1
-                raw_day = data.get("recall_date")
-                if raw_day:
-                    parsed_day = _as_date(raw_day)
-                    if parsed_day is None:
-                        report["recalled_unparsed_date"] += 1
-                    elif parsed_day > date.today():
-                        report["recalled_future_dated"] += 1
-                for key in recall_owned - data.keys():
-                    data[key] = None
-                incoming_resp = ""
-                detached = True
-            elif unassigned_reason == UNASSIGNED_REASON_RECALLED and recall_cleared:
-                # Офис очистил колонки отзыва. Прежнее РУЧНОЕ снятие не
-                # воскрешает договор в работу — возвращаем в ручное снятие.
-                prev_manual = ((row0["recall_prev_reason"]
-                                if row0 is not None else "") or "") \
-                    == UNASSIGNED_REASON_MANUAL
-                back_to = (incoming_resp or was_unassigned or "").strip()
-                if prev_manual:
-                    data["responsible"] = ""
-                    data["unassigned_from"] = was_unassigned or prev_resp or ""
-                    data["unassigned_reason"] = UNASSIGNED_REASON_MANUAL
-                    data["recall_prev_reason"] = None
-                    incoming_resp = ""
-                    detached = True
-                    report["recall_restored_to_manual"] += 1
-                else:
-                    data["responsible"] = back_to
+            if unassigned_reason == UNASSIGNED_REASON_RECALLED:
+                if incoming_resp:
                     data["unassigned_from"] = ""
                     data["unassigned_reason"] = ""
                     data["recall_prev_reason"] = None
-                    incoming_resp = back_to
-                    if back_to:
-                        known_resp.setdefault(_name_key(back_to), back_to)
-                        recall_restore_effect.append((cid, back_to))
-                    else:
-                        # «возврат в никуда»: метку снимаем (иначе каждая та же
-                        # книга заново объявляла бы возврат), но в эффект не
-                        # кладём — договор не достался никому.
-                        report["recall_restored_without_owner"] += 1
+                    recall_restore_effect.append((cid, incoming_resp))
                 for key in recall_owned - data.keys():
                     data[key] = None
-            elif unassigned_reason == UNASSIGNED_REASON_RECALLED:
-                # Отзыв держится: колонок отзыва в этой книге нет или книга не
-                # видит всего, что БД считает отзывом. Непустое ФИО договор НЕ
-                # возвращает — иначе отзыв отменялся бы каждой загрузкой.
-                data["responsible"] = ""
-                data["unassigned_from"] = was_unassigned or prev_resp or ""
-                data["unassigned_reason"] = UNASSIGNED_REASON_RECALLED
-                # Пока отзыв держится, колонки отзыва в БД не переписываются:
-                # книга, где офис переименовал одну из четырёх колонок, иначе
-                # стирала бы дату отзыва, поставленную офисом.
-                for key in list(recall_owned):
-                    data.pop(key, None)
-                incoming_resp = ""
-                report["recall_held"] += 1
-                detached = True
             elif unassigned_reason == UNASSIGNED_REASON_ABSENT_FROM_REGISTRY:
                 data["unassigned_from"] = ""
                 data["unassigned_reason"] = ""
@@ -7336,10 +7247,11 @@ def import_grid(
             employee: by_employee[employee]
             for employee in sorted(by_employee, key=_name_key)
         }
-        # --- Отзыв: счётчики, digest и частично затронутые люди --------------
-        report["recalled_sample"] = recall_sample if preview_only else []
+        # --- Отзыв: счётчики и digest ----------------------------------------
+        # «recalled» всегда ноль: колонки отзыва договор не открепляют.
+        # «recall_restored» — возврат легаси-отозванных строкой файла.
         for prefix, pairs in (
-            ("recalled", [(cid, emp) for cid, emp, _h in recall_effect]),
+            ("recalled", []),
             ("recall_restored", list(recall_restore_effect)),
         ):
             rows_out = [{"contract_id": cid, "employee": employee}
@@ -7348,14 +7260,6 @@ def import_grid(
             report[prefix + "_digest"] = hashlib.sha256(json.dumps(
                 rows_out, ensure_ascii=False, sort_keys=True,
                 separators=(",", ":")).encode("utf-8")).hexdigest()
-        report["recalled_had_owner"] = sum(1 for _c, _e, h in recall_effect if h)
-        recalled_per: dict[str, int] = {}
-        for _cid, employee, had in recall_effect:
-            if had and employee:
-                recalled_per[employee] = recalled_per.get(employee, 0) + 1
-        report["recalled_by_employee"] = {
-            employee: recalled_per[employee]
-            for employee in sorted(recalled_per, key=_name_key)}
         report["recall_restored_to_owner"] = len(recall_restore_effect)
         restored_per: dict[str, int] = {}
         for _cid, employee in recall_restore_effect:
@@ -7364,30 +7268,9 @@ def import_grid(
         report["recall_restored_by_employee"] = {
             employee: restored_per[employee]
             for employee in sorted(restored_per, key=_name_key)}
-        # Люди, у которых отозвана только ЧАСТЬ договоров: у них меняется номер
-        # представителя карточки (rep = min КД), визит из очереди вернётся с
-        # «отклонено сервером», фото выпадут из альбома руководителя.
-        if recall_effect:
-            taken_cids = {cid for cid, _e, h in recall_effect if h}
-            partial: set = set()
-            for cid in taken_cids:
-                old_row = existing.get(cid)
-                if old_row is None:
-                    continue
-                pkey = person_key(old_row)
-                for other_cid, other in existing.items():
-                    if other_cid in taken_cids or other_cid == cid:
-                        continue
-                    if person_key(other) == pkey and (
-                            str(other["responsible"] or "").strip()
-                            == str(old_row["responsible"] or "").strip()):
-                        partial.add(pkey)
-                        break
-            report["recalled_partial_persons"] = len(partial)
-        # Гейт по ФАКТУ ЭФФЕКТА: слепое массовое снятие/возвращение без свежего
-        # предпросмотра не применяется. Установившееся состояние (эффект нулевой)
-        # проходит — операторский CLI продолжает работать, хотя боевой мастер
-        # всегда несёт колонки отзыва. Расписка НЕ гасится (consume ниже по коду
+        # Гейт по ФАКТУ ЭФФЕКТА: слепое массовое возвращение легаси-отозванных
+        # без свежего предпросмотра не применяется. Установившееся состояние
+        # (эффект нулевой) проходит. Расписка НЕ гасится (consume ниже по коду
         # выполняется только после успешной сверки).
         recall_unverified = (
             require_source_proof and not preview_only
@@ -7401,10 +7284,10 @@ def import_grid(
             report["blocked"] = True
             report["recall_preview_required"] = True
             report["error"] = (
-                "импорт заблокирован: этот импорт снимает договоры по колонкам "
-                f"отзыва (отозвать {report['recalled']}, вернуть "
-                f"{report['recall_restored']}); нужен свежий предпросмотр "
-                "точного множества — примените через пульт"
+                "импорт заблокирован: этот импорт возвращает ранее отозванные "
+                f"договоры в работу (вернуть {report['recall_restored']}); "
+                "нужен свежий предпросмотр точного множества — примените "
+                "через пульт"
             )
             return report
         # Тот же гейт по факту эффекта — для историчных комментариев. Своей
