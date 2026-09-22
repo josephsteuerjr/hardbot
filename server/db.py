@@ -964,17 +964,24 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_push_log_target "
                      "ON push_log(day, target_id)")
         # Автономное приложение (PWA вне Телеги): вне Телеги нет initData, поэтому вход
-        # двухступенчатый. Бот шлёт ссылку (app_links, окно активации APP_LINK_DAYS,
-        # до APP_LINK_MAX_USES обменов — одну ссылку открывают и в браузере Телеги, и в
-        # Safari/Chrome при установке на экран); код обменивается на девайс-токен
-        # (app_tokens, скользящие APP_TOKEN_DAYS — продлевается при использовании).
-        conn.execute("""
+        # двухступенчатый. Пульт (или бот) выдаёт ссылку (app_links, окно активации
+        # APP_LINK_DAYS), сервер меняет код на девайс-токен (app_tokens, скользящие
+        # APP_TOKEN_DAYS — продлеваются при использовании).
+        # Потолок обменов у КАЖДОЙ ссылки свой (max_uses), а не один на всех: обычной
+        # ссылке хватает двух обменов (браузер + отдельное хранилище ярлыка iOS), а
+        # общая десятка означала, что пересланная ссылка живёт неделю на десять рук.
+        # bonus_ios — тот самый +1, выданный по факту открытия с iPhone/iPad.
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS app_links (
               code TEXT PRIMARY KEY,
               telegram_id INTEGER,
               created_at TEXT,
               used_at TEXT,
-              uses INTEGER NOT NULL DEFAULT 0
+              uses INTEGER NOT NULL DEFAULT 0,
+              max_uses INTEGER NOT NULL DEFAULT {int(APP_LINK_DEFAULT_USES)},
+              bonus_ios INTEGER NOT NULL DEFAULT 0,
+              last_use_at TEXT,
+              last_agent TEXT
             )
         """)
         conn.execute("""
@@ -982,7 +989,8 @@ def init_db() -> None:
               token TEXT PRIMARY KEY,
               telegram_id INTEGER,
               created_at TEXT,
-              expires_at TEXT
+              expires_at TEXT,
+              agent TEXT
             )
         """)
         # Фактическая точка съёмки фото (вручение досудебки не подделаешь):
@@ -1185,10 +1193,29 @@ def init_db() -> None:
         tcols = {r[1] for r in conn.execute("PRAGMA table_info(app_tokens)")}
         if "expires_at" not in tcols:
             conn.execute("ALTER TABLE app_tokens ADD COLUMN expires_at TEXT")
-        # Миграция app_links времён одноразовых кодов (без счётчика uses).
+        # Класс устройства последнего обмена (iphone/android/desktop/...): в пульте
+        # видно не только «вошёл», но и с чего именно — иначе разбор «почему у него
+        # не открывается» начинается с вопроса «а ты с чего заходил».
+        if "agent" not in tcols:
+            conn.execute("ALTER TABLE app_tokens ADD COLUMN agent TEXT")
+        # Миграция app_links времён одноразовых кодов (без счётчика uses) и времён
+        # общего потолка обменов (без max_uses/bonus_ios/last_use_at/last_agent).
+        # Шаблон один и тот же — PRAGMA table_info + ALTER TABLE ... DEFAULT: рабочая
+        # база прода, где строки в app_links уже лежат, переживает эту выкладку без
+        # ручных действий, а DEFAULT доливает двойку и в уже лежащие строки.
         lcols = {r[1] for r in conn.execute("PRAGMA table_info(app_links)")}
         if "uses" not in lcols:
             conn.execute("ALTER TABLE app_links ADD COLUMN uses INTEGER NOT NULL DEFAULT 0")
+        if "max_uses" not in lcols:
+            conn.execute("ALTER TABLE app_links ADD COLUMN max_uses INTEGER NOT NULL "
+                         f"DEFAULT {int(APP_LINK_DEFAULT_USES)}")
+        if "bonus_ios" not in lcols:
+            conn.execute(
+                "ALTER TABLE app_links ADD COLUMN bonus_ios INTEGER NOT NULL DEFAULT 0")
+        if "last_use_at" not in lcols:
+            conn.execute("ALTER TABLE app_links ADD COLUMN last_use_at TEXT")
+        if "last_agent" not in lcols:
+            conn.execute("ALTER TABLE app_links ADD COLUMN last_agent TEXT")
         # Одноразовый переход без потери уже завершённых визитов: переносим только
         # текущие значения, подтверждённые history.visits и той же датой. Маркер
         # обязателен: после reset_visits история остаётся, и повторная миграция не
@@ -1658,9 +1685,20 @@ def unbind(telegram_id: int) -> None:
 
 
 # --- Автономное приложение (PWA вне Телеги): ссылки входа + токены -----------
-APP_LINK_DAYS = 7       # окно активации ссылки входа
-APP_LINK_MAX_USES = 10  # обменов на токен с одной ссылки (Телега + Safari + повторы)
-APP_TOKEN_DAYS = 30     # скользящий срок токена: продлевается при каждом использовании
+APP_LINK_DAYS = 7           # окно активации ссылки входа
+# Обменов у обычной ссылки ДВА, а не десять. Двойка — это ровно путь человека:
+# первый обмен в браузере, второй нужен, когда ярлык «На экран Домой» на iOS
+# заводит СВОЁ хранилище и токена из Safari в нём не видно. Всё, что сверх, было
+# запасом «на переслать» — то есть дырой, а не пользой. Сколько обменов у
+# КОНКРЕТНОЙ ссылки, решают при выдаче (1 / 2 / 5), потолок — APP_LINK_MAX_USES.
+APP_LINK_DEFAULT_USES = 2
+APP_LINK_MAX_USES = 20      # потолок выбора при выдаче (защита от «поставлю 1000»)
+APP_TOKEN_DAYS = 30         # скользящий срок токена: продлевается при каждом использовании
+# Классы устройств, которым положен +1 обмен по факту первого открытия: у ярлыка
+# iOS отдельное хранилище, и человеку может понадобиться лишний обмен, если он
+# начал во встроенном браузере мессенджера. Суффикс «-pwa» (уже установленный
+# ярлык) сюда не входит осознанно: ему второй обмен не нужен.
+APP_AGENT_BONUS = ("iphone", "ipad")
 
 
 # Личности без Telegram. Вся идентификация в системе — целый id пользователя
@@ -1705,12 +1743,19 @@ def local_identity_for(employee: str, kind: str = "agent") -> tuple[int, bool]:
     return uid, True
 
 
-def create_app_link(telegram_id: int) -> str:
-    """Код входа для автономного PWA (бот шлёт ссылкой). Прежние НЕОТКРЫТЫЕ коды
-    юзера гасим (из неоткрытых жива только последняя ссылка; уже открытые доживают
-    своё окно — по ним могли ещё не доустановить ярлык), выданный девайс-токен
-    НЕ трогаем: запрос новой ссылки не разлогинивает телефон."""
-    code = secrets.token_urlsafe(18)
+def create_app_link(telegram_id: int, max_uses: int = APP_LINK_DEFAULT_USES) -> str:
+    """Код входа для автономного PWA. Прежние НЕОТКРЫТЫЕ коды юзера гасим (из
+    неоткрытых жива только последняя ссылка; уже открытые доживают своё окно — по ним
+    могли ещё не доустановить ярлык), выданный девайс-токен НЕ трогаем: запрос новой
+    ссылки не разлогинивает телефон.
+
+    Код короткий (token_urlsafe(9) — 12 символов): он теперь едет не во фрагменте, а
+    ПУТЁМ (/i/<код>), и человек иногда набирает или диктует его руками. 12 случайных
+    символов из 64-значного алфавита — это 2^72 вариантов при окне в неделю, лимите
+    обменов и общем счётчике неудач на адрес; перебор дешевле не стал.
+    """
+    max_uses = max(1, min(int(max_uses or APP_LINK_DEFAULT_USES), APP_LINK_MAX_USES))
+    code = secrets.token_urlsafe(9)
     now = datetime.now()
     with connect() as conn:
         conn.execute("DELETE FROM app_links WHERE telegram_id = ? AND used_at IS NULL",
@@ -1718,44 +1763,175 @@ def create_app_link(telegram_id: int) -> str:
         # заодно чистим просроченный мусор всех юзеров (лениво, без отдельного крона)
         cutoff = (now - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
         conn.execute("DELETE FROM app_links WHERE created_at < ?", (cutoff,))
-        conn.execute("INSERT INTO app_links (code, telegram_id, created_at) VALUES (?,?,?)",
-                     (code, telegram_id, now.isoformat(timespec="seconds")))
+        conn.execute(
+            "INSERT INTO app_links (code, telegram_id, created_at, max_uses) "
+            "VALUES (?,?,?,?)",
+            (code, telegram_id, now.isoformat(timespec="seconds"), max_uses))
         conn.commit()
     return code
 
 
-def redeem_app_link(code: str) -> str | None:
-    """Обменять код из ссылки бота на девайс-токен. Код МНОГОразовый в окне активации
-    (APP_LINK_DAYS, максимум APP_LINK_MAX_USES обменов): одну и ту же ссылку выездник
-    открывает в ин-апп браузере Телеги, потом в Safari/Chrome для установки на экран —
-    каждый контекст получает свой токен, ничего не «сгорает» и код руками не вводится.
-    Плата за преемственность: пересланная СВЕЖАЯ ссылка тоже пустит; защита — короткое
-    окно, лимит обменов и явный revoke_app_access из пульта. Прежние токены пользователя
-    НЕ трогаем: несколько устройств/браузеров — норма. None — код неизвестен, просрочен
-    или исчерпан."""
+def redeem_app_link(code: str, agent: str | None = None,
+                    keep_token: str | None = None) -> str | None:
+    """Обменять код ссылки входа на девайс-токен. None — код неизвестен, просрочен
+    или исчерпан.
+
+    Код многоразовый в окне активации (APP_LINK_DAYS), но обменов у него ровно
+    столько, сколько записано в его собственной строке (max_uses). Три правила,
+    из-за которых двойки хватает:
+
+    * `keep_token` — тот же человек переоткрыл ту же ЖИВУЮ ссылку с устройства, где
+      токен уже есть (перезагрузка страницы, повторная вставка ссылки, ссылка
+      пришла в открытую вкладку). Возвращаем ТОТ ЖЕ токен и обмен не тратим: иначе
+      двойка сгорала бы на пустом месте, не доведя человека до ярлыка.
+    * `agent` — класс устройства. Первому открытию с iPhone/iPad ссылка сама
+      поднимает потолок на +1 (bonus_ios): у ярлыка «На экран Домой» отдельное
+      хранилище, и обмен на его заведение нужен сверх того, что человек уже
+      потратил во встроенном браузере мессенджера. Андроид и десктоп не трогаем —
+      им хватает одного.
+    * расход попытки остаётся ОДНИМ атомарным UPDATE с условием в WHERE: две
+      вкладки, стартующие разом, не должны съесть обе попытки двухразовой ссылки.
+
+    Плата за преемственность прежняя: пересланная СВЕЖАЯ ссылка тоже пустит; защита —
+    короткое окно, малое число обменов и явный revoke_app_access из пульта. Прежние
+    токены пользователя НЕ трогаем: несколько устройств/браузеров — норма.
+    """
     if not code:
         return None
     now = datetime.now()
+    now_iso = now.isoformat(timespec="seconds")
     cutoff = (now - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
     with connect() as conn:
+        link = conn.execute(
+            "SELECT telegram_id, uses, max_uses, bonus_ios FROM app_links "
+            "WHERE code = ? AND created_at >= ?", (code, cutoff)).fetchone()
+        if link is None:
+            return None
+        # Повторное открытие живой ссылки тем же телефоном. Проверяем ВЛАДЕЛЬЦА
+        # токена, а не только его живость: чужой токен не должен продлевать себе
+        # жизнь чужой ссылкой. Исчерпанность здесь намеренно не смотрим — человек
+        # уже внутри, отказывать ему в его же токене не за что.
+        if keep_token:
+            own = conn.execute(
+                "SELECT telegram_id FROM app_tokens WHERE token = ? AND expires_at >= ?",
+                (keep_token, now_iso)).fetchone()
+            if own and int(own["telegram_id"] or 0) == int(link["telegram_id"] or 0):
+                conn.execute(
+                    "UPDATE app_links SET last_use_at = ?, last_agent = ? WHERE code = ?",
+                    (now_iso, agent, code))
+                if agent:
+                    conn.execute("UPDATE app_tokens SET agent = ? WHERE token = ?",
+                                 (agent, keep_token))
+                conn.commit()
+                return keep_token
         # Атомарный расход попытки: rowcount==0 → код чужой/просрочен/исчерпан
         # (в т.ч. проигранная гонка параллельных обменов за последнюю попытку).
         cur = conn.execute(
-            "UPDATE app_links SET used_at = ?, uses = uses + 1 WHERE code = ? "
-            "AND created_at >= ? AND uses < ?",
-            (now.isoformat(timespec="seconds"), code, cutoff, APP_LINK_MAX_USES))
+            "UPDATE app_links SET used_at = ?, last_use_at = ?, last_agent = ?, "
+            "uses = uses + 1 WHERE code = ? AND created_at >= ? "
+            "AND uses < COALESCE(max_uses, ?)",
+            (now_iso, now_iso, agent, code, cutoff, APP_LINK_DEFAULT_USES))
         if cur.rowcount == 0:
             conn.commit()
             return None
-        uid = conn.execute("SELECT telegram_id FROM app_links WHERE code = ?",
-                           (code,)).fetchone()["telegram_id"]
+        row = conn.execute(
+            "SELECT telegram_id, uses, max_uses, bonus_ios FROM app_links WHERE code = ?",
+            (code,)).fetchone()
+        uid = row["telegram_id"]
+        # Бонус даём ПО ФАКТУ и ровно один раз — на первом обмене. Заранее угадать
+        # «это айфон» нельзя: аналитик выдаёт ссылку, не глядя на телефон человека.
+        if (row["uses"] or 0) == 1 and not (row["bonus_ios"] or 0) and (
+                (agent or "") in APP_AGENT_BONUS):
+            conn.execute(
+                "UPDATE app_links SET max_uses = COALESCE(max_uses, ?) + 1, "
+                "bonus_ios = 1 WHERE code = ?", (APP_LINK_DEFAULT_USES, code))
         token = secrets.token_urlsafe(24)
         conn.execute(
-            "INSERT INTO app_tokens (token, telegram_id, created_at, expires_at) VALUES (?,?,?,?)",
-            (token, uid, now.isoformat(timespec="seconds"),
-             (now + timedelta(days=APP_TOKEN_DAYS)).isoformat(timespec="seconds")))
+            "INSERT INTO app_tokens (token, telegram_id, created_at, expires_at, agent) "
+            "VALUES (?,?,?,?,?)",
+            (token, uid, now_iso,
+             (now + timedelta(days=APP_TOKEN_DAYS)).isoformat(timespec="seconds"), agent))
         conn.commit()
     return token
+
+
+def app_link_expires_at(created_at: str | None) -> str | None:
+    """Конец окна активации ссылки. Отдельной функцией, чтобы сервер и пульт считали
+    срок одинаково, а не каждый по-своему."""
+    if not created_at:
+        return None
+    try:
+        return (datetime.fromisoformat(created_at)
+                + timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
+    except ValueError:
+        return None
+
+
+def app_links_state() -> list[dict]:
+    """Живое состояние входов для пульта — строка на ЧЕЛОВЕКА, а не на ссылку.
+
+    Аналитику важен человек: «выдали — открыл — вошёл». Ссылок у человека за неделю
+    может накопиться несколько (перевыпуск гасит только неоткрытую), поэтому в строке
+    показываем ПОСЛЕДНЮЮ выданную, а `entered`/`devices` считаем по всем его живым
+    токенам — иначе перевыпуск ссылки на глазах превращал бы вошедшего в «ждёт».
+
+    Человек с живым токеном, но без уцелевшей ссылки (старые чистятся по окну), тоже
+    попадает в список — строкой без кода: он вошёл, и это надо видеть.
+    """
+    now = datetime.now()
+    now_iso = now.isoformat(timespec="seconds")
+    cutoff = (now - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
+    with connect() as conn:
+        binds = {int(r["telegram_id"]): r for r in conn.execute(
+            "SELECT telegram_id, employee, kind FROM agent_bind")}
+        devices: dict[int, int] = {}
+        last_token: dict[int, str] = {}
+        for r in conn.execute(
+                "SELECT telegram_id, COUNT(*) n, MAX(created_at) last FROM app_tokens "
+                "WHERE expires_at >= ? GROUP BY telegram_id", (now_iso,)):
+            uid = int(r["telegram_id"] or 0)
+            devices[uid] = int(r["n"] or 0)
+            last_token[uid] = r["last"]
+        # ORDER BY created_at: последняя выданная ссылка человека перетирает прежние.
+        links = conn.execute("SELECT * FROM app_links ORDER BY created_at").fetchall()
+    rows: dict[int, dict] = {}
+    for r in links:
+        uid = int(r["telegram_id"] or 0)
+        bind = binds.get(uid)
+        created = r["created_at"]
+        uses = int(r["uses"] or 0)
+        max_uses = int(r["max_uses"] or APP_LINK_DEFAULT_USES)
+        rows[uid] = {
+            "employee": (bind["employee"] if bind else "") or "",
+            "telegram_id": uid,
+            "kind": ((bind["kind"] if bind else "") or "agent"),
+            "code": r["code"],
+            "created_at": created,
+            "expires_at": app_link_expires_at(created),
+            "uses": uses,
+            "max_uses": max_uses,
+            "bonus_ios": bool(r["bonus_ios"] or 0),
+            "last_use_at": r["last_use_at"] or r["used_at"],
+            "last_agent": r["last_agent"],
+            "entered": uid in devices,
+            "devices": devices.get(uid, 0),
+            # «alive» — по этой ссылке ещё пустят: окно не вышло и обмены остались.
+            "alive": bool(created and created >= cutoff and uses < max_uses),
+        }
+    for uid, n in devices.items():
+        if uid in rows:
+            continue
+        bind = binds.get(uid)
+        rows[uid] = {
+            "employee": (bind["employee"] if bind else "") or "",
+            "telegram_id": uid,
+            "kind": ((bind["kind"] if bind else "") or "agent"),
+            "code": None, "created_at": None, "expires_at": None,
+            "uses": 0, "max_uses": APP_LINK_DEFAULT_USES, "bonus_ios": False,
+            "last_use_at": last_token.get(uid), "last_agent": None,
+            "entered": True, "devices": n, "alive": False,
+        }
+    return sorted(rows.values(), key=lambda w: (w["employee"] or "", w["telegram_id"]))
 
 
 def uid_for_app_token(token: str) -> int | None:
@@ -1783,14 +1959,23 @@ def touch_app_token(token: str) -> None:
         conn.commit()
 
 
-def revoke_app_access(telegram_id: int) -> int:
-    """Отзыв доступа автономного приложения: гасим и токены, и неактивированные ссылки.
-    Возвращает число отозванных токенов (для ответа пульту)."""
+def revoke_app_access(telegram_id: int, scope: str = "all") -> int:
+    """Отзыв доступа автономного приложения. Возвращает число отозванных ТОКЕНОВ.
+
+    `scope="all"` (как было всегда) — гасим и токены, и ссылки: человек выходит из
+    приложения на всех устройствах. `scope="links"` — только ссылки: выданный QR
+    перестаёт работать, а телефон, который уже внутри, продолжает работать. Это
+    разные действия: «выдал не тому» и «сотрудник ушёл» лечатся по-разному, а раньше
+    и то и другое разлогинивало рабочий телефон.
+    """
     with connect() as conn:
-        cur = conn.execute("DELETE FROM app_tokens WHERE telegram_id = ?", (telegram_id,))
+        revoked = 0
+        if scope != "links":
+            revoked = conn.execute(
+                "DELETE FROM app_tokens WHERE telegram_id = ?", (telegram_id,)).rowcount
         conn.execute("DELETE FROM app_links WHERE telegram_id = ?", (telegram_id,))
         conn.commit()
-        return cur.rowcount
+        return revoked
 
 
 # --- Настройки --------------------------------------------------------------
@@ -2183,6 +2368,31 @@ def visits_for_employee(employee: str, date_from: str, date_to: str) -> list[sql
             "ORDER BY v.id",
             (employee, lo.isoformat(), hi.isoformat()),
         ).fetchall()
+
+
+def first_visit_days(employee: str) -> dict[str, str]:
+    """{номер договора: день ПЕРВОГО выезда} по всем договорам сотрудника — за
+    всю историю, БЕЗ окна отчёта.
+
+    Нужно ровно для одного: воронка судит обещание «чужим», если оно
+    датировано раньше первого выезда к должнику (колонку «дата обещания»
+    заполняет ещё и офис по телефону). Границу нельзя брать по окну отчёта:
+    у вечерней книги окно — ОДИН день, и повторный выезд к должнику оказывался
+    первым в окне, а вчерашнее сорванное обещание — «раньше первого выезда»,
+    то есть «без даты». Срыв гас ровно оттого, что с должником продолжали
+    работать, и гас именно в той книге, которую каждый вечер получают
+    руководители. Первый выезд — свойство должника, а не отчёта.
+
+    Фильтр по ответственному тот же, что у visits_for_employee: договоры,
+    закреплённые за этим ФИО СЕЙЧАС.
+    """
+    with connect() as conn:
+        return {r["contract_id"]: r["day"] for r in conn.execute(
+            "SELECT v.contract_id contract_id, "
+            "MIN(substr(v.created_at, 1, 10)) day "
+            "FROM visits v JOIN clients c ON c.contract_id = v.contract_id "
+            "WHERE c.responsible = ? GROUP BY v.contract_id",
+            (employee,)).fetchall()}
 
 
 def contracts_of_responsible(employee: str) -> list[sqlite3.Row]:

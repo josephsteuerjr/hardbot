@@ -134,23 +134,25 @@ def test_promise_state_repeats_the_rule_of_overdue_promises():
     made = date(2026, 9, 10)
     # платёж не раньше даты обещания = сдержал (db.overdue_promises)
     assert funnel.promise_state(made, paid=False, last_payment_day=made, on=on,
-                                visit_day=visit) == funnel.PROMISE_KEPT
+                                first_visit_day=visit) == funnel.PROMISE_KEPT
     assert funnel.promise_state(made, paid=True, last_payment_day=None, on=on,
-                                visit_day=visit) == funnel.PROMISE_KEPT
+                                first_visit_day=visit) == funnel.PROMISE_KEPT
     assert funnel.promise_state(made, paid=False, last_payment_day=date(2026, 9, 2),
-                                on=on, visit_day=visit) == funnel.PROMISE_BROKEN
+                                on=on, first_visit_day=visit) == funnel.PROMISE_BROKEN
     # срок ещё не наступил — это не срыв
     assert funnel.promise_state(date(2026, 9, 20), paid=False, last_payment_day=None,
-                                on=on, visit_day=visit) == funnel.PROMISE_PENDING
+                                on=on, first_visit_day=visit) == funnel.PROMISE_PENDING
     # срок «сегодня» тоже не срыв: день не кончился. Та же граница, что у
     # db.overdue_promises, иначе книга и «Просрочено обещаний» спорят каждое утро.
     assert funnel.promise_state(on, paid=False, last_payment_day=None,
-                                on=on, visit_day=visit) == funnel.PROMISE_PENDING
+                                on=on, first_visit_day=visit) == funnel.PROMISE_PENDING
     assert funnel.promise_state(date(2026, 9, 14), paid=False, last_payment_day=None,
-                                on=on, visit_day=visit) == funnel.PROMISE_BROKEN
-    # обещание старше самого выезда — чужое (его ставил офис по телефону)
+                                on=on, first_visit_day=visit) == funnel.PROMISE_BROKEN
+    # обещание старше ПЕРВОГО выезда к должнику — чужое (его ставил офис по
+    # телефону). Сравнение с каждым выездом гасило бы срыв при повторной поездке,
+    # см. tests/test_funnel_debtor_promise.py.
     assert funnel.promise_state(date(2026, 8, 20), paid=False, last_payment_day=None,
-                                on=on, visit_day=visit) == funnel.PROMISE_NODATE
+                                on=on, first_visit_day=visit) == funnel.PROMISE_NODATE
     assert funnel.promise_state(None, paid=False, last_payment_day=None,
                                 on=on) == funnel.PROMISE_NODATE
 
@@ -309,8 +311,11 @@ def test_book_carries_the_funnel_sheets():
     for name in ("Penetration, %", "Contact Rate, %", "RPC, %", "PTP, %",
                  "KP, %", "BP, %"):
         assert name in head
+    # Уровень среза — на своём листе (22.09.2026): в одной таблице каждый выезд
+    # лежал четырежды, и сумма колонки «Выездов» была вчетверо больше правды.
     levels = [ws.cell(row=r, column=1).value for r in range(4, ws.max_row + 1)]
-    assert "Сотрудник" in levels and levels[-1] == "Итого"
+    assert set(levels) == {"Сотрудник"}
+    assert [c.value for c in wb["Воронка — итого"][4]][:1] == ["Итого"]
 
 
 def test_percent_cells_are_real_numbers_so_the_book_can_be_pivoted():

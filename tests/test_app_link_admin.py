@@ -63,12 +63,12 @@ def test_employee_without_telegram_gets_identity_and_working_link(monkeypatch):
     assert body["created"] is True and body["local_identity"] is True
     tid = body["telegram_id"]
     assert tid >= db.LOCAL_UID_BASE
-    assert body["url"].startswith(URL + "/#link=")
+    assert body["url"] == f"{URL}/i/{body['code']}", "короткая ссылка, а не #link="
     assert body["days"] == db.APP_LINK_DAYS
     assert db.get_binding(tid) == "Иванов И."
 
     # ссылка обменивается на токен приложения, токен ведёт к этому сотруднику
-    code = body["url"].split("#link=", 1)[1]
+    code = body["code"]
     status, redeemed = _call("POST", "/api/redeem", headers={}, json_body={"code": code})
     assert status == 200 and redeemed["token"]
     assert db.uid_for_app_token(redeemed["token"]) == tid

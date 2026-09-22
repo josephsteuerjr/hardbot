@@ -13,9 +13,15 @@
      открывался без токена и получал 401 — стартовый адрес был «/». -->
 <script>
 (function(){
-  var t="";
+  var t="", u="", h="";
   try{ t=localStorage.getItem("app_token")||""; }catch(e){}
-  if(!t){ try{ var m=/[#&]t=([^&]+)/.exec(location.hash||""); if(m) t=decodeURIComponent(m[1]); }catch(e){} }
+  try{ h=location.hash||"";
+       var m=/[#&]t=([^&]+)/.exec(h); if(m) u=decodeURIComponent(m[1]); }catch(e){}
+  // «fresh=1» ставит сервер на редиректе с «/i/<код>»: токен выдан ПРЯМО СЕЙЧАС
+  // тому, кто открыл ссылку, и он главнее оставшегося на устройстве. Иначе на
+  // телефоне, где входил кто-то другой, ярлык унёс бы в start_url ЧУЖОЙ вход.
+  if(u && /[#&]fresh=1(&|$)/.test(h)) t=u;
+  if(!t) t=u;
   window.MANIFEST_PERSONAL=!!t;
   var l=document.createElement("link"); l.rel="manifest";
   l.href="/manifest.webmanifest"+(t?"?t="+encodeURIComponent(t):"");
@@ -407,11 +413,13 @@ const I18N = {
     fromgallery:"Выбрать из галереи",
     galhint:"Снимок из галереи прикрепится без точки съёмки — она снимается только камерой в приложении",
     nolist:"Список не загрузился. Закройте приложение и откройте заново — при связи он придёт с сервера.",
+    bootnone:"Данных на телефоне ещё нет.",
+    bootnonewhy:"Нет связи с сервером. Откройте приложение там, где есть интернет, — список клиентов загрузится, и дальше оно работает без сети.",
     updready:"Вышло обновление приложения",updbtn:"Обновить",
     retake:"Переснять",retakehint:"Карточка открыта — нажмите «Добавить фото»",
-    authexpired:"Срок доступа истёк. Напишите боту слово «ссылка» — придёт новая ссылка: откройте её и добавьте приложение на экран заново, либо вставьте её сюда. Несинхронизированные визиты не потеряются.",
-    authneed:"Нет доступа. Напишите боту слово «ссылка» — придёт ссылка для входа: откройте её, либо вставьте сюда.",
-    entercode:"Вставить ссылку вручную",codeprompt:"Вставьте ссылку или код из сообщения бота:",codeph:"Ссылка из сообщения бота",
+    authexpired:"Срок доступа истёк. Попросите у аналитика новую ссылку входа: откройте её на этом телефоне и добавьте приложение на экран заново — или вставьте ссылку сюда. Несинхронизированные визиты не потеряются.",
+    authneed:"Нет доступа. Попросите у аналитика ссылку входа: откройте её на этом телефоне — или вставьте её сюда.",
+    entercode:"Вставить ссылку вручную",codeprompt:"Вставьте ссылку входа:",codeph:"Ссылка входа",
     secResult:"Результат выезда",secContact:"Контакт",secClient:"Клиент сейчас",secAgree:"Договорённость",
     nosplit:"разбивка по статьям не пришла"},
   uz:{visit:"Chiqish",client:"Mijoz",debt:"Qarz",form:"To‘ldirish",my:"Mijozlarim",
@@ -456,11 +464,13 @@ const I18N = {
     fromgallery:"Galereyadan tanlash",
     galhint:"Galereyadagi rasm suratga olingan nuqtasiz biriktiriladi — nuqta faqat ilovadagi kamera bilan olinadi",
     nolist:"Ro'yxat yuklanmadi. Ilovani yopib, qayta oching — aloqa bo'lsa serverdan keladi.",
+    bootnone:"Telefonda hali ma’lumot yo‘q.",
+    bootnonewhy:"Server bilan aloqa yo‘q. Ilovani internet bor joyda oching — mijozlar ro‘yxati yuklanadi, keyin u aloqasiz ham ishlaydi.",
     updready:"Ilova yangilandi",updbtn:"Yangilash",
     retake:"Qayta olish",retakehint:"Karta ochildi — «Rasm qo‘shish»ni bosing",
-    authexpired:"Kirish muddati tugadi. Botga «ссылка» deb yozing — yangi havola keladi: uni oching va ilovani ekranga qayta qo‘shing, yoki shu yerga joylang. Yuborilmagan chiqishlar yo‘qolmaydi.",
-    authneed:"Kirish yo‘q. Botga «ссылка» deb yozing — kirish havolasi keladi: uni oching yoki shu yerga joylang.",
-    entercode:"Havolani qo‘lda joylash",codeprompt:"Bot xabaridagi havola yoki kodni joylashtiring:",codeph:"Bot xabaridagi havola",
+    authexpired:"Kirish muddati tugadi. Analitikdan yangi kirish havolasini so‘rang: uni shu telefonda oching va ilovani ekranga qayta qo‘shing — yoki havolani shu yerga joylang. Yuborilmagan chiqishlar yo‘qolmaydi.",
+    authneed:"Kirish yo‘q. Analitikdan kirish havolasini so‘rang: uni shu telefonda oching — yoki shu yerga joylang.",
+    entercode:"Havolani qo‘lda joylash",codeprompt:"Kirish havolasini joylashtiring:",codeph:"Kirish havolasi",
     secResult:"Chiqish natijasi",secContact:"Kontakt",secClient:"Mijoz hozir",secAgree:"Kelishuv",
     nosplit:"moddalar bo‘yicha taqsimot kelmadi"},
   tg:{visit:"Сафар",client:"Мизоҷ",debt:"Қарз",form:"Пур кардан",my:"Мизоҷони ман",
@@ -505,11 +515,13 @@ const I18N = {
     fromgallery:"Аз галерея интихоб",
     galhint:"Расм аз галерея бе нуқтаи аксбардорӣ замима мешавад — нуқта танҳо бо камераи барнома гирифта мешавад",
     nolist:"Рӯйхат бор нашуд. Барномаро пӯшед ва аз нав кушоед — ҳангоми алоқа аз сервер меояд.",
+    bootnone:"Дар телефон ҳанӯз маълумот нест.",
+    bootnonewhy:"Бо сервер алоқа нест. Барномаро дар ҷое, ки интернет ҳаст, кушоед — рӯйхати мизоҷон бор мешавад, баъд он бе алоқа низ кор мекунад.",
     updready:"Навсозии барнома баромад",updbtn:"Навсозӣ",
     retake:"Аз нав гирифтан",retakehint:"Корт кушода шуд — «Иловаи расм»-ро пахш кунед",
-    authexpired:"Мӯҳлати дастрасӣ гузашт. Ба бот калимаи «ссылка» нависед — пайванди нав меояд: онро кушоед ва барномаро аз нав ба экран гузоред, ё ин ҷо гузоред. Сафарҳои фиристоданашуда гум намешаванд.",
-    authneed:"Дастрасӣ нест. Ба бот калимаи «ссылка» нависед — пайванди воридшавӣ меояд: онро кушоед ё ин ҷо гузоред.",
-    entercode:"Гузоштани пайванд дастӣ",codeprompt:"Пайванд ё коди паёми ботро гузоред:",codeph:"Пайванд аз паёми бот",
+    authexpired:"Мӯҳлати дастрасӣ гузашт. Аз аналитик пайванди нави воридшавӣ пурсед: онро дар ҳамин телефон кушоед ва барномаро аз нав ба экран гузоред — ё пайвандро ин ҷо гузоред. Сафарҳои фиристоданашуда гум намешаванд.",
+    authneed:"Дастрасӣ нест. Аз аналитик пайванди воридшавӣ пурсед: онро дар ҳамин телефон кушоед — ё ин ҷо гузоред.",
+    entercode:"Гузоштани пайванд дастӣ",codeprompt:"Пайванди воридшавиро гузоред:",codeph:"Пайванди воридшавӣ",
     secResult:"Натиҷаи сафар",secContact:"Тамос",secClient:"Мизоҷ ҳозир",secAgree:"Созиш",
     nosplit:"тақсимот аз рӯи моддаҳо наомад"},
 };
@@ -820,7 +832,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=56;
+const SHELL_VERSION=57;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1164,22 +1176,33 @@ function finishSavedUI(rep, msg){
   STATE.tab="visit"; renderDetail();
 }
 
-// Автономное приложение (PWA вне Телеги): вход по ссылке бота. В #link= лежит код
-// (фрагмент не попадает в логи сервера — как initData у Телеги); код многоразовый в
-// окне активации: одну ссылку открывают в браузере Телеги, потом в Safari/Chrome при
-// установке — каждый обмен даёт девайс-токен (скользящие 30 дней, localStorage).
+// Автономное приложение (PWA вне Телеги): вход по ссылке. Короткая ссылка
+// «/i/<код>» обменивается НА СЕРВЕРЕ: человек открыл — и уже внутри, на «/#t=<токен>».
+// Старый вид «/#link=<код>» остаётся рабочим (выданные ссылки и бот): код лежит во
+// фрагменте, на сервер не уходит, и страница меняет его сама через POST /api/redeem.
+// Обменов у ссылки мало (обычно два), поэтому при обмене мы ВСЕГДА шлём свой текущий
+// токен: если он жив и наш, сервер вернёт его же и обмен не потратит.
 // Установленный ярлык живёт на персональном start_url «/#t=<токен>» (см. ниже).
 function appToken(){ try{ return localStorage.getItem('app_token')||''; }catch(e){ return ''; } }
 function cleanLinkFromUrl(){ try{ const u=new URL(location.href);
   u.searchParams.delete('link'); u.searchParams.delete('token');
   history.replaceState(null,'',u.pathname+(u.search||'')); }catch(e){} }
+// Ярлык на экране («На экран Домой» / установленное приложение) отличается от вкладки
+// только здесь, на клиенте: сервер по User-Agent этого не видит. Признак нужен серверу,
+// чтобы не дарить лишний обмен тому, кто уже установил ярлык.
+function isStandalone(){
+  try{
+    if(navigator.standalone===true) return true;
+    return !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+  }catch(e){ return false; }
+}
 // true — токен получен; 'have-token' — код невалиден/сервер недоступен, но на устройстве
 // уже есть токен (тихо продолжаем); 'net' — код НЕ обменян и токена нет (оставляем код в
 // URL, попробуем при следующем открытии); false — код ДЕЙСТВИТЕЛЬНО мёртв (410) и токена нет.
 async function redeemCode(code, fromUrl){
   try{
     const r=await fetch('/api/redeem',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({code})});
+      body:JSON.stringify({code, token:appToken(), standalone:isStandalone()})});
     if(r.ok){ const j=await r.json();
       if(j&&j.token){ try{ localStorage.setItem('app_token',j.token); }catch(e){} }
       stampTokenUrl();                         // #link=код → #t=токен: ярлык унесёт вход
@@ -1198,9 +1221,22 @@ let URLT=null, TRIED_URLT=false;   // кандидат из URL: живой loca
 function absorbTokenFromUrl(){
   // URL не чистим: #t в адресе — это и есть «преемственность» (см. stampTokenUrl).
   try{ const u=new URL(location.href);
-    const tk=u.hash?new URLSearchParams(u.hash.replace(/^#/,'')).get('t'):null;
+    const q=u.hash?new URLSearchParams(u.hash.replace(/^#/,'')):null;
+    const tk=q?q.get('t'):null;
     if(!tk) return;
     URLT=tk;
+    // «fresh=1» ставит сервер на редиректе с «/i/<код>»: этот токен он выдал ПРЯМО
+    // СЕЙЧАС тому, кто открыл ссылку, и он главнее того, что уже лежит на устройстве.
+    // Иначе телефон/браузер, где кто-то входил раньше, молча пускал бы под ПРЕЖНИМ
+    // человеком — а обмен новой ссылки сервер уже потратил, и следов не осталось бы.
+    if(q.get('fresh')==='1'){
+      if(tk!==appToken()){ try{ localStorage.setItem('app_token',tk); }catch(e){} }
+      return;
+    }
+    // Без метки токен в адресе — это start_url ярлыка, вшитый при установке. Он
+    // бывает СТАРШЕ того, что на устройстве (внутри ярлыка входили заново), поэтому
+    // живой localStorage-токен не трогаем: подмена выкинула бы человека из
+    // работающего ярлыка. Мёртвый токен подменит ветка 401 в boot (URLT).
     if(!appToken()){ try{ localStorage.setItem('app_token',tk); }catch(e){} }
   }catch(e){}
 }
@@ -1224,8 +1260,23 @@ function stampTokenUrl(){
     history.replaceState(null,'',u.pathname+(u.search||'')+'#t='+encodeURIComponent(tk));
   }catch(e){}
 }
+// Сервер увёл на «/#link_dead=1»: ссылка исчерпана, просрочена или чужая.
+function linkDeadFromUrl(){
+  try{ return new URLSearchParams((location.hash||'').replace(/^#/,'')).get('link_dead')==='1'; }
+  catch(e){ return false; }
+}
+function cleanHashFromUrl(){
+  try{ const u=new URL(location.href);
+    history.replaceState(null,'',u.pathname+(u.search||'')); }catch(e){}
+}
 async function redeemFromUrl(){
   absorbTokenFromUrl();
+  // Мёртвая ссылка — не тупик: чаще всего человек уже внутри и просто ткнул старый QR.
+  // Тихо входим своим токеном; отказ («попроси новую ссылку») покажет ветка 401 в boot.
+  if(linkDeadFromUrl()){
+    if(appToken()){ stampTokenUrl(); return 'have-token'; }
+    cleanHashFromUrl(); return false;
+  }
   let code=null;
   try{ const u=new URL(location.href);
     if(u.hash) code=new URLSearchParams(u.hash.replace(/^#/,'')).get('link');
@@ -1246,13 +1297,18 @@ async function redeemFromUrl(){
 // меняет только фрагмент, страница НЕ перезагружается и boot() сам не стартует.
 // Ловим hashchange: обмениваем код и перезапускаем загрузку.
 window.addEventListener('hashchange', async()=>{
-  let c=null;
-  try{ c=new URLSearchParams(location.hash.replace(/^#/,'')).get('link'); }catch(e){}
+  let c=null, t=null;
+  try{ const q=new URLSearchParams(location.hash.replace(/^#/,''));
+    c=q.get('link'); t=q.get('t'); }catch(e){}
+  // «/#t=…» в живой вкладке — это возврат с /i/<код> или вставленная персональная
+  // ссылка: токен уже готов, обменивать нечего.
+  if(!c && t && t!==appToken()){ try{ localStorage.setItem('app_token',t); }catch(e){}
+    boot(); return; }
   if(c && (await redeemCode(c, true))===true) boot();
 });
-// Экран «нужна ссылка от бота»: истёкший токен или мёртвый код без токена. Самолечение —
-// слово «ссылка» боту приносит новую ссылку; кнопка ручного ввода кода закрывает случай,
-// когда открыть ссылку в этом же браузере неудобно (iOS вне Chrome и т.п.).
+// Экран «нужна ссылка входа»: истёкший токен или мёртвый код без токена. Ссылку даёт
+// аналитик (бота в контуре компании нет). Поле ручной вставки — главный путь на iPhone:
+// внутри ярлыка ссылку не открыть, её именно вставляют.
 function renderAppAuthGone(expired){
   hideBottomNav(); const t=L();
   // Поле ввода прямо на экране, а не prompt(): на iOS-ярлыке prompt не переживает
@@ -1273,11 +1329,18 @@ async function enterCode(){
   let raw=el?el.value.trim():'';
   if(!raw && el && navigator.clipboard && navigator.clipboard.readText){
     try{ const cb=(await navigator.clipboard.readText()).trim();
-      if(/link=[A-Za-z0-9_-]+/.test(cb)||/^[A-Za-z0-9_-]{16,}$/.test(cb)){ raw=cb; el.value=cb; } }catch(e){}
+      if(/[#&]t=[A-Za-z0-9_-]{16,}/.test(cb)||/\/i\/[A-Za-z0-9_-]{8,}/.test(cb)
+        ||/link=[A-Za-z0-9_-]+/.test(cb)||/^[A-Za-z0-9_-]{8,}$/.test(cb)){ raw=cb; el.value=cb; } }catch(e){}
   }
   if(!raw && !el) raw=(prompt(L().codeprompt)||'').trim();
   if(!raw){ if(el) el.focus(); return; }
-  const m=raw.match(/link=([A-Za-z0-9_-]+)/);
+  // Вставили ПЕРСОНАЛЬНУЮ ссылку («…/#t=<токен>» из адресной строки Safari) — это
+  // готовый вход, обменивать нечего. Ровно так вход переносят в ярлык на iPhone.
+  const tk=raw.match(/[#&]t=([A-Za-z0-9_-]{16,})/);
+  if(tk){ try{ localStorage.setItem('app_token',tk[1]); }catch(e){}
+    stampTokenUrl(); toast('✓'); boot(); return; }
+  // Короткая ссылка входа «…/i/<код>», старая «…#link=<код>» или голый код.
+  const m=raw.match(/\/i\/([A-Za-z0-9_-]{8,})/)||raw.match(/link=([A-Za-z0-9_-]+)/);
   const r=await redeemCode(m?m[1]:raw, false);
   if(r===true){ toast('✓'); boot(); } else toast('✕');
 }
@@ -1286,7 +1349,7 @@ let START_TAB, START_DATE, START_TAB_USED=false;
 function authHeaders(){
   const h = {};
   if (TG && TG.initData) h["X-Init-Data"] = TG.initData;    // внутри Телеги — подпись WebApp
-  else { const t = appToken(); if(t) h["X-App-Token"]=t; }  // автономное PWA — токен от бота
+  else { const t = appToken(); if(t) h["X-App-Token"]=t; }  // автономное PWA — токен из ссылки входа
   const dev = new URLSearchParams(location.search).get("dev_uid");
   if (dev) h["X-Dev-Uid"] = dev;
   h["X-Shell-Version"]=String(SHELL_VERSION);
@@ -1344,7 +1407,7 @@ async function boot(){
   renderLangs(); hideBottomNav();
   geoProbe();                 // узнаём, дали ли права раньше (не спрашивает, только смотрит)
   tgGeoInit();                // внутри Телеграма — её собственный LocationManager
-  if(!REDEEMED){ REDEEMED=true;                          // код из ссылки бота
+  if(!REDEEMED){ REDEEMED=true;                          // код из ссылки входа
     if((await redeemFromUrl())==="reload") return; }        // страница перезагружается
   // Диплинк из пуша (?tab=digest&d=дата): параметры вычищаются из адреса СРАЗУ
   // — stampTokenUrl сохраняет query, а перезагрузка здесь штатная (обновление
@@ -1401,7 +1464,7 @@ async function boot(){
     clientMetric("boot_error", {download_ms:performance.now()-bootStarted});
     const st=+((e&&e.message)||0);
     // Сервер ответил «не пускаю» вне Телеги: токен истёк/отозван либо его ещё нет.
-    // Кэш здесь НЕ поднимаем (сервер доступен и отказал) — просим новую ссылку у бота.
+    // Кэш здесь НЕ поднимаем (сервер доступен и отказал) — просим новую ссылку у аналитика.
     if((st===401||st===403) && !(TG&&TG.initData)){
       // В localStorage мог остаться мёртвый токен, а в start_url ярлыка — живой
       // (переустановили ярлык после простоя): пробуем кандидата из URL один раз.
@@ -1420,7 +1483,12 @@ async function boot(){
       STATE.online=false;
       renderList();
     }else{
-      $("app").innerHTML = `<div class="center">Нет доступа.<br><span class="muted">Откройте через бота при интернете хотя бы раз.</span></div>`;
+      // Связи нет и снимка портфеля на телефоне ещё нет. Здесь стояла инструкция
+      // «откройте через бота»: в контуре компании бота нет — это был тупик, да ещё
+      // и по-русски для узбека с таджиком. Говорим ровно то, что человек может
+      // сделать сам: дойти до связи и открыть приложение ещё раз.
+      const t=L();
+      $("app").innerHTML = `<div class="center">${esc(t.bootnone)}<br><span class="muted">${esc(t.bootnonewhy)}</span></div>`;
     }
   }
 }

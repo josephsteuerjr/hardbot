@@ -1046,21 +1046,24 @@ def _last_payment_day(p: dict):
     return max(days) if days else None
 
 
-def _promise_view(e: dict, snap: dict, on) -> dict:
+def _promise_view(e: dict, snap: dict, on, first_day=None) -> dict:
     """Судьба обещания, взятого на этом выезде: состояние, дата, сумма, срок.
 
     Дату и сумму даёт снимок визита (в нём же живёт офисная правка этих ячеек),
     с откатом на колонку реестра — ровно тот же порядок, что у карточки должника.
-    Обещание, датированное раньше выезда, funnel.promise_state отбросит как
-    чужое: колонку «дата обещания» заполняет ещё и офис по телефону.
+    Обещание, датированное раньше ПЕРВОГО выезда к должнику, funnel.promise_state
+    отбросит как чужое: колонку «дата обещания» заполняет ещё и офис по телефону.
+    Граница берётся по первому выезду к должнику ЗА ВСЮ ИСТОРИЮ, а не по этому
+    выезду и не по первому выезду окна: обещание принадлежит должнику, и ни
+    повторный выезд к нему, ни короткое окно отчёта не имеют права гасить уже
+    сорванное обещание (см. funnel.promise_state, db.first_visit_days).
     """
     p = e["person"]
-    visit_day = _as_day(e["date"])
     promise_day = db._as_date(str(snap.get("promise_date") or "")[:10])
     paid = _person_paid(p)
     state = funnel.promise_state(promise_day, paid=paid,
                                  last_payment_day=_last_payment_day(p),
-                                 on=on, visit_day=visit_day)
+                                 on=on, first_visit_day=first_day)
     amount = db.canon_amount(snap.get("forecast_sum"))
     overdue = ((on - promise_day).days
                if promise_day and state == funnel.PROMISE_BROKEN else 0)
@@ -1164,6 +1167,26 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
     # видно на закрытии периода.
     on_today = db._as_date(today_iso())
     snap_cache: dict[str, dict] = {}
+    # Первый выезд к КАЖДОМУ должнику — граница «своего» обещания. Она одна на
+    # человека и НЕ ЗАВИСИТ ОТ ОКНА ОТЧЁТА: обещание принадлежит должнику, а не
+    # поездке и тем более не отчёту. Границей по окну книга спорила сама с
+    # собой: у вечерней книги окно — ОДИН день, повторный выезд к должнику
+    # оказывался в нём первым, и вчерашнее сорванное обещание становилось
+    # «без даты». Один и тот же должник на 22.09.2026 читался как «сорвано»
+    # в книге за 30 дней и как «без даты» в вечерней — BP 100 % против 0 %.
+    # Защита от офисной даты при этом цела: обещание раньше ПЕРВОГО В ЖИЗНИ
+    # выезда к должнику по-прежнему nodate.
+    visit_days: dict[str, list] = {}
+    for cid, first_day in db.first_visit_days(emp).items():
+        p = by_cid.get(cid)
+        if p is not None:
+            visit_days.setdefault(p["rep"], []).append(_as_day(first_day))
+    # Выезды окна добавляем следом: они уже отобраны и страхуют границу, если
+    # договор успели перезакрепить между двумя запросами.
+    for e in ordered:
+        visit_days.setdefault(e["person"]["rep"], []).append(_as_day(e["date"]))
+    first_visit = {rep: funnel.first_visit_day(days)
+                   for rep, days in visit_days.items()}
     for e in ordered:
         p = e["person"]
         snap_day = _snapshot_day(p)
@@ -1176,7 +1199,8 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
         if not e["contact_with"] and e["date"] == snap_day:
             e["contact_with"] = snap.get("contact_with") or ""
             e["who_at_address"] = snap.get("who_at_address") or ""
-        e["promise"] = _promise_view(e, snap, on_today)
+        e["promise"] = _promise_view(e, snap, on_today,
+                                     first_visit.get(p["rep"]))
     last: dict[str, dict] = {}
     for e in ordered:
         last[e["person"]["rep"]] = e
@@ -1512,10 +1536,35 @@ def _book_head(layout: list[dict]) -> tuple[list, list, list, list]:
 # тип «pct» превращает ячейку в НАСТОЯЩИЙ процент Excel, а не в текст «71,4%», —
 # иначе по показателю нельзя ни отсортировать, ни построить сводную, а книга
 # заказана именно «для самостоятельного анализа».
+def _workdays(days: list[dict], today: str) -> int:
+    """Рабочие дни окна, которые УЖЕ наступили.
+
+    Задание — «10 клиентов на РАБОЧИЙ день» (решение владельца 22.09.2026).
+    Считать по календарным дням значило ставить задание за выходные, а у
+    пресета «Месяц» (окно — месяц целиком) ещё и за дни, которые не наступили:
+    21.09.2026 задание выходило 300 вместо 210, а Penetration — 2,7 % вместо
+    настоящих 3,8 %. Этим множителем пользуются ТОЛЬКО листы воронки: план в
+    сводке и на листе «Сотрудники» остаётся прежним, чтобы книга не разошлась
+    с плашками приложения.
+    """
+    out = 0
+    for x in days or ():
+        day = str((x or {}).get("date") or "")
+        if not day or (today and day > today):
+            continue
+        weekend = (x or {}).get("weekend")
+        if weekend is None:
+            d = db._as_date(day)
+            weekend = bool(d and d.weekday() >= 5)
+        if not weekend:
+            out += 1
+    return out
+
+
 FUNNEL_COLUMNS = (
     ("Срез", 13, "text"), ("Имя", 28, "text"),
     ("Республика", 14, "text"), ("Офис", 14, "text"),
-    ("Задание", 10, "int"), ("Выездов", 10, "int"),
+    ("Задание", 10, "int"), ("Рабочих дней", 12, "int"), ("Выездов", 10, "int"),
     ("Penetration, %", 13, "pct"),
     ("Анкета заполнена", 13, "int"), ("Без анкеты", 11, "int"),
     ("Контактов", 11, "int"), ("Contact Rate, %", 14, "pct"),
@@ -1532,9 +1581,13 @@ FUNNEL_COLUMNS = (
 
 
 def _funnel_line(level: str, name: str, country: str, office: str,
-                 counts: dict, plan: int) -> list:
+                 counts: dict, plan: int, workdays: int = 0) -> list:
     """Строка воронки. Ноль печатаем ЯВНО, а не прочерком: «0 контактов при 9
-    выездах» — это и есть ответ про мёртвые адреса, и пустая ячейка его прячет."""
+    выездах» — это и есть ответ про мёртвые адреса, и пустая ячейка его прячет.
+
+    «Рабочих дней» стоит рядом с «Заданием», чтобы задание проверялось глазом:
+    задание = личная норма × рабочие наступившие дни, и руководителю видно, из
+    чего сложился знаменатель Penetration, а не только результат."""
     c = counts or funnel.empty_counts()
     r = funnel.rates(c, plan)
 
@@ -1543,7 +1596,7 @@ def _funnel_line(level: str, name: str, country: str, office: str,
         # вышло», и подменять его нулевым процентом нельзя.
         return "" if r.get(key) is None else r[key] / 100
 
-    return [level, name, country, office, plan or "", c["visits"],
+    return [level, name, country, office, plan or "", workdays, c["visits"],
             pct("penetration"),
             c["carded"], c["visits"] - c["carded"],
             c["contacts"], pct("contact_rate"), c["dead"],
@@ -1555,73 +1608,124 @@ def _funnel_line(level: str, name: str, country: str, office: str,
 
 
 PROMISE_COLUMNS = (
-    ("Дата выезда", 12), ("Республика", 14), ("Офис", 14), ("Сотрудник", 28),
+    ("Дата выезда", 12), ("Выездов с обещанием", 12),
+    ("Республика", 14), ("Офис", 14), ("Сотрудник", 28),
     ("Клиент", 32), ("Договоров", 10), ("С кем был контакт", 24),
     ("Кто на адресе", 30), ("Договорённость", 28),
-    ("Дата обещания", 13), ("Сумма обещания", 15), ("Группа по сумме", 16),
+    ("Дата обещания", 13), ("Сумма обещания", 15), ("Валюта", 11),
+    ("Группа по сумме", 16),
     ("Долг", 18), ("Исход обещания", 14), ("Дней просрочки", 13),
     ("Группа по просрочке", 16), ("Последний платёж", 15),
     ("Сумма платежа", 15), ("Исход выезда", 20), ("В зачёт KP/BP", 13),
 )
 
+# Тип «money» — колонка денег: формат ячейки берётся из валюты СТРОКИ, а не
+# прибивается к рублю. Подпись без знака валюты намеренно: строки листа
+# разложены по валютам, и знак живёт в колонке «Валюта» и в формате ячейки.
 RANGE_COLUMNS = (
-    ("Группа по сумме обещания", 24), ("Клиентов с обещанием", 15),
+    ("Группа по сумме обещания", 24), ("Валюта", 11),
+    ("Клиентов с обещанием", 15),
     ("Исполнено (KP)", 12), ("KP, %", 10, "pct"),
     ("Сорвано (BP)", 12), ("BP, %", 10, "pct"),
     ("Ждём срока", 11), ("Без даты", 11),
-    ("Обещано, ₽", 16), ("Сорвано обещаний, ₽", 18),
-    ("Долг сорвавших, ₽", 18),
+    ("Обещано", 16, "money"), ("Сорвано обещаний", 18, "money"),
+    ("Долг сорвавших", 18, "money"),
     ("Средняя просрочка, дн", 15), ("Худшая просрочка, дн", 15),
 )
 
+# Валюта долга, которой нет (пустой контрагент) или которых несколько. Пустая
+# ячейка тут читается как «нет данных», а это разные вещи: сложить такие суммы
+# с рублёвыми нельзя ни в том, ни в другом случае.
+UNIT_UNKNOWN = "не указана"
+UNIT_MIXED = "разные"
+
+
+def _promise_unit(p: dict) -> tuple[str, str]:
+    """(валюта для формата ячейки, подпись) долга должника.
+
+    Сумма обещания в анкете — голое число без единицы, и единственная честная
+    единица для неё это валюта долга того же человека. Должник с договорами
+    в РАЗНЫХ валютах помечается отдельно: складывать его обещание ни с теми,
+    ни с другими нельзя.
+    """
+    labels = {str(x.get("unit") or "") for x in (p.get("totals") or ())}
+    if len(labels) > 1:
+        return "", UNIT_MIXED
+    unit = labels.pop() if labels else debt.unit(p.get("partners") or [])
+    return unit, (unit or UNIT_UNKNOWN)
+
 
 def _promise_rows(rows: list[dict], names: dict) -> list[dict]:
-    """Все обещания клиента, взятые на выездах окна, — сырьё листов «Обещания»
-    и «Ранжирование». Одна строка = одно обещание на одном выезде."""
-    out = []
+    """Обещания клиентов, взятые на выездах окна, — сырьё листов «Обещания»
+    и «Ранжирование». Одна строка = ОДИН ДОЛЖНИК (решение владельца
+    22.09.2026), а не один выезд.
+
+    Результат, сумму и дату обещания даёт ПОСЛЕДНИЙ выезд к должнику: его
+    анкета и лежит сейчас в реестре. Раньше строка печаталась на каждый выезд,
+    и SUM колонки «Сумма обещания» показывал 10 100 000 там, где обещано
+    9 900 000: должник, к которому съездили дважды, считался дважды.
+
+    Ключ дедупликации — пара (сотрудник, должник), а не один номер договора:
+    номер КД дублируется между республиками (случай 47892257), и по голому
+    номеру работа одного выездника затёрла бы работу другого.
+    """
+    last: dict[tuple[str, str], tuple[dict, dict]] = {}
+    seen: dict[tuple[str, str], int] = {}
     for r in rows:
         for e in r["_entries"]:
             if funnel.contact_kind(e.get("contact_with")) != "client":
                 continue
             if funnel.promise_kind(e.get("agreed")) != "client":
                 continue
-            p, pr = e["person"], e["promise"]
-            last_day = _last_payment_day(p)
-            debt_val, debt_unit = _units_num(p["totals"])
-            out.append({
-                "date": e["date"], "country": names.get(r["country"], ""),
-                "office": r.get("office") or "", "employee": r["employee"],
-                "client": p["client"], "contracts": p["n"],
-                "contact_with": e.get("contact_with") or "",
-                "who_at_address": e.get("who_at_address") or "",
-                "agreed": e.get("agreed") or "",
-                "promise_day": pr["day"], "sum": pr["sum"],
-                "bucket": funnel.amount_bucket(pr["sum"]),
-                "debt": _persons_total([p]),
-                "debt_num": sum(x["sum"] for x in p["totals"]),
-                # Та же пара, что и у остальных денег книги: числом — только
-                # одну валюту (см. _units_num), иначе текст.
-                "debt_val": debt_val, "debt_unit": debt_unit,
-                "state": pr["state"],
-                "days_overdue": pr["days_overdue"],
-                "overdue_bucket": funnel.overdue_bucket(pr["days_overdue"]),
-                "last_payment": last_day.isoformat() if last_day else "",
-                "last_payment_sum": _v(p["contracts"], "last_payment_sum") or "",
-                "status": e["status"], "counted": bool(pr.get("counted")),
-            })
+            # «_entries» отсортированы по дате — побеждает последний выезд.
+            key = (r["employee"], e["person"]["rep"])
+            last[key] = (r, e)
+            seen[key] = seen.get(key, 0) + 1
+    out = []
+    for key, (r, e) in last.items():
+        p, pr = e["person"], e["promise"]
+        last_day = _last_payment_day(p)
+        debt_val, debt_unit = _units_num(p["totals"])
+        promise_unit, promise_unit_text = _promise_unit(p)
+        out.append({
+            "date": e["date"], "country": names.get(r["country"], ""),
+            "office": r.get("office") or "", "employee": r["employee"],
+            "client": p["client"], "contracts": p["n"],
+            "visits": seen[key],
+            "unit": promise_unit, "unit_text": promise_unit_text,
+            "contact_with": e.get("contact_with") or "",
+            "who_at_address": e.get("who_at_address") or "",
+            "agreed": e.get("agreed") or "",
+            "promise_day": pr["day"], "sum": pr["sum"],
+            "bucket": funnel.amount_bucket(pr["sum"]),
+            "debt": _persons_total([p]),
+            "debt_num": sum(x["sum"] for x in p["totals"]),
+            # Та же пара, что и у остальных денег книги: числом — только
+            # одну валюту (см. _units_num), иначе текст.
+            "debt_val": debt_val, "debt_unit": debt_unit,
+            "state": pr["state"],
+            "days_overdue": pr["days_overdue"],
+            "overdue_bucket": funnel.overdue_bucket(pr["days_overdue"]),
+            "last_payment": last_day.isoformat() if last_day else "",
+            "last_payment_sum": _v(p["contracts"], "last_payment_sum") or "",
+            "status": e["status"], "counted": bool(pr.get("counted")),
+        })
     out.sort(key=lambda x: (x["date"], x["employee"], x["client"]))
     return out
 
 
-def _range_line(title: str, items: list[dict]) -> list:
-    """Строка ранжирования: что стало с обещаниями одного размера."""
+def _range_line(title: str, items: list[dict], unit_text: str = "") -> list:
+    """Строка ранжирования: что стало с обещаниями одного размера И одной
+    валюты. Валюта в строке обязательна: до 22.09.2026 лист складывал суммы
+    разных валют в одну колонку с подписью «Обещано, ₽» — 900 000 + 9 000 000
+    давали «9 900 000 ₽», которых не существует."""
     kept = [x for x in items if x["state"] == funnel.PROMISE_KEPT]
     broken = [x for x in items if x["state"] == funnel.PROMISE_BROKEN]
     base = len(items)
     kp = funnel.rate(len(kept), len(items))
     bp = funnel.rate(len(broken), len(items))
     days = [x["days_overdue"] for x in broken]
-    return [title, base,
+    return [title, unit_text, base,
             len(kept), "" if kp is None else kp / 100,
             len(broken), "" if bp is None else bp / 100,
             sum(1 for x in items if x["state"] == funnel.PROMISE_PENDING),
@@ -1633,25 +1737,47 @@ def _range_line(title: str, items: list[dict]) -> list:
             max(days) if days else ""]
 
 
+def _office_country(rows: list[dict], names: dict) -> str:
+    """Республика офиса — по республикам его сотрудников.
+
+    У офисных строк колонка «Республика» пустовала, и фильтр по республике
+    выбрасывал их из книги целиком: руководитель направления, оставив свою
+    республику, переставал видеть собственные офисы. Офис почти всегда в одной
+    республике; если в нём люди из разных — перечисляем обе, а не молчим.
+    """
+    labels = sorted({names.get(r.get("country"), "") for r in rows} - {""})
+    return ", ".join(labels)
+
+
 def _funnel_sheets(wb, data: dict, rows: list[dict], names: dict,
                    rng: dict) -> None:
-    """Три листа книги: «Воронка», «Обещания», «Ранжирование».
+    """Листы воронки: «Воронка» (сотрудники), «Воронка — республики»,
+    «Воронка — офисы», «Воронка — итого», «Обещания», «Ранжирование».
 
-    Воронка — лестница Альберта одной таблицей, где знаменатель каждой ступени
-    это числитель предыдущей. Срезы (сотрудник, республика, офис, итог) лежат в
-    ОДНОЙ таблице с колонкой «Срез»: фильтром выбирается уровень, и не нужно
-    держать три листа с одинаковой шапкой.
+    Уровни среза разнесены ПО ЛИСТАМ, а не сложены в одну таблицу с колонкой
+    «Срез», как было до 22.09.2026. Одна таблица врала сложением: каждый выезд
+    лежал в ней четырежды (сотрудник, республика, офис, итог), и SUM по
+    колонке «Выездов» давал 36 при девяти настоящих выездах. Лист на уровень —
+    единственная раскладка, где сумма колонки это правда, а книгу заказывали
+    именно для самостоятельного анализа суммами и сводными.
     """
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
 
     metric = PatternFill("solid", fgColor="E4ECF6")
     money_fmt = "#,##0"
+    window = f"{rng['label']} ({rng['from']} — {rng['to']})"
 
-    def head(ws, columns, title: str) -> None:
+    def head(ws, columns, title: str, note: str = "") -> None:
+        """Шапка листа: заголовок, строка оговорок, названия колонок.
+
+        Оговорка живёт во ВТОРОЙ строке, над таблицей, а не под ней: под
+        таблицей её не видит ни фильтр, ни тот, кто дочитал до итогов.
+        """
         ws.append([title])
         ws["A1"].font = Font(bold=True)
-        ws.append([])
+        ws.append([note])
+        ws["A2"].font = Font(italic=True, color="666666")
         ws.append([c[0] for c in columns])
         for i, col in enumerate(columns, start=1):
             cell = ws.cell(row=3, column=i)
@@ -1661,102 +1787,166 @@ def _funnel_sheets(wb, data: dict, rows: list[dict], names: dict,
                 cell.fill = metric
             ws.column_dimensions[get_column_letter(i)].width = col[1]
 
-    # --- Воронка ------------------------------------------------------------
-    ws = wb.create_sheet("Воронка")
-    head(ws, FUNNEL_COLUMNS,
-         f"Воронка Collection · {data['scope']} · {rng['label']} "
-         f"({rng['from']} — {rng['to']})")
+    def dress(ws, columns, last_data_row: int, freeze: str) -> None:
+        """Проценты — настоящими процентами, фильтр — по строкам данных."""
+        for row in ws.iter_rows(min_row=4, max_row=ws.max_row):
+            for i, col in enumerate(columns):
+                if i < len(row) and len(col) > 2 and col[2] == "pct":
+                    row[i].number_format = "0.0%"
+                    row[i].fill = metric
+        if last_data_row > 3:
+            ws.auto_filter.ref = (f"A3:{get_column_letter(len(columns))}"
+                                  f"{last_data_row}")
+        ws.freeze_panes = freeze
+
+    # --- Воронка: по листу на уровень среза ---------------------------------
     plan_map = db.visit_plan_map()
-    days = max(1, len(data["by_day"]))
-    for r in rows:
-        ws.append(_funnel_line("Сотрудник", r["employee"],
-                               names.get(r["country"], ""), r.get("office") or "",
-                               r.get("funnel"),
-                               db.visit_plan_for(r["employee"], plan_map) * days))
+    # Задание — на РАБОЧИЙ наступивший день (решение владельца 22.09.2026).
+    work = _workdays(data.get("by_day"), rng.get("today") or today_iso())
+
+    def norm(group: list[dict]) -> int:
+        """Задание группы: сумма ЛИЧНЫХ норм × рабочие дни, как у _totals_of
+        (в группах 8/10/12 общая норма × число людей — цифра, которой никто не
+        ставил), только множитель дней рабочий, а не календарный."""
+        return sum(db.visit_plan_for(r["employee"], plan_map)
+                   for r in group) * work
+
+    def funnel_sheet(title: str, subtitle: str, lines: list[list], bold=False):
+        ws = wb.create_sheet(title)
+        head(ws, FUNNEL_COLUMNS,
+             f"Воронка Collection · {subtitle} · {data['scope']} · {window}",
+             f"Один уровень среза на лист: сумма колонки «Выездов» равна числу "
+             f"выездов уровня. Задание = личная норма × {work} рабочих дн., "
+             f"уже наступивших в окне (выходные и будущие дни не в счёт).")
+        for line in lines:
+            ws.append(line)
+            if bold:
+                for cell in ws[ws.max_row]:
+                    cell.font = Font(bold=True)
+        dress(ws, FUNNEL_COLUMNS, ws.max_row, "C4")
+        return ws
+
+    funnel_sheet("Воронка", "сотрудники", [
+        _funnel_line("Сотрудник", r["employee"], names.get(r["country"], ""),
+                     r.get("office") or "", r.get("funnel"),
+                     db.visit_plan_for(r["employee"], plan_map) * work, work)
+        for r in rows])
+
+    republics = []
     for c in data["countries"]:
-        ws.append(_funnel_line("Республика", c["name"], c["name"], "",
-                               c["totals"].get("funnel"),
-                               c["totals"].get("plan") or 0))
+        mine = [r for r in rows if r["country"] == c["code"]]
+        republics.append(_funnel_line("Республика", c["name"], c["name"], "",
+                                      c["totals"].get("funnel"),
+                                      norm(mine), work))
+    nowhere = [r for r in rows if not r.get("country")]
+    if nowhere:
+        # Сотрудник без страны кейсов бывает (пустой портфель, новичок). Без
+        # этой строки сумма листа не сошлась бы с числом выездов команды, а
+        # именно сложением лист и проверяют.
+        republics.append(_funnel_line(
+            "Республика", "Без республики", "", "",
+            funnel.add_counts(*[r.get("funnel") for r in nowhere]),
+            norm(nowhere), work))
+    funnel_sheet("Воронка — республики", "республики", republics)
+
+    offices = []
     for office in data.get("offices") or ():
-        ws.append(_funnel_line("Офис", office["name"], "", office["name"],
-                               office["totals"].get("funnel"),
-                               office["totals"].get("plan") or 0))
-    last = ws.max_row
-    ws.append(_funnel_line("Итого",
-                           f"сотрудников {data['totals']['employees']}", "", "",
-                           data["totals"].get("funnel"),
-                           data["totals"].get("plan") or 0))
-    for cell in ws[ws.max_row]:
-        cell.font = Font(bold=True)
-    for row in ws.iter_rows(min_row=4, max_row=ws.max_row):
-        for i, col in enumerate(FUNNEL_COLUMNS):
-            if len(col) > 2 and col[2] == "pct":
-                row[i].number_format = "0.0%"
-                row[i].fill = metric
-    if last > 3:
-        ws.auto_filter.ref = f"A3:{get_column_letter(len(FUNNEL_COLUMNS))}{last}"
-    ws.freeze_panes = "C4"
+        mine = [r for r in rows if _in_office(r, office["code"])]
+        offices.append(_funnel_line("Офис", office["name"],
+                                    _office_country(mine, names),
+                                    office["name"],
+                                    office["totals"].get("funnel"),
+                                    norm(mine), work))
+    if offices:
+        funnel_sheet("Воронка — офисы", "офисы", offices)
+
+    funnel_sheet("Воронка — итого", "итог команды", [
+        _funnel_line("Итого", f"сотрудников {data['totals']['employees']}",
+                     "", "", data["totals"].get("funnel"), norm(rows), work)],
+        bold=True)
 
     # --- Обещания: реестр для самостоятельного разбора ----------------------
     promises = _promise_rows(rows, names)
+    counted = [x for x in promises if x["counted"]]
+    # Расхождение двух листов названо вслух и ЧИСЛАМИ: «Ранжирование» считает
+    # только зачётные обещания, и молчаливая разница строк выглядела бы
+    # ошибкой книги (жалоба на воронку 22.09.2026).
+    gap = (f"Строк здесь {len(promises)} — по одной на должника; "
+           f"в зачёт KP/BP идёт {len(counted)}.")
     ws2 = wb.create_sheet("Обещания")
     head(ws2, PROMISE_COLUMNS,
-         f"Обещания клиентов, взятые на выездах · {rng['label']} "
-         f"({rng['from']} — {rng['to']})")
+         f"Обещания клиентов, взятые на выездах · {window}",
+         "Одна строка — один должник: результат, сумма и дата взяты с "
+         "ПОСЛЕДНЕГО выезда к нему, а сколько их было — в колонке «Выездов с "
+         "обещанием». " + gap + " Валюта обещания — валюта долга должника, "
+         "суммы разных валют не складываются.")
+    at_col = {c[0]: i + 1 for i, c in enumerate(PROMISE_COLUMNS)}
     for x in promises:
-        ws2.append([x["date"], x["country"], x["office"], x["employee"],
-                    x["client"], x["contracts"], x["contact_with"],
-                    x["who_at_address"], x["agreed"], x["promise_day"],
-                    x["sum"] or "", x["bucket"],
+        ws2.append([x["date"], x["visits"], x["country"], x["office"],
+                    x["employee"], x["client"], x["contracts"],
+                    x["contact_with"], x["who_at_address"], x["agreed"],
+                    x["promise_day"], x["sum"] or "", x["unit_text"],
+                    x["bucket"],
                     x["debt_val"] if x["debt_val"] is not None else x["debt"],
                     funnel.PROMISE_STATE_TEXT.get(x["state"], ""),
                     x["days_overdue"] or "", x["overdue_bucket"],
                     x["last_payment"], _num(x["last_payment_sum"]) or "",
                     x["status"], "да" if x["counted"] else "нет"])
         at = ws2.max_row
-        ws2.cell(row=at, column=11).number_format = money_fmt
+        ws2.cell(row=at, column=at_col["Сумма обещания"]).number_format = \
+            _money_fmt(x["unit"])
         if x["debt_val"] is not None:
-            ws2.cell(row=at, column=13).number_format = _money_fmt(x["debt_unit"])
-        ws2.cell(row=at, column=18).number_format = money_fmt
+            ws2.cell(row=at, column=at_col["Долг"]).number_format = \
+                _money_fmt(x["debt_unit"])
+        ws2.cell(row=at, column=at_col["Сумма платежа"]).number_format = money_fmt
+        state_cell = ws2.cell(row=at, column=at_col["Исход обещания"])
         if x["state"] == funnel.PROMISE_KEPT:
-            ws2.cell(row=at, column=14).fill = PatternFill("solid", fgColor="E3F2E1")
+            state_cell.fill = PatternFill("solid", fgColor="E3F2E1")
         elif x["state"] == funnel.PROMISE_BROKEN:
-            ws2.cell(row=at, column=14).fill = PatternFill("solid", fgColor="FAE3E0")
-    if ws2.max_row > 3:
-        ws2.auto_filter.ref = f"A3:{get_column_letter(len(PROMISE_COLUMNS))}{ws2.max_row}"
-    ws2.freeze_panes = "A4"
+            state_cell.fill = PatternFill("solid", fgColor="FAE3E0")
+    dress(ws2, PROMISE_COLUMNS, ws2.max_row, "A4")
 
     # --- Ранжирование по объёму обещания ------------------------------------
     # «Будем иметь понимание, с какими долгами умеем работать, срок просрочки,
     # сумму просрочки». Считаем по тем же обещаниям, что попали в зачёт KP/BP:
-    # иначе строки листа не сойдутся с колонками воронки.
-    counted = [x for x in promises if x["counted"]]
+    # иначе строки листа не сойдутся с колонками воронки. Внутри зачёта строки
+    # разложены ещё и по валютам — сомони с рублями не складываются нигде.
     ws3 = wb.create_sheet("Ранжирование")
-    head(ws3, RANGE_COLUMNS,
-         f"Исполнение обещаний по размеру · {rng['label']} "
-         f"({rng['from']} — {rng['to']})")
-    for title in funnel.AMOUNT_ORDER:
-        ws3.append(_range_line(title, [x for x in counted
-                                       if x["bucket"] == title]))
+    head(ws3, RANGE_COLUMNS, f"Исполнение обещаний по размеру · {window}",
+         f"Только обещания в зачёт KP/BP (колонка «В зачёт KP/BP» = «да» на "
+         f"листе «Обещания»): в зачёт идёт одно, последнее обещание должника. "
+         f"{gap} Каждая валюта своими строками — суммы разных валют не "
+         f"складываются, знак валюты в колонке «Валюта» и в формате ячейки.")
+    groups = sorted({(x["unit_text"], x["unit"]) for x in counted}) or [("", "")]
+    money_cols = [i + 1 for i, c in enumerate(RANGE_COLUMNS)
+                  if len(c) > 2 and c[2] == "money"]
+
+    def range_row(title: str, items: list[dict], unit_text: str, unit: str,
+                  bold: bool = False) -> None:
+        ws3.append(_range_line(title, items, unit_text))
+        for i in money_cols:
+            ws3.cell(row=ws3.max_row, column=i).number_format = _money_fmt(unit)
+        if bold:
+            for cell in ws3[ws3.max_row]:
+                cell.font = Font(bold=True)
+
+    for unit_text, unit in groups:
+        mine = [x for x in counted if x["unit_text"] == unit_text]
+        for title in funnel.AMOUNT_ORDER:
+            range_row(title, [x for x in mine if x["bucket"] == title],
+                      unit_text, unit)
     last3 = ws3.max_row
-    ws3.append(_range_line("Итого", counted))
-    for cell in ws3[ws3.max_row]:
-        cell.font = Font(bold=True)
-    for row in ws3.iter_rows(min_row=4, max_row=ws3.max_row):
-        for i, col in enumerate(RANGE_COLUMNS):
-            if len(col) > 2 and col[2] == "pct":
-                row[i].number_format = "0.0%"
-                row[i].fill = metric
-        for i in (8, 9, 10):
-            row[i].number_format = money_fmt
-    if last3 > 3:
-        ws3.auto_filter.ref = f"A3:{get_column_letter(len(RANGE_COLUMNS))}{last3}"
-    ws3.freeze_panes = "B4"
+    # Итоги — ПОД диапазоном фильтра и по одному на валюту: общий итог по всем
+    # валютам сразу был бы той самой суммой, которой не существует.
+    for unit_text, unit in groups:
+        range_row("Итого", [x for x in counted if x["unit_text"] == unit_text],
+                  unit_text, unit, bold=True)
+    dress(ws3, RANGE_COLUMNS, last3, "B4")
 
 
 def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> bytes:
-    """Та же статистика книгой: «Сотрудники», «Республики», «Выезды», «По дням»,
-    «Воронка», «Обещания», «Ранжирование».
+    """Та же статистика книгой: «Сотрудники», «Республики», «Выезды», «По дням»
+    и листы воронки (см. _funnel_sheets).
 
     Исходы разложены по столбцам — количество и деньги по каждому, — а столбцы
     собраны в блоки «Успешный выезд» и «Не успешный выезд» (просьба офиса
@@ -2145,6 +2335,17 @@ def daily_report_xlsx(mgr: dict, on_date: str,
             ws2.append([r["employee"], o["status"], o["n"]])
     for col, w in zip("ABC", (28, 28, 12)):
         ws2.column_dimensions[col].width = w
+
+    # Воронка Collection едет и в ВЕЧЕРНЕЙ книге — той самой, что уходит
+    # руководителям каждый вечер. До 22.09.2026 листы воронки собирались только
+    # в stats_xlsx, то есть по кнопке «⬇️ Excel» в приложении; на контуре
+    # компании, где Telegram выключен, до воронки было не добраться вовсе, а
+    # просили её именно в книге. Окно — тот самый день отчёта.
+    day_range = stats_range("today", today=db._as_date(on_date))
+    day_stats = stats_data(mgr, day_range, [r["employee"] for r in data["rows"]])
+    _funnel_sheets(wb, day_stats, day_stats["employees"],
+                   {c["code"]: c["name"] for c in day_stats["countries"]},
+                   day_range)
 
     buf = BytesIO()
     wb.save(buf)

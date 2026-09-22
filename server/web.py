@@ -2277,44 +2277,215 @@ async def _voice(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "text": text})
 
 
-async def _redeem(request: web.Request) -> web.Response:
-    """Обмен одноразового кода из ссылки бота на девайс-токен автономного PWA.
-    Код невалиден (использован/просрочен/чужой) → 410: клиент решает сам — если на
-    устройстве уже есть живой токен, продолжает тихо (повторное открытие той же
-    ссылки), иначе просит взять новую ссылку у бота."""
-    try:
-        code = str((await request.json()).get("code") or "").strip()
-    except Exception:  # noqa: BLE001
-        code = ""
-    token = db.redeem_app_link(code)
+# Классы устройств для ссылок входа. Короткое слово, а не сырой User-Agent: в
+# аудите и в пульте нужно «с чего зашёл», а полная строка UA — это и мусор на
+# экране, и лишний след. Суффикс «-pwa» значит «уже установленный ярлык» — такой
+# контекст сообщает о себе сам клиент (navigator.standalone), из UA его не видно.
+_AGENT_WEBVIEW = ("; wv)", "fb_iab", "fbav", "fban", "instagram", "line/",
+                  "micromessenger", "gsa/", "yandexsearch")
+_AGENT_DESKTOP = ("windows nt", "macintosh", "x11", "linux", "cros")
+
+
+def _agent_class(ua: str, standalone: bool = False) -> str:
+    """iphone / ipad / android / desktop / inapp / other (+ «-pwa» у ярлыка).
+
+    iOS определяем ПЕРВЫМ и не смотрим на встроенный браузер: именно открытому во
+    встроенном браузере айфону нужен запасной обмен на установку ярлыка, и класс
+    «inapp» отнял бы у него бонус.
+    """
+    u = (ua or "").lower()
+    if not u:
+        return "other"
+    if "ipad" in u:
+        base = "ipad"
+    elif "iphone" in u or "ipod" in u:
+        base = "iphone"
+    elif "android" in u:
+        base = "inapp" if any(m in u for m in _AGENT_WEBVIEW) else "android"
+    elif any(m in u for m in _AGENT_DESKTOP):
+        base = "desktop"
+    else:
+        base = "other"
+    return base + "-pwa" if standalone else base
+
+
+# Роботы предпросмотра ссылок. До этой работы обмен шёл только POST-ом, и «съесть»
+# ссылку предпросмотром было нельзя; у GET /i/<код> такая возможность появляется —
+# мессенджер, почта или антивирус открывают ссылку РАНЬШЕ человека и сжигают обмен.
+# Им отдаём страницу-заглушку, не трогая счётчик.
+_AGENT_PREFETCH = ("telegrambot", "whatsapp/", "facebookexternalhit", "twitterbot",
+                   "slackbot", "discordbot", "skypeuripreview", "vkshare", "viber",
+                   "linkedinbot", "googlebot", "bingbot", "bingpreview", "yandexbot",
+                   "applebot", "duckduckbot", "petalbot", "ahrefsbot", "semrushbot",
+                   "crawler", "spider", "headlesschrome", "preview")
+
+# Подсказка «этот браузер только что входил по ссылке»: имя и срок жизни куки,
+# которой /i/<код> узнаёт повторный тап. Пятнадцати минут хватает на весь путь
+# «открыл в мессенджере → переоткрыл в Safari → поставил ярлык», и они же не
+# дают подсказке зажиться на общем телефоне.
+_REOPEN_COOKIE = "hard_open"
+_REOPEN_TTL_S = 900
+
+# Заглушка для робота предпросмотра. Кода в ней нет — только человеку понятная
+# подпись и кнопка «войти» на тот же адрес с ?go=1: если живой браузер вдруг
+# опознан как робот, человек всё равно войдёт в одно касание.
+_LINK_PREVIEW_HTML = """<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Хард — вход</title></head>
+<body style="font-family:system-ui,sans-serif;text-align:center;padding:40px 16px">
+<h1 style="font-size:20px">Хард</h1>
+<p>Ссылка входа. Откройте её на рабочем телефоне.</p>
+<p><a href="?go=1" style="display:inline-block;padding:12px 20px;border-radius:12px;
+background:#1f6feb;color:#fff;text-decoration:none">Войти</a></p>
+</body></html>"""
+
+
+def _is_link_prefetch(ua: str) -> bool:
+    # Пустой User-Agent и всё, что не представилось браузером, — не человек:
+    # живые браузеры поголовно начинают строку с «Mozilla/5.0», а curl, wget,
+    # okhttp, Go-http-client и почтовые сканеры — нет. Дешевле одной проверкой
+    # отсечь всех разом, чем гнаться за списком роботов.
+    u = (ua or "").strip().lower()
+    return not u or "mozilla" not in u or any(m in u for m in _AGENT_PREFETCH)
+
+
+async def _app_login(request: web.Request) -> web.StreamResponse:
+    """GET /i/<код> — короткая ссылка входа: открыл и уже внутри.
+
+    Сервер сам меняет код на токен и уводит на «/#t=<токен>». Токен едет во
+    ФРАГМЕНТЕ: на сервер он при следующем запросе не попадёт, в access-логи и
+    Referer — тоже, а оболочка его уже понимает (absorbTokenFromUrl). Ни ввода
+    кода, ни бота, ни объяснений человеку — ровно то, ради чего это делалось.
+
+    Исчерпанная или чужая ссылка — не тупик: уводим на «/#link_dead=1», и оболочка
+    сперва пробует свой сохранённый токен (человек чаще всего уже внутри и просто
+    ткнул старый QR) и только потом показывает отказ.
+    """
+    # Перебор кодов считаем тем же счётчиком неудач, что у админ-ручек: /i/ —
+    # такая же дверь без пароля, и оставлять её без счёта нельзя.
+    _admin_too_many_fails(request)
+    code = (request.match_info.get("code") or "").strip()
+    ua = request.headers.get("User-Agent") or ""
+    no_store = {"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"}
+    if _is_link_prefetch(ua) and request.query.get("go") != "1":
+        return web.Response(text=_LINK_PREVIEW_HTML, content_type="text/html",
+                            headers=no_store)
+    agent = _agent_class(ua)
+    # Повторный тап ТОЙ ЖЕ ссылки в том же браузере не должен жечь обмен: в
+    # мессенджере по ссылке тыкают дважды чаще, чем кажется, а двухразовой
+    # ссылке это стоило бы обеих попыток ещё во встроенном браузере — до того,
+    # как человек вообще доберётся до Safari и ярлыка. У GET заголовка
+    # X-App-Token нет и быть не может, поэтому выданный токен кладётся в
+    # короткоживущую HttpOnly-куку с областью «/i/» и на повторе подаётся как
+    # keep_token: db.redeem_app_link вернёт его же, если он жив И принадлежит
+    # владельцу ЭТОЙ ссылки. Кука — только подсказка: ни одна ручка API по ней
+    # не пускает, доступ по-прежнему даёт исключительно заголовок.
+    token = db.redeem_app_link(code, agent=agent,
+                               keep_token=request.cookies.get(_REOPEN_COOKIE))
     if not token:
+        _admin_auth_failed(request, scope="app")
+        raise web.HTTPFound("/#link_dead=1", headers=no_store)
+    _admin_auth_ok(request, scope="app")
+    db.audit_access(db.uid_for_app_token(token) or 0, "app_login", detail=agent)
+    # «fresh=1» — метка «токен выдан ПРЯМО СЕЙЧАС тому, кто открыл эту ссылку».
+    # Без неё оболочка на устройстве, где кто-то уже входил, оставляла бы прежний
+    # токен: обмен ссылки сервер потратил, а человек оказывался в ЧУЖОМ портфеле.
+    # Метка едет во фрагменте (на сервер не вернётся) и живёт до первой удачной
+    # загрузки — stampTokenUrl переписывает адрес на чистое «#t=<токен>».
+    out = web.HTTPFound(f"/#t={token}&fresh=1", headers=no_store)
+    # Secure ставим только по настоящему https: в рабочем контуре впереди Caddy
+    # (X-Forwarded-Proto), а на голом http кука с Secure просто не сохранится, и
+    # повторный тап снова начал бы жечь обмены.
+    https = (request.headers.get("X-Forwarded-Proto") or request.scheme) == "https"
+    out.set_cookie(_REOPEN_COOKIE, token, max_age=_REOPEN_TTL_S, path="/i/",
+                   httponly=True, samesite="Lax", secure=https)
+    raise out
+
+
+async def _redeem(request: web.Request) -> web.Response:
+    """Обмен кода из ссылки на девайс-токен автономного PWA (старый путь «#link=»,
+    ручная вставка ссылки и ссылка, прилетевшая в уже открытую вкладку).
+
+    Тело: ``{code, token?, standalone?}``. `token` — то, что лежит на устройстве
+    сейчас: если он жив и принадлежит владельцу ссылки, сервер вернёт его же и
+    обмен НЕ потратит. Без этого двухразовая ссылка сгорала бы на перезагрузке
+    страницы и на второй попытке вставить ссылку руками.
+
+    Код невалиден (исчерпан/просрочен/чужой) → 410: клиент решает сам — если на
+    устройстве уже есть живой токен, продолжает тихо, иначе показывает отказ.
+    """
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    code = str(body.get("code") or "").strip()
+    keep = (str(body.get("token") or "").strip()
+            or (request.headers.get("X-App-Token") or "").strip())
+    agent = _agent_class(request.headers.get("User-Agent") or "",
+                         bool(body.get("standalone")))
+    _admin_too_many_fails(request)
+    token = db.redeem_app_link(code, agent=agent, keep_token=keep or None)
+    if not token:
+        _admin_auth_failed(request, scope="app")
         raise web.HTTPGone(text="link")
+    _admin_auth_ok(request, scope="app")
     uid = db.uid_for_app_token(token)
-    db.audit_access(uid or 0, "app_login")
+    db.audit_access(uid or 0, "app_login", detail=agent)
     return web.json_response({"ok": True, "token": token, "days": db.APP_TOKEN_DAYS})
 
 
 async def _admin_app_revoke(request: web.Request) -> web.Response:
-    """Отзыв доступа автономного приложения из пульта: {telegram_id}."""
+    """Отзыв доступа автономного приложения из пульта: ``{telegram_id, scope}``.
+
+    `scope="all"` (по умолчанию, как было) — и токены, и ссылки: человек выходит
+    везде. `scope="links"` — гасим только ссылки: выданный не тому QR умирает, а
+    телефон, который уже работает, не разлогинивается.
+    """
     _admin(request)
     body = await request.json()
     try:
         tid = int(body["telegram_id"])
     except (KeyError, TypeError, ValueError):
         raise web.HTTPBadRequest(text="telegram_id")
-    n = db.revoke_app_access(tid)
-    db.audit_access(tid, "app_revoke", detail=str(n))
-    return web.json_response({"ok": True, "revoked": n})
+    scope = "links" if str(body.get("scope") or "all") == "links" else "all"
+    n = db.revoke_app_access(tid, scope=scope)
+    db.audit_access(tid, "app_revoke", detail=f"{scope}:{n}")
+    return web.json_response({"ok": True, "revoked": n, "scope": scope})
+
+
+async def _admin_app_links(request: web.Request) -> web.Response:
+    """Состояние входов для раздела «Вход» в пульте: строка на человека.
+
+    Пульт сводит этот список со своим списком сотрудников реестра: кого здесь нет —
+    тому ссылку ещё не выдавали. Поля — см. db.app_links_state, плюс готовый `url`.
+
+    Адрес собирает сервер, а не пульт: пульт ходит на сервер по служебному адресу
+    (бывает и по IP), а телефон открывает публичный — собрав ссылку из своего
+    адреса, пульт нарисовал бы QR, который никуда не ведёт. Без MINIAPP_URL адрес
+    пустой, и это честнее выдуманного.
+    """
+    _admin(request)
+    base = os.getenv("MINIAPP_URL", "").strip().rstrip("/")
+    links = db.app_links_state()
+    for row in links:
+        row["url"] = f"{base}/i/{row['code']}" if base and row.get("code") else ""
+    return web.json_response({"links": links})
 
 
 async def _admin_app_link(request: web.Request) -> web.Response:
     """Ссылка входа в приложение из пульта — без Telegram.
 
-    Тело: ``{"employee": ФИО, "kind": "agent"|"courier"}`` либо
+    Тело: ``{"employee": ФИО, "kind": "agent"|"courier", "uses": N}`` либо
     ``{"telegram_id": id}``. У сотрудника без привязки создаётся служебная
     личность (db.local_identity_for), у привязанного — используется его id.
-    Ссылка та же, что выдаёт бот на слово «ссылка»: многоразовая в окне
-    активации, открывается на телефоне, приложение ставится на экран.
+    `uses` — сколько раз ссылку можно обменять (1..APP_LINK_MAX_USES, по умолчанию
+    два: браузер и отдельное хранилище ярлыка iOS). Сколько обменов останется у
+    конкретного телефона, сервер решит сам: айфону на первом открытии добавится +1.
+
+    Адрес короткий и путевой — ``<MINIAPP_URL>/i/<код>``: его видно целиком на
+    экране, он читается с QR и его можно продиктовать. Открыл — и уже внутри.
     """
     _admin(request)
     try:
@@ -2353,14 +2524,30 @@ async def _admin_app_link(request: web.Request) -> web.Response:
         if not employee:
             return web.json_response({"error": "employee required"}, status=400)
         tid, created = db.local_identity_for(employee, kind)
-    code = db.create_app_link(tid)
+    raw_uses = body.get("uses")
+    if raw_uses in (None, ""):
+        uses = db.APP_LINK_DEFAULT_USES
+    else:
+        try:
+            uses = int(raw_uses)
+        except (TypeError, ValueError):
+            return web.json_response({"error": "uses"}, status=400)
+        if not 1 <= uses <= db.APP_LINK_MAX_USES:
+            return web.json_response(
+                {"error": f"uses: от 1 до {db.APP_LINK_MAX_USES}"}, status=400)
+    code = db.create_app_link(tid, max_uses=uses)
     db.audit_access(tid, "app_link_issued_admin", detail=employee)
     return web.json_response({
         "ok": True,
         "telegram_id": tid,
         "employee": employee,
-        "url": f"{base}/#link={code}",
+        "code": code,
+        "url": f"{base}/i/{code}",
+        "uses": 0,
+        "max_uses": uses,
         "days": db.APP_LINK_DAYS,
+        "expires_at": db.app_link_expires_at(
+            datetime.now().isoformat(timespec="seconds")),
         "local_identity": db.is_local_uid(tid),
         "created": created,
     })
@@ -3408,7 +3595,15 @@ def _admin(request: web.Request) -> None:
 # лимит на частоту мешал бы штатной пакетной работе пульта, а перебор он всё
 # равно почти не замедляет. Память процесса, без базы: перезапуск обнуляет —
 # этого достаточно, чтобы подбор перестал быть дешёвым.
-_ADMIN_FAILS: dict[str, list[float]] = {}
+#
+# У каждой неудачи есть ПОМЕТКА, чья это дверь: "admin" — мастер-ключ, токен
+# устройства, код привязки пульта; "app" — код ссылки входа выездника. Считаются
+# они вместе (одно окно на адрес), а вот обнуляются порознь, и это главное:
+# удачный вход по своей ссылке — не пароль и достаётся даром (с живым токеном он
+# даже не тратит обмен), поэтому обнулять им счётчик ЧУЖИХ неудач нельзя. Иначе
+# цикл «19 попыток мастер-ключа + одно открытие своей ссылки» давал бы с одного
+# адреса бесконечный перебор ключа и одноразовых кодов привязки.
+_ADMIN_FAILS: dict[str, list[tuple[float, str]]] = {}
 _ADMIN_FAIL_WINDOW = 300.0   # секунд
 _ADMIN_FAIL_LIMIT = 20       # неудач за окно с одного адреса
 
@@ -3418,26 +3613,40 @@ def _admin_peer(request: web.Request) -> str:
     return forwarded or (request.remote or "?")
 
 
-def _admin_auth_ok(request: web.Request) -> None:
-    _ADMIN_FAILS.pop(_admin_peer(request), None)
+def _admin_auth_ok(request: web.Request, scope: str = "admin") -> None:
+    """Удача снимает неудачи СВОЕЙ двери.
+
+    `scope="admin"` — доказано владение ключом/токеном устройства, прощаем всё.
+    `scope="app"` — доказано лишь то, что у человека живая ссылка входа: снимаем
+    только его же промахи по ссылкам, счётчик админских дверей не трогаем.
+    """
+    peer = _admin_peer(request)
+    if scope == "admin":
+        _ADMIN_FAILS.pop(peer, None)
+        return
+    rest = [f for f in _ADMIN_FAILS.get(peer, []) if f[1] != scope]
+    if rest:
+        _ADMIN_FAILS[peer] = rest
+    else:
+        _ADMIN_FAILS.pop(peer, None)
 
 
-def _admin_auth_failed(request: web.Request) -> None:
+def _admin_auth_failed(request: web.Request, scope: str = "admin") -> None:
     peer = _admin_peer(request)
     now = time.monotonic()
-    fails = [t for t in _ADMIN_FAILS.get(peer, []) if now - t < _ADMIN_FAIL_WINDOW]
-    fails.append(now)
+    fails = [f for f in _ADMIN_FAILS.get(peer, []) if now - f[0] < _ADMIN_FAIL_WINDOW]
+    fails.append((now, scope))
     _ADMIN_FAILS[peer] = fails
     if len(_ADMIN_FAILS) > 1000:      # чтобы словарь не рос от случайного шума
         for stale in [k for k, v in _ADMIN_FAILS.items()
-                      if not v or now - v[-1] > _ADMIN_FAIL_WINDOW]:
+                      if not v or now - v[-1][0] > _ADMIN_FAIL_WINDOW]:
             _ADMIN_FAILS.pop(stale, None)
 
 
 def _admin_too_many_fails(request: web.Request) -> None:
     peer = _admin_peer(request)
     now = time.monotonic()
-    fails = [t for t in _ADMIN_FAILS.get(peer, []) if now - t < _ADMIN_FAIL_WINDOW]
+    fails = [f for f in _ADMIN_FAILS.get(peer, []) if now - f[0] < _ADMIN_FAIL_WINDOW]
     _ADMIN_FAILS[peer] = fails
     if len(fails) >= _ADMIN_FAIL_LIMIT:
         raise web.HTTPTooManyRequests(text="too many attempts",
@@ -4738,6 +4947,9 @@ def build_app(bot=None) -> web.Application:
     app = web.Application(client_max_size=256 * 1024 * 1024, middlewares=[_cors])
     app["bot"] = bot
     app.router.add_get("/", _index)
+    # Короткая ссылка входа. Путь из одной буквы — чтобы адрес целиком помещался
+    # на экране телефона и читался вслух: «слэш и — и двенадцать знаков».
+    app.router.add_get("/i/{code}", _app_login)
     app.router.add_get("/version.json", _version)
     app.router.add_get("/sw.js", _sw)
     app.router.add_get("/manifest.webmanifest", _manifest)
@@ -4848,6 +5060,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/redeem", _redeem)
     app.router.add_post("/admin/app_revoke", _admin_app_revoke)
     app.router.add_post("/admin/app_link.json", _admin_app_link)
+    app.router.add_get("/admin/app_links.json", _admin_app_links)
     app.router.add_post("/api/bind", _bind)
     app.router.add_post("/api/marker", _marker)
     app.router.add_get("/api/markers", _markers)

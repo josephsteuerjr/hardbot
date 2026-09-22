@@ -124,7 +124,10 @@ def test_xlsx_has_a_row_per_employee_and_a_total():
                                     employees=[EMP_A, EMP_B, EMP_IDLE])
         assert blob[:2] == b"PK"
         wb = load_workbook(io.BytesIO(blob))
-        assert wb.sheetnames == ["Сводка", "Исходы за день"]
+        # Воронка едет и в вечерней книге (22.09.2026): на контуре компании
+        # Telegram выключен, и кнопка «⬇️ Excel» в приложении — не дорога.
+        assert wb.sheetnames[:2] == ["Сводка", "Исходы за день"]
+        assert "Воронка" in wb.sheetnames and "Обещания" in wb.sheetnames
         ws = wb["Сводка"]
         head = [c.value for c in ws[3]]
         assert head[:5] == ["Сотрудник", "Республика", "Закреплено должников",
