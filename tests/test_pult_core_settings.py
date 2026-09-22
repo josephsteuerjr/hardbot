@@ -12,14 +12,22 @@ def test_default_path_is_the_historical_file():
     assert SETTINGS_PATH.parent.name == "pult"
 
 
-def test_missing_or_broken_file_gives_empty_settings(tmp_path):
-    assert dict(Settings.load(tmp_path / "нет.json")) == {}
+def test_missing_or_broken_file_gives_default_contour(tmp_path):
+    """Пустой файл — это не ноль ключей, а один пустой контур «Прод».
+
+    Пульт обязан открыться и показать экран привязки, а не падать на
+    отсутствии структуры.
+    """
+    from pult.core.settings import DEFAULT_PROFILE
+    fresh = Settings.load(tmp_path / "нет.json")
+    assert fresh["profiles"][DEFAULT_PROFILE] == {"url": "", "device_token": ""}
+    assert fresh["active"] == DEFAULT_PROFILE
     broken = tmp_path / "битые.json"
     broken.write_text("{не json", encoding="utf-8")
-    assert dict(Settings.load(broken)) == {}
+    assert Settings.load(broken)["active"] == DEFAULT_PROFILE
     listing = tmp_path / "список.json"
     listing.write_text("[1, 2]", encoding="utf-8")
-    assert dict(Settings.load(listing)) == {}
+    assert Settings.load(listing)["active"] == DEFAULT_PROFILE
 
 
 def test_roundtrip_keeps_keys_and_cyrillic(tmp_path):
@@ -42,7 +50,8 @@ def test_save_failure_is_quiet(tmp_path):
 
 
 def test_settings_is_a_plain_dict_for_the_window():
-    s = Settings({"url": "u"})
-    assert s.get("url") == "u"
-    s.pop("url")
+    s = Settings({"profiles": {"Один": {"url": "u"}}})
+    assert s["profiles"]["Один"]["url"] == "u"
+    s.pop("profiles")
+    s.pop("active", None)
     assert json.dumps(dict(s)) == "{}"

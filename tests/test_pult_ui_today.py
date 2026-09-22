@@ -91,12 +91,15 @@ def window(app, tmp_path):
 def test_sections_are_reorganised(app, window):
     keys = [s for s, _ in SECTIONS]
     assert keys == ["dash", "links", "people", "mgrs", "channels", "registry",
-                    "prio", "conn"]
+                    "prio", "conn", "maint"]
     assert "activity" not in keys, "«Активность» слилась с «Сотрудниками»"
     assert keys.index("links") < keys.index("people"), (
         "«Вход» стоит раньше «Сотрудников»: без Telegram выдача ссылок — главное действие")
+    assert keys.index("maint") == len(keys) - 1, (
+        "«Обслуживание» стоит последним: это работа не каждого дня")
     assert set(window.pages) == set(keys)
     assert LAZY["dash"] == "load_today" and LAZY["channels"] == "load_channels"
+    assert LAZY["maint"] == "maint_load"
     window.nav("channels")
     assert window.sec_title.text() == "Каналы"
     assert hasattr(window, "chats_list") and hasattr(window, "dig_time")

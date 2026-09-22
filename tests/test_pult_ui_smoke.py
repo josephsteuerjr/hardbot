@@ -37,12 +37,15 @@ def window(app, tmp_path):
 
 
 def test_window_title_and_sections(app, window):
-    assert window.windowTitle() == "Хард · Пульт"
+    # Заголовок называет активный контур: с двумя серверами «куда я смотрю» —
+    # первый вопрос, и он решается взглядом на окно.
+    assert window.windowTitle() == f"Хард · Пульт — {window.profile}"
     assert set(window.pages) == {sec for sec, _ in SECTIONS}
     for sec, _ in SECTIONS:
         window.nav(sec)
         assert window.stack.currentWidget() is window.pages[sec]
-    assert window.sec_title.text() == "Подключение"
+    assert window.sec_title.text() == "Обслуживание"
+    window.nav("conn")
     assert window.settings["sec"] == "conn"
 
 

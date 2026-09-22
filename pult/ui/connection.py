@@ -1,16 +1,30 @@
-"""Раздел «Подключение»: сервер и ключ, привязка устройства, токен бота."""
+"""Раздел «Подключение»: контуры серверов, привязка устройства, токен бота."""
 
 from __future__ import annotations
 
 from ..core import devices as dv
 from ..core import managers as mg
+from ..core.settings import active_profile
 from . import dialogs
-from .widgets import Button, Card, Field, Note, Page, Rows, label
+from .widgets import Button, Card, Combo, Field, Note, Page, Rows, label
 
 
 class ConnectionSection:
     def build_conn(self) -> Page:
         page = Page()
+        pc = Card("Контуры",
+                  "Каждый сервер — свой контур: свой адрес и свой токен "
+                  "устройства. Активный контур подписан в шапке каждого раздела "
+                  "и в заголовке окна. Ярлык может открывать пульт сразу в "
+                  "нужном контуре: «Пульт.pyw --contour Имя».")
+        self.profile_combo = pc.add(Combo(width_chars=18))
+        pc.add_row(self.profile_combo,
+                   Button("Переключиться", self.contour_switch, kind="accent"),
+                   Button("Добавить…", self.contour_add),
+                   Button("Переименовать…", self.contour_rename),
+                   Button("Удалить", self.contour_remove))
+        page.add(pc)
+
         sc = Card("Сервер")
         sc.add(label("Адрес сервера", "small"))
         self.url_entry = sc.add(Field(self.url))
@@ -67,7 +81,77 @@ class ConnectionSection:
                    Button("Стереть координаты", self.forget_geo), spacing_before=4)
         self.geo_out = gc.add(Note("", "small"))
         page.add(gc)
+        self.apply_profile()
         return page
+
+    # --- контуры --------------------------------------------------------------
+    def apply_profile(self) -> None:
+        """Синхронизировать раздел с активным контуром — после переключения."""
+        if not hasattr(self, "profile_combo"):
+            return
+        self.profile_combo.set_values(list(self.settings.get("profiles") or {}))
+        idx = self.profile_combo.findText(self.profile)
+        if idx >= 0:
+            self.profile_combo.set_current(idx)
+        self.url_entry.set(self.url)
+        self.key_entry.set("")
+        self._key_state()
+        self.dev_frame.clear()
+        self.dev_frame.set_empty("Устройства этого контура — «Обновить список»")
+
+    def contour_switch(self) -> None:
+        name = self.profile_combo.get()
+        if name == self.profile:
+            self.toast("Это и есть активный контур")
+            return
+        if not self.ask_yes_no(
+                "Переключить контур",
+                f"Переключиться на «{name}»?\n\nНезавершённые выборы (сотрудники, "
+                "книги) сбросятся — они относились к «{self.profile}»."):
+            return
+        self.switch_profile(name)
+
+    def contour_add(self) -> None:
+        name = dialogs.askstring("Новый контур", "Как назвать сервер?\n"
+                                 "Например: Компания, Тест.", parent=self)
+        if not name or not name.strip():
+            return
+        url = dialogs.askstring("Адрес сервера", "Адрес (https://…):", parent=self)
+        if url is None:
+            return
+        if not self.profile_add(name.strip(), url.strip()):
+            self.toast("Контур с таким именем уже есть", err=True)
+            return
+        self.apply_profile()
+        self.toast(f"Контур «{name.strip()}» добавлен — переключись к нему в списке")
+
+    def contour_rename(self) -> None:
+        old = self.profile_combo.get()
+        new = dialogs.askstring("Переименовать контур",
+                                f"Новое имя для «{old}»:", initialvalue=old,
+                                parent=self)
+        if not new or not new.strip() or new.strip() == old:
+            return
+        if not self.profile_rename(old, new.strip()):
+            self.toast("Контур с таким именем уже есть", err=True)
+            return
+        self.apply_profile()
+
+    def contour_remove(self) -> None:
+        name = self.profile_combo.get()
+        if name == self.profile:
+            self.toast("Сначала переключись на другой контур — активный не удаляется",
+                       err=True)
+            return
+        if not self.ask_yes_no("Удалить контур",
+                               f"Удалить контур «{name}»?\n\nТокен устройства "
+                               "останется жить на сервере — при возврате контур "
+                               "придётся привязать заново."):
+            return
+        if not self.profile_remove(name):
+            self.toast("Последний контур удалить нельзя", err=True)
+            return
+        self.apply_profile()
 
     # --- координаты фото -------------------------------------------------------
     def _show_geo_state(self, d: dict):
@@ -166,7 +250,7 @@ class ConnectionSection:
     def _device_bound(self, token: str, message: str) -> None:
         """Общий хвост обеих привязок: сохранить токен и забыть ключ."""
         self.device_token = token
-        self.settings["device_token"] = token
+        active_profile(self.settings)["device_token"] = token
         # Ключ НЕ сохраняем — в этом весь смысл: на диске остаётся токен,
         # который отзывается по одному и работает только с этой машины.
         self.settings.pop("key", None)
@@ -224,6 +308,7 @@ class ConnectionSection:
         if not self.ask_yes_no("Отвязать устройство", dv.UNBIND_TEXT):
             return
         self.device_token = ""
+        active_profile(self.settings).pop("device_token", None)
         self.settings.pop("device_token", None)
         self._save_settings()
         self.connected = False

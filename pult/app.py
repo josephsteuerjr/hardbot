@@ -53,6 +53,26 @@ def fatal(title: str, text: str) -> None:
     raise SystemExit(1)
 
 
+def _split_contour(argv: list[str] | None) -> tuple[str, list[str]]:
+    """Вынуть `--contour Имя` (или `--contour=Имя`) из аргументов запуска.
+
+    Ярлык «Пульт · Компания» — это `Пульт.pyw --contour Компания`: окно
+    открывается сразу в нужном сервере. Неизвестное имя — обычный старт.
+    """
+    args = list(argv if argv is not None else sys.argv[1:])
+    name = ""
+    if "--contour" in args:
+        i = args.index("--contour")
+        del args[i]
+        if i < len(args) and not args[i].startswith("-"):
+            name = args.pop(i)
+    for a in list(args):
+        if a.startswith("--contour="):
+            args.remove(a)
+            name = a.split("=", 1)[1]
+    return name, args
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         from PySide6.QtWidgets import QApplication
@@ -61,14 +81,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     from .ui import theme
 
-    app = QApplication.instance() or QApplication(argv if argv is not None else sys.argv)
+    contour, rest = _split_contour(argv)
+    app = QApplication.instance() or QApplication(rest)
     app.setApplicationName(APP_TITLE)
     app.setOrganizationName("Хард")
     theme.apply(app)
     try:
         bootstrap.ensure_hardbot()
         from .ui.main_window import Pult
-        window = Pult()
+        window = Pult(profile=contour)
     except StartupError as exc:
         fatal(exc.title, exc.text)
         return 1

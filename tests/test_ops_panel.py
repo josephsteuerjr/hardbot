@@ -1,8 +1,9 @@
-"""Панель инженера: роли не пересекаются, данные не видны, страница открыта.
+"""Панель обслуживания: роли, данные не видны, страница открыта.
 
-Главное свойство: панель обслуживания НЕ ВИДИТ должников, а пульт аналитика не
-попадает в панель. Это две разные роли одного механизма устройств, и если бы
-граница держалась на «токен есть — значит свой», она стёрлась бы молча.
+Главное свойство: панель обслуживания НЕ ВИДИТ должников, а инженер панели не
+попадает в данные пульта. Обслуживание открыто обеим ролям устройств — инженер
+входит веб-страницей, аналитик пультом, — но роли остаются раздельными для
+отзыва, и граница с данными держится отдельно.
 """
 
 import asyncio
@@ -50,13 +51,14 @@ def _device(role, fingerprint):
 OPS_PATHS = ("/ops/state.json", "/ops/devices.json")
 
 
-def test_operator_token_cannot_open_the_panel(monkeypatch):
-    """Пульт аналитика в обслуживание сервера не попадает."""
+def test_operator_token_opens_the_panel(monkeypatch):
+    """Пульт аналитика — тоже консоль обслуживания («гипотетический инженер»
+    переехал в пульт). Без этого владелец зависел бы от того, кто держит SSH."""
     _fresh(monkeypatch)
     pult = _device("operator", "fp-pult")
     for path in OPS_PATHS:
-        status, _ = _call("GET", path, headers=pult)
-        assert status == 401, f"пульт пустили в {path}"
+        status, body = _call("GET", path, headers=pult)
+        assert status == 200, f"пульт не пустили в {path}"
 
 
 def test_engineer_token_cannot_see_debtors(monkeypatch):
@@ -118,6 +120,33 @@ def test_engineer_issues_codes_only_for_the_pult(monkeypatch):
     status, body = _call("POST", "/ops/code.json", headers=engineer,
                          json_body={"name": "Вторая панель", "role": "engineer"})
     assert status == 400 and "командой на сервере" in body["error"]
+
+
+def test_operator_issues_codes_only_for_the_pult(monkeypatch):
+    """Аналитик из пульта выдаёт коды только пультам — то же правило, что у
+    инженера: вторую ПАНЕЛЬ не заводит никто, кроме того, кто у сервера."""
+    _fresh(monkeypatch)
+    pult = _device("operator", "fp-pult")
+    status, body = _call("POST", "/ops/code.json", headers=pult,
+                         json_body={"name": "Ноут второго аналитика",
+                                    "role": "operator"})
+    assert status == 200 and body["role"] == "operator"
+
+    status, body = _call("POST", "/ops/code.json", headers=pult,
+                         json_body={"name": "Панель инженера", "role": "engineer"})
+    assert status == 400 and "командой на сервере" in body["error"]
+
+
+def test_operator_cannot_revoke_the_device_he_works_from(monkeypatch):
+    """Само-отзыв закрыт и пульту: «пульт сломался» лечится только кодом
+    с сервера, и это осознанно."""
+    _fresh(monkeypatch)
+    made = db.enroll_admin_device("fp-pult", "Пульт", "operator")
+    headers = {"X-Device-Token": made["token"], "X-Device-Id": "fp-pult"}
+    status, body = _call("POST", "/ops/device/revoke.json", headers=headers,
+                         json_body={"id": made["id"]})
+    assert status == 400 and "из которого вы работаете" in body["error"]
+    assert db.admin_device_by_token(made["token"], "fp-pult"), "устройство всё-таки отозвано"
 
 
 def test_engineer_cannot_revoke_the_device_he_works_from(monkeypatch):

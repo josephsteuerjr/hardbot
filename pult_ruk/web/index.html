@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#1c6b58">
+<title>Хард — пульт руководителя</title>
+<link rel="stylesheet" href="ui.css">
+<script>
+// Тема выбирается ДО первой отрисовки: иначе тёмный пульт на секунду мигает
+// белым, и это первое, что видит человек, открывший его ночью с телефона.
+// Значение своё в каждом браузере — на компьютере и на телефоне может не
+// совпадать, и это правильно: свет вокруг у них разный.
+(function () {
+    var saved = null;
+    try { saved = localStorage.getItem('hard-ruk-theme'); } catch (e) { saved = null; }
+    document.documentElement.dataset.theme =
+        (saved === 'light' || saved === 'dark') ? saved : 'auto';
+})();
+</script>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%231c6b58'/%3E%3Ctext x='16' y='23' font-family='system-ui' font-size='19' font-weight='700' fill='white' text-anchor='middle'%3EХ%3C/text%3E%3C/svg%3E">
+</head>
+<!--
+  Разметка пульта руководителя. Контракт для app.js — ровно этот файл:
+
+  • экран = <section class="screen" data-screen="today|people|promises|report|me">,
+    показывается ровно один (остальным ставится hidden);
+  • переключение — по data-go="<экран>" на кнопках рейки и нижних вкладок;
+  • всё, что заполняется данными, помечено id и НЕ содержит верстки-заглушки:
+    app.js рисует содержимое сам, чтобы не было двух источников правды;
+  • ничего не грузится с внешних адресов: ни шрифтов, ни библиотек. Пульт
+    обязан открываться в самолёте, в офисе без интернета и на телефоне
+    через тоннель, где каждый лишний запрос — секунда ожидания.
+-->
+<body>
+
+<div class="app" id="app" hidden>
+
+  <nav class="rail" aria-label="Разделы">
+    <div class="rail__brand"><b>Хард</b><span>пульт руководителя</span></div>
+
+    <button class="rail__item" data-go="today" aria-current="page">Сегодня</button>
+    <button class="rail__item" data-go="people">Люди</button>
+    <button class="rail__item" data-go="promises">Обещания<span class="badge" id="rail-promises" hidden>0</span></button>
+    <button class="rail__item" data-go="report">Отчёт</button>
+
+    <div class="rail__foot">
+      <button class="rail__item rail__me" data-go="me">
+        <span class="row__face" id="rail-face">—</span>
+        <span class="rail__me-body">
+          <span class="rail__me-name" id="rail-name">Я и телефон</span>
+          <span class="rail__me-note" id="rail-scope"></span>
+        </span>
+      </button>
+    </div>
+  </nav>
+
+  <main class="page">
+
+    <!-- Одна строка связи на все экраны: «связь потеряна в 14:32». Стоит над
+         шапкой текущего экрана и НЕ убирает данные — руководителю полезнее
+         вчерашнее число с отметкой «связи нет», чем пустой экран. -->
+    <div class="fail" id="conn-fail" hidden></div>
+
+    <!-- ── Сегодня ────────────────────────────────────────────────────── -->
+    <section class="screen" data-screen="today">
+      <div class="head">
+        <h1 id="today-title">Сегодня</h1>
+        <span class="stamp" id="today-stamp"></span>
+      </div>
+
+      <div class="pills" id="today-days" role="group" aria-label="День"></div>
+
+      <button class="bubble" data-go="people" id="today-lead">
+        <div class="num num--lead" id="today-persons">—</div>
+        <div class="label" id="today-persons-label">должников обработано</div>
+        <div class="chips lead__aside" id="today-aside"></div>
+      </button>
+
+      <div class="grid" id="today-grid"></div>
+
+      <div class="bubble">
+        <div class="bubble__title">Кто работал</div>
+        <div class="rows" id="today-people"></div>
+      </div>
+    </section>
+
+    <!-- ── Люди ───────────────────────────────────────────────────────── -->
+    <section class="screen" data-screen="people" hidden>
+      <div class="head">
+        <h1>Люди</h1>
+        <span class="stamp" id="people-stamp"></span>
+      </div>
+      <div class="pills" id="people-filters" role="group" aria-label="Кого показать"></div>
+      <div class="bubble">
+        <div class="rows" id="people-rows"></div>
+      </div>
+    </section>
+
+    <!-- ── Обещания ───────────────────────────────────────────────────── -->
+    <section class="screen" data-screen="promises" hidden>
+      <div class="head">
+        <h1>Просроченные обещания</h1>
+        <span class="stamp" id="promises-stamp"></span>
+      </div>
+      <p class="note">Должник обещал заплатить и не заплатил. Неделя назад и позже — значит, пора спрашивать с выездника.</p>
+      <div class="bubble">
+        <div class="rows" id="promises-rows"></div>
+      </div>
+    </section>
+
+    <!-- ── Отчёт ──────────────────────────────────────────────────────── -->
+    <section class="screen" data-screen="report" hidden>
+      <div class="head">
+        <h1>Отчёт</h1>
+        <!-- Какие именно дни попали в «неделю» и когда посчитано: без этого
+             пилюля «Неделя» — обещание, а не факт. -->
+        <span class="stamp" id="report-stamp"></span>
+      </div>
+      <div class="bubble">
+        <div class="bubble__title">Период</div>
+        <div class="pills" id="report-period" role="group" aria-label="Период"></div>
+        <div class="more">
+          <div class="grid" id="report-totals"></div>
+          <div class="btns">
+            <button class="btn btn--primary" id="report-xlsx">Скачать книгу Excel</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Я и телефон ────────────────────────────────────────────────── -->
+    <section class="screen" data-screen="me" hidden>
+      <div class="head">
+        <h1>Я и телефон</h1>
+      </div>
+
+      <div class="bubble">
+        <div class="bubble__title">Кто я</div>
+        <div class="num" id="me-name">—</div>
+        <div class="label" id="me-scope"></div>
+        <div class="label" id="me-server-now"></div>
+      </div>
+
+      <!-- Переключение серверов появляется только когда их больше одного:
+           прод и контур компании. Ссылка входа сама заводит сервер, здесь
+           лишь выбор из знакомых. -->
+      <div class="bubble" id="me-server" hidden>
+        <div class="bubble__title">Сервер</div>
+        <p class="note">Ссылка входа сама называет сервер. Переключение не трогает чужой токен — вернуться можно без новой ссылки.</p>
+        <div class="btns" id="me-server-rows"></div>
+      </div>
+
+      <div class="bubble" id="me-phone">
+        <div class="bubble__title">Открыть на телефоне</div>
+        <p class="note" id="phone-note">Пока пульт открыт на этом компьютере, его можно открыть и с телефона — по этому коду.</p>
+        <img class="qr" id="phone-qr" alt="Код для телефона" hidden>
+        <div class="btns">
+          <button class="btn btn--primary" id="phone-start">Включить телефон</button>
+          <button class="btn" id="phone-stop" hidden>Выключить</button>
+        </div>
+        <div class="more" id="phone-details" hidden>
+          <div class="note" id="phone-url"></div>
+          <div class="note">Код-пропуск: <b id="phone-pin"></b> — его спросят один раз при первом открытии.</div>
+        </div>
+      </div>
+
+      <div class="bubble">
+        <div class="bubble__title">Вид</div>
+        <div class="theme" id="me-theme" role="radiogroup" aria-label="Оформление">
+          <button type="button" role="radio" data-theme="light" aria-checked="false">Светлая</button>
+          <button type="button" role="radio" data-theme="dark" aria-checked="false">Тёмная</button>
+          <button type="button" role="radio" data-theme="auto" aria-checked="true">Как в системе</button>
+        </div>
+        <p class="note note--tiny">Выбор запоминается в этом браузере: на компьютере и на телефоне он свой — свет вокруг разный.</p>
+      </div>
+
+      <div class="bubble">
+        <div class="bubble__title">Что мне приходит</div>
+        <div id="me-switches"></div>
+      </div>
+
+      <div class="btns">
+        <button class="btn btn--danger" id="me-out">Выйти из пульта</button>
+      </div>
+    </section>
+
+  </main>
+
+  <nav class="tabs" aria-label="Разделы">
+    <button class="tabs__item" data-go="today" aria-current="page"><b>·</b>Сегодня</button>
+    <button class="tabs__item" data-go="people"><b>·</b>Люди</button>
+    <button class="tabs__item" data-go="promises"><b>·</b>Обещания<span class="badge" id="tab-promises" hidden></span></button>
+    <button class="tabs__item" data-go="me"><b>·</b>Я</button>
+  </nav>
+</div>
+
+<!-- ── Вход: первый запуск и телефон ────────────────────────────────────── -->
+<div class="center" id="gate">
+  <div class="bubble">
+    <h1 id="gate-title">Пульт руководителя</h1>
+    <p class="note" id="gate-note">Вставьте свою ссылку входа — ту, что выдал аналитик. Дальше пульт запомнит вас и спрашивать не будет.</p>
+    <div class="more">
+      <input class="field" id="gate-input" inputmode="text" autocomplete="off" placeholder="https://…/i/код">
+      <div class="fail" id="gate-fail" hidden></div>
+      <button class="btn btn--primary btn--wide" id="gate-go">Войти</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js" type="module"></script>
+</body>
+</html>

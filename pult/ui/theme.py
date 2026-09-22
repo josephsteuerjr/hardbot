@@ -156,6 +156,12 @@ QLineEdit {{ background: {ALT}; border: 1px solid transparent; border-radius: {R
 QLineEdit:focus {{ border-color: {ACCENT}; }}
 QLineEdit:disabled {{ color: {MUTED}; background: {BG}; }}
 
+/* Журнал операций раздела «Обслуживание»: вывод доктора и логов — моноширинно
+   на вторичной заливке, без рамки: это продолжение панели, а не терминал. */
+QPlainTextEdit#OpsLog {{ background: {ALT}; border: none; border-radius: {RADIUS}px;
+    padding: 10px 14px; font-family: "Cascadia Mono", Consolas, monospace;
+    font-size: {TINY_PT}pt; color: {TEXT}; }}
+
 QComboBox {{ background: {ALT}; border: 1px solid transparent; border-radius: {RADIUS}px;
     padding: 8px 28px 8px 12px; }}
 QComboBox:focus {{ border-color: {ACCENT}; }}

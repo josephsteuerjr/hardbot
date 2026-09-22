@@ -19,12 +19,13 @@ from ..core import api as api_client
 from ..core.bootstrap import APP_DIR
 from ..core.constants import DEFAULT_KEY, DEFAULT_URL
 from ..core.import_flow import ImportFlow
-from ..core.settings import Settings
+from ..core.settings import Settings, active_profile, ensure_profiles
 from . import dialogs
 from .channels import ChannelsSection
 from .connection import ConnectionSection
 from .dashboard import DashboardSection
 from .links import LinksSection
+from .maintenance import MaintenanceSection
 from .managers import ManagersSection
 from .nav import SECTIONS, TITLES, NavRail
 from .people import PeopleSection
@@ -35,23 +36,29 @@ from .widgets import Button, Note, Toast, label
 
 ICON_PATH = APP_DIR / "icon.png"
 LAZY = {"dash": "load_today", "prio": "load_priority", "people": "load_people",
-        "links": "load_links", "mgrs": "load_managers", "channels": "load_channels"}
+        "links": "load_links", "mgrs": "load_managers", "channels": "load_channels",
+        "maint": "maint_load"}
 
 
 class Pult(QMainWindow, ImportFlow, DashboardSection, RegistrySection, PrioritySection,
            LinksSection, PeopleSection, ManagersSection, ChannelsSection,
-           ConnectionSection):
+           ConnectionSection, MaintenanceSection):
     invoke = Signal(object)
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Settings | None = None,
+                 profile: str = "") -> None:
         super().__init__()
-        self.setWindowTitle("Хард · Пульт")
-        if ICON_PATH.is_file():
-            self.setWindowIcon(QIcon(str(ICON_PATH)))
         self.settings = settings if settings is not None else Settings.load()
-        self.url = self.settings.get("url", DEFAULT_URL)
-        self.key = self.settings.get("key", DEFAULT_KEY)
-        self.device_token = self.settings.get("device_token", "")
+        if profile and profile in (self.settings.get("profiles") or {}):
+            # Ярлык «Пульт.pyw --contour Компания» открывает окно сразу в нужном
+            # контуре; нет такого имени — молча обычный старт, а не ошибка.
+            self.settings["active"] = profile
+        ensure_profiles(self.settings)
+        self.profile = self.settings["active"]
+        current = active_profile(self.settings)
+        self.url = current.get("url", DEFAULT_URL)
+        self.key = current.get("key", DEFAULT_KEY)
+        self.device_token = current.get("device_token", "")
         self.imp_book: dict = {}          # выбранная книга: путь, грид, вид источника
         self.imp_selected: set[str] = set()   # кого из сотрудников грузим
         self.db_employees: list[dict] = []    # фактические портфели последнего /stats
@@ -80,6 +87,7 @@ class Pult(QMainWindow, ImportFlow, DashboardSection, RegistrySection, PriorityS
 
         self.tasks = TaskRunner(self)
         self.invoke.connect(lambda fn: fn())
+        self._apply_contour_ui()
         self._build()
         self._place()
         has_credentials = bool(self.key or self.device_token)
@@ -116,6 +124,12 @@ class Pult(QMainWindow, ImportFlow, DashboardSection, RegistrySection, PriorityS
         bar.setContentsMargins(26, 14, 26, 10)
         self.sec_title = label("Сегодня", "h1")
         bar.addWidget(self.sec_title)
+        bar.addSpacing(14)
+        # Метка контура стоит в шапке КАЖДОГО раздела: с двумя серверами
+        # «куда я смотрю» — первый вопрос, и он не должен требовать похода
+        # в «Подключение».
+        self.contour_lbl = Note("", "caps", wrap=False)
+        bar.addWidget(self.contour_lbl)
         bar.addStretch(1)
         self.upd_lbl = Note("", "tiny", wrap=False)
         bar.addWidget(self.upd_lbl)
@@ -135,6 +149,7 @@ class Pult(QMainWindow, ImportFlow, DashboardSection, RegistrySection, PriorityS
             self.stack.addWidget(page)
 
         self.toast_lbl = Toast(self)
+        self._apply_contour_ui()
 
     def resizeEvent(self, event) -> None:  # noqa: N802 — Qt
         super().resizeEvent(event)
@@ -149,6 +164,84 @@ class Pult(QMainWindow, ImportFlow, DashboardSection, RegistrySection, PriorityS
         page.scroll_top()
         if self.connected and sec in LAZY and sec not in self._loaded:
             getattr(self, LAZY[sec])()
+
+    # ── контуры серверов ────────────────────────────────────────────────
+    def _apply_contour_ui(self) -> None:
+        """Заголовок окна и метка в шапке называют активный контур."""
+        if ICON_PATH.is_file():
+            self.setWindowIcon(QIcon(str(ICON_PATH)))
+        self.setWindowTitle(f"Хард · Пульт — {self.profile}")
+        if hasattr(self, "contour_lbl"):
+            self.contour_lbl.set(f"{self.profile} · {api_client.host_of(self.url)}")
+
+    def _flush_profile(self) -> None:
+        """Учесть текущие учётные данные в активном профиле (без мастер-ключа)."""
+        current = active_profile(self.settings)
+        current["url"] = self.url
+        if self.device_token:
+            current["device_token"] = self.device_token
+        else:
+            current.pop("device_token", None)
+
+    def switch_profile(self, name: str) -> None:
+        profiles = self.settings.get("profiles") or {}
+        if name not in profiles or name == self.profile:
+            return
+        self._flush_profile()
+        self.settings["active"] = name
+        self.profile = name
+        current = profiles[name]
+        self.url = current.get("url", DEFAULT_URL)
+        self.key = ""
+        self.device_token = current.get("device_token", "")
+        self.connected = False
+        self._loaded.clear()
+        # Выборы людей и книг относились к прежнему контуру: оставить их —
+        # значит однажды применить к чужому серверу.
+        self.imp_selected.clear()
+        self.exp_selected.clear()
+        self.enr_selected.clear()
+        self.scatter_selected.clear()
+        self._apply_contour_ui()
+        self.apply_profile()
+        self._save_settings()
+        if self.device_token:
+            self.refresh()
+        else:
+            # В контуре ещё нет токена — человек сразу видит экран привязки,
+            # а не «нет связи» на пустом адресе.
+            self.nav("conn")
+
+    def profile_add(self, name: str, url: str = "") -> bool:
+        name = (name or "").strip()
+        profiles = self.settings.get("profiles") or {}
+        if not name or name in profiles:
+            return False
+        profiles[name] = {"url": (url or "").strip().rstrip("/"), "device_token": ""}
+        self._save_settings()
+        return True
+
+    def profile_rename(self, old: str, new: str) -> bool:
+        old, new = (old or "").strip(), (new or "").strip()
+        profiles = self.settings.get("profiles") or {}
+        if not new or old not in profiles or new in profiles:
+            return False
+        profiles[new] = profiles.pop(old)
+        if self.settings.get("active") == old:
+            self.settings["active"] = new
+        if self.profile == old:
+            self.profile = new
+            self._apply_contour_ui()
+        self._save_settings()
+        return True
+
+    def profile_remove(self, name: str) -> bool:
+        profiles = self.settings.get("profiles") or {}
+        if name not in profiles or len(profiles) <= 1 or name == self.profile:
+            return False
+        del profiles[name]
+        self._save_settings()
+        return True
 
     # ── связь / фоновые задачи ──────────────────────────────────────────
     def _set_conn(self, ok: bool, text: str) -> None:
@@ -179,7 +272,7 @@ class Pult(QMainWindow, ImportFlow, DashboardSection, RegistrySection, PriorityS
 
     # ── обновление ──────────────────────────────────────────────────────
     def refresh(self) -> None:
-        self.settings["url"], self.settings["key"] = self.url, self.key
+        self._flush_profile()
         self._save_settings()
 
         def done(d):
@@ -208,12 +301,11 @@ class Pult(QMainWindow, ImportFlow, DashboardSection, RegistrySection, PriorityS
         self.settings.save()
 
     def closeEvent(self, event) -> None:  # noqa: N802 — Qt
-        self.settings["url"] = self.url
-        # Мастер-ключ при выходе НЕ сохраняем никогда. Он нужен ровно на одну
-        # операцию — привязать или отозвать устройство — и оставаться на диске
-        # ему незачем: для повседневной работы есть токен устройства.
-        if self.device_token:
-            self.settings["device_token"] = self.device_token
+        self._flush_profile()
+        # Мастер-ключ при выходе НЕ сохраняем никогда (Settings.save вычищает
+        # его и из профилей). Он нужен ровно на одну операцию — привязать или
+        # отозвать устройство — и оставаться на диске ему незачем: для
+        # повседневной работы есть токен устройства.
         self._save_settings()
         super().closeEvent(event)
 
