@@ -494,3 +494,157 @@ def revoke_text(row: dict) -> str:
             "Ссылки перестанут работать, а телефон разлогинится: сотрудник "
             "увидит «Нет доступа» и вернётся в систему только по новой ссылке. "
             "Выезды, фото и метки остаются в базе.")
+
+
+# --- массовая выдача ---------------------------------------------------------
+# Старт пробы — это «выдать всем и разослать», а не шестьдесят кликов подряд.
+# Сервер выдаёт одним запросом (/admin/app_links_bulk.json) по тем же правилам,
+# что одиночную ссылку; здесь — что ему отправить и как показать ответ списком.
+
+BULK_HEADERS = ("Сотрудник", "Кто", "Ссылка", "Открытий", "Действует до", "Ошибка")
+MANAGER_WHO = "руководитель"
+WORKER_WHO = "сотрудник"
+
+
+def bulk_items(people_by_name: dict, names) -> list[dict]:
+    """Строки для массовой выдачи из отмеченных ФИО раздела «Вход».
+
+    Привязанному шлём его id — ровно как одиночная выдача: иначе сервер
+    заведёт вторую служебную личность на то же ФИО, и портфель разъедется на
+    два аккаунта. Имени, которого в списке нет, в выдачу не берём.
+    """
+    items = []
+    for name in names or ():
+        row = (people_by_name or {}).get(name)
+        if not row:
+            continue
+        item = {"employee": name, "kind": row.get("kind") or "agent"}
+        if row.get("telegram_id"):
+            item["telegram_id"] = row["telegram_id"]
+        items.append(item)
+    return items
+
+
+def manager_has_team(m: dict) -> bool:
+    """Есть ли руководителю кого вести: направление, офис или люди поимённо.
+    Города — только подпись сводки, охвата они не дают."""
+    m = m or {}
+    offices = [c for c in (m.get("office_cities") or []) if str(c).strip()]
+    return bool((m.get("direction") or "").strip() or offices or (m.get("employees") or []))
+
+
+def manager_items(managers) -> tuple[list[dict], list[str]]:
+    """Руководители → строки выдачи; кому вести некого — в пропущенные.
+
+    Руководителю шлём ТОЛЬКО id: с ФИО в запросе сервер привязал бы его к
+    сотруднику и сделал выездником. Руководитель без команды увидит пустой
+    пульт — выдавать ему вход на старте незачем, оператор увидит его имя в
+    вопросе и решит сам.
+    """
+    items, skipped = [], []
+    for m in managers or ():
+        name = str(m.get("name") or m.get("telegram_id") or "—")
+        if manager_has_team(m):
+            items.append({"telegram_id": m.get("telegram_id")})
+        else:
+            skipped.append(name)
+    return items, skipped
+
+
+def bulk_rows(results, manager_ids=()) -> list[dict]:
+    """Ответ сервера → строки итогового списка (удачные сверху, по алфавиту)."""
+    mids = {str(t) for t in manager_ids or ()}
+    rows = []
+    for r in results or ():
+        r = r or {}
+        rows.append({
+            "employee": str(r.get("employee") or "—"),
+            "who": MANAGER_WHO if str(r.get("telegram_id")) in mids else WORKER_WHO,
+            "url": str(r.get("url") or ""),
+            "uses": _int(r.get("max_uses")),
+            "expires": fmt_day(r.get("expires_at")),
+            "error": str(r.get("error") or ""),
+        })
+    rows.sort(key=lambda x: (not x["url"], x["who"] != MANAGER_WHO, x["employee"]))
+    return rows
+
+
+def bulk_table(rows) -> list[tuple]:
+    """Строки таблицы итогового окна — в порядке BULK_HEADERS."""
+    return [(r["employee"], r["who"], r["url"], r["uses"] or "", r["expires"], r["error"])
+            for r in rows or ()]
+
+
+def bulk_summary(rows) -> str:
+    rows = list(rows or ())
+    ok = sum(1 for r in rows if r["url"])
+    text = f"Выдано ссылок: {ok} из {len(rows)}."
+    if ok < len(rows):
+        text += " У остальных причина — в колонке «Ошибка»."
+    if ok:
+        text += (" Каждая ссылка персональная: перешлите её лично человеку "
+                 "(в личку, не в общий чат).")
+    return text
+
+
+def bulk_text(rows) -> str:
+    """Для буфера обмена: строка на человека «ФИО — ссылка». Так список читается
+    и в мессенджере, и в заметке; для таблицы есть отдельная выгрузка в Excel."""
+    return "\n".join(f"{r['employee']} — {r['url']}" for r in rows or () if r["url"])
+
+
+def _uses_word(n: int) -> str:
+    n = abs(int(n or 0))
+    if n % 10 == 1 and n % 100 != 11:
+        return "открытию"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return "открытия"
+    return "открытий"
+
+
+def bulk_confirm_text(count: int, uses: int, entered: int = 0) -> str:
+    """Вопрос перед массовой выдачей: что будет со старыми ссылками и входами."""
+    text = (f"Выдать вход отмеченным — {count} чел., по {uses} {_uses_word(uses)}?\n\n"
+            "У кого ссылку уже выдавали, но её не открыли, старая перестанет "
+            "работать — вместо неё будет новая.")
+    if entered:
+        text += (f" Кто уже вошёл ({entered}), из приложения не вылетит: новая "
+                 "ссылка будет запасной.")
+    text += ("\n\nПосле выдачи откроется список «ФИО — ссылка»: его можно "
+             "скопировать целиком или сохранить в Excel.")
+    return text
+
+
+def manager_bulk_text(count: int, skipped=()) -> str:
+    """Вопрос перед выдачей входа всем руководителям."""
+    text = (f"Выдать вход руководителям — {count} чел.?\n\n"
+            "Ссылку можно открыть два раза: в пульте руководителя на компьютере и "
+            "на его телефоне. Дальше входы своей команде руководитель выдаёт сам.")
+    if skipped:
+        text += ("\n\nБез команды — пропущены (им вести некого): "
+                 + ", ".join(skipped) + ".")
+    return text
+
+
+def write_bulk_xlsx(path, rows) -> None:
+    """Список выданных ссылок в Excel: шапка, ширины, кликабельные адреса."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Ссылки входа"
+    ws.append(list(BULK_HEADERS))
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for r in rows or ():
+        ws.append([r["employee"], r["who"], r["url"], r["uses"] or None,
+                   r["expires"], r["error"]])
+        if r["url"]:
+            link = ws.cell(row=ws.max_row, column=3)
+            link.hyperlink = r["url"]
+            link.font = Font(color="0563C1", underline="single")
+    for col, width in zip("ABCDEF", (34, 14, 48, 10, 14, 40)):
+        ws.column_dimensions[col].width = width
+    ws.freeze_panes = "A2"
+    wb.save(path)

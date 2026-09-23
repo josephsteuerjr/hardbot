@@ -2484,6 +2484,81 @@ async def _admin_app_links(request: web.Request) -> web.Response:
     return web.json_response({"links": links})
 
 
+def _admin_issue_link(body: dict, base: str) -> tuple[int, dict]:
+    """Одна выдача ссылки аналитиком: общая для одиночной и массовой ручек.
+
+    Возвращает (HTTP-статус, ответ). Правила одни на обе ручки: руководителю и
+    владельцу — по id без привязки к ФИО, привязанному — его же id,
+    непривязанному ФИО — служебная личность. Число открытий проверяется ДО
+    того, как заводится личность: иначе опечатка в `uses` оставляла бы в базе
+    лишнюю служебную учётку.
+    """
+    employee = str(body.get("employee") or "").strip()
+    kind = "courier" if body.get("kind") == "courier" else "agent"
+    raw_uses = body.get("uses")
+    if raw_uses in (None, ""):
+        uses = db.APP_LINK_DEFAULT_USES
+    else:
+        try:
+            uses = int(raw_uses)
+        except (TypeError, ValueError):
+            return 400, {"error": "uses"}
+        if not 1 <= uses <= db.APP_LINK_MAX_USES:
+            return 400, {"error": f"uses: от 1 до {db.APP_LINK_MAX_USES}"}
+    created = False
+    raw_tid = body.get("telegram_id")
+    if raw_tid not in (None, ""):
+        try:
+            tid = int(raw_tid)
+        except (TypeError, ValueError):
+            return 400, {"error": "telegram_id"}
+        bound = db.get_binding(tid)
+        if not bound and not employee and (tid == ADMIN_ID or db.is_manager(tid)):
+            # Руководитель (или владелец) входит по ссылке БЕЗ привязки к ФИО:
+            # у него своя роль, а привязка сделала бы его выездником. Раньше эта
+            # ручка отвечала ему «никому не привязан», и руководитель, который
+            # по контракту раздаёт входы команде, сам войти не мог вовсе.
+            bound = (db.get_manager(tid) or {}).get("name") or f"руководитель {tid}"
+        elif not bound and employee:
+            db.set_bind(tid, employee, kind)
+            bound = employee
+        if not bound:
+            return 409, {"error": f"id {tid} никому не привязан: укажи сотрудника"}
+        employee = bound
+    else:
+        if not employee:
+            return 400, {"error": "employee required"}
+        tid, created = db.local_identity_for(employee, kind)
+    code = db.create_app_link(tid, max_uses=uses)
+    db.audit_access(tid, "app_link_issued_admin", detail=employee)
+    return 200, {
+        "ok": True,
+        "telegram_id": tid,
+        "employee": employee,
+        "code": code,
+        "url": f"{base}/i/{code}",
+        "uses": 0,
+        "max_uses": uses,
+        "days": db.APP_LINK_DAYS,
+        "expires_at": db.app_link_expires_at(
+            datetime.now().isoformat(timespec="seconds")),
+        "local_identity": db.is_local_uid(tid),
+        "created": created,
+    }
+
+
+def _public_base() -> tuple[str, web.Response | None]:
+    """Публичный адрес приложения или готовый отказ 409, если его нет."""
+    base = os.getenv("MINIAPP_URL", "").strip().rstrip("/")
+    if base:
+        return base, None
+    return "", web.json_response(
+        {"error": "MINIAPP_URL не задан на сервере: без публичного адреса "
+                  "ссылку входа не собрать"},
+        status=409,
+    )
+
+
 async def _admin_app_link(request: web.Request) -> web.Response:
     """Ссылка входа в приложение из пульта — без Telegram.
 
@@ -2504,69 +2579,58 @@ async def _admin_app_link(request: web.Request) -> web.Response:
         return web.json_response({"error": "тело не JSON"}, status=400)
     if not isinstance(body, dict):
         return web.json_response({"error": "тело не объект"}, status=400)
-    base = os.getenv("MINIAPP_URL", "").strip().rstrip("/")
-    if not base:
+    base, refused = _public_base()
+    if refused is not None:
+        return refused
+    status, payload = _admin_issue_link(body, base)
+    return web.json_response(payload, status=status)
+
+
+# Больше, чем людей в реестре и руководителей вместе, с запасом: защита от
+# случайного «выдать миллион», а не рабочее ограничение.
+APP_LINKS_BULK_MAX = 500
+
+
+async def _admin_app_links_bulk(request: web.Request) -> web.Response:
+    """Массовая выдача ссылок одним запросом — старт пробы в один клик.
+
+    Тело: ``{"items": [{"employee": ФИО, "telegram_id": id?, "kind": …}, …],
+    "uses": N}``. Каждая строка выдаётся по тем же правилам, что одиночная
+    (`_admin_issue_link`), и ошибка одной строки не валит остальные: в ответе у
+    неё будет `error`, у удачных — ссылка. По одной выдаче на запрос пульт через
+    транзит тратил бы секунду на человека.
+    """
+    _admin(request)
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return web.json_response({"error": "тело не JSON"}, status=400)
+    if not isinstance(body, dict) or not isinstance(body.get("items"), list):
+        return web.json_response({"error": "нужен список items"}, status=400)
+    items = body["items"]
+    if len(items) > APP_LINKS_BULK_MAX:
         return web.json_response(
-            {"error": "MINIAPP_URL не задан на сервере: без публичного адреса "
-                      "ссылку входа не собрать"},
-            status=409,
-        )
-    employee = str(body.get("employee") or "").strip()
-    kind = "courier" if body.get("kind") == "courier" else "agent"
-    created = False
-    raw_tid = body.get("telegram_id")
-    if raw_tid not in (None, ""):
-        try:
-            tid = int(raw_tid)
-        except (TypeError, ValueError):
-            return web.json_response({"error": "telegram_id"}, status=400)
-        bound = db.get_binding(tid)
-        if not bound and not employee and (tid == ADMIN_ID or db.is_manager(tid)):
-            # Руководитель (или владелец) входит по ссылке БЕЗ привязки к ФИО:
-            # у него своя роль, а привязка сделала бы его выездником. Раньше эта
-            # ручка отвечала ему «никому не привязан», и руководитель, который
-            # по контракту раздаёт входы команде, сам войти не мог вовсе.
-            bound = (db.get_manager(tid) or {}).get("name") or f"руководитель {tid}"
-        elif not bound and employee:
-            db.set_bind(tid, employee, kind)
-            bound = employee
-        if not bound:
-            return web.json_response(
-                {"error": f"id {tid} никому не привязан: укажи сотрудника"},
-                status=409,
-            )
-        employee = bound
-    else:
-        if not employee:
-            return web.json_response({"error": "employee required"}, status=400)
-        tid, created = db.local_identity_for(employee, kind)
-    raw_uses = body.get("uses")
-    if raw_uses in (None, ""):
-        uses = db.APP_LINK_DEFAULT_USES
-    else:
-        try:
-            uses = int(raw_uses)
-        except (TypeError, ValueError):
-            return web.json_response({"error": "uses"}, status=400)
-        if not 1 <= uses <= db.APP_LINK_MAX_USES:
-            return web.json_response(
-                {"error": f"uses: от 1 до {db.APP_LINK_MAX_USES}"}, status=400)
-    code = db.create_app_link(tid, max_uses=uses)
-    db.audit_access(tid, "app_link_issued_admin", detail=employee)
-    return web.json_response({
-        "ok": True,
-        "telegram_id": tid,
-        "employee": employee,
-        "code": code,
-        "url": f"{base}/i/{code}",
-        "uses": 0,
-        "max_uses": uses,
-        "days": db.APP_LINK_DAYS,
-        "expires_at": db.app_link_expires_at(
-            datetime.now().isoformat(timespec="seconds")),
-        "local_identity": db.is_local_uid(tid),
-        "created": created,
-    })
+            {"error": f"за раз не больше {APP_LINKS_BULK_MAX} человек"}, status=400)
+    base, refused = _public_base()
+    if refused is not None:
+        return refused
+    results = []
+    for item in items:
+        if not isinstance(item, dict):
+            results.append({"employee": "", "error": "строка не объект"})
+            continue
+        one = dict(item)
+        if "uses" not in one and "uses" in body:
+            one["uses"] = body["uses"]
+        status, payload = _admin_issue_link(one, base)
+        if status != 200:
+            payload = {"employee": str(item.get("employee") or ""),
+                       "telegram_id": item.get("telegram_id"),
+                       "error": str(payload.get("error") or f"HTTP {status}")}
+        results.append(payload)
+    issued = sum(1 for r in results if r.get("url"))
+    db.audit_access(0, "app_links_bulk", detail=f"выдано {issued} из {len(items)}")
+    return web.json_response({"ok": True, "issued": issued, "results": results})
 
 
 async def _lang(request: web.Request) -> web.Response:
@@ -5254,6 +5318,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/redeem", _redeem)
     app.router.add_post("/admin/app_revoke", _admin_app_revoke)
     app.router.add_post("/admin/app_link.json", _admin_app_link)
+    app.router.add_post("/admin/app_links_bulk.json", _admin_app_links_bulk)
     app.router.add_get("/admin/app_links.json", _admin_app_links)
     app.router.add_post("/api/bind", _bind)
     app.router.add_post("/api/marker", _marker)

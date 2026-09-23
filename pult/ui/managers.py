@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from ..core import links as lk
 from ..core import managers as mg
 from ..core.devices import valid_telegram_id
 from ..core.people import GUEST_PLACEHOLDER, guest_label
@@ -27,6 +28,13 @@ class ManagersSection:
                   "(СНГ — всех), состав считается живьём. Галочки в строке — что ему "
                   "слать: карточку по каждому визиту, сводку в конце дня, утренние "
                   "обещания. Гендиру обычно хватает одной сводки.")
+        # Старт пробы: вход всем руководителям одной кнопкой, итог — списком
+        # «ФИО — ссылка» (копировать целиком или в Excel). У каждой строки есть
+        # и своя кнопка «выдать вход» — для одного человека.
+        mc.add_row(Button("Выдать вход всем руководителям", self.mgr_bulk_issue,
+                          kind="accent"),
+                   Note("руководителям без команды вход не выдаётся", "tiny", wrap=False),
+                   spacing_before=2, stretch=False)
         self.mgr_list = mc.add(Rows(spacing=4))
         self.mgr_list.set_empty("Пока никого — добавьте ниже")
         page.add(mc)
@@ -311,6 +319,22 @@ class ManagersSection:
             self._mgr_form_reset()
             self.load_managers()
         self.bg_task(lambda: self.api("POST", "/admin/manager", body), done)
+
+    def mgr_bulk_issue(self):
+        """Вход всем руководителям с командой — одним запросом, итог списком."""
+        mgrs = getattr(self, "mgrs", None) or []
+        if not mgrs:
+            self.toast("Список руководителей пуст — нажмите «Обновить»", err=True)
+            return
+        items, skipped = lk.manager_items(mgrs)
+        if not items:
+            self.toast("Ни у одного руководителя нет команды — выдавать некому", err=True)
+            return
+        if not self.ask_yes_no("Вход руководителям",
+                               lk.manager_bulk_text(len(items), skipped)):
+            return
+        self.issue_bulk(items, lk.DEFAULT_USES, "Ссылки входа · руководители",
+                        manager_ids=[i["telegram_id"] for i in items])
 
     def mgr_delete(self, tid):
         if not self.ask_yes_no("Удаление", mg.delete_text(tid)):

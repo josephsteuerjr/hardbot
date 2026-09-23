@@ -630,10 +630,18 @@ class Meter(QWidget):
 # --- таблицы --------------------------------------------------------------------
 class RowsModel(QAbstractTableModel):
     def __init__(self, titles: list[str], numeric: set[int], parent=None,
-                 tint=None, tint_cols: set[int] | None = None) -> None:
+                 tint=None, tint_cols: set[int] | None = None,
+                 checkable: bool = False) -> None:
         super().__init__(parent)
         self.titles = titles
         self.numeric = numeric
+        # Необязательные галочки в первой колонке (массовые действия в «Входе»).
+        # Отмечено хранится по ЗНАЧЕНИЮ первой колонки, а не по номеру строки:
+        # строки пересобираются при каждом фильтре и перечитывании списка, а
+        # отметка человека пропадать от этого не должна.
+        self.checkable = checkable
+        self.checked: set = set()
+        self.on_check = None
         # Необязательная раскраска: tint(строка) → цвет (hex) или None. Нужна
         # там, где состояние — главное в строке («Вход»); по умолчанию выключена,
         # чтобы остальные таблицы остались слово в слово прежними.
@@ -647,9 +655,43 @@ class RowsModel(QAbstractTableModel):
     def columnCount(self, parent=QModelIndex()) -> int:  # noqa: N802
         return 0 if parent.isValid() else len(self.titles)
 
+    def flags(self, index):
+        base = super().flags(index)
+        if self.checkable and index.isValid() and index.column() == 0:
+            return base | Qt.ItemFlag.ItemIsUserCheckable
+        return base
+
+    def setData(self, index, value, role=Qt.ItemDataRole.EditRole):  # noqa: N802
+        if not (self.checkable and index.isValid() and index.column() == 0
+                and role == Qt.ItemDataRole.CheckStateRole):
+            return False
+        key = self.rows[index.row()][0]
+        state = value.value if hasattr(value, "value") else int(value)
+        if state == Qt.CheckState.Checked.value:
+            self.checked.add(key)
+        else:
+            self.checked.discard(key)
+        self.dataChanged.emit(index, index, [Qt.ItemDataRole.CheckStateRole])
+        if self.on_check is not None:
+            self.on_check(len(self.checked))
+        return True
+
+    def set_checked(self, keys) -> None:
+        self.checked = set(keys)
+        if self.rows:
+            self.dataChanged.emit(self.index(0, 0), self.index(len(self.rows) - 1, 0),
+                                  [Qt.ItemDataRole.CheckStateRole])
+        if self.on_check is not None:
+            self.on_check(len(self.checked))
+
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
+        if (role == Qt.ItemDataRole.CheckStateRole and self.checkable
+                and index.column() == 0):
+            key = self.rows[index.row()][0]
+            return (Qt.CheckState.Checked if key in self.checked
+                    else Qt.CheckState.Unchecked)
         if role == Qt.ItemDataRole.DisplayRole:
             row = self.rows[index.row()]
             return "" if index.column() >= len(row) else str(row[index.column()])
@@ -703,14 +745,15 @@ class Table(QTableView):
     ROW_H = 28
 
     def __init__(self, columns, numeric=(), stretch=(), visible_rows: int = 14,
-                 tint=None, tint_cols=(), parent: QWidget | None = None) -> None:
+                 tint=None, tint_cols=(), checkable: bool = False,
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.keys = [c[0] for c in columns]
         self.visible_rows = visible_rows
         numeric_idx = {i for i, c in enumerate(columns) if c[0] in set(numeric)}
         tint_idx = {i for i, c in enumerate(columns) if c[0] in set(tint_cols)}
         self.model_ = RowsModel([c[1] for c in columns], numeric_idx, self,
-                                tint=tint, tint_cols=tint_idx)
+                                tint=tint, tint_cols=tint_idx, checkable=checkable)
         self.proxy = QSortFilterProxyModel(self)
         self.proxy.setSourceModel(self.model_)
         self.proxy.setSortRole(Qt.ItemDataRole.UserRole)
@@ -783,6 +826,32 @@ class Table(QTableView):
 
     def clear(self) -> None:
         self.set_rows([])
+
+    # ── галочки (только у таблицы с checkable=True) ────────────────────
+    def checked_keys(self) -> list:
+        """Отмеченные — в порядке строк модели; отмеченные, но скрытые текущим
+        фильтром, тоже здесь: фильтр меняет вид, а не выбор."""
+        in_rows = [r[0] for r in self.model_.rows if r and r[0] in self.model_.checked]
+        rest = sorted(k for k in self.model_.checked if k not in set(in_rows))
+        return in_rows + rest
+
+    def set_checked(self, keys) -> None:
+        self.model_.set_checked(keys)
+
+    def check_visible(self, on: bool = True) -> None:
+        """Отметить (или снять) всех, кого сейчас видно после фильтра и поиска."""
+        visible = set()
+        for i in range(self.proxy.rowCount()):
+            src = self.proxy.mapToSource(self.proxy.index(i, 0))
+            if 0 <= src.row() < len(self.model_.rows):
+                visible.add(self.model_.rows[src.row()][0])
+        keys = set(self.model_.checked)
+        keys = keys | visible if on else keys - visible
+        self.model_.set_checked(keys)
+
+    def on_check(self, fn) -> None:
+        """fn(число отмеченных) при каждой смене отметок."""
+        self.model_.on_check = fn
 
 
 class DecisionTable(QTableWidget):

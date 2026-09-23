@@ -137,6 +137,76 @@ def show_link(title: str, url: str, note: str = "", parent: QWidget | None = Non
     _build_link_dialog(title, url, note, parent).exec()
 
 
+def _build_link_list_dialog(title: str, rows: list[dict], parent: QWidget | None = None,
+                            on_saved=None):
+    """Итог массовой выдачи: одна таблица «кто — ссылка», копирование всего
+    списка и выгрузка в Excel. Отдельный строитель — ради тестов без exec()."""
+    from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox,
+                                   QHeaderView, QPushButton, QTableWidget,
+                                   QTableWidgetItem)
+
+    from ..core import links as lk
+
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    dialog.setMinimumSize(900, 520)
+    layout = QVBoxLayout(dialog)
+    dialog.summary = Note(lk.bulk_summary(rows), "small")
+    layout.addWidget(dialog.summary)
+
+    table = QTableWidget(len(rows), len(lk.BULK_HEADERS), dialog)
+    table.setHorizontalHeaderLabels(list(lk.BULK_HEADERS))
+    table.verticalHeader().setVisible(False)
+    table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+    table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    for i, values in enumerate(lk.bulk_table(rows)):
+        for j, value in enumerate(values):
+            table.setItem(i, j, QTableWidgetItem(str(value)))
+    # Ссылка — главное в строке: целиком и в одну строку. Растягивается
+    # последняя колонка («Ошибка»), а не ссылка: иначе длинный текст отказа
+    # отжимал ссылку в перенос и выгонял таблицу в горизонтальную прокрутку.
+    table.setWordWrap(False)
+    header = table.horizontalHeader()
+    last = len(lk.BULK_HEADERS) - 1
+    for j in range(last):
+        header.setSectionResizeMode(j, QHeaderView.ResizeMode.ResizeToContents)
+    header.setSectionResizeMode(last, QHeaderView.ResizeMode.Stretch)
+    dialog.table = table
+    layout.addWidget(table, 1)
+
+    def copy_all():
+        copy_text(lk.bulk_text(rows))
+        dialog.summary.setText(lk.bulk_summary(rows) + " Список скопирован.")
+
+    def save_xlsx():
+        path = asksaveasfilename("Сохранить ссылки входа", "Ссылки входа.xlsx",
+                                 [("Excel", "*.xlsx")], ".xlsx", parent=dialog)
+        if not path:
+            return
+        lk.write_bulk_xlsx(path, rows)
+        dialog.summary.setText(lk.bulk_summary(rows) + f" Сохранено: {path}")
+        if on_saved is not None:
+            on_saved(path)
+
+    buttons = QDialogButtonBox()
+    dialog.copy_btn = QPushButton("Копировать всё")
+    dialog.copy_btn.clicked.connect(copy_all)
+    dialog.save_btn = QPushButton("Сохранить в Excel…")
+    dialog.save_btn.clicked.connect(save_xlsx)
+    close = QPushButton("Закрыть")
+    close.clicked.connect(dialog.accept)
+    for btn in (dialog.copy_btn, dialog.save_btn):
+        buttons.addButton(btn, QDialogButtonBox.ButtonRole.ActionRole)
+        btn.setEnabled(any(r["url"] for r in rows))
+    buttons.addButton(close, QDialogButtonBox.ButtonRole.AcceptRole)
+    layout.addWidget(buttons)
+    return dialog
+
+
+def show_link_list(title: str, rows: list[dict], parent: QWidget | None = None) -> None:
+    _build_link_list_dialog(title, rows, parent).exec()
+
+
 def _box(icon, title: str, text: str, parent: QWidget | None) -> QMessageBox:
     box = QMessageBox(parent)
     box.setIcon(icon)
