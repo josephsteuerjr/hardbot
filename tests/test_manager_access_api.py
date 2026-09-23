@@ -157,3 +157,27 @@ def test_audit_carries_manager_name(monkeypatch, miniapp):
     row = next(r for r in tail if r["action"] == "mgr_app_link")
     assert "Рук Линков" in row["detail"], row["detail"]
     assert row["target"] == EMP_A
+
+
+def test_manager_issues_link_to_himself(monkeypatch):
+    """«Себе» — тоже можно: руководитель, который сам возит, входит в
+    приложение своей ссылкой, даже когда его ФИО в составе команды нет."""
+    monkeypatch.setenv("MINIAPP_URL", "https://entry.example")
+    db.set_manager(MGR, "Рук Линков", [], [EMP_A])   # команда без EMP_B
+    db.set_bind(MGR, EMP_B)                          # а сам он — EMP_B
+    db.reset_role_caches()
+
+    # себе — можно
+    status, out = _call(web._manager_app_link, "POST", {"employee": EMP_B},
+                        monkeypatch)
+    assert status == 200 and out["employee"] == EMP_B
+    assert out["url"].startswith("https://entry.example/i/")
+
+    # своя строка видна в списке команды
+    status, out = _call(web._manager_app_links, "GET", None, monkeypatch)
+    assert {r["employee"] for r in out["links"]} == {EMP_A, EMP_B}
+
+    # чужому по-прежнему нельзя
+    status, out = _call(web._manager_app_link, "POST", {"employee": EMP_ALIEN},
+                        monkeypatch)
+    assert status == 403

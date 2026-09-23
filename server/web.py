@@ -3247,6 +3247,11 @@ async def _manager_app_links(request: web.Request) -> web.Response:
     """
     uid, mgr, team = _manager_gate(request)
     team_set = set(team)
+    # Руководитель может быть и выездником: своя строка входа видна всегда,
+    # даже если своего ФИО в составе команды нет.
+    own = db.get_binding(uid)
+    if own:
+        team_set.add(own)
     base = os.getenv("MINIAPP_URL", "").strip().rstrip("/")
     rows = []
     by_employee: dict[str, dict] = {}
@@ -3287,9 +3292,12 @@ async def _manager_app_link(request: web.Request) -> web.Response:
     except (ValueError, TypeError):
         return web.json_response({"error": "тело не JSON"}, status=400)
     employee = str(body.get("employee") or "").strip()
-    if not employee or employee not in set(team):
+    own = db.get_binding(uid)
+    allowed = set(team) | ({own} if own else set())
+    if not employee or employee not in allowed:
         return web.json_response(
-            {"error": "Это не ваш сотрудник: ссылку можно выдать только своей команде."},
+            {"error": "Это не ваш сотрудник: ссылку можно выдать только своей "
+                      "команде или себе."},
             status=403)
     base = os.getenv("MINIAPP_URL", "").strip().rstrip("/")
     if not base:
@@ -3318,9 +3326,12 @@ async def _manager_app_revoke(request: web.Request) -> web.Response:
     except (ValueError, TypeError):
         body = {}
     employee = str((body or {}).get("employee") or "").strip()
-    if not employee or employee not in set(team):
+    own = db.get_binding(uid)
+    allowed = set(team) | ({own} if own else set())
+    if not employee or employee not in allowed:
         return web.json_response(
-            {"error": "Это не ваш сотрудник: отзывать можно только свою команду."},
+            {"error": "Это не ваш сотрудник: отзывать можно только свою "
+                      "команду или себя."},
             status=403)
     tids = [r["telegram_id"] for r in db.app_links_state()
             if r["employee"] == employee and r["telegram_id"]]
