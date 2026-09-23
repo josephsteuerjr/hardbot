@@ -151,6 +151,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/promises", get(api_promises))
         .route("/api/stats", get(api_stats))
         .route("/api/report.xlsx", get(api_report))
+        .route("/api/pushes", get(api_pushes).post(api_pushes))
+        .route("/api/team_links", get(api_team_links))
+        .route("/api/team_link", post(api_team_link))
         .route("/api/phone", post(api_phone))
         .route("/{name}", get(static_file))
         .with_state(state.clone())
@@ -505,6 +508,77 @@ async fn api_report(State(app): State<AppState>,
         }
         Err(trouble) => ok_json(json!({
             "error": trouble.text, "kind": trouble.kind})),
+    }
+}
+
+// --- рубильники и входы команды ----------------------------------------------
+async fn api_pushes(State(app): State<AppState>, req: Request) -> Response {
+    let hard = app.hard.lock().await;
+    let out = if req.method() == axum::http::Method::POST {
+        let body = read_json(req).await;
+        let key = body.get("key").and_then(Value::as_str).unwrap_or("");
+        let value = body.get("value").and_then(Value::as_bool);
+        match value {
+            Some(v)
+                if ["push_visits", "push_digest", "push_promises"].contains(&key) =>
+            {
+                hard.set_push(key, v).await
+            }
+            _ => {
+                return err_json(json!({"error": "Неизвестный рубильник."}),
+                                StatusCode::BAD_REQUEST)
+            }
+        }
+    } else {
+        hard.pushes().await
+    };
+    match out {
+        Ok(data) => ok_json(data),
+        Err(trouble) => ok_json(json!({
+            "error": trouble.text, "kind": trouble.kind, "stale": false})),
+    }
+}
+
+async fn api_team_links(State(app): State<AppState>) -> Response {
+    let hard = app.hard.lock().await;
+    match hard.team_links().await {
+        Ok(data) => ok_json(data),
+        Err(trouble) => ok_json(json!({
+            "error": trouble.text, "kind": trouble.kind, "stale": false})),
+    }
+}
+
+async fn api_team_link(State(app): State<AppState>, req: Request) -> Response {
+    let body = read_json(req).await;
+    let employee = body
+        .get("employee")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let revoke = body.get("action").and_then(Value::as_str) == Some("revoke");
+    if employee.is_empty() {
+        return err_json(json!({"error": "Не сказано, кому выдать вход."}),
+                        StatusCode::BAD_REQUEST);
+    }
+    let hard = app.hard.lock().await;
+    match hard.team_link(&employee, revoke).await {
+        Ok(mut data) => {
+            // Выдача возвращается с QR картинкой: руководитель пересылает
+            // ссылку человеку сам — одним движением.
+            if !revoke {
+                if let Some(url) = data.get("url").and_then(Value::as_str) {
+                    if let Some(qr) = qr_data_url(url) {
+                        if let Some(map) = data.as_object_mut() {
+                            map.insert("qr".into(), Value::String(qr));
+                        }
+                    }
+                }
+            }
+            ok_json(data)
+        }
+        Err(trouble) => ok_json(json!({
+            "error": trouble.text, "kind": trouble.kind, "stale": false})),
     }
 }
 

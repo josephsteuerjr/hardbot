@@ -3209,6 +3209,125 @@ async def _manager_stats_employee(request: web.Request) -> web.Response:
     return _manager_json({**_stats_envelope(mgr, team, rng, uid), **data})
 
 
+async def _manager_pushes(request: web.Request) -> web.Response:
+    """Личные рубильники рассылок: GET — состояние, POST {ключ: bool} — переключить.
+
+    Руководитель меняет их сам из приложения/пульта — ровно те три, что приходят
+    ему в телеграм. Рубильники владельца живут в другом месте (пульт аналитика,
+    «Каналы») и через эту ручку не меняются: молчаливый «успех» без эффекта
+    хуже честного отказа.
+    """
+    uid, mgr, team = _manager_gate(request)
+    if uid == ADMIN_ID:
+        return web.json_response(
+            {"error": "Рубильники владельца меняются в пульте аналитика "
+                      "(раздел «Каналы»), не здесь."}, status=400)
+    if request.method == "POST":
+        body = await request.json()
+        pushes = {k: bool(body[k]) for k in db.MANAGER_PUSH_KEYS if k in body}
+        if not pushes:
+            return web.json_response({"error": "нет известных рубильников"},
+                                     status=400)
+        db.set_manager_pushes(uid, pushes)
+        db.audit_access(uid, "manager_pushes",
+                        detail=",".join(f"{k}={int(v)}" for k, v in pushes.items()))
+    row = db.get_manager(uid) or {}
+    return web.json_response(
+        {"pushes": {k: bool(row.get(k, True)) for k in db.MANAGER_PUSH_KEYS}})
+
+
+async def _manager_app_links(request: web.Request) -> web.Response:
+    """Входы команды руководителя: строка на человека, как в пульте аналитика.
+
+    Выдача ссылок теперь работа руководителя: аналитик не пересыльщик. Список —
+    только своя команда, включая тех, кому ссылку ещё не выдавали («не выдавали»).
+    """
+    uid, mgr, team = _manager_gate(request)
+    team_set = set(team)
+    base = os.getenv("MINIAPP_URL", "").strip().rstrip("/")
+    rows = []
+    by_employee: dict[str, dict] = {}
+    for row in db.app_links_state():
+        if row["employee"] in team_set:
+            row = dict(row)
+            row["url"] = f"{base}/i/{row['code']}" if base and row.get("code") else ""
+            rows.append(row)
+            by_employee[row["employee"]] = row
+    for name in team:
+        if name in by_employee:
+            continue
+        rows.append({
+            "employee": name, "telegram_id": None, "kind": "agent",
+            "code": None, "url": "", "created_at": None, "expires_at": None,
+            "uses": 0, "max_uses": db.APP_LINK_DEFAULT_USES, "bonus_ios": False,
+            "last_use_at": None, "last_agent": None,
+            "entered": False, "devices": 0, "alive": False,
+        })
+    rows.sort(key=lambda r: (not r["entered"], r["employee"]))
+    return web.json_response({
+        "screen": "team_links", "ok": True,
+        "manager": {"name": mgr.get("name") or "", "scope": mgr.get("scope") or ""},
+        "links": rows,
+    })
+
+
+async def _manager_app_link(request: web.Request) -> web.Response:
+    """Выдать ссылку входа сотруднику СВОЕЙ команды — руководитель пересылает сам.
+
+    Механика та же, что у аналитика: короткая ``<MINIAPP_URL>/i/<код>``, окно и
+    число обменов — серверные. Чужое ФИО не проходит: граница команды проверяется
+    на сервере, а не в интерфейсе.
+    """
+    uid, mgr, team = _manager_gate(request)
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return web.json_response({"error": "тело не JSON"}, status=400)
+    employee = str(body.get("employee") or "").strip()
+    if not employee or employee not in set(team):
+        return web.json_response(
+            {"error": "Это не ваш сотрудник: ссылку можно выдать только своей команде."},
+            status=403)
+    base = os.getenv("MINIAPP_URL", "").strip().rstrip("/")
+    if not base:
+        return web.json_response(
+            {"error": "MINIAPP_URL не задан на сервере: без публичного адреса "
+                      "ссылку входа не собрать"}, status=409)
+    kind = "courier" if body.get("kind") == "courier" else "agent"
+    tid, _created = db.local_identity_for(employee, kind)
+    code = db.create_app_link(tid, max_uses=db.APP_LINK_DEFAULT_USES)
+    db.audit_access(uid, "mgr_app_link", detail=f"{employee}:{code}")
+    return web.json_response({
+        "ok": True, "employee": employee, "telegram_id": tid,
+        "code": code, "url": f"{base}/i/{code}",
+        "expires_at": db.app_link_expires_at(datetime.now().isoformat(timespec="seconds")),
+        "uses": db.APP_LINK_DEFAULT_USES,
+    })
+
+
+async def _manager_app_revoke(request: web.Request) -> web.Response:
+    """Отозвать вход сотрудника своей команды: ссылки гаснут, телефон выходит."""
+    uid, mgr, team = _manager_gate(request)
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        body = {}
+    employee = str((body or {}).get("employee") or "").strip()
+    if not employee or employee not in set(team):
+        return web.json_response(
+            {"error": "Это не ваш сотрудник: отзывать можно только свою команду."},
+            status=403)
+    tids = [r["telegram_id"] for r in db.app_links_state()
+            if r["employee"] == employee and r["telegram_id"]]
+    if not tids:
+        return web.json_response({"error": "У этого человека нет выданных входов."})
+    scope = "links" if str((body or {}).get("scope") or "all") == "links" else "all"
+    revoked = sum(db.revoke_app_access(tid, scope=scope) for tid in tids)
+    db.audit_access(uid, "mgr_app_revoke", detail=f"{employee}:{scope}:{revoked}")
+    return web.json_response({"ok": True, "employee": employee,
+                              "revoked": revoked, "scope": scope})
+
+
 async def _manager_plan(request: web.Request) -> web.Response:
     """Нормы выездов команды: GET — список, POST {plan:{ФИО: норма}} — записать.
 
@@ -5039,6 +5158,11 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/manager/stats_employee", _manager_stats_employee)
     app.router.add_get("/api/manager/plan", _manager_plan)
     app.router.add_post("/api/manager/plan", _manager_plan)
+    app.router.add_get("/api/manager/pushes", _manager_pushes)
+    app.router.add_post("/api/manager/pushes", _manager_pushes)
+    app.router.add_get("/api/manager/app_links", _manager_app_links)
+    app.router.add_post("/api/manager/app_link", _manager_app_link)
+    app.router.add_post("/api/manager/app_revoke", _manager_app_revoke)
     app.router.add_get("/api/manager/workload", _manager_workload)
     app.router.add_get("/api/manager/binds", _manager_binds)
     app.router.add_post("/api/manager/binds", _manager_binds)

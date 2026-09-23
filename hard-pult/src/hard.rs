@@ -414,6 +414,37 @@ impl Hard {
         }
     }
 
+    // --- рассылки и входы команды --------------------------------------------
+    pub async fn pushes(&self) -> Result<Value, Trouble> {
+        self.request(reqwest::Method::GET,
+                     &format!("{}/api/manager/pushes", self.base()),
+                     None, true, None).await
+    }
+
+    pub async fn set_push(&self, key: &str, value: bool) -> Result<Value, Trouble> {
+        let mut body = Map::new();
+        body.insert(key.to_string(), Value::Bool(value));
+        self.request(reqwest::Method::POST,
+                     &format!("{}/api/manager/pushes", self.base()),
+                     Some(Value::Object(body)), true, None).await
+    }
+
+    pub async fn team_links(&self) -> Result<Value, Trouble> {
+        self.request(reqwest::Method::GET,
+                     &format!("{}/api/manager/app_links", self.base()),
+                     None, true, None).await
+    }
+
+    pub async fn team_link(&self, employee: &str, revoke: bool) -> Result<Value, Trouble> {
+        let path = if revoke { "/api/manager/app_revoke" } else { "/api/manager/app_link" };
+        let mut body = Map::new();
+        let emp: String = employee.chars().take(200).collect();
+        body.insert("employee".into(), Value::String(emp));
+        self.request(reqwest::Method::POST,
+                     &format!("{}{}", self.base(), path),
+                     Some(Value::Object(body)), true, None).await
+    }
+
     /// Книга Excel: открытым потоком, не собирая её в память целиком.
     pub async fn book(
         &self,
@@ -467,12 +498,23 @@ impl Hard {
 
 fn trouble_of(status: u16, body: &str) -> Trouble {
     match status {
-        403 => Trouble::status(
-            "auth",
-            "Сервер не считает вас руководителем направления. Это чинит аналитик — \
-             попросите выдать роль.",
-            status,
-        ),
+        403 => {
+            // 403 бывает разный: «не руководитель» и «не ваш сотрудник».
+            // Сервер называет причину по-русски — показываем её, а не общую.
+            if let Ok(parsed) = serde_json::from_str::<Value>(body) {
+                if let Some(named) = parsed.get("error").and_then(Value::as_str) {
+                    if !named.is_empty() {
+                        return Trouble::status("auth", named, status);
+                    }
+                }
+            }
+            Trouble::status(
+                "auth",
+                "Сервер не считает вас руководителем направления. Это чинит аналитик — \
+                 попросите выдать роль.",
+                status,
+            )
+        }
         401 => Trouble::status("auth", DEAD_TOKEN, status),
         410 => Trouble::status(
             "auth",

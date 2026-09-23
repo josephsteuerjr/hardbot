@@ -34,6 +34,23 @@ from pult_ruk.settings import Settings, server_entry        # noqa: E402
 from pult_ruk.tunnel import TunnelTrouble                   # noqa: E402
 
 TOKEN = "ТОКЕН-ХАРДА-1"
+TEAM_LINKS = {
+    "ok": True, "screen": "team_links",
+    "manager": {"name": "Шемякин А.", "scope": "Таджикистан"},
+    "links": [
+        {"employee": "Апиев А.", "telegram_id": 573001, "kind": "agent",
+         "code": None, "url": "", "created_at": None, "expires_at": None,
+         "uses": 0, "max_uses": 2, "bonus_ios": False, "last_use_at": None,
+         "last_agent": None, "entered": False, "devices": 0, "alive": False},
+        {"employee": "Бепиев Б.", "telegram_id": 573002, "kind": "agent",
+         "code": "LINKCODE99", "url": "https://x/i/LINKCODE99",
+         "created_at": "2026-09-23T08:00:00", "expires_at": "2026-09-30",
+         "uses": 1, "max_uses": 2, "bonus_ios": False, "last_use_at": None,
+         "last_agent": None, "entered": True, "devices": 1, "alive": True},
+    ],
+}
+PUSHES = {"pushes": {"push_visits": True, "push_digest": True,
+                     "push_promises": False}}
 TUNNEL_URL = "https://алый-кот-77.trycloudflare.com"
 TUNNEL_HOST = "алый-кот-77.trycloudflare.com"
 PHONE = {"Host": TUNNEL_HOST, "X-Forwarded-For": "203.0.113.7",
@@ -134,6 +151,53 @@ def hard_stub(state: dict) -> web.Application:
             headers={"Content-Disposition":
                      'attachment; filename=stats_2026-09-15_2026-09-21.xlsx'})
 
+    async def team_links(request):
+        bad = guard(request)
+        if bad is not None:
+            return bad
+        state["hits"].append(("team_links", None))
+        return web.json_response(TEAM_LINKS)
+
+    async def app_link(request):
+        bad = guard(request)
+        if bad is not None:
+            return bad
+        body = await request.json()
+        state["hits"].append(("app_link", dict(body)))
+        if body.get("employee") not in {"Апиев А.", "Бепиев Б."}:
+            return web.json_response(
+                {"error": "Это не ваш сотрудник."}, status=403)
+        return web.json_response({
+            "ok": True, "employee": body.get("employee"),
+            "telegram_id": 573003, "code": "NEWCODE42",
+            "url": "https://x/i/NEWCODE42", "expires_at": "2026-09-30",
+            "uses": 2})
+
+    async def app_revoke(request):
+        bad = guard(request)
+        if bad is not None:
+            return bad
+        body = await request.json()
+        state["hits"].append(("app_revoke", dict(body)))
+        return web.json_response({"ok": True, "employee": body.get("employee"),
+                                  "revoked": 1, "scope": "all"})
+
+    pushes_current = dict(PUSHES["pushes"])
+
+    async def pushes(request):
+        bad = guard(request)
+        if bad is not None:
+            return bad
+        if request.method == "POST":
+            body = await request.json()
+            state["hits"].append(("pushes_post", dict(body)))
+            for key, value in body.items():
+                if key in pushes_current:
+                    pushes_current[key] = bool(value)
+        else:
+            state["hits"].append(("pushes_get", None))
+        return web.json_response({"pushes": dict(pushes_current)})
+
     app = web.Application()
     app.router.add_post("/api/redeem", redeem)
     app.router.add_get("/api/manager/summary", summary)
@@ -141,6 +205,10 @@ def hard_stub(state: dict) -> web.Application:
     app.router.add_get("/api/manager/promises", promises)
     app.router.add_get("/api/manager/stats", stats)
     app.router.add_get("/api/manager/stats.xlsx", book)
+    app.router.add_get("/api/manager/app_links", team_links)
+    app.router.add_post("/api/manager/app_link", app_link)
+    app.router.add_post("/api/manager/app_revoke", app_revoke)
+    app.router.add_route("*", "/api/manager/pushes", pushes)
     return app
 
 
@@ -647,3 +715,97 @@ def test_flat_old_settings_migrate_into_servers(tmp_path):
     assert again["servers"]["https://old.example"]["token"] == "t1"
     assert again["url"] == "https://old.example"
     assert "token" not in again, "плоский токен остался вторым источником правды"
+
+
+# --- входы команды и рубильники -----------------------------------------------
+def test_team_links_come_from_the_hard(tmp_path):
+    async def go():
+        async with world(tmp_path) as w:
+            data = await (await w.client.get("/api/team_links")).json()
+            assert data["screen"] == "team_links"
+            names = [r["employee"] for r in data["links"]]
+            assert names == ["Апиев А.", "Бепиев Б."]
+    run(go())
+
+
+def test_team_link_issue_returns_url_and_qr(tmp_path):
+    async def go():
+        async with world(tmp_path) as w:
+            data = await (await w.client.post(
+                "/api/team_link",
+                json={"employee": "Апиев А.", "action": "issue"})).json()
+            assert data["url"] == "https://x/i/NEWCODE42"
+            assert data["qr"], "QR не построен для выданной ссылки"
+            kind, body = [h for h in w.state["hits"] if h[0] == "app_link"][0]
+            assert body["employee"] == "Апиев А."
+    run(go())
+
+
+def test_team_link_issue_refuses_stranger_by_russian_text(tmp_path):
+    async def go():
+        async with world(tmp_path) as w:
+            data = await (await w.client.post(
+                "/api/team_link",
+                json={"employee": "Чужой В.", "action": "issue"})).json()
+            assert "не ваш сотрудник" in data["error"]
+    run(go())
+
+
+def test_team_link_requires_employee(tmp_path):
+    async def go():
+        async with world(tmp_path) as w:
+            resp = await w.client.post("/api/team_link", json={})
+            assert resp.status == 400
+    run(go())
+
+
+def test_team_link_revoke_reaches_the_hard(tmp_path):
+    async def go():
+        async with world(tmp_path) as w:
+            data = await (await w.client.post(
+                "/api/team_link",
+                json={"employee": "Бепиев Б.", "action": "revoke"})).json()
+            assert data["ok"] is True
+            kind, body = [h for h in w.state["hits"] if h[0] == "app_revoke"][0]
+            assert body["employee"] == "Бепиев Б."
+    run(go())
+
+
+def test_pushes_read_and_flip(tmp_path):
+    async def go():
+        async with world(tmp_path) as w:
+            data = await (await w.client.get("/api/pushes")).json()
+            assert data["pushes"]["push_promises"] is False
+            data = await (await w.client.post(
+                "/api/pushes",
+                json={"key": "push_promises", "value": True})).json()
+            assert data["pushes"]["push_promises"] is True
+            again = await (await w.client.get("/api/pushes")).json()
+            assert again["pushes"]["push_promises"] is True
+    run(go())
+
+
+def test_pushes_reject_unknown_key(tmp_path):
+    async def go():
+        async with world(tmp_path) as w:
+            resp = await w.client.post("/api/pushes",
+                                       json={"key": "nope", "value": True})
+            assert resp.status == 400
+    run(go())
+
+
+def test_phone_can_issue_and_flip_its_own_team(tmp_path):
+    """Телефон руководителя из тоннеля — тот же руководитель: входы команды
+    и свои рубильники ему доступны, это не «управление пультом»."""
+    async def go():
+        async with world(tmp_path) as w:
+            phone = await let_phone_in(w)
+            resp = await w.client.get("/api/team_links", headers=phone)
+            assert resp.status == 200
+            resp = await w.client.post("/api/pushes", headers=phone,
+                                       json={"key": "push_digest", "value": False})
+            assert resp.status == 200
+            # а вот ссылку входа САМОГО пульта телефон по-прежнему не меняет
+            resp = await w.client.post("/api/out", json={}, headers=phone)
+            assert resp.status == 403
+    run(go())

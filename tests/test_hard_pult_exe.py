@@ -60,10 +60,50 @@ def _stub_hard(state: dict):
         bad = guard(request)
         return bad if bad is not None else web.json_response(SUMMARY)
 
+    pushes_state = {"push_visits": True, "push_digest": True, "push_promises": False}
+
+    async def pushes(request):
+        if request.headers.get("X-App-Token") != TOKEN:
+            return web.Response(status=401, text="auth")
+        if request.method == "POST":
+            body = await request.json()
+            for key, value in body.items():
+                if key in pushes_state:
+                    pushes_state[key] = bool(value)
+        return web.json_response({"pushes": dict(pushes_state)})
+
+    async def app_links(request):
+        if request.headers.get("X-App-Token") != TOKEN:
+            return web.Response(status=401, text="auth")
+        return web.json_response({
+            "ok": True, "screen": "team_links",
+            "manager": {"name": "Шемякин А.", "scope": "СНГ"},
+            "links": [
+                {"employee": "Апиев А.", "telegram_id": 573001,
+                 "code": None, "url": "", "entered": False, "devices": 0,
+                 "alive": False, "uses": 0, "max_uses": 2},
+            ]})
+
+    async def app_link(request):
+        if request.headers.get("X-App-Token") != TOKEN:
+            return web.Response(status=401, text="auth")
+        body = await request.json()
+        if body.get("employee") != "Апиев А.":
+            return web.json_response(
+                {"error": "Это не ваш сотрудник: ссылку можно выдать только своей команде."},
+                status=403)
+        return web.json_response({
+            "ok": True, "employee": body.get("employee"), "telegram_id": 573003,
+            "code": "RUSTCODE7", "url": "http://127.0.0.1:1/i/RUSTCODE7",
+            "expires_at": "2026-09-30", "uses": 2})
+
     app = web.Application()
     app.router.add_post("/api/redeem", redeem)
     app.router.add_get("/api/manager/summary", summary)
     app.router.add_get("/api/manager/promises", summary)
+    app.router.add_route("*", "/api/manager/pushes", pushes)
+    app.router.add_get("/api/manager/app_links", app_links)
+    app.router.add_post("/api/manager/app_link", app_link)
     return app
 
 
@@ -248,3 +288,31 @@ def test_out_forgets_and_page_still_serves(world):
     assert not raw["servers"][world["hard"]].get("token")
     status, state = _http("GET", world["base"] + "/api/state")
     assert state["ready"] is False
+
+
+def test_pushes_and_team_links_through_exe(world):
+    _http("POST", world["base"] + "/api/link",
+          {"link": f"{world['hard']}/i/AbCdEf123456"})
+
+    status, out = _http("GET", world["base"] + "/api/pushes")
+    assert status == 200 and out["pushes"]["push_promises"] is False
+
+    status, out = _http("POST", world["base"] + "/api/pushes",
+                        {"key": "push_promises", "value": True})
+    assert status == 200 and out["pushes"]["push_promises"] is True
+
+    status, out = _http("POST", world["base"] + "/api/pushes",
+                        {"key": "nope", "value": True})
+    assert status == 400
+
+    status, out = _http("GET", world["base"] + "/api/team_links")
+    assert status == 200 and out["links"][0]["employee"] == "Апиев А."
+
+    status, out = _http("POST", world["base"] + "/api/team_link",
+                        {"employee": "Апиев А.", "action": "issue"})
+    assert status == 200 and out["url"].endswith("/i/RUSTCODE7")
+    assert out["qr"], "QR не построен"
+
+    status, out = _http("POST", world["base"] + "/api/team_link",
+                        {"employee": "Чужой В.", "action": "issue"})
+    assert status == 200 and "не ваш сотрудник" in out.get("error", "")

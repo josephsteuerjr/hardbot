@@ -31,7 +31,7 @@ from pathlib import Path
 from aiohttp import web
 
 from . import session as gate_mod
-from .hard import Hard, HardTrouble
+from .hard import Hard, HardTrouble, PUSH_KEYS
 from .settings import Settings, load_settings
 from .tunnel import Tunnel, TunnelTrouble
 
@@ -156,6 +156,10 @@ def create_app(*, settings: Settings | None = None, hard: Hard | None = None,
     app.router.add_get("/api/promises", api_promises)
     app.router.add_get("/api/stats", api_stats)
     app.router.add_get("/api/report.xlsx", api_report)
+    app.router.add_get("/api/pushes", api_pushes)
+    app.router.add_post("/api/pushes", api_pushes)
+    app.router.add_get("/api/team_links", api_team_links)
+    app.router.add_post("/api/team_link", api_team_link)
     app.router.add_post("/api/phone", api_phone)
     app.router.add_post("/api/server", api_server)
     app.router.add_post("/api/out", api_out)
@@ -402,6 +406,48 @@ async def api_report(request: web.Request) -> web.Response:
     finally:
         upstream.release()
     return out
+
+
+# --- рубильники и входы команды ----------------------------------------------
+async def api_pushes(request: web.Request) -> web.Response:
+    """Свои рубильники рассылок: GET — прочитать, POST {key, value} — повернуть."""
+    hard = request.app["hard"]
+    if request.method == "POST":
+        body = await _body(request)
+        key, value = str(body.get("key") or ""), body.get("value")
+        if key not in PUSH_KEYS or not isinstance(value, bool):
+            return _json({"error": "Неизвестный рубильник."}, status=400)
+        call = hard.set_push(key, value)
+    else:
+        call = hard.pushes()
+    try:
+        return _json(await call)
+    except HardTrouble as trouble:
+        return _trouble_json(trouble)
+
+
+async def api_team_links(request: web.Request) -> web.Response:
+    try:
+        return _json(await request.app["hard"].team_links())
+    except HardTrouble as trouble:
+        return _trouble_json(trouble)
+
+
+async def api_team_link(request: web.Request) -> web.Response:
+    """Выдать или отозвать вход своему сотруднику. Выдача возвращает ссылку
+    и QR картинкой — руководитель пересылает её человеку сам."""
+    body = await _body(request)
+    employee = str(body.get("employee") or "").strip()
+    action = "revoke" if body.get("action") == "revoke" else "issue"
+    if not employee:
+        return _json({"error": "Не сказано, кому выдать вход."}, status=400)
+    try:
+        out = await request.app["hard"].team_link(employee, action)
+    except HardTrouble as trouble:
+        return _trouble_json(trouble)
+    if action == "issue" and out.get("url"):
+        out["qr"] = qr_data_url(out["url"])
+    return _json(out)
 
 
 async def api_phone(request: web.Request) -> web.Response:

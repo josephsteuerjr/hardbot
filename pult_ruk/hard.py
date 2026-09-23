@@ -36,6 +36,9 @@ PATHS = {
     "report": "/api/manager/stats.xlsx",
 }
 
+# Личные рубильники рассылок — те же ключи, что у «Харда».
+PUSH_KEYS = ("push_visits", "push_digest", "push_promises")
+
 # Код в ссылке входа: 12 случайных символов (server/db.py). Рамки широкие —
 # проверяем только то, что это не кусок чужого текста и не путь.
 CODE_RE = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
@@ -135,6 +138,17 @@ def normalize(payload: dict) -> dict:
     return out
 
 
+def _body_error(body: bytes) -> str:
+    """Текст ошибки из JSON-тела ответа, если сервер его прислал."""
+    try:
+        data = json.loads((body or b"")[:2000].decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    if isinstance(data, dict) and data.get("error"):
+        return str(data["error"])
+    return ""
+
+
 class Hard:
     """Один клиент на весь пульт: своя сессия, свой кэш, своя память о беде."""
 
@@ -190,8 +204,11 @@ class Hard:
     def _trouble(self, status: int, body: bytes) -> HardTrouble:
         """Код ответа → то, что человек может прочитать и понять, что делать."""
         if status == 403:
-            # 403 у «Харда» значит «эта учётка не руководитель» — отдельный
-            # случай: новая ссылка тут не поможет, помогает только аналитик.
+            # 403 бывает разный: «не руководитель» и «не ваш сотрудник».
+            # Если сервер назвал причину по-русски — показываем её, а не общую.
+            named = _body_error(body)
+            if named:
+                return HardTrouble("auth", named, status)
             return HardTrouble(
                 "auth",
                 "Сервер не считает вас руководителем направления. "
@@ -354,6 +371,28 @@ class Hard:
         fresh = normalize(data)
         self._cache[key] = {"data": fresh, "at": now_hhmm()}
         return {**fresh, "stale": False, "lost_at": "", "fresh_at": now_hhmm()}
+
+    # --- рассылки и входы команды --------------------------------------------
+    async def pushes(self) -> dict:
+        """Свои рубильники: {pushes: {push_visits, push_digest, push_promises}}."""
+        return await self._request("GET", self.base + "/api/manager/pushes")
+
+    async def set_push(self, key: str, value: bool) -> dict:
+        if key not in PUSH_KEYS:
+            raise HardTrouble("server", "Неизвестный рубильник рассылки.")
+        return await self._request("POST", self.base + "/api/manager/pushes",
+                                   payload={key: bool(value)})
+
+    async def team_links(self) -> dict:
+        """Входы команды: строка на человека, включая тех, кому не выдавали."""
+        return await self._request("GET", self.base + "/api/manager/app_links")
+
+    async def team_link(self, employee: str, action: str = "issue") -> dict:
+        """Выдать («issue») или отозвать («revoke») вход своему сотруднику."""
+        path = ("/api/manager/app_revoke" if action == "revoke"
+                else "/api/manager/app_link")
+        return await self._request("POST", self.base + path,
+                                   payload={"employee": employee[:200]})
 
     async def book(self, params: dict | None = None):
         """Книга Excel за период. Отдаёт открытый ответ «Харда» — пульт

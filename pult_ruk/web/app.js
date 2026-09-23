@@ -187,9 +187,11 @@ const S = {
     fail: '',             // строка «связь потеряна в 14:32…» для шапки
     date: '',             // выбранный день; пусто — «сегодня по серверу»
     qr: '',               // картинка кода: приходит только в ответе /api/phone
+    pushes: null,         // свои рубильники рассылок (ответ /api/pushes)
     summary: box(),       // /api/today — кормит и «Сегодня», и «Люди»
     promises: Object.assign(box(), { only: '' }),
     report: Object.assign(box(), { preset: 'week', from: '', to: '' }),
+    entry: Object.assign(box(), { issued: null }),   // /api/team_links + последняя выданная
     people: { open: '', cards: {} },   // раскрытая строка и карточки /api/employee
 };
 
@@ -377,6 +379,8 @@ function ensure(name, force) {
         if (force || stale || (!S.promises.data && !S.promises.loading)) loadPromises();
     } else if (name === 'report') {
         if (force || (!S.report.data && !S.report.loading)) loadReport(S.report.preset);
+    } else if (name === 'entry') {
+        if (force || (!S.entry.data && !S.entry.loading)) loadEntry();
     } else if (name === 'me') {
         renderMe();
     }
@@ -1106,35 +1110,195 @@ function renderMe() {
     }
 
     renderPhoneCard(st.phone || {});
-
-    const pushes = st.pushes || (mgr.pushes || null);
-    const rows = PUSH_SWITCHES.map((spec) => {
-        const known = pushes && Object.prototype.hasOwnProperty.call(pushes, spec.key);
-        return toggleRow(spec, known ? !!pushes[spec.key] : false, known);
-    });
-    // Одна оговорка на всю карточку — вместо трёх одинаковых в каждой строке.
-    const why = el('div', 'note note--tiny',
-        'Рассылки включает и выключает аналитик в своём пульте — здесь видно их состояние.');
-    id('me-switches').replaceChildren(why, ...rows);
+    renderSwitches();
 }
 
-function toggleRow(spec, value, known) {
-    // Ручки на запись в локальном API нет — переключатель показывает состояние,
-    // но не поворачивается. Подпись объясняет почему, чтобы это не читалось
-    // как поломка.
-    const row = el('label', 'toggle toggle--locked');
+/** Rubilymail toggles: the manager turns them personally — right from here.
+ *  The state arrives from /api/pushes; until it arrives, the toggles are locked and
+ *  explain why, so it doesn't read as a malfunction. */
+async function renderSwitches() {
+    const wrap = id('me-switches');
+    if (!wrap) return;
+    if (!S.pushes) {
+        try {
+            S.pushes = (await api('/api/pushes')).pushes || null;
+        } catch (e) {
+            S.pushes = null;
+        }
+    }
+    const pushes = S.pushes;
+    const rows = PUSH_SWITCHES.map((spec) => {
+        const known = pushes && Object.prototype.hasOwnProperty.call(pushes, spec.key);
+        return toggleRow(spec, known ? !!pushes[spec.key] : false, known,
+            known ? ((v) => switchPush(spec.key, v)) : null);
+    });
+    const why = el('div', 'note note--tiny', pushes
+        ? 'You toggle these yourself — they take effect immediately. The analyst can change the same ones in their console.'
+        : 'Mailing status didn\'t arrive — check the connection and reopen the page.');
+    wrap.replaceChildren(why, ...rows);
+}
+
+async function switchPush(key, value) {
+    try {
+        const out = await post('/api/pushes', { key, value });
+        if (out && out.pushes) S.pushes = out.pushes;
+    } catch (e) {
+        setFail((e && e.message) || 'the toggle didn\'t switch', false);
+    }
+    await renderSwitches();
+}
+
+function toggleRow(spec, value, known, onToggle) {
+    const row = el('label', known ? 'toggle' : 'toggle toggle--locked');
     const body = el('div', 'toggle__body');
     body.appendChild(el('div', 'toggle__name', spec.name));
     body.appendChild(el('div', 'toggle__note',
-        spec.note + (known ? '' : ' · состояние не пришло')));
+        spec.note + (known ? '' : ' · state didn\'t arrive')));
     row.appendChild(body);
     const input = el('input');
     input.type = 'checkbox';
     input.checked = !!value;
-    input.disabled = true;
+    input.disabled = !known;
+    if (known && onToggle) input.addEventListener('change', () => onToggle(input.checked));
     row.appendChild(input);
     row.appendChild(el('span', 'toggle__box'));
     return row;
+}
+
+// ── Вход команды ────────────────────────────────────────────────────────────
+
+/** Ссылки входа выдаёт сам руководитель: строка на человека, состояние входа
+ *  и две кнопки. Выдача сразу показывает ссылку с QR — переслать её в
+ *  мессенджер можно одним движением. */
+async function loadEntry() {
+    const rec = S.entry;
+    rec.loading = true;
+    renderEntry();
+    try {
+        const data = await api('/api/team_links');
+        rec.data = data;
+        rec.error = '';
+        rec.at = new Date();
+    } catch (e) {
+        onError(rec, e);
+    } finally {
+        rec.loading = false;
+        renderEntry();
+    }
+}
+
+function entryState(row) {
+    if (row.entered) {
+        return { text: 'вошёл', ok: true,
+                 hint: (row.devices || 1) + ' устройств' };
+    }
+    if (row.alive || row.code) {
+        const left = Math.max((row.max_uses || 2) - (row.uses || 0), 0);
+        return { text: 'выдана — ждёт', ok: false,
+                 hint: 'открытий осталось: ' + left };
+    }
+    return { text: 'не выдавали', ok: false, hint: '' };
+}
+
+function renderEntry() {
+    const rec = S.entry;
+    const rows = id('entry-rows');
+    if (!rows) return;
+    const stamp = id('entry-stamp');
+    if (rec.loading && !rec.data) {
+        rows.replaceChildren(el('div', 'note', 'Загружаем команду…'));
+        if (stamp) stamp.textContent = '';
+        return;
+    }
+    if (rec.error && !rec.data) {
+        rows.replaceChildren(el('div', 'fail', rec.error));
+        return;
+    }
+    const links = (rec.data && rec.data.links) || [];
+    if (stamp) {
+        stamp.textContent = rec.at ? 'обновлено ' + timeWords(rec.at) : '';
+    }
+    if (!links.length) {
+        rows.replaceChildren(el('div', 'note',
+            'В команде пока никто не закреплён за портфелями.'));
+        return;
+    }
+    rows.replaceChildren(...links.map((row) => {
+        const state = entryState(row);
+        const line = el('div', 'row');
+        const body = el('div', 'row__body');
+        body.appendChild(el('div', 'row__name', row.employee));
+        body.appendChild(el('div', 'row__note' + (state.ok ? ' row__note--ok' : ''),
+            state.text + (state.hint ? ' · ' + state.hint : '')));
+        line.appendChild(body);
+        const btns = el('div', 'btns btns--row');
+        const issue = el('button', 'btn btn--primary',
+                         row.code ? 'Выдать заново' : 'Выдать вход');
+        issue.type = 'button';
+        issue.addEventListener('click', () => issueEntry(row.employee));
+        btns.appendChild(issue);
+        if (row.entered || row.code) {
+            const revoke = el('button', 'btn btn--danger', 'Отозвать');
+            revoke.type = 'button';
+            revoke.addEventListener('click', () =>
+                revokeEntry(row.employee, row.entered));
+            btns.appendChild(revoke);
+        }
+        line.appendChild(btns);
+        return line;
+    }));
+}
+
+async function issueEntry(employee) {
+    try {
+        const out = await post('/api/team_link', { employee, action: 'issue' });
+        if (out && out.url) {
+            S.entry.issued = out;
+            renderIssued();
+            await loadEntry();
+        } else {
+            setFail((out && out.error) || 'ссылку собрать не удалось', false);
+        }
+    } catch (e) {
+        setFail((e && e.message) || 'ссылку собрать не удалось', false);
+    }
+}
+
+async function revokeEntry(employee, entered) {
+    const question = entered
+        ? 'Отозвать вход «' + employee + '»? Телефон выйдет из приложения сразу.'
+        : 'Погасить выданную ссылку «' + employee + '»? Открыть её будет нельзя.';
+    if (!window.confirm(question)) return;
+    try {
+        await post('/api/team_link', { employee, action: 'revoke' });
+        if (S.entry.issued && S.entry.issued.employee === employee) {
+            S.entry.issued = null;
+            renderIssued();
+        }
+        await loadEntry();
+    } catch (e) {
+        setFail((e && e.message) || 'отзыв не прошёл', false);
+    }
+}
+
+function renderIssued() {
+    const bubble = id('entry-issued');
+    if (!bubble) return;
+    const out = S.entry.issued;
+    bubble.hidden = !out;
+    if (!out) return;
+    id('entry-issued-name').textContent = out.employee || '';
+    id('entry-issued-url').textContent = out.url || '';
+    id('entry-issued-meta').textContent =
+        'открытий: ' + (out.uses || 2) + ' · годна до ' + (out.expires_at || '—');
+    const qr = id('entry-qr');
+    if (out.qr) {
+        qr.src = out.qr;
+        qr.hidden = false;
+    } else {
+        qr.removeAttribute('src');
+        qr.hidden = true;
+    }
 }
 
 function renderServers(list) {
@@ -1166,6 +1330,8 @@ async function switchServer(url) {
     S.summary = box();
     S.promises = Object.assign(box(), { only: '' });
     S.report = Object.assign(box(), { preset: 'week', from: '', to: '' });
+    S.entry = Object.assign(box(), { issued: null });
+    S.pushes = null;
     S.people = { open: '', cards: {} };
     await boot();
 }
@@ -1417,6 +1583,11 @@ function wire() {
     id('phone-start').addEventListener('click', () => switchPhone(true));
     id('phone-stop').addEventListener('click', () => switchPhone(false));
     id('me-out').addEventListener('click', logout);
+    id('entry-copy').addEventListener('click', copyIssued);
+    id('entry-hide').addEventListener('click', () => {
+        S.entry.issued = null;
+        renderIssued();
+    });
 
     const theme = id('me-theme');
     if (theme) {

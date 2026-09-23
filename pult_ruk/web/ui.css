@@ -882,3 +882,10 @@ button.bubble:active { transform: translateY(1px); }
 .stack { display: flex; flex-direction: column; gap: var(--s-4); }
 
 .stack--tight { gap: var(--s-3); }
+
+/* ── Вход команды ─────────────────────────────────────────────────────────
+   Кнопки выдачи стоят в строке человека: действие относится к нему, и
+   искать его внизу экрана было бы чужой логикой. */
+.btns--row { flex-direction: column; gap: var(--s-1); align-items: stretch; flex-shrink: 0; }
+.btns--row .btn { padding: 8px 14px; font-size: var(--type-meta); }
+.row__note--ok { color: var(--ok-fg); }
