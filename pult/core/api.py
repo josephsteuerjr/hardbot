@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import ssl
 import urllib.error
@@ -35,6 +36,16 @@ CERT_BAD_TEXT = ("Сертификат сервера не прошёл пров
                  "отправил: ни ключа, ни токена. Подключитесь к другой сети.")
 
 
+def _read_json(resp):
+    """Тело ответа как JSON, в том числе сжатое gzip: крупные ответы (выгрузка
+    базы — 46 МБ) сервер сжимает, если его об этом попросили."""
+    raw = resp.read()
+    headers = getattr(resp, "headers", None) or {}
+    if (headers.get("Content-Encoding") or "").lower() == "gzip":
+        raw = gzip.decompress(raw)
+    return json.loads(raw)
+
+
 def host_of(url: str) -> str:
     """Хост для подписи в рейке: «—», если адрес не разбирается."""
     try:
@@ -61,12 +72,15 @@ def request(base_url: str, method: str, path: str, body: dict | None = None, *,
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method,
                                  headers=auth_headers(key, device_token))
+    # Просим сжатие: контур компании опубликован через туннель, и несжатая
+    # выгрузка базы шла по нему минуты вместо секунд.
+    req.add_header("Accept-Encoding", "gzip")
     if data is not None:
         req.add_header("Content-Type", "application/json")
     try:
         try:
             with urlopen(req, timeout=timeout) as r:
-                return json.load(r)
+                return _read_json(r)
         except urllib.error.URLError as e:
             if isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
                 raise RuntimeError(CERT_BAD_TEXT) from e
@@ -78,7 +92,7 @@ def request(base_url: str, method: str, path: str, body: dict | None = None, *,
             raise RuntimeError(f"На сервере нет {path} — сервер старой версии?") from e
         if e.code == 409:
             try:
-                payload = json.load(e)
+                payload = _read_json(e)
             except (ValueError, TypeError):
                 payload = None
             if isinstance(payload, dict) and payload.get("error"):

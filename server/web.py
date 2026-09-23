@@ -5196,8 +5196,32 @@ async def _cors(request: web.Request, handler):
     return resp
 
 
+# Сжатие крупных текстовых ответов на стороне приложения. Контур компании
+# опубликован через обратный туннель, и самое узкое место — туннель из офиса до
+# публикатора (~0,85 МБ/с). Caddy на публикаторе сжимает уже ПОСЛЕ туннеля, и
+# полная выгрузка базы (46 МБ JSON) шла по туннелю как есть — 4,6 минуты на
+# «Проверить соответствия» в пульте. Сжатая — 3,4 МБ. Мелочь не сжимаем (выгоды
+# нет), фото и потоковые ответы — тоже: они уже сжаты или идут потоком.
+_COMPRESS_MIN_BYTES = 32 * 1024
+_COMPRESSIBLE_TYPES = ("application/json", "text/", "application/javascript")
+
+
+@web.middleware
+async def _compress(request: web.Request, handler):
+    resp = await handler(request)
+    if (type(resp) is web.Response
+            and "gzip" in (request.headers.get("Accept-Encoding") or "").lower()
+            and not resp.headers.get("Content-Encoding")
+            and (resp.content_type or "").startswith(_COMPRESSIBLE_TYPES)
+            and resp.body is not None
+            and len(resp.body) >= _COMPRESS_MIN_BYTES):
+        resp.enable_compression(web.ContentCoding.gzip)
+    return resp
+
+
 def build_app(bot=None) -> web.Application:
-    app = web.Application(client_max_size=256 * 1024 * 1024, middlewares=[_cors])
+    app = web.Application(client_max_size=256 * 1024 * 1024,
+                          middlewares=[_cors, _compress])
     app["bot"] = bot
     app.router.add_get("/", _index)
     # Короткая ссылка входа. Путь из одной буквы — чтобы адрес целиком помещался

@@ -122,3 +122,22 @@ def test_admin_api_object_carries_credentials(monkeypatch):
 def test_host_of():
     assert api.host_of("https://hardbot2.example.org/") == "hardbot2.example.org"
     assert api.host_of("") == "—"
+
+
+def test_asks_for_gzip_and_unpacks_it():
+    """Контур компании опубликован через туннель: несжатая выгрузка базы (46 МБ)
+    шла по нему минуты. Пульт просит gzip и сам распаковывает ответ."""
+    import gzip
+
+    class _Gz(_Response):
+        headers = {"Content-Encoding": "gzip"}
+
+    seen = {}
+
+    def urlopen(req, **kwargs):
+        seen["enc"] = req.get_header("Accept-encoding")
+        return _Gz(gzip.compress(json.dumps({"rows": [1, 2, 3]}).encode()))
+
+    assert api.request("https://h", "GET", "/admin/export.json", key="k",
+                       opener=urlopen) == {"rows": [1, 2, 3]}
+    assert seen["enc"] == "gzip"

@@ -219,3 +219,37 @@ def test_bad_uses_creates_no_identity(monkeypatch):
         n = conn.execute("SELECT COUNT(*) FROM agent_bind WHERE employee=?",
                          ("Опечаткин О.",)).fetchone()[0]
     assert n == 0
+
+
+def test_big_json_is_gzipped_only_when_asked(monkeypatch):
+    """Крупный JSON сжимается на стороне приложения — до туннеля, а не после
+    него. Без Accept-Encoding: gzip ответ прежний, мелочь не сжимается."""
+    import gzip
+    import json as _json
+
+    from aiohttp import web as aio_web
+
+    big = {"rows": [{"n": i, "text": "строка " * 20} for i in range(600)]}
+
+    async def scenario():
+        app = aio_web.Application(middlewares=[web._compress])
+        app.router.add_get("/big", lambda r: aio_web.json_response(big))
+        app.router.add_get("/small", lambda r: aio_web.json_response({"ok": 1}))
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            out = {}
+            for path, enc in (("/big", "gzip"), ("/big", "identity"), ("/small", "gzip")):
+                resp = await client.get(path, headers={"Accept-Encoding": enc},
+                                        auto_decompress=False)
+                out[(path, enc)] = (resp.headers.get("Content-Encoding"), await resp.read())
+            return out
+        finally:
+            await client.close()
+
+    out = asyncio.run(scenario())
+    enc, raw = out[("/big", "gzip")]
+    assert enc == "gzip" and _json.loads(gzip.decompress(raw)) == big
+    assert len(raw) < len(_json.dumps(big).encode()) / 5
+    assert out[("/big", "identity")][0] is None
+    assert out[("/small", "gzip")][0] is None
