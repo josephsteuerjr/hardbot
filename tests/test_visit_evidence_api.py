@@ -150,11 +150,17 @@ def test_presence_and_verdict_are_stored_with_the_visit(monkeypatch):
 
 
 def test_repeat_from_queue_does_not_duplicate_presence(monkeypatch):
-    body = _finish_body(CID_NEAR, "ev-near-1", [_near(14, k="open"), _near(10), _near(5)])
+    # Очередь повторяет ТО ЖЕ тело — с теми же метками времени. Тело собирается
+    # один раз: если собрать его заново, метки сдвинутся на секунду (на медленной
+    # машине между тестами проходит больше секунды) и дубли будут честными.
+    body = _finish_body(CID_NEAR, "ev-near-repeat",
+                        [_near(14, k="open"), _near(10), _near(5)],
+                        geo={"lat": ADDR[0], "lon": ADDR[1], "acc": 12})
+    _post(body, monkeypatch)
     _post(body, monkeypatch)
     with db.connect() as conn:
         n = conn.execute("SELECT COUNT(*) FROM visit_presence WHERE session_id="
-                         "'sess-ev-near-1'").fetchone()[0]
+                         "'sess-ev-near-repeat'").fetchone()[0]
     assert n == 4
 
 

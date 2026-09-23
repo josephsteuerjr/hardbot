@@ -19,7 +19,7 @@
 | `Пульт.pyw` | Точка входа двойным кликом, без консоли |
 | `pult.py` | Совместимая обёртка: `python pult.py` поднимает то же окно; реэкспортирует прежние имена (`Pult`, `LIMITED_TEST_*`, `write_registry_xlsx`…) для документов и тестов |
 | `app.py` | Сборка QApplication, тема, окна ошибок старта |
-| `core/` | Логика без Qt, покрыта тестами: `settings.py` (тот же файл настроек), `api.py` (клиент admin-API: X-Device-Token/X-Admin-Key, дружелюбные ошибки, TLS-fallback), `registry_import.py` + `import_flow.py` (книга → выбор сотрудников → предпросмотр → применение), `export.py`, `enrichment.py` (подбор личных файлов, окно дат, реестр доставленного, отчёт), `devices.py`, `managers.py`, `people.py`, `activity.py`, `priority.py`, `dashboard.py`, `workbook.py`, `text.py` |
+| `core/` | Логика без Qt, покрыта тестами: `settings.py` (тот же файл настроек), `api.py` (клиент admin-API: X-Device-Token/X-Admin-Key, дружелюбные ошибки; на непроверенный сертификат — отказ без повтора), `registry_import.py` + `import_flow.py` (книга → выбор сотрудников → предпросмотр → применение), `export.py`, `enrichment.py` (подбор личных файлов, окно дат, реестр доставленного, отчёт), `devices.py`, `managers.py`, `people.py`, `activity.py`, `priority.py`, `dashboard.py`, `workbook.py`, `text.py` |
 | `ui/` | PySide6: `theme.py` (токены + QSS), `widgets.py`, `nav.py` (рейка с SVG-иконками), `tasks.py` (QThreadPool), `dialogs.py` (в т.ч. окно ссылки входа с QR), `links.py` (раздел «Вход»),
 по модулю на раздел, `main_window.py` |
 | `enrich.py` | Библиотека доказуемого обогащения: пишет только proven bot-поля, ведёт реестр доставленного, проверяет snapshot/file map/contract, сохраняет ручной текст и создаёт backup |

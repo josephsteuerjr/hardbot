@@ -1709,20 +1709,31 @@ def is_local_uid(uid: int) -> bool:
     return int(uid or 0) >= LOCAL_UID_BASE
 
 
-def local_identity_for(employee: str, kind: str = "agent") -> tuple[int, bool]:
-    """(id, создана_ли_сейчас) для ФИО. Существующая привязка ФИО — любая, в том
-    числе на настоящий Telegram — переиспользуется: у сотрудника один вход."""
+def bound_identity(employee: str) -> int | None:
+    """Чей вход получит ссылка на это ФИО — тот же выбор, что у
+    ``local_identity_for``, но без создания новой учётки."""
     employee = (employee or "").strip()
     if not employee:
-        raise ValueError("пустое ФИО")
+        return None
     with connect() as conn:
         row = conn.execute(
             "SELECT telegram_id FROM agent_bind WHERE employee = ? "
             "ORDER BY approved DESC, telegram_id LIMIT 1",
             (employee,),
         ).fetchone()
-        if row:
-            return int(row["telegram_id"]), False
+    return int(row["telegram_id"]) if row else None
+
+
+def local_identity_for(employee: str, kind: str = "agent") -> tuple[int, bool]:
+    """(id, создана_ли_сейчас) для ФИО. Существующая привязка ФИО — любая, в том
+    числе на настоящий Telegram — переиспользуется: у сотрудника один вход."""
+    employee = (employee or "").strip()
+    if not employee:
+        raise ValueError("пустое ФИО")
+    bound = bound_identity(employee)
+    if bound is not None:
+        return bound, False
+    with connect() as conn:
         used = [
             conn.execute(
                 f"SELECT MAX(telegram_id) FROM {table} WHERE telegram_id >= ?",

@@ -205,16 +205,14 @@ def _request_json(url: str, key: str, timeout: int = 120,
                   device_token: str = "") -> dict:
         # Мастер-ключ больше не открывает данные после первой привязки — ходим
     # тем же, чем ходит сам пульт: токеном устройства плюс отпечаток машины.
-    from core.api import auth_headers
+    from core.api import CERT_BAD_TEXT, auth_headers
     req = urllib.request.Request(url, headers=auth_headers(key, device_token))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
             return json.load(response)
     except urllib.error.URLError as exc:
         if isinstance(getattr(exc, "reason", None), ssl.SSLCertVerificationError):
-            ctx = ssl._create_unverified_context()  # noqa: S323 — совместимость с текущим пультом
-            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as response:
-                return json.load(response)
+            raise RuntimeError(CERT_BAD_TEXT) from exc
         raise
 
 

@@ -69,6 +69,24 @@ impl Tunnel {
         String::new()
     }
 
+    /// Дочитать поток до конца; первый найденный адрес тоннеля — в слот.
+    async fn drain<R>(stream: R, url_slot: Arc<Mutex<String>>)
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut lines = BufReader::new(stream).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let url = Tunnel::extract_url(&line);
+            if !url.is_empty() {
+                let mut slot = url_slot.lock().expect("url");
+                if slot.is_empty() {
+                    *slot = url;
+                }
+            }
+        }
+    }
+
     pub fn available(&self) -> bool {
         find_binary().is_some()
     }
@@ -104,7 +122,9 @@ impl Tunnel {
                    "--no-autoupdate"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
+            // Адрес тоннеля cloudflared печатает в поток ОШИБОК (там весь его
+            // журнал), не в stdout: без этого адрес не находился никогда.
+            .stderr(std::process::Stdio::piped());
         #[cfg(windows)]
         {
             // Пульт живёт без консоли; cloudflared без этого флага открыл бы
@@ -116,23 +136,16 @@ impl Tunnel {
             .spawn()
             .map_err(|e| TunnelTrouble(format!(
                 "Не удалось запустить cloudflared: {}. Переустановите его: {}", e, WINGET)))?;
-        let stdout = child.stdout.take();
-        let url_slot = self.url.clone();
-        // Читаем вывод в стороне: cloudflared пишет адрес и продолжает сыпать
-        // логи всю жизнь; не читать — значит однажды упереться в буфер трубы.
-        let reader = tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            if let Some(out) = stdout {
-                let mut lines = BufReader::new(out).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let url = Tunnel::extract_url(&line);
-                    if !url.is_empty() {
-                        *url_slot.lock().expect("url") = url;
-                        break;
-                    }
-                }
-            }
-        });
+        // Читаем оба потока в стороне и ДО КОНЦА: cloudflared пишет адрес и
+        // продолжает сыпать журнал всю жизнь; бросить чтение после адреса —
+        // значит однажды упереться в буфер трубы и повесить тоннель.
+        // Читатели сами завершатся, когда процесс умрёт и трубы закроются.
+        if let Some(out) = child.stdout.take() {
+            tokio::spawn(Tunnel::drain(out, self.url.clone()));
+        }
+        if let Some(err) = child.stderr.take() {
+            tokio::spawn(Tunnel::drain(err, self.url.clone()));
+        }
         {
             self.inner.lock().expect("тоннель").replace(Running { child });
         }
@@ -140,7 +153,6 @@ impl Tunnel {
         loop {
             let url = self.url.lock().expect("url").clone();
             if !url.is_empty() {
-                let _ = reader.await;
                 return Ok(url);
             }
             if tokio::time::Instant::now() >= deadline {

@@ -164,3 +164,30 @@ def test_split_contour_space_and_equals_forms():
     assert _split_contour([]) == ("", [])
     name, rest = _split_contour(["--contour", "Компания", "--foo"])
     assert name == "Компания" and rest == ["--foo"]
+
+
+def test_failed_reenroll_keeps_working_token(window, monkeypatch):
+    """Опечатка в мастер-ключе при перепривязке не должна стирать рабочий
+    токен контура: следующее «Обновить» или закрытие окна пишет профиль на диск."""
+    from pult.ui import dialogs
+    monkeypatch.setattr(dialogs, "askstring", lambda *a, **k: "Ноутбук")
+    monkeypatch.setattr(window, "bg_task",
+                        lambda work, done, fail: fail(RuntimeError("401: неверный ключ")))
+    monkeypatch.setattr(window, "toast", lambda *a, **k: None)
+    window.key_entry.set("опечатка")
+    window.device_enroll()
+    assert window.device_token == "tok-prod"
+    window._flush_profile()
+    window._save_settings()
+    saved = json.loads(window.settings.path.read_text(encoding="utf-8"))
+    assert saved["profiles"]["Прод"]["device_token"] == "tok-prod"
+
+
+def test_empty_answer_on_reenroll_keeps_working_token(window, monkeypatch):
+    from pult.ui import dialogs
+    monkeypatch.setattr(dialogs, "askstring", lambda *a, **k: "Ноутбук")
+    monkeypatch.setattr(window, "bg_task", lambda work, done, fail: done({}))
+    monkeypatch.setattr(window, "toast", lambda *a, **k: None)
+    window.key_entry.set("ключ")
+    window.device_enroll()
+    assert window.device_token == "tok-prod"

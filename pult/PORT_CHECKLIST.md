@@ -29,7 +29,7 @@
 | [x] | Тост 3,2 с внизу по центру, красный при ошибке | `toast`, `_fail` | `ui/widgets.py: Toast`, `Pult.toast` |
 | [x] | Фоновые задачи: `bg_task(fn, done, fail)`, результат в UI-потоке | `bg_task` (threading + `after`) | `ui/tasks.py: TaskRunner` (QThreadPool/QRunnable + сигналы), `Pult.bg_task` |
 | [x] | Вызов из потока в UI-поток (`after(0, …)` для лога обогащения) | лямбды `self.after` | `Pult.ui_call` (сигнал `invoke`) |
-| [x] | `api(method, path, body, timeout)`: X-Device-Token иначе X-Admin-Key, JSON, TLS-fallback без проверки, 401 (два текста), 404, 409 c payload, «Сервер ответил N», «Нет связи с сервером» | `api` | `core/api.py: request`, `Pult.api` |
+| [x] | `api(method, path, body, timeout)`: X-Device-Token иначе X-Admin-Key, JSON, отказ на непроверенный сертификат (без повтора — 23.09.2026), 401 (два текста), 404, 409 c payload, «Сервер ответил N», «Нет связи с сервером» | `api` | `core/api.py: request`, `Pult.api` |
 | [x] | Настройки: файл `настройки пульта.json`, ключи `url key device_token sec scatterBase scatterSource enrich_file`, indent=1 | `_load_settings`, `_save_settings` | `core/settings.py: Settings` |
 | [x] | Закрытие: сохранить url, токен устройства; мастер-ключ никогда | `_on_close` | `Pult.closeEvent` |
 | [x] | Запуск двойным кликом без консоли | `Пульт.bat` (pythonw) | `pult/Пульт.pyw` (ассоциация `.pyw` → `pyw.exe`), `pult.py` — тонкая обёртка |

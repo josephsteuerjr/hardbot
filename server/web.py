@@ -3223,7 +3223,9 @@ async def _manager_pushes(request: web.Request) -> web.Response:
             {"error": "Рубильники владельца меняются в пульте аналитика "
                       "(раздел «Каналы»), не здесь."}, status=400)
     if request.method == "POST":
-        body = await request.json()
+        body = await _json_object(request)
+        if body is None:
+            return web.json_response({"error": "тело не JSON-объект"}, status=400)
         pushes = {k: bool(body[k]) for k in db.MANAGER_PUSH_KEYS if k in body}
         if not pushes:
             return web.json_response({"error": "нет известных рубильников"},
@@ -3237,6 +3239,30 @@ async def _manager_pushes(request: web.Request) -> web.Response:
     row = db.get_manager(uid) or {}
     return web.json_response(
         {"pushes": {k: bool(row.get(k, True)) for k in db.MANAGER_PUSH_KEYS}})
+
+
+def _foreign_privileged(uid: int, tid: int | None) -> bool:
+    """Вход другого руководителя или владельца. Руководитель, который сам возит,
+    привязан к своему ФИО, и это ФИО может стоять в чужой команде (у руководителя
+    направления, у «всей СНГ»). Токен такого входа несёт права того руководителя:
+    его команду, выдачу ссылок, имя в аудите. Поэтому через ручку руководителя
+    такой вход не выдаётся, не отзывается и не показывается его код. Выдаёт его
+    аналитик в своём пульте."""
+    return tid is not None and tid != uid and (tid == ADMIN_ID or db.is_manager(tid))
+
+
+def _mask_code(code: str | None) -> str:
+    """Живой код входа — это пропуск: в журналы пишется только начало."""
+    return f"{code[:3]}…" if code else "-"
+
+
+async def _json_object(request: web.Request) -> dict | None:
+    """Тело запроса как JSON-объект; список, строка или мусор — None (→ 400, не 500)."""
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return None
+    return body if isinstance(body, dict) else None
 
 
 async def _manager_app_links(request: web.Request) -> web.Response:
@@ -3258,6 +3284,8 @@ async def _manager_app_links(request: web.Request) -> web.Response:
     for row in db.app_links_state():
         if row["employee"] in team_set:
             row = dict(row)
+            if _foreign_privileged(uid, row.get("telegram_id")):
+                row["code"] = None
             row["url"] = f"{base}/i/{row['code']}" if base and row.get("code") else ""
             rows.append(row)
             by_employee[row["employee"]] = row
@@ -3287,10 +3315,9 @@ async def _manager_app_link(request: web.Request) -> web.Response:
     на сервере, а не в интерфейсе.
     """
     uid, mgr, team = _manager_gate(request)
-    try:
-        body = await request.json()
-    except (ValueError, TypeError):
-        return web.json_response({"error": "тело не JSON"}, status=400)
+    body = await _json_object(request)
+    if body is None:
+        return web.json_response({"error": "тело не JSON-объект"}, status=400)
     employee = str(body.get("employee") or "").strip()
     own = db.get_binding(uid)
     allowed = set(team) | ({own} if own else set())
@@ -3298,6 +3325,11 @@ async def _manager_app_link(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": "Это не ваш сотрудник: ссылку можно выдать только своей "
                       "команде или себе."},
+            status=403)
+    if _foreign_privileged(uid, db.bound_identity(employee)):
+        return web.json_response(
+            {"error": "Это вход другого руководителя: его выдаёт аналитик "
+                      "в своём пульте."},
             status=403)
     base = os.getenv("MINIAPP_URL", "").strip().rstrip("/")
     if not base:
@@ -3309,7 +3341,7 @@ async def _manager_app_link(request: web.Request) -> web.Response:
     code = db.create_app_link(tid, max_uses=db.APP_LINK_DEFAULT_USES)
     who = mgr.get("name") or f"id{uid}"
     db.audit_access(uid, "mgr_app_link", target=employee,
-                    detail=f"{who} выдал вход: {code}")
+                    detail=f"{who} выдал вход: {_mask_code(code)}")
     return web.json_response({
         "ok": True, "employee": employee, "telegram_id": tid,
         "code": code, "url": f"{base}/i/{code}",
@@ -3321,11 +3353,8 @@ async def _manager_app_link(request: web.Request) -> web.Response:
 async def _manager_app_revoke(request: web.Request) -> web.Response:
     """Отозвать вход сотрудника своей команды: ссылки гаснут, телефон выходит."""
     uid, mgr, team = _manager_gate(request)
-    try:
-        body = await request.json()
-    except (ValueError, TypeError):
-        body = {}
-    employee = str((body or {}).get("employee") or "").strip()
+    body = await _json_object(request) or {}
+    employee = str(body.get("employee") or "").strip()
     own = db.get_binding(uid)
     allowed = set(team) | ({own} if own else set())
     if not employee or employee not in allowed:
@@ -3337,7 +3366,12 @@ async def _manager_app_revoke(request: web.Request) -> web.Response:
             if r["employee"] == employee and r["telegram_id"]]
     if not tids:
         return web.json_response({"error": "У этого человека нет выданных входов."})
-    scope = "links" if str((body or {}).get("scope") or "all") == "links" else "all"
+    if any(_foreign_privileged(uid, tid) for tid in tids):
+        return web.json_response(
+            {"error": "Это вход другого руководителя: отзывает его аналитик "
+                      "в своём пульте."},
+            status=403)
+    scope = "links" if str(body.get("scope") or "all") == "links" else "all"
     revoked = sum(db.revoke_app_access(tid, scope=scope) for tid in tids)
     who = mgr.get("name") or f"id{uid}"
     db.audit_access(uid, "mgr_app_revoke", target=employee,
@@ -5221,11 +5255,16 @@ def build_app(bot=None) -> web.Application:
 
 
 class _PathOnlyAccessLogger(AbstractAccessLogger):
-    """Access-лог без query-строки: в ней ездят адреса должников и координаты."""
+    """Access-лог без query-строки: в ней ездят адреса должников и координаты.
+    Код ссылки входа (`/i/<код>`) — живой пропуск, а журнал видит инженер в
+    `/ops`: код маскируется."""
 
     def log(self, request, response, time):
+        path = request.path
+        if path.startswith("/i/"):
+            path = "/i/" + _mask_code(path[3:])
         self.logger.info("%s %s %s %s %.3f",
-                         request.remote or "-", request.method, request.path,
+                         request.remote or "-", request.method, path,
                          response.status, time)
 
 async def start_site(bot=None, host: str = "0.0.0.0", port: int = 8080):

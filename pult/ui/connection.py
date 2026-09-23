@@ -107,7 +107,7 @@ class ConnectionSection:
         if not self.ask_yes_no(
                 "Переключить контур",
                 f"Переключиться на «{name}»?\n\nНезавершённые выборы (сотрудники, "
-                "книги) сбросятся — они относились к «{self.profile}»."):
+                f"книги) сбросятся — они относились к «{self.profile}»."):
             return
         self.switch_profile(name)
 
@@ -276,6 +276,10 @@ class ConnectionSection:
         fingerprint = self.device_fingerprint()
         # Привязка идёт МАСТЕР-КЛЮЧОМ явно, а не через self.api: там уже мог
         # лежать токен прошлой привязки, и перепривязка ходила бы им.
+        # Прежний токен помним: при неудаче (опечатка в ключе, нет связи) он
+        # возвращается, иначе ближайшее «Обновить» или закрытие окна сотрёт
+        # рабочую привязку контура с диска.
+        prev_token = self.device_token
         self.key, self.device_token = key, ""
 
         def work():
@@ -285,12 +289,14 @@ class ConnectionSection:
         def done(d):
             token = (d or {}).get("token") or ""
             if not token:
+                self.device_token = prev_token
                 self.toast("Сервер не выдал токен", err=True)
                 return
             self._device_bound(token, "Устройство привязано — ключ больше не хранится")
 
         def fail(exc):
             self.key = key
+            self.device_token = prev_token
             self.toast(str(exc), err=True)
 
         self.bg_task(work, done, fail)

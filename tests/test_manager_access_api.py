@@ -19,22 +19,23 @@ import web
 ROOT = Path(__file__).resolve().parent.parent
 
 MGR, STRANGER, EMP_TID = 573000, 573999, 573001
+MGR2 = 573002   # второй руководитель, который сам возит
 EMP_A, EMP_B, EMP_ALIEN = "Линков А.", "Линкова Б.", "Чужоев В."
 
 
 def _wipe():
     with db.connect() as conn:
         conn.execute("DELETE FROM clients WHERE contract_id LIKE 'LNK-%'")
-        conn.execute("DELETE FROM managers WHERE telegram_id IN (?,?,?)",
-                     (MGR, STRANGER, EMP_TID))
-        conn.execute("DELETE FROM agent_bind WHERE telegram_id IN (?,?,?)",
-                     (MGR, STRANGER, EMP_TID))
+        conn.execute("DELETE FROM managers WHERE telegram_id IN (?,?,?,?)",
+                     (MGR, STRANGER, EMP_TID, MGR2))
+        conn.execute("DELETE FROM agent_bind WHERE telegram_id IN (?,?,?,?)",
+                     (MGR, STRANGER, EMP_TID, MGR2))
         conn.execute("DELETE FROM agent_bind WHERE employee IN (?,?,?)",
                      (EMP_A, EMP_B, EMP_ALIEN))
-        conn.execute("DELETE FROM app_tokens WHERE telegram_id IN (?,?,?)",
-                     (MGR, STRANGER, EMP_TID))
-        conn.execute("DELETE FROM app_links WHERE telegram_id IN (?,?,?)",
-                     (MGR, STRANGER, EMP_TID))
+        conn.execute("DELETE FROM app_tokens WHERE telegram_id IN (?,?,?,?)",
+                     (MGR, STRANGER, EMP_TID, MGR2))
+        conn.execute("DELETE FROM app_links WHERE telegram_id IN (?,?,?,?)",
+                     (MGR, STRANGER, EMP_TID, MGR2))
         conn.commit()
 
 
@@ -181,3 +182,68 @@ def test_manager_issues_link_to_himself(monkeypatch):
     status, out = _call(web._manager_app_link, "POST", {"employee": EMP_ALIEN},
                         monkeypatch)
     assert status == 403
+
+
+# --- вход другого руководителя ------------------------------------------------
+
+def _second_manager_drives_as(employee):
+    """Второй руководитель сам возит: его Telegram привязан к ФИО из нашей команды."""
+    db.set_manager(MGR2, "Рук Второй", [], [])
+    db.set_bind(MGR2, employee)
+    db.reset_role_caches()
+
+
+def test_manager_cannot_issue_login_of_another_manager(monkeypatch, miniapp):
+    """Ссылка на ФИО, к которому привязан другой руководитель, дала бы токен
+    с ЕГО правами: его команда, его выдача ссылок, его имя в аудите."""
+    _second_manager_drives_as(EMP_A)
+    status, out = _call(web._manager_app_link, "POST", {"employee": EMP_A},
+                        monkeypatch)
+    assert status == 403 and "другого руководителя" in out["error"]
+    assert not [r for r in db.app_links_state() if r["telegram_id"] == MGR2]
+
+
+def test_manager_cannot_revoke_or_see_code_of_another_manager(monkeypatch, miniapp):
+    _second_manager_drives_as(EMP_A)
+    code = db.create_app_link(MGR2, max_uses=2)          # выдал аналитик
+    status, out = _call(web._manager_app_links, "GET", None, monkeypatch)
+    row = next(r for r in out["links"] if r["employee"] == EMP_A)
+    assert not row["code"] and not row["url"], "живой код чужого руководителя виден"
+    status, out = _call(web._manager_app_revoke, "POST", {"employee": EMP_A},
+                        monkeypatch)
+    assert status == 403
+    assert db.redeem_app_link(code), "отказ в отзыве всё равно погасил ссылку"
+
+
+def test_manager_still_issues_link_to_himself_when_bound(monkeypatch, miniapp):
+    """Своя привязка — не чужой руководитель: себе выдавать можно по-прежнему."""
+    db.set_bind(MGR, EMP_A)
+    db.reset_role_caches()
+    status, out = _call(web._manager_app_link, "POST", {"employee": EMP_A},
+                        monkeypatch)
+    assert status == 200 and out["telegram_id"] == MGR
+
+
+def test_non_object_body_is_400_not_500(monkeypatch, miniapp):
+    for handler in (web._manager_app_link, web._manager_pushes):
+        status, _ = _call(handler, "POST", ["employee"], monkeypatch)
+        assert status == 400, handler.__name__
+    status, out = _call(web._manager_app_revoke, "POST", ["employee"], monkeypatch)
+    assert status == 403       # пустое тело = нет ФИО, а не падение
+
+
+def test_audit_and_access_log_hide_live_code(monkeypatch, miniapp):
+    _, made = _call(web._manager_app_link, "POST", {"employee": EMP_A}, monkeypatch)
+    row = next(r for r in db.audit_tail(20) if r["action"] == "mgr_app_link")
+    assert made["code"] not in row["detail"]
+
+    lines = []
+
+    class _Log:
+        def info(self, fmt, *args):
+            lines.append(fmt % args)
+
+    req = make_mocked_request("GET", f"/i/{made['code']}")
+    resp = type("R", (), {"status": 302})()
+    web._PathOnlyAccessLogger(_Log(), "").log(req, resp, 0.01)
+    assert lines and made["code"] not in lines[0] and "/i/" in lines[0]

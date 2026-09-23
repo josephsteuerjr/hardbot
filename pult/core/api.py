@@ -30,6 +30,11 @@ def auth_headers(key: str = "", device_token: str = "") -> dict[str, str]:
     return {"X-Admin-Key": key}
 
 
+CERT_BAD_TEXT = ("Сертификат сервера не прошёл проверку — эта сеть подменяет "
+                 "соединение (чужой Wi-Fi, прокси с подменой). Пульт ничего не "
+                 "отправил: ни ключа, ни токена. Подключитесь к другой сети.")
+
+
 def host_of(url: str) -> str:
     """Хост для подписи в рейке: «—», если адрес не разбирается."""
     try:
@@ -47,7 +52,9 @@ def request(base_url: str, method: str, path: str, body: dict | None = None, *,
     старой версии?»; 409 с JSON `{"error": …}` возвращается как есть — это
     валидационный конфликт импорта, сервер гарантированно ничего не записал, и
     экрану нужен структурированный отчёт, а не безликий HTTP 409.
-    Самоподписанный или прокси-сертификат — повтор без проверки TLS.
+    Сертификат не прошёл проверку — отказ словами, БЕЗ повтора «без проверки»:
+    такой повтор отдал бы мастер-ключ или токен устройства тому, кто подменил
+    связь. Серверы живут под настоящими сертификатами (Let's Encrypt).
     """
     urlopen = opener or urllib.request.urlopen
     url = (base_url or "").rstrip("/") + path
@@ -62,9 +69,7 @@ def request(base_url: str, method: str, path: str, body: dict | None = None, *,
                 return json.load(r)
         except urllib.error.URLError as e:
             if isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
-                ctx = ssl._create_unverified_context()  # noqa: S323 — осознанно
-                with urlopen(req, timeout=timeout, context=ctx) as r:
-                    return json.load(r)
+                raise RuntimeError(CERT_BAD_TEXT) from e
             raise
     except urllib.error.HTTPError as e:
         if e.code == 401:

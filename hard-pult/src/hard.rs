@@ -26,6 +26,27 @@ pub const NO_LINK: &str = "Пульт ещё не знает, кто вы. Вс�
      что выдал аналитик.";
 pub const OFFLINE: &str = "Нет связи с сервером «Хард». Проверьте интернет — как только \
      он появится, пульт догонит сам.";
+pub const CERT_BAD: &str = "Сертификат сервера «Хард» не прошёл проверку — эта сеть      подменяет соединение (гостиничный или чужой Wi-Fi). Пульт ничего не отправил.      Подключитесь к другой сети.";
+
+/// Сетевая беда словами. Сертификат не прошёл проверку — повтора «без проверки»
+/// нет и не будет: такой повтор отдал бы токен руководителя тому, кто подменил
+/// связь. Сервер живёт под настоящим сертификатом (Let's Encrypt).
+fn net_trouble(err: &reqwest::Error) -> Trouble {
+    let mut text = err.to_string();
+    let mut source = std::error::Error::source(err);
+    while let Some(inner) = source {
+        text.push(' ');
+        text.push_str(&inner.to_string());
+        source = inner.source();
+    }
+    let text = text.to_lowercase();
+    if text.contains("cert") || text.contains("сертификат") {
+        Trouble::new("offline", CERT_BAD)
+    } else {
+        Trouble::new("offline", OFFLINE)
+    }
+}
+
 pub const DEAD_TOKEN: &str = "Ссылка входа больше не действует. Попросите у аналитика \
      новую и вставьте её здесь.";
 
@@ -141,8 +162,7 @@ fn valid_code(code: &str) -> bool {
 
 pub struct Hard {
     pub settings: Arc<Mutex<Settings>>,
-    strict: reqwest::Client,
-    lenient: reqwest::Client,
+    client: reqwest::Client,
     cache: Mutex<HashMap<String, (Value, String)>>,
     lost_at: Mutex<Option<String>>,
     dead: Mutex<bool>,
@@ -152,23 +172,16 @@ pub struct Hard {
 impl Hard {
     pub fn new(settings: Arc<Mutex<Settings>>) -> Hard {
         let (name, scope) = settings.lock().expect("настройки").manager();
-        let timeout = Duration::from_secs(25);
-        let build = |danger: bool| {
-            reqwest::Client::builder()
-                .timeout(timeout)
-                .danger_accept_invalid_certs(danger)
-                // Без системных прокси — как у питон-версии: корпоративный
-                // прокси не знает про наши адреса и рвёт связь с сервером.
-                .no_proxy()
-                .build()
-                .expect("клиент без CertVerify нельзя: прод с самоподписанным сертификатом")
-        };
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(25))
+            // Без системных прокси — как у питон-версии: корпоративный
+            // прокси не знает про наши адреса и рвёт связь с сервером.
+            .no_proxy()
+            .build()
+            .expect("http-клиент");
         Hard {
             settings,
-            strict: build(false),
-            // Повтор без проверки сертификата — тот же ход, что у питон-пульта:
-            // прод живёт под самоподписанным nip.io-сертификатом.
-            lenient: build(true),
+            client,
             cache: Mutex::new(HashMap::new()),
             lost_at: Mutex::new(None),
             dead: Mutex::new(false),
@@ -253,19 +266,10 @@ impl Hard {
             }
             req
         };
-        // Сначала строго, при сертификатной беде — снисходительно: прод живёт
-        // под самоподписанным сертификатом, и отказ целиком отрезал бы его.
-        let attempt = send(&self.strict).send().await;
-        let resp = match attempt {
-            Ok(resp) => resp,
-            Err(err) if err.is_connect() || err.to_string().to_lowercase().contains("cert") => {
-                send(&self.lenient)
-                    .send()
-                    .await
-                    .map_err(|_| Trouble::new("offline", OFFLINE))?
-            }
-            Err(_) => return Err(Trouble::new("offline", OFFLINE)),
-        };
+        let resp = send(&self.client)
+            .send()
+            .await
+            .map_err(|err| net_trouble(&err))?;
         let status = resp.status().as_u16();
         if status >= 400 {
             let text = resp.text().await.unwrap_or_default();
@@ -464,25 +468,21 @@ impl Hard {
         )
         .map_err(|_| Trouble::new("server", "Не получилось собрать адрес книги."))?;
         let token = self.settings.lock().expect("настройки").token();
-        let attempt = self
-            .strict
-            .get(url.clone())
+        let resp = self
+            .client
+            .get(url)
             .header("X-App-Token", &token)
             .timeout(Duration::from_secs(300))
             .send()
-            .await;
-        let resp = match attempt {
-            Ok(resp) => resp,
-            Err(_) => {
-                self.lenient
-                    .get(url)
-                    .header("X-App-Token", &token)
-                    .timeout(Duration::from_secs(300))
-                    .send()
-                    .await
-                    .map_err(|_| Trouble::new("offline", "Сервер «Хард» не успел собрать книгу."))?
-            }
-        };
+            .await
+            .map_err(|err| {
+                let trouble = net_trouble(&err);
+                if trouble.text == CERT_BAD {
+                    trouble
+                } else {
+                    Trouble::new("offline", "Сервер «Хард» не успел собрать книгу.")
+                }
+            })?;
         let status = resp.status().as_u16();
         if status >= 400 {
             let text = resp.text().await.unwrap_or_default();

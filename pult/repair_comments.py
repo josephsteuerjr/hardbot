@@ -45,7 +45,7 @@ except Exception:  # noqa: BLE001
 def api_export(url: str, key: str, device_token: str = "") -> dict:
         # Мастер-ключ больше не открывает данные после первой привязки — ходим
     # тем же, чем ходит сам пульт: токеном устройства плюс отпечаток машины.
-    from core.api import auth_headers
+    from core.api import CERT_BAD_TEXT, auth_headers
     req = urllib.request.Request(url.rstrip("/") + "/admin/export.json",
                                  headers=auth_headers(key, device_token))
     try:
@@ -53,9 +53,7 @@ def api_export(url: str, key: str, device_token: str = "") -> dict:
             return json.load(r)
     except urllib.error.URLError as e:
         if isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
-            ctx = ssl._create_unverified_context()  # noqa: S323 — как в пульте
-            with urllib.request.urlopen(req, timeout=120, context=ctx) as r:
-                return json.load(r)
+            raise RuntimeError(CERT_BAD_TEXT) from e
         raise
 
 

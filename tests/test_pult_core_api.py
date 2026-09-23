@@ -1,4 +1,4 @@
-"""Клиент admin-API пульта: заголовки, дружелюбные ошибки, TLS-fallback."""
+"""Клиент admin-API пульта: заголовки, дружелюбные ошибки, отказ на чужой сертификат."""
 
 from __future__ import annotations
 
@@ -97,15 +97,14 @@ def test_connection_failure_is_readable():
         api.request("https://h", "GET", "/a", key="k", opener=_opener(boom))
 
 
-def test_self_signed_certificate_falls_back_to_unverified_tls():
+def test_bad_certificate_is_refused_without_unverified_retry():
+    """Повтор без проверки TLS отдал бы мастер-ключ тому, кто подменил связь."""
     def script(req, kw):
-        if "context" not in kw:
-            raise urllib.error.URLError(ssl.SSLCertVerificationError("self signed"))
-        return b'{"ok": 1}'
+        raise urllib.error.URLError(ssl.SSLCertVerificationError("self signed"))
     opener = _opener(script)
-    assert api.request("https://h", "GET", "/a", key="k", opener=opener) == {"ok": 1}
-    assert len(opener.calls) == 2
-    assert isinstance(opener.calls[1][1]["context"], ssl.SSLContext)
+    with pytest.raises(RuntimeError, match="Сертификат сервера не прошёл проверку"):
+        api.request("https://h", "GET", "/a", key="k", opener=opener)
+    assert len(opener.calls) == 1, "был повтор — ключ ушёл без проверки сертификата"
 
 
 def test_admin_api_object_carries_credentials(monkeypatch):

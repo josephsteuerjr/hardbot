@@ -327,8 +327,17 @@ async fn api_pin(State(app): State<AppState>, _headers: HeaderMap,
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let (ok, text, key) = app.gate.lock().expect("gate").check(&given);
+    let (ok, text, key, locked) = {
+        let mut gate = app.gate.lock().expect("gate");
+        let (ok, text, key) = gate.check(&given);
+        (ok, text, key, gate.locked)
+    };
     if !ok {
+        if locked {
+            // Пять промахов — тоннель гасится по-настоящему, как и обещает
+            // тревога «Тоннель погашен»: публичный адрес перестаёт отвечать.
+            app.tunnel.stop().await;
+        }
         return ok_json(json!({"ok": false, "error": text}));
     }
     let mut resp = ok_json(json!({"ok": true}));
