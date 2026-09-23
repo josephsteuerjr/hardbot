@@ -2386,7 +2386,17 @@ async def _app_login(request: web.Request) -> web.StreamResponse:
         _admin_auth_failed(request, scope="app")
         raise web.HTTPFound("/#link_dead=1", headers=no_store)
     _admin_auth_ok(request, scope="app")
-    db.audit_access(db.uid_for_app_token(token) or 0, "app_login", detail=agent)
+    uid = db.uid_for_app_token(token) or 0
+    db.audit_access(uid, "app_login", detail=agent)
+    # Открытая ссылка входа — это и есть подтверждение привязки. Ссылку выдал тот,
+    # у кого на это право (аналитик, руководитель своей команде, держатель логина
+    # сервера), и достаётся она ровно тому, кому переслана. При переезде базы
+    # привязки приезжают заявками (approved=0), а владельца для аппрува в контуре
+    # компании нет: без этого человек входил по ссылке и упирался в «ожидайте
+    # подтверждения» навсегда.
+    if uid and db.get_binding(uid) is None and db.pending_binding(uid):
+        employee = db.approve_binding(uid)
+        db.audit_access(uid, "bind_approved_by_link", target=employee)
     # «fresh=1» — метка «токен выдан ПРЯМО СЕЙЧАС тому, кто открыл эту ссылку».
     # Без неё оболочка на устройстве, где кто-то уже входил, оставляла бы прежний
     # токен: обмен ссылки сервер потратил, а человек оказывался в ЧУЖОМ портфеле.

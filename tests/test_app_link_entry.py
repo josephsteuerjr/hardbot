@@ -597,3 +597,42 @@ def test_shell_prefers_a_freshly_issued_token_over_the_one_on_the_device():
     # чужом токене ярлык «На экран Домой» унёс бы в start_url чужой вход.
     head = INDEX[:INDEX.index("<meta name=\"apple-mobile-web-app-capable\"")]
     assert "fresh=1" in head, "скрипт манифеста не знает про свежий токен"
+
+
+def test_opening_a_link_approves_a_pending_binding(fresh):
+    """При переезде базы привязки приезжают заявками (approved=0), а владельца для
+    аппрува в контуре компании нет. Ссылку выдал тот, у кого есть право, — её
+    открытие и есть подтверждение: человек попадает в портфель, а не в вечное
+    «ожидайте подтверждения»."""
+    tid = 700500001
+    with db.connect() as conn:
+        conn.execute("INSERT INTO agent_bind (telegram_id, employee, kind, approved, "
+                     "created_at) VALUES (?,?,?,?,?)",
+                     (tid, "Заявкин З.", "agent", 0, "2026-09-23"))
+        conn.commit()
+    assert db.get_binding(tid) is None
+    code = db.create_app_link(tid)
+
+    async def scenario(s):
+        status, location, _ = await s.enter(code, ua=ANDROID)
+        return status, location
+
+    status, location = run(scenario)
+    assert status == 302 and db.uid_for_app_token(_token_of(location)) == tid
+    assert db.get_binding(tid) == "Заявкин З.", "заявка осталась заявкой — человек заперт"
+
+
+def test_dead_link_approves_nothing(fresh):
+    tid = 700500002
+    with db.connect() as conn:
+        conn.execute("INSERT INTO agent_bind (telegram_id, employee, kind, approved, "
+                     "created_at) VALUES (?,?,?,?,?)",
+                     (tid, "Чужаков Ч.", "agent", 0, "2026-09-23"))
+        conn.commit()
+
+    async def scenario(s):
+        return await s.enter("nope-not-a-code", ua=ANDROID)
+
+    status, location, _ = run(scenario)
+    assert "link_dead" in location
+    assert db.get_binding(tid) is None
