@@ -3229,8 +3229,11 @@ async def _manager_pushes(request: web.Request) -> web.Response:
             return web.json_response({"error": "нет известных рубильников"},
                                      status=400)
         db.set_manager_pushes(uid, pushes)
+        who = mgr.get("name") or f"id{uid}"
         db.audit_access(uid, "manager_pushes",
-                        detail=",".join(f"{k}={int(v)}" for k, v in pushes.items()))
+                        detail="{} · {}".format(
+                            who, ",".join(f"{k}={int(v)}"
+                                          for k, v in pushes.items())))
     row = db.get_manager(uid) or {}
     return web.json_response(
         {"pushes": {k: bool(row.get(k, True)) for k in db.MANAGER_PUSH_KEYS}})
@@ -3296,7 +3299,9 @@ async def _manager_app_link(request: web.Request) -> web.Response:
     kind = "courier" if body.get("kind") == "courier" else "agent"
     tid, _created = db.local_identity_for(employee, kind)
     code = db.create_app_link(tid, max_uses=db.APP_LINK_DEFAULT_USES)
-    db.audit_access(uid, "mgr_app_link", detail=f"{employee}:{code}")
+    who = mgr.get("name") or f"id{uid}"
+    db.audit_access(uid, "mgr_app_link", target=employee,
+                    detail=f"{who} выдал вход: {code}")
     return web.json_response({
         "ok": True, "employee": employee, "telegram_id": tid,
         "code": code, "url": f"{base}/i/{code}",
@@ -3323,7 +3328,9 @@ async def _manager_app_revoke(request: web.Request) -> web.Response:
         return web.json_response({"error": "У этого человека нет выданных входов."})
     scope = "links" if str((body or {}).get("scope") or "all") == "links" else "all"
     revoked = sum(db.revoke_app_access(tid, scope=scope) for tid in tids)
-    db.audit_access(uid, "mgr_app_revoke", detail=f"{employee}:{scope}:{revoked}")
+    who = mgr.get("name") or f"id{uid}"
+    db.audit_access(uid, "mgr_app_revoke", target=employee,
+                    detail=f"{who} отозвал вход ({scope}): {revoked}")
     return web.json_response({"ok": True, "employee": employee,
                               "revoked": revoked, "scope": scope})
 

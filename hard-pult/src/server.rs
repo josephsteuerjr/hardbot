@@ -518,10 +518,15 @@ async fn api_pushes(State(app): State<AppState>, req: Request) -> Response {
         let body = read_json(req).await;
         let key = body.get("key").and_then(Value::as_str).unwrap_or("");
         let value = body.get("value").and_then(Value::as_bool);
+        let who = {
+            let name = hard.manager().0;
+            if name.is_empty() { "?".to_string() } else { name }
+        };
         match value {
             Some(v)
                 if ["push_visits", "push_digest", "push_promises"].contains(&key) =>
             {
+                (app.log)(&format!("рубильник {} → {} (кем: {})", key, v, who));
                 hard.set_push(key, v).await
             }
             _ => {
@@ -562,6 +567,10 @@ async fn api_team_link(State(app): State<AppState>, req: Request) -> Response {
                         StatusCode::BAD_REQUEST);
     }
     let hard = app.hard.lock().await;
+    let who = hard.manager().0;
+    let who = if who.is_empty() { "?".to_string() } else { who };
+    let verb = if revoke { "отозван" } else { "выдан" };
+    (app.log)(&format!("{} вход: {} (кем: {})", verb, employee, who));
     match hard.team_link(&employee, revoke).await {
         Ok(mut data) => {
             // Выдача возвращается с QR картинкой: руководитель пересылает

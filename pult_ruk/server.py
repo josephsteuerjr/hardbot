@@ -417,6 +417,8 @@ async def api_pushes(request: web.Request) -> web.Response:
         key, value = str(body.get("key") or ""), body.get("value")
         if key not in PUSH_KEYS or not isinstance(value, bool):
             return _json({"error": "Неизвестный рубильник."}, status=400)
+        log.info("рубильник %s → %s (кем: %s)", key, value,
+                 hard.manager.get("name") or "?")
         call = hard.set_push(key, value)
     else:
         call = hard.pushes()
@@ -447,6 +449,11 @@ async def api_team_link(request: web.Request) -> web.Response:
         return _trouble_json(trouble)
     if action == "issue" and out.get("url"):
         out["qr"] = qr_data_url(out["url"])
+        log.info("выдан вход: %s (кем: %s)", employee,
+                 (request.app["hard"].manager.get("name") or "?"))
+    else:
+        log.info("отозван вход: %s (кем: %s)", employee,
+                 (request.app["hard"].manager.get("name") or "?"))
     return _json(out)
 
 

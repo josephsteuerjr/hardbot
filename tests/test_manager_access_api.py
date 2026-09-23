@@ -148,3 +148,12 @@ def test_pushes_refuse_unknown_keys_and_strangers(monkeypatch):
     from aiohttp import web as aio_web
     with pytest.raises(aio_web.HTTPForbidden):
         _call(web._manager_pushes, "GET", None, monkeypatch, uid=STRANGER)
+
+
+def test_audit_carries_manager_name(monkeypatch, miniapp):
+    """Провенанс: в журнале — имя руководителя, а не только номер."""
+    _call(web._manager_app_link, "POST", {"employee": EMP_A}, monkeypatch)
+    tail = db.audit_tail(20)
+    row = next(r for r in tail if r["action"] == "mgr_app_link")
+    assert "Рук Линков" in row["detail"], row["detail"]
+    assert row["target"] == EMP_A
