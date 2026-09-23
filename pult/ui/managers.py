@@ -134,6 +134,10 @@ class ManagersSection:
                     lambda on, t=m["telegram_id"], k=key: self._mgr_push(t, k, on))
                 items.append(sw)
             items += [None,
+                      # Вход руководителя — ссылкой, как у всех: дальше он сам
+                      # раздаёт входы своей команде из пульта руководителя.
+                      Button("выдать вход",
+                             lambda t=m["telegram_id"]: self.issue_link(telegram_id=t)),
                       Button("проверить доставку",
                              lambda t=m["telegram_id"]: self.push_test(t)),
                       Button("изменить", lambda t=m["telegram_id"]: self.mgr_edit(t)),

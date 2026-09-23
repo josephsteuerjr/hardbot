@@ -2521,7 +2521,13 @@ async def _admin_app_link(request: web.Request) -> web.Response:
         except (TypeError, ValueError):
             return web.json_response({"error": "telegram_id"}, status=400)
         bound = db.get_binding(tid)
-        if not bound and employee:
+        if not bound and not employee and (tid == ADMIN_ID or db.is_manager(tid)):
+            # Руководитель (или владелец) входит по ссылке БЕЗ привязки к ФИО:
+            # у него своя роль, а привязка сделала бы его выездником. Раньше эта
+            # ручка отвечала ему «никому не привязан», и руководитель, который
+            # по контракту раздаёт входы команде, сам войти не мог вовсе.
+            bound = (db.get_manager(tid) or {}).get("name") or f"руководитель {tid}"
+        elif not bound and employee:
             db.set_bind(tid, employee, kind)
             bound = employee
         if not bound:

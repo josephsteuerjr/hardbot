@@ -131,3 +131,25 @@ def test_local_ids_are_allocated_sequentially(monkeypatch):
     b, created_b = db.local_identity_for("Б")
     assert created_a and created_b and b == a + 1
     assert db.is_local_uid(a) and not db.is_local_uid(123456789)
+
+
+def test_manager_gets_login_link_without_binding(monkeypatch):
+    """Руководитель раздаёт входы своей команде — но сам сначала входит по ссылке
+    аналитика. Привязки к ФИО у него нет и быть не должно: это роль, а не
+    выездник. Ссылка выдаётся по telegram_id, привязка не появляется."""
+    _fresh(monkeypatch)
+    mgr = 581000
+    db.set_manager(mgr, "Рук Ссылкин", [], ["Кто-то К."])
+    db.reset_role_caches()
+    try:
+        status, body = _call("POST", PATH, headers=KEY, json_body={"telegram_id": mgr})
+        assert status == 200, body
+        assert body["telegram_id"] == mgr and body["url"].startswith(URL + "/i/")
+        assert db.get_binding(mgr) is None, "руководитель стал выездником"
+        token = db.redeem_app_link(body["code"])
+        assert db.uid_for_app_token(token) == mgr
+    finally:
+        with db.connect() as conn:
+            conn.execute("DELETE FROM managers WHERE telegram_id=?", (mgr,))
+            conn.commit()
+        db.reset_role_caches()
