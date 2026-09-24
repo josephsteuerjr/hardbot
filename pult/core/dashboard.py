@@ -27,7 +27,7 @@ COUNTRIES_DESC = ("Отдельно по закреплённым кейсам. 
                   "scope руководителя, а не из числового поля «Пул».")
 REASON_TEXT = {"absent_from_registry": "нет в срезе реестра", "recalled": "отозваны",
                "manual": "сняты вручную", "(нет)": "без причины"}
-ENTRY_TEXT = {"pwa": "PWA", "telegram": "Telegram", "none": "не заходил"}
+ENTRY_TEXT = {"pwa": "PWA", "telegram": "старая система", "none": "не заходил"}
 
 
 def tile_values(d: dict) -> dict[str, str]:

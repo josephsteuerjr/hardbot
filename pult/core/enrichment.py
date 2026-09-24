@@ -157,7 +157,7 @@ def match_employees(by_emp, fmap) -> tuple[list[dict], list[str], list[str]]:
 
 def preview_pairs(by_emp, matched: list[dict]) -> list[tuple[str, object]]:
     pairs = [
-        ("с визитами бота", sum(1 for e in by_emp.values() if e["filled"])),
+        ("с выездами из приложения", sum(1 for e in by_emp.values() if e["filled"])),
         ("готовы к обогащению", len(matched)),
         ("завершённых визитов", sum(m["filled"] for m in matched)),
         ("файлов", sum(len(m["files"]) for m in matched))]
@@ -192,11 +192,11 @@ def preview_warning(by_emp, matched: list[dict], nofolder: list[str],
                    if sample else ""))
     if nofolder:
         warn += (("\n" if warn else "")
-                 + "Есть данные бота, но нет папки: " + ", ".join(nofolder))
+                 + "Есть данные из приложения, но нет папки: " + ", ".join(nofolder))
     if nofile:
         warn += ("\n" if warn else "") + "Папка есть, но нет .xlsb: " + ", ".join(nofile)
     if not matched and not warn:
-        warn = "Бот пока ничего не заполнил — обогащать нечего."
+        warn = "В приложении пока ничего не заполнено — обогащать нечего."
     return warn
 
 
@@ -233,14 +233,14 @@ def window_text(since: str, until: str) -> str:
     return ("ОКНО НЕ ЗАДАНО: в книги пойдут выезды за ВСЮ историю, "
             "включая уже обогащённые ранее. Если после прошлого прогона "
             "результат правили в книге или в реестре, правка будет "
-            "заменена версией бота.")
+            "заменена версией из приложения.")
 
 
 def confirm_text(n_employees: int, n_files: int, since: str, until: str) -> str:
     return (f"Обогатить личные реестры: сотрудников {n_employees}, файлов {n_files}?\n\n"
             f"{window_text(since, until)}\n\n"
             "В каждый файл дописываются ТОЛЬКО кейсы его сотрудника, заполненные "
-            "ботом. Резервная копия создаётся перед записью. Делает Excel — "
+            "в приложении. Резервная копия создаётся перед записью. Делает Excel — "
             "может занять время.")
 
 
@@ -459,7 +459,7 @@ def toast_text(results: list[dict]) -> tuple[str, bool]:
 def single_file_report(p: dict) -> str:
     """Отчёт запасного пути «обогатить один файл» (`enrich.enrich_file`)."""
     parts = [
-        f"Кейсов с данными бота: {p['filled_cases']}",
+        f"Кейсов с данными из приложения: {p['filled_cases']}",
         f"найдено в файле: {p['matched_cases']}",
         f"дописано ячеек: {p['cells_written']}"
         + (f" (поверх старых значений: {p['cells_over_nonempty']})"
@@ -470,7 +470,7 @@ def single_file_report(p: dict) -> str:
     text += (f"\nРезервная копия: {p['backup']}" if p.get("backup")
              else "\nФайл не изменился — резервная копия не создавалась.")
     if p["missing"]:
-        text += f"\n⚠ Заполнены ботом, но не найдены в файле ({len(p['missing'])}): " \
+        text += f"\n⚠ Заполнены в приложении, но не найдены в файле ({len(p['missing'])}): " \
                 + ", ".join(p["missing"][:20]) + ("…" if len(p["missing"]) > 20 else "")
     if p["visit_cols_absent"]:
         text += "\n⚠ В файле нет колонок: " + ", ".join(p["visit_cols_absent"])

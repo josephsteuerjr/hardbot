@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
+from ..core import constants
 from ..core.dashboard import (COUNTRIES, SILENT_COLUMNS, SILENT_NUMERIC, TILES, bars,
                               country_outcome_chips, country_pairs, country_today_pairs,
                               delivery_note,
@@ -61,6 +62,7 @@ class DashboardSection:
         self.delivery_kv = dc.add(KVGrid())
         self.delivery_note = dc.add(Note("", "small"), spacing_before=4)
         two_l.addWidget(dc, 1)
+        dc.setVisible(constants.TELEGRAM_UI)
         rc = Card("Реестр и обогащение",
                   "Договоры в базе, сколько закреплено, сколько потеряли "
                   "ответственного и когда пульт последний раз доставлял результаты "

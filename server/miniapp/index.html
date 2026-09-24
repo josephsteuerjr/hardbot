@@ -832,7 +832,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=57;
+const SHELL_VERSION=58;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -3843,7 +3843,7 @@ function dgWhen(s){ const d=String(s||"").slice(0,10);
 // Чем опознают чужого: имя профиля и ник. По голому telegram_id не видно ничего,
 // а «Bahrom Sharifov» на ФИО «Бахтиёров Юсуфхон» видно сразу.
 function dgWho(a){ return [a.profile||"без имени в профиле", a.username?"@"+a.username:"",
-  a.local?"вход без телеграма":"id "+a.telegram_id].filter(Boolean).join(" · "); }
+  a.local?"вход по ссылке":"id "+a.telegram_id].filter(Boolean).join(" · "); }
 function dgHolder(emp){
   const e=((DG.binds||{}).employees||[]).find(x=>x.employee===emp);
   return (e&&(e.accounts||[])[0])||null;

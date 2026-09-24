@@ -53,7 +53,7 @@ def test_match_employees_and_preview_texts(tmp_path):
     assert [m["employee"] for m in matched] == ["Иванов"]
     assert nofolder == ["Нетпапки (4)"] and nofile == ["Сидоров"]
     pairs = dict(en.preview_pairs(by_emp, matched))
-    assert pairs == {"с визитами бота": 3, "готовы к обогащению": 1,
+    assert pairs == {"с выездами из приложения": 3, "готовы к обогащению": 1,
                      "завершённых визитов": 2, "файлов": 1}
     warn = en.preview_warning(by_emp, matched, nofolder, nofile)
     assert "нет папки: Нетпапки (4)" in warn and "нет .xlsb: Сидоров" in warn
@@ -64,7 +64,7 @@ def test_match_employees_and_preview_texts(tmp_path):
     assert warn.startswith("⚠ Завершённых визитов без ответственного: 2")
     assert "КД: К1, К2" in warn
     assert dict(en.preview_pairs(by_emp, matched))["визитов без ответственного"] == 2
-    assert en.preview_warning(_Split(), [], [], []) == "Бот пока ничего не заполнил — обогащать нечего."
+    assert en.preview_warning(_Split(), [], [], []) == "В приложении пока ничего не заполнено — обогащать нечего."
 
 
 # --- окно и подтверждение --------------------------------------------------------

@@ -315,3 +315,22 @@ def name_mismatch_text(typed: str, real: str, tid: str) -> str:
 
 def delete_text(tid) -> str:
     return f"Удалить руководителя {tid}? Он перестанет получать дайджест."
+
+
+# Номера руководителей без Телеграма. Выше служебных личностей сотрудников
+# (сервер: LOCAL_UID_BASE = 900 000 000 000), чтобы не пересечься ни с ними, ни с
+# настоящими Telegram-id старых руководителей.
+LOCAL_MANAGER_ID_BASE = 910_000_000_000
+
+
+def next_local_manager_id(managers) -> str:
+    """Свободный номер для нового руководителя: следующий после самого большого
+    из уже выданных пультом, или первый в диапазоне."""
+    ids = []
+    for m in managers or ():
+        try:
+            ids.append(int(m.get("telegram_id")))
+        except (TypeError, ValueError):
+            continue
+    taken = [i for i in ids if i >= LOCAL_MANAGER_ID_BASE]
+    return str(max(taken) + 1 if taken else LOCAL_MANAGER_ID_BASE)

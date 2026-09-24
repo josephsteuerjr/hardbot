@@ -298,7 +298,7 @@ def columns_state_text(analysis: dict) -> str:
     if unknown:
         suggested = [item for item in unknown if item.get("suggest")]
         lines.append(
-            f"Бот не читает {len(unknown)} колонок книги."
+            f"Система не читает {len(unknown)} колонок книги."
             + (f" Для {len(suggested)} из них подсказано поле — проверь и сохрани."
                if suggested else
                " Если какая-то из них нужна выезднику, включи её как "
@@ -499,7 +499,7 @@ def import_notes(d: dict) -> list[str]:
     if unparsed_promise:
         notes.append(
             f"Офис написал в колонку обещания не-дату/не-число: "
-            f"{fmt_n(unparsed_promise)} ячеек (значение бота сохранено).")
+            f"{fmt_n(unparsed_promise)} ячеек (значение из приложения сохранено).")
     recalled_owned = int(d.get("recalled_had_owner") or 0)
     if recalled_owned:
         by_emp = d.get("recalled_by_employee") or {}
@@ -634,12 +634,12 @@ def import_notes(d: dict) -> list[str]:
     if d.get("protected_cells"):
         notes.append(f"Отклонено защитой: {d['protected_cells']} ячеек по "
                      f"{d.get('protected_contracts') or 0} договорам — в файле нет "
-                     "свежей даты выезда бота (устаревшая копия?), результат "
+                     "свежей даты выезда из приложения (устаревшая копия?), результат "
                      "выездника не затёрт.")
     unk = d.get("unknown_columns") or []
     if unk:
         notes.append(
-            "Бот не читает эти колонки файла: " + ", ".join(unk)
+            "Система не читает эти колонки файла: " + ", ".join(unk)
             + ". Реши, что с ними делать, на экране «Колонки реестра»: связать "
             "с полем, включить как дополнительные или скрыть."
         )

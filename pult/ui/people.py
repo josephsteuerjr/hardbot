@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QGridLayout, QWidget
 
 from ..core import activity as act
+from ..core import constants
 from ..core.devices import valid_telegram_id
 from ..core.people import (GUEST_PLACEHOLDER, KIND_LABELS, client_debt, client_label,
                            guest_label, kind_from_label, kind_index, kind_text, link_note,
@@ -56,9 +57,10 @@ class PeopleSection:
         self._act_row: tuple | None = None
 
         rc = Card("Назначение ролей",
-                  "ФИО берутся из реестра (колонка «ответственный»). Основной путь — "
-                  "«Ссылка входа»: сервер сам заведёт служебную личность, Telegram не "
-                  "нужен. Telegram ID впиши, только если сотрудник уже писал боту. "
+                  "ФИО берутся из реестра (колонка «ответственный»). Вход — «Ссылка "
+                  "входа»: сервер сам заведёт сотруднику личность. " + (
+                      "Telegram ID впиши, только если сотрудник уже писал боту. "
+                      if constants.TELEGRAM_UI else "") +
                   "«Офис» — где сидит сам сотрудник (Душанбе, Худжанд, Ташкент…): "
                   "по нему считается штат руководителя города, сохраняется сразу.")
         self.roles_frame = rc.add(Rows(spacing=4))
@@ -66,8 +68,9 @@ class PeopleSection:
         page.add(rc)
 
         bc = Card("Привязки входа",
-                  "Кто уже может входить: устройство по ссылке или Telegram-аккаунт. "
-                  "«Сбросить» — отвязать.")
+                  ("Кто уже может входить: устройство по ссылке или Telegram-аккаунт. "
+                   if constants.TELEGRAM_UI else
+                   "Кто уже может входить — по ссылке. ") + "«Сбросить» — отвязать.")
         self.binds_frame = bc.add(Rows())
         page.add(bc)
 
@@ -171,8 +174,11 @@ class PeopleSection:
             grid.setContentsMargins(0, 0, 0, 0)
             grid.setHorizontalSpacing(10)
             grid.setVerticalSpacing(6)
+            tg = constants.TELEGRAM_UI
             for col, text in enumerate(("СОТРУДНИК", "ДОГОВОРОВ", "ОФИС", "НОРМА",
-                                        "TELEGRAM ID", "ТИП", "СТАТУС", "", "ВХОД")):
+                                        "TELEGRAM ID" if tg else "", "ТИП",
+                                        "СТАТУС" if tg else "", "" if tg else "ВХОД",
+                                        "ВХОД" if tg else "СТАТУС")):
                 grid.addWidget(label(text, "caps"), 0, col)
             glabels = [guest_label(g) for g in self.guests]
             self._role_rows = []
@@ -206,17 +212,19 @@ class PeopleSection:
                 if e.get("telegram_id"):
                     tid.set(str(e["telegram_id"]))
                 combo.on_select(lambda c=combo, t=tid: self._pick_guest(c, t))
-                grid.addLayout(vcol(combo, tid, spacing=2), r, 4)
+                if tg:
+                    grid.addLayout(vcol(combo, tid, spacing=2), r, 4)
                 kind = Combo(KIND_LABELS, width_chars=11)
                 kind.set_current(kind_index(e))
                 grid.addWidget(kind, r, 5, Qt.AlignmentFlag.AlignTop)
                 status_text, bound = role_status(e)
                 grid.addWidget(Note(status_text, "success" if bound else "small", wrap=False),
                                r, 8, Qt.AlignmentFlag.AlignTop)
-                grid.addWidget(Button("Привязать",
-                                      lambda emp=e["employee"], t=tid, k=kind:
-                                      self.bind_role(emp, t, k), kind="accent"),
-                               r, 6, Qt.AlignmentFlag.AlignTop)
+                if tg:
+                    grid.addWidget(Button("Привязать",
+                                          lambda emp=e["employee"], t=tid, k=kind:
+                                          self.bind_role(emp, t, k), kind="accent"),
+                                   r, 6, Qt.AlignmentFlag.AlignTop)
                 # Ссылка входа без Telegram: сервер сам выдаст сотруднику
                 # служебную личность, если привязки ещё нет.
                 grid.addWidget(Button("Ссылка входа",

@@ -52,7 +52,7 @@ class LinksSection:
 
         who = Card("Кто входит",
                    "Ссылка персональная и короткая: открыл — и сразу в своём "
-                   "портфеле, без выбора имени и без бота. Ярлык «Домой» "
+                   "портфеле, без выбора имени. Ярлык «Домой» "
                    "уносит вход с собой, а второе открытие — запас: на случай, "
                    "если ярлык всё-таки откроется без доступа. «Вошёл» — это "
                    "живой вход в приложение, а не старая отметка активности.")
@@ -67,6 +67,15 @@ class LinksSection:
                      "заголовку сортирует, поле ищет по любой колонке, чипы "
                      "фильтруют. Выбери строку — кнопки под таблицей действуют "
                      "на неё.")
+        # Главная кнопка старта: вход всем, у кого его нет (не выдавали, истекла,
+        # исчерпана), — одним нажатием, без галочек. Галочки ниже — для выбора
+        # руками, когда нужны не все.
+        self.ln_all_btn = Button("Выдать вход всем, у кого его нет",
+                                 self.ln_bulk_issue_missing, kind="accent")
+        table.add_row(self.ln_all_btn,
+                      Note("итог — список «ФИО — ссылка»: скопировать или в Excel",
+                           "tiny", wrap=False),
+                      spacing_before=2, stretch=False)
         self.ln_search = Field(width_chars=30, placeholder="поиск по ФИО, состоянию…")
         self.ln_search.textChanged.connect(lambda t: self.ln_tv.set_filter(t))
         self.ln_filters = ChipFlow()
@@ -162,6 +171,10 @@ class LinksSection:
         self.ln_tv.set_filter(self.ln_search.get())
         self.ln_tiles.set_pairs(lk.summary_tiles(people), cols=4)
         self.ln_summary.setText(lk.link_summary(people))
+        missing = counts.get("none", 0)
+        self.ln_all_btn.setText(f"Выдать вход всем, у кого его нет ({missing})" if missing
+                                else "У всех есть вход")
+        self.ln_all_btn.setEnabled(bool(missing))
         self._ln_say(self.ln_note, "" if self._ln_fresh else OLD_SERVER_TEXT)
         # Выбор не должен убегать из-под руки: оператор выдаёт вход подряд
         # пятерым, и после каждой выдачи список перечитывается.
@@ -290,6 +303,21 @@ class LinksSection:
         self.ln_bulk_btn.setEnabled(bool(count))
         self.ln_bulk_btn.setText(f"Выдать отмеченным ({count})" if count
                                  else "Выдать отмеченным")
+
+    def ln_bulk_issue_missing(self):
+        """Вход всем, кому он нужен: «не выдавали», истёк или исчерпан — ровно
+        то, что показывает чип «не выдавали». Одно нажатие, один вопрос."""
+        names = [p["employee"] for p in self._ln_people if lk.matches(p, "none")]
+        if not names:
+            self.toast("У всех уже есть вход")
+            return
+        uses = lk.USES_CHOICES[max(self.ln_uses.current(), 0)]
+        if not self.ask_yes_no("Выдать вход всем, у кого его нет",
+                               lk.bulk_confirm_text(len(names), uses,
+                                                    who="всем, у кого его нет")):
+            return
+        self.issue_bulk(lk.bulk_items(self._ln_by_name, names), uses,
+                        f"Ссылки входа · {len(names)} чел.")
 
     def ln_bulk_issue(self):
         names = [n for n in self.ln_tv.checked_keys() if n in self._ln_by_name]

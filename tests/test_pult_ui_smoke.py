@@ -41,9 +41,11 @@ def test_window_title_and_sections(app, window):
     # первый вопрос, и он решается взглядом на окно.
     assert window.windowTitle() == f"Хард · Пульт — {window.profile}"
     assert set(window.pages) == {sec for sec, _ in SECTIONS}
+    from pult.ui.nav import hidden_sections
     for sec, _ in SECTIONS:
         window.nav(sec)
-        assert window.stack.currentWidget() is window.pages[sec]
+        shown = "dash" if sec in hidden_sections() else sec
+        assert window.stack.currentWidget() is window.pages[shown]
     assert window.sec_title.text() == "Обслуживание"
     window.nav("conn")
     assert window.settings["sec"] == "conn"

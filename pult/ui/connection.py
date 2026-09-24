@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ..core import constants
 from ..core import devices as dv
 from ..core import managers as mg
 from ..core.settings import active_profile
@@ -61,6 +62,7 @@ class ConnectionSection:
                    Note("формат: цифры : буквы/цифры (≥30 символов)", "tiny", wrap=False),
                    spacing_before=4)
         page.add(tc)
+        tc.setVisible(constants.TELEGRAM_UI)
 
         gc = Card("Координаты фото",
                   "Точка съёмки — доказательство выезда и одновременно данные о "

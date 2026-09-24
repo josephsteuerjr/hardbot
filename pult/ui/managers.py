@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from ..core import constants
 from ..core import links as lk
 from ..core import managers as mg
 from ..core.devices import valid_telegram_id
@@ -25,9 +26,13 @@ class ManagersSection:
 
         mc = Card("Руководители",
                   "Руководитель направления видит всех сотрудников своей республики "
-                  "(СНГ — всех), состав считается живьём. Галочки в строке — что ему "
-                  "слать: карточку по каждому визиту, сводку в конце дня, утренние "
-                  "обещания. Гендиру обычно хватает одной сводки.")
+                  "(СНГ — всех), состав считается живьём. " + (
+                      "Галочки в строке — что ему слать: карточку по каждому визиту, "
+                      "сводку в конце дня, утренние обещания. Гендиру обычно хватает "
+                      "одной сводки." if constants.TELEGRAM_UI else
+                      "Вход — по ссылке: «выдать вход» в строке или всем сразу "
+                      "кнопкой ниже. Дальше входы своей команде руководитель выдаёт "
+                      "сам, из своего пульта."))
         # Старт пробы: вход всем руководителям одной кнопкой, итог — списком
         # «ФИО — ссылка» (копировать целиком или в Excel). У каждой строки есть
         # и своя кнопка «выдать вход» — для одного человека.
@@ -41,14 +46,21 @@ class ManagersSection:
 
         fc = Card(MGR_FORM_TITLE)
         self.mgr_form_card = fc
-        fc.add(label("Кто это (из писавших боту)", "small"))
+        guest_lbl = fc.add(label("Кто это (из писавших боту)", "small"))
         self.mgr_guest_combo = Combo(["— никто ещё не писал боту —"], width_chars=58)
         self.mgr_guest_combo.on_select(self._mgr_pick_guest)
         fc.add(self.mgr_guest_combo)
+        guest_lbl.setVisible(constants.TELEGRAM_UI)
+        self.mgr_guest_combo.setVisible(constants.TELEGRAM_UI)
         self.mgr_tid = Field(width_chars=15)
         self.mgr_name = Field(width_chars=26)
-        fc.add_row(label("Telegram ID", "small"), self.mgr_tid, 8,
-                   label("Имя (для приветствия)", "small"), self.mgr_name, spacing_before=4)
+        tg = constants.TELEGRAM_UI
+        fc.add_row(label("Telegram ID" if tg else "Номер", "small"), self.mgr_tid, 8,
+                   label("Имя (для приветствия)" if tg else "Имя", "small"),
+                   self.mgr_name, spacing_before=4)
+        if not tg:
+            fc.add(Note("Номер новому руководителю вписывать не нужно — пульт выдаст "
+                        "свой. У тех, кто уже есть в списке, он стоит.", "tiny"))
         # Направление: состав сотрудников сервер считает живьём по стране
         # реестра. Раньше пульт про направления не знал и требовал отметить
         # сотрудников вручную — замороженный список устаревал с каждым разбросом.
@@ -130,12 +142,13 @@ class ManagersSection:
             items = [name, cities, emps, tid]
             if row["mismatch"]:
                 items.append(Note("⚠ ФИО ≠ реестру", "danger", wrap=False))
-            if m.get("can_dm") is None:
+            if constants.TELEGRAM_UI and m.get("can_dm") is None:
                 items.append(Note("⚠ не писал боту — ничего не дойдёт", "danger", wrap=False))
             # Тумблеры прямо в строке: «гендиру не нужны 225 карточек в день»
             # решалось тем, что он уносил чат в архив. Сохраняем сразу — форму
             # ради одной галочки открывать незачем.
-            for key, title, hint in mg.MANAGER_PUSH_SWITCHES:
+            for key, title, hint in (mg.MANAGER_PUSH_SWITCHES
+                                     if constants.TELEGRAM_UI else ()):
                 sw = Check(title, m.get(key, True))
                 sw.setToolTip(hint)
                 sw.toggled.connect(
@@ -146,8 +159,9 @@ class ManagersSection:
                       # раздаёт входы своей команде из пульта руководителя.
                       Button("выдать вход",
                              lambda t=m["telegram_id"]: self.issue_link(telegram_id=t)),
-                      Button("проверить доставку",
-                             lambda t=m["telegram_id"]: self.push_test(t)),
+                      *([Button("проверить доставку",
+                                lambda t=m["telegram_id"]: self.push_test(t))]
+                        if constants.TELEGRAM_UI else []),
                       Button("изменить", lambda t=m["telegram_id"]: self.mgr_edit(t)),
                       Button("удалить", lambda t=m["telegram_id"]: self.mgr_delete(t),
                              kind="danger")]
@@ -289,8 +303,12 @@ class ManagersSection:
 
     def save_manager(self):
         tid = self.mgr_tid.get().strip()
+        if not tid and not constants.TELEGRAM_UI:
+            tid = mg.next_local_manager_id(getattr(self, "mgrs", None) or [])
         if not valid_telegram_id(tid):
-            self.toast("Впиши Telegram ID руководителя (или выбери из списка)", err=True)
+            self.toast("Впиши Telegram ID руководителя (или выбери из списка)"
+                       if constants.TELEGRAM_UI else "Номер руководителя — только цифры",
+                       err=True)
             return
         direction = self._mgr_direction()
         if (not direction and not self.mgr_form["employees"]
@@ -301,7 +319,8 @@ class ManagersSection:
         # Права получает ВЛАДЕЛЕЦ telegram_id, а не тот, чьё имя вписали в форму.
         # Если такой id боту ни разу не писал, сверить некому — спрашиваем явно.
         known = next((g for g in self.guests if str(g["telegram_id"]) == tid), None)
-        if not known and not self.ask_yes_no("Незнакомый аккаунт", mg.unknown_account_text(tid)):
+        if (constants.TELEGRAM_UI and not known
+                and not self.ask_yes_no("Незнакомый аккаунт", mg.unknown_account_text(tid))):
             return
         body = mg.manager_body(tid, self.mgr_name.get(), self.mgr_form["cities"],
                                self.mgr_form["employees"], direction,

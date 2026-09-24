@@ -8,6 +8,7 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
                                QVBoxLayout, QWidget)
 
+from ..core import constants
 from . import theme
 
 # Порядок — по частоте использования: сначала день и вход людей, потом
@@ -21,6 +22,11 @@ SECTIONS = [
     ("mgrs", "Руководители"), ("channels", "Каналы"), ("registry", "Реестр"),
     ("prio", "Приоритет"), ("conn", "Подключение"), ("maint", "Обслуживание"),
 ]
+def hidden_sections() -> set[str]:
+    """Разделы, которых нет в меню: «Каналы» — это рассылки и беседы Телеграма."""
+    return set() if constants.TELEGRAM_UI else {"channels"}
+
+
 TITLES = dict(SECTIONS) | {"prio": "Приоритет выезда",
                            "links": "Вход сотрудников"}
 
@@ -121,6 +127,7 @@ class NavRail(QFrame):
             b.setIconSize(QSize(18, 18))
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             b.clicked.connect(lambda _c=False, s=sec: self.selected.emit(s))
+            b.setVisible(sec not in hidden_sections())
             lay.addWidget(b)
             lay.addSpacing(2)
             self.buttons[sec] = b

@@ -100,9 +100,12 @@ def test_sections_are_reorganised(app, window):
     assert set(window.pages) == set(keys)
     assert LAZY["dash"] == "load_today" and LAZY["channels"] == "load_channels"
     assert LAZY["maint"] == "maint_load"
-    window.nav("channels")
-    assert window.sec_title.text() == "Каналы"
+    # «Каналы» — рассылки и беседы Телеграма: страница собрана, но в контуре без
+    # Телеграма её нет в меню, и переход на неё уводит на «Сегодня».
     assert hasattr(window, "chats_list") and hasattr(window, "dig_time")
+    assert not window.rail.buttons["channels"].isVisibleTo(window.rail)
+    window.nav("channels")
+    assert window.sec_title.text() == "Сегодня"
     window.nav("mgrs")
     assert not hasattr(window, "geo_days") or window.pages["conn"] is not None
 
@@ -165,4 +168,32 @@ def test_dashboard_helpers_speak_russian():
     assert "Сбоев доставки сегодня нет" in dash.delivery_note(TODAY)
     assert dash.registry_pairs(TODAY)[2] == ("без ответственного", 5050)
     row = act.activity_row(WORKERS[2])
-    assert row[2] == "Telegram" and row[3] == 37 and row[-1].startswith("⚠ ФИО нет в реестре")
+    assert row[2] == "старая система" and row[3] == 37 and row[-1].startswith("⚠ ФИО нет в реестре")
+
+
+def test_no_telegram_in_the_console_by_default(app, window):
+    """Контур компании работает без Телеграма: в пульте не должно быть ни
+    рассылок и бесед, ни токена бота, ни «писавших боту», ни проверки доставки.
+    Рубильник constants.TELEGRAM_UI прячет это, а не вырезает."""
+    from pult.core import constants
+    assert constants.TELEGRAM_UI is False
+    rail = window.rail
+    assert not rail.buttons["channels"].isVisibleTo(rail)
+    assert not window.mgr_guest_combo.isVisibleTo(window.pages["mgrs"])
+    from pult.ui.nav import hidden_sections
+    texts = []
+    for sec, page in window.pages.items():
+        if sec in hidden_sections():
+            continue          # страницы нет в меню — открыть её нельзя
+        for w in page.findChildren(QtWidgets.QWidget):
+            if w.isVisibleTo(page) and hasattr(w, "text"):
+                try:
+                    texts.append(str(w.text()))
+                except TypeError:
+                    pass
+    import re
+    joined = "\n".join(texts).lower()
+    # Целыми словами: «бота» сидит и внутри «работает».
+    found = re.findall(r"telegram|телеграм\w*|botfather|(?<![а-яё])бот(?:а|у|ом)?(?![а-яё])",
+                       joined)
+    assert not found, f"в видимом тексте пульта остались упоминания: {sorted(set(found))}"

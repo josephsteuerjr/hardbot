@@ -27,7 +27,7 @@ from .dashboard import DashboardSection
 from .links import LinksSection
 from .maintenance import MaintenanceSection
 from .managers import ManagersSection
-from .nav import SECTIONS, TITLES, NavRail
+from .nav import SECTIONS, TITLES, NavRail, hidden_sections
 from .people import PeopleSection
 from .priority import PrioritySection
 from .registry import RegistrySection
@@ -156,6 +156,8 @@ class Pult(QMainWindow, ImportFlow, DashboardSection, RegistrySection, PriorityS
         self.toast_lbl.reposition()
 
     def nav(self, sec: str) -> None:
+        if sec in hidden_sections():
+            sec = "dash"      # запомненный раздел мог исчезнуть из меню
         self.rail.set_active(sec)
         page = self.pages[sec]
         self.stack.setCurrentWidget(page)

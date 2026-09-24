@@ -1133,8 +1133,8 @@ async function renderSwitches() {
             known ? ((v) => switchPush(spec.key, v)) : null);
     });
     const why = el('div', 'note note--tiny', pushes
-        ? 'You toggle these yourself — they take effect immediately. The analyst can change the same ones in their console.'
-        : 'Mailing status didn\'t arrive — check the connection and reopen the page.');
+        ? 'Переключаете сами — действует сразу. Аналитик может поменять то же у себя в пульте.'
+        : 'Состояние рассылок не пришло — проверьте связь и откройте страницу заново.');
     wrap.replaceChildren(why, ...rows);
 }
 
@@ -1143,7 +1143,7 @@ async function switchPush(key, value) {
         const out = await post('/api/pushes', { key, value });
         if (out && out.pushes) S.pushes = out.pushes;
     } catch (e) {
-        setFail((e && e.message) || 'the toggle didn\'t switch', false);
+        setFail((e && e.message) || 'переключатель не переключился', false);
     }
     await renderSwitches();
 }
@@ -1153,7 +1153,7 @@ function toggleRow(spec, value, known, onToggle) {
     const body = el('div', 'toggle__body');
     body.appendChild(el('div', 'toggle__name', spec.name));
     body.appendChild(el('div', 'toggle__note',
-        spec.note + (known ? '' : ' · state didn\'t arrive')));
+        spec.note + (known ? '' : ' · состояние не пришло')));
     row.appendChild(body);
     const input = el('input');
     input.type = 'checkbox';

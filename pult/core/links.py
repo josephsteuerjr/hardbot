@@ -468,7 +468,7 @@ def issue_lines(row: dict) -> list[tuple[str, str]]:
         lines.append(("small", "Открытие последнее: если ярлык откроется без "
                                "доступа, выдай вход заново."))
     if row.get("local_identity"):
-        lines.append(("small", "Вход без Telegram: у сотрудника служебная личность, "
+        lines.append(("small", "Вход по ссылке: у сотрудника служебная личность, "
                                "для работы нужен только телефон со ссылкой."))
     return lines
 
@@ -583,7 +583,7 @@ def bulk_summary(rows) -> str:
         text += " У остальных причина — в колонке «Ошибка»."
     if ok:
         text += (" Каждая ссылка персональная: перешлите её лично человеку "
-                 "(в личку, не в общий чат).")
+                 "(не в общий чат).")
     return text
 
 
@@ -602,9 +602,10 @@ def _uses_word(n: int) -> str:
     return "открытий"
 
 
-def bulk_confirm_text(count: int, uses: int, entered: int = 0) -> str:
+def bulk_confirm_text(count: int, uses: int, entered: int = 0,
+                      who: str = "отмеченным") -> str:
     """Вопрос перед массовой выдачей: что будет со старыми ссылками и входами."""
-    text = (f"Выдать вход отмеченным — {count} чел., по {uses} {_uses_word(uses)}?\n\n"
+    text = (f"Выдать вход {who} — {count} чел., по {uses} {_uses_word(uses)}?\n\n"
             "У кого ссылку уже выдавали, но её не открыли, старая перестанет "
             "работать — вместо неё будет новая.")
     if entered:
