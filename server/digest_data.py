@@ -27,7 +27,6 @@ import evidence
 import funnel
 import photostore
 from i18n import tf
-from util import num as _num
 
 _MONTHS = ["", "января", "февраля", "марта", "апреля", "мая", "июня", "июля",
            "августа", "сентября", "октября", "ноября", "декабря"]
@@ -180,6 +179,54 @@ def sorted_employees(mgr: dict) -> list[str]:
     return sorted(set(live))
 
 
+def _covers(mgr: dict, employee: str, countries: set[str],
+            office_index: dict[str, str]) -> bool:
+    """Входит ли сотрудник в охват руководителя, если судить не по портфелю
+    (его может уже не быть), а по его выездам: страна выездов, офис, имя."""
+    if db.get_manager(mgr["telegram_id"]) is None:
+        return True                       # владелец без записи — видит всех
+    direction = (mgr.get("direction") or "").strip()
+    if direction:
+        return direction == "all" or direction in countries
+    key = db._name_key(employee)
+    if any(db._name_key(e) == key for e in mgr.get("employees") or []):
+        return True
+    offices = {(c or "").strip().casefold() for c in mgr.get("office_cities") or []}
+    return bool(offices) and \
+        db.office_of(employee, office_index).strip().casefold() in offices
+
+
+def window_team(mgr: dict, team: list[str], d_from: str, d_to: str) -> list[str]:
+    """Команда ЗА ОКНО: живой состав плюс те, кто в этом окне выезжал.
+
+    Живой состав строится по реестру — у кого сейчас есть договоры. С кого в
+    конце месяца сняли весь портфель, из него выпадает, и это правильно: в
+    сегодняшней сводке человеку без договоров делать нечего. Но выезды,
+    которые он сделал до перезакрепления, — его работа, и в статистике того
+    окна он обязан остаться со своими цифрами, а не исчезнуть вместе с ними.
+
+    team — состав ДОСТУПА (sorted_employees): поимённый список и офис живут,
+    пока их не поправят руками. Здесь из него остаются только те, у кого в
+    реестре есть договоры, и в написании реестра (под ним портфели и выезды).
+    Сам состав доступа не режем: по нему руководитель находит фото
+    откреплённых договоров своих людей и выдаёт им вход. Пустой реестр (до
+    первого импорта) не фильтрует ничего — иначе пустым стал бы и экран."""
+    registry = {db._name_key(r["employee"]): r["employee"]
+                for r in db.employees_in_registry()}
+    if registry:
+        team = [registry[db._name_key(e)] for e in team
+                if db._name_key(e) in registry]
+    out = dict.fromkeys(team)
+    authors = db.visit_authors(d_from, d_to)
+    extra = [e for e in authors if e not in out]
+    if extra:
+        index = db.employee_office_index()
+        for emp in extra:
+            if _covers(mgr, emp, authors[emp], index):
+                out[emp] = None
+    return sorted(out)
+
+
 def manager_scope(uid: int, *, is_owner: bool = False) -> dict | None:
     """Единый сборщик mgr-словаря для бота, автопушей и вкладки приложения.
 
@@ -265,8 +312,10 @@ def overdue_by_employee(mgr: dict, on_date: str) -> list[tuple[str, list[dict]]]
 # --- ЭКРАН 1: сводка ---------------------------------------------------------
 def summary_data(mgr: dict, on_date: str, employees: list[str] | None = None) -> dict:
     # Состав считается РОВНО ОДИН РАЗ и передаётся дальше: у направленца каждый
-    # вызов sorted_employees — полный DISTINCT-скан clients.
-    employees = employees if employees is not None else sorted_employees(mgr)
+    # вызов sorted_employees — полный DISTINCT-скан clients. По умолчанию —
+    # состав ПОКАЗА за этот день (window_team), как у бота и у вкладки.
+    if employees is None:
+        employees = window_team(mgr, sorted_employees(mgr), on_date, on_date)
     rows = [{"ei": i, **_employee_row(emp, on_date)}
             for i, emp in enumerate(employees)]
     # порядок отображения: активные по убыванию числа кейсов, затем «нулевые»
@@ -550,8 +599,12 @@ def person_data(mgr: dict, on_date: str, employee: str, rep: str,
         # Экран статистики ведёт в карточку и по ПРОШЛОМУ выезду: человек, к
         # которому с тех пор съездили ещё раз, в persons_processed того дня уже
         # не значится. Карточка показывает текущее состояние — снимок сильнее.
+        # Сюда же — должник, которого с тех пор перезакрепили: к нему ведёт
+        # выезд этого сотрудника, и карточка по своему выезду открываться обязана.
         rows = db.person_contracts(rep)
-        if rows and (rows[0]["responsible"] or "") == employee:
+        if rows and ((rows[0]["responsible"] or "") == employee
+                     or db.employee_visited(employee,
+                                            [r["contract_id"] for r in rows])):
             p = next(iter(db._group_persons(rows)), None)
     if p is None:
         return None
@@ -622,13 +675,13 @@ def cases_data(mgr: dict, rng: dict, metric: str, country: str = "",
     if employee:
         employees = [e for e in employees if e == employee]
     metric = metric if metric in CASE_METRICS else "visits"
-    country_of = _employee_country_index()
+    country_of = _employee_country_index(rng["from"], rng["to"])
     if country:
         employees = [e for e in employees if country_of.get(e) == country]
     if office:
-        by_office = db.employee_cities()
+        by_office = db.employee_office_index()
         employees = [e for e in employees
-                     if _in_office({"office": by_office.get(e, "")}, office)]
+                     if _in_office({"office": db.office_of(e, by_office)}, office)]
     items = []
     for emp in employees:
         r = _employee_stats(emp, rng["from"], rng["to"], with_photos=False)
@@ -1124,10 +1177,19 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
     ради колонки, которой в сводном отчёте нет."""
     persons = db._group_persons(db.contracts_of_responsible(emp))
     by_cid = {c["contract_id"]: p for p in persons for c in p["contracts"]}
+    visits = db.visits_for_employee(emp, d_from, d_to)
+    # Выезды по договорам, которые с тех пор перезакрепили: должника в портфеле
+    # уже нет, но выезд — работа этого сотрудника, и выпасть из его статистики
+    # он не должен. Такие договоры собираем в людей отдельно от портфеля.
+    moved = {v["contract_id"] for v in visits} - set(by_cid)
+    if moved:
+        for p in db._group_persons(db.clients_by_ids(moved)):
+            for c in p["contracts"]:
+                by_cid[c["contract_id"]] = p
     # (день, человек) → последняя запись журнала этого дня: повторное нажатие
     # «Сохранить выезд» рождает вторую строку, но это тот же выезд.
     entries: dict[tuple[str, str], dict] = {}
-    for v in db.visits_for_employee(emp, d_from, d_to):
+    for v in visits:
         p = by_cid.get(v["contract_id"])
         if p is None:
             continue
@@ -1237,7 +1299,7 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
         # колонок сходятся с «Должников», а деньги не задваиваются.
         # Сколько выездов доехало не в свой день и сколько закрыто без точки
         # телефона — два счётчика контроля рядом с остальными.
-        "office": db.employee_cities().get(emp, ""),
+        "office": db.office_of(emp),
         # Среднее время на карточке — по тем выездам, где его удалось измерить.
         "fill_avg": _avg_fill([e.get("fill_seconds") for e in ordered]),
         "plan_per_day": db.visit_plan_for(emp),
@@ -1272,13 +1334,25 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
     }
 
 
-def _employee_country_index() -> dict[str, str]:
+def _employee_country_index(d_from: str | None = None,
+                            d_to: str | None = None) -> dict[str, str]:
     """ФИО → tj/uz по стране кейсов (как у направлений). Сотрудник, чьи кейсы
-    в обеих странах, остаётся в первой — статистика не задваивается."""
+    в обеих странах, остаётся в первой — статистика не задваивается.
+
+    С окном — ещё и те, у кого портфеля уже нет: страна берётся по его выездам
+    за окно, иначе человек, с которого сняли договоры, уезжал бы в «Без
+    республики» и выпадал из фильтра своей страны вместе с выездами."""
     out: dict[str, str] = {}
     for code in ("tj", "uz"):
         for emp in db.employees_by_direction(code):
             out.setdefault(emp, code)
+    if d_from and d_to:
+        for emp, codes in db.visit_authors(d_from, d_to).items():
+            if emp not in out:
+                code = next((c for c in ("tj", "uz") if c in codes),
+                            next(iter(sorted(codes)), None))
+                if code:
+                    out[emp] = code
     return out
 
 
@@ -1332,7 +1406,7 @@ def _totals_of(rows: list[dict], days: int) -> dict:
 def stats_data(mgr: dict, rng: dict, employees: list[str] | None = None) -> dict:
     employees = employees if employees is not None else sorted_employees(mgr)
     d_from, d_to = rng["from"], rng["to"]
-    country = _employee_country_index()
+    country = _employee_country_index(d_from, d_to)
     days = _range_days(rng)
     rows = []
     for emp in employees:
@@ -1749,419 +1823,19 @@ def _office_country(rows: list[dict], names: dict) -> str:
     return ", ".join(labels)
 
 
-def _funnel_sheets(wb, data: dict, rows: list[dict], names: dict,
+def _funnel_sheets(bk, data: dict, rows: list[dict], names: dict,
                    rng: dict) -> None:
-    """Листы воронки: «Воронка» (сотрудники), «Воронка — республики»,
-    «Воронка — офисы», «Воронка — итого», «Обещания», «Ранжирование».
-
-    Уровни среза разнесены ПО ЛИСТАМ, а не сложены в одну таблицу с колонкой
-    «Срез», как было до 22.09.2026. Одна таблица врала сложением: каждый выезд
-    лежал в ней четырежды (сотрудник, республика, офис, итог), и SUM по
-    колонке «Выездов» давал 36 при девяти настоящих выездах. Лист на уровень —
-    единственная раскладка, где сумма колонки это правда, а книгу заказывали
-    именно для самостоятельного анализа суммами и сводными.
-    """
-    from openpyxl.styles import Alignment, Font, PatternFill
-    from openpyxl.utils import get_column_letter
-
-    metric = PatternFill("solid", fgColor="E4ECF6")
-    money_fmt = "#,##0"
-    window = f"{rng['label']} ({rng['from']} — {rng['to']})"
-
-    def head(ws, columns, title: str, note: str = "") -> None:
-        """Шапка листа: заголовок, строка оговорок, названия колонок.
-
-        Оговорка живёт во ВТОРОЙ строке, над таблицей, а не под ней: под
-        таблицей её не видит ни фильтр, ни тот, кто дочитал до итогов.
-        """
-        ws.append([title])
-        ws["A1"].font = Font(bold=True)
-        ws.append([note])
-        ws["A2"].font = Font(italic=True, color="666666")
-        ws.append([c[0] for c in columns])
-        for i, col in enumerate(columns, start=1):
-            cell = ws.cell(row=3, column=i)
-            cell.font = Font(bold=True)
-            cell.alignment = Alignment(wrap_text=True, vertical="center")
-            if len(col) > 2 and col[2] == "pct":
-                cell.fill = metric
-            ws.column_dimensions[get_column_letter(i)].width = col[1]
-
-    def dress(ws, columns, last_data_row: int, freeze: str) -> None:
-        """Проценты — настоящими процентами, фильтр — по строкам данных."""
-        for row in ws.iter_rows(min_row=4, max_row=ws.max_row):
-            for i, col in enumerate(columns):
-                if i < len(row) and len(col) > 2 and col[2] == "pct":
-                    row[i].number_format = "0.0%"
-                    row[i].fill = metric
-        if last_data_row > 3:
-            ws.auto_filter.ref = (f"A3:{get_column_letter(len(columns))}"
-                                  f"{last_data_row}")
-        ws.freeze_panes = freeze
-
-    # --- Воронка: по листу на уровень среза ---------------------------------
-    plan_map = db.visit_plan_map()
-    # Задание — на РАБОЧИЙ наступивший день (решение владельца 22.09.2026).
-    work = _workdays(data.get("by_day"), rng.get("today") or today_iso())
-
-    def norm(group: list[dict]) -> int:
-        """Задание группы: сумма ЛИЧНЫХ норм × рабочие дни, как у _totals_of
-        (в группах 8/10/12 общая норма × число людей — цифра, которой никто не
-        ставил), только множитель дней рабочий, а не календарный."""
-        return sum(db.visit_plan_for(r["employee"], plan_map)
-                   for r in group) * work
-
-    def funnel_sheet(title: str, subtitle: str, lines: list[list], bold=False):
-        ws = wb.create_sheet(title)
-        head(ws, FUNNEL_COLUMNS,
-             f"Воронка Collection · {subtitle} · {data['scope']} · {window}",
-             f"Один уровень среза на лист: сумма колонки «Выездов» равна числу "
-             f"выездов уровня. Задание = личная норма × {work} рабочих дн., "
-             f"уже наступивших в окне (выходные и будущие дни не в счёт).")
-        for line in lines:
-            ws.append(line)
-            if bold:
-                for cell in ws[ws.max_row]:
-                    cell.font = Font(bold=True)
-        dress(ws, FUNNEL_COLUMNS, ws.max_row, "C4")
-        return ws
-
-    funnel_sheet("Воронка", "сотрудники", [
-        _funnel_line("Сотрудник", r["employee"], names.get(r["country"], ""),
-                     r.get("office") or "", r.get("funnel"),
-                     db.visit_plan_for(r["employee"], plan_map) * work, work)
-        for r in rows])
-
-    republics = []
-    for c in data["countries"]:
-        mine = [r for r in rows if r["country"] == c["code"]]
-        republics.append(_funnel_line("Республика", c["name"], c["name"], "",
-                                      c["totals"].get("funnel"),
-                                      norm(mine), work))
-    nowhere = [r for r in rows if not r.get("country")]
-    if nowhere:
-        # Сотрудник без страны кейсов бывает (пустой портфель, новичок). Без
-        # этой строки сумма листа не сошлась бы с числом выездов команды, а
-        # именно сложением лист и проверяют.
-        republics.append(_funnel_line(
-            "Республика", "Без республики", "", "",
-            funnel.add_counts(*[r.get("funnel") for r in nowhere]),
-            norm(nowhere), work))
-    funnel_sheet("Воронка — республики", "республики", republics)
-
-    offices = []
-    for office in data.get("offices") or ():
-        mine = [r for r in rows if _in_office(r, office["code"])]
-        offices.append(_funnel_line("Офис", office["name"],
-                                    _office_country(mine, names),
-                                    office["name"],
-                                    office["totals"].get("funnel"),
-                                    norm(mine), work))
-    if offices:
-        funnel_sheet("Воронка — офисы", "офисы", offices)
-
-    funnel_sheet("Воронка — итого", "итог команды", [
-        _funnel_line("Итого", f"сотрудников {data['totals']['employees']}",
-                     "", "", data["totals"].get("funnel"), norm(rows), work)],
-        bold=True)
-
-    # --- Обещания: реестр для самостоятельного разбора ----------------------
-    promises = _promise_rows(rows, names)
-    counted = [x for x in promises if x["counted"]]
-    # Расхождение двух листов названо вслух и ЧИСЛАМИ: «Ранжирование» считает
-    # только зачётные обещания, и молчаливая разница строк выглядела бы
-    # ошибкой книги (жалоба на воронку 22.09.2026).
-    gap = (f"Строк здесь {len(promises)} — по одной на должника; "
-           f"в зачёт KP/BP идёт {len(counted)}.")
-    ws2 = wb.create_sheet("Обещания")
-    head(ws2, PROMISE_COLUMNS,
-         f"Обещания клиентов, взятые на выездах · {window}",
-         "Одна строка — один должник: результат, сумма и дата взяты с "
-         "ПОСЛЕДНЕГО выезда к нему, а сколько их было — в колонке «Выездов с "
-         "обещанием». " + gap + " Валюта обещания — валюта долга должника, "
-         "суммы разных валют не складываются.")
-    at_col = {c[0]: i + 1 for i, c in enumerate(PROMISE_COLUMNS)}
-    for x in promises:
-        ws2.append([x["date"], x["visits"], x["country"], x["office"],
-                    x["employee"], x["client"], x["contracts"],
-                    x["contact_with"], x["who_at_address"], x["agreed"],
-                    x["promise_day"], x["sum"] or "", x["unit_text"],
-                    x["bucket"],
-                    x["debt_val"] if x["debt_val"] is not None else x["debt"],
-                    funnel.PROMISE_STATE_TEXT.get(x["state"], ""),
-                    x["days_overdue"] or "", x["overdue_bucket"],
-                    x["last_payment"], _num(x["last_payment_sum"]) or "",
-                    x["status"], "да" if x["counted"] else "нет"])
-        at = ws2.max_row
-        ws2.cell(row=at, column=at_col["Сумма обещания"]).number_format = \
-            _money_fmt(x["unit"])
-        if x["debt_val"] is not None:
-            ws2.cell(row=at, column=at_col["Долг"]).number_format = \
-                _money_fmt(x["debt_unit"])
-        ws2.cell(row=at, column=at_col["Сумма платежа"]).number_format = money_fmt
-        state_cell = ws2.cell(row=at, column=at_col["Исход обещания"])
-        if x["state"] == funnel.PROMISE_KEPT:
-            state_cell.fill = PatternFill("solid", fgColor="E3F2E1")
-        elif x["state"] == funnel.PROMISE_BROKEN:
-            state_cell.fill = PatternFill("solid", fgColor="FAE3E0")
-    dress(ws2, PROMISE_COLUMNS, ws2.max_row, "A4")
-
-    # --- Ранжирование по объёму обещания ------------------------------------
-    # «Будем иметь понимание, с какими долгами умеем работать, срок просрочки,
-    # сумму просрочки». Считаем по тем же обещаниям, что попали в зачёт KP/BP:
-    # иначе строки листа не сойдутся с колонками воронки. Внутри зачёта строки
-    # разложены ещё и по валютам — сомони с рублями не складываются нигде.
-    ws3 = wb.create_sheet("Ранжирование")
-    head(ws3, RANGE_COLUMNS, f"Исполнение обещаний по размеру · {window}",
-         f"Только обещания в зачёт KP/BP (колонка «В зачёт KP/BP» = «да» на "
-         f"листе «Обещания»): в зачёт идёт одно, последнее обещание должника. "
-         f"{gap} Каждая валюта своими строками — суммы разных валют не "
-         f"складываются, знак валюты в колонке «Валюта» и в формате ячейки.")
-    groups = sorted({(x["unit_text"], x["unit"]) for x in counted}) or [("", "")]
-    money_cols = [i + 1 for i, c in enumerate(RANGE_COLUMNS)
-                  if len(c) > 2 and c[2] == "money"]
-
-    def range_row(title: str, items: list[dict], unit_text: str, unit: str,
-                  bold: bool = False) -> None:
-        ws3.append(_range_line(title, items, unit_text))
-        for i in money_cols:
-            ws3.cell(row=ws3.max_row, column=i).number_format = _money_fmt(unit)
-        if bold:
-            for cell in ws3[ws3.max_row]:
-                cell.font = Font(bold=True)
-
-    for unit_text, unit in groups:
-        mine = [x for x in counted if x["unit_text"] == unit_text]
-        for title in funnel.AMOUNT_ORDER:
-            range_row(title, [x for x in mine if x["bucket"] == title],
-                      unit_text, unit)
-    last3 = ws3.max_row
-    # Итоги — ПОД диапазоном фильтра и по одному на валюту: общий итог по всем
-    # валютам сразу был бы той самой суммой, которой не существует.
-    for unit_text, unit in groups:
-        range_row("Итого", [x for x in counted if x["unit_text"] == unit_text],
-                  unit_text, unit, bold=True)
-    dress(ws3, RANGE_COLUMNS, last3, "B4")
+    """Листы воронки — в stats_book (книги пишутся xlsxwriter с нативными
+    типами ячеек, см. book.py). Импорт ленивый: stats_book сам зовёт сюда."""
+    import stats_book
+    stats_book.funnel_sheets(bk, data, rows, names, rng)
 
 
 def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> bytes:
-    """Та же статистика книгой: «Сотрудники», «Республики», «Выезды», «По дням»
-    и листы воронки (см. _funnel_sheets).
-
-    Исходы разложены по столбцам — количество и деньги по каждому, — а столбцы
-    собраны в блоки «Успешный выезд» и «Не успешный выезд» (просьба офиса
-    11.09.2026). Раньше исходы ехали одной строкой текста «Передана инф 3 лицу 8
-    · Нет контакта 3»: ни сложить, ни отсортировать. Лист «Республики» повторяет
-    тот же расклад по странам: направленцу нужен свод именно по своей.
-    """
-    from io import BytesIO
-
-    from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Font, PatternFill
-    from openpyxl.utils import get_column_letter
-
-    data = stats_data(mgr, rng, employees)
-    names = {c["code"]: c["name"] for c in data["countries"]}
-    rows = data["employees"]
-    layout = _outcome_layout(rows)
-    block_row, head_row, widths, spans = _book_head(layout)
-    fills = {"success": PatternFill("solid", fgColor="E3F2E1"),
-             "fail": PatternFill("solid", fgColor="FAE3E0"),
-             "other": PatternFill("solid", fgColor="EFEFEF")}
-    per_day = data["totals"].get("plan_per_day") or 0
-    emp_plan = per_day * max(1, len(data["by_day"]))
-
-    def dress(ws, head_top: int, last_data_row: int) -> None:
-        """Шапка-блоки, жирные заголовки, заливка, ширины — одинаково на листах."""
-        for cell in ws[head_top + 1]:
-            cell.font = Font(bold=True)
-            cell.alignment = Alignment(wrap_text=True, vertical="center")
-        for cell in ws[ws.max_row]:
-            cell.font = Font(bold=True)
-        for code, first, last in spans:
-            if last > first:
-                ws.merge_cells(start_row=head_top, start_column=first,
-                               end_row=head_top, end_column=last)
-            head = ws.cell(row=head_top, column=first)
-            head.font = Font(bold=True)
-            head.alignment = Alignment(horizontal="center")
-            for col in range(first, last + 1):
-                ws.cell(row=head_top, column=col).fill = fills[code]
-                ws.cell(row=head_top + 1, column=col).fill = fills[code]
-        for i, w in enumerate(widths, start=1):
-            ws.column_dimensions[get_column_letter(i)].width = w
-        # Фильтр по «Стране» — чтобы руководитель направления мог оставить свою
-        # республику прямо в листе сотрудников; строку «Итого» в диапазон не
-        # берём, иначе она уедет вместе с фильтром.
-        if last_data_row > head_top + 1:
-            ws.auto_filter.ref = (f"A{head_top + 1}:"
-                                  f"{get_column_letter(len(head_row))}{last_data_row}")
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Сотрудники"
-    ws.append([f"Статистика выездов · {data['scope']} · {rng['label']} "
-               f"({rng['from']} — {rng['to']})"])
-    ws["A1"].font = Font(bold=True)
-    ws.append([])
-    ws.append(block_row)
-    ws.append(head_row)
-    plan_map = db.visit_plan_map()
-    for r in rows:
-        line, fmts = _book_line(r["employee"], names.get(r["country"], ""), r,
-                                r.get("by_outcome") or {}, layout,
-                                db.visit_plan_for(r["employee"], plan_map)
-                                * max(1, len(data["by_day"])),
-                                office=r.get("office") or "")
-        ws.append(line)
-        for pos, fmt in fmts.items():
-            ws.cell(row=ws.max_row, column=pos + 1).number_format = fmt
-    last_employee_row = ws.max_row
-    line, fmts = _book_line("Итого", "", data["totals"], _outcome_totals(rows),
-                            layout, data["totals"].get("plan") or 0)
-    ws.append(line)
-    for pos, fmt in fmts.items():
-        ws.cell(row=ws.max_row, column=pos + 1).number_format = fmt
-    dress(ws, head_top=3, last_data_row=last_employee_row)
-    ws.freeze_panes = "C5"      # ФИО и страна остаются на виду при прокрутке вправо
-
-    # --- Республики: тот же расклад, но по странам --------------------------
-    ws_c = wb.create_sheet("Республики")
-    ws_c.append([f"По республикам · {rng['label']} ({rng['from']} — {rng['to']})"])
-    ws_c["A1"].font = Font(bold=True)
-    ws_c.append([])
-    country_head = ["Республика"] + list(head_row[1:])
-    ws_c.append(block_row)
-    ws_c.append(country_head)
-    for c in data["countries"]:
-        mine = [r for r in rows if r["country"] == c["code"]]
-        line, fmts = _book_line(c["name"], f"сотрудников {c['employees']}",
-                                c["totals"], _outcome_totals(mine), layout,
-                                c["totals"].get("plan") or 0)
-        ws_c.append(line)
-        for pos, fmt in fmts.items():
-            ws_c.cell(row=ws_c.max_row, column=pos + 1).number_format = fmt
-    last_country_row = ws_c.max_row
-    line, fmts = _book_line("Итого", f"сотрудников {data['totals']['employees']}",
-                            data["totals"], _outcome_totals(rows), layout,
-                            data["totals"].get("plan") or 0)
-    ws_c.append(line)
-    for pos, fmt in fmts.items():
-        ws_c.cell(row=ws_c.max_row, column=pos + 1).number_format = fmt
-    dress(ws_c, head_top=3, last_data_row=last_country_row)
-    ws_c.freeze_panes = "B5"
-
-    # --- Офисы: та же раскладка по городам, где сидит штат -------------------
-    if data.get("offices"):
-        ws_o = wb.create_sheet("Офисы")
-        ws_o.append([f"По офисам · {rng['label']} ({rng['from']} — {rng['to']})"])
-        ws_o["A1"].font = Font(bold=True)
-        ws_o.append([])
-        ws_o.append(block_row)
-        ws_o.append(["Офис"] + list(head_row[1:]))
-        # «Без офиса» приходит последней строкой в самом data["offices"] —
-        # отдельным блоком его считать больше не нужно, иначе задвоится.
-        for office in data["offices"]:
-            mine = [r for r in rows if _in_office(r, office["code"])]
-            line, fmts = _book_line(office["name"], f"сотрудников {office['employees']}",
-                                    office["totals"], _outcome_totals(mine), layout,
-                                    office["totals"].get("plan") or 0)
-            ws_o.append(line)
-            for pos, fmt in fmts.items():
-                ws_o.cell(row=ws_o.max_row, column=pos + 1).number_format = fmt
-        last_office_row = ws_o.max_row
-        line, fmts = _book_line("Итого", f"сотрудников {data['totals']['employees']}",
-                                data["totals"], _outcome_totals(rows), layout,
-                                data["totals"].get("plan") or 0)
-        ws_o.append(line)
-        for pos, fmt in fmts.items():
-            ws_o.cell(row=ws_o.max_row, column=pos + 1).number_format = fmt
-        dress(ws_o, head_top=3, last_data_row=last_office_row)
-        ws_o.freeze_panes = "B5"
-
-    ws2 = wb.create_sheet("Выезды")
-    # «Внесён», «Гео» и «Закрыл» — контроль, о котором просил офис: выезд,
-    # занесённый назавтра «потому что не было связи», закрытый без точки
-    # телефона или закрытый руководителем за сотрудника, виден строкой.
-    # Три момента выезда разведены: что человек нажал в приложении, что дошло до
-    # сервера и в чей день это легло. Раньше днём выезда был день загрузки, и
-    # работа целого дня без связи попадала в чужой день.
-    # Подтверждение выезда — четырьмя колонками справа от прежних: вердикт,
-    # сколько минут у адреса и когда, связь при сохранении, признаки серии.
-    ws2.append(["Дата", "Республика", "Офис", "Сотрудник", "Клиент", "Договоров",
-                "Выезд", "Результат", "Договорённость", "Заполнение карточки",
-                "Сохранён в приложении", "Принят сервером", "Внесён", "Гео",
-                "Закрыл", "Долг", "Подтверждение", "У адреса, мин", "У адреса с",
-                "У адреса до", "Связь при сохранении", "Признаки серии",
-                "Где заполнен"])
-    for cell in ws2[1]:
-        cell.font = Font(bold=True)
-    for r in rows:
-        own = set(db.agent_tids(r["employee"]) or ())
-        for e in r["_entries"]:
-            p = e["person"]
-            group = outcome_group(e["status"])
-            late = e.get("late_days")
-            row_at = ws2.max_row + 1
-            when = ("в день выезда" if late == 0
-                    else f"позже на {late} дн" if late else "неизвестно")
-            who = ("сам" if not own or e.get("agent_id") in own
-                   else "руководитель")
-            ev = e.get("ev") or {}
-            level = e.get("evidence_level") or ""
-            online = ev.get("online_save")
-            debt_num, debt_unit = _units_num(p.get("totals"))
-            ws2.append([e["date"], names.get(r["country"], ""), r.get("office") or "",
-                        r["employee"], p["client"], p["n"],
-                        OUTCOME_GROUP_LABEL[group], e["status"],
-                        e["agreed"], _fill_text(e.get("fill_seconds")),
-                        _stamp(e.get("saved_at")), _stamp(e.get("received_at")),
-                        when, "есть" if e.get("geo") else "нет", who,
-                        debt_num if debt_num is not None else _persons_total([p]),
-                        evidence.LEVEL_TEXT.get(level, "") if level else "",
-                        ev.get("near_min") if ev.get("near_min") is not None else "",
-                        ev.get("near_first") or "", ev.get("near_last") or "",
-                        "" if online is None else ("была" if online else "не было"),
-                        evidence.series_text(e.get("series")),
-                        ("" if ev.get("saved_away") is None
-                         else "не на адресе" if ev.get("saved_away") else "на адресе")])
-            ws2.cell(row=row_at, column=7).fill = fills[group]
-            if debt_num is not None:
-                ws2.cell(row=row_at, column=16).number_format = _money_fmt(debt_unit)
-            if late:
-                ws2.cell(row=row_at, column=13).fill = fills["fail"]
-            if not e.get("geo"):
-                ws2.cell(row=row_at, column=14).fill = fills["fail"]
-            if level == "confirmed":
-                ws2.cell(row=row_at, column=17).fill = fills["success"]
-            elif level == "far":
-                ws2.cell(row=row_at, column=17).fill = fills["fail"]
-            if evidence.is_series(e.get("series")):
-                ws2.cell(row=row_at, column=22).fill = fills["fail"]
-            if ev.get("saved_away"):
-                ws2.cell(row=row_at, column=23).fill = fills["fail"]
-    for i, w in enumerate((12, 14, 14, 28, 32, 10, 14, 22, 22, 18, 19, 18, 16, 8, 14, 18,
-                           26, 12, 11, 11, 18, 24, 14), start=1):
-        ws2.column_dimensions[get_column_letter(i)].width = w
-    if ws2.max_row > 1:
-        ws2.auto_filter.ref = f"A1:W{ws2.max_row}"
-    ws2.freeze_panes = "A2"
-
-    ws3 = wb.create_sheet("По дням")
-    ws3.append(["Дата", "Выездов"] + [r["employee"] for r in rows])
-    for cell in ws3[1]:
-        cell.font = Font(bold=True)
-    for i, x in enumerate(data["by_day"]):
-        ws3.append([x["date"], x["visits"]] + [r["by_day"][i] for r in rows])
-    ws3.column_dimensions["A"].width = 12
-
-    # Воронка Collection — три листа в конце книги: показатели, реестр обещаний
-    # и ранжирование по размеру обещания (просьба Альберта 15.09.2026).
-    _funnel_sheets(wb, data, rows, names, rng)
-
-    buf = BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
+    """Статистика книгой Excel — «Сводка», «Сотрудники», «Республики», «Офисы»,
+    «Выезды», «По дням» и воронка. Пишет stats_book (нативные типы ячеек)."""
+    import stats_book
+    return stats_book.stats_xlsx(mgr, rng, employees)
 
 
 # --- Сводный отчёт руководителю: закреплено / сегодня / всего ----------------
@@ -2195,62 +1869,11 @@ TOTALS_SINCE = "2026-01-01"
 
 def daily_report_data(mgr: dict, on_date: str,
                       employees: list[str] | None = None) -> dict:
-    """Строки сводного отчёта. Порядок — по отработанному сегодня, затем по
-    имени: сверху те, кто сегодня работал."""
-    employees = employees if employees is not None else sorted_employees(mgr)
-    country = _employee_country_index()
-    rows = []
-    for emp in employees:
-        today = _employee_stats(emp, on_date, on_date)
-        total = _employee_stats(emp, TOTALS_SINCE, on_date, with_photos=False)
-        assigned = db._group_persons(db.contracts_of_responsible(emp))
-        first = min((e["date"] for e in total["_entries"]), default="")
-        code = country.get(emp)
-        money_val, money_unit = _units_num(_totals_units(assigned))
-        rows.append({
-            "employee": emp,
-            "country": code,
-            "country_name": country_scope.info(code)["name"] if code else "",
-            "assigned_persons": len(assigned),
-            "assigned_contracts": sum(p["n"] for p in assigned),
-            "assigned_money": _persons_total(assigned),
-            "assigned_money_val": money_val, "assigned_money_unit": money_unit,
-            "today_persons": today["persons"], "today_visits": today["visits"],
-            "today_paid": today["paid"], "today_promised": today["promised"],
-            "today_photo": today["with_photo"],
-            "total_persons": total["persons"], "total_visits": total["visits"],
-            "total_paid": total["paid"],
-            "overdue": today["overdue"],
-            "first_day": first,
-            "outcomes": today["outcomes"],
-            "confirmed": today.get("confirmed", 0), "far": today.get("far", 0),
-            "unverified": today.get("unverified", 0), "series": today.get("series", 0),
-            "saved_away": today.get("saved_away", 0),
-        })
-    rows.sort(key=lambda r: (-r["today_persons"], -r["total_persons"],
-                             r["employee"].lower()))
-    keys = ("assigned_persons", "assigned_contracts", "today_persons", "today_visits",
-            "today_paid", "today_promised", "today_photo", "total_persons",
-            "total_visits", "total_paid", "overdue",
-            "confirmed", "far", "unverified", "series", "saved_away")
-    totals = {k: sum(r[k] for r in rows) for k in keys}
-    totals["employees"] = len(rows)
-    totals["active"] = sum(1 for r in rows if r["today_persons"])
-    # Числовой итог по деньгам — только когда у всех одна и та же валюта:
-    # сумма, в которой ₽ склеены с сумами, хуже отсутствия суммы.
-    units = {r["assigned_money_unit"] for r in rows}
-    if rows and len(units) == 1 and next(iter(units), ""):
-        totals["assigned_money_val"] = sum(r["assigned_money_val"] for r in rows)
-        totals["assigned_money_unit"] = units.pop()
-    return {"screen": "daily_report", "date": on_date, "rows": rows,
-            "totals": totals, "scope": scope_label(mgr),
-            "manager_name": mgr.get("name") or "",
-            "countries": [{"code": c, **{k: country_scope.info(c)[k]
-                                         for k in ("name", "short", "flag")},
-                           "employees": sum(1 for r in rows if r["country"] == c)}
-                          for c in sorted({r["country"] for r in rows if r["country"]},
-                                          key=lambda x: [s["code"] for s in
-                                                         country_scope.COUNTRIES].index(x))]}
+    """Строки вечерней сводки: закреплено / сегодня / всего. Это та же сводка
+    за окно, что лист «Сводка» книги за период (stats_book.period_report_data),
+    с окном в один день — два расчёта одной таблицы разошлись бы."""
+    import stats_book
+    return stats_book.daily_report_data(mgr, on_date, employees)
 
 
 def daily_report_caption(data: dict) -> str:
@@ -2285,71 +1908,9 @@ def daily_report_caption(data: dict) -> str:
 def daily_report_xlsx(mgr: dict, on_date: str,
                       employees: list[str] | None = None,
                       data: dict | None = None) -> bytes:
-    from io import BytesIO
-
-    from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Font
-
-    data = data if data is not None else daily_report_data(mgr, on_date, employees)
-    money_col = 1 + next(i for i, (key, _t, _w) in enumerate(DAILY_REPORT_COLUMNS)
-                         if key == "assigned_money")
-
-    def _put_money(ws, at_row: int, val, unit, text) -> None:
-        if val is None:
-            ws.cell(row=at_row, column=money_col, value=text or "")
-            return
-        cell = ws.cell(row=at_row, column=money_col, value=val)
-        cell.number_format = _money_fmt(unit)
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Сводка"
-    ws.append([f"Выезды · сводка на {human_date(on_date)} ({on_date})"
-               + (f" · {data['scope']}" if data["scope"] else "")])
-    ws["A1"].font = Font(bold=True, size=13)
-    ws.append([])
-    ws.append([title for _key, title, _w in DAILY_REPORT_COLUMNS])
-    for cell in ws[3]:
-        cell.font = Font(bold=True)
-        cell.alignment = Alignment(wrap_text=True, vertical="center")
-    for r in data["rows"]:
-        ws.append([r.get(key, "") for key, _t, _w in DAILY_REPORT_COLUMNS])
-        _put_money(ws, ws.max_row, r.get("assigned_money_val"),
-                   r.get("assigned_money_unit") or "", r.get("assigned_money"))
-    t = data["totals"]
-    ws.append(["Итого", ""] + [t.get(key, "") for key, _t, _w in DAILY_REPORT_COLUMNS[2:]])
-    _put_money(ws, ws.max_row, t.get("assigned_money_val"),
-               t.get("assigned_money_unit") or "", "")
-    for cell in ws[ws.max_row]:
-        cell.font = Font(bold=True)
-    for i, (_key, _title, width) in enumerate(DAILY_REPORT_COLUMNS):
-        ws.column_dimensions[chr(ord("A") + i)].width = width
-    ws.freeze_panes = "C4"
-
-    ws2 = wb.create_sheet("Исходы за день")
-    ws2.append(["Сотрудник", "Исход", "Должников"])
-    for cell in ws2[1]:
-        cell.font = Font(bold=True)
-    for r in data["rows"]:
-        for o in r["outcomes"]:
-            ws2.append([r["employee"], o["status"], o["n"]])
-    for col, w in zip("ABC", (28, 28, 12)):
-        ws2.column_dimensions[col].width = w
-
-    # Воронка Collection едет и в ВЕЧЕРНЕЙ книге — той самой, что уходит
-    # руководителям каждый вечер. До 22.09.2026 листы воронки собирались только
-    # в stats_xlsx, то есть по кнопке «⬇️ Excel» в приложении; на контуре
-    # компании, где Telegram выключен, до воронки было не добраться вовсе, а
-    # просили её именно в книге. Окно — тот самый день отчёта.
-    day_range = stats_range("today", today=db._as_date(on_date))
-    day_stats = stats_data(mgr, day_range, [r["employee"] for r in data["rows"]])
-    _funnel_sheets(wb, day_stats, day_stats["employees"],
-                   {c["code"]: c["name"] for c in day_stats["countries"]},
-                   day_range)
-
-    buf = BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
+    """Вечерняя книга (Сводка, Исходы за день, воронка дня) — пишет stats_book."""
+    import stats_book
+    return stats_book.daily_report_xlsx(mgr, on_date, employees, data)
 
 
 def daily_report_filename(on_date: str) -> str:

@@ -197,13 +197,17 @@ def test_book_shows_time_on_card():
                          employees=[EMP])
     wb = load_workbook(io.BytesIO(blob))
     ws = wb["Выезды"]
-    by_client = {ws.cell(row=r, column=5).value: ws.cell(row=r, column=10).value
+    # Длительность — числом Excel (доля суток) с форматом «[h]:mm:ss», а не
+    # текстом «5 мин»: по тексту не посчитать среднее и не отсортировать.
+    # openpyxl по такому формату сам отдаёт timedelta.
+    by_client = {ws.cell(row=r, column=5).value: ws.cell(row=r, column=10)
                  for r in range(2, ws.max_row + 1)}
-    assert by_client["Клиент Вовремя"] == "5 мин"
+    cell = by_client["Клиент Вовремя"]
+    assert cell.value == timedelta(seconds=300) and cell.number_format == "[h]:mm:ss"
     people = wb["Сотрудники"]
     head = {str(c.value): c.column for c in people[4] if c.value}
-    assert people.cell(row=5,
-                       column=head["Заполнение карточки, среднее"]).value == "5 мин"
+    avg = people.cell(row=5, column=head["Заполнение карточки, среднее"])
+    assert avg.value == timedelta(seconds=300) and avg.number_format == "[h]:mm:ss"
 
 
 def test_two_stamps_of_one_visit_are_separate():
@@ -218,9 +222,12 @@ def test_two_stamps_of_one_visit_are_separate():
     ws = load_workbook(io.BytesIO(blob))["Выезды"]
     row = next(r for r in range(2, ws.max_row + 1)
                if ws.cell(row=r, column=5).value == "Клиент Задним")
-    assert ws.cell(row=row, column=1).value == YESTERDAY, "день выезда — вчерашний"
-    assert ws.cell(row=row, column=11).value.endswith("18:40"), "нажал вчера вечером"
-    assert ws.cell(row=row, column=12).value.endswith("09:05"), "сервер принял утром"
+    # Дата и отметки — настоящими датой и дата-временем Excel.
+    assert ws.cell(row=row, column=1).value.date().isoformat() == YESTERDAY,         "день выезда — вчерашний"
+    saved, got = ws.cell(row=row, column=11), ws.cell(row=row, column=12)
+    assert saved.value.isoformat(timespec="minutes") == YESTERDAY + "T18:40",         "нажал вчера вечером"
+    assert got.value.isoformat(timespec="minutes") == T + "T09:05", "сервер принял утром"
+    assert saved.number_format == got.number_format == "dd.mm.yyyy hh:mm"
     assert ws.cell(row=row, column=13).value == "позже на 1 дн"
 
 

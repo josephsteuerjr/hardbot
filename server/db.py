@@ -676,9 +676,16 @@ def init_db() -> None:
                           ("dist_m", "INTEGER"), ("geo_far", "INTEGER"),
                           ("received_at", "TEXT"), ("fill_seconds", "INTEGER"),
                           ("saved_at", "TEXT"), ("session_id", "TEXT"),
-                          ("evidence_level", "TEXT"), ("evidence", "TEXT")):
+                          ("evidence_level", "TEXT"), ("evidence", "TEXT"),
+                          ("employee", "TEXT")):
             if col not in vcols:
                 conn.execute(f"ALTER TABLE visits ADD COLUMN {col} {decl}")
+        # employee — КТО выезжал (ФИО, от чьего имени закрыт визит). Без неё выезд
+        # приписывался тому, за кем договор закреплён СЕЙЧАС: перезакрепили
+        # портфель в конце месяца — и прошлые выезды молча переехали к новому
+        # владельцу, а у того, с кого сняли всё, пропали из статистики целиком.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_visits_employee "
+                     "ON visits(employee, created_at)")
         # Профиль пользователя (язык). Whitelist теперь = привязка к сотруднику.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -1239,8 +1246,64 @@ def init_db() -> None:
                 conn.execute(
                     "UPDATE clients SET visit_value_log=? WHERE contract_id=?",
                     (_log_json(seeded), r["contract_id"]))
+        # Автор старых выездов — один раз, с маркером: новые строки получают его
+        # при записи (log_visit), а повторный проход по уже перезакреплённым
+        # договорам только ухудшил бы угадывание.
+        author_key = "migration_visit_author_v1"
+        if not conn.execute("SELECT 1 FROM settings WHERE key=?",
+                            (author_key,)).fetchone():
+            filled = _backfill_visit_authors(conn)
+            conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)",
+                         (author_key, json.dumps({**filled,
+                                                  "at": date.today().isoformat()})))
         conn.commit()
     reset_role_caches()   # схема/роли могли поменяться — индекс адресатов заново
+
+
+def _backfill_visit_authors(conn: sqlite3.Connection) -> dict:
+    """Проставить visits.employee строкам, записанным до этой колонки.
+
+    Источники по убыванию надёжности:
+    1. visit_presence той же сессии карточки — там ФИО, от имени которого
+       сохраняли, записано в момент визита; это точный ответ.
+    2. Привязка телефона (agent_bind): сохранить выезд можно было только по
+       договору своего ФИО, так что ФИО привязки и есть автор. Перепривязки
+       телефонов редки, перезакрепления договоров — каждый месяц. Телефон
+       руководителя сюда не годится: он закрывал визит ОТ ИМЕНИ сотрудника.
+    3. Текущий ответственный договора — то, как выезд считался до сих пор.
+    Не нашлось ничего — строка остаётся NULL, и выборки по-прежнему берут
+    текущего ответственного."""
+    rows = conn.execute(
+        "SELECT v.id id, v.agent_id agent_id, v.session_id session_id, "
+        "c.responsible responsible FROM visits v "
+        "LEFT JOIN clients c ON c.contract_id = v.contract_id "
+        "WHERE v.employee IS NULL").fetchall()
+    if not rows:
+        return {"presence": 0, "binding": 0, "responsible": 0, "unknown": 0}
+    by_session = {r[0]: r[1] for r in conn.execute(
+        "SELECT session_id, MIN(employee) FROM visit_presence "
+        "WHERE IFNULL(TRIM(employee), '') <> '' GROUP BY session_id")}
+    managers = {r[0] for r in conn.execute("SELECT telegram_id FROM managers")}
+    binds: dict[int, set] = {}
+    for tid, emp in conn.execute(
+            "SELECT telegram_id, employee FROM agent_bind WHERE approved = 1 "
+            "AND IFNULL(TRIM(employee), '') <> ''"):
+        binds.setdefault(tid, set()).add(emp)
+    counts = {"presence": 0, "binding": 0, "responsible": 0, "unknown": 0}
+    for r in rows:
+        emp, how = None, "unknown"
+        if r["session_id"] and by_session.get(r["session_id"]):
+            emp, how = by_session[r["session_id"]], "presence"
+        elif (r["agent_id"] not in managers
+              and len(binds.get(r["agent_id"]) or ()) == 1):
+            emp, how = next(iter(binds[r["agent_id"]])), "binding"
+        elif (r["responsible"] or "").strip():
+            emp, how = r["responsible"], "responsible"
+        counts[how] += 1
+        if emp:
+            conn.execute("UPDATE visits SET employee = ? WHERE id = ?", (emp, r["id"]))
+    logging.info("Авторы выездов проставлены: %s", counts)
+    return counts
 
 
 # --- Профиль / язык ---------------------------------------------------------
@@ -2033,12 +2096,22 @@ DIRECTIONS = {
 # всю базу). Принадлежность человека к офису — отдельный факт, его заводит
 # оператор; в реестре его нет вовсе (колонка «Подразделение» там про Хард/Софт).
 def set_employee_city(employee: str, city: str) -> None:
-    """Закрепить сотрудника за офисом. Пустой город — снять закрепление."""
-    employee = (employee or "").strip()
+    """Закрепить сотрудника за офисом. Пустой город — снять закрепление.
+
+    ФИО записывается в написании РЕЕСТРА, а прежние записи того же человека
+    в другом написании (регистр, ё/е, лишний пробел) снимаются: иначе у одного
+    сотрудника оказалось бы два офиса, и какой из них «правда», решал бы порядок
+    строк."""
+    employee = " ".join((employee or "").split())
     if not employee:
         return
+    employee = registry_name_index().get(_name_key(employee), employee)
     city = (city or "").strip()
+    key = _name_key(employee)
     with connect() as conn:
+        for (other,) in conn.execute("SELECT employee FROM employee_city").fetchall():
+            if other != employee and _name_key(other) == key:
+                conn.execute("DELETE FROM employee_city WHERE employee = ?", (other,))
         if city:
             conn.execute(
                 "INSERT INTO employee_city (employee, city, updated_at) VALUES (?,?,?) "
@@ -2058,11 +2131,31 @@ def employee_cities() -> dict[str, str]:
             "SELECT employee, city FROM employee_city WHERE TRIM(city) <> ''")}
 
 
+def employee_office_index() -> dict[str, str]:
+    """{_name_key(ФИО): офис} — для сличения с ФИО из реестра и визитов.
+
+    Точное сравнение строк здесь уже подвело: состав офиса собирался по ключу
+    (регистр, ё/е, пробелы), а раскладка по чипам — по точной строке, и
+    сотрудник, которому офис записали чуть иначе, у руководителя офиса в
+    команде был, а в сводке висел в «Без офиса»."""
+    return {_name_key(emp): city for emp, city in employee_cities().items()}
+
+
+def office_of(employee: str, index: dict[str, str] | None = None) -> str:
+    """Офис сотрудника (пусто — не закреплён). index — employee_office_index(),
+    если офис нужен в цикле по команде."""
+    index = employee_office_index() if index is None else index
+    return index.get(_name_key(employee), "")
+
+
 def employees_by_cities(cities) -> list[str]:
     """Сотрудники перечисленных офисов — состав ЖИВОЙ, как у направления.
 
     Сверяем по _name_key: в роли и в реестре ФИО пишут по-разному, и точное
-    сравнение строк уже однажды оставило руководителей направлений без пушей."""
+    сравнение строк уже однажды оставило руководителей направлений без пушей.
+
+    Это список ДОСТУПА, поэтому человек без договоров в нём остаётся. Из
+    сводки его убирает digest_data.sorted_employees."""
     wanted = {(c or "").strip().casefold() for c in (cities or []) if str(c).strip()}
     if not wanted:
         return []
@@ -2221,6 +2314,10 @@ def manager_employees(telegram_id: int, *, is_owner: bool = False) -> list[str]:
         direction = (mgr.get("direction") or "").strip()
         if direction:                      # руководитель направления — список живой
             return employees_by_direction(direction)
+        # Написание НЕ канонизируем: это список доступа, строка уезжает
+        # клиенту как d.employee, и её смена стирала бы оффлайн-очередь.
+        # К написанию реестра состав приводит только сводка
+        # (digest_data.sorted_employees).
         allowed = [e for e in mgr.get("employees") or [] if str(e).strip()]
         # Офис — живой состав, а не поимённый: в портфеле выездника из другого
         # города ничего нет, а руководителю офиса сотрудник добавляется в тот
@@ -2316,6 +2413,38 @@ def employee_activity(employee: str) -> dict | None:
     return merged
 
 
+# Чей выезд: автор из самой строки визита, а у строк, которым автора так и не
+# нашлось (см. _backfill_visit_authors), — текущий ответственный, как было до
+# колонки. Подставляется с алиасами v (visits) и c (clients) и двумя
+# параметрами — ФИО дважды.
+_VISIT_BY = "(v.employee = ? OR (IFNULL(v.employee, '') = '' AND c.responsible = ?))"
+
+
+def _processed_rows(employee: str, lo: date, hi: date) -> list[sqlite3.Row]:
+    """Договоры со снимком выезда, отработанные сотрудником в [lo..hi].
+
+    Два пути, потому что сигналов два. Журнал визитов знает автора — по нему
+    находятся и договоры, которые с тех пор перезакрепили на другого. Снимок
+    (bot_visit_at) есть и у визитов старше журнала — по нему берём свои
+    договоры, если в тот же день их не закрывал кто-то другой: иначе новый
+    владелец получил бы чужой выезд в свою сводку."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM clients c WHERE c.bot_visit_at IS NOT NULL "
+            "AND TRIM(c.bot_visit_at) <> '' AND ("
+            " c.contract_id IN (SELECT v.contract_id FROM visits v "
+            "  JOIN clients c ON c.contract_id = v.contract_id "
+            f"  WHERE {_VISIT_BY} AND substr(v.created_at, 1, 10) BETWEEN ? AND ?)"
+            " OR (c.responsible = ? AND NOT EXISTS (SELECT 1 FROM visits v2 "
+            "  WHERE v2.contract_id = c.contract_id "
+            "  AND substr(v2.created_at, 1, 10) = substr(c.bot_visit_at, 1, 10) "
+            "  AND IFNULL(v2.employee, '') NOT IN ('', ?))))",
+            (employee, employee, lo.isoformat(), hi.isoformat(), employee, employee),
+        ).fetchall()
+    return [r for r in rows if _decode_bot_snapshot(r) is not None
+            and (d := _as_date(r["bot_visit_at"])) and lo <= d <= hi]
+
+
 def persons_processed(employee: str, on_date: str) -> list[dict]:
     """Люди сотрудника, у кого выезд состоялся в дату on_date (ISO). Сигнал —
     служебный bot_visit_at (его ставит только завершение в миниаппе). Возвращает
@@ -2323,15 +2452,7 @@ def persons_processed(employee: str, on_date: str) -> list[dict]:
     target = _as_date(on_date)
     if target is None:
         return []
-    with connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM clients WHERE responsible = ? "
-            "AND bot_visit_at IS NOT NULL AND TRIM(bot_visit_at) <> ''",
-            (employee,),
-        ).fetchall()
-    rows = [r for r in rows if _as_date(r["bot_visit_at"]) == target
-            and _decode_bot_snapshot(r) is not None]
-    return _group_persons(rows)
+    return _group_persons(_processed_rows(employee, target, target))
 
 
 def persons_processed_range(employee: str, date_from: str, date_to: str) -> list[dict]:
@@ -2340,25 +2461,21 @@ def persons_processed_range(employee: str, date_from: str, date_to: str) -> list
     lo, hi = _as_date(date_from), _as_date(date_to)
     if lo is None or hi is None:
         return []
-    with connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM clients WHERE responsible = ? "
-            "AND bot_visit_at IS NOT NULL AND TRIM(bot_visit_at) <> ''",
-            (employee,),
-        ).fetchall()
-    rows = [r for r in rows if _decode_bot_snapshot(r) is not None
-            and (d := _as_date(r["bot_visit_at"])) and lo <= d <= hi]
-    return _group_persons(rows)
+    return _group_persons(_processed_rows(employee, lo, hi))
 
 
 def visits_for_employee(employee: str, date_from: str, date_to: str) -> list[sqlite3.Row]:
     """Журнал завершённых выездов сотрудника за [date_from..date_to] (ISO,
-    включительно): строки visits, чей договор сейчас закреплён за этим ФИО.
+    включительно): строки visits, которые закрыл этот сотрудник (visits.employee).
 
     Это ИСТОРИЯ, а не последний снимок: человек, к которому съездили 2-го и
     9-го, виден в оба дня. persons_processed_range такого не умеет — он смотрит
     на bot_visit_at, а повторный выезд переносит человека в свой день целиком.
-    created_at режется до даты: старые строки могли нести время."""
+    created_at режется до даты: старые строки могли нести время.
+
+    До 24.09.2026 выезд принадлежал тому, за кем договор закреплён СЕЙЧАС, и
+    перезакрепление портфеля переписывало прошлое: у сотрудника, с которого
+    сняли все договоры, из статистики исчезали все его выезды."""
     lo, hi = _as_date(date_from), _as_date(date_to)
     if lo is None or hi is None:
         return []
@@ -2372,10 +2489,62 @@ def visits_for_employee(employee: str, date_from: str, date_to: str) -> list[sql
             "v.op_id op_id, v.evidence_level evidence_level, v.evidence evidence, "
             "c.geo_lat addr_lat, c.geo_lon addr_lon "
             "FROM visits v JOIN clients c ON c.contract_id = v.contract_id "
-            "WHERE c.responsible = ? AND substr(v.created_at, 1, 10) BETWEEN ? AND ? "
+            f"WHERE {_VISIT_BY} AND substr(v.created_at, 1, 10) BETWEEN ? AND ? "
             "ORDER BY v.id",
-            (employee, lo.isoformat(), hi.isoformat()),
+            (employee, employee, lo.isoformat(), hi.isoformat()),
         ).fetchall()
+
+
+def visit_authors(date_from: str, date_to: str) -> dict[str, set[str]]:
+    """{ФИО автора: коды стран его выездов} за окно — только строки с автором.
+
+    Нужно составу команды: сотрудник, с которого сняли все договоры, пропадает
+    из «живых» списков (они строятся по реестру), но выезды окна — его работа,
+    и в статистике этого окна он обязан остаться."""
+    lo, hi = _as_date(date_from), _as_date(date_to)
+    if lo is None or hi is None:
+        return {}
+    out: dict[str, set[str]] = {}
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT v.employee emp, c.country country, c.city city "
+            "FROM visits v JOIN clients c ON c.contract_id = v.contract_id "
+            "WHERE IFNULL(v.employee, '') <> '' "
+            "AND substr(v.created_at, 1, 10) BETWEEN ? AND ?",
+            (lo.isoformat(), hi.isoformat())).fetchall()
+    for r in rows:
+        code = (country_scope.scope_country([r["country"] or ""])
+                or country_scope.scope_country([r["city"] or ""]))
+        slot = out.setdefault(r["emp"], set())
+        if code:
+            slot.add(code)
+    return out
+
+
+def clients_by_ids(contract_ids) -> list[sqlite3.Row]:
+    """Строки clients по номерам договоров (порциями — предел параметров SQLite)."""
+    ids = sorted({str(c) for c in (contract_ids or ()) if c})
+    out: list[sqlite3.Row] = []
+    with connect() as conn:
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            out += conn.execute(
+                f"SELECT * FROM clients WHERE contract_id IN ({','.join('?' * len(chunk))}) "
+                "ORDER BY client, contract_id", chunk).fetchall()
+    return out
+
+
+def employee_visited(employee: str, contract_ids) -> bool:
+    """Закрывал ли сотрудник хоть один выезд по этим договорам — пропуск в
+    карточку должника, которого с тех пор перезакрепили на другого."""
+    ids = [str(c) for c in (contract_ids or ()) if c]
+    if not ids or not employee:
+        return False
+    with connect() as conn:
+        return conn.execute(
+            "SELECT 1 FROM visits v JOIN clients c ON c.contract_id = v.contract_id "
+            f"WHERE {_VISIT_BY} AND v.contract_id IN ({','.join('?' * len(ids))}) LIMIT 1",
+            (employee, employee, *ids)).fetchone() is not None
 
 
 def first_visit_days(employee: str) -> dict[str, str]:
@@ -2391,16 +2560,20 @@ def first_visit_days(employee: str) -> dict[str, str]:
     работать, и гас именно в той книге, которую каждый вечер получают
     руководители. Первый выезд — свойство должника, а не отчёта.
 
-    Фильтр по ответственному тот же, что у visits_for_employee: договоры,
-    закреплённые за этим ФИО СЕЙЧАС.
+    Договоры — те, что закреплены за этим ФИО сейчас, и те, по которым он сам
+    выезжал (их могли с тех пор перезакрепить). Первый выезд берётся по ВСЕМ
+    визитам к договору, чьи бы они ни были: он принадлежит должнику, а не
+    сотруднику, и обещание, данное предшественнику, — тоже полевое обещание.
     """
     with connect() as conn:
         return {r["contract_id"]: r["day"] for r in conn.execute(
             "SELECT v.contract_id contract_id, "
-            "MIN(substr(v.created_at, 1, 10)) day "
-            "FROM visits v JOIN clients c ON c.contract_id = v.contract_id "
-            "WHERE c.responsible = ? GROUP BY v.contract_id",
-            (employee,)).fetchall()}
+            "MIN(substr(v.created_at, 1, 10)) day FROM visits v "
+            "WHERE v.contract_id IN ("
+            " SELECT contract_id FROM clients WHERE responsible = ? "
+            " UNION SELECT contract_id FROM visits WHERE employee = ?) "
+            "GROUP BY v.contract_id",
+            (employee, employee)).fetchall()}
 
 
 def contracts_of_responsible(employee: str) -> list[sqlite3.Row]:
@@ -4008,7 +4181,7 @@ def log_visit(contract_id: str, agent_id: int, payload: str,
               geo_far: bool | None = None, on_date: str | None = None,
               fill_seconds: int | None = None, saved_at: str | None = None,
               session_id: str | None = None, evidence_level: str | None = None,
-              evidence: str | None = None) -> bool:
+              evidence: str | None = None, employee: str | None = None) -> bool:
     """Записать выезд в историю. op_id — идемпотентный ключ (uuid от клиента): повторная
     доставка того же выезда из оффлайн-очереди НЕ создаёт дубль. Возвращает True, если
     строка реально добавлена (значит, можно слать уведомление в группу); False — если это
@@ -4017,17 +4190,20 @@ def log_visit(contract_id: str, agent_id: int, payload: str,
     geo_far — вердикт «далеко» с учётом допуска по точности адреса; None — не судили.
     on_date — ДЕНЬ ВЫЕЗДА (ISO). Выезд, отработанный без сети, доезжает до сервера
     позже — иногда через двое суток, — и днём досыла он ложился в чужой день:
-    сотрудник из Худжанда откатал адреса 8.09, а в системе они появились 10.09."""
+    сотрудник из Худжанда откатал адреса 8.09, а в системе они появились 10.09.
+    employee — ФИО, от имени которого закрыт выезд: выезд навсегда остаётся
+    за ним, как бы потом ни перезакрепили договор."""
     with connect() as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO visits (contract_id, agent_id, created_at, payload, "
             "op_id, visit_lat, visit_lon, dist_m, geo_far, received_at, "
-            "fill_seconds, saved_at, session_id, evidence_level, evidence) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "fill_seconds, saved_at, session_id, evidence_level, evidence, employee) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (contract_id, agent_id, on_date or date.today().isoformat(), payload, op_id,
              lat, lon, dist_m, None if geo_far is None else int(bool(geo_far)),
              datetime.now().isoformat(timespec="seconds"), fill_seconds,
-             saved_at, session_id, evidence_level, evidence),
+             saved_at, session_id, evidence_level, evidence,
+             (employee or "").strip() or None),
         )
         conn.commit()
         return cur.rowcount > 0
@@ -4071,8 +4247,8 @@ def day_map_points(employee: str, on_date: str) -> dict:
             "SELECT v.visit_lat lat, v.visit_lon lon, v.dist_m dist_m, "
             "v.geo_far geo_far, v.agent_id agent_id, c.client client "
             "FROM visits v JOIN clients c ON c.contract_id = v.contract_id "
-            "WHERE c.responsible = ? AND v.created_at = ? AND v.visit_lat IS NOT NULL "
-            "ORDER BY v.id", (employee, on_date)).fetchall()
+            f"WHERE {_VISIT_BY} AND v.created_at = ? AND v.visit_lat IS NOT NULL "
+            "ORDER BY v.id", (employee, employee, on_date)).fetchall()
         tids = [r["telegram_id"] for r in conn.execute(
             "SELECT telegram_id FROM agent_bind WHERE employee = ?", (employee,))]
         markers = []

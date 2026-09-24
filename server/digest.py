@@ -38,8 +38,15 @@ from digest_data import (  # noqa: F401
     daily_report_xlsx,
     employee_data, human_date, manager_scope, overdue_by_employee, period_data,
     person_data, promises_data, scope_countries_info, scope_label,
-    sorted_employees, summary_data, today_iso,
+    sorted_employees, summary_data, today_iso, window_team,
 )
+
+
+def day_team(mgr: dict, on_date: str) -> list[str]:
+    """Команда за день: живой состав плюс те, кто в этот день выезжал (с кого
+    с тех пор сняли договоры). Порядок детерминированный — на нём держатся
+    индексы ei в callback, поэтому ВСЕ экраны одного дня берут состав отсюда."""
+    return window_team(mgr, sorted_employees(mgr), on_date, on_date)
 
 
 # --- утилиты значений -------------------------------------------------------
@@ -91,7 +98,7 @@ def daily_report_view(mgr: dict, on_date: str):
     сегодня, отработано всего»), а разбор по дням и карточки живут во вкладке
     приложения. Текстовый дайджест остаётся кнопкой в боте и фолбэком, если
     книга почему-то не собралась."""
-    data = daily_report_data(mgr, on_date)
+    data = daily_report_data(mgr, on_date, day_team(mgr, on_date))
     kb = InlineKeyboardBuilder()
     _app_button(kb, on_date)
     return (daily_report_caption(data), kb.as_markup(),
@@ -100,7 +107,7 @@ def daily_report_view(mgr: dict, on_date: str):
 
 
 def summary_view(mgr: dict, on_date: str) -> tuple[str, InlineKeyboardMarkup]:
-    d = summary_data(mgr, on_date)
+    d = summary_data(mgr, on_date, day_team(mgr, on_date))
     t = d["totals"]
 
     head = [f"📊 <b>Дайджест · {human_date(on_date)}</b>",
@@ -167,7 +174,7 @@ def summary_view(mgr: dict, on_date: str) -> tuple[str, InlineKeyboardMarkup]:
 
 # --- ЭКРАН 2: карточка сотрудника (детали) + его кейсы -----------------------
 def employee_view(mgr: dict, on_date: str, ei: int) -> tuple[str, InlineKeyboardMarkup]:
-    emps = sorted_employees(mgr)
+    emps = day_team(mgr, on_date)
     if not (0 <= ei < len(emps)):
         return summary_view(mgr, on_date)
     emp = emps[ei]
@@ -244,7 +251,7 @@ def _clip(v: str) -> str:
 
 
 def person_card(mgr: dict, on_date: str, ei: int, ci: int) -> tuple[str, InlineKeyboardMarkup]:
-    emps = sorted_employees(mgr)
+    emps = day_team(mgr, on_date)
     if not (0 <= ei < len(emps)):
         return summary_view(mgr, on_date)
     emp = emps[ei]
@@ -440,7 +447,7 @@ def promises_view(mgr: dict, on_date: str) -> tuple[str, InlineKeyboardMarkup]:
 # --- фото (данные для альбомов; сама отправка — в handlers_manager) ----------
 def photos_for_person(mgr: dict, on_date: str, ei: int, ci: int):
     """(person, все его фото) по кейсу дайджеста — или (None, []) при сбитых индексах."""
-    emps = sorted_employees(mgr)
+    emps = day_team(mgr, on_date)
     if not (0 <= ei < len(emps)):
         return None, []
     persons = db.persons_processed(emps[ei], on_date)
@@ -452,7 +459,7 @@ def photos_for_person(mgr: dict, on_date: str, ei: int, ci: int):
 
 def photos_for_employee_day(mgr: dict, on_date: str, ei: int):
     """(employee, [(person, его фото за on_date)]) — только люди, у кого фото есть."""
-    emps = sorted_employees(mgr)
+    emps = day_team(mgr, on_date)
     if not (0 <= ei < len(emps)):
         return None, []
     emp = emps[ei]

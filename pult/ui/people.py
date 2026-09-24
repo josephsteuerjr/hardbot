@@ -10,6 +10,8 @@ from PySide6.QtWidgets import QGridLayout, QWidget
 
 from ..core import activity as act
 from ..core import constants
+from ..core import enrichment as en
+from ..core import offices
 from ..core.devices import valid_telegram_id
 from ..core.people import (GUEST_PLACEHOLDER, KIND_LABELS, client_debt, client_label,
                            guest_label, kind_from_label, kind_index, kind_text, link_note,
@@ -93,7 +95,9 @@ class PeopleSection:
     # --- активность -------------------------------------------------------------
     def load_people(self):
         self.load_activity()
-        self.load_roles()
+        # Сначала офисы по папкам, потом таблица — чтобы новый человек
+        # показался уже с офисом, а не «не задан» до следующего открытия.
+        self.auto_offices(after=lambda _r: self.load_roles())
 
     def load_activity(self):
         def done(d):
@@ -235,6 +239,46 @@ class PeopleSection:
             grid.setColumnStretch(9, 1)
             frame.add(holder)
         self.bg_task(work, done)
+
+    def auto_offices(self, after=None) -> None:
+        """Дозаполнить пустые офисы по папкам портфелей (pult/core/offices.py).
+
+        Зовётся при открытии «Сотрудников» и после импорта реестра — ровно
+        тогда, когда в реестре появляются новые люди. Пишет только пустое;
+        нет базовой папки или диск недоступен — молча ничего не делает."""
+        base = (self.settings.get("scatterBase") or "").strip()
+        if not base:
+            if after:
+                after(None)
+            return
+
+        def work():
+            state = self.api("GET", "/admin/employee_cities.json")
+            employees = list(state.get("unassigned") or [])
+            if not employees:
+                return None
+            config = offices.read_path_config()
+            by_folder = offices.folder_offices(en.folder_map(base),
+                                               offices.load_aliases(config))
+            if not by_folder:
+                return None              # диск с портфелями недоступен
+            result = offices.suggest(employees, state.get("cities") or {}, by_folder)
+            if result["fill"]:
+                self.api("POST", "/admin/employee_cities.json",
+                         {"cities": result["fill"]})
+            return result
+
+        def done(result):
+            if result and result.get("fill"):
+                self.toast(offices.summary_text(result))
+            if after:
+                after(result)
+
+        def fail(_exc):
+            if after:
+                after(None)
+
+        self.bg_task(work, done, fail)
 
     def set_office(self, employee: str, combo) -> None:
         """Записать офис сотрудника. Сохраняем сразу по выбору: отдельная кнопка

@@ -257,6 +257,17 @@ def _manager_gate(request: web.Request) -> tuple[int, dict, list[str]]:
     return uid, mgr, digest_data.sorted_employees(mgr)
 
 
+def _day_team(mgr: dict, team: list[str], iso: str) -> list[str]:
+    """Команда за день: живой состав плюс те, кто в этот день выезжал, даже
+    если с них с тех пор сняли договоры (digest_data.window_team)."""
+    return digest_data.window_team(mgr, team, iso, iso)
+
+
+def _range_team(mgr: dict, team: list[str], rng: dict) -> list[str]:
+    """Команда за окно статистики — см. _day_team."""
+    return digest_data.window_team(mgr, team, rng["from"], rng["to"])
+
+
 def _manager_date(request: web.Request) -> tuple[str, str, str, str | None]:
     """(date, today, prev, next). Дату «сегодня» и соседние сутки считает
     СЕРВЕР: контейнер живёт по UTC, а телефон руководителя — по +3/+5, и
@@ -1560,7 +1571,8 @@ async def _save(request: web.Request) -> web.Response:
                               saved_at=_saved_at(body),
                               session_id=session_id,
                               evidence_level=ev["level"] if ev else None,
-                              evidence=evidence.dumps(ev) if ev else None)
+                              evidence=evidence.dumps(ev) if ev else None,
+                              employee=row["responsible"])
         # Адрес уточняется по выезду, на котором должника застали (addr_learn):
         # только у нового визита — повтор из очереди адрес не переучивает.
         if is_new:
@@ -3159,6 +3171,7 @@ def _map_auth(request: web.Request) -> tuple[str, str]:
 async def _manager_summary(request: web.Request) -> web.Response:
     uid, mgr, team = _manager_gate(request)
     iso, today, prev, nxt = _manager_date(request)
+    team = _day_team(mgr, team, iso)
     data = digest_data.summary_data(mgr, iso, employees=team)
     # 'ei' — индекс телеграм-callback, во вкладке он не нужен и провоцирует
     # клиент на него опереться.
@@ -3177,6 +3190,7 @@ async def _manager_summary(request: web.Request) -> web.Response:
 async def _manager_employee_view(request: web.Request) -> web.Response:
     uid, mgr, team = _manager_gate(request)
     iso, today, prev, nxt = _manager_date(request)
+    team = _day_team(mgr, team, iso)
     emp = _manager_employee_q(request, team)
     data = digest_data.employee_data(mgr, iso, emp, employees=team)
     if data is None:
@@ -3193,10 +3207,14 @@ async def _manager_employee_view(request: web.Request) -> web.Response:
 async def _manager_person(request: web.Request) -> web.Response:
     uid, mgr, team = _manager_gate(request)
     iso, today, prev, nxt = _manager_date(request)
+    team = _day_team(mgr, team, iso)
     emp = _manager_employee_q(request, team)
     rep = (request.query.get("rep") or "").strip()
     row = db.get_client(rep)
-    if not row or row["responsible"] != emp:
+    # Свой должник — или тот, к кому сотрудник выезжал до перезакрепления:
+    # карточка по собственному выезду открываться обязана.
+    if not row or (row["responsible"] != emp
+                   and not db.employee_visited(emp, [rep])):
         raise web.HTTPNotFound(text="person")
     data = digest_data.person_data(mgr, iso, emp, rep, employees=team)
     if data is None:
@@ -3213,6 +3231,9 @@ async def _manager_period(request: web.Request) -> web.Response:
         days = int(request.query.get("days", "7"))
     except (TypeError, ValueError):
         days = 7
+    span = days if days in (7, 30) else 7
+    start = (db._as_date(iso) - timedelta(days=span - 1)).isoformat()
+    team = digest_data.window_team(mgr, team, start, iso)
     data = digest_data.period_data(mgr, iso, days, employees=team)
     db.audit_access(uid, "digest_view", detail=f"period {iso} {data['days']}")
     return _manager_json({**_manager_envelope(mgr, team, iso, today, prev, nxt, uid),
@@ -3262,6 +3283,7 @@ def _stats_envelope(mgr, team, rng, uid) -> dict:
 async def _manager_stats(request: web.Request) -> web.Response:
     uid, mgr, team = _manager_gate(request)
     rng = _stats_range_q(request)
+    team = _range_team(mgr, team, rng)
     data = await asyncio.to_thread(
         functools.partial(digest_data.stats_data, mgr, rng, employees=team))
     db.audit_access(uid, "digest_view",
@@ -3276,6 +3298,7 @@ async def _manager_stats(request: web.Request) -> web.Response:
 async def _manager_stats_employee(request: web.Request) -> web.Response:
     uid, mgr, team = _manager_gate(request)
     rng = _stats_range_q(request)
+    team = _range_team(mgr, team, rng)
     emp = _manager_employee_q(request, team)
     data = await asyncio.to_thread(
         functools.partial(digest_data.stats_employee_data, mgr, rng, emp,
@@ -3508,6 +3531,7 @@ async def _manager_workload(request: web.Request) -> web.Response:
     одного сотрудника (?employee=)."""
     uid, mgr, team = _manager_gate(request)
     rng = _stats_range_q(request)
+    team = _range_team(mgr, team, rng)
     refresh = (request.query.get("refresh") or "") == "1"
     emp = (request.query.get("employee") or "").strip()
     if emp:
@@ -3646,6 +3670,7 @@ async def _manager_cases(request: web.Request) -> web.Response:
     открывает его выезды, а не всей команды."""
     uid, mgr, team = _manager_gate(request)
     rng = _stats_range_q(request)
+    team = _range_team(mgr, team, rng)
     metric = (request.query.get("metric") or "visits").strip()
     country = (request.query.get("country") or "").strip()[:8]
     office = (request.query.get("office") or "").strip()[:64]
@@ -3669,6 +3694,7 @@ async def _manager_stats_xlsx(request: web.Request) -> web.Response:
     ссылка с токеном осела бы в истории браузера."""
     uid, mgr, team = _manager_gate(request)
     rng = _stats_range_q(request)
+    team = _range_team(mgr, team, rng)
     body = await asyncio.to_thread(
         functools.partial(digest_data.stats_xlsx, mgr, rng, employees=team))
     db.audit_access(uid, "digest_export",
@@ -3686,6 +3712,7 @@ async def _manager_app_map_data(request: web.Request) -> web.Response:
     Подписанный /manager/map_data остаётся для телеграм-кнопки."""
     uid, mgr, team = _manager_gate(request)
     iso, today, prev, nxt = _manager_date(request)
+    team = _day_team(mgr, team, iso)
     emp = _manager_employee_q(request, team)
     pts = db.day_map_points(emp, iso)
     db.audit_access(uid, "digest_view", target=emp, detail=f"map {iso}")
@@ -4818,12 +4845,21 @@ async def _admin_employee_cities(request: web.Request) -> web.Response:
         for employee, city in pairs.items():
             db.set_employee_city(str(employee), str(city or ""))
         db.audit_access(0, "employee_cities", detail=f"changed={len(pairs)}")
+    # Ключи карты — в написании РЕЕСТРА: пульт сличает офис со строкой
+    # сотрудника точным совпадением, и запись, сделанная чуть другим
+    # написанием, показывалась бы «без офиса» при живом закреплении.
+    names = db.registry_name_index()
+    cities = {names.get(db._name_key(emp), emp): city
+              for emp, city in db.employee_cities().items()}
+    employees = [e["employee"] for e in db.employees_in_registry()]
     return web.json_response({
         "ok": True,
-        "cities": db.employee_cities(),
-        "employees": [e["employee"] for e in db.employees_in_registry()],
+        "cities": cities,
+        "employees": employees,
+        # Кому офис ещё не проставлен — пульт дозаполняет их по папкам портфелей.
+        "unassigned": [e for e in employees if not cities.get(e)],
         # Города, уже назначенные хоть кому-то, — подсказка для выбора в пульте.
-        "known": sorted({c for c in db.employee_cities().values() if c}),
+        "known": sorted({c for c in cities.values() if c}),
     })
 
 

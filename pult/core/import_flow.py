@@ -190,6 +190,10 @@ class ImportFlow:
             self._invalidate_import_preview(clear_report=False)
             text, err = ri.apply_toast(d)
             self.toast(text, err=err)
+            # Новые люди из реестра сразу получают офис по папкам портфелей —
+            # иначе они неделями висят в сводке руководителя «Без офиса».
+            if hasattr(self, "auto_offices"):
+                self.auto_offices()
             self.refresh()
 
         def fail(exc):

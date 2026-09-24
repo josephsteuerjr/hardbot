@@ -66,7 +66,7 @@ def visit_minutes_default() -> int:
 
 def office_point(employee: str) -> tuple[float, float] | None:
     """Откуда выездник стартует: центр города офиса (employee_city)."""
-    city = (db.employee_cities().get(employee) or "").strip()
+    city = (db.office_of(employee) or "").strip()
     if not city:
         return None
     hit = gazetteer.lookup(city, "")
@@ -230,7 +230,7 @@ def employee_row(employee: str, d_from: str, d_to: str, *, backends=None,
     now = db.visit_plan_for(employee)
     return {
         "employee": employee,
-        "office": db.employee_cities().get(employee, ""),
+        "office": db.office_of(employee),
         "portfolio_total": geo["total"], "portfolio_points": geo["on_map"],
         "portfolio_usable": geo["usable"],
         "radius_km": geo["radius_km"], "far_share": geo["far_share"],
