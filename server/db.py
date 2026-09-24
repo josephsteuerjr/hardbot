@@ -740,6 +740,12 @@ def init_db() -> None:
               updated_at TEXT
             )
         """)
+        # Откуда офис: manual — поставил человек (и старые строки без метки),
+        # folder — пульт по папке портфеля, auto — догадка сервера при импорте
+        # (guess_offices). Догадку уточняет папка, решение человека — никто.
+        ec_cols = {r[1] for r in conn.execute("PRAGMA table_info(employee_city)")}
+        if "source" not in ec_cols:
+            conn.execute("ALTER TABLE employee_city ADD COLUMN source TEXT")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS audit (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2095,8 +2101,13 @@ DIRECTIONS = {
 # в Ёвон, Хисор и Вахдат, а не «в Душанбе» (в самом Душанбе всего 35 кейсов на
 # всю базу). Принадлежность человека к офису — отдельный факт, его заводит
 # оператор; в реестре его нет вовсе (колонка «Подразделение» там про Хард/Софт).
-def set_employee_city(employee: str, city: str) -> None:
+OFFICE_SOURCES = ("manual", "folder", "auto")
+
+
+def set_employee_city(employee: str, city: str, source: str = "manual") -> None:
     """Закрепить сотрудника за офисом. Пустой город — снять закрепление.
+    source — откуда офис (OFFICE_SOURCES): решение человека, папка портфеля
+    или догадка сервера.
 
     ФИО записывается в написании РЕЕСТРА, а прежние записи того же человека
     в другом написании (регистр, ё/е, лишний пробел) снимаются: иначе у одного
@@ -2107,6 +2118,7 @@ def set_employee_city(employee: str, city: str) -> None:
         return
     employee = registry_name_index().get(_name_key(employee), employee)
     city = (city or "").strip()
+    source = source if source in OFFICE_SOURCES else "manual"
     key = _name_key(employee)
     with connect() as conn:
         for (other,) in conn.execute("SELECT employee FROM employee_city").fetchall():
@@ -2114,10 +2126,11 @@ def set_employee_city(employee: str, city: str) -> None:
                 conn.execute("DELETE FROM employee_city WHERE employee = ?", (other,))
         if city:
             conn.execute(
-                "INSERT INTO employee_city (employee, city, updated_at) VALUES (?,?,?) "
+                "INSERT INTO employee_city (employee, city, updated_at, source) "
+                "VALUES (?,?,?,?) "
                 "ON CONFLICT(employee) DO UPDATE SET city=excluded.city, "
-                "updated_at=excluded.updated_at",
-                (employee, city, date.today().isoformat()))
+                "updated_at=excluded.updated_at, source=excluded.source",
+                (employee, city, date.today().isoformat(), source))
         else:
             conn.execute("DELETE FROM employee_city WHERE employee = ?", (employee,))
         conn.commit()
@@ -2146,6 +2159,86 @@ def office_of(employee: str, index: dict[str, str] | None = None) -> str:
     если офис нужен в цикле по команде."""
     index = employee_office_index() if index is None else index
     return index.get(_name_key(employee), "")
+
+
+def office_sources() -> dict[str, str]:
+    """{ФИО: откуда офис} — manual/folder/auto; старые строки без метки — manual."""
+    with connect() as conn:
+        return {r["employee"]: (r["source"] or "manual") for r in conn.execute(
+            "SELECT employee, source FROM employee_city WHERE TRIM(city) <> ''")}
+
+
+# Офис по географии: ячейка сетки ~11 км (0.1°) и порог уверенности. Проверено
+# 24.09.2026 на живой базе: на 40 сотрудниках с известным офисом правило не
+# ошиблось ни разу, 8 спорных оставило без ответа — ровно так и задумано.
+OFFICE_GUESS_CELL = 1          # знаков после запятой в градусах
+OFFICE_GUESS_MIN_POINTS = 10
+OFFICE_GUESS_SHARE = 0.85
+# Курьеры в реестре подписаны «К-Фамилия». Их география — вся республика, по
+# ней офис не угадать; зато у курьеров он общий (решение владельца 16.09.2026:
+# курьеры — ташкентские), и берётся он из данных — у остальных «К-».
+COURIER_PREFIX = "к-"
+
+
+def guess_offices(apply: bool = True) -> dict:
+    """Проставить офис тем, у кого его нет, по данным самого реестра.
+
+    Офис из реестра напрямую не выводится (город там — где живёт должник), но
+    офис человека — это офис коллег, которые работают там же, где он. Каждый
+    его должник с точкой голосует за офис, чьи люди больше всех работают в той
+    же ячейке сетки; решение — только при явном перевесе. Курьеры («К-…») —
+    в офис остальных курьеров, если он у них один.
+
+    Пишет только ПУСТОЕ и помечает source='auto': папку портфеля пульт потом
+    поставит поверх, решение человека не трогается никогда. Возвращает
+    {"filled": {ФИО: офис}, "undecided": [ФИО]}."""
+    from collections import Counter, defaultdict
+    index = employee_office_index()
+    registry = [r["employee"] for r in employees_in_registry()]
+    todo = [e for e in registry if not index.get(_name_key(e))]
+    if not todo or not index:
+        return {"filled": {}, "undecided": todo}
+    cells: dict[str, list] = defaultdict(list)
+    with connect() as conn:
+        for r in conn.execute(
+                "SELECT responsible, geo_lat, geo_lon FROM clients "
+                "WHERE IFNULL(responsible, '') <> '' AND geo_lat IS NOT NULL "
+                "AND geo_lon IS NOT NULL"):
+            cells[r["responsible"]].append((round(r["geo_lat"], OFFICE_GUESS_CELL),
+                                            round(r["geo_lon"], OFFICE_GUESS_CELL)))
+    by_cell: dict[tuple, Counter] = defaultdict(Counter)
+    for emp, pts in cells.items():
+        office = index.get(_name_key(emp))
+        if office:
+            for p in pts:
+                by_cell[p][office] += 1
+    couriers = {index[_name_key(e)] for e in registry
+                if e.casefold().startswith(COURIER_PREFIX) and index.get(_name_key(e))}
+    filled, undecided = {}, []
+    for emp in todo:
+        if emp.casefold().startswith(COURIER_PREFIX):
+            office = next(iter(couriers)) if len(couriers) == 1 else ""
+        else:
+            votes = Counter()
+            for p in cells.get(emp, ()):
+                if by_cell.get(p):
+                    votes[by_cell[p].most_common(1)[0][0]] += 1
+            total = sum(votes.values())
+            office = ""
+            if total >= OFFICE_GUESS_MIN_POINTS:
+                top, n = votes.most_common(1)[0]
+                if n / total >= OFFICE_GUESS_SHARE:
+                    office = top
+        if office:
+            filled[emp] = office
+        else:
+            undecided.append(emp)
+    if apply:
+        for emp, office in filled.items():
+            set_employee_city(emp, office, source="auto")
+        if filled:
+            logging.info("Офисы по географии: %s", filled)
+    return {"filled": filled, "undecided": undecided}
 
 
 def employees_by_cities(cities) -> list[str]:

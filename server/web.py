@@ -4390,6 +4390,19 @@ async def _admin_import_json(request: web.Request) -> web.Response:
         report["geocoded"] = scoring.geocode_city_centroids()
     except Exception as e:  # noqa: BLE001
         logging.warning("geocode after import: %s", e)
+    # Новые люди из реестра сразу получают офис — по географии их должников
+    # (db.guess_offices), ПОСЛЕ геокодинга: у новых договоров появились точки.
+    # Иначе человек неделями висит у руководителя в «Без офиса», пока его не
+    # заметят. Пишется только пустое; ошибка тут импорт не отменяет.
+    try:
+        guessed = db.guess_offices(apply=True)
+        report["offices_guessed"] = guessed["filled"]
+        report["offices_undecided"] = guessed["undecided"]
+        if guessed["filled"]:
+            db.audit_access(0, "employee_cities",
+                            detail=f"auto={len(guessed['filled'])}")
+    except Exception as e:  # noqa: BLE001
+        logging.warning("guess offices after import: %s", e)
     return web.json_response(report)
 
 
@@ -4842,15 +4855,20 @@ async def _admin_employee_cities(request: web.Request) -> web.Response:
         pairs = body.get("cities")
         if not isinstance(pairs, dict):
             raise web.HTTPBadRequest(text="cities")
+        # «folder» — пульт проставил по папке портфеля; всё прочее — рука человека.
+        source = "folder" if body.get("source") == "folder" else "manual"
         for employee, city in pairs.items():
-            db.set_employee_city(str(employee), str(city or ""))
-        db.audit_access(0, "employee_cities", detail=f"changed={len(pairs)}")
+            db.set_employee_city(str(employee), str(city or ""), source=source)
+        db.audit_access(0, "employee_cities",
+                        detail=f"changed={len(pairs)} source={source}")
     # Ключи карты — в написании РЕЕСТРА: пульт сличает офис со строкой
     # сотрудника точным совпадением, и запись, сделанная чуть другим
     # написанием, показывалась бы «без офиса» при живом закреплении.
     names = db.registry_name_index()
     cities = {names.get(db._name_key(emp), emp): city
               for emp, city in db.employee_cities().items()}
+    sources = {names.get(db._name_key(emp), emp): src
+               for emp, src in db.office_sources().items()}
     employees = [e["employee"] for e in db.employees_in_registry()]
     return web.json_response({
         "ok": True,
@@ -4858,6 +4876,9 @@ async def _admin_employee_cities(request: web.Request) -> web.Response:
         "employees": employees,
         # Кому офис ещё не проставлен — пульт дозаполняет их по папкам портфелей.
         "unassigned": [e for e in employees if not cities.get(e)],
+        # Офис по догадке сервера (география при импорте): папка портфеля его
+        # уточняет, решение человека — нет.
+        "auto": [e for e in employees if cities.get(e) and sources.get(e) == "auto"],
         # Города, уже назначенные хоть кому-то, — подсказка для выбора в пульте.
         "known": sorted({c for c in cities.values() if c}),
     })

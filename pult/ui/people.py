@@ -254,7 +254,10 @@ class PeopleSection:
 
         def work():
             state = self.api("GET", "/admin/employee_cities.json")
-            employees = list(state.get("unassigned") or [])
+            # Догадку сервера (офис по географии при импорте) папка уточняет:
+            # для сравнения такой офис считается пустым.
+            guessed = set(state.get("auto") or [])
+            employees = list(state.get("unassigned") or []) + sorted(guessed)
             if not employees:
                 return None
             config = offices.read_path_config()
@@ -262,10 +265,17 @@ class PeopleSection:
                                                offices.load_aliases(config))
             if not by_folder:
                 return None              # диск с портфелями недоступен
-            result = offices.suggest(employees, state.get("cities") or {}, by_folder)
+            current = {e: c for e, c in (state.get("cities") or {}).items()
+                       if e not in guessed}
+            result = offices.suggest(employees, current, by_folder)
+            # Совпавшая с папкой догадка — не новость: не пишем и не называем.
+            result["fill"] = {e: c for e, c in result["fill"].items()
+                              if (state.get("cities") or {}).get(e) != c}
+            # У кого офис уже есть по догадке, тот не «без офиса», даже без папки.
+            result["nofolder"] = [e for e in result["nofolder"] if e not in guessed]
             if result["fill"]:
                 self.api("POST", "/admin/employee_cities.json",
-                         {"cities": result["fill"]})
+                         {"cities": result["fill"], "source": "folder"})
             return result
 
         def done(result):

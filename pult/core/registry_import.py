@@ -712,6 +712,13 @@ def apply_toast(d: dict) -> tuple[str, bool]:
         message += f" / снято {fmt_n(d['auto_unassigned'])}"
     if d.get("manual_restored"):
         message += f" / возвращено {fmt_n(d['manual_restored'])}"
+    # Офисы новым людям сервер раскладывает сам (по географии должников) —
+    # называем кому какой: догадку оператор должен видеть, чтобы поправить.
+    guessed = d.get("offices_guessed") or {}
+    if guessed:
+        names = ", ".join(f"{e} → {c}" for e, c in sorted(guessed.items())[:5])
+        more = f" и ещё {len(guessed) - 5}" if len(guessed) > 5 else ""
+        message += f" / офис по географии: {names}{more}"
     return message, False
 
 
