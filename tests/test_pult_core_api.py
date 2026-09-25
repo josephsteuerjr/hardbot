@@ -1,15 +1,21 @@
-"""Клиент admin-API пульта: заголовки, дружелюбные ошибки, отказ на чужой сертификат."""
+"""Клиент admin-API пульта: заголовки, дружелюбные ошибки, отказ на чужой сертификат
+и на адрес без https."""
 
 from __future__ import annotations
 
+import http.server
 import io
 import json
 import ssl
+import threading
 import urllib.error
+import urllib.request
+from types import SimpleNamespace
 
 import pytest
 
 from pult.core import api
+from pult.core.settings import Settings, active_profile
 
 
 class _Response(io.BytesIO):
@@ -141,3 +147,145 @@ def test_asks_for_gzip_and_unpacks_it():
     assert api.request("https://h", "GET", "/admin/export.json", key="k",
                        opener=urlopen) == {"rows": [1, 2, 3]}
     assert seen["enc"] == "gzip"
+
+
+# --- только https (ревью 25.09.2026) ------------------------------------------
+# Мастер-ключ, токен устройства и код привязки по http читает любой, кто видит
+# сеть. Опечатка «http://» в адресе контура не должна отдать их никому.
+PLAIN = ["http://hard.example", "HTTP://hard.example:443", "http://127.0.0.1.nip.io",
+         "http://127.0.0.1@evil.example", "http://127.0.0.2:8080", "ftp://hard.example",
+         "hard.example", "//hard.example", "https://", "http://[::1"]
+
+
+@pytest.mark.parametrize("url", PLAIN)
+def test_plain_http_is_refused_before_anything_is_sent(url):
+    opener = _opener(lambda req, kw: b'{"token": "t"}')
+    for creds in ({"key": "MASTER"}, {"device_token": "TOKEN"}, {}):
+        # привязка мастер-ключом, обычный запрос токеном и обмен кода без них
+        with pytest.raises(RuntimeError, match="должен начинаться с https://"):
+            api.request(url, "POST", "/admin/device/redeem.json",
+                        {"code": "ОДНОРАЗОВЫЙ", "device_id": "x"},
+                        opener=opener, **creds)
+    assert opener.calls == [], "запрос ушёл без https"
+
+
+def test_empty_address_says_where_to_enter_it():
+    opener = _opener(lambda req, kw: b"{}")
+    for url in ("", "   ", None):
+        with pytest.raises(RuntimeError, match="Не задан адрес сервера"):
+            api.request(url, "GET", "/admin/stats", device_token="t", opener=opener)
+    assert opener.calls == []
+
+
+@pytest.mark.parametrize("url", ["https://hard.example", "HTTPS://Hard.Example/",
+                                 "https://hard.example:8443", "http://127.0.0.1:8080",
+                                 "http://localhost:1", "http://LOCALHOST", "http://[::1]:5000"])
+def test_https_and_own_machine_pass(url):
+    opener = _opener(lambda req, kw: b'{"ok": true}')
+    assert api.request(url, "GET", "/admin/stats", device_token="t",
+                       opener=opener) == {"ok": True}
+    assert len(opener.calls) == 1
+
+
+def test_https_profiles_are_untouched(tmp_path):
+    """Контуры с https работают как раньше; http-контур отказывает сам, не
+    трогая ни себя, ни соседей, ни файл настроек."""
+    path = tmp_path / "настройки пульта.json"
+    Settings({"profiles": {"Прод": {"url": "https://prod.example", "device_token": "P"},
+                           "Компания": {"url": "http://10.0.0.5", "device_token": "K"}},
+              "active": "Прод"}, path).save()
+    before = path.read_bytes()
+    settings = Settings.load(path)
+
+    opener = _opener(lambda req, kw: b'{"ok": true}')
+    prod = active_profile(settings)
+    assert api.request(prod["url"], "GET", "/admin/stats",
+                       device_token=prod["device_token"], opener=opener) == {"ok": True}
+    assert opener.calls[0][0].get_header("X-device-token") == "P"
+
+    company = settings["profiles"]["Компания"]
+    with pytest.raises(RuntimeError, match="https://"):
+        api.request(company["url"], "GET", "/admin/stats",
+                    device_token=company["device_token"], opener=opener)
+    assert len(opener.calls) == 1
+    assert path.read_bytes() == before
+
+
+def test_redirect_to_plain_http_is_not_followed():
+    """urllib повторяет по новому адресу ВСЕ заголовки, ключ тоже."""
+    handler = api._NoDowngradeRedirect()
+    req = urllib.request.Request("https://hard.example/admin/stats",
+                                 headers={"X-Admin-Key": "MASTER"})
+    body = io.BytesIO(b"")
+    with pytest.raises(RuntimeError, match="https://"):
+        handler.redirect_request(req, body, 302, "Found", {},
+                                 "http://hard.example/admin/stats")
+    assert body.closed
+    moved = handler.redirect_request(req, io.BytesIO(b""), 302, "Found", {},
+                                     "https://hard.example/v2/stats")
+    assert moved.full_url == "https://hard.example/v2/stats"
+    # и этот обработчик стоит в двери, которой ходит пульт
+    assert any(isinstance(h, api._NoDowngradeRedirect)
+               for h in api._SECURE_OPENER.handlers)
+
+
+def test_redirect_downgrade_end_to_end(monkeypatch):
+    """Живой urllib: свой сервер (127.0.0.1) отвечает «иди на http://…» —
+    ключ получает только он, по чужому адресу запроса нет. Прокси выключены,
+    чтобы даже поломка не увела запрос за пределы машины."""
+    seen = []
+
+    class Redirect(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 — имя задаёт http.server
+            seen.append(self.headers.get("X-Admin-Key"))
+            self.send_response(302)
+            self.send_header("Location", "http://example.invalid/steal")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    monkeypatch.setattr(api, "_SECURE_OPENER", urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), api._NoDowngradeRedirect()))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(RuntimeError, match="https://"):
+            api.request(f"http://127.0.0.1:{server.server_address[1]}", "GET",
+                        "/admin/stats", key="MASTER", timeout=5)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert seen == ["MASTER"]
+
+
+def _no_network(*_args, **_kwargs):
+    raise AssertionError("запрос ушёл без https")
+
+
+def test_helper_scripts_refuse_plain_http_before_sending(monkeypatch):
+    """Командные помощники пульта шлют ключ и токен мимо `request` — у каждого
+    своя проверка до запроса."""
+    import core.api as core_api        # помощники берут `core`, а не `pult.core`
+    import daily_cycle
+    import repair_comments
+    import repair_false_enrichment
+    import restore_from_bot
+
+    monkeypatch.setattr(core_api, "_SECURE_OPENER", SimpleNamespace(open=_no_network))
+    monkeypatch.setattr(urllib.request, "urlopen", _no_network)
+    calls = [
+        lambda: repair_comments.api_export("http://hard.example", "MASTER"),
+        lambda: repair_false_enrichment._request_json(
+            "http://hard.example/admin/export.json", "MASTER", device_token="T"),
+        lambda: daily_cycle.api({"url": "http://hard.example", "device_token": "T"},
+                                "GET", "/admin/export.json"),
+        lambda: restore_from_bot.fetch_rows({"url": "http://hard.example",
+                                             "key": "MASTER"}, print),
+    ]
+    for call in calls:
+        with pytest.raises(RuntimeError, match="https://"):
+            call()
+    with pytest.raises(RuntimeError, match="Не задан адрес сервера"):
+        daily_cycle.api({"url": ""}, "GET", "/admin/export.json")

@@ -205,10 +205,11 @@ def _request_json(url: str, key: str, timeout: int = 120,
                   device_token: str = "") -> dict:
         # Мастер-ключ больше не открывает данные после первой привязки — ходим
     # тем же, чем ходит сам пульт: токеном устройства плюс отпечаток машины.
-    from core.api import CERT_BAD_TEXT, auth_headers
+    from core.api import CERT_BAD_TEXT, auth_headers, open_secure, require_https
+    require_https(url)          # не https — ключ и токен не поедут вовсе
     req = urllib.request.Request(url, headers=auth_headers(key, device_token))
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        with open_secure(req, timeout=timeout) as response:
             return json.load(response)
     except urllib.error.URLError as exc:
         if isinstance(getattr(exc, "reason", None), ssl.SSLCertVerificationError):

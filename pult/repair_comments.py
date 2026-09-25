@@ -45,11 +45,12 @@ except Exception:  # noqa: BLE001
 def api_export(url: str, key: str, device_token: str = "") -> dict:
         # Мастер-ключ больше не открывает данные после первой привязки — ходим
     # тем же, чем ходит сам пульт: токеном устройства плюс отпечаток машины.
-    from core.api import CERT_BAD_TEXT, auth_headers
+    from core.api import CERT_BAD_TEXT, auth_headers, open_secure, require_https
+    require_https(url)          # не https — ключ и токен не поедут вовсе
     req = urllib.request.Request(url.rstrip("/") + "/admin/export.json",
                                  headers=auth_headers(key, device_token))
     try:
-        with urllib.request.urlopen(req, timeout=120) as r:
+        with open_secure(req, timeout=120) as r:
             return json.load(r)
     except urllib.error.URLError as e:
         if isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
@@ -172,6 +173,18 @@ def build_repair_plan(grid: list[list], fields: list[dict], srv_by_cid: dict[str
             st["genuine_kept"] += 1             # настоящий колл-комментарий — не трогаем
     st["writes"] = writes
     return st
+
+
+def com_writes(writes: list[tuple[int, int, object]]) -> list[tuple[int, int, object]]:
+    """Записи плана → координаты Excel (с 1) и значения, готовые к записи через COM.
+
+    Комментарий выездника с ведущим «=», «+», «-», «@», табуляцией или возвратом
+    каретки Excel при вводе принял бы за формулу — «=HYPERLINK(…)» ожил бы в
+    живой книге сотрудника. `enrich._excel_safe` ставит апостроф: Excel съедает
+    его как отметку «текст» и в значение не кладёт, поэтому повторный прогон
+    читает ровно серверный текст и ничего не пишет. None — очистить ячейку.
+    """
+    return [(r + 1, c + 1, enrich._excel_safe(val)) for r, c, val in writes]
 
 
 def backup_copy_repair(path: Path) -> Path:
@@ -313,8 +326,8 @@ def main(argv=None) -> int:
                     if st["writes"]:
                         bk = backup_copy_repair(path)
                         print(f"    копия: {bk.name}")
-                        for r, c, val in st["writes"]:
-                            ws.range((r + 1, c + 1)).value = val
+                        for row, col, val in com_writes(st["writes"]):
+                            ws.range((row, col)).value = val
                         wb.save()
                         changed += 1
                 finally:

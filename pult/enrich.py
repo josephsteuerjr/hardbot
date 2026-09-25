@@ -1159,15 +1159,32 @@ def _plan_workbook(app, path: Path, fields: list[dict], rows: list[dict],
 # переписаны. То есть один комментарий одного выездника оставляет офис без
 # квитанции и с испорченными реестрами у всех. Ведущий апостроф Excel не
 # показывает, но хранит значение текстом.
-_EXCEL_FORMULA_START = ("=", "+", "-", "@")
+# Табуляция и возврат каретки в начале — туда же: их срезают при вставке и
+# импорте, и под ними оказывается та же формула. А «=HYPERLINK(…)» в книге
+# аналитика — уже не порча, а вынос данных при открытии (ревью 25.09.2026, #6).
+# Правило одно на всех писателей пульта: `_excel_safe` — запись через Excel
+# (xlwings), `core/export._text_cell` — через openpyxl.
+_EXCEL_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
 _EXCEL_CELL_LIMIT = 32767
 
 
+def excel_formula_like(value) -> bool:
+    """Строка, которую Excel при вводе принял бы за формулу."""
+    return isinstance(value, str) and value[:1] in _EXCEL_FORMULA_START
+
+
 def _excel_safe(value):
+    """Значение для записи ЧЕРЕЗ Excel (xlwings/COM). Числа, даты и None — как есть.
+
+    Апостроф Excel разбирает при вводе как отметку «это текст» и в значение не
+    кладёт: `Range.Value` потом читает строку без него, поэтому повторная сверка
+    плана сходится. Для openpyxl апостроф не годится — там он лёг бы в саму
+    строку (см. `core/export._text_cell`).
+    """
     if not isinstance(value, str):
         return value
     v = value[:_EXCEL_CELL_LIMIT]
-    if v[:1] in _EXCEL_FORMULA_START:
+    if excel_formula_like(v):
         return "'" + v
     return v
 

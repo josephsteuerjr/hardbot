@@ -162,10 +162,15 @@ def _free_port() -> int:
 
 
 def _http(method: str, url: str, body: dict | None = None,
-          headers: dict | None = None, timeout: float = 10):
+          headers: dict | None = None, timeout: float = 10, browser: bool = True):
+    """Запрос к exe. `browser` — как страница самого пульта: браузер ставит
+    свой Origin на каждый POST, а без него пульт меняющий запрос не примет."""
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method,
-                                 headers=headers or {})
+    headers = dict(headers or {})
+    if browser and method not in ("GET", "HEAD"):
+        parts = urllib.parse.urlsplit(url)
+        headers.setdefault("Origin", f"{parts.scheme}://{parts.netloc}")
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
     if data is not None:
         req.add_header("Content-Type", "application/json")
     try:
@@ -267,6 +272,26 @@ def test_foreign_host_is_refused(world):
         status, body = e.code, json.loads(e.read().decode())
     assert status == 403
     assert "не по своему адресу" in body["error"]
+
+
+def test_post_without_origin_is_refused(world):
+    """Ревью 25.09.2026: POST без Origin проходил мимо проверки и перепривязывал
+    пульт к чужому серверу. Теперь нужен свой Origin или Sec-Fetch-Site:
+    same-origin, а чужой Origin не спасает ничто."""
+    url = world["base"] + "/api/link"
+    link = {"link": f"{world['hard']}/i/AbCdEf123456"}
+    for headers in ({}, {"Origin": "null"}, {"Sec-Fetch-Site": "cross-site"},
+                    {"Origin": "https://evil.example", "Sec-Fetch-Site": "same-origin"}):
+        status, out = _http("POST", url, link, headers=headers, browser=False)
+        assert status == 403, headers
+        assert "чужой страницы" in out["error"]
+    assert world["stub"].state["hits"] == [], "запрос дошёл до «Харда»"
+    status, state = _http("GET", world["base"] + "/api/state")
+    assert state["ready"] is False
+
+    status, out = _http("POST", url, link, headers={"Sec-Fetch-Site": "same-origin"},
+                        browser=False)
+    assert status == 200 and out.get("ok") is True
 
 
 def test_date_is_validated_in_russian(world):

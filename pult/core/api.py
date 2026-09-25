@@ -35,6 +35,70 @@ CERT_BAD_TEXT = ("Сертификат сервера не прошёл пров
                  "соединение (чужой Wi-Fi, прокси с подменой). Пульт ничего не "
                  "отправил: ни ключа, ни токена. Подключитесь к другой сети.")
 
+# Куда секрет можно отдать по открытому http: только на эту же машину — там
+# нет сети, которую подслушивают. Всё остальное — только https.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+NO_URL_TEXT = ("Не задан адрес сервера — впишите его в пульте, раздел "
+               "«Подключение» (вид: https://сервер).")
+NOT_HTTPS_TEXT = ("Адрес сервера должен начинаться с https://. По такому адресу "
+                  "мастер-ключ, токен устройства и код привязки ушли бы по сети "
+                  "открытым текстом — пульт ничего не отправил. Исправьте адрес "
+                  "в пульте, раздел «Подключение» (http годится только для "
+                  "127.0.0.1 и localhost).")
+
+
+def require_https(url: str) -> None:
+    """Отказ словами ДО запроса, если секрет поехал бы по сети открытым текстом.
+
+    Мастер-ключ, токен устройства и одноразовый код привязки едут заголовками и
+    телом обычного HTTP-запроса; по http их читает любой, кто видит сеть (чужой
+    Wi-Fi, прокси). Опечатка «http://» в адресе контура молча отдавала бы ключ —
+    поэтому отказ ещё до того, как собран первый байт запроса. Исключение —
+    своя машина (127.0.0.1, localhost, ::1): там сети нет.
+    """
+    text = (url or "").strip()
+    if not text:
+        raise RuntimeError(NO_URL_TEXT)
+    try:
+        parts = urllib.parse.urlsplit(text)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        raise RuntimeError(NOT_HTTPS_TEXT) from None
+    if parts.scheme == "https" and host:
+        return
+    if parts.scheme == "http" and host in LOOPBACK_HOSTS:
+        return
+    raise RuntimeError(NOT_HTTPS_TEXT)
+
+
+class _NoDowngradeRedirect(urllib.request.HTTPRedirectHandler):
+    """Переадресация не уводит запрос с секретом на http.
+
+    urllib повторяет по новому адресу ВСЕ заголовки, в том числе ключ и токен.
+    Сервер «Харда» админ-ручки не переадресует; ответ «иди на http://…» может
+    дать только чья-то настройка перед ним (прокси, балансировщик) — и ключ по
+    такому ответу не поедет.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        try:
+            require_https(newurl)
+        except RuntimeError:
+            fp.close()
+            raise
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_SECURE_OPENER = urllib.request.build_opener(_NoDowngradeRedirect())
+
+
+def open_secure(req: urllib.request.Request, timeout: float):
+    """`urlopen` для запросов с секретом: адрес и переадресация — только https
+    (или своя машина). Им ходят и командные помощники пульта."""
+    require_https(req.full_url)
+    return _SECURE_OPENER.open(req, timeout=timeout)
+
 
 def _read_json(resp):
     """Тело ответа как JSON, в том числе сжатое gzip: крупные ответы (выгрузка
@@ -66,9 +130,12 @@ def request(base_url: str, method: str, path: str, body: dict | None = None, *,
     Сертификат не прошёл проверку — отказ словами, БЕЗ повтора «без проверки»:
     такой повтор отдал бы мастер-ключ или токен устройства тому, кто подменил
     связь. Серверы живут под настоящими сертификатами (Let's Encrypt).
+    Адрес не https (и не своя машина) — отказ до запроса (`require_https`):
+    это касается любого запроса, и привязки по коду тоже — код в теле.
     """
-    urlopen = opener or urllib.request.urlopen
-    url = (base_url or "").rstrip("/") + path
+    require_https(base_url)
+    urlopen = opener or open_secure
+    url = base_url.strip().rstrip("/") + path
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method,
                                  headers=auth_headers(key, device_token))

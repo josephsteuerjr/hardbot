@@ -193,11 +193,8 @@ async def guard_middleware(request: web.Request, handler):
 
     # 2. Чужая страница не имеет права слать сюда POST от имени хозяина
     #    (браузер отправит его молча, ответ не покажет, но сделанное останется).
-    if request.method == "POST":
-        origin = request.headers.get("Origin") or ""
-        mine = {f"http://{request.host}", f"https://{request.host}"}
-        if origin and origin not in mine:
-            return _json({"error": "Запрос пришёл с чужой страницы."}, status=403)
+    if request.method not in ("GET", "HEAD") and not own_page(request):
+        return _json({"error": "Запрос пришёл с чужой страницы."}, status=403)
 
     if path in OPEN_PATHS or not path.startswith("/api/"):
         return await handler(request)
@@ -211,6 +208,29 @@ async def guard_middleware(request: web.Request, handler):
         return _json({"error": ONLY_PC}, status=403)
 
     return await handler(request)
+
+
+def own_page(request: web.Request) -> bool:
+    """Меняющий запрос пришёл со страницы самого пульта. Сомнение — «нет».
+
+    Свой origin — адрес, под которым пульт открыт: `127.0.0.1:<порт>` у своего
+    браузера или имя живого тоннеля у телефона (cloudflared отдаёт его в Host,
+    а чужой Host отсёк шаг 1 — `known_host` пускает только эти два). Origin
+    браузер ставит на любой POST, Sec-Fetch-Site — на любой запрос, и страница
+    не может подделать ни тот, ни другой. Раньше запрос БЕЗ Origin проходил
+    молча: страница, сумевшая его не поставить, перепривязывала пульт к чужому
+    серверу (`/api/link`) или выводила из него (`/api/out`). Теперь нужен либо
+    свой Origin, либо — когда Origin нет или он «null» — слово самого браузера
+    «same-origin». Чужой Origin не спасает ничто.
+    """
+    origin = request.headers.get("Origin") or ""
+    mine = {f"http://{request.host}", f"https://{request.host}"}
+    if origin in mine:
+        return True
+    if origin not in ("", "null"):
+        return False
+    site = (request.headers.get("Sec-Fetch-Site") or "").strip().lower()
+    return site == "same-origin"
 
 
 # --- страница ----------------------------------------------------------------

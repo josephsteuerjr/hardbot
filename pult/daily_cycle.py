@@ -116,13 +116,14 @@ def api(settings: dict, method: str, path: str, body: dict | None = None, timeou
     data = json.dumps(body).encode("utf-8") if body is not None else None
 # Мастер-ключ больше не открывает данные после первой привязки — ходим
 # тем же, чем ходит сам пульт: токеном устройства плюс отпечаток машины.
-    from core.api import auth_headers
+    from core.api import auth_headers, open_secure, require_https
+    require_https(settings["url"])  # не https — ключ и токен не поедут вовсе
     req = urllib.request.Request(url, data=data, method=method,
                                  headers=auth_headers(settings.get("key", ""),
                                                       settings.get("device_token", "")))
     if data:
         req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with open_secure(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
 

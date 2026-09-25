@@ -5,7 +5,28 @@ from __future__ import annotations
 import urllib.parse
 from datetime import datetime
 
+import enrich
+
 from .text import fmt_n, parse_num, to_iso
+
+
+def _text_cell(ws, row: int, column: int, value):
+    """Ячейка openpyxl; строка ложится ТЕКСТОМ, числа и даты — как были.
+
+    openpyxl сам делает из строки с ведущим «=» формулу (а из «#N/A» —
+    ошибку), и комментарий выездника «=HYPERLINK(…)» исполнялся бы при
+    открытии выгрузки у аналитика. Апостроф, которым `enrich._excel_safe`
+    защищает запись через Excel, здесь не годится: openpyxl ввод не разбирает,
+    и апостроф остался бы в самой строке. Поэтому тип ячейки ставится явно, а
+    строку, похожую на формулу, помечаем quotePrefix — тем же флагом, каким
+    Excel хранит набранный апостроф: формула не оживёт и после F2 + Enter.
+    """
+    cell = ws.cell(row=row, column=column, value=value)
+    if isinstance(value, str):
+        cell.data_type = "s"
+        if enrich.excel_formula_like(value):
+            cell.quotePrefix = True
+    return cell
 
 
 def col_width(key: str, title: str) -> float:
@@ -25,8 +46,8 @@ _col_width = col_width
 
 def write_registry_xlsx(path: str, fields: list[dict], rows: list[dict]) -> None:
     """Слепок БД в новый xlsx: 3 строки шапки (блоки объединены), даты и суммы —
-    типизированные, автофильтр, закреплённая шапка."""
-    import enrich
+    типизированные, строки — текстом (никогда не формулой), автофильтр,
+    закреплённая шапка."""
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font
     from openpyxl.utils import get_column_letter
@@ -43,7 +64,7 @@ def write_registry_xlsx(path: str, fields: list[dict], rows: list[dict]) -> None
     start = 0
     for i in range(1, len(fields) + 1):
         if i == len(fields) or fields[i]["block"] != fields[start]["block"]:
-            c = ws.cell(row=1, column=start + 1, value=fields[start]["block"])
+            c = _text_cell(ws, 1, start + 1, fields[start]["block"])
             c.font, c.alignment = bold, center
             if i - 1 > start:
                 ws.merge_cells(start_row=1, start_column=start + 1,
@@ -51,8 +72,8 @@ def write_registry_xlsx(path: str, fields: list[dict], rows: list[dict]) -> None
             start = i
     # строка 2 — заголовки, строка 3 — сх/хард, ширины
     for j, fld in enumerate(fields, start=1):
-        ws.cell(row=2, column=j, value=fld["title"]).font = bold
-        ws.cell(row=3, column=j, value=fld["source"]).font = italic
+        _text_cell(ws, 2, j, fld["title"]).font = bold
+        _text_cell(ws, 3, j, fld["source"]).font = italic
         ws.column_dimensions[get_column_letter(j)].width = col_width(fld["key"], fld["title"])
     # данные со строки 4
     for r, row in enumerate(rows, start=4):
@@ -72,7 +93,7 @@ def write_registry_xlsx(path: str, fields: list[dict], rows: list[dict]) -> None
                     c = ws.cell(row=r, column=j, value=n)
                     c.number_format = "#,##0"
                     continue
-            ws.cell(row=r, column=j, value=str(v))
+            _text_cell(ws, r, j, str(v))
     last = max(len(rows) + 3, 4)
     ws.auto_filter.ref = f"A2:{get_column_letter(len(fields))}{last}"
     ws.freeze_panes = "A4"
@@ -114,7 +135,8 @@ def write_markers_xlsx(path: str, rows: list[dict]) -> None:
                 c = ws.cell(row=r, column=j, value=float(v))
                 c.number_format = "0.000000"
                 continue
-            ws.cell(row=r, column=j, value=v if isinstance(v, (int, float)) else str(v))
+            # Подпись метки пишет выездник: «=2+2» здесь — формула в книге аналитика.
+            _text_cell(ws, r, j, v if isinstance(v, (int, float)) else str(v))
     if rows:
         ws.auto_filter.ref = f"A1:{get_column_letter(len(MARKER_COLS))}{len(rows) + 1}"
     ws.freeze_panes = "A2"

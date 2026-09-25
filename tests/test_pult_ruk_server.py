@@ -17,11 +17,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -264,7 +266,10 @@ async def world(tmp_path, *, token: str = TOKEN, tunnel=None, state=None):
         path=tmp_path / "настройки пульта руководителя.json")
     tun = tunnel or FakeTunnel()
     app = create_app(settings=settings, tunnel=tun, port=0)
-    client = TestClient(TestServer(app))
+    # Клиент ведёт себя как браузер на странице самого пульта: такой браузер
+    # ставит Sec-Fetch-Site: same-origin на каждый свой запрос. Запросы без
+    # него (как у атакующей страницы) — `bare_post` ниже.
+    client = TestClient(TestServer(app), headers={"Sec-Fetch-Site": "same-origin"})
     await client.start_server()
     try:
         yield SimpleNamespace(client=client, state=state, tunnel=tun,
@@ -613,6 +618,116 @@ def test_foreign_page_cannot_post(tmp_path):
                                        headers={"Origin": "https://зло.example"})
             assert resp.status == 403
             assert server_entry(w.settings)["token"] == TOKEN
+    run(go())
+
+
+# --- чужая страница без Origin (ревью 25.09.2026) -----------------------------
+async def bare_post(w, path: str, body: dict, headers: dict | None = None):
+    """POST мимо браузера пульта: без Origin и Sec-Fetch-Site, если их не дали
+    явно. text/plain — «простой» запрос, который чужая страница шлёт без
+    префлайта; разбор тела пульт делает всё равно."""
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+                w.client.make_url(path), data=json.dumps(body),
+                headers={"Content-Type": "text/plain", **(headers or {})}) as resp:
+            return resp.status, await resp.json()
+
+
+def _own_origin(w) -> str:
+    return str(w.client.make_url("")).rstrip("/")
+
+
+def test_post_without_origin_is_refused(tmp_path):
+    """Так ломали в PoC: ни Origin, ни Sec-Fetch-Site — пульт перепривязывался
+    к серверу атакующего и выходил из «Харда» по чужой команде."""
+    async def go():
+        async with world(tmp_path) as w:
+            link = f"{w.settings['url']}/i/AbCdEf123456"
+            for path, body in (("/api/link", {"link": link}),
+                               ("/api/out", {}),
+                               ("/api/phone", {"on": True}),
+                               ("/api/server", {"url": w.settings["url"]}),
+                               ("/api/pushes", {"key": "push_promises", "value": True}),
+                               ("/api/team_link", {"employee": "Апиев А.",
+                                                   "action": "revoke"}),
+                               ("/api/pin", {"pin": w.gate.pin})):
+                status, data = await bare_post(w, path, body)
+                assert status == 403, path
+                assert "чужой страницы" in data["error"]
+            assert server_entry(w.settings)["token"] == TOKEN
+            assert w.tunnel.on is False
+            assert w.state["hits"] == [], "запрос дошёл до «Харда»"
+    run(go())
+
+
+def test_foreign_or_opaque_origin_is_refused(tmp_path):
+    async def go():
+        async with world(tmp_path) as w:
+            for origin in ("https://зло.example",
+                           "http://127.0.0.1:1",             # чужой порт той же машины
+                           "https://другой-кот-78.trycloudflare.com",
+                           "null"):
+                status, _ = await bare_post(w, "/api/out", {},
+                                            headers={"Origin": origin})
+                assert status == 403, origin
+            # чужой Origin не спасает и «same-origin»: верим обоим, но не порознь
+            status, _ = await bare_post(
+                w, "/api/out", {}, headers={"Origin": "https://зло.example",
+                                            "Sec-Fetch-Site": "same-origin"})
+            assert status == 403
+            for site in ("cross-site", "same-site", "none"):
+                status, _ = await bare_post(w, "/api/out", {},
+                                            headers={"Sec-Fetch-Site": site})
+                assert status == 403, site
+            assert server_entry(w.settings)["token"] == TOKEN
+    run(go())
+
+
+def test_own_origin_alone_is_enough(tmp_path):
+    """Браузер без Sec-Fetch-Site (старый Safari на iPhone) шлёт только Origin."""
+    async def go():
+        async with world(tmp_path, token="") as w:
+            link = f"{w.settings['url']}/i/AbCdEf123456"
+            status, data = await bare_post(w, "/api/link", {"link": link},
+                                           headers={"Origin": _own_origin(w)})
+            assert status == 200 and data["ok"] is True
+            assert server_entry(w.settings)["token"] == TOKEN
+    run(go())
+
+
+def test_same_origin_fetch_alone_is_enough(tmp_path):
+    """Origin нет или он «null» (так бывает при no-referrer) — решает слово
+    браузера «same-origin», которое страница подделать не может."""
+    async def go():
+        async with world(tmp_path, token="") as w:
+            link = f"{w.settings['url']}/i/AbCdEf123456"
+            for headers in ({"Sec-Fetch-Site": "same-origin"},
+                            {"Origin": "null", "Sec-Fetch-Site": "same-origin"}):
+                server_entry(w.settings)["token"] = ""
+                status, data = await bare_post(w, "/api/link", {"link": link},
+                                               headers=headers)
+                assert status == 200 and data["ok"] is True, headers
+                assert server_entry(w.settings)["token"] == TOKEN
+    run(go())
+
+
+def test_phone_origin_is_its_tunnel(tmp_path):
+    """Телефон приходит через cloudflared: Host и Origin — имя тоннеля. Чужой
+    тоннель или запрос без Origin до кода-пропуска не доходят и промахом не
+    считаются."""
+    async def go():
+        async with world(tmp_path) as w:
+            await w.client.post("/api/phone", json={"on": True})
+            pin = {"pin": w.gate.pin}
+            for headers in ({**PHONE, "Origin": "https://другой-кот-78.trycloudflare.com"},
+                            PHONE):
+                status, _ = await bare_post(w, "/api/pin", pin, headers=headers)
+                assert status == 403
+            assert w.gate.fails == 0 and not w.gate.sessions
+            status, data = await bare_post(w, "/api/pin", pin,
+                                           headers={**PHONE, "Origin": TUNNEL_URL})
+            assert status == 200 and data["ok"] is True
+            assert len(w.gate.sessions) == 1
     run(go())
 
 

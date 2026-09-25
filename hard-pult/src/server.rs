@@ -109,18 +109,12 @@ async fn guard(State(app): State<AppState>, mut req: Request, next: Next) -> Res
             StatusCode::FORBIDDEN,
         );
     }
-    if method == axum::http::Method::POST {
-        let origin = headers
-            .get(header::ORIGIN)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let mine = [format!("http://{}", host), format!("https://{}", host)];
-        if !origin.is_empty() && !mine.contains(&origin.to_string()) {
-            return err_json(
-                json!({"error": "Запрос пришёл с чужой страницы."}),
-                StatusCode::FORBIDDEN,
-            );
-        }
+    let reads = method == axum::http::Method::GET || method == axum::http::Method::HEAD;
+    if !reads && !own_page(&headers, &host) {
+        return err_json(
+            json!({"error": "Запрос пришёл с чужой страницы."}),
+            StatusCode::FORBIDDEN,
+        );
     }
     let open = path == "/api/state" || path == "/api/pin" || !path.starts_with("/api/");
     if !open && !(console || has_session) {
@@ -136,6 +130,33 @@ async fn guard(State(app): State<AppState>, mut req: Request, next: Next) -> Res
     }
     req.extensions_mut().insert(Who { console, has_session });
     next.run(req).await
+}
+
+/// Меняющий запрос пришёл со страницы самого пульта (как `own_page` у
+/// питон-версии). Свой origin — адрес, под которым пульт открыт: Host уже
+/// проверен `known_host` (свой 127.0.0.1 или живой тоннель). Origin браузер
+/// ставит на любой POST, Sec-Fetch-Site — на любой запрос, и страница не
+/// подделает ни тот, ни другой. Без Origin раньше пропускало молча — теперь
+/// нужен либо свой Origin, либо (Origin нет или «null») «same-origin» от
+/// браузера. Чужой или нечитаемый Origin — отказ.
+fn own_page(headers: &HeaderMap, host: &str) -> bool {
+    let origin = match headers.get(header::ORIGIN) {
+        None => "",
+        Some(value) => match value.to_str() {
+            Ok(text) => text,
+            Err(_) => return false,
+        },
+    };
+    if origin == format!("http://{}", host) || origin == format!("https://{}", host) {
+        return true;
+    }
+    if !origin.is_empty() && origin != "null" {
+        return false;
+    }
+    headers
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+        .map_or(false, |v| v.trim().eq_ignore_ascii_case("same-origin"))
 }
 
 pub fn router(state: AppState) -> Router {
@@ -631,5 +652,60 @@ async fn api_phone(State(app): State<AppState>, req: Request) -> Response {
             "on": false, "url": "", "pin": "", "qr": null,
             "ready": app.tunnel.available(), "error": text,
         })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::own_page;
+    use axum::http::HeaderMap;
+
+    const HOST: &str = "127.0.0.1:53124";
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(*name, value.parse().unwrap());
+        }
+        map
+    }
+
+    #[test]
+    fn post_without_origin_and_fetch_site_is_refused() {
+        // Так выглядела атака из ревью 25.09: text/plain без Origin.
+        assert!(!own_page(&headers(&[]), HOST));
+        assert!(!own_page(&headers(&[("origin", "null")]), HOST));
+        assert!(!own_page(&headers(&[("sec-fetch-site", "cross-site")]), HOST));
+        assert!(!own_page(&headers(&[("sec-fetch-site", "same-site")]), HOST));
+    }
+
+    #[test]
+    fn foreign_origin_is_refused_whatever_else_is_said() {
+        assert!(!own_page(&headers(&[("origin", "https://evil.example")]), HOST));
+        assert!(!own_page(&headers(&[("origin", "http://127.0.0.1:9999")]), HOST));
+        assert!(!own_page(
+            &headers(&[("origin", "https://evil.example"), ("sec-fetch-site", "same-origin")]),
+            HOST
+        ));
+    }
+
+    #[test]
+    fn own_origin_or_same_origin_fetch_passes() {
+        assert!(own_page(&headers(&[("origin", "http://127.0.0.1:53124")]), HOST));
+        assert!(own_page(&headers(&[("sec-fetch-site", "same-origin")]), HOST));
+        assert!(own_page(
+            &headers(&[("origin", "null"), ("sec-fetch-site", "same-origin")]),
+            HOST
+        ));
+        // телефон из тоннеля: Host и Origin — имя тоннеля
+        let tunnel = "bold-cat-77.trycloudflare.com";
+        assert!(own_page(
+            &headers(&[("origin", "https://bold-cat-77.trycloudflare.com")]),
+            tunnel
+        ));
+        assert!(!own_page(
+            &headers(&[("origin", "https://other-cat-78.trycloudflare.com")]),
+            tunnel
+        ));
     }
 }
