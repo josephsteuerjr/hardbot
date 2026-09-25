@@ -2160,7 +2160,17 @@ async def _manager_photo_file(request: web.Request) -> web.Response:
     path = photostore.photo_path(key, root=PHOTO_DIR)
     if path is None or path.suffix.lower() not in _PHOTO_SUFFIXES             or not path.is_file():
         raise web.HTTPNotFound(text="photo")
-    ctx = db.photo_contract_dirs(key.split("/", 1)[0])
+    # Ключ — «КД/имя», и КД бывает со слэшем (вложенный каталог). Право
+    # считаем по каталогу договора ЦЕЛИКОМ — всему до последнего «/», — а не
+    # по первому сегменту: иначе «A/B/имя» проверялся как договор «A» и
+    # отдавал снимок чужого договора «A/B» (ревью 25.09, F-3). Каталог обязан
+    # быть одним из каталогов этого договора — ровно так их перечисляет список
+    # (_manager_photos), поэтому законный просмотр не меняется.
+    contract_dir = key.rsplit("/", 1)[0]
+    ctx = db.photo_contract_dirs(contract_dir)
+    if contract_dir not in ctx["dirs"]:
+        db.audit_access(uid, "photo_view_denied", key)
+        raise web.HTTPNotFound(text="photo")
     rows = db.photo_index_for_dirs(ctx["dirs"])
     if not _photo_scope_ok(uid, scope, ctx["contracts"], rows):
         db.audit_access(uid, "photo_view_denied", key)
@@ -3670,6 +3680,12 @@ async def _manager_binds(request: web.Request) -> web.Response:
         # 404, как у _manager_employee_q: 403 остаётся одним смыслом «роли нет»
         # (по нему клиент гасит вкладку целиком).
         raise web.HTTPNotFound(text="account")
+    if _foreign_privileged(uid, tid):
+        # Руководитель, который сам возит, привязан к ФИО из чужой команды.
+        # Снять, переставить или одобрить его вход со своего экрана значило бы
+        # выключить коллегу (вместе с токенами приложения) — как и в ссылочных
+        # ручках, такой вход трогает только аналитик в пульте.
+        raise web.HTTPNotFound(text="employee")
     was, kind = row["employee"], (row["kind"] or "agent")
     error = None
     if action == "unbind":
@@ -3681,6 +3697,13 @@ async def _manager_binds(request: web.Request) -> web.Response:
     elif action == "approve":
         if row["approved"]:
             error = "заявки нет: этот аккаунт уже работает"
+        elif any(_foreign_privileged(uid, a["telegram_id"])
+                 for a in db.team_bindings([was])["bound"].get(was, [])):
+            # Одобрение вытесняет прежние устройства этого ФИО (set_bind +
+            # unbind). Если среди них вход другого руководителя — это тот же
+            # случай, что выше, только через заявку постороннего.
+            error = ("под этим ФИО работает вход другого руководителя — "
+                     "сменить ему устройство может аналитик в пульте")
         else:
             prev = db.employee_taken_by(was, exclude_telegram_id=tid)
             db.set_bind(tid, was, kind)
@@ -3783,7 +3806,11 @@ async def _manager_map_data(request: web.Request) -> web.Response:
 
 async def _manager_map(request: web.Request) -> web.Response:
     _map_auth(request)
-    return web.Response(text=MAP_PAGE, content_type="text/html", charset="utf-8")
+    # Растровый фолбэк этой страницы идёт прямо на tile.openstreetmap.org, а
+    # серверы OSM без Referer тайлы не отдают. Политика — умолчание браузера:
+    # наружу уходит только адрес сайта, подписанная строка запроса — никогда.
+    return web.Response(text=MAP_PAGE, content_type="text/html", charset="utf-8",
+                        headers={"Referrer-Policy": "strict-origin-when-cross-origin"})
 
 
 # Отдельная лёгкая страница (не миниапп): руководитель открывает её из Телеги по
@@ -3893,6 +3920,14 @@ def _admin(request: web.Request) -> None:
 
     Отпечаток машины сверяется на КАЖДОМ запросе, а не только при выдаче токена:
     иначе скопированный файл настроек продолжал бы работать на чужой машине.
+
+    Счётчик неудач — тот же, что у остальных дверей: без него перебор токена
+    устройства и мастер-ключа до первой привязки шёл бы именно сюда. Но
+    сверяется он только на ПРОМАХЕ: верный токен не запирается никогда. Все
+    пульты офиса выходят в интернет одним адресом, и один забытый пульт с
+    отозванным токеном, опрашивающий сервер, иначе запер бы на пять минут
+    всех остальных. Перебирать здесь нечего (токен — 256 бит), счётчик
+    держит лишь частоту промахов.
     """
     token = request.headers.get("X-Device-Token") or ""
     device = db.admin_device_by_token(
@@ -3913,6 +3948,7 @@ def _admin(request: web.Request) -> None:
                 key.encode("utf-8")):
             _admin_auth_ok(request)
             return
+    _admin_too_many_fails(request)
     _admin_auth_failed(request)
     raise web.HTTPUnauthorized(text="admin")
 
@@ -4119,8 +4155,25 @@ async def _admin_key_check(request: web.Request) -> web.Response:
 
 
 async def _admin_device_revoke(request: web.Request) -> web.Response:
+    """Отозвать устройство по id или ВСЕ устройства одной роли.
+
+    ``{"all": true, "role": "operator"|"engineer"}`` — ответ на кражу токена.
+    Оператор выдаёт коды пульта, и укравший его токен успевает завести себе
+    второе устройство: отзыв украденного его не гасит. Роль обязательна —
+    «отозвать вообще всё» одной опечаткой не делается.
+    """
     _admin_master_key_only(request)
-    body = await request.json()
+    body = await _json_object(request)
+    if body is None:
+        return web.json_response({"error": "тело не JSON-объект"}, status=400)
+    if body.get("all") is True:
+        role = str(body.get("role") or "").strip().lower()
+        if role not in db.DEVICE_ROLES:
+            return web.json_response(
+                {"error": f"роль должна быть одной из {', '.join(db.DEVICE_ROLES)}"},
+                status=400)
+        revoked = db.revoke_admin_devices_by_role(role)
+        return web.json_response({"ok": True, "role": role, "revoked": revoked})
     try:
         row_id = int(body.get("id"))
     except (TypeError, ValueError):
@@ -5324,9 +5377,49 @@ async def _compress(request: web.Request, handler):
     return resp
 
 
+# Защитные заголовки. Кликджекинг: вредная страница прячет наш адрес в
+# невидимый фрейм и наводит руководителя на «одобрить»/«снять»/«отозвать вход»
+# — страница уже авторизована токеном устройства (ревью 25.09). Caddy на
+# публикаторе заголовков не ставит, поэтому их ставит само приложение.
+#
+# Мини-приложение внутри web.telegram.org живёт во фрейме, поэтому запрет
+# фреймов зависит от того, включён ли Телеграм. CSP — только frame-ancestors:
+# страница карты грузит maplibre с CDN, а оболочка держится на встроенных
+# скриптах, и полный CSP сломал бы обе.
+_TELEGRAM_FRAME_ANCESTORS = ("frame-ancestors 'self' https://web.telegram.org "
+                             "https://*.telegram.org")
+
+
+def _telegram_on(app: web.Application) -> bool:
+    return app.get("bot") is not None or bool((os.getenv("BOT_TOKEN") or "").strip())
+
+
+async def _security_headers(request: web.Request, resp: web.StreamResponse) -> None:
+    """Сигнал on_response_prepare, а не middleware: он срабатывает прямо перед
+    отправкой заголовков у КАЖДОГО ответа — и у брошенных HTTPException
+    (401/404/429), и у потоковых (FileResponse карты с Range), которые
+    middleware видит уже отправленными. Поставленное хендлером не трогаем."""
+    headers = resp.headers
+    headers.setdefault("X-Content-Type-Options", "nosniff")
+    headers.setdefault("Referrer-Policy", "no-referrer")
+    if _telegram_on(request.app):
+        headers.setdefault("Content-Security-Policy", _TELEGRAM_FRAME_ANCESTORS)
+    else:
+        headers.setdefault("X-Frame-Options", "DENY")
+        headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+
+
+# Предел тела запроса. Прокси перед приложением режут тело и сами (встроенный
+# Caddy — 30 МБ), но на порту приложения было 256 МБ: один запрос занимал
+# память сервера целиком. 64 МБ — с запасом под загрузку реестра из пульта
+# и фото (PHOTO_MAX_BYTES).
+CLIENT_MAX_SIZE = 64 * 1024 * 1024
+
+
 def build_app(bot=None) -> web.Application:
-    app = web.Application(client_max_size=256 * 1024 * 1024,
+    app = web.Application(client_max_size=CLIENT_MAX_SIZE,
                           middlewares=[_cors, _compress])
+    app.on_response_prepare.append(_security_headers)
     app["bot"] = bot
     app.router.add_get("/", _index)
     # Короткая ссылка входа. Путь из одной буквы — чтобы адрес целиком помещался

@@ -8,8 +8,10 @@ visits или фотографии. Всё, что она умеет, — зак
 Входят двумя дорогами: ИТ-инженер — веб-страницей ``/ops/`` по коду роли
 engineer, аналитик — пультом (роль operator), куда перенесено всё, что
 задумывалось «гипотетическому инженеру». Контракт ключей один: код доступа
-рождается там, где есть логин к серверу, — командой на сервере или в этой
-панели; код инженера панель не выдаёт никогда.
+рождается там, где есть логин к серверу, — командой на сервере или в пульте
+аналитика, и только код пульта; код инженера панель не выдаёт никогда.
+Инженер кодов не выдаёт вовсе: код пульта открывает должников, и инженер,
+выдав его себе, обошёл бы ровно ту границу, ради которой роль отдельная.
 
 Что сюда сознательно НЕ вошло и почему: произвольный SQL (обошёл бы аудит
 доступа к карточке), произвольные команды и сборка образов (потребовали бы
@@ -100,21 +102,27 @@ async def devices(request: web.Request, device: dict) -> web.Response:
     """Список устройств и выдача кода привязки для пульта.
 
     Это мост между двумя целями владельца: раньше код мог выдать только тот,
-    у кого SSH. Теперь то же самое делает инженер из панели или аналитик из
-    пульта — и «не лазить по SSH» перестаёт противоречить «управляющим
-    становится тот, кто у сервера».
+    у кого SSH. Теперь то же самое делает аналитик из пульта — и «не лазить по
+    SSH» перестаёт противоречить «управляющим становится тот, кто у сервера».
     """
     return web.json_response({"devices": db.list_admin_devices(),
                               "codes": db.list_enroll_codes()})
 
 
 async def issue_code(request: web.Request, device: dict) -> web.Response:
+    if device.get("role") != "operator":
+        # Код пульта — это доступ к должникам. Инженер, которому они закрыты,
+        # выдал бы его себе и в два запроса стал бы оператором (ревью 25.09).
+        return web.json_response(
+            {"error": "код выдаёт оператор или команда на сервере"}, status=403)
     try:
         body = await request.json()
     except (ValueError, TypeError):
         body = {}
-    name = str((body or {}).get("name") or "").strip()
-    role = str((body or {}).get("role") or "operator").strip()
+    if not isinstance(body, dict):
+        body = {}
+    name = str(body.get("name") or "").strip()
+    role = str(body.get("role") or "operator").strip()
     if role != "operator":
         # Заводятся ПУЛЬТЫ. Новую панель инженера заводит тот, кто у сервера, —
         # иначе один инженер расплодил бы себе панелей, и отзыв потерял бы смысл.
@@ -140,6 +148,15 @@ async def revoke(request: web.Request, device: dict) -> web.Response:
         # лечится только доступом к серверу, которого мы его и лишаем.
         return web.json_response(
             {"error": "нельзя отозвать устройство, из которого вы работаете"}, status=400)
+    target = next((d for d in db.list_admin_devices(include_revoked=True)
+                   if d["id"] == row_id), None)
+    if target is not None and target["role"] != (device.get("role") or "operator"):
+        # Оператор и инженер не гасят друг друга: иначе укравший один токен
+        # отзывал бы законные устройства другой роли, а своё оставлял. Чужую
+        # роль отзывает мастер-ключ (/admin/device/revoke.json) или сервер.
+        return web.json_response(
+            {"error": "устройство другой роли отзывается мастер-ключом "
+                      "или командой на сервере"}, status=403)
     ok = db.revoke_admin_device(row_id)
     if ok:
         db.audit_access(0, "ops_device_revoke", str(row_id), _who(device))
@@ -232,12 +249,9 @@ th{color:var(--dim);font-weight:500;font-size:13px}
 
   <div class="card">
     <h2>Устройства</h2>
-    <div class="row">
-      <input id="devName" placeholder="Имя пульта, например «Ноут аналитика»" size="34">
-      <button id="issue">Выдать код для пульта</button>
-    </div>
-    <p class="hint">Код одноразовый и показывается один раз. Код для новой
-       панели инженера здесь не выдаётся — только командой на сервере.</p>
+    <p class="hint">Коды привязки здесь не выдаются: код пульта выдаёт аналитик
+       из своего пульта, код панели — команда на сервере. Отозвать отсюда можно
+       панель инженера; пульт отзывается мастер-ключом или командой на сервере.</p>
     <div id="devices" style="margin-top:12px"></div>
   </div>
 </main>
@@ -245,6 +259,16 @@ th{color:var(--dim);font-weight:500;font-size:13px}
 const BUTTONS = JSON.parse(document.getElementById("app").dataset.buttons || "[]");
 const $ = s => document.querySelector(s);
 let polling = null;
+
+// Всё, что приходит с сервера, ставится ТОЛЬКО текстом (textContent). Имя
+// устройства задаёт тот, кто обменял код, — вставленное разметкой, оно
+// исполнилось бы в панели инженера и унесло бы токен из localStorage.
+function node(tag, cls, text){
+  const e = document.createElement(tag);
+  if(cls) e.className = cls;
+  if(text != null) e.textContent = String(text);
+  return e;
+}
 
 // Устройство — это ИМЕННО ЭТОТ браузер. Отпечаток генерируется один раз и живёт
 // рядом с токеном: сервер сверяет его на каждом запросе, поэтому увезённый
@@ -317,15 +341,26 @@ $("#forget").onclick = () => {
 
 function renderAgent(s){
   const a = s.agent;
-  $("#agent").innerHTML = a.alive
-    ? '<span class="ok">Помощник на хосте отвечает</span> <span class="pill">на связи ' + a.seen + '</span>'
-    : '<span class="bad">Помощник на хосте не отвечает: ' + a.reason + '</span>';
+  const box = $("#agent");
+  box.textContent = "";
+  if(a.alive){
+    box.appendChild(node("span", "ok", "Помощник на хосте отвечает"));
+    box.appendChild(document.createTextNode(" "));
+    box.appendChild(node("span", "pill", "на связи " + a.seen));
+  }else{
+    box.appendChild(node("span", "bad", "Помощник на хосте не отвечает: " + a.reason));
+  }
   const inv = s.inventory || {};
   $("#disk").textContent = inv.disk_free ? ("Свободно на диске: " + inv.disk_free) : "";
   const units = (inv.units || []);
   const sel = $("#unit");
   const keep = sel.value;
-  sel.innerHTML = units.map(u => '<option value="' + u.unit + '">' + u.unit + '</option>').join("");
+  sel.textContent = "";
+  units.forEach(u => {
+    const o = node("option", "", u.unit);
+    o.value = u.unit;
+    sel.appendChild(o);
+  });
   if(keep) sel.value = keep;
   window.__units = units;
   fillBackups();
@@ -335,12 +370,14 @@ function fillBackups(){
   const unit = $("#unit").value;
   const u = (window.__units || []).find(x => x.unit === unit);
   const list = (u && u.backups) || [];
-  $("#backup").innerHTML = list.map(b => '<option>' + b + '</option>').join("");
+  const sel = $("#backup");
+  sel.textContent = "";
+  list.forEach(b => sel.appendChild(node("option", "", b)));
   $("#backupWrap").hidden = list.length === 0;
 }
 
 function renderButtons(){
-  $("#buttons").innerHTML = "";
+  $("#buttons").textContent = "";
   BUTTONS.forEach(b => {
     const el = document.createElement("button");
     el.textContent = b.title;
@@ -394,37 +431,39 @@ function poll(id, title){
 
 async function renderDevices(){
   const d = await api("/ops/devices.json");
-  const rows = d.devices.map(x =>
-    "<tr><td>" + (x.name || "(без имени)") + "</td><td><span class='pill'>" + x.role +
-    "</span></td><td>" + (x.last_seen || "ни разу") + "</td><td>" +
-    "<button data-id='" + x.id + "'>Отозвать</button></td></tr>").join("");
-  const waiting = d.codes.length
-    ? "<p class='hint'>Ждут обмена: " + d.codes.length + "</p>" : "";
-  $("#devices").innerHTML =
-    "<table><tr><th>Устройство</th><th>Роль</th><th>На связи</th><th></th></tr>" +
-    rows + "</table>" + waiting;
-  $("#devices").querySelectorAll("button").forEach(b => {
-    b.onclick = async () => {
-      if(!confirm("Отозвать доступ «" + b.closest("tr").children[0].textContent +
-                  "»?\\n\\nЕго токен перестанет работать немедленно.")) return;
-      try{ await api("/ops/device/revoke.json", "POST", {id: +b.dataset.id}); renderDevices(); }
-      catch(e){ alert(e.message); }
-    };
+  const table = node("table");
+  const head = node("tr");
+  ["Устройство", "Роль", "На связи", ""].forEach(t => head.appendChild(node("th", "", t)));
+  table.appendChild(head);
+  d.devices.forEach(x => {
+    const name = x.name || "(без имени)";
+    const tr = node("tr");
+    tr.appendChild(node("td", "", name));
+    const role = node("td");
+    role.appendChild(node("span", "pill", x.role));
+    tr.appendChild(role);
+    tr.appendChild(node("td", "", x.last_seen || "ни разу"));
+    const cell = node("td");
+    // Панель отзывает только панели: пульт аналитика гасится мастер-ключом
+    // (сервер откажет и сам, кнопка просто не обещает невозможного).
+    if(x.role === "engineer"){
+      const b = node("button", "", "Отозвать");
+      b.onclick = async () => {
+        if(!confirm("Отозвать доступ «" + name +
+                    "»?\\n\\nЕго токен перестанет работать немедленно.")) return;
+        try{ await api("/ops/device/revoke.json", "POST", {id: x.id}); renderDevices(); }
+        catch(e){ alert(e.message); }
+      };
+      cell.appendChild(b);
+    }
+    tr.appendChild(cell);
+    table.appendChild(tr);
   });
+  const box = $("#devices");
+  box.textContent = "";
+  box.appendChild(table);
+  if(d.codes.length) box.appendChild(node("p", "hint", "Ждут обмена: " + d.codes.length));
 }
-
-$("#issue").onclick = async () => {
-  const name = $("#devName").value.trim();
-  if(!name){ alert("Назовите пульт, чтобы через месяц понять, что отзываете."); return; }
-  try{
-    const r = await api("/ops/code.json", "POST", {name, role: "operator"});
-    $("#out").textContent =
-      "Код привязки для «" + name + "» (показывается один раз):\\n\\n    " + r.code +
-      "\\n\\nПередайте его аналитику. В пульте: вкладка «Сервер» → «Привязать по коду».";
-    $("#devName").value = "";
-    renderDevices();
-  }catch(e){ alert(e.message); }
-};
 
 $("#unit").onchange = fillBackups;
 
@@ -433,7 +472,11 @@ async function refresh(){
     const s = await api("/ops/state.json");
     $("#who").textContent = s.you.name ? ("вы: " + s.you.name) : "";
     renderAgent(s);
-  }catch(e){ $("#agent").innerHTML = '<span class="bad">' + e.message + '</span>'; }
+  }catch(e){
+    const box = $("#agent");
+    box.textContent = "";
+    box.appendChild(node("span", "bad", e.message));
+  }
 }
 
 async function start(){

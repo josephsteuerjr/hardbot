@@ -1,6 +1,6 @@
 """«Карта дня»: подписанные ссылки (maplink) и сбор точек (db.day_map_points).
 
-Ссылка = HMAC от (сотрудник, дата, expiry) на ключе из токена бота: чужая подпись,
+Ссылка = HMAC от (сотрудник, дата, expiry) на своём секрете сервера: чужая подпись,
 испорченная дата или истёкший срок — не пускают. Точки: визиты с гео-контролем,
 метки выездника за день, адреса обработанных должников.
 """
@@ -20,7 +20,7 @@ def _q(qs: str) -> dict:
 
 
 def test_sign_verify_roundtrip():
-    db.init_db()   # ключ подписи читает settings.bot_token
+    db.init_db()   # секрет подписи живёт в settings (см. test_maplink_secret)
     qs = _q(maplink.sign(EMP, TODAY))
     assert unquote(qs["e"]) == EMP
     assert maplink.verify(unquote(qs["e"]), qs["d"], qs["x"], qs["s"])

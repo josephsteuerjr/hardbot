@@ -4034,6 +4034,32 @@ def _device_token_hash(token: str) -> str:
 
 
 ADMIN_BOOTSTRAP_KEY = "admin_bootstrap_done"
+# Та же отметка файлом В КАТАЛОГЕ ДАННЫХ, рядом с базой, но не в ней.
+ADMIN_BOOTSTRAP_FILE = "admin_bootstrap.done"
+
+
+def admin_bootstrap_marker() -> Path:
+    """Путь файла-отметки: каталог базы (на сервере это /data, том контейнера).
+
+    Считается от DB_PATH в момент вызова, а не при импорте: база, открытая из
+    другого каталога, — другой сервер со своей отметкой.
+    """
+    return Path(DB_PATH).parent / ADMIN_BOOTSTRAP_FILE
+
+
+def _mark_admin_bootstrap_done() -> None:
+    """Поставить отметку и в базе, и файлом. Файл не переписываем: в нём время
+    ПЕРВОЙ привязки, по нему видно, с какого момента ключ разжалован."""
+    set_setting(ADMIN_BOOTSTRAP_KEY, "1")
+    marker = admin_bootstrap_marker()
+    try:
+        if not marker.exists():
+            marker.write_text(datetime.now().isoformat(timespec="seconds") + "\n",
+                              encoding="utf-8")
+    except OSError as exc:
+        # Отметка в базе остаётся и держит ключ разжалованным, пока базу не
+        # подменят. Молчать нельзя: без файла подмена базы вернёт ключу власть.
+        logging.warning("отметка бутстрапа не записана файлом %s: %s", marker, exc)
 
 
 def admin_bootstrap_done() -> bool:
@@ -4048,19 +4074,27 @@ def admin_bootstrap_done() -> bool:
     устройством, обладатель ключа отозвал бы все устройства и вернул себе полный
     доступ — то есть «один ключ открывает всё» вернулось бы через два шага.
 
-    На УЖЕ РАБОТАЮЩЕМ сервере флага в настройках нет: устройства там привязаны
-    давно, а строка появилась только сейчас. Поэтому если записей об устройствах
-    хоть одна — считаем бутстрап закрытым и запоминаем это. Без такой сверки
-    обновление молча оставило бы боевому серверу прежнее поведение, и вся правка
-    подействовала бы только на новые установки.
+    Главная отметка — ФАЙЛ в каталоге данных, а не строка в базе. База
+    подменяется штатно: `migrate.sh receive --replace` ставит чужую базу без
+    устройств, restore поднимает копию, снятую до первой привязки, — и флаг,
+    живший только в базе, уезжал вместе с ней, возвращая ключу весь /admin/*
+    (ревью 25.09). Файл ни в архив переезда, ни в копию базы не попадает, и ни
+    приём, ни восстановление его не стирают.
+
+    На УЖЕ РАБОТАЮЩЕМ сервере отметки может не быть ни файлом, ни в настройках:
+    устройства там привязаны давно, а отметка появилась позже. Поэтому строка в
+    настройках или хоть одна запись об устройстве тоже означают «закрыто», и
+    отметка тут же дописывается файлом. Без такой сверки обновление молча
+    оставило бы боевому серверу прежнее поведение.
     """
-    if get_setting(ADMIN_BOOTSTRAP_KEY) == "1":
+    if admin_bootstrap_marker().exists():
         return True
-    with connect() as conn:
-        row = conn.execute("SELECT 1 FROM admin_devices LIMIT 1").fetchone()
-    if row is None:
-        return False
-    set_setting(ADMIN_BOOTSTRAP_KEY, "1")
+    if get_setting(ADMIN_BOOTSTRAP_KEY) != "1":
+        with connect() as conn:
+            row = conn.execute("SELECT 1 FROM admin_devices LIMIT 1").fetchone()
+        if row is None:
+            return False
+    _mark_admin_bootstrap_done()
     return True
 
 
@@ -4077,6 +4111,9 @@ def enroll_admin_device(device_id: str, name: str = "", role: str = "operator") 
     role = _role(role)
     if not device_id:
         raise ValueError("device_id обязателен")
+    # Спрашиваем ДО вставки: после неё устройство уже есть, и сверка «по факту
+    # устройств» всегда отвечала бы «закрыто» — запись о закрытии не появлялась.
+    was_open = not admin_bootstrap_done()
     with connect() as conn:
         # Гасим прежний токен ТОЙ ЖЕ роли с той же машины. Одна машина может быть
         # одновременно и пультом аналитика, и панелью инженера — это разные
@@ -4092,8 +4129,10 @@ def enroll_admin_device(device_id: str, name: str = "", role: str = "operator") 
         row = conn.execute("SELECT id FROM admin_devices WHERE token_hash=?",
                            (_device_token_hash(token),)).fetchone()
         conn.commit()
-    if not admin_bootstrap_done():
-        set_setting(ADMIN_BOOTSTRAP_KEY, "1")
+    # Отметку ставит любая привязка — мастер-ключом или обменом кода (он
+    # приходит сюда же). Повторная ничего не меняет: файл хранит первую.
+    _mark_admin_bootstrap_done()
+    if was_open:
         audit_access(0, "admin_bootstrap_closed", str(row["id"]))
     audit_access(0, "device_enroll", str(row["id"]), f"{role}: {name or device_id[:16]}")
     return {"id": row["id"], "token": token, "created_at": now, "role": role}
@@ -4158,6 +4197,30 @@ def revoke_admin_device(device_row_id: int) -> bool:
     if changed:
         audit_access(0, "device_revoke", str(device_row_id))
     return bool(changed)
+
+
+def revoke_admin_devices_by_role(role: str) -> int:
+    """Отозвать ВСЕ живые устройства роли. Возвращает, сколько отозвано.
+
+    Ответ на украденный токен оператора: он выдаёт коды пульта, и укравший
+    успевает завести себе второе устройство, которое отзыв украденного не
+    гасит. Выбор и отзыв — в одной транзакции, чтобы в аудит попал ровно тот
+    список, что погас, даже если рядом кто-то обменивает код.
+    """
+    role = _role(role)
+    now = datetime.now().isoformat(timespec="seconds")
+    # Роль у старых строк бывает пустой — это оператор (см. list_admin_devices).
+    where = "revoked_at IS NULL AND COALESCE(NULLIF(role, ''), 'operator') = ?"
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        ids = [r["id"] for r in conn.execute(
+            f"SELECT id FROM admin_devices WHERE {where} ORDER BY id", (role,))]
+        conn.execute(f"UPDATE admin_devices SET revoked_at=? WHERE {where}",
+                     (now, role))
+        conn.commit()
+    audit_access(0, "device_revoke_all", role,
+                 f"отозвано {len(ids)}: " + ",".join(f"#{i}" for i in ids))
+    return len(ids)
 
 
 # --- Коды привязки -----------------------------------------------------------

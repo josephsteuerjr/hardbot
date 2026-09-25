@@ -23,18 +23,21 @@ SHELL = (ROOT / "server" / "miniapp" / "index.html").read_text(encoding="utf-8")
 
 MGR, STRANGER = 571000, 571999
 DEV_OLD, DEV_NEW, DEV_ALIEN = 571001, 571002, 571003
-IDS = (MGR, STRANGER, DEV_OLD, DEV_NEW, DEV_ALIEN)
+# Второй руководитель, который сам возит под ФИО из команды MGR.
+MGR_DRIVER = 571500
+IDS = (MGR, STRANGER, DEV_OLD, DEV_NEW, DEV_ALIEN, MGR_DRIVER)
+_IN_IDS = ",".join("?" * len(IDS))
 EMP_A, EMP_B, EMP_ALIEN = "Ктоаров А.", "Ктобеков Б.", "Ктовалиев В."
 
 
 def _wipe():
     with db.connect() as conn:
         conn.execute("DELETE FROM clients WHERE contract_id LIKE 'KTO-%'")
-        conn.execute("DELETE FROM managers WHERE telegram_id IN (?,?,?,?,?)", IDS)
-        conn.execute("DELETE FROM agent_bind WHERE telegram_id IN (?,?,?,?,?)", IDS)
-        conn.execute("DELETE FROM users WHERE telegram_id IN (?,?,?,?,?)", IDS)
-        conn.execute("DELETE FROM app_tokens WHERE telegram_id IN (?,?,?,?,?)", IDS)
-        conn.execute("DELETE FROM app_links WHERE telegram_id IN (?,?,?,?,?)", IDS)
+        conn.execute(f"DELETE FROM managers WHERE telegram_id IN ({_IN_IDS})", IDS)
+        conn.execute(f"DELETE FROM agent_bind WHERE telegram_id IN ({_IN_IDS})", IDS)
+        conn.execute(f"DELETE FROM users WHERE telegram_id IN ({_IN_IDS})", IDS)
+        conn.execute(f"DELETE FROM app_tokens WHERE telegram_id IN ({_IN_IDS})", IDS)
+        conn.execute(f"DELETE FROM app_links WHERE telegram_id IN ({_IN_IDS})", IDS)
         conn.execute("DELETE FROM agent_bind WHERE employee IN (?,?,?)",
                      (EMP_A, EMP_B, EMP_ALIEN))
         conn.commit()
@@ -158,6 +161,50 @@ def test_neither_a_foreign_name_nor_a_foreign_account_can_be_touched(monkeypatch
     with pytest.raises(web.web.HTTPNotFound):       # аккаунт без привязки вовсе
         _call("POST", {"action": "unbind", "telegram_id": 571777}, monkeypatch)
     assert db.get_binding(DEV_ALIEN) == EMP_ALIEN and db.get_binding(DEV_OLD) == EMP_A
+
+
+# --- чужой руководитель в своей команде (ревью 25.09, #8) ---------------------
+def _driving_manager():
+    """MGR_DRIVER — руководитель (строка в managers) и сам возит под EMP_B,
+    которое входит в команду MGR. Ссылочные ручки такой вход не трогают;
+    теперь не трогает и эта."""
+    db.set_manager(MGR_DRIVER, "Рук-водитель", [], [])
+    db.reset_role_caches()
+    db.set_bind(MGR_DRIVER, EMP_B)
+    return _token(MGR_DRIVER)
+
+
+@pytest.mark.parametrize("body", [
+    {"action": "unbind", "telegram_id": MGR_DRIVER},
+    {"action": "reassign", "telegram_id": MGR_DRIVER, "employee": EMP_A},
+    {"action": "approve", "telegram_id": MGR_DRIVER},
+])
+def test_another_managers_login_is_not_touched(monkeypatch, body):
+    tok = _driving_manager()
+    assert web._foreign_privileged(MGR, MGR_DRIVER)
+    with pytest.raises(web.web.HTTPNotFound):
+        _call("POST", body, monkeypatch)
+    assert db.get_binding(MGR_DRIVER) == EMP_B, "коллегу сняли или переставили"
+    assert db.uid_for_app_token(tok) == MGR_DRIVER, "у коллеги отняли вход"
+
+
+def test_a_strangers_request_does_not_push_out_another_manager(monkeypatch):
+    """Обход через заявку: одобрение чужой заявки на ФИО, под которым возит
+    другой руководитель, вытеснило бы его устройство и токены."""
+    tok = _driving_manager()
+    db.bind_agent(STRANGER, EMP_B, "agent", approved=False)
+    out = _call("POST", {"action": "approve", "telegram_id": STRANGER}, monkeypatch)
+    assert out["ok"] is False and "другого руководителя" in out["error"]
+    assert db.get_binding(MGR_DRIVER) == EMP_B
+    assert db.uid_for_app_token(tok) == MGR_DRIVER
+    assert db.get_binding(STRANGER) is None, "заявку одобрили"
+
+
+def test_own_login_is_still_the_managers_own_business(monkeypatch):
+    """Себя руководитель по-прежнему правит сам: «чужой» — только другой."""
+    db.set_bind(MGR, EMP_B)
+    out = _call("POST", {"action": "unbind", "telegram_id": MGR}, monkeypatch)
+    assert out["ok"] and db.get_binding(MGR) is None
 
 
 # --- одобрение заявки = смена устройства -------------------------------------

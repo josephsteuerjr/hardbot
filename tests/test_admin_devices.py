@@ -240,11 +240,178 @@ def test_existing_install_loses_the_key_power_on_upgrade(monkeypatch):
     _fresh(monkeypatch)
     import db
     db.enroll_admin_device("fp-старый", "Привязан до обновления")
-    # Убираем именно флаг, оставляя устройство: так выглядит база после апдейта.
+    # Убираем именно отметки, оставляя устройство: так выглядит база после
+    # апдейта с версии, где не было ни строки в настройках, ни файла.
     with db.connect() as conn:
         conn.execute("DELETE FROM settings WHERE key=?", (db.ADMIN_BOOTSTRAP_KEY,))
         conn.commit()
+    db.admin_bootstrap_marker().unlink()
 
     status, _ = _call("GET", "/admin/stats", headers=KEY)
     assert status == 401, "после обновления ключ всё ещё открывает данные"
     assert db.admin_bootstrap_done(), "флаг не проставился по факту устройств"
+    assert db.admin_bootstrap_marker().is_file(), "отметка не дописана файлом"
+
+
+# --- отметка бутстрапа вне базы (ревью 25.09, #10) ----------------------------
+def _wipe_devices_and_flag():
+    """Как после `migrate.sh receive --replace` или restore копии, снятой до
+    первой привязки: в базе нет ни устройств, ни строки-флага."""
+    with db.connect() as conn:
+        conn.execute("DELETE FROM admin_devices")
+        conn.execute("DELETE FROM admin_enroll_codes")
+        conn.execute("DELETE FROM settings WHERE key=?", (db.ADMIN_BOOTSTRAP_KEY,))
+        conn.commit()
+
+
+def test_replacing_the_database_does_not_hand_the_key_its_power_back(monkeypatch):
+    """Подмена базы штатна (переезд, восстановление), и флаг в базе уезжал с
+    ней: мастер-ключ снова открывал весь /admin/*. Файл в каталоге данных
+    подмену переживает."""
+    _fresh(monkeypatch)
+    _call("POST", "/admin/device/enroll.json", headers=KEY,
+          json_body={"device_id": "fp-1", "name": "Первый"})
+    assert db.admin_bootstrap_marker().is_file(), "привязка не оставила файл"
+
+    _wipe_devices_and_flag()
+    assert db.admin_bootstrap_done(), "пустая база переоткрыла бутстрап"
+    for path in ("/admin/stats", "/admin/export.json"):
+        status, _ = _call("GET", path, headers=KEY)
+        assert status == 401, f"после подмены базы ключ открыл {path}"
+
+
+def test_file_alone_closes_the_bootstrap(monkeypatch):
+    """Пустая admin_devices и файл на месте — ключ данных не видит, но
+    привязать и отозвать может: это путь восстановления."""
+    _fresh(monkeypatch)
+    _wipe_devices_and_flag()
+    db.admin_bootstrap_marker().write_text("2026-09-25T00:00:00\n", encoding="utf-8")
+
+    status, _ = _call("GET", "/admin/stats", headers=KEY)
+    assert status == 401
+    status, dev = _call("POST", "/admin/device/enroll.json", headers=KEY,
+                        json_body={"device_id": "fp-1", "name": "Заново"})
+    assert status == 200 and dev["token"]
+    status, body = _call("POST", "/admin/device/revoke.json", headers=KEY,
+                         json_body={"id": dev["id"]})
+    assert status == 200 and body["ok"] is True
+
+
+def test_code_exchange_leaves_the_file_too(monkeypatch):
+    _fresh(monkeypatch)
+    assert not db.admin_bootstrap_marker().exists()
+    code = db.issue_enroll_code("Ноут")["code"]
+    status, _ = _call("POST", "/admin/device/redeem.json", headers={},
+                      json_body={"code": code, "device_id": "fp-1"})
+    assert status == 200
+    assert db.admin_bootstrap_marker().is_file()
+
+
+def test_the_first_binding_is_written_to_the_audit(monkeypatch):
+    """Запись «бутстрап закрыт» раньше не появлялась никогда: сверка шла ПОСЛЕ
+    вставки устройства и всегда отвечала «уже закрыто»."""
+    _fresh(monkeypatch)
+    with db.connect() as conn:       # журнал общий на прогон — берём только свои
+        before = conn.execute("SELECT COALESCE(MAX(id), 0) FROM audit").fetchone()[0]
+    first = db.enroll_admin_device("fp-1", "Первый")
+    db.enroll_admin_device("fp-2", "Второй")
+    closed = [r for r in db.audit_tail(50)
+              if r["id"] > before and r["action"] == "admin_bootstrap_closed"]
+    assert [r["target"] for r in closed] == [str(first["id"])]
+
+
+# --- отзыв всех устройств роли (ревью 25.09, #9) ------------------------------
+def test_master_key_revokes_every_device_of_a_role(monkeypatch):
+    """Укравший токен оператора заводит себе второе устройство, и отзыв
+    украденного его не гасит. Лечится одним запросом: все пульты разом."""
+    _fresh(monkeypatch)
+    stolen = db.enroll_admin_device("fp-1", "Ноут аналитика", "operator")
+    code = db.issue_enroll_code("самозаведённый")["code"]
+    _s, minted = _call("POST", "/admin/device/redeem.json", headers={},
+                       json_body={"code": code, "device_id": "fp-чужой"})
+    panel = db.enroll_admin_device("fp-eng", "Панель", "engineer")
+
+    status, body = _call("POST", "/admin/device/revoke.json", headers=KEY,
+                         json_body={"all": True, "role": "operator"})
+    assert status == 200 and body == {"ok": True, "role": "operator", "revoked": 2}
+    for token, fp in ((stolen["token"], "fp-1"), (minted["token"], "fp-чужой")):
+        status, _ = _call("GET", "/admin/stats",
+                          headers={"X-Device-Token": token, "X-Device-Id": fp})
+        assert status == 401, "пульт пережил отзыв роли"
+    assert db.admin_device_by_token(panel["token"], "fp-eng"), "задело чужую роль"
+
+    row = next(r for r in db.audit_tail(20) if r["action"] == "device_revoke_all")
+    assert row["target"] == "operator" and row["detail"].startswith("отозвано 2")
+
+    status, body = _call("POST", "/admin/device/revoke.json", headers=KEY,
+                         json_body={"all": True, "role": "operator"})
+    assert status == 200 and body["revoked"] == 0
+
+
+def test_role_revoke_needs_the_master_key_and_a_role(monkeypatch):
+    _fresh(monkeypatch)
+    dev = db.enroll_admin_device("fp-1", "Пульт", "operator")
+    as_dev = {"X-Device-Token": dev["token"], "X-Device-Id": "fp-1"}
+    status, _ = _call("POST", "/admin/device/revoke.json", headers=as_dev,
+                      json_body={"all": True, "role": "operator"})
+    assert status == 401, "токен устройства отозвал роль"
+    for body in ({"all": True}, {"all": True, "role": "владелец"}):
+        status, _ = _call("POST", "/admin/device/revoke.json", headers=KEY,
+                          json_body=body)
+        assert status == 400, body
+    # «all» строкой — не согласие отозвать всё: идёт обычный путь по id.
+    status, _ = _call("POST", "/admin/device/revoke.json", headers=KEY,
+                      json_body={"all": "true", "role": "operator"})
+    assert status == 400
+    assert db.admin_device_by_token(dev["token"], "fp-1"), "отозвано без явного all"
+
+
+# --- счётчик неудач на операторском входе -------------------------------------
+def test_operator_door_locks_after_twenty_misses(monkeypatch):
+    """У _admin счётчика не было: перебор токена устройства шёл без предела."""
+    _fresh(monkeypatch)
+    db.enroll_admin_device("fp-1", "Пульт", "operator")
+
+    async def scenario():
+        client = TestClient(TestServer(web.build_app(None)))
+        await client.start_server()
+        try:
+            statuses = []
+            for i in range(web._ADMIN_FAIL_LIMIT + 1):
+                resp = await client.get("/admin/stats", headers={
+                    "X-Device-Token": f"не-тот-{i}", "X-Device-Id": "fp-1"})
+                statuses.append(resp.status)
+            return statuses
+        finally:
+            await client.close()
+
+    statuses = asyncio.run(scenario())
+    assert statuses[:web._ADMIN_FAIL_LIMIT] == [401] * web._ADMIN_FAIL_LIMIT
+    assert statuses[-1] == 429
+
+
+def test_operator_door_never_locks_out_a_valid_token(monkeypatch):
+    """Все пульты офиса выходят в интернет одним адресом. Забытый пульт с
+    отозванным токеном, опрашивающий сервер, не должен запирать остальных:
+    промахи копятся и режутся 429, а верный токен проходит всегда."""
+    _fresh(monkeypatch)
+    good = db.enroll_admin_device("fp-good", "Пульт", "operator")["token"]
+
+    async def scenario():
+        client = TestClient(TestServer(web.build_app(None)))
+        await client.start_server()
+        try:
+            for i in range(web._ADMIN_FAIL_LIMIT + 3):
+                await client.get("/admin/stats", headers={
+                    "X-Device-Token": f"отозванный-{i}", "X-Device-Id": "fp-old"})
+            bad = await client.get("/admin/stats", headers={
+                "X-Device-Token": "отозванный", "X-Device-Id": "fp-old"})
+            ok = await client.get("/admin/stats", headers={
+                "X-Device-Token": good, "X-Device-Id": "fp-good"})
+            return bad.status, ok.status
+        finally:
+            await client.close()
+
+    bad, ok = asyncio.run(scenario())
+    assert bad == 429, "промахи по-прежнему режутся"
+    assert ok == 200, "верный токен соседнего пульта не заперт"

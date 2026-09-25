@@ -460,14 +460,19 @@ def test_entering_by_link_does_not_forgive_master_key_guessing(fresh):
                                 headers={"X-Admin-Key": "не тот"},
                                 json={"device_id": f"x{i}", "name": "чужой"})
             more.append(rr.status)
-        return bad, free, left, more, (await s.links())["links"][0]
+        # Операторская дверь /admin/* на том же счётчике, но верный ключ она не
+        # запирает (за одним адресом офиса — все пульты); состояние ссылки
+        # читаем из базы, чтобы не зависеть от этой двери.
+        still = await s.c.get("/admin/app_links.json", headers=KEY)
+        return bad, free, left, more, still.status, db.app_links_state()[0]
 
-    bad, free, left, more, state = run(scenario)
+    bad, free, left, more, still, state = run(scenario)
     assert set(bad) == {401}
     assert free == 200, "своей ссылкой человек по-прежнему входит"
     assert state["uses"] == 1, "бесплатный обмен ничего не потратил — потому и опасен"
     assert left == web._ADMIN_FAIL_LIMIT - 1, "неудачи по ключу остались на счету"
     assert more == [401, 429], "потолок достигнут, дверь закрылась"
+    assert still == 200, "верный ключ операторскую дверь по-прежнему открывает"
 
 
 # --- схема базы --------------------------------------------------------------

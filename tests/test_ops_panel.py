@@ -105,26 +105,40 @@ def test_panel_page_is_open_but_carries_no_data(monkeypatch):
         assert leak not in page, f"на открытой странице оказалось «{leak}»"
 
 
-def test_engineer_issues_codes_only_for_the_pult(monkeypatch):
-    """Инженер заводит пульты, но не вторую панель.
+def test_engineer_issues_no_codes_at_all(monkeypatch):
+    """Инженер не выдаёт кодов вовсе — ни пульту, ни панели.
 
-    Иначе один инженер расплодил бы себе панелей, и отзыв перестал бы что-то
-    значить: отозвали одну — работает вторая.
+    Код пульта открывает должников. Раньше инженер выдавал его себе, обменивал
+    без мастер-ключа и в два запроса становился оператором (ревью 25.09, PoC
+    poc_eng_escalate.py): граница «панель не видит должников» стиралась.
     """
     _fresh(monkeypatch)
     engineer = _device("engineer", "fp-eng")
-    status, body = _call("POST", "/ops/code.json", headers=engineer,
-                         json_body={"name": "Ноут аналитика", "role": "operator"})
-    assert status == 200 and body["role"] == "operator"
+    for role in ("operator", "engineer"):
+        status, body = _call("POST", "/ops/code.json", headers=engineer,
+                             json_body={"name": "Себе же", "role": role})
+        assert status == 403, role
+        assert body["error"] == "код выдаёт оператор или команда на сервере"
+    assert db.list_enroll_codes(include_used=True) == [], "код всё-таки выписан"
 
+
+def test_engineer_cannot_climb_to_operator_through_a_code(monkeypatch):
+    """Вся цепочка из PoC: код → обмен → /admin/stats. Рвётся на первом шаге."""
+    _fresh(monkeypatch)
+    engineer = _device("engineer", "fp-eng")
     status, body = _call("POST", "/ops/code.json", headers=engineer,
-                         json_body={"name": "Вторая панель", "role": "engineer"})
-    assert status == 400 and "командой на сервере" in body["error"]
+                         json_body={"name": "promote", "role": "operator"})
+    assert status == 403 and not body.get("code")
+    status, _ = _call("POST", "/admin/device/redeem.json", headers={},
+                      json_body={"code": body.get("code") or "", "device_id": "eng-2"})
+    assert status == 400
+    status, _ = _call("GET", "/admin/stats", headers=engineer)
+    assert status == 401
 
 
 def test_operator_issues_codes_only_for_the_pult(monkeypatch):
-    """Аналитик из пульта выдаёт коды только пультам — то же правило, что у
-    инженера: вторую ПАНЕЛЬ не заводит никто, кроме того, кто у сервера."""
+    """Аналитик из пульта выдаёт коды только пультам: вторую ПАНЕЛЬ не
+    заводит никто, кроме того, кто у сервера."""
     _fresh(monkeypatch)
     pult = _device("operator", "fp-pult")
     status, body = _call("POST", "/ops/code.json", headers=pult,
@@ -159,6 +173,55 @@ def test_engineer_cannot_revoke_the_device_he_works_from(monkeypatch):
                          json_body={"id": made["id"]})
     assert status == 400 and "из которого вы работаете" in body["error"]
     assert db.admin_device_by_token(made["token"], "fp-eng"), "устройство всё-таки отозвано"
+
+
+def test_operator_and_engineer_do_not_revoke_each_other(monkeypatch):
+    """Роли гасят только свои устройства.
+
+    Иначе укравший токен одной роли отзывал бы законные устройства другой, а
+    своё оставлял. Чужую роль отзывает мастер-ключ.
+    """
+    _fresh(monkeypatch)
+    pult = db.enroll_admin_device("fp-pult", "Пульт", "operator")
+    panel = db.enroll_admin_device("fp-eng", "Панель", "engineer")
+    as_pult = {"X-Device-Token": pult["token"], "X-Device-Id": "fp-pult"}
+    as_panel = {"X-Device-Token": panel["token"], "X-Device-Id": "fp-eng"}
+
+    status, body = _call("POST", "/ops/device/revoke.json", headers=as_pult,
+                         json_body={"id": panel["id"]})
+    assert status == 403 and "мастер-ключом" in body["error"]
+    status, body = _call("POST", "/ops/device/revoke.json", headers=as_panel,
+                         json_body={"id": pult["id"]})
+    assert status == 403
+    assert db.admin_device_by_token(pult["token"], "fp-pult")
+    assert db.admin_device_by_token(panel["token"], "fp-eng")
+
+
+def test_a_role_revokes_its_own_kind(monkeypatch):
+    _fresh(monkeypatch)
+    first = _device("engineer", "fp-eng-1")
+    second = db.enroll_admin_device("fp-eng-2", "Вторая панель", "engineer")
+    status, body = _call("POST", "/ops/device/revoke.json", headers=first,
+                         json_body={"id": second["id"]})
+    assert status == 200 and body["ok"] is True
+    assert db.admin_device_by_token(second["token"], "fp-eng-2") is None
+
+
+def test_panel_page_never_inserts_markup(monkeypatch):
+    """Имя устройства задаёт тот, кто обменял код, — строкой в теле обмена.
+
+    Страница вставляла его разметкой: имя вида <img onerror=…> исполнялось бы в
+    панели инженера и уносило его токен из localStorage. Теперь данные ставятся
+    только текстом, и HTML-вставок на странице нет вовсе.
+    """
+    _fresh(monkeypatch)
+    status, body = _call("GET", "/ops/", headers={})
+    page = body.get("text", "")
+    assert status == 200
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+        assert sink not in page, f"на странице осталось {sink}"
+    assert 'node("td", "", name)' in page, "имя устройства ставится не текстом"
+    assert "/ops/code.json" not in page, "кнопка кода осталась, а инженеру её не выдают"
 
 
 def test_unknown_action_is_refused_before_the_queue(monkeypatch):

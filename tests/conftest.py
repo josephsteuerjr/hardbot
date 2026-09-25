@@ -69,6 +69,14 @@ def _admin_access_starts_fresh():
     except ImportError:
         yield
         return
+    # Отметка живёт и файлом рядом с базой (переживает подмену базы), поэтому
+    # сбрасываем обе: иначе первая же привязка разжаловала бы ключ навсегда.
+    marker = getattr(db, "admin_bootstrap_marker", None)
+    if marker is not None:
+        try:
+            marker().unlink(missing_ok=True)
+        except OSError:
+            pass
     try:
         with db.connect() as conn:
             conn.execute("DELETE FROM settings WHERE key=?", (db.ADMIN_BOOTSTRAP_KEY,))
