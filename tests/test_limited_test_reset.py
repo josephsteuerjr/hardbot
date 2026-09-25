@@ -68,7 +68,8 @@ def _seed_all_tables(photos: Path) -> None:
         )
         conn.execute(
             "INSERT INTO app_tokens(token, telegram_id, created_at, expires_at) "
-            "VALUES ('token-reset', 10, '2026-07-29', '2026-08-29')"
+            "VALUES (?, 10, '2026-07-29', '2026-08-29')",
+            (db.app_token_key("token-reset"),),
         )
         conn.execute(
             "INSERT INTO photo_geo(contract_id, file, telegram_id) "

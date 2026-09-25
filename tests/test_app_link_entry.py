@@ -479,7 +479,9 @@ def test_entering_by_link_does_not_forgive_master_key_guessing(fresh):
 def test_columns_migrate_on_a_working_database_with_rows(monkeypatch, tmp_path):
     """Рабочая база прода переживает эту выкладку без ручных действий: колонки
     доезжают тем же шаблоном, что и `uses`, а DEFAULT доливает двойку в СТРОКИ,
-    которые уже лежат. Проверяем на базе старой схемы с данными."""
+    которые уже лежат. Проверяем на базе старой схемы с данными. Токен телефона,
+    вошедшего до выкладки, лежит в такой базе сырым: он переезжает в хэш, а
+    телефон продолжает входить тем же токеном."""
     old = tmp_path / "hardbot.db"
     conn = sqlite3.connect(old)
     conn.execute("CREATE TABLE app_links (code TEXT PRIMARY KEY, telegram_id INTEGER,"
@@ -488,6 +490,8 @@ def test_columns_migrate_on_a_working_database_with_rows(monkeypatch, tmp_path):
                  " created_at TEXT, expires_at TEXT)")
     conn.execute("INSERT INTO app_links VALUES ('старая', 77, '2026-09-20T10:00:00',"
                  " NULL, 0)")
+    conn.execute("INSERT INTO app_tokens VALUES ('старый-токен', 77,"
+                 " '2026-09-20T10:00:00', '2099-01-01T00:00:00')")
     conn.commit()
     conn.close()
 
@@ -497,9 +501,12 @@ def test_columns_migrate_on_a_working_database_with_rows(monkeypatch, tmp_path):
     with db.connect() as c:
         row = dict(c.execute("SELECT * FROM app_links").fetchone())
         tok_cols = {r[1] for r in c.execute("PRAGMA table_info(app_tokens)")}
+        stored = [r[0] for r in c.execute("SELECT token FROM app_tokens")]
     assert row["max_uses"] == db.APP_LINK_DEFAULT_USES
     assert row["bonus_ios"] == 0 and row["last_use_at"] is None
     assert "agent" in tok_cols
+    assert stored == [db.app_token_key("старый-токен")], "в базе только хэш"
+    assert db.uid_for_app_token("старый-токен") == 77, "телефон не разлогинило"
     # и ссылка, выданная ДО выкладки, продолжает пускать ровно два раза
     assert db.redeem_app_link("старая", agent="android")
     assert db.redeem_app_link("старая", agent="android")

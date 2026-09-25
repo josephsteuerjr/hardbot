@@ -88,7 +88,8 @@ def test_expired_token_rejected():
     tok = db.redeem_app_link(db.create_app_link(506))
     past = (datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds")
     with db.connect() as conn:
-        conn.execute("UPDATE app_tokens SET expires_at = ? WHERE token = ?", (past, tok))
+        conn.execute("UPDATE app_tokens SET expires_at = ? WHERE token = ?",
+                     (past, db.app_token_key(tok)))
         conn.commit()
     assert db.uid_for_app_token(tok) is None
 
@@ -100,12 +101,13 @@ def test_touch_extends_living_token():
     tok = db.redeem_app_link(db.create_app_link(510))
     soon = (datetime.now() + timedelta(minutes=5)).isoformat(timespec="seconds")
     with db.connect() as conn:
-        conn.execute("UPDATE app_tokens SET expires_at = ? WHERE token = ?", (soon, tok))
+        conn.execute("UPDATE app_tokens SET expires_at = ? WHERE token = ?",
+                     (soon, db.app_token_key(tok)))
         conn.commit()
     db.touch_app_token(tok)
     with db.connect() as conn:
         exp = conn.execute("SELECT expires_at FROM app_tokens WHERE token = ?",
-                           (tok,)).fetchone()["expires_at"]
+                           (db.app_token_key(tok),)).fetchone()["expires_at"]
     assert exp > (datetime.now() + timedelta(days=db.APP_TOKEN_DAYS - 1)) \
         .isoformat(timespec="seconds")
 
@@ -116,7 +118,8 @@ def test_touch_does_not_resurrect_expired():
     tok = db.redeem_app_link(db.create_app_link(511))
     past = (datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds")
     with db.connect() as conn:
-        conn.execute("UPDATE app_tokens SET expires_at = ? WHERE token = ?", (past, tok))
+        conn.execute("UPDATE app_tokens SET expires_at = ? WHERE token = ?",
+                     (past, db.app_token_key(tok)))
         conn.commit()
     db.touch_app_token(tok)
     assert db.uid_for_app_token(tok) is None

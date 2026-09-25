@@ -1208,6 +1208,8 @@ def init_db() -> None:
         # не открывается» начинается с вопроса «а ты с чего заходил».
         if "agent" not in tcols:
             conn.execute("ALTER TABLE app_tokens ADD COLUMN agent TEXT")
+        # Сырые девайс-токены → sha256 (один раз, под маркером; см. app_token_key).
+        _hash_app_tokens_once(conn)
         # Миграция app_links времён одноразовых кодов (без счётчика uses) и времён
         # общего потолка обменов (без max_uses/bonus_ios/last_use_at/last_agent).
         # Шаблон один и тот же — PRAGMA table_info + ALTER TABLE ... DEFAULT: рабочая
@@ -1765,6 +1767,54 @@ APP_TOKEN_DAYS = 30         # скользящий срок токена: про
 # начал во встроенном браузере мессенджера. Суффикс «-pwa» (уже установленный
 # ярлык) сюда не входит осознанно: ему второй обмен не нужен.
 APP_AGENT_BONUS = ("iphone", "ipad")
+# Девайс-токен в базе — только его sha256, как у токенов пульта
+# (admin_devices.token_hash). Сырым он делал живым входом КОПИЮ базы, а копий
+# на диске десятки (выкладки, переезды, приёмки): любая пускала под любым
+# выездником и руководителем на 30 дней. Сырой токен теперь есть только в ответе
+# на выдачу, в куке повторного открытия и на самом телефоне; сервер сверяет хэш
+# того, что ему предъявили. Маркер — одноразовый перевод старых строк на хэш.
+APP_TOKENS_HASHED_KEY = "app_tokens_hashed_v1"
+
+
+def app_token_key(token: str) -> str:
+    """Во что превращается девайс-токен в app_tokens.token.
+
+    Соли и медленного хэша нет сознательно: токен — 192 случайных бита
+    (token_urlsafe(24)), перебирать там нечего, а поиск идёт по равенству."""
+    return hashlib.sha256(str(token or "").encode()).hexdigest()
+
+
+def _hash_app_tokens_once(conn: sqlite3.Connection) -> None:
+    """Заменить сырые девайс-токены их хэшами — один раз, под маркером.
+
+    Решает маркер, а не вид строки: до прохода в таблице только сырые токены,
+    после — только хэши, а token_urlsafe бывает и 64-символьным, так что по
+    длине их не различить. Проход идёт внутри транзакции init_db: замены и
+    маркер фиксирует один commit в её конце — оборвался старт посередине,
+    откатится всё вместе, и следующий старт пройдёт по тем же сырым строкам.
+    База, поднятая из копии до этой выкладки, приезжает без маркера, и проход
+    повторяется — это верно: в такой копии все токены сырые.
+
+    Телефоны ничего не замечают: шлют прежний сырой токен, сервер сверяет его
+    хэш. По строке через rowid, потому что sha256 в SQLite нет. Конфликта по
+    PRIMARY KEY на token не будет: хэш совпал бы с чужой строкой, только если в
+    ней уже лежит хэш того же самого токена. Строки с NULL вместо токена не
+    трогаем: входом они не были, а два NULL дали бы один хэш и уронили бы
+    старт на ключе."""
+    if conn.execute("SELECT 1 FROM settings WHERE key=?",
+                    (APP_TOKENS_HASHED_KEY,)).fetchone():
+        return
+    rows = conn.execute("SELECT rowid AS rid, token FROM app_tokens "
+                        "WHERE token IS NOT NULL").fetchall()
+    for r in rows:
+        conn.execute("UPDATE app_tokens SET token = ? WHERE rowid = ?",
+                     (app_token_key(r["token"]), r["rid"]))
+    conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)",
+                 (APP_TOKENS_HASHED_KEY,
+                  json.dumps({"tokens": len(rows),
+                              "at": datetime.now().isoformat(timespec="seconds")})))
+    if rows:
+        logging.info("Девайс-токены приложения переведены на хэш: %d", len(rows))
 
 
 # Личности без Telegram. Вся идентификация в системе — целый id пользователя
@@ -1888,17 +1938,20 @@ def redeem_app_link(code: str, agent: str | None = None,
         # токена, а не только его живость: чужой токен не должен продлевать себе
         # жизнь чужой ссылкой. Исчерпанность здесь намеренно не смотрим — человек
         # уже внутри, отказывать ему в его же токене не за что.
+        # Сверяем по хэшу, а возвращаем тот сырой, что прислал сам телефон (или
+        # его кука): из базы сырой токен не достать, и он там не нужен.
         if keep_token:
+            keep_key = app_token_key(keep_token)
             own = conn.execute(
                 "SELECT telegram_id FROM app_tokens WHERE token = ? AND expires_at >= ?",
-                (keep_token, now_iso)).fetchone()
+                (keep_key, now_iso)).fetchone()
             if own and int(own["telegram_id"] or 0) == int(link["telegram_id"] or 0):
                 conn.execute(
                     "UPDATE app_links SET last_use_at = ?, last_agent = ? WHERE code = ?",
                     (now_iso, agent, code))
                 if agent:
                     conn.execute("UPDATE app_tokens SET agent = ? WHERE token = ?",
-                                 (agent, keep_token))
+                                 (agent, keep_key))
                 conn.commit()
                 return keep_token
         # Атомарный расход попытки: rowcount==0 → код чужой/просрочен/исчерпан
@@ -1922,11 +1975,12 @@ def redeem_app_link(code: str, agent: str | None = None,
             conn.execute(
                 "UPDATE app_links SET max_uses = COALESCE(max_uses, ?) + 1, "
                 "bonus_ios = 1 WHERE code = ?", (APP_LINK_DEFAULT_USES, code))
+        # В базу — хэш, наружу — сырой: другого случая узнать его не будет.
         token = secrets.token_urlsafe(24)
         conn.execute(
             "INSERT INTO app_tokens (token, telegram_id, created_at, expires_at, agent) "
             "VALUES (?,?,?,?,?)",
-            (token, uid, now_iso,
+            (app_token_key(token), uid, now_iso,
              (now + timedelta(days=APP_TOKEN_DAYS)).isoformat(timespec="seconds"), agent))
         conn.commit()
     return token
@@ -2012,13 +2066,17 @@ def app_links_state() -> list[dict]:
 
 
 def uid_for_app_token(token: str) -> int | None:
-    """telegram_id по девайс-токену; просроченный (или легаси без expires_at) не пускаем."""
+    """telegram_id по девайс-токену; просроченный (или легаси без expires_at) не пускаем.
+
+    Ищем по хэшу предъявленного. Сам хэш из копии базы входом не служит: его
+    предъявят — сервер возьмёт хэш от хэша и ничего не найдёт."""
     if not token:
         return None
     with connect() as conn:
         row = conn.execute(
             "SELECT telegram_id FROM app_tokens WHERE token = ? AND expires_at >= ?",
-            (token, datetime.now().isoformat(timespec="seconds"))).fetchone()
+            (app_token_key(token),
+             datetime.now().isoformat(timespec="seconds"))).fetchone()
     return row["telegram_id"] if row else None
 
 
@@ -2032,8 +2090,26 @@ def touch_app_token(token: str) -> None:
         conn.execute(
             "UPDATE app_tokens SET expires_at = ? WHERE token = ? AND expires_at >= ?",
             ((now + timedelta(days=APP_TOKEN_DAYS)).isoformat(timespec="seconds"),
-             token, now.isoformat(timespec="seconds")))
+             app_token_key(token), now.isoformat(timespec="seconds")))
         conn.commit()
+
+
+def drop_app_token(token: str) -> int | None:
+    """Погасить ОДИН девайс-токен — тот, что предъявили («Выйти с этого
+    телефона», замена входа новой ссылкой). Возвращает telegram_id владельца,
+    если такой токен был. Остальные устройства человека и его ссылки не
+    трогаем: это не отзыв доступа, а выход с конкретного телефона."""
+    if not token:
+        return None
+    key = app_token_key(token)
+    with connect() as conn:
+        row = conn.execute("SELECT telegram_id FROM app_tokens WHERE token = ?",
+                           (key,)).fetchone()
+        if row is None:
+            return None
+        conn.execute("DELETE FROM app_tokens WHERE token = ?", (key,))
+        conn.commit()
+    return int(row["telegram_id"] or 0) or None
 
 
 def revoke_app_access(telegram_id: int, scope: str = "all") -> int:

@@ -674,8 +674,9 @@ async def _manifest(request: web.Request) -> web.StreamResponse:
     localStorage Safari туда не переезжает — а start_url переезжает всегда. Страница
     после входа сама переписывает <link rel=manifest> на /manifest.webmanifest?t=…,
     и ярлык рождается уже авторизованным. Чужой/протухший t молча игнорируем.
-    Компромисс: t оседает в access-логах (логи — root-only на своём VPS; сами токены
-    и так лежат рядом в БД), no-store — чтобы прокси/SW не закэшировали чужой манифест."""
+    Компромисс: t может осесть в access-логах внешнего прокси (свой журнал
+    приложения query-строку не пишет, в БД лежит только хэш токена), no-store —
+    чтобы прокси/SW не закэшировали чужой манифест."""
     raw = json.loads((MINIAPP_DIR / "manifest.webmanifest").read_text("utf-8"))
     tok = (request.query.get("t") or "").strip()
     if tok and db.uid_for_app_token(tok):
@@ -2561,6 +2562,20 @@ async def _redeem(request: web.Request) -> web.Response:
     uid = db.uid_for_app_token(token)
     db.audit_access(uid or 0, "app_login", detail=agent)
     return web.json_response({"ok": True, "token": token, "days": db.APP_TOKEN_DAYS})
+
+
+async def _logout(request: web.Request) -> web.Response:
+    """«Выйти с этого телефона» и замена входа новой ссылкой: гасим ИМЕННО
+    предъявленный токен (заголовок X-App-Token). Оболочка стирает телефон и
+    сама, но у ярлыка iOS хранилище своё, а токен вшит в его start_url — без
+    серверного отзыва ярлык продолжал бы входить. Погасить можно только то, чем
+    и так владеешь, поэтому другой проверки не нужно; неизвестный токен — тот
+    же ответ, чтобы ручка не служила проверкой «жив ли чужой токен»."""
+    tok = (request.headers.get("X-App-Token") or "").strip()
+    uid = db.drop_app_token(tok) if tok else None
+    if uid:
+        db.audit_access(uid, "app_logout")
+    return web.json_response({"ok": True})
 
 
 async def _admin_app_revoke(request: web.Request) -> web.Response:
@@ -5700,6 +5715,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/voice", _voice)
     app.router.add_post("/api/lang", _lang)
     app.router.add_post("/api/redeem", _redeem)
+    app.router.add_post("/api/logout", _logout)
     app.router.add_post("/admin/app_revoke", _admin_app_revoke)
     app.router.add_post("/admin/app_link.json", _admin_app_link)
     app.router.add_post("/admin/app_links_bulk.json", _admin_app_links_bulk)

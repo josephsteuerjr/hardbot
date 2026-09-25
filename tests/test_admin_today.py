@@ -42,7 +42,8 @@ def _seed():
         conn.execute("INSERT OR REPLACE INTO users (telegram_id, name, last_seen, shell_version) "
                      "VALUES (?,?,?,?)", (TID_A, "А", f"{T}T09:00:00", 38))
         conn.execute("INSERT INTO app_tokens (token, telegram_id, created_at, expires_at) "
-                     "VALUES (?,?,?,?)", ("tok-td-a", TID_A, f"{T}T09:00:00",
+                     "VALUES (?,?,?,?)", (db.app_token_key("tok-td-a"), TID_A,
+                                          f"{T}T09:00:00",
                                           (datetime.now() + timedelta(days=10)).isoformat()))
         conn.execute("INSERT INTO enrichment_ledger (contract_id, field_key, value, delivered_at) "
                      "VALUES (?,?,?,?)", ("TD-1", "call_status", "Оплачен", f"{T}T10:00:00"))

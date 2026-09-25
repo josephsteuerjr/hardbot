@@ -93,7 +93,7 @@ def _fill_source(data: Path) -> None:
     conn.execute("INSERT INTO app_links (code, telegram_id, created_at) "
                  "VALUES ('код',101,'2026-09-10')")
     conn.execute("INSERT INTO app_tokens (token, telegram_id, created_at) "
-                 "VALUES ('токен',101,'2026-09-10')")
+                 "VALUES (?,101,'2026-09-10')", (db.app_token_key("токен"),))
     conn.execute("INSERT INTO admin_devices (token_hash, device_id, name) "
                  "VALUES ('хэш','устройство','Ноут дома')")
     conn.execute("INSERT INTO settings (key, value) VALUES ('bot_token','секрет')")
