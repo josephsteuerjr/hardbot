@@ -1214,7 +1214,12 @@ function renderEntry() {
         rows.replaceChildren(el('div', 'fail', rec.error));
         return;
     }
-    const links = (rec.data && rec.data.links) || [];
+    const team = (rec.data && rec.data.links) || [];
+    // Свой вход руководителя — первой строкой: новый телефон или компьютер.
+    // Без неё руководитель жал «Выдать вход» на своей строке ВЫЕЗДНИКА и
+    // получал вход без «Сводки».
+    const me = rec.data && rec.data.me;
+    const links = me ? [me, ...team] : team;
     if (stamp) {
         stamp.textContent = rec.at ? 'обновлено ' + timeWords(rec.at) : '';
     }
@@ -1224,10 +1229,15 @@ function renderEntry() {
         return;
     }
     rows.replaceChildren(...links.map((row) => {
+        const self = row === me;
         const state = entryState(row);
         const line = el('div', 'row');
         const body = el('div', 'row__body');
-        body.appendChild(el('div', 'row__name', row.employee));
+        body.appendChild(el('div', 'row__name', row.label || row.employee));
+        if (self) {
+            body.appendChild(el('div', 'row__note',
+                'для вашего нового телефона или компьютера — со «Сводкой»'));
+        }
         body.appendChild(el('div', 'row__note' + (state.ok ? ' row__note--ok' : ''),
             state.text + (state.hint ? ' · ' + state.hint : '')));
         line.appendChild(body);
@@ -1237,7 +1247,7 @@ function renderEntry() {
         issue.type = 'button';
         issue.addEventListener('click', () => issueEntry(row.employee));
         btns.appendChild(issue);
-        if (row.entered || row.code) {
+        if (!self && (row.entered || row.code)) {
             const revoke = el('button', 'btn btn--danger', 'Отозвать');
             revoke.type = 'button';
             revoke.addEventListener('click', () =>

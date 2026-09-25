@@ -247,3 +247,32 @@ def test_audit_and_access_log_hide_live_code(monkeypatch, miniapp):
     resp = type("R", (), {"status": 302})()
     web._PathOnlyAccessLogger(_Log(), "").log(req, resp, 0.01)
     assert lines and made["code"] not in lines[0] and "/i/" in lines[0]
+
+
+# --- свой вход руководителя на новом устройстве ---------------------------------
+
+def test_manager_gets_his_own_manager_login_not_a_field_one(monkeypatch, miniapp):
+    """25.09.2026: руководитель, который сам возит, жал «Выдать вход» на своей
+    строке ВЫЕЗДНИКА и получал вход без «Сводки». Свой вход — отдельной
+    строкой, и выдаётся он на ЕГО id, а не на служебную личность ФИО."""
+    status, out = _call(web._manager_app_links, "GET", None, monkeypatch)
+    assert out["me"]["employee"] == web.MANAGER_SELF
+    assert out["me"]["telegram_id"] == MGR and not out["me"]["entered"]
+    assert [r["employee"] for r in out["links"]] == [EMP_A, EMP_B], \
+        "своя строка не должна смешиваться с командой"
+    status, out = _call(web._manager_app_link, "POST",
+                        {"employee": web.MANAGER_SELF}, monkeypatch)
+    assert status == 200 and out["telegram_id"] == MGR
+    assert out["url"].startswith(MINIAPP + "/i/")
+    code = out["code"]
+    _, state = _call(web._manager_app_links, "GET", None, monkeypatch)
+    assert state["me"]["code"] == code and state["me"]["url"].endswith(code)
+    assert db.redeem_app_link(code), "по ссылке руководителя не пускает"
+
+
+def test_self_login_mark_cannot_be_revoked_through_team_handle(monkeypatch, miniapp):
+    """Свой вход руководитель через «Вход команды» не гасит: это делает аналитик."""
+    _call(web._manager_app_link, "POST", {"employee": web.MANAGER_SELF}, monkeypatch)
+    status, _ = _call(web._manager_app_revoke, "POST",
+                      {"employee": web.MANAGER_SELF}, monkeypatch)
+    assert status == 403

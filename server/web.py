@@ -3368,6 +3368,32 @@ async def _json_object(request: web.Request) -> dict | None:
     return body if isinstance(body, dict) else None
 
 
+# Метка «свой вход руководителя» в ручках выдачи. С ФИО не совпадёт никогда:
+# ФИО не начинаются с «!» (та же договорённость, что у digest_data.NO_OFFICE).
+MANAGER_SELF = "!me"
+MANAGER_SELF_LABEL = "Вы — вход руководителя"
+
+
+def _manager_self_row(uid: int, base: str) -> dict:
+    """Строка собственного входа руководителя для «Вход команды».
+
+    До 25.09.2026 её не было: руководитель с новым телефоном жал «Выдать вход»
+    на своей же строке ВЫЕЗДНИКА (он и сам возит) и получал вход выездника —
+    портфель есть, «Сводки» нет. Свой вход руководителя выдавал только
+    аналитик. Эта строка выдаёт вход на ЕГО id — с ролью и «Сводкой»."""
+    state = next((dict(r) for r in db.app_links_state()
+                  if r["telegram_id"] == uid), None)
+    row = state or {
+        "telegram_id": uid, "kind": "agent", "code": None, "created_at": None,
+        "expires_at": None, "uses": 0, "max_uses": db.APP_LINK_DEFAULT_USES,
+        "bonus_ios": False, "last_use_at": None, "last_agent": None,
+        "entered": False, "devices": 0, "alive": False}
+    row["employee"] = MANAGER_SELF
+    row["label"] = MANAGER_SELF_LABEL
+    row["url"] = f"{base}/i/{row['code']}" if base and row.get("code") else ""
+    return row
+
+
 async def _manager_app_links(request: web.Request) -> web.Response:
     """Входы команды руководителя: строка на человека, как в пульте аналитика.
 
@@ -3407,6 +3433,9 @@ async def _manager_app_links(request: web.Request) -> web.Response:
         "screen": "team_links", "ok": True,
         "manager": {"name": mgr.get("name") or "", "scope": mgr.get("scope") or ""},
         "links": rows,
+        # Свой вход руководителя — отдельно от команды: он выдаётся на его id
+        # (роль и «Сводка»), а не на ФИО выездника.
+        "me": _manager_self_row(uid, base),
     })
 
 
@@ -3422,6 +3451,25 @@ async def _manager_app_link(request: web.Request) -> web.Response:
     if body is None:
         return web.json_response({"error": "тело не JSON-объект"}, status=400)
     employee = str(body.get("employee") or "").strip()
+    if employee == MANAGER_SELF:
+        # Свой вход руководителя — на его id, с ролью: новый телефон, второй
+        # компьютер. Ссылка та же, что выдаёт аналитик в «Руководителях».
+        base = os.getenv("MINIAPP_URL", "").strip().rstrip("/")
+        if not base:
+            return web.json_response(
+                {"error": "MINIAPP_URL не задан на сервере: без публичного адреса "
+                          "ссылку входа не собрать"}, status=409)
+        code = db.create_app_link(uid, max_uses=db.APP_LINK_DEFAULT_USES)
+        who = mgr.get("name") or f"id{uid}"
+        db.audit_access(uid, "mgr_app_link_self",
+                        detail=f"{who} выдал себе вход: {_mask_code(code)}")
+        return web.json_response({
+            "ok": True, "employee": MANAGER_SELF_LABEL, "telegram_id": uid,
+            "code": code, "url": f"{base}/i/{code}",
+            "expires_at": db.app_link_expires_at(
+                datetime.now().isoformat(timespec="seconds")),
+            "uses": db.APP_LINK_DEFAULT_USES,
+        })
     own = db.get_binding(uid)
     allowed = set(team) | ({own} if own else set())
     if not employee or employee not in allowed:
