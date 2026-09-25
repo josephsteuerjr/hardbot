@@ -586,22 +586,28 @@ def test_the_no_network_screen_speaks_all_three_languages():
 
 
 def test_shell_prefers_a_freshly_issued_token_over_the_one_on_the_device():
-    """Короткая ссылка, открытая на устройстве, где кто-то уже входил, обязана
-    впустить НОВОГО человека: сервер потратил на него обмен и пометил токен
-    «fresh=1». Токен из start_url ярлыка (метки нет) прежний не подменяет — там
-    он бывает СТАРШЕ того, что на устройстве, и подмена выкинула бы человека из
-    работающего ярлыка."""
+    """Короткая ссылка, открытая на устройстве, где входа нет (или он мёртв),
+    впускает НОВОГО человека сразу: сервер потратил на него обмен и пометил токен
+    «fresh=1». Но при ЖИВОМ входе адрес «#t=…&fresh=1» мог собрать и прислать
+    кто угодно (ревью 25.09.2026, #4): новый токен не перезаписывает вход, а ждёт
+    ответа человека (pending_token) — поведение целиком проверяет
+    test_shell_fixation под node. Токен из start_url ярлыка (метки нет) прежний
+    не подменяет — там он бывает СТАРШЕ того, что на устройстве."""
     body = INDEX[INDEX.index("function absorbTokenFromUrl("):]
     body = body[:body.index("function personalizeManifest(")]
     assert "get('fresh')==='1'" in body
     fresh_at = body.index("get('fresh')==='1'")
     keep_at = body.index("if(!appToken())")
-    assert fresh_at < keep_at, "свежий токен ставится ДО проверки «а есть ли свой»"
-    assert "localStorage.setItem('app_token',tk)" in body[fresh_at:keep_at]
-    # То же и для манифеста: он собирается в <head> ДО всего остального, и на
-    # чужом токене ярлык «На экран Домой» унёс бы в start_url чужой вход.
+    assert fresh_at < keep_at, "свежий токен разбирается ДО проверки «а есть ли свой»"
+    fresh_branch = body[fresh_at:keep_at]
+    assert "localStorage.setItem('app_token',tk)" in fresh_branch, "входа нет — новый и есть вход"
+    assert "setPendingToken(tk)" in fresh_branch, "живой вход — новый ждёт согласия"
+    # Манифест собирается в <head> ДО всего остального: при живом входе он
+    # строится с ним, а не с токеном из адреса — иначе ярлык «На экран Домой»
+    # унёс бы в start_url чужой вход.
     head = INDEX[:INDEX.index("<meta name=\"apple-mobile-web-app-capable\"")]
-    assert "fresh=1" in head, "скрипт манифеста не знает про свежий токен"
+    assert "if(!t) t=u;" in head, "токен из адреса — только когда своего входа нет"
+    assert ".test(h)) t=u" not in head, "метка fresh больше не перебивает живой вход"
 
 
 def test_opening_a_link_approves_a_pending_binding(fresh):

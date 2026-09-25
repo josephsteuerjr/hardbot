@@ -17,12 +17,15 @@
   try{ t=localStorage.getItem("app_token")||""; }catch(e){}
   try{ h=location.hash||"";
        var m=/[#&]t=([^&]+)/.exec(h); if(m) u=decodeURIComponent(m[1]); }catch(e){}
-  // «fresh=1» ставит сервер на редиректе с «/i/<код>»: токен выдан ПРЯМО СЕЙЧАС
-  // тому, кто открыл ссылку, и он главнее оставшегося на устройстве. Иначе на
-  // телефоне, где входил кто-то другой, ярлык унёс бы в start_url ЧУЖОЙ вход.
-  if(u && /[#&]fresh=1(&|$)/.test(h)) t=u;
+  // Токен из адреса берём, только когда своего входа на устройстве нет. Живой
+  // вход главнее даже «#t=…&fresh=1» (редирект с «/i/<код>»): такой адрес
+  // собирается руками и присылается в мессенджер, и ярлык унёс бы в start_url
+  // ЧУЖОЙ вход (ревью 25.09.2026, #4). Отдать ли телефон новой ссылке, человек
+  // решает сам после загрузки; мёртвый вход boot() меняет молча и тогда один
+  // раз перезагружает страницу, чтобы манифест собрался с новым токеном.
   if(!t) t=u;
   window.MANIFEST_PERSONAL=!!t;
+  window.MANIFEST_TOKEN=t;
   var l=document.createElement("link"); l.rel="manifest";
   l.href="/manifest.webmanifest"+(t?"?t="+encodeURIComponent(t):"");
   document.head.appendChild(l);
@@ -109,6 +112,15 @@ button,a,input,select,textarea,.pcard{touch-action:manipulation}
 .langs button{border:1px solid var(--border);background:var(--card);border-radius:20px;
   padding:4px 10px;font-size:12px;color:var(--muted);font-family:inherit}
 .langs button.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+/* «Выйти с этого телефона» — рядом с языком: других настроек у оболочки нет. */
+.langs button.out{display:inline-flex;align-items:center;gap:4px;margin-left:6px}
+.langs button.out .ico{width:13px;height:13px}
+@media (max-width:360px){ .langs button.out span{display:none} }
+/* Вопрос, на который нужен ответ: лист снизу, как выбор варианта, но поверх
+   всего (и навигатора) и без закрытия тапом мимо — ответ только кнопкой. */
+.picksheet.ask{z-index:110}
+.picksheet.ask .pickbody{max-width:520px;margin:0 auto;
+  padding:18px 16px calc(18px + env(safe-area-inset-bottom,0px))}
 .wrap{flex:1 1 auto;min-height:0;width:100%;padding:12px 14px 96px;max-width:520px;
   margin:0 auto;overflow-x:hidden;overflow-y:auto;overscroll-behavior-y:contain;
   -webkit-overflow-scrolling:touch;scrollbar-gutter:stable;scroll-padding-bottom:96px}
@@ -366,6 +378,7 @@ const ICONS = {
   target: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><path d="M12 1.5v3M12 19.5v3M1.5 12h3M19.5 12h3"/></svg>',
   plus:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
   image:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.6"/><path d="m4 17 4.5-4.5 3 3L15 12l5 5"/></svg>',
+  exit:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4H6a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h8"/><path d="M10 12h10M17 8l4 4-4 4"/></svg>',
 };
 function ic(name){ return `<span class="ico">${ICONS[name]||""}</span>`; }
 
@@ -420,6 +433,13 @@ const I18N = {
     authexpired:"Срок доступа истёк. Попросите у аналитика новую ссылку входа: откройте её на этом телефоне и добавьте приложение на экран заново — или вставьте ссылку сюда. Несинхронизированные визиты не потеряются.",
     authneed:"Нет доступа. Попросите у аналитика ссылку входа: откройте её на этом телефоне — или вставьте её сюда.",
     entercode:"Вставить ссылку вручную",codeprompt:"Вставьте ссылку входа:",codeph:"Ссылка входа",
+    swaptitle:"Открыта новая ссылка входа.",swapnow:"Сейчас на этом телефоне вход:",
+    swapwarn:"Если ссылку прислали не вам или вы её не просили — нажмите «Оставить».",
+    swapyes:"Заменить",swapno:"Оставить",swapmgr:"руководитель",
+    swaplost:"Не отправлено операций: {n}. При замене они пропадут. Заменить всё равно?",
+    logout:"Выйти",logoutq:"Выйти с этого телефона?",
+    logoutwhy:"С телефона удалятся вход, список клиентов, карточки и черновики. Войти снова можно будет только по новой ссылке входа.",
+    logoutlost:"Не отправлено операций: {n}. Они пропадут.",cancel:"Отмена",
     secResult:"Результат выезда",secContact:"Контакт",secClient:"Клиент сейчас",secAgree:"Договорённость",
     nosplit:"разбивка по статьям не пришла"},
   uz:{visit:"Chiqish",client:"Mijoz",debt:"Qarz",form:"To‘ldirish",my:"Mijozlarim",
@@ -471,6 +491,13 @@ const I18N = {
     authexpired:"Kirish muddati tugadi. Analitikdan yangi kirish havolasini so‘rang: uni shu telefonda oching va ilovani ekranga qayta qo‘shing — yoki havolani shu yerga joylang. Yuborilmagan chiqishlar yo‘qolmaydi.",
     authneed:"Kirish yo‘q. Analitikdan kirish havolasini so‘rang: uni shu telefonda oching — yoki shu yerga joylang.",
     entercode:"Havolani qo‘lda joylash",codeprompt:"Kirish havolasini joylashtiring:",codeph:"Kirish havolasi",
+    swaptitle:"Yangi kirish havolasi ochildi.",swapnow:"Hozir bu telefonda kirish:",
+    swapwarn:"Agar havola sizga yuborilmagan bo‘lsa yoki uni so‘ramagan bo‘lsangiz — «Qoldirish»ni bosing.",
+    swapyes:"Almashtirish",swapno:"Qoldirish",swapmgr:"rahbar",
+    swaplost:"Yuborilmagan amallar: {n}. Almashtirilsa, ular yo‘qoladi. Baribir almashtirilsinmi?",
+    logout:"Chiqish",logoutq:"Bu telefondan chiqasizmi?",
+    logoutwhy:"Telefondan kirish, mijozlar ro‘yxati, kartalar va qoralamalar o‘chiriladi. Qayta faqat yangi kirish havolasi bilan kirish mumkin.",
+    logoutlost:"Yuborilmagan amallar: {n}. Ular yo‘qoladi.",cancel:"Bekor qilish",
     secResult:"Chiqish natijasi",secContact:"Kontakt",secClient:"Mijoz hozir",secAgree:"Kelishuv",
     nosplit:"moddalar bo‘yicha taqsimot kelmadi"},
   tg:{visit:"Сафар",client:"Мизоҷ",debt:"Қарз",form:"Пур кардан",my:"Мизоҷони ман",
@@ -522,6 +549,13 @@ const I18N = {
     authexpired:"Мӯҳлати дастрасӣ гузашт. Аз аналитик пайванди нави воридшавӣ пурсед: онро дар ҳамин телефон кушоед ва барномаро аз нав ба экран гузоред — ё пайвандро ин ҷо гузоред. Сафарҳои фиристоданашуда гум намешаванд.",
     authneed:"Дастрасӣ нест. Аз аналитик пайванди воридшавӣ пурсед: онро дар ҳамин телефон кушоед — ё ин ҷо гузоред.",
     entercode:"Гузоштани пайванд дастӣ",codeprompt:"Пайванди воридшавиро гузоред:",codeph:"Пайванди воридшавӣ",
+    swaptitle:"Пайванди нави воридшавӣ кушода шуд.",swapnow:"Ҳоло дар ин телефон воридшавӣ:",
+    swapwarn:"Агар пайвандро ба шумо нафиристода бошанд ё шумо онро напурсида бошед — «Нигоҳ доштан»-ро пахш кунед.",
+    swapyes:"Иваз кардан",swapno:"Нигоҳ доштан",swapmgr:"роҳбар",
+    swaplost:"Амалҳои нафиристода: {n}. Ҳангоми иваз онҳо гум мешаванд. Бо вуҷуди ин иваз шавад?",
+    logout:"Баромадан",logoutq:"Аз ин телефон бароед?",
+    logoutwhy:"Аз телефон воридшавӣ, рӯйхати мизоҷон, кортҳо ва нусхаҳо нест карда мешаванд. Аз нав танҳо бо пайванди нави воридшавӣ ворид шудан мумкин аст.",
+    logoutlost:"Амалҳои нафиристода: {n}. Онҳо гум мешаванд.",cancel:"Бекор кардан",
     secResult:"Натиҷаи сафар",secContact:"Тамос",secClient:"Мизоҷ ҳозир",secAgree:"Созиш",
     nosplit:"тақсимот аз рӯи моддаҳо наомад"},
 };
@@ -669,6 +703,86 @@ async function clearLocalData(opts){
   }catch(e){}
 }
 
+// Полная очистка телефона (ревью 25.09.2026, #5). До неё отзыв доступа не стирал
+// ничего: токен, снимок портфеля kv:bootstrap и прогретые карточки оставались на
+// телефоне, и в авиарежиме boot поднимал весь портфель из снимка.
+// keepQueue — оставить исходящую очередь (выезды, фото, метки, заметки, ещё не
+// дошедшие до сервера): при отказе сервера это работа человека, она уйдёт, когда
+// он войдёт по новой ссылке. «Выйти» и замена входа стирают и её.
+// Безобидных настроек интерфейса в localStorage у оболочки нет (язык хранит
+// сервер), поэтому стирается всё, кроме OUT_KEY — отпечатков вышедших токенов.
+const OUT_KEY="hb_out";
+const LS_KEEP=[OUT_KEY];
+// Поколение данных устройства. Что стартовало ДО очистки и докатилось после неё
+// (ответ bootstrap, прогрев карточек), обратно в хранилище и на экран не пишет.
+let WIPE_GEN=0;
+async function wipeDevice(opts){
+  const keepQueue=!!(opts&&opts.keepQueue);
+  WIPE_GEN++;
+  // Сначала глушим всё, что само пишет в хранилище: трек поездки, следы
+  // карточки, черновик формы (beforeunload и уход в фон вписали бы его обратно).
+  try{ NAV.session=null; NAV.buf=[]; if($("navmode").classList.contains("on")) exitNav(); }catch(e){}
+  try{ clearTimeout(draftTimer); stopAutoSync(); draftDirty=false; prStop(); }catch(e){}
+  try{ closePick(); closeAsk("swapsheet"); closeAsk("outsheet"); PhotoAudit.free(); }catch(e){}
+  STATE.cur=null; STATE.persons=[]; STATE.roles=null;
+  try{
+    Object.keys(localStorage).forEach(k=>{ if(LS_KEEP.indexOf(k)<0) localStorage.removeItem(k); });
+  }catch(e){}
+  clearPendingToken();
+  URLT=null;
+  cleanHashFromUrl();            // «#t=<токен>» в адресе вернул бы вход перезагрузкой
+  for(const s of (keepQueue?["cards","kv"]:["cards","kv","queue"])){
+    try{ await IDB.clear(s); }catch(e){}
+  }
+  // Cache Storage: оболочка, персональный manifest.webmanifest?t=<токен>, тайлы
+  // карт. Оболочку service worker кладёт обратно сам при следующей загрузке по сети.
+  try{
+    if(typeof caches!=="undefined" && caches.keys){
+      const ks=await caches.keys();
+      await Promise.all(ks.map(k=>caches.delete(k).catch(()=>false)));
+    }
+  }catch(e){}
+  try{ updateOffBar(); }catch(e){}
+}
+// Вход, из которого вышли кнопкой «Выйти с этого телефона» (или который заменили
+// новой ссылкой), не должен молча вернуться: у установленного ярлыка токен вшит
+// в start_url («/#t=<токен>»), и следующий запуск снова положил бы его на
+// устройство. Храним не токен, а его отпечаток (32 бита, FNV-1a): вход по нему не
+// восстановить, а узнать — можно. Ручная вставка ссылки работает как раньше.
+function tokenMark(tk){
+  let h=0x811c9dc5;
+  for(let i=0;i<tk.length;i++){ h^=tk.charCodeAt(i); h=Math.imul(h,0x01000193)>>>0; }
+  return h.toString(36);
+}
+function markTokenOut(tk){
+  if(!tk) return;
+  try{
+    const a=(localStorage.getItem(OUT_KEY)||"").split(" ").filter(Boolean);
+    const m=tokenMark(tk);
+    if(a.indexOf(m)<0) a.push(m);
+    localStorage.setItem(OUT_KEY, a.slice(-20).join(" "));
+  }catch(e){}
+}
+function tokenIsOut(tk){
+  if(!tk) return false;
+  try{ return (localStorage.getItem(OUT_KEY)||"").split(" ").indexOf(tokenMark(tk))>=0; }
+  catch(e){ return false; }
+}
+// Погасить вход и на сервере (POST /api/logout). Отметка hb_out живёт в хранилище
+// ЭТОГО браузера, а у ярлыка iOS хранилище своё, и токен у него вшит в start_url:
+// без серверного отзыва ярлык продолжал бы входить. Без связи или на старом
+// сервере — молча: телефон всё равно очищается, токен доживёт свой срок.
+async function dropTokenOnServer(tk){
+  if(!tk || (TG&&TG.initData)) return;
+  try{
+    const ctl=(typeof AbortController!=="undefined")?new AbortController():null;
+    const timer=ctl?setTimeout(()=>ctl.abort(),5000):null;
+    try{ await fetch("/api/logout",{method:"POST",headers:{"X-App-Token":tk},
+                                  signal:ctl?ctl.signal:undefined}); }
+    finally{ if(timer) clearTimeout(timer); }
+  }catch(e){}
+}
+
 // Сколько операций ещё не ушло на сервер (визиты/фото/метки).
 async function pendingCount(){
   try{ return ((await IDB.all("queue"))||[]).length; }catch(e){ return 0; }
@@ -706,7 +820,7 @@ async function askPersistentStorage(){
 }
 
 async function warmCards(manual){
-  const t = L();
+  const t = L(), gen=WIPE_GEN;
   await askPersistentStorage();
   if(manual) warmBar(`<div class="pcard" style="display:block;margin-bottom:10px">
       <div class="muted" id="warmtxt">${esc(t.warmgoing)}…</div></div>`);
@@ -721,6 +835,7 @@ async function warmCards(manual){
       </div>`);
     return;
   }
+  if(gen!==WIPE_GEN) return;       // телефон очистили, пока карточки качались
   const downloadMs=performance.now()-downloadStarted;
   const reps = (j && j.cards) ? Object.keys(j.cards) : [];
   const entries=reps.map(rep=>[rep,j.cards[rep]]);
@@ -832,7 +947,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=58;
+const SHELL_VERSION=59;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1153,6 +1268,15 @@ async function flushQueue(){
     }
   }finally{ _flushing=false; updateOffBar(); }
 }
+// Досыл с ожиданием итога. flushQueue при уже идущем досыле возвращается сразу, а
+// замене входа нужен честный остаток: ждём чужой досыл, досылаем ещё раз. Потолок
+// ms — висящая сеть не должна держать человека на вопросе вечно.
+async function flushQueueSettled(ms){
+  const until=Date.now()+ms, pause=()=>new Promise(r=>setTimeout(r,200));
+  while(_flushing && Date.now()<until) await pause();
+  if(_flushing) return;
+  await Promise.race([flushQueue(), new Promise(r=>setTimeout(r,Math.max(0,until-Date.now())))]);
+}
 
 // Оптимистично отразить оффлайн-сохранение визита в кэше карточки и списке.
 function applyVisitLocally(rep, values){
@@ -1204,7 +1328,14 @@ async function redeemCode(code, fromUrl){
     const r=await fetch('/api/redeem',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({code, token:appToken(), standalone:isStandalone()})});
     if(r.ok){ const j=await r.json();
-      if(j&&j.token){ try{ localStorage.setItem('app_token',j.token); }catch(e){} }
+      if(j&&j.token){
+        // Сервер вернул ДРУГОЙ токен, а на устройстве уже есть вход: ссылка чужая
+        // (или наш вход мёртв). Молча не подменяем — как и «#t=…&fresh=1» (см.
+        // absorbTokenFromUrl): новый ждёт ответа человека после загрузки.
+        const cur=appToken();
+        if(cur && j.token!==cur && !(TG&&TG.initData)) setPendingToken(j.token);
+        else{ try{ localStorage.setItem('app_token',j.token); }catch(e){} }
+      }
       stampTokenUrl();                         // #link=код → #t=токен: ярлык унесёт вход
       return true; }
     if(r.status===410){                        // код мёртв (использован/просрочен/чужой) — жжём
@@ -1216,21 +1347,37 @@ async function redeemCode(code, fromUrl){
 // Преемственность входа для установленного ярлыка: манифест после входа становится
 // персональным (start_url «/#t=<токен>»), и iOS-ярлык — у которого хранилище ОТДЕЛЬНОЕ
 // от Safari — рождается уже авторизованным: токен приезжает в URL при каждом запуске.
-let URLT=null, TRIED_URLT=false;   // кандидат из URL: живой localStorage-токен сразу
-                                   // не затираем, но подменяем, если сервер дал 401
+let URLT=null;                  // кандидат из URL: живой localStorage-токен сразу
+const TRIED_TOKENS=new Set();   // не затираем, но подменяем, если сервер дал 401
+// Новая ссылка входа, пришедшая при ЖИВОМ входе на устройстве (ревью 25.09.2026,
+// #4). Ждёт ответа человека в sessionStorage — переживает перезагрузку вкладки
+// (обновление оболочки), но не её закрытие — и в URLT: если старый вход окажется
+// мёртвым, boot подменит его молча.
+const PENDING_KEY="pending_token";
+function pendingToken(){ try{ return sessionStorage.getItem(PENDING_KEY)||''; }catch(e){ return ''; } }
+function setPendingToken(tk){ try{ sessionStorage.setItem(PENDING_KEY,tk); }catch(e){} URLT=tk; }
+function clearPendingToken(){ try{ sessionStorage.removeItem(PENDING_KEY); }catch(e){} }
 function absorbTokenFromUrl(){
   // URL не чистим: #t в адресе — это и есть «преемственность» (см. stampTokenUrl).
   try{ const u=new URL(location.href);
     const q=u.hash?new URLSearchParams(u.hash.replace(/^#/,'')):null;
     const tk=q?q.get('t'):null;
     if(!tk) return;
+    // Из этого входа вышли кнопкой «Выйти» (или заменили его новой ссылкой): у
+    // ярлыка он вшит в start_url, но обратно молча не возвращается.
+    if(tokenIsOut(tk)) return;
     URLT=tk;
-    // «fresh=1» ставит сервер на редиректе с «/i/<код>»: этот токен он выдал ПРЯМО
-    // СЕЙЧАС тому, кто открыл ссылку, и он главнее того, что уже лежит на устройстве.
-    // Иначе телефон/браузер, где кто-то входил раньше, молча пускал бы под ПРЕЖНИМ
-    // человеком — а обмен новой ссылки сервер уже потратил, и следов не осталось бы.
+    // «fresh=1» ставит сервер на редиректе с «/i/<код>»: токен выдан ПРЯМО СЕЙЧАС
+    // тому, кто открыл ссылку. Но адрес «/#t=<свой токен>&fresh=1» собирается и
+    // руками, и присылается в мессенджер: раньше он молча подменял вход, и выезды,
+    // фото и GPS жертвы уходили в чужой аккаунт (ревью 25.09.2026, #4). Теперь при
+    // ЖИВОМ входе новый токен ждёт ответа человека (диалог после загрузки старым
+    // входом), а мёртвый вход boot подменит молча. Входа нет — новый и есть вход.
     if(q.get('fresh')==='1'){
-      if(tk!==appToken()){ try{ localStorage.setItem('app_token',tk); }catch(e){} }
+      const cur=appToken();
+      if(tk===cur) return;
+      if(!cur || (TG&&TG.initData)){ try{ localStorage.setItem('app_token',tk); }catch(e){} return; }
+      setPendingToken(tk);
       return;
     }
     // Без метки токен в адресе — это start_url ярлыка, вшитый при установке. Он
@@ -1296,16 +1443,22 @@ async function redeemFromUrl(){
 // Новая ссылка открылась в УЖЕ живой вкладке приложения: переход «/» → «/#link=…»
 // меняет только фрагмент, страница НЕ перезагружается и boot() сам не стартует.
 // Ловим hashchange: обмениваем код и перезапускаем загрузку.
-window.addEventListener('hashchange', async()=>{
+async function onHashChange(){
   let c=null, t=null;
   try{ const q=new URLSearchParams(location.hash.replace(/^#/,''));
     c=q.get('link'); t=q.get('t'); }catch(e){}
   // «/#t=…» в живой вкладке — это возврат с /i/<код> или вставленная персональная
-  // ссылка: токен уже готов, обменивать нечего.
-  if(!c && t && t!==appToken()){ try{ localStorage.setItem('app_token',t); }catch(e){}
-    boot(); return; }
-  if(c && (await redeemCode(c, true))===true) boot();
-});
+  // ссылка: токен уже готов, обменивать нечего. Но и такой адрес с чужим токеном
+  // присылает кто угодно, с меткой fresh или без: при ЖИВОМ входе молча не
+  // переключаемся (ревью #4) — спросит диалог после загрузки старым входом.
+  if(!c && t && t!==appToken()){
+    if(tokenIsOut(t)) return;
+    if(appToken() && !(TG&&TG.initData)) setPendingToken(t);
+    else{ try{ localStorage.setItem('app_token',t); }catch(e){} }
+    await boot(); return; }
+  if(c && (await redeemCode(c, true))===true) await boot();
+}
+window.addEventListener('hashchange', onHashChange);
 // Экран «нужна ссылка входа»: истёкший токен или мёртвый код без токена. Ссылку даёт
 // аналитик (бота в контуре компании нет). Поле ручной вставки — главный путь на iPhone:
 // внутри ярлыка ссылку не открыть, её именно вставляют.
@@ -1319,6 +1472,34 @@ function renderAppAuthGone(expired){
       style="display:block;width:100%;max-width:280px;margin:0 auto 10px;padding:13px 12px;border:1px solid var(--border);border-radius:11px;font-size:16px"
       onkeydown="if(event.key==='Enter')enterCode()">
     <button class="btn acc" style="max-width:280px;margin:0 auto" onclick="enterCode()">${esc(t.entercode)}</button></div>`;
+}
+// Сервер отверг вход (401/403) вне Телеграма. Сначала — молчаливая подмена: новая
+// ссылка входа, ждущая ответа человека, или токен из адреса (start_url ярлыка,
+// переустановленного после простоя). Мёртвый вход терять нечего, а это самый
+// частый законный случай: токен отозвали, он истёк, человек переехал на новый
+// адрес. Подменять нечем — телефон очищается (handleAuthGone).
+async function onAuthRejected(){
+  const dead=appToken(); if(dead) TRIED_TOKENS.add(dead);
+  const cand=[pendingToken(), URLT].find(x=>x && !TRIED_TOKENS.has(x) && !tokenIsOut(x));
+  if(!cand) return handleAuthGone(!!dead);
+  TRIED_TOKENS.add(cand); clearPendingToken(); closeAsk("swapsheet");
+  try{ localStorage.setItem('app_token',cand); }catch(e){}
+  // Манифест собран в <head> со старым входом, а Safari его не перечитывает: ярлык
+  // «На экран Домой» унёс бы в start_url мёртвый токен. Один раз перезагружаемся —
+  // головной скрипт соберёт манифест уже с новым.
+  if(appToken()===cand && window.MANIFEST_TOKEN!==cand){ stampTokenUrl(); location.reload(); return; }
+  return boot();
+}
+// Вход отозван или истёк: портфель, карточки, снимок и сам токен с телефона
+// стираем — иначе уволенный или нашедший телефон читал бы их в авиарежиме. Очередь
+// остаётся: это работа человека, она уйдёт, когда он войдёт по новой ссылке.
+// Нет сети или сервер лежит (5xx) — сюда не попадаем: работа из снимка без связи
+// штатна.
+async function handleAuthGone(expired){
+  const exp=(expired===undefined)?!!appToken():!!expired;   // до очистки: был ли вход
+  await wipeDevice({keepQueue:true});
+  renderLangs();                  // входа нет — нет и «Выйти»
+  renderAppAuthGone(exp);
 }
 async function enterCode(){
   // Код берём из поля; пустое поле → пробуем буфер обмена (iOS сам спросит
@@ -1343,6 +1524,105 @@ async function enterCode(){
   const m=raw.match(/\/i\/([A-Za-z0-9_-]{8,})/)||raw.match(/link=([A-Za-z0-9_-]+)/);
   const r=await redeemCode(m?m[1]:raw, false);
   if(r===true){ toast('✓'); boot(); } else toast('✕');
+}
+
+// Вопрос, на который нужен ответ кнопкой. Не confirm(): его текст не переводится,
+// а на iOS-ярлыке системные окна ведут себя непредсказуемо (см. renderAppAuthGone).
+function askSheet(id, inner){
+  let box=$(id);
+  if(!box){ box=document.createElement("div"); box.id=id; box.className="picksheet ask";
+    document.body.appendChild(box); }
+  box.innerHTML=`<div class="pickbg"></div><div class="pickbody">${inner}</div>`;
+}
+function closeAsk(id){ const b=$(id); if(b) b.remove(); }
+
+// Открыта новая ссылка входа при ЖИВОМ входе (ревью 25.09.2026, #4). Ссылку
+// «/#t=<токен>&fresh=1» может собрать и прислать любой держатель живого токена —
+// тогда выезды, фото и GPS жертвы уходили бы в ЕГО аккаунт. Поэтому телефон
+// отдаётся новой ссылке только тогда, когда человек сам это подтвердил, видя,
+// чей вход сейчас. Внутри Телеграма входом служит initData — там вопроса нет.
+let SWAP_WHO="", SWAP_BUSY=false;
+function whoIsIn(d){
+  const r=d&&d.roles;
+  if(r&&r.manager) return L().swapmgr+(r.acting?" · "+r.acting:"");
+  return (d&&d.employee)||"—";
+}
+function offerSwap(d){
+  const tk=pendingToken();
+  if(!tk) return;
+  if(tk===appToken() || (TG&&TG.initData) || tokenIsOut(tk)){ clearPendingToken(); return; }
+  if($("swapsheet")) return;       // вопрос уже на экране (или идёт замена) — не сбивать
+  SWAP_WHO=whoIsIn(d);
+  swapAsk();
+}
+function swapAsk(){
+  const t=L();
+  askSheet("swapsheet", `<div style="font-weight:600;margin-bottom:8px">${esc(t.swaptitle)}</div>
+    <div style="margin-bottom:8px">${esc(t.swapnow)} <b>${esc(SWAP_WHO)}</b></div>
+    <div class="muted" style="font-size:13px;margin-bottom:14px">${esc(t.swapwarn)}</div>
+    <div class="row2"><button class="btn" onclick="swapYes()">${esc(t.swapyes)}</button>
+      <button class="btn acc" onclick="swapNo()">${esc(t.swapno)}</button></div>`);
+}
+// «Оставить»: отклонённый токен больше не кандидат ни на что — даже если старый
+// вход потом умрёт, телефон очистится, а не перейдёт туда, от чего отказались.
+function swapNo(){
+  const tk=pendingToken();
+  if(tk){ TRIED_TOKENS.add(tk); if(URLT===tk) URLT=null; }
+  clearPendingToken(); closeAsk("swapsheet");
+}
+async function swapYes(force){
+  const tk=pendingToken();
+  if(!tk){ closeAsk("swapsheet"); return; }
+  if(SWAP_BUSY) return;
+  SWAP_BUSY=true;
+  try{
+    const t=L();
+    let left=await pendingCount();
+    if(left && !force){
+      // Сначала досылаем СТАРЫМ входом то, что человек успел сделать: замена
+      // стирает очередь целиком, а новый вход чужие выезды не примет.
+      if(navigator.onLine!==false){
+        askSheet("swapsheet", `<div class="muted" style="text-align:center;padding:12px 0">${esc(t.sending)}</div>`);
+        await flushQueueSettled(30000);
+        left=await pendingCount();
+      }
+      if(left){
+        askSheet("swapsheet", `<div style="font-weight:600;margin-bottom:14px">${esc(t.swaplost.replace("{n}",left))}</div>
+          <div class="row2"><button class="btn" style="color:var(--danger)" onclick="swapYes(true)">${esc(t.swapyes)}</button>
+            <button class="btn acc" onclick="swapNo()">${esc(t.swapno)}</button></div>`);
+        return;
+      }
+    }
+    const old=appToken();
+    await dropTokenOnServer(old);  // и ярлык с этим входом больше не впустит
+    await wipeDevice({keepQueue:false});
+    markTokenOut(old);             // прежний вход не вернётся сам из start_url ярлыка
+    try{ localStorage.setItem('app_token',tk); }catch(e){}
+    stampTokenUrl();
+    location.reload();             // манифест и всё прочее — уже с новым входом
+  }finally{ SWAP_BUSY=false; }
+}
+
+// «Выйти с этого телефона» (ревью 25.09.2026, #5): передать телефон другому или
+// просто выйти. Стирается всё, включая очередь, поэтому вопрос называет, сколько
+// неотправленного пропадёт. Кнопка живёт рядом с языком (renderLangs).
+async function askLogout(){
+  if(TG&&TG.initData) return;
+  const t=L(), left=await pendingCount();
+  askSheet("outsheet", `<div style="font-weight:600;margin-bottom:8px">${esc(t.logoutq)}</div>
+    <div class="muted" style="font-size:13px;margin-bottom:12px">${esc(t.logoutwhy)}</div>
+    ${left?`<div style="color:var(--danger);margin-bottom:12px">${esc(t.logoutlost.replace("{n}",left))}</div>`:""}
+    <div class="row2"><button class="btn" style="color:var(--danger)" onclick="logoutNow()">${esc(t.logout)}</button>
+      <button class="btn acc" onclick="closeAsk('outsheet')">${esc(t.cancel)}</button></div>`);
+}
+async function logoutNow(){
+  closeAsk("outsheet"); closeAsk("swapsheet");
+  const tk=appToken();
+  await dropTokenOnServer(tk);   // и ярлык с этим входом больше не впустит
+  await wipeDevice({keepQueue:false});
+  markTokenOut(tk);
+  renderLangs();
+  renderAppAuthGone(false);
 }
 
 let START_TAB, START_DATE, START_TAB_USED=false;
@@ -1375,8 +1655,14 @@ function toast(t){ const e=$("toast"); e.textContent=t; e.classList.add("show");
   setTimeout(()=>e.classList.remove("show"),1600); }
 
 function renderLangs(){
+  const t=L();
   $("langs").innerHTML = ["ru","uz","tg"].map(c =>
-    `<button class="${c===STATE.lang?'on':''}" onclick="setLang('${c}')">${c.toUpperCase()}</button>`).join("");
+    `<button class="${c===STATE.lang?'on':''}" onclick="setLang('${c}')">${c.toUpperCase()}</button>`).join("")+
+    // «Выйти с этого телефона» — там же, где язык: других настроек у оболочки нет.
+    // Внутри Телеграма вход — сама Телега, выходить из приложения некуда.
+    ((appToken() && !(TG&&TG.initData))
+      ? `<button class="out" onclick="askLogout()" title="${esc(t.logoutq)}" aria-label="${esc(t.logoutq)}">${ic("exit")}<span>${esc(t.logout)}</span></button>`
+      : "");
 }
 async function setLang(c){
   STATE.lang=c; renderLangs();
@@ -1402,7 +1688,7 @@ function renderPending(employee){
 }
 
 async function boot(){
-  const bootStarted=performance.now();
+  const bootStarted=performance.now(), gen=WIPE_GEN;
   checkShellVersion();
   renderLangs(); hideBottomNav();
   geoProbe();                 // узнаём, дали ли права раньше (не спрашивает, только смотрит)
@@ -1424,8 +1710,12 @@ async function boot(){
   }
   try{
     const d = await api("/api/bootstrap");
+    // Пока шёл запрос, телефон могли очистить («Выйти», замена входа): поздний
+    // ответ не должен вернуть на экран и в хранилище стёртый портфель.
+    if(gen!==WIPE_GEN) return;
     personalizeManifest();   // авторизация удалась → ярлык с этой страницы унесёт вход
     stampTokenUrl();         // …и в самом адресе страницы тоже (iOS берёт любой из двух)
+    offerSwap(d);            // открыта новая ссылка входа при живом входе — спросить
     STATE.lang=d.lang||STATE.lang; renderLangs();
     if(d.needsOnboarding){ STATE.onb=d; renderOnboarding(); return; }
     // Заявка ждёт подтверждения владельца (второе устройство на то же ФИО).
@@ -1441,6 +1731,7 @@ async function boot(){
       const left = await pendingCount();
       await clearLocalData({keepQueue: left > 0});
     }
+    if(gen!==WIPE_GEN) return;
     setBottomNav("clients");   // вкладки видны с первого экрана
     setMeta(d.meta, true); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
     STATE.roles=d.roles||null;   // роль руководителя: список его сотрудников + текущий
@@ -1461,19 +1752,17 @@ async function boot(){
       renderDigest();
     }
   }catch(e){
+    if(gen!==WIPE_GEN) return;     // телефон очистили, пока шёл запрос: экран уже свой
     clientMetric("boot_error", {download_ms:performance.now()-bootStarted});
     const st=+((e&&e.message)||0);
     // Сервер ответил «не пускаю» вне Телеги: токен истёк/отозван либо его ещё нет.
-    // Кэш здесь НЕ поднимаем (сервер доступен и отказал) — просим новую ссылку у аналитика.
-    if((st===401||st===403) && !(TG&&TG.initData)){
-      // В localStorage мог остаться мёртвый токен, а в start_url ярлыка — живой
-      // (переустановили ярлык после простоя): пробуем кандидата из URL один раз.
-      if(URLT && URLT!==appToken() && !TRIED_URLT){ TRIED_URLT=true;
-        try{ localStorage.setItem('app_token',URLT); }catch(e){}
-        return boot(); }
-      renderAppAuthGone(!!appToken()); return; }
+    // Кэш здесь НЕ поднимаем (сервер доступен и отказал): мёртвый вход подменяем
+    // кандидатом (новая ссылка, start_url ярлыка), а нечем — стираем портфель с
+    // телефона и просим новую ссылку у аналитика (onAuthRejected).
+    if((st===401||st===403) && !(TG&&TG.initData)) return onAuthRejected();
     // Сети нет — поднимаемся из оффлайн-снимка портфеля, если он есть.
     const snap = await loadBootstrapSnapshot();
+    if(gen!==WIPE_GEN) return;
     if(snap && snap.persons){
       STATE.lang=snap.lang||STATE.lang; renderLangs();
       setMeta(snap.meta); STATE.persons=snap.persons; STATE.kind=snap.kind||"agent";
@@ -1591,7 +1880,7 @@ async function routeDay(){
   $("plist").innerHTML =
     `<div class="muted" style="margin:4px 0 10px">🧭 ${esc(t.routeday)}: ${items.length}`+
     (j.km?` · ≈ ${j.km} км`:"")+`</div>`+
-    items.map((p,i)=>`<div class="pcard" onclick="openP('${p.rep}')">
+    items.map((p,i)=>`<div class="pcard" onclick="openP(${jsq(p.rep)})">
        <span style="flex:0 0 24px;height:24px;border-radius:50%;background:#2F80ED;color:#fff;
          display:flex;align-items:center;justify-content:center;font:600 12px/1 sans-serif">${i+1}</span>
        <div class="pinfo"><div class="pname">${esc(p.client)}</div>
@@ -1602,7 +1891,7 @@ async function routeDay(){
 let LIST_RENDER_SEQ=0;
 function personCardHTML(p,t){
   const dotStyle = (!p.visited && p.score!=null) ? ` style="background:${priColor(p.score)}"` : "";
-  return `<div class="pcard" onclick="openP(decodeURIComponent('${enc(p.rep)}'))">
+  return `<div class="pcard" onclick="openP(${jsq(p.rep)})">
      <span class="dot ${p.visited?'v':'n'}"${dotStyle}></span>
      <div class="pinfo"><div class="pname">${esc(p.client)}</div>
        <div class="psub">${p.n>1?(p.n+" "+t.kd+" · "):""}${totalStr(p)}</div></div>
@@ -1906,7 +2195,7 @@ function formField(f){
   return `<label class="fld">${esc(f.title)}</label>
     <select data-k="${f.key}" class="nativesel"><option value="">—</option>${opts}</select>
     <button type="button" class="pick${cur?" has":""}" data-for="${f.key}"
-      onclick="openPick('${esc(f.key)}')">${esc(cur?cur.label:"—")}</button>`;
+      onclick="openPick(${jsq(f.key)})">${esc(cur?cur.label:"—")}</button>`;
 }
 // Свой список вариантов. Открывается листом снизу, вариант — крупная кнопка.
 // Не зависит от прошивки телефона и от того, умеет ли webview показывать
@@ -1918,7 +2207,7 @@ function openPick(key){
   const cur=sel?sel.value:"";
   const rows=[{value:"",label:"—"}].concat(list).map(o=>
     `<button type="button" class="pickrow${o.value===cur?" on":""}"
-       onclick="choosePick('${esc(key)}',this)" data-v="${esc(o.value)}">${esc(o.label)}</button>`
+       onclick="choosePick(${jsq(key)},this)" data-v="${esc(o.value)}">${esc(o.label)}</button>`
   ).join("");
   const box=document.createElement("div");
   box.className="picksheet"; box.id="picksheet";
@@ -1965,13 +2254,13 @@ function panelForm(d,t){
     ${sec("",t.secAgree,grp(["agreed_payment"])+rest)}
     ${promiseSection(d)}
     <div class="fsec"><div class="fsec-h">${t.comment}</div>
-      <label class="fld">${t.comment}</label><textarea id="f_visit_comment">${esc(d.visit_comment||d.call_comment||"")}</textarea>
+      <label class="fld">${t.comment}</label><textarea id="f_visit_comment" maxlength="4000">${esc(d.visit_comment||d.call_comment||"")}</textarea>
       ${(STATE.meta&&STATE.meta.voice)
         ?`<button class="btn line" id="micbtn" style="margin-top:8px" onclick="toggleVoice()">🎤 <span>${esc(t.voice)}</span></button>`
         :`<button class="btn line frozen" id="micbtn" style="margin-top:8px" disabled
             title="${esc(t.voiceoff)}">🎤 <span>${esc(t.voice)}</span></button>
           <div class="muted" style="font-size:11px;margin-top:2px">${esc(t.voiceoff)}</div>`}
-      <label class="fld">${t.tips}</label><textarea id="f_tips">${esc(d.tips||"")}</textarea>
+      <label class="fld">${t.tips}</label><textarea id="f_tips" maxlength="4000">${esc(d.tips||"")}</textarea>
     </div>
     <div class="fsec"><div class="fsec-h">${t.photos}</div>
       <label class="btn line" style="cursor:pointer;margin-top:8px">${ic("camera")}<span>${t.addphoto}</span>
@@ -2028,7 +2317,7 @@ function promiseSection(d){
       return `<label class="fld">${esc(f.title)}</label>
         <input type="hidden" data-k="${esc(f.key)}" value="${esc(v)}">
         <button type="button" class="pick${v?" has":""}" data-for="${esc(f.key)}"
-          onclick="openDateWheel('${esc(f.key)}')">${esc(v||"—")}</button>
+          onclick="openDateWheel(${jsq(f.key)})">${esc(v||"—")}</button>
         ${lim?`<div class="muted" style="font-size:11px;margin:-6px 0 8px">не дальше ${esc(promiseMaxDate())} (${lim} дн от выезда)</div>`:""}
         ${reg[f.key]&&!v?`<div class="muted" style="font-size:11px;margin:-6px 0 8px">офис: ${esc(reg[f.key])}</div>`:""}`;
     }
@@ -2037,7 +2326,7 @@ function promiseSection(d){
         <input data-k="${esc(f.key)}" inputmode="numeric" class="money" placeholder="0"
           value="${esc(fmtMoneyInput(v))}" oninput="onMoneyInput(this)">
         <button type="button" class="xbtn" aria-label="очистить"
-          onclick="typedClear('${esc(f.key)}')">×</button>
+          onclick="typedClear(${jsq(f.key)})">×</button>
       </div>
       ${reg[f.key]&&!v?`<div class="muted" style="font-size:11px;margin:0 0 10px">офис: ${esc(reg[f.key])}</div>`:""}`;
   }).join("");
@@ -2105,7 +2394,7 @@ function openDateWheel(key){
         <div class="wheel" id="wh_d"><div class="wheelpad"></div><div class="wheelpad"></div></div>
       </div>
       <div style="display:flex;gap:8px;padding:0 14px 14px">
-        <button type="button" class="btn line" style="flex:1" onclick="typedClear('${esc(key)}')">Убрать</button>
+        <button type="button" class="btn line" style="flex:1" onclick="typedClear(${jsq(key)})">Убрать</button>
         <button type="button" class="btn acc" style="flex:1" onclick="wheelDone()">Готово</button>
       </div>
     </div>`;
@@ -2205,9 +2494,9 @@ function driveLinks(d){
 function providerChips(d){
   const l=driveLinks(d);
   return `<div class="providers">
-    <a href="${l.yandex}" target="_blank" onclick="openExt(event,'${l.yandex}')">${ic("map")}<span>Я.Карты</span></a>
-    <a href="${l.google}" target="_blank" onclick="openExt(event,'${l.google}')">${ic("map")}<span>Google</span></a>
-    <a href="${l.twogis}" target="_blank" onclick="openExt(event,'${l.twogis}')">${ic("map")}<span>2ГИС</span></a>
+    <a href="${esc(l.yandex)}" target="_blank" rel="noopener noreferrer" onclick="openExt(event,this.href)">${ic("map")}<span>Я.Карты</span></a>
+    <a href="${esc(l.google)}" target="_blank" rel="noopener noreferrer" onclick="openExt(event,this.href)">${ic("map")}<span>Google</span></a>
+    <a href="${esc(l.twogis)}" target="_blank" rel="noopener noreferrer" onclick="openExt(event,this.href)">${ic("map")}<span>2ГИС</span></a>
   </div>`;
 }
 function openExt(e,url){ if(TG&&TG.openLink){ e.preventDefault(); TG.openLink(url); } }
@@ -2621,7 +2910,7 @@ function draftsLeftHTML(t){
   const ds=draftsLeft(); if(!ds.length) return "";
   return `<div class="box" style="border-color:var(--danger);margin-bottom:10px">
     <div>✍️ ${esc(t.draftsleft)}: <b>${ds.length}</b></div>
-    ${ds.slice(0,5).map(p=>`<button class="btn line" style="margin-top:6px" onclick="openP(decodeURIComponent('${enc(p.rep)}'))">${esc(p.client)} ›</button>`).join("")}</div>`;
+    ${ds.slice(0,5).map(p=>`<button class="btn line" style="margin-top:6px" onclick="openP(${jsq(p.rep)})">${esc(p.client)} ›</button>`).join("")}</div>`;
 }
 
 // Голосовой комментарий: диктовка → /api/voice → текст в поле.
@@ -2942,15 +3231,20 @@ document.addEventListener("visibilitychange", ()=>{ if(document.hidden){ flushDr
 let LAST_REFRESH=0;
 async function refreshData(){
   if(Date.now()-LAST_REFRESH<60000) return;      // не чаще раза в минуту
+  if(!appToken() && !(TG&&TG.initData)) return;  // входа нет — экран входа фоном не дёргаем
+  const gen=WIPE_GEN;
   try{
     const d=await api("/api/bootstrap");
+    if(gen!==WIPE_GEN) return;                   // телефон очистили, пока шёл запрос
     LAST_REFRESH=Date.now();
+    offerSwap(d);        // новую ссылку открыли без связи: вход жив — теперь и спросить
     if(d.needsOnboarding) return;                // экраны входа фоном не дёргаем
     const prev=await loadBootstrapSnapshot();
     if(prev && prev.employee && d.employee && prev.employee!==d.employee){
       const left = await pendingCount();
       await clearLocalData({keepQueue: left > 0});
     }
+    if(gen!==WIPE_GEN) return;
     const sig=ps=>JSON.stringify((ps||[]).map(p=>[p.rep,p.visited,p.n]));
     const changed=sig(STATE.persons)!==sig(d.persons);
     setMeta(d.meta, true); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
@@ -2962,7 +3256,16 @@ async function refreshData(){
       if(!STATE.cur && q){ const qs=q.value; renderList();
         if(qs){ $("q").value=qs; filterList(); } }
     }
-  }catch(e){}                                    // оффлайн/отказ — молча, до следующего раза
+  }catch(e){
+    // Вход отозвали, пока приложение было открыто (iOS-ярлык живёт неделями без
+    // перезагрузки): решаем так же, как при запуске, — подмена кандидатом или
+    // очистка телефона. Но не посреди работы: открытую форму и отправку фото не
+    // рвём, это сделает следующая проверка или запуск. Нет сети/5xx — молча.
+    const st=+((e&&e.message)||0);
+    if((st===401||st===403) && gen===WIPE_GEN && appToken() && !(TG&&TG.initData)
+       && !SAVING && !PHOTO_BUSY && !PHOTO_PREPARING.size && !PHOTO_INFLIGHT.size
+       && !formVisible()) onAuthRejected();
+  }
 }
 setInterval(refreshData, 10*60*1000);            // раз в 10 минут при открытом приложении
 setInterval(checkShellVersion, 5*60*1000);        // версия легче полного портфеля
@@ -2975,7 +3278,15 @@ window.addEventListener("offline", ()=>{ STATE.online=false; updateOffBar(); });
 document.addEventListener("visibilitychange", ()=>{ if(!document.hidden){ flushQueue(); checkShellVersion(); refreshData(); } });
 window.addEventListener("pageshow", e=>{ checkShellVersion(); if(e.persisted){ flushQueue(); refreshData(); } });
 
-function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+// Апостроф тоже экранируется: в тексте и в атрибутах браузер вернёт его сам, а
+// атрибут в одинарных кавычках без этого рвался бы (ревью 25.09.2026, Low).
+function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+// Строка — аргумент встроенного обработчика: onclick="f(${jsq(x)})". Одного esc
+// здесь мало: браузер раскодирует &#39; и &quot; в атрибуте ДО разбора JS, и
+// апостроф узбекской латиницы («Farg'ona») закрыл бы строку — кнопка ломалась, а
+// строка с нагрузкой исполнялась бы. enc() не спасает: апостроф он не кодирует.
+// JSON.stringify даёт корректный JS-литерал, esc — корректный атрибут.
+function jsq(s){ return esc(JSON.stringify(String(s==null?"":s))); }
 
 // --- Геометки: захват точки (геолокация телефона) + сохранение ---
 // Метка ставится по нажатию, значит можно и нужно спрашивать права здесь же —
@@ -3233,8 +3544,9 @@ async function renderMarks(){
 // считает сервер (контейнер в UTC, телефон в +3/+5 — клиентская дата утром
 // показывала бы пустой день); клиент шлёт пресет и число сдвигов либо две
 // строки из полей «с/по» и сам дат не строит. Всё из БД проходит через esc();
-// в onclick уходят только ЧИСЛОВЫЕ индексы состояния (esc/enc не экранируют
-// апостроф, а он в ФИО на узбекской латинице норма).
+// в onclick уходят ЧИСЛОВЫЕ индексы состояния, а редкие строки (дата, код
+// страны и офиса) — только через jsq(): апостроф в ФИО и городах на узбекской
+// латинице — норма, и голый esc в JS-строке обработчика его не удержит.
 let DG={view:"stats", date:null, today:null, prev:null, next:null,
         preset:"today", shift:0, from:null, to:null, range:null,
         emp:null, rep:null, seq:0, last:0, rows:[], cases:[], items:[], days:[],
@@ -3295,7 +3607,8 @@ function dgFail(e){
   if(st===403){ // роль отозвали, пока устройство работало на старом снимке
     STATE.roles=null; setBottomNav("clients");
     b.innerHTML=`<div class="center">${esc(t.dggone)}</div>`; return; }
-  if(st===401){ renderAppAuthGone(!!appToken()); return; }
+  // 403 выше — отняли роль, вход жив; 401 — отозван сам вход: как при запуске.
+  if(st===401){ onAuthRejected(); return; }
   if(st===404){ b.innerHTML=`<div class="center">${esc(t.dggoneemp)}</div>
     <button class="btn line" style="margin-top:12px" onclick="dgGo('stats')">←</button>`;
     return; }
@@ -3339,9 +3652,9 @@ function dgOpenPromises(){ DG.date=DG.to; dgGo("promises"); }
 function dgDate(iso){ if(!iso) return; DG.date=iso; dgLoad(); }
 function dgHeadHTML(j,title){
   const nav=`<div class="muted" style="margin:4px 0 10px">
-    <button class="btn line" style="padding:2px 10px" onclick="dgDate('${esc(j.prev_date||"")}')">‹</button>
+    <button class="btn line" style="padding:2px 10px" onclick="dgDate(${jsq(j.prev_date||"")})">‹</button>
     <b style="margin:0 10px">${esc(j.date||"")}</b>
-    ${j.next_date?`<button class="btn line" style="padding:2px 10px" onclick="dgDate('${esc(j.next_date)}')">›</button>`:""}
+    ${j.next_date?`<button class="btn line" style="padding:2px 10px" onclick="dgDate(${jsq(j.next_date)})">›</button>`:""}
     <span style="margin-left:10px">обновлено в ${hhmm(new Date(DG.last||Date.now()))}</span>
   </div>`;
   return `<div style="font-weight:700">${esc(title)}</div>`+nav;
@@ -3569,11 +3882,11 @@ function dgDrawTable(){
   const cs=j.countries||[];
   const ctry=cs.length>1?`<div class="chips" style="margin:8px 0 0">
     <button class="chip${!DG.country?" on":""}" onclick="dgCountry('')">Все · ${(j.totals||{}).employees||0}</button>
-    ${cs.map(c=>`<button class="chip${DG.country===c.code?" on":""}" onclick="dgCountry('${esc(c.code)}')">${esc(c.flag)} ${esc(c.short)} · ${c.employees}</button>`).join("")}</div>`:"";
+    ${cs.map(c=>`<button class="chip${DG.country===c.code?" on":""}" onclick="dgCountry(${jsq(c.code)})">${esc(c.flag)} ${esc(c.short)} · ${c.employees}</button>`).join("")}</div>`:"";
   const offs=j.offices||[];
   const offc=offs.length>1?`<div class="chips" style="margin:6px 0 0">
     <button class="chip${!DG.office?" on":""}" onclick="dgOffice('')">Все офисы</button>
-    ${offs.map(o=>`<button class="chip${DG.office===o.code?" on":""}" onclick="dgOffice('${esc(o.code)}')">${o.code===DG_NOOFF?"❔":"🏢"} ${esc(o.name)} · ${o.employees}</button>`).join("")}</div>`:"";
+    ${offs.map(o=>`<button class="chip${DG.office===o.code?" on":""}" onclick="dgOffice(${jsq(o.code)})">${o.code===DG_NOOFF?"❔":"🏢"} ${esc(o.name)} · ${o.employees}</button>`).join("")}</div>`:"";
   const th=(key,label,cls)=>`<th class="${cls||""}${DG.sort===key?" on":""}" onclick="dgSort('${key}')">${label}${DG.sort===key?(DG.dir<0?" ↓":" ↑"):""}</th>`;
   const trs=rows.map((r,i)=>`<tr class="${r.visits?"":"z"}" onclick="dgPickEmp(${i})">
     <td class="l"><div class="pname">${esc(r.employee)}</div>${r.visits?"":`<div class="psub">${esc(dgIdle(r))}</div>`}</td>
@@ -3733,7 +4046,7 @@ function dgPromises(j,b){
   b.innerHTML=parts.join("");
 }
 async function dgMap(j,b){
-  b.innerHTML=`${dgHeadHTML(j,"🗺 "+esc(j.employee||DG.emp||""))}
+  b.innerHTML=`${dgHeadHTML(j,"🗺 "+(j.employee||DG.emp||""))}
     <div id="dgmap" style="height:58vh;border-radius:12px;overflow:hidden"></div>
     <div class="muted" id="dgleg" style="margin-top:8px"></div>
     <button class="btn line" style="margin-top:10px" onclick="dgGo('emp')">← ${esc(j.employee||"")}</button>`;
@@ -3874,7 +4187,8 @@ function dgBindsScreen(j,b){
   b.innerHTML=parts.join("");
 }
 // В onclick уходит только индекс в DG.baccs: ФИО на узбекской латинице содержит
-// апостроф, а esc его не экранирует (то же правило, что на всей вкладке).
+// апостроф, а esc в JS-строке обработчика его не удержит (то же правило, что на
+// всей вкладке; строки — только через jsq).
 function dgBindCard(a,emp,pending,dup){
   const i=DG.baccs.length, holder=pending?dgHolder(emp):null, who=dgWho(a);
   DG.baccs.push({tid:a.telegram_id, employee:emp, pending:!!pending, who:who,
