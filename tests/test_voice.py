@@ -157,6 +157,66 @@ def test_voice_maps_stt_busy_to_retryable_503(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_second_recognition_is_refused_at_once_not_queued(monkeypatch):
+    """Фраза — около 17 с на обоих ядрах VM. Прежний asyncio.Lock копил ждущих
+    без предела, и один токен, шлющий записи подряд, держал голос для всех.
+    Пока служба занята, следующий запрос сразу получает 503 и в очередь не
+    встаёт; освободилась — снова принимает."""
+    _enable(monkeypatch)
+    uid, rep = _identity(monkeypatch)
+    calls = []
+
+    class SlowSTT:
+        def __init__(self):
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def transcribe(self, path, language):
+            calls.append(language)
+            self.entered.set()
+            await self.release.wait()
+            return "первая фраза"
+
+    def form():
+        data = FormData()
+        data.add_field("voice", b"audio", filename="voice.webm")
+        return data
+
+    async def scenario():
+        stt = SlowSTT()
+        monkeypatch.setattr(web, "_STT", stt)
+        client = TestClient(TestServer(web.build_app(None)))
+        await client.start_server()
+        headers = {"X-Dev-Uid": str(uid)}
+        try:
+            first = asyncio.create_task(
+                client.post(f"/api/voice?rep={rep}", data=form(), headers=headers))
+            await asyncio.wait_for(stt.entered.wait(), timeout=5)
+
+            # wait_for: при очереди вместо отказа запрос висел бы до освобождения.
+            busy = await asyncio.wait_for(
+                client.post(f"/api/voice?rep={rep}", data=form(), headers=headers),
+                timeout=5)
+            assert busy.status == 503
+            assert await busy.json() == {"error": web.VOICE_BUSY_TEXT}
+            assert busy.headers["Retry-After"] == "60"
+
+            stt.release.set()
+            done = await asyncio.wait_for(first, timeout=5)
+            assert done.status == 200
+            assert (await done.json())["text"] == "первая фраза"
+
+            again = await client.post(f"/api/voice?rep={rep}", data=form(),
+                                      headers=headers)
+            assert again.status == 200
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+    assert len(calls) == 2, "занятый запрос всё-таки дошёл до службы"
+    assert not web._VOICE_SEM.locked()
+
+
 def test_empty_voice_is_422_and_never_calls_stt(monkeypatch):
     _enable(monkeypatch)
     uid, rep = _identity(monkeypatch)

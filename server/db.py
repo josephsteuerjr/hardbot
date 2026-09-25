@@ -2937,31 +2937,42 @@ def add_track_points(session_id: str, employee: str, telegram_id: int,
 
     Точки с битыми координатами молча отбрасываются: телефон в поле присылает
     и NaN, и нули, и «точность 5 км» — падать из-за этого посреди поездки нельзя.
+    Выкидывается ТОЧКА, а не пачка: на отказ очередь трека встаёт навсегда.
     Дубли по (session_id, ts) игнорируются, поэтому повторная отправка одной и
     той же пачки из оффлайн-очереди безопасна."""
+    import math
     now = datetime.now().isoformat(timespec="seconds")
     rows = []
     for p in points or []:
+        if not isinstance(p, dict):
+            continue
         try:
             lat, lon = float(p.get("lat")), float(p.get("lon"))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
+        # NaN и ±inf диапазон не проходят: любое сравнение с NaN ложно.
         if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
             continue
-        ts = str(p.get("ts") or "").strip()
+        # Метка времени — ключ дедупа; у оболочки это ISO-строка в 24 знака.
+        ts = str(p.get("ts") or "").strip()[:64]
         if not ts:
             continue
 
         def _f(key):
+            # Неконечная точность/скорость/курс — «не знаем» (NULL): int(inf)
+            # ронял всю пачку, а inf в REAL потом всплывал бы в ответах Infinity.
             try:
-                return float(p.get(key))
-            except (TypeError, ValueError):
+                value = float(p.get(key))
+            except (TypeError, ValueError, OverflowError):
                 return None
+            return value if math.isfinite(value) else None
 
         acc = _f("acc")
+        if acc is not None:
+            # acc_m — INTEGER: 1e300 метров не влезло бы в SQLite и уронило пачку.
+            acc = int(max(-1e9, min(acc, 1e9)))
         rows.append((session_id, employee, telegram_id, contract_id, ts, lat, lon,
-                     int(acc) if acc is not None else None,
-                     _f("speed"), _f("heading"), now))
+                     acc, _f("speed"), _f("heading"), now))
     if not rows:
         return 0
     with connect() as conn:
@@ -3166,8 +3177,9 @@ def chats_by_employee_index() -> dict[str, list[int]]:
     DISTINCT-сканом clients."""
     global _chats_index_cache
     now = time.monotonic()
-    if _chats_index_cache and now - _chats_index_cache[0] < _ROLE_CACHE_TTL_S:
-        return _chats_index_cache[1]
+    cached = _chats_index_cache          # одно чтение: см. reset_role_caches
+    if cached and now - cached[0] < _ROLE_CACHE_TTL_S:
+        return cached[1]
     index: dict[str, list[int]] = {}
     by_direction: dict[str, list[str]] = {}
     with connect() as conn:
@@ -3343,6 +3355,9 @@ _chats_index_cache: tuple[float, dict] | None = None
 
 
 def reset_role_caches() -> None:
+    """Сбросить кэши ролей. Зовётся и из потока импорта реестра, поэтому
+    читатели берут глобал ОДИН раз в локальную переменную: между проверкой
+    «кэш есть» и cache[1] его мог обнулить соседний поток."""
     global _registry_names_cache, _managers_index_cache, _chats_index_cache
     _registry_names_cache = None
     _managers_index_cache = None
@@ -3360,8 +3375,9 @@ def registry_name_index() -> dict[str, str]:
     rowid) отличается намеренно — у них разные задачи."""
     global _registry_names_cache
     now = time.monotonic()
-    if _registry_names_cache and now - _registry_names_cache[0] < _ROLE_CACHE_TTL_S:
-        return _registry_names_cache[1]
+    cached = _registry_names_cache       # одно чтение: см. reset_role_caches
+    if cached and now - cached[0] < _ROLE_CACHE_TTL_S:
+        return cached[1]
     with connect() as conn:
         rows = conn.execute(
             "SELECT responsible name, COUNT(*) c FROM clients "
@@ -3387,8 +3403,9 @@ def managers_by_employee_index() -> dict[str, list[dict]]:
     ссылке — мутировать их нельзя."""
     global _managers_index_cache
     now = time.monotonic()
-    if _managers_index_cache and now - _managers_index_cache[0] < _ROLE_CACHE_TTL_S:
-        return _managers_index_cache[1]
+    cached = _managers_index_cache       # одно чтение: см. reset_role_caches
+    if cached and now - cached[0] < _ROLE_CACHE_TTL_S:
+        return cached[1]
     index: dict[str, list[dict]] = {}
     by_direction: dict[str, list[str]] = {}
     for mgr in list_managers():
@@ -4938,10 +4955,41 @@ def export_markers(path: str) -> str:
     ws.append(["Дата", "Тип", "telegram_id", "Кейс (rep)", "Клиент", "Адрес",
                "Метка/подпись", "Широта", "Долгота"])
     for m in markers_rows():
-        ws.append([m["created_at"], m["kind"], m["telegram_id"], m["rep"],
-                   m["client"], m["address"], m["label"], m["lat"], m["lon"]])
+        ws.append(xlsx_text_row(ws, [
+            m["created_at"], m["kind"], m["telegram_id"], m["rep"],
+            m["client"], m["address"], m["label"], m["lat"], m["lon"]]))
     wb.save(path)
     return path
+
+
+# Серверные книги openpyxl (легаси /admin/export и /admin/markers.xlsx). Строку с
+# ведущим «=» openpyxl пишет ФОРМУЛОЙ: подпись метки или комментарий выездника
+# «=HYPERLINK(…)» исполнялись бы у аналитика при открытии выгрузки со всем
+# реестром (ревью 25.09.2026, #6). «+», «-» и «@» openpyxl формулой не делает,
+# но Excel превратит такую ячейку в формулу при первой же правке; табуляция и CR
+# — из того же списка OWASP. Поэтому все они едут ячейкой-строкой с quotePrefix —
+# тем самым невидимым «'» Excel. Апостроф В ЗНАЧЕНИЕ, как у pult/enrich._excel_safe
+# (там его съедает COM), в openpyxl остался бы видимым символом. Числа и даты не
+# трогаем.
+_XLSX_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def xlsx_text_row(ws, values) -> list:
+    """Строка для ws.append, в которой текст остаётся текстом."""
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE, Cell
+    out = []
+    for value in values:
+        if isinstance(value, str):
+            # Управляющий символ в одном комментарии ронял всю выгрузку:
+            # openpyxl отвергает его исключением IllegalCharacterError.
+            value = ILLEGAL_CHARACTERS_RE.sub("", value)
+            if value[:1] in _XLSX_FORMULA_START:
+                cell = Cell(ws, value=value)
+                cell.data_type = "s"
+                cell.quotePrefix = True
+                value = cell
+        out.append(value)
+    return out
 
 
 # --- Демо-данные (чтобы было что покрутить сразу) ---------------------------
@@ -5481,7 +5529,7 @@ def write_xlsx(path: str, rows: list[dict]) -> str:
         for f in FIELDS:
             v = r.get(f.key)
             out.append(_as_date(v) or v if f.key in DATE_KEYS else v)
-        ws.append(out)
+        ws.append(xlsx_text_row(ws, out))      # «=…» из поля — текст, не формула
         for c in date_cols:
             cell = ws.cell(row=r_idx, column=c)
             if isinstance(cell.value, date):

@@ -20,9 +20,11 @@ import hmac
 import html as _html
 import json
 import logging
+import math
 import os
 import re
 import tempfile
+import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -147,6 +149,11 @@ PROMISE_KEYS = ["agreed_payment", "promise_date", "last_payment_sum",
                 "last_payment_date", "forecast"]
 ALLOWED_SAVE = set(FORM_DROPDOWNS) | set(FORM_TEXT) | set(FORM_AMOUNTS) \
     | set(FORM_DATES)
+# Потолок свободного текста формы (visit_comment, tips). Длиннее — обрезаем, а
+# не 400: на любой 4xx оболочка откладывает запись очереди «на ручной разбор»,
+# и на сервер не доехал бы весь выезд, а не хвост комментария. У поля ввода тот
+# же maxlength, так что обрезка — страховка от старой оболочки и чужого клиента.
+VISIT_TEXT_MAX = 4000
 DATA_EXCHANGE_CONTRACT = contract_binding()
 
 
@@ -854,11 +861,8 @@ async def _route_day(request: web.Request) -> web.Response:
     emp = _employee(uid)
     if not emp:
         raise web.HTTPNotFound(text="bind")
-    try:
-        lat, lon = float(request.query.get("lat", "")), float(request.query.get("lon", ""))
-        start = (lat, lon)
-    except (TypeError, ValueError):
-        start = None
+    # Битая точка старта — как её отсутствие: маршрут строится от первого адреса.
+    start = _latlon(request.query.get("lat"), request.query.get("lon"))
     grouped = db.persons_for_employee(emp)
     persons = [_person_brief(p) for p in grouped]
     try:
@@ -972,13 +976,37 @@ async def _note_delete(request: web.Request) -> web.Response:
     return web.json_response({"ok": db.delete_note(uid, nid)})
 
 
+def _latlon(lat, lon) -> tuple[float, float] | None:
+    """Пара координат из запроса — или None, если это не точка на Земле.
+
+    float() принимает «inf», «nan» и 1e999, а json.loads — литералы Infinity и
+    NaN. Такая «точка» роняла гео-контроль посреди сохранения визита (500 уже
+    после записи полей, и очередь телефона повторяла его вечно), а в ответах
+    превращалась в Infinity — невалидный JSON, на котором JSON.parse роняет
+    экран руководителя целиком."""
+    try:
+        lat, lon = float(lat), float(lon)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not (math.isfinite(lat) and math.isfinite(lon)):
+        return None
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None
+    return lat, lon
+
+
 async def _marker(request: web.Request) -> web.Response:
     uid, emp = _auth(request)
     body = await request.json()
-    try:
-        lat, lon = float(body["lat"]), float(body["lon"])
-    except (KeyError, TypeError, ValueError):
-        raise web.HTTPBadRequest(text="lat/lon")
+    # Метка — это и есть точка, без неё записывать нечего: отказ, а не NULL.
+    # Оболочка на 4xx не повторяет метку, а оставляет её в очереди видимой
+    # («не сохранилось») — зацикливания нет. С rep метка переписывает точку
+    # должника во всех его договорах, поэтому мусор сюда не пускаем вовсе.
+    point = _latlon(body.get("lat"), body.get("lon")) if isinstance(body, dict) else None
+    if point is None:
+        raise web.HTTPBadRequest(
+            text="координаты метки не приняты: широта от -90 до 90, долгота от -180 до 180")
+    lat, lon = point
     rep = (body.get("rep") or "").strip() or None
     if rep:   # метка на кейс — проверим, что кейс наш (или владелец)
         row = db.get_client(rep)
@@ -1008,11 +1036,10 @@ async def _route(request: web.Request) -> web.Response:
     фронт в обоих случаях получает линию + км + минуты и рисует её на карте."""
     uid, emp = _auth(request)
     rep = request.query.get("rep", "")
-    try:
-        lat = float(request.query.get("lat", ""))
-        lon = float(request.query.get("lon", ""))
-    except (TypeError, ValueError):
+    point = _latlon(request.query.get("lat"), request.query.get("lon"))
+    if point is None:
         raise web.HTTPBadRequest(text="lat/lon")
+    lat, lon = point
     row = db.get_client(rep)
     if not row or (row["responsible"] != emp and uid != ADMIN_ID):
         raise web.HTTPNotFound(text="person")
@@ -1042,7 +1069,19 @@ async def _route_payload(lat: float, lon: float,
 
 # Координаты, введённые руками: «41.31, 69.24». Десятичная точка обязательна —
 # с запятой «41,31 69,24» неотличимо от пары целых, и разбор становится гаданием.
-_LATLON_RX = re.compile(r"^\s*(-?\d{1,2}(?:\.\d+)?)\s*[, ]\s*(-?\d{1,3}(?:\.\d+)?)\s*$")
+# Разделитель — «запятая в пробелах» ИЛИ «одни пробелы», и никак иначе. Прежний
+# «\s*[, ]\s*» делил серию пробелов между тремя кусками всеми способами сразу:
+# квадратичный перебор, 0,7 с цикла событий на один запрос в 8 КБ (ревью
+# 25.09.2026, F-2). Этот вариант линейный; табуляция стала разделителем — вреда нет.
+_LATLON_RX = re.compile(r"^\s*(-?\d{1,2}(?:\.\d+)?)(?:\s*,\s*|\s+)(-?\d{1,3}(?:\.\d+)?)\s*$")
+
+# Поисковая строка навигатора длиннее адреса не бывает. Режем ДО регулярок и
+# разбора: их стоимость растёт с длиной, а URL вмещает до 8 КБ.
+GEO_QUERY_MAX = 200
+
+
+def _geo_query(request: web.Request) -> str:
+    return (request.query.get("q") or "").strip()[:GEO_QUERY_MAX]
 
 
 _SUGGEST_LIMIT = 8
@@ -1069,7 +1108,7 @@ async def _geo_suggest(request: web.Request) -> web.Response:
     подписью области.
     """
     _auth(request)
-    q = (request.query.get("q") or "").strip()
+    q = _geo_query(request)
     if len(q) < 2:
         return web.json_response({"items": []})
     # geoindex.load() читает дампы с диска 5–7 секунд и КЭША НА ДИСКЕ НЕ ИМЕЕТ,
@@ -1078,15 +1117,23 @@ async def _geo_suggest(request: web.Request) -> web.Response:
     # Телеграма. Достаточно было одному выезднику набрать две буквы в поиске
     # первым после перезапуска. Уносим в поток.
     try:
-        import addr_cis
         import geoindex
         idx = await asyncio.get_running_loop().run_in_executor(None, geoindex.load)
     except Exception:                                  # noqa: BLE001
         return web.json_response({"items": []})
+    # Сам поиск — тоже в потоке. Запрос без совпадений проходит весь справочник
+    # (45 тыс. ключей, 131 тыс. записей): 40–130 мс на каждую паузу в наборе
+    # (оболочка ждёт 250 мс), и всё это время стоял цикл событий — сохранения,
+    # фото, пульт (ревью 25.09.2026, F-2). Справочник после загрузки только читается.
+    items = await asyncio.to_thread(_suggest_items, idx, q)
+    return web.json_response({"items": items})
 
+
+def _suggest_items(idx, q: str) -> list[dict]:
+    """Подсказки справочника по началу слова — синхронно, для потока."""
     needle = addr_cis.fuzzy(q)
     if not needle:
-        return web.json_response({"items": []})
+        return []
 
     seen: set[int] = set()
     hits: list[tuple[int, int, int, object]] = []
@@ -1147,7 +1194,7 @@ async def _geo_suggest(request: web.Request) -> web.Response:
                       "kind": r.fcode or ""})
         if len(items) >= _SUGGEST_LIMIT:
             break
-    return web.json_response({"items": items})
+    return items
 
 
 async def _geocode_free(request: web.Request) -> web.Response:
@@ -1159,7 +1206,9 @@ async def _geocode_free(request: web.Request) -> web.Response:
     геокодеры: туда уехали бы адреса должников (см. модуль geocode — точный
     геокодинг живёт в пульте на машине владельца, а не здесь)."""
     _auth(request)
-    q = (request.query.get("q") or "").strip()
+    # Обрезка до регулярки и разбора: после неё весь путь ниже — доли миллисекунды
+    # (замер 25.09.2026: разбор 8 КБ шёл 20 мс, 200 знаков — 0,5 мс).
+    q = _geo_query(request)
     if not q:
         raise web.HTTPBadRequest(text="q")
 
@@ -1193,8 +1242,11 @@ async def _geocode_free(request: web.Request) -> web.Response:
                               "precision": hit["precision"], "name": hit.get("name") or ""})
 
 
-# Пачка за раз. Навигатор шлёт ~10 точек, но оффлайн-очередь после часа без сети
-# может накопить сотни — режем, чтобы одна отправка не встала колом.
+# Пачка за раз. Оболочка (с первой версии трека) шлёт не больше 10 точек
+# (TRACK_FLUSH_N), а отставшие пачки из localStorage досылает по одной, так что
+# 500 — запас в пятьдесят раз, а не норма. Больше присылает только чужой
+# клиент: лишнее отбрасываем с записью в журнал, а не 400 — на любую ошибку
+# trackDrainQueue встаёт на этой пачке и не дошлёт ни её, ни следующие.
 TRACK_MAX_POINTS = 500
 
 
@@ -1228,6 +1280,9 @@ async def _track(request: web.Request) -> web.Response:
         row = db.get_client(rep)
         if not row or (row["responsible"] != emp and uid != ADMIN_ID):
             rep = None
+    if len(points) > TRACK_MAX_POINTS:
+        logging.warning("track: пачка из %d точек, приняты первые %d (uid=%s)",
+                        len(points), TRACK_MAX_POINTS, uid)
     added = db.add_track_points(session_id, emp, uid, rep, points[:TRACK_MAX_POINTS])
     return web.json_response({"ok": True, "added": added})
 
@@ -1237,14 +1292,11 @@ async def _route_to(request: web.Request) -> web.Response:
     Проверка «чей должник» здесь не нужна: цель задал сам пользователь,
     из БД ничего не читается."""
     _auth(request)
-    try:
-        lat = float(request.query.get("lat", ""))
-        lon = float(request.query.get("lon", ""))
-        dlat = float(request.query.get("dlat", ""))
-        dlon = float(request.query.get("dlon", ""))
-    except (TypeError, ValueError):
+    here = _latlon(request.query.get("lat"), request.query.get("lon"))
+    there = _latlon(request.query.get("dlat"), request.query.get("dlon"))
+    if here is None or there is None:
         raise web.HTTPBadRequest(text="lat/lon")
-    return await _route_payload(lat, lon, dlat, dlon)
+    return await _route_payload(*here, *there)
 
 
 async def _person(request: web.Request) -> web.Response:
@@ -1393,6 +1445,7 @@ async def _save(request: web.Request) -> web.Response:
                       if k not in typed_keys}
     cleared = set(body.get("cleared_keys") or []) if finish else set()
     rejected: dict[str, str] = {}
+    truncated: list[str] = []
     values = {}
     for key, raw in raw_values.items():
         if key not in ALLOWED_SAVE:
@@ -1405,6 +1458,13 @@ async def _save(request: web.Request) -> web.Response:
             if key in typed_keys and key in cleared:
                 values[key] = ""
             continue
+        if key in FORM_TEXT and len(value) > VISIT_TEXT_MAX:
+            # Режем ЗДЕСЬ, до записи: дальше текст копируется во все договоры
+            # человека, в снимок визита, в журнал значений и в visits.payload.
+            logging.warning("save: %s обрезан с %d до %d знаков (uid=%s)",
+                            key, len(value), VISIT_TEXT_MAX, uid)
+            value = value[:VISIT_TEXT_MAX].rstrip()
+            truncated.append(key)
         if key in FORM_DROPDOWNS and value not in DROPDOWNS[key]:
             raise web.HTTPBadRequest(text=f"invalid {key}")
         if key in typed_keys:
@@ -1483,11 +1543,11 @@ async def _save(request: web.Request) -> web.Response:
         # 'city' не считаем — центроид города, честная дистанция там бессмысленна.
         vlat = vlon = dist_m = None
         geo_far = None
-        g = body.get("geo") or {}
-        try:
-            vlat, vlon = float(g["lat"]), float(g["lon"])
-        except (KeyError, TypeError, ValueError):
-            vlat = vlon = None
+        g = body.get("geo")
+        g = g if isinstance(g, dict) else {}
+        # Неконечная или внеземная точка — как её отсутствие: визит принимаем
+        # всегда, в журнал ложится NULL (см. _latlon).
+        vlat, vlon = _latlon(g.get("lat"), g.get("lon")) or (None, None)
         # Грубые уровни отсекаем ЯВНО: центр района или области — это не адрес,
         # и расстояние до него ничего не проверяет, зато выглядит как нарушение.
         # Раньше судили только по geo_src, а он у всей иерархии один — «geonames».
@@ -1520,7 +1580,9 @@ async def _save(request: web.Request) -> web.Response:
             vlat = vlon = None
         try:
             acc = float(g.get("acc") or 0)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            acc = 0.0
+        if not math.isfinite(acc):
             acc = 0.0
         # Погрешность телефона СКЛАДЫВАЕМ с погрешностью адреса, а не сравниваем с
         # фиксированным порогом. Сетевой фикс в подъезде даёт 800-1500 м: раньше
@@ -1626,6 +1688,10 @@ async def _save(request: web.Request) -> web.Response:
     out = {"ok": True, "person": data}
     if rejected:
         out["rejected"] = rejected
+    if truncated:
+        # Не в rejected: оболочка показала бы «часть полей не принята», а поле
+        # принято — без хвоста.
+        out["truncated"] = truncated
     return web.json_response(out)
 
 
@@ -1640,14 +1706,15 @@ def _presence_from_draft(body, uid: int, emp: str, rep: str) -> None:
     g = body.get("geo")
     if not session_id or not isinstance(g, dict):
         return
-    samples = evidence.normalize_samples(
-        [{**g, "ts": g.get("ts") or _now_ms(), "k": "draft", "on": 1, "vis": 1}])
-    if samples:
-        try:
+    try:
+        # Разбор тоже под защитой: точность «inf» роняла его OverflowError-ом.
+        samples = evidence.normalize_samples(
+            [{**g, "ts": g.get("ts") or _now_ms(), "k": "draft", "on": 1, "vis": 1}])
+        if samples:
             db.add_presence(session_id, emp, uid, rep, samples,
                             received_at=datetime.now().isoformat(timespec="seconds"))
-        except Exception as exc:  # noqa: BLE001 — след не должен ломать черновик
-            logging.warning("presence(draft) failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001 — след не должен ломать черновик
+        logging.warning("presence(draft) failed: %s", exc)
 
 
 def _presence_from_save(body, uid: int, emp: str, rep: str, session_id: str | None,
@@ -1664,12 +1731,15 @@ def _presence_from_save(body, uid: int, emp: str, rep: str, session_id: str | No
     if vlat is not None:
         raw.append({"lat": vlat, "lon": vlon, "acc": acc,
                     "ts": body.get("occurred_at") or _now_ms(), "k": "save"})
-    samples = evidence.normalize_samples(raw)
-    if samples:
-        try:
+    try:
+        # Разбор следов — под той же защитой, что и запись: точность «inf» в
+        # одном следе роняла его OverflowError-ом, и визит получал 500 уже
+        # после записи полей, а очередь телефона повторяла его без конца.
+        samples = evidence.normalize_samples(raw)
+        if samples:
             db.add_presence(session_id, emp, uid, rep, samples)
-        except Exception as exc:  # noqa: BLE001
-            logging.warning("presence(save) failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001 — след не должен ломать визит
+        logging.warning("presence(save) failed: %s", exc)
 
 
 def _photo_samples(rep: str, day: str) -> list[dict]:
@@ -1727,16 +1797,22 @@ def _photo_geo_from(request: web.Request) -> tuple | None:
 def _photo_geo_query(q) -> tuple | None:
     """(lat, lon, acc_m, captured_at) — фактическая точка съёмки (миниапп
     снимает её в момент съёмки, оффлайн-очередь доносит её же). Мусор молча
-    игнорируем: фото важнее геометки."""
-    try:
-        lat, lon = float(q["lat"]), float(q["lon"])
-    except (KeyError, TypeError, ValueError):
+    игнорируем: фото важнее геометки.
+
+    Именно «игнорируем», а не 400: на любой 4xx у фото оболочка помечает снимок
+    «нужно переснять» и больше его не шлёт, то есть из-за мусорной координаты
+    пропал бы сам снимок. Неконечная точка — как её отсутствие (NULL)."""
+    point = _latlon(q.get("lat"), q.get("lon"))
+    if point is None:
         return None
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-        return None
+    lat, lon = point
     try:
+        # «Infinity» в заголовке — это строка, и JSON её не отсеет: оболочка
+        # склеивает X-Photo-Geo из чисел как есть. int(inf) бросает
+        # OverflowError, а он давал 500, на который очередь фото повторяет
+        # запрос вечно и держит за ним всё остальное.
         acc = max(0, min(int(float(q.get("acc") or 0)), 100_000))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         acc = 0
     captured = None
     try:
@@ -2192,9 +2268,22 @@ VISIT_PLAN_GROUPS = (8, 10, 12)
 
 # --- Голосовой комментарий: служба распознавания речи по Unix-сокету --------
 _STT = None
-_VOICE_LOCK = asyncio.Lock()
+# Одно распознавание за раз и БЕЗ очереди. Прежний asyncio.Lock копил ждущих
+# без предела: фраза — около 17 с на обоих ядрах VM, и один токен, шлющий
+# записи подряд, держал голос занятым для всех (ревью 25.09.2026, #15). Занято —
+# сразу 503: оболочка на 429/503 показывает «голос недоступен» и сама не повторяет.
+_VOICE_SEM = asyncio.Semaphore(1)
+VOICE_BUSY_TEXT = "распознавание занято, повторите через минуту"
 # Для таджикского служба пока использует auto.
 _VOICE_LANG = {"ru": "ru", "uz": "uz"}
+
+
+def _voice_busy() -> web.HTTPServiceUnavailable:
+    return web.HTTPServiceUnavailable(
+        text=json.dumps({"error": VOICE_BUSY_TEXT}, ensure_ascii=False),
+        content_type="application/json",
+        headers={"Retry-After": "60"},
+    )
 
 
 def _voice_configured() -> bool:
@@ -2225,6 +2314,8 @@ async def _voice(request: web.Request) -> web.Response:
     uid, _emp = _auth(request)
     if not _voice_configured():
         raise web.HTTPServiceUnavailable(text="voice off")
+    if _VOICE_SEM.locked():
+        raise _voice_busy()        # не принимаем запись, которую некому распознать
     try:
         reader = await request.multipart()
         field = None
@@ -2253,7 +2344,11 @@ async def _voice(request: web.Request) -> web.Response:
             raise web.HTTPUnprocessableEntity(text="empty voice")
         db.audit_access(uid, "voice", request.query.get("rep") or None)
         lang = _VOICE_LANG.get(lang_of(uid), "auto")
-        async with _VOICE_LOCK:
+        # Пока запись ехала, службу мог занять другой: снова отказ, не очередь.
+        # Между проверкой и захватом нет await — гонки в одном цикле нет.
+        if _VOICE_SEM.locked():
+            raise _voice_busy()
+        async with _VOICE_SEM:
             text = str(await _stt().transcribe(tmp, lang) or "").strip()
         if not text:
             raise web.HTTPUnprocessableEntity(text="empty transcript")
@@ -2728,9 +2823,12 @@ def _fill_seconds(body) -> int | None:
     try:
         opened = float(body.get("opened_at"))
         done = float(body.get("occurred_at") or 0) or opened
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    seconds = int((done - opened) / 1000)
+    delta = (done - opened) / 1000
+    if not math.isfinite(delta):
+        return None                 # int(inf) — 500 посреди сохранения визита
+    seconds = int(delta)
     if seconds < 0 or seconds > FILL_SECONDS_MAX:
         return None
     return seconds
@@ -2813,7 +2911,7 @@ def _photos_pending(body) -> int | None:
         return None
     try:
         return max(0, min(int(raw), 50))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -2831,7 +2929,10 @@ async def _await_visit_photos(cid: str, day: str, pending: int | None) -> None:
     if grace <= 0:
         return
     contracts = db.person_contracts(cid)
-    have = len(day_photos(contracts, day))
+    # Листание папок (iterdir + stat на каждый снимок) — в потоке: опрос идёт
+    # раз в секунду до конца окна догона (до 600 с), и в цикле событий он
+    # отнимал время у всех остальных запросов (ревью 25.09.2026, F-2в).
+    have = len(await asyncio.to_thread(day_photos, contracts, day))
     if pending is None:
         if have:
             return
@@ -2840,7 +2941,7 @@ async def _await_visit_photos(cid: str, day: str, pending: int | None) -> None:
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:
         await asyncio.sleep(_PHOTO_GRACE_POLL_S)
-        if len(day_photos(contracts, day)) >= target:
+        if len(await asyncio.to_thread(day_photos, contracts, day)) >= target:
             return
 
 
@@ -4456,7 +4557,8 @@ async def _admin_import_json(request: web.Request) -> web.Response:
             {"blocked": True, "error": f"импорт заблокирован: {exc}"},
             status=409,
         )
-    report = db.import_grid(
+    report = await asyncio.to_thread(
+        _import_grid_serial,
         grid,
         source_kind=source_kind,
         source_proof=body.get("source_proof"),
@@ -4486,6 +4588,13 @@ async def _admin_import_json(request: web.Request) -> web.Response:
     # change coordinates after the atomic import transaction.
     if report.get("idempotent_replay"):
         return web.json_response(report)
+    # Геокодинг — по-прежнему здесь, в цикле, и это НАМЕРЕННО. Проход держит
+    # ОДНУ транзакцию записи от первой найденной точки до конца: на свежей машине
+    # это ~19 с, больше busy_timeout (8 с). В потоке каждый телефон, пишущий в
+    # это время, простоял бы в цикле событий до 8 с на каждой записи и получил
+    # бы 500 (а журнал доступа — дыру). Пока проход не коммитит порциями
+    # (scoring.py), честнее один раз подождать всем. В ежедневном импорте он
+    # стоит десятые доли секунды: точки уже есть, считать нечего.
     try:
         import scoring
         report["geocoded"] = scoring.geocode_city_centroids()
@@ -4494,9 +4603,10 @@ async def _admin_import_json(request: web.Request) -> web.Response:
     # Новые люди из реестра сразу получают офис — по географии их должников
     # (db.guess_offices), ПОСЛЕ геокодинга: у новых договоров появились точки.
     # Иначе человек неделями висит у руководителя в «Без офиса», пока его не
-    # заметят. Пишется только пустое; ошибка тут импорт не отменяет.
+    # заметят. Пишется только пустое; ошибка тут импорт не отменяет. В потоке:
+    # короткие записи по одной, своё соединение, кэши ролей — см. ниже.
     try:
-        guessed = db.guess_offices(apply=True)
+        guessed = await asyncio.to_thread(db.guess_offices, apply=True)
         report["offices_guessed"] = guessed["filled"]
         report["offices_undecided"] = guessed["undecided"]
         if guessed["filled"]:
@@ -4505,6 +4615,26 @@ async def _admin_import_json(request: web.Request) -> web.Response:
     except Exception as e:  # noqa: BLE001
         logging.warning("guess offices after import: %s", e)
     return web.json_response(report)
+
+
+# import_grid — в потоке, а не в корутине: разбор и запись всего реестра (0,6 с
+# на 18 тыс. договоров на машине разработчика, на двух ядрах VM — дольше)
+# держали весь сервер (ревью 25.09.2026, F-stability-1). В поток можно:
+# import_grid открывает СВОЁ соединение (db.connect: WAL, busy_timeout 8 с) и
+# asyncio не трогает. Его BEGIN IMMEDIATE на реестре нашего размера длится
+# секунды, меньше busy_timeout: запись телефона в это время подождёт и пройдёт.
+# Общее с запросами у него — версия данных и кэши ролей: их сбрасывают целым
+# присваиванием, а читатели берут глобал один раз (см. db.reset_role_caches),
+# так что полусброшенного кэша не видит ни один поток.
+# Импорты и предпросмотры — строго по одному. Пока цикл стоял, очередь
+# получалась сама собой; в потоке второй упёрся бы в BEGIN IMMEDIATE первого и
+# через 8 с получил бы «database is locked». Замок держит поток, цикл его не ждёт.
+_IMPORT_SERIAL = threading.Lock()
+
+
+def _import_grid_serial(grid, **options) -> dict:
+    with _IMPORT_SERIAL:
+        return db.import_grid(grid, **options)
 
 
 async def _admin_import_preview_json(request: web.Request) -> web.Response:
@@ -4558,7 +4688,8 @@ async def _admin_import_preview_json(request: web.Request) -> web.Response:
             {"blocked": True, "error": f"предпросмотр заблокирован: {exc}"},
             status=409,
         )
-    report = db.import_grid(
+    report = await asyncio.to_thread(
+        _import_grid_serial,        # тот же BEGIN IMMEDIATE — в ту же очередь
         grid,
         source_kind=source_kind,
         source_proof=body.get("source_proof"),
@@ -4642,7 +4773,8 @@ async def _admin_export_json(request: web.Request) -> web.Response:
                 "visit_to": visit_to,
                 "rows": len(rows),
             },
-        }
+        },
+        headers=_NO_STORE,
     )
 
 
@@ -4685,21 +4817,51 @@ async def _admin_enrichment_ledger(request: web.Request) -> web.Response:
 
 async def _admin_markers_json(request: web.Request) -> web.Response:
     _admin(request)
-    return web.json_response({"rows": db.markers_rows()})
+    return web.json_response({"rows": db.markers_rows()}, headers=_NO_STORE)
 
 
-async def _admin_export(request: web.Request) -> web.StreamResponse:
+# Выгрузки пульту несут ПД всего реестра — ни браузер, ни прокси не должны
+# оставлять их у себя.
+_NO_STORE = {"Cache-Control": "no-store"}
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _xlsx_bytes(build) -> bytes:
+    """Собрать книгу build(path) во временный файл и вернуть её байты.
+
+    Раньше книга писалась в /tmp под постоянным именем и там оставалась: весь
+    реестр с ПД лежал в слое контейнера до пересоздания, а два одновременных
+    запроса писали в один и тот же файл (ревью 25.09.2026). Теперь имя
+    уникальное (mkstemp, права 0600), и файл удаляется здесь же, в потоке, при
+    любом исходе — ошибка сборки, обрыв клиента, отмена запроса."""
+    fd, path = tempfile.mkstemp(prefix="hard-export-", suffix=".xlsx")
+    os.close(fd)
+    try:
+        build(path)
+        return Path(path).read_bytes()
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+async def _xlsx_download(build, filename: str) -> web.Response:
+    # openpyxl на всём реестре — секунды (4,7 с на 18 тыс. договоров), и в
+    # корутине на это время вставал весь сервер. Собираем в потоке.
+    body = await asyncio.to_thread(_xlsx_bytes, build)
+    return web.Response(body=body, content_type=_XLSX_MIME, headers={
+        "Content-Disposition": f"attachment; filename={filename}", **_NO_STORE})
+
+
+async def _admin_export(request: web.Request) -> web.Response:
     _admin(request)
-    p = os.path.join(tempfile.gettempdir(), "registry_export.xlsx")
-    db.export_xlsx(p)
-    return web.FileResponse(p, headers={"Content-Disposition": "attachment; filename=registry_export.xlsx"})
+    return await _xlsx_download(db.export_xlsx, "registry_export.xlsx")
 
 
-async def _admin_markers_xlsx(request: web.Request) -> web.StreamResponse:
+async def _admin_markers_xlsx(request: web.Request) -> web.Response:
     _admin(request)
-    p = os.path.join(tempfile.gettempdir(), "markers.xlsx")
-    db.export_markers(p)
-    return web.FileResponse(p, headers={"Content-Disposition": "attachment; filename=markers.xlsx"})
+    return await _xlsx_download(db.export_markers, "markers.xlsx")
 
 
 async def _admin_employees(request: web.Request) -> web.Response:
