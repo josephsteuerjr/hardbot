@@ -32,7 +32,12 @@ check_profiles
 # и потом резервное копирование упрётся в права.
 step "Каталоги"
 mkdir -p data data/photos backups
-ok "data/ (база и фотографии) и backups/ (копии) на месте"
+# Только root (контейнер и помощник работают от него) видит содержимое. Копии
+# базы и сама база — это все ПД должников; на хосте рядом бывают чужие учётки и
+# служба мониторинга. 700 их не пускает, а root бит прав игнорирует и пишет как
+# прежде. Диагностику data/backups тогда запускают тоже от root (или через sudo).
+chmod 700 data backups 2>/dev/null || true
+ok "data/ (база и фотографии) и backups/ (копии) на месте, доступ только root (700)"
 
 # --- 3. Образ и запуск -------------------------------------------------------
 step "Образ"
@@ -153,8 +158,22 @@ ExecStart=$agent
 Restart=always
 RestartSec=5
 # Помощник запускает docker compose, поэтому работает от того же пользователя,
-# что и установка. Своих прав сверх этого ему не нужно.
+# что и установка (root — иначе не достучаться до docker.sock). Своих прав сверх
+# этого ему не нужно, поэтому лишнее у него отбираем systemd-харднингом ниже.
 WorkingDirectory=$DEPLOY_DIR
+# Хардининг. Помощник — root на хосте, а заявки ему кладёт контейнер: сузим то,
+# что он может натворить, если заявкой удастся его подтолкнуть. Все шесть
+# действий пишут только в /opt/hard/deploy/units/** (data, backups, ops) —
+# это /opt, его ProtectSystem=full НЕ трогает (закрывает лишь /usr,/boot,/etc),
+# поэтому ReadWritePaths не нужен. В /etc,/usr,/home,/root ничего не пишет;
+# файлы из /tmp в docker bind-mount не передаёт (PrivateTmp безопасен).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
 
 [Install]
 WantedBy=multi-user.target

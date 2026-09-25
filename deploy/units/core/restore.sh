@@ -40,6 +40,20 @@ if [ "$photos" -eq 1 ] && [ ! -d backups/photos ]; then
   die "зеркала фотографий backups/photos нет — нечего восстанавливать"
 fi
 
+# Симлинк на месте data/, самой базы или каталога фотографий увёл бы
+# восстановление за пределы каталога единицы: том с данными пишет и контейнер, а
+# он от root — подменив эти пути ссылкой на хостовый секрет (.env, ключ туннеля),
+# он заставил бы restore СКОПИРОВАТЬ секрет в data/ (контейнер его прочитает) или
+# ЗАПИСАТЬ базу поверх него. Такое не «чиним» — это скрыло бы подмену, — а честно
+# отказываем: root на хосте не идёт по ссылке, которую подложил контейнер.
+for suspect in data data/hardbot.db data/hardbot.db-wal data/hardbot.db-shm data/hardbot.db-journal data/photos; do
+  if [ -L "$suspect" ]; then
+    die "«$suspect» — символьная ссылка, а должен быть обычный файл или каталог.
+Это признак подмены: каталог data/ пишет и контейнер. Восстановление остановлено.
+Что сделать: посмотрите, кто заменил «$suspect» ссылкой (ls -l data/), удалите ссылку и повторите."
+  fi
+done
+
 say "Будет восстановлено:"
 say "  база:        $db_file ($(human_size "$db_file"))"
 [ "$photos" -eq 1 ] && say "  фотографии:  backups/photos → data/photos ($(human_size backups/photos))"
@@ -59,7 +73,10 @@ if [ -f data/hardbot.db ]; then
   ok "текущая база отложена: data/hardbot.db.before-restore-$stamp"
 fi
 rm -f data/hardbot.db-wal data/hardbot.db-shm data/hardbot.db-journal
-cp "$db_file" data/hardbot.db
+# --remove-destination: сначала снять существующий data/hardbot.db, потом создать
+# новый обычный файл. Без него cp пишет ПО ссылке, если бы место базы заняли
+# симлинком (его же ловит проверка -L выше — это второй рубеж).
+cp --remove-destination "$db_file" data/hardbot.db
 ok "база восстановлена"
 
 if [ "$photos" -eq 1 ]; then

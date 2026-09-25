@@ -66,12 +66,20 @@ server {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For   $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 120s;           # фото по слабой мобильной сети
     }
 }
 ```
+
+> **Почему `$remote_addr`, а не `$proxy_add_x_forwarded_for`.** Приложение считает
+> неудачные попытки входа по **первому** адресу в `X-Forwarded-For`. Вариант
+> `$proxy_add_x_forwarded_for` дописывает адрес прокси к тому, что прислал клиент,
+> — значит первым остаётся заголовок, присланный из интернета, и его можно
+> подделать: чужой запрос запрёт вход по чужому IP. Поэтому прокси обязан
+> **затирать** клиентский `X-Forwarded-For` своим значением (`$remote_addr`), а не
+> добавлять к нему. Встроенный Caddy (`COMPOSE_PROFILES=proxy`) делает это сам.
 
 **Своего прокси нет?** Встроенный включается в `.env` ядра: `DOMAIN=hard.company.ru`
 и `COMPOSE_PROFILES=proxy`. Направьте DNS-запись домена на сервер, откройте
