@@ -134,4 +134,4 @@ def test_screen_saves_on_tap_without_a_separate_button():
 
 
 def test_summary_has_a_way_into_the_norms():
-    assert "dgGo('plan')" in SHELL and "🎯 Нормы" in SHELL
+    assert "dgGo('plan')" in SHELL and "\"Нормы\",\"dgGo('plan')\"" in SHELL

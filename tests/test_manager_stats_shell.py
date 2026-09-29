@@ -12,7 +12,8 @@ def _section():
 
 def test_landing_is_stats_and_talks_to_the_new_endpoints():
     body = _section()
-    assert 'DG.view="stats"' in body
+    # v62: «Сводка» и «Сотрудники» входят через общий dgEnter, окно — то же.
+    assert 'return dgEnter("stats")' in body and "DG.view=view" in body
     for path in ("/api/manager/stats", "/api/manager/stats_employee", "/api/manager/stats.xlsx"):
         assert path in body, path
 
@@ -56,7 +57,8 @@ def test_table_is_sortable_and_filterable_without_losing_focus():
     body = _section()
     assert "function dgSort(" in body and "function dgCountry(" in body
     # поле поиска живёт вне перерисовываемой таблицы: иначе фокус терялся бы на каждой букве
-    stats = body[body.index("function dgStats("):body.index("function dgDrawTable(")]
+    # v62: таблица — на вкладке «Сотрудники» (dgTeam), поле поиска там же, вне таблицы.
+    stats = body[body.index("function dgTeam("):body.index("function dgCountryTotals(")]
     assert 'oninput="dgSearch(this.value)"' in stats and '<div id="dgtable">' in stats
     draw = body[body.index("function dgDrawTable("):body.index("function dgEmp(")]
     assert "oninput" not in draw
@@ -64,7 +66,7 @@ def test_table_is_sortable_and_filterable_without_losing_focus():
 
 def test_wide_container_only_on_the_manager_tab():
     assert ".wrap.wide{max-width:920px}" in INDEX
-    assert '$("app").classList.toggle("wide", active==="digest")' in INDEX
+    assert '$("app").classList.toggle("wide", active==="digest"||active==="team")' in INDEX
 
 
 def test_no_auto_polling():

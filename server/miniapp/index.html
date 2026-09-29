@@ -3,7 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<meta name="theme-color" content="#f4e4cf">
+<meta name="theme-color" content="#f4e4cf" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1d1914" media="(prefers-color-scheme: dark)">
+<script>
+// Тема (v62, слово владельца 30.09.2026): по умолчанию — как в системе; выбор
+// «светлая/тёмная» помнит телефон. Ставится ДО первой отрисовки, без вспышки.
+(function(){ try{ var t=localStorage.getItem("hb_theme");
+  if(t==="light"||t==="dark") document.documentElement.setAttribute("data-theme",t); }catch(e){} })();
+</script>
 <title>Хард</title>
 <!-- Манифест PWA подключается СКРИПТОМ, а не статичным <link>: Safari скачивает
      манифест при загрузке страницы (до входа) и при «На экран Домой» его не
@@ -51,9 +58,9 @@ if("serviceWorker" in navigator){
 /* Облик «Почерк» Hélène (оболочка v60): тёплая бумага с зерном, линия пером,
    терракота, заголовки почерком Zen Kurenaido, текст Golos. Одна поверхность:
    списки отбиты линиями, а не россыпью белых карточек. Шрифты свои (/fonts/),
-   без внешних CDN — оболочка поднимается и без сети. Светлая тема одна:
-   выездник работает на солнце. Зерно — под содержимым (z-index:-1 в
-   контексте body: body — position:fixed). */
+   без внешних CDN — оболочка поднимается и без сети. Тема — как в системе
+   (v62), выбор светлой/тёмной — кнопкой в шапке. Зерно — под содержимым
+   (z-index:-1 в контексте body: body — position:fixed). */
 @font-face{font-family:"Golos Text";font-weight:400 900;font-display:swap;src:url(/fonts/golos-cyr.woff2) format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
 @font-face{font-family:"Golos Text";font-weight:400 900;font-display:swap;src:url(/fonts/golos-ext.woff2) format("woff2");unicode-range:U+0460-052F,U+1C80-1C8A,U+20B4,U+2DE0-2DFF,U+A640-A69F,U+FE2E-FE2F}
 @font-face{font-family:"Golos Text";font-weight:400 900;font-display:swap;src:url(/fonts/golos-lat.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
@@ -80,6 +87,41 @@ if("serviceWorker" in navigator){
   --dur-1:90ms; --dur-2:140ms; --dur-3:220ms;
   --ease-out:cubic-bezier(.22,1,.36,1);
   --app-height:100vh;
+  --pop:0 2px 0 rgba(29,26,23,.85);
+  --on-terra:#1d1a17;
+  color-scheme:light;
+}
+/* Тёмная тема — та же бумага ночью (образец — «Почерк» Hélène). По умолчанию
+   следует системе; data-theme на <html> — выбор этого телефона. */
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --paper:#1d1914;
+    --card:color-mix(in srgb,var(--paper) 93%,#ffffff);
+    --alt:color-mix(in srgb,var(--paper) 87%,#ffffff);
+    --border:rgba(241,228,208,.13);
+    --line-ink:#8a7862;
+    --text:#f1e4d0; --text2:#d6c5ad; --muted:#ab9982; --faint:#978570;
+    --accent:#f1e4d0; --accent2:#eda676; --link:#eda676;
+    --tint:color-mix(in srgb,#e0915a 16%,transparent);
+    --success:#93b98d; --danger:#ec8a74; --warn:#d9ad62;
+    --grain:.06;
+    --pop:0 2px 0 rgba(0,0,0,.6);
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --paper:#1d1914;
+  --card:color-mix(in srgb,var(--paper) 93%,#ffffff);
+  --alt:color-mix(in srgb,var(--paper) 87%,#ffffff);
+  --border:rgba(241,228,208,.13);
+  --line-ink:#8a7862;
+  --text:#f1e4d0; --text2:#d6c5ad; --muted:#ab9982; --faint:#978570;
+  --accent:#f1e4d0; --accent2:#eda676; --link:#eda676;
+  --tint:color-mix(in srgb,#e0915a 16%,transparent);
+  --success:#93b98d; --danger:#ec8a74; --warn:#d9ad62;
+  --grain:.06;
+  --pop:0 2px 0 rgba(0,0,0,.6);
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html{width:100%;height:100%;overflow:hidden;overscroll-behavior:none;background:var(--bg)}
@@ -155,6 +197,7 @@ a{color:var(--link)}
 /* «Выйти с этого телефона» — рядом с языком: других настроек у оболочки нет. */
 .langs button.out{display:inline-flex;align-items:center;gap:4px;margin-left:6px}
 .langs button.out .ico{width:13px;height:13px}
+.langs button.theme{padding:5px 8px;font-size:14px;line-height:1}
 @media (max-width:360px){ .langs button.out span{display:none} }
 /* Вопрос, на который нужен ответ: лист снизу, как выбор варианта, но поверх
    всего (и навигатора) и без закрытия тапом мимо — ответ только кнопкой. */
@@ -170,7 +213,7 @@ a{color:var(--link)}
 .searchwrap .ico{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--line-ink)}
 .search{width:100%;padding:12px 14px 12px 40px;border:var(--lw) solid var(--line-ink);border-radius:999px;
   background:var(--card);font-size:15.5px;font-family:inherit;margin:0;color:var(--text)}
-.search:focus{outline:none;box-shadow:0 2px 0 rgba(29,26,23,.85)}
+.search:focus{outline:none;box-shadow:var(--pop)}
 /* Строка должника — не коробка: одна бумага, строки отбиты линией. */
 .pcard{background:transparent;border:0;border-bottom:var(--lw) solid var(--border);border-radius:0;
   padding:13px 4px;margin:0;display:flex;align-items:center;gap:12px;cursor:pointer;
@@ -204,7 +247,7 @@ a{color:var(--link)}
   color:var(--text);font-size:15.5px;font-family:inherit;font-weight:500;cursor:pointer;
   transition:transform var(--dur-1) var(--ease-out),background var(--dur-1) ease}
 .btn:active{background:var(--tint)}
-.btn.acc{background:var(--terra);color:#1d1a17;border:var(--lw) solid var(--text)}
+.btn.acc{background:var(--terra);color:var(--on-terra);border:var(--lw) solid var(--on-terra)}
 .btn.acc:active{filter:brightness(1.05);background:var(--terra)}
 .btn.ghost{background:transparent}
 .btn.line{margin-top:8px}
@@ -226,14 +269,14 @@ a{color:var(--link)}
   font-size:11.5px;color:var(--text2)}
 .geobadge .ico{width:13px;height:13px}
 .fab{position:absolute;right:10px;bottom:10px;z-index:4;display:flex;align-items:center;gap:7px;
-  background:var(--terra);color:#1d1a17;border:var(--lw) solid #1d1a17;border-radius:999px;padding:11px 18px 11px 13px;
-  font-size:14.5px;font-weight:600;font-family:inherit;box-shadow:0 2px 0 rgba(29,26,23,.85);cursor:pointer}
+  background:var(--terra);color:var(--on-terra);border:var(--lw) solid var(--on-terra);border-radius:999px;padding:11px 18px 11px 13px;
+  font-size:14.5px;font-weight:600;font-family:inherit;box-shadow:var(--pop);cursor:pointer}
 .fab .ico{width:18px;height:18px}
 label.fld{display:block;font-size:13.5px;color:var(--muted);margin:14px 0 6px}
 select,textarea{width:100%;padding:13px 14px;border:var(--lw) solid var(--line-ink);border-radius:16px;
   background:var(--card);font-size:15.5px;font-family:inherit;color:var(--text)}
 textarea{min-height:72px;resize:vertical;line-height:1.45}
-textarea:focus,select:focus{outline:none;box-shadow:0 2px 0 rgba(29,26,23,.85)}
+textarea:focus,select:focus{outline:none;box-shadow:var(--pop)}
 /* --- Форма визита: разделы — воздухом и линией, крупные тач-таргеты --- */
 .fsec{background:transparent;border:0;border-bottom:var(--lw) solid var(--border);border-radius:0;
   padding:4px 0 16px;margin-bottom:6px;box-shadow:none}
@@ -246,12 +289,12 @@ textarea:focus,select:focus{outline:none;box-shadow:0 2px 0 rgba(29,26,23,.85)}
   border-radius:16px;background:var(--card);color:var(--text);font-size:20px;font-weight:600;
   font-family:inherit;font-variant-numeric:tabular-nums;letter-spacing:.2px;margin:0}
 .money::placeholder{color:var(--faint);font-weight:400}
-.money:focus{outline:none;box-shadow:0 2px 0 rgba(29,26,23,.85)}
+.money:focus{outline:none;box-shadow:var(--pop)}
 .moneyrow{display:flex;gap:8px;align-items:stretch}
 .xbtn{flex:0 0 52px;min-height:52px;border:var(--lw) solid var(--line-ink);border-radius:16px;
   background:transparent;color:var(--muted);font-size:22px;line-height:1;font-family:inherit;padding:0;margin:0}
 .btn.acc.big{padding:16px;font-size:16.5px;font-weight:600;border-radius:999px;
-  box-shadow:0 2px 0 rgba(29,26,23,.85)}
+  box-shadow:var(--pop)}
 .draftrow{display:flex;align-items:center;gap:7px;font-size:12.5px;margin:2px 2px 0}
 .draftrow .d{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
 .cdcard{font-size:13.5px;border-bottom:var(--lw) solid var(--border);padding:9px 0}
@@ -294,7 +337,7 @@ textarea:focus,select:focus{outline:none;box-shadow:0 2px 0 rgba(29,26,23,.85)}
 .navmode.on{display:block}
 .navmap{position:absolute;inset:0}
 .navexit,.navrecenter{position:absolute;z-index:6;border:var(--lw) solid var(--line-ink);font-family:inherit;cursor:pointer;
-  background:var(--paper);color:var(--text);border-radius:999px;box-shadow:0 2px 0 rgba(29,26,23,.85)}
+  background:var(--paper);color:var(--text);border-radius:999px;box-shadow:var(--pop)}
 .navexit{top:calc(env(safe-area-inset-top,0px) + 12px);left:14px;display:flex;align-items:center;
   gap:6px;padding:9px 16px 9px 11px;font-size:13.5px;font-weight:500}
 .navexit .ico{width:16px;height:16px}
@@ -385,7 +428,111 @@ button.kpi:active{background:var(--tint)}
 .fv{font-weight:600;font-variant-numeric:tabular-nums}
 .fp{flex:0 0 86px;text-align:right;font-variant-numeric:tabular-nums;font-size:12px;color:var(--muted)}
 .fp b{color:var(--text)}
-@media (max-width:640px){ .stt .md{display:none} .stt td,.stt th{padding:10px 4px} .stt td.l{min-width:104px} }
+/* --- Режим (оболочка v62): у руководителя и владельца — переключатель роли
+   под шапкой вместо списка ФИО. «Выездник» — портфель и карта, выбор чьего
+   портфеля живёт внутри этого режима. --- */
+.modebar{display:none;padding:8px 16px;border-bottom:var(--lw) solid var(--border);flex:0 0 auto;
+  background:var(--bg);position:relative;z-index:4}
+.modebar.on{display:block}
+.seg{display:flex;border:var(--lw) solid var(--line-ink);border-radius:999px;padding:2px;gap:2px;
+  max-width:488px;margin:0 auto}
+.seg button{flex:1 1 0;min-width:0;border:0;border-radius:999px;background:transparent;color:var(--text2);
+  font:inherit;font-size:13px;padding:6px 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.seg button.on{background:var(--text);color:var(--paper);font-weight:500}
+/* Шапка экранов руководителя: заголовок почерком в строку, отбор справа. */
+.dgh{display:flex;align-items:center;gap:10px;margin:0 0 2px}
+.dgh .t{flex:1;min-width:0;font:400 24px/1.15 var(--hand);letter-spacing:.02em;-webkit-text-stroke:.3px currentColor;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dgsub{font-size:12px;color:var(--muted);margin-bottom:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dgh>span{flex:0 1 auto;min-width:0;display:flex}
+.fchip{flex:0 1 auto;min-width:0;max-width:100%;display:inline-flex;align-items:center;gap:4px;border:var(--lw) solid var(--line-ink);
+  border-radius:999px;background:transparent;padding:5px 11px;font:inherit;font-size:12.5px;color:var(--text);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.fchip.on{background:var(--tint)}
+/* Плитки-баблы: все действия руководителя видны сразу, ни одна не обрезана. */
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin:4px 0 12px}
+.tile{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
+  min-height:58px;padding:7px 3px 6px;border:var(--lw) solid var(--line-ink);border-radius:16px;
+  background:transparent;color:var(--text);font:inherit;cursor:pointer}
+.tile:active{background:var(--tint)}
+.tile .ico{width:20px;height:20px;color:var(--accent2)}
+.tile .tl{font-size:11.5px;line-height:1.15;text-align:center}
+.tile .tb{position:absolute;top:-6px;right:-3px;min-width:20px;padding:1px 6px;border-radius:999px;
+  background:var(--paper);border:var(--lw) solid var(--line-ink);font-size:11px;font-weight:600;line-height:1.35}
+.tile.hot .tb{background:var(--terra);border-color:var(--on-terra);color:var(--on-terra)}
+/* Период: пресеты — сегментом во всю ширину, листание — строкой ниже. */
+.seg.per{margin:0 0 6px;max-width:none}
+.seg.per button{font-size:12.5px;padding:6px 1px}
+.seg.per button.cal{flex:0 0 40px;display:flex;align-items:center;justify-content:center}
+.seg.per button.cal .ico{width:16px;height:16px}
+.pnav{margin:2px 0 6px}
+.pnav .arr{width:36px;height:32px;font-size:16px}
+.pnav .lbl{font-size:19px}
+/* Числа — компактнее: шесть в две строки и без воздуха коробок. */
+.kpis{margin:6px 0 6px}
+.kpi{padding:8px 8px 7px 0;margin-right:8px}
+.kpi .n{font-size:20px}
+.kpi .l{font-size:11.5px;margin-top:2px;line-height:1.2}
+.facts{font-size:12.5px;color:var(--muted);line-height:1.5;margin:2px 0 8px}
+.facts a{color:var(--link);text-decoration:none}
+.bars{height:46px;margin:8px 0 2px}
+/* Воронка свёрнута, пока её не раскроют: на «Сводке» — только главное. */
+details.fold{border-top:var(--lw) solid var(--border);border-bottom:var(--lw) solid var(--border);margin:8px 0}
+details.fold>summary{list-style:none;display:flex;align-items:center;gap:8px;padding:10px 2px;cursor:pointer;
+  font:400 18px/1.2 var(--hand);color:var(--text2);letter-spacing:.02em}
+details.fold>summary::-webkit-details-marker{display:none}
+details.fold>summary:after{content:"";margin-left:auto;width:7px;height:7px;border-right:var(--lw) solid var(--line-ink);
+  border-bottom:var(--lw) solid var(--line-ink);transform:rotate(45deg);transition:transform var(--dur-2) var(--ease-out)}
+details.fold[open]>summary:after{transform:rotate(-135deg)}
+details.fold .fcard{border:0;padding:0 2px;margin:0 0 6px}
+/* Таблица сотрудников: едет вбок, ФИО закреплено слева. */
+.stwrap.pin{margin:0 -16px;padding:0}
+.stt.pin{width:auto;min-width:100%}
+.stt.pin th.l,.stt.pin td.l{position:sticky;left:0;z-index:1;background:var(--paper);
+  padding-left:16px;box-shadow:inset calc(-1 * var(--lw)) 0 0 var(--border)}
+.stt.pin td.l{min-width:150px;max-width:170px}
+.stt.pin td.l .pname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stt.pin th:last-child,.stt.pin td:last-child{padding-right:16px}
+.stt.pin tbody tr:active td.l{background:color-mix(in srgb,var(--terra) 20%,var(--paper))}
+.stt.pin .pname{font-size:14px;line-height:1.25}
+.stt.pin td{padding:8px 7px}
+.stt.pin .psub{font-size:11.5px}
+.sthint{font-size:11px;color:var(--faint);margin:6px 0 0;text-align:right}
+/* Список выездника: инструменты — двумя плитками в строку, статусы — строкой. */
+.lhead{display:flex;align-items:baseline;gap:8px;margin:0 0 8px}
+.lhead .t{font:400 24px/1.15 var(--hand);letter-spacing:.02em;-webkit-text-stroke:.3px currentColor}
+.lhead .n{color:var(--muted);font-size:13px}
+.tools2{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:0 0 8px}
+.tools2 .tile{flex-direction:row;min-height:44px;gap:7px;padding:8px 10px}
+.tools2 .tile .tl{font-size:13.5px;text-align:left}
+.sline{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted);padding:6px 2px;
+  border-bottom:var(--lw) solid var(--border)}
+.sline .d{width:7px;height:7px;border-radius:50%;flex:0 0 auto;background:var(--success)}
+.sline .d.w{background:var(--terra)}
+.sline .toolbtn{margin-left:auto;flex:0 0 auto}
+.pfline{display:flex;align-items:center;gap:8px;width:100%;margin:0 0 10px;padding:9px 14px;
+  border:var(--lw) solid var(--line-ink);border-radius:999px;background:transparent;font:inherit;color:var(--text);
+  text-align:left;cursor:pointer}
+.pfline .k{color:var(--muted);font-size:12.5px;flex:0 0 auto}
+.pfline .v{flex:1;min-width:0;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pfline .ico{width:14px;height:14px;color:var(--line-ink);transform:rotate(90deg)}
+.card{border-bottom:var(--lw) solid var(--border);padding:10px 2px}
+/* Строки списков руководителя — линиями, не коробками («одна панель»). */
+.lrow{border-bottom:var(--lw) solid var(--border);padding:10px 2px 8px}
+.lrow .chips{margin:6px 0 0}
+.lrow.ask{border-left:3px solid var(--terra);padding-left:10px}
+.tile:disabled{opacity:.45}
+/* Карточка клиента: позвонить / метка / заметка — плитками в строку. */
+.acts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:0 0 4px}
+.acts.two{grid-template-columns:repeat(2,minmax(0,1fr))}
+.acts .tile{min-height:64px}
+.acts .tile .tl{font-size:12.5px}
+.acts .tile .ts{font-size:10.5px;color:var(--muted);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.providers a{padding:7px 4px}
+/* Карта ночью приглушена: светлая подложка слепит; метки — поверх, не трогаем. */
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]) .maplibregl-canvas{filter:brightness(.72) saturate(.85)} }
+:root[data-theme="dark"] .maplibregl-canvas{filter:brightness(.72) saturate(.85)}
+@media (max-width:640px){ .stt:not(.pin) .md{display:none} .stt:not(.pin) td,.stt:not(.pin) th{padding:10px 4px} .stt:not(.pin) td.l{min-width:104px} }
 @media (prefers-reduced-motion:reduce){ :root{--dur-1:40ms;--dur-2:60ms;--dur-3:90ms} .wrap>*,.panel.on{animation:none} }
 </style>
 </head>
@@ -394,6 +541,7 @@ button.kpi:active{background:var(--tint)}
   <span class="brand">Хард</span>
   <div class="langs" id="langs"></div>
 </div>
+<div class="modebar" id="modebar"></div>
 <div class="offbar" id="offbar"></div>
 <div class="wrap" id="app"><div class="center" id="boot">…</div></div>
 <div class="bottomnav" id="bottomnav"><div class="bottomnav-inner" id="bottomnavInner"></div></div>
@@ -440,6 +588,14 @@ const ICONS = {
   plus:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
   image:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.6"/><path d="m4 17 4.5-4.5 3 3L15 12l5 5"/></svg>',
   exit:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4H6a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h8"/><path d="M10 12h10M17 8l4 4-4 4"/></svg>',
+  clock:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9 2.5h6"/></svg>',
+  ruler:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17 17 3l4 4L7 21Z"/><path d="m7 13 2 2M10 10l2 2M13 7l2 2"/></svg>',
+  users:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c.6-3.4 3-5.4 6-5.4s5.4 2 6 5.4"/><path d="M15.5 5.2a3 3 0 0 1 0 5.6M17.5 14.8c1.8.6 3 2.4 3.5 5.2"/></svg>',
+  link:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1 1"/><path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1-1"/></svg>',
+  down:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></svg>',
+  route:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="18" r="2.2"/><circle cx="18" cy="6" r="2.2"/><path d="M8 18h7.5a3.5 3.5 0 0 0 0-7h-7a3.5 3.5 0 0 1 0-7H16"/></svg>',
+  cal:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>',
+  team:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18M3 12h18M3 19h18M8 5v14"/></svg>',
 };
 function ic(name){ return `<span class="ico">${ICONS[name]||""}</span>`; }
 
@@ -456,6 +612,8 @@ const I18N = {
     warmagain:"Обновить оффлайн-копию",warmfail:"Не удалось загрузить — нужна сеть",
     routeday:"Маршрут дня",rdempty:"Нет невизитированных кейсов с точками",
     freenav:"Навигация по адресу",freenavph:"Адрес или «41.31, 69.24»",
+    theme:"Тема",theme_system:"как в системе",theme_light:"светлая",theme_dark:"тёмная",modefield:"Выездник",modemanager:"Руководитель",modesecurity:"Безопасник",modefull:"Директор",modeowner:"Владелец",
+    team:"Сотрудники",pfk:"Портфель",pfpick:"Чей портфель открыть",byaddr:"По адресу",
     digest:"Сводка", dgneednet:"Сводка руководителя доступна только при связи",
     dgerr:"Не удалось загрузить сводку", dggone:"Доступ к сводке отозван",
     dggoneemp:"Сотрудник больше не в вашей команде",
@@ -514,6 +672,8 @@ const I18N = {
     warmagain:"Oflayn nusxani yangilash",warmfail:"Yuklanmadi — tarmoq kerak",
     routeday:"Kun marshruti",rdempty:"Nuqtali ochiq ishlar yo‘q",
     freenav:"Manzil bo‘yicha navigatsiya",freenavph:"Manzil yoki «41.31, 69.24»",
+    theme:"Mavzu",theme_system:"tizimdagidek",theme_light:"yorug‘",theme_dark:"qorong‘i",modefield:"Chiquvchi",modemanager:"Rahbar",modesecurity:"Xavfsizlik",modefull:"Direktor",modeowner:"Egasi",
+    team:"Xodimlar",pfk:"Portfel",pfpick:"Kimning portfelini ochish",byaddr:"Manzil bo‘yicha",
     digest:"Hisobot", dgneednet:"Rahbar hisoboti faqat aloqa bo‘lganda ochiladi",
     dgerr:"Hisobot yuklanmadi", dggone:"Hisobotga ruxsat bekor qilindi",
     dggoneemp:"Xodim endi jamoangizda emas",
@@ -572,6 +732,8 @@ const I18N = {
     warmagain:"Нусхаи офлайнро нав кунед",warmfail:"Нашуд — шабака лозим аст",
     routeday:"Масири рӯз",rdempty:"Кейси кушодаи нуқтадор нест",
     freenav:"Навигатсия аз рӯи нишонӣ",freenavph:"Нишонӣ ё «41.31, 69.24»",
+    theme:"Мавзӯъ",theme_system:"мисли система",theme_light:"равшан",theme_dark:"торик",modefield:"Выездник",modemanager:"Роҳбар",modesecurity:"Амният",modefull:"Директор",modeowner:"Соҳиб",
+    team:"Кормандон",pfk:"Портфел",pfpick:"Портфели киро кушоем",byaddr:"Аз рӯи нишонӣ",
     digest:"Ҳисобот", dgneednet:"Ҳисоботи роҳбар танҳо ҳангоми алоқа дастрас аст",
     dgerr:"Ҳисобот бор нашуд", dggone:"Дастрасӣ ба ҳисобот бекор шуд",
     dggoneemp:"Корманд дигар дар дастаи шумо нест",
@@ -883,17 +1045,14 @@ async function askPersistentStorage(){
 async function warmCards(manual){
   const t = L(), gen=WIPE_GEN;
   await askPersistentStorage();
-  if(manual) warmBar(`<div class="pcard" style="display:block;margin-bottom:10px">
-      <div class="muted" id="warmtxt">${esc(t.warmgoing)}…</div></div>`);
+  if(manual) warmBar(`<div class="sline"><span class="d w"></span><span id="warmtxt">${esc(t.warmgoing)}…</span></div>`);
   let j=null;
   const downloadStarted=performance.now();
   try{ j=await api("/api/cards"); }
   catch(e){
     clientMetric("warm_error", {});
-    if(manual) warmBar(`<div class="pcard" style="display:block;margin-bottom:10px">
-        <div class="muted">⚠️ ${esc(t.warmfail)}</div>
-        <button class="btn line" style="margin-top:8px" onclick="warmCards(true)">⬇ ${esc(t.warmagain)}</button>
-      </div>`);
+    if(manual) warmBar(`<div class="sline"><span class="d w"></span><span>⚠️ ${esc(t.warmfail)}</span>
+        <button class="toolbtn" onclick="warmCards(true)">⬇ ${esc(t.warmagain)}</button></div>`);
     return;
   }
   if(gen!==WIPE_GEN) return;       // телефон очистили, пока карточки качались
@@ -905,10 +1064,8 @@ async function warmCards(manual){
     await IDB.replace("cards", entries);
   }catch(e){
     clientMetric("warm_error", {cards:reps.length,download_ms:downloadMs});
-    if(manual) warmBar(`<div class="pcard" style="display:block;margin-bottom:10px">
-        <div class="muted">⚠️ ${esc(t.warmfail)}</div>
-        <button class="btn line" style="margin-top:8px" onclick="warmCards(true)">⬇ ${esc(t.warmagain)}</button>
-      </div>`);
+    if(manual) warmBar(`<div class="sline"><span class="d w"></span><span>⚠️ ${esc(t.warmfail)}</span>
+        <button class="toolbtn" onclick="warmCards(true)">⬇ ${esc(t.warmagain)}</button></div>`);
     return;
   }
   const cacheMs=performance.now()-cacheStarted;
@@ -1008,7 +1165,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=61;
+const SHELL_VERSION=62;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1719,11 +1876,25 @@ function renderLangs(){
   const t=L();
   $("langs").innerHTML = ["ru","uz","tg"].map(c =>
     `<button class="${c===STATE.lang?'on':''}" onclick="setLang('${c}')">${c.toUpperCase()}</button>`).join("")+
+    `<button class="theme" onclick="cycleTheme()" title="${esc(themeTitle())}" aria-label="${esc(themeTitle())}">${themeGlyph()}</button>`+
     // «Выйти с этого телефона» — там же, где язык: других настроек у оболочки нет.
     // Внутри Телеграма вход — сама Телега, выходить из приложения некуда.
     ((appToken() && !(TG&&TG.initData))
       ? `<button class="out" onclick="askLogout()" title="${esc(t.logoutq)}" aria-label="${esc(t.logoutq)}">${ic("exit")}<span>${esc(t.logout)}</span></button>`
       : "");
+}
+// Тема: система → светлая → тёмная → система. «Как в системе» — без отметки на
+// <html>, тогда решает prefers-color-scheme.
+const THEME_KEY="hb_theme";
+function themeNow(){ try{ const t=localStorage.getItem(THEME_KEY); return (t==="light"||t==="dark")?t:"system"; }catch(e){ return "system"; } }
+function themeGlyph(){ return {system:"◐",light:"☀",dark:"☾"}[themeNow()]; }
+function themeTitle(){ const t=L(); return t.theme+": "+t["theme_"+themeNow()]; }
+function cycleTheme(){
+  const next={system:"light",light:"dark",dark:"system"}[themeNow()];
+  try{ if(next==="system") localStorage.removeItem(THEME_KEY); else localStorage.setItem(THEME_KEY,next); }catch(e){}
+  try{ if(next==="system") document.documentElement.removeAttribute("data-theme");
+       else document.documentElement.setAttribute("data-theme",next); }catch(e){}
+  renderLangs(); toast(themeTitle());
 }
 async function setLang(c){
   STATE.lang=c; renderLangs();
@@ -1799,7 +1970,10 @@ async function boot(){
     STATE.online=true;
     cacheBootstrap(d);            // снимок портфеля для оффлайна (в фоне, не блокирует UI)
     const renderStarted=performance.now();
-    renderList();
+    // Руководитель открывает приложение в своём режиме (сводка), если сам не
+    // выбрал «Выездник»; диплинк на сводку ниже перекроет что угодно.
+    if(storedMode()==="lead" && !(START_TAB==="digest" && !START_TAB_USED)) renderDigest();
+    else renderList();
     const bd=d.diagnostics||{};
     clientMetric("boot_ok", {persons:STATE.persons.length,
       contracts:bd.contracts,server_ms:bd.server_ms,
@@ -1846,22 +2020,61 @@ async function boot(){
 // --- Нижняя навигация (Клиенты / Навигатор / Метки) — как в нативном приложении.
 // Показывается СРАЗУ после входа, а не после первого захода в карточку: человек
 // должен видеть, из чего состоит приложение, с первого экрана.
+// Руководитель: Сводка / Сотрудники / Навигатор; выездник (и руководитель в
+// режиме «Выездник»): Клиенты / Навигатор / Метки.
 function setBottomNav(active){
-  const items=[
+  const lead=hasLead() && STATE.mode==="lead";
+  const items=lead?[
+    {id:"digest",  label:L().digest, icon:"chart", fn:"renderDigest"},
+    {id:"team",    label:L().team,   icon:"team",  fn:"renderTeam"},
+    {id:"map",     label:L().navtab, icon:"nav",   fn:"renderNav"},
+  ]:[
     {id:"clients", label:L().my,     icon:"list", fn:"renderList"},
     {id:"map",     label:L().navtab, icon:"nav",  fn:"renderNav"},
     {id:"marks",   label:L().marks,  icon:"pin",  fn:"renderMarks"},
   ];
-  if(STATE.roles && STATE.roles.manager)
-    items.push({id:"digest", label:L().digest, icon:"chart", fn:"renderDigest"});
   $("bottomnavInner").innerHTML = items.map(it =>
     `<button class="${it.id===active?'on':''}" onclick="${it.fn}()">${ic(it.icon)}<span>${esc(it.label)}</span></button>`).join("");
   $("bottomnav").style.display = "block";
   // Статистика — таблица: на компьютере ей тесно в телефонной колонке.
-  $("app").classList.toggle("wide", active==="digest");
+  $("app").classList.toggle("wide", active==="digest"||active==="team");
+  renderModeBar();
   updateOffBar();
 }
-function hideBottomNav(){ $("bottomnav").style.display = "none"; }
+function hideBottomNav(){ $("bottomnav").style.display = "none"; const m=$("modebar"); if(m) m.classList.remove("on"); }
+
+// --- Режим руководителя (оболочка v62) ----------------------------------------
+// 30.09.2026, владелец: «выбор ролей … должен быть отдельный режим вместо выбора
+// собственно сотрудников, как сейчас — и у меня тоже». У кого есть роль
+// руководителя (безопасник, директор, владелец), под шапкой — переключатель:
+// «Руководитель» (сводка, сотрудники) ↔ «Выездник» (портфель, навигатор, метки).
+// Чей портфель открыт — выбирается уже ВНУТРИ режима «Выездник». Какой режим
+// открывать при запуске — удобство этого телефона (localStorage, стирается при
+// выходе вместе со всем); права по-прежнему решает сервер по роли.
+function hasLead(){ return !!(STATE.roles && STATE.roles.manager); }
+function modeKey(){ return "hb_mode:"+currentUid(); }
+function storedMode(){
+  if(!hasLead()) return "field";
+  let m=""; try{ m=localStorage.getItem(modeKey())||""; }catch(e){}
+  return m==="field"?"field":"lead";
+}
+function leadLabel(){ const t=L(), r=(STATE.roles&&STATE.roles.role)||"manager";
+  return t["mode"+r]||t.modemanager; }
+function renderModeBar(){
+  const el=$("modebar"); if(!el) return;
+  if(!hasLead()){ el.classList.remove("on"); el.innerHTML=""; return; }
+  const m=STATE.mode==="lead"?"lead":"field";
+  el.innerHTML=`<div class="seg">
+    <button class="${m==="lead"?"on":""}" onclick="setMode('lead')">${esc(leadLabel())}</button>
+    <button class="${m==="field"?"on":""}" onclick="setMode('field')">${esc(L().modefield)}</button></div>`;
+  el.classList.add("on");
+}
+function setMode(m){
+  if(!hasLead()) return;
+  m=(m==="field")?"field":"lead";
+  try{ localStorage.setItem(modeKey(), m); }catch(e){}
+  if(m==="field") renderList(); else renderDigest();
+}
 
 // --- Онбординг (самовыбор прямо в миниаппе): язык наверху, роль, сотрудник ---
 function renderOnboarding(){
@@ -1892,8 +2105,9 @@ function renderList(){
   stopMeWatch();
   flushDraft(); stopAutoSync();   // уход с карточки через нижнюю навигацию — не потерять черновик
   STATE.cur=null; removeMap(); prStop();
+  STATE.mode="field";
   const t=L();
-  const bar=`<div class="muted" style="margin-bottom:10px">${t.my}: ${STATE.persons.length}</div>`+
+  const bar=`<div class="lhead"><span class="t">${esc(t.my)}</span><span class="n">${STATE.persons.length}</span></div>`+
     draftsLeftHTML(t);
   // Пустой портфель — штатное состояние: сотрудника открепили, период отсёк,
   // переименовали в реестре. Раньше здесь был ранний return ДО переключателя
@@ -1905,11 +2119,11 @@ function renderList(){
       `<div id="geobar"></div><div class="center">${esc(t.nocl)}</div>`;
     geoBanner(); setBottomNav("clients"); return;
   }
-  $("app").innerHTML = bar +
+  $("app").innerHTML = bar + managerSwitchHTML() +
     `<div class="searchwrap">${ic("search")}<input class="search" id="q" placeholder="${esc(t.search)}" oninput="filterList()"></div>
-     ${managerSwitchHTML()}
-     <button class="btn line" style="margin-bottom:10px" onclick="routeDay()">🧭 ${esc(t.routeday)}</button>
-     <button class="btn line" style="margin-bottom:10px" onclick="askAddress()">📍 ${esc(t.freenav)}</button>
+     <div class="tools2">
+       <button class="tile" onclick="routeDay()">${ic("route")}<span class="tl">${esc(t.routeday)}</span></button>
+       <button class="tile" onclick="askAddress()">${ic("pin")}<span class="tl">${esc(t.byaddr)}</span></button></div>
      <div id="geobar"></div>
      <div id="warmbar"></div>
      <div id="plist"></div>`;
@@ -2184,9 +2398,11 @@ function panelVisit(d,t){
      <button class="fab" onclick="enterNav()">${ic("nav")}<span>${esc(t.go)}</span></button>
    </div>
    ${providerChips(d)}
-   <button class="btn line" onclick="setMarkCase()">${ic("pin")}<span>${t.setmark}</span></button>
-   <button class="btn line" onclick="noteForCase()">${ic("plus")}<span>${esc(t.notecase)}</span></button>
-   ${d.phone?`<button class="btn line" onclick="call()">${ic("phone")}<span>${t.call} · ${esc(d.phone)}</span></button>`:""}
+   <div class="acts${d.phone?"":" two"}">
+     ${d.phone?`<button class="tile" onclick="call()">${ic("phone")}<span class="tl">${t.call}</span><span class="ts">${esc(d.phone)}</span></button>`:""}
+     <button class="tile" onclick="setMarkCase()">${ic("pin")}<span class="tl">${t.setmark}</span></button>
+     <button class="tile" onclick="noteForCase()">${ic("plus")}<span class="tl">${esc(t.notecase)}</span></button>
+   </div>
    <div class="box" style="margin-top:10px">
      <div class="kv"><span class="k">${t.status}</span><span class="v">${esc(d.status||"—")}</span></div>
      ${d.assign_date?`<div class="kv"><span class="k">${t.inwork}</span><span class="v">${d.assign_date}</span></div>`:""}
@@ -2830,11 +3046,10 @@ function geoStatusHTML(){
   const t=L();
   if(GEO.state==="granted") return "";
   if(GEO.state==="unavailable") return "";
-  const msg = GEO.lastErr ? `<div class="muted" style="margin-top:6px">${esc(geoErrText(GEO.lastErr))}</div>` : "";
-  return `<div class="pcard" id="geocard" style="display:block;margin-bottom:10px">
-      <div class="muted">📍 ${esc(t.geowhy)}</div>${msg}
-      <button class="btn line" style="margin-top:8px" onclick="geoEnable()">${esc(t.geoon)}</button>
-    </div>`;
+  const msg = GEO.lastErr ? `<br>${esc(geoErrText(GEO.lastErr))}` : "";
+  return `<div class="sline" id="geocard"><span class="d w"></span>
+      <span>📍 ${esc(t.geowhy)}${msg}</span>
+      <button class="toolbtn" onclick="geoEnable()">${esc(t.geoon)}</button></div>`;
 }
 
 function geoBanner(){ const el=$("geobar"); if(el) el.innerHTML=geoStatusHTML(); }
@@ -3623,15 +3838,21 @@ function dgRangeQ(extra){
   if(DG.shift) p.set("shift",DG.shift);
   Object.entries(extra||{}).forEach(([k,v])=>{ if(v!=null&&v!=="") p.set(k,v); });
   return "?"+p.toString(); }
-async function renderDigest(){
+async function renderDigest(){ return dgEnter("stats"); }
+// «Сотрудники» — вторая вкладка режима руководителя: та же статистика за то же
+// окно, но таблицей с прокруткой вбок. Раньше таблица жила внизу «Сводки», и
+// экран был «ужасно перегружен» (владелец, 30.09.2026).
+async function renderTeam(){ return dgEnter("team"); }
+async function dgEnter(view){
   flushDraft(); stopAutoSync(); stopMeWatch(); removeMap(); STATE.cur=null; prStop();
   PhotoAudit.free();
-  DG.view="stats"; DG.emp=null; DG.rep=null; DG.bindacc=null;
+  STATE.mode="lead";
+  DG.view=view; DG.emp=null; DG.rep=null; DG.bindacc=null;
   if(DG.date){ // диплинк из дайджеста (?tab=digest&d=…): окно ровно на этот день
     DG.preset="custom"; DG.from=DG.date; DG.to=DG.date; DG.shift=0; DG.date=null; }
-  $("app").innerHTML=`<div class="h" id="dghead">${esc(L().digest)}</div>
-    <div id="dgbody" class="muted">…</div>`;
-  setBottomNav("digest");
+  $("app").innerHTML=`<div id="dgbody" class="muted">…</div>`;
+  DG.tab=view==="team"?"team":"digest";
+  setBottomNav(DG.tab);
   dgLoad();
 }
 async function dgLoad(){
@@ -3640,7 +3861,7 @@ async function dgLoad(){
   // старого экрана мог отрисоваться в рендерере нового.
   const seq=++DG.seq;
   const b=$("dgbody"); if(b) b.innerHTML="…";
-  const url = DG.view==="stats"    ? "/api/manager/stats"+dgRangeQ()
+  const url = (DG.view==="stats"||DG.view==="team") ? "/api/manager/stats"+dgRangeQ()
             : DG.view==="emp"      ? "/api/manager/stats_employee"+dgRangeQ({employee:DG.emp})
             : DG.view==="person"   ? "/api/manager/person"+dgQ({employee:DG.emp,rep:DG.rep})
             : DG.view==="plan"     ? "/api/manager/plan"
@@ -3679,8 +3900,13 @@ function dgFail(e){
     <button class="btn line" style="margin-top:12px" onclick="dgRefresh()">🔄</button>`;
 }
 function dgRefresh(){ if(Date.now()-DG.last<3000) return; dgLoad(); }
+// Нижняя вкладка следует за тем, откуда пришли: сотрудник и его карточки —
+// под «Сотрудниками», плитки, случаи и обещания — под «Сводкой».
 function dgGo(view, opts){ Object.assign(DG,{view},opts||{}); DG.bindacc=null; removeMap();
-  PhotoAudit.free(); dgLoad(); }
+  PhotoAudit.free();
+  if(view==="stats"||view==="team"){ const tab=view==="team"?"team":"digest";
+    if(STATE.mode==="lead" && tab!==DG.tab) setBottomNav(tab); DG.tab=tab; }
+  dgLoad(); }
 // --- окно периода: пресет, сдвиг, свои даты, день из столбика ---
 function dgPreset(p){ DG.preset=p; DG.shift=0; DG.from=null; DG.to=null; dgLoad(); }
 function dgShift(n){ if(DG.preset==="custom") DG.shift=n; else DG.shift=(DG.shift||0)+n; dgLoad(); }
@@ -3692,8 +3918,8 @@ function dgDay(i){ const d=DG.days[i]; if(!d) return;
 function dgSort(k){ if(DG.sort===k) DG.dir=-DG.dir; else { DG.sort=k; DG.dir=(k==="employee")?1:-1; } dgDrawTable(); }
 // Страна и офис — два среза одного списка, и выбираются по очереди: «Худжанд
 // внутри Таджикистана» на экране телефона читается хуже, чем просто «Худжанд».
-function dgCountry(c){ DG.country=c; DG.office=""; dgDrawKpis(); dgDrawTable(); }
-function dgOffice(o){ DG.office=o; DG.country=""; dgDrawKpis(); dgDrawTable(); }
+function dgCountry(c){ DG.country=c; DG.office=""; dgDrawKpis(); dgDrawTable(); dgFilterDraw(); }
+function dgOffice(o){ DG.office=o; DG.country=""; dgDrawKpis(); dgDrawTable(); dgFilterDraw(); }
 // Чип незакреплённых. Код приходит с сервера (digest_data.NO_OFFICE) и городом
 // быть не может: у человека без офиса поле пустое, и сравнивать надо с пустотой.
 const DG_NOOFF="!none";
@@ -3712,23 +3938,25 @@ function dgPickCase(i){ const c=DG.cases[i]; if(!c) return;
 function dgOpenMap(i){ const d=DG.days[i]; if(d){ DG.date=d.date; dgGo("map"); } }
 function dgOpenPromises(){ DG.date=DG.to; dgGo("promises"); }
 function dgDate(iso){ if(!iso) return; DG.date=iso; dgLoad(); }
+// Шапка экрана за день: заголовок почерком, листание дня стрелками.
 function dgHeadHTML(j,title){
-  const nav=`<div class="muted" style="margin:4px 0 10px">
-    <button class="btn line" style="padding:2px 10px" onclick="dgDate(${jsq(j.prev_date||"")})">‹</button>
-    <b style="margin:0 10px">${esc(j.date||"")}</b>
-    ${j.next_date?`<button class="btn line" style="padding:2px 10px" onclick="dgDate(${jsq(j.next_date)})">›</button>`:""}
-    <span style="margin-left:10px">обновлено в ${hhmm(new Date(DG.last||Date.now()))}</span>
-  </div>`;
-  return `<div style="font-weight:700">${esc(title)}</div>`+nav;
+  return `<div class="dgh"><div class="t">${esc(title)}</div></div>
+    <div class="pnav"><button class="arr" onclick="dgDate(${jsq(j.prev_date||"")})">‹</button>
+      <div class="lbl">${esc(j.date||"")}</div>
+      <button class="arr" ${j.next_date?"":"disabled"} onclick="dgDate(${jsq(j.next_date||"")})">›</button></div>
+    <div class="dgsub">обновлено в ${hhmm(new Date(DG.last||Date.now()))}</div>`;
 }
-function dgTop(title, sub){
-  return `<div style="font-weight:700;font-size:16px">${esc(title)}</div>
-    <div class="muted" style="font-size:12px;margin-bottom:4px">${sub?esc(sub)+" · ":""}обновлено в ${hhmm(new Date(DG.last||Date.now()))}</div>`;
+// Шапка экранов руководителя: заголовок в строку, справа — отбор (right).
+function dgTop(title, sub, right){
+  return `<div class="dgh"><div class="t">${esc(title)}</div>${right||""}</div>
+    <div class="dgsub">${sub?esc(sub)+" · ":""}обновлено в ${hhmm(new Date(DG.last||Date.now()))}</div>`;
 }
 function dgRender(j){
   const b=$("dgbody"); if(!b) return;
-  if(j.screen && j.screen!==DG.view) return;  // ответ не того экрана
+  // ответ не того экрана («Сотрудники» читают тот же ответ, что «Сводка»)
+  if(j.screen && j.screen!==(DG.view==="team"?"stats":DG.view)) return;
   if(DG.view==="stats") return dgStats(j,b);
+  if(DG.view==="team") return dgTeam(j,b);
   if(DG.view==="emp") return dgEmp(j,b);
   if(DG.view==="person") return dgPerson(j,b);
   if(DG.view==="map") return dgMap(j,b);
@@ -3764,9 +3992,9 @@ function dgLinksScreen(j,b){
   b.innerHTML=[`<button class="back" onclick="dgGo('stats')">‹ к сводке</button>`,
     dgTop("Вход команды","ссылки входа в приложение"),
     `<div class="muted" style="font-size:13px;margin:4px 0 2px">Ссылка личная: перешлите её человеку. Он открывает её на телефоне и сразу попадает в свой портфель. Сбросить — если телефон потерян или человек ушёл.</div>`,
-    `<div style="display:flex;gap:8px;flex-wrap:wrap">
-      <button class="btn line" style="flex:1 1 100%" ${lacking.length?"":"disabled"} onclick="dgLinkIssueAll()">Выдать всем, у кого нет · ${lacking.length}</button>
-      <button class="btn line" style="flex:1 1 100%" ${live.length?"":"disabled"} onclick="dgLinkCopyAll()">Скопировать живые ссылки · ${live.length}</button></div>`,
+    `<div class="tools2" style="margin-top:8px">
+      <button class="tile" ${lacking.length?"":"disabled"} onclick="dgLinkIssueAll()">${ic("link")}<span class="tl">Выдать всем, у кого нет · ${lacking.length}</span></button>
+      <button class="tile" ${live.length?"":"disabled"} onclick="dgLinkCopyAll()">${ic("down")}<span class="tl">Скопировать живые · ${live.length}</span></button></div>`,
     `<div class="chips">${chip("","Все",null)}${chip("in","Вошли",cnt.in)}${chip("live","Выдана",cnt.live)}${chip("dead","Истекла",cnt.dead)}${chip("none","Не выдавали",cnt.none)}</div>`,
     `<div class="searchwrap">${ic("search")}<input class="search" id="dglq" placeholder="Поиск сотрудника" value="${esc(DG.lq||"")}" oninput="dgLinkSearch(this.value)"></div>`,
     `<div id="dglinklist"></div>`].join("");
@@ -3785,7 +4013,7 @@ function dgLinksDraw(){
     const open=!!(x.alive&&x.url);
     const uses=open?`ссылка открыта ${x.uses||0} из ${x.max_uses||2}`:"";
     const dev=x.entered&&x.devices>1?`${x.devices} устройства`:"";
-    return `<div class="box">
+    return `<div class="lrow">
       <div class="pname">${esc(dgLinkName(x))}</div>
       <div class="psub">${esc([DG_LINK_TEXT[st], dev, uses, seen].filter(Boolean).join(" · "))}</div>
       ${open?`<div class="psub" style="word-break:break-all;margin-top:2px">${esc(x.url)}</div>`:""}
@@ -3899,7 +4127,7 @@ function dgWorkloadScreen(j,b){
     const rows=(j.days||[]).map(d=>`<tr><td class="l">${esc(d.label||d.date)}</td><td>${d.visits}</td>
       <td>${esc(d.first||"")}–${esc(d.last||"")}</td><td>${dgWlNum(d.address_min)}</td>
       <td>${dgWlNum(d.travel_min)}</td><td>${dgWlNum(d.idle_min)}</td><td>${dgWlNum(d.km)}</td></tr>`).join("");
-    parts.push(`<div class="stwrap"><table class="stt"><thead><tr><th class="l">День</th><th>Выезд.</th>
+    parts.push(`<div class="stwrap pin"><table class="stt pin"><thead><tr><th class="l">День</th><th>Выезд.</th>
       <th>С – по</th><th>У адр., мин</th><th>Дорога, мин</th><th>Простой, мин</th><th>км</th></tr></thead>
       <tbody>${rows||`<tr><td class="l muted" colspan="7">выездов не было</td></tr>`}</tbody></table></div>`);
     parts.push(`<div class="muted" style="font-size:11px;margin-top:6px">У адресов — по подтверждённым выездам (иначе по времени на карточке); дорога — между точками сохранения; простой — остальное время от первой карточки до последнего сохранения.</div>`);
@@ -3918,7 +4146,7 @@ function dgWorkloadScreen(j,b){
       <div class="psub">${esc(r.office||"")}${r.portfolio_points?` · на карте ${r.portfolio_points} из ${r.portfolio_total}`:""}</div></td>
     <td>${dgWlNum(r.radius_km)}</td><td>${dgWlNum(r.travel_min)}</td><td>${dgWlNum(r.visit_min)}${r.visit_min_measured?"*":""}</td>
     <td><b>${dgWlNum(r.norm_suggested)}</b></td><td>${dgWlNum(r.norm_now)}</td><td>${dgWlNum(r.visits_per_day)}</td></tr>`).join("");
-  parts.push(`<div class="stwrap"><table class="stt"><thead><tr><th class="l">Сотрудник</th><th>Радиус, км</th>
+  parts.push(`<div class="stwrap pin"><table class="stt pin"><thead><tr><th class="l">Сотрудник</th><th>Радиус, км</th>
     <th>Дорога, мин</th><th>У адр., мин</th><th>Норма расч.</th><th>Норма сейчас</th><th>Факт/день</th></tr></thead>
     <tbody>${rows||`<tr><td class="l muted" colspan="7">Команда пуста</td></tr>`}</tbody></table></div>
     <div class="muted" style="font-size:11px;margin-top:6px">* — время у адреса измерено по подтверждённым выездам этого человека. Тап по строке — разбор дней.</div>`);
@@ -3926,13 +4154,16 @@ function dgWorkloadScreen(j,b){
 }
 // --- общие куски экранов статистики ---
 const DG_PRESETS=[["today","Сегодня"],["yesterday","Вчера"],["7d","7 дней"],["30d","30 дней"],["month","Месяц"],["custom","Даты…"]];
+// Пресеты — сегментом во всю ширину: шесть кнопок видны целиком и на 360 px
+// (лентой чипов «Месяц» уходил за край экрана).
+const DG_PSHORT={today:"Сегодня",yesterday:"Вчера","7d":"7 дн","30d":"30 дн",month:"Месяц",custom:"Даты"};
 function dgPeriodBar(rg){
   const cur=(rg.preset==="today"&&rg.shift===-1)?"yesterday":rg.preset;
-  const chips=DG_PRESETS.map(([k,l])=>`<button class="chip${cur===k?" on":""}" onclick="dgPreset('${k}')">${l}</button>`).join("");
+  const chips=DG_PRESETS.map(([k,l])=>`<button class="${cur===k?"on":""}${k==="custom"?" cal":""}" aria-label="${l}" onclick="dgPreset('${k}')">${k==="custom"?ic("cal"):(DG_PSHORT[k]||l)}</button>`).join("");
   const custom=cur==="custom"?`<div class="dates"><input type="date" id="dgfrom" value="${esc(rg.from||"")}">
       <span class="muted">—</span><input type="date" id="dgto" value="${esc(rg.to||"")}">
       <button class="chip on" onclick="dgCustom()">OK</button></div>`:"";
-  return `<div class="chips nowrap">${chips}</div>${custom}
+  return `<div class="seg per">${chips}</div>${custom}
     <div class="pnav"><button class="arr" onclick="dgShift(-1)">‹</button>
       <div class="lbl">${esc(rg.label||"")}${rg.days>1?` <span class="muted" style="font-weight:400">· ${rg.days} дн</span>`:""}</div>
       <button class="arr" ${rg.next?"":"disabled"} onclick="dgShift(1)">›</button></div>`;
@@ -3975,7 +4206,7 @@ function dgKpis(t,rg){
   return `<div class="kpis">
     ${k(t.visits||0,"выездов",c("visits"))}${k(t.paid||0,"оплачен",c("paid"))}${k(t.promised||0,"обещают",c("promised"))}
     ${k(t.overdue||0,"обещаний просрочено",team?"dgOpenPromises()":"")}${k((t.with_photo||0)+"/"+(t.persons||0),"с фото",c("with_photo"))}${sixth}
-  </div>${line.length?`<div class="muted" style="font-size:13px">${line.join(" · ")}</div>`:""}`;
+  </div>${line.length?`<div class="facts">${line.join(" · ")}</div>`:""}`;
 }
 // --- Воронка Collection: лестница выезд → контакт → клиент → обещание → оплата ---
 // Счётчики приезжают из того же stats_data, что считает книгу (totals.funnel),
@@ -4010,10 +4241,15 @@ function dgFunnel(t,rg){
   // у старых выездов ступени контактов неполные, и молчать об этом значило бы
   // показать заниженный Contact Rate без объяснения.
   const partial=rg&&rg.from&&rg.from<"2026-09-15";
-  return `<div class="fcard"><div class="fhead">🪜 Воронка Collection</div>${rows.join("")}
+  // v62: свёрнута, пока не раскроют (выбор помнит телефон) — на «Сводке» только главное.
+  return `<details class="fold"${dgFoldOpen()?" open":""} ontoggle="dgFoldSave(this.open)">
+    <summary>🪜 Воронка Collection · ${f.visits} → ${f.ptp||0}</summary>
+    <div class="fcard">${rows.join("")}
     <div class="fsub" style="padding:4px 0 8px">ступени считают выезды; исполнение — людей
-    (обещавших: ${f.ptp_persons||0})${partial?" · до 15.09 анкета есть только у последних выездов":""}</div></div>`;
+    (обещавших: ${f.ptp_persons||0})${partial?" · до 15.09 анкета есть только у последних выездов":""}</div></div></details>`;
 }
+function dgFoldOpen(){ try{ return localStorage.getItem("hb_funnel_open")==="1"; }catch(e){ return false; } }
+function dgFoldSave(on){ try{ localStorage.setItem("hb_funnel_open", on?"1":"0"); }catch(e){} }
 function dgBars(days){
   const mx=Math.max(1,...days.map(d=>d.visits||0));
   const bars=days.map((d,i)=>`<button class="${d.weekend?"we":""}" title="${esc(d.label)}: ${d.visits||0}"
@@ -4029,27 +4265,51 @@ function dgIdle(r){
   return a.last_activity?`активность ${String(a.last_activity).slice(0,10)}`:"без активности";
 }
 function dgNum(r,k){ return k==="money"?(r.money||[]).reduce((s,x)=>s+(x.sum||0),0):(r[k]||0); }
-// --- ЭКРАН: статистика по команде ---
+// --- ЭКРАН: «Сводка» — главное о команде за окно ---
+// v62 (владелец, 30.09.2026): «вкладка ужасно перегружена», «кнопки, что сейчас
+// внизу, — компактными плиточками-бабблами наверху». Здесь: плитки действий,
+// период, шесть чисел, строка контроля, столбики дней и свёрнутая воронка.
+// Таблица сотрудников — своей вкладкой («Сотрудники», dgTeam).
 function dgStats(j,b){
   DG.stats=j; DG.rows=[]; DG.days=j.by_day||[]; DG.femp=null;
-  const rg=j.range||{}, t=j.totals||{};
-  const parts=[dgTop((j.manager&&j.manager.name)?j.manager.name:"Статистика", j.scope)];
+  const rg=j.range||{}, m=j.manager||{};
+  const parts=[dgTop(L().digest, [m.name, j.scope].filter(Boolean).join(" · "), `<span id="dgflt">${dgFilterChip()}</span>`)];
+  parts.push(dgTiles(j));
   parts.push(dgPeriodBar(rg));
-  parts.push(`<div id="dgkpis"></div><div id="dgfunnel"></div>`);
+  parts.push(`<div id="dgkpis"></div>`);
   if(DG.days.length>1) parts.push(dgBars(DG.days));
-  parts.push(`<div class="searchwrap" style="margin:10px 0 0">${ic("search")}
-    <input class="search" placeholder="Поиск сотрудника" value="${esc(DG.q)}" oninput="dgSearch(this.value)"></div>
-    <div id="dgtable"></div>`);
-  parts.push(`<div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
-    <button class="btn line" style="flex:1" onclick="dgOpenPromises()">⏰ Просрочено: ${t.overdue||0}</button>
-    <button class="btn line" style="flex:1" onclick="dgGo('photos')">📸 Фото по КД</button>
-    <button class="btn line" style="flex:1" onclick="dgGo('plan')">🎯 Нормы</button>
-    <button class="btn line" style="flex:1" onclick="dgGo('workload',{wemp:null})">📐 Нагрузка</button>
-    <button class="btn line" style="flex:1" onclick="dgGo('binds')">👤 Кто есть кто${(+j.bind_requests>0)?" · "+(+j.bind_requests):""}</button>
-    ${(j.manager&&j.manager.caps&&j.manager.caps.team_links===false)?"":`<button class="btn line" style="flex:1" onclick="dgGo('team_links')">🔗 Вход команды</button>`}
-    <button class="btn line" style="flex:1" onclick="dgExcel()">⬇️ Excel</button></div>`);
+  parts.push(`<div id="dgfunnel"></div>`);
   b.innerHTML=parts.join("");
   dgDrawKpis();
+}
+// Плитки-баблы: всё, что раньше стояло кнопками под таблицей и обрезалось.
+// Число на плитке — то, что ждёт руководителя (просрочено, заявки на вход).
+function dgTiles(j){
+  const t=j.totals||{}, caps=(j.manager&&j.manager.caps)||{};
+  const tile=(icon,label,go,badge)=>`<button class="tile${badge?" hot":""}" onclick="${go}">${ic(icon)}
+    <span class="tl">${label}</span>${badge?`<span class="tb">${badge}</span>`:""}</button>`;
+  return `<div class="tiles">${[
+    tile("clock","Просрочено","dgOpenPromises()",+t.overdue||0),
+    tile("camera","Фото по КД","dgGo('photos')"),
+    tile("target","Нормы","dgGo('plan')"),
+    tile("ruler","Нагрузка","dgGo('workload',{wemp:null})"),
+    tile("users","Кто есть кто","dgGo('binds')",+j.bind_requests||0),
+    caps.team_links===false?"":tile("link","Вход команды","dgGo('team_links')"),
+    tile("down","Excel","dgExcel()"),
+  ].join("")}</div>`;
+}
+// --- ЭКРАН: «Сотрудники» — таблица команды за то же окно ---
+// Таблица листается вбок, ФИО закреплено слева: на телефоне видны все колонки,
+// а не четыре из восьми (прежде «Долг» и «Должники» на узком экране прятались).
+// Поле поиска — вне перерисовываемой таблицы: иначе фокус терялся бы на каждой букве.
+function dgTeam(j,b){
+  DG.stats=j; DG.rows=[]; DG.days=j.by_day||[]; DG.femp=null;
+  const rg=j.range||{};
+  b.innerHTML=[dgTop(L().team, j.scope, `<span id="dgflt">${dgFilterChip()}</span>`),
+    dgPeriodBar(rg),
+    `<div class="searchwrap" style="margin:4px 0 4px">${ic("search")}
+      <input class="search" placeholder="Поиск сотрудника" value="${esc(DG.q)}" oninput="dgSearch(this.value)"></div>
+     <div id="dgtable"></div>`].join("");
   dgDrawTable();
 }
 // Итоги выбранной страны сервер считает той же функцией, что и общий свод, —
@@ -4071,6 +4331,43 @@ function dgDrawKpis(){
   const fl=$("dgfunnel");
   if(fl) fl.innerHTML=dgFunnel(dgCountryTotals(), DG.stats.range||{});
 }
+// Отбор по стране/офису — одной кнопкой в шапке и листом снизу (прежде — две
+// ленты чипов в три строки над таблицей). В onclick — только индексы DG.flt.
+function dgFilterName(){
+  const j=DG.stats||{};
+  if(DG.office){ const o=(j.offices||[]).find(x=>x.code===DG.office);
+    return o?(o.code===DG_NOOFF?"Без офиса":o.name):"Офис"; }
+  if(DG.country){ const c=(j.countries||[]).find(x=>x.code===DG.country);
+    return c?((c.flag?c.flag+" ":"")+(c.short||c.name||c.code)):"Страна"; }
+  return "Все офисы";
+}
+function dgFilterChip(){
+  const j=DG.stats||{};
+  if((j.offices||[]).length<2 && (j.countries||[]).length<2) return "";
+  return `<button class="fchip${(DG.office||DG.country)?" on":""}" onclick="dgFilterPick()">${esc(dgFilterName())} ▾</button>`;
+}
+function dgFilterDraw(){ const el=$("dgflt"); if(el) el.innerHTML=dgFilterChip(); }
+function dgFilterPick(){
+  const j=DG.stats||{}, t=j.totals||{};
+  DG.flt=[{k:"",code:"",label:"Все · "+(t.employees||0),on:!DG.office&&!DG.country}];
+  const cs=j.countries||[], offs=j.offices||[];
+  if(cs.length>1) cs.forEach(c=>DG.flt.push({k:"c",code:c.code,on:DG.country===c.code,
+    label:(c.flag?c.flag+" ":"")+(c.name||c.short||c.code)+" · "+c.employees}));
+  if(offs.length>1) offs.forEach(o=>DG.flt.push({k:"o",code:o.code,on:DG.office===o.code,
+    label:(o.code===DG_NOOFF?"Без офиса":"🏢 "+o.name)+" · "+o.employees}));
+  const box=document.createElement("div");
+  box.className="picksheet"; box.id="picksheet";
+  box.innerHTML=`<div class="pickbg" onclick="closePick()"></div><div class="pickbody">`+
+    DG.flt.map((f,i)=>`<button type="button" class="pickrow${f.on?" on":""}" onclick="dgFilterSet(${i})">${esc(f.label)}</button>`).join("")+
+    `</div>`;
+  document.body.appendChild(box);
+}
+function dgFilterSet(i){
+  const f=(DG.flt||[])[i]; closePick(); if(!f) return;
+  if(f.k==="c") return dgCountry(f.code);
+  if(f.k==="o") return dgOffice(f.code);
+  DG.country=""; DG.office=""; dgDrawKpis(); dgDrawTable(); dgFilterDraw();
+}
 function dgDrawTable(){
   const j=DG.stats, el=$("dgtable"); if(!j||!el) return;
   let rows=(j.employees||[]).slice();
@@ -4082,32 +4379,28 @@ function dgDrawTable(){
     const va=dgNum(a,k), vb=dgNum(b2,k);
     return va===vb?String(a.employee).localeCompare(String(b2.employee),"ru"):dir*(va-vb); });
   DG.rows=rows;
-  const cs=j.countries||[];
-  const ctry=cs.length>1?`<div class="chips" style="margin:8px 0 0">
-    <button class="chip${!DG.country?" on":""}" onclick="dgCountry('')">Все · ${(j.totals||{}).employees||0}</button>
-    ${cs.map(c=>`<button class="chip${DG.country===c.code?" on":""}" onclick="dgCountry(${jsq(c.code)})">${esc(c.flag)} ${esc(c.short)} · ${c.employees}</button>`).join("")}</div>`:"";
-  const offs=j.offices||[];
-  const offc=offs.length>1?`<div class="chips" style="margin:6px 0 0">
-    <button class="chip${!DG.office?" on":""}" onclick="dgOffice('')">Все офисы</button>
-    ${offs.map(o=>`<button class="chip${DG.office===o.code?" on":""}" onclick="dgOffice(${jsq(o.code)})">${o.code===DG_NOOFF?"❔":"🏢"} ${esc(o.name)} · ${o.employees}</button>`).join("")}</div>`:"";
   const th=(key,label,cls)=>`<th class="${cls||""}${DG.sort===key?" on":""}" onclick="dgSort('${key}')">${label}${DG.sort===key?(DG.dir<0?" ↓":" ↑"):""}</th>`;
   const trs=rows.map((r,i)=>`<tr class="${r.visits?"":"z"}" onclick="dgPickEmp(${i})">
-    <td class="l"><div class="pname">${esc(r.employee)}</div>${r.visits?"":`<div class="psub">${esc(dgIdle(r))}</div>`}</td>
-    <td>${r.visits||0}</td><td class="md">${r.persons||0}</td><td>${r.paid||0}</td><td>${r.promised||0}</td>
-    <td>${r.overdue||0}</td><td>${r.with_photo||0}</td><td class="md">${esc(r.money_text||"")}</td></tr>`).join("");
+    <td class="l"><div class="pname">${esc(r.employee)}</div><div class="psub">${esc(r.visits?(r.office||""):dgIdle(r))}</div></td>
+    <td><b>${r.visits||0}</b></td><td>${r.persons||0}</td><td>${r.paid||0}</td><td>${r.promised||0}</td>
+    <td>${r.overdue||0}</td><td>${r.with_photo||0}</td><td>${esc(r.money_text||"")}</td></tr>`).join("");
   const T={}; rows.forEach(r=>["visits","persons","paid","promised","overdue","with_photo"].forEach(x=>T[x]=(T[x]||0)+(r[x]||0)));
-  el.innerHTML=`${ctry}${offc}<div class="stwrap"><table class="stt"><thead><tr>
-      ${th("employee","Сотрудник","l")}${th("visits","Выезд.")}${th("persons","Долж.","md")}${th("paid","Опл.")}
-      ${th("promised","Обещ.")}${th("overdue","Проср.")}${th("with_photo","Фото")}${th("money","Долг","md")}</tr></thead>
+  el.innerHTML=`<div class="stwrap pin"><table class="stt pin"><thead><tr>
+      ${th("employee","Сотрудник","l")}${th("visits","Выезд.")}${th("persons","Должн.")}${th("paid","Опл.")}
+      ${th("promised","Обещ.")}${th("overdue","Проср.")}${th("with_photo","Фото")}${th("money","Долг")}</tr></thead>
     <tbody>${trs||`<tr><td class="l muted" colspan="8">Никого не найдено</td></tr>`}</tbody>
-    <tfoot><tr class="tot"><td class="l">Итого · ${rows.length}</td><td>${T.visits||0}</td><td class="md">${T.persons||0}</td>
-      <td>${T.paid||0}</td><td>${T.promised||0}</td><td>${T.overdue||0}</td><td>${T.with_photo||0}</td><td class="md"></td></tr></tfoot></table></div>`;
+    <tfoot><tr class="tot"><td class="l">Итого · ${rows.length}</td><td>${T.visits||0}</td><td>${T.persons||0}</td>
+      <td>${T.paid||0}</td><td>${T.promised||0}</td><td>${T.overdue||0}</td><td>${T.with_photo||0}</td><td></td></tr></tfoot></table></div>
+    <div class="sthint" id="dgsthint"></div>`;
+  // Подсказка «листается вбок» — только когда таблица правда шире экрана.
+  const w=el.querySelector?el.querySelector(".stwrap"):null, h=$("dgsthint");
+  if(w&&h&&w.scrollWidth>w.clientWidth+4) h.textContent="таблица листается вбок →";
 }
 // --- ЭКРАН: сотрудник за период ---
 function dgEmp(j,b){
   DG.cases=[]; DG.days=j.by_day||[]; DG.femp=j.employee||DG.emp||null;
   const rg=j.range||{};
-  const parts=[`<button class="back" onclick="dgGo('stats')">‹ к сотрудникам</button>`,
+  const parts=[`<button class="back" onclick="dgGo('team')">‹ к сотрудникам</button>`,
                dgTop(j.employee||DG.emp||"", rg.label)];
   parts.push(dgPeriodBar(rg));
   parts.push(dgKpis(j,rg));
@@ -4235,7 +4528,7 @@ async function dgShot(i){
 }
 function dgPromises(j,b){
   const t=j.totals||{};
-  const parts=[dgHeadHTML(j,"Просроченные обещания")];
+  const parts=[`<button class="back" onclick="dgGo('stats')">‹ к сводке</button>`,dgHeadHTML(j,"Просроченные обещания")];
   parts.push(`<div>всего: <b>${t.persons||0}</b>`+(t.persons?` · 🟢 отработано: ${t.worked||0} · ⚪ не тронуто: ${t.untouched||0}`:"")+`</div>`);
   if(!(j.employees||[]).length) parts.push(`<div class="muted" style="margin-top:8px">Просроченных обещаний нет 🎉</div>`);
   (j.employees||[]).forEach(r=>{
@@ -4245,7 +4538,6 @@ function dgPromises(j,b){
       parts.push(`<div class="muted">🔴 ${esc(pp.client)} — обещал ${esc(pp.promise_date||"")}, ${pp.days_overdue} дн назад${pp.money_text?` · ${esc(pp.money_text)}`:""}${fresh}</div>`);
     });
   });
-  parts.push(`<button class="btn line" style="margin-top:10px" onclick="dgGo('stats')">← К статистике</button>`);
   b.innerHTML=parts.join("");
 }
 async function dgMap(j,b){
@@ -4379,7 +4671,7 @@ function dgBindsScreen(j,b){
   parts.push(`<div style="font-weight:600;margin:14px 0 4px">Команда · ${team.length}</div>`);
   const rows=team.map(e=>{
     const accs=e.accounts||[];
-    if(!accs.length) return `<div class="box"><div class="pname">${esc(e.employee)}</div>
+    if(!accs.length) return `<div class="lrow"><div class="pname">${esc(e.employee)}</div>
       <div class="psub">устройства нет — человек выберет себя сам при входе</div></div>`;
     return accs.map(a=>dgBindCard(a,e.employee,false,accs.length>1)).join("");
   }).join("");
@@ -4404,7 +4696,7 @@ function dgBindCard(a,emp,pending,dup){
       <button class="chip" onclick="dgBindDo(${i},'unbind')">✖ Отклонить</button>`
     :`<button class="chip" onclick="dgBindPick(${i})">🔁 Другое ФИО</button>
       <button class="chip" onclick="dgBindDo(${i},'unbind')">✖ Снять</button>`;
-  return `<div class="box">
+  return `<div class="lrow${pending?" ask":""}">
     <div class="pname">${pending?"просит: ":""}${esc(emp)}${dup?" · два устройства":""}</div>
     <div class="psub">${esc(who)}</div>
     <div class="psub">${esc(when)}</div>
@@ -4436,7 +4728,7 @@ function dgBindList(){
     .filter(e=>!q||String(e.employee).toLowerCase().includes(q))
     .map(e=>{
       const busy=(e.accounts||[]).filter(x=>x.telegram_id!==a.tid);
-      if(busy.length) return `<div class="box" style="opacity:.55">
+      if(busy.length) return `<div class="lrow" style="opacity:.55">
         <div class="pname">${esc(e.employee)}</div>
         <div class="psub">занято: ${esc(dgWho(busy[0]))}</div></div>`;
       const k=DG.btargets.length, cur=(e.accounts||[]).some(x=>x.telegram_id===a.tid);
@@ -4520,9 +4812,10 @@ function dgCasesScreen(j,b){
   b.innerHTML=parts.join("");
 }
 function dgPhotos(b){
-  b.innerHTML=`${dgHeadHTML({date:DG.date,today:DG.today,prev_date:DG.prev,next_date:null},"📸 Фото по договору")}
-    <div id="pabody"></div>
-    <button class="btn line" style="margin-top:10px" onclick="dgGo('stats')">← К статистике</button>`;
+  b.innerHTML=`<button class="back" onclick="dgGo('stats')">‹ к сводке</button>
+    <div class="dgh"><div class="t">Фото по договору</div></div>
+    <div class="dgsub">все снимки договора: когда сняты, откуда и чем</div>
+    <div id="pabody"></div>`;
   PhotoAudit.render($("pabody"));
 }
 
@@ -4554,7 +4847,7 @@ const PhotoAudit={
     el.innerHTML=`<div style="display:flex;gap:8px">
       <input id="pacid" class="search" style="flex:1" placeholder="Номер КД"
              value="${esc(PA.cid||"")}">
-      <button class="btn acc" onclick="PhotoAudit.search()">Найти</button></div>
+      <button class="btn acc" style="width:auto;flex:0 0 auto;padding:10px 20px" onclick="PhotoAudit.search()">Найти</button></div>
       <div id="palist" class="muted" style="margin-top:10px"></div>`;
   },
   async search(){
@@ -4736,16 +5029,42 @@ function navShellHTML(d,t){
 // У руководителя нет привязки к сотруднику — он работает «от имени» одного из своих
 // и переключается здесь. Право открыть портфель проверяет СЕРВЕР по роли в БД:
 // сюда приходит только имя, и подделать его бесполезно.
+// v62: не выпадающий список на полэкрана, а строка «Портфель: ФИО ›» — выбор
+// листом снизу с поиском. В onclick — только индекс: апостроф в ФИО на
+// узбекской латинице — норма (правило вкладки руководителя).
 function managerSwitchHTML(){
   const r = STATE.roles;
   if(!r || !r.manager || !(r.employees||[]).length) return "";
   const t = L();
-  const opts = r.employees.map(e =>
-    `<option value="${esc(e)}"${e===r.acting?" selected":""}>${esc(e)}</option>`).join("");
-  return `<div class="pcard" style="display:block;margin-bottom:10px">
-      <div class="muted" style="margin-bottom:6px">${esc(t.mgrviewing)}</div>
-      <select class="search" style="width:100%" onchange="actAs(this.value)">${opts}</select>
-    </div>`;
+  return `<button class="pfline" onclick="openPortfolioPick()" aria-label="${esc(t.mgrviewing)}">
+      <span class="k">${esc(t.pfk)}</span><span class="v">${esc(r.acting||"—")}</span>${ic("chevR")}</button>`;
+}
+function openPortfolioPick(){
+  const r=STATE.roles; if(!r||!(r.employees||[]).length) return;
+  const box=document.createElement("div");
+  box.className="picksheet"; box.id="picksheet";
+  box.innerHTML=`<div class="pickbg" onclick="closePick()"></div>
+    <div class="pickbody"><div class="pname" style="padding:2px 8px 8px">${esc(L().pfpick)}</div>
+      <div class="searchwrap" style="margin:0 6px 6px">${ic("search")}<input class="search" id="pfq"
+        placeholder="${esc(L().search)}" oninput="drawPortfolioPick(this.value)"></div>
+      <div id="pflist"></div></div>`;
+  document.body.appendChild(box);
+  drawPortfolioPick("");
+}
+function drawPortfolioPick(q){
+  const el=$("pflist"), r=STATE.roles; if(!el||!r) return;
+  const f=fold(q||"").trim();
+  el.innerHTML=(r.employees||[]).map((e,i)=>[e,i]).filter(([e])=>!f||fold(e).includes(f))
+    .map(([e,i])=>`<button type="button" class="pickrow${e===r.acting?" on":""}" onclick="pickPortfolio(${i})">${esc(e)}</button>`)
+    .join("")||`<div class="center">—</div>`;
+}
+function pickPortfolio(i){
+  const e=((STATE.roles||{}).employees||[])[i]; closePick();
+  if(!e) return;
+  // После переключения boot() откроет тот режим, что выбран: портфель выбирают
+  // из «Выездника» — туда и вернуться.
+  try{ localStorage.setItem(modeKey(), "field"); }catch(ex){}
+  actAs(e);
 }
 
 async function actAs(employee){
@@ -4781,15 +5100,14 @@ function warmStatusHTML(){
   const t = L();
   const at = +(localStorage.getItem(WARM_KEY) || 0);
   const n = STATE.warmCount || 0, total = (STATE.persons||[]).length;
-  if(!at) return `<div class="pcard" style="display:block;margin-bottom:10px">
-      <div class="muted">${esc(t.warmnone)}</div>
-      <button class="btn line" style="margin-top:8px" onclick="warmCards(true)">⬇ ${esc(t.warmgo)}</button>
-    </div>`;
+  // v62: строка статуса с маленькой кнопкой, а не коробка с большой — список
+  // клиентов начинается выше, на первом экране телефона.
+  if(!at) return `<div class="sline"><span class="d w"></span><span>${esc(t.warmnone)}</span>
+      <button class="toolbtn" onclick="warmCards(true)">⬇ ${esc(t.warmgo)}</button></div>`;
   const ok = n >= total && total > 0;
-  return `<div class="pcard" style="display:block;margin-bottom:10px">
-      <div class="muted">${ok ? "✅ " : "⚠️ "}${esc(t.warmready)}: ${n}/${total} · ${hhmm(new Date(at))}</div>
-      <button class="btn line" style="margin-top:8px" onclick="warmCards(true)">⬇ ${esc(t.warmagain)}</button>
-    </div>`;
+  return `<div class="sline"><span class="d${ok?"":" w"}"></span>
+      <span>${esc(t.warmready)}: ${n}/${total} · ${hhmm(new Date(at))}</span>
+      <button class="toolbtn" onclick="warmCards(true)" aria-label="${esc(t.warmagain)}">⬇ ${ok?"":esc(t.warmagain)}</button></div>`;
 }
 
 // --- Навигация по произвольному адресу ----------------------------------------

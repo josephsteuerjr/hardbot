@@ -283,7 +283,8 @@ def _screen() -> str:
 
 
 def test_summary_has_a_way_into_the_screen():
-    assert "dgGo('binds')" in SHELL and "👤 Кто есть кто" in SHELL
+    # v62: плитка-бабл «Кто есть кто» наверху сводки (прежде — кнопка внизу).
+    assert "dgGo('binds')" in SHELL and "\"Кто есть кто\",\"dgGo('binds')\"" in SHELL
     assert "bind_requests" in SHELL, "число висящих заявок видно ещё со сводки"
 
 

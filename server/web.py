@@ -846,6 +846,12 @@ async def _bootstrap(request: web.Request) -> web.Response:
     # переключатель исчезал совсем — при том, что портфель ему открывает РОЛЬ.
     # Право определяется ролью, значит и переключатель зависит только от неё.
     roles = {"manager": bool(scope), "employees": scope, "acting": emp} if scope else None
+    if roles:
+        # Подпись режима в приложении (v62): «Руководитель», «Безопасник»,
+        # «Директор» или «Владелец» — какой ролью человек вошёл.
+        mrec = db.get_manager(uid)
+        roles["role"] = ((mrec or {}).get("role")
+                         or ("owner" if uid == ADMIN_ID else "manager"))
     diagnostics = {
         "server_ms": round((time.perf_counter() - started) * 1000, 1),
         "persons": len(persons),

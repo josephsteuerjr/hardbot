@@ -97,13 +97,18 @@ def test_office_and_country_chips_survive_the_apostrophe():
         countries: [{code: "U'Z", flag: "", short: "U'Z", employees: 1}, {code: "TJ", flag: "", short: "TJ", employees: 1}],
         offices: [{code: "Farg'ona", name: "Farg'ona", employees: 1}, {code: "Toshkent", name: "Toshkent", employees: 1}]},
         document.getElementById("app"))`);
-      const table = p.html("dgtable");
-      out.offices = onclicks(table, "dgOffice").map(h => call(h, "dgOffice"));
-      out.countries = onclicks(table, "dgCountry").map(h => call(h, "dgCountry"));
-      out.shown = table.includes("Farg&#39;ona");
+      // v62: страна и офис выбираются листом снизу; в onclick — только индекс,
+      // сама строка (с апострофом) живёт в состоянии и доезжает до отбора целой.
+      p.run("dgFilterPick()");
+      const sheet = p.html("picksheet");
+      out.idx = onclicks(sheet, "dgFilterSet").map(h => call(h, "dgFilterSet"));
+      out.picked = out.idx.map(([i]) => { p.run("dgFilterPick()"); p.run("dgFilterSet(" + i + ")");
+                                          return p.run("[DG.office, DG.country]"); });
+      out.shown = sheet.includes("Farg&#39;ona");
     """)
-    assert ["Farg'ona"] in out["offices"] and ["Toshkent"] in out["offices"]
-    assert ["U'Z"] in out["countries"]
+    assert all(len(a) == 1 and isinstance(a[0], int) for a in out["idx"]), out["idx"]
+    assert ["Farg'ona", ""] in out["picked"] and ["Toshkent", ""] in out["picked"]
+    assert ["", "U'Z"] in out["picked"]
     assert out["shown"]
 
 
