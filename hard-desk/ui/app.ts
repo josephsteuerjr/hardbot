@@ -8,6 +8,33 @@ import { activity } from "./views/activity";
 import { control } from "./views/control";
 import { device, links, promises, report } from "./views/misc";
 import { team } from "./views/team";
+import { onAdminLink, local } from "./analyst/lib";
+import { today } from "./analyst/today";
+import { people } from "./analyst/people";
+import { links as aLinks } from "./analyst/links";
+import { managers } from "./analyst/managers";
+import { conn, maint } from "./analyst/system";
+
+/** Пульт аналитика: тот же каркас и облик, данные — через питон-сторону. */
+async function startAnalyst() {
+  bare(false);
+  shell = await hard.state();
+  if (shell.theme === "light" || shell.theme === "dark") document.documentElement.dataset.theme = shell.theme;
+  onAdminLink((s) => { const pill = $("state"); pill.dataset.level = s.level; $("state-text").textContent = s.text; });
+  setHead("…");
+  let st: any = null;
+  try { st = await local("/state"); } catch (e) {
+    $("view-inner").innerHTML = `<div class="page enroll"><h1>Пульт аналитика</h1><p>${esc((e as Error).message)}</p></div>`;
+    return;
+  }
+  setWho(`<b>${esc(st.active || "")}</b>${esc(st.url || "адрес не задан")}`);
+  const list: Section[] = [today, people, aLinks, managers, conn, maint];
+  setSections(list);
+  let first = st.bound ? "dash" : "conn";
+  try { if (st.bound) first = localStorage.getItem("hard.section") || first; } catch { /* */ }
+  if (!list.some((s) => s.id === first)) first = "dash";
+  await go(first);
+}
 
 let shell: Shell;
 
@@ -68,7 +95,13 @@ async function start() {
   await go(first);
 }
 
-mountShell(`<b>Хард</b> · пульт руководителя`);
-hard.on("revoked", () => enrollScreen("Доступ этого компьютера отозван аналитиком. Всё сохранённое стёрто. Попросите новую ссылку входа."));
+const ANALYST = new URLSearchParams(location.search).get("mode") === "analyst";
 document.addEventListener("keydown", (e) => { if (e.key === "F5") { e.preventDefault(); void refresh(); } });
-void start();
+if (ANALYST) {
+  mountShell(`<b>Хард</b> · пульт аналитика`);
+  void startAnalyst();
+} else {
+  mountShell(`<b>Хард</b> · пульт руководителя`);
+  hard.on("revoked", () => enrollScreen("Доступ этого компьютера отозван аналитиком. Всё сохранённое стёрто. Попросите новую ссылку входа."));
+  void start();
+}

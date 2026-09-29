@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld("hard", {
   copy: (text: string) => ipcRenderer.invoke("hard:copy", text),
   theme: (t: string) => ipcRenderer.invoke("hard:theme", t),
   shot: (file: string) => ipcRenderer.invoke("hard:shot", file),
+  local: (path: string, body?: unknown) => ipcRenderer.invoke("hard:local", path, body),
+  pick: (kind: string, opts?: unknown) => ipcRenderer.invoke("hard:pick", kind, opts),
   win: (action: string) => ipcRenderer.send("hard:win", action),
   on: (name: "revoked" | "win", cb: (arg?: unknown) => void) => {
     ipcRenderer.on("hard:" + name, (_e, arg) => cb(arg));

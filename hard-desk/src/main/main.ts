@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { extname, join, normalize, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { call, deviceName, enroll, logout, setRevokedHandler } from "./net";
+import { local, startBackend } from "./local";
 import { runShots } from "./shots";
 import { readSettings, readToken, writeSettings } from "./store";
 
@@ -66,6 +67,7 @@ function start() {
   });
   wireIpc();
   makeTray();
+  if (MODE === "analyst") startBackend(log).catch((e) => log("питон-сторона: " + String(e.message || e)));
   show();
 }
 
@@ -226,6 +228,18 @@ function wireIpc() {
     writeSettings({ theme: t });
     BrowserWindow.fromWebContents(e.sender)?.setBackgroundColor(paper());
     return true;
+  });
+  // Пульт аналитика: питон-сторона и выбор файлов/папок.
+  ipcMain.handle("hard:local", (_e, path: string, body: unknown) => local(String(path), body));
+  ipcMain.handle("hard:pick", async (e, kind: "file" | "folder" | "save", opts: { title?: string; filters?: Electron.FileFilter[]; defaultPath?: string } = {}) => {
+    const w = BrowserWindow.fromWebContents(e.sender)!;
+    if (kind === "save") {
+      const r = await dialog.showSaveDialog(w, { title: opts.title, defaultPath: opts.defaultPath, filters: opts.filters });
+      return r.canceled ? "" : r.filePath || "";
+    }
+    const r = await dialog.showOpenDialog(w, { title: opts.title, defaultPath: opts.defaultPath, filters: opts.filters,
+      properties: kind === "folder" ? ["openDirectory"] : ["openFile"] });
+    return r.canceled ? "" : r.filePaths[0] || "";
   });
   ipcMain.handle("hard:shot", async (e, file: string) => {
     // Снимок окна для проверки глазами (только сборка разработчика).

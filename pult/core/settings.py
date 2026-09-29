@@ -20,11 +20,15 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from .bootstrap import APP_DIR
 
-SETTINGS_PATH = APP_DIR / "настройки пульта.json"
+# HARD_PULT_SETTINGS — другой файл настроек (дев-стенд пультов, снимки): так
+# проверка окна не ходит в рабочий контур ни на чтение, ни тем более на запись.
+SETTINGS_PATH = (Path(os.environ["HARD_PULT_SETTINGS"]) if os.environ.get("HARD_PULT_SETTINGS")
+                 else APP_DIR / "настройки пульта.json")
 
 # Имя контура, в которое переезжает плоский старый файл. Адресов серверов
 # в коде нет сознательно: сканер пакета для ИТ ищет именно их.

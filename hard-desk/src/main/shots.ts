@@ -29,10 +29,10 @@ export async function runShots(win: BrowserWindow, dir: string): Promise<void> {
     }
   }
   const only = (process.env.HARD_SHOT_ONLY || "").split(",").filter(Boolean);
-  const plan: [string, string, string?][] = [
-    ["activity", "01-activity"], ["team", "02-team"], ["promises", "03-promises"], ["control", "04-control"],
-    ["links", "05-links"], ["report", "06-report"], ["device", "07-device"],
-  ];
+  await sleep(1500);
+  // Разделы — как их видит человек: по кнопкам полки.
+  const ids = (await js(`[...document.querySelectorAll('#rail [data-go]')].map(b => b.dataset.go)`)) as string[] || [];
+  const plan: [string, string][] = ids.map((id, i) => [id, `${String(i + 1).padStart(2, "0")}-${id}`]);
   for (const [id, name] of plan) {
     if (only.length && !only.includes(name)) continue;
     const ok = await js(`(() => { const b = document.querySelector('[data-go="${id}"]'); if (b) { b.click(); return true; } return false; })()`);

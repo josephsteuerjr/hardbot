@@ -35,6 +35,8 @@ interface Bridge {
   copy(text: string): Promise<boolean>;
   theme(t: string): Promise<boolean>;
   shot(file: string): Promise<boolean>;
+  local(path: string, body?: unknown): Promise<{ ok: boolean; data?: any; error?: string }>;
+  pick(kind: "file" | "folder" | "save", opts?: { title?: string; filters?: { name: string; extensions: string[] }[]; defaultPath?: string }): Promise<string>;
   win(action: string): void;
   on(name: "revoked" | "win", cb: (arg?: unknown) => void): void;
 }
