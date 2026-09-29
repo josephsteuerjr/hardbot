@@ -326,14 +326,36 @@ def _busy(exc: BaseException) -> bool:
     return outlook_error_text(exc) == OUTLOOK_BUSY_TEXT
 
 
+def _signature(ol) -> str:
+    """Подпись по умолчанию — у отдельного черновика-«донора».
+
+    Подпись Outlook вставляет, когда у письма появляется окно (GetInspector).
+    Но письмо, у которого такое окно открывали, Outlook потом отказывается
+    ОТПРАВЛЯТЬ: «Параметр задан неверно» (проверено 29.09.2026; показать его
+    можно). Поэтому окно открываем у донора, берём его HTML и закрываем донора
+    без сохранения, а настоящее письмо окна не видит вовсе."""
+    donor = None
+    try:
+        donor = ol.CreateItem(0)
+        donor.GetInspector
+        return donor.HTMLBody or ""
+    except Exception:  # noqa: BLE001 — без подписи письмо всё равно уйдёт
+        return ""
+    finally:
+        if donor is not None:
+            try:
+                donor.Close(1)
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def send_outlook(to: list[str], subject_text: str, html_body: str, attachment: str, *,
                  display: bool = False, tries: int = 3, pause: float = 4.0) -> None:
     """Письмо из Outlook этой машины. display=True — открыть черновик и не
     отправлять (проверить, как выглядит).
 
-    Подпись владельца Outlook вставляет сам, когда у письма появляется окно
-    (GetInspector): текст ставим ПЕРЕД ней, и письмо выглядит так, будто его
-    написали руками.
+    Подпись владельца берётся у черновика-донора (см. `_signature`): текст
+    ставим ПЕРЕД ней, и письмо выглядит так, будто его написали руками.
 
     Outlook с открытым окном-вопросом (пароль, предупреждение) отказывает с
     «открыто диалоговое окно» — ждём и пробуем ещё (tries раз). Не вышло —
@@ -349,14 +371,10 @@ def send_outlook(to: list[str], subject_text: str, html_body: str, attachment: s
     try:
         try:
             ol = win32com.client.Dispatch("Outlook.Application")
+            signature = _signature(ol)
             mail = ol.CreateItem(0)
             mail.To = "; ".join(to)
             mail.Subject = subject_text
-            try:
-                mail.GetInspector            # подпись по умолчанию появляется здесь
-                signature = mail.HTMLBody or ""
-            except Exception:  # noqa: BLE001
-                signature = ""
             mail.HTMLBody = with_signature(html_body, signature)
             mail.Attachments.Add(str(attachment))
             for attempt in range(max(1, tries)):
