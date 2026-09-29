@@ -245,7 +245,7 @@ def test_control_export_writes_formulas_as_text():
         for row in ws.iter_rows(values_only=True):
             for v in row:
                 assert not (isinstance(v, str) and v.startswith("=") and ws.title == "Риск" and False)
-    assert wb["Риск"].cell(1, 1).value == "Сотрудник"
+    assert wb["Риск"].cell(3, 1).value == "Сотрудник"
 
 
 def test_yesterday_range_is_accepted():
@@ -255,3 +255,22 @@ def test_yesterday_range_is_accepted():
     st, body = _call("GET", "/api/manager/activity?preset=yesterday&kinds=visit",
                      headers={"X-Pult-Token": token})
     assert st == 200 and any(e["rep"] == "P2-3" for e in body["events"])
+
+
+# --- книга для рассылки из пульта аналитика ----------------------------------------
+def test_admin_stats_book_for_mailing(monkeypatch):
+    _seed()
+    monkeypatch.setenv("ADMIN_API_KEY", "master")
+    key = {"X-Admin-Key": "master"}
+    _visit("P2-0", EMP_A, "всё хорошо")
+    import openpyxl
+    st, body = _call("GET", "/admin/stats_book.xlsx?kind=daily", headers=key, raw=True)
+    assert st == 200 and body[:2] == b"PK"
+    wb = openpyxl.load_workbook(io.BytesIO(body))
+    assert wb.sheetnames[0] == "Сводка" and wb.sheetnames[-1] == "Как читать"
+    st, body = _call("GET", "/admin/stats_book.xlsx?preset=7d", headers=key, raw=True)
+    assert st == 200 and "Сотрудники" in openpyxl.load_workbook(io.BytesIO(body)).sheetnames
+    st, _ = _call("GET", "/admin/stats_book.xlsx?direction=kz", headers=key, raw=True)
+    assert st == 400
+    st, _ = _call("GET", "/admin/stats_book.xlsx", raw=True)
+    assert st in (401, 403)

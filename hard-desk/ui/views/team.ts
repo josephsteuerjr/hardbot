@@ -4,24 +4,19 @@
 import { api, hard } from "../kit/api";
 import { esc, icon, n, pct, plural, toast } from "../kit/dom";
 import { setHead, type Section } from "../kit/shell";
+import { DataTable, type Col } from "../kit/table";
 import { evidenceTag, officeChips, openPerson, problem, rangeChips, rangeQuery, staleNote, wireRange, type Range } from "./common";
 
 const state = {
   range: { preset: "today" } as Range,
   office: "",
   country: "",
-  sort: "visits",
-  dir: -1,
-  q: "",
   employee: "",
 };
 
-type Col = [key: string, title: string, fmt?: (r: any) => string];
-const COLS: Col[] = [
+const NUMS: [string, string][] = [
   ["visits", "Выездов"], ["persons", "Людей"], ["paid", "Оплачен"], ["promised", "Обещают"], ["overdue", "Просрочено"],
   ["with_photo", "С фото"], ["confirmed", "У адреса"], ["far", "Далеко"], ["late", "Позже"], ["no_geo", "Без гео"],
-  ["fill_avg", "Карточка", (r) => r.fill_avg ? `${Math.round(r.fill_avg / 60)} мин` : "—"],
-  ["plan", "План", (r) => r._plan ? pct(r.visits / r._plan) : "—"],
 ];
 
 function inOffice(r: any): boolean {
@@ -29,34 +24,33 @@ function inOffice(r: any): boolean {
   return !state.office || r.office === state.office;
 }
 
-function tableHtml(d: any): string {
+/** Сетка людей: сортировка и тихие фильтры по любому столбцу, итог по показанным. */
+function gridTable(host: HTMLElement, d: any, onPick: (emp: string) => void): void {
   const days = (d.by_day as any[]).filter((x) => !x.weekend).length || 1;
-  let rows = (d.employees as any[]).filter((r) => inOffice(r) && (!state.country || r.country === state.country)
-    && (!state.q || r.employee.toLowerCase().includes(state.q.toLowerCase())));
+  const rows = (d.employees as any[]).filter((r) => inOffice(r) && (!state.country || r.country === state.country));
   rows.forEach((r) => { r._plan = (r.plan_per_day || 0) * days; });
-  const key = state.sort;
-  rows = rows.slice().sort((a, b) => {
-    const va = key === "employee" ? a.employee : key === "plan" ? (a._plan ? a.visits / a._plan : -1) : (a[key] ?? -1);
-    const vb = key === "employee" ? b.employee : key === "plan" ? (b._plan ? b.visits / b._plan : -1) : (b[key] ?? -1);
-    return (va > vb ? 1 : va < vb ? -1 : 0) * state.dir;
-  });
-  const th = (k: string, t: string, l = false) =>
-    `<th class="sortable${l ? " l" : ""}" data-sort="${k}"${state.sort === k ? ` aria-sort="${state.dir > 0 ? "ascending" : "descending"}"` : ""}>${t}</th>`;
-  const cell = (r: any, c: Col) => {
-    const v = c[2] ? c[2](r) : n(r[c[0]]);
-    const zero = !c[2] && !r[c[0]];
-    return `<td class="${zero ? "zero" : ""}">${v}</td>`;
-  };
-  const sum = (k: string) => rows.reduce((s, r) => s + (Number(r[k]) || 0), 0);
-  const plan = rows.reduce((s, r) => s + r._plan, 0);
-  return `<div class="table-wrap"><table class="grid">
-    <thead><tr>${th("employee", "Сотрудник", true)}${COLS.map(([k, t]) => th(k, t)).join("")}</tr></thead>
-    <tbody>${rows.map((r) => `<tr class="pick" data-emp="${esc(r.employee)}">
-      <td class="l"><span class="who">${esc(r.employee)}</span><span class="sub">${esc(r.office || "без офиса")}${r.activity?.idle_days > 1 ? ` · простой ${r.activity.idle_days} дн` : ""}</span></td>
-      ${COLS.map((c) => cell(r, c)).join("")}</tr>`).join("")}</tbody>
-    <tfoot><tr><td class="l">Итого · ${n(rows.length)}</td>${COLS.map(([k]) =>
-      `<td>${k === "fill_avg" ? "" : k === "plan" ? (plan ? pct(sum("visits") / plan) : "—") : n(sum(k))}</td>`).join("")}</tr></tfoot>
-  </table></div>`;
+  const numCol = (k: string, t: string): Col<any> => ({ key: k, title: t, num: true, value: (r) => Number(r[k]) || 0,
+    html: (r) => (r[k] ? n(r[k]) : '<span class="zero">0</span>') });
+  const cols: Col<any>[] = [
+    { key: "employee", title: "Сотрудник", value: (r) => r.employee,
+      // Офис — своей колонкой; под именем — только простой, если он есть.
+      html: (r) => `<span class="who">${esc(r.employee)}</span>${r.activity?.idle_days > 1 ? `<span class="sub">простой ${r.activity.idle_days} дн</span>` : ""}` },
+    { key: "office", title: "Офис", value: (r) => r.office || "без офиса" },
+    ...NUMS.map(([k, t]) => numCol(k, t)),
+    { key: "fill_avg", title: "Карточка, мин", num: true, value: (r) => (r.fill_avg ? Math.round(r.fill_avg / 60) : ""),
+      html: (r) => (r.fill_avg ? `${Math.round(r.fill_avg / 60)} мин` : "—") },
+    { key: "plan", title: "План", num: true, value: (r) => (r._plan ? Math.round((r.visits / r._plan) * 100) : ""),
+      html: (r) => (r._plan ? pct(r.visits / r._plan) : "—") },
+  ];
+  new DataTable<any>(host, {
+    id: "manager-team", cols, key: (r) => r.employee, exportName: "Команда", searchPlaceholder: "Найти сотрудника",
+    onRow: (r) => onPick(r.employee),
+    footer: (shown) => {
+      const sum = (k: string) => shown.reduce((s, r) => s + (Number(r[k]) || 0), 0);
+      const plan = shown.reduce((s, r) => s + (r._plan || 0), 0);
+      return [`Итого · ${n(shown.length)}`, "", ...NUMS.map(([k]) => n(sum(k))), "", plan ? pct(sum("visits") / plan) : "—"];
+    },
+  }).setRows(rows);
 }
 
 function daysHtml(byDay: any[]): string {
@@ -90,11 +84,10 @@ async function renderTeam(root: HTMLElement) {
       <button class="btn small" data-xlsx>${icon("download")}Excel</button></div>
     <div class="toolbar">${countries.length > 1 ? `<div class="chips"><button class="chip" data-country="" aria-pressed="${!state.country}">Все страны</button>${countries.map((c) =>
       `<button class="chip" data-country="${esc(c.code)}" aria-pressed="${state.country === c.code}">${esc(c.flag)} ${esc(c.short || c.name)}</button>`).join("")}</div><span class="chip-sep"></span>` : ""}
-      ${officeChips(offices, state.office)}<span class="spacer"></span>
-      <input class="input search" id="team-q" placeholder="Найти сотрудника" value="${esc(state.q)}"></div>
+      ${officeChips(offices, state.office)}</div>
     ${kpis(totals)}
     ${daysHtml(d.by_day)}
-    <div class="section"><div id="tbl">${tableHtml(d)}</div></div>`;
+    <div class="section"><div id="tbl"></div></div>`;
   wireRange(root, state.range, () => void renderTeam(root));
   root.querySelectorAll<HTMLButtonElement>("[data-office]").forEach((b) => b.addEventListener("click", () => {
     state.office = b.dataset.office || ""; state.country = ""; void renderTeam(root);
@@ -102,19 +95,7 @@ async function renderTeam(root: HTMLElement) {
   root.querySelectorAll<HTMLButtonElement>("[data-country]").forEach((b) => b.addEventListener("click", () => {
     state.country = b.dataset.country || ""; state.office = ""; void renderTeam(root);
   }));
-  const wireTable = () => {
-    root.querySelectorAll<HTMLElement>("[data-sort]").forEach((th) => th.addEventListener("click", () => {
-      const k = th.dataset.sort!;
-      if (state.sort === k) state.dir = -state.dir; else { state.sort = k; state.dir = k === "employee" ? 1 : -1; }
-      root.querySelector("#tbl")!.innerHTML = tableHtml(d); wireTable();
-    }));
-    root.querySelectorAll<HTMLElement>("tr[data-emp]").forEach((tr) => tr.addEventListener("click", () => {
-      state.employee = tr.dataset.emp!; void renderEmployee(root);
-    }));
-  };
-  wireTable();
-  const qi = root.querySelector<HTMLInputElement>("#team-q");
-  qi?.addEventListener("input", () => { state.q = qi.value; root.querySelector("#tbl")!.innerHTML = tableHtml(d); wireTable(); });
+  gridTable(root.querySelector("#tbl")!, d, (emp) => { state.employee = emp; void renderEmployee(root); });
   root.querySelectorAll<HTMLElement>("[data-day]").forEach((b) => b.addEventListener("click", () => {
     const x = d.by_day[Number(b.dataset.day)];
     if (x) { state.range = { from: x.date, to: x.date }; void renderTeam(root); }
@@ -140,22 +121,29 @@ async function renderEmployee(root: HTMLElement) {
     ${daysHtml(d.by_day)}
     <div class="section"><div class="section-head"><h2 class="section-title">Выезды</h2>
       <span class="section-note">${n(cases.length)} ${plural(cases.length, "выезд", "выезда", "выездов")} · в портфеле ${n(d.portfolio)} ${plural(d.portfolio || 0, "человек", "человека", "человек")}</span></div>
-    <div class="table-wrap"><table class="grid"><thead><tr><th class="l">День</th><th class="l">Должник</th><th class="l">Исход</th>
-      <th class="l">Подтверждение</th><th>Карточка</th><th>Фото</th><th>Долг</th></tr></thead>
-    <tbody>${cases.map((c, i) => `<tr class="pick" data-case="${i}"><td class="l">${esc(c.day_label)}</td>
-      <td class="l"><span class="who">${esc(c.client)}</span><span class="sub mono">${esc(c.rep)}</span></td>
-      <td class="l">${esc(c.outcome || "—")}${c.agreed ? `<span class="sub">${esc(c.agreed)}</span>` : ""}</td>
-      <td class="l">${evidenceTag(c.evidence_level)}${c.late_days ? ` <span class="tag warn">позже на ${n(c.late_days)} дн</span>` : ""}${c.series ? `<span class="sub">${esc(c.series)}</span>` : ""}</td>
-      <td>${esc(c.fill_text || "—")}</td><td class="${c.photos ? "" : "zero"}">${n(c.photos)}</td><td>${esc(c.money_text || "")}</td></tr>`).join("")}</tbody></table></div>
-    ${cases.length ? "" : '<div class="empty"><b>Выездов нет</b>За это окно сотрудник не выезжал.</div>'}</div>`;
+    <div id="cases"></div>
+    </div>`;
   root.querySelector("[data-back]")?.addEventListener("click", () => { state.employee = ""; void renderTeam(root); });
   wireRange(root, state.range, () => void renderEmployee(root));
-  root.querySelectorAll<HTMLElement>("tr[data-case]").forEach((tr) => tr.addEventListener("click", () => {
-    const c = cases[Number(tr.dataset.case)];
-    root.querySelectorAll('tr[aria-selected="true"]').forEach((x) => x.removeAttribute("aria-selected"));
-    tr.setAttribute("aria-selected", "true");
-    void openPerson(emp, c.rep, c.date);
-  }));
+  const EV: Record<string, string> = { confirmed: "у адреса", far: "далеко от адреса", nofix: "точка не определилась", nogeo: "без геолокации", coarse: "точка грубая" };
+  new DataTable<any>(root.querySelector("#cases")!, {
+    id: "manager-cases", exportName: `Выезды — ${emp}`, key: (c) => `${c.date}|${c.rep}`, empty: "За это окно сотрудник не выезжал.",
+    cols: [
+      { key: "day", title: "День", value: (c) => c.date, html: (c) => esc(c.day_label) },
+      { key: "client", title: "Должник", value: (c) => c.client, html: (c) => `<span class="who">${esc(c.client)}</span><span class="sub mono">${esc(c.rep)}</span>` },
+      { key: "outcome", title: "Исход", value: (c) => c.outcome || "—", html: (c) => `${esc(c.outcome || "—")}${c.agreed ? `<span class="sub">${esc(c.agreed)}</span>` : ""}` },
+      { key: "ev", title: "Подтверждение", value: (c) => EV[c.evidence_level] || "",
+        html: (c) => `${evidenceTag(c.evidence_level)}${c.late_days ? ` <span class="tag warn">позже на ${n(c.late_days)} дн</span>` : ""}${c.series ? `<span class="sub">${esc(c.series)}</span>` : ""}` },
+      { key: "fill", title: "Карточка", value: (c) => c.fill_text || "" },
+      { key: "photos", title: "Фото", num: true, value: (c) => Number(c.photos) || 0 },
+      { key: "money", title: "Долг", num: true, value: (c) => c.money_text || "" },
+    ],
+    onRow: (c, tr) => {
+      root.querySelectorAll('tr[aria-selected="true"]').forEach((x) => x.removeAttribute("aria-selected"));
+      tr.setAttribute("aria-selected", "true");
+      void openPerson(emp, c.rep, c.date);
+    },
+  }).setRows(cases);
 }
 
 export const team: Section = {

@@ -1,21 +1,27 @@
-// «Вход» аналитика: персональные ссылки входа PWA. В контуре без Telegram это
-// единственный путь сотрудника в систему: таблица людей со статусом входа,
-// фильтры, выдать/перевыдать/отозвать, «всем, у кого нет», сохранить списком.
+// «Вход сотрудников»: персональные ссылки входа в приложение. В контуре без Telegram
+// это единственный путь сотрудника в систему. Таблица с фильтрами и галочками,
+// массовые действия — к отмеченным, а если не отмечено никого — к показанным:
+// выдать тем, у кого нет, выдать заново, сбросить доступ, скопировать или скачать
+// ссылки разом.
 import { hard } from "../kit/api";
 import { ask, esc, toast } from "../kit/dom";
 import type { Section } from "../kit/shell";
-import { adm, chipsHtml, fn, fnMap, guard, kvHtml, linkSheet, note, sortRows, tableHtml } from "./lib";
+import { DataTable, type Col } from "../kit/table";
+import { showIssued } from "../kit/issued";
+export { showIssued };
+import { adm, chipsHtml, fn, fnMap, guard, kvHtml, note } from "./lib";
 
-const st = { filter: "all", q: "", uses: 2, selected: "", sort: { col: 0, dir: 1 }, revoked: new Set<string>(), base: "" };
+type Row = { p: any; t: unknown[] };
+const st = { filter: "all", uses: 2, revoked: new Set<string>(), base: "" };
 let people: any[] = [];
 let byName: Record<string, any> = {};
+let table: DataTable<Row> | null = null;
 
-/** Выдать вход одному человеку и показать ссылку листом (общий путь разделов). */
+/** Выдать вход одному человеку и показать ссылку тем же листом. */
 export async function issueLink(body: { employee?: string; telegram_id?: number | string; kind?: string; uses?: number }): Promise<void> {
   const d = await adm("POST", "/admin/app_link.json", { uses: st.uses, ...body });
   if (!d || !d.url) { toast(String(d?.error || "Сервер не выдал ссылку")); return; }
-  const text = await fn("people.link_note", d);
-  linkSheet("Ссылка входа" + (body.employee ? " · " + body.employee : ""), d.url, text);
+  await showIssued("Ссылка входа", [{ employee: body.employee || d.employee || "", who: "", url: d.url, uses: d.max_uses, expires: String(d.expires_at || "").slice(0, 10) }]);
 }
 
 async function load(root: HTMLElement) {
@@ -37,77 +43,94 @@ async function draw(root: HTMLElement) {
     fn("links.summary_tiles", people), fn("links.link_summary", people)]);
   const shown = await fnMap<boolean>("links.matches", people.map((p) => [p, st.filter]));
   const visible = people.filter((_, i) => shown[i]);
-  let rows = await fnMap<unknown[]>("links.link_row", visible.map((p) => [p]));
-  if (st.q) rows = rows.filter((r) => r.join(" ").toLowerCase().includes(st.q.toLowerCase()));
-  rows = sortRows(rows, st.sort.col, st.sort.dir);
-  const missing = counts.none || 0;
-  const cur = byName[st.selected];
+  const tuples = await fnMap<unknown[]>("links.link_row", visible.map((p) => [p]));
+  const rows: Row[] = visible.map((p, i) => ({ p, t: tuples[i] }));
   root.innerHTML = `
-    ${kvHtml(tiles)}
-    ${note(summary)}
-    <div class="toolbar" style="margin-top:18px">${chipsHtml((FILTERS as [string, string][]).map(([k, t]) => ({ key: k, text: `${t} · ${counts[k] || 0}`, on: st.filter === k })), "filter")}
-      <span class="spacer"></span><input class="input search" id="ln-q" placeholder="Поиск" value="${esc(st.q)}"></div>
-    <div class="toolbar">
-      <span class="muted" style="font-size:13.5px">Обменов у ссылки:</span>
-      ${chipsHtml([1, 2, 5].map((x) => ({ key: String(x), text: String(x), on: st.uses === x })), "uses")}
-      <span class="spacer"></span>
-      <button class="btn primary" data-all ${missing ? "" : "disabled"}>${missing ? `Выдать вход всем, у кого его нет (${missing})` : "У всех есть вход"}</button>
-    </div>
-    ${cur ? `<div class="notice"><span class="grow"><b>${esc(cur.employee)}</b></span>
-      <button class="btn small" data-issue ${cur.alive ? "disabled" : ""}>Выдать вход</button>
-      <button class="btn small" data-again ${cur.code ? "" : "disabled"}>Выдать заново</button>
-      <button class="btn small" data-copy ${cur.code ? "" : "disabled"}>Копировать ссылку</button>
-      <button class="btn small danger" data-revoke ${cur.telegram_id && (cur.code || cur.entered) ? "" : "disabled"}>Отозвать</button></div>` : '<p class="muted" style="font-size:13.5px">Выберите человека в таблице — появятся действия.</p>'}
-    <div id="tbl">${tableHtml(COLS, rows, { pick: true, selected: st.selected })}</div>`;
-  wire(root);
-}
-
-function wire(root: HTMLElement) {
+    ${kvHtml(tiles)}${note(summary)}
+    <div class="toolbar" style="margin-top:16px">${chipsHtml((FILTERS as [string, string][]).map(([k, t]) => ({ key: k, text: `${t} · ${counts[k] || 0}`, on: st.filter === k })), "filter")}
+      <span class="spacer"></span><span class="muted" style="font-size:13px">Открытий у новой ссылки:</span>
+      ${chipsHtml([1, 2, 5].map((x) => ({ key: String(x), text: String(x), on: st.uses === x })), "uses")}</div>
+    <div class="bulk" id="bulk"></div>
+    <div id="tbl"></div>`;
   root.querySelectorAll<HTMLButtonElement>("[data-filter]").forEach((b) => b.addEventListener("click", () => { st.filter = b.dataset.filter!; void draw(root); }));
   root.querySelectorAll<HTMLButtonElement>("[data-uses]").forEach((b) => b.addEventListener("click", () => { st.uses = Number(b.dataset.uses); void draw(root); }));
-  const q = root.querySelector<HTMLInputElement>("#ln-q");
-  q?.addEventListener("change", () => { st.q = q.value; void draw(root); });
-  root.querySelectorAll<HTMLElement>("#tbl th").forEach((th, i) => th.addEventListener("click", () => {
-    st.sort = { col: i, dir: st.sort.col === i ? -st.sort.dir : 1 }; void draw(root);
-  }));
-  root.querySelectorAll<HTMLElement>("#tbl tr[data-key]").forEach((tr) => tr.addEventListener("click", () => {
-    st.selected = tr.dataset.key!; void draw(root);
-  }));
-  const cur = byName[st.selected];
-  root.querySelector("[data-issue]")?.addEventListener("click", guard(async () => {
-    await issueLink({ employee: cur.employee, kind: cur.kind || "agent", ...(cur.telegram_id ? { telegram_id: cur.telegram_id } : {}) });
+  const cols: Col<Row>[] = (COLS as [string, string][]).map(([k, t], i) => ({ key: k, title: t, value: (r: Row) => r.t[i] }));
+  table = new DataTable<Row>(root.querySelector("#tbl")!, {
+    id: "analyst-links", cols, key: (r) => r.p.employee, select: true, exportName: "Вход сотрудников",
+    onSelect: () => drawBulk(root),
+  });
+  table.setRows(rows);
+}
+
+function drawBulk(root: HTMLElement) {
+  const bar = root.querySelector<HTMLElement>("#bulk");
+  if (!bar || !table) return;
+  const sc = table.scope();
+  const people = sc.rows.map((r) => r.p);
+  const lacking = people.filter((p) => !p.alive && !p.entered).length;
+  // Копировать есть смысл только живые ссылки: израсходованная никого не впустит.
+  const live = people.filter((p) => p.alive && (p.url || p.code));
+  const withLink = live.length;
+  const canRevoke = people.filter((p) => p.telegram_id && (p.code || p.entered)).length;
+  bar.innerHTML = `<span class="who">Действия — <b>${esc(sc.label)}</b></span>
+    <button class="btn small primary" data-b="issue" ${lacking ? "" : "disabled"}>Выдать тем, у кого нет (${lacking})</button>
+    <button class="btn small" data-b="reissue" ${people.length ? "" : "disabled"}>Выдать заново</button>
+    <button class="btn small" data-b="copy" ${withLink ? "" : "disabled"}>Скопировать живые ссылки (${withLink})</button>
+    <button class="btn small" data-b="xlsx" ${people.length ? "" : "disabled"}>Скачать Excel</button>
+    <button class="btn small danger" data-b="revoke" ${canRevoke ? "" : "disabled"}>Сбросить доступ (${canRevoke})</button>
+    <span class="spacer"></span>
+    ${sc.picked ? '<button class="link" data-b="clear">снять отметки</button>' : ""}
+    <button class="ticon" data-b="reload" title="Обновить список"><svg viewBox="0 0 18 18" width="15" height="15"><path d="M14.5 8.5a5.5 5.5 0 1 1-1.6-3.9M14.5 2.5v3.6h-3.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></button>`;
+  const on = (k: string, f: () => Promise<void>) => bar.querySelector(`[data-b="${k}"]`)?.addEventListener("click", guard(f));
+  on("clear", async () => table!.clearSelection());
+  on("reload", async () => { await load(root); toast("Обновлено"); });
+  on("issue", async () => {
+    const names = people.filter((p) => !p.alive && !p.entered).map((p) => p.employee);
+    if (!(await ask("Выдать вход", await fn("links.bulk_confirm_text", names.length, st.uses, 0, "тем, у кого его нет"), "Выдать"))) return;
+    await bulkIssue(root, names);
+  });
+  on("reissue", async () => {
+    const names = people.map((p) => p.employee);
+    const entered = people.filter((p) => p.entered).length;
+    if (!(await ask("Выдать заново", await fn("links.bulk_confirm_text", names.length, st.uses, entered, sc.label.replace(/ \(\d+\)$/, "")), "Выдать заново"))) return;
+    await bulkIssue(root, names);
+  });
+  on("copy", async () => {
+    const lines: string[] = [];
+    for (const p of live) {
+      const url = p.url || (await fn<string>("links.link_url", p, st.base));
+      if (url) lines.push(`${p.employee} — ${url}`);
+    }
+    await hard.copy(lines.join("\n"));
+    toast(`Скопировано ссылок: ${lines.length}`);
+  });
+  on("xlsx", async () => {
+    const tuples = await fnMap<unknown[]>("links.link_row", people.map((p) => [p]));
+    const COLS = (await fn("links.COLUMNS")) as [string, string][];
+    const res = await hard.xlsx("Вход сотрудников", [...COLS.map(([, t]) => t), "Ссылка"],
+      people.map((p, i) => [...COLS.map((_, j) => (tuples[i][j] ?? "") as string), p.url || ""]));
+    if (res.ok && res.file) { toast("Книга сохранена"); void hard.open(res.file); }
+  });
+  on("revoke", async () => {
+    const ids = people.filter((p) => p.telegram_id && (p.code || p.entered)).map((p) => p.telegram_id);
+    if (!(await ask("Сбросить доступ?", `${ids.length} чел. выйдут из приложения на всех телефонах, их ссылки перестанут работать. Вернуть вход — новой ссылкой.`, "Сбросить", true))) return;
+    const d = await adm("POST", "/admin/app_revoke_bulk.json", { telegram_ids: ids, scope: "all" }, 120);
+    for (const p of people) if (ids.includes(p.telegram_id)) { st.revoked.add(String(p.telegram_id)); st.revoked.add(p.employee); }
+    toast(`Доступ сброшен: ${d.people} чел.`);
+    table!.clearSelection();
     await load(root);
-  }));
-  root.querySelector("[data-again]")?.addEventListener("click", guard(async () => {
-    if (!(await ask("Выдать заново?", await fn("links.reissue_text", cur), "Выдать"))) return;
-    await issueLink({ employee: cur.employee, kind: cur.kind || "agent", ...(cur.telegram_id ? { telegram_id: cur.telegram_id } : {}) });
-    await load(root);
-  }));
-  root.querySelector("[data-copy]")?.addEventListener("click", guard(async () => {
-    const url = await fn("links.link_url", cur, st.base);
-    if (!url) { toast("Ссылку собрать не из чего — выдайте заново"); return; }
-    await hard.copy(url); toast("Ссылка скопирована: " + cur.employee);
-  }));
-  root.querySelector("[data-revoke]")?.addEventListener("click", guard(async () => {
-    if (!(await ask("Отозвать вход?", await fn("links.revoke_text", cur), "Отозвать", true))) return;
-    await adm("POST", "/admin/app_revoke", { telegram_id: cur.telegram_id, scope: "all" });
-    st.revoked.add(String(cur.telegram_id)); st.revoked.add(cur.employee);
-    toast("Вход отозван: " + cur.employee);
-    await load(root);
-  }));
-  root.querySelector("[data-all]")?.addEventListener("click", guard(async () => {
-    const names = people.filter((p) => p && true).map((p) => p.employee);
-    const need = (await fnMap<boolean>("links.matches", people.map((p) => [p, "none"]))).map((m, i) => (m ? names[i] : "")).filter(Boolean);
-    if (!need.length) { toast("У всех уже есть вход"); return; }
-    if (!(await ask("Выдать вход всем, у кого его нет", await fn("links.bulk_confirm_text", need.length, st.uses, 0, "всем, у кого его нет"), "Выдать"))) return;
-    const items = await fn("links.bulk_items", byName, need);
-    const d = await adm("POST", "/admin/app_links_bulk.json", { items, uses: st.uses }, 180);
-    const rows = await fn("links.bulk_rows", d.results || []);
-    const text = (rows as any[]).map((r) => `${r.employee} — ${r.url || r.error || ""}`).join("\n");
-    await hard.copy(text);
-    toast((await fn<string>("links.bulk_summary", rows)).split(".")[0] + " · список скопирован");
-    await load(root);
-  }));
+  });
+}
+
+async function bulkIssue(root: HTMLElement, names: string[]) {
+  const items = await fn("links.bulk_items", byName, names);
+  toast("Выдаю ссылки…");
+  const d = await adm("POST", "/admin/app_links_bulk.json", { items, uses: st.uses }, 180);
+  const rows = await fn<any[]>("links.bulk_rows", d.results || []);
+  for (const n of names) { st.revoked.delete(n); }
+  table?.clearSelection();
+  await load(root);
+  await showIssued(`Ссылки входа · ${rows.length} чел.`, rows);
 }
 
 export const links: Section = {

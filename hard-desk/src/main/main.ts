@@ -12,6 +12,7 @@ import { dirname, extname, join, normalize, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { call, deviceName, enroll, logout, setRevokedHandler } from "./net";
 import { stopLegacyPult } from "./legacy";
+import { writeXlsx } from "./xlsx";
 import { local, startBackend } from "./local";
 import { runShots } from "./shots";
 import { readSettings, readToken, writeSettings } from "./store";
@@ -83,7 +84,8 @@ function start() {
   makeTray();
   stopLegacyPult(log);
   if (MODE === "analyst") startBackend(log).catch((e) => log("питон-сторона: " + String(e.message || e)));
-  show();
+  // Автозапуск с Windows открывает пульт сразу в трее: окно — по щелчку.
+  if (!process.argv.includes("--tray")) show();
 }
 
 // ------------------------------------------------------------------ статика
@@ -237,7 +239,29 @@ function wireIpc() {
     return { ok: true, file: pick.filePath };
   });
   ipcMain.handle("hard:open", (_e, file: string) => shell.openPath(String(file)));
+  // Любая таблица окна — книгой Excel: тот же вид у всех выгрузок пультов.
+  ipcMain.handle("hard:xlsx", async (e, name: string, headers: string[], rows: (string | number | null)[][]) => {
+    const w = BrowserWindow.fromWebContents(e.sender);
+    const safe = String(name || "Таблица").replace(/[\\\/:*?"<>|]/g, " ").trim() || "Таблица";
+    const stamp = new Date().toISOString().slice(0, 10);
+    const pick = await dialog.showSaveDialog(w!, { defaultPath: join(app.getPath("downloads"), `${safe} ${stamp}.xlsx`),
+      filters: [{ name: "Книга Excel", extensions: ["xlsx"] }] });
+    if (pick.canceled || !pick.filePath) return { ok: false };
+    try {
+      writeXlsx(pick.filePath, safe, (headers || []).map(String), Array.isArray(rows) ? rows : []);
+    } catch (err) {
+      return { ok: false, text: "Книга не записалась: " + String((err as Error).message || err) };
+    }
+    return { ok: true, file: pick.filePath };
+  });
   ipcMain.handle("hard:copy", (_e, text: string) => { clipboard.writeText(String(text ?? "")); return true; });
+  // Запуск вместе с Windows — свёрнутым к часам (--tray): рассылка книг почтой
+  // работает, только пока пульт запущен, и не должна зависеть от того, открыл
+  // ли его человек после перезагрузки.
+  ipcMain.handle("hard:autostart", (_e, on?: boolean) => {
+    if (typeof on === "boolean") app.setLoginItemSettings({ openAtLogin: on, args: ["--tray"] });
+    return app.getLoginItemSettings({ args: ["--tray"] }).openAtLogin;
+  });
   ipcMain.handle("hard:theme", (e, t: "light" | "dark" | "system") => {
     nativeTheme.themeSource = t;
     writeSettings({ theme: t });

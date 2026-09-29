@@ -3,9 +3,8 @@
 import { esc, n } from "../kit/dom";
 import type { Section } from "../kit/shell";
 import { issueLink } from "./links";
-import { adm, fn, guard, note, sortRows, tableHtml } from "./lib";
-
-let sort = { col: 4, dir: -1 };
+import { DataTable, tupleCols } from "../kit/table";
+import { adm, fn, fnMap, guard, note } from "./lib";
 
 export const today: Section = {
   id: "dash",
@@ -20,18 +19,17 @@ export const today: Section = {
       fn("dashboard.tile_values", d), fn("dashboard.TILES"), fn("dashboard.bars", d), fn("dashboard.silent_note", d),
       fn("dashboard.registry_pairs", d), fn("dashboard.registry_note", d), fn("dashboard.SILENT_COLUMNS"),
     ]);
-    const silentRows: unknown[][] = await Promise.all(((d.silent || []) as any[]).map((r) => fn("dashboard.silent_row", r)));
+    const silentRows = await fnMap<unknown[]>("dashboard.silent_row", ((d.silent || []) as any[]).map((r) => [r]));
     const countries = await Promise.all(((d.countries || []) as any[]).map(async (c) => ({
       c, pairs: await fn("dashboard.country_today_pairs", c), chips: await fn("dashboard.country_outcome_chips", c) })));
     const max = Math.max(1, ...(bars as any[]).map((b) => b.value));
     const draw = () => {
-      const rows = sortRows(silentRows, sort.col, sort.dir);
       root.innerHTML = `
         <div class="kpis">${(TILES as [string, string][]).map(([k, t]) => `<div class="kpi"><b>${esc(tiles[k])}</b><span>${esc(t)}</span></div>`).join("")}</div>
         <div class="days" style="height:84px">${(bars as any[]).map((b, i) => `<div class="day-bar" title="${esc(b.label)}: ${n(b.value)}">
           <i style="height:${Math.max(2, Math.round((b.value / max) * 62))}px;${b.weekend ? "opacity:.45" : ""}${i === bars.length - 1 ? ";background:var(--terra)" : ""}"></i><span>${esc(b.label)}</span></div>`).join("")}</div>
         <div class="section"><div class="section-head"><h2 class="section-title">Сегодня не выехали</h2><span class="section-note">${esc(silentNote)}</span></div>
-          <div id="silent">${tableHtml(cols, rows, { numeric: new Set(["portfolio", "idle"]), pick: true })}</div>
+          <div id="silent"></div>
           <p class="muted" style="font-size:13px">Щелчок по человеку — выдать ему ссылку входа.</p></div>
         <div class="section"><div class="section-head"><h2 class="section-title">Реестр и обогащение</h2></div>
           <div class="kpis">${(regPairs as [string, unknown][]).map(([k, v]) => `<div class="kpi"><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join("")}</div>${note(regNote)}</div>
@@ -40,12 +38,11 @@ export const today: Section = {
             <h3 class="hand" style="font-size:22px;margin:4px 0 8px;font-weight:400">${esc(c.flag || "")} ${esc(c.name)}</h3>
             <div class="kpis">${(pairs as [string, unknown][]).map(([k, v]) => `<div class="kpi"><b style="font-size:22px">${esc(v)}</b><span>${esc(k)}</span></div>`).join("")}</div>
             <div class="flags" style="margin-top:10px">${(chips as string[]).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div></div>`).join("")}</div></div>`;
-      root.querySelectorAll<HTMLElement>("#silent th").forEach((th, i) => th.addEventListener("click", () => {
-        sort = { col: i, dir: sort.col === i ? -sort.dir : -1 }; draw();
-      }));
-      root.querySelectorAll<HTMLElement>("#silent tr[data-key]").forEach((tr) => tr.addEventListener("click", guard(async () => {
-        await issueLink({ employee: tr.dataset.key! });
-      })));
+      new DataTable<unknown[]>(root.querySelector("#silent")!, {
+        id: "analyst-silent", cols: tupleCols(cols, new Set(["portfolio", "idle"])), key: (r) => String(r[0]),
+        exportName: "Не выехали сегодня", onRow: guard(async (r: unknown[]) => { await issueLink({ employee: String(r[0]) }); }),
+        empty: "Сегодня выехали все, у кого есть портфель.",
+      }).setRows(silentRows);
     };
     draw();
   },

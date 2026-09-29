@@ -169,6 +169,29 @@ def request(base_url: str, method: str, path: str, body: dict | None = None, *,
         raise RuntimeError(f"Нет связи с сервером ({e.reason})") from e
 
 
+def download(base_url: str, path: str, *, device_token: str = "", timeout: float = 90,
+             opener=None) -> bytes:
+    """Файл с admin-API (книга Excel для рассылки): те же заголовки и та же
+    проверка https, что у `request`, тело — байтами."""
+    require_https(base_url)
+    urlopen = opener or open_secure
+    req = urllib.request.Request(base_url.strip().rstrip("/") + path, method="GET",
+                                 headers=auth_headers("", device_token))
+    try:
+        with urlopen(req, timeout=timeout) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            raise RuntimeError(DEVICE_REVOKED_TEXT) from e
+        if e.code == 404:
+            raise RuntimeError(f"На сервере нет {path.split('?')[0]} — сервер старой версии?") from e
+        raise RuntimeError(f"Сервер ответил {e.code} на {path.split('?')[0]}") from e
+    except urllib.error.URLError as e:
+        if isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
+            raise RuntimeError(CERT_BAD_TEXT) from e
+        raise RuntimeError(f"Нет связи с сервером ({e.reason})") from e
+
+
 class AdminApi:
     """Адрес и учётные данные в одном месте; `call` — как прежний `Pult.api`."""
 

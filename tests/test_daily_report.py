@@ -130,8 +130,10 @@ def test_xlsx_has_a_row_per_employee_and_a_total():
         assert "Воронка" in wb.sheetnames and "Обещания" in wb.sheetnames
         ws = wb["Сводка"]
         head = [c.value for c in ws[3]]
-        assert head[:5] == ["Сотрудник", "Республика", "Закреплено должников",
-                            "Закреплено договоров", "Отработано сегодня"]
+        # Колонки группами: портфель на сегодня, затем окно дня (29.09.2026).
+        assert head[:6] == ["Сотрудник", "Республика", "Закреплено должников",
+                            "Закреплено договоров", "Долг закреплённый",
+                            "Отработано сегодня"]
         names = [ws.cell(row=r, column=1).value for r in range(4, ws.max_row + 1)]
         assert names[:3] == [EMP_A, EMP_B, EMP_IDLE] and names[-1] == "Итого"
         assert dd.daily_report_filename(T).endswith(".xlsx")

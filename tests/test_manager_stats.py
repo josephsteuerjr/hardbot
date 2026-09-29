@@ -261,7 +261,7 @@ def test_xlsx_is_a_workbook_with_four_sheets(monkeypatch):
     # книга на контуре компании не рассылается, её берут этой кнопкой.
     assert wb.sheetnames == ["Сводка", "Сотрудники", "Республики", "Выезды", "По дням",
                              "Воронка", "Воронка — республики", "Воронка — итого",
-                             "Обещания", "Ранжирование"]
+                             "Обещания", "Ранжирование", "Как читать"]
     ws = wb["Сотрудники"]
     names = [ws.cell(row=r, column=1).value for r in range(4, ws.max_row + 1)]
     assert EMP_A in names and names[-1] == "Итого"

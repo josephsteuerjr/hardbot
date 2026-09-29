@@ -3,6 +3,8 @@
 import { api, hard, type Shell } from "../kit/api";
 import { ago, ask, esc, icon, n, plural, shortDate, toast } from "../kit/dom";
 import type { Section } from "../kit/shell";
+import { DataTable } from "../kit/table";
+import { showIssued } from "../kit/issued";
 import { openPerson, problem, rangeChips, rangeQuery, staleNote, wireRange, type Range } from "./common";
 
 export const promises: Section = {
@@ -15,25 +17,33 @@ export const promises: Section = {
     const r = await api("/api/manager/promises");
     if (!r.ok) { root.innerHTML = problem(r.text || "Не загрузилось"); return; }
     const d = r.data;
-    const emps = (d.employees || []) as any[];
     const t = d.totals || {};
+    // Одна таблица на всех: сотрудник — столбец, по нему и фильтр, и сортировка.
+    const rows = ((d.employees || []) as any[]).flatMap((e) => (e.items as any[]).map((i) => ({ ...i, employee: e.employee })));
+    const after = (i: any) => (i.visited_after_promise ? "ездил" : i.last_visit ? "ездил до обещания" : "не ездил");
     root.innerHTML = `${staleNote(r.stale)}
       <div class="kpis"><div class="kpi accent"><b>${n(t.persons)}</b><span>просрочили обещание</span></div>
         <div class="kpi"><b>${n(t.worked)}</b><span>после обещания уже ездили</span></div>
         <div class="kpi"><b>${n(t.untouched)}</b><span>не трогали</span></div></div>
-      ${emps.map((e) => `<div class="section"><div class="section-head"><h2 class="section-title">${esc(e.employee)}</h2>
-          <span class="section-note">${n(e.items.length)} ${plural(e.items.length, "человек", "человека", "человек")}</span></div>
-        <table class="grid"><thead><tr><th class="l">Должник</th><th>Обещал до</th><th>Просрочка</th><th>Сумма</th><th class="l">После обещания</th></tr></thead>
-        <tbody>${(e.items as any[]).map((i) => `<tr class="pick" data-emp="${esc(e.employee)}" data-rep="${esc(i.rep)}">
-          <td class="l"><span class="who">${esc(i.client)}</span><span class="sub mono">${esc(i.rep)}</span></td>
-          <td>${esc(shortDate(i.promise_date || ""))}</td><td>${n(i.days_overdue)} дн</td><td>${esc(i.money_text || "")}</td>
-          <td class="l">${i.visited_after_promise ? '<span class="tag ok">ездил</span>' : i.last_visit ? '<span class="tag warn">ездил до обещания</span>' : '<span class="tag">не ездил</span>'}</td></tr>`).join("")}</tbody></table></div>`).join("")
-        || '<div class="empty"><b>Просроченных нет</b>Все обещания в срок или оплачены.</div>'}`;
-    root.querySelectorAll<HTMLElement>("tr[data-rep]").forEach((tr) => tr.addEventListener("click", () => {
-      void openPerson(tr.dataset.emp!, tr.dataset.rep!);
-    }));
+      <div class="section" id="prom"></div>`;
+    new DataTable<any>(root.querySelector("#prom")!, {
+      id: "manager-promises", exportName: "Просроченные обещания", key: (i) => `${i.employee}|${i.rep}`,
+      empty: "Все обещания в срок или оплачены.",
+      cols: [
+        { key: "emp", title: "Сотрудник", value: (i) => i.employee },
+        { key: "client", title: "Должник", value: (i) => i.client, html: (i) => `<span class="who">${esc(i.client)}</span><span class="sub mono">${esc(i.rep)}</span>` },
+        { key: "date", title: "Обещал до", value: (i) => i.promise_date || "", html: (i) => esc(shortDate(i.promise_date || "")) },
+        { key: "days", title: "Просрочка, дн", num: true, value: (i) => Number(i.days_overdue) || 0 },
+        { key: "sum", title: "Сумма", num: true, value: (i) => i.money_text || "" },
+        { key: "after", title: "После обещания", value: after,
+          html: (i) => (i.visited_after_promise ? '<span class="tag ok">ездил</span>' : i.last_visit ? '<span class="tag warn">ездил до обещания</span>' : '<span class="tag">не ездил</span>') },
+      ],
+      onRow: (i) => void openPerson(i.employee, i.rep),
+    }).setRows(rows);
   },
 };
+
+const ENTRY = (x: any) => (x.entered ? "вошёл" : x.alive ? "ссылка выдана" : x.code ? "ссылка истекла" : "не выдавали");
 
 export const links: Section = {
   id: "links",
@@ -46,38 +56,61 @@ export const links: Section = {
     if (!r.ok) { root.innerHTML = problem(r.text || "Не загрузилось"); return; }
     const d = r.data;
     const rows = [d.me, ...(d.links as any[])].filter(Boolean);
-    const status = (x: any) => x.entered
-      ? `<span class="tag ok">вошёл · ${n(x.devices || 1)} ${plural(x.devices || 1, "устройство", "устройства", "устройств")}</span>`
-      : x.code ? '<span class="tag warn">ссылка выдана, не открыта</span>' : '<span class="tag">не выдавали</span>';
-    root.innerHTML = `<p class="muted" style="max-width:760px;margin:0 0 14px">Ссылка персональная: перешлите её человеку в личку. Он открывает её на телефоне и сразу попадает в свой портфель. Отозвать — если телефон потерян или человек ушёл.</p>
-      <div>${rows.map((x) => `<div class="list-row" data-emp="${esc(x.employee)}">
-        <div class="grow"><div class="nm">${esc(x.label || x.employee)}</div>
-          <div class="sub">${x.last_use_at ? "последний вход " + esc(ago(x.last_use_at)) : "входов не было"}${x.last_agent ? " · " + esc(x.last_agent) : ""}</div>
-          ${x.url ? `<div class="url" style="margin-top:4px">${esc(x.url)}</div>` : ""}</div>
-        ${status(x)}
-        <button class="btn small" data-issue>${x.code ? "Новая ссылка" : "Выдать вход"}</button>
-        ${x.url ? `<button class="btn small" data-copy="${esc(x.url)}">${icon("copy")}Копировать</button>` : ""}
-        ${x.entered && x.employee !== "!me" ? '<button class="btn small danger" data-revoke>Отозвать</button>' : ""}
-      </div>`).join("")}</div>`;
-    root.querySelectorAll<HTMLElement>(".list-row").forEach((row) => {
-      const emp = row.dataset.emp!;
-      row.querySelector("[data-issue]")?.addEventListener("click", async () => {
-        const res = await api("/api/manager/app_link", undefined, "POST", { employee: emp });
-        if (!res.ok) { toast(res.text || "Не выдалось"); return; }
-        await hard.copy(res.data.url);
-        toast("Ссылка скопирована — перешлите её человеку");
-        void links.render(root, {});
-      });
-      row.querySelector<HTMLButtonElement>("[data-copy]")?.addEventListener("click", async (e) => {
-        await hard.copy((e.currentTarget as HTMLButtonElement).dataset.copy!); toast("Скопировано");
-      });
-      row.querySelector("[data-revoke]")?.addEventListener("click", async () => {
-        if (!(await ask("Отозвать вход?", `«${emp}» выйдет из приложения на телефоне. Новую ссылку можно выдать в любой момент.`, "Отозвать", true))) return;
-        const res = await api("/api/manager/app_revoke", undefined, "POST", { employee: emp });
-        toast(res.ok ? "Вход отозван" : res.text || "Не отозвалось");
-        void links.render(root, {});
-      });
+    root.innerHTML = `<p class="muted" style="max-width:760px;margin:0 0 6px">Ссылка персональная: перешлите её человеку в личку. Он открывает её на телефоне и сразу попадает в свой портфель. Отозвать — если телефон потерян или человек ушёл.</p>
+      <div class="bulk" id="bulk"></div><div id="tbl"></div>`;
+    const table = new DataTable<any>(root.querySelector("#tbl")!, {
+      id: "manager-links", exportName: "Вход команды", key: (x) => x.employee, select: true,
+      cols: [
+        { key: "who", title: "Кто", value: (x) => x.label || x.employee, html: (x) => `<span class="who">${esc(x.label || x.employee)}</span>` },
+        { key: "entry", title: "Вход", value: ENTRY,
+          html: (x) => (x.entered ? `<span class="tag ok">вошёл · ${n(x.devices || 1)} ${plural(x.devices || 1, "устройство", "устройства", "устройств")}</span>`
+            : x.alive ? '<span class="tag warn">ссылка выдана</span>' : x.code ? '<span class="tag">ссылка истекла</span>' : '<span class="tag">не выдавали</span>') },
+        { key: "seen", title: "Последний вход", value: (x) => String(x.last_use_at || "").replace("T", " ").slice(0, 16),
+          html: (x) => (x.last_use_at ? esc(ago(x.last_use_at)) : '<span class="muted">не было</span>') },
+        { key: "url", title: "Ссылка", filter: false, value: (x) => (x.alive ? x.url || "" : ""), html: (x) => (x.alive && x.url ? `<span class="url">${esc(x.url)}</span>` : "") },
+      ],
+      onSelect: () => drawBulk(),
     });
+    const drawBulk = () => {
+      const bar = root.querySelector<HTMLElement>("#bulk")!;
+      const sc = table.scope();
+      const ppl = sc.rows;
+      const lacking = ppl.filter((x) => !x.alive && !x.entered);
+      const live = ppl.filter((x) => x.alive && x.url);
+      const canRevoke = ppl.filter((x) => (x.entered || x.code) && x.employee !== "!me");
+      bar.innerHTML = `<span class="who">Действия — <b>${esc(sc.label)}</b></span>
+        <button class="btn small primary" data-b="issue" ${lacking.length ? "" : "disabled"}>Выдать тем, у кого нет (${lacking.length})</button>
+        <button class="btn small" data-b="reissue" ${ppl.length ? "" : "disabled"}>Выдать заново</button>
+        <button class="btn small" data-b="copy" ${live.length ? "" : "disabled"}>Скопировать живые ссылки (${live.length})</button>
+        <button class="btn small danger" data-b="revoke" ${canRevoke.length ? "" : "disabled"}>Сбросить доступ (${canRevoke.length})</button>
+        <span class="spacer"></span>${sc.picked ? '<button class="link" data-b="clear">снять отметки</button>' : ""}`;
+      const on = (k: string, f: () => Promise<void>) => bar.querySelector(`[data-b="${k}"]`)?.addEventListener("click", () => void f());
+      on("clear", async () => table.clearSelection());
+      const issue = async (list: any[], title: string) => {
+        if (!list.length) return;
+        if (!(await ask(title, `Выдать ссылку ${list.length} чел.? У кого ссылку выдавали, но не открыли, — старая перестанет работать. Кто уже вошёл, из приложения не вылетит.`, "Выдать"))) return;
+        toast("Выдаю ссылки…");
+        const out: any[] = [];
+        for (const x of list) {
+          const res = await api("/api/manager/app_link", undefined, "POST", { employee: x.employee });
+          out.push({ employee: x.label || x.employee, who: "", url: res.ok ? res.data.url : "", uses: res.ok ? res.data.uses : null,
+            expires: res.ok ? String(res.data.expires_at || "").slice(0, 10) : "", error: res.ok ? "" : res.text || "не выдано" });
+        }
+        await links.render(root, {});
+        await showIssued(`Ссылки входа · ${out.length} чел.`, out);
+      };
+      on("issue", () => issue(lacking, "Выдать вход"));
+      on("reissue", () => issue(ppl, "Выдать заново"));
+      on("copy", async () => { await hard.copy(live.map((x) => `${x.label || x.employee} — ${x.url}`).join("\n")); toast(`Скопировано ссылок: ${live.length}`); });
+      on("revoke", async () => {
+        if (!(await ask("Сбросить доступ?", `${canRevoke.length} чел. выйдут из приложения на телефонах, ссылки перестанут работать. Вернуть вход — новой ссылкой.`, "Сбросить", true))) return;
+        let done = 0;
+        for (const x of canRevoke) { const res = await api("/api/manager/app_revoke", undefined, "POST", { employee: x.employee }); if (res.ok) done++; }
+        toast(`Доступ сброшен: ${done} чел.`);
+        await links.render(root, {});
+      });
+    };
+    table.setRows(rows);
   },
 };
 

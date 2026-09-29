@@ -3,8 +3,10 @@
 // с отзывом по одному или всех разом.
 import { ago, ask, esc, n, toast } from "../kit/dom";
 import { closePanel, openPanel, type Section } from "../kit/shell";
-import { issueLink } from "./links";
+import { hard } from "../kit/api";
+import { DataTable, type Col } from "../kit/table";
 import { adm, fn, guard, note } from "./lib";
+import { showIssued } from "./links";
 
 const ROLES: [string, string, string][] = [
   ["manager", "Руководитель", "видит свою команду, выдаёт вход сотрудникам"],
@@ -15,38 +17,103 @@ const ROLE_TITLE = Object.fromEntries(ROLES.map(([k, t]) => [k, t]));
 
 let data: any = null;
 let staff: Record<string, string[]> = {};
+type MRow = { m: any; row: any; link: any; devs: any[] };
+let table: DataTable<MRow> | null = null;
+let devicesKnown = true;
+
+function linkState(l: any): string {
+  if (!l) return "не выдавали";
+  if (l.entered) return "вошёл";
+  if (l.alive) return l.uses ? "ссылка открыта" : "ссылка выдана";
+  return "ссылка истекла";
+}
 
 async function load(root: HTMLElement) {
-  const [d, offices, devices] = await Promise.all([
+  const [d, offices, devices, links] = await Promise.all([
     adm("GET", "/admin/managers"),
     adm("GET", "/admin/employee_cities.json").catch(() => ({})),
     adm("GET", "/admin/manager_devices.json").then((x) => x.devices || []).catch(() => null),
+    adm("GET", "/admin/app_links.json").then((x) => x.links || []).catch(() => []),
   ]);
   data = d;
+  devicesKnown = devices !== null;
   staff = {};
   for (const [emp, city] of Object.entries((offices.cities || {}) as Record<string, string>)) (staff[city] ||= []).push(emp);
-  const rows = await Promise.all(((d.managers || []) as any[]).map(async (m) => ({ m, row: await fn("managers.manager_row", m) })));
+  const linkBy: Record<string, any> = {};
+  for (const l of links as any[]) linkBy[String(l.telegram_id)] = l;
   const devBy: Record<string, any[]> = {};
   for (const x of (devices || []) as any[]) (devBy[String(x.telegram_id)] ||= []).push(x);
+  const rows: MRow[] = await Promise.all(((d.managers || []) as any[]).map(async (m) => ({
+    m, row: await fn("managers.manager_row", m), link: linkBy[String(m.telegram_id)], devs: devBy[String(m.telegram_id)] || [] })));
   root.innerHTML = `${note("Руководитель видит свою команду в пульте и в приложении. Безопасник видит ту же команду и раздел «Контроль» (следы и контрольный обзвон), но ничего не меняет. «Контроль» руководителям не показывается.")}
-    <div class="toolbar" style="margin-top:14px"><span class="spacer"></span><button class="btn primary" data-new>Добавить</button></div>
-    ${rows.map(({ m, row }) => {
-      const devs = devBy[String(m.telegram_id)] || [];
-      const live = devs.filter((x) => !x.revoked_at).length;
-      return `<div class="list-row" data-tid="${esc(m.telegram_id)}">
-        <div class="grow"><div class="nm">${esc(row.name)} <span class="tag" style="margin-left:6px">${esc(ROLE_TITLE[m.role || "manager"] || "Руководитель")}</span>${row.mismatch ? ' <span class="tag err">ФИО ≠ реестру</span>' : ""}</div>
-          <div class="sub">${esc(row.employees)}${row.cities !== "—" ? " · " + esc(row.cities) : ""} · id ${esc(row.tid)}${devices ? ` · пульт на ${n(live)} ${live === 1 ? "компьютере" : "компьютерах"}` : ""}</div></div>
-        <button class="btn small" data-link>Выдать вход</button><button class="btn small" data-edit>Изменить</button></div>`;
-    }).join("") || '<div class="empty"><b>Пока никого</b>Добавьте руководителя кнопкой выше.</div>'}
-    ${devices === null ? '<div class="notice" style="margin-top:14px"><span class="grow">Сервер ещё не обновлён: списка компьютеров с пультом руководителя он не отдаёт.</span></div>' : ""}`;
-  root.querySelector("[data-new]")?.addEventListener("click", guard(async () => {
-    edit(root, null, await fn("managers.next_local_manager_id", d.managers || []), []);
-  }));
-  root.querySelectorAll<HTMLElement>(".list-row[data-tid]").forEach((row) => {
-    const tid = row.dataset.tid!;
-    const m = (d.managers as any[]).find((x) => String(x.telegram_id) === tid);
-    row.querySelector("[data-link]")?.addEventListener("click", guard(() => issueLink({ telegram_id: Number(tid) })));
-    row.querySelector("[data-edit]")?.addEventListener("click", () => edit(root, m, tid, devBy[tid] || []));
+    <div class="bulk" id="bulk" style="margin-top:12px"></div><div id="tbl"></div>
+    ${devicesKnown ? "" : '<div class="notice" style="margin-top:14px"><span class="grow">Сервер ещё не обновлён: списка компьютеров с пультом руководителя он не отдаёт.</span></div>'}`;
+  const cols: Col<MRow>[] = [
+    { key: "name", title: "Руководитель", value: (r) => r.row.name,
+      html: (r) => `<span class="who">${esc(r.row.name)}</span>${r.row.mismatch ? ' <span class="tag err">ФИО ≠ реестру</span>' : ""}<span class="sub">id ${esc(r.row.tid)}</span>` },
+    { key: "role", title: "Роль", value: (r) => ROLE_TITLE[r.m.role || "manager"] || "Руководитель" },
+    { key: "scope", title: "Кого видит", value: (r) => r.row.employees,
+      html: (r) => `${esc(r.row.employees)}${r.row.cities !== "—" ? `<span class="sub">${esc(r.row.cities)}</span>` : ""}` },
+    { key: "entry", title: "Вход", value: (r) => linkState(r.link) },
+    { key: "seen", title: "Последний вход", value: (r) => String(r.link?.last_use_at || "").replace("T", " ").slice(0, 16) },
+    { key: "pc", title: "Компьютеры", num: true, value: (r) => r.devs.filter((x) => !x.revoked_at).length },
+  ];
+  table = new DataTable<MRow>(root.querySelector("#tbl")!, {
+    id: "analyst-managers", cols, key: (r) => String(r.m.telegram_id), select: true, exportName: "Руководители",
+    onRow: (r) => edit(root, r.m, String(r.m.telegram_id), r.devs),
+    onSelect: () => drawBulk(root),
+    empty: "Добавьте руководителя кнопкой «Добавить».",
+  });
+  table.setRows(rows);
+}
+
+function drawBulk(root: HTMLElement) {
+  const bar = root.querySelector<HTMLElement>("#bulk");
+  if (!bar || !table) return;
+  const sc = table.scope();
+  const ms = sc.rows;
+  const lacking = ms.filter((r) => !r.link || (!r.link.alive && !r.link.entered)).length;
+  const live = ms.filter((r) => r.link?.alive && r.link?.url);
+  const withAccess = ms.filter((r) => r.link?.code || r.link?.entered || r.devs.some((x) => !x.revoked_at)).length;
+  bar.innerHTML = `<span class="who">Действия — <b>${esc(sc.label)}</b></span>
+    <button class="btn small primary" data-b="issue" ${lacking ? "" : "disabled"}>Выдать тем, у кого нет (${lacking})</button>
+    <button class="btn small" data-b="reissue" ${ms.length ? "" : "disabled"}>Выдать заново</button>
+    <button class="btn small" data-b="copy" ${live.length ? "" : "disabled"}>Скопировать живые ссылки (${live.length})</button>
+    <button class="btn small danger" data-b="revoke" ${withAccess ? "" : "disabled"}>Сбросить доступ (${withAccess})</button>
+    <span class="spacer"></span>
+    ${sc.picked ? '<button class="link" data-b="clear">снять отметки</button>' : ""}
+    <button class="btn small" data-b="new">Добавить</button>
+    <button class="ticon" data-b="reload" title="Обновить список"><svg viewBox="0 0 18 18" width="15" height="15"><path d="M14.5 8.5a5.5 5.5 0 1 1-1.6-3.9M14.5 2.5v3.6h-3.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></button>`;
+  const on = (k: string, f: () => Promise<void>) => bar.querySelector(`[data-b="${k}"]`)?.addEventListener("click", guard(f));
+  on("clear", async () => table!.clearSelection());
+  on("reload", async () => { await load(root); toast("Обновлено"); });
+  on("new", async () => edit(root, null, await fn("managers.next_local_manager_id", data.managers || []), []));
+  const issue = async (list: MRow[], title: string) => {
+    if (!list.length) return;
+    if (!(await ask(title, `Выдать вход ${list.length} чел.? Ссылку можно открыть два раза: в пульте руководителя на компьютере и на телефоне. У кого ссылку выдавали, но не открыли, — старая перестанет работать.`, "Выдать"))) return;
+    toast("Выдаю ссылки…");
+    // Руководителю — только id: с ФИО сервер привязал бы его к сотруднику.
+    const d = await adm("POST", "/admin/app_links_bulk.json", { items: list.map((r) => ({ telegram_id: r.m.telegram_id })), uses: 2 }, 180);
+    const byId: Record<string, string> = Object.fromEntries(list.map((r) => [String(r.m.telegram_id), r.row.name]));
+    const rows = ((d.results || []) as any[]).map((x) => ({ employee: byId[String(x.telegram_id)] || x.employee || String(x.telegram_id),
+      who: "руководитель", url: x.url || "", uses: x.max_uses, expires: String(x.expires_at || "").slice(0, 10), error: x.error || "" }));
+    table?.clearSelection();
+    await load(root);
+    await showIssued(`Вход руководителям · ${rows.length} чел.`, rows);
+  };
+  on("issue", () => issue(ms.filter((r) => !r.link || (!r.link.alive && !r.link.entered)), "Выдать вход"));
+  on("reissue", () => issue(ms, "Выдать заново"));
+  on("copy", async () => {
+    await hard.copy(live.map((r) => `${r.row.name} — ${r.link.url}`).join("\n"));
+    toast(`Скопировано ссылок: ${live.length}`);
+  });
+  on("revoke", async () => {
+    const ids = ms.map((r) => r.m.telegram_id);
+    if (!(await ask("Сбросить доступ?", `${ids.length} чел. выйдут из приложения на телефонах, их ссылки перестанут работать, пульты на компьютерах отключатся при первом выходе на связь. Вернуть вход — новой ссылкой.`, "Сбросить", true))) return;
+    const d = await adm("POST", "/admin/app_revoke_bulk.json", { telegram_ids: ids, scope: "all" }, 120);
+    toast(`Доступ сброшен: ${d.people} чел.`);
+    table!.clearSelection();
+    await load(root);
   });
 }
 

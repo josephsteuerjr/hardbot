@@ -519,46 +519,66 @@ def visit_in_scope(team: list[str], visit_id: int) -> bool:
 
 
 # --- выгрузка -----------------------------------------------------------------
-def control_xlsx(mgr: dict, team: list[str], rng: dict) -> bytes:
-    """Риск по людям и итоги обзвона одной книгой. Текст со «=» — текстом:
-    комментарий выездника не должен стать формулой у безопасника."""
-    import io
+_RISK_FILL = {"high": "#FAE3E0", "mid": "#FBF0D0", "low": "#E3F2E1"}
+_OUTCOME_FILL = {"confirmed": "#E3F2E1", "paid_elsewhere": "#E3F2E1",
+                 "no_visit": "#FAE3E0", "cash_to_employee": "#FAE3E0"}
+_CONTROL_HELP = {
+    "Выездов": "Сколько выездов сотрудника попало в период.",
+    "Риск": "Балл от 0 до 100: чем выше, тем сильнее выезды сотрудника отличаются "
+            "от выездов его офиса. 50 и выше — высокий, 25–49 — средний.",
+    "Уровень": "Высокий, средний или низкий — по баллу риска.",
+    "Следы": "Из чего сложился балл: доля выездов с признаком у сотрудника и в "
+             "среднем по офису, а также счётчики (наличные в комментариях, повторы).",
+    "Проверено звонком": "Сколько выездов сотрудника уже проверили звонком должнику.",
+    "Не подтвердилось": "Звонок показал «выезда не было» или «отдал деньги сотруднику».",
+    "Почему выбран": "Почему выезд попал в обзвон: случайная выборка или конкретный признак.",
+    "Исход": "Что ответил должник.",
+    "Когда": "Когда внесён результат звонка.",
+}
 
-    import xlsxwriter
+
+def control_xlsx(mgr: dict, team: list[str], rng: dict) -> bytes:
+    """Риск по людям и итоги обзвона одной книгой — в том же облике, что
+    книга статистики (book.py): шапка с подсказками, уровень риска и исход
+    звонка подсвечены, даты — датами. Текст со «=» — текстом: комментарий
+    выездника не должен стать формулой у безопасника."""
+    import book
 
     ov = overview(mgr, team, rng)
-    buf = io.BytesIO()
-    wb = xlsxwriter.Workbook(buf, {"in_memory": True, "strings_to_formulas": False,
-                                   "strings_to_urls": False})
-    head = wb.add_format({"bold": True, "bottom": 1})
-    ws = wb.add_worksheet("Риск")
+    period = f"{rng.get('label') or ''} ({rng['from']} — {rng['to']})".strip()
+    bk = book.Book(_CONTROL_HELP.get)
+    ws = bk.sheet("Риск", tab="main")
+    ws.title(f"Контроль выездов · {period}")
+    ws.title("Балл риска сравнивает сотрудника с его же офисом. Высокий балл — повод "
+             "проверить выезды звонком, а не доказательство. Наведите мышь на "
+             "заголовок — всплывёт пояснение.", italic=True)
     cols = ["Сотрудник", "Офис", "Выездов", "Риск", "Уровень", "Следы",
             "Проверено звонком", "Не подтвердилось"]
-    for c, t in enumerate(cols):
-        ws.write_string(0, c, t, head)
+    head_at = ws.head(cols)
     level = {"high": "высокий", "mid": "средний", "low": "низкий"}
-    for r, row in enumerate(ov["rows"], start=1):
+    kinds = ["text", "text", "int", "int", "text", "text", "int", "int"]
+    wrap = bk.fmt(text_wrap=True, valign="top")
+    for row in ov["rows"]:
         sig = "; ".join(
             f"{s['label']} {round(s['value'] * 100)}% (офис {round(s['peer'] * 100)}%)"
             if "value" in s else f"{s['label']}: {s['n']}" for s in row["signals"])
-        ws.write_string(r, 0, row["employee"])
-        ws.write_string(r, 1, row["office"] or NO_OFFICE_NAME)
-        ws.write_number(r, 2, row["visits"])
-        ws.write_number(r, 3, row["risk"])
-        ws.write_string(r, 4, level[row["level"]])
-        ws.write_string(r, 5, sig)
-        ws.write_number(r, 6, row["checks"]["done"])
-        ws.write_number(r, 7, row["checks"]["no_visit"] + row["checks"]["cash"])
-    ws.set_column(0, 0, 32)
-    ws.set_column(1, 1, 16)
-    ws.set_column(5, 5, 90)
-    ws.freeze_panes(1, 0)
-    ws.autofilter(0, 0, max(1, len(ov["rows"])), len(cols) - 1)
-    ws2 = wb.add_worksheet("Обзвон")
+        at = ws.append([row["employee"], row["office"] or NO_OFFICE_NAME, row["visits"],
+                        row["risk"], level[row["level"]], "",
+                        row["checks"]["done"],
+                        row["checks"]["no_visit"] + row["checks"]["cash"]],
+                       kinds, fills={3: _RISK_FILL[row["level"]],
+                                     4: _RISK_FILL[row["level"]]})
+        ws.ws.write_string(at, 5, sig, wrap)
+    ws.widths((30, 16, 9, 7, 10, 80, 12, 13))
+    ws.autofilter(head_at, ws.row - 1, len(cols))
+    ws.freeze("B4")
+
+    ws2 = bk.sheet("Обзвон", tab="detail")
+    ws2.title(f"Обзвон должников · {period}")
+    ws2.title("Одна строка — один выезд, выбранный для проверки звонком.", italic=True)
     cols2 = ["День", "Сотрудник", "Должник", "Договор", "Почему выбран", "Исход",
              "Заметка", "Когда"]
-    for c, t in enumerate(cols2):
-        ws2.write_string(0, c, t, head)
+    head2 = ws2.head(cols2)
     keys = {db._name_key(e) for e in team}
     checks = [c for c in db.control_checks_between(rng["from"], rng["to"])
               if db._name_key(c.get("employee") or "") in keys]
@@ -572,17 +592,16 @@ def control_xlsx(mgr: dict, team: list[str], rng: dict) -> bytes:
                                   f"WHERE v.id IN ({q})", ids):
                 info[int(v["id"])] = (v["client"] or "", v["contract_id"] or "")
     ordered = sorted(checks, key=lambda x: (x["selected_on"], x.get("employee") or ""))
-    for r, c in enumerate(ordered, start=1):
+    kinds2 = ["date", "text", "text", "text", "text", "text", "text", "datetime"]
+    for c in ordered:
         client, cid = info.get(int(c["visit_id"]), ("", ""))
-        vals = [c["selected_on"], c.get("employee") or "", client, cid,
-                c.get("selected_why") or "",
-                db.CONTROL_OUTCOMES.get(c.get("outcome") or "", ""),
-                c.get("note") or "", c.get("checked_at") or ""]
-        for k, v in enumerate(vals):
-            ws2.write_string(r, k, str(v))
-    ws2.set_column(0, 1, 18)
-    ws2.set_column(2, 2, 30)
-    ws2.set_column(4, 6, 36)
-    ws2.freeze_panes(1, 0)
-    wb.close()
-    return buf.getvalue()
+        outcome = c.get("outcome") or ""
+        ws2.append([c["selected_on"], c.get("employee") or "", client, cid,
+                    c.get("selected_why") or "",
+                    db.CONTROL_OUTCOMES.get(outcome, "") or "не звонили",
+                    c.get("note") or "", c.get("checked_at") or ""],
+                   kinds2, fills={5: _OUTCOME_FILL.get(outcome)})
+    ws2.widths((11, 28, 30, 12, 34, 22, 40, 16))
+    ws2.autofilter(head2, ws2.row - 1, len(cols2))
+    ws2.freeze("C4")
+    return bk.close()

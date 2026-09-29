@@ -433,3 +433,74 @@ table.grid tfoot td { font-weight: 500; border-bottom: 0; border-top: var(--lw) 
   .split { grid-template-columns: 250px minmax(0, 1fr); gap: 0 24px; }
   #head, #view-inner { padding-left: 28px; padding-right: 28px; }
 }
+
+/* ---------------------------------------------------------------- таблица: фильтры и сортировка */
+
+/* Строка инструментов над таблицей — тихая: поиск без рамки до фокуса, счётчик
+   мелко, значки без подложки. Кричит только стоящий фильтр — терракотой. */
+.tbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 4px 0 6px; min-height: 32px; }
+.tbar .spacer { flex: 1; }
+.tsearch {
+  height: 30px; width: 200px; padding: 0 10px 0 28px; border: var(--lw) solid transparent; border-radius: 999px;
+  background: transparent url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 16 16'%3E%3Ccircle cx='7' cy='7' r='5' fill='none' stroke='%23997766' stroke-width='1.5'/%3E%3Cpath d='M11 11l3.5 3.5' stroke='%23997766' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat 9px 50%;
+  font: 400 13.5px/1 var(--sans); color: var(--ink); transition: border-color var(--dur-2) ease, background-color var(--dur-2) ease, width var(--dur-3) var(--ease-out);
+}
+.tsearch::placeholder { color: var(--muted); }
+.tsearch:hover { border-color: var(--line); }
+.tsearch:focus { outline: none; border-color: var(--line-ink); background-color: var(--surface); width: 260px; }
+.tcount { font-size: 12.5px; color: var(--muted); padding: 0 4px; }
+.ticon { width: 30px; height: 30px; border: 0; border-radius: 8px; background: transparent; color: var(--ink-3); display: grid; place-items: center; }
+.ticon:hover { background: var(--ctrl-hover); color: var(--ink); }
+.ftoken {
+  height: 26px; padding: 0 10px; border: var(--lw) solid color-mix(in srgb, var(--terra) 55%, transparent); border-radius: 999px;
+  background: var(--accent-soft); color: var(--ink-2); font: 400 12.5px/1 var(--sans); white-space: nowrap;
+}
+.ftoken span { color: var(--accent); margin-left: 3px; }
+.ftoken:hover { border-color: var(--terra); }
+.ftoken.quiet { background: transparent; border-color: transparent; color: var(--muted); }
+table.dt th .th-in { display: inline-flex; align-items: center; gap: 4px; }
+table.dt th:not(.l) .th-in { flex-direction: row-reverse; }
+table.dt th .th-t { cursor: pointer; }
+table.dt th .th-t:hover { color: var(--ink); }
+.funnel {
+  width: 18px; height: 18px; border: 0; padding: 0; border-radius: 5px; background: transparent; color: var(--muted);
+  display: inline-grid; place-items: center; opacity: 0; transition: opacity var(--dur-2) ease;
+}
+table.dt th:hover .funnel, .funnel:focus-visible { opacity: 1; }
+.funnel:hover { background: var(--ctrl-hover); color: var(--ink); }
+table.dt th.filtered .funnel { opacity: 1; color: var(--accent); }
+table.dt th.filtered .th-t { color: var(--ink); }
+table.dt td.sel, table.dt th.sel { width: 30px; padding-right: 0; }
+table.dt input[type="checkbox"] { accent-color: var(--terra); width: 15px; height: 15px; }
+
+.fpop {
+  position: fixed; z-index: 40; width: 280px; max-height: 420px; display: flex; flex-direction: column;
+  background: var(--paper); border: var(--lw) solid var(--line-ink); border-radius: 16px; box-shadow: var(--shadow-pop);
+  padding: 12px 12px 10px; animation: page-in var(--dur-2) var(--ease-out);
+}
+.fpop-h { font: 400 19px/1.2 var(--hand); letter-spacing: .02em; margin: 0 2px 8px; }
+.fpop-q { height: 32px; margin-bottom: 6px; }
+.fpop-acts { display: flex; gap: 12px; margin: 0 2px 6px; font-size: 12.5px; }
+.fpop-list { overflow: auto; min-height: 0; border-top: var(--lw) solid var(--line); border-bottom: var(--lw) solid var(--line); padding: 4px 0; }
+.fpop-row { display: flex; align-items: center; gap: 8px; padding: 5px 4px; border-radius: 8px; font-size: 13.5px; cursor: pointer; }
+.fpop-row:hover { background: var(--ctrl-hover); }
+.fpop-row input { accent-color: var(--terra); }
+.fpop-row .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fpop-n { font-size: 12px; color: var(--muted); }
+.fpop-range { display: flex; gap: 8px; }
+.fpop-range .input { width: 100%; height: 34px; }
+.fpop-foot { display: flex; align-items: center; margin-top: 10px; font-size: 13px; }
+.fpop-foot .spacer { flex: 1; }
+
+/* Массовые действия: полоса над таблицей, говорит, к кому применится. */
+.bulk { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 0 12px; border-bottom: var(--lw) solid var(--line); margin-bottom: 8px; }
+.bulk .who { font-size: 13.5px; color: var(--ink-2); margin-right: 4px; }
+.bulk .who b { font-weight: 500; color: var(--ink); }
+.bulk .spacer { flex: 1; }
+
+table.dt tbody tr.is-picked { background: var(--accent-soft); }
+
+/* Флажок с подписью и форма «подпись — поле» (рассылка). */
+label.check { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--ink); cursor: pointer; }
+label.check input { accent-color: var(--terra); width: 16px; height: 16px; margin: 0; }
+.form-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 12px 20px; align-items: center; margin-top: 8px; }

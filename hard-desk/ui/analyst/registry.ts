@@ -4,7 +4,8 @@
 import { hard } from "../kit/api";
 import { ask, esc, n, toast } from "../kit/dom";
 import type { Section } from "../kit/shell";
-import { adm, chipsHtml, fn, fnMap, guard, kvHtml, local, note, tableHtml } from "./lib";
+import { DataTable, tupleCols } from "../kit/table";
+import { adm, chipsHtml, fn, fnMap, guard, kvHtml, local, note } from "./lib";
 
 const XLS = [{ name: "Excel", extensions: ["xlsx", "xlsm", "xlsb", "xls"] }];
 const st = {
@@ -298,7 +299,9 @@ async function recalledTab(el: HTMLElement, limit = 500) {
   el.innerHTML = `${note("Кого офис снял с работы колонками отзыва. Договор остаётся в базе со всей историей, но исчезает из приложения выездника. Вернётся, когда офис очистит колонки отзыва и реестр загрузят снова.")}
     <div class="toolbar" style="margin-top:10px"><select class="input" id="r-emp" style="width:300px"><option value="">все сотрудники</option>${(r.employees as string[]).map((x) => `<option ${x === st.recEmp ? "selected" : ""}>${esc(x)}</option>`).join("")}</select>
       <button class="btn small" data-all>Показать все</button></div>
-    ${pairs(r.pairs)}<div style="margin-top:14px">${tableHtml(r.columns, r.rows, { numeric: new Set(["debt"]) })}</div>`;
+    ${pairs(r.pairs)}<div style="margin-top:14px" id="rec-tbl"></div>`;
+  new DataTable<unknown[]>(el.querySelector("#rec-tbl")!, { id: "analyst-recalled", cols: tupleCols(r.columns, new Set(["debt"])),
+    key: (x) => String(x[0]), exportName: "Отозванные договоры" }).setRows(r.rows);
   el.querySelector<HTMLSelectElement>("#r-emp")?.addEventListener("change", (e) => { st.recEmp = (e.target as HTMLSelectElement).value; void recalledTab(el); });
   el.querySelector("[data-all]")?.addEventListener("click", () => void recalledTab(el, 5000));
 }
@@ -354,7 +357,10 @@ async function drawPriority(root: HTMLElement) {
         <input class="input" type="number" data-w="${esc(k)}" value="${pr.weights[k]}" min="0" max="100" style="width:90px">`).join("")}
         <button class="btn primary" data-go>Пересчитать</button></div>
       <div class="flags" style="margin:6px 0 12px">${chips.map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div>
-      ${tableHtml(COLS, rows, { numeric: new Set(["debt", "exp", "visits", "score", "n"]) })}`;
+      <div id="prio-tbl"></div>`;
+    new DataTable<unknown[]>(root.querySelector("#prio-tbl")!, { id: "analyst-priority",
+      cols: tupleCols(COLS, new Set(["debt", "exp", "visits", "score", "n"])), key: (x) => String(x[0]) + String(x[1]),
+      exportName: "Приоритет выезда" }).setRows(rows);
     root.querySelector("[data-go]")?.addEventListener("click", () => {
       root.querySelectorAll<HTMLInputElement>("[data-w]").forEach((i) => { pr.weights[i.dataset.w!] = Number(i.value) || 0; });
       void priority.render(root, {});

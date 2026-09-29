@@ -25,6 +25,7 @@ import threading
 import time
 import traceback
 import uuid
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -208,6 +209,108 @@ def job_state(jid: str) -> dict:
     return {k: job[k] for k in ("id", "kind", "state", "log", "result", "error")}
 
 
+# --- рассылка книг почтой (Outlook через COM) ---------------------------------------------
+# Пульт в трее — и рассылка живёт, пока он запущен. Поток просыпается раз в
+# полминуты, а отправка идёт тем же порядком, что по кнопке «Отправить сейчас».
+_mail_busy = threading.Lock()
+
+
+def _mail_cfg() -> dict:
+    from pult.core import mailer
+    return mailer.config(_settings.get("mail"))
+
+
+def _mail_save(cfg: dict) -> None:
+    with _lock:
+        _settings["mail"] = cfg
+        _settings.save()
+
+
+def mail_state() -> dict:
+    from pult.core import mailer
+    cfg = _mail_cfg()
+    now = datetime.now()
+    return {"config": {k: v for k, v in cfg.items() if k not in ("history", "last")},
+            "books": mailer.BOOKS, "weekdays": mailer.WEEKDAYS,
+            "directions": mailer.DIRECTIONS, "next": mailer.next_run(cfg, now),
+            "history": mailer.history_rows(cfg), "outlook": mailer.outlook_running()}
+
+
+def mail_set(body: dict) -> dict:
+    from pult.core import mailer
+    with _lock:
+        cfg = mailer.clean(body, _settings.get("mail"))
+        _mail_save(cfg)
+    return mail_state()
+
+
+def mail_send(book: str, *, manual: bool, display: bool = False, say=print) -> dict:
+    """Одна книга одним письмом: скачать с сервера, сохранить во временную
+    папку, отдать Outlook. Каждая попытка — в историю."""
+    import tempfile
+    import urllib.parse
+
+    from pult.core import mailer
+    if book not in mailer.BOOKS:
+        raise ValueError("нет такой книги")
+    with _mail_busy:
+        cfg = _mail_cfg()
+        to = [r["email"] for r in cfg.get("recipients") or []]
+        if not to:
+            raise ValueError("Нет получателей")
+        now = datetime.now()
+        today = now.date()
+        name = mailer.file_name(book, cfg, today)
+        try:
+            say(f"Беру книгу «{mailer.BOOKS[book]}» с сервера…")
+            prof = _profile()
+            path = "/admin/stats_book.xlsx?" + urllib.parse.urlencode(mailer.query(book, cfg, today))
+            blob = api_client.download(prof.get("url", ""), path,
+                                       device_token=prof.get("device_token", ""))
+            folder = Path(tempfile.gettempdir()) / "Хард-рассылка"
+            folder.mkdir(exist_ok=True)
+            file = folder / name
+            file.write_bytes(blob)
+            try:
+                summary = mailer.summary_from_book(blob)
+            except Exception:  # noqa: BLE001 — итоги в письме не главное
+                summary = []
+            say("Передаю письмо в Outlook…")
+            mailer.send_outlook(to, mailer.subject(book, cfg, today),
+                                mailer.body_html(book, cfg, today, summary, now),
+                                str(file), display=display)
+        except Exception as exc:  # noqa: BLE001
+            if not display:
+                _mail_save(mailer.remember(_mail_cfg(), book, ok=False, when=now, to=to,
+                                           error=str(exc) or type(exc).__name__,
+                                           file=name, manual=manual))
+            raise
+        if not display:
+            _mail_save(mailer.remember(_mail_cfg(), book, ok=True, when=now, to=to,
+                                       file=name, manual=manual))
+        say("Открыт черновик в Outlook." if display else f"Отправлено: {', '.join(to)}")
+        return {"file": name, "to": to, "shown": display}
+
+
+def _mail_loop() -> None:
+    from pult.core import mailer
+    while True:
+        time.sleep(30)
+        try:
+            cfg = _mail_cfg()
+            for book in mailer.due(cfg, datetime.now()):
+                try:
+                    mail_send(book, manual=False, say=lambda _l: None)
+                except Exception:  # noqa: BLE001 — ошибка уже в истории
+                    # Неудачу тоже считаем попыткой дня: иначе поток бился бы в
+                    # закрытый Outlook каждые полминуты до полуночи.
+                    cfg2 = _mail_cfg()
+                    cfg2["last"] = {**(cfg2.get("last") or {}), book: datetime.now().date().isoformat()}
+                    _mail_save(cfg2)
+        except Exception:  # noqa: BLE001 — поток рассылки не должен умирать
+            traceback.print_exc()
+
+
 # --- HTTP ----------------------------------------------------------------------------------
 def _jsonable(v):
     if isinstance(v, tuple):
@@ -274,6 +377,15 @@ def route(path: str, body: dict):
         return unbind()
     if path == "/job":
         return job_state(str(body.get("id") or ""))
+    if path == "/mail/state":
+        return mail_state()
+    if path == "/mail/set":
+        return mail_set(body)
+    if path == "/mail/send":
+        book = str(body.get("book") or "")
+        display = bool(body.get("display"))
+        return {"job": start_job("mail", lambda say: mail_send(book, manual=True, display=display,
+                                                              say=say))}
     from pult import desk_registry
     return desk_registry.route(path, body, admin=admin, start_job=start_job, settings=_settings)
 
@@ -281,6 +393,7 @@ def route(path: str, body: dict):
 def main() -> None:
     srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     print(f"HARD-BACKEND {srv.server_address[1]} {SECRET}", flush=True)
+    threading.Thread(target=_mail_loop, daemon=True, name="mail").start()
     srv.serve_forever()
 
 

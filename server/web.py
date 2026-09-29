@@ -2627,6 +2627,73 @@ async def _admin_app_revoke(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "revoked": n, "scope": scope})
 
 
+async def _admin_stats_book(request: web.Request) -> web.Response:
+    """GET /admin/stats_book.xlsx — книга статистики на всю команду для пульта
+    аналитика. Нужна рассылке (29.09.2026): пульт в трее забирает книгу и
+    отправляет её гендиректору и заму почтой владельца через Outlook.
+
+    Окно — как у руководителя (preset/shift/from/to); kind=daily — вечерняя
+    книга за день date=; direction=tj|uz — одна республика."""
+    _admin(request)
+    q = request.query
+    direction = (q.get("direction") or "").strip()
+    if direction not in ("", "all", "tj", "uz"):
+        raise web.HTTPBadRequest(text="direction")
+    mgr = digest_data.manager_scope(0, is_owner=True)
+    # Республика — живым составом направления. Добор «кто выезжал в окне»
+    # (window_team) здесь не нужен: он охватил бы и чужую республику.
+    team = (db.employees_by_direction(direction) if direction in ("tj", "uz")
+            else None)
+    if q.get("kind") == "daily":
+        day = (q.get("date") or "").strip() or digest_data.today_iso()
+        if db._as_date(day) is None:
+            raise web.HTTPBadRequest(text="date")
+        team = team if team is not None else digest_data.sorted_employees(mgr)
+        body = await asyncio.to_thread(digest_data.daily_report_xlsx, mgr, day, team)
+        name = f"daily_{day}"
+    else:
+        rng = _stats_range_q(request)
+        if team is None:
+            team = _range_team(mgr, digest_data.sorted_employees(mgr), rng)
+        body = await asyncio.to_thread(
+            functools.partial(digest_data.stats_xlsx, mgr, rng, employees=team))
+        name = f"stats_{rng['from']}_{rng['to']}"
+    db.audit_access(0, "digest_export",
+                    detail=f"admin {name} dir={direction or 'all'} team={len(team)}")
+    return web.Response(
+        body=body,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={name}.xlsx",
+                 "Cache-Control": "no-store"})
+
+
+async def _admin_app_revoke_bulk(request: web.Request) -> web.Response:
+    """Сбросить доступ пачкой: ``{telegram_ids: [...], scope: "all"|"links"}``.
+
+    То же, что /admin/app_revoke, но одним запросом: пульт ходит на сервер через
+    туннель, и по запросу на человека сброс команды из шестидесяти шёл минуту.
+    `all` гасит и ссылки, и телефоны, и компьютеры с пультом руководителя."""
+    _admin(request)
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return web.json_response({"error": "тело не JSON"}, status=400)
+    ids = body.get("telegram_ids") if isinstance(body, dict) else None
+    if not isinstance(ids, list) or len(ids) > APP_LINKS_BULK_MAX:
+        return web.json_response({"error": "нужен список telegram_ids"}, status=400)
+    scope = "links" if str(body.get("scope") or "all") == "links" else "all"
+    revoked = people = 0
+    for raw in ids:
+        try:
+            tid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        revoked += db.revoke_app_access(tid, scope=scope)
+        people += 1
+        db.audit_access(tid, "app_revoke", detail=f"{scope}:bulk")
+    return web.json_response({"ok": True, "people": people, "revoked": revoked, "scope": scope})
+
+
 async def _admin_app_links(request: web.Request) -> web.Response:
     """Состояние входов для раздела «Вход» в пульте: строка на человека.
 
@@ -5970,6 +6037,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/admin/app_revoke", _admin_app_revoke)
     app.router.add_post("/admin/app_link.json", _admin_app_link)
     app.router.add_post("/admin/app_links_bulk.json", _admin_app_links_bulk)
+    app.router.add_post("/admin/app_revoke_bulk.json", _admin_app_revoke_bulk)
+    app.router.add_get("/admin/stats_book.xlsx", _admin_stats_book)
     app.router.add_get("/admin/app_links.json", _admin_app_links)
     app.router.add_post("/api/bind", _bind)
     app.router.add_post("/api/marker", _marker)

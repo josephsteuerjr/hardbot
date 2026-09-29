@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld("hard", {
   shot: (file: string) => ipcRenderer.invoke("hard:shot", file),
   local: (path: string, body?: unknown) => ipcRenderer.invoke("hard:local", path, body),
   pick: (kind: string, opts?: unknown) => ipcRenderer.invoke("hard:pick", kind, opts),
+  xlsx: (name: string, headers: string[], rows: unknown[][]) => ipcRenderer.invoke("hard:xlsx", name, headers, rows),
+  autostart: (on?: boolean) => ipcRenderer.invoke("hard:autostart", on),
   win: (action: string) => ipcRenderer.send("hard:win", action),
   on: (name: "revoked" | "win", cb: (arg?: unknown) => void) => {
     ipcRenderer.on("hard:" + name, (_e, arg) => cb(arg));

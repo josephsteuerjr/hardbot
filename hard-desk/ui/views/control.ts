@@ -4,6 +4,7 @@
 import { api, hard } from "../kit/api";
 import { dayTitle, esc, icon, n, pct, plural, toast } from "../kit/dom";
 import { setHead, type Section } from "../kit/shell";
+import { DataTable } from "../kit/table";
 import { evidenceTag, flagsHtml, officeChips, openPerson, problem, rangeChips, rangeQuery, staleNote, wireRange, type Range } from "./common";
 
 const state = {
@@ -42,21 +43,27 @@ async function renderRisk(root: HTMLElement) {
       <div class="kpi"><b>${n(rows.filter((x) => x.level === "mid").length)}</b><span>средний</span></div>
       <div class="kpi"><b>${n(rows.reduce((s, x) => s + x.checks.done, 0))}</b><span>проверено звонком</span></div>
       <div class="kpi"><b>${n(rows.reduce((s, x) => s + x.checks.no_visit + x.checks.cash, 0))}</b><span>не подтвердилось</span></div></div>
-    <div class="section"><div class="table-wrap"><table class="grid"><thead><tr>
-      <th class="l">Сотрудник</th><th>Выездов</th><th>Риск</th><th class="l">Следы против офиса</th><th>Обзвон</th></tr></thead>
-      <tbody>${rows.map((x) => `<tr class="pick" data-emp="${esc(x.employee)}">
-        <td class="l"><span class="who">${esc(x.employee)}</span><span class="sub">${esc(x.office || "без офиса")}</span></td>
-        <td>${n(x.visits)}</td>
-        <td><span class="risk" data-level="${x.level}" title="${esc(LEVEL[x.level])}"><b>${x.judged ? n(x.risk) : "—"}</b><span class="risk-bar"><i style="width:${x.risk}%"></i></span></span></td>
-        <td class="l" style="white-space:normal"><div class="signals">${x.signals.slice(0, 4).map((s: any) => `<span class="flag${["cash", "callback", "paid"].includes(s.key) ? " strong" : ""}">${signalText(s)}</span>`).join("") || '<span class="muted">следов нет</span>'}</div></td>
-        <td>${x.checks.done ? `${n(x.checks.done)}${x.checks.no_visit + x.checks.cash ? ` <span class="tag err">${n(x.checks.no_visit + x.checks.cash)}</span>` : ""}` : '<span class="muted">—</span>'}</td></tr>`).join("")}</tbody></table></div></div>
+    <div class="section" id="risk-tbl"></div>
     <div class="section"><div class="section-head"><h2 class="section-title">Что значат следы</h2></div>
       <div class="grid2">${(d.legend as any[]).map((l) => `<div class="list-row"><div class="grow"><div class="nm">${esc(l.label)}</div><div class="sub">${esc(l.hint)}</div></div></div>`).join("")}</div>
       <p class="muted" style="font-size:13.5px;max-width:760px;margin-top:14px">Каждый след сам по себе ничего не доказывает: человек сравнивается со своим офисом за то же окно. Подтверждает подозрение только звонок должнику — поэтому рядом контрольный обзвон.</p></div>`;
   wire(root);
-  root.querySelectorAll<HTMLElement>("tr[data-emp]").forEach((tr) => tr.addEventListener("click", () => {
-    state.employee = tr.dataset.emp!; void renderFlags(root);
-  }));
+  new DataTable<any>(root.querySelector("#risk-tbl")!, {
+    id: "control-risk", exportName: "Контроль — риск", key: (x) => x.employee,
+    cols: [
+      { key: "emp", title: "Сотрудник", value: (x) => x.employee, html: (x) => `<span class="who">${esc(x.employee)}</span><span class="sub">${esc(x.office || "без офиса")}</span>` },
+      { key: "office", title: "Офис", value: (x) => x.office || "без офиса" },
+      { key: "visits", title: "Выездов", num: true, value: (x) => x.visits },
+      { key: "risk", title: "Риск", num: true, value: (x) => (x.judged ? x.risk : ""),
+        html: (x) => `<span class="risk" data-level="${x.level}" title="${esc(LEVEL[x.level])}"><b>${x.judged ? n(x.risk) : "—"}</b><span class="risk-bar"><i style="width:${x.risk}%"></i></span></span>` },
+      { key: "level", title: "Уровень", value: (x) => LEVEL[x.level] },
+      { key: "signals", title: "Следы против офиса", filter: false, value: (x) => (x.signals as any[]).map((s) => s.label).join(", "),
+        html: (x) => `<div class="signals" style="white-space:normal">${(x.signals as any[]).slice(0, 4).map((s) => `<span class="flag${["cash", "callback", "paid"].includes(s.key) ? " strong" : ""}">${signalText(s)}</span>`).join("") || '<span class="muted">следов нет</span>'}</div>` },
+      { key: "checks", title: "Обзвон", num: true, value: (x) => x.checks.done,
+        html: (x) => (x.checks.done ? `${n(x.checks.done)}${x.checks.no_visit + x.checks.cash ? ` <span class="tag err">${n(x.checks.no_visit + x.checks.cash)}</span>` : ""}` : '<span class="muted">—</span>') },
+    ],
+    onRow: (x) => { state.employee = x.employee; void renderFlags(root); },
+  }).setRows(rows);
   root.querySelector("[data-xlsx]")?.addEventListener("click", async () => {
     const res = await hard.download("/api/control/export.xlsx", rangeQuery(state.range), `Контроль ${d.range.from}—${d.range.to}.xlsx`);
     if (res.ok && res.file) { toast("Книга сохранена"); void hard.open(res.file); } else if (res.text) toast(res.text);

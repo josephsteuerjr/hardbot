@@ -105,7 +105,9 @@ def test_office_split_of_outcomes():
 def test_blocks_sit_above_their_columns(sheet):
     _wb, ws = sheet
     titles = [c.value for c in ws[3] if c.value]
-    assert titles == ["Успешный выезд", "Не успешный выезд", "Прочие исходы"]
+    # Сперва подписи базовых колонок (29.09.2026), затем три блока исходов.
+    assert titles == ["Выезды и план", "Проверка выезда", "Деньги",
+                      "Успешный выезд", "Не успешный выезд", "Прочие исходы"]
     head = _head(ws)
     first_success = head["Успешный выезд: всего, чел."]
     assert ws.cell(row=3, column=first_success).value == "Успешный выезд"

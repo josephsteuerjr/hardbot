@@ -90,6 +90,7 @@ const I: Record<string, string> = {
   channels: '<path d="M3 5.5h12M3 9h12M3 12.5h7"/>',
   service: '<circle cx="9" cy="9" r="2.4"/><path d="M9 1.8v2M9 14.2v2M1.8 9h2M14.2 9h2M3.9 3.9l1.4 1.4M12.7 12.7l1.4 1.4M3.9 14.1l1.4-1.4M12.7 5.3l1.4-1.4"/>',
   today: '<circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/>',
+  mail: '<rect x="2" y="3.5" width="14" height="11" rx="1.8"/><path d="m2.6 4.6 6.4 5 6.4-5"/>',
 };
 
 export function icon(name: string, size = 18): string {
