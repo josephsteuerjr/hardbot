@@ -35,6 +35,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -1184,9 +1185,20 @@ def _excel_safe(value):
     if not isinstance(value, str):
         return value
     v = value[:_EXCEL_CELL_LIMIT]
-    if excel_formula_like(v):
+    if excel_formula_like(v) or excel_digits_lossy(v):
         return "'" + v
     return v
+
+
+def excel_digits_lossy(value) -> bool:
+    """Строка из одних цифр, которую Excel при вводе превратил бы в число С
+    ПОТЕРЕЙ: ведущие нули («0012345» → 12345) или больше 15 цифр (точность
+    Excel — 15 знаков, «8600123412341234» → 8600123412341230). Опыт A/B
+    30.09.2026: такой комментарий книга хранит числом, повторная сверка плана
+    не сходится, а в ячейке остаётся искажённое значение."""
+    t = value.strip() if isinstance(value, str) else ""
+    return t.isdigit() and t.isascii() and (
+        (len(t) > 1 and t[0] == "0") or len(t) > 15)
 
 
 # --- Занятая книга -----------------------------------------------------------
@@ -1339,7 +1351,8 @@ def open_for_write(app, path: str | Path):
     return wb
 
 
-def backup_copy(path: Path, root: str | Path | None = None) -> Path:
+def backup_copy(path: Path, root: str | Path | None = None,
+                source: Path | None = None) -> Path:
     """Копия «Имя (до обогащения 13.07.2026 14-05).xlsb». Откат = переименовать.
 
     root — корень для копий. Без него копия ложится рядом с книгой, как раньше.
@@ -1366,7 +1379,9 @@ def backup_copy(path: Path, root: str | Path | None = None) -> Path:
     while dst.exists():
         dst = folder / f"{path.stem} (до обогащения {stamp}, {n}){path.suffix}"
         n += 1
-    shutil.copy2(path, dst)
+    # source — нетронутая локальная копия той же книги (способ «local»):
+    # байты те же, что на шаре до записи, а второе чтение по сети не нужно.
+    shutil.copy2(source or path, dst)
     return dst
 
 
@@ -1379,10 +1394,45 @@ def _co_init():
         pass
 
 
+def _com_value(value):
+    """Значение для записи напрямую через COM — ровно то, что сделал бы
+    `xw.Range.value = …`: `_excel_safe` и даты через преобразователь самого
+    xlwings. Наивный datetime pywin32 считает местным временем и сдвигает на
+    часовой пояс: 30.09 легло бы как 29.09 20:00 (опыт 30.09.2026)."""
+    value = _excel_safe(value)
+    if isinstance(value, date):
+        from xlwings._xlwindows import _datetime_to_com_time
+        if not isinstance(value, datetime):
+            value = datetime(value.year, value.month, value.day)
+        return _datetime_to_com_time(value)
+    return value
+
+
+def _write_cells(ws, writes, log=lambda s: None, name: str = "") -> int:
+    """Записать план по ячейке, но напрямую через COM, мимо обёрток xlwings.
+
+    Опыт 30.09.2026 на книге формата выездника (593 записи): через
+    `ws.range(...).value` — 9,9 с (16,7 мс на ячейку), напрямую
+    `Cells(r, c).Value` — 1,1 с. Отрезки через xlwings ещё медленнее (117 мс на
+    вызов), через COM — не быстрее поштучной записи: записи в книге выездника
+    редкие и короткие. Значения — те же (`_com_value`); повтор той же ячейки —
+    побеждает последний, как при записи по порядку."""
+    cells: dict[tuple[int, int], object] = {}
+    for r, c, val, _is_date in writes:
+        cells[(r, c)] = val
+    api_cells = ws.api.Cells
+    for i, ((r, c), val) in enumerate(cells.items(), 1):
+        api_cells(r + 1, c + 1).Value = _com_value(val)
+        if i % 500 == 0:
+            log(f"{name}: пишу {i} / {len(cells)}…")
+    return len(cells)
+
+
 def _enrich_workbook(app, path: Path, fields: list[dict], rows: list[dict],
                      log=lambda s: None, since=None, until=None,
                      backup_root=None, ledger=None,
-                     server_authoritative: bool = False, decisions=None) -> dict:
+                     server_authoritative: bool = False, decisions=None,
+                     batch: bool = False) -> dict:
     """Один файл в уже открытом Excel: книга свободна? → лист → план → бэкап →
     точечная запись → сохранить тем же форматом. Возвращает план +
     backup/sheet/file.
@@ -1408,10 +1458,13 @@ def _enrich_workbook(app, path: Path, fields: list[dict], rows: list[dict],
             # бэкап — только когда реально есть что писать (файл на диске ещё
             # не изменён: Excel не сохранял); нет записей — нет мусорных копий
             plan["backup"] = str(backup_copy(path, backup_root))
-            for i, (r, c, val, _is_date) in enumerate(writes, 1):
-                ws.range((r + 1, c + 1)).value = _excel_safe(val)
-                if i % 200 == 0:
-                    log(f"{path.name}: пишу {i} / {len(writes)}…")
+            if batch:
+                _write_cells(ws, writes, log, path.name)
+            else:
+                for i, (r, c, val, _is_date) in enumerate(writes, 1):
+                    ws.range((r + 1, c + 1)).value = _excel_safe(val)
+                    if i % 200 == 0:
+                        log(f"{path.name}: пишу {i} / {len(writes)}…")
             wb.save()
         plan["sheet"] = ws.name
         plan["file"] = str(path)
@@ -1547,6 +1600,7 @@ def _enrich_with_evidence(
     ledger=None,
     server_authoritative: bool = False,
     decisions=None,
+    batch: bool = False,
 ) -> dict:
     """Run the existing writer, then reopen and prove a zero second plan."""
 
@@ -1557,7 +1611,7 @@ def _enrich_with_evidence(
     pre_sha = _sha256_file(path)
     plan = _enrich_workbook(app, path, fields, rows, log, since, until, backup_root,
                             ledger=ledger, server_authoritative=server_authoritative,
-                            decisions=decisions)
+                            decisions=decisions, batch=batch)
     post_sha = _sha256_file(path)
     backup_raw = plan.get("backup")
     backup_path = Path(backup_raw).resolve() if backup_raw else None
@@ -1630,6 +1684,184 @@ def _enrich_with_evidence(
     return plan
 
 
+class BookChangedDuringRun(RuntimeError):
+    """Книгу на шаре изменили или открыли, пока шло обогащение: не записано."""
+
+
+# Способы записи личных книг. «share» — как было до 30.09.2026: Excel открывает
+# книгу прямо на шаре, пишет по ячейке, сохраняет туда же и открывает ещё раз
+# для проверки. «share+batch» — то же, но запись отрезками. «local» — книга
+# один раз читается с шары в локальную папку, Excel работает с копией (запись
+# отрезками, сохранение, повторное открытие и нулевой второй план — всё
+# локально), и только проверенный файл заменяет книгу на шаре — если за это
+# время её никто не открыл и не изменил.
+ENGINES = ("share", "share+batch", "local")
+_REPLACE_RETRIES = (0.2, 0.5, 1.0)
+
+
+def _replace_on_share(src: Path, dst: Path) -> None:
+    """Проверенный файл — на место книги: копия рядом под служебным именем и
+    переименование поверх (так сохраняет и сам Excel). Книгу держат открытой —
+    Windows переименование не даст, служебную копию убираем."""
+    tmp = dst.with_name(f"~hard-{os.getpid()}-{dst.stem[:40]}.tmp")
+    try:
+        shutil.copyfile(src, tmp)
+        for i, pause in enumerate((0.0, *_REPLACE_RETRIES)):
+            if pause:
+                time.sleep(pause)
+            try:
+                os.replace(tmp, dst)
+                return
+            except PermissionError:
+                if i == len(_REPLACE_RETRIES):
+                    raise
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def _enrich_local(
+    app,
+    path: Path,
+    fields: list[dict],
+    rows: list[dict],
+    log=lambda s: None,
+    since=None,
+    until=None,
+    backup_root=None,
+    ledger=None,
+    server_authoritative: bool = False,
+    decisions=None,
+    work_dir=None,
+    before_commit=None,
+) -> dict:
+    """Способ «local»: тот же план, те же доказательства, но Excel — локально.
+
+    Порядок: книга свободна → один раз прочитать байты с шары (pre_sha) →
+    две локальные копии (нетронутая и рабочая) → Excel открывает рабочую,
+    строит план и пишет отрезками → сохранить → открыть заново и получить
+    нулевой второй план → копия «до обогащения» из нетронутой → книга на шаре
+    всё ещё та же и никем не открыта → заменить → хэш на шаре = хэш рабочей.
+    Всё, что ломается ДО замены, оставляет книгу на шаре нетронутой.
+    """
+    raw_path = Path(path)
+    if raw_path.is_symlink() or not raw_path.is_file():
+        raise FileNotFoundError(f"нужен обычный Excel-файл: {raw_path}")
+    path = raw_path.resolve()
+    assert_writable(path)
+    st0 = os.stat(path)
+    blob = _read_regular_bytes(path, label="книга")
+    pre_sha = hashlib.sha256(blob).hexdigest()
+    folder = Path(tempfile.mkdtemp(prefix="hard-enr-", dir=work_dir))
+    try:
+        pristine = folder / "src" / path.name
+        work = folder / path.name
+        pristine.parent.mkdir()
+        pristine.write_bytes(blob)
+        os.utime(pristine, ns=(st0.st_atime_ns, st0.st_mtime_ns))
+        work.write_bytes(blob)
+        wb = app.books.open(str(work))
+        try:
+            ws, grid = _workbook_grid(wb, fields)
+            plan = build_plan(grid, fields, rows, since, until,
+                              ledger=ledger, server_authoritative=server_authoritative,
+                              decisions=decisions)
+            writes = plan["writes"]
+            if writes:
+                _write_cells(ws, writes, log, path.name)
+                wb.save()
+            plan["sheet"] = ws.name
+        finally:
+            wb.close()
+        plan["file"] = str(path)
+        plan["backup"] = None
+        backup_path = backup_sha = None
+        if not writes:
+            # Писать нечего — шару не трогаем. Хэш после — честный, с шары:
+            # если книгу за это время изменили, zero-write контракт это покажет.
+            post_sha = _sha256_file(path)
+            if post_sha != pre_sha:
+                raise RuntimeError(f"{path.name}: zero-write contract нарушен")
+            post_plan = build_plan(grid, fields, rows, since, until, ledger=ledger,
+                                   server_authoritative=server_authoritative,
+                                   decisions=decisions)
+        else:
+            post_plan = _plan_workbook(app, work, fields, rows, since, until,
+                                       ledger=ledger,
+                                       server_authoritative=server_authoritative,
+                                       decisions=decisions)
+            if post_plan["cells_written"] or post_plan["changed_cases"]:
+                raise RuntimeError(f"{path.name}: повторный enrichment plan не нулевой "
+                                   "— на шару ничего не записано")
+            work_sha = _sha256_file(work)
+            backup_path = backup_copy(path, backup_root, source=pristine).resolve()
+            backup_sha = _sha256_file(backup_path)
+            if backup_sha != pre_sha:
+                raise RuntimeError(f"{path.name}: копия «до обогащения» не совпала с "
+                                   "книгой — на шару ничего не записано")
+            plan["backup"] = str(backup_path)
+            if before_commit:
+                before_commit(path)
+            owner = workbook_busy_owner(path)
+            if owner is not None:
+                raise BookChangedDuringRun(_busy_reason(path, owner))
+            if _sha256_file(path) != pre_sha:
+                raise BookChangedDuringRun(
+                    f"{path.name}: книгу изменили, пока шло обогащение — ничего не "
+                    "записано; прогони заново")
+            try:
+                _replace_on_share(work, path)
+            except PermissionError as e:
+                raise BookChangedDuringRun(
+                    f"{path.name}: книгу открыли, пока шло обогащение — ничего не "
+                    "записано; прогони заново") from e
+            try:
+                post_sha = _sha256_file(path)
+            except Exception as e:  # noqa: BLE001 — записано, но не проверено
+                raise WrittenButUnverified(
+                    path=str(path), pre_sha256=pre_sha, post_sha256=None,
+                    backup_path=str(backup_path), backup_sha256=backup_sha,
+                    cells_written=plan["cells_written"],
+                    displaced=plan.get("displaced") or [],
+                    ledger_entries=plan.get("ledger_entries") or [],
+                    conflicts=plan.get("conflicts") or [],
+                    office_edits=plan.get("office_edits") or [],
+                    resolved=plan.get("resolved") or [],
+                    reason=str(e)) from e
+            if post_sha != work_sha:
+                raise WrittenButUnverified(
+                    path=str(path), pre_sha256=pre_sha, post_sha256=post_sha,
+                    backup_path=str(backup_path), backup_sha256=backup_sha,
+                    cells_written=plan["cells_written"],
+                    displaced=plan.get("displaced") or [],
+                    ledger_entries=plan.get("ledger_entries") or [],
+                    conflicts=plan.get("conflicts") or [],
+                    office_edits=plan.get("office_edits") or [],
+                    resolved=plan.get("resolved") or [],
+                    reason="файл на шаре после замены не совпал с проверенной копией")
+        if (
+            post_plan["filled_contract_ids"] != plan["filled_contract_ids"]
+            or post_plan["matched_contract_ids"] != plan["matched_contract_ids"]
+            or post_plan["missing"] != plan["missing"]
+        ):
+            raise RuntimeError(f"{path.name}: coverage изменился после сохранения")
+        plan.update({
+            "path": str(path),
+            "pre_sha256": pre_sha,
+            "post_sha256": post_sha,
+            "backup_path": str(backup_path) if backup_path is not None else None,
+            "backup_sha256": backup_sha,
+            "errors": [],
+            "post_plan": _plan_summary(post_plan),
+            "engine": "local",
+        })
+        return plan
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def enrich_file(path: str | Path, fields: list[dict], rows: list[dict],
                 log=lambda s: None, since=None, until=None,
                 backup_root=None, ledger=None,
@@ -1656,7 +1888,9 @@ def enrich_file(path: str | Path, fields: list[dict], rows: list[dict],
 def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
                 since=None, until=None, backup_root=None,
                 receipt_dir=None, ledger=None, on_delivered=None,
-                server_authoritative: bool = False, decisions=None) -> list[dict]:
+                server_authoritative: bool = False, decisions=None,
+                engine: str = "share", work_dir=None,
+                before_commit=None) -> list[dict]:
     """Обогатить личные реестры пачкой, одной сессией Excel.
     jobs: [{employee, path, rows}] — каждому файлу свои строки (его кейсы).
     Ошибка одного файла не валит остальные: в результат кладётся {..., error}.
@@ -1682,6 +1916,8 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
     # Окно разбираем ДО открытия Excel: неразобранная граница должна остановить
     # прогон, а не тихо превратиться в «без границы».
     visit_window(since, until)
+    if engine not in ENGINES:
+        raise ValueError(f"неизвестный способ записи: {engine!r}")
 
     results: list[dict] = []
     attempted: set[int] = set()
@@ -1695,13 +1931,26 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
                 log(f"[{i}/{len(jobs)}] {job['employee']} — {path.name}…")
                 attempted.add(i)
                 try:
-                    plan = _enrich_with_evidence(
-                        app, path, fields, job["rows"], log,
-                        since, until, backup_root,
-                        ledger=ledger,
-                        server_authoritative=server_authoritative,
-                        decisions=decisions,
-                    )
+                    if engine == "local":
+                        plan = _enrich_local(
+                            app, path, fields, job["rows"], log,
+                            since, until, backup_root,
+                            ledger=ledger,
+                            server_authoritative=server_authoritative,
+                            decisions=decisions, work_dir=work_dir,
+                            before_commit=before_commit,
+                        )
+                    else:
+                        # batch — только когда он выбран: прежний вызов остаётся
+                        # прежним до буквы (на нём держатся заглушки тестов).
+                        extra = {"batch": True} if engine == "share+batch" else {}
+                        plan = _enrich_with_evidence(
+                            app, path, fields, job["rows"], log,
+                            since, until, backup_root,
+                            ledger=ledger,
+                            server_authoritative=server_authoritative,
+                            decisions=decisions, **extra,
+                        )
                 except WrittenButUnverified as e:
                     # Записано, но не проверено. НЕ откатывать. Ключ error нужен,
                     # иначе отчёт посчитает такую книгу успехом и покажет

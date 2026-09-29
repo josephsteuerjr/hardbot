@@ -118,6 +118,9 @@ def host_of(url: str) -> str:
         return "—"
 
 
+GZIP_BODY_FROM = 64 * 1024     # байт JSON, с которых тело запроса сжимается
+
+
 def request(base_url: str, method: str, path: str, body: dict | None = None, *,
             key: str = "", device_token: str = "", timeout: float = 20,
             opener=None):
@@ -137,8 +140,17 @@ def request(base_url: str, method: str, path: str, body: dict | None = None, *,
     urlopen = opener or open_secure
     url = base_url.strip().rstrip("/") + path
     data = json.dumps(body).encode() if body is not None else None
+    # Крупное тело — сжатым (опыт 30.09.2026): реестр на 50 тыс. строк — это
+    # 45–57 МБ JSON, и предпросмотр с применением гнали его по туннелю дважды;
+    # в gzip — 3–6 МБ. aiohttp распаковывает тело сам и лимит client_max_size
+    # меряет по распакованному — «бомба» не пройдёт.
+    gz = data is not None and len(data) > GZIP_BODY_FROM
+    if gz:
+        data = gzip.compress(data, 6)
     req = urllib.request.Request(url, data=data, method=method,
                                  headers=auth_headers(key, device_token))
+    if gz:
+        req.add_header("Content-Encoding", "gzip")
     # Просим сжатие: контур компании опубликован через туннель, и несжатая
     # выгрузка базы шла по нему минуты вместо секунд.
     req.add_header("Accept-Encoding", "gzip")
