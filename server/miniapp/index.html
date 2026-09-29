@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<meta name="theme-color" content="#FAF9F5">
+<meta name="theme-color" content="#f4e4cf">
 <title>Хард</title>
 <!-- Манифест PWA подключается СКРИПТОМ, а не статичным <link>: Safari скачивает
      манифест при загрузке страницы (до входа) и при «На экран Домой» его не
@@ -37,9 +37,8 @@
 <link rel="apple-touch-icon" href="/vendor/icon-192.png">
 <!-- Telegram SDK — локально (same-origin), чтобы приложение поднималось в оффлайне. -->
 <script src="/vendor/telegram-web-app.js"></script>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="preload" href="/fonts/golos-cyr.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/hand-cyr.woff2" as="font" type="font/woff2" crossorigin>
 <!-- Карт-библиотеки грузятся лениво, но только с нашего origin. Внешние CDN на
      мобильной сети Узбекистана обрывались и оставляли пустую карту. -->
 <script>
@@ -49,10 +48,37 @@ if("serviceWorker" in navigator){
 }
 </script>
 <style>
+/* Облик «Почерк» Hélène (оболочка v60): тёплая бумага с зерном, линия пером,
+   терракота, заголовки почерком Zen Kurenaido, текст Golos. Одна поверхность:
+   списки отбиты линиями, а не россыпью белых карточек. Шрифты свои (/fonts/),
+   без внешних CDN — оболочка поднимается и без сети. Светлая тема одна:
+   выездник работает на солнце. Зерно — под содержимым (z-index:-1 в
+   контексте body: body — position:fixed). */
+@font-face{font-family:"Golos Text";font-weight:400 900;font-display:swap;src:url(/fonts/golos-cyr.woff2) format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
+@font-face{font-family:"Golos Text";font-weight:400 900;font-display:swap;src:url(/fonts/golos-ext.woff2) format("woff2");unicode-range:U+0460-052F,U+1C80-1C8A,U+20B4,U+2DE0-2DFF,U+A640-A69F,U+FE2E-FE2F}
+@font-face{font-family:"Golos Text";font-weight:400 900;font-display:swap;src:url(/fonts/golos-lat.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+@font-face{font-family:"Zen Kurenaido";font-weight:400;font-display:swap;src:url(/fonts/hand-cyr.woff2) format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
+@font-face{font-family:"Zen Kurenaido";font-weight:400;font-display:swap;src:url(/fonts/hand-lat.woff2) format("woff2");unicode-range:U+0000-00FF,U+2000-206F,U+20AC,U+2116}
+@font-face{font-family:"PT Mono";font-weight:400;font-display:swap;src:url(/fonts/mono-cyr.woff2) format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
+@font-face{font-family:"PT Mono";font-weight:400;font-display:swap;src:url(/fonts/mono-lat.woff2) format("woff2");unicode-range:U+0000-00FF,U+2000-206F,U+20AC}
 :root{
-  --bg:#FAF9F5; --card:#FFFFFF; --alt:#F5F4ED; --border:#E6E2D9;
-  --text:#2B2825; --muted:#6B6660; --accent:#36332E; --accent2:#46423B;
-  --success:#5B8A3C; --danger:#B0472C; --navblue:#2F6FED;
+  --paper:#f4e4cf;
+  --bg:var(--paper);
+  --card:color-mix(in srgb,var(--paper) 55%,#ffffff);
+  --alt:color-mix(in srgb,var(--paper) 88%,#a07a4a);
+  --border:rgba(29,26,23,.14);
+  --line-ink:#997766;
+  --text:#1d1a17; --text2:#4a4038; --muted:#6e5f4f; --faint:#9a8a76;
+  --terra:#e0915a; --accent:#1d1a17; --accent2:#9a4a1e; --link:#9a4a1e;
+  --tint:color-mix(in srgb,#e0915a 20%,transparent);
+  --success:#4f7a4a; --danger:#b0402b; --warn:#9a6a1b; --navblue:#2f6fed;
+  --grain:.08;
+  --hand:"Zen Kurenaido","Neucha","Segoe Print",cursive;
+  --sans:"Golos Text",-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:"PT Mono",Consolas,monospace;
+  --lw:1.5px;
+  --dur-1:90ms; --dur-2:140ms; --dur-3:220ms;
+  --ease-out:cubic-bezier(.22,1,.36,1);
   --app-height:100vh;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -60,58 +86,72 @@ html{width:100%;height:100%;overflow:hidden;overscroll-behavior:none;background:
 body{position:fixed;top:0;left:0;right:0;width:100%;height:var(--app-height);margin:0;
   overflow:hidden;overscroll-behavior:none;background:var(--bg);color:var(--text);
   display:flex;flex-direction:column;
-  font-family:'Inter',-apple-system,'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.45}
+  font-family:var(--sans);font-size:15.5px;line-height:1.45;
+  -webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+/* Зерно бумаги — неподвижно и под всем, без смешения слоёв: на дешёвых
+   телефонах смешение над бегущим списком стоило бы кадров. */
+body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:var(--grain);
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .42 0 0 0 0 .3 0 0 0 0 .18 0 0 0 .9 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
 button,a,input,select,textarea,.pcard{touch-action:manipulation}
-  .warnfld{border:1px solid #B0472C;border-radius:10px;padding:10px 12px;color:#B0472C;font-size:13px;line-height:1.35;margin-bottom:10px}
+button{font-family:inherit}
+a{color:var(--link)}
+  .warnfld{border:var(--lw) solid var(--danger);border-radius:14px;padding:10px 12px;color:var(--danger);font-size:13px;line-height:1.35;margin-bottom:10px}
   /* Нативный select остаётся в DOM (по нему читают форму), но не показывается. */
   .nativesel{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
-  .pick{display:block;width:100%;text-align:left;padding:13px 14px;margin-bottom:10px;
-    border:1px solid var(--border);border-radius:10px;background:#fff;color:var(--muted);
-    font-size:15px;line-height:1.2}
-  .pick.has{color:var(--text);font-weight:600}
-  .pick:after{content:"⌄";float:right;color:var(--muted)}
+  .pick{display:block;width:100%;text-align:left;padding:14px 16px;margin-bottom:10px;
+    border:var(--lw) solid var(--line-ink);border-radius:16px;background:var(--card);color:var(--muted);
+    font-size:15.5px;line-height:1.2}
+  .pick.has{color:var(--text);font-weight:500}
+  .pick:after{content:"";float:right;width:8px;height:8px;margin:3px 4px 0 0;border-right:var(--lw) solid var(--line-ink);
+    border-bottom:var(--lw) solid var(--line-ink);transform:rotate(45deg)}
   .picksheet{position:fixed;inset:0;z-index:60;display:flex;align-items:flex-end}
   .wheelwrap{display:flex;gap:10px;padding:10px 14px}
   .wheel{flex:1;height:180px;overflow-y:auto;scroll-snap-type:y mandatory;
-    -webkit-overflow-scrolling:touch;position:relative;border-radius:10px;
+    -webkit-overflow-scrolling:touch;position:relative;border-radius:14px;
     touch-action:pan-y}
   .wheelitem{height:44px;line-height:44px;text-align:center;scroll-snap-align:center;
     color:var(--muted);font-size:16px}
-  .wheelitem.on{color:var(--text);font-weight:700}
+  .wheelitem.on{color:var(--text);font-weight:600}
   .wheelpad{height:68px}
   .wheelband{position:absolute;left:14px;right:14px;top:calc(50% - 22px);height:44px;
-    pointer-events:none;border-top:1px solid var(--border);
-    border-bottom:1px solid var(--border);background:var(--alt);opacity:.35;
-    border-radius:8px}
+    pointer-events:none;border-top:var(--lw) solid var(--line-ink);
+    border-bottom:var(--lw) solid var(--line-ink);background:var(--tint);opacity:.6;
+    border-radius:10px}
   .wheelhead{position:relative}
   .datechips{display:flex;gap:8px;padding:0 14px 10px;flex-wrap:wrap}
-  .datechip{border:1px solid var(--border);border-radius:16px;background:#fff;
+  .datechip{border:var(--lw) solid var(--line-ink);border-radius:999px;background:transparent;
     padding:8px 14px;font-size:14px;color:var(--text)}
-  .pickbg{position:absolute;inset:0;background:rgba(0,0,0,.35)}
-  .pickbody{position:relative;width:100%;max-height:70vh;overflow:auto;background:#fff;
-    border-radius:14px 14px 0 0;padding:8px}
+  .pickbg{position:absolute;inset:0;background:color-mix(in srgb,#1d1a17 38%,transparent);animation:fadein var(--dur-2) ease}
+  .pickbody{position:relative;width:100%;max-height:72vh;overflow:auto;background:var(--paper);
+    border-radius:22px 22px 0 0;border-top:var(--lw) solid var(--line-ink);padding:10px 8px calc(8px + env(safe-area-inset-bottom,0px));
+    box-shadow:0 -10px 40px rgba(29,26,23,.18);animation:sheetin var(--dur-3) var(--ease-out)}
+  .pickbody:before{content:"";display:block;width:38px;height:4px;border-radius:2px;background:var(--line-ink);opacity:.5;margin:2px auto 8px}
   .pickrow{display:block;width:100%;text-align:left;padding:16px 14px;border:0;
-    background:none;font-size:16px;border-bottom:1px solid var(--border);color:var(--text)}
+    background:none;font-size:16px;border-bottom:var(--lw) solid var(--border);color:var(--text)}
   .pickrow:last-child{border-bottom:0}
-  .pickrow.on{font-weight:700;background:var(--alt)}
+  .pickrow.on{font-weight:600;background:var(--tint);border-radius:12px}
+@keyframes sheetin{from{transform:translate3d(0,100%,0)}to{transform:none}}
+@keyframes fadein{from{opacity:0}to{opacity:1}}
+@keyframes lift{from{opacity:0;transform:translate3d(0,4px,0)}to{opacity:1;transform:none}}
 .ico{display:inline-flex;flex:0 0 auto;width:18px;height:18px}
 .ico svg{width:100%;height:100%;display:block}
 .bar{display:flex;align-items:center;justify-content:space-between;
-  padding:12px 14px;border-bottom:1px solid var(--border);position:relative;
+  padding:12px 16px 10px;border-bottom:var(--lw) solid var(--line-ink);position:relative;
   flex:0 0 auto;background:var(--bg);z-index:5}
-.brand{font-weight:600;letter-spacing:.3px}
+.brand{font:400 25px/1 var(--hand);letter-spacing:.03em;-webkit-text-stroke:.35px currentColor}
+.brand:after{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--terra);margin-left:5px;vertical-align:2px}
 /* Индикатор оффлайна / очереди отправки (данные кэшируются, визиты — в очередь). */
-.offbar{display:none;align-items:center;gap:8px;padding:7px 14px;font-size:12.5px;
-  background:#FBEED9;color:#7A5A1E;border-bottom:1px solid #EBD9B5;
+.offbar{display:none;align-items:center;gap:8px;padding:8px 16px;font-size:12.5px;
+  background:color-mix(in srgb,var(--terra) 16%,var(--paper));color:var(--text2);border-bottom:var(--lw) solid var(--line-ink);
   position:relative;flex:0 0 auto;z-index:4}
 .offbar.on{display:flex}
-.offbar .d{width:7px;height:7px;border-radius:50%;background:#C9852A;flex:0 0 auto}
-.offbar .offact{margin-left:auto;border:1px solid #C9852A;border-radius:14px;
-  background:transparent;color:#7A5A1E;padding:3px 9px;font:inherit;white-space:nowrap}
+.offbar .d{width:7px;height:7px;border-radius:50%;background:var(--terra);flex:0 0 auto}
+.offbar .offact{margin-left:auto;border:var(--lw) solid var(--line-ink);border-radius:999px;
+  background:transparent;color:var(--text);padding:4px 11px;font:inherit;white-space:nowrap}
 .langs{display:flex;gap:4px}
-.langs button{border:1px solid var(--border);background:var(--card);border-radius:20px;
-  padding:4px 10px;font-size:12px;color:var(--muted);font-family:inherit}
-.langs button.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+.langs button{border:var(--lw) solid transparent;background:transparent;border-radius:999px;
+  padding:5px 10px;font-size:12.5px;color:var(--muted);font-family:inherit}
+.langs button.on{background:var(--tint);color:var(--text);border-color:var(--line-ink)}
 /* «Выйти с этого телефона» — рядом с языком: других настроек у оболочки нет. */
 .langs button.out{display:inline-flex;align-items:center;gap:4px;margin-left:6px}
 .langs button.out .ico{width:13px;height:13px}
@@ -121,211 +161,232 @@ button,a,input,select,textarea,.pcard{touch-action:manipulation}
 .picksheet.ask{z-index:110}
 .picksheet.ask .pickbody{max-width:520px;margin:0 auto;
   padding:18px 16px calc(18px + env(safe-area-inset-bottom,0px))}
-.wrap{flex:1 1 auto;min-height:0;width:100%;padding:12px 14px 96px;max-width:520px;
+.wrap{flex:1 1 auto;min-height:0;width:100%;padding:14px 16px 100px;max-width:520px;
   margin:0 auto;overflow-x:hidden;overflow-y:auto;overscroll-behavior-y:contain;
-  -webkit-overflow-scrolling:touch;scrollbar-gutter:stable;scroll-padding-bottom:96px}
+  -webkit-overflow-scrolling:touch;scrollbar-gutter:stable;scroll-padding-bottom:100px}
+.wrap>*{animation:lift var(--dur-3) var(--ease-out)}
 .muted{color:var(--muted)}
-.searchwrap{position:relative;margin-bottom:10px}
-.searchwrap .ico{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--muted)}
-.search{width:100%;padding:10px 12px 10px 36px;border:1px solid var(--border);border-radius:10px;
-  background:var(--card);font-size:15px;font-family:inherit;margin:0;color:var(--text)}
-.pcard{background:var(--card);border:1px solid var(--border);border-radius:12px;
-  padding:12px 14px;margin-bottom:8px;display:flex;align-items:center;gap:12px;cursor:pointer;
-  box-shadow:0 1px 2px rgba(43,40,37,.04);transition:background .1s}
+.searchwrap{position:relative;margin-bottom:12px}
+.searchwrap .ico{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--line-ink)}
+.search{width:100%;padding:12px 14px 12px 40px;border:var(--lw) solid var(--line-ink);border-radius:999px;
+  background:var(--card);font-size:15.5px;font-family:inherit;margin:0;color:var(--text)}
+.search:focus{outline:none;box-shadow:0 2px 0 rgba(29,26,23,.85)}
+/* Строка должника — не коробка: одна бумага, строки отбиты линией. */
+.pcard{background:transparent;border:0;border-bottom:var(--lw) solid var(--border);border-radius:0;
+  padding:13px 4px;margin:0;display:flex;align-items:center;gap:12px;cursor:pointer;
+  transition:background var(--dur-1) ease,transform var(--dur-1) var(--ease-out)}
 .pcard:active{background:var(--alt)}
 .pinfo{flex:1;min-width:0}
-.pchev{color:var(--border);flex:0 0 auto}
-.dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto;background:var(--border)}
-.dot.v{background:var(--success)}
-.pname{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.psub{font-size:12px;color:var(--muted)}
+.pchev{color:var(--line-ink);flex:0 0 auto}
+.dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto;background:transparent;border:var(--lw) solid var(--line-ink)}
+.dot.v{background:var(--terra);border-color:var(--text)}
+.pname{font-weight:500;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.psub{font-size:12.5px;color:var(--muted)}
 .pamt{margin-left:auto;font-weight:500;white-space:nowrap}
-.back{border:none;background:none;color:var(--muted);font-size:14px;padding:0;font-family:inherit;
-  margin-bottom:8px;display:inline-flex;align-items:center;gap:3px;cursor:pointer}
-.h{font-size:18px;font-weight:600;margin:2px 0 2px}
-.tabs{display:flex;gap:6px;margin:12px 0;overflow:auto;-webkit-overflow-scrolling:touch}
-.tabs button{flex:1 0 auto;border:1px solid var(--border);background:var(--card);border-radius:10px;
-  padding:9px 10px;font-size:13px;color:var(--text);font-family:inherit;white-space:nowrap}
-.tabs button.on{background:var(--accent);color:var(--bg);border-color:var(--accent);
-  box-shadow:0 2px 8px rgba(43,40,37,.18)}
-.panel{display:none} .panel.on{display:block;animation:fadein .12s ease}
-@keyframes fadein{from{opacity:0}to{opacity:1}}
-.box{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:10px}
-.kv{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid var(--alt);font-size:14px}
+.back{border:none;background:none;color:var(--link);font-size:14.5px;padding:0;font-family:inherit;
+  margin-bottom:10px;display:inline-flex;align-items:center;gap:3px;cursor:pointer}
+.h{font:400 30px/1.12 var(--hand);letter-spacing:.02em;margin:4px 0 6px;-webkit-text-stroke:.35px currentColor}
+.tabs{display:flex;gap:4px;margin:12px 0 14px;overflow:auto;-webkit-overflow-scrolling:touch;
+  border-bottom:var(--lw) solid var(--border)}
+.tabs button{flex:1 0 auto;border:0;background:transparent;border-radius:0;
+  padding:10px 10px 11px;font-size:14.5px;color:var(--muted);font-family:inherit;white-space:nowrap;
+  border-bottom:2px solid transparent;margin-bottom:calc(-1 * var(--lw))}
+.tabs button.on{color:var(--text);border-bottom-color:var(--terra);box-shadow:none;font-weight:500}
+.panel{display:none} .panel.on{display:block;animation:lift var(--dur-3) var(--ease-out)}
+.box{background:transparent;border:var(--lw) solid var(--line-ink);border-radius:18px;padding:12px 16px;margin-bottom:12px}
+.kv{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:var(--lw) solid var(--border);font-size:14.5px}
 .kv:last-child{border-bottom:none}
 .kv .k{color:var(--muted)} .kv .v{text-align:right;font-weight:500}
-.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--success);font-weight:500}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--success);font-weight:500}
 .pill.n{color:var(--muted)}
 .btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;
-  padding:13px;border:1px solid var(--border);border-radius:11px;background:var(--card);
-  color:var(--text);font-size:15px;font-family:inherit;font-weight:500;cursor:pointer}
-.btn.acc{background:var(--accent);color:var(--bg);border:none}
+  padding:13px;border:var(--lw) solid var(--line-ink);border-radius:999px;background:transparent;
+  color:var(--text);font-size:15.5px;font-family:inherit;font-weight:500;cursor:pointer;
+  transition:transform var(--dur-1) var(--ease-out),background var(--dur-1) ease}
+.btn:active{background:var(--tint)}
+.btn.acc{background:var(--terra);color:#1d1a17;border:var(--lw) solid var(--text)}
+.btn.acc:active{filter:brightness(1.05);background:var(--terra)}
 .btn.ghost{background:transparent}
 .btn.line{margin-top:8px}
 /* Замороженная кнопка: видно, что средство есть, но сейчас не работает. Прятать
    её нельзя — человек в поле не отличит «у меня другое приложение» от «сломалось». */
 .btn.frozen{opacity:.45;cursor:default}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.providers{display:flex;gap:8px;margin-bottom:10px}
-.providers a{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;
-  border:1px solid var(--border);border-radius:12px;padding:8px 4px;font-size:11px;
-  color:var(--text);text-decoration:none;background:var(--alt)}
-.providers a .ico{width:18px;height:18px;color:var(--muted)}
-.mapwrap{border:1px solid var(--border);border-radius:14px;overflow:hidden;margin-bottom:10px;
+.providers{display:flex;gap:8px;margin-bottom:12px}
+.providers a{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;
+  border:var(--lw) solid var(--line-ink);border-radius:16px;padding:9px 4px;font-size:11.5px;
+  color:var(--text);text-decoration:none;background:transparent}
+.providers a .ico{width:18px;height:18px;color:var(--accent2)}
+.mapwrap{border:var(--lw) solid var(--line-ink);border-radius:18px;overflow:hidden;margin-bottom:12px;
   background:var(--card);position:relative}
 .map{height:220px;background:var(--alt)}
 .maplibregl-ctrl-attrib,.maplibregl-ctrl-logo{display:none}
 .geobadge{position:absolute;top:10px;left:10px;z-index:4;display:flex;align-items:center;gap:5px;
-  background:rgba(255,255,255,.92);backdrop-filter:blur(6px);border-radius:16px;padding:5px 10px 5px 8px;
-  font-size:11px;color:var(--muted);box-shadow:0 2px 8px rgba(0,0,0,.12)}
+  background:var(--paper);border:var(--lw) solid var(--line-ink);border-radius:999px;padding:5px 10px 5px 8px;
+  font-size:11.5px;color:var(--text2)}
 .geobadge .ico{width:13px;height:13px}
 .fab{position:absolute;right:10px;bottom:10px;z-index:4;display:flex;align-items:center;gap:7px;
-  background:var(--accent);color:#fff;border:none;border-radius:24px;padding:11px 18px 11px 13px;
-  font-size:14px;font-weight:600;font-family:inherit;box-shadow:0 4px 14px rgba(43,40,37,.32);cursor:pointer}
+  background:var(--terra);color:#1d1a17;border:var(--lw) solid #1d1a17;border-radius:999px;padding:11px 18px 11px 13px;
+  font-size:14.5px;font-weight:600;font-family:inherit;box-shadow:0 2px 0 rgba(29,26,23,.85);cursor:pointer}
 .fab .ico{width:18px;height:18px}
-label.fld{display:block;font-size:13px;color:var(--muted);margin:12px 0 5px}
-select,textarea{width:100%;padding:13px 12px;border:1px solid var(--border);border-radius:11px;
-  background:var(--card);font-size:15px;font-family:inherit;color:var(--text)}
-textarea{min-height:64px;resize:vertical}
-/* --- Форма визита: секции-карточки, крупные тач-таргеты (заполнение на телефоне в поле) --- */
-.fsec{background:var(--card);border:1px solid var(--border);border-radius:14px;
-  padding:6px 14px 14px;margin-bottom:12px;box-shadow:0 1px 2px rgba(43,40,37,.04)}
-.fsec-h{font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;
-  color:var(--muted);margin:12px 0 2px}
-.fsec.key{border-color:var(--accent);box-shadow:0 2px 10px rgba(43,40,37,.10)}
-.fsec.key .fsec-h{color:var(--accent)}
+label.fld{display:block;font-size:13.5px;color:var(--muted);margin:14px 0 6px}
+select,textarea{width:100%;padding:13px 14px;border:var(--lw) solid var(--line-ink);border-radius:16px;
+  background:var(--card);font-size:15.5px;font-family:inherit;color:var(--text)}
+textarea{min-height:72px;resize:vertical;line-height:1.45}
+textarea:focus,select:focus{outline:none;box-shadow:0 2px 0 rgba(29,26,23,.85)}
+/* --- Форма визита: разделы — воздухом и линией, крупные тач-таргеты --- */
+.fsec{background:transparent;border:0;border-bottom:var(--lw) solid var(--border);border-radius:0;
+  padding:4px 0 16px;margin-bottom:6px;box-shadow:none}
+.fsec-h{font:400 20px/1.2 var(--hand);letter-spacing:.03em;text-transform:none;
+  color:var(--text2);margin:14px 0 2px}
+.fsec.key{border-bottom-color:var(--line-ink)}
+.fsec.key .fsec-h{color:var(--accent2)}
 .fsec select{min-height:50px}
-.money{flex:1;min-width:0;min-height:50px;padding:12px 14px;border:1px solid var(--border);
-  border-radius:10px;background:#fff;color:var(--text);font-size:19px;font-weight:600;
+.money{flex:1;min-width:0;min-height:52px;padding:12px 16px;border:var(--lw) solid var(--line-ink);
+  border-radius:16px;background:var(--card);color:var(--text);font-size:20px;font-weight:600;
   font-family:inherit;font-variant-numeric:tabular-nums;letter-spacing:.2px;margin:0}
 .money::placeholder{color:var(--faint);font-weight:400}
-.money:focus{outline:none;border-color:var(--accent)}
+.money:focus{outline:none;box-shadow:0 2px 0 rgba(29,26,23,.85)}
 .moneyrow{display:flex;gap:8px;align-items:stretch}
-.xbtn{flex:0 0 50px;min-height:50px;border:1px solid var(--border);border-radius:10px;
-  background:#fff;color:var(--muted);font-size:22px;line-height:1;font-family:inherit;padding:0;margin:0}
-.btn.acc.big{padding:16px;font-size:16px;font-weight:600;border-radius:14px;
-  box-shadow:0 4px 14px rgba(43,40,37,.22)}
+.xbtn{flex:0 0 52px;min-height:52px;border:var(--lw) solid var(--line-ink);border-radius:16px;
+  background:transparent;color:var(--muted);font-size:22px;line-height:1;font-family:inherit;padding:0;margin:0}
+.btn.acc.big{padding:16px;font-size:16.5px;font-weight:600;border-radius:999px;
+  box-shadow:0 2px 0 rgba(29,26,23,.85)}
 .draftrow{display:flex;align-items:center;gap:7px;font-size:12.5px;margin:2px 2px 0}
 .draftrow .d{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
-.cdcard{font-size:13px;border-bottom:1px solid var(--alt);padding:8px 0}
+.cdcard{font-size:13.5px;border-bottom:var(--lw) solid var(--border);padding:9px 0}
 .cdcard:last-child{border-bottom:none}
 .cdcard .t{font-weight:500;margin-bottom:2px}
 .cdhead{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:2px}
-.cdhead .t{margin-bottom:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cdhead .t{margin-bottom:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono);font-size:13px}
 .cdsum{font-weight:600;white-space:nowrap}
-.toast{position:absolute;left:50%;bottom:84px;transform:translateX(-50%);background:var(--accent);
-  color:var(--bg);padding:10px 18px;border-radius:24px;font-size:14px;opacity:0;
-  transition:opacity .2s;pointer-events:none;z-index:30}
-.toast.show{opacity:1}
-.center{text-align:center;color:var(--muted);padding:40px 16px}
+.toast{position:absolute;left:50%;bottom:88px;transform:translate(-50%,8px);background:var(--text);
+  color:var(--paper);padding:11px 20px;border-radius:999px;font-size:14.5px;opacity:0;
+  transition:opacity var(--dur-3) var(--ease-out),transform var(--dur-3) var(--ease-out);pointer-events:none;z-index:30}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+.center{text-align:center;color:var(--muted);padding:44px 18px;line-height:1.55}
 .opt{display:flex;gap:8px;margin:6px 0 2px}
-.opt button{flex:1 1 0;border:1px solid var(--border);background:var(--card);border-radius:10px;
-  padding:10px;font-size:14px;font-family:inherit;color:var(--text)}
-.opt button.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
-.toolbtn{border:1px solid var(--border);background:var(--card);border-radius:20px;
-  padding:5px 12px;font-size:12px;color:var(--muted);font-family:inherit}
-.mk{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--alt);font-size:13px}
+.opt button{flex:1 1 0;border:var(--lw) solid var(--line-ink);background:transparent;border-radius:999px;
+  padding:10px;font-size:14.5px;font-family:inherit;color:var(--text)}
+.opt button.on{background:var(--text);color:var(--paper);border-color:var(--text)}
+.toolbtn{border:var(--lw) solid var(--line-ink);background:transparent;border-radius:999px;
+  padding:6px 13px;font-size:12.5px;color:var(--text2);font-family:inherit}
+.mk{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:var(--lw) solid var(--border);font-size:13.5px}
 .mk:last-child{border-bottom:none}
-.mkdot{width:8px;height:8px;border-radius:50%;background:var(--danger);flex:0 0 auto}
+.mkdot{width:8px;height:8px;border-radius:50%;background:var(--terra);flex:0 0 auto}
 
-/* --- нижняя навигация (как в нативном приложении) --- */
+/* --- нижняя навигация: бумага и линия пером, без стекла (стекло над бегущим
+   списком пересчитывалось бы каждый кадр) --- */
 .bottomnav{position:absolute;left:0;right:0;bottom:0;z-index:20;display:none;
-  background:rgba(250,249,245,.92);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
-  border-top:1px solid var(--border);padding:7px 10px calc(7px + env(safe-area-inset-bottom,0px))}
+  background:var(--paper);border-top:var(--lw) solid var(--line-ink);
+  padding:6px 10px calc(6px + env(safe-area-inset-bottom,0px))}
 .bottomnav-inner{display:flex;max-width:520px;margin:0 auto}
 .bottomnav button{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;
-  background:none;border:none;font-family:inherit;color:var(--muted);font-size:11px;padding:5px 0;cursor:pointer}
-.bottomnav button.on{color:var(--accent);font-weight:600}
-.bottomnav button .ico{width:21px;height:21px}
+  background:none;border:none;font-family:inherit;color:var(--muted);font-size:11.5px;padding:6px 0;cursor:pointer;
+  transition:transform var(--dur-1) var(--ease-out)}
+.bottomnav button.on{color:var(--text);font-weight:500}
+.bottomnav button.on .ico{color:var(--accent2)}
+.bottomnav button.on:after{content:"";width:6px;height:6px;border-radius:50%;background:var(--terra);margin-top:1px}
+.bottomnav button .ico{width:22px;height:22px}
 
 /* --- полноэкранный режим навигации («Поехать») --- */
 .navmode{position:absolute;inset:0;background:var(--bg);z-index:100;display:none}
 .navmode.on{display:block}
 .navmap{position:absolute;inset:0}
-.navexit,.navrecenter{position:absolute;z-index:6;border:none;font-family:inherit;cursor:pointer;
-  background:rgba(25,22,19,.78);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
-  color:#fff;border-radius:22px;box-shadow:0 4px 16px rgba(0,0,0,.28)}
+.navexit,.navrecenter{position:absolute;z-index:6;border:var(--lw) solid var(--line-ink);font-family:inherit;cursor:pointer;
+  background:var(--paper);color:var(--text);border-radius:999px;box-shadow:0 2px 0 rgba(29,26,23,.85)}
 .navexit{top:calc(env(safe-area-inset-top,0px) + 12px);left:14px;display:flex;align-items:center;
-  gap:6px;padding:9px 16px 9px 11px;font-size:13px;font-weight:500}
+  gap:6px;padding:9px 16px 9px 11px;font-size:13.5px;font-weight:500}
 .navexit .ico{width:16px;height:16px}
-.navrecenter{top:calc(env(safe-area-inset-top,0px) + 12px);right:14px;width:42px;height:42px;
+.navrecenter{top:calc(env(safe-area-inset-top,0px) + 12px);right:14px;width:44px;height:44px;
   display:flex;align-items:center;justify-content:center;padding:0}
 .navrecenter .ico{width:19px;height:19px}
-.navrecenter.hot{background:var(--navblue)}
-.navsheet{position:absolute;left:0;right:0;bottom:0;z-index:6;background:var(--card);
-  border-radius:20px 20px 0 0;padding:10px 18px calc(16px + env(safe-area-inset-bottom,0px));
-  box-shadow:0 -10px 30px rgba(0,0,0,.18)}
-.navhandle{width:36px;height:4px;border-radius:2px;background:var(--border);margin:0 auto 12px}
+.navrecenter.hot{background:var(--navblue);color:#fff;border-color:var(--navblue)}
+.navsheet{position:absolute;left:0;right:0;bottom:0;z-index:6;background:var(--paper);
+  border-top:var(--lw) solid var(--line-ink);border-radius:22px 22px 0 0;padding:10px 18px calc(16px + env(safe-area-inset-bottom,0px));
+  box-shadow:0 -10px 30px rgba(29,26,23,.18)}
+.navhandle{width:38px;height:4px;border-radius:2px;background:var(--line-ink);opacity:.5;margin:0 auto 12px}
 .navtop{display:flex;align-items:flex-end;justify-content:space-between;gap:10px;margin-bottom:10px}
-.navdist{font-size:27px;font-weight:700;line-height:1.1;letter-spacing:-.3px}
+.navdist{font:400 34px/1.05 var(--hand);letter-spacing:.02em}
 .navsub{font-size:13px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis;max-width:54vw}
 .naveta{font-size:14px;color:var(--muted);font-weight:500;white-space:nowrap;padding-bottom:3px}
-.navbanner{display:flex;align-items:center;gap:8px;background:var(--alt);border-radius:10px;
-  padding:9px 10px;font-size:12.5px;color:var(--muted);margin-bottom:10px}
+.navbanner{display:flex;align-items:center;gap:8px;background:var(--tint);border-radius:14px;
+  padding:9px 12px;font-size:12.5px;color:var(--text2);margin-bottom:10px}
 .navbanner .ico{width:15px;height:15px;flex:0 0 auto;color:var(--danger)}
 .navme{width:30px;height:30px;color:var(--navblue);filter:drop-shadow(0 1px 4px rgba(0,0,0,.45))}
 .navme svg{width:100%;height:100%;display:block}
 
-/* --- вкладка руководителя: статистика (на компьютере шире телефона) --- */
+/* --- вкладка руководителя: сетка статистики (на компьютере шире телефона) --- */
 .wrap.wide{max-width:920px}
-.chips{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
-.chip{border:1px solid var(--border);border-radius:16px;background:var(--card);padding:6px 12px;
-  font-size:13px;color:var(--text);font-family:inherit;white-space:nowrap;display:inline-flex;gap:5px;align-items:center}
-.chip.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
-.pnav{display:flex;align-items:center;gap:8px;margin:6px 0}
-.pnav .arr{width:40px;height:38px;border:1px solid var(--border);border-radius:10px;background:var(--card);
+/* Сводка стояла внутри .muted — сетка читалась серым. Числа — чернилами. */
+#dgbody{color:var(--text)}
+/* Горизонтальные ленты листаются пальцем; полосы прокрутки там — шум. */
+.stwrap,.chips.nowrap,.tabs{scrollbar-width:none}
+.stwrap::-webkit-scrollbar,.chips.nowrap::-webkit-scrollbar,.tabs::-webkit-scrollbar{display:none}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}
+.chip{border:var(--lw) solid var(--line-ink);border-radius:999px;background:transparent;padding:7px 13px;
+  font-size:13.5px;color:var(--text);font-family:inherit;white-space:nowrap;display:inline-flex;gap:5px;align-items:center;
+  transition:transform var(--dur-1) var(--ease-out)}
+.chip.on{background:var(--text);color:var(--paper);border-color:var(--text)}
+.pnav{display:flex;align-items:center;gap:8px;margin:8px 0}
+.pnav .arr{width:42px;height:40px;border:var(--lw) solid var(--line-ink);border-radius:999px;background:transparent;
   font-size:18px;font-family:inherit;color:var(--text);flex:0 0 auto}
 .pnav .arr:disabled{opacity:.35}
-.pnav .lbl{flex:1;text-align:center;font-weight:700;font-size:15px}
-.dates{display:flex;gap:8px;align-items:center;margin:2px 0 8px}
-.dates input{flex:1;min-width:0;padding:9px 10px;border:1px solid var(--border);border-radius:10px;
+.pnav .lbl{flex:1;text-align:center;font:400 21px/1.1 var(--hand);letter-spacing:.02em}
+.dates{display:flex;gap:8px;align-items:center;margin:4px 0 10px}
+.dates input{flex:1;min-width:0;padding:10px 12px;border:var(--lw) solid var(--line-ink);border-radius:14px;
   font:inherit;background:var(--card);color:var(--text)}
-.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0 6px}
-.kpi{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:10px 12px;
-  text-align:left;width:100%;font:inherit;color:inherit}
-button.kpi:active{background:var(--alt)}
-.kpi .n{font-size:20px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums}
-.kpi .l{font-size:11px;color:var(--muted);margin-top:3px}
-.bars{display:flex;align-items:flex-end;gap:2px;height:56px;margin:10px 0 2px}
-.bars button{flex:1;border:0;background:var(--accent2);border-radius:3px 3px 0 0;min-height:3px;padding:0;
-  cursor:pointer;opacity:.85}
-.bars button.we{background:#C9C3B6}
-.stwrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -14px;padding:0 14px}
-.stt{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}
-.stt th{cursor:pointer;color:var(--muted);font-weight:600;text-align:right;padding:8px 6px;
-  border-bottom:1px solid var(--border);white-space:nowrap;font-size:12px;user-select:none}
+/* Числа строкой: крупно, подпись словом, между ними линия — а не коробки. */
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:0;margin:12px 0 8px;
+  border-top:var(--lw) solid var(--border);border-bottom:var(--lw) solid var(--border)}
+.kpi{background:transparent;border:0;border-right:var(--lw) solid var(--border);border-radius:0;padding:12px 10px 10px 0;
+  margin-right:10px;text-align:left;width:100%;font:inherit;color:inherit}
+.kpi:nth-child(3n){border-right:0;margin-right:0}
+.kpis .kpi:nth-child(n+4){border-top:var(--lw) solid var(--border)}
+button.kpi:active{background:var(--tint)}
+.kpi .n{font-size:24px;font-weight:600;line-height:1.1;font-variant-numeric:tabular-nums}
+.kpi .l{font-size:12px;color:var(--muted);margin-top:4px}
+.bars{display:flex;align-items:flex-end;gap:3px;height:60px;margin:12px 0 2px}
+.bars button{flex:1;border:0;background:color-mix(in srgb,var(--terra) 75%,var(--paper));border-radius:4px 4px 1px 1px;min-height:3px;padding:0;
+  cursor:pointer}
+.bars button:active{background:var(--terra)}
+.bars button.we{background:var(--line-ink);opacity:.4}
+.stwrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -16px;padding:0 16px}
+.stt{width:100%;border-collapse:collapse;font-size:13.5px;font-variant-numeric:tabular-nums}
+.stt th{cursor:pointer;color:var(--muted);font-weight:400;text-align:right;padding:9px 6px 8px;
+  border-bottom:var(--lw) solid var(--line-ink);white-space:nowrap;font-size:12.5px;user-select:none}
 .stt th.on{color:var(--text)}
 .stt th.l,.stt td.l{text-align:left}
-.stt td{padding:9px 6px;border-bottom:1px solid var(--alt);text-align:right;white-space:nowrap}
-.stt td.l{white-space:normal;min-width:120px}
+.stt td{padding:10px 6px;border-bottom:var(--lw) solid var(--border);text-align:right;white-space:nowrap}
+.stt td.l{white-space:normal;min-width:120px;font-weight:500}
 .stt tbody tr{cursor:pointer}
-.stt tbody tr:active{background:var(--alt)}
+.stt tbody tr:active{background:var(--tint)}
 .stt tr.z td{color:var(--muted)}
-.stt tr.tot td{font-weight:700;border-top:2px solid var(--border);border-bottom:0}
+.stt tr.tot td{font-weight:600;border-top:var(--lw) solid var(--line-ink);border-bottom:0}
 .chips.nowrap{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:2px;
-  margin-left:-14px;margin-right:-14px;padding-left:14px;padding-right:14px}
-.barlbl{display:flex;gap:2px;font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums}
+  margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px}
+.barlbl{display:flex;gap:3px;font-size:10.5px;color:var(--muted);font-variant-numeric:tabular-nums}
 .barlbl span{flex:1;text-align:center;overflow:hidden}
 /* Воронка Collection: лестница выезд → контакт → клиент → обещание → оплата */
-.fcard{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:4px 12px;margin:10px 0}
-.fhead{font-size:12px;font-weight:700;color:var(--muted);padding:8px 0 2px;text-transform:uppercase;
-  letter-spacing:.4px}
-.frow{display:flex;align-items:center;gap:10px;padding:6px 0;border:0;background:none;width:100%;
+.fcard{background:transparent;border:var(--lw) solid var(--line-ink);border-radius:18px;padding:4px 14px;margin:12px 0}
+.fhead{font:400 19px/1.2 var(--hand);color:var(--text2);padding:10px 0 4px;text-transform:none;letter-spacing:.03em}
+.frow{display:flex;align-items:center;gap:10px;padding:7px 0;border:0;background:none;width:100%;
   font:inherit;color:inherit;text-align:left;cursor:pointer}
-.frow:active{background:var(--alt);border-radius:8px}
+.frow:active{background:var(--tint);border-radius:10px}
 .frow.plain{cursor:default}
 .frow.plain:active{background:none}
 .fbar{flex:0 0 56px;height:8px;border-radius:4px;background:var(--alt);overflow:hidden}
-.fbar i{display:block;height:100%;border-radius:4px;background:var(--accent2)}
-.fbar.dim i{background:#C9C3B6}
+.fbar i{display:block;height:100%;border-radius:4px;background:var(--terra)}
+.fbar.dim i{background:var(--line-ink);opacity:.5}
 .fl{flex:1;min-width:0}
-.fl b{font-size:13px;display:block}
-.fsub{font-size:11px;color:var(--muted)}
-.fv{font-weight:700;font-variant-numeric:tabular-nums}
+.fl b{font-size:13.5px;display:block;font-weight:500}
+.fsub{font-size:11.5px;color:var(--muted)}
+.fv{font-weight:600;font-variant-numeric:tabular-nums}
 .fp{flex:0 0 86px;text-align:right;font-variant-numeric:tabular-nums;font-size:12px;color:var(--muted)}
 .fp b{color:var(--text)}
-@media (max-width:640px){ .stt .md{display:none} .stt td,.stt th{padding:9px 4px} .stt td.l{min-width:104px} }
+@media (max-width:640px){ .stt .md{display:none} .stt td,.stt th{padding:10px 4px} .stt td.l{min-width:104px} }
+@media (prefers-reduced-motion:reduce){ :root{--dur-1:40ms;--dur-2:60ms;--dur-3:90ms} .wrap>*,.panel.on{animation:none} }
 </style>
 </head>
 <body>
@@ -947,7 +1008,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=59;
+const SHELL_VERSION=60;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();

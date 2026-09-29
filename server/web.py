@@ -5850,6 +5850,9 @@ def build_app(bot=None) -> web.Application:
     # Локально захостенные ассеты оболочки (Telegram SDK, иконки PWA) — same-origin,
     # чтобы миниапп поднимался в оффлайне без внешних CDN (их кэширует service worker).
     app.router.add_static("/vendor/", path=str(MINIAPP_DIR / "vendor"))
+    # Шрифты облика «Почерк» (OFL) — свои, same-origin: service worker держит их
+    # в кэше вместе с оболочкой, внешних CDN у выездника нет.
+    app.router.add_static("/fonts/", path=str(MINIAPP_DIR / "fonts"))
     app.router.add_get("/admin/stats", _admin_stats)
     app.router.add_post("/admin/import", _admin_import)
     app.router.add_post("/admin/import.json", _admin_import_json)

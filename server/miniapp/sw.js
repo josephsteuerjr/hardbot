@@ -14,7 +14,7 @@
  * после этого не нужно: открытие по сети кладёт оболочку обратно (network-first ниже),
  * свои ассеты — при первом запросе (caches.open создаёт кэш заново).
  */
-const CACHE = "hard-shell-v59";
+const CACHE = "hard-shell-v60";
 const PRECACHE = [
   "/",
   "/vendor/telegram-web-app.js",
@@ -25,6 +25,15 @@ const PRECACHE = [
   "/vendor/maplibre-gl-4.7.1.js",
   "/vendor/pmtiles-3.2.1.js",
   "/vendor/protomaps-themes-base-4.4.0.js",
+  // Шрифты облика «Почерк» (~135 КБ на все): без них офлайн-старт рисовал бы
+  // системным шрифтом.
+  "/fonts/golos-cyr.woff2",
+  "/fonts/golos-ext.woff2",
+  "/fonts/golos-lat.woff2",
+  "/fonts/hand-cyr.woff2",
+  "/fonts/hand-lat.woff2",
+  "/fonts/mono-cyr.woff2",
+  "/fonts/mono-lat.woff2",
 ];
 
 self.addEventListener("install", (e) => {
