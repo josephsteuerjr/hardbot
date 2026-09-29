@@ -40,6 +40,6 @@ if (existsSync(join(folder, "LICENSES.chromium.html"))) rmSync(join(folder, "LIC
 
 // zip — средствами Windows (tar из System32 умеет zip).
 const zip = join(dist, "Хард.zip");
-execFileSync("tar", ["-a", "-c", "-f", zip, "-C", dist, "Хард"], { stdio: "inherit" });
+execFileSync(join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe"), ["-a", "-c", "-f", zip, "-C", dist, "Хард"], { stdio: "inherit" });
 writeFileSync(join(dist, "СОСТАВ.txt"), `Хард — пульт (Electron ${process.versions.electron ?? ""})\nпапка: ${folder}\nархив: ${zip}\n`);
 console.log("готово:", folder, "\n", zip);
