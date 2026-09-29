@@ -303,39 +303,87 @@ def outlook_running() -> bool:
         pythoncom.CoUninitialize()
 
 
+OUTLOOK_BUSY_TEXT = ("Outlook ждёт ответа в открытом окне (вопрос, пароль, "
+                     "предупреждение). Переключитесь в Outlook, закройте это окно "
+                     "и нажмите ещё раз.")
+
+
+def outlook_error_text(exc: BaseException) -> str:
+    """Ошибка Outlook словами. COM отдаёт кортеж с описанием в excepinfo[2];
+    трейсбек человеку не нужен."""
+    detail = ""
+    info = exc.args[2] if len(getattr(exc, "args", ())) > 2 else None
+    if isinstance(info, tuple) and len(info) > 2 and info[2]:
+        detail = str(info[2])
+    detail = detail or (str(exc.args[1]) if len(getattr(exc, "args", ())) > 1 else str(exc))
+    low = detail.lower()
+    if "диалогов" in low or "dialog" in low:
+        return OUTLOOK_BUSY_TEXT
+    return f"Outlook не принял письмо: {detail}"
+
+
+def _busy(exc: BaseException) -> bool:
+    return outlook_error_text(exc) == OUTLOOK_BUSY_TEXT
+
+
 def send_outlook(to: list[str], subject_text: str, html_body: str, attachment: str, *,
-                 display: bool = False) -> None:
+                 display: bool = False, tries: int = 3, pause: float = 4.0) -> None:
     """Письмо из Outlook этой машины. display=True — открыть черновик и не
     отправлять (проверить, как выглядит).
 
     Подпись владельца Outlook вставляет сам, когда у письма появляется окно
     (GetInspector): текст ставим ПЕРЕД ней, и письмо выглядит так, будто его
-    написали руками."""
+    написали руками.
+
+    Outlook с открытым окном-вопросом (пароль, предупреждение) отказывает с
+    «открыто диалоговое окно» — ждём и пробуем ещё (tries раз). Не вышло —
+    черновик закрывается без сохранения: 29.09.2026 после двух таких отказов в
+    Outlook висели два скрытых черновика."""
+    import time
+
     import pythoncom
     import win32com.client
 
     pythoncom.CoInitialize()
+    mail = None
     try:
-        ol = win32com.client.Dispatch("Outlook.Application")
-        mail = ol.CreateItem(0)
-        mail.To = "; ".join(to)
-        mail.Subject = subject_text
         try:
-            mail.GetInspector            # подпись по умолчанию появляется здесь
-            signature = mail.HTMLBody or ""
-        except Exception:  # noqa: BLE001
-            signature = ""
-        mail.HTMLBody = with_signature(html_body, signature)
-        mail.Attachments.Add(str(attachment))
-        if display:
-            mail.Display(False)
-            return
-        mail.Send()
-        # Если Outlook был закрыт и поднят ради письма, оно могло бы остаться
-        # в «Исходящих» до следующего запуска: просим отправить сразу.
-        try:
-            ol.Session.SendAndReceive(False)
-        except Exception:  # noqa: BLE001
-            pass
+            ol = win32com.client.Dispatch("Outlook.Application")
+            mail = ol.CreateItem(0)
+            mail.To = "; ".join(to)
+            mail.Subject = subject_text
+            try:
+                mail.GetInspector            # подпись по умолчанию появляется здесь
+                signature = mail.HTMLBody or ""
+            except Exception:  # noqa: BLE001
+                signature = ""
+            mail.HTMLBody = with_signature(html_body, signature)
+            mail.Attachments.Add(str(attachment))
+            for attempt in range(max(1, tries)):
+                try:
+                    if display:
+                        mail.Display(False)
+                    else:
+                        mail.Send()
+                    break
+                except pythoncom.com_error as exc:
+                    if not _busy(exc) or attempt + 1 >= max(1, tries):
+                        raise
+                    time.sleep(pause)
+            mail = None                      # показано или отправлено — не трогаем
+        except pythoncom.com_error as exc:
+            raise RuntimeError(outlook_error_text(exc)) from exc
+        if not display:
+            # Если Outlook был закрыт и поднят ради письма, оно могло бы остаться
+            # в «Исходящих» до следующего запуска: просим отправить сразу.
+            try:
+                ol.Session.SendAndReceive(False)
+            except Exception:  # noqa: BLE001
+                pass
     finally:
+        if mail is not None:
+            try:
+                mail.Close(1)                # olDiscard: скрытый черновик не копится
+            except Exception:  # noqa: BLE001
+                pass
         pythoncom.CoUninitialize()

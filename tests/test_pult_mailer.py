@@ -114,3 +114,15 @@ def test_subject_file_and_query_name_the_period():
     assert mailer.query("week", _cfg(), d) == {"preset": "7d"}
     body = mailer.body_html("day", cfg, d, [("Выездов", 1234)], TUE_EVENING)
     assert "Добрый вечер" in body and "1 234" in body and "Как читать" in body
+
+
+def test_outlook_errors_are_worded_for_a_person():
+    """COM-ошибка Outlook — кортеж; человеку нужен текст, а не трейсбек."""
+    busy = Exception(-2147352567, "Ошибка.", (4096, "Microsoft Outlook",
+                     "Outlook не может выполнить эту операцию, так как открыто "
+                     "диалоговое окно. Закройте его и повторите попытку.", None, 0,
+                     -2147467259), None)
+    assert mailer.outlook_error_text(busy) == mailer.OUTLOOK_BUSY_TEXT
+    other = Exception(-2147352567, "Ошибка.", (4096, "Microsoft Outlook",
+                      "Не удается найти этот файл.", None, 0, -2147024894), None)
+    assert mailer.outlook_error_text(other) == "Outlook не принял письмо: Не удается найти этот файл."

@@ -14,9 +14,11 @@ async function job(body: unknown, log: (s: string) => void): Promise<any> {
   for (;;) {
     await new Promise((r) => setTimeout(r, 700));
     const j = await local("/job", { id });
+    // Упавшая задача кладёт в журнал трейсбек — человеку показываем только
+    // текст ошибки.
+    if (j.state === "failed") { log(j.error || "не вышло"); throw new Error(j.error || "не вышло"); }
     if (j.log?.length) log(j.log[j.log.length - 1]);
     if (j.state === "done") return j.result;
-    if (j.state === "failed") throw new Error(j.error || "не вышло");
   }
 }
 
