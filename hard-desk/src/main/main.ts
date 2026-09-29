@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, normalize, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { call, deviceName, enroll, logout, setRevokedHandler } from "./net";
+import { stopLegacyPult } from "./legacy";
 import { local, startBackend } from "./local";
 import { runShots } from "./shots";
 import { readSettings, readToken, writeSettings } from "./store";
@@ -80,6 +81,7 @@ function start() {
   });
   wireIpc();
   makeTray();
+  stopLegacyPult(log);
   if (MODE === "analyst") startBackend(log).catch((e) => log("питон-сторона: " + String(e.message || e)));
   show();
 }
