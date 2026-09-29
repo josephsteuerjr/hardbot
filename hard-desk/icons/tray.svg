@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Значок у часов: одна метка, без листа — на 16 px лист съедал бы метку. -->
+  <path d="M32 4 C 19 4 10 13.5 10 25.5 C 10 39 24 51 32 61 C 40 51 54 39 54 25.5 C 54 13.5 45 4 32 4 Z"
+        fill="#e0915a" stroke="#1d1a17" stroke-width="5" stroke-linejoin="round"/>
+  <circle cx="32" cy="25" r="8.5" fill="#f4e4cf" stroke="#1d1a17" stroke-width="4.5"/>
+</svg>

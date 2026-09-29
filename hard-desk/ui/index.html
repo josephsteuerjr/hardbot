@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self'; connect-src 'self'">
+  <meta name="color-scheme" content="light dark">
+  <title>Хард</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div id="app" class="bare">
+    <header id="chrome">
+      <div class="chrome-left">
+        <button class="chrome-btn" id="toggle-rail" type="button" title="Полка слева · Ctrl+B" aria-label="Показать или скрыть полку">
+          <svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M6 2.5v11"/></svg>
+        </button>
+        <div class="sign" id="sign">Хард</div>
+      </div>
+      <div class="chrome-drag"></div>
+      <div class="chrome-right">
+        <button class="chrome-btn" id="toggle-panel" type="button" title="Панель справа · Ctrl+J" aria-label="Панель справа" hidden>
+          <svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M10 2.5v11"/></svg>
+        </button>
+        <div class="controls">
+          <button class="win" data-win="minimize" type="button" aria-label="Свернуть к часам" title="Свернуть к часам">
+            <svg viewBox="0 0 12 12"><path d="M1 6h10"/></svg>
+          </button>
+          <button class="win" data-win="maximize" type="button" aria-label="Развернуть или восстановить">
+            <svg viewBox="0 0 12 12"><rect x="1.5" y="1.5" width="9" height="9" rx="1"/></svg>
+          </button>
+          <button class="win win-close" data-win="close" type="button" aria-label="Закрыть к часам" title="Закрыть к часам">
+            <svg viewBox="0 0 12 12"><path d="M2 2l8 8M10 2l-8 8"/></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <aside id="rail">
+      <nav class="rail-nav" id="rail-nav" aria-label="Разделы"></nav>
+      <div class="rail-foot">
+        <div class="rail-who" id="rail-who"></div>
+        <nav class="rail-nav" id="rail-bottom"></nav>
+      </div>
+    </aside>
+
+    <main id="main">
+      <header id="head">
+        <div>
+          <div class="head-kicker" id="head-kicker"></div>
+          <h1 class="head-title" id="head-title"></h1>
+        </div>
+        <div class="head-side">
+          <div id="head-tools"></div>
+          <div class="state-pill" id="state" data-level="live"><span class="state-dot"></span><span id="state-text">Подключение…</span></div>
+        </div>
+      </header>
+      <section id="view" tabindex="-1"><div id="view-inner"></div></section>
+    </main>
+
+    <aside id="panel">
+      <div class="panel-head">
+        <div class="panel-title" id="panel-title"></div>
+        <button class="icon-btn" id="panel-close" type="button" aria-label="Закрыть панель"><svg viewBox="0 0 18 18"><path d="M4 4l10 10M14 4 4 14"/></svg></button>
+      </div>
+      <div id="panel-body"><div id="panel-inner"></div></div>
+    </aside>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Хард: лист бумаги Hélène, метка выезда пером и пунктир маршрута к ней. -->
+  <rect x="10" y="10" width="236" height="236" rx="58" fill="#f4e4cf" stroke="#1d1a17" stroke-width="9"/>
+  <path d="M38 214 C 66 196, 96 224, 132 205" fill="none" stroke="#997766" stroke-width="11"
+        stroke-linecap="round" stroke-dasharray="0 21"/>
+  <path d="M150 38 C 112 38 86 66 86 100 C 86 140 128 176 150 204 C 172 176 214 140 214 100 C 214 66 188 38 150 38 Z"
+        fill="#e0915a" stroke="#1d1a17" stroke-width="10" stroke-linejoin="round"/>
+  <circle cx="150" cy="99" r="24" fill="#f4e4cf" stroke="#1d1a17" stroke-width="9"/>
+</svg>
