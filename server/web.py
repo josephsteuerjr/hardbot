@@ -53,6 +53,7 @@ from exchange_contract import (
 from fields import BY_KEY, DROPDOWNS
 from i18n import FIELD_TITLES, FORM_FIELD_TITLES, LANGUAGES, t, tf, tv
 import addr_learn
+import control
 import digest_data
 import evidence
 import maplink
@@ -254,14 +255,43 @@ def _manager_gate(request: web.Request) -> tuple[int, dict, list[str]]:
     значит «сегодня по направлению нет ответственных», а у владельца сразу после
     сброса и до первого импорта реестр пуст — старая проверка давала бы 403 на
     собственной вкладке (этот случай уже жёг прод, см. test_manager_app_access).
-    Пустая команда отдаётся пустым экраном, не отказом."""
-    uid = _uid(request)
+    Пустая команда отдаётся пустым экраном, не отказом.
+
+    Пульт на компьютере (Пульты 2) предъявляет X-Pult-Token — токен этого
+    компьютера. Он принимается ТОЛЬКО здесь: портфель выездника им не открыть.
+    Безопасник смотрит, но ничего не меняет: пишущие ручки и выдача входа для
+    него закрыты (403 read_only)."""
+    ptok = (request.headers.get("X-Pult-Token") or "").strip()
+    if ptok:
+        state, dev = db.manager_device_check(ptok, _admin_peer(request))
+        if state != "ok":
+            raise _json_error(web.HTTPUnauthorized, f"device_{state}")
+        uid = int(dev["telegram_id"])
+    else:
+        uid = _uid(request)
     if not uid:
         raise web.HTTPUnauthorized(text="auth")
     mgr = digest_data.manager_scope(uid, is_owner=(uid == ADMIN_ID))
     if mgr is None:
         raise web.HTTPForbidden(text="not a manager")
+    caps = db.manager_caps(mgr.get("role"), is_owner=(uid == ADMIN_ID))
+    # «Только чтение» — про ручки руководителя; отметка обзвона в «Контроле» —
+    # работа самого безопасника.
+    if not caps["team_links"] and request.path.startswith("/api/manager/") and (
+            request.method != "GET" or request.path in _LEAD_ONLY_PATHS):
+        raise _json_error(web.HTTPForbidden, "read_only")
+    if request.path.startswith("/api/control/") and not caps["control"]:
+        raise _json_error(web.HTTPForbidden, "no_control")
     return uid, mgr, digest_data.sorted_employees(mgr)
+
+
+# Чтение, которое безопаснику всё равно не положено: ссылки входа команды.
+_LEAD_ONLY_PATHS = frozenset({"/api/manager/app_links"})
+
+
+def _json_error(cls, code: str, **extra):
+    """HTTP-ошибка с телом {"error": code}: пульт показывает её словами."""
+    return cls(text=json.dumps({"error": code, **extra}), content_type="application/json")
 
 
 def _day_team(mgr: dict, team: list[str], iso: str) -> list[str]:
@@ -3894,6 +3924,207 @@ async def _manager_stats_xlsx(request: web.Request) -> web.Response:
                  "Cache-Control": "no-store"})
 
 
+# --- Пульт руководителя на компьютере (Пульты 2, 29.09.2026) -------------------
+# Вход ОДИН раз: ссылка входа руководителя (ключ) меняется на токен этого
+# компьютера, дальше пульт открывается сразу. Токен живёт до отзыва; отозванный
+# удаляется при первом же стуке, и пульт стирает у себя всё.
+_LINK_CODE_RE = re.compile(r"/i/([A-Za-z0-9_-]{6,})|link=([A-Za-z0-9_-]{6,})"
+                           r"|^([A-Za-z0-9_-]{6,})$")
+
+
+def _link_code(raw: str) -> str:
+    m = _LINK_CODE_RE.search((raw or "").strip())
+    return next((g for g in (m.groups() if m else ()) if g), "")
+
+
+def _device_me(uid: int, mgr: dict) -> dict:
+    owner = uid == ADMIN_ID
+    return {"me": {"name": mgr.get("name") or "",
+                   "role": "full" if owner else db.manager_role(mgr.get("role")),
+                   "direction": mgr.get("direction") or "",
+                   "office_cities": mgr.get("office_cities") or [],
+                   "scope": digest_data.scope_label(mgr), "isOwner": owner},
+            "caps": db.manager_caps(mgr.get("role"), is_owner=owner),
+            "today": digest_data.today_iso(),
+            "server_time": datetime.now(evidence.FIELD_TZ).isoformat(timespec="seconds")}
+
+
+async def _manager_device_enroll(request: web.Request) -> web.Response:
+    """{code, device} → {token, device_id, me, caps}. Код — из ссылки входа
+    руководителя (целиком или один код). Обмен тратит одно её использование."""
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    code = _link_code(str(body.get("code") or ""))
+    device = str(body.get("device") or "").strip()[:80]
+    _admin_too_many_fails(request)
+    uid = db.peek_app_link(code) if code else None
+    if not uid:
+        _admin_auth_failed(request, scope="app")
+        raise _json_error(web.HTTPGone, "link_dead")
+    mgr = digest_data.manager_scope(uid, is_owner=(uid == ADMIN_ID))
+    if mgr is None:
+        # Ссылка живая, но это вход выездника: не тратим её — пусть работает
+        # там, для чего выдана.
+        raise _json_error(web.HTTPForbidden, "not_manager")
+    got = db.enroll_manager_device(code, device)
+    if not got:
+        raise _json_error(web.HTTPGone, "link_dead")
+    _admin_auth_ok(request, scope="app")
+    uid, dev_id, token = got
+    db.audit_access(uid, "pult_enroll", detail=f"#{dev_id} {device}")
+    return _manager_json({"ok": True, "token": token, "device_id": dev_id,
+                          **_device_me(uid, mgr)})
+
+
+async def _manager_device_me(request: web.Request) -> web.Response:
+    uid, mgr, team = _manager_gate(request)
+    device = None
+    ptok = (request.headers.get("X-Pult-Token") or "").strip()
+    if ptok:
+        _, dev = db.manager_device_check(ptok)
+        if dev:
+            device = {"id": dev["id"], "name": dev["device"] or "",
+                      "created_at": dev["created_at"]}
+    return _manager_json({"ok": True, "device": device, "team": len(team),
+                          **_device_me(uid, mgr)})
+
+
+async def _manager_device_logout(request: web.Request) -> web.Response:
+    tok = (request.headers.get("X-Pult-Token") or "").strip()
+    uid = db.drop_manager_device(tok) if tok else None
+    if uid:
+        db.audit_access(uid, "pult_logout")
+    return web.json_response({"ok": True})
+
+
+async def _manager_activity(request: web.Request) -> web.Response:
+    """Лента: выезды с пометками, открытия карточек, фото, входы — за окно."""
+    uid, mgr, team = _manager_gate(request)
+    rng = _stats_range_q(request)
+    team = _range_team(mgr, team, rng)
+    q = request.query
+    kinds = {k for k in (q.get("kinds") or "").split(",") if k} or None
+    try:
+        limit = int(q.get("limit") or 200)
+    except ValueError:
+        limit = 200
+    data = await asyncio.to_thread(functools.partial(
+        control.activity, mgr, team, rng, office=(q.get("office") or "").strip(),
+        employee=(q.get("employee") or "").strip(), kinds=kinds,
+        before=(q.get("before") or "").strip(), limit=limit))
+    db.audit_access(uid, "digest_view",
+                    detail=f"activity {rng['from']}..{rng['to']} n={len(data['events'])}")
+    return _manager_json(data)
+
+
+async def _control_overview(request: web.Request) -> web.Response:
+    uid, mgr, team = _manager_gate(request)
+    rng = _stats_range_q(request)
+    team = _range_team(mgr, team, rng)
+    data = await asyncio.to_thread(functools.partial(
+        control.overview, mgr, team, rng, office=(request.query.get("office") or "").strip()))
+    db.audit_access(uid, "control_view", detail=f"overview {rng['from']}..{rng['to']}")
+    return _manager_json(data)
+
+
+async def _control_flags(request: web.Request) -> web.Response:
+    uid, mgr, team = _manager_gate(request)
+    rng = _stats_range_q(request)
+    team = _range_team(mgr, team, rng)
+    emp = _manager_employee_q(request, team)
+    data = await asyncio.to_thread(control.flags_of, mgr, team, rng, emp)
+    if data is None:
+        raise web.HTTPNotFound(text="employee")
+    db.audit_access(uid, "control_view", target=emp,
+                    detail=f"flags {rng['from']}..{rng['to']} n={len(data['visits'])}")
+    return _manager_json(data)
+
+
+async def _control_callbacks(request: web.Request) -> web.Response:
+    uid, mgr, team = _manager_gate(request)
+    iso, today, prev, nxt = _manager_date(request)
+    team = _day_team(mgr, team, iso)
+    data = await asyncio.to_thread(functools.partial(
+        control.callbacks, mgr, team, iso, office=(request.query.get("office") or "").strip()))
+    # Телефоны и адреса должников — выдача ПД: в журнал составом.
+    reps = ",".join(x["rep"] for x in data["items"][:50])
+    db.audit_access(uid, "control_callbacks",
+                    detail=f"{iso} n={len(data['items'])} reps={reps}")
+    return _manager_json({**data, "prev_date": prev, "next_date": nxt, "today": today})
+
+
+async def _control_callback(request: web.Request) -> web.Response:
+    uid, mgr, team = _manager_gate(request)
+    try:
+        body = await request.json()
+        vid = int(body.get("visit_id"))
+    except Exception:  # noqa: BLE001
+        raise _json_error(web.HTTPBadRequest, "visit_id")
+    outcome = str(body.get("outcome") or "").strip()
+    if outcome not in db.CONTROL_OUTCOMES:
+        raise _json_error(web.HTTPBadRequest, "outcome")
+    if not control.visit_in_scope(team, vid):
+        raise web.HTTPNotFound(text="visit")
+    chk = db.control_record(vid, outcome, str(body.get("note") or ""), uid)
+    if chk is None:
+        raise _json_error(web.HTTPNotFound, "not_selected")
+    db.audit_access(uid, "control_check", target=str(vid), detail=outcome)
+    return _manager_json({"ok": True, "check": chk})
+
+
+async def _control_export(request: web.Request) -> web.Response:
+    uid, mgr, team = _manager_gate(request)
+    rng = _stats_range_q(request)
+    team = _range_team(mgr, team, rng)
+    body = await asyncio.to_thread(control.control_xlsx, mgr, team, rng)
+    db.audit_access(uid, "control_export", detail=f"{rng['from']}..{rng['to']}")
+    return web.Response(
+        body=body,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition":
+                 f"attachment; filename=control_{rng['from']}_{rng['to']}.xlsx",
+                 "Cache-Control": "no-store"})
+
+
+async def _admin_manager_devices(request: web.Request) -> web.Response:
+    """Компьютеры с пультом руководителя: у кого, с какого числа, когда в сети,
+    отозван ли (и ещё не постучался)."""
+    _admin(request)
+    raw = (request.query.get("telegram_id") or "").strip()
+    try:
+        tid = int(raw) if raw else None
+    except ValueError:
+        raise web.HTTPBadRequest(text="telegram_id")
+    return web.json_response({"ok": True, "devices": db.list_manager_devices(tid)})
+
+
+async def _admin_manager_device_revoke(request: web.Request) -> web.Response:
+    """{id} — один компьютер; {telegram_id, all: true} — все компьютеры человека."""
+    _admin(request)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    try:
+        if body.get("id") is not None:
+            n = db.revoke_manager_devices(device_id=int(body["id"]), by="admin")
+        elif body.get("telegram_id") is not None and body.get("all"):
+            n = db.revoke_manager_devices(telegram_id=int(body["telegram_id"]), by="admin")
+        else:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text="id")
+    db.audit_access(ADMIN_ID, "pult_revoke",
+                    detail=json.dumps(body, ensure_ascii=False)[:200])
+    return web.json_response({"ok": True, "revoked": n})
+
+
 async def _manager_app_map_data(request: web.Request) -> web.Response:
     """Карта дня ВНУТРИ приложения: авторизация сессией, подпись не нужна.
     Подписанный /manager/map_data остаётся для телеграм-кнопки."""
@@ -5188,8 +5419,14 @@ async def _admin_manager_save(request: web.Request) -> web.Response:
     offices = body.get("office_cities")
     if offices is not None:
         offices = [str(c).strip() for c in offices if str(c).strip()]
+    # Роль (руководитель/безопасник) — тоже только если прислали: старый пульт
+    # её не знает, и сохранение не должно разжаловать безопасника.
+    role = body.get("role")
+    if role is not None and str(role) not in db.MANAGER_ROLES:
+        raise web.HTTPBadRequest(text="role")
     db.set_manager(tid, name, cities, employees, direction=direction,
-                   pushes=pushes or None, office_cities=offices)
+                   pushes=pushes or None, office_cities=offices,
+                   role=str(role) if role is not None else None)
     # account — КТО владеет этим telegram_id по данным бота (или null, если бот его
     # не видел). «name» — всего лишь подпись оператора, права получает владелец id;
     # пульт сверяет одно с другим и показывает расхождение сразу, а не через неделю.
@@ -5699,6 +5936,17 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/manager/binds", _manager_binds)
     app.router.add_get("/api/manager/cases", _manager_cases)
     app.router.add_get("/api/manager/stats.xlsx", _manager_stats_xlsx)
+    app.router.add_post("/api/manager/device/enroll", _manager_device_enroll)
+    app.router.add_get("/api/manager/device/me", _manager_device_me)
+    app.router.add_post("/api/manager/device/logout", _manager_device_logout)
+    app.router.add_get("/api/manager/activity", _manager_activity)
+    app.router.add_get("/api/control/overview", _control_overview)
+    app.router.add_get("/api/control/flags", _control_flags)
+    app.router.add_get("/api/control/callbacks", _control_callbacks)
+    app.router.add_post("/api/control/callback", _control_callback)
+    app.router.add_get("/api/control/export.xlsx", _control_export)
+    app.router.add_get("/admin/manager_devices.json", _admin_manager_devices)
+    app.router.add_post("/admin/manager_device/revoke.json", _admin_manager_device_revoke)
     app.router.add_get("/api/bootstrap", _bootstrap)
     app.router.add_get("/api/person", _person)
     app.router.add_get("/api/cards", _cards)

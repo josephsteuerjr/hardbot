@@ -4,6 +4,7 @@
 # Данные и артефакты
 data/
 _devdata/
+_devdata_pult/
 photos/
 *.db
 *.xlsx

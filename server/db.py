@@ -1210,6 +1210,48 @@ def init_db() -> None:
             conn.execute("ALTER TABLE app_tokens ADD COLUMN agent TEXT")
         # Сырые девайс-токены → sha256 (один раз, под маркером; см. app_token_key).
         _hash_app_tokens_once(conn)
+        # Пульт руководителя на компьютере (29.09.2026): ключ входа меняется ОДИН
+        # раз на токен этого компьютера, и дальше пульт открывается без входа.
+        # Срока нет — живёт до отзыва. Отзыв только ставит revoked_at: строку
+        # удаляет первый же стук отозванного токена, и пульт на том компьютере
+        # стирает у себя всё. Так аналитик видит «отозван, ждёт стука», пока
+        # компьютер не выходил на связь. В базе, как и у телефонов, — только sha256.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS manager_devices (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              telegram_id INTEGER NOT NULL,
+              token_hash TEXT NOT NULL UNIQUE,
+              device TEXT,
+              created_at TEXT,
+              last_seen_at TEXT,
+              last_ip TEXT,
+              revoked_at TEXT,
+              revoked_by TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_manager_devices_tid "
+                     "ON manager_devices(telegram_id)")
+        # Роль в команде руководства: руководитель или безопасник (см. MANAGER_ROLES).
+        mgcols2 = {r[1] for r in conn.execute("PRAGMA table_info(managers)")}
+        if "role" not in mgcols2:
+            conn.execute("ALTER TABLE managers ADD COLUMN role TEXT")
+        # Контрольный обзвон безопасника: какой выезд выбран на проверку, почему,
+        # и чем кончился звонок должнику. Выбор закрепляется при первом запросе
+        # дня — список не «переигрывается» от обновления страницы.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS control_checks (
+              visit_id INTEGER PRIMARY KEY,
+              selected_on TEXT NOT NULL,
+              selected_why TEXT,
+              employee TEXT,
+              checker_uid INTEGER,
+              outcome TEXT,
+              note TEXT,
+              checked_at TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_control_checks_day "
+                     "ON control_checks(selected_on)")
         # Миграция app_links времён одноразовых кодов (без счётчика uses) и времён
         # общего потолка обменов (без max_uses/bonus_ios/last_use_at/last_agent).
         # Шаблон один и тот же — PRAGMA table_info + ALTER TABLE ... DEFAULT: рабочая
@@ -2128,7 +2170,192 @@ def revoke_app_access(telegram_id: int, scope: str = "all") -> int:
                 "DELETE FROM app_tokens WHERE telegram_id = ?", (telegram_id,)).rowcount
         conn.execute("DELETE FROM app_links WHERE telegram_id = ?", (telegram_id,))
         conn.commit()
-        return revoked
+    # «Человек ушёл» — значит и его пульты на компьютерах: отзыв, а не удаление,
+    # чтобы аналитик видел, какой компьютер ещё не узнал об этом.
+    if scope != "links":
+        revoke_manager_devices(telegram_id=telegram_id, by="app_revoke")
+    return revoked
+
+
+# --- Пульт руководителя на компьютере: ключ → токен устройства ----------------
+# Ключ — та же ссылка входа руководителя, что и для телефона: второй раз выдавать
+# людям что-то новое незачем. Обмен тратит одно использование ссылки.
+MANAGER_DEVICE_TOUCH_S = 60   # last_seen пишем не чаще раза в минуту
+
+
+def peek_app_link(code: str) -> int | None:
+    """Чей это код, если по нему ещё можно войти. Ничего не тратит."""
+    if not code:
+        return None
+    cutoff = (datetime.now() - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT telegram_id FROM app_links WHERE code = ? AND created_at >= ? "
+            "AND uses < COALESCE(max_uses, ?)",
+            (code, cutoff, APP_LINK_DEFAULT_USES)).fetchone()
+    return int(row["telegram_id"]) if row else None
+
+
+def enroll_manager_device(code: str, device: str) -> tuple[int, int, str] | None:
+    """Потратить одно использование ссылки и выдать токен компьютеру.
+    (uid, id устройства, сырой токен) или None — ссылка мертва (гонку за
+    последнее использование решает условие в WHERE, как у redeem_app_link)."""
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    cutoff = (datetime.now() - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
+    token = secrets.token_urlsafe(32)
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE app_links SET used_at = ?, last_use_at = ?, last_agent = 'pult', "
+            "uses = uses + 1 WHERE code = ? AND created_at >= ? "
+            "AND uses < COALESCE(max_uses, ?)",
+            (now_iso, now_iso, code, cutoff, APP_LINK_DEFAULT_USES))
+        if cur.rowcount == 0:
+            conn.commit()
+            return None
+        uid = int(conn.execute("SELECT telegram_id FROM app_links WHERE code = ?",
+                               (code,)).fetchone()["telegram_id"])
+        dev_id = conn.execute(
+            "INSERT INTO manager_devices (telegram_id, token_hash, device, created_at, "
+            "last_seen_at) VALUES (?,?,?,?,?)",
+            (uid, app_token_key(token), (device or "").strip()[:80] or None,
+             now_iso, now_iso)).lastrowid
+        conn.commit()
+    return uid, int(dev_id), token
+
+
+def manager_device_check(token: str, ip: str | None = None) -> tuple[str, dict | None]:
+    """('ok', строка) | ('revoked', None) | ('unknown', None).
+
+    Отозванный токен при стуке УДАЛЯЕТСЯ: пульт на том компьютере узнаёт об
+    отзыве ответом 401 и стирает у себя токен и кэш, а в базе от него больше
+    ничего не остаётся."""
+    if not token:
+        return "unknown", None
+    key = app_token_key(token)
+    now = datetime.now()
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM manager_devices WHERE token_hash = ?",
+                           (key,)).fetchone()
+        if row is None:
+            return "unknown", None
+        if row["revoked_at"]:
+            conn.execute("DELETE FROM manager_devices WHERE id = ?", (row["id"],))
+            conn.commit()
+            return "revoked", None
+        last = _as_datetime(row["last_seen_at"])
+        if last is None or (now - last).total_seconds() >= MANAGER_DEVICE_TOUCH_S:
+            conn.execute("UPDATE manager_devices SET last_seen_at = ?, last_ip = ? "
+                         "WHERE id = ?",
+                         (now.isoformat(timespec="seconds"), (ip or "")[:64] or None,
+                          row["id"]))
+            conn.commit()
+    return "ok", dict(row)
+
+
+def _as_datetime(value) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value)) if value else None
+    except ValueError:
+        return None
+
+
+def drop_manager_device(token: str) -> int | None:
+    """«Выйти на этом компьютере»: удалить предъявленный токен. uid или None."""
+    key = app_token_key(token or "")
+    with connect() as conn:
+        row = conn.execute("SELECT telegram_id FROM manager_devices WHERE token_hash = ?",
+                           (key,)).fetchone()
+        if row is None:
+            return None
+        conn.execute("DELETE FROM manager_devices WHERE token_hash = ?", (key,))
+        conn.commit()
+    return int(row["telegram_id"])
+
+
+def list_manager_devices(telegram_id: int | None = None) -> list[dict]:
+    sql = ("SELECT d.id, d.telegram_id, d.device, d.created_at, d.last_seen_at, "
+           "d.last_ip, d.revoked_at, m.name manager_name, "
+           "COALESCE(m.role, 'manager') role "
+           "FROM manager_devices d LEFT JOIN managers m ON m.telegram_id = d.telegram_id")
+    args: tuple = ()
+    if telegram_id is not None:
+        sql += " WHERE d.telegram_id = ?"
+        args = (int(telegram_id),)
+    with connect() as conn:
+        rows = conn.execute(sql + " ORDER BY d.telegram_id, d.id", args).fetchall()
+    return [dict(r) for r in rows]
+
+
+def revoke_manager_devices(*, device_id: int | None = None,
+                           telegram_id: int | None = None, by: str = "") -> int:
+    """Отметить отзыв (строку удалит первый стук). Возвращает число отмеченных."""
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    with connect() as conn:
+        if device_id is not None:
+            n = conn.execute(
+                "UPDATE manager_devices SET revoked_at = ?, revoked_by = ? "
+                "WHERE id = ? AND revoked_at IS NULL", (now_iso, by, int(device_id))).rowcount
+        elif telegram_id is not None:
+            n = conn.execute(
+                "UPDATE manager_devices SET revoked_at = ?, revoked_by = ? "
+                "WHERE telegram_id = ? AND revoked_at IS NULL",
+                (now_iso, by, int(telegram_id))).rowcount
+        else:
+            n = 0
+        conn.commit()
+    return n
+
+
+# --- Контрольный обзвон ---------------------------------------------------------
+CONTROL_OUTCOMES = {
+    "confirmed": "подтвердил выезд",
+    "no_visit": "выезда не было",
+    "cash_to_employee": "отдал деньги сотруднику",
+    "paid_elsewhere": "оплатил сам",
+    "no_answer": "не дозвонились",
+    "refused": "отказался говорить",
+    "wrong_number": "не тот номер",
+}
+
+
+def control_checks_for(day: str) -> dict[int, dict]:
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM control_checks WHERE selected_on = ?",
+                            (day,)).fetchall()
+    return {int(r["visit_id"]): dict(r) for r in rows}
+
+
+def control_checks_between(d_from: str, d_to: str) -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM control_checks WHERE selected_on BETWEEN ? AND ?",
+            (d_from, d_to)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def control_select(day: str, picks: list[tuple[int, str, str]]) -> None:
+    """Закрепить выборку дня: (visit_id, почему, сотрудник). Уже выбранное не трогаем."""
+    with connect() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO control_checks (visit_id, selected_on, selected_why, "
+            "employee) VALUES (?,?,?,?)", [(int(v), day, why, emp) for v, why, emp in picks])
+        conn.commit()
+
+
+def control_record(visit_id: int, outcome: str, note: str, checker_uid: int) -> dict | None:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE control_checks SET outcome = ?, note = ?, checker_uid = ?, "
+            "checked_at = ? WHERE visit_id = ?",
+            (outcome, (note or "").strip()[:2000] or None, checker_uid, now_iso,
+             int(visit_id)))
+        conn.commit()
+        if cur.rowcount == 0:
+            return None
+        row = conn.execute("SELECT * FROM control_checks WHERE visit_id = ?",
+                           (int(visit_id),)).fetchone()
+    return dict(row)
 
 
 # --- Настройки --------------------------------------------------------------
@@ -2163,6 +2390,26 @@ def _json_list(s) -> list[str]:
 # только тем, что он уносил чат в архив. Значение по умолчанию — 1: включение
 # роли не должно молча отбирать уже работающие уведомления.
 MANAGER_PUSH_KEYS = ("push_visits", "push_digest", "push_promises")
+
+# Роль в команде руководства (29.09.2026). «Безопасник» видит то же, что
+# руководитель его охвата, плюс «Контроль», но ничего не меняет: не выдаёт вход,
+# не правит план и привязки. «Контроль» руководителю не показывается: флаги
+# нельзя показывать тому, кого они могут касаться. «full» — и то и другое
+# (владелец, директор направления).
+MANAGER_ROLES = ("manager", "security", "full")
+
+
+def manager_role(value) -> str:
+    v = str(value or "").strip().lower()
+    return v if v in MANAGER_ROLES else "manager"
+
+
+def manager_caps(role: str, *, is_owner: bool = False) -> dict:
+    role = "full" if is_owner else manager_role(role)
+    lead = role in ("manager", "full")
+    return {"team_links": lead, "plan_edit": lead, "pushes_edit": lead,
+            "binds_edit": lead, "control": role in ("security", "full"),
+            "activity": True}
 
 DIRECTIONS = {
     "tj": ("Таджикистан", ("Таджикистан",)),
@@ -2377,7 +2624,8 @@ def _manager_dict(r: sqlite3.Row) -> dict:
            "direction": (r["direction"] or "") if "direction" in keys else "",
            "office_cities": (_json_list(r["office_cities"])
                              if "office_cities" in keys else []),
-           "can_dm": r["can_dm"] if "can_dm" in keys else None}
+           "can_dm": r["can_dm"] if "can_dm" in keys else None,
+           "role": manager_role(r["role"] if "role" in keys else None)}
     for key in MANAGER_PUSH_KEYS:
         out[key] = bool(r[key]) if key in keys and r[key] is not None else True
     return out
@@ -2400,7 +2648,8 @@ def set_manager_pushes(telegram_id: int, pushes: dict) -> None:
 def set_manager(telegram_id: int, name: str, cities: list[str],
                 employees: list[str], direction: str | None = None,
                 pushes: dict | None = None,
-                office_cities: list[str] | None = None) -> None:
+                office_cities: list[str] | None = None,
+                role: str | None = None) -> None:
     """Создать/обновить руководителя (upsert по telegram_id). cities — ярлык-подпись
     (свободный ввод), employees — ФИО из реестра (кого он видит в дайджесте).
     office_cities — офисы, чей штат он ведёт: состав живой (db.employee_city),
@@ -2431,6 +2680,11 @@ def set_manager(telegram_id: int, name: str, cities: list[str],
              date.today().isoformat(), 1 if keep_offices else 0),
         )
         conn.commit()
+    if role is not None:
+        with connect() as conn:
+            conn.execute("UPDATE managers SET role = ? WHERE telegram_id = ?",
+                         (manager_role(role), telegram_id))
+            conn.commit()
     if pushes:
         set_manager_pushes(telegram_id, pushes)
     reset_role_caches()
@@ -2454,6 +2708,9 @@ def list_managers() -> list[dict]:
 def delete_manager(telegram_id: int) -> None:
     with connect() as conn:
         conn.execute("DELETE FROM managers WHERE telegram_id = ?", (telegram_id,))
+        # Пульты на компьютерах уходят вместе с ролью: без неё они всё равно
+        # получили бы 403, а висящий токен — лишний вход в базе.
+        conn.execute("DELETE FROM manager_devices WHERE telegram_id = ?", (telegram_id,))
         conn.commit()
     reset_role_caches()
 

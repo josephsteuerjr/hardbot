@@ -30,6 +30,7 @@ registry_export.xlsx
 
 # === Дев/демо-данные ===
 _devdata/
+_devdata_pult/
 _priodemo/
 data_dev/
 data/
