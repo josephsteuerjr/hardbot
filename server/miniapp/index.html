@@ -1008,7 +1008,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=60;
+const SHELL_VERSION=61;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -3646,6 +3646,7 @@ async function dgLoad(){
             : DG.view==="plan"     ? "/api/manager/plan"
             : DG.view==="workload" ? "/api/manager/workload"+dgRangeQ(DG.wemp?{employee:DG.wemp}:{})
             : DG.view==="binds"    ? "/api/manager/binds"
+            : DG.view==="team_links" ? "/api/manager/app_links"
             : DG.view==="cases"    ? "/api/manager/cases"+dgRangeQ({metric:DG.metric||"visits",
                                        country:DG.country||"", office:DG.office||"",
                                        employee:DG.femp||""})
@@ -3736,7 +3737,147 @@ function dgRender(j){
   if(DG.view==="plan") return dgPlanScreen(j,b);
   if(DG.view==="workload") return dgWorkloadScreen(j,b);
   if(DG.view==="binds") return dgBindsScreen(j,b);
+  if(DG.view==="team_links") return dgLinksScreen(j,b);
   return dgPromises(j,b);
+}
+// --- ЭКРАН: вход команды — ссылки входа в приложение ---------------------------
+// 29.09.2026, владелец: от аналитика руководителя отличает только выдача ссылок,
+// остальное — виндовая история. Здесь то же, что «Вход команды» пульта: выдать,
+// выдать заново, отправить, скопировать, сбросить. Граница команды — на сервере
+// (/api/manager/app_link(s), app_revoke): чужое ФИО он не пропустит. В onclick —
+// только индексы в DG.links (апостроф в ФИО, см. правило вкладки выше).
+const DG_LINK_TEXT={in:"вошёл", live:"ссылка выдана", dead:"ссылка истекла", none:"не выдавали"};
+function dgLinkState(x){ return x.entered?"in":(x.alive&&x.url)?"live":x.code?"dead":"none"; }
+function dgLinkName(x){ return x.label||x.employee||""; }
+function dgLinkLine(x){ return dgLinkName(x)+" — "+x.url; }
+// Живая неоткрытая ссылка бывает и у того, кто уже вошёл (выдали на новый
+// телефон) — отправить её надо и тогда.
+function dgLinkOpen(x){ return x.employee!=="!me" && !!(x.alive&&x.url); }
+function dgLinksScreen(j,b){
+  if(j) DG.links=[j.me, ...(j.links||[])].filter(Boolean);
+  const all=DG.links||[], f=DG.lf||"";
+  const cnt={in:0,live:0,dead:0,none:0};
+  all.forEach(x=>{ if(x.employee!=="!me") cnt[dgLinkState(x)]++; });
+  const lacking=all.filter(x=>x.employee!=="!me" && (dgLinkState(x)==="none"||dgLinkState(x)==="dead"));
+  const live=all.filter(dgLinkOpen);
+  const chip=(k,t,n)=>`<button class="chip${f===k?" on":""}" onclick="dgLinkFilter(${jsq(k)})">${esc(t)}${n!=null?" · "+n:""}</button>`;
+  b.innerHTML=[`<button class="back" onclick="dgGo('stats')">‹ к сводке</button>`,
+    dgTop("Вход команды","ссылки входа в приложение"),
+    `<div class="muted" style="font-size:13px;margin:4px 0 2px">Ссылка личная: перешлите её человеку. Он открывает её на телефоне и сразу попадает в свой портфель. Сбросить — если телефон потерян или человек ушёл.</div>`,
+    `<div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn line" style="flex:1 1 100%" ${lacking.length?"":"disabled"} onclick="dgLinkIssueAll()">Выдать всем, у кого нет · ${lacking.length}</button>
+      <button class="btn line" style="flex:1 1 100%" ${live.length?"":"disabled"} onclick="dgLinkCopyAll()">Скопировать живые ссылки · ${live.length}</button></div>`,
+    `<div class="chips">${chip("","Все",null)}${chip("in","Вошли",cnt.in)}${chip("live","Выдана",cnt.live)}${chip("dead","Истекла",cnt.dead)}${chip("none","Не выдавали",cnt.none)}</div>`,
+    `<div class="searchwrap">${ic("search")}<input class="search" id="dglq" placeholder="Поиск сотрудника" value="${esc(DG.lq||"")}" oninput="dgLinkSearch(this.value)"></div>`,
+    `<div id="dglinklist"></div>`].join("");
+  dgLinksDraw();
+}
+// Список — отдельно от шапки: поиск перерисовывает только его, и поле ввода не
+// теряет фокус вместе с клавиатурой.
+function dgLinksDraw(){
+  const box=$("dglinklist"); if(!box) return;
+  const all=DG.links||[], f=DG.lf||"", q=(DG.lq||"").trim().toLowerCase();
+  const shown=all.map((x,i)=>[x,i]).filter(([x])=>(!f||dgLinkState(x)===f||x.employee==="!me")
+    && (!q||dgLinkName(x).toLowerCase().includes(q)));
+  const rows=shown.map(([x,i])=>{
+    const st=dgLinkState(x), me=x.employee==="!me";
+    const seen=x.last_use_at?"последний вход "+dgWhen(x.last_use_at):"";
+    const open=!!(x.alive&&x.url);
+    const uses=open?`ссылка открыта ${x.uses||0} из ${x.max_uses||2}`:"";
+    const dev=x.entered&&x.devices>1?`${x.devices} устройства`:"";
+    return `<div class="box">
+      <div class="pname">${esc(dgLinkName(x))}</div>
+      <div class="psub">${esc([DG_LINK_TEXT[st], dev, uses, seen].filter(Boolean).join(" · "))}</div>
+      ${open?`<div class="psub" style="word-break:break-all;margin-top:2px">${esc(x.url)}</div>`:""}
+      <div class="chips" style="margin-bottom:0">
+        ${open?`<button class="chip" onclick="dgLinkShare(${i})">📤 Отправить</button>
+          <button class="chip" onclick="dgLinkCopy(${i})">Копировать</button>`:""}
+        <button class="chip" onclick="dgLinkIssue(${i})">${me?"Выдать себе":(x.code||x.entered)?"Выдать заново":"Выдать"}</button>
+        ${!me&&(x.entered||x.code)?`<button class="chip" onclick="dgLinkRevoke(${i})">✖ Сбросить</button>`:""}
+      </div></div>`;
+  }).join("");
+  box.innerHTML=rows||`<div class="center">Никого под этот отбор</div>`;
+}
+function dgLinkFilter(k){ DG.lf=(DG.lf===k)?"":k; dgLinksScreen(null,$("dgbody")); }
+function dgLinkSearch(v){ DG.lq=v; dgLinksDraw(); }
+async function dgLinkPost(path, body){
+  const h=authHeaders(); h["Content-Type"]="application/json";
+  const r=await fetch(path,{method:"POST",headers:h,body:JSON.stringify(body)});
+  let j={}; try{ j=await r.json(); }catch(e){}
+  if(!r.ok||j.error) throw new Error(j.error||("сервер ответил "+r.status));
+  return j;
+}
+async function dgCopyText(t){
+  try{ await navigator.clipboard.writeText(t); toast("Скопировано"); return; }catch(e){}
+  const ta=document.createElement("textarea"); ta.value=t; ta.setAttribute("readonly","");
+  ta.style.position="fixed"; ta.style.opacity="0"; document.body.appendChild(ta); ta.select();
+  let ok=false; try{ ok=document.execCommand("copy"); }catch(e){} ta.remove();
+  toast(ok?"Скопировано":"Не скопировалось — выделите ссылку вручную");
+}
+// «Отправить» — системное меню «Поделиться» (Телеграм, WhatsApp, СМС). Где его
+// нет (встроенный браузер мессенджера), ссылка просто копируется.
+async function dgShareText(t){
+  if(navigator.share){ try{ await navigator.share({text:t}); return; }
+    catch(e){ if(e&&e.name==="AbortError") return; } }
+  await dgCopyText(t);
+}
+function dgLinkShareText(x){
+  return (x.employee==="!me"?"Вход руководителя в приложение «Хард»: ":dgLinkName(x)+", ваша ссылка входа в приложение «Хард»: ")+x.url;
+}
+function dgLinkShare(i){ const x=(DG.links||[])[i]; if(x&&x.url) dgShareText(dgLinkShareText(x)); }
+function dgLinkCopy(i){ const x=(DG.links||[])[i]; if(x&&x.url) dgCopyText(x.url); }
+function dgLinkCopyAll(){
+  const live=(DG.links||[]).filter(dgLinkOpen);
+  if(live.length) dgCopyText(live.map(dgLinkLine).join("\n"));
+}
+// Выданные ссылки — листом снизу: отправить сразу, пока человек под рукой.
+function dgLinkSheet(title, done){
+  DG.linkout=done.filter(x=>x.url).map(x=>x.name+" — "+x.url).join("\n");
+  const bad=done.filter(x=>!x.url);
+  askSheet("dglinksheet", `<div class="pname" style="margin-bottom:6px">${esc(title)}</div>
+    <div style="max-height:42vh;overflow:auto;font-size:13px;line-height:1.45;word-break:break-all">
+      ${done.map(x=>`<div style="margin:4px 0">${esc(x.name)} — ${x.url?esc(x.url):`<span style="color:var(--danger)">${esc(x.error||"не выдано")}</span>`}</div>`).join("")}</div>
+    ${bad.length?`<div class="psub" style="margin-top:6px">не выдано: ${bad.length}</div>`:""}
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button class="btn acc" style="flex:1" ${DG.linkout?"":"disabled"} onclick="dgShareText(DG.linkout)">📤 Отправить</button>
+      <button class="btn" style="flex:1" ${DG.linkout?"":"disabled"} onclick="dgCopyText(DG.linkout)">Копировать</button></div>
+    <button class="btn ghost" style="margin-top:8px" onclick="closeAsk('dglinksheet')">Готово</button>`);
+}
+async function dgLinkIssue(i){
+  const x=(DG.links||[])[i]; if(!x) return;
+  if(x.entered && x.employee!=="!me" && !confirm("«"+dgLinkName(x)+"» уже вошёл. Выдать ещё одну ссылку — например, на новый телефон? Нынешний вход не пропадёт."))
+    return;
+  toast("Выдаю ссылку…");
+  try{
+    const out=await dgLinkPost("/api/manager/app_link",{employee:x.employee});
+    Object.assign(x,{url:out.url, code:out.code, alive:true, uses:0, max_uses:out.uses||x.max_uses});
+    dgLinksScreen(null,$("dgbody"));
+    dgLinkSheet("Ссылка входа",[{name:dgLinkName(x), url:out.url}]);
+  }catch(e){ toast(String((e&&e.message)||e)); }
+}
+async function dgLinkIssueAll(){
+  const list=(DG.links||[]).filter(x=>x.employee!=="!me" && (dgLinkState(x)==="none"||dgLinkState(x)==="dead"));
+  if(!list.length) return;
+  if(!confirm("Выдать ссылку входа "+list.length+" чел. — всем, у кого её нет или она истекла?")) return;
+  const done=[];
+  for(let k=0;k<list.length;k++){
+    const x=list[k]; toast("Выдаю "+(k+1)+" из "+list.length+"…");
+    try{
+      const out=await dgLinkPost("/api/manager/app_link",{employee:x.employee});
+      Object.assign(x,{url:out.url, code:out.code, alive:true, uses:0, max_uses:out.uses||x.max_uses});
+      done.push({name:dgLinkName(x), url:out.url});
+    }catch(e){ done.push({name:dgLinkName(x), url:"", error:String((e&&e.message)||e)}); }
+  }
+  dgLinksScreen(null,$("dgbody"));
+  dgLinkSheet("Ссылки входа · "+done.filter(x=>x.url).length+" из "+list.length, done);
+}
+async function dgLinkRevoke(i){
+  const x=(DG.links||[])[i]; if(!x||x.employee==="!me") return;
+  if(!confirm("Сбросить вход «"+dgLinkName(x)+"»? Приложение на его телефоне закроется, ссылки перестанут работать. Выезды останутся. Вернуть вход — новой ссылкой.")) return;
+  try{
+    await dgLinkPost("/api/manager/app_revoke",{employee:x.employee});
+    toast("Вход сброшен"); dgGo("team_links");
+  }catch(e){ toast(String((e&&e.message)||e)); }
 }
 // --- ЭКРАН: нагрузка — норма по расчёту против ручной, разбор дней ------------
 // Норма «10 на всех» не различает портфель в трёх кварталах и портфель по
@@ -3905,6 +4046,7 @@ function dgStats(j,b){
     <button class="btn line" style="flex:1" onclick="dgGo('plan')">🎯 Нормы</button>
     <button class="btn line" style="flex:1" onclick="dgGo('workload',{wemp:null})">📐 Нагрузка</button>
     <button class="btn line" style="flex:1" onclick="dgGo('binds')">👤 Кто есть кто${(+j.bind_requests>0)?" · "+(+j.bind_requests):""}</button>
+    ${(j.manager&&j.manager.caps&&j.manager.caps.team_links===false)?"":`<button class="btn line" style="flex:1" onclick="dgGo('team_links')">🔗 Вход команды</button>`}
     <button class="btn line" style="flex:1" onclick="dgExcel()">⬇️ Excel</button></div>`);
   b.innerHTML=parts.join("");
   dgDrawKpis();

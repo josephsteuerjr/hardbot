@@ -14,6 +14,9 @@ const ROLES: [string, string, string][] = [
   ["full", "Руководитель и контроль", "всё сразу — для директора направления"],
 ];
 const ROLE_TITLE = Object.fromEntries(ROLES.map(([k, t]) => [k, t]));
+// Ссылка руководителя — на три входа: телефон, ярлык на экране iPhone (у него
+// своё хранилище) и компьютер с пультом.
+const MANAGER_USES = 3;
 
 let data: any = null;
 let staff: Record<string, string[]> = {};
@@ -90,10 +93,10 @@ function drawBulk(root: HTMLElement) {
   on("new", async () => edit(root, null, await fn("managers.next_local_manager_id", data.managers || []), []));
   const issue = async (list: MRow[], title: string) => {
     if (!list.length) return;
-    if (!(await ask(title, `Выдать вход ${list.length} чел.? Ссылку можно открыть два раза: в пульте руководителя на компьютере и на телефоне. У кого ссылку выдавали, но не открыли, — старая перестанет работать.`, "Выдать"))) return;
+    if (!(await ask(title, `Выдать вход ${list.length} чел.? Ссылку можно открыть три раза: на телефоне, в ярлыке на экране iPhone и в пульте на компьютере. У кого ссылку выдавали, но не открыли, — старая перестанет работать.`, "Выдать"))) return;
     toast("Выдаю ссылки…");
     // Руководителю — только id: с ФИО сервер привязал бы его к сотруднику.
-    const d = await adm("POST", "/admin/app_links_bulk.json", { items: list.map((r) => ({ telegram_id: r.m.telegram_id })), uses: 2 }, 180);
+    const d = await adm("POST", "/admin/app_links_bulk.json", { items: list.map((r) => ({ telegram_id: r.m.telegram_id })), uses: MANAGER_USES }, 180);
     const byId: Record<string, string> = Object.fromEntries(list.map((r) => [String(r.m.telegram_id), r.row.name]));
     const rows = ((d.results || []) as any[]).map((x) => ({ employee: byId[String(x.telegram_id)] || x.employee || String(x.telegram_id),
       who: "руководитель", url: x.url || "", uses: x.max_uses, expires: String(x.expires_at || "").slice(0, 10), error: x.error || "" }));

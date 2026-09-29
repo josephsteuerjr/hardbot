@@ -52,5 +52,13 @@ app.whenReady().then(async () => {
   await shot("06-digest", 2500);
   await js(`document.getElementById('app').scrollTop = 1100`);
   await shot("07-digest-table", 700);
+  // «Вход команды»: список, затем массовая выдача (вопрос подтверждаем сами —
+  // системный confirm остановил бы снимки).
+  await js(`[...document.querySelectorAll('#dgbody button')].find(b => /Вход команды/.test(b.textContent))?.click()`);
+  await shot("08-links", 2000);
+  await js(`window.confirm = () => true; [...document.querySelectorAll('#dgbody button')].find(b => /Выдать всем/.test(b.textContent))?.click()`);
+  await shot("09-links-issued", 4000);
+  await js(`closeAsk('dglinksheet'); document.getElementById('app').scrollTop = 0`);
+  await shot("10-links-after", 800);
   app.quit();
 });

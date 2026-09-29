@@ -66,7 +66,9 @@ def _seed():
 
 def _visit(cid, emp, comment, *, level="confirmed", fill=300, day=None, op=None):
     day = day or date.today().isoformat()
-    saved = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    # Сохранён днём по времени поля (07:00 UTC = 12:00 в Ташкенте): «сейчас»
+    # вечером попадал бы в ночь и тест зависел бы от часа прогона.
+    saved = datetime.fromisoformat(f"{day}T07:00:00+00:00").isoformat()
     payload = (f"Выезд (миниапп). Статус: Нет контакта; Договорённость: ; Контакт: ; "
                f"На адресе: ; {comment}")
     db.log_visit(cid, AGENT, payload, op_id=op or f"p2-{cid}-{comment[:6]}", on_date=day,

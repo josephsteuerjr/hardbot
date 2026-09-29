@@ -348,7 +348,11 @@ def _manager_envelope(mgr, team, iso, today, prev, nxt, uid) -> dict:
             "manager": {"name": mgr.get("name") or "",
                         "scope": digest_data.scope_label(mgr),
                         "countries": digest_data.scope_countries_info(mgr),
-                        "isOwner": uid == ADMIN_ID}}
+                        "isOwner": uid == ADMIN_ID,
+                        # Права видит и приложение: «Вход команды» безопаснику
+                        # не показывается (сервер его всё равно не пустит).
+                        "caps": db.manager_caps(mgr.get("role"),
+                                                is_owner=uid == ADMIN_ID)}}
 
 
 def _employee(uid: int) -> str | None:
@@ -3595,6 +3599,7 @@ async def _json_object(request: web.Request) -> dict | None:
 # ФИО не начинаются с «!» (та же договорённость, что у digest_data.NO_OFFICE).
 MANAGER_SELF = "!me"
 MANAGER_SELF_LABEL = "Вы — вход руководителя"
+MANAGER_LINK_USES = 3
 
 
 def _manager_self_row(uid: int, base: str) -> dict:
@@ -3682,7 +3687,9 @@ async def _manager_app_link(request: web.Request) -> web.Response:
             return web.json_response(
                 {"error": "MINIAPP_URL не задан на сервере: без публичного адреса "
                           "ссылку входа не собрать"}, status=409)
-        code = db.create_app_link(uid, max_uses=db.APP_LINK_DEFAULT_USES)
+        # Три обмена: телефон, ярлык на экране iPhone (своё хранилище) и
+        # компьютер с пультом — иначе двойка кончалась бы на втором устройстве.
+        code = db.create_app_link(uid, max_uses=MANAGER_LINK_USES)
         who = mgr.get("name") or f"id{uid}"
         db.audit_access(uid, "mgr_app_link_self",
                         detail=f"{who} выдал себе вход: {_mask_code(code)}")
@@ -3691,7 +3698,7 @@ async def _manager_app_link(request: web.Request) -> web.Response:
             "code": code, "url": f"{base}/i/{code}",
             "expires_at": db.app_link_expires_at(
                 datetime.now().isoformat(timespec="seconds")),
-            "uses": db.APP_LINK_DEFAULT_USES,
+            "uses": MANAGER_LINK_USES,
         })
     own = db.get_binding(uid)
     allowed = set(team) | ({own} if own else set())
