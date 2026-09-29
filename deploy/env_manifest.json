@@ -374,6 +374,20 @@
       "why": "1 — при локальном запуске dev-миниаппа не открывать браузер. К серверу отношения не имеет."
     },
     {
+      "name": "PULT_DEV_PORT",
+      "unit": "core", "in_env_example": false, "required": false,
+      "default": "8090",
+      "readers": ["server/pult_dev.py:158"],
+      "why": "Порт дев-стенда пультов (server/pult_dev.py, синтетика). К рабочему серверу отношения не имеет."
+    },
+    {
+      "name": "HARD_PULT_SETTINGS",
+      "unit": "pult", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["pult/core/settings.py:30"],
+      "why": "Другой файл настроек пульта аналитика — для дев-стенда и снимков окна, чтобы проверка не ходила в рабочий контур."
+    },
+    {
       "name": "HARDBOT_NO_BROWSER",
       "unit": "core", "in_env_example": false, "required": false,
       "default": "",

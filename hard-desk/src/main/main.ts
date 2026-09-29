@@ -8,15 +8,28 @@
 import { BrowserWindow, Menu, Notification, Tray, app, clipboard, dialog, ipcMain, nativeImage, nativeTheme,
   net as enet, protocol, screen, shell } from "electron";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { extname, join, normalize, sep } from "node:path";
+import { dirname, extname, join, normalize, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { call, deviceName, enroll, logout, setRevokedHandler } from "./net";
 import { local, startBackend } from "./local";
 import { runShots } from "./shots";
 import { readSettings, readToken, writeSettings } from "./store";
 
+// Режим: явный флаг, имя файла или место. Поставка одна: папка «Хард», лежащая
+// внутри комплекта аналитика (рядом с pult/desk_backend.py), открывается пультом
+// аналитика; та же папка у руководителя — пультом руководителя.
+function inAnalystKit(): boolean {
+  if (!app.isPackaged) return false;
+  let d = dirname(process.execPath);
+  for (let i = 0; i < 3; i++) {
+    d = dirname(d);
+    if (existsSync(join(d, "pult", "desk_backend.py"))) return true;
+  }
+  return false;
+}
 const MODE: "manager" | "analyst" =
   process.argv.includes("--analyst") || /аналит|analyst/i.test(process.execPath) || process.env.HARD_MODE === "analyst"
+    || (!process.argv.includes("--manager") && inAnalystKit())
     ? "analyst" : "manager";
 const PRODUCT = MODE === "analyst" ? "Хард — пульт аналитика" : "Хард — пульт руководителя";
 

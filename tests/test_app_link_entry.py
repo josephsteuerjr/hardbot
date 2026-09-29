@@ -20,6 +20,7 @@
 import asyncio
 import re
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -488,8 +489,10 @@ def test_columns_migrate_on_a_working_database_with_rows(monkeypatch, tmp_path):
                  " created_at TEXT, used_at TEXT, uses INTEGER NOT NULL DEFAULT 0)")
     conn.execute("CREATE TABLE app_tokens (token TEXT PRIMARY KEY, telegram_id INTEGER,"
                  " created_at TEXT, expires_at TEXT)")
-    conn.execute("INSERT INTO app_links VALUES ('старая', 77, '2026-09-20T10:00:00',"
-                 " NULL, 0)")
+    # Дата выдачи — вчера, а не число из календаря: окно активации ссылки
+    # (APP_LINK_DAYS) неделя, и прибитая дата делала тест красным через неделю.
+    issued = (datetime.now() - timedelta(days=1)).isoformat(timespec="seconds")
+    conn.execute("INSERT INTO app_links VALUES ('старая', 77, ?, NULL, 0)", (issued,))
     conn.execute("INSERT INTO app_tokens VALUES ('старый-токен', 77,"
                  " '2026-09-20T10:00:00', '2099-01-01T00:00:00')")
     conn.commit()
