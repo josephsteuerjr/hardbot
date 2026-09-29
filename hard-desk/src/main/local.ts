@@ -85,16 +85,21 @@ export async function local(path: string, body: unknown = {}): Promise<{ ok: boo
   } catch (e) {
     return { ok: false, error: String((e as Error).message || e) };
   }
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Local-Secret": secret },
-      body: JSON.stringify(body ?? {}),
-    });
-    return (await res.json()) as { ok: boolean; data?: unknown; error?: string };
-  } catch (e) {
-    return { ok: false, error: "Питон-сторона пульта не отвечает: " + String((e as Error).message || e) };
+  let last: unknown = null;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Local-Secret": secret },
+        body: JSON.stringify(body ?? {}),
+      });
+      return (await res.json()) as { ok: boolean; data?: unknown; error?: string };
+    } catch (e) {
+      last = e;                 // сокет оборвался — повторим, запросы идемпотентны по чтению
+      await new Promise((r) => setTimeout(r, 120 * (i + 1)));
+    }
   }
+  return { ok: false, error: "Питон-сторона пульта не отвечает: " + String((last as Error)?.message || last) };
 }
 
 export function stopBackend(): void {

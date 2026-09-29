@@ -225,6 +225,9 @@ def _jsonable(v):
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "HardDesk/1"
+    # Постоянное соединение: окно шлёт десятки мелких запросов разом, и при
+    # HTTP/1.0 Node пытался переиспользовать уже закрытый сокет («fetch failed»).
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):  # тишина: вывод читает Electron
         return

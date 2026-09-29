@@ -14,6 +14,7 @@ import { people } from "./analyst/people";
 import { links as aLinks } from "./analyst/links";
 import { managers } from "./analyst/managers";
 import { conn, maint } from "./analyst/system";
+import { priority, registry } from "./analyst/registry";
 
 /** Пульт аналитика: тот же каркас и облик, данные — через питон-сторону. */
 async function startAnalyst() {
@@ -28,7 +29,7 @@ async function startAnalyst() {
     return;
   }
   setWho(`<b>${esc(st.active || "")}</b>${esc(st.url || "адрес не задан")}`);
-  const list: Section[] = [today, people, aLinks, managers, conn, maint];
+  const list: Section[] = [today, people, aLinks, managers, registry, priority, conn, maint];
   setSections(list);
   let first = st.bound ? "dash" : "conn";
   try { if (st.bound) first = localStorage.getItem("hard.section") || first; } catch { /* */ }
