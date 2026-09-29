@@ -4,6 +4,7 @@
 import { api, hard, type Shell } from "./kit/api";
 import { $, esc } from "./kit/dom";
 import { bare, go, mountShell, refresh, setHead, setSections, setWho, type Section } from "./kit/shell";
+import { startHeartbeat } from "./kit/heartbeat";
 import { activity } from "./views/activity";
 import { control } from "./views/control";
 import { device, links, promises, report } from "./views/misc";
@@ -36,6 +37,13 @@ async function startAnalyst() {
   try { if (st.bound) first = localStorage.getItem("hard.section") || first; } catch { /* */ }
   if (!list.some((s) => s.id === first)) first = "dash";
   await go(first);
+  if (st.bound) startHeartbeat(async () => {
+    const r = await hard.local("/admin", { method: "GET", path: "/admin/devices.json", timeout: 15 });
+    if (r.ok) return "live";
+    const e = r.error || "";
+    if (/отозван|не принят/i.test(e)) return "revoked";
+    return /Нет связи|ертификат/i.test(e) ? "off" : "live";
+  }, () => refresh());
 }
 
 let shell: Shell;
@@ -95,6 +103,12 @@ async function start() {
   try { first = localStorage.getItem("hard.section") || first; } catch { /* */ }
   if (!list.some((s) => s.id === first)) first = "activity";
   await go(first);
+  // Запуск без связи оставил разделы по умолчанию (без «Контроля» и т. п.) —
+  // тогда при возврате связи собираем пульт заново, иначе просто перерисовываем.
+  startHeartbeat(async () => {
+    const r = await hard.api("GET", "/api/manager/device/me");
+    return r.kind === "offline" || r.kind === "cert" ? "off" : r.kind === "revoked" ? "revoked" : "live";
+  }, () => (info ? refresh() : start()));
 }
 
 const ANALYST = new URLSearchParams(location.search).get("mode") === "analyst";
