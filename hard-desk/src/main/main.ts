@@ -29,8 +29,11 @@ function inAnalystKit(): boolean {
   }
   return false;
 }
+// Режим аналитика — только внутри комплекта (рядом pult/) или по явному флагу.
+// Прежнее правило «в пути есть слово "аналит"» открывало пульт руководителя,
+// распакованный в папку отдела аналитики, пультом аналитика без питон-стороны.
 const MODE: "manager" | "analyst" =
-  process.argv.includes("--analyst") || /аналит|analyst/i.test(process.execPath) || process.env.HARD_MODE === "analyst"
+  process.argv.includes("--analyst") || process.env.HARD_MODE === "analyst"
     || (!process.argv.includes("--manager") && inAnalystKit())
     ? "analyst" : "manager";
 const PRODUCT = MODE === "analyst" ? "Хард — пульт аналитика" : "Хард — пульт руководителя";
