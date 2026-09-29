@@ -20,6 +20,8 @@ bootstrap.ensure_paths()
 import enrich  # noqa: E402 — модуль верхнего уровня pult/, путь выше
 from pult.core import enrichment as en  # noqa: E402
 from pult.core import header_map as hm  # noqa: E402
+import exchange_contract as _xc  # noqa: E402 — контракт обмена (server/)
+from pult.core import exchange_state as xs  # noqa: E402
 from pult.core import registry_import as ri  # noqa: E402
 from pult.core.constants import (  # noqa: E402
     LIMITED_TEST_ENRICH_DISABLED_MESSAGE,
@@ -164,7 +166,8 @@ def imp_preview(body, *, admin, start_job, **_):
                                                  force_test_subset=restore)
         pbody = ri.preview_body(prepared, full_registry=full, restore_manual=restore,
                                 replace_current_comments=comments)
-        d = admin("POST", "/admin/import/preview.json", pbody, timeout=180)
+        d = xs.post_import(admin, "/admin/import/preview.json", pbody,
+                           sheet=_xc.WORKBOOK_SHEET_NAME, timeout=180, log=say)
         if d.get("error"):
             S["preview"] = None
             return {"error": ri.import_error_text(d, proof_path, registration_hint_wanted=False)}
@@ -199,7 +202,8 @@ def imp_apply(body, *, admin, start_job, **_):
                                timeout=60)
         except Exception:  # noqa: BLE001 — регистратор закрыт: подскажем команду
             registered = None
-        d = admin("POST", "/admin/import.json", pv["body"], timeout=180)
+        d = xs.post_import(admin, "/admin/import.json", pv["body"],
+                           sheet=_xc.WORKBOOK_SHEET_NAME, timeout=180, log=say)
         if isinstance(d, dict) and d.get("error"):
             d = {**d, "_proof_digest": meta["proof_digest"], "_source_kind": meta["source_kind"],
                  "_registered": bool(registered and registered.get("ok"))}

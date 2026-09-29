@@ -4748,6 +4748,9 @@ async def _admin_import_json(request: web.Request) -> web.Response:
     """
     _admin(request)
     body = await request.json()
+    refused = await asyncio.to_thread(_expand_sheets_delta, body)
+    if refused:
+        return web.json_response(refused, status=409)
     source_kind = body.get("source_kind")
     if source_kind not in db.IMPORT_SOURCE_KINDS:
         return web.json_response(
@@ -4963,6 +4966,71 @@ def _import_grid_serial(grid, **options) -> dict:
         return db.import_grid(grid, **options)
 
 
+# --- Перевоз реестра разницей (опыт exp/fast-exchange, 30.09.2026) -----------
+# Сервер помнит последние гриды, которые к нему приезжали (по SHA-256), и
+# принимает вместо «sheets» разницу к одному из них. Собранный грид обязан
+# совпасть с присланным отпечатком — дальше путь импорта прежний, до буквы.
+# Базы нет (перезапуск, чистка, другая машина) — 409 delta_base_unknown, и
+# пульт шлёт грид целиком.
+import grid_delta  # noqa: E402
+
+IMPORT_BASES_KEEP = 3
+
+
+def _import_bases_dir() -> Path:
+    d = Path(db.DB_PATH).parent / "import_bases"
+    d.mkdir(exist_ok=True)
+    return d
+
+
+def _remember_import_base(grid) -> str:
+    import gzip
+    raw = grid_delta.canonical(grid)
+    digest = hashlib.sha256(raw).hexdigest()
+    d = _import_bases_dir()
+    path = d / f"{digest}.json.gz"
+    if path.exists():
+        os.utime(path)
+    else:
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_bytes(gzip.compress(raw, 6))
+        os.replace(tmp, path)
+    for old in sorted(d.glob("*.json.gz"), key=lambda x: x.stat().st_mtime,
+                      reverse=True)[IMPORT_BASES_KEEP:]:
+        old.unlink(missing_ok=True)
+    return digest
+
+
+def _load_import_base(digest):
+    import gzip
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return None
+    path = _import_bases_dir() / f"{digest}.json.gz"
+    if not path.exists():
+        return None
+    return json.loads(gzip.decompress(path.read_bytes()))
+
+
+def _expand_sheets_delta(body: dict):
+    """sheets_delta → sheets с тем же гридом; вернуть тело ответа-отказа или None."""
+    delta = body.get("sheets_delta")
+    if delta is None:
+        return None
+    if body.get("sheets") is not None:
+        return {"blocked": True, "error": "delta_and_sheets",
+                "detail": "прислано и sheets, и sheets_delta"}
+    base = _load_import_base(delta.get("base") if isinstance(delta, dict) else None)
+    if base is None:
+        return {"blocked": True, "error": "delta_base_unknown"}
+    try:
+        grid = grid_delta.apply_delta(base, delta)
+    except grid_delta.DeltaError as exc:
+        return {"blocked": True, "error": "delta_mismatch", "detail": str(exc)}
+    body.pop("sheets_delta", None)
+    body["sheets"] = [{"name": db.WORKBOOK_SHEET_NAME, "grid": grid}]
+    return None
+
+
 async def _admin_import_preview_json(request: web.Request) -> web.Response:
     """Read-only preflight импорта без consume receipt и побочных mutator-ов.
 
@@ -4971,6 +5039,9 @@ async def _admin_import_preview_json(request: web.Request) -> web.Response:
     """
     _admin(request)
     body = await request.json()
+    refused = await asyncio.to_thread(_expand_sheets_delta, body)
+    if refused:
+        return web.json_response(refused, status=409)
     source_kind = body.get("source_kind")
     if source_kind not in db.IMPORT_SOURCE_KINDS:
         return web.json_response(
@@ -5028,6 +5099,7 @@ async def _admin_import_preview_json(request: web.Request) -> web.Response:
     )
     if report.get("blocked"):
         return web.json_response(report, status=409)
+    report["delta_base"] = await asyncio.to_thread(_remember_import_base, grid)
     return web.json_response(report)
 
 
