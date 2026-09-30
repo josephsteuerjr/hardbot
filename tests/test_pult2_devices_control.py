@@ -11,6 +11,7 @@
 
 import asyncio
 import io
+import pathlib
 from datetime import date, datetime, timedelta, timezone
 
 from aiohttp.test_utils import TestClient, TestServer
@@ -102,7 +103,25 @@ def test_enroll_spends_one_use_and_dead_link_is_410():
     st, _ = _call("POST", "/api/manager/device/enroll", json_body={"code": code, "device": "a"})
     assert st == 200
     st, body = _call("POST", "/api/manager/device/enroll", json_body={"code": code, "device": "b"})
-    assert st == 410 and body["error"] == "link_dead"
+    assert st == 410 and body["error"] == "link_dead" and body["reason"] == "used_up"
+
+
+def test_dead_link_says_why_so_the_pult_can_point_to_a_new_one():
+    """30.09.2026: руководители вставляли потраченные телефоном ссылки и видели
+    одно «устарела». Теперь сервер называет причину, пульт — путь к новой."""
+    _seed()
+    old = db.create_app_link(MGR, max_uses=3)
+    fresh = db.create_app_link(MGR, max_uses=3)          # старую неоткрытую гасит
+    st, body = _call("POST", "/api/manager/device/enroll", json_body={"code": old, "device": "a"})
+    assert st == 410 and body["reason"] == "unknown"
+    with db.connect() as conn:
+        conn.execute("UPDATE app_links SET created_at = '2020-01-01T00:00:00' WHERE code = ?", (fresh,))
+        conn.commit()
+    st, body = _call("POST", "/api/manager/device/enroll", json_body={"code": fresh, "device": "a"})
+    assert st == 410 and body["reason"] == "expired"
+    assert db.app_link_status(db.create_app_link(MGR)) == "live"
+    src = (pathlib.Path(__file__).resolve().parent.parent / "hard-desk" / "src" / "main" / "net.ts").read_text("utf-8")
+    assert "deadLinkText(await deadReason(res))" in src and "Выдать себе" in src
 
 
 def test_field_worker_link_is_not_a_key_and_is_not_spent():

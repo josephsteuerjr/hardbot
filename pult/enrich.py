@@ -1184,9 +1184,20 @@ def _excel_safe(value):
     if not isinstance(value, str):
         return value
     v = value[:_EXCEL_CELL_LIMIT]
-    if excel_formula_like(v):
+    if excel_formula_like(v) or excel_digits_lossy(v):
         return "'" + v
     return v
+
+
+def excel_digits_lossy(value) -> bool:
+    """Строка из одних цифр, которую Excel при вводе превратил бы в число С
+    ПОТЕРЕЙ: ведущие нули («0012345» → 12345) или больше 15 цифр (точность
+    Excel — 15 знаков, «8600123412341234» → 8600123412341230). Опыт A/B
+    30.09.2026: такой комментарий книга хранит числом, повторная сверка плана
+    не сходится, а в ячейке остаётся искажённое значение."""
+    t = value.strip() if isinstance(value, str) else ""
+    return t.isdigit() and t.isascii() and (
+        (len(t) > 1 and t[0] == "0") or len(t) > 15)
 
 
 # --- Занятая книга -----------------------------------------------------------

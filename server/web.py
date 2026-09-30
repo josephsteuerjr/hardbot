@@ -4044,7 +4044,11 @@ async def _manager_device_enroll(request: web.Request) -> web.Response:
     uid = db.peek_app_link(code) if code else None
     if not uid:
         _admin_auth_failed(request, scope="app")
-        raise _json_error(web.HTTPGone, "link_dead")
+        # Причина — чтобы пульт подсказал путь («Выдать себе» в приложении),
+        # а не одно «устарела». Код 72-битный: знание «был/кончился» перебору
+        # не помогает, а сам перебор считает общий счётчик неудач.
+        raise _json_error(web.HTTPGone, "link_dead",
+                          reason=db.app_link_status(code) if code else "unknown")
     mgr = digest_data.manager_scope(uid, is_owner=(uid == ADMIN_ID))
     if mgr is None:
         # Ссылка живая, но это вход выездника: не тратим её — пусть работает
