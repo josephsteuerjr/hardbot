@@ -395,6 +395,20 @@
       "why": "Дев-стенд целиком в режиме старого адреса (только выгрузка) — для студии и снимков. Действует только вместе с APP_DEV."
     },
     {
+      "name": "HARD_EXCHANGE_DELTA",
+      "unit": "pult", "in_env_example": false, "required": false,
+      "default": "1",
+      "readers": ["pult/core/exchange_state.py:27"],
+      "why": "Импорт реестра разницей к последнему отправленному гриду (сервер собирает тот же грид и сверяет SHA-256). 0 — всегда слать целиком, как до 01.10.2026."
+    },
+    {
+      "name": "HARD_EXCHANGE_DB",
+      "unit": "pult", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["pult/core/exchange_state.py:31"],
+      "why": "Другой файл локальной базы обмена пульта (последние отправленные гриды) — для тестов. Пусто — %LOCALAPPDATA%/Хард/exchange.sqlite."
+    },
+    {
       "name": "HARD_PULT_SETTINGS",
       "unit": "pult", "in_env_example": false, "required": false,
       "default": "",
@@ -671,6 +685,13 @@
       "default": "",
       "readers": ["registry_cycle/scheduler.py:37"],
       "why": "Домен пользователя Windows — его подставляет сама ОС. Нужен, чтобы задача в планировщике завелась от имени того, кто её создал. Не настройка."
+    },
+    {
+      "name": "LOCALAPPDATA",
+      "unit": "система", "in_env_example": false, "required": false,
+      "default": "",
+      "readers": ["pult/core/exchange_state.py:34"],
+      "why": "Локальная папка приложений Windows — её подставляет сама ОС. Там пульт держит базу обмена (Хард/exchange.sqlite). Не настройка."
     },
     {
       "name": "USERNAME",
