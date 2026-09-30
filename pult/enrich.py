@@ -1750,9 +1750,15 @@ def _enrich_local(
     if raw_path.is_symlink() or not raw_path.is_file():
         raise FileNotFoundError(f"нужен обычный Excel-файл: {raw_path}")
     path = raw_path.resolve()
+    t0 = time.perf_counter()
+    steps: list[tuple[str, float]] = []
+
+    def mark(name: str) -> None:
+        steps.append((name, round(time.perf_counter() - t0, 2)))
     assert_writable(path)
     st0 = os.stat(path)
     blob = _read_regular_bytes(path, label="книга")
+    mark("чтение с шары")
     pre_sha = hashlib.sha256(blob).hexdigest()
     folder = Path(tempfile.mkdtemp(prefix="hard-enr-", dir=work_dir))
     try:
@@ -1775,6 +1781,7 @@ def _enrich_local(
             plan["sheet"] = ws.name
         finally:
             wb.close()
+        mark("Excel: план и запись локально")
         plan["file"] = str(path)
         plan["backup"] = None
         backup_path = backup_sha = None
@@ -1795,6 +1802,7 @@ def _enrich_local(
             if post_plan["cells_written"] or post_plan["changed_cases"]:
                 raise RuntimeError(f"{path.name}: повторный enrichment plan не нулевой "
                                    "— на шару ничего не записано")
+            mark("Excel: повторная проверка")
             work_sha = _sha256_file(work)
             backup_path = backup_copy(path, backup_root, source=pristine).resolve()
             backup_sha = _sha256_file(backup_path)
@@ -1802,6 +1810,7 @@ def _enrich_local(
                 raise RuntimeError(f"{path.name}: копия «до обогащения» не совпала с "
                                    "книгой — на шару ничего не записано")
             plan["backup"] = str(backup_path)
+            mark("копия «до» на шаре")
             if before_commit:
                 before_commit(path)
             owner = workbook_busy_owner(path)
@@ -1811,6 +1820,7 @@ def _enrich_local(
                 raise BookChangedDuringRun(
                     f"{path.name}: книгу изменили, пока шло обогащение — ничего не "
                     "записано; прогони заново")
+            mark("книга не тронута — проверено")
             try:
                 _replace_on_share(work, path)
             except PermissionError as e:
@@ -1830,6 +1840,7 @@ def _enrich_local(
                     office_edits=plan.get("office_edits") or [],
                     resolved=plan.get("resolved") or [],
                     reason=str(e)) from e
+            mark("замена на шаре и хэш после")
             if post_sha != work_sha:
                 raise WrittenButUnverified(
                     path=str(path), pre_sha256=pre_sha, post_sha256=post_sha,
@@ -1856,7 +1867,9 @@ def _enrich_local(
             "errors": [],
             "post_plan": _plan_summary(post_plan),
             "engine": "local",
+            "steps": steps,
         })
+        log(f"{path.name}: " + " · ".join(f"{n} {t} с" for n, t in steps))
         return plan
     finally:
         shutil.rmtree(folder, ignore_errors=True)
