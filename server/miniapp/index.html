@@ -456,6 +456,10 @@ button.kpi:active{background:var(--tint)}
   background:transparent;color:var(--text);font:inherit;cursor:pointer}
 .tile:active{background:var(--tint)}
 .tile .ico{width:20px;height:20px;color:var(--accent2)}
+/* Неполный последний ряд — без дыры: последняя плитка тянется до края. */
+.tiles .tile:last-child:nth-child(4n+3){grid-column:span 2}
+.tiles .tile:last-child:nth-child(4n+2){grid-column:span 3}
+.tiles .tile:last-child:nth-child(4n+1){grid-column:span 4}
 .tile .tl{font-size:11.5px;line-height:1.15;text-align:center}
 .tile .tb{position:absolute;top:-6px;right:-3px;min-width:20px;padding:1px 6px;border-radius:999px;
   background:var(--paper);border:var(--lw) solid var(--line-ink);font-size:11px;font-weight:600;line-height:1.35}
@@ -470,7 +474,9 @@ button.kpi:active{background:var(--tint)}
 .pnav .lbl{font-size:19px}
 /* Числа — компактнее: шесть в две строки и без воздуха коробок. */
 .kpis{margin:6px 0 6px}
-.kpi{padding:8px 8px 7px 0;margin-right:8px}
+/* Кнопка центрирует содержимое по вертикали, а подпись в две строки растягивает
+   ряд: число в соседней плашке съезжало вниз (снимок владельца 30.09). Все — сверху. */
+.kpi{padding:8px 8px 7px 0;margin-right:8px;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start}
 .kpi .n{font-size:20px}
 .kpi .l{font-size:11.5px;margin-top:2px;line-height:1.2}
 .facts{font-size:12.5px;color:var(--muted);line-height:1.5;margin:2px 0 8px}
@@ -1165,7 +1171,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=62;
+const SHELL_VERSION=63;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
