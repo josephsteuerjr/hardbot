@@ -276,7 +276,7 @@ def _run_batch(monkeypatch, tmp_path, *, plans, on_delivered=None, ledger=None):
     jobs = [{"employee": f"Сотрудник {i}", "path": tmp_path / f"{i}.xlsb",
              "rows": []} for i in range(len(plans))]
     return enrich.enrich_many(jobs, FIELDS, receipt_dir=tmp_path / "кв",
-                              ledger=ledger, on_delivered=on_delivered)
+                              ledger=ledger, on_delivered=on_delivered, engine="share")
 
 
 def _plan(**over):

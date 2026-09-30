@@ -1694,7 +1694,8 @@ class BookChangedDuringRun(RuntimeError):
 # один раз читается с шары в локальную папку, Excel работает с копией (запись
 # отрезками, сохранение, повторное открытие и нулевой второй план — всё
 # локально), и только проверенный файл заменяет книгу на шаре — если за это
-# время её никто не открыл и не изменил.
+# время её никто не открыл и не изменил. С 01.10.2026 «local» — единственный
+# способ в работе: на 36 настоящих книгах результат тот же ячейка в ячейку.
 ENGINES = ("share", "share+batch", "local")
 _REPLACE_RETRIES = (0.2, 0.5, 1.0)
 
@@ -1902,7 +1903,7 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
                 since=None, until=None, backup_root=None,
                 receipt_dir=None, ledger=None, on_delivered=None,
                 server_authoritative: bool = False, decisions=None,
-                engine: str = "share", work_dir=None,
+                engine: str = "local", work_dir=None,
                 before_commit=None) -> list[dict]:
     """Обогатить личные реестры пачкой, одной сессией Excel.
     jobs: [{employee, path, rows}] — каждому файлу свои строки (его кейсы).
@@ -1917,6 +1918,8 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
     server_authoritative — явная галочка оператора, см. build_plan.
     decisions — решения оператора по конфликтам {(КД, поле): "server"|"file"},
     обычно собранные в пульте после preview_many.
+    engine — способ записи (ENGINES). По умолчанию «local» у всех входов: оба
+    пульта и командная строка; «share» остался для замеров и тестов.
 
     Результат СОБИРАЕТСЯ СНАРУЖИ блока Excel. Раньше он жил внутри, и смерть
     сессии на выходе (`quit()` по мёртвому COM) уносила его целиком: книги на

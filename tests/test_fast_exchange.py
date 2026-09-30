@@ -211,3 +211,12 @@ def test_large_bodies_go_gzipped_small_ones_plain():
 def test_analyst_pult_enriches_only_through_the_local_copy():
     src = (ROOT / "pult" / "desk_registry.py").read_text("utf-8")
     assert 'engine="local"' in src and "engine=\"share" not in src
+
+
+def test_every_entry_point_enriches_through_the_local_copy_by_default():
+    """Переключателя нет: Qt-пульт и командная строка зовут enrich_many без
+    engine и получают тот же способ, что новый пульт."""
+    import inspect
+    assert inspect.signature(enrich.enrich_many).parameters["engine"].default == "local"
+    for rel in ("pult/ui/registry.py", "pult/daily_cycle.py"):
+        assert "engine=" not in (ROOT / rel).read_text("utf-8"), rel
