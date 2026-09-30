@@ -206,3 +206,8 @@ def test_large_bodies_go_gzipped_small_ones_plain():
     assert json.loads(gzip.decompress(seen[0].data)) == big
     assert seen[1].get_header("Content-encoding") is None
     assert json.loads(seen[1].data) == {"from": ""}
+
+
+def test_analyst_pult_enriches_only_through_the_local_copy():
+    src = (ROOT / "pult" / "desk_registry.py").read_text("utf-8")
+    assert 'engine="local"' in src and "engine=\"share" not in src

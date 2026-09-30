@@ -2183,6 +2183,28 @@ def revoke_app_access(telegram_id: int, scope: str = "all") -> int:
 MANAGER_DEVICE_TOUCH_S = 60   # last_seen пишем не чаще раза в минуту
 
 
+def app_link_status(code: str) -> str:
+    """Почему по коду нельзя войти — чтобы пульт сказал человеку, что делать:
+    'live' | 'used_up' (входы кончились) | 'expired' (старше окна) | 'unknown'
+    (такого кода нет: не было, заменён новым неоткрытым или вычищен). Ничего не
+    тратит. 30.09.2026: руководители вставляли в пульт ссылки от 24.09, уже
+    потраченные телефоном и ярлыком, и видели только «устарела»."""
+    if not code:
+        return "unknown"
+    cutoff = (datetime.now() - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT created_at, uses, COALESCE(max_uses, ?) AS cap FROM app_links WHERE code = ?",
+            (APP_LINK_DEFAULT_USES, code)).fetchone()
+    if row is None:
+        return "unknown"
+    if (row["created_at"] or "") < cutoff:
+        return "expired"
+    if int(row["uses"] or 0) >= int(row["cap"] or 0):
+        return "used_up"
+    return "live"
+
+
 def peek_app_link(code: str) -> int | None:
     """Чей это код, если по нему ещё можно войти. Ничего не тратит."""
     if not code:

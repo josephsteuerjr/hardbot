@@ -132,6 +132,19 @@ export async function call(method: string, path: string, query?: Record<string, 
   return { ok: true, status: res.status, data };
 }
 
+// Отказ по ссылке — словами и с путём (30.09.2026): руководители вставляли
+// ссылки от 24.09, потраченные телефоном и ярлыком, и видели только «устарела».
+const NEW_LINK = "Новую возьмите в приложении на телефоне: Сводка → «Вход команды» → «Выдать себе» — или попросите у аналитика.";
+export function deadLinkText(reason: string): string {
+  if (reason === "used_up") return "По этой ссылке уже вошли столько раз, сколько она позволяет — телефон и ярлык на экране тоже считаются. " + NEW_LINK;
+  if (reason === "expired") return "Ссылке больше недели — она уже не действует. " + NEW_LINK;
+  return "Эта ссылка не действует — возможно, её уже заменили новой. " + NEW_LINK;
+}
+
+async function deadReason(res: Response): Promise<string> {
+  try { return String(((await res.json()) as { reason?: string }).reason || ""); } catch { return ""; }
+}
+
 /** Ключ → токен компьютера. Сервер берём из ссылки; голый код — к прежнему серверу. */
 export async function enroll(raw: string): Promise<ApiResult> {
   const link = splitLink(raw);
@@ -148,7 +161,7 @@ export async function enroll(raw: string): Promise<ApiResult> {
   } catch (err) {
     return troubleOf(err);
   }
-  if (res.status === 410) return { ok: false, status: 410, kind: "nolink", text: "Эта ссылка уже не действует (использована или устарела). Попросите новую." };
+  if (res.status === 410) return { ok: false, status: 410, kind: "nolink", text: deadLinkText(await deadReason(res)) };
   if (res.status === 403) return { ok: false, status: 403, kind: "forbidden", text: "Это ссылка выездника, а не руководителя. Её место — в телефоне." };
   if (res.status === 429) return { ok: false, status: 429, kind: "server", text: "Слишком много попыток. Подождите минуту." };
   if (!res.ok) return { ok: false, status: res.status, kind: "server", text: `Сервер ответил ошибкой ${res.status}.` };

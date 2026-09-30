@@ -192,6 +192,12 @@ def _uid(request: web.Request) -> int | None:
     автономного PWA (вне Телеги) либо из дев-обхода."""
     data = validate_init_data(request.headers.get("X-Init-Data") or "",
                               os.getenv("BOT_TOKEN", ""))
+    if not data and _is_drain(request):
+        # Старый адрес (только выгрузка): мини-приложение старого бота досылает
+        # очередь с его подписью. Токен старого бота проверяет ТОЛЬКО подпись
+        # и ТОЛЬКО здесь: сам бот не запускается, основной адрес его не знает.
+        data = validate_init_data(request.headers.get("X-Init-Data") or "",
+                                  os.getenv("DRAIN_BOT_TOKEN", ""))
     if data and isinstance(data.get("user"), dict):
         return int(data["user"].get("id") or 0) or None
     # Автономное приложение (PWA вне Телеги): авторизация по выданному ботом токену.
@@ -685,10 +691,13 @@ async def _index(request: web.Request) -> web.StreamResponse:
 
 async def _version(request: web.Request) -> web.Response:
     """Публичная версия без ПД и авторизации для пробуждённой старой PWA."""
-    return web.json_response({
+    payload = {
         "shellVersion": _shell_version(),
         "dataExchangeContract": DATA_EXCHANGE_CONTRACT,
-    }, headers={
+    }
+    if _is_drain(request):
+        payload["drain"] = _drain_payload()
+    return web.json_response(payload, headers={
         "Cache-Control": "no-store, max-age=0",
         "Pragma": "no-cache",
     })
@@ -4044,7 +4053,11 @@ async def _manager_device_enroll(request: web.Request) -> web.Response:
     uid = db.peek_app_link(code) if code else None
     if not uid:
         _admin_auth_failed(request, scope="app")
-        raise _json_error(web.HTTPGone, "link_dead")
+        # Причина — чтобы пульт подсказал путь («Выдать себе» в приложении),
+        # а не одно «устарела». Код 72-битный: знание «был/кончился» перебору
+        # не помогает, а сам перебор считает общий счётчик неудач.
+        raise _json_error(web.HTTPGone, "link_dead",
+                          reason=db.app_link_status(code) if code else "unknown")
     mgr = digest_data.manager_scope(uid, is_owner=(uid == ADMIN_ID))
     if mgr is None:
         # Ссылка живая, но это вход выездника: не тратим её — пусть работает
@@ -5896,6 +5909,59 @@ def _apply_cors(request: web.Request, resp: web.StreamResponse) -> None:
         resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
 
 
+# --- Старый адрес: только выгрузка того, что застряло на телефонах -----------
+# 30.09.2026, владелец: после переезда 23–24.09 часть выездников работала в старом
+# приложении (hardbot2.…nip.io и мини-приложение старого бота), и выезды легли в
+# очередь телефона. Старый адрес снова ведёт сюда — Caddy на Атланте ставит
+# заголовок X-Hard-Drain: 1, — но работать через него нельзя: пропускаются только
+# досылка очереди (выезды, фото, метки, заметки), вход по ссылке и сама
+# оболочка. Всё остальное — 410 drain_only, и оболочка показывает экран выгрузки.
+# Пишет сразу в рабочую базу: синхронизировать нечего.
+DRAIN_HEADER = "X-Hard-Drain"
+_DRAIN_GET = frozenset({"/", "/version.json", "/sw.js", "/manifest.webmanifest",
+                        "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png",
+                        "/favicon.ico"})
+_DRAIN_GET_PREFIXES = ("/vendor/", "/fonts/")
+_DRAIN_UPLOADS = frozenset({"/api/save", "/api/photo", "/api/marker", "/api/note",
+                            "/api/note_delete"})
+_DRAIN_POST = _DRAIN_UPLOADS | {"/api/redeem"}
+
+
+def _is_drain(request: web.Request) -> bool:
+    headers = getattr(request, "headers", None) or {}
+    if headers.get(DRAIN_HEADER) == "1":
+        return True
+    # Дев-стенд целиком в режиме старого адреса — для студии и снимков.
+    return DEV and os.getenv("HARD_DRAIN_ALL") == "1"
+
+
+def _drain_payload() -> dict:
+    return {"newUrl": (os.getenv("MINIAPP_URL") or "").rstrip("/")}
+
+
+@web.middleware
+async def _drain(request: web.Request, handler):
+    if not _is_drain(request):
+        return await handler(request)
+    path, method = request.path, request.method
+    allowed = (method == "OPTIONS"
+               or (method in ("GET", "HEAD")
+                   and (path in _DRAIN_GET or path.startswith(_DRAIN_GET_PREFIXES)))
+               or (method == "POST" and path in _DRAIN_POST))
+    if not allowed:
+        if method in ("GET", "HEAD") and not path.startswith(("/api/", "/admin/")):
+            raise web.HTTPFound("/")
+        return web.json_response({"error": "drain_only", **_drain_payload()}, status=410,
+                                 headers={"Cache-Control": "no-store"})
+    resp = await handler(request)
+    if method == "POST" and path in _DRAIN_UPLOADS and 200 <= resp.status < 300:
+        try:   # журнал: кто и что досылал со старого адреса
+            db.audit_access(_uid(request) or 0, "drain_upload", detail=path)
+        except Exception:  # noqa: BLE001 — журнал не важнее досланного выезда
+            pass
+    return resp
+
+
 @web.middleware
 async def _cors(request: web.Request, handler):
     if request.method == "OPTIONS":
@@ -5984,7 +6050,7 @@ CLIENT_MAX_SIZE = 64 * 1024 * 1024
 
 def build_app(bot=None) -> web.Application:
     app = web.Application(client_max_size=CLIENT_MAX_SIZE,
-                          middlewares=[_cors, _compress])
+                          middlewares=[_drain, _cors, _compress])
     app.on_response_prepare.append(_security_headers)
     app["bot"] = bot
     app.router.add_get("/", _index)

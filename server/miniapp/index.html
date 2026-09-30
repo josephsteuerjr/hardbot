@@ -456,6 +456,10 @@ button.kpi:active{background:var(--tint)}
   background:transparent;color:var(--text);font:inherit;cursor:pointer}
 .tile:active{background:var(--tint)}
 .tile .ico{width:20px;height:20px;color:var(--accent2)}
+/* Неполный последний ряд — без дыры: последняя плитка тянется до края. */
+.tiles .tile:last-child:nth-child(4n+3){grid-column:span 2}
+.tiles .tile:last-child:nth-child(4n+2){grid-column:span 3}
+.tiles .tile:last-child:nth-child(4n+1){grid-column:span 4}
 .tile .tl{font-size:11.5px;line-height:1.15;text-align:center}
 .tile .tb{position:absolute;top:-6px;right:-3px;min-width:20px;padding:1px 6px;border-radius:999px;
   background:var(--paper);border:var(--lw) solid var(--line-ink);font-size:11px;font-weight:600;line-height:1.35}
@@ -470,7 +474,9 @@ button.kpi:active{background:var(--tint)}
 .pnav .lbl{font-size:19px}
 /* Числа — компактнее: шесть в две строки и без воздуха коробок. */
 .kpis{margin:6px 0 6px}
-.kpi{padding:8px 8px 7px 0;margin-right:8px}
+/* Кнопка центрирует содержимое по вертикали, а подпись в две строки растягивает
+   ряд: число в соседней плашке съезжало вниз (снимок владельца 30.09). Все — сверху. */
+.kpi{padding:8px 8px 7px 0;margin-right:8px;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start}
 .kpi .n{font-size:20px}
 .kpi .l{font-size:11.5px;margin-top:2px;line-height:1.2}
 .facts{font-size:12.5px;color:var(--muted);line-height:1.5;margin:2px 0 8px}
@@ -612,7 +618,7 @@ const I18N = {
     warmagain:"Обновить оффлайн-копию",warmfail:"Не удалось загрузить — нужна сеть",
     routeday:"Маршрут дня",rdempty:"Нет невизитированных кейсов с точками",
     freenav:"Навигация по адресу",freenavph:"Адрес или «41.31, 69.24»",
-    theme:"Тема",theme_system:"как в системе",theme_light:"светлая",theme_dark:"тёмная",modefield:"Выездник",modemanager:"Руководитель",modesecurity:"Безопасник",modefull:"Директор",modeowner:"Владелец",
+    drainTitle:"Выгрузка на сервер",drainWhy:"Этот адрес приложения закрыт. Здесь можно только отправить на сервер то, что сохранилось на телефоне.",drainSending:"Отправляю…",drainDone:"Всё отправлено",drainNet:"Нет связи — повторю сам, как только появится интернет",drainAuth:"Чтобы отправить, нужен вход. Попросите у руководителя ссылку входа и вставьте её сюда:",drainLogin:"Войти и отправить",drainLeft:"Ждут отправки",drainVisits:"выездов",drainPhotos:"фото",drainMarks:"меток",drainNotes:"заметок",drainFailed:"Сервер не принял — внесите заново в новом приложении",drainDrafts:"Карточки без «Сохранить выезд» — их на сервере нет, внесите заново",drainOpen:"Открыть новое приложение",drainNothing:"На этом телефоне нечего отправлять",drainRetry:"Повторить",drainBadLink:"Ссылка не действует — попросите новую",theme:"Тема",theme_system:"как в системе",theme_light:"светлая",theme_dark:"тёмная",modefield:"Выездник",modemanager:"Руководитель",modesecurity:"Безопасник",modefull:"Директор",modeowner:"Владелец",
     team:"Сотрудники",pfk:"Портфель",pfpick:"Чей портфель открыть",byaddr:"По адресу",
     digest:"Сводка", dgneednet:"Сводка руководителя доступна только при связи",
     dgerr:"Не удалось загрузить сводку", dggone:"Доступ к сводке отозван",
@@ -672,7 +678,7 @@ const I18N = {
     warmagain:"Oflayn nusxani yangilash",warmfail:"Yuklanmadi — tarmoq kerak",
     routeday:"Kun marshruti",rdempty:"Nuqtali ochiq ishlar yo‘q",
     freenav:"Manzil bo‘yicha navigatsiya",freenavph:"Manzil yoki «41.31, 69.24»",
-    theme:"Mavzu",theme_system:"tizimdagidek",theme_light:"yorug‘",theme_dark:"qorong‘i",modefield:"Chiquvchi",modemanager:"Rahbar",modesecurity:"Xavfsizlik",modefull:"Direktor",modeowner:"Egasi",
+    drainTitle:"Serverga yuborish",drainWhy:"Ilovaning bu manzili yopilgan. Bu yerda faqat telefonda saqlanib qolganlarni serverga yuborish mumkin.",drainSending:"Yuborilmoqda…",drainDone:"Hammasi yuborildi",drainNet:"Aloqa yo‘q — internet paydo bo‘lishi bilan o‘zim qayta yuboraman",drainAuth:"Yuborish uchun kirish kerak. Rahbardan kirish havolasini so‘rang va shu yerga joylang:",drainLogin:"Kirish va yuborish",drainLeft:"Yuborilishini kutmoqda",drainVisits:"chiqish",drainPhotos:"rasm",drainMarks:"nuqta",drainNotes:"eslatma",drainFailed:"Server qabul qilmadi — yangi ilovada qaytadan kiriting",drainDrafts:"«Chiqishni saqlash» bosilmagan kartalar — ular serverda yo‘q, qaytadan kiriting",drainOpen:"Yangi ilovani ochish",drainNothing:"Bu telefonda yuboriladigan narsa yo‘q",drainRetry:"Qayta urinish",drainBadLink:"Havola ishlamayapti — yangisini so‘rang",theme:"Mavzu",theme_system:"tizimdagidek",theme_light:"yorug‘",theme_dark:"qorong‘i",modefield:"Chiquvchi",modemanager:"Rahbar",modesecurity:"Xavfsizlik",modefull:"Direktor",modeowner:"Egasi",
     team:"Xodimlar",pfk:"Portfel",pfpick:"Kimning portfelini ochish",byaddr:"Manzil bo‘yicha",
     digest:"Hisobot", dgneednet:"Rahbar hisoboti faqat aloqa bo‘lganda ochiladi",
     dgerr:"Hisobot yuklanmadi", dggone:"Hisobotga ruxsat bekor qilindi",
@@ -732,7 +738,7 @@ const I18N = {
     warmagain:"Нусхаи офлайнро нав кунед",warmfail:"Нашуд — шабака лозим аст",
     routeday:"Масири рӯз",rdempty:"Кейси кушодаи нуқтадор нест",
     freenav:"Навигатсия аз рӯи нишонӣ",freenavph:"Нишонӣ ё «41.31, 69.24»",
-    theme:"Мавзӯъ",theme_system:"мисли система",theme_light:"равшан",theme_dark:"торик",modefield:"Выездник",modemanager:"Роҳбар",modesecurity:"Амният",modefull:"Директор",modeowner:"Соҳиб",
+    drainTitle:"Фиристодан ба сервер",drainWhy:"Ин суроғаи барнома баста шуд. Дар ин ҷо танҳо он чиро, ки дар телефон монд, ба сервер фиристодан мумкин аст.",drainSending:"Фиристода мешавад…",drainDone:"Ҳама фиристода шуд",drainNet:"Алоқа нест — ҳамин ки интернет пайдо шавад, худам такрор мекунам",drainAuth:"Барои фиристодан воридшавӣ лозим аст. Аз роҳбар пайванди воридшавӣ пурсед ва ин ҷо гузоред:",drainLogin:"Ворид шудан ва фиристодан",drainLeft:"Дар навбати фиристодан",drainVisits:"сафар",drainPhotos:"расм",drainMarks:"нуқта",drainNotes:"қайд",drainFailed:"Сервер қабул накард — дар барномаи нав аз нав ворид кунед",drainDrafts:"Кортҳое, ки «Сафарро захира» пахш нашуд — онҳо дар сервер нестанд, аз нав ворид кунед",drainOpen:"Кушодани барномаи нав",drainNothing:"Дар ин телефон чизе барои фиристодан нест",drainRetry:"Такрор",drainBadLink:"Пайванд кор намекунад — пайванди нав пурсед",theme:"Мавзӯъ",theme_system:"мисли система",theme_light:"равшан",theme_dark:"торик",modefield:"Выездник",modemanager:"Роҳбар",modesecurity:"Амният",modefull:"Директор",modeowner:"Соҳиб",
     team:"Кормандон",pfk:"Портфел",pfpick:"Портфели киро кушоем",byaddr:"Аз рӯи нишонӣ",
     digest:"Ҳисобот", dgneednet:"Ҳисоботи роҳбар танҳо ҳангоми алоқа дастрас аст",
     dgerr:"Ҳисобот бор нашуд", dggone:"Дастрасӣ ба ҳисобот бекор шуд",
@@ -783,6 +789,8 @@ const I18N = {
     nosplit:"тақсимот аз рӯи моддаҳо наомад"},
 };
 let STATE = {lang:"ru", meta:null, persons:[], cur:null, tab:"visit"};
+// Старый адрес (только выгрузка очереди): {newUrl} — куда уходить работать.
+let DRAIN=null;
 let FORM_VERSION=0;
 let FORM_TOUCHED=new Set();
 // Явная очистка типизированного поля (кнопка «Убрать»). «Пусто после касания»
@@ -1165,7 +1173,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=62;
+const SHELL_VERSION=64;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1719,6 +1727,98 @@ async function handleAuthGone(expired){
   renderLangs();                  // входа нет — нет и «Выйти»
   renderAppAuthGone(exp);
 }
+// --- Старый адрес: экран выгрузки (оболочка v64, 30.09.2026) -------------------
+// Работать здесь нельзя — только отправить то, что застряло в очереди телефона
+// после переезда. Досылает штатный flushQueue (те же правила, что в поле: 401 и
+// сеть — ждать, отклонённое сервером — держать и показать). Статус — словами.
+let DRAIN_BUSY=false, DRAIN_TIMER=null;
+async function renderDrain(){
+  if(!DRAIN){
+    DRAIN={newUrl:""};
+    try{ const v=await (await fetch("/version.json",{cache:"no-store"})).json();
+         if(v&&v.drain) DRAIN=v.drain; }catch(e){}
+  }
+  hideBottomNav(); renderLangs();
+  await drainDraw("sending");
+  drainRun();
+}
+async function drainRun(){
+  if(DRAIN_BUSY) return;
+  DRAIN_BUSY=true; clearTimeout(DRAIN_TIMER);
+  let state="done";
+  try{
+    await drainDraw("sending");
+    await flushQueue();
+    const left=(await drainItems()).pending.length;
+    if(left) state=await drainProbe();
+  }finally{ DRAIN_BUSY=false; }
+  await drainDraw(state);
+  if(state==="net") DRAIN_TIMER=setTimeout(drainRun, 20000);
+}
+// Почему очередь стоит: пустой запрос сохранения без побочных эффектов.
+// 401/403 — нужен вход; ответ по существу (404/400) — вход есть; обрыв — сеть.
+async function drainProbe(){
+  try{
+    const r=await fetch("/api/save",{method:"POST",headers:jsonHeaders(),body:"{}"});
+    if(r.status===401||r.status===403) return "auth";
+    if(r.status>=500) return "net";
+    return "done";
+  }catch(e){ return "net"; }
+}
+async function drainItems(){
+  let items=[]; try{ items=(await IDB.all("queue"))||[]; }catch(e){}
+  const failed=items.filter(it=>it.failed), pending=items.filter(it=>!it.failed);
+  return {items, failed, pending};
+}
+async function drainName(rep){
+  try{ const c=await IDB.get("cards",rep); if(c&&c.client) return c.client; }catch(e){}
+  return rep ? ("КД "+rep) : "—";
+}
+function drainDrafts(){
+  const reps=[];
+  try{ Object.keys(localStorage).forEach(k=>{ if(k.indexOf("draft:")===0) reps.push(k.split(":").slice(2).join(":")); }); }catch(e){}
+  return reps;
+}
+async function drainDraw(state){
+  const t=L(), {failed, pending}=await drainItems();
+  const n=k=>pending.filter(it=>it.kind===k).length;
+  const counts=[[n("save"),t.drainVisits],[n("photo"),t.drainPhotos],[n("marker"),t.drainMarks],
+                [n("note")+n("note_delete"),t.drainNotes]].filter(([k])=>k).map(([k,l])=>l+": "+k).join(" · ");
+  const status = state==="sending" ? `<div class="sline"><span class="d w"></span><span>${esc(t.drainSending)}</span></div>`
+    : state==="net" ? `<div class="sline"><span class="d w"></span><span>${esc(t.drainNet)}</span>
+        <button class="toolbtn" onclick="drainRun()">${esc(t.drainRetry)}</button></div>`
+    : state==="auth" ? `<div class="sline"><span class="d w"></span><span>${esc(t.drainAuth)}</span></div>
+        <input id="codein" class="search" style="margin:8px 0" placeholder="${esc(t.codeph)}" autocomplete="off"
+          autocapitalize="off" autocorrect="off" spellcheck="false" onkeydown="if(event.key==='Enter')drainLogin()">
+        <button class="btn acc" onclick="drainLogin()">${esc(t.drainLogin)}</button>`
+    : `<div class="sline"><span class="d"></span><span>${esc(pending.length?t.drainSending:(failed.length?t.drainDone:t.drainNothing))}</span></div>`;
+  const left = pending.length ? `<div class="lrow"><div class="pname" style="white-space:normal">${esc(t.drainLeft)} — ${esc(counts)}</div></div>` : "";
+  const failedNames=[]; for(const it of failed) failedNames.push(await drainName(it.rep));
+  const drafts=drainDrafts(), draftNames=[]; for(const r of drafts) draftNames.push(await drainName(r));
+  const list=(title,names)=>names.length?`<div class="lrow"><div class="pname" style="white-space:normal">${esc(title)} · ${names.length}</div>
+      <div class="psub">${names.map(esc).join(" · ")}</div></div>`:"";
+  const done=state!=="sending" && !pending.length;
+  const open=(done && DRAIN && DRAIN.newUrl)?`<a class="btn acc" style="margin-top:14px;text-decoration:none"
+      href="${esc(DRAIN.newUrl)}/">${esc(t.drainOpen)}</a>`:"";
+  $("app").innerHTML=`<div class="dgh"><div class="t">${esc(t.drainTitle)}</div></div>
+    <div class="dgsub" style="white-space:normal">${esc(t.drainWhy)}</div>
+    ${status}${left}${list(t.drainFailed,failedNames)}${list(t.drainDrafts,draftNames)}${open}`;
+}
+// Вставленная ссылка входа: старый вход здесь заведомо мёртв (сервер его не
+// принял), поэтому токен из ссылки просто становится входом этого адреса.
+async function drainLogin(){
+  const el=$("codein"); const raw=(el&&el.value||"").trim(); if(!raw){ if(el) el.focus(); return; }
+  const m=raw.match(/\/i\/([A-Za-z0-9_-]{8,})/)||raw.match(/link=([A-Za-z0-9_-]+)/);
+  const code=m?m[1]:raw;
+  try{
+    const r=await fetch("/api/redeem",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({code, standalone:isStandalone()})});
+    const j=r.ok?await r.json():null;
+    if(!j||!j.token){ toast(L().drainBadLink); return; }
+    try{ localStorage.setItem("app_token", j.token); }catch(e){}
+    drainRun();
+  }catch(e){ toast(L().drainNet); }
+}
 async function enterCode(){
   // Код берём из поля; пустое поле → пробуем буфер обмена (iOS сам спросит
   // разрешение «Вставить») — но только если там похожее на код, чтобы не жечь
@@ -1847,7 +1947,7 @@ let START_TAB, START_DATE, START_TAB_USED=false;
 function authHeaders(){
   const h = {};
   if (TG && TG.initData) h["X-Init-Data"] = TG.initData;    // внутри Телеги — подпись WebApp
-  else { const t = appToken(); if(t) h["X-App-Token"]=t; }  // автономное PWA — токен из ссылки входа
+  if (!(TG && TG.initData) || DRAIN){ const t = appToken(); if(t) h["X-App-Token"]=t; }  // PWA — токен из ссылки входа
   const dev = new URLSearchParams(location.search).get("dev_uid");
   if (dev) h["X-Dev-Uid"] = dev;
   h["X-Shell-Version"]=String(SHELL_VERSION);
@@ -1879,7 +1979,7 @@ function renderLangs(){
     `<button class="theme" onclick="cycleTheme()" title="${esc(themeTitle())}" aria-label="${esc(themeTitle())}">${themeGlyph()}</button>`+
     // «Выйти с этого телефона» — там же, где язык: других настроек у оболочки нет.
     // Внутри Телеграма вход — сама Телега, выходить из приложения некуда.
-    ((appToken() && !(TG&&TG.initData))
+    ((appToken() && !(TG&&TG.initData) && !DRAIN)
       ? `<button class="out" onclick="askLogout()" title="${esc(t.logoutq)}" aria-label="${esc(t.logoutq)}">${ic("exit")}<span>${esc(t.logout)}</span></button>`
       : "");
 }
@@ -1990,6 +2090,9 @@ async function boot(){
     if(gen!==WIPE_GEN) return;     // телефон очистили, пока шёл запрос: экран уже свой
     clientMetric("boot_error", {download_ms:performance.now()-bootStarted});
     const st=+((e&&e.message)||0);
+    // 410 — старый адрес приложения (только выгрузка): портфеля и работы здесь нет,
+    // только отправка того, что осталось в очереди телефона.
+    if(st===410) return renderDrain();
     // Сервер ответил «не пускаю» вне Телеги: токен истёк/отозван либо его ещё нет.
     // Кэш здесь НЕ поднимаем (сервер доступен и отказал): мёртвый вход подменяем
     // кандидатом (новая ссылка, start_url ярлыка), а нечем — стираем портфель с
@@ -3506,6 +3609,8 @@ document.addEventListener("visibilitychange", ()=>{ if(document.hidden){ flushDr
 // карточку/форму не дёргаем, черновики целы.
 let LAST_REFRESH=0;
 async function refreshData(){
+  // Старый адрес: портфеля нет — при связи и возврате в приложение досылаем очередь.
+  if(DRAIN){ drainRun(); return; }
   if(Date.now()-LAST_REFRESH<60000) return;      // не чаще раза в минуту
   if(!appToken() && !(TG&&TG.initData)) return;  // входа нет — экран входа фоном не дёргаем
   const gen=WIPE_GEN;

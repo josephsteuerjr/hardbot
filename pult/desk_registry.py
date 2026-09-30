@@ -327,7 +327,11 @@ def enr_apply(body, *, admin, start_job, settings, **_):
                                        receipt_dir=en.receipt_dir(base), ledger=ledger,
                                        on_delivered=on_delivered, server_authoritative=False,
                                        decisions=decisions)
-        results = enrich.enrich_many(en.build_jobs(picked), S["enr_fields"], say, **kwargs)
+        # Книга едет на шару только проверенной: Excel работает с локальной копией
+        # (опыт 30.09–01.10.2026: те же книги, в 2–6 раз быстрее, занятую или
+        # изменённую за время прогона книгу не трогает). Переключателя нет.
+        results = enrich.enrich_many(en.build_jobs(picked), S["enr_fields"], say,
+                                     engine="local", **kwargs)
         S["last_receipt"] = next((r.get("receipt") for r in results if r.get("receipt")), None)
         S["enr_check"] = None
         conflicts, office = en.collect_conflicts(results)

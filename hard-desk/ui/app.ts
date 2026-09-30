@@ -59,6 +59,7 @@ function enrollScreen(note = "") {
     <img class="enroll-logo" src="icon.svg" alt="" onerror="this.remove()">
     <h1>Пульт руководителя</h1>
     <p>Вставьте ссылку входа — ту, что прислал аналитик. Это нужно один раз: дальше пульт на этом компьютере открывается сразу.</p>
+    <p class="hint">Ссылки нет или она уже потрачена на телефоне — возьмите новую в приложении: Сводка → «Вход команды» → «Выдать себе».</p>
     <div class="row"><input class="input" id="link" placeholder="https://…/i/…" autocomplete="off" spellcheck="false">
       <button class="btn primary" id="go">Войти</button></div>
     <div class="err" id="err">${esc(note)}</div>
