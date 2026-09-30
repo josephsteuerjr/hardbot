@@ -54,6 +54,8 @@ module.exports = [
     await d.open(OWNER); await week(d); await d.shot("owner-digest", { long: false });
     await d.js("setMode('field')"); await d.settle(); await d.shot("owner-field", { long: false });
   } },
+  // Живой старый адрес (STUDIO_BASE=https://hardbot2.…nip.io): только снимок, ничего не шлёт.
+  { name: "old-live", run: async (d) => { await d.open(AGENT); await d.settle(1500); await d.shot("old-live", { long: false }); } },
   // Старый адрес (стенд с HARD_DRAIN_ALL=1 и STUDIO_BASE на него): экран выгрузки.
   { name: "drain", run: async (d) => {
     await d.open(AGENT); await d.shot("drain-empty", { long: false });
