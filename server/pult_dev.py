@@ -149,6 +149,30 @@ def seed() -> None:
              for a, u, act, tgt in audit])
         conn.commit()
     print(f"засеяно: {len(TEAM)} выездников, выездов {op}")
+    seed_payments()
+
+
+def seed_payments() -> None:
+    """Оплаты по реестру («Дата/Сумма последнего платежа») — для блока «Оплаты»
+    сводки: часть должников платит в пару дней после выезда, часть — сама.
+    Реестр приходит импортом раз в день, поэтому последний платёж — вчера."""
+    rnd = random.Random(31)
+    last = date.today() - timedelta(days=1)
+    with db.connect() as conn:
+        visited = dict(conn.execute("SELECT contract_id, max(substr(created_at, 1, 10)) "
+                                    "FROM visits GROUP BY contract_id").fetchall())
+        for (cid,) in conn.execute("SELECT contract_id FROM clients").fetchall():
+            if cid in visited and rnd.random() < .3:
+                d = date.fromisoformat(visited[cid]) + timedelta(days=rnd.randint(0, 4))
+            elif rnd.random() < .08:
+                d = last - timedelta(days=rnd.randint(0, 20))
+            else:
+                continue
+            conn.execute("UPDATE clients SET last_payment_date=?, last_payment_sum=? "
+                         "WHERE contract_id=?",
+                         (min(d, last).isoformat(),
+                          str(rnd.choice([1500, 3000, 5000, 7500, 12000, 20000])), cid))
+        conn.commit()
 
 
 def main() -> None:

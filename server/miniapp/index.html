@@ -476,11 +476,42 @@ button.kpi:active{background:var(--tint)}
 .kpis{margin:6px 0 6px}
 /* Кнопка центрирует содержимое по вертикали, а подпись в две строки растягивает
    ряд: число в соседней плашке съезжало вниз (снимок владельца 30.09). Все — сверху. */
-.kpi{padding:8px 8px 7px 0;margin-right:8px;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start}
-.kpi .n{font-size:20px}
-.kpi .l{font-size:11.5px;margin-top:2px;line-height:1.2}
-.facts{font-size:12.5px;color:var(--muted);line-height:1.5;margin:2px 0 8px}
-.facts a{color:var(--link);text-decoration:none}
+/* v65 (владелец 01.10: «не лепить к краям, по центру тоже не айс»): число
+   отступает от линии слева так же, как от линии справа; первая колонка — по
+   краю страницы, как заголовки. */
+.kpi{padding:10px 12px 9px;margin-right:0;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start}
+.kpis .kpi:nth-child(3n+1){padding-left:2px}
+.kpi .n{font-size:21px}
+.kpi .l{font-size:11.5px;margin-top:3px;line-height:1.2}
+/* Разделы под числами — вместо сплошной строки «· 🎯 … · ⏱ … · 📍 …»: заголовок
+   почерком, строки «подпись — число» в линиях, без коробок. */
+.dsec{margin:16px 0 2px}
+.dsec-h{display:flex;align-items:baseline;gap:8px;font:400 19px/1.2 var(--hand);letter-spacing:.03em;
+  color:var(--text2);margin:0 0 5px}
+.dsec-h .note{margin-left:auto;font:400 11.5px/1.2 var(--sans);letter-spacing:0;color:var(--muted);
+  white-space:nowrap}
+.drows{display:grid;grid-template-columns:minmax(0,1fr);border-top:var(--lw) solid var(--border)}
+.drows.two{grid-template-columns:repeat(2,minmax(0,1fr));column-gap:16px}
+.drow{display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:9px 2px 8px;
+  border:0;border-bottom:var(--lw) solid var(--border);background:none;font:inherit;color:inherit;
+  text-align:left;width:100%;min-width:0}
+.drow span{font-size:13.5px;color:var(--text2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.drow b{font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
+.drow.zero b{color:var(--faint);font-weight:400}
+.drow b small{font-size:12px;font-weight:400;color:var(--muted)}
+.drows.two .drow span{font-size:13px}
+.drow .go{color:var(--faint);margin-left:3px}
+button.drow{cursor:pointer}
+button.drow:active{background:var(--tint)}
+.dplan{padding:2px 2px 0}
+.dplan .top{display:flex;align-items:baseline;justify-content:space-between;gap:10px}
+.dplan .top b{font-size:17px;font-weight:600;font-variant-numeric:tabular-nums}
+.dplan .pbar{height:8px;border-radius:4px;background:var(--alt);overflow:hidden;margin:7px 0 5px}
+.dplan .pbar i{display:block;height:100%;max-width:100%;background:var(--terra);border-radius:4px}
+.dsub{font-size:12px;color:var(--muted);line-height:1.4}
+.bars-h{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin:18px 0 0}
+.bars-h .t{font:400 19px/1.2 var(--hand);letter-spacing:.03em;color:var(--text2)}
+.bars-h .note{font-size:11.5px;color:var(--muted)}
 .bars{height:46px;margin:8px 0 2px}
 /* Воронка свёрнута, пока её не раскроют: на «Сводке» — только главное. */
 details.fold{border-top:var(--lw) solid var(--border);border-bottom:var(--lw) solid var(--border);margin:8px 0}
@@ -1173,7 +1204,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=64;
+const SHELL_VERSION=65;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -4287,32 +4318,47 @@ function dgKpis(t,rg){
   // (или договоры у сотрудника); за период — уникальные должники.
   const sixth=multi?k(t.persons||0,"должников",c("persons"))
              :(team?k((t.active||0)+"/"+t.employees,"в работе"):k(t.contracts||0,"договоров"));
-  const line=[];
-  // План офиса — «10 выездов на сотрудника в день». Без него процент
-  // проработки каждый день складывали на бумаге и присылали в чат руками.
-  if(t.plan) line.push(`🎯 план ${t.plan} (${t.plan_per_day} на человека) · `+
-    `<b>${Math.round((t.visits||0)/t.plan*100)}%</b>`);
-  if(multi&&team) line.push(`👥 в работе ${t.active||0} из ${t.employees}`);
-  // Контроль, о котором просил офис: выезды, внесённые не в свой день, и
-  // выезды без точки телефона. Ноль не показываем — строка и так длинная.
-  if(t.late) line.push(`⏱ внесено позже: <b>${t.late}</b>`);
-  if(t.no_geo) line.push(`📍 без гео: <b>${t.no_geo}</b>`);
-  // Подтверждение выезда: по всем следам телефона, а не по одной точке
-  // закрытия. Тап по числу — те самые случаи.
-  const evl=[["confirmed","🛡 на адресе"],["far","⚠️ у адреса не был"],
-             ["saved_away","✍️ заполнено не на адресе"],
-             ["unverified","❔ нечем проверить"],["series","🧾 признаки серии"]]
-    .filter(([k])=>t[k]).map(([k,l])=>team
-      ?`<a href="#" onclick="dgCases('${k}');return false">${l}: <b>${t[k]}</b></a>`
-      :`${l}: <b>${t[k]}</b>`);
-  if(evl.length) line.push(evl.join(" · "));
-  if(t.money_text) line.push(`💰 долг ${esc(t.money_text)}`);
-  if(t.money_paid_text) line.push(`✅ закрыто ${esc(t.money_paid_text)}`);
-  return `<div class="kpis">
+  const kpis=`<div class="kpis">
     ${k(t.visits||0,"выездов",c("visits"))}${k(t.paid||0,"оплачен",c("paid"))}${k(t.promised||0,"обещают",c("promised"))}
     ${k(t.overdue||0,"обещаний просрочено",team?"dgOpenPromises()":"")}${k((t.with_photo||0)+"/"+(t.persons||0),"с фото",c("with_photo"))}${sixth}
-  </div>${line.length?`<div class="facts">${line.join(" · ")}</div>`:""}`;
+  </div>`;
+  // v65 (владелец 01.10: «надписи внизу лепятся и не информативны»): вместо
+  // сплошной строки «🎯 … · 👥 … · ⏱ … · 📍 …» — разделы строками «подпись — число».
+  const row=(label,val,go,zero)=>go&&!zero
+    ?`<button class="drow" onclick="${go}"><span>${label}<i class="go">›</i></span><b>${val}</b></button>`
+    :`<div class="drow${zero?" zero":""}"><span>${label}</span><b>${val}</b></div>`;
+  const sec=(title,body,note)=>`<div class="dsec"><div class="dsec-h">${title}${note?`<span class="note">${note}</span>`:""}</div>${body}</div>`;
+  const out=[kpis];
+  // План офиса — «10 выездов на сотрудника в день»: полоса вместо процента в тексте.
+  if(t.plan){
+    const pct=Math.round((t.visits||0)/t.plan*100);
+    const sub=[`${t.plan_per_day} на человека в день`];
+    if(multi&&team) sub.push(`в работе ${t.active||0} из ${t.employees}`);
+    out.push(sec("План",`<div class="dplan"><div class="top"><span class="dsub">${t.visits||0} из ${t.plan}</span><b>${pct}%</b></div>
+      <div class="pbar"><i style="width:${Math.min(100,pct)}%"></i></div><div class="dsub">${sub.join(" · ")}</div></div>`));
+  }
+  // Оплаты — по реестру: «Дата/Сумма последнего платежа» (владелец 01.10:
+  // «обещания — это хорошо, но что насчёт оплат?»). Реестр приходит импортом раз
+  // в день, поэтому рядом — по какой день он знает об оплатах.
+  const asof=(DG.stats&&DG.stats.pay_asof)||"";
+  const payN=+t.pay_persons||0, aftN=+t.pay_after||0;
+  out.push(sec("Оплаты",`<div class="drows">
+    ${row("оплатили за период",payN?`<small>${payN} чел ·</small> ${esc(t.pay_money_text||"")}`:"0",c("pay"),!payN)}
+    ${row("из них после выезда",aftN?`<small>${aftN} чел ·</small> ${esc(t.pay_after_money_text||"")}`:"0",c("pay_after"),!aftN)}
+  </div>`, asof?`по реестру на ${esc(dgDM(asof))}`:"по реестру"));
+  const money=[];
+  if(t.money_text) money.push(row("долг должников периода",esc(t.money_text)));
+  if(t.money_paid_text) money.push(row("из них с исходом «Оплачен»",esc(t.money_paid_text)));
+  if(money.length) out.push(sec("Долг",`<div class="drows">${money.join("")}</div>`));
+  // Подтверждение выезда и контроль офиса — две колонки строк; тап — те самые случаи.
+  const ev=[["confirmed","на адресе"],["far","у адреса не был"],["saved_away","вне адреса"],
+            ["unverified","нечем проверить"],["series","признаки серии"]]
+    .map(([key,l])=>row(l,t[key]||0,c(key),!t[key]));
+  ev.push(row("внесено позже",t.late||0,"",!t.late), row("без гео",t.no_geo||0,"",!t.no_geo));
+  if(t.visits) out.push(sec("Проверка выездов",`<div class="drows two">${ev.join("")}</div>`));
+  return out.join("");
 }
+function dgDM(iso){ const d=String(iso||"").slice(0,10).split("-"); return d.length===3?`${d[2]}.${d[1]}`:iso; }
 // --- Воронка Collection: лестница выезд → контакт → клиент → обещание → оплата ---
 // Счётчики приезжают из того же stats_data, что считает книгу (totals.funnel),
 // проценты — те же пары «числитель/знаменатель», что в funnel.RATES на сервере.
@@ -4360,9 +4406,9 @@ function dgBars(days){
   const bars=days.map((d,i)=>`<button class="${d.weekend?"we":""}" title="${esc(d.label)}: ${d.visits||0}"
       style="height:${Math.max(3,Math.round((d.visits||0)/mx*52))}px" onclick="dgDay(${i})"></button>`).join("");
   const lbl=days.length<=31?`<div class="barlbl">${days.map(d=>`<span>${d.day}</span>`).join("")}</div>`:"";
-  return `<div class="bars">${bars}</div>${lbl}
-    <div class="muted" style="display:flex;justify-content:space-between;font-size:11px;margin-top:2px">
-      <span>${esc(days[0].label)}</span><span>выезды по дням · тап по столбику — открыть день</span><span>${esc(days[days.length-1].label)}</span></div>`;
+  // Подпись — заголовком над столбиками: внизу она слипалась с датами краёв.
+  return `<div class="bars-h"><span class="t">Выезды по дням</span><span class="note">тап — открыть день</span></div>
+    <div class="bars">${bars}</div>${lbl}`;
 }
 function dgIdle(r){
   const a=r.activity; if(!a) return "телеметрии нет";
@@ -4883,7 +4929,8 @@ async function dgBindPost(body){
       :"не сохранилось: "+String((e&&e.message)||e)+" — попробуйте при связи";
   }
 }
-const DG_METRIC_TITLE={visits:"Выезды",paid:"Оплачено",promised:"Обещают оплатить",
+const DG_METRIC_TITLE={visits:"Выезды",paid:"Исход «Оплачен»",promised:"Обещают оплатить",
+  pay:"Оплаты по реестру",pay_after:"Оплаты после выезда",
   with_photo:"Выезды с фото",persons:"Должники",
   confirmed:"Подтверждены на адресе",far:"У адреса не был",
   saved_away:"Заполнены не на адресе",

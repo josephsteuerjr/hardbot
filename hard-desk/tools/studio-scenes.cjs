@@ -24,6 +24,11 @@ module.exports = [
     await d.js("document.querySelector('details.fold')?.setAttribute('open','')"); await d.settle();
     await d.shot("lead-funnel", { long: false });
   } },
+  // Оплаты по реестру (v65): провал из «Сводки» в список «после выезда».
+  { name: "lead-pay", run: async (d) => {
+    await d.open(LEAD); await week(d);
+    await d.js("dgCases('pay_after')"); await d.settle(); await d.shot("lead-pay", { long: false });
+  } },
   { name: "lead-team", run: async (d) => {
     await d.open(LEAD); await d.js("renderTeam()"); await d.settle(); await week(d);
     await d.shot("lead-team");

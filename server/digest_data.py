@@ -613,6 +613,8 @@ def person_data(mgr: dict, on_date: str, employee: str, rep: str,
 
 # --- ЭКРАН: случаи за окном (тап по плашке сводки) ---------------------------
 CASE_METRICS = {"visits", "paid", "promised", "with_photo", "persons",
+                # Оплаты по реестру за окно: все и пришедшие после выезда.
+                "pay", "pay_after",
                 # Подтверждение выезда: подтверждён / у адреса не был /
                 # проверить нечем / признаки серии / заполнено не на адресе.
                 "confirmed", "far", "unverified", "series", "saved_away",
@@ -685,6 +687,21 @@ def cases_data(mgr: dict, rng: dict, metric: str, country: str = "",
     items = []
     for emp in employees:
         r = _employee_stats(emp, rng["from"], rng["to"], with_photos=False)
+        if metric in ("pay", "pay_after"):
+            for x in r["_pays"]:
+                if metric == "pay_after" and not x["visit_day"]:
+                    continue
+                p = x["person"]
+                items.append({
+                    "employee": emp, "date": x["day"].isoformat(),
+                    "day_label": _short_date(x["day"]),
+                    "rep": p["rep"], "client": p["client"], "n": p["n"],
+                    "outcome": "Оплата", "emoji": "💳",
+                    "agreed": (f"после выезда {_short_date(x['visit_day'])}"
+                               if x["visit_day"] else "без выезда"),
+                    "photos": 0, "money": x["units"], "money_text": _units_text(x["units"]),
+                })
+            continue
         entries = r["_entries"]
         # «Оплачен», «обещают» и «должников» — это ПОСЛЕДНЕЕ состояние человека
         # за окно, ровно как в плашках; «выездов» и ступени воронки — каждый
@@ -1099,6 +1116,49 @@ def _last_payment_day(p: dict):
     return max(days) if days else None
 
 
+# Платёж «после выезда»: к должнику ездили не раньше чем за столько дней до
+# платежа. Дальше связь выезда и оплаты уже гадание.
+PAY_AFTER_VISIT_DAYS = 30
+
+
+def _payments_of(persons: list[dict], d_from: str, d_to: str) -> list[dict]:
+    """Оплаты портфеля за окно — по реестру («Дата/Сумма последнего платежа»).
+
+    Владелец 01.10.2026: «обещания — это хорошо, но что насчёт оплат?». Реестр
+    знает только ПОСЛЕДНИЙ платёж договора, поэтому это «кто заплатил за окно и
+    сколько последним платежом», а не выписка. Человек считается один раз, суммы —
+    по его договорам с платежом в окне, раздельно по валютам. visit_day — самый
+    поздний выезд к человеку за PAY_AFTER_VISIT_DAYS до платежа (кем бы ни был)."""
+    lo, hi = db._as_date(d_from), db._as_date(d_to)
+    if lo is None or hi is None:
+        return []
+    out = []
+    for p in persons:
+        day, acc = None, {}
+        for c in p["contracts"]:
+            d = db._as_date(_cell_of(c, "last_payment_date") or "")
+            if d is None or not lo <= d <= hi:
+                continue
+            u = debt.unit([_cell_of(c, "partner")])
+            acc[u] = acc.get(u, 0) + int(db.canon_amount(_cell_of(c, "last_payment_sum")) or 0)
+            day = max(day, d) if day else d
+        if day:
+            out.append({"person": p, "day": day, "visit_day": None,
+                        "units": [{"unit": u, "sum": s} for u, s in acc.items() if s]})
+    if out:
+        since = min(x["day"] for x in out) - timedelta(days=PAY_AFTER_VISIT_DAYS)
+        seen = db.visit_days_for_contracts(
+            [c["contract_id"] for x in out for c in x["person"]["contracts"]],
+            since.isoformat(), hi.isoformat())
+        for x in out:
+            first = x["day"] - timedelta(days=PAY_AFTER_VISIT_DAYS)
+            prior = [d for c in x["person"]["contracts"]
+                     for d in map(db._as_date, seen.get(c["contract_id"], ()))
+                     if d and first <= d <= x["day"]]
+            x["visit_day"] = max(prior) if prior else None
+    return out
+
+
 def _promise_view(e: dict, snap: dict, on, first_day=None) -> dict:
     """Судьба обещания, взятого на этом выезде: состояние, дата, сумма, срок.
 
@@ -1278,6 +1338,8 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
     for e in ordered:
         by_day[e["date"]] = by_day.get(e["date"], 0) + 1
     act = db.employee_activity(emp)
+    pays = _payments_of(persons, d_from, d_to)
+    pays_after = [x for x in pays if x["visit_day"]]
     return {
         "employee": emp,
         "visits": len(ordered), "persons": len(people),
@@ -1326,11 +1388,15 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
             for status, ps in by_status.items()},
         "activity": {k: act.get(k) for k in _ACTIVITY_KEYS} if act else None,
         "portfolio": len(persons),
+        # Оплаты портфеля за окно по реестру и те из них, что пришли после выезда.
+        "pay_persons": len(pays), "pay_money": _merge_units(x["units"] for x in pays),
+        "pay_after": len(pays_after),
+        "pay_after_money": _merge_units(x["units"] for x in pays_after),
         # Воронка Collection: счётчики ступеней. Проценты не храним — их считает
         # funnel.rates там, где известен план, иначе «средний процент по
         # средним процентам» разошёлся бы с итогом по команде.
         "funnel": _funnel_of(ordered),
-        "_by_day": by_day, "_entries": ordered, "_paid": paid,
+        "_by_day": by_day, "_entries": ordered, "_paid": paid, "_pays": pays,
     }
 
 
@@ -1354,6 +1420,16 @@ def _employee_country_index(d_from: str | None = None,
                 if code:
                     out[emp] = code
     return out
+
+
+def _pay_totals(rows: list[dict]) -> dict:
+    """Блок «Оплаты» свода: люди и деньги, раздельно «всего» и «после выезда»."""
+    money = _merge_units(r.get("pay_money") for r in rows)
+    after = _merge_units(r.get("pay_after_money") for r in rows)
+    return {"pay_persons": sum(r.get("pay_persons", 0) for r in rows),
+            "pay_after": sum(r.get("pay_after", 0) for r in rows),
+            "pay_money": money, "pay_money_text": _units_text(money),
+            "pay_after_money": after, "pay_after_money_text": _units_text(after)}
 
 
 def _totals_of(rows: list[dict], days: int) -> dict:
@@ -1395,6 +1471,7 @@ def _totals_of(rows: list[dict], days: int) -> dict:
         "fill_avg": _avg_fill([r.get("fill_avg") for r in rows]),
         "money": _totals_units(people), "money_text": _persons_total(people),
         "money_paid": _totals_units(paid), "money_paid_text": _persons_total(paid),
+        **_pay_totals(rows),
         "plan_per_day": per_day,
         "plan": plan_total * max(1, days),
         # Воронка складывается счётчиками, а не процентами: доля команды — это
@@ -1440,6 +1517,9 @@ def stats_data(mgr: dict, rng: dict, employees: list[str] | None = None) -> dict
                       for c in codes],
         "scope": scope_label(mgr),
         "manager_name": mgr.get("name") or "",
+        # По какой день реестр знает об оплатах: импорт раз в день, и за
+        # «сегодня» оплат ещё нет — без даты ноль читался бы провалом.
+        "pay_asof": db.last_payment_asof(),
     }
 
 

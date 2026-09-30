@@ -2943,6 +2943,43 @@ def visits_for_employee(employee: str, date_from: str, date_to: str) -> list[sql
         ).fetchall()
 
 
+def visit_days_for_contracts(contract_ids, date_from: str, date_to: str) -> dict[str, list[str]]:
+    """{КД: дни выездов} за [date_from..date_to] — кем бы ни был выезд.
+
+    Нужно блоку «Оплаты» сводки: платёж засчитывается «после выезда», если к
+    должнику ездили до него. Договоров с платежом за окно — десятки, поэтому
+    запрос по списку КД, а не журнал сотрудника целиком."""
+    lo, hi = _as_date(date_from), _as_date(date_to)
+    ids = sorted({str(c) for c in contract_ids or () if c})
+    out: dict[str, list[str]] = {}
+    if lo is None or hi is None or not ids:
+        return out
+    with connect() as conn:
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            for r in conn.execute(
+                    "SELECT contract_id, substr(created_at, 1, 10) d FROM visits "
+                    f"WHERE contract_id IN ({','.join('?' * len(chunk))}) "
+                    "AND substr(created_at, 1, 10) BETWEEN ? AND ?",
+                    (*chunk, lo.isoformat(), hi.isoformat())):
+                out.setdefault(r["contract_id"], []).append(r["d"])
+    return out
+
+
+def last_payment_asof() -> str:
+    """Самая поздняя «Дата последнего платежа» в реестре (ISO) — по какой день
+    сводка вообще знает об оплатах. Реестр приходит импортом раз в день, и
+    «сегодня» оплат в нём ещё нет: без этой даты ноль выглядел бы провалом."""
+    best = None
+    with connect() as conn:
+        for (v,) in conn.execute("SELECT DISTINCT last_payment_date FROM clients "
+                                 "WHERE last_payment_date IS NOT NULL AND last_payment_date != ''"):
+            d = _as_date(v)
+            if d and (best is None or d > best):
+                best = d
+    return best.isoformat() if best else ""
+
+
 def visit_authors(date_from: str, date_to: str) -> dict[str, set[str]]:
     """{ФИО автора: коды стран его выездов} за окно — только строки с автором.
 
