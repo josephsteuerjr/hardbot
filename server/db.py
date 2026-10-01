@@ -1252,6 +1252,39 @@ def init_db() -> None:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_control_checks_day "
                      "ON control_checks(selected_on)")
+        # ЧЕК ОБ ОПЛАТЕ (контур СБ, 01.10.2026): фото/скрин перевода + сумма,
+        # приложенный к карточке должника. Это НЕ контрольное фото визита: у него
+        # другая роль (доказательство платежа и его плательщика), другой каталог
+        # на диске (receipts/, счётчик контрольных снимков он не трогает) и свой
+        # доступ на чтение. op — идемпотентный ключ оффлайн-очереди, как
+        # visits.op_id и имя файла снимка: повторная досылка не плодит строк.
+        # Амендмент запрещён — доказательство неизменяемо, как у photo_geo.
+        # payer_note («кто и почему») — свободный текст: когда-нибудь сгруппируется
+        # фонетическим скелетом в «один плательщик на нескольких должников».
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS payment_evidence (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              op TEXT UNIQUE,
+              contract_id TEXT NOT NULL,
+              employee TEXT,
+              telegram_id INTEGER,
+              visit_op TEXT,
+              paid_at TEXT,
+              amount REAL,
+              currency TEXT,
+              payer_is_client INTEGER NOT NULL DEFAULT 1,
+              payer_note TEXT,
+              file TEXT UNIQUE,
+              sha256 TEXT,
+              size_bytes INTEGER,
+              source TEXT,
+              created_at TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_payev_contract "
+                     "ON payment_evidence(contract_id, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_payev_sha "
+                     "ON payment_evidence(sha256)")
         # Миграция app_links времён одноразовых кодов (без счётчика uses) и времён
         # общего потолка обменов (без max_uses/bonus_ios/last_use_at/last_agent).
         # Шаблон один и тот же — PRAGMA table_info + ALTER TABLE ... DEFAULT: рабочая
@@ -3142,6 +3175,58 @@ def record_photo(contract_id: str, file: str, telegram_id: int, *,
              meta_state, shell_version, meta_origin, shrunk, a_lat, a_lon,
              a_tol, assign_date_at))
         conn.commit()
+
+
+def record_receipt(op: str, contract_id: str, employee: str | None,
+                   telegram_id: int | None, *, visit_op: str | None = None,
+                   paid_at: str | None = None, amount: float | None = None,
+                   currency: str | None = None, payer_is_client: bool = True,
+                   payer_note: str | None = None, file: str | None = None,
+                   sha256: str | None = None, size_bytes: int | None = None,
+                   source: str | None = None,
+                   created_at: str | None = None) -> int | None:
+    """Строка чека об оплате. INSERT OR IGNORE: повторная досылка того же op
+    из оффлайн-очереди не плодит строку и НЕ переписывает уже принятое —
+    чек доказательство, амендмент запрещён (тот же принцип, что photo_geo)."""
+    now = created_at or datetime.now().isoformat(timespec="seconds")
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO payment_evidence (op, contract_id, employee, "
+            "telegram_id, visit_op, paid_at, amount, currency, payer_is_client, "
+            "payer_note, file, sha256, size_bytes, source, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (op, contract_id, employee or None, telegram_id or None,
+             visit_op or None, paid_at, amount, currency or None,
+             1 if payer_is_client else 0, payer_note or None, file or None,
+             sha256 or None, size_bytes, source or None, now))
+        conn.commit()
+        if cur.rowcount:
+            return cur.lastrowid
+        row = conn.execute("SELECT id FROM payment_evidence WHERE op=?",
+                           (op,)).fetchone()
+        return row["id"] if row else None
+
+
+def receipts_for(contract_ids: list[str]) -> dict[str, list[dict]]:
+    """Чеки по договорам одним запросом: карточка и витрина СБ зовут это на
+    список целиком — построчный SELECT был бы N проходов по базе."""
+    ids = [c for c in contract_ids if c]
+    out: dict[str, list[dict]] = {}
+    for i in range(0, len(ids), 400):
+        chunk = ids[i:i + 400]
+        qs = ",".join("?" for _ in chunk)
+        with connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM payment_evidence WHERE contract_id IN ({qs}) "
+                "ORDER BY COALESCE(created_at,''), id", chunk).fetchall()
+        for r in rows:
+            out.setdefault(r["contract_id"], []).append({
+                "op": r["op"], "paid_at": r["paid_at"], "amount": r["amount"],
+                "currency": r["currency"],
+                "payer_is_client": bool(r["payer_is_client"]),
+                "payer_note": r["payer_note"], "file": r["file"],
+                "employee": r["employee"], "created_at": r["created_at"]})
+    return out
 
 
 def add_photo_geo(contract_id: str, file: str, telegram_id: int,

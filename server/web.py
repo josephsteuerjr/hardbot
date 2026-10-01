@@ -531,7 +531,8 @@ def _fmt_money_ru(value) -> str:
 
 
 def _person_full_from_rows(rows, rep: str, lang: str,
-                           extras: dict[str, list[dict]] | None = None) -> dict | None:
+                           extras: dict[str, list[dict]] | None = None,
+                           receipts: list[dict] | None = None) -> dict | None:
     """Полная карточка из уже выбранных строк одного человека.
 
     `/api/cards` получает все группы одним запросом. Повторный
@@ -631,6 +632,11 @@ def _person_full_from_rows(rows, rep: str, lang: str,
         # Дополнительные колонки реестра (карта колонок пульта). Состав и
         # подписи задаёт оператор, поэтому это плоский список, а не схема.
         "extra": _person_extra(rows, extras),
+        # Чеки об оплате, приложенные к карточке (контур СБ): дата платежа,
+        # сумма, платил ли клиент. Читаются и выездником (видит, что уже
+        # приложено), и руководителем/безопасником в витрине.
+        "receipts": (db.receipts_for([rep]).get(rep, [])
+                     if receipts is None else receipts),
     }
 
 
@@ -1377,10 +1383,13 @@ async def _cards(request: web.Request) -> web.Response:
     # что и сами договоры: карточек бывает под три сотни.
     all_extras = db.registry_extra_values(
         [r["contract_id"] for p in grouped for r in p["contracts"]])
+    # Чеки всего портфеля — тем же пакетом (не открывать запрос на карточку).
+    all_receipts = db.receipts_for([p["rep"] for p in grouped])
     for p in grouped:
         # persons_for_employee уже принёс все строки договоров. Не открываем
         # отдельное SQLite-соединение для каждой карточки.
-        full = _person_full_from_rows(p["contracts"], p["rep"], lang, all_extras)
+        full = _person_full_from_rows(p["contracts"], p["rep"], lang, all_extras,
+                                      all_receipts.get(p["rep"], []))
         if full:
             cards[p["rep"]] = full
     # ИБ: точечный просмотр карточки логируется в _person (view_card). Здесь — оптовый
@@ -2189,6 +2198,123 @@ async def _photo(request: web.Request) -> web.Response:
                     **meta)
     return web.json_response(
         {"ok": True, "photos": n, **({"dup": True} if not stored.published else {})})
+
+
+
+# --- Чек об оплате (контур СБ): фото перевода + сумма + кто платил ------------
+# Чеки лежат в СВОЁМ каталоге рядом с фото (photos/../receipts/<КД>/<op>.jpg):
+# счётчик контрольных снимков договора их не видит, галерея «Фото по КД» тоже.
+def receipt_dir() -> Path:
+    return PHOTO_DIR.parent / "receipts"
+
+
+# Пояснение «кто и почему платил» короче визитного текста: это одно поле формы,
+# а не свободный комментарий на 4000 знаков.
+RECEIPT_NOTE_MAX = 500
+
+
+def _receipt_query(request: web.Request) -> dict:
+    """Поля чека из query. Ошибки ПОЛЯ не роняют чек: оффлайн-очередь хоронит
+    запись на любом не-2xx (то же правило, что у нечитаемой суммы в /api/save),
+    а непринятое поле возвращается в rejected — нечитаемая сумма не должна
+    уничтожать само доказательство платежа."""
+    rejected: dict[str, str] = {}
+    amount = None
+    raw = (request.query.get("amount") or "").strip().replace(",", ".")
+    if raw:
+        try:
+            amount = round(float(raw), 2)
+            if not 0 < amount <= 1e9:
+                raise ValueError
+        except ValueError:
+            rejected["amount"] = "format"
+            amount = None
+    paid_at = None
+    raw_date = (request.query.get("paid_at") or "").strip()
+    if raw_date:
+        paid_at = db._as_date(raw_date)
+        if paid_at is None:
+            rejected["paid_at"] = "format"
+        elif paid_at > date.today():
+            # Дата из будущего — не «день платежа», а опечатка: поле отбрасываем,
+            # чек остаётся (дата загрузки-то настоящая).
+            rejected["paid_at"] = "future"
+            paid_at = None
+    payer_is_client = (request.query.get("payer") or "client") != "other"
+    note = (request.query.get("note") or "").strip()[:RECEIPT_NOTE_MAX]
+    if not payer_is_client and not note:
+        # «Другое лицо без пояснения» — сам по себе сигнал для СБ, чек принимаем.
+        rejected["payer_note"] = "required"
+    return {"amount": amount, "paid_at": paid_at, "payer_is_client": payer_is_client,
+            "note": note, "currency": (request.query.get("currency")
+                                       or "").strip()[:8] or None,
+            "rejected": rejected}
+
+
+async def _receipt(request: web.Request) -> web.Response:
+    uid, emp = _auth(request)
+    rep = request.query.get("rep", "")
+    row = db.get_client(rep)
+    if not row or (row["responsible"] != emp and uid != ADMIN_ID):
+        raise web.HTTPNotFound(text="person")
+    op = re.sub(r"[^A-Za-z0-9_-]", "", request.query.get("op", ""))[:64]
+    if not op:
+        raise web.HTTPBadRequest(text="op")
+    if request.content_type.lower() != "application/octet-stream":
+        raise web.HTTPUnsupportedMediaType(text="receipt content type")
+    fields = _receipt_query(request)
+    visit_op = re.sub(r"[^A-Za-z0-9_-]", "",
+                      request.query.get("visit") or "")[:64] or None
+    try:
+        stored = await _store_photo(
+            request.content.iter_chunked(_PHOTO_CHUNK), receipt_dir() / rep, op,
+            request.headers.get("X-Receipt-Ext"))
+    except _PhotoBodyError as e:
+        if e.too_large:
+            raise web.HTTPRequestEntityTooLarge(
+                max_size=PHOTO_MAX_BYTES, actual_size=e.actual_size)
+        raise web.HTTPUnprocessableEntity(text=e.reason)
+    db.audit_access(uid, "receipt", rep)
+    rid = db.record_receipt(
+        op, rep, emp, uid, visit_op=visit_op,
+        paid_at=fields["paid_at"].isoformat() if fields["paid_at"] else None,
+        amount=fields["amount"], currency=fields["currency"],
+        payer_is_client=fields["payer_is_client"],
+        payer_note=fields["note"] or None,
+        file=f"{rep}/{stored.path.name}",
+        sha256=stored.sha256, size_bytes=stored.size, source="app")
+    body = {"ok": True, "id": rid}
+    if fields["rejected"]:
+        body["rejected"] = fields["rejected"]
+    return web.json_response(body)
+
+
+async def _manager_receipt_file(request: web.Request) -> web.Response:
+    """Байты чека — руководителю и безопаснику своей команды. Право то же, что
+    у снимков: каталог договора целиком (_photo_scope_ok); файл лежит в другом
+    корне, но ключ тот же формат «КД/имя»."""
+    uid, _mgr, scope = _manager_gate(request)
+    key = (request.query.get("file") or "")[:220]
+    path = photostore.photo_path(key, root=receipt_dir())
+    if path is None or path.suffix.lower() not in _PHOTO_SUFFIXES or not path.is_file():
+        raise web.HTTPNotFound(text="receipt")
+    contract_dir = key.rsplit("/", 1)[0]
+    ctx = db.photo_contract_dirs(contract_dir)
+    if contract_dir not in ctx["dirs"]:
+        db.audit_access(uid, "receipt_view_denied", key)
+        raise web.HTTPNotFound(text="receipt")
+    rows = db.photo_index_for_dirs(ctx["dirs"])
+    if not _photo_scope_ok(uid, scope, ctx["contracts"], rows):
+        db.audit_access(uid, "receipt_view_denied", key)
+        raise web.HTTPNotFound(text="receipt")
+    db.audit_access(uid, "receipt_view", key)   # ИБ: каждый просмотр ПД — в журнал
+    resp = web.FileResponse(path)
+    resp.content_type = _PHOTO_MIME.get(path.suffix.lower(),
+                                        "application/octet-stream")
+    resp.headers["Cache-Control"] = "no-store, private"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Content-Disposition"] = "inline"
+    return resp
 
 
 # --- Поиск фото по КД для руководителя (первый HTTP-выход снимков наружу) ----
@@ -6181,6 +6307,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/route_day", _route_day)
     app.router.add_post("/api/save", _save)
     app.router.add_post("/api/photo", _photo)
+    app.router.add_post("/api/receipt", _receipt)
+    app.router.add_get("/api/manager/receipt_photo", _manager_receipt_file)
     app.router.add_post("/api/voice", _voice)
     app.router.add_post("/api/lang", _lang)
     app.router.add_post("/api/redeem", _redeem)
