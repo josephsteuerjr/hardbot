@@ -519,6 +519,9 @@ def _person_payload(p: dict, on_date: str) -> dict:
         # «photos» ниже — счётчик снимков, он был здесь раньше; список файлов
         # для показа в карточке кладём отдельным ключом.
         "shots": shots,
+        # Чеки об оплате, приложенные выездником (контур СБ): показать рядом с
+        # «Оплачен» из слов — сверка «слова против платежа» теперь в одном месте.
+        "receipts": db.receipts_for([p["rep"]]).get(p["rep"], []),
         "birth_date": rawv("birth_date"),
         "partners": list(p.get("partners") or []),
         "partner": ", ".join(p.get("partners") or []) or (rawv("partner") or ""),

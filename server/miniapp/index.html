@@ -629,6 +629,7 @@ const ICONS = {
   ruler:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17 17 3l4 4L7 21Z"/><path d="m7 13 2 2M10 10l2 2M13 7l2 2"/></svg>',
   users:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c.6-3.4 3-5.4 6-5.4s5.4 2 6 5.4"/><path d="M15.5 5.2a3 3 0 0 1 0 5.6M17.5 14.8c1.8.6 3 2.4 3.5 5.2"/></svg>',
   link:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1 1"/><path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1-1"/></svg>',
+  swap:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4 3 8l4 4"/><path d="M3 8h13a4 4 0 0 1 4 4"/><path d="m17 20 4-4-4-4"/><path d="M21 16H8a4 4 0 0 1-4-4"/></svg>',
   down:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></svg>',
   route:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="18" r="2.2"/><circle cx="18" cy="6" r="2.2"/><path d="M8 18h7.5a3.5 3.5 0 0 0 0-7h-7a3.5 3.5 0 0 1 0-7H16"/></svg>',
   cal:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>',
@@ -1207,7 +1208,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=66;
+const SHELL_VERSION=67;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -4140,6 +4141,7 @@ async function dgLoad(){
             : DG.view==="plan"     ? "/api/manager/plan"
             : DG.view==="workload" ? "/api/manager/workload"+dgRangeQ(DG.wemp?{employee:DG.wemp}:{})
             : DG.view==="binds"    ? "/api/manager/binds"
+            : DG.view==="assign"   ? "/api/control/assignments"+dgRangeQ()
             : DG.view==="team_links" ? "/api/manager/app_links"
             : DG.view==="cases"    ? "/api/manager/cases"+dgRangeQ({metric:DG.metric||"visits",
                                        country:DG.country||"", office:DG.office||"",
@@ -4238,8 +4240,38 @@ function dgRender(j){
   if(DG.view==="plan") return dgPlanScreen(j,b);
   if(DG.view==="workload") return dgWorkloadScreen(j,b);
   if(DG.view==="binds") return dgBindsScreen(j,b);
+  if(DG.view==="assign") return dgAssignScreen(j,b);
   if(DG.view==="team_links") return dgLinksScreen(j,b);
   return dgPromises(j,b);
+}
+// --- ЭКРАН: закрепления — кому приехали договоры (контур СБ) ---------------------
+// Журнал снят с диффов импорта: окно факта против заявленной «Даты закрепления».
+// «Любимчик» — это не приговор, а вопрос: медиана полученных заметно выше
+// офисной И стабильно; решает человек, здесь — только числа.
+function dgAssignScreen(j,b){
+  DG.assign=j;
+  const rows=j.rows||[], evs=j.events||[];
+  const med=r=>r.debt_ratio?`×${r.debt_ratio} от офиса`:"";
+  const rowHtml=r=>`<div class="lrow">
+    <div class="pname">${esc(r.employee)}</div>
+    <div class="psub">получил ${r.received} (передачи ${r.transfers}) · платящих ${r.paying}
+      ${r.backdated?` · <b>задним числом ${r.backdated}</b>`:""}</div>
+    <div class="psub">медиана долга ${esc(rcMoney(r.median_debt))} ${esc(med(r))}
+      ${r.top_peer?` · чаще всех от ${esc(r.top_peer)} (${r.top_peer_n})`:""}</div>
+  </div>`;
+  const evHtml=e=>`<div class="lrow">
+    <div class="pname">${esc(e.window_to)} · ${esc(e.employee||"(снят)")}</div>
+    <div class="psub">${esc(e.prev_employee||"без ответственного")} → ${esc(e.employee||"—")}
+      · ${esc(e.kind==="transfer"?"передача":e.kind==="assign"?"новое":"снято")}
+      ${e.claimed_at?` · «дата закрепления» ${esc(e.claimed_at)}`:""}</div>
+  </div>`;
+  b.innerHTML=[`<button class="back" onclick="dgGo('stats')">‹ к сводке</button>`,
+    dgTop("Закрепления","кому приехали договоры · окно "+esc((j.range&&(j.range.from+".."+j.range.to))||"")),
+    `<div class="muted" style="font-size:13px;margin:4px 0 2px">События снимает импорт общего реестра. «Дата закрепления» пишется руками и может отличаться от окна — расхождение больше ${j.claimed_lag_days||7} дн помечено как задним числом.</div>`,
+    `<div style="font-weight:700;margin:12px 0 4px">По сотрудникам</div>`,
+    rows.map(rowHtml).join("")||`<div class="center">За окно передач не было</div>`,
+    `<div style="font-weight:700;margin:12px 0 4px">События</div>`,
+    evs.slice(0,60).map(evHtml).join("")||`<div class="center">Событий нет</div>`].join("");
 }
 // --- ЭКРАН: вход команды — ссылки входа в приложение ---------------------------
 // 29.09.2026, владелец: от аналитика руководителя отличает только выдача ссылок,
@@ -4583,6 +4615,7 @@ function dgTiles(j){
     tile("ruler","Нагрузка","dgGo('workload',{wemp:null})"),
     tile("users","Кто есть кто","dgGo('binds')",+j.bind_requests||0),
     caps.team_links===false?"":tile("link","Вход команды","dgGo('team_links')"),
+    caps.control?tile("swap","Закрепления","dgGo('assign')"):"",
     tile("down","Excel","dgExcel()"),
   ].join("")}</div>`;
 }
@@ -4782,9 +4815,34 @@ function dgPerson(j,b){
   }else{
     parts.push(`<div class="muted" style="margin-top:10px">📸 фото по этому клиенту нет</div>`);
   }
+  // Чеки об оплате (контур СБ): дата, сумма, плательщик; сам снимок чека — по
+  // тапу, той же авторизацией, что и фото (отдельная ручка /api/manager/receipt_photo).
+  const rcs=j.receipts||[];
+  DG.rcs=rcs;
+  if(rcs.length){
+    parts.push(`<div style="margin-top:10px;font-weight:700">🧾 Чеки · ${rcs.length}</div>`);
+    parts.push(rcs.map((r,i)=>`<button class="btn line" style="padding:4px 10px;margin-top:6px" onclick="dgReceipt(${i})">
+      ${esc(r.paid_at||r.created_at||"")} · ${esc(rcMoney(r.amount))}${r.payer_is_client?"":" · другое лицо"+(r.payer_note?": "+esc(r.payer_note):"")}</button>`).join(""));
+    parts.push(`<div id="dgreceipt"></div>`);
+  }
   parts.push(`<button class="btn line" style="margin-top:10px" onclick="dgGo('emp')">← ${esc(DG.emp||"")}</button>`);
   b.innerHTML=parts.join("");
   dgShotsAuto();
+}
+async function dgReceipt(i){
+  const r=(DG.rcs||[])[i]; if(!r||!r.file) return;
+  const box=$("dgreceipt"); if(!box) return;
+  box.innerHTML=`<div class="muted" style="margin-top:8px">загружаю чек…</div>`;
+  try{
+    const rr=await fetch("/api/manager/receipt_photo?file="+enc(r.file),{headers:authHeaders()});
+    if(!rr.ok) throw new Error(rr.status);
+    const u=URL.createObjectURL(await rr.blob());
+    box.innerHTML=`<img src="${u}" style="max-width:100%;border-radius:10px"
+      onerror="this.outerHTML='<div class=muted>файл не отобразился</div>'">
+      <div class="muted" style="font-size:11px;margin-top:2px">${esc(r.paid_at||"")}${r.payer_is_client?"":" · платил не должник"}</div>`;
+  }catch(e){
+    box.innerHTML=`<div class="muted">чек не загрузился (${esc(String(e.message||e))})</div>`;
+  }
 }
 // Снимок тянется fetch'ем с заголовком авторизации (токен в query запрещён) и
 // живёт в том же LRU блобов, что и фото-аудит.

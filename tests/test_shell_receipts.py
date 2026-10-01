@@ -92,3 +92,25 @@ def test_queue_sends_receipt_with_fields_in_query():
         assert fragment in url, f"в запросе чека нет {fragment}: {url}"
     assert out["rc"].get("method") == "POST"
     assert out["dump"]["queue"] == [], "доставленный чек остался в очереди"
+
+
+# --- витрина руководителя/СБ: чеки в карточке и экран «Закрепления» (статика) -----
+def test_receipts_and_assignments_wired_into_manager_screens():
+    from pathlib import Path
+    index = (Path(__file__).resolve().parent.parent
+             / "server" / "miniapp" / "index.html").read_text("utf-8")
+    dg = index[index.index("let DG={"):index.index("const PHOTOBLOBS")]
+    # чек в карточке должника: файл тянется авторизованным fetch'ем, токен не в query
+    assert "/api/manager/receipt_photo?file=" in dg
+    i = dg.index("async function dgReceipt(")
+    body = dg[i:dg.index("\n}", i)]
+    assert "authHeaders()" in body and "token=" not in body
+    # экран закреплений: свой URL и рендер, плитка видна только роли с control
+    assert '"/api/control/assignments"' in dg and "dgAssignScreen" in dg
+    assert 'caps.control?tile("swap","Закрепления","dgGo(\'assign\')")' in dg
+    # onclick без ФИО — только индексы (правило вкладки руководителя)
+    import re
+    for m in re.finditer(r'onclick="([^"]*)"', dg[dg.index("function dgAssignScreen"):
+                                                dg.index("// --- ЭКРАН: вход команды")]):
+        for bad in ("${r.employee", "${e.employee", "${c.rep"):
+            assert bad not in m.group(1), m.group(1)
