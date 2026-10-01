@@ -697,6 +697,7 @@ const I18N = {
     logoutwhy:"С телефона удалятся вход, список клиентов, карточки и черновики. Войти снова можно будет только по новой ссылке входа.",
     logoutlost:"Не отправлено операций: {n}. Они пропадут.",cancel:"Отмена",
     secResult:"Результат выезда",secContact:"Контакт",secClient:"Клиент сейчас",secAgree:"Договорённость",
+    receipt:"Чек об оплате",rcShoot:"Приложить чек",rcAmount:"Сумма платежа",rcDate:"Дата платежа",rcPayerClient:"Платил должник",rcPayerOther:"Другое лицо",rcWho:"Кто платил и почему",rcNeedFields:"Заполните сумму и дату платежа",rcBadPhoto:"Фото чека не сохранилось — попробуйте ещё раз",
     nosplit:"разбивка по статьям не пришла"},
   uz:{visit:"Chiqish",client:"Mijoz",debt:"Qarz",form:"To‘ldirish",my:"Mijozlarim",
     search:"Qidirish: F.I.Sh., shartnoma, telefon",kd:"shartnoma",total:"Jami qarz",inwork:"Ish boshlandi",
@@ -757,6 +758,7 @@ const I18N = {
     logoutwhy:"Telefondan kirish, mijozlar ro‘yxati, kartalar va qoralamalar o‘chiriladi. Qayta faqat yangi kirish havolasi bilan kirish mumkin.",
     logoutlost:"Yuborilmagan amallar: {n}. Ular yo‘qoladi.",cancel:"Bekor qilish",
     secResult:"Chiqish natijasi",secContact:"Kontakt",secClient:"Mijoz hozir",secAgree:"Kelishuv",
+    receipt:"To‘lov cheki",rcShoot:"Chek qo‘shish",rcAmount:"To‘lov summasi",rcDate:"To‘lov sanasi",rcPayerClient:"Qarzdor to‘ladi",rcPayerOther:"Boshqa shaxs",rcWho:"Kim to‘ladi va nega",rcNeedFields:"Summa va to‘lov sanasini kiriting",rcBadPhoto:"Chek rasmi saqlanmadi — yana urinib ko‘ring",
     nosplit:"moddalar bo‘yicha taqsimot kelmadi"},
   tg:{visit:"Сафар",client:"Мизоҷ",debt:"Қарз",form:"Пур кардан",my:"Мизоҷони ман",
     search:"Ҷустуҷӯ: НН, шартнома, телефон",kd:"шартнома",total:"Қарзи умумӣ",inwork:"Дар кор аз",
@@ -817,6 +819,7 @@ const I18N = {
     logoutwhy:"Аз телефон воридшавӣ, рӯйхати мизоҷон, кортҳо ва нусхаҳо нест карда мешаванд. Аз нав танҳо бо пайванди нави воридшавӣ ворид шудан мумкин аст.",
     logoutlost:"Амалҳои нафиристода: {n}. Онҳо гум мешаванд.",cancel:"Бекор кардан",
     secResult:"Натиҷаи сафар",secContact:"Тамос",secClient:"Мизоҷ ҳозир",secAgree:"Созиш",
+    receipt:"Чеки пардохт",rcShoot:"Чек зама кардан",rcAmount:"Маблағи пардохт",rcDate:"Санаи пардохт",rcPayerClient:"Қарздор пардохт кард",rcPayerOther:"Шахси дигар",rcWho:"Кӣ пардохт кард ва чаро",rcNeedFields:"Маблағ ва санаи пардохтро ворид кунед",rcBadPhoto:"Расми чек нигоҳ дошта нашуд — аз нав кӯшиш кунед",
     nosplit:"тақсимот аз рӯи моддаҳо наомад"},
 };
 let STATE = {lang:"ru", meta:null, persons:[], cur:null, tab:"visit"};
@@ -1204,7 +1207,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=65;
+const SHELL_VERSION=66;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1440,6 +1443,8 @@ async function flushQueue(){
       // Нечитаемое/отклонённое фото остаётся видимым для пересъёмки, но не держит
       // за собой более поздние визиты, метки и фото.
       if(it.kind==="photo"&&it.failed) continue;
+      // Чек с тем же диагнозом: запись живёт для ручного разбора, очередь не держит.
+      if(it.kind==="receipt"&&it.failed) continue;
       // Очередь старой оболочки не содержит списка явно затронутых полей.
       // Сервер её не сертифицирует; сохраняем запись для ручного разбора.
       if(it.kind==="save"&&it.failed==="refresh-form") continue;
@@ -1483,6 +1488,17 @@ async function flushQueue(){
             {method:"POST",headers:photoHeaders(it.geo,it.ext,
                {at:it.at, src:it.src, sm:it.exif&&it.exif.sm, exif:it.exif}),
              body:bytes});
+        }else if(it.kind==="receipt"){
+          let bytes;
+          try{ bytes=await queuedPhotoBytes(it); }
+          catch(e){ await markPhotoFailed(it,"retake"); STATE.online=true; continue; }
+          const q=new URLSearchParams({rep:it.rep,op:it.op_id,
+            paid_at:it.paid_at||"",payer:it.payer_other?"other":"client"});
+          if(Number.isFinite(Number(it.amount))&&Number(it.amount)>0)
+            q.set("amount",String(it.amount));
+          if(it.note) q.set("note",it.note);
+          r=await fetch("/api/receipt?"+q.toString(),
+            {method:"POST",headers:receiptHeaders(it.ext),body:bytes});
         }else{ ok=true; }   // неизвестный тип — не держим вечно
         if(r){
           if(r.ok){
@@ -1493,6 +1509,7 @@ async function flushQueue(){
               // этого КД; текущий op удалится общим путём ниже.
               await retireReplacedPhoto(it);
             }
+            if(it.kind==="receipt"){ renderReceipts(); }
           }
           else if(r.status===401||r.status===403||r.status>=500) stop=true;  // авторизация/сервер — позже
           else if(it.kind==="save"&&r.status===409){
@@ -1500,7 +1517,7 @@ async function flushQueue(){
             try{ await IDB.put("queue",it); }catch(e){}
             STATE.online=true; continue;
           }
-          else if(it.kind==="photo"){
+          else if(it.kind==="photo"||it.kind==="receipt"){
             // Raw 4xx (в т.ч. 413/422) повтором не вылечится: запись сохраняем
             // как требующую пересъёмки и продолжаем последующие операции.
             await markPhotoFailed(it,String(r.status));
@@ -2439,7 +2456,7 @@ function drawPanel(){
   if(STATE.tab==="visit"){ p.innerHTML=panelVisit(d,t); setTimeout(initMap,0); }
   else if(STATE.tab==="client") p.innerHTML=panelClient(d,t);
   else if(STATE.tab==="debt") p.innerHTML=panelDebt(d,t);
-  else { p.innerHTML=panelForm(d,t); setTimeout(setupFormDraft,0); }
+  else { p.innerHTML=panelForm(d,t); setTimeout(setupFormDraft,0); setTimeout(renderReceipts,0); }
 }
 
 // --- Карта (MapLibre GL). Основной слой — свой Protomaps PMTiles; пин — наш.
@@ -2682,6 +2699,10 @@ function panelForm(d,t){
       </label>
       <div class="muted" style="font-size:11px;margin-top:6px">${t.galhint}</div>
       <div class="muted" id="phc" style="font-size:12px;margin-top:6px">${t.photos}: ${d.photos||0}</div>
+    </div>
+    <div class="fsec"><div class="fsec-h">🧾 ${t.receipt}</div>
+      <button type="button" class="btn line" style="margin-top:8px" onclick="openReceipt()">🧾 <span>${t.rcShoot}</span></button>
+      <div id="rclist" style="margin-top:6px"></div>
     </div>
     <div id="draftstat" class="draftrow" style="display:none"></div>
     <button class="btn acc big" id="savebtn" style="margin-top:12px" onclick="saveVisit()">${ic("check")}<span>${t.save}</span></button>`;
@@ -3049,6 +3070,122 @@ async function sendPhoto(rep,p,live,retakeOf){
   }finally{
     PHOTO_INFLIGHT.delete(op_id);
   }
+}
+// --- Чек об оплате (контур СБ): фото перевода + сумма + кто платил -----------
+// Чек — НЕ контрольное фото: точка съёмки не нужна (чек показывают, а не
+// снимают на адресе), зато сумма и дата платежа обязательны ДО снимка.
+// Снимок и есть «отправить»: без фото чек не существует.
+function receiptHeaders(ext){
+  const h=authHeaders();
+  h["Content-Type"]="application/octet-stream";
+  h["X-Receipt-Ext"]=ext||".jpg";
+  return h;
+}
+function closeReceipt(){ const b=$("rcsheet"); if(b) b.remove(); }
+function rcSetPayer(other){
+  const w=$("rc_who_box");
+  if(w) w.style.display=other?"":"none";
+  for(const id of ["rc_pc","rc_po"]){ const b=$(id); if(b) b.classList.toggle("on",
+    id===(other?"rc_po":"rc_pc")); }
+}
+function openReceipt(){
+  if(!STATE.cur) return;
+  const t=L(), today=srvToday();
+  const box=document.createElement("div");
+  box.className="picksheet"; box.id="rcsheet";
+  box.innerHTML=`<div class="pickbg" onclick="closeReceipt()"></div>
+    <div class="pickbody">
+      <div style="font-weight:700;margin:2px 0 12px">🧾 ${esc(t.receipt)}</div>
+      <label class="fld">${esc(t.rcAmount)}</label>
+      <input id="rc_amount" inputmode="numeric" class="money" placeholder="0" oninput="onMoneyInput(this)">
+      <label class="fld">${esc(t.rcDate)}</label>
+      <input id="rc_date" type="date" value="${today}" max="${today}">
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button type="button" class="pickrow on" id="rc_pc" style="flex:1" onclick="rcSetPayer(false)">${esc(t.rcPayerClient)}</button>
+        <button type="button" class="pickrow" id="rc_po" style="flex:1" onclick="rcSetPayer(true)">${esc(t.rcPayerOther)}</button>
+      </div>
+      <div id="rc_who_box" style="display:none">
+        <label class="fld">${esc(t.rcWho)}</label>
+        <input id="rc_who" maxlength="500">
+      </div>
+      <label class="btn acc" style="cursor:pointer;margin-top:14px">📷 <span>${esc(t.rcShoot)}</span>
+        <input type="file" accept="image/*" capture="environment" id="rc_file" style="display:none" onchange="upReceipt(true)">
+      </label>
+      <label class="btn line" style="cursor:pointer;margin-top:8px">🖼 <span>${esc(t.fromgallery)}</span>
+        <input type="file" accept="image/*" id="rc_file_gal" style="display:none" onchange="upReceipt(false)">
+      </label>
+    </div>`;
+  document.body.appendChild(box);
+}
+function rcMoney(v){ const n=Number(v);
+  return (Number.isFinite(n)&&n>0)?n.toLocaleString("ru-RU"):"—"; }
+async function upReceipt(live){
+  live=live!==false;
+  const el=$(live?"rc_file":"rc_file_gal"); if(!el) return;
+  const files=[...(el.files||[])];
+  try{ el.value=""; }catch(e){}
+  if(!files.length||!STATE.cur) return;
+  const t=L();
+  // Поля читаем ДО закрытия листа (он удаляется из DOM) и ДО чтения файла.
+  const amountRaw=(($("rc_amount")&&$("rc_amount").value)||"").replace(/[^0-9]/g,"");
+  const paidAt=(($("rc_date")&&$("rc_date").value)||"").trim();
+  const payerOther=$("rc_po")&&$("rc_po").classList.contains("on");
+  const note=(($("rc_who")&&$("rc_who").value)||"").trim();
+  const amount=amountRaw?Number(amountRaw):null;
+  if(!(amount>0)||!/^\d{4}-\d{2}-\d{2}$/.test(paidAt)){ toast(t.rcNeedFields); return; }
+  const rep=STATE.cur.rep;
+  // Читаем и жмём файл сразу (iOS: security-scoped файлы живут до await'ов).
+  let prepared;
+  try{
+    const f=files[0];
+    const small=await shrinkPhoto(f);
+    prepared={bytes:await photoBytes(small||f),ext:small?".jpg":photoExt(f.name,f.type)};
+  }catch(e){ toast(t.rcBadPhoto); return; }
+  closeReceipt();
+  await sendReceipt(rep,{amount,paid_at:paidAt,payer_other:payerOther,note},prepared);
+}
+async function sendReceipt(rep,fields,p){
+  const op_id=uuid(), at=Date.now();
+  const entry=Object.assign({op_id,kind:"receipt",rep,bytes:p.bytes,ext:p.ext,at},fields);
+  if(!(await enqueue(entry))){ toast(L().rcBadPhoto); return; }
+  try{
+    const q=new URLSearchParams({rep,op:op_id,amount:String(fields.amount),
+      paid_at:fields.paid_at,payer:fields.payer_other?"other":"client"});
+    if(fields.note) q.set("note",fields.note);
+    const r=await fetch("/api/receipt?"+q.toString(),
+      {method:"POST",headers:receiptHeaders(p.ext),body:p.bytes});
+    if(r.ok){
+      STATE.online=true;
+      try{ await IDB.del("queue",op_id); }catch(e){}
+      toast(L().saved); renderReceipts(); updateOffBar(); return;
+    }
+    if(r.status!==401&&r.status!==403&&r.status<500){
+      await markPhotoFailed(entry,String(r.status));
+      STATE.online=true; toast(L().rcBadPhoto); updateOffBar(); return;
+    }
+    throw new Error(r.status);
+  }catch(e){
+    // Нет сети: committed-запись в очереди, досыл тем же op_id при связи.
+    STATE.online=false; toast(L().savedoff);
+    renderReceipts(); updateOffBar();
+  }
+}
+async function renderReceipts(){
+  const box=$("rclist"); if(!box) return;
+  const t=L(), rep=STATE.cur&&STATE.cur.rep;
+  const parts=[];
+  const row=(date,sum,tail,queued)=>`<div class="muted" style="font-size:12.5px;padding:3px 0">🧾 ${esc(date||"")} · ${esc(rcMoney(sum))}${tail?" · "+esc(tail):""}${queued?" · "+esc(t.queuedn):""}</div>`;
+  for(const r of ((STATE.cur&&STATE.cur.receipts)||[]))
+    parts.push(row(r.paid_at||r.created_at,r.amount,
+      r.payer_is_client?t.rcPayerClient:(t.rcPayerOther+(r.payer_note?": "+r.payer_note:"")),false));
+  try{
+    const items=(await IDB.all("queue"))||[];
+    for(const it of items)
+      if(it.kind==="receipt"&&it.rep===rep)
+        parts.push(row(it.paid_at,it.amount,
+          it.payer_other?t.rcPayerOther:t.rcPayerClient,true));
+  }catch(e){}
+  box.innerHTML=parts.join("");
 }
 // --- Геопозиция --------------------------------------------------------------
 // ПОЧЕМУ ЗДЕСЬ ОТДЕЛЬНЫЙ ЗАПРОС ПРАВ. Раньше приложение не просило разрешение
