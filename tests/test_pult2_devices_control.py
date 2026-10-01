@@ -295,3 +295,43 @@ def test_admin_stats_book_for_mailing(monkeypatch):
     assert st == 400
     st, _ = _call("GET", "/admin/stats_book.xlsx", raw=True)
     assert st in (401, 403)
+
+
+# --- сигналы «кем закрыто» и «фото использовано дважды» (контур СБ, 01.10) ----------
+def test_bymgr_and_dupphoto_signals():
+    _seed()
+    # EMP_A ездит сам; EMP_B — все выезды закрыты чужим аккаунтом (AGENT
+    # привязан к EMP_A, то есть это act_as руководителя).
+    _visit("P2-0", EMP_A, "всё хорошо")
+    _visit("P2-3", EMP_B, "закрыл за него", op="p2-bymgr")
+    # один и тот же снимок (sha) приложен к двум разным должникам сотрудника A
+    with db.connect() as conn:
+        for cid in ("P2-0", "P2-1"):
+            conn.execute(
+                "INSERT INTO photo_geo (contract_id, file, telegram_id, sha256, "
+                "created_at) VALUES (?,?,?,?,?)",
+                (cid, f"{cid}/dup.jpg", AGENT, "f" * 64,
+                 date.today().isoformat() + "T08:00:00"))
+        conn.execute("DELETE FROM photo_geo WHERE contract_id LIKE 'P2-%' "
+                     "AND sha256 != ?", ("f" * 64,))
+        conn.commit()
+    token, _ = _enroll(SEC)
+    st, body = _call("GET", "/api/control/overview?preset=today",
+                     headers={"X-Pult-Token": token})
+    assert st == 200, body
+    def sig(row, key):
+        return next((s["n"] for s in row["signals"] if s["key"] == key), 0)
+    by_emp = {r["employee"]: r for r in body["rows"]}
+    assert sig(by_emp[EMP_B], "bymgr") == 1, "act_as-визит не посчитан"
+    assert sig(by_emp[EMP_A], "bymgr") == 0
+    assert sig(by_emp[EMP_A], "dupphoto") == 1, "переиспользованный файл не пойман"
+    assert sig(by_emp[EMP_B], "dupphoto") == 0
+    labels = {s["key"]: s["label"] for s in body["legend"]}
+    assert "bymgr" in labels and "dupphoto" in labels
+    # и флаг виден в поимённом списке выездов
+    st, body = _call("GET", f"/api/control/flags?employee={EMP_A}&preset=today",
+                     headers={"X-Pult-Token": token})
+    assert st == 200
+    st, body = _call("GET", f"/api/control/flags?employee={EMP_B}&preset=today",
+                     headers={"X-Pult-Token": token})
+    assert st == 200 and any("bymgr" in v["flags"] for v in body["visits"])

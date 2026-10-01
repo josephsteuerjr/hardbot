@@ -57,6 +57,8 @@ SIGNALS = (
     ("series", "серия", "доля выездов с признаками серии: несколько сохранений подряд из одной точки или невозможная скорость"),
     ("cash", "«наличные» в тексте", "выезды, где в комментарии деньги переданы сотруднику"),
     ("paid", "«оплатил» без платежа", f"исход «Оплачен», а платежа в реестре после выезда нет (старше {PAID_LAG_DAYS} дн.)"),
+    ("bymgr", "закрыто руководителем", "выезды, занесённые со счёта руководителя (act_as), а не с телефона сотрудника: сам по себе не нарушение, но для СБ — где статистику поправили руками"),
+    ("dupphoto", "фото использовано дважды", "снимки, приложенные к РАЗНЫМ должникам: один файл переиспользован (хэш sha256)"),
     ("repeat", "ездит без результата", "должники, к которым за окно было 3+ выезда без оплаты и обещания"),
     ("callback", "обзвон: не подтвердилось", "контрольный звонок: выезда не было или деньги отданы сотруднику"),
 )
@@ -66,7 +68,10 @@ SIGNAL_LABEL = {k: label for k, label, _ in SIGNALS}
 _SHARE_KEYS = ("far", "nogeo", "late", "fast", "night", "series", "paid")
 _SHARE_WEIGHT = {"far": 22, "nogeo": 10, "late": 14, "fast": 16, "night": 12, "series": 18,
                  "paid": 16}
-_COUNT_WEIGHT = {"cash": (18, 36), "repeat": (4, 16), "callback": (35, 70)}
+# bymgr — лёгкий вес: закрыть карточку за сотрудника законно (act_as журналируется);
+# dupphoto — тяжёлый: один файл у двух должников не бывает честно.
+_COUNT_WEIGHT = {"cash": (18, 36), "repeat": (4, 16), "callback": (35, 70),
+                 "bymgr": (6, 18), "dupphoto": (25, 50)}
 
 
 # --- время ---------------------------------------------------------------------
@@ -158,7 +163,8 @@ def _last_payment(p: dict) -> date | None:
     return best
 
 
-def _visit_flags(e: dict, payload: str, today: date) -> list[str]:
+def _visit_flags(e: dict, payload: str, today: date,
+                 tids: set[int] | None = None) -> list[str]:
     flags = []
     lvl = e.get("evidence_level") or ""
     if lvl == "far":
@@ -177,12 +183,38 @@ def _visit_flags(e: dict, payload: str, today: date) -> list[str]:
         flags.append("series")
     if _CASH_RE.search(_comment_of(payload)):
         flags.append("cash")
+    # «Кем закрыто»: визит занесён аккаунтом, не привязанным к этому ФИО, —
+    # руководитель через act_as. Для выездника это не нарушение (гео-контроль
+    # его и не судит), но СБ должен видеть, где числа занесены чужими руками.
+    if tids is not None and e.get("agent_id") is not None \
+            and e["agent_id"] not in tids:
+        flags.append("bymgr")
     day = db._as_date(e["date"])
     if "Оплачен" in (e.get("status") or "") and day and (today - day).days >= PAID_LAG_DAYS:
         paid = _last_payment(e["person"])
         if paid is None or paid < day:
             flags.append("paid")
     return flags
+
+
+def _dup_photos(tids: list[int], d_from: str, d_to: str) -> int:
+    """Сколько снимков этого человека за окно лежит у РАЗНЫХ должников.
+
+    Один и тот же файл (sha256) у двух КД не бывает честно: это переиспользование
+    контрольного фото. Считаем группами по хэшу, а не файлами, — пять копий одного
+    снимка это один сигнал, а не пять."""
+    if not tids:
+        return 0
+    hi = (date.fromisoformat(d_to) + timedelta(days=1)).isoformat()
+    qs = ",".join("?" * len(tids))
+    with db.connect() as conn:
+        rows = conn.execute(
+            f"SELECT sha256, COUNT(DISTINCT contract_id) AS dirs FROM photo_geo "
+            f"WHERE telegram_id IN ({qs}) AND sha256 IS NOT NULL "
+            "AND created_at >= ? AND created_at < ? "
+            "GROUP BY sha256 HAVING dirs > 1",
+            (*tids, d_from, hi)).fetchall()
+    return len(rows)
 
 
 def _entries(emp: str, d_from: str, d_to: str) -> list[dict]:
@@ -210,7 +242,8 @@ def _address(p: dict) -> str:
     return ""
 
 
-def _visit_event(e: dict, emp: str, office: str, payload: str, today: date) -> dict:
+def _visit_event(e: dict, emp: str, office: str, payload: str, today: date,
+                 tids: set[int] | None = None) -> dict:
     p = e["person"]
     saved = _local_dt(e.get("saved_at"))
     got = _local_dt(e.get("received_at"))
@@ -231,7 +264,7 @@ def _visit_event(e: dict, emp: str, office: str, payload: str, today: date) -> d
         "evidence": e.get("evidence_level") or "",
         "evidence_note": ((e.get("ev") or {}).get("note") or ""),
         "fill_s": e.get("fill_seconds"), "late_days": e.get("late_days"), "late_h": late_h,
-        "flags": _visit_flags(e, payload, today),
+        "flags": _visit_flags(e, payload, today, tids),
     }
 
 
@@ -331,11 +364,17 @@ def _client_names(reps: list[str]) -> dict[str, str]:
 
 # --- контроль: риск по людям --------------------------------------------------------
 def _person_signals(ents: list[dict], pay: dict[int, str], today: date,
-                    checks: list[dict]) -> tuple[dict, dict, list[dict]]:
+                    checks: list[dict], tids: set[int] | None = None,
+                    d_from: str = "", d_to: str = "") -> tuple[dict, dict, list[dict]]:
     n = len(ents)
-    per_visit = [(e, _visit_flags(e, pay.get(e["_vid"], ""), today)) for e in ents]
+    per_visit = [(e, _visit_flags(e, pay.get(e["_vid"], ""), today, tids))
+                 for e in ents]
     shares = {k: (sum(k in f for _, f in per_visit) / n if n else 0.0) for k in _SHARE_KEYS}
     counts = {"cash": sum("cash" in f for _, f in per_visit)}
+    if tids is not None:
+        counts["bymgr"] = sum("bymgr" in f for _, f in per_visit)
+    if d_from and d_to:
+        counts["dupphoto"] = _dup_photos(sorted(tids) if tids else [], d_from, d_to)
     by_person: dict[str, list[dict]] = {}
     for e in ents:
         by_person.setdefault(e["person"]["rep"], []).append(e)
@@ -358,7 +397,9 @@ def overview(mgr: dict, team: list[str], rng: dict, *, office: str = "") -> dict
         ents = _entries(emp, rng["from"], rng["to"])
         pay = _payloads([e["_vid"] for e in ents])
         checks = [c for c in checks_all if c.get("employee") == emp]
-        shares, counts, _ = _person_signals(ents, pay, today, checks)
+        tids = set(db.agent_tids(emp))
+        shares, counts, _ = _person_signals(ents, pay, today, checks, tids,
+                                            rng["from"], rng["to"])
         raw.append({"employee": emp, "office": of[emp], "visits": len(ents),
                     "shares": shares, "counts": counts, "checks": checks})
     # Медиана по офису (у кого выездов достаточно); офис из одного человека
@@ -418,7 +459,9 @@ def flags_of(mgr: dict, team: list[str], rng: dict, employee: str) -> dict | Non
     today = db._as_date(digest_data.today_iso())
     ents = _entries(employee, rng["from"], rng["to"])
     pay = _payloads([e["_vid"] for e in ents])
-    visits = [_visit_event(e, employee, of[employee], pay.get(e["_vid"], ""), today)
+    tids = set(db.agent_tids(employee))
+    visits = [_visit_event(e, employee, of[employee], pay.get(e["_vid"], ""), today,
+                           tids)
               for e in ents]
     visits.sort(key=lambda x: (x["at"] or "", x["id"]), reverse=True)
     return {"screen": "control_flags", "range": rng, "employee": employee,
@@ -428,7 +471,7 @@ def flags_of(mgr: dict, team: list[str], rng: dict, employee: str) -> dict | Non
 
 
 # --- контрольный обзвон ------------------------------------------------------------
-_STRONG = ("cash", "far", "series", "fast", "night")
+_STRONG = ("cash", "far", "series", "fast", "night", "dupphoto")
 
 
 def _rank(visit_id: int, day: str) -> str:
@@ -443,10 +486,11 @@ def callbacks(mgr: dict, team: list[str], day: str, *, office: str = "") -> dict
     for emp in people:
         ents = _entries(emp, day, day)
         pay = _payloads([e["_vid"] for e in ents])
+        tids = set(db.agent_tids(emp))
         for e in ents:
             payload = pay.get(e["_vid"], "")
             items_by_vid[e["_vid"]] = {"e": e, "emp": emp, "payload": payload,
-                                       "flags": _visit_flags(e, payload, today)}
+                                       "flags": _visit_flags(e, payload, today, tids)}
     chosen = db.control_checks_for(day)
     fresh = [v for v in items_by_vid if v not in chosen]
     if fresh and len(chosen) < len(items_by_vid):
