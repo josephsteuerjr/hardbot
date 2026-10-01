@@ -69,6 +69,8 @@ RESET_TABLES = {
     "employee_city",
     "app_links",
     "app_tokens",
+    # Токены приложения выездника на ПК — тот же выданный доступ, что app_tokens.
+    "agent_devices",
     "photo_geo",
     # Следы выезда (точки телефона при открытой карточке) и адреса, выученные
     # по подтверждённым выездам: и то и другое — ПРО КЕЙСЫ, которые сброс
@@ -136,11 +138,14 @@ DELETE_ORDER = (
     "visit_presence",
     "addr_candidates",
     "enrichment_ledger",
+    "payment_evidence",
+    "assignment_events",
     "notes",          # заметки объявлены сбрасываемыми — но чистить их забыли,
                       # и сброс падал целиком, как только у кого-то появлялась
                       # первая заметка (список RESET_TABLES и порядок удаления
                       # сверяются между собой)
     "app_tokens",
+    "agent_devices",
     "app_links",
     "managers",
     "employee_city",

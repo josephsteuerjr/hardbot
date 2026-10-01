@@ -3,8 +3,9 @@
 // HTTPS_PROXY на заокеанский прокси, который не работает), сертификат проверяет
 // Chromium по хранилищу Windows — повтора «без проверки» нет.
 import { session, type Session } from "electron";
+import { readFileSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
-import { cacheGet, cachePut, readSettings, readToken, wipe, writeSettings, writeToken } from "./store";
+import { cacheGet, cachePut, readFieldToken, readSettings, readToken, wipe, wipeField, writeFieldToken, writeSettings, writeToken } from "./store";
 
 export const OFFLINE = "Нет связи с сервером «Хард». Как только интернет появится, пульт догонит сам.";
 export const CERT_BAD = "Сертификат сервера не прошёл проверку — эта сеть подменяет соединение. " +
@@ -180,4 +181,130 @@ export async function logout(): Promise<void> {
     } catch { /* нет связи — токен всё равно стираем у себя, аналитик отзовёт */ }
   }
   wipe();
+}
+
+// --- Приложение выездника на ПК: свой класс токена (agent_devices) -------------
+// Телефон не вытесняется: вход по ссылке выездника даёт ПК-токен, привязка
+// agent_bind остаётся телефону. Белый список путей — только ручки выездника.
+const FIELD_PATH = /^\/api\/(bootstrap|person|cards|save|photo|receipt|markers|notes|note|lang|route_to|geocode|geo)\//;
+const FIELD_PATH_EXACT = new Set(["/api/person", "/api/cards", "/api/markers", "/api/notes",
+                                  "/api/geocode", "/api/logout"]);
+
+function fieldOk(path: string): boolean {
+  return FIELD_PATH.test(path) || FIELD_PATH_EXACT.has(path);
+}
+
+export async function enrollField(raw: string): Promise<ApiResult> {
+  const link = splitLink(raw);
+  if (!link) return { ok: false, status: 0, kind: "nolink", text: "Это не похоже на ссылку входа — вставьте её целиком." };
+  const base = link.base || readSettings().fieldServer || readSettings().server || "";
+  if (!base) return { ok: false, status: 0, kind: "nolink", text: "В ссылке нет адреса сервера — вставьте её целиком." };
+  let res: Response;
+  try {
+    res = await net().fetch(base + "/api/agent/device/enroll", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: link.code, device: deviceName() }),
+    });
+  } catch (err) {
+    return troubleOf(err);
+  }
+  if (res.status === 410) return { ok: false, status: 410, kind: "nolink", text: deadLinkText(await deadReason(res)) };
+  if (res.status === 403) return { ok: false, status: 403, kind: "forbidden", text: "Это ссылка руководителя или аналитика. Для приложения выездника нужна ссылка из «Вход команды» на ваше ФИО." };
+  if (res.status === 429) return { ok: false, status: 429, kind: "server", text: "Слишком много попыток. Подождите минуту." };
+  if (!res.ok) return { ok: false, status: res.status, kind: "server", text: `Сервер ответил ошибкой ${res.status}.` };
+  const data = (await res.json()) as { token: string; device_id: number; employee: string };
+  writeFieldToken(data.token);
+  writeSettings({ fieldServer: base, fieldDevice: { id: data.device_id, name: deviceName(), employee: data.employee } });
+  return { ok: true, status: 200, data: { ...data, token: undefined } };
+}
+
+export async function callField(method: string, path: string, query?: Record<string, unknown>, body?: unknown,
+                                opts: { binary?: boolean; cache?: boolean } = {}): Promise<ApiResult> {
+  const server = readSettings().fieldServer;
+  const token = readFieldToken();
+  if (!server || !token) return { ok: false, status: 0, kind: "nolink", text: "Приложение ещё не знает, кто вы." };
+  if (!fieldOk(String(path))) return { ok: false, status: 0, kind: "server", text: "запрещённый путь" };
+  const url = server + path + qs(query);
+  const key = "F " + method + " " + path + qs(query);
+  let res: Response;
+  try {
+    res = await net().fetch(url, {
+      method,
+      headers: { "X-App-Token": token, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      bypassCustomProtocolHandlers: true,
+    } as RequestInit);
+  } catch (err) {
+    const t = troubleOf(err);
+    if (method === "GET" && opts.cache !== false && !opts.binary) {
+      const hit = cacheGet(key);
+      if (hit) return { ...t, ok: true, status: 200, data: hit.data, stale: hit.at };
+    }
+    return t;
+  }
+  if (res.status === 401) {
+    wipeField();
+    onRevoked();
+    return { ok: false, status: 401, kind: "revoked", text: REVOKED };
+  }
+  if (res.status === 404) return { ok: false, status: 404, kind: "notfound", text: "Не найдено — возможно, договор перезакрепили." };
+  if (!res.ok) {
+    const code = await errorCode(res);
+    return { ok: false, status: res.status, kind: "server", text: `Сервер ответил ошибкой ${res.status}${code ? ": " + code.slice(0, 200) : ""}` };
+  }
+  if (opts.binary) {
+    const buf = Buffer.from(await res.arrayBuffer());
+    return { ok: true, status: res.status, data: { type: res.headers.get("content-type") || "", buf } };
+  }
+  const data = await res.json().catch(() => null);
+  if (method === "GET" && opts.cache !== false) cachePut(key, data);
+  return { ok: true, status: res.status, data };
+}
+
+/** Загрузка файла чека: сырые байты + поля в query (как телефон, X-Receipt-Ext). */
+export async function uploadField(path: string, query: Record<string, unknown>, filePath: string,
+                                  ext: string): Promise<ApiResult> {
+  const server = readSettings().fieldServer;
+  const token = readFieldToken();
+  if (!server || !token) return { ok: false, status: 0, kind: "nolink", text: "Приложение ещё не знает, кто вы." };
+  if (!fieldOk(String(path))) return { ok: false, status: 0, kind: "server", text: "запрещённый путь" };
+  let buf: Buffer;
+  try {
+    buf = readFileSync(filePath);
+  } catch {
+    return { ok: false, status: 0, kind: "server", text: "Файл не читается — возможно, его уже переместили." };
+  }
+  let res: Response;
+  try {
+    res = await net().fetch(server + path + qs(query), {
+      method: "POST",
+      headers: { "X-App-Token": token, "Content-Type": "application/octet-stream", "X-Receipt-Ext": ext || ".jpg" },
+      body: buf,
+      bypassCustomProtocolHandlers: true,
+    } as RequestInit);
+  } catch (err) {
+    return troubleOf(err);
+  }
+  if (res.status === 401) {
+    wipeField();
+    onRevoked();
+    return { ok: false, status: 401, kind: "revoked", text: REVOKED };
+  }
+  if (!res.ok) {
+    const code = await errorCode(res);
+    return { ok: false, status: res.status, kind: "server", text: `Чек не принят (${res.status}${code ? ": " + code.slice(0, 120) : ""}). Возьмите другой снимок и попробуйте ещё раз.` };
+  }
+  return { ok: true, status: res.status, data: await res.json().catch(() => ({})) };
+}
+
+export async function logoutField(): Promise<void> {
+  const server = readSettings().fieldServer;
+  const token = readFieldToken();
+  if (server && token) {
+    try {
+      await net().fetch(server + "/api/agent/device/logout", { method: "POST", headers: { "X-App-Token": token } });
+    } catch { /* нет связи — токен всё равно стираем, аналитик отзовёт */ }
+  }
+  wipeField();
 }

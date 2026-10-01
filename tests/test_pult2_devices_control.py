@@ -372,3 +372,44 @@ def test_assignment_journal_records_transfer_and_backdating():
     st, _ = _call("GET", "/api/control/assignments?preset=7d",
                   headers={"X-Pult-Token": mgr_tok})
     assert st == 403
+
+
+# --- приложение выездника на ПК: токен без вытеснения телефона ----------------------
+def test_agent_desk_enroll_and_work(world=None):
+    _seed()
+    db.bind_agent(880099, EMP_A)          # «телефон» сотрудника уже работает
+    phone_before = db.get_binding(880099)
+    assert phone_before == EMP_A
+    # руководитель выдаёт ссылку ВЫЕЗДНИКА; пульт ПК меняет её на токен устройства
+    uid_link, _ = db.local_identity_for(EMP_A)
+    code = db.create_app_link(uid_link, max_uses=2)
+    st, body = _call("POST", "/api/agent/device/enroll",
+                     json_body={"code": f"https://x.example/i/{code}", "device": "ПК-выездника"})
+    assert st == 200, body
+    tok = body["token"]
+    assert body["employee"] == EMP_A
+    # телефон НЕ вытеснен: привязка жива, заявок не появилось
+    assert db.get_binding(880099) == EMP_A
+    with db.connect() as conn:
+        pending = conn.execute("SELECT COUNT(*) FROM agent_bind WHERE employee=? "
+                               "AND approved=0", (EMP_A,)).fetchone()[0]
+    assert pending == 0, "ПК-вход породил заявку — вытеснил бы телефон"
+    # токен ПК открывает портфель выездника теми же ручками
+    st, body = _call("GET", "/api/bootstrap", headers={"X-App-Token": tok})
+    assert st == 200, body
+    assert body.get("employee") == EMP_A, body.get("employee")
+    # и ссылка руководителя на этом энролле отвергается, не тратясь
+    mgr_link = db.create_app_link(MGR, max_uses=3)
+    st, body = _call("POST", "/api/agent/device/enroll",
+                     json_body={"code": f"https://x.example/i/{mgr_link}", "device": "X"})
+    assert st == 403 and body["error"] == "not_agent"
+    assert db.app_link_status(mgr_link) != "used_up", "ссылка руководителя потрачена"
+    # отзыв администратором гасит токен
+    st, body = _call("GET", "/admin/agent_devices.json", headers={"X-Admin-Key": "x"})
+    assert st in (401, 403)
+    with db.connect() as conn:
+        dev_id = conn.execute("SELECT id FROM agent_devices ORDER BY id DESC "
+                              "LIMIT 1").fetchone()[0]
+    assert db.agent_device_revoke(dev_id, by="test") is True
+    st, _ = _call("GET", "/api/bootstrap", headers={"X-App-Token": tok})
+    assert st == 401, "отозванный токен ПК продолжает работать"

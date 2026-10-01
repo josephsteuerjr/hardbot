@@ -142,6 +142,13 @@ CARRY: dict[str, tuple[str, str]] = {
         "реестр доставленного по этим сотрудникам: без него обогащение с новой "
         "машины повторно доставит в книгу офиса уже доставленное",
         "COALESCE(responsible,'') IN (SELECT name FROM sel_emp)"),
+    "payment_evidence": (
+        "чеки об оплате по перенесенным КД — доказательства платежей едут с делом",
+        "COALESCE(contract_id,'') IN (SELECT kd FROM sel_kd)"
+        " OR COALESCE(employee,'') IN (SELECT name FROM sel_emp)"),
+    "assignment_events": (
+        "журнал закреплений по перенесенным КД: история «у кого договор был»",
+        "COALESCE(contract_id,'') IN (SELECT kd FROM sel_kd)"),
 }
 
 # ЧТО НЕ ЕДЕТ НИКОГДА. Не «забыли», а решено: у каждой строки своя причина.
@@ -152,6 +159,7 @@ DROP_ALL: dict[str, str] = {
     "admin_devices": "устройства пульта прежнего оператора",
     "admin_enroll_codes": "неиспользованный код привязки — дверь, которую ещё не открывали",
     "manager_devices": "компьютеры с пультом руководителя — выданный доступ",
+    "agent_devices": "приложение выездника на ПК — выданный доступ",
     "control_checks": "контрольный обзвон той установки: ссылается на её id выездов",
     "managers": "руководители и их рассылки с ПД должников — чужая настройка",
     "report_chats": "беседы для отчётов принадлежат старому боту",
@@ -172,6 +180,8 @@ KNOWN = set(CARRY) | set(DROP_ALL)
 # строки сверяются целиком (см. merge_table), иначе повторный приём их удвоил бы.
 KEYS: dict[str, tuple[str, ...]] = {
     "clients": ("contract_id",),
+    "payment_evidence": ("op",),
+    "assignment_events": ("contract_id", "window_to", "employee", "prev_employee"),
     "client_extra": ("contract_id", "slot"),
     "visits": ("op_id",),
     "notes": ("op_id",),

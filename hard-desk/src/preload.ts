@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld("hard", {
   logout: () => ipcRenderer.invoke("hard:logout"),
   api: (method: string, path: string, query?: Query, body?: unknown) => ipcRenderer.invoke("hard:api", method, path, query, body),
   image: (path: string, query?: Query) => ipcRenderer.invoke("hard:image", path, query),
+  upload: (path: string, query: Query, filePath: string, ext: string) => ipcRenderer.invoke("hard:upload", path, query, filePath, ext),
   download: (path: string, query: Query, name: string) => ipcRenderer.invoke("hard:download", path, query, name),
   open: (file: string) => ipcRenderer.invoke("hard:open", file),
   copy: (text: string) => ipcRenderer.invoke("hard:copy", text),

@@ -10,12 +10,12 @@ import { BrowserWindow, Menu, Notification, Tray, app, clipboard, dialog, ipcMai
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, normalize, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-import { call, deviceName, enroll, logout, setRevokedHandler } from "./net";
+import { call, callField, deviceName, enroll, enrollField, logout, logoutField, setRevokedHandler, uploadField } from "./net";
 import { stopLegacyPult } from "./legacy";
 import { writeXlsx } from "./xlsx";
 import { local, startBackend } from "./local";
 import { runShots } from "./shots";
-import { readSettings, readToken, writeSettings } from "./store";
+import { readFieldToken, readSettings, readToken, writeSettings } from "./store";
 
 // Режим: явный флаг, имя файла или место. Поставка одна: папка «Хард», лежащая
 // внутри комплекта аналитика (рядом с pult/desk_backend.py), открывается пультом
@@ -32,14 +32,20 @@ function inAnalystKit(): boolean {
 // Режим аналитика — только внутри комплекта (рядом pult/) или по явному флагу.
 // Прежнее правило «в пути есть слово "аналит"» открывало пульт руководителя,
 // распакованный в папку отдела аналитики, пультом аналитика без питон-стороны.
-const MODE: "manager" | "analyst" =
-  process.argv.includes("--analyst") || process.env.HARD_MODE === "analyst"
+// Режим выездника — только явным флагом: это отдельное приложение для людей,
+// а не ещё один пульт в той же папке.
+const MODE: "manager" | "analyst" | "field" =
+  process.argv.includes("--field") || process.env.HARD_MODE === "field"
+    ? "field"
+    : process.argv.includes("--analyst") || process.env.HARD_MODE === "analyst"
     || (!process.argv.includes("--manager") && inAnalystKit())
-    ? "analyst" : "manager";
-const PRODUCT = MODE === "analyst" ? "Хард — пульт аналитика" : "Хард — пульт руководителя";
+      ? "analyst" : "manager";
+const PRODUCT = MODE === "analyst" ? "Хард — пульт аналитика"
+  : MODE === "field" ? "Хард — приложение выездника"
+  : "Хард — пульт руководителя";
 
-app.setName(MODE === "analyst" ? "Хард-аналитик" : "Хард");
-if (process.platform === "win32") app.setAppUserModelId(MODE === "analyst" ? "ru.rimborso.hard.analyst" : "ru.rimborso.hard.manager");
+app.setName(MODE === "analyst" ? "Хард-аналитик" : MODE === "field" ? "Хард-выездник" : "Хард");
+if (process.platform === "win32") app.setAppUserModelId(MODE === "analyst" ? "ru.rimborso.hard.analyst" : MODE === "field" ? "ru.rimborso.hard.field" : "ru.rimborso.hard.manager");
 if (process.env.HARD_USER_DATA) app.setPath("userData", process.env.HARD_USER_DATA);
 
 protocol.registerSchemesAsPrivileged([
@@ -166,7 +172,7 @@ function createWindow(): BrowserWindow {
     return { action: "deny" };
   });
   w.webContents.on("will-navigate", (e, url) => { if (!url.startsWith("hard://")) e.preventDefault(); });
-  void w.loadURL("hard://app/index.html" + (MODE === "analyst" ? "?mode=analyst" : ""));
+  void w.loadURL("hard://app/index.html" + (MODE === "analyst" ? "?mode=analyst" : MODE === "field" ? "?mode=field" : ""));
   return w;
 }
 
@@ -217,20 +223,36 @@ function wireIpc() {
   });
   ipcMain.handle("hard:state", () => {
     const s = readSettings();
-    return { mode: MODE, product: PRODUCT, version: app.getVersion(), server: s.server || "", device: s.device || null,
-             enrolled: !!readToken() && !!s.server, theme: s.theme || "system", deviceName: deviceName(),
+    const field = MODE === "field";
+    return { mode: MODE, product: PRODUCT, version: app.getVersion(),
+             server: (field ? s.fieldServer : s.server) || "",
+             device: (field ? s.fieldDevice : s.device) || null,
+             enrolled: field ? !!readFieldToken() && !!s.fieldServer : !!readToken() && !!s.server,
+             theme: s.theme || "system", deviceName: deviceName(),
              maximized: !!win?.isMaximized() };
   });
-  ipcMain.handle("hard:enroll", (_e, link: string) => enroll(String(link || "")));
-  ipcMain.handle("hard:logout", async () => { await logout(); return true; });
+  ipcMain.handle("hard:enroll", (_e, link: string) =>
+    MODE === "field" ? enrollField(String(link || "")) : enroll(String(link || "")));
+  ipcMain.handle("hard:logout", async () => {
+    if (MODE === "field") await logoutField(); else await logout();
+    return true;
+  });
   ipcMain.handle("hard:api", (_e, method: string, path: string, query?: Record<string, unknown>, body?: unknown) =>
-    call(String(method || "GET").toUpperCase(), String(path), query, body));
+    MODE === "field"
+      ? callField(String(method || "GET").toUpperCase(), String(path), query, body)
+      : call(String(method || "GET").toUpperCase(), String(path), query, body));
   ipcMain.handle("hard:image", async (_e, path: string, query?: Record<string, unknown>) => {
-    const r = await call("GET", String(path), query, undefined, { binary: true });
+    const r = MODE === "field"
+      ? await callField("GET", String(path), query, undefined, { binary: true })
+      : await call("GET", String(path), query, undefined, { binary: true });
     if (!r.ok) return null;
     const { type, buf } = r.data as { type: string; buf: Buffer };
     return `data:${type || "image/jpeg"};base64,${buf.toString("base64")}`;
   });
+  // Чек с диска: страница выбирает файл (hard.pick), байты идут отсюда —
+  // токен остаётся в главном процессе, как у всего остального.
+  ipcMain.handle("hard:upload", (_e, path: string, query: Record<string, unknown>, filePath: string, ext: string) =>
+    uploadField(String(path), query || {}, String(filePath || ""), String(ext || ".jpg")));
   ipcMain.handle("hard:download", async (e, path: string, query: Record<string, unknown> | undefined, name: string) => {
     const r = await call("GET", String(path), query, undefined, { binary: true });
     if (!r.ok) return { ok: false, text: r.text };

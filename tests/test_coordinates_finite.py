@@ -239,7 +239,7 @@ def test_route_day_treats_a_broken_start_as_no_start(monkeypatch):
                 "solver": "none"}
 
     monkeypatch.setattr(web, "_uid", lambda _r: UID)
-    monkeypatch.setattr(web, "_employee", lambda _uid: EMP)
+    monkeypatch.setattr(web, "_employee", lambda _uid, request=None: EMP)
     monkeypatch.setattr(web.routing_client, "plan_day", fake_plan)
     db.init_db()
     resp = asyncio.run(web._route_day(SimpleNamespace(query={"lat": "inf", "lon": "69.6"})))

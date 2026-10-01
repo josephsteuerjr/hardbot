@@ -17,6 +17,7 @@ import { managers } from "./analyst/managers";
 import { conn, maint } from "./analyst/system";
 import { mail } from "./analyst/mail";
 import { priority, registry } from "./analyst/registry";
+import { fieldHelp, portfolio } from "./views/field";
 
 /** Пульт аналитика: тот же каркас и облик, данные — через питон-сторону. */
 async function startAnalyst() {
@@ -113,10 +114,66 @@ async function start() {
 }
 
 const ANALYST = new URLSearchParams(location.search).get("mode") === "analyst";
+const FIELD = new URLSearchParams(location.search).get("mode") === "field";
 document.addEventListener("keydown", (e) => { if (e.key === "F5") { e.preventDefault(); void refresh(); } });
+
+/** Приложение выездника: вход по своей ссылке, разделы — портфель и это устройство. */
+function enrollFieldScreen(note = "") {
+  bare(true);
+  setSections([]);
+  const host = $("view-inner");
+  $("head").hidden = true;
+  host.innerHTML = `<div class="page enroll">
+    <h1>Приложение выездника</h1>
+    <p>Вставьте СВОЮ ссылку входа — её выдаёт руководитель в «Входе команды». Это нужно один раз.</p>
+    <p class="hint">Телефон продолжает работать: вход на компьютере его не заменяет.</p>
+    <div class="row"><input class="input" id="link" placeholder="https://…/i/…" autocomplete="off" spellcheck="false">
+      <button class="btn primary" id="go">Войти</button></div>
+    <div class="err" id="err">${esc(note)}</div>
+  </div>`;
+  const input = $<HTMLInputElement>("link");
+  const btn = $<HTMLButtonElement>("go");
+  const submit = async () => {
+    const v = input.value.trim();
+    if (!v) { input.focus(); return; }
+    btn.disabled = true;
+    $("err").textContent = "";
+    const r = await hard.enroll(v);
+    btn.disabled = false;
+    if (!r.ok) { $("err").textContent = r.text || "Не получилось"; return; }
+    location.reload();
+  };
+  btn.addEventListener("click", submit);
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") void submit(); });
+  input.focus();
+}
+
+async function startField() {
+  shell = await hard.state();
+  if (shell.theme === "light" || shell.theme === "dark") document.documentElement.dataset.theme = shell.theme;
+  if (!shell.enrolled) { enrollFieldScreen(); return; }
+  bare(false);
+  setHead("…", "");
+  const me = await api("/api/bootstrap");
+  if (!me.ok && me.kind === "revoked") { enrollFieldScreen(me.text); return; }
+  const who: any = me.ok ? me.data : null;
+  setWho(`<b>${esc(who?.employee || "Выездник")}</b> · приложение на компьютере`);
+  const list: Section[] = [portfolio, fieldHelp];
+  setSections(list);
+  await go("portfolio");
+  startHeartbeat(async () => {
+    const r = await hard.api("GET", "/api/bootstrap");
+    return r.kind === "offline" || r.kind === "cert" ? "off" : r.kind === "revoked" ? "revoked" : "live";
+  }, () => (who ? refresh() : startField()));
+}
+
 if (ANALYST) {
   mountShell(`<b>Хард</b> · пульт аналитика`);
   void startAnalyst();
+} else if (FIELD) {
+  mountShell(`<b>Хард</b> · приложение выездника`);
+  hard.on("revoked", () => enrollFieldScreen("Вход этого компьютера отозван. Попросите у руководителя новую ссылку."));
+  void startField();
 } else {
   mountShell(`<b>Хард</b> · пульт руководителя`);
   hard.on("revoked", () => enrollScreen("Доступ этого компьютера отозван аналитиком. Всё сохранённое стёрто. Попросите новую ссылку входа."));

@@ -9,6 +9,8 @@ import { join } from "node:path";
 export interface Settings {
   server?: string;          // https://… — берётся из ссылки входа
   device?: { id: number; name: string; created_at?: string };
+  fieldServer?: string;     // приложение выездника на ПК: свой вход
+  fieldDevice?: { id: number; name: string; employee?: string; created_at?: string };
   seenTrayHint?: boolean;
   theme?: "light" | "dark" | "system";
   [k: string]: unknown;
@@ -86,4 +88,29 @@ export function wipe(): void {
     if (existsSync(c)) for (const f of readdirSync(c)) rmSync(join(c, f), { force: true });
   } catch { /* */ }
   writeSettings({ device: undefined });
+}
+
+// Приложение выездника на ПК — СВОЙ токен и свои поля настроек: один exe на
+// машине может быть и пультом руководителя, и приложением выездника; входы
+// независимы (на сервере это разные классы устройств).
+export function readFieldToken(): string {
+  try {
+    return open(readFileSync(file("field.key")));
+  } catch {
+    return "";
+  }
+}
+
+export function writeFieldToken(token: string): void {
+  ensure();
+  writeFileSync(file("field.key"), seal(token));
+}
+
+export function wipeField(): void {
+  try { rmSync(file("field.key"), { force: true }); } catch { /* */ }
+  try {
+    const c = join(dir(), "cache");
+    if (existsSync(c)) for (const f of readdirSync(c)) rmSync(join(c, f), { force: true });
+  } catch { /* */ }
+  writeSettings({ fieldDevice: undefined });
 }

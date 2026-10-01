@@ -43,10 +43,11 @@ def test_bulk_cards_reuses_the_grouped_contract_rows(monkeypatch):
     monkeypatch.setattr(
         web.db, "registry_extra_values",
         lambda ids: extras_calls.append(list(ids)) or {},
+    monkeypatch.setattr(web.db, "receipts_for", lambda ids: {}),
     )
     monkeypatch.setattr(
         web, "_person_full_from_rows",
-        lambda rows, rep, lang, extras=None: seen.append((rows, rep, lang))
+        lambda rows, rep, lang, extras=None, receipts=None: seen.append((rows, rep, lang))
         or {"rep": rep},
     )
     monkeypatch.setattr(

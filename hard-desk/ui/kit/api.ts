@@ -11,7 +11,7 @@ export interface ApiResult<T = any> {
 }
 
 export interface Shell {
-  mode: "manager" | "analyst";
+  mode: "manager" | "analyst" | "field";
   product: string;
   version: string;
   server: string;
@@ -30,6 +30,7 @@ interface Bridge {
   logout(): Promise<boolean>;
   api(method: string, path: string, query?: Q, body?: unknown): Promise<ApiResult>;
   image(path: string, query?: Q): Promise<string | null>;
+  upload(path: string, query: Q, filePath: string, ext: string): Promise<ApiResult>;
   download(path: string, query: Q | undefined, name: string): Promise<{ ok: boolean; file?: string; text?: string }>;
   open(file: string): Promise<string>;
   copy(text: string): Promise<boolean>;

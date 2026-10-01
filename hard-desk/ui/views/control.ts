@@ -8,7 +8,7 @@ import { DataTable } from "../kit/table";
 import { evidenceTag, flagsHtml, officeChips, openPerson, problem, rangeChips, rangeQuery, staleNote, wireRange, type Range } from "./common";
 
 const state = {
-  tab: "risk" as "risk" | "calls",
+  tab: "risk" as "risk" | "calls" | "assign",
   range: { preset: "30d" } as Range,
   office: "",
   employee: "",
@@ -24,7 +24,8 @@ function signalText(s: any): string {
 
 function tabs(): string {
   return `<div class="chips"><button class="chip" data-tab="risk" aria-pressed="${state.tab === "risk"}">Риск по людям</button>
-    <button class="chip" data-tab="calls" aria-pressed="${state.tab === "calls"}">Контрольный обзвон</button></div>`;
+    <button class="chip" data-tab="calls" aria-pressed="${state.tab === "calls"}">Контрольный обзвон</button>
+    <button class="chip" data-tab="assign" aria-pressed="${state.tab === "assign"}">Закрепления</button></div>`;
 }
 
 async function renderRisk(root: HTMLElement) {
@@ -104,6 +105,46 @@ async function renderFlags(root: HTMLElement) {
   }));
 }
 
+async function renderAssign(root: HTMLElement) {
+  setHead("Закрепления", "кому приехали договоры — и чьи они были");
+  const r = await api("/api/control/assignments", rangeQuery(state.range));
+  if (!root.isConnected) return;
+  if (!r.ok) { root.innerHTML = tabs() + problem(r.text || "Не загрузилось"); wire(root); return; }
+  const d = r.data;
+  const rows = d.rows as any[];
+  const evs = d.events as any[];
+  const KIND: Record<string, string> = { transfer: "передача", assign: "новое", removed: "снято" };
+  root.innerHTML = `${staleNote(r.stale)}
+    <div class="toolbar">${tabs()}</div>
+    <div class="toolbar">${rangeChips(state.range, d.range, ["7d", "30d", "month"])}</div>
+    <div class="kpis"><div class="kpi"><b>${n(rows.reduce((s, x) => s + x.received, 0))}</b><span>договоров передано</span></div>
+      <div class="kpi accent"><b>${n(rows.reduce((s, x) => s + x.backdated, 0))}</b><span>закреплено задним числом</span></div>
+      <div class="kpi"><b>${n(evs.filter((e) => e.kind === "transfer").length)}</b><span>передач между людьми</span></div></div>
+    <div class="section" id="assign-tbl"></div>
+    <div class="section"><div class="section-head"><h2 class="section-title">События</h2></div>
+      <div class="feed">${evs.slice(0, 100).map((e) => `<div class="ev"><time>${esc(e.window_to)}</time><span class="mark"></span>
+        <div><div class="line1"><b>${esc(e.employee || "(снят)")}</b> ← ${esc(e.prev_employee || "без ответственного")} · ${KIND[e.kind] || e.kind}${e.claimed_at ? ` <span class="muted">· «дата закрепления» ${esc(e.claimed_at)}</span>` : ""}</div>
+        <div class="line2"><span class="mono">${esc(e.contract_id)}</span>${e.debt ? ` · долг ${n(e.debt)}` : ""}</div></div></div>`).join("") || '<div class="empty"><b>Тихо</b>Передач за это окно не было.</div>'}</div>
+      <p class="muted" style="font-size:13.5px;max-width:760px;margin-top:12px">События снимает импорт общего реестра (окно факта); «дата закрепления» пишется руками и может отличаться — расхождение больше ${n(d.claimed_lag_days || 7)} дней помечено как задним числом. Медиана долга выше офисной — вопрос, а не приговор: смотрите, у кого это стабильно.</p></div>`;
+  wire(root);
+  new DataTable<any>(root.querySelector("#assign-tbl")!, {
+    id: "control-assign", exportName: "Закрепления", key: (x) => x.employee,
+    cols: [
+      { key: "emp", title: "Сотрудник", value: (x) => x.employee,
+        html: (x) => `<span class="who">${esc(x.employee)}</span><span class="sub">${esc(x.office || "без офиса")}</span>` },
+      { key: "received", title: "Получил", num: true, value: (x) => x.received },
+      { key: "transfers", title: "Передач", num: true, value: (x) => x.transfers },
+      { key: "paying", title: "Платящих", num: true, value: (x) => x.paying },
+      { key: "median", title: "Медиана долга", num: true, value: (x) => x.median_debt,
+        html: (x) => `${n(x.median_debt)}${x.debt_ratio ? ` <span class="muted">· ×${x.debt_ratio} от офиса (${n(x.office_median)})</span>` : ""}` },
+      { key: "backdated", title: "Задним числом", num: true, value: (x) => x.backdated,
+        html: (x) => (x.backdated ? `<span class="tag err">${n(x.backdated)}</span>` : '<span class="muted">—</span>') },
+      { key: "peer", title: "Чаще всех от", value: (x) => x.top_peer || "",
+        html: (x) => (x.top_peer ? `${esc(x.top_peer)} <span class="muted">· ${n(x.top_peer_n)}</span>` : '<span class="muted">—</span>') },
+    ],
+  }).setRows(rows);
+}
+
 async function renderCalls(root: HTMLElement) {
   setHead("Контрольный обзвон", "позвонить должнику и сверить со словами выездника");
   const r = await api("/api/control/callbacks", { date: state.day || undefined, office: state.office });
@@ -169,6 +210,7 @@ function wire(root: HTMLElement) {
 
 function draw(root: HTMLElement): Promise<void> {
   if (state.tab === "calls") return renderCalls(root);
+  if (state.tab === "assign") return renderAssign(root);
   if (state.employee) return renderFlags(root);
   return renderRisk(root);
 }

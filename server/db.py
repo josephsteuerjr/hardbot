@@ -1231,6 +1231,28 @@ def init_db() -> None:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_manager_devices_tid "
                      "ON manager_devices(telegram_id)")
+        # Приложение выездника на КОМПЬЮТЕРЕ (контур СБ/ПК, 01.10.2026). Правило
+        # «одно ФИО — одно устройство» обязано сохраниться для ТЕЛЕФОНОВ, но вход
+        # выездника на ПК не должен вытеснять телефон: поэтому у ПК свой класс
+        # токена (как manager_devices у пульта), привязку agent_bind он не трогает
+        # ВООБЩЕ — ни заявки, ни вытеснения. employee здесь — ФИО из ссылки входа,
+        # выданной руководителем; telegram_id — только актёр для журнала аудита.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS agent_devices (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              employee TEXT NOT NULL,
+              telegram_id INTEGER,
+              token_hash TEXT NOT NULL UNIQUE,
+              device TEXT,
+              created_at TEXT,
+              last_seen_at TEXT,
+              last_ip TEXT,
+              revoked_at TEXT,
+              revoked_by TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_devices_emp "
+                     "ON agent_devices(employee)")
         # Роль в команде руководства: руководитель или безопасник (см. MANAGER_ROLES).
         mgcols2 = {r[1] for r in conn.execute("PRAGMA table_info(managers)")}
         if "role" not in mgcols2:
@@ -2332,6 +2354,85 @@ def manager_device_check(token: str, ip: str | None = None) -> tuple[str, dict |
                           row["id"]))
             conn.commit()
     return "ok", dict(row)
+
+
+def enroll_agent_device(code: str, device: str) -> tuple[str, int, int, str] | None:
+    """Обменять использование ссылки ВЫЕЗДНИКА на токен приложения-на-ПК.
+
+    (employee, telegram_id, id устройства, сырой токен) или None — ссылка мертва.
+    Привязку agent_bind не трогает: телефон продолжает работать, заявки не
+    создаётся. Ссылка руководителя сюда не доходит — веб-слой отвернёт её раньше."""
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    cutoff = (datetime.now() - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
+    token = secrets.token_urlsafe(32)
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE app_links SET used_at = ?, last_use_at = ?, last_agent = 'desk', "
+            "uses = uses + 1 WHERE code = ? AND created_at >= ? "
+            "AND uses < COALESCE(max_uses, ?)",
+            (now_iso, now_iso, code, cutoff, APP_LINK_DEFAULT_USES))
+        if cur.rowcount == 0:
+            conn.commit()
+            return None
+        row = conn.execute(
+            "SELECT telegram_id FROM app_links WHERE code = ?", (code,)).fetchone()
+        uid = int(row["telegram_id"])
+        employee = get_binding(uid) or ""
+        if not employee:
+            conn.commit()
+            return None
+        dev_id = conn.execute(
+            "INSERT INTO agent_devices (employee, telegram_id, token_hash, device, "
+            "created_at, last_seen_at) VALUES (?,?,?,?,?,?)",
+            (employee, uid, app_token_key(token),
+             (device or "").strip()[:80] or None, now_iso, now_iso)).lastrowid
+        conn.commit()
+    return employee, uid, int(dev_id), token
+
+
+def agent_device_check(token: str, ip: str | None = None) -> tuple[str, dict | None]:
+    """Как manager_device_check: ('ok', строка) | ('revoked'|'unknown', None).
+    Отозванный токен удаляется при первом же стуке."""
+    if not token:
+        return "unknown", None
+    key = app_token_key(token)
+    now = datetime.now()
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM agent_devices WHERE token_hash = ?",
+                           (key,)).fetchone()
+        if row is None:
+            return "unknown", None
+        if row["revoked_at"]:
+            conn.execute("DELETE FROM agent_devices WHERE id = ?", (row["id"],))
+            conn.commit()
+            return "revoked", None
+        last = _as_datetime(row["last_seen_at"])
+        if last is None or (now - last).total_seconds() >= MANAGER_DEVICE_TOUCH_S:
+            conn.execute("UPDATE agent_devices SET last_seen_at = ?, last_ip = ? "
+                         "WHERE id = ?",
+                         (now.isoformat(timespec="seconds"), (ip or "")[:64] or None,
+                          row["id"]))
+            conn.commit()
+    return "ok", dict(row)
+
+
+def agent_devices_list() -> list[dict]:
+    with connect() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT id, employee, telegram_id, device, created_at, last_seen_at, "
+            "revoked_at FROM agent_devices ORDER BY COALESCE(revoked_at,''), "
+            "employee, id")]
+
+
+def agent_device_revoke(dev_id: int, by: str = "") -> bool:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE agent_devices SET revoked_at = COALESCE(revoked_at, ?), "
+            "revoked_by = COALESCE(revoked_by, ?) WHERE id = ? AND revoked_at IS NULL",
+            (now_iso, (by or "").strip()[:80] or None, dev_id))
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def _as_datetime(value) -> datetime | None:

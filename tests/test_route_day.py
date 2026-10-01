@@ -40,7 +40,7 @@ def test_route_day_chain(monkeypatch):
     _add("R-5", "Безгео Б.")
 
     monkeypatch.setattr(web, "_uid", lambda r: 424242)
-    monkeypatch.setattr(web, "_employee", lambda uid: EMP)
+    monkeypatch.setattr(web, "_employee", lambda uid, request=None: EMP)
     req = SimpleNamespace(query={"lat": "40.0", "lon": "69.0"})
     resp = asyncio.run(web._route_day(req))
     j = json.loads(resp.text)

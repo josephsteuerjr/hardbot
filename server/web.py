@@ -208,6 +208,13 @@ def _uid(request: web.Request) -> int | None:
         if uid:
             db.touch_app_token(tok)   # скользящие 30 дней: пользуются — не протухает
             return uid
+        # Приложение выездника на ПК (agent_devices): свой класс токена, работает
+        # теми же ручками, что телефон. Привязку agent_bind не трогает — телефон
+        # живёт своей жизнью, вытеснения нет.
+        state, dev = db.agent_device_check(tok, request.remote)
+        if state == "ok" and dev:
+            request["desk_employee"] = dev["employee"]
+            return int(dev["telegram_id"] or 0) or None
     if DEV:
         raw = request.headers.get("X-Dev-Uid") or request.query.get("dev_uid")
         try:
@@ -361,7 +368,13 @@ def _manager_envelope(mgr, team, iso, today, prev, nxt, uid) -> dict:
                                                 is_owner=uid == ADMIN_ID)}}
 
 
-def _employee(uid: int) -> str | None:
+def _employee(uid: int, request: web.Request | None = None) -> str | None:
+    # Приложение выездника на ПК знает СВОЁ ФИО из строки устройства: оно не
+    # следует за привязкой (телефон могли сменить), портфель на ПК стабилен.
+    if request is not None:
+        desk = request.get("desk_employee")
+        if desk:
+            return str(desk)
     """Кем пользователь работает в приложении.
 
     У выездника это его привязка. У РУКОВОДИТЕЛЯ привязки нет и быть не должно —
@@ -394,7 +407,7 @@ def _auth(request: web.Request) -> tuple[int, str]:
     uid = _uid(request)
     if not uid:
         raise web.HTTPUnauthorized(text="auth")
-    emp = _employee(uid)
+    emp = _employee(uid, request)
     if not emp:
         raise web.HTTPForbidden(text="not bound")
     return uid, emp
@@ -830,7 +843,7 @@ async def _bootstrap(request: web.Request) -> web.Response:
     except Exception:                                  # noqa: BLE001
         pass
     lang = lang_of(uid)
-    emp = _employee(uid)
+    emp = _employee(uid, request)
     if not emp:
         pend = db.pending_binding(uid)
         if pend:   # привязка есть, но ждёт аппрува ADMIN — данные не отдаём
@@ -914,7 +927,7 @@ async def _route_day(request: web.Request) -> web.Response:
     uid = _uid(request)
     if not uid:
         raise web.HTTPUnauthorized(text="auth")
-    emp = _employee(uid)
+    emp = _employee(uid, request)
     if not emp:
         raise web.HTTPNotFound(text="bind")
     # Битая точка старта — как её отсутствие: маршрут строится от первого адреса.
@@ -4355,6 +4368,73 @@ async def _admin_manager_device_revoke(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "revoked": n})
 
 
+# --- Приложение выездника на ПК: свой класс токена, телефон не вытесняет ---------
+async def _agent_device_enroll(request: web.Request) -> web.Response:
+    """{code, device} → {token, employee}: вход по ссылке ВЫЕЗДНИКА.
+
+    Ссылка руководителя отвергается (не тратится): пульту — свой энролл. Привязку
+    agent_bind не трогаем: телефон человека продолжает работать."""
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    code = _link_code(str(body.get("code") or ""))
+    device = str(body.get("device") or "").strip()[:80]
+    _admin_too_many_fails(request)
+    uid = db.peek_app_link(code) if code else None
+    if not uid:
+        _admin_auth_failed(request, scope="app")
+        raise _json_error(web.HTTPGone, "link_dead",
+                          reason=db.app_link_status(code) if code else "unknown")
+    if digest_data.manager_scope(uid, is_owner=(uid == ADMIN_ID)) is not None:
+        raise _json_error(web.HTTPForbidden, "not_agent")
+    got = db.enroll_agent_device(code, device)
+    if not got:
+        raise _json_error(web.HTTPGone, "link_dead")
+    employee, link_uid, dev_id, token = got
+    _admin_auth_ok(request, scope="app")
+    db.audit_access(link_uid, "desk_enroll", employee,
+                    detail=f"#{dev_id} {device}")
+    return web.json_response({"ok": True, "token": token, "device_id": dev_id,
+                              "employee": employee})
+
+
+async def _agent_device_logout(request: web.Request) -> web.Response:
+    """Погасить токен этого компьютера (сам выход)."""
+    tok = (request.headers.get("X-App-Token") or "").strip()
+    state, dev = db.agent_device_check(tok, request.remote)
+    if state != "ok" or not dev:
+        raise web.HTTPUnauthorized(text="auth")
+    db.agent_device_revoke(int(dev["id"]), by=f"self:{dev['employee']}")
+    db.audit_access(int(dev["telegram_id"] or 0) or 0, "desk_logout",
+                    dev["employee"])
+    return web.json_response({"ok": True})
+
+
+async def _admin_agent_devices(request: web.Request) -> web.Response:
+    _admin(request)
+    return web.json_response({"ok": True, "devices": db.agent_devices_list()})
+
+
+async def _admin_agent_device_revoke(request: web.Request) -> web.Response:
+    _admin(request)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    try:
+        dev_id = int(body.get("id"))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text="id")
+    n = db.agent_device_revoke(dev_id, by="admin")
+    db.audit_access(ADMIN_ID, "desk_revoke", detail=str(dev_id))
+    return web.json_response({"ok": True, "revoked": int(n)})
+
+
 async def _manager_app_map_data(request: web.Request) -> web.Response:
     """Карта дня ВНУТРИ приложения: авторизация сессией, подпись не нужна.
     Подписанный /manager/map_data остаётся для телеграм-кнопки."""
@@ -6295,6 +6375,10 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/manager/cases", _manager_cases)
     app.router.add_get("/api/manager/stats.xlsx", _manager_stats_xlsx)
     app.router.add_post("/api/manager/device/enroll", _manager_device_enroll)
+    app.router.add_post("/api/agent/device/enroll", _agent_device_enroll)
+    app.router.add_post("/api/agent/device/logout", _agent_device_logout)
+    app.router.add_get("/admin/agent_devices.json", _admin_agent_devices)
+    app.router.add_post("/admin/agent_device/revoke.json", _admin_agent_device_revoke)
     app.router.add_get("/api/manager/device/me", _manager_device_me)
     app.router.add_post("/api/manager/device/logout", _manager_device_logout)
     app.router.add_get("/api/manager/activity", _manager_activity)
