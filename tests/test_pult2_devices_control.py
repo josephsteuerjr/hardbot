@@ -335,3 +335,40 @@ def test_bymgr_and_dupphoto_signals():
     st, body = _call("GET", f"/api/control/flags?employee={EMP_B}&preset=today",
                      headers={"X-Pult-Token": token})
     assert st == 200 and any("bymgr" in v["flags"] for v in body["visits"])
+
+
+# --- журнал закреплений (контур СБ, 01.10) ------------------------------------------
+def test_assignment_journal_records_transfer_and_backdating():
+    _seed()  # первый импорт: P2-0..2 у EMP_A, P2-3..5 у EMP_B
+    # переносим P2-0 от EMP_A к EMP_B, «Дата закрепления» — задним числом
+    backdated = (date.today() - timedelta(days=30)).isoformat()
+    grid = [[f.title for f in db.FIELDS], [f.source for f in db.FIELDS]]
+    grid.append([{"contract_id": "P2-0", "client": "Должник 0", "responsible": EMP_B,
+                  "phone": "998901000000", "address": "Ташкент, улица 0",
+                  "assign_date": backdated}.get(f.key)
+                 for f in db.FIELDS])
+    rep = db.import_grid(grid, source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
+    assert rep["assignment_events"] == 1, rep.get("assignment_events")
+    events = [e for e in db.assignment_events_between("2000-01-01", "2100-01-01")
+              if e["contract_id"] == "P2-0" and e["kind"] == "transfer"]
+    assert events and events[0]["prev_employee"] == EMP_A \
+        and events[0]["employee"] == EMP_B
+    assert events[0]["claimed_at"] == backdated, "заявленная дата не сохранена"
+    # повтор того же импорта не плодит события
+    db.import_grid(grid, source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
+    again = [e for e in db.assignment_events_between("2000-01-01", "2100-01-01")
+             if e["contract_id"] == "P2-0"]
+    assert len([e for e in again if e["kind"] == "transfer"]) == 1
+    # отчёт: EMP_B получил договор, закрепление задним числом видно
+    token, _ = _enroll(SEC)
+    st, body = _call("GET", "/api/control/assignments?preset=7d",
+                     headers={"X-Pult-Token": token})
+    assert st == 200 and body["screen"] == "assignments", body
+    row = {r["employee"]: r for r in body["rows"]}[EMP_B]
+    assert row["received"] >= 4 and row["backdated"] >= 1
+    assert row["office_median"] is not None
+    # руководителю «Контроль» закрыт — и журнал тоже
+    mgr_tok, _ = _enroll(MGR)
+    st, _ = _call("GET", "/api/control/assignments?preset=7d",
+                  headers={"X-Pult-Token": mgr_tok})
+    assert st == 403

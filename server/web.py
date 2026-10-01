@@ -4250,6 +4250,17 @@ async def _control_overview(request: web.Request) -> web.Response:
     return _manager_json(data)
 
 
+async def _control_assignments(request: web.Request) -> web.Response:
+    """Журнал закреплений: кому приехали договоры и чьи это были (контур СБ)."""
+    uid, mgr, team = _manager_gate(request)
+    rng = _stats_range_q(request)
+    team = _range_team(mgr, team, rng)
+    data = await asyncio.to_thread(control.assignments, mgr, team, rng)
+    db.audit_access(uid, "control_view",
+                    detail=f"assignments {rng['from']}..{rng['to']}")
+    return _manager_json(data)
+
+
 async def _control_flags(request: web.Request) -> web.Response:
     uid, mgr, team = _manager_gate(request)
     rng = _stats_range_q(request)
@@ -6288,6 +6299,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/manager/device/logout", _manager_device_logout)
     app.router.add_get("/api/manager/activity", _manager_activity)
     app.router.add_get("/api/control/overview", _control_overview)
+    app.router.add_get("/api/control/assignments", _control_assignments)
     app.router.add_get("/api/control/flags", _control_flags)
     app.router.add_get("/api/control/callbacks", _control_callbacks)
     app.router.add_post("/api/control/callback", _control_callback)

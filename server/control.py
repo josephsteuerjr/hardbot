@@ -649,3 +649,90 @@ def control_xlsx(mgr: dict, team: list[str], rng: dict) -> bytes:
     ws2.autofilter(head2, ws2.row - 1, len(cols2))
     ws2.freeze("C4")
     return bk.close()
+
+
+# --- журнал закреплений (контур СБ, 01.10.2026) ------------------------------------
+# «Любимчики»: кому стабильно приезжают денежные должники. Событие смены
+# ответственного снимает импорт (окно факта), заявленная «Дата закрепления»
+# хранится рядом и сличается: дата далеко от окна — закрепление задним числом.
+CLAIMED_LAG_DAYS = 7
+
+
+def _money_int(v) -> int:
+    """Реестровые суммы приходят строками с пробелами — к целым рублям."""
+    digits = re.sub(r"[^\d-]", "", str(v or ""))
+    return int(digits) if digits not in ("", "-") else 0
+
+
+def assignments(mgr: dict, team: list[str], rng: dict) -> dict:
+    """Кому что приехало: события журнала закреплений и метрики «любимчиков».
+
+    «Денежность» договора — долг сейчас (debt.contract_debt) плюс отметка
+    «платил за 90 дней» (last_payment_date): точной истории платежей у сервера
+    нет, и это честная оговорка отчёта. Сравнение — медиана полученных данным
+    человеком против медианы ВСЕХ активных договоров команды."""
+    import debt as debt_mod
+
+    of, chips = offices_for(team)
+    events = db.assignment_events_between(rng["from"], rng["to"], team)
+    came_in = [e for e in events if e["employee"]]
+    # Экономика договоров — по текущему состоянию строки (долг меняется, для
+    # сравнения «кому отдают лучшее» текущего достаточно).
+    econ: dict[str, dict] = {}
+    pool: list[int] = []
+    for emp in team:
+        for r in db.contracts_of_responsible(emp):
+            cid = r["contract_id"]
+            paid = db._as_date(r["last_payment_date"]) if "last_payment_date" in r.keys() else None
+            recent_pay = bool(
+                paid and (date.today() - paid).days <= 90)
+            econ[cid] = {"debt": debt_mod.contract_debt(r) or 0,
+                         "recent_pay": recent_pay}
+            pool.append(debt_mod.contract_debt(r) or 0)
+    office_median = statistics.median(pool) if pool else 0
+
+    rows: dict[str, dict] = {}
+    for e in came_in:
+        r = rows.setdefault(e["employee"], {
+            "employee": e["employee"],
+            "office": "" if of.get(e["employee"]) == NO_OFFICE else of.get(e["employee"], ""),
+            "received": 0, "transfers": 0, "debts": [], "paying": 0,
+            "backdated": 0, "from_peers": {}})
+        c = econ.get(e["contract_id"]) or {"debt": 0, "recent_pay": False}
+        r["received"] += 1
+        r["debts"].append(c["debt"])
+        if c["recent_pay"]:
+            r["paying"] += 1
+        if e["kind"] == "transfer":
+            r["transfers"] += 1
+            if e["prev_employee"]:
+                r["from_peers"][e["prev_employee"]] = \
+                    r["from_peers"].get(e["prev_employee"], 0) + 1
+        claimed = db._as_date(e["claimed_at"] or "")
+        window = db._as_date(e["window_to"] or "")
+        if claimed and window and abs((claimed - window).days) > CLAIMED_LAG_DAYS:
+            r["backdated"] += 1
+
+    out_rows = []
+    for r in rows.values():
+        med = statistics.median(r["debts"]) if r["debts"] else 0
+        top_peer, top_peer_n = "", 0
+        for name, n in sorted(r["from_peers"].items(),
+                              key=lambda kv: (-kv[1], kv[0])):
+            top_peer, top_peer_n = name, n
+            break
+        out_rows.append({
+            "employee": r["employee"], "office": r["office"],
+            "received": r["received"], "transfers": r["transfers"],
+            "paying": r["paying"], "backdated": r["backdated"],
+            "median_debt": med, "office_median": office_median,
+            "debt_ratio": round(med / office_median, 2) if office_median else None,
+            "top_peer": top_peer, "top_peer_n": top_peer_n})
+    out_rows.sort(key=lambda x: (-(x["median_debt"] or 0), x["employee"].lower()))
+    # события — свежими сверху, с долгом и метками для витрины
+    for e in events:
+        e["debt"] = (econ.get(e["contract_id"]) or {}).get("debt")
+    return {"screen": "assignments", "range": rng, "offices": chips,
+            "rows": out_rows, "events": events[:500],
+            "claimed_lag_days": CLAIMED_LAG_DAYS,
+            "generated_at": datetime.now(TZ).isoformat(timespec="seconds")}

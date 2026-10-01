@@ -1285,6 +1285,33 @@ def init_db() -> None:
                      "ON payment_evidence(contract_id, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_payev_sha "
                      "ON payment_evidence(sha256)")
+        # ЖУРНАЛ ЗАКРЕПЛЕНИЙ (контур СБ, 01.10.2026): событие смены ответственного
+        # по договору, снятое ДИФФОМ ИМПОРТА. У импорта есть точная дата, и окно
+        # фактической смены честнее заявленной «Даты закрепления» из реестра (её
+        # пишут руками и задним числом) — обе величины храним и сличаем в отчёте.
+        # kind: transfer (был → новый), assign (не было → появился, включая новые
+        # строки реестра), removed (снят: полный срез или пустой ответственный).
+        # Ручные снятия/переназначения мимо импорта сюда не попадают — их след
+        # живёт в audit. UNIQUE держит повторный прогон того же окна.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS assignment_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              contract_id TEXT NOT NULL,
+              employee TEXT NOT NULL DEFAULT '',
+              prev_employee TEXT NOT NULL DEFAULT '',
+              kind TEXT NOT NULL,
+              window_to TEXT NOT NULL,
+              window_from TEXT,
+              claimed_at TEXT,
+              source TEXT,
+              created_at TEXT,
+              UNIQUE(contract_id, window_to, employee, prev_employee)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_assign_ev_emp "
+                     "ON assignment_events(employee, window_to)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_assign_ev_contract "
+                     "ON assignment_events(contract_id, window_to)")
         # Миграция app_links времён одноразовых кодов (без счётчика uses) и времён
         # общего потолка обменов (без max_uses/bonus_ios/last_use_at/last_agent).
         # Шаблон один и тот же — PRAGMA table_info + ALTER TABLE ... DEFAULT: рабочая
@@ -3205,6 +3232,24 @@ def record_receipt(op: str, contract_id: str, employee: str | None,
         row = conn.execute("SELECT id FROM payment_evidence WHERE op=?",
                            (op,)).fetchone()
         return row["id"] if row else None
+
+
+def assignment_events_between(d_from: str, d_to: str,
+                              employees: list[str] | None = None) -> list[dict]:
+    """События журнала закреплений за окно, новые сверху. employees — фильтр
+    по НОВОМУ ответственному (для команды руководителя/СБ)."""
+    args: list = [d_from, d_to]
+    where = "WHERE window_to >= ? AND window_to <= ?"
+    if employees:
+        keys = sorted({e for e in employees if e})
+        if keys:
+            where += f" AND employee IN ({','.join('?' * len(keys))})"
+            args += keys
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM assignment_events {where} "
+            "ORDER BY window_to DESC, id DESC", args).fetchall()
+    return [dict(r) for r in rows]
 
 
 def receipts_for(contract_ids: list[str]) -> dict[str, list[dict]]:
@@ -7574,6 +7619,10 @@ def import_grid(
             r["contract_id"] for r in conn.execute(
                 "SELECT contract_id FROM enrichment_ledger "
                 "WHERE field_key = 'visit_comment'")}
+        # Журнал закреплений: (КД, прежний, новый, заявленная дата закрепления).
+        # Пишется одной пачкой после разбора — в ТОЙ ЖЕ транзакции, что и смена
+        # (preview откатывает события вместе со всем импортом).
+        assignment_events: list[tuple[str, str, str, str | None]] = []
         # Визит — на человека: принятая правка разносится по всем его договорам
         # с тем же визитом, иначе карточка/дайджест (первый КД человека) её не
         # увидят, а файлы разъедутся построчно.
@@ -8002,6 +8051,15 @@ def import_grid(
                 tuple(data.values()),
             )
             report["updated" if is_update else "inserted"] += 1
+            # Журнал закреплений: событие снимается с ИТОГОВОГО data — после
+            # всех шлюзов (канонизация имени, ручное снятие, офисные правки).
+            prev_owner = (existing[cid]["responsible"] or "").strip() \
+                if cid in existing else ""
+            new_owner = str(data.get("responsible") or "").strip()
+            if new_owner != prev_owner:
+                assignment_events.append(
+                    (cid, prev_owner, new_owner,
+                     str(data.get("assign_date") or "")[:10] or None))
             slot_values = extra_values.get(cid) or {}
             if extra_cols:
                 # Пустая ячейка дополнительной колонки — это «значения больше
@@ -8096,6 +8154,9 @@ def import_grid(
                 report["auto_unassigned"] += changed
                 if changed:
                     auto_unassigned_effect.append((cid, former))
+        # Снятия полного среза — тоже события журнала закреплений.
+        assignment_events.extend(
+            (cid, former, "", None) for cid, former in auto_unassigned_effect)
         effect_rows = [
             {"contract_id": cid, "employee": employee}
             for cid, employee in sorted(auto_unassigned_effect)
@@ -8115,6 +8176,28 @@ def import_grid(
             employee: by_employee[employee]
             for employee in sorted(by_employee, key=_name_key)
         }
+        # --- Журнал закреплений: запись пачки --------------------------------
+        # window_from — прежнее известное состояние этого КД (окно прошлого
+        # события): позволяет видеть, как давно договор стоял у прежнего, не
+        # храня полную историю в каждой строке. INSERT OR IGNORE — повторный
+        # прогон того же окна не плодит события (UNIQUE по КД+окно+пара имён).
+        if assignment_events:
+            today_iso = date.today().isoformat()
+            now_iso = datetime.now().isoformat(timespec="seconds")
+            for cid, prev_owner, new_owner, claimed in assignment_events:
+                kind = ("transfer" if prev_owner and new_owner
+                        else "assign" if new_owner else "removed")
+                prev_window = conn.execute(
+                    "SELECT MAX(window_to) FROM assignment_events "
+                    "WHERE contract_id=? AND window_to<?", (cid, today_iso)
+                ).fetchone()[0]
+                conn.execute(
+                    "INSERT OR IGNORE INTO assignment_events (contract_id, "
+                    "employee, prev_employee, kind, window_to, window_from, "
+                    "claimed_at, source, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (cid, new_owner, prev_owner, kind, today_iso, prev_window,
+                     claimed, source_kind, now_iso))
+            report["assignment_events"] = len(assignment_events)
         # --- Отзыв: счётчики и digest ----------------------------------------
         # «recalled» всегда ноль: колонки отзыва договор не открепляют.
         # «recall_restored» — возврат легаси-отозванных строкой файла.
