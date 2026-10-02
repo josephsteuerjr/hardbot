@@ -37,9 +37,21 @@ cpSync(appDir, folder, { recursive: true });
 rmSync(appDir, { recursive: true, force: true });
 cpSync(join(here, "Как начать.txt"), join(folder, "Как начать.txt"));
 if (existsSync(join(folder, "LICENSES.chromium.html"))) rmSync(join(folder, "LICENSES.chromium.html"));
+// Запускатель приложения выездника: тот же exe в режиме --field (у выездника
+// свой класс входа — agent_devices, телефон не вытесняется). Выезднику папку
+// как есть: он жмёт «Хард — выездник» и вставляет СВОЮ ссылку из «Входа команды».
+writeFileSync(join(folder, "Хард — выездник.bat"),
+  "@echo off\r\nstart \"Хард — приложение выездника\" \"%~dp0Хард.exe\" --field\r\n");
 
 // zip — средствами Windows (tar из System32 умеет zip).
 const zip = join(dist, "Хард.zip");
 execFileSync(join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe"), ["-a", "-c", "-f", zip, "-C", dist, "Хард"], { stdio: "inherit" });
-writeFileSync(join(dist, "СОСТАВ.txt"), `Хард — пульт (Electron ${process.versions.electron ?? ""})\nпапка: ${folder}\nархив: ${zip}\n`);
+writeFileSync(join(dist, "СОСТАВ.txt"), `Хард — один exe, режимы (Electron ${process.versions.electron ?? ""})
+папка: ${folder}
+архив: ${zip}
+руководителю: папка как есть — Хард.exe (разделы — по роли с сервера: безопаснику виден «Контроль», руководителю «Вход команды»)
+безопаснику: та же папка — вход по ссылке роли безопасности
+выезднику: та же папка — «Хард — выездник.bat» (режим --field, вход по ссылке выездника; телефон продолжает работать)
+аналитику: та же папка ВНУТРИ комплекта (рядом pult/ и server/) — откроется пультом аналитика
+`);
 console.log("готово:", folder, "\n", zip);
