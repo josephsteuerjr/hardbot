@@ -505,6 +505,18 @@ def _person_payload(p: dict, on_date: str) -> dict:
 
     last_row = db.last_visit_row([c["contract_id"] for c in cs])
     last_ev = evidence.parse(_cell_of(last_row, "evidence"))
+    # Сверка «слова против денег»: сумма приложенных чеков против последнего
+    # платежа из реестра. Обе величины рядом — СБ видит расхождение одним
+    # взглядом, не собирая его из двух экранов.
+    receipts = db.receipts_for([p["rep"]]).get(p["rep"], [])
+    pay_date = None
+    pay_sum = None
+    for c in cs:
+        d = db._as_date(str(_cell_of(c, "last_payment_date") or ""))
+        if d and (pay_date is None or d > pay_date):
+            pay_date = d
+            digits = re.sub(r"[^\d]", "", str(_cell_of(c, "last_payment_sum") or ""))
+            pay_sum = int(digits) if digits else None
     return {
         "screen": "person",
         "rep": p["rep"], "client": p["client"], "n": p["n"],
@@ -521,7 +533,10 @@ def _person_payload(p: dict, on_date: str) -> dict:
         "shots": shots,
         # Чеки об оплате, приложенные выездником (контур СБ): показать рядом с
         # «Оплачен» из слов — сверка «слова против платежа» теперь в одном месте.
-        "receipts": db.receipts_for([p["rep"]]).get(p["rep"], []),
+        "receipts": receipts,
+        "receipts_total": round(sum(r["amount"] or 0 for r in receipts), 2),
+        "registry_pay": {"date": pay_date.isoformat() if pay_date else None,
+                         "sum": pay_sum},
         "birth_date": rawv("birth_date"),
         "partners": list(p.get("partners") or []),
         "partner": ", ".join(p.get("partners") or []) or (rawv("partner") or ""),

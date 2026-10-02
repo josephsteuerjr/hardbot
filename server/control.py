@@ -736,3 +736,58 @@ def assignments(mgr: dict, team: list[str], rng: dict) -> dict:
             "rows": out_rows, "events": events[:500],
             "claimed_lag_days": CLAIMED_LAG_DAYS,
             "generated_at": datetime.now(TZ).isoformat(timespec="seconds")}
+
+
+# --- лента выдачи входов (контур СБ) -----------------------------------------------
+# «Кто кому выдал вход» и «кто что отозвал» — действия руководителей и аналитика
+# над доступом. Для СБ это половина контроля руководителей: след сам по себе не
+# приговор, но «любимчику выдали второй вход в 23:40» — вопрос.
+_ACCESS_ACTIONS = {
+    "mgr_app_link": "выдал вход сотруднику",
+    "mgr_app_revoke": "сбросил вход",
+    "pult_enroll": "ввёл пульт на компьютере",
+    "pult_revoke": "отозвал пульт",
+    "desk_enroll": "ввёл приложение выездника на ПК",
+    "desk_revoke": "отозвал ПК-приложение",
+    "revoke_access": "отозвал доступ",
+    "bind_fix": "перепривязал аккаунт",
+    "mgr_rebind": "переставил аккаунт",
+    "mgr_unbind": "снял привязку",
+    "bind_approved_by_link": "ссылка подтвердила заявку",
+}
+
+
+def access_log(rng: dict, team: list[str] | None = None) -> dict:
+    """События доступа за окно, новые сверху. team — фильтр по цели (target =
+    ФИО сотрудника) для руководителя; админ видит всё."""
+    hi = (date.fromisoformat(rng["to"]) + timedelta(days=1)).isoformat()
+    qs = ",".join("?" * len(_ACCESS_ACTIONS))
+    with db.connect() as conn:
+        mgrs = {int(r["telegram_id"]): (r["name"] or "")
+                for r in conn.execute("SELECT telegram_id, name FROM managers")}
+        rows = conn.execute(
+            f"SELECT id, ts, actor, action, target, detail FROM audit "
+            f"WHERE action IN ({qs}) AND ts >= ? AND ts < ? "
+            "ORDER BY id DESC LIMIT 500",
+            (*_ACCESS_ACTIONS, rng["from"], hi)).fetchall()
+    names: dict[int, str] = {}
+
+    def name_of(uid: int) -> str:
+        if uid not in names:
+            names[uid] = mgrs.get(int(uid or 0), "") or db.get_binding(int(uid or 0)) or ""
+        return names[uid]
+
+    wanted = {e for e in (team or []) if e}
+    events = []
+    for r in rows:
+        target = r["target"] or ""
+        if wanted and target not in wanted:
+            continue
+        actor = int(r["actor"] or 0)
+        events.append({
+            "id": f"a{r['id']}", "ts": r["ts"], "day": str(r["ts"] or "")[:10],
+            "actor": actor, "actor_name": name_of(actor),
+            "action": r["action"], "label": _ACCESS_ACTIONS.get(r["action"], r["action"]),
+            "target": target, "detail": (r["detail"] or "")[:200]})
+    return {"screen": "access", "range": rng, "events": events,
+            "generated_at": datetime.now(TZ).isoformat(timespec="seconds")}

@@ -4274,6 +4274,78 @@ async def _control_assignments(request: web.Request) -> web.Response:
     return _manager_json(data)
 
 
+async def _control_access(request: web.Request) -> web.Response:
+    """Лента выдачи входов: кто кому выдал/отозвал доступ (контур СБ)."""
+    uid, mgr, team = _manager_gate(request)
+    rng = _stats_range_q(request)
+    team = _range_team(mgr, team, rng)
+    data = await asyncio.to_thread(control.access_log, rng, team)
+    db.audit_access(uid, "control_view", detail=f"access {rng['from']}..{rng['to']}")
+    return _manager_json(data)
+
+
+# --- «Контроль» для пульта аналитика: вся компания, вход устройства пульта --------
+# Те же правила и функции, что у безопасника, но состав — ВСЕ сотрудники реестра:
+# админ смотрит поверх границ команд. Право — токен устройства пульта (поимённо),
+# как у остальных админ-ручек; каждый просмотр — в журнал.
+def _all_employees() -> list[str]:
+    with db.connect() as conn:
+        return sorted({r["responsible"] for r in conn.execute(
+            "SELECT DISTINCT responsible FROM clients "
+            "WHERE COALESCE(responsible,'') <> ''")})
+
+
+async def _admin_control(request: web.Request, kind: str) -> web.Response:
+    _admin(request)
+    rng = _stats_range_q(request)
+    if kind == "callbacks":
+        iso, today, prev, nxt = _manager_date(request)
+        data = await asyncio.to_thread(functools.partial(
+            control.callbacks, None, _all_employees(), iso,
+            office=(request.query.get("office") or "").strip()))
+        db.audit_access(ADMIN_ID, "control_view", detail=f"admin callbacks {iso}")
+        return web.json_response(digest_data._public(
+            {**data, "prev_date": prev, "next_date": nxt, "today": today}))
+    if kind == "flags":
+        emp = (request.query.get("employee") or "").strip()
+        data = await asyncio.to_thread(control.flags_of, None, _all_employees(), rng, emp)
+        if data is None:
+            raise web.HTTPNotFound(text="employee")
+    elif kind == "assignments":
+        data = await asyncio.to_thread(control.assignments, None, _all_employees(), rng)
+    elif kind == "access":
+        data = await asyncio.to_thread(control.access_log, rng)
+    else:
+        data = await asyncio.to_thread(functools.partial(
+            control.overview, None, _all_employees(), rng,
+            office=(request.query.get("office") or "").strip()))
+    db.audit_access(ADMIN_ID, "control_view",
+                    detail=f"admin {kind} {rng['from']}..{rng['to']}")
+    resp = web.json_response(digest_data._public(data))
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+async def _admin_control_overview(request):
+    return await _admin_control(request, "overview")
+
+
+async def _admin_control_flags(request):
+    return await _admin_control(request, "flags")
+
+
+async def _admin_control_callbacks(request):
+    return await _admin_control(request, "callbacks")
+
+
+async def _admin_control_assignments(request):
+    return await _admin_control(request, "assignments")
+
+
+async def _admin_control_access(request):
+    return await _admin_control(request, "access")
+
+
 async def _control_flags(request: web.Request) -> web.Response:
     uid, mgr, team = _manager_gate(request)
     rng = _stats_range_q(request)
@@ -6384,6 +6456,12 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/manager/activity", _manager_activity)
     app.router.add_get("/api/control/overview", _control_overview)
     app.router.add_get("/api/control/assignments", _control_assignments)
+    app.router.add_get("/api/control/access", _control_access)
+    app.router.add_get("/admin/control/overview", _admin_control_overview)
+    app.router.add_get("/admin/control/flags", _admin_control_flags)
+    app.router.add_get("/admin/control/callbacks", _admin_control_callbacks)
+    app.router.add_get("/admin/control/assignments", _admin_control_assignments)
+    app.router.add_get("/admin/control/access", _admin_control_access)
     app.router.add_get("/api/control/flags", _control_flags)
     app.router.add_get("/api/control/callbacks", _control_callbacks)
     app.router.add_post("/api/control/callback", _control_callback)

@@ -8,12 +8,35 @@ import { DataTable } from "../kit/table";
 import { evidenceTag, flagsHtml, officeChips, openPerson, problem, rangeChips, rangeQuery, staleNote, wireRange, type Range } from "./common";
 
 const state = {
-  tab: "risk" as "risk" | "calls" | "assign",
+  tab: "risk" as "risk" | "calls" | "assign" | "access",
   range: { preset: "30d" } as Range,
   office: "",
   employee: "",
   day: "",
 };
+
+/** Как звать сервер: руководитель — своим токеном (/api/control/*), аналитик —
+ *  через питон-сторону пульта (/admin/control/*, вся компания). Одна и та же
+ *  вёрстка и правила, разный только транспорт. */
+export type ControlCall = (path: string, query?: Record<string, unknown>,
+                           method?: string, body?: unknown) =>
+  Promise<{ ok: boolean; data?: any; text?: string }>;
+
+let call: ControlCall = (p, q, m, b) => api(p, q, m, b);
+let canExcel = true;
+
+/** Транспорт пульта аналитика: локальный мост → устройство пульта. */
+export async function adminControlCall(path: string, query?: Record<string, unknown>,
+                                        method = "GET", body?: unknown) {
+  const qs = new URLSearchParams(
+    Object.entries(query || {})
+      .filter(([, v]) => v !== undefined && v !== null && v !== "")
+      .map(([k, v]) => [k, String(v)]),
+  ).toString();
+  const p = path.replace("/api/control", "/admin/control") + (qs ? "?" + qs : "");
+  const r = await hard.local("/admin", { method, path: p, ...(body !== undefined ? { body } : {}) });
+  return r.ok ? { ok: true, data: r.data } : { ok: false, text: r.error || "Ошибка связи с питон-стороной" };
+}
 
 const LEVEL: Record<string, string> = { high: "высокий", mid: "средний", low: "низкий" };
 
@@ -25,20 +48,20 @@ function signalText(s: any): string {
 function tabs(): string {
   return `<div class="chips"><button class="chip" data-tab="risk" aria-pressed="${state.tab === "risk"}">Риск по людям</button>
     <button class="chip" data-tab="calls" aria-pressed="${state.tab === "calls"}">Контрольный обзвон</button>
-    <button class="chip" data-tab="assign" aria-pressed="${state.tab === "assign"}">Закрепления</button></div>`;
+    <button class="chip" data-tab="assign" aria-pressed="${state.tab === "assign"}">Закрепления</button>
+    <button class="chip" data-tab="access" aria-pressed="${state.tab === "access"}">Доступ</button></div>`;
 }
 
 async function renderRisk(root: HTMLElement) {
   setHead("Контроль", "следы, по которым стоит проверить человека");
-  const r = await api("/api/control/overview", { ...rangeQuery(state.range), office: state.office });
+  const r = await call("/api/control/overview", { ...rangeQuery(state.range), office: state.office });
   if (!root.isConnected) return;
   if (!r.ok) { root.innerHTML = tabs() + problem(r.text || "Не загрузилось"); wire(root); return; }
   const d = r.data;
   const rows = d.rows as any[];
   const high = rows.filter((x) => x.level === "high").length;
   root.innerHTML = `${staleNote(r.stale)}
-    <div class="toolbar">${tabs()}<span class="spacer"></span>
-      <button class="btn small" data-xlsx>${icon("download")}Excel</button></div>
+    <div class="toolbar">${tabs()}<span class="spacer"></span>${canExcel ? `<button class="btn small" data-xlsx>${icon("download")}Excel</button>` : ""}</div>
     <div class="toolbar">${rangeChips(state.range, d.range, ["7d", "30d", "month"])}<span class="spacer"></span>${officeChips(d.offices, state.office)}</div>
     <div class="kpis"><div class="kpi accent"><b>${n(high)}</b><span>высокий риск</span></div>
       <div class="kpi"><b>${n(rows.filter((x) => x.level === "mid").length)}</b><span>средний</span></div>
@@ -75,7 +98,7 @@ async function renderFlags(root: HTMLElement) {
   const emp = state.employee;
   setHead(emp, "выезды со следами");
   root.innerHTML = '<div class="skeleton" style="width:40%"></div><div class="skeleton"></div>';
-  const r = await api("/api/control/flags", { ...rangeQuery(state.range), employee: emp });
+  const r = await call("/api/control/flags", { ...rangeQuery(state.range), employee: emp });
   if (!root.isConnected) return;
   if (!r.ok) { root.innerHTML = problem(r.text || "Не загрузилось"); return; }
   const d = r.data;
@@ -107,7 +130,7 @@ async function renderFlags(root: HTMLElement) {
 
 async function renderAssign(root: HTMLElement) {
   setHead("Закрепления", "кому приехали договоры — и чьи они были");
-  const r = await api("/api/control/assignments", rangeQuery(state.range));
+  const r = await call("/api/control/assignments", rangeQuery(state.range));
   if (!root.isConnected) return;
   if (!r.ok) { root.innerHTML = tabs() + problem(r.text || "Не загрузилось"); wire(root); return; }
   const d = r.data;
@@ -145,9 +168,30 @@ async function renderAssign(root: HTMLElement) {
   }).setRows(rows);
 }
 
+
+async function renderAccess(root: HTMLElement) {
+  setHead("Доступ", "кто кому выдал и кто что отозвал");
+  const r = await call("/api/control/access", rangeQuery(state.range));
+  if (!root.isConnected) return;
+  if (!r.ok) { root.innerHTML = tabs() + problem(r.text || "Не загрузилось"); wire(root); return; }
+  const d = r.data;
+  const evs = d.events as any[];
+  root.innerHTML = `${staleNote(r.stale)}
+    <div class="toolbar">${tabs()}</div>
+    <div class="toolbar">${rangeChips(state.range, d.range, ["7d", "30d", "month"])}</div>
+    <div class="kpis"><div class="kpi"><b>${n(evs.length)}</b><span>событий доступа</span></div>
+      <div class="kpi accent"><b>${n(evs.filter((e) => /revoke|unbind|сброс/i.test(e.action)).length)}</b><span>отзывов и сбросов</span></div>
+      <div class="kpi"><b>${n(evs.filter((e) => e.action === "mgr_app_link").length)}</b><span>выдано входов</span></div></div>
+    <div class="section feed">${evs.map((e) => `<div class="ev"><time>${esc(String(e.ts || "").replace("T", " ").slice(5, 16))}</time><span class="mark"></span>
+      <div><div class="line1"><b>${esc(e.actor_name || ("id " + e.actor))}</b> — ${esc(e.label)}${e.target ? ` · <b>${esc(e.target)}</b>` : ""}</div>
+      ${e.detail ? `<div class="line2">${esc(e.detail)}</div>` : ""}</div></div>`).join("") || '<div class="empty"><b>Тихо</b>Событий доступа за это окно нет.</div>'}</div>
+    <p class="muted" style="font-size:13.5px;max-width:760px;margin-top:12px">Выдача входа — действие руководителя или аналитика; сама по себе не нарушение, но «любимчику второй вход в 23:40» — вопрос. Просмотры карточек должников лежат в журнале на сервере.</p>`;
+  wire(root);
+}
+
 async function renderCalls(root: HTMLElement) {
   setHead("Контрольный обзвон", "позвонить должнику и сверить со словами выездника");
-  const r = await api("/api/control/callbacks", { date: state.day || undefined, office: state.office });
+  const r = await call("/api/control/callbacks", { date: state.day || undefined, office: state.office });
   if (!root.isConnected) return;
   if (!r.ok) { root.innerHTML = tabs() + problem(r.text || "Не загрузилось"); wire(root); return; }
   const d = r.data;
@@ -189,7 +233,7 @@ async function renderCalls(root: HTMLElement) {
     const vid = Number(card.dataset.vid);
     card.querySelectorAll<HTMLButtonElement>("[data-out]").forEach((b) => b.addEventListener("click", async () => {
       const note = card.querySelector<HTMLTextAreaElement>("[data-note]")?.value || "";
-      const res = await api("/api/control/callback", undefined, "POST", { visit_id: vid, outcome: b.dataset.out, note });
+      const res = await call("/api/control/callback", undefined, "POST", { visit_id: vid, outcome: b.dataset.out, note });
       if (!res.ok) { toast(res.text || "Не сохранилось"); return; }
       card.querySelectorAll("[data-out]").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
       card.classList.add("done");
@@ -211,20 +255,28 @@ function wire(root: HTMLElement) {
 function draw(root: HTMLElement): Promise<void> {
   if (state.tab === "calls") return renderCalls(root);
   if (state.tab === "assign") return renderAssign(root);
+  if (state.tab === "access") return renderAccess(root);
   if (state.employee) return renderFlags(root);
   return renderRisk(root);
 }
 
-export const control: Section = {
-  id: "control",
-  title: "Контроль",
-  icon: "control",
-  kicker: "следы, по которым стоит проверить человека",
-  async render(root) {
-    state.employee = "";
-    root.innerHTML = '<div class="skeleton" style="width:40%"></div><div class="skeleton"></div>';
-    await draw(root);
-  },
-};
+/** Раздел «Контроль». transport — чей токен, excel — есть ли админская выгрузка. */
+export function controlSection(transport: ControlCall, excel: boolean): Section {
+  call = transport;
+  canExcel = excel;
+  return {
+    id: "control",
+    title: "Контроль",
+    icon: "control",
+    kicker: "следы, по которым стоит проверить человека",
+    async render(root) {
+      state.employee = "";
+      root.innerHTML = '<div class="skeleton" style="width:40%"></div><div class="skeleton"></div>';
+      await draw(root);
+    },
+  };
+}
+
+export const control: Section = controlSection((p, q, m, b) => api(p, q, m, b), true);
 
 export { plural };

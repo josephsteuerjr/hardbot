@@ -1208,7 +1208,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=68;
+const SHELL_VERSION=69;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -4829,7 +4829,9 @@ function dgPerson(j,b){
   const rcs=j.receipts||[];
   DG.rcs=rcs;
   if(rcs.length){
-    parts.push(`<div style="margin-top:10px;font-weight:700">🧾 Чеки · ${rcs.length}</div>`);
+    const rp=j.registry_pay||{};
+    parts.push(`<div style="margin-top:10px;font-weight:700">🧾 Чеки · ${rcs.length} · ${esc(rcMoney(j.receipts_total))}</div>`);
+    parts.push(`<div class="muted" style="font-size:12px;margin:2px 0 4px">реестр: ${rp.date?("платёж "+esc(rp.date)+(rp.sum?" · "+esc(rcMoney(rp.sum)):"")):"платежей не видно"}</div>`);
     parts.push(rcs.map((r,i)=>`<button class="btn line" style="padding:4px 10px;margin-top:6px" onclick="dgReceipt(${i})">
       ${esc(r.paid_at||r.created_at||"")} · ${esc(rcMoney(r.amount))}${r.payer_is_client?"":" · другое лицо"+(r.payer_note?": "+esc(r.payer_note):"")}</button>`).join(""));
     parts.push(`<div id="dgreceipt"></div>`);

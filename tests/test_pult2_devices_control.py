@@ -413,3 +413,49 @@ def test_agent_desk_enroll_and_work(world=None):
     assert db.agent_device_revoke(dev_id, by="test") is True
     st, _ = _call("GET", "/api/bootstrap", headers={"X-App-Token": tok})
     assert st == 401, "отозванный токен ПК продолжает работать"
+
+
+# --- доступ и админский «Контроль» (контур СБ, 02.10 вечер) ------------------------
+def test_access_log_and_admin_control():
+    _seed()
+    db.audit_access(MGR, "mgr_app_link", EMP_A, detail="выдано")
+    db.audit_access(SEC, "mgr_app_revoke", EMP_B, detail="сброшено")
+    token, _ = _enroll(SEC)
+    st, body = _call("GET", "/api/control/access?preset=7d",
+                     headers={"X-Pult-Token": token})
+    assert st == 200 and body["screen"] == "access", body
+    acts = {e["action"] for e in body["events"]}
+    assert "mgr_app_link" in acts and "mgr_app_revoke" in acts
+    # руководитель «Контроль» не видит — и ленту тоже
+    mgr_tok, _ = _enroll(MGR)
+    assert _call("GET", "/api/control/access?preset=7d",
+                 headers={"X-Pult-Token": mgr_tok})[0] == 403
+    # админский «Контроль» — вся компания, вход устройством пульта по ключу
+    import os
+    from unittest import mock
+    with mock.patch.dict(os.environ, {"ADMIN_API_KEY": "master"}):
+        h = {"X-Admin-Key": "master"}
+        st, body = _call("GET", "/admin/control/overview", headers=h)
+        assert st == 200 and body["screen"] == "control", (st, body)
+        st, body = _call("GET", "/admin/control/assignments", headers=h)
+        assert st == 200 and body["screen"] == "assignments"
+        st, body = _call("GET", "/admin/control/access", headers=h)
+        assert st == 200 and body["screen"] == "access"
+        st, body = _call("GET", "/admin/control/callbacks", headers=h)
+        assert st == 200 and body["screen"] == "callbacks"
+    # чужой ключ не пускает
+    assert _call("GET", "/admin/control/overview",
+                 headers={"X-Admin-Key": "nope"})[0] in (401, 403)
+
+
+def test_manager_person_carries_receipt_vs_registry_totals():
+    _seed()
+    db.record_receipt("rc-t1", "P2-0", EMP_A, AGENT, amount=1500.0,
+                      paid_at="2026-09-28", file="P2-0/rc-t1.jpg",
+                      sha256="t" * 64, size_bytes=10, source="app")
+    token, _ = _enroll(SEC)
+    st, body = _call("GET", "/api/manager/person?employee=%s&rep=P2-0" % EMP_A,
+                     headers={"X-Pult-Token": token})
+    assert st == 200, body
+    assert body["receipts_total"] == 1500.0
+    assert "registry_pay" in body and set(body["registry_pay"]) == {"date", "sum"}
