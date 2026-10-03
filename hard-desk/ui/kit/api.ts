@@ -12,6 +12,7 @@ export interface ApiResult<T = any> {
 
 export interface Shell {
   mode: "manager" | "analyst" | "field";
+  kit?: boolean;
   product: string;
   version: string;
   server: string;
@@ -26,6 +27,8 @@ type Q = Record<string, unknown>;
 
 interface Bridge {
   state(): Promise<Shell>;
+  /** Один exe — все роли: сменить режим («manager»/«field»/«soft»/«analyst»). */
+  setMode(mode: string): Promise<{ ok: boolean; text?: string }>;
   enroll(link: string): Promise<ApiResult>;
   logout(): Promise<boolean>;
   api(method: string, path: string, query?: Q, body?: unknown): Promise<ApiResult>;

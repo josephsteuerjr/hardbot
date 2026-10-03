@@ -651,6 +651,29 @@ def is_filled(row: dict) -> bool:
     return row.get(FILLED_MARKER) is True and parse_date(row.get("visit_date")) is not None
 
 
+def soft_anchor(row: dict):
+    """День, которым кейс-звонок участвует в окне обогащения: ПОЗДНЯЯ из даты
+    коммуникации и дня последнего звонка (_call_day из экспорта). Дата
+    коммуникации бывает СЛЕДУЮЩИМ звонком в будущем — без дня звонка окно
+    «до сегодня» молча выкидывало бы свежие звонки с отложенным перезвоном."""
+    dates = [parse_date(row.get("soft_comm_date")), parse_date(row.get("_call_day"))]
+    dates = [d for d in dates if d is not None]
+    return max(dates) if dates else None
+
+
+def is_soft_filled(row: dict) -> bool:
+    """Звонок софтника: статус звонка есть, якорь разбираем.
+
+    Снимка визита у софт-кейса нет и не будет — доказательство здесь другое:
+    живая колонка месяца + окно по дню звонка + реестр доставленного."""
+    return cell_text(row.get("soft_call_status")) != "" and soft_anchor(row) is not None
+
+
+# Что развозим по софт-книгам: колонки звонка + общие обещание/прогноз.
+SOFT_CASE_KEYS = ("soft_call_status", "soft_comm_date", "soft_comment",
+                  "promise_date", "forecast_sum", "forecast")
+
+
 # Сколько номеров КД показывать в предупреждении пульта: список нужен, чтобы
 # «визиты в никуда» можно было проверить руками, а не поверить на слово.
 ORPHAN_SAMPLE = 20
@@ -715,7 +738,7 @@ def split_by_employee(rows: list[dict]) -> EmployeeSplit:
 def _is_source_row(row: list) -> bool:
     """Строка-пометка «сх/хард» под заголовками — не данные."""
     nonempty = [str(v).strip().lower() for v in row if v not in (None, "")]
-    return bool(nonempty) and all(v in ("сх", "хард") for v in nonempty)
+    return bool(nonempty) and all(v in ("сх", "хард", "софт") for v in nonempty)
 
 
 # ТЕХНИЧЕСКАЯ ПУСТОТА. В книге «Не обработан» означает «до этого кейса ещё не
@@ -905,14 +928,23 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
 
     for srv in rows:
         cid = norm_cid(srv.get(CONTRACT_KEY))
-        if not cid or not is_filled(srv):
-            continue     # без завершённого визита кейс не трогаем вообще
-        vdate = parse_date(srv.get("visit_date"))
+        if not cid:
+            continue
+        soft_case = False
+        if is_filled(srv):
+            vdate = parse_date(srv.get("visit_date"))
+        elif is_soft_filled(srv):
+            soft_case = True          # контур «Софт»: якорь — день звонка/коммуникации
+            vdate = soft_anchor(srv)
+        else:
+            continue     # без завершённого визита/звонка кейс не трогаем вообще
         if (since_d and vdate < since_d) or (until_d and vdate > until_d):
             out_of_window += 1
             continue
         filled_contract_ids.append(cid)
-        values = {k: srv.get(k) for k in VISIT_KEYS
+        keys_pool = VISIT_KEYS if not soft_case else [
+            k for k in VISIT_KEYS if k in SOFT_CASE_KEYS]
+        values = {k: srv.get(k) for k in keys_pool
                   if cell_text(srv.get(k)) != "" and k in col_map}
         filled_cases += 1
         targets = file_rows.get(cid)

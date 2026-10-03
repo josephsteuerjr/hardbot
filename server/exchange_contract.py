@@ -26,6 +26,9 @@ _SUPPORTED_RAW_SHA256 = {
     2: "d6f2a8c46f8d490eca7c715fe9e4561201f6cb7053a89aceabcf49ed9548b7c7",
     3: "f57137d420294851dfc40350006bb17e0cb55b13ab2371ac84a56a0c1c81bbe6",
     4: "21042268c5240574ade51f751497a02af7e774684dc4105e73a6b821d7fd2031",
+    # v5 — контур «Софт»: поля звонка в схеме, алиасы «Дата перезвона»/
+    # «Комментарий текущего месяца», soft-правила обогащения (2026-10-03)
+    5: "4925d47f4ccc39524f97250c0ba44e7661c24df04a8153cf31d932a2a52ad678",
 }
 
 
@@ -277,6 +280,7 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
             "snapshot_keys",
             "legacy_read_keys",
             "enrichment_source_keys",
+            "live_state_keys",
         },
         label="provenance",
     )
@@ -297,17 +301,28 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
         provenance["enrichment_source_keys"],
         label="provenance.enrichment_source_keys",
     )
+    # Контур «Софт»: поля звонка живут в ЖИВОЙ колонке clients (без снимка
+    # bot_visit_data — их пишут и софтник, и импорт мастера; эхо удерживают
+    # окно дат и реестр доставленного, а не доказательство снимком).
+    live_state_keys = _strings(
+        provenance["live_state_keys"],
+        label="provenance.live_state_keys",
+    )
+    if set(live_state_keys) & set(snapshot_keys):
+        raise ExchangeContractError(
+            "live state keys must not be snapshot keys"
+        )
     if completion_date_key not in snapshot_keys or completion_date_key not in (
         enrichment_source_keys
     ):
         raise ExchangeContractError("completion date is not exported/enriched")
-    if not set(dropdown_keys).union(text_keys, amount_keys, date_keys)             <= set(snapshot_keys):
-        raise ExchangeContractError("form fields are not all in provenance snapshot")
+    if not set(dropdown_keys).union(text_keys, amount_keys, date_keys)             <= set(snapshot_keys) | set(live_state_keys):
+        raise ExchangeContractError("form fields are not all in provenance state")
     if not set(legacy_read_keys) <= set(snapshot_keys):
         raise ExchangeContractError("legacy read keys are not in provenance snapshot")
     if set(legacy_read_keys) & set(enrichment_source_keys):
         raise ExchangeContractError("legacy-only keys must not be enriched")
-    if set(enrichment_source_keys) - set(snapshot_keys):
+    if set(enrichment_source_keys) - set(snapshot_keys) - set(live_state_keys):
         raise ExchangeContractError("enrichment sources are not provenance fields")
 
     enrichment = _exact_dict(

@@ -204,9 +204,9 @@ a{color:var(--link)}
 .picksheet.ask{z-index:110}
 .picksheet.ask .pickbody{max-width:520px;margin:0 auto;
   padding:18px 16px calc(18px + env(safe-area-inset-bottom,0px))}
-.wrap{flex:1 1 auto;min-height:0;width:100%;padding:14px 16px 100px;max-width:520px;
+.wrap{flex:1 1 auto;min-height:0;width:100%;padding:14px 16px calc(100px + env(safe-area-inset-bottom,0px));max-width:520px;
   margin:0 auto;overflow-x:hidden;overflow-y:auto;overscroll-behavior-y:contain;
-  -webkit-overflow-scrolling:touch;scrollbar-gutter:stable;scroll-padding-bottom:100px}
+  -webkit-overflow-scrolling:touch;scrollbar-gutter:stable;scroll-padding-bottom:calc(100px + env(safe-area-inset-bottom,0px))}
 .wrap>*{animation:lift var(--dur-3) var(--ease-out)}
 .muted{color:var(--muted)}
 .searchwrap{position:relative;margin-bottom:12px}
@@ -654,8 +654,12 @@ const I18N = {
     warmagain:"Обновить оффлайн-копию",warmfail:"Не удалось загрузить — нужна сеть",
     routeday:"Маршрут дня",rdempty:"Нет невизитированных кейсов с точками",
     freenav:"Навигация по адресу",freenavph:"Адрес или «41.31, 69.24»",
-    drainTitle:"Выгрузка на сервер",drainWhy:"Этот адрес приложения закрыт. Здесь можно только отправить на сервер то, что сохранилось на телефоне.",drainSending:"Отправляю…",drainDone:"Всё отправлено",drainNet:"Нет связи — повторю сам, как только появится интернет",drainAuth:"Чтобы отправить, нужен вход. Попросите у руководителя ссылку входа и вставьте её сюда:",drainLogin:"Войти и отправить",drainLeft:"Ждут отправки",drainVisits:"выездов",drainPhotos:"фото",drainMarks:"меток",drainNotes:"заметок",drainFailed:"Сервер не принял — внесите заново в новом приложении",drainDrafts:"Карточки без «Сохранить выезд» — их на сервере нет, внесите заново",drainOpen:"Открыть новое приложение",drainNothing:"На этом телефоне нечего отправлять",drainRetry:"Повторить",drainBadLink:"Ссылка не действует — попросите новую",theme:"Тема",theme_system:"как в системе",theme_light:"светлая",theme_dark:"тёмная",modefield:"Выездник",modemanager:"Руководитель",modesecurity:"Безопасник",modefull:"Директор",modeowner:"Владелец",
+    drainTitle:"Выгрузка на сервер",drainWhy:"Этот адрес приложения закрыт. Здесь можно только отправить на сервер то, что сохранилось на телефоне.",drainSending:"Отправляю…",drainDone:"Всё отправлено",drainNet:"Нет связи — повторю сам, как только появится интернет",drainAuth:"Чтобы отправить, нужен вход. Попросите у руководителя ссылку входа и вставьте её сюда:",drainLogin:"Войти и отправить",drainLeft:"Ждут отправки",drainVisits:"выездов",drainPhotos:"фото",drainMarks:"меток",drainNotes:"заметок",drainFailed:"Сервер не принял — внесите заново в новом приложении",drainDrafts:"Карточки без «Сохранить выезд» — их на сервере нет, внесите заново",drainOpen:"Открыть новое приложение",drainNothing:"На этом телефоне нечего отправлять",drainRetry:"Повторить",drainBadLink:"Ссылка не действует — попросите новую",theme:"Тема",theme_system:"как в системе",theme_light:"светлая",theme_dark:"тёмная",modefield:"Выездник",modemanager:"Руководитель",modesecurity:"Безопасник",modefull:"Директор",modeowner:"Владелец",modesoft:"Софт",
     team:"Сотрудники",pfk:"Портфель",pfpick:"Чей портфель открыть",byaddr:"По адресу",
+    softq:"Кому звонить",softtoday:"Сегодня",softall:"Все",calltab:"Звонки",savecall:"Сохранить звонок",
+    callreq:"Сначала выберите статус звонка",commdate:"Когда звонить снова",callmonth:"Комментарий месяца",
+    callhist:"Историчный комментарий (Софт)",calllog:"Звонки",overduen:"перезвон просрочен",nostatus:"без статуса",dn:"дн",
+    softresp:"Ответственный Софт",callsaved:"Звонок сохранён",
     digest:"Сводка", dgneednet:"Сводка руководителя доступна только при связи",
     dgerr:"Не удалось загрузить сводку", dggone:"Доступ к сводке отозван",
     dggoneemp:"Сотрудник больше не в вашей команде",
@@ -718,8 +722,12 @@ const I18N = {
     warmagain:"Oflayn nusxani yangilash",warmfail:"Yuklanmadi — tarmoq kerak",
     routeday:"Kun marshruti",rdempty:"Nuqtali ochiq ishlar yo‘q",
     freenav:"Manzil bo‘yicha navigatsiya",freenavph:"Manzil yoki «41.31, 69.24»",
-    drainTitle:"Serverga yuborish",drainWhy:"Ilovaning bu manzili yopilgan. Bu yerda faqat telefonda saqlanib qolganlarni serverga yuborish mumkin.",drainSending:"Yuborilmoqda…",drainDone:"Hammasi yuborildi",drainNet:"Aloqa yo‘q — internet paydo bo‘lishi bilan o‘zim qayta yuboraman",drainAuth:"Yuborish uchun kirish kerak. Rahbardan kirish havolasini so‘rang va shu yerga joylang:",drainLogin:"Kirish va yuborish",drainLeft:"Yuborilishini kutmoqda",drainVisits:"chiqish",drainPhotos:"rasm",drainMarks:"nuqta",drainNotes:"eslatma",drainFailed:"Server qabul qilmadi — yangi ilovada qaytadan kiriting",drainDrafts:"«Chiqishni saqlash» bosilmagan kartalar — ular serverda yo‘q, qaytadan kiriting",drainOpen:"Yangi ilovani ochish",drainNothing:"Bu telefonda yuboriladigan narsa yo‘q",drainRetry:"Qayta urinish",drainBadLink:"Havola ishlamayapti — yangisini so‘rang",theme:"Mavzu",theme_system:"tizimdagidek",theme_light:"yorug‘",theme_dark:"qorong‘i",modefield:"Chiquvchi",modemanager:"Rahbar",modesecurity:"Xavfsizlik",modefull:"Direktor",modeowner:"Egasi",
+    drainTitle:"Serverga yuborish",drainWhy:"Ilovaning bu manzili yopilgan. Bu yerda faqat telefonda saqlanib qolganlarni serverga yuborish mumkin.",drainSending:"Yuborilmoqda…",drainDone:"Hammasi yuborildi",drainNet:"Aloqa yo‘q — internet paydo bo‘lishi bilan o‘zim qayta yuboraman",drainAuth:"Yuborish uchun kirish kerak. Rahbardan kirish havolasini so‘rang va shu yerga joylang:",drainLogin:"Kirish va yuborish",drainLeft:"Yuborilishini kutmoqda",drainVisits:"chiqish",drainPhotos:"rasm",drainMarks:"nuqta",drainNotes:"eslatma",drainFailed:"Server qabul qilmadi — yangi ilovada qaytadan kiriting",drainDrafts:"«Chiqishni saqlash» bosilmagan kartalar — ular serverda yo‘q, qaytadan kiriting",drainOpen:"Yangi ilovani ochish",drainNothing:"Bu telefonda yuboriladigan narsa yo‘q",drainRetry:"Qayta urinish",drainBadLink:"Havola ishlamayapti — yangisini so‘rang",theme:"Mavzu",theme_system:"tizimdagidek",theme_light:"yorug‘",theme_dark:"qorong‘i",modefield:"Chiquvchi",modemanager:"Rahbar",modesecurity:"Xavfsizlik",modefull:"Direktor",modeowner:"Egasi",modesoft:"Soft",
     team:"Xodimlar",pfk:"Portfel",pfpick:"Kimning portfelini ochish",byaddr:"Manzil bo‘yicha",
+    softq:"Kimga qo‘ng‘iroq qilish",softtoday:"Bugun",softall:"Barchasi",calltab:"Qo‘ng‘iroqlar",savecall:"Qo‘ng‘iroqni saqlash",
+    callreq:"Avval qo‘ng‘iroq holatini tanlang",commdate:"Qachon yana qo‘ng‘iroq qilish",callmonth:"Oy izohi",
+    callhist:"Oldingi izohlar (Soft)",calllog:"Qo‘ng‘iroqlar",overduen:"qayta qo‘ng‘iroq kechikkan",nostatus:"holat yo‘q",dn:"kun",
+    softresp:"Mas’ul (Soft)",callsaved:"Qo‘ng‘iroq saqlandi",
     digest:"Hisobot", dgneednet:"Rahbar hisoboti faqat aloqa bo‘lganda ochiladi",
     dgerr:"Hisobot yuklanmadi", dggone:"Hisobotga ruxsat bekor qilindi",
     dggoneemp:"Xodim endi jamoangizda emas",
@@ -782,8 +790,12 @@ const I18N = {
     warmagain:"Нусхаи офлайнро нав кунед",warmfail:"Нашуд — шабака лозим аст",
     routeday:"Масири рӯз",rdempty:"Кейси кушодаи нуқтадор нест",
     freenav:"Навигатсия аз рӯи нишонӣ",freenavph:"Нишонӣ ё «41.31, 69.24»",
-    drainTitle:"Фиристодан ба сервер",drainWhy:"Ин суроғаи барнома баста шуд. Дар ин ҷо танҳо он чиро, ки дар телефон монд, ба сервер фиристодан мумкин аст.",drainSending:"Фиристода мешавад…",drainDone:"Ҳама фиристода шуд",drainNet:"Алоқа нест — ҳамин ки интернет пайдо шавад, худам такрор мекунам",drainAuth:"Барои фиристодан воридшавӣ лозим аст. Аз роҳбар пайванди воридшавӣ пурсед ва ин ҷо гузоред:",drainLogin:"Ворид шудан ва фиристодан",drainLeft:"Дар навбати фиристодан",drainVisits:"сафар",drainPhotos:"расм",drainMarks:"нуқта",drainNotes:"қайд",drainFailed:"Сервер қабул накард — дар барномаи нав аз нав ворид кунед",drainDrafts:"Кортҳое, ки «Сафарро захира» пахш нашуд — онҳо дар сервер нестанд, аз нав ворид кунед",drainOpen:"Кушодани барномаи нав",drainNothing:"Дар ин телефон чизе барои фиристодан нест",drainRetry:"Такрор",drainBadLink:"Пайванд кор намекунад — пайванди нав пурсед",theme:"Мавзӯъ",theme_system:"мисли система",theme_light:"равшан",theme_dark:"торик",modefield:"Выездник",modemanager:"Роҳбар",modesecurity:"Амният",modefull:"Директор",modeowner:"Соҳиб",
+    drainTitle:"Фиристодан ба сервер",drainWhy:"Ин суроғаи барнома баста шуд. Дар ин ҷо танҳо он чиро, ки дар телефон монд, ба сервер фиристодан мумкин аст.",drainSending:"Фиристода мешавад…",drainDone:"Ҳама фиристода шуд",drainNet:"Алоқа нест — ҳамин ки интернет пайдо шавад, худам такрор мекунам",drainAuth:"Барои фиристодан воридшавӣ лозим аст. Аз роҳбар пайванди воридшавӣ пурсед ва ин ҷо гузоред:",drainLogin:"Ворид шудан ва фиристодан",drainLeft:"Дар навбати фиристодан",drainVisits:"сафар",drainPhotos:"расм",drainMarks:"нуқта",drainNotes:"қайд",drainFailed:"Сервер қабул накард — дар барномаи нав аз нав ворид кунед",drainDrafts:"Кортҳое, ки «Сафарро захира» пахш нашуд — онҳо дар сервер нестанд, аз нав ворид кунед",drainOpen:"Кушодани барномаи нав",drainNothing:"Дар ин телефон чизе барои фиристодан нест",drainRetry:"Такрор",drainBadLink:"Пайванд кор намекунад — пайванди нав пурсед",theme:"Мавзӯъ",theme_system:"мисли система",theme_light:"равшан",theme_dark:"торик",modesoft:"Софт",modefield:"Выездник",modemanager:"Роҳбар",modesecurity:"Амният",modefull:"Директор",modeowner:"Соҳиб",
     team:"Кормандон",pfk:"Портфел",pfpick:"Портфели киро кушоем",byaddr:"Аз рӯи нишонӣ",
+    softq:"Кӣ ба занг задан",softtoday:"Имрӯз",softall:"Ҳама",calltab:"Зангҳо",savecall:"Зангро нигоҳ доштан",
+    callreq:"Аввал ҳолати зангро интихоб кунед",commdate:"Кай боэд занг задан",callmonth:"Шарҳи моҳ",
+    callhist:"Шарҳҳои қаблӣ (Soft)",calllog:"Зангҳо",overduen:"занги такрор дер шуд",nostatus:"бе ҳолат",dn:"рӯз",
+    softresp:"Масъул (Soft)",callsaved:"Занг нигоҳ дошта шуд",
     digest:"Ҳисобот", dgneednet:"Ҳисоботи роҳбар танҳо ҳангоми алоқа дастрас аст",
     dgerr:"Ҳисобот бор нашуд", dggone:"Дастрасӣ ба ҳисобот бекор шуд",
     dggoneemp:"Корманд дигар дар дастаи шумо нест",
@@ -1221,7 +1233,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=72;
+const SHELL_VERSION=73;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1479,6 +1491,7 @@ async function flushQueue(){
             opened_at:it.opened_at||undefined,
             form_version:it.form_version,input_keys:it.input_keys};
           if(it.cleared_keys&&it.cleared_keys.length) sbody.cleared_keys=it.cleared_keys;
+          if(it.save_kind) sbody.kind=it.save_kind;   // звонок софтника (контур «Софт»)
           if(it.geo) sbody.geo=it.geo;
           if(it.pr) Object.assign(sbody, it.pr);     // следы выезда из очереди
           r=await fetch("/api/save",{method:"POST",headers:jsonHeaders(),
@@ -1585,7 +1598,7 @@ function finishSavedUI(rep, msg){
   prStop(); prClear(rep);        // следы ушли вместе с визитом (или лежат в очереди)
   if(TG&&TG.HapticFeedback) TG.HapticFeedback.notificationOccurred("success");
   const p=STATE.persons.find(x=>x.rep===rep); if(p) p.visited=true;
-  STATE.tab="visit"; renderDetail();
+  STATE.tab=(STATE.mode==="soft")?"call":"visit"; renderDetail();
 }
 
 // Автономное приложение (PWA вне Телеги): вход по ссылке. Короткая ссылка
@@ -2103,7 +2116,8 @@ async function boot(){
       } }catch(e){}
   }
   try{
-    const d = await api("/api/bootstrap");
+    const bootMode=storedMode();
+    const d = await api("/api/bootstrap"+(bootMode==="soft"?"?mode=soft":""));
     // Пока шёл запрос, телефон могли очистить («Выйти», замена входа): поздний
     // ответ не должен вернуть на экран и в хранилище стёртый портфель.
     if(gen!==WIPE_GEN) return;
@@ -2129,12 +2143,14 @@ async function boot(){
     setBottomNav("clients");   // вкладки видны с первого экрана
     setMeta(d.meta, true); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
     STATE.roles=d.roles||null;   // роль руководителя: список его сотрудников + текущий
+    STATE.mode=bootMode;
     STATE.online=true;
-    cacheBootstrap(d);            // снимок портфеля для оффлайна (в фоне, не блокирует UI)
+    d._mode=STATE.mode; cacheBootstrap(d);   // снимок с режимом: оффлайн поднимет тот же портфель
     const renderStarted=performance.now();
     // Руководитель открывает приложение в своём режиме (сводка), если сам не
     // выбрал «Выездник»; диплинк на сводку ниже перекроет что угодно.
-    if(storedMode()==="lead" && !(START_TAB==="digest" && !START_TAB_USED)) renderDigest();
+    if(STATE.mode==="soft") renderSoftList();
+    else if(storedMode()==="lead" && !(START_TAB==="digest" && !START_TAB_USED)) renderDigest();
     else renderList();
     const bd=d.diagnostics||{};
     clientMetric("boot_ok", {persons:STATE.persons.length,
@@ -2169,8 +2185,9 @@ async function boot(){
       // Без roles из снимка руководитель в поле терял и переключатель
       // портфелей, и вкладку сводки — читалось как поломка приложения.
       STATE.roles=snap.roles||null;
+      STATE.mode=(snap._mode==="soft")?"soft":"field";
       STATE.online=false;
-      renderList();
+      if(STATE.mode==="soft") renderSoftList(); else renderList();
     }else{
       // Связи нет и снимка портфеля на телефоне ещё нет. Здесь стояла инструкция
       // «откройте через бота»: в контуре компании бота нет — это был тупик, да ещё
@@ -2189,10 +2206,14 @@ async function boot(){
 // режиме «Выездник»): Клиенты / Навигатор / Метки.
 function setBottomNav(active){
   const lead=hasLead() && STATE.mode==="lead";
+  const soft=STATE.mode==="soft";
   const items=lead?[
     {id:"digest",  label:L().digest, icon:"chart", fn:"renderDigest"},
     {id:"team",    label:L().team,   icon:"team",  fn:"renderTeam"},
     {id:"map",     label:L().navtab, icon:"nav",   fn:"renderNav"},
+  ]:soft?[
+    {id:"today",   label:L().softtoday, icon:"phone", fn:"renderSoftToday"},
+    {id:"all",     label:L().softall,   icon:"list",  fn:"renderSoftAll"},
   ]:[
     {id:"clients", label:L().my,     icon:"list",  fn:"renderList"},
     {id:"map",     label:L().navtab, icon:"nav",   fn:"renderNav"},
@@ -2221,28 +2242,41 @@ function hideBottomNav(){ $("bottomnav").style.display = "none"; const m=$("mode
 // открывать при запуске — удобство этого телефона (localStorage, стирается при
 // выходе вместе со всем); права по-прежнему решает сервер по роли.
 function hasLead(){ return !!(STATE.roles && STATE.roles.manager); }
+// Контур «Софт»: портфель по «ответственный Сотрудник СОФТ». У выездников,
+// переведённых УЗБ на звонки, ролей две — переключатель «Выездник | Софт».
+function softRole(){ return !!(STATE.roles && STATE.roles.soft); }
+function canField(){ return hasLead() || !!(STATE.roles && STATE.roles.field); }
 function modeKey(){ return "hb_mode:"+currentUid(); }
 function storedMode(){
-  if(!hasLead()) return "field";
+  const can={lead:hasLead(),soft:softRole(),field:canField()};
   let m=""; try{ m=localStorage.getItem(modeKey())||""; }catch(e){}
-  return m==="field"?"field":"lead";
+  if(m==="soft"&&can.soft) return "soft";
+  if(m==="lead"&&can.lead) return "lead";
+  if(m==="field"&&can.field) return "field";
+  if(can.soft&&!can.field&&!can.lead) return "soft";   // чистый софтник
+  return can.lead?"lead":"field";
 }
 function leadLabel(){ const t=L(), r=(STATE.roles&&STATE.roles.role)||"manager";
   return t["mode"+r]||t.modemanager; }
 function renderModeBar(){
   const el=$("modebar"); if(!el) return;
-  if(!hasLead()){ el.classList.remove("on"); el.innerHTML=""; return; }
-  const m=STATE.mode==="lead"?"lead":"field";
-  el.innerHTML=`<div class="seg">
-    <button class="${m==="lead"?"on":""}" onclick="setMode('lead')">${esc(leadLabel())}</button>
-    <button class="${m==="field"?"on":""}" onclick="setMode('field')">${esc(L().modefield)}</button></div>`;
+  const modes=[];
+  if(hasLead()) modes.push(["lead",leadLabel()]);
+  if(canField()) modes.push(["field",L().modefield]);
+  if(softRole()) modes.push(["soft",L().modesoft||"Софт"]);
+  if(modes.length<2){ el.classList.remove("on"); el.innerHTML=""; return; }
+  el.innerHTML=`<div class="seg">`+modes.map(([id,label])=>
+    `<button class="${STATE.mode===id?"on":""}" onclick="setMode('${id}')">${esc(label)}</button>`).join("")+`</div>`;
   el.classList.add("on");
 }
-function setMode(m){
-  if(!hasLead()) return;
-  m=(m==="field")?"field":"lead";
+async function setMode(m){
+  // Смена режима меняет сам портфель (выезды ↔ звонки), поэтому — полный
+  // перевход с загрузкой своего бутстрапа, а не перерисовка на старых данных.
+  const allowed=(m==="lead"&&hasLead())||(m==="field"&&canField())||(m==="soft"&&softRole());
+  if(!allowed) return;
   try{ localStorage.setItem(modeKey(), m); }catch(e){}
-  if(m==="field") renderList(); else renderDigest();
+  STATE.mode=m;
+  await boot();
 }
 
 // --- Онбординг (самовыбор прямо в миниаппе): язык наверху, роль, сотрудник ---
@@ -2309,6 +2343,36 @@ function renderList(){
   syncWarmCount();               // …и цифра в ней — из хранилища, а не из памяти сессии
 }
 
+// --- Режим «Софт»: очередь звонков (контур колл-центра) ----------------------
+// «Сегодня» — кому звонить: просроченная дата перезвона, потом без статуса,
+// потом дата коммуникации наступила. «Все» — весь портфель.
+function softDueToday(p){
+  if(!p.sc) return true;
+  if(!p.scd) return true;
+  return String(p.scd).slice(0,10) <= srvToday() || p.overdue>0;
+}
+function renderSoftToday(){ STATE.softFilter="today"; renderSoftList(); }
+function renderSoftAll(){ STATE.softFilter="all"; renderSoftList(); }
+function renderSoftList(){
+  stopMeWatch(); flushDraft(); stopAutoSync();
+  STATE.cur=null; STATE.mode="soft"; removeMap(); prStop();
+  resetScroll();
+  const t=L();
+  const pool = STATE.softFilter==="all" ? STATE.persons
+                                   : STATE.persons.filter(softDueToday);
+  STATE.softPool=pool;
+  const bar=`<div class="lhead"><span class="t">${esc(t.softq)}</span><span class="n">${pool.length}</span></div>`;
+  if(!STATE.persons.length){
+    $("app").innerHTML = bar + `<div class="center">${esc(t.nocl)}</div>`;
+    setBottomNav(STATE.softFilter||"today"); return;
+  }
+  $("app").innerHTML = bar +
+    `<div class="searchwrap">${ic("search")}<input class="search" id="q" placeholder="${esc(t.search)}" oninput="filterList()"></div>
+     <div id="plist"></div>`;
+  drawList(pool);
+  setBottomNav(STATE.softFilter||"today");
+}
+
 // Черновик маршрута дня: сервер берёт топ по скорингу и сворачивает цепочкой
 // «ближайший следующий» от живой точки (если дали гео). Тап по строке — карточка.
 async function routeDay(){
@@ -2336,10 +2400,17 @@ async function routeDay(){
 let LIST_RENDER_SEQ=0;
 function personCardHTML(p,t){
   const dotStyle = (!p.visited && p.score!=null) ? ` style="background:${priColor(p.score)}"` : "";
+  const softLine = STATE.mode==="soft"
+    ? `<div class="psub"${p.overdue>0?' style="color:#B0472C"':""}>${
+        p.overdue>0 ? "⏰ "+esc(t.overduen)+" · "+p.overdue+" "+esc(t.dn||"дн")
+                    : (p.sc ? "📞 "+esc(p.sc) : esc(t.nostatus)) }${
+        p.scd ? " · "+esc(String(p.scd).slice(5)) : ""}</div>`
+    : "";
   return `<div class="pcard" onclick="openP(${jsq(p.rep)})">
      <span class="dot ${p.visited?'v':'n'}"${dotStyle}></span>
      <div class="pinfo"><div class="pname">${esc(p.client)}</div>
-       <div class="psub">${p.n>1?(p.n+" "+t.kd+" · "):""}${totalStr(p)}</div></div>
+       <div class="psub">${p.n>1?(p.n+" "+t.kd+" · "):""}${totalStr(p)}</div>
+       ${softLine}</div>
      <span class="pchev">${ic("chevR")}</span>
    </div>`;
 }
@@ -2397,11 +2468,17 @@ function personMatches(p,q,qd,qf){
   // Одна-две цифры — это ещё не телефон: по ним совпал бы весь портфель.
   return qd.length>=3 && (p.tels||[]).some(tel=>tel.includes(qd));
 }
+function listPool(){
+  // В софт-режиме вкладка «Сегодня» держит свой пул: поиск не должен молча
+  // подменять её всем портфелем.
+  return (STATE.mode==="soft" && STATE.softPool) ? STATE.softPool : STATE.persons;
+}
 function filterList(){
+  const pool=listPool();
   const raw=$("q").value.trim();
-  if(!raw){ drawList(STATE.persons); return; }
+  if(!raw){ drawList(pool); return; }
   const q=raw.toLowerCase(), qd=raw.replace(/\D+/g,""), qf=fold(raw);
-  drawList(STATE.persons.filter(p=>personMatches(p,q,qd,qf)));
+  drawList(pool.filter(p=>personMatches(p,q,qd,qf)));
 }
 
 async function openP(rep){
@@ -2421,7 +2498,7 @@ async function openP(rep){
     d.call_comment=""; d.tips="";
     IDB.put("cards",d,rep).catch(()=>{});
   }
-  STATE.cur=d; STATE.tab="visit";
+  STATE.cur=d; STATE.tab=(STATE.mode==="soft")?"call":"visit";
   // Когда человек открыл карточку. Офис просил видеть время на адресе, а
   // честная граница измерения — именно карточка: приложение не знает, когда он
   // подошёл к подъезду, но знает, когда открыл должника и когда закрыл выезд.
@@ -2456,24 +2533,31 @@ function renderDetail(){
   const d=STATE.cur, t=L();
   resetScroll();
   const tab=(id,lbl)=>`<button class="${STATE.tab===id?'on':''}" onclick="setTab('${id}')">${lbl}</button>`;
+  // Форма ВИЗИТА софтнику не нужна: её «Сохранить выезд» упиралсяся бы в
+  // 404 владения и навсегда оседал в очереди телефона. Визит — чтение.
+  const soft=STATE.mode==="soft";
   $("app").innerHTML =
-    `<button class="back" onclick="renderList()">${ic("chevL")}${esc(t.my)}</button>
+    `<button class="back" onclick="${soft?"renderSoftList()":"renderList()"}">${ic("chevL")}${esc(soft?(L().softq):t.my)}</button>
      <div class="h">${esc(d.client)}</div>
      <div class="muted" style="font-size:13px">${d.birth_date?(t.born+": "+d.birth_date):""}${d.birth_date?" · ":""}${d.contracts.length} ${t.kd}</div>
-     <div class="tabs">${tab("visit",t.visit)}${tab("debt",t.debt)}${tab("client",t.client)}${tab("form",t.form)}</div>
+     <div class="tabs">${tab("visit",t.visit)}${tab("call",t.calltab||"Звонки")}${tab("debt",t.debt)}${tab("client",t.client)}${soft?"":tab("form",t.form)}</div>
      <div id="panel"></div>`;
   drawPanel();
   setBottomNav("clients");
 }
 function setTab(id){
-  if(STATE.tab==="form" && id!=="form") flushDraft();   // сохранить черновик до ухода с формы
+  if((STATE.tab==="form"||STATE.tab==="callform") && id!=="form" && id!=="callform")
+    flushDraft();   // сохранить черновик до ухода с формы
   STATE.tab=id; drawPanel(); resetScroll();
-  document.querySelectorAll(".tabs button").forEach((b,i)=>b.classList.toggle("on",["visit","debt","client","form"][i]===id)); }
+  const tabIds=soft?["visit","call","debt","client"]:["visit","call","debt","client","form","callform"];
+  document.querySelectorAll(".tabs button").forEach((b,i)=>b.classList.toggle("on",tabIds[i]===id)); }
 
 function drawPanel(){
   const d=STATE.cur, t=L(); const p=$("panel");
   removeMap(); stopAutoSync();
   if(STATE.tab==="visit"){ p.innerHTML=panelVisit(d,t); setTimeout(initMap,0); }
+  else if(STATE.tab==="call") p.innerHTML=panelCall(d,t);
+  else if(STATE.tab==="callform") p.innerHTML=panelCallForm(d,t);
   else if(STATE.tab==="client") p.innerHTML=panelClient(d,t);
   else if(STATE.tab==="debt") p.innerHTML=panelDebt(d,t);
   else { p.innerHTML=panelForm(d,t); setTimeout(setupFormDraft,0); setTimeout(renderReceipts,0); }
@@ -2728,6 +2812,95 @@ function panelForm(d,t){
     <button class="btn acc big" id="savebtn" style="margin-top:12px" onclick="saveVisit()">${ic("check")}<span>${t.save}</span></button>`;
 }
 
+// --- Контур «Софт»: вкладка «Звонки» и форма «Звонок» ------------------------
+function panelCall(d,t){
+  const s=d.soft||{};
+  const rows=(d.calls||[]).map(c=>`<div class="kv" style="align-items:flex-start">
+    <span class="k" style="min-width:96px">${esc(String(c.ts||"").slice(0,10))}${c.employee?`<br><span class="muted">${esc(c.employee)}</span>`:""}</span>
+    <span class="v" style="white-space:pre-wrap">${esc(c.payload||"")}</span></div>`).join("");
+  const month=String(s.comment||"").trim();
+  const hist=String(s.history||"").trim();
+  return `
+   <div class="acts${d.phone?"":" one"}">
+     ${d.phone?`<button class="tile" onclick="call()">${ic("phone")}<span class="tl">${t.call}</span><span class="ts">${esc(d.phone)}</span></button>`:""}
+     ${STATE.mode==="soft"?`<button class="tile" onclick="setTab('callform')">${ic("phone")}<span class="tl">${esc(t.savecall)}</span></button>`:""}
+   </div>
+   <div class="box" style="margin-top:10px">
+     <div class="kv"><span class="k">${esc(t.status)}</span><span class="v">${esc(s.status||"—")}</span></div>
+     <div class="kv"><span class="k">${esc(t.commdate)}</span><span class="v">${esc(s.comm_date||"—")}</span></div>
+     ${s.responsible?`<div class="kv"><span class="k">${esc(t.softresp)}</span><span class="v">${esc(s.responsible)}</span></div>`:""}
+   </div>
+   ${month?`<div class="box"><div class="muted" style="margin-bottom:6px">${esc(t.callmonth)}</div>
+     <div style="white-space:pre-wrap;line-height:1.45">${esc(month)}</div></div>`:""}
+   ${hist?`<div class="box"><div class="muted" style="margin-bottom:6px">${esc(t.callhist)}</div>
+     <div style="white-space:pre-wrap;line-height:1.45">${esc(hist)}</div></div>`:""}
+   <div class="box"><div class="muted" style="margin-bottom:6px">${esc(t.calllog)}</div>
+     ${rows||`<div class="muted">—</div>`}</div>`;
+}
+function panelCallForm(d,t){
+  const s=d.soft||{};
+  const dd=((STATE.meta||{}).dropdowns||{}).soft_call_status||[];
+  const cur=s.status||"";
+  const opts=`<option value="">—</option>`+dd.map(o=>`<option value="${esc(o.value)}"${o.value===cur?" selected":""}>${esc(o.label)}</option>`).join("");
+  const tf=typedFields().filter(f=>f.key!=="soft_comm_date");
+  return `
+   <div class="fsec key"><div class="fsec-h">📞</div>
+     <label class="fld">${esc(t.status)}</label>
+     <select data-k="soft_call_status">${opts||`<option value="">—</option>`}</select>
+     <label class="fld">${esc(t.callmonth)}</label>
+     <textarea id="f_soft_comment" maxlength="4000">${esc(s.comment||"")}</textarea>
+   </div>
+   <div class="fsec"><div class="fsec-h">⏰ ${esc(t.commdate)}</div>
+     <input type="hidden" data-k="soft_comm_date" value="${esc(s.comm_date||"")}">
+     <button type="button" class="pick${s.comm_date?" has":""}" data-for="soft_comm_date"
+       onclick="openDateWheel('soft_comm_date')">${esc(s.comm_date||"—")}</button>
+     <div class="muted" style="font-size:11px;margin-top:4px">пусто — в реестре дата не изменится</div>
+   </div>
+   ${promiseSection(d, tf)}
+   <button class="btn acc big" id="callbtn" style="margin-top:12px" onclick="saveCall()">${ic("check")}<span>${esc(t.savecall)}</span></button>`;
+}
+async function saveCall(){
+  if(SAVING) return;
+  if(!FORM_VERSION){ toast("Подключитесь к сети и обновите форму"); return; }
+  const t=L();
+  const st=document.querySelector('#panel select[data-k="soft_call_status"]');
+  if(!st||!st.value){ toast(t.callreq); return; }
+  const values={soft_call_status:st.value}, input_keys=["soft_call_status"];
+  const cm=$("f_soft_comment");
+  if(cm&&cm.value.trim()){ values.soft_comment=cm.value.trim(); input_keys.push("soft_comment"); }
+  document.querySelectorAll('#panel input[data-k]').forEach(el=>{
+    const k=el.dataset.k;
+    if(["soft_comm_date","promise_date","forecast_sum"].indexOf(k)<0) return;
+    const v=(el.type==="hidden")?el.value:el.value.replace(/\s+/g,"");
+    if(v){ values[k]=(el.type==="hidden")?v:v; input_keys.push(k); }
+  });
+  // «Убрать» обещания/даты — полноценный ответ: без cleared_keys сервер
+  // не узнает, что должник передумал, и старое обещание переживёт звонок.
+  const clearedNow=[...FORM_CLEARED].filter(k=>["promise_date","forecast_sum","soft_comm_date"].indexOf(k)>=0);
+  SAVING=true; const btn=$("callbtn"); if(btn) btn.disabled=true;
+  try{
+    const rep=STATE.cur.rep, op_id=uuid(), occurred_at=Date.now();
+    const body={rep,values,finish:true,op_id,occurred_at,kind:"call",
+      opened_at:STATE.openedAt||occurred_at,form_version:FORM_VERSION,input_keys};
+    if(clearedNow.length) body.cleared_keys=clearedNow;
+    try{
+      const j=await api("/api/save",{method:"POST",body:JSON.stringify(body)});
+      STATE.online=true; STATE.cur=j.person; IDB.put("cards",j.person,rep).catch(()=>{});
+      finishSavedUI(rep,t.callsaved);
+      const bad=j.rejected||null;
+      if(bad&&bad.promise_date) toast("Дата обещания не принята: не дальше "+(promiseMaxDays()||3)+" дн");
+      else if(bad) toast("Часть полей не принята: "+Object.keys(bad).join(", "));
+    }catch(e){
+      await enqueue({op_id,kind:"save",save_kind:"call",rep,values,input_keys,
+        cleared_keys:clearedNow,occurred_at,opened_at:STATE.openedAt||occurred_at,
+        form_version:FORM_VERSION,at:occurred_at});
+      STATE.online=false; finishSavedUI(rep,t.savedoff);
+    }
+  } finally {
+    SAVING=false; const b=$("callbtn"); if(b) b.disabled=false;
+  }
+}
+
 // --- Обещание выездника (контракт v3): дата барабаном + сумма ---------------
 // Скрытый <input data-k> — ИСТИНА (как <select> у пикера): по нему читает
 // readForm, в него восстанавливается черновик, на него подписан автосейв.
@@ -2757,8 +2930,9 @@ function promiseMaxDate(){
   return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+
          String(d.getDate()).padStart(2,"0");
 }
-function promiseSection(d){
-  const tf2=typedFields();
+function promiseSection(d, fields){
+  // В форме ВИЗИТА софт-дата не показывается; форма «Звонок» передаёт свой набор.
+  const tf2=fields||typedFields().filter(f=>f.key!=="soft_comm_date");
   if(!tf2.length) return "";
   const cur=(d&&d.formTyped)||{};
   const reg=(d&&d.formTypedRegistry)||{};
@@ -3835,7 +4009,7 @@ async function refreshData(){
   if(!appToken() && !(TG&&TG.initData)) return;  // входа нет — экран входа фоном не дёргаем
   const gen=WIPE_GEN;
   try{
-    const d=await api("/api/bootstrap");
+    const d=await api("/api/bootstrap"+(STATE.mode==="soft"?"?mode=soft":""));
     if(gen!==WIPE_GEN) return;                   // телефон очистили, пока шёл запрос
     LAST_REFRESH=Date.now();
     offerSwap(d);        // новую ссылку открыли без связи: вход жив — теперь и спросить
@@ -3848,13 +4022,20 @@ async function refreshData(){
     if(gen!==WIPE_GEN) return;
     const sig=ps=>JSON.stringify((ps||[]).map(p=>[p.rep,p.visited,p.n]));
     const changed=sig(STATE.persons)!==sig(d.persons);
+    // Роль софта отозвали (переназначили ответственного): софт-экран с полевым
+    // портфелем плодил бы 404 на каждом звонке — тихо возвращаемся в выезды.
+    if(STATE.mode==="soft" && !(d.roles&&d.roles.soft)){
+      try{ localStorage.setItem(modeKey(), "field"); }catch(e){}
+      STATE.mode="field"; return boot();
+    }
     setMeta(d.meta, true); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
     STATE.roles=d.roles||null;   // роль руководителя: список его сотрудников + текущий
     STATE.online=true; cacheBootstrap(d); updateOffBar();
     if(changed){
       warmCards();                               // и полные карточки новых клиентов
       const q=$("q");                            // поиск есть только на экране списка
-      if(!STATE.cur && q){ const qs=q.value; renderList();
+      if(!STATE.cur && q){ const qs=q.value;
+        if(STATE.mode==="soft") renderSoftList(); else renderList();
         if(qs){ $("q").value=qs; filterList(); } }
     }
   }catch(e){
@@ -4581,6 +4762,18 @@ function dgKpis(t,rg){
     .map(([key,l])=>row(l,t[key]||0,c(key),!t[key]));
   ev.push(row("внесено позже",t.late||0,"",!t.late), row("нет GPS-точки",t.no_geo||0,"",!t.no_geo));
   if(t.visits) out.push(sec("Проверка выездов",`<div class="drows two">${ev.join("")}</div>`));
+  // Контур «Софт»: своя команда и свои метрики — звонки вместо выездов.
+  const soft=(DG.stats&&DG.stats.soft)||null;
+  if(soft&&soft.employees&&soft.employees.length){
+    const fmt=v=>(+v||0).toLocaleString("ru-RU");
+    const top=soft.employees.slice(0,5).map(r=>
+      `<div class="drow"><span>${esc(r.employee)}</span><b>${r.calls} звонков</b></div>`).join("");
+    out.push(sec("Софт · звонки",`<div class="drows">
+      ${row("сотрудников",soft.employees.length)}
+      ${row("звонков за период",soft.calls)}
+      ${row("Ждём / Сомнение",`${fmt(soft.wait)} / ${fmt(soft.doubt)}`)}
+    </div><div class="drows">${top}</div>`,"колл-центр: оплаты — в «Оплатах» сверху"));
+  }
   return out.join("");
 }
 function dgDM(iso){ const d=String(iso||"").slice(0,10).split("-"); return d.length===3?`${d[2]}.${d[1]}`:iso; }

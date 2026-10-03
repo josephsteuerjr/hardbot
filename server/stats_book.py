@@ -832,11 +832,41 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
 
     _visits_sheet(bk, rows, names)
     _days_sheet(bk, data, rows)
+    # Контур «Софт»: своя команда и свои метрики (звонки вместо выездов);
+    # лист появляется, когда у направления есть софт-портфели.
+    if data.get("soft", {}).get("employees"):
+        _soft_sheet(bk, data["soft"], period)
     # Воронка Collection — в конце книги: показатели, реестр обещаний и
     # ранжирование по размеру обещания (просьба Альберта 15.09.2026).
     funnel_sheets(bk, data, rows, names, rng)
     _guide_sheet(bk, f"{data['scope']} · {period}")
     return bk.close()
+
+
+def _soft_sheet(bk: "book.Book", soft: dict, period: str) -> None:
+    """Софт-команда: звонки, статусы, KPI книги софтника (Взыск/Ждём/Сомнение/Макс).
+
+    Ждём/Сомнение — суммы прогноза по корзинам, Взыск — оплаты реестра,
+    Макс — их сумма: ровно то, что офис считал руками в «Статистике
+    сотрудника» и подбивках."""
+    ws = bk.sheet("Софт", tab="detail")
+    ws.title(f"Софт · звонки · {period}", size=13)
+    head_at = ws.head(["Сотрудник", "Договоров", "Долг", "Звонков",
+                       "Ждём", "Сомнение", "Оплаты", "Макс",
+                       "Топ-статусы"])
+    kinds = ["text", "int", "money", "int", "money", "money", "money", "money", "text"]
+    for r in soft["employees"]:
+        top = ", ".join(f"{k} × {v}" for k, v in sorted(
+            r["statuses"].items(), key=lambda kv: -kv[1])[:3])
+        ws.append([r["employee"], r["contracts"], r["debt"] or None,
+                   r["calls"], r["wait"] or None, r["doubt"] or None,
+                   r["paid_sum"] or None, r["max"] or None, top], kinds)
+    ws.append(["Итого", soft["contracts"], None, soft["calls"],
+               soft["wait"] or None, soft["doubt"] or None, None, None, ""],
+              kinds, bold=True)
+    ws.widths((30, 11, 14, 10, 14, 13, 14, 14, 40))
+    ws.autofilter(head_at, ws.row - 1, 9)
+    ws.freeze("A3")
 
 
 # --- Вечерняя книга ----------------------------------------------------------

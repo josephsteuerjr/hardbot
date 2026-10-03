@@ -6,6 +6,7 @@ import { api, hard } from "../kit/api";
 import { esc, n, toast } from "../kit/dom";
 import { openPanel, setHead, type Section } from "../kit/shell";
 import { DataTable } from "../kit/table";
+import { mountModeSwitchIfKit } from "../kit/modeswitch";
 
 const state = { persons: [] as any[], rep: "" };
 
@@ -112,7 +113,14 @@ export const fieldHelp: Section = {
       <div class="list-row"><div class="grow"><div class="nm">Чеки — для сверки оплат</div>
         <div class="sub">Прикладывайте снимок перевода сразу, как должник показал оплату: сумма свери́тся с реестром.</div></div></div>
     </div>
+    <div class="section" id="modesec" style="display:none"><div class="section-head"><h3 class="section-title">Режимы этого exe</h3></div>
+      <div id="modesw"></div></div>
     <div class="row" style="margin-top:12px"><button class="btn" id="f-logout">Выйти с этого компьютера</button></div></div>`;
+  void mountModeSwitchIfKit(root.querySelector("#modesw")!, "field").then(() => {
+    const sec = root.querySelector("#modesec") as HTMLElement | null;
+    const sw = root.querySelector("#modesw") as HTMLElement | null;
+    if (sec && sw && sw.innerHTML.trim()) sec.style.display = "";
+  });
     root.querySelector("#f-logout")?.addEventListener("click", async () => {
       if (!confirm("Выйти? Вход, портфель и кэш этого компьютера сотрутся.")) return;
       await hard.logout();

@@ -78,9 +78,12 @@ def _imp(rows, **kw):
 
 
 def test_typed_keys_are_canonical_constants():
-    assert db.FORM_TYPED_KEYS == frozenset({"promise_date", "forecast_sum"})
+    # soft_comm_date (дата следующей коммуникации) — типизированное поле
+    # формы ЗВОНКА контура «Софт», того же канона даты.
+    assert db.FORM_TYPED_KEYS == frozenset(
+        {"promise_date", "forecast_sum", "soft_comm_date"})
     assert set(db.FORM_AMOUNT_KEYS) == {"forecast_sum"}
-    assert set(db.FORM_DATE_KEYS) == {"promise_date"}
+    assert set(db.FORM_DATE_KEYS) == {"promise_date", "soft_comm_date"}
     # Обе колонки — ЖИВЫЕ поля реестра: сумма едет в личные книги и
     # возвращается офисной правкой (решение владельца 26.08.2026).
     assert {"promise_date", "forecast_sum"} <= {f.key for f in FIELDS}

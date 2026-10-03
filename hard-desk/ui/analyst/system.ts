@@ -5,6 +5,8 @@ import { ask, esc, toast } from "../kit/dom";
 import { refresh, type Section } from "../kit/shell";
 import { adm, fn, guard, local, note, val } from "./lib";
 
+import { mountModeSwitch } from "../kit/modeswitch";
+
 export const conn: Section = {
   id: "conn",
   title: "Подключение",
@@ -30,7 +32,9 @@ export const conn: Section = {
           <button class="btn" data-key>Привязать мастер-ключом</button>
           ${s.bound ? '<span class="spacer"></span><button class="btn danger small" data-unbind>Забыть токен здесь</button>' : ""}</div></div>
       <div class="section"><div class="section-head"><h2 class="section-title">Устройства пульта</h2></div><div id="devs"><div class="skeleton"></div></div></div>
+      <div class="section"><div class="section-head"><h2 class="section-title">Режимы этого exe</h2></div><div id="modesw"><div class="skeleton"></div></div></div>
       <p class="muted" style="font-size:12.5px;margin-top:24px">Настройки: <span class="mono">${esc(s.settings_path)}</span></p>`;
+  void mountModeSwitch(root.querySelector("#modesw")!, "analyst");
     root.querySelectorAll<HTMLButtonElement>("[data-prof]").forEach((b) => b.addEventListener("click", guard(async () => {
       await local("/profile", { action: "switch", name: b.dataset.prof }); toast("Контур: " + b.dataset.prof); await refresh();
     })));

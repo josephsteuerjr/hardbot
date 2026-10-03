@@ -53,6 +53,9 @@ RESET_TABLES = {
     # следующего импорта в карточке всплыли бы данные исчезнувшего договора.
     "client_extra",
     "visits",
+    # Звонки софтников привязаны к КД, как визиты: кейсы сброс уносит — уносит
+    # и журнал звонков по ним.
+    "calls",
     "users",
     "agent_bind",
     "audit",
@@ -154,6 +157,7 @@ DELETE_ORDER = (
     "agent_bind",
     "users",
     "visits",
+    "calls",
     "client_extra",
     "clients",
     "settings",

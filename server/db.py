@@ -178,6 +178,10 @@ BOOKKEEPING = [
     # одного дня, содержит СТАРЫЙ снимок — без журнала он выглядел бы как
     # «офисная правка» и откатывал бы результат повторного выезда.
     ("visit_value_log", "TEXT"),
+    # Второй контур ответственности — колл-центр «Софт» («ответственный
+    # Сотрудник СОФТ» из общего реестра). Читается как scoring-колонка:
+    # заголовок остаётся в игнор-листе контракта, экспортная схема не меняется.
+    ("responsible_soft", "TEXT"),
 ]
 
 # Семантика обмена больше не дублируется между bot/pult/clearance. Она загружается
@@ -218,6 +222,8 @@ FORECAST_WAITING = "Ждём"       # обещание есть — ждём с�
 FORECAST_BROKEN = "Срыв"        # обещание было и не устояло
 FORECAST_PAID = "Уже"           # платёж уже прошёл, ждать нечего
 PAID_STATUS = "Оплачен"         # значение результата визита, при котором ждать нечего
+# То же для звонка софтника: список со статусами «… sms» (контур «Софт»).
+PAID_SOFT_STATUSES = ("Оплачен", "Оплачен sms")
 _forecast_options = set(BY_KEY[FORECAST_KEY].options or [])
 if not {FORECAST_WAITING, FORECAST_BROKEN, FORECAST_PAID} <= _forecast_options:
     raise RuntimeError(
@@ -642,6 +648,27 @@ def init_db() -> None:
         if "op_id" not in vcols:
             conn.execute("ALTER TABLE visits ADD COLUMN op_id TEXT")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_visits_op ON visits(op_id)")
+        # Журнал звонков контура «Софт» — зеркало visits без гео/evidence:
+        # created_at — ДЕНЬ ЗВОНКА, received_at — серверное время приёма,
+        # op_id — идемпотентный ключ оффлайн-очереди, employee — автор навсегда.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS calls (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              contract_id TEXT,
+              agent_id INTEGER,
+              created_at TEXT,
+              payload TEXT,
+              op_id TEXT,
+              received_at TEXT,
+              saved_at TEXT,
+              employee TEXT
+            )
+        """)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_calls_op ON calls(op_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_calls_employee "
+                     "ON calls(employee, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_calls_contract "
+                     "ON calls(contract_id)")
         # Вкладка руководителя превращает разовое нажатие дайджеста в регулярное
         # открытие, а сводка на N сотрудников — это 2N проходов по clients.
         # Составной индекс покрывает и persons_processed/overdue_promises
@@ -2811,6 +2838,28 @@ def employees_by_direction(direction: str) -> list[str]:
     return sorted(out)
 
 
+def soft_employees_by_direction(direction: str) -> list[str]:
+    """Софт-команда направления — тем же живым способом, что выездная
+    (employees_by_direction), но по второй колонке ответственности."""
+    import country_scope
+    out: dict[str, None] = {}
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT responsible_soft AS employee, country, city FROM clients "
+            "WHERE responsible_soft IS NOT NULL AND TRIM(responsible_soft) <> ''"
+        ).fetchall()
+    if direction == "all":
+        for r in rows:
+            out.setdefault(r["employee"], None)
+        return sorted(out)
+    for r in rows:
+        code = (country_scope.scope_country([r["country"] or ""])
+                or country_scope.scope_country([r["city"] or ""]))
+        if code == direction:
+            out.setdefault(r["employee"], None)
+    return sorted(out)
+
+
 def _manager_dict(r: sqlite3.Row) -> dict:
     keys = r.keys()
     out = {"telegram_id": r["telegram_id"], "name": r["name"] or "",
@@ -4235,6 +4284,58 @@ def persons_for_employee(employee: str) -> list[dict]:
     return _group_persons(clients_for_employee(employee))
 
 
+# --- Контур «Софт»: портфель по второй колонке ответственности ---------------
+def clients_for_soft(employee: str) -> list[sqlite3.Row]:
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM clients WHERE responsible_soft = ? "
+            "ORDER BY client, contract_id",
+            (employee,),
+        ).fetchall()
+
+
+def persons_for_soft(employee: str) -> list[dict]:
+    return _group_persons(clients_for_soft(employee))
+
+
+def soft_portfolio_exists(employee: str) -> bool:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM clients WHERE responsible_soft = ? LIMIT 1",
+            (employee,),
+        ).fetchone()
+    return row is not None
+
+
+def soft_employees() -> list[sqlite3.Row]:
+    """Состав софт-команды из реестра: имя + счётчик + страны (как
+    employees_in_registry, но по ответственного Сотрудник СОФТ)."""
+    with connect() as conn:
+        return conn.execute(
+            "SELECT responsible_soft AS employee, COUNT(*) AS contracts, "
+            "GROUP_CONCAT(DISTINCT IFNULL(country,'')) AS countries "
+            "FROM clients WHERE responsible_soft IS NOT NULL "
+            "AND TRIM(responsible_soft) <> '' "
+            "GROUP BY responsible_soft ORDER BY responsible_soft"
+        ).fetchall()
+
+
+def soft_calls_for_employee(employee: str, lo: str | None = None,
+                            hi: str | None = None) -> list[sqlite3.Row]:
+    """Журнал звонков сотрудника за окно (включительно, по ДНЮ звонка)."""
+    q = ("SELECT * FROM calls WHERE employee = ? ")
+    args: list = [employee]
+    if lo:
+        q += "AND created_at >= ? "
+        args.append(lo)
+    if hi:
+        q += "AND created_at <= ? "
+        args.append(hi)
+    q += "ORDER BY created_at DESC, id DESC"
+    with connect() as conn:
+        return conn.execute(q, args).fetchall()
+
+
 def person_contracts(rep_contract_id: str) -> list[sqlite3.Row]:
     """Все договоры человека, к которому относится этот договор.
 
@@ -4279,9 +4380,32 @@ def plans_for_employee(employee: str) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def update_person(rep_contract_id: str, values: dict) -> None:
-    """Записать поля во ВСЕ договоры человека (выезд = на человека, не на КД)."""
-    for r in person_contracts(rep_contract_id):
+def person_contracts_by_soft(rep_contract_id: str) -> list[sqlite3.Row]:
+    """Договоры человека в пределах СОФТ-закрепления (см. person_contracts).
+
+    Звонок размазывается по договорам одного софтника: у человека бывают КД
+    за разными ВЫЕЗДНЫМИ ответственными, и запись «по выездному» раскладывала
+    бы результат звонка только в часть его договоров."""
+    row = get_client(rep_contract_id)
+    if not row:
+        return []
+    with connect() as conn:
+        candidates = conn.execute(
+            "SELECT * FROM clients WHERE client IS ? "
+            "AND IFNULL(responsible_soft,'') = IFNULL(?, '') ORDER BY contract_id",
+            (row["client"], row["responsible_soft"]),
+        ).fetchall()
+    key = person_key(row)
+    return [c for c in candidates if person_key(c) == key]
+
+
+def update_person(rep_contract_id: str, values: dict, *,
+                  by_soft: bool = False) -> None:
+    """Записать поля во ВСЕ договоры человека (выезд = на человека, не на КД).
+    by_soft — группа по ответственного СОФТ (контур «Софт»)."""
+    rows = (person_contracts_by_soft(rep_contract_id) if by_soft
+            else person_contracts(rep_contract_id))
+    for r in rows:
         update_fields(r["contract_id"], values)
 
 
@@ -5016,6 +5140,55 @@ def log_visit(contract_id: str, agent_id: int, payload: str,
         return cur.rowcount > 0
 
 
+def log_call(contract_id: str, agent_id: int, payload: str,
+             op_id: str | None = None, on_date: str | None = None,
+             saved_at: str | None = None,
+             employee: str | None = None) -> bool:
+    """Записать ЗВОНОК в историю (контур «Софт»). Зеркало log_visit без
+    гео/подтверждения/фото: звонку они не нужны по построению. op_id — тот же
+    идемпотентный ключ оффлайн-очереди; on_date — ДЕНЬ ЗВОНКА (не день доставки);
+    employee — ФИО софтника, от имени которого закрыт звонок."""
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO calls (contract_id, agent_id, created_at, "
+            "payload, op_id, received_at, saved_at, employee) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (contract_id, agent_id, on_date or date.today().isoformat(),
+             payload, op_id,
+             datetime.now().isoformat(timespec="seconds"), saved_at,
+             (employee or "").strip() or None),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def same_call_logged_today(contract_id: str, employee: str, payload: str,
+                           on_date: str | None = None) -> bool:
+    """Был ли СЕГОДНЯ записан тот же звонок тем же софтником (дедуп повторного
+    нажатия «Сохранить звонок» — новый op_id, то же содержимое)."""
+    on_date = on_date or date.today().isoformat()
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT employee, payload FROM calls WHERE contract_id = ? "
+            "AND created_at = ? ORDER BY id DESC LIMIT 1",
+            (contract_id, on_date)).fetchone()
+    return (bool(row) and (row["employee"] or "") == (employee or "")
+            and (row["payload"] or "") == (payload or ""))
+
+
+def calls_for_person(rep_contract_id: str, limit: int = 50) -> list[sqlite3.Row]:
+    """Журнал звонков по договорам человека (для карточки)."""
+    ids = [r["contract_id"] for r in person_contracts(rep_contract_id)]
+    if not ids:
+        return []
+    marks = ",".join("?" for _ in ids)
+    with connect() as conn:
+        return conn.execute(
+            f"SELECT * FROM calls WHERE contract_id IN ({marks}) "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            (*ids, limit)).fetchall()
+
+
 def same_visit_logged_today(contract_id: str, agent_id: int, payload: str,
                             on_date: str | None = None) -> bool:
     """Был ли СЕГОДНЯ записан ТОТ ЖЕ выезд: тот же выездник и тот же результат.
@@ -5676,7 +5849,7 @@ def _block_spans() -> list[tuple[int, int, str]]:
 # Колонки-даты: в экспорте пишем как настоящие даты Excel (числа — текстом,
 # чтобы ничего не потерялось; даты — типизированно, чтобы сортировались/фильтровались).
 DATE_KEYS = {"birth_date", "last_payment_date", "promise_date", "visit_date",
-             "meeting_date", "kd_date", "assign_date"}
+             "meeting_date", "kd_date", "assign_date", "soft_comm_date"}
 
 # Границы разумного для серийной даты Excel: 1990-01-01 .. 2100-01-01. Всё, что
 # вне — не дата, а просто число в колонке даты, и выдавать его за дату опаснее,
@@ -5744,6 +5917,13 @@ _SCORING_ONLY_TITLES = {
     "Текущие платежи": "paid_current",
 }
 
+# Колонки контура «Софт», читаемые тем же механизмом, что scoring: заголовок
+# остаётся «разрешённым игнорируемым» контракта, значение едет в служебную
+# колонку. Экспортная схема и строка типов не меняются.
+_SOFT_ONLY_TITLES = {
+    "ответственный Сотрудник СОФТ": "responsible_soft",
+}
+
 # Помесячные оплаты названы по месяцу («Оплаты за 04.26») и меняются каждый месяц,
 # поэтому в контракте они заданы шаблоном, а в БД сворачиваются в счётчик месяцев.
 _PAID_MONTH_RX = re.compile(r"^Оплаты за (?:0[1-9]|1[0-2])\.[0-9]{2}$")
@@ -5759,6 +5939,18 @@ def _scoring_only_headers() -> dict[str, str]:
         SCORING_ONLY_HEADERS = {_norm_title(t): k
                                 for t, k in _SCORING_ONLY_TITLES.items()}
     return SCORING_ONLY_HEADERS
+
+
+SOFT_ONLY_HEADERS: dict[str, str] = {}
+
+
+def _soft_only_headers() -> dict[str, str]:
+    """Нормализованный заголовок → служебная колонка софта (лениво, как scoring)."""
+    global SOFT_ONLY_HEADERS
+    if not SOFT_ONLY_HEADERS:
+        SOFT_ONLY_HEADERS = {_norm_title(t): k
+                             for t, k in _SOFT_ONLY_TITLES.items()}
+    return SOFT_ONLY_HEADERS
 
 
 # --- Карта колонок реестра (правится оператором, без правки кода) -------------
@@ -6255,6 +6447,11 @@ def enrichment_rows() -> list[dict]:
     """
     with connect() as conn:
         rows = conn.execute("SELECT * FROM clients ORDER BY client").fetchall()
+        # День последнего звонка по КД — якорь окна софт-кейса в build_plan:
+        # soft_comm_date бывает датой СЛЕДУЮЩЕГО звонка (в будущем), и окно
+        # «до сегодня» молча выкидывало бы свежие звонки.
+        call_days = {r[0]: r[1] for r in conn.execute(
+            "SELECT contract_id, MAX(created_at) FROM calls GROUP BY contract_id")}
     result = []
     for raw in rows:
         row = {f.key: raw[f.key] for f in FIELDS}
@@ -6263,6 +6460,9 @@ def enrichment_rows() -> list[dict]:
                 row[key] = None
         snapshot = _merged_visit(raw)
         row[BOT_VISIT_MARKER] = snapshot is not None
+        call_day = call_days.get(raw["contract_id"])
+        if call_day:
+            row["_call_day"] = call_day
         bot_snapshot = _decode_bot_snapshot(raw)
         row[VISIT_COMMENT_CLEARED_MARKER] = bool(
             snapshot is not None
@@ -6279,6 +6479,14 @@ def enrichment_rows() -> list[dict]:
             if tips:
                 snapshot = {**snapshot, "tips": tips}
             row.update(snapshot)
+        elif str((raw["soft_call_status"] if "soft_call_status" in raw.keys() else "") or "").strip():
+            # Контур «Софт»: снимка визита нет и не будет; обещание живёт
+            # в живой колонке (звонок пишет её напрямую). Эхо «мастер → книга»
+            # удерживают окно по дате коммуникации и реестр доставленного.
+            for k in ("promise_date", "forecast_sum", "forecast"):
+                v = str((raw[k] if k in raw.keys() else None) or "").strip()
+                if v:
+                    row[k] = v
         result.append(row)
     return result
 
@@ -7466,6 +7674,7 @@ def import_grid(
     # и строка типов при этом не меняются вообще.
     scoring_cols: dict[int, str] = {}
     recall_cols: dict[int, str] = {}
+    soft_cols: dict[int, str] = {}
     paid_month_cols: list[int] = []
     for index, (cell, key) in enumerate(zip(rows[best_h], col_keys)):
         if key is not None or cell in (None, ""):
@@ -7474,6 +7683,10 @@ def import_grid(
         mapped = _scoring_only_headers().get(_norm_title(title))
         if mapped:
             scoring_cols[index] = mapped
+            continue
+        mapped = _soft_only_headers().get(_norm_title(title))
+        if mapped:
+            soft_cols[index] = mapped
             continue
         mapped = _recall_headers().get(_norm_title(title))
         if mapped:
@@ -7551,6 +7764,14 @@ def import_grid(
                 number = _money_int(val)
                 if number:
                     data[target] = number
+        for index, target in soft_cols.items():
+            # Софт-ответственный — текст; канонизируется ниже по известным
+            # написаниям (как responsible). Пустая ячейка ведёт себя как у
+            # responsible: ключа нет — прежнее значение не трогаем.
+            val = raw[index] if index < len(raw) else None
+            text = str(val).strip() if val is not None else ""
+            if text:
+                data[target] = text
         for index, target in recall_cols.items():
             val = raw[index] if index < len(raw) else None
             text, is_set = _recall_cell(val, is_date=(target == "recall_date"))
@@ -7767,6 +7988,13 @@ def import_grid(
             nm = (r["responsible"] or "").strip()
             if nm:
                 known_resp.setdefault(_name_key(nm), nm)
+        # Та же защита для софт-ответственных: имя живёт только в своей колонке.
+        known_soft: dict[str, str] = {}
+        for r in existing.values():
+            nm = ((r["responsible_soft"] or "").strip()
+                  if "responsible_soft" in r.keys() else "")
+            if nm:
+                known_soft.setdefault(_name_key(nm), nm)
         if full_registry:
             report["authoritative_employees"] = [
                 known_resp.get(key, employee)
@@ -7869,6 +8097,11 @@ def import_grid(
             if incoming_resp:
                 data["responsible"] = incoming_resp
                 known_resp.setdefault(_name_key(incoming_resp), incoming_resp)
+            incoming_soft = canonical_responsible(
+                str(data.get("responsible_soft") or "").strip(), known_soft)
+            if incoming_soft:
+                data["responsible_soft"] = incoming_soft
+                known_soft.setdefault(_name_key(incoming_soft), incoming_soft)
             # --- Отзыв реестром ------------------------------------------
             # НИЧЕГО не решаем по колонкам отзыва: они читаются и хранятся
             # как данные (см. RECALL_TITLES). Сюда попадает только ЛЕГАСИ-

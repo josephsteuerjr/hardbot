@@ -21,7 +21,7 @@ def test_default_configuration_is_complete_and_renderable():
     assert set(bundle.fields.profile_tags) == {"hard", "soft"}
     assert bundle.master_path(datetime(2026, 7, 27)).name == "ОБЩИЙ РЕЕСТР ИЮЛЬ.xlsb"
     assert bundle.workspace_path().name == "registry_cycle_v2"
-    assert len(bundle.fields.collect) == 21
+    assert len(bundle.fields.collect) == 22
     assert any(
         rule.title == "Телефон глав"
         for rule in bundle.fields.collect
@@ -75,7 +75,8 @@ def test_field_semantics_are_explicit_and_safe():
     assert rules["дата обещания"] == ("date", "require_baseline")
     assert rules["Дата встречи"] == ("date", "require_baseline")
     assert rules["Дата выезда"] == ("literal", "require_baseline")
-    assert rules["Дата перезвона"] == ("date", "require_baseline")
+    assert rules["Дата коммуникации"] == ("date", "require_baseline")
+    assert rules["Историчный комментарий Софт"] == ("text", "accept_superset")
     assert rules["Прогноз"] == ("text", "require_baseline")
     assert rules["Общий результат"] == ("text", "require_baseline")
     assert rules["Телефон глав"] == ("text", "require_baseline")

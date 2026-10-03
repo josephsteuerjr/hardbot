@@ -1538,7 +1538,73 @@ def stats_data(mgr: dict, rng: dict, employees: list[str] | None = None) -> dict
         # По какой день реестр знает об оплатах: импорт раз в день, и за
         # «сегодня» оплат ещё нет — без даты ноль читался бы провалом.
         "pay_asof": db.last_payment_asof(),
+        # Контур «Софт»: отдельным блоком — у софтников свои метрики (звонки),
+        # в выездную таблицу они не смешиваются.
+        "soft": soft_block(mgr, rng),
     }
+
+
+def soft_block(mgr: dict, rng: dict) -> dict:
+    """Контур «Софт» в сводке руководителя: состав и счётчики софт-команды.
+
+    KPI повторяет лист «Статистика сотрудника» софт-книги: Взыск — оплаты
+    реестра по портфелю софта, Ждём/Сомнение — суммы прогноза по корзинам,
+    Макс — их сумма. Звонки — из журнала calls (по автору). Охват — страны
+    направления руководителя (владелец видит всех)."""
+    d_from, d_to = rng["from"], rng["to"]
+    employees = db.soft_employees_by_direction(mgr.get("direction") or "")
+    country = _employee_country_index(d_from, d_to)
+    rows = []
+    for emp in employees:
+        contracts = db.clients_for_soft(emp)
+        persons = _group_persons_public(contracts)
+        calls = db.soft_calls_for_employee(emp, d_from, d_to)
+        statuses: dict[str, int] = {}
+        for c in calls:
+            text = c["payload"] or ""
+            marker = "Статус: "
+            i = text.find(marker)
+            if i >= 0:
+                j = text.find(";", i)
+                st = text[i + len(marker):j if j > i else len(text)].strip()
+                if st:
+                    statuses[st] = statuses.get(st, 0) + 1
+        # Обещание у человека ОДНО на все его договоры (update_person
+        # размазывает сумму по КД) — считаем по первому договору каждого
+        # человека, иначе «Ждём» завышался бы кратно числу КД.
+        wait = doubt = 0
+        for p in persons:
+            c = p["contracts"][0]
+            fc = (c["forecast"] or "").strip() if "forecast" in c.keys() else ""
+            if fc in ("Ждём",):
+                wait += int(db.canon_amount(c["forecast_sum"]) or 0)
+            elif fc in ("Сомнение",):
+                doubt += int(db.canon_amount(c["forecast_sum"]) or 0)
+        pays = _payments_of(persons, d_from, d_to)
+        pay_sum = sum(int(u["sum"]) for x in pays for u in x["units"])
+        rows.append({
+            "employee": emp,
+            "contracts": len(contracts),
+            "debt": sum(int(db.canon_amount(c["debt_total"]) or 0) for c in contracts),
+            "calls": len(calls),
+            "statuses": statuses,
+            "wait": wait, "doubt": doubt, "max": wait + doubt + pay_sum,
+            "paid_persons": len(pays), "paid_sum": pay_sum,
+            "country": country.get(emp),
+        })
+    rows.sort(key=lambda r: (-r["calls"], r["employee"].lower()))
+    return {
+        "employees": rows,
+        "calls": sum(r["calls"] for r in rows),
+        "contracts": sum(r["contracts"] for r in rows),
+        "wait": sum(r["wait"] for r in rows),
+        "doubt": sum(r["doubt"] for r in rows),
+    }
+
+
+def _group_persons_public(contracts):
+    """Группировка договоров в людей — обёртка над db._group_persons."""
+    return db._group_persons(contracts)
 
 
 def stats_employee_data(mgr: dict, rng: dict, employee: str,

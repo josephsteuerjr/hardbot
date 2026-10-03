@@ -135,15 +135,15 @@ def test_new_column_becomes_an_extra_field_and_reaches_the_card():
                 "responsible": "Колонкин К.",
                 "условия акции": "Прощение до 50% процентов",
                 "сумма акции": 14500.0,
-                "начало акции": "2026-08-19"}],
-              extra_headers=("условия акции", "сумма акции", "начало акции")),
+                "Совсем новая колонка": "2026-08-19"}],
+              extra_headers=("условия акции", "сумма акции", "Совсем новая колонка")),
         source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
     assert not report.get("blocked"), report.get("error")
     assert report["extra_columns"] == ["Акция", "Сумма акции"]
     assert report["extra_cells"] == 2
     # Колонка, про которую оператор ещё не решил, остаётся видимой в отчёте —
     # но импорт не блокирует.
-    assert report["unknown_columns"] == ["начало акции"]
+    assert report["unknown_columns"] == ["Совсем новая колонка"]
     assert db.export_schema() == before          # схема не тронута
 
     values = db.registry_extra_values(["CM-4"])["CM-4"]

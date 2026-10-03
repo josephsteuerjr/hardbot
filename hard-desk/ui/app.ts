@@ -2,7 +2,7 @@
 // открывается сразу. Разделы видны по возможностям, которые считает сервер (caps):
 // безопасник видит «Контроль», руководитель — «Вход команды».
 import { api, hard, type Shell } from "./kit/api";
-import { $, esc } from "./kit/dom";
+import { $, esc, toast } from "./kit/dom";
 import { bare, go, mountShell, refresh, setHead, setSections, setWho, type Section } from "./kit/shell";
 import { startHeartbeat } from "./kit/heartbeat";
 import { activity } from "./views/activity";
@@ -18,6 +18,7 @@ import { conn, maint } from "./analyst/system";
 import { mail } from "./analyst/mail";
 import { priority, registry } from "./analyst/registry";
 import { fieldHelp, portfolio } from "./views/field";
+import { softHelp, softQueue } from "./views/soft";
 import { adminControlCall, controlSection } from "./views/control";
 
 /** Пульт аналитика: тот же каркас и облик, данные — через питон-сторону. */
@@ -122,14 +123,15 @@ const ANALYST = new URLSearchParams(location.search).get("mode") === "analyst";
 const FIELD = new URLSearchParams(location.search).get("mode") === "field";
 document.addEventListener("keydown", (e) => { if (e.key === "F5") { e.preventDefault(); void refresh(); } });
 
-/** Приложение выездника: вход по своей ссылке, разделы — портфель и это устройство. */
+/** Приложение сотрудника (выездник и софт — одно окно): роль узнаёт СЕРВЕР
+ *  по ссылке входа и портфелю; сам человек о режимах не знает ничего. */
 function enrollFieldScreen(note = "") {
   bare(true);
   setSections([]);
   const host = $("view-inner");
   $("head").hidden = true;
   host.innerHTML = `<div class="page enroll">
-    <h1>Приложение выездника</h1>
+    <h1>Хард</h1>
     <p>Вставьте СВОЮ ссылку входа — её выдаёт руководитель в «Входе команды». Это нужно один раз.</p>
     <p class="hint">Телефон продолжает работать: вход на компьютере его не заменяет.</p>
     <div class="row"><input class="input" id="link" placeholder="https://…/i/…" autocomplete="off" spellcheck="false">
@@ -153,7 +155,7 @@ function enrollFieldScreen(note = "") {
   input.focus();
 }
 
-async function startField() {
+async function startAgent() {
   shell = await hard.state();
   if (shell.theme === "light" || shell.theme === "dark") document.documentElement.dataset.theme = shell.theme;
   if (!shell.enrolled) { enrollFieldScreen(); return; }
@@ -162,23 +164,27 @@ async function startField() {
   const me = await api("/api/bootstrap");
   if (!me.ok && me.kind === "revoked") { enrollFieldScreen(me.text); return; }
   const who: any = me.ok ? me.data : null;
-  setWho(`<b>${esc(who?.employee || "Выездник")}</b> · приложение на компьютере`);
-  const list: Section[] = [portfolio, fieldHelp];
+  // Какой экран показать — решает СЕРВЕР: есть портфель софта → очередь звонков
+  // (перевод УЗБ на колл-центр), иначе — портфель выездника. Смешанный случай
+  // тоже открывает очередь: визит всё равно закрывается телефоном.
+  const soft = !!(who?.roles?.soft);
+  setWho(`<b>${esc(who?.employee || "Сотрудник")}</b> · приложение на компьютере`);
+  const list: Section[] = soft ? [softQueue, softHelp] : [portfolio, fieldHelp];
   setSections(list);
-  await go("portfolio");
+  await go(soft ? "softqueue" : "portfolio");
   startHeartbeat(async () => {
     const r = await hard.api("GET", "/api/bootstrap");
     return r.kind === "offline" || r.kind === "cert" ? "off" : r.kind === "revoked" ? "revoked" : "live";
-  }, () => (who ? refresh() : startField()));
+  }, () => (who ? refresh() : startAgent()));
 }
 
 if (ANALYST) {
   mountShell(`<b>Хард</b> · пульт аналитика`);
   void startAnalyst();
 } else if (FIELD) {
-  mountShell(`<b>Хард</b> · приложение выездника`);
+  mountShell(`<b>Хард</b> · приложение сотрудника`);
   hard.on("revoked", () => enrollFieldScreen("Вход этого компьютера отозван. Попросите у руководителя новую ссылку."));
-  void startField();
+  void startAgent();
 } else {
   mountShell(`<b>Хард</b> · пульт руководителя`);
   hard.on("revoked", () => enrollScreen("Доступ этого компьютера отозван аналитиком. Всё сохранённое стёрто. Попросите новую ссылку входа."));

@@ -50,7 +50,7 @@ from exchange_contract import (
     contract_binding,
     validate_contract_binding,
 )
-from fields import BY_KEY, DROPDOWNS
+from fields import BY_KEY, DROPDOWNS, SOFT
 from i18n import FIELD_TITLES, FORM_FIELD_TITLES, LANGUAGES, t, tf, tv
 import addr_learn
 import control
@@ -140,6 +140,15 @@ FORM_TEXT = list(FORM_TEXT_KEYS)
 # Типизированные поля формы (обещание выездника, контракт v3; на v2 пусты).
 FORM_AMOUNTS = list(FORM_AMOUNT_KEYS)
 FORM_DATES = list(FORM_DATE_KEYS)
+# Контур «Софт»: ключи софт-формы (источник поля «софт») не показываются
+# в форме ВИЗИТА выездника — у звонка своя форма и свой экран.
+SOFT_FORM_KEYS = frozenset(
+    k for k in (*FORM_DROPDOWNS, *FORM_TEXT, *FORM_AMOUNTS, *FORM_DATES)
+    if k in BY_KEY and BY_KEY[k].source == SOFT
+)
+FORM_DROPDOWNS_VISIT = tuple(
+    k for k in FORM_DROPDOWNS if k not in SOFT_FORM_KEYS
+)
 # Что показываем во вкладке «Клиент» (плотные строки).
 INFO_KEYS = ["birth_date", "phone", "phone_main", "city", "address",
              "address_customer", "extra_address", "responsible", "tips"]
@@ -601,7 +610,7 @@ def _person_full_from_rows(rows, rep: str, lang: str,
                            for k in (*FORM_DATES, *FORM_AMOUNTS)
                            if k in BY_KEY}
     form = []
-    for k in FORM_DROPDOWNS:
+    for k in FORM_DROPDOWNS_VISIT:
         # До первого доказанного визита форма всегда пустая. Значения HARD-полей
         # из master допустимы только как read-only контекст в карточке: иначе
         # простое открытие и сохранение формы превращало старый импорт в
@@ -650,6 +659,25 @@ def _person_full_from_rows(rows, rep: str, lang: str,
         # приложено), и руководителем/безопасником в витрине.
         "receipts": (db.receipts_for([rep]).get(rep, [])
                      if receipts is None else receipts),
+        # Контур «Софт»: состояние звонка по человеку (живая колонка месяца),
+        # форма «Звонок» и журнал звонков. Читается и софтником, и выездником
+        # (кто звонил и что обещали — полезно и на адресе).
+        "soft": {
+            "status": _row_get(rows, "soft_call_status") or "",
+            "comm_date": _row_get(rows, "soft_comm_date") or "",
+            "comment": _row_get(rows, "soft_comment") or "",
+            "history": _row_get(rows, "soft_history") or "",
+            "responsible": _row_get(rows, "responsible_soft") or "",
+        },
+        "softForm": [
+            {"key": "soft_call_status", "title": _title("soft_call_status", lang),
+             "current": _row_get(rows, "soft_call_status") or ""},
+        ],
+        "calls": [
+            {"ts": c["created_at"], "received": c["received_at"],
+             "employee": c["employee"] or "", "payload": c["payload"] or ""}
+            for c in db.calls_for_person(rep)
+        ],
     }
 
 
@@ -851,20 +879,58 @@ async def _bootstrap(request: web.Request) -> web.Response:
                                       "employee": pend["employee"]})
         return web.json_response({   # ещё не выбрал себя → онбординг прямо в миниаппе
             "ok": True, "needsOnboarding": True, "uid": uid, "lang": lang,
-            "employees": [{"employee": e["employee"], "contracts": e["contracts"]}
-                          for e in db.employees_in_registry()],
+            "employees": [
+                {"employee": e["employee"], "contracts": e["contracts"]}
+                for e in db.employees_in_registry()
+            ] + [
+                # Контур «Софт»: человек может быть только софтником — его имени
+                # нет среди выездников, но выбрать себя он обязан тем же списком.
+                {"employee": e["employee"], "contracts": e["contracts"],
+                 "soft": True}
+                for e in db.soft_employees()
+            ],
             "langs": [{"code": c, "name": n} for c, n in LANGUAGES.items()]})
-    grouped = db.persons_for_employee(emp)
+    # Контур «Софт»: у человека есть портфель и по второй колонке
+    # ответственности. Флаг едет в roles (вместе с режимом ?mode=soft это
+    # переключатель «Выездник | Софт» в оболочке).
+    soft_exists = db.soft_portfolio_exists(emp)
+    soft_mode = soft_exists and request.query.get("mode") == "soft"
+    if soft_mode:
+        grouped = db.persons_for_soft(emp)
+    else:
+        grouped = db.persons_for_employee(emp)
     persons = [_person_brief(p) for p in grouped]
-    try:
-        idx = _priority_index_nonblocking()
+    if soft_mode:
+        # Очередь звонков: просроченная дата коммуникации наверх, затем
+        # договоры без статуса, дальше по долгу. Приоритет выезда здесь не
+        # применим — он про адреса, а софтник работает телефоном.
         for pb, p in zip(persons, grouped):
-            s = idx.get(f"{p['client'] or ''}|{p['birth_date'] or ''}")
-            if s:
-                pb["score"], pb["reason"], pb["city"] = s["score"], s["reason"], s["city"]
-        persons.sort(key=lambda x: x.get("score", -1), reverse=True)   # приоритет наверху
-    except Exception as e:  # noqa: BLE001
-        logging.warning("priority_index: %s", e)
+            status = _row_get(p["contracts"], "soft_call_status")
+            comm = _row_get(p["contracts"], "soft_comm_date")
+            pb["sc"] = status or ""
+            pb["scd"] = comm or ""
+            pb["overdue"] = 0
+            if comm:
+                try:
+                    pb["overdue"] = max(
+                        0, (date.today() - date.fromisoformat(str(comm)[:10])).days)
+                except ValueError:
+                    pass
+        persons.sort(key=lambda x: (
+            0 if x.get("scd") and x.get("overdue", 0) > 0
+            else 1 if not x.get("sc")
+            else 2,
+            -x.get("overdue", 0), -x.get("total") if isinstance(x.get("total"), (int, float)) else 0))
+    else:
+        try:
+            idx = _priority_index_nonblocking()
+            for pb, p in zip(persons, grouped):
+                s = idx.get(f"{p['client'] or ''}|{p['birth_date'] or ''}")
+                if s:
+                    pb["score"], pb["reason"], pb["city"] = s["score"], s["reason"], s["city"]
+            persons.sort(key=lambda x: x.get("score", -1), reverse=True)   # приоритет наверху
+        except Exception as e:  # noqa: BLE001
+            logging.warning("priority_index: %s", e)
     # Роль руководителя: у него нет привязки, он работает от имени сотрудника и
     # может переключаться. Фронт по этому блоку рисует переключатель портфелей.
     scope = _manager_scope(uid)
@@ -874,7 +940,12 @@ async def _bootstrap(request: web.Request) -> web.Response:
     # переключатель исчезал совсем — при том, что портфель ему открывает РОЛЬ.
     # Право определяется ролью, значит и переключатель зависит только от неё.
     roles = {"manager": bool(scope), "employees": scope, "acting": emp} if scope else None
-    if roles:
+    if soft_exists:
+        # Портфель софта есть — человек может работать в режиме «Софт», даже
+        # если он одновременно выездник (перевод УЗБ на звонки).
+        roles = roles or {}
+        roles["soft"] = True
+    if roles and roles.get("manager"):
         # Подпись режима в приложении (v62): «Руководитель», «Безопасник»,
         # «Директор» или «Владелец» — какой ролью человек вошёл.
         mrec = db.get_manager(uid)
@@ -1372,7 +1443,10 @@ async def _person(request: web.Request) -> web.Response:
     uid, emp = _auth(request)
     rep = request.query.get("rep", "")
     row = db.get_client(rep)
-    if not row or (row["responsible"] != emp and uid != ADMIN_ID):
+    # Контур «Софт»: карточку открывает хозяин ЛЮБОЙ из колонок
+    # ответственности — софтник работает те же договоры, что и выездник.
+    if not row or (uid != ADMIN_ID and emp != row["responsible"]
+                   and emp != row["responsible_soft"]):
         raise web.HTTPNotFound(text="person")
     db.audit_access(uid, "view_card", rep)              # ИБ: доступ к ПД в журнал
     data = _person_full(rep, lang_of(uid))
@@ -1391,7 +1465,12 @@ async def _cards(request: web.Request) -> web.Response:
     uid, emp = _auth(request)
     lang = lang_of(uid)
     cards = {}
-    grouped = db.persons_for_employee(emp)
+    # Прогрев — по ОБЕИМ колонкам ответственности: софтнику кэш нужен не меньше
+    # (очередь «кому звонить» открывает карточки офлайн той же механикой).
+    grouped = {p["rep"]: p for p in db.persons_for_employee(emp)}
+    for p in db.persons_for_soft(emp):
+        grouped.setdefault(p["rep"], p)
+    grouped = list(grouped.values())
     # Дополнительные поля всего портфеля — одним запросом по той же причине,
     # что и сами договоры: карточек бывает под три сотни.
     all_extras = db.registry_extra_values(
@@ -1480,7 +1559,11 @@ async def _save(request: web.Request) -> web.Response:
     body = await request.json()
     rep = body.get("rep", "")
     row = db.get_client(rep)
-    if not row or (row["responsible"] != emp and uid != ADMIN_ID):
+    # Контур «Софт»: kind=call — звонок софтника. Владение строгое: звонок
+    # закрывает хозяин второй колонки ответственности, визит — первой.
+    kind = "call" if str(body.get("kind") or "").strip() == "call" else "visit"
+    if not row or (uid != ADMIN_ID and emp != (
+            row["responsible_soft"] if kind == "call" else row["responsible"])):
         raise web.HTTPNotFound(text="person")
     raw_values = dict(body.get("values") or {})
     finish = bool(body.get("finish"))
@@ -1508,6 +1591,16 @@ async def _save(request: web.Request) -> web.Response:
     # комментарий выездника старым ключом call_comment — переадресуем в visit_comment.
     if "call_comment" in raw_values and "visit_comment" not in raw_values:
         raw_values["visit_comment"] = raw_values.pop("call_comment")
+    # Поля формы делятся по kind ЖЁСТКО: звонок не пишет визитные поля (даже
+    # легаси-ключом), визит — софт-колонки. Иначе чужая форма протаскивала бы
+    # результат визита через kind:"call" и наоборот.
+    if kind == "call":
+        # soft_comment — маркер «сх» (колонку ведёт месячный цикл), но в форме
+        # звонка поле живёт: его пишет софтник, серверу оно известно текстом.
+        soft_allowed = SOFT_FORM_KEYS | {"soft_comment"} | set(FORM_AMOUNTS) | set(FORM_DATES)
+        raw_values = {k: v for k, v in raw_values.items() if k in soft_allowed}
+    else:
+        raw_values = {k: v for k, v in raw_values.items() if k not in SOFT_FORM_KEYS}
     typed_keys = set(FORM_AMOUNTS) | set(FORM_DATES)
     if not finish:
         # pushDraft шлёт finish:false каждые 20 секунд, а update_person пишет
@@ -1549,6 +1642,9 @@ async def _save(request: web.Request) -> web.Response:
                 continue
             value = canon
         values[key] = value
+    if kind == "call":
+        return _save_call(uid, emp, body, rep, row, values, rejected,
+                          truncated, finish, cleared)
     # Снять обещание выездник может ЛЮБОЕ, не только «своё». Он стоит перед
     # должником, и его слово свежее любой офисной даты: запрет на чужое означал
     # бы, что должника со сорвавшимся обещанием никто не вернёт в маршрут.
@@ -1763,6 +1859,71 @@ async def _save(request: web.Request) -> web.Response:
     if truncated:
         # Не в rejected: оболочка показала бы «часть полей не принята», а поле
         # принято — без хвоста.
+        out["truncated"] = truncated
+    return web.json_response(out)
+
+
+def _save_call(uid: int, emp: str, body: dict, rep: str, row, values: dict,
+               rejected: dict, truncated: list, finish: bool,
+               cleared: set) -> web.Response:
+    """Звонок софтника (kind=call): та же механика формы, БЕЗ гео, фото,
+    подтверждения и переучивания адреса — звонку они не нужны по построению.
+
+    Правила те же, что у выезда: обязательный статус, окно обещания,
+    вывод «Прогноза». Отличия: статус звонка софт вместо результата визита,
+    «Общий результат» звонок НЕ трогает (его ведёт офис), дата коммуникации —
+    это дата следующего звонка, а не отметка о прошлом."""
+    if finish and "soft_call_status" not in values:
+        raise web.HTTPBadRequest(text="call result required")
+    if finish and values.get("promise_date"):
+        limit = db.promise_ahead_days()
+        if limit:
+            edge = date.fromisoformat(_occurred_on(body)) + timedelta(days=limit)
+            if db._as_date(values["promise_date"]) and \
+                    db._as_date(values["promise_date"]) > edge:
+                rejected["promise_date"] = f"too_far:{limit}"
+                values.pop("promise_date", None)
+    if finish:
+        promise_was = str(row["promise_date"] or "").strip()
+        promise_now = (str(values.get("promise_date") or "").strip()
+                       if "promise_date" in values else promise_was)
+        fc = db.visit_forecast(
+            paid=values.get("soft_call_status") in db.PAID_SOFT_STATUSES,
+            promise_now=promise_now, promise_was=promise_was,
+            promise_dropped="promise_date" in cleared)
+        if fc:
+            values[db.FORECAST_KEY] = fc
+    db.audit_access(uid, "save_call" if finish else "save_card", rep)
+    if values:
+        # Группа — по СОФТ-закреплению: у человека бывают разные выездные
+        # ответственные, звонок обязан лечь во все его договоры софтника.
+        db.update_person(rep, values, by_soft=True)
+    if finish:
+        completed_at = _occurred_on(body)
+        op_id = (str(body.get("op_id") or "")).strip() or None
+        payload = (
+            f"Звонок (приложение). Статус: "
+            f"{values.get('soft_call_status', '')}; "
+            f"{values.get('soft_comment', '')}"
+        )
+        # Дедуп повторного нажатия (зеркало same_visit_logged_today, но здесь
+        # гасим и строку): тот же софтник, тот же день, то же содержимое —
+        # второй РЕАЛЬНЫЙ звонок с другим статусом/комментарием пройдёт.
+        if db.same_call_logged_today(rep, row["responsible_soft"] or emp,
+                                     payload, on_date=completed_at):
+            data = _person_full(rep, lang_of(uid))
+            out = {"ok": True, "person": data, "dedup": True}
+            if rejected:
+                out["rejected"] = rejected
+            return web.json_response(out)
+        db.log_call(rep, uid, payload, op_id=op_id, on_date=completed_at,
+                    saved_at=_saved_at(body),
+                    employee=row["responsible_soft"] or emp)
+    data = _person_full(rep, lang_of(uid))
+    out = {"ok": True, "person": data}
+    if rejected:
+        out["rejected"] = rejected
+    if truncated:
         out["truncated"] = truncated
     return web.json_response(out)
 

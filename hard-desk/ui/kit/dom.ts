@@ -91,6 +91,7 @@ const I: Record<string, string> = {
   service: '<circle cx="9" cy="9" r="2.4"/><path d="M9 1.8v2M9 14.2v2M1.8 9h2M14.2 9h2M3.9 3.9l1.4 1.4M12.7 12.7l1.4 1.4M3.9 14.1l1.4-1.4M12.7 5.3l1.4-1.4"/>',
   today: '<circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/>',
   mail: '<rect x="2" y="3.5" width="14" height="11" rx="1.8"/><path d="m2.6 4.6 6.4 5 6.4-5"/>',
+  phone: '<path d="M3.6 3.2c-.5 2.9 1 6.1 3.5 8.7s5.7 3.9 8.6 3.4c.6-.1 1-.7.8-1.3l-.6-2c-.2-.6-.8-.9-1.4-.8l-1.7.4a11.4 11.4 0 0 1-4.7-4.7l.4-1.7c.1-.6-.2-1.2-.8-1.4l-2-.6c-.6-.2-1.2.2-1.3.8Z"/>',
 };
 
 export function icon(name: string, size = 18): string {

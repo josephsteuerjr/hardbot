@@ -1,6 +1,6 @@
 {
   "schema": "hardbot.data-exchange-contract.v1",
-  "version": 4,
+  "version": 5,
   "artifacts": {
     "snapshot_kind": "hardbot_limited_test_pre_reset.v2",
     "enrichment_evidence_schema": "hardbot.pult-enrichment.v2",
@@ -15,17 +15,20 @@
       "who_at_address",
       "client_location",
       "purpose_rf",
-      "agreed_payment"
+      "agreed_payment",
+      "soft_call_status"
     ],
     "text_keys": [
       "visit_comment",
-      "tips"
+      "tips",
+      "soft_comment"
     ],
     "amount_keys": [
       "forecast_sum"
     ],
     "date_keys": [
-      "promise_date"
+      "promise_date",
+      "soft_comm_date"
     ]
   },
   "workbook_shape": {
@@ -55,7 +58,7 @@
     },
     "unknown_headers_policy": "block",
     "duplicate_headers_policy": "block",
-    "export_schema_sha256": "94ea00279e624796f66202a034fc6d9e247116056ee68446f2b2de39bdabe87a",
+    "export_schema_sha256": "5998dce450a58609dd1a280eb3bb983b4fef22c4b01e1013953a267989c65628",
     "contract_key": "contract_id",
     "responsible_key": "responsible",
     "contract_title": "Номер КД / ID",
@@ -69,6 +72,12 @@
       ],
       "assign_date": [
         "Дата закрепления ХАРД"
+      ],
+      "soft_comm_date": [
+        "Дата перезвона"
+      ],
+      "soft_comment": [
+        "Комментарий текущего месяца"
       ]
     },
     "allowed_ignored_headers": [
@@ -85,10 +94,6 @@
       "Текущие платежи",
       "Долг на начало месяца",
       "Изменение долга",
-      "статус звонка софт",
-      "Дата перезвона",
-      "Комментарий текущего месяца Софт",
-      "Историчный комментарий Софт",
       "Долг на момент передачи в работу",
       "Дата входа",
       "Дата отзыва",
@@ -101,7 +106,12 @@
       "ПИНФЛ",
       "дата посл выезда",
       "Передача на отзыв",
-      "Вывод из работы"
+      "Вывод из работы",
+      "условия акции",
+      "начало акции",
+      "окончание акции",
+      "сумма акции",
+      "Ставка АВ %"
     ],
     "allowed_ignored_header_patterns": [
       "^Оплаты за (?:0[1-9]|1[0-2])\\.[0-9]{2}$"
@@ -140,7 +150,15 @@
       "visit_comment",
       "promise_date",
       "forecast_sum",
-      "forecast"
+      "forecast",
+      "soft_call_status",
+      "soft_comm_date",
+      "soft_comment"
+    ],
+    "live_state_keys": [
+      "soft_call_status",
+      "soft_comm_date",
+      "soft_comment"
     ]
   },
   "enrichment": {
@@ -209,6 +227,21 @@
         "source": "forecast",
         "target": "forecast",
         "merge": "replace"
+      },
+      {
+        "source": "soft_call_status",
+        "target": "soft_call_status",
+        "merge": "replace"
+      },
+      {
+        "source": "soft_comm_date",
+        "target": "soft_comm_date",
+        "merge": "replace"
+      },
+      {
+        "source": "soft_comment",
+        "target": "soft_comment",
+        "merge": "preserve_text"
       }
     ],
     "forbidden_targets": [

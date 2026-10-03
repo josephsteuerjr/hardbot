@@ -4,6 +4,7 @@ import { api, hard, type Shell } from "../kit/api";
 import { ago, ask, esc, icon, n, plural, shortDate, toast } from "../kit/dom";
 import type { Section } from "../kit/shell";
 import { DataTable } from "../kit/table";
+import { mountModeSwitchIfKit } from "../kit/modeswitch";
 import { showIssued } from "../kit/issued";
 import { openPerson, problem, rangeChips, rangeQuery, staleNote, wireRange, type Range } from "./common";
 
@@ -159,12 +160,19 @@ export function device(shell: Shell, me: any, onLogout: () => void): Section {
           <dt>Вход с</dt><dd>${esc(shell.device?.created_at ? new Date(shell.device.created_at).toLocaleString("ru-RU") : "—")}</dd>
           <dt>Сервер</dt><dd class="mono">${esc(shell.server)}</dd>
           <dt>Версия</dt><dd>${esc(shell.product)} ${esc(shell.version)}</dd></dl>
+        <div class="section" id="modesec" style="display:none"><div class="section-head"><h2 class="section-title">Режимы этого exe</h2></div>
+          <div id="modesw"></div></div>
         <div class="section"><div class="section-head"><h2 class="section-title">Вид</h2></div>
           <div class="chips">${[["system", "Как в Windows"], ["light", "Светлый"], ["dark", "Тёмный"]].map(([k, t]) =>
             `<button class="chip" data-theme="${k}" aria-pressed="${theme === k}">${t}</button>`).join("")}</div></div>
         <div class="section"><div class="section-head"><h2 class="section-title">Выйти на этом компьютере</h2></div>
           <p class="muted" style="max-width:640px;margin:0 0 12px">Пульт забудет вход и всё сохранённое. Войти снова можно новой ссылкой от аналитика.</p>
           <button class="btn danger" data-logout>Выйти</button></div>`;
+      void mountModeSwitchIfKit(root.querySelector("#modesw")!, "manager").then(() => {
+        const sec = root.querySelector("#modesec") as HTMLElement | null;
+        const sw = root.querySelector("#modesw") as HTMLElement | null;
+        if (sec && sw && sw.innerHTML.trim()) sec.style.display = "";
+      });
       root.querySelectorAll<HTMLButtonElement>("[data-theme]").forEach((b) => b.addEventListener("click", async () => {
         const t = b.dataset.theme!;
         await hard.theme(t);

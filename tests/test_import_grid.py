@@ -190,7 +190,7 @@ def test_published_master_type_row_is_validated_and_never_becomes_client():
     db.init_db()
     titles = [
         *[field.title for field in db.FIELDS],
-        "Историчный комментарий Софт",
+        "Дата закрепления СОФТ",
     ]
     type_row = [*[field.source for field in db.FIELDS], "софт"]
     assert "софт" in {db._norm_title(value) for value in type_row}

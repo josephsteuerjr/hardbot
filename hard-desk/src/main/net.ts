@@ -183,12 +183,16 @@ export async function logout(): Promise<void> {
   wipe();
 }
 
-// --- Приложение выездника на ПК: свой класс токена (agent_devices) -------------
+// --- Приложение выездника/софтника на ПК: свой класс токена (agent_devices) ----
 // Телефон не вытесняется: вход по ссылке выездника даёт ПК-токен, привязка
 // agent_bind остаётся телефону. Белый список путей — только ручки выездника.
-const FIELD_PATH = /^\/api\/(bootstrap|person|cards|save|photo|receipt|markers|notes|note|lang|route_to|geocode|geo)\//;
+// Хвост «(/.*)?»: путь зовётся и как «/api/save», и как «/api/photo/xyz» —
+// строгая дробь после имени не пропускала «/api/bootstrap» и «/api/save»,
+// и приложение выездника на сборке 03.10 не открывало портфель вовсе.
+const FIELD_PATH = /^\/api\/(bootstrap|person|cards|save|photo|receipt|markers|notes|note|lang|route_to|geocode|geo)(\/.*)?$/;
 const FIELD_PATH_EXACT = new Set(["/api/person", "/api/cards", "/api/markers", "/api/notes",
-                                  "/api/geocode", "/api/logout"]);
+                                  "/api/geocode", "/api/logout", "/api/bootstrap", "/api/save",
+                                  "/api/receipt", "/api/photo", "/api/note"]);
 
 function fieldOk(path: string): boolean {
   return FIELD_PATH.test(path) || FIELD_PATH_EXACT.has(path);

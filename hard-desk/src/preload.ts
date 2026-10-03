@@ -5,6 +5,7 @@ type Query = Record<string, unknown> | undefined;
 
 contextBridge.exposeInMainWorld("hard", {
   state: () => ipcRenderer.invoke("hard:state"),
+  setMode: (mode: string) => ipcRenderer.invoke("hard:setMode", mode),
   enroll: (link: string) => ipcRenderer.invoke("hard:enroll", link),
   logout: () => ipcRenderer.invoke("hard:logout"),
   api: (method: string, path: string, query?: Query, body?: unknown) => ipcRenderer.invoke("hard:api", method, path, query, body),

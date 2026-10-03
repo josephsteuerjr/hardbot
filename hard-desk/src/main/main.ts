@@ -32,20 +32,55 @@ function inAnalystKit(): boolean {
 // Режим аналитика — только внутри комплекта (рядом pult/) или по явному флагу.
 // Прежнее правило «в пути есть слово "аналит"» открывало пульт руководителя,
 // распакованный в папку отдела аналитики, пультом аналитика без питон-стороны.
-// Режим выездника — только явным флагом: это отдельное приложение для людей,
-// а не ещё один пульт в той же папке.
-const MODE: "manager" | "analyst" | "field" =
-  process.argv.includes("--field") || process.env.HARD_MODE === "field"
-    ? "field"
-    : process.argv.includes("--analyst") || process.env.HARD_MODE === "analyst"
-    || (!process.argv.includes("--manager") && inAnalystKit())
-      ? "analyst" : "manager";
-const PRODUCT = MODE === "analyst" ? "Хард — пульт аналитика"
-  : MODE === "field" ? "Хард — приложение выездника"
-  : "Хард — пульт руководителя";
+// Режимы выездника и софтника — только явным флагом: это отдельные приложения
+// для людей, а не ещё один пульт в той же папке.
+// «Софт» и «Выездник» на ПК — ОДИН режим «приложение сотрудника»: какой экран
+// показать (очередь звонков или портфель), решает СЕРВЕР по портфелю человека
+// (roles.soft в bootstrap). Сотрудник о режимах не знает вовсе.
+type Mode = "manager" | "analyst" | "field";
+const MODES: readonly Mode[] = ["manager", "analyst", "field"];
 
-app.setName(MODE === "analyst" ? "Хард-аналитик" : MODE === "field" ? "Хард-выездник" : "Хард");
-if (process.platform === "win32") app.setAppUserModelId(MODE === "analyst" ? "ru.rimborso.hard.analyst" : MODE === "field" ? "ru.rimborso.hard.field" : "ru.rimborso.hard.manager");
+function autoMode(): Mode {
+  return process.argv.includes("--analyst") || process.env.HARD_MODE === "analyst"
+    || (!process.argv.includes("--manager") && inAnalystKit())
+    ? "analyst" : "manager";
+}
+
+function cliMode(): Mode | null {
+  for (const m of MODES) {
+    if (process.argv.includes("--" + m) || process.env.HARD_MODE === m) return m;
+  }
+  // --soft прежних ярлыков — то же окно сотрудника (экран определит сервер)
+  if (process.argv.includes("--soft") || process.env.HARD_MODE === "soft") return "field";
+  return null;
+}
+
+function savedMode(): Mode | null {
+  const m = readSettings().appMode;
+  return MODES.includes(m as Mode) ? (m as Mode) : null;
+}
+
+function productOf(m: Mode): string {
+  return m === "analyst" ? "Хард — пульт аналитика"
+    : m === "field" ? "Хард — приложение сотрудника"
+    : "Хард — пульт руководителя";
+}
+
+function queryOf(m: Mode): string {
+  return m === "manager" ? "" : "?mode=" + m;
+}
+
+// Один exe — все роли (владелец 03.10: «полный фарш»). Режим выбирается внутри
+// окна («Это устройство» → «Режим этого компьютера») и живёт в настройках;
+// флаги --field/--soft/--analyst прошлых bat-запускателей перекрывают выбор
+// на один запуск, так что старые ярлыки продолжают работать.
+let MODE: Mode = cliMode() ?? savedMode() ?? autoMode();
+const PRODUCT = productOf(MODE);
+
+app.setName(MODE === "analyst" ? "Хард-аналитик" : MODE === "field" ? "Хард-сотрудник" : "Хард");
+if (process.platform === "win32") app.setAppUserModelId(
+  MODE === "analyst" ? "ru.rimborso.hard.analyst" : MODE === "field" ? "ru.rimborso.hard.field"
+  : "ru.rimborso.hard.manager");
 if (process.env.HARD_USER_DATA) app.setPath("userData", process.env.HARD_USER_DATA);
 
 protocol.registerSchemesAsPrivileged([
@@ -172,7 +207,7 @@ function createWindow(): BrowserWindow {
     return { action: "deny" };
   });
   w.webContents.on("will-navigate", (e, url) => { if (!url.startsWith("hard://")) e.preventDefault(); });
-  void w.loadURL("hard://app/index.html" + (MODE === "analyst" ? "?mode=analyst" : MODE === "field" ? "?mode=field" : ""));
+  void w.loadURL("hard://app/index.html" + queryOf(MODE));
   return w;
 }
 
@@ -224,15 +259,48 @@ function wireIpc() {
   ipcMain.handle("hard:state", () => {
     const s = readSettings();
     const field = MODE === "field";
-    return { mode: MODE, product: PRODUCT, version: app.getVersion(),
+    return { mode: MODE, product: productOf(MODE), kit: inAnalystKit(),
+             version: app.getVersion(),
              server: (field ? s.fieldServer : s.server) || "",
              device: (field ? s.fieldDevice : s.device) || null,
              enrolled: field ? !!readFieldToken() && !!s.fieldServer : !!readToken() && !!s.server,
              theme: s.theme || "system", deviceName: deviceName(),
              maximized: !!win?.isMaximized() };
   });
-  ipcMain.handle("hard:enroll", (_e, link: string) =>
-    MODE === "field" ? enrollField(String(link || "")) : enroll(String(link || "")));
+  // Переключатель режимов — ТОЛЬКО в пульте аналитика (комплект): сотрудникам
+  // СНГ роль определяет их ссылка, и они о режимах не знают.
+  ipcMain.handle("hard:setMode", (_e, m: string) => {
+    const next = MODES.includes(m as Mode) ? (m as Mode) : null;
+    if (!next) return { ok: false, text: "неизвестный режим" };
+    if (next === "analyst" && !inAnalystKit())
+      return { ok: false, text: "пульт аналитика живёт только внутри комплекта аналитика" };
+    writeSettings({ appMode: next });
+    MODE = next;
+    if (tray) tray.setToolTip(productOf(next));
+    if (win && !win.isDestroyed()) void win.loadURL("hard://app/index.html" + queryOf(next));
+    return { ok: true };
+  });
+  // Вход по ссылке БЕЗ знания роли: класс ссылки различает сервер (обе
+  // стороны НЕ тратят чужую ссылку, 403). Сначала пробуем вход текущего
+  // режима, при 403 — второй класс; успех другого класса переворачивает окно.
+  ipcMain.handle("hard:enroll", async (_e, link: string) => {
+    const raw = String(link || "");
+    const pult = MODE !== "field";
+    const first = pult ? await enroll(raw) : await enrollField(raw);
+    if (first.ok) return first;
+    if (first.status === 403) {
+      const second = pult ? await enrollField(raw) : await enroll(raw);
+      if (second.ok) {
+        const next: Mode = pult ? "field" : "manager";
+        writeSettings({ appMode: next });
+        MODE = next;
+        if (tray) tray.setToolTip(productOf(next));
+        if (win && !win.isDestroyed()) void win.loadURL("hard://app/index.html" + queryOf(next));
+        return second;
+      }
+    }
+    return first;
+  });
   ipcMain.handle("hard:logout", async () => {
     if (MODE === "field") await logoutField(); else await logout();
     return true;
