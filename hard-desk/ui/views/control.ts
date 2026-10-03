@@ -1,7 +1,7 @@
 // «Контроль» — только безопасность (и владелец). Процентов и сводного балла
 // НЕТ (решение 03.10.2026): только счётчики по каждому признаку, отдельно.
-// Слои: статистика по людям, гео-запись дня по времени, контрольный обзвон,
-// закрепления, доступ и сигналы тревоги (SOS).
+// Слои: статистика по людям, гео-запись дня по времени (сопоставление фрода
+// с перемещением), контрольный обзвон, закрепления и доступ.
 import { api, hard } from "../kit/api";
 import { dayTitle, esc, icon, n, plural, toast } from "../kit/dom";
 import { setHead, type Section } from "../kit/shell";
@@ -9,7 +9,7 @@ import { DataTable } from "../kit/table";
 import { evidenceTag, flagsHtml, officeChips, openPerson, problem, rangeChips, rangeQuery, staleNote, wireRange, type Range } from "./common";
 
 const state = {
-  tab: "risk" as "risk" | "calls" | "assign" | "access" | "sos",
+  tab: "risk" as "risk" | "calls" | "assign" | "access",
   range: { preset: "30d" } as Range,
   office: "",
   employee: "",
@@ -68,7 +68,7 @@ function tabs(): string {
     <button class="chip" data-tab="calls" aria-pressed="${state.tab === "calls"}">Контрольный обзвон</button>
     <button class="chip" data-tab="assign" aria-pressed="${state.tab === "assign"}">Закрепления</button>
     <button class="chip" data-tab="access" aria-pressed="${state.tab === "access"}">Доступ</button>
-    <button class="chip" data-tab="sos" aria-pressed="${state.tab === "sos"}">Тревога (SOS)</button></div>`;
+    </div>`;
 }
 
 async function renderRisk(root: HTMLElement) {
@@ -236,7 +236,7 @@ async function mountDayPlayer(box: HTMLElement, track: TrackPoint[], visits: any
     `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:100%">
       <path fill="none" stroke="#93a3b3" stroke-width="2.5" stroke-linejoin="round" d="${chunks.map(c => `M${pathOf(c)}`).join(" ")}"></path>
       <path id="dsvg-tail" fill="none" stroke="#B0472C" stroke-width="3.5" stroke-linejoin="round" d=""></path>
-      ${visitPts.map(v => { const [x, y] = project(v); return `<circle cx="${x}" cy="${y}" r="5" fill="#2c6e46"><title>${esc(v.debtor || v.rep)}</title></circle>`; }).join("")}
+      ${visitPts.map(v => { const [x, y] = project(v); return `<circle cx="${x}" cy="${y}" r="5" fill="${v.flags && v.flags.length ? "#B0472C" : "#2c6e46"}"><title>${esc(v.debtor || v.rep)}${v.flags && v.flags.length ? " · " + esc(v.flags.join(", ")) : ""}</title></circle>`; }).join("")}
       <circle id="dsvg-dot" r="7" fill="#B0472C" stroke="#fff" stroke-width="2"></circle>
     </svg>`;
   const svgLine = { tail: svgEl.querySelector("#dsvg-tail")!, dot: svgEl.querySelector("#dsvg-dot")! };
@@ -258,8 +258,8 @@ async function mountDayPlayer(box: HTMLElement, track: TrackPoint[], visits: any
           paint: { "line-color": "#B0472C", "line-width": 4 } });
         for (const v of visitPts) {
           const elx = document.createElement("div");
-          elx.className = "dmap-visit";
-          elx.title = String(v.debtor || v.rep);
+          elx.className = "dmap-visit" + (v.flags && v.flags.length ? " bad" : "");
+          elx.title = `${v.debtor || v.rep}${v.flags && v.flags.length ? " · " + v.flags.join(", ") : ""}`;
           new w.maplibregl.Marker({ element: elx }).setLngLat([v.lon, v.lat]).addTo(map);
         }
         const hd = document.createElement("div");
@@ -481,36 +481,6 @@ async function renderAccess(root: HTMLElement) {
   wire(root);
 }
 
-async function renderSos(root: HTMLElement) {
-  setHead("Тревога (SOS)", "сигналы выездников из приложения");
-  const r = await call("/api/control/sos", rangeQuery(state.range));
-  if (!root.isConnected) return;
-  if (!r.ok) { root.innerHTML = tabs() + problem(r.text || "Не загрузилось"); wire(root); return; }
-  const d = r.data;
-  const evs = d.events as any[];
-  const open = evs.filter((e) => !e.resolved_at).length;
-  root.innerHTML = `${staleNote((r as { stale?: string }).stale)}
-    <div class="toolbar">${tabs()}</div>
-    <div class="toolbar">${rangeChips(state.range, d.range, ["7d", "30d", "month"])}</div>
-    <div class="kpis"><div class="kpi accent"><b>${n(open)}</b><span>не отработано</span></div>
-      <div class="kpi"><b>${n(evs.length - open)}</b><span>отработано</span></div></div>
-    <div class="section feed">${evs.map((e) => `<div class="ev"><time>${esc(String(e.ts || "").replace("T", " ").slice(5, 16))}</time><span class="mark" style="${e.resolved_at ? "" : "background:#B0472C"}"></span>
-      <div><div class="line1"><b>${esc(e.employee || "без привязки")}</b>${e.battery != null ? ` · заряд ${n(e.battery)}%` : ""}${e.acc_m != null ? ` · точность ${n(e.acc_m)} м` : ""}</div>
-      ${e.maps ? `<div class="line2"><a href="#" data-map="${esc(e.maps)}">точка на карте</a></div>` : ""}
-      ${e.note ? `<div class="line2">${esc(e.note)}</div>` : ""}
-      ${e.resolved_at ? `<div class="line2 muted">отработал ${esc(e.resolved_by || "")} · ${esc(String(e.resolved_at).replace("T", " ").slice(0, 16))}</div>` : `<button class="btn small" data-resolve="${n(e.id)}">Отработано</button>`}</div></div>`).join("") || '<div class="empty"><b>Тихо</b>Сигналов за это окно не было.</div>'}</div>
-    <p class="muted" style="font-size:13.5px;max-width:760px;margin-top:12px">Кнопка SOS в приложении («На линии», долгое нажатие) шлёт точку, заряд и время; без связи сигнал доезжает позже — ровно один раз. Руководителю и безопасникам в момент приёма уходит телеграм.</p>`;
-  wire(root);
-  root.querySelectorAll<HTMLAnchorElement>("[data-map]").forEach((a) => a.addEventListener("click", (ev) => {
-    ev.preventDefault(); void window.open(a.dataset.map!, "_blank");
-  }));
-  root.querySelectorAll<HTMLButtonElement>("[data-resolve]").forEach((b) => b.addEventListener("click", async () => {
-    const res = await call("/api/control/sos_resolve", undefined, "POST", { id: Number(b.dataset.resolve) });
-    if (!res.ok) { toast(res.text || "Не сохранилось"); return; }
-    toast("Отмечено"); void renderSos(root);
-  }));
-}
-
 async function renderCalls(root: HTMLElement) {
   setHead("Контрольный обзвон", "позвонить должнику и сверить со словами выездника");
   const r = await call("/api/control/callbacks", { date: state.day || undefined, office: state.office });
@@ -578,7 +548,6 @@ function draw(root: HTMLElement): Promise<void> {
   if (state.tab === "calls") return renderCalls(root);
   if (state.tab === "assign") return renderAssign(root);
   if (state.tab === "access") return renderAccess(root);
-  if (state.tab === "sos") return renderSos(root);
   if (state.employee) return renderFlags(root);
   return renderRisk(root);
 }

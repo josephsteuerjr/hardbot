@@ -918,15 +918,6 @@ def day_story(mgr: dict, team: list[str], employee: str, day: str) -> dict | Non
         at = datetime.fromtimestamp(s["from_ms"] / 1000.0, TZ)
         events.append({"kind": "move",
                        "at": at.isoformat(timespec="seconds"), "event": s})
-    # SOS — по МЕСТНОМУ дню (ts на сервере в UTC, вечерUTC = чужой день)
-    key = db._name_key(employee)
-    for r in db.sos_events_between(
-            (lo_local - timedelta(days=2)).date().isoformat(),
-            (hi_local + timedelta(days=2)).date().isoformat()):
-        t = _local_dt(r.get("ts"))
-        if t and t.date().isoformat() == day and db._name_key(r.get("employee") or "") == key:
-            events.append({"kind": "sos", "at": t.isoformat(timespec="seconds"),
-                           "event": r})
     events.sort(key=lambda x: x["at"] or "")
     # Сырой трек для плеера (перемотка по времени): точек за смену при шаге
     # ≥25 м — сотни, не тысячи; на всякий случай режем с конца (последние).
@@ -965,15 +956,3 @@ def geo_days(mgr: dict, team: list[str], rng: dict, employee: str) -> dict:
             for iso in sorted(set(pts) | set(visits), reverse=True)]
     return {"screen": "geo_days", "employee": employee, "days": days,
             "range": rng, "generated_at": datetime.now(TZ).isoformat(timespec="seconds")}
-
-
-# --- сигналы тревоги (SOS, контур СБ) ---------------------------------------------
-def sos_feed(mgr: dict, team: list[str] | None, rng: dict) -> dict:
-    """Лента сигналов SOS за окно, новые сверху. team=None — вся компания
-    (админский транспорт); для безопасника — его команда."""
-    events = db.sos_events_between(rng["from"], rng["to"], team)
-    for r in events:
-        r["maps"] = (f"https://www.openstreetmap.org/?mlat={r['lat']}&mlon={r['lon']}#map=17/{r['lat']}/{r['lon']}"
-                     if r.get("lat") is not None and r.get("lon") is not None else "")
-    return {"screen": "sos", "range": rng, "events": events,
-            "generated_at": datetime.now(TZ).isoformat(timespec="seconds")}

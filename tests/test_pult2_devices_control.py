@@ -44,7 +44,7 @@ def _call(method, path, *, headers=None, json_body=None, raw=False):
 def _seed():
     db.init_db()
     with db.connect() as conn:
-        for t in ("manager_devices", "control_checks", "sos_events"):
+        for t in ("manager_devices", "control_checks"):
             conn.execute(f"DELETE FROM {t}")
         conn.execute("DELETE FROM track_points WHERE employee IN (?,?)", (EMP_A, EMP_B))
         conn.execute("DELETE FROM managers WHERE telegram_id IN (?,?,?)", (MGR, SEC, FULL))
@@ -84,21 +84,6 @@ def _enroll(uid):
                      json_body={"code": f"https://x.example/i/{code}", "device": "ПК-1"})
     assert st == 200, body
     return body["token"], body
-
-
-def _agent_token():
-    """Токен приложения выездника (X-App-Token) — как выдаёт обмен ссылки."""
-    import secrets
-    tok = secrets.token_urlsafe(24)
-    now = datetime.now()
-    with db.connect() as conn:
-        conn.execute(
-            "INSERT INTO app_tokens (token, telegram_id, created_at, expires_at, agent) "
-            "VALUES (?,?,?,?,?)",
-            (db.app_token_key(tok), AGENT, now.isoformat(timespec="seconds"),
-             (now + timedelta(days=1)).isoformat(timespec="seconds"), "test"))
-        conn.commit()
-    return tok
 
 
 # --- вход по ключу ------------------------------------------------------------------
@@ -431,38 +416,6 @@ def test_day_story_reads_geo_by_time():
     assert st == 404
 
 
-def test_sos_signal_is_recorded_once_and_shown_to_control():
-    _seed()
-    h = {"X-App-Token": _agent_token()}
-    body = {"client_id": "sos-uuid-1", "lat": 41.31, "lon": 69.24,
-            "acc": 12, "battery": 77, "note": ""}
-    st, first = _call("POST", "/api/sos", headers=h, json_body=body)
-    assert st == 200 and first["ok"] and first["fresh"], first
-    # повтор из оффлайн-очереди — тот же сигнал, не второй
-    st, repeat = _call("POST", "/api/sos", headers=h, json_body=body)
-    assert st == 200 and not repeat["fresh"]
-    # без координат — не ошибка поля, а ok:false (очередь не встаёт)
-    st, bad = _call("POST", "/api/sos", headers=h,
-                    json_body={"client_id": "sos-uuid-2", "lat": None})
-    assert st == 200 and not bad["ok"]
-    token, _ = _enroll(SEC)
-    st, feed = _call("GET", "/api/control/sos?preset=7d", headers={"X-Pult-Token": token})
-    assert st == 200 and len(feed["events"]) == 1
-    ev = feed["events"][0]
-    assert ev["employee"] == EMP_A and "openstreetmap" in ev["maps"]
-    # отработка: один раз, повторно не отмечается
-    st, done = _call("POST", "/api/control/sos_resolve",
-                     headers={"X-Pult-Token": token}, json_body={"id": ev["id"]})
-    assert st == 200 and done["ok"]
-    st, again = _call("POST", "/api/control/sos_resolve",
-                      headers={"X-Pult-Token": token}, json_body={"id": ev["id"]})
-    assert st == 200 and not again["ok"]
-    # руководитель «Контроль» не видит — и тревогу тоже
-    mgr_tok, _ = _enroll(MGR)
-    assert _call("GET", "/api/control/sos?preset=7d",
-                 headers={"X-Pult-Token": mgr_tok})[0] == 403
-
-
 # --- журнал закреплений (контур СБ, 01.10) ------------------------------------------
 def test_assignment_journal_records_transfer_and_backdating():
     _seed()  # первый импорт: P2-0..2 у EMP_A, P2-3..5 у EMP_B
@@ -573,8 +526,6 @@ def test_access_log_and_admin_control():
         assert st == 200 and body["screen"] == "day"
         st, body = _call("GET", f"/admin/control/geo_days?employee={EMP_A}&preset=7d", headers=h)
         assert st == 200 and body["screen"] == "geo_days"
-        st, body = _call("GET", "/admin/control/sos?preset=7d", headers=h)
-        assert st == 200 and body["screen"] == "sos"
     # чужой ключ не пускает
     assert _call("GET", "/admin/control/overview",
                  headers={"X-Admin-Key": "nope"})[0] in (401, 403)
