@@ -1,18 +1,20 @@
-// «Контроль» — только безопасность (и владелец). Три слоя: риск по людям против
-// медианы своего офиса, разбор выездов человека по следам и контрольный обзвон
-// должников: подтвердить звонком, был ли выезд и не отдавал ли человек деньги в руки.
+// «Контроль» — только безопасность (и владелец). Процентов и сводного балла
+// НЕТ (решение 03.10.2026): только счётчики по каждому признаку, отдельно.
+// Слои: статистика по людям, гео-запись дня по времени, контрольный обзвон,
+// закрепления, доступ и сигналы тревоги (SOS).
 import { api, hard } from "../kit/api";
-import { dayTitle, esc, icon, n, pct, plural, toast } from "../kit/dom";
+import { dayTitle, esc, icon, n, plural, toast } from "../kit/dom";
 import { setHead, type Section } from "../kit/shell";
 import { DataTable } from "../kit/table";
 import { evidenceTag, flagsHtml, officeChips, openPerson, problem, rangeChips, rangeQuery, staleNote, wireRange, type Range } from "./common";
 
 const state = {
-  tab: "risk" as "risk" | "calls" | "assign" | "access",
+  tab: "risk" as "risk" | "calls" | "assign" | "access" | "sos",
   range: { preset: "30d" } as Range,
   office: "",
   employee: "",
   day: "",
+  geoDay: "",
 };
 
 /** Как звать сервер: руководитель — своим токеном (/api/control/*), аналитик —
@@ -38,55 +40,72 @@ export async function adminControlCall(path: string, query?: Record<string, unkn
   return r.ok ? { ok: true, data: r.data } : { ok: false, text: r.error || "Ошибка связи с питон-стороной" };
 }
 
-const LEVEL: Record<string, string> = { high: "высокий", mid: "средний", low: "низкий" };
+/** Колонки-счётчики: один признак — одна колонка, без процентов и весов. */
+const COUNTERS: [string, string][] = [
+  ["far", "Далеко от адреса"],
+  ["nogeo", "Нет GPS-точки"],
+  ["addr_coarse", "Адрес неточный"],
+  ["late", "Внесено позже"],
+  ["fast", "За полминуты"],
+  ["night", "Ночью"],
+  ["series", "Внесено пачкой"],
+  ["cash", "«Наличные» в тексте"],
+  ["paid", "«Оплатил» без платежа"],
+  ["bymgr", "Внесено руководителем"],
+  ["dupphoto", "Фото дважды"],
+  ["callback", "Обзвон: не подтвердилось"],
+];
 
-function signalText(s: any): string {
-  if (s.value !== undefined) return `${esc(s.label)} <span class="muted">${pct(s.value)} · офис ${pct(s.peer)}</span>`;
-  return `${esc(s.label)} <span class="muted">· ${n(s.n)}</span>`;
+function counterCell(key: string, title: string) {
+  return {
+    key, title, num: true as const, value: (x: any) => x.counts[key] || 0,
+    html: (x: any) => (x.counts[key] ? `<b>${n(x.counts[key])}</b>` : '<span class="muted">—</span>'),
+  };
 }
 
 function tabs(): string {
-  return `<div class="chips"><button class="chip" data-tab="risk" aria-pressed="${state.tab === "risk"}">Риск по людям</button>
+  return `<div class="chips"><button class="chip" data-tab="risk" aria-pressed="${state.tab === "risk"}">Статистика по людям</button>
     <button class="chip" data-tab="calls" aria-pressed="${state.tab === "calls"}">Контрольный обзвон</button>
     <button class="chip" data-tab="assign" aria-pressed="${state.tab === "assign"}">Закрепления</button>
-    <button class="chip" data-tab="access" aria-pressed="${state.tab === "access"}">Доступ</button></div>`;
+    <button class="chip" data-tab="access" aria-pressed="${state.tab === "access"}">Доступ</button>
+    <button class="chip" data-tab="sos" aria-pressed="${state.tab === "sos"}">Тревога (SOS)</button></div>`;
 }
 
 async function renderRisk(root: HTMLElement) {
-  setHead("Контроль", "следы, по которым стоит проверить человека");
+  setHead("Контроль", "статистика признаков — только факты, без процентов");
   const r = await call("/api/control/overview", { ...rangeQuery(state.range), office: state.office });
   if (!root.isConnected) return;
   if (!r.ok) { root.innerHTML = tabs() + problem(r.text || "Не загрузилось"); wire(root); return; }
   const d = r.data;
   const rows = d.rows as any[];
-  const high = rows.filter((x) => x.level === "high").length;
-  root.innerHTML = `${staleNote(r.stale)}
+  const sum = (k: string) => rows.reduce((s, x) => s + (x.counts[k] || 0), 0);
+  const vis = rows.reduce((s, x) => s + (x.verifiable || 0), 0);
+  const visAll = rows.reduce((s, x) => s + (x.visits || 0), 0);
+  root.innerHTML = `${staleNote((r as { stale?: string }).stale)}
     <div class="toolbar">${tabs()}<span class="spacer"></span>${canExcel ? `<button class="btn small" data-xlsx>${icon("download")}Excel</button>` : ""}</div>
     <div class="toolbar">${rangeChips(state.range, d.range, ["7d", "30d", "month"])}<span class="spacer"></span>${officeChips(d.offices, state.office)}</div>
-    <div class="kpis"><div class="kpi accent"><b>${n(high)}</b><span>высокий риск</span></div>
-      <div class="kpi"><b>${n(rows.filter((x) => x.level === "mid").length)}</b><span>средний</span></div>
-      <div class="kpi"><b>${n(rows.reduce((s, x) => s + x.checks.done, 0))}</b><span>проверено звонком</span></div>
-      <div class="kpi"><b>${n(rows.reduce((s, x) => s + x.checks.no_visit + x.checks.cash, 0))}</b><span>не подтвердилось</span></div></div>
+    <div class="kpis"><div class="kpi"><b>${n(visAll)}</b><span>выездов в окне</span></div>
+      <div class="kpi accent"><b>${n(sum("far"))}</b><span>далеко от адреса</span></div>
+      <div class="kpi"><b>${n(vis)}</b><span>проверяемых (точный адрес + GPS)</span></div>
+      <div class="kpi"><b>${n(sum("addr_coarse"))}</b><span>адрес неточный — не проверить</span></div>
+      <div class="kpi"><b>${n(rows.reduce((s, x) => s + x.checks.no_visit + x.checks.cash, 0))}</b><span>не подтвердилось звонком</span></div></div>
     <div class="section" id="risk-tbl"></div>
-    <div class="section"><div class="section-head"><h2 class="section-title">Что значат следы</h2></div>
-      <div class="grid2">${(d.legend as any[]).map((l) => `<div class="list-row"><div class="grow"><div class="nm">${esc(l.label)}</div><div class="sub">${esc(l.hint)}</div></div></div>`).join("")}</div>
-      <p class="muted" style="font-size:13.5px;max-width:760px;margin-top:14px">Каждый след сам по себе ничего не доказывает: человек сравнивается со своим офисом за то же окно. Подтверждает подозрение только звонок должнику — поэтому рядом контрольный обзвон.</p></div>`;
+    <div class="section"><div class="section-head"><h2 class="section-title">Как читать</h2></div>
+      <ul style="margin:4px 0 0 18px;line-height:1.6">${(d.how as string[]).map((t) => `<li style="font-size:13.5px">${esc(t)}</li>`).join("")}</ul></div>
+    <div class="section"><div class="section-head"><h2 class="section-title">Что значат признаки</h2></div>
+      <div class="grid2">${(d.legend as any[]).map((l) => `<div class="list-row"><div class="grow"><div class="nm">${esc(l.label)}</div><div class="sub">${esc(l.hint)}</div></div></div>`).join("")}</div></div>`;
   wire(root);
   new DataTable<any>(root.querySelector("#risk-tbl")!, {
-    id: "control-risk", exportName: "Контроль — риск", key: (x) => x.employee,
+    id: "control-risk", exportName: "Контроль — статистика", key: (x) => x.employee,
     cols: [
       { key: "emp", title: "Сотрудник", value: (x) => x.employee, html: (x) => `<span class="who">${esc(x.employee)}</span><span class="sub">${esc(x.office || "без офиса")}</span>` },
       { key: "office", title: "Офис", value: (x) => x.office || "без офиса" },
       { key: "visits", title: "Выездов", num: true, value: (x) => x.visits },
-      { key: "risk", title: "Риск", num: true, value: (x) => (x.judged ? x.risk : ""),
-        html: (x) => `<span class="risk" data-level="${x.level}" title="${esc(LEVEL[x.level])}"><b>${x.judged ? n(x.risk) : "—"}</b><span class="risk-bar"><i style="width:${x.risk}%"></i></span></span>` },
-      { key: "level", title: "Уровень", value: (x) => LEVEL[x.level] },
-      { key: "signals", title: "Следы против офиса", filter: false, value: (x) => (x.signals as any[]).map((s) => s.label).join(", "),
-        html: (x) => `<div class="signals" style="white-space:normal">${(x.signals as any[]).slice(0, 4).map((s) => `<span class="flag${["cash", "callback", "paid"].includes(s.key) ? " strong" : ""}">${signalText(s)}</span>`).join("") || '<span class="muted">следов нет</span>'}</div>` },
-      { key: "checks", title: "Обзвон", num: true, value: (x) => x.checks.done,
-        html: (x) => (x.checks.done ? `${n(x.checks.done)}${x.checks.no_visit + x.checks.cash ? ` <span class="tag err">${n(x.checks.no_visit + x.checks.cash)}</span>` : ""}` : '<span class="muted">—</span>') },
+      { key: "verifiable", title: "Проверяемых", num: true, value: (x) => x.verifiable,
+        html: (x) => `${n(x.verifiable)}<span class="sub"> из ${n(x.visits)}</span>` },
+      ...COUNTERS.map(([key, title]) => counterCell(key, title)),
     ],
-    onRow: (x) => { state.employee = x.employee; void renderFlags(root); },
+    onRow: (x) => { state.employee = x.employee; state.geoDay = ""; void renderFlags(root); },
   }).setRows(rows);
   root.querySelector("[data-xlsx]")?.addEventListener("click", async () => {
     const res = await hard.download("/api/control/export.xlsx", rangeQuery(state.range), `Контроль ${d.range.from}—${d.range.to}.xlsx`);
@@ -94,9 +113,77 @@ async function renderRisk(root: HTMLElement) {
   });
 }
 
+/** Гео-запись одного дня по времени: отрезки движения, выезды, тревога. */
+async function renderDay(root: HTMLElement, day: string) {
+  const body = root.querySelector("#day-body") as HTMLElement | null;
+  if (!body) return;
+  body.innerHTML = '<div class="skeleton"></div>';
+  const r = await call("/api/control/day", { ...rangeQuery(state.range), employee: state.employee, date: day });
+  if (!root.isConnected || !body.isConnected) return;
+  if (!r.ok) { body.innerHTML = problem(r.text || "Не загрузилось"); return; }
+  const d = r.data;
+  const evs = d.events as any[];
+  const gaps = d.gaps as any[];
+  body.innerHTML = `
+    <div class="kpis"><div class="kpi"><b>${n(d.points)}</b><span>точек записано</span></div>
+      <div class="kpi"><b>${d.km ? d.km.toFixed(1).replace(".", ",") : "0"}</b><span>км по записи</span></div>
+      <div class="kpi"><b>${esc(d.first || "—")}</b><span>первая точка</span></div>
+      <div class="kpi"><b>${esc(d.last || "—")}</b><span>последняя точка</span></div></div>
+    ${gaps.length ? `<div class="notice"><span class="grow">Паузы записи: ${gaps.map((g) => `${esc(g.from)}–${esc(g.to)} (${n(g.min)} мин)`).join(", ")} — телефон не писал: гео выключено, приложение закрыто или села батарея.</span></div>` : ""}
+    <div class="feed">${evs.map((e) => {
+      if (e.kind === "move") {
+        const s = e.event;
+        return `<div class="ev"><time>${esc(s.from)}</time><span class="mark"></span>
+          <div><div class="line1">В движении ${esc(s.from)}–${esc(s.to)} · ${n(s.min)} мин</div>
+          <div class="line2">${String(s.km).replace(".", ",")} км · точек ${n(s.n)}</div></div></div>`;
+      }
+      if (e.kind === "sos") {
+        const s = e.event;
+        return `<div class="ev"><time>${esc(String(s.ts || "").slice(11, 16))}</time><span class="mark" style="background:#B0472C"></span>
+          <div><div class="line1"><b style="color:#B0472C">СИГНАЛ ТРЕВОГИ</b>${s.battery != null ? ` · заряд ${n(s.battery)}%` : ""}</div>
+          ${s.maps ? `<div class="line2"><a href="#" data-map="${esc(s.maps)}">точка на карте</a></div>` : ""}</div></div>`;
+      }
+      const v = e.event;
+      return `<div class="ev visit pick" data-rep="${esc(v.rep)}" data-day="${esc(v.day)}"><time>${esc(v.time)}</time><span class="mark"></span>
+        <div><div class="line1"><b>${esc(v.debtor || v.rep)}</b> — ${esc(v.title)}${v.agreed ? ` · ${esc(v.agreed)}` : ""}</div>
+        ${v.detail ? `<div class="line2">${esc(v.detail)}</div>` : ""}${flagsHtml(v.flags)}</div>
+        <div class="side">${evidenceTag(v.evidence)}</div></div>`;
+    }).join("") || '<div class="empty"><b>Пусто</b>Ни выездов, ни гео-записи в этот день.</div>'}</div>`;
+  body.querySelectorAll<HTMLElement>(".ev.visit[data-rep]").forEach((row) => row.addEventListener("click", () => {
+    void openPerson(state.employee, row.dataset.rep!, row.dataset.day);
+  }));
+  body.querySelectorAll<HTMLAnchorElement>("[data-map]").forEach((a) => a.addEventListener("click", (ev) => {
+    ev.preventDefault(); window.open(a.dataset.map!, "_blank");
+  }));
+}
+
+async function renderGeoSection(root: HTMLElement) {
+  const box = root.querySelector("#geo-box") as HTMLElement | null;
+  if (!box) return;
+  const r = await call("/api/control/geo_days", { ...rangeQuery(state.range), employee: state.employee });
+  if (!root.isConnected || !box.isConnected) return;
+  if (!r.ok) { box.innerHTML = problem(r.text || "Не загрузилось"); return; }
+  const days = (r.data.days as any[]) || [];
+  if (!days.length) {
+    box.innerHTML = '<p class="muted" style="font-size:13.5px">За это окно гео-записи и выездов нет.</p>';
+    return;
+  }
+  const first = state.geoDay && days.some((x) => x.day === state.geoDay) ? state.geoDay : days[0].day;
+  state.geoDay = first;
+  box.innerHTML = `<div class="chips" style="margin-bottom:10px">${days.slice(0, 14).map((x) =>
+    `<button class="chip" data-gday="${esc(x.day)}" aria-pressed="${x.day === first}">${esc(dayTitle(x.day))}<span class="n">${n(x.points || x.visits || 0)}</span></button>`).join("")}</div>
+    <div id="day-body"></div>`;
+  box.querySelectorAll<HTMLButtonElement>("[data-gday]").forEach((b) => b.addEventListener("click", () => {
+    state.geoDay = b.dataset.gday!;
+    box.querySelectorAll("[data-gday]").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+    void renderDay(root, state.geoDay);
+  }));
+  void renderDay(root, state.geoDay);
+}
+
 async function renderFlags(root: HTMLElement) {
   const emp = state.employee;
-  setHead(emp, "выезды со следами");
+  setHead(emp, "выезды с признаками");
   root.innerHTML = '<div class="skeleton" style="width:40%"></div><div class="skeleton"></div>';
   const r = await call("/api/control/flags", { ...rangeQuery(state.range), employee: emp });
   if (!root.isConnected) return;
@@ -104,6 +191,8 @@ async function renderFlags(root: HTMLElement) {
   const d = r.data;
   const all = d.visits as any[];
   const flagged = all.filter((v) => v.flags.length);
+  const verifiable = all.filter((v) => v.evidence === "confirmed" || v.evidence === "far").length;
+  const coarse = all.filter((v) => v.evidence === "coarse").length;
   let day = "";
   const rows = flagged.map((v) => {
     const head = v.day !== day ? `<div class="feed-day">${esc(dayTitle(v.day))}</div>` : "";
@@ -115,10 +204,14 @@ async function renderFlags(root: HTMLElement) {
   }).join("");
   root.innerHTML = `<div class="toolbar"><button class="btn small" data-back>← Все люди</button>${rangeChips(state.range, d.range, ["7d", "30d", "month"])}</div>
     <div class="kpis"><div class="kpi"><b>${n(all.length)}</b><span>выездов за окно</span></div>
-      <div class="kpi accent"><b>${n(flagged.length)}</b><span>со следами</span></div>
-      <div class="kpi"><b>${n(all.filter((v) => v.flags.includes("cash")).length)}</b><span>«наличные» в тексте</span></div>
-      <div class="kpi"><b>${n(all.filter((v) => v.flags.includes("far")).length)}</b><span>далеко от адреса</span></div></div>
-    <div class="section feed">${rows || '<div class="empty"><b>Чисто</b>Выездов со следами за это окно нет.</div>'}</div>`;
+      <div class="kpi accent"><b>${n(flagged.length)}</b><span>с признаками</span></div>
+      <div class="kpi"><b>${n(all.filter((v) => v.flags.includes("far")).length)}</b><span>далеко (из ${n(verifiable)} проверяемых)</span></div>
+      <div class="kpi"><b>${n(coarse)}</b><span>адрес неточный</span></div>
+      <div class="kpi"><b>${n(all.filter((v) => v.flags.includes("nogeo")).length)}</b><span>нет GPS-точки</span></div></div>
+    <div class="section feed">${rows || '<div class="empty"><b>Чисто</b>Выездов с признаками за это окно нет.</div>'}</div>
+    <div class="section"><div class="section-head"><h2 class="section-title">Гео по времени</h2></div>
+      <p class="muted" style="font-size:13.5px;margin:0 0 10px">Запись смены «На линии» и поездок: движение отрезками, выезды и тревога одной лентой по времени.</p>
+      <div id="geo-box"></div></div>`;
   root.querySelector("[data-back]")?.addEventListener("click", () => { state.employee = ""; void renderRisk(root); });
   wireRange(root, state.range, () => void renderFlags(root));
   root.querySelectorAll<HTMLElement>(".ev[data-rep]").forEach((row) => row.addEventListener("click", () => {
@@ -126,6 +219,7 @@ async function renderFlags(root: HTMLElement) {
     row.setAttribute("aria-selected", "true");
     void openPerson(emp, row.dataset.rep!, row.dataset.day);
   }));
+  void renderGeoSection(root);
 }
 
 async function renderAssign(root: HTMLElement) {
@@ -137,7 +231,7 @@ async function renderAssign(root: HTMLElement) {
   const rows = d.rows as any[];
   const evs = d.events as any[];
   const KIND: Record<string, string> = { transfer: "передача", assign: "новое", removed: "снято" };
-  root.innerHTML = `${staleNote(r.stale)}
+  root.innerHTML = `${staleNote((r as { stale?: string }).stale)}
     <div class="toolbar">${tabs()}</div>
     <div class="toolbar">${rangeChips(state.range, d.range, ["7d", "30d", "month"])}</div>
     <div class="kpis"><div class="kpi"><b>${n(rows.reduce((s, x) => s + x.received, 0))}</b><span>договоров передано</span></div>
@@ -176,7 +270,7 @@ async function renderAccess(root: HTMLElement) {
   if (!r.ok) { root.innerHTML = tabs() + problem(r.text || "Не загрузилось"); wire(root); return; }
   const d = r.data;
   const evs = d.events as any[];
-  root.innerHTML = `${staleNote(r.stale)}
+  root.innerHTML = `${staleNote((r as { stale?: string }).stale)}
     <div class="toolbar">${tabs()}</div>
     <div class="toolbar">${rangeChips(state.range, d.range, ["7d", "30d", "month"])}</div>
     <div class="kpis"><div class="kpi"><b>${n(evs.length)}</b><span>событий доступа</span></div>
@@ -189,6 +283,36 @@ async function renderAccess(root: HTMLElement) {
   wire(root);
 }
 
+async function renderSos(root: HTMLElement) {
+  setHead("Тревога (SOS)", "сигналы выездников из приложения");
+  const r = await call("/api/control/sos", rangeQuery(state.range));
+  if (!root.isConnected) return;
+  if (!r.ok) { root.innerHTML = tabs() + problem(r.text || "Не загрузилось"); wire(root); return; }
+  const d = r.data;
+  const evs = d.events as any[];
+  const open = evs.filter((e) => !e.resolved_at).length;
+  root.innerHTML = `${staleNote((r as { stale?: string }).stale)}
+    <div class="toolbar">${tabs()}</div>
+    <div class="toolbar">${rangeChips(state.range, d.range, ["7d", "30d", "month"])}</div>
+    <div class="kpis"><div class="kpi accent"><b>${n(open)}</b><span>не отработано</span></div>
+      <div class="kpi"><b>${n(evs.length - open)}</b><span>отработано</span></div></div>
+    <div class="section feed">${evs.map((e) => `<div class="ev"><time>${esc(String(e.ts || "").replace("T", " ").slice(5, 16))}</time><span class="mark" style="${e.resolved_at ? "" : "background:#B0472C"}"></span>
+      <div><div class="line1"><b>${esc(e.employee || "без привязки")}</b>${e.battery != null ? ` · заряд ${n(e.battery)}%` : ""}${e.acc_m != null ? ` · точность ${n(e.acc_m)} м` : ""}</div>
+      ${e.maps ? `<div class="line2"><a href="#" data-map="${esc(e.maps)}">точка на карте</a></div>` : ""}
+      ${e.note ? `<div class="line2">${esc(e.note)}</div>` : ""}
+      ${e.resolved_at ? `<div class="line2 muted">отработал ${esc(e.resolved_by || "")} · ${esc(String(e.resolved_at).replace("T", " ").slice(0, 16))}</div>` : `<button class="btn small" data-resolve="${n(e.id)}">Отработано</button>`}</div></div>`).join("") || '<div class="empty"><b>Тихо</b>Сигналов за это окно не было.</div>'}</div>
+    <p class="muted" style="font-size:13.5px;max-width:760px;margin-top:12px">Кнопка SOS в приложении («На линии», долгое нажатие) шлёт точку, заряд и время; без связи сигнал доезжает позже — ровно один раз. Руководителю и безопасникам в момент приёма уходит телеграм.</p>`;
+  wire(root);
+  root.querySelectorAll<HTMLAnchorElement>("[data-map]").forEach((a) => a.addEventListener("click", (ev) => {
+    ev.preventDefault(); void window.open(a.dataset.map!, "_blank");
+  }));
+  root.querySelectorAll<HTMLButtonElement>("[data-resolve]").forEach((b) => b.addEventListener("click", async () => {
+    const res = await call("/api/control/sos_resolve", undefined, "POST", { id: Number(b.dataset.resolve) });
+    if (!res.ok) { toast(res.text || "Не сохранилось"); return; }
+    toast("Отмечено"); void renderSos(root);
+  }));
+}
+
 async function renderCalls(root: HTMLElement) {
   setHead("Контрольный обзвон", "позвонить должнику и сверить со словами выездника");
   const r = await call("/api/control/callbacks", { date: state.day || undefined, office: state.office });
@@ -199,7 +323,7 @@ async function renderCalls(root: HTMLElement) {
   const items = d.items as any[];
   const todo = items.filter((x) => x.state === "todo").length;
   const outcomes = d.outcomes as { key: string; label: string }[];
-  root.innerHTML = `${staleNote(r.stale)}
+  root.innerHTML = `${staleNote((r as { stale?: string }).stale)}
     <div class="toolbar">${tabs()}<span class="spacer"></span>
       <div class="chips"><button class="chip" data-day="${esc(d.prev_date)}">‹</button>
       <span class="muted nowrap" style="font-size:13.5px;padding:0 6px">${esc(dayTitle(d.date, d.today))}</span>
@@ -216,7 +340,7 @@ async function renderCalls(root: HTMLElement) {
         <div class="phones">${(x.phones as string[]).map((p) => `<button class="phone" data-phone="${esc(p)}" title="Скопировать">${esc(p)}</button>`).join("") || '<span class="muted">телефона в реестре нет</span>'}</div>
         ${x.address ? `<div class="muted" style="font-size:13px;margin-top:6px">${esc(x.address)}</div>` : ""}
         <div class="said"><b>${esc(x.status || "—")}</b>${x.agreed ? ` · ${esc(x.agreed)}` : ""}${x.promise ? ` · обещание ${esc(x.promise.date || "")} ${x.promise.sum ? esc(x.promise.sum) : ""}` : ""}${x.reported ? `<br>${esc(x.reported)}` : ""}</div>
-        <div class="why">${esc(x.why === "по следам" ? "выбран по следам:" : x.why)} ${x.why === "по следам" ? flagsHtml(x.flags) : ""}</div></div>
+        <div class="why">${esc(x.why === "по следам" ? "выбран по признакам:" : x.why)} ${x.why === "по следам" ? flagsHtml(x.flags) : ""}</div></div>
       <div><div class="outcomes">${outcomes.map((o) => `<button class="chip" data-out="${o.key}" aria-pressed="${x.outcome === o.key}">${esc(o.label)}</button>`).join("")}</div>
         <textarea class="input" data-note placeholder="Заметка: что сказал должник" style="width:100%;margin-top:8px;min-height:60px">${esc(x.note)}</textarea>
         ${x.checked_at ? `<div class="muted" style="font-size:12px;margin-top:4px">отмечено ${esc(x.checked_at.replace("T", " ").slice(0, 16))}</div>` : ""}</div>
@@ -256,6 +380,7 @@ function draw(root: HTMLElement): Promise<void> {
   if (state.tab === "calls") return renderCalls(root);
   if (state.tab === "assign") return renderAssign(root);
   if (state.tab === "access") return renderAccess(root);
+  if (state.tab === "sos") return renderSos(root);
   if (state.employee) return renderFlags(root);
   return renderRisk(root);
 }
@@ -268,7 +393,7 @@ export function controlSection(transport: ControlCall, excel: boolean): Section 
     id: "control",
     title: "Контроль",
     icon: "control",
-    kicker: "следы, по которым стоит проверить человека",
+    kicker: "статистика признаков — только факты, без процентов",
     async render(root) {
       state.employee = "";
       root.innerHTML = '<div class="skeleton" style="width:40%"></div><div class="skeleton"></div>';

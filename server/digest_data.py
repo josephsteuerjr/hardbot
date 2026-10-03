@@ -1989,15 +1989,15 @@ def daily_report_caption(data: dict) -> str:
                  f"({t['assigned_contracts']} договоров)")
     if t["overdue"]:
         parts.append(f"⏰ Просрочено обещаний: {t['overdue']}")
-    # Подтверждение выезда — одной строкой: на адресе / не был / нечем
-    # проверить. Ноль по всем трём — строки нет (старые оболочки).
+    # Подтверждение выезда — одной строкой: на адресе / не был / проверить
+    # не удалось. Ноль по всем трём — строки нет (старые оболочки).
     if t.get("confirmed") or t.get("far") or t.get("unverified"):
         parts.append(f"🛡 На адресе подтверждено: <b>{t.get('confirmed', 0)}</b> · "
                      f"у адреса не был: <b>{t.get('far', 0)}</b> · "
-                     f"нечем проверить: {t.get('unverified', 0)}"
+                     f"проверить не удалось: {t.get('unverified', 0)}"
                      + (f" · заполнено не на адресе: {t['saved_away']}"
                         if t.get("saved_away") else "")
-                     + (f" · признаки серии: {t['series']}" if t.get("series") else ""))
+                     + (f" · внесено пачкой: {t['series']}" if t.get("series") else ""))
     parts.append("Таблица по каждому сотруднику — в файле; "
                  "разбор по дням и карточки — во вкладке «Сводка» приложения.")
     return "\n".join(parts)

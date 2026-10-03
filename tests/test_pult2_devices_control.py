@@ -44,8 +44,9 @@ def _call(method, path, *, headers=None, json_body=None, raw=False):
 def _seed():
     db.init_db()
     with db.connect() as conn:
-        for t in ("manager_devices", "control_checks"):
+        for t in ("manager_devices", "control_checks", "sos_events"):
             conn.execute(f"DELETE FROM {t}")
+        conn.execute("DELETE FROM track_points WHERE employee IN (?,?)", (EMP_A, EMP_B))
         conn.execute("DELETE FROM managers WHERE telegram_id IN (?,?,?)", (MGR, SEC, FULL))
         conn.execute("DELETE FROM clients WHERE contract_id LIKE 'P2-%'")
         conn.execute("DELETE FROM visits WHERE contract_id LIKE 'P2-%'")
@@ -83,6 +84,21 @@ def _enroll(uid):
                      json_body={"code": f"https://x.example/i/{code}", "device": "ПК-1"})
     assert st == 200, body
     return body["token"], body
+
+
+def _agent_token():
+    """Токен приложения выездника (X-App-Token) — как выдаёт обмен ссылки."""
+    import secrets
+    tok = secrets.token_urlsafe(24)
+    now = datetime.now()
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO app_tokens (token, telegram_id, created_at, expires_at, agent) "
+            "VALUES (?,?,?,?,?)",
+            (db.app_token_key(tok), AGENT, now.isoformat(timespec="seconds"),
+             (now + timedelta(days=1)).isoformat(timespec="seconds"), "test"))
+        conn.commit()
+    return tok
 
 
 # --- вход по ключу ------------------------------------------------------------------
@@ -248,7 +264,7 @@ def test_callbacks_are_fixed_for_the_day_and_outcome_is_recorded():
     assert st == 200 and ok["check"]["outcome"] == "cash_to_employee"
     _, ov = _call("GET", "/api/control/overview?preset=7d", headers=h)
     row = next(r for r in ov["rows"] if r["employee"] == EMP_A)
-    assert row["checks"]["cash"] == 1 and any(s["key"] == "callback" for s in row["signals"])
+    assert row["counts"]["callback"] == 1, "обзвон не посчитан счётчиком"
 
 
 def test_control_export_writes_formulas_as_text():
@@ -261,12 +277,12 @@ def test_control_export_writes_formulas_as_text():
     assert st == 200 and body[:2] == b"PK"
     import openpyxl
     wb = openpyxl.load_workbook(io.BytesIO(body))
-    assert "Риск" in wb.sheetnames and "Обзвон" in wb.sheetnames
-    for ws in wb.worksheets:
-        for row in ws.iter_rows(values_only=True):
-            for v in row:
-                assert not (isinstance(v, str) and v.startswith("=") and ws.title == "Риск" and False)
-    assert wb["Риск"].cell(3, 1).value == "Сотрудник"
+    assert "Статистика" in wb.sheetnames and "Обзвон" in wb.sheetnames
+    assert wb["Статистика"].cell(3, 1).value == "Сотрудник"
+    # ни процентов, ни балла: колонок «Риск»/«Уровень» больше нет
+    head = [wb["Статистика"].cell(3, c).value for c in range(1, 20)]
+    assert "Риск" not in head and "Уровень" not in head
+    assert "Проверяемых" in head and "Далеко от адреса" in head
 
 
 def test_yesterday_range_is_accepted():
@@ -319,15 +335,13 @@ def test_bymgr_and_dupphoto_signals():
     st, body = _call("GET", "/api/control/overview?preset=today",
                      headers={"X-Pult-Token": token})
     assert st == 200, body
-    def sig(row, key):
-        return next((s["n"] for s in row["signals"] if s["key"] == key), 0)
     by_emp = {r["employee"]: r for r in body["rows"]}
-    assert sig(by_emp[EMP_B], "bymgr") == 1, "act_as-визит не посчитан"
-    assert sig(by_emp[EMP_A], "bymgr") == 0
-    assert sig(by_emp[EMP_A], "dupphoto") == 1, "переиспользованный файл не пойман"
-    assert sig(by_emp[EMP_B], "dupphoto") == 0
-    labels = {s["key"]: s["label"] for s in body["legend"]}
-    assert "bymgr" in labels and "dupphoto" in labels
+    assert by_emp[EMP_B]["counts"]["bymgr"] == 1, "act_as-визит не посчитан"
+    assert by_emp[EMP_A]["counts"]["bymgr"] == 0
+    assert by_emp[EMP_A]["counts"]["dupphoto"] == 1, "переиспользованный файл не пойман"
+    assert by_emp[EMP_B]["counts"]["dupphoto"] == 0
+    labels = {s["key"] for s in body["legend"]}
+    assert {"bymgr", "dupphoto", "addr_coarse"} <= labels
     # и флаг виден в поимённом списке выездов
     st, body = _call("GET", f"/api/control/flags?employee={EMP_A}&preset=today",
                      headers={"X-Pult-Token": token})
@@ -335,6 +349,112 @@ def test_bymgr_and_dupphoto_signals():
     st, body = _call("GET", f"/api/control/flags?employee={EMP_B}&preset=today",
                      headers={"X-Pult-Token": token})
     assert st == 200 and any("bymgr" in v["flags"] for v in body["visits"])
+
+
+# --- никаких процентов: только счётчики (слово Егора, 03.10.2026) -------------------
+def test_overview_has_no_percents_or_risk_score():
+    """Проценты и балл обвиняли тех, у кого адреса точнее. Витрина — счётчики:
+    «далеко» только по проверяемым, база рядом; неточный адрес — не обвинение."""
+    _seed()
+    # EMP_A: 2 far + 2 confirmed (проверяемые), 2 coarse (адрес неточный)
+    _visit("P2-0", EMP_A, "ок", level="far")
+    _visit("P2-1", EMP_A, "ок", level="far")
+    _visit("P2-2", EMP_A, "ок", level="confirmed")
+    _visit("P2-3", EMP_A, "ок", level="confirmed")
+    _visit("P2-4", EMP_A, "ок", level="coarse")
+    _visit("P2-5", EMP_A, "ок", level="coarse")
+    # EMP_B: только неточные адреса — винить не в чем
+    _visit("P2-0", EMP_B, "ок", level="coarse", op="p2-b1")
+    _visit("P2-1", EMP_B, "ок", level="nogeo", op="p2-b2")
+    token, _ = _enroll(SEC)
+    st, body = _call("GET", "/api/control/overview?preset=today",
+                     headers={"X-Pult-Token": token})
+    assert st == 200, body
+    rows = {r["employee"]: r for r in body["rows"]}
+    a = rows[EMP_A]
+    assert a["visits"] == 6 and a["verifiable"] == 4
+    assert a["counts"]["far"] == 2 and a["counts"]["addr_coarse"] == 2
+    b = rows[EMP_B]
+    # coarse больше НЕ считается «нет GPS-точки»: это качество данных
+    assert b["counts"]["addr_coarse"] == 1 and b["counts"]["nogeo"] == 1
+    assert "risk" not in a and "level" not in a and "signals" not in a
+    assert body["how"], "объяснение «как читать» обязательно"
+    legend = {s["key"] for s in body["legend"]}
+    assert "addr_coarse" in legend
+
+
+# --- гео-запись: день по времени и сигналы SOS (03.10.2026) ------------------------
+def _track_points(emp, day, seq):
+    """Точки гео-записи сотрудника за день: seq — [(минуты от полуночи UTC+5,
+    lat, lon)]."""
+    with db.connect() as conn:
+        for i, (minute, lat, lon) in enumerate(seq):
+            # ts на сервере в UTC, день местный +5: полдень местный = 07:00 UTC
+            ts = f"{day}T{7 + minute // 60:02d}:{minute % 60:02d}:00.000Z"
+            conn.execute(
+                "INSERT INTO track_points (session_id, employee, telegram_id, "
+                "contract_id, ts, lat, lon, acc_m, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (f"day:{day}-t", emp, AGENT, None, ts, lat, lon, 15,
+                 date.today().isoformat() + "T00:00:00"))
+
+
+def test_day_story_reads_geo_by_time():
+    _seed()
+    day = date.today().isoformat()
+    _track_points(EMP_A, day, [(0, 41.30, 69.20), (10, 41.31, 69.21),
+                               (20, 41.32, 69.22), (200, 41.40, 69.30)])
+    _visit("P2-0", EMP_A, "на месте", level="confirmed")
+    token, _ = _enroll(SEC)
+    h = {"X-Pult-Token": token}
+    st, body = _call("GET", f"/api/control/day?employee={EMP_A}&date={day}&preset=today",
+                     headers=h)
+    assert st == 200 and body["screen"] == "day", body
+    assert body["points"] == 4
+    # разрыв 3 часа между 20-й и 200-й минутой — два отрезка движения
+    assert len(body["segments"]) == 2
+    assert body["segments"][0]["km"] > 0.5, "километраж по соседним точкам"
+    kinds = [e["kind"] for e in body["events"]]
+    assert "move" in kinds and "visit" in kinds
+    assert any(g["min"] >= 100 for g in body["gaps"]), "пауза записи не поймана"
+    # чипы дней окна
+    st, days = _call("GET", f"/api/control/geo_days?employee={EMP_A}&preset=7d", headers=h)
+    assert st == 200 and any(d["day"] == day and d["points"] == 4 for d in days["days"])
+    # чужой сотрудник — 404
+    st, _ = _call("GET", f"/api/control/day?employee=Нет Такого&date={day}", headers=h)
+    assert st == 404
+
+
+def test_sos_signal_is_recorded_once_and_shown_to_control():
+    _seed()
+    h = {"X-App-Token": _agent_token()}
+    body = {"client_id": "sos-uuid-1", "lat": 41.31, "lon": 69.24,
+            "acc": 12, "battery": 77, "note": ""}
+    st, first = _call("POST", "/api/sos", headers=h, json_body=body)
+    assert st == 200 and first["ok"] and first["fresh"], first
+    # повтор из оффлайн-очереди — тот же сигнал, не второй
+    st, repeat = _call("POST", "/api/sos", headers=h, json_body=body)
+    assert st == 200 and not repeat["fresh"]
+    # без координат — не ошибка поля, а ok:false (очередь не встаёт)
+    st, bad = _call("POST", "/api/sos", headers=h,
+                    json_body={"client_id": "sos-uuid-2", "lat": None})
+    assert st == 200 and not bad["ok"]
+    token, _ = _enroll(SEC)
+    st, feed = _call("GET", "/api/control/sos?preset=7d", headers={"X-Pult-Token": token})
+    assert st == 200 and len(feed["events"]) == 1
+    ev = feed["events"][0]
+    assert ev["employee"] == EMP_A and "openstreetmap" in ev["maps"]
+    # отработка: один раз, повторно не отмечается
+    st, done = _call("POST", "/api/control/sos_resolve",
+                     headers={"X-Pult-Token": token}, json_body={"id": ev["id"]})
+    assert st == 200 and done["ok"]
+    st, again = _call("POST", "/api/control/sos_resolve",
+                      headers={"X-Pult-Token": token}, json_body={"id": ev["id"]})
+    assert st == 200 and not again["ok"]
+    # руководитель «Контроль» не видит — и тревогу тоже
+    mgr_tok, _ = _enroll(MGR)
+    assert _call("GET", "/api/control/sos?preset=7d",
+                 headers={"X-Pult-Token": mgr_tok})[0] == 403
 
 
 # --- журнал закреплений (контур СБ, 01.10) ------------------------------------------
@@ -443,6 +563,12 @@ def test_access_log_and_admin_control():
         assert st == 200 and body["screen"] == "access"
         st, body = _call("GET", "/admin/control/callbacks", headers=h)
         assert st == 200 and body["screen"] == "callbacks"
+        st, body = _call("GET", f"/admin/control/day?employee={EMP_A}&preset=7d", headers=h)
+        assert st == 200 and body["screen"] == "day"
+        st, body = _call("GET", f"/admin/control/geo_days?employee={EMP_A}&preset=7d", headers=h)
+        assert st == 200 and body["screen"] == "geo_days"
+        st, body = _call("GET", "/admin/control/sos?preset=7d", headers=h)
+        assert st == 200 and body["screen"] == "sos"
     # чужой ключ не пускает
     assert _call("GET", "/admin/control/overview",
                  headers={"X-Admin-Key": "nope"})[0] in (401, 403)

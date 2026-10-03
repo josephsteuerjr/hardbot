@@ -16,6 +16,7 @@ import secrets
 import sqlite3
 import time
 from datetime import date, datetime, timedelta, timezone
+from uuid import uuid4
 from pathlib import Path
 
 import country_scope
@@ -97,8 +98,9 @@ PUSH_VISIT = "visit"
 PUSH_GROUP = "group"
 PUSH_REPORT_CHAT = "report_chat"
 PUSH_TEST = "test"          # пробная отправка из пульта: НЕ выдаёт себя за рассылку
+PUSH_SOS = "sos"            # сигнал тревоги выездника: руководителю и безопасникам
 PUSH_KINDS = (PUSH_DIGEST, PUSH_PROMISE, PUSH_VISIT, PUSH_GROUP,
-              PUSH_REPORT_CHAT, PUSH_TEST)
+              PUSH_REPORT_CHAT, PUSH_TEST, PUSH_SOS)
 PUSH_SENT = "sent"
 PUSH_BLOCKED = "blocked"    # TelegramForbiddenError: «не нажал /start» — чинит человек
 PUSH_FAILED = "failed"
@@ -1334,6 +1336,26 @@ def init_db() -> None:
                      "ON assignment_events(employee, window_to)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_assign_ev_contract "
                      "ON assignment_events(contract_id, window_to)")
+        # Сигнал тревоги выездника (контур СБ, 03.10.2026). Привязан к гео-записи
+        # «На линии»: кнопка SOS в приложении шлёт точку на момент нажатия.
+        # client_id (uuid с телефона) делает повтор из оффлайн-очереди безопасным:
+        # сети в поле нет — сигнал обязан доехать позже, и ровно один раз.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sos_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              client_id TEXT NOT NULL,
+              ts TEXT NOT NULL,
+              telegram_id INTEGER,
+              employee TEXT,
+              lat REAL, lon REAL, acc_m INTEGER,
+              battery INTEGER,
+              note TEXT,
+              resolved_at TEXT, resolved_by TEXT,
+              created_at TEXT,
+              UNIQUE(client_id)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sos_ts ON sos_events(ts)")
         # Миграция app_links времён одноразовых кодов (без счётчика uses) и времён
         # общего потолка обменов (без max_uses/bonus_ios/last_use_at/last_agent).
         # Шаблон один и тот же — PRAGMA table_info + ALTER TABLE ... DEFAULT: рабочая
@@ -2539,6 +2561,60 @@ def control_record(visit_id: int, outcome: str, note: str, checker_uid: int) -> 
         row = conn.execute("SELECT * FROM control_checks WHERE visit_id = ?",
                            (int(visit_id),)).fetchone()
     return dict(row)
+
+
+# --- Сигнал тревоги выездника (SOS, контур СБ) ---------------------------------
+def record_sos(client_id: str, telegram_id: int, employee: str,
+               lat, lon, acc_m, battery, note: str) -> tuple[dict | None, bool]:
+    """Записать сигнал тревоги. Возвращает (строка, новый ли). Повтор того же
+    client_id из оффлайн-очереди не плодит событий и не рассылается второй раз —
+    поэтому «новый ли» решает вставка, а не подсчёт."""
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    cid = (client_id or "").strip()[:64] or f"srv-{uuid4().hex[:20]}"
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO sos_events (client_id, ts, telegram_id, employee, "
+            "lat, lon, acc_m, battery, note, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (cid, now_iso, telegram_id, employee or "", lat, lon, acc_m, battery,
+             (note or "").strip()[:500] or None, now_iso))
+        conn.commit()
+        row = conn.execute("SELECT * FROM sos_events WHERE client_id = ?", (cid,)).fetchone()
+    return (dict(row) if row else None), bool(cur.rowcount)
+
+
+def sos_events_between(d_from: str, d_to: str,
+                       team: list[str] | None = None) -> list[dict]:
+    hi = (date.fromisoformat(d_to) + timedelta(days=1)).isoformat()
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM sos_events WHERE ts >= ? AND ts < ? ORDER BY id DESC LIMIT 500",
+            (d_from, hi)).fetchall()
+    out = [dict(r) for r in rows]
+    if team is not None:
+        keys = {_name_key(e) for e in team if e}
+        out = [r for r in out if _name_key(r.get("employee") or "") in keys]
+    return out
+
+
+def sos_resolve(event_id: int, by_name: str) -> bool:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE sos_events SET resolved_at = ?, resolved_by = ? WHERE id = ? "
+            "AND resolved_at IS NULL", (now_iso, (by_name or "")[:120], int(event_id)))
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def track_points_between(employee: str, lo_iso: str, hi_iso: str) -> list[dict]:
+    """Точки гео-записи сотрудника в окне UTC (границы местного дня считает
+    вызывающий: ts точек — UTC с телефона). И «На линии», и поездки навигатора."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT session_id, ts, lat, lon, acc_m, speed FROM track_points "
+            "WHERE employee = ? AND ts >= ? AND ts < ? ORDER BY ts",
+            (employee, lo_iso, hi_iso)).fetchall()
+    return [dict(r) for r in rows]
 
 
 # --- Настройки --------------------------------------------------------------

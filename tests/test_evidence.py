@@ -47,7 +47,7 @@ def test_phone_accuracy_widens_tolerance_not_blame():
 def test_hopeless_accuracy_is_not_judged():
     ev = _build([_s(0, acc=4000, k="save")])
     assert ev["level"] == "nofix"
-    assert "неточная" in ev["note"]
+    assert "Проверить не удалось" in ev["note"] and "точность" in ev["note"]
 
 
 def test_no_points_at_all_is_nogeo():

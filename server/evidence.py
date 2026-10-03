@@ -66,13 +66,13 @@ LEVELS = ("confirmed", "far", "nofix", "nogeo", "coarse")
 LEVEL_TEXT = {
     "confirmed": "подтверждён на адресе",
     "far": "у адреса не был",
-    "nofix": "точка телефона неточная",
-    "nogeo": "без геолокации",
-    "coarse": "адрес неточный — проверить нельзя",
+    "nofix": "GPS-точка слишком грубая",
+    "nogeo": "координат нет",
+    "coarse": "адрес неточный",
 }
 LEVEL_EMOJI = {"confirmed": "🛡", "far": "⚠️", "nofix": "❔", "nogeo": "📵",
                "coarse": "❔"}
-# «Нечем проверить» — всё, что не подтверждение и не нарушение.
+# Не удалось проверить — всё, что не подтверждение и не нарушение.
 UNVERIFIED = ("nofix", "nogeo", "coarse")
 
 _PRECISION_RU = {"city": "города", "district": "района", "region": "области"}
@@ -301,16 +301,16 @@ def note(ev: dict) -> str:
         return " · ".join([head, *tail])
     if level == "nofix":
         acc = ev.get("worst_acc_m")
-        return (f"Точка телефона неточная ({_pretty_m(acc)}) — проверить нельзя"
-                if acc else "Точка телефона неточная — проверить нельзя")
+        return (f"Проверить не удалось: телефон выдал точку с точностью {_pretty_m(acc)}"
+                if acc else "Проверить не удалось: телефон выдал слишком грубую точку")
     if level == "nogeo":
-        return "Без геолокации — проверить нельзя"
+        return "Проверить не удалось: телефон не передал координаты"
     if not ev.get("addr"):
-        return "Адреса на карте нет — проверить нельзя"
+        return "Проверить не удалось: адреса нет на карте"
     prec = _PRECISION_RU.get(ev.get("precision") or "")
     if prec:
-        return f"Адрес известен только до {prec} — проверить нельзя"
-    return "Адрес известен неточно — проверить нельзя"
+        return f"Проверить не удалось: адрес в реестре только до {prec}"
+    return "Проверить не удалось: адрес известен неточно"
 
 
 def line(ev: dict | None) -> str | None:

@@ -125,7 +125,7 @@ async function renderEmployee(root: HTMLElement) {
     </div>`;
   root.querySelector("[data-back]")?.addEventListener("click", () => { state.employee = ""; void renderTeam(root); });
   wireRange(root, state.range, () => void renderEmployee(root));
-  const EV: Record<string, string> = { confirmed: "у адреса", far: "далеко от адреса", nofix: "точка не определилась", nogeo: "без геолокации", coarse: "точка грубая" };
+  const EV: Record<string, string> = { confirmed: "у адреса", far: "далеко от адреса", nofix: "GPS не поймался", nogeo: "нет GPS-точки", coarse: "адрес неточный" };
   new DataTable<any>(root.querySelector("#cases")!, {
     id: "manager-cases", exportName: `Выезды — ${emp}`, key: (c) => `${c.date}|${c.rep}`, empty: "За это окно сотрудник не выезжал.",
     cols: [

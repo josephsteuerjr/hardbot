@@ -331,6 +331,9 @@ textarea:focus,select:focus{outline:none;box-shadow:var(--pop)}
 .bottomnav button.on .ico{color:var(--accent2)}
 .bottomnav button.on:after{content:"";width:6px;height:6px;border-radius:50%;background:var(--terra);margin-top:1px}
 .bottomnav button .ico{width:22px;height:22px}
+.btn.sos{background:#B0472C;color:#fff;border-color:#8f3722;user-select:none;-webkit-user-select:none;touch-action:none}
+.btn.sos.arming{background:#7d2c1b}
+.btn.sos.sent{opacity:.6}
 
 /* --- полноэкранный режим навигации («Поехать») --- */
 .navmode{position:absolute;inset:0;background:var(--bg);z-index:100;display:none}
@@ -1208,7 +1211,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=69;
+const SHELL_VERSION=70;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -2181,9 +2184,10 @@ function setBottomNav(active){
     {id:"team",    label:L().team,   icon:"team",  fn:"renderTeam"},
     {id:"map",     label:L().navtab, icon:"nav",   fn:"renderNav"},
   ]:[
-    {id:"clients", label:L().my,     icon:"list", fn:"renderList"},
-    {id:"map",     label:L().navtab, icon:"nav",  fn:"renderNav"},
-    {id:"marks",   label:L().marks,  icon:"pin",  fn:"renderMarks"},
+    {id:"clients", label:L().my,     icon:"list",  fn:"renderList"},
+    {id:"map",     label:L().navtab, icon:"nav",   fn:"renderNav"},
+    {id:"marks",   label:L().marks,  icon:"pin",   fn:"renderMarks"},
+    {id:"line",    label:"На линии", icon:"target",fn:"renderLine"},
   ];
   $("bottomnavInner").innerHTML = items.map(it =>
     `<button class="${it.id===active?'on':''}" onclick="${it.fn}()">${ic(it.icon)}<span>${esc(it.label)}</span></button>`).join("");
@@ -3823,12 +3827,13 @@ async function refreshData(){
   }
 }
 setInterval(refreshData, 10*60*1000);            // раз в 10 минут при открытом приложении
+dayResumeCheck(); dayDrainQueue();                  // смена «На линии»: продолжить и дослать
 setInterval(checkShellVersion, 5*60*1000);        // версия легче полного портфеля
 
 // Появилась связь — досылаем накопленную очередь; пропала — переключаем индикатор.
 // Плюс досыл и обновление данных при возвращении к приложению (события online в
 // мобильном WebView не всегда надёжны, visibilitychange/pageshow — подстраховка).
-window.addEventListener("online", ()=>{ STATE.online=true; updateOffBar(); flushQueue(); checkShellVersion(); refreshData(); });
+window.addEventListener("online", ()=>{ STATE.online=true; updateOffBar(); flushQueue(); checkShellVersion(); refreshData(); dayDrainQueue(); });
 window.addEventListener("offline", ()=>{ STATE.online=false; updateOffBar(); });
 document.addEventListener("visibilitychange", ()=>{ if(!document.hidden){ flushQueue(); checkShellVersion(); refreshData(); } });
 window.addEventListener("pageshow", e=>{ checkShellVersion(); if(e.persisted){ flushQueue(); refreshData(); } });
@@ -4530,9 +4535,9 @@ function dgKpis(t,rg){
   if(money.length) out.push(sec("Долг",`<div class="drows">${money.join("")}</div>`));
   // Подтверждение выезда и контроль офиса — две колонки строк; тап — те самые случаи.
   const ev=[["confirmed","на адресе"],["far","у адреса не был"],["saved_away","вне адреса"],
-            ["unverified","нечем проверить"],["series","признаки серии"]]
+            ["unverified","проверить не удалось"],["series","внесено пачкой"]]
     .map(([key,l])=>row(l,t[key]||0,c(key),!t[key]));
-  ev.push(row("внесено позже",t.late||0,"",!t.late), row("без гео",t.no_geo||0,"",!t.no_geo));
+  ev.push(row("внесено позже",t.late||0,"",!t.late), row("нет GPS-точки",t.no_geo||0,"",!t.no_geo));
   if(t.visits) out.push(sec("Проверка выездов",`<div class="drows two">${ev.join("")}</div>`));
   return out.join("");
 }
@@ -5164,7 +5169,7 @@ const DG_METRIC_TITLE={visits:"Выезды",paid:"Исход «Оплачен»
   with_photo:"Выезды с фото",persons:"Должники",
   confirmed:"Подтверждены на адресе",far:"У адреса не был",
   saved_away:"Заполнены не на адресе",
-  unverified:"Нечем проверить",series:"Признаки серии",
+  unverified:"Проверить не удалось",series:"Внесено пачкой",
   carded:"Воронка · анкета заполнена",contacts:"Воронка · контакты",
   dead:"Воронка · мёртвые адреса",rpc:"Воронка · контакт с клиентом",
   third:"Воронка · контакт с 3-м лицом",ptp:"Воронка · обещания клиента",
@@ -5665,6 +5670,209 @@ function stopNavWatch(){
   trackFlush();                       // хвост поездки не теряем
 }
 function onNavPosErr(){ navShowBanner(L().nogeo); }
+
+// --- Смена «На линии»: постоянная гео-запись рабочего дня (03.10.2026) ----------
+// Юристы разрешили трекинг. Точка пишется ТОЛЬКО в движении (шаг ≥25 м) плюс
+// «пульс» раз в 10 минут на стоянке — чтобы пауза не выглядела пропавшей записью.
+// Не ушедшее живёт в localStorage и доезжает позже, тем же механизмом, что трек
+// поездки (сервер идемпотентен по session_id+ts). Кнопка SOS шлёт точку на момент
+// нажатия руководителю и безопасникам; долгое нажатие — чтобы не сработать в кармане.
+const DAY_KEY="hb_day_queue", DAY_ON_KEY="hb_day_on",
+      DAY_FLUSH_N=20, DAY_FLUSH_MS=60000, DAY_MIN_M=25, DAY_PULSE_MS=600000;
+const DAY={on:false, session:"", watchId:null, timer:null, lastPos:null, lastMs:0,
+           buf:[], points:0, km:0, started:null, wake:null};
+
+function dayQueue(){
+  let q=[]; try{ q=JSON.parse(localStorage.getItem(DAY_KEY)||"[]"); }catch(e){ return []; }
+  let patched=false;
+  for(const b of q){ if(b && !b.bid){ b.bid=uuid(); patched=true; } }
+  if(patched) dayQueueSet(q);
+  return q;
+}
+function dayQueueSet(q){ try{ localStorage.setItem(DAY_KEY, JSON.stringify(q.slice(-2000))); }catch(e){} }
+
+function daySaveOn(){
+  try{ localStorage.setItem(DAY_ON_KEY, JSON.stringify(
+    {session:DAY.session, started:DAY.started})); }catch(e){}
+}
+function dayClearOn(){ try{ localStorage.removeItem(DAY_ON_KEY); }catch(e){} }
+
+function dayOnPos(p){
+  if(!DAY.on) return;
+  const me={lat:p.coords.latitude, lon:p.coords.longitude};
+  const now=p.timestamp||Date.now();
+  const moved=!DAY.lastPos || haversineKm(DAY.lastPos, me)*1000 >= DAY_MIN_M;
+  const pulse=now-DAY.lastMs >= DAY_PULSE_MS;
+  if(!moved && !pulse) return;
+  if(DAY.lastPos && moved) DAY.km += haversineKm(DAY.lastPos, me);
+  DAY.lastPos=me; DAY.lastMs=now;
+  DAY.buf.push({ts:new Date(now).toISOString(), lat:me.lat, lon:me.lon,
+                acc:(p.coords&&p.coords.accuracy)||null,
+                speed:(p.coords&&p.coords.speed)||null, heading:null});
+  DAY.points++;
+  if(DAY.buf.length>=DAY_FLUSH_N) dayFlush();
+  dayRenderStatus();
+}
+
+async function dayFlush(){
+  if(!DAY.session || !DAY.buf.length) return;
+  const batch={bid:uuid(), session_id:DAY.session, rep:null,
+               points:DAY.buf.splice(0, DAY.buf.length)};
+  try{
+    await api("/api/track", {method:"POST", body:JSON.stringify(batch)});
+  }catch(e){
+    dayQueueSet(dayQueue().concat([batch]));
+  }
+}
+
+async function dayDrainQueue(){
+  for(const b of dayQueue()){
+    try{
+      if(b.sos){ await api("/api/sos", {method:"POST", body:JSON.stringify(b.body)}); }
+      else{ await api("/api/track", {method:"POST", body:JSON.stringify(b)}); }
+      dayQueueSet(dayQueue().filter(x => x.bid !== b.bid));
+    }catch(e){ return; }
+  }
+}
+
+async function dayWakeAcquire(){
+  try{ if(navigator.wakeLock) DAY.wake=await navigator.wakeLock.request("screen"); }catch(e){}
+}
+document.addEventListener("visibilitychange", ()=>{
+  if(!document.hidden && DAY.on && !DAY.wake) dayWakeAcquire();
+  if(!document.hidden) dayDrainQueue();
+});
+
+async function dayStart(keep){
+  if(DAY.on) return;
+  if(!navigator.geolocation){ toast(L().nogeo); return; }
+  if(GEO.state!=="granted"){
+    const p=await askGeo();
+    if(!p){ toast(geoErrText(GEO.lastErr)); return; }
+  }
+  const today=new Date().toISOString().slice(0,10);
+  DAY.on=true;
+  DAY.session=(keep&&keep.session) || ("day:"+today+"-"+uuid());
+  DAY.started=(keep&&keep.started) || Date.now();
+  DAY.buf=[]; DAY.lastPos=null; DAY.lastMs=0; DAY.points=0; DAY.km=0;
+  daySaveOn();
+  dayDrainQueue();
+  await dayWakeAcquire();
+  DAY.timer=setInterval(dayFlush, DAY_FLUSH_MS);
+  DAY.watchId=navigator.geolocation.watchPosition(dayOnPos, ()=>{},
+    {enableHighAccuracy:true, maximumAge:5000, timeout:20000});
+  dayRenderStatus();
+}
+
+function dayStop(){
+  if(!DAY.on) return;
+  DAY.on=false;
+  if(DAY.watchId!=null && navigator.geolocation){
+    try{ navigator.geolocation.clearWatch(DAY.watchId); }catch(e){}
+    DAY.watchId=null;
+  }
+  if(DAY.timer){ clearInterval(DAY.timer); DAY.timer=null; }
+  if(DAY.wake){ try{ DAY.wake.release(); }catch(e){} DAY.wake=null; }
+  dayFlush();
+  dayClearOn();
+  dayRenderStatus();
+}
+
+// Приложение перезапустили посреди смены — продолжаем ту же сессию: сервер
+// дедуплицирует по (session_id, ts), точка «шва» не заметит.
+function dayResumeCheck(){
+  let on=null;
+  try{ on=JSON.parse(localStorage.getItem(DAY_ON_KEY)||"null"); }catch(e){}
+  if(!on || !on.session) return;
+  const today=new Date().toISOString().slice(0,10);
+  if(String(on.session).indexOf("day:"+today)===0) void dayStart(on);
+  else dayClearOn();
+}
+
+// --- SOS: сигнал тревоги ---------------------------------------------------------
+let SOS_TIMER=null, SOS_AT=0;
+function sosArm(el){
+  if(SOS_TIMER) return;
+  SOS_AT=Date.now();
+  el.classList.add("arming");
+  const lbl=el.querySelector("span");
+  SOS_BASE=lbl?lbl.textContent:"";
+  SOS_TIMER=setInterval(()=>{
+    const left=3-Math.floor((Date.now()-SOS_AT)/1000);
+    if(lbl) lbl.textContent=left>0 ? ("держите ещё "+left+"…") : "отправляю…";
+    if(left<=0){ sosDisarm(el, true); if(lbl) lbl.textContent=SOS_BASE; void sosSend(el); }
+  }, 200);
+}
+let SOS_BASE="";
+function sosDisarm(el, keep){
+  if(!SOS_TIMER) return;
+  clearInterval(SOS_TIMER); SOS_TIMER=null;
+  el.classList.remove("arming");
+  const lbl=el.querySelector("span");
+  if(lbl && !keep) lbl.textContent=SOS_BASE;
+}
+async function sosSend(el){
+  const btn=el||$("sosbtn");
+  const pos=await new Promise(res=>{
+    if(!navigator.geolocation) return res(null);
+    navigator.geolocation.getCurrentPosition(p=>res(p), ()=>res(null),
+      {enableHighAccuracy:true, maximumAge:15000, timeout:8000});
+  });
+  let battery=null;
+  try{ if(navigator.getBattery){ const b=await navigator.getBattery(); battery=Math.round(b.level*100); } }catch(e){}
+  const body={client_id:uuid(),
+              lat:pos?pos.coords.latitude:null, lon:pos?pos.coords.longitude:null,
+              acc:(pos&&pos.coords&&pos.coords.accuracy)||null,
+              battery:battery, note:""};
+  try{
+    await api("/api/sos", {method:"POST", body:JSON.stringify(body)});
+    toast("Сигнал отправлен — вам позвонят");
+  }catch(e){
+    dayQueueSet(dayQueue().concat([{bid:uuid(), sos:true, body}]));
+    toast("Нет связи — сигнал уйдёт при появлении сети");
+  }
+}
+
+function dayRenderStatus(){
+  const el=$("linestat");
+  if(!el) return;
+  if(!DAY.on){
+    el.innerHTML='<b>Запись выключена</b><div class="muted" style="font-size:13px">'+
+      'Включите, когда выходите на выезды, — и выключите в конце дня.</div>';
+    return;
+  }
+  const hh=new Date(DAY.started).toTimeString().slice(0,5);
+  el.innerHTML='<b>Запись идёт с '+hh+'</b>'+
+    '<div class="muted" style="font-size:13px">точек сегодня: '+DAY.points+
+    ' · путь ≈ '+(DAY.km<1?Math.round(DAY.km*1000)+" м":DAY.km.toFixed(1)+" км")+'</div>';
+}
+
+async function renderLine(){
+  resetScroll(); flushDraft(); stopAutoSync(); stopMeWatch(); prStop();
+  removeMap(); STATE.cur=null;
+  $("app").innerHTML=
+    '<div class="h">На линии</div>'+
+    '<div id="linestat" class="block" style="padding:12px 0"></div>'+
+    '<button class="btn '+(DAY.on?'':'acc')+'" style="margin:0 0 16px" id="daybtn"'+
+      ' onclick="'+(DAY.on?'dayStop()':'void dayStart()')+'">'+
+      '<span>'+(DAY.on?'Завершить смену':'Начать смену')+'</span></button>'+
+    '<div class="muted" style="font-size:13.5px;line-height:1.5;margin-bottom:18px">'+
+      'Пока смена идёт, приложение записывает движение: точка пишется только когда '+
+      'вы перемещаетесь, на стоянке — отметка раз в 10 минут. Без сети ничего не '+
+      'теряется: запись доедает до сервера при связи. Выключите смену в конце дня. '+
+      (navigator.wakeLock?'':'На iPhone запись идёт, только пока приложение открыто.')+'</div>'+
+    '<div class="h" style="color:#B0472C">Тревога</div>'+
+    '<button class="btn sos" id="sosbtn"'+ 
+      ' onpointerdown="sosArm(this)" onpointerup="sosDisarm(this)"'+
+      ' onpointerleave="sosDisarm(this)"><span>SOS — нажмите и держите 3 секунды</span></button>'+
+    '<div class="muted" style="font-size:13.5px;line-height:1.5;margin-top:8px">'+
+      'Отправит вашу точку, заряд телефона и время руководителю и службе '+
+      'безопасности. Если связи нет — сигнал уйдёт автоматически, как только '+
+      'появится.</div>';
+  setBottomNav("line");
+  dayRenderStatus();
+  dayDrainQueue();
+}
 
 function onNavPos(p){
   if(NAV.bannerTimeout){ clearTimeout(NAV.bannerTimeout); NAV.bannerTimeout=null; }

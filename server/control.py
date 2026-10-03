@@ -2,12 +2,17 @@
 
 Зачем «Контроль». В Таджикистане выездник берёт у должника наличные «в счёт
 долга» и не сдаёт их, либо пишет выезд, которого не было. Прямой улики в данных
-нет — есть следы: выезд далеко от адреса или без точки телефона, выезд,
+нет — есть признаки: выезд далеко от адреса или без точки телефона, выезд,
 занесённый задним числом, карточка, заполненная за полминуты, выезд ночью, серия
 сохранений из одной точки, «наличные» в тексте, «оплатил», за которым в реестре
-не пришло ни копейки. Каждый след сам по себе ничего не доказывает, поэтому
-человек сравнивается со своим офисом, а подтверждает подозрение только звонок
-должнику — контрольный обзвон.
+не пришло ни копейки. Каждый признак сам по себе ничего не доказывает —
+подтверждает подозрение только звонок должнику (контрольный обзвон).
+
+Решение от 03.10.2026 (слово Егора): процентов и сводного балла риска НЕТ —
+только счётчики по каждому признаку, отдельно. Адреса в реестре неровные
+(большая часть — до города/района), и любая доля обвиняла бы того, у кого
+адреса точнее. «Далеко от адреса» считается только по проверяемым выездам
+(точный адрес + годная GPS-точка), база показывается рядом.
 
 Всё считается по сохранённым фактам визита (evidence, series, received_at),
 правила живут здесь и могут меняться без миграций.
@@ -19,7 +24,7 @@ import hashlib
 import math
 import re
 import statistics
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import db
 import digest_data
@@ -32,7 +37,6 @@ NO_OFFICE_NAME = digest_data.NO_OFFICE_NAME
 FAST_FILL_S = 40          # карточку быстрее не заполнить честно
 NIGHT_FROM, NIGHT_TO = 21, 7
 PAID_LAG_DAYS = 3         # платёж доезжает до реестра не сразу
-MIN_VISITS_FOR_SHARE = 5  # у кого выездов меньше — доли не судим, это шум
 CALLBACK_SHARE = 0.10
 CALLBACK_MIN = 3
 CALLBACK_FLAGGED_MAX = 10
@@ -49,29 +53,37 @@ _CASH_RE = re.compile(
     re.I)
 
 SIGNALS = (
-    ("far", "далеко от адреса", "доля выездов, где телефон был дальше допуска от адреса должника"),
-    ("nogeo", "без точки телефона", "доля выездов, которые нечем проверить: нет точки или она слишком грубая"),
-    ("late", "занесён позже", "доля выездов, доехавших до сервера на следующий день и позже"),
+    ("far", "далеко от адреса",
+     "точка сохранения дальше допустимого от адреса; судим ТОЛЬКО проверяемые "
+     "выезды — адрес в реестре точный и телефон дал годную точку"),
+    ("nogeo", "нет годной GPS-точки",
+     "телефон не передал координаты или точка грубее 1,5 км — выезд по месту "
+     "проверить не удалось"),
+    ("late", "внесено позже", "доля выездов, доехавших до сервера на следующий день и позже"),
     ("fast", "карточка за полминуты", f"доля карточек, заполненных быстрее {FAST_FILL_S} с"),
     ("night", "ночью", f"доля выездов, сохранённых с {NIGHT_FROM}:00 до {NIGHT_TO:02d}:00"),
-    ("series", "серия", "доля выездов с признаками серии: несколько сохранений подряд из одной точки или невозможная скорость"),
+    ("series", "внесено пачкой", "несколько выездов внесено подряд из одной точки при разных адресах или с невозможной скоростью перемещения"),
     ("cash", "«наличные» в тексте", "выезды, где в комментарии деньги переданы сотруднику"),
     ("paid", "«оплатил» без платежа", f"исход «Оплачен», а платежа в реестре после выезда нет (старше {PAID_LAG_DAYS} дн.)"),
-    ("bymgr", "закрыто руководителем", "выезды, занесённые со счёта руководителя (act_as), а не с телефона сотрудника: сам по себе не нарушение, но для СБ — где статистику поправили руками"),
+    ("bymgr", "внесено руководителем", "выезды, занесённые со счёта руководителя (act_as), а не с телефона сотрудника: сам по себе не нарушение, но для СБ — где статистику поправили руками"),
     ("dupphoto", "фото использовано дважды", "снимки, приложенные к РАЗНЫМ должникам: один файл переиспользован (хэш sha256)"),
     ("repeat", "ездит без результата", "должники, к которым за окно было 3+ выезда без оплаты и обещания"),
     ("callback", "обзвон: не подтвердилось", "контрольный звонок: выезда не было или деньги отданы сотруднику"),
+    ("addr_coarse", "адрес неточный",
+     "адрес в реестре известен только до города или района — выезд по месту "
+     "проверить нельзя. Это качество данных, а не поведение сотрудника: "
+     "в балл риска не входит"),
 )
 SIGNAL_LABEL = {k: label for k, label, _ in SIGNALS}
-# «Оплачен» без платежа — тоже доля против офиса: реестр платежей доезжает
-# с опозданием у всех одинаково, и абсолютный счёт судил бы задержку, а не человека.
-_SHARE_KEYS = ("far", "nogeo", "late", "fast", "night", "series", "paid")
-_SHARE_WEIGHT = {"far": 22, "nogeo": 10, "late": 14, "fast": 16, "night": 12, "series": 18,
-                 "paid": 16}
-# bymgr — лёгкий вес: закрыть карточку за сотрудника законно (act_as журналируется);
-# dupphoto — тяжёлый: один файл у двух должников не бывает честно.
-_COUNT_WEIGHT = {"cash": (18, 36), "repeat": (4, 16), "callback": (35, 70),
-                 "bymgr": (6, 18), "dupphoto": (25, 50)}
+# Решение от 03.10.2026 (слово Егора): процентов в «Контроле» НЕ ПОКАЗЫВАЕМ
+# ВООБЩЕ — ни долей признака, ни сводного балла риска. Адреса в реестре
+# неровные (большая часть — до города/района), и любая доля обвиняла бы того,
+# у кого адреса точнее, и хвалила бы того, у кого проверять нечего. Витрина —
+# ТОЛЬКО счётчики: сколько выездов с каждым признаком, каждый отдельно.
+# «Далеко от адреса» при этом считается по проверяемым выездам (точный адрес
+# + годная GPS-точка), и его база показывается рядом.
+COUNTER_KEYS = ("far", "nogeo", "addr_coarse", "late", "fast", "night", "series",
+                "cash", "paid", "bymgr", "dupphoto", "repeat", "callback")
 
 
 # --- время ---------------------------------------------------------------------
@@ -166,11 +178,17 @@ def _last_payment(p: dict) -> date | None:
 def _visit_flags(e: dict, payload: str, today: date,
                  tids: set[int] | None = None) -> list[str]:
     flags = []
+    # Гео-вердикт — три РАЗНЫХ утверждения, которые раньше склеивались в один
+    # «нечем проверить»: «далеко» винит человека и живёт только на проверяемых
+    # выездах; «нет точки» — телефон сотрудника не дал себя проверить;
+    # «адрес неточный» — качество данных реестра, человека не обвиняет.
     lvl = e.get("evidence_level") or ""
     if lvl == "far":
         flags.append("far")
-    elif not e.get("geo") or lvl in evidence.UNVERIFIED:
+    if lvl in ("nogeo", "nofix") or (not lvl and not e.get("geo")):
         flags.append("nogeo")
+    if lvl == "coarse":
+        flags.append("addr_coarse")
     if (e.get("late_days") or 0) >= 1:
         flags.append("late")
     fs = e.get("fill_seconds")
@@ -365,14 +383,22 @@ def _client_names(reps: list[str]) -> dict[str, str]:
 # --- контроль: риск по людям --------------------------------------------------------
 def _person_signals(ents: list[dict], pay: dict[int, str], today: date,
                     checks: list[dict], tids: set[int] | None = None,
-                    d_from: str = "", d_to: str = "") -> tuple[dict, dict, list[dict]]:
-    n = len(ents)
+                    d_from: str = "", d_to: str = "") -> tuple[dict, list[dict]]:
     per_visit = [(e, _visit_flags(e, pay.get(e["_vid"], ""), today, tids))
                  for e in ents]
-    shares = {k: (sum(k in f for _, f in per_visit) / n if n else 0.0) for k in _SHARE_KEYS}
-    counts = {"cash": sum("cash" in f for _, f in per_visit)}
-    if tids is not None:
-        counts["bymgr"] = sum("bymgr" in f for _, f in per_visit)
+    # Проверяемые выезды: вердикт по месту вообще возможен — адрес точный
+    # И телефон дал годную точку (evidence.py confirmed/far). «Далеко от
+    # адреса» считаем только среди них и показываем базу рядом с числом:
+    # «3 из 12» честнее любого процента, когда у половины портфеля адрес
+    # известен до района.
+    v_n = sum(1 for e, _ in per_visit
+              if (e.get("evidence_level") or "") in ("confirmed", "far"))
+    counts = {k: 0 for k in COUNTER_KEYS}
+    for _, f in per_visit:
+        for k in f:
+            if k in counts:
+                counts[k] += 1
+    counts["verifiable"] = v_n
     if d_from and d_to:
         counts["dupphoto"] = _dup_photos(sorted(tids) if tids else [], d_from, d_to)
     by_person: dict[str, list[dict]] = {}
@@ -384,7 +410,7 @@ def _person_signals(ents: list[dict], pay: dict[int, str], today: date,
              or "Обещ" in (x.get("agreed") or "")) for x in items))
     bad = [c for c in checks if c.get("outcome") in ("no_visit", "cash_to_employee")]
     counts["callback"] = len(bad)
-    return shares, counts, per_visit
+    return counts, per_visit
 
 
 def overview(mgr: dict, team: list[str], rng: dict, *, office: str = "") -> dict:
@@ -392,64 +418,45 @@ def overview(mgr: dict, team: list[str], rng: dict, *, office: str = "") -> dict
     people = _pick(team, of, office, "")
     today = db._as_date(digest_data.today_iso())
     checks_all = db.control_checks_between(rng["from"], rng["to"])
-    raw = []
+    rows = []
     for emp in people:
         ents = _entries(emp, rng["from"], rng["to"])
         pay = _payloads([e["_vid"] for e in ents])
         checks = [c for c in checks_all if c.get("employee") == emp]
         tids = set(db.agent_tids(emp))
-        shares, counts, _ = _person_signals(ents, pay, today, checks, tids,
-                                            rng["from"], rng["to"])
-        raw.append({"employee": emp, "office": of[emp], "visits": len(ents),
-                    "shares": shares, "counts": counts, "checks": checks})
-    # Медиана по офису (у кого выездов достаточно); офис из одного человека
-    # сравнивается со всей командой.
-    def med(key: str, pool: list[dict]) -> float:
-        vals = [r["shares"][key] for r in pool if r["visits"] >= MIN_VISITS_FOR_SHARE]
-        return statistics.median(vals) if vals else 0.0
-    judged = [r for r in raw if r["visits"] >= MIN_VISITS_FOR_SHARE]
-    rows = []
-    for r in raw:
-        pool = [x for x in judged if x["office"] == r["office"]]
-        if len(pool) < 3:
-            pool = judged
-        score = 0.0
-        signals = []
-        for key in _SHARE_KEYS:
-            v, peer = r["shares"][key], med(key, pool)
-            if r["visits"] >= MIN_VISITS_FOR_SHARE and v > 0:
-                excess = max(0.0, v - peer)
-                pts = _SHARE_WEIGHT[key] * min(1.0, excess / 0.3)
-                score += pts
-                if excess >= 0.1 or (v >= 0.5 and pts > 0):
-                    signals.append({"key": key, "label": SIGNAL_LABEL[key],
-                                    "value": round(v, 3), "peer": round(peer, 3),
-                                    "points": round(pts)})
-        for key, (w, cap) in _COUNT_WEIGHT.items():
-            c = r["counts"].get(key, 0)
-            if c:
-                pts = min(cap, w * c)
-                score += pts
-                signals.append({"key": key, "label": SIGNAL_LABEL[key], "n": c,
-                                "points": round(pts)})
-        risk = int(min(100, round(score)))
-        signals.sort(key=lambda s: -s["points"])
-        done = [c for c in r["checks"] if c.get("outcome")]
+        counts, _ = _person_signals(ents, pay, today, checks, tids,
+                                    rng["from"], rng["to"])
+        done = [c for c in checks if c.get("outcome")]
         rows.append({
-            "employee": r["employee"],
-            "office": "" if r["office"] == NO_OFFICE else r["office"],
-            "visits": r["visits"], "risk": risk,
-            "level": "high" if risk >= 50 else "mid" if risk >= 25 else "low",
-            "judged": r["visits"] >= MIN_VISITS_FOR_SHARE,
-            "signals": signals,
-            "checks": {"selected": len(r["checks"]), "done": len(done),
-                       "confirmed": sum(c["outcome"] == "confirmed" for c in done),
+            "employee": emp,
+            "office": "" if of[emp] == NO_OFFICE else of[emp],
+            "visits": len(ents),
+            # Качество гео — отдельно от поведения: сколько выездов вообще
+            # можно проверить по месту и у скольких адрес неточен.
+            "verifiable": counts["verifiable"],
+            "addr_coarse": counts["addr_coarse"],
+            "counts": counts,
+            "checks": {"selected": len(checks), "done": len(done),
                        "no_visit": sum(c["outcome"] == "no_visit" for c in done),
                        "cash": sum(c["outcome"] == "cash_to_employee" for c in done)}})
-    rows.sort(key=lambda x: (-x["risk"], -x["visits"], x["employee"].lower()))
+    # Сортировка без балла: сначала «прямые» нарушения (далеко, наличные,
+    # фото дважды, обзвон), затем общий вес признаков, затем выезды.
+    def _weight(r: dict) -> int:
+        c = r["counts"]
+        return (c["far"] * 3 + c["cash"] * 2 + c["dupphoto"] * 3 + c["callback"] * 3
+                + c["series"] * 2 + c["night"] + c["fast"] + c["late"] + c["paid"] * 2
+                + c["nogeo"] + c["bymgr"])
+    rows.sort(key=lambda x: (-_weight(x), -x["visits"], x["employee"].lower()))
     return {"screen": "control", "range": rng, "offices": chips, "rows": rows,
             "legend": [{"key": k, "label": label, "hint": hint} for k, label, hint in SIGNALS],
-            "outcomes": [{"key": k, "label": v} for k, v in db.CONTROL_OUTCOMES.items()]}
+            "outcomes": [{"key": k, "label": v} for k, v in db.CONTROL_OUTCOMES.items()],
+            # Как читать — одним объяснением на все витрины «Контроля».
+            "how": [
+                "Здесь только факты: сколько выездов с каждым признаком. Проценты и сводный балл сознательно не показываются — адреса в реестре неровные, и доля обвиняла бы того, у кого адреса точнее.",
+                "«Далеко от адреса» — прямое обвинение, поэтому считается только по проверяемым выездам: адрес в реестре точный и телефон дал годную точку. База («из скольких») показана рядом.",
+                "«Нет годной GPS-точки» и «адрес неточный» — почему выезд не удалось проверить: первое — про телефон сотрудника, второе — про качество данных и в вину не ставится.",
+                "Подтверждает подозрение только звонок должнику — вкладка «Обзвон».",
+            ]}
 
 
 def flags_of(mgr: dict, team: list[str], rng: dict, employee: str) -> dict | None:
@@ -563,16 +570,43 @@ def visit_in_scope(team: list[str], visit_id: int) -> bool:
 
 
 # --- выгрузка -----------------------------------------------------------------
-_RISK_FILL = {"high": "#FAE3E0", "mid": "#FBF0D0", "low": "#E3F2E1"}
+# Колонки книги «Статистика»: счётчик на каждый признак, отдельно. Процентов
+# и сводного балла в книге нет — решение от 03.10.2026 (см. COUNTER_KEYS).
+_XLSX_COUNTERS = (
+    ("far", "Далеко от адреса"),
+    ("nogeo", "Нет GPS-точки"),
+    ("addr_coarse", "Адрес неточный"),
+    ("late", "Внесено позже"),
+    ("fast", "За полминуты"),
+    ("night", "Ночью"),
+    ("series", "Внесено пачкой"),
+    ("cash", "«Наличные» в тексте"),
+    ("paid", "«Оплатил» без платежа"),
+    ("bymgr", "Внесено руководителем"),
+    ("dupphoto", "Фото использовано дважды"),
+    ("repeat", "Без результата 3+ выезда"),
+    ("callback", "Обзвон: не подтвердилось"),
+)
 _OUTCOME_FILL = {"confirmed": "#E3F2E1", "paid_elsewhere": "#E3F2E1",
                  "no_visit": "#FAE3E0", "cash_to_employee": "#FAE3E0"}
 _CONTROL_HELP = {
     "Выездов": "Сколько выездов сотрудника попало в период.",
-    "Риск": "Балл от 0 до 100: чем выше, тем сильнее выезды сотрудника отличаются "
-            "от выездов его офиса. 50 и выше — высокий, 25–49 — средний.",
-    "Уровень": "Высокий, средний или низкий — по баллу риска.",
-    "Следы": "Из чего сложился балл: доля выездов с признаком у сотрудника и в "
-             "среднем по офису, а также счётчики (наличные в комментариях, повторы).",
+    "Проверяемых": "Выезды, которые вообще можно проверить по месту: адрес в реестре точный "
+                   "И телефон дал годную точку. «Далеко от адреса» считается только среди них.",
+    "Далеко от адреса": "Выезды, где точка сохранения была дальше допустимого от ТОЧНОГО адреса "
+                        "должника. Прямое обвинение — проверить звонком.",
+    "Нет GPS-точки": "Выезды, где телефон не передал координаты или точка грубее 1,5 км: "
+                     "проверить по месту не удалось.",
+    "Адрес неточный": "Выезды, где адрес в реестре известен только до города или района. "
+                      "Качество данных, а не поведение сотрудника.",
+    "За полминуты": f"Карточки, заполненные быстрее {FAST_FILL_S} с.",
+    "Внесено пачкой": "Выезды из серии: несколько сохранений подряд из одной точки при разных адресах "
+                      "или с невозможной скоростью перемещения.",
+    "Внесено позже": "Выезды, доехавшие до сервера на следующий день и позже.",
+    "«Оплатил» без платежа": f"Исход «Оплачен», а платежа в реестре после выезда нет (старше {PAID_LAG_DAYS} дн.).",
+    "Внесено руководителем": "Выезды, занесённые со счёта руководителя (act_as), а не с телефона сотрудника.",
+    "Фото использовано дважды": "Снимки, приложенные к РАЗНЫМ должникам: один файл переиспользован.",
+    "Обзвон: не подтвердилось": "Контрольный звонок: выезда не было или деньги отданы сотруднику.",
     "Проверено звонком": "Сколько выездов сотрудника уже проверили звонком должнику.",
     "Не подтвердилось": "Звонок показал «выезда не было» или «отдал деньги сотруднику».",
     "Почему выбран": "Почему выезд попал в обзвон: случайная выборка или конкретный признак.",
@@ -582,38 +616,38 @@ _CONTROL_HELP = {
 
 
 def control_xlsx(mgr: dict, team: list[str], rng: dict) -> bytes:
-    """Риск по людям и итоги обзвона одной книгой — в том же облике, что
-    книга статистики (book.py): шапка с подсказками, уровень риска и исход
-    звонка подсвечены, даты — датами. Текст со «=» — текстом: комментарий
-    выездника не должен стать формулой у безопасника."""
+    """Статистика признаков по людям и итоги обзвона одной книгой — в том же
+    облике, что книга статистики (book.py): счётчик на каждый признак
+    отдельной колонкой, процентов и сводного балла нет, исход звонка
+    подсвечен, даты — датами. Текст со «=» — текстом: комментарий выездника
+    не должен стать формулой у безопасника."""
     import book
 
     ov = overview(mgr, team, rng)
     period = f"{rng.get('label') or ''} ({rng['from']} — {rng['to']})".strip()
     bk = book.Book(_CONTROL_HELP.get)
-    ws = bk.sheet("Риск", tab="main")
+    ws = bk.sheet("Статистика", tab="main")
     ws.title(f"Контроль выездов · {period}")
-    ws.title("Балл риска сравнивает сотрудника с его же офисом. Высокий балл — повод "
-             "проверить выезды звонком, а не доказательство. Наведите мышь на "
-             "заголовок — всплывёт пояснение.", italic=True)
-    cols = ["Сотрудник", "Офис", "Выездов", "Риск", "Уровень", "Следы",
-            "Проверено звонком", "Не подтвердилось"]
+    ws.title("Только факты: сколько выездов с каждым признаком. Проценты и сводный "
+             "балл сознательно не показываются: адреса в реестре неровные, и доля "
+             "обвиняла бы того, у кого адреса точнее. «Далеко от адреса» считается "
+             "только по проверяемым выездам — точный адрес и годная GPS-точка. "
+             "Наведите мышь на заголовок — всплывёт пояснение.", italic=True)
+    cols = (["Сотрудник", "Офис", "Выездов", "Проверяемых"]
+            + [title for _, title in _XLSX_COUNTERS]
+            + ["Проверено звонком", "Не подтвердилось"])
     head_at = ws.head(cols)
-    level = {"high": "высокий", "mid": "средний", "low": "низкий"}
-    kinds = ["text", "text", "int", "int", "text", "text", "int", "int"]
-    wrap = bk.fmt(text_wrap=True, valign="top")
+    kinds = (["text", "text", "int", "int"] + ["int"] * len(_XLSX_COUNTERS)
+             + ["int", "int"])
     for row in ov["rows"]:
-        sig = "; ".join(
-            f"{s['label']} {round(s['value'] * 100)}% (офис {round(s['peer'] * 100)}%)"
-            if "value" in s else f"{s['label']}: {s['n']}" for s in row["signals"])
-        at = ws.append([row["employee"], row["office"] or NO_OFFICE_NAME, row["visits"],
-                        row["risk"], level[row["level"]], "",
-                        row["checks"]["done"],
-                        row["checks"]["no_visit"] + row["checks"]["cash"]],
-                       kinds, fills={3: _RISK_FILL[row["level"]],
-                                     4: _RISK_FILL[row["level"]]})
-        ws.ws.write_string(at, 5, sig, wrap)
-    ws.widths((30, 16, 9, 7, 10, 80, 12, 13))
+        c = row["counts"]
+        ws.append([row["employee"], row["office"] or NO_OFFICE_NAME, row["visits"],
+                   row["verifiable"]]
+                  + [c.get(key, 0) for key, _ in _XLSX_COUNTERS]
+                  + [row["checks"]["done"],
+                     row["checks"]["no_visit"] + row["checks"]["cash"]],
+                  kinds)
+    ws.widths((30, 16, 9, 12) + (8,) * len(_XLSX_COUNTERS) + (12, 13))
     ws.autofilter(head_at, ws.row - 1, len(cols))
     ws.freeze("B4")
 
@@ -790,4 +824,145 @@ def access_log(rng: dict, team: list[str] | None = None) -> dict:
             "action": r["action"], "label": _ACCESS_ACTIONS.get(r["action"], r["action"]),
             "target": target, "detail": (r["detail"] or "")[:200]})
     return {"screen": "access", "range": rng, "events": events,
+            "generated_at": datetime.now(TZ).isoformat(timespec="seconds")}
+
+
+# --- гео-запись: день сотрудника по времени (03.10.2026) -------------------------
+# Режим «На линии» (PWA выездника) и поездки-навигатор пишут точки в track_points.
+# Сырой трек — сотни координат, которые человек не читает; «способ чтения по
+# времени» — лента дня: отрезки движения с километрами и паузами, выезды с
+# вердиктами и сигналы SOS вперемешку, по возрастанию времени.
+SEGMENT_GAP_MIN = 10     # разрыв в записи больше этого — новый отрезок
+MOVE_MIN_M = 20          # меньше — точка считается той же позицией, не движением
+GAP_WARN_MIN = 45        # пауза в записи, о которой стоит сказать явно
+
+
+def _segments(points: list[dict]) -> list[dict]:
+    """Точки → отрезки движения: разрыв по времени разрывает, километраж
+    считается по соседним точкам (не «туда-обратно» — сумма длин шагов)."""
+    out: list[dict] = []
+    cur: dict | None = None
+    for p in points:
+        ms = evidence.to_ms(p["ts"])
+        if ms is None:
+            continue
+        if cur is None or (ms - cur["to_ms"]) > SEGMENT_GAP_MIN * 60_000:
+            if cur:
+                out.append(cur)
+            cur = {"from_ms": ms, "to_ms": ms, "n": 1, "km": 0.0,
+                   "lat0": p["lat"], "lon0": p["lon"],
+                   "lat1": p["lat"], "lon1": p["lon"]}
+        else:
+            step = evidence.haversine_m(cur["lat1"], cur["lon1"], p["lat"], p["lon"])
+            if step >= MOVE_MIN_M:
+                cur["km"] += step / 1000.0
+                cur["lat1"], cur["lon1"] = p["lat"], p["lon"]
+            cur["to_ms"] = ms
+            cur["n"] += 1
+    if cur:
+        out.append(cur)
+    for s in out:
+        s["from"] = _hhmm(datetime.fromtimestamp(s["from_ms"] / 1000.0, TZ))
+        s["to"] = _hhmm(datetime.fromtimestamp(s["to_ms"] / 1000.0, TZ))
+        s["min"] = max(1, round((s["to_ms"] - s["from_ms"]) / 60000))
+        s["km"] = round(s["km"], 1)
+    return out
+
+
+def _day_gaps(points_ms: list[int]) -> list[dict]:
+    """Паузы записи ВНУТРИ дня: между соседними точками больше GAP_WARN_MIN
+    минут. Это не «человек пропал» — это «телефон не писал»: гео выключили,
+    села батарея, приложение закрыто. Для СБ — где день перестал быть виден."""
+    gaps = []
+    for a, b in zip(points_ms, points_ms[1:]):
+        gap_min = (b - a) / 60000
+        if gap_min >= GAP_WARN_MIN:
+            gaps.append({"from": _hhmm(datetime.fromtimestamp(a / 1000.0, TZ)),
+                         "to": _hhmm(datetime.fromtimestamp(b / 1000.0, TZ)),
+                         "min": round(gap_min)})
+    return gaps
+
+
+def day_story(mgr: dict, team: list[str], employee: str, day: str) -> dict | None:
+    """Один день одного человека по времени. Читается сверху вниз: когда вышел
+    (первая точка), как двигался, где был выезд и чем он подтверждён, когда
+    запись прервалась. Точки — местный день (пояс +5): ts на сервере в UTC."""
+    if employee not in team:
+        return None
+    if db._as_date(day) is None:
+        return None
+    lo_local = datetime.fromisoformat(day + "T00:00:00").replace(tzinfo=TZ)
+    hi_local = lo_local + timedelta(days=1)
+    pts = db.track_points_between(
+        employee, lo_local.astimezone(timezone.utc).isoformat(),
+        hi_local.astimezone(timezone.utc).isoformat())
+    pts_ms = [evidence.to_ms(p["ts"]) for p in pts]
+    pts_ms = [m for m in pts_ms if m is not None]
+    segments = _segments(pts)
+    today = db._as_date(digest_data.today_iso())
+    ents = _entries(employee, day, day)
+    pay = _payloads([e["_vid"] for e in ents])
+    tids = set(db.agent_tids(employee))
+    events: list[dict] = []
+    for e in ents:
+        ev = _visit_event(e, employee, "", pay.get(e["_vid"], ""), today, tids)
+        events.append({"kind": "visit", "at": ev["at"], "event": ev})
+    for s in segments:
+        at = datetime.fromtimestamp(s["from_ms"] / 1000.0, TZ)
+        events.append({"kind": "move",
+                       "at": at.isoformat(timespec="seconds"), "event": s})
+    # SOS — по МЕСТНОМУ дню (ts на сервере в UTC, вечерUTC = чужой день)
+    key = db._name_key(employee)
+    for r in db.sos_events_between(
+            (lo_local - timedelta(days=2)).date().isoformat(),
+            (hi_local + timedelta(days=2)).date().isoformat()):
+        t = _local_dt(r.get("ts"))
+        if t and t.date().isoformat() == day and db._name_key(r.get("employee") or "") == key:
+            events.append({"kind": "sos", "at": t.isoformat(timespec="seconds"),
+                           "event": r})
+    events.sort(key=lambda x: x["at"] or "")
+    return {"screen": "day", "employee": employee, "day": day,
+            "points": len(pts), "km": round(sum(s["km"] for s in segments), 1),
+            "first": segments[0]["from"] if segments else "",
+            "last": segments[-1]["to"] if segments else "",
+            "segments": segments, "gaps": _day_gaps(pts_ms),
+            "events": events,
+            "generated_at": datetime.now(TZ).isoformat(timespec="seconds")}
+
+
+def geo_days(mgr: dict, team: list[str], rng: dict, employee: str) -> dict:
+    """В какие дни окна у человека есть гео-запись или выезды — чипы для
+    выбора дня в «Гео по времени». День — местный (пояс +5)."""
+    if employee not in team:
+        return {"screen": "geo_days", "employee": employee, "days": []}
+    lo_utc = (datetime.fromisoformat(rng["from"] + "T00:00:00").replace(tzinfo=TZ)
+              - timedelta(days=1)).astimezone(timezone.utc).isoformat()
+    hi_utc = (datetime.fromisoformat(
+        (db._as_date(rng["to"]) + timedelta(days=1)).isoformat() + "T00:00:00"
+    ).replace(tzinfo=TZ) + timedelta(days=1)).astimezone(timezone.utc).isoformat()
+    pts: dict[str, int] = {}
+    for p in db.track_points_between(employee, lo_utc, hi_utc):
+        t = _local_dt(p["ts"])
+        if t:
+            pts[t.date().isoformat()] = pts.get(t.date().isoformat(), 0) + 1
+    visits: dict[str, int] = {}
+    for v in db.visits_for_employee(employee, rng["from"], rng["to"]):
+        d = str(v["created_at"] or "")[:10]
+        if d:
+            visits[d] = visits.get(d, 0) + 1
+    days = [{"day": iso, "points": pts.get(iso, 0), "visits": visits.get(iso, 0)}
+            for iso in sorted(set(pts) | set(visits), reverse=True)]
+    return {"screen": "geo_days", "employee": employee, "days": days,
+            "range": rng, "generated_at": datetime.now(TZ).isoformat(timespec="seconds")}
+
+
+# --- сигналы тревоги (SOS, контур СБ) ---------------------------------------------
+def sos_feed(mgr: dict, team: list[str] | None, rng: dict) -> dict:
+    """Лента сигналов SOS за окно, новые сверху. team=None — вся компания
+    (админский транспорт); для безопасника — его команда."""
+    events = db.sos_events_between(rng["from"], rng["to"], team)
+    for r in events:
+        r["maps"] = (f"https://www.openstreetmap.org/?mlat={r['lat']}&mlon={r['lon']}#map=17/{r['lat']}/{r['lon']}"
+                     if r.get("lat") is not None and r.get("lon") is not None else "")
+    return {"screen": "sos", "range": rng, "events": events,
             "generated_at": datetime.now(TZ).isoformat(timespec="seconds")}

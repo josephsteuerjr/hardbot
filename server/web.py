@@ -4284,6 +4284,148 @@ async def _control_access(request: web.Request) -> web.Response:
     return _manager_json(data)
 
 
+async def _control_day(request: web.Request) -> web.Response:
+    """Гео-запись одного дня по времени: отрезки движения, выезды, SOS."""
+    uid, mgr, team = _manager_gate(request)
+    rng = _stats_range_q(request)
+    team = _range_team(mgr, team, rng)
+    emp = _manager_employee_q(request, team)
+    day = (request.query.get("date") or rng["to"]).strip()
+    data = await asyncio.to_thread(control.day_story, mgr, team, emp, day)
+    if data is None:
+        raise web.HTTPNotFound(text="employee")
+    db.audit_access(uid, "control_view", target=emp, detail=f"day {day}")
+    return _manager_json(data)
+
+
+async def _control_geo_days(request: web.Request) -> web.Response:
+    """Дни окна, по которым у сотрудника есть гео-запись или выезды."""
+    uid, mgr, team = _manager_gate(request)
+    rng = _stats_range_q(request)
+    team = _range_team(mgr, team, rng)
+    emp = _manager_employee_q(request, team)
+    data = await asyncio.to_thread(control.geo_days, mgr, team, rng, emp)
+    db.audit_access(uid, "control_view", target=emp,
+                    detail=f"geo_days {rng['from']}..{rng['to']}")
+    return _manager_json(data)
+
+
+async def _control_sos(request: web.Request) -> web.Response:
+    """Лента сигналов тревоги выездников за окно."""
+    uid, mgr, team = _manager_gate(request)
+    rng = _stats_range_q(request)
+    team = _range_team(mgr, team, rng)
+    data = await asyncio.to_thread(control.sos_feed, mgr, team, rng)
+    db.audit_access(uid, "control_view", detail=f"sos {rng['from']}..{rng['to']}")
+    return _manager_json(data)
+
+
+async def _control_sos_resolve(request: web.Request) -> web.Response:
+    """Отметить сигнал отработанным. Команда своего безопасника — только своя."""
+    uid, mgr, team = _manager_gate(request)
+    try:
+        body = await request.json()
+        event_id = int(body.get("id"))
+    except Exception:                                   # noqa: BLE001
+        raise web.HTTPBadRequest(text="id")
+    keys = {db._name_key(e) for e in team}
+    event = next((r for r in db.sos_events_between("2000-01-01", "2100-01-01")
+                  if r["id"] == event_id), None)
+    if event is None or db._name_key(event.get("employee") or "") not in keys:
+        raise web.HTTPNotFound(text="sos")
+    name = (mgr.get("name") or f"id {uid}")
+    ok = await asyncio.to_thread(db.sos_resolve, event_id, name)
+    db.audit_access(uid, "sos_resolve", target=event.get("employee") or "",
+                    detail=f"sos {event_id}")
+    return web.json_response({"ok": ok})
+
+
+# --- сигнал тревоги выездника (SOS) ------------------------------------------------
+async def _sos(request: web.Request) -> web.Response:
+    """Кнопка SOS в приложении: точка на момент нажатия, заряд, текст.
+
+    Идемпотентна по client_id (uuid с телефона): без сети сигнал висит в
+    оффлайн-очереди и доезжает позже — ровно один раз, без повторных тревог.
+    200 + ok:false (а не 500) сохраняет семантику очереди: ошибка ПОЛЯ не
+    должна блокировать досылку остальных сообщений."""
+    uid, emp = _auth(request)
+    try:
+        body = await request.json()
+    except Exception:                                   # noqa: BLE001
+        raise web.HTTPBadRequest(text="json")
+    try:
+        lat = float(body.get("lat"))
+        lon = float(body.get("lon"))
+    except (TypeError, ValueError):
+        lat = lon = None
+    if lat is None or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return web.json_response({"ok": False, "error": "coords"})
+    try:
+        acc = int(float(body.get("acc") or 0))
+    except (TypeError, ValueError, OverflowError):
+        acc = None
+    try:
+        battery = int(float(body.get("battery")))
+    except (TypeError, ValueError, OverflowError):
+        battery = None
+    row, fresh = await asyncio.to_thread(
+        db.record_sos, str(body.get("client_id") or ""), uid, emp or "",
+        lat, lon, acc, battery, str(body.get("note") or ""))
+    if fresh and row is not None:
+        _spawn_visit_notify(_sos_notify(request, row))
+    db.audit_access(uid, "sos_signal", target=emp or "",
+                    detail=f"{row['id'] if row else '?'} {lat:.5f},{lon:.5f}")
+    return web.json_response({"ok": True, "id": row["id"] if row else None,
+                              "fresh": fresh})
+
+
+async def _sos_notify(request: web.Request, row: dict) -> None:
+    """Тревога — руководителям этого сотрудника и безопасникам, сразу.
+    Внешний try — на всё тело: рассылка не имеет права уронить приём сигнала."""
+    try:
+        bot = request.app.get("bot")
+        emp = row.get("employee") or ""
+        targets: dict[int, str] = {}
+        for m in db.managers_for_employee(emp):
+            targets[int(m["telegram_id"])] = m.get("name") or ""
+        with db.connect() as conn:
+            for r in conn.execute("SELECT telegram_id, name FROM managers"):
+                role = (r["role"] or "")
+                if role in ("security", "full"):
+                    targets[int(r["telegram_id"])] = r["name"] or ""
+        if not bot or not targets:
+            db.log_push(db.PUSH_SOS, db.PUSH_SKIP_NO_TARGETS if targets
+                        else db.PUSH_SKIP_NO_BOT, employee=emp)
+            return
+        from notify import classify_send_error, _maps_link
+        local = control._local_dt(row.get("ts"))
+        lines = [
+            "🆘 СИГНАЛ ТРЕВОГИ",
+            f"🧑‍💼 {_esc(emp) or 'сотрудник без привязки'} (id {row.get('telegram_id')})",
+            f"🕒 {local.strftime('%d.%m %H:%M') if local else (row.get('ts') or '')}"
+            " (время офисов)",
+            f"📍 {_esc(_maps_link(row.get('lat'), row.get('lon')))}",
+        ]
+        if row.get("acc_m") is not None:
+            lines.append(f"точность точки: {int(row['acc_m'])} м")
+        if row.get("battery") is not None:
+            lines.append(f"🔋 {int(row['battery'])}%")
+        if row.get("note"):
+            lines.append(f"💬 {_esc(row['note'])}")
+        text = "\n".join(lines)
+        for chat_id in targets:
+            try:
+                await bot.send_message(chat_id, text, disable_web_page_preview=False)
+                db.log_push(db.PUSH_SOS, db.PUSH_SENT, target_kind="chat",
+                            target_id=chat_id, employee=emp)
+            except Exception as exc:                     # noqa: BLE001
+                status, err = classify_send_error(exc)
+                db.log_push(db.PUSH_SOS, status, target_kind="chat",
+                            target_id=chat_id, employee=emp, error=err)
+    except Exception as exc:                             # noqa: BLE001
+        logging.warning("sos notify failed: %s", exc)
+
+
 # --- «Контроль» для пульта аналитика: вся компания, вход устройства пульта --------
 # Те же правила и функции, что у безопасника, но состав — ВСЕ сотрудники реестра:
 # админ смотрит поверх границ команд. Право — токен устройства пульта (поимённо),
@@ -4315,6 +4457,17 @@ async def _admin_control(request: web.Request, kind: str) -> web.Response:
         data = await asyncio.to_thread(control.assignments, None, _all_employees(), rng)
     elif kind == "access":
         data = await asyncio.to_thread(control.access_log, rng)
+    elif kind == "day":
+        emp = (request.query.get("employee") or "").strip()
+        day = (request.query.get("date") or rng["to"]).strip()
+        data = await asyncio.to_thread(control.day_story, None, _all_employees(), emp, day)
+        if data is None:
+            raise web.HTTPNotFound(text="employee")
+    elif kind == "geo_days":
+        emp = (request.query.get("employee") or "").strip()
+        data = await asyncio.to_thread(control.geo_days, None, _all_employees(), rng, emp)
+    elif kind == "sos":
+        data = await asyncio.to_thread(control.sos_feed, None, None, rng)
     else:
         data = await asyncio.to_thread(functools.partial(
             control.overview, None, _all_employees(), rng,
@@ -4344,6 +4497,18 @@ async def _admin_control_assignments(request):
 
 async def _admin_control_access(request):
     return await _admin_control(request, "access")
+
+
+async def _admin_control_day(request):
+    return await _admin_control(request, "day")
+
+
+async def _admin_control_geo_days(request):
+    return await _admin_control(request, "geo_days")
+
+
+async def _admin_control_sos(request):
+    return await _admin_control(request, "sos")
 
 
 async def _control_flags(request: web.Request) -> web.Response:
@@ -6457,15 +6622,23 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/control/overview", _control_overview)
     app.router.add_get("/api/control/assignments", _control_assignments)
     app.router.add_get("/api/control/access", _control_access)
+    app.router.add_get("/api/control/day", _control_day)
+    app.router.add_get("/api/control/geo_days", _control_geo_days)
+    app.router.add_get("/api/control/sos", _control_sos)
+    app.router.add_post("/api/control/sos_resolve", _control_sos_resolve)
     app.router.add_get("/admin/control/overview", _admin_control_overview)
     app.router.add_get("/admin/control/flags", _admin_control_flags)
     app.router.add_get("/admin/control/callbacks", _admin_control_callbacks)
     app.router.add_get("/admin/control/assignments", _admin_control_assignments)
     app.router.add_get("/admin/control/access", _admin_control_access)
+    app.router.add_get("/admin/control/day", _admin_control_day)
+    app.router.add_get("/admin/control/geo_days", _admin_control_geo_days)
+    app.router.add_get("/admin/control/sos", _admin_control_sos)
     app.router.add_get("/api/control/flags", _control_flags)
     app.router.add_get("/api/control/callbacks", _control_callbacks)
     app.router.add_post("/api/control/callback", _control_callback)
     app.router.add_get("/api/control/export.xlsx", _control_export)
+    app.router.add_post("/api/sos", _sos)
     app.router.add_get("/admin/manager_devices.json", _admin_manager_devices)
     app.router.add_post("/admin/manager_device/revoke.json", _admin_manager_device_revoke)
     app.router.add_get("/api/bootstrap", _bootstrap)

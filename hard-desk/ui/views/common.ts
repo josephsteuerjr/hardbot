@@ -51,10 +51,11 @@ export function staleNote(at?: string): string {
 }
 
 const FLAG_TEXT: Record<string, string> = {
-  far: "далеко от адреса", nogeo: "без точки телефона", late: "занесён позже", fast: "карточка за полминуты",
-  night: "ночью", series: "серия", cash: "«наличные» в тексте", paid: "«оплатил» без платежа",
+  far: "далеко от адреса", nogeo: "нет GPS-точки", late: "внесено позже", fast: "карточка за полминуты",
+  night: "ночью", series: "внесено пачкой", cash: "«наличные» в тексте", paid: "«оплатил» без платежа",
+  addr_coarse: "адрес неточный", bymgr: "внесено руководителем", dupphoto: "фото использовано дважды",
 };
-const STRONG = new Set(["cash", "paid", "far"]);
+const STRONG = new Set(["cash", "paid", "far", "dupphoto"]);
 
 export function flagsHtml(flags: string[] | undefined): string {
   if (!flags || !flags.length) return "";
@@ -62,8 +63,8 @@ export function flagsHtml(flags: string[] | undefined): string {
 }
 
 const EVIDENCE: Record<string, [string, string]> = {
-  confirmed: ["у адреса", "ok"], far: ["далеко от адреса", "err"], nofix: ["точка не определилась", "warn"],
-  nogeo: ["без геолокации", "warn"], coarse: ["точка грубая", "warn"],
+  confirmed: ["у адреса", "ok"], far: ["далеко от адреса", "err"], nofix: ["GPS не поймался", "warn"],
+  nogeo: ["нет GPS-точки", "warn"], coarse: ["адрес неточный", "warn"],
 };
 export function evidenceTag(level: string | undefined): string {
   const e = level ? EVIDENCE[level] : undefined;

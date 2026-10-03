@@ -149,6 +149,9 @@ CARRY: dict[str, tuple[str, str]] = {
     "assignment_events": (
         "журнал закреплений по перенесенным КД: история «у кого договор был»",
         "COALESCE(contract_id,'') IN (SELECT kd FROM sel_kd)"),
+    "sos_events": (
+        "сигналы тревоги выездников: инцидент едет со своим человеком",
+        "COALESCE(employee,'') IN (SELECT name FROM sel_emp)"),
 }
 
 # ЧТО НЕ ЕДЕТ НИКОГДА. Не «забыли», а решено: у каждой строки своя причина.
@@ -182,6 +185,7 @@ KEYS: dict[str, tuple[str, ...]] = {
     "clients": ("contract_id",),
     "payment_evidence": ("op",),
     "assignment_events": ("contract_id", "window_to", "employee", "prev_employee"),
+    "sos_events": ("client_id",),
     "client_extra": ("contract_id", "slot"),
     "visits": ("op_id",),
     "notes": ("op_id",),
