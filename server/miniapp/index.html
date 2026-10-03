@@ -332,6 +332,10 @@ textarea:focus,select:focus{outline:none;box-shadow:var(--pop)}
 .bottomnav button.on:after{content:"";width:6px;height:6px;border-radius:50%;background:var(--terra);margin-top:1px}
 .bottomnav button .ico{width:22px;height:22px}
 .btn.sos{background:#B0472C;color:#fff;border-color:#8f3722;user-select:none;-webkit-user-select:none;touch-action:none}
+.geo-block{position:fixed;inset:0;z-index:60;background:rgba(15,20,26,.55);
+  display:flex;align-items:center;justify-content:center;padding:20px}
+.geo-block-card{background:var(--bg,#fff);border-radius:14px;padding:18px;
+  max-width:420px;box-shadow:0 12px 40px rgba(0,0,0,.35)}
 .btn.sos.arming{background:#7d2c1b}
 .btn.sos.sent{opacity:.6}
 
@@ -674,6 +678,9 @@ const I18N = {
     geodenied:"Доступ к геопозиции запрещён. Включите его в настройках телефона для этого приложения.",
     geonosignal:"Сигнал не поймался. Выйдите из помещения и попробуйте ещё раз.",
     geoslow:"Не успели ответить на запрос. Нажмите ещё раз и выберите «Разрешить».",
+    georeqtitle:"Без точки GPS выезд не сохраняется",
+    georeqwhy:"Включите геолокацию в настройках телефона и запросите ещё раз — без координаты карточка не закроется. Заполненное не потеряется: черновик сохраняется.",
+    georeqretry:"Запросить гео ещё раз",georeqstay:"Остаться в карточке",
     go:"Поехать",exit:"Выйти",finishvisit:"Отметить визит",mins:"мин",
     draftwait:"черновик не отправлен на сервер",draftsent:"черновик сохранён на сервере",
     geooffvisit:"Геолокация выключена — выезд не будет подтверждён руководителю.",
@@ -735,6 +742,9 @@ const I18N = {
     geodenied:"Geolokatsiyaga ruxsat yo‘q. Telefon sozlamalarida shu ilova uchun yoqing.",
     geonosignal:"Signal yo‘q. Ko‘chaga chiqib, yana urinib ko‘ring.",
     geoslow:"So‘rovga javob bermadingiz. Yana bosing va «Ruxsat berish»ni tanlang.",
+    georeqtitle:"GPS nuqtasisiz chiqish saqlanmaydi",
+    georeqwhy:"Telefon sozlamalarida geolokatsiyani yoqing va yana so‘rang — koordinatasiz karta yopilmaydi. To‘ldirilgani yo‘qolmaydi: qoralama saqlanadi.",
+    georeqretry:"Geoni yana so‘rash",georeqstay:"Kartada qolish",
     go:"Yo‘lga chiqish",exit:"Yopish",finishvisit:"Tashrifni belgilash",mins:"daq",
     draftwait:"qoralama serverga yuborilmadi",draftsent:"qoralama serverda saqlandi",
     geooffvisit:"Geolokatsiya o‘chirilgan — chiqish rahbarga tasdiqlanmaydi.",
@@ -796,6 +806,9 @@ const I18N = {
     geodenied:"Иҷозат ба геомавқеъ нест. Дар танзимоти телефон барои ин барнома фаъол кунед.",
     geonosignal:"Сигнал нест. Аз бино бароед ва боз кӯшиш кунед.",
     geoslow:"Ба дархост ҷавоб надодед. Боз пахш кунед ва «Иҷозат» -ро интихоб кунед.",
+    georeqtitle:"Бе нуқтаи GPS сафар сабт намешавад",
+    georeqwhy:"Геолокатсияро дар танзимоти телефон фаъол кунед ва боз дархост кунед — бе координата корт пӯшида намешавад. Пуркардашуда гум намешавад: пешнавис боқӣ мемонад.",
+    georeqretry:"Георо боз дархост кардан",georeqstay:"Дар корт мондан",
     go:"Ба роҳ баромадан",exit:"Бастан",finishvisit:"Сафарро қайд кардан",mins:"дақ",
     draftwait:"нусха ба сервер нафиристода шуд",draftsent:"нусха дар сервер захира шуд",
     geooffvisit:"Геомавқеъ хомӯш аст — сафар ба роҳбар тасдиқ намешавад.",
@@ -1211,7 +1224,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=70;
+const SHELL_VERSION=71;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -3574,6 +3587,34 @@ async function waitPhotosSettled(rep){
 // палец успевает нажать ещё раз. Каждое нажатие — новый op_id, то есть отдельный выезд и
 // отдельная отбивка руководителю (в проде так набралось 34 записи по одному договору).
 let SAVING=false;
+// Точка для закрытия карточки: сначала быстрая попытка, затем — блокирующий
+// диалог с повторным запросом (askGeo без таймаута: системный диалог можно
+// читать сколько нужно). Отмена = остаться в карточке.
+async function ensureVisitGeo(){
+  let g=await grabGeo(4000,5000);
+  if(g) return g;
+  while(true){
+    if(!await geoBlockDialog()) return null;
+    g=await askGeo();
+    if(g) return g;
+  }
+}
+function geoBlockDialog(){
+  return new Promise(res=>{
+    const ov=document.createElement("div");
+    ov.className="geo-block";
+    ov.innerHTML='<div class="geo-block-card"><b>'+esc(L().georeqtitle)+'</b>'+
+      '<div class="muted" style="font-size:13.5px;line-height:1.5;margin:8px 0 14px">'+
+      esc(L().georeqwhy)+'</div>'+
+      '<button class="btn acc" id="georetry">'+esc(L().georeqretry)+'</button>'+
+      '<button class="btn" id="geostay" style="margin-left:8px">'+esc(L().georeqstay)+'</button></div>';
+    document.body.appendChild(ov);
+    const done=v=>{ ov.remove(); res(v); };
+    ov.querySelector("#georetry").addEventListener("click",()=>done(true));
+    ov.querySelector("#geostay").addEventListener("click",()=>done(false));
+  });
+}
+
 async function saveVisit(){
   if(SAVING) return;
   if(!FORM_VERSION){
@@ -3585,11 +3626,15 @@ async function saveVisit(){
     toast(L().resultreq);
     return;
   }
+  // Без точки GPS выезд не сохраняется (слово Егора, 03.10.2026): повторный
+  // запрос — и всё. Заполненное не теряется: черновик продолжает писаться,
+  // карточка просто не закрывается, пока не появится координата.
+  const geo=await ensureVisitGeo();
+  if(!geo) return;
   SAVING=true;
   const btn=$("savebtn"); if(btn) btn.disabled=true;
   try{
     const rep=STATE.cur.rep, op_id=uuid();
-    const geo=await grabGeo(4000,5000);   // свежая точка, не с прошлого адреса
     // Сначала фото, потом карточка: иначе руководителю уйдёт «📸 без фото» по
     // визиту, снимок которого догрузится через пару секунд.
     const photos_pending=await waitPhotosSettled(rep);

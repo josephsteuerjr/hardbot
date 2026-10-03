@@ -417,6 +417,12 @@ def test_day_story_reads_geo_by_time():
     kinds = [e["kind"] for e in body["events"]]
     assert "move" in kinds and "visit" in kinds
     assert any(g["min"] >= 100 for g in body["gaps"]), "пауза записи не поймана"
+    # сырой трек для плеера: те же точки, метки времени возрастают
+    track = body["track"]
+    assert len(track) == 4 and all(p["lat"] for p in track)
+    assert [p["t"] for p in track] == sorted(p["t"] for p in track)
+    visit = next(e["event"] for e in body["events"] if e["kind"] == "visit")
+    assert visit["lat"] == 41.3, "точка закрытия выезда не приехала в ленту"
     # чипы дней окна
     st, days = _call("GET", f"/api/control/geo_days?employee={EMP_A}&preset=7d", headers=h)
     assert st == 200 and any(d["day"] == day and d["points"] == 4 for d in days["days"])

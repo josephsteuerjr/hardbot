@@ -504,3 +504,16 @@ table.dt tbody tr.is-picked { background: var(--accent-soft); }
 label.check { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--ink); cursor: pointer; }
 label.check input { accent-color: var(--terra); width: 16px; height: 16px; margin: 0; }
 .form-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 12px 20px; align-items: center; margin-top: 8px; }
+
+/* --- Плеер дня («Контроль» → Гео по времени) -------------------------------- */
+.dayplayer-box { margin: 0 0 14px }
+.daymap { position: relative; height: 420px; border: 1px solid var(--line, #d8dee6);
+  border-radius: 10px; overflow: hidden; background: #eef1f4 }
+.daymap .maplibregl-canvas { outline: none }
+.daymap-fb { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center }
+.dayplayer { display: flex; align-items: center; gap: 8px; margin-top: 8px }
+.dayplayer input[type="range"] { flex: 1 }
+.dmap-head { width: 16px; height: 16px; border-radius: 50%; background: #B0472C;
+  border: 3px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: default }
+.dmap-visit { width: 12px; height: 12px; border-radius: 50%; background: #2c6e46;
+  border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.35); cursor: default }

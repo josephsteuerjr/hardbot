@@ -906,6 +906,13 @@ def day_story(mgr: dict, team: list[str], employee: str, day: str) -> dict | Non
     events: list[dict] = []
     for e in ents:
         ev = _visit_event(e, employee, "", pay.get(e["_vid"], ""), today, tids)
+        # Координаты в ленту дня: точка закрытия и точка адреса — плеер дня
+        # рисует выезды на треке, а не только текстом.
+        pt, addr = e.get("_pt"), e.get("_addr")
+        ev["lat"] = pt[0] if pt and pt[0] is not None else None
+        ev["lon"] = pt[1] if pt and pt[1] is not None else None
+        ev["alat"] = addr[0] if addr and addr[0] is not None else None
+        ev["alon"] = addr[1] if addr and addr[1] is not None else None
         events.append({"kind": "visit", "at": ev["at"], "event": ev})
     for s in segments:
         at = datetime.fromtimestamp(s["from_ms"] / 1000.0, TZ)
@@ -921,12 +928,16 @@ def day_story(mgr: dict, team: list[str], employee: str, day: str) -> dict | Non
             events.append({"kind": "sos", "at": t.isoformat(timespec="seconds"),
                            "event": r})
     events.sort(key=lambda x: x["at"] or "")
+    # Сырой трек для плеера (перемотка по времени): точек за смену при шаге
+    # ≥25 м — сотни, не тысячи; на всякий случай режем с конца (последние).
+    track = [{"t": m, "lat": p["lat"], "lon": p["lon"], "acc": p.get("acc_m")}
+             for p, m in zip(pts, pts_ms) if m is not None]
     return {"screen": "day", "employee": employee, "day": day,
             "points": len(pts), "km": round(sum(s["km"] for s in segments), 1),
             "first": segments[0]["from"] if segments else "",
             "last": segments[-1]["to"] if segments else "",
             "segments": segments, "gaps": _day_gaps(pts_ms),
-            "events": events,
+            "events": events, "track": track[-4000:],
             "generated_at": datetime.now(TZ).isoformat(timespec="seconds")}
 
 

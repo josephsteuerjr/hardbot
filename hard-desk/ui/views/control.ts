@@ -113,10 +113,198 @@ async function renderRisk(root: HTMLElement) {
   });
 }
 
-/** Гео-запись одного дня по времени: отрезки движения, выезды, тревога. */
+/** Плеер дня: трек на карте (или схеме, если карту не подняли), ползунок
+ *  времени, play и скорость. Перемотка произвольная — тащишь ползунок,
+ *  видишь, где человек был в этот момент; хвост подсвечен. */
+interface TrackPoint { t: number; lat: number; lon: number; acc: number | null }
+interface PlayerCtl { stop(): void }
+
+let playerCtl: PlayerCtl | null = null;
+let deskMapLibs: Promise<boolean> | null = null;
+
+function ensureDeskMapLibs(server: string): Promise<boolean> {
+  if (deskMapLibs) return deskMapLibs;
+  const addCss = (href: string) => {
+    if (document.querySelector(`link[href="${href}"]`)) return;
+    const l = document.createElement("link"); l.rel = "stylesheet"; l.href = href;
+    document.head.appendChild(l);
+  };
+  const addJs = (src: string) => new Promise<boolean>(res => {
+    const s = document.createElement("script"); s.src = src;
+    s.onload = () => res(true); s.onerror = () => res(false);
+    document.head.appendChild(s);
+  });
+  deskMapLibs = (async () => {
+    const w = window as any;
+    if (w.maplibregl && w.pmtiles && w.protomaps_themes_base) return true;
+    addCss(`${server}/vendor/maplibre-gl-4.7.1.css`);
+    if (!await addJs(`${server}/vendor/maplibre-gl-4.7.1.js`)) return false;
+    await addJs(`${server}/vendor/pmtiles-3.2.1.js`);
+    await addJs(`${server}/vendor/protomaps-themes-base-4.4.0.js`);
+    return !!w.maplibregl;
+  })();
+  return deskMapLibs;
+}
+
+function deskMapStyle(server: string): any {
+  const w = window as any;
+  if (!w.maplibregl.__pmtiles_proto) {
+    w.maplibregl.addProtocol("pmtiles", new w.pmtiles.Protocol().tile);
+    w.maplibregl.__pmtiles_proto = true;
+  }
+  const themed = w.protomaps_themes_base.layers
+    ? w.protomaps_themes_base.layers("protomaps", "light", "ru")
+    : w.protomaps_themes_base.default("protomaps", "light");
+  // Symbol-слои требуют внешних glyph — без них (как в миниаппе).
+  return { version: 8,
+    sources: { protomaps: { type: "vector", url: `pmtiles://${server}/tiles/basemap.pmtiles`, attribution: "© OpenStreetMap" } },
+    layers: themed.filter((l: any) => l.type !== "symbol") };
+}
+
+function trackAt(track: TrackPoint[], t: number): TrackPoint | null {
+  if (!track.length) return null;
+  if (t <= track[0].t) return track[0];
+  if (t >= track[track.length - 1].t) return track[track.length - 1];
+  let lo = 0, hi = track.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (track[mid].t <= t) lo = mid; else hi = mid;
+  }
+  const a = track[lo], b = track[hi];
+  const k = b.t === a.t ? 0 : (t - a.t) / (b.t - a.t);
+  return { t, lat: a.lat + (b.lat - a.lat) * k, lon: a.lon + (b.lon - a.lon) * k, acc: b.acc };
+}
+
+/** Время трека — метки эпохи; показываем местное время офисов (+5), каким
+ *  его видят в ленте дня, — а не пояс компьютера руководителя. */
+const FIELD_TZ_MIN = 5 * 60;
+function hhmmField(t: number): string {
+  const d = new Date(t + FIELD_TZ_MIN * 60000);
+  return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+}
+
+async function mountDayPlayer(box: HTMLElement, track: TrackPoint[], visits: any[]) {
+  if (playerCtl) { playerCtl.stop(); playerCtl = null; }
+  if (!track.length) return;                      // трека нет — только лента
+  const st = await hard.state().catch(() => null);
+  const server = (st?.server || "").replace(/\/$/, "");
+  const t0 = track[0].t, t1 = track[track.length - 1].t;
+
+  box.innerHTML = `
+    <div class="daymap" id="daymap"><div class="daymap-fb" id="daysvg"></div></div>
+    <div class="dayplayer">
+      <button class="btn small" id="dp-play" title="Проиграть день">▶</button>
+      <select class="input" id="dp-speed" style="width:auto">
+        <option value="60">×60</option><option value="120" selected>×120</option>
+        <option value="300">×300</option><option value="600">×600</option>
+      </select>
+      <input type="range" id="dp-range" min="${t0}" max="${t1}" step="30000" value="${t0}">
+      <span class="mono nowrap" id="dp-time">${hhmmField(t0)}</span>
+    </div>
+    <p class="muted" style="font-size:12.5px;margin:4px 0 0">Тащите ползунок — где человек был в этот момент; ▶ — проиграть день. Красным — последние 15 минут до ползунка. Время — местное, как у офисов.</p>`;
+
+  const mapEl = box.querySelector<HTMLElement>("#daymap")!;
+  const svgEl = box.querySelector<HTMLElement>("#daysvg")!;
+  const range = box.querySelector<HTMLInputElement>("#dp-range")!;
+  const timeEl = box.querySelector<HTMLElement>("#dp-time")!;
+  const playBtn = box.querySelector<HTMLButtonElement>("#dp-play")!;
+  const speedSel = box.querySelector<HTMLSelectElement>("#dp-speed")!;
+
+  let map: any = null;
+  let tailSrc: any = null;
+  let head: any = null;
+  const visitPts = visits.filter(v => v.lat != null && v.lon != null);
+
+  // Схема (fallback) строится всегда — дёшево и без сети; карту рисуем сверху.
+  const lats = track.map(p => p.lat), lons = track.map(p => p.lon);
+  const la0 = Math.min(...lats), la1 = Math.max(...lats);
+  const lo0 = Math.min(...lons), lo1 = Math.max(...lons);
+  const W = 900, H = 460;
+  const project = (p: { lat: number; lon: number }): [number, number] => {
+    const spanA = Math.max(1e-6, la1 - la0 + 0.06), spanO = Math.max(1e-6, lo1 - lo0 + 0.06);
+    const k = Math.min(W / spanO, H / spanA);
+    return [W / 2 + (p.lon - (lo0 + lo1) / 2) * k, H / 2 - (p.lat - (la0 + la1) / 2) * k];
+  };
+  const pathOf = (pts: TrackPoint[]) => pts.map(p => project(p).map(v => v.toFixed(1)).join(",")).join(" ");
+  // Пауза записи >10 мин — разрыв линии: видно, где телефон молчал.
+  const chunks: TrackPoint[][] = [[track[0]]];
+  for (let i = 1; i < track.length; i++) {
+    if (track[i].t - track[i - 1].t > 10 * 60000) chunks.push([]);
+    chunks[chunks.length - 1].push(track[i]);
+  }
+  svgEl.innerHTML =
+    `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:100%">
+      <path fill="none" stroke="#93a3b3" stroke-width="2.5" stroke-linejoin="round" d="${chunks.map(c => `M${pathOf(c)}`).join(" ")}"></path>
+      <path id="dsvg-tail" fill="none" stroke="#B0472C" stroke-width="3.5" stroke-linejoin="round" d=""></path>
+      ${visitPts.map(v => { const [x, y] = project(v); return `<circle cx="${x}" cy="${y}" r="5" fill="#2c6e46"><title>${esc(v.debtor || v.rep)}</title></circle>`; }).join("")}
+      <circle id="dsvg-dot" r="7" fill="#B0472C" stroke="#fff" stroke-width="2"></circle>
+    </svg>`;
+  const svgLine = { tail: svgEl.querySelector("#dsvg-tail")!, dot: svgEl.querySelector("#dsvg-dot")! };
+
+  if (server && await ensureDeskMapLibs(server)) {
+    try {
+      const w = window as any;
+      const ll = track.map(p => [p.lon, p.lat]);
+      const bounds = ll.reduce((b, c) => b.extend(c), new w.maplibregl.LngLatBounds(ll[0], ll[0]));
+      map = new w.maplibregl.Map({ container: mapEl, style: deskMapStyle(server),
+        bounds: [[bounds.getWest() - 0.01, bounds.getSouth() - 0.01], [bounds.getEast() + 0.01, bounds.getNorth() + 0.01]],
+        fitBoundsOptions: { padding: 30 }, attributionControl: false, dragRotate: false });
+      map.on("load", () => {
+        map.addSource("track", { type: "geojson", data: { type: "MultiLineString", coordinates: [ll] } });
+        map.addLayer({ id: "track", type: "line", source: "track",
+          paint: { "line-color": "#93a3b3", "line-width": 3 } });
+        tailSrc = map.addSource("tail", { type: "geojson", data: { type: "LineString", coordinates: [] } });
+        map.addLayer({ id: "tail", type: "line", source: "tail",
+          paint: { "line-color": "#B0472C", "line-width": 4 } });
+        for (const v of visitPts) {
+          const elx = document.createElement("div");
+          elx.className = "dmap-visit";
+          elx.title = String(v.debtor || v.rep);
+          new w.maplibregl.Marker({ element: elx }).setLngLat([v.lon, v.lat]).addTo(map);
+        }
+        const hd = document.createElement("div");
+        hd.className = "dmap-head";
+        head = new w.maplibregl.Marker({ element: hd }).setLngLat(ll[0]).addTo(map);
+      });
+      map.on("error", () => { /* подложка не поднялась — схема уже нарисована */ });
+    } catch { map = null; }
+  }
+
+  const TAIL_MS = 15 * 60000;
+  function update(t: number) {
+    const p = trackAt(track, t)!;
+    const tail = track.filter(q => q.t >= t - TAIL_MS && q.t <= t);
+    timeEl.textContent = hhmmField(t);
+    const [x, y] = project(p);
+    svgLine.dot.setAttribute("cx", String(x)); svgLine.dot.setAttribute("cy", String(y));
+    svgLine.tail.setAttribute("d", tail.length ? `M${pathOf(tail)}` : "");
+    if (map && head) head.setLngLat([p.lon, p.lat]);
+    if (map && tailSrc) tailSrc.setData({ type: "LineString", coordinates: tail.map(q => [q.lon, q.lat]) });
+  }
+
+  let timer: number | undefined;
+  const stop = () => { if (timer) { clearInterval(timer); timer = undefined; } playBtn.textContent = "▶"; };
+  playerCtl = { stop };
+  range.addEventListener("input", () => { stop(); update(Number(range.value)); });
+  playBtn.addEventListener("click", () => {
+    if (timer) { stop(); return; }
+    let t = Number(range.value) >= t1 - 30000 ? t0 : Number(range.value);
+    playBtn.textContent = "⏸";
+    timer = window.setInterval(() => {
+      t += Number(speedSel.value) * 100;
+      if (t >= t1) { t = t1; stop(); }
+      range.value = String(t);
+      update(t);
+    }, 100);
+  });
+  update(t0);
+}
+
+/** Гео-запись одного дня по времени: плеер + лента (выезды, отрезки, тревога). */
 async function renderDay(root: HTMLElement, day: string) {
   const body = root.querySelector("#day-body") as HTMLElement | null;
   if (!body) return;
+  if (playerCtl) { playerCtl.stop(); playerCtl = null; }
   body.innerHTML = '<div class="skeleton"></div>';
   const r = await call("/api/control/day", { ...rangeQuery(state.range), employee: state.employee, date: day });
   if (!root.isConnected || !body.isConnected) return;
@@ -124,9 +312,13 @@ async function renderDay(root: HTMLElement, day: string) {
   const d = r.data;
   const evs = d.events as any[];
   const gaps = d.gaps as any[];
-  body.innerHTML = `
+  const visits = evs.filter(e => e.kind === "visit").map(e => e.event);
+  const track = (d.track || []) as TrackPoint[];
+  body.innerHTML = `<div class="dayplayer-box" id="player-box"></div><div id="day-rest"></div>`;
+  const rest = body.querySelector<HTMLElement>("#day-rest")!;
+  rest.innerHTML = `
     <div class="kpis"><div class="kpi"><b>${n(d.points)}</b><span>точек записано</span></div>
-      <div class="kpi"><b>${d.km ? d.km.toFixed(1).replace(".", ",") : "0"}</b><span>км по записи</span></div>
+      <div class="kpi"><b>${d.km ? String(d.km).replace(".", ",") : "0"}</b><span>км по записи</span></div>
       <div class="kpi"><b>${esc(d.first || "—")}</b><span>первая точка</span></div>
       <div class="kpi"><b>${esc(d.last || "—")}</b><span>последняя точка</span></div></div>
     ${gaps.length ? `<div class="notice"><span class="grow">Паузы записи: ${gaps.map((g) => `${esc(g.from)}–${esc(g.to)} (${n(g.min)} мин)`).join(", ")} — телефон не писал: гео выключено, приложение закрыто или села батарея.</span></div>` : ""}
@@ -149,12 +341,18 @@ async function renderDay(root: HTMLElement, day: string) {
         ${v.detail ? `<div class="line2">${esc(v.detail)}</div>` : ""}${flagsHtml(v.flags)}</div>
         <div class="side">${evidenceTag(v.evidence)}</div></div>`;
     }).join("") || '<div class="empty"><b>Пусто</b>Ни выездов, ни гео-записи в этот день.</div>'}</div>`;
-  body.querySelectorAll<HTMLElement>(".ev.visit[data-rep]").forEach((row) => row.addEventListener("click", () => {
+  rest.querySelectorAll<HTMLElement>(".ev.visit[data-rep]").forEach((row) => row.addEventListener("click", () => {
     void openPerson(state.employee, row.dataset.rep!, row.dataset.day);
   }));
-  body.querySelectorAll<HTMLAnchorElement>("[data-map]").forEach((a) => a.addEventListener("click", (ev) => {
+  rest.querySelectorAll<HTMLAnchorElement>("[data-map]").forEach((a) => a.addEventListener("click", (ev) => {
     ev.preventDefault(); window.open(a.dataset.map!, "_blank");
   }));
+  const pbox = body.querySelector<HTMLElement>("#player-box")!;
+  if (track.length) {
+    void mountDayPlayer(pbox, track, visits);
+  } else {
+    pbox.innerHTML = '<p class="muted" style="font-size:13.5px">В этот день гео-записи нет — только выезды. Трек появится, когда сотрудник включает «На линии».</p>';
+  }
 }
 
 async function renderGeoSection(root: HTMLElement) {
