@@ -1018,3 +1018,38 @@ def test_service_defaults_to_employee_wins():
     assert sig.parameters["master_conflict_policy"].default is None
     src = inspect.getsource(CycleService.prepare_snapshot)
     assert '"master_conflict_policy", "employee_wins"' in src
+
+
+def test_separate_soft_owner_drives_collection_and_projections():
+    headers = ("Номер КД / ID", "ответственный Сотрудник", "ответственный Сотрудник СОФТ",
+               "Текст Харда", "Текст Софта", "Доп. Адрес/Доп.Номер")
+    tags = ("сх", "сх", "софт", "хард", "софт", "сх")
+    fields = replace(_fields(), profile_tags={"hard":("сх","хард"),"soft":("сх","софт")},
+                     collect=(FieldRule("Текст Харда", ("hard",)), FieldRule("Текст Софта", ("soft",)),
+                              FieldRule("Доп. Адрес/Доп.Номер", ("hard","soft"))), preserve_if_master_blank=())
+    master = _book("master.xlsb", [("1","H1","S1","хард","софт","общий"),
+                                     ("2","H2","S1","хард2","софт2","общий2")], headers=headers, types=tags)
+    hard = _book("hard.xlsb", [("1","H1","хард","общий")],
+                 headers=(headers[0],headers[1],headers[3],headers[5]), types=("сх","сх","хард","сх"))
+    soft = _book("soft.xlsb", [("1","H1","S1","новый звонок","общий"),
+                                ("2","H2","S1","новый звонок2","общий2")],
+                 headers=(headers[0],headers[1],headers[2],headers[4],headers[5]), types=("сх","сх","софт","софт","сх"))
+    se = replace(_entry("soft.xlsb"), profile="soft")
+    plan = build_sync_plan(master, [(_entry("hard.xlsb"),hard),(se,soft)], fields,
+                           multi_owner_policy="master_responsible", master_conflict_policy="employee_wins")
+    assert not plan.blocked, [(i.code,i.context) for i in plan.issues]
+    assert {change.after for change in plan.changes} == {"новый звонок","новый звонок2"}
+    projection = next(p for p in plan.projections if p.entry.profile == "soft")
+    assert len(projection.rows) == 2
+    assert all(row[2] == "S1" for row in projection.rows)
+
+
+def test_one_person_can_have_both_profiles_when_master_has_two_owner_columns():
+    fields = replace(_fields(), profile_tags={"hard":("сх","хард"),"soft":("сх","софт")}, collect=())
+    headers = ("Номер КД / ID", "ответственный Сотрудник", "ответственный Сотрудник СОФТ")
+    master = _book("master.xlsb", [("1","Иванов","Иванов")],headers=headers,types=("сх","сх","софт"))
+    hard = _book("hard.xlsb",[("1","Иванов")],headers=headers[:2],types=("сх","сх"))
+    soft = _book("soft.xlsb",[("1","Иванов","Иванов")],headers=headers,types=("сх","сх","софт"))
+    plan = build_sync_plan(master,[(_entry("hard.xlsb"),hard),(replace(_entry("soft.xlsb"),profile="soft"),soft)],fields)
+    assert not plan.blocked, [i.code for i in plan.issues]
+    assert len(plan.projections) == 2

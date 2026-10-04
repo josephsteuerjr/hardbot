@@ -5,7 +5,19 @@ from __future__ import annotations
 from typing import Any
 
 from .models import WorkbookSnapshot
-from .normalize import is_blank, norm_name
+from .normalize import is_blank, norm_name, norm_title
+
+
+def responsible_title_for(book, fields, profile: str) -> str:
+    """Новый master имеет две ответственности; старые книги сохраняют одну."""
+    titles = ([fields.soft_responsible_title, fields.responsible_title]
+              if profile == "soft" else [fields.responsible_title])
+    for title in titles:
+        variants = fields.title_variants(title)
+        found = [str(header) for header in book.headers if norm_title(header) in variants]
+        if len(found) == 1:
+            return found[0]
+    return titles[0]
 
 
 def canonical_responsible_name(

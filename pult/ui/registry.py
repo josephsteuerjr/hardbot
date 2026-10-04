@@ -73,6 +73,9 @@ class RegistrySection:
                    "ручка регистратора на сервере закрыта, пульт покажет команду.")
         imp.add_row(Button("Выбрать реестр…", self.pick_registry, kind="accent"))
         self.imp_file_lbl = imp.add(Note("", "small"))
+        self.imp_profile = Combo(["Хард", "Софт", "Оба типа"])
+        imp.add_row(label("Тип сотрудников:", "small"), self.imp_profile)
+        self.imp_profile.currentIndexChanged.connect(self._imp_profile_changed)
         self.imp_pick_frame = imp.add(Rows(spacing=4))
         # Две первые галочки стоят по умолчанию (решение владельца 16.09.2026):
         # обычный прогон идёт с полным срезом и возвратом ручных снятий, а
@@ -113,8 +116,8 @@ class RegistrySection:
 
     def _card_enrich(self) -> Card:
         enr = Card("Обогащение личных реестров",
-                   "Точечно переносит доказанные выезды из приложения в личные ФИО.xlsb: "
-                   "пишутся только ячейки с доказательством визита, чужие правки "
+                   "Переносит доказанные выезды и звонки в активные личные книги Хард и Софт. "
+                   "В каждой папке нужен один рабочий .xlsb; имя может быть любым. Чужие правки "
                    "не трогаются. Сначала предпросмотр, запись — отдельной кнопкой.")
         enr.add_row(Button("Папка с республиками…", self.scatter_pick_base),
                     Button("Проверить соответствия (без записи)", self.enr_preview,
@@ -384,14 +387,15 @@ class RegistrySection:
             book = ri.read_registry(path)
             stats = self.api("GET", "/admin/stats")
             book["db_employees"] = list(stats.get("employees") or [])
-            book["employees"] = ri.merge_import_employees(
-                book["employees"], book["db_employees"])
+            book["db_soft_employees"] = list(stats.get("soft_employees") or [])
+            ri.select_profile(book, "hard", book["db_employees"], book["db_soft_employees"])
             return book
 
         def done(book):
             head, first, c_id, c_who = ri.grid_layout(book["grid"])
             book.update(head=head, first=first, c_id=c_id, c_who=c_who)
             self.imp_book = book
+            self.imp_profile.set_current(0)
             self.db_employees = list(book.get("db_employees") or [])
             self.imp_selected = ri.default_import_selection(book["employees"])
             self.imp_full_var.set(False)
@@ -413,6 +417,21 @@ class RegistrySection:
             self.toast("Реестр не прочитан", err=True)
 
         self.bg_task(work, done, fail)
+
+    def _imp_profile_changed(self, index):
+        if not self.imp_book:
+            return
+        profile = ("hard", "soft", "both")[index]
+        try:
+            ri.select_profile(self.imp_book, profile,
+                              self.imp_book.get("db_employees"), self.imp_book.get("db_soft_employees"))
+        except ValueError as exc:
+            self.imp_profile.set_current(("hard", "soft", "both").index(self.imp_book.get("import_profile", "hard")))
+            self.toast(str(exc), err=True)
+            return
+        self.imp_selected = ri.default_import_selection(self.imp_book["employees"])
+        self._invalidate_import_preview(clear_report=True)
+        self._imp_render()
 
     def _imp_render(self):
         self.imp_pick_frame.clear()

@@ -637,6 +637,14 @@ def find_header(grid: list[list], fields: list[dict]) -> tuple[int, dict]:
             if target in schema_keys
         ),
     }
+    # Личные книги являются проекциями Хард/Софт, а не полным master.
+    hard_only = {"visit_date", "who_at_address", "contact_with", "purpose_rf",
+                 "client_location", "agreed_payment", "visit_comment"}
+    soft_only = {"soft_call_status", "soft_comm_date", "soft_comment"}
+    if not (hard_only & set(best_map)) and soft_only & set(best_map):
+        required_targets -= hard_only | {"overall_result", "call_status", "add_address"}
+    elif hard_only & set(best_map) and not ({"soft_call_status", "soft_comm_date"} & set(best_map)):
+        required_targets -= soft_only
     missing = sorted(required_targets - set(best_map))
     if missing:
         raise ValueError(
@@ -656,9 +664,7 @@ def soft_anchor(row: dict):
     коммуникации и дня последнего звонка (_call_day из экспорта). Дата
     коммуникации бывает СЛЕДУЮЩИМ звонком в будущем — без дня звонка окно
     «до сегодня» молча выкидывало бы свежие звонки с отложенным перезвоном."""
-    dates = [parse_date(row.get("soft_comm_date")), parse_date(row.get("_call_day"))]
-    dates = [d for d in dates if d is not None]
-    return max(dates) if dates else None
+    return parse_date(row.get("_call_day"))
 
 
 def is_soft_filled(row: dict) -> bool:
@@ -666,7 +672,8 @@ def is_soft_filled(row: dict) -> bool:
 
     Снимка визита у софт-кейса нет и не будет — доказательство здесь другое:
     живая колонка месяца + окно по дню звонка + реестр доставленного."""
-    return cell_text(row.get("soft_call_status")) != "" and soft_anchor(row) is not None
+    return (row.get("_bot_call_completed") is True and
+            cell_text(row.get("soft_call_status")) != "" and soft_anchor(row) is not None)
 
 
 # Что развозим по софт-книгам: колонки звонка + общие обещание/прогноз.
@@ -727,8 +734,23 @@ def split_by_employee(rows: list[dict]) -> EmployeeSplit:
             continue
         e = out.setdefault(norm_name(emp), {"employee": emp, "rows": [], "filled": 0})
         e["rows"].append(r)
-        if is_filled(r):
+        if is_filled(r) or (is_soft_filled(r) and any(cell_text(r.get(k)) and
+                (r.get("_common_days") or {}).get(k) == r.get("_call_day")
+                for k in ("promise_date", "forecast_sum", "forecast"))):
             e["filled"] += 1
+    for r in rows:
+        emp = str(r.get("responsible_soft") or "").strip()
+        if not emp:
+            continue
+        key = "soft:" + norm_name(emp)
+        e = out.setdefault(key, {"employee": emp, "profile": "soft", "rows": [], "filled": 0})
+        e["rows"].append({**r, "_profile": "soft"})
+        if is_soft_filled(r):
+            e["filled"] += 1
+    for key, e in out.items():
+        if not key.startswith("soft:"):
+            e["profile"] = "hard"
+            e["rows"] = [{**r, "_profile": "hard"} for r in e["rows"]]
     if seen_dates:
         order = sorted(seen_dates, key=lambda s: (s[6:], s[3:5], s[:2]))
         out.orphan_dates = (order[0], order[-1])
@@ -930,21 +952,32 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
         cid = norm_cid(srv.get(CONTRACT_KEY))
         if not cid:
             continue
-        soft_case = False
-        if is_filled(srv):
-            vdate = parse_date(srv.get("visit_date"))
-        elif is_soft_filled(srv):
-            soft_case = True          # контур «Софт»: якорь — день звонка/коммуникации
-            vdate = soft_anchor(srv)
-        else:
-            continue     # без завершённого визита/звонка кейс не трогаем вообще
-        if (since_d and vdate < since_d) or (until_d and vdate > until_d):
+        hard_day = parse_date(srv.get("visit_date")) if is_filled(srv) else None
+        call_day = soft_anchor(srv) if is_soft_filled(srv) else None
+        common_day = parse_date(srv.get("_common_day")) or call_day or hard_day
+        profile = srv.get("_profile") or (
+            "soft" if "soft_call_status" in col_map and "visit_date" not in col_map else
+            "hard" if "visit_date" in col_map and "soft_call_status" not in col_map else "both")
+        anchors = {}
+        for key in VISIT_KEYS:
+            if key in ("promise_date", "forecast_sum", "forecast"):
+                anchor = parse_date((srv.get("_common_days") or {}).get(key)) or common_day
+            elif key in SOFT_CASE_KEYS:
+                anchor = call_day if profile != "hard" else None
+            else:
+                anchor = hard_day if profile != "soft" else None
+            if anchor is not None:
+                anchors[key] = anchor
+        if not anchors:
+            continue
+        eligible = {k: d for k, d in anchors.items()
+                    if (not since_d or d >= since_d) and (not until_d or d <= until_d)}
+        if not eligible:
             out_of_window += 1
             continue
+        vdate = max(eligible.values())
         filled_contract_ids.append(cid)
-        keys_pool = VISIT_KEYS if not soft_case else [
-            k for k in VISIT_KEYS if k in SOFT_CASE_KEYS]
-        values = {k: srv.get(k) for k in keys_pool
+        values = {k: srv.get(k) for k in eligible
                   if cell_text(srv.get(k)) != "" and k in col_map}
         filled_cases += 1
         targets = file_rows.get(cid)
@@ -960,6 +993,7 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
                 comment_cleared_cids.append(cid)
         case_changed = False
         for key, val in values.items():
+            vdate = eligible[key]
             c = col_map[key]
             is_date = is_date_key.get(key, False)
             for r in targets:

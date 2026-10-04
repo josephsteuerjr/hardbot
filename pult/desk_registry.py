@@ -98,6 +98,7 @@ def _book_view(selected=None) -> dict:
     book = S["book"] or {}
     sel = set(selected if selected is not None else book.get("_selected") or [])
     return {"caption": ri.file_caption(book) if book else "",
+            "profile": book.get("import_profile", "hard"),
             "employees": [{"key": e["key"], "name": e["name"], "note": ri.employee_note(e),
                            "in_db": bool(e.get("db_count"))}
                           for e in book.get("employees") or []],
@@ -116,7 +117,8 @@ def imp_pick(body, *, admin, start_job, **_):
         book = ri.read_registry(path)
         stats = admin("GET", "/admin/stats")
         book["db_employees"] = list(stats.get("employees") or [])
-        book["employees"] = ri.merge_import_employees(book["employees"], book["db_employees"])
+        book["db_soft_employees"] = list(stats.get("soft_employees") or [])
+        ri.select_profile(book, "hard", book["db_employees"], book["db_soft_employees"])
         head, first, c_id, c_who = ri.grid_layout(book["grid"])
         book.update(head=head, first=first, c_id=c_id, c_who=c_who)
         book["_selected"] = sorted(ri.default_import_selection(book["employees"]))
@@ -129,6 +131,10 @@ def imp_pick(body, *, admin, start_job, **_):
 def imp_selection(body, **_):
     """«снять / есть в БД / все» и подпись кнопки предпросмотра."""
     book = S["book"] or {}
+    if body.get("profile") and body["profile"] != book.get("import_profile", "hard"):
+        ri.select_profile(book, body["profile"], book.get("db_employees"), book.get("db_soft_employees"))
+        S["preview"] = None
+        return _book_view()
     mode = body.get("mode")
     if mode == "all":
         sel = {e["key"] for e in book.get("employees") or []}
@@ -145,7 +151,8 @@ def imp_selection(body, **_):
 
 
 def _signature(book, sel, full, restore, comments):
-    return (book.get("file_sha256"), tuple(sorted(sel)), bool(full), bool(restore), bool(comments))
+    return (book.get("file_sha256"), book.get("import_profile", "hard"),
+            tuple(sorted(sel)), bool(full), bool(restore), bool(comments))
 
 
 def imp_preview(body, *, admin, start_job, **_):

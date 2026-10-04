@@ -982,11 +982,15 @@ const IDB = (()=>{
 // Плюс не трогался localStorage, и черновик формы с очередью трека прошлого
 // выездника продолжали жить под новым именем.
 async function clearLocalData(opts){
+  dayStop(true);
+  stopNavWatch();
+  dayClearOn();
+  dayQueueSet(dayQueue().filter(b=>b.employee));
   const keepQueue = !!(opts && opts.keepQueue);
   const stores = keepQueue ? ["cards"] : ["cards","queue"];
   for(const s of stores){ try{ await IDB.clear(s); }catch(e){} }
   try{
-    localStorage.removeItem(TRACK_KEY);
+    trackQueueSet(trackQueue().filter(b=>b.employee));
     localStorage.removeItem(WARM_KEY);
     Object.keys(localStorage)
       .filter(k => k.indexOf("draft:") === 0)
@@ -1013,6 +1017,7 @@ async function wipeDevice(opts){
   // Сначала глушим всё, что само пишет в хранилище: трек поездки, следы
   // карточки, черновик формы (beforeunload и уход в фон вписали бы его обратно).
   try{ NAV.session=null; NAV.buf=[]; if($("navmode").classList.contains("on")) exitNav(); }catch(e){}
+  try{ dayStop(); }catch(e){}
   try{ clearTimeout(draftTimer); stopAutoSync(); draftDirty=false; prStop(); }catch(e){}
   try{ closePick(); closeAsk("swapsheet"); closeAsk("outsheet"); PhotoAudit.free(); }catch(e){}
   STATE.cur=null; STATE.persons=[]; STATE.roles=null;
@@ -1091,7 +1096,9 @@ async function cacheBootstrap(d){
     employee:d.employee,roles:d.roles||null,at:Date.now()},"bootstrap"); }catch(e){}
 }
 async function loadBootstrapSnapshot(){ try{ return await IDB.get("kv","bootstrap"); }catch(e){ return null; } }
-async function loadCard(rep){ try{ return (await IDB.get("cards",rep))||null; }catch(e){ return null; } }
+function cardKey(rep,profile){ return (profile==="soft"?"soft:":"")+rep; }
+function storeCard(d,rep){return IDB.put("cards",d,cardKey(rep,d._profile||(STATE.mode==="soft"?"soft":"hard")));}
+async function loadCard(rep){ try{ return (await IDB.get("cards",cardKey(rep,STATE.mode)))||null; }catch(e){ return null; } }
 // Прогрев кэша всех карточек одним запросом (только онлайн, в фоне, не блокирует UI).
 // Полные карточки портфеля в оффлайн-кэш. `manual` — запуск кнопкой: тогда процесс
 // показываем, при фоновом прогреве после входа — только итог. Раскладка идёт
@@ -1111,25 +1118,27 @@ async function askPersistentStorage(){
 }
 
 async function warmCards(manual){
-  const t = L(), gen=WIPE_GEN;
+  const t = L(), gen=WIPE_GEN, mode=STATE.mode;
   await askPersistentStorage();
   if(manual) warmBar(`<div class="sline"><span class="d w"></span><span id="warmtxt">${esc(t.warmgoing)}…</span></div>`);
   let j=null;
   const downloadStarted=performance.now();
-  try{ j=await api("/api/cards"); }
+  try{ j=await api("/api/cards?mode="+enc(STATE.mode)); }
   catch(e){
     clientMetric("warm_error", {});
     if(manual) warmBar(`<div class="sline"><span class="d w"></span><span>⚠️ ${esc(t.warmfail)}</span>
         <button class="toolbtn" onclick="warmCards(true)">⬇ ${esc(t.warmagain)}</button></div>`);
     return;
   }
-  if(gen!==WIPE_GEN) return;       // телефон очистили, пока карточки качались
+  if(gen!==WIPE_GEN || mode!==STATE.mode) return;
   const downloadMs=performance.now()-downloadStarted;
   const reps = (j && j.cards) ? Object.keys(j.cards) : [];
-  const entries=reps.map(rep=>[rep,j.cards[rep]]);
+  const profile=mode==="soft"?"soft":"hard";
+  const entries=reps.map(rep=>[cardKey(rep,profile),{...j.cards[rep],_profile:profile}]);
   const cacheStarted=performance.now();
   try{
-    await IDB.replace("cards", entries);
+    const other=(await IDB.all("cards")||[]).filter(d=>d.rep&&(d._profile||"hard")!==profile);
+    await IDB.replace("cards", entries.concat(other.map(d=>[cardKey(d.rep,d._profile),d])));
   }catch(e){
     clientMetric("warm_error", {cards:reps.length,download_ms:downloadMs});
     if(manual) warmBar(`<div class="sline"><span class="d w"></span><span>⚠️ ${esc(t.warmfail)}</span>
@@ -1233,7 +1242,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=73;
+const SHELL_VERSION=74;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1524,6 +1533,7 @@ async function flushQueue(){
           if(Number.isFinite(Number(it.amount))&&Number(it.amount)>0)
             q.set("amount",String(it.amount));
           if(it.note) q.set("note",it.note);
+          if(it.visit_op) q.set("visit",it.visit_op);
           r=await fetch("/api/receipt?"+q.toString(),
             {method:"POST",headers:receiptHeaders(it.ext),body:bytes});
         }else{ ok=true; }   // неизвестный тип — не держим вечно
@@ -1589,7 +1599,7 @@ function applyVisitLocally(rep, values){
     if(values.call_comment!=null) d.visit_comment=values.call_comment;  // легаси-черновики
     if(values.tips!=null) d.tips=values.tips;
     if(values.call_status!=null) d.status=values.call_status;
-    IDB.put("cards", d, rep).catch(()=>{});
+    storeCard(d,rep).catch(()=>{});
   }
   const p=STATE.persons.find(x=>x.rep===rep); if(p) p.visited=true;
 }
@@ -2116,8 +2126,15 @@ async function boot(){
       } }catch(e){}
   }
   try{
-    const bootMode=storedMode();
-    const d = await api("/api/bootstrap"+(bootMode==="soft"?"?mode=soft":""));
+    let bootMode=storedMode();
+    let d = await api("/api/bootstrap"+(bootMode==="soft"?"?mode=soft":""));
+    // Первый вход ещё не знает ролей. Выбираем доступный портфель после ответа.
+    STATE.roles=d.roles||null;
+    const availableMode=storedMode();
+    if(availableMode==="soft" && bootMode!=="soft" && !d.needsOnboarding && !d.pending){
+      bootMode="soft";
+      d=await api("/api/bootstrap?mode=soft");
+    }
     // Пока шёл запрос, телефон могли очистить («Выйти», замена входа): поздний
     // ответ не должен вернуть на экран и в хранилище стёртый портфель.
     if(gen!==WIPE_GEN) return;
@@ -2245,7 +2262,8 @@ function hasLead(){ return !!(STATE.roles && STATE.roles.manager); }
 // Контур «Софт»: портфель по «ответственный Сотрудник СОФТ». У выездников,
 // переведённых УЗБ на звонки, ролей две — переключатель «Выездник | Софт».
 function softRole(){ return !!(STATE.roles && STATE.roles.soft); }
-function canField(){ return hasLead() || !!(STATE.roles && STATE.roles.field); }
+function canField(){ return hasLead() || (!STATE.roles ? true :
+  (STATE.roles.field===undefined ? !softRole() : !!STATE.roles.field)); }
 function modeKey(){ return "hb_mode:"+currentUid(); }
 function storedMode(){
   const can={lead:hasLead(),soft:softRole(),field:canField()};
@@ -2483,8 +2501,8 @@ function filterList(){
 
 async function openP(rep){
   let d=null;
-  try{ d=await api("/api/person?rep="+enc(rep));
-    if(d){ STATE.online=true; IDB.put("cards",d,rep).catch(()=>{}); } }   // освежить кэш карточки
+  try{ d=await api("/api/person?rep="+enc(rep)+"&mode="+enc(STATE.mode));
+    if(d){ STATE.online=true; storeCard(d,rep).catch(()=>{}); } }   // освежить кэш карточки
   catch(e){ d=await loadCard(rep); if(d) STATE.online=false; }            // нет сети → из кэша
   if(!d){ toast(STATE.online===false?"нет данных оффлайн":"✕"); return; }
   // Старые IndexedDB-карточки могли содержать form-prefill из master. До
@@ -2496,7 +2514,7 @@ async function openP(rep){
     // сохраняем даже до первого завершённого визита; очищаем только недоказанный
     // legacy-prefill прочих полей.
     d.call_comment=""; d.tips="";
-    IDB.put("cards",d,rep).catch(()=>{});
+    storeCard(d,rep).catch(()=>{});
   }
   STATE.cur=d; STATE.tab=(STATE.mode==="soft")?"call":"visit";
   // Когда человек открыл карточку. Офис просил видеть время на адресе, а
@@ -2532,7 +2550,7 @@ async function openP(rep){
 function renderDetail(){
   const d=STATE.cur, t=L();
   resetScroll();
-  const tab=(id,lbl)=>`<button class="${STATE.tab===id?'on':''}" onclick="setTab('${id}')">${lbl}</button>`;
+  const tab=(id,lbl)=>`<button class="${(STATE.tab==='callform'?'call':STATE.tab)===id?'on':''}" onclick="setTab('${id}')">${lbl}</button>`;
   // Форма ВИЗИТА софтнику не нужна: её «Сохранить выезд» упиралсяся бы в
   // 404 владения и навсегда оседал в очереди телефона. Визит — чтение.
   const soft=STATE.mode==="soft";
@@ -2549,8 +2567,8 @@ function setTab(id){
   if((STATE.tab==="form"||STATE.tab==="callform") && id!=="form" && id!=="callform")
     flushDraft();   // сохранить черновик до ухода с формы
   STATE.tab=id; drawPanel(); resetScroll();
-  const tabIds=soft?["visit","call","debt","client"]:["visit","call","debt","client","form","callform"];
-  document.querySelectorAll(".tabs button").forEach((b,i)=>b.classList.toggle("on",tabIds[i]===id)); }
+  const tabIds=STATE.mode==="soft"?["visit","call","debt","client"]:["visit","call","debt","client","form","callform"];
+  document.querySelectorAll(".tabs button").forEach((b,i)=>b.classList.toggle("on",tabIds[i]===(id==='callform'?'call':id))); }
 
 function drawPanel(){
   const d=STATE.cur, t=L(); const p=$("panel");
@@ -2856,7 +2874,7 @@ function panelCallForm(d,t){
        onclick="openDateWheel('soft_comm_date')">${esc(s.comm_date||"—")}</button>
      <div class="muted" style="font-size:11px;margin-top:4px">пусто — в реестре дата не изменится</div>
    </div>
-   ${promiseSection(d, tf)}
+   ${promiseSection({...d,formTyped:d.softFormTyped||d.formTyped}, tf)}
    <button class="btn acc big" id="callbtn" style="margin-top:12px" onclick="saveCall()">${ic("check")}<span>${esc(t.savecall)}</span></button>`;
 }
 async function saveCall(){
@@ -2885,7 +2903,7 @@ async function saveCall(){
     if(clearedNow.length) body.cleared_keys=clearedNow;
     try{
       const j=await api("/api/save",{method:"POST",body:JSON.stringify(body)});
-      STATE.online=true; STATE.cur=j.person; IDB.put("cards",j.person,rep).catch(()=>{});
+      STATE.online=true; STATE.cur=j.person; storeCard(j.person,rep).catch(()=>{});
       finishSavedUI(rep,t.callsaved);
       const bad=j.rejected||null;
       if(bad&&bad.promise_date) toast("Дата обещания не принята: не дальше "+(promiseMaxDays()||3)+" дн");
@@ -3291,9 +3309,10 @@ function openReceipt(){
     <div class="pickbody">
       <div style="font-weight:700;margin:2px 0 12px">🧾 ${esc(t.receipt)}</div>
       <label class="fld">${esc(t.rcAmount)}</label>
-      <input id="rc_amount" inputmode="numeric" class="money" placeholder="0" oninput="onMoneyInput(this)">
+      <input id="rc_amount" inputmode="decimal" class="money" placeholder="0,00">
       <label class="fld">${esc(t.rcDate)}</label>
       <input id="rc_date" type="date" value="${today}" max="${today}">
+      ${STATE.cur.last_visit_op?'<label class="fld"><input id="rc_visit" type="checkbox"> Чек относится к последнему выезду</label>':''}
       <div style="display:flex;gap:8px;margin-top:10px">
         <button type="button" class="pickrow on" id="rc_pc" style="flex:1" onclick="rcSetPayer(false)">${esc(t.rcPayerClient)}</button>
         <button type="button" class="pickrow" id="rc_po" style="flex:1" onclick="rcSetPayer(true)">${esc(t.rcPayerOther)}</button>
@@ -3321,11 +3340,12 @@ async function upReceipt(live){
   if(!files.length||!STATE.cur) return;
   const t=L();
   // Поля читаем ДО закрытия листа (он удаляется из DOM) и ДО чтения файла.
-  const amountRaw=(($("rc_amount")&&$("rc_amount").value)||"").replace(/[^0-9]/g,"");
+  const amountRaw=(($("rc_amount")&&$("rc_amount").value)||"").replace(/\s/g,"").replace(",",".");
   const paidAt=(($("rc_date")&&$("rc_date").value)||"").trim();
   const payerOther=$("rc_po")&&$("rc_po").classList.contains("on");
   const note=(($("rc_who")&&$("rc_who").value)||"").trim();
-  const amount=amountRaw?Number(amountRaw):null;
+  const amount=/^\d+(\.\d{1,2})?$/.test(amountRaw)?Number(amountRaw):null;
+  const visit_op=$("rc_visit")&&$("rc_visit").checked?STATE.cur.last_visit_op:"";
   if(!(amount>0)||!/^\d{4}-\d{2}-\d{2}$/.test(paidAt)){ toast(t.rcNeedFields); return; }
   const rep=STATE.cur.rep;
   // Читаем и жмём файл сразу (iOS: security-scoped файлы живут до await'ов).
@@ -3336,7 +3356,7 @@ async function upReceipt(live){
     prepared={bytes:await photoBytes(small||f),ext:small?".jpg":photoExt(f.name,f.type)};
   }catch(e){ toast(t.rcBadPhoto); return; }
   closeReceipt();
-  await sendReceipt(rep,{amount,paid_at:paidAt,payer_other:payerOther,note},prepared);
+  await sendReceipt(rep,{amount,paid_at:paidAt,payer_other:payerOther,note,visit_op},prepared);
 }
 async function sendReceipt(rep,fields,p){
   const op_id=uuid(), at=Date.now();
@@ -3346,6 +3366,7 @@ async function sendReceipt(rep,fields,p){
     const q=new URLSearchParams({rep,op:op_id,amount:String(fields.amount),
       paid_at:fields.paid_at,payer:fields.payer_other?"other":"client"});
     if(fields.note) q.set("note",fields.note);
+    if(fields.visit_op) q.set("visit",fields.visit_op);
     const r=await fetch("/api/receipt?"+q.toString(),
       {method:"POST",headers:receiptHeaders(p.ext),body:p.bytes});
     if(r.ok){
@@ -3826,7 +3847,7 @@ async function saveVisit(){
     Object.assign(body, pr);
     try{
       const j=await api("/api/save",{method:"POST",body:JSON.stringify(body)});
-      STATE.online=true; STATE.cur=j.person; IDB.put("cards",j.person,rep).catch(()=>{});
+      STATE.online=true; STATE.cur=j.person; storeCard(j.person,rep).catch(()=>{});
       finishSavedUI(rep, L().saved);
       // Визит сохранён, но поле сервер не принял (дата обещания за пределом,
       // нечитаемая сумма). Молчать нельзя: человек уедет с адреса уверенным,
@@ -4050,7 +4071,7 @@ async function refreshData(){
   }
 }
 setInterval(refreshData, 10*60*1000);            // раз в 10 минут при открытом приложении
-dayResumeCheck(); dayDrainQueue();                  // смена «На линии»: продолжить и дослать
+Promise.resolve().then(()=>{dayResumeCheck();void dayDrainQueue();}); // после инициализации DAY
 setInterval(checkShellVersion, 5*60*1000);        // версия легче полного портфеля
 
 // Появилась связь — досылаем накопленную очередь; пропала — переключаем индикатор.
@@ -4091,13 +4112,13 @@ async function setMarkCase(){
   const rep=STATE.cur.rep, op_id=uuid();
   try{
     const j=await api("/api/marker",{method:"POST",body:JSON.stringify({rep,lat:loc.lat,lon:loc.lon,op_id})});
-    STATE.online=true; if(j.person){ STATE.cur=j.person; IDB.put("cards",j.person,rep).catch(()=>{}); }
+    STATE.online=true; if(j.person){ STATE.cur=j.person; storeCard(j.person,rep).catch(()=>{}); }
     if(TG&&TG.HapticFeedback) TG.HapticFeedback.notificationOccurred("success");
     toast(t.marksaved); drawPanel();
   }catch(e){
     await enqueue({op_id, kind:"marker", rep, lat:loc.lat, lon:loc.lon, at:Date.now()});
     STATE.online=false;
-    if(STATE.cur && STATE.cur.rep===rep){ STATE.cur.geo={lat:loc.lat,lon:loc.lon,src:"manual"}; IDB.put("cards",STATE.cur,rep).catch(()=>{}); }
+    if(STATE.cur && STATE.cur.rep===rep){ STATE.cur.geo={lat:loc.lat,lon:loc.lon,src:"manual"}; storeCard(STATE.cur,rep).catch(()=>{}); }
     if(TG&&TG.HapticFeedback) TG.HapticFeedback.notificationOccurred("success");
     toast(t.marksaved+" ("+t.queuedn+")"); drawPanel(); updateOffBar();
   }
@@ -5070,10 +5091,12 @@ function dgPerson(j,b){
   DG.rcs=rcs;
   if(rcs.length){
     const rp=j.registry_pay||{};
-    parts.push(`<div style="margin-top:10px;font-weight:700">🧾 Чеки · ${rcs.length} · ${esc(rcMoney(j.receipts_total))}</div>`);
-    parts.push(`<div class="muted" style="font-size:12px;margin:2px 0 4px">реестр: ${rp.date?("платёж "+esc(rp.date)+(rp.sum?" · "+esc(rcMoney(rp.sum)):"")):"платежей не видно"}</div>`);
+    const totals=(j.receipts_totals||[]).map(x=>rcMoney(x.sum)+" "+x.currency).join(" · ");
+    parts.push(`<div style="margin-top:10px;font-weight:700">🧾 Чеки за всё время · ${rcs.length}${totals?" · "+esc(totals):""}</div>`);
+    parts.push(`<div class="muted" style="font-size:12px;margin:2px 0 4px">В реестре виден только последний платёж по каждому КД, не полная выписка.</div>`);
+    parts.push((j.payment_checks||[]).map(x=>`<div class="muted" style="font-size:12px">КД ${esc(x.contract_id)} · ${esc(x.date)} · реестр ${esc(rcMoney(x.registry_sum))} ${esc(x.currency||"")} · чеки за ту же дату ${esc(rcMoney(x.receipt_sum))}${x.difference!==null?" · разница "+esc(x.difference):" · недостаточно данных для сравнения"}</div>`).join(""));
     parts.push(rcs.map((r,i)=>`<button class="btn line" style="padding:4px 10px;margin-top:6px" onclick="dgReceipt(${i})">
-      ${esc(r.paid_at||r.created_at||"")} · ${esc(rcMoney(r.amount))}${r.payer_is_client?"":" · другое лицо"+(r.payer_note?": "+esc(r.payer_note):"")}</button>`).join(""));
+      КД ${esc(r.contract_id||"")} · ${esc(r.paid_at||r.created_at||"")} · ${esc(rcMoney(r.amount))} ${esc(r.currency||"без валюты")}${r.visit_op?" · связан с выездом":""}${r.payer_is_client?"":" · другое лицо"+(r.payer_note?": "+esc(r.payer_note):"")}</button>`).join(""));
     parts.push(`<div id="dgreceipt"></div>`);
   }
   parts.push(`<button class="btn line" style="margin-top:10px" onclick="dgGo('emp')">← ${esc(DG.emp||"")}</button>`);
@@ -5845,7 +5868,17 @@ function trackQueue(){
   if(patched) trackQueueSet(q);
   return q;
 }
-function trackQueueSet(q){ try{ localStorage.setItem(TRACK_KEY, JSON.stringify(q.slice(-2000))); }catch(e){} }
+function trackQueueSet(q){ try{ localStorage.setItem(TRACK_KEY, JSON.stringify(q)); return true; }
+  catch(e){ navShowBanner("Не удалось сохранить трек на телефоне. Освободите место; держите приложение открытым до отправки."); return false; } }
+
+function trackPersist(){
+  if(!NAV.session || !NAV.buf.length) return true;
+  const batch={bid:uuid(),session_id:NAV.session,employee:NAV.owner||STATE.employee,
+    rep:NAV.rep||null,points:NAV.buf.slice()};
+  if(!trackQueueSet(trackQueue().concat([batch]))) return false;
+  NAV.buf.splice(0,batch.points.length);
+  return true;
+}
 
 function trackPush(me, p){
   if(!NAV.session) return;
@@ -5857,19 +5890,12 @@ function trackPush(me, p){
   NAV.buf.push({ts:new Date(p.timestamp||Date.now()).toISOString(), lat:me.lat, lon:me.lon,
                 acc:(p.coords&&p.coords.accuracy)||null,
                 speed:(p.coords&&p.coords.speed)||null, heading:NAV.lastHeading||null});
-  if(NAV.buf.length>=TRACK_FLUSH_N) trackFlush();
+  trackPersist();
 }
 
 async function trackFlush(){
-  if(!NAV.session || !NAV.buf.length) return;
-  const batch={bid:uuid(),   // стабильный id пачки: по нему её удаляют из очереди
-               session_id:NAV.session, rep:(NAV.free?null:(STATE.cur&&STATE.cur.rep)||null),
-               points:NAV.buf.splice(0, NAV.buf.length)};
-  try{
-    await api("/api/track", {method:"POST", body:JSON.stringify(batch)});
-  }catch(e){
-    trackQueueSet(trackQueue().concat([batch]));   // не ушло — в очередь на потом
-  }
+  if(!trackPersist()) return;
+  await trackDrainQueue();
 }
 
 // Досыл накопленного. Очередь перечитывается ПЕРЕД каждой правкой и удаляется
@@ -5877,16 +5903,20 @@ async function trackFlush(){
 // он записывался обратно целиком — и всё, что trackFlush дописал за время
 // ожидания сети, молча стиралось вместе с точками текущей поездки.
 async function trackDrainQueue(){
-  for(const b of trackQueue()){
+  if(NAV.draining) return;
+  NAV.draining=true;
+  try{ for(const b of trackQueue()){
+    if(b.employee && b.employee!==STATE.employee) continue;
     try{
       await api("/api/track", {method:"POST", body:JSON.stringify(b)});
-      trackQueueSet(trackQueue().filter(x => x.bid !== b.bid));
+      if(!trackQueueSet(trackQueue().filter(x => x.bid !== b.bid))) return;
     }catch(e){ return; }        // сеть пропала — остальное дождётся следующего раза
-  }
+  }}finally{NAV.draining=false;}
 }
 
 async function startNavWatch(){
   NAV.session=uuid(); NAV.buf=[]; NAV.lastTracked=null;
+  NAV.owner=STATE.employee; NAV.rep=NAV.free?null:(STATE.cur&&STATE.cur.rep)||null;
   trackDrainQueue();                                   // сначала досылаем прошлое
   if(!navigator.geolocation){ navShowBanner(L().nogeo); return; }
   // watchPosition сам покажет системный диалог, но его ответ никто не ждёт и
@@ -5914,7 +5944,7 @@ function onNavPosErr(){ navShowBanner(L().nogeo); }
 const DAY_KEY="hb_day_queue", DAY_ON_KEY="hb_day_on",
       DAY_FLUSH_N=20, DAY_FLUSH_MS=60000, DAY_MIN_M=25, DAY_PULSE_MS=600000;
 const DAY={on:false, session:"", watchId:null, timer:null, lastPos:null, lastMs:0,
-           buf:[], points:0, km:0, started:null, wake:null};
+           buf:[], points:0, km:0, started:null, wake:null, error:"", draining:false, owner:""};
 
 function dayQueue(){
   let q=[]; try{ q=JSON.parse(localStorage.getItem(DAY_KEY)||"[]"); }catch(e){ return []; }
@@ -5923,58 +5953,78 @@ function dayQueue(){
   if(patched) dayQueueSet(q);
   return q;
 }
-function dayQueueSet(q){ try{ localStorage.setItem(DAY_KEY, JSON.stringify(q.slice(-2000))); }catch(e){} }
+function dayQueueSet(q){
+  try{ localStorage.setItem(DAY_KEY, JSON.stringify(q)); return true; }
+  catch(e){ DAY.error="Не удалось сохранить точки на телефоне. Освободите место; держите приложение открытым до отправки."; dayRenderStatus(); return false; }
+}
+function dayPersist(){
+  if(!DAY.session || !DAY.buf.length) return true;
+  const batch={bid:uuid(),session_id:DAY.session,employee:DAY.owner||STATE.employee,rep:null,points:DAY.buf.slice()};
+  if(!dayQueueSet(dayQueue().concat([batch]))) return false;
+  DAY.buf.splice(0,batch.points.length);
+  return true;
+}
 
 function daySaveOn(){
   try{ localStorage.setItem(DAY_ON_KEY, JSON.stringify(
-    {session:DAY.session, started:DAY.started})); }catch(e){}
+    {session:DAY.session, started:DAY.started, employee:DAY.owner})); }catch(e){}
 }
 function dayClearOn(){ try{ localStorage.removeItem(DAY_ON_KEY); }catch(e){} }
 
 function dayOnPos(p){
   if(!DAY.on) return;
-  const me={lat:p.coords.latitude, lon:p.coords.longitude};
+  const me={lat:p.coords.latitude, lon:p.coords.longitude, acc:p.coords.accuracy||0};
   const now=p.timestamp||Date.now();
   const moved=!DAY.lastPos || haversineKm(DAY.lastPos, me)*1000 >= DAY_MIN_M;
   const pulse=now-DAY.lastMs >= DAY_PULSE_MS;
   if(!moved && !pulse) return;
-  if(DAY.lastPos && moved) DAY.km += haversineKm(DAY.lastPos, me);
+  if(DAY.lastPos && moved && now-DAY.lastMs<=DAY_PULSE_MS &&
+     me.acc<=200 && DAY.lastPos.acc<=200 &&
+     haversineKm(DAY.lastPos,me)*1000>Math.max(25,me.acc+DAY.lastPos.acc))
+    DAY.km += haversineKm(DAY.lastPos, me);
   DAY.lastPos=me; DAY.lastMs=now;
   DAY.buf.push({ts:new Date(now).toISOString(), lat:me.lat, lon:me.lon,
                 acc:(p.coords&&p.coords.accuracy)||null,
                 speed:(p.coords&&p.coords.speed)||null, heading:null});
   DAY.points++;
-  if(DAY.buf.length>=DAY_FLUSH_N) dayFlush();
+  DAY.error="";
+  dayPersist();
+  if(DAY.points%DAY_FLUSH_N===0) dayFlush();
   dayRenderStatus();
 }
 
 async function dayFlush(){
-  if(!DAY.session || !DAY.buf.length) return;
-  const batch={bid:uuid(), session_id:DAY.session, rep:null,
-               points:DAY.buf.splice(0, DAY.buf.length)};
-  try{
-    await api("/api/track", {method:"POST", body:JSON.stringify(batch)});
-  }catch(e){
-    dayQueueSet(dayQueue().concat([batch]));
-  }
+  dayPersist();
+  await dayDrainQueue();
 }
 
 async function dayDrainQueue(){
-  for(const b of dayQueue()){
+  if(DAY.draining) return;
+  DAY.draining=true;
+  try{ for(const b of dayQueue()){
+    if(b.employee && b.employee!==STATE.employee) continue;
     try{
       await api("/api/track", {method:"POST", body:JSON.stringify(b)});
-      dayQueueSet(dayQueue().filter(x => x.bid !== b.bid));
+      if(!dayQueueSet(dayQueue().filter(x => x.bid !== b.bid))) return;
     }catch(e){ return; }
-  }
+  }}finally{ DAY.draining=false; }
 }
 
 async function dayWakeAcquire(){
-  try{ if(navigator.wakeLock) DAY.wake=await navigator.wakeLock.request("screen"); }catch(e){}
+  try{ if(navigator.wakeLock && DAY.on && !document.hidden){
+    const wake=await navigator.wakeLock.request("screen");
+    if(!DAY.on){ void wake.release(); return; }
+    DAY.wake=wake;
+    wake.addEventListener("release",()=>{if(DAY.wake===wake) DAY.wake=null;});
+  }}catch(e){}
 }
 document.addEventListener("visibilitychange", ()=>{
+  if(document.hidden) dayPersist();
   if(!document.hidden && DAY.on && !DAY.wake) dayWakeAcquire();
   if(!document.hidden) dayDrainQueue();
 });
+window.addEventListener("pagehide",dayPersist);
+window.addEventListener("beforeunload",dayPersist);
 
 async function dayStart(keep){
   if(DAY.on) return;
@@ -5984,20 +6034,22 @@ async function dayStart(keep){
     if(!p){ toast(geoErrText(GEO.lastErr)); return; }
   }
   const today=new Date().toISOString().slice(0,10);
+  if(!dayPersist()) return;
   DAY.on=true;
+  DAY.owner=STATE.employee;
   DAY.session=(keep&&keep.session) || ("day:"+today+"-"+uuid());
   DAY.started=(keep&&keep.started) || Date.now();
-  DAY.buf=[]; DAY.lastPos=null; DAY.lastMs=0; DAY.points=0; DAY.km=0;
+  DAY.lastPos=null; DAY.lastMs=0; DAY.points=0; DAY.km=0; DAY.error="";
   daySaveOn();
   dayDrainQueue();
   await dayWakeAcquire();
   DAY.timer=setInterval(dayFlush, DAY_FLUSH_MS);
-  DAY.watchId=navigator.geolocation.watchPosition(dayOnPos, ()=>{},
+  DAY.watchId=navigator.geolocation.watchPosition(dayOnPos, e=>{DAY.error=geoErrText(e.code);dayRenderStatus();},
     {enableHighAccuracy:true, maximumAge:5000, timeout:20000});
   dayRenderStatus();
 }
 
-function dayStop(){
+function dayStop(persistOnly=false){
   if(!DAY.on) return;
   DAY.on=false;
   if(DAY.watchId!=null && navigator.geolocation){
@@ -6006,7 +6058,7 @@ function dayStop(){
   }
   if(DAY.timer){ clearInterval(DAY.timer); DAY.timer=null; }
   if(DAY.wake){ try{ DAY.wake.release(); }catch(e){} DAY.wake=null; }
-  dayFlush();
+  if(persistOnly) dayPersist(); else dayFlush();
   dayClearOn();
   dayRenderStatus();
 }
@@ -6017,12 +6069,16 @@ function dayResumeCheck(){
   let on=null;
   try{ on=JSON.parse(localStorage.getItem(DAY_ON_KEY)||"null"); }catch(e){}
   if(!on || !on.session) return;
+  if(on.employee && on.employee!==STATE.employee){dayClearOn();return;}
   const today=new Date().toISOString().slice(0,10);
   if(String(on.session).indexOf("day:"+today)===0) void dayStart(on);
   else dayClearOn();
 }
 
 function dayRenderStatus(){
+  const btn=$("daybtn");
+  if(btn){ btn.innerHTML='<span>'+(DAY.on?'Завершить смену':'Начать смену')+'</span>';
+    btn.classList.toggle("acc",!DAY.on); btn.onclick=()=>DAY.on?dayStop():void dayStart(); }
   const el=$("linestat");
   if(!el) return;
   if(!DAY.on){
@@ -6031,7 +6087,8 @@ function dayRenderStatus(){
     return;
   }
   const hh=new Date(DAY.started).toTimeString().slice(0,5);
-  el.innerHTML='<b>Запись идёт с '+hh+'</b>'+
+  el.innerHTML='<b>'+(DAY.error?'Запись требует внимания':'Запись включена с '+hh)+'</b>'+
+    (DAY.error?'<div class="muted">'+esc(DAY.error)+'</div>':'')+
     '<div class="muted" style="font-size:13px">точек сегодня: '+DAY.points+
     ' · путь ≈ '+(DAY.km<1?Math.round(DAY.km*1000)+" м":DAY.km.toFixed(1)+" км")+'</div>';
 }
@@ -6047,9 +6104,9 @@ async function renderLine(){
       '<span>'+(DAY.on?'Завершить смену':'Начать смену')+'</span></button>'+
     '<div class="muted" style="font-size:13.5px;line-height:1.5;margin-bottom:18px">'+
       'Пока смена идёт, приложение записывает движение: точка пишется только когда '+
-      'вы перемещаетесь, на стоянке — отметка раз в 10 минут. Без сети ничего не '+
-      'теряется: запись доедает до сервера при связи. Выключите смену в конце дня. '+
-      (navigator.wakeLock?'':'На iPhone запись идёт, только пока приложение открыто.')+'</div>';
+      'вы перемещаетесь, на стоянке — отметка раз в 10 минут. Точки сохраняются '+
+      'на телефоне и отправляются при связи. Запись работает, пока приложение открыто '+
+      'на экране; при сворачивании или блокировке возможны перерывы. Выключите смену в конце дня.</div>';
   setBottomNav("line");
   dayRenderStatus();
   dayDrainQueue();

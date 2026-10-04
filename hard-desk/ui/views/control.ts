@@ -116,7 +116,7 @@ async function renderRisk(root: HTMLElement) {
 /** Плеер дня: трек на карте (или схеме, если карту не подняли), ползунок
  *  времени, play и скорость. Перемотка произвольная — тащишь ползунок,
  *  видишь, где человек был в этот момент; хвост подсвечен. */
-interface TrackPoint { t: number; lat: number; lon: number; acc: number | null }
+interface TrackPoint { t: number; lat: number; lon: number; acc: number | null; session?: string }
 interface PlayerCtl { stop(): void }
 
 let playerCtl: PlayerCtl | null = null;
@@ -171,6 +171,8 @@ function trackAt(track: TrackPoint[], t: number): TrackPoint | null {
     if (track[mid].t <= t) lo = mid; else hi = mid;
   }
   const a = track[lo], b = track[hi];
+  if (t === a.t) return a;
+  if (b.t - a.t > 10 * 60000 || a.session !== b.session) return null;
   const k = b.t === a.t ? 0 : (t - a.t) / (b.t - a.t);
   return { t, lat: a.lat + (b.lat - a.lat) * k, lon: a.lon + (b.lon - a.lon) * k, acc: b.acc };
 }
@@ -201,7 +203,7 @@ async function mountDayPlayer(box: HTMLElement, track: TrackPoint[], visits: any
       <input type="range" id="dp-range" min="${t0}" max="${t1}" step="30000" value="${t0}">
       <span class="mono nowrap" id="dp-time">${hhmmField(t0)}</span>
     </div>
-    <p class="muted" style="font-size:12.5px;margin:4px 0 0">Тащите ползунок — где человек был в этот момент; ▶ — проиграть день. Красным — последние 15 минут до ползунка. Время — местное, как у офисов.</p>`;
+    <p class="muted" style="font-size:12.5px;margin:4px 0 0">Ползунок показывает оценку положения между замерами телефона. В разрывах записи положение неизвестно. Грубые точки исключены; путь приблизительный. Красным — последние 15 минут записи. Время офисов.</p>`;
 
   const mapEl = box.querySelector<HTMLElement>("#daymap")!;
   const svgEl = box.querySelector<HTMLElement>("#daysvg")!;
@@ -229,7 +231,7 @@ async function mountDayPlayer(box: HTMLElement, track: TrackPoint[], visits: any
   // Пауза записи >10 мин — разрыв линии: видно, где телефон молчал.
   const chunks: TrackPoint[][] = [[track[0]]];
   for (let i = 1; i < track.length; i++) {
-    if (track[i].t - track[i - 1].t > 10 * 60000) chunks.push([]);
+    if (track[i].t - track[i - 1].t > 10 * 60000 || track[i].session !== track[i - 1].session) chunks.push([]);
     chunks[chunks.length - 1].push(track[i]);
   }
   svgEl.innerHTML =
@@ -250,10 +252,11 @@ async function mountDayPlayer(box: HTMLElement, track: TrackPoint[], visits: any
         bounds: [[bounds.getWest() - 0.01, bounds.getSouth() - 0.01], [bounds.getEast() + 0.01, bounds.getNorth() + 0.01]],
         fitBoundsOptions: { padding: 30 }, attributionControl: false, dragRotate: false });
       map.on("load", () => {
-        map.addSource("track", { type: "geojson", data: { type: "MultiLineString", coordinates: [ll] } });
+        map.addSource("track", { type: "geojson", data: { type: "MultiLineString", coordinates: chunks.filter(c=>c.length>1).map(c=>c.map(p=>[p.lon,p.lat])) } });
         map.addLayer({ id: "track", type: "line", source: "track",
           paint: { "line-color": "#93a3b3", "line-width": 3 } });
-        tailSrc = map.addSource("tail", { type: "geojson", data: { type: "LineString", coordinates: [] } });
+        map.addSource("tail", { type: "geojson", data: { type: "MultiLineString", coordinates: [] } });
+        tailSrc = map.getSource("tail");
         map.addLayer({ id: "tail", type: "line", source: "tail",
           paint: { "line-color": "#B0472C", "line-width": 4 } });
         for (const v of visitPts) {
@@ -272,14 +275,17 @@ async function mountDayPlayer(box: HTMLElement, track: TrackPoint[], visits: any
 
   const TAIL_MS = 15 * 60000;
   function update(t: number) {
-    const p = trackAt(track, t)!;
-    const tail = track.filter(q => q.t >= t - TAIL_MS && q.t <= t);
-    timeEl.textContent = hhmmField(t);
+    const p = trackAt(track, t);
+    const tailChunks = chunks.map(c=>c.filter(q => q.t >= t - TAIL_MS && q.t <= t)).filter(c=>c.length>1);
+    timeEl.textContent = hhmmField(t)+(p ? "" : " · нет записи");
+    svgLine.dot.setAttribute("visibility",p ? "visible" : "hidden");
+    if(head) head.getElement().style.display=p ? "" : "none";
+    svgLine.tail.setAttribute("d",tailChunks.map(c=>`M${pathOf(c)}`).join(" "));
+    if (map && tailSrc) tailSrc.setData({type:"MultiLineString",coordinates:tailChunks.map(c=>c.map(q=>[q.lon,q.lat]))});
+    if(!p) return;
     const [x, y] = project(p);
     svgLine.dot.setAttribute("cx", String(x)); svgLine.dot.setAttribute("cy", String(y));
-    svgLine.tail.setAttribute("d", tail.length ? `M${pathOf(tail)}` : "");
     if (map && head) head.setLngLat([p.lon, p.lat]);
-    if (map && tailSrc) tailSrc.setData({ type: "LineString", coordinates: tail.map(q => [q.lon, q.lat]) });
   }
 
   let timer: number | undefined;
@@ -317,16 +323,17 @@ async function renderDay(root: HTMLElement, day: string) {
   body.innerHTML = `<div class="dayplayer-box" id="player-box"></div><div id="day-rest"></div>`;
   const rest = body.querySelector<HTMLElement>("#day-rest")!;
   rest.innerHTML = `
-    <div class="kpis"><div class="kpi"><b>${n(d.points)}</b><span>точек записано</span></div>
+    <div class="kpis"><div class="kpi"><b>${n(d.points)}</b><span>точек для расчёта</span></div>
       <div class="kpi"><b>${d.km ? String(d.km).replace(".", ",") : "0"}</b><span>км по записи</span></div>
       <div class="kpi"><b>${esc(d.first || "—")}</b><span>первая точка</span></div>
       <div class="kpi"><b>${esc(d.last || "—")}</b><span>последняя точка</span></div></div>
-    ${gaps.length ? `<div class="notice"><span class="grow">Паузы записи: ${gaps.map((g) => `${esc(g.from)}–${esc(g.to)} (${n(g.min)} мин)`).join(", ")} — телефон не писал: гео выключено, приложение закрыто или села батарея.</span></div>` : ""}
+    ${d.excluded_points ? `<p class="muted">Из ${n(d.raw_points)} исходных точек исключено ${n(d.excluded_points)} неточных или повторных замеров.</p>` : ""}
+    ${gaps.length ? `<div class="notice"><span class="grow">Паузы записи: ${gaps.map((g) => `${esc(g.from)}–${esc(g.to)} (${n(g.min)} мин)`).join(", ")}. В эти интервалы достоверных точек нет; причина по записи неизвестна.</span></div>` : ""}
     <div class="feed">${evs.map((e) => {
       if (e.kind === "move") {
         const s = e.event;
         return `<div class="ev"><time>${esc(s.from)}</time><span class="mark"></span>
-          <div><div class="line1">В движении ${esc(s.from)}–${esc(s.to)} · ${n(s.min)} мин</div>
+          <div><div class="line1">${s.km > 0 ? "Движение по записи" : "Точки в пределах точности"} ${esc(s.from)}–${esc(s.to)} · ${n(s.min)} мин</div>
           <div class="line2">${String(s.km).replace(".", ",")} км · точек ${n(s.n)}</div></div></div>`;
       }
       if (e.kind === "sos") {
@@ -336,12 +343,13 @@ async function renderDay(root: HTMLElement, day: string) {
           ${s.maps ? `<div class="line2"><a href="#" data-map="${esc(s.maps)}">точка на карте</a></div>` : ""}</div></div>`;
       }
       const v = e.event;
+      if(e.kind === "action") return `<div class="ev pick" ${v.rep ? `data-rep="${esc(v.rep)}" data-day="${esc(v.day)}"` : ""}><time>${esc(v.time)}</time><span class="mark"></span><div><div class="line1">${esc(v.title)}${v.debtor ? " · "+esc(v.debtor) : ""}${v.visit_op ? ' · связан с выездом' : ''}</div></div></div>`;
       return `<div class="ev visit pick" data-rep="${esc(v.rep)}" data-day="${esc(v.day)}"><time>${esc(v.time)}</time><span class="mark"></span>
         <div><div class="line1"><b>${esc(v.debtor || v.rep)}</b> — ${esc(v.title)}${v.agreed ? ` · ${esc(v.agreed)}` : ""}</div>
         ${v.detail ? `<div class="line2">${esc(v.detail)}</div>` : ""}${flagsHtml(v.flags)}</div>
         <div class="side">${evidenceTag(v.evidence)}</div></div>`;
     }).join("") || '<div class="empty"><b>Пусто</b>Ни выездов, ни гео-записи в этот день.</div>'}</div>`;
-  rest.querySelectorAll<HTMLElement>(".ev.visit[data-rep]").forEach((row) => row.addEventListener("click", () => {
+  rest.querySelectorAll<HTMLElement>(".ev[data-rep]").forEach((row) => row.addEventListener("click", () => {
     void openPerson(state.employee, row.dataset.rep!, row.dataset.day);
   }));
   rest.querySelectorAll<HTMLAnchorElement>("[data-map]").forEach((a) => a.addEventListener("click", (ev) => {
@@ -439,15 +447,16 @@ async function renderAssign(root: HTMLElement) {
     <div class="section"><div class="section-head"><h2 class="section-title">События</h2></div>
       <div class="feed">${evs.slice(0, 100).map((e) => `<div class="ev"><time>${esc(e.window_to)}</time><span class="mark"></span>
         <div><div class="line1"><b>${esc(e.employee || "(снят)")}</b> ← ${esc(e.prev_employee || "без ответственного")} · ${KIND[e.kind] || e.kind}${e.claimed_at ? ` <span class="muted">· «дата закрепления» ${esc(e.claimed_at)}</span>` : ""}</div>
-        <div class="line2"><span class="mono">${esc(e.contract_id)}</span>${e.debt ? ` · долг ${n(e.debt)}` : ""}</div></div></div>`).join("") || '<div class="empty"><b>Тихо</b>Передач за это окно не было.</div>'}</div>
+        <div class="line2">${e.profile === 'soft' ? 'Софт' : 'Хард'} · <span class="mono">${esc(e.contract_id)}</span>${e.debt ? ` · долг ${n(e.debt)}` : ""}</div></div></div>`).join("") || '<div class="empty"><b>Тихо</b>Передач за это окно не было.</div>'}</div>
       <p class="muted" style="font-size:13.5px;max-width:760px;margin-top:12px">События снимает импорт общего реестра (окно факта); «дата закрепления» пишется руками и может отличаться — расхождение больше ${n(d.claimed_lag_days || 7)} дней помечено как задним числом. Медиана долга выше офисной — вопрос, а не приговор: смотрите, у кого это стабильно.</p></div>`;
   wire(root);
   new DataTable<any>(root.querySelector("#assign-tbl")!, {
-    id: "control-assign", exportName: "Закрепления", key: (x) => x.employee,
+    id: "control-assign", exportName: "Закрепления", key: (x) => `${x.profile}:${x.employee}`,
     cols: [
       { key: "emp", title: "Сотрудник", value: (x) => x.employee,
         html: (x) => `<span class="who">${esc(x.employee)}</span><span class="sub">${esc(x.office || "без офиса")}</span>` },
       { key: "received", title: "Получил", num: true, value: (x) => x.received },
+      { key: "profile", title: "Профиль", value: (x) => x.profile === 'soft' ? 'Софт' : 'Хард' },
       { key: "transfers", title: "Передач", num: true, value: (x) => x.transfers },
       { key: "paying", title: "Платящих", num: true, value: (x) => x.paying },
       { key: "median", title: "Медиана долга", num: true, value: (x) => x.median_debt,

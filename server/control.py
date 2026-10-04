@@ -288,15 +288,18 @@ def _visit_event(e: dict, emp: str, office: str, payload: str, today: date,
 
 # --- лента активности -----------------------------------------------------------
 _AUDIT_KINDS = {"view_card": "view", "photo": "photo", "app_login": "login",
-                "marker": "mark", "promise_set": "promise"}
+                "marker": "mark", "promise_set": "promise", "receipt": "receipt",
+                "receipt_view": "receipt_view", "save_call": "call", "save_card": "edit"}
 _AUDIT_TITLE = {"view": "открыл карточку", "photo": "фото", "login": "вошёл в приложение",
-                "mark": "метка на карте", "promise": "записал обещание"}
+                "mark": "метка на карте", "promise": "записал обещание",
+                "receipt": "приложил чек", "receipt_view": "открыл чек",
+                "call": "сохранил звонок", "edit": "изменил карточку"}
 
 
 def activity(mgr: dict, team: list[str], rng: dict, *, office: str = "",
              employee: str = "", kinds: set[str] | None = None,
              before: str = "", limit: int = 200) -> dict:
-    kinds = kinds or {"visit", "photo", "view", "login", "mark", "promise"}
+    kinds = kinds or {"visit", "photo", "view", "login", "mark", "promise", "receipt", "receipt_view", "call", "edit"}
     of, chips = offices_for(team)
     people = _pick(team, of, office, employee)
     today = db._as_date(digest_data.today_iso())
@@ -328,7 +331,7 @@ def activity(mgr: dict, team: list[str], rng: dict, *, office: str = "",
             seen = conn.execute(
                 f"SELECT actor, MAX(ts) ts FROM audit WHERE actor IN ({q}) GROUP BY actor",
                 list(uids)).fetchall()
-            wanted = [a for a, k in _AUDIT_KINDS.items() if k in kinds]
+            wanted = [a for a, k in _AUDIT_KINDS.items() if k in kinds and a not in ("receipt", "save_call")]
             arows = []
             if wanted:
                 qa = ",".join("?" * len(wanted))
@@ -355,6 +358,35 @@ def activity(mgr: dict, team: list[str], rng: dict, *, office: str = "",
                 "office": "" if of.get(emp) == NO_OFFICE else of.get(emp, ""),
                 "rep": r["target"] or "", "debtor": names.get(r["target"] or "", ""),
                 "title": _AUDIT_TITLE[kind], "detail": "", "flags": []})
+    # Завершённый звонок и чек — из неизменяемых журналов с автором события,
+    # а не из сегодняшней привязки аккаунта. Повтор доставки не плодит действия.
+    if people:
+        marks = ','.join('?' * len(people))
+        with db.connect() as conn:
+            journals = []
+            if "call" in kinds:
+                journals += [("call", dict(r)) for r in conn.execute(
+                    f"SELECT * FROM calls WHERE employee IN ({marks}) AND created_at >= ? AND created_at <= ?",
+                    (*people, rng["from"], rng["to"] + "T23:59:59"))]
+            if "receipt" in kinds:
+                lo = (date.fromisoformat(rng["from"]) - timedelta(days=1)).isoformat()
+                hi = (date.fromisoformat(rng["to"]) + timedelta(days=2)).isoformat()
+                journals += [("receipt", dict(r)) for r in conn.execute(
+                    f"SELECT * FROM payment_evidence WHERE employee IN ({marks}) AND created_at >= ? AND created_at < ?",
+                    (*people, lo, hi))]
+        names = _client_names([r["contract_id"] for _, r in journals])
+        for kind, r in journals:
+            t = _local_dt((r.get("saved_at") or r.get("received_at")) if kind == "call" else r["created_at"])
+            if not t or not rng["from"] <= t.date().isoformat() <= rng["to"]:
+                continue
+            emp = r["employee"]
+            events.append({"id": f"{kind}{r['id']}", "kind": kind,
+                "at": t.isoformat(timespec="seconds"), "time": _hhmm(t),
+                "day": t.date().isoformat(), "employee": emp,
+                "office": "" if of.get(emp) == NO_OFFICE else of.get(emp, ""),
+                "rep": r["contract_id"], "debtor": names.get(r["contract_id"], ""),
+                "title": _AUDIT_TITLE[kind], "detail": "", "flags": [],
+                "visit_op": r.get("visit_op"), "op": r.get("op_id") or r.get("op")})
     for row in rows:
         row["last_seen"] = last_seen.get(row["employee"])
     events.sort(key=lambda x: (x["at"] or "", x["id"]), reverse=True)
@@ -715,8 +747,12 @@ def assignments(mgr: dict, team: list[str], rng: dict) -> dict:
     econ: dict[str, dict] = {}
     pool: list[int] = []
     for emp in team:
-        for r in db.contracts_of_responsible(emp):
+        with db.connect() as conn:
+            portfolio = conn.execute("SELECT * FROM clients WHERE responsible=? OR responsible_soft=?", (emp, emp)).fetchall()
+        for r in portfolio:
             cid = r["contract_id"]
+            if cid in econ:
+                continue
             paid = db._as_date(r["last_payment_date"]) if "last_payment_date" in r.keys() else None
             recent_pay = bool(
                 paid and (date.today() - paid).days <= 90)
@@ -727,8 +763,10 @@ def assignments(mgr: dict, team: list[str], rng: dict) -> dict:
 
     rows: dict[str, dict] = {}
     for e in came_in:
-        r = rows.setdefault(e["employee"], {
+        profile = e.get("profile", "hard")
+        r = rows.setdefault((e["employee"], profile), {
             "employee": e["employee"],
+            "profile": profile,
             "office": "" if of.get(e["employee"]) == NO_OFFICE else of.get(e["employee"], ""),
             "received": 0, "transfers": 0, "debts": [], "paying": 0,
             "backdated": 0, "from_peers": {}})
@@ -756,7 +794,7 @@ def assignments(mgr: dict, team: list[str], rng: dict) -> dict:
             top_peer, top_peer_n = name, n
             break
         out_rows.append({
-            "employee": r["employee"], "office": r["office"],
+            "employee": r["employee"], "office": r["office"], "profile": r["profile"],
             "received": r["received"], "transfers": r["transfers"],
             "paying": r["paying"], "backdated": r["backdated"],
             "median_debt": med, "office_median": office_median,
@@ -796,14 +834,20 @@ def access_log(rng: dict, team: list[str] | None = None) -> dict:
     ФИО сотрудника) для руководителя; админ видит всё."""
     hi = (date.fromisoformat(rng["to"]) + timedelta(days=1)).isoformat()
     qs = ",".join("?" * len(_ACCESS_ACTIONS))
+    wanted = sorted({e for e in (team or []) if e})
+    scope = ""
+    if team is not None:
+        if not wanted:
+            return {"screen": "access", "range": rng, "events": []}
+        scope = f" AND target IN ({','.join('?' * len(wanted))})"
     with db.connect() as conn:
         mgrs = {int(r["telegram_id"]): (r["name"] or "")
                 for r in conn.execute("SELECT telegram_id, name FROM managers")}
         rows = conn.execute(
             f"SELECT id, ts, actor, action, target, detail FROM audit "
             f"WHERE action IN ({qs}) AND ts >= ? AND ts < ? "
-            "ORDER BY id DESC LIMIT 500",
-            (*_ACCESS_ACTIONS, rng["from"], hi)).fetchall()
+            + scope + " ORDER BY id DESC LIMIT 500",
+            (*_ACCESS_ACTIONS, rng["from"], hi, *wanted)).fetchall()
     names: dict[int, str] = {}
 
     def name_of(uid: int) -> str:
@@ -835,6 +879,21 @@ def access_log(rng: dict, team: list[str] | None = None) -> dict:
 SEGMENT_GAP_MIN = 10     # разрыв в записи больше этого — новый отрезок
 MOVE_MIN_M = 20          # меньше — точка считается той же позицией, не движением
 GAP_WARN_MIN = 45        # пауза в записи, о которой стоит сказать явно
+TRACK_MAX_ACCURACY_M = 200
+
+
+def _usable_track(points: list[dict]) -> list[dict]:
+    """Сырые точки остаются в БД. Для карты исключаем заведомо грубые замеры."""
+    by_time = {}
+    for point in points:
+        ms = evidence.to_ms(point.get("ts"))
+        acc = point.get("acc_m")
+        if ms is None or (acc is not None and float(acc) > TRACK_MAX_ACCURACY_M):
+            continue
+        prior = by_time.get(ms)
+        if prior is None or (acc or 0) < (prior.get("acc_m") or 0):
+            by_time[ms] = point
+    return [by_time[ms] for ms in sorted(by_time)]
 
 
 def _segments(points: list[dict]) -> list[dict]:
@@ -842,21 +901,25 @@ def _segments(points: list[dict]) -> list[dict]:
     считается по соседним точкам (не «туда-обратно» — сумма длин шагов)."""
     out: list[dict] = []
     cur: dict | None = None
-    for p in points:
+    for p in _usable_track(points):
         ms = evidence.to_ms(p["ts"])
         if ms is None:
             continue
-        if cur is None or (ms - cur["to_ms"]) > SEGMENT_GAP_MIN * 60_000:
+        if (cur is None or (ms - cur["to_ms"]) > SEGMENT_GAP_MIN * 60_000
+                or p.get("session_id") != cur.get("session_id")):
             if cur:
                 out.append(cur)
             cur = {"from_ms": ms, "to_ms": ms, "n": 1, "km": 0.0,
                    "lat0": p["lat"], "lon0": p["lon"],
-                   "lat1": p["lat"], "lon1": p["lon"]}
+                   "lat1": p["lat"], "lon1": p["lon"],
+                   "session_id": p.get("session_id"), "acc": p.get("acc_m") or 0}
         else:
             step = evidence.haversine_m(cur["lat1"], cur["lon1"], p["lat"], p["lon"])
-            if step >= MOVE_MIN_M:
+            uncertainty = max(MOVE_MIN_M, cur["acc"] + (p.get("acc_m") or 0))
+            if step >= uncertainty:
                 cur["km"] += step / 1000.0
                 cur["lat1"], cur["lon1"] = p["lat"], p["lon"]
+                cur["acc"] = p.get("acc_m") or 0
             cur["to_ms"] = ms
             cur["n"] += 1
     if cur:
@@ -896,6 +959,8 @@ def day_story(mgr: dict, team: list[str], employee: str, day: str) -> dict | Non
     pts = db.track_points_between(
         employee, lo_local.astimezone(timezone.utc).isoformat(),
         hi_local.astimezone(timezone.utc).isoformat())
+    raw_points = len(pts)
+    pts = _usable_track(pts)
     pts_ms = [evidence.to_ms(p["ts"]) for p in pts]
     pts_ms = [m for m in pts_ms if m is not None]
     segments = _segments(pts)
@@ -918,13 +983,19 @@ def day_story(mgr: dict, team: list[str], employee: str, day: str) -> dict | Non
         at = datetime.fromtimestamp(s["from_ms"] / 1000.0, TZ)
         events.append({"kind": "move",
                        "at": at.isoformat(timespec="seconds"), "event": s})
+    actions = activity(mgr, team, {"from": day, "to": day}, employee=employee,
+                       kinds={"photo", "view", "login", "mark", "promise", "receipt", "receipt_view", "call", "edit"}, limit=500)
+    for action in actions["events"]:
+        events.append({"kind": "action", "at": action["at"], "event": action})
     events.sort(key=lambda x: x["at"] or "")
     # Сырой трек для плеера (перемотка по времени): точек за смену при шаге
     # ≥25 м — сотни, не тысячи; на всякий случай режем с конца (последние).
-    track = [{"t": m, "lat": p["lat"], "lon": p["lon"], "acc": p.get("acc_m")}
+    track = [{"t": m, "lat": p["lat"], "lon": p["lon"], "acc": p.get("acc_m"),
+              "session": p.get("session_id")}
              for p, m in zip(pts, pts_ms) if m is not None]
     return {"screen": "day", "employee": employee, "day": day,
             "points": len(pts), "km": round(sum(s["km"] for s in segments), 1),
+            "raw_points": raw_points, "excluded_points": raw_points - len(pts),
             "first": segments[0]["from"] if segments else "",
             "last": segments[-1]["to"] if segments else "",
             "segments": segments, "gaps": _day_gaps(pts_ms),

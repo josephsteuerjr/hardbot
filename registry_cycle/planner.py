@@ -28,6 +28,7 @@ from .normalize import (
 from .ownership import (
     canonical_responsible_name,
     resolve_book_responsible,
+    responsible_title_for,
     workbook_data_is_empty,
 )
 from .rollover import build_month_rollover_plan
@@ -212,6 +213,7 @@ def build_sync_plan(
     plan.issues.extend(rollover_issues)
     key_col = _column_index(master, fields, fields.key_title)
     responsible_col = _column_index(master, fields, fields.responsible_title)
+    separate_profiles = responsible_title_for(master, fields, "soft") != responsible_title_for(master, fields, "hard")
     previous_responsible_col = (
         _column_index(
             master,
@@ -269,6 +271,10 @@ def build_sync_plan(
     tolerated_source_values: list[dict[str, Any]] = []
 
     for entry, book in personal_books:
+        owner_title = responsible_title_for(book, fields, entry.profile)
+        responsible_col = _column_index(master, fields, responsible_title_for(master, fields, entry.profile))
+        previous_responsible_col = (_column_index(master, fields, fields.previous_responsible_title)
+            if fields.previous_responsible_title and not (separate_profiles and entry.profile == "soft") else None)
         if entry.profile not in fields.profile_tags:
             plan.issues.append(
                 Issue(
@@ -279,10 +285,10 @@ def build_sync_plan(
                 )
             )
             continue
-        responsibles = book.unique_responsibles(fields.responsible_title)
+        responsibles = book.unique_responsibles(owner_title)
         responsible = resolve_book_responsible(
             book,
-            fields.responsible_title,
+            owner_title,
         )
         if responsible is None:
             if not responsibles and workbook_data_is_empty(book):
@@ -310,6 +316,7 @@ def build_sync_plan(
         if (
             previous_profile is not None
             and previous_profile[0] != entry.profile
+            and not separate_profiles
         ):
             plan.issues.append(
                 Issue(
@@ -356,7 +363,7 @@ def build_sync_plan(
         personal_responsible_col = _column_index(
             book,
             fields,
-            fields.responsible_title,
+            owner_title,
         )
         if personal_key_col is None or personal_responsible_col is None:
             plan.issues.append(
@@ -416,9 +423,10 @@ def build_sync_plan(
                 )
                 continue
             owner_case = case_sources[contract_id].setdefault(
-                responsible_norm,
+                (entry.profile + "\0" + responsible_norm) if separate_profiles else responsible_norm,
                 {
                     "responsible": responsible,
+                    "profile": entry.profile,
                     "paths": set(),
                 },
             )
@@ -582,7 +590,9 @@ def build_sync_plan(
                     handoff_values[source_key].append(source_cell)
                     continue
                 previous_owner = source_owner.setdefault(source_key, responsible_norm)
-                if previous_owner != responsible_norm:
+                if previous_owner != responsible_norm and not (
+                    separate_profiles and all(s.entry.profile != entry.profile and
+                      values_equal_for_rule(s.value, value, rule) for s in source_values[source_key])):
                     plan.issues.append(
                         Issue(
                             "error",
@@ -697,7 +707,8 @@ def build_sync_plan(
     duplicate_cases = {
         contract_id: owners
         for contract_id, owners in case_sources.items()
-        if len(owners) > 1
+        if len(owners) > 1 and (not separate_profiles or any(
+            count > 1 for count in Counter(item["profile"] for item in owners.values()).values()))
     }
     if duplicate_cases:
         samples = []
@@ -828,6 +839,8 @@ def build_sync_plan(
             )
             continue
         source = sources[0]
+        responsible_col = _column_index(master, fields,
+                           responsible_title_for(master, fields, source.entry.profile))
         target_rows = master_rows_by_key.get(contract_id)
         if not target_rows:
             missing = missing_contracts.setdefault(
@@ -1257,6 +1270,8 @@ def build_sync_plan(
         responsible = book_responsibles.get(entry.entry_id)
         if not responsible:
             continue
+        owner_title = responsible_title_for(master, fields, entry.profile)
+        responsible_col = _column_index(master, fields, owner_title)
         target_master_rows = [
             (row_number, row)
             for row_number, row in enumerate(
@@ -1507,7 +1522,7 @@ def build_sync_plan(
                 index
                 for index, title in enumerate(output_titles)
                 if norm_title(title)
-                in _title_variants(fields, fields.responsible_title)
+                in _title_variants(fields, owner_title)
             ),
             None,
         )

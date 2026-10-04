@@ -22,6 +22,7 @@ class ExchangeContractError(RuntimeError):
 
 CONTRACT_PATH = Path(__file__).with_name("data_exchange_contract.json")
 _SUPPORTED_RAW_SHA256 = {
+    6: "9de2c3a20a9c8ab165f8f2149a10cec60b4c4c81741142b049d22edffd445600",
     1: "6a6f06af70dff45ea9b4fde2fa2f23b2fef03fd658bcaca56ab6cc6513eb60b9",
     2: "d6f2a8c46f8d490eca7c715fe9e4561201f6cb7053a89aceabcf49ed9548b7c7",
     3: "f57137d420294851dfc40350006bb17e0cb55b13ab2371ac84a56a0c1c81bbe6",
@@ -64,6 +65,9 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
         raise ExchangeContractError("exchange contract is not valid UTF-8 JSON") from exc
+    candidate_version = payload.get("version") if isinstance(payload, dict) else None
+    if isinstance(candidate_version, int) and not isinstance(candidate_version, bool) and candidate_version not in _SUPPORTED_RAW_SHA256:
+        raise ExchangeContractError("exchange contract bytes are not approved for this version")
     root = _exact_dict(
         payload,
         {
@@ -76,7 +80,7 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
             "enrichment",
             "office_overlay",
             "imports",
-        },
+        } | ({"soft"} if isinstance(payload, dict) and payload.get("version", 0) == 6 else set()),
         label="contract",
     )
     if root["schema"] != "hardbot.data-exchange-contract.v1":
@@ -90,6 +94,16 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
             "exchange contract bytes are not approved for this version; "
             "bump/review the version and update the supported SHA"
         )
+    if version == 6:
+        soft = _exact_dict(root["soft"], {"provenance_marker", "event_day", "responsible_key",
+                           "result_keys", "import_profiles", "office_edit_proof"}, label="soft")
+        if soft != {"provenance_marker": "_bot_call_completed", "event_day": "_call_day",
+                    "responsible_key": "responsible_soft",
+                    "result_keys": ["soft_call_status", "soft_comm_date", "soft_comment",
+                                    "promise_date", "forecast_sum", "forecast"],
+                    "import_profiles": ["hard", "soft", "both"],
+                    "office_edit_proof": "current_delivery_and_result_echo"}:
+            raise ExchangeContractError("unsupported soft exchange semantics")
 
     artifacts = _exact_dict(
         root["artifacts"],

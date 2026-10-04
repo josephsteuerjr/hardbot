@@ -91,7 +91,8 @@ def test_contract_binding_sha_is_exact_raw_contract_file_sha():
     }
 
 
-def test_form_snapshot_enrichment_and_import_semantics_cannot_drift_apart():
+def test_form_snapshot_enrichment_and_import_semantics_cannot_drift_apart(monkeypatch, tmp_path):
+    _isolated_db(monkeypatch, tmp_path)
     assert tuple(web.FORM_DROPDOWNS) == contract.FORM_DROPDOWN_KEYS
     assert tuple(web.FORM_TEXT) == contract.FORM_TEXT_KEYS
     assert web.FORM_PROTOCOL_VERSION == contract.FORM_PROTOCOL_VERSION

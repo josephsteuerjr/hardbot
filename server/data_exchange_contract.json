@@ -1,6 +1,14 @@
 {
   "schema": "hardbot.data-exchange-contract.v1",
-  "version": 5,
+  "version": 6,
+  "soft": {
+    "provenance_marker": "_bot_call_completed",
+    "event_day": "_call_day",
+    "responsible_key": "responsible_soft",
+    "result_keys": ["soft_call_status", "soft_comm_date", "soft_comment", "promise_date", "forecast_sum", "forecast"],
+    "import_profiles": ["hard", "soft", "both"],
+    "office_edit_proof": "current_delivery_and_result_echo"
+  },
   "artifacts": {
     "snapshot_kind": "hardbot_limited_test_pre_reset.v2",
     "enrichment_evidence_schema": "hardbot.pult-enrichment.v2",

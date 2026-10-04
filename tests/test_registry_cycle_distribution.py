@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,37 @@ HEADERS = (
 )
 TYPES = ("сх", "сх", "хард")
 EMPLOYEE = "Иванов Иван"
+
+
+def test_new_soft_assignment_uses_soft_baseline_not_hard_owner(monkeypatch, tmp_path):
+    headers = ("Номер КД / ID", "ответственный Сотрудник", "ответственный Сотрудник СОФТ")
+    tags = ("сх", "сх", "софт")
+    master_path, baseline_path = tmp_path/"master.xlsb", tmp_path/"baseline.xlsb"
+    master = replace(_book(master_path,[("1","H1","S1")],"master"),headers=headers,type_tags=tags)
+    baseline = replace(_book(baseline_path,[("1","H1",None)],"baseline"),headers=headers,type_tags=tags)
+    hard = replace(_book(tmp_path/"hard.xlsb",[("1","H1")],"hard"),headers=headers[:2],type_tags=tags[:2])
+    soft = replace(_book(tmp_path/"soft.xlsb",[],"soft"),headers=headers,type_tags=tags)
+    books={master_path:master,baseline_path:baseline,hard.path:hard,soft.path:soft}
+    monkeypatch.setattr(distribution,"read_portfolio",lambda path,fields:books[Path(path)])
+    entries=[ManifestEntry(entry_id=profile,path=book.path,country="Тест",group=profile,
+             profile=profile,employee_folder=owner,responsible_hint=owner)
+             for profile,book,owner in (("hard",hard,"H1"),("soft",soft,"S1"))]
+    captured=tuple(CapturedPersonal(entry=entry,copy_path=book.path,fingerprint=book.fingerprint)
+                   for entry,book in zip(entries,(hard,soft)))
+    snapshot=SnapshotSet(run_id="profiles",run_dir=tmp_path/".registry-cycle"/"runs"/"profiles",
+                         master_original=master_path,master_copy=master_path,
+                         master_fingerprint=master.fingerprint,personals=captured)
+    bundle=_bundle(tmp_path)
+    bundle=replace(bundle,fields=replace(bundle.fields,profile_tags={"hard":("сх","хард"),"soft":("сх","софт")}))
+    plan=build_distribution_plan(bundle,snapshot,_config(),baseline_path)
+    assert not plan.blocked, [(i.code,i.context) for i in plan.issues]
+    assert len(plan.rows)==1
+    assert plan.rows[0].responsible == "S1"
+    assert plan.rows[0].values[2] == "S1"
+    books[baseline_path]=replace(baseline,headers=headers[:2],type_tags=tags[:2],rows=(("1",None),))
+    blocked=build_distribution_plan(bundle,snapshot,_config(),baseline_path)
+    assert blocked.blocked
+    assert any(i.code=="distribution_profile_owner_missing" for i in blocked.issues)
 
 
 def _fingerprint(seed: str) -> FileFingerprint:

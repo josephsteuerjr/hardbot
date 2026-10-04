@@ -25,7 +25,7 @@ def _find_header(rows: list[list[Any]], fields: FieldConfig) -> int:
     # реестре («ответственный Сотрудник» → «…ХАРД») не должно останавливать
     # перенос личных реестров.
     key = fields.title_variants(fields.key_title)
-    responsible = fields.title_variants(fields.responsible_title)
+    responsible = fields.title_variants(fields.responsible_title) | fields.title_variants(fields.soft_responsible_title)
     candidates: list[tuple[bool, int, int]] = []
     for index, row in enumerate(rows[: fields.header_search_rows]):
         titles = {norm_title(value) for value in row}
@@ -54,7 +54,7 @@ def _validate_headers(headers: tuple[Any, ...], fields: FieldConfig) -> None:
         raise WorkbookReadError(
             "повторяющиеся заголовки: " + ", ".join(sorted(set(duplicates)))
         )
-    if not (fields.title_variants(fields.responsible_title) & set(seen)):
+    if not ((fields.title_variants(fields.responsible_title) | fields.title_variants(fields.soft_responsible_title)) & set(seen)):
         raise WorkbookReadError(f"нет колонки «{fields.responsible_title}»")
 
 

@@ -119,6 +119,12 @@ def employee_note(emp: dict) -> str:
 
 
 def selected_rows(book: dict, selected: set[str]) -> int:
+    if book and "grid" in book and "c_id" in book and "first" in book:
+        columns = book.get("owner_columns", [book["c_who"]])
+        c_id = book["c_id"]
+        return len({enrich.norm_cid(row[c_id]) for row in book["grid"][book["first"]:]
+                    if len(row) > c_id and enrich.norm_cid(row[c_id]) and
+                    any(len(row) > col and emp_key(row[col]) in selected for col in columns)})
     return sum(int(e.get("file_count", e.get("count", 0)) or 0)
                for e in (book or {}).get("employees") or []
                if e["key"] in selected)
@@ -209,15 +215,52 @@ def grid_for(book: dict, picked: set[str], *, allow_empty: bool = False) -> list
     if not picked:
         raise ValueError("не выбран ни один сотрудник")
     grid, c_who = book["grid"], book["c_who"]
+    columns = book.get("owner_columns", [c_who])
     out = list(grid[:book["first"]])
     for row in grid[book["first"]:]:
-        if len(row) > c_who and emp_key(row[c_who]) in picked:
+        if any(len(row) > column and emp_key(row[column]) in picked for column in columns):
             out.append(row)
     # Сравниваем с `first`, а не с `head`: в шапке ТРИ строки, и «len > head»
     # было истиной даже для книги без единой строки данных.
     if len(out) <= book["first"] and not allow_empty:
         raise ValueError("после отбора не осталось ни одной строки")
     return out
+
+
+def select_profile(book: dict, profile: str, db_hard=None, db_soft=None) -> None:
+    """Отбор общего master по одному или обоим контурам ответственности."""
+    if profile not in ("hard", "soft", "both"):
+        raise ValueError("Выбери Хард, Софт или оба типа")
+    head, first, c_id, c_who = grid_layout(book["grid"])
+    soft_titles = {enrich.norm_title(t) for t in (
+        "ответственный Сотрудник СОФТ", "Ответственный сотрудник soft")}
+    soft_columns = [i for i, title in enumerate(book["grid"][head])
+                    if enrich.norm_title(title) in soft_titles]
+    if len(soft_columns) > 1:
+        raise ValueError("В реестре повторяется колонка ответственного Софта")
+    if profile in ("soft", "both") and not soft_columns:
+        raise ValueError("В реестре нет колонки «ответственный Сотрудник СОФТ»")
+    columns = ([c_who] if profile == "hard" else soft_columns if profile == "soft"
+               else [c_who, *soft_columns])
+    grouped = {}
+    for row in book["grid"][first:]:
+        if len(row) <= c_id or not enrich.norm_cid(row[c_id]):
+            continue
+        seen = set()
+        for column in columns:
+            name = enrich.cell_text(row[column]) if len(row) > column else ""
+            key = emp_key(name)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            item = grouped.setdefault(key, {"key": key, "name": name, "file_count": 0})
+            item["file_count"] += 1
+    database = (list(db_hard or []) if profile == "hard" else list(db_soft or [])
+                if profile == "soft" else [*list(db_hard or []), *list(db_soft or [])])
+    book.update(head=head, first=first, c_id=c_id, c_who=c_who,
+                owner_columns=columns, import_profile=profile,
+                employees=merge_import_employees(list(grouped.values()), database))
+    book["_selected"] = sorted(default_import_selection(book["employees"]))
 
 
 def read_registry(path: str) -> dict:
@@ -348,7 +391,7 @@ def prepare_import(book: dict, picked: list[str], *, full_registry: bool = False
         e["key"] for e in book["employees"]
         if int(e.get("file_count", e.get("count", 0)) or 0) > 0
     }
-    whole = set(picked) == file_emps
+    whole = set(picked) == file_emps and book.get("import_profile", "hard") == "hard"
 
     if whole and book.get("published") and not force_test_subset:
         prepared = book["published"]
@@ -387,6 +430,7 @@ def prepare_import(book: dict, picked: list[str], *, full_registry: bool = False
     return ({"source_kind": IMPORT_SOURCE_TEST_SUBSET, "source_proof": proof,
              "sheets": [{"name": contract.WORKBOOK_SHEET_NAME, "grid": grid}],
              "proof_digest": digest,
+             "import_profile": book.get("import_profile", "hard"),
              "authoritative_employees": authoritative_employees}, proof_path)
 
 
@@ -398,6 +442,7 @@ def preview_body(prepared: dict, *, full_registry: bool, restore_manual: bool,
         "source_proof": prepared["source_proof"],
         "sheets": prepared["sheets"],
         "full_registry": full_registry,
+        "import_profile": prepared.get("import_profile", "hard"),
         "authoritative_employees": (
             prepared["authoritative_employees"] if full_registry else []
         ),

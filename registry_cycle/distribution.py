@@ -57,6 +57,7 @@ from .normalize import (
 from .ownership import (
     canonical_responsible_name,
     resolve_book_responsible,
+    responsible_title_for,
     workbook_data_is_empty,
 )
 from .reader import read_portfolio
@@ -551,6 +552,8 @@ def build_distribution_plan(
         )
     baseline_rows_by_key = baseline.rows_by_key(bundle.fields.key_title)
     master_rows_by_key = master.rows_by_key(bundle.fields.key_title)
+    separate_profiles = (responsible_title_for(master, bundle.fields, "soft") !=
+                         responsible_title_for(master, bundle.fields, "hard"))
     baseline_duplicates = {
         key
         for key, values in baseline_rows_by_key.items()
@@ -634,10 +637,11 @@ def build_distribution_plan(
                 )
             )
             continue
-        responsibles = book.unique_responsibles(bundle.fields.responsible_title)
+        owner_title = responsible_title_for(book, bundle.fields, entry.profile)
+        responsibles = book.unique_responsibles(owner_title)
         responsible = resolve_book_responsible(
             book,
-            bundle.fields.responsible_title,
+            owner_title,
         )
         # Downward distribution is a separate operation.  A brand-new empty
         # target has no workbook row from which its recipient can be read, so
@@ -667,6 +671,7 @@ def build_distribution_plan(
         if (
             previous_profile is not None
             and previous_profile[0] != entry.profile
+            and not separate_profiles
         ):
             issues.append(
                 Issue(
@@ -790,68 +795,82 @@ def build_distribution_plan(
             return candidates[0]
         return None
 
-    for offset, row in enumerate(master.rows):
-        master_row = master.data_start + offset
-        contract_id = norm_key(master.row_value(row, key_column))
-        if not contract_id:
+    owner_profiles = bundle.fields.profile_tags if separate_profiles else {profile for profile, _ in personal_targets}
+    for owner_profile in owner_profiles:
+        if separate_profiles and owner_profile == "soft" and (
+                responsible_title_for(baseline, bundle.fields, "soft") ==
+                responsible_title_for(baseline, bundle.fields, "hard")):
+            issues.append(Issue("error", "distribution_profile_owner_missing",
+                                "Исторический baseline не содержит ответственность Софта"))
             continue
-        raw_responsible = master.row_value(row, responsible_column)
-        original_norm = norm_name(raw_responsible)
-        if not original_norm:
+        responsible_column = master.column_index(responsible_title_for(master, bundle.fields, owner_profile))
+        baseline_responsible_column = baseline.column_index(responsible_title_for(baseline, bundle.fields, owner_profile))
+        if responsible_column is None or baseline_responsible_column is None:
+            issues.append(Issue("error", "distribution_profile_owner_missing",
+                                "Нет колонки ответственности профиля " + owner_profile))
             continue
-        target_norm = canonical_responsible_name(
-            raw_responsible,
-            config.responsible_aliases,
-        )
-        targets = target_by_responsible.get(target_norm, [])
-        if not targets:
-            unmatched[str(raw_responsible).strip()] += 1
-            baseline_item = baseline_item_for(contract_id, master_row)
-            if baseline_item is None:
-                new_assignment_without_target_count += 1
-                if len(new_assignment_without_target) < 100:
-                    new_assignment_without_target.append(
-                        {
-                            "contract_id": contract_id,
-                            "master_row": master_row + 1,
-                            "responsible": str(raw_responsible).strip(),
-                            "reason": "baseline_missing_or_ambiguous",
-                        }
-                    )
-            else:
-                _baseline_row, baseline_values = baseline_item
-                if is_blank(
-                    baseline.row_value(
-                        baseline_values,
-                        baseline_responsible_column,
-                    )
-                ):
+        for offset, row in enumerate(master.rows):
+            master_row = master.data_start + offset
+            contract_id = norm_key(master.row_value(row, key_column))
+            if not contract_id:
+                continue
+            raw_responsible = master.row_value(row, responsible_column)
+            original_norm = norm_name(raw_responsible)
+            if not original_norm:
+                continue
+            target_norm = canonical_responsible_name(
+                raw_responsible,
+                config.responsible_aliases,
+            )
+            targets = [target for target in target_by_responsible.get(target_norm, []) if target[0] == owner_profile]
+            if not targets:
+                unmatched[str(raw_responsible).strip()] += 1
+                baseline_item = baseline_item_for(contract_id, master_row)
+                if baseline_item is None:
                     new_assignment_without_target_count += 1
                     if len(new_assignment_without_target) < 100:
                         new_assignment_without_target.append(
                             {
                                 "contract_id": contract_id,
                                 "master_row": master_row + 1,
-                                "responsible": str(
-                                    raw_responsible
-                                ).strip(),
-                                "reason": "baseline_owner_blank",
+                                "responsible": str(raw_responsible).strip(),
+                                "reason": "baseline_missing_or_ambiguous",
                             }
                         )
-            continue
-        if original_norm in aliases:
-            alias_counts[alias_display[original_norm]] += 1
-        for profile, responsible_norm in targets:
-            master_assignments[
-                f"{profile}\0{responsible_norm}"
-            ].append(
-                (
-                    contract_id,
-                    master_row,
-                    row,
-                    str(raw_responsible).strip(),
+                else:
+                    _baseline_row, baseline_values = baseline_item
+                    if is_blank(
+                        baseline.row_value(
+                            baseline_values,
+                            baseline_responsible_column,
+                        )
+                    ):
+                        new_assignment_without_target_count += 1
+                        if len(new_assignment_without_target) < 100:
+                            new_assignment_without_target.append(
+                                {
+                                    "contract_id": contract_id,
+                                    "master_row": master_row + 1,
+                                    "responsible": str(
+                                        raw_responsible
+                                    ).strip(),
+                                    "reason": "baseline_owner_blank",
+                                }
+                            )
+                continue
+            if original_norm in aliases:
+                alias_counts[alias_display[original_norm]] += 1
+            for profile, responsible_norm in targets:
+                master_assignments[
+                    f"{profile}\0{responsible_norm}"
+                ].append(
+                    (
+                        contract_id,
+                        master_row,
+                        row,
+                        str(raw_responsible).strip(),
+                    )
                 )
-            )
 
     rows: list[DistributionRow] = []
     unproven: list[dict[str, Any]] = []
@@ -872,6 +891,8 @@ def build_distribution_plan(
         personal_targets.items(),
         key=lambda item: str(item[1][0].entry.path).casefold(),
     ):
+        owner_title = responsible_title_for(master, bundle.fields, profile)
+        baseline_responsible_column = baseline.column_index(responsible_title_for(baseline, bundle.fields, profile))
         current_rows_by_key = book.rows_by_key(bundle.fields.key_title)
         assignments = master_assignments.get(
             f"{profile}\0{responsible_norm}",
@@ -882,7 +903,7 @@ def build_distribution_plan(
                 index
                 for index, (title, _master_column) in enumerate(expected_columns)
                 if norm_title(title)
-                == norm_title(bundle.fields.responsible_title)
+                == norm_title(owner_title)
             ),
             None,
         )

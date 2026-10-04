@@ -67,32 +67,34 @@ async function openCard(rep: string) {
       <div class="row" style="margin-top:8px"><button class="btn" id="f-savec">Сохранить комментарий</button>
         <span class="muted" style="font-size:13px">это совместный текст месяца: его увидит и офис, и руководитель</span></div></div>
     <div class="section"><div class="section-head"><h3 class="section-title">🧾 Чек об оплате</h3></div>
-      <div class="row"><input class="input" id="f-rc-sum" placeholder="Сумма платежа" inputmode="numeric" style="max-width:160px">
+      <div class="row"><input class="input" id="f-rc-sum" placeholder="Сумма платежа" inputmode="decimal" style="max-width:160px">
         <input class="input" id="f-rc-date" type="date" style="max-width:160px"></div>
       <div class="row" style="margin-top:6px">
         <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="f-rc-other"> платил не должник</label>
         <input class="input" id="f-rc-who" placeholder="кто и почему платил" style="flex:1"></div>
       <button class="btn primary" id="f-rc-add" style="margin-top:8px">Выбрать снимок чека и приложить</button>
+      ${d.last_visit_op ? '<label class="list-row"><input id="f-rc-visit" type="checkbox"> Чек относится к последнему выезду</label>' : ''}
       ${rcs.length ? `<div class="list" style="margin-top:10px">${rcs.map((x) => `
         <div class="list-row"><div class="grow"><div class="nm">${esc(x.paid_at || x.created_at || "")} · ${money(x.amount)}</div>
           <div class="sub">${x.payer_is_client ? "платил должник" : "другое лицо" + (x.payer_note ? ": " + esc(x.payer_note) : "")}</div></div></div>`).join("")}</div>` : ""}
-      <p class="muted" style="font-size:13px">Чек — доказательство платежа для службы безопасности; сумма свери́тся с реестром оплат.</p></div>`;
+      <p class="muted" style="font-size:13px">СБ увидит чек и последний платёж из реестра. Полная сверка требует выписки платежей.</p></div>`;
   panel.querySelector("#f-savec")?.addEventListener("click", async () => {
     const text = (panel.querySelector("#f-comment") as HTMLTextAreaElement).value;
     const res = await api("/api/save", undefined, "POST", { rep, values: { visit_comment: text }, finish: false });
     if (res.ok) toast("Комментарий сохранён"); else toast(res.text || "Не сохранилось");
   });
   panel.querySelector("#f-rc-add")?.addEventListener("click", async () => {
-    const sumRaw = String((panel.querySelector("#f-rc-sum") as HTMLInputElement).value || "").replace(/\D/g, "");
+    const sumRaw = String((panel.querySelector("#f-rc-sum") as HTMLInputElement).value || "").replace(/\s/g, "").replace(",", ".");
     const date = (panel.querySelector("#f-rc-date") as HTMLInputElement).value || new Date().toISOString().slice(0, 10);
     const other = (panel.querySelector("#f-rc-other") as HTMLInputElement).checked;
     const who = (panel.querySelector("#f-rc-who") as HTMLInputElement).value.trim();
-    if (!sumRaw) { toast("Укажите сумму платежа"); return; }
+    if (!/^\d+(\.\d{1,2})?$/.test(sumRaw) || Number(sumRaw)<=0) { toast("Укажите сумму платежа"); return; }
     const picked = await hard.pick("file", { title: "Снимок чека", filters: [{ name: "Изображение", extensions: ["jpg", "jpeg", "png", "webp"] }] });
     if (!picked) return;
     const ext = (picked.slice(picked.lastIndexOf(".")).toLowerCase() || ".jpg");
     const q: Record<string, unknown> = { rep, op: "desk-" + Date.now().toString(36), amount: sumRaw, paid_at: date, payer: other ? "other" : "client" };
     if (other && who) q.note = who;
+    if ((panel.querySelector("#f-rc-visit") as HTMLInputElement | null)?.checked) q.visit=d.last_visit_op;
     const r2 = await hard.upload("/api/receipt", q, picked, ext);
     if (r2.ok) { toast("Чек приложен"); void openCard(rep); } else toast(r2.text || "Чек не принят");
   });

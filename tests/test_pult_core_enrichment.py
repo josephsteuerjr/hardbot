@@ -53,11 +53,11 @@ def test_match_employees_and_preview_texts(tmp_path):
     assert [m["employee"] for m in matched] == ["Иванов"]
     assert nofolder == ["Нетпапки (4)"] and nofile == ["Сидоров"]
     pairs = dict(en.preview_pairs(by_emp, matched))
-    assert pairs == {"с выездами из приложения": 3, "готовы к обогащению": 1,
-                     "завершённых визитов": 2, "файлов": 1}
+    assert pairs == {"с результатами из приложения": 3, "готовы к обогащению": 1,
+                     "результатов Хард / Софт": 2, "файлов": 1}
     warn = en.preview_warning(by_emp, matched, nofolder, nofile)
     assert "нет папки: Нетпапки (4)" in warn and "нет .xlsb: Сидоров" in warn
-    assert en.pick_note(matched[0]) == "визитов: 2 · файлов: 1 · Душанбе"
+    assert en.pick_note(matched[0]) == "HARD · результатов: 2 · файлов: 1 · Душанбе"
 
     by_emp.orphan_filled, by_emp.orphan_rows, by_emp.orphan_cids = 2, 5, ["К1", "К2"]
     warn = en.preview_warning(by_emp, matched, [], [])

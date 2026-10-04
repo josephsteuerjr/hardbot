@@ -571,6 +571,10 @@ def _person_full_from_rows(rows, rep: str, lang: str,
         return None
     main = rows[0]
     visit = next((v for r in rows if (v := db.bot_visit_snapshot(r)) is not None), None)
+    newest_row = max(rows, key=lambda r: max(str(r["bot_call_at"] or ""),
+                     str(r["bot_visit_event_at"] or r["bot_visit_at"] or "")))
+    latest_common = db.common_result(newest_row)
+    last_visit = db.last_visit_row([r["contract_id"] for r in rows])
     visited = visit is not None
     contracts = [{
         "contract_id": r["contract_id"], "partner": r["partner"],
@@ -590,8 +594,8 @@ def _person_full_from_rows(rows, rep: str, lang: str,
     # наличии снимка убиралась «чтобы не дублировать форму» — и выездник,
     # набрав сумму, нигде её потом не видел. Пока снимка нет — офисные
     # значения read-only.
-    snap_date = str((visit or {}).get("promise_date") or "").strip()
-    snap_sum = str((visit or {}).get("forecast_sum") or "").strip()
+    snap_date = str(latest_common.get("promise_date") or "").strip()
+    snap_sum = str(latest_common.get("forecast_sum") or "").strip()
     for x in promise:
         if x["key"] == "promise_date" and snap_date:
             x["value"] = _fmt_date_ru(snap_date)
@@ -637,6 +641,8 @@ def _person_full_from_rows(rows, rep: str, lang: str,
         "contracts": contracts, "info": info, "promise": promise,
         "form": form,
         "formTyped": form_typed,
+        "softFormTyped": {k: latest_common.get(k, "") for k in (*FORM_DATES, *FORM_AMOUNTS)},
+        "last_visit_op": last_visit["op_id"] if last_visit else None,
         "formTypedRegistry": form_typed_registry,
         # Текущий комментарий — живой совместный текст месяца: его можно
         # продолжить до завершения визита, а доказанный snapshot остаётся
@@ -657,7 +663,8 @@ def _person_full_from_rows(rows, rep: str, lang: str,
         # Чеки об оплате, приложенные к карточке (контур СБ): дата платежа,
         # сумма, платил ли клиент. Читаются и выездником (видит, что уже
         # приложено), и руководителем/безопасником в витрине.
-        "receipts": (db.receipts_for([rep]).get(rep, [])
+        "receipts": ([receipt for items in db.receipts_for([r["contract_id"] for r in rows]).values()
+                      for receipt in items]
                      if receipts is None else receipts),
         # Контур «Софт»: состояние звонка по человеку (живая колонка месяца),
         # форма «Звонок» и журнал звонков. Читается и софтником, и выездником
@@ -695,8 +702,12 @@ def _person_extra(rows, extras: dict[str, list[dict]] | None) -> list[dict]:
     return [{"title": label, "value": value} for label, value in shown.items()]
 
 
-def _person_full(rep: str, lang: str) -> dict | None:
-    return _person_full_from_rows(db.person_contracts(rep), rep, lang)
+def _person_full(rep: str, lang: str, *, by_soft: bool = False) -> dict | None:
+    data = _person_full_from_rows((db.person_contracts_by_soft(rep) if by_soft
+                                  else db.person_contracts(rep)), rep, lang)
+    if data:
+        data["_profile"] = "soft" if by_soft else "hard"
+    return data
 
 
 # --- Маршрут «я → должник» (навигация в миниаппе) ---------------------------
@@ -945,6 +956,7 @@ async def _bootstrap(request: web.Request) -> web.Response:
         # если он одновременно выездник (перевод УЗБ на звонки).
         roles = roles or {}
         roles["soft"] = True
+        roles["field"] = bool(db.persons_for_employee(emp))
     if roles and roles.get("manager"):
         # Подпись режима в приложении (v62): «Руководитель», «Безопасник»,
         # «Директор» или «Владелец» — какой ролью человек вошёл.
@@ -1449,7 +1461,10 @@ async def _person(request: web.Request) -> web.Response:
                    and emp != row["responsible_soft"]):
         raise web.HTTPNotFound(text="person")
     db.audit_access(uid, "view_card", rep)              # ИБ: доступ к ПД в журнал
-    data = _person_full(rep, lang_of(uid))
+    by_soft = request.query.get("mode") == "soft" or (emp != row["responsible"] and emp == row["responsible_soft"])
+    if by_soft and uid != ADMIN_ID and emp != row["responsible_soft"]:
+        raise web.HTTPNotFound(text="person")
+    data = _person_full(rep, lang_of(uid), by_soft=by_soft)
     if not data:
         raise web.HTTPNotFound(text="person")
     return web.json_response(data)
@@ -1467,22 +1482,23 @@ async def _cards(request: web.Request) -> web.Response:
     cards = {}
     # Прогрев — по ОБЕИМ колонкам ответственности: софтнику кэш нужен не меньше
     # (очередь «кому звонить» открывает карточки офлайн той же механикой).
-    grouped = {p["rep"]: p for p in db.persons_for_employee(emp)}
-    for p in db.persons_for_soft(emp):
-        grouped.setdefault(p["rep"], p)
-    grouped = list(grouped.values())
+    soft_mode = request.query.get("mode") == "soft" or (
+        db.soft_portfolio_exists(emp) and not db.persons_for_employee(emp))
+    grouped = db.persons_for_soft(emp) if soft_mode else db.persons_for_employee(emp)
     # Дополнительные поля всего портфеля — одним запросом по той же причине,
     # что и сами договоры: карточек бывает под три сотни.
     all_extras = db.registry_extra_values(
         [r["contract_id"] for p in grouped for r in p["contracts"]])
     # Чеки всего портфеля — тем же пакетом (не открывать запрос на карточку).
-    all_receipts = db.receipts_for([p["rep"] for p in grouped])
+    all_receipts = db.receipts_for([r["contract_id"] for p in grouped for r in p["contracts"]])
     for p in grouped:
         # persons_for_employee уже принёс все строки договоров. Не открываем
         # отдельное SQLite-соединение для каждой карточки.
         full = _person_full_from_rows(p["contracts"], p["rep"], lang, all_extras,
-                                      all_receipts.get(p["rep"], []))
+                                      [receipt for r in p["contracts"]
+                                       for receipt in all_receipts.get(r["contract_id"], [])])
         if full:
+            full["_profile"] = "soft" if soft_mode else "hard"
             cards[p["rep"]] = full
     # ИБ: точечный просмотр карточки логируется в _person (view_card). Здесь — оптовый
     # предзагруз своего портфеля в оффлайн-кэш: пишем один факт (кто/когда/сколько), без
@@ -1820,7 +1836,7 @@ async def _save(request: web.Request) -> web.Response:
         # clients. При ретрае после редкого падения между log_visit и этой записью
         # восстанавливаем отсутствующий снимок; старый дубль новый снимок не откатывает.
         if is_new or not db.has_bot_visit(rep):
-            db.record_bot_visit(rep, values, completed_at)
+            db.record_bot_visit(rep, values, completed_at, event_at=_saved_at(body))
         proven_row = db.get_client(rep)
         proven_snapshot = db.bot_visit_snapshot(proven_row) or {}
         notify_row = dict(proven_row)
@@ -1894,7 +1910,7 @@ def _save_call(uid: int, emp: str, body: dict, rep: str, row, values: dict,
         if fc:
             values[db.FORECAST_KEY] = fc
     db.audit_access(uid, "save_call" if finish else "save_card", rep)
-    if values:
+    if values and not finish:
         # Группа — по СОФТ-закреплению: у человека бывают разные выездные
         # ответственные, звонок обязан лечь во все его договоры софтника.
         db.update_person(rep, values, by_soft=True)
@@ -1909,18 +1925,16 @@ def _save_call(uid: int, emp: str, body: dict, rep: str, row, values: dict,
         # Дедуп повторного нажатия (зеркало same_visit_logged_today, но здесь
         # гасим и строку): тот же софтник, тот же день, то же содержимое —
         # второй РЕАЛЬНЫЙ звонок с другим статусом/комментарием пройдёт.
-        if db.same_call_logged_today(rep, row["responsible_soft"] or emp,
-                                     payload, on_date=completed_at):
-            data = _person_full(rep, lang_of(uid))
-            out = {"ok": True, "person": data, "dedup": True}
-            if rejected:
-                out["rejected"] = rejected
-            return web.json_response(out)
-        db.log_call(rep, uid, payload, op_id=op_id, on_date=completed_at,
-                    saved_at=_saved_at(body),
-                    employee=row["responsible_soft"] or emp)
-    data = _person_full(rep, lang_of(uid))
+        try:
+            result = db.save_call_result(rep, uid, row["responsible_soft"] or emp,
+                       values, payload, op_id=op_id, on_date=completed_at,
+                       saved_at=_saved_at(body))
+        except ValueError as exc:
+            raise web.HTTPConflict(text=str(exc)) from exc
+    data = _person_full(rep, lang_of(uid), by_soft=True)
     out = {"ok": True, "person": data}
+    if finish:
+        out.update(result)
     if rejected:
         out["rejected"] = rejected
     if truncated:
@@ -2439,6 +2453,14 @@ async def _receipt(request: web.Request) -> web.Response:
     fields = _receipt_query(request)
     visit_op = re.sub(r"[^A-Za-z0-9_-]", "",
                       request.query.get("visit") or "")[:64] or None
+    if visit_op:
+        ids = {r["contract_id"] for r in db.person_contracts(rep)}
+        with db.connect() as conn:
+            associated = conn.execute("SELECT contract_id,agent_id FROM visits WHERE op_id=?",
+                                      (visit_op,)).fetchone()
+        if not associated or associated["contract_id"] not in ids or associated["agent_id"] != uid:
+            raise web.HTTPBadRequest(text="Чек нельзя связать с этим выездом")
+    fields["currency"] = fields["currency"] or debt.unit([row["partner"]]) or None
     try:
         stored = await _store_photo(
             request.content.iter_chunked(_PHOTO_CHUNK), receipt_dir() / rep, op,
@@ -5122,6 +5144,8 @@ async def _admin_stats(request: web.Request) -> web.Response:
         "countries": db.stats_by_country(),
         "employees": [{"employee": e["employee"], "contracts": e["contracts"]}
                       for e in db.employees_in_registry()],
+        "soft_employees": [{"employee": e["employee"], "contracts": e["contracts"]}
+                           for e in db.soft_employees()],
         "bindings": [{"telegram_id": b["telegram_id"], "employee": b["employee"],
                       "kind": (b["kind"] if "kind" in b.keys() else "agent")}
                      for b in db.list_bindings()],
@@ -5400,6 +5424,7 @@ async def _admin_import_json(request: web.Request) -> web.Response:
         require_source_proof=True,
         full_registry=full_registry,
         authoritative_employees=authoritative_employees,
+        import_profile=body.get("import_profile", "hard"),
         restore_manual_unassigned=restore_manual_unassigned,
         replace_current_visit_comments=replace_current_visit_comments,
         expected_auto_unassigned=expected_auto_unassigned,
@@ -5599,6 +5624,7 @@ async def _admin_import_preview_json(request: web.Request) -> web.Response:
         require_source_proof=False,
         full_registry=full_registry,
         authoritative_employees=authoritative_employees,
+        import_profile=body.get("import_profile", "hard"),
         preview_only=True,
         restore_manual_unassigned=restore_manual_unassigned,
         replace_current_visit_comments=replace_current_visit_comments,

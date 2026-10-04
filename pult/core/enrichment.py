@@ -108,8 +108,8 @@ def preview_lines(results: list[dict]) -> list[str]:
 
 # --- подбор файлов ----------------------------------------------------------
 def personal_files(entries, emp) -> list[Path]:
-    """Личные реестры сотрудника в его папках: ФИО.xlsb (имя из источника или
-    папки), иначе первый непременной .xlsb в папке (~времянки Excel — мимо).
+    """По одной активной книге в папке сотрудника, независимо от имени файла.
+    Несколько рабочих книг требуют решения оператора; ~времянки Excel — мимо.
 
     Страховочные копии «(до обогащения …)» / «(до разброса …)» / «(до починки …)»
     тоже мимо: подхватить копию вместо живого файла — значит обогатить или
@@ -117,14 +117,12 @@ def personal_files(entries, emp) -> list[Path]:
     files: list[Path] = []
     for e in entries:
         folder = e["path"]
-        cands = [folder / f"{razbros.sanitize_filename(emp)}.xlsb",
-                 folder / f"{folder.name}.xlsb"]
-        found = next((c for c in cands if c.exists()), None)
-        if not found:
-            xs = [p for p in sorted(folder.glob("*.xlsb"))
-                  if not p.name.startswith("~")
-                  and not razbros.is_backup_copy(p.name)]
-            found = xs[0] if xs else None
+        xs = [p for p in sorted(folder.glob("*.xlsb"))
+              if not p.name.startswith("~") and not razbros.is_backup_copy(p.name)]
+        if len(xs) > 1:
+            raise ValueError(f"В папке {folder} несколько активных .xlsb: "
+                             + ", ".join(p.name for p in xs))
+        found = xs[0] if xs else None
         if found and found not in files:
             files.append(found)
     return files
@@ -136,12 +134,14 @@ def folder_map(base: str, roots: list[str] | None = None) -> dict:
 
 
 def match_employees(by_emp, fmap) -> tuple[list[dict], list[str], list[str]]:
-    """Сотрудники с визитами бота → (готовы, нет папки, нет файла)."""
+    """Активные владельцы с доказанными визитами/звонками → подбор по профилю."""
     matched, nofolder, nofile = [], [], []
     for key, e in sorted(by_emp.items(), key=lambda kv: kv[1]["employee"].lower()):
         if not e["filled"]:
             continue        # бот ничего не заполнял — обогащать нечего
-        entries = fmap.get(key)
+        profile = e.get("profile", "hard")
+        entries = fmap.get(enrich.norm_name(e["employee"]))
+        entries = [entry for entry in (entries or []) if entry.get("kind", "hard") == profile]
         if not entries:
             nofolder.append(f"{e['employee']} ({e['filled']})")
             continue
@@ -150,6 +150,7 @@ def match_employees(by_emp, fmap) -> tuple[list[dict], list[str], list[str]]:
             nofile.append(e["employee"])
             continue
         matched.append({"key": key, "employee": e["employee"],
+                        "profile": profile,
                         "filled": e["filled"], "files": files,
                         "rows": e["rows"]})
     return matched, nofolder, nofile
@@ -157,9 +158,9 @@ def match_employees(by_emp, fmap) -> tuple[list[dict], list[str], list[str]]:
 
 def preview_pairs(by_emp, matched: list[dict]) -> list[tuple[str, object]]:
     pairs = [
-        ("с выездами из приложения", sum(1 for e in by_emp.values() if e["filled"])),
+        ("с результатами из приложения", sum(1 for e in by_emp.values() if e["filled"])),
         ("готовы к обогащению", len(matched)),
-        ("завершённых визитов", sum(m["filled"] for m in matched)),
+        ("результатов Хард / Софт", sum(m["filled"] for m in matched)),
         ("файлов", sum(len(m["files"]) for m in matched))]
     orphan_filled = getattr(by_emp, "orphan_filled", 0)
     if orphan_filled:
@@ -202,7 +203,7 @@ def preview_warning(by_emp, matched: list[dict], nofolder: list[str],
 
 def pick_note(m: dict) -> str:
     where = " · ".join(p.parent.parent.name for p in m["files"])
-    return f"визитов: {m['filled']} · файлов: {len(m['files'])} · {where}"
+    return f"{m.get('profile', 'hard').upper()} · результатов: {m['filled']} · файлов: {len(m['files'])} · {where}"
 
 
 # --- задания и окно -----------------------------------------------------------

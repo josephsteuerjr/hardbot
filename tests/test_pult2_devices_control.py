@@ -50,6 +50,7 @@ def _seed():
         conn.execute("DELETE FROM managers WHERE telegram_id IN (?,?,?)", (MGR, SEC, FULL))
         conn.execute("DELETE FROM clients WHERE contract_id LIKE 'P2-%'")
         conn.execute("DELETE FROM visits WHERE contract_id LIKE 'P2-%'")
+        conn.execute("DELETE FROM photo_geo WHERE contract_id LIKE 'P2-%'")
         conn.execute("DELETE FROM app_links WHERE telegram_id IN (?,?,?,?)", (MGR, SEC, FULL, AGENT))
         conn.commit()
     grid = [[f.title for f in db.FIELDS], [f.source for f in db.FIELDS]]

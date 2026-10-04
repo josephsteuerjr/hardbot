@@ -296,4 +296,4 @@ def test_guards_stay_fail_closed():
 def test_signature_tolerates_missing_toggles():
     view = FakeView(PREVIEW)
     del view.imp_restore_manual_var
-    assert view._imp_signature() == ("a" * 64, ("егор",), True, False, False)
+    assert view._imp_signature() == ("a" * 64, "hard", ("егор",), True, False, False)

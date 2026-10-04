@@ -182,7 +182,76 @@ BOOKKEEPING = [
     # Сотрудник СОФТ» из общего реестра). Читается как scoring-колонка:
     # заголовок остаётся в игнор-листе контракта, экспортная схема не меняется.
     ("responsible_soft", "TEXT"),
+    ("bot_call_at", "TEXT"),
+    ("bot_call_data", "TEXT"),
+    ("call_office_data", "TEXT"),
+    ("call_value_log", "TEXT"),
+    ("bot_visit_event_at", "TEXT"),
 ]
+
+SOFT_SNAPSHOT_KEYS = ("soft_call_status", "soft_comm_date", "soft_comment",
+                      "promise_date", "forecast_sum", "forecast")
+COMMON_RESULT_KEYS = ("promise_date", "forecast_sum", "forecast")
+
+
+def _call_value_log(row) -> dict:
+    try:
+        raw = json.loads(row["call_value_log"] or "{}")
+        return {k: list(v) for k, v in raw.items() if k in SOFT_SNAPSHOT_KEYS and isinstance(v, list)}
+    except (KeyError, IndexError, TypeError, ValueError):
+        return {}
+
+
+def _call_log_add(log, values):
+    out = {k: list(v) for k, v in log.items()}
+    for key, value in values.items():
+        if key in SOFT_SNAPSHOT_KEYS and value not in (None, ""):
+            text = str(value)
+            if text not in out.setdefault(key, []):
+                out[key].append(text)
+    return out
+
+
+def bot_call_snapshot(row) -> dict | None:
+    try:
+        data = json.loads(row["bot_call_data"] or "")
+        if not isinstance(data, dict) or not row["bot_call_at"]:
+            return None
+        if data.get("soft_call_status") not in (BY_KEY["soft_call_status"].options or []):
+            return None
+        result = {k: data[k] for k in SOFT_SNAPSHOT_KEYS if k in data}
+        office = json.loads(row["call_office_data"] or "{}")
+        if office.get("event_at") == row["bot_call_at"]:
+            result.update({k: v for k, v in office.get("fields", {}).items()
+                           if k in SOFT_SNAPSHOT_KEYS})
+        return result
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
+def call_is_latest(row) -> bool:
+    visit_at = (str(row["bot_visit_event_at"] or row["bot_visit_at"] or "")
+                if _decode_bot_snapshot(row) is not None else "")
+    return bool(bot_call_snapshot(row) and str(row["bot_call_at"] or "") >= visit_at)
+
+
+def call_field_at(row, key) -> str:
+    data = json.loads(row["bot_call_data"] or "{}")
+    return str(data.get("_field_at", {}).get(key) or row["bot_call_at"] or "")
+
+
+def call_owns_field(row, key) -> bool:
+    call = bot_call_snapshot(row) or {}
+    visit = _merged_visit(row) or {}
+    return key in call and (key not in visit or call_field_at(row, key) >=
+                            str(row["bot_visit_event_at"] or row["bot_visit_at"] or ""))
+
+
+def common_result(row) -> dict:
+    out = {k: v for k, v in (_merged_visit(row) or {}).items() if k in COMMON_RESULT_KEYS}
+    out.update({k: v for k, v in (bot_call_snapshot(row) or {}).items()
+                if k in COMMON_RESULT_KEYS and call_owns_field(row, k)})
+    return out
 
 # Семантика обмена больше не дублируется между bot/pult/clearance. Она загружается
 # из version+SHA-locked data_exchange_contract.json; несовместимая правка не даст
@@ -665,6 +734,10 @@ def init_db() -> None:
             )
         """)
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_calls_op ON calls(op_id)")
+        call_cols = {r[1] for r in conn.execute("PRAGMA table_info(calls)")}
+        for col in ("values_json", "contracts_json"):
+            if col not in call_cols:
+                conn.execute(f'ALTER TABLE calls ADD COLUMN "{col}" TEXT')
         conn.execute("CREATE INDEX IF NOT EXISTS idx_calls_employee "
                      "ON calls(employee, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_calls_contract "
@@ -1354,9 +1427,26 @@ def init_db() -> None:
               claimed_at TEXT,
               source TEXT,
               created_at TEXT,
-              UNIQUE(contract_id, window_to, employee, prev_employee)
+              profile TEXT NOT NULL DEFAULT 'hard',
+              UNIQUE(contract_id, window_to, employee, prev_employee, profile)
             )
         """)
+        if "profile" not in {r[1] for r in conn.execute("PRAGMA table_info(assignment_events)")}:
+            # Старый UNIQUE не различал Хард и Софт одного сотрудника.
+            conn.execute("""CREATE TABLE assignment_events_v6 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, contract_id TEXT NOT NULL,
+                employee TEXT NOT NULL DEFAULT '', prev_employee TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL, window_to TEXT NOT NULL, window_from TEXT,
+                claimed_at TEXT, source TEXT, created_at TEXT,
+                profile TEXT NOT NULL DEFAULT 'hard',
+                UNIQUE(contract_id, window_to, employee, prev_employee, profile))""")
+            conn.execute("""INSERT INTO assignment_events_v6
+                (id, contract_id, employee, prev_employee, kind, window_to,
+                 window_from, claimed_at, source, created_at)
+                SELECT id, contract_id, employee, prev_employee, kind, window_to,
+                 window_from, claimed_at, source, created_at FROM assignment_events""")
+            conn.execute("DROP TABLE assignment_events")
+            conn.execute("ALTER TABLE assignment_events_v6 RENAME TO assignment_events")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_assign_ev_emp "
                      "ON assignment_events(employee, window_to)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_assign_ev_contract "
@@ -1415,8 +1505,47 @@ def init_db() -> None:
             conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)",
                          (author_key, json.dumps({**filled,
                                                   "at": date.today().isoformat()})))
+        call_migration = "migration_call_snapshots_v1"
+        if not conn.execute("SELECT 1 FROM settings WHERE key=?", (call_migration,)).fetchone():
+            recovered = _backfill_call_snapshots(conn)
+            conn.execute("INSERT INTO settings(key,value) VALUES (?,?)",
+                         (call_migration, json.dumps({"contracts": recovered, "at": date.today().isoformat()})))
         conn.commit()
     reset_role_caches()   # схема/роли могли поменяться — индекс адресатов заново
+
+
+def _backfill_call_snapshots(conn: sqlite3.Connection) -> int:
+    """Старые звонки доказывают только статус/комментарий из журнала.
+
+    Дата следующего звонка и сумма отсутствовали в старом payload: сырые
+    импортные колонки не превращаем в результат приложения задним числом.
+    """
+    recovered = set()
+    for call in conn.execute("SELECT * FROM calls WHERE values_json IS NULL "
+                             "ORDER BY created_at, id").fetchall():
+        match = re.match(r"^Звонок \(приложение\)\. Статус: (.*?); ?(.*)$",
+                         call["payload"] or "", flags=re.S)
+        if not match or match[1] not in (BY_KEY["soft_call_status"].options or []):
+            continue
+        rep = conn.execute("SELECT * FROM clients WHERE contract_id=?", (call["contract_id"],)).fetchone()
+        if not rep or not call["employee"] or _name_key(rep["responsible_soft"]) != _name_key(call["employee"]):
+            continue
+        candidates = conn.execute("SELECT * FROM clients WHERE client IS ? AND responsible_soft=?",
+                                  (rep["client"], rep["responsible_soft"])).fetchall()
+        rows = [row for row in candidates if person_key(row) == person_key(rep)]
+        values = {"soft_call_status": match[1], "soft_comment": match[2]}
+        event_at = str(call["saved_at"] or call["created_at"] + "T00:00:00")
+        snapshot = {**values, "_field_at": {key:event_at for key in values}}
+        conn.execute("UPDATE calls SET values_json=?, contracts_json=? WHERE id=?",
+                     (json.dumps(values, ensure_ascii=False), json.dumps([r["contract_id"] for r in rows]), call["id"]))
+        for row in rows:
+            if str(row["bot_call_at"] or "") > event_at:
+                continue
+            conn.execute("UPDATE clients SET bot_call_at=?, bot_call_data=?, call_value_log=? WHERE contract_id=?",
+                         (event_at, json.dumps(snapshot, ensure_ascii=False),
+                          json.dumps(_call_log_add(_call_value_log(row), values), ensure_ascii=False), row["contract_id"]))
+            recovered.add(row["contract_id"])
+    return len(recovered)
 
 
 def _backfill_visit_authors(conn: sqlite3.Connection) -> dict:
@@ -3404,8 +3533,9 @@ def assignment_events_between(d_from: str, d_to: str,
     if employees:
         keys = sorted({e for e in employees if e})
         if keys:
-            where += f" AND employee IN ({','.join('?' * len(keys))})"
-            args += keys
+            marks = ','.join('?' * len(keys))
+            where += f" AND (employee IN ({marks}) OR prev_employee IN ({marks}))"
+            args += keys + keys
     with connect() as conn:
         rows = conn.execute(
             f"SELECT * FROM assignment_events {where} "
@@ -3427,6 +3557,7 @@ def receipts_for(contract_ids: list[str]) -> dict[str, list[dict]]:
                 "ORDER BY COALESCE(created_at,''), id", chunk).fetchall()
         for r in rows:
             out.setdefault(r["contract_id"], []).append({
+                "contract_id": r["contract_id"], "visit_op": r["visit_op"],
                 "op": r["op"], "paid_at": r["paid_at"], "amount": r["amount"],
                 "currency": r["currency"],
                 "payer_is_client": bool(r["payer_is_client"]),
@@ -4410,7 +4541,7 @@ def update_person(rep_contract_id: str, values: dict, *,
 
 
 def record_bot_visit(rep_contract_id: str, values: dict,
-                     completed_at: str | None = None) -> int:
+                     completed_at: str | None = None, event_at: str | None = None) -> int:
     """Зафиксировать доверенный снимок завершённого визита во всех КД человека.
 
     ``values`` — уже отфильтрованное тело фактического POST /api/save; намеренно
@@ -4442,6 +4573,10 @@ def record_bot_visit(rep_contract_id: str, values: dict,
         # «известными», чтобы файл, обогащённый до повторного выезда, не выдал их
         # импорту за офисные правки.
         for r in contracts:
+            conn.execute("UPDATE clients SET bot_visit_event_at=? WHERE contract_id=?",
+                         (event_at or (completed_at + "T" +
+                          (datetime.now().strftime("%H:%M:%S.%f")
+                           if completed_at == now else "00:00:00")), r["contract_id"]))
             log = _log_append(_decode_value_log(r), snapshot)
             if "visit_comment" in snapshot:
                 # Прямые in-process вызовы record_bot_visit (миграции/тесты)
@@ -5140,6 +5275,70 @@ def log_visit(contract_id: str, agent_id: int, payload: str,
         return cur.rowcount > 0
 
 
+def save_call_result(contract_id: str, agent_id: int, employee: str,
+                     values: dict, payload: str, *, op_id: str | None,
+                     on_date: str, saved_at: str | None = None) -> dict:
+    """Журнал и снимки звонка в одной транзакции; повтор не меняет карточку."""
+    rows = person_contracts_by_soft(contract_id)
+    values = {k: v for k, v in values.items() if k in BY_KEY}
+    encoded = json.dumps(values, ensure_ascii=False, sort_keys=True)
+    event_at = saved_at or (on_date + "T" +
+        (datetime.now().strftime("%H:%M:%S.%f") if on_date == date.today().isoformat()
+         else "00:00:00"))
+    # Клиентское время должно относиться к заявленному дню события.
+    if str(event_at)[:10] != on_date:
+        event_at = on_date + "T00:00:00"
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current_rep = conn.execute("SELECT * FROM clients WHERE contract_id=?", (contract_id,)).fetchone()
+        if not current_rep or current_rep["responsible_soft"] != employee:
+            raise ValueError("Закрепление изменилось. Обновите портфель")
+        candidates = conn.execute("SELECT * FROM clients WHERE client IS ? AND responsible_soft=?",
+                                  (current_rep["client"], employee)).fetchall()
+        rows = [r for r in candidates if person_key(r) == person_key(current_rep)]
+        prior = conn.execute("SELECT * FROM calls WHERE op_id=?", (op_id,)).fetchone() if op_id else None
+        if prior:
+            if prior["contract_id"] != contract_id or prior["agent_id"] != agent_id:
+                raise ValueError("op_id принадлежит другому звонку")
+            return {"dedup": True, "applied": False}
+        last = conn.execute("SELECT * FROM calls WHERE contract_id=? AND created_at=? "
+                            "ORDER BY id DESC LIMIT 1", (contract_id, on_date)).fetchone()
+        if last and last["employee"] == employee and last["values_json"] == encoded:
+            return {"dedup": True, "applied": False}
+        conn.execute("INSERT INTO calls (contract_id,agent_id,created_at,payload,op_id,"
+                     "received_at,saved_at,employee,values_json,contracts_json) "
+                     "VALUES (?,?,?,?,?,?,?,?,?,?)", (contract_id,agent_id,on_date,payload,op_id,
+                     datetime.now().isoformat(timespec="seconds"),event_at,employee,encoded,
+                     json.dumps([r["contract_id"] for r in rows])))
+        applied = False
+        for old in rows:
+            # Перечитываем под write-lock: параллельный звонок не откатывается.
+            row = conn.execute("SELECT * FROM clients WHERE contract_id=?", (old["contract_id"],)).fetchone()
+            if str(row["bot_call_at"] or "") > event_at:
+                continue
+            previous = bot_call_snapshot(row) or {}
+            snapshot = {k: values.get(k, previous[k]) if k in previous else values[k]
+                        for k in SOFT_SNAPSHOT_KEYS if k in values or k in previous}
+            snapshot["_field_at"] = {k: event_at if k in values else call_field_at(row, k)
+                                     for k in SOFT_SNAPSHOT_KEYS if k in snapshot}
+            current = dict(values)
+            if str(row["bot_visit_event_at"] or row["bot_visit_at"] or "") > event_at:
+                for key in COMMON_RESULT_KEYS:
+                    current.pop(key, None)
+            current.update(bot_call_at=event_at,
+                           bot_call_data=json.dumps(snapshot, ensure_ascii=False),
+                           call_office_data=None,
+                           call_value_log=json.dumps(_call_log_add(_call_value_log(row), snapshot), ensure_ascii=False),
+                           updated_at=date.today().isoformat())
+            sets = ", ".join(f'"{k}"=?' for k in current)
+            conn.execute(f"UPDATE clients SET {sets} WHERE contract_id=?",
+                         (*current.values(), row["contract_id"]))
+            applied = True
+        conn.commit()
+    _bump_version()
+    return {"dedup": False, "applied": applied}
+
+
 def log_call(contract_id: str, agent_id: int, payload: str,
              op_id: str | None = None, on_date: str | None = None,
              saved_at: str | None = None,
@@ -5178,15 +5377,18 @@ def same_call_logged_today(contract_id: str, employee: str, payload: str,
 
 def calls_for_person(rep_contract_id: str, limit: int = 50) -> list[sqlite3.Row]:
     """Журнал звонков по договорам человека (для карточки)."""
-    ids = [r["contract_id"] for r in person_contracts(rep_contract_id)]
+    ids = [r["contract_id"] for r in person_contracts_by_soft(rep_contract_id)]
     if not ids:
         return []
     marks = ",".join("?" for _ in ids)
     with connect() as conn:
         return conn.execute(
-            f"SELECT * FROM calls WHERE contract_id IN ({marks}) "
+            f"SELECT * FROM calls WHERE contract_id IN ({marks}) OR EXISTS ("
+            "SELECT 1 FROM json_each(CASE WHEN json_valid(calls.contracts_json) "
+            "THEN calls.contracts_json ELSE '[]' END) "
+            f"WHERE value IN ({marks})) "
             "ORDER BY created_at DESC, id DESC LIMIT ?",
-            (*ids, limit)).fetchall()
+            (*ids, *ids, limit)).fetchall()
 
 
 def same_visit_logged_today(contract_id: str, agent_id: int, payload: str,
@@ -6433,6 +6635,10 @@ def registry_rows(
             for key in BOT_VISIT_KEYS:
                 if key in out and key in visit:
                     out[key] = visit[key]
+        call = bot_call_snapshot(row)
+        if call:
+            out.update({k: v for k, v in call.items()
+                        if k not in COMMON_RESULT_KEYS or call_owns_field(row, k)})
         result.append(out)
     return result
 
@@ -6455,14 +6661,18 @@ def enrichment_rows() -> list[dict]:
     result = []
     for raw in rows:
         row = {f.key: raw[f.key] for f in FIELDS}
+        row["responsible_soft"] = raw["responsible_soft"]
         for key in BOT_VISIT_KEYS:
             if key in row:
                 row[key] = None
         snapshot = _merged_visit(raw)
         row[BOT_VISIT_MARKER] = snapshot is not None
-        call_day = call_days.get(raw["contract_id"])
-        if call_day:
-            row["_call_day"] = call_day
+        call_snapshot = bot_call_snapshot(raw)
+        row["_bot_call_completed"] = call_snapshot is not None
+        for key in SOFT_SNAPSHOT_KEYS[:3]:
+            row[key] = None
+        if call_snapshot:
+            row["_call_day"] = str(raw["bot_call_at"])[:10]
         bot_snapshot = _decode_bot_snapshot(raw)
         row[VISIT_COMMENT_CLEARED_MARKER] = bool(
             snapshot is not None
@@ -6479,14 +6689,13 @@ def enrichment_rows() -> list[dict]:
             if tips:
                 snapshot = {**snapshot, "tips": tips}
             row.update(snapshot)
-        elif str((raw["soft_call_status"] if "soft_call_status" in raw.keys() else "") or "").strip():
-            # Контур «Софт»: снимка визита нет и не будет; обещание живёт
-            # в живой колонке (звонок пишет её напрямую). Эхо «мастер → книга»
-            # удерживают окно по дате коммуникации и реестр доставленного.
-            for k in ("promise_date", "forecast_sum", "forecast"):
-                v = str((raw[k] if k in raw.keys() else None) or "").strip()
-                if v:
-                    row[k] = v
+        if call_snapshot:
+            row.update({k: v for k, v in call_snapshot.items()
+                        if k not in COMMON_RESULT_KEYS or call_owns_field(raw, k)})
+        row["_common_days"] = {k: (call_field_at(raw, k)[:10] if call_owns_field(raw, k)
+                                   else str(raw["bot_visit_at"] or "")[:10]) for k in COMMON_RESULT_KEYS}
+        row["_common_day"] = (str(raw["bot_call_at"])[:10] if call_is_latest(raw)
+                              else str(raw["bot_visit_at"] or "")[:10])
         result.append(row)
     return result
 
@@ -7020,6 +7229,7 @@ def import_grid(
     require_source_proof: bool = False,
     full_registry: bool = False,
     authoritative_employees: list[str] | None = None,
+    import_profile: str = "hard",
     preview_only: bool = False,
     restore_manual_unassigned: bool = False,
     replace_current_visit_comments: bool = False,
@@ -7314,6 +7524,13 @@ def import_grid(
         return report
 
     authoritative_by_key: dict[str, str] = {}
+    if import_profile not in ("hard", "soft", "both"):
+        report.update(blocked=True, error="Неизвестный профиль импорта: Хард / Софт / оба")
+        return report
+    report["import_profile"] = import_profile
+    owner_keys = (["responsible"] if import_profile == "hard" else
+                  ["responsible_soft"] if import_profile == "soft" else
+                  ["responsible", "responsible_soft"])
     if full_registry:
         if not isinstance(authoritative_employees, list) or not authoritative_employees:
             report["blocked"] = True
@@ -7694,6 +7911,10 @@ def import_grid(
             continue
         if _PAID_MONTH_RX.fullmatch(title):
             paid_month_cols.append(index)
+    if import_profile in ("soft", "both") and "responsible_soft" not in soft_cols.values():
+        report["blocked"] = True
+        report["error"] = "Для импорта Софта нужна колонка «ответственный Сотрудник СОФТ»."
+        return report
     # Колонки отзыва, которые РЕАЛЬНО есть в этой книге. Пустая ячейка такой
     # колонки — «отзыва нет», отсутствие колонки — «не знаем».
     recall_owned = set(recall_cols.values())
@@ -7770,8 +7991,7 @@ def import_grid(
             # responsible: ключа нет — прежнее значение не трогаем.
             val = raw[index] if index < len(raw) else None
             text = str(val).strip() if val is not None else ""
-            if text:
-                data[target] = text
+            data[target] = text
         for index, target in recall_cols.items():
             val = raw[index] if index < len(raw) else None
             text, is_set = _recall_cell(val, is_date=(target == "recall_date"))
@@ -7898,11 +8118,11 @@ def import_grid(
 
     if full_registry:
         outside_scope = sorted({
-            str(data.get(WORKBOOK_RESPONSIBLE_KEY) or "").strip()
-            for data in grouped.values()
-            if str(data.get(WORKBOOK_RESPONSIBLE_KEY) or "").strip()
-            and _name_key(data.get(WORKBOOK_RESPONSIBLE_KEY))
-            not in authoritative_by_key
+            str(data.get(key) or "").strip()
+            for data in grouped.values() for key in owner_keys
+            if any(str(data.get(k) or "").strip() for k in owner_keys)
+            and not any(_name_key(data.get(k)) in authoritative_by_key for k in owner_keys)
+            and str(data.get(key) or "").strip()
         })
         if outside_scope:
             report["blocked"] = True
@@ -7939,11 +8159,12 @@ def import_grid(
         # address/phone нужны person_key: без даты рождения человек различается
         # именно по ним, иначе однофамильцы склеятся (см. person_key).
         existing = {r["contract_id"]: r for r in conn.execute(
-            "SELECT contract_id, client, birth_date, responsible, address, phone, "
+            "SELECT contract_id, client, birth_date, responsible, responsible_soft, address, phone, "
             "visit_comment, historical_visit_comment, "
             "unassigned_from, unassigned_reason, recall_prev_reason, "
             "recall_date, recall_reason, recall_transfer, recall_withdrawn, "
-            "bot_visit_at, bot_visit_data, office_edit_data, visit_value_log "
+            "bot_visit_at, bot_visit_data, office_edit_data, visit_value_log, "
+            "bot_call_at, bot_call_data, call_office_data, call_value_log, bot_visit_event_at "
             "FROM clients")}
         # Кому обогащение уже возило комментарий выезда. Единственный честный
         # ответ на вопрос «есть ли этот текст в книгах и в общем реестре»:
@@ -7955,7 +8176,7 @@ def import_grid(
         # Журнал закреплений: (КД, прежний, новый, заявленная дата закрепления).
         # Пишется одной пачкой после разбора — в ТОЙ ЖЕ транзакции, что и смена
         # (preview откатывает события вместе со всем импортом).
-        assignment_events: list[tuple[str, str, str, str | None]] = []
+        assignment_events: list[tuple[str, str, str, str | None, str]] = []
         # Визит — на человека: принятая правка разносится по всем его договорам
         # с тем же визитом, иначе карточка/дайджест (первый КД человека) её не
         # увидят, а файлы разъедутся построчно.
@@ -8149,6 +8370,70 @@ def import_grid(
                     data[key] = None
             owners[cid] = "" if detached \
                 else str(incoming_resp or prev_resp or "").strip()
+            # Дата перезвона не является датой факта. Офисная правка звонка
+            # допустима только после подтверждённой доставки текущего результата
+            # в книгу и эха хотя бы одного софт-поля. Старый master молчит.
+            # Предыдущая строка могла уже применить правку того же звонка
+            # ко второму КД человека. Читаем этот overlay внутри транзакции.
+            call_row = conn.execute("SELECT * FROM clients WHERE contract_id=?", (cid,)).fetchone() if row0 is not None else None
+            call_snapshot = bot_call_snapshot(call_row) if call_row is not None else None
+            call_protected = set()
+            if call_snapshot:
+                call_keys = set(SOFT_SNAPSHOT_KEYS[:3])
+                call_keys.update(k for k in COMMON_RESULT_KEYS if call_owns_field(call_row, k))
+                call_protected = call_keys
+                delivered = {r["field_key"]: r for r in conn.execute(
+                    "SELECT * FROM enrichment_ledger WHERE contract_id=?", (cid,))}
+                anchored = any(k in delivered and
+                               delivered[k]["visit_date"] == str(call_row["bot_call_at"])[:10] and
+                               str(delivered[k]["value"] or "") == str(call_snapshot.get(k) or "") and
+                               str(data.get(k) or "") == str(call_snapshot.get(k) or "") and
+                               str(data.get(k) or "").strip()
+                               for k in SOFT_SNAPSHOT_KEYS[:3])
+                edits = {}
+                for key in call_keys:
+                    value = data.pop(key, None)
+                    if value in (None, "") or str(value) == str(call_snapshot.get(key) or ""):
+                        continue
+                    known_call = json.loads(call_row["bot_call_data"] or "{}")
+                    if str(value) == str(known_call.get(key) or "") or str(value) in _call_value_log(call_row).get(key, []):
+                        continue
+                    if anchored:
+                        if key in FORM_TYPED_KEYS:
+                            value = canon_form_value(key, value)
+                        elif key in BOT_DROPDOWN_KEYS:
+                            value = _canon_option(key, str(value))
+                        if value is not None:
+                            edits[key] = value
+                    else:
+                        report["protected_cells"] += 1
+                        protected_cids.add(cid)
+                if edits:
+                    office_cids.add(cid)
+                    siblings = conn.execute("SELECT * FROM clients WHERE responsible_soft=? AND bot_call_at=?",
+                                            (call_row["responsible_soft"], call_row["bot_call_at"])).fetchall()
+                    for sibling in siblings:
+                        scid = sibling["contract_id"]
+                        if person_key(sibling) != person_key(call_row):
+                            continue
+                        if verified_source["scope"] is not None and scid not in grouped:
+                            continue
+                        sibling_edits = {k:v for k,v in edits.items()
+                                         if k not in COMMON_RESULT_KEYS or call_owns_field(sibling,k)}
+                        if not sibling_edits:
+                            continue
+                        merged_call = {**(bot_call_snapshot(sibling) or {}), **sibling_edits}
+                        sets = ', '.join(f'"{k}"=?' for k in sibling_edits)
+                        conn.execute(f"UPDATE clients SET {sets}, call_office_data=?, call_value_log=? WHERE contract_id=?",
+                            (*sibling_edits.values(),
+                             json.dumps({"event_at": sibling["bot_call_at"], "fields": merged_call}, ensure_ascii=False),
+                             json.dumps(_call_log_add(_call_value_log(sibling), merged_call), ensure_ascii=False), scid))
+                        report["office_applied"].setdefault(scid, {}).update(sibling_edits)
+                    # Эти значения уже прошли свой шлюз, Хард их повторно не судит.
+                    for key, value in edits.items():
+                        data[key] = value
+                        report["office_cells"] += 1
+                        report["office_by_key"][key] = report["office_by_key"].get(key, 0) + 1
             # После подтверждённого визита очередной импорт может обновлять долг,
             # адрес и прочие поля источника, а поля визита — только через якорный
             # шлюз (см. докстринг): совпавшая «Дата выезда» доказывает, что файл
@@ -8191,6 +8476,8 @@ def import_grid(
 
                 candidates = {}
                 for key in OFFICE_DIRECT_EDIT_KEYS:
+                    if key in call_protected:
+                        continue
                     # Промис-колонки офис ведёт и ДО визита (софт-линия): пока
                     # бот по ключу не высказался, значение файла идёт обычным
                     # upsert'ом — office_cells/protected_cells не растут, и
@@ -8400,11 +8687,17 @@ def import_grid(
             # всех шлюзов (канонизация имени, ручное снятие, офисные правки).
             prev_owner = (existing[cid]["responsible"] or "").strip() \
                 if cid in existing else ""
-            new_owner = str(data.get("responsible") or "").strip()
+            new_owner = str(data.get("responsible", prev_owner) or "").strip()
             if new_owner != prev_owner:
                 assignment_events.append(
                     (cid, prev_owner, new_owner,
-                     str(data.get("assign_date") or "")[:10] or None))
+                     str(data.get("assign_date") or "")[:10] or None, "hard"))
+            if "responsible_soft" in data:
+                prev_soft = str(existing[cid]["responsible_soft"] or "").strip() if cid in existing else ""
+                new_soft = str(data["responsible_soft"] or "").strip()
+                if new_soft != prev_soft:
+                    assignment_events.append((cid, prev_soft, new_soft,
+                        str(data.get("assign_date_soft") or "")[:10] or None, "soft"))
             slot_values = extra_values.get(cid) or {}
             if extra_cols:
                 # Пустая ячейка дополнительной колонки — это «значения больше
@@ -8478,7 +8771,7 @@ def import_grid(
             for employee in sorted(manual_by_employee, key=_name_key)
         }
         auto_unassigned_effect: list[tuple[str, str]] = []
-        if full_registry:
+        if full_registry and import_profile in ("hard", "both"):
             # Отсутствие считается только по каноническим КД, разобранным тем же
             # preflight выше, и только внутри явно выбранных сотрудников. Строки,
             # визиты, фото и долги не удаляются.
@@ -8499,9 +8792,19 @@ def import_grid(
                 report["auto_unassigned"] += changed
                 if changed:
                     auto_unassigned_effect.append((cid, former))
-        # Снятия полного среза — тоже события журнала закреплений.
-        assignment_events.extend(
-            (cid, former, "", None) for cid, former in auto_unassigned_effect)
+                    assignment_events.append((cid, former, "", None, "hard"))
+        if full_registry and import_profile in ("soft", "both"):
+            for cid, old in existing.items():
+                former = str(old["responsible_soft"] or "").strip()
+                if not former or _name_key(former) not in authoritative_by_key or cid in grouped:
+                    continue
+                changed = conn.execute("UPDATE clients SET responsible_soft='' "
+                                       "WHERE contract_id=? AND responsible_soft=?",
+                                       (cid, former)).rowcount
+                report["auto_unassigned"] += changed
+                if changed:
+                    auto_unassigned_effect.append((cid, "Софт: " + former))
+                    assignment_events.append((cid, former, "", None, "soft"))
         effect_rows = [
             {"contract_id": cid, "employee": employee}
             for cid, employee in sorted(auto_unassigned_effect)
@@ -8529,19 +8832,19 @@ def import_grid(
         if assignment_events:
             today_iso = date.today().isoformat()
             now_iso = datetime.now().isoformat(timespec="seconds")
-            for cid, prev_owner, new_owner, claimed in assignment_events:
+            for cid, prev_owner, new_owner, claimed, profile in assignment_events:
                 kind = ("transfer" if prev_owner and new_owner
                         else "assign" if new_owner else "removed")
                 prev_window = conn.execute(
                     "SELECT MAX(window_to) FROM assignment_events "
-                    "WHERE contract_id=? AND window_to<?", (cid, today_iso)
+                    "WHERE contract_id=? AND profile=? AND window_to<?", (cid, profile, today_iso)
                 ).fetchone()[0]
                 conn.execute(
                     "INSERT OR IGNORE INTO assignment_events (contract_id, "
                     "employee, prev_employee, kind, window_to, window_from, "
-                    "claimed_at, source, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    "claimed_at, source, created_at, profile) VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (cid, new_owner, prev_owner, kind, today_iso, prev_window,
-                     claimed, source_kind, now_iso))
+                     claimed, source_kind, now_iso, profile))
             report["assignment_events"] = len(assignment_events)
         # --- Отзыв: счётчики и digest ----------------------------------------
         # «recalled» всегда ноль: колонки отзыва договор не открепляют.
@@ -8726,7 +9029,7 @@ def reset_visits() -> dict:
         n = conn.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
         conn.execute(f"UPDATE clients SET {sets}, bot_visit_at=NULL, "
                      f"bot_visit_data=NULL, office_edit_data=NULL, "
-                     f"visit_value_log=NULL, photos_count=0, visits_count=0")
+                     f"visit_value_log=NULL, bot_visit_event_at=NULL, photos_count=0, visits_count=0")
         # Водяной знак для дедупа уведомлений: строки visits намеренно переживают сброс
         # (на них держатся карта дня и активность), но выезд, закрытый ПОСЛЕ сброса,
         # не должен считаться повтором вчерашнего — иначе первая же отбивка новой

@@ -49,7 +49,9 @@ async function importTab(el: HTMLElement) {
   if (warn.length) warn.push("Точные числа пульт покажет в предпросмотре до записи.");
   el.innerHTML = `${note("Общий реестр: опубликованный master или утверждённое тестовое подмножество. Личные ФИО.xlsb сюда не загружаются. Сначала предпросмотр — запись отдельной кнопкой.")}
     <div class="toolbar" style="margin-top:12px"><button class="btn primary" data-pick>Выбрать реестр…</button><span class="muted" id="imp-cap">${esc(book?.caption || "")}</span></div>
-    ${book ? `<div class="toolbar"><span class="muted" style="font-size:13.5px">Кого грузить:</span>
+    ${book ? `<div class="toolbar"><span class="muted" style="font-size:13.5px">Тип сотрудников:</span>
+        <select class="input" data-profile style="width:auto">${[["hard","Хард"],["soft","Софт"],["both","Оба типа"]].map(([k,v])=>`<option value="${k}" ${book.profile===k?'selected':''}>${v}</option>`).join("")}</select>
+        <span class="muted" style="font-size:13.5px">Кого грузить:</span>
         <button class="btn small" data-sel="none">снять</button><button class="btn small" data-sel="existing">есть в БД</button><button class="btn small" data-sel="all">все</button>
         <span class="spacer"></span><span class="muted" style="font-size:13px">отмечено ${n(st.sel.size)} из ${n(book.employees.length)}</span></div>
       <div class="grid2" style="max-height:340px;overflow:auto;border-top:var(--lw) solid var(--line)">${book.employees.map((e: any) => `<label class="list-row" style="cursor:pointer;padding:8px 4px">
@@ -76,9 +78,13 @@ async function importTab(el: HTMLElement) {
     try {
       st.imp = await job("/reg/pick", { path }, (s) => { cap.textContent = s; });
     } catch (e) {
-      st.imp = null; cap.textContent = `Файл не разобран: ${(e as Error).message}. Если офис переименовал колонку — вкладка «Колонки реестра».`; return;
+      st.imp = null; cap.textContent = `Файл не разобран: ${(e as Error).message}`; return;
     }
     st.sel = new Set(st.imp.selected); st.full = false; st.restore = false; st.comments = false; invalidate(); redraw();
+  }));
+  el.querySelector<HTMLSelectElement>("[data-profile]")?.addEventListener("change", guard(async () => {
+    st.imp=await local("/reg/select", {profile:(el.querySelector("[data-profile]") as HTMLSelectElement).value});
+    st.sel=new Set(st.imp.selected); st.full=false; invalidate(); redraw();
   }));
   el.querySelectorAll<HTMLButtonElement>("[data-sel]").forEach((b) => b.addEventListener("click", guard(async () => {
     const r = await local("/reg/select", { mode: b.dataset.sel, full: st.full });
@@ -124,7 +130,7 @@ async function enrichTab(el: HTMLElement) {
   if (!st.since && !st.until) { st.since = st.enr.since || ""; st.until = st.enr.until || ""; }
   const e = st.enr;
   const cols = e.conflict_columns as [string, string][];
-  el.innerHTML = `${note("Точечно переносит доказанные выезды из приложения в личные ФИО.xlsb: пишутся только ячейки с доказательством визита, чужие правки не трогаются. Сначала проверка, запись — отдельной кнопкой.")}
+  el.innerHTML = `${note("Переносит сохраненные визиты и звонки в активные личные книги Хард и Софт. В каждой папке должен быть один рабочий .xlsb; имя может быть любым. Правки книги защищены реестром доставки. Сначала проверка, запись — отдельной кнопкой.")}
     <div class="toolbar" style="margin-top:12px"><button class="btn" data-base>Папка с республиками…</button><span class="muted">${esc(e.base ? "база: " + e.base : "базовая папка не выбрана")}</span>
       <span class="spacer"></span><button class="btn primary" data-scan ${e.base ? "" : "disabled"}>Проверить соответствия</button></div>
     <div class="toolbar"><span class="muted" style="font-size:13.5px">Выезды с</span><input class="input" id="e-since" value="${esc(st.since)}" placeholder="ДД.ММ.ГГГГ" style="width:130px">

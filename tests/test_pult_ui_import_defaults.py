@@ -78,3 +78,22 @@ def test_new_book_returns_the_toggles_to_defaults(app, window):
     assert window.imp_restore_manual_var.get() is True
     assert window.imp_replace_current_comments_var.get() is False
     assert "ПОЛНЫЙ СРЕЗ" in window.imp_warn.text()
+
+
+def test_python_profile_choice_changes_selection_and_invalidates_preview(app, window):
+    import db
+    from pult.core import registry_import as ri
+    fields = db.FIELDS
+    rows = [[f.title for f in fields] + ["ответственный Сотрудник СОФТ"],
+            [f.source for f in fields] + ["софт"],
+            [{"contract_id":"UI-PROFILE", "responsible":"Hard QA"}.get(f.key) for f in fields] + ["Soft QA"]]
+    window.imp_book = {"grid":rows, "scope":ri.scope_from_grid(rows), "file_sha256":"synthetic"}
+    ri.select_profile(window.imp_book, "hard")
+    window.imp_selected = {"hard qa"}
+    old_signature = window._imp_signature()
+    window._imp_preview_signature = old_signature
+    window.imp_profile.setCurrentIndex(1)
+    assert window.imp_book["import_profile"] == "soft"
+    assert window.imp_selected == {"soft qa"}
+    assert window._imp_preview_signature is None
+    assert window._imp_signature() != old_signature

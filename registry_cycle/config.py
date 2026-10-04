@@ -77,6 +77,7 @@ class FieldConfig:
     employee_header_fill_rgb: tuple[str, ...] = ("#FFFF00",)
     strict_header_color_validation: bool = False
     month_rollover: MonthRolloverConfig | None = None
+    soft_responsible_title: str = "ответственный Сотрудник СОФТ"
 
     def title_variants(self, title: str) -> set[str]:
         """Нормализованные написания колонки: каноническое + все алиасы.
@@ -803,6 +804,7 @@ def _parse_fields(raw: dict[str, Any]) -> FieldConfig:
         str(schema.get("key_title") or ""),
         str(schema.get("responsible_title") or ""),
         str(schema.get("previous_responsible_title") or ""),
+        "ответственный Сотрудник СОФТ",
     } - {""}
     registry_titles = {field.title for field in _hardbot_fields.FIELDS}
     unknown_alias_targets = (

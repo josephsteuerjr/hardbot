@@ -52,7 +52,7 @@ class ImportFlow:
     def _imp_signature(self) -> tuple:
         book = self.imp_book or {}
         return (
-            book.get("file_sha256"), tuple(sorted(self.imp_selected)),
+            book.get("file_sha256"), book.get("import_profile", "hard"), tuple(sorted(self.imp_selected)),
             _toggle(self, "imp_full_var"), _toggle(self, "imp_restore_manual_var"),
             _toggle(self, "imp_replace_current_comments_var"),
         )

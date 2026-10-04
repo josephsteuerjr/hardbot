@@ -448,6 +448,21 @@ def _visit_keys() -> list[str]:
     return list(_VISIT_ORDER) + tail
 
 
+def _payment_amount(value):
+    text = re.sub(r"[^\d.,-]", "", str(value or ""))
+    if not text:
+        return None
+    if "," in text and "." in text:
+        decimal = "," if text.rfind(",") > text.rfind(".") else "."
+        text = text.replace("." if decimal == "," else ",", "").replace(decimal, ".")
+    else:
+        text = text.replace(",", ".")
+    try:
+        return round(float(text), 2)
+    except ValueError:
+        return None
+
+
 def _person_payload(p: dict, on_date: str) -> dict:
     cs = p["contracts"]
     pick = _visit_pick(cs)
@@ -508,15 +523,33 @@ def _person_payload(p: dict, on_date: str) -> dict:
     # Сверка «слова против денег»: сумма приложенных чеков против последнего
     # платежа из реестра. Обе величины рядом — СБ видит расхождение одним
     # взглядом, не собирая его из двух экранов.
-    receipts = db.receipts_for([p["rep"]]).get(p["rep"], [])
+    receipts = [receipt for items in db.receipts_for([c["contract_id"] for c in cs]).values()
+                for receipt in items]
+    receipt_totals = {}
+    for receipt in receipts:
+        currency = receipt["currency"] or "без валюты"
+        receipt_totals[currency] = round(receipt_totals.get(currency, 0) + (receipt["amount"] or 0), 2)
+    payments = []
+    checks = []
     pay_date = None
     pay_sum = None
     for c in cs:
         d = db._as_date(str(_cell_of(c, "last_payment_date") or ""))
         if d and (pay_date is None or d > pay_date):
             pay_date = d
-            digits = re.sub(r"[^\d]", "", str(_cell_of(c, "last_payment_sum") or ""))
-            pay_sum = int(digits) if digits else None
+            pay_sum = _payment_amount(_cell_of(c, "last_payment_sum"))
+        if d:
+            amount = _payment_amount(_cell_of(c, "last_payment_sum"))
+            currency = debt.unit([_cell_of(c, "partner")])
+            payments.append({"contract_id": c["contract_id"], "date": d.isoformat(),
+                             "sum": amount, "currency": currency})
+            same_day = [r for r in receipts if r["contract_id"] == c["contract_id"] and r["paid_at"] == d.isoformat()]
+            comparable = [r for r in same_day if currency and r["currency"] == currency and r["amount"] is not None]
+            total = round(sum(r["amount"] for r in comparable), 2) if comparable else None
+            checks.append({"contract_id": c["contract_id"], "date": d.isoformat(), "currency": currency,
+                           "receipt_sum": total, "registry_sum": amount,
+                           "difference": round(total - amount, 2) if total is not None and amount is not None else None,
+                           "complete": False, "source": "last_payment_only"})
     return {
         "screen": "person",
         "rep": p["rep"], "client": p["client"], "n": p["n"],
@@ -534,7 +567,9 @@ def _person_payload(p: dict, on_date: str) -> dict:
         # Чеки об оплате, приложенные выездником (контур СБ): показать рядом с
         # «Оплачен» из слов — сверка «слова против платежа» теперь в одном месте.
         "receipts": receipts,
-        "receipts_total": round(sum(r["amount"] or 0 for r in receipts), 2),
+        "receipts_total": next(iter(receipt_totals.values())) if len(receipt_totals) == 1 else None,
+        "receipts_totals": [{"currency": unit, "sum": total} for unit, total in receipt_totals.items()],
+        "registry_payments": payments, "payment_checks": checks,
         "registry_pay": {"date": pay_date.isoformat() if pay_date else None,
                          "sum": pay_sum},
         "birth_date": rawv("birth_date"),
