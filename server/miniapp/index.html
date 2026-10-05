@@ -689,6 +689,7 @@ const I18N = {
     resultreq:"Сначала выберите результат выезда",
     offline:"Оффлайн",datao:"данные на",pend:"ждут отправки",sending:"Отправляю…",
     savedoff:"Сохранено — уйдёт при связи",queuedn:"в очереди",
+    savednogeo:"Сохранено без точки GPS",savedoffnogeo:"Сохранено без точки GPS — уйдёт при связи",
     photosending:"Отправляю фото — не закрывайте…",
     photoretake:"фото нужно переснять",photolost:"Фото не сохранилось — снимите его ещё раз",
     fromgallery:"Выбрать из галереи",
@@ -757,6 +758,7 @@ const I18N = {
     resultreq:"Avval chiqish natijasini tanlang",
     offline:"Oflayn",datao:"ma’lumot",pend:"yuboriladi",sending:"Yuborilmoqda…",
     savedoff:"Saqlandi — aloqa paydo bo‘lsa yuboriladi",queuedn:"navbatda",
+    savednogeo:"GPS nuqtasisiz saqlandi",savedoffnogeo:"GPS nuqtasisiz saqlandi — aloqa paydo bo‘lsa yuboriladi",
     photosending:"Rasm yuborilmoqda — yopmang…",
     photoretake:"rasmni qayta olish kerak",photolost:"Rasm saqlanmadi — qayta oling",
     fromgallery:"Galereyadan tanlash",
@@ -825,6 +827,7 @@ const I18N = {
     resultreq:"Аввал натиҷаи сафарро интихоб кунед",
     offline:"Офлайн",datao:"додаҳо аз",pend:"дар навбат",sending:"Фиристода мешавад…",
     savedoff:"Захира шуд — ҳангоми алоқа фиристода мешавад",queuedn:"дар навбат",
+    savednogeo:"Бе нуқтаи GPS захира шуд",savedoffnogeo:"Бе нуқтаи GPS захира шуд — ҳангоми алоқа фиристода мешавад",
     photosending:"Расм фиристода мешавад — пӯшед накунед…",
     photoretake:"расмро аз нав гирифтан лозим",photolost:"Расм захира нашуд — аз нав гиред",
     fromgallery:"Аз галерея интихоб",
@@ -1242,7 +1245,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=74;
+const SHELL_VERSION=75;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -3779,10 +3782,20 @@ async function waitPhotosSettled(rep){
 // палец успевает нажать ещё раз. Каждое нажатие — новый op_id, то есть отдельный выезд и
 // отдельная отбивка руководителю (в проде так набралось 34 записи по одному договору).
 let SAVING=false;
-// Точка для закрытия карточки: сначала быстрая попытка, затем — блокирующий
-// диалог с повторным запросом (askGeo без таймаута: системный диалог можно
-// читать сколько нужно). Отмена = остаться в карточке.
+// Обязательность приходит с сервера. Без настройки (в том числе в старом
+// offline-bootstrap) действует временный разрешающий режим. Точку пытаемся
+// получить до 4 секунд суммарно, даже если Telegram не вызывает callback.
+function visitGeoRequired(){ return (STATE.meta||{}).visitGeoRequired===true; }
 async function ensureVisitGeo(){
+  if(!visitGeoRequired()){
+    let timer;
+    try{
+      return await Promise.race([
+        grabGeo(4000,5000).catch(()=>null),
+        new Promise(r=>{ timer=setTimeout(()=>r(null),4000); }),
+      ]);
+    }finally{ clearTimeout(timer); }
+  }
   let g=await grabGeo(4000,5000);
   if(g) return g;
   while(true){
@@ -3818,15 +3831,12 @@ async function saveVisit(){
     toast(L().resultreq);
     return;
   }
-  // Без точки GPS выезд не сохраняется (слово Егора, 03.10.2026): повторный
-  // запрос — и всё. Заполненное не теряется: черновик продолжает писаться,
-  // карточка просто не закрывается, пока не появится координата.
-  const geo=await ensureVisitGeo();
-  if(!geo) return;
   SAVING=true;
   const btn=$("savebtn"); if(btn) btn.disabled=true;
   try{
     const rep=STATE.cur.rep, op_id=uuid();
+    const geo=await ensureVisitGeo();
+    if(!geo && visitGeoRequired()) return;
     // Сначала фото, потом карточка: иначе руководителю уйдёт «📸 без фото» по
     // визиту, снимок которого догрузится через пару секунд.
     const photos_pending=await waitPhotosSettled(rep);
@@ -3848,7 +3858,7 @@ async function saveVisit(){
     try{
       const j=await api("/api/save",{method:"POST",body:JSON.stringify(body)});
       STATE.online=true; STATE.cur=j.person; storeCard(j.person,rep).catch(()=>{});
-      finishSavedUI(rep, L().saved);
+      finishSavedUI(rep, geo?L().saved:L().savednogeo);
       // Визит сохранён, но поле сервер не принял (дата обещания за пределом,
       // нечитаемая сумма). Молчать нельзя: человек уедет с адреса уверенным,
       // что записал дату.
@@ -3863,7 +3873,7 @@ async function saveVisit(){
         opened_at:STATE.openedAt||occurred_at,
         form_version:FORM_VERSION, geo, pr, at:occurred_at});
       STATE.online=false; applyVisitLocally(rep, values);
-      finishSavedUI(rep, L().savedoff);
+      finishSavedUI(rep, geo?L().savedoff:L().savedoffnogeo);
     }
   } finally {
     SAVING=false;

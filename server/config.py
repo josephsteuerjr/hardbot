@@ -26,6 +26,12 @@ GROUP_CHAT_ID = _int_env("GROUP_CHAT_ID")
 _BIND_APPROVAL_ENV = (os.getenv("BIND_APPROVAL", "1") or "1").strip().lower()
 BIND_APPROVAL = _BIND_APPROVAL_ENV not in ("", "0", "false", "no", "off")
 
+# Временный режим: отсутствие GPS не мешает завершить карточку. Сбор гео и
+# оценка присутствия продолжаются. 1 возвращает блокирующий диалог в PWA.
+VISIT_GEO_REQUIRED = (os.getenv("VISIT_GEO_REQUIRED", "0") or "0").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
 
 def approval_required() -> bool:
     """Нужен ли аппрув. Если ADMIN_ID не задан — некому одобрять, поэтому НЕ требуем

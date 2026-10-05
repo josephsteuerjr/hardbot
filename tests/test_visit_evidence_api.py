@@ -237,8 +237,12 @@ def test_no_geo_at_all_is_nogeo(monkeypatch):
             "form_version": webmod.FORM_PROTOCOL_VERSION, "input_keys": ["call_status"],
             "occurred_at": now, "session_id": "sess-nogeo",
             "presence": [{"ts": now - 5000, "on": 0}]}
-    _post(body, monkeypatch)
-    assert _visit(CID_NEAR)["evidence_level"] == "nogeo"
+    response = _post(body, monkeypatch)
+    assert response.status == 200
+    row = _visit(CID_NEAR)
+    assert row["evidence_level"] == "nogeo"
+    assert row["visit_lat"] is None and row["visit_lon"] is None
+    assert row["dist_m"] is None and row["geo_far"] is None
 
 
 def test_draft_point_is_served_with_server_time(monkeypatch):

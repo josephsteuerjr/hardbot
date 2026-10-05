@@ -35,6 +35,7 @@ from aiohttp.abc import AbstractAccessLogger
 
 import addr_cis                       # разбор произвольного адреса для навигации
 import db
+import config
 import ops_panel
 import debt
 import geoindex                       # офлайн-справочник координат (без похода в сеть)
@@ -456,6 +457,7 @@ def _meta(lang: str) -> dict:
         # предлагает обновиться САМО. 04.08.2026 обновление приходилось объяснять
         # людям словами «закройте из списка задач», и до половины оно не дошло.
         "shellVersion": _shell_version(),
+        "visitGeoRequired": config.VISIT_GEO_REQUIRED,
         # Типизированные поля формы: клиент рисует по ним секцию обещания;
         # на контракте v2 список пуст и секции нет. Дату «сегодня» считает
         # СЕРВЕР: контейнер живёт по UTC, телефон — по +3/+5, и клиентская
@@ -751,6 +753,7 @@ async def _version(request: web.Request) -> web.Response:
     """Публичная версия без ПД и авторизации для пробуждённой старой PWA."""
     payload = {
         "shellVersion": _shell_version(),
+        "visitGeoRequired": config.VISIT_GEO_REQUIRED,
         "dataExchangeContract": DATA_EXCHANGE_CONTRACT,
     }
     if _is_drain(request):
