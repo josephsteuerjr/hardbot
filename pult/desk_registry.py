@@ -372,8 +372,9 @@ def enr_replay(body, *, admin, start_job, settings, **_):
 # --- выгрузки, период, отозванные -----------------------------------------------------------
 def exp_employees(body, *, admin, **_):
     stats = admin("GET", "/admin/stats")
-    rows = ri.merge_import_employees([], list(stats.get("employees") or []))
-    S["exp_db"] = list(stats.get("employees") or [])
+    S["exp_db"] = [*list(stats.get("employees") or []),
+                   *list(stats.get("soft_employees") or [])]
+    rows = ri.merge_import_employees([], S["exp_db"])
     return {"employees": [{"key": e["key"], "name": e["name"], "count": e.get("db_count") or 0} for e in rows]}
 
 

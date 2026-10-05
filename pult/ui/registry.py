@@ -206,7 +206,7 @@ class RegistrySection:
         exp = Card("Экспорт-слепок",
                    "Новый xlsx из БД сервера. Можно выгрузить весь реестр либо "
                    "только выбранных сотрудников и независимо ограничить строки "
-                   "доказанными выездами за период.")
+                   "выездами или звонками из приложения за период.")
         exp.add_row(label("Сотрудники:", "small"), None,
                     Button("снять", lambda: self._exp_all(False)),
                     Button("все", lambda: self._exp_all(True)), stretch=False)
@@ -214,7 +214,7 @@ class RegistrySection:
         self.exp_pick_frame.set_empty("Подключись к серверу, чтобы увидеть сотрудников из БД")
         self.exp_since = DateField()
         self.exp_until = DateField()
-        exp.add_row(label("Выезды с", "small"), self.exp_since, label("по", "small"),
+        exp.add_row(label("Результаты с", "small"), self.exp_since, label("по", "small"),
                     self.exp_until, Note("пусто = без ограничения", "tiny", wrap=False),
                     Button("Только сегодня", self._exp_today), spacing_before=4)
         exp.add_row(Button("Подготовить выгрузку…", self.do_export_full, kind="accent"),
@@ -410,6 +410,7 @@ class RegistrySection:
             self.imp_profile.set_current(("hard", "soft", "both").index(book["import_profile"]))
             self.imp_profile.blockSignals(False)
             self.db_employees = list(book.get("db_employees") or [])
+            self.db_soft_employees = list(book.get("db_soft_employees") or [])
             self.imp_selected = ri.restore_import_selection(book, self.settings)
             self.imp_full_var.set(False)
             self.imp_restore_manual_var.set(False)
@@ -831,7 +832,7 @@ class RegistrySection:
     def _render_export_employees(self):
         if not hasattr(self, "exp_pick_frame"):
             return
-        rows = ri.merge_import_employees([], self.db_employees)
+        rows = ri.merge_import_employees([], [*self.db_employees, *self.db_soft_employees])
         keys = {row["key"] for row in rows}
         old_keys = set(self._exp_vars)
         if not self._exp_initialized or (old_keys and self.exp_selected == old_keys):
@@ -848,7 +849,7 @@ class RegistrySection:
             return
         self.exp_list = CheckList(columns=2)
         self.exp_list.set_items(
-            [{"key": e["key"], "text": f"{e['name']} · {fmt_n(e.get('db_count') or 0)} дог.",
+            [{"key": e["key"], "text": f"{e['name']} · {fmt_n(e.get('db_count') or 0)} назнач.",
               "checked": e["key"] in self.exp_selected} for e in rows],
             on_toggle=self._exp_toggle)
         self._exp_vars = self.exp_list.checks

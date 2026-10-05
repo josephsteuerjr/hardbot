@@ -146,7 +146,7 @@ def write_markers_xlsx(path: str, rows: list[dict]) -> None:
 def export_request(employees: list[dict], selected: set[str],
                    since_text: str, until_text: str) -> dict:
     """Точный состав выгрузки: путь `/admin/export.json?mode=full…`, сотрудники
-    и окно доказанных выездов. `employees` — объединённый список из БД
+    и окно доказанных выездов/звонков. `employees` — объединённый список из БД
     (`registry_import.merge_import_employees([], db_employees)`)."""
     all_keys = {employee["key"] for employee in employees}
     picked = set(selected).intersection(all_keys)
@@ -184,7 +184,7 @@ def export_confirm_text(request: dict, rows_count: int) -> str:
     window = (
         f"с {request['visit_from'] or '…'} по {request['visit_to'] or '…'}"
         if request["visit_from"] or request["visit_to"]
-        else "без ограничения по дате выезда"
+        else "без ограничения по дате выезда или звонка"
     )
     return (f"Строк в выгрузке: {fmt_n(rows_count)}\n\n"
             f"Сотрудники: {employee_text}\nПериод: {window}\n\n"

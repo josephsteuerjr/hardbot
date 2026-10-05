@@ -240,10 +240,10 @@ def test_full_registry_is_an_explicit_flag_not_inferred_from_source_kind():
         imp_full_var = _BoolVar(False)
 
     probe = Probe()
-    assert pult_ui.Pult._imp_signature(probe)[2] is False
+    assert pult_ui.Pult._imp_signature(probe)[3] is False
 
     probe.imp_full_var = _BoolVar(True)
-    assert pult_ui.Pult._imp_signature(probe)[2] is True
+    assert pult_ui.Pult._imp_signature(probe)[3] is True
 
 
 def test_import_employee_list_is_union_of_file_and_database():

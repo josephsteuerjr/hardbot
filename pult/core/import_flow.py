@@ -224,7 +224,8 @@ class ImportFlow:
 
     # --- экспорт ----------------------------------------------------------------
     def _export_request(self) -> dict:
-        employees = self._merge_import_employees([], self.db_employees)
+        employees = self._merge_import_employees(
+            [], [*self.db_employees, *getattr(self, "db_soft_employees", [])])
         return export_request(employees, self.exp_selected,
                               self.exp_since.get(), self.exp_until.get())
 

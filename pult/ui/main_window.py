@@ -62,6 +62,7 @@ class Pult(QMainWindow, ImportFlow, DashboardSection, RegistrySection, PriorityS
         self.imp_book: dict = {}          # выбранная книга: путь, грид, вид источника
         self.imp_selected: set[str] = set()   # кого из сотрудников грузим
         self.db_employees: list[dict] = []    # фактические портфели последнего /stats
+        self.db_soft_employees: list[dict] = []
         self.exp_selected: set[str] = set()
         self._exp_vars: dict = {}
         self._exp_initialized = False
@@ -280,6 +281,7 @@ class Pult(QMainWindow, ImportFlow, DashboardSection, RegistrySection, PriorityS
         def done(d):
             self._set_conn(True, "подключено")
             self.db_employees = list(d.get("employees") or [])
+            self.db_soft_employees = list(d.get("soft_employees") or [])
             self._render_export_employees()
             self.render_stats(d)
             self._show_period(d.get("period") or {})

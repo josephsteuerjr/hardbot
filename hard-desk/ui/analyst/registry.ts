@@ -279,12 +279,12 @@ async function exportTab(el: HTMLElement) {
   }
   const per = await local("/reg/period");
   el.innerHTML = `<div class="section"><div class="section-head"><h2 class="section-title">Экспорт-слепок</h2></div>
-      ${note("Новый xlsx из базы сервера: весь реестр либо выбранные сотрудники; строки можно ограничить доказанными выездами за период.")}
+      ${note("Новый xlsx из базы сервера: весь реестр либо выбранные сотрудники; строки можно ограничить выездами или звонками из приложения за период.")}
       <div class="toolbar" style="margin-top:10px"><button class="btn small" data-x="none">снять</button><button class="btn small" data-x="all">все</button>
-        <span class="spacer"></span><span class="muted" style="font-size:13.5px">Выезды с</span><input class="input" id="x-since" value="${esc(st.expSince)}" placeholder="ДД.ММ.ГГГГ" style="width:130px">
+        <span class="spacer"></span><span class="muted" style="font-size:13.5px">Результаты с</span><input class="input" id="x-since" value="${esc(st.expSince)}" placeholder="ДД.ММ.ГГГГ" style="width:130px">
         <span class="muted" style="font-size:13.5px">по</span><input class="input" id="x-until" value="${esc(st.expUntil)}" placeholder="ДД.ММ.ГГГГ" style="width:130px"></div>
       <div class="grid2" style="max-height:260px;overflow:auto;border-top:var(--lw) solid var(--line)">${st.expEmps.map((x: any) => `<label class="list-row" style="cursor:pointer;padding:7px 4px">
-        <input type="checkbox" data-xk="${esc(x.key)}" ${st.expSel.has(x.key) ? "checked" : ""}><span class="grow">${esc(x.name)} <span class="sub">· ${n(x.count)} дог.</span></span></label>`).join("")}</div>
+        <input type="checkbox" data-xk="${esc(x.key)}" ${st.expSel.has(x.key) ? "checked" : ""}><span class="grow">${esc(x.name)} <span class="sub">· ${n(x.count)} назнач.</span></span></label>`).join("")}</div>
       <div class="toolbar" style="margin-top:12px"><button class="btn primary" data-export>Подготовить выгрузку…</button><button class="btn" data-markers>Метки курьеров…</button><span class="muted" id="x-log"></span></div></div>
     <div class="section"><div class="section-head"><h2 class="section-title">Период выгрузки</h2></div>
       ${note("По дате закрепления: выездники видят только клиентов из этого окна. Пусто — видны все.")}

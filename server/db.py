@@ -6642,8 +6642,8 @@ def registry_rows(
 
     ``employees=None`` сохраняет прежний полный экспорт, включая строки без
     ответственного. Переданный список ограничивает выгрузку только выбранными
-    сотрудниками. Окно дат относится к доказанному ``bot_visit_at`` и потому не
-    принимает импортную/ручную ``visit_date`` за состоявшийся визит.
+    сотрудниками в любом профиле. Окно дат относится к доказанным выездам
+    и звонкам; импортные даты и будущий перезвон не считаются фактом.
     """
     if isinstance(employees, str):
         employees = [employees]
@@ -6665,17 +6665,21 @@ def registry_rows(
         if (
             employee_keys is not None
             and _name_key(row["responsible"]) not in employee_keys
+            and _name_key(row["responsible_soft"]) not in employee_keys
         ):
             continue
+        visit = _merged_visit(row)
+        call = bot_call_snapshot(row)
         if since or until:
-            visit_date = _as_date(row["bot_visit_at"])
-            if not row["bot_visit_data"] or visit_date is None:
-                continue
-            if since and visit_date < since:
-                continue
-            if until and visit_date > until:
+            fact_days = [day for snapshot, timestamp in (
+                (visit, row["bot_visit_at"]), (call, row["bot_call_at"]))
+                if snapshot is not None and
+                (day := _as_date(str(timestamp or "")[:10])) is not None]
+            if not any((since is None or day >= since) and
+                       (until is None or day <= until) for day in fact_days):
                 continue
         out = {f.key: row[f.key] for f in FIELDS}
+        out["responsible_soft"] = row["responsible_soft"]
         # Поля визита — из ДОКАЗАННОГО снимка, а не из сырых колонок. Сырые
         # хранят копию последнего импорта: у 440 из 890 договоров с визитом там
         # лежит офисное «Не обработан», потому что офис по этому кейсу ещё не
@@ -6683,12 +6687,10 @@ def registry_rows(
         # (они читают снимок), а полная выгрузка — импортную копию, и файл,
         # собранный из неё, затирал живые статусы дефолтом. Обогащение так
         # делало всегда (enrichment_rows), выгрузка — нет.
-        visit = _merged_visit(row)
         if visit:
             for key in BOT_VISIT_KEYS:
                 if key in out and key in visit:
                     out[key] = visit[key]
-        call = bot_call_snapshot(row)
         if call:
             out.update({k: v for k, v in call.items()
                         if k not in COMMON_RESULT_KEYS or call_owns_field(row, k)})
