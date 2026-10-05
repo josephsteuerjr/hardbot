@@ -20,6 +20,7 @@ from pathlib import Path
 import enrich
 import razbros
 from . import header_map
+from registry_cycle.normalize import personal_workbooks
 
 BACKUP_FOLDER = "!! Обогащение из БД"
 RECEIPTS_FOLDER = "_квитанции"
@@ -110,17 +111,15 @@ def preview_lines(results: list[dict]) -> list[str]:
 
 # --- подбор файлов ----------------------------------------------------------
 def personal_files(entries, emp) -> list[Path]:
-    """По одной активной книге в папке сотрудника, независимо от имени файла.
-    Несколько рабочих книг требуют решения оператора; ~времянки Excel — мимо.
-
-    Страховочные копии «(до обогащения …)» / «(до разброса …)» / «(до починки …)»
-    тоже мимо: подхватить копию вместо живого файла — значит обогатить или
-    импортировать данные недельной давности."""
+    """ФИО.xlsb: посторонние, датированные и резервные книги не участвуют."""
     files: list[Path] = []
     for e in entries:
         folder = e["path"]
-        xs = [p for p in sorted(folder.glob("*.xlsb"))
-              if not p.name.startswith("~") and not razbros.is_backup_copy(p.name)]
+        candidates = [p for p in folder.iterdir() if p.is_file() and p.suffix.casefold() == '.xlsb'
+                      and not p.name.startswith('~') and not razbros.is_backup_copy(p.name)]
+        xs = personal_workbooks(candidates, emp)
+        if not xs:
+            xs = personal_workbooks(candidates, folder.name)
         if len(xs) > 1:
             raise ValueError(f"В папке {folder} несколько активных .xlsb: "
                              + ", ".join(p.name for p in xs))

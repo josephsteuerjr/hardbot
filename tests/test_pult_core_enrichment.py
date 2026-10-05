@@ -20,6 +20,8 @@ def test_personal_files_prefers_named_book_and_skips_copies(tmp_path):
     folder = tmp_path / "РТ" / "Душанбе" / "Иванов Иван"
     folder.mkdir(parents=True)
     (folder / "Иванов Иван.xlsb").write_bytes(b"")
+    (folder / "Иванов Иван 02.10.2026.xlsb").write_bytes(b"old")
+    (folder / "Копия Иванов Иван.xlsb").write_bytes(b"old")
     (folder / "Иванов Иван (до обогащения 01.08 10-00).xlsb").write_bytes(b"")
     (folder / "~$Иванов Иван.xlsb").write_bytes(b"")
     files = en.personal_files([{"path": folder}], "Иванов Иван")
@@ -29,7 +31,17 @@ def test_personal_files_prefers_named_book_and_skips_copies(tmp_path):
     other.mkdir(parents=True)
     (other / "портфель.xlsb").write_bytes(b"")
     (other / "портфель (до разброса 02.08 09-00).xlsb").write_bytes(b"")
-    assert en.personal_files([{"path": other}], "Петров Пётр") == [other / "портфель.xlsb"]
+    assert en.personal_files([{"path": other}], "Петров Пётр") == []
+    (other / 'Петров.xlsb').write_bytes(b'')
+    assert en.personal_files([{"path": other}], "Петров Пётр") == [other / 'Петров.xlsb']
+
+
+def test_personal_files_only_duplicate_normalized_fio_is_ambiguous(tmp_path):
+    import pytest
+    (tmp_path / 'Иванов Иван.xlsb').write_bytes(b'')
+    (tmp_path / 'Иванов  Иван.xlsb').write_bytes(b'')
+    with pytest.raises(ValueError, match='несколько активных'):
+        en.personal_files([{'path': tmp_path}], 'Иванов Иван')
 
 
 class _Split(dict):

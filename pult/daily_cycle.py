@@ -202,22 +202,11 @@ def folder_map(base: str | None):
 
 
 def personal_files(entries, employee: str) -> list[Path]:
-    """Личные реестры сотрудника: ФИО.xlsb, иначе файл по имени папки.
-    Времянки Excel (~$…) и страховочные копии «(до …)» не берём — это не реестр,
-    а обогатить старую копию вместо живого файла хуже, чем не обогатить вовсе."""
-    files: list[Path] = []
-    for e in entries:
-        folder = e["path"]
-        cands = [folder / f"{razbros.sanitize_filename(employee)}.xlsb",
-                 folder / f"{folder.name}.xlsb"]
-        found = next((c for c in cands if c.exists()), None)
-        if not found:
-            found = next((p for p in sorted(folder.glob("*.xlsb"))
-                          if not p.name.startswith("~")
-                          and not razbros.is_backup_copy(p.name)), None)
-        if found and found not in files:
-            files.append(found)
-    return files
+    """Тот же подбор ФИО.xlsb, что и в ручном обогащении."""
+    from core.bootstrap import ensure_paths
+    ensure_paths()
+    from core.enrichment import personal_files as select_personal_files
+    return select_personal_files(entries, employee)
 
 
 def step_export(settings: dict, base: str | None, dry: bool, log) -> str:

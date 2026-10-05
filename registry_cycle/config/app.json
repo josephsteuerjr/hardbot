@@ -46,6 +46,7 @@
     ],
     "group_mode": "all_except_ignored",
     "portfolio_layout": "root/group/employee/*.xlsb",
+    "personal_filename_policy": "employee_name",
     "backup_name_prefixes": [
       "~",
       "Копия "

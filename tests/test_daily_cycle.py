@@ -6,6 +6,17 @@ import pytest
 from pult import daily_cycle
 
 
+def test_daily_cycle_selects_fio_book_without_arbitrary_fallback(tmp_path):
+    folder = tmp_path / 'Сотрудник'
+    folder.mkdir()
+    dated = folder / 'Сотрудник 02.10.2026.xlsb'
+    dated.write_bytes(b'old')
+    assert daily_cycle.personal_files([{'path': folder}], 'Сотрудник') == []
+    active = folder / 'Сотрудник.xlsb'
+    active.write_bytes(b'current')
+    assert daily_cycle.personal_files([{'path': folder}], 'Сотрудник') == [active]
+
+
 def test_cell_json_makes_calamine_dates_serializable():
     values = [
         daily_cycle._cell_json(date(2026, 7, 27)),

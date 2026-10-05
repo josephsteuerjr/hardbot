@@ -118,6 +118,7 @@ class AppConfig:
     month_names: dict[int, str]
     portfolio_roots: tuple[PortfolioRoot, ...]
     portfolio_layout: str
+    personal_filename_policy: str
     group_discovery_mode: str
     profile_detection_mode: str
     discovery_audit_mode: str
@@ -447,6 +448,9 @@ def _parse_app(raw: dict[str, Any]) -> AppConfig:
             "discovery.portfolio_layout должен быть "
             f"{SUPPORTED_PORTFOLIO_LAYOUT!r}, получено {portfolio_layout!r}"
         )
+    personal_filename_policy = str(discovery.get('personal_filename_policy', 'employee_name')).strip()
+    if personal_filename_policy != 'employee_name':
+        raise ConfigurationError('discovery.personal_filename_policy должен быть employee_name')
     group_discovery_mode = str(
         discovery.get("group_mode", "configured")
     ).strip().casefold()
@@ -688,6 +692,7 @@ def _parse_app(raw: dict[str, Any]) -> AppConfig:
         month_names=month_names,
         portfolio_roots=tuple(roots),
         portfolio_layout=portfolio_layout,
+        personal_filename_policy=personal_filename_policy,
         group_discovery_mode=group_discovery_mode,
         profile_detection_mode=profile_detection_mode,
         discovery_audit_mode=discovery_audit_mode,

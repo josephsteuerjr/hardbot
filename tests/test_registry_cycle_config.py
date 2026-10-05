@@ -198,6 +198,7 @@ def test_direction_contract_cannot_be_silently_changed(
             [".xlsx"],
             "active_extensions",
         ),
+        ('discovery', 'personal_filename_policy', 'any_name', 'personal_filename_policy'),
         (
             "safety",
             "block_unconfigured_groups_with_files",

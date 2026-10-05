@@ -8,6 +8,7 @@ from pathlib import Path
 from .config import ConfigBundle, GroupConfig
 from .models import DiscoveryReport, Issue, ManifestEntry
 from .profile_detection import WORKBOOK_PROFILE
+from .normalize import personal_workbooks
 
 
 _KNOWN_EXCEL_WORKBOOK_EXTENSIONS = frozenset({
@@ -526,13 +527,20 @@ def _scan_group(
 
     empty_folders = 0
     for employee_folder in employee_folders:
-        active = _active_files(
+        candidates = _active_files(
             employee_folder,
             bundle.app.active_extensions,
             backup_prefixes,
             unreadable,
         )
         if _employee_audit_incomplete(employee_folder, unreadable):
+            continue
+        active = personal_workbooks(candidates, employee_folder.name)
+        if candidates and not active:
+            report.issues.append(Issue('error', 'personal_workbook_missing',
+                f'нет рабочей книги {employee_folder.name}.xlsb',
+                {'path': str(employee_folder), 'expected_name': employee_folder.name + '.xlsb',
+                 'files': [str(p) for p in candidates], 'profile': group.profile}))
             continue
         if not active:
             empty_folders += 1

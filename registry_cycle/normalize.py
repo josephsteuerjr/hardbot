@@ -6,6 +6,7 @@ import math
 import re
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 _ZERO_WIDTH = ("\u200b", "\u200c", "\u200d", "\ufeff")
@@ -30,6 +31,13 @@ def norm_name(value: Any) -> str:
         " ",
         str(value or "").replace("\u00a0", " ").strip(),
     ).casefold()
+
+
+def personal_workbooks(paths, employee: str) -> list[Path]:
+    """Рабочая книга называется по ФИО; даты и копии рядом не участвуют."""
+    expected = norm_name(re.sub(r'[\\/*?:"<>|]', '_', str(employee).strip()))
+    return sorted((p for p in paths if norm_name(p.stem) == expected),
+                  key=lambda p: p.name.casefold())
 
 
 def norm_key(value: Any) -> str:

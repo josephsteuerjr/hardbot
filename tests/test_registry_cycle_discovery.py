@@ -5,8 +5,7 @@
 * группы под корнем не настраиваются — участвуют все, кроме архивных;
 * профиль на этом шаге всегда «workbook»: настоящий определяется позже
   по столбцам самой книги, а не по имени папки или файла;
-* резервные копии отсекаются простыми префиксами «~» и «Копия », без регулярных
-  выражений.
+* рабочая книга называется по ФИО, даты и копии рядом не попадают в манифест.
 
 Два места ниже закрепляют поведение, которое молчит: книга глубже сотрудника
 и книга неподдерживаемого формата при штатных настройках просто не попадают
@@ -77,15 +76,10 @@ def test_only_the_single_active_workbook_of_an_employee_is_taken(tmp_path):
 
 
 def test_profile_is_not_decided_at_discovery_time(tmp_path):
-    """Профиль книги определяется по её столбцам, а не по имени файла.
-
-    Прежде префикс «СОФТ » в имени файла переключал профиль. Правило снято
-    намеренно: переименованная книга не должна менять состав столбцов, который
-    поедет сотруднику.
-    """
-    employee = tmp_path / "Город" / "Петров Пётр"
+    """Папка Soft не подменяет определение профиля по столбцам."""
+    employee = tmp_path / "Soft" / "Петров Пётр"
     employee.mkdir(parents=True)
-    (employee / "СОФТ Петров Пётр.xlsb").write_bytes(b"x")
+    (employee / "Петров Пётр.xlsb").write_bytes(b"x")
 
     report = discover(_bundle_for(tmp_path))
 
@@ -126,21 +120,34 @@ def test_archive_groups_are_skipped_entirely(tmp_path):
 # ── что останавливает работу ───────────────────────────────────────────────
 
 
-def test_two_active_workbooks_in_one_employee_folder_block(tmp_path):
-    """Ловушка переезда: старые сайдкар-копии рядом с книгой.
-
-    Прежде «Фамилия (до разброса 27.07 12-00).xlsb» отсекался регулярным
-    выражением. Теперь резервные копии узнаются только по префиксам «~»
-    и «Копия », поэтому оставшийся с июля файл считается вторым активным
-    и останавливает перенос до того, как что-либо будет записано.
-    """
+def test_copies_and_dated_workbooks_do_not_block_fio_book(tmp_path):
     employee = tmp_path / "Город" / "Иванов Иван"
     employee.mkdir(parents=True)
     (employee / "Иванов Иван.xlsb").write_bytes(b"active")
     (employee / "Иванов Иван (до разброса 27.07 12-00).xlsb").write_bytes(b"old")
+    (employee / 'Иванов Иван 02.10.2026.xlsb').write_bytes(b'old')
 
     report = discover(_bundle_for(tmp_path))
 
+    assert not report.blocked
+    assert [entry.path.name for entry in report.entries] == ['Иванов Иван.xlsb']
+
+
+def test_missing_fio_book_does_not_import_arbitrary_workbook(tmp_path):
+    employee = tmp_path / 'Город' / 'Иванов Иван'
+    employee.mkdir(parents=True)
+    (employee / 'Иванов Иван 02.10.2026.xlsb').write_bytes(b'old')
+    report = discover(_bundle_for(tmp_path))
+    assert report.blocked and not report.entries
+    assert any(item.code == 'personal_workbook_missing' for item in report.issues)
+
+
+def test_duplicate_normalized_fio_books_still_block(tmp_path):
+    employee = tmp_path / 'Город' / 'Иванов Иван'
+    employee.mkdir(parents=True)
+    (employee / 'Иванов Иван.xlsb').write_bytes(b'active')
+    (employee / 'Иванов  Иван.xlsb').write_bytes(b'other')
+    report = discover(_bundle_for(tmp_path))
     assert report.blocked
     issue = next(
         item for item in report.issues if item.code == "multiple_active_files"

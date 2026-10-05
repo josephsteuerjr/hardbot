@@ -167,8 +167,8 @@ def test_receipts_group_and_decimal_registry_amount(world):
 
 
 def test_ambiguous_personal_files_are_blocked(tmp_path):
-    (tmp_path/"first.xlsb").touch()
-    (tmp_path/"second.xlsb").touch()
+    (tmp_path/"Сотрудник.xlsb").touch()
+    (tmp_path/"Сотрудник .xlsb").touch()
     with pytest.raises(ValueError, match="несколько активных"):
         en.personal_files([{"path":tmp_path}], "Сотрудник")
 

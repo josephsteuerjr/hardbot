@@ -157,7 +157,7 @@ async function enrichTab(el: HTMLElement) {
   if (!st.since && !st.until) { st.since = st.enr.since || ""; st.until = st.enr.until || ""; }
   const e = st.enr;
   const cols = e.conflict_columns as [string, string][];
-  el.innerHTML = `${note("Переносит сохраненные визиты и звонки в активные личные книги Хард и Софт. В каждой папке должен быть один рабочий .xlsb; имя может быть любым. Правки книги защищены реестром доставки. Сначала проверка, запись — отдельной кнопкой.")}
+  el.innerHTML = `${note("Переносит сохраненные визиты и звонки в личные книги Хард и Софт. Рабочая книга называется ФИО.xlsb; копии и датированные файлы рядом не участвуют. Правки книги защищены реестром доставки. Сначала проверка, запись — отдельной кнопкой.")}
     <div class="toolbar" style="margin-top:12px"><button class="btn" data-base>Папка с республиками…</button><span class="muted">${esc(e.base ? "база: " + e.base : "базовая папка не выбрана")}</span>
       <span class="spacer"></span><button class="btn primary" data-scan ${e.base ? "" : "disabled"}>Проверить соответствия</button></div>
     <div class="toolbar"><span class="muted" style="font-size:13.5px">Результаты с</span><input class="input" id="e-since" value="${esc(st.since)}" placeholder="ДД.ММ.ГГГГ" style="width:130px">

@@ -143,18 +143,19 @@ def test_manager_call_card_api_checks_current_and_historical_owner(world, monkey
         read("C")
 
 
-def test_profile_comes_from_columns_and_ambiguous_employee_does_not_block_others(tmp_path, monkeypatch):
+def test_profile_comes_from_columns_and_only_fio_books_are_selected(tmp_path, monkeypatch):
     folders = {}
-    for name in ("Converted", "Ambiguous", "Regular"):
+    for name in ("Converted", "WithCopies", "Missing", "Regular"):
         folder = tmp_path / "City" / name
         folder.mkdir(parents=True)
         (folder / (name + ".xlsb")).write_bytes(b"test placeholder")
         folders[name.lower()] = [{"path": folder, "kind": "hard"}]
-    (folders["ambiguous"][0]["path"] / "duplicate.xlsb").write_bytes(b"test placeholder")
+    (folders["withcopies"][0]["path"] / "WithCopies 02.10.2026.xlsb").write_bytes(b"old copy")
+    (folders['missing'][0]['path'] / 'Missing.xlsb').rename(folders['missing'][0]['path'] / 'copy.xlsb')
     def header(path):
         return [["Номер КД / ID", "статус звонка софт", "Дата коммуникации"]] if "Converted" in path else [["Номер КД / ID", "Дата выезда"]]
     monkeypatch.setattr(en.header_map, "read_header_grid", header)
-    by_emp = {name.lower(): {"employee": name, "profile": profile, "filled": 1, "rows": []} for name, profile in (("Converted", "soft"), ("Ambiguous", "hard"), ("Regular", "hard"))}
+    by_emp = {name.lower(): {"employee": name, "profile": profile, "filled": 1, "rows": []} for name, profile in (("Converted", "soft"), ("WithCopies", "hard"), ("Missing", "hard"), ("Regular", "hard"))}
     matched, nofolder, errors = en.match_employees(by_emp, folders)
-    assert {m["employee"] for m in matched} == {"Converted", "Regular"}
-    assert not nofolder and "несколько активных" in errors[0]
+    assert {m["employee"] for m in matched} == {"Converted", "WithCopies", "Regular"}
+    assert not nofolder and 'Missing' in errors[0] and 'нет .xlsb' in errors[0]
