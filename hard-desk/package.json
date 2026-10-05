@@ -10,7 +10,8 @@
     "start": "node build.mjs && electron .",
     "icons": "electron tools/icons.cjs",
     "dist": "node build.mjs && node tools/dist.mjs",
-    "check": "tsc -p ."
+    "check": "tsc -p .",
+    "test:queue": "node tools/test-call-queue.cjs"
   },
   "devDependencies": {
     "@electron/packager": "20.3.0",

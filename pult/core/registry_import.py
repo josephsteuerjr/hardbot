@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import tempfile
 import uuid
 from pathlib import Path
@@ -116,6 +117,50 @@ def employee_note(emp: dict) -> str:
         + (f" · написаний в файле: {emp['variants']}"
            if int(emp.get("variants") or 1) > 1 else "")
     )
+
+
+def import_preferences(settings: dict) -> dict:
+    """Локальный выбор отдельно для сервера и учётной записи оператора."""
+    current = (settings.get("profiles") or {}).get(settings.get("active"), settings)
+    identity = str(current.get("url") or "").rstrip("/") + "\n" + str(current.get("device_token") or "")
+    key = hashlib.sha256(identity.encode()).hexdigest()
+    return settings.setdefault("registry_import_choices", {}).setdefault(key, {})
+
+
+def remember_import_selection(book: dict, selected, settings: dict) -> None:
+    available = {e["key"] for e in book.get("employees", [])}
+    book["_selected"] = sorted(set(selected) & available)
+    preferences = import_preferences(settings)
+    profile = book.get("import_profile", "hard")
+    preferences["profile"] = profile
+    preferences.setdefault("selected", {})[profile] = book["_selected"]
+
+
+def restore_import_selection(book: dict, settings: dict) -> set[str]:
+    saved = import_preferences(settings).get("selected", {})
+    profile = book.get("import_profile", "hard")
+    selected = set(saved[profile]) if profile in saved else default_import_selection(book["employees"])
+    selected &= {e["key"] for e in book["employees"]}
+    book["_selected"] = sorted(selected)
+    return selected
+
+
+def filter_import_employees(employees: list[dict], selected, *, query="", group="all", sort="name") -> list[dict]:
+    """Фильтр меняет отображение, а не полный набор отмеченных сотрудников."""
+    query = emp_key(query)
+    def included(e):
+        in_file, in_db = bool(e.get("file_count")), bool(e.get("db_count"))
+        return (not query or query in emp_key(e["name"])) and (
+            group == "all" or group == "selected" and e["key"] in selected
+            or group == "existing" and in_file and in_db
+            or group == "new" and in_file and not in_db
+            or group == "db_only" and in_db and not in_file)
+    def order(e):
+        return ((-int(e.get("file_count") or 0), emp_key(e["name"])) if sort == "file"
+                else (-int(e.get("db_count") or 0), emp_key(e["name"])) if sort == "db"
+                else (e["key"] not in selected, emp_key(e["name"])) if sort == "selected"
+                else (emp_key(e["name"]),))
+    return sorted((e for e in employees if included(e)), key=order)
 
 
 def selected_rows(book: dict, selected: set[str]) -> int:

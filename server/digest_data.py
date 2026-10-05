@@ -213,11 +213,15 @@ def window_team(mgr: dict, team: list[str], d_from: str, d_to: str) -> list[str]
     первого импорта) не фильтрует ничего — иначе пустым стал бы и экран."""
     registry = {db._name_key(r["employee"]): r["employee"]
                 for r in db.employees_in_registry()}
+    for employee in db.soft_employees_by_direction("all"):
+        registry.setdefault(db._name_key(employee), employee)
     if registry:
         team = [registry[db._name_key(e)] for e in team
                 if db._name_key(e) in registry]
     out = dict.fromkeys(team)
     authors = db.visit_authors(d_from, d_to)
+    for employee, countries in db.call_authors(d_from, d_to).items():
+        authors.setdefault(employee, set()).update(countries)
     extra = [e for e in authors if e not in out]
     if extra:
         index = db.employee_office_index()
@@ -642,10 +646,28 @@ def _pretty_m(m) -> str:
 
 
 def person_data(mgr: dict, on_date: str, employee: str, rep: str,
-                employees: list[str] | None = None) -> dict | None:
+                employees: list[str] | None = None, *, by_soft: bool = False) -> dict | None:
     employees = employees if employees is not None else sorted_employees(mgr)
     if employee not in employees:
         return None
+    if by_soft:
+        rows = [r for r in db.person_contracts_by_soft(rep) if r["responsible_soft"] == employee or
+                db.employee_called(employee, [r["contract_id"]])]
+        p = next(iter(db._group_persons(rows)), None) if rows else None
+        if p is None:
+            return None
+        data = _person_payload(p, on_date)
+        row = db.get_client(rep)
+        common = db.common_result(row)
+        data.update(profile="soft", outcome=row["soft_call_status"] or "", evidence={},
+                    fill_text="", geo=None, learned_point=False, shots=[], photos=0, tips="",
+                    dates={"promise_date": common.get("promise_date"), "visit_date": None, "reminder_date": None, "meeting_date": None},
+                    comment=row["soft_comment"] or "", visit=[
+                        {"key": key, "title": db.BY_KEY[key].title, "value": common.get(key, row[key])}
+                        for key in ("soft_call_status", "soft_comm_date", "promise_date", "forecast_sum", "forecast")],
+                    calls=[{"day": r["created_at"], "payload": r["payload"]}
+                           for r in db.calls_for_person(rep) if r["employee"] == employee])
+        return data
     persons = db.persons_processed(employee, on_date)
     p = next((x for x in persons if x["rep"] == rep), None)
     if p is None:

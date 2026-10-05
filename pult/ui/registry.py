@@ -76,6 +76,13 @@ class RegistrySection:
         self.imp_profile = Combo(["Хард", "Софт", "Оба типа"])
         imp.add_row(label("Тип сотрудников:", "small"), self.imp_profile)
         self.imp_profile.currentIndexChanged.connect(self._imp_profile_changed)
+        self.imp_search = Field(placeholder="Поиск сотрудника")
+        self.imp_filter = Combo(["Все сотрудники", "Отмеченные", "Есть в файле и БД", "Новые для БД", "Только в БД"])
+        self.imp_sort = Combo(["По ФИО", "По договорам файла", "По договорам в БД", "Сначала отмеченные"])
+        imp.add_row(self.imp_search, self.imp_filter, self.imp_sort)
+        self.imp_search.textChanged.connect(lambda _: self._imp_render())
+        self.imp_filter.currentIndexChanged.connect(lambda _: self._imp_render())
+        self.imp_sort.currentIndexChanged.connect(lambda _: self._imp_render())
         self.imp_pick_frame = imp.add(Rows(spacing=4))
         # Две первые галочки стоят по умолчанию (решение владельца 16.09.2026):
         # обычный прогон идёт с полным срезом и возвратом ручных снятий, а
@@ -131,7 +138,7 @@ class RegistrySection:
         # подтверждению «вся история».
         self.enr_since = DateField()
         self.enr_until = DateField()
-        enr.add_row(label("Выезды с", "small"), self.enr_since, label("по", "small"),
+        enr.add_row(label("Результаты с", "small"), self.enr_since, label("по", "small"),
                     self.enr_until, Note("ДД.ММ.ГГГГ · пусто = без границы", "tiny", wrap=False),
                     Button("Только сегодня", self._enr_window_today),
                     Button("Из квитанции", self._enr_suggest_window),
@@ -388,16 +395,22 @@ class RegistrySection:
             stats = self.api("GET", "/admin/stats")
             book["db_employees"] = list(stats.get("employees") or [])
             book["db_soft_employees"] = list(stats.get("soft_employees") or [])
-            ri.select_profile(book, "hard", book["db_employees"], book["db_soft_employees"])
+            profile = ri.import_preferences(self.settings).get("profile", "hard")
+            try:
+                ri.select_profile(book, profile, book["db_employees"], book["db_soft_employees"])
+            except ValueError:
+                ri.select_profile(book, "hard", book["db_employees"], book["db_soft_employees"])
             return book
 
         def done(book):
             head, first, c_id, c_who = ri.grid_layout(book["grid"])
             book.update(head=head, first=first, c_id=c_id, c_who=c_who)
             self.imp_book = book
-            self.imp_profile.set_current(0)
+            self.imp_profile.blockSignals(True)
+            self.imp_profile.set_current(("hard", "soft", "both").index(book["import_profile"]))
+            self.imp_profile.blockSignals(False)
             self.db_employees = list(book.get("db_employees") or [])
-            self.imp_selected = ri.default_import_selection(book["employees"])
+            self.imp_selected = ri.restore_import_selection(book, self.settings)
             self.imp_full_var.set(False)
             self.imp_restore_manual_var.set(False)
             self._invalidate_import_preview(clear_report=True)
@@ -429,7 +442,8 @@ class RegistrySection:
             self.imp_profile.set_current(("hard", "soft", "both").index(self.imp_book.get("import_profile", "hard")))
             self.toast(str(exc), err=True)
             return
-        self.imp_selected = ri.default_import_selection(self.imp_book["employees"])
+        self.imp_selected = ri.restore_import_selection(self.imp_book, self.settings)
+        self._imp_remember()
         self._invalidate_import_preview(clear_report=True)
         self._imp_render()
 
@@ -445,10 +459,14 @@ class RegistrySection:
             Button("есть в БД", self._imp_existing),
             Button("все", lambda: self._imp_all(True)), stretch=False)
         self.imp_list = CheckList()
+        visible = ri.filter_import_employees(book["employees"], self.imp_selected,
+            query=self.imp_search.get(),
+            group=("all", "selected", "existing", "new", "db_only")[self.imp_filter.currentIndex()],
+            sort=("name", "file", "db", "selected")[self.imp_sort.currentIndex()])
         self.imp_list.set_items(
             [{"key": emp["key"], "text": emp["name"], "note": ri.employee_note(emp),
               "checked": emp["key"] in self.imp_selected}
-             for emp in book["employees"]],
+             for emp in visible],
             on_toggle=self._imp_toggle)
         self._imp_vars = self.imp_list.checks
         self.imp_pick_frame.add(self.imp_list)
@@ -457,8 +475,13 @@ class RegistrySection:
 
     def _imp_toggle(self, name, on):
         (self.imp_selected.add if on else self.imp_selected.discard)(name)
+        self._imp_remember()
         self._invalidate_import_preview(clear_report=True)
-        self._imp_count()
+        self._imp_render()
+
+    def _imp_remember(self):
+        ri.remember_import_selection(self.imp_book, self.imp_selected, self.settings)
+        self._save_settings()
 
     def _imp_all(self, on):
         self.imp_selected = ({e["key"] for e in self.imp_book.get("employees") or []}
@@ -472,10 +495,9 @@ class RegistrySection:
         self._imp_sync_selection()
 
     def _imp_sync_selection(self):
-        if hasattr(self, "imp_list"):
-            self.imp_list.set_checked(self.imp_selected)
+        self._imp_remember()
         self._invalidate_import_preview(clear_report=True)
-        self._imp_count()
+        self._imp_render()
 
     def _imp_count(self):
         self.imp_go_btn.configure(
@@ -628,8 +650,8 @@ class RegistrySection:
     def _ledger_for(self, employees: list[str]) -> dict:
         # Реестр доставленного: сервер помнит, что пульт сам положил в книгу;
         # без него отличие файла от сервера неотличимо от правки офиса.
-        answer = self.api("GET", en.ledger_query(employees), timeout=120) or {}
-        return dict(answer.get("ledger") or {})
+        answer = self.api("GET", en.ledger_query(employees) + "&books=1", timeout=120) or {}
+        return {**dict(answer.get("ledger") or {}), "_books": dict(answer.get("books") or {})}
 
     def enr_check(self, which: str = "all"):
         """Проверка без Excel и без записи: план по книгам, конфликты — в таблицу

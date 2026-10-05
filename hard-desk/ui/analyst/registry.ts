@@ -11,6 +11,7 @@ const XLS = [{ name: "Excel", extensions: ["xlsx", "xlsm", "xlsb", "xls"] }];
 const st = {
   tab: "import" as "import" | "enrich" | "columns" | "export" | "recalled",
   imp: null as any, sel: new Set<string>(), full: false, restore: false, comments: false, preview: null as any, applied: null as any,
+  impQuery: "", impFilter: "all", impSort: "name",
   enr: null as any, matched: [] as any[], enrSel: new Set<string>(), since: "", until: "", check: null as any, decisions: {} as Record<string, string>, applyRes: null as any,
   cols: null as any, colDecisions: [] as any[], scan: null as any,
   expEmps: [] as any[], expSel: new Set<string>(), expSince: "", expUntil: "",
@@ -42,6 +43,16 @@ function pairs(p: [string, unknown][]): string {
 
 async function importTab(el: HTMLElement) {
   const book = st.imp;
+  const employees = (book?.employees || []).filter((e: any) => {
+    const file = Number(e.file_count || 0), db = Number(e.db_count || 0);
+    return (!st.impQuery || e.name.toLocaleLowerCase("ru").includes(st.impQuery.toLocaleLowerCase("ru"))) &&
+      (st.impFilter === "all" || st.impFilter === "selected" && st.sel.has(e.key) ||
+       st.impFilter === "existing" && file && db || st.impFilter === "new" && file && !db || st.impFilter === "db_only" && !file && db);
+  }).sort((a: any, b: any) => {
+    const numeric = st.impSort === "file" ? b.file_count - a.file_count : st.impSort === "db" ? b.db_count - a.db_count :
+      st.impSort === "selected" ? Number(st.sel.has(b.key)) - Number(st.sel.has(a.key)) : 0;
+    return numeric || a.name.localeCompare(b.name, "ru");
+  });
   const warn: string[] = [];
   if (st.full) warn.push("ПОЛНЫЙ СРЕЗ: у выбранных сотрудников будут сняты договоры, которых нет среди их выбранных строк. Остальные не затрагиваются. Файл неполный — снимите галочку.");
   if (st.restore) warn.push("ВОЗВРАТ РУЧНЫХ СНЯТИЙ: вернутся только договоры, которые снова есть в выбранных строках с тем же сотрудником.");
@@ -54,7 +65,11 @@ async function importTab(el: HTMLElement) {
         <span class="muted" style="font-size:13.5px">Кого грузить:</span>
         <button class="btn small" data-sel="none">снять</button><button class="btn small" data-sel="existing">есть в БД</button><button class="btn small" data-sel="all">все</button>
         <span class="spacer"></span><span class="muted" style="font-size:13px">отмечено ${n(st.sel.size)} из ${n(book.employees.length)}</span></div>
-      <div class="grid2" style="max-height:340px;overflow:auto;border-top:var(--lw) solid var(--line)">${book.employees.map((e: any) => `<label class="list-row" style="cursor:pointer;padding:8px 4px">
+      <div class="toolbar"><input class="input search" data-imp-query placeholder="Поиск сотрудника" value="${esc(st.impQuery)}">
+        <select class="input" data-imp-filter style="width:auto">${[["all","Все сотрудники"],["selected","Отмеченные"],["existing","Есть в файле и БД"],["new","Новые для БД"],["db_only","Только в БД"]].map(([k,v])=>`<option value="${k}" ${st.impFilter===k?'selected':''}>${v}</option>`).join("")}</select>
+        <select class="input" data-imp-sort style="width:auto">${[["name","По ФИО"],["file","По договорам файла"],["db","По договорам в БД"],["selected","Сначала отмеченные"]].map(([k,v])=>`<option value="${k}" ${st.impSort===k?'selected':''}>${v}</option>`).join("")}</select>
+        <span class="muted">видно ${n(employees.length)}</span></div>
+      <div class="grid2" style="max-height:340px;overflow:auto;border-top:var(--lw) solid var(--line)">${employees.map((e: any) => `<label class="list-row" style="cursor:pointer;padding:8px 4px">
         <input type="checkbox" data-emp="${esc(e.key)}" ${st.sel.has(e.key) ? "checked" : ""}><span class="grow"><span class="nm">${esc(e.name)}</span><br><span class="sub">${esc(e.note)}</span></span></label>`).join("")}</div>
       <div class="block">
         <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="full" ${st.full ? "checked" : ""}><span class="grow">Для выбранных сотрудников это полный срез — снять у них договоры, которых нет в выбранных строках файла</span></label>
@@ -70,6 +85,15 @@ async function importTab(el: HTMLElement) {
       ${st.applied ? `${pairs(st.applied.pairs)}<div class="notice" style="white-space:pre-line;margin-top:12px"><span class="grow">${esc((st.applied.notes || []).join("\n"))}</span></div>` : ""}` : ""}`;
   const redraw = () => importTab(el);
   const invalidate = () => { st.preview = null; st.applied = null; };
+  el.querySelector<HTMLInputElement>("[data-imp-query]")?.addEventListener("input", (event) => {
+    const input = event.target as HTMLInputElement;
+    const pos = input.selectionStart;
+    st.impQuery = input.value; void redraw();
+    const next = el.querySelector<HTMLInputElement>("[data-imp-query]"); next?.focus(); next?.setSelectionRange(pos, pos);
+  });
+  for (const [attr, key] of [["data-imp-filter", "impFilter"], ["data-imp-sort", "impSort"]] as const) {
+    el.querySelector<HTMLSelectElement>(`[${attr}]`)?.addEventListener("change", (event) => { st[key] = (event.target as HTMLSelectElement).value; void redraw(); });
+  }
   el.querySelector("[data-pick]")?.addEventListener("click", guard(async () => {
     const path = await hard.pick("file", { title: "Реестр", filters: XLS });
     if (!path) return;
@@ -90,9 +114,10 @@ async function importTab(el: HTMLElement) {
     const r = await local("/reg/select", { mode: b.dataset.sel, full: st.full });
     st.sel = new Set(r.selected); invalidate(); redraw();
   })));
-  el.querySelectorAll<HTMLInputElement>("[data-emp]").forEach((cb) => cb.addEventListener("change", () => {
-    if (cb.checked) st.sel.add(cb.dataset.emp!); else st.sel.delete(cb.dataset.emp!); invalidate(); redraw();
-  }));
+  el.querySelectorAll<HTMLInputElement>("[data-emp]").forEach((cb) => cb.addEventListener("change", guard(async () => {
+    if (cb.checked) st.sel.add(cb.dataset.emp!); else st.sel.delete(cb.dataset.emp!); invalidate();
+    await local("/reg/select", { selected: [...st.sel] }); redraw();
+  })));
   el.querySelectorAll<HTMLInputElement>("[data-opt]").forEach((cb) => cb.addEventListener("change", () => {
     const k = cb.dataset.opt as "full" | "restore" | "comments"; st[k] = cb.checked; invalidate();
     if (k === "full" && cb.checked) toast("Полный режим включён для выбранных сотрудников");
@@ -116,10 +141,12 @@ async function importTab(el: HTMLElement) {
 
 // ------------------------------------------------------------------ обогащение
 
+function decisionKey(c: any): string { return JSON.stringify([c.book_path || "", c.contract_id, c.key]); }
+
 function conflictTable(list: any[], decide: boolean, labels: Record<string, string>, cols: [string, string][]): string {
   const head = cols.map(([, t]) => `<th class="l">${esc(t)}</th>`).join("") + (decide ? '<th class="l">Решение</th>' : "");
   return `<div class="table-wrap"><table class="grid"><thead><tr>${head}</tr></thead><tbody>${list.map((c) => {
-    const k = `${c.contract_id}|${c.key}`;
+    const k = decisionKey(c);
     return `<tr>${(c.row as unknown[]).map((v) => `<td class="l" style="white-space:normal">${esc(v)}</td>`).join("")}${decide ? `<td class="l">
       <select class="input" data-dec="${esc(k)}" style="height:30px">${Object.entries(labels).map(([dk, dt]) => `<option value="${dk}" ${(st.decisions[k] || "file") === dk ? "selected" : ""}>${esc(dt)}</option>`).join("")}</select></td>` : ""}</tr>`;
   }).join("")}</tbody></table></div>`;
@@ -133,7 +160,7 @@ async function enrichTab(el: HTMLElement) {
   el.innerHTML = `${note("Переносит сохраненные визиты и звонки в активные личные книги Хард и Софт. В каждой папке должен быть один рабочий .xlsb; имя может быть любым. Правки книги защищены реестром доставки. Сначала проверка, запись — отдельной кнопкой.")}
     <div class="toolbar" style="margin-top:12px"><button class="btn" data-base>Папка с республиками…</button><span class="muted">${esc(e.base ? "база: " + e.base : "базовая папка не выбрана")}</span>
       <span class="spacer"></span><button class="btn primary" data-scan ${e.base ? "" : "disabled"}>Проверить соответствия</button></div>
-    <div class="toolbar"><span class="muted" style="font-size:13.5px">Выезды с</span><input class="input" id="e-since" value="${esc(st.since)}" placeholder="ДД.ММ.ГГГГ" style="width:130px">
+    <div class="toolbar"><span class="muted" style="font-size:13.5px">Результаты с</span><input class="input" id="e-since" value="${esc(st.since)}" placeholder="ДД.ММ.ГГГГ" style="width:130px">
       <span class="muted" style="font-size:13.5px">по</span><input class="input" id="e-until" value="${esc(st.until)}" placeholder="ДД.ММ.ГГГГ" style="width:130px">
       <button class="btn small" data-today>Только сегодня</button><span class="muted" style="font-size:12.5px">пусто = без границы</span></div>
     <div id="e-scan-out">${st.scan ? `${pairs(st.scan.pairs)}${st.scan.warning ? `<div class="notice" style="white-space:pre-line;margin-top:12px"><span class="grow">${esc(st.scan.warning)}</span></div>` : ""}` : ""}</div>
@@ -186,12 +213,12 @@ async function enrichTab(el: HTMLElement) {
   }));
   el.querySelectorAll<HTMLSelectElement>("[data-dec]").forEach((s) => s.addEventListener("change", () => { st.decisions[s.dataset.dec!] = s.value; }));
   el.querySelectorAll<HTMLButtonElement>("[data-dall]").forEach((b) => b.addEventListener("click", () => {
-    for (const c of st.check.conflicts) st.decisions[`${c.contract_id}|${c.key}`] = b.dataset.dall!; redraw();
+    for (const c of st.check.conflicts) st.decisions[decisionKey(c)] = b.dataset.dall!; redraw();
   }));
   el.querySelector("[data-apply]")?.addEventListener("click", guard(async () => {
     win();
-    const decisions = Object.entries(st.decisions).map(([k, d]) => { const [contract_id, key] = k.split("|"); return { contract_id, key, decision: d }; });
-    if (st.check) for (const c of st.check.conflicts) if (!st.decisions[`${c.contract_id}|${c.key}`]) decisions.push({ contract_id: c.contract_id, key: c.key, decision: "file" });
+    const decisions = Object.entries(st.decisions).map(([k, d]) => { const [book_path, contract_id, key] = JSON.parse(k); return { book_path, contract_id, key, decision: d }; });
+    if (st.check) for (const c of st.check.conflicts) if (!st.decisions[decisionKey(c)]) decisions.push({ book_path: c.book_path, contract_id: c.contract_id, key: c.key, decision: "file" });
     const body = { keys: [...st.enrSel], since: st.since, until: st.until, decisions };
     const conf = await local("/enr/confirm", body);
     if (conf.whole && !(await ask(e.whole_title, e.whole_text, "Вся история", true))) return;

@@ -660,10 +660,7 @@ def is_filled(row: dict) -> bool:
 
 
 def soft_anchor(row: dict):
-    """День, которым кейс-звонок участвует в окне обогащения: ПОЗДНЯЯ из даты
-    коммуникации и дня последнего звонка (_call_day из экспорта). Дата
-    коммуникации бывает СЛЕДУЮЩИМ звонком в будущем — без дня звонка окно
-    «до сегодня» молча выкидывало бы свежие звонки с отложенным перезвоном."""
+    """День фактического звонка. Следующий перезвон не является датой факта."""
     return parse_date(row.get("_call_day"))
 
 
@@ -734,7 +731,7 @@ def split_by_employee(rows: list[dict]) -> EmployeeSplit:
             continue
         e = out.setdefault(norm_name(emp), {"employee": emp, "rows": [], "filled": 0})
         e["rows"].append(r)
-        if is_filled(r) or (is_soft_filled(r) and any(cell_text(r.get(k)) and
+        if is_filled(r) or (is_soft_filled(r) and any((cell_text(r.get(k)) or k in r.get("_enrichment_clear_keys", [])) and
                 (r.get("_common_days") or {}).get(k) == r.get("_call_day")
                 for k in ("promise_date", "forecast_sum", "forecast"))):
             e["filled"] += 1
@@ -845,6 +842,26 @@ def _ledger_value(ledger, cid: str, key: str):
     else:
         value = entry
     return None if value is None else cell_text(value)
+
+
+def book_key(path) -> str:
+    return str(path).replace("\\", "/").casefold()
+
+
+def ledger_for_book(ledger, path):
+    if ledger is None or "_books" not in ledger:
+        return ledger
+    return ledger["_books"].get(book_key(path), {})
+
+
+def decisions_for_book(decisions, path):
+    out = {}
+    for key, value in (decisions or {}).items():
+        if len(key) == 2:
+            out[key] = value
+        elif len(key) == 3 and book_key(key[0]) == book_key(path):
+            out[key[1:]] = value
+    return out
 
 
 def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
@@ -978,7 +995,9 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
         vdate = max(eligible.values())
         filled_contract_ids.append(cid)
         values = {k: srv.get(k) for k in eligible
-                  if cell_text(srv.get(k)) != "" and k in col_map}
+                  if k in col_map and (cell_text(srv.get(k)) != "" or
+                      k in ("soft_comm_date", "promise_date", "forecast_sum", "forecast")
+                      and k in srv.get("_enrichment_clear_keys", []))}
         filled_cases += 1
         targets = file_rows.get(cid)
         if not targets:
@@ -2010,6 +2029,8 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
             app.screen_updating = False
             for i, job in enumerate(jobs, 1):
                 path = Path(job["path"])
+                book_ledger = ledger_for_book(ledger, path)
+                book_decisions = decisions_for_book(decisions, path)
                 log(f"[{i}/{len(jobs)}] {job['employee']} — {path.name}…")
                 attempted.add(i)
                 try:
@@ -2017,9 +2038,9 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
                         plan = _enrich_local(
                             app, path, fields, job["rows"], log,
                             since, until, backup_root,
-                            ledger=ledger,
+                            ledger=book_ledger,
                             server_authoritative=server_authoritative,
-                            decisions=decisions, work_dir=work_dir,
+                            decisions=book_decisions, work_dir=work_dir,
                             before_commit=before_commit,
                         )
                     else:
@@ -2029,9 +2050,9 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
                         plan = _enrich_with_evidence(
                             app, path, fields, job["rows"], log,
                             since, until, backup_root,
-                            ledger=ledger,
+                            ledger=book_ledger,
                             server_authoritative=server_authoritative,
-                            decisions=decisions, **extra,
+                            decisions=book_decisions, **extra,
                         )
                 except WrittenButUnverified as e:
                     # Записано, но не проверено. НЕ откатывать. Ключ error нужен,
@@ -2102,8 +2123,8 @@ def preview_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
             if sheet is None:
                 raise ValueError(f"обязательный лист «{SHEET_NAME}» отсутствует")
             plan = build_plan(sheet["grid"], fields, job["rows"], since, until,
-                              ledger=ledger, server_authoritative=server_authoritative,
-                              decisions=decisions)
+                              ledger=ledger_for_book(ledger, path), server_authoritative=server_authoritative,
+                              decisions=decisions_for_book(decisions, path))
             plan.pop("writes", None)
             plan["file_sha256"] = book["file_sha256"]
         except Exception as e:  # noqa: BLE001 — одна книга не валит проверку

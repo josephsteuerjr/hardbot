@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 import statistics
@@ -312,6 +313,7 @@ def activity(mgr: dict, team: list[str], rng: dict, *, office: str = "",
         times = sorted(x["at"] for x in evs if x["at"])
         rows.append({"employee": emp, "office": "" if of[emp] == NO_OFFICE else of[emp],
                      "visits": len(evs),
+                     "calls": 0,
                      "first": times[0][11:16] if times else "",
                      "last": times[-1][11:16] if times else "",
                      "far": sum("far" in x["flags"] for x in evs),
@@ -364,8 +366,7 @@ def activity(mgr: dict, team: list[str], rng: dict, *, office: str = "",
         marks = ','.join('?' * len(people))
         with db.connect() as conn:
             journals = []
-            if "call" in kinds:
-                journals += [("call", dict(r)) for r in conn.execute(
+            journals += [("call", dict(r)) for r in conn.execute(
                     f"SELECT * FROM calls WHERE employee IN ({marks}) AND created_at >= ? AND created_at <= ?",
                     (*people, rng["from"], rng["to"] + "T23:59:59"))]
             if "receipt" in kinds:
@@ -375,17 +376,45 @@ def activity(mgr: dict, team: list[str], rng: dict, *, office: str = "",
                     f"SELECT * FROM payment_evidence WHERE employee IN ({marks}) AND created_at >= ? AND created_at < ?",
                     (*people, lo, hi))]
         names = _client_names([r["contract_id"] for _, r in journals])
+        by_employee = {row["employee"]: row for row in rows}
         for kind, r in journals:
             t = _local_dt((r.get("saved_at") or r.get("received_at")) if kind == "call" else r["created_at"])
             if not t or not rng["from"] <= t.date().isoformat() <= rng["to"]:
                 continue
             emp = r["employee"]
+            title, detail, flags = _AUDIT_TITLE[kind], "", []
+            if kind == "call":
+                try:
+                    values = json.loads(r.get("values_json") or "{}")
+                except (ValueError, TypeError):
+                    values = {}
+                status = str(values.get("soft_call_status") or "")
+                title = "Звонок" + (": " + status if status else "")
+                detail = str(values.get("soft_comment") or r.get("payload") or "")
+                if values.get("soft_comm_date"):
+                    detail += " · следующий контакт: " + str(values["soft_comm_date"])
+                received = _local_dt(r.get("received_at"))
+                if received and received.date() > db._as_date(r["created_at"]):
+                    flags.append("late")
+                if t.hour >= NIGHT_FROM or t.hour < NIGHT_TO:
+                    flags.append("night")
+                if _CASH_RE.search(detail):
+                    flags.append("cash")
+                summary = by_employee[emp]
+                summary["calls"] += 1
+                summary["late"] += int("late" in flags)
+                summary["flags"] += int(bool(flags))
+                hhmm = _hhmm(t)
+                summary["first"] = min(summary["first"], hhmm) if summary["first"] else hhmm
+                summary["last"] = max(summary["last"], hhmm) if summary["last"] else hhmm
+                if kind not in kinds:
+                    continue
             events.append({"id": f"{kind}{r['id']}", "kind": kind,
                 "at": t.isoformat(timespec="seconds"), "time": _hhmm(t),
                 "day": t.date().isoformat(), "employee": emp,
                 "office": "" if of.get(emp) == NO_OFFICE else of.get(emp, ""),
                 "rep": r["contract_id"], "debtor": names.get(r["contract_id"], ""),
-                "title": _AUDIT_TITLE[kind], "detail": "", "flags": [],
+                "title": title, "detail": detail, "flags": flags,
                 "visit_op": r.get("visit_op"), "op": r.get("op_id") or r.get("op")})
     for row in rows:
         row["last_seen"] = last_seen.get(row["employee"])
@@ -394,7 +423,7 @@ def activity(mgr: dict, team: list[str], rng: dict, *, office: str = "",
         events = [x for x in events if (x["at"] or "") < before]
     limit = max(1, min(500, int(limit or 200)))
     page = events[:limit]
-    rows.sort(key=lambda r: (-(r["visits"]), r["employee"].lower()))
+    rows.sort(key=lambda r: (-(r["visits"] + r["calls"]), r["employee"].lower()))
     return {"screen": "activity", "range": rng, "tz": "+05:00", "offices": chips,
             "employees": rows, "events": page,
             "next_before": page[-1]["at"] if len(events) > limit and page else None,

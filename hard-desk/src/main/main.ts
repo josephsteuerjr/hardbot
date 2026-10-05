@@ -10,7 +10,7 @@ import { BrowserWindow, Menu, Notification, Tray, app, clipboard, dialog, ipcMai
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, normalize, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-import { call, callField, deviceName, enroll, enrollField, logout, logoutField, setRevokedHandler, uploadField } from "./net";
+import { call, callField, deviceName, enroll, enrollField, flushCallQueue, logout, logoutField, setRevokedHandler, uploadField } from "./net";
 import { stopLegacyPult } from "./legacy";
 import { writeXlsx } from "./xlsx";
 import { local, startBackend } from "./local";
@@ -115,6 +115,7 @@ function paper(): string {
 }
 
 function start() {
+  setInterval(() => { void flushCallQueue().catch(error => log("Очередь звонков: " + String(error))); }, 15000);
   const t = readSettings().theme;
   if (t === "dark" || t === "light") nativeTheme.themeSource = t;
   if (process.env.HARD_THEME === "dark" || process.env.HARD_THEME === "light") nativeTheme.themeSource = process.env.HARD_THEME;

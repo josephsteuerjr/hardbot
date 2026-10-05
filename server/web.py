@@ -3778,12 +3778,14 @@ async def _manager_person(request: web.Request) -> web.Response:
     emp = _manager_employee_q(request, team)
     rep = (request.query.get("rep") or "").strip()
     row = db.get_client(rep)
+    by_soft = bool(row and (request.query.get("mode") == "soft" or
+                           row["responsible_soft"] == emp and row["responsible"] != emp))
     # Свой должник — или тот, к кому сотрудник выезжал до перезакрепления:
     # карточка по собственному выезду открываться обязана.
-    if not row or (row["responsible"] != emp
-                   and not db.employee_visited(emp, [rep])):
+    if not row or (by_soft and row["responsible_soft"] != emp and not db.employee_called(emp, [rep])) or (
+            not by_soft and row["responsible"] != emp and not db.employee_visited(emp, [rep])):
         raise web.HTTPNotFound(text="person")
-    data = digest_data.person_data(mgr, iso, emp, rep, employees=team)
+    data = digest_data.person_data(mgr, iso, emp, rep, employees=team, by_soft=by_soft)
     if data is None:
         raise web.HTTPNotFound(text="person")
     db.audit_access(uid, "digest_view_card", target=rep, detail=f"{emp} {iso}")
@@ -5731,6 +5733,7 @@ async def _admin_enrichment_ledger(request: web.Request) -> web.Response:
         return web.json_response({
             "data_exchange_contract": DATA_EXCHANGE_CONTRACT,
             "ledger": ledger,
+            **({"books": db.enrichment_book_ledger(employees or None)} if request.query.get("books") == "1" else {}),
             "count": sum(len(v) for v in ledger.values()),
         })
     try:

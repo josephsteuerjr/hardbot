@@ -1002,6 +1002,21 @@ def init_db() -> None:
               PRIMARY KEY (contract_id, field_key)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS enrichment_book_ledger (
+              contract_id TEXT NOT NULL, field_key TEXT NOT NULL,
+              file_path TEXT NOT NULL, value TEXT NOT NULL, visit_date TEXT,
+              responsible TEXT, delivered_at TEXT NOT NULL, receipt_digest TEXT,
+              PRIMARY KEY (contract_id, field_key, file_path)
+            )
+        """)
+        # Мигрируем только доказанную последнюю доставку в конкретную книгу.
+        conn.executemany("""INSERT OR IGNORE INTO enrichment_book_ledger
+            (contract_id, field_key, file_path, value, visit_date, responsible, delivered_at, receipt_digest)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", [
+                (r["contract_id"], r["field_key"], str(r["file_path"]).replace("\\", "/").casefold(),
+                 r["value"], r["visit_date"], r["responsible"], r["delivered_at"], r["receipt_digest"])
+                for r in conn.execute("SELECT * FROM enrichment_ledger WHERE IFNULL(file_path, '') <> ''").fetchall()])
         receipt_cols = {
             row[1]
             for row in conn.execute("PRAGMA table_info(import_receipts)")
@@ -3111,7 +3126,7 @@ def manager_employees(telegram_id: int, *, is_owner: bool = False) -> list[str]:
     if mgr is not None:
         direction = (mgr.get("direction") or "").strip()
         if direction:                      # руководитель направления — список живой
-            return employees_by_direction(direction)
+            return sorted(set(employees_by_direction(direction)) | set(soft_employees_by_direction(direction)))
         # Написание НЕ канонизируем: это список доступа, строка уезжает
         # клиенту как d.employee, и её смена стирала бы оффлайн-очередь.
         # К написанию реестра состав приводит только сводка
@@ -3123,7 +3138,7 @@ def manager_employees(telegram_id: int, *, is_owner: bool = False) -> list[str]:
         allowed += employees_by_cities(mgr.get("office_cities"))
         return sorted(dict.fromkeys(allowed))
     if is_owner:
-        return [r["employee"] for r in employees_in_registry()]
+        return sorted({r["employee"] for r in employees_in_registry()} | set(soft_employees_by_direction("all")))
     return []
 
 
@@ -3354,6 +3369,44 @@ def visit_authors(date_from: str, date_to: str) -> dict[str, set[str]]:
         if code:
             slot.add(code)
     return out
+
+
+def call_authors(date_from: str, date_to: str) -> dict[str, set[str]]:
+    """Авторы исторических звонков остаются в своей команде за окно."""
+    lo, hi = _as_date(date_from), _as_date(date_to)
+    if lo is None or hi is None:
+        return {}
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT v.employee emp, c.country, c.city FROM calls v "
+            "LEFT JOIN clients c ON c.contract_id=v.contract_id "
+            "WHERE IFNULL(v.employee, '') <> '' AND substr(v.created_at,1,10) BETWEEN ? AND ?",
+            (lo.isoformat(), hi.isoformat())).fetchall()
+    out = {}
+    for r in rows:
+        code = country_scope.scope_country([r["country"] or ""]) or country_scope.scope_country([r["city"] or ""])
+        if code:
+            out.setdefault(r["emp"], set()).add(code)
+        else:
+            out.setdefault(r["emp"], set())
+    return out
+
+
+def employee_called(employee: str, contract_ids) -> bool:
+    ids = {str(cid) for cid in contract_ids if cid}
+    if not employee or not ids:
+        return False
+    with connect() as conn:
+        rows = conn.execute("SELECT contract_id, contracts_json FROM calls WHERE employee=?", (employee,)).fetchall()
+    for row in rows:
+        if row["contract_id"] in ids:
+            return True
+        try:
+            if ids.intersection(json.loads(row["contracts_json"] or "[]")):
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
 
 
 def clients_by_ids(contract_ids) -> list[sqlite3.Row]:
@@ -6673,6 +6726,8 @@ def enrichment_rows() -> list[dict]:
             row[key] = None
         if call_snapshot:
             row["_call_day"] = str(raw["bot_call_at"])[:10]
+            row["_enrichment_clear_keys"] = ["soft_comm_date"] if (
+                "soft_comm_date" in call_snapshot and not str(call_snapshot["soft_comm_date"] or "").strip()) else []
         bot_snapshot = _decode_bot_snapshot(raw)
         row[VISIT_COMMENT_CLEARED_MARKER] = bool(
             snapshot is not None
@@ -6692,6 +6747,10 @@ def enrichment_rows() -> list[dict]:
         if call_snapshot:
             row.update({k: v for k, v in call_snapshot.items()
                         if k not in COMMON_RESULT_KEYS or call_owns_field(raw, k)})
+        row.setdefault("_enrichment_clear_keys", []).extend(
+            key for key in COMMON_RESULT_KEYS if not str(row.get(key) or "").strip()
+            and ((call_snapshot and key in call_snapshot and call_owns_field(raw, key))
+                 or (snapshot and key in snapshot and not call_owns_field(raw, key))))
         row["_common_days"] = {k: (call_field_at(raw, k)[:10] if call_owns_field(raw, k)
                                    else str(raw["bot_visit_at"] or "")[:10]) for k in COMMON_RESULT_KEYS}
         row["_common_day"] = (str(raw["bot_call_at"])[:10] if call_is_latest(raw)
@@ -6724,6 +6783,21 @@ def enrichment_ledger(employees: list[str] | None = None) -> dict[str, dict]:
             "at": r["delivered_at"],
             "responsible": r["responsible"] or "",
         }
+    return out
+
+
+def enrichment_book_ledger(employees: list[str] | None = None) -> dict:
+    wanted = {_name_key(e) for e in (employees or []) if str(e).strip()}
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM enrichment_book_ledger ORDER BY file_path, contract_id, field_key").fetchall()
+    out = {}
+    for r in rows:
+        if wanted and _name_key(r["responsible"]) not in wanted:
+            continue
+        path = str(r["file_path"]).replace("\\", "/").casefold()
+        out.setdefault(path, {}).setdefault(r["contract_id"], {})[r["field_key"]] = {
+            "value": r["value"], "visit_date": r["visit_date"] or "",
+            "at": r["delivered_at"], "responsible": r["responsible"] or ""}
     return out
 
 
@@ -6771,6 +6845,15 @@ def record_enrichment_deliveries(entries: list, receipt_digest: str = "") -> int
             "delivered_at=excluded.delivered_at, "
             "receipt_digest=excluded.receipt_digest",
             prepared,
+        )
+        conn.executemany(
+            "INSERT INTO enrichment_book_ledger (contract_id, field_key, value, "
+            "visit_date, responsible, file_path, delivered_at, receipt_digest) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(contract_id, field_key, file_path) DO UPDATE SET "
+            "value=excluded.value, visit_date=excluded.visit_date, responsible=excluded.responsible, "
+            "delivered_at=excluded.delivered_at, receipt_digest=excluded.receipt_digest",
+            [(*r[:5], str(r[5]).replace("\\", "/").casefold(), *r[6:]) for r in prepared if r[5]],
         )
         conn.commit()
     return len(prepared)

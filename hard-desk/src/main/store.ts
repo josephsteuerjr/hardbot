@@ -2,7 +2,7 @@
 // только зашифрованными (safeStorage = DPAPI учётной записи Windows). Скопированный
 // на другую машину или под другого пользователя файл токена ничего не даёт.
 import { app, safeStorage } from "electron";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 
@@ -104,6 +104,23 @@ export function readFieldToken(): string {
 export function writeFieldToken(token: string): void {
   ensure();
   writeFileSync(file("field.key"), seal(token));
+}
+
+export interface PendingCall { body: Record<string, unknown>; error?: string }
+export interface CallQueue { owner: string; entries: PendingCall[] }
+export function readCallQueue(): CallQueue | null {
+  const path = file("calls-pending.bin");
+  if (!existsSync(path)) return null;
+  return JSON.parse(open(readFileSync(path))) as CallQueue;
+}
+export function writeCallQueue(queue: CallQueue): void {
+  ensure();
+  const path = file("calls-pending.bin"), temp = path + ".tmp";
+  writeFileSync(temp, seal(JSON.stringify(queue)));
+  renameSync(temp, path);
+}
+export function clearCallQueue(): void {
+  for (const name of ["calls-pending.bin", "calls-pending.bin.tmp"]) rmSync(file(name), { force: true });
 }
 
 export function wipeField(): void {

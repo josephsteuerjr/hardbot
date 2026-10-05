@@ -6,12 +6,12 @@ import { ago, dayTitle, esc, n, plural } from "../kit/dom";
 import { preserve, type Section } from "../kit/shell";
 import { flagsHtml, officeChips, openPerson, problem, rangeChips, rangeQuery, staleNote, wireRange, type Range } from "./common";
 
-const KINDS: [string, string][] = [["visit", "Выезды"], ["view", "Открыл карточку"], ["photo", "Фото"], ["login", "Входы"]];
+const KINDS: [string, string][] = [["visit", "Выезды"], ["call", "Звонки"], ["receipt", "Квитанции"], ["promise", "Обещания"], ["view", "Открыл карточку"], ["photo", "Фото"], ["login", "Входы"]];
 const state = {
   range: { preset: "today" } as Range,
   office: "",
   employee: "",
-  kinds: new Set(["visit", "view", "photo", "login"]),
+  kinds: new Set(KINDS.map(([kind]) => kind)),
   onlyFlags: false,
   q: "",
 };
@@ -27,7 +27,7 @@ function eventHtml(e: any, fresh: boolean): string {
   } else {
     line1 = `${who} ${esc(e.title)}${e.debtor ? ` — ${esc(e.debtor)}` : ""}`;
   }
-  const line2 = e.kind === "visit" ? esc(e.detail || "") : "";
+  const line2 = esc(e.detail || "");
   const side = [e.office ? esc(e.office) : "", e.fill_s != null && e.kind === "visit" ? `карточка ${Math.max(1, Math.round(e.fill_s / 60))} мин` : ""]
     .filter(Boolean).join("<br>");
   const pick = e.rep && e.kind !== "login";
@@ -42,12 +42,13 @@ function peopleHtml(rows: any[]): string {
   const list = rows.map((r) => {
     const online = r.last_seen && now - Date.parse(r.last_seen) < 15 * 60000;
     const meta = [
-      r.first ? `${esc(r.first)}–${esc(r.last)}` : "выездов нет",
+      `${n(r.visits)} выездов · ${n(r.calls || 0)} звонков`,
+      r.first ? `${esc(r.first)}–${esc(r.last)}` : "результатов нет",
       r.far ? `<span class="warn">далеко ${n(r.far)}</span>` : "",
       r.late ? `<span class="warn">позже ${n(r.late)}</span>` : "",
     ].filter(Boolean).join(" · ");
     return `<button class="person-row" data-emp="${esc(r.employee)}" aria-pressed="${state.employee === r.employee}">
-      <span class="nm"><span class="seen-dot${online ? " on" : ""}"></span>${esc(r.employee)}</span><span class="num">${n(r.visits)}</span>
+      <span class="nm"><span class="seen-dot${online ? " on" : ""}"></span>${esc(r.employee)}</span><span class="num">${n(r.visits + (r.calls || 0))}</span>
       <span class="meta"><span>${meta}</span><span style="margin-left:auto">${esc(ago(r.last_seen))}</span></span></button>`;
   }).join("");
   return `<div class="people">
@@ -126,7 +127,7 @@ function wire(root: HTMLElement) {
     if (!ev) return;
     root.querySelectorAll('.ev[aria-selected="true"]').forEach((x) => x.removeAttribute("aria-selected"));
     row.setAttribute("aria-selected", "true");
-    void openPerson(ev.employee, ev.rep, ev.day);
+    void openPerson(ev.employee, ev.rep, ev.day, ev.kind === "call" ? "soft" : undefined);
   });
 }
 
@@ -142,7 +143,7 @@ export const activity: Section = {
   id: "activity",
   title: "Активность",
   icon: "activity",
-  kicker: "что происходит в поле прямо сейчас",
+  kicker: "что делает команда",
   async render(root) {
     seen = new Set();
     root.innerHTML = '<div class="skeleton" style="width:40%"></div><div class="skeleton"></div><div class="skeleton" style="width:70%"></div>';

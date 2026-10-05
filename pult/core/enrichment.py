@@ -19,6 +19,7 @@ from pathlib import Path
 
 import enrich
 import razbros
+from . import header_map
 
 BACKUP_FOLDER = "!! Обогащение из БД"
 RECEIPTS_FOLDER = "_квитанции"
@@ -33,10 +34,10 @@ SERVER_AUTHORITATIVE_WARNING = (
 )
 
 CONFLICT_COLUMNS = (
-    ("employee", "Сотрудник", 150), ("contract_id", "КД", 100),
+    ("employee", "Сотрудник", 150), ("book", "Книга", 200), ("contract_id", "КД", 100),
     ("column", "Колонка", 150), ("file", "В файле", 170),
     ("server", "На сервере", 170), ("delivered", "Доставлялось", 150),
-    ("visit_date", "Выезд", 90), ("kind", "Вид", 110),
+    ("visit_date", "Дата факта", 90), ("kind", "Вид", 110),
 )
 CONFLICT_KINDS = {"no_history": "нет истории", "both_changed": "правили обе стороны",
                   "office_edit": "правка офиса"}
@@ -56,8 +57,9 @@ DECISION_HINT = ("По каждой строке выбери, что делат
                  "«везде…» ставят один ответ на все строки; потом нажми «Записать».")
 
 
-def conflict_key(c: dict) -> tuple[str, str]:
-    return (str(c.get("contract_id") or ""), str(c.get("key") or ""))
+def conflict_key(c: dict) -> tuple[str, ...]:
+    base = (str(c.get("contract_id") or ""), str(c.get("key") or ""))
+    return (enrich.book_key(c["book_path"]), *base) if c.get("book_path") else base
 
 
 def decisions_summary(decisions: dict) -> tuple[int, int]:
@@ -133,21 +135,47 @@ def folder_map(base: str, roots: list[str] | None = None) -> dict:
     return razbros.build_folder_map(razbros.resolve_roots(base, reps, roots or []))
 
 
+def workbook_profile(path) -> str:
+    """Профиль определяют столбцы активной книги, а не название города."""
+    analysis = header_map.analyze(header_map.read_header_grid(str(path)))
+    keys = {column["key"] for column in analysis["recognized"]}
+    hard = bool(keys & {"visit_date", "who_at_address", "contact_with", "visit_comment"})
+    soft = bool(keys & {"soft_call_status", "soft_comm_date"})
+    if hard and soft:
+        return "both"
+    if hard:
+        return "hard"
+    if soft:
+        return "soft"
+    raise ValueError(f"Не удалось определить профиль книги по колонкам: {path}")
+
+
 def match_employees(by_emp, fmap) -> tuple[list[dict], list[str], list[str]]:
     """Активные владельцы с доказанными визитами/звонками → подбор по профилю."""
     matched, nofolder, nofile = [], [], []
+    profiles = {}
     for key, e in sorted(by_emp.items(), key=lambda kv: kv[1]["employee"].lower()):
         if not e["filled"]:
             continue        # бот ничего не заполнял — обогащать нечего
         profile = e.get("profile", "hard")
         entries = fmap.get(enrich.norm_name(e["employee"]))
-        entries = [entry for entry in (entries or []) if entry.get("kind", "hard") == profile]
         if not entries:
             nofolder.append(f"{e['employee']} ({e['filled']})")
             continue
-        files = personal_files(entries, e["employee"])
+        files = []
+        try:
+            for entry in entries:
+                for path in personal_files([entry], e["employee"]):
+                    if path not in profiles:
+                        profiles[path] = workbook_profile(path)
+                    detected = profiles[path]
+                    if detected == profile or detected == "both" and entry.get("kind", "hard") == profile:
+                        files.append(path)
+        except Exception as exc:  # нечитаемая/неоднозначная книга не блокирует остальных
+            nofile.append(f"{e['employee']}: {exc}")
+            continue
         if not files:
-            nofile.append(e["employee"])
+            nofile.append(f"{e['employee']} — нет .xlsb профиля {profile.upper()}")
             continue
         matched.append({"key": key, "employee": e["employee"],
                         "profile": profile,
@@ -195,7 +223,7 @@ def preview_warning(by_emp, matched: list[dict], nofolder: list[str],
         warn += (("\n" if warn else "")
                  + "Есть данные из приложения, но нет папки: " + ", ".join(nofolder))
     if nofile:
-        warn += ("\n" if warn else "") + "Папка есть, но нет .xlsb: " + ", ".join(nofile)
+        warn += ("\n" if warn else "") + "Не подобрана рабочая книга: " + ", ".join(nofile)
     if not matched and not warn:
         warn = "В приложении пока ничего не заполнено — обогащать нечего."
     return warn
@@ -230,11 +258,10 @@ def window_text(since: str, until: str) -> str:
     """Строка про окно для подтверждения. Без окна прогон переутверждает базу
     поверх всей истории визитов — об этом говорим прямо."""
     if since or until:
-        return f"Окно выездов: с {since or '—'} по {until or '—'}."
-    return ("ОКНО НЕ ЗАДАНО: в книги пойдут выезды за ВСЮ историю, "
-            "включая уже обогащённые ранее. Если после прошлого прогона "
-            "результат правили в книге или в реестре, правка будет "
-            "заменена версией из приложения.")
+        return f"Окно результатов: с {since or '—'} по {until or '—'}. Дата факта выезда или звонка."
+    return ("ОКНО НЕ ЗАДАНО: будут проверены выезды и звонки за ВСЮ историю. "
+            "Правки книги защищены историей доставки; спорные ячейки "
+            "останутся без изменений до решения конфликта.")
 
 
 def confirm_text(n_employees: int, n_files: int, since: str, until: str) -> str:
@@ -247,8 +274,8 @@ def confirm_text(n_employees: int, n_files: int, since: str, until: str) -> str:
 
 WHOLE_HISTORY_TITLE = "Вся история"
 WHOLE_HISTORY_TEXT = (
-    "Окно дат пустое. Прогон перепишет в книгах результаты за ВСЮ историю "
-    "визитов, включая уже обогащённые ранее и правленные после этого.\n\n"
+    "Окно дат пустое. Прогон проверит результаты выездов и звонков за ВСЮ историю. "
+    "Правки книги защищены историей доставки; конфликты требуют решения.\n\n"
     "Обычно нужно окно с даты прошлого прогона — оно подставляется из "
     "последней квитанции автоматически.\n\n"
     "Точно обогащать за всю историю?"
@@ -334,14 +361,16 @@ def collect_conflicts(results: list[dict]) -> tuple[list[dict], list[dict]]:
     for r in results:
         emp = r.get("employee") or ""
         for c in r.get("conflicts") or []:
-            conflicts.append({"employee": emp, **c})
+            conflicts.append({"employee": emp, "book_path": r.get("file", ""), **c})
         for c in r.get("office_edits") or []:
-            office.append({"employee": emp, **c})
+            office.append({"employee": emp, "book_path": r.get("file", ""), **c})
     return conflicts, office
 
 
 def conflict_row(c: dict) -> tuple:
-    return (c.get("employee", ""), c.get("contract_id", ""), c.get("column") or c.get("key", ""),
+    path = Path(c["book_path"]) if c.get("book_path") else None
+    book = (f"{path.parent.parent.name}/{path.name}" if path.parent.parent.name else path.name) if path else ""
+    return (c.get("employee", ""), book, c.get("contract_id", ""), c.get("column") or c.get("key", ""),
             str(c.get("file") if c.get("file") is not None else ""),
             str(c.get("server") if c.get("server") is not None else ""),
             str(c.get("delivered") if c.get("delivered") is not None else ""),

@@ -937,8 +937,10 @@ class DecisionTable(QTableWidget):
             combo = self.cellWidget(i, self.columnCount() - 1)
             if combo is None:
                 continue
-            out[(str(record.get("contract_id") or ""),
-                 str(record.get("key") or ""))] = str(combo.currentData() or self.default)
+            key = (str(record.get("contract_id") or ""), str(record.get("key") or ""))
+            if record.get("book_path"):
+                key = (str(record["book_path"]).replace("\\", "/").casefold(), *key)
+            out[key] = str(combo.currentData() or self.default)
         return out
 
     def clear(self) -> None:

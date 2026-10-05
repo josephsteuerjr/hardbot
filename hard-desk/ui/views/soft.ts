@@ -53,12 +53,22 @@ export const softQueue: Section = {
     for(const p of state.persons) for(const x of p.totals?.length?p.totals:[{unit:p.unit,sum:p.total}])
       sums[x.unit||"ед. не указана"]=(sums[x.unit||"ед. не указана"]||0)+(Number(x.sum)||0);
     const debtSum=Object.entries(sums).map(([unit,sum])=>money(sum)+" "+unit).join(" · ");
+    const pending = await api("/api/local/call_queue");
+    const queue = pending.data as { pending?: number; errors?: { rep: string; op_id: string; error: string }[] } | undefined;
     root.innerHTML = `
+      ${!pending.ok ? `<div class="notice err">${esc(pending.text || "Не удалось прочитать очередь звонков")}</div>` : queue?.pending ?
+        `<div class="notice"><span class="grow">Ожидают отправки ${n(queue.pending - (queue.errors || []).length)} звонков; требуют проверки ${(queue.errors || []).length}. Отправка повторяется автоматически при появлении связи.
+        ${(queue.errors || []).map(e => `<br>${esc(e.rep)}: ${esc(e.error)} <button class="btn small" data-pending-op="${esc(e.op_id)}">Убрать из очереди</button>`).join("")}</span></div>` : ""}
       <div class="kpis"><div class="kpi accent"><b>${n(today.length)}</b><span>звонить сегодня</span></div>
         <div class="kpi"><b>${n(state.persons.length)}</b><span>должников всего</span></div>
         <div class="kpi"><b>${esc(debtSum)}</b><span>долг портфеля</span></div></div>
       <div class="toolbar"><button class="btn small" data-scope="today">Сегодня (${n(today.length)})</button><button class="btn small" data-scope="all">Все (${n(state.persons.length)})</button></div>
       <div class="section" id="s-tbl"></div>`;
+    root.querySelectorAll<HTMLButtonElement>("[data-pending-op]").forEach(button => button.addEventListener("click", async () => {
+      if (!confirm("Убрать проблемную запись из очереди? Принятая сервером часть останется в журнале. Исправленный результат сохраните в карточке должника.")) return;
+      const result = await api("/api/local/call_queue/remove", undefined, "POST", { op_id: button.dataset.pendingOp });
+      if (result.ok) await softQueue.render(root, {}); else toast(result.text || "Не удалось убрать запись");
+    }));
     const table=new DataTable<any>(root.querySelector("#s-tbl")!, {
       id: "soft-queue", exportName: "Очередь звонков", key: (x) => x.rep,
       cols: [
@@ -123,27 +133,35 @@ async function openSoftCard(rep: string) {
         <div class="list-row"><div class="grow"><div class="nm">${esc(String(c.ts || "").slice(0, 10))}${c.employee ? " · " + esc(c.employee) : ""}</div>
           <div class="sub" style="white-space:pre-wrap">${esc(c.payload || "")}</div></div></div>`).join("")
         : '<div class="muted">звонков пока не было</div>'}</div></div>`;
+  const touched = new Set<string>();
+  const inputs = [["c-comment", "soft_comment"], ["c-date", "soft_comm_date"], ["c-pdate", "promise_date"], ["c-psum", "forecast_sum"]] as const;
+  for (const [id, key] of inputs) panel.querySelector(`#${id}`)?.addEventListener("input", () => touched.add(key));
   panel.querySelector("#c-save")?.addEventListener("click", async () => {
     const status = (panel.querySelector("#c-status") as HTMLSelectElement).value;
     if (!status) { toast("Выберите статус"); return; }
     const values: Record<string, string> = { soft_call_status: status };
     const comment = (panel.querySelector("#c-comment") as HTMLTextAreaElement).value.trim();
-    values.soft_comment = comment;
+    if (touched.has("soft_comment")) values.soft_comment = comment;
     const cdate = (panel.querySelector("#c-date") as HTMLInputElement).value;
-    values.soft_comm_date = cdate;
+    if (touched.has("soft_comm_date")) values.soft_comm_date = cdate;
     const pdate = (panel.querySelector("#c-pdate") as HTMLInputElement).value;
-    if (pdate) values.promise_date = pdate;
+    if (touched.has("promise_date")) values.promise_date = pdate;
     const psum = ((panel.querySelector("#c-psum") as HTMLInputElement).value || "").replace(/\s/g, "").replace(",", ".");
-    if (psum && !/^\d+(?:\.\d+)?$/.test(psum)) { toast("Проверьте сумму обещания"); return; }
-    if (psum) values.forecast_sum = psum;
+    if (touched.has("forecast_sum") && psum && !/^\d+(?:\.\d+)?$/.test(psum)) { toast("Проверьте сумму обещания"); return; }
+    if (touched.has("forecast_sum")) values.forecast_sum = psum;
+    const saveButton = panel.querySelector<HTMLButtonElement>("#c-save")!;
+    saveButton.disabled = true;
     const res = await api("/api/save", undefined, "POST", {
       rep, values, finish: true, kind: "call",
-      op_id: "desk-call-" + Date.now().toString(36),
+      op_id: "desk-call-" + crypto.randomUUID(),
       form_version: state.formVersion,
       input_keys: Object.keys(values),
+      cleared_keys: Object.keys(values).filter(key => key !== "soft_call_status" && key !== "soft_comment" && values[key] === ""),
       occurred_at: Date.now(),
     });
+    saveButton.disabled = false;
     if (res.ok) {
+      if ((res.data as any)?.queued) { toast("Звонок сохранён на компьютере; отправится при появлении связи"); return; }
       const rejected = (res.data as any)?.rejected || null;
       toast(rejected ? "Звонок сохранён, но часть полей не принята: " + Object.keys(rejected).join(", ")
                      : "Звонок сохранён");
@@ -176,7 +194,7 @@ export const softHelp: Section = {
     if (sec && sw && sw.innerHTML.trim()) sec.style.display = "";
   });
     root.querySelector("#s-logout")?.addEventListener("click", async () => {
-      if (!confirm("Выйти? Вход, портфель и кэш этого компьютера сотрутся.")) return;
+      if (!confirm("Выйти? Вход, портфель, кэш и неотправленные звонки этого компьютера сотрутся.")) return;
       const hard = await import("../kit/api").then((m) => m.hard);
       await hard.logout();
       location.reload();

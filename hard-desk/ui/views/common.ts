@@ -72,9 +72,9 @@ export function evidenceTag(level: string | undefined): string {
 }
 
 /** Карточка должника в панели справа: как в миниаппе, но на широкой колонке. */
-export async function openPerson(employee: string, rep: string, date?: string): Promise<void> {
+export async function openPerson(employee: string, rep: string, date?: string, mode?: string): Promise<void> {
   const body = openPanel(`<h2>…</h2><div class="sub">${esc(employee)}</div>`);
-  const r = await api("/api/manager/person", { employee, rep, date });
+  const r = await api("/api/manager/person", { employee, rep, date, mode });
   if (!r.ok) { body.innerHTML = problem(r.text || "Не открылось"); return; }
   const d = r.data;
   $("panel-title").innerHTML = `<h2>${esc(d.client || rep)}</h2>
@@ -93,10 +93,11 @@ export async function openPerson(employee: string, rep: string, date?: string): 
   body.innerHTML = `
     ${ev.level ? `<div style="margin:2px 0 6px">${evidenceTag(ev.level)} <span class="muted" style="font-size:13px">${esc(ev.note || "")}</span></div>` : ""}
     <dl class="kv">${kv}</dl>
-    ${form ? `<div class="block"><h3>Выезд ${esc(shortDate(d.date || ""))}</h3><dl class="kv">${form}</dl></div>` : ""}
+    ${form ? `<div class="block"><h3>${d.profile === "soft" ? "Звонок" : "Выезд"} ${esc(shortDate(d.date || ""))}</h3><dl class="kv">${form}</dl></div>` : ""}
+    ${d.calls?.length ? `<div class="block"><h3>История звонков</h3>${d.calls.map((c: any) => `<p>${esc(c.day)} · ${esc(c.payload)}</p>`).join("")}</div>` : ""}
     ${d.comment ? `<div class="block"><h3>Комментарий</h3><div style="white-space:pre-wrap;font-size:14px;line-height:1.55">${esc(d.comment)}</div></div>` : ""}
     <div class="block" id="ph-block" hidden><h3>Фото</h3><div class="photos" id="ph"></div></div>`;
-  void loadPhotos(rep, date);
+  if (d.profile !== "soft") void loadPhotos(rep, date);
 }
 
 async function loadPhotos(rep: string, date?: string) {

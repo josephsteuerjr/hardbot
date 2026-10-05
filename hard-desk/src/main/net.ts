@@ -5,7 +5,9 @@
 import { session, type Session } from "electron";
 import { readFileSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
+import { createHash } from "node:crypto";
 import { cacheGet, cachePut, readFieldToken, readSettings, readToken, wipe, wipeField, writeFieldToken, writeSettings, writeToken } from "./store";
+import { clearCallQueue, readCallQueue, writeCallQueue, type CallQueue } from "./store";
 
 export const OFFLINE = "Нет связи с сервером «Хард». Как только интернет появится, пульт догонит сам.";
 export const CERT_BAD = "Сертификат сервера не прошёл проверку — эта сеть подменяет соединение. " +
@@ -223,11 +225,74 @@ export async function enrollField(raw: string): Promise<ApiResult> {
   return { ok: true, status: 200, data: { ...data, token: undefined } };
 }
 
+function callOwner(): string {
+  return createHash("sha256").update((readSettings().fieldServer || "") + "\n" + readFieldToken()).digest("hex");
+}
+function ownedCallQueue(): CallQueue {
+  const owner = callOwner(), queue = readCallQueue();
+  if (queue && queue.owner !== owner && queue.entries.length) throw new Error("На компьютере остались звонки другого входа. Восстановите прежний вход или явно очистите очередь при выходе.");
+  return queue?.owner === owner ? queue : { owner, entries: [] };
+}
+let flushingCalls: Promise<Map<string, ApiResult>> | null = null;
+export function flushCallQueue(): Promise<Map<string, ApiResult>> {
+  if (flushingCalls) return flushingCalls;
+  const work = async () => {
+    const results = new Map<string, ApiResult>();
+    if (!readFieldToken()) return results;
+    const owner = callOwner();
+    for (;;) {
+      const entry = ownedCallQueue().entries.find(e => !e.error);
+      if (!entry || callOwner() !== owner) break;
+      const id = String(entry.body.op_id);
+      const res = await callField("POST", "/api/save", undefined, entry.body, { sendingQueue: true });
+      if (res.kind === "offline" || res.status >= 500) break;
+      results.set(id, res);
+      if (callOwner() !== owner || res.kind === "cert" || res.kind === "revoked" || res.kind === "nolink") break;
+      const current = ownedCallQueue(); // сохранения во время отправки остаются в очереди
+      const rejected = (res.data as { rejected?: Record<string, unknown> } | undefined)?.rejected;
+      if (res.ok && !rejected) current.entries = current.entries.filter(e => e.body.op_id !== entry.body.op_id);
+      else {
+        const pending = current.entries.find(e => e.body.op_id === entry.body.op_id);
+        if (pending) pending.error = res.ok ? "Звонок принят, но поля требуют проверки: " + Object.keys(rejected || {}).join(", ") : res.text || "Сервер не принял звонок";
+      }
+      writeCallQueue(current);
+    }
+    return results;
+  };
+  flushingCalls = work().finally(() => { flushingCalls = null; });
+  return flushingCalls;
+}
+
 export async function callField(method: string, path: string, query?: Record<string, unknown>, body?: unknown,
-                                opts: { binary?: boolean; cache?: boolean } = {}): Promise<ApiResult> {
+                                opts: { binary?: boolean; cache?: boolean; sendingQueue?: boolean } = {}): Promise<ApiResult> {
   const server = readSettings().fieldServer;
   const token = readFieldToken();
   if (!server || !token) return { ok: false, status: 0, kind: "nolink", text: "Приложение ещё не знает, кто вы." };
+  if (method === "POST" && path === "/api/local/call_queue/remove") {
+    try {
+      const queue = ownedCallQueue(), id = String((body as { op_id?: unknown })?.op_id || "");
+      queue.entries = queue.entries.filter(entry => entry.body.op_id !== id || !entry.error);
+      writeCallQueue(queue);
+      return { ok: true, status: 200, data: { pending: queue.entries.length } };
+    } catch (error) { return { ok: false, status: 0, kind: "server", text: String(error) }; }
+  }
+  if (method === "GET" && path === "/api/local/call_queue") {
+    try {
+      const queue = ownedCallQueue();
+      return { ok: true, status: 200, data: { pending: queue.entries.length, errors: queue.entries.filter(e => e.error).map(e => ({ rep: e.body.rep, op_id: e.body.op_id, error: e.error })) } };
+    } catch (error) { return { ok: false, status: 0, kind: "server", text: String(error) }; }
+  }
+  const callBody = body as Record<string, unknown> | undefined;
+  if (!opts.sendingQueue && method === "POST" && path === "/api/save" && callBody?.kind === "call" && callBody.finish === true) {
+    if (!callBody.op_id || !callBody.occurred_at) return { ok: false, status: 0, kind: "server", text: "Нет идентификатора или времени звонка" };
+    try {
+      const queue = ownedCallQueue();
+      if (!queue.entries.some(e => e.body.op_id === callBody.op_id)) queue.entries.push({ body: callBody });
+      writeCallQueue(queue);
+      const results = await flushCallQueue();
+      return results.get(String(callBody.op_id)) || { ok: true, status: 200, data: { queued: true, op_id: callBody.op_id } };
+    } catch (error) { return { ok: false, status: 0, kind: "server", text: "Не удалось сохранить звонок на компьютере: " + String(error) }; }
+  }
   if (!fieldOk(String(path))) return { ok: false, status: 0, kind: "server", text: "запрещённый путь" };
   const url = server + path + qs(query);
   const key = "F " + method + " " + path + qs(query);
@@ -311,4 +376,5 @@ export async function logoutField(): Promise<void> {
     } catch { /* нет связи — токен всё равно стираем, аналитик отзовёт */ }
   }
   wipeField();
+  clearCallQueue();
 }

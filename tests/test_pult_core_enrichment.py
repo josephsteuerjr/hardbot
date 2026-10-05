@@ -8,6 +8,8 @@ import json
 from datetime import date, timedelta
 from pathlib import Path
 
+from pult.core import bootstrap
+bootstrap.ensure_paths()
 import enrich
 
 from pult.core import enrichment as en
@@ -36,7 +38,8 @@ class _Split(dict):
     orphan_cids: list = []
 
 
-def test_match_employees_and_preview_texts(tmp_path):
+def test_match_employees_and_preview_texts(tmp_path, monkeypatch):
+    monkeypatch.setattr(en, "workbook_profile", lambda path: "hard")
     folder = tmp_path / "РТ" / "Душанбе" / "Иванов"
     folder.mkdir(parents=True)
     (folder / "Иванов.xlsb").write_bytes(b"")
@@ -51,12 +54,12 @@ def test_match_employees_and_preview_texts(tmp_path):
     fmap = {"иванов": [{"path": folder}], "сидоров": [{"path": empty}]}
     matched, nofolder, nofile = en.match_employees(by_emp, fmap)
     assert [m["employee"] for m in matched] == ["Иванов"]
-    assert nofolder == ["Нетпапки (4)"] and nofile == ["Сидоров"]
+    assert nofolder == ["Нетпапки (4)"] and nofile == ["Сидоров — нет .xlsb профиля HARD"]
     pairs = dict(en.preview_pairs(by_emp, matched))
     assert pairs == {"с результатами из приложения": 3, "готовы к обогащению": 1,
                      "результатов Хард / Софт": 2, "файлов": 1}
     warn = en.preview_warning(by_emp, matched, nofolder, nofile)
-    assert "нет папки: Нетпапки (4)" in warn and "нет .xlsb: Сидоров" in warn
+    assert "нет папки: Нетпапки (4)" in warn and "Сидоров — нет .xlsb профиля HARD" in warn
     assert en.pick_note(matched[0]) == "HARD · результатов: 2 · файлов: 1 · Душанбе"
 
     by_emp.orphan_filled, by_emp.orphan_rows, by_emp.orphan_cids = 2, 5, ["К1", "К2"]
@@ -69,7 +72,7 @@ def test_match_employees_and_preview_texts(tmp_path):
 
 # --- окно и подтверждение --------------------------------------------------------
 def test_window_text_is_loud_when_empty():
-    assert en.window_text("01.08.2026", "") == "Окно выездов: с 01.08.2026 по —."
+    assert en.window_text("01.08.2026", "") == "Окно результатов: с 01.08.2026 по —. Дата факта выезда или звонка."
     assert en.window_text("", "").startswith("ОКНО НЕ ЗАДАНО")
     text = en.confirm_text(2, 3, "", "05.08.2026")
     assert text.startswith("Обогатить личные реестры: сотрудников 2, файлов 3?")
@@ -195,7 +198,7 @@ def test_conflict_tables_and_ledger_error():
     conflicts, office = en.collect_conflicts(_results())
     assert [c["employee"] for c in conflicts] == ["Иванов"]
     row = en.conflict_row(conflicts[0])
-    assert row == ("Иванов", "К2", "Общий результат", "офис", "бот", "старое",
+    assert row == ("Иванов", "Иванов.xlsb", "К2", "Общий результат", "офис", "бот", "старое",
                    "2026-08-02", "правили обе стороны")
     assert en.conflict_row(office[0])[-1] == "правка офиса"
     err = en.ledger_error(_results())

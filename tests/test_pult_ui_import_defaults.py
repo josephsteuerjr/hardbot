@@ -97,3 +97,26 @@ def test_python_profile_choice_changes_selection_and_invalidates_preview(app, wi
     assert window.imp_selected == {"soft qa"}
     assert window._imp_preview_signature is None
     assert window._imp_signature() != old_signature
+
+
+def test_import_search_keeps_hidden_selection_and_profile_remembers_empty(app, window):
+    import db
+    from pult.core import registry_import as ri
+    fields = db.FIELDS
+    rows = [[f.title for f in fields] + ["ответственный Сотрудник СОФТ"], [f.source for f in fields] + ["софт"]]
+    for i, name in enumerate(("Alpha", "Beta")):
+        rows.append([{"contract_id": f"UI-FILTER-{i}", "responsible": name}.get(f.key) for f in fields] + ["Soft QA"])
+    window.imp_book = {"grid": rows, "scope": ri.scope_from_grid(rows), "file_sha256": "synthetic"}
+    ri.select_profile(window.imp_book, "hard")
+    window.imp_selected = {"alpha"}
+    window._imp_remember()
+    window._imp_render()
+    window.imp_search.set("Beta")
+    assert set(window.imp_list.checks) == {"beta"} and window.imp_selected == {"alpha"}
+    window.imp_search.set("")
+    window.imp_profile.setCurrentIndex(1)
+    window._imp_all(False)
+    window.imp_profile.setCurrentIndex(0)
+    assert window.imp_selected == {"alpha"}
+    window.imp_profile.setCurrentIndex(1)
+    assert window.imp_selected == set()

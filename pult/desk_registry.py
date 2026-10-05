@@ -100,12 +100,13 @@ def _book_view(selected=None) -> dict:
     return {"caption": ri.file_caption(book) if book else "",
             "profile": book.get("import_profile", "hard"),
             "employees": [{"key": e["key"], "name": e["name"], "note": ri.employee_note(e),
+                           "file_count": e.get("file_count", 0), "db_count": e.get("db_count", 0),
                            "in_db": bool(e.get("db_count"))}
                           for e in book.get("employees") or []],
             "selected": sorted(sel)}
 
 
-def imp_pick(body, *, admin, start_job, **_):
+def imp_pick(body, *, admin, start_job, settings, **_):
     path = str(body.get("path") or "")
 
     def work(say):
@@ -118,21 +119,28 @@ def imp_pick(body, *, admin, start_job, **_):
         stats = admin("GET", "/admin/stats")
         book["db_employees"] = list(stats.get("employees") or [])
         book["db_soft_employees"] = list(stats.get("soft_employees") or [])
-        ri.select_profile(book, "hard", book["db_employees"], book["db_soft_employees"])
+        profile = ri.import_preferences(settings).get("profile", "hard")
+        try:
+            ri.select_profile(book, profile, book["db_employees"], book["db_soft_employees"])
+        except ValueError:
+            ri.select_profile(book, "hard", book["db_employees"], book["db_soft_employees"])
         head, first, c_id, c_who = ri.grid_layout(book["grid"])
         book.update(head=head, first=first, c_id=c_id, c_who=c_who)
-        book["_selected"] = sorted(ri.default_import_selection(book["employees"]))
+        ri.restore_import_selection(book, settings)
         with _lock:
             S["book"], S["preview"] = book, None
         return _book_view()
     return {"job": start_job("pick", work)}
 
 
-def imp_selection(body, **_):
+def imp_selection(body, *, settings, **_):
     """«снять / есть в БД / все» и подпись кнопки предпросмотра."""
     book = S["book"] or {}
     if body.get("profile") and body["profile"] != book.get("import_profile", "hard"):
         ri.select_profile(book, body["profile"], book.get("db_employees"), book.get("db_soft_employees"))
+        ri.restore_import_selection(book, settings)
+        ri.remember_import_selection(book, book["_selected"], settings)
+        settings.save()
         S["preview"] = None
         return _book_view()
     mode = body.get("mode")
@@ -144,7 +152,8 @@ def imp_selection(body, **_):
         sel = ri.existing_import_selection(book.get("employees") or [])
     else:
         sel = set(body.get("selected") or [])
-    book["_selected"] = sorted(sel)
+    ri.remember_import_selection(book, sel, settings)
+    settings.save()
     S["preview"] = None
     return {"selected": sorted(sel),
             "button": ri.preview_button_text(book, sel, bool(body.get("full")))}
@@ -274,12 +283,13 @@ def _picked(keys) -> list[dict]:
 
 
 def _ledger(admin, employees):
-    answer = admin("GET", en.ledger_query(employees), timeout=120) or {}
-    return dict(answer.get("ledger") or {})
+    answer = admin("GET", en.ledger_query(employees) + "&books=1", timeout=120) or {}
+    return {**dict(answer.get("ledger") or {}), "_books": dict(answer.get("books") or {})}
 
 
 def _conf(c: list[dict]) -> list[dict]:
     return [{"contract_id": str(x.get("contract_id") or ""), "key": str(x.get("key") or ""),
+             "book_path": str(x.get("book_path") or ""),
              "row": en.conflict_row(x)} for x in c]
 
 
@@ -312,7 +322,7 @@ def _decisions(body, picked, since, until) -> dict:
     pv = S["enr_check"]
     if not pv or pv["keys"] != sorted(m["key"] for m in picked) or (pv["since"], pv["until"]) != (since, until):
         return {}
-    return {(str(d["contract_id"]), str(d["key"])): str(d["decision"]) for d in body.get("decisions") or []}
+    return {en.conflict_key(d): str(d["decision"]) for d in body.get("decisions") or []}
 
 
 def enr_apply(body, *, admin, start_job, settings, **_):
