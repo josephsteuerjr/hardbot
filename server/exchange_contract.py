@@ -922,10 +922,13 @@ def validate_import_source_proof(
                 row["contract_id"],
                 label=f"test subset contracts[{index}].contract_id",
             )
-            responsible = _string(
+            # A Soft-only master row has no Hard owner. Keep that exact empty
+            # value in the scope; the grid digest still binds the Soft column
+            # and the importer compares the Hard scope with the parsed grid.
+            responsible = ("" if row["responsible"] == "" else _string(
                 row["responsible"],
                 label=f"test subset contracts[{index}].responsible",
-            )
+            ))
             if contract_id in scope:
                 raise ExchangeContractError(
                     "test subset proof contains duplicate contract IDs"

@@ -206,6 +206,7 @@ def test_import_preview_is_read_only_and_carries_explicit_full_flag(monkeypatch)
             "full_registry": True,
             "authoritative_employees": ["Егор"],
             "preview_only": True,
+            "import_profile": "hard",
             "replace_current_visit_comments": True,
             # Предпросмотр не восстанавливает откреплённое вручную:
             # это запись, а предпросмотр обязан быть без записи.

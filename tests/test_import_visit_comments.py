@@ -249,7 +249,7 @@ def test_requested_comment_action_requires_its_real_header(tmp_path, monkeypatch
     assert report["missing_comment_headers"] == ["visit_comment"]
 
 
-def test_historical_comment_is_read_only_and_rendered_on_third_tab(
+def test_historical_comment_is_read_only_and_rendered_on_client_tab(
     tmp_path, monkeypatch
 ):
     _init(tmp_path, monkeypatch)
@@ -266,7 +266,7 @@ def test_historical_comment_is_read_only_and_rendered_on_third_tab(
 
     assert card["historical_visit_comment"] == "раньше обещал оплатить"
     assert "historical_visit_comment" not in web.ALLOWED_SAVE
-    assert '${tab("visit",t.visit)}${tab("debt",t.debt)}${tab("client",t.client)}' in miniapp
+    assert '${tab("debt",t.debt)}${tab("client",t.client)}' in miniapp
     assert "d.historical_visit_comment" in miniapp
     assert miniapp.index("function panelClient") < miniapp.index(
         "d.historical_visit_comment"

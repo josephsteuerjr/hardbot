@@ -7367,8 +7367,9 @@ def import_grid(
 
     ``full_registry`` — отдельное явное решение оператора, а не следствие
     ``source_kind``. При нём ``authoritative_employees`` задаёт точную область:
-    снимаются только отсутствующие договоры этих сотрудников, остальные
-    портфели не затрагиваются. Пустой вход допустим и означает нулевой портфель
+    снимаются отсутствующие договоры и явно пустые назначения выбранного
+    профиля этих сотрудников, остальные портфели не затрагиваются.
+    Пустой вход допустим и означает нулевой портфель
     явно выбранного сотрудника.
     ``preview_only`` выполняет тот же расчёт в транзакции и откатывает все записи.
     При применении пульт передаёт увиденный ``expected_auto_unassigned``; если
@@ -8006,7 +8007,7 @@ def import_grid(
     # Ключи РЕЕСТРА, реально присутствующие в шапке этой книги. Общий признак
     # «колонка есть» для всех политик, различающих пустую ячейку и отсутствие
     # колонки (отзыв здесь; снятие обещания — якорный шлюз, вер. контракта 3).
-    book_keys = {k for k in col_keys if k}
+    book_keys = {k for k in col_keys if k} | set(soft_cols.values())
 
     # Сначала разобрать ВЕСЬ файл в памяти. Это обязательный preflight: при
     # повторе КД не должна успеть записаться ни одна предыдущая строка.
@@ -8069,12 +8070,15 @@ def import_grid(
                 if number:
                     data[target] = number
         for index, target in soft_cols.items():
-            # Софт-ответственный — текст; канонизируется ниже по известным
-            # написаниям (как responsible). Пустая ячейка ведёт себя как у
-            # responsible: ключа нет — прежнее значение не трогаем.
+            # Софт-ответственный канонизируется ниже. Частичный Софт-импорт
+            # сохраняет прежнюю явную очистку этой ячейки. В полном срезе
+            # пустое назначение снимается ниже с учётом профиля и выбранных
+            # сотрудников и включается в count/digest предпросмотра.
             val = raw[index] if index < len(raw) else None
             text = str(val).strip() if val is not None else ""
-            data[target] = text
+            if (target != "responsible_soft" or text
+                    or not full_registry and import_profile in ("soft", "both")):
+                data[target] = text
         for index, target in recall_cols.items():
             val = raw[index] if index < len(raw) else None
             text, is_set = _recall_cell(val, is_date=(target == "recall_date"))
@@ -8422,7 +8426,7 @@ def import_grid(
                     recall_restore_effect.append((cid, incoming_resp))
                 for key in recall_owned - data.keys():
                     data[key] = None
-            elif unassigned_reason == UNASSIGNED_REASON_ABSENT_FROM_REGISTRY:
+            elif unassigned_reason == UNASSIGNED_REASON_ABSENT_FROM_REGISTRY and incoming_resp:
                 data["unassigned_from"] = ""
                 data["unassigned_reason"] = ""
                 for key in recall_owned - data.keys():
@@ -8829,7 +8833,6 @@ def import_grid(
         ).hexdigest()
         # Считаем по итогу разбора всего файла, а не построчно: у одного договора в
         # реестре бывает несколько строк, и владелец может стоять в любой из них.
-        report["no_responsible"] = sum(1 for owner in owners.values() if not owner)
         manual_effect_rows = [
             {"contract_id": cid, "employee": employee}
             for cid, employee in sorted(manual_restore_effect)
@@ -8855,15 +8858,18 @@ def import_grid(
         }
         auto_unassigned_effect: list[tuple[str, str]] = []
         if full_registry and import_profile in ("hard", "both"):
-            # Отсутствие считается только по каноническим КД, разобранным тем же
-            # preflight выше, и только внутри явно выбранных сотрудников. Строки,
-            # визиты, фото и долги не удаляются.
+            # Отсутствующий КД или пустая колонка владельца в полном срезе
+            # снимает прежнее назначение только явно выбранного сотрудника.
+            # Так переход Hard -> Soft работает и для КД, оставшегося в master.
+            # Отсутствующая колонка не является очисткой. История не удаляется.
             for cid, old in existing.items():
                 former = str(old["responsible"] or "").strip()
+                present_blank = ("responsible" in book_keys and cid in grouped
+                                 and not str(grouped[cid].get("responsible") or "").strip())
                 if (
                     not former
                     or _name_key(former) not in authoritative_by_key
-                    or cid in grouped
+                    or cid in grouped and not present_blank
                 ):
                     continue
                 changed = conn.execute(
@@ -8876,10 +8882,15 @@ def import_grid(
                 if changed:
                     auto_unassigned_effect.append((cid, former))
                     assignment_events.append((cid, former, "", None, "hard"))
+                    if cid in owners:
+                        owners[cid] = ""
         if full_registry and import_profile in ("soft", "both"):
             for cid, old in existing.items():
                 former = str(old["responsible_soft"] or "").strip()
-                if not former or _name_key(former) not in authoritative_by_key or cid in grouped:
+                present_blank = ("responsible_soft" in book_keys and cid in grouped
+                                 and not str(grouped[cid].get("responsible_soft") or "").strip())
+                if (not former or _name_key(former) not in authoritative_by_key
+                        or cid in grouped and not present_blank):
                     continue
                 changed = conn.execute("UPDATE clients SET responsible_soft='' "
                                        "WHERE contract_id=? AND responsible_soft=?",
@@ -8888,6 +8899,7 @@ def import_grid(
                 if changed:
                     auto_unassigned_effect.append((cid, "Софт: " + former))
                     assignment_events.append((cid, former, "", None, "soft"))
+        report["no_responsible"] = sum(1 for owner in owners.values() if not owner)
         effect_rows = [
             {"contract_id": cid, "employee": employee}
             for cid, employee in sorted(auto_unassigned_effect)
