@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import date, datetime, timedelta
 
@@ -1523,9 +1524,10 @@ def _totals_of(rows: list[dict], days: int) -> dict:
     plan_map = db.visit_plan_map()
     # План команды — СУММА личных норм: в группах 8/10/12 умножение общей нормы
     # на число людей дало бы цифру, которой никто не ставил.
-    plan_total = sum(db.visit_plan_for(r["employee"], plan_map) for r in rows)
+    plan_total = sum(db.visit_plan_for(r["employee"], plan_map) for r in rows
+                     if r.get("profile") != "soft")
     return {
-        "employees": len(rows),
+        "employees": sum(1 for r in rows if r.get("profile") != "soft"),
         "active": sum(1 for r in rows if r["visits"]),
         "visits": sum(r["visits"] for r in rows),
         "persons": len(people),
@@ -1566,6 +1568,11 @@ def stats_data(mgr: dict, rng: dict, employees: list[str] | None = None) -> dict
         r = _employee_stats(emp, d_from, d_to)
         r["country"] = country.get(emp)
         r["by_day"] = [r["_by_day"].get(x["date"], 0) for x in days]
+        has_soft = db.soft_portfolio_exists(emp) or bool(db.soft_calls_for_employee(emp, d_from, d_to))
+        r["profiles"] = (["hard"] if r["portfolio"] or r["visits"] or not has_soft else []) + (["soft"] if has_soft else [])
+        r["profile"] = "soft" if r["profiles"] == ["soft"] else "hard"
+        if r["profile"] == "soft":
+            r["plan_per_day"] = 0
         rows.append(r)
     for i, x in enumerate(days):
         x["visits"] = sum(r["by_day"][i] for r in rows)
@@ -1598,79 +1605,135 @@ def stats_data(mgr: dict, rng: dict, employees: list[str] | None = None) -> dict
         "pay_asof": db.last_payment_asof(),
         # Контур «Софт»: отдельным блоком — у софтников свои метрики (звонки),
         # в выездную таблицу они не смешиваются.
-        "soft": soft_block(mgr, rng),
+        "soft": soft_block(mgr, rng, employees=employees),
     }
 
 
-def soft_block(mgr: dict, rng: dict) -> dict:
+def _call_values(call) -> dict:
+    try:
+        values = json.loads(call["values_json"] or "{}")
+        return values if isinstance(values, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def _call_status(call, values: dict) -> str:
+    if "soft_call_status" in values:
+        return str(values["soft_call_status"] or "").strip()
+    # Старые звонки сохраняли только текст. Текущий реестр здесь не источник.
+    match = re.search(r"Статус:\s*([^;\n]*)", call["payload"] or "")
+    return match.group(1).strip() if match else ""
+
+
+def _soft_employee_stats(emp: str, rng: dict, calls=None, *, details=False) -> dict:
+    contracts = db.clients_for_soft(emp)
+    persons = db._group_persons(contracts)
+    calls = calls if calls is not None else db.soft_calls_for_employee(emp, rng["from"], rng["to"])
+    statuses: dict[str, int] = {}
+    cases, people, by_day = [], set(), {}
+    call_ids = {}
+    for call in calls:
+        try:
+            ids = json.loads(call["contracts_json"] or "[]")
+        except (ValueError, TypeError):
+            ids = []
+        ids = [str(x) for x in ids if isinstance(x, str)] if isinstance(ids, list) else []
+        call_ids[call["id"]] = ids or [call["contract_id"]]
+    rows = {c["contract_id"]: c for c in db.clients_by_ids(
+        {cid for ids in call_ids.values() for cid in ids})} if calls else {}
+    for call in calls:
+        values = _call_values(call)
+        status = _call_status(call, values) or "Без статуса"
+        statuses[status] = statuses.get(status, 0) + 1
+        day = call["created_at"]
+        by_day[day] = by_day.get(day, 0) + 1
+        cs = [rows[cid] for cid in call_ids[call["id"]] if cid in rows]
+        rep = rows.get(call["contract_id"])
+        if rep is not None:
+            # Один результат относится к группе КД; повторный звонок не новый человек.
+            people.add(db.person_key(rep))
+        else:
+            people.add((call["contract_id"],))
+        if details:
+            money = _totals_units(db._group_persons(cs))
+            cases.append({"id": call["id"], "profile": "soft", "date": day,
+                          "day_label": _short_date(db._as_date(day)),
+                          "employee": emp, "rep": call["contract_id"],
+                          "client": rep["client"] if rep is not None else call["contract_id"],
+                          "n": len(cs) or 1, "outcome": status,
+                          "comment": str(values.get("soft_comment") or ""),
+                          "money": money, "money_text": _units_text(money)})
+    forecasts = {"Ждём": [], "Сомнение": []}
+    for person in persons:
+        c = person["contracts"][0]
+        fc = (c["forecast"] or "").strip()
+        if fc in forecasts:
+            forecasts[fc].append([{"unit": debt.unit([c["partner"]]),
+                                   "sum": debt.num(c["forecast_sum"])}])
+    wait, doubt = (_merge_units(forecasts[k]) for k in ("Ждём", "Сомнение"))
+    pays = _payments_of(persons, rng["from"], rng["to"])
+    paid = _merge_units(p["units"] for p in pays)
+    money = _totals_units(persons)
+    maximum = _merge_units([wait, doubt, paid])
+    result = {"employee": emp, "profile": "soft", "office": db.employee_cities().get(emp, ""),
+              "contracts": len(contracts), "portfolio": len(persons),
+              "calls": len(calls), "persons": len(people), "statuses": statuses,
+              "paid_persons": len({p["person"]["rep"] for p in pays}),
+              "money": money, "money_text": _units_text(money),
+              "_by_day": by_day}
+    # Старые числовые поля остаются совместимыми только для одной валюты.
+    for key, units in (("wait", wait), ("doubt", doubt), ("paid_sum", paid),
+                       ("debt", money), ("max", maximum)):
+        result[key] = _units_num(units)[0] if units else 0
+        result[key + "_money"] = units
+        result[key + "_text"] = _units_text(units)
+    if details:
+        result["cases"] = cases
+        result["by_day"] = [{**d, "calls": by_day.get(d["date"], 0)} for d in _range_days(rng)]
+    return result
+
+
+def soft_block(mgr: dict, rng: dict, employees: list[str] | None = None) -> dict:
     """Контур «Софт» в сводке руководителя: состав и счётчики софт-команды.
 
     KPI повторяет лист «Статистика сотрудника» софт-книги: Взыск — оплаты
     реестра по портфелю софта, Ждём/Сомнение — суммы прогноза по корзинам,
-    Макс — их сумма. Звонки — из журнала calls (по автору). Охват — страны
-    направления руководителя (владелец видит всех)."""
+    Макс — их сумма. Звонки — из журнала calls (по автору). Охват — точный
+    разрешённый состав руководителя, в том числе офисный и ручной."""
     d_from, d_to = rng["from"], rng["to"]
-    employees = db.soft_employees_by_direction(mgr.get("direction") or "")
+    employees = employees if employees is not None else sorted_employees(mgr)
     country = _employee_country_index(d_from, d_to)
     rows = []
     for emp in employees:
-        contracts = db.clients_for_soft(emp)
-        persons = _group_persons_public(contracts)
         calls = db.soft_calls_for_employee(emp, d_from, d_to)
-        statuses: dict[str, int] = {}
-        for c in calls:
-            text = c["payload"] or ""
-            marker = "Статус: "
-            i = text.find(marker)
-            if i >= 0:
-                j = text.find(";", i)
-                st = text[i + len(marker):j if j > i else len(text)].strip()
-                if st:
-                    statuses[st] = statuses.get(st, 0) + 1
-        # Обещание у человека ОДНО на все его договоры (update_person
-        # размазывает сумму по КД) — считаем по первому договору каждого
-        # человека, иначе «Ждём» завышался бы кратно числу КД.
-        wait = doubt = 0
-        for p in persons:
-            c = p["contracts"][0]
-            fc = (c["forecast"] or "").strip() if "forecast" in c.keys() else ""
-            if fc in ("Ждём",):
-                wait += int(db.canon_amount(c["forecast_sum"]) or 0)
-            elif fc in ("Сомнение",):
-                doubt += int(db.canon_amount(c["forecast_sum"]) or 0)
-        pays = _payments_of(persons, d_from, d_to)
-        pay_sum = sum(int(u["sum"]) for x in pays for u in x["units"])
-        rows.append({
-            "employee": emp,
-            "contracts": len(contracts),
-            "debt": sum(int(db.canon_amount(c["debt_total"]) or 0) for c in contracts),
-            "calls": len(calls),
-            "statuses": statuses,
-            "wait": wait, "doubt": doubt, "max": wait + doubt + pay_sum,
-            "paid_persons": len(pays), "paid_sum": pay_sum,
-            "country": country.get(emp),
-        })
+        if not calls and not db.soft_portfolio_exists(emp):
+            continue
+        rows.append({**_soft_employee_stats(emp, rng, calls), "country": country.get(emp)})
     rows.sort(key=lambda r: (-r["calls"], r["employee"].lower()))
-    return {
+    result = {
         "employees": rows,
         "calls": sum(r["calls"] for r in rows),
         "contracts": sum(r["contracts"] for r in rows),
-        "wait": sum(r["wait"] for r in rows),
-        "doubt": sum(r["doubt"] for r in rows),
     }
-
-
-def _group_persons_public(contracts):
-    """Группировка договоров в людей — обёртка над db._group_persons."""
-    return db._group_persons(contracts)
+    for key in ("wait", "doubt", "paid_sum"):
+        units = _merge_units(r[key + "_money"] for r in rows)
+        result[key] = _units_num(units)[0] if units else 0
+        result[key + "_money"] = units
+        result[key + "_text"] = _units_text(units)
+    return result
 
 
 def stats_employee_data(mgr: dict, rng: dict, employee: str,
-                        employees: list[str] | None = None) -> dict | None:
+                        employees: list[str] | None = None, mode: str = "") -> dict | None:
     employees = employees if employees is not None else sorted_employees(mgr)
     if employee not in employees:
         return None
     r = _employee_stats(employee, rng["from"], rng["to"])
+    has_soft = db.soft_portfolio_exists(employee) or bool(db.soft_calls_for_employee(employee, rng["from"], rng["to"]))
+    profiles = (["hard"] if r["portfolio"] or r["visits"] or not has_soft else []) + (["soft"] if has_soft else [])
+    if mode == "soft" or (not mode and profiles == ["soft"]):
+        return {"screen": "emp", "range": rng, "profiles": profiles,
+                **_soft_employee_stats(employee, rng, details=True)}
     days = _range_days(rng)
     for x in days:
         x["visits"] = r["_by_day"].get(x["date"], 0)
@@ -1689,7 +1752,8 @@ def stats_employee_data(mgr: dict, rng: dict, employee: str,
             **_case_marks(e),
         })
     per_day = db.visit_plan_for(employee)
-    return {"screen": "emp", "range": rng, **r, "by_day": days, "cases": cases,
+    return {"screen": "emp", "range": rng, "profile": "hard", "profiles": profiles,
+            **r, "by_day": days, "cases": cases,
             "plan_per_day": per_day, "plan": per_day * max(1, len(days))}
 
 

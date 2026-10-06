@@ -3927,9 +3927,12 @@ async def _manager_stats_employee(request: web.Request) -> web.Response:
     rng = _stats_range_q(request)
     team = _range_team(mgr, team, rng)
     emp = _manager_employee_q(request, team)
+    mode = request.query.get("mode", "")
+    if mode not in ("", "soft", "hard"):
+        raise web.HTTPBadRequest(text="mode")
     data = await asyncio.to_thread(
         functools.partial(digest_data.stats_employee_data, mgr, rng, emp,
-                          employees=team))
+                          employees=team, mode=mode))
     if data is None:
         raise web.HTTPNotFound(text="employee")
     reps = ",".join(c["rep"] for c in data["cases"][:50])

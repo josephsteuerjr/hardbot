@@ -780,7 +780,7 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
     """
     data = dd.stats_data(mgr, rng, employees)
     names = {c["code"]: c["name"] for c in data["countries"]}
-    rows = data["employees"]
+    rows = [r for r in data["employees"] if r.get("profile") != "soft"]
     layout = dd._outcome_layout(rows)
     period = f"{rng['label']} ({rng['from']} — {rng['to']})"
     bk = book.Book(explain)
@@ -852,17 +852,20 @@ def _soft_sheet(bk: "book.Book", soft: dict, period: str) -> None:
     ws = bk.sheet("Софт", tab="detail")
     ws.title(f"Софт · звонки · {period}", size=13)
     head_at = ws.head(["Сотрудник", "Договоров", "Долг", "Звонков",
-                       "Ждём", "Сомнение", "Оплаты", "Макс",
+                       "Ждём", "Сомнение", "Оплаты по реестру", "Макс",
                        "Топ-статусы"])
     kinds = ["text", "int", "money", "int", "money", "money", "money", "money", "text"]
     for r in soft["employees"]:
         top = ", ".join(f"{k} × {v}" for k, v in sorted(
             r["statuses"].items(), key=lambda kv: -kv[1])[:3])
-        ws.append([r["employee"], r["contracts"], r["debt"] or None,
-                   r["calls"], r["wait"] or None, r["doubt"] or None,
-                   r["paid_sum"] or None, r["max"] or None, top], kinds)
+        cash = lambda k: _money(r[k + "_money"], r[k + "_text"])
+        ws.append([r["employee"], r["contracts"], cash("debt"),
+                   r["calls"], cash("wait"), cash("doubt"),
+                   cash("paid_sum"), cash("max"), top], kinds)
     ws.append(["Итого", soft["contracts"], None, soft["calls"],
-               soft["wait"] or None, soft["doubt"] or None, None, None, ""],
+               _money(soft["wait_money"], soft["wait_text"]),
+               _money(soft["doubt_money"], soft["doubt_text"]),
+               _money(soft["paid_sum_money"], soft["paid_sum_text"]), None, ""],
               kinds, bold=True)
     ws.widths((30, 11, 14, 10, 14, 13, 14, 14, 40))
     ws.autofilter(head_at, ws.row - 1, 9)

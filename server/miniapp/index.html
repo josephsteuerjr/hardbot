@@ -1245,7 +1245,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=76;
+const SHELL_VERSION=77;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -4405,8 +4405,8 @@ async function dgLoad(){
   resetScroll();
   const b=$("dgbody"); if(b) b.innerHTML="…";
   const url = (DG.view==="stats"||DG.view==="team") ? "/api/manager/stats"+dgRangeQ()
-            : DG.view==="emp"      ? "/api/manager/stats_employee"+dgRangeQ({employee:DG.emp})
-            : DG.view==="person"   ? "/api/manager/person"+dgQ({employee:DG.emp,rep:DG.rep})
+            : DG.view==="emp"      ? "/api/manager/stats_employee"+dgRangeQ({employee:DG.emp,mode:DG.profile||""})
+            : DG.view==="person"   ? "/api/manager/person"+dgQ({employee:DG.emp,rep:DG.rep,mode:DG.profile||""})
             : DG.view==="plan"     ? "/api/manager/plan"
             : DG.view==="workload" ? "/api/manager/workload"+dgRangeQ(DG.wemp?{employee:DG.wemp}:{})
             : DG.view==="binds"    ? "/api/manager/binds"
@@ -4426,7 +4426,7 @@ async function dgLoad(){
   DG.date=j.date; DG.today=j.today; DG.prev=j.prev_date; DG.next=j.next_date;
   if(j.range){ DG.range=j.range; DG.preset=j.range.preset; DG.shift=j.range.shift||0;
                DG.from=j.range.from; DG.to=j.range.to; }
-  dgRender(j);
+  try{ dgRender(j); }catch(e){ console.error("manager render",e); dgFail(new Error("500")); }
 }
 function dgFail(e){
   const t=L(), b=$("dgbody"); if(!b) return;
@@ -4473,12 +4473,13 @@ function dgInOffice(r,code){ const o=r.office||""; return code===DG_NOOFF?!o:o==
 // ездят — только числовые индексы, поэтому контекст живёт в состоянии.
 function dgCases(metric){ dgGo("cases",{metric}); }
 function dgSearch(v){ DG.q=(v||"").trim().toLowerCase(); dgDrawTable(); }
-function dgPickEmp(i){ const r=DG.rows[i]; if(r) dgGo("emp",{emp:r.employee}); }
+function dgPickEmp(i){ const r=DG.rows[i]; if(r) dgGo("emp",{emp:r.employee,profile:DG.contour==="soft"?"soft":"hard"}); }
+function dgPickSoft(i){ const r=(DG.softrows||[])[i]; if(r) dgGo("emp",{emp:r.employee,profile:"soft"}); }
 function dgPickCase(i){ const c=DG.cases[i]; if(!c) return;
   DG.date=c.date;
   // В общем списке случаи разных сотрудников: карточку открываем от имени того,
   // за кем закреплён договор, иначе сервер честно ответит «не ваш человек».
-  dgGo("person",{rep:c.rep, emp:c.employee||DG.emp}); }
+  dgGo("person",{rep:c.rep, emp:c.employee||DG.emp,profile:c.profile||"hard"}); }
 function dgOpenMap(i){ const d=DG.days[i]; if(d){ DG.date=d.date; dgGo("map"); } }
 function dgOpenPromises(){ DG.date=DG.to; dgGo("promises"); }
 function dgDate(iso){ if(!iso) return; DG.date=iso; dgLoad(); }
@@ -4796,15 +4797,14 @@ function dgKpis(t,rg){
   if(t.visits) out.push(sec("Проверка выездов",`<div class="drows two">${ev.join("")}</div>`));
   // Контур «Софт»: своя команда и свои метрики — звонки вместо выездов.
   const soft=(DG.stats&&DG.stats.soft)||null;
-  if(soft&&soft.employees&&soft.employees.length){
-    const fmt=v=>(+v||0).toLocaleString("ru-RU");
-    const top=soft.employees.slice(0,5).map(r=>
-      `<div class="drow"><span>${esc(r.employee)}</span><b>${r.calls} звонков</b></div>`).join("");
+  DG.softrows=dgSoftRows();
+  if(DG.view==="stats"&&DG.softrows.length){
+    const top=DG.softrows.slice(0,5).map((r,i)=>
+      `<button class="drow" onclick="dgPickSoft(${i})"><span>${esc(r.employee)}</span><b>${r.calls} звонков ›</b></button>`).join("");
     out.push(sec("Софт · звонки",`<div class="drows">
-      ${row("сотрудников",soft.employees.length)}
-      ${row("звонков за период",soft.calls)}
-      ${row("Ждём / Сомнение",`${fmt(soft.wait)} / ${fmt(soft.doubt)}`)}
-    </div><div class="drows">${top}</div>`,"колл-центр: оплаты — в «Оплатах» сверху"));
+      ${row("сотрудников",DG.softrows.length)}
+      ${row("звонков за период",DG.softrows.reduce((s,r)=>s+(r.calls||0),0))}
+    </div><div class="drows">${top}</div><button class="btn line" onclick="DG.contour='soft';dgGo('team')">Все сотрудники Софта →</button>`,"звонки по дню сохранения; оплаты — по портфелю реестра"));
   }
   return out.join("");
 }
@@ -4851,13 +4851,13 @@ function dgFunnel(t,rg){
 }
 function dgFoldOpen(){ try{ return localStorage.getItem("hb_funnel_open")==="1"; }catch(e){ return false; } }
 function dgFoldSave(on){ try{ localStorage.setItem("hb_funnel_open", on?"1":"0"); }catch(e){} }
-function dgBars(days){
-  const mx=Math.max(1,...days.map(d=>d.visits||0));
-  const bars=days.map((d,i)=>`<button class="${d.weekend?"we":""}" title="${esc(d.label)}: ${d.visits||0}"
-      style="height:${Math.max(3,Math.round((d.visits||0)/mx*52))}px" onclick="dgDay(${i})"></button>`).join("");
+function dgBars(days,field="visits"){
+  const mx=Math.max(1,...days.map(d=>d[field]||0));
+  const bars=days.map((d,i)=>`<button class="${d.weekend?"we":""}" title="${esc(d.label)}: ${d[field]||0}"
+      style="height:${Math.max(3,Math.round((d[field]||0)/mx*52))}px" onclick="dgDay(${i})"></button>`).join("");
   const lbl=days.length<=31?`<div class="barlbl">${days.map(d=>`<span>${d.day}</span>`).join("")}</div>`:"";
   // Подпись — заголовком над столбиками: внизу она слипалась с датами краёв.
-  return `<div class="bars-h"><span class="t">Выезды по дням</span><span class="note">тап — открыть день</span></div>
+  return `<div class="bars-h"><span class="t">${field==="calls"?"Звонки":"Выезды"} по дням</span><span class="note">тап — открыть день</span></div>
     <div class="bars">${bars}</div>${lbl}`;
 }
 function dgIdle(r){
@@ -4906,9 +4906,10 @@ function dgTiles(j){
 // Поле поиска — вне перерисовываемой таблицы: иначе фокус терялся бы на каждой букве.
 function dgTeam(j,b){
   DG.stats=j; DG.rows=[]; DG.days=j.by_day||[]; DG.femp=null;
+  if(!DG.contour) DG.contour=(j.employees||[]).some(r=>r.profile!=="soft")?"hard":"soft";
   const rg=j.range||{};
   b.innerHTML=[dgTop(L().team, j.scope, `<span id="dgflt">${dgFilterChip()}</span>`),
-    dgPeriodBar(rg),
+    dgPeriodBar(rg), dgContourChips(DG.contour),
     `<div class="searchwrap" style="margin:4px 0 4px">${ic("search")}
       <input class="search" placeholder="Поиск сотрудника" value="${esc(DG.q)}" oninput="dgSearch(this.value)"></div>
      <div id="dgtable"></div>`].join("");
@@ -4972,7 +4973,8 @@ function dgFilterSet(i){
 }
 function dgDrawTable(){
   const j=DG.stats, el=$("dgtable"); if(!j||!el) return;
-  let rows=(j.employees||[]).slice();
+  if(DG.contour==="soft") return dgDrawSoftTable(el);
+  let rows=(j.employees||[]).filter(r=>r.profile!=="soft");
   if(DG.country) rows=rows.filter(r=>r.country===DG.country);
   if(DG.office) rows=rows.filter(r=>dgInOffice(r,DG.office));
   if(DG.q) rows=rows.filter(r=>String(r.employee||"").toLowerCase().includes(DG.q));
@@ -4999,12 +5001,45 @@ function dgDrawTable(){
   if(w&&h&&w.scrollWidth>w.clientWidth+4) h.textContent="таблица листается вбок →";
 }
 // --- ЭКРАН: сотрудник за период ---
+function dgContourChips(mode,profiles=["hard","soft"]){
+  return `<div class="chips">${profiles.map(p=>`<button class="chip" aria-pressed="${p===mode}" onclick="dgContour('${p}')">${p==="soft"?"Софт · звонки":"Хард · выезды"}</button>`).join("")}</div>`;
+}
+function dgContour(mode){
+  if(DG.view==="emp"){ DG.profile=mode; dgLoad(); }
+  else{ DG.contour=mode; DG.sort="employee"; DG.dir=1; dgGo('team'); }
+}
+function dgSoftRows(){
+  return (((DG.stats||{}).soft||{}).employees||[]).filter(r=>(!DG.country||r.country===DG.country)&&(!DG.office||dgInOffice(r,DG.office)));
+}
+function dgDrawSoftTable(el){
+  let rows=dgSoftRows().filter(r=>!DG.q||String(r.employee||"").toLowerCase().includes(DG.q));
+  const k=DG.sort||"employee",dir=DG.dir||1;
+  rows.sort((a,b)=>k==="employee"?dir*String(a.employee).localeCompare(String(b.employee),"ru"):dir*((+a[k]||0)-(+b[k]||0)));
+  DG.rows=rows;
+  const th=(k,t)=>`<th onclick="dgSort('${k}')">${t}</th>`;
+  el.innerHTML=`<div class="stwrap pin"><table class="stt pin"><thead><tr><th class="l" onclick="dgSort('employee')">Сотрудник</th>${th("calls","Звонков")}${th("persons","Людей в звонках")}${th("portfolio","Портфель, людей")}${th("contracts","КД")}<th>Оплаты по реестру</th><th>Ждём</th><th>Сомнение</th></tr></thead><tbody>${rows.map((r,i)=>`<tr onclick="dgPickEmp(${i})"><td class="l"><div class="pname">${esc(r.employee)}</div><div class="psub">${esc(r.office||"без офиса")}</div></td><td>${r.calls||0}</td><td>${r.persons||0}</td><td>${r.portfolio||0}</td><td>${r.contracts||0}</td><td>${esc(r.paid_sum_text||"0")}</td><td>${esc(r.wait_text||"0")}</td><td>${esc(r.doubt_text||"0")}</td></tr>`).join("")||'<tr><td colspan="8" class="l muted">Никого не найдено</td></tr>'}</tbody></table></div><div class="muted">Оплаты и прогноз — по текущему портфелю реестра. Тап по сотруднику — звонки за период.</div>`;
+}
+function dgSoftEmp(j,b){
+  DG.cases=j.cases||[]; DG.days=j.by_day||[]; DG.profile="soft"; DG.contour="soft";
+  const rg=j.range||{};
+  const metric=(label,value)=>`<div class="drow"><span>${esc(label)}</span><b>${esc(value)}</b></div>`;
+  const parts=[`<button class="back" onclick="dgGo('team')">‹ к сотрудникам</button>`,dgTop(j.employee||DG.emp||"",rg.label),dgPeriodBar(rg),dgContourChips("soft",j.profiles||["soft"]),
+    `<div class="fsec"><div class="fsec-h">Софт · звонки</div><div class="drows">${metric("звонков за период",j.calls||0)}${metric("людей в звонках",j.persons||0)}${metric("портфель: людей / договоров",`${j.portfolio||0} / ${j.contracts||0}`)}${metric("оплаты по реестру",j.paid_sum_text||"0")}${metric("прогноз · ждём",j.wait_text||"0")}${metric("прогноз · сомнение",j.doubt_text||"0")}</div></div>`,
+    `<div class="muted">Звонки — по дню сохранения результата. Оплаты и прогноз — по текущему портфелю реестра.</div>`];
+  if(DG.days.length>1) parts.push(dgBars(DG.days,"calls"));
+  parts.push(`<div class="chips">${Object.entries(j.statuses||{}).map(([s,n])=>`<span class="chip">${esc(s)} <b>${n}</b></span>`).join("")}</div>`);
+  parts.push(DG.cases.map((c,i)=>`<div class="pcard" onclick="dgPickCase(${i})"><div class="pinfo"><div class="pname">${esc(c.client)}</div><div class="psub">${esc(c.day_label||c.date)} · ${esc(c.outcome||"")}${c.n>1?` · КД ${c.n}`:""}</div>${c.comment?`<div class="psub">${esc(c.comment)}</div>`:""}</div><div class="pamt">${esc(c.money_text||"")}</div></div>`).join("")||`<div class="muted">За этот период звонков не было.</div>`);
+  b.innerHTML=parts.join("");
+}
 function dgEmp(j,b){
+  if(j.profile==="soft") return dgSoftEmp(j,b);
+  DG.profile="hard"; DG.contour="hard";
   DG.cases=[]; DG.days=j.by_day||[]; DG.femp=j.employee||DG.emp||null;
   const rg=j.range||{};
   const parts=[`<button class="back" onclick="dgGo('team')">‹ к сотрудникам</button>`,
                dgTop(j.employee||DG.emp||"", rg.label)];
   parts.push(dgPeriodBar(rg));
+  parts.push(dgContourChips("hard",j.profiles||["hard"]));
   parts.push(dgKpis(j,rg));
   const a=j.activity;
   if(a) parts.push(`<div class="muted" style="font-size:13px;margin-top:4px">📈 визиты 7д ${a.visits_7d||0} · 30д ${a.visits_30d||0}`+
@@ -5046,7 +5081,7 @@ function dgPerson(j,b){
   if((j.phones||[]).length) parts.push(`<div>📞 ${j.phones.map(esc).join(" · ")}</div>`);
   if(j.address) parts.push(`<div>📍 ${esc(j.address)}</div>`);
   if(j.money_text) parts.push(`<div>💰 <b>${esc(j.money_text)}</b></div>`);
-  parts.push(`<div style="margin-top:8px;font-weight:700">🧾 Итог выезда</div>`);
+  parts.push(`<div style="margin-top:8px;font-weight:700">🧾 ${j.profile==="soft"?"Результат звонка":"Итог выезда"}</div>`);
   if(j.outcome&&j.outcome!=="—") parts.push(`<div>✅ ${esc(j.outcome)}</div>`);
   (j.visit||[]).forEach(v=>{
     if(!v.value) return;
@@ -5054,6 +5089,7 @@ function dgPerson(j,b){
   });
   if(j.tips) parts.push(`<div>📇 ${esc(j.tips)}</div>`);
   if(j.comment) parts.push(`<div>💬 ${esc(j.comment)}</div>`);
+  if(j.profile==="soft"&&(j.calls||[]).length) parts.push(`<div class="fsec-h">История звонков</div>`+(j.calls||[]).map(c=>`<div class="muted">${esc(c.day)} · ${esc(c.payload)}</div>`).join(""));
   const g=j.geo;
   if(g){
     if(g.by_other) parts.push(`<div>📍 визит закрыл руководитель (${esc(g.pretty)} от адреса)</div>`);
@@ -5093,7 +5129,7 @@ function dgPerson(j,b){
       rest.map((sh,i)=>`<button class="btn line" style="padding:4px 10px" onclick="dgShot(${auto.length+i})">
         ${esc(sh.date||"")}${sh.on_visit?" · выезд":""}</button>`).join("")+`</div>`);
     parts.push(`<div id="dgshot"></div>`);
-  }else{
+  }else if(j.profile!=="soft"){
     parts.push(`<div class="muted" style="margin-top:10px">📸 фото по этому клиенту нет</div>`);
   }
   // Чеки об оплате (контур СБ): дата, сумма, плательщик; сам снимок чека — по
