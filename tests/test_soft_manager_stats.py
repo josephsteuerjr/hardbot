@@ -188,3 +188,18 @@ def test_excel_keeps_mixed_currency_forecast_as_text(world, monkeypatch):
     wb = load_workbook(BytesIO(dd.stats_xlsx({}, RANGE, employees=["S1"])))
     row = next(r for r in wb["Софт"].values if r[0] == "S1")
     assert isinstance(row[4], str) and "UZS" in row[4] and "₽" in row[4]
+
+
+def test_employee_and_manager_comment_view_is_newest_first_without_rewriting_text(world):
+    for i, note in enumerate(["Первая\nпродолжение", "Последняя\nвторая строка"]):
+        db.save_call_result("A", 100, "S1", {"soft_call_status": "Нет контакта", "soft_comment": note},
+                            "Тест", op_id=str(i), on_date=DAY, saved_at=DAY+f"T10:0{i}:00",
+                            append_comment=True)
+    raw = db.get_client("A")["soft_comment"]
+    assert raw.index("Первая") < raw.index("Последняя")
+    person = web._person_full("A", "ru", by_soft=True)
+    assert person["soft"]["comment"] == raw
+    assert "Последняя\nвторая строка" in person["soft"]["comment_entries"][0]
+    data = dd.person_data({}, DAY, "S1", "A", employees=["S1"], by_soft=True)
+    assert data["comment_display"].index("Последняя") < data["comment_display"].index("Первая")
+    assert db.get_client("A")["soft_comment"] == raw

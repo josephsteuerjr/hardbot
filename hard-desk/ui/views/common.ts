@@ -95,7 +95,7 @@ export async function openPerson(employee: string, rep: string, date?: string, m
     <dl class="kv">${kv}</dl>
     ${form ? `<div class="block"><h3>${d.profile === "soft" ? "Звонок" : "Выезд"} ${esc(shortDate(d.date || ""))}</h3><dl class="kv">${form}</dl></div>` : ""}
     ${d.calls?.length ? `<div class="block"><h3>История звонков</h3>${d.calls.map((c: any) => `<p>${esc(c.day)} · ${esc(c.payload)}</p>`).join("")}</div>` : ""}
-    ${d.comment ? `<div class="block"><h3>Комментарий</h3><div style="white-space:pre-wrap;font-size:14px;line-height:1.55">${esc(d.comment)}</div></div>` : ""}
+    ${d.comment ? `<div class="block"><h3>Комментарий</h3><div style="white-space:pre-wrap;font-size:14px;line-height:1.55">${esc(d.comment_display ?? d.comment)}</div></div>` : ""}
     ${d.receipts?.length ? `<div class="block"><h3>Квитанции для сверки</h3>${d.receipts.map((receipt: any) => `<div class="list-row"><div class="grow"><b>${esc(receipt.amount ?? '—')} ${esc(receipt.currency || '')}</b> · ${esc(receipt.paid_at || receipt.created_at || '')}<div class="sub">${esc(receipt.employee || '')}${receipt.payer_note ? ' · ' + esc(receipt.payer_note) : ''}</div></div><button class="btn small" data-receipt="${esc(receipt.file)}">Снимок</button></div>`).join('')}<p class="muted">Наличие квитанции не подтверждает зачисление. Сверьте операцию с реестром платежей.</p></div>` : ''}
     <div class="block" id="ph-block" hidden><h3>Фото</h3><div class="photos" id="ph"></div></div>`;
   body.querySelectorAll<HTMLButtonElement>('[data-receipt]').forEach(button => button.addEventListener('click', async () => {

@@ -35,6 +35,7 @@ from aiohttp.abc import AbstractAccessLogger
 
 import addr_cis                       # разбор произвольного адреса для навигации
 import db
+import comment_view
 import workday
 import config
 import ops_panel
@@ -691,6 +692,7 @@ def _person_full_from_rows(rows, rep: str, lang: str,
             "status": _row_get(rows, "soft_call_status") or "",
             "comm_date": _row_get(rows, "soft_comm_date") or "",
             "comment": _row_get(rows, "soft_comment") or "",
+            "comment_entries": comment_view.newest_first(_row_get(rows, "soft_comment")),
             "history": _row_get(rows, "soft_history") or "",
             "responsible": _row_get(rows, "responsible_soft") or "",
         },

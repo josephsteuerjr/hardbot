@@ -22,6 +22,7 @@ import re
 from datetime import date, datetime, timedelta
 
 import country_scope
+import comment_view
 import db
 import workday
 import debt
@@ -664,7 +665,8 @@ def person_data(mgr: dict, on_date: str, employee: str, rep: str,
         data.update(profile="soft", outcome=row["soft_call_status"] or "", evidence={},
                     fill_text="", geo=None, learned_point=False, shots=[], photos=0, tips="",
                     dates={"promise_date": common.get("promise_date"), "visit_date": None, "reminder_date": None, "meeting_date": None},
-                    comment=row["soft_comment"] or "", visit=[
+                    comment=row["soft_comment"] or "",
+                    comment_display="\n".join(comment_view.newest_first(row["soft_comment"])), visit=[
                         {"key": key, "title": db.BY_KEY[key].title, "value": common.get(key, row[key])}
                         for key in ("soft_call_status", "soft_comm_date", "promise_date", "forecast_sum", "forecast")],
                     calls=[{"day": r["created_at"], "payload": r["payload"]}

@@ -98,6 +98,7 @@ async function openSoftCard(rep: string) {
   if (!r.ok) { panel.innerHTML = '<div class="empty"><b>Не открылось</b>' + esc(r.text || "") + "</div>"; return; }
   const d: any = r.data;
   const s: any = d.soft || {};
+  const notes: string[] = s.comment_entries || (s.comment ? [s.comment] : []);
   const calls: any[] = d.calls || [];
   const phones: string[] = d.phones?.length ? d.phones : [d.phone].filter(Boolean);
   const options = `<option value="">—</option>` + (state.dropdowns.soft_call_status || []).map(
@@ -117,7 +118,7 @@ async function openSoftCard(rep: string) {
     <div class="section"><div class="section-head"><h3 class="section-title">Записать звонок</h3></div>
       <label class="muted" style="font-size:13px">Статус</label>
       <select class="input" id="c-status" style="width:100%">${options}</select>
-      ${s.comment ? `<details style="margin-top:10px"><summary>Накопленный комментарий</summary><div style="white-space:pre-wrap;padding:8px 0">${esc(s.comment)}</div></details>` : ""}
+      ${notes.length ? `<div class="muted" style="margin-top:10px">Последняя заметка</div><div style="white-space:pre-wrap;max-height:220px;overflow:auto;padding:8px 0">${esc(notes[0])}</div>${notes.length > 1 ? `<details><summary>Предыдущие заметки (${notes.length - 1})</summary><div style="white-space:pre-wrap;padding:8px 0">${esc(notes.slice(1).join("\n\n"))}</div></details>` : ""}` : ""}
       <label class="muted" style="font-size:13px;margin-top:8px;display:block">Новая заметка к звонку</label>
       <textarea class="input" id="c-comment" maxlength="4000" placeholder="Что выяснили при этом звонке" style="width:100%;min-height:70px"></textarea>
       <div class="row" style="margin-top:8px">

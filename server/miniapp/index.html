@@ -1245,7 +1245,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=77;
+const SHELL_VERSION=78;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -2839,7 +2839,7 @@ function panelCall(d,t){
   const rows=(d.calls||[]).map(c=>`<div class="kv" style="align-items:flex-start">
     <span class="k" style="min-width:96px">${esc(String(c.at||c.ts||"").replace('T',' ').slice(0,16))}${c.employee?`<br><span class="muted">${esc(c.employee)}</span>`:""}</span>
     <span class="v" style="white-space:pre-wrap">${esc(c.payload||"")}</span></div>`).join("");
-  const month=String(s.comment||"").trim();
+  const month=(s.comment_entries||[String(s.comment||"")]).join("\n\n").trim();
   const hist=String(s.history||"").trim();
   return `
    <div class="acts${d.phone?"":" one"}">
@@ -2860,6 +2860,7 @@ function panelCall(d,t){
 }
 function panelCallForm(d,t){
   const s=d.soft||{};
+  const notes=s.comment_entries||(s.comment?[s.comment]:[]);
   const dd=((STATE.meta||{}).dropdowns||{}).soft_call_status||[];
   const cur=s.status||"";
   const opts=`<option value="">—</option>`+dd.map(o=>`<option value="${esc(o.value)}"${o.value===cur?" selected":""}>${esc(o.label)}</option>`).join("");
@@ -2868,7 +2869,7 @@ function panelCallForm(d,t){
    <div class="fsec key"><div class="fsec-h">📞</div>
      <label class="fld">${esc(t.status)}</label>
      <select data-k="soft_call_status">${opts||`<option value="">—</option>`}</select>
-     ${s.comment?`<details><summary>${esc(t.callmonth)}</summary><div style="white-space:pre-wrap">${esc(s.comment)}</div></details>`:""}
+     ${notes.length?`<div class="muted" style="margin-top:8px">${esc(t.callmonth)}</div><div style="white-space:pre-wrap;max-height:220px;overflow:auto;margin:6px 0">${esc(notes[0])}</div>${notes.length>1?`<details><summary>${esc(t.callmonth)} · ${notes.length-1}</summary><div style="white-space:pre-wrap">${esc(notes.slice(1).join("\n\n"))}</div></details>`:""}`:""}
      <label class="fld">${esc(t.callnote)}</label>
      <textarea id="f_soft_comment" maxlength="4000"></textarea>
    </div>
@@ -5088,7 +5089,7 @@ function dgPerson(j,b){
     parts.push(`<div>${v.title?`<span class="muted">${esc(v.title)}:</span> `:""}${esc(v.value)}${v.registry?` <span class="muted">· в реестре сейчас: ${esc(v.registry)}</span>`:""}</div>`);
   });
   if(j.tips) parts.push(`<div>📇 ${esc(j.tips)}</div>`);
-  if(j.comment) parts.push(`<div>💬 ${esc(j.comment)}</div>`);
+  if(j.comment) parts.push(`<div style="white-space:pre-wrap">💬 ${esc(j.comment_display??j.comment)}</div>`);
   if(j.profile==="soft"&&(j.calls||[]).length) parts.push(`<div class="fsec-h">История звонков</div>`+(j.calls||[]).map(c=>`<div class="muted">${esc(c.day)} · ${esc(c.payload)}</div>`).join(""));
   const g=j.geo;
   if(g){
