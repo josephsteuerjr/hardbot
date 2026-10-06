@@ -1792,6 +1792,7 @@ def set_bind(telegram_id: int, employee: str, kind: str = "agent") -> None:
             "employee=excluded.employee, kind=excluded.kind, approved=1",
             (telegram_id, employee, kind, workday.today().isoformat()),
         )
+        _reserve_local_uid(conn, telegram_id)
         conn.commit()
 
 
@@ -2180,6 +2181,7 @@ def local_identity_for(employee: str, kind: str = "agent") -> tuple[int, bool]:
         if bound:
             return int(bound["telegram_id"]), False
         uid = _next_local_uid(conn)
+        _reserve_local_uid(conn, uid)
         conn.execute(
             "INSERT OR IGNORE INTO users (telegram_id, name, created_at) VALUES (?,?,?)",
             (uid, employee, datetime.now().isoformat(timespec="seconds")),
@@ -2198,7 +2200,19 @@ def _next_local_uid(conn, base: int = LOCAL_UID_BASE) -> int:
     ).fetchone()[0] or 0 for table in (
         "agent_bind", "users", "managers", "app_links", "app_tokens",
         "agent_devices", "manager_devices")]
-    return max(base - 1, *used) + 1
+    watermark = conn.execute("SELECT value FROM settings WHERE key='local_identity_last_uid'").fetchone()
+    historical = 0 if watermark else conn.execute(
+        "SELECT COALESCE(MAX(CAST(actor AS INTEGER)),0) FROM audit").fetchone()[0]
+    return max(base - 1, *used, int(watermark[0]) if watermark else 0, historical) + 1
+
+
+def _reserve_local_uid(conn, uid: int) -> None:
+    if not is_local_uid(uid):
+        return
+    conn.execute(
+        "INSERT INTO settings(key,value) VALUES ('local_identity_last_uid',?) "
+        "ON CONFLICT(key) DO UPDATE SET value=CAST(MAX(CAST(value AS INTEGER),CAST(excluded.value AS INTEGER)) AS TEXT)",
+        (str(uid),))
 
 
 def next_local_manager_id() -> int:
@@ -3185,6 +3199,10 @@ def set_manager(telegram_id: int, name: str, cities: list[str],
                                       "agent_devices", "manager_devices"))
             if occupied:
                 raise ValueError("Служебный ID уже принадлежит другой учётной записи. Обновите список и добавьте руководителя заново.")
+            watermark = conn.execute("SELECT value FROM settings WHERE key='local_identity_last_uid'").fetchone()
+            if watermark and telegram_id <= int(watermark[0]):
+                raise ValueError("Служебный ID уже использовался. Обновите список и добавьте руководителя заново.")
+        _reserve_local_uid(conn, telegram_id)
         conn.execute(
             "INSERT INTO managers "
             "(telegram_id, name, cities, employees, direction, office_cities, created_at) "
@@ -3227,6 +3245,7 @@ def list_managers() -> list[dict]:
 
 def delete_manager(telegram_id: int) -> None:
     with connect() as conn:
+        _reserve_local_uid(conn, telegram_id)
         conn.execute("DELETE FROM managers WHERE telegram_id = ?", (telegram_id,))
         # Пульты на компьютерах уходят вместе с ролью: без неё они всё равно
         # получили бы 403, а висящий токен — лишний вход в базе.

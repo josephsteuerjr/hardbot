@@ -45,3 +45,30 @@ def test_real_telegram_dual_role_remains_allowed():
     db.set_bind(123456, "Staff")
     db.set_manager(123456, "Staff leader", [], ["Staff"])
     assert db.get_manager(123456) and db.get_binding(123456) == "Staff"
+
+
+def test_deleted_local_account_id_is_never_reused_for_pending_device_queue():
+    old, _ = db.local_identity_for("Previous staff")
+    with db.connect() as conn:
+        conn.execute("DELETE FROM agent_bind WHERE telegram_id=?", (old,))
+        conn.execute("DELETE FROM users WHERE telegram_id=?", (old,))
+    new, _ = db.local_identity_for("Different staff")
+    assert new > old
+
+
+def test_deleted_manager_id_cannot_be_reassigned_to_another_person():
+    old = 910_000_000_003
+    db.set_manager(old, "Previous leader", [], [])
+    db.delete_manager(old)
+    assert db.next_local_manager_id() > old
+    with pytest.raises(ValueError, match="ID"):
+        db.set_manager(old, "Different leader", [], [])
+
+
+def test_manually_bound_local_identity_also_survives_account_deletion():
+    old = 920_000_000_000
+    db.set_bind(old, "Previous staff")
+    with db.connect() as conn:
+        conn.execute("DELETE FROM agent_bind WHERE telegram_id=?", (old,))
+    new, _ = db.local_identity_for("Different staff")
+    assert new > old
