@@ -48,9 +48,11 @@ def test_bulk_cards_reuses_the_grouped_contract_rows(monkeypatch):
     )
     monkeypatch.setattr(
         web, "_person_full_from_rows",
-        lambda rows, rep, lang, extras=None, receipts=None: seen.append((rows, rep, lang))
+        lambda rows, rep, lang, extras=None, receipts=None, history=None: seen.append((rows, rep, lang))
         or {"rep": rep},
     )
+    monkeypatch.setattr(web.db, "portfolio_card_history", lambda grouped, **kw: {
+        p["rep"]: {"visit": None, "calls": []} for p in grouped})
     monkeypatch.setattr(
         web.db, "audit_access", lambda *args, **kwargs: audit.append((args, kwargs)),
     )

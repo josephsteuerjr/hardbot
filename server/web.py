@@ -564,7 +564,8 @@ def _fmt_money_ru(value) -> str:
 
 def _person_full_from_rows(rows, rep: str, lang: str,
                            extras: dict[str, list[dict]] | None = None,
-                           receipts: list[dict] | None = None) -> dict | None:
+                           receipts: list[dict] | None = None,
+                           history: dict | None = None) -> dict | None:
     """Полная карточка из уже выбранных строк одного человека.
 
     `/api/cards` получает все группы одним запросом. Повторный
@@ -584,7 +585,8 @@ def _person_full_from_rows(rows, rep: str, lang: str,
     newest_row = max(rows, key=lambda r: max(str(r["bot_call_at"] or ""),
                      str(r["bot_visit_event_at"] or r["bot_visit_at"] or "")))
     latest_common = db.common_result(newest_row)
-    last_visit = db.last_visit_row([r["contract_id"] for r in rows])
+    last_visit = (db.last_visit_row([r["contract_id"] for r in rows])
+                  if history is None else history["visit"])
     visited = visit is not None
     contracts = [{
         "contract_id": r["contract_id"], "partner": r["partner"],
@@ -699,7 +701,7 @@ def _person_full_from_rows(rows, rep: str, lang: str,
              "at": (control._local_dt(c["saved_at"] or c["received_at"]).isoformat(timespec="seconds")
                     if control._local_dt(c["saved_at"] or c["received_at"]) else c["created_at"]),
              "employee": c["employee"] or "", "payload": c["payload"] or ""}
-            for c in db.calls_for_person(rep)
+            for c in (db.calls_for_person(rep) if history is None else history["calls"])
         ],
     }
 
@@ -1488,19 +1490,13 @@ async def _person(request: web.Request) -> web.Response:
     return web.json_response(data)
 
 
-async def _cards(request: web.Request) -> web.Response:
-    """Все полные карточки портфеля сотрудника разом — прогрев оффлайн-кэша миниаппа.
-    Клиент зовёт это ОНЛАЙН сразу после /api/bootstrap и складывает карточки в IndexedDB,
-    чтобы в поле без сети открывать любого своего клиента и заполнять визит. Один запрос
-    вместо N (по карточке на человека). ПД в журнал доступа тут не пишем — это оптовый
-    предзагруз своего же портфеля, а не точечный просмотр (view_card логируется в _person)."""
-    started = time.perf_counter()
-    uid, emp = _auth(request)
-    lang = lang_of(uid)
+def _cards_payload(uid: int, emp: str, lang: str, requested_soft: bool,
+                   started: float) -> dict:
+    """Сборка карточек в рабочем потоке: SQLite не задерживает вход других людей."""
     cards = {}
     # Прогрев — по ОБЕИМ колонкам ответственности: софтнику кэш нужен не меньше
     # (очередь «кому звонить» открывает карточки офлайн той же механикой).
-    soft_mode = request.query.get("mode") == "soft" or (
+    soft_mode = requested_soft or (
         db.soft_portfolio_exists(emp) and not db.persons_for_employee(emp))
     grouped = db.persons_for_soft(emp) if soft_mode else db.persons_for_employee(emp)
     # Дополнительные поля всего портфеля — одним запросом по той же причине,
@@ -1509,12 +1505,14 @@ async def _cards(request: web.Request) -> web.Response:
         [r["contract_id"] for p in grouped for r in p["contracts"]])
     # Чеки всего портфеля — тем же пакетом (не открывать запрос на карточку).
     all_receipts = db.receipts_for([r["contract_id"] for p in grouped for r in p["contracts"]])
+    histories = db.portfolio_card_history(grouped, by_soft=soft_mode)
     for p in grouped:
         # persons_for_employee уже принёс все строки договоров. Не открываем
         # отдельное SQLite-соединение для каждой карточки.
         full = _person_full_from_rows(p["contracts"], p["rep"], lang, all_extras,
                                       [receipt for r in p["contracts"]
-                                       for receipt in all_receipts.get(r["contract_id"], [])])
+                                       for receipt in all_receipts.get(r["contract_id"], [])],
+                                      histories[p["rep"]])
         if full:
             full["_profile"] = "soft" if soft_mode else "hard"
             cards[p["rep"]] = full
@@ -1534,11 +1532,42 @@ async def _cards(request: web.Request) -> web.Response:
         uid, "cards_prefetch", target=emp,
         detail=json.dumps(diagnostics, ensure_ascii=False, separators=(",", ":")),
     )
-    response = web.json_response({
+    return {
         "ok": True, "cards": cards,
         "at": datetime.now().isoformat(timespec="seconds"),
         "diagnostics": diagnostics,
-    })
+    }
+
+
+_CARDS_BUILD_LIMIT = asyncio.Semaphore(2)
+_CARDS_BUILDS: set[asyncio.Task] = set()
+
+
+async def _cards(request: web.Request) -> web.Response:
+    """Предзагрузка своего портфеля без блокировки остальных запросов.
+
+    Максимум две сборки одновременно. Отмена HTTP-запроса не освобождает слот
+    до завершения рабочего потока, иначе повторы набирают неограниченную очередь.
+    """
+    started = time.perf_counter()
+    uid, emp = _auth(request)
+    lang = lang_of(uid)
+    limit = _CARDS_BUILD_LIMIT
+    await limit.acquire()
+    build = asyncio.create_task(asyncio.to_thread(
+        _cards_payload, uid, emp, lang, request.query.get("mode") == "soft", started))
+    _CARDS_BUILDS.add(build)
+
+    def finished(task):
+        _CARDS_BUILDS.discard(task)
+        limit.release()
+        if not task.cancelled():
+            task.exception()  # Забрать ошибку также после обрыва клиентского запроса.
+
+    build.add_done_callback(finished)
+    payload = await asyncio.shield(build)
+    response = web.json_response(payload)
+    diagnostics = payload["diagnostics"]
     response.headers["Server-Timing"] = f"app;dur={diagnostics['server_ms']}"
     response.enable_compression()
     return response

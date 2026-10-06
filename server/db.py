@@ -5519,6 +5519,93 @@ def calls_for_person(rep_contract_id: str, limit: int = 50) -> list[sqlite3.Row]
             (*ids, *ids, limit)).fetchall()
 
 
+def portfolio_card_history(grouped: list[dict], *, by_soft: bool = False) -> dict:
+    """История для прогрева портфеля без отдельных запросов на каждого человека.
+
+    История звонков сохраняет группу по Soft-владельцу даже в Hard-карточке,
+    как calls_for_person. Визиты выбираются по показанным договорам карточки.
+    """
+    result = {p["rep"]: {"visit": None, "calls": []} for p in grouped}
+    if not grouped:
+        return result
+    contract_reps: dict[str, set[str]] = {}
+    for p in grouped:
+        for row in p["contracts"]:
+            contract_reps.setdefault(row["contract_id"], set()).add(p["rep"])
+    call_ids = {}
+
+    def chunks(values):
+        values = list(values)
+        for offset in range(0, len(values), 400):
+            yield values[offset:offset + 400]
+
+    with connect() as conn:
+        if by_soft:
+            call_ids = {p["rep"]: [r["contract_id"] for r in p["contracts"]]
+                        for p in grouped}
+        else:
+            # У одного Soft-человека могут быть разные Hard-владельцы.
+            # Дочитываем только ключи его договоров, не весь реестр на карточку.
+            keys = {p["rep"]: (person_key(p["contracts"][0]),
+                               p["contracts"][0]["responsible_soft"] or "")
+                    for p in grouped}
+            names = {p["contracts"][0]["client"] for p in grouped}
+            soft_groups = {}
+            for batch in chunks(names):
+                present = [name for name in batch if name is not None]
+                marks = ",".join("?" for _ in present)
+                where = f"client IN ({marks})" if present else "0"
+                if None in batch:
+                    where += " OR client IS NULL"
+                rows = conn.execute(
+                    "SELECT contract_id,client,birth_date,address,phone,responsible_soft "
+                    "FROM clients WHERE " + where, present).fetchall()
+                for row in rows:
+                    key = (person_key(row), row["responsible_soft"] or "")
+                    soft_groups.setdefault(key, []).append(row["contract_id"])
+            call_ids = {rep: soft_groups.get(key, []) for rep, key in keys.items()}
+
+        for batch in chunks(contract_reps):
+            marks = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                f"SELECT * FROM visits WHERE contract_id IN ({marks}) ORDER BY id DESC",
+                batch).fetchall()
+            for row in rows:
+                for rep in contract_reps[row["contract_id"]]:
+                    previous = result[rep]["visit"]
+                    if previous is None or row["id"] > previous["id"]:
+                        result[rep]["visit"] = row
+
+        call_reps: dict[str, set[str]] = {}
+        for rep, ids in call_ids.items():
+            for cid in ids:
+                call_reps.setdefault(cid, set()).add(rep)
+        calls = {}
+        for batch in chunks(call_reps):
+            marks = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                f"SELECT * FROM calls WHERE contract_id IN ({marks}) OR EXISTS ("
+                "SELECT 1 FROM json_each(CASE WHEN json_valid(calls.contracts_json) "
+                "THEN calls.contracts_json ELSE '[]' END) "
+                f"WHERE value IN ({marks}))", (*batch, *batch)).fetchall()
+            calls.update((row["id"], row) for row in rows)
+        for row in sorted(calls.values(), key=lambda r: (
+                r["created_at"] is not None, r["created_at"] or "", r["id"]), reverse=True):
+            ids = {row["contract_id"]}
+            try:
+                saved = json.loads(row["contracts_json"] or "[]")
+                values = saved.values() if isinstance(saved, dict) else (
+                    saved if isinstance(saved, list) else [saved])
+                ids.update(value for value in values if isinstance(value, str))
+            except (TypeError, ValueError):
+                pass
+            reps = set().union(*(call_reps.get(cid, set()) for cid in ids))
+            for rep in reps:
+                if len(result[rep]["calls"]) < 50:
+                    result[rep]["calls"].append(row)
+    return result
+
+
 def same_visit_logged_today(contract_id: str, agent_id: int, payload: str,
                             on_date: str | None = None) -> bool:
     """Был ли СЕГОДНЯ записан ТОТ ЖЕ выезд: тот же выездник и тот же результат.
