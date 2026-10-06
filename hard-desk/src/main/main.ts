@@ -299,6 +299,7 @@ function wireIpc() {
         if (win && !win.isDestroyed()) void win.loadURL("hard://app/index.html" + queryOf(next));
         return second;
       }
+      return second;
     }
     return first;
   });

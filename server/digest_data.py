@@ -22,6 +22,7 @@ from datetime import date, datetime, timedelta
 
 import country_scope
 import db
+import workday
 import debt
 import evidence
 import funnel
@@ -40,9 +41,9 @@ def human_date(iso: str) -> str:
 
 
 def today_iso() -> str:
-    # Та же система координат, что и у visit_date (date.today() в момент завершения
+    # Та же система координат, что и у visit_date (workday.today() в момент завершения
     # визита) — чтобы фильтр «за сегодня» совпадал с тем, как визиты записаны.
-    return date.today().isoformat()
+    return workday.today().isoformat()
 
 
 def _v(contracts, key):
@@ -884,7 +885,7 @@ def promises_data(mgr: dict, on_date: str,
 def period_data(mgr: dict, on_date: str, days: int = 7,
                 employees: list[str] | None = None) -> dict:
     days = days if days in (7, 30) else 7
-    end = db._as_date(on_date) or date.today()
+    end = db._as_date(on_date) or workday.today()
     start = end - timedelta(days=days - 1)
     d_from, d_to = start.isoformat(), end.isoformat()
     employees = employees if employees is not None else sorted_employees(mgr)

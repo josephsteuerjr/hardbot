@@ -138,10 +138,12 @@ export async function call(method: string, path: string, query?: Record<string, 
 // Отказ по ссылке — словами и с путём (30.09.2026): руководители вставляли
 // ссылки от 24.09, потраченные телефоном и ярлыком, и видели только «устарела».
 const NEW_LINK = "Новую возьмите в приложении на телефоне: Сводка → «Вход команды» → «Выдать себе» — или попросите у аналитика.";
-export function deadLinkText(reason: string): string {
-  if (reason === "used_up") return "По этой ссылке уже вошли столько раз, сколько она позволяет — телефон и ярлык на экране тоже считаются. " + NEW_LINK;
-  if (reason === "expired") return "Ссылке больше недели — она уже не действует. " + NEW_LINK;
-  return "Эта ссылка не действует — возможно, её уже заменили новой. " + NEW_LINK;
+const NEW_EMPLOYEE_LINK = "Попросите руководителя выдать новую ссылку на ваше ФИО в «Вход команды» или обратитесь к аналитику.";
+export function deadLinkText(reason: string, employee = false): string {
+  const next = employee ? NEW_EMPLOYEE_LINK : NEW_LINK;
+  if (reason === "used_up") return "По этой ссылке уже вошли столько раз, сколько она позволяет — телефон и ярлык на экране тоже считаются. " + next;
+  if (reason === "expired") return "Ссылке больше недели — она уже не действует. " + next;
+  return "Эта ссылка не действует — возможно, её уже заменили новой. " + next;
 }
 
 async function deadReason(res: Response): Promise<string> {
@@ -205,28 +207,45 @@ export async function enrollField(raw: string): Promise<ApiResult> {
   if (!link) return { ok: false, status: 0, kind: "nolink", text: "Это не похоже на ссылку входа — вставьте её целиком." };
   const base = link.base || readSettings().fieldServer || readSettings().server || "";
   if (!base) return { ok: false, status: 0, kind: "nolink", text: "В ссылке нет адреса сервера — вставьте её целиком." };
+  const previousSettings = readSettings(), previousToken = readFieldToken(), pending = readCallQueue();
+  const hasPending = !!pending?.entries.length;
+  const previousUid = previousSettings.fieldDevice?.telegram_id;
+  if (hasPending && base !== previousSettings.fieldServer)
+    return { ok: false, status: 409, kind: "forbidden", text: "Сначала отправьте звонки прежнего входа. Очередь сохранена на этом компьютере." };
+  const previousOwner = legacyCallOwner();
   let res: Response;
   try {
     res = await net().fetch(base + "/api/agent/device/enroll", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code: link.code, device: deviceName() }),
+      body: JSON.stringify({ code: link.code, device: deviceName(),
+        keep_token: base === previousSettings.fieldServer ? previousToken : undefined,
+        expected_uid: hasPending ? previousUid : undefined, reuse_only: hasPending && !previousUid }),
     });
   } catch (err) {
     return troubleOf(err);
   }
-  if (res.status === 410) return { ok: false, status: 410, kind: "nolink", text: deadLinkText(await deadReason(res)) };
+  if (res.status === 410) return { ok: false, status: 410, kind: "nolink", text: deadLinkText(await deadReason(res), true) };
   if (res.status === 403) return { ok: false, status: 403, kind: "forbidden", text: "Это ссылка руководителя или аналитика. Для приложения выездника нужна ссылка из «Вход команды» на ваше ФИО." };
   if (res.status === 429) return { ok: false, status: 429, kind: "server", text: "Слишком много попыток. Подождите минуту." };
+  if (res.status === 409) return { ok: false, status: 409, kind: "forbidden", text: "На компьютере остались звонки прежнего сотрудника. Сначала отправьте их или восстановите его вход; очередь сохранена." };
   if (!res.ok) return { ok: false, status: res.status, kind: "server", text: `Сервер ответил ошибкой ${res.status}.` };
-  const data = (await res.json()) as { token: string; device_id: number; employee: string };
+  const data = (await res.json()) as { token: string; device_id: number; employee: string; telegram_id?: number };
+  if (hasPending && (previousUid ? data.telegram_id !== previousUid : data.token !== previousToken))
+    return { ok: false, status: 409, kind: "forbidden", text: "Вход не изменён: сначала отправьте сохранённые звонки прежнего сотрудника." };
   writeFieldToken(data.token);
-  writeSettings({ fieldServer: base, fieldDevice: { id: data.device_id, name: deviceName(), employee: data.employee } });
+  writeSettings({ fieldServer: base, fieldDevice: { id: data.device_id, name: deviceName(), employee: data.employee, telegram_id: data.telegram_id } });
+  if (data.telegram_id && pending?.owner === previousOwner && data.token === previousToken)
+    writeCallQueue({ ...pending, owner: callOwner() });
   return { ok: true, status: 200, data: { ...data, token: undefined } };
 }
 
-function callOwner(): string {
+function legacyCallOwner(): string {
   return createHash("sha256").update((readSettings().fieldServer || "") + "\n" + readFieldToken()).digest("hex");
+}
+function callOwner(): string {
+  const settings = readSettings(), uid = settings.fieldDevice?.telegram_id;
+  return uid ? createHash("sha256").update((settings.fieldServer || "") + "\nuid:" + uid).digest("hex") : legacyCallOwner();
 }
 function ownedCallQueue(): CallQueue {
   const owner = callOwner(), queue = readCallQueue();

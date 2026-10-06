@@ -2,12 +2,16 @@
 // стили рядом. Всё в out/: его и грузит окно (свой протокол hard://), его же
 // кладёт в поставку tools/dist.mjs.
 import { build } from "esbuild";
-import { cpSync, mkdirSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { cpSync, existsSync, lstatSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { dirname, join, relative, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const out = join(here, "out");
+if (existsSync(out)) {
+  const rel = relative(realpathSync(here), realpathSync(out));
+  if (lstatSync(out).isSymbolicLink() || !rel || rel.startsWith("..") || isAbsolute(rel)) throw new Error("Unsafe output directory");
+}
 rmSync(out, { recursive: true, force: true });
 mkdirSync(join(out, "ui"), { recursive: true });
 

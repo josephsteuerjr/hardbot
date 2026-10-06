@@ -28,6 +28,7 @@ import statistics
 from datetime import date, datetime, timedelta, timezone
 
 import db
+import workday
 import digest_data
 import evidence
 
@@ -60,9 +61,9 @@ SIGNALS = (
     ("nogeo", "нет годной GPS-точки",
      "телефон не передал координаты или точка грубее 1,5 км — выезд по месту "
      "проверить не удалось"),
-    ("late", "внесено позже", "доля выездов, доехавших до сервера на следующий день и позже"),
-    ("fast", "карточка за полминуты", f"доля карточек, заполненных быстрее {FAST_FILL_S} с"),
-    ("night", "ночью", f"доля выездов, сохранённых с {NIGHT_FROM}:00 до {NIGHT_TO:02d}:00"),
+    ("late", "внесено позже", "выезды, доехавшие до сервера на следующий день и позже; причиной могла быть работа без связи"),
+    ("fast", f"карточка быстрее {FAST_FILL_S} с", "время между открытием и сохранением карточки; короткое время само по себе не подтверждает нарушение"),
+    ("night", "ночью", f"выезды, сохранённые с {NIGHT_FROM}:00 до {NIGHT_TO:02d}:00 по времени офисов"),
     ("series", "внесено пачкой", "несколько выездов внесено подряд из одной точки при разных адресах или с невозможной скоростью перемещения"),
     ("cash", "«наличные» в тексте", "выезды, где в комментарии деньги переданы сотруднику"),
     ("paid", "«оплатил» без платежа", f"исход «Оплачен», а платежа в реестре после выезда нет (старше {PAID_LAG_DAYS} дн.)"),
@@ -415,18 +416,23 @@ def activity(mgr: dict, team: list[str], rng: dict, *, office: str = "",
                 "office": "" if of.get(emp) == NO_OFFICE else of.get(emp, ""),
                 "rep": r["contract_id"], "debtor": names.get(r["contract_id"], ""),
                 "title": title, "detail": detail, "flags": flags,
-                "visit_op": r.get("visit_op"), "op": r.get("op_id") or r.get("op")})
+                "visit_op": r.get("visit_op"), "op": r.get("op_id") or r.get("op"),
+                "received_at": r.get("received_at"), "actor_id": r.get("agent_id")})
     for row in rows:
         row["last_seen"] = last_seen.get(row["employee"])
     events.sort(key=lambda x: (x["at"] or "", x["id"]), reverse=True)
     if before:
-        events = [x for x in events if (x["at"] or "") < before]
+        if "|" in before:
+            stamp, event_id = before.rsplit("|", 1)
+            events = [x for x in events if (x["at"] or "", x["id"]) < (stamp, event_id)]
+        else:
+            events = [x for x in events if (x["at"] or "") < before]
     limit = max(1, min(500, int(limit or 200)))
     page = events[:limit]
     rows.sort(key=lambda r: (-(r["visits"] + r["calls"]), r["employee"].lower()))
     return {"screen": "activity", "range": rng, "tz": "+05:00", "offices": chips,
             "employees": rows, "events": page,
-            "next_before": page[-1]["at"] if len(events) > limit and page else None,
+            "next_before": (page[-1]["at"] + "|" + page[-1]["id"]) if len(events) > limit and page else None,
             "signals": [{"key": k, "label": label} for k, label, _ in SIGNALS],
             "generated_at": datetime.now(TZ).isoformat(timespec="seconds")}
 
@@ -500,23 +506,18 @@ def overview(mgr: dict, team: list[str], rng: dict, *, office: str = "") -> dict
             "checks": {"selected": len(checks), "done": len(done),
                        "no_visit": sum(c["outcome"] == "no_visit" for c in done),
                        "cash": sum(c["outcome"] == "cash_to_employee" for c in done)}})
-    # Сортировка без балла: сначала «прямые» нарушения (далеко, наличные,
-    # фото дважды, обзвон), затем общий вес признаков, затем выезды.
-    def _weight(r: dict) -> int:
-        c = r["counts"]
-        return (c["far"] * 3 + c["cash"] * 2 + c["dupphoto"] * 3 + c["callback"] * 3
-                + c["series"] * 2 + c["night"] + c["fast"] + c["late"] + c["paid"] * 2
-                + c["nogeo"] + c["bymgr"])
-    rows.sort(key=lambda x: (-_weight(x), -x["visits"], x["employee"].lower()))
+    # No hidden aggregate score: the reviewer chooses which factual column
+    # to sort. Default ordering conveys no judgement about the employee.
+    rows.sort(key=lambda x: x["employee"].casefold())
     return {"screen": "control", "range": rng, "offices": chips, "rows": rows,
             "legend": [{"key": k, "label": label, "hint": hint} for k, label, hint in SIGNALS],
             "outcomes": [{"key": k, "label": v} for k, v in db.CONTROL_OUTCOMES.items()],
             # Как читать — одним объяснением на все витрины «Контроля».
             "how": [
                 "Здесь только факты: сколько выездов с каждым признаком. Проценты и сводный балл сознательно не показываются — адреса в реестре неровные, и доля обвиняла бы того, у кого адреса точнее.",
-                "«Далеко от адреса» — прямое обвинение, поэтому считается только по проверяемым выездам: адрес в реестре точный и телефон дал годную точку. База («из скольких») показана рядом.",
+                "«Далеко от адреса» — повод проверить обстоятельства. Считается только при точном адресе и годной GPS-точке телефона; точка сохранения сама по себе не доказывает место или отсутствие выезда. База показана рядом.",
                 "«Нет годной GPS-точки» и «адрес неточный» — почему выезд не удалось проверить: первое — про телефон сотрудника, второе — про качество данных и в вину не ставится.",
-                "Подтверждает подозрение только звонок должнику — вкладка «Обзвон».",
+                "Дополнительная проверка — контрольный обзвон по выезду. Ответ должника записывается отдельно и требует сопоставления с остальными данными; автоматически нарушение не устанавливается.",
             ]}
 
 
@@ -784,7 +785,7 @@ def assignments(mgr: dict, team: list[str], rng: dict) -> dict:
                 continue
             paid = db._as_date(r["last_payment_date"]) if "last_payment_date" in r.keys() else None
             recent_pay = bool(
-                paid and (date.today() - paid).days <= 90)
+                paid and (workday.today() - paid).days <= 90)
             econ[cid] = {"debt": debt_mod.contract_debt(r) or 0,
                          "recent_pay": recent_pay}
             pool.append(debt_mod.contract_debt(r) or 0)

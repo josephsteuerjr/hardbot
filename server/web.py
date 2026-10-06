@@ -26,7 +26,7 @@ import re
 import tempfile
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl
 
@@ -35,6 +35,7 @@ from aiohttp.abc import AbstractAccessLogger
 
 import addr_cis                       # разбор произвольного адреса для навигации
 import db
+import workday
 import config
 import ops_panel
 import debt
@@ -423,6 +424,13 @@ def _auth(request: web.Request) -> tuple[int, str]:
     return uid, emp
 
 
+def _require_field_write(uid: int) -> None:
+    """Security may inspect employee cards, but cannot edit their facts."""
+    mgr = db.get_manager(uid)
+    if uid != ADMIN_ID and mgr and db.manager_role(mgr.get("role")) == "security":
+        raise _json_error(web.HTTPForbidden, "read_only")
+
+
 # --- Формовка данных --------------------------------------------------------
 def _form_field_title(key: str, lang: str) -> str:
     d = FORM_FIELD_TITLES.get(key) or {}
@@ -466,7 +474,7 @@ def _meta(lang: str) -> dict:
                          "kind": "date" if k in FORM_DATE_KEYS else "number",
                          "title": _form_field_title(k, lang)}
                         for k in (*FORM_DATES, *FORM_AMOUNTS)],
-        "today": date.today().isoformat(),
+        "today": workday.today().isoformat(),
         # Предел обещания оплаты (дней от дня выезда). Колесо дат в приложении
         # дальше этой даты не пускает, сервер проверяет то же самое ещё раз:
         # оболочка на телефоне бывает старая, а очередь доносит визиты сутками.
@@ -635,6 +643,10 @@ def _person_full_from_rows(rows, rep: str, lang: str,
         "assign_date": main["assign_date"],
         "visit_date": (visit or {}).get("visit_date"),
         "address": _row_get(rows, "address"), "phone": _row_get(rows, "phone"),
+        "phones": list(dict.fromkeys(str(_cell(r, k)).strip() for k in ("phone_main", "phone")
+                                     for r in rows if _cell(r, k) not in (None, ""))),
+        "extra_contact": "\n".join(dict.fromkeys(str(_cell(r, "extra_address")).strip()
+                                                for r in rows if _cell(r, "extra_address") not in (None, ""))),
         "geo": {"lat": main["geo_lat"], "lon": main["geo_lon"], "src": main["geo_src"]},
         "total": sum(debt.contract_debt(r) for r in rows),
         "unit": debt.unit(sorted({r["partner"] for r in rows if r["partner"]})),
@@ -684,6 +696,8 @@ def _person_full_from_rows(rows, rep: str, lang: str,
         ],
         "calls": [
             {"ts": c["created_at"], "received": c["received_at"],
+             "at": (control._local_dt(c["saved_at"] or c["received_at"]).isoformat(timespec="seconds")
+                    if control._local_dt(c["saved_at"] or c["received_at"]) else c["created_at"]),
              "employee": c["employee"] or "", "payload": c["payload"] or ""}
             for c in db.calls_for_person(rep)
         ],
@@ -927,7 +941,7 @@ async def _bootstrap(request: web.Request) -> web.Response:
             if comm:
                 try:
                     pb["overdue"] = max(
-                        0, (date.today() - date.fromisoformat(str(comm)[:10])).days)
+                        0, (workday.today() - date.fromisoformat(str(comm)[:10])).days)
                 except ValueError:
                     pass
         persons.sort(key=lambda x: (
@@ -975,7 +989,7 @@ async def _bootstrap(request: web.Request) -> web.Response:
         "ok": True, "uid": uid, "employee": emp,
         "kind": db.get_kind(uid), "lang": lang,
         "persons": persons, "meta": _meta(lang),
-        "roles": roles, "diagnostics": diagnostics,
+        "roles": roles, "diagnostics": diagnostics, "today": workday.today().isoformat(),
     })
     response.headers["Server-Timing"] = f"app;dur={diagnostics['server_ms']}"
     response.enable_compression()
@@ -1152,6 +1166,7 @@ def _latlon(lat, lon) -> tuple[float, float] | None:
 
 async def _marker(request: web.Request) -> web.Response:
     uid, emp = _auth(request)
+    _require_field_write(uid)
     body = await request.json()
     # Метка — это и есть точка, без неё записывать нечего: отказ, а не NULL.
     # Оболочка на 4xx не повторяет метку, а оставляет её в очереди видимой
@@ -1575,6 +1590,7 @@ async def _client_event(request: web.Request) -> web.Response:
 
 async def _save(request: web.Request) -> web.Response:
     uid, emp = _auth(request)
+    _require_field_write(uid)
     body = await request.json()
     rep = body.get("rep", "")
     row = db.get_client(rep)
@@ -1892,6 +1908,8 @@ def _save_call(uid: int, emp: str, body: dict, rep: str, row, values: dict,
     вывод «Прогноза». Отличия: статус звонка софт вместо результата визита,
     «Общий результат» звонок НЕ трогает (его ведёт офис), дата коммуникации —
     это дата следующего звонка, а не отметка о прошлом."""
+    if "append_comment" in body and type(body["append_comment"]) is not bool:
+        raise web.HTTPBadRequest(text="append_comment")
     if finish and "soft_call_status" not in values:
         raise web.HTTPBadRequest(text="call result required")
     if finish and values.get("promise_date"):
@@ -1931,7 +1949,8 @@ def _save_call(uid: int, emp: str, body: dict, rep: str, row, values: dict,
         try:
             result = db.save_call_result(rep, uid, row["responsible_soft"] or emp,
                        values, payload, op_id=op_id, on_date=completed_at,
-                       saved_at=_saved_at(body))
+                       saved_at=_saved_at(body), append_comment=body.get("append_comment") is True,
+                       comment_author=_acting_actor_name(uid) or row["responsible_soft"] or emp)
         except ValueError as exc:
             raise web.HTTPConflict(text=str(exc)) from exc
     data = _person_full(rep, lang_of(uid), by_soft=True)
@@ -2317,6 +2336,7 @@ def _permanent_photo_count(dest: Path) -> int:
 
 async def _photo(request: web.Request) -> web.Response:
     uid, emp = _auth(request)
+    _require_field_write(uid)
     rep = request.query.get("rep", "")
     row = db.get_client(rep)
     if not row or (row["responsible"] != emp and uid != ADMIN_ID):
@@ -2426,7 +2446,7 @@ def _receipt_query(request: web.Request) -> dict:
         paid_at = db._as_date(raw_date)
         if paid_at is None:
             rejected["paid_at"] = "format"
-        elif paid_at > date.today():
+        elif paid_at > workday.today():
             # Дата из будущего — не «день платежа», а опечатка: поле отбрасываем,
             # чек остаётся (дата загрузки-то настоящая).
             rejected["paid_at"] = "future"
@@ -2444,9 +2464,10 @@ def _receipt_query(request: web.Request) -> dict:
 
 async def _receipt(request: web.Request) -> web.Response:
     uid, emp = _auth(request)
+    _require_field_write(uid)
     rep = request.query.get("rep", "")
     row = db.get_client(rep)
-    if not row or (row["responsible"] != emp and uid != ADMIN_ID):
+    if not row or (row["responsible"] != emp and row["responsible_soft"] != emp and uid != ADMIN_ID):
         raise web.HTTPNotFound(text="person")
     op = re.sub(r"[^A-Za-z0-9_-]", "", request.query.get("op", ""))[:64]
     if not op:
@@ -2503,7 +2524,12 @@ async def _manager_receipt_file(request: web.Request) -> web.Response:
         db.audit_access(uid, "receipt_view_denied", key)
         raise web.HTTPNotFound(text="receipt")
     rows = db.photo_index_for_dirs(ctx["dirs"])
-    if not _photo_scope_ok(uid, scope, ctx["contracts"], rows):
+    soft_owner = any(c["contract_id"] == ctx["cid"] and (c["responsible_soft"] or "") in scope
+                     for c in ctx["contracts"])
+    with db.connect() as conn:
+        authors = [r[0] for r in conn.execute("SELECT employee FROM payment_evidence WHERE file=?", (key,))]
+    receipt_author = any(name in scope for name in authors)
+    if not (_photo_scope_ok(uid, scope, ctx["contracts"], rows) or soft_owner or receipt_author):
         db.audit_access(uid, "receipt_view_denied", key)
         raise web.HTTPNotFound(text="receipt")
     db.audit_access(uid, "receipt_view", key)   # ИБ: каждый просмотр ПД — в журнал
@@ -3254,7 +3280,7 @@ def _late_visit_line(visit_day: str | None) -> str | None:
     Без неё доставленный из оффлайна визит выглядит как сегодняшний, и
     руководитель либо считает его свежим, либо не понимает, почему в сводке за
     тот день его не было."""
-    if not visit_day or visit_day == date.today().isoformat():
+    if not visit_day or visit_day == workday.today().isoformat():
         return None
     try:
         pretty = date.fromisoformat(visit_day).strftime("%d.%m")
@@ -3298,7 +3324,7 @@ def _saved_at(body) -> str | None:
     целого дня ложилась в чужой день.
     """
     try:
-        moment = datetime.fromtimestamp(float(body.get("occurred_at")) / 1000.0)
+        moment = datetime.fromtimestamp(float(body.get("occurred_at")) / 1000.0, timezone.utc).replace(tzinfo=None)
     except (TypeError, ValueError, OSError, OverflowError):
         return None
     return moment.isoformat(timespec="seconds")
@@ -3310,12 +3336,12 @@ def _occurred_on(body) -> str:
     Клиенту доверяем ограниченно: будущим днём визит не датируется никогда, а
     слишком старый (больше двух недель) — это не оффлайн, а сбитые часы или
     очередь, пролежавшая с прошлой жизни телефона."""
-    today = date.today()
+    today = workday.today()
     raw = body.get("occurred_at")
     if raw is None:
         return today.isoformat()
     try:
-        moment = datetime.fromtimestamp(float(raw) / 1000.0)
+        moment = datetime.fromtimestamp(float(raw) / 1000.0, evidence.FIELD_TZ)
     except (TypeError, ValueError, OSError, OverflowError):
         return today.isoformat()
     day = moment.date()
@@ -3425,7 +3451,7 @@ async def _visit_notify(request: web.Request, notify_row, uid: int,
         # Снимки офлайн-визита приезжают ВМЕСТЕ с ним, то есть сегодня: ждём их
         # по дню доставки, а не по дню выезда (day здесь — день выезда).
         await _await_visit_photos(notify_row["contract_id"],
-                                  date.today().isoformat(), pending)
+                                  workday.today().isoformat(), pending)
     except Exception as exc:  # noqa: BLE001 — догон не должен съесть рассылку
         logging.warning("photo grace failed: %s", exc)
     ev = (evidence_ctx or {}).get("ev")
@@ -3544,7 +3570,7 @@ async def _notify_report_chats(request: web.Request, row, vlat, vlon,
                         contract_id=row["contract_id"])
             return
         files = day_photos(db.person_contracts(row["contract_id"]),
-                           date.today().isoformat())
+                           workday.today().isoformat())
         rels = [f"{p.parent.name}/{p.name}" for p in files]
         geo_map = db.photo_geo_for_files(rels)
         # photo_geo с вер. 33 — индекс ВСЕХ снимков: строка есть и без точки.
@@ -3632,7 +3658,7 @@ async def _notify_managers(request: web.Request, row, dist_m: int | None = None,
                     contract_id=cid)
         return
     from notify import classify_send_error, promise_line, send_album
-    files = day_photos(db.person_contracts(cid), date.today().isoformat())
+    files = day_photos(db.person_contracts(cid), workday.today().isoformat())
     lines = [f"✅ Выезд отработан",
              f"👤 {_esc(row['client'])} ({_esc(cid)})",
              f"🧑‍💼 {_esc(emp)}",
@@ -4377,7 +4403,7 @@ async def _manager_device_enroll(request: web.Request) -> web.Response:
     code = _link_code(str(body.get("code") or ""))
     device = str(body.get("device") or "").strip()[:80]
     _admin_too_many_fails(request)
-    uid = db.peek_app_link(code) if code else None
+    uid = db.peek_app_link(code, desktop=True) if code else None
     if not uid:
         _admin_auth_failed(request, scope="app")
         # Причина — чтобы пульт подсказал путь («Выдать себе» в приложении),
@@ -4392,7 +4418,7 @@ async def _manager_device_enroll(request: web.Request) -> web.Response:
         raise _json_error(web.HTTPForbidden, "not_manager")
     got = db.enroll_manager_device(code, device)
     if not got:
-        raise _json_error(web.HTTPGone, "link_dead")
+        raise _json_error(web.HTTPGone, "link_dead", reason=db.app_link_status(code))
     _admin_auth_ok(request, scope="app")
     uid, dev_id, token = got
     db.audit_access(uid, "pult_enroll", detail=f"#{dev_id} {device}")
@@ -4451,6 +4477,18 @@ async def _control_overview(request: web.Request) -> web.Response:
     return _manager_json(data)
 
 
+async def _control_soft(request: web.Request) -> web.Response:
+    uid, mgr, team = _manager_gate(request)
+    rng = _stats_range_q(request)
+    team = _range_team(mgr, team, rng)
+    data = await asyncio.to_thread(functools.partial(
+        control.activity, mgr, team, rng, kinds={"call"},
+        office=(request.query.get("office") or "").strip(),
+        before=(request.query.get("before") or "").strip(), limit=200))
+    db.audit_access(uid, "control_view", detail=f"soft {rng['from']}..{rng['to']}")
+    return _manager_json(data)
+
+
 async def _control_assignments(request: web.Request) -> web.Response:
     """Журнал закреплений: кому приехали договоры и чьи это были (контур СБ)."""
     uid, mgr, team = _manager_gate(request)
@@ -4506,7 +4544,9 @@ def _all_employees() -> list[str]:
     with db.connect() as conn:
         return sorted({r["responsible"] for r in conn.execute(
             "SELECT DISTINCT responsible FROM clients "
-            "WHERE COALESCE(responsible,'') <> ''")})
+            "WHERE TRIM(COALESCE(responsible,'')) <> '' UNION "
+            "SELECT DISTINCT responsible_soft FROM clients "
+            "WHERE TRIM(COALESCE(responsible_soft,'')) <> ''")})
 
 
 async def _admin_control(request: web.Request, kind: str) -> web.Response:
@@ -4525,6 +4565,11 @@ async def _admin_control(request: web.Request, kind: str) -> web.Response:
         data = await asyncio.to_thread(control.flags_of, None, _all_employees(), rng, emp)
         if data is None:
             raise web.HTTPNotFound(text="employee")
+    elif kind == "soft":
+        data = await asyncio.to_thread(functools.partial(
+            control.activity, None, _all_employees(), rng, kinds={"call"},
+            office=(request.query.get("office") or "").strip(),
+            before=(request.query.get("before") or "").strip(), limit=200))
     elif kind == "assignments":
         data = await asyncio.to_thread(control.assignments, None, _all_employees(), rng)
     elif kind == "access":
@@ -4551,6 +4596,10 @@ async def _admin_control(request: web.Request, kind: str) -> web.Response:
 
 async def _admin_control_overview(request):
     return await _admin_control(request, "overview")
+
+
+async def _admin_control_soft(request):
+    return await _admin_control(request, "soft")
 
 
 async def _admin_control_flags(request):
@@ -4686,22 +4735,36 @@ async def _agent_device_enroll(request: web.Request) -> web.Response:
     code = _link_code(str(body.get("code") or ""))
     device = str(body.get("device") or "").strip()[:80]
     _admin_too_many_fails(request)
-    uid = db.peek_app_link(code) if code else None
+    uid = db.peek_app_link(code, desktop=True) if code else None
+    keep_token = str(body.get("keep_token") or "").strip() or None
+    expected_uid = body.get("expected_uid")
+    if expected_uid is not None and (type(expected_uid) is not int or expected_uid <= 0):
+        raise _json_error(web.HTTPBadRequest, "expected_uid")
+    reuse_only = body.get("reuse_only") is True
+    if uid is None and keep_token and code and db.app_link_status(code) != "expired":
+        with db.connect() as conn:
+            row = conn.execute("SELECT telegram_id FROM app_links WHERE code=?", (code,)).fetchone()
+        uid = int(row["telegram_id"]) if row else None
     if not uid:
         _admin_auth_failed(request, scope="app")
         raise _json_error(web.HTTPGone, "link_dead",
-                          reason=db.app_link_status(code) if code else "unknown")
+                          reason=db.app_link_status(code, desktop=True) if code else "unknown")
     if digest_data.manager_scope(uid, is_owner=(uid == ADMIN_ID)) is not None:
         raise _json_error(web.HTTPForbidden, "not_agent")
-    got = db.enroll_agent_device(code, device)
+    if expected_uid is not None and uid != expected_uid:
+        raise _json_error(web.HTTPConflict, "pending_calls_other_login")
+    got = db.enroll_agent_device(code, device, keep_token=keep_token,
+                                 expected_uid=expected_uid, reuse_only=reuse_only)
     if not got:
+        if reuse_only:
+            raise _json_error(web.HTTPConflict, "pending_calls_other_login")
         raise _json_error(web.HTTPGone, "link_dead")
     employee, link_uid, dev_id, token = got
     _admin_auth_ok(request, scope="app")
     db.audit_access(link_uid, "desk_enroll", employee,
                     detail=f"#{dev_id} {device}")
     return web.json_response({"ok": True, "token": token, "device_id": dev_id,
-                              "employee": employee})
+                              "employee": employee, "telegram_id": link_uid})
 
 
 async def _agent_device_logout(request: web.Request) -> web.Response:
@@ -6011,7 +6074,7 @@ async def _admin_managers(request: web.Request) -> web.Response:
     """Экран «Руководители» в пульте: список руководителей + справочники для форм
     (города и сотрудники из реестра, карта город→команда) + настройки автопуша."""
     _admin(request)
-    today = date.today().isoformat()
+    today = workday.today().isoformat()
     managers = db.list_managers()
     for m in managers:
         # Расхождение написаний ФИО роль/реестр: у таких портфель у руководителя
@@ -6214,7 +6277,7 @@ async def _admin_digest_settings(request: web.Request) -> web.Response:
             if key in b:
                 db.set_setting(key, "1" if b.get(key) else "0")
 
-    today = date.today().isoformat()
+    today = workday.today().isoformat()
     delivery = db.push_summary(today)
     delivery["recent"] = db.push_tail(20, day=today)
     return web.json_response({
@@ -6691,11 +6754,13 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/manager/device/logout", _manager_device_logout)
     app.router.add_get("/api/manager/activity", _manager_activity)
     app.router.add_get("/api/control/overview", _control_overview)
+    app.router.add_get("/api/control/soft", _control_soft)
     app.router.add_get("/api/control/assignments", _control_assignments)
     app.router.add_get("/api/control/access", _control_access)
     app.router.add_get("/api/control/day", _control_day)
     app.router.add_get("/api/control/geo_days", _control_geo_days)
     app.router.add_get("/admin/control/overview", _admin_control_overview)
+    app.router.add_get("/admin/control/soft", _admin_control_soft)
     app.router.add_get("/admin/control/flags", _admin_control_flags)
     app.router.add_get("/admin/control/callbacks", _admin_control_callbacks)
     app.router.add_get("/admin/control/assignments", _admin_control_assignments)

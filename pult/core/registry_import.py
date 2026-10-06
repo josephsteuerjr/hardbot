@@ -537,6 +537,10 @@ def expected_from_preview(d: dict, body: dict) -> dict | str:
 
 # --- отчёт -------------------------------------------------------------------
 def import_pairs(d: dict) -> list[tuple[str, object]]:
+    unassigned_label = {
+        "hard": "без закрепления Харда", "soft": "без закрепления Софта",
+        "both": "без обоих закреплений",
+    }.get(d.get("import_profile", "hard"), "без закрепления")
     return [("строк", d.get("total_rows")), ("добавлено", d.get("inserted")),
             ("обновлено", d.get("updated")), ("без КД", d.get("skipped_no_id")),
             ("дублей", d.get("duplicates")),
@@ -544,19 +548,19 @@ def import_pairs(d: dict) -> list[tuple[str, object]]:
             ("ручных снятий в выбранных строках",
              d.get("manual_restore_candidates")),
             ("будет возвращено / возвращено", d.get("manual_restored")),
-            ("текущих комментариев сохранено",
+            ("комментариев выезда сохранено",
              d.get("current_comments_preserved")),
-            ("текущих комментариев заменено",
+            ("комментариев выезда заменено",
              d.get("current_comments_replaced")),
-            ("текущих комментариев очищено",
+            ("комментариев выезда очищено",
              d.get("current_comments_cleared")),
             ("историчных комментариев загружено",
              d.get("historical_comments_imported")),
             ("историчных комментариев очищено",
              d.get("historical_comments_cleared")),
-            ("без ответственного", d.get("no_responsible")),
+            (unassigned_label, d.get("no_responsible")),
             ("офисных правок", d.get("office_cells")),
-            ("call-полей изолировано", d.get("isolated_call_cells")),
+            ("прежних полей звонка пропущено", d.get("isolated_call_cells")),
             ("отозвано реестром (у сотрудников)", d.get("recalled_had_owner")),
             ("пришло уже отозванным", d.get("recalled_without_owner")),
             ("отзыв держится", d.get("recall_held")),
@@ -711,21 +715,28 @@ def import_notes(d: dict) -> list[str]:
     )
     other_unassigned = max(int(d.get("no_responsible") or 0) - held_manual, 0)
     if other_unassigned:
+        profile = d.get("import_profile", "hard")
+        owner_text = {"hard": "Харда", "soft": "Софта", "both": "Харда и Софта"}.get(profile, "выбранного профиля")
         notes.append(
-            f"Без ответственного вне ручных снятий: {other_unassigned} строк. "
-            "Эти договоры в базе есть, но их не видит ни один выездник. "
-            "Проверь пустые значения в колонке «ответственный Сотрудник»."
+            f"Без закрепления {owner_text} вне ручных снятий: {other_unassigned} строк. "
+            "Договоры сохранены в базе. Проверь соответствующие колонки "
+            "ответственных в общем реестре."
         )
+    if d.get("isolated_call_cells"):
+        notes.append(
+            "Пропущены прежние колонки «Статус звонка» и «комментарий звонка» "
+            "в строках с результатом выезда. Софтовые результат звонка и "
+            "комментарий месяца читаются отдельно; этот счётчик их не затрагивает.")
     if d.get("office_cells"):
         notes.append(f"Принято офисных правок: {d['office_cells']} ячеек по "
-                     f"{d.get('office_contracts') or 0} договорам — файл видел "
-                     "обогащение (дата выезда совпала), отличия учтены как правки "
-                     "офиса и попадут в карточки и обогащение.")
+                     f"{d.get('office_contracts') or 0} договорам — подтверждено, "
+                     "что реестр получил текущий результат выезда или звонка. "
+                     "Правки попадут в карточки и последующее обогащение.")
     if d.get("protected_cells"):
         notes.append(f"Отклонено защитой: {d['protected_cells']} ячеек по "
-                     f"{d.get('protected_contracts') or 0} договорам — в файле нет "
-                     "свежей даты выезда из приложения (устаревшая копия?), результат "
-                     "выездника не затёрт.")
+                     f"{d.get('protected_contracts') or 0} договорам — не подтверждено, "
+                     "что файл видел текущий результат выезда или звонка. "
+                     "Сохранён результат из приложения.")
     unk = d.get("unknown_columns") or []
     if unk:
         notes.append(
@@ -745,7 +756,7 @@ def import_notes(d: dict) -> list[str]:
     ignored = d.get("ignored_columns") or []
     if ignored:
         notes.append(
-            "Служебные колонки по текущему контракту: "
+            "Прочие колонки общего реестра: "
             + ", ".join(ignored)
         )
     return notes
@@ -753,13 +764,16 @@ def import_notes(d: dict) -> list[str]:
 
 def preview_headline(d: dict, full_registry: bool) -> str:
     """Первая заметка предпросмотра: полный срез или частичный импорт."""
+    profile = d.get("import_profile", "hard")
+    profile_text = {"hard": "Хард", "soft": "Софт", "both": "Хард и Софт"}.get(profile, profile)
+    prefix = f"Профиль: {profile_text}. " if "import_profile" in d else ""
     if not full_registry:
-        return "ЧАСТИЧНЫЙ ИМПОРТ: отсутствующие в файле договоры сниматься не будут."
+        return prefix + "ЧАСТИЧНЫЙ ИМПОРТ: отсутствующие в файле договоры сниматься не будут."
     by_employee = d.get("auto_unassigned_by_employee") or {}
     breakdown = ", ".join(f"{name}: {fmt_n(count)}"
                           for name, count in by_employee.items())
     return (
-        "ПОЛНЫЙ СРЕЗ ВЫБРАННЫХ: у выбранных сотрудников после "
+        prefix + "ПОЛНЫЙ СРЕЗ ВЫБРАННЫХ: у выбранных сотрудников после "
         "применения будет снято договоров: "
         f"{fmt_n(d.get('auto_unassigned'))}. Остальные сотрудники "
         "не затрагиваются."

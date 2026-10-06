@@ -1,12 +1,18 @@
 """Blocked registry imports must be side-effect free at the HTTP boundary."""
 
 import asyncio
+import pytest
 from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 
 import db
 import scoring
 import web
+
+
+@pytest.fixture(autouse=True)
+def _database():
+    db.init_db()
 
 
 def test_blocked_imports_return_409_before_geocoding(monkeypatch):

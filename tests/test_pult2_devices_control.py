@@ -50,6 +50,7 @@ def _seed():
         conn.execute("DELETE FROM managers WHERE telegram_id IN (?,?,?)", (MGR, SEC, FULL))
         conn.execute("DELETE FROM clients WHERE contract_id LIKE 'P2-%'")
         conn.execute("DELETE FROM visits WHERE contract_id LIKE 'P2-%'")
+        conn.execute("DELETE FROM calls WHERE contract_id LIKE 'P2-%'")
         conn.execute("DELETE FROM photo_geo WHERE contract_id LIKE 'P2-%'")
         conn.execute("DELETE FROM app_links WHERE telegram_id IN (?,?,?,?)", (MGR, SEC, FULL, AGENT))
         conn.commit()
@@ -88,6 +89,46 @@ def _enroll(uid):
 
 
 # --- вход по ключу ------------------------------------------------------------------
+def test_soft_control_has_scoped_journal_and_cannot_be_opened_by_lead():
+    _seed()
+    import workday
+    day = workday.today().isoformat()
+    with db.connect() as conn:
+        conn.execute("UPDATE clients SET responsible_soft=? WHERE contract_id='P2-0'", (EMP_A,))
+        conn.execute("UPDATE clients SET responsible_soft=? WHERE contract_id='P2-3'", (EMP_B,))
+    db.save_call_result("P2-0", AGENT, EMP_A, {"soft_comment": "Ожидает расчёт"}, "Звонок",
+                        op_id="soft-scope-a", on_date=day)
+    db.save_call_result("P2-3", AGENT, EMP_B, {"soft_comment": "Чужая команда"}, "Звонок",
+                        op_id="soft-scope-b", on_date=day)
+    db.set_manager(SEC, "СБ", [], [EMP_A], role="security")
+    token, _ = _enroll(SEC)
+    st, body = _call("GET", "/api/control/soft?preset=today", headers={"X-Pult-Token": token})
+    assert st == 200, body
+    assert [event["op"] for event in body["events"]] == ["soft-scope-a"]
+    assert body["events"][0]["detail"] == "Ожидает расчёт"
+    token, _ = _enroll(MGR)
+    assert _call("GET", "/api/control/soft", headers={"X-Pult-Token": token})[0] == 403
+
+
+def test_call_activity_cursor_preserves_events_with_equal_timestamp():
+    _seed()
+    import control
+    import workday
+    day = workday.today().isoformat()
+    with db.connect() as conn:
+        conn.execute("UPDATE clients SET responsible_soft=? WHERE contract_id IN ('P2-0','P2-1')", (EMP_A,))
+    stamp = day + "T07:00:00+00:00"
+    for i in range(2):
+        db.save_call_result(f"P2-{i}", AGENT, EMP_A, {"soft_comment": str(i)}, "Звонок",
+                            op_id=f"soft-cursor-{i}", on_date=day, saved_at=stamp)
+    rng = {"from": day, "to": day}
+    first = control.activity({}, [EMP_A], rng, kinds={"call"}, limit=1)
+    assert first["next_before"]
+    second = control.activity({}, [EMP_A], rng, kinds={"call"}, limit=1, before=first["next_before"])
+    assert second["events"] and second["events"][0]["id"] != first["events"][0]["id"]
+    assert not second["next_before"]
+
+
 def test_enroll_gives_device_token_and_caps():
     _seed()
     token, body = _enroll(MGR)

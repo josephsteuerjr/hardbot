@@ -74,7 +74,7 @@ async function importTab(el: HTMLElement) {
       <div class="block">
         <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="full" ${st.full ? "checked" : ""}><span class="grow">Для выбранных сотрудников это полный срез — снять у них договоры, которых нет в выбранных строках файла</span></label>
         <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="restore" ${st.restore ? "checked" : ""}><span class="grow">Вернуть ранее вручную снятые договоры, если они снова есть в выбранных строках с тем же ответственным</span></label>
-        <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="comments" ${st.comments ? "checked" : ""}><span class="grow">Начало месяца: заменить текущие комментарии значениями файла (пустая ячейка очистит комментарий)</span></label>
+        <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="comments" ${st.comments ? "checked" : ""}><span class="grow">Начало месяца: заменить комментарии выезда значениями файла (пустая ячейка очистит комментарий)</span></label>
         <p class="muted" style="font-size:13px">Историчные комментарии грузятся сами, если колонка есть в файле: значение повторяет файл точно, пустая ячейка очищает.</p></div>
       ${warn.length ? `<div class="notice" style="white-space:pre-line"><span class="grow">${esc(warn.join("\n"))}</span></div>` : ""}
       <div class="toolbar"><button class="btn primary" data-preview ${st.sel.size ? "" : "disabled"}>Предпросмотр выбранных (${n(st.sel.size)})</button>

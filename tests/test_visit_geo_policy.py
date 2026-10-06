@@ -110,4 +110,4 @@ def test_server_exposes_policy_in_bootstrap_and_public_version(monkeypatch, requ
     assert web._meta("ru")["visitGeoRequired"] is required
     response = asyncio.run(web._version(make_mocked_request("GET", "/version.json")))
     assert json.loads(response.text)["visitGeoRequired"] is required
-    assert json.loads(response.text)["shellVersion"] == 75
+    assert json.loads(response.text)["shellVersion"] == web._shell_version()

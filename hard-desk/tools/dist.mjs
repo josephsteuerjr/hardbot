@@ -5,14 +5,26 @@
 //   сам найдёт питон-сторону и откроется пультом аналитика.
 //   node tools/dist.mjs
 import { packager } from "@electron/packager";
-import { cpSync, existsSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { cpSync, existsSync, lstatSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, resolve, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
 const here = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(here, "dist");
-rmSync(dist, { recursive: true, force: true });
+function removeBuildFolder(path) {
+  const target = resolve(path);
+  const rel = relative(resolve(dist), target);
+  if (rel.startsWith("..") || isAbsolute(rel) || resolve(dist) === resolve(here)) throw new Error("Unsafe build path");
+  if (existsSync(target)) {
+    if (lstatSync(target).isSymbolicLink()) throw new Error("Build target is a link");
+    const real = realpathSync(target);
+    const actualRel = relative(realpathSync(here), real);
+    if (actualRel.startsWith("..") || isAbsolute(actualRel) || !actualRel) throw new Error("Build target leaves project");
+  }
+  rmSync(target, { recursive: true, force: true });
+}
+removeBuildFolder(dist);
 
 const [appDir] = await packager({
   dir: here,
@@ -32,11 +44,10 @@ const [appDir] = await packager({
 });
 
 const folder = join(dist, "Хард");
-rmSync(folder, { recursive: true, force: true });
+removeBuildFolder(folder);
 cpSync(appDir, folder, { recursive: true });
-rmSync(appDir, { recursive: true, force: true });
+removeBuildFolder(appDir);
 cpSync(join(here, "Как начать.txt"), join(folder, "Как начать.txt"));
-if (existsSync(join(folder, "LICENSES.chromium.html"))) rmSync(join(folder, "LICENSES.chromium.html"));
 // zip — средствами Windows (tar из System32 умеет zip).
 const zip = join(dist, "Хард.zip");
 execFileSync(join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe"), ["-a", "-c", "-f", zip, "-C", dist, "Хард"], { stdio: "inherit" });

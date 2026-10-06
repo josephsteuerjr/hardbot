@@ -4,12 +4,12 @@
 // с перемещением), контрольный обзвон, закрепления и доступ.
 import { api, hard } from "../kit/api";
 import { dayTitle, esc, icon, n, plural, toast } from "../kit/dom";
-import { setHead, type Section } from "../kit/shell";
+import { openPanel, setHead, type Section } from "../kit/shell";
 import { DataTable } from "../kit/table";
 import { evidenceTag, flagsHtml, officeChips, openPerson, problem, rangeChips, rangeQuery, staleNote, wireRange, type Range } from "./common";
 
 const state = {
-  tab: "risk" as "risk" | "calls" | "assign" | "access",
+  tab: "risk" as "risk" | "calls" | "soft" | "assign" | "access",
   range: { preset: "30d" } as Range,
   office: "",
   employee: "",
@@ -46,7 +46,7 @@ const COUNTERS: [string, string][] = [
   ["nogeo", "Нет GPS-точки"],
   ["addr_coarse", "Адрес неточный"],
   ["late", "Внесено позже"],
-  ["fast", "За полминуты"],
+  ["fast", "Быстрее 40 с"],
   ["night", "Ночью"],
   ["series", "Внесено пачкой"],
   ["cash", "«Наличные» в тексте"],
@@ -65,7 +65,8 @@ function counterCell(key: string, title: string) {
 
 function tabs(): string {
   return `<div class="chips"><button class="chip" data-tab="risk" aria-pressed="${state.tab === "risk"}">Статистика по людям</button>
-    <button class="chip" data-tab="calls" aria-pressed="${state.tab === "calls"}">Контрольный обзвон</button>
+    <button class="chip" data-tab="calls" aria-pressed="${state.tab === "calls"}">Проверка выездов</button>
+    <button class="chip" data-tab="soft" aria-pressed="${state.tab === "soft"}">Результаты Софта</button>
     <button class="chip" data-tab="assign" aria-pressed="${state.tab === "assign"}">Закрепления</button>
     <button class="chip" data-tab="access" aria-pressed="${state.tab === "access"}">Доступ</button>
     </div>`;
@@ -543,9 +544,47 @@ async function renderCalls(root: HTMLElement) {
   });
 }
 
+async function renderSoft(root: HTMLElement, before = "", earlier: any[] = []) {
+  setHead("Контроль", "заявленные результаты звонков и время доставки");
+  const r = await call("/api/control/soft", { ...rangeQuery(state.range), office: state.office, before });
+  if (!root.isConnected) return;
+  if (!r.ok) { root.innerHTML = tabs() + problem(r.text || "Не загрузилось"); wire(root); return; }
+  const d = r.data;
+  const events = [...earlier, ...(d.events || [])];
+  root.innerHTML = `<div class="toolbar">${tabs()}</div>
+    <div class="toolbar">${rangeChips(state.range, d.range)}<span class="spacer"></span>${officeChips(d.offices, state.office)}</div>
+    <div class="notice">Это результаты, внесённые сотрудниками. Приложение не совершает звонок и не получает подтверждение оператора связи. Поздняя доставка возможна при работе без сети.</div>
+    <div class="section" id="soft-control-table"></div>
+    ${d.next_before ? '<button class="btn" id="soft-more">Загрузить более ранние</button>' : ''}`;
+  wire(root);
+  new DataTable<any>(root.querySelector("#soft-control-table")!, {
+    id: "control-soft", exportName: "Результаты Софта", key: x => x.id,
+    cols: [
+      { key: "at", title: "Время звонка (UTC+5)", value: x => String(x.at || '').slice(0, 19).replace('T', ' ') },
+      { key: "employee", title: "Сотрудник", value: x => x.employee },
+      { key: "debtor", title: "Должник", value: x => x.debtor },
+      { key: "rep", title: "КД", value: x => x.rep },
+      { key: "title", title: "Результат", value: x => x.title },
+      { key: "detail", title: "Новая заметка", value: x => x.detail },
+      { key: "flags", title: "Поводы проверить", value: x => (x.flags || []).join(', '), html: x => flagsHtml(x.flags) },
+    ],
+    onRow: x => {
+      const panel = openPanel(`<h2>${esc(x.debtor || x.rep)}</h2>`);
+      panel.innerHTML = `<dl class="kv"><dt>Сотрудник</dt><dd>${esc(x.employee)}</dd>
+        <dt>Договор</dt><dd>${esc(x.rep)}</dd><dt>Время результата (UTC+5)</dt><dd>${esc(x.at)}</dd>
+        <dt>Получен сервером (UTC)</dt><dd>${esc(x.received_at)}</dd><dt>Операция</dt><dd>${esc(x.op)}</dd>
+        <dt>Результат</dt><dd>${esc(x.title)}</dd></dl><div style="white-space:pre-wrap">${esc(x.detail)}</div>
+        <p class="muted">Текст хранится в журнале конкретного звонка. Для подтверждения контакта нужна независимая проверка.</p>
+        ${canExcel ? '<button class="btn" id="soft-case">Открыть карточку и историю</button>' : ''}`;
+      panel.querySelector("#soft-case")?.addEventListener("click", () => void openPerson(x.employee, x.rep, x.day, "soft"));
+    },
+  }).setRows(events);
+  root.querySelector("#soft-more")?.addEventListener("click", () => void renderSoft(root, d.next_before, events));
+}
+
 function wire(root: HTMLElement) {
   root.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach((b) => b.addEventListener("click", () => {
-    state.tab = b.dataset.tab as "risk" | "calls"; state.employee = ""; void draw(root);
+    state.tab = b.dataset.tab as typeof state.tab; state.employee = ""; void draw(root);
   }));
   root.querySelectorAll<HTMLButtonElement>("[data-office]").forEach((b) => b.addEventListener("click", () => {
     state.office = b.dataset.office || ""; void draw(root);
@@ -554,6 +593,7 @@ function wire(root: HTMLElement) {
 }
 
 function draw(root: HTMLElement): Promise<void> {
+  if (state.tab === "soft") return renderSoft(root);
   if (state.tab === "calls") return renderCalls(root);
   if (state.tab === "assign") return renderAssign(root);
   if (state.tab === "access") return renderAccess(root);

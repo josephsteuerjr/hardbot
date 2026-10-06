@@ -9,7 +9,7 @@ const esbuild = require('esbuild');
 
 const root = path.resolve(__dirname, '..');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'hard-call-queue-test-'));
-let network = 'offline', sent = [], hold = null;
+let network = 'offline', sent = [], hold = null, enrollment = null;
 const electron = {
   app: { getPath: () => temp },
   safeStorage: {
@@ -19,10 +19,10 @@ const electron = {
   },
   session: { fromPartition: () => ({ setProxy: async () => {}, fetch: async (_url, options) => {
     if (network === 'offline') throw new Error('ERR_INTERNET_DISCONNECTED');
-    sent.push(JSON.parse(options.body));
+    if (options.body) sent.push(JSON.parse(options.body));
     if (hold) { const wait = hold; hold = null; await wait; }
-    return { ok: network === 'online' || network === 'partial', status: network === '500' ? 500 : network === '404' ? 404 : 200,
-      text: async () => 'synthetic rejection', json: async () => network === 'partial' ? { rejected: { forecast_sum: 'format' } } : { ok: true } };
+    return { ok: network === 'online' || network === 'partial', status: network === '500' ? 500 : network === '404' ? 404 : network === '401' ? 401 : 200,
+      text: async () => 'synthetic rejection', json: async () => _url.endsWith('/device/enroll') && enrollment ? enrollment : network === 'partial' ? { rejected: { forecast_sum: 'format' } } : { ok: true } };
   } }) },
 };
 function load(name) {
@@ -76,6 +76,30 @@ function load(name) {
   store.writeFieldToken('synthetic-token');
   await net.callField('POST', '/api/local/call_queue/remove', undefined, { op_id: 'reassigned' });
   assert.equal(store.readCallQueue().entries.length, 1);
+  store.clearCallQueue();
+  store.writeSettings({fieldDevice:{id:1,name:'Synthetic PC',employee:'Synthetic Soft',telegram_id:101}});
+  network='offline';
+  await net.callField('POST','/api/save',undefined,call('stable-principal'));
+  const stableOwner=store.readCallQueue().owner;
+  store.writeFieldToken('rotated-token-for-same-principal');
+  network='online'; await net.flushCallQueue();
+  assert.equal(store.readCallQueue().entries.length,0); // token rotation preserves the same identity
+  network='offline'; await net.callField('POST','/api/save',undefined,call('recover-after-revoke'));
+  network='401'; await net.flushCallQueue();
+  assert.equal(store.readFieldToken(),'');
+  assert.equal(store.readSettings().fieldDevice.telegram_id,101);
+  assert.equal(store.readCallQueue().owner,stableOwner);
+  network='online';
+  enrollment={token:'new-same-principal-token',device_id:2,employee:'Synthetic Soft',telegram_id:101};
+  assert.equal((await net.enrollField('https://synthetic.invalid/i/synthetic-link')).ok,true);
+  assert.equal(store.readCallQueue().owner,stableOwner);
+  await net.flushCallQueue(); assert.equal(store.readCallQueue().entries.length,0);
+  network='offline'; await net.callField('POST','/api/save',undefined,call('do-not-switch-user'));
+  enrollment={token:'another-principal-token',device_id:3,employee:'Other Synthetic Soft',telegram_id:202};
+  network='online';
+  assert.equal((await net.enrollField('https://synthetic.invalid/i/another-link')).ok,false);
+  assert.equal(store.readFieldToken(),'new-same-principal-token');
+  assert.equal(store.readCallQueue().entries.length,1);
   console.log('Call queue: offline, restart, idempotence, concurrent saves, transient errors, rejection and identity checks passed');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
   const resolved = fs.realpathSync(temp);

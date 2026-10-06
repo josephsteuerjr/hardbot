@@ -9,6 +9,7 @@
 import hashlib
 import hmac
 import json
+import workday
 import logging
 import os
 import re
@@ -238,6 +239,19 @@ def call_is_latest(row) -> bool:
 def call_field_at(row, key) -> str:
     data = json.loads(row["bot_call_data"] or "{}")
     return str(data.get("_field_at", {}).get(key) or row["bot_call_at"] or "")
+
+
+def call_fact_day(row) -> str:
+    try:
+        data = json.loads(row["bot_call_data"] or "{}")
+        return str(data.get("_event_day") or row["bot_call_at"] or "")[:10]
+    except (ValueError, AttributeError, TypeError):
+        return str(row["bot_call_at"] or "")[:10]
+
+
+def call_field_day(row, key) -> str:
+    data = json.loads(row["bot_call_data"] or "{}")
+    return str(data.get("_field_day", {}).get(key) or call_field_at(row, key))[:10]
 
 
 def call_owns_field(row, key) -> bool:
@@ -1065,7 +1079,7 @@ def init_db() -> None:
             conn.execute("ALTER TABLE managers ADD COLUMN office_cities TEXT")
         # Журнал доставки уведомлений: строка на КАЖДУЮ попытку и каждый ранний
         # return. Ранние return сейчас молчат — именно они и есть «не работает».
-        # day = date.today() (в контейнере UTC) — та же система координат, что у
+        # day = workday.today() (в контейнере UTC) — та же система координат, что у
         # visit_date и digest_last_run, иначе «сводка за сегодня» спорила бы с
         # датой дайджеста. Телеметрия, не аудит: ПД-выдача пишется в audit.
         conn.execute("""
@@ -1105,6 +1119,7 @@ def init_db() -> None:
               uses INTEGER NOT NULL DEFAULT 0,
               max_uses INTEGER NOT NULL DEFAULT {int(APP_LINK_DEFAULT_USES)},
               bonus_ios INTEGER NOT NULL DEFAULT 0,
+              bonus_desktop INTEGER NOT NULL DEFAULT 0,
               last_use_at TEXT,
               last_agent TEXT
             )
@@ -1480,6 +1495,9 @@ def init_db() -> None:
         if "bonus_ios" not in lcols:
             conn.execute(
                 "ALTER TABLE app_links ADD COLUMN bonus_ios INTEGER NOT NULL DEFAULT 0")
+        if "bonus_desktop" not in lcols:
+            conn.execute(
+                "ALTER TABLE app_links ADD COLUMN bonus_desktop INTEGER NOT NULL DEFAULT 0")
         if "last_use_at" not in lcols:
             conn.execute("ALTER TABLE app_links ADD COLUMN last_use_at TEXT")
         if "last_agent" not in lcols:
@@ -1496,7 +1514,7 @@ def init_db() -> None:
             conn.execute(
                 "INSERT INTO settings (key, value) VALUES (?, ?)",
                 (migration_key, json.dumps({"contracts": n_backfilled,
-                                            "at": date.today().isoformat()})),
+                                            "at": workday.today().isoformat()})),
             )
         # Сидинг журнала значений визита для строк, созданных до колонки
         # visit_value_log: без него якорный шлюз принял бы эхо текущего снимка
@@ -1519,12 +1537,12 @@ def init_db() -> None:
             filled = _backfill_visit_authors(conn)
             conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)",
                          (author_key, json.dumps({**filled,
-                                                  "at": date.today().isoformat()})))
+                                                  "at": workday.today().isoformat()})))
         call_migration = "migration_call_snapshots_v1"
         if not conn.execute("SELECT 1 FROM settings WHERE key=?", (call_migration,)).fetchone():
             recovered = _backfill_call_snapshots(conn)
             conn.execute("INSERT INTO settings(key,value) VALUES (?,?)",
-                         (call_migration, json.dumps({"contracts": recovered, "at": date.today().isoformat()})))
+                         (call_migration, json.dumps({"contracts": recovered, "at": workday.today().isoformat()})))
         conn.commit()
     reset_role_caches()   # схема/роли могли поменяться — индекс адресатов заново
 
@@ -1616,7 +1634,7 @@ def ensure_owner(telegram_id: int, name: str = "Владелец") -> None:
             # role — легаси-колонка; задаём явно, чтобы пережить старую схему с NOT NULL
             "INSERT INTO users (telegram_id, name, role, created_at) VALUES (?,?,?,?) "
             "ON CONFLICT(telegram_id) DO NOTHING",
-            (telegram_id, name, "owner", date.today().isoformat()),
+            (telegram_id, name, "owner", workday.today().isoformat()),
         )
         conn.commit()
 
@@ -1634,7 +1652,7 @@ def set_lang(telegram_id: int, lang: str) -> None:
         conn.execute(
             "INSERT INTO users (telegram_id, lang, role, created_at) VALUES (?,?,?,?) "
             "ON CONFLICT(telegram_id) DO UPDATE SET lang=excluded.lang",
-            (telegram_id, lang, "collector", date.today().isoformat()),
+            (telegram_id, lang, "collector", workday.today().isoformat()),
         )
         conn.commit()
 
@@ -1656,7 +1674,7 @@ def touch_guest(telegram_id: int, username: str | None = None,
             "  username=COALESCE(excluded.username, users.username), "
             "  name=COALESCE(excluded.name, users.name), "
             "  last_seen=excluded.last_seen",
-            (telegram_id, nm, uname, now, "collector", date.today().isoformat()),
+            (telegram_id, nm, uname, now, "collector", workday.today().isoformat()),
         )
         conn.commit()
 
@@ -1718,13 +1736,13 @@ def bind_agent(telegram_id: int, employee: str, kind: str = "agent",
         cur = conn.execute(
             "INSERT OR IGNORE INTO agent_bind (telegram_id, employee, kind, approved, created_at) "
             "VALUES (?,?,?,?,?)",
-            (telegram_id, employee, kind, 1 if approved else 0, date.today().isoformat()),
+            (telegram_id, employee, kind, 1 if approved else 0, workday.today().isoformat()),
         )
         if cur.rowcount == 0:
             cur = conn.execute(
                 "UPDATE agent_bind SET employee = ?, kind = ?, approved = ?, created_at = ? "
                 "WHERE telegram_id = ? AND approved = 0",
-                (employee, kind, 1 if approved else 0, date.today().isoformat(), telegram_id),
+                (employee, kind, 1 if approved else 0, workday.today().isoformat(), telegram_id),
             )
         conn.commit()
         return cur.rowcount > 0
@@ -1772,7 +1790,7 @@ def set_bind(telegram_id: int, employee: str, kind: str = "agent") -> None:
             "VALUES (?,?,?,1,?) "
             "ON CONFLICT(telegram_id) DO UPDATE SET "
             "employee=excluded.employee, kind=excluded.kind, approved=1",
-            (telegram_id, employee, kind, date.today().isoformat()),
+            (telegram_id, employee, kind, workday.today().isoformat()),
         )
         conn.commit()
 
@@ -1783,9 +1801,14 @@ def employees_with_bindings() -> list[dict]:
     экрана «Роли» в пульте — там заказчик вписывает telegram_id каждому ФИО."""
     with connect() as conn:
         emps = conn.execute(
-            "SELECT responsible AS employee, COUNT(*) AS contracts FROM clients "
-            "WHERE responsible IS NOT NULL AND TRIM(responsible) <> '' "
-            "GROUP BY responsible ORDER BY responsible"
+            "WITH assignments AS ("
+            "SELECT contract_id,responsible AS employee,'hard' AS profile FROM clients "
+            "WHERE trim(coalesce(responsible,''))<>'' UNION ALL "
+            "SELECT contract_id,responsible_soft AS employee,'soft' AS profile FROM clients "
+            "WHERE trim(coalesce(responsible_soft,''))<>'') "
+            "SELECT employee,count(DISTINCT contract_id) AS contracts,"
+            "sum(profile='hard') AS hard_contracts,sum(profile='soft') AS soft_contracts "
+            "FROM assignments GROUP BY employee ORDER BY employee"
         ).fetchall()
         # Только одобренные: неодобренная заявка второго телефона на то же ФИО
         # не должна выглядеть как «сотрудник привязан» (правило «одно ФИО — одно
@@ -1798,6 +1821,8 @@ def employees_with_bindings() -> list[dict]:
         b = binds.get(e["employee"])
         out.append({
             "employee": e["employee"], "contracts": e["contracts"],
+            "hard_contracts": e["hard_contracts"], "soft_contracts": e["soft_contracts"],
+            "profiles": [p for p in ("hard", "soft") if e[p + "_contracts"]],
             "telegram_id": b["telegram_id"] if b else None,
             "kind": (b["kind"] if b and b["kind"] else None) if b else None,
             "approved": (b["approved"] if b else None),
@@ -2251,11 +2276,16 @@ def redeem_app_link(code: str, agent: str | None = None,
                 return keep_token
         # Атомарный расход попытки: rowcount==0 → код чужой/просрочен/исчерпан
         # (в т.ч. проигранная гонка параллельных обменов за последнюю попытку).
+        ios_bonus = bool(not link["bonus_ios"] and (agent or "") in APP_AGENT_BONUS)
         cur = conn.execute(
             "UPDATE app_links SET used_at = ?, last_use_at = ?, last_agent = ?, "
-            "uses = uses + 1 WHERE code = ? AND created_at >= ? "
-            "AND uses < COALESCE(max_uses, ?)",
-            (now_iso, now_iso, agent, code, cutoff, APP_LINK_DEFAULT_USES))
+            "uses = uses + 1, max_uses = COALESCE(max_uses, ?) + "
+            "CASE WHEN bonus_ios = 0 AND ? THEN 1 ELSE 0 END, "
+            "bonus_ios = CASE WHEN ? THEN 1 ELSE bonus_ios END "
+            "WHERE code = ? AND created_at >= ? "
+            "AND (uses < COALESCE(max_uses, ?) OR (bonus_ios = 0 AND ?))",
+            (now_iso, now_iso, agent, APP_LINK_DEFAULT_USES, int(ios_bonus), int(ios_bonus),
+             code, cutoff, APP_LINK_DEFAULT_USES, int(ios_bonus)))
         if cur.rowcount == 0:
             conn.commit()
             return None
@@ -2263,13 +2293,8 @@ def redeem_app_link(code: str, agent: str | None = None,
             "SELECT telegram_id, uses, max_uses, bonus_ios FROM app_links WHERE code = ?",
             (code,)).fetchone()
         uid = row["telegram_id"]
-        # Бонус даём ПО ФАКТУ и ровно один раз — на первом обмене. Заранее угадать
-        # «это айфон» нельзя: аналитик выдаёт ссылку, не глядя на телефон человека.
-        if (row["uses"] or 0) == 1 and not (row["bonus_ios"] or 0) and (
-                (agent or "") in APP_AGENT_BONUS):
-            conn.execute(
-                "UPDATE app_links SET max_uses = COALESCE(max_uses, ?) + 1, "
-                "bonus_ios = 1 WHERE code = ?", (APP_LINK_DEFAULT_USES, code))
+        # Бонус iOS выдан атомарно выше. ПК может войти первым — первый
+        # фактический вход с iPhone всё равно получает запасной обмен.
         # В базу — хэш, наружу — сырой: другого случая узнать его не будет.
         token = secrets.token_urlsafe(24)
         conn.execute(
@@ -2318,6 +2343,12 @@ def app_links_state() -> list[dict]:
             uid = int(r["telegram_id"] or 0)
             devices[uid] = int(r["n"] or 0)
             last_token[uid] = r["last"]
+        for r in conn.execute(
+                "SELECT telegram_id, COUNT(*) n, MAX(created_at) last FROM agent_devices "
+                "WHERE revoked_at IS NULL GROUP BY telegram_id"):
+            uid = int(r["telegram_id"] or 0)
+            devices[uid] = devices.get(uid, 0) + int(r["n"] or 0)
+            last_token[uid] = max(last_token.get(uid) or "", r["last"] or "")
         # ORDER BY created_at: последняя выданная ссылка человека перетирает прежние.
         links = conn.execute("SELECT * FROM app_links ORDER BY created_at").fetchall()
     rows: dict[int, dict] = {}
@@ -2337,6 +2368,8 @@ def app_links_state() -> list[dict]:
             "uses": uses,
             "max_uses": max_uses,
             "bonus_ios": bool(r["bonus_ios"] or 0),
+            "bonus_desktop": bool(r["bonus_desktop"] or 0),
+            "desktop_available": bool(bind and created and created >= cutoff and not r["bonus_desktop"]),
             "last_use_at": r["last_use_at"] or r["used_at"],
             "last_agent": r["last_agent"],
             "entered": uid in devices,
@@ -2354,6 +2387,7 @@ def app_links_state() -> list[dict]:
             "kind": ((bind["kind"] if bind else "") or "agent"),
             "code": None, "created_at": None, "expires_at": None,
             "uses": 0, "max_uses": APP_LINK_DEFAULT_USES, "bonus_ios": False,
+            "bonus_desktop": False, "desktop_available": False,
             "last_use_at": last_token.get(uid), "last_agent": None,
             "entered": True, "devices": n, "alive": False,
         }
@@ -2436,7 +2470,7 @@ def revoke_app_access(telegram_id: int, scope: str = "all") -> int:
 MANAGER_DEVICE_TOUCH_S = 60   # last_seen пишем не чаще раза в минуту
 
 
-def app_link_status(code: str) -> str:
+def app_link_status(code: str, *, desktop: bool = False) -> str:
     """Почему по коду нельзя войти — чтобы пульт сказал человеку, что делать:
     'live' | 'used_up' (входы кончились) | 'expired' (старше окна) | 'unknown'
     (такого кода нет: не было, заменён новым неоткрытым или вычищен). Ничего не
@@ -2447,18 +2481,18 @@ def app_link_status(code: str) -> str:
     cutoff = (datetime.now() - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
     with connect() as conn:
         row = conn.execute(
-            "SELECT created_at, uses, COALESCE(max_uses, ?) AS cap FROM app_links WHERE code = ?",
+            "SELECT created_at, uses, bonus_desktop, COALESCE(max_uses, ?) AS cap FROM app_links WHERE code = ?",
             (APP_LINK_DEFAULT_USES, code)).fetchone()
     if row is None:
         return "unknown"
     if (row["created_at"] or "") < cutoff:
         return "expired"
-    if int(row["uses"] or 0) >= int(row["cap"] or 0):
+    if int(row["uses"] or 0) >= int(row["cap"] or 0) and not (desktop and not row["bonus_desktop"]):
         return "used_up"
     return "live"
 
 
-def peek_app_link(code: str) -> int | None:
+def peek_app_link(code: str, *, desktop: bool = False) -> int | None:
     """Чей это код, если по нему ещё можно войти. Ничего не тратит."""
     if not code:
         return None
@@ -2466,8 +2500,8 @@ def peek_app_link(code: str) -> int | None:
     with connect() as conn:
         row = conn.execute(
             "SELECT telegram_id FROM app_links WHERE code = ? AND created_at >= ? "
-            "AND uses < COALESCE(max_uses, ?)",
-            (code, cutoff, APP_LINK_DEFAULT_USES)).fetchone()
+            "AND (uses < COALESCE(max_uses, ?) OR (? AND bonus_desktop = 0))",
+            (code, cutoff, APP_LINK_DEFAULT_USES, int(desktop))).fetchone()
     return int(row["telegram_id"]) if row else None
 
 
@@ -2527,7 +2561,8 @@ def manager_device_check(token: str, ip: str | None = None) -> tuple[str, dict |
     return "ok", dict(row)
 
 
-def enroll_agent_device(code: str, device: str) -> tuple[str, int, int, str] | None:
+def enroll_agent_device(code: str, device: str, *, keep_token: str | None = None,
+                        expected_uid: int | None = None, reuse_only: bool = False) -> tuple[str, int, int, str] | None:
     """Обменять использование ссылки ВЫЕЗДНИКА на токен приложения-на-ПК.
 
     (employee, telegram_id, id устройства, сырой токен) или None — ссылка мертва.
@@ -2537,19 +2572,40 @@ def enroll_agent_device(code: str, device: str) -> tuple[str, int, int, str] | N
     cutoff = (datetime.now() - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
     token = secrets.token_urlsafe(32)
     with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        link = conn.execute("SELECT * FROM app_links WHERE code=? AND created_at>=?",
+                            (code, cutoff)).fetchone()
+        if link is None:
+            return None
+        uid = int(link["telegram_id"])
+        if expected_uid is not None and uid != expected_uid:
+            return None
+        binding = conn.execute("SELECT employee FROM agent_bind WHERE telegram_id=? AND approved=1",
+                               (uid,)).fetchone()
+        employee = str(binding["employee"] or "").strip() if binding else ""
+        if not employee:
+            return None
+        if keep_token:
+            previous = conn.execute(
+                "SELECT * FROM agent_devices WHERE token_hash=? AND telegram_id=? "
+                "AND employee=? AND revoked_at IS NULL",
+                (app_token_key(keep_token), uid, employee)).fetchone()
+            if previous:
+                conn.execute("UPDATE agent_devices SET last_seen_at=? WHERE id=?",
+                             (now_iso, previous["id"]))
+                conn.commit()
+                return employee, uid, int(previous["id"]), keep_token
+        if reuse_only:
+            return None
+        desktop_bonus = int(not link["bonus_desktop"])
         cur = conn.execute(
             "UPDATE app_links SET used_at = ?, last_use_at = ?, last_agent = 'desk', "
-            "uses = uses + 1 WHERE code = ? AND created_at >= ? "
-            "AND uses < COALESCE(max_uses, ?)",
-            (now_iso, now_iso, code, cutoff, APP_LINK_DEFAULT_USES))
+            "uses = uses + 1, max_uses = COALESCE(max_uses, ?) + ?, "
+            "bonus_desktop = 1 WHERE code = ? AND created_at >= ? "
+            "AND (uses < COALESCE(max_uses, ?) OR bonus_desktop = 0)",
+            (now_iso, now_iso, APP_LINK_DEFAULT_USES, desktop_bonus,
+             code, cutoff, APP_LINK_DEFAULT_USES))
         if cur.rowcount == 0:
-            conn.commit()
-            return None
-        row = conn.execute(
-            "SELECT telegram_id FROM app_links WHERE code = ?", (code,)).fetchone()
-        uid = int(row["telegram_id"])
-        employee = get_binding(uid) or ""
-        if not employee:
             conn.commit()
             return None
         dev_id = conn.execute(
@@ -2818,7 +2874,7 @@ def set_employee_city(employee: str, city: str, source: str = "manual") -> None:
                 "VALUES (?,?,?,?) "
                 "ON CONFLICT(employee) DO UPDATE SET city=excluded.city, "
                 "updated_at=excluded.updated_at, source=excluded.source",
-                (employee, city, date.today().isoformat(), source))
+                (employee, city, workday.today().isoformat(), source))
         else:
             conn.execute("DELETE FROM employee_city WHERE employee = ?", (employee,))
         conn.commit()
@@ -3064,7 +3120,7 @@ def set_manager(telegram_id: int, name: str, cities: list[str],
              json.dumps(list(employees or []), ensure_ascii=False),
              (direction or "").strip() or None,
              json.dumps(list(office_cities or []), ensure_ascii=False),
-             date.today().isoformat(), 1 if keep_offices else 0),
+             workday.today().isoformat(), 1 if keep_offices else 0),
         )
         conn.commit()
     if role is not None:
@@ -3710,7 +3766,7 @@ def photo_geo_sweep() -> int:
     days = photo_geo_retention_days()
     if days <= 0:
         return 0
-    before = (date.today() - timedelta(days=days)).isoformat()
+    before = (workday.today() - timedelta(days=days)).isoformat()
     # Следы выезда — те же перемещения сотрудника, срок хранения один.
     presence_sweep(days)
     return photo_geo_forget(before=before)
@@ -4113,7 +4169,7 @@ def log_push(kind: str, status: str, *, target_kind: str = "",
                 "employee, contract_id, status, error, note, attempt) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (datetime.now().isoformat(timespec="seconds"),
-                 date.today().isoformat(), kind, target_kind or "",
+                 workday.today().isoformat(), kind, target_kind or "",
                  target_id, employee, contract_id,
                  status, (error or "")[:300] or None, (note or "")[:300] or None,
                  int(attempt)))
@@ -4195,7 +4251,7 @@ def push_settled_today(kind: str, day: str) -> set[int]:
 
 def push_trim(keep_days: int = 60) -> int:
     """Обрезка журнала: телеметрия, не архив. ПД-выдача живёт в audit."""
-    edge = (date.today() - timedelta(days=keep_days)).isoformat()
+    edge = (workday.today() - timedelta(days=keep_days)).isoformat()
     with connect() as conn:
         cur = conn.execute("DELETE FROM push_log WHERE day < ?", (edge,))
         conn.commit()
@@ -4601,7 +4657,7 @@ def record_bot_visit(rep_contract_id: str, values: dict,
     не дочитываем пропущенные поля из clients, потому что там может лежать старый
     импорт. Возвращает число помеченных договоров.
     """
-    completed_at = completed_at or date.today().isoformat()
+    completed_at = completed_at or workday.today().isoformat()
     snapshot = _bot_snapshot(values, completed_at)
     if snapshot is None:
         return 0
@@ -4618,7 +4674,7 @@ def record_bot_visit(rep_contract_id: str, values: dict,
     if newest is not None and _as_date(completed_at) and newest > _as_date(completed_at):
         return 0
     payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
-    now = date.today().isoformat()
+    now = workday.today().isoformat()
     with connect() as conn:
         # office_edit_data=NULL: новый визит перекрывает прежние офисные правки —
         # иначе старый оверлей лёг бы поверх свежего снимка повторного выезда.
@@ -4895,7 +4951,7 @@ def activity_stats() -> list[dict]:
     Сортировка «проблемные сверху»: сначала вовсе без активности, затем по
     убыванию idle_days (кто дольше простаивает), при равенстве — по имени.
     """
-    today = date.today()
+    today = workday.today()
     cut7 = (today - timedelta(days=7)).isoformat()    # окна включают границу
     cut30 = (today - timedelta(days=30)).isoformat()
     with connect() as conn:
@@ -4980,7 +5036,7 @@ def update_fields(contract_id: str, values: dict[str, str]) -> None:
     safe = {k: v for k, v in values.items() if k in BY_KEY or k in dict(BOOKKEEPING)}
     if not safe:
         return
-    safe["updated_at"] = date.today().isoformat()
+    safe["updated_at"] = workday.today().isoformat()
     sets = ", ".join(f'"{k}" = ?' for k in safe)
     with connect() as conn:
         conn.execute(
@@ -5318,7 +5374,7 @@ def log_visit(contract_id: str, agent_id: int, payload: str,
             "op_id, visit_lat, visit_lon, dist_m, geo_far, received_at, "
             "fill_seconds, saved_at, session_id, evidence_level, evidence, employee) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (contract_id, agent_id, on_date or date.today().isoformat(), payload, op_id,
+            (contract_id, agent_id, on_date or workday.today().isoformat(), payload, op_id,
              lat, lon, dist_m, None if geo_far is None else int(bool(geo_far)),
              datetime.now().isoformat(timespec="seconds"), fill_seconds,
              saved_at, session_id, evidence_level, evidence,
@@ -5330,16 +5386,19 @@ def log_visit(contract_id: str, agent_id: int, payload: str,
 
 def save_call_result(contract_id: str, agent_id: int, employee: str,
                      values: dict, payload: str, *, op_id: str | None,
-                     on_date: str, saved_at: str | None = None) -> dict:
+                     on_date: str, saved_at: str | None = None,
+                     append_comment: bool = False, comment_author: str | None = None) -> dict:
     """Журнал и снимки звонка в одной транзакции; повтор не меняет карточку."""
     rows = person_contracts_by_soft(contract_id)
     values = {k: v for k, v in values.items() if k in BY_KEY}
     encoded = json.dumps(values, ensure_ascii=False, sort_keys=True)
-    event_at = saved_at or (on_date + "T" +
-        (datetime.now().strftime("%H:%M:%S.%f") if on_date == date.today().isoformat()
-         else "00:00:00"))
+    import evidence
+    event_at = saved_at or (datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+                           if on_date == workday.today().isoformat() else on_date + "T00:00:00")
     # Клиентское время должно относиться к заявленному дню события.
-    if str(event_at)[:10] != on_date:
+    event_ms = evidence.to_ms(event_at)
+    event_day = datetime.fromtimestamp(event_ms / 1000, evidence.FIELD_TZ).date().isoformat() if event_ms is not None else str(event_at)[:10]
+    if saved_at and event_day != on_date:
         event_at = on_date + "T00:00:00"
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -5357,7 +5416,10 @@ def save_call_result(contract_id: str, agent_id: int, employee: str,
         last = conn.execute("SELECT * FROM calls WHERE contract_id=? AND created_at=? "
                             "ORDER BY id DESC LIMIT 1", (contract_id, on_date)).fetchone()
         if last and last["employee"] == employee and last["values_json"] == encoded:
-            return {"dedup": True, "applied": False}
+            previous_ms = evidence.to_ms(last["saved_at"] or last["received_at"])
+            current_ms = evidence.to_ms(event_at)
+            if previous_ms is not None and current_ms is not None and 0 <= current_ms - previous_ms <= 4000:
+                return {"dedup": True, "applied": False}
         conn.execute("INSERT INTO calls (contract_id,agent_id,created_at,payload,op_id,"
                      "received_at,saved_at,employee,values_json,contracts_json) "
                      "VALUES (?,?,?,?,?,?,?,?,?,?)", (contract_id,agent_id,on_date,payload,op_id,
@@ -5370,11 +5432,24 @@ def save_call_result(contract_id: str, agent_id: int, employee: str,
             if str(row["bot_call_at"] or "") > event_at:
                 continue
             previous = bot_call_snapshot(row) or {}
-            snapshot = {k: values.get(k, previous[k]) if k in previous else values[k]
-                        for k in SOFT_SNAPSHOT_KEYS if k in values or k in previous}
-            snapshot["_field_at"] = {k: event_at if k in values else call_field_at(row, k)
-                                     for k in SOFT_SNAPSHOT_KEYS if k in snapshot}
             current = dict(values)
+            if append_comment and "soft_comment" in current:
+                note = str(current["soft_comment"] or "").strip()
+                if note:
+                    ms = evidence.to_ms(event_at)
+                    stamp = datetime.fromtimestamp(ms / 1000, evidence.FIELD_TZ).strftime("%d.%m.%Y %H:%M") if ms is not None else on_date
+                    entry = f"{stamp} · {comment_author or employee}: {note}"
+                    before = str(previous.get("soft_comment") or row["soft_comment"] or "").strip()
+                    current["soft_comment"] = before + ("\n" if before else "") + entry
+                else:
+                    current.pop("soft_comment")
+            snapshot = {k: current.get(k, previous[k]) if k in previous else current[k]
+                        for k in SOFT_SNAPSHOT_KEYS if k in current or k in previous}
+            snapshot["_field_at"] = {k: event_at if k in current else call_field_at(row, k)
+                                     for k in SOFT_SNAPSHOT_KEYS if k in snapshot}
+            snapshot["_event_day"] = on_date
+            snapshot["_field_day"] = {k: on_date if k in current else call_field_day(row, k)
+                                      for k in SOFT_SNAPSHOT_KEYS if k in snapshot}
             if str(row["bot_visit_event_at"] or row["bot_visit_at"] or "") > event_at:
                 for key in COMMON_RESULT_KEYS:
                     current.pop(key, None)
@@ -5382,7 +5457,7 @@ def save_call_result(contract_id: str, agent_id: int, employee: str,
                            bot_call_data=json.dumps(snapshot, ensure_ascii=False),
                            call_office_data=None,
                            call_value_log=json.dumps(_call_log_add(_call_value_log(row), snapshot), ensure_ascii=False),
-                           updated_at=date.today().isoformat())
+                           updated_at=workday.today().isoformat())
             sets = ", ".join(f'"{k}"=?' for k in current)
             conn.execute(f"UPDATE clients SET {sets} WHERE contract_id=?",
                          (*current.values(), row["contract_id"]))
@@ -5405,7 +5480,7 @@ def log_call(contract_id: str, agent_id: int, payload: str,
             "INSERT OR IGNORE INTO calls (contract_id, agent_id, created_at, "
             "payload, op_id, received_at, saved_at, employee) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (contract_id, agent_id, on_date or date.today().isoformat(),
+            (contract_id, agent_id, on_date or workday.today().isoformat(),
              payload, op_id,
              datetime.now().isoformat(timespec="seconds"), saved_at,
              (employee or "").strip() or None),
@@ -5418,7 +5493,7 @@ def same_call_logged_today(contract_id: str, employee: str, payload: str,
                            on_date: str | None = None) -> bool:
     """Был ли СЕГОДНЯ записан тот же звонок тем же софтником (дедуп повторного
     нажатия «Сохранить звонок» — новый op_id, то же содержимое)."""
-    on_date = on_date or date.today().isoformat()
+    on_date = on_date or workday.today().isoformat()
     with connect() as conn:
         row = conn.execute(
             "SELECT employee, payload FROM calls WHERE contract_id = ? "
@@ -5461,7 +5536,7 @@ def same_visit_logged_today(contract_id: str, agent_id: int, payload: str,
     (на них держатся карта дня и активность), поэтому смотрим только на записи, сделанные
     ПОСЛЕ последнего сброса — водяной знак по id, а не по дате, у которой суточная
     гранулярность."""
-    on_date = on_date or date.today().isoformat()
+    on_date = on_date or workday.today().isoformat()
     try:
         floor = int(get_setting("visits_reset_id") or 0)
     except (TypeError, ValueError):
@@ -5668,7 +5743,7 @@ def presence_sweep(days: int) -> int:
     фото — это тоже перемещения сотрудника, а не данные реестра)."""
     if days <= 0:
         return 0
-    before = (date.today() - timedelta(days=days)).isoformat()
+    before = (workday.today() - timedelta(days=days)).isoformat()
     with connect() as conn:
         cur = conn.execute("DELETE FROM visit_presence WHERE ts < ?", (before,))
         conn.commit()
@@ -6672,7 +6747,7 @@ def registry_rows(
         call = bot_call_snapshot(row)
         if since or until:
             fact_days = [day for snapshot, timestamp in (
-                (visit, row["bot_visit_at"]), (call, row["bot_call_at"]))
+                (visit, row["bot_visit_at"]), (call, call_fact_day(row)))
                 if snapshot is not None and
                 (day := _as_date(str(timestamp or "")[:10])) is not None]
             if not any((since is None or day >= since) and
@@ -6727,7 +6802,7 @@ def enrichment_rows() -> list[dict]:
         for key in SOFT_SNAPSHOT_KEYS[:3]:
             row[key] = None
         if call_snapshot:
-            row["_call_day"] = str(raw["bot_call_at"])[:10]
+            row["_call_day"] = call_fact_day(raw)
             row["_enrichment_clear_keys"] = ["soft_comm_date"] if (
                 "soft_comm_date" in call_snapshot and not str(call_snapshot["soft_comm_date"] or "").strip()) else []
         bot_snapshot = _decode_bot_snapshot(raw)
@@ -6753,9 +6828,9 @@ def enrichment_rows() -> list[dict]:
             key for key in COMMON_RESULT_KEYS if not str(row.get(key) or "").strip()
             and ((call_snapshot and key in call_snapshot and call_owns_field(raw, key))
                  or (snapshot and key in snapshot and not call_owns_field(raw, key))))
-        row["_common_days"] = {k: (call_field_at(raw, k)[:10] if call_owns_field(raw, k)
+        row["_common_days"] = {k: (call_field_day(raw, k) if call_owns_field(raw, k)
                                    else str(raw["bot_visit_at"] or "")[:10]) for k in COMMON_RESULT_KEYS}
-        row["_common_day"] = (str(raw["bot_call_at"])[:10] if call_is_latest(raw)
+        row["_common_day"] = (call_fact_day(raw) if call_is_latest(raw)
                               else str(raw["bot_visit_at"] or "")[:10])
         result.append(row)
     return result
@@ -8474,7 +8549,7 @@ def import_grid(
                 delivered = {r["field_key"]: r for r in conn.execute(
                     "SELECT * FROM enrichment_ledger WHERE contract_id=?", (cid,))}
                 anchored = any(k in delivered and
-                               delivered[k]["visit_date"] == str(call_row["bot_call_at"])[:10] and
+                               delivered[k]["visit_date"] == call_fact_day(call_row) and
                                str(delivered[k]["value"] or "") == str(call_snapshot.get(k) or "") and
                                str(data.get(k) or "") == str(call_snapshot.get(k) or "") and
                                str(data.get(k) or "").strip()
@@ -8732,7 +8807,7 @@ def import_grid(
                         sibs = [c for c in sibs if c in grouped]
                     if cid not in sibs:
                         sibs.append(cid)
-                    at = date.today().isoformat()
+                    at = workday.today().isoformat()
                     for sc in sibs:
                         base = existing[sc]
                         ov = {**(fresh_overlays.get(sc)
@@ -8816,7 +8891,7 @@ def import_grid(
                         "title=excluded.title, label=excluded.label, "
                         "value=excluded.value, updated_at=excluded.updated_at",
                         (cid, slot, item["title"], item["label"], value,
-                         date.today().isoformat()),
+                         workday.today().isoformat()),
                     )
                     report["extra_cells"] += 1
         report["office_contracts"] = len(office_cids)        # договоры, не строки
@@ -8901,7 +8976,21 @@ def import_grid(
                 if changed:
                     auto_unassigned_effect.append((cid, "Софт: " + former))
                     assignment_events.append((cid, former, "", None, "soft"))
-        report["no_responsible"] = sum(1 for owner in owners.values() if not owner)
+        selected_owners = [row for row in conn.execute(
+            "SELECT contract_id, responsible, responsible_soft FROM clients")
+            if row["contract_id"] in grouped]
+        report["no_responsible_hard"] = sum(
+            not str(row["responsible"] or "").strip() for row in selected_owners)
+        report["no_responsible_soft"] = sum(
+            not str(row["responsible_soft"] or "").strip() for row in selected_owners)
+        report["no_responsible_either"] = sum(
+            not str(row["responsible"] or "").strip()
+            and not str(row["responsible_soft"] or "").strip()
+            for row in selected_owners)
+        report["no_responsible"] = report[
+            "no_responsible_hard" if import_profile == "hard" else
+            "no_responsible_soft" if import_profile == "soft" else
+            "no_responsible_either"]
         effect_rows = [
             {"contract_id": cid, "employee": employee}
             for cid, employee in sorted(auto_unassigned_effect)
@@ -8927,7 +9016,7 @@ def import_grid(
         # храня полную историю в каждой строке. INSERT OR IGNORE — повторный
         # прогон того же окна не плодит события (UNIQUE по КД+окно+пара имён).
         if assignment_events:
-            today_iso = date.today().isoformat()
+            today_iso = workday.today().isoformat()
             now_iso = datetime.now().isoformat(timespec="seconds")
             for cid, prev_owner, new_owner, claimed, profile in assignment_events:
                 kind = ("transfer" if prev_owner and new_owner

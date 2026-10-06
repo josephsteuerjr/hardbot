@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 import json
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -54,7 +55,8 @@ def test_bulk_cards_reuses_the_grouped_contract_rows(monkeypatch):
         web.db, "audit_access", lambda *args, **kwargs: audit.append((args, kwargs)),
     )
 
-    response = asyncio.run(web._cards(object()))
+    monkeypatch.setattr(web.db, "soft_portfolio_exists", lambda _emp: False)
+    response = asyncio.run(web._cards(SimpleNamespace(query={})))
     payload = _body(response)
 
     assert seen == [(contracts_a, "A", "ru"), (contracts_b, "B", "ru")]
@@ -118,7 +120,7 @@ def test_phone_replaces_card_cache_in_one_atomic_transaction():
         "async function syncWarmCount(")]
     replace = INDEX[INDEX.index("replace:(s,entries)"):INDEX.index("};\n})();")]
 
-    assert 'await IDB.replace("cards", entries)' in warm
+    assert 'await IDB.replace("cards", entries.concat(other.map' in warm
     assert 'await IDB.put("cards"' not in warm
     assert "o.clear()" in replace and "o.put(v,k)" in replace
 

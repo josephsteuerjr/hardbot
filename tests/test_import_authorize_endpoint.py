@@ -8,6 +8,7 @@ HTTP-ручку на СВОЁМ стенде, но она обязана ост�
 """
 
 import asyncio
+import pytest
 
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -15,6 +16,11 @@ import db
 import web
 
 HEADERS = {"X-Admin-Key": "test-admin-key"}
+
+
+@pytest.fixture(autouse=True)
+def _database():
+    db.init_db()
 
 
 def _post(body: dict) -> tuple[int, dict]:

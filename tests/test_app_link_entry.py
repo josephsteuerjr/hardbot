@@ -329,7 +329,7 @@ def test_app_links_json_is_the_screen_behind_the_pult(fresh):
     assert len(rows) == 1
     row = rows[0]
     assert set(row) == {"employee", "telegram_id", "kind", "code", "created_at",
-                        "expires_at", "uses", "max_uses", "bonus_ios", "last_use_at",
+                        "expires_at", "uses", "max_uses", "bonus_ios", "bonus_desktop", "desktop_available", "last_use_at",
                         "last_agent", "entered", "devices", "alive", "url"}
     # адрес собирает сервер: пульт знает служебный адрес, а телефону нужен публичный
     assert row["url"] == f"{URL}/i/{row['code']}"

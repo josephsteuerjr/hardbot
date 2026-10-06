@@ -35,6 +35,7 @@ def _seed(cid, precision, src="geonames", lat=40.5, lon=69.9):
 
 @pytest.fixture(autouse=True)
 def _cleanup():
+    db.init_db()
     yield
     with db.connect() as conn:
         conn.execute("DELETE FROM clients WHERE contract_id LIKE 'AL-%'")

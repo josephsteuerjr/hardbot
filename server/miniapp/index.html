@@ -657,7 +657,7 @@ const I18N = {
     drainTitle:"Выгрузка на сервер",drainWhy:"Этот адрес приложения закрыт. Здесь можно только отправить на сервер то, что сохранилось на телефоне.",drainSending:"Отправляю…",drainDone:"Всё отправлено",drainNet:"Нет связи — повторю сам, как только появится интернет",drainAuth:"Чтобы отправить, нужен вход. Попросите у руководителя ссылку входа и вставьте её сюда:",drainLogin:"Войти и отправить",drainLeft:"Ждут отправки",drainVisits:"выездов",drainPhotos:"фото",drainMarks:"меток",drainNotes:"заметок",drainFailed:"Сервер не принял — внесите заново в новом приложении",drainDrafts:"Карточки без «Сохранить выезд» — их на сервере нет, внесите заново",drainOpen:"Открыть новое приложение",drainNothing:"На этом телефоне нечего отправлять",drainRetry:"Повторить",drainBadLink:"Ссылка не действует — попросите новую",theme:"Тема",theme_system:"как в системе",theme_light:"светлая",theme_dark:"тёмная",modefield:"Выездник",modemanager:"Руководитель",modesecurity:"Безопасник",modefull:"Директор",modeowner:"Владелец",modesoft:"Софт",
     team:"Сотрудники",pfk:"Портфель",pfpick:"Чей портфель открыть",byaddr:"По адресу",
     softq:"Кому звонить",softtoday:"Сегодня",softall:"Все",calltab:"Звонки",savecall:"Сохранить звонок",
-    callreq:"Сначала выберите статус звонка",commdate:"Когда звонить снова",callmonth:"Комментарий месяца",
+    callreq:"Сначала выберите статус звонка",commdate:"Когда звонить снова",callmonth:"Накопленный комментарий",callnote:"Новая заметка к звонку",
     callhist:"Историчный комментарий (Софт)",calllog:"Звонки",overduen:"перезвон просрочен",nostatus:"без статуса",dn:"дн",
     softresp:"Ответственный Софт",callsaved:"Звонок сохранён",
     digest:"Сводка", dgneednet:"Сводка руководителя доступна только при связи",
@@ -726,7 +726,7 @@ const I18N = {
     drainTitle:"Serverga yuborish",drainWhy:"Ilovaning bu manzili yopilgan. Bu yerda faqat telefonda saqlanib qolganlarni serverga yuborish mumkin.",drainSending:"Yuborilmoqda…",drainDone:"Hammasi yuborildi",drainNet:"Aloqa yo‘q — internet paydo bo‘lishi bilan o‘zim qayta yuboraman",drainAuth:"Yuborish uchun kirish kerak. Rahbardan kirish havolasini so‘rang va shu yerga joylang:",drainLogin:"Kirish va yuborish",drainLeft:"Yuborilishini kutmoqda",drainVisits:"chiqish",drainPhotos:"rasm",drainMarks:"nuqta",drainNotes:"eslatma",drainFailed:"Server qabul qilmadi — yangi ilovada qaytadan kiriting",drainDrafts:"«Chiqishni saqlash» bosilmagan kartalar — ular serverda yo‘q, qaytadan kiriting",drainOpen:"Yangi ilovani ochish",drainNothing:"Bu telefonda yuboriladigan narsa yo‘q",drainRetry:"Qayta urinish",drainBadLink:"Havola ishlamayapti — yangisini so‘rang",theme:"Mavzu",theme_system:"tizimdagidek",theme_light:"yorug‘",theme_dark:"qorong‘i",modefield:"Chiquvchi",modemanager:"Rahbar",modesecurity:"Xavfsizlik",modefull:"Direktor",modeowner:"Egasi",modesoft:"Soft",
     team:"Xodimlar",pfk:"Portfel",pfpick:"Kimning portfelini ochish",byaddr:"Manzil bo‘yicha",
     softq:"Kimga qo‘ng‘iroq qilish",softtoday:"Bugun",softall:"Barchasi",calltab:"Qo‘ng‘iroqlar",savecall:"Qo‘ng‘iroqni saqlash",
-    callreq:"Avval qo‘ng‘iroq holatini tanlang",commdate:"Qachon yana qo‘ng‘iroq qilish",callmonth:"Oy izohi",
+    callreq:"Avval qo‘ng‘iroq holatini tanlang",commdate:"Qachon yana qo‘ng‘iroq qilish",callmonth:"Yig‘ilgan izoh",callnote:"Qo‘ng‘iroqqa yangi izoh",
     callhist:"Oldingi izohlar (Soft)",calllog:"Qo‘ng‘iroqlar",overduen:"qayta qo‘ng‘iroq kechikkan",nostatus:"holat yo‘q",dn:"kun",
     softresp:"Mas’ul (Soft)",callsaved:"Qo‘ng‘iroq saqlandi",
     digest:"Hisobot", dgneednet:"Rahbar hisoboti faqat aloqa bo‘lganda ochiladi",
@@ -795,7 +795,7 @@ const I18N = {
     drainTitle:"Фиристодан ба сервер",drainWhy:"Ин суроғаи барнома баста шуд. Дар ин ҷо танҳо он чиро, ки дар телефон монд, ба сервер фиристодан мумкин аст.",drainSending:"Фиристода мешавад…",drainDone:"Ҳама фиристода шуд",drainNet:"Алоқа нест — ҳамин ки интернет пайдо шавад, худам такрор мекунам",drainAuth:"Барои фиристодан воридшавӣ лозим аст. Аз роҳбар пайванди воридшавӣ пурсед ва ин ҷо гузоред:",drainLogin:"Ворид шудан ва фиристодан",drainLeft:"Дар навбати фиристодан",drainVisits:"сафар",drainPhotos:"расм",drainMarks:"нуқта",drainNotes:"қайд",drainFailed:"Сервер қабул накард — дар барномаи нав аз нав ворид кунед",drainDrafts:"Кортҳое, ки «Сафарро захира» пахш нашуд — онҳо дар сервер нестанд, аз нав ворид кунед",drainOpen:"Кушодани барномаи нав",drainNothing:"Дар ин телефон чизе барои фиристодан нест",drainRetry:"Такрор",drainBadLink:"Пайванд кор намекунад — пайванди нав пурсед",theme:"Мавзӯъ",theme_system:"мисли система",theme_light:"равшан",theme_dark:"торик",modesoft:"Софт",modefield:"Выездник",modemanager:"Роҳбар",modesecurity:"Амният",modefull:"Директор",modeowner:"Соҳиб",
     team:"Кормандон",pfk:"Портфел",pfpick:"Портфели киро кушоем",byaddr:"Аз рӯи нишонӣ",
     softq:"Кӣ ба занг задан",softtoday:"Имрӯз",softall:"Ҳама",calltab:"Зангҳо",savecall:"Зангро нигоҳ доштан",
-    callreq:"Аввал ҳолати зангро интихоб кунед",commdate:"Кай боэд занг задан",callmonth:"Шарҳи моҳ",
+    callreq:"Аввал ҳолати зангро интихоб кунед",commdate:"Кай боэд занг задан",callmonth:"Шарҳи ҷамъшуда",callnote:"Шарҳи нави занг",
     callhist:"Шарҳҳои қаблӣ (Soft)",calllog:"Зангҳо",overduen:"занги такрор дер шуд",nostatus:"бе ҳолат",dn:"рӯз",
     softresp:"Масъул (Soft)",callsaved:"Занг нигоҳ дошта шуд",
     digest:"Ҳисобот", dgneednet:"Ҳисоботи роҳбар танҳо ҳангоми алоқа дастрас аст",
@@ -1245,7 +1245,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=75;
+const SHELL_VERSION=76;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -2837,7 +2837,7 @@ function panelForm(d,t){
 function panelCall(d,t){
   const s=d.soft||{};
   const rows=(d.calls||[]).map(c=>`<div class="kv" style="align-items:flex-start">
-    <span class="k" style="min-width:96px">${esc(String(c.ts||"").slice(0,10))}${c.employee?`<br><span class="muted">${esc(c.employee)}</span>`:""}</span>
+    <span class="k" style="min-width:96px">${esc(String(c.at||c.ts||"").replace('T',' ').slice(0,16))}${c.employee?`<br><span class="muted">${esc(c.employee)}</span>`:""}</span>
     <span class="v" style="white-space:pre-wrap">${esc(c.payload||"")}</span></div>`).join("");
   const month=String(s.comment||"").trim();
   const hist=String(s.history||"").trim();
@@ -2868,8 +2868,9 @@ function panelCallForm(d,t){
    <div class="fsec key"><div class="fsec-h">📞</div>
      <label class="fld">${esc(t.status)}</label>
      <select data-k="soft_call_status">${opts||`<option value="">—</option>`}</select>
-     <label class="fld">${esc(t.callmonth)}</label>
-     <textarea id="f_soft_comment" maxlength="4000">${esc(s.comment||"")}</textarea>
+     ${s.comment?`<details><summary>${esc(t.callmonth)}</summary><div style="white-space:pre-wrap">${esc(s.comment)}</div></details>`:""}
+     <label class="fld">${esc(t.callnote)}</label>
+     <textarea id="f_soft_comment" maxlength="4000"></textarea>
    </div>
    <div class="fsec"><div class="fsec-h">⏰ ${esc(t.commdate)}</div>
      <input type="hidden" data-k="soft_comm_date" value="${esc(s.comm_date||"")}">
@@ -2901,7 +2902,7 @@ async function saveCall(){
   SAVING=true; const btn=$("callbtn"); if(btn) btn.disabled=true;
   try{
     const rep=STATE.cur.rep, op_id=uuid(), occurred_at=Date.now();
-    const body={rep,values,finish:true,op_id,occurred_at,kind:"call",
+    const body={rep,values,finish:true,op_id,occurred_at,kind:"call",append_comment:true,
       opened_at:STATE.openedAt||occurred_at,form_version:FORM_VERSION,input_keys};
     if(clearedNow.length) body.cleared_keys=clearedNow;
     try{

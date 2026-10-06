@@ -24,6 +24,8 @@ ROOT = Path(__file__).resolve().parent.parent
 os.environ.setdefault("ADMIN_ID", "700700700")
 
 sys.path.insert(0, str(ROOT / "server"))
+# Pure helpers of the analyst kit must also work when a module is run alone.
+sys.path.insert(0, str(ROOT / "pult"))
 # engine/ (аналитический движок) в пакет для ИТ не входит — его тесты пропускаются
 # сами (см. needs_engine в tests/test_security.py: проверяется и каталог, и fastapi).
 if (ROOT / "engine").is_dir():

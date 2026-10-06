@@ -42,6 +42,7 @@ def test_soft_only_row_has_exact_empty_hard_owner_in_proof(registry):
     result = db.import_grid(workbook, source_kind=db.IMPORT_SOURCE_TEST_SUBSET,
                             source_proof=proof, import_profile='soft', preview_only=True)
     assert not result['blocked'], result
+    assert result['no_responsible'] == 0
     assert db.get_client('A')['responsible'] == 'H1'
 
     changed = grid([{**rows[0], 'responsible_soft': 'S9'}])
@@ -71,7 +72,10 @@ def test_full_both_slice_removes_present_blank_hard_owner_and_proves_effect(regi
     assert not preview['blocked'], preview
     assert preview['auto_unassigned'] == 3  # A Hard blank, B Soft absent, C Hard absent
     assert preview['auto_unassigned_by_employee'] == {'H1': 2, 'Софт: S1': 1}
-    assert preview['no_responsible'] == 1
+    assert preview['no_responsible'] == 0
+    assert preview['no_responsible_hard'] == 1
+    assert preview['no_responsible_soft'] == 0
+    assert preview['no_responsible_either'] == 0
     assert db.get_client('A')['responsible'] == 'H1'
     result = db.import_grid(workbook, **options, require_source_proof=True, expected_auto_unassigned=3,
                             expected_auto_unassigned_digest=preview['auto_unassigned_digest'])

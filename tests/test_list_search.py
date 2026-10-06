@@ -89,6 +89,6 @@ def test_shell_compares_phones_by_digits_only():
     assert re.search(r"replace\(/\\D\+/g,\"\"\)", body), "запрос не приводится к цифрам"
 
 
-def test_empty_query_shows_the_whole_portfolio():
+def test_empty_query_shows_the_selected_profile_portfolio():
     body = _filter_body()
-    assert "if(!raw){ drawList(STATE.persons); return; }" in body
+    assert "if(!raw){ drawList(pool); return; }" in body

@@ -2,11 +2,12 @@
 // очередь «кому звонить сегодня» (просроченная дата коммуникации, без статуса),
 // карточка с телефонами и историей звонков, фиксация звонка одним экраном.
 // Гео, фото и подтверждение выезда — свойства поля, здесь их нет намеренно.
-import { api } from "../kit/api";
+import { api, hard } from "../kit/api";
 import { esc, n, toast } from "../kit/dom";
 import { openPanel, setHead, type Section } from "../kit/shell";
 import { DataTable } from "../kit/table";
 import { mountModeSwitchIfKit } from "../kit/modeswitch";
+import { receiptHtml, wireReceipt } from "./receipt";
 
 const state = {
   persons: [] as any[],
@@ -46,7 +47,7 @@ export const softQueue: Section = {
     state.dropdowns = (d.meta && d.meta.dropdowns) || {};
     state.formVersion = (d.meta && d.meta.formProtocolVersion) || 0;
     const now = new Date();
-  const localToday = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  const localToday = d.today || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
   const today = state.persons.filter(
       (x) => !x.sc || !x.scd || dueDays(x) > 0 || String(x.scd).slice(0, 10) <= localToday);
     const sums: Record<string,number>={};
@@ -98,6 +99,7 @@ async function openSoftCard(rep: string) {
   const d: any = r.data;
   const s: any = d.soft || {};
   const calls: any[] = d.calls || [];
+  const phones: string[] = d.phones?.length ? d.phones : [d.phone].filter(Boolean);
   const options = `<option value="">—</option>` + (state.dropdowns.soft_call_status || []).map(
     (o) => `<option value="${esc(o.value)}"${o.value === (s.status || "") ? " selected" : ""}>${esc(o.label)}</option>`).join("");
   panel.innerHTML = `
@@ -107,15 +109,17 @@ async function openSoftCard(rep: string) {
       <div class="kpi"><b>${n((d.contracts || []).length)}</b><span>договоров</span></div>
       <div class="kpi"><b>${n(calls.length)}</b><span>звонков в журнале</span></div></div>
     <div class="section"><div class="section-head"><h3 class="section-title">📞 Телефоны</h3></div>
-      <div class="list">${[d.phone].filter(Boolean).map((t) => `
+      <div class="list">${phones.map((t, index) => `
         <div class="list-row"><div class="grow"><div class="nm mono">${esc(t)}</div>
-          <div class="sub">основной номер реестра</div></div></div>`).join("") || '<div class="muted">основного номера нет — смотрите «Доп. адрес / номер» в карточке</div>'}
-      </div></div>
+          <div class="sub">контакт из реестра</div></div><button class="btn small" data-copy-phone="${index}">Копировать</button></div>`).join("") || '<div class="muted">телефона в основных колонках нет</div>'}
+      </div>${d.extra_contact ? `<div class="muted" style="margin-top:8px">Дополнительные контакты и адреса</div><div style="white-space:pre-wrap">${esc(d.extra_contact)}</div>` : ''}</div>
+    <details style="margin-bottom:12px"><summary>Договоры (${n((d.contracts || []).length)})</summary>${(d.contracts || []).map((c: any) => `<div class="list-row"><span class="mono">${esc(c.contract_id)}</span><span>${esc(c.partner || '')}</span><span>${esc(money(c.total))} ${esc(c.unit || '')}</span></div>`).join('')}</details>
     <div class="section"><div class="section-head"><h3 class="section-title">Записать звонок</h3></div>
       <label class="muted" style="font-size:13px">Статус</label>
       <select class="input" id="c-status" style="width:100%">${options}</select>
-      <label class="muted" style="font-size:13px;margin-top:8px;display:block">Комментарий месяца</label>
-      <textarea class="input" id="c-comment" style="width:100%;min-height:70px">${esc(s.comment || "")}</textarea>
+      ${s.comment ? `<details style="margin-top:10px"><summary>Накопленный комментарий</summary><div style="white-space:pre-wrap;padding:8px 0">${esc(s.comment)}</div></details>` : ""}
+      <label class="muted" style="font-size:13px;margin-top:8px;display:block">Новая заметка к звонку</label>
+      <textarea class="input" id="c-comment" maxlength="4000" placeholder="Что выяснили при этом звонке" style="width:100%;min-height:70px"></textarea>
       <div class="row" style="margin-top:8px">
         <div><label class="muted" style="font-size:13px;display:block">Позвонить снова</label>
           <input class="input" id="c-date" type="date" value="${esc(String(s.comm_date || "").slice(0, 10))}" style="max-width:160px"></div>
@@ -130,9 +134,14 @@ async function openSoftCard(rep: string) {
       ${s.history ? `<div class="muted" style="margin-bottom:6px">Историчный комментарий (Софт):</div>
         <div style="white-space:pre-wrap">${esc(s.history)}</div><hr>` : ""}
       <div class="list">${calls.length ? calls.map((c) => `
-        <div class="list-row"><div class="grow"><div class="nm">${esc(String(c.ts || "").slice(0, 10))}${c.employee ? " · " + esc(c.employee) : ""}</div>
+        <div class="list-row"><div class="grow"><div class="nm">${esc(String(c.at || c.ts || "").replace('T', ' ').slice(0, 16))}${c.employee ? " · " + esc(c.employee) : ""}</div>
           <div class="sub" style="white-space:pre-wrap">${esc(c.payload || "")}</div></div></div>`).join("")
-        : '<div class="muted">звонков пока не было</div>'}</div></div>`;
+        : '<div class="muted">звонков пока не было</div>'}</div></div>${receiptHtml(d, false)}`;
+  panel.querySelectorAll<HTMLButtonElement>("[data-copy-phone]").forEach(button => button.addEventListener("click", async () => {
+    await hard.copy(phones[Number(button.dataset.copyPhone)]);
+    toast("Номер скопирован");
+  }));
+  wireReceipt(panel, rep, d, () => { void openSoftCard(rep); });
   const touched = new Set<string>();
   const inputs = [["c-comment", "soft_comment"], ["c-date", "soft_comm_date"], ["c-pdate", "promise_date"], ["c-psum", "forecast_sum"]] as const;
   for (const [id, key] of inputs) panel.querySelector(`#${id}`)?.addEventListener("input", () => touched.add(key));
@@ -141,7 +150,7 @@ async function openSoftCard(rep: string) {
     if (!status) { toast("Выберите статус"); return; }
     const values: Record<string, string> = { soft_call_status: status };
     const comment = (panel.querySelector("#c-comment") as HTMLTextAreaElement).value.trim();
-    if (touched.has("soft_comment")) values.soft_comment = comment;
+    if (comment) values.soft_comment = comment;
     const cdate = (panel.querySelector("#c-date") as HTMLInputElement).value;
     if (touched.has("soft_comm_date")) values.soft_comm_date = cdate;
     const pdate = (panel.querySelector("#c-pdate") as HTMLInputElement).value;
@@ -152,7 +161,7 @@ async function openSoftCard(rep: string) {
     const saveButton = panel.querySelector<HTMLButtonElement>("#c-save")!;
     saveButton.disabled = true;
     const res = await api("/api/save", undefined, "POST", {
-      rep, values, finish: true, kind: "call",
+      rep, values, finish: true, kind: "call", append_comment: true,
       op_id: "desk-call-" + crypto.randomUUID(),
       form_version: state.formVersion,
       input_keys: Object.keys(values),
@@ -161,7 +170,10 @@ async function openSoftCard(rep: string) {
     });
     saveButton.disabled = false;
     if (res.ok) {
-      if ((res.data as any)?.queued) { toast("Звонок сохранён на компьютере; отправится при появлении связи"); return; }
+      if ((res.data as any)?.queued) {
+        (panel.querySelector("#c-comment") as HTMLTextAreaElement).value = "";
+        toast("Звонок сохранён на компьютере; отправится при появлении связи"); return;
+      }
       const rejected = (res.data as any)?.rejected || null;
       toast(rejected ? "Звонок сохранён, но часть полей не принята: " + Object.keys(rejected).join(", ")
                      : "Звонок сохранён");
@@ -182,8 +194,8 @@ export const softHelp: Section = {
         <div class="sub">Руководитель выдаёт её в «Входе команды». Телефон продолжает работать: вход на ПК его не заменяет.</div></div></div>
       <div class="list-row"><div class="grow"><div class="nm">Очередь — вместо фильтра в Excel</div>
         <div class="sub">«Кому звонить» — просроченный перезвон и должники без статуса. Телефон должника — в строке и в карточке.</div></div></div>
-      <div class="list-row"><div class="grow"><div class="nm">Результат сохранён на сервере</div>
-        <div class="sub">Аналитик переносит сохраненные звонки в вашу книгу через «Обогащение книг». Затем перенос из личных книг обновляет общий реестр.</div></div></div>
+      <div class="list-row"><div class="grow"><div class="nm">Очередь и сохранённый результат</div>
+        <div class="sub">Без сети звонок ждёт на этом ПК. После приёма сервером аналитик переносит его в вашу книгу через «Обогащение книг», затем перенос из личных книг обновляет общий реестр. Даты и время показаны по офису (UTC+5).</div></div></div>
     </div>
     <div class="section" id="modesec" style="display:none"><div class="section-head"><h3 class="section-title">Режимы этого exe</h3></div>
       <div id="modesw"></div></div>

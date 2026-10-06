@@ -97,7 +97,7 @@ class RegistrySection:
             "в выбранных строках файла с тем же ответственным",
             value=True, on_toggle=self._imp_restore_manual_toggle))
         self.imp_replace_current_comments_var = imp.add(WrapCheck(
-            "Начало месяца: заменить текущие комментарии значениями файла "
+            "Начало месяца: заменить комментарии выезда значениями файла "
             "(пустая ячейка очистит комментарий)",
             on_toggle=self._imp_comment_toggle))
         # Историчный комментарий галочки больше не имеет: забытая галочка

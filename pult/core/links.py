@@ -68,7 +68,7 @@ DEFAULT_USES_INDEX = USES_CHOICES.index(DEFAULT_USES)
 # Класс устройства последнего обмена — как его называет сервер.
 AGENT_TEXT = {
     "iphone": "iPhone", "ipad": "iPad", "android": "Android",
-    "desktop": "компьютер", "inapp": "в мессенджере", "other": "—",
+    "desktop": "компьютер", "desk": "ПК", "inapp": "в мессенджере", "other": "—",
 }
 
 
@@ -85,6 +85,8 @@ def link_alive(link: dict) -> bool:
     только что выданная ссылка покажется просроченной, и оператор пойдёт
     выдавать её ещё раз, недоумевая."""
     link = link or {}
+    if link.get("desktop_available"):
+        return True
     if "alive" in link:
         return bool(link["alive"])
     if not link.get("code"):
@@ -230,6 +232,8 @@ def merge_rows(employees=(), links=(), workers=(), revoked=()) -> list[dict]:
         row["expires_at"] = str(best.get("expires_at") or "")
         row["agent"] = str(best.get("last_agent") or "")
         row["bonus_ios"] = bool(best.get("bonus_ios"))
+        row["bonus_desktop"] = bool(best.get("bonus_desktop"))
+        row["desktop_available"] = bool(best.get("desktop_available"))
         # Отзыв гасит ссылки, поэтому ссылка старше отзыва быть не может:
         # появилась новая — память об отзыве больше не нужна.
         row["revoked"] = not row["code"] and bool(
@@ -295,7 +299,8 @@ def uses_text(row: dict) -> str:
         return ""
     mx = _int(row.get("max_uses"))
     uses = _int(row.get("uses"))
-    return f"{uses} из {mx}" if mx else str(uses)
+    value = f"{uses} из {mx}" if mx else str(uses)
+    return value + (" + ПК" if row.get("desktop_available") else "")
 
 
 def uses_left(row: dict) -> int:

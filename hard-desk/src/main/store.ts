@@ -10,7 +10,7 @@ export interface Settings {
   server?: string;          // https://… — берётся из ссылки входа
   device?: { id: number; name: string; created_at?: string };
   fieldServer?: string;     // приложение выездника на ПК: свой вход
-  fieldDevice?: { id: number; name: string; employee?: string; created_at?: string };
+  fieldDevice?: { id: number; name: string; employee?: string; telegram_id?: number; created_at?: string };
   seenTrayHint?: boolean;
   theme?: "light" | "dark" | "system";
   [k: string]: unknown;
@@ -124,10 +124,16 @@ export function clearCallQueue(): void {
 }
 
 export function wipeField(): void {
+  const identity = readSettings().fieldDevice;
+  const pending = readCallQueue();
   try { rmSync(file("field.key"), { force: true }); } catch { /* */ }
   try {
     const c = join(dir(), "cache");
     if (existsSync(c)) for (const f of readdirSync(c)) rmSync(join(c, f), { force: true });
   } catch { /* */ }
-  writeSettings({ fieldDevice: undefined });
+  // The revoked token and cached cards go away. Retain only the principal
+  // needed to recover its encrypted unsent calls after a new link is issued.
+  writeSettings({ fieldDevice: pending?.entries.length && identity?.telegram_id
+    ? { id: identity.id, name: identity.name, telegram_id: identity.telegram_id }
+    : undefined });
 }

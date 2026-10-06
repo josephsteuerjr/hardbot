@@ -56,7 +56,9 @@ def test_decision_table_defaults_bulk_and_per_row(app, window):
     combo = table.cellWidget(1, table.columnCount() - 1)
     combo.setCurrentIndex(en.DECISION_ORDER.index(en.DECISION_FILE))
     assert table.decisions() == {("A", "call_status"): "server", ("B", "call_status"): "file"}
-    assert table.item(0, 3).text() == "Правка офиса" and table.item(1, 4).text() == "Обещание"
+    file_col = [key for key, *_ in en.CONFLICT_COLUMNS].index("file")
+    server_col = [key for key, *_ in en.CONFLICT_COLUMNS].index("server")
+    assert table.item(0, file_col).text() == "Правка офиса" and table.item(1, server_col).text() == "Обещание"
     table.clear()
     assert table.rowCount() == 0 and table.decisions() == {}
 
