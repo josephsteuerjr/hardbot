@@ -293,6 +293,8 @@ def _manager_gate(request: web.Request) -> tuple[int, dict, list[str]]:
         uid = int(dev["telegram_id"])
     else:
         uid = _uid(request)
+        if request.get("desk_employee"):
+            raise web.HTTPForbidden(text="not a manager")
     if not uid:
         raise web.HTTPUnauthorized(text="auth")
     mgr = digest_data.manager_scope(uid, is_owner=(uid == ADMIN_ID))
@@ -963,7 +965,7 @@ async def _bootstrap(request: web.Request) -> web.Response:
             logging.warning("priority_index: %s", e)
     # Роль руководителя: у него нет привязки, он работает от имени сотрудника и
     # может переключаться. Фронт по этому блоку рисует переключатель портфелей.
-    scope = _manager_scope(uid)
+    scope = [] if request.get("desk_employee") else _manager_scope(uid)
     # Переключатель портфелей рисуется по этому флагу. Условие «и нет привязки»
     # запирало руководителя в чужом портфеле: стоило оператору вписать его
     # telegram_id как выездника (или самому руководителю пройти онбординг), и
@@ -3195,7 +3197,8 @@ async def _admin_app_link(request: web.Request) -> web.Response:
     личность (db.local_identity_for), у привязанного — используется его id.
     `uses` — сколько раз ссылку можно обменять (1..APP_LINK_MAX_USES, по умолчанию
     два: браузер и отдельное хранилище ярлыка iOS). Сколько обменов останется у
-    конкретного телефона, сервер решит сам: айфону на первом открытии добавится +1.
+    конкретного телефона, сервер решит сам: максимум два телефонных обмена;
+    для программы на ПК предусмотрена одна отдельная активация.
 
     Адрес короткий и путевой — ``<MINIAPP_URL>/i/<код>``: его видно целиком на
     экране, он читается с QR и его можно продиктовать. Открыл — и уже внутри.
@@ -4040,6 +4043,7 @@ async def _manager_app_links(request: web.Request) -> web.Response:
             row = dict(row)
             if _foreign_privileged(uid, row.get("telegram_id")):
                 row["code"] = None
+                row["can_issue"] = False
             row["url"] = f"{base}/i/{row['code']}" if base and row.get("code") else ""
             rows.append(row)
             by_employee[row["employee"]] = row
@@ -4432,22 +4436,23 @@ async def _manager_device_enroll(request: web.Request) -> web.Response:
     code = _link_code(str(body.get("code") or ""))
     device = str(body.get("device") or "").strip()[:80]
     _admin_too_many_fails(request)
-    uid = db.peek_app_link(code, desktop=True) if code else None
+    uid = db.app_link_identity(code) if code else None
     if not uid:
         _admin_auth_failed(request, scope="app")
         # Причина — чтобы пульт подсказал путь («Выдать себе» в приложении),
         # а не одно «устарела». Код 72-битный: знание «был/кончился» перебору
         # не помогает, а сам перебор считает общий счётчик неудач.
         raise _json_error(web.HTTPGone, "link_dead",
-                          reason=db.app_link_status(code) if code else "unknown")
+                          reason=db.app_link_status(code, desktop=True) if code else "unknown")
     mgr = digest_data.manager_scope(uid, is_owner=(uid == ADMIN_ID))
     if mgr is None:
         # Ссылка живая, но это вход выездника: не тратим её — пусть работает
         # там, для чего выдана.
         raise _json_error(web.HTTPForbidden, "not_manager")
-    got = db.enroll_manager_device(code, device)
+    keep_token = str(body.get("keep_token") or "").strip() or None
+    got = db.enroll_manager_device(code, device, keep_token=keep_token)
     if not got:
-        raise _json_error(web.HTTPGone, "link_dead", reason=db.app_link_status(code))
+        raise _json_error(web.HTTPGone, "link_dead", reason=db.app_link_status(code, desktop=True))
     _admin_auth_ok(request, scope="app")
     uid, dev_id, token = got
     db.audit_access(uid, "pult_enroll", detail=f"#{dev_id} {device}")
@@ -4764,7 +4769,7 @@ async def _agent_device_enroll(request: web.Request) -> web.Response:
     code = _link_code(str(body.get("code") or ""))
     device = str(body.get("device") or "").strip()[:80]
     _admin_too_many_fails(request)
-    uid = db.peek_app_link(code, desktop=True) if code else None
+    uid = db.app_link_identity(code) if code else None
     keep_token = str(body.get("keep_token") or "").strip() or None
     expected_uid = body.get("expected_uid")
     if expected_uid is not None and (type(expected_uid) is not int or expected_uid <= 0):
@@ -6111,6 +6116,7 @@ async def _admin_managers(request: web.Request) -> web.Response:
         m["spelling_mismatch"] = len(db.manager_spelling_mismatches(m))
     return web.json_response({
         "managers": managers,
+        "next_local_id": db.next_local_manager_id(),
         "cities": db.cities_in_registry(),
         "employees": [{"employee": e["employee"], "contracts": e["contracts"]}
                       for e in db.employees_in_registry()],
@@ -6206,9 +6212,12 @@ async def _admin_manager_save(request: web.Request) -> web.Response:
     role = body.get("role")
     if role is not None and str(role) not in db.MANAGER_ROLES:
         raise web.HTTPBadRequest(text="role")
-    db.set_manager(tid, name, cities, employees, direction=direction,
-                   pushes=pushes or None, office_cities=offices,
-                   role=str(role) if role is not None else None)
+    try:
+        db.set_manager(tid, name, cities, employees, direction=direction,
+                       pushes=pushes or None, office_cities=offices,
+                       role=str(role) if role is not None else None)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=409)
     # account — КТО владеет этим telegram_id по данным бота (или null, если бот его
     # не видел). «name» — всего лишь подпись оператора, права получает владелец id;
     # пульт сверяет одно с другим и показывает расхождение сразу, а не через неделю.

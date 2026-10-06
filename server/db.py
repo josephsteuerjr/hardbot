@@ -2169,25 +2169,41 @@ def local_identity_for(employee: str, kind: str = "agent") -> tuple[int, bool]:
     employee = (employee or "").strip()
     if not employee:
         raise ValueError("пустое ФИО")
-    bound = bound_identity(employee)
-    if bound is not None:
-        return bound, False
+    kind = "courier" if kind == "courier" else "agent"
     with connect() as conn:
-        used = [
-            conn.execute(
-                f"SELECT MAX(telegram_id) FROM {table} WHERE telegram_id >= ?",
-                (LOCAL_UID_BASE,),
-            ).fetchone()[0] or 0
-            for table in ("agent_bind", "users")
-        ]
-        uid = max(LOCAL_UID_BASE - 1, *used) + 1
+        # Роль руководителя может существовать без users/agent_bind. Все классы
+        # входа разделяют одно пространство ID; выделение и привязка атомарны.
+        conn.execute("BEGIN IMMEDIATE")
+        bound = conn.execute(
+            "SELECT telegram_id FROM agent_bind WHERE employee=? "
+            "ORDER BY approved DESC, telegram_id LIMIT 1", (employee,)).fetchone()
+        if bound:
+            return int(bound["telegram_id"]), False
+        uid = _next_local_uid(conn)
         conn.execute(
             "INSERT OR IGNORE INTO users (telegram_id, name, created_at) VALUES (?,?,?)",
             (uid, employee, datetime.now().isoformat(timespec="seconds")),
         )
+        conn.execute(
+            "INSERT INTO agent_bind (telegram_id,employee,kind,approved,created_at) "
+            "VALUES (?,?,?,?,?)", (uid, employee, kind, 1, workday.today().isoformat()))
         conn.commit()
-    set_bind(uid, employee, kind)
+    reset_role_caches()
     return uid, True
+
+
+def _next_local_uid(conn, base: int = LOCAL_UID_BASE) -> int:
+    used = [conn.execute(
+        f"SELECT MAX(telegram_id) FROM {table} WHERE telegram_id >= ?", (base,)
+    ).fetchone()[0] or 0 for table in (
+        "agent_bind", "users", "managers", "app_links", "app_tokens",
+        "agent_devices", "manager_devices")]
+    return max(base - 1, *used) + 1
+
+
+def next_local_manager_id() -> int:
+    with connect() as conn:
+        return _next_local_uid(conn, 910_000_000_000)
 
 
 def create_app_link(telegram_id: int, max_uses: int = APP_LINK_DEFAULT_USES) -> str:
@@ -2231,11 +2247,10 @@ def redeem_app_link(code: str, agent: str | None = None,
       токен уже есть (перезагрузка страницы, повторная вставка ссылки, ссылка
       пришла в открытую вкладку). Возвращаем ТОТ ЖЕ токен и обмен не тратим: иначе
       двойка сгорала бы на пустом месте, не доведя человека до ярлыка.
-    * `agent` — класс устройства. Первому открытию с iPhone/iPad ссылка сама
-      поднимает потолок на +1 (bonus_ios): у ярлыка «На экран Домой» отдельное
-      хранилище, и обмен на его заведение нужен сверх того, что человек уже
-      потратил во встроенном браузере мессенджера. Андроид и десктоп не трогаем —
-      им хватает одного.
+    * Два обмена для телефонных хранилищ (браузер и ярлык). Класс `agent`
+      больше не увеличивает лимит: передаваемый клиентом User-Agent не выдаёт
+      дополнительного входа. Активация программы ПК хранится отдельно в
+      bonus_desktop и не может занимать или расширять телефонную квоту.
     * расход попытки остаётся ОДНИМ атомарным UPDATE с условием в WHERE: две
       вкладки, стартующие разом, не должны съесть обе попытки двухразовой ссылки.
 
@@ -2276,16 +2291,13 @@ def redeem_app_link(code: str, agent: str | None = None,
                 return keep_token
         # Атомарный расход попытки: rowcount==0 → код чужой/просрочен/исчерпан
         # (в т.ч. проигранная гонка параллельных обменов за последнюю попытку).
-        ios_bonus = bool(not link["bonus_ios"] and (agent or "") in APP_AGENT_BONUS)
         cur = conn.execute(
             "UPDATE app_links SET used_at = ?, last_use_at = ?, last_agent = ?, "
-            "uses = uses + 1, max_uses = COALESCE(max_uses, ?) + "
-            "CASE WHEN bonus_ios = 0 AND ? THEN 1 ELSE 0 END, "
-            "bonus_ios = CASE WHEN ? THEN 1 ELSE bonus_ios END "
+            "uses = uses + 1, bonus_ios = CASE WHEN ? THEN 1 ELSE bonus_ios END "
             "WHERE code = ? AND created_at >= ? "
-            "AND (uses < COALESCE(max_uses, ?) OR (bonus_ios = 0 AND ?))",
-            (now_iso, now_iso, agent, APP_LINK_DEFAULT_USES, int(ios_bonus), int(ios_bonus),
-             code, cutoff, APP_LINK_DEFAULT_USES, int(ios_bonus)))
+            "AND uses - bonus_desktop < MIN(2, COALESCE(max_uses, ?) - bonus_desktop)",
+            (now_iso, now_iso, agent, int((agent or "") in APP_AGENT_BONUS),
+             code, cutoff, APP_LINK_DEFAULT_USES))
         if cur.rowcount == 0:
             conn.commit()
             return None
@@ -2323,7 +2335,7 @@ def app_links_state() -> list[dict]:
 
     Аналитику важен человек: «выдали — открыл — вошёл». Ссылок у человека за неделю
     может накопиться несколько (перевыпуск гасит только неоткрытую), поэтому в строке
-    показываем ПОСЛЕДНЮЮ выданную, а `entered`/`devices` считаем по всем его живым
+    показываем последнюю ещё доступную (либо последнюю выданную), а `entered`/`devices` считаем по всем его живым
     токенам — иначе перевыпуск ссылки на глазах превращал бы вошедшего в «ждёт».
 
     Человек с живым токеном, но без уцелевшей ссылки (старые чистятся по окну), тоже
@@ -2334,7 +2346,11 @@ def app_links_state() -> list[dict]:
     cutoff = (now - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
     with connect() as conn:
         binds = {int(r["telegram_id"]): r for r in conn.execute(
-            "SELECT telegram_id, employee, kind FROM agent_bind")}
+            "SELECT telegram_id, employee, kind, approved FROM agent_bind")}
+        from config import ADMIN_ID
+        privileged = {int(r[0]) for r in conn.execute("SELECT telegram_id FROM managers")}
+        if ADMIN_ID:
+            privileged.add(ADMIN_ID)
         devices: dict[int, int] = {}
         last_token: dict[int, str] = {}
         for r in conn.execute(
@@ -2349,6 +2365,12 @@ def app_links_state() -> list[dict]:
             uid = int(r["telegram_id"] or 0)
             devices[uid] = devices.get(uid, 0) + int(r["n"] or 0)
             last_token[uid] = max(last_token.get(uid) or "", r["last"] or "")
+        for r in conn.execute(
+                "SELECT telegram_id, COUNT(*) n, MAX(created_at) last FROM manager_devices "
+                "WHERE revoked_at IS NULL GROUP BY telegram_id"):
+            uid = int(r["telegram_id"] or 0)
+            devices[uid] = devices.get(uid, 0) + int(r["n"] or 0)
+            last_token[uid] = max(last_token.get(uid) or "", r["last"] or "")
         # ORDER BY created_at: последняя выданная ссылка человека перетирает прежние.
         links = conn.execute("SELECT * FROM app_links ORDER BY created_at").fetchall()
     rows: dict[int, dict] = {}
@@ -2358,7 +2380,12 @@ def app_links_state() -> list[dict]:
         created = r["created_at"]
         uses = int(r["uses"] or 0)
         max_uses = int(r["max_uses"] or APP_LINK_DEFAULT_USES)
-        rows[uid] = {
+        in_window = bool(created and created >= cutoff)
+        pc_used = int(bool(r["bonus_desktop"]))
+        phone_remaining = max(0, min(2, max_uses - pc_used) - (uses - pc_used)) if in_window else 0
+        desktop_available = bool(in_window and not pc_used and (
+            uid in privileged or (bind and bind["approved"])))
+        candidate = {
             "employee": (bind["employee"] if bind else "") or "",
             "telegram_id": uid,
             "kind": ((bind["kind"] if bind else "") or "agent"),
@@ -2369,14 +2396,19 @@ def app_links_state() -> list[dict]:
             "max_uses": max_uses,
             "bonus_ios": bool(r["bonus_ios"] or 0),
             "bonus_desktop": bool(r["bonus_desktop"] or 0),
-            "desktop_available": bool(bind and created and created >= cutoff and not r["bonus_desktop"]),
+            "desktop_available": desktop_available,
+            "phone_remaining": phone_remaining,
+            "link_status": "expired" if not in_window else "live" if phone_remaining or desktop_available else "used_up",
             "last_use_at": r["last_use_at"] or r["used_at"],
             "last_agent": r["last_agent"],
             "entered": uid in devices,
             "devices": devices.get(uid, 0),
             # «alive» — по этой ссылке ещё пустят: окно не вышло и обмены остались.
-            "alive": bool(created and created >= cutoff and uses < max_uses),
+            "alive": bool(phone_remaining or desktop_available),
         }
+        # A newer exhausted link must not hide an older still usable personal link.
+        if uid not in rows or candidate["alive"] or not rows[uid]["alive"]:
+            rows[uid] = candidate
     for uid, n in devices.items():
         if uid in rows:
             continue
@@ -2388,6 +2420,7 @@ def app_links_state() -> list[dict]:
             "code": None, "created_at": None, "expires_at": None,
             "uses": 0, "max_uses": APP_LINK_DEFAULT_USES, "bonus_ios": False,
             "bonus_desktop": False, "desktop_available": False,
+            "phone_remaining": 0, "link_status": "none",
             "last_use_at": last_token.get(uid), "last_agent": None,
             "entered": True, "devices": n, "alive": False,
         }
@@ -2455,6 +2488,11 @@ def revoke_app_access(telegram_id: int, scope: str = "all") -> int:
         if scope != "links":
             revoked = conn.execute(
                 "DELETE FROM app_tokens WHERE telegram_id = ?", (telegram_id,)).rowcount
+            conn.execute(
+                "UPDATE agent_devices SET revoked_at=COALESCE(revoked_at, ?), "
+                "revoked_by=COALESCE(revoked_by, 'app_revoke') WHERE telegram_id=? "
+                "AND revoked_at IS NULL",
+                (datetime.now().isoformat(timespec="seconds"), telegram_id))
         conn.execute("DELETE FROM app_links WHERE telegram_id = ?", (telegram_id,))
         conn.commit()
     # «Человек ушёл» — значит и его пульты на компьютерах: отзыв, а не удаление,
@@ -2487,7 +2525,10 @@ def app_link_status(code: str, *, desktop: bool = False) -> str:
         return "unknown"
     if (row["created_at"] or "") < cutoff:
         return "expired"
-    if int(row["uses"] or 0) >= int(row["cap"] or 0) and not (desktop and not row["bonus_desktop"]):
+    pc_used = int(bool(row["bonus_desktop"]))
+    available = not pc_used if desktop else (
+        int(row["uses"] or 0) - pc_used < min(2, int(row["cap"] or 0) - pc_used))
+    if not available:
         return "used_up"
     return "live"
 
@@ -2500,12 +2541,22 @@ def peek_app_link(code: str, *, desktop: bool = False) -> int | None:
     with connect() as conn:
         row = conn.execute(
             "SELECT telegram_id FROM app_links WHERE code = ? AND created_at >= ? "
-            "AND (uses < COALESCE(max_uses, ?) OR (? AND bonus_desktop = 0))",
-            (code, cutoff, APP_LINK_DEFAULT_USES, int(desktop))).fetchone()
+            "AND ((? AND bonus_desktop = 0) OR (NOT ? AND "
+            "uses - bonus_desktop < MIN(2, COALESCE(max_uses, ?) - bonus_desktop)))",
+            (code, cutoff, int(desktop), int(desktop), APP_LINK_DEFAULT_USES)).fetchone()
     return int(row["telegram_id"]) if row else None
 
 
-def enroll_manager_device(code: str, device: str) -> tuple[int, int, str] | None:
+def app_link_identity(code: str) -> int | None:
+    """Classify a nonexpired link before admission; does not consume or renew it."""
+    cutoff = (datetime.now() - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
+    with connect() as conn:
+        row = conn.execute("SELECT telegram_id FROM app_links WHERE code=? AND created_at>=?",
+                           (code, cutoff)).fetchone()
+    return int(row["telegram_id"]) if row else None
+
+
+def enroll_manager_device(code: str, device: str, *, keep_token: str | None = None) -> tuple[int, int, str] | None:
     """Потратить одно использование ссылки и выдать токен компьютеру.
     (uid, id устройства, сырой токен) или None — ссылка мертва (гонку за
     последнее использование решает условие в WHERE, как у redeem_app_link)."""
@@ -2513,11 +2564,22 @@ def enroll_manager_device(code: str, device: str) -> tuple[int, int, str] | None
     cutoff = (datetime.now() - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
     token = secrets.token_urlsafe(32)
     with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        link = conn.execute("SELECT telegram_id FROM app_links WHERE code=? AND created_at>=?",
+                            (code, cutoff)).fetchone()
+        if link is None:
+            return None
+        if keep_token:
+            existing = conn.execute(
+                "SELECT id FROM manager_devices WHERE token_hash=? AND telegram_id=? "
+                "AND revoked_at IS NULL", (app_token_key(keep_token), link["telegram_id"])).fetchone()
+            if existing:
+                return int(link["telegram_id"]), int(existing["id"]), keep_token
         cur = conn.execute(
             "UPDATE app_links SET used_at = ?, last_use_at = ?, last_agent = 'pult', "
-            "uses = uses + 1 WHERE code = ? AND created_at >= ? "
-            "AND uses < COALESCE(max_uses, ?)",
-            (now_iso, now_iso, code, cutoff, APP_LINK_DEFAULT_USES))
+            "uses = uses + 1, bonus_desktop = 1, max_uses = MAX(3, COALESCE(max_uses, ?)) "
+            "WHERE code = ? AND created_at >= ? AND bonus_desktop = 0",
+            (now_iso, now_iso, APP_LINK_DEFAULT_USES, code, cutoff))
         if cur.rowcount == 0:
             conn.commit()
             return None
@@ -2602,9 +2664,9 @@ def enroll_agent_device(code: str, device: str, *, keep_token: str | None = None
             "UPDATE app_links SET used_at = ?, last_use_at = ?, last_agent = 'desk', "
             "uses = uses + 1, max_uses = COALESCE(max_uses, ?) + ?, "
             "bonus_desktop = 1 WHERE code = ? AND created_at >= ? "
-            "AND (uses < COALESCE(max_uses, ?) OR bonus_desktop = 0)",
+            "AND bonus_desktop = 0",
             (now_iso, now_iso, APP_LINK_DEFAULT_USES, desktop_bonus,
-             code, cutoff, APP_LINK_DEFAULT_USES))
+             code, cutoff))
         if cur.rowcount == 0:
             conn.commit()
             return None
@@ -2629,6 +2691,14 @@ def agent_device_check(token: str, ip: str | None = None) -> tuple[str, dict | N
                            (key,)).fetchone()
         if row is None:
             return "unknown", None
+        binding = conn.execute(
+            "SELECT 1 FROM agent_bind WHERE telegram_id=? AND employee=? AND approved=1",
+            (row["telegram_id"], row["employee"])).fetchone()
+        if not binding and not row["revoked_at"]:
+            conn.execute("UPDATE agent_devices SET revoked_at=?, revoked_by='binding_changed' WHERE id=?",
+                         (now.isoformat(timespec="seconds"), row["id"]))
+            conn.commit()
+            return "revoked", None
         if row["revoked_at"]:
             conn.execute("DELETE FROM agent_devices WHERE id = ?", (row["id"],))
             conn.commit()
@@ -3106,6 +3176,15 @@ def set_manager(telegram_id: int, name: str, cities: list[str],
         # office_cities=None означает «не трогать»: старый пульт этого поля не
         # шлёт, и сохранение руководителя не должно молча снимать ему охват.
         keep_offices = office_cities is None
+        conn.execute("BEGIN IMMEDIATE")
+        if is_local_uid(telegram_id) and not conn.execute(
+                "SELECT 1 FROM managers WHERE telegram_id=?", (telegram_id,)).fetchone():
+            occupied = any(conn.execute(
+                f"SELECT 1 FROM {table} WHERE telegram_id=? LIMIT 1", (telegram_id,)
+            ).fetchone() for table in ("agent_bind", "users", "app_links", "app_tokens",
+                                      "agent_devices", "manager_devices"))
+            if occupied:
+                raise ValueError("Служебный ID уже принадлежит другой учётной записи. Обновите список и добавьте руководителя заново.")
         conn.execute(
             "INSERT INTO managers "
             "(telegram_id, name, cities, employees, direction, office_cities, created_at) "
@@ -3122,12 +3201,10 @@ def set_manager(telegram_id: int, name: str, cities: list[str],
              json.dumps(list(office_cities or []), ensure_ascii=False),
              workday.today().isoformat(), 1 if keep_offices else 0),
         )
-        conn.commit()
-    if role is not None:
-        with connect() as conn:
+        if role is not None:
             conn.execute("UPDATE managers SET role = ? WHERE telegram_id = ?",
                          (manager_role(role), telegram_id))
-            conn.commit()
+        conn.commit()
     if pushes:
         set_manager_pushes(telegram_id, pushes)
     reset_role_caches()

@@ -6,6 +6,7 @@ import type { Section } from "../kit/shell";
 import { DataTable } from "../kit/table";
 import { mountModeSwitchIfKit } from "../kit/modeswitch";
 import { showIssued } from "../kit/issued";
+import { copyLink, linkQuota, linkStatus, usableLink } from "../kit/login-links";
 import { openPerson, problem, rangeChips, rangeQuery, staleNote, wireRange, type Range } from "./common";
 
 export const promises: Section = {
@@ -44,20 +45,21 @@ export const promises: Section = {
   },
 };
 
-const ENTRY = (x: any) => (x.entered ? "вошёл" : x.alive ? "ссылка выдана" : x.code ? "ссылка истекла" : "не выдавали");
+const ENTRY = (x: any) => (x.entered ? "вошёл" : linkStatus(x));
 
 export const links: Section = {
   id: "links",
   title: "Вход команды",
   icon: "links",
-  kicker: "ссылки входа в приложение для выездников",
+  kicker: "персональные ссылки сотрудников Софта и Харда",
   async render(root) {
     root.innerHTML = '<div class="skeleton"></div>';
     const r = await api("/api/manager/app_links");
     if (!r.ok) { root.innerHTML = problem(r.text || "Не загрузилось"); return; }
     const d = r.data;
     const rows = [d.me, ...(d.links as any[])].filter(Boolean);
-    root.innerHTML = `<p class="muted" style="max-width:760px;margin:0 0 6px">Ссылка персональная: перешлите её человеку в личку. Он открывает её на телефоне и сразу попадает в свой портфель. Отозвать — если телефон потерян или человек ушёл.</p>
+    let busy = false;
+    root.innerHTML = `<p class="muted" style="max-width:760px;margin:0 0 6px">Ссылка персональная. Два входа для телефона (браузер и ярлык) и отдельный вход для программы на ПК. Её можно скопировать повторно после входа сотрудника — копирование квоту не тратит. Срок ссылки — неделя; уже подключённые устройства продолжают работать.</p>
       <div class="bulk" id="bulk"></div><div id="tbl"></div>`;
     const table = new DataTable<any>(root.querySelector("#tbl")!, {
       id: "manager-links", exportName: "Вход команды", key: (x) => x.employee, select: true,
@@ -65,31 +67,40 @@ export const links: Section = {
         { key: "who", title: "Кто", value: (x) => x.label || x.employee, html: (x) => `<span class="who">${esc(x.label || x.employee)}</span>` },
         { key: "entry", title: "Вход", value: ENTRY,
           html: (x) => (x.entered ? `<span class="tag ok">вошёл · ${n(x.devices || 1)} ${plural(x.devices || 1, "устройство", "устройства", "устройств")}</span>`
-            : x.alive ? '<span class="tag warn">ссылка выдана</span>' : x.code ? '<span class="tag">ссылка истекла</span>' : '<span class="tag">не выдавали</span>') },
+            : `<span class="tag">${esc(linkStatus(x))}</span>`) },
+        { key: "quota", title: "Остаток входов / срок", value: linkQuota,
+          html: (x) => `${esc(linkQuota(x))}${x.expires_at ? `<span class="sub">до ${esc(shortDate(x.expires_at))} · ${esc(linkStatus(x))}</span>` : ""}` },
         { key: "seen", title: "Последний вход", value: (x) => String(x.last_use_at || "").replace("T", " ").slice(0, 16),
           html: (x) => (x.last_use_at ? esc(ago(x.last_use_at)) : '<span class="muted">не было</span>') },
-        { key: "url", title: "Ссылка", filter: false, value: (x) => (x.alive ? x.url || "" : ""), html: (x) => (x.alive && x.url ? `<span class="url">${esc(x.url)}</span>` : "") },
+        { key: "url", title: "Ссылка", filter: false, value: (x) => x.url || "", html: (x) => x.url ?
+          `<span class="url">${esc(x.url)}</span><button class="btn small" data-copy-link="${esc(x.employee)}">Скопировать ссылку${usableLink(x) ? "" : " (не действует)"}</button>` : "" },
       ],
       onSelect: () => drawBulk(),
+      afterRender: (host) => host.querySelectorAll<HTMLButtonElement>("[data-copy-link]").forEach(button =>
+        button.addEventListener("click", () => { const row = rows.find(x => x.employee === button.dataset.copyLink); if (row?.url) void copyLink(row.url); })),
     });
     const drawBulk = () => {
       const bar = root.querySelector<HTMLElement>("#bulk")!;
       const sc = table.scope();
       const ppl = sc.rows;
-      const lacking = ppl.filter((x) => !x.alive && !x.entered);
-      const live = ppl.filter((x) => x.alive && x.url);
+      const lacking = ppl.filter((x) => !usableLink(x) && !x.entered && x.can_issue !== false);
+      const issuable = ppl.filter((x) => x.can_issue !== false);
+      const live = ppl.filter((x) => usableLink(x) && x.url);
       const canRevoke = ppl.filter((x) => (x.entered || x.code) && x.employee !== "!me");
       bar.innerHTML = `<span class="who">Действия — <b>${esc(sc.label)}</b></span>
         <button class="btn small primary" data-b="issue" ${lacking.length ? "" : "disabled"}>Выдать тем, у кого нет (${lacking.length})</button>
-        <button class="btn small" data-b="reissue" ${ppl.length ? "" : "disabled"}>Выдать заново</button>
-        <button class="btn small" data-b="copy" ${live.length ? "" : "disabled"}>Скопировать живые ссылки (${live.length})</button>
+        <button class="btn small" data-b="reissue" ${issuable.length ? "" : "disabled"}>Выдать заново</button>
+        <button class="btn small" data-b="copy" ${live.length ? "" : "disabled"}>Скопировать действующие ссылки (${live.length})</button>
         <button class="btn small danger" data-b="revoke" ${canRevoke.length ? "" : "disabled"}>Сбросить доступ (${canRevoke.length})</button>
         <span class="spacer"></span>${sc.picked ? '<button class="link" data-b="clear">снять отметки</button>' : ""}`;
       const on = (k: string, f: () => Promise<void>) => bar.querySelector(`[data-b="${k}"]`)?.addEventListener("click", () => void f());
       on("clear", async () => table.clearSelection());
       const issue = async (list: any[], title: string) => {
-        if (!list.length) return;
-        if (!(await ask(title, `Выдать ссылку ${list.length} чел.? У кого ссылку выдавали, но не открыли, — старая перестанет работать. Кто уже вошёл, из приложения не вылетит.`, "Выдать"))) return;
+        if (!list.length || busy) return;
+        busy = true;
+        bar.querySelectorAll<HTMLButtonElement>("button").forEach(b => b.disabled = true);
+        try {
+        if (!(await ask(title, `Выдать ссылку ${list.length} чел.? У кого ссылку выдавали, но не открыли, — старая перестанет работать. Кто уже вошёл, из приложения не вылетит.`, "Выдать"))) { busy = false; drawBulk(); return; }
         toast("Выдаю ссылки…");
         const out: any[] = [];
         for (const x of list) {
@@ -99,17 +110,25 @@ export const links: Section = {
         }
         await links.render(root, {});
         await showIssued(`Ссылки входа · ${out.length} чел.`, out);
+        } catch (error) { toast((error as Error).message || "Не удалось выдать ссылки"); }
+        finally { busy = false; if (bar.isConnected) drawBulk(); }
       };
       on("issue", () => issue(lacking, "Выдать вход"));
-      on("reissue", () => issue(ppl, "Выдать заново"));
+      on("reissue", () => issue(issuable, "Выдать заново"));
       on("copy", async () => { await hard.copy(live.map((x) => `${x.label || x.employee} — ${x.url}`).join("\n")); toast(`Скопировано ссылок: ${live.length}`); });
       on("revoke", async () => {
-        if (!(await ask("Сбросить доступ?", `${canRevoke.length} чел. выйдут из приложения на телефонах, ссылки перестанут работать. Вернуть вход — новой ссылкой.`, "Сбросить", true))) return;
+        if (busy) return;
+        busy = true;
+        try {
+        if (!(await ask("Сбросить доступ?", `${canRevoke.length} чел. выйдут из приложения на телефонах и ПК, ссылки перестанут работать. Вернуть вход — новой ссылкой.`, "Сбросить", true))) { busy = false; drawBulk(); return; }
         let done = 0;
         for (const x of canRevoke) { const res = await api("/api/manager/app_revoke", undefined, "POST", { employee: x.employee }); if (res.ok) done++; }
         toast(`Доступ сброшен: ${done} чел.`);
         await links.render(root, {});
+        } catch (error) { toast((error as Error).message || "Не удалось сбросить доступ"); }
+        finally { busy = false; if (bar.isConnected) drawBulk(); }
       });
+      if (busy) bar.querySelectorAll<HTMLButtonElement>("button").forEach(b => b.disabled = true);
     };
     table.setRows(rows);
   },

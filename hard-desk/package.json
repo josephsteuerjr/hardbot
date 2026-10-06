@@ -1,7 +1,7 @@
 {
   "name": "hard-desk",
   "productName": "Хард",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "private": true,
   "description": "Хард — пульт руководителя и пульт аналитика на движке Hélène (Electron)",
   "main": "out/main.js",
@@ -11,7 +11,8 @@
     "icons": "electron tools/icons.cjs",
     "dist": "node build.mjs && node tools/dist.mjs",
     "check": "tsc -p .",
-    "test:queue": "node tools/test-call-queue.cjs"
+    "test:queue": "node tools/test-call-queue.cjs",
+    "test:links": "node tools/test-login-link.cjs"
   },
   "devDependencies": {
     "@electron/packager": "20.3.0",

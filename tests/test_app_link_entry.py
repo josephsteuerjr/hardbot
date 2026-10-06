@@ -167,7 +167,7 @@ def test_second_tap_from_the_same_browser_does_not_burn_a_use(fresh):
         "тот же браузер обязан получить тот же токен, а не по новому на каждый тап")
     row = next(r for r in state["links"] if r["code"] == body["code"])
     assert row["uses"] == 1, f"три тапа с одного телефона — один обмен, а не три: {row}"
-    assert row["max_uses"] >= 3, "айфону всё равно полагается запасной обмен"
+    assert row["phone_remaining"] == 1 and row["desktop_available"]
 
 
 def test_two_uses_by_default_and_then_the_link_is_dead_but_not_a_dead_end(fresh):
@@ -186,9 +186,8 @@ def test_two_uses_by_default_and_then_the_link_is_dead_but_not_a_dead_end(fresh)
     assert s3 == 302 and l3 == "/#link_dead=1"
 
 
-def test_iphone_gets_one_extra_use_by_fact_not_by_guess(fresh):
-    """Айфон различаем ПО ФАКТУ первого открытия: +1 обмен на установку ярлыка,
-    у которого своё хранилище. Заранее угадать телефон аналитик не может."""
+def test_iphone_browser_and_shortcut_share_two_phone_slots(fresh):
+    """iOS identifies a device class; it cannot expand the phone budget."""
 
     async def scenario(s):
         _st, body = await s.issue("Сидоров С.")
@@ -199,11 +198,11 @@ def test_iphone_gets_one_extra_use_by_fact_not_by_guess(fresh):
 
     (st1, loc1, _r), state, rest = run(scenario)
     assert st1 == 302 and loc1.startswith("/#t=")
-    assert state["max_uses"] == db.APP_LINK_DEFAULT_USES + 1
+    assert state["max_uses"] == db.APP_LINK_DEFAULT_USES
     assert state["bonus_ios"] is True and state["last_agent"] == "iphone"
     assert [st for st, _l in rest] == [302, 302, 302]
-    assert rest[0][1].startswith("/#t=") and rest[1][1].startswith("/#t=")
-    assert rest[2][1] == "/#link_dead=1", "бонус ровно один, а не бесконечный"
+    assert rest[0][1].startswith("/#t=")
+    assert rest[1][1] == rest[2][1] == "/#link_dead=1"
 
 
 def test_installed_shortcut_gets_no_bonus(fresh):
@@ -330,7 +329,7 @@ def test_app_links_json_is_the_screen_behind_the_pult(fresh):
     row = rows[0]
     assert set(row) == {"employee", "telegram_id", "kind", "code", "created_at",
                         "expires_at", "uses", "max_uses", "bonus_ios", "bonus_desktop", "desktop_available", "last_use_at",
-                        "last_agent", "entered", "devices", "alive", "url"}
+                        "last_agent", "entered", "devices", "alive", "url", "phone_remaining", "link_status"}
     # адрес собирает сервер: пульт знает служебный адрес, а телефону нужен публичный
     assert row["url"] == f"{URL}/i/{row['code']}"
     assert row["employee"] == "Иванов И." and row["kind"] == "agent"

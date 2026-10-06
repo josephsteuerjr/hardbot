@@ -8,6 +8,8 @@ import { hostname, userInfo } from "node:os";
 import { createHash } from "node:crypto";
 import { cacheGet, cachePut, readFieldToken, readSettings, readToken, wipe, wipeField, writeFieldToken, writeSettings, writeToken } from "./store";
 import { clearCallQueue, readCallQueue, writeCallQueue, type CallQueue } from "./store";
+import { splitLink } from "./link";
+export { splitLink } from "./link";
 
 export const OFFLINE = "Нет связи с сервером «Хард». Как только интернет появится, пульт догонит сам.";
 export const CERT_BAD = "Сертификат сервера не прошёл проверку — эта сеть подменяет соединение. " +
@@ -40,19 +42,6 @@ export function deviceName(): string {
 
 /** Ссылка входа → (адрес сервера, код). Вставляют что придётся: ссылку целиком,
  *  ссылку с решёткой из старой рассылки или один код. */
-export function splitLink(raw: string): { base: string; code: string } | null {
-  const text = String(raw || "").trim().replace(/^[<"']+|[>"']+$/g, "");
-  if (!text) return null;
-  let base = "";
-  let code = "";
-  const m = /^(https?:\/\/[^/?#\s]+)/i.exec(text);
-  if (m) base = m[1].replace(/^http:\/\/(?!127\.0\.0\.1|localhost)/i, "https://");
-  const c = /\/i\/([A-Za-z0-9_-]{6,})/.exec(text) || /[#&?]link=([A-Za-z0-9_-]{6,})/.exec(text) || /^([A-Za-z0-9_-]{6,})$/.exec(text);
-  if (c) code = c[1];
-  if (!code) return null;
-  return { base, code };
-}
-
 function qs(query?: Record<string, unknown>): string {
   if (!query) return "";
   const p = new URLSearchParams();
@@ -161,13 +150,13 @@ export async function enroll(raw: string): Promise<ApiResult> {
     res = await net().fetch(base + "/api/manager/device/enroll", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code: link.code, device: deviceName() }),
+      body: JSON.stringify({ code: link.code, device: deviceName(), keep_token: base === readSettings().server ? readToken() : undefined }),
     });
   } catch (err) {
     return troubleOf(err);
   }
   if (res.status === 410) return { ok: false, status: 410, kind: "nolink", text: deadLinkText(await deadReason(res)) };
-  if (res.status === 403) return { ok: false, status: 403, kind: "forbidden", text: "Это ссылка выездника, а не руководителя. Её место — в телефоне." };
+  if (res.status === 403) return { ok: false, status: 403, kind: "forbidden", text: "Это личная ссылка сотрудника. Переключаю приложение на вход сотрудника." };
   if (res.status === 429) return { ok: false, status: 429, kind: "server", text: "Слишком много попыток. Подождите минуту." };
   if (!res.ok) return { ok: false, status: res.status, kind: "server", text: `Сервер ответил ошибкой ${res.status}.` };
   const data = (await res.json()) as { token: string; device_id: number };

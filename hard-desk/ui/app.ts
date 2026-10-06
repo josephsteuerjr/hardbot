@@ -55,6 +55,21 @@ async function startAnalyst() {
 
 let shell: Shell;
 
+async function openAfterEnrollment() {
+  const actual = await hard.state();
+  const query = actual.mode === "field" ? "?mode=field" : actual.mode === "analyst" ? "?mode=analyst" : "";
+  if (location.search !== query) { location.search = query; return; }
+  if (actual.mode === "field") await startAgent(); else await start();
+}
+
+function startError(text: string, retry: () => Promise<void>) {
+  bare(false);
+  setSections([]);
+  setHead("Подключение");
+  $("view-inner").innerHTML = `<div class="page enroll"><p>${esc(text || "Не удалось загрузить ваш доступ. Проверьте связь и повторите.")}</p><button class="btn" id="retry-start">Повторить</button></div>`;
+  $("retry-start").addEventListener("click", () => void retry());
+}
+
 const ROLE: Record<string, string> = { manager: "руководитель", security: "безопасность", full: "руководитель · контроль" };
 
 function enrollScreen(note = "") {
@@ -64,9 +79,9 @@ function enrollScreen(note = "") {
   $("head").hidden = true;
   host.innerHTML = `<div class="page enroll">
     <img class="enroll-logo" src="icon.svg" alt="" onerror="this.remove()">
-    <h1>Пульт руководителя</h1>
-    <p>Вставьте ссылку входа — ту, что прислал аналитик. Это нужно один раз: дальше пульт на этом компьютере открывается сразу.</p>
-    <p class="hint">Ссылки нет или она уже потрачена на телефоне — возьмите новую в приложении: Сводка → «Вход команды» → «Выдать себе».</p>
+    <h1>Вход в приложение</h1>
+    <p>Вставьте свою персональную ссылку. Приложение откроет вашу рабочую страницу: Софт, Хард или пульт руководителя.</p>
+    <p class="hint">Сотруднику ссылку выдаёт руководитель в «Входе команды», руководителю — аналитик. Два входа для телефона и один для программы на ПК; повтор на уже подключённом устройстве их не расходует.</p>
     <div class="row"><input class="input" id="link" placeholder="https://…/i/…" autocomplete="off" spellcheck="false">
       <button class="btn primary" id="go">Войти</button></div>
     <div class="err" id="err">${esc(note)}</div>
@@ -82,7 +97,7 @@ function enrollScreen(note = "") {
     const r = await hard.enroll(v);
     btn.disabled = false;
     if (!r.ok) { $("err").textContent = r.text || "Не получилось"; return; }
-    await start();
+    await openAfterEnrollment();
   };
   btn.addEventListener("click", submit);
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") void submit(); });
@@ -91,12 +106,14 @@ function enrollScreen(note = "") {
 
 async function start() {
   shell = await hard.state();
+  if (shell.mode === "field") { await openAfterEnrollment(); return; }
   if (shell.theme === "light" || shell.theme === "dark") document.documentElement.dataset.theme = shell.theme;
   if (!shell.enrolled) { enrollScreen(); return; }
   bare(false);
   setHead("…", "");
   const me = await api("/api/manager/device/me");
   if (!me.ok && me.kind === "revoked") { enrollScreen(me.text); return; }
+  if (!me.ok) { startError(me.text || "", start); return; }
   const info = me.ok ? me.data : null;
   const caps = info?.caps || { team_links: true, control: false };
   const who = info?.me;
@@ -131,7 +148,7 @@ function enrollFieldScreen(note = "") {
   const host = $("view-inner");
   $("head").hidden = true;
   host.innerHTML = `<div class="page enroll">
-    <h1>Хард</h1>
+    <h1>Вход в приложение</h1>
     <p>Вставьте СВОЮ ссылку входа — её выдаёт руководитель в «Входе команды». Это нужно один раз.</p>
     <p class="hint">Телефон продолжает работать: вход на компьютере его не заменяет.</p>
     <div class="row"><input class="input" id="link" placeholder="https://…/i/…" autocomplete="off" spellcheck="false">
@@ -148,7 +165,7 @@ function enrollFieldScreen(note = "") {
     const r = await hard.enroll(v);
     btn.disabled = false;
     if (!r.ok) { $("err").textContent = r.text || "Не получилось"; return; }
-    location.reload();
+    await openAfterEnrollment();
   };
   btn.addEventListener("click", submit);
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") void submit(); });
@@ -157,18 +174,20 @@ function enrollFieldScreen(note = "") {
 
 async function startAgent() {
   shell = await hard.state();
+  if (shell.mode !== "field") { await openAfterEnrollment(); return; }
   if (shell.theme === "light" || shell.theme === "dark") document.documentElement.dataset.theme = shell.theme;
   if (!shell.enrolled) { enrollFieldScreen(); return; }
   bare(false);
   setHead("…", "");
   const me = await api("/api/bootstrap");
   if (!me.ok && me.kind === "revoked") { enrollFieldScreen(me.text); return; }
+  if (!me.ok) { startError(me.text || "", startAgent); return; }
   const who: any = me.ok ? me.data : null;
   // Какой экран показать — решает СЕРВЕР: есть портфель софта → очередь звонков
   // (перевод УЗБ на колл-центр), иначе — портфель выездника. Смешанный случай
   // тоже открывает очередь: визит всё равно закрывается телефоном.
   const soft = !!(who?.roles?.soft);
-  setWho(`<b>${esc(who?.employee || "Сотрудник")}</b> · приложение на компьютере`);
+  setWho(`<b>${esc(who?.employee || "Сотрудник")}</b> · ${soft ? "Софт" : "Хард"}`);
   const list: Section[] = soft ? [softQueue, softHelp] : [portfolio, fieldHelp];
   setSections(list);
   await go(soft ? "softqueue" : "portfolio");
@@ -186,7 +205,7 @@ if (ANALYST) {
   hard.on("revoked", () => enrollFieldScreen("Вход этого компьютера отозван. Попросите у руководителя новую ссылку."));
   void startAgent();
 } else {
-  mountShell(`<b>Хард</b> · пульт руководителя`);
+  mountShell(`<b>Хард</b> · приложение`);
   hard.on("revoked", () => enrollScreen("Доступ этого компьютера отозван аналитиком. Всё сохранённое стёрто. Попросите новую ссылку входа."));
   void start();
 }

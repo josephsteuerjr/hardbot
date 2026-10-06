@@ -296,7 +296,7 @@ function wireIpc() {
         writeSettings({ appMode: next });
         MODE = next;
         if (tray) tray.setToolTip(productOf(next));
-        if (win && !win.isDestroyed()) void win.loadURL("hard://app/index.html" + queryOf(next));
+        if (win && !win.isDestroyed()) win.setTitle(productOf(next));
         return second;
       }
       return second;

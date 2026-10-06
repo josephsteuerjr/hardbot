@@ -115,6 +115,7 @@ class ManagersSection:
                 staff.setdefault(city, []).append(emp)
             self.mgr_office_staff = {c: sorted(v) for c, v in staff.items()}
             self.mgrs = d.get("managers") or []
+            self.mgr_next_local_id = d.get("next_local_id")
             self.mgr_cities = d.get("cities") or []
             self.mgr_emps = d.get("employees") or []
             self.mgr_city_emps = d.get("city_employees") or {}
@@ -304,7 +305,8 @@ class ManagersSection:
     def save_manager(self):
         tid = self.mgr_tid.get().strip()
         if not tid and not constants.TELEGRAM_UI:
-            tid = mg.next_local_manager_id(getattr(self, "mgrs", None) or [])
+            tid = str(getattr(self, "mgr_next_local_id", None) or
+                      mg.next_local_manager_id(getattr(self, "mgrs", None) or []))
         if not valid_telegram_id(tid):
             self.toast("Впиши Telegram ID руководителя (или выбери из списка)"
                        if constants.TELEGRAM_UI else "Номер руководителя — только цифры",

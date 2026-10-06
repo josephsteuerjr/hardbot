@@ -66,14 +66,14 @@ def test_pc_only_entry_is_visible_after_link_removal_and_revocation(entry):
         conn.execute("UPDATE agent_devices SET revoked_at='2026-10-06' WHERE telegram_id=?",(UID,))
     assert not any(r['telegram_id']==UID for r in db.app_links_state())
 
-def test_pc_first_does_not_lose_iphone_shortcut_bonus(entry):
+def test_pc_first_leaves_exactly_two_phone_entries(entry):
     assert db.enroll_agent_device(entry,'Synthetic PC')
     assert db.redeem_app_link(entry,agent='iphone')
     assert db.redeem_app_link(entry,agent='iphone-pwa')
-    assert db.redeem_app_link(entry,agent='android')
+    assert db.redeem_app_link(entry,agent='android') is None
     state=info(entry)
     assert state['bonus_desktop']==state['bonus_ios']==1
-    assert state['max_uses']==db.APP_LINK_DEFAULT_USES+2
+    assert state['max_uses']==db.APP_LINK_DEFAULT_USES+1
     assert db.redeem_app_link(entry,agent='android') is None
 
 def test_same_pc_reopening_link_costs_no_extra_activation(entry):
@@ -142,8 +142,58 @@ def test_legacy_pending_queue_requires_token_reuse_and_never_burns_other_link(en
         http(web._agent_device_enroll,entry,reuse_only=True,keep_token='invalid-synthetic-token')
     assert info(entry)['uses']==0 and info(entry)['bonus_desktop']==0
 
-def test_concurrent_ios_activation_adds_only_one_bonus(entry):
+def test_concurrent_ios_activation_cannot_add_phone_slots(entry):
     with ThreadPoolExecutor(max_workers=2) as pool:
         result=list(pool.map(lambda _:db.redeem_app_link(entry,agent='iphone'),range(2)))
     assert all(result)
-    assert info(entry)['max_uses']==db.APP_LINK_DEFAULT_USES+1
+    assert info(entry)['max_uses']==db.APP_LINK_DEFAULT_USES
+    assert db.redeem_app_link(entry,agent='iphone') is None
+
+
+def test_pc_slot_cannot_be_spent_by_phone_and_phone_slots_cannot_buy_second_pc(entry):
+    pc=db.enroll_agent_device(entry,'First PC')
+    assert pc
+    assert db.enroll_agent_device(entry,'Second PC') is None
+    assert len([t for t in spend_phone(entry) if t])==2
+    assert db.redeem_app_link(entry,agent='iphone') is None
+    assert info(entry)['uses']==3
+
+
+def test_all_access_revocation_also_revokes_employee_pc(entry):
+    pc=db.enroll_agent_device(entry,'PC')
+    phone=db.redeem_app_link(entry,agent='android')
+    db.revoke_app_access(UID,scope='all')
+    assert db.uid_for_app_token(phone) is None
+    assert db.agent_device_check(pc[3])[0]=='revoked'
+
+
+def test_link_only_revocation_keeps_employee_pc(entry):
+    pc=db.enroll_agent_device(entry,'PC')
+    db.revoke_app_access(UID,scope='links')
+    assert db.agent_device_check(pc[3])[0]=='ok'
+
+
+def test_binding_change_invalidates_previous_employee_pc(entry):
+    pc=db.enroll_agent_device(entry,'PC')
+    db.set_bind(UID,'Different employee')
+    assert db.agent_device_check(pc[3])[0]=='revoked'
+
+
+def test_phone_exhaustion_reports_reusable_pc_link(entry):
+    spend_phone(entry)
+    row=next(r for r in db.app_links_state() if r['telegram_id']==UID)
+    assert row['alive'] and row['desktop_available'] and row['phone_remaining']==0
+    assert row['link_status']=='live'
+
+
+def test_manager_has_two_phone_entries_and_one_pc_with_idempotent_reopening(entry):
+    db.set_manager(UID,'Synthetic leader',[],['Synthetic Soft'])
+    code=db.create_app_link(UID,max_uses=3)
+    assert all(spend_phone(code))
+    assert db.redeem_app_link(code,agent='iphone') is None
+    pc=http(web._manager_device_enroll,code)
+    assert info(code)['uses']==3
+    assert http(web._manager_device_enroll,code,keep_token=pc['token'])['token']==pc['token']
+    with pytest.raises(aio_web.HTTPGone):http(web._manager_device_enroll,code)
+    with pytest.raises(aio_web.HTTPForbidden):http(web._agent_device_enroll,code)
+    assert info(code)['uses']==3

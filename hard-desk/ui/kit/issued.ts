@@ -2,6 +2,7 @@
 // скопировать всё разом или скачать книгой Excel.
 import { hard } from "./api";
 import { esc, toast } from "./dom";
+import { copyLink } from "./login-links";
 
 /** Итог выдачи списком: скопировать «ФИО — ссылка» или скачать книгой. */
 export async function showIssued(title: string, rows: any[]): Promise<void> {
@@ -14,13 +15,14 @@ export async function showIssued(title: string, rows: any[]): Promise<void> {
     <h3>${esc(title)}</h3>
     <p>Выдано ${ok.length} из ${rows.length}. Каждая ссылка персональная — пересылайте лично человеку, не в общий чат.</p>
     <div style="overflow:auto;border-top:var(--lw) solid var(--line);border-bottom:var(--lw) solid var(--line);margin-bottom:14px">
-      ${rows.map((r) => `<div class="list-row"><div class="grow"><div class="nm">${esc(r.employee)} <span class="sub">${esc(r.who || "")}</span></div>
-        ${r.url ? `<div class="url">${esc(r.url)}</div>` : `<div class="sub" style="color:var(--err)">${esc(r.error || "не выдано")}</div>`}</div></div>`).join("")}
+      ${rows.map((r, i) => `<div class="list-row"><div class="grow"><div class="nm">${esc(r.employee)} <span class="sub">${esc(r.who || "")}</span></div>
+        ${r.url ? `<div class="url">${esc(r.url)}</div><div class="sub">Два входа для телефона + один для программы на ПК · до ${esc(r.expires || "—")}</div>` : `<div class="sub" style="color:var(--err)">${esc(r.error || "не выдано")}</div>`}</div>${r.url ? `<button class="btn small" data-copy-one="${i}">Скопировать ссылку</button>` : ""}</div>`).join("")}
     </div>
     ${bad.length ? `<p style="color:var(--err);margin-top:-6px">Не выдано: ${bad.length} — причина в строке.</p>` : ""}
     <div class="row"><button class="btn" data-close>Закрыть</button><button class="btn" data-xlsx>Скачать Excel</button>
       <button class="btn primary" data-copy ${ok.length ? "" : "disabled"}>Скопировать всё</button></div></div>`;
   box.querySelector("[data-close]")!.addEventListener("click", () => box.remove());
+  box.querySelectorAll<HTMLButtonElement>("[data-copy-one]").forEach(b => b.addEventListener("click", () => void copyLink(rows[Number(b.dataset.copyOne)].url)));
   box.querySelector("[data-copy]")!.addEventListener("click", async () => { await hard.copy(text); toast(`Скопировано ссылок: ${ok.length}`); });
   box.querySelector("[data-xlsx]")!.addEventListener("click", async () => {
     const res = await hard.xlsx("Ссылки входа", ["Кто", "Роль", "Ссылка", "Открытий", "Действует до", "Ошибка"],
@@ -29,4 +31,3 @@ export async function showIssued(title: string, rows: any[]): Promise<void> {
   });
   document.body.appendChild(box);
 }
-

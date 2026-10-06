@@ -7,6 +7,7 @@ import { hard } from "../kit/api";
 import { DataTable, type Col } from "../kit/table";
 import { adm, fn, guard, note } from "./lib";
 import { showIssued } from "./links";
+import { copyLink, linkDetails, linkStatus, usableLink } from "../kit/login-links";
 
 const ROLES: [string, string, string][] = [
   ["manager", "Руководитель", "видит свою команду, выдаёт вход сотрудникам"],
@@ -23,12 +24,12 @@ let staff: Record<string, string[]> = {};
 type MRow = { m: any; row: any; link: any; devs: any[] };
 let table: DataTable<MRow> | null = null;
 let devicesKnown = true;
+let linksBusy = false;
 
 function linkState(l: any): string {
   if (!l) return "не выдавали";
   if (l.entered) return "вошёл";
-  if (l.alive) return l.uses ? "ссылка открыта" : "ссылка выдана";
-  return "ссылка истекла";
+  return linkStatus(l);
 }
 
 async function load(root: HTMLElement) {
@@ -63,7 +64,7 @@ async function load(root: HTMLElement) {
   ];
   table = new DataTable<MRow>(root.querySelector("#tbl")!, {
     id: "analyst-managers", cols, key: (r) => String(r.m.telegram_id), select: true, exportName: "Руководители",
-    onRow: (r) => edit(root, r.m, String(r.m.telegram_id), r.devs),
+    onRow: (r) => edit(root, r.m, String(r.m.telegram_id), r.devs, r.link),
     onSelect: () => drawBulk(root),
     empty: "Добавьте руководителя кнопкой «Добавить».",
   });
@@ -75,8 +76,8 @@ function drawBulk(root: HTMLElement) {
   if (!bar || !table) return;
   const sc = table.scope();
   const ms = sc.rows;
-  const lacking = ms.filter((r) => !r.link || (!r.link.alive && !r.link.entered)).length;
-  const live = ms.filter((r) => r.link?.alive && r.link?.url);
+  const lacking = ms.filter((r) => !usableLink(r.link) && !r.link?.entered).length;
+  const live = ms.filter((r) => usableLink(r.link) && r.link?.url);
   const withAccess = ms.filter((r) => r.link?.code || r.link?.entered || r.devs.some((x) => !x.revoked_at)).length;
   bar.innerHTML = `<span class="who">Действия — <b>${esc(sc.label)}</b></span>
     <button class="btn small primary" data-b="issue" ${lacking ? "" : "disabled"}>Выдать тем, у кого нет (${lacking})</button>
@@ -90,9 +91,12 @@ function drawBulk(root: HTMLElement) {
   const on = (k: string, f: () => Promise<void>) => bar.querySelector(`[data-b="${k}"]`)?.addEventListener("click", guard(f));
   on("clear", async () => table!.clearSelection());
   on("reload", async () => { await load(root); toast("Обновлено"); });
-  on("new", async () => edit(root, null, await fn("managers.next_local_manager_id", data.managers || []), []));
+  on("new", async () => edit(root, null, String(data.next_local_id || await fn("managers.next_local_manager_id", data.managers || [])), []));
   const issue = async (list: MRow[], title: string) => {
-    if (!list.length) return;
+    if (!list.length || linksBusy) return;
+    linksBusy = true;
+    bar.querySelectorAll<HTMLButtonElement>("button").forEach(b => b.disabled = true);
+    try {
     if (!(await ask(title, `Выдать вход ${list.length} чел.? Ссылку можно открыть три раза: на телефоне, в ярлыке на экране iPhone и в пульте на компьютере. У кого ссылку выдавали, но не открыли, — старая перестанет работать.`, "Выдать"))) return;
     toast("Выдаю ссылки…");
     // Руководителю — только id: с ФИО сервер привязал бы его к сотруднику.
@@ -103,28 +107,35 @@ function drawBulk(root: HTMLElement) {
     table?.clearSelection();
     await load(root);
     await showIssued(`Вход руководителям · ${rows.length} чел.`, rows);
+    } finally { linksBusy = false; if (root.isConnected) drawBulk(root); }
   };
-  on("issue", () => issue(ms.filter((r) => !r.link || (!r.link.alive && !r.link.entered)), "Выдать вход"));
+  on("issue", () => issue(ms.filter((r) => !usableLink(r.link) && !r.link?.entered), "Выдать вход"));
   on("reissue", () => issue(ms, "Выдать заново"));
   on("copy", async () => {
     await hard.copy(live.map((r) => `${r.row.name} — ${r.link.url}`).join("\n"));
     toast(`Скопировано ссылок: ${live.length}`);
   });
   on("revoke", async () => {
+    if (linksBusy) return;
+    linksBusy = true;
+    try {
     const ids = ms.map((r) => r.m.telegram_id);
     if (!(await ask("Сбросить доступ?", `${ids.length} чел. выйдут из приложения на телефонах, их ссылки перестанут работать, пульты на компьютерах отключатся при первом выходе на связь. Вернуть вход — новой ссылкой.`, "Сбросить", true))) return;
     const d = await adm("POST", "/admin/app_revoke_bulk.json", { telegram_ids: ids, scope: "all" }, 120);
     toast(`Доступ сброшен: ${d.people} чел.`);
     table!.clearSelection();
     await load(root);
+    } finally { linksBusy = false; if (root.isConnected) drawBulk(root); }
   });
+  if (linksBusy) bar.querySelectorAll<HTMLButtonElement>("button").forEach(b => b.disabled = true);
 }
 
 function chipList(items: string[], on: Set<string>, attr: string, count?: (x: string) => number): string {
   return `<div class="chips" style="gap:6px">${items.map((x) => `<button class="chip toggle" data-${attr}="${esc(x)}" aria-pressed="${on.has(x)}">${esc(x)}${count && count(x) ? `<span class="n">${n(count(x))}</span>` : ""}</button>`).join("")}</div>`;
 }
 
-function edit(root: HTMLElement, m: any, tid: string, devices: any[]) {
+function edit(root: HTMLElement, m: any, tid: string, devices: any[], link: any = null) {
+  let issuing = false;
   const form = {
     name: m?.name || "", role: m?.role || "manager", direction: m?.direction || "",
     offices: new Set<string>(m?.office_cities || []), employees: new Set<string>(m?.employees || []),
@@ -145,7 +156,10 @@ function edit(root: HTMLElement, m: any, tid: string, devices: any[]) {
         ${form.direction ? `<p class="muted" style="font-size:13px">Состав направления сервер считает сам — отмечать людей не нужно.</p>` : `
         <p class="muted" style="font-size:13px;margin:12px 0 6px">Офисы (штат живой):</p>${chipList(officeList, form.offices, "office", (x) => (staff[x] || []).length)}
         <p class="muted" style="font-size:13px;margin:12px 0 6px">И поимённо:</p>${chipList(empList, form.employees, "emp", empCount)}`}</div>
-      ${m ? `<div class="block"><h3>Компьютеры с пультом</h3>${devices.length ? devices.map((x) => `<div class="list-row">
+      ${m ? `<div class="block"><h3>Ссылка входа</h3>${linkDetails(link)}
+        <div class="toolbar">${link?.url ? `<button class="btn" data-copy-entry>Скопировать существующую ссылку</button>` : ""}
+        <button class="btn" data-issue-entry>${link?.code ? "Выдать новую ссылку" : "Выдать ссылку"}</button></div></div>
+      <div class="block"><h3>Компьютеры с пультом</h3>${devices.length ? devices.map((x) => `<div class="list-row">
           <div class="grow"><div class="nm">${esc(x.device || "компьютер")}</div><div class="sub">с ${esc(String(x.created_at || "").slice(0, 10))} · ${x.revoked_at ? "отозван, ждёт стука" : esc(ago(x.last_seen_at ? x.last_seen_at + "Z" : null))}</div></div>
           ${x.revoked_at ? '<span class="tag warn">отозван</span>' : `<button class="btn small danger" data-revoke="${x.id}">Отозвать</button>`}</div>`).join("")
           + `<div class="toolbar" style="margin-top:10px"><button class="btn small danger" data-revoke-all>Отозвать все</button></div>`
@@ -153,6 +167,21 @@ function edit(root: HTMLElement, m: any, tid: string, devices: any[]) {
       <div class="toolbar" style="margin-top:22px"><button class="btn primary" data-save>Сохранить</button>
         ${m ? '<span class="spacer"></span><button class="btn danger" data-del>Удалить</button>' : ""}</div>`);
     body.querySelector<HTMLInputElement>("#mg-name")!.addEventListener("input", (e) => { form.name = (e.target as HTMLInputElement).value; });
+    body.querySelector("[data-copy-entry]")?.addEventListener("click", () => void copyLink(link.url));
+    body.querySelector<HTMLButtonElement>("[data-issue-entry]")?.addEventListener("click", guard(async () => {
+      if (issuing) return;
+      issuing = true;
+      const button = body.querySelector<HTMLButtonElement>("[data-issue-entry]")!;
+      button.disabled = true;
+      try {
+        if (!(await ask("Выдать новую ссылку?", "Прежняя неоткрытая ссылка перестанет работать. Действующие устройства сохранят вход. Новая ссылка: два входа для телефона и один для программы на ПК.", "Выдать"))) return;
+        const issued = await adm("POST", "/admin/app_link.json", { telegram_id: Number(tid), uses: MANAGER_USES });
+        link = { ...issued, code: issued.code, alive: true, phone_remaining: 2, desktop_available: true, link_status: "live" };
+        draw();
+        await load(root);
+        await showIssued("Вход руководителя", [{ employee: m.name, who: "руководитель", url: issued.url, expires: String(issued.expires_at || "").slice(0, 10) }]);
+      } finally { issuing = false; button.disabled = false; }
+    }));
     body.querySelectorAll<HTMLInputElement>('[name="mg-role"]').forEach((r) => r.addEventListener("change", () => { form.role = r.value; }));
     body.querySelector<HTMLSelectElement>("#mg-dir")!.addEventListener("change", (e) => { form.direction = (e.target as HTMLSelectElement).value; draw(); });
     body.querySelectorAll<HTMLButtonElement>("[data-office]").forEach((b) => b.addEventListener("click", () => {
