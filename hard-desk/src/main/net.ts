@@ -261,7 +261,7 @@ export function flushCallQueue(): Promise<Map<string, ApiResult>> {
       if (res.ok && !rejected) current.entries = current.entries.filter(e => e.body.op_id !== entry.body.op_id);
       else {
         const pending = current.entries.find(e => e.body.op_id === entry.body.op_id);
-        if (pending) pending.error = res.ok ? "Звонок принят, но поля требуют проверки: " + Object.keys(rejected || {}).join(", ") : res.text || "Сервер не принял звонок";
+        if (pending) pending.error = res.ok ? "Запись принята, но поля требуют проверки: " + Object.keys(rejected || {}).join(", ") : res.text || "Сервер не принял запись";
       }
       writeCallQueue(current);
     }
@@ -291,15 +291,16 @@ export async function callField(method: string, path: string, query?: Record<str
     } catch (error) { return { ok: false, status: 0, kind: "server", text: String(error) }; }
   }
   const callBody = body as Record<string, unknown> | undefined;
-  if (!opts.sendingQueue && method === "POST" && path === "/api/save" && callBody?.kind === "call" && callBody.finish === true) {
-    if (!callBody.op_id || !callBody.occurred_at) return { ok: false, status: 0, kind: "server", text: "Нет идентификатора или времени звонка" };
+  if (!opts.sendingQueue && method === "POST" && path === "/api/save" &&
+      (callBody?.kind === "call" || callBody?.kind === "payment") && callBody.finish === true) {
+    if (!callBody.op_id || !callBody.occurred_at) return { ok: false, status: 0, kind: "server", text: "Нет идентификатора или времени записи" };
     try {
       const queue = ownedCallQueue();
       if (!queue.entries.some(e => e.body.op_id === callBody.op_id)) queue.entries.push({ body: callBody });
       writeCallQueue(queue);
       const results = await flushCallQueue();
       return results.get(String(callBody.op_id)) || { ok: true, status: 200, data: { queued: true, op_id: callBody.op_id } };
-    } catch (error) { return { ok: false, status: 0, kind: "server", text: "Не удалось сохранить звонок на компьютере: " + String(error) }; }
+    } catch (error) { return { ok: false, status: 0, kind: "server", text: "Не удалось сохранить запись на компьютере: " + String(error) }; }
   }
   if (!fieldOk(String(path))) return { ok: false, status: 0, kind: "server", text: "запрещённый путь" };
   const url = server + path + qs(query);

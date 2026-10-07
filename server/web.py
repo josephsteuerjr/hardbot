@@ -570,7 +570,8 @@ def _fmt_money_ru(value) -> str:
 def _person_full_from_rows(rows, rep: str, lang: str,
                            extras: dict[str, list[dict]] | None = None,
                            receipts: list[dict] | None = None,
-                           history: dict | None = None) -> dict | None:
+                           history: dict | None = None,
+                           reported_payments: list[dict] | None = None) -> dict | None:
     """Полная карточка из уже выбранных строк одного человека.
 
     `/api/cards` получает все группы одним запросом. Повторный
@@ -665,7 +666,10 @@ def _person_full_from_rows(rows, rep: str, lang: str,
         "payments": [{"contract_id": r["contract_id"],
                       "unit": debt.unit([r["partner"]] if r["partner"] else []),
                       "amount": r["last_payment_sum"] or "",
-                      "date": r["last_payment_date"] or ""} for r in rows],
+                      "date": r["last_payment_date"] or "",
+                      "current": r["paid_current"] if r["paid_current"] is not None else ""} for r in rows],
+        "reported_payments": ([p for items in db.reported_payments_for([r["contract_id"] for r in rows]).values()
+                                for p in items] if reported_payments is None else reported_payments),
         "paymentTitles": {"amount": _title("last_payment_sum", lang),
                           "date": _title("last_payment_date", lang)},
         "form": form,
@@ -1529,6 +1533,7 @@ def _cards_payload(uid: int, emp: str, lang: str, requested_soft: bool,
         [r["contract_id"] for p in grouped for r in p["contracts"]])
     # Чеки всего портфеля — тем же пакетом (не открывать запрос на карточку).
     all_receipts = db.receipts_for([r["contract_id"] for p in grouped for r in p["contracts"]])
+    all_reported = db.reported_payments_for([r["contract_id"] for p in grouped for r in p["contracts"]])
     histories = db.portfolio_card_history(grouped, by_soft=soft_mode)
     for p in grouped:
         # persons_for_employee уже принёс все строки договоров. Не открываем
@@ -1536,7 +1541,9 @@ def _cards_payload(uid: int, emp: str, lang: str, requested_soft: bool,
         full = _person_full_from_rows(p["contracts"], p["rep"], lang, all_extras,
                                       [receipt for r in p["contracts"]
                                        for receipt in all_receipts.get(r["contract_id"], [])],
-                                      histories[p["rep"]])
+                                      histories[p["rep"]],
+                                      [payment for r in p["contracts"]
+                                       for payment in all_reported.get(r["contract_id"], [])])
         if full:
             full["_profile"] = "soft" if soft_mode else "hard"
             cards[p["rep"]] = full
@@ -1647,6 +1654,8 @@ async def _save(request: web.Request) -> web.Response:
     body = await request.json()
     rep = body.get("rep", "")
     row = db.get_client(rep)
+    if body.get("kind") == "payment":
+        return _save_reported_payment(uid, emp, body, row)
     # Контур «Софт»: kind=call — звонок софтника. Владение строгое: звонок
     # закрывает хозяин второй колонки ответственности, визит — первой.
     kind = "call" if str(body.get("kind") or "").strip() == "call" else "visit"
@@ -1955,6 +1964,35 @@ async def _save(request: web.Request) -> web.Response:
         # принято — без хвоста.
         out["truncated"] = truncated
     return web.json_response(out)
+
+
+def _save_reported_payment(uid: int, emp: str, body: dict, row) -> web.Response:
+    if not row or (row["responsible_soft"] != emp and uid != ADMIN_ID):
+        raise web.HTTPNotFound(text="person")
+    if body.get("finish") is not True:
+        raise web.HTTPBadRequest(text="Подтвердите запись оплаты")
+    op = str(body.get("op_id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", op):
+        raise web.HTTPBadRequest(text="Идентификатор оплаты обязателен")
+    paid_at = db.canon_iso_date(body.get("paid_at"))
+    if not paid_at or date.fromisoformat(paid_at) > workday.today():
+        raise web.HTTPBadRequest(text="Укажите дату оплаты не позднее сегодня")
+    from decimal import Decimal, InvalidOperation
+    try:
+        amount = Decimal(str(body.get("amount") or "").replace(' ', '').replace(',', '.'))
+        if not amount.is_finite() or not 0 < amount <= Decimal('1000000000') or amount.as_tuple().exponent < -2:
+            raise ValueError
+    except (InvalidOperation, ValueError):
+        raise web.HTTPBadRequest(text="Укажите сумму оплаты с точностью до копеек")
+    rep = row["contract_id"]
+    try:
+        result = db.record_reported_payment(op, rep, row["responsible_soft"] or emp, uid,
+            paid_at=paid_at, amount=float(amount), currency=debt.unit([row["partner"]]),
+            created_at=_saved_at(body) or datetime.now(timezone.utc).replace(tzinfo=None).isoformat())
+    except ValueError as exc:
+        raise web.HTTPConflict(text=str(exc)) from exc
+    db.audit_access(uid, "payment_record", rep)
+    return web.json_response({"ok": True, **result})
 
 
 def _save_call(uid: int, emp: str, body: dict, rep: str, row, values: dict,

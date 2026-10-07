@@ -1,6 +1,6 @@
 {
   "schema": "hardbot.data-exchange-contract.v1",
-  "version": 7,
+  "version": 8,
   "soft": {
     "provenance_marker": "_bot_call_completed",
     "event_day": "_call_day",
@@ -9,6 +9,9 @@
     "communication_date": "event_day",
     "callback_key": "soft_next_call_date",
     "overall_result_source": "soft_call_status_without_sms",
+    "payment_provenance_marker": "_bot_payment_recorded",
+    "payment_event_day": "_payment_day",
+    "payment_export": "soft_comment",
     "import_profiles": ["hard", "soft", "both"],
     "office_edit_proof": "current_delivery_and_result_echo"
   },

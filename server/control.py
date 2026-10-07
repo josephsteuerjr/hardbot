@@ -413,6 +413,9 @@ def activity(mgr: dict, team: list[str], rng: dict, *, office: str = "",
                 summary["last"] = max(summary["last"], hhmm) if summary["last"] else hhmm
                 if kind not in kinds:
                     continue
+            if kind == "receipt" and r.get("source") == "manual":
+                title = "Записана оплата"
+                detail = db.reported_payment_text(r)
             events.append({"id": f"{kind}{r['id']}", "kind": kind,
                 "at": t.isoformat(timespec="seconds"), "time": _hhmm(t),
                 "day": t.date().isoformat(), "employee": emp,

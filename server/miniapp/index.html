@@ -1245,7 +1245,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=79;
+const SHELL_VERSION=80;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1508,6 +1508,10 @@ async function flushQueue(){
           if(it.pr) Object.assign(sbody, it.pr);     // следы выезда из очереди
           r=await fetch("/api/save",{method:"POST",headers:jsonHeaders(),
             body:JSON.stringify(sbody)});
+        }else if(it.kind==="payment"){
+          r=await fetch("/api/save",{method:"POST",headers:jsonHeaders(),body:JSON.stringify({
+            kind:"payment",finish:true,rep:it.rep,op_id:it.op_id,occurred_at:it.occurred_at,
+            paid_at:it.paid_at,amount:it.amount})});
         }else if(it.kind==="marker"){
           const body={lat:it.lat,lon:it.lon,op_id:it.op_id};
           if(it.rep) body.rep=it.rep; if(it.label) body.label=it.label;
@@ -1564,7 +1568,7 @@ async function flushQueue(){
             await retireReplacedPhoto(it);
             STATE.online=true; continue;
           }
-          else if(it.kind==="save"||it.kind==="note"||it.kind==="marker"){
+          else if(it.kind==="save"||it.kind==="payment"||it.kind==="note"||it.kind==="marker"){
             // ЗАПИСЬ НЕ УДАЛЯЕМ. Раньше 4xx у save попадал в общий `else
             // ok=true`, и заполненная в поле форма исчезала БЕЗ СЛЕДА; заметки
             // и гео-метки удалялись молча ВСЕГДА — а 404 здесь штатен (договор
@@ -2836,7 +2840,33 @@ function panelForm(d,t){
 // --- Контур «Софт»: вкладка «Звонки» и форма «Звонок» ------------------------
 function softPayments(d){
   const titles=d.paymentTitles||{};
-  return `<div class="fsec"><div class="fsec-h">💳 Оплаты из реестра</div>${(d.payments||[]).map(p=>`<div class="box" style="margin:6px 0"><div class="muted">${esc(p.contract_id)}</div><div class="kv"><span class="k">${esc(titles.amount||"Сумма последнего платежа")}</span><span class="v">${esc(p.amount||"—")} ${esc(p.amount?p.unit||"":"")}</span></div><div class="kv"><span class="k">${esc(titles.date||"Дата последнего платежа")}</span><span class="v">${esc(p.date||"—")}</span></div></div>`).join("")}</div>`;
+  return `<div class="fsec"><div class="fsec-h">💳 Оплаты из реестра</div>${(d.payments||[]).map(p=>`<div class="box" style="margin:6px 0"><div class="muted">${esc(p.contract_id)}</div><div class="kv"><span class="k">Текущие платежи</span><span class="v">${esc(p.current===undefined||p.current===""?"—":p.current)} ${esc(p.unit||"")}</span></div><div class="kv"><span class="k">${esc(titles.amount||"Сумма последнего платежа")}</span><span class="v">${esc(p.amount||"—")} ${esc(p.amount?p.unit||"":"")}</span></div><div class="kv"><span class="k">${esc(titles.date||"Дата последнего платежа")}</span><span class="v">${esc(p.date||"—")}</span></div></div>`).join("")}</div>`;
+}
+function manualPaymentForm(d){
+  return `<div class="fsec"><div class="fsec-h">💳 Записать оплату</div><label class="fld">Договор</label>
+    <select id="payment_contract">${(d.contracts||[]).map(c=>`<option value="${esc(c.contract_id)}">${esc(c.contract_id)} · ${esc(c.unit||"")}</option>`).join("")}</select>
+    <label class="fld">Дата оплаты</label><input class="money" id="payment_date" type="date" max="${esc(srvToday())}">
+    <label class="fld">Сумма оплаты</label><input class="money" id="payment_amount" inputmode="decimal" placeholder="0">
+    <button class="btn line" id="payment_save" onclick="savePayment()">Сохранить оплату</button>
+    <div class="muted" style="font-size:12px;margin-top:6px">Дата и сумма попадут в комментарий Софта при обогащении Excel.</div>
+    ${(d.reported_payments||[]).slice().reverse().map(p=>`<div class="box"><div>${esc(p.paid_at)} · ${esc(Number(p.amount).toLocaleString("ru-RU",{minimumFractionDigits:2,maximumFractionDigits:2}))} ${esc(p.currency||"")}</div><div class="muted">КД ${esc(p.contract_id)} · записал ${esc(p.employee||"")}</div></div>`).join("")}</div>`;
+}
+let PAYMENT_SAVING=false;
+async function savePayment(){
+  if(PAYMENT_SAVING) return;
+  const rep=$("payment_contract").value,paid_at=$("payment_date").value;
+  const amount=$("payment_amount").value.replace(/\s/g,"").replace(",",".");
+  if(!/^\d+(\.\d{1,2})?$/.test(amount)||Number(amount)<=0||Number(amount)>1e9||!paid_at||paid_at>srvToday()){toast("Укажите дату и сумму оплаты");return;}
+  const body={kind:"payment",finish:true,rep,paid_at,amount,op_id:uuid(),occurred_at:Date.now()};
+  PAYMENT_SAVING=true;const button=$("payment_save");button.disabled=true;
+  try{
+    try{const response=await fetch("/api/save",{method:"POST",headers:jsonHeaders(),body:JSON.stringify(body)});
+      if(!response.ok){const error=new Error(await response.text());error.status=response.status;throw error;}}
+    catch(e){if(e.status&&e.status<500){toast(e.message||"Оплата не записана");return;}
+      await enqueue({...body,kind:"payment",at:body.occurred_at});$("payment_amount").value="";toast("Оплата сохранена и ждёт отправки");return;}
+    toast("Оплата записана");$("payment_amount").value="";
+    try{STATE.cur=await api("/api/person?rep="+enc(STATE.cur.rep)+"&mode=soft");drawPanel();}catch(e){}
+  }finally{PAYMENT_SAVING=false;if(button.isConnected)button.disabled=false;}
 }
 function panelCall(d,t){
   const s=d.soft||{};
@@ -2857,6 +2887,7 @@ function panelCall(d,t){
      ${s.responsible?`<div class="kv"><span class="k">${esc(t.softresp)}</span><span class="v">${esc(s.responsible)}</span></div>`:""}
    </div>
    ${softPayments(d)}
+   ${manualPaymentForm(d)}
    ${month?`<div class="box"><div class="muted" style="margin-bottom:6px">${esc(t.callmonth)}</div>
      <div style="white-space:pre-wrap;line-height:1.45">${esc(month)}</div></div>`:""}
    ${hist?`<div class="box"><div class="muted" style="margin-bottom:6px">${esc(t.callhist)}</div>
@@ -2887,6 +2918,7 @@ function panelCallForm(d,t){
    </div>
    ${promiseSection({...d,formTyped:d.softFormTyped||d.formTyped}, tf)}
    ${softPayments(d)}
+   ${manualPaymentForm(d)}
    <button class="btn acc big" id="callbtn" style="margin-top:12px" onclick="saveCall()">${ic("check")}<span>${esc(t.savecall)}</span></button>`;
 }
 async function saveCall(){

@@ -3781,6 +3781,7 @@ def receipts_for(contract_ids: list[str]) -> dict[str, list[dict]]:
         with connect() as conn:
             rows = conn.execute(
                 f"SELECT * FROM payment_evidence WHERE contract_id IN ({qs}) "
+                "AND COALESCE(source,'') <> 'manual' "
                 "ORDER BY COALESCE(created_at,''), id", chunk).fetchall()
         for r in rows:
             out.setdefault(r["contract_id"], []).append({
@@ -3791,6 +3792,74 @@ def receipts_for(contract_ids: list[str]) -> dict[str, list[dict]]:
                 "payer_note": r["payer_note"], "file": r["file"],
                 "employee": r["employee"], "created_at": r["created_at"]})
     return out
+
+
+def reported_payments_for(contract_ids: list[str] | None = None) -> dict[str, list[dict]]:
+    """Записанные сотрудником оплаты: конкретный КД, отдельно от чеков и реестра."""
+    out = {}
+    chunks = [None] if contract_ids is None else [contract_ids[i:i+400] for i in range(0,len(contract_ids),400)]
+    for ids in chunks:
+        where = "source='manual'"
+        args = []
+        if ids is not None:
+            where += " AND contract_id IN (" + ','.join('?' for _ in ids) + ")"
+            args = ids
+        with connect() as conn:
+            rows = conn.execute("SELECT * FROM payment_evidence WHERE " + where +
+                                " ORDER BY created_at, id", args).fetchall()
+        for row in rows:
+            item = dict(row)
+            item["event_day"] = _payment_event_day(item)
+            item["text"] = reported_payment_text(item)
+            out.setdefault(row["contract_id"], []).append(item)
+    return out
+
+
+def _payment_event_day(item: dict) -> str:
+    import evidence
+    ms = evidence.to_ms(item["created_at"])
+    return (datetime.fromtimestamp(ms/1000, evidence.FIELD_TZ).date().isoformat()
+            if ms is not None else str(item["created_at"] or "")[:10])
+
+
+def reported_payment_text(item: dict) -> str:
+    amount = format(float(item["amount"]), '.2f').rstrip('0').rstrip('.')
+    return (f"Оплата №{item['id']} · КД {item['contract_id']} · {item['paid_at']} · "
+            f"{amount} {item['currency'] or ''} · записал {item['employee'] or ''}").strip()
+
+
+def append_reported_payments(text, payments: list[dict]) -> str:
+    lines = str(text or '').splitlines()
+    for payment in payments:
+        if payment['text'] not in lines:
+            lines.append(payment['text'])
+    return '\n'.join(lines)
+
+
+def record_reported_payment(op: str, contract_id: str, employee: str, uid: int,
+                            *, paid_at: str, amount: float, currency: str,
+                            created_at: str) -> dict:
+    """Атомарная проверка закрепления и неизменяемая идемпотентная запись."""
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT responsible_soft FROM clients WHERE contract_id=?",
+                           (contract_id,)).fetchone()
+        if not row or row["responsible_soft"] != employee:
+            raise ValueError("Закрепление изменилось. Обновите портфель")
+        prior = conn.execute("SELECT * FROM payment_evidence WHERE op=?", (op,)).fetchone()
+        if prior:
+            if (prior["source"] != "manual" or prior["contract_id"] != contract_id
+                    or prior["telegram_id"] != uid or prior["paid_at"] != paid_at
+                    or prior["amount"] != amount):
+                raise ValueError("Идентификатор принадлежит другой записи оплаты")
+            return {"id": prior["id"], "dedup": True}
+        cur = conn.execute("INSERT INTO payment_evidence "
+            "(op,contract_id,employee,telegram_id,paid_at,amount,currency,source,created_at) "
+            "VALUES (?,?,?,?,?,?,?,'manual',?)",
+            (op,contract_id,employee,uid,paid_at,amount,currency,created_at))
+        conn.commit()
+    _bump_version()
+    return {"id": cur.lastrowid, "dedup": False}
 
 
 def add_photo_geo(contract_id: str, file: str, telegram_id: int,
@@ -6926,7 +6995,7 @@ def registry_rows(
     ``employees=None`` сохраняет прежний полный экспорт, включая строки без
     ответственного. Переданный список ограничивает выгрузку только выбранными
     сотрудниками в любом профиле. Окно дат относится к доказанным выездам
-    и звонкам; импортные даты и будущий перезвон не считаются фактом.
+    звонкам и записям оплат; импортные даты и будущий перезвон не считаются фактом.
     """
     if isinstance(employees, str):
         employees = [employees]
@@ -6943,6 +7012,7 @@ def registry_rows(
         raise ValueError("начало окна выгрузки позже окончания")
     with connect() as conn:
         rows = conn.execute("SELECT * FROM clients ORDER BY client").fetchall()
+    payments = reported_payments_for()
     result = []
     for row in rows:
         if (
@@ -6958,6 +7028,7 @@ def registry_rows(
                 (visit, row["bot_visit_at"]), (call, call_fact_day(row)))
                 if snapshot is not None and
                 (day := _as_date(str(timestamp or "")[:10])) is not None]
+            fact_days.extend(date.fromisoformat(p['event_day']) for p in payments.get(row['contract_id'], []))
             if not any((since is None or day >= since) and
                        (until is None or day <= until) for day in fact_days):
                 continue
@@ -6981,6 +7052,8 @@ def registry_rows(
                         if k not in COMMON_RESULT_KEYS or call_owns_field(row, k)})
             if call_owns_field(row, "overall_result"):
                 out["overall_result"] = call["overall_result"]
+        if row['contract_id'] in payments:
+            out['soft_comment'] = append_reported_payments(out.get('soft_comment'), payments[row['contract_id']])
         result.append(out)
     return result
 
@@ -6998,6 +7071,7 @@ def enrichment_rows() -> list[dict]:
         # Окно определяется фактом из журнала, включая legacy-снимки.
         call_days = {r[0]: r[1] for r in conn.execute(
             "SELECT contract_id, MAX(created_at) FROM calls GROUP BY contract_id")}
+    payments = reported_payments_for()
     result = []
     for raw in rows:
         row = {f.key: raw[f.key] for f in FIELDS}
@@ -7047,6 +7121,11 @@ def enrichment_rows() -> list[dict]:
         row["_common_days"]["call_status"] = row["_common_days"]["overall_result"]
         row["_common_day"] = (call_fact_day(raw) if call_is_latest(raw)
                               else str(raw["bot_visit_at"] or "")[:10])
+        reported = payments.get(raw["contract_id"], [])
+        row["_bot_payment_recorded"] = bool(reported)
+        if reported:
+            row["_payment_day"] = max(p["event_day"] for p in reported)
+            row["soft_comment"] = append_reported_payments(row.get("soft_comment"), reported)
         result.append(row)
     return result
 

@@ -8,6 +8,7 @@ import { openPanel, setHead, type Section } from "../kit/shell";
 import { DataTable } from "../kit/table";
 import { mountModeSwitchIfKit } from "../kit/modeswitch";
 import { receiptHtml, wireReceipt } from "./receipt";
+import { paymentHtml, wirePayment } from "./payment";
 
 const state = {
   persons: [] as any[],
@@ -58,7 +59,7 @@ export const softQueue: Section = {
     const queue = pending.data as { pending?: number; errors?: { rep: string; op_id: string; error: string }[] } | undefined;
     root.innerHTML = `
       ${!pending.ok ? `<div class="notice err">${esc(pending.text || "Не удалось прочитать очередь звонков")}</div>` : queue?.pending ?
-        `<div class="notice"><span class="grow">Ожидают отправки ${n(queue.pending - (queue.errors || []).length)} звонков; требуют проверки ${(queue.errors || []).length}. Отправка повторяется автоматически при появлении связи.
+        `<div class="notice"><span class="grow">Ожидают отправки ${n(queue.pending - (queue.errors || []).length)} записей; требуют проверки ${(queue.errors || []).length}. Отправка повторяется автоматически при появлении связи.
         ${(queue.errors || []).map(e => `<br>${esc(e.rep)}: ${esc(e.error)} <button class="btn small" data-pending-op="${esc(e.op_id)}">Убрать из очереди</button>`).join("")}</span></div>` : ""}
       <div class="kpis"><div class="kpi accent"><b>${n(today.length)}</b><span>звонить сегодня</span></div>
         <div class="kpi"><b>${n(state.persons.length)}</b><span>должников всего</span></div>
@@ -116,7 +117,8 @@ async function openSoftCard(rep: string) {
       </div>${d.extra_contact ? `<div class="muted" style="margin-top:8px">Дополнительные контакты и адреса</div><div style="white-space:pre-wrap">${esc(d.extra_contact)}</div>` : ''}</div>
     <details style="margin-bottom:12px"><summary>Договоры (${n((d.contracts || []).length)})</summary>${(d.contracts || []).map((c: any) => `<div class="list-row"><span class="mono">${esc(c.contract_id)}</span><span>${esc(c.partner || '')}</span><span>${esc(money(c.total))} ${esc(c.unit || '')}</span></div>`).join('')}</details>
     <div class="section"><div class="section-head"><h3 class="section-title">💳 Оплаты из реестра</h3></div>
-      ${(d.payments || []).map((p: any) => `<div class="list-row"><div class="grow"><div class="nm mono">${esc(p.contract_id)}</div><div class="sub">${esc(d.paymentTitles?.date || 'Дата последнего платежа')}: ${esc(p.date || '—')}</div></div><div><span class="muted">${esc(d.paymentTitles?.amount || 'Сумма последнего платежа')}</span><br>${esc(p.amount ? money(p.amount) + ' ' + (p.unit || '') : '—')}</div></div>`).join('')}</div>
+      ${(d.payments || []).map((p: any) => `<div class="list-row"><div class="grow"><div class="nm mono">${esc(p.contract_id)}</div><div class="sub">Текущие платежи: ${esc(p.current === '' || p.current == null ? '—' : Number(p.current).toLocaleString('ru-RU')+' '+(p.unit || ''))}<br>${esc(d.paymentTitles?.date || 'Дата последнего платежа')}: ${esc(p.date || '—')}</div></div><div><span class="muted">${esc(d.paymentTitles?.amount || 'Сумма последнего платежа')}</span><br>${esc(p.amount ? money(p.amount) + ' ' + (p.unit || '') : '—')}</div></div>`).join('')}</div>
+    ${paymentHtml(d)}
     <div class="section"><div class="section-head"><h3 class="section-title">Записать звонок</h3></div>
       <label class="muted" style="font-size:13px">Статус</label>
       <select class="input" id="c-status" style="width:100%">${options}</select>
@@ -145,6 +147,7 @@ async function openSoftCard(rep: string) {
     toast("Номер скопирован");
   }));
   wireReceipt(panel, rep, d, () => { void openSoftCard(rep); });
+  wirePayment(panel, () => { void openSoftCard(rep); });
   const touched = new Set<string>();
   const inputs = [["c-comment", "soft_comment"], ["c-date", "soft_next_call_date"], ["c-pdate", "promise_date"], ["c-psum", "forecast_sum"]] as const;
   for (const [id, key] of inputs) panel.querySelector(`#${id}`)?.addEventListener("input", () => touched.add(key));

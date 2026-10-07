@@ -665,12 +665,13 @@ def soft_anchor(row: dict):
 
 
 def is_soft_filled(row: dict) -> bool:
-    """Звонок софтника: статус звонка есть, якорь разбираем.
+    """Результат Софта: доказанный звонок или запись оплаты с днём факта.
 
     Снимка визита у софт-кейса нет и не будет — доказательство здесь другое:
     живая колонка месяца + окно по дню звонка + реестр доставленного."""
-    return (row.get("_bot_call_completed") is True and
-            cell_text(row.get("soft_call_status")) != "" and soft_anchor(row) is not None)
+    return ((row.get("_bot_call_completed") is True and
+             cell_text(row.get("soft_call_status")) != "" and soft_anchor(row) is not None)
+            or (row.get("_bot_payment_recorded") is True and parse_date(row.get("_payment_day")) is not None))
 
 
 # Что развозим по софт-книгам: колонки звонка + общие обещание/прогноз.
@@ -977,7 +978,11 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
             "hard" if "visit_date" in col_map and "soft_call_status" not in col_map else "both")
         anchors = {}
         for key in VISIT_KEYS:
-            if key in ("promise_date", "forecast_sum", "forecast", "call_status"):
+            if key == "soft_comment" and profile != "hard":
+                dates = [d for d in (call_day, parse_date(srv.get("_payment_day"))
+                         if srv.get("_bot_payment_recorded") is True else None) if d is not None]
+                anchor = max(dates) if dates else None
+            elif key in ("promise_date", "forecast_sum", "forecast", "call_status"):
                 anchor = parse_date((srv.get("_common_days") or {}).get(key)) or common_day
             elif key in SOFT_CASE_KEYS:
                 anchor = call_day if profile != "hard" else None

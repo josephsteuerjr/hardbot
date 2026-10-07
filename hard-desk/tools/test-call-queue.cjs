@@ -100,6 +100,19 @@ function load(name) {
   assert.equal((await net.enrollField('https://synthetic.invalid/i/another-link')).ok,false);
   assert.equal(store.readFieldToken(),'new-same-principal-token');
   assert.equal(store.readCallQueue().entries.length,1);
+  store.clearCallQueue();
+  const payment = {rep:'SYNTHETIC-2',kind:'payment',finish:true,op_id:'manual-payment-one',
+    occurred_at:1780000000123,amount:'1500.50',paid_at:'2026-05-20'};
+  network='offline';
+  assert.equal((await net.callField('POST','/api/save',undefined,payment)).data.queued,true);
+  net=load('net');
+  assert.deepEqual(JSON.parse(JSON.stringify(store.readCallQueue().entries[0].body)),payment);
+  network='online';await net.flushCallQueue();await net.flushCallQueue();
+  assert.equal(store.readCallQueue().entries.length,0);
+  assert.equal(sent.filter(x=>x.op_id===payment.op_id).length,1);
+  network='404';
+  assert.equal((await net.callField('POST','/api/save',undefined,{...payment,op_id:'payment-reassigned'})).ok,false);
+  assert.ok(store.readCallQueue().entries[0].error);
   console.log('Call queue: offline, restart, idempotence, concurrent saves, transient errors, rejection and identity checks passed');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
   const resolved = fs.realpathSync(temp);
