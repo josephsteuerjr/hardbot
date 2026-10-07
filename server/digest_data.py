@@ -662,13 +662,15 @@ def person_data(mgr: dict, on_date: str, employee: str, rep: str,
         data = _person_payload(p, on_date)
         row = db.get_client(rep)
         common = db.common_result(row)
+        soft = db.bot_call_snapshot(row) or {}
         data.update(profile="soft", outcome=row["soft_call_status"] or "", evidence={},
                     fill_text="", geo=None, learned_point=False, shots=[], photos=0, tips="",
                     dates={"promise_date": common.get("promise_date"), "visit_date": None, "reminder_date": None, "meeting_date": None},
                     comment=row["soft_comment"] or "",
                     comment_display="\n".join(comment_view.newest_first(row["soft_comment"])), visit=[
-                        {"key": key, "title": db.BY_KEY[key].title, "value": common.get(key, row[key])}
-                        for key in ("soft_call_status", "soft_comm_date", "promise_date", "forecast_sum", "forecast")],
+                        {"key": key, "title": db.BY_KEY[key].title if key in db.BY_KEY else "Когда звонить снова",
+                         "value": common.get(key, soft.get(key, row[key]))}
+                        for key in ("soft_call_status", "soft_comm_date", "soft_next_call_date", "overall_result", "promise_date", "forecast_sum", "forecast")],
                     calls=[{"day": r["created_at"], "payload": r["payload"]}
                            for r in db.calls_for_person(rep) if r["employee"] == employee])
         return data

@@ -1245,7 +1245,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=78;
+const SHELL_VERSION=79;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -2834,6 +2834,10 @@ function panelForm(d,t){
 }
 
 // --- Контур «Софт»: вкладка «Звонки» и форма «Звонок» ------------------------
+function softPayments(d){
+  const titles=d.paymentTitles||{};
+  return `<div class="fsec"><div class="fsec-h">💳 Оплаты из реестра</div>${(d.payments||[]).map(p=>`<div class="box" style="margin:6px 0"><div class="muted">${esc(p.contract_id)}</div><div class="kv"><span class="k">${esc(titles.amount||"Сумма последнего платежа")}</span><span class="v">${esc(p.amount||"—")} ${esc(p.amount?p.unit||"":"")}</span></div><div class="kv"><span class="k">${esc(titles.date||"Дата последнего платежа")}</span><span class="v">${esc(p.date||"—")}</span></div></div>`).join("")}</div>`;
+}
 function panelCall(d,t){
   const s=d.soft||{};
   const rows=(d.calls||[]).map(c=>`<div class="kv" style="align-items:flex-start">
@@ -2848,9 +2852,11 @@ function panelCall(d,t){
    </div>
    <div class="box" style="margin-top:10px">
      <div class="kv"><span class="k">${esc(t.status)}</span><span class="v">${esc(s.status||"—")}</span></div>
-     <div class="kv"><span class="k">${esc(t.commdate)}</span><span class="v">${esc(s.comm_date||"—")}</span></div>
+     <div class="kv"><span class="k">Дата коммуникации</span><span class="v">${esc(s.comm_date||"—")}</span></div>
+     <div class="kv"><span class="k">${esc(t.commdate)}</span><span class="v">${esc(s.next_call_date||"—")}</span></div>
      ${s.responsible?`<div class="kv"><span class="k">${esc(t.softresp)}</span><span class="v">${esc(s.responsible)}</span></div>`:""}
    </div>
+   ${softPayments(d)}
    ${month?`<div class="box"><div class="muted" style="margin-bottom:6px">${esc(t.callmonth)}</div>
      <div style="white-space:pre-wrap;line-height:1.45">${esc(month)}</div></div>`:""}
    ${hist?`<div class="box"><div class="muted" style="margin-bottom:6px">${esc(t.callhist)}</div>
@@ -2864,7 +2870,7 @@ function panelCallForm(d,t){
   const dd=((STATE.meta||{}).dropdowns||{}).soft_call_status||[];
   const cur=s.status||"";
   const opts=`<option value="">—</option>`+dd.map(o=>`<option value="${esc(o.value)}"${o.value===cur?" selected":""}>${esc(o.label)}</option>`).join("");
-  const tf=typedFields().filter(f=>f.key!=="soft_comm_date");
+  const tf=typedFields().filter(f=>!["soft_comm_date","soft_next_call_date"].includes(f.key));
   return `
    <div class="fsec key"><div class="fsec-h">📞</div>
      <label class="fld">${esc(t.status)}</label>
@@ -2874,12 +2880,13 @@ function panelCallForm(d,t){
      <textarea id="f_soft_comment" maxlength="4000"></textarea>
    </div>
    <div class="fsec"><div class="fsec-h">⏰ ${esc(t.commdate)}</div>
-     <input type="hidden" data-k="soft_comm_date" value="${esc(s.comm_date||"")}">
-     <button type="button" class="pick${s.comm_date?" has":""}" data-for="soft_comm_date"
-       onclick="openDateWheel('soft_comm_date')">${esc(s.comm_date||"—")}</button>
-     <div class="muted" style="font-size:11px;margin-top:4px">пусто — в реестре дата не изменится</div>
+     <input type="hidden" data-k="soft_next_call_date" value="${esc(s.next_call_date||"")}">
+     <button type="button" class="pick${s.next_call_date?" has":""}" data-for="soft_next_call_date"
+       onclick="openDateWheel('soft_next_call_date')">${esc(s.next_call_date||"—")}</button>
+     <div class="muted" style="font-size:11px;margin-top:4px">Дата коммуникации сохраняется автоматически по дню звонка.</div>
    </div>
    ${promiseSection({...d,formTyped:d.softFormTyped||d.formTyped}, tf)}
+   ${softPayments(d)}
    <button class="btn acc big" id="callbtn" style="margin-top:12px" onclick="saveCall()">${ic("check")}<span>${esc(t.savecall)}</span></button>`;
 }
 async function saveCall(){
@@ -2893,13 +2900,13 @@ async function saveCall(){
   if(cm&&cm.value.trim()){ values.soft_comment=cm.value.trim(); input_keys.push("soft_comment"); }
   document.querySelectorAll('#panel input[data-k]').forEach(el=>{
     const k=el.dataset.k;
-    if(["soft_comm_date","promise_date","forecast_sum"].indexOf(k)<0) return;
+    if(["soft_next_call_date","promise_date","forecast_sum"].indexOf(k)<0) return;
     const v=(el.type==="hidden")?el.value:el.value.replace(/\s+/g,"");
     if(v){ values[k]=(el.type==="hidden")?v:v; input_keys.push(k); }
   });
   // «Убрать» обещания/даты — полноценный ответ: без cleared_keys сервер
   // не узнает, что должник передумал, и старое обещание переживёт звонок.
-  const clearedNow=[...FORM_CLEARED].filter(k=>["promise_date","forecast_sum","soft_comm_date"].indexOf(k)>=0);
+  const clearedNow=[...FORM_CLEARED].filter(k=>["promise_date","forecast_sum","soft_next_call_date"].indexOf(k)>=0);
   SAVING=true; const btn=$("callbtn"); if(btn) btn.disabled=true;
   try{
     const rep=STATE.cur.rep, op_id=uuid(), occurred_at=Date.now();
@@ -2955,7 +2962,7 @@ function promiseMaxDate(){
 }
 function promiseSection(d, fields){
   // В форме ВИЗИТА софт-дата не показывается; форма «Звонок» передаёт свой набор.
-  const tf2=fields||typedFields().filter(f=>f.key!=="soft_comm_date");
+  const tf2=fields||typedFields().filter(f=>!["soft_comm_date","soft_next_call_date"].includes(f.key));
   if(!tf2.length) return "";
   const cur=(d&&d.formTyped)||{};
   const reg=(d&&d.formTypedRegistry)||{};

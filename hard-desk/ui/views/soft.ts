@@ -1,5 +1,5 @@
 // «Софт» — приложение софтника (колл-центр) на ПК. Замена личной книги Excel:
-// очередь «кому звонить сегодня» (просроченная дата коммуникации, без статуса),
+// очередь «кому звонить сегодня» (просроченный перезвон, без статуса),
 // карточка с телефонами и историей звонков, фиксация звонка одним экраном.
 // Гео, фото и подтверждение выезда — свойства поля, здесь их нет намеренно.
 import { api, hard } from "../kit/api";
@@ -115,6 +115,8 @@ async function openSoftCard(rep: string) {
           <div class="sub">контакт из реестра</div></div><button class="btn small" data-copy-phone="${index}">Копировать</button></div>`).join("") || '<div class="muted">телефона в основных колонках нет</div>'}
       </div>${d.extra_contact ? `<div class="muted" style="margin-top:8px">Дополнительные контакты и адреса</div><div style="white-space:pre-wrap">${esc(d.extra_contact)}</div>` : ''}</div>
     <details style="margin-bottom:12px"><summary>Договоры (${n((d.contracts || []).length)})</summary>${(d.contracts || []).map((c: any) => `<div class="list-row"><span class="mono">${esc(c.contract_id)}</span><span>${esc(c.partner || '')}</span><span>${esc(money(c.total))} ${esc(c.unit || '')}</span></div>`).join('')}</details>
+    <div class="section"><div class="section-head"><h3 class="section-title">💳 Оплаты из реестра</h3></div>
+      ${(d.payments || []).map((p: any) => `<div class="list-row"><div class="grow"><div class="nm mono">${esc(p.contract_id)}</div><div class="sub">${esc(d.paymentTitles?.date || 'Дата последнего платежа')}: ${esc(p.date || '—')}</div></div><div><span class="muted">${esc(d.paymentTitles?.amount || 'Сумма последнего платежа')}</span><br>${esc(p.amount ? money(p.amount) + ' ' + (p.unit || '') : '—')}</div></div>`).join('')}</div>
     <div class="section"><div class="section-head"><h3 class="section-title">Записать звонок</h3></div>
       <label class="muted" style="font-size:13px">Статус</label>
       <select class="input" id="c-status" style="width:100%">${options}</select>
@@ -123,14 +125,14 @@ async function openSoftCard(rep: string) {
       <textarea class="input" id="c-comment" maxlength="4000" placeholder="Что выяснили при этом звонке" style="width:100%;min-height:70px"></textarea>
       <div class="row" style="margin-top:8px">
         <div><label class="muted" style="font-size:13px;display:block">Позвонить снова</label>
-          <input class="input" id="c-date" type="date" value="${esc(String(s.comm_date || "").slice(0, 10))}" style="max-width:160px"></div>
+          <input class="input" id="c-date" type="date" value="${esc(String(s.next_call_date || "").slice(0, 10))}" style="max-width:160px"></div>
         <div><label class="muted" style="font-size:13px;display:block">Обещание: дата</label>
           <input class="input" id="c-pdate" type="date" value="${esc(d.softFormTyped?.promise_date || '')}" style="max-width:160px"></div>
         <div><label class="muted" style="font-size:13px;display:block">сумма</label>
           <input class="input" id="c-psum" inputmode="decimal" value="${esc(d.softFormTyped?.forecast_sum || '')}" placeholder="0" style="max-width:120px"></div>
       </div>
       <button class="btn primary" id="c-save" style="margin-top:10px">Сохранить звонок</button>
-      <p class="muted" style="font-size:12.5px">«Общий результат» звонок не меняет — его ведёт офис. Обещание и прогноз считаются теми же правилами, что и на выезде.</p></div>
+      <p class="muted" style="font-size:12.5px">Дата коммуникации записывается по дню звонка, перезвон — отдельно. «Общий результат» обновляется по статусу звонка.</p></div>
     <div class="section"><div class="section-head"><h3 class="section-title">Журнал звонков</h3></div>
       ${s.history ? `<div class="muted" style="margin-bottom:6px">Историчный комментарий (Софт):</div>
         <div style="white-space:pre-wrap">${esc(s.history)}</div><hr>` : ""}
@@ -144,7 +146,7 @@ async function openSoftCard(rep: string) {
   }));
   wireReceipt(panel, rep, d, () => { void openSoftCard(rep); });
   const touched = new Set<string>();
-  const inputs = [["c-comment", "soft_comment"], ["c-date", "soft_comm_date"], ["c-pdate", "promise_date"], ["c-psum", "forecast_sum"]] as const;
+  const inputs = [["c-comment", "soft_comment"], ["c-date", "soft_next_call_date"], ["c-pdate", "promise_date"], ["c-psum", "forecast_sum"]] as const;
   for (const [id, key] of inputs) panel.querySelector(`#${id}`)?.addEventListener("input", () => touched.add(key));
   panel.querySelector("#c-save")?.addEventListener("click", async () => {
     const status = (panel.querySelector("#c-status") as HTMLSelectElement).value;
@@ -153,7 +155,7 @@ async function openSoftCard(rep: string) {
     const comment = (panel.querySelector("#c-comment") as HTMLTextAreaElement).value.trim();
     if (comment) values.soft_comment = comment;
     const cdate = (panel.querySelector("#c-date") as HTMLInputElement).value;
-    if (touched.has("soft_comm_date")) values.soft_comm_date = cdate;
+    if (touched.has("soft_next_call_date")) values.soft_next_call_date = cdate;
     const pdate = (panel.querySelector("#c-pdate") as HTMLInputElement).value;
     if (touched.has("promise_date")) values.promise_date = pdate;
     const psum = ((panel.querySelector("#c-psum") as HTMLInputElement).value || "").replace(/\s/g, "").replace(",", ".");

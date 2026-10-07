@@ -22,6 +22,7 @@ class ExchangeContractError(RuntimeError):
 
 CONTRACT_PATH = Path(__file__).with_name("data_exchange_contract.json")
 _SUPPORTED_RAW_SHA256 = {
+    7: "7b8baef118be6d49b3a8e51108c08950f7b4089a75f501fda524069988d259ad",
     6: "9de2c3a20a9c8ab165f8f2149a10cec60b4c4c81741142b049d22edffd445600",
     1: "6a6f06af70dff45ea9b4fde2fa2f23b2fef03fd658bcaca56ab6cc6513eb60b9",
     2: "d6f2a8c46f8d490eca7c715fe9e4561201f6cb7053a89aceabcf49ed9548b7c7",
@@ -80,7 +81,7 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
             "enrichment",
             "office_overlay",
             "imports",
-        } | ({"soft"} if isinstance(payload, dict) and payload.get("version", 0) == 6 else set()),
+        } | ({"soft"} if isinstance(payload, dict) and payload.get("version", 0) >= 6 else set()),
         label="contract",
     )
     if root["schema"] != "hardbot.data-exchange-contract.v1":
@@ -94,15 +95,19 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
             "exchange contract bytes are not approved for this version; "
             "bump/review the version and update the supported SHA"
         )
-    if version == 6:
-        soft = _exact_dict(root["soft"], {"provenance_marker", "event_day", "responsible_key",
-                           "result_keys", "import_profiles", "office_edit_proof"}, label="soft")
-        if soft != {"provenance_marker": "_bot_call_completed", "event_day": "_call_day",
+    if version >= 6:
+        expected_soft = {"provenance_marker": "_bot_call_completed", "event_day": "_call_day",
                     "responsible_key": "responsible_soft",
                     "result_keys": ["soft_call_status", "soft_comm_date", "soft_comment",
                                     "promise_date", "forecast_sum", "forecast"],
                     "import_profiles": ["hard", "soft", "both"],
-                    "office_edit_proof": "current_delivery_and_result_echo"}:
+                    "office_edit_proof": "current_delivery_and_result_echo"}
+        if version == 7:
+            expected_soft["result_keys"] += ["overall_result", "soft_next_call_date"]
+            expected_soft.update(communication_date="event_day", callback_key="soft_next_call_date",
+                                 overall_result_source="soft_call_status_without_sms")
+        soft = _exact_dict(root["soft"], set(expected_soft), label="soft")
+        if soft != expected_soft:
             raise ExchangeContractError("unsupported soft exchange semantics")
 
     artifacts = _exact_dict(

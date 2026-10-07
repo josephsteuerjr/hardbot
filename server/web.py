@@ -148,7 +148,7 @@ FORM_DATES = list(FORM_DATE_KEYS)
 SOFT_FORM_KEYS = frozenset(
     k for k in (*FORM_DROPDOWNS, *FORM_TEXT, *FORM_AMOUNTS, *FORM_DATES)
     if k in BY_KEY and BY_KEY[k].source == SOFT
-)
+) | {"soft_next_call_date"}
 FORM_DROPDOWNS_VISIT = tuple(
     k for k in FORM_DROPDOWNS if k not in SOFT_FORM_KEYS
 )
@@ -436,6 +436,8 @@ def _require_field_write(uid: int) -> None:
 
 # --- Формовка данных --------------------------------------------------------
 def _form_field_title(key: str, lang: str) -> str:
+    if key == "soft_next_call_date":
+        return {"uz": "Qayta qo‘ng‘iroq sanasi", "tg": "Санаи занги навбатӣ"}.get(lang, "Когда звонить снова")
     d = FORM_FIELD_TITLES.get(key) or {}
     return d.get(lang) or d.get("ru") or _title(key, lang)
 
@@ -595,6 +597,8 @@ def _person_full_from_rows(rows, rep: str, lang: str,
         "contract_id": r["contract_id"], "partner": r["partner"],
         "unit": debt.unit([r["partner"]] if r["partner"] else []),
         "total": debt.contract_debt(r),
+        "last_payment_sum": r["last_payment_sum"] or "",
+        "last_payment_date": r["last_payment_date"] or "",
         "debt": [{"key": k, "title": _title(k, lang), "value": v}
                  for k, v in debt.breakdown(r)],
     } for r in rows]
@@ -658,6 +662,12 @@ def _person_full_from_rows(rows, rep: str, lang: str,
         "totals": debt.totals_by_unit(rows),
         "photos": sum(r["photos_count"] or 0 for r in rows),
         "contracts": contracts, "info": info, "promise": promise,
+        "payments": [{"contract_id": r["contract_id"],
+                      "unit": debt.unit([r["partner"]] if r["partner"] else []),
+                      "amount": r["last_payment_sum"] or "",
+                      "date": r["last_payment_date"] or ""} for r in rows],
+        "paymentTitles": {"amount": _title("last_payment_sum", lang),
+                          "date": _title("last_payment_date", lang)},
         "form": form,
         "formTyped": form_typed,
         "softFormTyped": {k: latest_common.get(k, "") for k in (*FORM_DATES, *FORM_AMOUNTS)},
@@ -690,7 +700,9 @@ def _person_full_from_rows(rows, rep: str, lang: str,
         # (кто звонил и что обещали — полезно и на адресе).
         "soft": {
             "status": _row_get(rows, "soft_call_status") or "",
-            "comm_date": _row_get(rows, "soft_comm_date") or "",
+            "comm_date": _soft_value(rows, "soft_comm_date"),
+            "next_call_date": _soft_value(rows, "soft_next_call_date"),
+            "overall_result": latest_common.get("overall_result") or _row_get(rows, "overall_result") or "",
             "comment": _row_get(rows, "soft_comment") or "",
             "comment_entries": comment_view.newest_first(_row_get(rows, "soft_comment")),
             "history": _row_get(rows, "soft_history") or "",
@@ -708,6 +720,14 @@ def _person_full_from_rows(rows, rep: str, lang: str,
             for c in (db.calls_for_person(rep) if history is None else history["calls"])
         ],
     }
+
+
+def _soft_value(rows, key):
+    for row in rows:
+        snapshot = db.bot_call_snapshot(row)
+        if snapshot is not None and key in snapshot:
+            return snapshot[key] or ""
+    return _row_get(rows, key) or ""
 
 
 def _person_extra(rows, extras: dict[str, list[dict]] | None) -> list[dict]:
@@ -935,12 +955,12 @@ async def _bootstrap(request: web.Request) -> web.Response:
         grouped = db.persons_for_employee(emp)
     persons = [_person_brief(p) for p in grouped]
     if soft_mode:
-        # Очередь звонков: просроченная дата коммуникации наверх, затем
+        # Очередь звонков: просроченная дата перезвона наверх, затем
         # договоры без статуса, дальше по долгу. Приоритет выезда здесь не
         # применим — он про адреса, а софтник работает телефоном.
         for pb, p in zip(persons, grouped):
             status = _row_get(p["contracts"], "soft_call_status")
-            comm = _row_get(p["contracts"], "soft_comm_date")
+            comm = _soft_value(p["contracts"], "soft_next_call_date")
             pb["sc"] = status or ""
             pb["scd"] = comm or ""
             pb["overdue"] = 0
@@ -1663,6 +1683,12 @@ async def _save(request: web.Request) -> web.Response:
     # легаси-ключом), визит — софт-колонки. Иначе чужая форма протаскивала бы
     # результат визита через kind:"call" и наоборот.
     if kind == "call":
+        # Старые PWA/ПК и их durable-очереди присылают перезвон прежним
+        # именем. Дата коммуникации теперь вычисляется из времени события.
+        if "soft_comm_date" in raw_values:
+            raw_values.setdefault("soft_next_call_date", raw_values.pop("soft_comm_date"))
+        if "soft_comm_date" in (body.get("cleared_keys") or []):
+            body["cleared_keys"] = list(set(body["cleared_keys"]) | {"soft_next_call_date"})
         # soft_comment — маркер «сх» (колонку ведёт месячный цикл), но в форме
         # звонка поле живёт: его пишет софтник, серверу оно известно текстом.
         soft_allowed = SOFT_FORM_KEYS | {"soft_comment"} | set(FORM_AMOUNTS) | set(FORM_DATES)
@@ -1939,8 +1965,8 @@ def _save_call(uid: int, emp: str, body: dict, rep: str, row, values: dict,
 
     Правила те же, что у выезда: обязательный статус, окно обещания,
     вывод «Прогноза». Отличия: статус звонка софт вместо результата визита,
-    «Общий результат» звонок НЕ трогает (его ведёт офис), дата коммуникации —
-    это дата следующего звонка, а не отметка о прошлом."""
+    общий результат выводится из статуса, дата коммуникации — день события,
+    дата перезвона хранится отдельно. Старые очереди принимаются совместимо."""
     if "append_comment" in body and type(body["append_comment"]) is not bool:
         raise web.HTTPBadRequest(text="append_comment")
     if finish and "soft_call_status" not in values:

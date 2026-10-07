@@ -392,8 +392,11 @@ def activity(mgr: dict, team: list[str], rng: dict, *, office: str = "",
                 status = str(values.get("soft_call_status") or "")
                 title = "Звонок" + (": " + status if status else "")
                 detail = str(values.get("soft_comment") or r.get("payload") or "")
-                if values.get("soft_comm_date"):
-                    detail += " · следующий контакт: " + str(values["soft_comm_date"])
+                callback = values.get("soft_next_call_date")
+                if "overall_result" not in values:  # журнал v6: прежнее имя перезвона
+                    callback = values.get("soft_comm_date")
+                if callback:
+                    detail += " · следующий контакт: " + str(callback)
                 received = _local_dt(r.get("received_at"))
                 if received and received.date() > db._as_date(r["created_at"]):
                     flags.append("late")

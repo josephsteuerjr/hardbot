@@ -2,7 +2,7 @@
 
 Звонок — зеркало визита без гео: та же идемпотентность op_id, тот же канон
 обещания, тот же «Прогноз». Отличия проверяются здесь явно: владение по второй
-колонке ответственности, «Общий результат» звонком не трогается, форма визита
+колонке ответственности, «Общий результат» отражает звонок, форма визита
 не знает софт-полей, а форма звонка не требует результата визита.
 """
 import asyncio
@@ -89,11 +89,11 @@ def test_call_save_writes_columns_and_journal(tmp_path, monkeypatch):
     row = db.get_client(CID)
     assert row["soft_call_status"] == "Обещает оплатить"
     assert row["soft_comment"] == "обещал к пятнице"
-    assert row["soft_comm_date"] == when
+    assert row["soft_comm_date"] == db.workday.today().isoformat()
+    assert row["soft_next_call_date"] == when
     assert row["promise_date"] == when
     assert row["forecast"] == "Ждём"           # тот же вывод, что у визита
-    # «Общий результат» звонок НЕ трогает — его ведёт офис.
-    assert not (row["overall_result"] or "")
+    assert row["overall_result"] == "Обещает оплатить"
     calls = db.calls_for_person(CID)
     assert len(calls) == 1
     assert calls[0]["employee"] == EMP_SOFT
@@ -155,7 +155,7 @@ def test_visit_form_has_no_soft_fields():
     assert "soft_call_status" in web.FORM_DROPDOWNS
     # soft_comment — маркер «сх» реестра (месячная колонка офиса), но в форме
     # звонка поле живёт и принимается сервером (FORM_TEXT).
-    assert web.SOFT_FORM_KEYS == frozenset({"soft_call_status", "soft_comm_date"})
+    assert web.SOFT_FORM_KEYS == frozenset({"soft_call_status", "soft_comm_date", "soft_next_call_date"})
     assert "soft_comment" in web.FORM_TEXT
 
 
@@ -181,6 +181,7 @@ def test_bootstrap_soft_mode_queue(tmp_path, monkeypatch):
         {"contract_id": "CALL-2", "client": "Без статуса", "responsible": EMP_HARD,
          "responsible_soft": EMP_SOFT, "debt_total": "2000"},
     ])
+    db.update_fields("CALL-1", {"soft_next_call_date": "2026-01-01"})
     from datetime import date as _d
     monkeypatch.setattr(web, "_uid", lambda _r: 4242)
     monkeypatch.setattr(web, "_employee", lambda uid, _r: EMP_SOFT)

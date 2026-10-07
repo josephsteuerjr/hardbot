@@ -81,12 +81,13 @@ def test_conflict_decisions_belong_to_one_book():
     assert enrich.decisions_for_book(decisions, "u:/soft.xlsb") == {("A", "forecast_sum"): "file"}
 
 
-def test_cleared_callback_date_reaches_soft_book_but_office_edit_is_protected(world, monkeypatch):
+def test_cleared_callback_preserves_fact_date_and_office_edit_is_protected(world, monkeypatch):
     future = (date.today() + timedelta(days=3)).isoformat()
     call(monkeypatch, "initial-date", values={"soft_comm_date": future})
     call(monkeypatch, "clear-date", values={"soft_comm_date": ""}, cleared_keys=["soft_comm_date"])
     exported = next(r for r in db.enrichment_rows() if r["contract_id"] == "A")
-    assert "soft_comm_date" in exported["_enrichment_clear_keys"]
+    assert exported["soft_next_call_date"] == ""
+    assert exported["soft_comm_date"] == db.workday.today().isoformat()
     schema = db.export_schema()
     soft_keys = {"contract_id", "extra_address", "soft_call_status", "soft_comm_date", "soft_comment", "promise_date", "forecast_sum", "forecast"}
     cols = [f for f in schema if f["key"] in soft_keys]
@@ -95,7 +96,7 @@ def test_cleared_callback_date_reaches_soft_book_but_office_edit_is_protected(wo
     ledger = {"A": {"soft_comm_date": {"value": future}}}
     plan = enrich.build_plan(book, schema, [{**exported, "_profile": "soft"}], ledger=ledger)
     index = next(i for i,f in enumerate(cols) if f["key"] == "soft_comm_date")
-    assert (2, index, "", True) in plan["writes"]
+    assert (2, index, db.workday.today(), True) in plan["writes"]
     book[2][index] = (date.today() + timedelta(days=5)).isoformat()
     plan = enrich.build_plan(book, schema, [{**exported, "_profile": "soft"}], ledger=ledger)
     assert any(c["key"] == "soft_comm_date" and c["kind"] == "both_changed" for c in plan["conflicts"])

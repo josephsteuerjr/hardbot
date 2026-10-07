@@ -977,7 +977,7 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
             "hard" if "visit_date" in col_map and "soft_call_status" not in col_map else "both")
         anchors = {}
         for key in VISIT_KEYS:
-            if key in ("promise_date", "forecast_sum", "forecast"):
+            if key in ("promise_date", "forecast_sum", "forecast", "call_status"):
                 anchor = parse_date((srv.get("_common_days") or {}).get(key)) or common_day
             elif key in SOFT_CASE_KEYS:
                 anchor = call_day if profile != "hard" else None

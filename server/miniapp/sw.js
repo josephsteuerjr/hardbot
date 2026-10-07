@@ -14,7 +14,7 @@
  * после этого не нужно: открытие по сети кладёт оболочку обратно (network-first ниже),
  * свои ассеты — при первом запросе (caches.open создаёт кэш заново).
  */
-const CACHE = "hard-shell-v78";
+const CACHE = "hard-shell-v79";
 const PRECACHE = [
   "/",
   "/vendor/telegram-web-app.js",

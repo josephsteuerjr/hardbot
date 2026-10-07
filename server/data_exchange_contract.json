@@ -1,11 +1,14 @@
 {
   "schema": "hardbot.data-exchange-contract.v1",
-  "version": 6,
+  "version": 7,
   "soft": {
     "provenance_marker": "_bot_call_completed",
     "event_day": "_call_day",
     "responsible_key": "responsible_soft",
-    "result_keys": ["soft_call_status", "soft_comm_date", "soft_comment", "promise_date", "forecast_sum", "forecast"],
+    "result_keys": ["soft_call_status", "soft_comm_date", "soft_comment", "promise_date", "forecast_sum", "forecast", "overall_result", "soft_next_call_date"],
+    "communication_date": "event_day",
+    "callback_key": "soft_next_call_date",
+    "overall_result_source": "soft_call_status_without_sms",
     "import_profiles": ["hard", "soft", "both"],
     "office_edit_proof": "current_delivery_and_result_echo"
   },
@@ -36,7 +39,8 @@
     ],
     "date_keys": [
       "promise_date",
-      "soft_comm_date"
+      "soft_comm_date",
+      "soft_next_call_date"
     ]
   },
   "workbook_shape": {
@@ -166,7 +170,8 @@
     "live_state_keys": [
       "soft_call_status",
       "soft_comm_date",
-      "soft_comment"
+      "soft_comment",
+      "soft_next_call_date"
     ]
   },
   "enrichment": {

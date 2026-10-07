@@ -188,11 +188,18 @@ BOOKKEEPING = [
     ("call_office_data", "TEXT"),
     ("call_value_log", "TEXT"),
     ("bot_visit_event_at", "TEXT"),
+    ("soft_next_call_date", "TEXT"),
 ]
 
 SOFT_SNAPSHOT_KEYS = ("soft_call_status", "soft_comm_date", "soft_comment",
-                      "promise_date", "forecast_sum", "forecast")
-COMMON_RESULT_KEYS = ("promise_date", "forecast_sum", "forecast")
+                      "promise_date", "forecast_sum", "forecast", "overall_result",
+                      "soft_next_call_date")
+COMMON_RESULT_KEYS = ("promise_date", "forecast_sum", "forecast", "overall_result")
+
+
+def soft_overall_result(status: str) -> str:
+    result = str(status or "").removesuffix(" sms")
+    return result if result in (BY_KEY["overall_result"].options or []) else ""
 
 
 def _call_value_log(row) -> dict:
@@ -221,10 +228,17 @@ def bot_call_snapshot(row) -> dict | None:
         if data.get("soft_call_status") not in (BY_KEY["soft_call_status"].options or []):
             return None
         result = {k: data[k] for k in SOFT_SNAPSHOT_KEYS if k in data}
+        # v6 записывал в коммуникацию будущий перезвон. История неизменна;
+        # чтение старого снимка разделяет дату факта и прежний план.
+        if data.get("_communication_semantics") != "event_day":
+            result["soft_next_call_date"] = data.get("soft_comm_date", "")
+            result["soft_comm_date"] = call_fact_day(row)
         office = json.loads(row["call_office_data"] or "{}")
         if office.get("event_at") == row["bot_call_at"]:
             result.update({k: v for k, v in office.get("fields", {}).items()
-                           if k in SOFT_SNAPSHOT_KEYS})
+                           if k in SOFT_SNAPSHOT_KEYS and
+                           (k != "soft_comm_date" or data.get("_communication_semantics") == "event_day")})
+        result.setdefault("overall_result", soft_overall_result(result["soft_call_status"]))
         return result
     except (KeyError, IndexError, TypeError, ValueError):
         return None
@@ -251,18 +265,25 @@ def call_fact_day(row) -> str:
 
 def call_field_day(row, key) -> str:
     data = json.loads(row["bot_call_data"] or "{}")
-    return str(data.get("_field_day", {}).get(key) or call_field_at(row, key))[:10]
+    if key in ("soft_comm_date", "overall_result") and data.get("_communication_semantics") != "event_day":
+        return call_fact_day(row)
+    return str(data.get("_field_day", {}).get(key) or data.get("_event_day") or call_field_at(row, key))[:10]
 
 
 def call_owns_field(row, key) -> bool:
     call = bot_call_snapshot(row) or {}
     visit = _merged_visit(row) or {}
+    if key == "overall_result" and "call_status" in visit:
+        visit = {**visit, "overall_result": visit["call_status"]}
     return key in call and (key not in visit or call_field_at(row, key) >=
                             str(row["bot_visit_event_at"] or row["bot_visit_at"] or ""))
 
 
 def common_result(row) -> dict:
     out = {k: v for k, v in (_merged_visit(row) or {}).items() if k in COMMON_RESULT_KEYS}
+    visit = _merged_visit(row) or {}
+    if "call_status" in visit:
+        out["overall_result"] = visit["call_status"]
     out.update({k: v for k, v in (bot_call_snapshot(row) or {}).items()
                 if k in COMMON_RESULT_KEYS and call_owns_field(row, k)})
     return out
@@ -1568,7 +1589,8 @@ def _backfill_call_snapshots(conn: sqlite3.Connection) -> int:
         rows = [row for row in candidates if person_key(row) == person_key(rep)]
         values = {"soft_call_status": match[1], "soft_comment": match[2]}
         event_at = str(call["saved_at"] or call["created_at"] + "T00:00:00")
-        snapshot = {**values, "_field_at": {key:event_at for key in values}}
+        snapshot = {**values, "_field_at": {key:event_at for key in values},
+                    "_event_day": call["created_at"]}
         conn.execute("UPDATE calls SET values_json=?, contracts_json=? WHERE id=?",
                      (json.dumps(values, ensure_ascii=False), json.dumps([r["contract_id"] for r in rows]), call["id"]))
         for row in rows:
@@ -5486,7 +5508,9 @@ def save_call_result(contract_id: str, agent_id: int, employee: str,
                      append_comment: bool = False, comment_author: str | None = None) -> dict:
     """Журнал и снимки звонка в одной транзакции; повтор не меняет карточку."""
     rows = person_contracts_by_soft(contract_id)
-    values = {k: v for k, v in values.items() if k in BY_KEY}
+    values = {k: v for k, v in values.items() if k in BY_KEY or k == "soft_next_call_date"}
+    values["soft_comm_date"] = on_date
+    values["overall_result"] = soft_overall_result(values.get("soft_call_status", ""))
     encoded = json.dumps(values, ensure_ascii=False, sort_keys=True)
     import evidence
     event_at = saved_at or (datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
@@ -5544,6 +5568,7 @@ def save_call_result(contract_id: str, agent_id: int, employee: str,
             snapshot["_field_at"] = {k: event_at if k in current else call_field_at(row, k)
                                      for k in SOFT_SNAPSHOT_KEYS if k in snapshot}
             snapshot["_event_day"] = on_date
+            snapshot["_communication_semantics"] = "event_day"
             snapshot["_field_day"] = {k: on_date if k in current else call_field_day(row, k)
                                       for k in SOFT_SNAPSHOT_KEYS if k in snapshot}
             if str(row["bot_visit_event_at"] or row["bot_visit_at"] or "") > event_at:
@@ -6949,9 +6974,13 @@ def registry_rows(
             for key in BOT_VISIT_KEYS:
                 if key in out and key in visit:
                     out[key] = visit[key]
+            if "call_status" in visit:
+                out["overall_result"] = visit["call_status"]
         if call:
             out.update({k: v for k, v in call.items()
                         if k not in COMMON_RESULT_KEYS or call_owns_field(row, k)})
+            if call_owns_field(row, "overall_result"):
+                out["overall_result"] = call["overall_result"]
         result.append(out)
     return result
 
@@ -6966,9 +6995,7 @@ def enrichment_rows() -> list[dict]:
     """
     with connect() as conn:
         rows = conn.execute("SELECT * FROM clients ORDER BY client").fetchall()
-        # День последнего звонка по КД — якорь окна софт-кейса в build_plan:
-        # soft_comm_date бывает датой СЛЕДУЮЩЕГО звонка (в будущем), и окно
-        # «до сегодня» молча выкидывало бы свежие звонки.
+        # Окно определяется фактом из журнала, включая legacy-снимки.
         call_days = {r[0]: r[1] for r in conn.execute(
             "SELECT contract_id, MAX(created_at) FROM calls GROUP BY contract_id")}
     result = []
@@ -7007,12 +7034,17 @@ def enrichment_rows() -> list[dict]:
         if call_snapshot:
             row.update({k: v for k, v in call_snapshot.items()
                         if k not in COMMON_RESULT_KEYS or call_owns_field(raw, k)})
+            if call_owns_field(raw, "overall_result"):
+                # Общая физическая колонка остаётся прежней: существующее
+                # правило call_status -> overall_result получает итог звонка.
+                row["call_status"] = call_snapshot["overall_result"]
         row.setdefault("_enrichment_clear_keys", []).extend(
             key for key in COMMON_RESULT_KEYS if not str(row.get(key) or "").strip()
             and ((call_snapshot and key in call_snapshot and call_owns_field(raw, key))
                  or (snapshot and key in snapshot and not call_owns_field(raw, key))))
         row["_common_days"] = {k: (call_field_day(raw, k) if call_owns_field(raw, k)
                                    else str(raw["bot_visit_at"] or "")[:10]) for k in COMMON_RESULT_KEYS}
+        row["_common_days"]["call_status"] = row["_common_days"]["overall_result"]
         row["_common_day"] = (call_fact_day(raw) if call_is_latest(raw)
                               else str(raw["bot_visit_at"] or "")[:10])
         result.append(row)
@@ -8740,6 +8772,8 @@ def import_grid(
                 edits = {}
                 for key in call_keys:
                     value = data.pop(key, None)
+                    if key == "overall_result" and value == UNPROCESSED_RESULT:
+                        continue
                     if value in (None, "") or str(value) == str(call_snapshot.get(key) or ""):
                         continue
                     known_call = json.loads(call_row["bot_call_data"] or "{}")
@@ -8748,7 +8782,7 @@ def import_grid(
                     if anchored:
                         if key in FORM_TYPED_KEYS:
                             value = canon_form_value(key, value)
-                        elif key in BOT_DROPDOWN_KEYS:
+                        elif key in BOT_DROPDOWN_KEYS or key == "overall_result":
                             value = _canon_option(key, str(value))
                         if value is not None:
                             edits[key] = value
@@ -8839,6 +8873,8 @@ def import_grid(
                     OFFICE_RESULT_SOURCE_KEY,
                     None,
                 )
+                if "overall_result" in call_protected:
+                    candidates.pop(OFFICE_RESULT_SNAPSHOT_KEY, None)
                 # ЭХО — вторая половина якоря для РЕЗУЛЬТАТА визита.
                 #
                 # Одной даты мало: «Дата выезда» это поле HARD, его печатает

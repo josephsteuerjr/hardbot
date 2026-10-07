@@ -183,7 +183,9 @@ def test_legacy_calls_recover_only_journal_values_not_imported_amount(world):
     db.init_db()
     first = db.bot_call_snapshot(db.get_client("B"))
     assert first["soft_comment"] == "из старой оболочки"
-    assert "forecast_sum" not in first and "soft_comm_date" not in first
+    assert "forecast_sum" not in first
+    assert first["soft_comm_date"] == date.today().isoformat()
+    assert not first["soft_next_call_date"]
     db.init_db()
     assert db.bot_call_snapshot(db.get_client("B")) == first
 
