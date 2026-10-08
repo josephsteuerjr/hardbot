@@ -94,6 +94,8 @@ class Stop(SystemExit):
 # ---------------------------------------------------------------------------
 
 CARRY: dict[str, tuple[str, str]] = {
+    "registry_payments": ("история оплат реестра для операционной воронки",
+                          "COALESCE(contract_id,'') IN (SELECT kd FROM sel_kd)"),
     "clients": (
         "портфели: договоры, адреса, суммы, закрепление",
         "COALESCE(responsible,'') IN (SELECT name FROM sel_emp)"),
@@ -184,6 +186,7 @@ KNOWN = set(CARRY) | set(DROP_ALL)
 # которому строку узнаёт само приложение. Пустой кортеж = ключа нет вовсе: такие
 # строки сверяются целиком (см. merge_table), иначе повторный приём их удвоил бы.
 KEYS: dict[str, tuple[str, ...]] = {
+    "registry_payments": ("contract_id", "paid_at", "currency"),
     "clients": ("contract_id",),
     "payment_evidence": ("op",),
     "assignment_events": ("contract_id", "window_to", "employee", "prev_employee"),

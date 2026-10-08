@@ -69,7 +69,10 @@ function softKpis(t: any): string {
   return `<div class="kpis">${[[n(t.calls), "звонков"], [n(t.persons), "людей в звонках"],
     [n(t.portfolio), "людей в портфеле"], [n(t.contracts), "договоров в портфеле"],
     [t.paid_sum_text || "0", "оплаты по реестру"], [t.wait_text || "0", "прогноз · ждём"],
-    [t.doubt_text || "0", "прогноз · сомнение"]].map(([v, label]) => `<div class="kpi"><b>${esc(v)}</b><span>${esc(label)}</span></div>`).join("")}</div>`;
+    [t.doubt_text || "0", "прогноз · сомнение"],
+    [n(t.rpc || 0), "RPC · результативные звонки"], [n(t.ptp || 0), "PTP · обещания"],
+    [n(t.kp || 0), "KP · исполнено в срок"], [n(t.operation?.partial || 0), "частичные оплаты"]].map(([v, label]) => `<div class="kpi"><b>${esc(v)}</b><span>${esc(label)}</span></div>`).join("")}</div>` +
+    `<div class="chips">${Object.entries(t.operation?.statuses || {}).map(([s, count]) => `<span class="chip">${esc(s)} <b>${n(count)}</b></span>`).join('')}</div>`;
 }
 
 function softTable(host: HTMLElement, rows: any[], onPick: (emp: string) => void): void {
@@ -80,7 +83,11 @@ function softTable(host: HTMLElement, rows: any[], onPick: (emp: string) => void
       { key: "employee", title: "Сотрудник", value: r => r.employee },
       { key: "office", title: "Офис", value: r => r.office || "без офиса" },
       ...[["calls", "Звонков"], ["persons", "Людей в звонках"], ["portfolio", "Портфель, людей"], ["contracts", "Договоров"]].map(([key, title]) => ({ key, title, num: true, value: (r: any) => r[key] || 0 })),
+      ...[["rpc", "RPC"], ["ptp", "PTP"], ["kp", "KP"]].map(([key, title]) => ({ key, title, num: true, value: (r: any) => r[key] || 0 })),
+      ...[["rpc_rate", "RPC, %"], ["ptp_rate", "PTP от RPC, %"], ["kp_rate", "KP от PTP, %"]].map(([key, title]) => ({ key, title, num: true, value: (r: any) => r[key], html: (r: any) => r[key] == null ? '—' : pct(r[key]) })),
+      { key: "partial", title: "Частичные оплаты", num: true, value: r => r.operation?.partial || 0 },
       ...[["paid_sum_text", "Оплаты по реестру"], ["wait_text", "Ждём"], ["doubt_text", "Сомнение"]].map(([key, title]) => ({ key, title, value: (r: any) => r[key] || "0" })),
+      ...Object.keys(rows[0]?.operation?.statuses || {}).map(title => ({key:'status-'+title,title,num:true,value:(r:any)=>r.operation?.statuses?.[title]||0})),
     ], onRow: r => onPick(r.employee),
   }).setRows(rows);
 }

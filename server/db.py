@@ -189,12 +189,13 @@ BOOKKEEPING = [
     ("call_value_log", "TEXT"),
     ("bot_visit_event_at", "TEXT"),
     ("soft_next_call_date", "TEXT"),
+    ("soft_extra_phone", "TEXT"),
 ]
 
 SOFT_SNAPSHOT_KEYS = ("soft_call_status", "soft_comm_date", "soft_comment",
                       "promise_date", "forecast_sum", "forecast", "overall_result",
-                      "soft_next_call_date")
-COMMON_RESULT_KEYS = ("promise_date", "forecast_sum", "forecast", "overall_result")
+                      "soft_next_call_date", "meeting_date", "soft_extra_phone")
+COMMON_RESULT_KEYS = ("promise_date", "forecast_sum", "forecast", "overall_result", "meeting_date")
 
 
 def soft_overall_result(status: str) -> str:
@@ -401,6 +402,39 @@ def canon_amount(value) -> str | None:
         except (ValueError, OverflowError):
             return None
     return str(n) if 0 <= n <= MONEY_MAX else None
+
+
+def canon_soft_amount(value) -> str | None:
+    """Сумма обещания Софта: до двух знаков, без округления целого рубля."""
+    from decimal import Decimal, InvalidOperation
+    text = str(value or '').replace('\u00a0', '').replace('\u202f', '').replace(' ', '').replace(',', '.')
+    if not _MONEY_RX.fullmatch(text):
+        return None
+    try:
+        number = Decimal(text)
+        if number.is_finite() and 0 <= number <= MONEY_MAX and number == number.quantize(Decimal('0.01')):
+            return format(number.normalize(), 'f')
+    except InvalidOperation:
+        pass
+    return None
+
+
+def registry_payment_amount(value) -> float | None:
+    """Десятичная сумма из реестра, включая раздельные тысячи и валюту."""
+    from decimal import Decimal, InvalidOperation
+    text = str(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else re.sub(r'[^\d.,-]', '', str(value or ''))
+    if ',' in text and '.' in text:
+        separator = ',' if text.rfind(',') > text.rfind('.') else '.'
+        text = text.replace('.' if separator == ',' else ',', '').replace(separator, '.')
+    else:
+        text = text.replace(',', '.')
+    try:
+        number = Decimal(text)
+        if number.is_finite() and 0 <= number <= MONEY_MAX:
+            return float(number.quantize(Decimal('0.01')))
+    except InvalidOperation:
+        pass
+    return None
 
 
 def canon_form_value(key: str, value) -> str | None:
@@ -1458,6 +1492,11 @@ def init_db() -> None:
                      "ON payment_evidence(contract_id, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_payev_sha "
                      "ON payment_evidence(sha256)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS registry_payments (
+            contract_id TEXT NOT NULL, paid_at TEXT NOT NULL,
+            currency TEXT NOT NULL, amount REAL NOT NULL,
+            observed_at TEXT NOT NULL,
+            PRIMARY KEY(contract_id, paid_at, currency))""")
         # ЖУРНАЛ ЗАКРЕПЛЕНИЙ (контур СБ, 01.10.2026): событие смены ответственного
         # по договору, снятое ДИФФОМ ИМПОРТА. У импорта есть точная дата, и окно
         # фактической смены честнее заявленной «Даты закрепления» из реестра (её
@@ -1564,6 +1603,7 @@ def init_db() -> None:
             recovered = _backfill_call_snapshots(conn)
             conn.execute("INSERT INTO settings(key,value) VALUES (?,?)",
                          (call_migration, json.dumps({"contracts": recovered, "at": workday.today().isoformat()})))
+        _remember_registry_payments(conn)
         conn.commit()
     reset_role_caches()   # схема/роли могли поменяться — индекс адресатов заново
 
@@ -4747,6 +4787,65 @@ def soft_employees() -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def _remember_registry_payments(conn) -> None:
+    """Оплаты, увиденные в реестре. Повтор импорта не создаёт второй платёж."""
+    import debt
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for row in conn.execute("SELECT contract_id, last_payment_date, last_payment_sum, partner FROM clients "
+                            "WHERE last_payment_date IS NOT NULL AND last_payment_sum IS NOT NULL").fetchall():
+        day = _as_date(row["last_payment_date"])
+        amount = registry_payment_amount(row["last_payment_sum"])
+        if day is None or amount is None:
+            continue
+        conn.execute("INSERT INTO registry_payments VALUES (?,?,?,?,?) "
+                     "ON CONFLICT(contract_id,paid_at,currency) DO UPDATE SET amount=excluded.amount "
+                     "WHERE registry_payments.amount != excluded.amount",
+                     (row["contract_id"], day.isoformat(), debt.unit([row["partner"]]), amount, stamp))
+
+
+def registry_payments_for(contract_ids) -> list[dict]:
+    """История доступных реестровых оплат; текущие колонки — для старых БД."""
+    import debt
+    ids = sorted(set(str(cid) for cid in contract_ids))
+    payments = {}
+    with connect() as conn:
+        for start in range(0, len(ids), 400):
+            chunk = ids[start:start + 400]
+            qs = ','.join('?' for _ in chunk)
+            for row in conn.execute(f"SELECT * FROM registry_payments WHERE contract_id IN ({qs})", chunk):
+                payments[(row["contract_id"], row["paid_at"], row["currency"])] = dict(row)
+            for row in conn.execute(f"SELECT * FROM clients WHERE contract_id IN ({qs})", chunk):
+                day = _as_date(row["last_payment_date"])
+                amount = registry_payment_amount(row["last_payment_sum"])
+                if day is not None and amount is not None:
+                    unit = debt.unit([row["partner"]])
+                    payments[(row["contract_id"], day.isoformat(), unit)] = {
+                        "contract_id": row["contract_id"], "paid_at": day.isoformat(),
+                        "currency": unit, "amount": amount}
+    return list(payments.values())
+
+
+def calls_for_contracts(contract_ids, until: str) -> list:
+    ids = sorted(set(contract_ids))
+    result = {}
+    with connect() as conn:
+        for start in range(0, len(ids), 300):
+            chunk = ids[start:start + 300]
+            marks = ','.join('?' for _ in chunk)
+            for row in conn.execute(f"SELECT * FROM calls WHERE created_at<=? AND "
+                f"(contract_id IN ({marks}) OR EXISTS (SELECT 1 FROM json_each("
+                "CASE WHEN json_valid(contracts_json) THEN contracts_json ELSE '[]' END) "
+                f"WHERE value IN ({marks})))", (until, *chunk, *chunk)):
+                result[row["id"]] = row
+    return list(result.values())
+
+
+def first_activity_day() -> str | None:
+    with connect() as conn:
+        return conn.execute("SELECT MIN(day) FROM (SELECT MIN(created_at) AS day FROM calls "
+                            "UNION ALL SELECT MIN(created_at) FROM visits)").fetchone()[0]
+
+
 def soft_calls_for_employee(employee: str, lo: str | None = None,
                             hi: str | None = None) -> list[sqlite3.Row]:
     """Журнал звонков сотрудника за окно (включительно, по ДНЮ звонка)."""
@@ -5577,7 +5676,7 @@ def save_call_result(contract_id: str, agent_id: int, employee: str,
                      append_comment: bool = False, comment_author: str | None = None) -> dict:
     """Журнал и снимки звонка в одной транзакции; повтор не меняет карточку."""
     rows = person_contracts_by_soft(contract_id)
-    values = {k: v for k, v in values.items() if k in BY_KEY or k == "soft_next_call_date"}
+    values = {k: v for k, v in values.items() if k in BY_KEY or k in ("soft_next_call_date", "soft_extra_phone")}
     values["soft_comm_date"] = on_date
     values["overall_result"] = soft_overall_result(values.get("soft_call_status", ""))
     encoded = json.dumps(values, ensure_ascii=False, sort_keys=True)
@@ -5622,6 +5721,10 @@ def save_call_result(contract_id: str, agent_id: int, employee: str,
                 continue
             previous = bot_call_snapshot(row) or {}
             current = dict(values)
+            if current.get("soft_extra_phone"):
+                before = str(previous.get("soft_extra_phone") or row["soft_extra_phone"] or "")
+                current["soft_extra_phone"] = "\n".join(dict.fromkeys(
+                    line.strip() for line in (before + "\n" + current["soft_extra_phone"]).splitlines() if line.strip()))
             if append_comment and "soft_comment" in current:
                 note = str(current["soft_comment"] or "").strip()
                 if note:
@@ -7050,6 +7153,9 @@ def registry_rows(
         if call:
             out.update({k: v for k, v in call.items()
                         if k not in COMMON_RESULT_KEYS or call_owns_field(row, k)})
+            if call.get("soft_extra_phone"):
+                out["extra_address"] = "\n".join(dict.fromkeys(
+                    line.strip() for line in (str(out.get("extra_address") or "") + "\n" + call["soft_extra_phone"]).splitlines() if line.strip()))
             if call_owns_field(row, "overall_result"):
                 out["overall_result"] = call["overall_result"]
         if row['contract_id'] in payments:
@@ -7085,10 +7191,12 @@ def enrichment_rows() -> list[dict]:
         row["_bot_call_completed"] = call_snapshot is not None
         for key in SOFT_SNAPSHOT_KEYS[:3]:
             row[key] = None
+        # Импортная плановая дата не является доказательством ввода сотрудника.
+        row["meeting_date"] = None
         if call_snapshot:
             row["_call_day"] = call_fact_day(raw)
-            row["_enrichment_clear_keys"] = ["soft_comm_date"] if (
-                "soft_comm_date" in call_snapshot and not str(call_snapshot["soft_comm_date"] or "").strip()) else []
+            row["_enrichment_clear_keys"] = [key for key in ("soft_comm_date", "meeting_date")
+                if key in call_snapshot and not str(call_snapshot[key] or "").strip()]
         bot_snapshot = _decode_bot_snapshot(raw)
         row[VISIT_COMMENT_CLEARED_MARKER] = bool(
             snapshot is not None
@@ -7108,6 +7216,9 @@ def enrichment_rows() -> list[dict]:
         if call_snapshot:
             row.update({k: v for k, v in call_snapshot.items()
                         if k not in COMMON_RESULT_KEYS or call_owns_field(raw, k)})
+            if call_snapshot.get("soft_extra_phone"):
+                row["tips"] = "\n".join(dict.fromkeys(
+                    line.strip() for line in (str(row.get("tips") or "") + "\n" + call_snapshot["soft_extra_phone"]).splitlines() if line.strip()))
             if call_owns_field(raw, "overall_result"):
                 # Общая физическая колонка остаётся прежней: существующее
                 # правило call_status -> overall_result получает итог звонка.
@@ -7119,6 +7230,8 @@ def enrichment_rows() -> list[dict]:
         row["_common_days"] = {k: (call_field_day(raw, k) if call_owns_field(raw, k)
                                    else str(raw["bot_visit_at"] or "")[:10]) for k in COMMON_RESULT_KEYS}
         row["_common_days"]["call_status"] = row["_common_days"]["overall_result"]
+        if call_snapshot and call_snapshot.get("soft_extra_phone"):
+            row["_common_days"]["tips"] = call_field_day(raw, "soft_extra_phone")
         row["_common_day"] = (call_fact_day(raw) if call_is_latest(raw)
                               else str(raw["bot_visit_at"] or "")[:10])
         reported = payments.get(raw["contract_id"], [])
@@ -9473,6 +9586,7 @@ def import_grid(
         else:
             if require_source_proof:
                 _consume_import_authorization(conn, verified_source, report)
+            _remember_registry_payments(conn)
             conn.commit()
     # Человеку в пульте нужны заголовки реестра, а не ключи схемы: в отчёте
     # появились «дата обещания», «Сумма прогноза» и «Прогноз», и строка вида
@@ -9531,6 +9645,7 @@ def wipe_registry() -> dict:
     чтобы после нового импорта сотрудники сразу видели своих клиентов без повторной привязки."""
     with connect() as conn:
         n = conn.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
+        conn.execute("DELETE FROM registry_payments")
         conn.execute("DELETE FROM clients")
         conn.execute("DELETE FROM visits")
         conn.execute("DELETE FROM markers")

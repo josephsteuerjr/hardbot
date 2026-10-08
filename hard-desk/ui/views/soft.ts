@@ -15,6 +15,7 @@ const state = {
   dropdowns: {} as Record<string, { value: string; label: string }[]>,
   formVersion: 0,
   showAll: false,
+  partner: "",
 };
 
 function money(v: unknown): string {
@@ -49,6 +50,8 @@ export const softQueue: Section = {
     state.formVersion = (d.meta && d.meta.formProtocolVersion) || 0;
     const now = new Date();
   const localToday = d.today || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const partners = [...new Set<string>(state.persons.flatMap(x => x.partners || []))].sort();
+    if (state.partner && !partners.includes(state.partner)) state.partner = "";
   const today = state.persons.filter(
       (x) => !x.sc || !x.scd || dueDays(x) > 0 || String(x.scd).slice(0, 10) <= localToday);
     const sums: Record<string,number>={};
@@ -64,7 +67,8 @@ export const softQueue: Section = {
       <div class="kpis"><div class="kpi accent"><b>${n(today.length)}</b><span>звонить сегодня</span></div>
         <div class="kpi"><b>${n(state.persons.length)}</b><span>должников всего</span></div>
         <div class="kpi"><b>${esc(debtSum)}</b><span>долг портфеля</span></div></div>
-      <div class="toolbar"><button class="btn small" data-scope="today">Сегодня (${n(today.length)})</button><button class="btn small" data-scope="all">Все (${n(state.persons.length)})</button></div>
+      <div class="toolbar"><button class="btn small" data-scope="today">Сегодня (${n(today.length)})</button><button class="btn small" data-scope="all">Все (${n(state.persons.length)})</button>
+        <label>Контрагент <select class="input" id="s-partner"><option value="">Все контрагенты</option>${partners.map(p => `<option value="${esc(p)}"${p === state.partner ? ' selected' : ''}>${esc(p)}</option>`).join('')}</select></label></div>
       <div class="section" id="s-tbl"></div>`;
     root.querySelectorAll<HTMLButtonElement>("[data-pending-op]").forEach(button => button.addEventListener("click", async () => {
       if (!confirm("Убрать проблемную запись из очереди? Принятая сервером часть останется в журнале. Исправленный результат сохраните в карточке должника.")) return;
@@ -78,7 +82,8 @@ export const softQueue: Section = {
           html: (x) => `<span class="who">${esc(x.client || "")}</span><span class="sub mono">${esc((x.tels || [])[0] || "")}</span>` },
         { key: "debt", title: "Долг", num: true, value: (x) => x.total, html:(x)=>esc(debtText(x)) },
         { key: "sc", title: "Статус", value: (x) => x.sc || "—" },
-        { key: "scd", title: "Перезвон", value: (x) => String(x.scd || "").slice(0, 10) || "—" },
+        { key: "scd", title: "Встреча/перезвон", value: (x) => String(x.scd || "").slice(0, 10) || "—" },
+        { key: "partners", title: "Контрагент", value: (x) => (x.partners || []).join(', ') },
         { key: "overdue", title: "Просрочен, дн", num: true, value: (x) => (dueDays(x) > 0 ? dueDays(x) : 0),
           html: (x) => dueDays(x) > 0 ? `<b style="color:var(--bad,#B0472C)">${dueDays(x)}</b>` : "—" },
         { key: "kd", title: "Договоров", num: true, value: (x) => x.n },
@@ -86,7 +91,8 @@ export const softQueue: Section = {
       ],
       onRow: (x) => { void openSoftCard(x.rep); },
     });
-    const show=()=>{table.setRows(state.showAll?state.persons:today);root.querySelectorAll<HTMLButtonElement>("[data-scope]").forEach(b=>b.classList.toggle("primary",(b.dataset.scope==="all")===state.showAll));};
+    const show=()=>{table.setRows((state.showAll?state.persons:today).filter(x => !state.partner || (x.partners || []).includes(state.partner)));root.querySelectorAll<HTMLButtonElement>("[data-scope]").forEach(b=>b.classList.toggle("primary",(b.dataset.scope==="all")===state.showAll));};
+    root.querySelector<HTMLSelectElement>("#s-partner")?.addEventListener("change", e => { state.partner = (e.target as HTMLSelectElement).value; show(); });
     root.querySelectorAll<HTMLButtonElement>("[data-scope]").forEach(b=>b.addEventListener("click",()=>{state.showAll=b.dataset.scope==="all";show();}));
     show();
   },
@@ -114,7 +120,7 @@ async function openSoftCard(rep: string) {
       <div class="list">${phones.map((t, index) => `
         <div class="list-row"><div class="grow"><div class="nm mono">${esc(t)}</div>
           <div class="sub">контакт из реестра</div></div><button class="btn small" data-copy-phone="${index}">Копировать</button></div>`).join("") || '<div class="muted">телефона в основных колонках нет</div>'}
-      </div>${d.extra_contact ? `<div class="muted" style="margin-top:8px">Дополнительные контакты и адреса</div><div style="white-space:pre-wrap">${esc(d.extra_contact)}</div>` : ''}</div>
+      </div>${d.extra_contact ? `<div class="muted" style="margin-top:8px">Дополнительные контакты и адреса из реестра</div><div style="white-space:pre-wrap">${esc(d.extra_contact)}</div>` : ''}${s.extra_phone ? `<div class="muted" style="margin-top:8px">Сохранённые дополнительные контакты</div><div style="white-space:pre-wrap">${esc(s.extra_phone)}</div>` : ''}</div>
     <details style="margin-bottom:12px"><summary>Договоры (${n((d.contracts || []).length)})</summary>${(d.contracts || []).map((c: any) => `<div class="list-row"><span class="mono">${esc(c.contract_id)}</span><span>${esc(c.partner || '')}</span><span>${esc(money(c.total))} ${esc(c.unit || '')}</span></div>`).join('')}</details>
     <div class="section"><div class="section-head"><h3 class="section-title">💳 Оплаты из реестра</h3></div>
       ${(d.payments || []).map((p: any) => `<div class="list-row"><div class="grow"><div class="nm mono">${esc(p.contract_id)}</div><div class="sub">Текущие платежи: ${esc(p.current === '' || p.current == null ? '—' : Number(p.current).toLocaleString('ru-RU')+' '+(p.unit || ''))}<br>${esc(d.paymentTitles?.date || 'Дата последнего платежа')}: ${esc(p.date || '—')}</div></div><div><span class="muted">${esc(d.paymentTitles?.amount || 'Сумма последнего платежа')}</span><br>${esc(p.amount ? money(p.amount) + ' ' + (p.unit || '') : '—')}</div></div>`).join('')}</div>
@@ -125,8 +131,10 @@ async function openSoftCard(rep: string) {
       ${notes.length ? `<div class="muted" style="margin-top:10px">Последняя заметка</div><div style="white-space:pre-wrap;max-height:220px;overflow:auto;padding:8px 0">${esc(notes[0])}</div>${notes.length > 1 ? `<details><summary>Предыдущие заметки (${notes.length - 1})</summary><div style="white-space:pre-wrap;padding:8px 0">${esc(notes.slice(1).join("\n\n"))}</div></details>` : ""}` : ""}
       <label class="muted" style="font-size:13px;margin-top:8px;display:block">Новая заметка к звонку</label>
       <textarea class="input" id="c-comment" maxlength="4000" placeholder="Что выяснили при этом звонке" style="width:100%;min-height:70px"></textarea>
+      <label class="muted" style="margin-top:8px;display:block">Новый дополнительный номер и контакт</label>
+      <input class="input" id="c-extra" maxlength="4000" placeholder="Номер, имя, кем приходится клиенту" style="width:100%">
       <div class="row" style="margin-top:8px">
-        <div><label class="muted" style="font-size:13px;display:block">Позвонить снова</label>
+        <div><label class="muted" style="font-size:13px;display:block">Дата встречи/перезвона</label>
           <input class="input" id="c-date" type="date" value="${esc(String(s.next_call_date || "").slice(0, 10))}" style="max-width:160px"></div>
         <div><label class="muted" style="font-size:13px;display:block">Обещание: дата</label>
           <input class="input" id="c-pdate" type="date" value="${esc(d.softFormTyped?.promise_date || '')}" style="max-width:160px"></div>
@@ -148,8 +156,14 @@ async function openSoftCard(rep: string) {
   }));
   wireReceipt(panel, rep, d, () => { void openSoftCard(rep); });
   wirePayment(panel, () => { void openSoftCard(rep); });
+  const officeNow = new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const promiseEdge = new Date(officeNow + 'T12:00:00Z');
+  promiseEdge.setUTCDate(promiseEdge.getUTCDate() + 3);
+  const promiseMax = promiseEdge.toISOString().slice(0, 10);
+  const promiseInput = panel.querySelector<HTMLInputElement>("#c-pdate")!;
+  promiseInput.min = officeNow; promiseInput.max = promiseMax;
   const touched = new Set<string>();
-  const inputs = [["c-comment", "soft_comment"], ["c-date", "soft_next_call_date"], ["c-pdate", "promise_date"], ["c-psum", "forecast_sum"]] as const;
+  const inputs = [["c-comment", "soft_comment"], ["c-extra", "soft_extra_phone"], ["c-date", "soft_next_call_date"], ["c-pdate", "promise_date"], ["c-psum", "forecast_sum"]] as const;
   for (const [id, key] of inputs) panel.querySelector(`#${id}`)?.addEventListener("input", () => touched.add(key));
   panel.querySelector("#c-save")?.addEventListener("click", async () => {
     const status = (panel.querySelector("#c-status") as HTMLSelectElement).value;
@@ -157,11 +171,20 @@ async function openSoftCard(rep: string) {
     const values: Record<string, string> = { soft_call_status: status };
     const comment = (panel.querySelector("#c-comment") as HTMLTextAreaElement).value.trim();
     if (comment) values.soft_comment = comment;
+    const extra = (panel.querySelector("#c-extra") as HTMLInputElement).value.trim();
+    if (extra) values.soft_extra_phone = extra;
     const cdate = (panel.querySelector("#c-date") as HTMLInputElement).value;
     if (touched.has("soft_next_call_date")) values.soft_next_call_date = cdate;
     const pdate = (panel.querySelector("#c-pdate") as HTMLInputElement).value;
+    if (touched.has("promise_date") && pdate && (pdate < officeNow || pdate > promiseMax)) { toast("Обещание: от сегодня до трёх дней включительно"); return; }
+    if (status === "Встреча в офисе" && !cdate) { toast("Укажите дату встречи в офисе"); return; }
     if (touched.has("promise_date")) values.promise_date = pdate;
     const psum = ((panel.querySelector("#c-psum") as HTMLInputElement).value || "").replace(/\s/g, "").replace(",", ".");
+    if (status.startsWith("Обещает оплатить")) {
+      if (!pdate || !/^\d+(?:\.\d{1,2})?$/.test(psum) || Number(psum) <= 0) { toast("Укажите дату и сумму обещания"); return; }
+      if (pdate < officeNow || pdate > promiseMax) { toast("Обещание: максимум три дня от сегодня"); return; }
+      values.promise_date = pdate; values.forecast_sum = psum;
+    }
     if (touched.has("forecast_sum") && psum && !/^\d+(?:\.\d+)?$/.test(psum)) { toast("Проверьте сумму обещания"); return; }
     if (touched.has("forecast_sum")) values.forecast_sum = psum;
     const saveButton = panel.querySelector<HTMLButtonElement>("#c-save")!;

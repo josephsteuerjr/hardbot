@@ -6,7 +6,7 @@ import { openPanel } from "../kit/shell";
 export interface Range { preset?: string; shift?: number; from?: string; to?: string }
 export interface RangeInfo { preset: string; from: string; to: string; label: string; days: number; today: string; next: unknown }
 
-export const PRESETS: [string, string][] = [["today", "Сегодня"], ["yesterday", "Вчера"], ["7d", "7 дней"], ["30d", "30 дней"], ["month", "Месяц"]];
+export const PRESETS: [string, string][] = [["today", "Сегодня"], ["yesterday", "Вчера"], ["7d", "7 дней"], ["30d", "30 дней"], ["month", "Месяц"], ["all", "За всё время"]];
 
 export function rangeQuery(r: Range): Record<string, unknown> {
   if (r.from || r.to) return { preset: "custom", from: r.from, to: r.to, shift: r.shift || 0 };
@@ -16,7 +16,7 @@ export function rangeQuery(r: Range): Record<string, unknown> {
 export function rangeChips(r: Range, info: RangeInfo | null, only?: string[]): string {
   const cur = r.from ? "custom" : (r.preset || "today");
   const list = PRESETS.filter(([k]) => !only || only.includes(k));
-  const nav = info ? `<span class="chip-sep"></span>
+  const nav = info && info.preset !== 'all' ? `<span class="chip-sep"></span>
     <button class="chip" data-shift="-1" title="Раньше">‹</button>
     <span class="muted nowrap" style="font-size:13.5px;padding:0 6px">${esc(info.label)}</span>
     <button class="chip" data-shift="1" ${info.next ? "" : "disabled"} title="Позже">›</button>` : "";

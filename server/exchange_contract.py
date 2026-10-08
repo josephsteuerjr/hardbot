@@ -22,6 +22,7 @@ class ExchangeContractError(RuntimeError):
 
 CONTRACT_PATH = Path(__file__).with_name("data_exchange_contract.json")
 _SUPPORTED_RAW_SHA256 = {
+    9: "1ab4ea266086ef59a3fdc07561b7596d01a5081905ad8373a9af995b356231bb",
     8: "2d3c871b0dcd702ce6f6e0a638b9508daa34f305cd9d521f6564108252bb65cb",
     7: "7b8baef118be6d49b3a8e51108c08950f7b4089a75f501fda524069988d259ad",
     6: "9de2c3a20a9c8ab165f8f2149a10cec60b4c4c81741142b049d22edffd445600",
@@ -107,9 +108,12 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
             expected_soft["result_keys"] += ["overall_result", "soft_next_call_date"]
             expected_soft.update(communication_date="event_day", callback_key="soft_next_call_date",
                                  overall_result_source="soft_call_status_without_sms")
-        if version == 8:
+        if version >= 8:
             expected_soft.update(payment_provenance_marker="_bot_payment_recorded",
                                  payment_event_day="_payment_day", payment_export="soft_comment")
+        if version >= 9:
+            expected_soft["result_keys"] += ["meeting_date", "soft_extra_phone"]
+            expected_soft.update(scheduled_date_key="meeting_date", promise_max_days=3)
         soft = _exact_dict(root["soft"], set(expected_soft), label="soft")
         if soft != expected_soft:
             raise ExchangeContractError("unsupported soft exchange semantics")

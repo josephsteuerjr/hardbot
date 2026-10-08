@@ -148,7 +148,7 @@ FORM_DATES = list(FORM_DATE_KEYS)
 SOFT_FORM_KEYS = frozenset(
     k for k in (*FORM_DROPDOWNS, *FORM_TEXT, *FORM_AMOUNTS, *FORM_DATES)
     if k in BY_KEY and BY_KEY[k].source == SOFT
-) | {"soft_next_call_date"}
+) | {"soft_next_call_date", "soft_extra_phone", "meeting_date"}
 FORM_DROPDOWNS_VISIT = tuple(
     k for k in FORM_DROPDOWNS if k not in SOFT_FORM_KEYS
 )
@@ -436,6 +436,8 @@ def _require_field_write(uid: int) -> None:
 
 # --- Формовка данных --------------------------------------------------------
 def _form_field_title(key: str, lang: str) -> str:
+    if key == "soft_extra_phone":
+        return {"uz": "Qo‘shimcha raqam", "tg": "Рақами иловагӣ"}.get(lang, "Дополнительный номер и контакт")
     if key == "soft_next_call_date":
         return {"uz": "Qayta qo‘ng‘iroq sanasi", "tg": "Санаи занги навбатӣ"}.get(lang, "Когда звонить снова")
     d = FORM_FIELD_TITLES.get(key) or {}
@@ -484,6 +486,7 @@ def _meta(lang: str) -> dict:
         # дальше этой даты не пускает, сервер проверяет то же самое ещё раз:
         # оболочка на телефоне бывает старая, а очередь доносит визиты сутками.
         "promiseMaxDays": db.promise_ahead_days(),
+        "softPromiseMaxDays": 3,
         "dataExchangeContract": DATA_EXCHANGE_CONTRACT,
         "vectorTiles": "/tiles/basemap.pmtiles" if TILES_FILE.exists() else None,
         # Микрофон показываем только при полностью заданном UDS-контракте.
@@ -510,7 +513,7 @@ def _search_tels(rows) -> list[str]:
     """Телефоны человека, одними цифрами — искать будут набором подряд."""
     tels: set[str] = set()
     for r in rows:
-        for key in ("phone", "phone_main"):
+        for key in ("phone", "phone_main", "soft_extra_phone"):
             for chunk in _TEL_SPLIT_RE.split(str(_cell(r, key) or "")):
                 digits = "".join(_DIGITS_RE.findall(chunk))
                 # «2», «-», «0» в графе телефона — пометки оператора, а не номер.
@@ -535,7 +538,8 @@ def _person_brief(p: dict) -> dict:
             # не дотянуться. Кладём их рядом со списком — те же данные того же
             # портфеля, которые уже уехали на телефон в /api/cards.
             "ids": _search_ids(p["contracts"]),
-            "tels": _search_tels(p["contracts"])}
+            "tels": _search_tels(p["contracts"]),
+            "partners": p["partners"]}
 
 
 def _row_get(rows, key):
@@ -706,6 +710,8 @@ def _person_full_from_rows(rows, rep: str, lang: str,
             "status": _row_get(rows, "soft_call_status") or "",
             "comm_date": _soft_value(rows, "soft_comm_date"),
             "next_call_date": _soft_value(rows, "soft_next_call_date"),
+            "meeting_date": _soft_value(rows, "meeting_date"),
+            "extra_phone": _soft_value(rows, "soft_extra_phone"),
             "overall_result": latest_common.get("overall_result") or _row_get(rows, "overall_result") or "",
             "comment": _row_get(rows, "soft_comment") or "",
             "comment_entries": comment_view.newest_first(_row_get(rows, "soft_comment")),
@@ -730,6 +736,8 @@ def _soft_value(rows, key):
     for row in rows:
         snapshot = db.bot_call_snapshot(row)
         if snapshot is not None and key in snapshot:
+            if key == "soft_next_call_date" and "meeting_date" in snapshot:
+                return snapshot["meeting_date"] or ""
             return snapshot[key] or ""
     return _row_get(rows, key) or ""
 
@@ -1736,7 +1744,8 @@ async def _save(request: web.Request) -> web.Response:
         if key in FORM_DROPDOWNS and value not in DROPDOWNS[key]:
             raise web.HTTPBadRequest(text=f"invalid {key}")
         if key in typed_keys:
-            canon = db.canon_form_value(key, value)
+            canon = (db.canon_soft_amount(value) if kind == "call" and key == "forecast_sum"
+                     else db.canon_form_value(key, value))
             if canon is None:
                 # НИКАКОГО 400: клиент считает любой не-2xx обрывом связи и
                 # хоронит запись очереди навсегда — пропал бы весь визит,
@@ -2009,13 +2018,22 @@ def _save_call(uid: int, emp: str, body: dict, rep: str, row, values: dict,
         raise web.HTTPBadRequest(text="append_comment")
     if finish and "soft_call_status" not in values:
         raise web.HTTPBadRequest(text="call result required")
+    if finish:
+        if "soft_next_call_date" in values:
+            values["meeting_date"] = values["soft_next_call_date"]
+        elif "meeting_date" in values:
+            values["soft_next_call_date"] = values["meeting_date"]
     if finish and values.get("promise_date"):
-        limit = db.promise_ahead_days()
+        limit = 3
         if limit:
-            edge = date.fromisoformat(_occurred_on(body)) + timedelta(days=limit)
+            event_day = date.fromisoformat(_occurred_on(body))
+            edge = event_day + timedelta(days=limit)
             if db._as_date(values["promise_date"]) and \
                     db._as_date(values["promise_date"]) > edge:
                 rejected["promise_date"] = f"too_far:{limit}"
+                values.pop("promise_date", None)
+            elif db._as_date(values["promise_date"]) and db._as_date(values["promise_date"]) < event_day:
+                rejected["promise_date"] = "before_call"
                 values.pop("promise_date", None)
     if finish:
         promise_was = str(row["promise_date"] or "").strip()

@@ -1,19 +1,36 @@
 {
   "schema": "hardbot.data-exchange-contract.v1",
-  "version": 8,
+  "version": 9,
   "soft": {
     "provenance_marker": "_bot_call_completed",
     "event_day": "_call_day",
     "responsible_key": "responsible_soft",
-    "result_keys": ["soft_call_status", "soft_comm_date", "soft_comment", "promise_date", "forecast_sum", "forecast", "overall_result", "soft_next_call_date"],
+    "result_keys": [
+      "soft_call_status",
+      "soft_comm_date",
+      "soft_comment",
+      "promise_date",
+      "forecast_sum",
+      "forecast",
+      "overall_result",
+      "soft_next_call_date",
+      "meeting_date",
+      "soft_extra_phone"
+    ],
     "communication_date": "event_day",
     "callback_key": "soft_next_call_date",
     "overall_result_source": "soft_call_status_without_sms",
     "payment_provenance_marker": "_bot_payment_recorded",
     "payment_event_day": "_payment_day",
     "payment_export": "soft_comment",
-    "import_profiles": ["hard", "soft", "both"],
-    "office_edit_proof": "current_delivery_and_result_echo"
+    "import_profiles": [
+      "hard",
+      "soft",
+      "both"
+    ],
+    "office_edit_proof": "current_delivery_and_result_echo",
+    "scheduled_date_key": "meeting_date",
+    "promise_max_days": 3
   },
   "artifacts": {
     "snapshot_kind": "hardbot_limited_test_pre_reset.v2",
@@ -35,7 +52,8 @@
     "text_keys": [
       "visit_comment",
       "tips",
-      "soft_comment"
+      "soft_comment",
+      "soft_extra_phone"
     ],
     "amount_keys": [
       "forecast_sum"
@@ -43,7 +61,8 @@
     "date_keys": [
       "promise_date",
       "soft_comm_date",
-      "soft_next_call_date"
+      "soft_next_call_date",
+      "meeting_date"
     ]
   },
   "workbook_shape": {
@@ -73,7 +92,7 @@
     },
     "unknown_headers_policy": "block",
     "duplicate_headers_policy": "block",
-    "export_schema_sha256": "5998dce450a58609dd1a280eb3bb983b4fef22c4b01e1013953a267989c65628",
+    "export_schema_sha256": "e5e77c93d25dc46b8bd13e2a88a4374141e714ba5ded840ef169422fbb62ebc4",
     "contract_key": "contract_id",
     "responsible_key": "responsible",
     "contract_title": "Номер КД / ID",
@@ -93,6 +112,9 @@
       ],
       "soft_comment": [
         "Комментарий текущего месяца"
+      ],
+      "meeting_date": [
+        "Дата встречи"
       ]
     },
     "allowed_ignored_headers": [
@@ -168,13 +190,16 @@
       "forecast",
       "soft_call_status",
       "soft_comm_date",
-      "soft_comment"
+      "soft_comment",
+      "meeting_date"
     ],
     "live_state_keys": [
       "soft_call_status",
       "soft_comm_date",
       "soft_comment",
-      "soft_next_call_date"
+      "soft_next_call_date",
+      "meeting_date",
+      "soft_extra_phone"
     ]
   },
   "enrichment": {
@@ -258,6 +283,11 @@
         "source": "soft_comment",
         "target": "soft_comment",
         "merge": "preserve_text"
+      },
+      {
+        "source": "meeting_date",
+        "target": "meeting_date",
+        "merge": "replace"
       }
     ],
     "forbidden_targets": [

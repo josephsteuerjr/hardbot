@@ -81,9 +81,9 @@ def test_typed_keys_are_canonical_constants():
     # Перезвон хранится отдельно; soft_comm_date принимается только как
     # совместимое имя старых очередей. Факт коммуникации вычисляет сервер.
     assert db.FORM_TYPED_KEYS == frozenset(
-        {"promise_date", "forecast_sum", "soft_comm_date", "soft_next_call_date"})
+        {"promise_date", "forecast_sum", "soft_comm_date", "soft_next_call_date", "meeting_date"})
     assert set(db.FORM_AMOUNT_KEYS) == {"forecast_sum"}
-    assert set(db.FORM_DATE_KEYS) == {"promise_date", "soft_comm_date", "soft_next_call_date"}
+    assert set(db.FORM_DATE_KEYS) == {"promise_date", "soft_comm_date", "soft_next_call_date", "meeting_date"}
     # Обе колонки — ЖИВЫЕ поля реестра: сумма едет в личные книги и
     # возвращается офисной правкой (решение владельца 26.08.2026).
     assert {"promise_date", "forecast_sum"} <= {f.key for f in FIELDS}

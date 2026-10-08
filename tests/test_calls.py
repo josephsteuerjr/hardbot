@@ -155,7 +155,7 @@ def test_visit_form_has_no_soft_fields():
     assert "soft_call_status" in web.FORM_DROPDOWNS
     # soft_comment — маркер «сх» реестра (месячная колонка офиса), но в форме
     # звонка поле живёт и принимается сервером (FORM_TEXT).
-    assert web.SOFT_FORM_KEYS == frozenset({"soft_call_status", "soft_comm_date", "soft_next_call_date"})
+    assert web.SOFT_FORM_KEYS == frozenset({"soft_call_status", "soft_comm_date", "soft_next_call_date", "meeting_date", "soft_extra_phone"})
     assert "soft_comment" in web.FORM_TEXT
 
 

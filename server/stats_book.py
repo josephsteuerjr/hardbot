@@ -30,6 +30,7 @@ import db
 import digest_data as dd
 import evidence
 import funnel
+import soft_report_book
 from util import num as _num
 
 FILL_SUCCESS, FILL_FAIL, FILL_OTHER = "#E3F2E1", "#FAE3E0", "#EFEFEF"
@@ -836,6 +837,7 @@ def stats_xlsx(mgr: dict, rng: dict, employees: list[str] | None = None) -> byte
     # лист появляется, когда у направления есть софт-портфели.
     if data.get("soft", {}).get("employees"):
         _soft_sheet(bk, data["soft"], period)
+        soft_report_book.write(bk, data["soft"], period)
     # Воронка Collection — в конце книги: показатели, реестр обещаний и
     # ранжирование по размеру обещания (просьба Альберта 15.09.2026).
     funnel_sheets(bk, data, rows, names, rng)
@@ -900,5 +902,8 @@ def daily_report_xlsx(mgr: dict, on_date: str,
     day_stats = dd.stats_data(mgr, day_range, [r["employee"] for r in data["rows"]])
     funnel_sheets(bk, day_stats, day_stats["employees"],
                   {c["code"]: c["name"] for c in day_stats["countries"]}, day_range)
+    if day_stats.get("soft", {}).get("employees"):
+        _soft_sheet(bk, day_stats["soft"], dd.human_date(on_date))
+        soft_report_book.write(bk, day_stats["soft"], dd.human_date(on_date))
     _guide_sheet(bk, caption)
     return bk.close()

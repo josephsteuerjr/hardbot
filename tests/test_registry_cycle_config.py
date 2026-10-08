@@ -73,7 +73,7 @@ def test_field_semantics_are_explicit_and_safe():
     assert rules["Сумма последнего платежа"] == ("number", "require_baseline")
     assert rules["Дата последнего платежа"] == ("date", "require_baseline")
     assert rules["дата обещания"] == ("date", "require_baseline")
-    assert rules["Дата встречи"] == ("date", "require_baseline")
+    assert rules["Дата встречи/Дата перезвона"] == ("date", "require_baseline")
     assert rules["Дата выезда"] == ("literal", "require_baseline")
     assert rules["Дата коммуникации"] == ("date", "require_baseline")
     assert rules["Историчный комментарий Софт"] == ("text", "accept_superset")

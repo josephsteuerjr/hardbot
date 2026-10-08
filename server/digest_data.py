@@ -28,6 +28,7 @@ import workday
 import debt
 import evidence
 import funnel
+import soft_reporting
 import photostore
 from i18n import tf
 
@@ -938,7 +939,7 @@ _PAYLOAD_STATUS = re.compile(r"Статус:\s*(.*?);\s*Договорённос
 # воронки. У выездов старше этой даты их в строке нет — тогда анкету берём из
 # снимка человека, и только если снимок описывает ИМЕННО этот выезд.
 _PAYLOAD_CONTACT = re.compile(r"Контакт:\s*(.*?);\s*На адресе:\s*(.*?);", re.S)
-STATS_PRESETS = ("today", "yesterday", "7d", "30d", "month", "custom")
+STATS_PRESETS = ("today", "yesterday", "7d", "30d", "month", "all", "custom")
 _PRESET_DAYS = {"today": 1, "7d": 7, "30d": 30}
 STATS_MAX_DAYS = 366
 # Деление исходов на успешные и неуспешные — решение офиса (Илья Павлюк,
@@ -1011,7 +1012,10 @@ def stats_range(preset: str | None, shift: int = 0, frm: str | None = None,
         shift = max(-1000, min(1000, int(shift or 0)))
     except (TypeError, ValueError):
         shift = 0
-    if preset == "custom" or (preset is None and (lo or hi)):
+    if preset == "all":
+        lo = db._as_date(db.first_activity_day()) or today
+        lo, hi, shift = min(lo, today), today, 0
+    elif preset == "custom" or (preset is None and (lo or hi)):
         preset = "custom"
         lo = lo or hi or today
         hi = hi or lo
@@ -1047,7 +1051,7 @@ def stats_range(preset: str | None, shift: int = 0, frm: str | None = None,
     return {
         "preset": preset, "shift": shift,
         "from": lo.isoformat(), "to": hi.isoformat(), "days": days,
-        "label": range_label(lo, hi), "today": today.isoformat(),
+        "label": ("За всё время · " if preset == "all" else "") + range_label(lo, hi), "today": today.isoformat(),
         "is_today": lo == hi == today,
         "prev": {"from": p_lo.isoformat(), "to": p_hi.isoformat()},
         "next": None if hi >= today else {"from": n_lo.isoformat(),
@@ -1685,6 +1689,14 @@ def _soft_employee_stats(emp: str, rng: dict, calls=None, *, details=False) -> d
               "paid_persons": len({p["person"]["rep"] for p in pays}),
               "money": money, "money_text": _units_text(money),
               "_by_day": by_day}
+    history = db.calls_for_contracts(rows, min(rng["to"], today_iso())) if calls else []
+    # История может содержать остальные КД старой группы человека.
+    history_ids = {cid for c in history for cid in soft_reporting.contract_ids(c)}
+    historical_rows = {c["contract_id"]: c for c in db.clients_by_ids(history_ids)} if history_ids else {}
+    operation = soft_reporting.build(calls, historical_rows, history,
+        db.registry_payments_for(history_ids), asof=min(rng["to"], today_iso()))
+    result["operation"] = operation
+    result.update({key: operation[key] for key in ("rpc", "ptp", "kp", "rpc_rate", "ptp_rate", "kp_rate")})
     # Старые числовые поля остаются совместимыми только для одной валюты.
     for key, units in (("wait", wait), ("doubt", doubt), ("paid_sum", paid),
                        ("debt", money), ("max", maximum)):

@@ -1245,7 +1245,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=80;
+const SHELL_VERSION=81;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -2386,6 +2386,8 @@ function renderSoftList(){
   const pool = STATE.softFilter==="all" ? STATE.persons
                                    : STATE.persons.filter(softDueToday);
   STATE.softPool=pool;
+  const partnerOptions=[...new Set(STATE.persons.flatMap(p=>p.partners||[]))].sort();
+  if(STATE.softPartner&&!partnerOptions.includes(STATE.softPartner)) STATE.softPartner='';
   const bar=`<div class="lhead"><span class="t">${esc(t.softq)}</span><span class="n">${pool.length}</span></div>`;
   if(!STATE.persons.length){
     $("app").innerHTML = bar + `<div class="center">${esc(t.nocl)}</div>`;
@@ -2394,7 +2396,11 @@ function renderSoftList(){
   $("app").innerHTML = bar +
     `<div class="searchwrap">${ic("search")}<input class="search" id="q" placeholder="${esc(t.search)}" oninput="filterList()"></div>
      <div id="plist"></div>`;
-  drawList(pool);
+  const search=$('q');
+  if(search){
+    search.parentElement.insertAdjacentHTML('afterend',`<label class="fld">Контрагент</label><select id="softpartner" onchange="STATE.softPartner=this.value;filterList()"><option value="">Все контрагенты</option>${partnerOptions.map(p=>`<option value="${esc(p)}"${p===STATE.softPartner?' selected':''}>${esc(p)}</option>`).join('')}</select>`);
+  }
+  filterList();
   setBottomNav(STATE.softFilter||"today");
 }
 
@@ -2499,11 +2505,13 @@ function listPool(){
   return (STATE.mode==="soft" && STATE.softPool) ? STATE.softPool : STATE.persons;
 }
 function filterList(){
-  const pool=listPool();
+  const pool=listPool().filter(p=>STATE.mode!=="soft"||!STATE.softPartner||(p.partners||[]).includes(STATE.softPartner));
   const raw=$("q").value.trim();
-  if(!raw){ drawList(pool); return; }
   const q=raw.toLowerCase(), qd=raw.replace(/\D+/g,""), qf=fold(raw);
-  drawList(pool.filter(p=>personMatches(p,q,qd,qf)));
+  const items=raw?pool.filter(p=>personMatches(p,q,qd,qf)):pool;
+  drawList(items);
+  const count=document.querySelector('.lhead .n');
+  if(STATE.mode==='soft'&&count) count.textContent=String(items.length);
 }
 
 async function openP(rep){
@@ -2582,7 +2590,14 @@ function drawPanel(){
   removeMap(); stopAutoSync();
   if(STATE.tab==="visit"){ p.innerHTML=panelVisit(d,t); setTimeout(initMap,0); }
   else if(STATE.tab==="call") p.innerHTML=panelCall(d,t);
-  else if(STATE.tab==="callform") p.innerHTML=panelCallForm(d,t);
+  else if(STATE.tab==="callform"){
+    FORM_TOUCHED.clear(); FORM_CLEARED.clear();
+    p.innerHTML=panelCallForm(d,t);
+    p.querySelectorAll('input[data-k]').forEach(el=>{
+      const mark=()=>{ FORM_TOUCHED.add(el.dataset.k); if(el.value) FORM_CLEARED.delete(el.dataset.k); };
+      el.addEventListener('input',mark); el.addEventListener('change',mark);
+    });
+  }
   else if(STATE.tab==="client") p.innerHTML=panelClient(d,t);
   else if(STATE.tab==="debt") p.innerHTML=panelDebt(d,t);
   else { p.innerHTML=panelForm(d,t); setTimeout(setupFormDraft,0); setTimeout(renderReceipts,0); }
@@ -2901,16 +2916,19 @@ function panelCallForm(d,t){
   const dd=((STATE.meta||{}).dropdowns||{}).soft_call_status||[];
   const cur=s.status||"";
   const opts=`<option value="">—</option>`+dd.map(o=>`<option value="${esc(o.value)}"${o.value===cur?" selected":""}>${esc(o.label)}</option>`).join("");
-  const tf=typedFields().filter(f=>!["soft_comm_date","soft_next_call_date"].includes(f.key));
+  const tf=typedFields().filter(f=>!["soft_comm_date","soft_next_call_date","meeting_date"].includes(f.key));
   return `
    <div class="fsec key"><div class="fsec-h">📞</div>
      <label class="fld">${esc(t.status)}</label>
      <select data-k="soft_call_status">${opts||`<option value="">—</option>`}</select>
+     ${s.extra_phone?`<label class="fld">Сохранённые дополнительные контакты</label><div style="white-space:pre-wrap">${esc(s.extra_phone)}</div>`:''}
      ${notes.length?`<div class="muted" style="margin-top:8px">${esc(t.callmonth)}</div><div style="white-space:pre-wrap;max-height:220px;overflow:auto;margin:6px 0">${esc(notes[0])}</div>${notes.length>1?`<details><summary>${esc(t.callmonth)} · ${notes.length-1}</summary><div style="white-space:pre-wrap">${esc(notes.slice(1).join("\n\n"))}</div></details>`:""}`:""}
      <label class="fld">${esc(t.callnote)}</label>
      <textarea id="f_soft_comment" maxlength="4000"></textarea>
+     <label class="fld">Новый дополнительный номер и контакт</label>
+     <textarea id="f_soft_extra_phone" maxlength="4000" rows="2" placeholder="Номер, имя, кем приходится клиенту"></textarea>
    </div>
-   <div class="fsec"><div class="fsec-h">⏰ ${esc(t.commdate)}</div>
+   <div class="fsec"><div class="fsec-h">⏰ Дата встречи/Дата перезвона</div>
      <input type="hidden" data-k="soft_next_call_date" value="${esc(s.next_call_date||"")}">
      <button type="button" class="pick${s.next_call_date?" has":""}" data-for="soft_next_call_date"
        onclick="openDateWheel('soft_next_call_date')">${esc(s.next_call_date||"—")}</button>
@@ -2930,15 +2948,29 @@ async function saveCall(){
   const values={soft_call_status:st.value}, input_keys=["soft_call_status"];
   const cm=$("f_soft_comment");
   if(cm&&cm.value.trim()){ values.soft_comment=cm.value.trim(); input_keys.push("soft_comment"); }
+  const extra=$("f_soft_extra_phone");
+  if(extra&&extra.value.trim()){ values.soft_extra_phone=extra.value.trim(); input_keys.push("soft_extra_phone"); }
   document.querySelectorAll('#panel input[data-k]').forEach(el=>{
     const k=el.dataset.k;
     if(["soft_next_call_date","promise_date","forecast_sum"].indexOf(k)<0) return;
+    if(!FORM_TOUCHED.has(k)&&!FORM_CLEARED.has(k)) return;
     const v=(el.type==="hidden")?el.value:el.value.replace(/\s+/g,"");
-    if(v){ values[k]=(el.type==="hidden")?v:v; input_keys.push(k); }
+    if(v||FORM_CLEARED.has(k)){ values[k]=v; input_keys.push(k); }
   });
   // «Убрать» обещания/даты — полноценный ответ: без cleared_keys сервер
   // не узнает, что должник передумал, и старое обещание переживёт звонок.
   const clearedNow=[...FORM_CLEARED].filter(k=>["promise_date","forecast_sum","soft_next_call_date"].indexOf(k)>=0);
+  if(st.value.startsWith("Обещает оплатить")){
+    const due=document.querySelector('#panel input[data-k="promise_date"]');
+    const sum=document.querySelector('#panel input[data-k="forecast_sum"]');
+    const amount=sum?sum.value.replace(/\s/g,'').replace(',','.') : '';
+    if(!due||!due.value||!/^\d+(?:\.\d{1,2})?$/.test(amount)||+amount<=0){ toast("Укажите дату и сумму обещания"); return; }
+    values.promise_date=due.value; values.forecast_sum=amount;
+    for(const key of ['promise_date','forecast_sum']) if(!input_keys.includes(key)) input_keys.push(key);
+  }
+  const planned=document.querySelector('#panel input[data-k="soft_next_call_date"]');
+  if(st.value==="Встреча в офисе"&&!(planned&&planned.value)){ toast("Укажите дату встречи в офисе"); return; }
+  if(values.promise_date&&(values.promise_date<srvToday()||values.promise_date>promiseMaxDate())){ toast("Обещание: максимум три дня от сегодня"); return; }
   SAVING=true; const btn=$("callbtn"); if(btn) btn.disabled=true;
   try{
     const rep=STATE.cur.rep, op_id=uuid(), occurred_at=Date.now();
@@ -2983,7 +3015,7 @@ function typedFields(){ return (STATE.meta&&STATE.meta.typedFields)||[]; }
 // Предел обещания оплаты — решение офиса: «не более трёх дней + к дню выезда».
 // Ноль значит «без предела». Считаем от СЕРВЕРНОГО сегодня: часы телефона врут,
 // а обещание, уехавшее за предел из-за сбитой даты, вернётся отказом сервера.
-function promiseMaxDays(){ const n=+((STATE.meta||{}).promiseMaxDays||0);
+function promiseMaxDays(){ if(STATE.mode==="soft") return 3; const n=+((STATE.meta||{}).promiseMaxDays||0);
   return Number.isFinite(n)&&n>0?n:0; }
 function promiseMaxDate(){
   const n=promiseMaxDays(); if(!n) return "";
@@ -2994,7 +3026,7 @@ function promiseMaxDate(){
 }
 function promiseSection(d, fields){
   // В форме ВИЗИТА софт-дата не показывается; форма «Звонок» передаёт свой набор.
-  const tf2=fields||typedFields().filter(f=>!["soft_comm_date","soft_next_call_date"].includes(f.key));
+  const tf2=fields||typedFields().filter(f=>!["soft_comm_date","soft_next_call_date","meeting_date"].includes(f.key));
   if(!tf2.length) return "";
   const cur=(d&&d.formTyped)||{};
   const reg=(d&&d.formTypedRegistry)||{};
@@ -3006,12 +3038,12 @@ function promiseSection(d, fields){
         <input type="hidden" data-k="${esc(f.key)}" value="${esc(v)}">
         <button type="button" class="pick${v?" has":""}" data-for="${esc(f.key)}"
           onclick="openDateWheel(${jsq(f.key)})">${esc(v||"—")}</button>
-        ${lim?`<div class="muted" style="font-size:11px;margin:-6px 0 8px">не дальше ${esc(promiseMaxDate())} (${lim} дн от выезда)</div>`:""}
+        ${lim?`<div class="muted" style="font-size:11px;margin:-6px 0 8px">не дальше ${esc(promiseMaxDate())} (${lim} дн от ${STATE.mode==='soft'?'звонка':'выезда'})</div>`:""}
         ${reg[f.key]&&!v?`<div class="muted" style="font-size:11px;margin:-6px 0 8px">офис: ${esc(reg[f.key])}</div>`:""}`;
     }
     return `<label class="fld">${esc(f.title)}</label>
       <div class="moneyrow" style="margin-bottom:${reg[f.key]&&!v?"2px":"10px"}">
-        <input data-k="${esc(f.key)}" inputmode="numeric" class="money" placeholder="0"
+        <input data-k="${esc(f.key)}" inputmode="${STATE.mode==='soft'?'decimal':'numeric'}" class="money" placeholder="0"
           value="${esc(fmtMoneyInput(v))}" oninput="onMoneyInput(this)">
         <button type="button" class="xbtn" aria-label="очистить"
           onclick="typedClear(${jsq(f.key)})">×</button>
@@ -3022,6 +3054,11 @@ function promiseSection(d, fields){
 }
 // Сумма: храним и шлём только цифры, показываем с разрядами («15 000»).
 function fmtMoneyInput(v){
+  if(STATE.mode==='soft'){
+    const parts=String(v==null?'':v).replace(/\s/g,'').replace(',','.').replace(/[^0-9.]/g,'').split('.');
+    const whole=parts[0].slice(0,13).replace(/\B(?=(\d{3})+(?!\d))/g,' ');
+    return whole+(parts.length>1?'.'+parts.slice(1).join('').slice(0,2):'');
+  }
   const d=String(v==null?"":v).replace(/[^0-9]/g,"").slice(0,13);
   return d.replace(/\B(?=(\d{3})+(?!\d))/g," ");
 }
@@ -3029,6 +3066,7 @@ function onMoneyInput(el){
   const shown=fmtMoneyInput(el.value);
   if(el.value!==shown) el.value=shown;
   if(el.value) FORM_CLEARED.delete(el.dataset.k);
+  if(STATE.tab==='callform') FORM_TOUCHED.add(el.dataset.k);
 }
 function typedClear(key){
   const el=document.querySelector('#panel [data-k="'+key+'"]');
@@ -4768,10 +4806,10 @@ function dgWorkloadScreen(j,b){
   b.innerHTML=parts.join("");
 }
 // --- общие куски экранов статистики ---
-const DG_PRESETS=[["today","Сегодня"],["yesterday","Вчера"],["7d","7 дней"],["30d","30 дней"],["month","Месяц"],["custom","Даты…"]];
+const DG_PRESETS=[["today","Сегодня"],["yesterday","Вчера"],["7d","7 дней"],["30d","30 дней"],["month","Месяц"],["all","За всё время"],["custom","Даты…"]];
 // Пресеты — сегментом во всю ширину: шесть кнопок видны целиком и на 360 px
 // (лентой чипов «Месяц» уходил за край экрана).
-const DG_PSHORT={today:"Сегодня",yesterday:"Вчера","7d":"7 дн","30d":"30 дн",month:"Месяц",custom:"Даты"};
+const DG_PSHORT={today:"День",yesterday:"Вчера","7d":"7 дн","30d":"30 дн",month:"Мес.",all:"Всё",custom:"Даты"};
 function dgPeriodBar(rg){
   const cur=(rg.preset==="today"&&rg.shift===-1)?"yesterday":rg.preset;
   const chips=DG_PRESETS.map(([k,l])=>`<button class="${cur===k?"on":""}${k==="custom"?" cal":""}" aria-label="${l}" onclick="dgPreset('${k}')">${k==="custom"?ic("cal"):(DG_PSHORT[k]||l)}</button>`).join("");
@@ -4779,7 +4817,7 @@ function dgPeriodBar(rg){
       <span class="muted">—</span><input type="date" id="dgto" value="${esc(rg.to||"")}">
       <button class="chip on" onclick="dgCustom()">OK</button></div>`:"";
   return `<div class="seg per">${chips}</div>${custom}
-    <div class="pnav"><button class="arr" onclick="dgShift(-1)">‹</button>
+    <div class="pnav"><button class="arr" ${cur==='all'?'disabled':''} onclick="dgShift(-1)">‹</button>
       <div class="lbl">${esc(rg.label||"")}${rg.days>1?` <span class="muted" style="font-weight:400">· ${rg.days} дн</span>`:""}</div>
       <button class="arr" ${rg.next?"":"disabled"} onclick="dgShift(1)">›</button></div>`;
 }
@@ -5057,15 +5095,17 @@ function dgDrawSoftTable(el){
   rows.sort((a,b)=>k==="employee"?dir*String(a.employee).localeCompare(String(b.employee),"ru"):dir*((+a[k]||0)-(+b[k]||0)));
   DG.rows=rows;
   const th=(k,t)=>`<th onclick="dgSort('${k}')">${t}</th>`;
-  el.innerHTML=`<div class="stwrap pin"><table class="stt pin"><thead><tr><th class="l" onclick="dgSort('employee')">Сотрудник</th>${th("calls","Звонков")}${th("persons","Людей в звонках")}${th("portfolio","Портфель, людей")}${th("contracts","КД")}<th>Оплаты по реестру</th><th>Ждём</th><th>Сомнение</th></tr></thead><tbody>${rows.map((r,i)=>`<tr onclick="dgPickEmp(${i})"><td class="l"><div class="pname">${esc(r.employee)}</div><div class="psub">${esc(r.office||"без офиса")}</div></td><td>${r.calls||0}</td><td>${r.persons||0}</td><td>${r.portfolio||0}</td><td>${r.contracts||0}</td><td>${esc(r.paid_sum_text||"0")}</td><td>${esc(r.wait_text||"0")}</td><td>${esc(r.doubt_text||"0")}</td></tr>`).join("")||'<tr><td colspan="8" class="l muted">Никого не найдено</td></tr>'}</tbody></table></div><div class="muted">Оплаты и прогноз — по текущему портфелю реестра. Тап по сотруднику — звонки за период.</div>`;
+  el.innerHTML=`<div class="stwrap pin"><table class="stt pin"><thead><tr><th class="l" onclick="dgSort('employee')">Сотрудник</th>${th("calls","Звонков")}${th("persons","Людей в звонках")}${th("portfolio","Портфель, людей")}${th("contracts","КД")}${th("rpc","RPC")}${th("ptp","PTP")}${th("kp","KP")}<th>Оплаты по реестру</th><th>Ждём</th><th>Сомнение</th></tr></thead><tbody>${rows.map((r,i)=>`<tr onclick="dgPickEmp(${i})"><td class="l"><div class="pname">${esc(r.employee)}</div><div class="psub">${esc(r.office||"без офиса")}</div></td><td>${r.calls||0}</td><td>${r.persons||0}</td><td>${r.portfolio||0}</td><td>${r.contracts||0}</td><td>${r.rpc||0}</td><td>${r.ptp||0}</td><td>${r.kp||0}</td><td>${esc(r.paid_sum_text||"0")}</td><td>${esc(r.wait_text||"0")}</td><td>${esc(r.doubt_text||"0")}</td></tr>`).join("")||'<tr><td colspan="11" class="l muted">Никого не найдено</td></tr>'}</tbody></table></div><div class="muted">Оплаты и прогноз — по текущему портфелю реестра. Тап по сотруднику — звонки за период.</div>`;
 }
 function dgSoftEmp(j,b){
   DG.cases=j.cases||[]; DG.days=j.by_day||[]; DG.profile="soft"; DG.contour="soft";
   const rg=j.range||{};
   const metric=(label,value)=>`<div class="drow"><span>${esc(label)}</span><b>${esc(value)}</b></div>`;
+  const op=j.operation||{};
   const parts=[`<button class="back" onclick="dgGo('team')">‹ к сотрудникам</button>`,dgTop(j.employee||DG.emp||"",rg.label),dgPeriodBar(rg),dgContourChips("soft",j.profiles||["soft"]),
     `<div class="fsec"><div class="fsec-h">Софт · звонки</div><div class="drows">${metric("звонков за период",j.calls||0)}${metric("людей в звонках",j.persons||0)}${metric("портфель: людей / договоров",`${j.portfolio||0} / ${j.contracts||0}`)}${metric("оплаты по реестру",j.paid_sum_text||"0")}${metric("прогноз · ждём",j.wait_text||"0")}${metric("прогноз · сомнение",j.doubt_text||"0")}</div></div>`,
-    `<div class="muted">Звонки — по дню сохранения результата. Оплаты и прогноз — по текущему портфелю реестра.</div>`];
+    `<div class="fsec"><div class="fsec-h">Операционная воронка</div><div class="drows">${metric('RPC · результативные звонки',op.rpc||0)}${metric('PTP · обещания',op.ptp||0)}${metric('KP · полная оплата в срок',op.kp||0)}${metric('Частичные оплаты',op.partial||0)}${metric('RPC, %',op.rpc_rate==null?'—':(op.rpc_rate*100).toFixed(1)+'%')}${metric('PTP от RPC, %',op.ptp_rate==null?'—':(op.ptp_rate*100).toFixed(1)+'%')}${metric('KP от PTP, %',op.kp_rate==null?'—':(op.kp_rate*100).toFixed(1)+'%')}</div></div>`,
+    `<div class="muted">Звонки — по дню события. RPC — по статусам шаблона; KP — полная реестровая оплата в срок. Платёж относится к последнему обещанию.</div>`];
   if(DG.days.length>1) parts.push(dgBars(DG.days,"calls"));
   parts.push(`<div class="chips">${Object.entries(j.statuses||{}).map(([s,n])=>`<span class="chip">${esc(s)} <b>${n}</b></span>`).join("")}</div>`);
   parts.push(DG.cases.map((c,i)=>`<div class="pcard" onclick="dgPickCase(${i})"><div class="pinfo"><div class="pname">${esc(c.client)}</div><div class="psub">${esc(c.day_label||c.date)} · ${esc(c.outcome||"")}${c.n>1?` · КД ${c.n}`:""}</div>${c.comment?`<div class="psub">${esc(c.comment)}</div>`:""}</div><div class="pamt">${esc(c.money_text||"")}</div></div>`).join("")||`<div class="muted">За этот период звонков не было.</div>`);

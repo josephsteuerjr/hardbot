@@ -645,6 +645,7 @@ def find_header(grid: list[list], fields: list[dict]) -> tuple[int, dict]:
         required_targets -= hard_only | {"overall_result", "call_status", "add_address"}
     elif hard_only & set(best_map) and not ({"soft_call_status", "soft_comm_date"} & set(best_map)):
         required_targets -= soft_only
+    required_targets.discard("meeting_date")
     missing = sorted(required_targets - set(best_map))
     if missing:
         raise ValueError(
@@ -676,7 +677,7 @@ def is_soft_filled(row: dict) -> bool:
 
 # Что развозим по софт-книгам: колонки звонка + общие обещание/прогноз.
 SOFT_CASE_KEYS = ("soft_call_status", "soft_comm_date", "soft_comment",
-                  "promise_date", "forecast_sum", "forecast")
+                  "promise_date", "forecast_sum", "forecast", "meeting_date", "soft_extra_phone")
 
 
 # Сколько номеров КД показывать в предупреждении пульта: список нужен, чтобы
@@ -978,11 +979,15 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
             "hard" if "visit_date" in col_map and "soft_call_status" not in col_map else "both")
         anchors = {}
         for key in VISIT_KEYS:
-            if key == "soft_comment" and profile != "hard":
+            if key == "tips":
+                phone_day = parse_date((srv.get("_common_days") or {}).get("tips")) if profile != "hard" else None
+                dates = [d for d in (phone_day, hard_day if profile != "soft" else None) if d is not None]
+                anchor = max(dates) if dates else None
+            elif key == "soft_comment" and profile != "hard":
                 dates = [d for d in (call_day, parse_date(srv.get("_payment_day"))
                          if srv.get("_bot_payment_recorded") is True else None) if d is not None]
                 anchor = max(dates) if dates else None
-            elif key in ("promise_date", "forecast_sum", "forecast", "call_status"):
+            elif key in ("promise_date", "forecast_sum", "forecast", "call_status", "meeting_date"):
                 anchor = parse_date((srv.get("_common_days") or {}).get(key)) or common_day
             elif key in SOFT_CASE_KEYS:
                 anchor = call_day if profile != "hard" else None
@@ -1001,7 +1006,7 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
         filled_contract_ids.append(cid)
         values = {k: srv.get(k) for k in eligible
                   if k in col_map and (cell_text(srv.get(k)) != "" or
-                      k in ("soft_comm_date", "promise_date", "forecast_sum", "forecast")
+                      k in ("soft_comm_date", "promise_date", "forecast_sum", "forecast", "meeting_date")
                       and k in srv.get("_enrichment_clear_keys", []))}
         filled_cases += 1
         targets = file_rows.get(cid)

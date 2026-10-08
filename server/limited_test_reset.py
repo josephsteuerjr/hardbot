@@ -40,6 +40,7 @@ from photostore import PHOTO_DIR as DEFAULT_PHOTO_DIR
 
 
 RESET_TABLES = {
+    "registry_payments",
     # Журнал доставки пушей: telegram_id руководителей и ФИО сотрудников — это
     # ПД, переживать сброс ограниченного теста они не должны (в отличие от
     # training_rows, где ПД нет по построению).
@@ -133,6 +134,7 @@ EXPECTED_TABLES = RESET_TABLES | RETAINED_TABLES
 
 # Сначала зависимые/операционные сущности, затем registry и identity/config.
 DELETE_ORDER = (
+    "registry_payments",
     "push_log",       # телеметрия, зависимостей нет — но не в DELETE_ORDER
                       # значит RuntimeError «после reset остались строки»
     "control_checks",  # до visits: проверки ссылаются на выезды
