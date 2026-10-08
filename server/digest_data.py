@@ -1695,6 +1695,7 @@ def _soft_employee_stats(emp: str, rng: dict, calls=None, *, details=False) -> d
     historical_rows = {c["contract_id"]: c for c in db.clients_by_ids(history_ids)} if history_ids else {}
     operation = soft_reporting.build(calls, historical_rows, history,
         db.registry_payments_for(history_ids), asof=min(rng["to"], today_iso()))
+    operation["portfolio_money"] = soft_reporting.portfolio_money(contracts)
     result["operation"] = operation
     result.update({key: operation[key] for key in ("rpc", "ptp", "kp", "rpc_rate", "ptp_rate", "kp_rate")})
     # Старые числовые поля остаются совместимыми только для одной валюты.

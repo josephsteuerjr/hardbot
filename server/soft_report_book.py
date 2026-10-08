@@ -46,7 +46,7 @@ def write(bk, soft, period):
     employees = soft['employees']
     total = {'employee': 'Итого:', 'contracts': sum(r['contracts'] for r in employees),
              'calls': sum(r['calls'] for r in employees),
-             'debt_money': merge_money(r['debt_money'] for r in employees)}
+             'debt_money': merge_money(r['operation']['portfolio_money'] for r in employees)}
     total['operation'] = {
         'statuses': {s: sum(r['operation']['statuses'][s] for r in employees) for s in sr.STATUSES},
         **{k: sum(r['operation'][k] for r in employees) for k in ('rpc', 'ptp', 'kp', 'other', 'partial', 'incomplete', 'amount_missing')},
@@ -63,7 +63,7 @@ def write(bk, soft, period):
             ws.write_number(index, col, op['statuses'][status], int_fmt)
         monies = {}
         for col, key in [(3, 'debt_money'), (19, 'ptp_money'), (22, 'kp_money'), (31, 'partial_money')]:
-            value, unit = cash(r[key] if key == 'debt_money' else op[key]); monies[col] = (value, unit)
+            value, unit = cash((r[key] if is_total else op['portfolio_money']) if key == 'debt_money' else op[key]); monies[col] = (value, unit)
             fmt = bk.fmt(num_format='#,##0.00' + (f'" {unit}"' if unit else ''), **style)
             if isinstance(value, str): ws.write_string(index, col, value, fmt)
             else: ws.write_number(index, col, value, fmt)

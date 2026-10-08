@@ -52,6 +52,18 @@ def _money(amounts) -> list[dict]:
     return [{"unit": unit, "sum": float(amount)} for unit, amount in sorted(amounts.items()) if amount]
 
 
+def portfolio_money(contracts) -> list[dict]:
+    """Те же исходные колонки долга, с копейками для нового Excel-отчёта."""
+    amounts = defaultdict(Decimal)
+    for row in contracts:
+        current = debt._cell(row, "debt_today")
+        source = current if current not in (None, "") else debt._cell(row, "debt_total")
+        number = db.registry_payment_amount(source)
+        if number is not None:
+            amounts[debt.unit([debt._cell(row, "partner")])] += Decimal(str(number))
+    return _money(amounts)
+
+
 def _promise(call, rows) -> dict:
     data = values(call)
     ids = contract_ids(call)

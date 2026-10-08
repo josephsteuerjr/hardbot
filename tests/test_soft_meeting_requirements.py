@@ -221,3 +221,17 @@ def test_daily_and_all_time_reports_use_their_own_payment_cutoff(world):
     assert daily['Софт · операции']['V4'].value==0
     cumulative=load_workbook(BytesIO(dd.stats_xlsx({},dd.stats_range('all',today=db._as_date('2026-10-08')),employees=['S1'])),data_only=True)
     assert cumulative['Софт · операции']['V4'].value==1
+
+
+def test_portfolio_amount_keeps_cents_and_explicit_zero(world):
+    with db.connect() as conn:
+        conn.execute("UPDATE clients SET debt_today='1000.25',debt_total='9999' WHERE contract_id IN ('A','B')")
+        conn.commit()
+    rng=dd.stats_range('custom',frm=DAY,to='2026-10-08')
+    ws=load_workbook(BytesIO(dd.stats_xlsx({},rng,employees=['S1'])),data_only=True)['Софт · операции']
+    assert ws['D4'].value==2000.5
+    with db.connect() as conn:
+        conn.execute("UPDATE clients SET debt_today='0' WHERE contract_id='A'")
+        conn.commit()
+    ws=load_workbook(BytesIO(dd.stats_xlsx({},rng,employees=['S1'])),data_only=True)['Софт · операции']
+    assert ws['D4'].value==1000.25
