@@ -184,9 +184,10 @@ def main() -> int:
     p.add_argument("--office", default="")
     p.add_argument("--role", default="agent",
                    help="agent|manager|security|full|analyst (руководителям/аналитику "
-                        "нужно два подтверждения и запись в managers)")
+                        "нужно два подтверждения администраторов)")
     p.add_argument("--telegram-id", type=int, default=None,
-                   help="uid руководителя/аналитика, если в managers его не найти по ФИО")
+                   help="внутренний номер пользователя, если нужно задать явно "
+                        "(иначе берётся из managers или создаётся служебный)")
     p.add_argument("--password", default="")
     p.set_defaults(func=cmd_create)
 

@@ -153,9 +153,10 @@ def create_account(employee: str, username: str, password: str, *, office: str =
                    role: str = "agent", by: str = "cli",
                    telegram_id: int | None = None) -> dict:
     """Завести аккаунт. Роль по умолчанию agent (сотрудник Хард/Софт).
-    Руководителям/аналитику (manager/security/full/analyst) нужен telegram_id —
-    токен класса manager_devices адресован uid из managers; ищется по ФИО,
-    можно задать явно. Пароль печатается вызывающим ОДИН раз."""
+    Руководителям/аналитику нужен внутренний номер пользователя (легаси-поле
+    зовётся telegram_id, но Телеграм не используется): берётся из managers
+    по ФИО, при отсутствии — создаётся запись со служебным id 90 000 000 000+.
+    Пароль печатается вызывающим ОДИН раз."""
     employee = str(employee or "").strip()
     username = normalize_username(username)
     office = str(office or "").strip()
@@ -170,6 +171,11 @@ def create_account(employee: str, username: str, password: str, *, office: str =
         return {"ok": False, "error": "Пароль от 8 символов, с буквой и цифрой."}
     resolved_uid = None
     if role in PRIVILEGED:
+        # telegram_id здесь — ЛЕГАСИ-имя внутреннего номера пользователя, к
+        # самому Телеграму оно не привязано. Настоящее Telegram ни при чём:
+        # если человека нет в managers, заводим запись со СЛУЖЕБНЫМ id из
+        # диапазона 90 000 000 000+ (реальные id в эти числа не попадают),
+        # чтобы менеджерский токен и состав команды работали как обычно.
         if telegram_id is None:
             with db.connect() as conn:
                 row = conn.execute("SELECT telegram_id FROM managers WHERE name=?",
@@ -181,9 +187,18 @@ def create_account(employee: str, username: str, password: str, *, office: str =
                             break
             telegram_id = int(row["telegram_id"]) if row else None
         if telegram_id is None:
-            return {"ok": False, "error":
-                    "Для роли руководителя/аналитика нужен telegram_id: человека нет "
-                    "в managers (добавьте его туда или передайте --telegram-id)."}
+            with db.connect() as conn:
+                while True:
+                    candidate = 90_000_000_000 + secrets.randbelow(1_000_000)
+                    if not conn.execute("SELECT 1 FROM managers WHERE telegram_id=?",
+                                        (candidate,)).fetchone():
+                        break
+                role_row = role if role in ("manager", "security", "full") else "manager"
+                conn.execute("INSERT INTO managers(telegram_id,name,cities,employees,"
+                             "direction,role,created_at) VALUES(?,?,?,?,?,?,?)",
+                             (candidate, employee, "", "", "", role_row, _now()))
+                conn.commit()
+            telegram_id = candidate
         resolved_uid = int(telegram_id)
     with db.connect() as conn:
         if conn.execute("SELECT 1 FROM accounts WHERE username=?", (username,)).fetchone():

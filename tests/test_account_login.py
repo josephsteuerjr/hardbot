@@ -218,9 +218,16 @@ def test_manager_account_mints_manager_class_token(world):
     assert accounts.device_gate_by_token("manager_devices", row["id"])[0] == "ok"
 
 
-def test_privileged_role_requires_manager_binding(world):
-    bad = accounts.create_account("Неизвестный Человек", "ghost", "parol1234", role="analyst")
-    assert not bad["ok"] and "managers" in bad["error"]
+def test_privileged_without_binding_gets_synthetic_internal_id(world):
+    # Телеграм не нужен вовсе: человека нет в managers — запись заводится со
+    # служебным id 90 000 000 000+, менеджерский токен работает как обычно.
+    made = accounts.create_account("Клинов Дмитрий", "klinov", "parol1234", role="analyst")
+    assert made.get("ok"), made
+    with db.connect() as conn:
+        row = conn.execute("SELECT telegram_id FROM managers WHERE name='Клинов Дмитрий'").fetchone()
+    assert row and 90_000_000_000 <= row["telegram_id"] < 90_001_000_000
+    result = accounts.login("klinov", "parol1234", device=desktop_device(), entrance="internal")
+    assert result["action"] == "ok_pending" and result.get("token")
 
 
 def test_agent_role_single_confirmation_still(world):
