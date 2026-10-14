@@ -37,6 +37,9 @@ data/
 
 # === Локальные ops-скрипты и бэкап git-истории hardbot (не для ИТ/ИБ) ===
 _local/
+hard-desk/installer/bin/
+hard-desk/setup-build/
+hard-desk/setup-qa/
 
 # === Рабочие каталоги единиц установки (создаются на месте, не в репозитории) ===
 # Модель речи (скачивается при первом старте), дорожные графы (собираются
@@ -153,3 +156,11 @@ hard-pult/hard-pult.exe
 # Собранный пульт «Хард» для этой машины (копия hard-desk/dist/Хард): ярлык
 # «Пульт» на рабочем столе смотрит сюда. Не в git — собирается tools/dist.mjs.
 /Хард/
+hard-desk/backend-build/
+hard-desk/backend-dist/
+hard-desk/installers/
+
+# Выход prepare-release.mjs (релизные пакеты — артефакты, пересобираются)
+hard-desk/release/
+# Собранные ASAR-бандлы — бинарные артефакты сборки, в истории им не место
+*.asar

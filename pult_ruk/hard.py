@@ -257,6 +257,7 @@ class Hard:
             async with session.request(
                     method, url, params=clean or None, json=payload,
                     headers=headers,
+                    allow_redirects=False,
                     timeout=aiohttp.ClientTimeout(total=timeout or self.timeout)) as resp:
                 body = await resp.read()
                 status = resp.status
@@ -267,6 +268,8 @@ class Hard:
                 "занят — на экране то, что удалось получить в прошлый раз.")
         except aiohttp.ClientError:
             raise HardTrouble("offline", OFFLINE)
+        if 300 <= status < 400:
+            raise HardTrouble("server", "Сервер переадресовал запрос. Токен на другой адрес не отправлен; проверьте адрес сервера.")
         if status >= 400:
             raise self._trouble(status, body)
         try:
@@ -410,11 +413,15 @@ class Hard:
             resp = await session.get(
                 self.base + PATHS["report"], params=clean or None,
                 headers={"X-App-Token": self.token},
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=300, sock_read=120))
         except asyncio.TimeoutError:
             raise HardTrouble("offline", "Сервер «Хард» не успел собрать книгу.")
         except aiohttp.ClientError:
             raise HardTrouble("offline", OFFLINE)
+        if 300 <= resp.status < 400:
+            resp.release()
+            raise HardTrouble("server", "Сервер переадресовал загрузку. Токен на другой адрес не отправлен.")
         if resp.status >= 400:
             body = await resp.read()
             resp.release()

@@ -491,7 +491,10 @@ def _person_payload(p: dict, on_date: str) -> dict:
         raw = rawv(key)
         # title — подпись поля: без неё карточка была столбиком голых значений
         # («3 лицо», «Ждём», «17512»), и что есть что — угадывай.
-        visit.append({"key": key, "value": val, "title": tf(key, "ru"),
+        title = tf(key, "ru")
+        if title == key and key in db.BY_KEY:
+            title = db.BY_KEY[key].title
+        visit.append({"key": key, "value": val, "title": title,
                       "registry": raw if (raw and val and raw != val) else None})
 
     comment = pick("visit_comment") or pick("call_comment")
@@ -649,14 +652,26 @@ def _pretty_m(m) -> str:
     return f"{m / 1000:.1f} км" if m >= 1000 else f"{int(m)} м"
 
 
+def _contract_cards(rows, profile):
+    return [{"contract_id": r["contract_id"], "partner": r["partner"],
+             "total": db.registry_payment_amount(r["debt_today"] if r["debt_today"] not in (None, "") else r["debt_total"]),
+             "unit": debt.unit([r["partner"]]),
+             "status": db.effective_soft_status(r) if profile == "soft" else db.common_result(r).get("overall_result") or "",
+             "last_payment_sum": db.registry_payment_amount(r["last_payment_sum"]), "last_payment_date": r["last_payment_date"],
+             "current_payment": r["paid_current"]} for r in rows]
+
+
 def person_data(mgr: dict, on_date: str, employee: str, rep: str,
-                employees: list[str] | None = None, *, by_soft: bool = False) -> dict | None:
+                employees: list[str] | None = None, *, by_soft: bool = False,
+                current_only: bool = False) -> dict | None:
     employees = employees if employees is not None else sorted_employees(mgr)
     if employee not in employees:
         return None
     if by_soft:
         rows = [r for r in db.person_contracts_by_soft(rep) if r["responsible_soft"] == employee or
-                db.employee_called(employee, [r["contract_id"]])]
+                (not current_only and db.employee_called(employee, [r["contract_id"]]))]
+        if current_only and not any(r['contract_id'] == rep for r in rows):
+            return None
         p = next(iter(db._group_persons(rows)), None) if rows else None
         if p is None:
             return None
@@ -664,20 +679,34 @@ def person_data(mgr: dict, on_date: str, employee: str, rep: str,
         row = db.get_client(rep)
         common = db.common_result(row)
         soft = db.bot_call_snapshot(row) or {}
-        data.update(profile="soft", outcome=row["soft_call_status"] or "", evidence={},
+        data.update(profile="soft", outcome=db.effective_soft_status(row), evidence={},
                     fill_text="", geo=None, learned_point=False, shots=[], photos=0, tips="",
                     dates={"promise_date": common.get("promise_date"), "visit_date": None, "reminder_date": None, "meeting_date": None},
                     comment=row["soft_comment"] or "",
                     comment_display="\n".join(comment_view.newest_first(row["soft_comment"])), visit=[
                         {"key": key, "title": db.BY_KEY[key].title if key in db.BY_KEY else "Когда звонить снова",
-                         "value": common.get(key, soft.get(key, row[key]))}
+                         "value": db.effective_soft_status(row) if key == "soft_call_status" else common.get(key, soft.get(key, row[key]))}
                         for key in ("soft_call_status", "soft_comm_date", "soft_next_call_date", "overall_result", "promise_date", "forecast_sum", "forecast")],
-                    calls=[{"day": r["created_at"], "payload": r["payload"]}
+                    calls=[{"id": r["id"], "day": r["created_at"], "payload": r["payload"]}
                            for r in db.calls_for_person(rep) if r["employee"] == employee])
+        import current_promises
+        current = current_promises.soft_data([employee], today_iso())
+        ids = {r["contract_id"] for r in rows}
+        data["current_promises"] = [i for e in current["employees"] for i in e["items"]
+                                    if ids.intersection(i["contracts"])]
+        data["reported_payments"] = [p for ps in db.reported_payments_for(sorted(ids)).values()
+                                     for p in ps if p["employee"] in employees]
+        data["contracts"] = _contract_cards(rows, "soft")
         return data
-    persons = db.persons_processed(employee, on_date)
-    p = next((x for x in persons if x["rep"] == rep), None)
-    if p is None:
+    if current_only:
+        rows = [r for r in db.person_contracts(rep) if r['responsible'] == employee]
+        if not any(r['contract_id'] == rep for r in rows):
+            return None
+        p = next(iter(db._group_persons(rows)), None) if rows else None
+    else:
+        persons = db.persons_processed(employee, on_date)
+        p = next((x for x in persons if x["rep"] == rep), None)
+    if p is None and not current_only:
         # Экран статистики ведёт в карточку и по ПРОШЛОМУ выезду: человек, к
         # которому с тех пор съездили ещё раз, в persons_processed того дня уже
         # не значится. Карточка показывает текущее состояние — снимок сильнее.
@@ -690,7 +719,22 @@ def person_data(mgr: dict, on_date: str, employee: str, rep: str,
             p = next(iter(db._group_persons(rows)), None)
     if p is None:
         return None
-    return _person_payload(p, on_date)
+    # A historical visit grants access to its contract, not to newly grouped
+    # contracts of the new owner. Apply scope before metadata, sums and media.
+    visible = [r for r in p['contracts'] if r['responsible'] in employees or r['responsible_soft'] in employees
+               or (not current_only and db.employee_visited(employee, [r['contract_id']]))]
+    if not visible:
+        return None
+    scoped = next(iter(db._group_persons(visible)))
+    scoped['rep'] = rep
+    data = _person_payload(scoped, on_date)
+    ids = [r['contract_id'] for r in visible]
+    data['contracts'] = _contract_cards(visible, "hard")
+    data['reported_payments'] = [pay for ps in db.reported_payments_for(ids).values()
+                               for pay in ps if pay['employee'] in employees]
+    import office_work
+    data['office_history'] = office_work.person_data(visible)['history'] if visible else []
+    return data
 
 
 # --- ЭКРАН: случаи за окном (тап по плашке сводки) ---------------------------
@@ -1877,7 +1921,7 @@ BOOK_BASE_HEAD = ("Сотрудник", "Страна", "Офис", "Выезд�
                   "Внесено позже", "Без гео",
                   # Подтверждение выезда (evidence.py): четыре счётчика и
                   # среднее время у адреса — по подтверждённым выездам.
-                  "Подтверждено на адресе", "У адреса не был",
+                  "Точка рядом с адресом", "Точка далеко от адреса",
                   "Нечем проверить", "Признаки серии", "Заполнен не на адресе",
                   "У адреса, среднее",
                   "Заполнение карточки, среднее",
@@ -2159,7 +2203,7 @@ DAILY_REPORT_COLUMNS = (
     ("today_photo", "С фото сегодня", 13),
     ("overdue", "Просрочено обещаний", 14),
     ("confirmed", "На адресе подтверждено", 14),
-    ("far", "У адреса не был", 13),
+    ("far", "Точка далеко от адреса", 22),
     ("unverified", "Нечем проверить", 13),
     ("total_persons", "Отработано всего", 13),
     ("total_visits", "Выездов всего", 12),
@@ -2198,7 +2242,7 @@ def daily_report_caption(data: dict) -> str:
     # не удалось. Ноль по всем трём — строки нет (старые оболочки).
     if t.get("confirmed") or t.get("far") or t.get("unverified"):
         parts.append(f"🛡 На адресе подтверждено: <b>{t.get('confirmed', 0)}</b> · "
-                     f"у адреса не был: <b>{t.get('far', 0)}</b> · "
+                     f"точка далеко от адреса: <b>{t.get('far', 0)}</b> · "
                      f"проверить не удалось: {t.get('unverified', 0)}"
                      + (f" · заполнено не на адресе: {t['saved_away']}"
                         if t.get("saved_away") else "")

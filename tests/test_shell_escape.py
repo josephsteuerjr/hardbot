@@ -71,7 +71,7 @@ def test_contract_with_an_apostrophe_opens_from_list_drafts_and_route():
         routes: {"/api/route_day": () => ({status: 200, body: {ok: true, km: 1,
                  order: [{rep: REP, client: "Ne'matov", totals: [{sum: 1, unit: "сум"}], km: 1}]}})}});
       const w = newWorld({ls: {app_token: A,
-        ["draft:anon:" + REP]: JSON.stringify({v: {visit_comment: "x"}, keys: ["visit_comment"], at: 1})}});
+        ["draft:1:" + REP]: JSON.stringify({v: {visit_comment: "x"}, keys: ["visit_comment"], at: 1})}});
       const p = await openPage(w, {url: HOST, server: srv});
       await p.booted();
       out.list = onclicks(p.html("plist"), "openP").map(h => call(h, "openP"));

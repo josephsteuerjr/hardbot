@@ -6,6 +6,7 @@
 «Выйти» (стёр бы очередь) не показывает.
 """
 from pathlib import Path
+import re
 
 from shell_node import run_shell
 
@@ -73,7 +74,7 @@ def test_without_login_asks_for_a_link_then_sends():
     assert out["redeem"]["code"] == "NEWCODE123"
     assert out["dump"]["ls"]["app_token"] == B
     assert out["dump"]["queue"] == ["op-2"]
-    assert "Всё отправлено" in out["after"]
+    assert "Сервер не принял" in out["after"] and "Всё отправлено" not in out["after"]
     assert "Открыть новое приложение" in out["final"] and "https://new.test/" in out["final"]
 
 
@@ -81,4 +82,4 @@ def test_texts_exist_in_all_three_languages():
     index = (Path(__file__).resolve().parent.parent / "server" / "miniapp" / "index.html").read_text("utf-8")
     for key in ("drainTitle:", "drainWhy:", "drainAuth:", "drainLogin:", "drainFailed:",
                 "drainDrafts:", "drainOpen:", "drainNet:", "drainBadLink:"):
-        assert index.count(key) == 3, key
+        assert len(re.findall(r"(?<![.\w])" + re.escape(key), index)) == 3, key

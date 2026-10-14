@@ -28,6 +28,7 @@ import gzip
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -646,6 +647,7 @@ def find_header(grid: list[list], fields: list[dict]) -> tuple[int, dict]:
     elif hard_only & set(best_map) and not ({"soft_call_status", "soft_comm_date"} & set(best_map)):
         required_targets -= soft_only
     required_targets.discard("meeting_date")
+    required_targets -= {"last_payment_sum", "last_payment_date"}
     missing = sorted(required_targets - set(best_map))
     if missing:
         raise ValueError(
@@ -902,6 +904,8 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
         else:
             col_map[source_key] = target_col
     is_date_key = {f["key"]: bool(f.get("date")) for f in fields}
+    for source,target in WRITE_TARGETS.items():
+        is_date_key[source] = is_date_key.get(target,False)
 
     data_start = header_row + 1
     if data_start < len(grid) and _is_source_row(grid[data_start]):
@@ -979,7 +983,12 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
             "hard" if "visit_date" in col_map and "soft_call_status" not in col_map else "both")
         anchors = {}
         for key in VISIT_KEYS:
-            if key == "tips":
+            if key in ("_reported_payment_sum", "_reported_payment_date"):
+                anchor = (parse_date(srv.get("_payment_day"))
+                          if profile != "hard" and srv.get("_bot_payment_recorded") is True else None)
+            elif key == "soft_call_status" and profile != "hard":
+                anchor = parse_date(srv.get("_payment_status_day")) or call_day
+            elif key == "tips":
                 phone_day = parse_date((srv.get("_common_days") or {}).get("tips")) if profile != "hard" else None
                 dates = [d for d in (phone_day, hard_day if profile != "soft" else None) if d is not None]
                 anchor = max(dates) if dates else None
@@ -1033,7 +1042,11 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
                 elif merge_mode == "preserve_text":
                     out_val = merge_preserving_text(cur, val)
                 elif merge_mode == "replace":
-                    out_val = parse_date(val) if is_date and parse_date(val) \
+                    if key == '_reported_payment_sum' and (not math.isfinite(float(val)) or not 0<float(val)<=1e9):
+                        raise ValueError('Некорректная сумма записанной оплаты')
+                    if key == '_reported_payment_date' and parse_date(val) is None:
+                        raise ValueError('Некорректная дата записанной оплаты')
+                    out_val = float(val) if key == "_reported_payment_sum" else parse_date(val) if is_date and parse_date(val) \
                         else cell_text(val)
                 else:
                     raise ValueError(
@@ -1234,6 +1247,64 @@ def _workbook_grid(wb, fields: list[dict]) -> tuple[object, list[list]]:
     return ws, grid
 
 
+def _payment_statistics_plan(wb, grid, fields, rows, since=None, until=None, *, warnings=None) -> list[dict]:
+    """Repair only the known statistics SUMIF accidentally pointing to dates.
+
+    Collection statistics still use the existing authoritative Current Payments
+    column. Manual last-payment columns do not redefine confirmed income or KP.
+    """
+    lo,hi=visit_window(since,until)
+    if not any(r.get('_bot_payment_recorded') is True and r.get('_profile') != 'hard'
+               and (day:=parse_date(r.get('_payment_day'))) is not None
+               and (lo is None or day>=lo) and (hi is None or day<=hi) for r in rows):
+        return []
+    sheets = {sheet.name:sheet for sheet in wb.sheets}
+    sheet = sheets.get('Статистика сотрудника')
+    if sheet is None or norm_title(sheet.range('C1').value) != norm_title('Взыск'):
+        return []
+    header,cols = find_header(grid,fields)
+    if 'last_payment_date' not in cols:
+        return []
+    def letter(index):
+        value='';index+=1
+        while index:
+            index,remainder=divmod(index-1,26);value=chr(65+remainder)+value
+        return value
+    dates=letter(cols['last_payment_date'])
+    current=[i for i,title in enumerate(grid[header]) if norm_title(title)==norm_title('Текущие платежи')]
+    changes=[]
+    for row in range(2,7):
+        cell=f'C{row}'
+        formula=sheet.range(cell).formula
+        expected=f"=SUMIF(Портфели!A:A,'Статистика сотрудника'!$A{row},Портфели!{dates}:{dates})"
+        if formula != expected:
+            continue
+        if len(current)!=1:
+            if warnings is not None:
+                warnings.append(f'{sheet.name}!{cell}: формула суммирует даты. '
+                    'Колонка «Текущие платежи» отсутствует или неоднозначна; '
+                    'формула сохранена, сумма взыскания требует исправления.')
+            continue
+        amount=letter(current[0])
+        changes.append({'sheet':sheet.name,'cell':cell,'before':formula,
+                        'after':expected.rsplit(f'!{dates}:{dates}',1)[0]+f'!{amount}:{amount})'})
+    return changes
+
+
+def _set_payment_statistics_plan(plan, wb, grid, fields, rows, since=None, until=None):
+    plan['statistics_warnings'] = []
+    plan['statistics_formula_changes'] = _payment_statistics_plan(
+        wb, grid, fields, rows, since, until, warnings=plan['statistics_warnings'])
+
+
+def _apply_payment_statistics(wb, changes):
+    for change in changes:
+        cell=wb.sheets[change['sheet']].range(change['cell'])
+        if cell.formula != change['before']:
+            raise RuntimeError('Формула статистики изменилась после проверки')
+        cell.formula=change['after']
+
+
 def _plan_workbook(app, path: Path, fields: list[dict], rows: list[dict],
                    since=None, until=None, ledger=None,
                    server_authoritative: bool = False, decisions=None) -> dict:
@@ -1242,9 +1313,11 @@ def _plan_workbook(app, path: Path, fields: list[dict], rows: list[dict],
     wb = app.books.open(str(path), update_links=False, read_only=True)
     try:
         _ws, grid = _workbook_grid(wb, fields)
-        return build_plan(grid, fields, rows, since, until,
+        plan = build_plan(grid, fields, rows, since, until,
                           ledger=ledger, server_authoritative=server_authoritative,
                           decisions=decisions)
+        _set_payment_statistics_plan(plan,wb,grid,fields,rows,since,until)
+        return plan
     finally:
         wb.close()
 
@@ -1547,9 +1620,10 @@ def _enrich_workbook(app, path: Path, fields: list[dict], rows: list[dict],
         plan = build_plan(grid, fields, rows, since, until,
                           ledger=ledger, server_authoritative=server_authoritative,
                           decisions=decisions)
+        _set_payment_statistics_plan(plan,wb,grid,fields,rows,since,until)
         writes = plan["writes"]
         plan["backup"] = None
-        if writes:
+        if writes or plan['statistics_formula_changes']:
             # бэкап — только когда реально есть что писать (файл на диске ещё
             # не изменён: Excel не сохранял); нет записей — нет мусорных копий
             plan["backup"] = str(backup_copy(path, backup_root))
@@ -1560,6 +1634,7 @@ def _enrich_workbook(app, path: Path, fields: list[dict], rows: list[dict],
                     ws.range((r + 1, c + 1)).value = _excel_safe(val)
                     if i % 200 == 0:
                         log(f"{path.name}: пишу {i} / {len(writes)}…")
+            _apply_payment_statistics(wb,plan['statistics_formula_changes'])
             wb.save()
         plan["sheet"] = ws.name
         plan["file"] = str(path)
@@ -1680,6 +1755,8 @@ def _plan_summary(plan: dict) -> dict[str, Any]:
         "errors": [],
         "visit_cols_absent": list(plan["visit_cols_absent"]),
         "missing_contract_ids": list(plan["missing"]),
+        "statistics_formula_changes": list(plan.get("statistics_formula_changes") or []),
+        "statistics_warnings": list(plan.get("statistics_warnings") or []),
     }
 
 
@@ -1871,8 +1948,11 @@ def _enrich_local(
                               ledger=ledger, server_authoritative=server_authoritative,
                               decisions=decisions)
             writes = plan["writes"]
-            if writes:
+            _set_payment_statistics_plan(plan,wb,grid,fields,rows,since,until)
+            has_changes = bool(writes or plan['statistics_formula_changes'])
+            if has_changes:
                 _write_cells(ws, writes, log, path.name)
+                _apply_payment_statistics(wb,plan['statistics_formula_changes'])
                 wb.save()
             plan["sheet"] = ws.name
         finally:
@@ -1881,7 +1961,7 @@ def _enrich_local(
         plan["file"] = str(path)
         plan["backup"] = None
         backup_path = backup_sha = None
-        if not writes:
+        if not has_changes:
             # Писать нечего — шару не трогаем. Хэш после — честный, с шары:
             # если книгу за это время изменили, zero-write контракт это покажет.
             post_sha = _sha256_file(path)
@@ -1895,7 +1975,7 @@ def _enrich_local(
                                        ledger=ledger,
                                        server_authoritative=server_authoritative,
                                        decisions=decisions)
-            if post_plan["cells_written"] or post_plan["changed_cases"]:
+            if post_plan["cells_written"] or post_plan["changed_cases"] or post_plan.get('statistics_formula_changes'):
                 raise RuntimeError(f"{path.name}: повторный enrichment plan не нулевой "
                                    "— на шару ничего не записано")
             mark("Excel: повторная проверка")
@@ -2293,7 +2373,7 @@ def write_batch_receipt(results: list[dict], receipt_dir, *,
                 "cells_over_nonempty", "changed_cases", "out_of_window",
                 "ledger_mode", "server_authoritative", "ledger_seeded",
                 "cells_updated_delivered", "resolved_file", "resolved_server",
-                "error", "written_unverified", "not_attempted")}
+                "error", "written_unverified", "not_attempted", "statistics_formula_changes", "statistics_warnings")}
             for r in results
         ],
         "displaced": [

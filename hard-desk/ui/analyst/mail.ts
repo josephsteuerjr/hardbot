@@ -5,21 +5,12 @@ import { hard } from "../kit/api";
 import { ask, esc, toast } from "../kit/dom";
 import { refresh, type Section } from "../kit/shell";
 import { DataTable } from "../kit/table";
-import { guard, local, note } from "./lib";
+import { guard, local, note, runJob } from "./lib";
 
 type Person = { name: string; email: string };
 
 async function job(body: unknown, log: (s: string) => void): Promise<any> {
-  const { job: id } = await local("/mail/send", body);
-  for (;;) {
-    await new Promise((r) => setTimeout(r, 700));
-    const j = await local("/job", { id });
-    // Упавшая задача кладёт в журнал трейсбек — человеку показываем только
-    // текст ошибки.
-    if (j.state === "failed") { log(j.error || "не вышло"); throw new Error(j.error || "не вышло"); }
-    if (j.log?.length) log(j.log[j.log.length - 1]);
-    if (j.state === "done") return j.result;
-  }
+  return runJob("/mail/send", body, log);
 }
 
 export const mail: Section = {

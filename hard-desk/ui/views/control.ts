@@ -3,6 +3,7 @@
 // Слои: статистика по людям, гео-запись дня по времени (сопоставление фрода
 // с перемещением), контрольный обзвон, закрепления и доступ.
 import { api, hard } from "../kit/api";
+import { tr } from "../kit/i18n";
 import { dayTitle, esc, icon, n, plural, toast } from "../kit/dom";
 import { openPanel, setHead, type Section } from "../kit/shell";
 import { DataTable } from "../kit/table";
@@ -568,7 +569,7 @@ async function renderSoft(root: HTMLElement, before = "", earlier: any[] = []) {
       { key: "detail", title: "Новая заметка", value: x => x.detail },
       { key: "flags", title: "Поводы проверить", value: x => (x.flags || []).join(', '), html: x => flagsHtml(x.flags) },
     ],
-    onRow: x => {
+    onRow: async x => {
       const panel = openPanel(`<h2>${esc(x.debtor || x.rep)}</h2>`);
       panel.innerHTML = `<dl class="kv"><dt>Сотрудник</dt><dd>${esc(x.employee)}</dd>
         <dt>Договор</dt><dd>${esc(x.rep)}</dd><dt>Время результата (UTC+5)</dt><dd>${esc(x.at)}</dd>
@@ -577,6 +578,35 @@ async function renderSoft(root: HTMLElement, before = "", earlier: any[] = []) {
         <p class="muted">Текст хранится в журнале конкретного звонка. Для подтверждения контакта нужна независимая проверка.</p>
         ${canExcel ? '<button class="btn" id="soft-case">Открыть карточку и историю</button>' : ''}`;
       panel.querySelector("#soft-case")?.addEventListener("click", () => void openPerson(x.employee, x.rep, x.day, "soft"));
+      const id = x.call_id || Number(String(x.id).replace(/^call/, ""));
+      const result = await call("/api/control/call_review", { call_id: id });
+      if (!panel.isConnected) return;
+      if (!result.ok) { panel.insertAdjacentHTML("beforeend", problem(result.text || "Проверка не загрузилась")); return; }
+      const review = result.data.review || {};
+      const option = (value: string, label: string, selected: string) => `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`;
+      panel.insertAdjacentHTML("beforeend", `<div class="block"><h3>Проверка звонка №${n(id)}</h3>
+        <p class="hint">${esc(tr("sourceNotice"))} Решение проверяющего не изменяет результат сотрудника.</p>
+        <div class="row"><label>Срок <input class="input" type="date" data-review-due value="${esc(review.due || new Date().toLocaleDateString('en-CA'))}"></label>
+        <label>Состояние <select class="input" data-review-state>${option("open", "Открыта", review.state || "open")}${option("checking", "Проверяется", review.state)}${option("closed", "Завершена", review.state)}</select></label></div>
+        <label>Источник <select class="input" data-review-source>${[["employee_report", "Запись сотрудника"], ["customer_callback", "Контрольный звонок клиенту"], ["telephony", "Сведения телефонии"], ["registry", "Реестр платежей"], ["other", "Другой источник"]].map(([v,l]) => option(v,l,review.source || "employee_report")).join("")}</select></label>
+        <label>Ссылка или реквизиты источника <input class="input" data-review-ref value="${esc(review.source_ref || "")}" maxlength="1000"></label>
+        <label>Решение <select class="input" data-review-decision>${[["", "Пока нет решения"], ["confirmed", "Подтверждено проверкой"], ["disputed", "Есть расхождение"], ["inconclusive", "Недостаточно данных"], ["no_contact", "Связаться не удалось"]].map(([v,l]) => option(v,l,review.decision || "")).join("")}</select></label>
+        <label>Комментарий <textarea class="input" data-review-note maxlength="10000">${esc(review.note || "")}</textarea></label>
+        <p class="muted">Проверяющий: ${review.checker_uid ? esc(review.checker_uid) : "назначается при сохранении на текущий вход"}</p>
+        <button class="btn" data-review-save>Сохранить проверку</button><div role="status" data-review-status></div>
+        <h3>История проверки</h3>${(result.data.history || []).map((h: any) => `<p>${esc(h.at)} · проверяющий ${esc(h.actor)} · ${esc(h.values.state)} / ${esc(h.values.decision)}<br>${esc(h.values.note)}<br>Источник: ${esc(h.values.source)} · ${esc(h.values.source_ref)}</p>`).join("") || '<p class="muted">Проверка ещё не назначена.</p>'}</div>`);
+      const button = panel.querySelector<HTMLButtonElement>("[data-review-save]")!;
+      let revision = review.revision || 0;
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        const value = (key: string) => panel.querySelector<HTMLInputElement>(`[data-review-${key}]`)!.value;
+        const saved = await call("/api/control/call_review", undefined, "POST", { call_id: id, revision,
+          op_id: crypto.randomUUID(), due: value("due"), state: value("state"), source: value("source"),
+          source_ref: value("ref"), decision: value("decision"), note: value("note") });
+        button.disabled = false;
+        panel.querySelector("[data-review-status]")!.textContent = saved.ok ? tr("reviewSaved") : saved.text || "Не сохранилось";
+        if (saved.ok) revision = saved.data.review.revision;
+      });
     },
   }).setRows(events);
   root.querySelector("#soft-more")?.addEventListener("click", () => void renderSoft(root, d.next_before, events));

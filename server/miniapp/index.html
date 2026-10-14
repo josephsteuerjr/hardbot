@@ -985,6 +985,7 @@ const IDB = (()=>{
 // Плюс не трогался localStorage, и черновик формы с очередью трека прошлого
 // выездника продолжали жить под новым именем.
 async function clearLocalData(opts){
+  if(opts&&opts.keepQueue) await stampQueueOwners();
   dayStop(true);
   stopNavWatch();
   dayClearOn();
@@ -1016,6 +1017,7 @@ const LS_KEEP=[OUT_KEY];
 let WIPE_GEN=0;
 async function wipeDevice(opts){
   const keepQueue=!!(opts&&opts.keepQueue);
+  if(keepQueue) await stampQueueOwners();
   WIPE_GEN++;
   // Сначала глушим всё, что само пишет в хранилище: трек поездки, следы
   // карточки, черновик формы (beforeunload и уход в фон вписали бы его обратно).
@@ -1023,9 +1025,9 @@ async function wipeDevice(opts){
   try{ dayStop(); }catch(e){}
   try{ clearTimeout(draftTimer); stopAutoSync(); draftDirty=false; prStop(); }catch(e){}
   try{ closePick(); closeAsk("swapsheet"); closeAsk("outsheet"); PhotoAudit.free(); }catch(e){}
-  STATE.cur=null; STATE.persons=[]; STATE.roles=null;
+  STATE.cur=null; STATE.persons=[]; STATE.roles=null; STATE.uid=null; STATE.employee="";
   try{
-    Object.keys(localStorage).forEach(k=>{ if(LS_KEEP.indexOf(k)<0) localStorage.removeItem(k); });
+    Object.keys(localStorage).forEach(k=>{ if(LS_KEEP.indexOf(k)<0&&!(keepQueue&&k==="hb_queue_owner_blocked")) localStorage.removeItem(k); });
   }catch(e){}
   clearPendingToken();
   URLT=null;
@@ -1095,13 +1097,15 @@ function uuid(){
 function hhmm(dt){ return String(dt.getHours()).padStart(2,"0")+":"+String(dt.getMinutes()).padStart(2,"0"); }
 
 async function cacheBootstrap(d){
-  try{ await IDB.put("kv",{lang:d.lang,meta:d.meta,persons:d.persons,kind:d.kind,
-    employee:d.employee,roles:d.roles||null,at:Date.now()},"bootstrap"); }catch(e){}
+  try{const old=await IDB.get("kv","bootstrap");if(old&&old.scope_version&&d.scope_version&&old.scope_version!==d.scope_version)await IDB.clear("cards");}catch(e){}
+  try{ await IDB.put("kv",{uid:d.uid,lang:d.lang,meta:d.meta,persons:d.persons,kind:d.kind,
+    employee:d.employee,roles:d.roles||null,scope_version:d.scope_version,_mode:d._mode||STATE.mode,at:Date.now()},"bootstrap"); }catch(e){}
 }
-async function loadBootstrapSnapshot(){ try{ return await IDB.get("kv","bootstrap"); }catch(e){ return null; } }
+function offlineLeaseValid(s){const age=Date.now()-Number(s&&s.at);return Number.isFinite(age)&&age>=0&&age<=8*60*60*1000;}
+async function loadBootstrapSnapshot(){ try{ const s=await IDB.get("kv","bootstrap"); return offlineLeaseValid(s)?s:null; }catch(e){ return null; } }
 function cardKey(rep,profile){ return (profile==="soft"?"soft:":"")+rep; }
 function storeCard(d,rep){return IDB.put("cards",d,cardKey(rep,d._profile||(STATE.mode==="soft"?"soft":"hard")));}
-async function loadCard(rep){ try{ return (await IDB.get("cards",cardKey(rep,STATE.mode)))||null; }catch(e){ return null; } }
+async function loadCard(rep){ try{ if(!(await loadBootstrapSnapshot())) return null; return (await IDB.get("cards",cardKey(rep,STATE.mode)))||null; }catch(e){ return null; } }
 // Прогрев кэша всех карточек одним запросом (только онлайн, в фоне, не блокирует UI).
 // Полные карточки портфеля в оффлайн-кэш. `manual` — запуск кнопкой: тогда процесс
 // показываем, при фоновом прогреве после входа — только итог. Раскладка идёт
@@ -1209,6 +1213,9 @@ async function updateOffBar(){
   if(rejected.length){
     const reps=[...new Set(rejected.map(it=>it.rep).filter(Boolean))].slice(0,3).join(", ");
     msg+=(msg?" · ":"")+"⚠️ "+rejected.length+" "+t.savefailed+(reps?" ("+reps+")":"");
+    if(rejected.some(it=>it.failed==="server-owner")) msg+=" · Сохранены записи прежнего входа. Восстановите вход того же сотрудника для отправки.";
+    const fields=[...new Set(rejected.flatMap(it=>Object.keys(it.rejected||{})))];
+    if(fields.length) msg+=" · Требуют проверки поля: "+fields.join(", ");
   }
   // Обновление ДОПОЛНЯЕТ полосу, а не подменяет её. Подменяло — и пропадали
   // разом счётчик очереди, «N фото нужно переснять [код]» и кнопка «Переснять»,
@@ -1216,6 +1223,7 @@ async function updateOffBar(){
   if(UPDATE_READY) msg=(msg?msg+" · ":"")+t.updready;
   e.className="offbar on";
   e.innerHTML=`<span class="d"></span><span>${esc(msg)}</span>`+
+    (rejected.length?`<button class="offact" onclick="showQueueProblems()">${esc(recoveryText('review'))}</button>`:"")+
     (failed?`<button class="offact" onclick="retakeFailedPhoto()">${esc(t.retake)}</button>`:"")+
     (UPDATE_READY?`<button class="offact" onclick="reloadForUpdate()">${esc(t.updbtn)}</button>`:"");
 }
@@ -1238,14 +1246,58 @@ function retakeFailedPhoto(){
 // дубли визитов/меток/фото и не шлёт повторный пост в группу.
 function jsonHeaders(){ const h=authHeaders(); h["Content-Type"]="application/json"; return h; }
 async function enqueue(entry){
+  if(!entry._owner&&STATE.uid) entry._owner={uid:STATE.uid,employee:STATE.employee||""};
   try{ await IDB.put("queue", entry); return true; }catch(e){ return false; }
+}
+
+async function stampQueueOwners(){
+  const snap=await IDB.get("kv","bootstrap").catch(()=>null);
+  const owner={uid:STATE.uid||(snap&&snap.uid)||null,employee:STATE.employee||(snap&&snap.employee)||""};
+  if(!owner.uid&&!owner.employee) owner.unknown=true;
+  try{
+    const items=await IDB.all("queue");
+    for(const it of items||[]) if(!it._owner){it._owner=owner;await IDB.put("queue",it);}
+  }catch(e){
+    // Even if IDB fails, revocation must remove cards/tokens. Preserve a
+    // barrier for unlabelled entries if the storage later becomes readable.
+    try{localStorage.setItem("hb_queue_owner_blocked","1");}catch(_e){}
+  }
+}
+function queueBelongs(it){
+  const owner=it._owner;
+  if(!owner){try{return localStorage.getItem("hb_queue_owner_blocked")!=="1";}catch(e){return false;}}
+  return !owner.unknown&&(!owner.uid||owner.uid===STATE.uid)&&(!owner.employee||owner.employee===STATE.employee);
+}
+
+// Факт сначала становится durable. Закрытие PWA во время HTTP не теряет
+// работу; потерянный ответ повторяется с тем же op_id и исходным временем.
+const SAVE_INFLIGHT=new Set();
+async function submitSavedOperation(entry,body){
+  const generation=WIPE_GEN,token=appToken();
+  SAVE_INFLIGHT.add(entry.op_id);
+  try{
+    if(!(await enqueue(entry))){
+      toast("Не удалось сохранить на телефоне. Освободите место и повторите; форма сохранения не закрыта.");
+      return null;
+    }
+    try{
+      const j=await api("/api/save",{method:"POST",body:JSON.stringify(body)});
+      if(generation!==WIPE_GEN||token!==appToken()||!queueBelongs(entry)) return null;
+      if(!j||j.ok!==true) throw new Error("invalid acknowledgement");
+      if(j.rejected&&Object.keys(j.rejected).length){
+        entry.failed="server-fields"; entry.rejected=j.rejected;
+        await enqueue(entry);
+      }else await IDB.del("queue",entry.op_id);
+      return {queued:false,data:j};
+    }catch(e){ return generation===WIPE_GEN&&token===appToken()&&queueBelongs(entry)?{queued:true}:null; }
+  }finally{ SAVE_INFLIGHT.delete(entry.op_id); updateOffBar(); }
 }
 
 const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=81;
+const SHELL_VERSION=84;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1469,10 +1521,21 @@ let _flushing=false;
 async function flushQueue(){
   if(_flushing) return;
   _flushing=true;
+  const generation=WIPE_GEN, token=appToken();
   try{
     let items=[]; try{ items=(await IDB.all("queue"))||[]; }catch(e){ items=[]; }
+    if(items.some(it=>it._owner)&&(DRAIN||!STATE.uid)){
+      try{const identity=await api("/api/identity");STATE.uid=identity.uid;STATE.employee=identity.employee||"";}
+      catch(e){return;}
+    }
     items.sort((a,b)=>(a.at||0)-(b.at||0));   // порядок как случилось в поле
     for(const it of items){
+      if(generation!==WIPE_GEN||token!==appToken()) break;
+      if(!queueBelongs(it)){
+        it.failed="server-owner";await IDB.put("queue",it);continue;
+      }
+      if(it.failed==="server-owner"){delete it.failed;await IDB.put("queue",it);}
+      if(SAVE_INFLIGHT.has(it.op_id)) continue;
       if(it.kind==="photo"&&PHOTO_PREPARING.has(it.op_id)) continue;
       // По этому снимку прямо сейчас идёт свой POST (sendPhoto). Второй запрос
       // тем же op_id сервер отобьёт как дубль, но пока он едет, «Сохранить
@@ -1490,6 +1553,8 @@ async function flushQueue(){
       // разбора, но не даём ей тормозить последующие операции.
       if(String(it.failed||"").indexOf("server-")===0) continue;
       let ok=false, stop=false;
+      const ctl=new AbortController(), timer=setTimeout(()=>ctl.abort(),
+        it.kind==="photo"||it.kind==="receipt"?120000:30000);
       try{
         let r;
         if(it.kind==="save"){
@@ -1504,31 +1569,32 @@ async function flushQueue(){
             form_version:it.form_version,input_keys:it.input_keys};
           if(it.cleared_keys&&it.cleared_keys.length) sbody.cleared_keys=it.cleared_keys;
           if(it.save_kind) sbody.kind=it.save_kind;   // звонок софтника (контур «Софт»)
+          if(it.save_kind==="call") sbody.append_comment=it.append_comment!==false;
           if(it.geo) sbody.geo=it.geo;
           if(it.pr) Object.assign(sbody, it.pr);     // следы выезда из очереди
-          r=await fetch("/api/save",{method:"POST",headers:jsonHeaders(),
+          r=await fetch("/api/save",{method:"POST",headers:jsonHeaders(),signal:ctl.signal,redirect:"error",
             body:JSON.stringify(sbody)});
         }else if(it.kind==="payment"){
-          r=await fetch("/api/save",{method:"POST",headers:jsonHeaders(),body:JSON.stringify({
+          r=await fetch("/api/save",{method:"POST",headers:jsonHeaders(),signal:ctl.signal,redirect:"error",body:JSON.stringify({
             kind:"payment",finish:true,rep:it.rep,op_id:it.op_id,occurred_at:it.occurred_at,
-            paid_at:it.paid_at,amount:it.amount})});
+            paid_at:it.paid_at,amount:it.amount,result_status:it.result_status||"",payment_revision:it.payment_revision})});
         }else if(it.kind==="marker"){
           const body={lat:it.lat,lon:it.lon,op_id:it.op_id};
           if(it.rep) body.rep=it.rep; if(it.label) body.label=it.label;
-          r=await fetch("/api/marker",{method:"POST",headers:jsonHeaders(),body:JSON.stringify(body)});
+          r=await fetch("/api/marker",{method:"POST",headers:jsonHeaders(),signal:ctl.signal,redirect:"error",body:JSON.stringify(body)});
         }else if(it.kind==="note_delete"){
-          r=await fetch("/api/note_delete",{method:"POST",headers:jsonHeaders(),
+          r=await fetch("/api/note_delete",{method:"POST",headers:jsonHeaders(),signal:ctl.signal,redirect:"error",
             body:JSON.stringify({id:it.id})});
         }else if(it.kind==="note"){
           const body={text:it.text,op_id:it.op_id};
           if(it.rep) body.rep=it.rep;
-          r=await fetch("/api/note",{method:"POST",headers:jsonHeaders(),body:JSON.stringify(body)});
+          r=await fetch("/api/note",{method:"POST",headers:jsonHeaders(),signal:ctl.signal,redirect:"error",body:JSON.stringify(body)});
         }else if(it.kind==="photo"){
           let bytes;
           try{ bytes=await queuedPhotoBytes(it); }
           catch(e){ await markPhotoFailed(it,"retake"); STATE.online=true; continue; }
           r=await fetch("/api/photo?rep="+enc(it.rep)+"&op="+it.op_id,
-            {method:"POST",headers:photoHeaders(it.geo,it.ext,
+            {method:"POST",signal:ctl.signal,redirect:"error",headers:photoHeaders(it.geo,it.ext,
                {at:it.at, src:it.src, sm:it.exif&&it.exif.sm, exif:it.exif}),
              body:bytes});
         }else if(it.kind==="receipt"){
@@ -1542,10 +1608,18 @@ async function flushQueue(){
           if(it.note) q.set("note",it.note);
           if(it.visit_op) q.set("visit",it.visit_op);
           r=await fetch("/api/receipt?"+q.toString(),
-            {method:"POST",headers:receiptHeaders(it.ext),body:bytes});
+            {method:"POST",signal:ctl.signal,redirect:"error",headers:receiptHeaders(it.ext),body:bytes});
         }else{ ok=true; }   // неизвестный тип — не держим вечно
         if(r){
           if(r.ok){
+            if(it.kind==="save"||it.kind==="payment"){
+              const j=await r.json();
+              if(!j||j.ok!==true) throw new Error("invalid acknowledgement");
+              if(j.rejected&&Object.keys(j.rejected).length){
+                it.failed="server-fields"; it.rejected=j.rejected; it.failed_at=Date.now();
+                await IDB.put("queue",it); STATE.online=true; continue;
+              }
+            }
             ok=true;
             if(it.kind==="photo"){
               try{ const j=await r.json(); showPhotoCount(it.rep,j.photos); }catch(e){}
@@ -1555,7 +1629,7 @@ async function flushQueue(){
             }
             if(it.kind==="receipt"){ renderReceipts(); }
           }
-          else if(r.status===401||r.status===403||r.status>=500) stop=true;  // авторизация/сервер — позже
+          else if(r.status===401||r.status===403||r.status===408||r.status===429||r.status>=500) stop=true;  // временный отказ — позже
           else if(it.kind==="save"&&r.status===409){
             it.failed="refresh-form"; it.failed_at=Date.now();
             try{ await IDB.put("queue",it); }catch(e){}
@@ -1580,6 +1654,8 @@ async function flushQueue(){
           }else ok=true;   // прочая невалидная операция не держит очередь вечно
         }
       }catch(e){ stop=true; }   // сеть недоступна — прекращаем, повтор при следующей связи
+      finally{clearTimeout(timer);}
+      if(generation!==WIPE_GEN||token!==appToken()) break;
       if(ok){ try{ await IDB.del("queue", it.op_id); }catch(e){} }
       if(stop){ STATE.online=false; break; }
       STATE.online=true;
@@ -1883,7 +1959,7 @@ async function drainDraw(state){
         <input id="codein" class="search" style="margin:8px 0" placeholder="${esc(t.codeph)}" autocomplete="off"
           autocapitalize="off" autocorrect="off" spellcheck="false" onkeydown="if(event.key==='Enter')drainLogin()">
         <button class="btn acc" onclick="drainLogin()">${esc(t.drainLogin)}</button>`
-    : `<div class="sline"><span class="d"></span><span>${esc(pending.length?t.drainSending:(failed.length?t.drainDone:t.drainNothing))}</span></div>`;
+    : `<div class="sline"><span class="d"></span><span>${esc(pending.length?t.drainSending:(failed.length?t.drainFailed:t.drainDone))}</span></div>`;
   const left = pending.length ? `<div class="lrow"><div class="pname" style="white-space:normal">${esc(t.drainLeft)} — ${esc(counts)}</div></div>` : "";
   const failedNames=[]; for(const it of failed) failedNames.push(await drainName(it.rep));
   const drafts=drainDrafts(), draftNames=[]; for(const r of drafts) draftNames.push(await drainName(r));
@@ -2048,9 +2124,12 @@ function authHeaders(){
 async function api(path, opts){
   opts = opts || {};
   const h = authHeaders(); h["Content-Type"] = "application/json";
-  const r = await fetch(path, Object.assign({}, opts, {headers:h}));
-  if (!r.ok) throw new Error(r.status);
-  return r.json();
+  const ctl=new AbortController(), timer=setTimeout(()=>ctl.abort(),30000);
+  try{
+    const r = await fetch(path, Object.assign({}, opts, {headers:h,signal:ctl.signal,redirect:"error"}));
+    if (!r.ok){let error;try{error=await r.json();}catch(e){}throw new Error(error&&error.message||String(r.status));}
+    return await r.json();
+  }finally{ clearTimeout(timer); }
 }
 // Только числовые замеры этапов. Ни имена, ни КД, ни адреса, ни тексты ошибок
 // сюда не принимаются — сервер повторно проверяет тот же белый список.
@@ -2166,6 +2245,7 @@ async function boot(){
     if(gen!==WIPE_GEN) return;
     setBottomNav("clients");   // вкладки видны с первого экрана
     setMeta(d.meta, true); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
+    STATE.uid=d.uid; STATE.employee=d.employee||"";
     STATE.roles=d.roles||null;   // роль руководителя: список его сотрудников + текущий
     STATE.mode=bootMode;
     STATE.online=true;
@@ -2206,6 +2286,7 @@ async function boot(){
     if(snap && snap.persons){
       STATE.lang=snap.lang||STATE.lang; renderLangs();
       setMeta(snap.meta); STATE.persons=snap.persons; STATE.kind=snap.kind||"agent";
+      STATE.uid=snap.uid; STATE.employee=snap.employee||"";
       // Без roles из снимка руководитель в поле терял и переключатель
       // портфелей, и вкладку сводки — читалось как поломка приложения.
       STATE.roles=snap.roles||null;
@@ -2395,11 +2476,8 @@ function renderSoftList(){
   }
   $("app").innerHTML = bar +
     `<div class="searchwrap">${ic("search")}<input class="search" id="q" placeholder="${esc(t.search)}" oninput="filterList()"></div>
+     <label class="fld">Контрагент</label><select id="softpartner" onchange="STATE.softPartner=this.value;filterList()"><option value="">Все контрагенты</option>${partnerOptions.map(p=>`<option value="${esc(p)}"${p===STATE.softPartner?' selected':''}>${esc(p)}</option>`).join('')}</select>
      <div id="plist"></div>`;
-  const search=$('q');
-  if(search){
-    search.parentElement.insertAdjacentHTML('afterend',`<label class="fld">Контрагент</label><select id="softpartner" onchange="STATE.softPartner=this.value;filterList()"><option value="">Все контрагенты</option>${partnerOptions.map(p=>`<option value="${esc(p)}"${p===STATE.softPartner?' selected':''}>${esc(p)}</option>`).join('')}</select>`);
-  }
   filterList();
   setBottomNav(STATE.softFilter||"today");
 }
@@ -2572,14 +2650,14 @@ function renderDetail(){
   $("app").innerHTML =
     `<button class="back" onclick="${soft?"renderSoftList()":"renderList()"}">${ic("chevL")}${esc(soft?(L().softq):t.my)}</button>
      <div class="h">${esc(d.client)}</div>
-     <div class="muted" style="font-size:13px">${d.birth_date?(t.born+": "+d.birth_date):""}${d.birth_date?" · ":""}${d.contracts.length} ${t.kd}</div>
+     <div class="muted" style="font-size:13px">${d.birth_date?(t.born+": "+esc(d.birth_date)):""}${d.birth_date?" · ":""}${d.contracts.length} ${t.kd}</div>
      <div class="tabs">${tab("visit",t.visit)}${tab("call",t.calltab||"Звонки")}${tab("debt",t.debt)}${tab("client",t.client)}${soft?"":tab("form",t.form)}</div>
      <div id="panel"></div>`;
   drawPanel();
   setBottomNav("clients");
 }
 function setTab(id){
-  if((STATE.tab==="form"||STATE.tab==="callform") && id!=="form" && id!=="callform")
+  if((STATE.tab==="form"||STATE.tab==="callform") && id!==STATE.tab)
     flushDraft();   // сохранить черновик до ухода с формы
   STATE.tab=id; drawPanel(); resetScroll();
   const tabIds=STATE.mode==="soft"?["visit","call","debt","client"]:["visit","call","debt","client","form","callform"];
@@ -2593,6 +2671,7 @@ function drawPanel(){
   else if(STATE.tab==="callform"){
     FORM_TOUCHED.clear(); FORM_CLEARED.clear();
     p.innerHTML=panelCallForm(d,t);
+    try{const saved=JSON.parse(localStorage.getItem("softdraft:"+currentUid()+":"+d.rep)||"null");if(saved&&String(saved.uid)===String(currentUid()))restoreSoftForm(saved);}catch(e){}
     p.querySelectorAll('input[data-k]').forEach(el=>{
       const mark=()=>{ FORM_TOUCHED.add(el.dataset.k); if(el.value) FORM_CLEARED.delete(el.dataset.k); };
       el.addEventListener('input',mark); el.addEventListener('change',mark);
@@ -2700,8 +2779,8 @@ function panelVisit(d,t){
    </div>
    <div class="box" style="margin-top:10px">
      <div class="kv"><span class="k">${t.status}</span><span class="v">${esc(d.status||"—")}</span></div>
-     ${d.assign_date?`<div class="kv"><span class="k">${t.inwork}</span><span class="v">${d.assign_date}</span></div>`:""}
-     ${d.visit_date?`<div class="kv"><span class="k">${t.lastvisit}</span><span class="v">${d.visit_date}</span></div>`:""}
+     ${d.assign_date?`<div class="kv"><span class="k">${t.inwork}</span><span class="v">${esc(d.assign_date)}</span></div>`:""}
+     ${d.visit_date?`<div class="kv"><span class="k">${t.lastvisit}</span><span class="v">${esc(d.visit_date)}</span></div>`:""}
      <div class="kv"><span class="k">${t.photos}</span><span class="v">${d.photos||0}</span></div>
    </div>`;
 }
@@ -2860,27 +2939,54 @@ function softPayments(d){
 function manualPaymentForm(d){
   return `<div class="fsec"><div class="fsec-h">💳 Записать оплату</div><label class="fld">Договор</label>
     <select id="payment_contract">${(d.contracts||[]).map(c=>`<option value="${esc(c.contract_id)}">${esc(c.contract_id)} · ${esc(c.unit||"")}</option>`).join("")}</select>
-    <label class="fld">Дата оплаты</label><input class="money" id="payment_date" type="date" max="${esc(srvToday())}">
+    <label class="fld">Дата оплаты</label><input class="money" id="payment_date" type="date" value="${esc(srvToday())}" max="${esc(srvToday())}">
     <label class="fld">Сумма оплаты</label><input class="money" id="payment_amount" inputmode="decimal" placeholder="0">
+    <label class="fld">Результат по выбранному договору</label><select id="payment_result"><option value="">Оставить текущий статус</option><option value="Оплачен" ${d.payment_revision?'':'disabled'}>Оплачен</option></select>
     <button class="btn line" id="payment_save" onclick="savePayment()">Сохранить оплату</button>
-    <div class="muted" style="font-size:12px;margin-top:6px">Дата и сумма попадут в комментарий Софта при обогащении Excel.</div>
-    ${(d.reported_payments||[]).slice().reverse().map(p=>`<div class="box"><div>${esc(p.paid_at)} · ${esc(Number(p.amount).toLocaleString("ru-RU",{minimumFractionDigits:2,maximumFractionDigits:2}))} ${esc(p.currency||"")}</div><div class="muted">КД ${esc(p.contract_id)} · записал ${esc(p.employee||"")}</div></div>`).join("")}</div>`;
+    <div class="muted" style="font-size:12px;margin-top:6px">${d.payment_revision?'Сумма и дата попадут в колонки последнего платежа и комментарий Софта. Выбранный результат сохранится вместе с оплатой.':'Для результата «Оплачен» и переноса в колонки требуется обновление сервера и аналитического комплекта. На этом сервере доступна прежняя запись оплаты.'}</div>
+    ${(d.reported_payments||[]).slice().reverse().map(p=>`<div class="box"><div>${esc(p.paid_at)} · ${esc(Number(p.amount).toLocaleString("ru-RU",{minimumFractionDigits:2,maximumFractionDigits:2}))} ${esc(p.currency||"")}</div><div class="muted">КД ${esc(p.contract_id)} · записал ${esc(p.employee||"")}${p.result_status?' · '+esc(p.result_status):''}</div></div>`).join("")}</div>`;
 }
 let PAYMENT_SAVING=false;
+function captureSoftForm(){
+  if(STATE.tab!=="callform") return null;
+  return {fields:[...document.querySelectorAll('#panel select[data-k],#panel input[data-k],#f_soft_comment,#f_soft_extra_phone,#payment_contract,#payment_date,#payment_amount,#payment_result')]
+    .map(el=>({id:el.id,key:el.dataset.k,value:el.value})),touched:[...FORM_TOUCHED],cleared:[...FORM_CLEARED]};
+}
+function restoreSoftForm(draft){
+  if(!draft||STATE.tab!=="callform") return;
+  for(const field of draft.fields){
+    const el=field.id?$(field.id):document.querySelector('#panel [data-k="'+field.key+'"]');
+    if(el) el.value=field.value;
+  }
+  FORM_TOUCHED.clear();for(const key of draft.touched) FORM_TOUCHED.add(key);
+  FORM_CLEARED.clear();for(const key of draft.cleared) FORM_CLEARED.add(key);
+  syncTypedLabels();
+}
 async function savePayment(){
   if(PAYMENT_SAVING) return;
   const rep=$("payment_contract").value,paid_at=$("payment_date").value;
   const amount=$("payment_amount").value.replace(/\s/g,"").replace(",",".");
   if(!/^\d+(\.\d{1,2})?$/.test(amount)||Number(amount)<=0||Number(amount)>1e9||!paid_at||paid_at>srvToday()){toast("Укажите дату и сумму оплаты");return;}
-  const body={kind:"payment",finish:true,rep,paid_at,amount,op_id:uuid(),occurred_at:Date.now()};
+  const body={kind:"payment",finish:true,rep,paid_at,amount,result_status:$("payment_result").value,payment_revision:STATE.cur.payment_revision,op_id:uuid(),occurred_at:Date.now()};
+  if(body.result_status&&!body.payment_revision){toast("Для сохранения результата оплаты требуется обновление сервера");return;}
+  const cardRep=STATE.cur&&STATE.cur.rep,amountControl=$("payment_amount");
   PAYMENT_SAVING=true;const button=$("payment_save");button.disabled=true;
   try{
-    try{const response=await fetch("/api/save",{method:"POST",headers:jsonHeaders(),body:JSON.stringify(body)});
-      if(!response.ok){const error=new Error(await response.text());error.status=response.status;throw error;}}
-    catch(e){if(e.status&&e.status<500){toast(e.message||"Оплата не записана");return;}
-      await enqueue({...body,kind:"payment",at:body.occurred_at});$("payment_amount").value="";toast("Оплата сохранена и ждёт отправки");return;}
-    toast("Оплата записана");$("payment_amount").value="";
-    try{STATE.cur=await api("/api/person?rep="+enc(STATE.cur.rep)+"&mode=soft");drawPanel();}catch(e){}
+    const result=await submitSavedOperation({...body,kind:"payment",at:body.occurred_at},body);
+    if(!result) return;
+    if($("payment_amount")===amountControl) amountControl.value="";
+    if($("payment_result")) $("payment_result").value="";
+    if(result.queued){toast("Оплата сохранена и ждёт отправки");return;}
+    toast("Оплата записана");
+    try{
+      const fresh=await api("/api/person?rep="+enc(cardRep)+"&mode=soft");
+      if(!STATE.cur||STATE.cur.rep!==cardRep) return;
+      const draft=captureSoftForm();if(draft&&!FORM_TOUCHED.has("soft_call_status"))draft.fields=draft.fields.filter(f=>f.key!=="soft_call_status");STATE.cur=fresh;
+      const brief=STATE.persons.find(p=>p.rep===cardRep);if(brief){brief.sc=fresh.soft?.status||"";brief.scd=fresh.soft?.next_call_date||"";}
+      storeCard(fresh,cardRep).catch(()=>{});
+      const owner=currentUid(),persons=STATE.persons.map(p=>({...p}));IDB.get("kv","bootstrap").then(snapshot=>{if(snapshot&&snapshot.uid===owner&&owner===currentUid()&&snapshot._mode==="soft"&&STATE.mode==="soft")return IDB.put("kv",{...snapshot,persons},"bootstrap");}).catch(()=>{});
+      drawPanel();restoreSoftForm(draft);
+    }catch(e){}
   }finally{PAYMENT_SAVING=false;if(button.isConnected)button.disabled=false;}
 }
 function panelCall(d,t){
@@ -2977,17 +3083,19 @@ async function saveCall(){
     const body={rep,values,finish:true,op_id,occurred_at,kind:"call",append_comment:true,
       opened_at:STATE.openedAt||occurred_at,form_version:FORM_VERSION,input_keys};
     if(clearedNow.length) body.cleared_keys=clearedNow;
-    try{
-      const j=await api("/api/save",{method:"POST",body:JSON.stringify(body)});
+    const result=await submitSavedOperation({op_id,kind:"save",save_kind:"call",append_comment:true,rep,values,input_keys,
+      cleared_keys:clearedNow,occurred_at,opened_at:STATE.openedAt||occurred_at,
+      form_version:FORM_VERSION,at:occurred_at},body);
+    if(!result) return;
+    if(result.queued||!result.data.rejected){try{localStorage.removeItem("softdraft:"+currentUid()+":"+rep);}catch(e){}}
+    if(!result.queued){
+      const j=result.data;
       STATE.online=true; STATE.cur=j.person; storeCard(j.person,rep).catch(()=>{});
       finishSavedUI(rep,t.callsaved);
       const bad=j.rejected||null;
       if(bad&&bad.promise_date) toast("Дата обещания не принята: не дальше "+(promiseMaxDays()||3)+" дн");
       else if(bad) toast("Часть полей не принята: "+Object.keys(bad).join(", "));
-    }catch(e){
-      await enqueue({op_id,kind:"save",save_kind:"call",rep,values,input_keys,
-        cleared_keys:clearedNow,occurred_at,opened_at:STATE.openedAt||occurred_at,
-        form_version:FORM_VERSION,at:occurred_at});
+    }else{
       STATE.online=false; finishSavedUI(rep,t.savedoff);
     }
   } finally {
@@ -3934,8 +4042,13 @@ async function saveVisit(){
     // одинаково в онлайн-тело и в запись очереди: pr снимается СЕЙЧАС.
     const pr=prPayload(rep);
     Object.assign(body, pr);
-    try{
-      const j=await api("/api/save",{method:"POST",body:JSON.stringify(body)});
+    const result=await submitSavedOperation({op_id, kind:"save", rep, values, input_keys,
+      cleared_keys:clearedNow, photos_pending, occurred_at,
+      opened_at:STATE.openedAt||occurred_at,
+      form_version:FORM_VERSION, geo, pr, at:occurred_at},body);
+    if(!result) return;
+    if(!result.queued){
+      const j=result.data;
       STATE.online=true; STATE.cur=j.person; storeCard(j.person,rep).catch(()=>{});
       finishSavedUI(rep, geo?L().saved:L().savednogeo);
       // Визит сохранён, но поле сервер не принял (дата обещания за пределом,
@@ -3945,12 +4058,8 @@ async function saveVisit(){
       if(bad&&bad.promise_date) toast("Дата обещания не принята: не дальше "+
         (promiseMaxDays()||3)+" дн от выезда");
       else if(bad) toast("Часть полей не принята: "+Object.keys(bad).join(", "));
-    }catch(e){
-      // Нет сети — кладём выезд в очередь, помечаем визит локально; уйдёт при связи.
-      await enqueue({op_id, kind:"save", rep, values, input_keys,
-        cleared_keys:clearedNow, photos_pending, occurred_at,
-        opened_at:STATE.openedAt||occurred_at,
-        form_version:FORM_VERSION, geo, pr, at:occurred_at});
+    }else{
+      // Запись уже на диске; помечаем визит локально до следующей попытки.
       STATE.online=false; applyVisitLocally(rep, values);
       finishSavedUI(rep, geo?L().savedoff:L().savedoffnogeo);
     }
@@ -3967,7 +4076,22 @@ async function saveVisit(){
 // Полная очистка черновика — только после явного «Сохранить выезд» (finish:true).
 let draftTimer=null, syncTimer=null, draftDirty=false;
 
+function recoveryText(key){const messages={ru:{review:"Разобрать очередь",export:"Экспорт исходника",fix:"Исправить в форме",remove:"Убрать запись",old:"Запись другого входа. Для просмотра и отправки восстановите исходный вход.",partial:"Принято частично",refused:"Не принято",draftfail:"Черновик не сохранён: хранилище телефона недоступно"},uz:{review:"Navbatni tekshirish",export:"Asl yozuvni eksport qilish",fix:"Shaklda tuzatish",remove:"Yozuvni olib tashlash",old:"Boshqa kirishga tegishli. Asl foydalanuvchi bilan kiring.",partial:"Qisman qabul qilindi",refused:"Qabul qilinmadi",draftfail:"Qoralama saqlanmadi: telefon xotirasi ishlamayapti"},tg:{review:"Баррасии навбат",export:"Содироти нусхаи асл",fix:"Ислоҳ дар шакл",remove:"Хориҷ кардани сабт",old:"Сабти воридшавии дигар. Бо воридшавии аслӣ дароед.",partial:"Қисман қабул шуд",refused:"Қабул нашуд",draftfail:"Пешнавис захира нашуд: ҳофиза дастнорас аст"}};return (messages[STATE.lang]||messages.ru)[key];}
+async function showQueueProblems(){
+  flushDraft();const items=(await IDB.all("queue")||[]).filter(it=>it.failed);
+  const host=$("app");host.innerHTML=`<button class="back" onclick="boot()">‹ ${esc(L().my)}</button><h2>${esc(recoveryText('review'))}</h2><div id="queueproblems"></div>`;
+  for(const it of items){const box=document.createElement("div");box.className="block";host.querySelector("#queueproblems").appendChild(box);
+    if(!queueOwnerMatches(it)){box.textContent=recoveryText('old');continue;}
+    const source={...it};delete source.bytes;delete source.blob;
+    box.innerHTML=`<b>${esc(it.rep||it.kind)}</b> · ${esc(recoveryText(it.rejected?'partial':'refused'))}<div>${esc(it.failed)}</div><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(JSON.stringify(source,null,2))}</pre><button class="btn line" data-export>${esc(recoveryText('export'))}</button>${it.save_kind==='call'?`<button class="btn line" data-fix>${esc(recoveryText('fix'))}</button>`:''}<button class="btn line" data-remove>${esc(recoveryText('remove'))}</button>`;
+    box.querySelector('[data-export]').onclick=()=>{const url=URL.createObjectURL(new Blob([JSON.stringify(source,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='hard-queue-'+it.op_id+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+    const fix=box.querySelector('[data-fix]');if(fix)fix.onclick=async()=>{await openP(it.rep);setTab('callform');const keys=Object.keys(it.values||{});restoreSoftForm({fields:keys.map(key=>({key,id:key==='soft_comment'?'f_soft_comment':key==='soft_extra_phone'?'f_soft_extra_phone':'',value:String(it.values[key]||'')})),touched:keys,cleared:it.cleared_keys||[]});saveDraft();};
+    box.querySelector('[data-remove]').onclick=async()=>{if(confirm('Исходник будет удалён с телефона. Сначала сохраните экспорт для разбора.')){await IDB.del('queue',it.op_id);box.remove();}};
+  }
+}
+
 function currentUid(){
+  if(STATE.uid) return STATE.uid;
   try{ if(TG&&TG.initDataUnsafe&&TG.initDataUnsafe.user) return TG.initDataUnsafe.user.id; }catch(e){}
   return new URLSearchParams(location.search).get("dev_uid") || "anon";
 }
@@ -4007,6 +4131,12 @@ function formVisible(){ return !!(STATE.cur && STATE.tab==="form" && $("f_visit_
 function loadDraft(rep){ try{ const s=localStorage.getItem(draftKey(rep)); return s?JSON.parse(s):null; }catch(e){ return null; } }
 function clearDraft(rep){ try{ localStorage.removeItem(draftKey(rep)); }catch(e){} }
 function saveDraft(){
+  if(STATE.cur&&STATE.tab==="callform"){
+    const draft=captureSoftForm();
+    try{localStorage.setItem("softdraft:"+currentUid()+":"+STATE.cur.rep,JSON.stringify({...draft,uid:currentUid(),rep:STATE.cur.rep,at:Date.now()}));}
+    catch(e){toast(recoveryText('draftfail'));}
+    return;
+  }
   if(!formVisible()) return;   // не читать DOM другой вкладки — иначе затрём черновик пустотой
   const v=readForm(), key=draftKey(STATE.cur.rep);
   try{
@@ -4103,7 +4233,10 @@ async function pushDraft(){
 // Уход со страницы/сворачивание приложения — досрочно сохранить (и попробовать отправить).
 // В мобильном WebView не гарантировано, поэтому это лишь подстраховка; истина — localStorage.
 window.addEventListener("beforeunload", flushDraft);
-document.addEventListener("visibilitychange", ()=>{ if(document.hidden){ flushDraft(); pushDraft(); } });
+window.addEventListener("pagehide", flushDraft);
+document.addEventListener("input",()=>{if(STATE.tab==="callform")saveDraft();});
+document.addEventListener("change",()=>{if(STATE.tab==="callform")saveDraft();});
+document.addEventListener("visibilitychange", ()=>{ if(document.hidden){ flushDraft(); if(STATE.tab==="form")pushDraft(); } });
 
 // Тихое фоновое обновление портфеля. iOS-ярлык неделями живёт без перезагрузки
 // страницы (процесс замораживается/размораживается), boot() не перезапускается —
@@ -4139,6 +4272,7 @@ async function refreshData(){
       STATE.mode="field"; return boot();
     }
     setMeta(d.meta, true); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
+    STATE.uid=d.uid; STATE.employee=d.employee||"";
     STATE.roles=d.roles||null;   // роль руководителя: список его сотрудников + текущий
     STATE.online=true; cacheBootstrap(d); updateOffBar();
     if(changed){
@@ -4205,7 +4339,7 @@ async function setMarkCase(){
     if(TG&&TG.HapticFeedback) TG.HapticFeedback.notificationOccurred("success");
     toast(t.marksaved); drawPanel();
   }catch(e){
-    await enqueue({op_id, kind:"marker", rep, lat:loc.lat, lon:loc.lon, at:Date.now()});
+    if(!(await enqueue({op_id, kind:"marker", rep, lat:loc.lat, lon:loc.lon, at:Date.now()}))){toast("Метка не сохранена: хранилище телефона недоступно");return;}
     STATE.online=false;
     if(STATE.cur && STATE.cur.rep===rep){ STATE.cur.geo={lat:loc.lat,lon:loc.lon,src:"manual"}; storeCard(STATE.cur,rep).catch(()=>{}); }
     if(TG&&TG.HapticFeedback) TG.HapticFeedback.notificationOccurred("success");
@@ -4495,7 +4629,7 @@ async function dgLoad(){
                                        employee:DG.femp||""})
             : DG.view==="map"      ? "/api/manager/map_data"+dgQ({employee:DG.emp})
             : DG.view==="photos"   ? null
-            :                        "/api/manager/promises"+dgQ();
+            :                        "/api/manager/promises"+dgQ({mode:DG.contour||"hard"});
   if(url===null){ if(seq===DG.seq) dgRender({screen:"photos"}); return; }
   let j=null;
   try{ j=await api(url); STATE.online=true; DG.last=Date.now(); }
@@ -4868,7 +5002,7 @@ function dgKpis(t,rg){
   if(t.money_paid_text) money.push(row("из них с исходом «Оплачен»",esc(t.money_paid_text)));
   if(money.length) out.push(sec("Долг",`<div class="drows">${money.join("")}</div>`));
   // Подтверждение выезда и контроль офиса — две колонки строк; тап — те самые случаи.
-  const ev=[["confirmed","на адресе"],["far","у адреса не был"],["saved_away","вне адреса"],
+  const ev=[["confirmed","точка рядом с адресом"],["far","точка далеко от адреса"],["saved_away","заполнено вдали от адреса"],
             ["unverified","проверить не удалось"],["series","внесено пачкой"]]
     .map(([key,l])=>row(l,t[key]||0,c(key),!t[key]));
   ev.push(row("внесено позже",t.late||0,"",!t.late), row("нет GPS-точки",t.no_geo||0,"",!t.no_geo));
@@ -5169,7 +5303,7 @@ function dgPerson(j,b){
   });
   if(j.tips) parts.push(`<div>📇 ${esc(j.tips)}</div>`);
   if(j.comment) parts.push(`<div style="white-space:pre-wrap">💬 ${esc(j.comment_display??j.comment)}</div>`);
-  if(j.profile==="soft"&&(j.calls||[]).length) parts.push(`<div class="fsec-h">История звонков</div>`+(j.calls||[]).map(c=>`<div class="muted">${esc(c.day)} · ${esc(c.payload)}</div>`).join(""));
+  if(j.profile==="soft"&&(j.calls||[]).length) parts.push(`<div class="fsec-h">История звонков</div>`+(j.calls||[]).map(c=>`<div class="muted">${esc(c.day)} · ${esc(c.payload)}${j.manager?.caps?.control&&c.id?`<button class="btn line" onclick="dgCallReview(${Number(c.id)})">Проверка звонка №${Number(c.id)}</button>`:''}</div>`).join(""));
   const g=j.geo;
   if(g){
     if(g.by_other) parts.push(`<div>📍 визит закрыл руководитель (${esc(g.pretty)} от адреса)</div>`);
@@ -5273,6 +5407,21 @@ async function dgShot(i){
       onerror="this.outerHTML='<div class=muted>файл не отобразился</div>'">`;
   }catch(e){ box.innerHTML=`<div class="muted" style="margin-top:8px">не удалось загрузить (${esc(String(e.message||e))})</div>`; }
 }
+async function dgCallReview(id){
+  const b=$("dgbody");if(!b)return;
+  try{const d=await api('/api/control/call_review?call_id='+enc(id)),r=d.review||{};
+    const options=(pairs,value)=>pairs.map(([key,label])=>`<option value="${key}" ${key===value?'selected':''}>${esc(label)}</option>`).join('');
+    b.innerHTML=`<button class="back" onclick="dgGo('person')">‹ Назад к истории</button><h2>Проверка звонка №${Number(id)}</h2><p class="muted">${esc(d.source_notice)}</p><p>${esc(d.call.payload)}</p>
+    <label class="fld">Срок<input class="search" id="cr-due" type="date" value="${esc(r.due||STATE.meta.today)}"></label>
+    <label class="fld">Состояние<select class="search" id="cr-state">${options([['open','Открыта'],['checking','Проверяется'],['closed','Завершена']],r.state||'open')}</select></label>
+    <label class="fld">Источник<select class="search" id="cr-source">${options([['employee_report','Запись сотрудника'],['customer_callback','Контрольный звонок'],['telephony','Телефония'],['registry','Реестр'],['other','Другой источник']],r.source||'employee_report')}</select></label>
+    <label class="fld">Ссылка или реквизиты<input class="search" id="cr-ref" value="${esc(r.source_ref||'')}"></label>
+    <label class="fld">Решение<select class="search" id="cr-decision">${options([['','Нет решения'],['confirmed','Подтверждено'],['disputed','Есть расхождение'],['inconclusive','Недостаточно данных'],['no_contact','Связаться не удалось']],r.decision||'')}</select></label>
+    <label class="fld">Комментарий<textarea class="search" id="cr-note">${esc(r.note||'')}</textarea></label><button class="btn acc" id="cr-save">Сохранить проверку</button><div id="cr-result" role="status"></div>
+    <h3>История</h3>${(d.history||[]).map(h=>`<p>${esc(h.at)} · ${esc(h.actor)} · ${esc(h.values.state)} / ${esc(h.values.decision)}<br>${esc(h.values.note)}<br>${esc(h.values.source_ref)}</p>`).join('')}`;
+    $('cr-save').onclick=async()=>{const button=$('cr-save');button.disabled=true;try{const saved=await api('/api/control/call_review',{method:'POST',body:JSON.stringify({call_id:id,revision:r.revision||0,op_id:uuid(),due:$('cr-due').value,state:$('cr-state').value,source:$('cr-source').value,source_ref:$('cr-ref').value,decision:$('cr-decision').value,note:$('cr-note').value})});r.revision=saved.review.revision;$('cr-result').textContent='Проверка сохранена';}catch(e){$('cr-result').textContent=String(e.message||e);}finally{button.disabled=false;}};
+  }catch(e){toast(String(e.message||e));}
+}
 function dgPromises(j,b){
   const t=j.totals||{};
   const parts=[`<button class="back" onclick="dgGo('stats')">‹ к сводке</button>`,dgHeadHTML(j,"Просроченные обещания")];
@@ -5281,7 +5430,7 @@ function dgPromises(j,b){
   (j.employees||[]).forEach(r=>{
     parts.push(`<div style="margin-top:8px"><b>${esc(r.employee)}</b> — ${r.persons}</div>`);
     (r.items||[]).forEach(pp=>{
-      const fresh=pp.visited_after_promise?" · 🟢 визит после обещания":(pp.last_visit?" · 🟡 визит до обещания":" · ⚪ визитов не было");
+      const fresh=j.profile==="soft"?(pp.visited_after_promise?" · звонок после срока":" · после срока не звонил"):(pp.visited_after_promise?" · 🟢 визит после обещания":(pp.last_visit?" · 🟡 визит до обещания":" · ⚪ визитов не было"));
       parts.push(`<div class="muted">🔴 ${esc(pp.client)} — обещал ${esc(pp.promise_date||"")}, ${pp.days_overdue} дн назад${pp.money_text?` · ${esc(pp.money_text)}`:""}${fresh}</div>`);
     });
   });
@@ -5328,7 +5477,7 @@ async function dgMap(j,b){
   $("dgleg").textContent="🔵 адрес · 🟢 визит · 🔴 далеко · 🟣 закрыл руководитель · 🟠 метка";
 }
 // Пометки контроля у выезда: доехал не в свой день, закрыт без точки телефона.
-const DG_EV={confirmed:"🛡 на адресе",far:"⚠️ у адреса не был",nofix:"❔ точка неточная",coarse:"❔ адрес неточный"};
+const DG_EV={confirmed:"🛡 точка рядом с адресом",far:"⚠️ точка далеко от адреса",nofix:"❔ точка неточная",coarse:"❔ адрес неточный"};
 function caseMarks(c){
   const out=[];
   if(c.late_days) out.push("⏱ +"+c.late_days+" дн");
@@ -5552,7 +5701,7 @@ async function dgBindPost(body){
 const DG_METRIC_TITLE={visits:"Выезды",paid:"Исход «Оплачен»",promised:"Обещают оплатить",
   pay:"Оплаты по реестру",pay_after:"Оплаты после выезда",
   with_photo:"Выезды с фото",persons:"Должники",
-  confirmed:"Подтверждены на адресе",far:"У адреса не был",
+  confirmed:"Точка рядом с адресом",far:"Точка далеко от адреса",
   saved_away:"Заполнены не на адресе",
   unverified:"Проверить не удалось",series:"Внесено пачкой",
   carded:"Воронка · анкета заполнена",contacts:"Воронка · контакты",
@@ -5705,7 +5854,7 @@ async function noteForCase(){
     await api("/api/note",{method:"POST",body:JSON.stringify({text,op_id,rep:d.rep})});
     STATE.online=true; toast(L().notesaved);
   }catch(e){
-    await enqueue({op_id, kind:"note", text, rep:d.rep, at:Date.now()});
+    if(!(await enqueue({op_id, kind:"note", text, rep:d.rep, at:Date.now()}))){toast("Заметка не сохранена: хранилище телефона недоступно");return;}
     STATE.online=false; toast(L().notesaved+" ("+L().queuedn+")"); updateOffBar();
   }
 }
@@ -5720,7 +5869,7 @@ async function addNote(){
     await api("/api/note",{method:"POST",body:JSON.stringify({text,op_id,rep})});
     STATE.online=true; if(el) el.value=""; toast(t.notesaved); loadNotes();
   }catch(e){
-    await enqueue({op_id, kind:"note", text, rep, at:Date.now()});
+    if(!(await enqueue({op_id, kind:"note", text, rep, at:Date.now()}))){toast("Заметка не сохранена: хранилище телефона недоступно");return;}
     STATE.online=false; if(el) el.value="";
     toast(t.notesaved+" ("+t.queuedn+")"); updateOffBar();
   }
@@ -5734,7 +5883,7 @@ async function delNote(id){
     // Нет сети — удаление в очередь, как визит и метка. Раньше оно просто
     // пропадало: на экране заметка исчезала, на сервере оставалась и
     // возвращалась при следующем открытии.
-    await enqueue({op_id:uuid(), kind:"note_delete", id, at:Date.now()});
+    if(!(await enqueue({op_id:uuid(), kind:"note_delete", id, at:Date.now()}))){toast("Удаление не сохранено: хранилище телефона недоступно");return;}
     STATE.online=false; updateOffBar();
   }
   loadNotes();
@@ -5749,7 +5898,7 @@ async function newMarker(){
     await api("/api/marker",{method:"POST",body:JSON.stringify({lat:loc.lat,lon:loc.lon,label,op_id})});
     STATE.online=true; toast(t.marksaved); renderMarks();
   }catch(e){
-    await enqueue({op_id, kind:"marker", lat:loc.lat, lon:loc.lon, label, at:Date.now()});
+    if(!(await enqueue({op_id, kind:"marker", lat:loc.lat, lon:loc.lon, label, at:Date.now()}))){toast("Метка не сохранена: хранилище телефона недоступно");return;}
     STATE.online=false; toast(t.marksaved+" ("+t.queuedn+")"); renderMarks();
   }
 }

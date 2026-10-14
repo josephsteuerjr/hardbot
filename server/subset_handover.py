@@ -155,11 +155,24 @@ CARRY: dict[str, tuple[str, str]] = {
         "журнал звонков софтников по перенесенным КД — работа, как визиты",
         "COALESCE(contract_id,'') IN (SELECT kd FROM sel_kd)"
         " OR COALESCE(employee,'') IN (SELECT name FROM sel_emp)"),
+    "office_actions": (
+        "неизменяемые офисные факты по выбранным договорам или исходному автору",
+        "op_id IN (SELECT op_id FROM office_action_contracts WHERE contract_id IN (SELECT kd FROM sel_kd))"
+        " OR employee IN (SELECT name FROM sel_emp)"),
+    "office_action_contracts": (
+        "устойчивые связи офисных фактов с договорами, ключ операции переживает перенос",
+        "op_id IN (SELECT op_id FROM office_actions)"),
 }
 
 # ЧТО НЕ ЕДЕТ НИКОГДА. Не «забыли», а решено: у каждой строки своя причина.
 # Список закрытый — незнакомая таблица останавливает снятие (trim_to_employees).
 DROP_ALL: dict[str, str] = {
+    "employee_identities": "реестр идентичностей требует отдельного согласования при частичном переносе; uid и авторы не заменяются автоматически",
+    "employee_aliases": "история имён локального реестра идентичностей; полный backup сохраняет её",
+    "call_reviews": "проверки ссылаются на локальные id звонков и доступ проверяющего этой установки; полный backup сохраняет их",
+    "call_review_history": "история локальной проверки; перед частичным переносом экспортируется отдельно вместе с источником",
+    "notification_outbox": "внешняя доставка прежней установки; её нельзя повторять после частичного переноса",
+    "notification_attempts": "реестр попыток внешней доставки прежней установки",
     "enrichment_book_ledger": "конкретные пути книг прежней установки: доставка в новой установке подтверждается заново",
     "app_links": "ссылки входа выписаны на чужой домен",
     "app_tokens": "девайс-токены мини-приложения — это выданный доступ",
@@ -186,6 +199,8 @@ KNOWN = set(CARRY) | set(DROP_ALL)
 # которому строку узнаёт само приложение. Пустой кортеж = ключа нет вовсе: такие
 # строки сверяются целиком (см. merge_table), иначе повторный приём их удвоил бы.
 KEYS: dict[str, tuple[str, ...]] = {
+    "office_actions": ("op_id",),
+    "office_action_contracts": ("op_id", "contract_id"),
     "registry_payments": ("contract_id", "paid_at", "currency"),
     "clients": ("contract_id",),
     "payment_evidence": ("op",),

@@ -88,8 +88,13 @@ def test_stale_master_preserves_call_but_delivered_office_edit_is_accepted(world
     assert db.get_client("A")["soft_comment"] == "новый звонок"
     db.record_enrichment_deliveries([{"contract_id": "A", "key": "soft_call_status",
         "value": "Обещает оплатить", "visit_date": date.today().isoformat(), "responsible": "S1"}])
-    world[0].update(soft_call_status="Обещает оплатить", forecast_sum="13000", soft_comment="проверено офисом")
-    db.import_grid(grid(world), source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
+    world[0].update(soft_call_status="Обещает оплатить", soft_comm_date=db.call_fact_day(db.get_client('A')),
+                    forecast_sum="13000", soft_comment="проверено офисом")
+    preview=db.import_grid(grid(world), source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
+                           allow_soft_office_edits=True, preview_only=True)
+    db.import_grid(grid(world), source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
+                   allow_soft_office_edits=True,
+                   expected_soft_office_effect_digest=preview['soft_office_effect_digest'])
     exported = next(r for r in db.enrichment_rows() if r["contract_id"] == "A")
     assert exported["forecast_sum"] == "13000"
     sibling = next(r for r in db.enrichment_rows() if r["contract_id"] == "B")
@@ -259,7 +264,7 @@ def test_receipt_and_call_activity_keep_historical_employee(world, monkeypatch):
     db.record_receipt("historic-receipt", "A", "S1", 100,
                       paid_at=date.today().isoformat(), amount=100, currency="₽")
     db.bind_agent(100, "S2")
-    local_day = control._local_dt(datetime.now().isoformat()).date().isoformat()
+    local_day = db.workday.today().isoformat()
     data = control.activity({}, ["S1"], {"from": local_day, "to": local_day}, kinds={"receipt", "call"})
     assert {e["kind"] for e in data["events"]} == {"receipt", "call"}
     assert {e["employee"] for e in data["events"]} == {"S1"}

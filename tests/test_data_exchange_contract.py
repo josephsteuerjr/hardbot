@@ -137,7 +137,7 @@ def test_form_snapshot_enrichment_and_import_semantics_cannot_drift_apart(monkey
     } & contract.ENRICHMENT_FORBIDDEN_TARGETS
 
     for source, target, _merge in contract.ENRICHMENT_WRITE_RULES:
-        assert source == "tips" or source in db.BY_KEY
+        assert source in {"tips", "_reported_payment_sum", "_reported_payment_date"} or source in db.BY_KEY
         assert target in db.BY_KEY
 
     miniapp = (

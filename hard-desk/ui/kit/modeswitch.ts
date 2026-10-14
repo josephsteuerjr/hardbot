@@ -9,12 +9,13 @@ import { esc } from "./dom";
 export async function mountModeSwitchIfKit(host: HTMLElement, current: string): Promise<void> {
   try {
     const st = await hard.state();
-    if (!st.kit) { host.innerHTML = ""; return; }
+    if (!st.kit || st.fixedProduct) { host.innerHTML = ""; return; }
   } catch { host.innerHTML = ""; return; }
   await mountModeSwitch(host, current);
 }
 
 export async function mountModeSwitch(host: HTMLElement, current: string): Promise<void> {
+  if ((await hard.state()).fixedProduct) { host.closest(".section")?.remove(); return; }
   const items: [string, string, string][] = [
     ["manager", "Пульт", "руководитель, безопасник, директор — сводка, команда, контроль"],
     ["field", "Приложение сотрудника", "выездник и софт: экран (портфель или очередь звонков) определяет сервер по портфелю"],

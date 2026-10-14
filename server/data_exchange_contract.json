@@ -1,6 +1,6 @@
 {
   "schema": "hardbot.data-exchange-contract.v1",
-  "version": 9,
+  "version": 10,
   "soft": {
     "provenance_marker": "_bot_call_completed",
     "event_day": "_call_day",
@@ -22,7 +22,10 @@
     "overall_result_source": "soft_call_status_without_sms",
     "payment_provenance_marker": "_bot_payment_recorded",
     "payment_event_day": "_payment_day",
-    "payment_export": "soft_comment",
+    "payment_export": "soft_comment_and_last_payment_columns",
+    "payment_amount_key": "_reported_payment_sum",
+    "payment_date_key": "_reported_payment_date",
+    "payment_status": "explicit_selected_contract_without_call",
     "import_profiles": [
       "hard",
       "soft",
@@ -191,7 +194,9 @@
       "soft_call_status",
       "soft_comm_date",
       "soft_comment",
-      "meeting_date"
+      "meeting_date",
+      "_reported_payment_sum",
+      "_reported_payment_date"
     ],
     "live_state_keys": [
       "soft_call_status",
@@ -199,7 +204,9 @@
       "soft_comment",
       "soft_next_call_date",
       "meeting_date",
-      "soft_extra_phone"
+      "soft_extra_phone",
+      "_reported_payment_sum",
+      "_reported_payment_date"
     ]
   },
   "enrichment": {
@@ -287,6 +294,16 @@
       {
         "source": "meeting_date",
         "target": "meeting_date",
+        "merge": "replace"
+      },
+      {
+        "source": "_reported_payment_sum",
+        "target": "last_payment_sum",
+        "merge": "replace"
+      },
+      {
+        "source": "_reported_payment_date",
+        "target": "last_payment_date",
         "merge": "replace"
       }
     ],

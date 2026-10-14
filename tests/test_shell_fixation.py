@@ -193,7 +193,7 @@ def test_link_opened_offline_is_asked_about_once_the_login_answers():
     открытый вопрос повторная проверка не сбивает."""
     out = _scenario(r"""
       const SNAP = {lang: "ru", meta: {}, persons: PERSONS, kind: "agent", employee: "Первый П.",
-                    roles: null, at: 1};
+                    roles: null, at: Date.now()};
       const srv = fakeServer({tokens: {[A]: "neterr", [B]: OTHER}});
       const w = newWorld({ls: {app_token: A}, idb: {kv: {bootstrap: SNAP}}});
       const p = await openPage(w, {url: HOST + "#t=" + B + "&fresh=1", server: srv});

@@ -40,6 +40,8 @@ from photostore import PHOTO_DIR as DEFAULT_PHOTO_DIR
 
 
 RESET_TABLES = {
+    "office_actions", "office_action_contracts",
+    "call_review_history", "call_reviews", "notification_attempts", "notification_outbox",
     "registry_payments",
     # Журнал доставки пушей: telegram_id руководителей и ФИО сотрудников — это
     # ПД, переживать сброс ограниченного теста они не должны (в отличие от
@@ -103,6 +105,7 @@ RESET_TABLES = {
 # an old published master could become "new" again immediately after cleanup.
 # Pending authorizations are invalidated atomically during reset.
 RETAINED_TABLES = {
+    "employee_identities", "employee_aliases",  # staff identity survives registry reset; no portfolio or login grant
     "import_receipts",
     "import_source_heads",
     # Корпус для обучения скоринга — это НЕ портфель выездника. Сюда загружается
@@ -134,6 +137,8 @@ EXPECTED_TABLES = RESET_TABLES | RETAINED_TABLES
 
 # Сначала зависимые/операционные сущности, затем registry и identity/config.
 DELETE_ORDER = (
+    "office_action_contracts", "office_actions",
+    "call_review_history", "call_reviews", "notification_attempts", "notification_outbox",
     "registry_payments",
     "push_log",       # телеметрия, зависимостей нет — но не в DELETE_ORDER
                       # значит RuntimeError «после reset остались строки»

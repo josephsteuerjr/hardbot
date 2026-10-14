@@ -10,6 +10,7 @@ API, тот же замок. Тест поднимает заглушку «Ха
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -25,7 +26,7 @@ import pytest
 pytest.importorskip("aiohttp")
 
 ROOT = Path(__file__).resolve().parents[1]
-EXE = ROOT / "hard-pult" / "hard-pult.exe"
+EXE = Path(os.environ.get("HARD_PULT_TEST_EXE") or ROOT / "hard-pult" / "hard-pult.exe")
 
 TOKEN = "ТОКЕН-ХАРДА-RUST"
 SUMMARY = {
@@ -238,7 +239,11 @@ def test_link_redeem_and_today(world):
     # токен лёг в файл настроек рядом с exe, а не остался в памяти
     raw = json.loads((world["exe_dir"] /
                       "настройки пульта руководителя.json").read_text("utf-8"))
-    assert raw["servers"][world["hard"]]["token"] == TOKEN
+    from pult_ruk.settings import Settings
+    settings_path = world["exe_dir"] / "настройки пульта руководителя.json"
+    assert raw["servers"][world["hard"]]["token"].startswith("dpapi-v1:")
+    assert TOKEN not in settings_path.read_text("utf-8")
+    assert Settings.load(settings_path)["servers"][world["hard"]]["token"] == TOKEN
 
     status, today = _http("GET", world["base"] + "/api/today")
     assert status == 200

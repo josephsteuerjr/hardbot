@@ -15,6 +15,8 @@ export const conn: Section = {
   kicker: "контур, адрес и привязка этого компьютера",
   async render(root) {
     const s = await local("/state");
+    const jobs = await local("/jobs");
+    const installed = (await hard.state()).fixedProduct;
     root.innerHTML = `
       <div class="toolbar"><span class="muted" style="font-size:13.5px">Контур:</span>
         <div class="chips">${(s.profiles as string[]).map((p) => `<button class="chip" data-prof="${esc(p)}" aria-pressed="${p === s.active}">${esc(p)}</button>`).join("")}</div>
@@ -33,7 +35,16 @@ export const conn: Section = {
           ${s.bound ? '<span class="spacer"></span><button class="btn danger small" data-unbind>Забыть токен здесь</button>' : ""}</div></div>
       <div class="section"><div class="section-head"><h2 class="section-title">Устройства пульта</h2></div><div id="devs"><div class="skeleton"></div></div></div>
       <div class="section"><div class="section-head"><h2 class="section-title">Режимы этого exe</h2></div><div id="modesw"><div class="skeleton"></div></div></div>
+      <div class="section"><h2 class="section-title">Журнал операций</h2><p class="hint">После потерянного ответа сверьте задачу по номеру. Для почты ищите HardOperationId в черновиках, исходящих и отправленных Outlook. Неопределённая отправка автоматически не повторяется.</p>
+      ${(jobs || []).map((j: any) => `<div class="list-row"><div class="grow"><span class="mono">${esc(j.id)}</span> · ${esc(j.kind)} · ${esc(j.state)}<div class="sub">${esc(j.error || "")}</div></div></div>`).join("") || '<p class="muted">Задач в этом контуре пока нет.</p>'}</div>
       <p class="muted" style="font-size:12.5px;margin-top:24px">Настройки: <span class="mono">${esc(s.settings_path)}</span></p>`;
+    if (installed && !s.bound) {
+      const b = document.createElement("button"); b.className = "btn"; b.textContent = "Перенести настройки прежнего пульта";
+      root.prepend(b);
+      b.addEventListener("click", guard(async () => {
+        const r = await hard.migrate(); if (r.ok) { toast("Контуры и вход перенесены"); await refresh(); } else toast(r.text || "Перенос отменён");
+      }));
+    }
   void mountModeSwitch(root.querySelector("#modesw")!, "analyst");
     root.querySelectorAll<HTMLButtonElement>("[data-prof]").forEach((b) => b.addEventListener("click", guard(async () => {
       await local("/profile", { action: "switch", name: b.dataset.prof }); toast("Контур: " + b.dataset.prof); await refresh();

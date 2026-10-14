@@ -1,0 +1,69 @@
+/* Employee CRM uses the existing paper, terra, type and motion tokens. */
+.employee-workspace .kpi.money b { white-space: normal; overflow-wrap: anywhere; font-size: 18px; line-height: 1.35; }
+.employee-workspace .kpi b { font-size: 25px; }
+.employee-workspace .kpi { padding: 10px 10px 10px 0; margin-right: 10px; }
+.employee-workspace .kpis { grid-template-columns: repeat(auto-fit, minmax(105px, 1fr)); }
+.employee-workspace .toolbar { flex-wrap: wrap; gap: 8px; }
+.employee-scope, .employee-period { margin: 14px 0; }
+.employee-period label, .employee-scope label { display: flex; align-items: center; gap: 6px; }
+.employee-period .input { max-width: 150px; font-size: 12px; }
+.employee-scope select { max-width: 220px; }
+.employee-workspace .tbar { flex-wrap: wrap; gap: 8px; }
+.employee-workspace .tsearch { min-width: 130px; max-width: 280px; flex: 1; }
+.view-tabs { display: inline-flex; gap: 4px; }
+.th-t { border: 0; padding: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; text-align: inherit; }
+.column-picker { margin: 8px 0 12px; position: relative; font-size: 12px; }
+.column-picker summary { cursor: pointer; color: var(--ink-3); }
+.column-options { position: absolute; z-index: 15; top: 24px; left: 0; width: min(380px, 100%); max-height: 360px; overflow-y: auto; padding: 12px; background: var(--panel); border: 1px solid var(--line-strong); border-radius: 8px; }
+.column-options .row { gap: 8px; margin: 6px 0; }
+.column-options .column-width { width: 65px; padding: 4px; }
+.employee-table { overflow: auto; max-height: calc(100vh - 300px); min-height: 140px; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+.employee-table .grid { width: max-content; min-width: 100%; }
+.employee-table .grid td { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.employee-table .grid th { position: sticky; top: 0; z-index: 3; background: var(--surface); }
+.employee-table .grid th:first-child, .employee-table .grid td:first-child { position: sticky; left: 0; background: var(--panel); z-index: 2; min-width: 200px; max-width: 260px; }
+.employee-table .grid th:first-child { z-index: 4; background: var(--surface); }
+.employee-table .who { white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.employee-table .current-row td, .portfolio-person.current-row { background: var(--accent-soft); }
+.employee-table .current-row td:first-child { background: var(--surface-2); }
+.list-filters { display: flex; flex-wrap: wrap; gap: 5px; margin: 10px 0; }
+.list-filters .funnel { opacity: 1; }
+.portfolio-list { display: grid; gap: 0; }
+.portfolio-person { display: grid; grid-template-columns: minmax(0,1fr) auto; width: 100%; background: transparent; color: var(--ink); border: 0; border-bottom: 1px solid var(--line); padding: 12px 4px; gap: 5px 12px; text-align: left; cursor: pointer; }
+.portfolio-person:hover { background: var(--ctrl-hover); }
+.portfolio-person .sub { grid-column: 1 / -1; overflow-wrap: anywhere; }
+.person-name { font-weight: 600; overflow-wrap: anywhere; }
+.person-debt { font-size: 12px; max-width: 220px; overflow-wrap: anywhere; }
+.table-pages { justify-content: flex-end; padding-top: 12px; gap: 10px; }
+.employee-name { margin: 8px 0 4px; font: 600 21px/1.3 var(--sans); overflow-wrap: anywhere; }
+.employee-card .section { margin-top: 16px; }
+.employee-card .section-title { margin: 0 0 10px; }
+.employee-card details > summary { cursor: pointer; color: var(--ink-2); padding: 8px 0; font-size: 13px; }
+.employee-card details[open] > summary { margin-bottom: 8px; }
+.employee-card .hint { font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.employee-card .row { flex-wrap: wrap; gap: 8px; }
+.employee-card .card-navigation { position: sticky; top: 0; z-index: 5; padding: 10px 0; border-bottom: 1px solid var(--line); background: var(--panel); }
+.card-navigation .grow { text-align: center; font-size: 11px; }
+.office-form > label, .office-fields label { display: block; margin-top: 10px; color: var(--ink-2); font-size: 12px; }
+.office-form .input, .employee-card #f-comment { display: block; width: 100%; margin: 5px 0; font-size: 13px; }
+.office-form textarea, .employee-card #f-comment { min-height: 85px; }
+.office-form [hidden], .employee-card [hidden] { display: none !important; }
+.office-fields { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+.office-form .hint { display: block; }
+.office-form .tag { font-size: 10px; }
+.card-save-actions { margin-top: 12px; }
+.employee-card .kv-line { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; padding: 5px 0; }
+.employee-card .kv-line span { overflow-wrap: anywhere; min-width: 0; }
+.office-note { white-space: pre-wrap; overflow-wrap: anywhere; }
+.delivery-state { font-size: 11px; margin-top: 10px; }
+.queue-error { padding-top: 10px; overflow-wrap: anywhere; }
+.employee-workspace .notice { font-size: 12px; }
+@media (max-width: 1100px) {
+  .employee-workspace #app.with-panel { --rail-track: 0px; }
+  .employee-workspace #view-inner { padding-inline: 16px; }
+  .person-debt { max-width: 155px; }
+}
+@media (max-width: 800px) {
+  .employee-workspace #app.with-panel { --panel-track: min(460px, 100vw); }
+  .employee-card .office-fields { grid-template-columns: minmax(0,1fr); }
+}

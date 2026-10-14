@@ -144,7 +144,9 @@ export const activity: Section = {
   title: "Активность",
   icon: "activity",
   kicker: "что делает команда",
-  async render(root) {
+  async render(root, params) {
+    if (params.range) state.range = params.range as Range;
+    if (typeof params.office === "string") state.office = params.office;
     seen = new Set();
     root.innerHTML = '<div class="skeleton" style="width:40%"></div><div class="skeleton"></div><div class="skeleton" style="width:70%"></div>';
     await load(root);

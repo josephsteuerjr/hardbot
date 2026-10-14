@@ -35,7 +35,8 @@ export function writeSettings(patch: Partial<Settings>): Settings {
   ensure();
   const next = { ...readSettings(), ...patch };
   for (const k of Object.keys(next)) if (next[k] === undefined) delete next[k];
-  writeFileSync(file("settings.json"), JSON.stringify(next, null, 2));
+  writeFileSync(file("settings.json.tmp"), JSON.stringify(next, null, 2));
+  renameSync(file("settings.json.tmp"), file("settings.json"));
   return next;
 }
 
@@ -46,6 +47,16 @@ function seal(text: string): Buffer {
 
 function open(buf: Buffer): string {
   return safeStorage.decryptString(buf);
+}
+
+/** Recovery material is durable before the first enroll HTTP request. */
+export function preparedEnroll(key: string, token: string): string {
+  ensure();
+  const name = file("enroll-" + createHash("sha256").update(key).digest("hex") + ".bin");
+  if (existsSync(name)) return open(readFileSync(name));
+  writeFileSync(name + ".tmp", seal(token), { flush: true });
+  renameSync(name + ".tmp", name);
+  return token;
 }
 
 export function readToken(): string {
@@ -65,13 +76,19 @@ const cacheName = (key: string) => join(dir(), "cache", createHash("sha256").upd
 
 export function cacheGet(key: string): { at: string; data: unknown } | null {
   try {
-    return JSON.parse(open(readFileSync(cacheName(key))));
+    const hit = JSON.parse(open(readFileSync(cacheName(key))));
+    const age = Date.now() - Date.parse(hit.at);
+    return Number.isFinite(age) && age >= 0 && age <= 8 * 60 * 60 * 1000 ? hit : null;
   } catch {
     return null;
   }
 }
 
-export function cachePut(key: string, data: unknown): void {
+let cacheEpoch = 0;
+export const cacheGeneration = (): number => cacheEpoch;
+
+export function cachePut(key: string, data: unknown, generation = cacheEpoch): void {
+  if (generation !== cacheEpoch) return;
   try {
     ensure();
     writeFileSync(cacheName(key), seal(JSON.stringify({ at: new Date().toISOString(), data })));
@@ -80,13 +97,23 @@ export function cachePut(key: string, data: unknown): void {
   }
 }
 
-/** Отзыв или «Выйти»: стереть токен, устройство и все кэши экранов. */
-export function wipe(): void {
-  try { rmSync(file("device.key"), { force: true }); } catch { /* */ }
+export function cacheRemove(key: string): void {
+  cacheEpoch++;
+  try { rmSync(cacheName(key), { force: true }); } catch { /* unavailable cache is optional */ }
+}
+
+export function clearCache(): void {
+  cacheEpoch++;
   try {
     const c = join(dir(), "cache");
     if (existsSync(c)) for (const f of readdirSync(c)) rmSync(join(c, f), { force: true });
-  } catch { /* */ }
+  } catch { /* best effort removal; network authority still gates fresh reads */ }
+}
+
+/** Отзыв или «Выйти»: стереть токен, устройство и все кэши экранов. */
+export function wipe(): void {
+  try { rmSync(file("device.key"), { force: true }); } catch { /* */ }
+  clearCache();
   writeSettings({ device: undefined });
 }
 
@@ -116,21 +143,43 @@ export function readCallQueue(): CallQueue | null {
 export function writeCallQueue(queue: CallQueue): void {
   ensure();
   const path = file("calls-pending.bin"), temp = path + ".tmp";
-  writeFileSync(temp, seal(JSON.stringify(queue)));
+  writeFileSync(temp, seal(JSON.stringify(queue)), { flush: true });
   renameSync(temp, path);
 }
 export function clearCallQueue(): void {
   for (const name of ["calls-pending.bin", "calls-pending.bin.tmp"]) rmSync(file(name), { force: true });
 }
 
+export function readDraft(key: string): unknown {
+  const name = file("draft-" + createHash("sha256").update(key).digest("hex") + ".bin");
+  return existsSync(name) ? JSON.parse(open(readFileSync(name))) : null;
+}
+
+export function hasFieldWork(): boolean {
+  if (readCallQueue()?.entries.length) return true;
+  for (const name of readdirSync(app.getPath("userData"))) {
+    if (!/^draft-[a-f0-9]+\.bin$/.test(name)) continue;
+    try {
+      const draft = JSON.parse(open(readFileSync(file(name))));
+      if (draft?.fields || draft?.office || typeof draft?.comment === "string") return true;
+    } catch { return true; } // damaged work must be recovered before installing
+  }
+  return false;
+}
+export function writeDraft(key: string, draft: unknown): void {
+  ensure();
+  const name = file("draft-" + createHash("sha256").update(key).digest("hex") + ".bin");
+  if (draft === null) { rmSync(name, { force: true }); return; }
+  const data = JSON.stringify(draft);
+  if (data.length > 256000) throw new Error("Черновик слишком большой");
+  writeFileSync(name + ".tmp", seal(data), { flush: true }); renameSync(name + ".tmp", name);
+}
+
 export function wipeField(): void {
   const identity = readSettings().fieldDevice;
   const pending = readCallQueue();
   try { rmSync(file("field.key"), { force: true }); } catch { /* */ }
-  try {
-    const c = join(dir(), "cache");
-    if (existsSync(c)) for (const f of readdirSync(c)) rmSync(join(c, f), { force: true });
-  } catch { /* */ }
+  clearCache();
   // The revoked token and cached cards go away. Retain only the principal
   // needed to recover its encrypted unsent calls after a new link is issued.
   writeSettings({ fieldDevice: pending?.entries.length && identity?.telegram_id

@@ -96,7 +96,8 @@ def load_settings() -> dict:
     if not SETTINGS_PATH.exists():
         return {}
     try:
-        return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        from pult.core.settings import decode_tokens
+        return decode_tokens(json.loads(SETTINGS_PATH.read_text(encoding="utf-8")))
     except Exception:  # noqa: BLE001
         return {}
 

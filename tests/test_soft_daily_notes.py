@@ -10,7 +10,7 @@ from pult import enrich
 from test_review_soft_integrity import world,call,grid
 
 def moment(hour,minute=0):
-    return datetime.combine(workday.today(),datetime.min.time()).replace(hour=hour,minute=minute,tzinfo=timezone.utc).timestamp()*1000
+    return datetime.combine(workday.today(),datetime.min.time()).replace(hour=hour,minute=minute,tzinfo=timezone(timedelta(hours=5))).timestamp()*1000
 
 def test_same_result_later_is_a_second_attempt_but_retry_and_double_tap_are_not(world,monkeypatch):
     first=call(monkeypatch,'one',occurred_at=moment(8))
@@ -61,8 +61,12 @@ def test_call_after_local_midnight_has_correct_office_day_and_import_anchor(worl
     assert db.registry_rows(visit_from=office_day.isoformat(),visit_to=office_day.isoformat())
     db.record_enrichment_deliveries([{'contract_id':'A','key':'soft_call_status','value':'Нет контакта',
                                      'visit_date':office_day.isoformat(),'responsible':'S1'}])
-    world[0].update(soft_call_status='Нет контакта',soft_comment='Synthetic office correction')
-    report=db.import_grid(grid(world),source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
+    world[0].update(soft_call_status='Нет контакта',soft_comm_date=office_day.isoformat(),soft_comment='Synthetic office correction')
+    preview=db.import_grid(grid(world),source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
+                           allow_soft_office_edits=True,preview_only=True)
+    report=db.import_grid(grid(world),source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
+                          allow_soft_office_edits=True,
+                          expected_soft_office_effect_digest=preview['soft_office_effect_digest'])
     assert report['office_cells']>0
     assert db.get_client('A')['soft_comment']=='Synthetic office correction'
 

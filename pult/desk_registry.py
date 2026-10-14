@@ -35,12 +35,23 @@ from pult.core.export import (export_confirm_text, export_request,  # noqa: E402
 from pult.core.text import fmt_n  # noqa: E402
 
 _lock = threading.RLock()
-S: dict = {
+def _empty_state() -> dict:
+    return {
     "col_path": "", "col_analysis": None,
     "book": None, "preview": None,
     "enr_fields": None, "enr_matched": [], "enr_check": None, "enr_decisions": {},
     "exp_data": None, "exp_request": None, "last_receipt": None,
-}
+    }
+
+
+S: dict = _empty_state()
+
+
+def reset_context() -> None:
+    """Предпросмотр, решения и выгрузки относятся только к своему контуру."""
+    with _lock:
+        S.clear()
+        S.update(_empty_state())
 
 
 def route(path: str, body: dict, *, admin, start_job, settings):
@@ -159,9 +170,9 @@ def imp_selection(body, *, settings, **_):
             "button": ri.preview_button_text(book, sel, bool(body.get("full")))}
 
 
-def _signature(book, sel, full, restore, comments):
+def _signature(book, sel, full, restore, comments, soft_edits=False):
     return (book.get("file_sha256"), book.get("import_profile", "hard"),
-            tuple(sorted(sel)), bool(full), bool(restore), bool(comments))
+            tuple(sorted(sel)), bool(full), bool(restore), bool(comments), bool(soft_edits))
 
 
 def imp_preview(body, *, admin, start_job, **_):
@@ -174,14 +185,15 @@ def imp_preview(body, *, admin, start_job, **_):
     if not picked:
         raise RuntimeError("Отметь хотя бы одного сотрудника")
     full, restore, comments = bool(body.get("full")), bool(body.get("restore_manual")), bool(body.get("replace_comments"))
-    sig = _signature(book, picked, full, restore, comments)
+    soft_edits = bool(body.get("soft_edits"))
+    sig = _signature(book, picked, full, restore, comments, soft_edits)
 
     def work(say):
         say(f"Проверяю импорт {Path(book['path']).name}: {len(picked)} сотр…")
         prepared, proof_path = ri.prepare_import(book, picked, full_registry=full,
                                                  force_test_subset=restore)
         pbody = ri.preview_body(prepared, full_registry=full, restore_manual=restore,
-                                replace_current_comments=comments)
+                                replace_current_comments=comments, allow_soft_office_edits=soft_edits)
         d = xs.post_import(admin, "/admin/import/preview.json", pbody,
                            sheet=_xc.WORKBOOK_SHEET_NAME, timeout=180, log=say)
         if d.get("error"):
@@ -203,7 +215,7 @@ def imp_apply(body, *, admin, start_job, **_):
     pv = S["preview"]
     book = S["book"] or {}
     sig = _signature(book, body.get("selected") or [], body.get("full"), body.get("restore_manual"),
-                     body.get("replace_comments"))
+                     body.get("replace_comments"), body.get("soft_edits"))
     if not pv or pv["sig"] != sig:
         S["preview"] = None
         raise RuntimeError("Сначала сделай свежий предпросмотр импорта")
@@ -272,7 +284,7 @@ def enr_preview(body, *, admin, start_job, settings, **_):
         S["enr_fields"], S["enr_matched"], S["enr_check"] = d["fields"], matched, None
         return {"pairs": en.preview_pairs(by_emp, matched),
                 "warning": en.preview_warning(by_emp, matched, nofolder, nofile),
-                "matched": [{"key": m["key"], "employee": m["employee"], "note": en.pick_note(m)}
+                "matched": [{"key": m["key"], "employee": m["employee"], "profile": m["profile"], "note": en.pick_note(m)}
                             for m in matched]}
     return {"job": start_job("enr_preview", work)}
 

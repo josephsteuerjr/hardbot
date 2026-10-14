@@ -5,12 +5,12 @@ import { hard } from "../kit/api";
 import { ask, esc, n, toast } from "../kit/dom";
 import type { Section } from "../kit/shell";
 import { DataTable, tupleCols } from "../kit/table";
-import { adm, chipsHtml, fn, fnMap, guard, kvHtml, local, note } from "./lib";
+import { adm, chipsHtml, fn, fnMap, guard, kvHtml, local, note, runJob } from "./lib";
 
 const XLS = [{ name: "Excel", extensions: ["xlsx", "xlsm", "xlsb", "xls"] }];
 const st = {
   tab: "import" as "import" | "enrich" | "columns" | "export" | "recalled",
-  imp: null as any, sel: new Set<string>(), full: false, restore: false, comments: false, preview: null as any, applied: null as any,
+  imp: null as any, sel: new Set<string>(), full: false, restore: false, comments: false, softEdits: false, preview: null as any, applied: null as any,
   impQuery: "", impFilter: "all", impSort: "name",
   enr: null as any, matched: [] as any[], enrSel: new Set<string>(), since: "", until: "", check: null as any, decisions: {} as Record<string, string>, applyRes: null as any,
   cols: null as any, colDecisions: [] as any[], scan: null as any,
@@ -20,14 +20,7 @@ const st = {
 
 /** Задача питон-стороны: ждём конца, журнал — в строку статуса. */
 async function job(path: string, body: unknown, log?: (s: string) => void): Promise<any> {
-  const { job: id } = await local(path, body);
-  for (;;) {
-    await new Promise((r) => setTimeout(r, 700));
-    const j = await local("/job", { id });
-    if (log && j.log?.length) log(j.log[j.log.length - 1]);
-    if (j.state === "done") return j.result;
-    if (j.state === "failed") throw new Error(j.error || "не вышло");
-  }
+  return runJob(path, body, log);
 }
 
 function tabs(): string {
@@ -57,6 +50,7 @@ async function importTab(el: HTMLElement) {
   if (st.full) warn.push("ПОЛНЫЙ СРЕЗ: у выбранных сотрудников будут сняты договоры, которых нет среди их выбранных строк. Остальные не затрагиваются. Файл неполный — снимите галочку.");
   if (st.restore) warn.push("ВОЗВРАТ РУЧНЫХ СНЯТИЙ: вернутся только договоры, которые снова есть в выбранных строках с тем же сотрудником.");
   if (st.comments) warn.push("Текущие комментарии будут заменены значениями файла, включая пустые.");
+  if (st.softEdits) warn.push("Офисные правки результатов Софта будут применены к завершённым звонкам. Предпросмотр покажет точные замены. Для обычного обновления портфелей оставьте этот пункт выключенным.");
   if (warn.length) warn.push("Точные числа пульт покажет в предпросмотре до записи.");
   el.innerHTML = `${note("Общий реестр: опубликованный master или утверждённое тестовое подмножество. Личные ФИО.xlsb сюда не загружаются. Сначала предпросмотр — запись отдельной кнопкой.")}
     <div class="toolbar" style="margin-top:12px"><button class="btn primary" data-pick>Выбрать реестр…</button><span class="muted" id="imp-cap">${esc(book?.caption || "")}</span></div>
@@ -75,6 +69,8 @@ async function importTab(el: HTMLElement) {
         <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="full" ${st.full ? "checked" : ""}><span class="grow">Для выбранных сотрудников это полный срез — снять у них договоры, которых нет в выбранных строках файла</span></label>
         <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="restore" ${st.restore ? "checked" : ""}><span class="grow">Вернуть ранее вручную снятые договоры, если они снова есть в выбранных строках с тем же ответственным</span></label>
         <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="comments" ${st.comments ? "checked" : ""}><span class="grow">Начало месяца: заменить комментарии выезда значениями файла (пустая ячейка очистит комментарий)</span></label>
+        <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="softEdits" ${st.softEdits ? "checked" : ""}><span class="grow">Применить проверенные офисные правки результатов звонков Софта</span></label>
+        <p class="muted" style="font-size:13px">При обычном импорте сохранённые результаты звонков Софта защищены от замены данными реестра.</p>
         <p class="muted" style="font-size:13px">Историчные комментарии грузятся сами, если колонка есть в файле: значение повторяет файл точно, пустая ячейка очищает.</p></div>
       ${warn.length ? `<div class="notice" style="white-space:pre-line"><span class="grow">${esc(warn.join("\n"))}</span></div>` : ""}
       <div class="toolbar"><button class="btn primary" data-preview ${st.sel.size ? "" : "disabled"}>Предпросмотр выбранных (${n(st.sel.size)})</button>
@@ -104,7 +100,7 @@ async function importTab(el: HTMLElement) {
     } catch (e) {
       st.imp = null; cap.textContent = `Файл не разобран: ${(e as Error).message}`; return;
     }
-    st.sel = new Set(st.imp.selected); st.full = false; st.restore = false; st.comments = false; invalidate(); redraw();
+    st.sel = new Set(st.imp.selected); st.full = false; st.restore = false; st.comments = false; st.softEdits = false; invalidate(); redraw();
   }));
   el.querySelector<HTMLSelectElement>("[data-profile]")?.addEventListener("change", guard(async () => {
     st.imp=await local("/reg/select", {profile:(el.querySelector("[data-profile]") as HTMLSelectElement).value});
@@ -119,11 +115,11 @@ async function importTab(el: HTMLElement) {
     await local("/reg/select", { selected: [...st.sel] }); redraw();
   })));
   el.querySelectorAll<HTMLInputElement>("[data-opt]").forEach((cb) => cb.addEventListener("change", () => {
-    const k = cb.dataset.opt as "full" | "restore" | "comments"; st[k] = cb.checked; invalidate();
+    const k = cb.dataset.opt as "full" | "restore" | "comments" | "softEdits"; st[k] = cb.checked; invalidate();
     if (k === "full" && cb.checked) toast("Полный режим включён для выбранных сотрудников");
     redraw();
   }));
-  const body = () => ({ selected: [...st.sel], full: st.full, restore_manual: st.restore, replace_comments: st.comments });
+  const body = () => ({ selected: [...st.sel], full: st.full, restore_manual: st.restore, replace_comments: st.comments, soft_edits: st.softEdits });
   const logEl = () => el.querySelector("#imp-log")!;
   el.querySelector("[data-preview]")?.addEventListener("click", guard(async () => {
     invalidate(); logEl().textContent = "Проверяю…";
@@ -167,8 +163,13 @@ async function enrichTab(el: HTMLElement) {
     ${st.matched.length ? `<div class="toolbar"><span class="muted" style="font-size:13.5px">Кого обогащать:</span>
         <button class="btn small" data-esel="none">снять</button><button class="btn small" data-esel="all">все</button>
         <span class="spacer"></span><span class="muted" style="font-size:13px">отмечено ${n(st.enrSel.size)} из ${n(st.matched.length)}</span></div>
-      <div class="grid2" style="max-height:300px;overflow:auto;border-top:var(--lw) solid var(--line)">${st.matched.map((m) => `<label class="list-row" style="cursor:pointer;padding:8px 4px">
-        <input type="checkbox" data-ek="${esc(m.key)}" ${st.enrSel.has(m.key) ? "checked" : ""}><span class="grow"><span class="nm">${esc(m.employee)}</span><br><span class="sub">${esc(m.note)}</span></span></label>`).join("")}</div>
+      <p class="muted" style="font-size:13px">Сотрудники с результатами за всю историю. Выбранные даты ограничивают перенос фактов в книги.</p>
+      <div class="grid2">${([['hard','Хард'],['soft','Софт']] as const).map(([profile,title]) => {
+        const members = st.matched.filter((m) => (m.profile || (m.key.startsWith('soft:') ? 'soft' : 'hard')) === profile);
+        return `<div><h3>${title} — ${n(members.length)} <span class="muted" style="font-size:13px">отмечено ${n(members.filter((m) => st.enrSel.has(m.key)).length)}</span></h3>
+          <div style="max-height:260px;overflow:auto;border-top:var(--lw) solid var(--line)">${members.map((m) => `<label class="list-row" style="cursor:pointer;padding:8px 4px">
+          <input type="checkbox" data-ek="${esc(m.key)}" ${st.enrSel.has(m.key) ? "checked" : ""}><span class="grow"><span class="nm">${esc(m.employee)}</span><br><span class="sub">${esc(m.note)}</span></span></label>`).join('') || '<p class="muted">Нет сотрудников с сохранёнными результатами.</p>'}</div></div>`;
+      }).join('')}</div>
       <div class="toolbar" style="margin-top:12px"><button class="btn primary" data-check ${st.enrSel.size ? "" : "disabled"}>Проверить конфликты (без записи)</button>
         ${e.writes ? `<button class="btn" data-apply ${st.enrSel.size ? "" : "disabled"}>Записать выбранных (${n(st.enrSel.size)})</button>` : ""}
         <span class="muted" id="e-log"></span></div>` : ""}

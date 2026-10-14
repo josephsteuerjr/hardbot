@@ -34,6 +34,25 @@ export async function local<T = any>(path: string, body: unknown = {}): Promise<
   return r.data as T;
 }
 
+/** Keep the request id before starting. A lost start response is recovered by id. */
+export async function runJob(path: string, body: unknown, log?: (s: string) => void): Promise<any> {
+  const id = crypto.randomUUID();
+  localStorage.setItem("hard:last-job", id);
+  try {
+    await local(path, { ...(body as object), request_id: id });
+  } catch (error) {
+    try { await local("/job", { id }); }
+    catch { throw new Fail(`Операция №${id}: ответ потерян. Проверьте журнал задач в «Подключении» перед повтором. ${String((error as Error).message || error)}`); }
+  }
+  for (;;) {
+    await new Promise(r => setTimeout(r, 700));
+    const j = await local("/job", { id });
+    if (log && j.log?.length) log(j.log[j.log.length - 1]);
+    if (j.state === "done") return j.result;
+    if (["failed", "uncertain"].includes(j.state)) throw new Fail(`Операция №${id}: ${j.error || j.state}`);
+  }
+}
+
 /** Ошибку — словами в тост, без трейсбеков. */
 export function guard<A extends unknown[]>(f: (...a: A) => Promise<unknown>) {
   return async (...a: A) => {

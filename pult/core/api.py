@@ -84,6 +84,12 @@ class _NoDowngradeRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         try:
             require_https(newurl)
+            old, new = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(newurl)
+            def origin(parts):
+                return (parts.scheme.lower(), (parts.hostname or "").lower(),
+                        parts.port or (443 if parts.scheme == "https" else 80))
+            if origin(old) != origin(new) or new.username or new.password:
+                raise RuntimeError("Переадресация на другой сервер запрещена: ключ и токен не отправлены.")
         except RuntimeError:
             fp.close()
             raise

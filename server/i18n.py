@@ -37,6 +37,8 @@ def variants(key: str) -> set[str]:
 
 
 TEXT: dict[str, dict[str, str]] = {
+    "review_invalid": {"ru": "Проверьте срок, состояние и источник проверки. Для окончательного решения нужны комментарий и реквизиты самостоятельного источника.", "uz": "Tekshiruv muddati, holati va manbasini tekshiring. Yakuniy qaror uchun izoh va mustaqil manba rekvizitlari kerak.", "tg": "Муҳлат, ҳолат ва манбаи санҷишро тафтиш кунед. Барои қарор шарҳ ва маълумоти манбаи мустақил лозим аст."},
+    "review_conflict": {"ru": "Проверку уже изменили. Откройте карточку заново перед сохранением.", "uz": "Tekshiruv o‘zgartirilgan. Saqlashdan oldin kartani qayta oching.", "tg": "Санҷиш тағйир ёфтааст. Пеш аз захира кортро аз нав кушоед."},
     "access_denied": {
         "ru": "⛔ Доступа нет. Передайте аналитику ваш ID: <code>{id}</code>",
         "uz": "⛔ Ruxsat yo‘q. Analitikka ID’ingizni yuboring: <code>{id}</code>",

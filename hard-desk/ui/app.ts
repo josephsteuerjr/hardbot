@@ -2,10 +2,15 @@
 // открывается сразу. Разделы видны по возможностям, которые считает сервер (caps):
 // безопасник видит «Контроль», руководитель — «Вход команды».
 import { api, hard, type Shell } from "./kit/api";
+import { currentLanguage, setLanguage } from "./kit/i18n";
 import { $, esc, toast } from "./kit/dom";
 import { bare, go, mountShell, refresh, setHead, setSections, setWho, type Section } from "./kit/shell";
 import { startHeartbeat } from "./kit/heartbeat";
 import { activity } from "./views/activity";
+import { workspace } from "./views/workspace";
+import { teamPortfolio } from "./views/team-portfolio";
+import { managerCRM } from "./views/manager-crm";
+import { mountDesktopTools } from "./kit/desktop-tools";
 import { control } from "./views/control";
 import { device, links, promises, report } from "./views/misc";
 import { team } from "./views/team";
@@ -17,8 +22,8 @@ import { managers } from "./analyst/managers";
 import { conn, maint } from "./analyst/system";
 import { mail } from "./analyst/mail";
 import { priority, registry } from "./analyst/registry";
-import { fieldHelp, portfolio } from "./views/field";
-import { softHelp, softQueue } from "./views/soft";
+import { fieldHelp, portfolio, hardEmployeeSections } from "./views/field";
+import { softHelp, softQueue, softEmployeeSections } from "./views/soft";
 import { adminControlCall, controlSection } from "./views/control";
 
 /** Пульт аналитика: тот же каркас и облик, данные — через питон-сторону. */
@@ -80,7 +85,7 @@ function enrollScreen(note = "") {
   host.innerHTML = `<div class="page enroll">
     <img class="enroll-logo" src="icon.svg" alt="" onerror="this.remove()">
     <h1>Вход в приложение</h1>
-    <p>Вставьте свою персональную ссылку. Приложение откроет вашу рабочую страницу: Софт, Хард или пульт руководителя.</p>
+    <p>${shell?.fixedProduct ? "Подключите рабочее место руководителя или СБ своей персональной ссылкой." : "Вставьте свою персональную ссылку. Приложение откроет вашу рабочую страницу: Софт, Хард или пульт руководителя."}</p>
     <p class="hint">Сотруднику ссылку выдаёт руководитель в «Входе команды», руководителю — аналитик. Два входа для телефона и один для программы на ПК; повтор на уже подключённом устройстве их не расходует.</p>
     <div class="row"><input class="input" id="link" placeholder="https://…/i/…" autocomplete="off" spellcheck="false">
       <button class="btn primary" id="go">Войти</button></div>
@@ -88,6 +93,7 @@ function enrollScreen(note = "") {
     <div class="hint">Ссылка персональная — другим её не пересылайте. Если компьютер потеряли или сменили, аналитик отзовёт вход: пульт на старом компьютере сотрёт у себя всё при первом же выходе на связь.</div>
   </div>`;
   const input = $<HTMLInputElement>("link");
+  addMigration(host);
   const btn = $<HTMLButtonElement>("go");
   const submit = async () => {
     const v = input.value.trim();
@@ -104,6 +110,15 @@ function enrollScreen(note = "") {
   input.focus();
 }
 
+function addMigration(host: HTMLElement) {
+  if (!shell?.fixedProduct) return;
+  const b = document.createElement("button"); b.className = "btn small"; b.textContent = "Перенести вход из прежней программы";
+  host.querySelector(".enroll")?.append(b);
+  b.addEventListener("click", async () => {
+    const r = await hard.migrate(); if (r.ok) await openAfterEnrollment(); else toast(r.text || "Перенос не выполнен");
+  });
+}
+
 async function start() {
   shell = await hard.state();
   if (shell.mode === "field") { await openAfterEnrollment(); return; }
@@ -118,15 +133,16 @@ async function start() {
   const caps = info?.caps || { team_links: true, control: false };
   const who = info?.me;
   setWho(who ? `<b>${esc(who.name || "Руководитель")}</b>${esc(ROLE[who.role] || "")}${who.scope ? " · " + esc(who.scope) : ""}` : "");
-  const list: Section[] = [activity, team, promises];
+  document.body.classList.add("desktop");
+  const list: Section[] = [managerCRM, teamPortfolio, workspace, activity, team, promises];
   if (caps.control) list.push(control);
   if (caps.team_links) list.push(links);
   list.push(report(!!caps.control));
   list.push(device(shell, who, () => enrollScreen()));
   setSections(list);
-  let first = "activity";
+  let first = "crm";
   try { first = localStorage.getItem("hard.section") || first; } catch { /* */ }
-  if (!list.some((s) => s.id === first)) first = "activity";
+  if (!list.some((s) => s.id === first)) first = "crm";
   await go(first);
   // Запуск без связи оставил разделы по умолчанию (без «Контроля» и т. п.) —
   // тогда при возврате связи собираем пульт заново, иначе просто перерисовываем.
@@ -138,6 +154,7 @@ async function start() {
 
 const ANALYST = new URLSearchParams(location.search).get("mode") === "analyst";
 const FIELD = new URLSearchParams(location.search).get("mode") === "field";
+mountDesktopTools();
 document.addEventListener("keydown", (e) => { if (e.key === "F5") { e.preventDefault(); void refresh(); } });
 
 /** Приложение сотрудника (выездник и софт — одно окно): роль узнаёт СЕРВЕР
@@ -156,6 +173,7 @@ function enrollFieldScreen(note = "") {
     <div class="err" id="err">${esc(note)}</div>
   </div>`;
   const input = $<HTMLInputElement>("link");
+  addMigration(host);
   const btn = $<HTMLButtonElement>("go");
   const submit = async () => {
     const v = input.value.trim();
@@ -173,6 +191,7 @@ function enrollFieldScreen(note = "") {
 }
 
 async function startAgent() {
+  document.body.classList.add("desktop", "employee-workspace");
   shell = await hard.state();
   if (shell.mode !== "field") { await openAfterEnrollment(); return; }
   if (shell.theme === "light" || shell.theme === "dark") document.documentElement.dataset.theme = shell.theme;
@@ -183,12 +202,19 @@ async function startAgent() {
   if (!me.ok && me.kind === "revoked") { enrollFieldScreen(me.text); return; }
   if (!me.ok) { startError(me.text || "", startAgent); return; }
   const who: any = me.ok ? me.data : null;
+  setLanguage(who?.lang || currentLanguage());
   // Какой экран показать — решает СЕРВЕР: есть портфель софта → очередь звонков
   // (перевод УЗБ на колл-центр), иначе — портфель выездника. Смешанный случай
   // тоже открывает очередь: визит всё равно закрывается телефоном.
-  const soft = !!(who?.roles?.soft);
+  const soft = shell.productId === "soft" || (!shell.fixedProduct && !!who?.roles?.soft);
+  if (shell.productId === "hard" && who?.roles?.soft && !who?.roles?.field) {
+    startError("У этого входа есть только портфель Софта. Откройте программу «Софт».", startAgent); return;
+  }
+  if (shell.productId === "soft" && !who?.roles?.soft) {
+    startError("У этого входа нет портфеля Софта. Откройте приложение «Хард» или проверьте назначение у руководителя.", startAgent); return;
+  }
   setWho(`<b>${esc(who?.employee || "Сотрудник")}</b> · ${soft ? "Софт" : "Хард"}`);
-  const list: Section[] = soft ? [softQueue, softHelp] : [portfolio, fieldHelp];
+  const list: Section[] = soft ? [softQueue, ...softEmployeeSections, softHelp] : [portfolio, ...hardEmployeeSections, fieldHelp];
   setSections(list);
   await go(soft ? "softqueue" : "portfolio");
   startHeartbeat(async () => {
@@ -202,6 +228,7 @@ if (ANALYST) {
   void startAnalyst();
 } else if (FIELD) {
   mountShell(`<b>Хард</b> · приложение сотрудника`);
+  void hard.state().then(s => { if (s.fixedProduct) $("sign").textContent = s.product; });
   hard.on("revoked", () => enrollFieldScreen("Вход этого компьютера отозван. Попросите у руководителя новую ссылку."));
   void startAgent();
 } else {

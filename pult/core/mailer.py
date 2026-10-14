@@ -350,17 +350,18 @@ def _signature(ol) -> str:
 
 
 def send_outlook(to: list[str], subject_text: str, html_body: str, attachment: str, *,
-                 display: bool = False, tries: int = 3, pause: float = 4.0) -> None:
+                 display: bool = False, tries: int = 3, pause: float = 4.0, operation_id=None) -> None:
     """Письмо из Outlook этой машины. display=True — открыть черновик и не
     отправлять (проверить, как выглядит).
 
     Подпись владельца берётся у черновика-донора (см. `_signature`): текст
     ставим ПЕРЕД ней, и письмо выглядит так, будто его написали руками.
 
-    Outlook с открытым окном-вопросом (пароль, предупреждение) отказывает с
-    «открыто диалоговое окно» — ждём и пробуем ещё (tries раз). Не вышло —
-    черновик закрывается без сохранения: 29.09.2026 после двух таких отказов в
-    Outlook висели два скрытых черновика."""
+    Display при открытом диалоге Outlook можно повторить (tries раз). Send
+    вызывается единожды: ошибка может скрывать состоявшуюся отправку.
+    При operation_id черновик сохраняется с HardOperationId до Send, чтобы
+    оператор мог найти его и сверить результат после неопределённого ответа.
+    Несохранённый черновик без номера закрывается без сохранения."""
     import time
 
     import pythoncom
@@ -375,8 +376,15 @@ def send_outlook(to: list[str], subject_text: str, html_body: str, attachment: s
             mail = ol.CreateItem(0)
             mail.To = "; ".join(to)
             mail.Subject = subject_text
+            if operation_id:
+                mail.Subject += " [Хард " + str(operation_id) + "]"
             mail.HTMLBody = with_signature(html_body, signature)
             mail.Attachments.Add(str(attachment))
+            if operation_id:
+                mail.UserProperties.Add("HardOperationId", 1).Value = str(operation_id)
+                mail.Save()
+            if not display:
+                tries = 1
             for attempt in range(max(1, tries)):
                 try:
                     if display:

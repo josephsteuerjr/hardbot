@@ -417,6 +417,7 @@ def activity(mgr: dict, team: list[str], rng: dict, *, office: str = "",
                 title = "Записана оплата"
                 detail = db.reported_payment_text(r)
             events.append({"id": f"{kind}{r['id']}", "kind": kind,
+                "call_id": r["id"] if kind == "call" else None,
                 "at": t.isoformat(timespec="seconds"), "time": _hhmm(t),
                 "day": t.date().isoformat(), "employee": emp,
                 "office": "" if of.get(emp) == NO_OFFICE else of.get(emp, ""),

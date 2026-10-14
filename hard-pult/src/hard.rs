@@ -176,6 +176,7 @@ impl Hard {
         let (name, scope) = settings.lock().expect("настройки").manager();
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(25))
+            .redirect(reqwest::redirect::Policy::none())
             // Без системных прокси — как у питон-версии: корпоративный
             // прокси не знает про наши адреса и рвёт связь с сервером.
             .no_proxy()
@@ -273,7 +274,7 @@ impl Hard {
             .await
             .map_err(|err| net_trouble(&err))?;
         let status = resp.status().as_u16();
-        if status >= 400 {
+        if status >= 300 {
             let text = resp.text().await.unwrap_or_default();
             return Err(trouble_of(status, &text));
         }
@@ -486,7 +487,7 @@ impl Hard {
                 }
             })?;
         let status = resp.status().as_u16();
-        if status >= 400 {
+        if status >= 300 {
             let text = resp.text().await.unwrap_or_default();
             let trouble = trouble_of(status, &text);
             if trouble.kind == "auth" {

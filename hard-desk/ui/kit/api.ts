@@ -12,6 +12,8 @@ export interface ApiResult<T = any> {
 
 export interface Shell {
   mode: "manager" | "analyst" | "field";
+  productId?: "hard" | "soft" | "manager" | "analyst";
+  fixedProduct?: boolean;
   kit?: boolean;
   product: string;
   version: string;
@@ -27,6 +29,9 @@ type Q = Record<string, unknown>;
 
 interface Bridge {
   state(): Promise<Shell>;
+  edit(action: string): void;
+  update(action: "state" | "check" | "install"): Promise<any>;
+  migrate(): Promise<{ ok: boolean; text?: string }>;
   /** Один exe — все роли: сменить режим («manager»/«field»/«soft»/«analyst»). */
   setMode(mode: string): Promise<{ ok: boolean; text?: string }>;
   enroll(link: string): Promise<ApiResult>;
@@ -45,7 +50,7 @@ interface Bridge {
   /** Запуск вместе с Windows (свёрнутым к часам). Без аргумента — узнать. */
   autostart(on?: boolean): Promise<boolean>;
   win(action: string): void;
-  on(name: "revoked" | "win", cb: (arg?: unknown) => void): void;
+  on(name: "revoked" | "win" | "update", cb: (arg?: unknown) => void): void;
 }
 
 export const hard: Bridge = (window as unknown as { hard: Bridge }).hard;
@@ -61,6 +66,8 @@ function tell(level: "live" | "warn" | "off" | "busy", text: string) {
 }
 
 export async function api<T = any>(path: string, query?: Q, method = "GET", body?: unknown): Promise<ApiResult<T>> {
+  // A locally protected draft/settings write says nothing about server reachability.
+  if (path.startsWith("/api/local/")) return hard.api(method,path,query,body);
   busy++;
   tell("busy", "Обновляю…");
   let r: ApiResult<T>;

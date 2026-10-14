@@ -108,7 +108,8 @@ def load_settings() -> dict:
     if not SETTINGS_PATH.exists():
         raise SystemExit(f"Нет файла настроек: {SETTINGS_PATH}. Запусти пульт и сохрани "
                          "адрес сервера с ключом — цикл берёт их оттуда.")
-    return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    from pult.core.settings import decode_tokens
+    return decode_tokens(json.loads(SETTINGS_PATH.read_text(encoding="utf-8")))
 
 
 def api(settings: dict, method: str, path: str, body: dict | None = None, timeout=180):
@@ -217,20 +218,9 @@ def step_export(settings: dict, base: str | None, dry: bool, log) -> str:
     by_emp = enrich.split_by_employee(data["rows"])
     fmap = folder_map(base)
 
-    jobs, nofolder, nofile = [], [], []
-    for key, e in sorted(by_emp.items(), key=lambda kv: kv[1]["employee"].lower()):
-        if not e["filled"]:
-            continue                       # бот ничего не заполнял — обогащать нечего
-        entries = fmap.get(key)
-        if not entries:
-            nofolder.append(f"{e['employee']} ({e['filled']})")
-            continue
-        files = personal_files(entries, e["employee"])
-        if not files:
-            nofile.append(e["employee"])
-            continue
-        for p in files:
-            jobs.append({"employee": e["employee"], "path": str(p), "rows": e["rows"]})
+    from core.enrichment import match_employees, build_jobs
+    matched, nofolder, nofile = match_employees(by_emp, fmap)
+    jobs = build_jobs(matched)
 
     log(f"К обогащению: {len(jobs)} файлов, {sum(1 for e in by_emp.values() if e['filled'])} "
         f"сотрудников с визитами бота")

@@ -420,6 +420,9 @@ def report_lines(results: list[dict]) -> list[str]:
     for r in ok[:15]:
         lines.append(f"  {r['employee']} — {Path(r['file']).name}: "
                      f"ячеек {r.get('cells_written')}, кейсов {r.get('changed_cases')}")
+        if r.get('statistics_formula_changes'):
+            lines.append(f"    исправлены ссылки статистики на суммы платежей: {len(r['statistics_formula_changes'])}")
+        lines.extend(f"    ⚠ {warning}" for warning in r.get('statistics_warnings') or [])
     if len(ok) > 15:
         lines.append(f"  … и ещё {len(ok) - 15} файлов")
     # Что именно вытеснили — поимённо, а не одним счётчиком.
@@ -481,8 +484,9 @@ def ledger_error(results: list[dict]) -> str:
 def toast_text(results: list[dict]) -> tuple[str, bool]:
     s = summarize(results)
     bad = s["bad"]
-    return (f"Обогащено файлов: {len(s['ok'])}" + (f", ошибок: {len(bad)}" if bad else ""),
-            bool(bad))
+    warnings = any(r.get('statistics_warnings') for r in results)
+    return (f"Обогащено файлов: {len(s['ok'])}" + (f", ошибок: {len(bad)}" if bad else "")
+            + (" · проверьте предупреждения статистики" if warnings else ""), bool(bad or warnings))
 
 
 def single_file_report(p: dict) -> str:

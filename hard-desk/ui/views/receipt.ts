@@ -6,6 +6,7 @@ import { toast } from "../kit/dom";
 export function receiptHtml(d: any, visitLink: boolean): string {
   const receipts: any[] = d.receipts || [];
   return `<div class="section"><div class="section-head"><h3 class="section-title">Чек об оплате</h3></div>
+    <label>Договор <select class="input" id="f-rc-contract"><option value="">Выберите договор</option>${(d.contracts || []).map((c:any)=>`<option value="${esc(c.contract_id)}" ${(d.contracts || []).length===1?"selected":""}>${esc(c.contract_id)} · ${esc(c.unit || "валюта не указана")}</option>`).join("")}</select></label>
     <div class="row"><input class="input" id="f-rc-sum" placeholder="Сумма из чека" inputmode="decimal" style="max-width:160px">
     <input class="input" id="f-rc-date" type="date" style="max-width:160px"></div>
     <div class="row" style="margin-top:6px"><label><input type="checkbox" id="f-rc-other"> платил не должник</label>
@@ -18,6 +19,8 @@ export function receiptHtml(d: any, visitLink: boolean): string {
 
 export function wireReceipt(panel: HTMLElement, rep: string, d: any, refresh: () => void): void {
   panel.querySelector("#f-rc-add")?.addEventListener("click", async () => {
+    const contract=(panel.querySelector("#f-rc-contract") as HTMLSelectElement).value;
+    if(!(d.contracts || []).some((c:any)=>c.contract_id===contract)){toast("Выберите договор для чека");return}
     const amount = (panel.querySelector("#f-rc-sum") as HTMLInputElement).value.replace(/\s/g, '').replace(',', '.');
     const paid = (panel.querySelector("#f-rc-date") as HTMLInputElement).value;
     const other = (panel.querySelector("#f-rc-other") as HTMLInputElement).checked;
@@ -27,14 +30,18 @@ export function wireReceipt(panel: HTMLElement, rep: string, d: any, refresh: ()
     if (other && !who) { toast("Укажите, кто платил вместо должника"); return; }
     const file = await hard.pick("file", { title: "Снимок чека", filters: [{ name: "Изображение", extensions: ["jpg", "jpeg", "png", "webp"] }] });
     if (!file) return;
-    const query: Record<string, unknown> = { rep, op: 'desk-receipt-' + crypto.randomUUID(), amount, paid_at: paid, payer: other ? 'other' : 'client' };
+    const query: Record<string, unknown> = { rep:contract, op: 'desk-receipt-' + crypto.randomUUID(), amount, paid_at: paid, payer: other ? 'other' : 'client' };
     if (other) query.note = who;
     if ((panel.querySelector("#f-rc-visit") as HTMLInputElement | null)?.checked) query.visit = d.last_visit_op;
     const button = panel.querySelector<HTMLButtonElement>("#f-rc-add")!;
     button.disabled = true;
     try {
       const result = await hard.upload("/api/receipt", query, file, file.slice(file.lastIndexOf('.')).toLowerCase());
-      if (result.ok) { toast("Чек приложен"); refresh(); } else toast(result.text || "Чек не принят");
+      if (result.ok) {
+        panel.querySelectorAll<HTMLInputElement>('[id^="f-rc-"]').forEach(input=>{if(input.type==="checkbox")input.checked=false;else input.value="";delete input.dataset.hardDirty});
+        panel.dispatchEvent(new CustomEvent("hard-form-saved", { detail: ["f-rc-contract", "f-rc-sum", "f-rc-date", "f-rc-other", "f-rc-who", "f-rc-visit"] }));
+        toast("Чек приложен"); refresh();
+      } else toast(result.text || "Чек не принят");
     } finally { if (button.isConnected) button.disabled = false; }
   });
 }

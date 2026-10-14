@@ -28,7 +28,7 @@ from pult.core.settings import (DEFAULT_PROFILE, Settings, active_profile,  # no
 def test_flat_file_migrates_into_default_profile(tmp_path):
     data = {"url": "https://a.example", "device_token": "tok-a", "sec": "dash"}
     Settings(data, tmp_path / "s.json").save()
-    raw = json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))
+    raw = dict(Settings.load(tmp_path / "s.json"))
     assert raw["profiles"][DEFAULT_PROFILE]["url"] == "https://a.example"
     assert raw["profiles"][DEFAULT_PROFILE]["device_token"] == "tok-a"
     assert raw["active"] == DEFAULT_PROFILE
@@ -126,7 +126,7 @@ def test_flush_writes_token_into_profile_not_flat_only(window):
     window.device_token = "tok-new"
     window._flush_profile()
     window._save_settings()
-    saved = json.loads(window.settings.path.read_text(encoding="utf-8"))
+    saved = dict(Settings.load(window.settings.path))
     assert saved["profiles"]["Прод"]["device_token"] == "tok-new"
     assert saved["device_token"] == "tok-new"
 
@@ -179,7 +179,7 @@ def test_failed_reenroll_keeps_working_token(window, monkeypatch):
     assert window.device_token == "tok-prod"
     window._flush_profile()
     window._save_settings()
-    saved = json.loads(window.settings.path.read_text(encoding="utf-8"))
+    saved = dict(Settings.load(window.settings.path))
     assert saved["profiles"]["Прод"]["device_token"] == "tok-prod"
 
 

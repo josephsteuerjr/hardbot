@@ -23,6 +23,7 @@ import logging
 import math
 import os
 import re
+import sqlite3
 import tempfile
 import threading
 import time
@@ -369,7 +370,10 @@ def _manager_envelope(mgr, team, iso, today, prev, nxt, uid) -> dict:
     if (frm or "").strip() or (to or "").strip():
         note = (f"окно периода {frm or '…'}—{to or '…'} к этой вкладке не "
                 "применяется: здесь все выезды за день")
+    import access_policy
     return {"ok": True, "date": iso, "today": today,
+            "scope_version": access_policy.version(team, mgr.get("role"), db.manager_caps(mgr.get("role"), is_owner=uid == ADMIN_ID)),
+            "offline_read_seconds": access_policy.OFFLINE_READ_SECONDS,
             "prev_date": prev, "next_date": nxt, "team": team,
             "period_note": note,
             "manager": {"name": mgr.get("name") or "",
@@ -463,6 +467,7 @@ def _shell_version() -> int:
 
 def _meta(lang: str) -> dict:
     return {
+        "offlineReadSeconds": 8 * 60 * 60,
         "dropdowns": {k: [{"value": v, "label": tv(v, lang)} for v in DROPDOWNS[k]]
                       for k in FORM_DROPDOWNS},
         "dropdownTitles": {k: _title(k, lang) for k in FORM_DROPDOWNS},
@@ -598,10 +603,12 @@ def _person_full_from_rows(rows, rep: str, lang: str,
     last_visit = (db.last_visit_row([r["contract_id"] for r in rows])
                   if history is None else history["visit"])
     visited = visit is not None
+    import office_work
+    totals = office_work.portfolio_totals(rows)
     contracts = [{
         "contract_id": r["contract_id"], "partner": r["partner"],
         "unit": debt.unit([r["partner"]] if r["partner"] else []),
-        "total": debt.contract_debt(r),
+        "total": db.registry_payment_amount(r["debt_today"] if r["debt_today"] not in (None, "") else r["debt_total"]),
         "last_payment_sum": r["last_payment_sum"] or "",
         "last_payment_date": r["last_payment_date"] or "",
         "debt": [{"key": k, "title": _title(k, lang), "value": v}
@@ -662,9 +669,9 @@ def _person_full_from_rows(rows, rep: str, lang: str,
         "extra_contact": "\n".join(dict.fromkeys(str(_cell(r, "extra_address")).strip()
                                                 for r in rows if _cell(r, "extra_address") not in (None, ""))),
         "geo": {"lat": main["geo_lat"], "lon": main["geo_lon"], "src": main["geo_src"]},
-        "total": sum(debt.contract_debt(r) for r in rows),
+        "total": round(sum(t["sum"] for t in totals), 2), "debt_known": bool(totals),
         "unit": debt.unit(sorted({r["partner"] for r in rows if r["partner"]})),
-        "totals": debt.totals_by_unit(rows),
+        "totals": totals,
         "photos": sum(r["photos_count"] or 0 for r in rows),
         "contracts": contracts, "info": info, "promise": promise,
         "payments": [{"contract_id": r["contract_id"],
@@ -674,6 +681,8 @@ def _person_full_from_rows(rows, rep: str, lang: str,
                       "current": r["paid_current"] if r["paid_current"] is not None else ""} for r in rows],
         "reported_payments": ([p for items in db.reported_payments_for([r["contract_id"] for r in rows]).values()
                                 for p in items] if reported_payments is None else reported_payments),
+        "payment_revision": db.payment_card_revision(rows),
+        "payment_today": workday.today().isoformat(),
         "paymentTitles": {"amount": _title("last_payment_sum", lang),
                           "date": _title("last_payment_date", lang)},
         "form": form,
@@ -707,7 +716,7 @@ def _person_full_from_rows(rows, rep: str, lang: str,
         # форма «Звонок» и журнал звонков. Читается и софтником, и выездником
         # (кто звонил и что обещали — полезно и на адресе).
         "soft": {
-            "status": _row_get(rows, "soft_call_status") or "",
+            "status": _soft_value(rows, "soft_call_status"),
             "comm_date": _soft_value(rows, "soft_comm_date"),
             "next_call_date": _soft_value(rows, "soft_next_call_date"),
             "meeting_date": _soft_value(rows, "meeting_date"),
@@ -720,7 +729,7 @@ def _person_full_from_rows(rows, rep: str, lang: str,
         },
         "softForm": [
             {"key": "soft_call_status", "title": _title("soft_call_status", lang),
-             "current": _row_get(rows, "soft_call_status") or ""},
+             "current": _soft_value(rows, "soft_call_status")},
         ],
         "calls": [
             {"ts": c["created_at"], "received": c["received_at"],
@@ -733,6 +742,10 @@ def _person_full_from_rows(rows, rep: str, lang: str,
 
 
 def _soft_value(rows, key):
+    if key == "soft_call_status":
+        row = max(rows,key=lambda r:max(db.call_field_at(r,key),
+                  str((db.payment_status_snapshot(r) or {}).get("event_at") or "")))
+        return db.effective_soft_status(row)
     for row in rows:
         snapshot = db.bot_call_snapshot(row)
         if snapshot is not None and key in snapshot:
@@ -921,10 +934,10 @@ def _priority_index_nonblocking() -> dict:
 
 async def _bootstrap(request: web.Request) -> web.Response:
     started = time.perf_counter()
-    uid = _uid(request)
+    uid = await asyncio.to_thread(_uid, request)
     if not uid:
         raise web.HTTPUnauthorized(text="auth")
-    _remember_from_init(request)     # вход в приложение — тоже знакомство
+    await asyncio.to_thread(_remember_from_init, request)     # вход в приложение — тоже знакомство
     # Версия оболочки устройства (шлют v33+): «у него старая оболочка» —
     # проверяемый факт, а не догадка по отсутствию заголовка. Тихо: удобство.
     try:
@@ -966,12 +979,15 @@ async def _bootstrap(request: web.Request) -> web.Response:
     else:
         grouped = db.persons_for_employee(emp)
     persons = [_person_brief(p) for p in grouped]
+    if request.get("desk_employee"):
+        import office_work
+        await asyncio.to_thread(office_work.decorate, persons, grouped)
     if soft_mode:
         # Очередь звонков: просроченная дата перезвона наверх, затем
         # договоры без статуса, дальше по долгу. Приоритет выезда здесь не
         # применим — он про адреса, а софтник работает телефоном.
         for pb, p in zip(persons, grouped):
-            status = _row_get(p["contracts"], "soft_call_status")
+            status = _soft_value(p["contracts"], "soft_call_status")
             comm = _soft_value(p["contracts"], "soft_next_call_date")
             pb["sc"] = status or ""
             pb["scd"] = comm or ""
@@ -1023,8 +1039,11 @@ async def _bootstrap(request: web.Request) -> web.Response:
         "persons": len(persons),
         "contracts": sum(int(p.get("n") or 0) for p in persons),
     }
+    import access_policy
+    scope_version = await asyncio.to_thread(access_policy.version, [emp])
     response = web.json_response({
         "ok": True, "uid": uid, "employee": emp,
+        "scope_version": scope_version, "offline_read_seconds": access_policy.OFFLINE_READ_SECONDS,
         "kind": db.get_kind(uid), "lang": lang,
         "persons": persons, "meta": _meta(lang),
         "roles": roles, "diagnostics": diagnostics, "today": workday.today().isoformat(),
@@ -1034,12 +1053,45 @@ async def _bootstrap(request: web.Request) -> web.Response:
     return response
 
 
+async def _identity(request: web.Request) -> web.Response:
+    """Own principal only; also needed to recover a queue on the old origin."""
+    uid, employee = await asyncio.to_thread(_auth, request)
+    import access_policy
+    version = await asyncio.to_thread(access_policy.version, [employee])
+    return web.json_response({"ok": True, "uid": uid, "employee": employee,
+                             "scope_version": version, "offline_read_seconds": access_policy.OFFLINE_READ_SECONDS},
+                             headers={"Cache-Control": "no-store"})
+
+
+def _database_ready() -> bool:
+    # mode=rw refuses to create an empty DB. A rollback checks access to the
+    # writer lock without changing application data or exposing it in HTTP.
+    conn = sqlite3.connect(db.DB_PATH.resolve().as_uri() + "?mode=rw", uri=True, timeout=1)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for table in ("clients", "visits", "calls", "settings", "notification_outbox"):
+            conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+        conn.rollback()
+        return True
+    finally:
+        conn.close()
+
+
+async def _ready(request: web.Request) -> web.Response:
+    try:
+        ready = await asyncio.to_thread(_database_ready)
+    except (sqlite3.Error, OSError):
+        ready = False
+    return web.json_response({"ok": ready}, status=200 if ready else 503,
+                             headers={"Cache-Control": "no-store"})
+
+
 async def _act_as(request: web.Request) -> web.Response:
     """Руководитель переключается на портфель другого своего сотрудника.
 
     Проверка списка — на сервере: клиент присылает имя, но право открыть этот
     портфель определяется ролью в БД, а не тем, что пришло в запросе."""
-    uid = _uid(request)
+    uid = await asyncio.to_thread(_uid, request)
     if not uid:
         raise web.HTTPUnauthorized(text="auth")
     try:
@@ -1052,7 +1104,7 @@ async def _act_as(request: web.Request) -> web.Response:
         raise web.HTTPForbidden(text="not a manager")
     if not db.set_acting_employee(uid, employee, scope):
         raise web.HTTPForbidden(text="employee not in scope")
-    db.audit_access(uid, "act_as", employee)           # ИБ: смена контекста — в журнал
+    await asyncio.to_thread(db.audit_access, uid, "act_as", employee)           # ИБ: смена контекста — в журнал
     return web.json_response({"ok": True, "acting": employee})
 
 
@@ -1062,7 +1114,7 @@ async def _route_day(request: web.Request) -> web.Response:
     Неверный соседний граф отбрасывается по snap-distance. При любой недоступности
     остаётся локальный 2-opt по той же матрице либо честный haversine-фолбэк.
     """
-    uid = _uid(request)
+    uid = await asyncio.to_thread(_uid, request)
     if not uid:
         raise web.HTTPUnauthorized(text="auth")
     emp = _employee(uid, request)
@@ -1092,7 +1144,7 @@ async def _route_day(request: web.Request) -> web.Response:
         order.append({"rep": nxt["rep"], "client": nxt["client"], "totals": nxt["totals"],
                       "score": nxt.get("score"), "km": leg,
                       "lat": nxt["lat"], "lon": nxt["lon"]})
-    db.audit_access(uid, "route_day",
+    await asyncio.to_thread(db.audit_access, uid, "route_day",
                     detail=f"{emp} {len(order)} {plan['matrix_src']} {plan['solver']}")
     return web.json_response({"ok": True, "employee": emp,
                               "order": order, "km": plan["km"],
@@ -1101,12 +1153,12 @@ async def _route_day(request: web.Request) -> web.Response:
 
 
 async def _bind(request: web.Request) -> web.Response:
-    uid = _uid(request)
+    uid = await asyncio.to_thread(_uid, request)
     if not uid:
         raise web.HTTPUnauthorized(text="auth")
     # Именно здесь имя нужнее всего: человек выбирает себя из списка, и если он
     # промахнётся, владелец должен видеть в пульте «кто», а не голый номер.
-    _remember_from_init(request)
+    await asyncio.to_thread(_remember_from_init, request)
     body = await request.json()
     kind = "courier" if body.get("kind") == "courier" else "agent"
     employee = (body.get("employee") or "").strip()
@@ -1124,7 +1176,7 @@ async def _bind(request: web.Request) -> web.Response:
     taken_by = db.employee_taken_by(employee, exclude_telegram_id=uid)
     if taken_by:
         created = db.bind_agent(uid, employee, kind, approved=False)
-        db.audit_access(uid, "bind_request_taken", employee)
+        await asyncio.to_thread(db.audit_access, uid, "bind_request_taken", employee)
         if created:                                # заявка уходит владельцу один раз
             bot = request.app.get("bot")
             if bot and ADMIN_ID:
@@ -1140,7 +1192,7 @@ async def _bind(request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "pending": True, "taken": True,
                                   "employee": None, "kind": db.get_kind(uid)})
     ok = db.bind_agent(uid, employee, kind)   # свободное ФИО — работаем сразу
-    db.audit_access(uid, "bind_self", employee)
+    await asyncio.to_thread(db.audit_access, uid, "bind_self", employee)
     return web.json_response({"ok": ok, "employee": db.get_binding(uid), "kind": db.get_kind(uid)})
 
 
@@ -1150,7 +1202,7 @@ async def _note_add(request: web.Request) -> web.Response:
     Чужой кейс привязать нельзя — иначе заметка стала бы способом узнать, что
     договор с таким номером вообще существует.
     """
-    uid, emp = _auth(request)
+    uid, emp = await asyncio.to_thread(_auth, request)
     body = await request.json()
     text = (body.get("text") or "").strip()
     if not text:
@@ -1166,7 +1218,7 @@ async def _note_add(request: web.Request) -> web.Response:
 
 
 async def _notes(request: web.Request) -> web.Response:
-    uid, _ = _auth(request)
+    uid, _ = await asyncio.to_thread(_auth, request)
     rows = db.notes_for(uid)
     return web.json_response({"ok": True, "notes": [
         {"id": r["id"], "rep": r["client_rep"], "text": r["text"], "at": r["created_at"]}
@@ -1174,7 +1226,7 @@ async def _notes(request: web.Request) -> web.Response:
 
 
 async def _note_delete(request: web.Request) -> web.Response:
-    uid, _ = _auth(request)
+    uid, _ = await asyncio.to_thread(_auth, request)
     body = await request.json()
     try:
         nid = int(body.get("id"))
@@ -1203,7 +1255,7 @@ def _latlon(lat, lon) -> tuple[float, float] | None:
 
 
 async def _marker(request: web.Request) -> web.Response:
-    uid, emp = _auth(request)
+    uid, emp = await asyncio.to_thread(_auth, request)
     _require_field_write(uid)
     body = await request.json()
     # Метка — это и есть точка, без неё записывать нечего: отказ, а не NULL.
@@ -1220,18 +1272,18 @@ async def _marker(request: web.Request) -> web.Response:
         row = db.get_client(rep)
         if not row or (row["responsible"] != emp and uid != ADMIN_ID):
             raise web.HTTPNotFound(text="person")
-        db.audit_access(uid, "marker", rep)
+        await asyncio.to_thread(db.audit_access, uid, "marker", rep)
     label = (body.get("label") or "").strip() or None
     op_id = (str(body.get("op_id") or "")).strip() or None
     mid = db.add_marker(uid, db.get_kind(uid), lat, lon, client_rep=rep, label=label, op_id=op_id)
     out = {"ok": True, "id": mid}
     if rep:
-        out["person"] = _person_full(rep, lang_of(uid))
+        out["person"] = await asyncio.to_thread(_person_full, rep, lang_of(uid))
     return web.json_response(out)
 
 
 async def _markers(request: web.Request) -> web.Response:
-    uid, _ = _auth(request)
+    uid, _ = await asyncio.to_thread(_auth, request)
     rows = db.markers_for_telegram(uid)
     return web.json_response({"ok": True, "markers": [
         {"id": r["id"], "lat": r["lat"], "lon": r["lon"], "label": r["label"],
@@ -1242,7 +1294,7 @@ async def _route(request: web.Request) -> web.Response:
     """Геометрия маршрута от живой точки выездника до должника — для полноэкранной
     навигации в миниаппе. Выбираем UZ/TJ OSRM по реальной близости к графу; иначе прямая —
     фронт в обоих случаях получает линию + км + минуты и рисует её на карте."""
-    uid, emp = _auth(request)
+    uid, emp = await asyncio.to_thread(_auth, request)
     rep = request.query.get("rep", "")
     point = _latlon(request.query.get("lat"), request.query.get("lon"))
     if point is None:
@@ -1315,7 +1367,7 @@ async def _geo_suggest(request: web.Request) -> web.Response:
     виду тот населённый пункт, который крупнее, а мелкие тёзки различаются
     подписью области.
     """
-    _auth(request)
+    await asyncio.to_thread(_auth, request)
     q = _geo_query(request)
     if len(q) < 2:
         return web.json_response({"items": []})
@@ -1413,7 +1465,7 @@ async def _geocode_free(request: web.Request) -> web.Response:
     ТОЛЬКО офлайн-справочник. Сервер-витрина принципиально не ходит в публичные
     геокодеры: туда уехали бы адреса должников (см. модуль geocode — точный
     геокодинг живёт в пульте на машине владельца, а не здесь)."""
-    _auth(request)
+    await asyncio.to_thread(_auth, request)
     # Обрезка до регулярки и разбора: после неё весь путь ниже — доли миллисекунды
     # (замер 25.09.2026: разбор 8 КБ шёл 20 мс, 200 знаков — 0,5 мс).
     q = _geo_query(request)
@@ -1468,7 +1520,7 @@ async def _track(request: web.Request) -> web.Response:
 
     Идемпотентна по (session_id, ts): в поле сеть рвётся, и клиент переотправляет
     одну и ту же пачку — дублей это не создаёт."""
-    uid, emp = _auth(request)
+    uid, emp = await asyncio.to_thread(_auth, request)
     try:
         body = await request.json()
     except Exception:                                  # noqa: BLE001
@@ -1499,7 +1551,7 @@ async def _route_to(request: web.Request) -> web.Response:
     """Маршрут до произвольной точки (без привязки к договору).
     Проверка «чей должник» здесь не нужна: цель задал сам пользователь,
     из БД ничего не читается."""
-    _auth(request)
+    await asyncio.to_thread(_auth, request)
     here = _latlon(request.query.get("lat"), request.query.get("lon"))
     there = _latlon(request.query.get("dlat"), request.query.get("dlon"))
     if here is None or there is None:
@@ -1508,7 +1560,7 @@ async def _route_to(request: web.Request) -> web.Response:
 
 
 async def _person(request: web.Request) -> web.Response:
-    uid, emp = _auth(request)
+    uid, emp = await asyncio.to_thread(_auth, request)
     rep = request.query.get("rep", "")
     row = db.get_client(rep)
     # Контур «Софт»: карточку открывает хозяин ЛЮБОЙ из колонок
@@ -1516,14 +1568,78 @@ async def _person(request: web.Request) -> web.Response:
     if not row or (uid != ADMIN_ID and emp != row["responsible"]
                    and emp != row["responsible_soft"]):
         raise web.HTTPNotFound(text="person")
-    db.audit_access(uid, "view_card", rep)              # ИБ: доступ к ПД в журнал
+    await asyncio.to_thread(db.audit_access, uid, "view_card", rep)              # ИБ: доступ к ПД в журнал
     by_soft = request.query.get("mode") == "soft" or (emp != row["responsible"] and emp == row["responsible_soft"])
     if by_soft and uid != ADMIN_ID and emp != row["responsible_soft"]:
         raise web.HTTPNotFound(text="person")
-    data = _person_full(rep, lang_of(uid), by_soft=by_soft)
+    data = await asyncio.to_thread(_person_full, rep, lang_of(uid), by_soft=by_soft)
     if not data:
         raise web.HTTPNotFound(text="person")
+    import office_work
+    card_rows = await asyncio.to_thread(db.person_contracts_by_soft if by_soft else db.person_contracts, rep)
+    data["office"] = await asyncio.to_thread(office_work.person_data, card_rows)
+    if request.get("desk_employee"):
+        import soft_reporting
+        data["totals"] = office_work.portfolio_totals(card_rows)
+        data["debt_known"] = bool(data["totals"])
+        by_id = {r["contract_id"]: r for r in card_rows}
+        for contract in data["contracts"]:
+            money = office_work.portfolio_totals([by_id[contract["contract_id"]]])
+            contract["total"] = money[0]["sum"] if money else None
     return web.json_response(data)
+
+
+async def _office_action(request: web.Request) -> web.Response:
+    uid, emp = await asyncio.to_thread(_auth, request)
+    _require_field_write(uid)
+    import office_work
+    try:
+        body = await request.json()
+        result = await asyncio.to_thread(office_work.save, uid, emp, body)
+    except office_work.OfficeError as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=exc.status)
+    except (ValueError, TypeError):
+        return web.json_response({"ok": False, "error": "Проверьте тело записи"}, status=400)
+    return web.json_response(result)
+
+
+async def _workspace_report(request: web.Request) -> web.Response:
+    uid, emp = await asyncio.to_thread(_auth, request)
+    import office_work
+    profile = request.query.get("profile", "hard")
+    if profile not in ("hard", "soft"):
+        raise web.HTTPBadRequest(text="profile")
+    today = workday.today().isoformat()
+    d_to = request.query.get("to") or today
+    d_from = request.query.get("from") or today
+    if request.query.get("period") == "all":
+        with db.connect() as conn:
+            table, column = ("calls", "created_at") if profile == "soft" else ("office_actions", "event_day")
+            first = conn.execute(f"SELECT MIN({column}) FROM {table} WHERE employee=?", (emp,)).fetchone()[0]
+            if profile == "hard":
+                visit_first = conn.execute("SELECT MIN(created_at) FROM visits WHERE employee=?", (emp,)).fetchone()[0]
+                first = min([d for d in (first, visit_first) if d] or [today])
+        d_from, d_to = first or today, today
+    try:
+        lo, hi = office_work._date(d_from, "начало"), office_work._date(d_to, "конец")
+    except office_work.OfficeError as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+    if lo > hi or d_to > today or (request.query.get("period") != "all" and (hi - lo).days > 365):
+        raise web.HTTPBadRequest(text="Период: до 366 дней, не позднее сегодня")
+    result = await asyncio.to_thread(office_work.report, emp, profile, d_from, d_to)
+    response = web.json_response(result)
+    response.enable_compression()
+    return response
+
+
+async def _workspace_promises(request: web.Request) -> web.Response:
+    uid, emp = await asyncio.to_thread(_auth, request)
+    import office_work
+    profile = request.query.get("profile", "hard")
+    if profile not in ("hard", "soft"):
+        raise web.HTTPBadRequest(text="profile")
+    return web.json_response({"ok": True, "profile": profile, "today": workday.today().isoformat(),
+                              "items": await asyncio.to_thread(office_work.promises, emp, profile)})
 
 
 def _cards_payload(uid: int, emp: str, lang: str, requested_soft: bool,
@@ -1589,7 +1705,7 @@ async def _cards(request: web.Request) -> web.Response:
     до завершения рабочего потока, иначе повторы набирают неограниченную очередь.
     """
     started = time.perf_counter()
-    uid, emp = _auth(request)
+    uid, emp = await asyncio.to_thread(_auth, request)
     lang = lang_of(uid)
     limit = _CARDS_BUILD_LIMIT
     await limit.acquire()
@@ -1624,7 +1740,7 @@ _CLIENT_METRICS = {
 
 async def _client_event(request: web.Request) -> web.Response:
     """Ограниченные метрики загрузки без имён, КД, адресов и текста ошибок."""
-    uid, emp = _auth(request)
+    uid, emp = await asyncio.to_thread(_auth, request)
     if request.content_length is not None and request.content_length > 4096:
         raise web.HTTPRequestEntityTooLarge(max_size=4096, actual_size=request.content_length)
     try:
@@ -1652,18 +1768,20 @@ async def _client_event(request: web.Request) -> web.Response:
         {"event": event, "metrics": metrics},
         ensure_ascii=False, separators=(",", ":"),
     )
-    db.audit_access(uid, f"client_{event}", target=emp, detail=detail)
+    await asyncio.to_thread(db.audit_access, uid, f"client_{event}", target=emp, detail=detail)
     return web.json_response({"ok": True})
 
 
 async def _save(request: web.Request) -> web.Response:
-    uid, emp = _auth(request)
+    uid, emp = await asyncio.to_thread(_auth, request)
     _require_field_write(uid)
     body = await request.json()
     rep = body.get("rep", "")
     row = db.get_client(rep)
+    if body.get("kind") == "office":
+        raise web.HTTPBadRequest(text="Офисная запись требует /api/office/action")
     if body.get("kind") == "payment":
-        return _save_reported_payment(uid, emp, body, row)
+        return await asyncio.to_thread(_save_reported_payment, uid, emp, body, row)
     # Контур «Софт»: kind=call — звонок софтника. Владение строгое: звонок
     # закрывает хозяин второй колонки ответственности, визит — первой.
     kind = "call" if str(body.get("kind") or "").strip() == "call" else "visit"
@@ -1755,8 +1873,8 @@ async def _save(request: web.Request) -> web.Response:
             value = canon
         values[key] = value
     if kind == "call":
-        return _save_call(uid, emp, body, rep, row, values, rejected,
-                          truncated, finish, cleared)
+        return await asyncio.to_thread(_save_call, uid, emp, body, rep, row, values, rejected,
+                                       truncated, finish, cleared)
     # Снять обещание выездник может ЛЮБОЕ, не только «своё». Он стоит перед
     # должником, и его слово свежее любой офисной даты: запрет на чужое означал
     # бы, что должника со сорвавшимся обещанием никто не вернёт в маршрут.
@@ -1793,30 +1911,25 @@ async def _save(request: web.Request) -> web.Response:
             promise_dropped="promise_date" in cleared)
         if fc:
             values[db.FORECAST_KEY] = fc
-    db.audit_access(uid, "save_visit" if finish else "save_card", rep)
+    await asyncio.to_thread(db.audit_access, uid, "save_visit" if finish else "save_card", rep)
     if not finish:
         # Автосохранение черновика несёт точку телефона: у неё есть серверное
         # время приёма, то есть это свидетельство СВЯЗИ и места разом — с
         # телефона такое не подделать (evidence.py, следы вида draft).
-        _presence_from_draft(body, uid, emp, rep)
+        await asyncio.to_thread(_presence_from_draft, body, uid, emp, rep)
     if finish and any(k in values for k in typed_keys):
         # Кто и когда убрал должника из маршрута — единственный след; он же
         # закрывает вопрос ИБ «кто трогал поле ПД».
         prev_snap0 = db.bot_visit_snapshot(row) or {}
-        db.audit_access(uid, "promise_set", rep, json.dumps(
+        await asyncio.to_thread(db.audit_access, uid, "promise_set", rep, json.dumps(
             {"was": prev_snap0.get("promise_date") or "",
              "now": values.get("promise_date", ""),
              "sum": values.get("forecast_sum", ""),
              "fc": values.get(db.FORECAST_KEY, "")}, ensure_ascii=False))
-    if values:
-        db.update_person(rep, values)  # пишется во ВСЕ договоры человека, сразу в БД
+    if values and not finish:
+        await asyncio.to_thread(db.update_person, rep, values)
     if finish:
         completed_at = _occurred_on(body)
-        # visit_date НАЗАД не двигаем: у человека это дата последнего выезда, и
-        # доставка позавчерашнего визита не должна отменять вчерашний.
-        prev_visit = db._as_date(row["visit_date"])
-        if prev_visit is None or prev_visit <= date.fromisoformat(completed_at):
-            db.update_person(rep, {"visit_date": completed_at})
         cur = db.get_client(rep)
         op_id = (str(body.get("op_id") or "")).strip() or None
         # Гео-контроль: точка телефона в момент закрытия vs известная точка должника.
@@ -1882,7 +1995,7 @@ async def _save(request: web.Request) -> web.Response:
                   "online_open": body.get("online_at_open"),
                   "foreground_ms": body.get("foreground_ms"),
                   "tolerance": tolerance, "precision": precision}
-        _presence_from_save(body, uid, emp, rep, session_id, vlat, vlon, acc)
+        await asyncio.to_thread(_presence_from_save, body, uid, emp, rep, session_id, vlat, vlon, acc)
         ev = _build_evidence(session_id, rep, cur, completed_at, ev_ctx)
         # История визита строится из явного тела этой формы. Сырые HARD-поля
         # clients/master запрещено дочитывать даже для текста журнала.
@@ -1906,7 +2019,8 @@ async def _save(request: web.Request) -> web.Response:
         # дни, доехавшие одной пачкой, — это два разных выезда.
         same_today = db.same_visit_logged_today(rep, uid, payload,
                                                 on_date=completed_at)
-        is_new = db.log_visit(rep, uid, payload,
+        try:
+            is_new = await asyncio.to_thread(db.save_visit_result, rep, uid, row["responsible"], values, payload,
                               op_id=op_id, lat=vlat, lon=vlon, dist_m=dist_m,
                               geo_far=geo_far, on_date=completed_at,
                               fill_seconds=_fill_seconds(body),
@@ -1914,30 +2028,35 @@ async def _save(request: web.Request) -> web.Response:
                               session_id=session_id,
                               evidence_level=ev["level"] if ev else None,
                               evidence=evidence.dumps(ev) if ev else None,
-                              employee=row["responsible"])
+                              notification=None if same_today else {
+                                  "actor": _acting_actor_name(uid) or db.get_binding(uid),
+                                  "dist_m": dist_m, "geo_far": geo_far, "lat": vlat, "lon": vlon,
+                                  "pending": _photos_pending(body),
+                                  "evidence_ctx": {"session_id": session_id, "op_id": op_id,
+                                      "rep": rep, "ev": ev, **ev_ctx}})
+        except ValueError as exc:
+            raise web.HTTPConflict(text=str(exc)) from exc
         # Адрес уточняется по выезду, на котором должника застали (addr_learn):
         # только у нового визита — повтор из очереди адрес не переучивает.
         if is_new:
             try:
-                learned = addr_learn.consider(
+                learned = await asyncio.to_thread(addr_learn.consider,
                     cur, values, ev, db.presence_for_session(session_id) if session_id else [],
                     employee=emp, op_id=op_id)
                 if learned and learned.get("applied"):
-                    db.audit_access(uid, "addr_learned", rep,
+                    await asyncio.to_thread(db.audit_access, uid, "addr_learned", rep,
                                     f"{learned['lat']},{learned['lon']} ±{learned['acc_m']} м: "
                                     f"{learned['reason']}")
             except Exception as exc:  # noqa: BLE001 — обучение не должно ломать визит
                 logging.warning("addr_learn failed: %s", exc)
-        # Снимок строится только из values этого POST, а не из сырых HARD-полей
-        # clients. При ретрае после редкого падения между log_visit и этой записью
-        # восстанавливаем отсутствующий снимок; старый дубль новый снимок не откатывает.
-        if is_new or not db.has_bot_visit(rep):
-            db.record_bot_visit(rep, values, completed_at, event_at=_saved_at(body))
+        # Журнал, поля и снимок уже сохранены одной транзакцией.
         proven_row = db.get_client(rep)
         proven_snapshot = db.bot_visit_snapshot(proven_row) or {}
         notify_row = dict(proven_row)
+        event_snapshot = db._bot_snapshot(values, completed_at) or {}
         for key in db.BOT_SNAPSHOT_KEYS:
-            notify_row[key] = proven_snapshot.get(key)
+            notify_row[key] = event_snapshot.get(key)
+        notify_row["visit_date"] = completed_at
         # is_new гасит повтор из оффлайн-очереди (тот же op_id), same_today — повторное
         # нажатие «Сохранить выезд» (новый op_id, но выезд тот же: тот же выездник и тот
         # же результат). Без второго условия руководителю прилетало 2-3 одинаковых
@@ -1952,19 +2071,16 @@ async def _save(request: web.Request) -> web.Response:
             # Она и раньше занимала львиную долю ответа (альбом фото каждому
             # руководителю грузится внутри HTTP-запроса телефона), а теперь ещё
             # и ждёт опоздавшие снимки.
-            _spawn_visit_notify(_visit_notify(
-                request, notify_row, uid, dist_m, geo_far, actor, vlat, vlon,
-                completed_at, _photos_pending(body),
-                evidence_ctx={"session_id": session_id, "op_id": op_id,
-                              "rep": rep, "ev": ev, **ev_ctx}))
+            import notification_outbox
+            _spawn_visit_notify(notification_outbox.deliver(request.app, op_id))
         else:
             # Самая частая причина «отбивка не пришла» — дедуп; без этой строки
             # она оставалась невидимой.
-            db.log_push(db.PUSH_VISIT, db.PUSH_SKIP_DEDUP,
+            await asyncio.to_thread(db.log_push, db.PUSH_VISIT, db.PUSH_SKIP_DEDUP,
                         employee=proven_row["responsible"] or "", contract_id=rep,
                         note="повтор из очереди (op_id)" if not is_new
                         else "повторное сохранение того же результата")
-    data = _person_full(rep, lang_of(uid))
+    data = await asyncio.to_thread(_person_full, rep, lang_of(uid))
     out = {"ok": True, "person": data}
     if rejected:
         out["rejected"] = rejected
@@ -1994,10 +2110,17 @@ def _save_reported_payment(uid: int, emp: str, body: dict, row) -> web.Response:
     except (InvalidOperation, ValueError):
         raise web.HTTPBadRequest(text="Укажите сумму оплаты с точностью до копеек")
     rep = row["contract_id"]
+    result_status = body.get("result_status", "")
+    if result_status not in ("", "Оплачен"):
+        raise web.HTTPBadRequest(text="Выберите результат оплаты")
+    if result_status and not isinstance(body.get("payment_revision"),str):
+        raise web.HTTPBadRequest(text="Обновите карточку перед записью результата оплаты")
+    saved_at = _saved_at(body)
     try:
         result = db.record_reported_payment(op, rep, row["responsible_soft"] or emp, uid,
             paid_at=paid_at, amount=float(amount), currency=debt.unit([row["partner"]]),
-            created_at=_saved_at(body) or datetime.now(timezone.utc).replace(tzinfo=None).isoformat())
+            created_at=saved_at or datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+            result_status=result_status,expected_revision=body.get("payment_revision"))
     except ValueError as exc:
         raise web.HTTPConflict(text=str(exc)) from exc
     db.audit_access(uid, "payment_record", rep)
@@ -2065,10 +2188,14 @@ def _save_call(uid: int, emp: str, body: dict, rep: str, row, values: dict,
             result = db.save_call_result(rep, uid, row["responsible_soft"] or emp,
                        values, payload, op_id=op_id, on_date=completed_at,
                        saved_at=_saved_at(body), append_comment=body.get("append_comment") is True,
-                       comment_author=_acting_actor_name(uid) or row["responsible_soft"] or emp)
+                       comment_author=_acting_actor_name(uid) or row["responsible_soft"] or emp,
+                       expected_revision=body.get("card_revision"))
         except ValueError as exc:
             raise web.HTTPConflict(text=str(exc)) from exc
     data = _person_full(rep, lang_of(uid), by_soft=True)
+    if finish and body.get("card_revision") is not None and data:
+        import office_work
+        data["office"] = office_work.person_data(db.person_contracts_by_soft(rep))
     out = {"ok": True, "person": data}
     if finish:
         out.update(result)
@@ -2450,13 +2577,13 @@ def _permanent_photo_count(dest: Path) -> int:
 
 
 async def _photo(request: web.Request) -> web.Response:
-    uid, emp = _auth(request)
+    uid, emp = await asyncio.to_thread(_auth, request)
     _require_field_write(uid)
     rep = request.query.get("rep", "")
     row = db.get_client(rep)
     if not row or (row["responsible"] != emp and uid != ADMIN_ID):
         raise web.HTTPNotFound(text="person")
-    db.audit_access(uid, "photo", rep)
+    await asyncio.to_thread(db.audit_access, uid, "photo", rep)
     dest = PHOTO_DIR / rep
     # op — идемпотентный ключ загрузки из оффлайн-очереди: имя файла = op, повторная
     # доставка того же фото не создаёт второй файл и не накручивает счётчик photos_count.
@@ -2578,7 +2705,7 @@ def _receipt_query(request: web.Request) -> dict:
 
 
 async def _receipt(request: web.Request) -> web.Response:
-    uid, emp = _auth(request)
+    uid, emp = await asyncio.to_thread(_auth, request)
     _require_field_write(uid)
     rep = request.query.get("rep", "")
     row = db.get_client(rep)
@@ -2609,7 +2736,7 @@ async def _receipt(request: web.Request) -> web.Response:
             raise web.HTTPRequestEntityTooLarge(
                 max_size=PHOTO_MAX_BYTES, actual_size=e.actual_size)
         raise web.HTTPUnprocessableEntity(text=e.reason)
-    db.audit_access(uid, "receipt", rep)
+    await asyncio.to_thread(db.audit_access, uid, "receipt", rep)
     rid = db.record_receipt(
         op, rep, emp, uid, visit_op=visit_op,
         paid_at=fields["paid_at"].isoformat() if fields["paid_at"] else None,
@@ -2628,7 +2755,7 @@ async def _manager_receipt_file(request: web.Request) -> web.Response:
     """Байты чека — руководителю и безопаснику своей команды. Право то же, что
     у снимков: каталог договора целиком (_photo_scope_ok); файл лежит в другом
     корне, но ключ тот же формат «КД/имя»."""
-    uid, _mgr, scope = _manager_gate(request)
+    uid, _mgr, scope = await asyncio.to_thread(_manager_gate, request)
     key = (request.query.get("file") or "")[:220]
     path = photostore.photo_path(key, root=receipt_dir())
     if path is None or path.suffix.lower() not in _PHOTO_SUFFIXES or not path.is_file():
@@ -2636,7 +2763,7 @@ async def _manager_receipt_file(request: web.Request) -> web.Response:
     contract_dir = key.rsplit("/", 1)[0]
     ctx = db.photo_contract_dirs(contract_dir)
     if contract_dir not in ctx["dirs"]:
-        db.audit_access(uid, "receipt_view_denied", key)
+        await asyncio.to_thread(db.audit_access, uid, "receipt_view_denied", key)
         raise web.HTTPNotFound(text="receipt")
     rows = db.photo_index_for_dirs(ctx["dirs"])
     soft_owner = any(c["contract_id"] == ctx["cid"] and (c["responsible_soft"] or "") in scope
@@ -2645,9 +2772,9 @@ async def _manager_receipt_file(request: web.Request) -> web.Response:
         authors = [r[0] for r in conn.execute("SELECT employee FROM payment_evidence WHERE file=?", (key,))]
     receipt_author = any(name in scope for name in authors)
     if not (_photo_scope_ok(uid, scope, ctx["contracts"], rows) or soft_owner or receipt_author):
-        db.audit_access(uid, "receipt_view_denied", key)
+        await asyncio.to_thread(db.audit_access, uid, "receipt_view_denied", key)
         raise web.HTTPNotFound(text="receipt")
-    db.audit_access(uid, "receipt_view", key)   # ИБ: каждый просмотр ПД — в журнал
+    await asyncio.to_thread(db.audit_access, uid, "receipt_view", key)   # ИБ: каждый просмотр ПД — в журнал
     resp = web.FileResponse(path)
     resp.content_type = _PHOTO_MIME.get(path.suffix.lower(),
                                         "application/octet-stream")
@@ -2702,7 +2829,7 @@ def _photo_scope_ok(uid: int, scope: list[str], contracts, rows) -> bool:
 
 async def _manager_photos(request: web.Request) -> web.Response:
     """Поиск фото по номеру договора: список с датами и сигналами к разбору."""
-    uid, _mgr, scope = _manager_gate(request)
+    uid, _mgr, scope = await asyncio.to_thread(_manager_gate, request)
     raw = (request.query.get("contract_id") or "").strip()[:64]
     if not raw:
         raise web.HTTPBadRequest(text="contract_id")
@@ -2715,7 +2842,7 @@ async def _manager_photos(request: web.Request) -> web.Response:
     if not _photo_scope_ok(uid, scope, ctx["contracts"], rows):
         # Отказ — тоже след: незалогированный перебор чужих КД — первое
         # замечание ИБ на новой поверхности ПД.
-        db.audit_access(uid, "photo_search_denied", ctx["cid"])
+        await asyncio.to_thread(db.audit_access, uid, "photo_search_denied", ctx["cid"])
         raise web.HTTPNotFound(text="photos")   # 404: не подтверждаем существование КД
     payload = photoaudit.build(
         ctx, rows, files,
@@ -2736,18 +2863,18 @@ async def _manager_photos(request: web.Request) -> web.Response:
             octx = db.photo_contract_dirs(other)
             orows = db.photo_index_for_dirs(octx["dirs"])
             if _photo_scope_ok(uid, scope, octx["contracts"], orows):
-                db.audit_access(uid, "photo_dup_reveal", other)
+                await asyncio.to_thread(db.audit_access, uid, "photo_dup_reveal", other)
             else:
                 s["other_contract"] = None
                 s["foreign"] = True
-    db.audit_access(uid, "photo_search", ctx["cid"], f"n={len(payload['items'])}")
+    await asyncio.to_thread(db.audit_access, uid, "photo_search", ctx["cid"], f"n={len(payload['items'])}")
     return web.json_response({"ok": True, **payload})
 
 
 async def _manager_photo_file(request: web.Request) -> web.Response:
     """Байты снимка. <img src> невозможен: токен в query запрещён, поэтому
     оболочка тянет это fetch'ем с authHeaders() и делает blob:-URL."""
-    uid, _mgr, scope = _manager_gate(request)
+    uid, _mgr, scope = await asyncio.to_thread(_manager_gate, request)
     key = (request.query.get("file") or "")[:220]
     path = photostore.photo_path(key, root=PHOTO_DIR)
     if path is None or path.suffix.lower() not in _PHOTO_SUFFIXES             or not path.is_file():
@@ -2761,13 +2888,13 @@ async def _manager_photo_file(request: web.Request) -> web.Response:
     contract_dir = key.rsplit("/", 1)[0]
     ctx = db.photo_contract_dirs(contract_dir)
     if contract_dir not in ctx["dirs"]:
-        db.audit_access(uid, "photo_view_denied", key)
+        await asyncio.to_thread(db.audit_access, uid, "photo_view_denied", key)
         raise web.HTTPNotFound(text="photo")
     rows = db.photo_index_for_dirs(ctx["dirs"])
     if not _photo_scope_ok(uid, scope, ctx["contracts"], rows):
-        db.audit_access(uid, "photo_view_denied", key)
+        await asyncio.to_thread(db.audit_access, uid, "photo_view_denied", key)
         raise web.HTTPNotFound(text="photo")
-    db.audit_access(uid, "photo_view", key)   # ИБ: каждый просмотр ПД — в журнал
+    await asyncio.to_thread(db.audit_access, uid, "photo_view", key)   # ИБ: каждый просмотр ПД — в журнал
     resp = web.FileResponse(path)
     resp.content_type = _PHOTO_MIME.get(path.suffix.lower(),
                                         "application/octet-stream")
@@ -2827,7 +2954,7 @@ async def _voice(request: web.Request) -> web.Response:
     На границу службы уходят только байты и ``ru|uz|auto``: uid/ФИО/КД,
     исходное имя файла и текст формы не передаются.
     """
-    uid, _emp = _auth(request)
+    uid, _emp = await asyncio.to_thread(_auth, request)
     if not _voice_configured():
         raise web.HTTPServiceUnavailable(text="voice off")
     if _VOICE_SEM.locked():
@@ -2858,7 +2985,7 @@ async def _voice(request: web.Request) -> web.Response:
                 f.write(chunk)
         if size <= 0:
             raise web.HTTPUnprocessableEntity(text="empty voice")
-        db.audit_access(uid, "voice", request.query.get("rep") or None)
+        await asyncio.to_thread(db.audit_access, uid, "voice", request.query.get("rep") or None)
         lang = _VOICE_LANG.get(lang_of(uid), "auto")
         # Пока запись ехала, службу мог занять другой: снова отказ, не очередь.
         # Между проверкой и захватом нет await — гонки в одном цикле нет.
@@ -3020,7 +3147,7 @@ async def _app_login(request: web.Request) -> web.StreamResponse:
         raise web.HTTPFound("/#link_dead=1", headers=no_store)
     _admin_auth_ok(request, scope="app")
     uid = db.uid_for_app_token(token) or 0
-    db.audit_access(uid, "app_login", detail=agent)
+    await asyncio.to_thread(db.audit_access, uid, "app_login", detail=agent)
     # Открытая ссылка входа — это и есть подтверждение привязки. Ссылку выдал тот,
     # у кого на это право (аналитик, руководитель своей команде, держатель логина
     # сервера), и достаётся она ровно тому, кому переслана. При переезде базы
@@ -3029,7 +3156,7 @@ async def _app_login(request: web.Request) -> web.StreamResponse:
     # подтверждения» навсегда.
     if uid and db.get_binding(uid) is None and db.pending_binding(uid):
         employee = db.approve_binding(uid)
-        db.audit_access(uid, "bind_approved_by_link", target=employee)
+        await asyncio.to_thread(db.audit_access, uid, "bind_approved_by_link", target=employee)
     # «fresh=1» — метка «токен выдан ПРЯМО СЕЙЧАС тому, кто открыл эту ссылку».
     # Без неё оболочка на устройстве, где кто-то уже входил, оставляла бы прежний
     # токен: обмен ссылки сервер потратил, а человек оказывался в ЧУЖОМ портфеле.
@@ -3075,7 +3202,7 @@ async def _redeem(request: web.Request) -> web.Response:
         raise web.HTTPGone(text="link")
     _admin_auth_ok(request, scope="app")
     uid = db.uid_for_app_token(token)
-    db.audit_access(uid or 0, "app_login", detail=agent)
+    await asyncio.to_thread(db.audit_access, uid or 0, "app_login", detail=agent)
     return web.json_response({"ok": True, "token": token, "days": db.APP_TOKEN_DAYS})
 
 
@@ -3089,7 +3216,7 @@ async def _logout(request: web.Request) -> web.Response:
     tok = (request.headers.get("X-App-Token") or "").strip()
     uid = db.drop_app_token(tok) if tok else None
     if uid:
-        db.audit_access(uid, "app_logout")
+        await asyncio.to_thread(db.audit_access, uid, "app_logout")
     return web.json_response({"ok": True})
 
 
@@ -3100,7 +3227,7 @@ async def _admin_app_revoke(request: web.Request) -> web.Response:
     везде. `scope="links"` — гасим только ссылки: выданный не тому QR умирает, а
     телефон, который уже работает, не разлогинивается.
     """
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     body = await request.json()
     try:
         tid = int(body["telegram_id"])
@@ -3108,7 +3235,7 @@ async def _admin_app_revoke(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="telegram_id")
     scope = "links" if str(body.get("scope") or "all") == "links" else "all"
     n = db.revoke_app_access(tid, scope=scope)
-    db.audit_access(tid, "app_revoke", detail=f"{scope}:{n}")
+    await asyncio.to_thread(db.audit_access, tid, "app_revoke", detail=f"{scope}:{n}")
     return web.json_response({"ok": True, "revoked": n, "scope": scope})
 
 
@@ -3119,7 +3246,7 @@ async def _admin_stats_book(request: web.Request) -> web.Response:
 
     Окно — как у руководителя (preset/shift/from/to); kind=daily — вечерняя
     книга за день date=; direction=tj|uz — одна республика."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     q = request.query
     direction = (q.get("direction") or "").strip()
     if direction not in ("", "all", "tj", "uz"):
@@ -3143,7 +3270,7 @@ async def _admin_stats_book(request: web.Request) -> web.Response:
         body = await asyncio.to_thread(
             functools.partial(digest_data.stats_xlsx, mgr, rng, employees=team))
         name = f"stats_{rng['from']}_{rng['to']}"
-    db.audit_access(0, "digest_export",
+    await asyncio.to_thread(db.audit_access, 0, "digest_export",
                     detail=f"admin {name} dir={direction or 'all'} team={len(team)}")
     return web.Response(
         body=body,
@@ -3158,7 +3285,7 @@ async def _admin_app_revoke_bulk(request: web.Request) -> web.Response:
     То же, что /admin/app_revoke, но одним запросом: пульт ходит на сервер через
     туннель, и по запросу на человека сброс команды из шестидесяти шёл минуту.
     `all` гасит и ссылки, и телефоны, и компьютеры с пультом руководителя."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     try:
         body = await request.json()
     except (ValueError, TypeError):
@@ -3175,7 +3302,7 @@ async def _admin_app_revoke_bulk(request: web.Request) -> web.Response:
             continue
         revoked += db.revoke_app_access(tid, scope=scope)
         people += 1
-        db.audit_access(tid, "app_revoke", detail=f"{scope}:bulk")
+        await asyncio.to_thread(db.audit_access, tid, "app_revoke", detail=f"{scope}:bulk")
     return web.json_response({"ok": True, "people": people, "revoked": revoked, "scope": scope})
 
 
@@ -3190,7 +3317,7 @@ async def _admin_app_links(request: web.Request) -> web.Response:
     адреса, пульт нарисовал бы QR, который никуда не ведёт. Без MINIAPP_URL адрес
     пустой, и это честнее выдуманного.
     """
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     base = os.getenv("MINIAPP_URL", "").strip().rstrip("/")
     links = db.app_links_state()
     for row in links:
@@ -3287,7 +3414,7 @@ async def _admin_app_link(request: web.Request) -> web.Response:
     Адрес короткий и путевой — ``<MINIAPP_URL>/i/<код>``: его видно целиком на
     экране, он читается с QR и его можно продиктовать. Открыл — и уже внутри.
     """
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     try:
         body = await request.json()
     except (ValueError, TypeError):
@@ -3315,7 +3442,7 @@ async def _admin_app_links_bulk(request: web.Request) -> web.Response:
     неё будет `error`, у удачных — ссылка. По одной выдаче на запрос пульт через
     транзит тратил бы секунду на человека.
     """
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     try:
         body = await request.json()
     except (ValueError, TypeError):
@@ -3344,12 +3471,12 @@ async def _admin_app_links_bulk(request: web.Request) -> web.Response:
                        "error": str(payload.get("error") or f"HTTP {status}")}
         results.append(payload)
     issued = sum(1 for r in results if r.get("url"))
-    db.audit_access(0, "app_links_bulk", detail=f"выдано {issued} из {len(items)}")
+    await asyncio.to_thread(db.audit_access, 0, "app_links_bulk", detail=f"выдано {issued} из {len(items)}")
     return web.json_response({"ok": True, "issued": issued, "results": results})
 
 
 async def _lang(request: web.Request) -> web.Response:
-    uid, _ = _auth(request)
+    uid, _ = await asyncio.to_thread(_auth, request)
     lang = (await request.json()).get("lang", "")
     if lang in ("ru", "uz", "tg"):
         db.set_lang(uid, lang)
@@ -3439,10 +3566,19 @@ def _saved_at(body) -> str | None:
     бывают сутки, и раньше — когда днём выезда был день загрузки — работа
     целого дня ложилась в чужой день.
     """
+    if isinstance(body.get("occurred_at"), bool):
+        return None
     try:
         moment = datetime.fromtimestamp(float(body.get("occurred_at")) / 1000.0, timezone.utc).replace(tzinfo=None)
     except (TypeError, ValueError, OSError, OverflowError):
         return None
+    # The journal timestamp must follow the same clock bounds as its event
+    # day. A clamped day plus an unbounded future timestamp blocks later facts.
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    local_day = moment.replace(tzinfo=timezone.utc).astimezone(evidence.FIELD_TZ).date()
+    today = workday.today()
+    if moment > now + timedelta(minutes=5) or local_day > today or (today - local_day).days > OCCURRED_MAX_AGE_DAYS:
+        moment = now  # same server-time fallback as the bounded event day
     return moment.isoformat(timespec="seconds")
 
 
@@ -3595,11 +3731,15 @@ async def _visit_notify(request: web.Request, notify_row, uid: int,
                                    evidence_line=ev_line)
         except Exception as e:  # noqa: BLE001 — сбой лички не отменяет беседу
             logging.warning("manager notify failed: %s", e)
+            await asyncio.to_thread(db.log_push, db.PUSH_VISIT, db.PUSH_FAILED,
+                                   contract_id=notify_row["contract_id"], error=type(e).__name__)
         await _notify_report_chats(request, notify_row, vlat, vlon, dist_m,
                                    uid, actor=actor, visit_day=day,
                                    evidence_line=ev_line)
     except Exception as exc:  # noqa: BLE001
         logging.warning("visit notify failed: %s", exc)
+        await asyncio.to_thread(db.log_push, db.PUSH_REPORT_CHAT, db.PUSH_FAILED,
+                               contract_id=notify_row["contract_id"], error=type(exc).__name__)
 
 
 async def wait_visit_notify(timeout: float = 30.0) -> None:
@@ -3727,7 +3867,7 @@ async def _notify_report_chats(request: web.Request, row, vlat, vlon,
         # строкой на визит: push_log тримится и уносится сбросом, а на вопрос
         # ИБ «кто получал ПД за квартал» отвечает audit.
         if delivered and files:
-            db.audit_access(0, "report_chat_push", row["contract_id"],
+            await asyncio.to_thread(db.audit_access, 0, "report_chat_push", row["contract_id"],
                             f"chats={','.join(str(c) for c in delivered)} "
                             f"photos={len(files)}")
     except Exception as exc:  # noqa: BLE001 — пост не должен ломать сохранение визита
@@ -3856,7 +3996,7 @@ async def _notify_managers(request: web.Request, row, dist_m: int | None = None,
     # Факт ВЫДАЧИ ПД (фото должника в личку) — одной строкой на визит в audit:
     # push_log — телеметрия, он тримится и целиком уносится сбросом.
     if delivered and files:
-        db.audit_access(0, "visit_push", cid,
+        await asyncio.to_thread(db.audit_access, 0, "visit_push", cid,
                         f"tids={','.join(str(t) for t in delivered)} "
                         f"photos={len(files)}")
 
@@ -3878,7 +4018,7 @@ def _map_auth(request: web.Request) -> tuple[str, str]:
 # поехали бы между запросами). ADMIN-байпас принадлежности кейса из _person
 # здесь НЕ повторяется: у владельца нужный сотрудник и так есть в team.
 async def _manager_summary(request: web.Request) -> web.Response:
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     iso, today, prev, nxt = _manager_date(request)
     team = _day_team(mgr, team, iso)
     data = digest_data.summary_data(mgr, iso, employees=team)
@@ -3889,15 +4029,15 @@ async def _manager_summary(request: web.Request) -> web.Response:
     for g in data.get("groups", []):
         for r in g.get("employees", []):
             r.pop("ei", None)
-    db.audit_access(uid, "digest_view",
+    await asyncio.to_thread(db.audit_access, uid, "digest_view",
                     detail=f"summary {iso} team={len(team)} "
                            f"persons={data['totals']['persons']}")
-    return _manager_json({**_manager_envelope(mgr, team, iso, today, prev, nxt, uid),
+    return _manager_json({**await asyncio.to_thread(_manager_envelope, mgr, team, iso, today, prev, nxt, uid),
                           **data})
 
 
 async def _manager_employee_view(request: web.Request) -> web.Response:
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     iso, today, prev, nxt = _manager_date(request)
     team = _day_team(mgr, team, iso)
     emp = _manager_employee_q(request, team)
@@ -3907,36 +4047,106 @@ async def _manager_employee_view(request: web.Request) -> web.Response:
     # Аудит с СОСТАВОМ показанных должников: для ИБ «открывал экран» и «видел
     # этих людей» — разные вещи (до 50 rep, дальше усечение).
     reps = ",".join(c["rep"] for c in data["cases"][:50])
-    db.audit_access(uid, "digest_view", target=emp,
+    await asyncio.to_thread(db.audit_access, uid, "digest_view", target=emp,
                     detail=f"employee {iso} n={len(data['cases'])} reps={reps}")
-    return _manager_json({**_manager_envelope(mgr, team, iso, today, prev, nxt, uid),
+    return _manager_json({**await asyncio.to_thread(_manager_envelope, mgr, team, iso, today, prev, nxt, uid),
                           **data})
 
 
 async def _manager_person(request: web.Request) -> web.Response:
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     iso, today, prev, nxt = _manager_date(request)
     team = _day_team(mgr, team, iso)
     emp = _manager_employee_q(request, team)
     rep = (request.query.get("rep") or "").strip()
     row = db.get_client(rep)
-    by_soft = bool(row and (request.query.get("mode") == "soft" or
+    mode = request.query.get('mode')
+    by_soft = bool(row and (mode == 'soft' or mode != 'hard' and
                            row["responsible_soft"] == emp and row["responsible"] != emp))
     # Свой должник — или тот, к кому сотрудник выезжал до перезакрепления:
     # карточка по собственному выезду открываться обязана.
     if not row or (by_soft and row["responsible_soft"] != emp and not db.employee_called(emp, [rep])) or (
             not by_soft and row["responsible"] != emp and not db.employee_visited(emp, [rep])):
         raise web.HTTPNotFound(text="person")
-    data = digest_data.person_data(mgr, iso, emp, rep, employees=team, by_soft=by_soft)
+    current_only = request.query.get('current_portfolio') == '1'
+    if current_only and row['responsible_soft' if by_soft else 'responsible'] != emp:
+        raise web.HTTPNotFound(text='person')
+    data = digest_data.person_data(mgr, iso, emp, rep, employees=team, by_soft=by_soft, current_only=current_only)
     if data is None:
         raise web.HTTPNotFound(text="person")
-    db.audit_access(uid, "digest_view_card", target=rep, detail=f"{emp} {iso}")
-    return _manager_json({**_manager_envelope(mgr, team, iso, today, prev, nxt, uid),
+    import office_work
+    current = db.person_contracts_by_soft(rep) if by_soft else db.person_contracts(rep)
+    owner_key = 'responsible_soft' if by_soft else 'responsible'
+    visible = [r for r in current if r[owner_key] == emp] if current_only else [r for r in current if r[owner_key] in team]
+    if visible:
+        totals = office_work.portfolio_totals(visible)
+        data['money_text'] = ' · '.join(f"{t['sum']:,.2f}".replace(',', ' ').replace('.', ',')+' '+t['unit'] for t in totals)
+        data['outcome'] = _portfolio_result(visible,'soft' if by_soft else 'hard')
+    await asyncio.to_thread(db.audit_access, uid, "digest_view_card", target=rep, detail=f"{emp} {iso}")
+    return _manager_json({**await asyncio.to_thread(_manager_envelope, mgr, team, iso, today, prev, nxt, uid),
                           "employee": emp, **data})
 
 
+def _portfolio_result(contracts, profile):
+    if profile == 'soft':
+        return _soft_value(contracts,'soft_call_status')
+    latest = max(contracts,key=lambda r:max(str(r['bot_call_at'] or ''),
+        str(r['bot_visit_event_at'] or r['bot_visit_at'] or ''),
+        str((db.payment_status_snapshot(r) or {}).get('event_at') or '')))
+    return db.common_result(latest).get('overall_result') or latest['overall_result'] or ''
+
+
+def _team_portfolio(team: list[str], profile: str) -> dict:
+    """Current assignments, including clients without a call/visit in a period."""
+    column = "responsible_soft" if profile == "soft" else "responsible"
+    import office_work
+    by_owner = {}
+    names = sorted(set(team))
+    with db.connect() as conn:
+        for start in range(0,len(names),400):
+            chunk = names[start:start+400]
+            marks = ','.join('?' for _ in chunk)
+            for row in conn.execute(f"SELECT * FROM clients WHERE {column} IN ({marks}) ORDER BY client,contract_id",chunk):
+                by_owner.setdefault(row[column],[]).append(row)
+    office_of,offices = control.offices_for(names)
+    country_of = digest_data._employee_country_index()
+    items = []
+    for employee,rows in by_owner.items():
+        for person in db._group_persons(rows):
+            brief = _person_brief(person)
+            contracts = person['contracts']
+            brief['totals'] = office_work.portfolio_totals(contracts)
+            latest = max(contracts,key=lambda r:max(str(r['bot_call_at'] or ''),
+                str(r['bot_visit_event_at'] or r['bot_visit_at'] or ''),
+                str((db.payment_status_snapshot(r) or {}).get('event_at') or '')))
+            common = db.common_result(latest)
+            items.append({**brief,'employee':employee,'profile':profile,
+                'office':office_of.get(employee,''),'country':country_of.get(employee,''),
+                'address':_row_get(contracts,'address') or '',
+                'status':_portfolio_result(contracts,profile),
+                'promise_date':common.get('promise_date') or '',
+                'next_date':_soft_value(contracts,'meeting_date') if profile=='soft' else latest['reminder_date'] or ''})
+    items.sort(key=lambda r:(str(r['client']).casefold(),r['employee'],r['rep']))
+    return {'profile':profile,'items':items,'employees':sorted(by_owner),'offices':offices,
+            'persons':len(items),'contracts':sum(r['n'] for r in items),'asof':workday.today().isoformat()}
+
+
+async def _manager_portfolio(request: web.Request) -> web.Response:
+    uid,mgr,team = await asyncio.to_thread(_manager_gate,request)
+    profile = request.query.get('mode','hard')
+    if profile not in ('hard','soft'):
+        raise web.HTTPBadRequest(text='mode')
+    employee = (request.query.get('employee') or '').strip()
+    if employee and employee not in team:
+        raise web.HTTPNotFound(text='employee')
+    selected = [employee] if employee else team
+    data = await asyncio.to_thread(_team_portfolio,selected,profile)
+    await asyncio.to_thread(db.audit_access,uid,'digest_view_portfolio',detail=f'{profile} n={data["persons"]}')
+    return _manager_json(data)
+
+
 async def _manager_period(request: web.Request) -> web.Response:
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     iso, today, prev, nxt = _manager_date(request)
     try:
         days = int(request.query.get("days", "7"))
@@ -3946,20 +4156,28 @@ async def _manager_period(request: web.Request) -> web.Response:
     start = (db._as_date(iso) - timedelta(days=span - 1)).isoformat()
     team = digest_data.window_team(mgr, team, start, iso)
     data = digest_data.period_data(mgr, iso, days, employees=team)
-    db.audit_access(uid, "digest_view", detail=f"period {iso} {data['days']}")
-    return _manager_json({**_manager_envelope(mgr, team, iso, today, prev, nxt, uid),
+    await asyncio.to_thread(db.audit_access, uid, "digest_view", detail=f"period {iso} {data['days']}")
+    return _manager_json({**await asyncio.to_thread(_manager_envelope, mgr, team, iso, today, prev, nxt, uid),
                           **data})
 
 
 async def _manager_promises(request: web.Request) -> web.Response:
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     iso, today, prev, nxt = _manager_date(request)
-    data = digest_data.promises_data(mgr, iso, employees=team)
+    mode = request.query.get("mode", "hard")
+    if mode not in ("hard", "soft"):
+        raise web.HTTPBadRequest(text="mode")
+    if mode == "soft":
+        import current_promises
+        data = await asyncio.to_thread(current_promises.soft_data, team, today)
+    else:
+        data = await asyncio.to_thread(digest_data.promises_data, mgr, iso, team)
+        data["profile"] = "hard"
     reps = ",".join(i["rep"] or "" for e in data["employees"]
                     for i in e["items"][:50])[:400]
-    db.audit_access(uid, "digest_view",
+    await asyncio.to_thread(db.audit_access, uid, "digest_view",
                     detail=f"promises {iso} n={data['totals']['persons']} reps={reps}")
-    return _manager_json({**_manager_envelope(mgr, team, iso, today, prev, nxt, uid),
+    return _manager_json({**await asyncio.to_thread(_manager_envelope, mgr, team, iso, today, prev, nxt, uid),
                           **data})
 
 
@@ -3992,12 +4210,12 @@ def _stats_envelope(mgr, team, rng, uid) -> dict:
 # карточку, ни сохранить выезд. Та же ошибка уже была с индексом приоритета
 # (9 сентября) — считаем в отдельном потоке, соединение SQLite у него своё.
 async def _manager_stats(request: web.Request) -> web.Response:
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     rng = _stats_range_q(request)
     team = _range_team(mgr, team, rng)
     data = await asyncio.to_thread(
         functools.partial(digest_data.stats_data, mgr, rng, employees=team))
-    db.audit_access(uid, "digest_view",
+    await asyncio.to_thread(db.audit_access, uid, "digest_view",
                     detail=f"stats {rng['from']}..{rng['to']} team={len(team)} "
                            f"visits={data['totals']['visits']}")
     # Счётчик висящих заявок на вход — прямо на сводке. 14.09.2026 две заявки
@@ -4007,7 +4225,7 @@ async def _manager_stats(request: web.Request) -> web.Response:
 
 
 async def _manager_stats_employee(request: web.Request) -> web.Response:
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     rng = _stats_range_q(request)
     team = _range_team(mgr, team, rng)
     emp = _manager_employee_q(request, team)
@@ -4020,7 +4238,7 @@ async def _manager_stats_employee(request: web.Request) -> web.Response:
     if data is None:
         raise web.HTTPNotFound(text="employee")
     reps = ",".join(c["rep"] for c in data["cases"][:50])
-    db.audit_access(uid, "digest_view", target=emp,
+    await asyncio.to_thread(db.audit_access, uid, "digest_view", target=emp,
                     detail=f"stats_employee {rng['from']}..{rng['to']} "
                            f"n={len(data['cases'])} reps={reps}")
     return _manager_json({**_stats_envelope(mgr, team, rng, uid), **data})
@@ -4034,7 +4252,7 @@ async def _manager_pushes(request: web.Request) -> web.Response:
     «Каналы») и через эту ручку не меняются: молчаливый «успех» без эффекта
     хуже честного отказа.
     """
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     if uid == ADMIN_ID:
         return web.json_response(
             {"error": "Рубильники владельца меняются в пульте аналитика "
@@ -4049,7 +4267,7 @@ async def _manager_pushes(request: web.Request) -> web.Response:
                                      status=400)
         db.set_manager_pushes(uid, pushes)
         who = mgr.get("name") or f"id{uid}"
-        db.audit_access(uid, "manager_pushes",
+        await asyncio.to_thread(db.audit_access, uid, "manager_pushes",
                         detail="{} · {}".format(
                             who, ",".join(f"{k}={int(v)}"
                                           for k, v in pushes.items())))
@@ -4115,7 +4333,7 @@ async def _manager_app_links(request: web.Request) -> web.Response:
     Выдача ссылок теперь работа руководителя: аналитик не пересыльщик. Список —
     только своя команда, включая тех, кому ссылку ещё не выдавали («не выдавали»).
     """
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     team_set = set(team)
     # Руководитель может быть и выездником: своя строка входа видна всегда,
     # даже если своего ФИО в составе команды нет.
@@ -4162,7 +4380,7 @@ async def _manager_app_link(request: web.Request) -> web.Response:
     число обменов — серверные. Чужое ФИО не проходит: граница команды проверяется
     на сервере, а не в интерфейсе.
     """
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     body = await _json_object(request)
     if body is None:
         return web.json_response({"error": "тело не JSON-объект"}, status=400)
@@ -4179,7 +4397,7 @@ async def _manager_app_link(request: web.Request) -> web.Response:
         # компьютер с пультом — иначе двойка кончалась бы на втором устройстве.
         code = db.create_app_link(uid, max_uses=MANAGER_LINK_USES)
         who = mgr.get("name") or f"id{uid}"
-        db.audit_access(uid, "mgr_app_link_self",
+        await asyncio.to_thread(db.audit_access, uid, "mgr_app_link_self",
                         detail=f"{who} выдал себе вход: {_mask_code(code)}")
         return web.json_response({
             "ok": True, "employee": MANAGER_SELF_LABEL, "telegram_id": uid,
@@ -4209,7 +4427,7 @@ async def _manager_app_link(request: web.Request) -> web.Response:
     tid, _created = db.local_identity_for(employee, kind)
     code = db.create_app_link(tid, max_uses=db.APP_LINK_DEFAULT_USES)
     who = mgr.get("name") or f"id{uid}"
-    db.audit_access(uid, "mgr_app_link", target=employee,
+    await asyncio.to_thread(db.audit_access, uid, "mgr_app_link", target=employee,
                     detail=f"{who} выдал вход: {_mask_code(code)}")
     return web.json_response({
         "ok": True, "employee": employee, "telegram_id": tid,
@@ -4221,7 +4439,7 @@ async def _manager_app_link(request: web.Request) -> web.Response:
 
 async def _manager_app_revoke(request: web.Request) -> web.Response:
     """Отозвать вход сотрудника своей команды: ссылки гаснут, телефон выходит."""
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     body = await _json_object(request) or {}
     employee = str(body.get("employee") or "").strip()
     own = db.get_binding(uid)
@@ -4243,7 +4461,7 @@ async def _manager_app_revoke(request: web.Request) -> web.Response:
     scope = "links" if str(body.get("scope") or "all") == "links" else "all"
     revoked = sum(db.revoke_app_access(tid, scope=scope) for tid in tids)
     who = mgr.get("name") or f"id{uid}"
-    db.audit_access(uid, "mgr_app_revoke", target=employee,
+    await asyncio.to_thread(db.audit_access, uid, "mgr_app_revoke", target=employee,
                     detail=f"{who} отозвал вход ({scope}): {revoked}")
     return web.json_response({"ok": True, "employee": employee,
                               "revoked": revoked, "scope": scope})
@@ -4256,7 +4474,7 @@ async def _manager_plan(request: web.Request) -> web.Response:
     8/10/12 по фактической выработке, состав групп меняется чаще, чем выходят
     выкладки. Чужих людей через эту ручку не тронуть — только свою команду.
     """
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     if request.method == "POST":
         body = await request.json()
         plan = body.get("plan")
@@ -4272,7 +4490,7 @@ async def _manager_plan(request: web.Request) -> web.Response:
                 continue
             db.set_visit_plan(name, norm)
             changed.append(name)
-        db.audit_access(uid, "visit_plan", detail=f"changed={len(changed)}")
+        await asyncio.to_thread(db.audit_access, uid, "visit_plan", detail=f"changed={len(changed)}")
     plan_map = db.visit_plan_map()
     common = db.visit_plan_per_day()
     # Норма по расчёту (workload.py) — подсказка рядом с ручной: по географии
@@ -4295,7 +4513,7 @@ async def _manager_plan(request: web.Request) -> web.Response:
 async def _manager_workload(request: web.Request) -> web.Response:
     """Нагрузка команды: норма по расчёту против ручной, темп, разбор дней
     одного сотрудника (?employee=)."""
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     rng = _stats_range_q(request)
     team = _range_team(mgr, team, rng)
     refresh = (request.query.get("refresh") or "") == "1"
@@ -4311,7 +4529,7 @@ async def _manager_workload(request: web.Request) -> web.Response:
             functools.partial(workload.workload_data, mgr, rng, team,
                               backends=_routing_backends(), vroom_url=VROOM_URL,
                               refresh=refresh))
-    db.audit_access(uid, "digest_view",
+    await asyncio.to_thread(db.audit_access, uid, "digest_view",
                     detail=f"workload {rng['from']}..{rng['to']} emp={emp or '-'}")
     return _manager_json({**_stats_envelope(mgr, team, rng, uid), **data})
 
@@ -4371,9 +4589,9 @@ async def _manager_binds(request: web.Request) -> web.Response:
     списком: руководителю нужен текст на экране, а не номер статуса. Кодами
     остаются кривой запрос (400) и чужой человек (404).
     """
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     if request.method != "POST":
-        db.audit_access(uid, "digest_view", detail=f"binds team={len(team)}")
+        await asyncio.to_thread(db.audit_access, uid, "digest_view", detail=f"binds team={len(team)}")
         return _manager_json(_binds_payload(team))
     body = await request.json()
     action = str(body.get("action") or "").strip()
@@ -4398,7 +4616,7 @@ async def _manager_binds(request: web.Request) -> web.Response:
     error = None
     if action == "unbind":
         db.unbind(tid)
-        db.audit_access(uid, "mgr_unbind", str(tid),
+        await asyncio.to_thread(db.audit_access, uid, "mgr_unbind", str(tid),
                         f"{was} pending={0 if row['approved'] else 1}")
         if not row["approved"]:
             await _tell_bind_changed(request, tid, "bind_rejected_user")
@@ -4420,7 +4638,7 @@ async def _manager_binds(request: web.Request) -> web.Response:
                 # закрываем ему и вход в приложение — «сменили устройство»
                 # значит сменили, а не «теперь работают оба».
                 db.unbind(prev)
-            db.audit_access(uid, "mgr_approve_bind", str(tid),
+            await asyncio.to_thread(db.audit_access, uid, "mgr_approve_bind", str(tid),
                             f"{was} prev={prev or '—'}")
             await _tell_bind_changed(request, tid, "bind_approved_user", emp=was)
     else:
@@ -4434,7 +4652,7 @@ async def _manager_binds(request: web.Request) -> web.Response:
             error = "этот аккаунт уже работает под этим ФИО"
         else:
             db.set_bind(tid, target, kind)
-            db.audit_access(uid, "mgr_rebind", str(tid), f"{was} -> {target}")
+            await asyncio.to_thread(db.audit_access, uid, "mgr_rebind", str(tid), f"{was} -> {target}")
             await _tell_bind_changed(request, tid, "bind_approved_user", emp=target)
     payload = _binds_payload(team)
     if error:
@@ -4447,7 +4665,7 @@ async def _manager_cases(request: web.Request) -> web.Response:
 
     employee сужает до одного человека: ступень воронки в карточке сотрудника
     открывает его выезды, а не всей команды."""
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     rng = _stats_range_q(request)
     team = _range_team(mgr, team, rng)
     metric = (request.query.get("metric") or "visits").strip()
@@ -4461,7 +4679,7 @@ async def _manager_cases(request: web.Request) -> web.Response:
         functools.partial(digest_data.cases_data, mgr, rng, metric, country,
                           employees=team, office=office, employee=employee))
     reps = ",".join(c["rep"] for c in data["cases"][:50])
-    db.audit_access(uid, "digest_view",
+    await asyncio.to_thread(db.audit_access, uid, "digest_view",
                     detail=f"cases {data['metric']} {rng['from']}..{rng['to']} "
                            f"country={country or '-'} employee={employee or '-'} "
                            f"n={data['total']} reps={reps}")
@@ -4471,12 +4689,12 @@ async def _manager_cases(request: web.Request) -> web.Response:
 async def _manager_stats_xlsx(request: web.Request) -> web.Response:
     """Та же статистика книгой Excel. Токен — только в заголовке (как у фото):
     ссылка с токеном осела бы в истории браузера."""
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     rng = _stats_range_q(request)
     team = _range_team(mgr, team, rng)
     body = await asyncio.to_thread(
         functools.partial(digest_data.stats_xlsx, mgr, rng, employees=team))
-    db.audit_access(uid, "digest_export",
+    await asyncio.to_thread(db.audit_access, uid, "digest_export",
                     detail=f"stats.xlsx {rng['from']}..{rng['to']} team={len(team)}")
     return web.Response(
         body=body,
@@ -4501,12 +4719,15 @@ def _link_code(raw: str) -> str:
 
 def _device_me(uid: int, mgr: dict) -> dict:
     owner = uid == ADMIN_ID
+    import access_policy
     return {"me": {"name": mgr.get("name") or "",
                    "role": "full" if owner else db.manager_role(mgr.get("role")),
                    "direction": mgr.get("direction") or "",
                    "office_cities": mgr.get("office_cities") or [],
                    "scope": digest_data.scope_label(mgr), "isOwner": owner},
             "caps": db.manager_caps(mgr.get("role"), is_owner=owner),
+            "scope_version": access_policy.version(digest_data.sorted_employees(mgr), mgr.get("role"), db.manager_caps(mgr.get("role"), is_owner=owner)),
+            "offline_read_seconds": access_policy.OFFLINE_READ_SECONDS,
             "today": digest_data.today_iso(),
             "server_time": datetime.now(evidence.FIELD_TZ).isoformat(timespec="seconds")}
 
@@ -4537,18 +4758,22 @@ async def _manager_device_enroll(request: web.Request) -> web.Response:
         # там, для чего выдана.
         raise _json_error(web.HTTPForbidden, "not_manager")
     keep_token = str(body.get("keep_token") or "").strip() or None
-    got = db.enroll_manager_device(code, device, keep_token=keep_token)
+    enroll_token = str(body.get("enroll_token") or "").strip() or None
+    if enroll_token and not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", enroll_token):
+        raise _json_error(web.HTTPBadRequest, "enroll_token")
+    got = await asyncio.to_thread(db.enroll_manager_device, code, device, keep_token=keep_token,
+                                  enroll_token=enroll_token)
     if not got:
         raise _json_error(web.HTTPGone, "link_dead", reason=db.app_link_status(code, desktop=True))
     _admin_auth_ok(request, scope="app")
     uid, dev_id, token = got
-    db.audit_access(uid, "pult_enroll", detail=f"#{dev_id} {device}")
+    await asyncio.to_thread(db.audit_access, uid, "pult_enroll", detail=f"#{dev_id} {device}")
     return _manager_json({"ok": True, "token": token, "device_id": dev_id,
-                          **_device_me(uid, mgr)})
+                          **await asyncio.to_thread(_device_me, uid, mgr)})
 
 
 async def _manager_device_me(request: web.Request) -> web.Response:
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     device = None
     ptok = (request.headers.get("X-Pult-Token") or "").strip()
     if ptok:
@@ -4557,20 +4782,20 @@ async def _manager_device_me(request: web.Request) -> web.Response:
             device = {"id": dev["id"], "name": dev["device"] or "",
                       "created_at": dev["created_at"]}
     return _manager_json({"ok": True, "device": device, "team": len(team),
-                          **_device_me(uid, mgr)})
+                          **await asyncio.to_thread(_device_me, uid, mgr)})
 
 
 async def _manager_device_logout(request: web.Request) -> web.Response:
     tok = (request.headers.get("X-Pult-Token") or "").strip()
     uid = db.drop_manager_device(tok) if tok else None
     if uid:
-        db.audit_access(uid, "pult_logout")
+        await asyncio.to_thread(db.audit_access, uid, "pult_logout")
     return web.json_response({"ok": True})
 
 
 async def _manager_activity(request: web.Request) -> web.Response:
     """Лента: выезды с пометками, открытия карточек, фото, входы — за окно."""
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     rng = _stats_range_q(request)
     team = _range_team(mgr, team, rng)
     q = request.query
@@ -4583,57 +4808,94 @@ async def _manager_activity(request: web.Request) -> web.Response:
         control.activity, mgr, team, rng, office=(q.get("office") or "").strip(),
         employee=(q.get("employee") or "").strip(), kinds=kinds,
         before=(q.get("before") or "").strip(), limit=limit))
-    db.audit_access(uid, "digest_view",
+    await asyncio.to_thread(db.audit_access, uid, "digest_view",
                     detail=f"activity {rng['from']}..{rng['to']} n={len(data['events'])}")
     return _manager_json(data)
 
 
 async def _control_overview(request: web.Request) -> web.Response:
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     rng = _stats_range_q(request)
     team = _range_team(mgr, team, rng)
     data = await asyncio.to_thread(functools.partial(
         control.overview, mgr, team, rng, office=(request.query.get("office") or "").strip()))
-    db.audit_access(uid, "control_view", detail=f"overview {rng['from']}..{rng['to']}")
+    await asyncio.to_thread(db.audit_access, uid, "control_view", detail=f"overview {rng['from']}..{rng['to']}")
     return _manager_json(data)
 
 
 async def _control_soft(request: web.Request) -> web.Response:
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     rng = _stats_range_q(request)
     team = _range_team(mgr, team, rng)
     data = await asyncio.to_thread(functools.partial(
         control.activity, mgr, team, rng, kinds={"call"},
         office=(request.query.get("office") or "").strip(),
         before=(request.query.get("before") or "").strip(), limit=200))
-    db.audit_access(uid, "control_view", detail=f"soft {rng['from']}..{rng['to']}")
+    await asyncio.to_thread(db.audit_access, uid, "control_view", detail=f"soft {rng['from']}..{rng['to']}")
+    return _manager_json(data)
+
+
+async def _control_call_review(request: web.Request) -> web.Response:
+    import call_review
+    if request.path.startswith("/admin/"):
+        await asyncio.to_thread(_admin, request)
+        uid, team = ADMIN_ID, await asyncio.to_thread(_all_employees)
+    else:
+        uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
+    try:
+        if request.method == "POST":
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("body")
+            cid = int(body.get("call_id"))
+        else:
+            cid = int(request.query.get("call_id", ""))
+        if not request.path.startswith("/admin/"):
+            def event_day():
+                with db.connect() as conn:
+                    row = conn.execute("SELECT created_at FROM calls WHERE id=?", (cid,)).fetchone()
+                return row[0] if row else None
+            day = await asyncio.to_thread(event_day)
+            if day and db._as_date(day):
+                team = await asyncio.to_thread(_day_team, mgr, team, day)
+        if request.method == "POST":
+            data = await asyncio.to_thread(call_review.update, cid, team, uid, body)
+        else:
+            data = await asyncio.to_thread(call_review.read, cid, team)
+    except (ValueError, TypeError) as exc:
+        raise _json_error(web.HTTPBadRequest, "review_invalid", message=t("review_invalid", lang_of(uid)))
+    except RuntimeError as exc:
+        raise _json_error(web.HTTPConflict, "review_conflict", message=t("review_conflict", lang_of(uid)))
+    if data is None:
+        raise web.HTTPNotFound(text="call")
+    await asyncio.to_thread(db.audit_access, uid, "control_call_review", target=str(cid), detail=request.method)
     return _manager_json(data)
 
 
 async def _control_assignments(request: web.Request) -> web.Response:
     """Журнал закреплений: кому приехали договоры и чьи это были (контур СБ)."""
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     rng = _stats_range_q(request)
     team = _range_team(mgr, team, rng)
     data = await asyncio.to_thread(control.assignments, mgr, team, rng)
-    db.audit_access(uid, "control_view",
+    await asyncio.to_thread(db.audit_access, uid, "control_view",
                     detail=f"assignments {rng['from']}..{rng['to']}")
     return _manager_json(data)
 
 
 async def _control_access(request: web.Request) -> web.Response:
     """Лента выдачи входов: кто кому выдал/отозвал доступ (контур СБ)."""
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     rng = _stats_range_q(request)
     team = _range_team(mgr, team, rng)
     data = await asyncio.to_thread(control.access_log, rng, team)
-    db.audit_access(uid, "control_view", detail=f"access {rng['from']}..{rng['to']}")
+    await asyncio.to_thread(db.audit_access, uid, "control_view", detail=f"access {rng['from']}..{rng['to']}")
     return _manager_json(data)
 
 
 async def _control_day(request: web.Request) -> web.Response:
     """Гео-запись одного дня по времени: отрезки движения, выезды, SOS."""
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     rng = _stats_range_q(request)
     team = _range_team(mgr, team, rng)
     emp = _manager_employee_q(request, team)
@@ -4641,18 +4903,18 @@ async def _control_day(request: web.Request) -> web.Response:
     data = await asyncio.to_thread(control.day_story, mgr, team, emp, day)
     if data is None:
         raise web.HTTPNotFound(text="employee")
-    db.audit_access(uid, "control_view", target=emp, detail=f"day {day}")
+    await asyncio.to_thread(db.audit_access, uid, "control_view", target=emp, detail=f"day {day}")
     return _manager_json(data)
 
 
 async def _control_geo_days(request: web.Request) -> web.Response:
     """Дни окна, по которым у сотрудника есть гео-запись или выезды."""
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     rng = _stats_range_q(request)
     team = _range_team(mgr, team, rng)
     emp = _manager_employee_q(request, team)
     data = await asyncio.to_thread(control.geo_days, mgr, team, rng, emp)
-    db.audit_access(uid, "control_view", target=emp,
+    await asyncio.to_thread(db.audit_access, uid, "control_view", target=emp,
                     detail=f"geo_days {rng['from']}..{rng['to']}")
     return _manager_json(data)
 
@@ -4667,18 +4929,20 @@ def _all_employees() -> list[str]:
             "SELECT DISTINCT responsible FROM clients "
             "WHERE TRIM(COALESCE(responsible,'')) <> '' UNION "
             "SELECT DISTINCT responsible_soft FROM clients "
-            "WHERE TRIM(COALESCE(responsible_soft,'')) <> ''")})
+            "WHERE TRIM(COALESCE(responsible_soft,'')) <> '' UNION "
+            "SELECT DISTINCT employee FROM calls WHERE TRIM(COALESCE(employee,'')) <> '' UNION "
+            "SELECT DISTINCT employee FROM visits WHERE TRIM(COALESCE(employee,'')) <> ''")})
 
 
 async def _admin_control(request: web.Request, kind: str) -> web.Response:
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     rng = _stats_range_q(request)
     if kind == "callbacks":
         iso, today, prev, nxt = _manager_date(request)
         data = await asyncio.to_thread(functools.partial(
             control.callbacks, None, _all_employees(), iso,
             office=(request.query.get("office") or "").strip()))
-        db.audit_access(ADMIN_ID, "control_view", detail=f"admin callbacks {iso}")
+        await asyncio.to_thread(db.audit_access, ADMIN_ID, "control_view", detail=f"admin callbacks {iso}")
         return web.json_response(digest_data._public(
             {**data, "prev_date": prev, "next_date": nxt, "today": today}))
     if kind == "flags":
@@ -4708,7 +4972,7 @@ async def _admin_control(request: web.Request, kind: str) -> web.Response:
         data = await asyncio.to_thread(functools.partial(
             control.overview, None, _all_employees(), rng,
             office=(request.query.get("office") or "").strip()))
-    db.audit_access(ADMIN_ID, "control_view",
+    await asyncio.to_thread(db.audit_access, ADMIN_ID, "control_view",
                     detail=f"admin {kind} {rng['from']}..{rng['to']}")
     resp = web.json_response(digest_data._public(data))
     resp.headers["Cache-Control"] = "no-store"
@@ -4748,33 +5012,33 @@ async def _admin_control_geo_days(request):
 
 
 async def _control_flags(request: web.Request) -> web.Response:
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     rng = _stats_range_q(request)
     team = _range_team(mgr, team, rng)
     emp = _manager_employee_q(request, team)
     data = await asyncio.to_thread(control.flags_of, mgr, team, rng, emp)
     if data is None:
         raise web.HTTPNotFound(text="employee")
-    db.audit_access(uid, "control_view", target=emp,
+    await asyncio.to_thread(db.audit_access, uid, "control_view", target=emp,
                     detail=f"flags {rng['from']}..{rng['to']} n={len(data['visits'])}")
     return _manager_json(data)
 
 
 async def _control_callbacks(request: web.Request) -> web.Response:
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     iso, today, prev, nxt = _manager_date(request)
     team = _day_team(mgr, team, iso)
     data = await asyncio.to_thread(functools.partial(
         control.callbacks, mgr, team, iso, office=(request.query.get("office") or "").strip()))
     # Телефоны и адреса должников — выдача ПД: в журнал составом.
     reps = ",".join(x["rep"] for x in data["items"][:50])
-    db.audit_access(uid, "control_callbacks",
+    await asyncio.to_thread(db.audit_access, uid, "control_callbacks",
                     detail=f"{iso} n={len(data['items'])} reps={reps}")
     return _manager_json({**data, "prev_date": prev, "next_date": nxt, "today": today})
 
 
 async def _control_callback(request: web.Request) -> web.Response:
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     try:
         body = await request.json()
         vid = int(body.get("visit_id"))
@@ -4788,16 +5052,16 @@ async def _control_callback(request: web.Request) -> web.Response:
     chk = db.control_record(vid, outcome, str(body.get("note") or ""), uid)
     if chk is None:
         raise _json_error(web.HTTPNotFound, "not_selected")
-    db.audit_access(uid, "control_check", target=str(vid), detail=outcome)
+    await asyncio.to_thread(db.audit_access, uid, "control_check", target=str(vid), detail=outcome)
     return _manager_json({"ok": True, "check": chk})
 
 
 async def _control_export(request: web.Request) -> web.Response:
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     rng = _stats_range_q(request)
     team = _range_team(mgr, team, rng)
     body = await asyncio.to_thread(control.control_xlsx, mgr, team, rng)
-    db.audit_access(uid, "control_export", detail=f"{rng['from']}..{rng['to']}")
+    await asyncio.to_thread(db.audit_access, uid, "control_export", detail=f"{rng['from']}..{rng['to']}")
     return web.Response(
         body=body,
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -4809,7 +5073,7 @@ async def _control_export(request: web.Request) -> web.Response:
 async def _admin_manager_devices(request: web.Request) -> web.Response:
     """Компьютеры с пультом руководителя: у кого, с какого числа, когда в сети,
     отозван ли (и ещё не постучался)."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     raw = (request.query.get("telegram_id") or "").strip()
     try:
         tid = int(raw) if raw else None
@@ -4820,7 +5084,7 @@ async def _admin_manager_devices(request: web.Request) -> web.Response:
 
 async def _admin_manager_device_revoke(request: web.Request) -> web.Response:
     """{id} — один компьютер; {telegram_id, all: true} — все компьютеры человека."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
@@ -4836,7 +5100,7 @@ async def _admin_manager_device_revoke(request: web.Request) -> web.Response:
             raise ValueError
     except (TypeError, ValueError):
         raise web.HTTPBadRequest(text="id")
-    db.audit_access(ADMIN_ID, "pult_revoke",
+    await asyncio.to_thread(db.audit_access, ADMIN_ID, "pult_revoke",
                     detail=json.dumps(body, ensure_ascii=False)[:200])
     return web.json_response({"ok": True, "revoked": n})
 
@@ -4874,15 +5138,18 @@ async def _agent_device_enroll(request: web.Request) -> web.Response:
         raise _json_error(web.HTTPForbidden, "not_agent")
     if expected_uid is not None and uid != expected_uid:
         raise _json_error(web.HTTPConflict, "pending_calls_other_login")
-    got = db.enroll_agent_device(code, device, keep_token=keep_token,
-                                 expected_uid=expected_uid, reuse_only=reuse_only)
+    enroll_token = str(body.get("enroll_token") or "").strip() or None
+    if enroll_token and not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", enroll_token):
+        raise _json_error(web.HTTPBadRequest, "enroll_token")
+    got = await asyncio.to_thread(db.enroll_agent_device, code, device, keep_token=keep_token,
+                                 expected_uid=expected_uid, reuse_only=reuse_only, enroll_token=enroll_token)
     if not got:
         if reuse_only:
             raise _json_error(web.HTTPConflict, "pending_calls_other_login")
         raise _json_error(web.HTTPGone, "link_dead")
     employee, link_uid, dev_id, token = got
     _admin_auth_ok(request, scope="app")
-    db.audit_access(link_uid, "desk_enroll", employee,
+    await asyncio.to_thread(db.audit_access, link_uid, "desk_enroll", employee,
                     detail=f"#{dev_id} {device}")
     return web.json_response({"ok": True, "token": token, "device_id": dev_id,
                               "employee": employee, "telegram_id": link_uid})
@@ -4895,18 +5162,18 @@ async def _agent_device_logout(request: web.Request) -> web.Response:
     if state != "ok" or not dev:
         raise web.HTTPUnauthorized(text="auth")
     db.agent_device_revoke(int(dev["id"]), by=f"self:{dev['employee']}")
-    db.audit_access(int(dev["telegram_id"] or 0) or 0, "desk_logout",
+    await asyncio.to_thread(db.audit_access, int(dev["telegram_id"] or 0) or 0, "desk_logout",
                     dev["employee"])
     return web.json_response({"ok": True})
 
 
 async def _admin_agent_devices(request: web.Request) -> web.Response:
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     return web.json_response({"ok": True, "devices": db.agent_devices_list()})
 
 
 async def _admin_agent_device_revoke(request: web.Request) -> web.Response:
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
@@ -4918,20 +5185,20 @@ async def _admin_agent_device_revoke(request: web.Request) -> web.Response:
     except (TypeError, ValueError):
         raise web.HTTPBadRequest(text="id")
     n = db.agent_device_revoke(dev_id, by="admin")
-    db.audit_access(ADMIN_ID, "desk_revoke", detail=str(dev_id))
+    await asyncio.to_thread(db.audit_access, ADMIN_ID, "desk_revoke", detail=str(dev_id))
     return web.json_response({"ok": True, "revoked": int(n)})
 
 
 async def _manager_app_map_data(request: web.Request) -> web.Response:
     """Карта дня ВНУТРИ приложения: авторизация сессией, подпись не нужна.
     Подписанный /manager/map_data остаётся для телеграм-кнопки."""
-    uid, mgr, team = _manager_gate(request)
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     iso, today, prev, nxt = _manager_date(request)
     team = _day_team(mgr, team, iso)
     emp = _manager_employee_q(request, team)
     pts = db.day_map_points(emp, iso)
-    db.audit_access(uid, "digest_view", target=emp, detail=f"map {iso}")
-    return _manager_json({**_manager_envelope(mgr, team, iso, today, prev, nxt, uid),
+    await asyncio.to_thread(db.audit_access, uid, "digest_view", target=emp, detail=f"map {iso}")
+    return _manager_json({**await asyncio.to_thread(_manager_envelope, mgr, team, iso, today, prev, nxt, uid),
                           "employee": emp, **pts,
                           "vectorTiles": "/tiles/basemap.pmtiles"
                           if TILES_FILE.exists() else None,
@@ -5115,8 +5382,9 @@ _ADMIN_FAIL_LIMIT = 20       # неудач за окно с одного адр
 
 
 def _admin_peer(request: web.Request) -> str:
-    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-    return forwarded or (request.remote or "?")
+    from trusted_proxy import peer
+    return peer(request.remote or "?", request.headers.get("X-Forwarded-For") or "",
+                (db.get_setting("trusted_proxies") or "").split(","))
 
 
 def _admin_auth_ok(request: web.Request, scope: str = "admin") -> None:
@@ -5218,7 +5486,7 @@ async def _admin_devices(request: web.Request) -> web.Response:
     привязывать заново.
     """
     try:
-        _admin(request)
+        await asyncio.to_thread(_admin, request)
     except web.HTTPUnauthorized:
         _admin_master_key_only(request)
     return web.json_response({"devices": db.list_admin_devices(
@@ -5326,7 +5594,7 @@ async def _admin_device_revoke(request: web.Request) -> web.Response:
 
 
 async def _admin_stats(request: web.Request) -> web.Response:
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     s = db.stats_all()
     return web.json_response({
         "clients": s["total"], "visited": s["visited"], "markers": len(db.list_markers()),
@@ -5344,7 +5612,7 @@ async def _admin_stats(request: web.Request) -> web.Response:
 
 
 async def _admin_period(request: web.Request) -> web.Response:
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     if request.method == "POST":
         b = await request.json()
         db.set_period(b.get("from", ""), b.get("to", ""))
@@ -5358,7 +5626,7 @@ async def _admin_import(request: web.Request) -> web.Response:
     It cannot carry the versioned publication/test-scope receipt used by the
     JSON boundary, so accepting it would reopen a stale-client bypass.
     """
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     return web.json_response(
         {
             "blocked": True,
@@ -5390,7 +5658,7 @@ async def _admin_registry_columns(request: web.Request) -> web.Response:
     ровно тот разбор заголовков, который потом сделает импорт, а не свою
     приблизительную копию.
     """
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     return web.json_response({
         "map": db.registry_column_map(),
         "schema": [{"key": f["key"], "title": f["title"], "block": f["block"],
@@ -5413,7 +5681,7 @@ async def _admin_registry_columns_save(request: web.Request) -> web.Response:
     Карта меняет то, как читается боевой реестр, поэтому запись логируется в
     журнал доступа: по нему видно, кто и когда переопределил колонку.
     """
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     body = await request.json()
     device = db.admin_device_by_token(request.headers.get("X-Device-Token") or "")
     author = (device["name"] if device else "мастер-ключ")
@@ -5421,7 +5689,7 @@ async def _admin_registry_columns_save(request: web.Request) -> web.Response:
         saved = db.save_registry_column_map(body.get("map") or body, author=author)
     except (ValueError, TypeError) as exc:
         return web.json_response({"error": str(exc)}, status=409)
-    db.audit_access(
+    await asyncio.to_thread(db.audit_access,
         0, "registry_columns_save", target=author,
         detail=json.dumps(
             {"aliases": sum(len(v) for v in saved["aliases"].values()),
@@ -5433,7 +5701,7 @@ async def _admin_registry_columns_save(request: web.Request) -> web.Response:
 
 async def _admin_import_authorize(request: web.Request) -> web.Response:
     """Зарегистрировать один exact proof (если ручка включена)."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     if not IMPORT_REGISTRAR_HTTP:
         return web.json_response(
             {"blocked": True, "enabled": False,
@@ -5453,7 +5721,7 @@ async def _admin_import_authorize(request: web.Request) -> web.Response:
     except (ExchangeContractError, ValueError, TypeError) as exc:
         return web.json_response(
             {"blocked": True, "error": f"proof отклонён: {exc}"}, status=409)
-    db.audit_access(0, "import_authorize", authorization.get("proof_digest") or "",
+    await asyncio.to_thread(db.audit_access, 0, "import_authorize", authorization.get("proof_digest") or "",
                     source_kind)
     return web.json_response({"ok": True, "enabled": True,
                               "authorization": authorization})
@@ -5465,7 +5733,7 @@ async def _admin_import_json(request: web.Request) -> web.Response:
     ``source_kind`` обязателен. Personal-books → bot здесь не существует:
     personal ↔ master обслуживает только registry_cycle.
     """
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     body = await request.json()
     refused = await asyncio.to_thread(_expand_sheets_delta, body)
     if refused:
@@ -5487,9 +5755,11 @@ async def _admin_import_json(request: web.Request) -> web.Response:
         "replace_current_visit_comments", False
     )
     restore_manual_unassigned = body.get("restore_manual_unassigned", False)
+    allow_soft_office_edits = body.get("allow_soft_office_edits", False)
     for option_name, option_value in (
         ("restore_manual_unassigned", restore_manual_unassigned),
         ("replace_current_visit_comments", replace_current_visit_comments),
+        ("allow_soft_office_edits", allow_soft_office_edits),
     ):
         if type(option_value) is not bool:
             return web.json_response(
@@ -5616,6 +5886,8 @@ async def _admin_import_json(request: web.Request) -> web.Response:
         import_profile=body.get("import_profile", "hard"),
         restore_manual_unassigned=restore_manual_unassigned,
         replace_current_visit_comments=replace_current_visit_comments,
+        allow_soft_office_edits=allow_soft_office_edits,
+        expected_soft_office_effect_digest=body.get("expected_soft_office_effect_digest"),
         expected_auto_unassigned=expected_auto_unassigned,
         expected_auto_unassigned_digest=expected_auto_unassigned_digest,
         expected_manual_restored=expected_manual_restored,
@@ -5659,7 +5931,7 @@ async def _admin_import_json(request: web.Request) -> web.Response:
         report["offices_guessed"] = guessed["filled"]
         report["offices_undecided"] = guessed["undecided"]
         if guessed["filled"]:
-            db.audit_access(0, "employee_cities",
+            await asyncio.to_thread(db.audit_access, 0, "employee_cities",
                             detail=f"auto={len(guessed['filled'])}")
     except Exception as e:  # noqa: BLE001
         logging.warning("guess offices after import: %s", e)
@@ -5757,7 +6029,7 @@ async def _admin_import_preview_json(request: web.Request) -> web.Response:
     Отдельный endpoint намеренный: новый пульт, попавший на старый сервер, получит
     404 и остановится, а не отправит якобы preview в старый write-handler.
     """
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     body = await request.json()
     refused = await asyncio.to_thread(_expand_sheets_delta, body)
     if refused:
@@ -5782,6 +6054,7 @@ async def _admin_import_preview_json(request: web.Request) -> web.Response:
     for option_name, option_value in (
         ("restore_manual_unassigned", restore_manual_unassigned),
         ("replace_current_visit_comments", replace_current_visit_comments),
+        ("allow_soft_office_edits", body.get("allow_soft_office_edits", False)),
     ):
         if type(option_value) is not bool:
             return web.json_response(
@@ -5815,6 +6088,7 @@ async def _admin_import_preview_json(request: web.Request) -> web.Response:
         authoritative_employees=authoritative_employees,
         import_profile=body.get("import_profile", "hard"),
         preview_only=True,
+        allow_soft_office_edits=body.get("allow_soft_office_edits", False),
         restore_manual_unassigned=restore_manual_unassigned,
         replace_current_visit_comments=replace_current_visit_comments,
     )
@@ -5827,7 +6101,7 @@ async def _admin_import_preview_json(request: web.Request) -> web.Response:
 async def _admin_chats(request: web.Request) -> web.Response:
     """Пульту: беседы, которые бот собрал (его добавляли в группы), + список ФИО
     из реестра для закрепления."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     return web.json_response({
         "chats": db.list_report_chats(),
         "employees": [r["employee"] for r in db.employees_in_registry()]})
@@ -5835,7 +6109,7 @@ async def _admin_chats(request: web.Request) -> web.Response:
 
 async def _admin_chats_set(request: web.Request) -> web.Response:
     """Настройка беседы из пульта: {chat_id, enabled?, employees?}."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     body = await request.json()
     try:
         chat_id = int(body["chat_id"])
@@ -5859,7 +6133,7 @@ async def _admin_export_json(request: web.Request) -> web.Response:
     Старый пульт без параметра тоже получает очищенный поток и потому не может
     повторно разнести импортные псевдовизиты по живым файлам.
     """
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     full = request.query.get("mode") == "full"
     employees = request.query.getall("employee", [])
     visit_from = request.query.get("visit_from", "")
@@ -5905,7 +6179,7 @@ async def _admin_enrichment_ledger(request: web.Request) -> web.Response:
     ``{"entries": [...], "receipt_digest": "..."}``. Мусор в записях даёт 409
     без единой записи: половинчатый реестр хуже пустого.
     """
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     if request.method == "GET":
         employees = list(request.query.getall("employee", []))
         employees += [
@@ -5936,7 +6210,7 @@ async def _admin_enrichment_ledger(request: web.Request) -> web.Response:
 
 
 async def _admin_markers_json(request: web.Request) -> web.Response:
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     return web.json_response({"rows": db.markers_rows()}, headers=_NO_STORE)
 
 
@@ -5975,19 +6249,19 @@ async def _xlsx_download(build, filename: str) -> web.Response:
 
 
 async def _admin_export(request: web.Request) -> web.Response:
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     return await _xlsx_download(db.export_xlsx, "registry_export.xlsx")
 
 
 async def _admin_markers_xlsx(request: web.Request) -> web.Response:
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     return await _xlsx_download(db.export_markers, "markers.xlsx")
 
 
 async def _admin_employees(request: web.Request) -> web.Response:
     """Список ФИО из реестра с уже проставленной привязкой — для экрана «Роли»
     в пульте. Заказчик вписывает telegram_id каждому ФИО, тип (выездник/курьер)."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     # Норма выездов едет вместе со списком: в пульте она стоит колонкой рядом
     # с офисом, и отдельный запрос на каждую строку был бы тридцатью запросами.
     plan_map = db.visit_plan_map()
@@ -6005,14 +6279,14 @@ async def _admin_employees(request: web.Request) -> web.Response:
 
 async def _admin_visit_plan(request: web.Request) -> web.Response:
     """Нормы выездов из пульта: POST {plan:{ФИО: норма}}; 0 — вернуть к общей."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     body = await request.json()
     plan = body.get("plan")
     if not isinstance(plan, dict):
         raise web.HTTPBadRequest(text="plan")
     for employee, norm in plan.items():
         db.set_visit_plan(str(employee), norm)
-    db.audit_access(0, "visit_plan", detail=f"changed={len(plan)}")
+    await asyncio.to_thread(db.audit_access, 0, "visit_plan", detail=f"changed={len(plan)}")
     common = db.visit_plan_per_day()
     plan_map = db.visit_plan_map()
     return web.json_response({"ok": True, "plan": plan_map, "common": common,
@@ -6022,7 +6296,7 @@ async def _admin_visit_plan(request: web.Request) -> web.Response:
 async def _admin_emp_clients(request: web.Request) -> web.Response:
     """Договоры сотрудника для «убрать клиентов» в пульте: ?employee=ФИО →
     {clients:[{contract_id, client, debt, unit}]} в порядке ФИО клиента."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     employee = (request.query.get("employee") or "").strip()
     if not employee:
         raise web.HTTPBadRequest(text="employee")
@@ -6035,21 +6309,21 @@ async def _admin_emp_clients(request: web.Request) -> web.Response:
 async def _admin_unassign(request: web.Request) -> web.Response:
     """Снять договоры с сотрудника: {employee, contract_ids:[…]}. Клиенты остаются
     в реестре без ответственного и пропадают из миниаппа сотрудника. {ok, n}."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     body = await request.json()
     employee = (body.get("employee") or "").strip()
     ids = body.get("contract_ids") or []
     if not employee or not isinstance(ids, list) or not ids:
         raise web.HTTPBadRequest(text="employee/contract_ids")
     n = db.unassign_clients(employee, ids)
-    db.audit_access(ADMIN_ID, "unassign", employee, str(n))
+    await asyncio.to_thread(db.audit_access, ADMIN_ID, "unassign", employee, str(n))
     return web.json_response({"ok": True, "n": n})
 
 
 async def _admin_recalled(request: web.Request) -> web.Response:
     """Пульту: снятые с работы договоры — единственный экран, где их видно.
     ?reason=recalled|manual|absent_from_registry, ?employee=ФИО, ?limit=N."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     reason = (request.query.get("reason") or db.UNASSIGNED_REASON_RECALLED).strip()
     if reason not in (db.UNASSIGNED_REASON_RECALLED, db.UNASSIGNED_REASON_MANUAL,
                       db.UNASSIGNED_REASON_ABSENT_FROM_REGISTRY):
@@ -6071,7 +6345,7 @@ async def _admin_recalled(request: web.Request) -> web.Response:
               "debt": debt.contract_debt(r), "unit": debt.unit([r["partner"]])}
              for r in data["rows"]]
     # Оптовая выдача ПД (до 5000 ФИО с долгами) — след в журнал обязателен.
-    db.audit_access(ADMIN_ID or 0, "recalled_list", reason, str(data["shown"]))
+    await asyncio.to_thread(db.audit_access, ADMIN_ID or 0, "recalled_list", reason, str(data["shown"]))
     return web.json_response({"reason": reason, "totals": data["totals"],
                               "by_employee": data["by_employee"],
                               "shown": data["shown"], "limit": data["limit"],
@@ -6082,7 +6356,7 @@ async def _admin_bind(request: web.Request) -> web.Response:
     """Предзаданная привязка из пульта: {telegram_id:int, employee:str, kind:str}.
     Создать/обновить с approved=1 — работник с этим id сразу привязан к клиентам
     (без самовыбора в боте). Upsert через db.set_bind (по employee и telegram_id)."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     body = await request.json()
     try:
         tid = int(body["telegram_id"])
@@ -6098,7 +6372,7 @@ async def _admin_bind(request: web.Request) -> web.Response:
 
 
 async def _admin_unbind(request: web.Request) -> web.Response:
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     body = await request.json()
     db.unbind(int(body["telegram_id"]))
     return web.json_response({"ok": True})
@@ -6107,7 +6381,7 @@ async def _admin_unbind(request: web.Request) -> web.Response:
 async def _admin_guests(request: web.Request) -> web.Response:
     """Список гостей (кто писал боту) — для выбора telegram_id при привязке в пульте.
     {guests:[{telegram_id, username, name, last_seen, bound_employee|null}]}. Свежие сверху."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     return web.json_response({"guests": db.guests()})
 
 
@@ -6119,7 +6393,7 @@ async def _admin_bot_token(request: web.Request) -> web.Response:
     """Сменить токен бота: {token}. Валидируем формат, пишем в .env (+ settings),
     процесс подхватит после РЕСТАРТА (env читается на старте) — сами НЕ перезапускаем.
     Токен НЕ логируем и НЕ возвращаем. Ответ: {ok, need_restart:true}."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     body = await request.json()
     token = (body.get("token") or "").strip()
     if not _TOKEN_RE.match(token):
@@ -6146,7 +6420,7 @@ GEOCODER_ALLOW_PUBLIC = os.getenv("GEOCODER_ALLOW_PUBLIC", "").strip() in ("1", 
 
 
 async def _admin_geocode(request: web.Request) -> web.Response:
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     import geocode
     asyncio.get_event_loop().run_in_executor(
         None, functools.partial(geocode.geocode_all, use_precise=GEOCODER_ALLOW_PUBLIC))
@@ -6155,7 +6429,7 @@ async def _admin_geocode(request: web.Request) -> web.Response:
 
 
 async def _admin_priority(request: web.Request) -> web.Response:
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     import scoring
     q = request.rel_url.query
 
@@ -6177,7 +6451,7 @@ async def _admin_priority(request: web.Request) -> web.Response:
 async def _admin_today(request: web.Request) -> web.Response:
     """Экран «Сегодня» в пульте: выезды по дням, кто молчит, доставка,
     обогащение, реестр — одной ручкой, чтобы владелец не ходил по SSH."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     data = await asyncio.get_event_loop().run_in_executor(
         None, digest_data.today_overview)
     return web.json_response(data)
@@ -6186,7 +6460,7 @@ async def _admin_today(request: web.Request) -> web.Response:
 async def _admin_activity(request: web.Request) -> web.Response:
     """Активность работников (визиты/метки за 7/30 дней, простой) — вкладка
     «Активность» в пульте. Считается на лету из visits/markers по created_at."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     return web.json_response({"workers": db.activity_stats(),
                               "generated_at": datetime.now().isoformat(timespec="seconds")})
 
@@ -6194,7 +6468,7 @@ async def _admin_activity(request: web.Request) -> web.Response:
 async def _admin_managers(request: web.Request) -> web.Response:
     """Экран «Руководители» в пульте: список руководителей + справочники для форм
     (города и сотрудники из реестра, карта город→команда) + настройки автопуша."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     today = workday.today().isoformat()
     managers = db.list_managers()
     for m in managers:
@@ -6233,7 +6507,7 @@ async def _admin_employee_cities(request: web.Request) -> web.Response:
     душанбинский выездник ездит в Ёвон, Хисор и Вахдат. Штат офиса из данных не
     выводится, его заводит оператор — и на нём держится охват руководителя по
     городу (managers.cities)."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     if request.method == "POST":
         body = await request.json()
         pairs = body.get("cities")
@@ -6243,7 +6517,7 @@ async def _admin_employee_cities(request: web.Request) -> web.Response:
         source = "folder" if body.get("source") == "folder" else "manual"
         for employee, city in pairs.items():
             db.set_employee_city(str(employee), str(city or ""), source=source)
-        db.audit_access(0, "employee_cities",
+        await asyncio.to_thread(db.audit_access, 0, "employee_cities",
                         detail=f"changed={len(pairs)} source={source}")
     # Ключи карты — в написании РЕЕСТРА: пульт сличает офис со строкой
     # сотрудника точным совпадением, и запись, сделанная чуть другим
@@ -6270,7 +6544,7 @@ async def _admin_employee_cities(request: web.Request) -> web.Response:
 
 async def _admin_manager_save(request: web.Request) -> web.Response:
     """Создать/обновить руководителя: {telegram_id:int, name:str, cities:[str], employees:[str]}."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     body = await request.json()
     try:
         tid = int(body["telegram_id"])
@@ -6313,7 +6587,7 @@ async def _admin_manager_save(request: web.Request) -> web.Response:
 
 
 async def _admin_manager_delete(request: web.Request) -> web.Response:
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     body = await request.json()
     try:
         tid = int(body["telegram_id"])
@@ -6335,7 +6609,7 @@ async def _admin_photo_geo(request: web.Request) -> web.Response:
     адрес САМОГО сотрудника. До 27.08.2026 стереть её можно было только
     полным сбросом теста — то есть вместе со всей работой.
     """
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     # Админ-API ходит под мастер-ключом или токеном устройства, личности там
     # нет — в журнале это ADMIN_ID, как у остальных операторских действий.
     uid = ADMIN_ID or 0
@@ -6349,7 +6623,7 @@ async def _admin_photo_geo(request: web.Request) -> web.Response:
             if not 0 <= days <= 3650:
                 raise web.HTTPBadRequest(text="retention_days range")
             db.set_setting("photo_geo_retention_days", str(days))
-            db.audit_access(uid, "photo_geo_retention", "", str(days))
+            await asyncio.to_thread(db.audit_access, uid, "photo_geo_retention", "", str(days))
         forget = b.get("forget")
         if isinstance(forget, dict):
             try:
@@ -6361,7 +6635,7 @@ async def _admin_photo_geo(request: web.Request) -> web.Response:
                 raise web.HTTPBadRequest(text=str(exc))
             # Стирание ПД — след обязателен: это единственное доказательство,
             # что координаты убрали по решению, а не потеряли.
-            db.audit_access(uid, "photo_geo_forget",
+            await asyncio.to_thread(db.audit_access, uid, "photo_geo_forget",
                             (forget.get("contract") or "").strip(),
                             json.dumps({**{k: forget.get(k) for k in
                                            ("before", "employee", "contract")},
@@ -6375,7 +6649,7 @@ async def _admin_digest_settings(request: web.Request) -> web.Response:
     """GET/POST настроек автопуша дайджеста: {time:"HH:MM", enabled:bool} (время по МСК).
     GET дополнительно отдаёт защёлки, счётчики добора и сводку доставок за
     сегодня — «не работает» становится проверяемым фактом без захода на сервер."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     if request.method == "POST":
         b = await request.json()
         for key, setting in (("time", "digest_time"), ("promise_time", "promise_time")):
@@ -6434,7 +6708,7 @@ async def _admin_push_test(request: web.Request) -> web.Response:
     что диагностирует — push_settled_today считает улаженными sent и blocked,
     и руководитель, по которому нажали «проверить» в 11:00, не получил бы
     настоящую сводку в 16:30."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     import digest
     from notify import classify_send_error
     body = await request.json()
@@ -6493,7 +6767,7 @@ async def _admin_push_test(request: web.Request) -> web.Response:
 async def _admin_digest_preview(request: web.Request) -> web.Response:
     """Предпросмотр сводки руководителя (текст) для пульта: ?telegram_id=.
     Плюс диагностика состава: почему сводка такая и дойдёт ли она."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     import digest
     try:
         tid = int(request.query.get("telegram_id", ""))
@@ -6547,7 +6821,7 @@ async def _admin_notify(request: web.Request) -> web.Response:
     """Сообщение владельцу бота: {text:str}. Нужно суточному циклу на машине Егора
     (pult/daily_cycle.py) — он работает по расписанию и без этого молчит. Молчание
     планировщика опаснее ошибки: незамеченный сбой = сутки без обмена данными."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     body = await request.json()
     text = str(body.get("text") or "").strip()
     if not text:
@@ -6570,7 +6844,7 @@ async def _admin_restart(request: web.Request) -> web.Response:
     Работает в паре с супервизором, который поднимает процесс обратно: docker-compose
     `restart: unless-stopped` (наш случай) или systemd. Ответ отдаём ДО выхода —
     os._exit через call_later, чтобы клиент получил подтверждение."""
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     logging.warning("Перезапуск процесса по запросу admin-API (применение нового токена)")
     asyncio.get_event_loop().call_later(0.5, lambda: os._exit(0))
     return web.json_response({"ok": True, "restarting": True})
@@ -6584,7 +6858,7 @@ async def _admin_reset(request: web.Request) -> web.Response:
     clients receive an explicit refusal instead of mistaking a 404 for a
     network failure.
     """
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     return web.json_response(
         {
             "blocked": True,
@@ -6631,12 +6905,12 @@ def _apply_cors(request: web.Request, resp: web.StreamResponse) -> None:
 # оболочка. Всё остальное — 410 drain_only, и оболочка показывает экран выгрузки.
 # Пишет сразу в рабочую базу: синхронизировать нечего.
 DRAIN_HEADER = "X-Hard-Drain"
-_DRAIN_GET = frozenset({"/", "/version.json", "/sw.js", "/manifest.webmanifest",
+_DRAIN_GET = frozenset({"/", "/ready.json", "/api/identity", "/version.json", "/sw.js", "/manifest.webmanifest",
                         "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png",
                         "/favicon.ico"})
 _DRAIN_GET_PREFIXES = ("/vendor/", "/fonts/")
 _DRAIN_UPLOADS = frozenset({"/api/save", "/api/photo", "/api/marker", "/api/note",
-                            "/api/note_delete"})
+                            "/api/note_delete", "/api/receipt"})
 _DRAIN_POST = _DRAIN_UPLOADS | {"/api/redeem"}
 
 
@@ -6669,7 +6943,7 @@ async def _drain(request: web.Request, handler):
     resp = await handler(request)
     if method == "POST" and path in _DRAIN_UPLOADS and 200 <= resp.status < 300:
         try:   # журнал: кто и что досылал со старого адреса
-            db.audit_access(_uid(request) or 0, "drain_upload", detail=path)
+            await asyncio.to_thread(db.audit_access, await asyncio.to_thread(_uid, request) or 0, "drain_upload", detail=path)
         except Exception:  # noqa: BLE001 — журнал не важнее досланного выезда
             pass
     return resp
@@ -6766,6 +7040,11 @@ def build_app(bot=None) -> web.Application:
                           middlewares=[_drain, _cors, _compress])
     app.on_response_prepare.append(_security_headers)
     app["bot"] = bot
+    app["notification_limit"] = asyncio.Semaphore(4)
+    import notification_outbox
+    app.cleanup_ctx.append(notification_outbox.lifecycle)
+    import audit_spool
+    app.cleanup_ctx.append(audit_spool.lifecycle)
     app.router.add_get("/", _index)
     # Короткая ссылка входа. Путь из одной буквы — чтобы адрес целиком помещался
     # на экране телефона и читался вслух: «слэш и — и двенадцать знаков».
@@ -6851,6 +7130,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/manager/summary", _manager_summary)
     app.router.add_get("/api/manager/employee", _manager_employee_view)
     app.router.add_get("/api/manager/person", _manager_person)
+    app.router.add_get("/api/manager/portfolio", _manager_portfolio)
     app.router.add_get("/api/manager/period", _manager_period)
     app.router.add_get("/api/manager/promises", _manager_promises)
     app.router.add_get("/api/manager/map_data", _manager_app_map_data)
@@ -6880,6 +7160,10 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/manager/activity", _manager_activity)
     app.router.add_get("/api/control/overview", _control_overview)
     app.router.add_get("/api/control/soft", _control_soft)
+    app.router.add_get("/api/control/call_review", _control_call_review)
+    app.router.add_post("/api/control/call_review", _control_call_review)
+    app.router.add_get("/admin/control/call_review", _control_call_review)
+    app.router.add_post("/admin/control/call_review", _control_call_review)
     app.router.add_get("/api/control/assignments", _control_assignments)
     app.router.add_get("/api/control/access", _control_access)
     app.router.add_get("/api/control/day", _control_day)
@@ -6899,6 +7183,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/admin/manager_devices.json", _admin_manager_devices)
     app.router.add_post("/admin/manager_device/revoke.json", _admin_manager_device_revoke)
     app.router.add_get("/api/bootstrap", _bootstrap)
+    app.router.add_get("/api/identity", _identity)
+    app.router.add_get("/ready.json", _ready)
     app.router.add_get("/api/person", _person)
     app.router.add_get("/api/cards", _cards)
     app.router.add_post("/api/client-event", _client_event)
@@ -6910,6 +7196,9 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/act_as", _act_as)
     app.router.add_get("/api/route_day", _route_day)
     app.router.add_post("/api/save", _save)
+    app.router.add_post("/api/office/action", _office_action)
+    app.router.add_get("/api/workspace/report", _workspace_report)
+    app.router.add_get("/api/workspace/promises", _workspace_promises)
     app.router.add_post("/api/photo", _photo)
     app.router.add_post("/api/receipt", _receipt)
     app.router.add_get("/api/manager/receipt_photo", _manager_receipt_file)

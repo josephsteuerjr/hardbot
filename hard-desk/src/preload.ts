@@ -5,6 +5,10 @@ type Query = Record<string, unknown> | undefined;
 
 contextBridge.exposeInMainWorld("hard", {
   state: () => ipcRenderer.invoke("hard:state"),
+  edit: (action: string) => ipcRenderer.send("hard:edit", action),
+  update: (action: string) => ipcRenderer.invoke("hard:update", action),
+  migrate: () => ipcRenderer.invoke("hard:migrate"),
+  trayAction: (action: string) => ipcRenderer.send("hard:trayAction", action),
   setMode: (mode: string) => ipcRenderer.invoke("hard:setMode", mode),
   enroll: (link: string) => ipcRenderer.invoke("hard:enroll", link),
   logout: () => ipcRenderer.invoke("hard:logout"),
@@ -21,7 +25,7 @@ contextBridge.exposeInMainWorld("hard", {
   xlsx: (name: string, headers: string[], rows: unknown[][]) => ipcRenderer.invoke("hard:xlsx", name, headers, rows),
   autostart: (on?: boolean) => ipcRenderer.invoke("hard:autostart", on),
   win: (action: string) => ipcRenderer.send("hard:win", action),
-  on: (name: "revoked" | "win", cb: (arg?: unknown) => void) => {
+  on: (name: "revoked" | "win" | "update", cb: (arg?: unknown) => void) => {
     ipcRenderer.on("hard:" + name, (_e, arg) => cb(arg));
   },
 });

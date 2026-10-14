@@ -16,6 +16,7 @@ import re
 import secrets
 import sqlite3
 import time
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -190,6 +191,7 @@ BOOKKEEPING = [
     ("bot_visit_event_at", "TEXT"),
     ("soft_next_call_date", "TEXT"),
     ("soft_extra_phone", "TEXT"),
+    ("payment_status_data", "TEXT"),
 ]
 
 SOFT_SNAPSHOT_KEYS = ("soft_call_status", "soft_comm_date", "soft_comment",
@@ -287,7 +289,51 @@ def common_result(row) -> dict:
         out["overall_result"] = visit["call_status"]
     out.update({k: v for k, v in (bot_call_snapshot(row) or {}).items()
                 if k in COMMON_RESULT_KEYS and call_owns_field(row, k)})
+    if payment_owns_status(row, "overall_result"):
+        out["overall_result"] = payment_status_snapshot(row)["status"]
     return out
+
+
+def payment_status_snapshot(row) -> dict | None:
+    """Explicit result of an immutable payment; it is never a call snapshot."""
+    try:
+        data = json.loads(row["payment_status_data"] or "")
+        if (not isinstance(data, dict) or data.get("status") != "Оплачен"
+                or not data.get("event_at") or not data.get("op")):
+            return None
+        return data
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
+def payment_owns_status(row, key="soft_call_status") -> bool:
+    payment = payment_status_snapshot(row)
+    if payment is None:
+        return False
+    call = bot_call_snapshot(row)
+    if call is not None and call_field_at(row, key) > payment["event_at"]:
+        return False
+    if key == "overall_result":
+        visit_at = str(row["bot_visit_event_at"] or row["bot_visit_at"] or "")
+        if _decode_bot_snapshot(row) is not None and visit_at > payment["event_at"]:
+            return False
+    return True
+
+
+def effective_soft_status(row) -> str:
+    if payment_owns_status(row):
+        return payment_status_snapshot(row)["status"]
+    return str(row["soft_call_status"] or "")
+
+
+def payment_card_revision(rows) -> str:
+    """Pure row fingerprint usable by the phone and desktop under a write lock."""
+    import hashlib
+    keys = ("contract_id", "responsible_soft", "soft_call_status", "overall_result",
+            "bot_call_at", "bot_call_data", "call_office_data", "bot_visit_at",
+            "bot_visit_event_at", "office_edit_data", "payment_status_data", "updated_at")
+    data = [[row[k] for k in keys] for row in sorted(rows, key=lambda r:r["contract_id"])]
+    return hashlib.sha256(json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 # Семантика обмена больше не дублируется между bot/pult/clearance. Она загружается
 # из version+SHA-locked data_exchange_contract.json; несовместимая правка не даст
@@ -803,6 +849,14 @@ def init_db() -> None:
             )
         """)
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_calls_op ON calls(op_id)")
+        import call_review
+        call_review.init_schema(conn)
+        import notification_outbox
+        notification_outbox.init_schema(conn)
+        import employee_identity
+        employee_identity.init_schema(conn)
+        import office_work
+        office_work.init_schema(conn)
         call_cols = {r[1] for r in conn.execute("PRAGMA table_info(calls)")}
         for col in ("values_json", "contracts_json"):
             if col not in call_cols:
@@ -818,6 +872,10 @@ def init_db() -> None:
         # (employees_by_direction: responsible, country, city — COVERING).
         conn.execute("CREATE INDEX IF NOT EXISTS idx_clients_resp_country_city "
                      "ON clients(responsible, country, city)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_clients_soft "
+                     "ON clients(responsible_soft, contract_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_clients_hard_person ON clients(client,responsible)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_clients_soft_person ON clients(client,responsible_soft)")
         # last_visit_geo — горячий запрос обеих карточек (телеграм и вкладка),
         # без индекса это полный SCAN visits на каждое открытие.
         conn.execute("CREATE INDEX IF NOT EXISTS idx_visits_contract "
@@ -925,6 +983,9 @@ def init_db() -> None:
               detail TEXT
             )
         """)
+        if "event_id" not in {r[1] for r in conn.execute("PRAGMA table_info(audit)")}:
+            conn.execute("ALTER TABLE audit ADD COLUMN event_id TEXT")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_event ON audit(event_id)")
         # Устройства пульта. Admin-ключ вводится ОДИН РАЗ — чтобы обменять его на
         # токен, привязанный к этой машине. Дальше ключ в пульте не хранится, и
         # утёкший ключ сам по себе ничего не грузит: нужен ещё и enroll с машины.
@@ -1492,6 +1553,8 @@ def init_db() -> None:
                      "ON payment_evidence(contract_id, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_payev_sha "
                      "ON payment_evidence(sha256)")
+        if "result_status" not in {r[1] for r in conn.execute("PRAGMA table_info(payment_evidence)")}:
+            conn.execute("ALTER TABLE payment_evidence ADD COLUMN result_status TEXT")
         conn.execute("""CREATE TABLE IF NOT EXISTS registry_payments (
             contract_id TEXT NOT NULL, paid_at TEXT NOT NULL,
             currency TEXT NOT NULL, amount REAL NOT NULL,
@@ -2632,25 +2695,28 @@ def app_link_identity(code: str) -> int | None:
     return int(row["telegram_id"]) if row else None
 
 
-def enroll_manager_device(code: str, device: str, *, keep_token: str | None = None) -> tuple[int, int, str] | None:
+def enroll_manager_device(code: str, device: str, *, keep_token: str | None = None,
+                          enroll_token: str | None = None) -> tuple[int, int, str] | None:
     """Потратить одно использование ссылки и выдать токен компьютеру.
     (uid, id устройства, сырой токен) или None — ссылка мертва (гонку за
     последнее использование решает условие в WHERE, как у redeem_app_link)."""
     now_iso = datetime.now().isoformat(timespec="seconds")
     cutoff = (datetime.now() - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
-    token = secrets.token_urlsafe(32)
+    if enroll_token and not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", enroll_token):
+        raise ValueError("enroll_token")
+    token = enroll_token or secrets.token_urlsafe(32)
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         link = conn.execute("SELECT telegram_id FROM app_links WHERE code=? AND created_at>=?",
                             (code, cutoff)).fetchone()
         if link is None:
             return None
-        if keep_token:
+        for recovery_token in filter(None, (keep_token, enroll_token)):
             existing = conn.execute(
                 "SELECT id FROM manager_devices WHERE token_hash=? AND telegram_id=? "
-                "AND revoked_at IS NULL", (app_token_key(keep_token), link["telegram_id"])).fetchone()
+                "AND revoked_at IS NULL", (app_token_key(recovery_token), link["telegram_id"])).fetchone()
             if existing:
-                return int(link["telegram_id"]), int(existing["id"]), keep_token
+                return int(link["telegram_id"]), int(existing["id"]), recovery_token
         cur = conn.execute(
             "UPDATE app_links SET used_at = ?, last_use_at = ?, last_agent = 'pult', "
             "uses = uses + 1, bonus_desktop = 1, max_uses = MAX(3, COALESCE(max_uses, ?)) "
@@ -2700,7 +2766,8 @@ def manager_device_check(token: str, ip: str | None = None) -> tuple[str, dict |
 
 
 def enroll_agent_device(code: str, device: str, *, keep_token: str | None = None,
-                        expected_uid: int | None = None, reuse_only: bool = False) -> tuple[str, int, int, str] | None:
+                        expected_uid: int | None = None, reuse_only: bool = False,
+                        enroll_token: str | None = None) -> tuple[str, int, int, str] | None:
     """Обменять использование ссылки ВЫЕЗДНИКА на токен приложения-на-ПК.
 
     (employee, telegram_id, id устройства, сырой токен) или None — ссылка мертва.
@@ -2708,7 +2775,9 @@ def enroll_agent_device(code: str, device: str, *, keep_token: str | None = None
     создаётся. Ссылка руководителя сюда не доходит — веб-слой отвернёт её раньше."""
     now_iso = datetime.now().isoformat(timespec="seconds")
     cutoff = (datetime.now() - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
-    token = secrets.token_urlsafe(32)
+    if enroll_token and not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", enroll_token):
+        raise ValueError("enroll_token")
+    token = enroll_token or secrets.token_urlsafe(32)
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         link = conn.execute("SELECT * FROM app_links WHERE code=? AND created_at>=?",
@@ -2723,16 +2792,16 @@ def enroll_agent_device(code: str, device: str, *, keep_token: str | None = None
         employee = str(binding["employee"] or "").strip() if binding else ""
         if not employee:
             return None
-        if keep_token:
+        for recovery_token in filter(None, (keep_token, enroll_token)):
             previous = conn.execute(
                 "SELECT * FROM agent_devices WHERE token_hash=? AND telegram_id=? "
                 "AND employee=? AND revoked_at IS NULL",
-                (app_token_key(keep_token), uid, employee)).fetchone()
+                (app_token_key(recovery_token), uid, employee)).fetchone()
             if previous:
                 conn.execute("UPDATE agent_devices SET last_seen_at=? WHERE id=?",
                              (now_iso, previous["id"]))
                 conn.commit()
-                return employee, uid, int(previous["id"]), keep_token
+                return employee, uid, int(previous["id"]), recovery_token
         if reuse_only:
             return None
         desktop_bonus = int(not link["bonus_desktop"])
@@ -3720,7 +3789,7 @@ def record_photo(contract_id: str, file: str, telegram_id: int, *,
     if addr:
         a_lat, a_lon, a_tol = addr
     e = exif or {}
-    now = created_at or datetime.now().isoformat(timespec="seconds")
+    now = created_at or datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
     with connect() as conn:
         conn.execute(
             "INSERT INTO photo_geo (contract_id, file, telegram_id, lat, lon, "
@@ -3772,7 +3841,7 @@ def record_receipt(op: str, contract_id: str, employee: str | None,
     """Строка чека об оплате. INSERT OR IGNORE: повторная досылка того же op
     из оффлайн-очереди не плодит строку и НЕ переписывает уже принятое —
     чек доказательство, амендмент запрещён (тот же принцип, что photo_geo)."""
-    now = created_at or datetime.now().isoformat(timespec="seconds")
+    now = created_at or datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
     with connect() as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO payment_evidence (op, contract_id, employee, "
@@ -3878,11 +3947,12 @@ def append_reported_payments(text, payments: list[dict]) -> str:
 
 def record_reported_payment(op: str, contract_id: str, employee: str, uid: int,
                             *, paid_at: str, amount: float, currency: str,
-                            created_at: str) -> dict:
+                            created_at: str, result_status: str = "",
+                            expected_revision: str | None = None) -> dict:
     """Атомарная проверка закрепления и неизменяемая идемпотентная запись."""
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT responsible_soft FROM clients WHERE contract_id=?",
+        row = conn.execute("SELECT * FROM clients WHERE contract_id=?",
                            (contract_id,)).fetchone()
         if not row or row["responsible_soft"] != employee:
             raise ValueError("Закрепление изменилось. Обновите портфель")
@@ -3890,13 +3960,37 @@ def record_reported_payment(op: str, contract_id: str, employee: str, uid: int,
         if prior:
             if (prior["source"] != "manual" or prior["contract_id"] != contract_id
                     or prior["telegram_id"] != uid or prior["paid_at"] != paid_at
-                    or prior["amount"] != amount):
+                    or prior["amount"] != amount or (prior["result_status"] or "") != result_status):
                 raise ValueError("Идентификатор принадлежит другой записи оплаты")
             return {"id": prior["id"], "dedup": True}
+        if result_status not in ("", "Оплачен"):
+            raise ValueError("Неподдерживаемый результат оплаты")
+        if result_status:
+            candidates = conn.execute("SELECT * FROM clients WHERE client IS ? AND responsible_soft=?",
+                                      (row["client"], employee)).fetchall()
+            group = [r for r in candidates if person_key(r) == person_key(row)]
+            if expected_revision != payment_card_revision(group):
+                raise ValueError("Карточка изменилась. Обновите её и сверьте оплату перед повтором")
         cur = conn.execute("INSERT INTO payment_evidence "
-            "(op,contract_id,employee,telegram_id,paid_at,amount,currency,source,created_at) "
-            "VALUES (?,?,?,?,?,?,?,'manual',?)",
-            (op,contract_id,employee,uid,paid_at,amount,currency,created_at))
+            "(op,contract_id,employee,telegram_id,paid_at,amount,currency,source,created_at,result_status) "
+            "VALUES (?,?,?,?,?,?,?,'manual',?,?)",
+            (op,contract_id,employee,uid,paid_at,amount,currency,created_at,result_status or None))
+        if result_status:
+            event = {"status":result_status,"event_at":created_at,
+                     "event_day":_payment_event_day({"created_at":created_at}),"op":op}
+            old_payment = payment_status_snapshot(row)
+            if old_payment is None or event["event_at"] >= old_payment["event_at"]:
+                conn.execute("UPDATE clients SET payment_status_data=? WHERE contract_id=?",
+                             (json.dumps(event,ensure_ascii=False),contract_id))
+                updated = conn.execute("SELECT * FROM clients WHERE contract_id=?",(contract_id,)).fetchone()
+                changes = {}
+                if payment_owns_status(updated):
+                    changes["soft_call_status"] = result_status
+                if payment_owns_status(updated,"overall_result"):
+                    changes["overall_result"] = result_status
+                if changes:
+                    conn.execute("UPDATE clients SET "+', '.join('"'+k+'"=?' for k in changes)+" WHERE contract_id=?",
+                                 (*changes.values(),contract_id))
         conn.commit()
     _bump_version()
     return {"id": cur.lastrowid, "dedup": False}
@@ -4400,6 +4494,8 @@ def log_push(kind: str, status: str, *, target_kind: str = "",
                  target_id, employee, contract_id,
                  status, (error or "")[:300] or None, (note or "")[:300] or None,
                  int(attempt)))
+            import notification_outbox
+            notification_outbox.record(conn, kind, target_id, status, error)
             conn.commit()
     except Exception as exc:                               # noqa: BLE001
         logging.warning("log_push потерян: kind=%s status=%s target=%s err=%s",
@@ -4791,11 +4887,14 @@ def _remember_registry_payments(conn) -> None:
     """Оплаты, увиденные в реестре. Повтор импорта не создаёт второй платёж."""
     import debt
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    echoes = _manual_payment_echoes(conn)
     for row in conn.execute("SELECT contract_id, last_payment_date, last_payment_sum, partner FROM clients "
                             "WHERE last_payment_date IS NOT NULL AND last_payment_sum IS NOT NULL").fetchall():
         day = _as_date(row["last_payment_date"])
         amount = registry_payment_amount(row["last_payment_sum"])
         if day is None or amount is None:
+            continue
+        if (row["contract_id"],day.isoformat(),amount,debt.unit([row["partner"]])) in echoes:
             continue
         conn.execute("INSERT INTO registry_payments VALUES (?,?,?,?,?) "
                      "ON CONFLICT(contract_id,paid_at,currency) DO UPDATE SET amount=excluded.amount "
@@ -4809,6 +4908,7 @@ def registry_payments_for(contract_ids) -> list[dict]:
     ids = sorted(set(str(cid) for cid in contract_ids))
     payments = {}
     with connect() as conn:
+        echoes = _manual_payment_echoes(conn)
         for start in range(0, len(ids), 400):
             chunk = ids[start:start + 400]
             qs = ','.join('?' for _ in chunk)
@@ -4819,10 +4919,22 @@ def registry_payments_for(contract_ids) -> list[dict]:
                 amount = registry_payment_amount(row["last_payment_sum"])
                 if day is not None and amount is not None:
                     unit = debt.unit([row["partner"]])
+                    if (row["contract_id"],day.isoformat(),amount,unit) in echoes:
+                        continue
                     payments[(row["contract_id"], day.isoformat(), unit)] = {
                         "contract_id": row["contract_id"], "paid_at": day.isoformat(),
                         "currency": unit, "amount": amount}
     return list(payments.values())
+
+
+def _manual_payment_echoes(conn) -> set[tuple]:
+    """A copied employee payment is not independent registry confirmation.
+
+    Existing independent observations remain in registry_payments. A matching
+    manual echo in latest-payment columns cannot create/replace an observation.
+    """
+    return {(r["contract_id"],r["paid_at"],registry_payment_amount(r["amount"]),r["currency"] or "")
+            for r in conn.execute("SELECT contract_id,paid_at,amount,currency FROM payment_evidence WHERE source='manual'")}
 
 
 def calls_for_contracts(contract_ids, until: str) -> list:
@@ -4936,7 +5048,8 @@ def update_person(rep_contract_id: str, values: dict, *,
 
 
 def record_bot_visit(rep_contract_id: str, values: dict,
-                     completed_at: str | None = None, event_at: str | None = None) -> int:
+                     completed_at: str | None = None, event_at: str | None = None,
+                     *, _conn=None, _contracts=None) -> int:
     """Зафиксировать доверенный снимок завершённого визита во всех КД человека.
 
     ``values`` — уже отфильтрованное тело фактического POST /api/save; намеренно
@@ -4947,7 +5060,7 @@ def record_bot_visit(rep_contract_id: str, values: dict,
     snapshot = _bot_snapshot(values, completed_at)
     if snapshot is None:
         return 0
-    contracts = person_contracts(rep_contract_id)
+    contracts = _contracts if _contracts is not None else person_contracts(rep_contract_id)
     if not contracts:
         return 0
     # Выезд, доехавший из оффлайна ПОЗЖЕ более свежего визита, не имеет права
@@ -4961,7 +5074,7 @@ def record_bot_visit(rep_contract_id: str, values: dict,
         return 0
     payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
     now = workday.today().isoformat()
-    with connect() as conn:
+    with (nullcontext(_conn) if _conn is not None else connect()) as conn:
         # office_edit_data=NULL: новый визит перекрывает прежние офисные правки —
         # иначе старый оверлей лёг бы поверх свежего снимка повторного выезда.
         # Журнал НЕ чистим, а дополняем: значения прежнего снимка должны остаться
@@ -4992,8 +5105,10 @@ def record_bot_visit(rep_contract_id: str, values: dict,
                     (completed_at, payload, _log_json(log), now,
                      r["contract_id"]),
                 )
-        conn.commit()
-    _bump_version()
+        if _conn is None:
+            conn.commit()
+    if _conn is None:
+        _bump_version()
     return len(contracts)
 
 
@@ -5618,15 +5733,23 @@ def list_enroll_codes(include_used: bool = False) -> list[dict]:
 def audit_access(actor: int, action: str, target: str | None = None,
                  detail: str | None = None) -> None:
     """Записать факт доступа к ПД (кто-что-когда). Append-only, не валит основной поток."""
+    event = (secrets.token_hex(16), datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds"), actor, action, target, detail)
     try:
-        with connect() as conn:
+        conn = sqlite3.connect(DB_PATH, timeout=.05)
+        with conn:
             conn.execute(
-                "INSERT INTO audit (ts, actor, action, target, detail) VALUES (?,?,?,?,?)",
-                (datetime.now().isoformat(timespec="seconds"), actor, action, target, detail),
+                "INSERT INTO audit (event_id, ts, actor, action, target, detail) VALUES (?,?,?,?,?,?)", event,
             )
             conn.commit()
-    except Exception:  # noqa: BLE001 — аудит не должен ломать работу выездника
-        pass
+    except sqlite3.Error:
+        try:
+            import audit_spool
+            audit_spool.save(event)
+        except Exception as exc:
+            logging.error("Audit spool failed: %s", type(exc).__name__)
+    finally:
+        if 'conn' in locals():
+            conn.close()
 
 
 def audit_tail(limit: int = 200) -> list[sqlite3.Row]:
@@ -5642,7 +5765,8 @@ def log_visit(contract_id: str, agent_id: int, payload: str,
               geo_far: bool | None = None, on_date: str | None = None,
               fill_seconds: int | None = None, saved_at: str | None = None,
               session_id: str | None = None, evidence_level: str | None = None,
-              evidence: str | None = None, employee: str | None = None) -> bool:
+              evidence: str | None = None, employee: str | None = None,
+              *, _conn=None) -> bool:
     """Записать выезд в историю. op_id — идемпотентный ключ (uuid от клиента): повторная
     доставка того же выезда из оффлайн-очереди НЕ создаёт дубль. Возвращает True, если
     строка реально добавлена (значит, можно слать уведомление в группу); False — если это
@@ -5654,7 +5778,7 @@ def log_visit(contract_id: str, agent_id: int, payload: str,
     сотрудник из Худжанда откатал адреса 8.09, а в системе они появились 10.09.
     employee — ФИО, от имени которого закрыт выезд: выезд навсегда остаётся
     за ним, как бы потом ни перезакрепили договор."""
-    with connect() as conn:
+    with (nullcontext(_conn) if _conn is not None else connect()) as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO visits (contract_id, agent_id, created_at, payload, "
             "op_id, visit_lat, visit_lon, dist_m, geo_far, received_at, "
@@ -5662,18 +5786,69 @@ def log_visit(contract_id: str, agent_id: int, payload: str,
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (contract_id, agent_id, on_date or workday.today().isoformat(), payload, op_id,
              lat, lon, dist_m, None if geo_far is None else int(bool(geo_far)),
-             datetime.now().isoformat(timespec="seconds"), fill_seconds,
+             datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds"), fill_seconds,
              saved_at, session_id, evidence_level, evidence,
              (employee or "").strip() or None),
         )
-        conn.commit()
+        if _conn is None:
+            conn.commit()
         return cur.rowcount > 0
+
+
+def save_visit_result(contract_id: str, agent_id: int, employee: str | None,
+                      values: dict, payload: str, **journal) -> bool:
+    """One transaction for ownership, idempotence, current fields and provenance."""
+    notification = journal.pop("notification", None)
+    day = journal.get("on_date") or workday.today().isoformat()
+    event_at = journal.get("saved_at") or datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    op_id = journal.get("op_id")
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rep = conn.execute("SELECT * FROM clients WHERE contract_id=?", (contract_id,)).fetchone()
+        if not rep or (rep["responsible"] or "") != (employee or ""):
+            raise ValueError("Закрепление изменилось. Обновите портфель")
+        prior = conn.execute("SELECT contract_id,agent_id FROM visits WHERE op_id=?", (op_id,)).fetchone() if op_id else None
+        if prior:
+            if prior["contract_id"] != contract_id or prior["agent_id"] != agent_id:
+                raise ValueError("op_id принадлежит другому выезду")
+            return False
+        candidates = conn.execute("SELECT * FROM clients WHERE client IS ? AND IFNULL(responsible,'')=IFNULL(?, '')",
+                                  (rep["client"], rep["responsible"])).fetchall()
+        contracts = [r for r in candidates if person_key(r) == person_key(rep)]
+        is_new = log_visit(contract_id, agent_id, payload, employee=employee, _conn=conn, **journal)
+        newer = any((r["bot_visit_event_at"] or (r["bot_visit_at"] + "T00:00:00" if r["bot_visit_at"] else "")) > event_at
+                    or (r["bot_visit_at"] or "") > day for r in contracts)
+        if is_new and not newer:
+            for row in contracts:
+                current = {k: v for k, v in values.items() if k in BY_KEY or k in dict(BOOKKEEPING)}
+                if (row["bot_call_at"] or "") > event_at:
+                    for key in COMMON_RESULT_KEYS:
+                        current.pop(key, None)
+                current["visit_date"] = max(row["visit_date"] or "", day)
+                current["updated_at"] = workday.today().isoformat()
+                sets = ", ".join(f'"{k}"=?' for k in current)
+                conn.execute(f"UPDATE clients SET {sets} WHERE contract_id=?", (*current.values(), row["contract_id"]))
+            record_bot_visit(contract_id, values, day, event_at, _conn=conn, _contracts=contracts)
+        if is_new and notification is not None:
+            import notification_outbox
+            snapshot = dict(rep)
+            snapshot.update({k: v for k, v in values.items() if k in snapshot})
+            event_snapshot = _bot_snapshot(values, day) or {}
+            for key in BOT_SNAPSHOT_KEYS:
+                snapshot[key] = event_snapshot.get(key)
+            snapshot["visit_date"] = day
+            notification_outbox.enqueue(conn, op_id or f"visit:{contract_id}:{agent_id}:{event_at}",
+                {**notification, "row": snapshot, "day": day, "uid": agent_id})
+        conn.commit()
+    _bump_version()
+    return is_new
 
 
 def save_call_result(contract_id: str, agent_id: int, employee: str,
                      values: dict, payload: str, *, op_id: str | None,
                      on_date: str, saved_at: str | None = None,
-                     append_comment: bool = False, comment_author: str | None = None) -> dict:
+                     append_comment: bool = False, comment_author: str | None = None,
+                     expected_revision: str | None = None) -> dict:
     """Журнал и снимки звонка в одной транзакции; повтор не меняет карточку."""
     rows = person_contracts_by_soft(contract_id)
     values = {k: v for k, v in values.items() if k in BY_KEY or k in ("soft_next_call_date", "soft_extra_phone")}
@@ -5700,7 +5875,14 @@ def save_call_result(contract_id: str, agent_id: int, employee: str,
         if prior:
             if prior["contract_id"] != contract_id or prior["agent_id"] != agent_id:
                 raise ValueError("op_id принадлежит другому звонку")
+            if expected_revision is not None and prior["values_json"] != encoded:
+                raise ValueError("Идентификатор уже использован для другого результата")
             return {"dedup": True, "applied": False}
+        if expected_revision is not None:
+            import office_work
+            events = office_work._events(conn, [r["contract_id"] for r in rows])
+            if not isinstance(expected_revision, str) or expected_revision != office_work._revision(rows, events):
+                raise ValueError("Карточка изменилась. Обновите её и сверьте ввод перед повтором")
         last = conn.execute("SELECT * FROM calls WHERE contract_id=? AND created_at=? "
                             "ORDER BY id DESC LIMIT 1", (contract_id, on_date)).fetchone()
         if last and last["employee"] == employee and last["values_json"] == encoded:
@@ -5711,7 +5893,7 @@ def save_call_result(contract_id: str, agent_id: int, employee: str,
         conn.execute("INSERT INTO calls (contract_id,agent_id,created_at,payload,op_id,"
                      "received_at,saved_at,employee,values_json,contracts_json) "
                      "VALUES (?,?,?,?,?,?,?,?,?,?)", (contract_id,agent_id,on_date,payload,op_id,
-                     datetime.now().isoformat(timespec="seconds"),event_at,employee,encoded,
+                     datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds"),event_at,employee,encoded,
                      json.dumps([r["contract_id"] for r in rows])))
         applied = False
         for old in rows:
@@ -5746,6 +5928,11 @@ def save_call_result(contract_id: str, agent_id: int, employee: str,
             if str(row["bot_visit_event_at"] or row["bot_visit_at"] or "") > event_at:
                 for key in COMMON_RESULT_KEYS:
                     current.pop(key, None)
+            payment_status = payment_status_snapshot(row)
+            if payment_status and payment_status["event_at"] > event_at:
+                current.pop("soft_call_status", None)
+                if payment_owns_status(row,"overall_result"):
+                    current.pop("overall_result", None)
             current.update(bot_call_at=event_at,
                            bot_call_data=json.dumps(snapshot, ensure_ascii=False),
                            call_office_data=None,
@@ -5775,7 +5962,7 @@ def log_call(contract_id: str, agent_id: int, payload: str,
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (contract_id, agent_id, on_date or workday.today().isoformat(),
              payload, op_id,
-             datetime.now().isoformat(timespec="seconds"), saved_at,
+             datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds"), saved_at,
              (employee or "").strip() or None),
         )
         conn.commit()
@@ -7239,6 +7426,18 @@ def enrichment_rows() -> list[dict]:
         if reported:
             row["_payment_day"] = max(p["event_day"] for p in reported)
             row["soft_comment"] = append_reported_payments(row.get("soft_comment"), reported)
+            latest = max(reported,key=lambda p:(p["paid_at"],p["created_at"],p["id"]))
+            row["_reported_payment_sum"] = latest["amount"]
+            row["_reported_payment_date"] = latest["paid_at"]
+        if payment_owns_status(raw):
+            status = payment_status_snapshot(raw)
+            row["soft_call_status"] = status["status"]
+            row["_payment_status_day"] = status["event_day"]
+        if payment_owns_status(raw,"overall_result"):
+            status = payment_status_snapshot(raw)
+            row["call_status"] = status["status"]
+            row["_common_days"]["call_status"] = status["event_day"]
+            row["_common_days"]["overall_result"] = status["event_day"]
         result.append(row)
     return result
 
@@ -7800,6 +7999,8 @@ def import_grid(
     preview_only: bool = False,
     restore_manual_unassigned: bool = False,
     replace_current_visit_comments: bool = False,
+    allow_soft_office_edits: bool = False,
+    expected_soft_office_effect_digest: str | None = None,
     expected_auto_unassigned: int | None = None,
     expected_auto_unassigned_digest: str | None = None,
     expected_manual_restored: int | None = None,
@@ -7899,6 +8100,9 @@ def import_grid(
               "operator_aliases": [], "extra_columns": [], "extra_cells": 0,
               "protected_cells": 0, "protected_contracts": 0,
               "office_cells": 0, "office_contracts": 0, "office_applied": {},
+              "allow_soft_office_edits": allow_soft_office_edits,
+              "soft_office_applied": {},
+              "soft_office_effect_digest": hashlib.sha256(b"[]").hexdigest(),
               "office_by_key": {}, "protected_by_key": {},
               "office_promise_unparsed": 0,
               "office_result_unprocessed": 0,
@@ -7964,6 +8168,7 @@ def import_grid(
     for option_name, option_value in (
         ("restore_manual_unassigned", restore_manual_unassigned),
         ("replace_current_visit_comments", replace_current_visit_comments),
+        ("allow_soft_office_edits", allow_soft_office_edits),
     ):
         if type(option_value) is not bool:
             report["blocked"] = True
@@ -7971,6 +8176,16 @@ def import_grid(
                 f"импорт заблокирован: {option_name} должен быть boolean"
             )
             return report
+
+    if expected_soft_office_effect_digest is not None and (
+        not isinstance(expected_soft_office_effect_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_soft_office_effect_digest) is None
+    ):
+        report.update(blocked=True, error="импорт заблокирован: expected_soft_office_effect_digest должен быть lowercase SHA-256")
+        return report
+    if allow_soft_office_edits and not preview_only and expected_soft_office_effect_digest is None:
+        report.update(blocked=True, error="Для офисных правок Софта нужен свежий предпросмотр точного множества замен")
+        return report
 
     if (
         expected_auto_unassigned is not None
@@ -8727,6 +8942,16 @@ def import_grid(
             if replay is not None:
                 conn.rollback()
                 return replay
+        import employee_identity
+        incoming_names = [str(data.get(key) or "").strip() for data in grouped.values() for key in owner_keys]
+        identity_conflicts = employee_identity.conflicts(conn, incoming_names)
+        if identity_conflicts:
+            report.update(blocked=True, identity_collisions=identity_conflicts,
+                          error="Сначала разберите неоднозначные имена сотрудников: импорт не объединяет личности автоматически")
+            conn.rollback()
+            return report
+        if not preview_only:
+            employee_identity.ensure(conn, incoming_names)
         # address/phone нужны person_key: без даты рождения человек различается
         # именно по ним, иначе однофамильцы склеятся (см. person_key).
         existing = {r["contract_id"]: r for r in conn.execute(
@@ -8942,8 +9167,8 @@ def import_grid(
             owners[cid] = "" if detached \
                 else str(incoming_resp or prev_resp or "").strip()
             # Дата перезвона не является датой факта. Офисная правка звонка
-            # допустима только после подтверждённой доставки текущего результата
-            # в книгу и эха хотя бы одного софт-поля. Старый master молчит.
+            # разрешается отдельно от обычного импорта. Повторяющийся статус
+            # и доставка в личную книгу не доказывают свежесть общего master.
             # Предыдущая строка могла уже применить правку того же звонка
             # ко второму КД человека. Читаем этот overlay внутри транзакции.
             call_row = conn.execute("SELECT * FROM clients WHERE contract_id=?", (cid,)).fetchone() if row0 is not None else None
@@ -8955,12 +9180,14 @@ def import_grid(
                 call_protected = call_keys
                 delivered = {r["field_key"]: r for r in conn.execute(
                     "SELECT * FROM enrichment_ledger WHERE contract_id=?", (cid,))}
-                anchored = any(k in delivered and
+                anchored = (allow_soft_office_edits and
+                            str(data.get("soft_comm_date") or "") == call_fact_day(call_row) and
+                            any(k in delivered and
                                delivered[k]["visit_date"] == call_fact_day(call_row) and
                                str(delivered[k]["value"] or "") == str(call_snapshot.get(k) or "") and
                                str(data.get(k) or "") == str(call_snapshot.get(k) or "") and
                                str(data.get(k) or "").strip()
-                               for k in SOFT_SNAPSHOT_KEYS[:3])
+                               for k in SOFT_SNAPSHOT_KEYS[:3]))
                 edits = {}
                 for key in call_keys:
                     value = data.pop(key, None)
@@ -9002,6 +9229,12 @@ def import_grid(
                              json.dumps({"event_at": sibling["bot_call_at"], "fields": merged_call}, ensure_ascii=False),
                              json.dumps(_call_log_add(_call_value_log(sibling), merged_call), ensure_ascii=False), scid))
                         report["office_applied"].setdefault(scid, {}).update(sibling_edits)
+                        effects = report["soft_office_applied"].setdefault(scid, {})
+                        for key, value in sibling_edits.items():
+                            effect = effects.setdefault(key, {
+                                "event_at": sibling["bot_call_at"],
+                                "before": (bot_call_snapshot(sibling) or {}).get(key)})
+                            effect["after"] = value
                     # Эти значения уже прошли свой шлюз, Хард их повторно не судит.
                     for key, value in edits.items():
                         data[key] = value
@@ -9508,6 +9741,15 @@ def import_grid(
                 "предпросмотр точного множества — примените через пульт"
             )
             return report
+        soft_effects = sorted(
+            (cid, key, effect["event_at"], effect["before"], effect["after"])
+            for cid, fields in report["soft_office_applied"].items()
+            for key, effect in fields.items())
+        report["soft_office_effect_digest"] = hashlib.sha256(json.dumps(
+            soft_effects, ensure_ascii=False, separators=(",", ":"), default=str).encode()).hexdigest()
+        stale_soft_office = (
+            expected_soft_office_effect_digest is not None
+            and expected_soft_office_effect_digest != report["soft_office_effect_digest"])
         stale_count = (
             expected_auto_unassigned is not None
             and report["auto_unassigned"] != expected_auto_unassigned
@@ -9549,7 +9791,7 @@ def import_grid(
             != expected_recall_restored_digest
         )
         if (
-            stale_count or stale_digest or stale_comment_digest
+            stale_count or stale_digest or stale_comment_digest or stale_soft_office
             or stale_manual_count or stale_manual_digest
             or stale_recalled or stale_recalled_digest
             or stale_recall_restored or stale_recall_restored_digest
@@ -9557,6 +9799,7 @@ def import_grid(
             conn.rollback()
             report["blocked"] = True
             report["preview_stale"] = True
+            report["expected_soft_office_effect_digest"] = expected_soft_office_effect_digest
             report["expected_auto_unassigned"] = expected_auto_unassigned
             report["expected_auto_unassigned_digest"] = (
                 expected_auto_unassigned_digest
@@ -9646,6 +9889,8 @@ def wipe_registry() -> dict:
     with connect() as conn:
         n = conn.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
         conn.execute("DELETE FROM registry_payments")
+        conn.execute("DELETE FROM office_action_contracts")
+        conn.execute("DELETE FROM office_actions")
         conn.execute("DELETE FROM clients")
         conn.execute("DELETE FROM visits")
         conn.execute("DELETE FROM markers")

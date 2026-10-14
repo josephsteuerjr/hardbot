@@ -297,14 +297,14 @@ def test_book_carries_verdict_columns():
     wb = load_workbook(io.BytesIO(blob))
     ws = wb["Сотрудники"]
     head = {ws.cell(row=4, column=c).value: c for c in range(1, ws.max_column + 1)}
-    assert "Подтверждено на адресе" in head and "У адреса не был" in head
-    assert ws.cell(row=5, column=head["У адреса не был"]).value == 1
+    assert "Точка рядом с адресом" in head and "Точка далеко от адреса" in head
+    assert ws.cell(row=5, column=head["Точка далеко от адреса"]).value == 1
     ws2 = wb["Выезды"]
     head2 = {ws2.cell(row=1, column=c).value: c for c in range(1, ws2.max_column + 1)}
     verdicts = {ws2.cell(row=r, column=head2["Клиент"]).value:
                 ws2.cell(row=r, column=head2["Подтверждение"]).value
                 for r in range(2, ws2.max_row + 1)}
-    assert verdicts["Дальний Д."] == "у адреса не был"
+    assert verdicts["Дальний Д."] == "точка телефона далеко от адреса"
     assert verdicts["Городской Г."].startswith("адрес неточный")
 
 

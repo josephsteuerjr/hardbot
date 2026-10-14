@@ -1,7 +1,7 @@
 // Каркас окна: шапка с кнопками окна, полка разделов, заголовок, центр с физикой
 // прокрутки Hélène и панель справа (карточка должника, разбор сотрудника).
 import { Scroller } from "./scroller";
-import { $, esc, icon } from "./dom";
+import { $, esc, icon, toast } from "./dom";
 import { hard, onLink } from "./api";
 
 export interface Section {
@@ -21,6 +21,7 @@ let currentParams: Record<string, unknown> = {};
 let viewScroller: Scroller | null = null;
 let panelScroller: Scroller | null = null;
 let renderSeq = 0;
+let panelReturn: HTMLElement | null = null;
 
 export function mountShell(sign: string): void {
   const app = $("app");
@@ -86,6 +87,7 @@ export function setHead(title: string, kicker = "", tools = ""): void {
 }
 
 export async function go(id: string, params: Record<string, unknown> = {}): Promise<void> {
+  if(document.querySelector('#panel-inner [data-saving="1"]')){toast("Дождитесь сохранения записи");return}
   const s = sections.find((x) => x.id === id) ?? sections[0];
   if (!s) return;
   if (current && current !== s) current.leave?.();
@@ -114,6 +116,12 @@ export function currentId(): string {
   return current?.id ?? "";
 }
 
+export function hasSection(id: string): boolean { return sections.some(section => section.id === id); }
+
+export function currentContext(): { id: string; params: Record<string, unknown> } {
+  return { id: currentId(), params: { ...currentParams } };
+}
+
 /** Правка содержимого без прыжка прокрутки. */
 export function preserve(fn: () => void): void {
   if (viewScroller) viewScroller.preserve(fn);
@@ -121,6 +129,8 @@ export function preserve(fn: () => void): void {
 }
 
 export function openPanel(titleHtml: string, bodyHtml = '<div class="skeleton"></div><div class="skeleton"></div>'): HTMLElement {
+  const focused = document.activeElement as HTMLElement | null;
+  if (focused?.closest("#view-inner")) panelReturn = focused;
   $("panel-title").innerHTML = titleHtml;
   const inner = $("panel-inner");
   inner.innerHTML = `<div class="page">${bodyHtml}</div>`;
@@ -130,8 +140,12 @@ export function openPanel(titleHtml: string, bodyHtml = '<div class="skeleton"><
 }
 
 export function closePanel(): void {
+  if(document.querySelector('#panel-inner [data-saving="1"]')){toast("Дождитесь сохранения записи");return}
   $("app").classList.remove("with-panel");
   document.querySelectorAll('[aria-selected="true"]').forEach((el) => el.removeAttribute("aria-selected"));
+  const target = panelReturn?.isConnected ? panelReturn : document.querySelector<HTMLElement>("#view-inner .current-row") || document.querySelector<HTMLElement>("#view-inner [data-tsearch]");
+  target?.focus({ preventScroll: true });
+  panelReturn = null;
 }
 
 export function panelOpen(): boolean {

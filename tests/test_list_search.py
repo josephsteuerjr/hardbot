@@ -90,5 +90,12 @@ def test_shell_compares_phones_by_digits_only():
 
 
 def test_empty_query_shows_the_selected_profile_portfolio():
-    body = _filter_body()
-    assert "if(!raw){ drawList(pool); return; }" in body
+    from shell_node import run_shell
+    result = run_shell(r'''
+    const w=newWorld(),p=await openPage(w);await p.booted();await settle(w);
+    p.run(`STATE.mode="soft";STATE.softPartner="";STATE.persons=[{rep:"A"},{rep:"B"}];
+      STATE.softPool=[{rep:"A"}];document.getElementById("app").innerHTML='<input id="q"><div id="plist"></div>';
+      drawList=items=>{window.filtered=items.map(p=>p.rep)};filterList()`);
+    out.reps=p.run("window.filtered");
+    ''')
+    assert result["reps"] == ["A"]

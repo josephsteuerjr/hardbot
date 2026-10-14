@@ -14,6 +14,7 @@ mod hard;
 mod server;
 mod session;
 mod settings;
+mod token_protection;
 mod tunnel;
 
 use std::io::Write;

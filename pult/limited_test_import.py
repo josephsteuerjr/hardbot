@@ -1013,7 +1013,8 @@ def _settings(payload: Any) -> tuple[str, str, str]:
             "settings JSON must contain a trimmed nonblank url string",
         )
     key = _credential(payload, "key")
-    device_token = _credential(payload, "device_token")
+    from pult.core.settings import decode_tokens
+    device_token = _credential(decode_tokens(payload), "device_token")
     if not key and not device_token:
         raise OperatorBlocked(
             "settings_invalid",

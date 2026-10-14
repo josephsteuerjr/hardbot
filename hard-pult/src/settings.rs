@@ -38,6 +38,16 @@ impl Settings {
             .unwrap_or_default();
         let mut s = Settings { path, data };
         s.ensure_servers();
+        if let Some(servers) = s.data.get_mut("servers").and_then(Value::as_object_mut) {
+            for entry in servers.values_mut() {
+                if let Some(token) = entry.get("token").and_then(Value::as_str) {
+                    match crate::token_protection::open(token) {
+                        Ok(clear) => { entry["token"] = Value::String(clear); },
+                        Err(_) => { entry["token"] = Value::String(String::new()); eprintln!("Токен настроек недоступен для этой учётной записи Windows"); }
+                    }
+                }
+            }
+        }
         s
     }
 
@@ -189,7 +199,20 @@ impl Settings {
     }
 
     pub fn save(&self) -> bool {
-        let text = serde_json::to_string_pretty(&Value::Object(self.data.clone()))
+        let mut protected = self.data.clone();
+        if let Some(servers) = protected.get_mut("servers").and_then(Value::as_object_mut) {
+            for entry in servers.values_mut() {
+                if let Some(token) = entry.get("token").and_then(Value::as_str) {
+                    if !token.is_empty() {
+                        match crate::token_protection::seal(token) {
+                            Ok(sealed) => { entry["token"] = Value::String(sealed); },
+                            Err(_) => return false,
+                        }
+                    }
+                }
+            }
+        }
+        let text = serde_json::to_string_pretty(&Value::Object(protected))
             .unwrap_or_default();
         std::fs::write(&self.path, text).is_ok()
     }

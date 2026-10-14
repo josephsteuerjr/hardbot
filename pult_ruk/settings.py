@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 import os
+import base64
+import copy
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
@@ -74,7 +76,13 @@ class Settings(dict):
     """Словарь, помнящий свой файл. Тот же приём, что в пульте аналитика."""
 
     def __init__(self, data: dict | None = None, path: Path = SETTINGS_PATH) -> None:
-        super().__init__(data or {})
+        incoming = copy.deepcopy(data or {})
+        from pult.core.settings import _dpapi, TOKEN_PREFIX
+        for record in [incoming, *incoming.get("servers", {}).values()]:
+            token = record.get("token") if isinstance(record, dict) else None
+            if isinstance(token, str) and token.startswith(TOKEN_PREFIX):
+                record["token"] = _dpapi(base64.b64decode(token[len(TOKEN_PREFIX):], validate=True), decrypt=True).decode("utf-8")
+        super().__init__(incoming)
         self.path = Path(path)
         ensure_servers(self)
 
@@ -92,8 +100,15 @@ class Settings(dict):
         """Записать. Ошибку не поднимаем: пульт обязан работать и с диска,
         на который не пускают, — просто в следующий раз спросит ссылку снова."""
         try:
-            self.path.write_text(
-                json.dumps(dict(self), ensure_ascii=False, indent=1), encoding="utf-8")
+            payload = copy.deepcopy(dict(self))
+            if os.name == "nt":
+                from pult.core.settings import _dpapi, TOKEN_PREFIX
+                for record in [payload, *payload.get("servers", {}).values()]:
+                    if record.get("token"):
+                        record["token"] = TOKEN_PREFIX + base64.b64encode(_dpapi(str(record["token"]).encode())).decode("ascii")
+            temporary = self.path.with_name(self.path.name + ".tmp")
+            temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.replace(temporary, self.path)
         except OSError:
             return False
         # Файл с токеном не должен быть общим для всех пользователей машины.

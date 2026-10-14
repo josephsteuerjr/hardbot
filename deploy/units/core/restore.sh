@@ -14,6 +14,7 @@
 # или через sudo.
 source "$(dirname "$0")/../../_lib.sh"
 source "$DEPLOY_DIR/_actions.sh"
+umask 077
 
 src="${1:-}"
 if [ -z "$src" ]; then
@@ -69,7 +70,25 @@ compose stop app
 
 stamp="$(date +%Y%m%dT%H%M%S)"
 if [ -f data/hardbot.db ]; then
-  cp -p data/hardbot.db "data/hardbot.db.before-restore-$stamp"
+  # SIGTERM/аварийная остановка не гарантируют checkpoint. Простое cp главного
+  # файла с последующим удалением -wal теряло последние подтверждённые записи.
+  # Согласованный снимок создаёт SQLite, читая и основной файл, и WAL.
+  read -r -d '' SNAPSHOT <<'PY' || true
+import os, sqlite3, sys
+source = sqlite3.connect("file:/data/hardbot.db?mode=ro", uri=True)
+target = "/data/hardbot.db.before-restore-" + sys.argv[1]
+temporary = target + ".part"
+destination = sqlite3.connect(temporary)
+try:
+    source.backup(destination)
+    if destination.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+        raise RuntimeError("Rollback snapshot failed integrity check")
+finally:
+    destination.close()
+    source.close()
+os.replace(temporary, target)
+PY
+  compose run --rm --no-deps -T app python -c "$SNAPSHOT" "$stamp" || die "Согласованная копия текущей БД не снята. Замена отменена; исходные база и WAL сохранены."
   ok "текущая база отложена: data/hardbot.db.before-restore-$stamp"
 fi
 rm -f data/hardbot.db-wal data/hardbot.db-shm data/hardbot.db-journal

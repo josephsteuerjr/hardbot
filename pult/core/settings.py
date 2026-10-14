@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 import os
+import base64
+import copy
 from pathlib import Path
 
 from .bootstrap import APP_DIR
@@ -33,6 +35,48 @@ SETTINGS_PATH = (Path(os.environ["HARD_PULT_SETTINGS"]) if os.environ.get("HARD_
 # Имя контура, в которое переезжает плоский старый файл. Адресов серверов
 # в коде нет сознательно: сканер пакета для ИТ ищет именно их.
 DEFAULT_PROFILE = "Прод"
+
+TOKEN_PREFIX = "dpapi-v1:"
+
+
+def _dpapi(data: bytes, *, decrypt: bool = False) -> bytes:
+    """Windows user DPAPI, available in the frozen runtime without extra DLL packages."""
+    if os.name != "nt":
+        raise OSError("Windows DPAPI недоступен")
+    import ctypes
+    from ctypes import wintypes
+    class Blob(ctypes.Structure):
+        _fields_ = [("size", wintypes.DWORD), ("data", ctypes.POINTER(ctypes.c_ubyte))]
+    buffer = ctypes.create_string_buffer(data)
+    incoming = Blob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)))
+    outgoing = Blob()
+    crypt = ctypes.WinDLL("crypt32", use_last_error=True)
+    function = crypt.CryptUnprotectData if decrypt else crypt.CryptProtectData
+    function.argtypes = [ctypes.POINTER(Blob), ctypes.c_void_p, ctypes.c_void_p,
+                         ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(Blob)]
+    function.restype = wintypes.BOOL
+    if not function(ctypes.byref(incoming), None, None, None, None, 1, ctypes.byref(outgoing)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    free = ctypes.WinDLL("kernel32").LocalFree
+    free.argtypes = [ctypes.c_void_p]
+    free.restype = ctypes.c_void_p
+    try:
+        return ctypes.string_at(outgoing.data, outgoing.size)
+    finally:
+        free(outgoing.data)
+
+
+def decode_tokens(data: dict) -> dict:
+    """Accept old plaintext settings and protected settings without re-enrollment."""
+    result = copy.deepcopy(data)
+    records = [result, *result.get("profiles", {}).values()] if isinstance(result.get("profiles", {}), dict) else [result]
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        token = record.get("device_token")
+        if isinstance(token, str) and token.startswith(TOKEN_PREFIX):
+            record["device_token"] = _dpapi(base64.b64decode(token[len(TOKEN_PREFIX):], validate=True), decrypt=True).decode("utf-8")
+    return result
 
 
 def ensure_profiles(data: dict) -> dict:
@@ -70,7 +114,10 @@ class Settings(dict):
     """Словарь с памятью о своём файле."""
 
     def __init__(self, data: dict | None = None, path: Path = SETTINGS_PATH) -> None:
-        super().__init__(data or {})
+        incoming = data or {}
+        self.protect_tokens = (os.name == "nt" or os.environ.get("HARD_PULT_PROTECT_TOKENS") == "1"
+                               or incoming.get("token_protection") == "windows-dpapi")
+        super().__init__(decode_tokens(incoming))
         self.path = Path(path)
         ensure_profiles(self)
 
@@ -98,8 +145,17 @@ class Settings(dict):
         else:
             self.pop("device_token", None)
         try:
-            self.path.write_text(
-                json.dumps(dict(self), ensure_ascii=False, indent=1), encoding="utf-8")
+            payload = copy.deepcopy(dict(self))
+            if self.protect_tokens:
+                payload["token_protection"] = "windows-dpapi"
+                for record in [payload, *payload["profiles"].values()]:
+                    token = record.get("device_token")
+                    if token:
+                        record["device_token"] = TOKEN_PREFIX + base64.b64encode(_dpapi(str(token).encode("utf-8"))).decode("ascii")
+            temporary = self.path.with_name(self.path.name + ".tmp")
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.replace(temporary, self.path)
         except OSError:
             return False
         return True

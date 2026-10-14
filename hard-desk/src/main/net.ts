@@ -5,10 +5,12 @@
 import { session, type Session } from "electron";
 import { readFileSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
-import { createHash } from "node:crypto";
-import { cacheGet, cachePut, readFieldToken, readSettings, readToken, wipe, wipeField, writeFieldToken, writeSettings, writeToken } from "./store";
+import { createHash, randomBytes } from "node:crypto";
+import { preparedEnroll, readDraft, writeDraft } from "./store";
+import { cacheGeneration, cacheGet, cachePut, cacheRemove, clearCache, readFieldToken, readSettings, readToken, wipe, wipeField, writeFieldToken, writeSettings, writeToken } from "./store";
 import { clearCallQueue, readCallQueue, writeCallQueue, type CallQueue } from "./store";
 import { splitLink } from "./link";
+import { fetchBuffered } from "./transport";
 export { splitLink } from "./link";
 
 export const OFFLINE = "Нет связи с сервером «Хард». Как только интернет появится, пульт догонит сам.";
@@ -32,6 +34,22 @@ function net(): Session {
     void ses.setProxy({ mode: "direct" });
   }
   return ses;
+}
+
+function request(url: string, init: RequestInit, timeoutMs = 30000): Promise<Response> {
+  return fetchBuffered((target, options) => net().fetch(target, options), url, init, timeoutMs);
+}
+
+function cacheIdentity(server: string, token: string): string {
+  return createHash("sha256").update(server + "\n" + token).digest("hex");
+}
+
+function acceptScope(data: any, identity: string): void {
+  if (!data?.scope_version) return;
+  const settings = readSettings();
+  const versions = (settings.accessVersions || {}) as Record<string, string>;
+  if (versions[identity] && versions[identity] !== data.scope_version) clearCache();
+  if (versions[identity] !== data.scope_version) writeSettings({ accessVersions: { ...versions, [identity]: data.scope_version } });
 }
 
 export function deviceName(): string {
@@ -59,7 +77,7 @@ function troubleOf(err: unknown): ApiResult {
 async function errorCode(res: Response): Promise<string> {
   try {
     const t = await res.text();
-    try { return String((JSON.parse(t) as { error?: string }).error || t); } catch { return t; }
+    try { const data = JSON.parse(t) as { message?: string; error?: string }; return String(data.message || data.error || t); } catch { return t; }
   } catch {
     return "";
   }
@@ -69,23 +87,44 @@ type Revoked = () => void;
 let onRevoked: Revoked = () => {};
 export function setRevokedHandler(fn: Revoked): void { onRevoked = fn; }
 
+const changedAuthority = (): ApiResult => ({ ok: false, status: 409, kind: "nolink",
+  text: "Вход или права изменились. Откройте данные заново." });
+
+function localPreferences(method: string, query: Record<string, unknown> | undefined, body: unknown, owner: string): ApiResult {
+  try {
+    const params = (method === "POST" ? body : query) as { profile?: string; id?: string; value?: unknown };
+    if (!params || !["hard", "soft"].includes(params.profile || "") || !/^[a-z0-9_-]{1,80}$/.test(params.id || ""))
+      throw new Error("Некорректные настройки");
+    const key = owner + "\npreferences\n" + params.profile + "\n" + params.id;
+    if (method === "POST") writeDraft(key, params.value ?? null);
+    else if (method !== "GET") throw new Error("method");
+    return { ok: true, status: 200, data: { value: readDraft(key) } };
+  } catch (error) { return { ok: false, status: 0, kind: "server", text: String(error) }; }
+}
+
 export async function call(method: string, path: string, query?: Record<string, unknown>, body?: unknown,
                            opts: { binary?: boolean; cache?: boolean } = {}): Promise<ApiResult> {
   const server = readSettings().server;
   const token = readToken();
   if (!server || !token) return { ok: false, status: 0, kind: "nolink", text: "Пульт ещё не знает, кто вы." };
+  if (path === "/api/local/preferences") {
+    return localPreferences(method, query, body, "manager\n" + cacheIdentity(server, token));
+  }
   if (!/^\/api\/(manager|control)\//.test(path)) return { ok: false, status: 0, kind: "server", text: "запрещённый путь" };
   const url = server + path + qs(query);
-  const key = method + " " + path + qs(query);
+  const key = cacheIdentity(server, token) + " " + method + " " + path + qs(query);
+  let generation = cacheGeneration();
+  const current = () => readSettings().server === server && readToken() === token && generation === cacheGeneration();
   let res: Response;
   try {
-    res = await net().fetch(url, {
+    res = await request(url, {
       method,
       headers: { "X-Pult-Token": token, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
       body: body !== undefined ? JSON.stringify(body) : undefined,
       bypassCustomProtocolHandlers: true,
-    } as RequestInit);
+    } as RequestInit, opts.binary ? 120000 : 30000);
   } catch (err) {
+    if (!current()) return changedAuthority();
     const t = troubleOf(err);
     if (method === "GET" && opts.cache !== false && !opts.binary) {
       const hit = cacheGet(key);
@@ -93,8 +132,10 @@ export async function call(method: string, path: string, query?: Record<string, 
     }
     return t;
   }
+  if (!current()) return changedAuthority();
   if (res.status === 401) {
     const code = await errorCode(res);
+    if (!current()) return changedAuthority();
     if (code === "device_revoked" || code === "device_unknown") {
       wipe();
       onRevoked();
@@ -104,23 +145,40 @@ export async function call(method: string, path: string, query?: Record<string, 
   }
   if (res.status === 403) {
     const code = await errorCode(res);
+    if (!current()) return changedAuthority();
+    clearCache(); // a known permission denial cannot become an offline grant
     const text = code === "read_only" ? "У безопасника доступ только на чтение."
       : code === "no_control" ? "Раздел «Контроль» — только для безопасности."
       : code && code !== "not a manager" && !code.startsWith("<") ? code
       : "Роль руководителя снята. Если это ошибка — напишите аналитику.";
     return { ok: false, status: 403, kind: "forbidden", text };
   }
-  if (res.status === 404) return { ok: false, status: 404, kind: "notfound", text: "Не найдено — возможно, человека перезакрепили." };
+  if (res.status === 404) { cacheRemove(key); return { ok: false, status: 404, kind: "notfound", text: "Не найдено — возможно, человека перезакрепили." }; }
   if (!res.ok) {
     const code = await errorCode(res);
+    if (!current()) return changedAuthority();
     return { ok: false, status: res.status, kind: "server", text: `Сервер ответил ошибкой ${res.status}${code ? ": " + code.slice(0, 200) : ""}` };
   }
   if (opts.binary) {
     const buf = Buffer.from(await res.arrayBuffer());
+    if (!current()) return changedAuthority();
     return { ok: true, status: res.status, data: { type: res.headers.get("content-type") || "", buf } };
   }
   const data = await res.json().catch(() => null);
-  if (method === "GET" && opts.cache !== false) cachePut(key, data);
+  if (!current()) return changedAuthority();
+  if (generation === cacheGeneration()) {
+    acceptScope(data, cacheIdentity(server, token));
+    generation = cacheGeneration();
+  }
+  if (method === "GET" && path === "/api/manager/device/me") {
+    const previous = cacheGet(key);
+    const authority = (d: any) => JSON.stringify([d?.me?.role, d?.me?.scope, d?.scope_version, d?.caps || {}]);
+    if (previous && generation === cacheGeneration() && authority(previous.data) !== authority(data)) {
+      clearCache();
+      generation = cacheGeneration();
+    }
+  }
+  if (method === "GET" && opts.cache !== false) cachePut(key, data, generation);
   return { ok: true, status: res.status, data };
 }
 
@@ -147,10 +205,11 @@ export async function enroll(raw: string): Promise<ApiResult> {
   if (!base) return { ok: false, status: 0, kind: "nolink", text: "В ссылке нет адреса сервера — вставьте её целиком." };
   let res: Response;
   try {
-    res = await net().fetch(base + "/api/manager/device/enroll", {
+    res = await request(base + "/api/manager/device/enroll", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code: link.code, device: deviceName(), keep_token: base === readSettings().server ? readToken() : undefined }),
+      body: JSON.stringify({ code: link.code, device: deviceName(), keep_token: base === readSettings().server ? readToken() : undefined,
+        enroll_token: preparedEnroll("manager\n" + base + "\n" + link.code, randomBytes(32).toString("base64url")) }),
     });
   } catch (err) {
     return troubleOf(err);
@@ -170,10 +229,10 @@ export async function logout(): Promise<void> {
   const token = readToken();
   if (server && token) {
     try {
-      await net().fetch(server + "/api/manager/device/logout", { method: "POST", headers: { "X-Pult-Token": token } });
+      await request(server + "/api/manager/device/logout", { method: "POST", headers: { "X-Pult-Token": token } }, 5000);
     } catch { /* нет связи — токен всё равно стираем у себя, аналитик отзовёт */ }
   }
-  wipe();
+  if (readSettings().server === server && readToken() === token) wipe();
 }
 
 // --- Приложение выездника/софтника на ПК: свой класс токена (agent_devices) ----
@@ -186,6 +245,8 @@ const FIELD_PATH = /^\/api\/(bootstrap|person|cards|save|photo|receipt|markers|n
 const FIELD_PATH_EXACT = new Set(["/api/person", "/api/cards", "/api/markers", "/api/notes",
                                   "/api/geocode", "/api/logout", "/api/bootstrap", "/api/save",
                                   "/api/receipt", "/api/photo", "/api/note"]);
+for (const path of ["/api/office/action", "/api/workspace/report", "/api/workspace/promises"])
+  FIELD_PATH_EXACT.add(path);
 
 function fieldOk(path: string): boolean {
   return FIELD_PATH.test(path) || FIELD_PATH_EXACT.has(path);
@@ -204,10 +265,11 @@ export async function enrollField(raw: string): Promise<ApiResult> {
   const previousOwner = legacyCallOwner();
   let res: Response;
   try {
-    res = await net().fetch(base + "/api/agent/device/enroll", {
+    res = await request(base + "/api/agent/device/enroll", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ code: link.code, device: deviceName(),
+        enroll_token: hasPending ? undefined : preparedEnroll("field\n" + base + "\n" + link.code, randomBytes(32).toString("base64url")),
         keep_token: base === previousSettings.fieldServer ? previousToken : undefined,
         expected_uid: hasPending ? previousUid : undefined, reuse_only: hasPending && !previousUid }),
     });
@@ -242,6 +304,20 @@ function ownedCallQueue(): CallQueue {
   return queue?.owner === owner ? queue : { owner, entries: [] };
 }
 let flushingCalls: Promise<Map<string, ApiResult>> | null = null;
+function acknowledgeDraft(body:Record<string,unknown>,data:any):void {
+  if(body.kind!=="office"&&body.kind!=="call"&&body.kind!=="payment")return;
+  const profile=body.kind==="office"?"hard":"soft",key=callOwner()+"\n"+profile+"\n"+String(body.draft_rep || body.rep);
+  const draft=readDraft(key) as any;
+  if(!draft || draft.pending_op_id!==body.op_id)return;
+  const accepted=(id:string)=>body.kind==="call"?id.startsWith("c-"):body.kind==="payment"?id.startsWith("p-"):
+    body.action==="month_comment"?["f-comment","f-clear-comment"].includes(id):id.startsWith("o-");
+  const fields=Object.fromEntries(Object.entries(draft.fields || {}).filter(([id])=>!accepted(id)&&(!draft.dirty||draft.dirty.includes(id))));
+  const next={...draft,fields,dirty:Object.keys(fields),touched:body.kind==="office"&&body.action!=="month_comment"||body.kind==="call"?[]:draft.touched,
+    pending_op_id:undefined,revision:data?.revision || data?.person?.office?.revision || draft.revision};
+  if(body.kind==="office"&&body.action!=="month_comment")delete next.office;
+  if(!fields["f-comment"]&&!fields["f-clear-comment"])delete next.comment;
+  writeDraft(key,Object.keys(fields).length?next:null);
+}
 export function flushCallQueue(): Promise<Map<string, ApiResult>> {
   if (flushingCalls) return flushingCalls;
   const work = async () => {
@@ -252,13 +328,17 @@ export function flushCallQueue(): Promise<Map<string, ApiResult>> {
       const entry = ownedCallQueue().entries.find(e => !e.error);
       if (!entry || callOwner() !== owner) break;
       const id = String(entry.body.op_id);
-      const res = await callField("POST", "/api/save", undefined, entry.body, { sendingQueue: true });
-      if (res.kind === "offline" || res.status >= 500) break;
+      const path = entry.body.kind === "office" ? "/api/office/action" : "/api/save";
+      const res = await callField("POST", path, undefined, entry.body, { sendingQueue: true });
+      if (res.kind === "offline" || res.status === 408 || res.status === 429 || res.status >= 500) break;
       results.set(id, res);
       if (callOwner() !== owner || res.kind === "cert" || res.kind === "revoked" || res.kind === "nolink") break;
       const current = ownedCallQueue(); // сохранения во время отправки остаются в очереди
       const rejected = (res.data as { rejected?: Record<string, unknown> } | undefined)?.rejected;
-      if (res.ok && !rejected) current.entries = current.entries.filter(e => e.body.op_id !== entry.body.op_id);
+      if (res.ok && !rejected) {
+        acknowledgeDraft(entry.body,res.data);
+        current.entries = current.entries.filter(e => e.body.op_id !== entry.body.op_id);
+      }
       else {
         const pending = current.entries.find(e => e.body.op_id === entry.body.op_id);
         if (pending) pending.error = res.ok ? "Запись принята, но поля требуют проверки: " + Object.keys(rejected || {}).join(", ") : res.text || "Сервер не принял запись";
@@ -276,6 +356,22 @@ export async function callField(method: string, path: string, query?: Record<str
   const server = readSettings().fieldServer;
   const token = readFieldToken();
   if (!server || !token) return { ok: false, status: 0, kind: "nolink", text: "Приложение ещё не знает, кто вы." };
+  if (path === "/api/local/preferences") return localPreferences(method, query, body, callOwner());
+  if (path === "/api/local/draft") {
+    try {
+      const data = body as { rep?: string; draft?: unknown } | undefined;
+      const rep = String(query?.rep || data?.rep || "");
+      if (!rep || rep.length > 200) throw new Error("rep");
+      const profile = String(query?.profile || (body as any)?.profile || "soft");
+      if (!["soft", "hard"].includes(profile)) throw new Error("profile");
+      const key = callOwner() + "\n" + profile + "\n" + rep;
+      if (method === "POST") writeDraft(key, data?.draft ?? null);
+      const draft=readDraft(key) as any;
+      const pending=ownedCallQueue().entries.find(e=>e.body.op_id===draft?.pending_op_id ||
+        (!e.error && String(e.body.draft_rep || e.body.rep)===rep && (e.body.kind==="office"?"hard":"soft")===profile));
+      return { ok: true, status: 200, data: { draft, pending:pending?{op_id:pending.body.op_id,kind:pending.body.kind,error:pending.error}:null } };
+    } catch (error) { return { ok: false, status: 0, kind: "server", text: String(error) }; }
+  }
   if (method === "POST" && path === "/api/local/call_queue/remove") {
     try {
       const queue = ownedCallQueue(), id = String((body as { op_id?: unknown })?.op_id || "");
@@ -287,16 +383,23 @@ export async function callField(method: string, path: string, query?: Record<str
   if (method === "GET" && path === "/api/local/call_queue") {
     try {
       const queue = ownedCallQueue();
-      return { ok: true, status: 200, data: { pending: queue.entries.length, errors: queue.entries.filter(e => e.error).map(e => ({ rep: e.body.rep, op_id: e.body.op_id, error: e.error })) } };
+      return { ok: true, status: 200, data: { pending: queue.entries.length, errors: queue.entries.filter(e => e.error).map(e => ({ rep: e.body.rep, op_id: e.body.op_id, error: e.error, body: e.body })) } };
     } catch (error) { return { ok: false, status: 0, kind: "server", text: String(error) }; }
   }
   const callBody = body as Record<string, unknown> | undefined;
-  if (!opts.sendingQueue && method === "POST" && path === "/api/save" &&
-      (callBody?.kind === "call" || callBody?.kind === "payment") && callBody.finish === true) {
+  if (!opts.sendingQueue && method === "POST" &&
+      ((path === "/api/save" && (callBody?.kind === "call" || callBody?.kind === "payment")) ||
+       (path === "/api/office/action" && callBody?.kind === "office")) && callBody?.finish === true) {
     if (!callBody.op_id || !callBody.occurred_at) return { ok: false, status: 0, kind: "server", text: "Нет идентификатора или времени записи" };
     try {
       const queue = ownedCallQueue();
-      if (!queue.entries.some(e => e.body.op_id === callBody.op_id)) queue.entries.push({ body: callBody });
+      const prior = queue.entries.find(e => e.body.op_id === callBody.op_id);
+      const canonical = (value: unknown) => JSON.stringify(value, (_key, item) =>
+        item && typeof item === "object" && !Array.isArray(item)
+          ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
+      if (prior && canonical(prior.body) !== canonical(callBody))
+        return { ok: false, status: 409, kind: "server", text: "Идентификатор уже используется для другой записи. Исходная запись сохранена в очереди." };
+      if (!prior) queue.entries.push({ body: callBody });
       writeCallQueue(queue);
       const results = await flushCallQueue();
       return results.get(String(callBody.op_id)) || { ok: true, status: 200, data: { queued: true, op_id: callBody.op_id } };
@@ -304,16 +407,19 @@ export async function callField(method: string, path: string, query?: Record<str
   }
   if (!fieldOk(String(path))) return { ok: false, status: 0, kind: "server", text: "запрещённый путь" };
   const url = server + path + qs(query);
-  const key = "F " + method + " " + path + qs(query);
+  const key = "F " + cacheIdentity(server, token) + " " + method + " " + path + qs(query);
+  let generation = cacheGeneration();
+  const current = () => readSettings().fieldServer === server && readFieldToken() === token && generation === cacheGeneration();
   let res: Response;
   try {
-    res = await net().fetch(url, {
+    res = await request(url, {
       method,
       headers: { "X-App-Token": token, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
       body: body !== undefined ? JSON.stringify(body) : undefined,
       bypassCustomProtocolHandlers: true,
-    } as RequestInit);
+    } as RequestInit, opts.binary ? 120000 : 30000);
   } catch (err) {
+    if (!current()) return changedAuthority();
     const t = troubleOf(err);
     if (method === "GET" && opts.cache !== false && !opts.binary) {
       const hit = cacheGet(key);
@@ -321,22 +427,34 @@ export async function callField(method: string, path: string, query?: Record<str
     }
     return t;
   }
+  if (!current()) return changedAuthority();
   if (res.status === 401) {
     wipeField();
     onRevoked();
     return { ok: false, status: 401, kind: "revoked", text: REVOKED };
   }
-  if (res.status === 404) return { ok: false, status: 404, kind: "notfound", text: "Не найдено — возможно, договор перезакрепили." };
+  if (res.status === 403) { clearCache(); return { ok: false, status: 403, kind: "forbidden", text: "Нет доступа к этим данным." }; }
+  if (res.status === 404) { clearCache(); return { ok: false, status: 404, kind: "notfound", text: "Не найдено — возможно, договор перезакрепили." }; }
   if (!res.ok) {
     const code = await errorCode(res);
+    if (!current()) return changedAuthority();
     return { ok: false, status: res.status, kind: "server", text: `Сервер ответил ошибкой ${res.status}${code ? ": " + code.slice(0, 200) : ""}` };
   }
   if (opts.binary) {
     const buf = Buffer.from(await res.arrayBuffer());
+    if (!current()) return changedAuthority();
     return { ok: true, status: res.status, data: { type: res.headers.get("content-type") || "", buf } };
   }
   const data = await res.json().catch(() => null);
-  if (method === "GET" && opts.cache !== false) cachePut(key, data);
+  if (!current()) return changedAuthority();
+  if (!data || (opts.sendingQueue && (data as { ok?: boolean }).ok !== true))
+    return { ok: false, status: 502, kind: "server", text: "Сервер не подтвердил запись. Она сохранена на компьютере и будет отправлена повторно." };
+  const beforeScope = cacheGeneration();
+  if (beforeScope === generation) {
+    acceptScope(data, cacheIdentity(server, token));
+    generation = cacheGeneration();
+  }
+  if (method === "GET" && opts.cache !== false) cachePut(key, data, generation);
   return { ok: true, status: res.status, data };
 }
 
@@ -346,6 +464,8 @@ export async function uploadField(path: string, query: Record<string, unknown>, 
   const server = readSettings().fieldServer;
   const token = readFieldToken();
   if (!server || !token) return { ok: false, status: 0, kind: "nolink", text: "Приложение ещё не знает, кто вы." };
+  const generation = cacheGeneration();
+  const current = () => readSettings().fieldServer === server && readFieldToken() === token && generation === cacheGeneration();
   if (!fieldOk(String(path))) return { ok: false, status: 0, kind: "server", text: "запрещённый путь" };
   let buf: Buffer;
   try {
@@ -355,15 +475,17 @@ export async function uploadField(path: string, query: Record<string, unknown>, 
   }
   let res: Response;
   try {
-    res = await net().fetch(server + path + qs(query), {
+    res = await request(server + path + qs(query), {
       method: "POST",
       headers: { "X-App-Token": token, "Content-Type": "application/octet-stream", "X-Receipt-Ext": ext || ".jpg" },
       body: buf,
       bypassCustomProtocolHandlers: true,
-    } as RequestInit);
+    } as RequestInit, 120000);
   } catch (err) {
+    if (!current()) return changedAuthority();
     return troubleOf(err);
   }
+  if (!current()) return changedAuthority();
   if (res.status === 401) {
     wipeField();
     onRevoked();
@@ -371,9 +493,12 @@ export async function uploadField(path: string, query: Record<string, unknown>, 
   }
   if (!res.ok) {
     const code = await errorCode(res);
+    if (!current()) return changedAuthority();
     return { ok: false, status: res.status, kind: "server", text: `Чек не принят (${res.status}${code ? ": " + code.slice(0, 120) : ""}). Возьмите другой снимок и попробуйте ещё раз.` };
   }
-  return { ok: true, status: res.status, data: await res.json().catch(() => ({})) };
+  const data = await res.json().catch(() => ({}));
+  if (!current()) return changedAuthority();
+  return { ok: true, status: res.status, data };
 }
 
 export async function logoutField(): Promise<void> {
@@ -381,9 +506,8 @@ export async function logoutField(): Promise<void> {
   const token = readFieldToken();
   if (server && token) {
     try {
-      await net().fetch(server + "/api/agent/device/logout", { method: "POST", headers: { "X-App-Token": token } });
+      await request(server + "/api/agent/device/logout", { method: "POST", headers: { "X-App-Token": token } }, 5000);
     } catch { /* нет связи — токен всё равно стираем, аналитик отзовёт */ }
   }
-  wipeField();
-  clearCallQueue();
+  if (readSettings().fieldServer === server && readFieldToken() === token) wipeField();
 }

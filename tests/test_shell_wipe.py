@@ -25,7 +25,7 @@ const PERSONS = [{rep: "R1", client: "ИВАНОВ И.", visited: false, n: 1,
 const CARDS = {R1: {rep: "R1", client: "ИВАНОВ И."}};
 const ME = {employee: "Первый П.", persons: PERSONS, cards: CARDS};
 const SNAP = {lang: "ru", meta: {}, persons: PERSONS, kind: "agent", employee: "Первый П.",
-              roles: null, at: 1};
+              roles: null, at: Date.now()};
 const Q = {op_id: "op-1", kind: "save", rep: "R1", values: {call_status: "x"},
            input_keys: ["call_status"], at: 1, form_version: 3};
 // Телефон, на котором уже поработали: вход, черновик, трек, следы, отметка

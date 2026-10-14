@@ -74,6 +74,9 @@ class Stop(SystemExit):
 
 # Данные взыскания. Ради них перенос и делается.
 CARRY = {
+    "office_actions", "office_action_contracts",
+    "employee_identities", "employee_aliases",
+    "call_reviews", "call_review_history",
     "registry_payments",       # история оплат реестра
     "clients",                # портфели: договоры, адреса, суммы, закрепление
     "client_extra",           # дополнительные колонки реестра (привязаны к КД)
@@ -112,6 +115,7 @@ CARRY = {
 # человек, которому новый владелец доступ не выдавал и о котором не знает.
 # admin_devices и app_tokens — то же самое для пульта и мини-приложения.
 ALWAYS_CLEAR = {
+    "notification_outbox", "notification_attempts",
     "enrichment_book_ledger", # доказанная доставка в конкретный путь книги этой установки;
                               # на новом сервере связь с книгами подтверждается заново
     "admin_devices",          # токены машин прежнего оператора (хэши, но всё же доступ)

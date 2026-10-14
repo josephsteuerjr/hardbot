@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src", "ui"]
+  "include": ["src", "ui", "setup-ui"]
 }

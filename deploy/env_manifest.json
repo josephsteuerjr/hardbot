@@ -416,6 +416,13 @@
       "why": "Другой файл локальной базы обмена пульта (последние отправленные гриды) — для тестов. Пусто — %LOCALAPPDATA%/Хард/exchange.sqlite."
     },
     {
+      "name": "HARD_PULT_PROTECT_TOKENS",
+      "unit": "pult", "in_env_example": false, "required": false,
+      "default": "0",
+      "readers": ["pult/core/settings.py", "hard-desk/src/main/local.ts"],
+      "why": "Установленный Windows-пульт аналитика передаёт 1 своему backend: токены всех контуров сохраняются через DPAPI пользователя. Старые открытые настройки читаются совместимо; защищённый файл сохраняет защиту без повторного задания переменной. При недоступном шифровании запись отказывается, открытый токен на диск не отправляется. Для старого Qt-пульта значение по умолчанию сохраняет прежний формат."
+    },
+    {
       "name": "HARD_PULT_SETTINGS",
       "unit": "pult", "in_env_example": false, "required": false,
       "default": "",
@@ -720,6 +727,13 @@
       "default": "",
       "readers": ["tests/test_repair_false_enrichment.py:285"],
       "why": "1 — запустить ручной e2e-тест против настоящего Excel через COM. По умолчанию такой тест пропускается: он требует установленного Excel и правит файлы на диске."
+    },
+    {
+      "name": "HARD_PULT_TEST_EXE",
+      "unit": "тесты", "in_env_example": false, "required": false,
+      "default": "hard-pult/hard-pult.exe",
+      "readers": ["tests/test_hard_pult_exe.py:29"],
+      "why": "Путь к отдельной локальной GNU-сборке для smoke-прогона без замены прежнего бинарника."
     },
     {
       "name": "QT_QPA_PLATFORM",

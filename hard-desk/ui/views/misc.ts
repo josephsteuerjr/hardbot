@@ -8,25 +8,29 @@ import { mountModeSwitchIfKit } from "../kit/modeswitch";
 import { showIssued } from "../kit/issued";
 import { copyLink, linkQuota, linkStatus, usableLink } from "../kit/login-links";
 import { openPerson, problem, rangeChips, rangeQuery, staleNote, wireRange, type Range } from "./common";
+import { go, hasSection } from "../kit/shell";
 
 export const promises: Section = {
   id: "promises",
   title: "Обещания",
   icon: "promises",
   kicker: "просроченные обещания оплаты",
-  async render(root) {
+  async render(root, params) {
     root.innerHTML = '<div class="skeleton"></div>';
-    const r = await api("/api/manager/promises");
+    const soft = params.profile === "soft" || params.mode === "soft";
+    const r = await api("/api/manager/promises", { mode: soft ? "soft" : "hard" });
     if (!r.ok) { root.innerHTML = problem(r.text || "Не загрузилось"); return; }
     const d = r.data;
     const t = d.totals || {};
     // Одна таблица на всех: сотрудник — столбец, по нему и фильтр, и сортировка.
-    const rows = ((d.employees || []) as any[]).flatMap((e) => (e.items as any[]).map((i) => ({ ...i, employee: e.employee })));
-    const after = (i: any) => (i.visited_after_promise ? "ездил" : i.last_visit ? "ездил до обещания" : "не ездил");
+    const selected = Array.isArray(params.employees) ? new Set(params.employees) : null;
+    const rows = ((d.employees || []) as any[]).filter(e => !selected || selected.has(e.employee)).flatMap((e) => (e.items as any[]).map((i) => ({ ...i, employee: e.employee })));
+    const totals = { persons: rows.length, worked: rows.filter(i => i.visited_after_promise).length, untouched: rows.filter(i => !i.visited_after_promise).length };
+    const after = (i: any) => soft ? (i.visited_after_promise ? "звонил после срока" : "не звонил после срока") : (i.visited_after_promise ? "ездил" : i.last_visit ? "ездил до обещания" : "не ездил");
     root.innerHTML = `${staleNote(r.stale)}
-      <div class="kpis"><div class="kpi accent"><b>${n(t.persons)}</b><span>просрочили обещание</span></div>
-        <div class="kpi"><b>${n(t.worked)}</b><span>после обещания уже ездили</span></div>
-        <div class="kpi"><b>${n(t.untouched)}</b><span>не трогали</span></div></div>
+      <div class="kpis"><div class="kpi accent"><b>${n(totals.persons)}</b><span>просрочили обещание</span></div>
+        <div class="kpi"><b>${n(totals.worked)}</b><span>после срока уже ${soft ? "звонили" : "ездили"}</span></div>
+        <div class="kpi"><b>${n(totals.untouched)}</b><span>не трогали</span></div></div>
       <div class="section" id="prom"></div>`;
     new DataTable<any>(root.querySelector("#prom")!, {
       id: "manager-promises", exportName: "Просроченные обещания", key: (i) => `${i.employee}|${i.rep}`,
@@ -38,9 +42,9 @@ export const promises: Section = {
         { key: "days", title: "Просрочка, дн", num: true, value: (i) => Number(i.days_overdue) || 0 },
         { key: "sum", title: "Сумма", num: true, value: (i) => i.money_text || "" },
         { key: "after", title: "После обещания", value: after,
-          html: (i) => (i.visited_after_promise ? '<span class="tag ok">ездил</span>' : i.last_visit ? '<span class="tag warn">ездил до обещания</span>' : '<span class="tag">не ездил</span>') },
+          html: (i) => `<span class="tag ${i.visited_after_promise ? "ok" : "warn"}">${esc(after(i))}</span>` },
       ],
-      onRow: (i) => void openPerson(i.employee, i.rep),
+      onRow: (i) => void openPerson(i.employee, i.rep, undefined, soft ? "soft" : "hard"),
     }).setRows(rows);
   },
 };
@@ -141,21 +145,33 @@ export function report(control: boolean): Section {
     title: "Отчёт",
     icon: "report",
     kicker: "книга Excel за любое окно",
-    render(root) {
+    render(root, context?: any) {
+      if(context?.range)rep.range={...context.range};
       const draw = () => {
-        root.innerHTML = `<div class="toolbar">${rangeChips(rep.range, null)}</div>
+        root.innerHTML = `${context?.returnTo?.id && hasSection(context.returnTo.id) ? '<div class="toolbar"><button class="btn small" data-report-back>← Вернуться в CRM</button></div>' : ''}<div class="toolbar">${rangeChips(rep.range, null)}</div>
+          <div class="toolbar"><label class="muted">С <input class="input" type="date" data-report-from value="${esc(rep.range.from || '')}"></label><label class="muted">По <input class="input" type="date" data-report-to value="${esc(rep.range.to || '')}"></label><span class="muted">Для своего периода укажите обе даты.</span></div>
           <div class="grid2" style="max-width:900px">
-            <div class="list-row"><div class="grow"><div class="nm">Статистика команды</div><div class="sub">сводка, люди, выезды, воронка — по окну выше</div></div>
-              <button class="btn primary" data-dl="stats">${icon("download")}Скачать</button></div>
+            <div class="list-row"><div class="grow"><div class="nm">Отчёт команды по шаблону</div><div class="sub">сводка, Хард, «Софт · операции» и «Софт · обещания» за выбранный период</div></div>
+              <button class="btn primary" data-dl="stats">${icon("download")}Сформировать Excel</button></div>
             ${control ? `<div class="list-row"><div class="grow"><div class="nm">Контроль</div><div class="sub">риск по людям и итоги обзвона</div></div>
               <button class="btn" data-dl="control">${icon("download")}Скачать</button></div>` : ""}
           </div>`;
+        root.querySelector('[data-report-back]')?.addEventListener('click',()=>void go(context.returnTo.id,context.returnTo.params || {}));
         wireRange(root, rep.range, draw);
+        for(const key of ['from','to'] as const)root.querySelector<HTMLInputElement>(`[data-report-${key}]`)?.addEventListener('change',event=>{
+          rep.range[key]=(event.target as HTMLInputElement).value || undefined;
+          if(rep.range.from || rep.range.to)root.querySelectorAll('[data-preset]').forEach(el=>el.setAttribute('aria-pressed','false'));
+        });
         root.querySelectorAll<HTMLButtonElement>("[data-dl]").forEach((b) => b.addEventListener("click", async () => {
+          if(b.disabled)return;
+          if(!!rep.range.from!==!!rep.range.to || rep.range.from && rep.range.to && rep.range.from>rep.range.to){toast('Укажите обе даты в правильном порядке');return;}
+          const label=b.innerHTML;b.disabled=true;b.textContent='Формируется…';
           const isC = b.dataset.dl === "control";
-          const res = await hard.download(isC ? "/api/control/export.xlsx" : "/api/manager/stats.xlsx", rangeQuery(rep.range),
-            isC ? "Контроль.xlsx" : "Статистика.xlsx");
-          if (res.ok && res.file) { toast("Книга сохранена"); void hard.open(res.file); } else if (res.text) toast(res.text);
+          try {
+            const res = await hard.download(isC ? "/api/control/export.xlsx" : "/api/manager/stats.xlsx", rangeQuery(rep.range),
+              isC ? "Контроль.xlsx" : "Отчёт команды.xlsx");
+            if (res.ok && res.file) { toast("Отчёт сформирован"); void hard.open(res.file); } else if (res.text) toast(res.text);
+          } finally {if(b.isConnected){b.disabled=false;b.innerHTML=label}}
         }));
       };
       draw();

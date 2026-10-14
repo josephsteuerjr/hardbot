@@ -64,8 +64,8 @@ MAX_SAMPLES = 300
 
 LEVELS = ("confirmed", "far", "nofix", "nogeo", "coarse")
 LEVEL_TEXT = {
-    "confirmed": "подтверждён на адресе",
-    "far": "у адреса не был",
+    "confirmed": "точка телефона рядом с адресом",
+    "far": "точка телефона далеко от адреса",
     "nofix": "GPS-точка слишком грубая",
     "nogeo": "координат нет",
     "coarse": "адрес неточный",

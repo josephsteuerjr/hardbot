@@ -173,7 +173,7 @@ async function renderEmployee(root: HTMLElement) {
   root.querySelectorAll<HTMLButtonElement>("[data-mode]").forEach(b => b.addEventListener("click", () => {
     state.mode = b.dataset.mode as "hard" | "soft"; void renderEmployee(root);
   }));
-  const EV: Record<string, string> = { confirmed: "у адреса", far: "далеко от адреса", nofix: "GPS не поймался", nogeo: "нет GPS-точки", coarse: "адрес неточный" };
+  const EV: Record<string, string> = { confirmed: "точка рядом с адресом", far: "точка далеко от адреса", nofix: "GPS не поймался", nogeo: "нет GPS-точки", coarse: "адрес неточный" };
   new DataTable<any>(root.querySelector("#cases")!, {
     id: soft ? "manager-soft-cases" : "manager-cases", exportName: `${soft ? "Звонки" : "Выезды"} — ${emp}`, key: (c) => String(c.id || `${c.date}|${c.rep}`), empty: soft ? "За этот период звонков не было." : "За это окно сотрудник не выезжал.",
     cols: [
@@ -201,6 +201,10 @@ export const team: Section = {
   icon: "team",
   kicker: "сетка по людям и офисам",
   async render(root, params) {
+    if (params.range) state.range = params.range as Range;
+    if (typeof params.office === "string") state.office = params.office;
+    if (typeof params.country === "string") state.country = params.country;
+    if (params.profile === "hard" || params.profile === "soft") state.mode = params.profile;
     state.employee = params.employee ? String(params.employee) : "";
     if (state.employee) state.mode = params.mode === "soft" ? "soft" : params.mode === "hard" ? "hard" : "";
     root.innerHTML = '<div class="skeleton" style="width:40%"></div><div class="skeleton"></div><div class="skeleton" style="width:70%"></div>';

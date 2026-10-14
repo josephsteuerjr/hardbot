@@ -19,6 +19,8 @@
 from __future__ import annotations
 
 import json
+import copy
+import hashlib
 import secrets
 import sys
 import threading
@@ -35,12 +37,30 @@ if str(APP_DIR.parent) not in sys.path:
 
 from pult.core import api as api_client  # noqa: E402
 from pult.core import devices as dv  # noqa: E402
-from pult.core.settings import active_profile, load_settings  # noqa: E402
+from pult.core.settings import Settings, active_profile, load_settings  # noqa: E402
 
 SECRET = secrets.token_urlsafe(24)
 _lock = threading.RLock()
 _settings = load_settings()
 _jobs: dict[str, dict] = {}
+_journal = None
+
+
+def job_journal():
+    global _journal
+    if _journal is None:
+        from pult.core.durable_jobs import Journal
+        path = getattr(_settings, "path", None)
+        if path is None or Path(path).parent == APP_DIR:
+            path = APP_DIR.parent / "_local" / "backend-settings.json"
+        _journal = Journal(Path(path).with_name("jobs.sqlite3"))
+        _journal.recover()
+    return _journal
+
+
+def job_profile():
+    prof = _profile()
+    return str(_settings.get("active", "")) + "\n" + str(prof.get("url", ""))
 
 
 # --- функции экранов: закрытый список ------------------------------------------------
@@ -105,6 +125,11 @@ def _profile() -> dict:
     return active_profile(_settings)
 
 
+def _persist_settings() -> None:
+    if not _settings.save():
+        raise RuntimeError("Настройки не сохранены на диске. Не закрывайте пульт; проверьте место, права и доступность шифрования, затем сохраните настройки в «Подключении».")
+
+
 def state() -> dict:
     with _lock:
         prof = _profile()
@@ -112,6 +137,25 @@ def state() -> dict:
                 "url": prof.get("url", ""), "bound": bool(prof.get("device_token")),
                 "device_name": dv.device_default_name(), "key_state": dv.key_state_text(prof.get("device_token", "")),
                 "settings_path": str(_settings.path)}
+
+
+def import_settings(path: str) -> dict:
+    """Перенос старого файла без перепривязки устройства и потери контуров."""
+    with _lock:
+        if any(p.get("device_token") for p in _settings.get("profiles", {}).values()):
+            raise RuntimeError("Пульт уже привязан. Перенос поверх действующего входа запрещён.")
+        if any(j.get("state") == "running" for j in _jobs.values()):
+            raise RuntimeError("Дождитесь завершения текущей операции.")
+        source = Path(path)
+        data = json.loads(source.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not ("profiles" in data or "url" in data):
+            raise ValueError("Это не файл настроек прежнего пульта.")
+        incoming = Settings(data, path=_settings.path)
+        if not incoming.save():
+            raise RuntimeError("Не удалось сохранить перенесённые настройки.")
+        _settings.clear()
+        _settings.update(incoming)
+        return state()
 
 
 def admin(method: str, path: str, body=None, timeout: float = 30, key: str = ""):
@@ -127,11 +171,18 @@ def profile_action(body: dict) -> dict:
     act = body.get("action")
     name = str(body.get("name") or "").strip()
     with _lock:
+        if _mail_busy.locked() or any(j.get("state") == "running" for j in _jobs.values()):
+            raise RuntimeError("Дождитесь завершения операции перед изменением контура.")
         profiles = _settings.setdefault("profiles", {})
+        previous = copy.deepcopy(dict(_settings))
         if act == "switch" and name in profiles:
             _settings["active"] = name
         elif act == "save":
-            _profile()["url"] = str(body.get("url") or "").strip().rstrip("/")
+            url = str(body.get("url") or "").strip().rstrip("/")
+            prof = _profile()
+            if prof.get("device_token") and url != prof.get("url", "").rstrip("/"):
+                raise RuntimeError("Адрес привязанного контура менять нельзя. Добавьте новый контур или сначала снимите привязку.")
+            prof["url"] = url
         elif act == "add" and name and name not in profiles:
             profiles[name] = {"url": str(body.get("url") or "").strip().rstrip("/"), "device_token": ""}
             _settings["active"] = name
@@ -147,7 +198,13 @@ def profile_action(body: dict) -> dict:
                 _settings["active"] = next(iter(profiles))
         else:
             raise ValueError("не понял, что сделать с контуром")
-        _settings.save()
+        try:
+            _persist_settings()
+        except RuntimeError:
+            _settings.clear(); _settings.update(previous)
+            raise
+        from pult import desk_registry
+        desk_registry.reset_context()
     return state()
 
 
@@ -169,41 +226,64 @@ def bind(body: dict) -> dict:
         raise RuntimeError("Сервер не выдал токен")
     with _lock:
         _profile()["device_token"] = token
-        _settings.save()
+        _persist_settings()
     return state()
 
 
 def unbind() -> dict:
     with _lock:
+        previous = _profile().get("device_token", "")
         _profile()["device_token"] = ""
-        _settings.save()
+        try:
+            _persist_settings()
+        except RuntimeError:
+            _profile()["device_token"] = previous
+            raise
     return state()
 
 
 # --- долгие задачи (Excel, импорт) -------------------------------------------------------
-def start_job(kind: str, fn) -> str:
-    jid = uuid.uuid4().hex[:12]
+def start_job(kind: str, fn, *, request_id=None, fingerprint=None) -> str:
+    jid = str(request_id or uuid.uuid4().hex)
+    if not 8 <= len(jid) <= 128 or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in jid):
+        raise ValueError("request_id")
+    profile = job_profile()
+    fingerprint = fingerprint or kind
     job = {"id": jid, "kind": kind, "state": "running", "log": [], "result": None, "error": None,
            "started": time.time()}
-    _jobs[jid] = job
+    with _lock:
+        previous = job_journal().load(jid, profile, fingerprint)
+        if previous:
+            return jid
+        if any(j.get("state") == "running" for j in _jobs.values()):
+            raise RuntimeError("Дождитесь завершения текущей операции.")
+        job_journal().save(job, profile, fingerprint)
+        _jobs[jid] = job
 
     def say(line: str) -> None:
         job["log"].append(str(line))
+        job_journal().save(job, profile, fingerprint)
 
     def run():
         try:
             job["result"] = fn(say)
             job["state"] = "done"
         except Exception as exc:  # noqa: BLE001
-            job["state"] = "failed"
+            job["state"] = "uncertain" if kind == "mail" else "failed"
             job["error"] = str(exc) or type(exc).__name__
             job["log"].append(traceback.format_exc()[-1200:])
+        finally:
+            try:
+                job_journal().save(job, profile, fingerprint)
+            except Exception as exc:
+                job["state"] = "uncertain"
+                job["error"] = "Не удалось записать результат операции: " + str(exc)
     threading.Thread(target=run, daemon=True).start()
     return jid
 
 
 def job_state(jid: str) -> dict:
-    job = _jobs.get(jid)
+    job = job_journal().load(jid, job_profile())
     if not job:
         raise KeyError("нет такой задачи")
     return {k: job[k] for k in ("id", "kind", "state", "log", "result", "error")}
@@ -223,7 +303,7 @@ def _mail_cfg() -> dict:
 def _mail_save(cfg: dict) -> None:
     with _lock:
         _settings["mail"] = cfg
-        _settings.save()
+        _persist_settings()
 
 
 def mail_state() -> dict:
@@ -244,7 +324,7 @@ def mail_set(body: dict) -> dict:
     return mail_state()
 
 
-def mail_send(book: str, *, manual: bool, display: bool = False, say=print) -> dict:
+def mail_send(book: str, *, manual: bool, display: bool = False, say=print, operation_id=None) -> dict:
     """Одна книга одним письмом: скачать с сервера, сохранить во временную
     папку, отдать Outlook. Каждая попытка — в историю."""
     import tempfile
@@ -278,7 +358,7 @@ def mail_send(book: str, *, manual: bool, display: bool = False, say=print) -> d
             say("Передаю письмо в Outlook…")
             mailer.send_outlook(to, mailer.subject(book, cfg, today),
                                 mailer.body_html(book, cfg, today, summary, now),
-                                str(file), display=display)
+                                str(file), display=display, operation_id=operation_id)
         except Exception as exc:  # noqa: BLE001
             if not display:
                 _mail_save(mailer.remember(_mail_cfg(), book, ok=False, when=now, to=to,
@@ -300,7 +380,9 @@ def _mail_loop() -> None:
             cfg = _mail_cfg()
             for book in mailer.due(cfg, datetime.now()):
                 try:
-                    mail_send(book, manual=False, say=lambda _l: None)
+                    identifier = "scheduled-" + hashlib.sha256((job_profile() + datetime.now().date().isoformat() + book).encode()).hexdigest()
+                    start_job("mail", lambda say, selected=book, oid=identifier: mail_send(selected, manual=False, say=say, operation_id=oid),
+                              request_id=identifier, fingerprint=identifier)
                 except Exception:  # noqa: BLE001 — ошибка уже в истории
                     # Неудачу тоже считаем попыткой дня: иначе поток бился бы в
                     # закрытый Outlook каждые полминуты до полуночи.
@@ -359,6 +441,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def route(path: str, body: dict):
+    fingerprint = hashlib.sha256(json.dumps([path, body], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    def durable_start(kind, fn):
+        return start_job(kind, fn, request_id=body.get("request_id"), fingerprint=fingerprint)
+    if path == "/settings/import":
+        return import_settings(str(body.get("path") or ""))
+    if path == "/busy":
+        return {"busy": _mail_busy.locked() or any(j.get("state") == "running" for j in _jobs.values())}
     if path == "/state":
         return state()
     if path == "/admin":
@@ -377,6 +466,9 @@ def route(path: str, body: dict):
         return unbind()
     if path == "/job":
         return job_state(str(body.get("id") or ""))
+    if path == "/jobs":
+        return [{k: j.get(k) for k in ("id", "kind", "state", "started", "error")}
+                for j in job_journal().list(job_profile())]
     if path == "/mail/state":
         return mail_state()
     if path == "/mail/set":
@@ -384,10 +476,10 @@ def route(path: str, body: dict):
     if path == "/mail/send":
         book = str(body.get("book") or "")
         display = bool(body.get("display"))
-        return {"job": start_job("mail", lambda say: mail_send(book, manual=True, display=display,
-                                                              say=say))}
+        return {"job": durable_start("mail", lambda say: mail_send(book, manual=True, display=display,
+                                                              say=say, operation_id=body.get("request_id")))}
     from pult import desk_registry
-    return desk_registry.route(path, body, admin=admin, start_job=start_job, settings=_settings)
+    return desk_registry.route(path, body, admin=admin, start_job=durable_start, settings=_settings)
 
 
 def main() -> None:

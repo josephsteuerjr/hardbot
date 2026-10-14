@@ -32,5 +32,5 @@ ENV APP_DATA=/data
 # Логи сразу в stdout, без буферизации — видно в `docker compose logs`
 ENV PYTHONUNBUFFERED=1
 HEALTHCHECK --interval=10s --timeout=4s --start-period=30s --retries=6 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=3).read(1)"
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready.json', timeout=3).read(1)"
 CMD ["python", "app.py"]

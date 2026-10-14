@@ -480,7 +480,7 @@ def prepare_import(book: dict, picked: list[str], *, full_registry: bool = False
 
 
 def preview_body(prepared: dict, *, full_registry: bool, restore_manual: bool,
-                 replace_current_comments: bool) -> dict:
+                 replace_current_comments: bool, allow_soft_office_edits: bool = False) -> dict:
     return {
         "data_exchange_contract": enrich.DATA_EXCHANGE_CONTRACT,
         "source_kind": prepared["source_kind"],
@@ -493,6 +493,7 @@ def preview_body(prepared: dict, *, full_registry: bool, restore_manual: bool,
         ),
         "restore_manual_unassigned": restore_manual,
         "replace_current_visit_comments": replace_current_comments,
+        "allow_soft_office_edits": allow_soft_office_edits,
     }
 
 
@@ -503,6 +504,8 @@ def expected_from_preview(d: dict, body: dict) -> dict | str:
     (recall_columns); старый сервер такого ключа не отдаёт — требование не
     включается, и новый пульт со старым сервером работает как раньше."""
     needs = (
+        (bool(body.get("allow_soft_office_edits")), None,
+         "soft_office_effect_digest", "Сервер не вернул точное множество офисных правок Софта"),
         (bool(body.get("full_registry")), "auto_unassigned",
          "auto_unassigned_digest",
          "Сервер не вернул точное множество снятий"),
@@ -571,6 +574,16 @@ def import_pairs(d: dict) -> list[tuple[str, object]]:
 
 def import_notes(d: dict) -> list[str]:
     notes = []
+    if d.get("allow_soft_office_edits"):
+        from fields import BY_KEY
+        edits = [(cid, key, change) for cid, fields in (d.get("soft_office_applied") or {}).items()
+                 for key, change in fields.items()]
+        notes.append(f"Офисные правки Софта: {len(edits)} замен. Пустые ячейки не очищают результаты звонков.")
+        for cid, key, change in edits[:12]:
+            title = BY_KEY[key].title if key in BY_KEY else key
+            notes.append(f"  КД {cid} · {title}: «{change['before']}» → «{change['after']}»")
+        if len(edits) > 12:
+            notes.append(f"  … и ещё {len(edits) - 12} замен")
     if "recall_columns" in d and not d.get("recall_columns"):
         notes.append(
             "В файле НЕТ колонок отзыва («Дата отзыва», «Причина отзыва», "
