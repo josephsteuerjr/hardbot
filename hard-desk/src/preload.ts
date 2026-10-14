@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld("hard", {
   trayAction: (action: string) => ipcRenderer.send("hard:trayAction", action),
   setMode: (mode: string) => ipcRenderer.invoke("hard:setMode", mode),
   enroll: (link: string) => ipcRenderer.invoke("hard:enroll", link),
+  accountLogin: (server: string, username: string, password: string) => ipcRenderer.invoke("hard:accountLogin", server, username, password),
   logout: () => ipcRenderer.invoke("hard:logout"),
   api: (method: string, path: string, query?: Query, body?: unknown) => ipcRenderer.invoke("hard:api", method, path, query, body),
   image: (path: string, query?: Query) => ipcRenderer.invoke("hard:image", path, query),

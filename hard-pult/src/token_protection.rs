@@ -2,6 +2,9 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 
 const PREFIX: &str = "dpapi-v1:";
+/// Публичный маркер запечатанного значения: settings.save() переписывает такие
+/// токены как есть, не пытаясь запечатать повторно и не теряя их.
+pub const SEALED_PREFIX: &str = PREFIX;
 
 #[repr(C)]
 struct Blob { size: u32, data: *mut u8 }

@@ -65,7 +65,12 @@ export async function installUpdate(canClose: () => Promise<boolean>, beforeInst
   if (!updater || state.phase !== "ready" || !signed || !downloaded || installing) return { ok: false, text: "Обновление ещё не готово" };
   installing = true;
   try {
-    if (!(await canClose())) return { ok: false, text: "Сохраните форму и дождитесь завершения операции с реестрами или рассылки" };
+    // canClose может БРОСИТЬ (повреждённая очередь/черновик): это «не сейчас»,
+    // а не повод удалять уже скачанный установщик (раньше исключение уходило
+    // в общий catch и unlinkSync съедал готовое обновление).
+    let busyWork = false;
+    try { busyWork = !(await canClose()); } catch { busyWork = true; }
+    if (busyWork) return { ok: false, text: "Не удалось проверить незавершённые операции (возможно, повреждена локальная очередь). Повторите после проверки очереди; скачанное обновление сохранено." };
     if (statSync(downloaded).size !== signed.size) throw new Error("Size mismatch");
     const hash = createHash("sha512");
     for await (const chunk of createReadStream(downloaded)) hash.update(chunk);

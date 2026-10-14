@@ -10,7 +10,7 @@ import { BrowserWindow, Notification, Tray, app, clipboard, dialog, ipcMain, nat
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, normalize, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-import { call, callField, deviceName, enroll, enrollField, flushCallQueue, logout, logoutField, setRevokedHandler, uploadField } from "./net";
+import { accountLogin, call, callField, deviceName, enroll, enrollField, flushCallQueue, logout, logoutField, setRevokedHandler, uploadField } from "./net";
 import { stopLegacyPult } from "./legacy";
 import { writeXlsx } from "./xlsx";
 import { local, startBackend } from "./local";
@@ -394,6 +394,11 @@ function wireIpc() {
     }
     return first;
   });
+  // Вход сотрудника по логину и паролю (аккаунт вместо ссылки): живёт в main —
+  // отпечаток машины и пароль не проходят через страницу. Токен пишется как
+  // обычный полевой, дальше конструктор работает как после enrollField.
+  handle("hard:accountLogin", (_e, server: string, username: string, password: string) =>
+    accountLogin(String(server || ""), String(username || ""), String(password || "")));
   handle("hard:logout", async () => {
     if (MODE === "field") await logoutField(); else await logout();
     return true;

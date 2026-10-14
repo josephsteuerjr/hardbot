@@ -1499,6 +1499,10 @@ def init_db() -> None:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_devices_emp "
                      "ON agent_devices(employee)")
+        # Аккаунты «логин-пароль»: свои таблицы + связка с таблицами устройств,
+        # поэтому вызов строго ПОСЛЕ их создания выше.
+        import accounts
+        accounts.init_schema(conn)
         # Роль в команде руководства: руководитель или безопасник (см. MANAGER_ROLES).
         mgcols2 = {r[1] for r in conn.execute("PRAGMA table_info(managers)")}
         if "role" not in mgcols2:

@@ -14,6 +14,10 @@ export function migrateData(target: string, appData: string, product: ProductId,
     if (typeof source !== "string") throw new Error("Некорректный запрос переноса");
     importData(source, target, product); rmSync(request); return;
   }
+  // Перенос уже выполнялся для этого профиля — не повторять автоматически.
+  // Без этого guard'а «Выйти» (очищающий ключи при пустой очереди) на следующем
+  // старте снова находил сохранённый источник и молча восстанавливал вход.
+  if (existsSync(join(target, "migration-v1.json"))) return;
   if (hasProfile(target, product)) return;
   const candidates = discoverProfiles(product, { appData, ...locations }, target);
   if (new Set(candidates.map(c => c.fingerprint)).size > 1) {

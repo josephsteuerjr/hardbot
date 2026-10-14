@@ -1009,9 +1009,11 @@ async function clearLocalData(opts){
 // дошедшие до сервера): при отказе сервера это работа человека, она уйдёт, когда
 // он войдёт по новой ссылке. «Выйти» и замена входа стирают и её.
 // Безобидных настроек интерфейса в localStorage у оболочки нет (язык хранит
-// сервер), поэтому стирается всё, кроме OUT_KEY — отпечатков вышедших токенов.
+// сервер), поэтому стирается всё, кроме OUT_KEY — отпечатков вышедших токенов —
+// и hb_device_uuid: идентификатор устройства для входа по логину (см.
+// deviceProfile), он принадлежит телефону, а не вошедшему человеку.
 const OUT_KEY="hb_out";
-const LS_KEEP=[OUT_KEY];
+const LS_KEEP=[OUT_KEY,"hb_device_uuid"];
 // Поколение данных устройства. Что стартовало ДО очистки и докатилось после неё
 // (ответ bootstrap, прогрев карточек), обратно в хранилище и на экран не пишет.
 let WIPE_GEN=0;
@@ -1297,7 +1299,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=84;
+const SHELL_VERSION=85;
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1856,16 +1858,237 @@ window.addEventListener('hashchange', onHashChange);
 // Экран «нужна ссылка входа»: истёкший токен или мёртвый код без токена. Ссылку даёт
 // аналитик (бота в контуре компании нет). Поле ручной вставки — главный путь на iPhone:
 // внутри ярлыка ссылку не открыть, её именно вставляют.
+// С октября 2026 у экрана ДВЕ вкладки: «По ссылке» (прежний путь, не менялся) и
+// «По логину» — вход сотрудника логином и паролем (docs/account-login-plan.md).
+// Тексты этой вкладки не в I18N: аккаунты заводят только русскоязычным сотрудникам.
+let AUTH_TAB="link", AUTH_EXPIRED=false, AUTH_USER="", AUTH_BUSY=false;
+const AUTH_INPUT_CSS="display:block;width:100%;max-width:280px;margin:0 auto 10px;padding:13px 12px;border:1px solid var(--border);border-radius:11px;font-size:16px";
 function renderAppAuthGone(expired){
+  if(expired!==undefined) AUTH_EXPIRED=!!expired;   // вкладки переключаются без аргумента
   hideBottomNav(); const t=L();
+  const tab=(id,name)=>`<button class="btn${AUTH_TAB===id?" acc":""}" onclick="authTab('${id}')">${esc(name)}</button>`;
   // Поле ввода прямо на экране, а не prompt(): на iOS-ярлыке prompt не переживает
   // переключение в Телегу за кодом, да и вставка в него неудобна. font-size 16px —
   // чтобы iOS не зумил страницу при фокусе.
-  $("app").innerHTML=`<div class="center">${esc(expired?t.authexpired:t.authneed)}<br><br>
+  const body = AUTH_TAB==="link"
+    ? `${esc(AUTH_EXPIRED?t.authexpired:t.authneed)}<br><br>
     <input id="codein" placeholder="${esc(t.codeph)}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
-      style="display:block;width:100%;max-width:280px;margin:0 auto 10px;padding:13px 12px;border:1px solid var(--border);border-radius:11px;font-size:16px"
+      style="${AUTH_INPUT_CSS}"
       onkeydown="if(event.key==='Enter')enterCode()">
-    <button class="btn acc" style="max-width:280px;margin:0 auto" onclick="enterCode()">${esc(t.entercode)}</button></div>`;
+    <button class="btn acc" style="max-width:280px;margin:0 auto" onclick="enterCode()">${esc(t.entercode)}</button>`
+    : `<div class="muted" style="margin-bottom:14px">Вход сотрудника по логину и паролю</div>
+    <div style="max-width:280px;margin:0 auto;text-align:left">
+      <label class="fld" for="loginuser">Логин</label>
+      <input id="loginuser" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" style="${AUTH_INPUT_CSS}"
+        onkeydown="if(event.key==='Enter'){$('loginpass').focus()}">
+      <label class="fld" for="loginpass">Пароль</label>
+      <input id="loginpass" type="password" autocomplete="current-password" style="${AUTH_INPUT_CSS}"
+        onkeydown="if(event.key==='Enter')accountLogin()">
+    </div>
+    <div id="loginerr" style="display:none;max-width:280px;margin:0 auto 12px;color:var(--danger)"></div>
+    <button class="btn acc" style="max-width:280px;margin:0 auto" id="loginbtn" onclick="accountLogin()">Войти</button>`;
+  $("app").innerHTML=`<div class="center" style="padding-top:24px">
+    <div class="row2" style="max-width:280px;margin:0 auto 18px">${tab("link","По ссылке")}${tab("login","По логину")}</div>
+    ${body}</div>`;
+}
+function authTab(x){ AUTH_TAB=x; renderAppAuthGone(); }
+
+// --- Вход по логину и паролю: устройство и GPS --------------------------------
+// Устройство представляет себя отпечатком: стабильный uuid (IndexedDB kv →
+// device_uuid; «Выйти» стирает kv, поэтому копия живёт в localStorage — ключ
+// hb_device_uuid внесён в LS_KEEP) плюс паспорт браузера (модель, экран, tz,
+// язык, ядра/память) → sha-256. На старом WebView без crypto.subtle отпечаток
+// деградирует до 'sha-unsupported-<uuid>' — сервер такой честно фиксирует.
+const DEVICE_UUID_LS="hb_device_uuid";
+let _DEVICE_PROFILE=null;
+async function deviceUuid(){
+  try{ const v=await IDB.get("kv","device_uuid"); if(v) return String(v); }catch(e){}
+  try{ const v=localStorage.getItem(DEVICE_UUID_LS);
+       if(v){ IDB.put("kv",v,"device_uuid").catch(()=>{}); return v; } }catch(e){}
+  const v=uuid();                                   // генерируется РОВНО один раз
+  try{ await IDB.put("kv",v,"device_uuid"); }catch(e){}
+  try{ localStorage.setItem(DEVICE_UUID_LS,v); }catch(e){}
+  return v;
+}
+function deviceModel(){
+  const ua=(navigator&&navigator.userAgent)||"", pf=(navigator&&navigator.platform)||"";
+  const ios=ua.match(/OS (\d+)(?:[_ ]\d+)*/);
+  if(/iPhone/.test(ua)) return "iPhone · iOS "+(ios?ios[1]:"");
+  if(/iPad/.test(ua)) return "iPad · iOS "+(ios?ios[1]:"");
+  if(/iPod/.test(ua)) return "iPod · iOS "+(ios?ios[1]:"");
+  const and=ua.match(/Android[ /]([\d.]+)/);
+  if(and){ const dm=ua.match(/Android[^;)]*;\s*([^;)]+?)\s*(?:Build|\))/);
+    return "Android "+(and[1]||"")+(dm&&dm[1]?" · "+dm[1]:""); }
+  if(/Windows/.test(ua)) return "Windows ПК";
+  if(/Mac OS X/.test(ua)) return "Mac";
+  return pf||"Браузер";
+}
+// {fp, kind, label} — кэшируется в памяти на время жизни страницы.
+async function deviceProfile(){
+  if(_DEVICE_PROFILE) return _DEVICE_PROFILE;
+  const scr=(typeof screen!=="undefined"&&screen)
+    ? Math.round(screen.width||0)+"x"+Math.round(screen.height||0) : "0x0";
+  const prof={uuid:await deviceUuid(), model:deviceModel(),
+    screen:scr+"@"+((window.devicePixelRatio&&+window.devicePixelRatio.toFixed(2))||1),
+    tz:"", lang:(navigator&&navigator.language)||"", hw:0, mem:0};
+  try{ prof.tz=(window.Intl&&Intl.DateTimeFormat)?(Intl.DateTimeFormat().resolvedOptions().timeZone||""):""; }catch(e){}
+  try{ prof.hw=navigator.hardwareConcurrency||0; }catch(e){}
+  try{ prof.mem=navigator.deviceMemory||0; }catch(e){}
+  let fp="";
+  try{
+    if(window.crypto&&crypto.subtle&&crypto.subtle.digest){
+      const dig=await crypto.subtle.digest("SHA-256",
+        new TextEncoder().encode(JSON.stringify(prof)));
+      fp=Array.from(new Uint8Array(dig),b=>b.toString(16).padStart(2,"0")).join("");
+    }
+  }catch(e){}
+  if(!fp) fp="sha-unsupported-"+(prof.uuid||uuid());
+  _DEVICE_PROFILE={fp,
+    kind:(/iPhone|iPad|iPod|Android|Mobile/i.test((navigator&&navigator.userAgent)||"")?"phone":"desktop"),
+    label:(prof.model+" · "+scr)};                    // «iPhone · iOS 17 · 390x844»
+  return _DEVICE_PROFILE;
+}
+// Точка на момент входа. Таймаут 15 с именно здесь (в отличие от askGeo без
+// таймаута): отказ/запрет геолокации не должен держать форму — запрос уходит и
+// БЕЗ gps, сервер честно ответит no_gps и зафиксирует попытку входа.
+function loginGps(ms){
+  return new Promise(res=>{
+    try{
+      if(!navigator.geolocation) return res(null);
+      navigator.geolocation.getCurrentPosition(
+        p=>{ GEO.state="granted";
+             res({lat:p.coords.latitude, lon:p.coords.longitude,
+                  accuracy:Math.round(p.coords.accuracy||0)}); },
+        ()=>res(null),
+        {enableHighAccuracy:true, timeout:ms||15000, maximumAge:30000});
+    }catch(e){ res(null); }
+  });
+}
+function authErr(msg){ const e=$("loginerr"); if(e){ e.textContent=msg||""; e.style.display=msg?"block":"none"; } }
+function authBusy(on){ const b=$("loginbtn"); if(b){ b.disabled=!!on; b.textContent=on?"Вхожу…":"Войти"; } }
+async function accountLogin(){
+  if(AUTH_BUSY) return;
+  const u=(( $("loginuser")||{}).value||"").trim();
+  const p=(( $("loginpass")||{}).value)||"";
+  if(!u||!p){ authErr("Введите логин и пароль."); return; }
+  AUTH_BUSY=true; AUTH_USER=u; authErr(""); authBusy(true);
+  try{
+    // Вход нового устройства: прежний токен (пусть и мёртвый — этот экран обычно
+    // уже после очистки) стираем ЗАРАНЕЕ, чтобы чужой не улетел на сервер и не
+    // остался на устройстве рядом с новым входом.
+    try{ localStorage.removeItem("app_token"); }catch(e){}
+    const dev=await deviceProfile();
+    const gps=await loginGps(15000);   // нет прав/сигнала — всё равно отправляем
+    const body={username:u, password:p, entrance:"public",
+                device:{kind:dev.kind, fp:dev.fp, label:dev.label}};
+    if(gps) body.gps=gps;
+    const r=await fetch("/api/account/login",{method:"POST",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+    let j=null; try{ j=await r.json(); }catch(e){}
+    if(r.ok && j && (j.action==="ok"||j.action==="ok_pending") && j.token){
+      try{ localStorage.setItem("app_token", j.token); }catch(e){}
+      if(j.username) AUTH_USER=j.username;          // нормализованное имя сервера
+      if(j.must_change_password){ renderPasswordChange(); return; }
+      stampTokenUrl(); toast("✓"); boot();          // ok_pending покажет renderPending сам
+      return;
+    }
+    // 403 bad/disabled/no_gps и 429 locked приходят с готовым русским текстом.
+    authErr((j&&j.error)||("Вход не удался ("+r.status+"). Попробуйте ещё раз."));
+  }catch(e){ authErr("Нет связи с сервером — попробуйте ещё раз."); }
+  finally{ AUTH_BUSY=false; authBusy(false); }
+}
+// Сервер потребовал сменить пароль (первый вход / сброс): форма сразу после
+// входа, токен уже сохранён — после смены продолжаем штатным boot().
+function pwErr(msg){ const e=$("pwerr"); if(e){ e.textContent=msg||""; e.style.display=msg?"block":"none"; } }
+function renderPasswordChange(){
+  hideBottomNav();
+  $("app").innerHTML=`<div class="center" style="padding:24px 18px">
+    <div style="font-size:34px;margin-bottom:10px">🔑</div>
+    <div style="font-weight:600;color:var(--text);margin-bottom:6px">Смените пароль</div>
+    <div class="muted" style="margin-bottom:6px">Сервер просит заменить пароль при первом входе. Новый — от 8 символов, с буквой и цифрой.</div>
+    <div style="max-width:280px;margin:0 auto;text-align:left">
+      <label class="fld" for="pwcur">Текущий пароль</label>
+      <input id="pwcur" type="password" autocomplete="current-password" style="${AUTH_INPUT_CSS}">
+      <label class="fld" for="pwnew">Новый пароль</label>
+      <input id="pwnew" type="password" autocomplete="new-password" style="${AUTH_INPUT_CSS}">
+      <label class="fld" for="pwnew2">Новый пароль ещё раз</label>
+      <input id="pwnew2" type="password" autocomplete="new-password" style="${AUTH_INPUT_CSS}"
+        onkeydown="if(event.key==='Enter')passwordSave()">
+      <div id="pwerr" style="display:none;margin:0 0 12px;color:var(--danger)"></div>
+    </div>
+    <button class="btn acc" style="max-width:280px;margin:0 auto" id="pwbtn" onclick="passwordSave()">Сменить и продолжить</button></div>`;
+}
+async function passwordSave(){
+  if(!AUTH_USER){ boot(); return; }
+  const cur=(($("pwcur")||{}).value)||"", nw=(($("pwnew")||{}).value)||"", nw2=(($("pwnew2")||{}).value)||"";
+  if(!cur||!nw||!nw2) return pwErr("Заполните все три поля.");
+  if(nw!==nw2) return pwErr("Новые пароли не совпадают.");
+  if(nw===cur) return pwErr("Новый пароль совпадает с текущим.");
+  const b=$("pwbtn"); if(b){ b.disabled=true; b.textContent="Сохраняю…"; }
+  try{
+    const r=await fetch("/api/account/password",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({username:AUTH_USER,current:cur,new:nw})});
+    let j=null; try{ j=await r.json(); }catch(e){}
+    if(r.ok && j && j.ok){ toast("Пароль изменён"); stampTokenUrl(); boot(); return; }
+    pwErr((j&&j.error)||"Не удалось сменить пароль — попробуйте ещё раз.");
+  }catch(e){ pwErr("Нет связи с сервером — попробуйте ещё раз."); }
+  finally{ const bb=$("pwbtn"); if(bb){ bb.disabled=false; bb.textContent="Сменить и продолжить"; } }
+}
+// «Мои входы»: журнал входов аккаунта тем же токеном (даты, устройства, IP) и
+// «Выйти из аккаунта». Показывается и для входа по ссылке — тем токеном сервер
+// ответит отказом, и список просто не откроется (мягкий toast).
+async function askMyLogins(){
+  askSheet("loginsheet", `<div class="muted" style="text-align:center;padding:12px 0">Загружаю…</div>`);
+  let j=null;
+  try{ j=await api("/api/account/sessions"); }catch(e){ j=null; }
+  if(!(j&&j.ok)){ closeAsk("loginsheet"); toast("Не удалось загрузить входы"); return; }
+  const kindName={phone:"телефон", desktop:"компьютер"};
+  const failName={bad_password:"неверный пароль", locked:"блокировка",
+                  no_gps:"без геолокации", disabled:"аккаунт выключен",
+                  unknown:"нет такого логина"};
+  const rows=(j.logins||[]).map(s=>{
+    const bad=s.kind&&s.kind!=="ok"&&s.kind!=="ok_pending"&&s.kind!=="approved"&&s.kind!=="passwd";
+    return `<div class="box" style="margin:6px 0${bad?";opacity:.7":""}">
+      <div>${esc(kindName[s.device_kind]||s.device_kind||"устройство")} · ${esc(String(s.at||"").replace("T"," "))}${bad?` · <span class='muted'>${esc(failName[s.kind]||s.kind)}</span>`:""}</div>
+      <div class="muted">${esc(s.label||"")}${s.entrance?` · вход ${esc(s.entrance)}`:""}${s.ip?` · ${esc(s.ip)}`:""}</div>
+    </div>`;}).join("");
+  askSheet("loginsheet", `
+    <div style="font-weight:600;margin:4px 0 10px">Мои входы</div>
+    ${rows||`<div class="muted">Пока нет ни одного входа</div>`}
+    <div class="row2" style="margin-top:12px">
+      <button class="btn" style="color:var(--danger)" onclick="accountLogout()">Выйти из аккаунта</button>
+      <button class="btn acc" onclick="closeAsk('loginsheet')">${esc(L().cancel)}</button>
+    </div>`);
+}
+// Выход из аккаунта: гасим токен на сервере (/api/account/logout), убираем его
+// из localStorage и продолжаем ШТАТНЫМ logoutNow — тот увидит пустой app_token
+// и не ударит в /api/logout повторно. Как и «Выйти с этого телефона», честно
+// спрашиваем про неотправленную очередь: она стирается вместе с входом.
+async function accountLogout(force){
+  if(!force){
+    const left=await pendingCount();
+    if(left){
+      const t=L();
+      askSheet("loginsheet", `<div style="font-weight:600;margin-bottom:8px">${esc(t.logoutq)}</div>
+        <div class="muted" style="font-size:13px;margin-bottom:12px">${esc(t.logoutwhy)}</div>
+        <div style="color:var(--danger);margin-bottom:12px">${esc(t.logoutlost.replace("{n}",left))}</div>
+        <div class="row2"><button class="btn" style="color:var(--danger)" onclick="accountLogout(true)">${esc(t.logout)}</button>
+          <button class="btn acc" onclick="closeAsk('loginsheet')">${esc(t.cancel)}</button></div>`);
+      return;
+    }
+  }
+  closeAsk("loginsheet");
+  const tk=appToken();
+  try{
+    const ctl=(typeof AbortController!=="undefined")?new AbortController():null;
+    const timer=ctl?setTimeout(()=>ctl.abort(),5000):null;
+    try{ await fetch("/api/account/logout",{method:"POST",headers:{"X-App-Token":tk||""},
+                                             signal:ctl?ctl.signal:undefined}); }
+    finally{ if(timer) clearTimeout(timer); }
+  }catch(e){}
+  try{ localStorage.removeItem("app_token"); }catch(e){}
+  await logoutNow();
 }
 // Сервер отверг вход (401/403) вне Телеграма. Сначала — молчаливая подмена: новая
 // ссылка входа, ждущая ответа человека, или токен из адреса (start_url ярлыка,
@@ -2149,9 +2372,11 @@ function renderLangs(){
     `<button class="${c===STATE.lang?'on':''}" onclick="setLang('${c}')">${c.toUpperCase()}</button>`).join("")+
     `<button class="theme" onclick="cycleTheme()" title="${esc(themeTitle())}" aria-label="${esc(themeTitle())}">${themeGlyph()}</button>`+
     // «Выйти с этого телефона» — там же, где язык: других настроек у оболочки нет.
+    // Рядом «Мои входы» — журнал входов аккаунта (вход по логину, октябрь 2026).
     // Внутри Телеграма вход — сама Телега, выходить из приложения некуда.
     ((appToken() && !(TG&&TG.initData) && !DRAIN)
-      ? `<button class="out" onclick="askLogout()" title="${esc(t.logoutq)}" aria-label="${esc(t.logoutq)}">${ic("exit")}<span>${esc(t.logout)}</span></button>`
+      ? `<button class="out" onclick="askMyLogins()" title="Мои входы" aria-label="Мои входы">${ic("list")}<span>Мои входы</span></button>`+
+        `<button class="out" onclick="askLogout()" title="${esc(t.logoutq)}" aria-label="${esc(t.logoutq)}">${ic("exit")}<span>${esc(t.logout)}</span></button>`
       : "");
 }
 // Тема: система → светлая → тёмная → система. «Как в системе» — без отметки на

@@ -11,6 +11,7 @@ import { mountModeSwitchIfKit } from "../kit/modeswitch";
 import { receiptHtml, wireReceipt } from "./receipt";
 import { paymentHtml, wirePayment } from "./payment";
 import { cardNavigation, employeeSections, lockCard, personListHtml, promiseText } from "./employee";
+import { accountSectionHtml, wireAccountSection } from "./misc";
 
 const state = {
   persons: [] as any[],
@@ -341,6 +342,9 @@ export const softHelp: Section = {
   kicker: "вход, выход, что здесь можно",
   async render(root) {
     setHead("Это устройство", "приложение софтника на компьютере");
+    // Аккаунт «логин-пароль»: журнал «Мои входы» и смена пароля — только
+    // вошедшим по логину-паролю (у ссылочного входа аккаунта на сервере нет).
+    const account = (await hard.state()).device?.username || "";
     root.innerHTML = `<div class="section"><div class="grid2">
       <div class="list-row"><div class="grow"><div class="nm">Вход — по вашей ссылке</div>
         <div class="sub">Руководитель выдаёт её в «Входе команды». Телефон продолжает работать: вход на ПК его не заменяет.</div></div></div>
@@ -349,11 +353,13 @@ export const softHelp: Section = {
       <div class="list-row"><div class="grow"><div class="nm">Очередь и сохранённый результат</div>
         <div class="sub">Без сети звонок ждёт на этом ПК. После приёма сервером аналитик переносит его в вашу книгу через «Обогащение книг», затем перенос из личных книг обновляет общий реестр. Даты и время показаны по офису (UTC+5).</div></div></div>
     </div>
+    ${account ? accountSectionHtml() : ""}
     <label>Русский / O‘zbekcha / Тоҷикӣ <select class="input" id="recovery-language">${["ru", "uz", "tg"].map(lang => `<option value="${lang}" ${lang === currentLanguage() ? "selected" : ""}>${lang.toUpperCase()}</option>`).join("")}</select></label>
     <p class="hint">${esc(tr("offlinePolicy"))} ${esc(tr("retained"))}</p>
     <div class="section" id="modesec" style="display:none"><div class="section-head"><h3 class="section-title">Режимы этого exe</h3></div>
       <div id="modesw"></div></div>
     <div class="row" style="margin-top:12px"><button class="btn" id="s-logout">Выйти с этого компьютера</button></div></div>`;
+    if (account) wireAccountSection(root, account);
     root.querySelector<HTMLSelectElement>("#recovery-language")?.addEventListener("change", event => { setLanguage((event.target as HTMLSelectElement).value); void softHelp.render(root, {}); });
   void mountModeSwitchIfKit(root.querySelector("#modesw")!, "field").then(() => {
     const sec = root.querySelector("#modesec") as HTMLElement | null;

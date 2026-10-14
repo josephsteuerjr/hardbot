@@ -61,6 +61,7 @@ import control
 import digest_data
 import evidence
 import maplink
+import accounts
 import routing_client
 import workload
 import stt_client
@@ -226,6 +227,18 @@ def _uid(request: web.Request) -> int | None:
         # живёт своей жизнью, вытеснения нет.
         state, dev = db.agent_device_check(tok, request.remote)
         if state == "ok" and dev:
+            # Токен, выпущенный аккаунту логина-пароля: доступ — только после
+            # подтверждения владельца (accounts.device_gate). До подтверждения
+            # данные закрыты, но /api/bootstrap честно отвечает pending —
+            # приложение показывает экран ожидания (тот же, что у заявок).
+            if dev["account_id"]:
+                import accounts as _accounts
+                gate, gate_employee = _accounts.device_gate(int(dev["account_id"]), int(dev["id"]))
+                if gate != "ok":
+                    request["desk_employee"] = None
+                    request["account_awaiting"] = gate_employee or ""
+                    request["account_gate"] = gate
+                    return None
             request["desk_employee"] = dev["employee"]
             return int(dev["telegram_id"] or 0) or None
     if DEV:
@@ -936,6 +949,12 @@ async def _bootstrap(request: web.Request) -> web.Response:
     started = time.perf_counter()
     uid = await asyncio.to_thread(_uid, request)
     if not uid:
+        # Аккаунт логина-пароля ждёт подтверждения владельца: приложение должно
+        # показать экран ожидания, а не «вход сгорел».
+        awaiting = request.get("account_awaiting")
+        if awaiting:
+            return web.json_response({"ok": True, "pending": True, "uid": 0,
+                                      "lang": lang_of(0), "employee": awaiting})
         raise web.HTTPUnauthorized(text="auth")
     await asyncio.to_thread(_remember_from_init, request)     # вход в приложение — тоже знакомство
     # Версия оболочки устройства (шлют v33+): «у него старая оболочка» —
@@ -1064,14 +1083,16 @@ async def _identity(request: web.Request) -> web.Response:
 
 
 def _database_ready() -> bool:
-    # mode=rw refuses to create an empty DB. A rollback checks access to the
-    # writer lock without changing application data or exposing it in HTTP.
+    # mode=rw refuses to create an empty DB. Проверка ТОЛЬКО чтением: прежний
+    # BEGIN IMMEDIATE брал write-lock основной БД из неаутентифицированного
+    # роута — во время длинного импорта healthcheck стабильно получал 503 и
+    # помечал контейнер unhealthy, а каждый внешний проб конкурировал с
+    # транзакциями выездов (ревью 13.10, P1). Отсутствующую/недоступную БД
+    # читающий запрос ловит так же.
     conn = sqlite3.connect(db.DB_PATH.resolve().as_uri() + "?mode=rw", uri=True, timeout=1)
     try:
-        conn.execute("BEGIN IMMEDIATE")
         for table in ("clients", "visits", "calls", "settings", "notification_outbox"):
             conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
-        conn.rollback()
         return True
     finally:
         conn.close()
@@ -5167,6 +5188,131 @@ async def _agent_device_logout(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+# --- Аккаунты «логин-пароль» (модель владельца 14.10) --------------------------
+# Создание/пароли — только на сервере (account_access.py); HTTP умеет вход,
+# смену своего пароля, свои сессии, выход, список «кто ввёл» для руководителя
+# и подтверждение владельцем (админ-ручки). До подтверждения токен работает
+# лишь на /api/bootstrap → pending (см. _uid).
+
+async def _account_login(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    _admin_too_many_fails(request)   # тот же IP-счётчик, что у остальных дверей
+    device = body.get("device") if isinstance(body.get("device"), dict) else {}
+    result = await asyncio.to_thread(accounts.login,
+                                     str(body.get("username") or ""),
+                                     str(body.get("password") or ""),
+                                     device=device,
+                                     entrance=str(body.get("entrance") or "public"),
+                                     ip=request.remote or "",
+                                     gps=body.get("gps") if isinstance(body.get("gps"), dict) else None)
+    if result.get("action") == "bad":
+        _admin_auth_failed(request, scope="account")
+    else:
+        _admin_auth_ok(request, scope="account")
+    if result.get("action") in ("ok", "ok_pending"):
+        return web.json_response(result)
+    status = 429 if result.get("action") == "locked" else 403
+    return web.json_response({"ok": False, **{k: v for k, v in result.items() if k != "token"}},
+                             status=status)
+
+
+async def _account_password(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        raise _json_error(web.HTTPBadRequest, "body")
+    _admin_too_many_fails(request)
+    result = await asyncio.to_thread(accounts.change_password,
+                                     str(body.get("username") or ""),
+                                     str(body.get("current") or ""),
+                                     str(body.get("new") or ""))
+    if not result.get("ok"):
+        _admin_auth_failed(request, scope="account")
+        return web.json_response(result, status=403)
+    _admin_auth_ok(request, scope="account")
+    return web.json_response({"ok": True})
+
+
+def _account_device_of_request(request: web.Request) -> tuple[int, int] | None:
+    """(agent_dev_id, account_id) по токену запроса — для своих ручек."""
+    tok = (request.headers.get("X-App-Token") or "").strip()
+    if not tok:
+        return None
+    state, dev = db.agent_device_check(tok, request.remote)
+    if state != "ok" or not dev or not dev["account_id"]:
+        return None
+    import accounts as _accounts
+    linked = _accounts.account_of_token(int(dev["id"]))
+    return (int(dev["id"]), linked[0]) if linked else None
+
+
+async def _account_sessions(request: web.Request) -> web.Response:
+    found = _account_device_of_request(request)
+    if not found:
+        raise web.HTTPUnauthorized(text="auth")
+    import accounts as _accounts
+    rows = await asyncio.to_thread(_accounts.sessions_for, found[0], found[1])
+    return web.json_response({"ok": True, "logins": rows})
+
+
+async def _account_logout(request: web.Request) -> web.Response:
+    found = _account_device_of_request(request)
+    if not found:
+        raise web.HTTPUnauthorized(text="auth")
+    db.agent_device_revoke(found[0], by="self:account")
+    await asyncio.to_thread(db.audit_access, 0, "account_logout", f"dev#{found[0]}")
+    return web.json_response({"ok": True})
+
+
+async def _manager_entered(request: web.Request) -> web.Response:
+    """«Кто ввёл» для руководителя: своя команда, телефоны+компьютеры,
+    готовность (ввели и там, и там) — список пересылается владельцу."""
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
+    rows = await asyncio.to_thread(accounts.entered_list)
+    team_set = set(team)
+    own = db.get_binding(uid)
+    if own:
+        team_set.add(own)
+    rows = [r for r in rows if r["employee"] in team_set]
+    return web.json_response({"ok": True, "entered": rows,
+                              "generated_at": datetime.now().isoformat(timespec="seconds")})
+
+
+async def _admin_accounts(request: web.Request) -> web.Response:
+    _admin(request)
+    rows = await asyncio.to_thread(accounts.admin_accounts)
+    return web.json_response({"ok": True, "accounts": rows})
+
+
+async def _admin_account_approve(request: web.Request) -> web.Response:
+    """Команда владельца: открыть аккаунт и/или подтвердить устройство."""
+    _admin(request)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        raise _json_error(web.HTTPBadRequest, "body")
+    by = "owner"
+    if body.get("username"):
+        result = await asyncio.to_thread(accounts.approve_account,
+                                         str(body.get("username")), by)
+    elif body.get("device_id") is not None:
+        try:
+            device_id = int(body.get("device_id"))
+        except (TypeError, ValueError):
+            raise _json_error(web.HTTPBadRequest, "device_id")
+        result = await asyncio.to_thread(accounts.approve_device, device_id, by)
+    else:
+        raise _json_error(web.HTTPBadRequest, "username or device_id")
+    if not result.get("ok"):
+        return web.json_response(result, status=404)
+    return web.json_response({"ok": True})
+
+
 async def _admin_agent_devices(request: web.Request) -> web.Response:
     await asyncio.to_thread(_admin, request)
     return web.json_response({"ok": True, "devices": db.agent_devices_list()})
@@ -7153,6 +7299,14 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/manager/device/enroll", _manager_device_enroll)
     app.router.add_post("/api/agent/device/enroll", _agent_device_enroll)
     app.router.add_post("/api/agent/device/logout", _agent_device_logout)
+    # Аккаунты «логин-пароль»
+    app.router.add_post("/api/account/login", _account_login)
+    app.router.add_post("/api/account/password", _account_password)
+    app.router.add_get("/api/account/sessions", _account_sessions)
+    app.router.add_post("/api/account/logout", _account_logout)
+    app.router.add_get("/api/manager/entered", _manager_entered)
+    app.router.add_get("/admin/accounts.json", _admin_accounts)
+    app.router.add_post("/admin/account_approve.json", _admin_account_approve)
     app.router.add_get("/admin/agent_devices.json", _admin_agent_devices)
     app.router.add_post("/admin/agent_device/revoke.json", _admin_agent_device_revoke)
     app.router.add_get("/api/manager/device/me", _manager_device_me)

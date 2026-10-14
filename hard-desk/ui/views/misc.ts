@@ -51,6 +51,57 @@ export const promises: Section = {
 
 const ENTRY = (x: any) => (x.entered ? "вошёл" : linkStatus(x));
 
+// «Кто ввёл логин-пароль»: сотрудник вводит вход и на телефоне, и на
+// компьютере; подтверждает его только владелец. Ячейка устройства — название
+// и время ввода, пусто — ещё не вводил.
+function enteredCell(x: any, fallback: string): string {
+  if (!x) return '<span class="muted">—</span>';
+  return `<span class="who">${esc(x.label || fallback)}</span>${x.at ? `<span class="sub">${esc(ago(x.at))}</span>` : ""}`;
+}
+
+const ENTERED_STATUS = (x: any) => (x.status === "active" ? "активен" : "ждёт подтверждения");
+
+async function drawEntered(root: HTMLElement): Promise<void> {
+  const host = root.querySelector<HTMLElement>("#entered-tbl");
+  const bar = root.querySelector<HTMLElement>("#entered-bulk");
+  if (!host || !bar || !root.isConnected) return;
+  host.innerHTML = '<div class="skeleton"></div>';
+  const r = await api("/api/manager/entered");
+  if (!host.isConnected) return;
+  if (!r.ok) {
+    host.innerHTML = `${problem(r.text || "Не загрузилось")}<div class="toolbar" style="margin-top:10px"><button class="btn small" data-retry>Повторить</button></div>`;
+    host.querySelector("[data-retry]")?.addEventListener("click", () => void drawEntered(root));
+    return;
+  }
+  const entered = ((r.data?.entered || []) as any[]);
+  new DataTable<any>(host, {
+    id: "manager-entered", exportName: "Кто ввёл логин-пароль", key: (x) => `${x.username || ""}|${x.employee || ""}`,
+    empty: "Никто ещё не вводил логин-пароль.",
+    cols: [
+      { key: "emp", title: "ФИО", value: (x) => x.employee,
+        html: (x) => `<span class="who">${esc(x.employee)}</span>${x.username ? `<span class="sub mono">${esc(x.username)}</span>` : ""}` },
+      { key: "office", title: "Офис", value: (x) => x.office || "" },
+      { key: "phone", title: "Телефон", value: (x) => x.phone?.label || "", html: (x) => enteredCell(x.phone, "телефон") },
+      { key: "desktop", title: "Компьютер", value: (x) => x.desktop?.label || "", html: (x) => enteredCell(x.desktop, "компьютер") },
+      { key: "ready", title: "Готов", value: (x) => (x.ready ? "готов" : "нет"),
+        html: (x) => (x.ready ? '<span class="tag ok">готов</span>' : '<span class="tag">нет</span>') },
+      { key: "status", title: "Статус", value: ENTERED_STATUS,
+        html: (x) => `<span class="tag ${x.status === "active" ? "ok" : "warn"}">${esc(ENTERED_STATUS(x))}</span>` },
+    ],
+  }).setRows(entered);
+  const gen = String(r.data?.generated_at || "").replace("T", " ").slice(0, 16);
+  bar.innerHTML = `<span class="who">Ввели и на телефоне, и на компьютере: <b>${n(entered.filter((x) => x.ready).length)} из ${n(entered.length)}</b></span>
+    <button class="btn small" data-b="copy" ${entered.length ? "" : "disabled"}>Скопировать список</button>
+    <span class="spacer"></span>${gen ? `<span class="sub">по состоянию на ${esc(gen)}</span>` : ""}
+    <button class="ticon" data-b="reload" title="Обновить список"><svg viewBox="0 0 18 18" width="15" height="15"><path d="M14.5 8.5a5.5 5.5 0 1 1-1.6-3.9M14.5 2.5v3.6h-3.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></button>`;
+  bar.querySelector('[data-b="copy"]')?.addEventListener("click", async () => {
+    // Формат согласован с владельцем: «ФИО — офис — тел ✓/— — ПК ✓/— — готов/нет».
+    await hard.copy(entered.map((x) => `${x.employee} — ${x.office || "—"} — тел ${x.phone ? "✓" : "—"} — ПК ${x.desktop ? "✓" : "—"} — ${x.ready ? "готов" : "нет"}`).join("\n"));
+    toast(`Скопировано: ${n(entered.length)}`);
+  });
+  bar.querySelector('[data-b="reload"]')?.addEventListener("click", () => void drawEntered(root));
+}
+
 export const links: Section = {
   id: "links",
   title: "Вход команды",
@@ -64,7 +115,12 @@ export const links: Section = {
     const rows = [d.me, ...(d.links as any[])].filter(Boolean);
     let busy = false;
     root.innerHTML = `<p class="muted" style="max-width:760px;margin:0 0 6px">Ссылка персональная. Два входа для телефона (браузер и ярлык) и отдельный вход для программы на ПК. Её можно скопировать повторно после входа сотрудника — копирование квоту не тратит. Срок ссылки — неделя; уже подключённые устройства продолжают работать.</p>
-      <div class="bulk" id="bulk"></div><div id="tbl"></div>`;
+      <div class="bulk" id="bulk"></div><div id="tbl"></div>
+      <div class="section" id="entered-sec">
+        <div class="section-head"><h2 class="section-title">Кто ввёл логин-пароль</h2></div>
+        <p class="muted" style="max-width:760px;margin:6px 0 12px">Логин и пароль вводят дважды: на телефоне и на компьютере; «готов» — ввёл и там и там. Список пересылается владельцу; подтверждение — только он.</p>
+        <div class="bulk" id="entered-bulk"></div><div id="entered-tbl"></div>
+      </div>`;
     const table = new DataTable<any>(root.querySelector("#tbl")!, {
       id: "manager-links", exportName: "Вход команды", key: (x) => x.employee, select: true,
       cols: [
@@ -135,6 +191,9 @@ export const links: Section = {
       if (busy) bar.querySelectorAll<HTMLButtonElement>("button").forEach(b => b.disabled = true);
     };
     table.setRows(rows);
+    // Второй блок грузим тем же механизмом: лениво при открытии раздела,
+    // дальше — кнопкой обновления в его строке действий.
+    void drawEntered(root);
   },
 };
 
@@ -223,4 +282,67 @@ export function device(shell: Shell, me: any, onLogout: () => void): Section {
       });
     },
   };
+}
+
+// --- Аккаунт «логин-пароль» сотрудника: «Мои входы» и «Смена пароля» --------
+// Блоки вставляются в раздел «Это устройство» (fieldHelp/softHelp) только для
+// вошедших по аккаунту: у ссылочного входа журнала и пароля нет (сервер 401).
+
+const LOGIN_KIND: Record<string, string> = {
+  ok: "вход", ok_pending: "вход · ждёт подтверждения", bad_password: "неверный пароль",
+  locked: "блокировка", disabled: "доступ закрыт", blocked: "доступ закрыт",
+  no_gps: "без геолокации", passwd: "смена пароля", approved: "подтверждено", unknown: "неизвестный логин",
+};
+
+export function accountSectionHtml(): string {
+  return `<div class="section"><div class="section-head"><h3 class="section-title">Мои входы</h3>
+      <button class="btn small" data-sessions-reload>Обновить</button></div>
+    <div data-sessions><div class="skeleton"></div></div>
+    <p class="hint">Каждый вход и отказ по вашему аккаунту: телефон и компьютер, адрес входа.</p></div>
+    <div class="section"><div class="section-head"><h3 class="section-title">Смена пароля</h3></div>
+      <div style="max-width:420px">
+        <input class="input" id="cp-current" type="password" placeholder="Текущий пароль" autocomplete="current-password" style="width:100%">
+        <input class="input" id="cp-new" type="password" placeholder="Новый пароль — от 8 символов, буква и цифра" autocomplete="new-password" style="width:100%;margin-top:8px">
+        <input class="input" id="cp-repeat" type="password" placeholder="Повторите новый пароль" autocomplete="new-password" style="width:100%;margin-top:8px">
+        <div style="margin-top:10px"><button class="btn primary" id="cp-go">Сменить пароль</button></div>
+        <p class="notice" id="cp-note" hidden style="margin-top:10px"></p>
+      </div></div>`;
+}
+
+export function wireAccountSection(root: HTMLElement, username: string): void {
+  const list = root.querySelector<HTMLElement>("[data-sessions]");
+  const load = async () => {
+    if (!list) return;
+    list.innerHTML = '<div class="skeleton"></div>';
+    const r = await api("/api/account/sessions");
+    if (!list.isConnected) return;
+    if (!r.ok) { list.innerHTML = `<div class="notice err">${esc(r.text || "Журнал не загрузился")}</div>`; return; }
+    const rows: any[] = r.data?.logins || [];
+    list.innerHTML = rows.length ? `<div class="list">${rows.map(x => `
+      <div class="list-row"><div class="grow"><div class="nm">${esc(String(x.at || "").replace("T", " ").slice(0, 19))} · ${x.device_kind === "phone" ? "телефон" : "компьютер"}</div>
+        <div class="sub">${esc(x.label || "")}</div></div>
+        <div class="sub">${esc(x.entrance === "internal" ? "внутренний вход" : "публичный вход")} · ${esc(LOGIN_KIND[x.kind] || x.kind || "")}</div>
+      </div>`).join("")}</div>` : '<p class="muted">Входов пока не записано.</p>';
+  };
+  void load();
+  root.querySelector("[data-sessions-reload]")?.addEventListener("click", () => void load());
+  root.querySelector<HTMLButtonElement>("#cp-go")?.addEventListener("click", async () => {
+    const button = root.querySelector<HTMLButtonElement>("#cp-go")!;
+    const current = root.querySelector<HTMLInputElement>("#cp-current")?.value || "";
+    const next = root.querySelector<HTMLInputElement>("#cp-new")?.value || "";
+    const repeat = root.querySelector<HTMLInputElement>("#cp-repeat")?.value || "";
+    const note = root.querySelector<HTMLElement>("#cp-note")!;
+    const say = (text: string, bad: boolean) => { note.textContent = text; note.className = "notice" + (bad ? " err" : ""); note.hidden = false; };
+    note.hidden = true;
+    if (!current) { root.querySelector<HTMLInputElement>("#cp-current")?.focus(); return; }
+    if (next.length < 8 || !/[0-9]/.test(next) || !/[a-zA-Zа-яА-ЯёЁ]/.test(next)) { say("Пароль от 8 символов, с буквой и цифрой.", true); return; }
+    if (next !== repeat) { say("Пароли не совпадают.", true); return; }
+    button.disabled = true;
+    const r = await api("/api/account/password", undefined, "POST", { username, current, new: next });
+    button.disabled = false;
+    if (!r.ok) { say(r.text || "Не удалось сменить пароль.", true); return; }
+    for (const id of ["#cp-current", "#cp-new", "#cp-repeat"]) root.querySelector<HTMLInputElement>(id)!.value = "";
+    say("Пароль сменён.", false);
+    toast("Пароль сменён");
+  });
 }

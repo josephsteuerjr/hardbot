@@ -19,6 +19,7 @@ import { today } from "./analyst/today";
 import { people } from "./analyst/people";
 import { links as aLinks } from "./analyst/links";
 import { managers } from "./analyst/managers";
+import { accounts } from "./analyst/accounts";
 import { conn, maint } from "./analyst/system";
 import { mail } from "./analyst/mail";
 import { priority, registry } from "./analyst/registry";
@@ -39,7 +40,7 @@ async function startAnalyst() {
     return;
   }
   setWho(`<b>${esc(st.active || "")}</b>${esc(st.url || "адрес не задан")}`);
-  const list: Section[] = [today, people, aLinks, managers, registry, priority,
+  const list: Section[] = [today, people, aLinks, managers, accounts, registry, priority,
                            // «Контроль» целиком (риск/обзвон/закрепления/доступ):
                            // аналитик смотрит ВСЮ компанию через устройство пульта.
                            controlSection(adminControlCall, false),
@@ -158,7 +159,10 @@ mountDesktopTools();
 document.addEventListener("keydown", (e) => { if (e.key === "F5") { e.preventDefault(); void refresh(); } });
 
 /** Приложение сотрудника (выездник и софт — одно окно): роль узнаёт СЕРВЕР
- *  по ссылке входа и портфелю; сам человек о режимах не знает ничего. */
+ *  по ссылке входа и портфелю; сам человек о режимах не знает ничего.
+ *  С 14.10 вход ещё и по логину-паролю (аккаунт выдаёт владелец) — вторая
+ *  вкладка того же экрана; до подтверждения владельцем сервер отвечает
+ *  pending, и вместо портфеля показывается экран ожидания. */
 function enrollFieldScreen(note = "") {
   bare(true);
   setSections([]);
@@ -166,28 +170,163 @@ function enrollFieldScreen(note = "") {
   $("head").hidden = true;
   host.innerHTML = `<div class="page enroll">
     <h1>Вход в приложение</h1>
-    <p>Вставьте СВОЮ ссылку входа — её выдаёт руководитель в «Входе команды». Это нужно один раз.</p>
-    <p class="hint">Телефон продолжает работать: вход на компьютере его не заменяет.</p>
-    <div class="row"><input class="input" id="link" placeholder="https://…/i/…" autocomplete="off" spellcheck="false">
-      <button class="btn primary" id="go">Войти</button></div>
+    <div class="chips" style="margin:0 0 18px">
+      <button class="chip" id="tab-link" aria-pressed="true">Ссылка входа</button>
+      <button class="chip" id="tab-pass" aria-pressed="false">Логин и пароль</button>
+    </div>
+    <div id="pane-link">
+      <p>Вставьте СВОЮ ссылку входа — её выдаёт руководитель в «Входе команды». Это нужно один раз.</p>
+      <p class="hint">Телефон продолжает работать: вход на компьютере его не заменяет.</p>
+      <div class="row"><input class="input" id="link" placeholder="https://…/i/…" autocomplete="off" spellcheck="false">
+        <button class="btn primary" id="go">Войти</button></div>
+    </div>
+    <div id="pane-pass" hidden>
+      <p>Введите логин и пароль, которые вам выдали вместе с программой.</p>
+      <p class="hint">Телефон продолжает работать: вход на компьютере его не заменяет.</p>
+      ${shell?.server ? "" : `<div class="row" style="margin-bottom:10px"><input class="input" id="acc-server" placeholder="Адрес сервера — https://… из инструкции" autocomplete="off" spellcheck="false"></div>`}
+      <div class="row" style="margin-bottom:10px"><input class="input" id="acc-login" placeholder="Логин" autocomplete="username" spellcheck="false"></div>
+      <div class="row"><input class="input" id="acc-pass" type="password" placeholder="Пароль" autocomplete="current-password">
+        <button class="btn primary" id="acc-go">Войти</button></div>
+    </div>
     <div class="err" id="err">${esc(note)}</div>
+    <div class="row" id="err-actions" hidden style="margin-top:12px"></div>
   </div>`;
   const input = $<HTMLInputElement>("link");
   addMigration(host);
+  // Отказ входа словами; 409 «остались звонки прежнего сотрудника» получает
+  // кнопку принудительной очистки очереди — иначе компьютер оказался бы тупиком.
+  const hideActions = () => { const a = $("err-actions"); a.hidden = true; a.innerHTML = ""; };
+  const showFailure = (r: { text?: string; status?: number }, retry: () => unknown) => {
+    $("err").textContent = r.text || "Не получилось";
+    hideActions();
+    if (r.status !== 409) return;
+    const actions = $("err-actions");
+    const clear = document.createElement("button");
+    clear.className = "btn small danger";
+    clear.textContent = "Очистить очередь прежнего сотрудника";
+    clear.addEventListener("click", async () => {
+      if (!confirm("Удалить все неотправленные звонки прежнего сотрудника на этом компьютере? Это нельзя отменить.")) return;
+      const done = await hard.api("POST", "/api/local/call_queue/clear");
+      if (!done.ok) { $("err").textContent = done.text || "Очередь не очищена"; return; }
+      $("err").textContent = "Очередь очищена. Пробую войти снова…";
+      await retry();
+    });
+    actions.append(clear);
+    actions.hidden = false;
+  };
+  const tabLink = $<HTMLButtonElement>("tab-link"), tabPass = $<HTMLButtonElement>("tab-pass");
+  const pick = (pass: boolean) => {
+    tabLink.setAttribute("aria-pressed", String(!pass));
+    tabPass.setAttribute("aria-pressed", String(pass));
+    $("pane-link").hidden = pass;
+    $("pane-pass").hidden = !pass;
+    (pass ? $<HTMLInputElement>("acc-login") : input)?.focus();
+  };
+  tabLink.addEventListener("click", () => pick(false));
+  tabPass.addEventListener("click", () => pick(true));
   const btn = $<HTMLButtonElement>("go");
   const submit = async () => {
     const v = input.value.trim();
     if (!v) { input.focus(); return; }
     btn.disabled = true;
     $("err").textContent = "";
+    hideActions();
     const r = await hard.enroll(v);
     btn.disabled = false;
-    if (!r.ok) { $("err").textContent = r.text || "Не получилось"; return; }
+    if (!r.ok) { showFailure(r, submit); return; }
     await openAfterEnrollment();
   };
   btn.addEventListener("click", submit);
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") void submit(); });
+  const accLogin = $<HTMLInputElement>("acc-login"), accPass = $<HTMLInputElement>("acc-pass");
+  const accBtn = $<HTMLButtonElement>("acc-go");
+  const submitPass = async () => {
+    const username = accLogin.value.trim().toLowerCase();
+    const serverField = document.getElementById("acc-server") as HTMLInputElement | null;
+    const server = (serverField?.value || "").trim().replace(/\/+$/, "");
+    if (!username) { accLogin.focus(); return; }
+    if (!accPass.value) { accPass.focus(); return; }
+    if (serverField && !server) { serverField.focus(); return; }
+    if (serverField && !/^https?:\/\/[^\s]+$/.test(server)) {
+      $("err").textContent = "Адрес сервера выглядит не так — скопируйте его из инструкции целиком.";
+      return;
+    }
+    accBtn.disabled = true;
+    $("err").textContent = "";
+    hideActions();
+    const r = await hard.accountLogin(server, username, accPass.value);
+    accBtn.disabled = false;
+    if (!r.ok) { showFailure(r, submitPass); return; }
+    if (r.data?.must_change_password) {
+      const changed = await passwordChangeScreen(String(r.data?.username || username), accPass.value);
+      if (!changed) return;
+    }
+    await openAfterEnrollment();
+  };
+  accBtn.addEventListener("click", () => void submitPass());
+  for (const field of [accLogin, accPass]) field.addEventListener("keydown", (e) => { if (e.key === "Enter") void submitPass(); });
   input.focus();
+}
+
+/** Первый вход по выданному паролю: сервер ставит must_change_password, пока
+ *  пароль не сменён. Три поля, POST /api/account/password; после успеха вход
+ *  продолжается сам (портфель или экран ожидания подтверждения). */
+function passwordChangeScreen(username: string, current: string): Promise<boolean> {
+  bare(true);
+  setSections([]);
+  $("head").hidden = true;
+  $("view-inner").innerHTML = `<div class="page enroll">
+    <h1>Смена пароля</h1>
+    <p>Вы вошли как <b>${esc(username)}</b>. Выданный пароль одноразовый — задайте свой.</p>
+    <div class="row" style="margin-bottom:10px"><input class="input" id="pw-current" type="password" placeholder="Выданный пароль" autocomplete="current-password"></div>
+    <div class="row" style="margin-bottom:10px"><input class="input" id="pw-new" type="password" placeholder="Новый пароль — от 8 символов, буква и цифра" autocomplete="new-password"></div>
+    <div class="row"><input class="input" id="pw-repeat" type="password" placeholder="Повторите новый пароль" autocomplete="new-password">
+      <button class="btn primary" id="pw-go">Сменить пароль</button></div>
+    <div class="err" id="pw-err"></div>
+  </div>`;
+  const currentInput = $<HTMLInputElement>("pw-current");
+  currentInput.value = current; // только что введён — подставляем, дальше не храним
+  return new Promise<boolean>(resolve => {
+    const submit = async () => {
+      const go = $<HTMLButtonElement>("pw-go");
+      const next = $<HTMLInputElement>("pw-new").value, repeat = $<HTMLInputElement>("pw-repeat").value;
+      if (!currentInput.value) { currentInput.focus(); return; }
+      if (next.length < 8 || !/[0-9]/.test(next) || !/[a-zA-Zа-яА-ЯёЁ]/.test(next)) { $("pw-err").textContent = "Пароль от 8 символов, с буквой и цифрой."; return; }
+      if (next !== repeat) { $("pw-err").textContent = "Пароли не совпадают."; return; }
+      go.disabled = true;
+      $("pw-err").textContent = "";
+      const r = await api("/api/account/password", undefined, "POST", { username, current: currentInput.value, new: next });
+      go.disabled = false;
+      if (!r.ok) { $("pw-err").textContent = r.text || "Не удалось сменить пароль."; return; }
+      resolve(true);
+    };
+    $<HTMLButtonElement>("pw-go").addEventListener("click", () => void submit());
+    for (const id of ["pw-current", "pw-new", "pw-repeat"]) $<HTMLInputElement>(id).addEventListener("keydown", (e) => { if (e.key === "Enter") void submit(); });
+    currentInput.focus();
+  });
+}
+
+/** Вход по логину-паролю записан, но владелец ещё не открыл доступ: сервер
+ *  отвечает /api/bootstrap {pending:true} — показываем ожидание, портфель
+ *  не открываем. «Проверить снова» повторяет обычный запуск приложения. */
+function pendingApprovalScreen(employee = "") {
+  bare(true);
+  setSections([]);
+  $("head").hidden = true;
+  $("view-inner").innerHTML = `<div class="page enroll">
+    <h1>Вход записан</h1>
+    ${employee ? `<p class="hint" style="margin:0 0 6px">${esc(employee)}</p>` : ""}
+    <p>Вход записан. Доступ появится после подтверждения владельца. Можно закрыть программу.</p>
+    <p class="hint">Руководитель передаёт список введших, владелец открывает доступ. Позже нажмите «Проверить снова» — после подтверждения приложение откроется сразу.</p>
+    <div class="row"><button class="btn primary" id="pending-check">Проверить снова</button>
+      <button class="btn" id="pending-exit">Выйти</button></div>
+  </div>`;
+  $<HTMLButtonElement>("pending-check").addEventListener("click", () => void startAgent());
+  $<HTMLButtonElement>("pending-exit").addEventListener("click", async () => {
+    if (!confirm("Выйти? Вход и кэш закроются. Неотправленные записи и черновики сохранятся для того же сотрудника.")) return;
+    await hard.logout();
+    location.reload();
+  });
 }
 
 async function startAgent() {
@@ -202,6 +341,9 @@ async function startAgent() {
   if (!me.ok && me.kind === "revoked") { enrollFieldScreen(me.text); return; }
   if (!me.ok) { startError(me.text || "", startAgent); return; }
   const who: any = me.ok ? me.data : null;
+  // Аккаунт «логин-пароль» ждёт подтверждения владельца: токен работает, но
+  // данных нет — экран ожидания вместо портфеля (см. pendingApprovalScreen).
+  if (who?.pending) { pendingApprovalScreen(String(who.employee || "")); return; }
   setLanguage(who?.lang || currentLanguage());
   // Какой экран показать — решает СЕРВЕР: есть портфель софта → очередь звонков
   // (перевод УЗБ на колл-центр), иначе — портфель выездника. Смешанный случай

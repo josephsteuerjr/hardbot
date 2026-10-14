@@ -7,6 +7,7 @@ import { DataTable } from "../kit/table";
 import { openHardCard } from "./hard-card";
 import { employeeSections, personListHtml, promiseText, queueNotice } from "./employee";
 import { mountModeSwitchIfKit } from "../kit/modeswitch";
+import { accountSectionHtml, wireAccountSection } from "./misc";
 
 const state = { persons: [] as any[], rep: "", table: undefined as DataTable<any> | undefined, today: "", showToday: false, partner: "" };
 export const hardEmployeeSections = employeeSections("hard", rep => void openCard(rep));
@@ -93,6 +94,9 @@ export const fieldHelp: Section = {
   kicker: "вход, выход, что здесь можно",
   async render(root) {
     setHead("Это устройство", "приложение выездника на компьютере");
+    // Аккаунт «логин-пароль»: журнал «Мои входы» и смена пароля — только
+    // вошедшим по логину-паролю (у ссылочного входа аккаунта на сервере нет).
+    const account = (await hard.state()).device?.username || "";
     root.innerHTML = `<div class="section"><div class="grid2">
       <div class="list-row"><div class="grow"><div class="nm">Вход — по вашей ссылке</div>
         <div class="sub">Руководитель выдаёт её в «Входе команды». Телефон продолжает работать: вход на ПК его не заменяет.</div></div></div>
@@ -101,9 +105,11 @@ export const fieldHelp: Section = {
       <div class="list-row"><div class="grow"><div class="nm">Чеки — для сверки оплат</div>
         <div class="sub">Сообщённая оплата и чек требуют реестровой сверки. Свои записи, доставку и отчёты смотрите в «Истории работы» и «Моих результатах». Черновики защищены на этом ПК; без сети чтение доступно до 8 часов.</div></div></div>
     </div>
+    ${account ? accountSectionHtml() : ""}
     <div class="section" id="modesec" style="display:none"><div class="section-head"><h3 class="section-title">Режимы этого exe</h3></div>
       <div id="modesw"></div></div>
     <div class="row" style="margin-top:12px"><button class="btn" id="f-logout">Выйти с этого компьютера</button></div></div>`;
+    if (account) wireAccountSection(root, account);
   void mountModeSwitchIfKit(root.querySelector("#modesw")!, "field").then(() => {
     const sec = root.querySelector("#modesec") as HTMLElement | null;
     const sw = root.querySelector("#modesw") as HTMLElement | null;

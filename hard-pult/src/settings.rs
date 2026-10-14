@@ -23,6 +23,11 @@ pub fn settings_path() -> PathBuf {
 pub struct Settings {
     path: PathBuf,
     data: Map<String, Value>,
+    /// Серверы, чей токен не открылся DPAPI (другая учётка Windows). Значение
+    /// в `data` остаётся ЗАПЕЧАТАННЫМ: следующий save() перепишет его как есть,
+    /// а не затрёт пустой строкой — перенос файла на другую учётку не должен
+    /// уничтожать единственную копию токена.
+    locked: std::collections::BTreeSet<String>,
 }
 
 impl Settings {
@@ -36,18 +41,25 @@ impl Settings {
                 _ => None,
             })
             .unwrap_or_default();
-        let mut s = Settings { path, data };
+        let mut s = Settings { path, data, locked: Default::default() };
         s.ensure_servers();
+        let mut locked = std::collections::BTreeSet::new();
         if let Some(servers) = s.data.get_mut("servers").and_then(Value::as_object_mut) {
-            for entry in servers.values_mut() {
+            for (url, entry) in servers.iter_mut() {
                 if let Some(token) = entry.get("token").and_then(Value::as_str) {
                     match crate::token_protection::open(token) {
                         Ok(clear) => { entry["token"] = Value::String(clear); },
-                        Err(_) => { entry["token"] = Value::String(String::new()); eprintln!("Токен настроек недоступен для этой учётной записи Windows"); }
+                        Err(err) => {
+                            // Недоступен ЭТОЙ учётной записи: остаётся запечатанным
+                            // на месте, пользоваться нельзя, уничтожать нельзя.
+                            locked.insert(url.clone());
+                            eprintln!("Токен настроек недоступен для этой учётной записи Windows ({url}): {err}");
+                        }
                     }
                 }
             }
         }
+        s.locked = locked;
         s
     }
 
@@ -134,10 +146,11 @@ impl Settings {
             .map(|m| {
                 m.iter()
                     .map(|(url, entry)| {
-                        let ready = entry
-                            .get("token")
-                            .and_then(Value::as_str)
-                            .map_or(false, |t| !t.is_empty());
+                        let ready = !self.locked.contains(url)
+                            && entry
+                                .get("token")
+                                .and_then(Value::as_str)
+                                .map_or(false, |t| !t.is_empty());
                         (url.clone(), ready)
                     })
                     .collect()
@@ -159,6 +172,10 @@ impl Settings {
     }
 
     pub fn token(&mut self) -> String {
+        let url = self.url();
+        if self.locked.contains(&url) {
+            return String::new(); // запечатанный и недоступный — как «не входил»
+        }
         self.entry()
             .get("token")
             .and_then(Value::as_str)
@@ -175,6 +192,7 @@ impl Settings {
 
     pub fn set_login(&mut self, url: &str, token: &str, days: Value) {
         self.set_url(url);
+        self.locked.remove(url.trim_end_matches('/'));
         let entry = self.entry();
         entry.insert("token".into(), Value::String(token.to_string()));
         entry.insert("days".into(), days);
@@ -203,6 +221,10 @@ impl Settings {
         if let Some(servers) = protected.get_mut("servers").and_then(Value::as_object_mut) {
             for entry in servers.values_mut() {
                 if let Some(token) = entry.get("token").and_then(Value::as_str) {
+                    if token.starts_with(crate::token_protection::SEALED_PREFIX) {
+                        // Уже запечатан (недоступен этой учётке) — переписать как есть.
+                        continue;
+                    }
                     if !token.is_empty() {
                         match crate::token_protection::seal(token) {
                             Ok(sealed) => { entry["token"] = Value::String(sealed); },
@@ -214,6 +236,16 @@ impl Settings {
         }
         let text = serde_json::to_string_pretty(&Value::Object(protected))
             .unwrap_or_default();
-        std::fs::write(&self.path, text).is_ok()
+        // Атомарно: краш посреди записи не оставляет битый JSON (молчаливая
+        // потеря всех серверов при следующем load — исправлено 14.10).
+        let tmp = self.path.with_extension("json.tmp");
+        if std::fs::write(&tmp, &text).is_err() {
+            return false;
+        }
+        if std::fs::rename(&tmp, &self.path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return false;
+        }
+        true
     }
 }

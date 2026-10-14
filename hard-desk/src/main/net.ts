@@ -2,7 +2,7 @@
 // в страницу не попадает никогда. Мимо системного прокси (на машинах офиса бывает
 // HTTPS_PROXY на заокеанский прокси, который не работает), сертификат проверяет
 // Chromium по хранилищу Windows — повтора «без проверки» нет.
-import { session, type Session } from "electron";
+import { app, session, type Session } from "electron";
 import { readFileSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { createHash, randomBytes } from "node:crypto";
@@ -291,6 +291,64 @@ export async function enrollField(raw: string): Promise<ApiResult> {
   return { ok: true, status: 200, data: { ...data, token: undefined } };
 }
 
+/** Отпечаток этого компьютера для входа по логину-паролю: sha-256 имени машины,
+ *  пользователя Windows и каталога данных — стабилен, пока программа живёт на
+ *  этом же месте; смена машины видна аккаунту как новое устройство. */
+function desktopFingerprint(): string {
+  let user = "";
+  try { user = userInfo().username; } catch { /* */ }
+  try {
+    return createHash("sha256").update(hostname() + "\n" + user + "\n" + app.getPath("userData")).digest("hex");
+  } catch {
+    return createHash("sha256").update(hostname() + "\n" + user).digest("hex");
+  }
+}
+
+/** Вход сотрудника по логину и паролю (аккаунт вместо персональной ссылки).
+ *  Токен выдаётся того же класса, что у входа по ссылке (agent_devices), и
+ *  сохраняется как обычный полевой — конструктор дальше не различает. Сервер
+ *  до подтверждения владельца отвечает pending только на /api/bootstrap. */
+export async function accountLogin(server: string, username: string, password: string): Promise<ApiResult> {
+  const base = String(server || "").trim().replace(/\/+$/, "") || readSettings().fieldServer || readSettings().server || "";
+  if (!base) return { ok: false, status: 0, kind: "nolink", text: "Неизвестен адрес сервера. Войдите один раз по ссылке или укажите адрес сервера из инструкции." };
+  const name = deviceName();
+  const fp = desktopFingerprint();
+  const previous = readSettings(), pending = readCallQueue();
+  const hasPending = !!pending?.entries.length;
+  if (hasPending && base !== previous.fieldServer)
+    return { ok: false, status: 409, kind: "forbidden", text: "Сначала отправьте звонки прежнего входа. Очередь сохранена на этом компьютере." };
+  let res: Response;
+  try {
+    res = await request(base + "/api/account/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password, entrance: "internal",
+        device: { kind: "desktop", fp, label: name + " · " + fp.slice(0, 8) } }),
+    });
+  } catch (err) {
+    return troubleOf(err);
+  }
+  if (res.status === 403 || res.status === 429) {
+    const data = await res.json().catch(() => null) as { error?: string } | null;
+    return { ok: false, status: res.status, kind: res.status === 429 ? "server" : "forbidden",
+      text: data?.error || "Не удалось войти. Проверьте логин и пароль." };
+  }
+  if (!res.ok) return { ok: false, status: res.status, kind: "server", text: `Сервер ответил ошибкой ${res.status}.` };
+  const data = (await res.json().catch(() => null)) as
+    { action?: string; token?: string; employee?: string; username?: string; must_change_password?: boolean; error?: string } | null;
+  if (!data?.token || (data.action !== "ok" && data.action !== "ok_pending"))
+    return { ok: false, status: 0, kind: "server", text: data?.error || "Сервер не выдал вход. Попробуйте ещё раз." };
+  // Очередь звонков прежнего сотрудника не должна молча достаться новому входу:
+  // тот же человек — переносим очередь на новый токен, другой — отказ (на экране
+  // входа появится кнопка «Очистить очередь прежнего сотрудника»).
+  if (hasPending && (!previous.fieldDevice?.employee || previous.fieldDevice.employee !== data.employee))
+    return { ok: false, status: 409, kind: "forbidden", text: "На компьютере остались звонки прежнего сотрудника. Сначала отправьте их или восстановите его вход; очередь сохранена." };
+  writeFieldToken(data.token);
+  writeSettings({ fieldServer: base, fieldDevice: { name, employee: data.employee || "", username: data.username || "" } });
+  if (hasPending && pending) writeCallQueue({ ...pending, owner: callOwner() });
+  return { ok: true, status: 200, data: { action: data.action, employee: data.employee, username: data.username, must_change_password: !!data.must_change_password } };
+}
+
 function legacyCallOwner(): string {
   return createHash("sha256").update((readSettings().fieldServer || "") + "\n" + readFieldToken()).digest("hex");
 }
@@ -336,7 +394,8 @@ export function flushCallQueue(): Promise<Map<string, ApiResult>> {
       const current = ownedCallQueue(); // сохранения во время отправки остаются в очереди
       const rejected = (res.data as { rejected?: Record<string, unknown> } | undefined)?.rejected;
       if (res.ok && !rejected) {
-        acknowledgeDraft(entry.body,res.data);
+        try { acknowledgeDraft(entry.body, res.data); }
+        catch { /* повреждённый черновик не должен подвешивать всю очередь */ }
         current.entries = current.entries.filter(e => e.body.op_id !== entry.body.op_id);
       }
       else {
@@ -355,6 +414,18 @@ export async function callField(method: string, path: string, query?: Record<str
                                 opts: { binary?: boolean; cache?: boolean; sendingQueue?: boolean } = {}): Promise<ApiResult> {
   const server = readSettings().fieldServer;
   const token = readFieldToken();
+  if (method === "POST" && path === "/api/local/call_queue/clear") {
+    // Полная очистка очереди прежнего входа (запрещённый вход нового сотрудника,
+    // повреждённый файл очереди). UI показывает подтверждение с числом записей.
+    // Доступна и БЕЗ токена: кнопка на экране входа нужна именно тогда, когда
+    // войти нельзя, а чужая очередь держит компьютер.
+    try {
+      let dropped = -1; // -1 = файл не читался (повреждён) — всё равно чистим
+      try { dropped = ownedCallQueue().entries.length; } catch { /* повреждён */ }
+      clearCallQueue();
+      return { ok: true, status: 200, data: { dropped } };
+    } catch (error) { return { ok: false, status: 0, kind: "server", text: String(error) }; }
+  }
   if (!server || !token) return { ok: false, status: 0, kind: "nolink", text: "Приложение ещё не знает, кто вы." };
   if (path === "/api/local/preferences") return localPreferences(method, query, body, callOwner());
   if (path === "/api/local/draft") {
@@ -385,6 +456,33 @@ export async function callField(method: string, path: string, query?: Record<str
       const queue = ownedCallQueue();
       return { ok: true, status: 200, data: { pending: queue.entries.length, errors: queue.entries.filter(e => e.error).map(e => ({ rep: e.body.rep, op_id: e.body.op_id, error: e.error, body: e.body })) } };
     } catch (error) { return { ok: false, status: 0, kind: "server", text: String(error) }; }
+  }
+  // Руки аккаунта «логин-пароль»: журнал своих входов ходит с полевым токеном,
+  // смена пароля — с текущим паролем. Тексты ошибок сервера показываем как есть
+  // («Текущий пароль неверен»), а 401 здесь НЕ гасит вход: у ссылочного входа
+  // аккаунта просто нет — это не отзыв устройства.
+  if (path === "/api/account/sessions" || path === "/api/account/password") {
+    const allowed = (method === "GET" && path === "/api/account/sessions") || (method === "POST" && path === "/api/account/password");
+    if (!allowed) return { ok: false, status: 0, kind: "server", text: "запрещённый путь" };
+    let res: Response;
+    try {
+      res = await request(server + path, {
+        method,
+        headers: { "X-App-Token": token, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        bypassCustomProtocolHandlers: true,
+      } as RequestInit);
+    } catch (err) {
+      return troubleOf(err);
+    }
+    if (res.status === 401) return { ok: false, status: 401, kind: "server", text: "Этот вход заведён по ссылке — журнал входов и смена пароля недоступны." };
+    if (!res.ok) {
+      const code = await errorCode(res);
+      return { ok: false, status: res.status, kind: "server", text: code || `Сервер ответил ошибкой ${res.status}.` };
+    }
+    const data = await res.json().catch(() => null);
+    if (!data) return { ok: false, status: 502, kind: "server", text: "Сервер ответил непонятным ответом." };
+    return { ok: true, status: res.status, data };
   }
   const callBody = body as Record<string, unknown> | undefined;
   if (!opts.sendingQueue && method === "POST" &&

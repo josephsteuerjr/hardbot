@@ -10,7 +10,8 @@ export interface Settings {
   server?: string;          // https://… — берётся из ссылки входа
   device?: { id: number; name: string; created_at?: string };
   fieldServer?: string;     // приложение выездника на ПК: свой вход
-  fieldDevice?: { id: number; name: string; employee?: string; telegram_id?: number; created_at?: string };
+  // id — только у входа по ссылке; вход по логину-паролю пишет name/employee/username
+  fieldDevice?: { id?: number; name: string; employee?: string; username?: string; telegram_id?: number; created_at?: string };
   seenTrayHint?: boolean;
   theme?: "light" | "dark" | "system";
   [k: string]: unknown;

@@ -18,7 +18,7 @@ export interface Shell {
   product: string;
   version: string;
   server: string;
-  device: { id: number; name: string; created_at?: string } | null;
+  device: { id?: number; name: string; created_at?: string; employee?: string; username?: string; telegram_id?: number } | null;
   enrolled: boolean;
   theme: "light" | "dark" | "system";
   deviceName: string;
@@ -35,6 +35,9 @@ interface Bridge {
   /** Один exe — все роли: сменить режим («manager»/«field»/«soft»/«analyst»). */
   setMode(mode: string): Promise<{ ok: boolean; text?: string }>;
   enroll(link: string): Promise<ApiResult>;
+  /** Вход сотрудника по логину и паролю: main собирает отпечаток устройства
+   *  и пишет полевой токен; рендерер пароль не хранит. */
+  accountLogin(server: string, username: string, password: string): Promise<ApiResult>;
   logout(): Promise<boolean>;
   api(method: string, path: string, query?: Q, body?: unknown): Promise<ApiResult>;
   image(path: string, query?: Q): Promise<string | null>;
