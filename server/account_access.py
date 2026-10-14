@@ -3,7 +3,7 @@
 Как и у admin_access.py, HTTP-ручек записи здесь НЕТ намеренно: право завести
 аккаунт или сменить пароль равно доступу к серверу (SSH/панель ИТ). Входить
 сотрудники будут сами — логином и паролем на телефоне (GPS обязателен) и на
-компьютере; доступ открывается командой владельца (approve), после того как
+компьютере; доступ открывается подтверждением администратора (approve), после того как
 руководитель переслал список «кто ввёл» (см. /api/manager/entered).
 
     python account_access.py create --employee "ФИО" --username kurbanov --office Душанбе
@@ -52,7 +52,8 @@ def _gen_password() -> str:
 def cmd_create(args: argparse.Namespace) -> int:
     password = args.password or _gen_password()
     result = accounts.create_account(args.employee, args.username, password,
-                                     office=args.office or "", role=args.role, by="cli")
+                                     office=args.office or "", role=args.role, by="cli",
+                                     telegram_id=args.telegram_id)
     if not result.get("ok"):
         _out("ОТКАЗ: " + result.get("error", ""))
         return 1
@@ -60,7 +61,7 @@ def cmd_create(args: argparse.Namespace) -> int:
          + (f", офис {args.office}" if args.office else "") + ")")
     _out(f"Пароль (сообщить один раз, на экране не повторится): {password}")
     if args.role != "agent":
-        _out("Роль не agent: до входа руководителем убедитесь, что человек есть в managers.")
+        _out("Роль не agent: активация потребует ДВУХ подтверждений администраторов.")
     return 0
 
 
@@ -120,21 +121,33 @@ def cmd_entered(args: argparse.Namespace) -> int:
         if r["phone"]:
             _out(f"    телефон: {r['phone']['label']} в {r['phone']['at']} "
                  f"({r['phone']['gps'] or 'без GPS'})")
-    _out("\nГотовые (ввели и там, и там) переслать владельцу; он: approve / approve-device.")
+    _out("\nГотовые (ввели и там, и там) переслать администратору; он: approve / approve-device.")
+    _out("Руководителям/аналитику нужно ДВА подтверждения разных администраторов.")
     return 0
 
 
 def cmd_approve(args: argparse.Namespace) -> int:
-    result = accounts.approve_account(args.username, by="owner-cli")
-    _out("Аккаунт открыт." if result.get("ok") else "ОТКАЗ: " + result.get("error", ""))
-    return 0 if result.get("ok") else 1
+    result = accounts.approve_account(args.username, by=args.by or "admin-cli")
+    if not result.get("ok"):
+        _out("ОТКАЗ: " + result.get("error", ""))
+        return 1
+    if result.get("active"):
+        _out(f"Аккаунт открыт. Подтверждения: {', '.join(result.get('approvals', []))}")
+    else:
+        _out(result.get("error", "Нужно ещё подтверждение администратора."))
+    return 0
 
 
 def cmd_approve_device(args: argparse.Namespace) -> int:
-    result = accounts.approve_device(args.id, by="owner-cli")
-    _out("Устройство подтверждено." if result.get("ok")
-         else "ОТКАЗ: " + result.get("error", ""))
-    return 0 if result.get("ok") else 1
+    result = accounts.approve_device(args.id, by=args.by or "admin-cli")
+    if not result.get("ok"):
+        _out("ОТКАЗ: " + result.get("error", ""))
+        return 1
+    if result.get("active"):
+        _out(f"Устройство подтверждено. Подтверждения: {', '.join(result.get('approvals', []))}")
+    else:
+        _out(result.get("error", "Нужно ещё подтверждение администратора."))
+    return 0
 
 
 def cmd_disable(args: argparse.Namespace) -> int:
@@ -169,7 +182,11 @@ def main() -> int:
     p.add_argument("--employee", required=True)
     p.add_argument("--username", required=True)
     p.add_argument("--office", default="")
-    p.add_argument("--role", default="agent")
+    p.add_argument("--role", default="agent",
+                   help="agent|manager|security|full|analyst (руководителям/аналитику "
+                        "нужно два подтверждения и запись в managers)")
+    p.add_argument("--telegram-id", type=int, default=None,
+                   help="uid руководителя/аналитика, если в managers его не найти по ФИО")
     p.add_argument("--password", default="")
     p.set_defaults(func=cmd_create)
 
@@ -188,10 +205,13 @@ def main() -> int:
 
     p = sub.add_parser("approve")
     p.add_argument("--username", required=True)
+    p.add_argument("--by", default="admin-cli",
+                   help="имя администратора для двухподтверждений (по умолчанию admin-cli)")
     p.set_defaults(func=cmd_approve)
 
     p = sub.add_parser("approve-device")
     p.add_argument("--id", type=int, required=True)
+    p.add_argument("--by", default="admin-cli")
     p.set_defaults(func=cmd_approve_device)
 
     p = sub.add_parser("disable")

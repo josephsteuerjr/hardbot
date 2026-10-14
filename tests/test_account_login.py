@@ -59,12 +59,12 @@ def test_full_office_circle_before_and_after_owner_approval(world):
                            "WHERE fingerprint='phone-fp-1'").fetchone()
         agent = conn.execute("SELECT id FROM agent_devices WHERE fingerprint='phone-fp-1' "
                              "AND revoked_at IS NULL").fetchone()
-    assert accounts.device_gate(dev["account_id"], agent["id"]) == ("pending", "Курбонов Шохрух")
+    assert accounts.device_gate_by_token("agent_devices", agent["id"]) == ("pending", "Курбонов Шохрух")
 
     # Команда владельца: аккаунт + оба устройства.
     assert accounts.approve_account("kurbanov", by="owner-test")["ok"]
     assert accounts.approve_device(dev["id"], by="owner-test")["ok"]
-    assert accounts.device_gate(dev["account_id"], agent["id"]) == ("ok", "Курбонов Шохрух")
+    assert accounts.device_gate_by_token("agent_devices", agent["id"]) == ("ok", "Курбонов Шохрух")
 
     # Повторный вход тем же телефоном — сразу ok (устройство подтверждено).
     again = login(entrance="public", device=phone_device())
@@ -155,7 +155,7 @@ def test_sessions_journal_and_token_link(world):
     with db.connect() as conn:
         agent_id = conn.execute("SELECT id FROM agent_devices WHERE fingerprint='pc-fp-1' "
                                 "AND revoked_at IS NULL").fetchone()["id"]
-    linked = accounts.account_of_token(agent_id)
+    linked = accounts.account_of_token("agent_devices", agent_id)
     assert linked and linked[1] == "kurbanov"
     rows = accounts.sessions_for(agent_id, linked[0])
     assert len(rows) >= 2 and {r["kind"] for r in rows} == {"ok_pending"}
@@ -169,3 +169,61 @@ def test_entered_list_scopes_by_office_and_skips_empty(world):
     assert rows == []            # Курбонов — другой офис; Акназаров не вводил вовсе
     rows_all = accounts.entered_list()
     assert len(rows_all) == 1 and rows_all[0]["office"] == "Душанбе"
+
+
+def _manager_world(world):
+    with db.connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO managers(telegram_id,name,cities,employees) "
+                     "VALUES(501,'Мазанов Сергей','','')")
+        conn.commit()
+
+
+def test_privileged_role_needs_two_admin_confirmations(world):
+    _manager_world(world)
+    made = accounts.create_account("Мазанов Сергей", "mazanov", "parol1234",
+                                   role="manager", by="test")
+    assert made.get("ok"), made
+    accounts.login("mazanov", "parol1234", device=desktop_device(), entrance="internal")
+    first = accounts.approve_account("mazanov", by="admin-egor")
+    assert first["ok"] and not first["active"] and first["need"] == 2
+    second = accounts.approve_account("mazanov", by="admin-egor")   # тот же админ — не считается
+    assert not second["active"]
+    third = accounts.approve_account("mazanov", by="admin-mazanov")
+    assert third["active"]
+
+
+def test_manager_account_mints_manager_class_token(world):
+    _manager_world(world)
+    accounts.create_account("Мазанов Сергей", "mazanov", "parol1234", role="manager")
+    result = accounts.login("mazanov", "parol1234", device=desktop_device(),
+                            entrance="internal")
+    assert result["action"] == "ok_pending" and result.get("token")
+    with db.connect() as conn:
+        row = conn.execute("SELECT id FROM manager_devices WHERE account_id IS NOT NULL "
+                           "AND revoked_at IS NULL").fetchone()
+        assert row is not None, "токен должен быть класса manager_devices"
+        gate = accounts.device_gate_by_token("manager_devices", row["id"])
+    assert gate[0] == "pending"      # аккаунт ещё не активирован двумя администраторами
+    accounts.approve_account("mazanov", "admin-egor")
+    accounts.approve_account("mazanov", "admin-mazanov")
+    with db.connect() as conn:
+        dev = conn.execute("SELECT id FROM account_devices WHERE kind='desktop'").fetchone()
+    result2 = accounts.approve_device(dev["id"], "admin-egor")
+    assert not result2["active"]
+    result3 = accounts.approve_device(dev["id"], "admin-mazanov")
+    assert result3["active"]
+    with db.connect() as conn:
+        row = conn.execute("SELECT id FROM manager_devices WHERE account_id IS NOT NULL "
+                           "AND revoked_at IS NULL").fetchone()
+    assert accounts.device_gate_by_token("manager_devices", row["id"])[0] == "ok"
+
+
+def test_privileged_role_requires_manager_binding(world):
+    bad = accounts.create_account("Неизвестный Человек", "ghost", "parol1234", role="analyst")
+    assert not bad["ok"] and "managers" in bad["error"]
+
+
+def test_agent_role_single_confirmation_still(world):
+    make(world)
+    result = accounts.approve_account("kurbanov", by="admin-egor")
+    assert result["active"] is True

@@ -1,17 +1,21 @@
-"""Аккаунты «логин-пароль» для сотрудников: вход без персональных ссылок.
+"""Аккаунты «логин-пароль»: вход без персональных ссылок.
 
-Модель владельца (14.10.2026, согласовано с ИБ/ИТ):
-- аккаунты заводит владелец на сервере (account_access.py, HTTP-ручек записи
-  нет — как у admin_access.py); логин-пароль выдаётся человеку в офисе;
-- сотрудник вводит логин/пароль НА ТЕЛЕФОНЕ (публичный вход, GPS обязателен)
+Модель (владелец + ИБ/ИТ, 14.10.2026):
+- аккаунты заводит администратор на сервере (account_access.py, HTTP-ручек
+  записи нет — как у admin_access.py; админ-вариант Егора и Сергея Мазанова
+  подтверждается самим доступом к серверу: адрес + root-пароль);
+- СОТРУДНИК вводит логин/пароль НА ТЕЛЕФОНЕ (публичный вход, GPS обязателен)
   и НА КОМПЬЮТЕРЕ (внутренний вход): «ввели и там, и там» = человек в офисе;
-- руководитель видит список «кто ввёл» и пересылает владельцу; доверять
-  руководителю подтверждение нельзя — подтверждает ТОЛЬКО владелец;
-- до подтверждения вход «работает, но без данных»: приложение показывает
-  экран ожидания (тот же pending, что у заявок привязки). Доступ появляется
-  командой владельца; повторный вход с нового устройства — тот же круг.
-Токены выпускаются существующих классов (agent_devices/manager_devices),
-помеченные account_id: телефон и ПК одним классом, различаются отпечатком.
+- РУКОВОДИТЕЛИ и АНАЛИТИК — без условия двойного входа: их активация
+  требует ДВУХ подтверждений разных администраторов (у сотрудника — одного);
+- до активации вход «работает, но без данных»: приложение показывает экран
+  ожидания (тот же pending, что у заявок привязки);
+- руководитель видит список «кто ввёл» и пересылает администраторам;
+  подтверждать руководителям нельзя;
+- повторный вход с нового устройства — тот же круг; подтверждение нового
+  телефона гасит прежний.
+Токены выпускаются существующих классов по роли: сотрудник — agent_devices,
+руководитель/аналитик — manager_devices; оба помечены account_id.
 """
 from __future__ import annotations
 
@@ -25,16 +29,22 @@ from datetime import datetime, timedelta
 
 import db
 
-ROLES = ("agent", "manager", "security", "full")
+ROLES = ("agent", "manager", "security", "full", "analyst")
+# Привилегированные роли: активация двумя администраторами, токен класса
+# manager_devices (у аналитика/руководителя свои продукты и ручки).
+PRIVILEGED = ("manager", "security", "full", "analyst")
 LOCK_AFTER_FAILS = 5
 LOCK_MINUTES = 15
-GPS_MAX_AGE_HOURS = 24      # запас на часовые пояса; сама точность не критична
 
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P, _SCRYPT_DK = 16384, 8, 1, 32
 
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _approvals_needed(role: str) -> int:
+    return 2 if role in PRIVILEGED else 1
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
@@ -49,11 +59,17 @@ def init_schema(conn: sqlite3.Connection) -> None:
           must_change_password INTEGER NOT NULL DEFAULT 1,
           status TEXT NOT NULL DEFAULT 'awaiting',
           totp_secret TEXT,
+          telegram_id INTEGER,
+          approvals TEXT NOT NULL DEFAULT '[]',
           created_by TEXT, created_at TEXT, updated_at TEXT,
           activated_by TEXT, activated_at TEXT,
           failed_attempts INTEGER NOT NULL DEFAULT 0,
           locked_until TEXT
         )""")
+    acc_cols = {r[1] for r in conn.execute("PRAGMA table_info(accounts)")}
+    for col, ddl in (("telegram_id", "INTEGER"), ("approvals", "TEXT NOT NULL DEFAULT '[]'")):
+        if col not in acc_cols:
+            conn.execute(f"ALTER TABLE accounts ADD COLUMN {col} {ddl}")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS account_devices (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,8 +82,15 @@ def init_schema(conn: sqlite3.Connection) -> None:
           gps TEXT,                       -- телефон: {"lat","lon","accuracy"}
           first_seen TEXT NOT NULL, last_seen TEXT,
           approved_by TEXT, approved_at TEXT, revoked_at TEXT,
-          agent_dev_id INTEGER            -- строка agent_devices с токеном
+          approvals TEXT NOT NULL DEFAULT '[]',
+          agent_dev_id INTEGER,           -- строка в token_table
+          token_table TEXT NOT NULL DEFAULT 'agent_devices'
         )""")
+    dev_cols = {r[1] for r in conn.execute("PRAGMA table_info(account_devices)")}
+    for col, ddl in (("approvals", "TEXT NOT NULL DEFAULT '[]'"),
+                     ("token_table", "TEXT NOT NULL DEFAULT 'agent_devices'")):
+        if col not in dev_cols:
+            conn.execute(f"ALTER TABLE account_devices ADD COLUMN {col} {ddl}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_account_devices_acc "
                  "ON account_devices(account_id, kind, status)")
     conn.execute("""
@@ -127,10 +150,12 @@ def _valid_password(password: str) -> bool:
 
 
 def create_account(employee: str, username: str, password: str, *, office: str = "",
-                   role: str = "agent", by: str = "cli") -> dict:
-    """Завести аккаунт. Роль по умолчанию agent (сотрудник Хард/Софт);
-    manager/security/full — когда в managers есть привязка по telegram_id
-    (токенам этих ролей нужен uid). Пароль печатается вызывающим ОДИН раз."""
+                   role: str = "agent", by: str = "cli",
+                   telegram_id: int | None = None) -> dict:
+    """Завести аккаунт. Роль по умолчанию agent (сотрудник Хард/Софт).
+    Руководителям/аналитику (manager/security/full/analyst) нужен telegram_id —
+    токен класса manager_devices адресован uid из managers; ищется по ФИО,
+    можно задать явно. Пароль печатается вызывающим ОДИН раз."""
     employee = str(employee or "").strip()
     username = normalize_username(username)
     office = str(office or "").strip()
@@ -143,12 +168,31 @@ def create_account(employee: str, username: str, password: str, *, office: str =
                 "Логин: 3–32 символа, латиница/цифры/._- , начинается с буквы или цифры."}
     if not _valid_password(password or ""):
         return {"ok": False, "error": "Пароль от 8 символов, с буквой и цифрой."}
+    resolved_uid = None
+    if role in PRIVILEGED:
+        if telegram_id is None:
+            with db.connect() as conn:
+                row = conn.execute("SELECT telegram_id FROM managers WHERE name=?",
+                                   (employee,)).fetchone()
+                if row is None:   # ё/регистр/пробелы: то же сличение, что в командах
+                    for m in conn.execute("SELECT name,telegram_id FROM managers").fetchall():
+                        if db._name_key(m["name"]) == db._name_key(employee):
+                            row = m
+                            break
+            telegram_id = int(row["telegram_id"]) if row else None
+        if telegram_id is None:
+            return {"ok": False, "error":
+                    "Для роли руководителя/аналитика нужен telegram_id: человека нет "
+                    "в managers (добавьте его туда или передайте --telegram-id)."}
+        resolved_uid = int(telegram_id)
     with db.connect() as conn:
         if conn.execute("SELECT 1 FROM accounts WHERE username=?", (username,)).fetchone():
             return {"ok": False, "error": "Такой логин уже есть."}
         conn.execute("INSERT INTO accounts(username,employee,office,role,password_hash,"
-                     "status,created_by,created_at) VALUES(?,?,?,?,?,'awaiting',?,?)",
-                     (username, employee, office, role, hash_password(password), by, _now()))
+                     "status,telegram_id,created_by,created_at) "
+                     "VALUES(?,?,?,?,?,'awaiting',?,?,?)",
+                     (username, employee, office, role, hash_password(password),
+                      resolved_uid, by, _now()))
         conn.commit()
     db.audit_access(0, "account_create", employee, f"{username} role={role} by {by}")
     return {"ok": True, "username": username}
@@ -182,22 +226,33 @@ def _journal(conn: sqlite3.Connection, account_id: int | None, username: str, ki
 
 # --- вход --------------------------------------------------------------------
 
-def _mint_agent_token(conn: sqlite3.Connection, account: sqlite3.Row,
-                      device_row: sqlite3.Row) -> str:
-    """Выпустить/ротировать токен агентского класса для устройства аккаунта."""
+def _mint_token(conn: sqlite3.Connection, account: sqlite3.Row,
+                device_row: sqlite3.Row) -> str:
+    """Выпустить/ротировать токен нужного классА по роли: сотрудник —
+    agent_devices (телефон и ПК одним классом), руководитель/аналитик —
+    manager_devices (там обязателен telegram_id из managers)."""
     raw = secrets.token_urlsafe(32)
     now = _now()
-    if device_row["agent_dev_id"]:
-        conn.execute("UPDATE agent_devices SET revoked_at=?, revoked_by=? WHERE id=? "
+    token_table = "manager_devices" if account["role"] in PRIVILEGED else "agent_devices"
+    if device_row["agent_dev_id"] and device_row["token_table"] == token_table:
+        conn.execute(f"UPDATE {token_table} SET revoked_at=?, revoked_by=? WHERE id=? "
                      "AND revoked_at IS NULL",
                      (now, "account:rotate", device_row["agent_dev_id"]))
-    dev_id = conn.execute(
-        "INSERT INTO agent_devices(employee,telegram_id,token_hash,device,created_at,"
-        "last_seen_at,account_id,fingerprint) VALUES(?,?,?,?,?,?,?,?)",
-        (account["employee"], None, db.app_token_key(raw), device_row["label"][:80],
-         now, now, account["id"], device_row["fingerprint"])).lastrowid
-    conn.execute("UPDATE account_devices SET agent_dev_id=? WHERE id=?",
-                 (dev_id, device_row["id"]))
+    key = db.app_token_key(raw)
+    if token_table == "manager_devices":
+        dev_id = conn.execute(
+            "INSERT INTO manager_devices(telegram_id,token_hash,device,created_at,"
+            "last_seen_at,account_id) VALUES(?,?,?,?,?,?)",
+            (account["telegram_id"], key, device_row["label"][:80], now, now,
+             account["id"])).lastrowid
+    else:
+        dev_id = conn.execute(
+            "INSERT INTO agent_devices(employee,telegram_id,token_hash,device,created_at,"
+            "last_seen_at,account_id,fingerprint) VALUES(?,?,?,?,?,?,?,?)",
+            (account["employee"], None, key, device_row["label"][:80], now, now,
+             account["id"], device_row["fingerprint"])).lastrowid
+    conn.execute("UPDATE account_devices SET agent_dev_id=?, token_table=? WHERE id=?",
+                 (dev_id, token_table, device_row["id"]))
     return raw
 
 
@@ -253,7 +308,7 @@ def login(username: str, password: str, *, device: dict, entrance: str,
             return {"action": "blocked",
                     "error": "Доступ этому аккаунту закрыт. Обратитесь к руководителю."}
         if device_kind == "phone" and not gps_text:
-            # Требование владельца: GPS на телефоне обязателен именно при входе.
+            # Требование ИБ: GPS на телефоне обязателен именно при входе.
             _journal(conn, row["id"], username, "no_gps", entrance=entrance,
                      device_kind=device_kind, fingerprint=fingerprint, label=label, ip=ip)
             conn.commit()
@@ -282,7 +337,7 @@ def login(username: str, password: str, *, device: dict, entrance: str,
                          "THEN ? ELSE gps END WHERE id=?",
                          (_now(), label[:120], gps_text, gps_text, dev["id"]))
 
-        token = _mint_agent_token(conn, row, dev)
+        token = _mint_token(conn, row, dev)
         account_active = row["status"] == "active"
         device_active = dev["status"] == "active"
         action = "ok" if (account_active and device_active) else "ok_pending"
@@ -295,17 +350,19 @@ def login(username: str, password: str, *, device: dict, entrance: str,
                 "office": row["office"] or "",
                 "must_change_password": bool(row["must_change_password"]),
                 "error": "" if action == "ok" else
-                "Вход записан. Доступ появится после подтверждения владельца."}
+                "Вход записан. Доступ появится после подтверждения администратора."}
 
 
-def device_gate(account_id: int, agent_dev_id: int) -> tuple[str, str]:
+def device_gate_by_token(token_table: str, row_id: int) -> tuple[str, str]:
     """('ok'|'pending'|'blocked', ФИО) для middleware: решает, пропускать ли
     токен, выпущенный аккаунту. Вызывается на КАЖДЫЙ запрос — дёшево (индекс)."""
+    if token_table not in ("agent_devices", "manager_devices"):
+        return "blocked", ""
     with db.connect() as conn:
         row = conn.execute(
             "SELECT a.status AS astatus, a.employee AS employee, d.status AS dstatus "
             "FROM accounts a JOIN account_devices d ON d.account_id=a.id "
-            "WHERE a.id=? AND d.agent_dev_id=?", (account_id, agent_dev_id)).fetchone()
+            "WHERE d.token_table=? AND d.agent_dev_id=?", (token_table, row_id)).fetchone()
         if row is None:
             return "blocked", ""
         if row["astatus"] == "disabled":
@@ -334,47 +391,86 @@ def change_password(username: str, current: str, new: str) -> dict:
     return {"ok": True}
 
 
-# --- действия владельца --------------------------------------------------------
+# --- действия администратора ----------------------------------------------------
+
+def _add_approval(approvals_json: str, by: str) -> list[str]:
+    try:
+        listed = list(json.loads(approvals_json or "[]"))
+    except (ValueError, TypeError):
+        listed = []
+    if by and by not in listed:
+        listed.append(by)
+    return listed
+
 
 def approve_account(username: str, by: str) -> dict:
-    """Команда владельца: открыть доступ аккаунту (устройства подтверждаются
-    отдельно — обычно одной командой approve_device по каждому вводу)."""
+    """Подтверждение администратора. Сотрудник активируется с первого;
+    руководитель/аналитик — со ВТОРОГО подтверждения ДРУГОГО администратора
+    (доверять одному нельзя — как и руководителям, по правилу заказчика)."""
     username = normalize_username(username)
     with db.connect() as conn:
         row = conn.execute("SELECT * FROM accounts WHERE username=?", (username,)).fetchone()
         if row is None:
             return {"ok": False, "error": "Нет такого аккаунта."}
-        conn.execute("UPDATE accounts SET status='active', activated_by=?, activated_at=?, "
-                     "updated_at=? WHERE id=?", (by, _now(), _now(), row["id"]))
+        if row["status"] == "disabled":
+            return {"ok": False, "error": "Аккаунт закрыт; сначала enable."}
+        approvals = _add_approval(row["approvals"], by)
+        need = _approvals_needed(row["role"])
+        active = len(approvals) >= need and row["status"] != "active"
+        already = row["status"] == "active"
+        if active or already:
+            conn.execute("UPDATE accounts SET status='active', approvals=?, activated_by=?, "
+                         "activated_at=?, updated_at=? WHERE id=?",
+                         (json.dumps(approvals), by, _now(), _now(), row["id"]))
+        else:
+            conn.execute("UPDATE accounts SET approvals=?, updated_at=? WHERE id=?",
+                         (json.dumps(approvals), _now(), row["id"]))
         _journal(conn, row["id"], username, "approved", label=f"by {by}")
         conn.commit()
         db.audit_access(0, "account_approve", row["employee"], f"{username} by {by}")
-    return {"ok": True}
+        if already or len(approvals) >= need:
+            return {"ok": True, "active": True, "approvals": approvals}
+        return {"ok": True, "active": False, "need": need,
+                "approvals": approvals,
+                "error": f"Подтверждено ({len(approvals)} из {need}). "
+                         f"Нужно подтверждение ещё одного администратора."}
 
 
 def approve_device(device_id: int, by: str) -> dict:
-    """Подтвердить устройство (обычно — оба ввода из офиса). Новый ТЕЛЕФОН
-    при подтверждении гасит прежний телефон аккаунта: сменить — значит сменить."""
+    """Подтвердить устройство (сотруднику — с первого подтверждения,
+    руководителю/аналитику — со второго администратора). Активация нового
+    ТЕЛЕФОНА гасит прежний телефон аккаунта: сменить — значит сменить."""
     with db.connect() as conn:
         dev = conn.execute("SELECT * FROM account_devices WHERE id=?", (device_id,)).fetchone()
         if dev is None:
             return {"ok": False, "error": "Нет такого устройства."}
-        conn.execute("UPDATE account_devices SET status='active', approved_by=?, "
-                     "approved_at=? WHERE id=?", (by, _now(), device_id))
-        if dev["kind"] == "phone":
-            old = conn.execute(
-                "SELECT id, agent_dev_id FROM account_devices WHERE account_id=? AND kind='phone' "
-                "AND status='active' AND id<>?", (dev["account_id"], device_id)).fetchall()
-            for row in old:
-                conn.execute("UPDATE account_devices SET status='revoked', revoked_at=? "
-                             "WHERE id=?", (_now(), row["id"]))
-                if row["agent_dev_id"]:
-                    conn.execute("UPDATE agent_devices SET revoked_at=?, revoked_by=? "
-                                 "WHERE id=? AND revoked_at IS NULL",
-                                 (_now(), f"account:new-phone:{by}", row["agent_dev_id"]))
-        conn.commit()
-        acc = conn.execute("SELECT username FROM accounts WHERE id=?",
+        acc = conn.execute("SELECT * FROM accounts WHERE id=?",
                            (dev["account_id"],)).fetchone()
+        need = _approvals_needed(acc["role"]) if acc else 1
+        approvals = _add_approval(dev["approvals"], by)
+        table = dev["token_table"] or "agent_devices"
+        activated = dev["status"] == "active" or len(approvals) >= need
+        if activated and dev["status"] != "active":
+            conn.execute("UPDATE account_devices SET status='active', approved_by=?, "
+                         "approved_at=?, approvals=? WHERE id=?",
+                         (by, _now(), json.dumps(approvals), device_id))
+            if dev["kind"] == "phone":
+                old = conn.execute(
+                    "SELECT id, agent_dev_id, token_table FROM account_devices "
+                    "WHERE account_id=? AND kind='phone' AND status='active' AND id<>?",
+                    (dev["account_id"], device_id)).fetchall()
+                for row in old:
+                    conn.execute("UPDATE account_devices SET status='revoked', revoked_at=? "
+                                 "WHERE id=?", (_now(), row["id"]))
+                    if row["agent_dev_id"]:
+                        conn.execute(f"UPDATE {row['token_table'] or 'agent_devices'} "
+                                     "SET revoked_at=?, revoked_by=? WHERE id=? "
+                                     "AND revoked_at IS NULL",
+                                     (_now(), f"account:new-phone:{by}", row["agent_dev_id"]))
+        else:
+            conn.execute("UPDATE account_devices SET approvals=? WHERE id=?",
+                         (json.dumps(approvals), device_id))
+        conn.commit()
         if acc:
             _journal(conn, dev["account_id"], acc["username"], "approved",
                      device_kind=dev["kind"], label=dev["label"], gps=dev["gps"] or "",
@@ -382,7 +478,11 @@ def approve_device(device_id: int, by: str) -> dict:
             conn.commit()
         db.audit_access(0, "account_device_approve", str(dev["label"]),
                         f"#{device_id} {dev['kind']} by {by}")
-    return {"ok": True}
+        if activated:
+            return {"ok": True, "active": True, "approvals": approvals}
+        return {"ok": True, "active": False, "need": need, "approvals": approvals,
+                "error": f"Подтверждено ({len(approvals)} из {need}). "
+                         f"Нужно подтверждение ещё одного администратора."}
 
 
 def set_status(username: str, status: str, by: str) -> dict:
@@ -396,12 +496,13 @@ def set_status(username: str, status: str, by: str) -> dict:
         conn.execute("UPDATE accounts SET status=?, updated_at=? WHERE id=?",
                      (status, _now(), row["id"]))
         if status == "disabled":   # сразу погасить все токены аккаунта
-            for dev in conn.execute("SELECT agent_dev_id FROM account_devices "
+            for dev in conn.execute("SELECT agent_dev_id, token_table FROM account_devices "
                                     "WHERE account_id=? AND status='active'",
                                     (row["id"],)).fetchall():
                 if dev["agent_dev_id"]:
-                    conn.execute("UPDATE agent_devices SET revoked_at=?, revoked_by=? "
-                                 "WHERE id=? AND revoked_at IS NULL",
+                    conn.execute(f"UPDATE {dev['token_table'] or 'agent_devices'} "
+                                 "SET revoked_at=?, revoked_by=? WHERE id=? "
+                                 "AND revoked_at IS NULL",
                                  (_now(), f"account:disable:{by}", dev["agent_dev_id"]))
             conn.execute("UPDATE account_devices SET status='revoked', revoked_at=? "
                          "WHERE account_id=? AND status='active'", (_now(), row["id"]))
@@ -413,7 +514,7 @@ def set_status(username: str, status: str, by: str) -> dict:
 
 def entered_list(office: str = "") -> list[dict]:
     """«Кто ввёл»: строка на аккаунт с телефонным и компьютерным вводом.
-    Руководитель пересылает список владельцу; ready = введено и там, и там."""
+    Руководитель пересылает список администраторам; ready = введено и там, и там."""
     with db.connect() as conn:
         rows = conn.execute("SELECT * FROM accounts ORDER BY office, employee").fetchall()
         out: list[dict] = []
@@ -441,7 +542,7 @@ def entered_list(office: str = "") -> list[dict]:
 
 
 def admin_accounts() -> list[dict]:
-    """Полный список для владельца/аналитика: аккаунты, устройства, журнал."""
+    """Полный список для администратора/аналитика: аккаунты, устройства, журнал."""
     with db.connect() as conn:
         out = []
         for acc in conn.execute("SELECT * FROM accounts ORDER BY office, employee").fetchall():
@@ -471,12 +572,14 @@ def sessions_for(agent_dev_id: int, account_id: int, limit: int = 30) -> list[di
     return [dict(r) for r in rows]
 
 
-def account_of_token(agent_dev_id: int) -> tuple[int, str] | None:
-    """(account_id, username) по строке agent_devices — для своих ручек
+def account_of_token(token_table: str, row_id: int) -> tuple[int, str] | None:
+    """(account_id, username) по строке токена — для своих ручек
     (сессии/выход) прямо токеном."""
+    if token_table not in ("agent_devices", "manager_devices"):
+        return None
     with db.connect() as conn:
         row = conn.execute(
             "SELECT a.id AS aid, a.username AS username FROM accounts a "
-            "JOIN account_devices d ON d.account_id=a.id WHERE d.agent_dev_id=?",
-            (agent_dev_id,)).fetchone()
+            "JOIN account_devices d ON d.account_id=a.id "
+            "WHERE d.token_table=? AND d.agent_dev_id=?", (token_table, row_id)).fetchone()
     return (int(row["aid"]), row["username"]) if row else None

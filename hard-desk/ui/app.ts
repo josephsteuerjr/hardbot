@@ -161,7 +161,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "F5") { e.preventDef
 /** Приложение сотрудника (выездник и софт — одно окно): роль узнаёт СЕРВЕР
  *  по ссылке входа и портфелю; сам человек о режимах не знает ничего.
  *  С 14.10 вход ещё и по логину-паролю (аккаунт выдаёт владелец) — вторая
- *  вкладка того же экрана; до подтверждения владельцем сервер отвечает
+ *  вкладка того же экрана; до подтверждения администратором сервер отвечает
  *  pending, и вместо портфеля показывается экран ожидания. */
 function enrollFieldScreen(note = "") {
   bare(true);
@@ -316,7 +316,7 @@ function pendingApprovalScreen(employee = "") {
   $("view-inner").innerHTML = `<div class="page enroll">
     <h1>Вход записан</h1>
     ${employee ? `<p class="hint" style="margin:0 0 6px">${esc(employee)}</p>` : ""}
-    <p>Вход записан. Доступ появится после подтверждения владельца. Можно закрыть программу.</p>
+    <p>Вход записан. Доступ появится после подтверждения администратора. Можно закрыть программу.</p>
     <p class="hint">Руководитель передаёт список введших, владелец открывает доступ. Позже нажмите «Проверить снова» — после подтверждения приложение откроется сразу.</p>
     <div class="row"><button class="btn primary" id="pending-check">Проверить снова</button>
       <button class="btn" id="pending-exit">Выйти</button></div>
@@ -341,7 +341,7 @@ async function startAgent() {
   if (!me.ok && me.kind === "revoked") { enrollFieldScreen(me.text); return; }
   if (!me.ok) { startError(me.text || "", startAgent); return; }
   const who: any = me.ok ? me.data : null;
-  // Аккаунт «логин-пароль» ждёт подтверждения владельца: токен работает, но
+  // Аккаунт «логин-пароль» ждёт подтверждения администратора: токен работает, но
   // данных нет — экран ожидания вместо портфеля (см. pendingApprovalScreen).
   if (who?.pending) { pendingApprovalScreen(String(who.employee || "")); return; }
   setLanguage(who?.lang || currentLanguage());

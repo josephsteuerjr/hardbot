@@ -228,12 +228,13 @@ def _uid(request: web.Request) -> int | None:
         state, dev = db.agent_device_check(tok, request.remote)
         if state == "ok" and dev:
             # Токен, выпущенный аккаунту логина-пароля: доступ — только после
-            # подтверждения владельца (accounts.device_gate). До подтверждения
+            # подтверждения администратора (accounts.device_gate_by_token). До подтверждения
             # данные закрыты, но /api/bootstrap честно отвечает pending —
             # приложение показывает экран ожидания (тот же, что у заявок).
             if dev["account_id"]:
                 import accounts as _accounts
-                gate, gate_employee = _accounts.device_gate(int(dev["account_id"]), int(dev["id"]))
+                gate, gate_employee = _accounts.device_gate_by_token(
+                    "agent_devices", int(dev["id"]))
                 if gate != "ok":
                     request["desk_employee"] = None
                     request["account_awaiting"] = gate_employee or ""
@@ -306,6 +307,17 @@ def _manager_gate(request: web.Request) -> tuple[int, dict, list[str]]:
         if state != "ok":
             raise _json_error(web.HTTPUnauthorized, f"device_{state}")
         uid = int(dev["telegram_id"])
+        # Токен, выпущенный аккаунту логина-пароля (руководителю/аналитику):
+        # доступ — только после активации администраторами (для этих ролей —
+        # двух подтверждений). Раньше срока — честный отказ с кодом.
+        if dev["account_id"]:
+            import accounts as _accounts
+            gate, _gate_employee = _accounts.device_gate_by_token(
+                "manager_devices", int(dev["id"]))
+            if gate == "pending":
+                raise _json_error(web.HTTPForbidden, "account_pending")
+            if gate != "ok":
+                raise _json_error(web.HTTPForbidden, "account_blocked")
     else:
         uid = _uid(request)
         if request.get("desk_employee"):
@@ -949,7 +961,7 @@ async def _bootstrap(request: web.Request) -> web.Response:
     started = time.perf_counter()
     uid = await asyncio.to_thread(_uid, request)
     if not uid:
-        # Аккаунт логина-пароля ждёт подтверждения владельца: приложение должно
+        # Аккаунт логина-пароля ждёт подтверждения администратора: приложение должно
         # показать экран ожидания, а не «вход сгорел».
         awaiting = request.get("account_awaiting")
         if awaiting:
@@ -5239,16 +5251,25 @@ async def _account_password(request: web.Request) -> web.Response:
 
 
 def _account_device_of_request(request: web.Request) -> tuple[int, int] | None:
-    """(agent_dev_id, account_id) по токену запроса — для своих ручек."""
-    tok = (request.headers.get("X-App-Token") or "").strip()
-    if not tok:
-        return None
-    state, dev = db.agent_device_check(tok, request.remote)
-    if state != "ok" or not dev or not dev["account_id"]:
-        return None
+    """(id строки токена, account_id) по токену запроса — для своих ручек.
+    Оба класса: сотрудник (X-App-Token → agent_devices) и руководитель/аналитик
+    (X-Pult-Token → manager_devices)."""
     import accounts as _accounts
-    linked = _accounts.account_of_token(int(dev["id"]))
-    return (int(dev["id"]), linked[0]) if linked else None
+    tok = (request.headers.get("X-App-Token") or "").strip()
+    if tok:
+        state, dev = db.agent_device_check(tok, request.remote)
+        if state == "ok" and dev and dev["account_id"]:
+            linked = _accounts.account_of_token("agent_devices", int(dev["id"]))
+            if linked:
+                return int(dev["id"]), linked[0]
+    ptok = (request.headers.get("X-Pult-Token") or "").strip()
+    if ptok:
+        state, dev = db.manager_device_check(ptok, _admin_peer(request))
+        if state == "ok" and dev and dev["account_id"]:
+            linked = _accounts.account_of_token("manager_devices", int(dev["id"]))
+            if linked:
+                return int(dev["id"]), linked[0]
+    return None
 
 
 async def _account_sessions(request: web.Request) -> web.Response:
@@ -5290,13 +5311,15 @@ async def _admin_accounts(request: web.Request) -> web.Response:
 
 
 async def _admin_account_approve(request: web.Request) -> web.Response:
-    """Команда владельца: открыть аккаунт и/или подтвердить устройство."""
+    """Подтверждение администратора: активировать аккаунт и/или устройство.
+    Сотрудник — с первого подтверждения, руководитель/аналитик — со второго
+    администратора (в ответе видно, сколько подтверждений собрано)."""
     _admin(request)
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
         raise _json_error(web.HTTPBadRequest, "body")
-    by = "owner"
+    by = str(body.get("by") or "admin")[:64]
     if body.get("username"):
         result = await asyncio.to_thread(accounts.approve_account,
                                          str(body.get("username")), by)
@@ -5310,7 +5333,7 @@ async def _admin_account_approve(request: web.Request) -> web.Response:
         raise _json_error(web.HTTPBadRequest, "username or device_id")
     if not result.get("ok"):
         return web.json_response(result, status=404)
-    return web.json_response({"ok": True})
+    return web.json_response(result)
 
 
 async def _admin_agent_devices(request: web.Request) -> web.Response:
