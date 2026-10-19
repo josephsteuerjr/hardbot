@@ -3,12 +3,12 @@
 // на другую машину или под другого пользователя файл токена ничего не даёт.
 import { app, safeStorage } from "electron";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { join } from "node:path";
 
 export interface Settings {
   server?: string;          // https://… — берётся из ссылки входа
-  device?: { id: number; name: string; created_at?: string };
+  device?: { id?: number; name: string; created_at?: string; username?: string; role?: string; telegram_id?: number };
   fieldServer?: string;     // приложение выездника на ПК: свой вход
   // id — только у входа по ссылке; вход по логину-паролю пишет name/employee/username
   fieldDevice?: { id?: number; name: string; employee?: string; username?: string; telegram_id?: number; created_at?: string };
@@ -19,6 +19,23 @@ export interface Settings {
 
 const dir = () => app.getPath("userData");
 const file = (name: string) => join(dir(), name);
+
+/** One installation key shared by Hard and Soft for this Windows user. */
+export function pcIdentity(): { privateKey: string; publicKey: string; fingerprint: string } {
+  const base = process.env.HARD_USER_DATA ? join(process.env.HARD_USER_DATA, "shared")
+    : join(process.env.LOCALAPPDATA || app.getPath("appData"), "Hard", "shared");
+  mkdirSync(base, { recursive: true });
+  const target = join(base, "pc-identity.bin");
+  if (!existsSync(target)) {
+    const pair = generateKeyPairSync("ed25519");
+    const publicRaw = pair.publicKey.export({ type: "spki", format: "der" }).subarray(-32);
+    const value = JSON.stringify({ privateKey: pair.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      publicKey: publicRaw.toString("base64"), fingerprint: createHash("sha256").update(publicRaw).digest("hex") });
+    try { writeFileSync(target, seal(value), { flag: "wx", flush: true }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  }
+  return JSON.parse(open(readFileSync(target)));
+}
 
 function ensure(): void {
   mkdirSync(join(dir(), "cache"), { recursive: true });
@@ -167,6 +184,15 @@ export function hasFieldWork(): boolean {
   }
   return false;
 }
+
+// Durable unsent work may survive an update. Reject damaged storage, rather
+// than requiring every valid offline queue to be sent before installation.
+export function validateFieldWork(): void {
+  readCallQueue();
+  for(const name of readdirSync(app.getPath("userData"))){
+    if(/^draft-[a-f0-9]+\.bin$/.test(name))JSON.parse(open(readFileSync(file(name))));
+  }
+}
 export function writeDraft(key: string, draft: unknown): void {
   ensure();
   const name = file("draft-" + createHash("sha256").update(key).digest("hex") + ".bin");
@@ -176,9 +202,15 @@ export function writeDraft(key: string, draft: unknown): void {
   writeFileSync(name + ".tmp", seal(data), { flush: true }); renameSync(name + ".tmp", name);
 }
 
-export function wipeField(): void {
+export function wipeField(opts?: {discardWork?: boolean}): void {
   const identity = readSettings().fieldDevice;
-  const pending = readCallQueue();
+  const pending = opts?.discardWork ? null : readCallQueue();
+  if(opts?.discardWork){
+    clearCallQueue();
+    for(const name of readdirSync(app.getPath("userData"))){
+      if(/^draft-[a-f0-9]+\.bin(?:\.tmp)?$/.test(name))rmSync(file(name),{force:true});
+    }
+  }
   try { rmSync(file("field.key"), { force: true }); } catch { /* */ }
   clearCache();
   // The revoked token and cached cards go away. Retain only the principal

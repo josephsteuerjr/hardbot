@@ -19,8 +19,8 @@ def test_direction_options_match_server_codes():
 
 
 def test_manager_body_always_sends_direction():
-    body = mg.manager_body("807070009", " Альберт ", {"Таджикистан"}, set(), "tj")
-    assert body == {"telegram_id": 807070009, "name": "Альберт",
+    body = mg.manager_body("9782002", " Тестовый руководитель ", {"Таджикистан"}, set(), "tj")
+    assert body == {"telegram_id": 9782002, "name": "Тестовый руководитель",
                     "cities": ["Таджикистан"], "employees": [], "direction": "tj",
                     "office_cities": []}
     plain = mg.manager_body("1", "Имя", set(), {"Б", "А"})

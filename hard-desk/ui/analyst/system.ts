@@ -6,6 +6,7 @@ import { refresh, type Section } from "../kit/shell";
 import { adm, fn, guard, local, note, val } from "./lib";
 
 import { mountModeSwitch } from "../kit/modeswitch";
+import { mountOwnerAccess } from "./owner-access";
 
 export const conn: Section = {
   id: "conn",
@@ -22,7 +23,7 @@ export const conn: Section = {
         <div class="chips">${(s.profiles as string[]).map((p) => `<button class="chip" data-prof="${esc(p)}" aria-pressed="${p === s.active}">${esc(p)}</button>`).join("")}</div>
         <span class="spacer"></span><input class="input" id="c-new" placeholder="Новый контур" style="width:170px"><button class="btn small" data-add>Добавить</button></div>
       <div class="section"><div class="section-head"><h2 class="section-title">Сервер</h2></div>
-        <div class="toolbar"><input class="input" id="c-url" value="${esc(s.url)}" placeholder="https://сервер" style="width:420px">
+        <div class="toolbar"><input class="input" id="c-url" value="${esc(s.url || DEFAULT_SERVER)}" placeholder="https://сервер" style="width:420px">
         <button class="btn" data-url>Сохранить адрес</button></div></div>
       <div class="section"><div class="section-head"><h2 class="section-title">Этот компьютер</h2>
         <span class="tag ${s.bound ? "ok" : "warn"}">${s.bound ? "привязан" : "не привязан"}</span></div>
@@ -33,13 +34,14 @@ export const conn: Section = {
         <div class="toolbar"><input class="input" id="c-key" type="password" placeholder="Мастер-ключ (один раз, на диск не пишется)" style="width:300px">
           <button class="btn" data-key>Привязать мастер-ключом</button>
           ${s.bound ? '<span class="spacer"></span><button class="btn danger small" data-unbind>Забыть токен здесь</button>' : ""}</div></div>
-      <div class="section"><div class="section-head"><h2 class="section-title">Устройства пульта</h2></div><div id="devs"><div class="skeleton"></div></div></div>
-      <div class="section"><div class="section-head"><h2 class="section-title">Режимы этого exe</h2></div><div id="modesw"><div class="skeleton"></div></div></div>
+      <div class="section"><div class="section-head"><h2 class="section-title">Прежние устройства</h2></div><div id="devs"><div class="skeleton"></div></div></div>
+      <div class="section"><div class="section-head"><h2 class="section-title">Программы</h2></div><div id="modesw"><div class="skeleton"></div></div></div>
       <div class="section"><h2 class="section-title">Журнал операций</h2><p class="hint">После потерянного ответа сверьте задачу по номеру. Для почты ищите HardOperationId в черновиках, исходящих и отправленных Outlook. Неопределённая отправка автоматически не повторяется.</p>
       ${(jobs || []).map((j: any) => `<div class="list-row"><div class="grow"><span class="mono">${esc(j.id)}</span> · ${esc(j.kind)} · ${esc(j.state)}<div class="sub">${esc(j.error || "")}</div></div></div>`).join("") || '<p class="muted">Задач в этом контуре пока нет.</p>'}</div>
       <p class="muted" style="font-size:12.5px;margin-top:24px">Настройки: <span class="mono">${esc(s.settings_path)}</span></p>`;
+    mountOwnerAccess(root,s);
     if (installed && !s.bound) {
-      const b = document.createElement("button"); b.className = "btn"; b.textContent = "Перенести настройки прежнего пульта";
+      const b = document.createElement("button"); b.className = "btn"; b.textContent = "Перенести прежние настройки";
       root.prepend(b);
       b.addEventListener("click", guard(async () => {
         const r = await hard.migrate(); if (r.ok) { toast("Контуры и вход перенесены"); await refresh(); } else toast(r.text || "Перенос отменён");
@@ -116,9 +118,7 @@ export const maint: Section = {
           ${(d.pending || []).length ? `<p class="muted">В очереди: ${esc((d.pending as any[]).map((p) => `${p.action}·${p.unit || ""}`).join(", "))}</p>` : ""}</div>
         <div class="section"><div class="section-head"><h2 class="section-title">Журнал операции</h2></div>
           <pre id="o-log" style="white-space:pre-wrap;font:13px/1.5 var(--mono);border:var(--lw) solid var(--line-ink);border-radius:14px;padding:12px 14px;background:var(--surface);max-height:360px;overflow:auto">Выберите операцию.</pre></div>
-        <div class="section"><div class="section-head"><h2 class="section-title">Код для нового пульта аналитика</h2></div>
-          <div class="toolbar"><input class="input" id="o-name" placeholder="Имя пульта, например «Ноут аналитика»" style="width:320px"><button class="btn primary" data-code>Выдать код</button></div>
-          <div id="o-devs"></div></div>`;
+        <div class="section"><h2>Прежние устройства</h2><p class="muted">Личные профили управляются в разделе «Профили и устройства». Старые операторские коды больше не выдаются.</p><div id="o-devs"></div></div>`;
       root.querySelectorAll<HTMLButtonElement>("[data-unit]").forEach((b) => b.addEventListener("click", () => { unit = b.dataset.unit!; draw(); }));
       root.querySelectorAll<HTMLButtonElement>("[data-op]").forEach((b) => b.addEventListener("click", guard(async () => {
         const action = b.dataset.op!;
@@ -142,13 +142,6 @@ export const maint: Section = {
           if (x.done) { log.textContent = `${title} — ${x.exit === 0 ? "готово" : "код возврата " + x.exit}\n\n${x.output || "(без вывода)"}`; break; }
         }
       })));
-      root.querySelector("[data-code]")?.addEventListener("click", guard(async () => {
-        const name = val("o-name");
-        if (!name) { toast("Назовите пульт, чтобы через месяц понять, что отзываете"); return; }
-        const r = await adm("POST", "/ops/code.json", { name, role: "operator" });
-        await hard.copy(String(r.code || ""));
-        toast(`Код «${name}» скопирован — показывается один раз`);
-      }));
       void (async () => {
         try {
           const x = await adm("GET", "/ops/devices.json");
@@ -168,3 +161,4 @@ export const maint: Section = {
     draw();
   },
 };
+import { DEFAULT_SERVER } from "../../src/main/product";

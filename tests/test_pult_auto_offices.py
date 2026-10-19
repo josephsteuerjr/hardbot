@@ -20,9 +20,9 @@ def _fmap(*items):
 
 
 def test_empty_office_is_filled_from_the_only_folder():
-    by = offices.folder_offices(_fmap(("Калонов Абдухафиз", "Худжанд", "hard")))
-    r = offices.suggest(["Калонов Абдухафиз"], {}, by)
-    assert r["fill"] == {"Калонов Абдухафиз": "Худжанд"}
+    by = offices.folder_offices(_fmap(("Примеров5 Сотрудник5", "Худжанд", "hard")))
+    r = offices.suggest(["Примеров5 Сотрудник5"], {}, by)
+    assert r["fill"] == {"Примеров5 Сотрудник5": "Худжанд"}
 
 
 def test_human_decision_is_never_overwritten():

@@ -11,7 +11,7 @@
 (function(){ try{ var t=localStorage.getItem("hb_theme");
   if(t==="light"||t==="dark") document.documentElement.setAttribute("data-theme",t); }catch(e){} })();
 </script>
-<title>Хард</title>
+<title>Взыскание СНГ</title>
 <!-- Манифест PWA подключается СКРИПТОМ, а не статичным <link>: Safari скачивает
      манифест при загрузке страницы (до входа) и при «На экран Домой» его не
      перечитывает. Если токен уже известен (localStorage или #t= в адресе),
@@ -31,6 +31,9 @@
   // решает сам после загрузки; мёртвый вход boot() меняет молча и тогда один
   // раз перезагружает страницу, чтобы манифест собрался с новым токеном.
   if(!t) t=u;
+  // Password profiles keep credentials in their own browser storage. A new
+  // home-screen installation signs in with its password at the common URL.
+  try{if(localStorage.getItem("account_role"))t="";}catch(e){}
   window.MANIFEST_PERSONAL=!!t;
   window.MANIFEST_TOKEN=t;
   var l=document.createElement("link"); l.rel="manifest";
@@ -39,7 +42,7 @@
 })();
 </script>
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Хард">
+<meta name="apple-mobile-web-app-title" content="Взыскание СНГ">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="apple-touch-icon" href="/vendor/icon-192.png">
 <!-- Telegram SDK — локально (same-origin), чтобы приложение поднималось в оффлайне. -->
@@ -198,7 +201,8 @@ a{color:var(--link)}
 .langs button.out{display:inline-flex;align-items:center;gap:4px;margin-left:6px}
 .langs button.out .ico{width:13px;height:13px}
 .langs button.theme{padding:5px 8px;font-size:14px;line-height:1}
-@media (max-width:360px){ .langs button.out span{display:none} }
+@media (max-width:420px){ .langs button.out{min-width:40px;min-height:40px;justify-content:center;padding:8px}
+  .langs button.out span:not(.ico){display:none} }
 /* Вопрос, на который нужен ответ: лист снизу, как выбор варианта, но поверх
    всего (и навигатора) и без закрытия тапом мимо — ответ только кнопкой. */
 .picksheet.ask{z-index:110}
@@ -654,7 +658,7 @@ const I18N = {
     warmagain:"Обновить оффлайн-копию",warmfail:"Не удалось загрузить — нужна сеть",
     routeday:"Маршрут дня",rdempty:"Нет невизитированных кейсов с точками",
     freenav:"Навигация по адресу",freenavph:"Адрес или «41.31, 69.24»",
-    drainTitle:"Выгрузка на сервер",drainWhy:"Этот адрес приложения закрыт. Здесь можно только отправить на сервер то, что сохранилось на телефоне.",drainSending:"Отправляю…",drainDone:"Всё отправлено",drainNet:"Нет связи — повторю сам, как только появится интернет",drainAuth:"Чтобы отправить, нужен вход. Попросите у руководителя ссылку входа и вставьте её сюда:",drainLogin:"Войти и отправить",drainLeft:"Ждут отправки",drainVisits:"выездов",drainPhotos:"фото",drainMarks:"меток",drainNotes:"заметок",drainFailed:"Сервер не принял — внесите заново в новом приложении",drainDrafts:"Карточки без «Сохранить выезд» — их на сервере нет, внесите заново",drainOpen:"Открыть новое приложение",drainNothing:"На этом телефоне нечего отправлять",drainRetry:"Повторить",drainBadLink:"Ссылка не действует — попросите новую",theme:"Тема",theme_system:"как в системе",theme_light:"светлая",theme_dark:"тёмная",modefield:"Выездник",modemanager:"Руководитель",modesecurity:"Безопасник",modefull:"Директор",modeowner:"Владелец",modesoft:"Софт",
+    drainTitle:"Выгрузка на сервер",drainWhy:"Этот адрес приложения закрыт. Здесь можно только отправить на сервер то, что сохранилось на телефоне.",drainSending:"Отправляю…",drainDone:"Всё отправлено",drainNet:"Нет связи — повторю сам, как только появится интернет",drainAuth:"Чтобы отправить, нужен вход. Попросите у руководителя ссылку входа и вставьте её сюда:",drainLogin:"Войти и отправить",drainLeft:"Ждут отправки",drainVisits:"выездов",drainPhotos:"фото",drainMarks:"меток",drainNotes:"заметок",drainFailed:"Сервер не принял — внесите заново в новом приложении",drainOwner:"Запись сохранена, но её владелец не подтверждён. Автоматически отправлять под чужим входом нельзя; покажите эту очередь руководителю для ручной сверки.",drainDrafts:"Карточки без «Сохранить выезд» — их на сервере нет, внесите заново",drainOpen:"Открыть новое приложение",drainNothing:"На этом телефоне нечего отправлять",drainRetry:"Повторить",drainBadLink:"Ссылка не действует — попросите новую",theme:"Тема",theme_system:"как в системе",theme_light:"светлая",theme_dark:"тёмная",modefield:"Выездник",modemanager:"Руководитель",modesecurity:"Служба безопасности",modefull:"Директор",modeowner:"Владелец",modesoft:"Софт",
     team:"Сотрудники",pfk:"Портфель",pfpick:"Чей портфель открыть",byaddr:"По адресу",
     softq:"Кому звонить",softtoday:"Сегодня",softall:"Все",calltab:"Звонки",savecall:"Сохранить звонок",
     callreq:"Сначала выберите статус звонка",commdate:"Когда звонить снова",callmonth:"Накопленный комментарий",callnote:"Новая заметка к звонку",
@@ -723,7 +727,7 @@ const I18N = {
     warmagain:"Oflayn nusxani yangilash",warmfail:"Yuklanmadi — tarmoq kerak",
     routeday:"Kun marshruti",rdempty:"Nuqtali ochiq ishlar yo‘q",
     freenav:"Manzil bo‘yicha navigatsiya",freenavph:"Manzil yoki «41.31, 69.24»",
-    drainTitle:"Serverga yuborish",drainWhy:"Ilovaning bu manzili yopilgan. Bu yerda faqat telefonda saqlanib qolganlarni serverga yuborish mumkin.",drainSending:"Yuborilmoqda…",drainDone:"Hammasi yuborildi",drainNet:"Aloqa yo‘q — internet paydo bo‘lishi bilan o‘zim qayta yuboraman",drainAuth:"Yuborish uchun kirish kerak. Rahbardan kirish havolasini so‘rang va shu yerga joylang:",drainLogin:"Kirish va yuborish",drainLeft:"Yuborilishini kutmoqda",drainVisits:"chiqish",drainPhotos:"rasm",drainMarks:"nuqta",drainNotes:"eslatma",drainFailed:"Server qabul qilmadi — yangi ilovada qaytadan kiriting",drainDrafts:"«Chiqishni saqlash» bosilmagan kartalar — ular serverda yo‘q, qaytadan kiriting",drainOpen:"Yangi ilovani ochish",drainNothing:"Bu telefonda yuboriladigan narsa yo‘q",drainRetry:"Qayta urinish",drainBadLink:"Havola ishlamayapti — yangisini so‘rang",theme:"Mavzu",theme_system:"tizimdagidek",theme_light:"yorug‘",theme_dark:"qorong‘i",modefield:"Chiquvchi",modemanager:"Rahbar",modesecurity:"Xavfsizlik",modefull:"Direktor",modeowner:"Egasi",modesoft:"Soft",
+    drainTitle:"Serverga yuborish",drainWhy:"Ilovaning bu manzili yopilgan. Bu yerda faqat telefonda saqlanib qolganlarni serverga yuborish mumkin.",drainSending:"Yuborilmoqda…",drainDone:"Hammasi yuborildi",drainNet:"Aloqa yo‘q — internet paydo bo‘lishi bilan o‘zim qayta yuboraman",drainAuth:"Yuborish uchun kirish kerak. Rahbardan kirish havolasini so‘rang va shu yerga joylang:",drainLogin:"Kirish va yuborish",drainLeft:"Yuborilishini kutmoqda",drainVisits:"chiqish",drainPhotos:"rasm",drainMarks:"nuqta",drainNotes:"eslatma",drainFailed:"Server qabul qilmadi — yangi ilovada qaytadan kiriting",drainOwner:"Yozuv saqlangan, lekin egasi tasdiqlanmagan. Boshqa hisobdan avtomatik yuborib bo‘lmaydi; ro‘yxatni rahbarga ko‘rsating.",drainDrafts:"«Chiqishni saqlash» bosilmagan kartalar — ular serverda yo‘q, qaytadan kiriting",drainOpen:"Yangi ilovani ochish",drainNothing:"Bu telefonda yuboriladigan narsa yo‘q",drainRetry:"Qayta urinish",drainBadLink:"Havola ishlamayapti — yangisini so‘rang",theme:"Mavzu",theme_system:"tizimdagidek",theme_light:"yorug‘",theme_dark:"qorong‘i",modefield:"Chiquvchi",modemanager:"Rahbar",modesecurity:"Xavfsizlik",modefull:"Direktor",modeowner:"Egasi",modesoft:"Soft",
     team:"Xodimlar",pfk:"Portfel",pfpick:"Kimning portfelini ochish",byaddr:"Manzil bo‘yicha",
     softq:"Kimga qo‘ng‘iroq qilish",softtoday:"Bugun",softall:"Barchasi",calltab:"Qo‘ng‘iroqlar",savecall:"Qo‘ng‘iroqni saqlash",
     callreq:"Avval qo‘ng‘iroq holatini tanlang",commdate:"Qachon yana qo‘ng‘iroq qilish",callmonth:"Yig‘ilgan izoh",callnote:"Qo‘ng‘iroqqa yangi izoh",
@@ -792,7 +796,7 @@ const I18N = {
     warmagain:"Нусхаи офлайнро нав кунед",warmfail:"Нашуд — шабака лозим аст",
     routeday:"Масири рӯз",rdempty:"Кейси кушодаи нуқтадор нест",
     freenav:"Навигатсия аз рӯи нишонӣ",freenavph:"Нишонӣ ё «41.31, 69.24»",
-    drainTitle:"Фиристодан ба сервер",drainWhy:"Ин суроғаи барнома баста шуд. Дар ин ҷо танҳо он чиро, ки дар телефон монд, ба сервер фиристодан мумкин аст.",drainSending:"Фиристода мешавад…",drainDone:"Ҳама фиристода шуд",drainNet:"Алоқа нест — ҳамин ки интернет пайдо шавад, худам такрор мекунам",drainAuth:"Барои фиристодан воридшавӣ лозим аст. Аз роҳбар пайванди воридшавӣ пурсед ва ин ҷо гузоред:",drainLogin:"Ворид шудан ва фиристодан",drainLeft:"Дар навбати фиристодан",drainVisits:"сафар",drainPhotos:"расм",drainMarks:"нуқта",drainNotes:"қайд",drainFailed:"Сервер қабул накард — дар барномаи нав аз нав ворид кунед",drainDrafts:"Кортҳое, ки «Сафарро захира» пахш нашуд — онҳо дар сервер нестанд, аз нав ворид кунед",drainOpen:"Кушодани барномаи нав",drainNothing:"Дар ин телефон чизе барои фиристодан нест",drainRetry:"Такрор",drainBadLink:"Пайванд кор намекунад — пайванди нав пурсед",theme:"Мавзӯъ",theme_system:"мисли система",theme_light:"равшан",theme_dark:"торик",modesoft:"Софт",modefield:"Выездник",modemanager:"Роҳбар",modesecurity:"Амният",modefull:"Директор",modeowner:"Соҳиб",
+    drainTitle:"Фиристодан ба сервер",drainWhy:"Ин суроғаи барнома баста шуд. Дар ин ҷо танҳо он чиро, ки дар телефон монд, ба сервер фиристодан мумкин аст.",drainSending:"Фиристода мешавад…",drainDone:"Ҳама фиристода шуд",drainNet:"Алоқа нест — ҳамин ки интернет пайдо шавад, худам такрор мекунам",drainAuth:"Барои фиристодан воридшавӣ лозим аст. Аз роҳбар пайванди воридшавӣ пурсед ва ин ҷо гузоред:",drainLogin:"Ворид шудан ва фиристодан",drainLeft:"Дар навбати фиристодан",drainVisits:"сафар",drainPhotos:"расм",drainMarks:"нуқта",drainNotes:"қайд",drainFailed:"Сервер қабул накард — дар барномаи нав аз нав ворид кунед",drainOwner:"Сабт нигоҳ дошта шуд, вале соҳибаш тасдиқ нашуд. Бо номи дигар худкор нафиристед; рӯйхатро ба роҳбар нишон диҳед.",drainDrafts:"Кортҳое, ки «Сафарро захира» пахш нашуд — онҳо дар сервер нестанд, аз нав ворид кунед",drainOpen:"Кушодани барномаи нав",drainNothing:"Дар ин телефон чизе барои фиристодан нест",drainRetry:"Такрор",drainBadLink:"Пайванд кор намекунад — пайванди нав пурсед",theme:"Мавзӯъ",theme_system:"мисли система",theme_light:"равшан",theme_dark:"торик",modesoft:"Софт",modefield:"Выездник",modemanager:"Роҳбар",modesecurity:"Амният",modefull:"Директор",modeowner:"Соҳиб",
     team:"Кормандон",pfk:"Портфел",pfpick:"Портфели киро кушоем",byaddr:"Аз рӯи нишонӣ",
     softq:"Кӣ ба занг задан",softtoday:"Имрӯз",softall:"Ҳама",calltab:"Зангҳо",savecall:"Зангро нигоҳ доштан",
     callreq:"Аввал ҳолати зангро интихоб кунед",commdate:"Кай боэд занг задан",callmonth:"Шарҳи ҷамъшуда",callnote:"Шарҳи нави занг",
@@ -879,23 +883,17 @@ function noteShellVersion(v, live){
   if(!Number.isInteger(srv)||srv<=SHELL_VERSION||UPDATE_READY) return;
   UPDATE_READY=true;
   clientMetric("shell_update", {shell:srv});
-  // «Занят» — это ещё и открытый выбор файла со сжатием: возврат из системной
-  // камеры сам поднимает visibilitychange, а PHOTO_PREPARING заполняется лишь
-  // ПОСЛЕ чтения и сжатия. Перезагрузиться в этом промежутке — стереть снимок
-  // до того, как он попал в очередь, ровно в тот момент, когда человек его
-  // только что сделал.
-  // draftDirty — это «есть неотправленные правки», а НЕ «человек работает»:
-  // автосинк гасит его каждые 20 секунд и при уходе в фон. Открытая заполненная
-  // форма почти всё время выглядит «свободен», и человек посреди разговора с
-  // должником вылетел бы в список клиентов. Текст черновика уцелеет, а место —
-  // нет. Поэтому открытая форма сама по себе означает «занят».
-  const busy=(typeof draftDirty!=="undefined"&&draftDirty)
-             ||PHOTO_PREPARING.size||PHOTO_BUSY>0
-             ||(typeof formVisible==="function"&&formVisible());
-  if(!busy){ setTimeout(()=>location.reload(),600); return; }
   try{ updateOffBar(); }catch(e){}
 }
-function reloadForUpdate(){ location.reload(); }
+async function reloadForUpdate(){
+  if(PHOTO_PREPARING.size||PHOTO_BUSY>0||PHOTO_INFLIGHT.size||SAVING){
+    toast("Дождитесь сохранения записи и подготовки фото"); return;
+  }
+  // Keep the durable draft and queue; no network success is required to save edits.
+  clearTimeout(draftTimer);
+  if(saveDraft()===false){ toast("Не удалось сохранить черновик на устройстве. Повторите обновление после сохранения."); return; }
+  location.reload();
+}
 
 // Проверка версии не зависит от тяжёлого авторизованного bootstrap. Это важно
 // для старого Telegram WebView и ярлыка PWA, который ОС могла заморозить на
@@ -951,7 +949,11 @@ const IDB = (()=>{
   // Для очереди одного request.onsuccess недостаточно: транзакция IndexedDB ещё
   // может abort-нуться (quota/закрытие iOS PWA). Запись считается надёжной только
   // после transaction.oncomplete.
-  const write=(name,action)=>open().then(d=>new Promise((res,rej)=>{
+  const write=(name,action,valid)=>{const generation=WIPE_GEN;return open().then(d=>{
+    // open() itself can wait for IndexedDB initialization. A wipe may have
+    // happened meanwhile; do not create a stale write transaction afterwards.
+    if(generation!==WIPE_GEN||(valid&&!valid())) return false;
+    return new Promise((res,rej)=>{
     let tx;
     try{
       tx=d.transaction(name,"readwrite");
@@ -960,20 +962,37 @@ const IDB = (()=>{
     tx.oncomplete=()=>res();
     tx.onabort=()=>rej(tx.error||new Error("idb abort"));
     tx.onerror=()=>rej(tx.error||new Error("idb error"));
-  }));
+    });
+  });};
   return {
     get:(s,k)=>store(s,"readonly").then(o=>p(o.get(k))),
-    put:(s,v,k)=>write(s,o=>{ if(k===undefined) o.put(v); else o.put(v,k); }),
+    put:(s,v,k,valid)=>write(s,o=>{ if(k===undefined) o.put(v); else o.put(v,k); },valid),
     del:(s,k)=>write(s,o=>o.delete(k)),
     all:(s)=>store(s,"readonly").then(o=>p(o.getAll())),
     count:(s)=>store(s,"readonly").then(o=>p(o.count())),
     clear:(s)=>write(s,o=>o.clear()),
     // Один атомарный снимок портфеля: сотни отдельных транзакций подвешивали
     // слабые телефоны, а частичный сбой оставлял смесь старых и новых карточек.
-    replace:(s,entries)=>write(s,o=>{
+    replace:(s,entries,valid)=>write(s,o=>{
       o.clear();
       for(const [k,v] of entries) o.put(v,k);
-    }),
+    },valid),
+    // Queue removal and its acknowledgement counter commit together.
+    ack:async(key)=>{
+      const generation=WIPE_GEN,d=await open();
+      if(generation!==WIPE_GEN)return;
+      return new Promise((resolve,reject)=>{
+        const tx=d.transaction(["queue","kv"],"readwrite"),q=tx.objectStore("queue"),kv=tx.objectStore("kv");
+        const item=q.get(key);
+        item.onsuccess=()=>{if(!item.result)return;
+          const req=kv.get("sync-progress");req.onsuccess=()=>{
+            const old=req.result||{};q.delete(key);
+            const count=q.count();count.onsuccess=()=>kv.put({sent:(old.sent||0)+1,complete:count.result===0},"sync-progress");
+          };
+        };
+        tx.oncomplete=()=>resolve();tx.onabort=tx.onerror=()=>reject(tx.error||new Error("ack abort"));
+      });
+    },
   };
 })();
 
@@ -982,8 +1001,8 @@ const IDB = (()=>{
 // Смена сотрудника на устройстве: чужие ПД чистим, а РАБОТУ ЧЕЛОВЕКА — нет.
 // Раньше отсюда безусловно стиралась вся очередь, включая неотправленные визиты
 // и фото; при переключении портфеля руководителем это была прямая потеря работы.
-// Плюс не трогался localStorage, и черновик формы с очередью трека прошлого
-// выездника продолжали жить под новым именем.
+// Черновики и очередь прежнего uid остаются только как НЕОТПРАВЛЕННАЯ работа;
+// новый uid по своему ключу формы не видит их. Явный выход удаляет оба.
 async function clearLocalData(opts){
   if(opts&&opts.keepQueue) await stampQueueOwners();
   dayStop(true);
@@ -991,13 +1010,14 @@ async function clearLocalData(opts){
   dayClearOn();
   dayQueueSet(dayQueue().filter(b=>b.employee));
   const keepQueue = !!(opts && opts.keepQueue);
-  const stores = keepQueue ? ["cards"] : ["cards","queue"];
+  const stores = keepQueue ? ["cards","kv"] : ["cards","kv","queue"];
   for(const s of stores){ try{ await IDB.clear(s); }catch(e){} }
   try{
     trackQueueSet(trackQueue().filter(b=>b.employee));
     localStorage.removeItem(WARM_KEY);
     Object.keys(localStorage)
-      .filter(k => k.indexOf("draft:") === 0)
+      .filter(k => (k.startsWith("draft:") || k.startsWith("softdraft:"))
+        && (!keepQueue || !ownedDraftKey(k)))
       .forEach(k => localStorage.removeItem(k));
   }catch(e){}
 }
@@ -1009,27 +1029,130 @@ async function clearLocalData(opts){
 // дошедшие до сервера): при отказе сервера это работа человека, она уйдёт, когда
 // он войдёт по новой ссылке. «Выйти» и замена входа стирают и её.
 // Безобидных настроек интерфейса в localStorage у оболочки нет (язык хранит
-// сервер), поэтому стирается всё, кроме OUT_KEY — отпечатков вышедших токенов —
-// и hb_device_uuid: идентификатор устройства для входа по логину (см.
-// deviceProfile), он принадлежит телефону, а не вошедшему человеку.
+// сервер). При keepQueue сохраняются также UID-маркированные черновики,
+// неподтверждённые анонимные черновики удаляются. Явный выход стирает всё,
+// кроме OUT_KEY — отпечатков вышедших токенов — и hb_device_uuid: он
+// принадлежит телефону, а не вошедшему человеку (см. deviceProfile).
 const OUT_KEY="hb_out";
-const LS_KEEP=[OUT_KEY,"hb_device_uuid"];
+const LS_KEEP=[OUT_KEY,"hb_device_uuid","hb_erasure_pending"];
+function ownedDraftKey(key){
+  // Unsent work follows the same UID-bound custody as the offline queue.
+  // Anonymous or malformed old drafts have no proven owner and are removed.
+  const parts=String(key).split(":");
+  return (parts[0]==="draft"||parts[0]==="softdraft")&&
+    /^[1-9][0-9]*$/.test(parts[1]||"")&&parts.length>=3;
+}
 // Поколение данных устройства. Что стартовало ДО очистки и докатилось после неё
 // (ответ bootstrap, прогрев карточек), обратно в хранилище и на экран не пишет.
 let WIPE_GEN=0;
+const MOBILE_RETENTION_MS=14*60*60*1000;
+const CONTACT_KEY="hb_server_contact";
+let ACCESS_CHECK=null, ACCESS_VERIFIED=0, ACCESS_CREDENTIAL="", PURGING=null, RETENTION_TIMER=null;
+let POLICY_NOTICE="";
+function mobileProfile(){
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent||"") ||
+    (/Mac/i.test(navigator.platform||"")&&navigator.maxTouchPoints>1);
+}
+function confirmedContact(){
+  try{const s=JSON.parse(localStorage.getItem(CONTACT_KEY)||"null");
+    return s&&s.mark===tokenMark(cacheCredential())&&Number.isFinite(s.at)?s.at:0;
+  }catch(e){return 0;}
+}
+function noteServerContact(){
+  const credential=cacheCredential(); if(!credential)return;
+  ACCESS_VERIFIED=Date.now();ACCESS_CREDENTIAL=credential;
+  try{localStorage.setItem(CONTACT_KEY,JSON.stringify({mark:tokenMark(credential),at:ACCESS_VERIFIED}));}catch(e){}
+  clearTimeout(RETENTION_TIMER);
+  if(mobileProfile())RETENTION_TIMER=setTimeout(()=>void enforceRetention(),MOBILE_RETENTION_MS);
+  try{navigator.serviceWorker?.controller?.postMessage({type:"PROFILE_ACTIVE"});}catch(e){}
+}
+async function purgeProfile(reason){
+  if(PURGING)return PURGING;
+  const tk=appToken();markTokenOut(tk);
+  try{localStorage.setItem("hb_erasure_pending","1");}catch(e){}
+  const replacement=reason==="revoked"?[pendingToken(),URLT].find(t=>t&&t!==tk&&!TRIED_TOKENS.has(t)&&!tokenIsOut(t)):null;
+  POLICY_NOTICE=reason==="expired" ? "Данные на устройстве удалены: 14 часов без подтверждённой связи с сервером. Неотправленные записи удалены." : "Доступ отозван. Локальный профиль и неотправленные записи удалены.";
+  PURGING=(async()=>{
+    ACCESS_VERIFIED=0;ACCESS_CREDENTIAL="";
+    await wipeDevice({keepQueue:false});
+    try{sessionStorage.clear();localStorage.removeItem("hb_device_uuid");}catch(e){}
+    // Leave a non-personal erasure barrier if a browser store was temporarily
+    // unavailable. A new login cannot revive remnants under the same UID.
+    let erased=true;
+    for(const name of ["cards","kv","queue"]){try{if(await IDB.count(name))erased=false;}catch(e){erased=false;}}
+    try{if((await caches.keys()).length)erased=false;}catch(e){erased=false;}
+    if(!erased){POLICY_NOTICE="Очистка данных не завершена: хранилище недоступно. Повторим при открытии приложения.";renderLangs();renderAppAuthGone(true);await updateOffBar();return;}
+    try{localStorage.removeItem("hb_erasure_pending");}catch(e){}
+    if(replacement){
+      TRIED_TOKENS.add(replacement);localStorage.setItem("app_token",replacement);stampTokenUrl();location.reload();return;
+    }
+    renderLangs();renderAppAuthGone(true);await updateOffBar();
+  })();
+  try{await PURGING;}finally{PURGING=null;}
+}
+async function enforceRetention(){
+  if(PURGING)return false;
+  if(localStorage.getItem("hb_erasure_pending")){await purgeProfile("revoked");return false;}
+  if(!mobileProfile()||!cacheCredential())return true;
+  const gen=WIPE_GEN,credential=cacheCredential();
+  let at=confirmedContact();
+  if(!at){
+    // Migration from PWA100: use the original authenticated snapshot time,
+    // never grant a new lease merely because a closed app was reopened.
+    const snap=await IDB.get("kv","bootstrap").catch(()=>null);
+    if(gen!==WIPE_GEN||credential!==cacheCredential())return false;
+    if(snap&&snap._credential===credential)at=Number(snap.at)||0;
+  }
+  if(at&&(Date.now()<at||Date.now()-at>=MOBILE_RETENTION_MS)){
+    await purgeProfile("expired");return false;
+  }
+  return true;
+}
+async function ensureAccess(force=false){
+  if(!await enforceRetention())return false;
+  const credential=cacheCredential(),generation=WIPE_GEN;
+  if(!credential)return false;
+  if(!force&&ACCESS_CREDENTIAL===credential&&Date.now()-ACCESS_VERIFIED<30000)return true;
+  if(ACCESS_CHECK&&ACCESS_CHECK.credential===credential)return ACCESS_CHECK.promise;
+  const check={credential,promise:null};
+  check.promise=(async()=>{
+    const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),10000);
+    try{
+      const r=await ORIGINAL_FETCH("/api/identity",{headers:authHeaders(),signal:ctl.signal,cache:"no-store",redirect:"error"});
+      if(generation!==WIPE_GEN||credential!==cacheCredential())return false;
+      if(r.status===401||r.status===403){await purgeProfile("revoked");return false;}
+      if(!r.ok)throw new Error("access unavailable");
+      const identity=await r.json();
+      if(identity.ok!==true||!identity.uid)throw new Error("invalid identity");
+      if(generation!==WIPE_GEN||credential!==cacheCredential())return false;
+      if(!await enforceRetention())return false;
+      noteServerContact();STATE.online=true;return true;
+    }catch(e){ACCESS_VERIFIED=0;STATE.online=false;return false;}
+    finally{clearTimeout(timer);if(ACCESS_CHECK===check)ACCESS_CHECK=null;}
+  })();
+  ACCESS_CHECK=check;return check.promise;
+}
 async function wipeDevice(opts){
   const keepQueue=!!(opts&&opts.keepQueue);
-  if(keepQueue) await stampQueueOwners();
+  // Invalidate pending cache writers before the first asynchronous IDB read.
   WIPE_GEN++;
+  // The old portfolio must disappear from the DOM before a candidate token
+  // is installed, including while IDB cleanup or the next boot is pending.
+  try{ hideBottomNav(); $("app").innerHTML=""; }catch(e){}
+  if(keepQueue) await stampQueueOwners();
   // Сначала глушим всё, что само пишет в хранилище: трек поездки, следы
   // карточки, черновик формы (beforeunload и уход в фон вписали бы его обратно).
   try{ NAV.session=null; NAV.buf=[]; if($("navmode").classList.contains("on")) exitNav(); }catch(e){}
   try{ dayStop(); }catch(e){}
   try{ clearTimeout(draftTimer); stopAutoSync(); draftDirty=false; prStop(); }catch(e){}
+  ACCESS_VERIFIED=0;ACCESS_CREDENTIAL="";
+  clearTimeout(RETENTION_TIMER);
+  try{sessionStorage.clear();}catch(e){}
   try{ closePick(); closeAsk("swapsheet"); closeAsk("outsheet"); PhotoAudit.free(); }catch(e){}
   STATE.cur=null; STATE.persons=[]; STATE.roles=null; STATE.uid=null; STATE.employee="";
   try{
-    Object.keys(localStorage).forEach(k=>{ if(LS_KEEP.indexOf(k)<0&&!(keepQueue&&k==="hb_queue_owner_blocked")) localStorage.removeItem(k); });
+    Object.keys(localStorage).forEach(k=>{ if(LS_KEEP.indexOf(k)<0&&
+      !(keepQueue&&(k==="hb_queue_owner_blocked"||ownedDraftKey(k)))) localStorage.removeItem(k); });
   }catch(e){}
   clearPendingToken();
   URLT=null;
@@ -1040,6 +1163,13 @@ async function wipeDevice(opts){
   // Cache Storage: оболочка, персональный manifest.webmanifest?t=<токен>, тайлы
   // карт. Оболочку service worker кладёт обратно сам при следующей загрузке по сети.
   try{
+    if(navigator.serviceWorker?.controller&&typeof MessageChannel!=="undefined"){
+      await new Promise(resolve=>{
+        const channel=new MessageChannel(),timer=setTimeout(()=>{channel.port1.close();resolve();},2000);
+        channel.port1.onmessage=()=>{clearTimeout(timer);channel.port1.close();resolve();};
+        navigator.serviceWorker.controller.postMessage({type:"ERASE_PROFILE"},[channel.port2]);
+      });
+    }
     if(typeof caches!=="undefined" && caches.keys){
       const ks=await caches.keys();
       await Promise.all(ks.map(k=>caches.delete(k).catch(()=>false)));
@@ -1071,19 +1201,25 @@ function tokenIsOut(tk){
   try{ return (localStorage.getItem(OUT_KEY)||"").split(" ").indexOf(tokenMark(tk))>=0; }
   catch(e){ return false; }
 }
-// Погасить вход и на сервере (POST /api/logout). Отметка hb_out живёт в хранилище
-// ЭТОГО браузера, а у ярлыка iOS хранилище своё, и токен у него вшит в start_url:
-// без серверного отзыва ярлык продолжал бы входить. Без связи или на старом
-// сервере — молча: телефон всё равно очищается, токен доживёт свой срок.
+// Погасить предъявленный аккаунтный либо ссылочный токен на сервере. Отметка
+// hb_out защищает только этот браузер; ярлык iOS хранит start_url отдельно.
+// При недоступном сервере локальная очистка не доказывает отзыв токена.
 async function dropTokenOnServer(tk){
-  if(!tk || (TG&&TG.initData)) return;
+  if(!tk) return true;
   try{
     const ctl=(typeof AbortController!=="undefined")?new AbortController():null;
     const timer=ctl?setTimeout(()=>ctl.abort(),5000):null;
-    try{ await fetch("/api/logout",{method:"POST",headers:{"X-App-Token":tk},
-                                  signal:ctl?ctl.signal:undefined}); }
+    try{
+      const opts={method:"POST",headers:{"X-App-Token":tk},signal:ctl?ctl.signal:undefined};
+      const account=await fetch("/api/account/logout",opts);
+      if(account.ok) return true;
+      if(account.status!==401 && account.status!==404) return false;
+      // A legacy link token is not an account session. Old servers may not
+      // expose the account endpoint yet; its 404 has the same fallback.
+      return (await fetch("/api/logout",opts)).ok;
+    }
     finally{ if(timer) clearTimeout(timer); }
-  }catch(e){}
+  }catch(e){ return false; }
 }
 
 // Сколько операций ещё не ушло на сервер (визиты/фото/метки).
@@ -1099,15 +1235,55 @@ function uuid(){
 function hhmm(dt){ return String(dt.getHours()).padStart(2,"0")+":"+String(dt.getMinutes()).padStart(2,"0"); }
 
 async function cacheBootstrap(d){
-  try{const old=await IDB.get("kv","bootstrap");if(old&&old.scope_version&&d.scope_version&&old.scope_version!==d.scope_version)await IDB.clear("cards");}catch(e){}
-  try{ await IDB.put("kv",{uid:d.uid,lang:d.lang,meta:d.meta,persons:d.persons,kind:d.kind,
-    employee:d.employee,roles:d.roles||null,scope_version:d.scope_version,_mode:d._mode||STATE.mode,at:Date.now()},"bootstrap"); }catch(e){}
+  const gen=WIPE_GEN, credential=cacheCredential();
+  if(!credential) return;
+  try{
+    const old=await IDB.get("kv","bootstrap");
+    if(gen!==WIPE_GEN||credential!==cacheCredential()) return;
+    if(old&&old.scope_version&&d.scope_version&&old.scope_version!==d.scope_version){
+      await IDB.clear("cards");
+      if(gen!==WIPE_GEN||credential!==cacheCredential()) return;
+    }
+    await IDB.put("kv",{uid:d.uid,lang:d.lang,meta:d.meta,persons:d.persons,kind:d.kind,
+      employee:d.employee,roles:d.roles||null,scope_version:d.scope_version,_mode:d._mode||STATE.mode,
+      _credential:credential,at:Date.now()},"bootstrap",
+      ()=>gen===WIPE_GEN&&credential===cacheCredential());
+  }catch(e){}
 }
-function offlineLeaseValid(s){const age=Date.now()-Number(s&&s.at);return Number.isFinite(age)&&age>=0&&age<=8*60*60*1000;}
-async function loadBootstrapSnapshot(){ try{ const s=await IDB.get("kv","bootstrap"); return offlineLeaseValid(s)?s:null; }catch(e){ return null; } }
+function offlineLeaseValid(s){const age=Date.now()-Number(confirmedContact()||(s&&s.at));return Number.isFinite(age)&&age>=0&&(!mobileProfile()||age<MOBILE_RETENTION_MS);}
+// Credential is a cache selector, NOT proof of a person's identity. Only an
+// online server bootstrap may write a snapshot for a newly presented token.
+function cacheCredential(){
+  const token=appToken();
+  if(token) return "token:"+token;
+  return (TG&&TG.initData)?"telegram:"+TG.initData:"";
+}
+async function loadBootstrapSnapshot(){
+  if(!await enforceRetention())return null;
+  try{
+    const gen=WIPE_GEN, credential=cacheCredential();
+    if(!credential) return null;
+    const s=await IDB.get("kv","bootstrap");
+    return gen===WIPE_GEN&&credential===cacheCredential()&&s&&s._credential===credential&&offlineLeaseValid(s)?s:null;
+  }catch(e){ return null; }
+}
 function cardKey(rep,profile){ return (profile==="soft"?"soft:":"")+rep; }
-function storeCard(d,rep){return IDB.put("cards",d,cardKey(rep,d._profile||(STATE.mode==="soft"?"soft":"hard")));}
-async function loadCard(rep){ try{ if(!(await loadBootstrapSnapshot())) return null; return (await IDB.get("cards",cardKey(rep,STATE.mode)))||null; }catch(e){ return null; } }
+function storeCard(d,rep){
+  const gen=WIPE_GEN, credential=cacheCredential(), uid=STATE.uid;
+  if(!credential||!STATE.uid) return Promise.resolve();
+  return IDB.put("cards",{...d,_cacheCredential:credential,_cacheUid:uid},
+    cardKey(rep,d._profile||(STATE.mode==="soft"?"soft":"hard")),
+    ()=>gen===WIPE_GEN&&credential===cacheCredential()&&uid===STATE.uid);
+}
+async function loadCard(rep){
+  try{
+    const gen=WIPE_GEN, snap=await loadBootstrapSnapshot();
+    if(!snap) return null;
+    const d=await IDB.get("cards",cardKey(rep,STATE.mode));
+    return gen===WIPE_GEN&&d&&d._cacheCredential===snap._credential&&d._cacheUid===snap.uid&&
+      snap._credential===cacheCredential()?d:null;
+  }catch(e){ return null; }
+}
 // Прогрев кэша всех карточек одним запросом (только онлайн, в фоне, не блокирует UI).
 // Полные карточки портфеля в оффлайн-кэш. `manual` — запуск кнопкой: тогда процесс
 // показываем, при фоновом прогреве после входа — только итог. Раскладка идёт
@@ -1127,7 +1303,8 @@ async function askPersistentStorage(){
 }
 
 async function warmCards(manual){
-  const t = L(), gen=WIPE_GEN, mode=STATE.mode;
+  const t = L(), gen=WIPE_GEN, mode=STATE.mode, credential=cacheCredential(), uid=STATE.uid;
+  if(!credential||!uid) return;
   await askPersistentStorage();
   if(manual) warmBar(`<div class="sline"><span class="d w"></span><span id="warmtxt">${esc(t.warmgoing)}…</span></div>`);
   let j=null;
@@ -1139,15 +1316,18 @@ async function warmCards(manual){
         <button class="toolbtn" onclick="warmCards(true)">⬇ ${esc(t.warmagain)}</button></div>`);
     return;
   }
-  if(gen!==WIPE_GEN || mode!==STATE.mode) return;
+  if(gen!==WIPE_GEN || mode!==STATE.mode || credential!==cacheCredential() || uid!==STATE.uid) return;
   const downloadMs=performance.now()-downloadStarted;
   const reps = (j && j.cards) ? Object.keys(j.cards) : [];
   const profile=mode==="soft"?"soft":"hard";
-  const entries=reps.map(rep=>[cardKey(rep,profile),{...j.cards[rep],_profile:profile}]);
+  const entries=reps.map(rep=>[cardKey(rep,profile),{...j.cards[rep],_profile:profile,
+    _cacheCredential:credential,_cacheUid:uid}]);
   const cacheStarted=performance.now();
   try{
     const other=(await IDB.all("cards")||[]).filter(d=>d.rep&&(d._profile||"hard")!==profile);
-    await IDB.replace("cards", entries.concat(other.map(d=>[cardKey(d.rep,d._profile),d])));
+    if(gen!==WIPE_GEN || mode!==STATE.mode || credential!==cacheCredential() || uid!==STATE.uid) return;
+    await IDB.replace("cards", entries.concat(other.map(d=>[cardKey(d.rep,d._profile),d])),
+      ()=>gen===WIPE_GEN&&mode===STATE.mode&&credential===cacheCredential()&&uid===STATE.uid);
   }catch(e){
     clientMetric("warm_error", {cards:reps.length,download_ms:downloadMs});
     if(manual) warmBar(`<div class="sline"><span class="d w"></span><span>⚠️ ${esc(t.warmfail)}</span>
@@ -1155,6 +1335,7 @@ async function warmCards(manual){
     return;
   }
   const cacheMs=performance.now()-cacheStarted;
+  if(gen!==WIPE_GEN || mode!==STATE.mode || credential!==cacheCredential() || uid!==STATE.uid) return;
   STATE.warmCount = entries.length;
   try{ localStorage.setItem(WARM_KEY, String(Date.now())); }catch(e){}
   const sd=(j&&j.diagnostics)||{};
@@ -1168,7 +1349,11 @@ async function warmCards(manual){
 // показывала «⚠️ 0/N» на полном кэше — и именно оффлайн, когда проверить больше нечем.
 // Считаем правду в IndexedDB и перерисовываем полоску, если счёт разошёлся.
 async function syncWarmCount(){
-  let n; try{ n = await IDB.count("cards"); }catch(e){ return; }
+  let n; try{
+    const credential=cacheCredential(), uid=STATE.uid;
+    n=((await IDB.all("cards"))||[]).filter(d=>d._cacheCredential===credential&&d._cacheUid===uid).length;
+    if(credential!==cacheCredential()||uid!==STATE.uid) return;
+  }catch(e){ return; }
   if(n === STATE.warmCount) return;
   STATE.warmCount = n;
   warmBar(warmStatusHTML());
@@ -1177,7 +1362,9 @@ async function syncWarmCount(){
 let _retakeTarget=null;
 async function updateOffBar(){
   const e=$("offbar"); if(!e) return;
-  let items=[]; try{ items=(await IDB.all("queue"))||[]; }catch(_){}
+  const generation=WIPE_GEN;
+  let items=[],progress={}; try{ items=(await IDB.all("queue"))||[];progress=await IDB.get("kv","sync-progress")||{}; }catch(_){}
+  if(generation!==WIPE_GEN)return;
   const failedItems=items.filter(it=>it&&it.kind==="photo"&&it.failed);
   failedItems.sort((a,b)=>(a.failed_at||a.at||0)-(b.failed_at||b.at||0));
   const failed=failedItems.length;
@@ -1196,14 +1383,18 @@ async function updateOffBar(){
   // UPDATE_READY тоже повод показать полосу. Раньше этот выход стоял ВЫШЕ ветки
   // обновления, и человек «онлайн, очередь пуста» — то есть в самом обычном
   // состоянии — кнопку «Обновить» не видел вообще никогда.
-  if(!off && !qn && !failed && !rejected.length && !UPDATE_READY){
+  if(!off && !items.length && !UPDATE_READY && !POLICY_NOTICE && !progress.complete){
     e.className="offbar"; e.innerHTML=""; return; }
   let msg;
-  if(off){ const snap=await loadBootstrapSnapshot();
+  if(off){ const snap=PURGING?null:await loadBootstrapSnapshot();
     const at=snap&&snap.at?new Date(snap.at):null;
     msg=t.offline+(at?" · "+t.datao+" "+hhmm(at):""); }
   else msg=qn?t.sending:"";
   if(qn) msg+=" · "+qn+" "+t.pend;
+  const sent=progress.sent||0,left=items.length;
+  if(left)msg=(_flushing?"Синхронизация":off?"Ожидание связи":"Отправка приостановлена")+" · Отправлено "+sent+" из "+(sent+left)+", осталось "+left;
+  else if(progress.complete)msg="Всё синхронизировано · Отправлено "+sent+" из "+sent+", осталось 0";
+  if(POLICY_NOTICE)msg=POLICY_NOTICE;
   if(failed){
     const shown=failedReps.slice(0,3).join(", ")+(failedReps.length>3?", …":"");
     // Причину отказа показываем человеку и владельцу. 04.08.2026 два фото
@@ -1223,6 +1414,7 @@ async function updateOffBar(){
   // разом счётчик очереди, «N фото нужно переснять [код]» и кнопка «Переснять»,
   // то есть ровно то, ради чего полоса и существует.
   if(UPDATE_READY) msg=(msg?msg+" · ":"")+t.updready;
+  if(generation!==WIPE_GEN)return;
   e.className="offbar on";
   e.innerHTML=`<span class="d"></span><span>${esc(msg)}</span>`+
     (rejected.length?`<button class="offact" onclick="showQueueProblems()">${esc(recoveryText('review'))}</button>`:"")+
@@ -1248,8 +1440,19 @@ function retakeFailedPhoto(){
 // дубли визитов/меток/фото и не шлёт повторный пост в группу.
 function jsonHeaders(){ const h=authHeaders(); h["Content-Type"]="application/json"; return h; }
 async function enqueue(entry){
-  if(!entry._owner&&STATE.uid) entry._owner={uid:STATE.uid,employee:STATE.employee||""};
-  try{ await IDB.put("queue", entry); return true; }catch(e){ return false; }
+  const generation=WIPE_GEN,credential=cacheCredential();
+  if(!credential||!STATE.uid)return false;
+  if(!await enforceRetention())return false;
+  if(generation!==WIPE_GEN||credential!==cacheCredential())return false;
+  if(!entry._owner) entry._owner=STATE.uid
+    ?{uid:STATE.uid,employee:STATE.employee||""}:{unknown:true};
+  try{
+    const p=await IDB.get("kv","sync-progress")||{};
+    if(generation!==WIPE_GEN||credential!==cacheCredential())return false;
+    await IDB.put("kv",{sent:p.sent||0,complete:false},"sync-progress");
+    if(generation!==WIPE_GEN||credential!==cacheCredential())return false;
+    await IDB.put("queue", entry);void updateOffBar();return true;
+  }catch(e){ return false; }
 }
 
 async function stampQueueOwners(){
@@ -1267,8 +1470,10 @@ async function stampQueueOwners(){
 }
 function queueBelongs(it){
   const owner=it._owner;
-  if(!owner){try{return localStorage.getItem("hb_queue_owner_blocked")!=="1";}catch(e){return false;}}
-  return !owner.unknown&&(!owner.uid||owner.uid===STATE.uid)&&(!owner.employee||owner.employee===STATE.employee);
+  // Keep unlabelled legacy work for recovery, but never send it under a new
+  // credential. A matching employee name alone does not establish identity.
+  return !!(owner&&owner.uid&&STATE.uid&&owner.uid===STATE.uid&&
+    (!owner.employee||owner.employee===STATE.employee));
 }
 
 // Факт сначала становится durable. Закрытие PWA во время HTTP не теряет
@@ -1282,6 +1487,7 @@ async function submitSavedOperation(entry,body){
       toast("Не удалось сохранить на телефоне. Освободите место и повторите; форма сохранения не закрыта.");
       return null;
     }
+    if(generation!==WIPE_GEN||token!==appToken()||!queueBelongs(entry)) return null;
     try{
       const j=await api("/api/save",{method:"POST",body:JSON.stringify(body)});
       if(generation!==WIPE_GEN||token!==appToken()||!queueBelongs(entry)) return null;
@@ -1289,7 +1495,7 @@ async function submitSavedOperation(entry,body){
       if(j.rejected&&Object.keys(j.rejected).length){
         entry.failed="server-fields"; entry.rejected=j.rejected;
         await enqueue(entry);
-      }else await IDB.del("queue",entry.op_id);
+      }else await IDB.ack(entry.op_id);
       return {queued:false,data:j};
     }catch(e){ return generation===WIPE_GEN&&token===appToken()&&queueBelongs(entry)?{queued:true}:null; }
   }finally{ SAVE_INFLIGHT.delete(entry.op_id); updateOffBar(); }
@@ -1299,7 +1505,30 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=85;
+const SHELL_VERSION=101;
+let LOGIN_GPS=null;
+const ORIGINAL_FETCH=window.fetch.bind(window);
+window.fetch=async(input,init)=>{
+  const url=new URL(typeof input==="string"?input:(input.url||String(input)),location.href);
+  if(url.origin!==location.origin||!url.pathname.startsWith("/api/"))return ORIGINAL_FETCH(input,init);
+  if(!await enforceRetention())throw new Error("profile erased");
+  const generation=WIPE_GEN,credential=cacheCredential();
+  const source=init?.headers||(typeof input!=="string"?input.headers:undefined)||{},headers={};
+  if(typeof source.forEach==="function")source.forEach((v,k)=>{headers[k]=v;});else Object.assign(headers,source);
+  const authenticated=Object.keys(headers).some(k=>/^(x-app-token|x-pult-token|x-init-data)$/i.test(k));
+  const method=String(init?.method||input.method||"GET").toUpperCase();
+  if(authenticated&&method!=="GET"&&method!=="HEAD"&&!await ensureAccess())throw new Error("access unavailable");
+  headers["X-Client-Version"]="3.2.0";
+  if(LOGIN_GPS&&Date.now()-LOGIN_GPS.at<90000)headers["X-Device-GPS"]=JSON.stringify(LOGIN_GPS.point);
+  try{
+    const r=await ORIGINAL_FETCH(input,{...init,headers});
+    if(generation!==WIPE_GEN||credential!==cacheCredential())throw new Error("stale response");
+    if(!await enforceRetention())throw new Error("profile erased");
+    if(authenticated&&r.ok&&url.pathname!=="/api/client-event")noteServerContact();
+    if(authenticated&&(r.status===401||r.status===403))await ensureAccess(true);
+    return r;
+  }catch(e){ACCESS_VERIFIED=0;STATE.online=false;throw e;}
+};
 // Пока новый File уже durable в IDB, но ещё ждёт geo, flush не должен отправить
 // его с geo:null. После перезапуска Set пуст — аварийная запись всё равно уйдёт.
 const PHOTO_PREPARING=new Set();
@@ -1525,6 +1754,10 @@ async function flushQueue(){
   _flushing=true;
   const generation=WIPE_GEN, token=appToken();
   try{
+    if(generation!==WIPE_GEN||token!==appToken())return;
+    if(!await ensureAccess(true))return;
+    if(generation!==WIPE_GEN||token!==appToken())return;
+    await updateOffBar();
     let items=[]; try{ items=(await IDB.all("queue"))||[]; }catch(e){ items=[]; }
     if(items.some(it=>it._owner)&&(DRAIN||!STATE.uid)){
       try{const identity=await api("/api/identity");STATE.uid=identity.uid;STATE.employee=identity.employee||"";}
@@ -1611,20 +1844,19 @@ async function flushQueue(){
           if(it.visit_op) q.set("visit",it.visit_op);
           r=await fetch("/api/receipt?"+q.toString(),
             {method:"POST",signal:ctl.signal,redirect:"error",headers:receiptHeaders(it.ext),body:bytes});
-        }else{ ok=true; }   // неизвестный тип — не держим вечно
+        }else{it.failed="server-unknown-operation";await IDB.put("queue",it);continue;}
+        if(generation!==WIPE_GEN||token!==appToken())break;
         if(r){
           if(r.ok){
-            if(it.kind==="save"||it.kind==="payment"){
-              const j=await r.json();
-              if(!j||j.ok!==true) throw new Error("invalid acknowledgement");
-              if(j.rejected&&Object.keys(j.rejected).length){
-                it.failed="server-fields"; it.rejected=j.rejected; it.failed_at=Date.now();
-                await IDB.put("queue",it); STATE.online=true; continue;
-              }
+            const acknowledgement=await r.json();
+            if(!acknowledgement||acknowledgement.ok!==true)throw new Error("invalid acknowledgement");
+            if(acknowledgement.rejected&&Object.keys(acknowledgement.rejected).length){
+              it.failed="server-fields"; it.rejected=acknowledgement.rejected; it.failed_at=Date.now();
+              await IDB.put("queue",it); STATE.online=true; continue;
             }
             ok=true;
             if(it.kind==="photo"){
-              try{ const j=await r.json(); showPhotoCount(it.rep,j.photos); }catch(e){}
+              showPhotoCount(it.rep,acknowledgement.photos);
               // Успешная пересъёмка закрывает ровно одну старую failed-запись
               // этого КД; текущий op удалится общим путём ниже.
               await retireReplacedPhoto(it);
@@ -1653,12 +1885,12 @@ async function flushQueue(){
             it.failed="server-"+r.status; it.failed_at=Date.now();
             try{ await IDB.put("queue",it); }catch(e){}
             STATE.online=true; continue;
-          }else ok=true;   // прочая невалидная операция не держит очередь вечно
+          }else{it.failed="server-"+r.status;await IDB.put("queue",it);}
         }
       }catch(e){ stop=true; }   // сеть недоступна — прекращаем, повтор при следующей связи
       finally{clearTimeout(timer);}
       if(generation!==WIPE_GEN||token!==appToken()) break;
-      if(ok){ try{ await IDB.del("queue", it.op_id); }catch(e){} }
+      if(ok){ try{ await IDB.ack(it.op_id);await updateOffBar(); }catch(e){} }
       if(stop){ STATE.online=false; break; }
       STATE.online=true;
     }
@@ -1720,10 +1952,13 @@ function isStandalone(){
 // уже есть токен (тихо продолжаем); 'net' — код НЕ обменян и токена нет (оставляем код в
 // URL, попробуем при следующем открытии); false — код ДЕЙСТВИТЕЛЬНО мёртв (410) и токена нет.
 async function redeemCode(code, fromUrl){
+  const gen=WIPE_GEN, token=appToken();
   try{
     const r=await fetch('/api/redeem',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({code, token:appToken(), standalone:isStandalone()})});
+    if(gen!==WIPE_GEN||token!==appToken()) return 'net';
     if(r.ok){ const j=await r.json();
+      if(gen!==WIPE_GEN||token!==appToken()) return 'net';
       if(j&&j.token){
         // Сервер вернул ДРУГОЙ токен, а на устройстве уже есть вход: ссылка чужая
         // (или наш вход мёртв). Молча не подменяем — как и «#t=…&fresh=1» (см.
@@ -1772,7 +2007,7 @@ function absorbTokenFromUrl(){
     if(q.get('fresh')==='1'){
       const cur=appToken();
       if(tk===cur) return;
-      if(!cur || (TG&&TG.initData)){ try{ localStorage.setItem('app_token',tk); }catch(e){} return; }
+      if(!cur){ try{ localStorage.setItem('app_token',tk); }catch(e){} return; }
       setPendingToken(tk);
       return;
     }
@@ -1789,9 +2024,15 @@ function personalizeManifest(){
   // не трогаем (там initData, а ярлык оттуда не ставят).
   const tk=appToken(); if(!tk || (TG&&TG.initData)) return;
   const l=document.querySelector('link[rel="manifest"]');
+  if(localStorage.getItem("account_role")){if(l)l.href='/manifest.webmanifest';return;}
   if(l) l.href='/manifest.webmanifest?t='+encodeURIComponent(tk);
 }
 function stampTokenUrl(){
+  if(localStorage.getItem("account_role")){
+    try{const u=new URL(location.href);for(const key of ['t','token','link'])u.searchParams.delete(key);
+      history.replaceState(null,'',u.pathname+(u.search||''));}catch(e){}
+    return;
+  }
   // Живой токен держим ПРЯМО в адресе страницы (#t=…, фрагмент на сервер не уходит):
   // iOS при «На экран Домой» берёт то ли текущий URL, то ли start_url манифеста —
   // после этой строчки ОБА варианта несут вход с собой, ярлык рождается «с уже
@@ -1861,39 +2102,41 @@ window.addEventListener('hashchange', onHashChange);
 // С октября 2026 у экрана ДВЕ вкладки: «По ссылке» (прежний путь, не менялся) и
 // «По логину» — вход сотрудника логином и паролем (docs/account-login-plan.md).
 // Тексты этой вкладки не в I18N: аккаунты заводят только русскоязычным сотрудникам.
-let AUTH_TAB="link", AUTH_EXPIRED=false, AUTH_USER="", AUTH_BUSY=false;
+let AUTH_TAB="login", AUTH_EXPIRED=false, AUTH_USER="", AUTH_BUSY=false;
 const AUTH_INPUT_CSS="display:block;width:100%;max-width:280px;margin:0 auto 10px;padding:13px 12px;border:1px solid var(--border);border-radius:11px;font-size:16px";
-function renderAppAuthGone(expired){
-  if(expired!==undefined) AUTH_EXPIRED=!!expired;   // вкладки переключаются без аргумента
-  hideBottomNav(); const t=L();
-  const tab=(id,name)=>`<button class="btn${AUTH_TAB===id?" acc":""}" onclick="authTab('${id}')">${esc(name)}</button>`;
-  // Поле ввода прямо на экране, а не prompt(): на iOS-ярлыке prompt не переживает
-  // переключение в Телегу за кодом, да и вставка в него неудобна. font-size 16px —
-  // чтобы iOS не зумил страницу при фокусе.
-  const body = AUTH_TAB==="link"
-    ? `${esc(AUTH_EXPIRED?t.authexpired:t.authneed)}<br><br>
-    <input id="codein" placeholder="${esc(t.codeph)}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
-      style="${AUTH_INPUT_CSS}"
-      onkeydown="if(event.key==='Enter')enterCode()">
-    <button class="btn acc" style="max-width:280px;margin:0 auto" onclick="enterCode()">${esc(t.entercode)}</button>`
-    : `<div class="muted" style="margin-bottom:14px">Вход сотрудника по логину и паролю</div>
-    <div style="max-width:280px;margin:0 auto;text-align:left">
-      <label class="fld" for="loginuser">Логин</label>
-      <input id="loginuser" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" style="${AUTH_INPUT_CSS}"
-        onkeydown="if(event.key==='Enter'){$('loginpass').focus()}">
-      <label class="fld" for="loginpass">Пароль</label>
-      <input id="loginpass" type="password" autocomplete="current-password" style="${AUTH_INPUT_CSS}"
-        onkeydown="if(event.key==='Enter')accountLogin()">
-    </div>
-    <div id="loginerr" style="display:none;max-width:280px;margin:0 auto 12px;color:var(--danger)"></div>
-    <button class="btn acc" style="max-width:280px;margin:0 auto" id="loginbtn" onclick="accountLogin()">Войти</button>`;
-  $("app").innerHTML=`<div class="center" style="padding-top:24px">
-    <div class="row2" style="max-width:280px;margin:0 auto 18px">${tab("link","По ссылке")}${tab("login","По логину")}</div>
-    ${body}</div>`;
+function renderAppAuthGone(expired=false){
+  AUTH_EXPIRED=!!expired;
+  hideBottomNav();
+  const registering=AUTH_TAB==="register";
+  $("app").innerHTML=`<div class="center" style="padding:24px 18px"><h2>${registering?"Создать профиль сотрудника":AUTH_EXPIRED ? "Срок доступа истёк" : "Вход в профиль"}</h2>
+    <p class="muted">${registering?"Выберите себя в списке и придумайте логин и пароль. Ваш руководитель подтвердит телефон во «Входе команды». Компьютер для регистрации не нужен.":"Войдите со своим логином и паролем. Если профиля ещё нет, создайте его здесь."}</p>
+    <div style="max-width:300px;margin:0 auto;text-align:left">
+      ${registering?`<label class="fld" for="loginemployee">Сотрудник</label><select id="loginemployee" style="${AUTH_INPUT_CSS}"><option value="">Загружаем список…</option></select><p class="muted" id="staffhint"></p>`:""}
+      <label class="fld" for="loginuser">Логин</label><input id="loginuser" autocomplete="username" autocapitalize="off" style="${AUTH_INPUT_CSS}">
+      <label class="fld" for="loginpass">Пароль</label><input id="loginpass" type="password" autocomplete="${registering?"new-password":"current-password"}" style="${AUTH_INPUT_CSS}" onkeydown="if(event.key==='Enter')${registering?"accountRegister()":"accountLogin()"}">
+      ${registering?`<p class="muted">От 8 символов, с буквой и цифрой.</p><label class="fld" for="loginpass2">Повторите пароль</label><input id="loginpass2" type="password" autocomplete="new-password" style="${AUTH_INPUT_CSS}" onkeydown="if(event.key==='Enter')accountRegister()">`:""}
+      <div class="muted" style="margin:12px 0">Геопозиция для входа не нужна. Телефон сотрудника подтверждает его руководитель.</div><div id="loginerr" style="display:none;color:var(--danger)"></div>
+      <button class="btn acc" id="loginbtn" onclick="${registering?"accountRegister()":"accountLogin()"}">${registering?"Создать профиль":"Войти"}</button>
+      <button class="btn" style="margin-top:12px" onclick="authTab('${registering?"login":"register"}')">${registering?"Уже есть профиль — войти":"Нет профиля — зарегистрироваться"}</button>
+      <p class="muted">Руководитель подтверждает устройства сотрудников во «Входе команды».</p></div></div>`;
+  if(registering) loadRegistrationStaff();
 }
-function authTab(x){ AUTH_TAB=x; renderAppAuthGone(); }
 
-// --- Вход по логину и паролю: устройство и GPS --------------------------------
+function authTab(x){ if(AUTH_BUSY)return; AUTH_TAB=x==="register"?"register":"login"; renderAppAuthGone(); }
+async function loadRegistrationStaff(){
+  const select=$("loginemployee");
+  if(!select)return;
+  try{
+    const response=await fetch("/api/account/staff",{cache:"no-store"});
+    const data=await response.json();
+    if(!response.ok||!data.ok)throw new Error("staff");
+    if(!select.isConnected)return;
+    select.innerHTML='<option value="">Выберите своё ФИО</option>'+(data.employees||[]).map(r=>`<option value="${esc(r.employee)}">${esc(r.employee)}${r.office?" · "+esc(r.office):""}</option>`).join("");
+    if($("staffhint"))$("staffhint").textContent="Нет вашего ФИО? Обратитесь к руководителю. Если профиль уже создан на ПК, войдите с тем же логином.";
+  }catch(e){if(select.isConnected){select.innerHTML='<option value="">Список не загрузился</option>';authErr("Не удалось загрузить сотрудников. Вернитесь ко входу и повторите регистрацию.");}}
+}
+
+// --- Вход по логину и паролю: устройство --------------------------------------
 // Устройство представляет себя отпечатком: стабильный uuid (IndexedDB kv →
 // device_uuid; «Выйти» стирает kv, поэтому копия живёт в localStorage — ключ
 // hb_device_uuid внесён в LS_KEEP) плюс паспорт браузера (модель, экран, tz,
@@ -1938,7 +2181,7 @@ async function deviceProfile(){
   try{
     if(window.crypto&&crypto.subtle&&crypto.subtle.digest){
       const dig=await crypto.subtle.digest("SHA-256",
-        new TextEncoder().encode(JSON.stringify(prof)));
+        new TextEncoder().encode("hard-install-v1:"+prof.uuid));
       fp=Array.from(new Uint8Array(dig),b=>b.toString(16).padStart(2,"0")).join("");
     }
   }catch(e){}
@@ -1948,24 +2191,28 @@ async function deviceProfile(){
     label:(prof.model+" · "+scr)};                    // «iPhone · iOS 17 · 390x844»
   return _DEVICE_PROFILE;
 }
-// Точка на момент входа. Таймаут 15 с именно здесь (в отличие от askGeo без
-// таймаута): отказ/запрет геолокации не должен держать форму — запрос уходит и
-// БЕЗ gps, сервер честно ответит no_gps и зафиксирует попытку входа.
-function loginGps(ms){
-  return new Promise(res=>{
-    try{
-      if(!navigator.geolocation) return res(null);
-      navigator.geolocation.getCurrentPosition(
-        p=>{ GEO.state="granted";
-             res({lat:p.coords.latitude, lon:p.coords.longitude,
-                  accuracy:Math.round(p.coords.accuracy||0)}); },
-        ()=>res(null),
-        {enableHighAccuracy:true, timeout:ms||15000, maximumAge:30000});
-    }catch(e){ res(null); }
-  });
-}
 function authErr(msg){ const e=$("loginerr"); if(e){ e.textContent=msg||""; e.style.display=msg?"block":"none"; } }
-function authBusy(on){ const b=$("loginbtn"); if(b){ b.disabled=!!on; b.textContent=on?"Вхожу…":"Войти"; } }
+function authBusy(on){ const b=$("loginbtn"); if(b){ b.disabled=!!on; b.textContent=AUTH_TAB==="register"?(on?"Создаём…":"Создать профиль"):(on?"Вхожу…":"Войти"); } }
+async function accountRegister(){
+  if(AUTH_BUSY)return;
+  const employee=($("loginemployee")?.value||"").trim(),username=($("loginuser")?.value||"").trim();
+  const password=$("loginpass")?.value||"",repeat=$("loginpass2")?.value||"";
+  if(!employee||!username||!password){authErr("Выберите себя и заполните логин и пароль.");return;}
+  if(password!==repeat){authErr("Пароли не совпадают.");return;}
+  AUTH_BUSY=true;authErr("");authBusy(true);
+  try{
+    if(typeof STATE!=="undefined"&&STATE.uid&&localStorage.getItem("app_token"))await wipeDevice({keepQueue:true});
+    try{localStorage.removeItem("app_token");}catch(e){}
+    const device=await deviceProfile();
+    const response=await fetch("/api/account/register",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({employee,username,password,audience:"mobile",device:{kind:"phone",fp:device.fp,label:device.label}})});
+    const result=await response.json();
+    if(!response.ok||!result.ok||!result.token){authErr(result.error||"Профиль не создан. Повторите попытку.");return;}
+    localStorage.setItem("app_token",result.token);localStorage.setItem("account_role","agent");AUTH_USER=result.username;
+    stampTokenUrl();toast("Профиль создан. Телефон ожидает подтверждения руководителя.");boot();
+  }catch(e){authErr("Нет ответа сервера. Попробуйте войти с выбранным логином: профиль мог уже создаться.");}
+  finally{AUTH_BUSY=false;authBusy(false);}
+}
 async function accountLogin(){
   if(AUTH_BUSY) return;
   const u=(( $("loginuser")||{}).value||"").trim();
@@ -1976,17 +2223,19 @@ async function accountLogin(){
     // Вход нового устройства: прежний токен (пусть и мёртвый — этот экран обычно
     // уже после очистки) стираем ЗАРАНЕЕ, чтобы чужой не улетел на сервер и не
     // остался на устройстве рядом с новым входом.
+    // A login form may be shown without any active portfolio. If another
+    // principal is still active, quarantine its private data before login.
+    if(typeof STATE!=="undefined" && STATE.uid && localStorage.getItem("app_token"))
+      await wipeDevice({keepQueue:true});
     try{ localStorage.removeItem("app_token"); }catch(e){}
     const dev=await deviceProfile();
-    const gps=await loginGps(15000);   // нет прав/сигнала — всё равно отправляем
-    const body={username:u, password:p, entrance:"public",
-                device:{kind:dev.kind, fp:dev.fp, label:dev.label}};
-    if(gps) body.gps=gps;
+    const body={username:u, password:p, entrance:"public", audience:"mobile",
+                device:{kind:"phone", fp:dev.fp, label:dev.label}};
     const r=await fetch("/api/account/login",{method:"POST",
       headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
     let j=null; try{ j=await r.json(); }catch(e){}
     if(r.ok && j && (j.action==="ok"||j.action==="ok_pending") && j.token){
-      try{ localStorage.setItem("app_token", j.token); }catch(e){}
+      try{ localStorage.setItem("app_token", j.token); localStorage.setItem("account_role",j.role||"agent"); }catch(e){}
       if(j.username) AUTH_USER=j.username;          // нормализованное имя сервера
       if(j.must_change_password){ renderPasswordChange(); return; }
       stampTokenUrl(); toast("✓"); boot();          // ok_pending покажет renderPending сам
@@ -2061,10 +2310,8 @@ async function askMyLogins(){
       <button class="btn acc" onclick="closeAsk('loginsheet')">${esc(L().cancel)}</button>
     </div>`);
 }
-// Выход из аккаунта: гасим токен на сервере (/api/account/logout), убираем его
-// из localStorage и продолжаем ШТАТНЫМ logoutNow — тот увидит пустой app_token
-// и не ударит в /api/logout повторно. Как и «Выйти с этого телефона», честно
-// спрашиваем про неотправленную очередь: она стирается вместе с входом.
+// Обе кнопки выхода идут через один серверный отзыв и одну очистку. Как и
+// «Выйти с этого телефона», спрашиваем про неотправленную очередь.
 async function accountLogout(force){
   if(!force){
     const left=await pendingCount();
@@ -2079,15 +2326,6 @@ async function accountLogout(force){
     }
   }
   closeAsk("loginsheet");
-  const tk=appToken();
-  try{
-    const ctl=(typeof AbortController!=="undefined")?new AbortController():null;
-    const timer=ctl?setTimeout(()=>ctl.abort(),5000):null;
-    try{ await fetch("/api/account/logout",{method:"POST",headers:{"X-App-Token":tk||""},
-                                             signal:ctl?ctl.signal:undefined}); }
-    finally{ if(timer) clearTimeout(timer); }
-  }catch(e){}
-  try{ localStorage.removeItem("app_token"); }catch(e){}
   await logoutNow();
 }
 // Сервер отверг вход (401/403) вне Телеграма. Сначала — молчаливая подмена: новая
@@ -2096,10 +2334,14 @@ async function accountLogout(force){
 // частый законный случай: токен отозвали, он истёк, человек переехал на новый
 // адрес. Подменять нечем — телефон очищается (handleAuthGone).
 async function onAuthRejected(){
+  if(appToken()){await purgeProfile("revoked");return;}
   const dead=appToken(); if(dead) TRIED_TOKENS.add(dead);
   const cand=[pendingToken(), URLT].find(x=>x && !TRIED_TOKENS.has(x) && !tokenIsOut(x));
   if(!cand) return handleAuthGone(!!dead);
-  TRIED_TOKENS.add(cand); clearPendingToken(); closeAsk("swapsheet");
+  // A failed A token cannot establish whether B is a renewal or another
+  // person. Stamp A's queue, then clear A's private cache before installing B.
+  await wipeDevice({keepQueue:true});
+  TRIED_TOKENS.add(cand); closeAsk("swapsheet");
   try{ localStorage.setItem('app_token',cand); }catch(e){}
   // Манифест собран в <head> со старым входом, а Safari его не перечитывает: ярлык
   // «На экран Домой» унёс бы в start_url мёртвый токен. Один раз перезагружаемся —
@@ -2114,7 +2356,7 @@ async function onAuthRejected(){
 // штатна.
 async function handleAuthGone(expired){
   const exp=(expired===undefined)?!!appToken():!!expired;   // до очистки: был ли вход
-  await wipeDevice({keepQueue:true});
+  await wipeDevice({keepQueue:false});
   renderLangs();                  // входа нет — нет и «Выйти»
   renderAppAuthGone(exp);
 }
@@ -2172,6 +2414,8 @@ function drainDrafts(){
 }
 async function drainDraw(state){
   const t=L(), {failed, pending}=await drainItems();
+  const unowned=failed.filter(it=>it.failed==="server-owner");
+  const rejected=failed.filter(it=>it.failed!=="server-owner");
   const n=k=>pending.filter(it=>it.kind===k).length;
   const counts=[[n("save"),t.drainVisits],[n("photo"),t.drainPhotos],[n("marker"),t.drainMarks],
                 [n("note")+n("note_delete"),t.drainNotes]].filter(([k])=>k).map(([k,l])=>l+": "+k).join(" · ");
@@ -2182,18 +2426,19 @@ async function drainDraw(state){
         <input id="codein" class="search" style="margin:8px 0" placeholder="${esc(t.codeph)}" autocomplete="off"
           autocapitalize="off" autocorrect="off" spellcheck="false" onkeydown="if(event.key==='Enter')drainLogin()">
         <button class="btn acc" onclick="drainLogin()">${esc(t.drainLogin)}</button>`
-    : `<div class="sline"><span class="d"></span><span>${esc(pending.length?t.drainSending:(failed.length?t.drainFailed:t.drainDone))}</span></div>`;
+    : `<div class="sline"><span class="d"></span><span>${esc(pending.length?t.drainSending:(unowned.length?t.drainOwner:(rejected.length?t.drainFailed:t.drainDone)))}</span></div>`;
   const left = pending.length ? `<div class="lrow"><div class="pname" style="white-space:normal">${esc(t.drainLeft)} — ${esc(counts)}</div></div>` : "";
-  const failedNames=[]; for(const it of failed) failedNames.push(await drainName(it.rep));
+  const unownedNames=[]; for(const it of unowned) unownedNames.push(await drainName(it.rep));
+  const failedNames=[]; for(const it of rejected) failedNames.push(await drainName(it.rep));
   const drafts=drainDrafts(), draftNames=[]; for(const r of drafts) draftNames.push(await drainName(r));
   const list=(title,names)=>names.length?`<div class="lrow"><div class="pname" style="white-space:normal">${esc(title)} · ${names.length}</div>
       <div class="psub">${names.map(esc).join(" · ")}</div></div>`:"";
-  const done=state!=="sending" && !pending.length;
+  const done=state!=="sending" && !pending.length && !unowned.length;
   const open=(done && DRAIN && DRAIN.newUrl)?`<a class="btn acc" style="margin-top:14px;text-decoration:none"
       href="${esc(DRAIN.newUrl)}/">${esc(t.drainOpen)}</a>`:"";
   $("app").innerHTML=`<div class="dgh"><div class="t">${esc(t.drainTitle)}</div></div>
     <div class="dgsub" style="white-space:normal">${esc(t.drainWhy)}</div>
-    ${status}${left}${list(t.drainFailed,failedNames)}${list(t.drainDrafts,draftNames)}${open}`;
+    ${status}${left}${list(t.drainOwner,unownedNames)}${list(t.drainFailed,failedNames)}${list(t.drainDrafts,draftNames)}${open}`;
 }
 // Вставленная ссылка входа: старый вход здесь заведомо мёртв (сервер его не
 // принял), поэтому токен из ссылки просто становится входом этого адреса.
@@ -2206,7 +2451,7 @@ async function drainLogin(){
       body:JSON.stringify({code, standalone:isStandalone()})});
     const j=r.ok?await r.json():null;
     if(!j||!j.token){ toast(L().drainBadLink); return; }
-    try{ localStorage.setItem("app_token", j.token); }catch(e){}
+    try{ localStorage.setItem("app_token", j.token); localStorage.setItem("account_role",j.role||"agent"); }catch(e){}
     drainRun();
   }catch(e){ toast(L().drainNet); }
 }
@@ -2316,7 +2561,7 @@ async function swapYes(force){
 // просто выйти. Стирается всё, включая очередь, поэтому вопрос называет, сколько
 // неотправленного пропадёт. Кнопка живёт рядом с языком (renderLangs).
 async function askLogout(){
-  if(TG&&TG.initData) return;
+  if(TG&&TG.initData && !appToken()) return; // signed-only legacy Telegram has no account session
   const t=L(), left=await pendingCount();
   askSheet("outsheet", `<div style="font-weight:600;margin-bottom:8px">${esc(t.logoutq)}</div>
     <div class="muted" style="font-size:13px;margin-bottom:12px">${esc(t.logoutwhy)}</div>
@@ -2327,31 +2572,41 @@ async function askLogout(){
 async function logoutNow(){
   closeAsk("outsheet"); closeAsk("swapsheet");
   const tk=appToken();
-  await dropTokenOnServer(tk);   // и ярлык с этим входом больше не впустит
+  const revoked=await dropTokenOnServer(tk);
   await wipeDevice({keepQueue:false});
   markTokenOut(tk);
   renderLangs();
   renderAppAuthGone(false);
+  if(!revoked) toast("Вход удалён с этого телефона, но серверный отзыв не подтверждён. При связи проверьте вход на других устройствах.");
 }
 
 let START_TAB, START_DATE, START_TAB_USED=false;
 function authHeaders(){
   const h = {};
   if (TG && TG.initData) h["X-Init-Data"] = TG.initData;    // внутри Телеги — подпись WebApp
-  if (!(TG && TG.initData) || DRAIN){ const t = appToken(); if(t) h["X-App-Token"]=t; }  // PWA — токен из ссылки входа
+  // Password login may happen inside Telegram's WebView as well. An explicit
+  // bearer wins at the server; signed initData remains the legacy/no-token path.
+  const t=appToken(); if(t) h[(!localStorage.getItem("account_role") || localStorage.getItem("account_role")==="agent")?"X-App-Token":"X-Pult-Token"]=t;
   const dev = new URLSearchParams(location.search).get("dev_uid");
   if (dev) h["X-Dev-Uid"] = dev;
-  h["X-Shell-Version"]=String(SHELL_VERSION);
+  h["X-Shell-Version"]=String(SHELL_VERSION); h["X-Client-Version"]="3.2.0";
+  h["X-Work-Product"]=STATE.mode==="soft"?"soft":"hard";
+  if(LOGIN_GPS && Date.now()-LOGIN_GPS.at<90000) h["X-Device-GPS"]=JSON.stringify(LOGIN_GPS.point);
   return h;
 }
 async function api(path, opts){
   opts = opts || {};
+  const generation=WIPE_GEN, credential=cacheCredential();
   const h = authHeaders(); h["Content-Type"] = "application/json";
   const ctl=new AbortController(), timer=setTimeout(()=>ctl.abort(),30000);
   try{
     const r = await fetch(path, Object.assign({}, opts, {headers:h,signal:ctl.signal,redirect:"error"}));
-    if (!r.ok){let error;try{error=await r.json();}catch(e){}throw new Error(error&&error.message||String(r.status));}
-    return await r.json();
+    if (!r.ok){let detail;try{detail=await r.json();}catch(e){}const error=new Error(String(r.status));error.detail=detail&&detail.message;throw error;}
+    const data=await r.json();
+    // A response initiated under A must not mutate B's state or rewarm B's
+    // cache after a logout, revoked-token replacement or same-token UID change.
+    if(generation!==WIPE_GEN||credential!==cacheCredential()) throw new Error("stale response");
+    return data;
   }finally{ clearTimeout(timer); }
 }
 // Только числовые замеры этапов. Ни имена, ни КД, ни адреса, ни тексты ошибок
@@ -2373,8 +2628,9 @@ function renderLangs(){
     `<button class="theme" onclick="cycleTheme()" title="${esc(themeTitle())}" aria-label="${esc(themeTitle())}">${themeGlyph()}</button>`+
     // «Выйти с этого телефона» — там же, где язык: других настроек у оболочки нет.
     // Рядом «Мои входы» — журнал входов аккаунта (вход по логину, октябрь 2026).
-    // Внутри Телеграма вход — сама Телега, выходить из приложения некуда.
-    ((appToken() && !(TG&&TG.initData) && !DRAIN)
+    // Signed-only Telegram has no account session, but a password login in
+    // its WebView does: it needs the same revoke/logout controls as the PWA.
+    ((appToken() && !DRAIN)
       ? `<button class="out" onclick="askMyLogins()" title="Мои входы" aria-label="Мои входы">${ic("list")}<span>Мои входы</span></button>`+
         `<button class="out" onclick="askLogout()" title="${esc(t.logoutq)}" aria-label="${esc(t.logoutq)}">${ic("exit")}<span>${esc(t.logout)}</span></button>`
       : "");
@@ -2403,20 +2659,35 @@ let REDEEMED=false;
 // Кнопки «выбрать другого» тут нет намеренно: самовыбор одноразовый, и чужое
 // ФИО правит руководитель. Раньше кнопка была, но не работала — на этом экране
 // сервер списка сотрудников не отдаёт вовсе, — и человек жал мёртвую кнопку.
-function renderPending(employee){
+function renderPending(employee, kind){
   hideBottomNav();
   const t=L();
-  $("app").innerHTML=`<div class="center" style="padding:24px">
+  // Аккаунт «логин-пароль» ждёт подтверждения администратора — это НЕ заявка
+  // привязки: другие тексты (pending_kind приходит с сервера, октябрь 2026).
+  const acc=kind==="account" || kind==="gps";
+  let leader=false;try{leader=acc&&["manager","security","full","analyst"].includes(localStorage.getItem("account_role"));}catch(e){}
+  const title=acc?"Вход записан":t.pendingtitle;
+  const why=leader?"Ваш доступ и телефон подтверждает администратор. Попросите его открыть в Аналитике «Профили и устройства» → «Открыть профиль» напротив вашего ФИО и подтвердить доступ и телефон. Самостоятельно подтвердить своё устройство во «Входе команды» нельзя.":acc?"Профиль и телефон ожидают своего руководителя. Попросите его открыть «Вход команды», сверить ваше ФИО и нажать «Подтвердить телефон». Компьютер для этого не нужен. После подтверждения доступ откроется здесь.":t.pendingwhy;
+  const wrong=leader?"После подтверждения администратором нажмите «Проверить снова».":acc?"Проверьте позже кнопкой или спросите руководителя.":t.pendingwrong;
+  $("app").innerHTML=`<div class="center" id="pendingAccess" style="padding:24px">
       <div style="font-size:40px;margin-bottom:12px">⏳</div>
-      <div>${esc(t.pendingtitle)}</div>
+      <div>${esc(title)}</div>
       <div class="muted" style="margin-top:8px">${esc(employee||"")}</div>
-      <div class="muted" style="margin-top:12px">${esc(t.pendingwhy)}</div>
-      <div class="muted" style="margin-top:16px;font-size:12px">${esc(t.pendingwrong)}</div>
+      <div class="muted" style="margin-top:12px">${esc(why)}</div>
+      <div class="muted" style="margin-top:16px;font-size:12px">${esc(wrong)}</div>
+      ${acc?`<button class="btn acc" style="max-width:280px;margin:16px auto 0" onclick="checkPending()">Проверить снова</button>`:""}
     </div>`;
+}
+async function checkPending(){
+  const btn=$("pendingAccess")?.querySelector("button");
+  if(btn){ btn.disabled=true; btn.textContent="Проверяю…"; }
+  await refreshData(true);
+  if(btn && btn.isConnected){ btn.disabled=false; btn.textContent="Проверить снова"; }
 }
 
 async function boot(){
-  const bootStarted=performance.now(), gen=WIPE_GEN;
+  if(!await enforceRetention())return;
+  const bootStarted=performance.now(); let gen=WIPE_GEN;
   checkShellVersion();
   renderLangs(); hideBottomNav();
   geoProbe();                 // узнаём, дали ли права раньше (не спрашивает, только смотрит)
@@ -2457,13 +2728,15 @@ async function boot(){
     // Заявка ждёт подтверждения владельца (второе устройство на то же ФИО).
     // Ветки не было вовсе: сервер отдавал pending, фронт валился в «Нет доступа»,
     // и человек не понимал, ждать ему или он сломал приложение.
-    if(d.pending){ renderPending(d.employee); return; }
+    if(d.must_change_password){ AUTH_USER=d.username||AUTH_USER; renderPasswordChange(); return; }
+    if(d.pending){ renderPending(d.employee, d.pending_kind); return; }
     // Сменился сотрудник на устройстве (перевыпуск на другого человека) — чистим кэш и
     // очередь прошлого, чтобы не смешивать ПД и не долить чужие визиты под новым токеном.
     const prev = await loadBootstrapSnapshot();
     // keepQueue: дрейф личности руководителя (acting пишет фолбэк allowed[0]
     // при смене состава) не должен стоить выезднику неотправленной очереди.
-    if(prev && prev.employee && d.employee && prev.employee !== d.employee){
+    if(prev && prev.uid && d.uid && prev.uid !== d.uid){
+      WIPE_GEN++; gen=WIPE_GEN;
       const left = await pendingCount();
       await clearLocalData({keepQueue: left > 0});
     }
@@ -2488,7 +2761,7 @@ async function boot(){
       download_ms:performance.now()-bootStarted});
     warmCards();                  // полные карточки всех клиентов в фон-кэш (онлайн)
     flushQueue();                 // досыл накопленного оффлайна (визиты/фото/метки)
-    if(!START_TAB_USED && START_TAB==="digest" && STATE.roles && STATE.roles.manager){
+    if(!START_TAB_USED && (START_TAB==="digest" || ['manager','security','full'].includes(localStorage.getItem('account_role'))) && STATE.roles && STATE.roles.manager){
       START_TAB_USED=true;        // одноразово: boot() зовётся и после actAs/setLang
       DG.date=START_DATE||null;
       renderDigest();
@@ -2500,11 +2773,11 @@ async function boot(){
     // 410 — старый адрес приложения (только выгрузка): портфеля и работы здесь нет,
     // только отправка того, что осталось в очереди телефона.
     if(st===410) return renderDrain();
-    // Сервер ответил «не пускаю» вне Телеги: токен истёк/отозван либо его ещё нет.
+    // Сервер ответил «не пускаю»: токен истёк/отозван либо его ещё нет.
     // Кэш здесь НЕ поднимаем (сервер доступен и отказал): мёртвый вход подменяем
     // кандидатом (новая ссылка, start_url ярлыка), а нечем — стираем портфель с
     // телефона и просим новую ссылку у аналитика (onAuthRejected).
-    if((st===401||st===403) && !(TG&&TG.initData)) return onAuthRejected();
+    if(st===401||st===403) return onAuthRejected();
     // Сети нет — поднимаемся из оффлайн-снимка портфеля, если он есть.
     const snap = await loadBootstrapSnapshot();
     if(gen!==WIPE_GEN) return;
@@ -2818,10 +3091,13 @@ function filterList(){
 }
 
 async function openP(rep){
+  const gen=WIPE_GEN, credential=cacheCredential(), uid=STATE.uid;
   let d=null;
   try{ d=await api("/api/person?rep="+enc(rep)+"&mode="+enc(STATE.mode));
+    if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid) return;
     if(d){ STATE.online=true; storeCard(d,rep).catch(()=>{}); } }   // освежить кэш карточки
   catch(e){ d=await loadCard(rep); if(d) STATE.online=false; }            // нет сети → из кэша
+  if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid) return;
   if(!d){ toast(STATE.online===false?"нет данных оффлайн":"✕"); return; }
   // Старые IndexedDB-карточки могли содержать form-prefill из master. До
   // доказанного snapshot он не является пользовательским вводом и очищается;
@@ -3598,6 +3874,7 @@ async function upPhoto(id, live){
   const files=[...(el.files||[])]; if(!files.length) return;
   if(!STATE.cur) return;                       // карточку успели закрыть
   const rep=STATE.cur.rep;
+  const gen=WIPE_GEN, credential=cacheCredential(), uid=STATE.uid;
   // Намерение «переснять» живёт до первого снимка пачки, только для него и
   // только в пределах своего же КД.
   const retakeOf=(RETAKE_FOR&&RETAKE_FOR.rep===rep)?RETAKE_FOR.op_id:null;
@@ -3628,11 +3905,14 @@ async function upPhoto(id, live){
     try{ el.value=""; }catch(e){}
     // Держим «занят» до конца отправки ВСЕЙ пачки: пока идёт сеть по первому
     // снимку, остальные живут только в памяти, и перезагрузка их потеряет.
-    for(let i=0;i<prepared.length;i++)
+    for(let i=0;i<prepared.length;i++){
+      if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid) return;
       await sendPhoto(rep,prepared[i],live!==false,i===0?retakeOf:null);
+    }
   }finally{ PHOTO_BUSY--; }
 }
 async function sendPhoto(rep,p,live,retakeOf){
+  const gen=WIPE_GEN, credential=cacheCredential(), uid=STATE.uid;
   const op_id=uuid(), at=Date.now();
   const bytes=p.bytes, mime=p.mime, ext2=p.ext;
   // Сначала фиксируем единственную самостоятельную копию и ждём commit IDB.
@@ -3657,22 +3937,28 @@ async function sendPhoto(rep,p,live,retakeOf){
     // Галерея точку не получает вовсе (см. комментарий у upPhoto).
     if(live){
       geo=await grabGeo(4000,5000);
+      if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid) return;
       entry.geo=geo;
       try{ await IDB.put("queue",entry); }catch(e){}  // без geo фото всё равно сохранено
     }
   }finally{
     PHOTO_PREPARING.delete(op_id);
   }
+  if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid||!queueBelongs(entry)) return;
   PHOTO_INFLIGHT.add(op_id);
   try{
     const r=await fetch("/api/photo?rep="+enc(rep)+"&op="+op_id,
       {method:"POST",headers:photoHeaders(geo,ext2,
          {at,src:entry.src,sm:p.exif&&p.exif.sm,exif:p.exif}),body:bytes});
+    if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid) return;
     if(r.ok){
-      const j=await r.json(); STATE.online=true;
+      const j=await r.json();
+      if(!j||j.ok!==true)throw new Error("invalid acknowledgement");
+      if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid) return;
+      STATE.online=true;
       showPhotoCount(rep,j.photos);
       await retireReplacedPhoto(entry);
-      try{ await IDB.del("queue",op_id); }catch(e){}
+      try{ await IDB.ack(op_id); }catch(e){}
       toast(L().saved); updateOffBar(); return;
     }
     if(r.status!==401&&r.status!==403&&r.status<500){
@@ -3684,6 +3970,7 @@ async function sendPhoto(rep,p,live,retakeOf){
     throw new Error(r.status);
   }catch(e){
     // Нет сети/временная серверная ошибка: committed-запись уже в очереди.
+    if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid) return;
     // Счётчик покажем оптимистично, тот же op_id досылается при связи.
     // STATE.cur обнуляется тапом по нижней навигации. Без проверки это TypeError,
     // и он рвёт цикл отправки: остальные снимки пачки не уходят вообще.
@@ -3753,6 +4040,7 @@ async function upReceipt(live){
   const files=[...(el.files||[])];
   try{ el.value=""; }catch(e){}
   if(!files.length||!STATE.cur) return;
+  const gen=WIPE_GEN, credential=cacheCredential(), uid=STATE.uid;
   const t=L();
   // Поля читаем ДО закрытия листа (он удаляется из DOM) и ДО чтения файла.
   const amountRaw=(($("rc_amount")&&$("rc_amount").value)||"").replace(/\s/g,"").replace(",",".");
@@ -3770,13 +4058,16 @@ async function upReceipt(live){
     const small=await shrinkPhoto(f);
     prepared={bytes:await photoBytes(small||f),ext:small?".jpg":photoExt(f.name,f.type)};
   }catch(e){ toast(t.rcBadPhoto); return; }
+  if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid) return;
   closeReceipt();
   await sendReceipt(rep,{amount,paid_at:paidAt,payer_other:payerOther,note,visit_op},prepared);
 }
 async function sendReceipt(rep,fields,p){
+  const gen=WIPE_GEN, credential=cacheCredential(), uid=STATE.uid;
   const op_id=uuid(), at=Date.now();
   const entry=Object.assign({op_id,kind:"receipt",rep,bytes:p.bytes,ext:p.ext,at},fields);
   if(!(await enqueue(entry))){ toast(L().rcBadPhoto); return; }
+  if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid||!queueBelongs(entry)) return;
   try{
     const q=new URLSearchParams({rep,op:op_id,amount:String(fields.amount),
       paid_at:fields.paid_at,payer:fields.payer_other?"other":"client"});
@@ -3784,9 +4075,15 @@ async function sendReceipt(rep,fields,p){
     if(fields.visit_op) q.set("visit",fields.visit_op);
     const r=await fetch("/api/receipt?"+q.toString(),
       {method:"POST",headers:receiptHeaders(p.ext),body:p.bytes});
+    if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid) return;
     if(r.ok){
+      const acknowledgement=await r.json();
+      if(!acknowledgement||acknowledgement.ok!==true)throw new Error("invalid acknowledgement");
+      if(acknowledgement.rejected&&Object.keys(acknowledgement.rejected).length){
+        entry.failed="server-fields";entry.rejected=acknowledgement.rejected;await IDB.put("queue",entry);updateOffBar();return;
+      }
       STATE.online=true;
-      try{ await IDB.del("queue",op_id); }catch(e){}
+      try{ await IDB.ack(op_id); }catch(e){}
       toast(L().saved); renderReceipts(); updateOffBar(); return;
     }
     if(r.status!==401&&r.status!==403&&r.status<500){
@@ -3796,6 +4093,7 @@ async function sendReceipt(rep,fields,p){
     throw new Error(r.status);
   }catch(e){
     // Нет сети: committed-запись в очереди, досыл тем же op_id при связи.
+    if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid) return;
     STATE.online=false; toast(L().savedoff);
     renderReceipts(); updateOffBar();
   }
@@ -3811,7 +4109,7 @@ async function renderReceipts(){
   try{
     const items=(await IDB.all("queue"))||[];
     for(const it of items)
-      if(it.kind==="receipt"&&it.rep===rep)
+      if(it.kind==="receipt"&&it.rep===rep&&queueBelongs(it))
         parts.push(row(it.paid_at,it.amount,
           it.payer_other?t.rcPayerOther:t.rcPayerClient,true));
   }catch(e){}
@@ -4234,6 +4532,7 @@ function geoBlockDialog(){
 
 async function saveVisit(){
   if(SAVING) return;
+  const gen=WIPE_GEN, credential=cacheCredential(), uid=STATE.uid;
   if(!FORM_VERSION){
     toast("Подключитесь к сети и обновите форму");
     return;
@@ -4248,10 +4547,12 @@ async function saveVisit(){
   try{
     const rep=STATE.cur.rep, op_id=uuid();
     const geo=await ensureVisitGeo();
+    if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid) return;
     if(!geo && visitGeoRequired()) return;
     // Сначала фото, потом карточка: иначе руководителю уйдёт «📸 без фото» по
     // визиту, снимок которого догрузится через пару секунд.
     const photos_pending=await waitPhotosSettled(rep);
+    if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid) return;
     // occurred_at — КОГДА выезд отработан. Онлайн это «сейчас», но та же форма
     // уходит в очередь и может доехать через сутки-двое (в горах под Худжандом
     // глушат интернет), и сервер без этой отметки датировал бы визит днём
@@ -4306,7 +4607,7 @@ async function showQueueProblems(){
   flushDraft();const items=(await IDB.all("queue")||[]).filter(it=>it.failed);
   const host=$("app");host.innerHTML=`<button class="back" onclick="boot()">‹ ${esc(L().my)}</button><h2>${esc(recoveryText('review'))}</h2><div id="queueproblems"></div>`;
   for(const it of items){const box=document.createElement("div");box.className="block";host.querySelector("#queueproblems").appendChild(box);
-    if(!queueOwnerMatches(it)){box.textContent=recoveryText('old');continue;}
+    if(!queueBelongs(it)){box.textContent=recoveryText('old');continue;}
     const source={...it};delete source.bytes;delete source.blob;
     box.innerHTML=`<b>${esc(it.rep||it.kind)}</b> · ${esc(recoveryText(it.rejected?'partial':'refused'))}<div>${esc(it.failed)}</div><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(JSON.stringify(source,null,2))}</pre><button class="btn line" data-export>${esc(recoveryText('export'))}</button>${it.save_kind==='call'?`<button class="btn line" data-fix>${esc(recoveryText('fix'))}</button>`:''}<button class="btn line" data-remove>${esc(recoveryText('remove'))}</button>`;
     box.querySelector('[data-export]').onclick=()=>{const url=URL.createObjectURL(new Blob([JSON.stringify(source,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='hard-queue-'+it.op_id+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
@@ -4359,8 +4660,8 @@ function saveDraft(){
   if(STATE.cur&&STATE.tab==="callform"){
     const draft=captureSoftForm();
     try{localStorage.setItem("softdraft:"+currentUid()+":"+STATE.cur.rep,JSON.stringify({...draft,uid:currentUid(),rep:STATE.cur.rep,at:Date.now()}));}
-    catch(e){toast(recoveryText('draftfail'));}
-    return;
+    catch(e){toast(recoveryText('draftfail'));return false;}
+    return true;
   }
   if(!formVisible()) return;   // не читать DOM другой вкладки — иначе затрём черновик пустотой
   const v=readForm(), key=draftKey(STATE.cur.rep);
@@ -4368,7 +4669,8 @@ function saveDraft(){
     if(Object.keys(v).length) localStorage.setItem(
       key, JSON.stringify({v, keys:[...FORM_TOUCHED], at:Date.now()}));
     else localStorage.removeItem(key);
-  }catch(e){}
+  }catch(e){return false;}
+  return true;
 }
 function flushDraft(){ clearTimeout(draftTimer); saveDraft(); }   // немедленно, перед уходом с формы
 
@@ -4470,20 +4772,29 @@ document.addEventListener("visibilitychange", ()=>{ if(document.hidden){ flushDr
 // снимок; список перерисовываем ТОЛЬКО если он сейчас на экране — открытую
 // карточку/форму не дёргаем, черновики целы.
 let LAST_REFRESH=0;
-async function refreshData(){
+async function refreshData(force=false){
   // Старый адрес: портфеля нет — при связи и возврате в приложение досылаем очередь.
   if(DRAIN){ drainRun(); return; }
-  if(Date.now()-LAST_REFRESH<60000) return;      // не чаще раза в минуту
+  // Ручная проверка и вернувшийся экран ожидания не заперты минутным
+  // ограничением портфеля (online/visibility могут прийти сразу после входа).
+  if(Date.now()-LAST_REFRESH<60000 && !force && !$("pendingAccess")) return;
   if(!appToken() && !(TG&&TG.initData)) return;  // входа нет — экран входа фоном не дёргаем
-  const gen=WIPE_GEN;
+  let gen=WIPE_GEN;
   try{
     const d=await api("/api/bootstrap"+(STATE.mode==="soft"?"?mode=soft":""));
     if(gen!==WIPE_GEN) return;                   // телефон очистили, пока шёл запрос
     LAST_REFRESH=Date.now();
     offerSwap(d);        // новую ссылку открыли без связи: вход жив — теперь и спросить
+    if($("pendingAccess")){
+      if(d.pending){ renderPending(d.employee, d.pending_kind); return; }
+      // Доступ появился: полный boot применяет те же проверки смены человека,
+      // режим, навигацию и досыл очереди, что и при обычном запуске.
+      return boot();
+    }
     if(d.needsOnboarding) return;                // экраны входа фоном не дёргаем
     const prev=await loadBootstrapSnapshot();
-    if(prev && prev.employee && d.employee && prev.employee!==d.employee){
+    if(prev && prev.uid && d.uid && prev.uid!==d.uid){
+      WIPE_GEN++; gen=WIPE_GEN;
       const left = await pendingCount();
       await clearLocalData({keepQueue: left > 0});
     }
@@ -4508,14 +4819,13 @@ async function refreshData(){
         if(qs){ $("q").value=qs; filterList(); } }
     }
   }catch(e){
+    if(force && $("pendingAccess")) toast("Не удалось проверить. Попробуйте при связи.");
     // Вход отозвали, пока приложение было открыто (iOS-ярлык живёт неделями без
     // перезагрузки): решаем так же, как при запуске, — подмена кандидатом или
     // очистка телефона. Но не посреди работы: открытую форму и отправку фото не
     // рвём, это сделает следующая проверка или запуск. Нет сети/5xx — молча.
     const st=+((e&&e.message)||0);
-    if((st===401||st===403) && gen===WIPE_GEN && appToken() && !(TG&&TG.initData)
-       && !SAVING && !PHOTO_BUSY && !PHOTO_PREPARING.size && !PHOTO_INFLIGHT.size
-       && !formVisible()) onAuthRejected();
+    if((st===401||st===403) && gen===WIPE_GEN && appToken())await onAuthRejected();
   }
 }
 setInterval(refreshData, 10*60*1000);            // раз в 10 минут при открытом приложении
@@ -4525,10 +4835,45 @@ setInterval(checkShellVersion, 5*60*1000);        // версия легче п�
 // Появилась связь — досылаем накопленную очередь; пропала — переключаем индикатор.
 // Плюс досыл и обновление данных при возвращении к приложению (события online в
 // мобильном WebView не всегда надёжны, visibilitychange/pageshow — подстраховка).
-window.addEventListener("online", ()=>{ STATE.online=true; updateOffBar(); flushQueue(); checkShellVersion(); refreshData(); dayDrainQueue(); });
+async function resumeProfile(){
+  const host=$("app");if(host)host.style.visibility="hidden";
+  ACCESS_VERIFIED=0;
+  try{
+    if(!await enforceRetention())return;
+    const active=await ensureAccess(true);await updateOffBar();
+    if(active){await flushQueue();refreshData();dayDrainQueue();}
+    checkShellVersion();
+  }finally{if(host)host.style.visibility="";}
+}
+window.addEventListener("online", ()=>void resumeProfile());
 window.addEventListener("offline", ()=>{ STATE.online=false; updateOffBar(); });
-document.addEventListener("visibilitychange", ()=>{ if(!document.hidden){ flushQueue(); checkShellVersion(); refreshData(); } });
-window.addEventListener("pageshow", e=>{ checkShellVersion(); if(e.persisted){ flushQueue(); refreshData(); } });
+document.addEventListener("visibilitychange", ()=>{if(!document.hidden)void resumeProfile();},true);
+window.addEventListener("pageshow", e=>{if(e.persisted)void resumeProfile();else checkShellVersion();});
+setInterval(async()=>{
+  if(document.hidden||!cacheCredential())return;
+  if(!await enforceRetention())return;
+  if(await pendingCount())void flushQueue();
+},20000);
+
+// Another tab may replace or remove the shared bearer while this tab still
+// displays the former person's portfolio. The storage event never fires in
+// the writing tab; its ordinary login/logout path owns that cleanup. Here we
+// invalidate only this tab's memory and DOM before reload. Do not wipe IDB or
+// localStorage: the other tab may already be writing the new person's data.
+function sharedLoginChanged(event){
+  if(event.storageArea!==localStorage || (event.key!=="app_token" && event.key!==null)) return;
+  if(event.key!==null && event.oldValue===event.newValue) return;
+  // The old form still belongs to the old UID until we clear its DOM. Flush
+  // the delayed Hard/Soft edit synchronously, then preserve that UID-labelled
+  // draft like its outgoing queue through the ensuing credential rebind.
+  try{if(event.newValue)flushDraft();clearTimeout(draftTimer);draftDirty=false;}catch(e){}
+  WIPE_GEN++;
+  try{ hideBottomNav(); $("app").innerHTML=""; }catch(e){}
+  try{ stopAutoSync(); stopNavWatch(); }catch(e){}
+  STATE.cur=null;STATE.persons=[];STATE.roles=null;STATE.uid=null;STATE.employee="";
+  location.reload(); // boot reads the new credential and rejects a foreign cached portfolio
+}
+window.addEventListener("storage",sharedLoginChanged);
 
 // Апостроф тоже экранируется: в тексте и в атрибутах браузер вернёт его сам, а
 // атрибут в одинарных кавычках без этого рвался бы (ревью 25.09.2026, Low).
@@ -4848,6 +5193,7 @@ async function dgLoad(){
             : DG.view==="workload" ? "/api/manager/workload"+dgRangeQ(DG.wemp?{employee:DG.wemp}:{})
             : DG.view==="binds"    ? "/api/manager/binds"
             : DG.view==="assign"   ? "/api/control/assignments"+dgRangeQ()
+            : DG.view==="account_entries" ? "/api/manager/entered"
             : DG.view==="team_links" ? "/api/manager/app_links"
             : DG.view==="cases"    ? "/api/manager/cases"+dgRangeQ({metric:DG.metric||"visits",
                                        country:DG.country||"", office:DG.office||"",
@@ -4948,6 +5294,7 @@ function dgRender(j){
   if(DG.view==="workload") return dgWorkloadScreen(j,b);
   if(DG.view==="binds") return dgBindsScreen(j,b);
   if(DG.view==="assign") return dgAssignScreen(j,b);
+  if(DG.view==="account_entries") return dgAccountEntries(j,b);
   if(DG.view==="team_links") return dgLinksScreen(j,b);
   return dgPromises(j,b);
 }
@@ -4986,6 +5333,50 @@ function dgAssignScreen(j,b){
 // выдать заново, отправить, скопировать, сбросить. Граница команды — на сервере
 // (/api/manager/app_link(s), app_revoke): чужое ФИО он не пропустит. В onclick —
 // только индексы в DG.links (апостроф в ФИО, см. правило вкладки выше).
+function dgAccountEntries(j,b){
+  DG.accountEntries=(j.entered||[]).slice().sort((a,b)=>Number((b.devices||[]).some(d=>d.status==="pending"))-Number((a.devices||[]).some(d=>d.status==="pending")));
+  const pending=DG.accountEntries.reduce((n,r)=>n+(r.devices||[]).filter(d=>d.status==="pending").length,0);
+  b.innerHTML=`<button class="back" onclick="dgGo('stats')">‹ к сводке</button>`+
+    dgTop("Вход команды",pending?"Ждут подтверждения: "+pending:"Все заявки обработаны")+
+    `<div class="box"><b>Как разрешить вход</b><p>Попросите сотрудника зарегистрироваться или войти на своём телефоне либо в программе на ПК. Найдите его заявку ниже, сверьте ФИО и нажмите «Подтвердить телефон» или «Подтвердить ПК».</p><p class="muted">Телефон можно подтвердить без компьютера. Для ПК лично проверьте сотрудника за этим компьютером. Геопозиция не требуется.</p></div>
+     <button class="btn" onclick="dgLoad()">Обновить</button>`+
+    (DG.accountEntries.map((row,i)=>`<div class="lrow"><div class="pname">${esc(row.employee)}</div>`+
+      (row.devices||[]).map((d,k)=>`<div class="psub">${esc(d.kind==="phone"?"Телефон":"Компьютер")}: ${esc(d.label||"")} · ${esc(d.status==="active"?"подтверждён":"ожидает")}</div>`+
+        (row.can_approve&&d.status==="pending"?`<button class="btn acc" onclick="dgApproveAccountDevice(${i},${k},this)">Подтвердить ${d.kind==="phone"?"телефон":"ПК"}</button>`:"")).join("")+`</div>`).join("")||`<div class="center">Заявок пока нет. Сотруднику нужно создать профиль или войти на своём устройстве, затем обновите список.</div>`);
+}
+function dgConfirmAccountDevice(message){
+  return new Promise(resolve=>{
+    askSheet("accountapprovesheet",`<h3 id="account-approve-title">Подтвердить вход</h3><p>${esc(message)}</p>
+      <div class="row2"><button class="btn" data-cancel>Отмена</button><button class="btn acc" data-confirm>Подтвердить</button></div>`);
+    const sheet=$("accountapprovesheet"),body=sheet.querySelector(".pickbody");
+    body.setAttribute("role","dialog");body.setAttribute("aria-modal","true");body.setAttribute("aria-labelledby","account-approve-title");
+    let answered=false;
+    const done=value=>{if(answered)return;answered=true;document.removeEventListener("keydown",key);closeAsk("accountapprovesheet");resolve(value);};
+    const key=event=>{if(event.key==="Escape")done(false);};
+    sheet.querySelector("[data-cancel]").onclick=()=>done(false);
+    sheet.querySelector("[data-confirm]").onclick=()=>done(true);
+    sheet.querySelector(".pickbg").onclick=()=>done(false);
+    document.addEventListener("keydown",key);
+    sheet.querySelector("[data-confirm]").focus();
+  });
+}
+async function dgApproveAccountDevice(i,k,button){
+  if($("accountapprovesheet")) return;
+  if(button.disabled) return;
+  const row=(DG.accountEntries||[])[i],device=row?.devices?.[k];
+  if(!device || !row.can_approve || device.status!=="pending") return;
+  const message=device.kind==="desktop"
+    ? "Вы лично видите "+row.employee+" за указанным компьютером и сверили ФИО? Прежний ПК будет отключён."
+    : "Вы сверили личность сотрудника "+row.employee+" и подтверждаете его телефон? Прежний телефон будет отключён. Компьютер не требуется.";
+  button.disabled=true;
+  try{
+    if(!await dgConfirmAccountDevice(message)) return;
+    const result=await api("/api/manager/account_approve",{method:"POST",body:JSON.stringify({device_id:device.id,observed_pc:device.kind==="desktop"})});
+    if(!result?.ok) throw new Error(result?.error||"Подтверждение не выполнено");
+    toast("Доступ подтверждён"); await dgLoad();
+  }catch(e){toast(String(e?.message||e));}
+  finally{if(button.isConnected)button.disabled=false;}
+}
 const DG_LINK_TEXT={in:"вошёл", live:"ссылка выдана", dead:"ссылка истекла", none:"не выдавали"};
 function dgLinkState(x){ return x.entered?"in":(x.alive&&x.url)?"live":x.code?"dead":"none"; }
 function dgLinkName(x){ return x.label||x.employee||""; }
@@ -5332,7 +5723,7 @@ function dgTiles(j){
     tile("target","Нормы","dgGo('plan')"),
     tile("ruler","Нагрузка","dgGo('workload',{wemp:null})"),
     tile("users","Кто есть кто","dgGo('binds')",+j.bind_requests||0),
-    caps.team_links===false?"":tile("link","Вход команды","dgGo('team_links')"),
+    tile("link","Вход команды","dgGo('account_entries')"),
     caps.control?tile("swap","Закрепления","dgGo('assign')"):"",
     tile("down","Excel","dgExcel()"),
   ].join("")}</div>`;
@@ -5794,7 +6185,7 @@ async function dgSetPlan(i,norm){
 function dgWhen(s){ const d=String(s||"").slice(0,10);
   return d.length===10?d.slice(8,10)+"."+d.slice(5,7)+"."+d.slice(0,4):""; }
 // Чем опознают чужого: имя профиля и ник. По голому telegram_id не видно ничего,
-// а «Bahrom Sharifov» на ФИО «Бахтиёров Юсуфхон» видно сразу.
+// а «Example User» на ФИО «Примеров2 Сотрудник2» видно сразу.
 function dgWho(a){ return [a.profile||"без имени в профиле", a.username?"@"+a.username:"",
   a.local?"вход по ссылке":"id "+a.telegram_id].filter(Boolean).join(" · "); }
 function dgHolder(emp){
@@ -6230,6 +6621,7 @@ async function actAs(employee){
   }catch(e){ toast("✕"); return; }
   // Чужие карточки убираем всегда; неотправленную очередь сохраняем — её судьбу
   // человек только что решил сам.
+  WIPE_GEN++; // invalidate old portfolio's pending cache/network writes
   await clearLocalData({keepQueue: left > 0});
   await boot();
 }

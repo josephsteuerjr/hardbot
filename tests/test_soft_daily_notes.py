@@ -12,11 +12,18 @@ from test_review_soft_integrity import world,call,grid
 def moment(hour,minute=0):
     return datetime.combine(workday.today(),datetime.min.time()).replace(hour=hour,minute=minute,tzinfo=timezone(timedelta(hours=5))).timestamp()*1000
 
+def past_moment(minutes_ago):
+    """Момент НАСТОЯЩЕГО прошедшего времени (поле, UTC+5). Фиксированные
+    «сегодня 08:00» до восьми утра по Самаре — будущее, и сервер честно
+    клампит его к «сейчас»: все звонки получают одно время, контент-дедуп
+    глотал ВТОРУЮ попытку, и тест падал по часам прогона (волна 20498ad)."""
+    return (datetime.now(timezone(timedelta(hours=5))) - timedelta(minutes=minutes_ago)).timestamp()*1000
+
 def test_same_result_later_is_a_second_attempt_but_retry_and_double_tap_are_not(world,monkeypatch):
-    first=call(monkeypatch,'one',occurred_at=moment(8))
-    double=call(monkeypatch,'double',occurred_at=moment(8)+1000)
-    later=call(monkeypatch,'two',occurred_at=moment(8,1))
-    retry=call(monkeypatch,'two',occurred_at=moment(8,1))
+    first=call(monkeypatch,'one',occurred_at=past_moment(30))
+    double=call(monkeypatch,'double',occurred_at=past_moment(30)+1000)
+    later=call(monkeypatch,'two',occurred_at=past_moment(29))
+    retry=call(monkeypatch,'two',occurred_at=past_moment(29))
     assert first['applied'] and double['dedup'] and later['applied'] and retry['dedup']
     assert len(db.calls_for_person('A'))==2
 

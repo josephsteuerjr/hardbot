@@ -33,3 +33,14 @@ export function splitLink(raw: string): { base: string; code: string } | null {
     return { base: url.origin, code };
   } catch { return null; }
 }
+
+/** Apply the same transport policy to password login as to personal links. */
+export function serverOrigin(raw: string): string | null {
+  try {
+    const url = new URL(String(raw || "").trim());
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password ||
+        url.pathname !== "/" || url.search || url.hash) return null;
+    if (url.protocol === "http:" && !plainHttpAllowed(url.hostname)) url.protocol = "https:";
+    return url.origin;
+  } catch { return null; }
+}

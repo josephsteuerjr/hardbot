@@ -30,7 +30,7 @@ export const today: Section = {
           <i style="height:${Math.max(2, Math.round((b.value / max) * 62))}px;${b.weekend ? "opacity:.45" : ""}${i === bars.length - 1 ? ";background:var(--terra)" : ""}"></i><span>${esc(b.label)}</span></div>`).join("")}</div>
         <div class="section"><div class="section-head"><h2 class="section-title">Сегодня не выехали</h2><span class="section-note">${esc(silentNote)}</span></div>
           <div id="silent"></div>
-          <p class="muted" style="font-size:13px">Щелчок по человеку — выдать ему ссылку входа.</p></div>
+          <p class="muted" style="font-size:13px">Щелчок по сотруднику открывает управление профилями и устройствами.</p></div>
         <div class="section"><div class="section-head"><h2 class="section-title">Реестр и обогащение</h2></div>
           <div class="kpis">${(regPairs as [string, unknown][]).map(([k, v]) => `<div class="kpi"><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join("")}</div>${note(regNote)}</div>
         <div class="section"><div class="section-head"><h2 class="section-title">По республикам</h2></div>

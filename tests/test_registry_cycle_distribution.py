@@ -443,9 +443,9 @@ def test_responsible_alias_routes_to_canonical_employee(
     monkeypatch,
     tmp_path,
 ):
-    canonical = "Тургунов Музаффар"
-    intermediate = "Тургунов Музаффар (канон)"
-    typo = "Тургунов Музафар"
+    canonical = "Примеров10 Сотрудник10"
+    intermediate = "Примеров10 Сотрудник10 (канон)"
+    typo = "Примеров10 Музафар"
     plan = _run_plan(
         monkeypatch,
         tmp_path,

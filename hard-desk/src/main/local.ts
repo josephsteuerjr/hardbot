@@ -114,7 +114,7 @@ export async function local(path: string, body: unknown = {}): Promise<{ ok: boo
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Local-Secret": secret },
         body: JSON.stringify(body ?? {}),
-      }, path === "/admin" ? 300000 : 30000);
+      }, path === "/admin" || path === '/account/root_bootstrap' ? 300000 : 30000);
       return (await res.json()) as { ok: boolean; data?: unknown; error?: string };
     } catch (e) {
       last = e;

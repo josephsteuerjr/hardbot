@@ -37,6 +37,7 @@ import re
 import sqlite3
 import sys
 import tarfile
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -115,6 +116,9 @@ CARRY = {
 # человек, которому новый владелец доступ не выдавал и о котором не знает.
 # admin_devices и app_tokens — то же самое для пульта и мини-приложения.
 ALWAYS_CLEAR = {
+    "account_deletions",  # retired identity authority of the previous installation
+    'account_admin_grants', 'account_token_sessions', 'owner_bootstrap_challenges',
+    'pc_registration_challenges', 'staff_roster',  # local authority and people mapping need fresh reconciliation
     "notification_outbox", "notification_attempts",
     "enrichment_book_ledger", # доказанная доставка в конкретный путь книги этой установки;
                               # на новом сервере связь с книгами подтверждается заново
@@ -129,6 +133,14 @@ ALWAYS_CLEAR = {
     "manager_devices",
     # Приложение выездника на ПК: тот же класс выданного доступа.
     "agent_devices",
+    # Аккаунты «логин-пароль»: scrypt-пароли, подтверждения администраторов,
+    # устройства и журнал входов (IP, отпечатки, GPS) — доступ и секрет
+    # ЭТОЙ установки; на новом сервере заводятся заново (account_access.py).
+    "accounts",
+    "account_devices",
+    "account_logins",
+    "account_approval_events",  # журнал доступа прежней установки, остаётся в её архиве
+    "account_phone_requests",  # короткие коды/утверждения людей прежней установки
     # Контрольный обзвон безопасника: внутренняя проверка людей этой установки,
     # другому владельцу она не передаётся.
     "control_checks",
@@ -170,6 +182,9 @@ SETTINGS_DROP = {
     # в архиве, он дал бы держателю архива подписывать ссылки на карту
     # принимающего сервера; там сервер при первой подписи заведёт новый.
     "maplink_secret",
+    # Защёлка доступов относится к одной установке. На новый сервер переходят
+    # данные работы, но не момент её переключения и не обходная дата.
+    "account_cutover_activated_at_utc",
 }
 
 # Колонки, которые обнуляются у переезжающих строк.
@@ -350,6 +365,55 @@ def scan_photos(root: Path) -> list[tuple[str, Path, int]]:
     return out
 
 
+def scan_receipts(root: Path) -> list[tuple[str, Path, int]]:
+    """Unlike transient photo uploads, receipt evidence may never be skipped."""
+    if root.is_symlink() or (root.exists() and not root.is_dir()):
+        raise Stop(f"каталог чеков {root} не является обычным каталогом")
+    if root.exists() and any(p.is_symlink() for p in root.rglob("*")):
+        raise Stop(f"в {root} есть ссылка: чеки нельзя пропускать молча")
+    return scan_photos(root)
+
+
+def pending_audit_spool(data: Path) -> int:
+    """Access-audit fallback belongs to the source installation, not its new owner.
+
+    Refuse a full take until the source app has drained it into its own DB;
+    access audit is deliberately cleared from the sanitized destination.
+    """
+    spool = data / "audit-spool.sqlite3"
+    if not spool.exists():
+        return 0
+    with closing(sqlite3.connect(f"file:{spool}?mode=ro", uri=True)) as conn:
+        tables = tables_of(conn)
+        if tables != {"events"} or conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise Stop("audit-spool не читается или имеет неизвестную схему; перенос отменён")
+        return conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+
+
+def check_receipt_references(db_path: Path, receipt_root: Path) -> list[str]:
+    """A payment row without its immutable bytes is not a complete handover."""
+    issues: list[str] = []
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
+        if "payment_evidence" not in tables_of(conn):
+            return issues
+        for rel, digest, size in conn.execute(
+            "SELECT file,sha256,size_bytes FROM payment_evidence"
+        ):
+            if (not rel or not isinstance(rel, str) or rel.startswith("/")
+                    or "\\" in rel or ".." in Path(rel).parts or len(Path(rel).parts) != 2):
+                issues.append(f"некорректный путь чека: {rel!r}")
+                continue
+            file = receipt_root / rel
+            if (any(p.is_symlink() for p in (receipt_root, *file.parents))
+                    or file.is_symlink() or not file.is_file()):
+                issues.append(f"нет файла чека: {rel}")
+            elif (size is not None and file.stat().st_size != size) or (
+                digest and sha256_file(file) != digest
+            ):
+                issues.append(f"чек не совпал с записью базы: {rel}")
+    return issues
+
+
 # ---------------------------------------------------------------------------
 # take — снятие на исходном сервере
 # ---------------------------------------------------------------------------
@@ -517,6 +581,13 @@ def cmd_take(args: argparse.Namespace) -> int:
     src_db = data / DB_NAME
     if not src_db.is_file():
         raise Stop(f"нет {src_db} — базы ещё нет (приложение ни разу не запускалось?)")
+    try:
+        pending = pending_audit_spool(data)
+    except sqlite3.Error as exc:
+        raise Stop(f"audit-spool не читается: {exc}; перенос отменён") from exc
+    if pending:
+        raise Stop(f"в audit-spool осталось {pending} событий доступа. Дождитесь drain на исходном сервере; "
+                   "не переносите журнал доступа старой установки на новый сервер")
 
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)
@@ -548,9 +619,18 @@ def cmd_take(args: argparse.Namespace) -> int:
         conn.close()
 
     photos: list[tuple[str, Path, int]] = []
+    receipts: list[tuple[str, Path, int]] = []
     if not args.db_only:
         log("  считаю контрольные суммы фотографий…")
         photos = scan_photos(data / "photos")
+        receipts = scan_receipts(data / "receipts")
+    elif scan_receipts(data / "receipts") or counts.get("payment_evidence", 0):
+        raise Stop("--db-only пропустил бы чеки или payment_evidence; снимите полный архив, "
+                   "чтобы база не ссылалась на отсутствующие файлы")
+
+    missing_receipts = check_receipt_references(copy, data / "receipts")
+    if missing_receipts:
+        raise Stop("в базе есть чек без исходных байтов: " + "; ".join(missing_receipts[:5]))
 
     db_sha = sha256_file(copy)
     photo_bytes = sum(sz for _, _, sz in photos)
@@ -570,6 +650,7 @@ def cmd_take(args: argparse.Namespace) -> int:
                  "размер": size_str(copy.stat().st_size)},
         "фотографии": {"файлов": len(photos), "байт": photo_bytes,
                        "размер": size_str(photo_bytes)},
+        "чеки": {"файлов": len(receipts), "байт": sum(sz for _, _, sz in receipts)},
         "чистка": cleaning,
     }
     inventory_txt = render_inventory(manifest)
@@ -578,6 +659,8 @@ def cmd_take(args: argparse.Namespace) -> int:
     sums.write(f"{db_sha}  {DB_NAME}\n")
     for rel, path, _size in photos:
         sums.write(f"{sha256_file(path)}  photos/{rel}\n")
+    for rel, path, _size in receipts:
+        sums.write(f"{sha256_file(path)}  receipts/{rel}\n")
     sums_bytes = sums.getvalue().encode("utf-8")
 
     # Опись печатаем ЗДЕСЬ, а не достаём потом из архива: вытащить один файл
@@ -608,6 +691,8 @@ def cmd_take(args: argparse.Namespace) -> int:
         tar.add(copy, arcname=f"{ARCHIVE_ROOT}/{DB_NAME}")
         for rel, path, _size in photos:
             tar.add(path, arcname=f"{ARCHIVE_ROOT}/photos/{rel}")
+        for rel, path, _size in receipts:
+            tar.add(path, arcname=f"{ARCHIVE_ROOT}/receipts/{rel}")
     out.flush()
 
     copy.unlink(missing_ok=True)
@@ -637,13 +722,24 @@ def cmd_verify(args: argparse.Namespace) -> int:
     problems: list[str] = []
     say = print
 
+    if "чеки" not in manifest and int((manifest.get("таблицы") or {}).get("payment_evidence", 0)):
+        problems.append("старый архив содержит payment_evidence, но не подтверждает файлы чеков; "
+                        "снимите новый полный архив с data/receipts")
+
     say("1. Контрольные суммы файлов")
     bad_sums = 0
     checked = 0
+    listed: set[str] = set()
     for line in sums_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         digest, _, rel = line.partition("  ")
+        if (not re.fullmatch(r"[0-9a-f]{64}", digest) or rel in listed
+                or rel.startswith("/") or ".." in Path(rel).parts
+                or not (rel == DB_NAME or rel.startswith(("photos/", "receipts/")))):
+            problems.append(f"небезопасная или повторная запись суммы: {rel}")
+            continue
+        listed.add(rel)
         target = root / rel
         if not target.is_file():
             problems.append(f"файла нет: {rel}")
@@ -709,6 +805,17 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if photos_declared != photos_found:
         problems.append(
             f"фотографий: заявлено {photos_declared}, найдено {photos_found}")
+    receipt_declared = int((manifest.get("чеки") or {}).get("файлов") or 0)
+    receipts_found = len(scan_receipts(root / "receipts"))
+    if receipt_declared != receipts_found:
+        problems.append(f"чеков: заявлено {receipt_declared}, найдено {receipts_found}")
+    actual_files = {DB_NAME} | {f"photos/{rel}" for rel, _, _ in scan_photos(root / "photos")}
+    actual_files |= {f"receipts/{rel}" for rel, _, _ in scan_receipts(root / "receipts")}
+    if actual_files != listed:
+        problems.append("SHA256SUMS не покрывает ровно все файлы базы/фотографий/чеков")
+    if int((manifest.get("таблицы") or {}).get("payment_evidence", 0)) and not receipts_found:
+        problems.append("payment_evidence есть, файлов чеков нет")
+    problems.extend(check_receipt_references(db_path, root / "receipts"))
 
     if args.out_json:
         Path(args.out_json).write_text(
@@ -794,26 +901,39 @@ def cmd_inventory(args: argparse.Namespace) -> int:
 # Отдельная команда, а не проверка наличия файла: hardbot.db появляется сразу
 # после install.sh (приложение создаёт схему на первом запуске), поэтому «файл
 # есть» ничего не говорит. Занятой считаем базу, в которой есть хоть что-то из
-# рабочего: договоры, визиты, фотографии.
+# рабочего: любые строки пользовательских таблиц, фотографии и чеки.
 # ---------------------------------------------------------------------------
 
 def cmd_state(args: argparse.Namespace) -> int:
     data = Path(args.data)
     db_path = data / DB_NAME
     photos = len(scan_photos(data / "photos"))
+    receipts = len(scan_receipts(data / "receipts"))
+    if db_path.is_symlink():
+        raise Stop("база назначения — символическая ссылка; состояние нельзя считать пустым")
     if not db_path.is_file():
-        print("пусто (базы нет)" if not photos
-              else f"занято (базы нет, но фотографий {photos})")
+        other = any((data / f"{DB_NAME}{suffix}").exists() for suffix in ("-wal", "-shm", "-journal"))
+        other |= (data / "audit-spool.sqlite3").exists()
+        other |= bool(data.exists() and any(p.name not in {"photos", "receipts"}
+                                            for p in data.iterdir()))
+        print("пусто (базы нет)" if not (photos or receipts or other)
+              else "занято (базы нет, но есть файлы данных)")
         return 0
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
-        clients = _one(conn, "SELECT COUNT(*) FROM clients")
-        visits = _one(conn, "SELECT COUNT(*) FROM visits")
-    finally:
-        conn.close()
-    if clients or visits or photos:
-        print(f"занято: договоров {clients}, визитов {visits}, "
-              f"фотографий {photos}")
+        with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
+            if conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise Stop("база назначения повреждена; ничего не заменено")
+            counts = counts_of(conn)
+    except sqlite3.Error as exc:
+        raise Stop(f"не удалось прочитать состояние базы назначения: {exc}") from exc
+    populated = {name: n for name, n in counts.items() if n}
+    unknown_files = any(p.name not in {DB_NAME, DB_NAME + "-wal", DB_NAME + "-shm",
+                                           DB_NAME + "-journal", "photos", "receipts",
+                                           "audit-spool.sqlite3", "audit-spool.sqlite3-wal",
+                                           "audit-spool.sqlite3-shm"}
+                        for p in data.iterdir())
+    if populated or photos or receipts or unknown_files or (data / "audit-spool.sqlite3").exists():
+        print(f"занято: таблиц со строками {len(populated)}, фотографий {photos}, чеков {receipts}")
     else:
         print("пусто")
     return 0

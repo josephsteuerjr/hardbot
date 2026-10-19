@@ -22,7 +22,7 @@ async function activityTab(root: HTMLElement) {
     <div class="toolbar" style="margin-top:14px">${chipsHtml((FILTERS as [string, string][]).map(([k, t]) => ({ key: k, text: `${t} · ${counts[k] || 0}`, on: st.filter === k })), "filter")}
 </div>
     ${st.selected ? `<div class="notice"><span class="grow"><b>${esc(st.selected)}</b></span>
-      <button class="btn small" data-link>Ссылка входа</button><button class="btn small" data-unassign>Снять клиентов…</button></div>` : ""}
+      <button class="btn small" data-link>Профиль и устройства</button><button class="btn small" data-unassign>Снять клиентов…</button></div>` : ""}
     <div id="tbl"></div>`;
   const tab = root.querySelector<HTMLElement>("#tab")!;
   tab.querySelectorAll<HTMLButtonElement>("[data-filter]").forEach((b) => b.addEventListener("click", () => { st.filter = b.dataset.filter!; void activityTab(root); }));
@@ -56,7 +56,7 @@ async function rolesTab(root: HTMLElement) {
       html: (e) => `<select class="input" data-kind style="height:32px"><option value="agent">Выездник</option><option value="courier" ${e.kind === "courier" ? "selected" : ""}>Курьер ГПХ</option></select>` },
     { key: "bound", title: "Вход", value: (e) => (e.telegram_id ? "привязан" : "не назначен"),
       html: (e) => (e.telegram_id ? '<span class="tag ok">привязан</span>' : '<span class="tag">не назначен</span>') },
-    { key: "act", title: "", filter: false, value: () => "", html: () => '<button class="btn small" data-link>Ссылка входа</button>' },
+    { key: "act", title: "", filter: false, value: () => "", html: () => '<button class="btn small" data-link>Профиль и устройства</button>' },
   ];
   new DataTable<any>(tab.querySelector("#roles-tbl")!, {
     id: "analyst-roles", cols, key: (e) => e.employee, exportName: "Сотрудники — офисы и нормы",

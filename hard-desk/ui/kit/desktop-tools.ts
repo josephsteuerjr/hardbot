@@ -3,7 +3,6 @@ import { esc, toast } from "./dom";
 
 export function mountDesktopTools(): void {
   void hard.state().then(s => { if (s.fixedProduct) document.getElementById("sign")!.textContent = s.product; });
-  // Флаг живёт на самом поле: сохранённая/закрытая форма удаляет его вместе с DOM.
   document.addEventListener("input", e => {
     const el = e.target as HTMLElement;
     if (el.matches("input,textarea,select") && !el.closest(".toolbar,.tbar,.crm-filters,.fpop,.enroll,.update-pop,.column-picker")) el.dataset.hardDirty = "1";
@@ -22,7 +21,6 @@ export function mountDesktopTools(): void {
     menu.style.left = Math.max(8, Math.min(e.clientX, innerWidth - menu.offsetWidth - 8)) + "px";
     menu.style.top = Math.max(8, Math.min(e.clientY, innerHeight - menu.offsetHeight - 8)) + "px";
     menu.querySelectorAll<HTMLElement>("[data-edit]").forEach(b => {
-      // Сохранить selection и фокус редактируемого поля при нажатии меню.
       b.addEventListener("mousedown", ev => ev.preventDefault());
       b.addEventListener("click", () => { if (editable) target.focus(); hard.edit(b.dataset.edit!); close(); });
     });
@@ -32,7 +30,6 @@ export function mountDesktopTools(): void {
       if (ev.key === "ArrowDown" || ev.key === "ArrowUp") { ev.preventDefault(); buttons[(i + (ev.key === "ArrowDown" ? 1 : buttons.length - 1)) % buttons.length].focus(); }
       if (ev.key === "Escape") { close(); target.focus(); }
     });
-    // Клавиатурный вызов контекстного меню.
     if (!e.clientX && !e.clientY) menu.querySelector<HTMLButtonElement>("button")?.focus();
   });
   document.addEventListener("mousedown", e => { if (menu && !menu.contains(e.target as Node)) close(); });
@@ -48,7 +45,7 @@ export function mountDesktopTools(): void {
     pop.innerHTML = `<b>Обновление программы</b><p>${esc(latest?.text || "Загрузка состояния…")}</p>
       ${latest?.version ? `<p>Версия ${esc(latest.version)} ${latest.phase === "downloading" ? `· ${latest.percent || 0}%` : ""}</p>` : ""}
       <div class="row"><button class="btn small" data-check ${["checking", "downloading"].includes(latest?.phase) ? "disabled" : ""}>Проверить</button>
-      ${latest?.phase === "ready" ? '<button class="btn small primary" data-install>Установить</button>' : ""}<button class="btn small" data-dismiss>Закрыть</button></div>`;
+      ${latest?.phase === "ready" ? '<button class="btn small primary" data-install>Перезагрузить для установки обновления</button>' : ""}<button class="btn small" data-dismiss>Закрыть</button></div>`;
     pop.querySelector("[data-check]")?.addEventListener("click", async () => { latest = await hard.update("check"); draw(); });
     pop.querySelector("[data-dismiss]")?.addEventListener("click", () => { pop?.remove(); pop = null; });
     pop.querySelector("[data-install]")?.addEventListener("click", async () => {
@@ -61,5 +58,16 @@ export function mountDesktopTools(): void {
     pop = document.createElement("div"); pop.className = "update-pop"; pop.setAttribute("role", "dialog"); pop.setAttribute("aria-label", "Обновление программы"); document.body.append(pop);
     latest = await hard.update("state"); draw();
   });
-  hard.on("update", s => { latest = s; button.classList.toggle("ready", latest?.phase === "ready"); draw(); });
+  const renderState = (s: any) => {
+    latest = s;
+    const ready = latest?.phase === "ready";
+    button.classList.toggle("ready", ready);
+    button.style.width = ready ? "auto" : "";
+    button.style.padding = ready ? "0 12px" : "";
+    button.textContent = ready ? "Перезагрузить для установки обновления" : "↻";
+    button.title = ready ? latest.text : "Обновление программы";
+    draw();
+  };
+  hard.on("update", renderState);
+  void hard.update("state").then(renderState);
 }

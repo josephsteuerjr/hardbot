@@ -16,7 +16,8 @@ app.whenReady().then(async () => {
       for (const theme of ['light', 'dark']) {
         process.env.HARD_QA_THEME = theme;
         const w = new BrowserWindow({ width: 1440, height: 950, show: false,
-          webPreferences: { partition: `qa-${role}-${theme}-${Date.now()}`, preload: path.join(__dirname, 'qa-desktop-preload.cjs'), contextIsolation: false, sandbox: false, backgroundThrottling: false } });
+          webPreferences: { partition: `qa-${role}-${theme}-${Date.now()}`, preload: path.join(__dirname, 'qa-desktop-preload.cjs'), contextIsolation: false, sandbox: false, backgroundThrottling: false, offscreen: true } });
+        console.log('Renderer scenario:', role, theme);
         const js = code => w.webContents.executeJavaScript(code);
         await w.loadFile(path.join(__dirname, '../out/ui/index.html'));
         await sleep(1000);
@@ -25,7 +26,8 @@ app.whenReady().then(async () => {
         const rails = await js('[...document.querySelectorAll("[data-go]")].map(b=>b.dataset.go)');
         assert.equal(rails.includes('control'), role !== 'manager');
         assert.equal(rails.includes('links'), role !== 'security');
-        if (role === 'security') await js('document.querySelector("[data-go=workspace]").click()');
+        // CRM is the landing page; this scenario exercises the separate activity overview.
+        await js('document.querySelector("[data-go=workspace]").click()');
         await sleep(200);
         assert.equal(await js('document.querySelectorAll("#crm-table tbody tr").length'), 3);
         const layout = await js('(()=>{const a=document.getElementById("app"),r=document.getElementById("rail");return {app: a.className,track:getComputedStyle(a).getPropertyValue("--rail-track"),railWidth:getComputedStyle(r).width,x:r.getBoundingClientRect().x,grid:getComputedStyle(a).gridTemplateColumns}})()');

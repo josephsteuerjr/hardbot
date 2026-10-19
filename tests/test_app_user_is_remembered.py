@@ -17,7 +17,7 @@ class _Req:
         self.headers = headers
 
 
-def _init_data(uid, username="utkirov", first="Фирдавс", last="Уткиров"):
+def _init_data(uid, username="synthetic-user", first="Учебный", last="Профиль 1"):
     return json.dumps({"user": {"id": uid, "username": username,
                                 "first_name": first, "last_name": last}})
 
@@ -38,8 +38,8 @@ def test_app_entry_records_name_and_username(monkeypatch):
     web._remember_from_init(_patch(monkeypatch, _init_data(uid)))
     g = _guest(uid)
     assert g is not None, "открывший приложение остался неизвестным"
-    assert g["username"] == "utkirov"
-    assert g["name"] == "Фирдавс Уткиров"
+    assert g["username"] == "synthetic-user"
+    assert g["name"] == "Учебный Профиль 1"
 
 
 def test_missing_or_broken_init_data_is_silent(monkeypatch):

@@ -24,11 +24,11 @@ from pult.ui import dialogs, theme  # noqa: E402
 from pult.ui.main_window import Pult  # noqa: E402
 from pult.ui.people import OFFICE_NONE  # noqa: E402
 
-EMPS = [{"employee": "Акназаров Карим", "contracts": 280},
-        {"employee": "Рахимов Махмадулло", "contracts": 348}]
-OFFICES = {"Акназаров Карим": "Худжанд", "Рахимов Махмадулло": "Душанбе"}
+EMPS = [{"employee": "Примеров1 Сотрудник1", "contracts": 280},
+        {"employee": "Примеров8 Сотрудник8", "contracts": 348}]
+OFFICES = {"Примеров1 Сотрудник1": "Худжанд", "Примеров8 Сотрудник8": "Душанбе"}
 MANAGERS = {
-    "managers": [{"telegram_id": 943628290, "name": "Старший спец", "cities": [],
+    "managers": [{"telegram_id": 9782003, "name": "Старший спец", "cities": [],
                   "employees": [], "direction": "", "office_cities": ["Душанбе"],
                   "can_dm": 1, "spelling_mismatch": 0}],
     "cities": [], "employees": EMPS, "city_employees": {},
@@ -114,15 +114,15 @@ def test_office_column_shows_current_value(app, window):
 
 def test_choosing_office_saves_at_once(app, window):
     _open_people(window, app)
-    combo = _office_combos(window)[1]           # Рахимов, сейчас Душанбе
+    combo = _office_combos(window)[1]           # Примеров8, сейчас Душанбе
     combo.setCurrentText("Худжанд")
     window.calls.clear()
-    window.set_office("Рахимов Махмадулло", combo)
+    window.set_office("Примеров8 Сотрудник8", combo)
     app.processEvents()
     assert [c for c in window.calls if c[0] == "POST"] == [
         ("POST", "/admin/employee_cities.json",
-         {"cities": {"Рахимов Махмадулло": "Худжанд"}})]
-    assert window._offices["Рахимов Махмадулло"] == "Худжанд"
+         {"cities": {"Примеров8 Сотрудник8": "Худжанд"}})]
+    assert window._offices["Примеров8 Сотрудник8"] == "Худжанд"
 
 
 def test_unchanged_office_does_not_post(app, window):
@@ -130,7 +130,7 @@ def test_unchanged_office_does_not_post(app, window):
     каждую строку превратил бы открытие вкладки в тридцать записей."""
     _open_people(window, app)
     window.calls.clear()
-    window.set_office("Рахимов Махмадулло", _office_combos(window)[1])
+    window.set_office("Примеров8 Сотрудник8", _office_combos(window)[1])
     assert [c for c in window.calls if c[0] == "POST"] == []
 
 
@@ -139,11 +139,11 @@ def test_clearing_office_sends_empty_string(app, window):
     combo = _office_combos(window)[1]
     combo.setCurrentText(OFFICE_NONE)
     window.calls.clear()
-    window.set_office("Рахимов Махмадулло", combo)
+    window.set_office("Примеров8 Сотрудник8", combo)
     app.processEvents()
     assert ("POST", "/admin/employee_cities.json",
-            {"cities": {"Рахимов Махмадулло": ""}}) in window.calls
-    assert "Рахимов Махмадулло" not in window._offices
+            {"cities": {"Примеров8 Сотрудник8": ""}}) in window.calls
+    assert "Примеров8 Сотрудник8" not in window._offices
 
 
 def test_manager_form_offers_offices_and_saves_them(app, window):
@@ -151,11 +151,11 @@ def test_manager_form_offers_offices_and_saves_them(app, window):
     window.load_managers()
     app.processEvents()
     # Штат офиса пульт знает и подписывает — оператор видит, кого получит.
-    assert window.mgr_office_staff["Душанбе"] == ["Рахимов Махмадулло"]
-    window.mgr_edit(943628290)
+    assert window.mgr_office_staff["Душанбе"] == ["Примеров8 Сотрудник8"]
+    window.mgr_edit(9782003)
     app.processEvents()
     assert window.mgr_form["offices"] == {"Душанбе"}
-    assert "Рахимов Махмадулло" in window.mgr_office_hint.text()
+    assert "Примеров8 Сотрудник8" in window.mgr_office_hint.text()
     window.calls.clear()
     window.save_manager()
     app.processEvents()
@@ -172,7 +172,7 @@ def test_office_alone_is_enough_to_save_a_manager(app, window):
     window.load_managers()
     app.processEvents()
     window._mgr_form_reset()
-    window.mgr_tid.set("943628290")
+    window.mgr_tid.set("9782003")
     window.mgr_name.set("Старший спец")
     window._mgr_toggle_office("Душанбе")
     window.calls.clear()

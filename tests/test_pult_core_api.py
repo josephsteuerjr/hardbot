@@ -155,6 +155,17 @@ def test_asks_for_gzip_and_unpacks_it():
 PLAIN = ["http://hard.example", "HTTP://hard.example:443", "http://127.0.0.1.nip.io",
          "http://127.0.0.1@evil.example", "http://127.0.0.2:8080", "ftp://hard.example",
          "hard.example", "//hard.example", "https://", "http://[::1"]
+PLAIN += ["http://8.8.8.8", "http://172.32.0.1", "http://[fe80::1]",
+          "http://hard.corp.local", "https://user:pass@hard.example", "https://hard.example:bad"]
+
+
+@pytest.mark.parametrize("url", ["http://10.0.0.25:8080", "http://172.16.3.4",
+                                "http://192.168.3.4", "http://[fd00::1]:8080"])
+def test_corporate_ip_can_be_used_without_public_dns(url):
+    opener = _opener(lambda req, kw: b'{"ok": true}')
+    assert api.request(url, "GET", "/admin/stats", device_token="synthetic-token",
+                       opener=opener) == {"ok": True}
+    assert len(opener.calls) == 1
 
 
 @pytest.mark.parametrize("url", PLAIN)
@@ -188,11 +199,11 @@ def test_https_and_own_machine_pass(url):
 
 
 def test_https_profiles_are_untouched(tmp_path):
-    """Контуры с https работают как раньше; http-контур отказывает сам, не
+    """Контуры с https работают как раньше; публичный http-контур отказывает сам, не
     трогая ни себя, ни соседей, ни файл настроек."""
     path = tmp_path / "настройки пульта.json"
     Settings({"profiles": {"Прод": {"url": "https://prod.example", "device_token": "P"},
-                           "Компания": {"url": "http://10.0.0.5", "device_token": "K"}},
+                           "Компания": {"url": "http://company.example", "device_token": "K"}},
               "active": "Прод"}, path).save()
     before = path.read_bytes()
     settings = Settings.load(path)

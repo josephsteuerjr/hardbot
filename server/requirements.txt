@@ -25,6 +25,7 @@ aiohttp==3.14.3          # веб-сервер мини-приложения и 
 openpyxl==3.1.5          # чтение реестров xlsx (и старые выгрузки)
 xlsxwriter==3.2.9        # книги руководителя: даты датами, деньги числами (stats_book.py)
 python-dotenv==1.2.3     # чтение .env
+cryptography==49.0.0     # proof of possession for PC registration
 
 # --- второй ряд: то, что тянут за собой пакеты выше (у xlsxwriter зависимостей нет) ---
 aiofiles==25.1.0

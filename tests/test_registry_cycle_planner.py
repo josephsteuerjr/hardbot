@@ -941,8 +941,8 @@ def test_reassigned_case_hands_old_yellow_value_to_blank_new_owner():
 
 
 def test_responsible_alias_uses_canonical_book_as_master_target():
-    canonical = "Тургунов Музаффар"
-    typo = "Тургунов Музафар"
+    canonical = "Примеров10 Сотрудник10"
+    typo = "Примеров10 Музафар"
     master = _book(
         "master.xlsb",
         [["1", typo, None, None, None]],

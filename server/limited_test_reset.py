@@ -40,6 +40,8 @@ from photostore import PHOTO_DIR as DEFAULT_PHOTO_DIR
 
 
 RESET_TABLES = {
+    "account_deletions",  # retired installation UIDs leave with all other account authority
+    'account_admin_grants', 'account_token_sessions', 'owner_bootstrap_challenges', 'pc_registration_challenges',
     "office_actions", "office_action_contracts",
     "call_review_history", "call_reviews", "notification_attempts", "notification_outbox",
     "registry_payments",
@@ -77,6 +79,14 @@ RESET_TABLES = {
     "app_tokens",
     # Токены приложения выездника на ПК — тот же выданный доступ, что app_tokens.
     "agent_devices",
+    # Аккаунты «логин-пароль»: доступ по паролю и журнал входов (IP, отпечатки,
+    # GPS). Ограниченный тест начинается с чистого штата — заводятся заново
+    # (account_access.py), переживать сброс им незачем, а журнал — ПД.
+    "account_logins",
+    "account_approval_events",
+    "account_phone_requests",  # unconsumed one-time approval codes cannot survive reset
+    "account_devices",
+    "accounts",
     "photo_geo",
     # Следы выезда (точки телефона при открытой карточке) и адреса, выученные
     # по подтверждённым выездам: и то и другое — ПРО КЕЙСЫ, которые сброс
@@ -105,6 +115,7 @@ RESET_TABLES = {
 # an old published master could become "new" again immediately after cleanup.
 # Pending authorizations are invalidated atomically during reset.
 RETAINED_TABLES = {
+    'staff_roster',  # directory survives portfolio reset; it grants no login by itself
     "employee_identities", "employee_aliases",  # staff identity survives registry reset; no portfolio or login grant
     "import_receipts",
     "import_source_heads",
@@ -137,6 +148,7 @@ EXPECTED_TABLES = RESET_TABLES | RETAINED_TABLES
 
 # Сначала зависимые/операционные сущности, затем registry и identity/config.
 DELETE_ORDER = (
+    "account_deletions",
     "office_action_contracts", "office_actions",
     "call_review_history", "call_reviews", "notification_attempts", "notification_outbox",
     "registry_payments",
@@ -157,6 +169,13 @@ DELETE_ORDER = (
                       # первая заметка (список RESET_TABLES и порядок удаления
                       # сверяются между собой)
     "app_tokens",
+    # Журнал и устройства аккаунтов — до самого accounts (на него ссылаются).
+    'account_admin_grants', 'account_token_sessions', 'owner_bootstrap_challenges', 'pc_registration_challenges',
+    "account_logins",
+    "account_approval_events",
+    "account_phone_requests",  # unconsumed one-time approval codes cannot survive reset
+    "account_devices",
+    "accounts",
     "agent_devices",
     "app_links",
     "managers",

@@ -224,7 +224,10 @@ def test_restore_refuses_symlinks_and_replaces_destination():
     text = RESTORE.read_text(encoding="utf-8")
     assert "[ -L" in text, "restore.sh не проверяет символьные ссылки на data/базе/фото"
     assert "data/hardbot.db" in text
-    assert "--remove-destination" in text, "база копируется без --remove-destination"
+    # Restore now stages a whole generation and moves old DB/WAL aside before
+    # publishing with rename; a copy over an existing symlink is no longer used.
+    assert 'mv "data/$asset" "$aside/$asset"' in text
+    assert 'mv "$stage/$asset" "data/$asset"' in text
 
 
 @pytest.mark.parametrize("script", [

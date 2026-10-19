@@ -19,9 +19,9 @@ from pult.ui import dialogs, theme  # noqa: E402
 from pult.ui.main_window import Pult  # noqa: E402
 from pult.ui.people import PLAN_COMMON  # noqa: E402
 
-EMPS = [{"employee": "Акназаров Карим", "contracts": 280, "plan": 12,
+EMPS = [{"employee": "Примеров1 Сотрудник1", "contracts": 280, "plan": 12,
          "plan_personal": True},
-        {"employee": "Рахимов Махмадулло", "contracts": 348, "plan": 10,
+        {"employee": "Примеров8 Сотрудник8", "contracts": 348, "plan": 10,
          "plan_personal": False}]
 
 
@@ -101,10 +101,10 @@ def test_choosing_norm_saves_at_once(app, window):
     combo = _plan_combos(window)[1]
     combo.setCurrentText("8")
     window.calls.clear()
-    window.set_plan("Рахимов Махмадулло", combo)
+    window.set_plan("Примеров8 Сотрудник8", combo)
     app.processEvents()
     assert [c for c in window.calls if c[0] == "POST"] == [
-        ("POST", "/admin/visit_plan.json", {"plan": {"Рахимов Махмадулло": 8}})]
+        ("POST", "/admin/visit_plan.json", {"plan": {"Примеров8 Сотрудник8": 8}})]
 
 
 def test_common_returns_zero(app, window):
@@ -113,10 +113,10 @@ def test_common_returns_zero(app, window):
     combo = _plan_combos(window)[0]
     combo.setCurrentText(PLAN_COMMON)
     window.calls.clear()
-    window.set_plan("Акназаров Карим", combo)
+    window.set_plan("Примеров1 Сотрудник1", combo)
     app.processEvents()
     assert [c for c in window.calls if c[0] == "POST"] == [
-        ("POST", "/admin/visit_plan.json", {"plan": {"Акназаров Карим": 0}})]
+        ("POST", "/admin/visit_plan.json", {"plan": {"Примеров1 Сотрудник1": 0}})]
 
 
 def test_garbage_is_not_sent(app, window):
@@ -124,6 +124,6 @@ def test_garbage_is_not_sent(app, window):
     combo = _plan_combos(window)[0]
     combo.setCurrentText("десять")
     window.calls.clear()
-    window.set_plan("Акназаров Карим", combo)
+    window.set_plan("Примеров1 Сотрудник1", combo)
     app.processEvents()
     assert [c for c in window.calls if c[0] == "POST"] == [], "число или «общая»"

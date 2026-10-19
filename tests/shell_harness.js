@@ -264,6 +264,8 @@ function fakeServer(cfg) {
     const who = own(cfg.tokens, key) ? cfg.tokens[key] : 401;
     if (typeof who === "number") return { status: who, body: {} };
     if (who === "neterr") return "neterr";
+    if (path === "/api/identity") return { status: 200, body: {
+      ok: true, uid: who.uid === undefined ? 1 : who.uid, employee: who.employee || "" } };
     if (path === "/api/bootstrap") {
       return {
         status: 200, body: Object.assign({
@@ -274,6 +276,9 @@ function fakeServer(cfg) {
     }
     if (path === "/api/cards") return { status: 200, body: { cards: who.cards || {} } };
     if (path === "/api/save") return { status: cfg.saveStatus || 200, body: { ok: true, person: {} } };
+    // These fixture tokens come from legacy links unless a test overrides the
+    // route: the account endpoint must reject them before /api/logout revokes.
+    if (path === "/api/account/logout") return { status: 401, body: {} };
     return { status: 200, body: { ok: true } };
   };
   srv.cfg = cfg;
@@ -322,7 +327,8 @@ async function openPage(w, opts) {
     localStorage: w.ls, sessionStorage: w.ss,
     indexedDB: makeIDB(w), caches: makeCaches(w),
     location, history, document,
-    navigator: { onLine: opts.onLine !== false, userAgent: "Mozilla/5.0 (shell harness)", standalone: false },
+    navigator: { onLine: opts.onLine !== false, userAgent: opts.userAgent || "Mozilla/5.0 (shell harness)", standalone: false },
+    Date: class extends Date {static now(){return opts.now ? opts.now() : Date.now();}},
     matchMedia: () => ({ matches: false, addEventListener() {} }),
     innerHeight: 800,
     alert: m => { page.dialogs.push(["alert", String(m)]); },

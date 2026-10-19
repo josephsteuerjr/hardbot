@@ -170,9 +170,9 @@ def imp_selection(body, *, settings, **_):
             "button": ri.preview_button_text(book, sel, bool(body.get("full")))}
 
 
-def _signature(book, sel, full, restore, comments, soft_edits=False):
+def _signature(book, sel, full, restore, comments, soft_edits=False, excluded=()):
     return (book.get("file_sha256"), book.get("import_profile", "hard"),
-            tuple(sorted(sel)), bool(full), bool(restore), bool(comments), bool(soft_edits))
+            tuple(sorted(sel)), bool(full), bool(restore), bool(comments), bool(soft_edits),tuple(sorted(set(excluded))))
 
 
 def imp_preview(body, *, admin, start_job, **_):
@@ -186,11 +186,13 @@ def imp_preview(body, *, admin, start_job, **_):
         raise RuntimeError("Отметь хотя бы одного сотрудника")
     full, restore, comments = bool(body.get("full")), bool(body.get("restore_manual")), bool(body.get("replace_comments"))
     soft_edits = bool(body.get("soft_edits"))
-    sig = _signature(book, picked, full, restore, comments, soft_edits)
+    excluded=body.get('exclude_contracts') or []
+    filtered,excluded_rows=ri.exclude_contracts(book,excluded)
+    sig = _signature(book, picked, full, restore, comments, soft_edits,excluded)
 
     def work(say):
         say(f"Проверяю импорт {Path(book['path']).name}: {len(picked)} сотр…")
-        prepared, proof_path = ri.prepare_import(book, picked, full_registry=full,
+        prepared, proof_path = ri.prepare_import(filtered, picked, full_registry=full,
                                                  force_test_subset=restore)
         pbody = ri.preview_body(prepared, full_registry=full, restore_manual=restore,
                                 replace_current_comments=comments, allow_soft_office_edits=soft_edits)
@@ -205,6 +207,7 @@ def imp_preview(body, *, admin, start_job, **_):
             return {"error": expected}
         S["preview"] = {"body": {**pbody, **expected}, "meta": prepared, "sig": sig, "proof": proof_path}
         notes = ri.import_notes(d)
+        if excluded_rows:notes.insert(0,f'По выбранным номерам договоров исключено строк: {excluded_rows}.')
         notes.insert(0, ri.preview_headline(d, full))
         return {"pairs": ri.import_pairs(d), "notes": notes, "apply": ri.apply_button_label(d),
                 "unassigned": int(d.get("auto_unassigned") or 0)}
@@ -215,7 +218,7 @@ def imp_apply(body, *, admin, start_job, **_):
     pv = S["preview"]
     book = S["book"] or {}
     sig = _signature(book, body.get("selected") or [], body.get("full"), body.get("restore_manual"),
-                     body.get("replace_comments"), body.get("soft_edits"))
+                     body.get("replace_comments"), body.get("soft_edits"),body.get('exclude_contracts') or [])
     if not pv or pv["sig"] != sig:
         S["preview"] = None
         raise RuntimeError("Сначала сделай свежий предпросмотр импорта")
@@ -316,7 +319,8 @@ def enr_check(body, *, admin, start_job, **_):
         kwargs = en.preview_kwargs(since=since, until=until, ledger=ledger)
         results = enrich.preview_many(en.build_jobs(picked), S["enr_fields"], say, **kwargs)
         conflicts, office = en.collect_conflicts(results)
-        S["enr_check"] = {"keys": sorted(m["key"] for m in picked), "since": since, "until": until}
+        S["enr_check"] = {"keys": sorted(m["key"] for m in picked), "since": since, "until": until,
+                          "conflict_count":len(conflicts)+len(office)}
         return {"lines": en.preview_lines(results), "conflicts": _conf(conflicts), "office": _conf(office)}
     return {"job": start_job("enr_check", work)}
 
@@ -325,7 +329,11 @@ def enr_confirm(body, **_):
     picked = _picked(body.get("keys"))
     since, until = str(body.get("since") or ""), str(body.get("until") or "")
     decisions = _decisions(body, picked, since, until)
-    note = en.confirm_decisions_note(decisions, 0) if decisions else en.NO_CHECK_NOTE
+    checked=S['enr_check']
+    valid=bool(checked and checked['keys']==sorted(m['key'] for m in picked)
+               and (checked['since'],checked['until'])==(since,until))
+    note=(en.confirm_decisions_note(decisions,max(0,int(checked.get('conflict_count',0))-len(decisions)))
+          or 'Проверка конфликтов для выбранного набора выполнена.') if valid else en.NO_CHECK_NOTE
     return {"text": en.confirm_text(len(picked), len(en.build_jobs(picked)), since, until)
             + (("\n\n" + note) if note else ""), "whole": not (since or until)}
 

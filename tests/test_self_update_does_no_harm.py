@@ -57,12 +57,14 @@ def test_open_form_counts_as_busy_even_when_the_draft_is_already_synced():
     бы, а место — нет.
     """
     body = _fn("noteShellVersion", "function reloadForUpdate(")
-    assert "formVisible()" in body, "открытая форма снова не считается работой"
-    assert 'STATE.tab==="form"' in INDEX
+    # The new policy never auto-reloads, even when the form appears idle.
+    assert "location.reload" not in body and "UPDATE_READY=true" in body
+    reload = _fn("reloadForUpdate", "// Проверка версии")
+    assert "saveDraft()===false" in reload
 
 
 def test_busy_covers_the_gap_between_the_camera_and_the_queue():
-    body = _fn("noteShellVersion", "function reloadForUpdate(")
+    body = _fn("reloadForUpdate", "// Проверка версии")
     assert "PHOTO_BUSY>0" in body, "промежуток «камера закрылась, фото ещё в памяти» не покрыт"
     assert "let PHOTO_BUSY=0;" in INDEX
 
@@ -94,7 +96,8 @@ def test_update_bar_adds_to_the_queue_line_instead_of_replacing_it():
     assert "retakeFailedPhoto()" in tail, "кнопка «Переснять» обязана уцелеть"
     assert "reloadForUpdate()" in tail
     assert "t.photoretake" in body
-    assert "return" not in tail, "между сборкой сообщения и отрисовкой снова выход"
+    # A concurrent profile wipe must prevent a stale message being rendered.
+    assert "if(generation!==WIPE_GEN)return;" in tail
 
 
 def test_retake_link_is_made_only_by_an_explicit_tap():
@@ -113,6 +116,6 @@ def test_retake_intent_does_not_leak_to_another_case():
 
 def test_leaving_the_card_mid_batch_does_not_break_the_loop():
     i = INDEX.index("async function sendPhoto(")
-    body = INDEX[i:i + 3000]
+    body = INDEX[i:INDEX.index("\n}", i)]
     assert "if(STATE.cur&&STATE.cur.rep===rep){" in body, \
         "STATE.cur снова трогают без проверки — TypeError оборвёт отправку пачки"

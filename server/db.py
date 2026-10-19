@@ -1503,6 +1503,12 @@ def init_db() -> None:
         # поэтому вызов строго ПОСЛЕ их создания выше.
         import accounts
         accounts.init_schema(conn)
+        import staff_roster
+        import pc_registration
+        staff_roster.init_schema(conn)
+        pc_registration.init_schema(conn)
+        import root_bootstrap
+        root_bootstrap.init_schema(conn)
         # Роль в команде руководства: руководитель или безопасник (см. MANAGER_ROLES).
         mgcols2 = {r[1] for r in conn.execute("PRAGMA table_info(managers)")}
         if "role" not in mgcols2:
@@ -1966,8 +1972,8 @@ def team_bindings(employees: list[str]) -> dict:
     Один запрос на всю команду, а не тридцать по одному ФИО: экран открывают с
     телефона в поле.
 
-    Имя профиля и ник тянем из users — ими чужого и опознают: «Bahrom Sharifov»
-    на ФИО «Бахтиёров Юсуфхон» видно сразу, а по голому telegram_id не видно
+    Имя профиля и ник тянем из users — ими чужого и опознают: «Example User»
+    на ФИО «Примеров2 Сотрудник2» видно сразу, а по голому telegram_id не видно
     ничего. За ФИО возвращается СПИСОК, а не одна привязка: два одобренных
     устройства на одном имени в базе возможны (аппрув из бота прежнее не
     вытеснял), и прятать это от руководителя — значит прятать ровно то, что он
@@ -2177,7 +2183,7 @@ def telegram_for_employee(employee: str) -> int | None:
 def list_bindings(include_pending: bool = False) -> list[sqlite3.Row]:
     """Действующие привязки. Заявка, ждущая одобрения, — НЕ привязка.
 
-    04.08.2026: в сводке пульта у Акназарова оказалось «два устройства», и по
+    04.08.2026: в сводке пульта у Примеров1а оказалось «два устройства», и по
     списку это выглядело как выданный доступ постороннему. На деле вторая строка
     была заявкой с approved=0 — правило «одно устройство» отработало и никого не
     пустило. Но отличить это по списку было нельзя: он показывал обе одинаково.
@@ -2360,6 +2366,9 @@ def create_app_link(telegram_id: int, max_uses: int = APP_LINK_DEFAULT_USES) -> 
     символов из 64-значного алфавита — это 2^72 вариантов при окне в неделю, лимите
     обменов и общем счётчике неудач на адрес; перебор дешевле не стал.
     """
+    import account_policy
+    if account_policy.strict():
+        raise PermissionError("legacy_cutover")
     max_uses = max(1, min(int(max_uses or APP_LINK_DEFAULT_USES), APP_LINK_MAX_USES))
     code = secrets.token_urlsafe(9)
     now = datetime.now()
@@ -2401,7 +2410,8 @@ def redeem_app_link(code: str, agent: str | None = None,
     короткое окно, малое число обменов и явный revoke_app_access из пульта. Прежние
     токены пользователя НЕ трогаем: несколько устройств/браузеров — норма.
     """
-    if not code:
+    import account_policy
+    if account_policy.strict() or not code:
         return None
     now = datetime.now()
     now_iso = now.isoformat(timespec="seconds")
@@ -2575,7 +2585,8 @@ def uid_for_app_token(token: str) -> int | None:
 
     Ищем по хэшу предъявленного. Сам хэш из копии базы входом не служит: его
     предъявят — сервер возьмёт хэш от хэша и ничего не найдёт."""
-    if not token:
+    import account_policy
+    if account_policy.strict() or not token:
         return None
     with connect() as conn:
         row = conn.execute(
@@ -2704,6 +2715,9 @@ def enroll_manager_device(code: str, device: str, *, keep_token: str | None = No
     """Потратить одно использование ссылки и выдать токен компьютеру.
     (uid, id устройства, сырой токен) или None — ссылка мертва (гонку за
     последнее использование решает условие в WHERE, как у redeem_app_link)."""
+    import account_policy
+    if account_policy.strict():
+        return None
     now_iso = datetime.now().isoformat(timespec="seconds")
     cutoff = (datetime.now() - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
     if enroll_token and not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", enroll_token):
@@ -2755,6 +2769,9 @@ def manager_device_check(token: str, ip: str | None = None) -> tuple[str, dict |
                            (key,)).fetchone()
         if row is None:
             return "unknown", None
+        import account_policy
+        if account_policy.strict() and not row["account_id"]:
+            return "legacy", None
         if row["revoked_at"]:
             conn.execute("DELETE FROM manager_devices WHERE id = ?", (row["id"],))
             conn.commit()
@@ -2777,6 +2794,9 @@ def enroll_agent_device(code: str, device: str, *, keep_token: str | None = None
     (employee, telegram_id, id устройства, сырой токен) или None — ссылка мертва.
     Привязку agent_bind не трогает: телефон продолжает работать, заявки не
     создаётся. Ссылка руководителя сюда не доходит — веб-слой отвернёт её раньше."""
+    import account_policy
+    if account_policy.strict():
+        return None
     now_iso = datetime.now().isoformat(timespec="seconds")
     cutoff = (datetime.now() - timedelta(days=APP_LINK_DAYS)).isoformat(timespec="seconds")
     if enroll_token and not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", enroll_token):
@@ -2840,14 +2860,22 @@ def agent_device_check(token: str, ip: str | None = None) -> tuple[str, dict | N
                            (key,)).fetchone()
         if row is None:
             return "unknown", None
-        binding = conn.execute(
-            "SELECT 1 FROM agent_bind WHERE telegram_id=? AND employee=? AND approved=1",
-            (row["telegram_id"], row["employee"])).fetchone()
-        if not binding and not row["revoked_at"]:
-            conn.execute("UPDATE agent_devices SET revoked_at=?, revoked_by='binding_changed' WHERE id=?",
-                         (now.isoformat(timespec="seconds"), row["id"]))
-            conn.commit()
-            return "revoked", None
+        import account_policy
+        if account_policy.strict() and not row["account_id"]:
+            return "legacy", None
+        # Аккаунт «логин-пароль» живёт по статусу аккаунта/устройства (гейт
+        # web._uid → accounts.device_gate_by_token); привязка agent_bind —
+        # семантика ссылочных входов. Ревью 15.10: bind-проверка убивала
+        # аккаунт-токены на первом же запросе (telegram_id=NULL не совпадает).
+        if not row["account_id"]:
+            binding = conn.execute(
+                "SELECT 1 FROM agent_bind WHERE telegram_id=? AND employee=? AND approved=1",
+                (row["telegram_id"], row["employee"])).fetchone()
+            if not binding and not row["revoked_at"]:
+                conn.execute("UPDATE agent_devices SET revoked_at=?, revoked_by='binding_changed' WHERE id=?",
+                             (now.isoformat(timespec="seconds"), row["id"]))
+                conn.commit()
+                return "revoked", None
         if row["revoked_at"]:
             conn.execute("DELETE FROM agent_devices WHERE id = ?", (row["id"],))
             conn.commit()
@@ -3411,9 +3439,12 @@ def manager_employees(telegram_id: int, *, is_owner: bool = False) -> list[str]:
     «никого», а не «всех», иначе роль не ограничивала бы ничего."""
     mgr = get_manager(telegram_id)
     if mgr is not None:
+        import staff_roster
+        with connect() as roster_conn:
+            roster_team = staff_roster.manager_employees(roster_conn, mgr)
         direction = (mgr.get("direction") or "").strip()
         if direction:                      # руководитель направления — список живой
-            return sorted(set(employees_by_direction(direction)) | set(soft_employees_by_direction(direction)))
+            return sorted(set(employees_by_direction(direction)) | set(soft_employees_by_direction(direction)) | set(roster_team))
         # Написание НЕ канонизируем: это список доступа, строка уезжает
         # клиенту как d.employee, и её смена стирала бы оффлайн-очередь.
         # К написанию реестра состав приводит только сводка
@@ -3422,7 +3453,7 @@ def manager_employees(telegram_id: int, *, is_owner: bool = False) -> list[str]:
         # Офис — живой состав, а не поимённый: в портфеле выездника из другого
         # города ничего нет, а руководителю офиса сотрудник добавляется в тот
         # же день, когда его заводит оператор.
-        allowed += employees_by_cities(mgr.get("office_cities"))
+        allowed += employees_by_cities(mgr.get("office_cities")) + roster_team
         return sorted(dict.fromkeys(allowed))
     if is_owner:
         return sorted({r["employee"] for r in employees_in_registry()} | set(soft_employees_by_direction("all")))
@@ -5533,6 +5564,10 @@ def enroll_admin_device(device_id: str, name: str = "", role: str = "operator") 
     now = datetime.now().isoformat(timespec="seconds")
     device_id = str(device_id or "").strip()[:128]
     role = _role(role)
+    if role == 'operator':
+        import account_policy
+        if account_policy.strict():
+            raise ValueError('Старая привязка Аналитика закрыта. Войдите в личный профиль в новой программе.')
     if not device_id:
         raise ValueError("device_id обязателен")
     # Спрашиваем ДО вставки: после неё устройство уже есть, и сверка «по факту
@@ -5580,7 +5615,7 @@ def admin_device_by_token(token: str, device_id: str | None = None) -> dict | No
     now = datetime.now().isoformat(timespec="seconds")
     with connect() as conn:
         row = conn.execute(
-            "SELECT id, device_id, name, created_at, last_seen, role FROM admin_devices "
+            "SELECT id, device_id, name, created_at, last_seen, role, account_approver FROM admin_devices "
             "WHERE token_hash=? AND revoked_at IS NULL", (digest,)).fetchone()
         if row is None:
             return None
@@ -5595,7 +5630,7 @@ def admin_device_by_token(token: str, device_id: str | None = None) -> dict | No
         conn.commit()
     return {"id": row["id"], "device_id": row["device_id"], "name": row["name"] or "",
             "created_at": row["created_at"], "last_seen": row["last_seen"] or "",
-            "role": row["role"] or "operator"}
+            "role": row["role"] or "operator", "account_approver": row["account_approver"] or ""}
 
 
 def list_admin_devices(include_revoked: bool = False) -> list[dict]:
@@ -5673,6 +5708,10 @@ def issue_enroll_code(name: str = "", role: str = "operator") -> dict:
     для пульта, привязал бы себе панель обслуживания сервера.
     """
     role = _role(role)
+    if role == 'operator':
+        import account_policy
+        if account_policy.strict():
+            raise ValueError('Старые коды Аналитика закрыты. Используйте личный профиль.')
     code = secrets.token_urlsafe(24)
     now = datetime.now().isoformat(timespec="seconds")
     with connect() as conn:
@@ -5707,6 +5746,10 @@ def redeem_enroll_code(code: str, device_id: str, name: str = "") -> dict:
             raise ValueError("код не найден")
         if row["used_at"]:
             raise ValueError("код уже использован")
+        if (row['role'] or 'operator') == 'operator':
+            import account_policy
+            if account_policy.strict(connection=conn):
+                raise ValueError('Старые коды Аналитика закрыты. Используйте личный профиль.')
         changed = conn.execute(
             "UPDATE admin_enroll_codes SET used_at=?, used_by_device=? "
             "WHERE id=? AND used_at IS NULL",
@@ -9266,7 +9309,7 @@ def import_grid(
                 # офисной правки (office_cells = 0 во всех расписках). Офис
                 # правил «Общий результат» в книгах, бот об этом не узнавал, и
                 # очередное обогащение возвращало туда своё значение — так
-                # пропали правки по 28 договорам Уткирова за 03.08.
+                # пропали правки по 28 договорам Примеров12а за 03.08.
                 #
                 # Замок, который не открывается никогда, — это стена.
                 anchor_ok = (

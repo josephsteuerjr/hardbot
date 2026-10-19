@@ -36,6 +36,11 @@ esac
 
 
 def _bash():
+    if os.name == "nt":
+        git = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe"
+        if git.is_file():
+            return str(git)
+        pytest.skip("Windows POSIX install test needs Git Bash, not the WSL bash.exe launcher")
     found = shutil.which("bash")
     if not found:
         pytest.skip("нет bash — скрипты установки здесь не запускаются")
@@ -67,6 +72,14 @@ def _fake_deploy(tmp_path):
     return deploy
 
 
+def _posix(path):
+    if os.name != "nt":
+        return str(path)
+    cygpath = Path(_bash()).parent.parent / "usr/bin/cygpath.exe"
+    return subprocess.run([str(cygpath), "-u", str(path)], check=True,
+                          text=True, capture_output=True).stdout.strip()
+
+
 def _run(bundle, tmp_path, *args):
     stub_dir = tmp_path / "stub"
     stub_dir.mkdir(exist_ok=True)
@@ -77,7 +90,7 @@ def _run(bundle, tmp_path, *args):
     # настройка «Харда»: в манифесте переменных ему делать нечего.
     child = dict(os.environ)
     child["PATH"] = str(stub_dir) + os.pathsep + child["PATH"]
-    child["HOME"] = str(tmp_path / "home")        # чтобы поиск не ушёл в чужой ~/hard
+    child["HOME"] = _posix(tmp_path / "home")     # чтобы поиск не ушёл в чужой ~/hard
     return subprocess.run(
         [_bash(), "./load.sh", "--no-verify", *args],
         cwd=bundle, env=child, stdin=subprocess.DEVNULL,
@@ -88,7 +101,7 @@ def _run(bundle, tmp_path, *args):
 def test_marker_is_set_when_deploy_is_given(tmp_path):
     bundle = _fake_bundle(tmp_path)
     deploy = _fake_deploy(tmp_path)
-    done = _run(bundle, tmp_path, "--deploy", str(deploy))
+    done = _run(bundle, tmp_path, "--deploy", _posix(deploy))
     assert done.returncode == 0, done.stdout + done.stderr
     marker = deploy / "offline" / "OFFLINE"
     assert marker.is_file(), "отметка офлайн-режима не поставлена:\n" + done.stdout + done.stderr

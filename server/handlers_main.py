@@ -24,6 +24,7 @@ from aiogram.types import (
 )
 
 import db
+import account_policy
 from config import ADMIN_ID, lang_of
 from i18n import t
 from keyboards import accept_group_kb
@@ -99,7 +100,7 @@ def _applink_text(uid: int, lang: str) -> str | None:
     """Короткое сообщение с одноразовой ссылкой входа в автономное приложение.
     Код — в #-фрагменте: не попадает в логи сервера."""
     url = os.getenv("MINIAPP_URL", "").strip().rstrip("/")
-    if not url or not _may_open_app(uid):
+    if account_policy.strict() or not url or not _may_open_app(uid):
         return None
     code = db.create_app_link(uid)
     db.audit_access(uid, "app_link_issued")
@@ -189,6 +190,9 @@ async def manager_request(message: Message):
 
 
 async def _manager_request(user, message):
+    if account_policy.strict():
+        await message.answer("Вход по Telegram закрыт: используйте аккаунт.")
+        return
     uid = user.id
     if db.is_manager(uid) or uid == ADMIN_ID:
         await message.answer("Роль руководителя у вас уже есть.")
@@ -215,7 +219,7 @@ async def _manager_request(user, message):
 
 @router.callback_query(F.data.startswith("mgrreq:"))
 async def manager_request_accept(cb: CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
+    if account_policy.strict() or cb.from_user.id != ADMIN_ID:
         await cb.answer("⛔", show_alert=True)
         return
     uid = int(cb.data.split(":", 1)[1])
@@ -228,7 +232,7 @@ async def manager_request_accept(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("mgrno:"))
 async def manager_request_reject(cb: CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
+    if account_policy.strict() or cb.from_user.id != ADMIN_ID:
         await cb.answer("⛔", show_alert=True)
         return
     uid = int(cb.data.split(":", 1)[1])
@@ -243,7 +247,7 @@ async def manager_request_reject(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("mgrdir:"))
 async def manager_request_direction(cb: CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
+    if account_policy.strict() or cb.from_user.id != ADMIN_ID:
         await cb.answer("⛔", show_alert=True)
         return
     code = cb.data.split(":", 1)[1]
@@ -280,7 +284,7 @@ async def manager_name_reply(message: Message):
     Хендлер молчит для всех, кроме владельца с открытой заявкой, и пропускает
     сообщение дальше: иначе он съел бы обычную переписку.
     """
-    if message.from_user.id != ADMIN_ID:
+    if account_policy.strict() or message.from_user.id != ADMIN_ID:
         raise SkipHandler
     raw = db.get_setting(_PENDING_MGR) or ""
     if not raw.isdigit():
@@ -296,7 +300,7 @@ async def manager_name_reply(message: Message):
 
 @router.callback_query(F.data.startswith("approvebind:"))
 async def approve_bind(cb: CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
+    if account_policy.strict() or cb.from_user.id != ADMIN_ID:
         await cb.answer("⛔", show_alert=True)
         return
     uid = int(cb.data.split(":", 1)[1])
@@ -314,7 +318,7 @@ async def approve_bind(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("rejectbind:"))
 async def reject_bind(cb: CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
+    if account_policy.strict() or cb.from_user.id != ADMIN_ID:
         await cb.answer("⛔", show_alert=True)
         return
     uid = int(cb.data.split(":", 1)[1])
@@ -354,7 +358,7 @@ async def bot_added(event: ChatMemberUpdated):
 
 @router.callback_query(F.data.startswith("acceptgroup:"))
 async def accept_group(cb: CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
+    if account_policy.strict() or cb.from_user.id != ADMIN_ID:
         await cb.answer("⛔", show_alert=True)
         return
     chat_id = cb.data.split(":", 1)[1]

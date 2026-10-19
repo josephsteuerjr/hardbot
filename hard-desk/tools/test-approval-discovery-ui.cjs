@@ -1,0 +1,27 @@
+const {app,BrowserWindow}=require('electron'),fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const base=path.resolve(__dirname,'../../_local/approval-discovery-qa');fs.mkdirSync(base,{recursive:true});app.setPath('userData',fs.mkdtempSync(path.join(base,'profile-')));app.disableHardwareAcceleration();
+app.whenReady().then(async()=>{let w;try{
+ w=new BrowserWindow({width:1450,height:1050,show:false,webPreferences:{preload:path.join(__dirname,'test-approval-discovery-preload.cjs'),contextIsolation:false,sandbox:false,offscreen:true,backgroundThrottling:false}});
+ await w.loadFile(path.join(__dirname,'../out/ui/index.html'),{query:{mode:'analyst'}});
+ const js=code=>w.webContents.executeJavaScript(code);
+ const until=async code=>{for(let i=0;i<100;i++){if(await js(code))return;await new Promise(r=>setTimeout(r,50));}throw Error('Timed out '+code+' '+await js('JSON.stringify(window.__errors)'));};
+ await until('!!document.querySelector("[data-go=accounts]")');await js('document.querySelector("[data-go=accounts]").click()');
+ await until('!!document.querySelector("[data-profile=synthetic-staff]")');
+ assert.match(await js('document.querySelector("#bulk").textContent'),/устройств ждут подтверждения: 2/);
+ assert.equal(await js('document.title'),'Взыскание СНГ — Аналитик');
+ await js('document.querySelector("[data-profile=synthetic-staff]").click()');
+ await until('!!document.querySelector("#acc .section")');
+ assert.match(await js('document.querySelector("#acc").textContent'),/Вход команды/);
+ assert.equal(await js('document.querySelectorAll("#acc [data-approve]").length'),0);
+ assert.equal(await js('document.querySelectorAll("#acc [data-open]").length'),0);
+ await js('document.querySelector("[data-profile=synthetic-manager]").click()');await until('!!document.querySelector("#acc [data-approve]")');
+ assert.equal(await js('document.querySelector("#acc [data-approve]").textContent'),'Подтвердить телефон');
+ await new Promise(r=>setTimeout(r,350));fs.writeFileSync(path.join(base,'analyst-approval.png'),(await w.webContents.capturePage()).toPNG());
+ await js('document.querySelector("#acc [data-approve]").click()');await until('!!document.querySelector("#ask [data-yes]")');
+ assert.equal(await js('window.__access.calls.some(c=>c.body?.path==="/admin/account_approve.json")'),false);
+ await js('document.querySelector("#ask [data-no]").click()');
+ assert.equal(await js('window.__access.calls.some(c=>c.body?.path==="/admin/account_approve.json")'),false);
+ assert.equal(await js('window.__errors.length'),0);
+ fs.writeFileSync(path.join(base,'RESULTS.json'),JSON.stringify({pendingCount:true,explicitProfileAction:true,staffDirectedToManager:true,managerDeviceAction:true,cancelSendsNothing:true,productTitle:true}));
+ console.log('Analyst approval UI: pending count, explicit profile action, staff/manager boundary and title PASS');app.exit(0);
+}catch(e){console.error(e);app.exit(1);}finally{if(w&&!w.isDestroyed())w.destroy();}}).catch(e=>{console.error(e);app.exit(1)});

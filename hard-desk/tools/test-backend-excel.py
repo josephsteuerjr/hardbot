@@ -137,6 +137,9 @@ try:
     keys = [item['key'] for item in preview['matched']]
     check = job('/enr/check', {'keys':keys})
     assert not check['conflicts'] and not check['office'], check
+    confirmation=request('/enr/confirm',{'keys':keys})
+    assert 'Проверка конфликтов для выбранного набора выполнена.' in confirmation['text'],confirmation
+    assert 'не делалась' not in confirmation['text'],confirmation
     applied = job('/enr/apply', {'keys':keys})
     assert not applied['ledger_error'], applied
     if soft_payment:

@@ -4,3 +4,5 @@
 *.jpg binary
 *.xlsx binary
 *.xlsb binary
+# Byte-approved protocol schema: preserve its exact approved serialization.
+data_exchange_contract.json -text

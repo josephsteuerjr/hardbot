@@ -129,7 +129,7 @@ def test_replace_first_sends_the_old_queue_with_the_old_login():
       const p = await openPage(w, {url: HOST + "#t=" + B + "&fresh=1", server: srv});
       await p.booted();
       // Выезд, сделанный уже после загрузки: он в очереди и ещё не ушёл.
-      await p.run(`IDB.put("queue", {op_id: "op-late", kind: "save", rep: "R1",
+      await p.run(`enqueue({op_id: "op-late", kind: "save", rep: "R1",
                    values: {call_status: "x"}, input_keys: ["call_status"], at: 5, form_version: 3})`);
       await p.run("swapYes()");
       await settle(w);
@@ -192,8 +192,8 @@ def test_link_opened_offline_is_asked_about_once_the_login_answers():
     задаёт фоновая проверка, как только сервер подтвердил старый вход; уже
     открытый вопрос повторная проверка не сбивает."""
     out = _scenario(r"""
-      const SNAP = {lang: "ru", meta: {}, persons: PERSONS, kind: "agent", employee: "Первый П.",
-                    roles: null, at: Date.now()};
+      const SNAP = {lang: "ru", meta: {}, persons: PERSONS, kind: "agent", uid: 1,
+                    employee: "Первый П.", roles: null, at: Date.now(), _credential: "token:"+A};
       const srv = fakeServer({tokens: {[A]: "neterr", [B]: OTHER}});
       const w = newWorld({ls: {app_token: A}, idb: {kv: {bootstrap: SNAP}}});
       const p = await openPage(w, {url: HOST + "#t=" + B + "&fresh=1", server: srv});
@@ -289,9 +289,9 @@ def test_manager_is_named_by_role_in_the_dialog():
     assert "Сейчас на этом телефоне вход: <b>руководитель · Сотрудник С.</b>" in out["sheet"]
 
 
-def test_inside_telegram_nothing_changes():
-    """Внутри Телеграма входом служит initData, токен в запросы не ходит: там
-    поведение прежнее, и ни диалога, ни «Выйти»."""
+def test_inside_telegram_account_bearer_keeps_swap_and_logout():
+    """Подписанный Telegram-контекст не даёт без вопроса заменить аккаунтный
+    токен, а для парольного входа кнопка выхода остаётся доступна."""
     out = _scenario(r"""
       const tg = {WebApp: {initData: "tg-init", initDataUnsafe: {user: {id: 5}}, viewportStableHeight: 700,
                            ready() {}, expand() {}, onEvent() {}}};
@@ -303,7 +303,7 @@ def test_inside_telegram_nothing_changes():
       out.langs = p.html("langs");
     """)
     assert out["token"] == B and out["pending"] is None and out["sheet"] is None
-    assert "askLogout" not in out["langs"]
+    assert "askLogout" in out["langs"]
 
 
 def test_dialog_texts_exist_in_all_three_languages():

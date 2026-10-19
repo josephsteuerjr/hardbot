@@ -31,7 +31,7 @@ export function startUpdates(onState: (s: UpdateState) => void, log: (s: string)
   updater.on("download-progress", p => tell({ phase: "downloading", version: signed?.version, percent: Math.round(p.percent), text: "Загрузка обновления" }));
   updater.on("update-downloaded", e => {
     downloaded = e.downloadedFile;
-    tell({ phase: "ready", version: e.version, text: "Обновление готово. Сохраните работу и нажмите «Установить»." });
+    tell({ phase: "ready", version: e.version, text: "Обновление загружено. Сохраните форму и нажмите «Перезагрузить для установки обновления»." });
   });
   tell({ phase: "idle", text: "Обновления проверяются автоматически" });
   const check = () => void checkUpdates().catch(() => log("Обновление: проверка не удалась; текущая версия сохранена"));

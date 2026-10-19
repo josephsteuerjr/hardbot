@@ -3,8 +3,7 @@
 # восстанавливать не из чего — они не хранят данных, их просто ставят заново).
 #
 #   cd deploy/units/core
-#   ./restore.sh backups/20260902T120000            # только база
-#   ./restore.sh backups/20260902T120000 --photos   # база + фотографии из зеркала
+#   ./restore.sh backups/20260902T120000            # полный проверенный снимок
 #   добавьте --yes, чтобы не спрашивать подтверждения
 #
 # Приложение останавливается на время замены базы и запускается снова.
@@ -37,9 +36,15 @@ db_file="$src/hardbot.db"
 [ -f "$db_file" ] || die "в «$src» нет файла hardbot.db.
 Что сделать: укажите каталог копии целиком, например ./restore.sh backups/20260902T120000 (список: ls backups/)."
 [ "$(head -c 15 "$db_file")" = "SQLite format 3" ] || die "$db_file — не база SQLite"
-if [ "$photos" -eq 1 ] && [ ! -d backups/photos ]; then
-  die "зеркала фотографий backups/photos нет — нечего восстанавливать"
-fi
+need_cmd sha256sum "нужен coreutils для проверки полной копии"
+[ -f "$src/SHA256SUMS" ] && [ ! -L "$src/SHA256SUMS" ] \
+  || die "копия без SHA256SUMS неполна (старый формат не включал receipts/audit-spool); восстановление остановлено. Сделайте новый полный backup или используйте проверенный recovery_bundle в новом пустом каталоге"
+[ -z "$(find "$src" -type l -print -quit)" ] || die "в копии есть символическая ссылка"
+( cd "$src" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum ) \
+  | cmp -s "$src/SHA256SUMS" - \
+  || die "состав или SHA256 файлов копии изменился; data/ не тронут"
+[ "$photos" -eq 0 ] || [ -d "$src/photos" ] \
+  || die "в этой копии нет фотографий; --photos не может их восстановить"
 
 # Симлинк на месте data/, самой базы или каталога фотографий увёл бы
 # восстановление за пределы каталога единицы: том с данными пишет и контейнер, а
@@ -47,7 +52,7 @@ fi
 # он заставил бы restore СКОПИРОВАТЬ секрет в data/ (контейнер его прочитает) или
 # ЗАПИСАТЬ базу поверх него. Такое не «чиним» — это скрыло бы подмену, — а честно
 # отказываем: root на хосте не идёт по ссылке, которую подложил контейнер.
-for suspect in data data/hardbot.db data/hardbot.db-wal data/hardbot.db-shm data/hardbot.db-journal data/photos; do
+for suspect in data data/hardbot.db data/hardbot.db-wal data/hardbot.db-shm data/hardbot.db-journal data/photos data/receipts data/audit-spool.sqlite3 data/audit-spool.sqlite3-wal data/audit-spool.sqlite3-shm; do
   if [ -L "$suspect" ]; then
     die "«$suspect» — символьная ссылка, а должен быть обычный файл или каталог.
 Это признак подмены: каталог data/ пишет и контейнер. Восстановление остановлено.
@@ -57,7 +62,9 @@ done
 
 say "Будет восстановлено:"
 say "  база:        $db_file ($(human_size "$db_file"))"
-[ "$photos" -eq 1 ] && say "  фотографии:  backups/photos → data/photos ($(human_size backups/photos))"
+[ -d "$src/photos" ] && say "  фотографии: $src/photos → data/photos"
+[ -d "$src/receipts" ] && say "  чеки: $src/receipts → data/receipts"
+[ -f "$src/audit-spool.sqlite3" ] && say "  audit-spool: $src/audit-spool.sqlite3"
 say "  текущая база отложится в data/hardbot.db.before-restore-*"
 if [ "$yes" -ne 1 ]; then
   printf 'Продолжить? [y/N] '
@@ -65,10 +72,32 @@ if [ "$yes" -ne 1 ]; then
   case "$answer" in y|Y|д|Д) ;; *) say "Отменено"; exit 0 ;; esac
 fi
 
+# Всё входящее копируем в staging ДО остановки/перемещения текущих файлов.
+# На той же файловой системе публикация отдельных деревьев идёт через rename.
+stage="data/.restore-stage-$$"
+[ ! -e "$stage" ] || die "временный каталог $stage уже существует"
+mkdir "$stage"
+cp "$db_file" "$stage/hardbot.db"
+for asset in photos receipts audit-spool.sqlite3; do
+  [ -e "$src/$asset" ] && cp -a "$src/$asset" "$stage/$asset"
+done
+( cd "$stage" && find . -type f -print0 | sort -z | xargs -0 sha256sum ) \
+  | cmp -s "$src/SHA256SUMS" - \
+  || { rm -rf "$stage"; die "staging не совпал с архивом; data/ не тронут"; }
+
 say "Останавливаю приложение…"
 compose stop app
 
 stamp="$(date +%Y%m%dT%H%M%S)"
+aside="backups/before-restore-$stamp-$$"
+mkdir "$aside"
+mkdir "$aside/raw-db"
+# Before opening SQLite again preserve the exact main DB and any hot sidecars.
+# The consistent rollback snapshot below is additional protection, not a
+# replacement for the original WAL bytes after an interrupted restore.
+for asset in hardbot.db hardbot.db-wal hardbot.db-shm hardbot.db-journal; do
+  [ -e "data/$asset" ] && cp -a "data/$asset" "$aside/raw-db/$asset"
+done
 if [ -f data/hardbot.db ]; then
   # SIGTERM/аварийная остановка не гарантируют checkpoint. Простое cp главного
   # файла с последующим удалением -wal теряло последние подтверждённые записи.
@@ -91,31 +120,59 @@ PY
   compose run --rm --no-deps -T app python -c "$SNAPSHOT" "$stamp" || die "Согласованная копия текущей БД не снята. Замена отменена; исходные база и WAL сохранены."
   ok "текущая база отложена: data/hardbot.db.before-restore-$stamp"
 fi
-rm -f data/hardbot.db-wal data/hardbot.db-shm data/hardbot.db-journal
-# --remove-destination: сначала снять существующий data/hardbot.db, потом создать
-# новый обычный файл. Без него cp пишет ПО ссылке, если бы место базы заняли
-# симлинком (его же ловит проверка -L выше — это второй рубеж).
-cp --remove-destination "$db_file" data/hardbot.db
-ok "база восстановлена"
-
-if [ "$photos" -eq 1 ]; then
-  mkdir -p data/photos
-  if command -v rsync >/dev/null 2>&1; then
-    rsync -a backups/photos/ data/photos/
-  else
-    cp -a backups/photos/. data/photos/
+# On an ordinary write/start error, restore the complete original generation.
+# A SIGKILL/power loss cannot run traps: the exact old bytes remain in aside,
+# and the app must not be restarted until an operator reconciles the two sets.
+publish_started=0
+published=0
+restore_on_error() {
+  [ "$publish_started" -eq 1 ] && [ "$published" -eq 0 ] || return 0
+  set +e
+  compose stop app >/dev/null 2>&1
+  mkdir -p "$aside/failed-publish"
+  for asset in hardbot.db hardbot.db-wal hardbot.db-shm hardbot.db-journal receipts audit-spool.sqlite3 audit-spool.sqlite3-wal audit-spool.sqlite3-shm; do
+    # An old member may not yet have moved when the failure happened. Never
+    # mistake that still-live member for a newly published one.
+    if [ -e "$aside/$asset" ] || [ -e "$src/$asset" ] || [[ "$asset" = *-wal || "$asset" = *-shm || "$asset" = *-journal ]]; then
+      [ -e "data/$asset" ] && mv "data/$asset" "$aside/failed-publish/$asset"
+      [ -e "$aside/$asset" ] && mv "$aside/$asset" "data/$asset"
+    fi
+  done
+  if [ -e "$aside/photos" ] || [ -d "$src/photos" ]; then
+    [ -e data/photos ] && mv data/photos "$aside/failed-publish/photos"
+    [ -e "$aside/photos" ] && mv "$aside/photos" data/photos
   fi
-  ok "фотографии восстановлены"
+  warn "публикация не завершилась; восстановлен прежний комплект из $aside. Проверьте его и запустите app вручную"
+}
+trap restore_on_error EXIT
+publish_started=1
+for asset in hardbot.db hardbot.db-wal hardbot.db-shm hardbot.db-journal receipts audit-spool.sqlite3 audit-spool.sqlite3-wal audit-spool.sqlite3-shm; do
+  [ -e "data/$asset" ] && mv "data/$asset" "$aside/$asset"
+done
+# --db-only update snapshots deliberately omit photos: leave the existing tree
+# untouched, never detach it while rolling back only the database.
+if [ -d "$src/photos" ] && [ -e data/photos ]; then
+  mv data/photos "$aside/photos"
 fi
+# Incomplete publish leaves prior exact DB+WAL+assets recoverable as one set
+# in aside; never delete an old WAL before its matching DB is secured.
+for asset in hardbot.db photos receipts audit-spool.sqlite3; do
+  [ -e "$stage/$asset" ] && mv "$stage/$asset" "data/$asset"
+done
+rmdir "$stage"
+ok "база восстановлена"
 
 say "Запускаю приложение…"
 compose start app
 if wait_healthy app 180; then
   ok "app: $(health_of app)"
+  published=1
 else
   compose logs --tail=40 app || true
   die "приложение не поднялось после восстановления.
 Что сделать: прежняя база не потеряна — она рядом, data/hardbot.db.before-restore-$stamp.
-Вернуть её: cp data/hardbot.db.before-restore-$stamp data/hardbot.db && docker compose start app"
+Остановите app; отложите НЕУДАЧНЫЕ data/hardbot.db и активы, верните ВМЕСТЕ файлы
+из $aside (включая -wal/-shm, receipts, audit-spool), затем запустите app.
+Нельзя копировать одну старую БД поверх WAL нового запуска."
 fi
 say "Готово"

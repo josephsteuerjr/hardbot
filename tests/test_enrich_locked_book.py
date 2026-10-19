@@ -1,6 +1,6 @@
 """Занятая книга: отказ до копии и до первой записи.
 
-10.09.2026. Обогащение Бозорова упало с «backup/pre/post contract нарушен».
+10.09.2026. Обогащение Примеров3а упало с «backup/pre/post contract нарушен».
 Разбор: книга была открыта у сотрудника с 10:56, Excel отдал её пульту только
 для чтения, 66 ячеек «записались» в память, а `wb.save()` при подавленных
 диалогах молча не сделал ничего — файл на диске остался прежним. Контракт
@@ -127,9 +127,9 @@ def _grid():
 
 def _book(tmp_path: Path) -> Path:
     """Живой файл в маске папок сотрудника: <город>/<ФИО>/<ФИО>.xlsb."""
-    folder = tmp_path / "Худжанд" / "Бозоров Мухриддин"
+    folder = tmp_path / "Худжанд" / "Примеров3 Сотрудник3"
     folder.mkdir(parents=True)
-    path = folder / "Бозоров Мухриддин.xlsb"
+    path = folder / "Примеров3 Сотрудник3.xlsb"
     path.write_bytes(b"\x00livebook")
     return path
 
@@ -144,7 +144,7 @@ def _owner_blob(name: str) -> bytes:
 # --- 1. Книга открыта у другого человека -------------------------------------
 
 def test_read_only_book_is_refused_before_the_backup_and_the_first_write(tmp_path):
-    """Случай Бозорова: до копии и до записи дело не доходит вообще."""
+    """Случай Примеров3а: до копии и до записи дело не доходит вообще."""
     path, root = _book(tmp_path), tmp_path / "копии"
     before = path.read_bytes()
     app = _App(_grid(), read_only=True)
@@ -160,10 +160,10 @@ def test_read_only_book_is_refused_before_the_backup_and_the_first_write(tmp_pat
 
 def test_the_refusal_names_who_holds_the_book(tmp_path):
     path = _book(tmp_path)
-    enrich.excel_owner_file(path).write_bytes(_owner_blob("Аличон Махмадиев"))
+    enrich.excel_owner_file(path).write_bytes(_owner_blob("Учебный Профиль 1"))
     app = _App(_grid(), read_only=True)
 
-    with pytest.raises(RuntimeError, match="Аличон Махмадиев"):
+    with pytest.raises(RuntimeError, match="Учебный Профиль 1"):
         enrich._enrich_with_evidence(app, path, FIELDS, ROWS)
 
 
@@ -204,8 +204,8 @@ def test_a_free_book_is_still_written_and_verified(tmp_path):
 # --- 3. Кто держит книгу -----------------------------------------------------
 
 def test_owner_name_survives_cyrillic():
-    assert enrich.parse_lock_owner(_owner_blob("Аличон Махмадиев")) == \
-        "Аличон Махмадиев"
+    assert enrich.parse_lock_owner(_owner_blob("Учебный Профиль 1")) == \
+        "Учебный Профиль 1"
     assert enrich.parse_lock_owner(_owner_blob("Alichon Makhmadiev")) == \
         "Alichon Makhmadiev"
     assert enrich.parse_lock_owner(b"") == ""
@@ -236,7 +236,7 @@ def test_a_really_locked_book_is_busy_with_a_name(tmp_path):
     from ctypes import wintypes
 
     path = _book(tmp_path)
-    enrich.excel_owner_file(path).write_bytes(_owner_blob("Аличон Махмадиев"))
+    enrich.excel_owner_file(path).write_bytes(_owner_blob("Учебный Профиль 1"))
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateFileW.restype = wintypes.HANDLE
     kernel32.CreateFileW.argtypes = [
@@ -246,8 +246,8 @@ def test_a_really_locked_book_is_busy_with_a_name(tmp_path):
     handle = kernel32.CreateFileW(str(path), 0x80000000, 0x1, None, 3, 0x80, None)
     assert handle not in (None, 0, ctypes.c_void_p(-1).value)
     try:
-        assert enrich.workbook_busy_owner(path) == "Аличон Махмадиев"
-        with pytest.raises(RuntimeError, match="Аличон Махмадиев"):
+        assert enrich.workbook_busy_owner(path) == "Учебный Профиль 1"
+        with pytest.raises(RuntimeError, match="Учебный Профиль 1"):
             enrich.assert_writable(path)
     finally:
         kernel32.CloseHandle(handle)

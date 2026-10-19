@@ -14,7 +14,21 @@
  * после этого не нужно: открытие по сети кладёт оболочку обратно (network-first ниже),
  * свои ассеты — при первом запросе (caches.open создаёт кэш заново).
  */
-const CACHE = "hard-shell-v85";
+const CACHE = "hard-shell-v101";
+let cacheEnabled=true,cacheEpoch=0;
+const cacheWrites=new Set();
+function remember(key,response){
+  if(!cacheEnabled)return Promise.resolve();
+  const epoch=cacheEpoch;
+  const write=caches.open(CACHE).then(c=>{if(cacheEnabled&&epoch===cacheEpoch)return c.put(key,response);}).catch(()=>{});
+  cacheWrites.add(write);write.finally(()=>cacheWrites.delete(write));return write;
+}
+self.addEventListener("message",event=>{
+  if(event.data?.type==="ERASE_PROFILE"){
+    cacheEnabled=false;cacheEpoch++;
+    event.waitUntil(Promise.all([...cacheWrites]).then(()=>event.ports[0]?.postMessage("erased")));
+  }else if(event.data?.type==="PROFILE_ACTIVE"){cacheEnabled=true;}
+});
 const PRECACHE = [
   "/",
   "/vendor/telegram-web-app.js",
@@ -60,6 +74,8 @@ self.addEventListener("fetch", (e) => {
   // частью shell-кэша. Иначе именно старая PWA могла бы "подтвердить" себе
   // старую версию из собственного cache-first.
   if (sameOrigin && url.pathname === "/version.json") return;
+  // A credential-bearing manifest must never become a persistent cache key.
+  if(sameOrigin&&url.pathname==="/manifest.webmanifest"&&url.searchParams.has("t"))return;
 
   // Данные, админ-API и тайлы — всегда из сети (оффлайн-данные держит IndexedDB миниаппа).
   if (sameOrigin && (url.pathname.startsWith("/api/") ||
@@ -72,7 +88,7 @@ self.addEventListener("fetch", (e) => {
   if (req.mode === "navigate") {
     e.respondWith(
       fetch(req, {cache: "no-store"}).then((resp) => {
-        if (resp && resp.ok) { const copy = resp.clone(); caches.open(CACHE).then((c) => c.put("/", copy)); }
+        if (resp && resp.ok) remember("/",resp.clone());
         return resp;
       }).catch(() => caches.match("/"))
     );
@@ -84,7 +100,7 @@ self.addEventListener("fetch", (e) => {
     e.respondWith(
       caches.match(req).then((hit) => {
         const net = fetch(req).then((resp) => {
-          if (resp && resp.ok) caches.open(CACHE).then((c) => c.put(req, resp.clone()));
+          if (resp && resp.ok) remember(req,resp.clone());
           return resp;
         }).catch(() => hit);
         return hit || net;
@@ -98,7 +114,7 @@ self.addEventListener("fetch", (e) => {
   e.respondWith(
     caches.match(req).then((hit) =>
       hit || fetch(req).then((resp) => {
-        caches.open(CACHE).then((c) => c.put(req, resp.clone())).catch(() => {});
+        remember(req,resp.clone());
         return resp;
       }).catch(() => hit)
     )

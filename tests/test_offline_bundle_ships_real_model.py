@@ -69,6 +69,11 @@ BAKED_NONE = "|0|0|манифеста нет"
 
 
 def _bash():
+    if os.name == "nt":
+        git = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe"
+        if git.is_file():
+            return str(git)
+        pytest.skip("Windows POSIX build test needs Git Bash, not the WSL bash.exe launcher")
     found = shutil.which("bash")
     if not found:
         pytest.skip("нет bash — скрипты сборки здесь не запускаются")
@@ -82,7 +87,8 @@ def _posix(path):
     выглядят как /c/Users/…. Тест не должен подсовывать ему форму «C:\\…»,
     которой в его мире не бывает.
     """
-    cygpath = shutil.which("cygpath")
+    cygpath = (str(Path(_bash()).parent.parent / "usr/bin/cygpath.exe")
+               if os.name == "nt" else shutil.which("cygpath"))
     if cygpath:
         return subprocess.run([cygpath, "-u", str(path)], capture_output=True,
                               text=True, check=True).stdout.strip()
@@ -101,7 +107,7 @@ def _run(tmp_path, *args, download="good", baked=BAKED_OK):
     child["STUB_BAKED"] = baked
     out = tmp_path / "out"
     done = subprocess.run(
-        [_bash(), str(BUNDLE), "--version", "test", "--out", _posix(out), *args],
+        [_bash(), _posix(BUNDLE), "--version", "test", "--out", _posix(out), *args],
         cwd=str(ROOT / "deploy" / "offline"), env=child, stdin=subprocess.DEVNULL,
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600,
     )

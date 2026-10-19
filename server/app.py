@@ -301,7 +301,15 @@ async def _daily_loop(bot: Bot, kind: str, enabled_key: str, time_key: str,
             now = datetime.now(MSK)
             window = (now.hour, now.minute) >= (th, tm)
             if window and db.get_setting(last_run_key) != today:
-                if not db.push_enabled(enabled_key):
+                import account_policy
+                if account_policy.strict():
+                    # Telegram identities are not approved account/device credentials.
+                    # Record one explicit skip per day instead of silently leaving
+                    # the scheduled delivery looking overdue forever.
+                    if db.get_setting(off_noted_key) != today:
+                        db.log_push(kind, db.PUSH_SKIP_DISABLED, note="account_cutover")
+                        db.set_setting(off_noted_key, today)
+                elif not db.push_enabled(enabled_key):
                     # Инструментируем выключенность РОВНО раз в сутки; last_run
                     # не ставим — включение в середине дня обязано разослать.
                     if db.get_setting(off_noted_key) != today:
@@ -381,7 +389,10 @@ async def _wait_forever() -> None:
 
 
 async def main():
+    import account_policy
+    account_policy.cutover_at()  # invalid operator configuration must fail startup
     db.init_db()
+    account_policy.activate()  # durable one-way activation across restart
     if ADMIN_ID:
         db.ensure_owner(ADMIN_ID)
     token = bot_token()

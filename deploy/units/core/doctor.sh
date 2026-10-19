@@ -120,10 +120,49 @@ if [ -z "$(env_get ADMIN_API_KEY)" ]; then
   problem "ADMIN_API_KEY пуст — пульт аналитика не подключится"
   hint "восстановить: ./install.sh (он сгенерирует ключ) и затем вписать этот ключ в пульт"
 fi
-if [ -z "$(env_get ADMIN_ID)" ]; then
-  problem "ADMIN_ID пуст — у системы нет владельца: некому подтверждать доступ сотрудникам и некому получать сводки"
-  hint "узнать свой id: напишите боту команду /whoami; затем впишите ADMIN_ID в .env и ./update.sh"
-fi
+owner_state="$(compose exec -T app python -B - <<'PY' 2>/dev/null
+import sqlite3
+
+c = sqlite3.connect('file:/data/hardbot.db?mode=ro', uri=True)
+tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+latched = False
+if 'settings' in tables:
+    row = c.execute("SELECT value FROM settings WHERE key='account_cutover_activated_at_utc'").fetchone()
+    latched = bool(row and row[0])
+state = 'missing' if latched else 'legacy'
+needed = {'accounts', 'account_admin_grants', 'account_devices', 'manager_devices', 'account_token_sessions'}
+if needed <= tables:
+    owner = c.execute("SELECT a.id FROM accounts a JOIN account_admin_grants g ON g.account_id=a.id "
+                      "WHERE a.role='analyst' AND a.status='active' AND a.must_change_password=0 "
+                      "AND g.granted_by='ssh-root' AND length(g.principal)>0 LIMIT 1").fetchone()
+    if owner:
+        pc = c.execute("SELECT 1 FROM account_devices d JOIN account_token_sessions s ON s.device_id=d.id "
+                       "JOIN manager_devices m ON m.id=s.token_id AND s.token_table='manager_devices' "
+                       "WHERE d.account_id=? AND d.kind='desktop' AND d.status='active' "
+                       "AND d.token_table='manager_devices' AND length(d.public_key)>0 "
+                       "AND m.account_id=d.account_id AND m.revoked_at IS NULL LIMIT 1", owner).fetchone()
+        state = 'ready' if pc else 'needs_pc'
+c.close()
+print(state)
+PY
+)" || owner_state=unavailable
+case "$owner_state" in
+  ready) ok "владелец: активный личный профиль и подтверждённый ПК; Telegram ADMIN_ID для этого входа не требуется" ;;
+  needs_pc)
+    problem "профиль владельца создан, но активный подтверждённый ПК не найден"
+    hint "войдите в «Взыскание СНГ — Аналитик» со своим логином и паролем; восстановление доступно в «Подключении» через root или sudo" ;;
+  missing)
+    problem "после перехода на личные профили активный профиль владельца не найден"
+    hint "создайте или восстановите профиль в «Подключении» Аналитика после проверки IP и root/sudo; не открывайте прежние способы входа" ;;
+  legacy)
+    if [ -z "$(env_get ADMIN_ID)" ]; then
+      problem "владелец ещё не настроен"
+      hint "создайте первичный профиль в «Подключении» Аналитика после проверки IP и root/sudo"
+    fi ;;
+  *)
+    problem "личный профиль владельца не удалось проверить"
+    hint "сначала проверьте доступность приложения и базы; затем повторите диагностику" ;;
+esac
 url="$(env_get MINIAPP_URL)"
 case "$url" in
   https://*) ;;

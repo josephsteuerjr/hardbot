@@ -388,6 +388,10 @@ table.grid tfoot td { font-weight: 500; border-bottom: 0; border-top: var(--lw) 
 }
 .notice.err { border-color: var(--err); }
 .notice .grow { flex: 1; }
+.phone-request-receipt { display: block; overflow-wrap: anywhere; }
+.phone-request-receipt strong { display: block; margin-bottom: 6px; }
+.phone-request-receipt .mono { font-weight: 700; user-select: text; }
+.phone-request-receipt p { margin: 8px 0 0; }
 .skeleton { height: 14px; border-radius: 7px; background: var(--line); margin: 12px 0; animation: pulse 1.4s ease-in-out infinite; }
 
 /* Вход: одна колонка по центру, почерк. */

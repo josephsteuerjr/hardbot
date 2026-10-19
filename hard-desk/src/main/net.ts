@@ -5,18 +5,19 @@
 import { app, session, type Session } from "electron";
 import { readFileSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
-import { createHash, randomBytes } from "node:crypto";
-import { preparedEnroll, readDraft, writeDraft } from "./store";
+import { createHash, randomBytes, sign } from "node:crypto";
+import { preparedEnroll, readDraft, writeDraft, pcIdentity } from "./store";
 import { cacheGeneration, cacheGet, cachePut, cacheRemove, clearCache, readFieldToken, readSettings, readToken, wipe, wipeField, writeFieldToken, writeSettings, writeToken } from "./store";
 import { clearCallQueue, readCallQueue, writeCallQueue, type CallQueue } from "./store";
-import { splitLink } from "./link";
+import { serverOrigin, splitLink } from "./link";
 import { fetchBuffered } from "./transport";
+import { PRODUCT_ID } from './product';
 export { splitLink } from "./link";
 
 export const OFFLINE = "Нет связи с сервером «Хард». Как только интернет появится, пульт догонит сам.";
 export const CERT_BAD = "Сертификат сервера не прошёл проверку — эта сеть подменяет соединение. " +
   "Пульт ничего не отправил. Подключитесь к другой сети.";
-export const REVOKED = "Доступ этого компьютера отозван. Попросите у аналитика новую ссылку входа.";
+export const REVOKED = "Доступ этого компьютера отозван. Войдите в личный профиль и запросите подтверждение устройства.";
 
 export interface ApiResult {
   ok: boolean;
@@ -37,6 +38,8 @@ function net(): Session {
 }
 
 function request(url: string, init: RequestInit, timeoutMs = 30000): Promise<Response> {
+  const headers = { ...(init.headers as Record<string,string> || {}), "X-Client-Version": app.getVersion?.() || "3.2.0", 'X-Work-Product': PRODUCT_ID || 'hard' };
+  init = { ...init, headers };
   return fetchBuffered((target, options) => net().fetch(target, options), url, init, timeoutMs);
 }
 
@@ -110,7 +113,20 @@ export async function call(method: string, path: string, query?: Record<string, 
   if (path === "/api/local/preferences") {
     return localPreferences(method, query, body, "manager\n" + cacheIdentity(server, token));
   }
-  if (!/^\/api\/(manager|control)\//.test(path)) return { ok: false, status: 0, kind: "server", text: "запрещённый путь" };
+  if (path === "/api/manager/account_phone_request") {
+    // A legacy link is still a valid manager bearer in compatibility mode;
+    // never offer this one-time code request from that local session. Server
+    // independently checks account-linked, active principal and team scope.
+    const device = readSettings().device;
+    const id = (body as { device_id?: unknown } | null)?.device_id;
+    if (method !== "POST" || !device?.username || !["manager", "full"].includes(device.role || "") ||
+        !Number.isSafeInteger(id) || Number(id) <= 0 || !body || Object.keys(body).length !== 1)
+      return { ok: false, status: 403, kind: "forbidden", text: "Нужен подтверждённый вход руководителя по учётке и ожидающий телефон своей команды." };
+  }
+  // Only self-service account paths are admitted; /admin remains a separate device authority.
+  const accountPath = (method === "POST" && path === "/api/account/password") ||
+    (method === "GET" && path === "/api/account/sessions");
+  if (!accountPath && !/^\/api\/(manager|control)\//.test(path)) return { ok: false, status: 0, kind: "server", text: "запрещённый путь" };
   const url = server + path + qs(query);
   const key = cacheIdentity(server, token) + " " + method + " " + path + qs(query);
   let generation = cacheGeneration();
@@ -136,6 +152,7 @@ export async function call(method: string, path: string, query?: Record<string, 
   if (res.status === 401) {
     const code = await errorCode(res);
     if (!current()) return changedAuthority();
+    if (accountPath) return { ok: false, status: 401, kind: "forbidden", text: "У этого входа нет подтверждённой учётки или сеанс истёк." };
     if (code === "device_revoked" || code === "device_unknown") {
       wipe();
       onRevoked();
@@ -147,6 +164,8 @@ export async function call(method: string, path: string, query?: Record<string, 
     const code = await errorCode(res);
     if (!current()) return changedAuthority();
     clearCache(); // a known permission denial cannot become an offline grant
+    if (code === "account_pending" || code === "password_change_required")
+      return { ok: false, status: 403, kind: "forbidden", text: code };
     const text = code === "read_only" ? "У безопасника доступ только на чтение."
       : code === "no_control" ? "Раздел «Контроль» — только для безопасности."
       : code && code !== "not a manager" && !code.startsWith("<") ? code
@@ -235,6 +254,46 @@ export async function logout(): Promise<void> {
   if (readSettings().server === server && readToken() === token) wipe();
 }
 
+/** Password entry for a manager/security/full account. It uses the manager
+ * device store, never touches the employee token or an offline call queue.
+ * The analyst /admin device is a separate credential, not this token. */
+export async function accountManagerLogin(server: string, username: string, password: string): Promise<ApiResult> {
+  const base = serverOrigin(String(server || "").trim() || readSettings().server || "");
+  if (!base) return { ok: false, status: 0, kind: "nolink", text: "Укажите адрес сервера из инструкции." };
+  const previous = readSettings(), previousToken = readToken(), generation = cacheGeneration();
+  const current = () => readSettings().server === previous.server && readToken() === previousToken && cacheGeneration() === generation;
+  let res: Response;
+  try {
+    res = await request(base + "/api/account/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password, audience: "manager", entrance: "internal",
+        pc_proof: await pcLoginProof(base, username, password),
+        device: { kind: "desktop", fp: desktopFingerprint(), label: deviceName() + " · пульт" } }),
+    });
+  } catch (err) { return current() ? troubleOf(err) : changedAuthority(); }
+  if (!current()) return changedAuthority();
+  if (!res.ok) {
+    const code = await errorCode(res);
+    return current() ? { ok: false, status: res.status, kind: "forbidden",
+      text: code || "Не удалось войти. Проверьте логин и пароль." } : changedAuthority();
+  }
+  const data = await res.json().catch(() => null) as
+    { action?: string; token?: string; username?: string; role?: string; uid?: number; must_change_password?: boolean; error?: string } | null;
+  if (!current()) return changedAuthority();
+  if (!data || !["ok", "ok_pending"].includes(data.action || "") || !data.token ||
+      !["manager", "security", "full"].includes(data.role || "") || !Number.isSafeInteger(data.uid))
+    return { ok: false, status: 502, kind: "server",
+      text: data?.role === "analyst" ? "Аккаунт аналитика не открывает /admin: используйте установленный вход пульта аналитика."
+        : "Сервер не подтвердил роль руководителя или выдал неполный вход. Существующий вход сохранён." };
+  writeToken(data.token);
+  writeSettings({ server: base, device: { name: deviceName(), created_at: new Date().toISOString(),
+    username: data.username || username, role: data.role, telegram_id: data.uid } });
+  // Cache keys include the bearer. Old manager data cannot cross this boundary;
+  // leaving the independent field cache intact preserves its offline workspace.
+  return { ok: true, status: res.status, data: { action: data.action, username: data.username || username,
+    role: data.role, must_change_password: !!data.must_change_password } };
+}
+
 // --- Приложение выездника/софтника на ПК: свой класс токена (agent_devices) ----
 // Телефон не вытесняется: вход по ссылке выездника даёт ПК-токен, привязка
 // agent_bind остаётся телефону. Белый список путей — только ручки выездника.
@@ -243,7 +302,7 @@ export async function logout(): Promise<void> {
 // и приложение выездника на сборке 03.10 не открывало портфель вовсе.
 const FIELD_PATH = /^\/api\/(bootstrap|person|cards|save|photo|receipt|markers|notes|note|lang|route_to|geocode|geo)(\/.*)?$/;
 const FIELD_PATH_EXACT = new Set(["/api/person", "/api/cards", "/api/markers", "/api/notes",
-                                  "/api/geocode", "/api/logout", "/api/bootstrap", "/api/save",
+                                  "/api/geocode", "/api/logout", "/api/bootstrap", "/api/identity", "/api/save",
                                   "/api/receipt", "/api/photo", "/api/note"]);
 for (const path of ["/api/office/action", "/api/workspace/report", "/api/workspace/promises"])
   FIELD_PATH_EXACT.add(path);
@@ -295,13 +354,52 @@ export async function enrollField(raw: string): Promise<ApiResult> {
  *  пользователя Windows и каталога данных — стабилен, пока программа живёт на
  *  этом же месте; смена машины видна аккаунту как новое устройство. */
 function desktopFingerprint(): string {
-  let user = "";
-  try { user = userInfo().username; } catch { /* */ }
+  return pcIdentity().fingerprint;
+}
+
+async function pcLoginProof(base: string, username: string, password: string): Promise<any> {
+  const identity = pcIdentity();
+  const response = await request(base + "/api/account/pc_challenge", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ public_key: identity.publicKey, fingerprint: identity.fingerprint, label: deviceName() }) });
+  const c = await response.json() as any;
+  if (!response.ok || !c.ok) throw new Error(c.error || "Проверка компьютера недоступна. Обновите программу и сервер.");
+  const message = [c.challenge_id, c.nonce, "", username.trim().toLowerCase(), createHash("sha256").update(password).digest("hex")].join("\n");
+  return { challenge_id: c.challenge_id, signature: sign(null, Buffer.from(message), identity.privateKey).toString("base64") };
+}
+
+export async function accountStaff(server: string): Promise<ApiResult> {
+  const base = serverOrigin(server || readSettings().fieldServer || "");
+  if (!base) return { ok: false, status: 400, text: "Проверьте адрес сервера." };
   try {
-    return createHash("sha256").update(hostname() + "\n" + user + "\n" + app.getPath("userData")).digest("hex");
-  } catch {
-    return createHash("sha256").update(hostname() + "\n" + user).digest("hex");
-  }
+    const res = await request(base + "/api/account/staff", { method: "GET" });
+    return { ok: res.ok, status: res.status, data: await res.json() };
+  } catch (error) { return troubleOf(error); }
+}
+
+export async function accountRegister(server: string, employee: string, username: string, password: string): Promise<ApiResult> {
+  const base = serverOrigin(server || readSettings().fieldServer || "");
+  if (!base) return { ok: false, status: 400, text: "Проверьте адрес сервера." };
+  if (readCallQueue()?.entries.length) return { ok: false, status: 409,
+    text: "Сначала отправьте очередь прежнего профиля. Записи сохранены на компьютере." };
+  try {
+    const identity = pcIdentity();
+    const challenge = await request(base + "/api/account/pc_challenge", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ public_key: identity.publicKey, fingerprint: identity.fingerprint, label: deviceName() }) });
+    const c = await challenge.json() as any;
+    if (!challenge.ok || !c.ok) return { ok: false, status: challenge.status, text: c.error || "Не удалось зарегистрировать компьютер." };
+    employee = employee.trim(); username = username.trim().toLowerCase();
+    const message = [c.challenge_id, c.nonce, employee, username, createHash("sha256").update(password).digest("hex")].join("\n");
+    const signature = sign(null, Buffer.from(message), identity.privateKey).toString("base64");
+    const response = await request(base + "/api/account/register", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ employee, username, password, pc_proof: { challenge_id: c.challenge_id, signature } }) });
+    const data = await response.json() as any;
+    if (!response.ok || !data.ok || !data.token) return { ok: false, status: response.status, text: data.error || "Профиль не создан." };
+    if (readCallQueue()?.entries.length) return { ok: false, status: 409, text: "Профиль создан. Войдите после отправки очереди прежнего профиля." };
+    clearCache();
+    writeFieldToken(data.token);
+    writeSettings({ fieldServer: base, fieldDevice: { name: deviceName(), employee: data.employee, username: data.username, telegram_id: data.uid } });
+    return { ok: true, status: response.status, data: { ...data, token: undefined } };
+  } catch (error) { return troubleOf(error); }
 }
 
 /** Вход сотрудника по логину и паролю (аккаунт вместо персональной ссылки).
@@ -309,43 +407,58 @@ function desktopFingerprint(): string {
  *  сохраняется как обычный полевой — конструктор дальше не различает. Сервер
  *  до подтверждения владельца отвечает pending только на /api/bootstrap. */
 export async function accountLogin(server: string, username: string, password: string): Promise<ApiResult> {
-  const base = String(server || "").trim().replace(/\/+$/, "") || readSettings().fieldServer || readSettings().server || "";
+  const base = serverOrigin(String(server || "").trim() || readSettings().fieldServer || readSettings().server || "");
   if (!base) return { ok: false, status: 0, kind: "nolink", text: "Неизвестен адрес сервера. Войдите один раз по ссылке или укажите адрес сервера из инструкции." };
   const name = deviceName();
   const fp = desktopFingerprint();
   const previous = readSettings(), pending = readCallQueue();
+  const previousToken = readFieldToken(), previousOwner = callOwner(), previousGeneration = cacheGeneration();
+  const current = () => readFieldToken() === previousToken && readSettings().fieldServer === previous.fieldServer && cacheGeneration() === previousGeneration;
   const hasPending = !!pending?.entries.length;
-  if (hasPending && base !== previous.fieldServer)
+  if (hasPending && (base !== previous.fieldServer || !previous.fieldDevice?.telegram_id ||
+      pending?.owner !== previousOwner))
     return { ok: false, status: 409, kind: "forbidden", text: "Сначала отправьте звонки прежнего входа. Очередь сохранена на этом компьютере." };
   let res: Response;
   try {
     res = await request(base + "/api/account/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password, entrance: "internal",
+      body: JSON.stringify({ username, password, entrance: "internal", audience: "employee",
+        pc_proof: await pcLoginProof(base, username, password),
+        expected_uid: hasPending ? previous.fieldDevice?.telegram_id : undefined,
         device: { kind: "desktop", fp, label: name + " · " + fp.slice(0, 8) } }),
     });
   } catch (err) {
+    if (!current()) return changedAuthority();
     return troubleOf(err);
   }
-  if (res.status === 403 || res.status === 429) {
+  if (!current()) return changedAuthority();
+  if (res.status === 403 || res.status === 429 || res.status === 409) {
     const data = await res.json().catch(() => null) as { error?: string } | null;
+    if (!current()) return changedAuthority();
     return { ok: false, status: res.status, kind: res.status === 429 ? "server" : "forbidden",
       text: data?.error || "Не удалось войти. Проверьте логин и пароль." };
   }
   if (!res.ok) return { ok: false, status: res.status, kind: "server", text: `Сервер ответил ошибкой ${res.status}.` };
   const data = (await res.json().catch(() => null)) as
-    { action?: string; token?: string; employee?: string; username?: string; must_change_password?: boolean; error?: string } | null;
-  if (!data?.token || (data.action !== "ok" && data.action !== "ok_pending"))
-    return { ok: false, status: 0, kind: "server", text: data?.error || "Сервер не выдал вход. Попробуйте ещё раз." };
+    { action?: string; token?: string; employee?: string; username?: string; uid?: number; role?: string; must_change_password?: boolean; error?: string } | null;
+  if (!current()) return changedAuthority();
+  if (!data?.token || (data.action !== "ok" && data.action !== "ok_pending") || data.role !== "agent")
+    return { ok: false, status: 0, kind: "server", text: "Сервер не подтвердил роль сотрудника. Прежний вход сохранён." };
   // Очередь звонков прежнего сотрудника не должна молча достаться новому входу:
   // тот же человек — переносим очередь на новый токен, другой — отказ (на экране
   // входа появится кнопка «Очистить очередь прежнего сотрудника»).
-  if (hasPending && (!previous.fieldDevice?.employee || previous.fieldDevice.employee !== data.employee))
+  const latestQueue = readCallQueue();
+  if (latestQueue?.entries.length && (base !== previous.fieldServer ||
+      latestQueue.owner !== previousOwner || previous.fieldDevice?.telegram_id !== data.uid))
     return { ok: false, status: 409, kind: "forbidden", text: "На компьютере остались звонки прежнего сотрудника. Сначала отправьте их или восстановите его вход; очередь сохранена." };
   writeFieldToken(data.token);
-  writeSettings({ fieldServer: base, fieldDevice: { name, employee: data.employee || "", username: data.username || "" } });
-  if (hasPending && pending) writeCallQueue({ ...pending, owner: callOwner() });
+  // uid (внутренний номер аккаунта) — тот же слот, что у входа по ссылке:
+  // стабильный владелец очереди между ротациями токена и сохранённая
+  // идентичность при wipeField (иначе 401 орфанил собственную очередь).
+  writeSettings({ fieldServer: base, fieldDevice: { name, employee: data.employee || "", username: data.username || "", telegram_id: data.uid } });
+  // The stable server+uid owner is unchanged. Keep the live queue: it may have
+  // received new records or acknowledgements while the login request was pending.
   return { ok: true, status: 200, data: { action: data.action, employee: data.employee, username: data.username, must_change_password: !!data.must_change_password } };
 }
 
@@ -382,6 +495,9 @@ export function flushCallQueue(): Promise<Map<string, ApiResult>> {
     const results = new Map<string, ApiResult>();
     if (!readFieldToken()) return results;
     const owner = callOwner();
+    if(!ownedCallQueue().entries.some(e=>!e.error))return results;
+    const access=await callField("GET","/api/identity",undefined,undefined,{cache:false});
+    if(!access.ok||access.stale||callOwner()!==owner)return results;
     for (;;) {
       const entry = ownedCallQueue().entries.find(e => !e.error);
       if (!entry || callOwner() !== owner) break;
@@ -462,6 +578,8 @@ export async function callField(method: string, path: string, query?: Record<str
   // («Текущий пароль неверен»), а 401 здесь НЕ гасит вход: у ссылочного входа
   // аккаунта просто нет — это не отзыв устройства.
   if (path === "/api/account/sessions" || path === "/api/account/password") {
+    const identity = cacheIdentity(server, token);
+    const current = () => cacheIdentity(readSettings().fieldServer || "", readFieldToken()) === identity;
     const allowed = (method === "GET" && path === "/api/account/sessions") || (method === "POST" && path === "/api/account/password");
     if (!allowed) return { ok: false, status: 0, kind: "server", text: "запрещённый путь" };
     let res: Response;
@@ -473,14 +591,18 @@ export async function callField(method: string, path: string, query?: Record<str
         bypassCustomProtocolHandlers: true,
       } as RequestInit);
     } catch (err) {
+      if (!current()) return changedAuthority();
       return troubleOf(err);
     }
+    if (!current()) return changedAuthority();
     if (res.status === 401) return { ok: false, status: 401, kind: "server", text: "Этот вход заведён по ссылке — журнал входов и смена пароля недоступны." };
     if (!res.ok) {
       const code = await errorCode(res);
+      if (!current()) return changedAuthority();
       return { ok: false, status: res.status, kind: "server", text: code || `Сервер ответил ошибкой ${res.status}.` };
     }
     const data = await res.json().catch(() => null);
+    if (!current()) return changedAuthority();
     if (!data) return { ok: false, status: 502, kind: "server", text: "Сервер ответил непонятным ответом." };
     return { ok: true, status: res.status, data };
   }
@@ -527,11 +649,19 @@ export async function callField(method: string, path: string, query?: Record<str
   }
   if (!current()) return changedAuthority();
   if (res.status === 401) {
-    wipeField();
+    wipeField({discardWork:true});
     onRevoked();
     return { ok: false, status: 401, kind: "revoked", text: REVOKED };
   }
-  if (res.status === 403) { clearCache(); return { ok: false, status: 403, kind: "forbidden", text: "Нет доступа к этим данным." }; }
+  if (res.status === 403) {
+    clearCache();
+    // Руководитель/аналитик по логину-паролю до двух подтверждений: честный
+    // текст ожидания вместо генерик-отказа «Нет доступа к этим данным».
+    const code403 = await errorCode(res);
+    if (code403 === "account_pending")
+      return { ok: false, status: 403, kind: "forbidden", text: "Вход записан. Доступ появится после подтверждения администраторами (для руководителя и аналитика — двух). Проверьте связь позже." };
+    return { ok: false, status: 403, kind: "forbidden", text: "Нет доступа к этим данным." };
+  }
   if (res.status === 404) { clearCache(); return { ok: false, status: 404, kind: "notfound", text: "Не найдено — возможно, договор перезакрепили." }; }
   if (!res.ok) {
     const code = await errorCode(res);
@@ -585,7 +715,7 @@ export async function uploadField(path: string, query: Record<string, unknown>, 
   }
   if (!current()) return changedAuthority();
   if (res.status === 401) {
-    wipeField();
+    wipeField({discardWork:true});
     onRevoked();
     return { ok: false, status: 401, kind: "revoked", text: REVOKED };
   }

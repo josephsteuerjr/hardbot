@@ -17,7 +17,7 @@ export async function mountModeSwitchIfKit(host: HTMLElement, current: string): 
 export async function mountModeSwitch(host: HTMLElement, current: string): Promise<void> {
   if ((await hard.state()).fixedProduct) { host.closest(".section")?.remove(); return; }
   const items: [string, string, string][] = [
-    ["manager", "Пульт", "руководитель, безопасник, директор — сводка, команда, контроль"],
+    ["manager", "Пульт", "руководитель, сотрудник службы безопасности, директор — сводка, команда, контроль"],
     ["field", "Приложение сотрудника", "выездник и софт: экран (портфель или очередь звонков) определяет сервер по портфелю"],
     ["analyst", "Аналитик", "реестры, обогащение, рассылка — только внутри комплекта"],
   ];

@@ -53,9 +53,7 @@
     ],
     "profile_detection": "workbook_columns"
   },
-  "responsible_aliases": {
-    "Тургунов Музафар": "Тургунов Музаффар"
-  },
+  "responsible_aliases": {},
   "safety": {
     "require_all_configured_groups": true,
     "block_unconfigured_groups_with_files": true,

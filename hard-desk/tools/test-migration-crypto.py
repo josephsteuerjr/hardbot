@@ -46,6 +46,19 @@ migrate(automatic)
 for target, queued in ((automatic,False),(lab / 'manual',True)):
     if queued:
         fixture(target, True)  # initialize a different destination profile key
+        occupied = {p.name: p.read_bytes() for p in target.iterdir() if p.suffix in ('.key', '.bin') or p.name == 'Local State'}
+        try:
+            migrate(target, True)
+        except subprocess.CalledProcessError as error:
+            assert 'уже есть настройки' in error.stderr.decode('utf-8', errors='replace')
+        else:
+            raise AssertionError('Explicit migration replaced an occupied profile')
+        assert all((target / name).read_bytes() == content for name, content in occupied.items())
+        # Leave Chromium's initialized key, with no existing identity or work.
+        assert target.resolve().is_relative_to(lab.resolve())
+        for name in occupied:
+            if name != 'Local State':
+                (target / name).unlink()
         migrate(target, True)
     for name, content in protected.items():
         assert (target / name).read_bytes() == content
@@ -54,5 +67,5 @@ for target, queued in ((automatic,False),(lab / 'manual',True)):
     assert not (target / 'migration-request.json').exists()
 (base / 'RESULTS.json').write_text(json.dumps({'automaticBeforeChromium':True,
     'manualDeferredUntilRestart':True,'realV10ProfileEncryption':True,'tokensQueueDraftReadable':True,
-    'identityAndBytesPreserved':True}), encoding='utf-8')
-print('Real migration passed: v10 profile key, token/queue/draft decryption, preserved uid/bytes, automatic and deferred manual import.')
+    'identityAndBytesPreserved':True,'occupiedTargetRefusedUnchanged':True}), encoding='utf-8')
+print('Real migration passed: v10 profile key, token/queue/draft decryption, preserved uid/bytes, automatic/deferred import and refusal to overwrite existing work.')

@@ -1,0 +1,7 @@
+# Optional private-network listener, in addition to the loopback listener.
+# Linux .env: COMPOSE_FILE=docker-compose.yml:docker-compose.lan.yml
+# Set APP_LAN_IP to the specific corporate interface; never 0.0.0.0.
+services:
+  app:
+    ports:
+      - "${APP_LAN_IP:?Set APP_LAN_IP to the private corporate interface}:${APP_PORT:-8080}:8080"

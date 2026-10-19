@@ -15,6 +15,24 @@ from pult.core.import_flow import ImportFlow
 
 
 # --- тексты ------------------------------------------------------------------
+def test_explicit_exclusions_handle_numeric_source_ids_without_mutating_original():
+    import exchange_contract as contract
+    grid=[[contract.WORKBOOK_CONTRACT_TITLE,contract.WORKBOOK_RESPONSIBLE_TITLE],[731001.0,'Synthetic'],['KD731001','Synthetic'],[731002,'Synthetic']]
+    book={'grid':grid,'file_sha256':'synthetic-unchanged-source'}
+    filtered,count=ri.exclude_contracts(book,['731001','KD731001'])
+    assert count==2 and filtered['grid']==[grid[0],grid[3]]
+    assert book['grid']==grid and len(book['grid'])==4
+    assert filtered['file_sha256']==book['file_sha256']
+
+
+def test_exclusions_are_bound_to_preview_signature():
+    from pult import desk_registry
+    book={'path':'synthetic.xlsb','file_sha256':'synthetic-source'}
+    a=desk_registry._signature(book,['synthetic'],False,False,False,excluded=['731001'])
+    b=desk_registry._signature(book,['synthetic'],False,False,False,excluded=['731002'])
+    assert a!=b
+
+
 def test_preview_button_counts_people_and_rows():
     book = {"employees": [{"key": "егор", "file_count": 3}, {"key": "илья", "file_count": 2}]}
     assert ri.preview_button_text(book, {"егор"}, False) == "Предпросмотр выбранных (1 чел · 3 дог.)"

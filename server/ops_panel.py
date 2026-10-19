@@ -494,3 +494,294 @@ start();
 setInterval(() => { if(!$("#app-body").hidden) refresh(); }, 15000);
 </script>
 </html>"""
+
+
+# This is deliberately separate from the engineer-only maintenance page above.
+# Its HTML carries no account data; the authenticated operator API supplies rows.
+def approval_page() -> str:
+    """Mobile operator approval form; GET /ops/approve serves only static markup."""
+    return _APPROVAL_PAGE
+
+
+_APPROVAL_PAGE = """<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Хард — подтверждение телефона</title>
+<style>
+:root{color-scheme:light;--ink:#172334;--muted:#526174;--line:#d6dfe9;
+  --paper:#fff;--bg:#f2f5f9;--blue:#174cad;--red:#a12332;--amber:#785300}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);
+ font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{background:#18345d;color:#fff;padding:18px max(18px,env(safe-area-inset-right)) 16px;
+ padding-left:max(18px,env(safe-area-inset-left))}
+h1{font-size:21px;line-height:1.25;margin:0}header p{margin:5px 0 0;color:#d9e5fa;font-size:14px}
+main{max-width:720px;margin:auto;padding:16px max(14px,env(safe-area-inset-right)) 36px;
+ padding-left:max(14px,env(safe-area-inset-left))}
+.card{background:var(--paper);border:1px solid var(--line);border-radius:14px;
+ padding:17px;margin:0 0 14px;box-shadow:0 2px 8px #1a375008}
+h2{font-size:18px;margin:0 0 9px}p{margin:8px 0}small,.hint{color:var(--muted);font-size:14px}
+label{display:block;font-weight:600;margin:12px 0 5px}
+input:not([type=checkbox]),textarea{font:inherit;border:1px solid #a8b5c5;border-radius:9px;
+ width:100%;padding:11px;min-height:45px;background:#fff;color:var(--ink)}
+textarea{min-height:80px;resize:vertical}input[type=checkbox]{width:22px;height:22px;flex:none}
+.check{display:flex;gap:10px;align-items:flex-start;font-weight:500;line-height:1.4}
+.check input{margin-top:2px}button{font:inherit;font-weight:600;border:1px solid var(--blue);
+ border-radius:10px;background:var(--blue);color:#fff;min-height:46px;padding:9px 15px;cursor:pointer}
+button.secondary{background:#fff;color:var(--blue)}button:disabled{opacity:.48;cursor:not-allowed}
+button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid #82b2f5;outline-offset:2px}
+.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:14px}.actions button{flex:1 1 150px}
+.notice{padding:10px 12px;border-radius:9px;background:#e8effa;color:#153766;margin:10px 0}
+.warn{background:#fff1d2;color:var(--amber)}.error{background:#ffebef;color:var(--red)}
+.good{background:#e5f5ea;color:#205c35}.meta{display:grid;grid-template-columns:minmax(0,1fr);
+ gap:5px;overflow-wrap:anywhere}.meta b{font-weight:600}.request{border-top:1px solid var(--line);
+ padding-top:12px;margin-top:14px}.request:first-child{border-top:0;margin-top:0;padding-top:0}
+code{overflow-wrap:anywhere} [hidden]{display:none!important}
+@media(min-width:580px){.meta{grid-template-columns:1fr 1fr}}
+</style></head><body>
+<header><h1>Подтверждение телефона</h1><p>Оператор · отдельный экран без данных должников</p></header>
+<main>
+<section class="card" id="login">
+ <h2>Привязать этот браузер</h2>
+ <p class="hint">Получите одноразовый код устройства оператора у администратора или в действующем пульте.
+   Код телефона сотрудника сюда не вводите.</p>
+ <label for="enrollCode">Код устройства оператора</label>
+ <input id="enrollCode" autocomplete="off" autocapitalize="off" spellcheck="false">
+ <label for="deviceName">Как назвать этот браузер</label>
+ <input id="deviceName" autocomplete="off" placeholder="Например, телефон администратора">
+ <div class="actions"><button id="redeem">Привязать</button></div>
+ <p id="loginStatus" class="notice" role="status" aria-live="polite"></p>
+</section>
+<section id="workspace" hidden>
+ <div class="card"><h2>Ваше право подтверждения</h2>
+  <p id="principal" class="notice" role="status"></p>
+  <p class="hint">Одного названия роли «оператор» недостаточно: сервер проверяет
+    зарегистрированного подтверждающего и действующий запрос руководителя.
+    Код запроса получите от руководителя <b>по другому каналу</b> и сверьте с ним человека и телефон.</p>
+  <div class="actions"><button class="secondary" id="reload">Обновить заявки</button>
+    <button class="secondary" id="forget">Забыть токен браузера</button></div>
+ </div>
+ <div class="card"><h2>Моя геолокация при подтверждении</h2>
+  <p class="hint">Сервер запишет мою точку и точность. GPS телефона сотрудника не доказывает,
+    что он находится в офисе; регистрация с телефона разрешена вне офиса.</p>
+  <p id="myGps" class="notice" role="status" aria-live="polite">Точка ещё не получена.</p>
+  <div class="actions"><button id="gpsRetry" class="secondary">Разрешить / повторить GPS</button></div>
+  <p class="hint" id="gpsHelp">Если разрешение отклонено: откройте настройки сайта/браузера,
+    разрешите геолокацию для этого адреса, вернитесь и нажмите «повторить».
+    На iPhone: Настройки → Конфиденциальность и безопасность → Службы геолокации,
+    затем доступ Safari к геопозиции и разрешение этого сайта (в меню адресной строки).
+    На Android: настройки сайта в Chrome и геолокация в настройках телефона.
+    Доступен только в безопасном контексте HTTPS (кроме localhost).</p>
+ </div>
+ <div class="card"><h2>Заявки на телефоны</h2>
+  <p id="listStatus" class="notice" role="status" aria-live="polite">Загрузка…</p>
+  <div id="requests"></div>
+ </div>
+ <section class="card" id="decision" hidden>
+  <h2>Решение по одному телефону</h2>
+  <p id="selection" class="notice"></p>
+  <label for="requestCode">Одноразовый код запроса от руководителя</label>
+  <input id="requestCode" autocomplete="off" autocapitalize="off" spellcheck="false">
+  <p class="hint">Код вводится только после самостоятельной связи с руководителем по другому каналу.
+    Он не отображается в списке заявок и не является паролем сотрудника.</p>
+  <label for="reason">Что и как вы проверили (12–500 символов)</label>
+  <textarea id="reason" maxlength="500" placeholder="Например, позвонил руководителю по известному номеру и сверил ФИО и устройство"></textarea>
+  <div id="exceptionWrap" hidden>
+   <p class="notice warn">GPS при регистрации или входе сотрудника отсутствует.
+     Исключение будет отмечено на сервере на 24 часа; проверьте причину с руководителем.</p>
+   <label for="exceptionReason">Причина исключения без GPS (12–500 символов)</label>
+   <textarea id="exceptionReason" maxlength="500"></textarea>
+  </div>
+  <label class="check"><input type="checkbox" id="attest"><span>Я лично проверил запрос руководителя
+    по другому каналу, сверил человека и именно этот телефон. Я понимаю,
+    что GPS не доказывает присутствие в офисе.</span></label>
+  <div class="actions"><button id="approve" disabled>Подтвердить этот телефон</button></div>
+  <p id="decisionStatus" class="notice" role="status" aria-live="polite"></p>
+ </section>
+</section>
+</main>
+<script>
+(() => {
+"use strict";
+const $ = id => document.getElementById(id);
+const storedToken = () => localStorage.getItem("hard.approval.token") || "";
+let principal = "", selected = null, ownGps = null, busy = false;
+function status(id, text, type){$(id).textContent = text;$(id).className = "notice " + (type || "");}
+function deviceId(){
+  let id = localStorage.getItem("hard.ops.device");
+  if(!id){id = "browser-" + crypto.randomUUID();localStorage.setItem("hard.ops.device", id);}
+  return id;
+}
+function make(tag, text, className){
+  const el = document.createElement(tag);
+  if(text != null) el.textContent = String(text);
+  if(className) el.className = className;
+  return el;
+}
+function unauthenticated(message){
+  principal = "";selected = null;ownGps = null;
+  $("workspace").hidden = true;$("login").hidden = false;
+  $("decision").hidden = true;
+  status("loginStatus", message || "Введите одноразовый код привязки.", message ? "error" : "");
+}
+async function api(path, method="GET", body){
+  const headers = {"X-Device-Token":storedToken(),"X-Device-Id":deviceId()};
+  if(body) headers["Content-Type"] = "application/json";
+  const response = await fetch(path,{method,headers,body:body ? JSON.stringify(body) : undefined,
+    cache:"no-store"});
+  const data = await response.json().catch(() => ({}));
+  if(response.status === 401){localStorage.removeItem("hard.approval.token");
+    unauthenticated("Доступ истёк или устройство отозвано. Получите новый код оператора.");}
+  if(!response.ok || data.ok === false) throw new Error(data.error || "HTTP " + response.status);
+  return data;
+}
+function locationText(value, at){
+  let p = value;
+  if(typeof p === "string") {try{p = JSON.parse(p);}catch{p = null;}}
+  if(!p || typeof p !== "object" || p.lat == null || p.lon == null ||
+      !Number.isFinite(Number(p.lat)) || !Number.isFinite(Number(p.lon))) return "Нет GPS";
+  return `${Number(p.lat).toFixed(5)}, ${Number(p.lon).toFixed(5)} · точность ${
+    Number(p.accuracy || 0).toFixed(0)} м · запись ${at || "время не указано"}`;
+}
+function latestRequest(account, device){
+  return (account.phone_requests || []).find(r => Number(r.device_id) === Number(device.id)) || null;
+}
+function activeRequest(account, device){
+  const r = latestRequest(account,device);
+  return r && !r.consumed_at && Date.parse(r.expires_at || "") > Date.now() ? r : null;
+}
+function requestStatus(r){
+  if(!r) return "Запрос руководителя ещё не поступил. Попросите руководителя отправить запрос и связаться отдельно.";
+  const header = `Запрос руководителя #${r.manager_uid} · ${r.issued_at || "время не указано"} · до ${r.expires_at || "не указано"}. `;
+  if(r.consumed_at) return header + `Уже использован ${r.consumed_at}; запросите новый.`;
+  if(Date.parse(r.expires_at || "") <= Date.now()) return header + "Истёк; запросите новый.";
+  return header + "Действует. Код приходит отдельно, в списке его нет.";
+}
+function checks(){
+  const missing = selected && (!selected.account.registration_gps || !selected.device.gps);
+  const exceptionOK = !missing || $("exceptionReason").value.trim().length >= 12;
+  $("approve").disabled = busy || !principal || !selected || !selected.request ||
+    !ownGps || !$("attest").checked || !$("requestCode").value.trim() ||
+    $("reason").value.trim().length < 12 || !exceptionOK;
+}
+function resetSelection(){
+  selected = null;$("decision").hidden = true;$("requestCode").value = "";
+  $("reason").value = "";$("exceptionReason").value = "";$("attest").checked = false;
+  status("decisionStatus", "");checks();
+}
+function select(account, device, request){
+  resetSelection();
+  if(!principal || !request) return;
+  selected = {account,device,request};
+  $("selection").textContent = `Аккаунт ${account.username} · ${account.employee} · телефон #${device.id} (${device.label || "без названия"}).`;
+  $("exceptionWrap").hidden = !!(account.registration_gps && device.gps);
+  $("decision").hidden = false;$("decision").scrollIntoView({block:"start",behavior:"smooth"});checks();
+}
+function line(box, title, text){const p = make("p");p.append(make("b",title+": "),document.createTextNode(String(text)));box.append(p);}
+function render(rows){
+  resetSelection();const box = $("requests");box.textContent = "";
+  let count = 0;
+  for(const account of rows){
+    for(const device of (account.devices || [])){
+      // An already active employee can request a replacement phone. Its new
+      // device remains pending until the operator decides on THAT request.
+      if(device.kind !== "phone" || device.status !== "pending" ||
+         !["awaiting","active"].includes(account.status)) continue;
+      count++;
+      const request = activeRequest(account,device);
+      const receipt = latestRequest(account,device);
+      const card = make("article",null,"request");const meta = make("div",null,"meta");
+      line(meta,"Сотрудник",account.employee || "не указано");
+      line(meta,"Аккаунт",account.username || "не указан");
+      line(meta,"Телефон",`#${device.id} · ${device.label || "без названия"}`);
+      line(meta,"Регистрация",account.created_at || "время не указано");
+      line(meta,"GPS регистрации",locationText(account.registration_gps,account.created_at));
+      line(meta,"GPS телефона",locationText(device.gps,device.first_seen));
+      card.append(meta);
+      const note = make("p",requestStatus(receipt),"notice " + (request ? "" : "warn"));
+      card.append(note);
+      if(!account.registration_gps || !device.gps)
+        card.append(make("p","Внимание: GPS сотрудника отсутствует; потребуется причина исключения. Местонахождение не доказывает офис.","notice warn"));
+      if(request && principal){const btn = make("button","Разобрать телефон #"+device.id);
+        btn.type = "button";btn.onclick = () => select(account,device,request);card.append(btn);}
+      box.append(card);
+    }
+  }
+  status("listStatus",count ? `Ожидают рассмотрения: ${count}. Выберите один телефон.` :
+    "Телефонов с ожидающей регистрацией нет.");
+}
+async function refresh(){
+  if(!storedToken()){unauthenticated();return;}
+  try{
+    const data = await api("/admin/accounts.json");
+    if(!$("login").hidden && !storedToken()) return;
+    $("login").hidden = true;$("workspace").hidden = false;
+    principal = typeof data.approver === "string" ? data.approver.trim() : "";
+    status("principal",principal ? `Зарегистрированный подтверждающий: ${principal}` :
+      "У этого устройства нет зарегистрированного подтверждающего. Администратор должен назначить его на сервере; подтверждение недоступно.",principal ? "good" : "error");
+    render(Array.isArray(data.accounts) ? data.accounts : []);
+  }catch(e){
+    if(!$("workspace").hidden) status("listStatus","Не удалось обновить: "+e.message,"error");
+    else if($("login").hidden) unauthenticated("Не удалось проверить доступ: "+e.message);
+    else status("loginStatus","Не удалось проверить доступ: "+e.message,"error");
+  }
+}
+$("redeem").onclick = async () => {
+  const code = $("enrollCode").value.trim();
+  if(!code){status("loginStatus","Введите код устройства оператора.","error");return;}
+  $("redeem").disabled = true;
+  try{
+    const response = await fetch("/admin/device/redeem.json",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({code,device_id:deviceId(),name:$("deviceName").value.trim() || "телефон администратора"})});
+    const data = await response.json().catch(() => ({}));
+    if(!response.ok || !data.ok) throw new Error(data.error || "HTTP "+response.status);
+    if(data.role !== "operator" || typeof data.token !== "string" || !data.token)
+      throw new Error("Нужен код устройства с ролью operator; этот код не подходит.");
+    localStorage.setItem("hard.approval.token",data.token);$("enrollCode").value = "";
+    await refresh();
+  }catch(e){status("loginStatus","Привязка не удалась: "+e.message,"error");}
+  finally{$("redeem").disabled = false;}
+};
+$("forget").onclick = () => {localStorage.removeItem("hard.approval.token");unauthenticated("Токен удалён из этого браузера. На сервере устройство ещё действует; отзовите его отдельно при необходимости.");};
+$("reload").onclick = refresh;
+$("gpsRetry").onclick = () => {
+  ownGps = null;checks();
+  if(!navigator.geolocation){status("myGps","Браузер не поддерживает геолокацию. Подтверждение здесь невозможно.","error");return;}
+  status("myGps","Запрашиваю местоположение этого телефона…");
+  navigator.geolocation.getCurrentPosition(position => {
+    ownGps = {lat:position.coords.latitude,lon:position.coords.longitude,
+      accuracy:position.coords.accuracy};
+    status("myGps",`Точка получена: ${locationText(ownGps,new Date(position.timestamp).toLocaleString("ru-RU"))}. Она будет записана при подтверждении.`,"good");
+    checks();
+  },error => {
+    ownGps = null;
+    status("myGps","GPS не получен ("+(error && error.message || "отказ/таймаут")+"). Разрешите геолокацию в настройках сайта и телефона, затем нажмите «повторить». Без моей точки сервер не примет подтверждение.","error");checks();
+  },{enableHighAccuracy:true,timeout:15000,maximumAge:0});
+};
+for(const id of ["requestCode","reason","exceptionReason","attest"]){
+  $(id).addEventListener(id === "attest" ? "change" : "input",checks);
+}
+$("approve").onclick = async () => {
+  checks();if($("approve").disabled || !selected) return;
+  const target = selected;
+  // Never substitute the current selection after a slow network response.
+  const body = {device_id:Number(target.device.id),request_code:$("requestCode").value.trim(),
+    verified_out_of_band:true,reason:$("reason").value.trim(),gps:ownGps};
+  if(!$("exceptionWrap").hidden) body.gps_exception_reason = $("exceptionReason").value.trim();
+  busy = true;checks();status("decisionStatus","Передаю решение серверу…");
+  try{
+    const result = await api("/admin/account_approve.json","POST",body);
+    if(result.account_active !== true || result.device_active !== true)
+      status("decisionStatus","Сервер принял шаг, но аккаунт или телефон ещё не активен. Проверьте журнал и повторно обновите список; не считайте это успешным входом.","warn");
+    else status("decisionStatus",result.gps_exception_pending ?
+      "Подтверждено сервером с временным исключением без GPS (24 часа)." :
+      "Сервер подтвердил аккаунт и именно этот телефон.","good");
+    // Do not retain the manager's one-use code in a filled field.
+    $("requestCode").value = "";$("attest").checked = false;
+    selected = null;
+    // Preserve the result until the next deliberate refresh.
+  }catch(e){status("decisionStatus","Сервер отказал: "+e.message+". Ничего не подтверждено на этом экране.","error");}
+  finally{busy = false;checks();}
+};
+refresh();
+})();
+</script></body></html>"""

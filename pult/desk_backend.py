@@ -27,6 +27,7 @@ import threading
 import time
 import traceback
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -44,6 +45,21 @@ _lock = threading.RLock()
 _settings = load_settings()
 _jobs: dict[str, dict] = {}
 _journal = None
+_access_busy = False
+
+
+@contextmanager
+def account_operation():
+    global _access_busy
+    with _lock:
+        if _access_busy or _mail_busy.locked() or any(j.get('state') == 'running' for j in _jobs.values()):
+            raise RuntimeError('Дождитесь завершения текущей операции перед сменой доступа.')
+        _access_busy = True
+    try:
+        yield
+    finally:
+        with _lock:
+            _access_busy = False
 
 
 def job_journal():
@@ -136,12 +152,14 @@ def state() -> dict:
         return {"profiles": list(_settings.get("profiles", {})), "active": _settings.get("active"),
                 "url": prof.get("url", ""), "bound": bool(prof.get("device_token")),
                 "device_name": dv.device_default_name(), "key_state": dv.key_state_text(prof.get("device_token", "")),
-                "settings_path": str(_settings.path)}
+                "settings_path": str(_settings.path),"account_session":str(prof.get('device_token') or '').startswith('account:')}
 
 
 def import_settings(path: str) -> dict:
     """Перенос старого файла без перепривязки устройства и потери контуров."""
     with _lock:
+        if _access_busy:
+            raise RuntimeError('Дождитесь завершения входа.')
         if any(p.get("device_token") for p in _settings.get("profiles", {}).values()):
             raise RuntimeError("Пульт уже привязан. Перенос поверх действующего входа запрещён.")
         if any(j.get("state") == "running" for j in _jobs.values()):
@@ -163,15 +181,22 @@ def admin(method: str, path: str, body=None, timeout: float = 30, key: str = "")
     token = "" if key else prof.get("device_token", "")
     if not prof.get("url"):
         raise RuntimeError(api_client.NO_URL_TEXT)
-    return api_client.request(prof["url"], method, path, body, key=key, device_token=token,
-                              timeout=timeout)
+    try:
+        return api_client.request(prof["url"], method, path, body, key=key, device_token=token,
+                                  timeout=timeout)
+    except api_client.AccessRevoked:
+        with _lock:
+            if prof.get('device_token') == token:
+                prof['device_token'] = ''
+                _persist_settings()
+        raise
 
 
 def profile_action(body: dict) -> dict:
     act = body.get("action")
     name = str(body.get("name") or "").strip()
     with _lock:
-        if _mail_busy.locked() or any(j.get("state") == "running" for j in _jobs.values()):
+        if _access_busy or _mail_busy.locked() or any(j.get("state") == "running" for j in _jobs.values()):
             raise RuntimeError("Дождитесь завершения операции перед изменением контура.")
         profiles = _settings.setdefault("profiles", {})
         previous = copy.deepcopy(dict(_settings))
@@ -210,6 +235,8 @@ def profile_action(body: dict) -> dict:
 
 def bind(body: dict) -> dict:
     """Привязка по одноразовому коду (обычный путь) или мастер-ключом (один раз)."""
+    if _access_busy:
+        raise RuntimeError('Дождитесь завершения входа.')
     code = str(body.get("code") or "").strip()
     key = str(body.get("key") or "").strip()
     name = str(body.get("name") or dv.device_default_name()).strip()
@@ -232,6 +259,8 @@ def bind(body: dict) -> dict:
 
 def unbind() -> dict:
     with _lock:
+        if _access_busy:
+            raise RuntimeError('Дождитесь завершения входа.')
         previous = _profile().get("device_token", "")
         _profile()["device_token"] = ""
         try:
@@ -243,6 +272,10 @@ def unbind() -> dict:
 
 
 # --- долгие задачи (Excel, импорт) -------------------------------------------------------
+class JobBusyError(RuntimeError):
+    """Admission refused before a durable job or worker was created."""
+
+
 def start_job(kind: str, fn, *, request_id=None, fingerprint=None) -> str:
     jid = str(request_id or uuid.uuid4().hex)
     if not 8 <= len(jid) <= 128 or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in jid):
@@ -255,8 +288,8 @@ def start_job(kind: str, fn, *, request_id=None, fingerprint=None) -> str:
         previous = job_journal().load(jid, profile, fingerprint)
         if previous:
             return jid
-        if any(j.get("state") == "running" for j in _jobs.values()):
-            raise RuntimeError("Дождитесь завершения текущей операции.")
+        if _access_busy or any(j.get("state") == "running" for j in _jobs.values()):
+            raise JobBusyError("Дождитесь завершения текущей операции.")
         job_journal().save(job, profile, fingerprint)
         _jobs[jid] = job
 
@@ -372,23 +405,31 @@ def mail_send(book: str, *, manual: bool, display: bool = False, say=print, oper
         return {"file": name, "to": to, "shown": display}
 
 
-def _mail_loop() -> None:
+def _schedule_due_mail(now: datetime) -> None:
+    """Admit today's due jobs; only mail_send records an actual successful day.
+
+    A refused admission (busy or journal write failure) has not called Outlook:
+    leave it due for the next tick. Once admitted, the stable operation ID and
+    durable journal prevent an uncertain Outlook result from being sent twice.
+    """
     from pult.core import mailer
+    for book in mailer.due(_mail_cfg(), now):
+        identifier = "scheduled-" + hashlib.sha256((job_profile() + now.date().isoformat() + book).encode()).hexdigest()
+        try:
+            start_job("mail", lambda say, selected=book, oid=identifier: mail_send(selected, manual=False, say=say, operation_id=oid),
+                      request_id=identifier, fingerprint=identifier)
+        except JobBusyError:
+            # Another operation owns the sole worker; retry after it finishes.
+            return
+        except Exception:  # noqa: BLE001 — failed admission or durable uncertain ID; never invent a sent day
+            traceback.print_exc()
+
+
+def _mail_loop() -> None:
     while True:
         time.sleep(30)
         try:
-            cfg = _mail_cfg()
-            for book in mailer.due(cfg, datetime.now()):
-                try:
-                    identifier = "scheduled-" + hashlib.sha256((job_profile() + datetime.now().date().isoformat() + book).encode()).hexdigest()
-                    start_job("mail", lambda say, selected=book, oid=identifier: mail_send(selected, manual=False, say=say, operation_id=oid),
-                              request_id=identifier, fingerprint=identifier)
-                except Exception:  # noqa: BLE001 — ошибка уже в истории
-                    # Неудачу тоже считаем попыткой дня: иначе поток бился бы в
-                    # закрытый Outlook каждые полминуты до полуночи.
-                    cfg2 = _mail_cfg()
-                    cfg2["last"] = {**(cfg2.get("last") or {}), book: datetime.now().date().isoformat()}
-                    _mail_save(cfg2)
+            _schedule_due_mail(datetime.now())
         except Exception:  # noqa: BLE001 — поток рассылки не должен умирать
             traceback.print_exc()
 
@@ -436,6 +477,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = route(self.path, body)
             self._send(200, {"ok": True, "data": data})
+        except api_client.AccessRevoked as exc:
+            self._send(200, {"ok": False, "revoked": True, "error": str(exc)})
         except Exception as exc:  # noqa: BLE001 — окну нужен текст, не трейсбек
             self._send(200, {"ok": False, "error": str(exc) or type(exc).__name__})
 
@@ -446,8 +489,57 @@ def route(path: str, body: dict):
         return start_job(kind, fn, request_id=body.get("request_id"), fingerprint=fingerprint)
     if path == "/settings/import":
         return import_settings(str(body.get("path") or ""))
+    if path == '/account/root_probe':
+        from pult.core.account_session import probe
+        return probe(body.get('ip'))
+    if path == '/account/root_access_check':
+        from pult.core.account_session import verify_root_access
+        return verify_root_access(body.get('ip'),str(body.get('host_key') or ''),str(body.get('ssh_username') or 'root'),
+            str(body.get('root_password') or ''),str(body.get('sudo_password') or ''))
+    if path == '/account/root_bootstrap':
+        with account_operation():
+            from pult.core.account_session import root_bootstrap
+            import datetime
+            operation=str(body.get('operation_id') or '')
+            if not operation: raise ValueError('Нужен номер операции.')
+            log_path=Path(_settings.path).with_name('account-operations.jsonl')
+            def record(stage,details):
+                with log_path.open('a',encoding='utf-8') as f:
+                    f.write(json.dumps({'at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        'operation_id':operation,'stage':stage,**details},ensure_ascii=False)+'\n')
+            record('intent',{'action':'root owner bootstrap','server':_profile().get('url'),
+                'host_key':body.get('host_key'),'backup':'online SQLite backup before account creation'})
+            root_credentials={'ssh_username':str(body.get('ssh_username') or 'root'),
+                              'sudo_password':str(body.get('sudo_password') or '')}
+            try:
+                result=root_bootstrap(_profile().get('url',''),body.get('ip'),str(body.get('root_password') or ''),
+                    str(body.get('host_key') or ''),str(body.get('username') or ''),str(body.get('password') or ''),operation,
+                    legacy_token=str(_profile().get('device_token') or '') if not str(_profile().get('device_token') or '').startswith('account:') else '',
+                    legacy_device_id=dv.device_fingerprint(),employee=str(body.get('employee') or ''),recovery=body.get('recovery') is True,
+                    **root_credentials)
+                record('result',{'result':'success','receipt':result})
+                return result
+            except Exception:
+                record('result',{'result':'unknown_or_failed','next':'inspect operation_id and account before retry'})
+                raise
+    if path == '/account/login':
+        with account_operation():
+            from pult.core.account_session import login
+            result=login(_profile().get('url',''),str(body.get('username') or ''),str(body.get('password') or ''),_settings.path)
+            with _lock:
+                previous=_profile().get('device_token','')
+                _profile()['device_token']='account:'+result['token']
+                try:
+                    _persist_settings()
+                except Exception:
+                    _profile()['device_token']=previous
+                    raise
+            return {**state(),'must_change_password':bool(result.get('must_change_password')),'username':result.get('username'),'pending':result.get('action')=='ok_pending'}
+    if path == '/account/password':
+        return api_client.request(_profile().get('url',''),'POST','/api/account/password',{
+            'username':str(body.get('username') or ''),'current':str(body.get('current') or ''),'new':str(body.get('new') or '')})
     if path == "/busy":
-        return {"busy": _mail_busy.locked() or any(j.get("state") == "running" for j in _jobs.values())}
+        return {"busy": _access_busy or _mail_busy.locked() or any(j.get("state") == "running" for j in _jobs.values())}
     if path == "/state":
         return state()
     if path == "/admin":

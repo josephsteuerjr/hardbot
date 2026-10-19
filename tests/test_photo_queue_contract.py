@@ -49,7 +49,8 @@ def test_photo_geo_does_not_depend_on_exif():
 def test_indexeddb_writes_wait_for_transaction_commit():
     assert "tx.oncomplete=()=>res();" in INDEX
     assert 'tx.onabort=()=>rej(tx.error||new Error("idb abort"));' in INDEX
-    assert 'put:(s,v,k)=>write(s,o=>' in INDEX
+    assert 'put:(s,v,k,valid)=>write(s,o=>' in INDEX
+    assert 'if(generation!==WIPE_GEN||(valid&&!valid())) return false;' in INDEX
     assert 'del:(s,k)=>write(s,o=>o.delete(k))' in INDEX
 
 
@@ -73,7 +74,7 @@ def test_permanent_photo_error_stays_visible_but_does_not_block_queue():
     assert 'onclick="retakeFailedPhoto()"' in INDEX
     assert "await retireReplacedPhoto(it);" in INDEX
     assert "const old=it.replaces_op_id;" in INDEX
-    assert 'await IDB.del("queue",op_id)' in INDEX
+    assert 'await IDB.ack(op_id)' in INDEX
 
 
 def test_retake_keeps_ios_user_activation_and_links_exact_failed_op():
@@ -90,7 +91,9 @@ def test_retake_keeps_ios_user_activation_and_links_exact_failed_op():
 
 
 def test_indexeddb_write_failure_is_not_reported_as_queued():
-    assert 'try{ await IDB.put("queue", entry); return true; }catch(e){ return false; }' in INDEX
+    body = INDEX[INDEX.index("async function enqueue("):INDEX.index("async function stampQueueOwners(")]
+    assert 'await IDB.put("queue", entry)' in body
+    assert 'catch(e){ return false; }' in body
     assert 'if(!(await enqueue(entry))){ toast(L().photolost); return; }' in INDEX
 
 

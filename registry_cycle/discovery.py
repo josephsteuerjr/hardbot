@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from registry_cycle.portfolio_paths import SECONDARY_CONTAINERS, secondary_folders
 
 from .config import ConfigBundle, GroupConfig
 from .models import DiscoveryReport, Issue, ManifestEntry
@@ -405,6 +406,7 @@ def _scan_group(
     backup_prefixes: tuple[str, ...],
     report: DiscoveryReport,
     audit_mode: str,
+    allowed_employees: set[Path] | None = None,
 ) -> None:
     group_path = root / group.name
     label = f"{country} / {group.name}"
@@ -447,6 +449,22 @@ def _scan_group(
         return
 
     unreadable: dict[Path, str] = {}
+    if allowed_employees is not None:
+        employee_folders = [p for p in employee_folders if p in allowed_employees]
+    elif group_path.parent == root and group.name.casefold() != 'soft':
+        for container in list(employee_folders):
+            if container.name.casefold() not in SECONDARY_CONTAINERS:
+                continue
+            employee_folders.remove(container)
+            try:
+                selected = secondary_folders(root, container)
+            except OSError as exc:
+                _remember_unreadable(unreadable, container, exc)
+                continue
+            if selected:
+                _scan_group(root, country,
+                    GroupConfig(str(container.relative_to(root)), group.profile, group.enabled, group.required),
+                    bundle, backup_prefixes, report, audit_mode, set(selected))
     for path in group_children:
         if _is_active_file(
             path,

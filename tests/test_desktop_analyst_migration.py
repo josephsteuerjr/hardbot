@@ -43,6 +43,22 @@ def test_import_rejects_existing_identity_and_running_job(backend, tmp_path):
         backend.import_settings(str(source))
 
 
+def test_confirmed_revocation_removes_only_rejected_profile_token(backend, monkeypatch):
+    from pult.core import api
+    prof = backend._profile()
+    prof.update(url='https://synthetic.invalid', device_token='account:synthetic-revoked')
+    backend._settings['profiles']['Other'] = {'url': 'https://other.invalid', 'device_token': 'synthetic-other'}
+    def rejected(*args, **kwargs):
+        raise api.AccessRevoked('Synthetic revoked')
+    monkeypatch.setattr(api, 'request', rejected)
+    with pytest.raises(api.AccessRevoked):
+        backend.admin('GET', '/admin/devices.json')
+    assert not prof['device_token']
+    saved = Settings.load(backend._settings.path)
+    assert not saved.get('device_token')
+    assert saved['profiles']['Other']['device_token'] == 'synthetic-other'
+
+
 def test_failed_import_keeps_current_settings(backend, tmp_path, monkeypatch):
     source = tmp_path / "old.json"
     source.write_text('{"url":"https://synthetic.invalid","sec":"registry"}', encoding="utf-8")

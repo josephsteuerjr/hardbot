@@ -9,7 +9,7 @@
 занесённой назавтра по нему нельзя; для этого и появился `received_at`.
 """
 import io
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from openpyxl import load_workbook
@@ -19,9 +19,12 @@ import digest_data as dd
 
 MGR = 563001
 EMP = "Ктконтролев К."
-TODAY = date.today()
+TODAY = db.workday.today()
 T = TODAY.isoformat()
 YESTERDAY = (TODAY - timedelta(days=1)).isoformat()
+# received_at is UTC; a host-local evening interpreted as UTC rolls into
+# the next office day. Use an explicit morning UTC on the intended day.
+RECEIVED_UTC = T + 'T09:05:00'
 
 
 def _payload(status):
@@ -49,19 +52,19 @@ def _seed():
             "INSERT INTO visits (contract_id, agent_id, created_at, payload, "
             "visit_lat, visit_lon, received_at) VALUES (?,?,?,?,?,?,?)",
             ("KT-1", 777001, T, _payload("Оплачен"), 38.5, 68.7,
-             datetime.now().isoformat(timespec="seconds")))
+             RECEIVED_UTC))
         # 2) выезд вчерашний, принят сегодня — «внесён позже»
         conn.execute(
             "INSERT INTO visits (contract_id, agent_id, created_at, payload, "
             "visit_lat, visit_lon, received_at) VALUES (?,?,?,?,?,?,?)",
             ("KT-2", 777001, YESTERDAY, _payload("Нет контакта"), 38.5, 68.7,
-             datetime.now().isoformat(timespec="seconds")))
+             RECEIVED_UTC))
         # 3) выезд сегодня, без точки телефона, закрыл ЧУЖОЙ аккаунт (руководитель)
         conn.execute(
             "INSERT INTO visits (contract_id, agent_id, created_at, payload, received_at) "
             "VALUES (?,?,?,?,?)",
             ("KT-3", MGR, T, _payload("В работе"),
-             datetime.now().isoformat(timespec="seconds")))
+             RECEIVED_UTC))
         conn.commit()
     db.set_manager(MGR, "Рук", [], [EMP])
     db.reset_role_caches()
@@ -95,14 +98,16 @@ def test_fresh_visit_carries_the_moment_it_reached_the_server():
     with db.connect() as conn:
         got = conn.execute("SELECT received_at FROM visits WHERE op_id='kt-op-1'"
                            ).fetchone()[0]
-    assert got and got[:10] == date.today().isoformat()
-    with db.connect() as conn:
-        conn.execute("DELETE FROM visits WHERE op_id='kt-op-1'")
-        conn.commit()
+    try:
+        assert got and got[:10] == datetime.now(timezone.utc).date().isoformat()
+    finally:
+        with db.connect() as conn:
+            conn.execute("DELETE FROM visits WHERE op_id='kt-op-1'")
+            conn.commit()
 
 
 def test_same_day_delivery_is_zero_not_missing():
-    assert dd._late_days(T, datetime.now().isoformat()) == 0
+    assert dd._late_days(T, RECEIVED_UTC) == 0
 
 
 def test_old_rows_without_the_mark_are_not_judged():

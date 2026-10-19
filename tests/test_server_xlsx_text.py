@@ -95,7 +95,9 @@ def test_every_formula_starter_is_text_and_numbers_stay_numbers():
     assert _formulas(buf.getvalue()) == []
     cells = list(load_workbook(io.BytesIO(buf.getvalue())).active[1])
     for cell, value in zip(cells, starters):
-        assert (cell.value, cell.data_type, cell.quotePrefix) == (value, "s", True)
+        # XML readers may retain an escaped CR or normalize it to LF. Only
+        # line-ending transport differs; type, quoting and formula checks stay.
+        assert (cell.value.replace("\r", "\n"), cell.data_type, cell.quotePrefix) == (value.replace("\r", "\n"), "s", True)
     text, whole, frac, day = cells[len(starters):]
     assert (text.value, text.data_type, text.quotePrefix) == ("обычный текст", "s", False)
     assert (whole.value, whole.data_type) == (5, "n")

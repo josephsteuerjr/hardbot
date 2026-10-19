@@ -24,7 +24,7 @@ import subset_handover as sh
 
 ROOT = Path(__file__).resolve().parent.parent
 
-НАШИ = ["Муминов Абдулло", "Курбонов Шохрух"]
+НАШИ = ["Примеров7 Сотрудник7", "Примеров6 Сотрудник6"]
 ЧУЖОЙ = "Мадаминов Лишний"
 
 
@@ -43,7 +43,7 @@ def _fresh_db(path: Path, monkeypatch) -> Path:
 def _fill_source(data: Path) -> None:
     """Три сотрудника: двое наших и один чужой, у всех всё одинаковое."""
     conn = sqlite3.connect(data / "hardbot.db")
-    people = {"Муминов Абдулло": 101, "Курбонов Шохрух": 102, ЧУЖОЙ: 103}
+    people = {"Примеров7 Сотрудник7": 101, "Примеров6 Сотрудник6": 102, ЧУЖОЙ: 103}
     for i, (name, tg) in enumerate(people.items()):
         conn.execute("INSERT INTO agent_bind (telegram_id, employee, kind, approved,"
                      " created_at) VALUES (?,?,'agent',1,'2026-09-01')", (tg, name))
@@ -273,7 +273,7 @@ def test_опечатка_в_фио_это_отказ_а_не_пустой_ар�
 
 
 def test_фио_узнаётся_по_началу_и_без_учёта_регистра(источник, tmp_path):
-    архив = _unpack(_take(источник, tmp_path, кто=["муминов  абдулло"]),
+    архив = _unpack(_take(источник, tmp_path, кто=["примеров7  сотрудник7"]),
                     tmp_path / "распаковка")
     assert _count(архив / sh.DB_NAME, "clients") == 2
 
@@ -434,7 +434,7 @@ def test_лишний_пробел_в_фио_не_делает_договор_ч
     приезжала, а отчёт уверял оператора, что это другой человек."""
     conn = sqlite3.connect(приёмник / "hardbot.db")
     conn.execute("INSERT INTO clients (contract_id, client, responsible) "
-                 "VALUES ('KD00','Старая строка','Муминов  Абдулло')")
+                 "VALUES ('KD00','Старая строка','Примеров7  Сотрудник7')")
     conn.commit()
     conn.close()
 
@@ -461,10 +461,10 @@ def test_выданный_на_машине_вход_не_раздваивает
     uid = sh.LOCAL_UID_BASE
     conn = sqlite3.connect(приёмник / "hardbot.db")
     conn.execute("INSERT INTO agent_bind (telegram_id, employee, kind, approved,"
-                 " created_at) VALUES (?,'Муминов Абдулло','agent',1,'2026-09-20')",
+                 " created_at) VALUES (?,'Примеров7 Сотрудник7','agent',1,'2026-09-20')",
                  (uid,))
     conn.execute("INSERT INTO users (telegram_id, name, created_at) "
-                 "VALUES (?,'Муминов Абдулло','2026-09-20')", (uid,))
+                 "VALUES (?,'Примеров7 Сотрудник7','2026-09-20')", (uid,))
     conn.commit()
     conn.close()
 
@@ -473,7 +473,7 @@ def test_выданный_на_машине_вход_не_раздваивает
     цель = приёмник / "hardbot.db"
     conn = sqlite3.connect(цель)
     привязки = conn.execute("SELECT telegram_id, approved FROM agent_bind "
-                            "WHERE employee='Муминов Абдулло'").fetchall()
+                            "WHERE employee='Примеров7 Сотрудник7'").fetchall()
     conn.close()
     assert привязки == [(uid, 1)]
 
@@ -516,7 +516,7 @@ def test_занятый_номер_не_уводит_чужую_личность
     assert conn.execute("SELECT name FROM users WHERE telegram_id=101"
                         ).fetchone()[0] == "Местный Сотрудник"
     новый = conn.execute("SELECT telegram_id FROM agent_bind "
-                         "WHERE employee='Муминов Абдулло'").fetchone()[0]
+                         "WHERE employee='Примеров7 Сотрудник7'").fetchone()[0]
     conn.close()
     assert новый >= sh.LOCAL_UID_BASE
     assert _count(цель, "visits", f"agent_id = {новый}") == 3

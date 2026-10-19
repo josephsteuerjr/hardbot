@@ -119,6 +119,23 @@ check_profiles() {
       [ -n "$(env_get DOMAIN)" ] || die "в .env включён профиль proxy, но не задан DOMAIN"
       ;;
   esac
+  # This overlay is opt-in and must bind a specific corporate IPv4 address.
+  case "$(env_get COMPOSE_FILE)" in
+    *docker-compose.lan.yml*|*docker-compose.lan-tls.yml*)
+      local address a b c d part
+      address="$(env_get APP_LAN_IP)"
+      [[ "$address" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
+        || die "APP_LAN_IP должен быть приватным IPv4 интерфейса ВМ"
+      IFS=. read -r a b c d <<< "$address"
+      for part in "$a" "$b" "$c" "$d"; do
+        ((10#$part <= 255)) || die "некорректный APP_LAN_IP"
+      done
+      if ! ((10#$a == 10 || (10#$a == 172 && 10#$b >= 16 && 10#$b <= 31) ||
+             (10#$a == 192 && 10#$b == 168))); then
+        die "APP_LAN_IP должен быть в диапазоне 10/8, 172.16/12 или 192.168/16"
+      fi
+      ;;
+  esac
 }
 
 container_id() { compose ps -q "$1" 2>/dev/null || true; }

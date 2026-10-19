@@ -98,8 +98,8 @@ export const fieldHelp: Section = {
     // вошедшим по логину-паролю (у ссылочного входа аккаунта на сервере нет).
     const account = (await hard.state()).device?.username || "";
     root.innerHTML = `<div class="section"><div class="grid2">
-      <div class="list-row"><div class="grow"><div class="nm">Вход — по вашей ссылке</div>
-        <div class="sub">Руководитель выдаёт её в «Входе команды». Телефон продолжает работать: вход на ПК его не заменяет.</div></div></div>
+      <div class="list-row"><div class="grow"><div class="nm">Вход — по личному профилю</div>
+        <div class="sub">Профиль и компьютер подтверждает ваш руководитель. При замене ПК прежний вход закрывается. Телефон продолжает работать: вход на ПК его не заменяет.</div></div></div>
       <div class="list-row"><div class="grow"><div class="nm">Визит закрывается в телефоне</div>
         <div class="sub">На ПК записывайте офисные контакты, попытки связи, информацию, обещания и сообщённые оплаты в карточке. Офисная запись не создаёт выезд или GPS.</div></div></div>
       <div class="list-row"><div class="grow"><div class="nm">Чеки — для сверки оплат</div>

@@ -1,8 +1,6 @@
 {
   "schema_version": 1,
-  "responsible_aliases": {
-    "Тургунов Музафар": "Тургунов Музаффар"
-  },
+  "responsible_aliases": {},
   "safety": {
     "require_baseline_owner_blank": true,
     "max_total_rows": 2500,

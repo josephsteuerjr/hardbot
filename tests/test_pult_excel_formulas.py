@@ -4,9 +4,9 @@
 правами, а открывает аналитик: «=HYPERLINK(…)» в «Реестре целиком» исполнялся
 бы при открытии книги со всем реестром. Правило одно, способов записи два:
 
-* openpyxl («Реестр целиком», «Метки») — строка ложится текстом как есть, без
+* openpyxl («Реестр целиком», «Метки») — строка ложится текстом, без
   апострофа внутри: тип ячейки «s» и флаг quotePrefix, как у набранного в
-  Excel апострофа;
+  Excel апострофа; XML-нормализация CR → LF при чтении не является формулой;
 * через сам Excel (починка комментариев, обогащение) — ведущий апостроф,
   который Excel съедает при вводе, поэтому повторный прогон читает ровно
   серверный текст и ничего не переписывает.
@@ -76,8 +76,10 @@ def test_registry_export_keeps_visit_text_as_text(tmp_path):
     ws = load_workbook(path).active
     for r, text in enumerate(texts, start=4):
         cell = ws.cell(row=r, column=4)
-        # ровно исходный текст: ни формулы, ни апострофа внутри значения
-        assert cell.data_type == "s" and cell.value == text, (r, cell.value)
+        # XML readers may preserve an escaped CR or normalize a literal CR to
+        # LF. Compare that transport difference on both sides; still require
+        # exact remaining text, text type, quoting and absence of formulas.
+        assert cell.data_type == "s" and cell.value.replace("\r", "\n") == text.replace("\r", "\n"), (r, cell.value)
         assert cell.quotePrefix is (text in DANGEROUS)
         tips = ws.cell(row=r, column=5)
         assert tips.data_type == "s" and tips.value == "=1+1"
@@ -100,7 +102,7 @@ def test_markers_export_keeps_label_as_text(tmp_path):
     ws = load_workbook(path).active
     for r, text in enumerate(DANGEROUS, start=2):
         label = ws.cell(row=r, column=7)
-        assert label.data_type == "s" and label.value == text
+        assert label.data_type == "s" and label.value.replace("\r", "\n") == text.replace("\r", "\n")
         assert label.quotePrefix is True
         assert ws.cell(row=r, column=6).value == "-ул. Тестовая, 1"
         assert ws.cell(row=r, column=1).value == datetime(2026, 9, 25, 10, 15)

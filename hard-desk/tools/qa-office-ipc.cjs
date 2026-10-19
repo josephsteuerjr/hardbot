@@ -17,7 +17,7 @@ let python=null,config=null;
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const wait=async(fn,message)=>{for(let i=0;i<120;i++){if(await fn())return;await sleep(100)}throw new Error(message)};
 async function startServer(port=0){
-  python=spawn('python',['-X','utf8',path.join(root,'_local/hard-office-2026-10-11/server-fixture.py'),String(port)],{windowsHide:true,env:{...process.env,PYTHONIOENCODING:'utf-8',HARD_QA_FIXTURE_DIR:fixtureDirectory},stdio:['ignore','pipe','pipe']});
+  python=spawn('python',['-X','utf8',path.join(__dirname,'qa-server-fixture.py'),String(port)],{windowsHide:true,env:{...process.env,PYTHONIOENCODING:'utf-8',HARD_QA_FIXTURE_DIR:fixtureDirectory},stdio:['ignore','pipe','pipe']});
   return await new Promise((resolve,reject)=>{let output='',error='';const timer=setTimeout(()=>reject(new Error('Fixture timeout: '+error.slice(-1000))),20000);python.stderr.on('data',d=>error+=d);python.stdout.on('data',d=>{output+=d;const line=output.split(/\r?\n/).find(line=>line.startsWith('OFFICE-QA '));if(line){clearTimeout(timer);resolve(JSON.parse(line.slice(10)))}});python.once('error',reject);python.once('exit',code=>{if(!output.includes('OFFICE-QA ')){clearTimeout(timer);reject(new Error('Fixture exit '+code+': '+error.slice(-1000)))}})});
 }
 function loadModule(name){const code=buildSync({entryPoints:[path.join(__dirname,'../src/main/'+name+'.ts')],bundle:true,platform:'node',format:'cjs',write:false,external:['electron']}).outputFiles[0].text;const module={exports:{}};require('node:vm').runInNewContext(code,{module,exports:module.exports,require,Buffer,Response,URLSearchParams,AbortController,setTimeout,clearTimeout});return module.exports;}

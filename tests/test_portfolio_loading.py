@@ -121,11 +121,12 @@ def test_unknown_client_metric_event_is_rejected(monkeypatch):
 def test_phone_replaces_card_cache_in_one_atomic_transaction():
     warm = INDEX[INDEX.index("async function warmCards("):INDEX.index(
         "async function syncWarmCount(")]
-    replace = INDEX[INDEX.index("replace:(s,entries)"):INDEX.index("};\n})();")]
+    replace = INDEX[INDEX.index("replace:(s,entries,valid)"):INDEX.index("};\n})();")]
 
     assert 'await IDB.replace("cards", entries.concat(other.map' in warm
     assert 'await IDB.put("cards"' not in warm
     assert "o.clear()" in replace and "o.put(v,k)" in replace
+    assert "},valid)" in replace, "a wipe must invalidate delayed replacement transactions"
 
 
 def test_large_list_yields_between_bounded_batches():

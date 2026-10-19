@@ -5,7 +5,7 @@ const esbuild = require('esbuild');
 const code = esbuild.buildSync({entryPoints:[path.join(__dirname,'../src/main/link.ts')],bundle:true,platform:'node',format:'cjs',write:false}).outputFiles[0].text;
 const moduleLink = {exports:{}};
 vm.runInNewContext(code,{module:moduleLink,exports:moduleLink.exports,require});
-const {splitLink} = moduleLink.exports;
+const {splitLink,serverOrigin} = moduleLink.exports;
 const expected = {base:'https://synthetic.invalid',code:'test_code123'};
 for (const text of ['https://synthetic.invalid/i/test_code123','Synthetic staff — https://synthetic.invalid/i/test_code123','<https://synthetic.invalid/i/test_code123>','https://synthetic.invalid/#link=test_code123']) {
   assert.deepEqual(JSON.parse(JSON.stringify(splitLink(text))), expected);
@@ -25,3 +25,8 @@ assert.equal(splitLink('http://8.8.8.8/i/test_code123').base,'https://8.8.8.8');
 assert.equal(splitLink('http://hard.corp.local/i/test_code123').base,'https://hard.corp.local');
 assert.equal(splitLink('http://[fe80::1]/i/test_code123').base,'https://[fe80::1]');
 console.log('Login link parser: labelled line, legacy URL, credentials, ambiguous input and TLS policy (private-range plain http) passed');
+assert.equal(serverOrigin('http://10.0.0.25:8080/'),'http://10.0.0.25:8080');
+assert.equal(serverOrigin('http://synthetic.invalid/'),'https://synthetic.invalid');
+assert.equal(serverOrigin('http://8.8.8.8/'),'https://8.8.8.8');
+for (const address of ['https://user:pass@synthetic.invalid','https://synthetic.invalid/path','https://synthetic.invalid?token=x','file:///etc/passwd'])
+  assert.equal(serverOrigin(address),null);

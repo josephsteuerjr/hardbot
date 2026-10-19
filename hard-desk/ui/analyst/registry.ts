@@ -11,7 +11,7 @@ const XLS = [{ name: "Excel", extensions: ["xlsx", "xlsm", "xlsb", "xls"] }];
 const st = {
   tab: "import" as "import" | "enrich" | "columns" | "export" | "recalled",
   imp: null as any, sel: new Set<string>(), full: false, restore: false, comments: false, softEdits: false, preview: null as any, applied: null as any,
-  impQuery: "", impFilter: "all", impSort: "name",
+  impQuery: "", impFilter: "all", impSort: "name", excludedIds: "",
   enr: null as any, matched: [] as any[], enrSel: new Set<string>(), since: "", until: "", check: null as any, decisions: {} as Record<string, string>, applyRes: null as any,
   cols: null as any, colDecisions: [] as any[], scan: null as any,
   expEmps: [] as any[], expSel: new Set<string>(), expSince: "", expUntil: "",
@@ -59,6 +59,8 @@ async function importTab(el: HTMLElement) {
         <span class="muted" style="font-size:13.5px">Кого грузить:</span>
         <button class="btn small" data-sel="none">снять</button><button class="btn small" data-sel="existing">есть в БД</button><button class="btn small" data-sel="all">все</button>
         <span class="spacer"></span><span class="muted" style="font-size:13px">отмечено ${n(st.sel.size)} из ${n(book.employees.length)}</span></div>
+      <details><summary>Исключить отдельные договоры из импорта</summary><p class="hint">Введите номера в точности как в исходном файле, по одному на строку. Предпросмотр покажет число исключённых строк. Остальные данные файла сохраняются.</p>
+        <textarea class="input" data-excluded-ids rows="3" aria-label="Номера договоров для исключения">${esc(st.excludedIds)}</textarea></details>
       <div class="toolbar"><input class="input search" data-imp-query placeholder="Поиск сотрудника" value="${esc(st.impQuery)}">
         <select class="input" data-imp-filter style="width:auto">${[["all","Все сотрудники"],["selected","Отмеченные"],["existing","Есть в файле и БД"],["new","Новые для БД"],["db_only","Только в БД"]].map(([k,v])=>`<option value="${k}" ${st.impFilter===k?'selected':''}>${v}</option>`).join("")}</select>
         <select class="input" data-imp-sort style="width:auto">${[["name","По ФИО"],["file","По договорам файла"],["db","По договорам в БД"],["selected","Сначала отмеченные"]].map(([k,v])=>`<option value="${k}" ${st.impSort===k?'selected':''}>${v}</option>`).join("")}</select>
@@ -119,7 +121,12 @@ async function importTab(el: HTMLElement) {
     if (k === "full" && cb.checked) toast("Полный режим включён для выбранных сотрудников");
     redraw();
   }));
-  const body = () => ({ selected: [...st.sel], full: st.full, restore_manual: st.restore, replace_comments: st.comments, soft_edits: st.softEdits });
+  el.querySelector<HTMLTextAreaElement>('[data-excluded-ids]')?.addEventListener('input',event=>{
+    st.excludedIds=(event.target as HTMLTextAreaElement).value;st.preview=null;
+    el.querySelector<HTMLButtonElement>('[data-apply]')?.setAttribute('disabled','');
+  });
+  const body = () => ({ selected: [...st.sel], full: st.full, restore_manual: st.restore, replace_comments: st.comments, soft_edits: st.softEdits,
+    exclude_contracts: st.excludedIds.split(/[\r\n,;]+/).map(x=>x.trim()).filter(Boolean) });
   const logEl = () => el.querySelector("#imp-log")!;
   el.querySelector("[data-preview]")?.addEventListener("click", guard(async () => {
     invalidate(); logEl().textContent = "Проверяю…";

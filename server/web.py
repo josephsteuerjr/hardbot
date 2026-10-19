@@ -13,6 +13,7 @@ aiohttp идёт в комплекте с aiogram — новых зависим�
 from __future__ import annotations
 
 import asyncio
+import secrets
 import collections
 import functools
 import hashlib
@@ -62,6 +63,7 @@ import digest_data
 import evidence
 import maplink
 import accounts
+import account_policy
 import routing_client
 import workload
 import stt_client
@@ -204,29 +206,34 @@ def validate_init_data(init_data: str, token: str, max_age: int = _MAX_AGE) -> d
 def _uid(request: web.Request) -> int | None:
     """telegram_id запросившего: из подписанного initData (внутри Телеги), из токена
     автономного PWA (вне Телеги) либо из дев-обхода."""
-    data = validate_init_data(request.headers.get("X-Init-Data") or "",
-                              os.getenv("BOT_TOKEN", ""))
-    if not data and _is_drain(request):
+    strict = account_policy.strict()
+    data = None if strict else validate_init_data(request.headers.get("X-Init-Data") or "",
+                                                   os.getenv("BOT_TOKEN", ""))
+    if not strict and not data and _is_drain(request):
         # Старый адрес (только выгрузка): мини-приложение старого бота досылает
         # очередь с его подписью. Токен старого бота проверяет ТОЛЬКО подпись
         # и ТОЛЬКО здесь: сам бот не запускается, основной адрес его не знает.
         data = validate_init_data(request.headers.get("X-Init-Data") or "",
                                   os.getenv("DRAIN_BOT_TOKEN", ""))
-    if data and isinstance(data.get("user"), dict):
-        return int(data["user"].get("id") or 0) or None
-    # Автономное приложение (PWA вне Телеги): авторизация по выданному ботом токену.
+    # An explicit account token wins over Telegram initData when both exist.
+    # Otherwise a logged-in WebView could show a different person's signed
+    # Telegram portfolio after password login (or bypass a pending account).
+    # Автономное приложение (PWA вне Телеги): авторизация по выданному токену.
     # ТОЛЬКО из заголовка — в query токен нельзя (осел бы в access-логах/Referer/истории).
     tok = (request.headers.get("X-App-Token") or "").strip()
-    if tok:
+    if tok and not strict:
         uid = db.uid_for_app_token(tok)
-        if uid:
+        if uid and not accounts.legacy_uid_deleted(uid):
             db.touch_app_token(tok)   # скользящие 30 дней: пользуются — не протухает
             return uid
+    if tok:
         # Приложение выездника на ПК (agent_devices): свой класс токена, работает
         # теми же ручками, что телефон. Привязку agent_bind не трогает — телефон
         # живёт своей жизнью, вытеснения нет.
         state, dev = db.agent_device_check(tok, request.remote)
         if state == "ok" and dev:
+            if strict and not dev["account_id"]:
+                return None
             # Токен, выпущенный аккаунту логина-пароля: доступ — только после
             # подтверждения администратора (accounts.device_gate_by_token). До подтверждения
             # данные закрыты, но /api/bootstrap честно отвечает pending —
@@ -242,7 +249,27 @@ def _uid(request: web.Request) -> int | None:
                     return None
             request["desk_employee"] = dev["employee"]
             return int(dev["telegram_id"] or 0) or None
-    if DEV:
+        return None  # presented bearer was invalid; never fall back to initData
+    ptok = (request.headers.get('X-Pult-Token') or '').strip()
+    if ptok:
+        state, dev = db.manager_device_check(ptok, _admin_peer(request))
+        if state != 'ok' or not dev or not dev['account_id']:
+            return None
+        gate, employee = accounts.device_gate_by_token('manager_devices',int(dev['id']))
+        with db.connect() as conn:
+            acc=conn.execute('SELECT role FROM accounts WHERE id=?',(dev['account_id'],)).fetchone()
+        if not acc or acc['role'] not in ('manager','security','full'): return None
+        if gate!='ok':
+            request['account_awaiting']=employee
+            request['account_gate']=gate
+            return None
+        request['manager_device_scope']=_manager_scope(int(dev['telegram_id']))
+        request['manager_device_role']=acc['role']
+        return int(dev['telegram_id'])
+    if data and isinstance(data.get("user"), dict):
+        uid = int(data["user"].get("id") or 0) or None
+        return uid if uid and not accounts.legacy_uid_deleted(uid) else None
+    if DEV and not strict:
         raw = request.headers.get("X-Dev-Uid") or request.query.get("dev_uid")
         try:
             return int(raw) if raw else None
@@ -302,20 +329,32 @@ def _manager_gate(request: web.Request) -> tuple[int, dict, list[str]]:
     Безопасник смотрит, но ничего не меняет: пишущие ручки и выдача входа для
     него закрыты (403 read_only)."""
     ptok = (request.headers.get("X-Pult-Token") or "").strip()
+    if account_policy.strict() and not ptok:
+        raise _json_error(web.HTTPUnauthorized, "legacy_cutover")
     if ptok:
         state, dev = db.manager_device_check(ptok, _admin_peer(request))
         if state != "ok":
             raise _json_error(web.HTTPUnauthorized, f"device_{state}")
         uid = int(dev["telegram_id"])
+        if account_policy.strict() and not dev["account_id"]:
+            raise _json_error(web.HTTPUnauthorized, "legacy_cutover")
         # Токен, выпущенный аккаунту логина-пароля (руководителю/аналитику):
         # доступ — только после активации администраторами (для этих ролей —
         # двух подтверждений). Раньше срока — честный отказ с кодом.
         if dev["account_id"]:
             import accounts as _accounts
+            with db.connect() as _conn:
+                _principal = _conn.execute("SELECT role, telegram_id FROM accounts WHERE id=?",
+                                           (dev["account_id"],)).fetchone()
+            if (not _principal or _principal["role"] not in ("manager", "security", "full")
+                    or int(_principal["telegram_id"] or 0) != uid):
+                raise _json_error(web.HTTPForbidden, "account_role")
             gate, _gate_employee = _accounts.device_gate_by_token(
                 "manager_devices", int(dev["id"]))
             if gate == "pending":
                 raise _json_error(web.HTTPForbidden, "account_pending")
+            if gate == "password":
+                raise _json_error(web.HTTPForbidden, "password_change_required")
             if gate != "ok":
                 raise _json_error(web.HTTPForbidden, "account_blocked")
     else:
@@ -327,6 +366,9 @@ def _manager_gate(request: web.Request) -> tuple[int, dict, list[str]]:
     mgr = digest_data.manager_scope(uid, is_owner=(uid == ADMIN_ID))
     if mgr is None:
         raise web.HTTPForbidden(text="not a manager")
+    if ptok and dev["account_id"] and (
+            ("full" if uid == ADMIN_ID else db.manager_role(mgr.get("role"))) != _principal["role"]):
+        raise _json_error(web.HTTPForbidden, "account_role")
     caps = db.manager_caps(mgr.get("role"), is_owner=(uid == ADMIN_ID))
     # «Только чтение» — про ручки руководителя; отметка обзвона в «Контроле» —
     # работа самого безопасника.
@@ -412,6 +454,8 @@ def _manager_envelope(mgr, team, iso, today, prev, nxt, uid) -> dict:
 
 
 def _employee(uid: int, request: web.Request | None = None) -> str | None:
+    if request is not None and 'manager_device_scope' in request:
+        return db.acting_employee(uid,request['manager_device_scope'])
     # Приложение выездника на ПК знает СВОЁ ФИО из строки устройства: оно не
     # следует за привязкой (телефон могли сменить), портфель на ПК стабилен.
     if request is not None:
@@ -453,6 +497,9 @@ def _auth(request: web.Request) -> tuple[int, str]:
     emp = _employee(uid, request)
     if not emp:
         raise web.HTTPForbidden(text="not bound")
+    if request.query.get('mode')=='soft' or request.query.get('profile')=='soft' or request.headers.get('X-Work-Product')=='soft':
+        import staff_roster
+        emp=staff_roster.product_employee(emp,'soft')
     return uid, emp
 
 
@@ -965,7 +1012,21 @@ async def _bootstrap(request: web.Request) -> web.Response:
         # показать экран ожидания, а не «вход сгорел».
         awaiting = request.get("account_awaiting")
         if awaiting:
+            if request.get('account_gate')=='blocked':
+                raise _json_error(web.HTTPUnauthorized,'Доступ профиля или устройства изменился. Войдите заново или обратитесь к руководителю.')
+            if request.get('account_gate')=='gps':
+                return web.json_response({'ok':True,'pending':True,'pending_kind':'gps','uid':0,'lang':lang_of(0),'employee':awaiting})
+            if request.get("account_gate") == "password":
+                found = await asyncio.to_thread(_account_device_of_request, request)
+                linked = await asyncio.to_thread(accounts.account_of_token, found[2], found[0]) if found else None
+                return web.json_response({"ok": True, "pending": True, "pending_kind": "password",
+                                          "must_change_password": True, "username": linked[1] if linked else "",
+                                          "employee": awaiting, "lang": lang_of(0)})
+            # pending_kind различает ОЖИДАНИЕ АККАУНТА (вход по логину-паролю
+            # ждёт администратора) и ОЖИДАНИЕ ПРИВЯЗКИ (второе устройство на
+            # ФИО): телефону нужны разные тексты, не тексты заявки привязки.
             return web.json_response({"ok": True, "pending": True, "uid": 0,
+                                      "pending_kind": "account",
                                       "lang": lang_of(0), "employee": awaiting})
         raise web.HTTPUnauthorized(text="auth")
     await asyncio.to_thread(_remember_from_init, request)     # вход в приложение — тоже знакомство
@@ -983,6 +1044,10 @@ async def _bootstrap(request: web.Request) -> web.Response:
     lang = lang_of(uid)
     emp = _employee(uid, request)
     if not emp:
+        if 'manager_device_scope' in request:
+            return web.json_response({'ok':True,'uid':uid,'lang':lang,'employee':'','persons':[],
+                'meta':_meta(lang),'roles':{'manager':True,'employees':request['manager_device_scope'],
+                'acting':'','role':request.get('manager_device_role','manager')},'today':workday.today().isoformat()})
         pend = db.pending_binding(uid)
         if pend:   # привязка есть, но ждёт аппрува ADMIN — данные не отдаём
             return web.json_response({"ok": True, "pending": True, "uid": uid, "lang": lang,
@@ -1003,9 +1068,12 @@ async def _bootstrap(request: web.Request) -> web.Response:
     # Контур «Софт»: у человека есть портфель и по второй колонке
     # ответственности. Флаг едет в roles (вместе с режимом ?mode=soft это
     # переключатель «Выездник | Софт» в оболочке).
-    soft_exists = db.soft_portfolio_exists(emp)
+    import staff_roster
+    soft_employee=staff_roster.product_employee(emp,'soft')
+    soft_exists = db.soft_portfolio_exists(soft_employee)
     soft_mode = soft_exists and request.query.get("mode") == "soft"
     if soft_mode:
+        emp=soft_employee
         grouped = db.persons_for_soft(emp)
     else:
         grouped = db.persons_for_employee(emp)
@@ -1086,9 +1154,17 @@ async def _bootstrap(request: web.Request) -> web.Response:
 
 async def _identity(request: web.Request) -> web.Response:
     """Own principal only; also needed to recover a queue on the old origin."""
-    uid, employee = await asyncio.to_thread(_auth, request)
+    uid = await asyncio.to_thread(_uid, request)
+    if not uid:
+        # A valid newly enrolled device may still await approval/password.
+        # It cannot send work, but it is not a deleted or revoked credential.
+        if request.get('account_gate') in ('pending', 'password', 'gps'):
+            return web.json_response({'ok': True, 'uid': 0, 'pending': True},
+                                     headers={'Cache-Control': 'no-store'})
+        raise web.HTTPUnauthorized(text='auth')
+    employee = await asyncio.to_thread(_employee, uid, request) or ''
     import access_policy
-    version = await asyncio.to_thread(access_policy.version, [employee])
+    version = await asyncio.to_thread(access_policy.version, [employee] if employee else [])
     return web.json_response({"ok": True, "uid": uid, "employee": employee,
                              "scope_version": version, "offline_read_seconds": access_policy.OFFLINE_READ_SECONDS},
                              headers={"Cache-Control": "no-store"})
@@ -1243,7 +1319,7 @@ async def _note_add(request: web.Request) -> web.Response:
     rep = (body.get("rep") or "").strip() or None
     if rep:
         row = db.get_client(rep)
-        if not row or (row["responsible"] != emp and uid != ADMIN_ID):
+        if not row or (row["responsible"] != emp and row["responsible_soft"] != emp and uid != ADMIN_ID):
             raise web.HTTPNotFound(text="person")
     op_id = (str(body.get("op_id") or "")).strip() or None
     nid = db.add_note(uid, text, employee=emp, client_rep=rep, op_id=op_id)
@@ -1811,6 +1887,9 @@ async def _save(request: web.Request) -> web.Response:
     body = await request.json()
     rep = body.get("rep", "")
     row = db.get_client(rep)
+    if body.get('kind') in ('call','payment'):
+        import staff_roster
+        emp=staff_roster.product_employee(emp,'soft')
     if body.get("kind") == "office":
         raise web.HTTPBadRequest(text="Офисная запись требует /api/office/action")
     if body.get("kind") == "payment":
@@ -3154,6 +3233,8 @@ async def _app_login(request: web.Request) -> web.StreamResponse:
     сперва пробует свой сохранённый токен (человек чаще всего уже внутри и просто
     ткнул старый QR) и только потом показывает отказ.
     """
+    if account_policy.strict():
+        raise _json_error(web.HTTPGone, "legacy_cutover")
     # Перебор кодов считаем тем же счётчиком неудач, что у админ-ручек: /i/ —
     # такая же дверь без пароля, и оставлять её без счёта нельзя.
     _admin_too_many_fails(request)
@@ -3217,6 +3298,8 @@ async def _redeem(request: web.Request) -> web.Response:
     Код невалиден (исчерпан/просрочен/чужой) → 410: клиент решает сам — если на
     устройстве уже есть живой токен, продолжает тихо, иначе показывает отказ.
     """
+    if account_policy.strict():
+        raise _json_error(web.HTTPGone, "legacy_cutover")
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
@@ -3367,6 +3450,8 @@ def _admin_issue_link(body: dict, base: str) -> tuple[int, dict]:
     того, как заводится личность: иначе опечатка в `uses` оставляла бы в базе
     лишнюю служебную учётку.
     """
+    if account_policy.strict():
+        return 410, {"error": "legacy_cutover"}
     employee = str(body.get("employee") or "").strip()
     kind = "courier" if body.get("kind") == "courier" else "agent"
     raw_uses = body.get("uses")
@@ -3732,6 +3817,14 @@ async def _visit_notify(request: web.Request, notify_row, uid: int,
     Тело запроса здесь уже прочитано, а request нужен только ради request.app
     (бот) — обращаться к нему после ответа безопасно. Своё исключение фоновая
     задача обязана съесть сама: наверх его принимать некому."""
+    if account_policy.strict():
+        # Every outbox claim needs explicit per-channel skip attempts; an empty
+        # attempt set is classified uncertain and otherwise accumulates debt.
+        for kind in (db.PUSH_GROUP, db.PUSH_VISIT, db.PUSH_REPORT_CHAT):
+            db.log_push(kind, db.PUSH_SKIP_DISABLED,
+                        employee=notify_row["responsible"] or "",
+                        contract_id=notify_row["contract_id"], note="account_cutover")
+        return
     try:
         # Снимки офлайн-визита приезжают ВМЕСТЕ с ним, то есть сегодня: ждём их
         # по дню доставки, а не по дню выезда (day здесь — день выезда).
@@ -3791,6 +3884,11 @@ async def _notify_group(request: web.Request, row, uid: int,
     (одна транзакция на весь файл) это database is locked, а исключение отсюда
     превращало бы сохранённый визит в HTTP 500 — и оболочка на 5xx прекращает
     разбор всей очереди."""
+    if account_policy.strict():
+        db.log_push(db.PUSH_GROUP, db.PUSH_SKIP_DISABLED,
+                    employee=row["responsible"] or "", contract_id=row["contract_id"],
+                    note="account_cutover")
+        return
     try:
         emp = row["responsible"] or ""
         cid = row["contract_id"]
@@ -3845,6 +3943,11 @@ async def _notify_report_chats(request: web.Request, row, vlat, vlon,
     """Отчёт о визите в закреплённые беседы (опциональная фича, настраивается
     пультом): текст по образцу постов сотрудников + фото за день + фактические
     гео-точки (закрытие визита и съёмка фото — такое не подделаешь)."""
+    if account_policy.strict():
+        db.log_push(db.PUSH_REPORT_CHAT, db.PUSH_SKIP_DISABLED,
+                    employee=row["responsible"] or "", contract_id=row["contract_id"],
+                    note="account_cutover")
+        return
     bot = request.app.get("bot")
     if not bot:
         db.log_push(db.PUSH_REPORT_CHAT, db.PUSH_SKIP_NO_BOT,
@@ -3919,6 +4022,11 @@ async def _notify_managers(request: web.Request, row, dist_m: int | None = None,
     Адресация — db.managers_for_employee (обратный индекс с направленцами и
     сравнением по _name_key): раньше сверка шла с сырым m['employees'], и
     руководители НАПРАВЛЕНИЙ не получали визит-пуш вообще."""
+    if account_policy.strict():
+        db.log_push(db.PUSH_VISIT, db.PUSH_SKIP_DISABLED,
+                    employee=row["responsible"] or "", contract_id=row["contract_id"],
+                    note="account_cutover")
+        return
     emp = row["responsible"] or ""
     cid = row["contract_id"]
     bot = request.app.get("bot")
@@ -4036,6 +4144,8 @@ async def _notify_managers(request: web.Request, row, dist_m: int | None = None,
 
 # --- «Карта дня» руководителя (подписанная ссылка из дайджеста) --------------
 def _map_auth(request: web.Request) -> tuple[str, str]:
+    if account_policy.strict():
+        raise _json_error(web.HTTPForbidden, "legacy_cutover")
     q = request.query
     emp, d = q.get("e", ""), q.get("d", "")
     if not maplink.verify(emp, d, q.get("x", ""), q.get("s", "")):
@@ -4413,6 +4523,8 @@ async def _manager_app_link(request: web.Request) -> web.Response:
     число обменов — серверные. Чужое ФИО не проходит: граница команды проверяется
     на сервере, а не в интерфейсе.
     """
+    if account_policy.strict():
+        raise _json_error(web.HTTPGone, "legacy_cutover")
     uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     body = await _json_object(request)
     if body is None:
@@ -4768,6 +4880,8 @@ def _device_me(uid: int, mgr: dict) -> dict:
 async def _manager_device_enroll(request: web.Request) -> web.Response:
     """{code, device} → {token, device_id, me, caps}. Код — из ссылки входа
     руководителя (целиком или один код). Обмен тратит одно её использование."""
+    if account_policy.strict():
+        raise _json_error(web.HTTPGone, "legacy_cutover")
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
@@ -5126,9 +5240,13 @@ async def _admin_manager_device_revoke(request: web.Request) -> web.Response:
         body = {}
     try:
         if body.get("id") is not None:
-            n = db.revoke_manager_devices(device_id=int(body["id"]), by="admin")
+            n = int(accounts.revoke_approved_device("manager_devices", int(body["id"]), by="operator:admin"))
         elif body.get("telegram_id") is not None and body.get("all"):
-            n = db.revoke_manager_devices(telegram_id=int(body["telegram_id"]), by="admin")
+            with db.connect() as conn:
+                ids = [r[0] for r in conn.execute("SELECT id FROM manager_devices "
+                       "WHERE telegram_id=? AND revoked_at IS NULL", (int(body["telegram_id"]),))]
+            n = sum(accounts.revoke_approved_device("manager_devices", dev_id, by="operator:admin")
+                    for dev_id in ids)
         else:
             raise ValueError
     except (TypeError, ValueError):
@@ -5144,6 +5262,8 @@ async def _agent_device_enroll(request: web.Request) -> web.Response:
 
     Ссылка руководителя отвергается (не тратится): пульту — свой энролл. Привязку
     agent_bind не трогаем: телефон человека продолжает работать."""
+    if account_policy.strict():
+        raise _json_error(web.HTTPGone, "legacy_cutover")
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
@@ -5206,6 +5326,84 @@ async def _agent_device_logout(request: web.Request) -> web.Response:
 # и подтверждение владельцем (админ-ручки). До подтверждения токен работает
 # лишь на /api/bootstrap → pending (см. _uid).
 
+async def _account_register(request: web.Request) -> web.Response:
+    _admin_too_many_fails(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise _json_error(web.HTTPBadRequest, "body")
+    if not isinstance(body, dict):
+        raise _json_error(web.HTTPBadRequest, "body")
+    result = await asyncio.to_thread(accounts.create_account,
+                                     str(body.get("employee") or ""),
+                                     str(body.get("username") or ""),
+                                     str(body.get("password") or ""), self_service=True,
+                                     registration_gps=body.get("gps"),
+                                     registration_ip=_admin_peer(request),
+                                     registration_pc=body.get('pc_proof'),
+                                     registration_device=body.get('device') if body.get('audience')=='mobile' else None)
+    if not result.get("ok"):
+        _admin_auth_failed(request, scope="account")
+        return web.json_response(result, status=400)
+    await asyncio.to_thread(db.audit_access, 0, "account_self_register", result["username"],
+                            f"ip={_admin_peer(request)}")
+    return web.json_response({**result, "pending": True}, status=201)
+
+
+async def _account_pc_challenge(request):
+    _admin_too_many_fails(request)
+    body=await _json_object(request)
+    if not body: raise _json_error(web.HTTPBadRequest,'body')
+    import pc_registration
+    result=await asyncio.to_thread(pc_registration.challenge,str(body.get('public_key') or ''),
+        str(body.get('fingerprint') or ''),str(body.get('label') or ''),_admin_peer(request))
+    return web.json_response(result,status=200 if result.get('ok') else 400)
+
+
+async def _account_staff(request):
+    import staff_roster
+    with db.connect() as conn:
+        rows=staff_roster.candidates(conn)
+        privileged=accounts._privileged_names(conn)
+    return web.json_response({'ok':True,'employees':[
+        {'employee':r['employee'],'office':r['office'],'products':json.loads(r['products'])}
+        for r in rows if db._name_key(r['employee']) not in privileged]})
+
+
+async def _account_capabilities(request):
+    return web.json_response({'ok':True,'version':'3.2.0','pc_first':False,
+                              'mobile_registration':True,'root_bootstrap':True})
+
+
+async def _account_root_challenge(request):
+    _admin_too_many_fails(request)
+    body=await _json_object(request)
+    import root_bootstrap
+    try: result=await asyncio.to_thread(root_bootstrap.challenge,str((body or {}).get('operation_id') or ''))
+    except ValueError: raise _json_error(web.HTTPBadRequest,'operation_id')
+    return web.json_response(result)
+
+
+async def _admin_staff_roster(request):
+    await asyncio.to_thread(_admin,request)
+    import staff_roster
+    if request.method=='GET':
+        with db.connect() as conn:
+            rows=staff_roster.rows(conn,active_only=False)
+            managers=[dict(r) for r in conn.execute('SELECT telegram_id,name,role FROM managers')]
+        return web.json_response({'ok':True,'employees':rows,'managers':managers})
+    body=await _json_object(request)
+    if not body: raise _json_error(web.HTTPBadRequest,'body')
+    actor=request.get('admin_device') or {}
+    try:
+        if body.get('apply'):
+            result=await asyncio.to_thread(staff_roster.apply,body.get('items'),str(body.get('expected_sha256') or ''),
+                by=str(actor.get('account_approver') or actor.get('id') or 'operator'))
+        else: result=await asyncio.to_thread(staff_roster.preview,body.get('items'))
+    except ValueError as exc: return web.json_response({'ok':False,'error':str(exc)},status=400)
+    return web.json_response(result,status=200 if result.get('ok') else 409)
+
+
 async def _account_login(request: web.Request) -> web.Response:
     try:
         body = await request.json()
@@ -5215,20 +5413,25 @@ async def _account_login(request: web.Request) -> web.Response:
         body = {}
     _admin_too_many_fails(request)   # тот же IP-счётчик, что у остальных дверей
     device = body.get("device") if isinstance(body.get("device"), dict) else {}
+    expected_uid = body.get("expected_uid")
+    if expected_uid is not None and (isinstance(expected_uid, bool) or not isinstance(expected_uid, int)):
+        raise _json_error(web.HTTPBadRequest, "expected_uid")
     result = await asyncio.to_thread(accounts.login,
                                      str(body.get("username") or ""),
                                      str(body.get("password") or ""),
                                      device=device,
                                      entrance=str(body.get("entrance") or "public"),
-                                     ip=request.remote or "",
+                                     ip=_admin_peer(request), expected_uid=expected_uid,
+                                     audience=str(body.get("audience") or ""),
+                                     pc_proof=body.get('pc_proof'),
                                      gps=body.get("gps") if isinstance(body.get("gps"), dict) else None)
-    if result.get("action") == "bad":
+    if result.get("action") in ("bad", "locked"):
         _admin_auth_failed(request, scope="account")
     else:
         _admin_auth_ok(request, scope="account")
     if result.get("action") in ("ok", "ok_pending"):
         return web.json_response(result)
-    status = 429 if result.get("action") == "locked" else 403
+    status = 429 if result.get("action") == "locked" else 409 if result.get("action") == "conflict" else 403
     return web.json_response({"ok": False, **{k: v for k, v in result.items() if k != "token"}},
                              status=status)
 
@@ -5237,6 +5440,8 @@ async def _account_password(request: web.Request) -> web.Response:
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
+        raise _json_error(web.HTTPBadRequest, "body")
+    if not isinstance(body, dict):
         raise _json_error(web.HTTPBadRequest, "body")
     _admin_too_many_fails(request)
     result = await asyncio.to_thread(accounts.change_password,
@@ -5250,10 +5455,12 @@ async def _account_password(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-def _account_device_of_request(request: web.Request) -> tuple[int, int] | None:
-    """(id строки токена, account_id) по токену запроса — для своих ручек.
-    Оба класса: сотрудник (X-App-Token → agent_devices) и руководитель/аналитик
-    (X-Pult-Token → manager_devices)."""
+def _account_device_of_request(request: web.Request) -> tuple[int, int, str] | None:
+    """(id строки токена, account_id, таблица токена) по токену запроса — для
+    своих ручек. Оба класса: сотрудник (X-App-Token → agent_devices) и
+    руководитель/аналитик (X-Pult-Token → manager_devices). Таблицу возвращаем
+    явно: у выхода она решает, ЧЬЮ строку гасить (id в таблицах независимы —
+    ревью 15.10: отзыв менеджерского входа бил по чужой строке agent_devices)."""
     import accounts as _accounts
     tok = (request.headers.get("X-App-Token") or "").strip()
     if tok:
@@ -5261,14 +5468,14 @@ def _account_device_of_request(request: web.Request) -> tuple[int, int] | None:
         if state == "ok" and dev and dev["account_id"]:
             linked = _accounts.account_of_token("agent_devices", int(dev["id"]))
             if linked:
-                return int(dev["id"]), linked[0]
+                return int(dev["id"]), linked[0], "agent_devices"
     ptok = (request.headers.get("X-Pult-Token") or "").strip()
     if ptok:
         state, dev = db.manager_device_check(ptok, _admin_peer(request))
         if state == "ok" and dev and dev["account_id"]:
             linked = _accounts.account_of_token("manager_devices", int(dev["id"]))
             if linked:
-                return int(dev["id"]), linked[0]
+                return int(dev["id"]), linked[0], "manager_devices"
     return None
 
 
@@ -5281,54 +5488,201 @@ async def _account_sessions(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "logins": rows})
 
 
+async def _account_gps_request(request):
+    found=await asyncio.to_thread(_account_device_of_request,request)
+    if not found:raise _json_error(web.HTTPUnauthorized,'auth')
+    result=await asyncio.to_thread(accounts.request_gps_exception,found[2],found[0],found[1],_admin_peer(request))
+    return web.json_response(result,status=200 if result.get('ok') else 403)
+
+
 async def _account_logout(request: web.Request) -> web.Response:
     found = _account_device_of_request(request)
     if not found:
         raise web.HTTPUnauthorized(text="auth")
-    db.agent_device_revoke(found[0], by="self:account")
-    await asyncio.to_thread(db.audit_access, 0, "account_logout", f"dev#{found[0]}")
+    # Гасим токен в ЕГО таблице: id строк agent_devices/manager_devices
+    # независимы, agent_device_revoke по менеджерскому id отзывал чужое
+    # устройство выездника и оставлял живым сам менеджерский вход.
+    await asyncio.to_thread(accounts.revoke_token, found[2], found[0], "self:account")
+    await asyncio.to_thread(db.audit_access, 0, "account_logout",
+                            f"{found[2]}#{found[0]}")
     return web.json_response({"ok": True})
 
 
 async def _manager_entered(request: web.Request) -> web.Response:
     """«Кто ввёл» для руководителя: своя команда, телефоны+компьютеры,
-    готовность (ввели и там, и там) — список пересылается владельцу."""
+    готовность (ввели и там, и там) — список пересылается владельцу.
+    Координаты входа НЕ отправляем: руководителю достаточно факта «ввели с
+    телефона», GPS-точка — персональные данные (администраторам остаётся)."""
     uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
-    rows = await asyncio.to_thread(accounts.entered_list)
+    rows = await asyncio.to_thread(accounts.entered_list, include_empty=True)
     team_set = set(team)
     own = db.get_binding(uid)
     if own:
         team_set.add(own)
     rows = [r for r in rows if r["employee"] in team_set]
+    reviewable = await asyncio.to_thread(accounts.manager_reviewable, uid, is_owner=(uid == ADMIN_ID))
+    for r in rows:
+        r["can_approve"] = r["username"] in reviewable
+        r['can_request_phone'] = False
+        if r.get("phone"):
+            r["phone"] = {k: v for k, v in r["phone"].items() if k != "gps"}
     return web.json_response({"ok": True, "entered": rows,
                               "generated_at": datetime.now().isoformat(timespec="seconds")})
 
 
+async def _manager_phone_request(request: web.Request) -> web.Response:
+    """Manager desktop account requests approval of a pending phone device.
+
+    Code is shown ONCE to the manager for independent human contact with an
+    operator; neither the phone applicant nor legacy manager credentials see it.
+    """
+    if not account_policy.strict():
+        raise _json_error(web.HTTPForbidden, "phone_request_requires_cutover")
+    uid, _mgr, _team = await asyncio.to_thread(_manager_gate, request)
+    tok = (request.headers.get("X-Pult-Token") or "").strip()
+    state, manager_dev = db.manager_device_check(tok, _admin_peer(request))
+    if state != "ok" or not manager_dev or not manager_dev["account_id"]:
+        raise _json_error(web.HTTPUnauthorized, "manager_account_device_required")
+    body = await _json_object(request)
+    if not body or type(body.get("device_id")) is not int or body["device_id"] <= 0:
+        raise _json_error(web.HTTPBadRequest, "device_id")
+    result = await asyncio.to_thread(accounts.request_phone_registration, uid,
+                                     int(manager_dev["id"]), body["device_id"],
+                                     ip=_admin_peer(request))
+    return web.json_response(result, status=200 if result.get("ok") else 403)
+
+
+async def _manager_account_approve(request: web.Request) -> web.Response:
+    uid, _mgr, _team = await asyncio.to_thread(_manager_gate, request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise _json_error(web.HTTPBadRequest, "body")
+    if not isinstance(body, dict) or bool(body.get("username")) == (body.get("device_id") is not None):
+        raise _json_error(web.HTTPBadRequest, "username or device_id")
+    device_id = body.get("device_id")
+    if device_id is not None and (isinstance(device_id, bool) or not isinstance(device_id, int) or device_id <= 0):
+        raise _json_error(web.HTTPBadRequest, "device_id")
+    result = await asyncio.to_thread(accounts.manager_approve, uid,
+                                     username=str(body.get("username") or ""), device_id=device_id,
+                                     is_owner=(uid == ADMIN_ID), ip=_admin_peer(request),
+                                     observed_pc=body.get('observed_pc') is True,
+                                     gps_exception_reason=str(body.get('gps_exception_reason') or ''),
+                                     gps_exception_minutes=body.get('gps_exception_minutes',60))
+    return web.json_response(result, status=200 if result.get("ok") else 404)
+
+
 async def _admin_accounts(request: web.Request) -> web.Response:
-    _admin(request)
+    await asyncio.to_thread(_admin, request)
     rows = await asyncio.to_thread(accounts.admin_accounts)
-    return web.json_response({"ok": True, "accounts": rows})
+    actor = request.get("admin_device") or {}
+    return web.json_response({"ok": True, "accounts": rows,
+                              "approver": actor.get("account_approver") or "",
+                              "cutover_active": account_policy.strict()})
+
+
+async def _admin_account_action(request):
+    await asyncio.to_thread(_admin,request)
+    body=await _json_object(request)
+    if not body: raise _json_error(web.HTTPBadRequest,'body')
+    actor=request.get('admin_device') or {}
+    principal=str(actor.get('account_approver') or '')
+    if not principal: raise _json_error(web.HTTPForbidden,'administrator_identity_required')
+    action=str(body.get('action') or '')
+    username=accounts.normalize_username(body.get('username'))
+    by='principal:'+principal
+    if action in ('reset','disable','enable','revoke','delete'):
+        with db.connect() as conn:
+            if action=='revoke':
+                if type(body.get('device_id')) is not int: raise _json_error(web.HTTPBadRequest,'device_id')
+                primary=conn.execute("SELECT 1 FROM account_admin_grants g JOIN account_devices d ON d.account_id=g.account_id WHERE d.id=? AND g.granted_by='ssh-root'",(body['device_id'],)).fetchone()
+            else:
+                primary=conn.execute("SELECT 1 FROM account_admin_grants g JOIN accounts a ON a.id=g.account_id WHERE a.username=? AND g.granted_by='ssh-root'",(username,)).fetchone()
+        if primary:
+            raise _json_error(web.HTTPForbidden,'Первичный профиль владельца: смените свой пароль в разделе «Подключение». Восстановление и замена компьютера доступны там же после проверки IP и root-пароля.')
+    if action=='create':
+        uid=body.get('uid')
+        if type(uid) is not int or uid==ADMIN_ID: raise _json_error(web.HTTPBadRequest,'Выберите подтверждённого руководителя. Профиль владельца создаётся через root-доступ.')
+        issued_secret=str(body.get('password') or '') or secrets.token_urlsafe(18)+'9a'
+        result=await asyncio.to_thread(accounts.create_manager_account,uid,username,issued_secret,
+            display_name=str(body.get('display_name') or ''),by=by)
+        if result.get('ok'): result['temporary_password']=issued_secret
+    elif action=='reset':
+        issued_secret=secrets.token_urlsafe(18)+'9a'
+        result=await asyncio.to_thread(accounts.set_password,username,issued_secret,by=by)
+        if result.get('ok'):result.update({'username':username,'temporary_password':issued_secret})
+    elif action=='delete':
+        if body.get('confirm_username') != username or type(body.get('account_id')) is not int:
+            raise _json_error(web.HTTPBadRequest,'Подтвердите логин и обновите список аккаунтов.')
+        result=await asyncio.to_thread(accounts.delete_account,username,by,expected_id=body['account_id'])
+    elif action in ('disable','enable'):
+        result=await asyncio.to_thread(accounts.set_status,username,'disabled' if action=='disable' else 'awaiting',by)
+    elif action=='revoke':
+        device_id=body.get('device_id')
+        if type(device_id) is not int:raise _json_error(web.HTTPBadRequest,'device_id')
+        with db.connect() as conn: dev=conn.execute('SELECT token_table,agent_dev_id FROM account_devices WHERE id=?',(device_id,)).fetchone()
+        result={'ok':bool(dev and await asyncio.to_thread(accounts.revoke_approved_device,dev['token_table'],dev['agent_dev_id'],by=by))}
+    else: raise _json_error(web.HTTPBadRequest,'action')
+    return web.json_response(result,status=200 if result.get('ok') else 400)
 
 
 async def _admin_account_approve(request: web.Request) -> web.Response:
     """Подтверждение администратора: активировать аккаунт и/или устройство.
-    Сотрудник — с первого подтверждения, руководитель/аналитик — со второго
-    администратора (в ответе видно, сколько подтверждений собрано)."""
-    _admin(request)
+    Достаточно одного реального администратора по правилу владельца от 18.10.2026.
+    Личность берётся из доверенного principal, а не из тела запроса."""
+    await asyncio.to_thread(_admin, request)
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
         raise _json_error(web.HTTPBadRequest, "body")
-    by = str(body.get("by") or "admin")[:64]
+    if not isinstance(body, dict):
+        raise _json_error(web.HTTPBadRequest, "body")
+    actor = request.get("admin_device") or {}
+    principal = actor.get("account_approver")
+    if not principal:
+        raise _json_error(web.HTTPForbidden,
+                          "Администратор этого устройства не назначен. Зарегистрируйте его на сервере: "
+                          "account_access.py approver --device-id ID --name ADMIN")
+    by = "principal:" + principal
+    if body.get("request_code") and not account_policy.strict():
+        raise _json_error(web.HTTPForbidden, "phone_approval_requires_cutover")
+    if account_policy.strict() and body.get("request_code"):
+        if (type(body.get("device_id")) is not int or body["device_id"] <= 0
+                or body.get("verified_out_of_band") is not True):
+            raise _json_error(web.HTTPBadRequest, "phone_attestation_required")
+        with db.connect() as conn:
+            linked = conn.execute("SELECT account_id FROM account_devices WHERE id=? AND kind='phone'",
+                                  (body["device_id"],)).fetchone()
+        if not linked:
+            raise _json_error(web.HTTPNotFound, "phone_device")
+        result = await asyncio.to_thread(accounts.approve_phone_registration,
+                                         str(body["request_code"]), principal,
+                                         attestation=str(body.get("reason") or ""),
+                                         operator_gps=body.get("gps"),
+                                         gps_exception_reason=str(body.get("gps_exception_reason") or ""),
+                                         ip=_admin_peer(request), device_id=body["device_id"])
+        return web.json_response(result, status=200 if result.get("ok") else 403)
+    if account_policy.strict():
+        with db.connect() as conn:
+            if body.get("username"):
+                _target = conn.execute("SELECT created_by FROM accounts WHERE username=?",
+                                       (accounts.normalize_username(body["username"]),)).fetchone()
+            elif body.get("device_id") is not None and type(body["device_id"]) is int:
+                _target = conn.execute("SELECT a.created_by FROM accounts a JOIN account_devices d "
+                                       "ON d.account_id=a.id WHERE d.id=?", (body["device_id"],)).fetchone()
+            else:
+                _target = None
+        if _target and _target["created_by"] == "self-registration":
+            raise _json_error(web.HTTPForbidden, "registration_requires_attested_request")
     if body.get("username"):
         result = await asyncio.to_thread(accounts.approve_account,
-                                         str(body.get("username")), by)
+                                         str(body.get("username")), by, ip=_admin_peer(request))
     elif body.get("device_id") is not None:
         try:
             device_id = int(body.get("device_id"))
         except (TypeError, ValueError):
             raise _json_error(web.HTTPBadRequest, "device_id")
-        result = await asyncio.to_thread(accounts.approve_device, device_id, by)
+        result = await asyncio.to_thread(accounts.approve_device, device_id, by, ip=_admin_peer(request))
     else:
         raise _json_error(web.HTTPBadRequest, "username or device_id")
     if not result.get("ok"):
@@ -5353,7 +5707,7 @@ async def _admin_agent_device_revoke(request: web.Request) -> web.Response:
         dev_id = int(body.get("id"))
     except (TypeError, ValueError):
         raise web.HTTPBadRequest(text="id")
-    n = db.agent_device_revoke(dev_id, by="admin")
+    n = accounts.revoke_approved_device("agent_devices", dev_id, by="operator:admin")
     await asyncio.to_thread(db.audit_access, ADMIN_ID, "desk_revoke", detail=str(dev_id))
     return web.json_response({"ok": True, "revoked": int(n)})
 
@@ -5509,19 +5863,33 @@ def _admin(request: web.Request) -> None:
     всех остальных. Перебирать здесь нечего (токен — 256 бит), счётчик
     держит лишь частоту промахов.
     """
+    account_token=request.headers.get('X-Pult-Token') or ''
+    if account_token:
+        state, linked=db.manager_device_check(account_token,_admin_peer(request))
+        if state=='ok' and linked and linked['account_id']:
+            gate,_employee=accounts.device_gate_by_token('manager_devices',int(linked['id']))
+            with db.connect() as conn:
+                grant=conn.execute('SELECT g.principal,a.role,a.telegram_id FROM account_admin_grants g '
+                    'JOIN accounts a ON a.id=g.account_id WHERE g.account_id=?',(linked['account_id'],)).fetchone()
+            if gate=='ok' and grant and (grant['role']=='analyst' or (grant['role']=='full' and grant['telegram_id']==ADMIN_ID)):
+                request['admin_device']={**dict(linked),'role':'operator','account_approver':grant['principal'],'account_session':True}
+                _admin_auth_ok(request)
+                return
+        raise _json_error(web.HTTPForbidden,'account_admin_access_denied')
     token = request.headers.get("X-Device-Token") or ""
     device = db.admin_device_by_token(
         token, request.headers.get("X-Device-Id") or "") if token else None
     # Роль сверяем явно: устройство инженера сюда не пускаем. Панель обслуживания
     # не должна видеть должников ни при каких обстоятельствах, а «токен есть —
     # значит свой» стёрло бы эту границу молча.
-    if device and device.get("role", "operator") == "operator":
+    if device and device.get("role", "operator") == "operator" and not account_policy.strict():
+        request["admin_device"] = device
         _admin_auth_ok(request)
         return
     # До самой первой привязки ключ работает как обычный доступ: иначе первый
     # пульт неоткуда взять. После неё — никогда, даже если все устройства
     # отозвали (см. db.admin_bootstrap_done).
-    if not db.admin_bootstrap_done():
+    if not db.admin_bootstrap_done() and not account_policy.strict():
         key = os.getenv("ADMIN_API_KEY", "")
         if key and hmac.compare_digest(
                 (request.headers.get("X-Admin-Key") or "").encode("utf-8"),
@@ -5606,11 +5974,15 @@ def _engineer(request: web.Request) -> dict:
     перезапускать сервер, и открывать её строкой из .env значило бы вернуть
     ровно то, что мы только что убрали.
     """
+    if request.headers.get('X-Pult-Token'):
+        _admin(request)
+        return request['admin_device']
     _admin_too_many_fails(request)
     token = request.headers.get("X-Device-Token") or ""
     device = db.admin_device_by_token(
         token, request.headers.get("X-Device-Id") or "") if token else None
-    if device and device.get("role") in ("engineer", "operator"):
+    if device and (device.get('role') == 'engineer' or
+                   (device.get('role') == 'operator' and not account_policy.strict())):
         _admin_auth_ok(request)
         return device
     _admin_auth_failed(request)
@@ -5697,6 +6069,11 @@ async def _ops_page(request: web.Request) -> web.Response:
     обращается к ручкам. Все ручки с данными закрыты ролью, как и были.
     """
     return web.Response(text=ops_panel.page(), content_type="text/html", charset="utf-8")
+
+
+async def _ops_approve_page(request: web.Request) -> web.Response:
+    """Static mobile form only; all account data/actions use operator-gated APIs."""
+    return web.Response(text=ops_panel.approval_page(), content_type="text/html", charset="utf-8")
 
 
 async def _ops_state(request: web.Request) -> web.Response:
@@ -7204,9 +7581,38 @@ async def _security_headers(request: web.Request, resp: web.StreamResponse) -> N
 CLIENT_MAX_SIZE = 64 * 1024 * 1024
 
 
+@web.middleware
+async def _account_client_policy(request,handler):
+    # Protocol admission retires unmodified old clients; it is not binary or
+    # hardware attestation. Every data gate still validates account and device.
+    protected=request.path.startswith(('/api/','/admin/'))
+    strict=await asyncio.to_thread(account_policy.strict) if protected else False
+    if protected and strict:
+        try:
+            version=tuple(int(x) for x in request.headers.get('X-Client-Version','').split('.'))
+        except ValueError: version=()
+        if len(version)!=3 or version<(3,2,0):
+            # Retired installed queues can discard an item on any 4xx. Reject
+            # their writes before auth/body handling with a transient status,
+            # preserving the unposted evidence until the client is upgraded.
+            queued_write=request.method not in ('GET','HEAD','OPTIONS')
+            return web.json_response({'ok':False,'error':'Установите новую версию программы или обновите страницу входа.',
+                                      'minimum_version':'3.2.0'},status=503 if queued_write else 426,
+                                     headers={'Retry-After':'300'} if queued_write else None)
+    if request.path.startswith('/api/'):
+        try: point=json.loads(request.headers.get('X-Device-GPS','null'))
+        except (ValueError,TypeError): point=None
+        if point:
+            for header,table in (('X-App-Token','agent_devices'),('X-Pult-Token','manager_devices')):
+                token=request.headers.get(header,'')
+                if token: await asyncio.to_thread(accounts.refresh_gps,table,token,point)
+    return await handler(request)
+
+
 def build_app(bot=None) -> web.Application:
+    account_policy.activate()  # invalid UTC fails; persisted cutover survives restart
     app = web.Application(client_max_size=CLIENT_MAX_SIZE,
-                          middlewares=[_drain, _cors, _compress])
+                          middlewares=[_drain, _cors, _account_client_policy, _compress])
     app.on_response_prepare.append(_security_headers)
     app["bot"] = bot
     app["notification_limit"] = asyncio.Semaphore(4)
@@ -7247,6 +7653,7 @@ def build_app(bot=None) -> web.Application:
     # Панель обслуживания. Отдельный путь и отдельная роль: сюда не пускают ни
     # мастер-ключом, ни токеном пульта. Ни одна ручка здесь не читает должников.
     app.router.add_get("/ops/", _ops_page)
+    app.router.add_get("/ops/approve", _ops_approve_page)
     app.router.add_get("/ops/state.json", _ops_state)
     app.router.add_post("/ops/run.json", _ops_run)
     app.router.add_get("/ops/result.json", _ops_result)
@@ -7323,12 +7730,23 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/agent/device/enroll", _agent_device_enroll)
     app.router.add_post("/api/agent/device/logout", _agent_device_logout)
     # Аккаунты «логин-пароль»
+    app.router.add_post("/api/account/register", _account_register)
+    app.router.add_post('/api/account/gps_request',_account_gps_request)
+    app.router.add_post('/api/account/pc_challenge',_account_pc_challenge)
+    app.router.add_get('/api/account/staff',_account_staff)
+    app.router.add_get('/api/account/capabilities',_account_capabilities)
+    app.router.add_post('/api/account/root_challenge',_account_root_challenge)
+    app.router.add_get('/admin/staff_roster.json',_admin_staff_roster)
+    app.router.add_post('/admin/staff_roster.json',_admin_staff_roster)
     app.router.add_post("/api/account/login", _account_login)
+    app.router.add_post("/api/manager/account_approve", _manager_account_approve)
+    app.router.add_post("/api/manager/account_phone_request", _manager_phone_request)
     app.router.add_post("/api/account/password", _account_password)
     app.router.add_get("/api/account/sessions", _account_sessions)
     app.router.add_post("/api/account/logout", _account_logout)
     app.router.add_get("/api/manager/entered", _manager_entered)
     app.router.add_get("/admin/accounts.json", _admin_accounts)
+    app.router.add_post('/admin/account_action.json',_admin_account_action)
     app.router.add_post("/admin/account_approve.json", _admin_account_approve)
     app.router.add_get("/admin/agent_devices.json", _admin_agent_devices)
     app.router.add_post("/admin/agent_device/revoke.json", _admin_agent_device_revoke)

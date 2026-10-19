@@ -16,6 +16,19 @@ from pult.core import enrichment as en
 
 
 # --- файлы -------------------------------------------------------------------
+def test_confirm_recognizes_successful_zero_conflict_check_and_rejects_stale_window(monkeypatch):
+    from pult import desk_registry as dr
+    state=dr._empty_state()
+    state['enr_matched']=[{'key':'synthetic','employee':'Synthetic Employee','files':['synthetic.xlsb'],'rows':[]}]
+    state['enr_check']={'keys':['synthetic'],'since':'17.10.2026','until':'18.10.2026','conflict_count':0}
+    monkeypatch.setattr(dr,'S',state)
+    body={'keys':['synthetic'],'since':'17.10.2026','until':'18.10.2026','decisions':[]}
+    text=dr.enr_confirm(body)['text']
+    assert 'Проверка конфликтов для выбранного набора выполнена.' in text
+    assert en.NO_CHECK_NOTE not in text
+    assert en.NO_CHECK_NOTE in dr.enr_confirm({**body,'until':'19.10.2026'})['text']
+
+
 def test_personal_files_prefers_named_book_and_skips_copies(tmp_path):
     folder = tmp_path / "РТ" / "Душанбе" / "Иванов Иван"
     folder.mkdir(parents=True)

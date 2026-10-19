@@ -21,7 +21,7 @@ const ME = {employee: "Первый П.", persons: PERSONS, cards: {R1: CARD}};
 const RCQ = {op_id: "rc-op-1", kind: "receipt", rep: "R1",
              bytes: new Uint8Array([1, 2, 3]), ext: ".jpg", at: 5,
              amount: 2000, paid_at: "2026-09-30", payer_other: true,
-             note: "сестра"};
+             note: "сестра", _owner: {uid: 1, employee: "Первый П."}};
 """
 
 

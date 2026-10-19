@@ -112,6 +112,9 @@ TEXT_SUFFIXES = {".py", ".pyw", ".md", ".txt", ".sh", ".yml", ".yaml", ".json", 
 TEXT_NAMES = {"Dockerfile", "Caddyfile", ".dockerignore", ".gitignore", ".gitattributes",
               ".env.example"}
 CRLF_SUFFIXES = {".bat"}
+# The protocol binding hashes the approved raw schema, including its line ends.
+# Keep it in the text leak scan, but never normalize its packaged bytes.
+BYTE_PINNED_TEXT_PATHS = {"server/data_exchange_contract.json"}
 
 # Сканер утечек: (название правила, регулярное выражение).
 LEAK_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -129,6 +132,35 @@ LEAK_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("приватный ключ", re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----")),
     ("ключ доступа AWS", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
 )
+
+# Осознанные исключения правила «пароль в открытом виде»: строки, ЛОКАЛЬНО
+# похожие на присваивание секрета, но им не являющиеся (чтение CLI/CSV-колонки,
+# f-string вывода, словарь подписей журнала входов, синтетика тестов).
+# Появились 15.10.2026: волна аккаунтов «логин-пароль» принесла в исходники
+# законные строки про пароли, и пакет для ИТ перестал собираться. Маркеры
+# записаны разрывными строковыми литералами, чтобы сканер не ловил свой же
+# список исключений (тот же приём, что у адресов серверов выше). Новое
+# исключение — только после разбора человеком, не «чтобы сборка прошла».
+LEAK_ALLOW: dict[str, tuple[str, ...]] = {
+    "server/account_access.py": (
+        "pass" "word = args.password or _gen_password()",   # чтение CLI-аргумента
+        "pass" "word = row[3].strip() if len(row) > 3 and row[3].strip() else _gen_password()",
+        '_out(f"OK  {username:20} {employee} [{office}] парол' 'ь: {password}")',
+    ),
+    "server/miniapp/index.html": (
+        'const failName={bad_pass' 'word:"неверный пароль", locked:"блокировка",',
+    ),
+    "tests/test_account_login.py": (
+        'def login(username="kurbanov", pass' 'word="parol1234", device=None, entrance="public", gps=GPS):',
+        'again = login(pass' 'word="novyiparol9", entrance="public", device=phone_device())',
+    ),
+    "tests/test_account_cutover.py": (
+        'def login(username, pass' 'word=TEST_SECRET, role="employee", fp="pc", kind="desktop", gps=GPS):',
+    ),
+    "tests/test_shell_account_review.py": (
+        'must_change_pass' 'word:true,username:"test-login",pending_kind:"password"}}});',
+    ),
+}
 
 
 class BuildStop(SystemExit):
@@ -267,7 +299,7 @@ def is_text(relative: PurePosixPath) -> bool:
     if posix.startswith(BAKED_MODEL_DIR + "/") and relative.suffix.lower() != ".md":
         return False
     name = relative.name
-    return name in TEXT_NAMES or relative.suffix.lower() in TEXT_SUFFIXES
+    return name.startswith("Caddyfile") or name in TEXT_NAMES or relative.suffix.lower() in TEXT_SUFFIXES
 
 
 def scan_for_leaks(root: Path, files: list[PurePosixPath]) -> None:
@@ -280,10 +312,16 @@ def scan_for_leaks(root: Path, files: list[PurePosixPath]) -> None:
         except OSError as exc:
             raise BuildStop(f"не читается {relative}: {exc}") from exc
         for title, pattern in LEAK_RULES:
-            match = pattern.search(text)
-            if match:
-                line = text.count("\n", 0, match.start()) + 1
-                findings.append(f"{relative}:{line} — {title}")
+            allowed = LEAK_ALLOW.get(relative.as_posix(), ())
+            for match in pattern.finditer(text):
+                # Исключения проверяются по СТРОКЕ совпадения: разрешённая
+                # строка не глушит другие находки того же правила в файле.
+                line_start = text.rfind("\n", 0, match.start()) + 1
+                line_end = text.find("\n", match.end())
+                line_text = text[line_start:line_end if line_end != -1 else len(text)]
+                if title == "пароль в открытом виде" and line_text.strip() in allowed:
+                    continue
+                findings.append(f"{relative}:{text.count(chr(10), 0, match.start()) + 1} — {title}")
                 break
     if findings:
         raise BuildStop("STOP: в исходниках найдены секреты, пакет не собран:\n  "
@@ -291,9 +329,9 @@ def scan_for_leaks(root: Path, files: list[PurePosixPath]) -> None:
 
 
 def normalized_bytes(root: Path, relative: PurePosixPath) -> bytes:
-    """Текст едет с LF (как в git), .bat — с CRLF; остальное байт в байт."""
+    """Текст с LF, .bat с CRLF; byte-pinned схема и бинарные файлы без изменений."""
     raw = (root / Path(*relative.parts)).read_bytes()
-    if not is_text(relative):
+    if relative.as_posix() in BYTE_PINNED_TEXT_PATHS or not is_text(relative):
         return raw
     unified = raw.replace(b"\r\n", b"\n")
     if relative.suffix.lower() in CRLF_SUFFIXES:

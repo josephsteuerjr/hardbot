@@ -18,7 +18,7 @@ export interface Shell {
   product: string;
   version: string;
   server: string;
-  device: { id?: number; name: string; created_at?: string; employee?: string; username?: string; telegram_id?: number } | null;
+  device: { id?: number; name: string; created_at?: string; employee?: string; username?: string; role?: string; telegram_id?: number } | null;
   enrolled: boolean;
   theme: "light" | "dark" | "system";
   deviceName: string;
@@ -38,6 +38,10 @@ interface Bridge {
   /** Вход сотрудника по логину и паролю: main собирает отпечаток устройства
    *  и пишет полевой токен; рендерер пароль не хранит. */
   accountLogin(server: string, username: string, password: string): Promise<ApiResult>;
+  accountStaff(server: string): Promise<ApiResult>;
+  accountRegister(server: string, employee: string, username: string, password: string): Promise<ApiResult>;
+  /** Privileged manager/security/full entry; never grants analyst /admin access. */
+  accountManagerLogin(server: string, username: string, password: string): Promise<ApiResult>;
   logout(): Promise<boolean>;
   api(method: string, path: string, query?: Q, body?: unknown): Promise<ApiResult>;
   image(path: string, query?: Q): Promise<string | null>;
@@ -45,6 +49,7 @@ interface Bridge {
   download(path: string, query: Q | undefined, name: string): Promise<{ ok: boolean; file?: string; text?: string }>;
   open(file: string): Promise<string>;
   copy(text: string): Promise<boolean>;
+  saveText(name: string, content: string): Promise<{ok: boolean; text?: string}>;
   theme(t: string): Promise<boolean>;
   shot(file: string): Promise<boolean>;
   local(path: string, body?: unknown): Promise<{ ok: boolean; data?: any; error?: string }>;

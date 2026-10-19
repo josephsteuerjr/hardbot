@@ -182,6 +182,20 @@ def preview_button_text(book: dict, selected: set[str], full: bool) -> str:
 
 
 # --- книга -------------------------------------------------------------------
+def exclude_contracts(book: dict, identifiers) -> tuple[dict, int]:
+    """Explicit source IDs only; the original book and source hash stay intact."""
+    if not isinstance(identifiers, (list, tuple)) or len(identifiers)>10000:
+        raise ValueError('Укажите номера договоров из файла отдельными строками.')
+    if any(not isinstance(x,str) or len(x)>128 for x in identifiers):
+        raise ValueError('Некорректный номер договора для исключения.')
+    excluded={enrich.norm_cid(x) for x in identifiers if enrich.norm_cid(x)}
+    if not excluded:return book,0
+    _,first,cid,_=grid_layout(book['grid'])
+    rows=[row for row in book['grid'][first:] if len(row)<=cid or enrich.norm_cid(row[cid]) not in excluded]
+    result={**book,'grid':book['grid'][:first]+rows}
+    return result,len(book['grid'])-len(result['grid'])
+
+
 def grid_layout(grid: list[list]) -> tuple[int, int, int, int]:
     """(строка заголовков, первая строка данных, колонка КД, колонка ФИО).
 

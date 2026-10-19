@@ -1,0 +1,26 @@
+# Optional offline HTTPS on the corporate interface. Requires explicit trust of
+# the public root certificate on client devices, or replacement by corporate PKI.
+# Append this file to COMPOSE_FILE after docker-compose.lan.yml.
+services:
+  caddy-lan:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      APP_LAN_IP: ${APP_LAN_IP:?Set APP_LAN_IP to the private corporate interface}
+    ports:
+      - "${APP_LAN_IP}:443:443"
+    volumes:
+      - ./Caddyfile.lan:/etc/caddy/Caddyfile:ro
+      - caddy-lan-data:/data
+      - caddy-lan-config:/config
+    networks:
+      - hard
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy-lan-data:
+  caddy-lan-config:

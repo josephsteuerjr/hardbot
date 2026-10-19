@@ -346,8 +346,8 @@ export const softHelp: Section = {
     // вошедшим по логину-паролю (у ссылочного входа аккаунта на сервере нет).
     const account = (await hard.state()).device?.username || "";
     root.innerHTML = `<div class="section"><div class="grid2">
-      <div class="list-row"><div class="grow"><div class="nm">Вход — по вашей ссылке</div>
-        <div class="sub">Руководитель выдаёт её в «Входе команды». Телефон продолжает работать: вход на ПК его не заменяет.</div></div></div>
+      <div class="list-row"><div class="grow"><div class="nm">Вход — по личному профилю</div>
+        <div class="sub">Профиль и компьютер подтверждает ваш руководитель. При замене ПК прежний вход закрывается. Телефон продолжает работать: вход на ПК его не заменяет.</div></div></div>
       <div class="list-row"><div class="grow"><div class="nm">Очередь — вместо фильтра в Excel</div>
         <div class="sub">«Кому звонить» — просроченный перезвон и должники без статуса. Телефон должника — в строке и в карточке.</div></div></div>
       <div class="list-row"><div class="grow"><div class="nm">Очередь и сохранённый результат</div>

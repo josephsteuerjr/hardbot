@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import gzip
+import ipaddress
 import json
 import ssl
 import urllib.error
@@ -18,6 +19,10 @@ DEVICE_REVOKED_TEXT = ("Устройство не принято: токен о�
 BAD_KEY_TEXT = "Неверный мастер-ключ"
 
 
+class AccessRevoked(RuntimeError):
+    """The server rejected an existing device credential, rather than a network failure."""
+
+
 def auth_headers(key: str = "", device_token: str = "") -> dict[str, str]:
     """Чем представляемся серверу.
 
@@ -26,18 +31,21 @@ def auth_headers(key: str = "", device_token: str = "") -> dict[str, str]:
     на другую машину, продолжал бы работать — а это обычный JSON на диске.
     """
     if device_token:
+        if device_token.startswith('account:'):
+            return {'X-Pult-Token':device_token[8:],'X-Client-Version':'3.2.0'}
         from .devices import device_fingerprint
         return {"X-Device-Token": device_token, "X-Device-Id": device_fingerprint()}
-    return {"X-Admin-Key": key}
+    return {"X-Admin-Key": key,'X-Client-Version':'3.2.0'}
 
 
 CERT_BAD_TEXT = ("Сертификат сервера не прошёл проверку — эта сеть подменяет "
                  "соединение (чужой Wi-Fi, прокси с подменой). Пульт ничего не "
                  "отправил: ни ключа, ни токена. Подключитесь к другой сети.")
 
-# Куда секрет можно отдать по открытому http: только на эту же машину — там
-# нет сети, которую подслушивают. Всё остальное — только https.
+# Corporate VPN/LAN access uses an explicit private IP; DNS names require TLS.
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+LAN_NETWORKS = tuple(ipaddress.ip_network(n) for n in
+                     ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"))
 
 NO_URL_TEXT = ("Не задан адрес сервера — впишите его в пульте, раздел "
                "«Подключение» (вид: https://сервер).")
@@ -45,7 +53,7 @@ NOT_HTTPS_TEXT = ("Адрес сервера должен начинаться �
                   "мастер-ключ, токен устройства и код привязки ушли бы по сети "
                   "открытым текстом — пульт ничего не отправил. Исправьте адрес "
                   "в пульте, раздел «Подключение» (http годится только для "
-                  "127.0.0.1 и localhost).")
+                  "loopback или конкретного приватного IP корпоративной сети/VPN).")
 
 
 def require_https(url: str) -> None:
@@ -55,7 +63,7 @@ def require_https(url: str) -> None:
     телом обычного HTTP-запроса; по http их читает любой, кто видит сеть (чужой
     Wi-Fi, прокси). Опечатка «http://» в адресе контура молча отдавала бы ключ —
     поэтому отказ ещё до того, как собран первый байт запроса. Исключение —
-    своя машина (127.0.0.1, localhost, ::1): там сети нет.
+    своя машина и конкретный приватный IP корпоративной сети/VPN.
     """
     text = (url or "").strip()
     if not text:
@@ -63,12 +71,22 @@ def require_https(url: str) -> None:
     try:
         parts = urllib.parse.urlsplit(text)
         host = (parts.hostname or "").lower()
+        if parts.username or parts.password:
+            raise ValueError("credentials in URL")
+        parts.port  # Validate a malformed port before constructing a request.
     except ValueError:
         raise RuntimeError(NOT_HTTPS_TEXT) from None
     if parts.scheme == "https" and host:
         return
     if parts.scheme == "http" and host in LOOPBACK_HOSTS:
         return
+    if parts.scheme == "http":
+        try:
+            address = ipaddress.ip_address(host)
+            if any(address.version == n.version and address in n for n in LAN_NETWORKS):
+                return
+        except ValueError:
+            pass
     raise RuntimeError(NOT_HTTPS_TEXT)
 
 
@@ -172,7 +190,9 @@ def request(base_url: str, method: str, path: str, body: dict | None = None, *,
             raise
     except urllib.error.HTTPError as e:
         if e.code == 401:
-            raise RuntimeError(DEVICE_REVOKED_TEXT if device_token else BAD_KEY_TEXT) from e
+            if device_token:
+                raise AccessRevoked(DEVICE_REVOKED_TEXT) from e
+            raise RuntimeError(BAD_KEY_TEXT) from e
         if e.code == 404:
             raise RuntimeError(f"На сервере нет {path} — сервер старой версии?") from e
         if e.code == 409:

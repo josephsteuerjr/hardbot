@@ -37,7 +37,7 @@ def test_first_login_reloads_once_so_the_manifest_becomes_personal():
 def test_ios_home_screen_icon_and_meta():
     head = INDEX.split("</head>", 1)[0]
     assert '<link rel="apple-touch-icon" href="/vendor/icon-192.png">' in head
-    assert '<meta name="apple-mobile-web-app-title" content="Хард">' in head
+    assert '<meta name="apple-mobile-web-app-title" content="Взыскание СНГ">' in head
     assert '<meta name="apple-mobile-web-app-capable" content="yes">' in head
 
 

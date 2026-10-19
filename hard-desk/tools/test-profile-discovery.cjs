@@ -13,8 +13,13 @@ try{
  const found=discoverProfiles('soft',{appData:roaming,home,shortcuts:[desktop],readShortcut});assert.equal(found.some(p=>p.source===legacy),true);
  const target=path.join(root,'target');migrateData(target,roaming,'soft');assert.equal(JSON.parse(fs.readFileSync(path.join(target,'migration-v1.json'))).source,null);
  fs.mkdirSync(path.join(home,'Downloads'),{recursive:true});const later=path.join(home,'Downloads','Хард прежний','data');fixture(later);
- fs.writeFileSync(path.join(target,'settings.json'),JSON.stringify({theme:'dark'}));migrateData(target,roaming,'soft',{home});assert.equal(JSON.parse(fs.readFileSync(path.join(target,'settings.json'))).fieldDevice.id,101);
+ fs.writeFileSync(path.join(target,'settings.json'),JSON.stringify({theme:'dark'}));migrateData(target,roaming,'soft',{home});assert.equal(JSON.parse(fs.readFileSync(path.join(target,'settings.json'))).fieldDevice,undefined);
+ // A completed automatic search cannot silently restore a logged-out identity.
+ // The user's explicit migration still works when an old profile appears later.
+ importData(later,target,'soft');assert.equal(JSON.parse(fs.readFileSync(path.join(target,'settings.json'))).fieldDevice.id,101);
  const protectedBytes=fs.readFileSync(path.join(target,'field.key'));migrateData(target,roaming,'soft',{home});assert.deepEqual(fs.readFileSync(path.join(target,'field.key')),protectedBytes);
+ fs.unlinkSync(path.join(target,'field.key'));fs.writeFileSync(path.join(target,'settings.json'),JSON.stringify({theme:'dark'}));
+ migrateData(target,roaming,'soft',{home});assert.equal(fs.existsSync(path.join(target,'field.key')),false);
  const other=path.join(roaming,'Хард-сотрудник');fixture(other,202);const malformed=path.join(roaming,'Хард');fs.mkdirSync(malformed);fs.writeFileSync(path.join(malformed,'settings.json'),'{broken');
  const ambiguous=path.join(root,'ambiguous');migrateData(ambiguous,roaming,'soft',{home});assert.equal(fs.existsSync(path.join(ambiguous,'field.key')),false);assert.equal(fs.existsSync(path.join(ambiguous,'migration-choice.json')),true);
  const rollback=path.join(root,'rollback');fs.mkdirSync(rollback);fs.writeFileSync(path.join(rollback,'settings.json'),'{}');fs.writeFileSync(path.join(rollback,'Local State'),'Original empty encryption profile');
@@ -22,5 +27,5 @@ try{
  const isolated=load('migration.ts',name=>name==='node:fs'?fsStub:require(name));assert.throws(()=>isolated.importData(later,rollback,'soft'));
  assert.equal(fs.readFileSync(path.join(rollback,'settings.json'),'utf8'),'{}');assert.equal(fs.readFileSync(path.join(rollback,'Local State'),'utf8'),'Original empty encryption profile');assert.equal(fs.existsSync(path.join(rollback,'field.key')),false);
  assert.equal(JSON.parse(fs.readFileSync(path.join(later,'settings.json'))).fieldDevice.id,101);
- console.log('Profile discovery passed: folder/EXE/shortcut, portable discovery, retry after empty search, malformed JSON, ambiguous identities, working profile preservation and atomic rollback.');
+ console.log('Profile discovery passed: folder/EXE/shortcut, explicit retry after empty search, no automatic restoration after logout, ambiguous identities and atomic rollback.');
 }finally{assert.ok(root.startsWith(path.join(os.tmpdir(),'hard-discovery-test-')));fs.rmSync(root,{recursive:true,force:true});}

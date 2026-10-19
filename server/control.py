@@ -90,7 +90,7 @@ COUNTER_KEYS = ("far", "nogeo", "addr_coarse", "late", "fast", "night", "series"
 
 # --- время ---------------------------------------------------------------------
 def _local_dt(value) -> datetime | None:
-    """Момент в поясе офисов (+5). received_at — наивное местное время сервера,
+    """Момент в поясе офисов (+5). received_at — наивное UTC сервера,
     saved_at — миллисекунды или ISO от телефона."""
     if value in (None, ""):
         return None
@@ -869,7 +869,10 @@ _ACCESS_ACTIONS = {
 def access_log(rng: dict, team: list[str] | None = None) -> dict:
     """События доступа за окно, новые сверху. team — фильтр по цели (target =
     ФИО сотрудника) для руководителя; админ видит всё."""
-    hi = (date.fromisoformat(rng["to"]) + timedelta(days=1)).isoformat()
+    lo = datetime.fromisoformat(rng["from"]).replace(tzinfo=TZ).astimezone(
+        timezone.utc).replace(tzinfo=None).isoformat()
+    hi = (datetime.fromisoformat(rng["to"]).replace(tzinfo=TZ) + timedelta(days=1)
+          ).astimezone(timezone.utc).replace(tzinfo=None).isoformat()
     qs = ",".join("?" * len(_ACCESS_ACTIONS))
     wanted = sorted({e for e in (team or []) if e})
     scope = ""
@@ -884,7 +887,7 @@ def access_log(rng: dict, team: list[str] | None = None) -> dict:
             f"SELECT id, ts, actor, action, target, detail FROM audit "
             f"WHERE action IN ({qs}) AND ts >= ? AND ts < ? "
             + scope + " ORDER BY id DESC LIMIT 500",
-            (*_ACCESS_ACTIONS, rng["from"], hi, *wanted)).fetchall()
+            (*_ACCESS_ACTIONS, lo, hi, *wanted)).fetchall()
     names: dict[int, str] = {}
 
     def name_of(uid: int) -> str:
@@ -899,8 +902,9 @@ def access_log(rng: dict, team: list[str] | None = None) -> dict:
         if wanted and target not in wanted:
             continue
         actor = int(r["actor"] or 0)
+        at = _local_dt(r["ts"])
         events.append({
-            "id": f"a{r['id']}", "ts": r["ts"], "day": str(r["ts"] or "")[:10],
+            "id": f"a{r['id']}", "ts": r["ts"], "day": at.date().isoformat() if at else "",
             "actor": actor, "actor_name": name_of(actor),
             "action": r["action"], "label": _ACCESS_ACTIONS.get(r["action"], r["action"]),
             "target": target, "detail": (r["detail"] or "")[:200]})

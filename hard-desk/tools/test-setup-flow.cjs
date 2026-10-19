@@ -14,7 +14,7 @@ const pause=ms=>new Promise(r=>setTimeout(r,ms));
 function run(exe,args,extra={},timeout=120000){const r=spawnSync(exe,args,{env:{...env,...extra},windowsHide:true,encoding:'utf8',timeout});if(r.error)throw r.error;assert.equal(r.status,0,(r.stderr||'').slice(-500));return r;}
 function fixture(dir,make){run(process.execPath,[path.join(desk,'tools/run-electron-test.cjs'),path.join(desk,'tools/test-install-data.cjs')],{HARD_INSTALL_QA_DATA:dir,HARD_INSTALL_QA_MAKE:make?'1':'0',HARD_INSTALL_QA_FIELD_ONLY:'1'},30000);}
 function hashes(dir){return Object.fromEntries(fs.readdirSync(dir).filter(n=>n.endsWith('.key')||n.endsWith('.bin')).map(n=>[n,crypto.createHash('sha256').update(fs.readFileSync(path.join(dir,n))).digest('hex')]));}
-function launch(exe,args,extra={}){const p=spawn(exe,args,{env:{...env,...extra},windowsHide:true,stdio:'ignore'});processes.push(p);return p;}
+function launch(exe,args,extra={}){const p=spawn(exe,args,{env:{...env,...extra},windowsHide:false,stdio:'ignore'});processes.push(p);return p;}
 async function cdp(port){
  let page;
  for(let n=0;n<200;n++){try{const all=await(await fetch('http://127.0.0.1:'+port+'/json/list')).json();page=all.find(x=>x.type==='page'&&x.url.endsWith('/setup/index.html'));if(page)break;}catch{}await pause(100);}
@@ -23,8 +23,8 @@ async function cdp(port){
  let next=0;const waiting=new Map();ws.addEventListener('message',e=>{const d=JSON.parse(String(e.data));if(waiting.has(d.id)){const [resolve,reject]=waiting.get(d.id);waiting.delete(d.id);d.error?reject(new Error(d.error.message)):resolve(d.result);}});
  async function command(method,params={}){const id=++next;return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{waiting.delete(id);reject(new Error('QA command timed out: '+method));},120000);waiting.set(id,[v=>{clearTimeout(timer);resolve(v);},e=>{clearTimeout(timer);reject(e);}]);ws.send(JSON.stringify({id,method,params}));});}
  const api={async evaluate(expression){const r=await command('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(r.exceptionDetails)throw new Error(r.exceptionDetails.exception?.description||r.exceptionDetails.text);return r.result?.value;},async screenshot(name){const r=await command('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(lab,name),Buffer.from(r.data,'base64'));},close(){ws.close();socket=null;}};
- for(let i=0;i<100;i++){if(await api.evaluate('typeof window.setup === "object" && document.readyState === "complete"'))return api;await pause(100);}
- throw new Error('Wizard bridge did not become ready');
+ for(let i=0;i<100;i++){if(await api.evaluate('typeof window.setup === "object" && document.readyState === "complete" && window.setup.state().then(s=>s.visible)'))return api;await pause(100);}
+ throw new Error('Wizard did not become visible on Windows');
 }
 async function closed(p){for(let i=0;i<200&&p.exitCode===null;i++)await pause(100);assert.equal(p.exitCode,0,'Wizard did not exit cleanly');}
 async function quitApp(port,p){

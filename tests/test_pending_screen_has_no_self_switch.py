@@ -21,7 +21,10 @@ def _pending_screen() -> str:
 def test_no_button_to_pick_another_employee():
     body = _pending_screen()
     assert "restartOnboarding" not in body, "самовыбор одноразовый"
-    assert "<button" not in body, "кнопок на этом экране быть не должно"
+    # Accepted mobile login no longer requires a GPS exception workflow.
+    import re
+    assert set(re.findall(r'onclick="([^"]+)"',body)) == {'checkPending()'}
+    assert 'kind==="gps"' in body and '<select' not in body
 
 
 def test_dead_handler_is_gone_entirely():

@@ -52,7 +52,7 @@ export const promises: Section = {
 const ENTRY = (x: any) => (x.entered ? "вошёл" : linkStatus(x));
 
 // «Кто ввёл логин-пароль»: сотрудник вводит вход и на телефоне, и на
-// компьютере; подтверждает его только владелец. Ячейка устройства — название
+// компьютере; подтверждает руководитель своей команды. Ячейка устройства — название
 // и время ввода, пусто — ещё не вводил.
 function enteredCell(x: any, fallback: string): string {
   if (!x) return '<span class="muted">—</span>';
@@ -61,141 +61,46 @@ function enteredCell(x: any, fallback: string): string {
 
 const ENTERED_STATUS = (x: any) => (x.status === "active" ? "активен" : "ждёт подтверждения");
 
-async function drawEntered(root: HTMLElement): Promise<void> {
-  const host = root.querySelector<HTMLElement>("#entered-tbl");
-  const bar = root.querySelector<HTMLElement>("#entered-bulk");
-  if (!host || !bar || !root.isConnected) return;
-  host.innerHTML = '<div class="skeleton"></div>';
-  const r = await api("/api/manager/entered");
-  if (!host.isConnected) return;
-  if (!r.ok) {
-    host.innerHTML = `${problem(r.text || "Не загрузилось")}<div class="toolbar" style="margin-top:10px"><button class="btn small" data-retry>Повторить</button></div>`;
-    host.querySelector("[data-retry]")?.addEventListener("click", () => void drawEntered(root));
-    return;
-  }
-  const entered = ((r.data?.entered || []) as any[]);
-  new DataTable<any>(host, {
-    id: "manager-entered", exportName: "Кто ввёл логин-пароль", key: (x) => `${x.username || ""}|${x.employee || ""}`,
-    empty: "Никто ещё не вводил логин-пароль.",
-    cols: [
-      { key: "emp", title: "ФИО", value: (x) => x.employee,
-        html: (x) => `<span class="who">${esc(x.employee)}</span>${x.username ? `<span class="sub mono">${esc(x.username)}</span>` : ""}` },
-      { key: "office", title: "Офис", value: (x) => x.office || "" },
-      { key: "phone", title: "Телефон", value: (x) => x.phone?.label || "", html: (x) => enteredCell(x.phone, "телефон") },
-      { key: "desktop", title: "Компьютер", value: (x) => x.desktop?.label || "", html: (x) => enteredCell(x.desktop, "компьютер") },
-      { key: "ready", title: "Готов", value: (x) => (x.ready ? "готов" : "нет"),
-        html: (x) => (x.ready ? '<span class="tag ok">готов</span>' : '<span class="tag">нет</span>') },
-      { key: "status", title: "Статус", value: ENTERED_STATUS,
-        html: (x) => `<span class="tag ${x.status === "active" ? "ok" : "warn"}">${esc(ENTERED_STATUS(x))}</span>` },
-    ],
-  }).setRows(entered);
-  const gen = String(r.data?.generated_at || "").replace("T", " ").slice(0, 16);
-  bar.innerHTML = `<span class="who">Ввели и на телефоне, и на компьютере: <b>${n(entered.filter((x) => x.ready).length)} из ${n(entered.length)}</b></span>
-    <button class="btn small" data-b="copy" ${entered.length ? "" : "disabled"}>Скопировать список</button>
-    <span class="spacer"></span>${gen ? `<span class="sub">по состоянию на ${esc(gen)}</span>` : ""}
-    <button class="ticon" data-b="reload" title="Обновить список"><svg viewBox="0 0 18 18" width="15" height="15"><path d="M14.5 8.5a5.5 5.5 0 1 1-1.6-3.9M14.5 2.5v3.6h-3.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></button>`;
-  bar.querySelector('[data-b="copy"]')?.addEventListener("click", async () => {
-    // Формат согласован с владельцем: «ФИО — офис — тел ✓/— — ПК ✓/— — готов/нет».
-    await hard.copy(entered.map((x) => `${x.employee} — ${x.office || "—"} — тел ${x.phone ? "✓" : "—"} — ПК ${x.desktop ? "✓" : "—"} — ${x.ready ? "готов" : "нет"}`).join("\n"));
-    toast(`Скопировано: ${n(entered.length)}`);
-  });
-  bar.querySelector('[data-b="reload"]')?.addEventListener("click", () => void drawEntered(root));
+
+async function drawEntered(root: HTMLElement, accountSession: boolean): Promise<void> {
+  const r=await api("/api/manager/entered");
+  if(!r.ok){ root.innerHTML=problem(r.text || "Список заявок не загрузился."); return; }
+  const rows=(r.data?.entered || []).slice().sort((a:any,b:any)=>Number((b.devices||[]).some((d:any)=>d.status==='pending'))-Number((a.devices||[]).some((d:any)=>d.status==='pending')));
+  const pending=rows.flatMap((x:any)=>(x.devices||[]).filter((d:any)=>d.status==='pending').map((d:any)=>({row:x,device:d})));
+  root.innerHTML=`<div class="section"><h2>Регистрация и устройства команды</h2>
+    <div class="notice"><b>Как подтвердить вход</b><p>Сотрудник создаёт профиль или входит на телефоне либо в программе на ПК. Его заявка появится здесь. Сверьте ФИО и нажмите кнопку под заявкой.</p><p>Телефон можно подтвердить без предварительного ПК. Для компьютера лично проверьте сотрудника за этим ПК. Прежнее устройство того же вида будет отключено.</p></div>
+    <h3>Ждут подтверждения: ${pending.length}</h3>
+    <div id="entered-pending">${pending.length?pending.map(({row,device}:any)=>`<div class="list-row"><div class="grow"><b>${esc(row.employee)}</b><div class="sub">${esc(device.kind==='phone'?'Телефон':'Компьютер')} · ${esc(device.label||'')} · ${esc(row.office||'')}</div></div>${accountSession&&row.can_approve?`<button class="btn primary" data-device="${device.id}">Подтвердить ${device.kind==='phone'?'телефон':'ПК'}</button>`:'<span class="muted">Подтверждает свой руководитель</span>'}</div>`).join(''):'<p class="muted">Новых заявок нет. После регистрации или входа сотрудника нажмите «Обновить».</p>'}</div>
+    <button class="btn" id="entered-reload">Обновить</button><div id="entered-tbl"></div></div>`;
+  new DataTable<any>(root.querySelector("#entered-tbl")!,{id:"team-accounts",key:x=>x.username,exportName:"Регистрация команды",
+    cols:[{key:"employee",title:"Сотрудник",value:x=>x.employee},{key:"office",title:"Офис",value:x=>x.office},
+      {key:"status",title:"Доступ",value:x=>x.ready ? "Доступ подтверждён" : "Ожидает подтверждения"},
+      {key:"devices",title:"Устройства и заявки",value:x=>(x.devices||[]).map((d:any)=>d.label).join(", "),html:x=>(x.devices||[]).map((d:any)=>
+        `<div class="list-row"><span>${esc(d.kind==="phone"?"Телефон":"Компьютер")}: ${esc(d.label)} · ${esc(d.status==="active"?"подтверждён":"ожидает")}</span>
+          </div>`).join("")}
+    ]}).setRows(rows);
+  root.querySelector("#entered-reload")?.addEventListener("click",()=>void drawEntered(root,accountSession));
+  root.querySelectorAll<HTMLButtonElement>("[data-device]").forEach(button=>button.addEventListener("click",async()=>{
+    const id=Number(button.dataset.device), row=rows.find((x:any)=>(x.devices||[]).some((d:any)=>d.id===id));
+    const device=row?.devices.find((d:any)=>d.id===id); if(!device)return;
+    if(!await ask("Подтвердить доступ",device.kind==="desktop"
+      ? `Вы лично видите ${row.employee} за указанным компьютером и сверили ФИО? Прежний ПК будет отключён.`
+      : `Вы сверили личность ${row.employee} и подтверждаете его телефон? Прежний телефон будет отключён. Компьютер не требуется.`,"Подтвердить"))return;
+    button.disabled=true;
+    try{
+      const response=await api("/api/manager/account_approve",undefined,"POST",{device_id:id,observed_pc:device.kind==="desktop"});
+      if(!response.ok || !response.data?.ok){toast(response.data?.error || response.text || "Подтверждение не выполнено.");return;}
+      toast("Доступ подтверждён. Решение сохранено в журнале."); await drawEntered(root,accountSession);
+    }finally{if(button.isConnected)button.disabled=false;}
+  }));
 }
 
-export const links: Section = {
-  id: "links",
-  title: "Вход команды",
-  icon: "links",
-  kicker: "персональные ссылки сотрудников Софта и Харда",
-  async render(root) {
-    root.innerHTML = '<div class="skeleton"></div>';
-    const r = await api("/api/manager/app_links");
-    if (!r.ok) { root.innerHTML = problem(r.text || "Не загрузилось"); return; }
-    const d = r.data;
-    const rows = [d.me, ...(d.links as any[])].filter(Boolean);
-    let busy = false;
-    root.innerHTML = `<p class="muted" style="max-width:760px;margin:0 0 6px">Ссылка персональная. Два входа для телефона (браузер и ярлык) и отдельный вход для программы на ПК. Её можно скопировать повторно после входа сотрудника — копирование квоту не тратит. Срок ссылки — неделя; уже подключённые устройства продолжают работать.</p>
-      <div class="bulk" id="bulk"></div><div id="tbl"></div>
-      <div class="section" id="entered-sec">
-        <div class="section-head"><h2 class="section-title">Кто ввёл логин-пароль</h2></div>
-        <p class="muted" style="max-width:760px;margin:6px 0 12px">Логин и пароль вводят дважды: на телефоне и на компьютере; «готов» — ввёл и там и там. Список пересылается владельцу; подтверждение — только он.</p>
-        <div class="bulk" id="entered-bulk"></div><div id="entered-tbl"></div>
-      </div>`;
-    const table = new DataTable<any>(root.querySelector("#tbl")!, {
-      id: "manager-links", exportName: "Вход команды", key: (x) => x.employee, select: true,
-      cols: [
-        { key: "who", title: "Кто", value: (x) => x.label || x.employee, html: (x) => `<span class="who">${esc(x.label || x.employee)}</span>` },
-        { key: "entry", title: "Вход", value: ENTRY,
-          html: (x) => (x.entered ? `<span class="tag ok">вошёл · ${n(x.devices || 1)} ${plural(x.devices || 1, "устройство", "устройства", "устройств")}</span>`
-            : `<span class="tag">${esc(linkStatus(x))}</span>`) },
-        { key: "quota", title: "Остаток входов / срок", value: linkQuota,
-          html: (x) => `${esc(linkQuota(x))}${x.expires_at ? `<span class="sub">до ${esc(shortDate(x.expires_at))} · ${esc(linkStatus(x))}</span>` : ""}` },
-        { key: "seen", title: "Последний вход", value: (x) => String(x.last_use_at || "").replace("T", " ").slice(0, 16),
-          html: (x) => (x.last_use_at ? esc(ago(x.last_use_at)) : '<span class="muted">не было</span>') },
-        { key: "url", title: "Ссылка", filter: false, value: (x) => x.url || "", html: (x) => x.url ?
-          `<span class="url">${esc(x.url)}</span><button class="btn small" data-copy-link="${esc(x.employee)}">Скопировать ссылку${usableLink(x) ? "" : " (не действует)"}</button>` : "" },
-      ],
-      onSelect: () => drawBulk(),
-      afterRender: (host) => host.querySelectorAll<HTMLButtonElement>("[data-copy-link]").forEach(button =>
-        button.addEventListener("click", () => { const row = rows.find(x => x.employee === button.dataset.copyLink); if (row?.url) void copyLink(row.url); })),
-    });
-    const drawBulk = () => {
-      const bar = root.querySelector<HTMLElement>("#bulk")!;
-      const sc = table.scope();
-      const ppl = sc.rows;
-      const lacking = ppl.filter((x) => !usableLink(x) && !x.entered && x.can_issue !== false);
-      const issuable = ppl.filter((x) => x.can_issue !== false);
-      const live = ppl.filter((x) => usableLink(x) && x.url);
-      const canRevoke = ppl.filter((x) => (x.entered || x.code) && x.employee !== "!me");
-      bar.innerHTML = `<span class="who">Действия — <b>${esc(sc.label)}</b></span>
-        <button class="btn small primary" data-b="issue" ${lacking.length ? "" : "disabled"}>Выдать тем, у кого нет (${lacking.length})</button>
-        <button class="btn small" data-b="reissue" ${issuable.length ? "" : "disabled"}>Выдать заново</button>
-        <button class="btn small" data-b="copy" ${live.length ? "" : "disabled"}>Скопировать действующие ссылки (${live.length})</button>
-        <button class="btn small danger" data-b="revoke" ${canRevoke.length ? "" : "disabled"}>Сбросить доступ (${canRevoke.length})</button>
-        <span class="spacer"></span>${sc.picked ? '<button class="link" data-b="clear">снять отметки</button>' : ""}`;
-      const on = (k: string, f: () => Promise<void>) => bar.querySelector(`[data-b="${k}"]`)?.addEventListener("click", () => void f());
-      on("clear", async () => table.clearSelection());
-      const issue = async (list: any[], title: string) => {
-        if (!list.length || busy) return;
-        busy = true;
-        bar.querySelectorAll<HTMLButtonElement>("button").forEach(b => b.disabled = true);
-        try {
-        if (!(await ask(title, `Выдать ссылку ${list.length} чел.? У кого ссылку выдавали, но не открыли, — старая перестанет работать. Кто уже вошёл, из приложения не вылетит.`, "Выдать"))) { busy = false; drawBulk(); return; }
-        toast("Выдаю ссылки…");
-        const out: any[] = [];
-        for (const x of list) {
-          const res = await api("/api/manager/app_link", undefined, "POST", { employee: x.employee });
-          out.push({ employee: x.label || x.employee, who: "", url: res.ok ? res.data.url : "", uses: res.ok ? res.data.uses : null,
-            expires: res.ok ? String(res.data.expires_at || "").slice(0, 10) : "", error: res.ok ? "" : res.text || "не выдано" });
-        }
-        await links.render(root, {});
-        await showIssued(`Ссылки входа · ${out.length} чел.`, out);
-        } catch (error) { toast((error as Error).message || "Не удалось выдать ссылки"); }
-        finally { busy = false; if (bar.isConnected) drawBulk(); }
-      };
-      on("issue", () => issue(lacking, "Выдать вход"));
-      on("reissue", () => issue(issuable, "Выдать заново"));
-      on("copy", async () => { await hard.copy(live.map((x) => `${x.label || x.employee} — ${x.url}`).join("\n")); toast(`Скопировано ссылок: ${live.length}`); });
-      on("revoke", async () => {
-        if (busy) return;
-        busy = true;
-        try {
-        if (!(await ask("Сбросить доступ?", `${canRevoke.length} чел. выйдут из приложения на телефонах и ПК, ссылки перестанут работать. Вернуть вход — новой ссылкой.`, "Сбросить", true))) { busy = false; drawBulk(); return; }
-        let done = 0;
-        for (const x of canRevoke) { const res = await api("/api/manager/app_revoke", undefined, "POST", { employee: x.employee }); if (res.ok) done++; }
-        toast(`Доступ сброшен: ${done} чел.`);
-        await links.render(root, {});
-        } catch (error) { toast((error as Error).message || "Не удалось сбросить доступ"); }
-        finally { busy = false; if (bar.isConnected) drawBulk(); }
-      });
-      if (busy) bar.querySelectorAll<HTMLButtonElement>("button").forEach(b => b.disabled = true);
-    };
-    table.setRows(rows);
-    // Второй блок грузим тем же механизмом: лениво при открытии раздела,
-    // дальше — кнопкой обновления в его строке действий.
-    void drawEntered(root);
-  },
-};
+export function links(accountSession: boolean): Section {
+  return {id:"links",title:"Вход команды",icon:"links",kicker:"Регистрация и подтверждение устройств",
+    async render(root){root.innerHTML='<div class="skeleton"></div>';await drawEntered(root,accountSession);}};
+}
+
+
 
 const rep = { range: { preset: "month" } as Range };
 export function report(control: boolean): Section {
@@ -260,8 +165,10 @@ export function device(shell: Shell, me: any, onLogout: () => void): Section {
           <div class="chips">${[["system", "Как в Windows"], ["light", "Светлый"], ["dark", "Тёмный"]].map(([k, t]) =>
             `<button class="chip" data-theme="${k}" aria-pressed="${theme === k}">${t}</button>`).join("")}</div></div>
         <div class="section"><div class="section-head"><h2 class="section-title">Выйти на этом компьютере</h2></div>
-          <p class="muted" style="max-width:640px;margin:0 0 12px">Пульт забудет вход и всё сохранённое. Войти снова можно новой ссылкой от аналитика.</p>
+          <p class="muted" style="max-width:640px;margin:0 0 12px">Пульт забудет текущий вход и кэш. Учётка останется действующей, если администратор её не отключил; вход по прежней ссылке может потребовать выдачи новой.</p>
+          ${shell.device?.username ? accountSectionHtml() : ""}
           <button class="btn danger" data-logout>Выйти</button></div>`;
+      if (shell.device?.username) wireAccountSection(root, shell.device.username);
       void mountModeSwitchIfKit(root.querySelector("#modesw")!, "manager").then(() => {
         const sec = root.querySelector("#modesec") as HTMLElement | null;
         const sw = root.querySelector("#modesw") as HTMLElement | null;

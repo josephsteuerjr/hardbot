@@ -94,9 +94,7 @@ def test_field_semantics_are_explicit_and_safe():
 def test_full_cycle_has_shared_responsible_aliases():
     bundle = load_config_bundle()
 
-    assert bundle.app.responsible_aliases == {
-        "Тургунов Музафар": "Тургунов Музаффар"
-    }
+    assert bundle.app.responsible_aliases == {}
 
 
 def test_distribution_aliases_must_match_app_exactly(tmp_path: Path):

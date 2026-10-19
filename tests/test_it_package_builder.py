@@ -22,6 +22,27 @@ def _load_builder():
 builder = _load_builder()
 
 
+def test_packaged_exchange_contract_retains_live_binding(built):
+    """The package must speak the same byte-pinned protocol as the live server."""
+    import hashlib
+    import exchange_contract
+
+    with zipfile.ZipFile(built['archive']) as archive:
+        raw = archive.read('hard-test.1/server/data_exchange_contract.json')
+    assert hashlib.sha256(raw).hexdigest() == exchange_contract.CONTRACT_SHA256
+
+
+def test_byte_pinned_schema_is_still_scanned_for_secrets(tmp_path):
+    from pathlib import PurePosixPath
+
+    relative = PurePosixPath('server/data_exchange_contract.json')
+    target = tmp_path / relative
+    target.parent.mkdir()
+    target.write_text('BOT_TOKEN=' + '123456789:' + 'a' * 35, encoding='utf-8')
+    with pytest.raises(builder.BuildStop):
+        builder.scan_for_leaks(tmp_path, [relative])
+
+
 @pytest.fixture(scope="module")
 def built(tmp_path_factory):
     out = tmp_path_factory.mktemp("dist")
@@ -257,7 +278,6 @@ def test_leak_scanner_stops_the_build(tmp_path):
         builder.build(root, tmp_path / "out2", version="0.2")
     assert "server/settings.py" in str(stop.value)
     leaky.unlink()
-
     # Образцы собираются из кусков: иначе сканер поймал бы сам этот файл тестов.
     server_ip = ".".join(("209", "222", "251", "112"))
     for payload in (f"SERVER={server_ip}\n", "ssh_" + "password" + ": hunter2secret\n",
@@ -273,6 +293,21 @@ def test_leak_scanner_stops_the_build(tmp_path):
     archive, _ = builder.build(root, tmp_path / "out4", version="0.4")
     with zipfile.ZipFile(archive) as zf:
         assert "hard-0.4/server/.env.example" in zf.namelist()
+
+
+def test_password_exception_requires_exact_line_and_cannot_hide_other_secret(tmp_path):
+    from pathlib import PurePosixPath
+    relative = PurePosixPath("server/account_access.py")
+    source = tmp_path / str(relative)
+    source.parent.mkdir(parents=True)
+    permitted = "pass" + "word = args.password or _gen_password()"
+    source.write_text(permitted + "\n", encoding="utf-8")
+    builder.scan_for_leaks(tmp_path, [relative])
+    for suffix in ("; secret_" + "pass" + "word = 'synthetic-leak'",
+                   " # -----BEGIN OPENSSH " + "PRIVATE KEY-----"):
+        source.write_text(permitted + suffix + "\n", encoding="utf-8")
+        with pytest.raises(builder.BuildStop):
+            builder.scan_for_leaks(tmp_path, [relative])
 
 
 def test_wanted_rules():

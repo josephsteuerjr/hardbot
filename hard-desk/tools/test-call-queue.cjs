@@ -6,10 +6,11 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const esbuild = require('esbuild');
+const pcProof = require('./mock-pc-proof.cjs')();
 
 const root = path.resolve(__dirname, '..');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'hard-call-queue-test-'));
-let network = 'offline', sent = [], hold = null, enrollment = null, managerInfo = null;
+let network = 'offline', sent = [], hold = null, enrollment = null, managerInfo = null, accountReply = null;
 const electron = {
   app: { getPath: () => temp },
   safeStorage: {
@@ -19,10 +20,13 @@ const electron = {
   },
   session: { fromPartition: () => ({ setProxy: async () => {}, fetch: async (_url, options) => {
     if (network === 'offline') throw new Error('ERR_INTERNET_DISCONNECTED');
+    if (_url.endsWith('/api/account/pc_challenge')) return Response.json(pcProof.issue(JSON.parse(options.body)));
+    if (_url.endsWith('/api/account/login')) pcProof.verify(JSON.parse(options.body));
+    if(_url.endsWith('/api/identity') && !['401','403','500'].includes(network))return Response.json({ok:true,uid:101});
     if (options.body) sent.push(JSON.parse(options.body));
     if (hold) { const wait = hold; hold = null; await wait; }
     const status = network === '500' ? 500 : network === '404' ? 404 : network === '401' ? 401 : network === '403' ? 403 : network === '429' ? 429 : 200;
-    const body = _url.endsWith('/device/enroll') && enrollment ? enrollment : _url.endsWith('/device/me') && managerInfo ? managerInfo : network === 'partial' ? { ok: true, rejected: { forecast_sum: 'format' } } : { ok: true };
+    const body = _url.endsWith('/account/login') && accountReply ? accountReply : _url.endsWith('/device/enroll') && enrollment ? enrollment : _url.endsWith('/device/me') && managerInfo ? managerInfo : network === 'partial' ? { ok: true, rejected: { forecast_sum: 'format' } } : { ok: true };
     return new Response(network === 'invalid' ? 'not JSON' : JSON.stringify(body), {status});
   } }) },
 };
@@ -30,7 +34,7 @@ function load(name) {
   const code = esbuild.buildSync({ entryPoints: [path.join(root, 'src/main', name + '.ts')], bundle: true,
     platform: 'node', format: 'cjs', external: ['electron'], write: false }).outputFiles[0].text;
   const module = { exports: {} };
-    vm.runInNewContext(code, { module, exports: module.exports, Buffer, Response, URLSearchParams, AbortController, setTimeout, clearTimeout,
+    vm.runInNewContext(code, { module, exports: module.exports, Buffer, Response, URLSearchParams, AbortController, setTimeout, clearTimeout, process: {env:{HARD_USER_DATA:temp}},
     require: name => name === 'electron' ? electron : require(name) });
   return module.exports;
 }
@@ -95,13 +99,13 @@ function load(name) {
   network='offline'; await net.callField('POST','/api/save',undefined,call('recover-after-revoke'));
   network='401'; await net.flushCallQueue();
   assert.equal(store.readFieldToken(),'');
-  assert.equal(store.readSettings().fieldDevice.telegram_id,101);
-  assert.equal(store.readCallQueue().owner,stableOwner);
+  assert.equal(store.readSettings().fieldDevice,undefined);
+  assert.equal(store.readCallQueue(),null);
   network='online';
   enrollment={token:'new-same-principal-token',device_id:2,employee:'Synthetic Soft',telegram_id:101};
   assert.equal((await net.enrollField('https://synthetic.invalid/i/synthetic-link')).ok,true);
-  assert.equal(store.readCallQueue().owner,stableOwner);
-  await net.flushCallQueue(); assert.equal(store.readCallQueue().entries.length,0);
+  assert.equal(store.readCallQueue(),null);
+  await net.flushCallQueue(); assert.equal(store.readCallQueue(),null);
   network='offline'; await net.callField('POST','/api/save',undefined,call('do-not-switch-user'));
   enrollment={token:'another-principal-token',device_id:3,employee:'Other Synthetic Soft',telegram_id:202};
   network='online';
@@ -212,7 +216,40 @@ function load(name) {
   store.writeToken('synthetic-manager-two');assert.equal((await net.call('GET','/api/local/preferences',{profile:'hard',id:'team-portfolio-hard'})).data.value,null);
   store.writeToken('synthetic-manager-one');assert.equal((await net.call('GET','/api/local/preferences',{profile:'hard',id:'team-portfolio-hard'})).data.value.q,'Synthetic manager search');
   assert.equal((await net.call('GET','/api/local/preferences',{profile:'hard',id:'../invalid'})).ok,false);
-  console.log('Queue/cache/drafts/preferences: calls, payments, office and manager settings; encrypted restart, routes, scope, updater work and offline expiry passed');
+  network='offline';
+  store.writeSettings({fieldServer:'https://synthetic.invalid',fieldDevice:{telegram_id:101,employee:'Old label'}});
+  store.writeFieldToken('account-old');
+  await net.callField('POST','/api/save',undefined,call('account-queue'));
+  const originalQueue=store.readCallQueue();
+  network='online';accountReply={action:'ok_pending',token:'account-new',uid:101,role:'agent',employee:'New label',username:'test'};
+  assert.equal((await net.accountLogin('https://synthetic.invalid','test','synthetic123')).ok,true);
+  assert.equal(store.readCallQueue().owner,originalQueue.owner);
+  assert.equal(store.readCallQueue().entries[0].body.op_id,'account-queue');
+  assert.equal(sent.at(-1).expected_uid,101);
+  let finishQueueLogin;hold=new Promise(resolve=>finishQueueLogin=resolve);
+  const queueLogin=net.accountLogin('https://synthetic.invalid','test','synthetic123');
+  await new Promise(resolve=>setTimeout(resolve,0));
+  const liveQueue=store.readCallQueue();
+  store.writeCallQueue({...liveQueue,entries:[...liveQueue.entries,{body:call('arrived-during-login')} ]});
+  finishQueueLogin();assert.equal((await queueLogin).ok,true);
+  assert.equal(store.readCallQueue().entries.length,2);
+  accountReply={...accountReply,uid:102,token:'foreign-account'};
+  assert.equal((await net.accountLogin('https://synthetic.invalid','other','synthetic123')).status,409);
+  assert.equal(store.readFieldToken(),'account-new');
+  store.writeCallQueue({...originalQueue,owner:'foreign-owner'});
+  assert.equal((await net.accountLogin('https://synthetic.invalid','test','synthetic123')).status,409);
+  assert.equal(store.readCallQueue().owner,'foreign-owner');
+  store.clearCallQueue();
+  let finishLogin;hold=new Promise(resolve=>finishLogin=resolve);
+  const lateLogin=net.accountLogin('https://synthetic.invalid','test','synthetic123');
+  await new Promise(resolve=>setTimeout(resolve,0));store.wipeField();finishLogin();
+  assert.equal((await lateLogin).ok,false);assert.equal(store.readFieldToken(),'');
+  store.writeSettings({fieldServer:'https://synthetic.invalid'});store.writeFieldToken('sessions-old');
+  let finishSessions;hold=new Promise(resolve=>finishSessions=resolve);
+  const lateSessions=net.callField('GET','/api/account/sessions');
+  await new Promise(resolve=>setTimeout(resolve,0));store.writeFieldToken('sessions-new');finishSessions();
+  assert.equal((await lateSessions).ok,false);
+  console.log('Queue/cache/drafts/preferences: encrypted recovery, account identity, stale login/session responses and preserved queues passed');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
   const resolved = fs.realpathSync(temp);
   assert.ok(resolved.startsWith(fs.realpathSync(os.tmpdir()) + path.sep));

@@ -61,7 +61,7 @@ def cmd_create(args: argparse.Namespace) -> int:
          + (f", офис {args.office}" if args.office else "") + ")")
     _out(f"Пароль (сообщить один раз, на экране не повторится): {password}")
     if args.role != "agent":
-        _out("Роль не agent: активация потребует ДВУХ подтверждений администраторов.")
+        _out("Для активации требуется подтверждение администратора.")
     return 0
 
 
@@ -69,7 +69,10 @@ def cmd_bulk(args: argparse.Namespace) -> int:
     rows: list[list[str]] = []
     if args.csv:
         with open(args.csv, encoding="utf-8-sig") as f:
-            rows = list(csv.reader(f))
+            text = f.read()
+        first = next((line for line in text.splitlines() if line.strip()), "")
+        delimiter = ";" if ";" in first else "\t" if "\t" in first else ","
+        rows = list(csv.reader(text.splitlines(), delimiter=delimiter))
     if not rows:
         _out("CSV пуст или не передан (--csv файл.csv, колонки: ФИО;офис;логин;пароль).")
         return 1
@@ -82,8 +85,7 @@ def cmd_bulk(args: argparse.Namespace) -> int:
         username = row[2].strip() if len(row) > 2 and row[2].strip() else ""
         password = row[3].strip() if len(row) > 3 and row[3].strip() else _gen_password()
         if not username:
-            base = "".join(ch for ch in employee.lower() if "a" <= ch <= "z")
-            username = base[:16] or f"emp{secrets.token_hex(3)}"
+            username = _username_for(employee)
         result = accounts.create_account(employee, username, password,
                                          office=office, by="cli-bulk")
         if result.get("ok"):
@@ -94,6 +96,23 @@ def cmd_bulk(args: argparse.Namespace) -> int:
             _out(f"FAIL {employee}: {result.get('error', '')}")
     _out(f"\nИтого: создано {made}, отказов {len(failed)}")
     return 0 if not failed else 1
+
+
+def _username_for(employee: str) -> str:
+    """A readable transliteration, with a suffix when an existing login is taken."""
+    import re
+    alphabet = dict(zip("абвгдеёжзийклмнопрстуфхцчшщъыьэюяқғҳҷӯӣ",
+                        ("a b v g d e e zh z i y k l m n o p r s t u f kh ts ch sh shch "
+                         "_ y _ e yu ya q gh h j u i").split()))
+    raw = "".join(alphabet.get(ch, ch) for ch in employee.lower())
+    base = re.sub(r"[^a-z0-9]+", ".", raw).strip(".")[:28] or "employee"
+    with db.connect() as conn:
+        used = {r[0] for r in conn.execute("SELECT username FROM accounts")}
+    candidate, suffix = base, 1
+    while candidate in used:
+        suffix += 1
+        candidate = base[:32 - len(str(suffix)) - 1] + "." + str(suffix)
+    return candidate
 
 
 def cmd_passwd(args: argparse.Namespace) -> int:
@@ -151,9 +170,16 @@ def cmd_approve_device(args: argparse.Namespace) -> int:
 
 
 def cmd_disable(args: argparse.Namespace) -> int:
-    status = "disabled" if not args.enable else "active"
+    status = "disabled" if not args.enable else "awaiting"
     result = accounts.set_status(args.username, status, by="cli")
     _out(f"Статус: {status}" if result.get("ok") else "ОТКАЗ: " + result.get("error", ""))
+    return 0 if result.get("ok") else 1
+
+
+def cmd_approver(args: argparse.Namespace) -> int:
+    result = accounts.register_approver(args.device_id, args.name)
+    _out(f"Администратор назначен: {result['principal']}" if result.get("ok")
+         else "ОТКАЗ: " + result.get("error", ""))
     return 0 if result.get("ok") else 1
 
 
@@ -184,7 +210,7 @@ def main() -> int:
     p.add_argument("--office", default="")
     p.add_argument("--role", default="agent",
                    help="agent|manager|security|full|analyst (руководителям/аналитику "
-                        "нужно два подтверждения администраторов)")
+                        "достаточно одного подтверждения администратора)")
     p.add_argument("--telegram-id", type=int, default=None,
                    help="внутренний номер пользователя, если нужно задать явно "
                         "(иначе берётся из managers или создаётся служебный)")
@@ -223,6 +249,11 @@ def main() -> int:
     p = sub.add_parser("list")
     p.add_argument("--by-office", action="store_true")
     p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("approver", help="назначить администратора устройства (только SSH)")
+    p.add_argument("--device-id", type=int, required=True)
+    p.add_argument("--name", required=True, help="постоянный id человека; одинаковый на всех его устройствах")
+    p.set_defaults(func=cmd_approver)
 
     args = parser.parse_args()
     return args.func(args)

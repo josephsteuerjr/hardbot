@@ -6,13 +6,13 @@ const {spawn}=require('node:child_process');
 const role=process.argv.find(a=>a.startsWith('--role='))?.split('=')[1] || 'soft';
 const legacyServer=process.argv.includes('--legacy-server');
 const fixtureId=role+(legacyServer?'-legacy':'')+'-'+Date.now();
-const root=path.resolve(__dirname,'../..'),base=path.join(root,'_local/release-completion-2026-10-12');
+const root=path.resolve(__dirname,'../..'),base=process.env.HARD_QA_ROOT || path.join(root,'_local/release-completion-2026-10-12');
 const lab=path.join(base,'live-'+role+(legacyServer?'-legacy':''));fs.mkdirSync(lab,{recursive:true});
 const product=role==='soft'?'soft':'manager';
 process.env.HARD_USER_DATA=path.join(lab,'data-'+Date.now());process.argv.push('--tray');
 fs.mkdirSync(process.env.HARD_USER_DATA,{recursive:true});app.setPath('userData',process.env.HARD_USER_DATA);
 process.env.NODE_PATH=path.join(__dirname,'../node_modules');require('node:module').Module._initPaths();
-BrowserWindow.prototype.show=function(){};app.disableHardwareAcceleration();
+app.disableHardwareAcceleration();
 let dialogs=0;dialog.showSaveDialog=async()=>{dialogs++;return {canceled:false,filePath:path.join(lab,'team-report.xlsx')}};
 const downloads=[];
 shell.openPath=async()=>'';
@@ -30,7 +30,7 @@ ipcMain.handle=(channel,handler)=>originalHandle(channel,async(event,...args)=>{
 let python=null,config=null;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const wait=async(fn,message)=>{for(let i=0;i<100;i++){if(await fn())return;await sleep(100)}throw new Error(message)};
 async function server(port=0){
-  python=spawn('python',['-X','utf8',path.join(base,'server-fixture.py'),String(port)],{windowsHide:true,env:{...process.env,PYTHONIOENCODING:'utf-8',HARD_QA_RELEASE_ROLE:fixtureId},stdio:['ignore','pipe','pipe']});
+  python=spawn('python',['-X','utf8',path.join(__dirname,'qa-server-fixture.py'),String(port)],{windowsHide:true,env:{...process.env,PYTHONIOENCODING:'utf-8',HARD_QA_RELEASE_ROLE:fixtureId},stdio:['ignore','pipe','pipe']});
   return await new Promise((resolve,reject)=>{let output='',error='';const timer=setTimeout(()=>reject(new Error('Server timeout: '+error.slice(-1200))),20000);
     python.stderr.on('data',d=>error+=d);python.stdout.on('data',d=>{output+=d;const line=output.split(/\r?\n/).find(v=>v.startsWith('RELEASE-QA '));if(line){clearTimeout(timer);resolve(JSON.parse(line.slice(11)))}});
     python.once('error',reject);python.once('exit',code=>{if(!output.includes('RELEASE-QA ')){clearTimeout(timer);reject(new Error('Server exit '+code+': '+error.slice(-1200)))}})});
@@ -50,7 +50,7 @@ app.whenReady().then(async()=>{try{
   w.webContents.setBackgroundThrottling(false);
   const js=code=>w.webContents.executeJavaScript(code);const net=moduleOf('net');
   await js('(()=>{const style=document.createElement("style");style.textContent="*,*::before,*::after{animation:none!important;transition:none!important}";document.head.append(style)})()');
-  const capture=async name=>{await sleep(300);await w.webContents.capturePage();await sleep(150);fs.writeFileSync(path.join(lab,name),(await w.webContents.capturePage()).toPNG())};
+  const capture=async name=>{console.log('Capturing',name);await sleep(300);fs.writeFileSync(path.join(lab,name),(await w.webContents.capturePage()).toPNG());console.log('Captured',name)};
   const result={role,realRenderer:true,realIPC:true,realHTTP:true,realSQLite:true};
   await js('window.__qaErrors=[];window.addEventListener("error",e=>window.__qaErrors.push(e.message));window.addEventListener("unhandledrejection",e=>window.__qaErrors.push(String(e.reason)))');
   if(role==='soft'){
@@ -97,12 +97,17 @@ app.whenReady().then(async()=>{try{
     const scoped=(await net.call('GET','/api/manager/portfolio',{mode:'hard'})).data;assert.equal(scoped.contracts,3);assert.equal(scoped.items.some(p=>p.ids.includes('FOREIGN-001')),false);
     await capture('crm-portfolio.png');
     await js('document.querySelector("#team-portfolio-table tbody tr[data-key]").dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}))');await wait(()=>js('!!document.querySelector("[data-case-next]")'),'Card navigation missing');
-    await js('document.querySelector("[data-case-next]").click()');await wait(()=>js('document.getElementById("panel-title").textContent.includes("LIVE-003")'),'Next card failed');
-    assert.equal(await js('document.querySelectorAll("#panel-inner input,#panel-inner textarea,#panel-inner select").length'),0);
-    assert.equal(await js('document.getElementById("panel-inner").textContent.includes("1 000,25")'),true);
+    await js('document.querySelector("[data-case-next]").click()');await wait(()=>js('document.getElementById("head-kicker").textContent.includes("LIVE-003")'),'Next card failed');
+    assert.equal(await js('document.querySelectorAll(".mcrm-case-workspace input,.mcrm-case-workspace textarea,.mcrm-case-workspace select").length'),0);
+    await js('document.querySelector("[data-case-back]").click()');
+    await wait(()=>js('!!document.querySelector("#team-portfolio-table tbody tr[data-key]")'),'Table return missing');
+    await js('document.querySelector("#team-portfolio-table tbody tr[data-key]").click()');
+    await wait(()=>js('!!document.querySelector("[data-case-tab=contracts]")'),'Contracts tab missing');
+    await js('document.querySelector("[data-case-tab=contracts]").click()');
+    assert.equal(await js('document.querySelector(".mcrm-case-workspace").textContent.includes("1 000,25")'),true);
     result.scopeExact=true;result.fullPortfolioWithoutActivity=true;result.readOnlyCard=true;result.keyboardNavigation=true;
     await capture('crm-card.png');
-    await js('document.getElementById("panel-close").click();document.querySelector("[data-go=report]").click()');await wait(()=>js('!!document.querySelector("[data-dl=stats]")'),'Report button missing');
+    await js('document.querySelector("[data-case-back]").click();document.querySelector("[data-go=report]").click()');await wait(()=>js('!!document.querySelector("[data-dl=stats]")'),'Report button missing');
     assert.equal(dialogs,0);await js('document.querySelector("[data-preset=today]").click()');assert.equal(dialogs,0);
     await js(`for(const key of ['from','to']){const input=document.querySelector('[data-report-'+key+']');input.value=${JSON.stringify('2026-10-12')};input.dispatchEvent(new Event('change',{bubbles:true}))}`);
     assert.equal(dialogs,0);assert.equal(downloads.length,0);

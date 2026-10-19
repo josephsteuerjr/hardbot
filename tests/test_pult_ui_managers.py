@@ -27,7 +27,7 @@ from pult.ui.widgets import Button  # noqa: E402
 
 MANAGERS = {
     "managers": [
-        {"telegram_id": 8539622577, "name": "Рук ТЖ", "cities": ["Таджикистан"],
+        {"telegram_id": 9782001, "name": "Рук ТЖ", "cities": ["Таджикистан"],
          "employees": [], "direction": "tj", "can_dm": 1, "spelling_mismatch": 0},
         {"telegram_id": 111222333, "name": "Точечный", "cities": ["Худжанд"],
          "employees": ["Иванов И."], "direction": "", "can_dm": 1, "spelling_mismatch": 0},
@@ -66,7 +66,7 @@ def window(app, tmp_path, monkeypatch):
     def api(method, path, body=None, timeout=20):
         calls.append((method, path, body))
         if path == "/admin/guests":
-            return {"guests": [{"telegram_id": 8539622577, "name": "Рук ТЖ"}]}
+            return {"guests": [{"telegram_id": 9782001, "name": "Рук ТЖ"}]}
         if path == "/admin/managers":
             return {**MANAGERS, "managers": [dict(m) for m in MANAGERS["managers"]]}
         if path == "/admin/chats":
@@ -105,7 +105,7 @@ def test_edit_fills_form_scrolls_and_keeps_direction_hint(app, window):
     assert window.mgr_form_card.title.text() == MGR_FORM_TITLE
     _edit_buttons(window)[0].click()
     app.processEvents()
-    assert window.mgr_tid.get() == "8539622577" and window.mgr_name.get() == "Рук ТЖ"
+    assert window.mgr_tid.get() == "9782001" and window.mgr_name.get() == "Рук ТЖ"
     assert window.mgr_direction.current() == 1
     assert "Таджикистан" in window.mgr_emp_hint.text(), "подсказка направления стёрлась"
     assert not window.mgr_emp_chips.isEnabled(), "у направленца галочки должны гаснуть"
@@ -132,7 +132,7 @@ def test_save_sends_direction_and_resets_form(app, window):
     app.processEvents()
     posts = [c for c in window.calls if c[0] == "POST"]
     assert posts == [("POST", "/admin/manager",
-                      {"telegram_id": 8539622577, "name": "Рук ТЖ",
+                      {"telegram_id": 9782001, "name": "Рук ТЖ",
                        "cities": ["Таджикистан"], "employees": [], "direction": "tj",
                        "office_cities": []})]
     assert ("GET", "/admin/managers", None) in window.calls, "после записи список перечитан"

@@ -21,6 +21,7 @@ from aiogram.types import (
 )
 
 import db
+import account_policy
 import digest
 import notify
 from config import ADMIN_ID, lang_of
@@ -42,6 +43,8 @@ def manager_menu() -> ReplyKeyboardMarkup:
 
 
 def scope(uid: int) -> dict | None:
+    if account_policy.strict():
+        return None
     """Область видимости пользователя для дайджеста.
     Руководитель → его города/сотрудники. Владелец (ADMIN) без явной роли →
     «супер-обзор»: все сотрудники реестра. Сборка одна на бот, автопуши и
@@ -53,7 +56,7 @@ def scope(uid: int) -> dict | None:
 class IsManager(BaseFilter):
     async def __call__(self, message: Message) -> bool:
         uid = message.from_user.id
-        return uid == ADMIN_ID or db.is_manager(uid)
+        return not account_policy.strict() and (uid == ADMIN_ID or db.is_manager(uid))
 
 
 async def _send_requested_applink(message: Message) -> bool:

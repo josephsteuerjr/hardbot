@@ -3,7 +3,7 @@
 #
 # Не путать с backup.sh/restore.sh: те делают копию ВНУТРИ одной установки
 # (для отката). Здесь другое — снять работающую систему целиком и поднять её
-# на чужом сервере: база, фотографии, контрольные суммы и опись, по которой
+# на чужом сервере: база, фотографии, чеки, контрольные суммы и опись, по которой
 # принимающая сторона сверяет, что доехало.
 #
 #   НА СТАРОМ СЕРВЕРЕ:
@@ -489,10 +489,13 @@ cmd_receive() {
 
   local incoming_photos=0
   [ -d "$UNPACK_DIR/$ARCHIVE_ROOT/photos" ] && incoming_photos=1
+  local incoming_receipts=0
+  [ -d "$UNPACK_DIR/$ARCHIVE_ROOT/receipts" ] && incoming_receipts=1
 
   # --- Что уже стоит на этом сервере ---------------------------------------
   local state
-  state="$(in_app state --data /data | tr -d '\r')"
+  state="$(in_app state --data /data | tr -d '\r')" \
+    || die "состояние назначения не прочитано; data/ не тронут"
   say ""
   say "СОСТОЯНИЕ ЭТОГО СЕРВЕРА"
   say "-----------------------"
@@ -516,6 +519,8 @@ cmd_receive() {
 Ничего не изменено."
       fi
       ;;
+    пусто*) ;;
+    *) die "неизвестный ответ проверки состояния: $state; data/ не тронут" ;;
   esac
 
   # --- Подтверждение --------------------------------------------------------
@@ -538,6 +543,8 @@ cmd_receive() {
   else
     say "  • в data/ встанет база из архива"
   fi
+  [ "$incoming_receipts" -eq 1 ] && say "  • в data/ встанут чеки из архива"
+  say "  • прежние база (включая WAL/SHM), чеки и audit-spool отложатся в ${aside#$UNIT_DIR/} даже при пустой схеме"
   say "  • приложение запустится и опись сверится с тем, что реально в базе"
   if [ "$yes" -ne 1 ]; then
     printf 'Продолжить? [y/N] '
@@ -545,41 +552,66 @@ cmd_receive() {
     case "$answer" in y|Y|д|Д) ;; *) rm -rf "$UNPACK_DIR"; say "Отменено"; exit 0 ;; esac
   fi
 
+  # До остановки/перемещения существующих файлов подготовить ВСЕ входящие
+  # байты. Ошибка копирования не делает старую установку недоступной.
+  local stage="$UNIT_DIR/.migration-stage-$$"
+  [ ! -e "$stage" ] || die "staging уже существует: $stage"
+  mkdir "$stage"
+  cp "$UNPACK_DIR/$ARCHIVE_ROOT/hardbot.db" "$stage/hardbot.db"
+  for asset in photos receipts; do
+    [ -d "$UNPACK_DIR/$ARCHIVE_ROOT/$asset" ] && cp -a "$UNPACK_DIR/$ARCHIVE_ROOT/$asset" "$stage/$asset"
+  done
+  cmp -s "$stage/hardbot.db" "$UNPACK_DIR/$ARCHIVE_ROOT/hardbot.db" \
+    || die "staging базы не совпал с проверенным архивом; data/ не заменено"
+  for asset in photos receipts; do
+    if [ -d "$stage/$asset" ]; then
+      diff -qr "$stage/$asset" "$UNPACK_DIR/$ARCHIVE_ROOT/$asset" >/dev/null \
+        || die "staging $asset не совпал с проверенным архивом; data/ не заменено"
+    fi
+  done
+
   say ""
   say "Останавливаю приложение…"
-  compose stop app >/dev/null 2>&1 || true
+  compose stop app >/dev/null || die "не удалось остановить app; старые данные на месте"
 
-  # --- Отложить то, что было -----------------------------------------------
-  # Именно ОТЛОЖИТЬ, а не удалить: перенос — операция, которую делают один раз
-  # и под давлением, и «а верните как было» звучит чаще, чем хотелось бы.
-  if [ "$replace" -eq 1 ]; then
-    mkdir -p "$aside"
-    if [ -f "$UNIT_DIR/data/hardbot.db" ]; then
-      mv "$UNIT_DIR/data/hardbot.db" "$aside/hardbot.db"
-      # Спутники WAL без своей базы бессмысленны и опасны — уносим вместе с ней.
-      for spare in "$UNIT_DIR"/data/hardbot.db-wal "$UNIT_DIR"/data/hardbot.db-shm; do
-        [ -f "$spare" ] && mv "$spare" "$aside/"
-      done
-      ok "прежняя база отложена: ${aside#$UNIT_DIR/}/hardbot.db"
-    fi
-    if [ "$incoming_photos" -eq 1 ] && [ -d "$UNIT_DIR/data/photos" ]; then
-      mv "$UNIT_DIR/data/photos" "$aside/photos"
-      ok "прежние фотографии отложены: ${aside#$UNIT_DIR/}/photos"
-    fi
-  else
-    rm -f "$UNIT_DIR"/data/hardbot.db-wal "$UNIT_DIR"/data/hardbot.db-shm
+  # Повтор ПОСЛЕ остановки закрывает окно между первым state и ответом человека.
+  local stopped_state
+  stopped_state="$(in_app state --data /data | tr -d '\r')" \
+    || die "после остановки состояние не читается; data/ не заменено"
+  case "$stopped_state" in
+    пусто*) ;;
+    занято*) [ "$replace" -eq 1 ] \
+      || die "пока ожидали подтверждение, появились данные ($stopped_state); нужен --replace. data/ не заменено" ;;
+    *) die "неизвестный ответ проверки после остановки: $stopped_state" ;;
+  esac
+
+  # Даже пустой инициализированный DB сохраняется: слово «пусто» не является
+  # разрешением безвозвратно стирать bytes SQLite/WAL/SHM. Каталог aside
+  # создаётся эксклюзивно, чтобы второй receive не смешал два комплекта.
+  mkdir -p "$UNIT_DIR/backups"
+  mkdir "$aside" || die "не удаётся создать отдельный каталог сохранения: $aside"
+  for asset in hardbot.db hardbot.db-wal hardbot.db-shm hardbot.db-journal audit-spool.sqlite3 audit-spool.sqlite3-wal audit-spool.sqlite3-shm receipts; do
+    [ -e "$UNIT_DIR/data/$asset" ] && mv "$UNIT_DIR/data/$asset" "$aside/$asset"
+  done
+  if [ "$incoming_photos" -eq 1 ] && [ -e "$UNIT_DIR/data/photos" ]; then
+    mv "$UNIT_DIR/data/photos" "$aside/photos"
   fi
+  ok "старые байты отложены: ${aside#$UNIT_DIR/} (включая WAL и чеки)"
 
   # --- Подставить новое -----------------------------------------------------
-  cp "$UNPACK_DIR/$ARCHIVE_ROOT/hardbot.db" "$UNIT_DIR/data/hardbot.db"
+  mv "$stage/hardbot.db" "$UNIT_DIR/data/hardbot.db"
   ok "база подставлена"
   if [ "$incoming_photos" -eq 1 ]; then
-    mkdir -p "$UNIT_DIR/data/photos"
-    cp -a "$UNPACK_DIR/$ARCHIVE_ROOT/photos/." "$UNIT_DIR/data/photos/"
+    mv "$stage/photos" "$UNIT_DIR/data/photos"
     ok "фотографии подставлены"
   else
     say "  в архиве фотографий нет (снимали с --db-only) — каталог photos не тронут"
   fi
+  if [ "$incoming_receipts" -eq 1 ]; then
+    mv "$stage/receipts" "$UNIT_DIR/data/receipts"
+    ok "чеки подставлены"
+  fi
+  rmdir "$stage"
 
   say ""
   say "Запускаю приложение…"

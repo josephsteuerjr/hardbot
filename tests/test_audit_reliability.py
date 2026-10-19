@@ -134,7 +134,7 @@ def test_offline_soft_cache_keeps_mode_and_tracking_principal():
     assert result == {"mode": "soft", "uid": 1, "employee": "Synthetic Soft"}
 
 
-def test_readiness_refuses_missing_corrupt_or_locked_database(tmp_path, monkeypatch):
+def test_readiness_refuses_missing_or_corrupt_and_survives_concurrent_writer(tmp_path, monkeypatch):
     import db, web, sqlite3
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "readiness.db")
     with pytest.raises(sqlite3.Error):
@@ -145,8 +145,11 @@ def test_readiness_refuses_missing_corrupt_or_locked_database(tmp_path, monkeypa
     conn = db.connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        with pytest.raises(sqlite3.OperationalError):
-            web._database_ready()
+        # Контракт после P1-фикса 13.10: readiness теперь ЧИТАЕТ и не берёт
+        # write-lock основной БД из неаутентифицированного роута. Длинный
+        # импорт (параллельная пишущая транзакция) не должен ронять healthcheck
+        # в 503 — раньше зонд сам делал BEGIN IMMEDIATE и проигрывал импорту.
+        assert web._database_ready(), "readiness обязан оставаться зелёным во время записи"
     finally:
         conn.rollback(); conn.close()
     broken = tmp_path / "broken.db"
@@ -254,10 +257,16 @@ def test_waiting_for_database_writer_does_not_block_other_http_requests(tmp_path
         finally:
             conn.close()
     holder = threading.Thread(target=hold_writer)
-    holder.start(); assert ready.wait(2)
-    timer = threading.Timer(1, release.set); timer.start()
+    timer = threading.Timer(4, release.set)
     async def scenario():
         async with TestClient(TestServer(web.build_app(None))) as client:
+            # Measure server responsiveness on established connections. A cold
+            # second TCP connection takes ~2s on some corporate Windows hosts,
+            # including the unchanged reviewed baseline; that is not SQLite
+            # blocking the event loop. Keep the .5s and pending-write assertions.
+            warm = await asyncio.gather(client.get('/version.json'),client.get('/version.json'))
+            for response in warm: await response.read()
+            holder.start(); assert ready.wait(2); timer.start()
             saving = asyncio.create_task(client.post("/api/save", json={"kind": "call", "rep": "S", "finish": True,
                 "op_id": "responsive-call", "form_version": web.FORM_PROTOCOL_VERSION,
                 "values": {"soft_call_status": "Нет контакта"}, "input_keys": ["soft_call_status"]}))
@@ -272,7 +281,8 @@ def test_waiting_for_database_writer_does_not_block_other_http_requests(tmp_path
     try:
         asyncio.run(scenario())
     finally:
-        release.set(); timer.cancel(); holder.join(5)
+        release.set(); timer.cancel()
+        if holder.ident is not None: holder.join(5)
 
 
 def test_settings_write_failure_cannot_switch_the_active_contour(tmp_path, monkeypatch):

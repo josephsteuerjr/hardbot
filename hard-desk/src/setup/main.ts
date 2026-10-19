@@ -61,7 +61,9 @@ export function startUninstaller(): void {
     mkdirSync(join(temporary, "resources"));
     for (const file of ["app.asar", "process-check.exe"]) rawFs.copyFileSync(join(root, "resources", file), join(temporary, "resources", file));
     const forwarded = process.argv.filter(arg => /^\/S$/i.test(arg) || /^--remote-debugging-port=\d+$/.test(arg));
-    const p = spawn(join(temporary, exeName()), ["--hard-uninstall-ready", root, ...forwarded], { detached: true, windowsHide: true, stdio: "ignore" }); p.unref();
+    // This child owns the interactive window. SW_HIDE suppresses its first
+    // ShowWindow call on Windows, even after BrowserWindow.show().
+    const p = spawn(join(temporary, exeName()), ["--hard-uninstall-ready", root, ...forwarded], { detached: true, windowsHide: false, stdio: "ignore" }); p.unref();
     app.exit(0);
   } catch { app.exit(2); }
 }
@@ -118,7 +120,7 @@ function boot(): void {
   }).catch(() => { if (win) win.webContents.send("setup:progress", "Не удалось открыть мастер. Повторите запуск установщика."); else app.exit(2); });
   app.on("window-all-closed", () => app.quit());
 }
-function state() { return { name: product.name, version: app.getVersion(), removing, target, current: hasProfile(profile, product.id),
+function state() { return { name: product.name, version: app.getVersion(), removing, target, visible: win?.isVisible() ?? false, current: hasProfile(profile, product.id),
   candidates: candidates.map(c => ({ source: c.source, label: c.label, last: c.last, kind: c.kind })), preview }; }
 function progress(text: string) { win?.webContents.send("setup:progress", text); }
 async function apply(source: string): Promise<{ ok: boolean; message?: string }> {
@@ -145,7 +147,9 @@ async function apply(source: string): Promise<{ ok: boolean; message?: string }>
       const manifest = jsonFile(join(process.resourcesPath, "setup-payload.json"));
       if (!manifest || manifest.product !== product.id || manifest.version !== app.getVersion() || createHash("sha512").update(readFileSync(payload)).digest("base64") !== manifest.sha512) throw new Error("Установщик повреждён. Используйте новую копию файла.");
       progress("Устанавливаем " + product.name + "…");
-      const code = await executeNsis(payload, ["/S", "/currentuser", ...(process.argv.includes("--updated") ? ["--updated"] : []), "/D=" + target]);
+      // electron-updater passes --force-run to the OUTER wizard. Forward it
+      // to NSIS, which owns launching the installed executable after replacement.
+      const code = await executeNsis(payload, ["/S", "/currentuser", ...process.argv.filter(a => a === "--updated" || a === "--force-run"), "/D=" + target]);
       if (code !== 0 || !existsSync(join(target, exeName()))) throw new Error("Установка не завершена. Закройте программу и повторите.");
       if (candidate) { progress("Переносим выбранные настройки…"); importData(candidate.source, profile, product.id); }
     }

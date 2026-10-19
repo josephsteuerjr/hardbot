@@ -7,6 +7,7 @@ import yaml from 'js-yaml';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { products, releaseUrl } from './products.mjs';
+import { auditRuntimeDependencies } from './runtime-dependencies.mjs';
 const here = join(dirname(fileURLToPath(import.meta.url)), '..');
 const qa = !!process.env.HARD_SETUP_QA_BUILD;
 mkdirSync(join(here,'installer/bin'),{recursive:true});
@@ -32,6 +33,7 @@ for (const id of (selected.length ? selected : Object.keys(products))) {
         runAfterFinish: false, differentialPackage: false },
       publish: { provider: 'generic', url: releaseUrl, channel: id, useMultipleRangeRequest: false },
     }, publish: 'never' });
+  console.log('Packaged runtime audited:', id, auditRuntimeDependencies(join(here,qa?'setup-qa':'installers',id,'win-unpacked/resources/app.asar')));
   // Builder also emits latest.yml for compatibility; only the product channel is distributable.
   const output = join(here, qa?'setup-qa':'installers', id);
   const channel = join(output, id + '.yml');
@@ -49,10 +51,13 @@ for (const id of (selected.length ? selected : Object.keys(products))) {
   await build({targets:Platform.WINDOWS.createTarget(['portable'],Arch.x64),projectDir:here,
     config:{appId:p.appId+'.setup'+(qa?'_setupqa':''),productName:p.name+' — Установка',artifactName:name,
       extraMetadata:{name:`hard-setup-${id}`,main:'out/setup-main.js'},directories:{output:`${innerRelative}/outer`,buildResources:'installer'},
-      files:['out/setup-main.js','out/setup-preload.js','out/setup-registry.json','out/setup/**/*','package.json'],asar:true,compression:'maximum',
+      // The application installer is already compressed; normal compression
+      // avoids spending minutes recompressing it in the outer wizard.
+      files:['out/setup-main.js','out/setup-preload.js','out/setup-registry.json','out/setup/**/*','package.json'],asar:true,compression:'normal',
       electronVersion:JSON.parse(readFileSync(join(here,'package.json'))).devDependencies.electron,
       extraResources:[{from:`${innerRelative}/application-installer.exe`,to:'application-installer.exe'},{from:`${innerRelative}/setup-payload.json`,to:'setup-payload.json'},{from:'installer/bin/process-check.exe',to:'process-check.exe'}],
       win:{icon:'icons/icon.ico',executableName:`hard-setup-${id}`,signExecutable:false,target:['portable']},portable:{requestExecutionLevel:'user'},publish:null},publish:'never'});
+  auditRuntimeDependencies(join(inner,'outer/win-unpacked/resources/app.asar'));
   copyFileSync(join(inner,'outer',name),join(output,name));
   for(const file of metadata.files){file.size=statSync(join(output,name)).size;file.sha512=createHash('sha512').update(readFileSync(join(output,name))).digest('base64');}
   metadata.sha512=metadata.files[0].sha512;writeFileSync(channel,yaml.dump(metadata));

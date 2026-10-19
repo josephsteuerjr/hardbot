@@ -1,5 +1,7 @@
 import { build } from 'esbuild';
 import { extractFile, listPackage } from '@electron/asar';
+import { nativeHelperDigest } from './native-helper-digest.mjs';
+import { auditRuntimeDependencies } from './runtime-dependencies.mjs';
 import { readFileSync, existsSync, readdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { dirname, join, resolve, relative, normalize, sep } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -60,18 +62,19 @@ for (const id of Object.keys(products)) {
       ||receipt.product!==id||receipt.version!==version||receipt.sha512!==createHash('sha512').update(readFileSync(component)).digest('base64')
       ||sha(extractFile(outerAsar,'out/setup-main.js'))!==sha(setupExpected.outputFiles[0].contents)
       ||setupStatic.some(([name,bytes])=>sha(extractFile(outerAsar,normalize(name)))!==sha(bytes))) throw new Error('Custom wizard/source/component mismatch: '+id);
-    if(sha(readFileSync(join(unpacked,'resources/process-check.exe')))!==sha(readFileSync(join(here,'installer/bin/process-check.exe'))))throw new Error('Stale wizard native helper: '+id);
+    if(nativeHelperDigest(readFileSync(join(unpacked,'resources/process-check.exe')))!==nativeHelperDigest(readFileSync(join(here,'installer/bin/process-check.exe'))))throw new Error('Stale wizard native helper: '+id);
     execFileSync(sevenZip,['e','-y','-bd','-o'+join(extract,'component'),component,'$PLUGINSDIR\\app-64.7z'],{stdio:'pipe'});
     const innerArchive=join(extract,'component/app-64.7z');if(!existsSync(innerArchive))throw new Error('Missing embedded application: '+id);
     unpacked=join(extract,'installed');execFileSync(sevenZip,['x','-y','-bd','-o'+unpacked,innerArchive],{stdio:'pipe'});
     if(JSON.stringify(JSON.parse(extractFile(join(unpacked,'resources/app.asar'),'out/setup-registry.json').toString()))!==JSON.stringify(productionRegistry))throw new Error('Non-production removal identity: '+id);
     if(sha(extractFile(join(unpacked,'resources/app.asar'),'out/setup-main.js'))!==sha(setupExpected.outputFiles[0].contents))throw new Error('Stale removal wizard: '+id);
-    if(sha(readFileSync(join(unpacked,'resources/process-check.exe')))!==sha(readFileSync(join(here,'installer/bin/process-check.exe'))))throw new Error('Stale app native helper: '+id);
+    if(nativeHelperDigest(readFileSync(join(unpacked,'resources/process-check.exe')))!==nativeHelperDigest(readFileSync(join(here,'installer/bin/process-check.exe'))))throw new Error('Stale app native helper: '+id);
   }
   if(walk(unpacked).some(path=>/(?:^|[/\\])(?:_local|\.env(?:\..*)?|calls-pending\.bin|backend-settings\.json)(?:[/\\]|$)|\.(?:db|xlsb|xlsx|private\.pem)$/i.test(relative(unpacked,path))))
     throw new Error('Forbidden operational data in installer resources: '+id);
   const packed=join(unpacked,'resources/app.asar');
   if (!existsSync(packed)) throw new Error('Missing actual installer ASAR: '+id);
+  auditRuntimeDependencies(packed);
   const expected = await build({ bundle: true, platform: 'node', format: 'cjs', target: 'node22', external: ['electron', 'electron-updater', 'original-fs'],
     logLevel: 'warning', entryPoints: [join(here, 'src/main/launcher.ts')], write: false, define: { __HARD_PRODUCT__: JSON.stringify(id) } });
   if (sha(extractFile(packed, join('out', 'main.js'))) !== sha(expected.outputFiles[0].contents)
@@ -102,6 +105,10 @@ for (const id of Object.keys(products)) {
     }
   }
   console.log('Payload audited:', id);
+  // Bound temporary disk use to one product. These files were extracted by
+  // this run into its fresh private directory and every check above has passed.
+  if (dirname(extract) !== lab) throw new Error('Unsafe product audit cleanup path');
+  rmSync(extract, {recursive:true, force:true});
 }
 } finally {
   if(!resolve(lab).startsWith(resolve(tmpdir())+sep)) throw new Error('Unsafe audit cleanup path');

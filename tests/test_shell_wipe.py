@@ -24,10 +24,11 @@ const PERSONS = [{rep: "R1", client: "ИВАНОВ И.", visited: false, n: 1,
                   totals: [{sum: 100, unit: "сум"}], ids: ["R1"], tels: []}];
 const CARDS = {R1: {rep: "R1", client: "ИВАНОВ И."}};
 const ME = {employee: "Первый П.", persons: PERSONS, cards: CARDS};
-const SNAP = {lang: "ru", meta: {}, persons: PERSONS, kind: "agent", employee: "Первый П.",
-              roles: null, at: Date.now()};
+const SNAP = {lang: "ru", meta: {}, persons: PERSONS, kind: "agent", uid: 1,
+              employee: "Первый П.", roles: null, at: Date.now(), _credential: "token:"+A};
 const Q = {op_id: "op-1", kind: "save", rep: "R1", values: {call_status: "x"},
-           input_keys: ["call_status"], at: 1, form_version: 3};
+           input_keys: ["call_status"], at: 1, form_version: 3,
+           _owner: {uid: 1, employee: "Первый П."}};
 // Телефон, на котором уже поработали: вход, черновик, трек, следы, отметка
 // прогрева, снимок портфеля, карточка, неотправленный выезд, кэш оболочки и карт.
 const fullWorld = () => newWorld({
@@ -55,7 +56,7 @@ def _assert_portfolio_gone(dump):
     assert not leftovers, f"в localStorage остались: {sorted(leftovers)}"
 
 
-def test_rejected_login_wipes_the_portfolio_but_keeps_the_queue():
+def test_rejected_login_wipes_the_portfolio_and_queue():
     out = _scenario(r"""
       const srv = fakeServer({tokens: {[A]: 401}});
       const w = fullWorld();
@@ -64,14 +65,14 @@ def test_rejected_login_wipes_the_portfolio_but_keeps_the_queue():
       out.dump = w.dump(); out.app = p.html("app"); out.langs = p.html("langs"); out.url = p.url();
     """)
     _assert_portfolio_gone(out["dump"])
-    assert out["dump"]["queue"] == ["op-1"], "неотправленный выезд стёрт"
+    assert out["dump"]["queue"] == []
     assert "Срок доступа истёк" in out["app"], "человек не узнал, что вход истёк"
-    assert 'id="codein"' in out["app"], "поле ручной вставки ссылки пропало"
+    assert 'id="loginuser"' in out["app"], "поле ручной вставки ссылки пропало"
     assert "askLogout" not in out["langs"]
     assert "#t=" not in out["url"], "мёртвый токен остался в адресе"
 
 
-def test_handle_auth_gone_wipes_everything_but_the_queue():
+def test_handle_auth_gone_wipes_everything_including_queue():
     out = _scenario(r"""
       const srv = fakeServer({tokens: {[A]: ME}, saveStatus: 500});
       const w = fullWorld();
@@ -87,7 +88,7 @@ def test_handle_auth_gone_wipes_everything_but_the_queue():
     assert before["kv"] == ["bootstrap"] and before["cards"] == ["R1"]
     assert before["queue"] == ["op-1"]
     _assert_portfolio_gone(after)
-    assert after["queue"] == ["op-1"]
+    assert after["queue"] == []
     assert "Срок доступа истёк" in out["app"]   # expired вычислен ДО очистки
 
 
@@ -152,7 +153,7 @@ def test_logout_asks_with_the_count_and_then_wipes_the_queue_too():
     _assert_portfolio_gone(after)
     assert after["queue"] == [], "«Выйти» обязано стереть и очередь"
     assert after["ls"] == {"hb_out": out["mark"]}
-    assert "Нет доступа" in out["app"] and 'id="codein"' in out["app"]
+    assert "Вход в профиль" in out["app"] and 'id="loginuser"' in out["app"]
     assert "askLogout" not in out["langs"]
     assert "#t=" not in out["url"]
     assert out["sheet_after"] is None
@@ -162,31 +163,18 @@ def test_logout_asks_with_the_count_and_then_wipes_the_queue_too():
     assert out["logout_tokens"] == [A]
 
 
-def test_after_logout_the_shortcut_does_not_log_back_in_by_itself():
-    """У ярлыка токен вшит в start_url «/#t=<токен>»: без отметки «вышли» первый
-    же запуск после «Выйти» молча вернул бы вход. Ручная вставка своей ссылки
-    при этом работает."""
-    out = _scenario(r"""
-      const srv = fakeServer({tokens: {[A]: ME}, saveStatus: 500});
-      const w = fullWorld();
-      const p = await openPage(w, {url: HOST, server: srv});
-      await p.booted();
-      await p.run("logoutNow()");
-      await settle(w);
-      const p2 = await openPage(w, {url: HOST + "#t=" + A, server: srv});
-      await p2.booted();
-      out.relaunch = {token: w.ls.getItem("app_token"), boot_tokens: p2.tokensSeen("/api/bootstrap"),
-                      app: p2.html("app")};
-      p2.el("codein").value = HOST + "#t=" + A;
-      await p2.run("enterCode()");
-      await settle(w);
-      out.pasted = {token: w.ls.getItem("app_token"), boot_tokens: p2.tokensSeen("/api/bootstrap")};
+def test_after_logout_the_shortcut_requires_explicit_password_entry():
+    """A saved old token never signs the user back in after logout."""
+    out=_scenario(r"""
+      const srv=fakeServer({tokens:{[A]:ME},saveStatus:500});const w=fullWorld();
+      const p=await openPage(w,{url:HOST,server:srv});await p.booted();await p.run("logoutNow()");await settle(w);
+      const p2=await openPage(w,{url:HOST+"#t="+A,server:srv});await p2.booted();
+      out.relaunch={token:w.ls.getItem("app_token"),boot_tokens:p2.tokensSeen("/api/bootstrap"),app:p2.html("app")};
     """)
-    relaunch, pasted = out["relaunch"], out["pasted"]
-    assert relaunch["token"] is None, "ярлык вернул вход после «Выйти»"
-    assert A not in relaunch["boot_tokens"]
-    assert "Нет доступа" in relaunch["app"]
-    assert pasted["token"] == A and pasted["boot_tokens"][-1] == A
+    relaunch=out['relaunch']
+    assert relaunch['token'] is None and A not in relaunch['boot_tokens']
+    assert 'Вход в профиль' in relaunch['app'] and 'id="loginuser"' in relaunch['app']
+    assert 'codein' not in relaunch['app'] and 'accountRegister()' not in relaunch['app']
 
 
 def test_logout_button_lives_next_to_the_language_and_only_with_a_login():
@@ -204,10 +192,14 @@ def test_logout_button_lives_next_to_the_language_and_only_with_a_login():
       const p3 = await openPage(newWorld({ls: {app_token: A}}), {url: HOST, server: srv, telegram: tg});
       await p3.booted();
       out.telegram = p3.html("langs");
+      const p4 = await openPage(newWorld({}), {url: HOST, server: srv, telegram: tg});
+      await p4.booted();
+      out.telegram_signed_only = p4.html("langs");
     """)
     assert "setLang('ru')" in out["with_login"] and 'onclick="askLogout()"' in out["with_login"]
     assert "askLogout" not in out["no_login"]
-    assert "askLogout" not in out["telegram"]
+    assert 'onclick="askLogout()"' in out["telegram"]
+    assert "askLogout" not in out["telegram_signed_only"]
     for key in ("logout:", "logoutq:", "logoutwhy:", "logoutlost:", "cancel:"):
         assert INDEX.count(key) == 3, key
 
@@ -235,13 +227,12 @@ def test_manager_tab_401_wipes_but_a_revoked_role_does_not():
     assert role_gone["dump"]["kv"] == ["bootstrap"]
     assert "Доступ к сводке отозван" in role_gone["body"]
     _assert_portfolio_gone(login_gone["dump"])
-    assert login_gone["dump"]["queue"] == ["op-1"]
+    assert login_gone["dump"]["queue"] == []
     assert "Срок доступа истёк" in login_gone["app"]
 
 
-def test_background_refresh_waits_while_the_form_is_open():
-    """Отзыв посреди заполнения формы не рвёт её: сохранить выезд в очередь
-    человек ещё успеет. Очистит следующая проверка, когда форма закрыта."""
+def test_revocation_wipes_immediately_even_while_the_form_is_open():
+    """An open form cannot defer confirmed revocation and local erasure."""
     out = _scenario(r"""
       const srv = fakeServer({tokens: {[A]: ME}, saveStatus: 500});
       const w = fullWorld();
@@ -253,15 +244,11 @@ def test_background_refresh_waits_while_the_form_is_open():
       await p.run("refreshData()");
       await settle(w);
       out.form_open = w.dump();
-      p.run(`STATE.cur=null; document.getElementById("app").innerHTML="";`);
-      await p.run("refreshData()");
-      await settle(w);
       out.form_closed = w.dump(); out.app = p.html("app");
     """)
-    assert out["form_open"]["ls"]["app_token"] == A
-    assert out["form_open"]["kv"] == ["bootstrap"]
+    _assert_portfolio_gone(out["form_open"])
     _assert_portfolio_gone(out["form_closed"])
-    assert out["form_closed"]["queue"] == ["op-1"]
+    assert out["form_closed"]["queue"] == []
     assert "Срок доступа истёк" in out["app"]
 
 
@@ -290,5 +277,5 @@ def test_a_late_answer_does_not_bring_back_a_wiped_portfolio():
     """)
     _assert_portfolio_gone(out["dump"])
     assert out["dump"]["queue"] == []
-    assert "Нет доступа" in out["app"]
+    assert "Вход в профиль" in out["app"]
     assert out["list"] is None, "поздний ответ нарисовал список поверх экрана входа"

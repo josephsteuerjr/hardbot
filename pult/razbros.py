@@ -245,6 +245,7 @@ def build_folder_map(roots: list[tuple[str, Path]]) -> dict[str, list[dict]]:
     """{ФИО.lower: [ {path, republic, city, kind} ]} по маске root/<Город|Soft>/<ФИО>.
     Ровно два уровня вниз — это и есть маска, а не обход дерева. `!Архив`/`_tech` — мимо.
     Одно ФИО может встретиться в нескольких местах (город + Soft + разные республики)."""
+    from registry_cycle.portfolio_paths import SECONDARY_CONTAINERS, secondary_folders
     folder_map: dict[str, list[dict]] = {}
     for republic, root in roots:
         if not root.exists():
@@ -256,6 +257,13 @@ def build_folder_map(roots: list[tuple[str, Path]]) -> dict[str, list[dict]]:
             is_soft = city.name.strip().lower() == "soft"
             for emp in city.iterdir():                     # уровень 2: папка сотрудника
                 if not emp.is_dir() or _is_skip_dir(emp.name):
+                    continue
+                if not is_soft and emp.name.casefold() in SECONDARY_CONTAINERS:
+                    for person in secondary_folders(root, emp):
+                        folder_map.setdefault(person.name.strip().lower(), []).append({
+                            "path": person, "republic": republic,
+                            "city": city.name, "kind": "hard",
+                        })
                     continue
                 folder_map.setdefault(emp.name.strip().lower(), []).append({
                     "path": emp, "republic": republic,

@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# Резервная копия ЯДРА: база и фотографии. Это единственная единица, где есть
+# Резервная копия ЯДРА: база, audit-spool, фотографии и чеки. Это единственная единица, где есть
 # что бэкапить: у речи и маршрутов данных нет, они восстанавливаются установкой.
 #
 #   cd deploy/units/core
-#   ./backup.sh            # база + фотографии
-#   ./backup.sh --db-only  # только база (секунды; так делает update.sh)
+#   ./backup.sh            # база + spool + фотографии + чеки
+#   ./backup.sh --db-only  # база + spool + чеки; фотографии остаются в data/
 #
 # База копируется онлайн-бэкапом SQLite изнутри контейнера — это единственный
 # согласованный способ снять работающую базу (обычное cp может дать битый
 # файл). Копия ложится в backups/<дата-время>/hardbot.db.
 #
-# Фотографии не меняются после записи, поэтому держим одно зеркало
-# backups/photos/ и досылаем в него только новое (rsync, без него — cp -u).
+# Фотографии и чеки сохраняются в том же каталоге снимка, что и база;
+# SHA256SUMS выпускается только после полного копирования всех файлов.
 #
-# Старые копии базы удаляются, остаются последние BACKUP_KEEP (из .env, по
-# умолчанию 14). Зеркало фотографий не ротируется.
+# Старые полные каталоги копии удаляются, остаются последние BACKUP_KEEP
+# (из .env, по умолчанию 14). Это локальная ротация, не внешний архив.
 #
 # Копия снимается и с работающим приложением, и с остановленным, и с падающим
 # по кругу — то есть ровно тогда, когда она нужнее всего. Как это устроено,
@@ -22,8 +22,8 @@
 source "$(dirname "$0")/../../_lib.sh"   # приносит set -euo pipefail
 source "$DEPLOY_DIR/_actions.sh"
 
-# Сразу после set: копия базы и зеркало фотографий — это все ПД должников. Пусть
-# всё, что создаёт этот скрипт (каталог копии, временный файл, зеркало), рождается
+# Сразу после set: база, фотографии, чеки и spool содержат ПД. Пусть
+# всё, что создаёт этот скрипт (каталог копии и временный файл), рождается
 # доступным только владельцу (root). Ставим ДО первого mkdir/mktemp.
 umask 077
 
@@ -35,17 +35,20 @@ keep="$(env_get BACKUP_KEEP)"
 keep="${keep:-14}"
 stamp="$(date +%Y%m%dT%H%M%S)"
 dest="backups/$stamp"
-mkdir -p "$dest"
+mkdir -p backups
+mkdir "$dest" || die "копия $dest уже существует: одновременный запуск backup запрещён"
 
 # --- База ------------------------------------------------------------------------
 # Питон-сниппет один для обоих путей: онлайн-бэкап в /tmp контейнера, затем
 # байты в stdout (так на хосте не появляются файлы, принадлежащие root).
 read -r -d '' SNIPPET <<'PY' || true
 import os, sqlite3, sys
-src = sqlite3.connect("file:/data/hardbot.db?mode=ro", uri=True)
+src = sqlite3.connect("file:/data/" + sys.argv[1] + "?mode=ro", uri=True)
 dst = sqlite3.connect("/tmp/backup.db")
 with dst:
     src.backup(dst)
+if dst.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+    raise RuntimeError("SQLite snapshot failed quick_check")
 dst.close(); src.close()
 with open("/tmp/backup.db", "rb") as f:
     while chunk := f.read(1 << 20):
@@ -83,7 +86,7 @@ $(tail -n 5 "$err_log" | sed 's/^/  /')"
 }
 
 if [ "$(health_of app)" != "нет" ] && [ "$(docker inspect -f '{{.State.Running}}' "$(container_id app)" 2>/dev/null)" = "true" ]; then
-  compose exec -T app python -c "$SNIPPET" > "$tmp_db" 2>"$err_log" || backup_failed
+  backup_sqlite() { compose exec -T app python -c "$SNIPPET" "$1" > "$2" 2>"$err_log" || backup_failed; }
 else
   # Контейнер не работает (остановлен или падает по кругу) — читаем базу
   # одноразовым контейнером из того же образа (образ есть после install.sh).
@@ -101,8 +104,18 @@ else
   # «C:/Program Files/Git/data», контейнер монтировал пустоту и sqlite честно
   # отвечал «unable to open database file». Ошибка выглядела как поломка базы,
   # хотя база была цела. У compose путь берётся из файла и через MSYS не идёт.
-  compose run --rm --no-deps -T app python -c "$SNIPPET" > "$tmp_db" 2>"$err_log" || backup_failed
+  backup_sqlite() { compose run --rm --no-deps -T app python -c "$SNIPPET" "$1" > "$2" 2>"$err_log" || backup_failed; }
 fi
+
+# Audit drain двигает события только spool -> primary. Сначала снять spool,
+# потом primary: каждое старое событие остаётся хотя бы в одном снимке.
+if [ -e data/audit-spool.sqlite3 ]; then
+  [ -f data/audit-spool.sqlite3 ] && [ ! -L data/audit-spool.sqlite3 ] \
+    || die "audit-spool не обычный файл; неполную копию не выпускаю"
+  backup_sqlite audit-spool.sqlite3 "$dest/.audit-spool.sqlite3.part"
+  mv "$dest/.audit-spool.sqlite3.part" "$dest/audit-spool.sqlite3"
+fi
+backup_sqlite hardbot.db "$tmp_db"
 
 if [ ! -s "$tmp_db" ] || [ "$(head -c 15 "$tmp_db")" != "SQLite format 3" ]; then
   backup_failed
@@ -110,20 +123,34 @@ fi
 mv "$tmp_db" "$dest/hardbot.db"
 ok "база: $dest/hardbot.db ($(human_size "$dest/hardbot.db"))"
 
-# --- Фотографии ------------------------------------------------------------------
+# --- Неизменяемые доказательства -------------------------------------------------
+for asset in photos receipts; do
+  [ -L "data/$asset" ] && die "data/$asset — ссылка, нельзя выпустить неполную копию"
+  if [ -d "data/$asset" ]; then
+    if [ -n "$(find "data/$asset" -type l -print -quit)" ]; then
+      die "data/$asset содержит ссылку; копия остановлена"
+    fi
+  fi
+done
 if [ "$db_only" -eq 0 ]; then
   if [ -d data/photos ]; then
-    mkdir -p backups/photos
-    if command -v rsync >/dev/null 2>&1; then
-      rsync -a data/photos/ backups/photos/
-    else
-      cp -au data/photos/. backups/photos/
-    fi
-    ok "фотографии: backups/photos/ ($(human_size backups/photos))"
+    cp -a data/photos "$dest/photos"
+    ok "фотографии: $dest/photos ($(human_size "$dest/photos"))"
   else
     ok "фотографий пока нет"
   fi
 fi
+if [ -d data/receipts ]; then
+  cp -a data/receipts "$dest/receipts"
+  ok "чеки: $dest/receipts ($(human_size "$dest/receipts"))"
+fi
+
+# Единственный ready-маркер записывается ПОСЛЕ всех копий. Старые копии без
+# описи restore отвергает: он не может доказать полноту чеков и audit-spool.
+need_cmd sha256sum "нужен coreutils для контроля копии"
+( cd "$dest" && find . -type f ! -name SHA256SUMS ! -name .SHA256SUMS.part -print0 | sort -z | xargs -0 sha256sum > .SHA256SUMS.part )
+mv "$dest/.SHA256SUMS.part" "$dest/SHA256SUMS"
+ok "состав и SHA256: $dest/SHA256SUMS"
 
 # --- Ротация копий базы -----------------------------------------------------------
 old="$(ls -1d backups/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9] 2>/dev/null | sort | head -n -"$keep" || true)"

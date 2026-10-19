@@ -20,7 +20,7 @@ RESPONSIBLE = "ответственный Сотрудник"
 
 def _book(*responsibles: str) -> WorkbookSnapshot:
     return WorkbookSnapshot(
-        path=Path("СОФТ Турсунов Улугбек-") / "Иванов Иван.xlsb",
+        path=Path("СОФТ Примеров11 Сотрудник11-") / "Иванов Иван.xlsb",
         sheet="Портфели",
         sheet_names=("Портфели",),
         fingerprint=FileFingerprint(size=1, mtime_ns=1, sha256="0" * 64),
@@ -35,11 +35,11 @@ def _book(*responsibles: str) -> WorkbookSnapshot:
 
 def test_owner_is_read_from_the_book_not_from_the_path():
     # Папка называется одним человеком, книга — другим: побеждает книга.
-    assert resolve_book_responsible(_book("Уткиров Фирдавс"), RESPONSIBLE) == "Уткиров Фирдавс"
+    assert resolve_book_responsible(_book("Примеров12 Сотрудник12"), RESPONSIBLE) == "Примеров12 Сотрудник12"
 
 
 def test_two_owners_in_one_book_is_not_resolved():
-    book = _book("Уткиров Фирдавс", "Исмоилов Хожиакбар")
+    book = _book("Примеров12 Сотрудник12", "Примеров4 Сотрудник4")
     assert resolve_book_responsible(book, RESPONSIBLE) is None
 
 
@@ -66,13 +66,13 @@ def test_missing_responsible_column_is_not_resolved():
 
 def test_empty_book_is_recognised_as_empty():
     assert workbook_data_is_empty(_book())
-    assert not workbook_data_is_empty(_book("Уткиров Фирдавс"))
+    assert not workbook_data_is_empty(_book("Примеров12 Сотрудник12"))
 
 
 def test_alias_is_applied_without_looping():
-    aliases = {"Уткиров Фирдавс": "Уткиров Ф.", "Уткиров Ф.": "Уткиров Фирдавс"}
+    aliases = {"Примеров12 Сотрудник12": "Примеров12 Ф.", "Примеров12 Ф.": "Примеров12 Сотрудник12"}
     # Цикл в алиасах не должен подвешивать нормализацию.
-    assert canonical_responsible_name("Уткиров Фирдавс", aliases)
-    assert canonical_responsible_name("Исмоилов Хожиакбар", {}) == canonical_responsible_name(
-        " исмоилов   хожиакбар ", {}
+    assert canonical_responsible_name("Примеров12 Сотрудник12", aliases)
+    assert canonical_responsible_name("Примеров4 Сотрудник4", {}) == canonical_responsible_name(
+        " примеров4   сотрудник4 ", {}
     )

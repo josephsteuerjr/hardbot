@@ -11,6 +11,7 @@
 
 import pathlib
 import re
+import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 INDEX = (ROOT / "server" / "miniapp" / "index.html").read_text(encoding="utf-8")
@@ -42,9 +43,10 @@ def test_update_never_interrupts_work():
     """Перезагрузка посреди заполнения формы стоила бы человеку работы."""
     i = INDEX.index("function noteShellVersion(")
     body = INDEX[i:INDEX.index("function reloadForUpdate(", i)]
-    assert "draftDirty" in body, "не проверяется незаконченный черновик"
-    assert "PHOTO_PREPARING.size" in body, "не проверяется готовящееся фото"
-    assert "location.reload()" in body
+    assert "location.reload()" not in body
+    reload_body = INDEX[INDEX.index("async function reloadForUpdate("):INDEX.index("// Проверка версии", i)]
+    assert "PHOTO_PREPARING.size" in reload_body
+    assert "saveDraft()===false" in reload_body
 
 
 def test_busy_user_gets_a_button_instead_of_a_reload():
@@ -62,3 +64,31 @@ def test_older_or_equal_server_version_does_nothing():
     i = INDEX.index("function noteShellVersion(")
     body = INDEX[i:INDEX.index("function reloadForUpdate(", i)]
     assert "srv<=SHELL_VERSION" in body
+
+
+def test_actual_update_handler_does_not_reload_current_login_page():
+    """Execute the shipped JS with the server's actual advertised version."""
+    start = INDEX.index("function noteShellVersion(")
+    handler = INDEX[start:INDEX.index("async function reloadForUpdate(", start)]
+    script = f"""
+const SHELL_VERSION={_index_version()};
+let UPDATE_READY=false, reloads=0, banners=0, busy=false;
+const PHOTO_PREPARING=new Set(), PHOTO_BUSY=0, draftDirty=false;
+const location={{reload(){{reloads++;}}}};
+function clientMetric(){{}}
+function setTimeout(fn){{fn();}}
+function formVisible(){{return busy;}}
+function updateOffBar(){{banners++;}}
+{handler}
+for(let i=0;i<8;i++) noteShellVersion({_sw_version()},true);
+if(reloads!==0 || UPDATE_READY) throw Error('Current login page reloads itself');
+noteShellVersion(SHELL_VERSION+1,false);
+if(reloads!==0 || UPDATE_READY) throw Error('Offline snapshot triggered update');
+busy=true; noteShellVersion(SHELL_VERSION+1,true);
+if(reloads!==0 || banners!==1) throw Error('Update interrupted active work');
+UPDATE_READY=false; busy=false;
+noteShellVersion(SHELL_VERSION+1,true);
+noteShellVersion(SHELL_VERSION+1,true);
+if(reloads!==0 || banners!==2) throw Error('Idle user must also get an explicit update button');
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)

@@ -8,14 +8,14 @@
 import { BrowserWindow, Notification, Tray, app, clipboard, dialog, ipcMain, nativeImage, nativeTheme,
   net as enet, protocol, screen, shell } from "electron";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, extname, join, normalize, sep } from "node:path";
+import { basename, dirname, extname, join, normalize, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-import { accountLogin, call, callField, deviceName, enroll, enrollField, flushCallQueue, logout, logoutField, setRevokedHandler, uploadField } from "./net";
+import { accountLogin, accountStaff, accountRegister, accountManagerLogin, call, callField, deviceName, enroll, enrollField, flushCallQueue, logout, logoutField, setRevokedHandler, uploadField } from "./net";
 import { stopLegacyPult } from "./legacy";
 import { writeXlsx } from "./xlsx";
 import { local, startBackend } from "./local";
 import { runShots } from "./shots";
-import { hasFieldWork, readFieldToken, readSettings, readToken, writeSettings } from "./store";
+import { hasFieldWork, validateFieldWork, readFieldToken, readSettings, readToken, writeSettings } from "./store";
 import { FIXED_PRODUCT, PRODUCT_ID } from "./product";
 import { migrateData, queueImport } from "./migration";
 import { checkUpdates, installUpdate, startUpdates, updateState } from "./updates";
@@ -315,7 +315,7 @@ function wireIpc() {
     if (action === "check") return checkUpdates();
     if (action === "install") return installUpdate(async () => {
       if (!win || win.isDestroyed()) return false;
-      if (MODE === "field" && hasFieldWork()) return false;
+      if (MODE === "field") validateFieldWork();
       if (MODE === "analyst") {
         const r = await local("/busy");
         if (!r.ok || (r.data as { busy: boolean }).busy) return false;
@@ -398,7 +398,16 @@ function wireIpc() {
   // отпечаток машины и пароль не проходят через страницу. Токен пишется как
   // обычный полевой, дальше конструктор работает как после enrollField.
   handle("hard:accountLogin", (_e, server: string, username: string, password: string) =>
-    accountLogin(String(server || ""), String(username || ""), String(password || "")));
+    MODE === "field" ? accountLogin(String(server || ""), String(username || ""), String(password || ""))
+      : { ok: false, status: 403, kind: "forbidden", text: "Вход сотрудника доступен только в Харде/Софте." });
+  handle("hard:accountStaff", (_e, server: string) => MODE === "field" ? accountStaff(String(server || ""))
+    : { ok: false, status: 403, text: "Создание профиля доступно в программе сотрудника." });
+  handle("hard:accountRegister", (_e, server: string, employee: string, username: string, password: string) =>
+    MODE === "field" ? accountRegister(String(server || ""), String(employee || ""), String(username || ""), String(password || ""))
+      : { ok: false, status: 403, text: "Создание профиля доступно в программе сотрудника." });
+  handle("hard:accountManagerLogin", (_e, server: string, username: string, password: string) =>
+    MODE === "manager" ? accountManagerLogin(String(server || ""), String(username || ""), String(password || ""))
+      : { ok: false, status: 403, kind: "forbidden", text: "Парольный вход руководителя доступен только в пульте руководителя." });
   handle("hard:logout", async () => {
     if (MODE === "field") await logoutField(); else await logout();
     return true;
@@ -449,6 +458,15 @@ function wireIpc() {
     return { ok: true, file: grantFile(e.sender.id, pick.filePath) };
   });
   handle("hard:copy", (_e, text: string) => { clipboard.writeText(String(text ?? "")); return true; });
+  handle("hard:saveText", async (e, name: string, content: string) => {
+    if (MODE !== 'analyst' || typeof content !== 'string' || content.length > 131072)
+      return { ok: false, text: 'Сохранение файла доступно в программе аналитика.' };
+    const selected = await dialog.showSaveDialog(BrowserWindow.fromWebContents(e.sender)!, {
+      defaultPath: basename(String(name || 'Вход в профиль.txt')), filters: [{ name: 'Текстовый файл', extensions: ['txt'] }] });
+    if (selected.canceled || !selected.filePath) return { ok: false, text: '' };
+    writeFileSync(selected.filePath, content, { encoding: 'utf8', flush: true });
+    return { ok: true };
+  });
   // Запуск вместе с Windows — свёрнутым к часам (--tray): рассылка книг почтой
   // работает, только пока пульт запущен, и не должна зависеть от того, открыл
   // ли его человек после перезагрузки.
@@ -470,6 +488,7 @@ function wireIpc() {
       if (data && typeof data.path === "string" && path !== "/admin")
         body = { ...data, path: selectedLocalFile(e.sender.id, path, data.path) };
       const result = await local(String(path), body);
+      if ((result as {revoked?: boolean}).revoked) win?.webContents.send("hard:revoked");
       return result;
     } catch (error) { return { ok: false, error: String((error as Error).message || error) }; }
   });
