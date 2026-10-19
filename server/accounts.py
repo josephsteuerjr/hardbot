@@ -214,6 +214,8 @@ def _synthetic_uid(conn: sqlite3.Connection) -> int:
                 or conn.execute("SELECT 1 FROM agent_bind WHERE telegram_id=?",
                                 (candidate,)).fetchone()
                 or conn.execute("SELECT 1 FROM accounts WHERE telegram_id=?",
+                                (candidate,)).fetchone()
+                or conn.execute("SELECT 1 FROM account_deletions WHERE telegram_id=?",
                                 (candidate,)).fetchone())
         if not busy:
             return candidate
@@ -225,7 +227,8 @@ def _resolve_agent_uid(conn: sqlite3.Connection, employee: str) -> int:
     период ссылка+аккаунт), при отсутствии — служебный синтетический.
     Ревью 15.10: без uid аккаунт-токен не проходил _uid (401 на все ручки)."""
     matches = {int(m["telegram_id"]) for m in conn.execute(
-        "SELECT employee,telegram_id FROM agent_bind WHERE approved=1")
+        "SELECT b.employee,b.telegram_id FROM agent_bind b WHERE b.approved=1 "
+        "AND NOT EXISTS (SELECT 1 FROM account_deletions x WHERE x.telegram_id=b.telegram_id)")
         if db._name_key(m["employee"]) == db._name_key(employee)}
     if len(matches) > 1:
         raise UIDConflict("ФИО соответствует нескольким внутренним ID; нужна ручная сверка.")
@@ -311,6 +314,8 @@ def create_account(employee: str, username: str, password: str, *, office: str =
                 resolved_uid = _resolve_agent_uid(conn, employee)
             except UIDConflict as exc:
                 return {"ok": False, "error": str(exc)}
+        if role == 'agent' and conn.execute("SELECT 1 FROM account_deletions WHERE telegram_id=?", (resolved_uid,)).fetchone():
+            return {"ok": False, "error": "Внутренний ID удалённого аккаунта повторно использовать нельзя. Создайте новый аккаунт без прежнего ID."}
         from config import ADMIN_ID
         if ADMIN_ID and resolved_uid == ADMIN_ID and role != "full":
             return {"ok": False, "error": "UID владельца требует полную роль и ручную сверку."}

@@ -100,3 +100,63 @@ def test_transaction_rolls_back_if_deletion_fails(world, monkeypatch):
         accounts.delete_account('delete-user', 'principal:test', expected_id=world['id'])
     assert db.agent_device_check(token)[0] == 'ok'
     assert not accounts.legacy_uid_deleted(world['telegram_id'])
+
+
+def test_legacy_binding_cannot_give_recreated_account_its_deleted_queue_owner(world):
+    # The real transition has a pre-existing binding; an unbound synthetic-only
+    # test would allocate a new UID accidentally and miss the regression.
+    uid=world['telegram_id']
+    db.set_bind(uid,'Synthetic Delete')
+    old_token=enter('same-pc','desktop')
+    assert accounts.delete_account('delete-user','principal:test',expected_id=world['id'])['ok']
+    assert accounts.create_account('Synthetic Delete','delete-user','initial123')['ok']
+    with db.connect() as conn:
+        fresh=conn.execute("SELECT id,telegram_id FROM accounts WHERE username='delete-user'").fetchone()
+        assert fresh['telegram_id']!=uid
+        assert conn.execute('SELECT employee FROM agent_bind WHERE telegram_id=?',(uid,)).fetchone()[0]=='Synthetic Delete'
+    # Existing clients bind unsent work to server+UID and send expected_uid.
+    # New enrollment must not transfer that old journal to a new account.
+    login=accounts.login('delete-user','initial123',device={'kind':'desktop','fp':'same-pc','label':'Synthetic'},entrance='internal',expected_uid=uid)
+    assert login['action']=='conflict' and not login.get('token')
+    assert db.agent_device_check(old_token)[0]!='ok'
+
+
+def test_explicit_retired_agent_uid_is_refused(world):
+    assert accounts.delete_account('delete-user','principal:test',expected_id=world['id'])['ok']
+    assert not accounts.create_account('Synthetic Delete','delete-user','initial123',telegram_id=world['telegram_id'])['ok']
+
+
+def test_random_uid_allocator_reserves_unbound_deleted_generations(world, monkeypatch):
+    uid=world['telegram_id'];assert uid>=90_000_000_000
+    assert accounts.delete_account('delete-user','principal:test',expected_id=world['id'])['ok']
+    candidates=iter([uid-90_000_000_000,999999 if uid!=90_000_999_999 else 999998])
+    monkeypatch.setattr(accounts.secrets,'randbelow',lambda _:next(candidates))
+    assert accounts.create_account('Synthetic Delete','delete-user','initial123')['ok']
+    with db.connect() as conn:
+        assert conn.execute("SELECT telegram_id FROM accounts WHERE username='delete-user'").fetchone()[0]!=uid
+
+
+def test_recreated_profile_keeps_business_portfolio_without_old_identity(world):
+    uid=world['telegram_id'];db.set_bind(uid,'Synthetic Delete')
+    with db.connect() as conn:
+        conn.execute("INSERT INTO clients(contract_id,client,responsible,responsible_soft) VALUES('OWN','Synthetic Client','Synthetic Delete','Synthetic Delete')")
+        conn.commit()
+    db.log_visit('OWN',uid,'visit',op_id='synthetic-before-delete')
+    assert accounts.delete_account('delete-user','principal:test',expected_id=world['id'])['ok']
+    assert accounts.create_account('Synthetic Delete','delete-user','initial123')['ok']
+    token=enter('new-pc','desktop')
+    with db.connect() as conn:
+        acc=conn.execute("SELECT * FROM accounts WHERE username='delete-user'").fetchone()
+        dev=conn.execute('SELECT id FROM account_devices WHERE account_id=?',(acc['id'],)).fetchone()
+        assert acc['telegram_id']!=uid
+        assert conn.execute('SELECT count(*) FROM clients').fetchone()[0]==1
+        assert conn.execute('SELECT count(*) FROM visits').fetchone()[0]==1
+    assert accounts.approve_account('delete-user','principal:test')['ok']
+    assert accounts.approve_device(dev['id'],'principal:test')['ok']
+    assert accounts.change_password('delete-user','initial123','changed123')['ok']
+    async def run():
+        async with TestClient(TestServer(web.build_app(None))) as client:
+            r=await client.get('/api/bootstrap',headers={'X-App-Token':token})
+            assert r.status==200
+            body=await r.json();assert body['uid']==acc['telegram_id'] and body['persons']
+    asyncio.run(run())
