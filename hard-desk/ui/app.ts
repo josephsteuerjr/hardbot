@@ -16,6 +16,7 @@ import { control } from "./views/control";
 import { device, links, promises, report } from "./views/misc";
 import { team } from "./views/team";
 import { onAdminLink, local } from "./analyst/lib";
+import { useAnalystCardTransport } from './analyst/card-access';
 import { today } from "./analyst/today";
 import { people } from "./analyst/people";
 import { managers } from "./analyst/managers";
@@ -29,6 +30,7 @@ import { adminControlCall, controlSection } from "./views/control";
 
 /** Пульт аналитика: тот же каркас и облик, данные — через питон-сторону. */
 async function startAnalyst() {
+  useAnalystCardTransport();
   bare(false);
   shell = await hard.state();
   document.title = shell.product;

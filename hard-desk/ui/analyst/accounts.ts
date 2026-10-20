@@ -17,6 +17,13 @@ const kind = (k: unknown): string => KIND[String(k ?? "")] || String(k ?? "");
 const roleTitle = (a: any): string => ROLE[a?.role] || a?.role || "";
 const statusTitle = (a: any): string => STATUS[a?.status] || a?.status || "—";
 const devApproved = (x: any): boolean => !!x && x.status === "active";
+const clientText = (device: any): string => {
+  const c=device.client;
+  if(!c)return 'Версия пока не сообщалась';
+  const version=c.source==='pwa' ? `Оболочка ${c.shell_version}` :
+    `${c.source==='desktop'?'Программа':'Клиент сообщил'} ${c.client_version || '—'}`;
+  return `${version}${c.product ? ' · '+c.product : ''} · замечена ${fmt(c.last_seen_at)} UTC`;
+};
 /** GPS-строка сервера — JSON {"lat","lon","accuracy"} — показываем координатами, не сырым текстом. */
 const gpsText = (x: any): string => {
   const raw = x?.gps;
@@ -64,6 +71,7 @@ function details(root: HTMLElement, a: any) {
     <div class="block"><h3>Устройства (${n(devs.length)})</h3>
       ${devs.length ? devs.map((x) => `<div class="list-row">
         <div class="grow"><div class="nm">${esc(x.label || kind(x.kind) || "устройство")}</div>
+          <div class="sub">${esc(clientText(x))}</div>
           <div class="sub">${esc(kind(x.kind))}${x.first_seen ? ` · с ${esc(fmt(x.first_seen))}` : ""} · ${esc(gpsText(x))}</div>
           <div class="sub">Подтвердил: ${esc(x.approved_by || "—")}${x.approved_at ? ` · ${esc(fmt(x.approved_at))}` : ""}</div></div>
         ${x.status === "revoked" ? '<span class="tag">отозвано</span>'

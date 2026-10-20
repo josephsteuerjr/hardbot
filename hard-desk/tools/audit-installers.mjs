@@ -13,8 +13,14 @@ import { releaseUrl } from './products.mjs';
 import yaml from 'js-yaml';
 const here = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args=process.argv.slice(2);
-if(args.length && (args.length!==2 || args[0]!=='--assets')) throw new Error('Usage: audit-installers.mjs [--assets directory]');
-const assetDirectory=args.length ? resolve(here,args[1]) : null;
+let assetDirectory=null, selectedProducts=Object.keys(products);
+while(args.length){
+  const option=args.shift(), value=args.shift();
+  if(!value)throw new Error('Usage: audit-installers.mjs [--assets directory] [--product product]');
+  if(option==='--assets')assetDirectory=resolve(here,value);
+  else if(option==='--product' && Object.hasOwn(products,value))selectedProducts=[value];
+  else throw new Error('Unknown installer audit option or product');
+}
 const sha = x => createHash('sha256').update(x).digest('hex');
 function guid(value){const b=createHash('sha1').update(Buffer.from('50e065bc313411e69bab38c9862bdaf3','hex')).update(value).digest().subarray(0,16);b[6]=(b[6]&15)|80;b[8]=(b[8]&63)|128;const s=b.toString('hex');return [s.slice(0,8),s.slice(8,12),s.slice(12,16),s.slice(16,20),s.slice(20)].join('-');}
 const productionRegistry=Object.fromEntries(Object.entries(products).map(([id,p])=>[id,guid(p.appId)]));
@@ -43,7 +49,7 @@ const sevenZip=join(here,'node_modules/electron-winstaller/vendor/7z-x64.exe');
 if(!existsSync(sevenZip)) throw new Error('The local NSIS audit requires the bundled Windows 7-Zip');
 const lab=mkdtempSync(join(tmpdir(),'hard-nsis-audit-'));
 try {
-for (const id of Object.keys(products)) {
+for (const id of selectedProducts) {
   const installer=join(assetDirectory || join(here,'installers',id),`${id}-${version}-setup.exe`);
   if(!existsSync(installer)){stale.push(id);continue;}
   const extract=join(lab,id);let unpacked=join(extract,'application');

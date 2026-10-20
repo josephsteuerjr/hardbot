@@ -50,6 +50,7 @@ export function startBackend(log: (s: string) => void): Promise<void> {
       const bundled = exe.endsWith("hard-backend.exe");
       const args = bundled ? [] : exe === "py" ? ["-3", "-X", "utf8", "-m", "pult.desk_backend"] : ["-X", "utf8", "-m", "pult.desk_backend"];
       const p = spawn(exe, args, { cwd: root, windowsHide: true, env: { ...process.env, PYTHONIOENCODING: "utf-8",
+        HARD_CLIENT_VERSION: app.getVersion(), HARD_CLIENT_PRODUCT: 'analyst',
         ...(bundled ? { HARD_PULT_SETTINGS: join(app.getPath("userData"), "backend-settings.json"), HARD_PULT_PROTECT_TOKENS: "1" } : {}) } });
       child = p; // quitting during startup must not leave a mail/backend process behind
       let buf = "";

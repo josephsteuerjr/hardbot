@@ -3,6 +3,13 @@ import { api, hard } from "../kit/api";
 import { $, esc, icon, lightbox, n, shortDate } from "../kit/dom";
 import { openPanel, go, hasSection, currentContext } from "../kit/shell";
 
+let cardApi: typeof api = api;
+let cardImage = (path: string, query?: Record<string, unknown>) => hard.image(path, query);
+export function setPersonTransport(read: typeof api, image: typeof cardImage): void {
+  cardApi = read;
+  cardImage = image;
+}
+
 export interface Range { preset?: string; shift?: number; from?: string; to?: string }
 export interface RangeInfo { preset: string; from: string; to: string; label: string; days: number; today: string; next: unknown }
 
@@ -92,7 +99,7 @@ export async function openPerson(employee: string, rep: string, date?: string, m
 async function openPersonPanel(employee: string, rep: string, date?: string, mode?: string,
   navigation?: CaseNavigation): Promise<void> {
   const body = openPanel(`<h2>…</h2><div class="sub">${esc(employee)}</div>`);
-  const r = await api("/api/manager/person", { employee, rep, date, mode });
+  const r = await cardApi("/api/manager/person", { employee, rep, date, mode });
   if (!body.isConnected) return;
   if (!r.ok) { body.innerHTML = problem(r.text || "Не открылось"); return; }
   const d = r.data;
@@ -127,7 +134,7 @@ async function openPersonPanel(employee: string, rep: string, date?: string, mod
     ${d.receipts?.length ? `<div class="block"><h3>Квитанции для сверки</h3>${d.receipts.map((receipt: any) => `<div class="list-row"><div class="grow"><b>${esc(receipt.amount ?? '—')} ${esc(receipt.currency || '')}</b> · ${esc(receipt.paid_at || receipt.created_at || '')}<div class="sub">${esc(receipt.employee || '')}${receipt.payer_note ? ' · ' + esc(receipt.payer_note) : ''}</div></div><button class="btn small" data-receipt="${esc(receipt.file)}">Снимок</button></div>`).join('')}<p class="muted">Наличие квитанции не подтверждает зачисление. Сверьте операцию с реестром платежей.</p></div>` : ''}
     <div class="block" id="ph-block" hidden><h3>Фото</h3><div class="photos" id="ph"></div></div>`;
   body.querySelectorAll<HTMLButtonElement>('[data-receipt]').forEach(button => button.addEventListener('click', async () => {
-    const src = await hard.image('/api/manager/receipt_photo', { file: button.dataset.receipt });
+    const src = await cardImage('/api/manager/receipt_photo', { file: button.dataset.receipt });
     if (src) lightbox(src); else button.textContent = 'Не удалось открыть';
   }));
   body.querySelector('[data-case-previous]')?.addEventListener('click',()=>navigation?.previous?.());
@@ -136,7 +143,7 @@ async function openPersonPanel(employee: string, rep: string, date?: string, mod
 }
 
 export async function loadPhotos(rep: string, date: string | undefined, host: HTMLElement) {
-  const r = await api("/api/manager/photos", { contract_id: rep });
+  const r = await cardApi("/api/manager/photos", { contract_id: rep });
   if (!r.ok || !host.isConnected) return;
   let list = ((r.data?.items || []) as any[]).filter((x) => !x.missing);
   if (date) {
@@ -153,7 +160,7 @@ export async function loadPhotos(rep: string, date: string | undefined, host: HT
     img.alt = "";
     img.title = String(ph.shot_at || ph.uploaded_at || "").replace("T", " ").slice(0, 16);
     box.appendChild(img);
-    void hard.image("/api/manager/photo", { file: ph.file }).then((src) => {
+    void cardImage("/api/manager/photo", { file: ph.file }).then((src) => {
       if (src) { img.src = src; img.addEventListener("click", () => lightbox(src)); } else img.remove();
     });
   }

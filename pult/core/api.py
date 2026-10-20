@@ -30,12 +30,19 @@ def auth_headers(key: str = "", device_token: str = "") -> dict[str, str]:
     КАЖДОМ запросе, а не только при выдаче. Без этого файл настроек, скопированный
     на другую машину, продолжал бы работать — а это обычный JSON на диске.
     """
+    import os
+    import re
+    reported = os.getenv('HARD_CLIENT_VERSION', '')
+    desktop = bool(re.fullmatch(r'[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}', reported))
+    version = {'X-Client-Version': reported if desktop else '3.2.0'}
+    if desktop and os.getenv('HARD_CLIENT_PRODUCT') == 'analyst':
+        version.update({'X-Work-Product': 'analyst', 'X-Client-Runtime': 'desktop'})
     if device_token:
         if device_token.startswith('account:'):
-            return {'X-Pult-Token':device_token[8:],'X-Client-Version':'3.2.0'}
+            return {'X-Pult-Token':device_token[8:], **version}
         from .devices import device_fingerprint
-        return {"X-Device-Token": device_token, "X-Device-Id": device_fingerprint()}
-    return {"X-Admin-Key": key,'X-Client-Version':'3.2.0'}
+        return {"X-Device-Token": device_token, "X-Device-Id": device_fingerprint(), **(version if desktop else {})}
+    return {"X-Admin-Key": key, **version}
 
 
 CERT_BAD_TEXT = ("Сертификат сервера не прошёл проверку — эта сеть подменяет "

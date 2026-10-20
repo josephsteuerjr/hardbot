@@ -2873,7 +2873,7 @@ async def _manager_receipt_file(request: web.Request) -> web.Response:
     """Байты чека — руководителю и безопаснику своей команды. Право то же, что
     у снимков: каталог договора целиком (_photo_scope_ok); файл лежит в другом
     корне, но ключ тот же формат «КД/имя»."""
-    uid, _mgr, scope = await asyncio.to_thread(_manager_gate, request)
+    uid, _mgr, scope = await _card_read_gate(request)
     key = (request.query.get("file") or "")[:220]
     path = photostore.photo_path(key, root=receipt_dir())
     if path is None or path.suffix.lower() not in _PHOTO_SUFFIXES or not path.is_file():
@@ -2947,7 +2947,7 @@ def _photo_scope_ok(uid: int, scope: list[str], contracts, rows) -> bool:
 
 async def _manager_photos(request: web.Request) -> web.Response:
     """Поиск фото по номеру договора: список с датами и сигналами к разбору."""
-    uid, _mgr, scope = await asyncio.to_thread(_manager_gate, request)
+    uid, _mgr, scope = await _card_read_gate(request)
     raw = (request.query.get("contract_id") or "").strip()[:64]
     if not raw:
         raise web.HTTPBadRequest(text="contract_id")
@@ -2992,7 +2992,7 @@ async def _manager_photos(request: web.Request) -> web.Response:
 async def _manager_photo_file(request: web.Request) -> web.Response:
     """Байты снимка. <img src> невозможен: токен в query запрещён, поэтому
     оболочка тянет это fetch'ем с authHeaders() и делает blob:-URL."""
-    uid, _mgr, scope = await asyncio.to_thread(_manager_gate, request)
+    uid, _mgr, scope = await _card_read_gate(request)
     key = (request.query.get("file") or "")[:220]
     path = photostore.photo_path(key, root=PHOTO_DIR)
     if path is None or path.suffix.lower() not in _PHOTO_SUFFIXES             or not path.is_file():
@@ -4202,8 +4202,19 @@ async def _manager_employee_view(request: web.Request) -> web.Response:
                           **data})
 
 
+async def _card_read_gate(request: web.Request) -> tuple[int, dict, list[str]]:
+    """Analyst card reads use admin authority, never a manager session."""
+    if request.path in {'/admin/control/person', '/admin/control/photos',
+                        '/admin/control/photo', '/admin/control/receipt_photo'}:
+        await asyncio.to_thread(_admin, request)
+        team = await asyncio.to_thread(_all_employees)
+        return ADMIN_ID, {'telegram_id': ADMIN_ID, 'role': 'full', 'name': 'Аналитик',
+                          'direction': 'all', 'employees': team}, team
+    return await asyncio.to_thread(_manager_gate, request)
+
+
 async def _manager_person(request: web.Request) -> web.Response:
-    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
+    uid, mgr, team = await _card_read_gate(request)
     iso, today, prev, nxt = _manager_date(request)
     team = _day_team(mgr, team, iso)
     emp = _manager_employee_q(request, team)
@@ -7795,6 +7806,10 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/control/day", _control_day)
     app.router.add_get("/api/control/geo_days", _control_geo_days)
     app.router.add_get("/admin/control/overview", _admin_control_overview)
+    app.router.add_get("/admin/control/person", _manager_person)
+    app.router.add_get("/admin/control/photos", _manager_photos)
+    app.router.add_get("/admin/control/photo", _manager_photo_file)
+    app.router.add_get("/admin/control/receipt_photo", _manager_receipt_file)
     app.router.add_get("/admin/control/soft", _admin_control_soft)
     app.router.add_get("/admin/control/flags", _admin_control_flags)
     app.router.add_get("/admin/control/callbacks", _admin_control_callbacks)

@@ -39,7 +39,8 @@ def metadata(headers):
     if product not in ('hard', 'soft', 'manager', 'analyst'):
         product = ''
     ua = headers.get('User-Agent', '')
-    source = ('pwa' if shell else 'compatibility' if ua.startswith('Python-urllib/')
+    desktop_bridge = headers.get('X-Client-Runtime') == 'desktop' and product == 'analyst'
+    source = ('pwa' if shell else 'desktop' if desktop_bridge else 'compatibility' if ua.startswith('Python-urllib/')
               else 'desktop' if 'Electron/' in ua else 'reported')
     return {'client_version': version, 'shell_version': shell, 'product': product, 'source': source}
 

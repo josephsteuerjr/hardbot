@@ -545,6 +545,24 @@ def route(path: str, body: dict):
     if path == "/admin":
         return admin(str(body.get("method") or "GET"), str(body.get("path") or ""),
                      body.get("body"), float(body.get("timeout") or 30))
+    if path == '/admin_image':
+        import base64
+        import urllib.parse
+        kind, file = body.get('kind'), body.get('file')
+        if kind not in ('photo', 'receipt_photo') or not isinstance(file, str) or not file or len(file) > 220:
+            raise ValueError('Недопустимый снимок карточки')
+        suffix = Path(file).suffix.lower()
+        mime = {'.jpg':'image/jpeg','.jpeg':'image/jpeg','.png':'image/png',
+                '.webp':'image/webp','.gif':'image/gif','.heic':'image/heic',
+                '.heif':'image/heif','.avif':'image/avif','.jfif':'image/jpeg',
+                '.jpe':'image/jpeg'}.get(suffix)
+        if not mime:
+            raise ValueError('Недопустимый формат снимка')
+        prof = _profile()
+        raw = api_client.download(prof.get('url', ''), '/admin/control/'+kind+'?'+
+                                  urllib.parse.urlencode({'file':file}),
+                                  device_token=prof.get('device_token', ''), timeout=90)
+        return {'src':'data:'+mime+';base64,'+base64.b64encode(raw).decode('ascii')}
     if path == "/fn":
         name = str(body.get("name") or "")
         if "map" in body:          # одна функция по списку — одной поездкой
