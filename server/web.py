@@ -4212,12 +4212,19 @@ async def _manager_person(request: web.Request) -> web.Response:
     mode = request.query.get('mode')
     by_soft = bool(row and (mode == 'soft' or mode != 'hard' and
                            row["responsible_soft"] == emp and row["responsible"] != emp))
+    current_only = request.query.get('current_portfolio') == '1'
+    # Older desktop activity screens label non-call events as Hard, including
+    # Soft card views and receipts. Resolve that presentation hint only when
+    # Hard grants no access and Soft independently grants access. An explicit
+    # current-portfolio request must still match its selected profile exactly.
+    if (row and not by_soft and not current_only and row['responsible'] != emp
+            and not db.employee_visited(emp, [rep])):
+        by_soft = row['responsible_soft'] == emp or db.employee_called(emp, [rep])
     # Свой должник — или тот, к кому сотрудник выезжал до перезакрепления:
     # карточка по собственному выезду открываться обязана.
     if not row or (by_soft and row["responsible_soft"] != emp and not db.employee_called(emp, [rep])) or (
             not by_soft and row["responsible"] != emp and not db.employee_visited(emp, [rep])):
         raise web.HTTPNotFound(text="person")
-    current_only = request.query.get('current_portfolio') == '1'
     if current_only and row['responsible_soft' if by_soft else 'responsible'] != emp:
         raise web.HTTPNotFound(text='person')
     data = digest_data.person_data(mgr, iso, emp, rep, employees=team, by_soft=by_soft, current_only=current_only)
