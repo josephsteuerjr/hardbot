@@ -20,6 +20,7 @@ import unicodedata
 from datetime import datetime, timedelta
 
 import db
+import client_versions
 
 ROLES = ("agent", "manager", "security", "full", "analyst")
 
@@ -128,6 +129,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
                  "PRIMARY KEY(token_table,token_id))")
     conn.execute("INSERT OR IGNORE INTO account_token_sessions(token_table,token_id,device_id) "
                  "SELECT token_table,agent_dev_id,id FROM account_devices WHERE agent_dev_id IS NOT NULL")
+    client_versions.init_schema(conn)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS account_logins (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1039,6 +1041,7 @@ def delete_account(username: str, by: str, *, expected_id: int) -> dict:
         _revoke_account_tokens(conn, row['id'], f"account:delete:{by}")
         conn.execute("INSERT INTO account_deletions VALUES(?,?,?,?)", (row['id'], uid, _now(), by))
         conn.execute("DELETE FROM account_phone_requests WHERE account_id=?", (row['id'],))
+        conn.execute("DELETE FROM account_client_versions WHERE account_id=?", (row['id'],))
         conn.execute("DELETE FROM account_token_sessions WHERE device_id IN "
                      "(SELECT id FROM account_devices WHERE account_id=?)", (row['id'],))
         conn.execute("DELETE FROM account_devices WHERE account_id=?", (row['id'],))
@@ -1160,7 +1163,8 @@ def admin_accounts() -> list[dict]:
                         "role": acc["role"], "status": acc["status"],
                         "must_change_password": bool(acc["must_change_password"]),
                         "created_at": acc["created_at"], "activated_at": acc["activated_at"],
-                        "devices": [dict(d) for d in devices],
+                        "devices": [{**dict(d), **client_versions.for_device(conn, d['id'])}
+                                    for d in devices],
                         "approval_events": [dict(e) for e in approvals],
                         "logins": [dict(l) for l in logins]})
         return out

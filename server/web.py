@@ -5360,6 +5360,8 @@ async def _account_register(request: web.Request) -> web.Response:
         return web.json_response(result, status=400)
     await asyncio.to_thread(db.audit_access, 0, "account_self_register", result["username"],
                             f"ip={_admin_peer(request)}")
+    if result.get('token'):
+        await _observe_client_version(request, token=result['token'], login=True)
     return web.json_response({**result, "pending": True}, status=201)
 
 
@@ -5443,6 +5445,7 @@ async def _account_login(request: web.Request) -> web.Response:
     else:
         _admin_auth_ok(request, scope="account")
     if result.get("action") in ("ok", "ok_pending"):
+        await _observe_client_version(request, token=result['token'], login=True)
         return web.json_response(result)
     status = 429 if result.get("action") == "locked" else 409 if result.get("action") == "conflict" else 403
     return web.json_response({"ok": False, **{k: v for k, v in result.items() if k != "token"}},
@@ -7593,11 +7596,27 @@ async def _security_headers(request: web.Request, resp: web.StreamResponse) -> N
 CLIENT_MAX_SIZE = 64 * 1024 * 1024
 
 
+async def _observe_client_version(request, *, token=None, login=False):
+    import client_versions
+    info = client_versions.metadata(request.headers)
+    if not info:
+        return
+    try:
+        for header, table in (('X-App-Token', 'agent_devices'), ('X-Pult-Token', 'manager_devices')):
+            bearer = token if token is not None else request.headers.get(header, '')
+            if bearer:
+                await asyncio.to_thread(client_versions.observe, table, bearer, info, login=login)
+    except Exception:
+        logging.warning('Client version observation failed', exc_info=True)
+
+
 @web.middleware
 async def _account_client_policy(request,handler):
     # Protocol admission retires unmodified old clients; it is not binary or
     # hardware attestation. Every data gate still validates account and device.
     protected=request.path.startswith(('/api/','/admin/'))
+    if protected and request.method != 'OPTIONS':
+        await _observe_client_version(request)
     strict=await asyncio.to_thread(account_policy.strict) if protected else False
     if protected and strict:
         try:
