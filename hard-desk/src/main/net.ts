@@ -106,7 +106,7 @@ function localPreferences(method: string, query: Record<string, unknown> | undef
 }
 
 export async function call(method: string, path: string, query?: Record<string, unknown>, body?: unknown,
-                           opts: { binary?: boolean; cache?: boolean } = {}): Promise<ApiResult> {
+                           opts: { binary?: boolean; cache?: boolean; revalidated?: boolean } = {}): Promise<ApiResult> {
   const server = readSettings().server;
   const token = readToken();
   if (!server || !token) return { ok: false, status: 0, kind: "nolink", text: "Пульт ещё не знает, кто вы." };
@@ -130,7 +130,10 @@ export async function call(method: string, path: string, query?: Record<string, 
   const url = server + path + qs(query);
   const key = cacheIdentity(server, token) + " " + method + " " + path + qs(query);
   let generation = cacheGeneration();
-  const current = () => readSettings().server === server && readToken() === token && generation === cacheGeneration();
+  const samePrincipal = () => readSettings().server === server && readToken() === token;
+  const current = () => samePrincipal() && generation === cacheGeneration();
+  const invalidated = (): Promise<ApiResult> | ApiResult => method === "GET" && samePrincipal() && !opts.revalidated
+    ? call(method, path, query, body, { ...opts, cache: false, revalidated: true }) : changedAuthority();
   let res: Response;
   try {
     res = await request(url, {
@@ -140,7 +143,7 @@ export async function call(method: string, path: string, query?: Record<string, 
       bypassCustomProtocolHandlers: true,
     } as RequestInit, opts.binary ? 120000 : 30000);
   } catch (err) {
-    if (!current()) return changedAuthority();
+    if (!current()) return invalidated();
     const t = troubleOf(err);
     if (method === "GET" && opts.cache !== false && !opts.binary) {
       const hit = cacheGet(key);
@@ -148,10 +151,10 @@ export async function call(method: string, path: string, query?: Record<string, 
     }
     return t;
   }
-  if (!current()) return changedAuthority();
+  if (!current()) return invalidated();
   if (res.status === 401) {
     const code = await errorCode(res);
-    if (!current()) return changedAuthority();
+    if (!current()) return invalidated();
     if (accountPath) return { ok: false, status: 401, kind: "forbidden", text: "У этого входа нет подтверждённой учётки или сеанс истёк." };
     if (code === "device_revoked" || code === "device_unknown") {
       wipe();
@@ -162,7 +165,7 @@ export async function call(method: string, path: string, query?: Record<string, 
   }
   if (res.status === 403) {
     const code = await errorCode(res);
-    if (!current()) return changedAuthority();
+    if (!current()) return invalidated();
     clearCache(); // a known permission denial cannot become an offline grant
     if (code === "account_pending" || code === "password_change_required")
       return { ok: false, status: 403, kind: "forbidden", text: code };
@@ -175,16 +178,16 @@ export async function call(method: string, path: string, query?: Record<string, 
   if (res.status === 404) { cacheRemove(key); return { ok: false, status: 404, kind: "notfound", text: "Не найдено — возможно, человека перезакрепили." }; }
   if (!res.ok) {
     const code = await errorCode(res);
-    if (!current()) return changedAuthority();
+    if (!current()) return invalidated();
     return { ok: false, status: res.status, kind: "server", text: `Сервер ответил ошибкой ${res.status}${code ? ": " + code.slice(0, 200) : ""}` };
   }
   if (opts.binary) {
     const buf = Buffer.from(await res.arrayBuffer());
-    if (!current()) return changedAuthority();
+    if (!current()) return invalidated();
     return { ok: true, status: res.status, data: { type: res.headers.get("content-type") || "", buf } };
   }
   const data = await res.json().catch(() => null);
-  if (!current()) return changedAuthority();
+  if (!current()) return invalidated();
   if (generation === cacheGeneration()) {
     acceptScope(data, cacheIdentity(server, token));
     generation = cacheGeneration();
@@ -527,7 +530,7 @@ export function flushCallQueue(): Promise<Map<string, ApiResult>> {
 }
 
 export async function callField(method: string, path: string, query?: Record<string, unknown>, body?: unknown,
-                                opts: { binary?: boolean; cache?: boolean; sendingQueue?: boolean } = {}): Promise<ApiResult> {
+                                opts: { binary?: boolean; cache?: boolean; sendingQueue?: boolean; revalidated?: boolean } = {}): Promise<ApiResult> {
   const server = readSettings().fieldServer;
   const token = readFieldToken();
   if (method === "POST" && path === "/api/local/call_queue/clear") {
@@ -619,6 +622,16 @@ export async function callField(method: string, path: string, query?: Record<str
           ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
       if (prior && canonical(prior.body) !== canonical(callBody))
         return { ok: false, status: 409, kind: "server", text: "Идентификатор уже используется для другой записи. Исходная запись сохранена в очереди." };
+      if (!prior && callBody.kind === "call" && typeof callBody.card_revision === "string") {
+        const sameAttempt = (value: Record<string, unknown>) => {
+          const { op_id, occurred_at, ...content } = value;
+          return canonical(content);
+        };
+        const conflict = queue.entries.find(entry => entry.error &&
+          /(?:ошибкой 409|Карточка изменилась)/.test(entry.error) &&
+          sameAttempt(entry.body) === sameAttempt(callBody));
+        if (conflict) return { ok: false, status: 409, kind: "server", text: conflict.error };
+      }
       if (!prior) queue.entries.push({ body: callBody });
       writeCallQueue(queue);
       const results = await flushCallQueue();
@@ -629,7 +642,10 @@ export async function callField(method: string, path: string, query?: Record<str
   const url = server + path + qs(query);
   const key = "F " + cacheIdentity(server, token) + " " + method + " " + path + qs(query);
   let generation = cacheGeneration();
-  const current = () => readSettings().fieldServer === server && readFieldToken() === token && generation === cacheGeneration();
+  const samePrincipal = () => readSettings().fieldServer === server && readFieldToken() === token;
+  const current = () => samePrincipal() && generation === cacheGeneration();
+  const invalidated = (): Promise<ApiResult> | ApiResult => method === "GET" && samePrincipal() && !opts.revalidated
+    ? callField(method, path, query, body, { ...opts, cache: false, revalidated: true }) : changedAuthority();
   let res: Response;
   try {
     res = await request(url, {
@@ -639,7 +655,7 @@ export async function callField(method: string, path: string, query?: Record<str
       bypassCustomProtocolHandlers: true,
     } as RequestInit, opts.binary ? 120000 : 30000);
   } catch (err) {
-    if (!current()) return changedAuthority();
+    if (!current()) return invalidated();
     const t = troubleOf(err);
     if (method === "GET" && opts.cache !== false && !opts.binary) {
       const hit = cacheGet(key);
@@ -647,7 +663,7 @@ export async function callField(method: string, path: string, query?: Record<str
     }
     return t;
   }
-  if (!current()) return changedAuthority();
+  if (!current()) return invalidated();
   if (res.status === 401) {
     wipeField({discardWork:true});
     onRevoked();
@@ -665,16 +681,16 @@ export async function callField(method: string, path: string, query?: Record<str
   if (res.status === 404) { clearCache(); return { ok: false, status: 404, kind: "notfound", text: "Не найдено — возможно, договор перезакрепили." }; }
   if (!res.ok) {
     const code = await errorCode(res);
-    if (!current()) return changedAuthority();
+    if (!current()) return invalidated();
     return { ok: false, status: res.status, kind: "server", text: `Сервер ответил ошибкой ${res.status}${code ? ": " + code.slice(0, 200) : ""}` };
   }
   if (opts.binary) {
     const buf = Buffer.from(await res.arrayBuffer());
-    if (!current()) return changedAuthority();
+    if (!current()) return invalidated();
     return { ok: true, status: res.status, data: { type: res.headers.get("content-type") || "", buf } };
   }
   const data = await res.json().catch(() => null);
-  if (!current()) return changedAuthority();
+  if (!current()) return invalidated();
   if (!data || (opts.sendingQueue && (data as { ok?: boolean }).ok !== true))
     return { ok: false, status: 502, kind: "server", text: "Сервер не подтвердил запись. Она сохранена на компьютере и будет отправлена повторно." };
   const beforeScope = cacheGeneration();

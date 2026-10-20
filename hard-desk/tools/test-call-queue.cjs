@@ -25,9 +25,9 @@ const electron = {
     if(_url.endsWith('/api/identity') && !['401','403','500'].includes(network))return Response.json({ok:true,uid:101});
     if (options.body) sent.push(JSON.parse(options.body));
     if (hold) { const wait = hold; hold = null; await wait; }
-    const status = network === '500' ? 500 : network === '404' ? 404 : network === '401' ? 401 : network === '403' ? 403 : network === '429' ? 429 : 200;
+    const status = network === '500' ? 500 : network === '404' ? 404 : network === '409' ? 409 : network === '401' ? 401 : network === '403' ? 403 : network === '429' ? 429 : 200;
     const body = _url.endsWith('/account/login') && accountReply ? accountReply : _url.endsWith('/device/enroll') && enrollment ? enrollment : _url.endsWith('/device/me') && managerInfo ? managerInfo : network === 'partial' ? { ok: true, rejected: { forecast_sum: 'format' } } : { ok: true };
-    return new Response(network === 'invalid' ? 'not JSON' : JSON.stringify(body), {status});
+    return new Response(network === '409' ? 'Карточка изменилась. Обновите её и сверьте ввод перед повтором' : network === 'invalid' ? 'not JSON' : JSON.stringify(body), {status});
   } }) },
 };
 function load(name) {
@@ -44,6 +44,19 @@ function load(name) {
   let net = load('net');
   const call = id => ({ rep: 'SYNTHETIC', kind: 'call', finish: true, op_id: id, occurred_at: 1780000000123,
     values: { soft_call_status: 'Synthetic status', soft_comment: 'private synthetic note' } });
+  network='409';
+  const stale={...call('stale-one'),card_revision:'synthetic-stale'};
+  assert.equal((await net.callField('POST','/api/save',undefined,stale)).status,409);
+  const attempted=sent.length;
+  assert.equal((await net.callField('POST','/api/save',undefined,{...stale,op_id:'stale-two',occurred_at:stale.occurred_at+1000})).status,409);
+  assert.equal(store.readCallQueue().entries.length,1,'new id/time accumulated the same stale-card attempt');
+  assert.equal(sent.length,attempted,'unchanged conflict was sent to the server again');
+  assert.equal(JSON.stringify(store.readCallQueue().entries[0].body),JSON.stringify(stale),'original conflict payload changed');
+  // An explicitly refreshed/reviewed revision is a different operation.
+  network='online';
+  assert.equal((await net.callField('POST','/api/save',undefined,{...stale,op_id:'reviewed',card_revision:'synthetic-reviewed'})).ok,true);
+  assert.equal(store.readCallQueue().entries.length,1,'accepted new call silently removed old failed original');
+  store.clearCallQueue();sent=[];network='offline';
   const first = call('one');
   const queued = await net.callField('POST', '/api/save', undefined, first);
   assert.equal(queued.data.queued, true);

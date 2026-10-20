@@ -47,7 +47,7 @@ function load(name, overrides = {}) {
   let requests=0;
   const child=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();child.kill=()=>{};
   const spawn=()=>{setTimeout(()=>child.stdout.emit('data','HARD-BACKEND 43210 synthetic-secret\n'),0);return child;};
-  const electron={app:{isPackaged:false,on:()=>{},getPath:()=>os.tmpdir()}};
+  const electron={app:{isPackaged:false,on:()=>{},getPath:()=>os.tmpdir(),getVersion:()=> '3.2.9'}};
   const local=load('local',{process:{...process,resourcesPath:os.tmpdir()},
     fetch:async()=>{requests++;if(requests%2===1)throw new Error('Response lost after commit');return new Response('{"ok":true,"data":{}}')},
     require:n=>n==='electron'?electron:n==='node:child_process'?{spawn}:require(n)}).local;

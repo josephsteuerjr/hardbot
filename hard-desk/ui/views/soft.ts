@@ -72,12 +72,18 @@ export const softQueue: Section = {
     const debtSum=Object.entries(sums).map(([unit,sum])=>money(sum)+" "+unit).join(" · ");
     const pending = await api("/api/local/call_queue");
     const queue = pending.data as { pending?: number; errors?: { rep: string; op_id: string; error: string; body: any }[] } | undefined;
+    // All originals stay in encrypted storage; one debtor occupies one row on screen.
+    const errorGroups = new Map<string, NonNullable<typeof queue>["errors"]>();
+    for (const item of queue?.errors || []) {
+      const group = errorGroups.get(item.rep) || [];
+      group.push(item); errorGroups.set(item.rep, group);
+    }
     root.innerHTML = `
       ${r.stale?`<div class="notice">Портфель из локального кэша на ${esc(r.stale)}. Новые записи будут ждать сети.</div>`:""}
       ${!promises.ok?`<div class="notice">Обещания не загрузились: ${esc(promises.text || "проверьте связь или версию сервера")}</div>`:""}
       ${!pending.ok ? `<div class="notice err">${esc(pending.text || "Не удалось прочитать очередь звонков")}</div>` : queue?.pending ?
         `<div class="notice"><span class="grow">Ожидают отправки ${n(queue.pending - (queue.errors || []).length)} записей; требуют проверки ${(queue.errors || []).length}. Отправка повторяется автоматически при появлении связи.
-        ${(queue.errors || []).map(e => `<br>${esc(e.rep)}: ${esc(e.error)} <button class="btn small" data-pending-view="${esc(e.op_id)}">Разобрать запись</button> <button class="btn small" data-pending-op="${esc(e.op_id)}">Убрать из очереди</button>`).join("")}</span></div>` : ""}
+        ${[...errorGroups].map(([rep, items]) => `<div class="queue-error"><b>${esc(rep)}</b> · ${n(items!.length)} записей требуют сверки<details><summary>Показать записи и причины</summary>${items!.map(e => `<div>${esc(e.error)} <button class="btn small" data-pending-view="${esc(e.op_id)}">Разобрать запись</button> <button class="btn small" data-pending-op="${esc(e.op_id)}">Убрать из очереди</button></div>`).join("")}</details></div>`).join("")}</span></div>` : ""}
       <div class="kpis"><div class="kpi accent"><b>${n(today.length)}</b><span>звонить сегодня</span></div>
         <div class="kpi"><b>${n(state.persons.length)}</b><span>должников всего</span></div>
         <div class="kpi money"><b>${esc(debtSum)}</b><span>долг портфеля по валютам</span></div></div>
@@ -322,7 +328,12 @@ async function openSoftCard(rep: string, preserveDraft = false) {
       await persist();
       toast(res.text || "Не сохранилось");panel.querySelector("#c-state")!.textContent="Требует исправления";
       const error=panel.querySelector<HTMLElement>("#c-error")!;error.hidden=false;error.textContent=res.text || "Ввод сохранён; запись не принята";
-      if(res.status===409)panel.querySelector<HTMLElement>("#c-reload")!.hidden=false;
+      if(res.status===409){
+        panel.querySelector<HTMLElement>("#c-reload")!.hidden=false;
+        for(const id of ["c-save","c-save-next","p-save"]){
+          const button=panel.querySelector<HTMLButtonElement>("#"+id);if(button)button.disabled=true;
+        }
+      }
     }
   };
   panel.querySelector("#c-save")?.addEventListener("click",()=>void saveCall());
