@@ -10,31 +10,51 @@ import { copyLink, linkQuota, linkStatus, usableLink } from "../kit/login-links"
 import { openPerson, problem, rangeChips, rangeQuery, staleNote, wireRange, type Range } from "./common";
 import { go, hasSection } from "../kit/shell";
 
+let promisesSequence = 0;
+const promiseProfileKey = "hard.manager-promises.profile";
 export const promises: Section = {
   id: "promises",
   title: "Обещания",
   icon: "promises",
   kicker: "просроченные обещания оплаты",
   async render(root, params) {
+    const sequence = ++promisesSequence;
     root.innerHTML = '<div class="skeleton"></div>';
-    const soft = params.profile === "soft" || params.mode === "soft";
-    const r = await api("/api/manager/promises", { mode: soft ? "soft" : "hard" });
-    if (!r.ok) { root.innerHTML = problem(r.text || "Не загрузилось"); return; }
-    const d = r.data;
-    const t = d.totals || {};
-    // Одна таблица на всех: сотрудник — столбец, по нему и фильтр, и сортировка.
+    const [hardPromises, softPromises] = await Promise.all([
+      api("/api/manager/promises", { mode: "hard" }),
+      api("/api/manager/promises", { mode: "soft" }),
+    ]);
+    if (!root.isConnected || sequence !== promisesSequence) return;
     const selected = Array.isArray(params.employees) ? new Set(params.employees) : null;
-    const rows = ((d.employees || []) as any[]).filter(e => !selected || selected.has(e.employee)).flatMap((e) => (e.items as any[]).map((i) => ({ ...i, employee: e.employee })));
+    const rowsOf = (result: typeof hardPromises) => ((result.data?.employees || []) as any[])
+      .filter(e => !selected || selected.has(e.employee))
+      .flatMap(e => (e.items || []).map((i: any) => ({ ...i, employee: e.employee })));
+    const hardRows = rowsOf(hardPromises), softRows = rowsOf(softPromises);
+    const requested = params.profile || params.mode;
+    let remembered = "";
+    try { remembered = localStorage.getItem(promiseProfileKey) || ""; } catch { /* optional preference */ }
+    const profile = [requested, remembered].find(p => p === "hard" || p === "soft")
+      || (hardRows.length ? "hard" : softRows.length ? "soft" : !hardPromises.ok && softPromises.ok ? "soft" : "hard");
+    const soft = profile === "soft", r = soft ? softPromises : hardPromises;
+    try { localStorage.setItem(promiseProfileKey, profile); } catch { /* optional preference */ }
+    const picker = `<div class="chips" aria-label="Направление обещаний">
+      <button class="chip" data-promise-mode="hard" aria-pressed="${!soft}">Хард · выезды (${hardPromises.ok ? n(hardRows.length) : "—"})</button>
+      <button class="chip" data-promise-mode="soft" aria-pressed="${soft}">Софт · звонки (${softPromises.ok ? n(softRows.length) : "—"})</button></div>`;
+    const wirePicker = () => root.querySelectorAll<HTMLElement>("[data-promise-mode]").forEach(button =>
+      button.addEventListener("click", () => void go("promises", { profile: button.dataset.promiseMode })));
+    if (!r.ok) { root.innerHTML = picker + problem(r.text || "Обещания не загрузились"); wirePicker(); return; }
+    const d = r.data, rows = soft ? softRows : hardRows;
     const totals = { persons: rows.length, worked: rows.filter(i => i.visited_after_promise).length, untouched: rows.filter(i => !i.visited_after_promise).length };
     const after = (i: any) => soft ? (i.visited_after_promise ? "звонил после срока" : "не звонил после срока") : (i.visited_after_promise ? "ездил" : i.last_visit ? "ездил до обещания" : "не ездил");
     root.innerHTML = `${staleNote(r.stale)}
+      ${picker}<p class="hint">${soft ? "Софт · обещания по звонкам" : "Хард · обещания, зафиксированные на выездах"}. Текущая просрочка; будущие и выполненные обещания в таблицу не входят.</p>
       <div class="kpis"><div class="kpi accent"><b>${n(totals.persons)}</b><span>просрочили обещание</span></div>
         <div class="kpi"><b>${n(totals.worked)}</b><span>после срока уже ${soft ? "звонили" : "ездили"}</span></div>
         <div class="kpi"><b>${n(totals.untouched)}</b><span>не трогали</span></div></div>
       <div class="section" id="prom"></div>`;
     new DataTable<any>(root.querySelector("#prom")!, {
-      id: "manager-promises", exportName: "Просроченные обещания", key: (i) => `${i.employee}|${i.rep}`,
-      empty: "Все обещания в срок или оплачены.",
+      id: "manager-promises-" + profile, exportName: "Просроченные обещания — " + (soft ? "Софт" : "Хард"), key: (i) => `${i.employee}|${i.rep}`,
+      empty: "В выбранном направлении текущей просрочки по обещаниям нет.",
       cols: [
         { key: "emp", title: "Сотрудник", value: (i) => i.employee },
         { key: "client", title: "Должник", value: (i) => i.client, html: (i) => `<span class="who">${esc(i.client)}</span><span class="sub mono">${esc(i.rep)}</span>` },
@@ -46,7 +66,9 @@ export const promises: Section = {
       ],
       onRow: (i) => void openPerson(i.employee, i.rep, undefined, soft ? "soft" : "hard"),
     }).setRows(rows);
+    wirePicker();
   },
+  leave() { promisesSequence++; },
 };
 
 const ENTRY = (x: any) => (x.entered ? "вошёл" : linkStatus(x));

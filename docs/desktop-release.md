@@ -1,5 +1,9 @@
 # Проверка настольного выпуска
 
+## 3.2.6
+
+The manager Promises page shows separate Hard and Soft selectors with counts. On first opening it selects Soft when Hard is empty and Soft has overdue promises; explicit selections are retained. Each profile keeps separate table filters and exports. Loading failures remain visible. Server calculations and access scopes are unchanged.
+
 Поставка состоит из четырёх продуктов: Хард, Софт, руководитель/СБ и аналитик.
 Сборка установщика и совпадение исходников не доказывают запуск установленной
 программы: библиотека updater может оказаться без транзитивных зависимостей.
