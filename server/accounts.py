@@ -1174,6 +1174,30 @@ def sessions_for(agent_dev_id: int, account_id: int, limit: int = 30) -> list[di
     return [dict(r) for r in rows]
 
 
+def revoke_account_device(device_id: int, *, by: str = "operator") -> bool:
+    """Retire a logical device even after its credential has been deleted.
+
+    Password reset revokes tokens; their next request removes the token rows.
+    The approval still exists and must be revocable independently of them.
+    """
+    if type(device_id) is not int or device_id <= 0:
+        return False
+    with db.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        device = conn.execute("SELECT id,account_id,status FROM account_devices WHERE id=?",
+                              (device_id,)).fetchone()
+        if device is None:
+            return False
+        _revoke_slot_tokens(conn, device_id, by)
+        if device["status"] != "revoked":
+            conn.execute("UPDATE account_devices SET status='revoked',revoked_at=? WHERE id=?",
+                         (_now(), device_id))
+            _approval_event(conn, device["account_id"], device_id, 0, by,
+                            "device", "revoked", detail=f"operator:account_device#{device_id}")
+        conn.commit()
+    return True
+
+
 def revoke_approved_device(token_table: str, row_id: int, *, by: str = "operator") -> bool:
     """Operator device revocation differs from self logout: approval is retired.
 

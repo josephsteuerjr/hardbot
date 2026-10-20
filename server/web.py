@@ -5633,8 +5633,7 @@ async def _admin_account_action(request):
     elif action=='revoke':
         device_id=body.get('device_id')
         if type(device_id) is not int:raise _json_error(web.HTTPBadRequest,'device_id')
-        with db.connect() as conn: dev=conn.execute('SELECT token_table,agent_dev_id FROM account_devices WHERE id=?',(device_id,)).fetchone()
-        result={'ok':bool(dev and await asyncio.to_thread(accounts.revoke_approved_device,dev['token_table'],dev['agent_dev_id'],by=by))}
+        result={'ok':await asyncio.to_thread(accounts.revoke_account_device,device_id,by=by)}
     else: raise _json_error(web.HTTPBadRequest,'action')
     return web.json_response(result,status=200 if result.get('ok') else 400)
 
