@@ -194,3 +194,29 @@ def test_bootstrap_soft_mode_queue(tmp_path, monkeypatch):
     assert [p["client"] for p in data["persons"]][0] == "Просрочен"
     assert data["persons"][0]["overdue"] > 0
     assert data["persons"][1]["sc"] == ""
+
+
+def test_soft_bootstrap_pools_keep_contract_partner_and_employee_scope(tmp_path, monkeypatch):
+    _isolated(tmp_path, monkeypatch, rows=[
+        {"contract_id": "POOL-A", "client": "Synthetic client", "birth_date": "2000-01-01",
+         "responsible": EMP_HARD, "responsible_soft": EMP_SOFT, "pool": " Pool 2 ", "partner": "Alpha"},
+        {"contract_id": "POOL-B", "client": "Synthetic client", "birth_date": "2000-01-01",
+         "responsible": EMP_HARD, "responsible_soft": EMP_SOFT, "pool": "Pool 1", "partner": "Beta"},
+        {"contract_id": "POOL-C", "client": "Synthetic client", "birth_date": "2000-01-01",
+         "responsible": EMP_HARD, "responsible_soft": EMP_SOFT, "pool": "Pool 2", "partner": "Alpha"},
+        {"contract_id": "POOL-HIDDEN", "client": "Synthetic client", "birth_date": "2000-01-01",
+         "responsible": EMP_HARD, "responsible_soft": "Other operator", "pool": "Hidden", "partner": "Hidden"},
+    ])
+    monkeypatch.setattr(web, "_uid", lambda _r: 4242)
+    monkeypatch.setattr(web, "_employee", lambda uid, _r: EMP_SOFT)
+    monkeypatch.setattr(web, "_remember_from_init", lambda _r: None)
+    monkeypatch.setattr(web, "lang_of", lambda uid: "ru")
+    data = json.loads(asyncio.run(web._bootstrap(make_mocked_request("GET", "/api/bootstrap?mode=soft"))).body)
+    assert len(data["persons"]) == 1
+    person = data["persons"][0]
+    assert person["pools"] == ["Pool 1", "Pool 2"]
+    assert person["pool_partners"] == [
+        {"pool": "Pool 1", "partner": "Beta"},
+        {"pool": "Pool 2", "partner": "Alpha"},
+    ]
+    assert person["n"] == 3

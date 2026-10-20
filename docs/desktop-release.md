@@ -1,5 +1,9 @@
 # Проверка настольного выпуска
 
+## 3.2.7
+
+Софт: выбор пула из реестра рядом с контрагентом, сохранение выбора после перезапуска, колонка пула в таблице. Совместные фильтры проверяют пул и контрагента одного договора, сохраняя целую карточку должника. В веб-режиме Софта также доступен выбор пула (PWA102). Пулы берутся только из закреплённых договоров; права, данные и очередь не меняются.
+
 ## 3.2.6
 
 The manager Promises page shows separate Hard and Soft selectors with counts. On first opening it selects Soft when Hard is empty and Soft has overdue promises; explicit selections are retained. Each profile keeps separate table filters and exports. Loading failures remain visible. Server calculations and access scopes are unchanged.

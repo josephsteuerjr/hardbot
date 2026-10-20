@@ -606,6 +606,10 @@ def _person_brief(p: dict) -> dict:
         if c["geo_lat"] is not None:
             lat, lon = c["geo_lat"], c["geo_lon"]
             break
+    pool_partners = sorted({
+        (str(_cell(c, "pool") or "").strip(), str(_cell(c, "partner") or "").strip())
+        for c in p["contracts"]
+    })
     return {"rep": p["rep"], "client": p["client"], "n": p["n"],
             "total": p["total"], "unit": debt.unit(p["partners"]),
             "totals": p["totals"],   # ЗК + Делимобиль → «11 550 000 сум · 132 900 ₽»
@@ -616,7 +620,9 @@ def _person_brief(p: dict) -> dict:
             # портфеля, которые уже уехали на телефон в /api/cards.
             "ids": _search_ids(p["contracts"]),
             "tels": _search_tels(p["contracts"]),
-            "partners": p["partners"]}
+            "partners": p["partners"],
+            "pools": sorted({pool for pool, _ in pool_partners if pool}),
+            "pool_partners": [{"pool": pool, "partner": partner} for pool, partner in pool_partners]}
 
 
 def _row_get(rows, key):

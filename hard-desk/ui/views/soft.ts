@@ -19,6 +19,7 @@ const state = {
   formVersion: 0,
   showAll: false,
   partner: "",
+  pool: "",
   table: undefined as DataTable<any> | undefined,
 };
 export const softEmployeeSections=employeeSections("soft",rep=>void openSoftCard(rep));
@@ -53,14 +54,16 @@ export const softQueue: Section = {
     if (!r.ok) { root.innerHTML = '<div class="empty"><b>Не загрузилось</b>' + esc(r.text || "") + "</div>"; return; }
     const d: any = r.data;
     state.persons = (d.persons || []) as any[];
-    if(prefs.data?.value){state.showAll=!!prefs.data.value.showAll;state.partner=prefs.data.value.partner || ""}
+    if(prefs.data?.value){state.showAll=!!prefs.data.value.showAll;state.partner=prefs.data.value.partner || "";state.pool=prefs.data.value.pool || ""}
     for(const person of state.persons)person.promises=(promises.data?.items || []).filter((p:any)=>(p.contracts || []).some((cid:string)=>(person.ids || [person.rep]).includes(cid)));
     state.dropdowns = (d.meta && d.meta.dropdowns) || {};
     state.formVersion = (d.meta && d.meta.formProtocolVersion) || 0;
     const now = new Date();
   const localToday = d.today || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
     const partners = [...new Set<string>(state.persons.flatMap(x => x.partners || []))].sort();
+    const pools = [...new Set<string>(state.persons.flatMap(x => x.pools || []))].sort((a,b)=>a.localeCompare(b,"ru",{numeric:true}));
     if (state.partner && !partners.includes(state.partner)) state.partner = "";
+    if (state.pool && !pools.includes(state.pool)) state.pool = "";
   const today = state.persons.filter(
       (x) => !x.sc || !x.scd || dueDays(x) > 0 || String(x.scd).slice(0, 10) <= localToday);
     const sums: Record<string,number>={};
@@ -79,7 +82,8 @@ export const softQueue: Section = {
         <div class="kpi"><b>${n(state.persons.length)}</b><span>должников всего</span></div>
         <div class="kpi money"><b>${esc(debtSum)}</b><span>долг портфеля по валютам</span></div></div>
       <div class="toolbar"><button class="btn small" data-scope="today">Сегодня (${n(today.length)})</button><button class="btn small" data-scope="all">Все (${n(state.persons.length)})</button>
-        <label>Контрагент <select class="input" id="s-partner"><option value="">Все контрагенты</option>${partners.map(p => `<option value="${esc(p)}"${p === state.partner ? ' selected' : ''}>${esc(p)}</option>`).join('')}</select></label></div>
+        <label>Контрагент <select class="input" id="s-partner"><option value="">Все контрагенты</option>${partners.map(p => `<option value="${esc(p)}"${p === state.partner ? ' selected' : ''}>${esc(p)}</option>`).join('')}</select></label>
+        <label>Пул <select class="input" id="s-pool"><option value="">Все пулы</option>${pools.map(p => `<option value="${esc(p)}"${p === state.pool ? ' selected' : ''}>${esc(p)}</option>`).join('')}</select></label></div>
       <div class="section" id="s-tbl"></div>`;
     root.querySelectorAll<HTMLButtonElement>("[data-pending-op]").forEach(button => button.addEventListener("click", async () => {
       if (!confirm("Убрать проблемную запись из очереди? Принятая сервером часть останется в журнале. Исправленный результат сохраните в карточке должника.")) return;
@@ -103,7 +107,7 @@ export const softQueue: Section = {
     }));
     const table=new DataTable<any>(root.querySelector("#s-tbl")!, {
       id: "soft-queue", profile:"soft",pageSize:100,listHtml:personListHtml, exportName: "Очередь звонков", key: (x) => x.rep,
-      searchPlaceholder:"ФИО, КД, телефон, адрес",empty:"В этом закреплении нет должников.",defaultHidden:["city","contracts","address","reason"],
+      searchPlaceholder:"ФИО, КД, телефон, адрес",empty:"По выбранным фильтрам должников нет.",defaultHidden:["city","contracts","address","reason"],
       cols: [
         { key: "client", title: "Должник", value: (x) => x.client,
           html: (x) => `<span class="who">${esc(x.client || "")}</span><span class="sub mono">${esc((x.tels || [])[0] || "")}</span>` },
@@ -111,6 +115,7 @@ export const softQueue: Section = {
         { key: "sc", title: "Статус", value: (x) => x.sc || "—" },
         { key: "scd", title: "Встреча/перезвон", value: (x) => String(x.scd || "").slice(0, 10) || "—" },
         { key: "partners", title: "Контрагент", value: (x) => (x.partners || []).join(', ') },
+        { key: "pools", title: "Пул", value: (x) => (x.pools || []).join(', ') },
         { key: "overdue", title: "Просрочен, дн", num: true, value: (x) => (dueDays(x) > 0 ? dueDays(x) : 0),
           html: (x) => dueDays(x) > 0 ? `<b style="color:var(--bad,#B0472C)">${dueDays(x)}</b>` : "—" },
         { key: "kd", title: "Договоров", num: true, value: (x) => x.n },
@@ -124,8 +129,11 @@ export const softQueue: Section = {
       onRow: (x) => { void openSoftCard(x.rep); },
     });
     state.table=table;await table.restore();if(!root.isConnected)return;
-    const show=()=>{table.setRows((state.showAll?state.persons:today).filter(x => !state.partner || (x.partners || []).includes(state.partner)));root.querySelectorAll<HTMLButtonElement>("[data-scope]").forEach(b=>b.classList.toggle("primary",(b.dataset.scope==="all")===state.showAll));void api("/api/local/preferences",undefined,"POST",{profile:"soft",id:"portfolio-scope",value:{showAll:state.showAll,partner:state.partner}});};
+    const show=()=>{table.setRows((state.showAll?state.persons:today).filter(x => state.pool
+      ? (x.pool_partners || []).some((tag:any)=>tag.pool===state.pool&&(!state.partner||tag.partner===state.partner))
+      : !state.partner || (x.partners || []).includes(state.partner)));root.querySelectorAll<HTMLButtonElement>("[data-scope]").forEach(b=>b.classList.toggle("primary",(b.dataset.scope==="all")===state.showAll));void api("/api/local/preferences",undefined,"POST",{profile:"soft",id:"portfolio-scope",value:{showAll:state.showAll,partner:state.partner,pool:state.pool}});};
     root.querySelector<HTMLSelectElement>("#s-partner")?.addEventListener("change", e => { state.partner = (e.target as HTMLSelectElement).value; show(); });
+    root.querySelector<HTMLSelectElement>("#s-pool")?.addEventListener("change", e => { state.pool = (e.target as HTMLSelectElement).value; show(); });
     root.querySelectorAll<HTMLButtonElement>("[data-scope]").forEach(b=>b.addEventListener("click",()=>{state.showAll=b.dataset.scope==="all";show();}));
     show();
   },

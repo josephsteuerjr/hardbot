@@ -1505,7 +1505,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=101;
+const SHELL_VERSION=102;
 let LOGIN_GPS=null;
 const ORIGINAL_FETCH=window.fetch.bind(window);
 window.fetch=async(input,init)=>{
@@ -2966,7 +2966,9 @@ function renderSoftList(){
                                    : STATE.persons.filter(softDueToday);
   STATE.softPool=pool;
   const partnerOptions=[...new Set(STATE.persons.flatMap(p=>p.partners||[]))].sort();
+  const poolOptions=[...new Set(STATE.persons.flatMap(p=>p.pools||[]))].sort((a,b)=>a.localeCompare(b,'ru',{numeric:true}));
   if(STATE.softPartner&&!partnerOptions.includes(STATE.softPartner)) STATE.softPartner='';
+  if(STATE.softRegistryPool&&!poolOptions.includes(STATE.softRegistryPool)) STATE.softRegistryPool='';
   const bar=`<div class="lhead"><span class="t">${esc(t.softq)}</span><span class="n">${pool.length}</span></div>`;
   if(!STATE.persons.length){
     $("app").innerHTML = bar + `<div class="center">${esc(t.nocl)}</div>`;
@@ -2975,6 +2977,7 @@ function renderSoftList(){
   $("app").innerHTML = bar +
     `<div class="searchwrap">${ic("search")}<input class="search" id="q" placeholder="${esc(t.search)}" oninput="filterList()"></div>
      <label class="fld">Контрагент</label><select id="softpartner" onchange="STATE.softPartner=this.value;filterList()"><option value="">Все контрагенты</option>${partnerOptions.map(p=>`<option value="${esc(p)}"${p===STATE.softPartner?' selected':''}>${esc(p)}</option>`).join('')}</select>
+     <label class="fld">Пул</label><select id="softpool" onchange="STATE.softRegistryPool=this.value;filterList()"><option value="">Все пулы</option>${poolOptions.map(p=>`<option value="${esc(p)}"${p===STATE.softRegistryPool?' selected':''}>${esc(p)}</option>`).join('')}</select>
      <div id="plist"></div>`;
   filterList();
   setBottomNav(STATE.softFilter||"today");
@@ -3081,7 +3084,9 @@ function listPool(){
   return (STATE.mode==="soft" && STATE.softPool) ? STATE.softPool : STATE.persons;
 }
 function filterList(){
-  const pool=listPool().filter(p=>STATE.mode!=="soft"||!STATE.softPartner||(p.partners||[]).includes(STATE.softPartner));
+  const pool=listPool().filter(p=>STATE.mode!=="soft" || (STATE.softRegistryPool
+    ? (p.pool_partners||[]).some(tag=>tag.pool===STATE.softRegistryPool&&(!STATE.softPartner||tag.partner===STATE.softPartner))
+    : !STATE.softPartner||(p.partners||[]).includes(STATE.softPartner)));
   const raw=$("q").value.trim();
   const q=raw.toLowerCase(), qd=raw.replace(/\D+/g,""), qf=fold(raw);
   const items=raw?pool.filter(p=>personMatches(p,q,qd,qf)):pool;

@@ -1,7 +1,7 @@
 const {app,BrowserWindow}=require('electron');
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
 const out=path.resolve(process.env.HARD_QA_ROOT || path.join(__dirname,'../../_local/architecture-review-2026-10-09'),'soft-renderer');
-fs.mkdirSync(out,{recursive:true});app.setPath('userData',path.join(out,'data'));app.disableHardwareAcceleration();
+fs.mkdirSync(out,{recursive:true});app.setPath('userData',fs.mkdtempSync(path.join(out,'data-')));app.disableHardwareAcceleration();
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 app.whenReady().then(async()=>{
   const w=new BrowserWindow({show:false,width:1440,height:950,webPreferences:{preload:path.join(__dirname,'qa-soft-preload.cjs'),contextIsolation:false,sandbox:false,backgroundThrottling:false,offscreen:true}});
@@ -10,8 +10,22 @@ app.whenReady().then(async()=>{
     await w.loadFile(path.join(__dirname,'../out/ui/index.html'),{query:{mode:'field'}});await sleep(600);
     await js('(()=>{const s=document.createElement("style");s.textContent="*,*::before,*::after{transition:none!important;animation:none!important}#app{--rail-track:var(--rail-w)!important;--panel-track:0px!important}#app.with-panel{--panel-track:var(--panel-w)!important}";document.head.append(s)})()');
     assert.equal(await js('document.querySelectorAll("tbody tr").length'),2);
+    assert.deepEqual(await js('Array.from(document.querySelectorAll("#s-pool option"),x=>x.value)'),['','Пул 1','Пул 2','Пул 10']);
+    await js('document.getElementById("s-pool").value="Пул 10";document.getElementById("s-pool").dispatchEvent(new Event("change"))');
+    assert.equal(await js('document.querySelectorAll("tbody tr[data-key]").length'),0);
+    await js('document.querySelector("[data-scope=all]").click()');
+    assert.equal(await js('document.querySelectorAll("tbody tr").length'),1);
+    assert.match(await js('document.querySelector("tbody").textContent'),/Синтетический клиент В/);
+    await js('document.getElementById("s-pool").value="Пул 2";document.getElementById("s-pool").dispatchEvent(new Event("change"));document.getElementById("s-partner").value="Альфа";document.getElementById("s-partner").dispatchEvent(new Event("change"))');
+    assert.equal(await js('document.querySelectorAll("tbody tr").length'),1);
+    assert.match(await js('document.querySelector("tbody").textContent'),/Синтетический клиент Б/);
     await js('document.getElementById("s-partner").value="Бета";document.getElementById("s-partner").dispatchEvent(new Event("change"))');
     assert.equal(await js('document.querySelectorAll("tbody tr").length'),1);
+    await w.reload();await sleep(600);
+    assert.equal(await js('document.getElementById("s-pool").value'),'Пул 2');
+    assert.equal(await js('document.getElementById("s-partner").value'),'Бета');
+    assert.equal(await js('document.querySelectorAll("tbody tr").length'),1);
+    fs.writeFileSync(path.join(out,'soft-pools.png'),(await w.webContents.capturePage()).toPNG());
     await js('document.querySelector("tbody tr").click()');await sleep(100);
     assert.equal(await js('document.querySelectorAll("#p-contract option").length'),2);
     await js(`document.getElementById('c-comment').value='Заметка до записи оплаты';document.getElementById('c-comment').dispatchEvent(new Event('input',{bubbles:true}));
@@ -26,7 +40,7 @@ app.whenReady().then(async()=>{
     assert.equal(await js('window.__errors.length'),0,await js('JSON.stringify(window.__errors)'));
     await w.webContents.capturePage();await sleep(150);
     fs.writeFileSync(path.join(out,'soft-card.png'),(await w.webContents.capturePage()).toPNG());
-    fs.writeFileSync(path.join(out,'RESULTS.json'),JSON.stringify({partnerKeepsWholePerson:true,callDraftSurvivesPayment:true,manualPaymentBody:true,offlineCallBody:true},null,2));
+    fs.writeFileSync(path.join(out,'RESULTS.json'),JSON.stringify({poolSelector:true,poolPartnerSameContract:true,futurePoolAvailableInAll:true,poolPreferenceSurvivesReload:true,partnerKeepsWholePerson:true,callDraftSurvivesPayment:true,manualPaymentBody:true,offlineCallBody:true},null,2));
     console.log('Soft renderer QA passed: partner/person grouping, preserved note across payment, selected contract, cents and offline call body.');app.exit(0);
   }catch(e){console.error(e);app.exit(1);}
 });

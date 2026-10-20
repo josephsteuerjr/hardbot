@@ -99,3 +99,20 @@ def test_empty_query_shows_the_selected_profile_portfolio():
     out.reps=p.run("window.filtered");
     ''')
     assert result["reps"] == ["A"]
+
+
+def test_soft_pool_and_partner_must_match_the_same_contract():
+    from shell_node import run_shell
+    result = run_shell(r'''
+    const w=newWorld(),p=await openPage(w);await p.booted();await settle(w);
+    p.run(`STATE.mode="soft";STATE.softPartner="Alpha";STATE.softRegistryPool="Pool 2";
+      STATE.persons=[{rep:"A",partners:["Alpha","Beta"],pools:["Pool 1","Pool 2"],
+        pool_partners:[{pool:"Pool 1",partner:"Alpha"},{pool:"Pool 2",partner:"Beta"}]},
+        {rep:"B",partners:["Alpha"],pools:["Pool 2"],pool_partners:[{pool:"Pool 2",partner:"Alpha"}]}];
+      STATE.softPool=STATE.persons;document.getElementById("app").innerHTML='<input id="q"><div id="plist"></div>';
+      drawList=items=>{window.filtered=items.map(p=>p.rep)};filterList()`);
+    out.sameContract=p.run("window.filtered");
+    p.run('STATE.softRegistryPool="";filterList()');out.allPools=p.run("window.filtered");
+    ''')
+    assert result["sameContract"] == ["B"]
+    assert result["allPools"] == ["A", "B"]
