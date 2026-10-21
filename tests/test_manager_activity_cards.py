@@ -61,3 +61,27 @@ def test_valid_hard_activity_keeps_hard_card(world, monkeypatch):
 def test_explicit_soft_does_not_turn_into_hard_access(world, monkeypatch):
     with pytest.raises(aio_web.HTTPNotFound):
         card(monkeypatch, employee='H1', team=['H1'], mode='soft')
+
+
+@pytest.mark.parametrize('mode', ['hard', 'soft', ''])
+def test_activity_account_name_resolves_explicit_soft_portfolio(world, monkeypatch, mode):
+    import staff_roster
+    items = [{'employee': 'S1', 'products': ['hard', 'soft'],
+              'product_names': {'hard': 'S1', 'soft': 'S1 SOFT'}}]
+    checked = staff_roster.preview(items)
+    staff_roster.apply(items, checked['sha256'], by='synthetic')
+    with db.connect() as conn:
+        conn.execute("UPDATE clients SET responsible_soft='S1 SOFT' WHERE responsible_soft='S1'")
+    data = card(monkeypatch, mode=mode, team=['S1', 'S1 SOFT'])
+    assert data['profile'] == 'soft' and data['employee'] == 'S1 SOFT'
+    assert {r['contract_id'] for r in data['contracts']} == {'A', 'B'}
+    # Being able to name the base account cannot grant its other portfolio.
+    with pytest.raises(aio_web.HTTPNotFound):
+        card(monkeypatch, mode=mode, team=['S1'])
+
+
+def test_activity_does_not_guess_soft_suffix(world, monkeypatch):
+    with db.connect() as conn:
+        conn.execute("UPDATE clients SET responsible_soft='S1 SOFT'")
+    with pytest.raises(aio_web.HTTPNotFound):
+        card(monkeypatch, team=['S1', 'S1 SOFT'])

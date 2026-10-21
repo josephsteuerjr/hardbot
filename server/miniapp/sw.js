@@ -14,7 +14,7 @@
  * после этого не нужно: открытие по сети кладёт оболочку обратно (network-first ниже),
  * свои ассеты — при первом запросе (caches.open создаёт кэш заново).
  */
-const CACHE = "hard-shell-v102";
+const CACHE = "hard-shell-v103";
 let cacheEnabled=true,cacheEpoch=0;
 const cacheWrites=new Set();
 function remember(key,response){

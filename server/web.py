@@ -4216,28 +4216,31 @@ async def _card_read_gate(request: web.Request) -> tuple[int, dict, list[str]]:
 async def _manager_person(request: web.Request) -> web.Response:
     uid, mgr, team = await _card_read_gate(request)
     iso, today, prev, nxt = _manager_date(request)
+    account_team = team
     team = _day_team(mgr, team, iso)
-    emp = _manager_employee_q(request, team)
+    emp = _manager_employee_q(request, sorted(set(team) | set(account_team)))
     rep = (request.query.get("rep") or "").strip()
     row = db.get_client(rep)
     mode = request.query.get('mode')
-    by_soft = bool(row and (mode == 'soft' or mode != 'hard' and
-                           row["responsible_soft"] == emp and row["responsible"] != emp))
     current_only = request.query.get('current_portfolio') == '1'
-    # Older desktop activity screens label non-call events as Hard, including
-    # Soft card views and receipts. Resolve that presentation hint only when
-    # Hard grants no access and Soft independently grants access. An explicit
-    # current-portfolio request must still match its selected profile exactly.
-    if (row and not by_soft and not current_only and row['responsible'] != emp
-            and not db.employee_visited(emp, [rep])):
-        by_soft = row['responsible_soft'] == emp or db.employee_called(emp, [rep])
-    # Свой должник — или тот, к кому сотрудник выезжал до перезакрепления:
-    # карточка по собственному выезду открываться обязана.
-    if not row or (by_soft and row["responsible_soft"] != emp and not db.employee_called(emp, [rep])) or (
-            not by_soft and row["responsible"] != emp and not db.employee_visited(emp, [rep])):
+    # The activity actor uses the account name; its Soft portfolio may have an
+    # explicitly configured different name. Resolve only roster mappings that
+    # are independently in this manager's scope, never infer aliases by suffix.
+    import staff_roster
+    hard_emp = staff_roster.product_employee(emp, 'hard')
+    soft_emp = staff_roster.product_employee(emp, 'soft')
+    hard_ok = bool(row and hard_emp in team and (row['responsible'] == hard_emp or
+                   not current_only and db.employee_visited(hard_emp, [rep])))
+    soft_ok = bool(row and soft_emp in team and (row['responsible_soft'] == soft_emp or
+                   not current_only and db.employee_called(soft_emp, [rep])))
+    # Old activity clients label non-call events Hard. Keep that hint when it
+    # grants access, otherwise resolve an authorized Soft card. Explicit current
+    # portfolio and explicit Soft requests keep their selected profile.
+    by_soft = mode == 'soft' or (not hard_ok and soft_ok and
+                                 (mode != 'hard' or not current_only))
+    if not (soft_ok if by_soft else hard_ok):
         raise web.HTTPNotFound(text="person")
-    if current_only and row['responsible_soft' if by_soft else 'responsible'] != emp:
-        raise web.HTTPNotFound(text='person')
+    emp = soft_emp if by_soft else hard_emp
     data = digest_data.person_data(mgr, iso, emp, rep, employees=team, by_soft=by_soft, current_only=current_only)
     if data is None:
         raise web.HTTPNotFound(text="person")
@@ -4636,19 +4639,33 @@ async def _manager_app_revoke(request: web.Request) -> web.Response:
                               "revoked": revoked, "scope": scope})
 
 
+def _visit_plan_updates(plan) -> dict[str, int]:
+    """Validate the whole edit before writing any employee's norm."""
+    if not isinstance(plan, dict):
+        raise web.HTTPBadRequest(text='plan')
+    result = {}
+    for employee, norm in plan.items():
+        text = str(norm).strip() if norm is not None else ''
+        if text == '':
+            value = 0
+        elif not re.fullmatch(r'[0-9]{1,3}', text) or int(text) > 100:
+            raise web.HTTPBadRequest(text='Норма: целое число от 1 до 100; 0 или пусто — общая')
+        else:
+            value = int(text)
+        result[str(employee).strip()] = value
+    return result
+
+
 async def _manager_plan(request: web.Request) -> web.Response:
     """Нормы выездов команды: GET — список, POST {plan:{ФИО: норма}} — записать.
 
-    Правит РУКОВОДИТЕЛЬ прямо из приложения: офис делит выездников на группы
-    8/10/12 по фактической выработке, состав групп меняется чаще, чем выходят
-    выкладки. Чужих людей через эту ручку не тронуть — только свою команду.
+    Целое число 1–100, 0 возвращает общую норму. Чужих людей через эту
+    ручку не тронуть — только свою команду.
     """
     uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     if request.method == "POST":
         body = await request.json()
-        plan = body.get("plan")
-        if not isinstance(plan, dict):
-            raise web.HTTPBadRequest(text="plan")
+        plan = _visit_plan_updates(body.get("plan") if isinstance(body, dict) else None)
         allowed = set(team)
         changed = []
         for employee, norm in plan.items():
@@ -6853,9 +6870,7 @@ async def _admin_visit_plan(request: web.Request) -> web.Response:
     """Нормы выездов из пульта: POST {plan:{ФИО: норма}}; 0 — вернуть к общей."""
     await asyncio.to_thread(_admin, request)
     body = await request.json()
-    plan = body.get("plan")
-    if not isinstance(plan, dict):
-        raise web.HTTPBadRequest(text="plan")
+    plan = _visit_plan_updates(body.get("plan") if isinstance(body, dict) else None)
     for employee, norm in plan.items():
         db.set_visit_plan(str(employee), norm)
     await asyncio.to_thread(db.audit_access, 0, "visit_plan", detail=f"changed={len(plan)}")

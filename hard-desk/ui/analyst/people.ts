@@ -40,9 +40,8 @@ async function rolesTab(root: HTMLElement) {
   const list = (emps.employees || []) as any[];
   const cities: Record<string, string> = offices.cities || {};
   const known: string[] = offices.known || [];
-  const groups: number[] = emps.plan_groups || [8, 10, 12];
   const tab = root.querySelector<HTMLElement>("#tab")!;
-  tab.innerHTML = `${note("«Офис» — где сидит сам сотрудник (Душанбе, Худжанд, Ташкент…): по нему считается штат руководителя города. «Норма» — выездов в день: от неё план в сводке. Сохраняется сразу по выбору.")}
+  tab.innerHTML = `${note("«Офис» — где сидит сам сотрудник (Душанбе, Худжанд, Ташкент…): по нему считается штат руководителя города. «Норма» — целое число выездов в день от 1 до 100; пустое поле возвращает общую норму. Сохраняется после ввода.")}
     <datalist id="offices">${known.map((k) => `<option value="${esc(k)}">`).join("")}</datalist>
     <div id="roles-tbl" style="margin-top:10px"></div>`;
   const cols: Col<any>[] = [
@@ -51,7 +50,7 @@ async function rolesTab(root: HTMLElement) {
     { key: "office", title: "Офис", value: (e) => cities[e.employee] || "",
       html: (e) => `<input class="input" list="offices" data-office value="${esc(cities[e.employee] || "")}" placeholder="не задан" style="width:150px;height:32px">` },
     { key: "plan", title: "Норма", value: (e) => (e.plan_personal ? String(e.plan) : "общая"),
-      html: (e) => `<select class="input" data-plan style="height:32px"><option value="0">общая</option>${groups.map((g) => `<option value="${g}" ${e.plan_personal && e.plan === g ? "selected" : ""}>${g}</option>`).join("")}</select>` },
+      html: (e) => `<input class="input" type="number" min="1" max="100" step="1" inputmode="numeric" data-plan value="${e.plan_personal ? esc(e.plan) : ""}" placeholder="общая ${esc(emps.plan_common || 10)}" aria-label="Норма выездов: ${esc(e.employee)}" style="width:115px;height:32px">` },
     { key: "kind", title: "Тип", value: (e) => (e.kind === "courier" ? "Курьер ГПХ" : "Выездник"),
       html: (e) => `<select class="input" data-kind style="height:32px"><option value="agent">Выездник</option><option value="courier" ${e.kind === "courier" ? "selected" : ""}>Курьер ГПХ</option></select>` },
     { key: "bound", title: "Вход", value: (e) => (e.telegram_id ? "привязан" : "не назначен"),
@@ -69,10 +68,17 @@ async function rolesTab(root: HTMLElement) {
         cities[emp] = city;
         toast(city ? `${emp}: офис ${city}` : `${emp}: офис снят`);
       }));
-      const plan = tr.querySelector<HTMLSelectElement>("[data-plan]")!;
+      const plan = tr.querySelector<HTMLInputElement>("[data-plan]")!;
       plan.addEventListener("change", guard(async () => {
-        await adm("POST", "/admin/visit_plan.json", { plan: { [emp]: Number(plan.value) } });
-        toast(Number(plan.value) ? `${emp}: норма ${plan.value} в день` : `${emp}: норма общая`);
+        if (!plan.reportValidity()) return;
+        const value = plan.value === "" ? 0 : Number(plan.value);
+        plan.disabled = true;
+        try {
+          await adm("POST", "/admin/visit_plan.json", { plan: { [emp]: value } });
+          const row = list.find((e) => e.employee === emp);
+          if (row) { row.plan_personal = value > 0; row.plan = value || emps.plan_common || 10; }
+          toast(value ? `${emp}: норма ${value} в день` : `${emp}: норма общая`);
+        } finally { plan.disabled = false; }
       }));
       tr.querySelector("[data-link]")!.addEventListener("click", guard(() =>
         issueLink({ employee: emp, kind: tr.querySelector<HTMLSelectElement>("[data-kind]")!.value })));

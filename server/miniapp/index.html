@@ -1417,6 +1417,7 @@ async function updateOffBar(){
   if(generation!==WIPE_GEN)return;
   e.className="offbar on";
   e.innerHTML=`<span class="d"></span><span>${esc(msg)}</span>`+
+    (off?`<button class="offact" onclick="resumeProfile()">${esc(t.retry||"Повторить")}</button>`:"")+
     (rejected.length?`<button class="offact" onclick="showQueueProblems()">${esc(recoveryText('review'))}</button>`:"")+
     (failed?`<button class="offact" onclick="retakeFailedPhoto()">${esc(t.retake)}</button>`:"")+
     (UPDATE_READY?`<button class="offact" onclick="reloadForUpdate()">${esc(t.updbtn)}</button>`:"");
@@ -1505,7 +1506,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=102;
+const SHELL_VERSION=103;
 let LOGIN_GPS=null;
 const ORIGINAL_FETCH=window.fetch.bind(window);
 window.fetch=async(input,init)=>{
@@ -3890,7 +3891,14 @@ async function upPhoto(id, live){
   // самостоятельные ArrayBuffer'ы, не File/Blob path.
   const prepared=[];
   try{
-    for(const f of files){
+    // Materialize every picker file before decoding, EXIF, GPS or network.
+    // iOS may revoke its native file handle while another await is pending.
+    const captured=await Promise.allSettled(files.map(async f=>({
+      name:f.name, file:new Blob([await (f.arrayBuffer?f.arrayBuffer():new Response(f).arrayBuffer())],
+                                {type:f.type||"image/jpeg"})})));
+    for(const result of captured){
+      if(result.status!=="fulfilled"){toast(L().photolost);continue;}
+      const f=result.value.file;
       try{
         // EXIF — ПЕРВЫМ: shrinkPhoto стирает метаданные без следа и без лога.
         // Таймаут: медленное чтение не должно расширять окно, в котором файл
@@ -3904,7 +3912,7 @@ async function upPhoto(id, live){
         exif.sm=small?1:0;   // «пережато/оригинал»: у HEIC-оригинала разбор возможен позже
         prepared.push({bytes:await photoBytes(small||f),
                        mime:small?"image/jpeg":(f.type||"image/jpeg"),
-                       ext:small?".jpg":photoExt(f.name,f.type), exif});
+                       ext:small?".jpg":photoExt(result.value.name,f.type), exif});
       }catch(e){ toast(L().photolost); }
     }
     try{ el.value=""; }catch(e){}
@@ -4857,7 +4865,12 @@ window.addEventListener("pageshow", e=>{if(e.persisted)void resumeProfile();else
 setInterval(async()=>{
   if(document.hidden||!cacheCredential())return;
   if(!await enforceRetention())return;
-  if(await pendingCount())void flushQueue();
+  if(STATE.online===false){
+    // An empty queue still needs a probe: a transient identity failure must
+    // not leave the phone labelled offline until the ten-minute refresh.
+    if(await ensureAccess(true)){void refreshData();void flushQueue();}
+    void updateOffBar();
+  }else if(await pendingCount())void flushQueue();
 },20000);
 
 // Another tab may replace or remove the shared bearer while this tab still
@@ -6126,6 +6139,9 @@ function dgPlanScreen(j,b){
   const allBlock=emps.length?`<div class="card" style="padding:10px;margin-top:8px">
       <div class="pname">Всем сразу</div>
       <div class="chips" style="margin-top:6px">${allChips}</div>
+      <div style="display:flex;gap:8px;margin-top:8px;align-items:center"><label for="dgplanall">Выездов в день</label>
+        <input id="dgplanall" class="input" type="number" min="1" max="100" step="1" inputmode="numeric" style="width:90px" aria-label="Норма всей команде">
+        <button class="btn line" onclick="dgPlanInput(-1)">Применить всем</button></div>
       <div class="muted" style="font-size:12px;margin-top:4px">одна норма каждому в команде; «сбросить» — у всех снова общая</div></div>`:"";
   const rows=emps.map((e,i)=>{
     const chips=groups.map(n=>`<button class="chip${e.plan===n?" on":""}"
@@ -6136,6 +6152,9 @@ function dgPlanScreen(j,b){
     // одним тапом убрано 02.10: на проде его нажимали, и Penetration уезжал.
     return `<div class="card" style="padding:10px;margin-top:8px">
       <div class="pname">${esc(e.employee)}</div>
+      <div style="display:flex;gap:8px;margin-top:8px;align-items:center"><label for="dgplan${i}">Выездов в день</label>
+        <input id="dgplan${i}" class="input" type="number" min="1" max="100" step="1" inputmode="numeric"
+          value="${e.personal?e.plan:""}" placeholder="общая ${j.common}" style="width:110px" onchange="dgPlanInput(${i})"></div>
       <div class="chips" style="margin-top:6px">${chips}</div>
       ${e.suggested?`<div class="muted" style="font-size:12px;margin-top:4px">📐 по расчёту ${e.suggested} в день${e.why?" — "+esc(e.why):""} — эксперимент, план не меняет</div>`:""}</div>`;
   }).join("");
@@ -6146,6 +6165,13 @@ function dgPlanScreen(j,b){
     allBlock+
     (rows||`<div class="center">Команда пуста</div>`)+
     `<div id="dgplanmsg" class="muted" style="margin-top:10px;font-size:12px"></div>`;
+}
+function dgPlanInput(i){
+  const input=$(i<0?"dgplanall":"dgplan"+i);
+  if(!input||!input.reportValidity())return;
+  if(i<0&&input.value===""){input.focus();return;}
+  const norm=input.value===""?0:Number(input.value);
+  if(i<0)void dgSetPlanAll(norm);else void dgSetPlan(i,norm);
 }
 async function dgSetPlanAll(norm){
   const j=DG.plan||{}, emps=j.employees||[];
