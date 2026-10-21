@@ -104,8 +104,10 @@ def test_a_stranger_from_another_team_is_skipped_not_fatal(monkeypatch):
 
 
 def test_garbage_norm_does_not_break_the_map(monkeypatch):
-    _call("POST", {"plan": {EMP_A: "двенадцать"}}, monkeypatch)
-    assert db.visit_plan_map() == {}, "мусор — это «нет личной нормы»"
+    _call("POST", {"plan": {EMP_A: 13}}, monkeypatch)
+    with pytest.raises(web.web.HTTPBadRequest):
+        _call("POST", {"plan": {EMP_A: "двенадцать"}}, monkeypatch)
+    assert db.visit_plan_map() == {EMP_A:13}, "ошибка ввода не стирает сохранённую норму"
 
 
 def test_bad_body_is_400(monkeypatch):
