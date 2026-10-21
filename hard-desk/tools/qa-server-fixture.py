@@ -55,6 +55,7 @@ if not metadata.exists():
         assert enrolled
         uid, device_id, token = enrolled
         tokens[role] = {'token': token, 'id': device_id, 'telegram_id': uid, 'name': 'Synthetic ' + role, 'role': role}
+        phone_tokens[role] = db.redeem_app_link(db.create_app_link(uid), agent='android')
         login_links[role] = db.create_app_link(uid)
     metadata.write_text(json.dumps({'tokens': tokens, 'phone_tokens': phone_tokens, 'login_links': login_links}, ensure_ascii=False), encoding='utf8')
 config = json.loads(metadata.read_text(encoding='utf8'))
