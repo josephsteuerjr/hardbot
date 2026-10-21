@@ -19,6 +19,7 @@ const functions = [
   'accountLogout', 'askLogout', 'logoutNow', 'renderLangs', 'absorbTokenFromUrl', 'renderPending',
   'checkPending', 'refreshData', 'boot', 'authHeaders', 'cacheCredential',
   'onAuthRejected', 'handleAuthGone', 'pendingToken', 'setPendingToken',
+  'purgeProfile', 'resumeProfile',
 ];
 const declarations = ['OUT_KEY', 'LS_KEEP'].map(name => {
   const line = html.match(new RegExp(`^const ${name}=.*;$`, 'm'));
@@ -32,6 +33,7 @@ function storage() {
     getItem: {value: k => Object.hasOwn(s, k) ? s[k] : null},
     setItem: {value: (k, v) => { s[k] = String(v); }},
     removeItem: {value: k => { delete s[k]; }},
+    clear: {value:()=>{for(const k of Object.keys(s))delete s[k];}},
   });
   return s;
 }
@@ -41,7 +43,7 @@ function page({stored = storage(), hash = '', responses = [], fetchResponses = [
   const listeners = {window: {}, document: {}};
   const queue = responses.slice();
   const replies = fetchResponses.slice();
-  const app = {innerHTML: '', classList: {toggle() {}}};
+  const app = {innerHTML: '', style:{}, classList: {toggle() {}}};
   const langs = {innerHTML: ''};
   const nav = {classList: {contains: () => false}};
   const element = id => {
@@ -80,11 +82,14 @@ function page({stored = storage(), hash = '', responses = [], fetchResponses = [
       if (!replies.length) throw Error('offline');
       return replies.shift(); },
     AbortController, setTimeout, clearTimeout,
+    RETENTION_TIMER:null, ACCESS_VERIFIED:0, ACCESS_CREDENTIAL:'',
+    enforceRetention:async()=>true, mobileProfile:()=>false,
+    PURGING:null, POLICY_NOTICE:'', ensureAccess:async()=>true,
     TG: null, DRAIN: null, NAV: {session: null, buf: []}, PhotoAudit: {free() {}},
     dayStop() {}, exitNav() {}, stopAutoSync() {}, prStop() {}, closePick() {},
     stampQueueOwners: async () => {}, 
     updateOffBar() {}, dayDrainQueue() {}, stopNavWatch() {},
-    IDB: {clear: async () => { calls.wipe++; }}, caches: {keys: async () => [], delete: async () => true},
+    IDB: {clear: async () => { calls.wipe++; }, count:async()=>0}, caches: {keys: async () => [], delete: async () => true},
     draftTimer: null, draftDirty: false,
     checkShellVersion() {}, geoProbe() {}, tgGeoInit() {},
     storedMode: () => 'field', personalizeManifest() {}, stampTokenUrl() {}, offerSwap() {},
@@ -136,7 +141,7 @@ function page({stored = storage(), hash = '', responses = [], fetchResponses = [
   assert.match(flow.app.innerHTML, /onclick="checkPending\(\)"/);
   // Register and fire the production visibility listener: a thawed installed PWA
   // must notice approval even though the last explicit check was seconds ago.
-  const visibilityListener = html.match(/^document\.addEventListener\("visibilitychange", \(\)=>\{ if\(!document\.hidden\)\{ flushQueue\(\); checkShellVersion\(\); refreshData\(\); \} \}\);$/m);
+  const visibilityListener = html.match(/^document\.addEventListener\("visibilitychange",.*resumeProfile.*$/m);
   assert(visibilityListener, 'production visibility listener exists');
   flow.run(visibilityListener[0]);
   flow.listeners.document.visibilitychange();

@@ -17,7 +17,7 @@ const names = ['appToken', 'cacheCredential', 'offlineLeaseValid', 'cacheBootstr
   'enqueue', 'stampQueueOwners', 'queueBelongs', 'updateOffBar', 'wipeDevice',
   'submitSavedOperation', 'flushQueue',
   'tokenMark', 'markTokenOut', 'tokenIsOut', 'clearPendingToken', 'pendingToken',
-  'setPendingToken', 'cleanHashFromUrl', 'onAuthRejected', 'clearLocalData', 'boot', 'sharedLoginChanged',
+  'setPendingToken', 'cleanHashFromUrl', 'onAuthRejected', 'purgeProfile', 'clearLocalData', 'boot', 'sharedLoginChanged',
   'ownedDraftKey', 'currentUid', 'draftKey', 'loadDraft', 'formVisible', 'saveDraft', 'flushDraft'];
 function storage() {
   const values = {};
@@ -25,6 +25,7 @@ function storage() {
     getItem: {value: k => values[k] ?? null},
     setItem: {value: (k, v) => { values[k] = String(v); }},
     removeItem: {value: k => { delete values[k]; }},
+    clear: {value:()=>{for(const k of Object.keys(values))delete values[k];}},
   });
   return values;
 }
@@ -33,6 +34,7 @@ function idb() {
   return {maps,
     get: async (s, k) => maps[s].get(k),
     all: async s => [...maps[s].values()],
+    count:async s=>maps[s].size,
     put: async (s, value, k, valid) => {
       if (valid && !valid()) return false;
       maps[s].set(k === undefined ? value.op_id : k, value);
@@ -64,6 +66,10 @@ function page({db = idb(), local = storage(), responses = []} = {}) {
     trackQueue: () => [], trackQueueSet() {}, exitNav() {}, stopAutoSync() {},
     prStop() {}, closePick() {}, closeAsk() {}, updateOffBar() {},
     clearTimeout() {}, draftTimer: null, draftDirty: false,
+    RETENTION_TIMER:null, ACCESS_VERIFIED:0, ACCESS_CREDENTIAL:'',
+    enforceRetention:async()=>true, mobileProfile:()=>false, confirmedContact:()=>0,
+    ensureAccess:async()=>true,
+    PURGING:null, POLICY_NOTICE:'',
     renderLangs() {}, hideBottomNav() {}, geoProbe() {}, tgGeoInit() {},
     checkShellVersion() {}, personalizeManifest() {}, stampTokenUrl() {}, offerSwap() {},
     storedMode: () => 'field', setMeta() {}, setBottomNav() {}, clientMetric() {},
@@ -109,7 +115,7 @@ async function settle() { await new Promise(r => setImmediate(r)); }
   p.run(`setPendingToken('B-token')`);
   p.ctx.api = async () => { throw Error('401'); };
   await p.run('boot()'); // A rejected, B staged and the installed manifest reloads.
-  assert.equal(db.maps.queue.get('A-unsent')._owner.uid, 'A-uid');
+  assert.equal(db.maps.queue.has('A-unsent'), false, 'revocation erases all mobile work under the current retention policy');
   assert.equal(db.maps.kv.has('bootstrap'), false);
   assert.equal(db.maps.cards.size, 0);
   assert.equal(p.local.getItem('app_token'), 'B-token');
@@ -138,6 +144,9 @@ async function settle() { await new Promise(r => setImmediate(r)); }
   assert.equal(await p.run(`loadCard('A-RECORD')`), null);
 
   // B can enter only after a successful server response, never by reusing A's cache.
+  // Independently test custody of a stranded legacy entry, rather than
+  // incorrectly expecting revocation to retain the previous mobile outbox.
+  db.maps.queue.set('A-unsent',{op_id:'A-unsent',kind:'note',rep:'A-RECORD',_owner:{uid:'A-uid',employee:'Person A'}});
   p.ctx.api = async () => B;
   await p.run('boot()'); await settle();
   assert.match(p.app.innerHTML, /B-private/);
@@ -150,8 +159,9 @@ async function settle() { await new Promise(r => setImmediate(r)); }
   assert.equal(p.calls.sent,0,'production flush cannot send A work under B');
   assert.equal(db.maps.queue.get('A-unsent').failed,'server-owner');
 
-  // Same person, rotated bearer: offline B is denied until B has been validated,
-  // then B's new cache works offline and A's labelled queue stays available.
+  // Same person, rotated bearer: the rejected profile is erased even when
+  // a later validated login reports the same UID. Offline access still needs
+  // a server-validated snapshot for the new credential.
   local.setItem('app_token', 'A-token');
   const same = page({db: idb(), local, responses: [A]});
   same.ctx.flushQueue=()=>{}; // keep the renewal test focused on cache/queue custody
@@ -170,9 +180,8 @@ async function settle() { await new Promise(r => setImmediate(r)); }
   renewed.ctx.flushQueue=()=>{};
   await renewed.run('boot()'); assert.match(renewed.app.innerHTML, /No offline portfolio/);
   await renewed.run('boot()'); await settle();
-  assert.equal(renewed.db.maps.queue.get('A-rotation-work')._owner.uid,'A-uid');
-  assert.equal(renewed.run(`queueBelongs(${JSON.stringify(renewed.db.maps.queue.get('A-rotation-work'))})`),true,
-    'a verified renewal by the same UID can recover that UID\'s original work');
+  assert.equal(renewed.db.maps.queue.has('A-rotation-work'),false,
+    'a new credential must not resurrect work erased after revocation');
   renewed.ctx.api = async () => { throw Error('offline'); };
   await renewed.run('boot()'); assert.match(renewed.app.innerHTML, /A-private/);
 
