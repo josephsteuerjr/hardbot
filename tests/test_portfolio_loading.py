@@ -155,7 +155,7 @@ def test_version_probe_bypasses_auth_and_every_cache():
     assert index_response.headers["X-Hardbot-Shell-Version"] == str(web._shell_version())
     assert 'fetch("/version.json", {cache:"no-store"})' in INDEX
     assert 'url.pathname === "/version.json"' in SW
-    assert 'fetch(req, {cache: "no-store"})' in SW
+    assert 'fetch(req,{cache:"no-store",signal:ctl.signal})' in SW
 
 
 def test_bootstrap_and_cards_report_server_timing_and_compress():

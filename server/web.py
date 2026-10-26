@@ -1031,8 +1031,11 @@ async def _bootstrap(request: web.Request) -> web.Response:
             # pending_kind различает ОЖИДАНИЕ АККАУНТА (вход по логину-паролю
             # ждёт администратора) и ОЖИДАНИЕ ПРИВЯЗКИ (второе устройство на
             # ФИО): телефону нужны разные тексты, не тексты заявки привязки.
+            found = await asyncio.to_thread(_account_device_of_request, request)
+            password_review = await asyncio.to_thread(_account_password_review, found[1]) if found else False
             return web.json_response({"ok": True, "pending": True, "uid": 0,
-                                      "pending_kind": "account",
+                                      "pending_kind": "password_review" if password_review else "account",
+                                      "password_review_pending": password_review,
                                       "lang": lang_of(0), "employee": awaiting})
         raise web.HTTPUnauthorized(text="auth")
     await asyncio.to_thread(_remember_from_init, request)     # вход в приложение — тоже знакомство
@@ -4890,6 +4893,31 @@ async def _manager_stats_xlsx(request: web.Request) -> web.Response:
                  "Cache-Control": "no-store"})
 
 
+async def _manager_promise_report(request: web.Request) -> web.Response:
+    import promise_report
+    import promise_report_book
+    uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
+    try:
+        params = promise_report.parameters(request.query.get('from'),request.query.get('to'),
+            request.query.get('asof'),due=request.query.get('due',''),country=request.query.get('country',''))
+    except ValueError as error:
+        raise web.HTTPBadRequest(text=str(error)) from None
+    team = await asyncio.to_thread(_range_team,mgr,team,{'from':params['from_date'],'to':params['to_date']})
+    employee = request.query.get('employee','').strip()
+    if employee and employee not in team:
+        raise web.HTTPNotFound(text='employee')
+    data = await asyncio.to_thread(promise_report.data,mgr,params,[employee] if employee else team)
+    is_excel = request.path.endswith('.xlsx')
+    await asyncio.to_thread(db.audit_access,uid,'digest_export' if is_excel else 'digest_view',
+        detail=f"promise_report {params['from_date']}..{params['to_date']} asof={params['asof']} due={params['due']} ptp={data['totals']['ptp']}")
+    if not is_excel:
+        return _manager_json(data)
+    body = await asyncio.to_thread(promise_report_book.write,data)
+    return web.Response(body=body,content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition':f"attachment; filename=promises_{params['from_date']}_{params['to_date']}_asof_{params['asof']}.xlsx",
+                 'Cache-Control':'no-store'})
+
+
 # --- Пульт руководителя на компьютере (Пульты 2, 29.09.2026) -------------------
 # Вход ОДИН раз: ссылка входа руководителя (ключ) меняется на токен этого
 # компьютера, дальше пульт открывается сразу. Токен живёт до отзыва; отозванный
@@ -5403,6 +5431,59 @@ async def _account_pc_challenge(request):
     return web.json_response(result,status=200 if result.get('ok') else 400)
 
 
+async def _team_context(request, kind):
+    if kind == 'analyst':
+        await asyncio.to_thread(_admin, request)
+        actor = request.get('admin_device') or {}
+        principal = str(actor.get('account_approver') or actor.get('id') or 'operator')
+        return {'kind': kind, 'actor': 'analyst:' + principal, 'name': principal, 'writable': False}
+    if kind == 'manager':
+        uid, manager, team = await asyncio.to_thread(_manager_gate, request)
+        return {'kind': kind, 'actor': 'manager:' + str(uid), 'uid': uid,
+                'name': manager.get('name') or 'Руководитель', 'manager': manager, 'team': team,
+                'writable': db.manager_caps(manager.get('role'), is_owner=uid == ADMIN_ID)['team_links']}
+    uid, employee = await asyncio.to_thread(_auth, request)
+    if await asyncio.to_thread(db.get_manager, uid):
+        raise _json_error(web.HTTPForbidden, 'Используйте задачи руководителя.')
+    return {'kind': 'employee', 'actor': 'employee:' + str(uid), 'uid': uid, 'name': employee}
+
+
+async def _employee_board(request):
+    import team_work
+    analyst = request.path.startswith('/admin/')
+    context = await _team_context(request, 'analyst' if analyst else 'manager')
+    scope = {} if analyst else {'team': context['team'], 'manager': context['manager']}
+    try:
+        if request.method == 'POST':
+            body = await _json_object(request)
+            if not body:
+                raise ValueError('Проверьте данные сотрудника.')
+            result = await asyncio.to_thread(team_work.board_change, body, actor=context['actor'], **scope)
+        else:
+            result = await asyncio.to_thread(team_work.board, writable=analyst or context['writable'], **scope)
+        return web.json_response(result, headers={'Cache-Control': 'no-store'})
+    except ValueError as exc:
+        return web.json_response({'ok': False, 'error': str(exc)}, status=409, headers={'Cache-Control': 'no-store'})
+
+
+async def _staff_tasks(request):
+    import team_work
+    kind = 'analyst' if request.path.startswith('/admin/') else 'manager' if request.path.startswith('/api/manager/') else 'employee'
+    context = await _team_context(request, kind)
+    try:
+        if request.method == 'POST':
+            body = await _json_object(request)
+            if not body:
+                raise ValueError('Проверьте данные задачи.')
+            result = await asyncio.to_thread(team_work.task_change, body, context)
+        else:
+            task_id = int(request.query['id']) if 'id' in request.query else None
+            result = await asyncio.to_thread(team_work.task_list, context, task_id)
+        return web.json_response(result, headers={'Cache-Control': 'no-store'})
+    except ValueError as exc:
+        return web.json_response({'ok': False, 'error': str(exc)}, status=409, headers={'Cache-Control': 'no-store'})
+
+
 async def _account_staff(request):
     import staff_roster
     with db.connect() as conn:
@@ -5532,6 +5613,12 @@ async def _account_sessions(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "logins": rows})
 
 
+def _account_password_review(account_id):
+    with db.connect() as conn:
+        row=conn.execute('SELECT password_review_pending FROM accounts WHERE id=?',(account_id,)).fetchone()
+        return bool(row and row[0])
+
+
 async def _account_gps_request(request):
     found=await asyncio.to_thread(_account_device_of_request,request)
     if not found:raise _json_error(web.HTTPUnauthorized,'auth')
@@ -5563,10 +5650,12 @@ async def _manager_entered(request: web.Request) -> web.Response:
     own = db.get_binding(uid)
     if own:
         team_set.add(own)
-    rows = [r for r in rows if r["employee"] in team_set]
+    team_keys = {db._name_key(name) for name in team_set}
+    rows = [r for r in rows if db._name_key(r["employee"]) in team_keys]
     reviewable = await asyncio.to_thread(accounts.manager_reviewable, uid, is_owner=(uid == ADMIN_ID))
     for r in rows:
-        r["can_approve"] = r["username"] in reviewable
+        r["can_approve"] = r["username"] in reviewable and not r['password_review_pending']
+        r["can_reset_password"] = r["username"] in reviewable and not r['password_review_pending']
         r['can_request_phone'] = False
         if r.get("phone"):
             r["phone"] = {k: v for k, v in r["phone"].items() if k != "gps"}
@@ -5616,13 +5705,31 @@ async def _manager_account_approve(request: web.Request) -> web.Response:
     return web.json_response(result, status=200 if result.get("ok") else 404)
 
 
+async def _manager_account_reset(request: web.Request) -> web.Response:
+    uid, _mgr, _team = await asyncio.to_thread(_manager_gate, request)
+    body = await _json_object(request)
+    if not body or not all(isinstance(body.get(k), str) for k in ('username','password','operation_id')):
+        raise _json_error(web.HTTPBadRequest, 'body')
+    result = await asyncio.to_thread(accounts.manager_reset_password, uid, body['username'],
+                                    body['password'], body['operation_id'], is_owner=(uid == ADMIN_ID),
+                                    ip=_admin_peer(request))
+    return web.json_response(result, status=200 if result.get('ok') else 400,
+                             headers={'Cache-Control':'no-store'})
+
+
 async def _admin_accounts(request: web.Request) -> web.Response:
     await asyncio.to_thread(_admin, request)
     rows = await asyncio.to_thread(accounts.admin_accounts)
     actor = request.get("admin_device") or {}
     return web.json_response({"ok": True, "accounts": rows,
                               "approver": actor.get("account_approver") or "",
+                              "password_review_owner": await asyncio.to_thread(_password_review_owner, actor.get('account_approver') or ''),
                               "cutover_active": account_policy.strict()})
+
+
+def _password_review_owner(principal):
+    with db.connect() as conn:
+        return accounts._owner_approver(conn, 'principal:'+principal)
 
 
 async def _admin_account_action(request):
@@ -5708,14 +5815,18 @@ async def _admin_account_approve(request: web.Request) -> web.Response:
     if account_policy.strict():
         with db.connect() as conn:
             if body.get("username"):
-                _target = conn.execute("SELECT created_by FROM accounts WHERE username=?",
+                _target = conn.execute("SELECT created_by,password_review_pending FROM accounts WHERE username=?",
                                        (accounts.normalize_username(body["username"]),)).fetchone()
             elif body.get("device_id") is not None and type(body["device_id"]) is int:
                 _target = conn.execute("SELECT a.created_by FROM accounts a JOIN account_devices d "
                                        "ON d.account_id=a.id WHERE d.id=?", (body["device_id"],)).fetchone()
             else:
                 _target = None
-        if _target and _target["created_by"] == "self-registration":
+        # A completed password reset is an owner decision, separate from the
+        # manager's initial registration/device approval. approve_account checks
+        # the root-backed principal and completed personal password change.
+        password_review = bool(body.get("username") and _target and _target["password_review_pending"])
+        if _target and _target["created_by"] == "self-registration" and not password_review:
             raise _json_error(web.HTTPForbidden, "registration_requires_attested_request")
     if body.get("username"):
         result = await asyncio.to_thread(accounts.approve_account,
@@ -7783,6 +7894,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/manager/binds", _manager_binds)
     app.router.add_get("/api/manager/cases", _manager_cases)
     app.router.add_get("/api/manager/stats.xlsx", _manager_stats_xlsx)
+    app.router.add_get('/api/manager/promise_report', _manager_promise_report)
+    app.router.add_get('/api/manager/promise_report.xlsx', _manager_promise_report)
     app.router.add_post("/api/manager/device/enroll", _manager_device_enroll)
     app.router.add_post("/api/agent/device/enroll", _agent_device_enroll)
     app.router.add_post("/api/agent/device/logout", _agent_device_logout)
@@ -7791,12 +7904,19 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post('/api/account/gps_request',_account_gps_request)
     app.router.add_post('/api/account/pc_challenge',_account_pc_challenge)
     app.router.add_get('/api/account/staff',_account_staff)
+    for path in ('/admin/employee_board.json', '/api/manager/employee_board'):
+        app.router.add_get(path, _employee_board)
+        app.router.add_post(path, _employee_board)
+    for path in ('/admin/staff_tasks.json', '/api/manager/staff_tasks', '/api/staff_tasks'):
+        app.router.add_get(path, _staff_tasks)
+        app.router.add_post(path, _staff_tasks)
     app.router.add_get('/api/account/capabilities',_account_capabilities)
     app.router.add_post('/api/account/root_challenge',_account_root_challenge)
     app.router.add_get('/admin/staff_roster.json',_admin_staff_roster)
     app.router.add_post('/admin/staff_roster.json',_admin_staff_roster)
     app.router.add_post("/api/account/login", _account_login)
     app.router.add_post("/api/manager/account_approve", _manager_account_approve)
+    app.router.add_post("/api/manager/account_reset", _manager_account_reset)
     app.router.add_post("/api/manager/account_phone_request", _manager_phone_request)
     app.router.add_post("/api/account/password", _account_password)
     app.router.add_get("/api/account/sessions", _account_sessions)

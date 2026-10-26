@@ -23,6 +23,16 @@ WORKDIR /app
 # каталога обрывает сборку. Так одна и та же строка работает в обоих случаях.
 COPY requirements.txt wheelhous[e]/ /build/
 ARG PIP_FLAGS=""
+# pip содержит собственный certifi. Проверенный hash защищает начальную установку;
+# для офлайн-сборки колесо pip приходит в wheelhouse вместе с requirements.
+RUN if [ -f /build/pip-26.2.2-py3-none-any.whl ]; then \
+      python -m pip install --no-index --no-deps /build/pip-26.2.2-py3-none-any.whl; \
+    else \
+      python -m pip install --no-cache-dir --no-deps "pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70"; \
+    fi
+# Удаляем также системные цепочки доверия к отозванным eMudhra CA.
+RUN sed -i -E '/^[^#!].*\/(emSign_ECC_Root_CA_-_(G3|C3)|emSign_Root_CA_-_C1|Comodo_AAA_Services_root)\.crt$/s/^/!/' /etc/ca-certificates.conf \
+    && update-ca-certificates
 RUN pip install --no-cache-dir ${PIP_FLAGS} -r /build/requirements.txt && rm -rf /build
 
 COPY . .

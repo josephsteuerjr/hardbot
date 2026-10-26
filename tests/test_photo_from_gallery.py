@@ -65,7 +65,7 @@ def test_photo_still_reaches_the_server_without_a_point():
     """Отсутствие точки не должно мешать самому фото доехать."""
     assert "if(geo) h[\"X-Photo-Geo\"]" in INDEX, "заголовок ставится только при наличии точки"
     i = INDEX.index("async function sendPhoto(")
-    body = INDEX[i:i + 2000]
+    body = INDEX[i:INDEX.index("\n}", i)]
     assert 'fetch("/api/photo?rep="' in body
     # photoHeaders получил третий (опциональный) аргумент метаданных — якорь
     # устойчив к нему, а инвариант «гео едет заголовком» проверяется отдельно
@@ -91,8 +91,8 @@ def test_a_broken_file_does_not_swallow_the_rest_of_the_selection():
     """Один нечитаемый снимок из пяти не должен отменять остальные четыре."""
     i = INDEX.index("async function upPhoto(")
     body = INDEX[i:INDEX.index("async function sendPhoto(")]
-    assert "catch(e){ toast(L().photolost); }" in body
-    assert "catch(e){ toast(L().photolost); return; }" not in body
+    assert "Promise.allSettled(files.map" in body
+    assert 'if(result.status!=="fulfilled"){toast(L().photolost);continue;}' in body
 
 
 def test_hint_and_button_exist_in_all_three_languages():

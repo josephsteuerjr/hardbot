@@ -9,6 +9,7 @@ import { showIssued } from "../kit/issued";
 import { copyLink, linkQuota, linkStatus, usableLink } from "../kit/login-links";
 import { openPerson, problem, rangeChips, rangeQuery, staleNote, wireRange, type Range } from "./common";
 import { go, hasSection } from "../kit/shell";
+import { mountPromiseReport } from "./promise-report";
 
 let promisesSequence = 0;
 const promiseProfileKey = "hard.manager-promises.profile";
@@ -82,10 +83,47 @@ function enteredCell(x: any, fallback: string): string {
 }
 
 const ENTERED_STATUS = (x: any) => (x.status === "active" ? "активен" : "ждёт подтверждения");
+let enteredQuery = "", enteredExpanded = false, enteredSelected = "";
+let enteredSequence = 0;
+
+function entryState(row: any): string {
+  if (row.password_review_pending) return row.must_change_password ? "Сотрудник меняет временный пароль" : "Пароль: ждёт владельца";
+  return ({active:"Доступ открыт",awaiting:"Ждёт подтверждения",disabled:"Доступ закрыт",blocked:"Заблокирован"} as Record<string,string>)[row.status] || row.status;
+}
+
+function enteredDetails(root: HTMLElement, row: any, accountSession: boolean): void {
+  enteredSelected=row.username;
+  const host=root.querySelector<HTMLElement>('#team-profile')!;
+  host.innerHTML=`<section class="section"><h3>${esc(row.employee)}</h3><dl class="kv"><dt>Логин</dt><dd>${esc(row.username)}</dd><dt>Офис</dt><dd>${esc(row.office||'—')}</dd><dt>Доступ</dt><dd>${esc(entryState(row))}</dd></dl>
+    ${['phone','desktop'].map(kind=>`<h4>${kind==='phone'?'Телефон':'Компьютер'}</h4>${(row.devices||[]).filter((d:any)=>d.kind===kind).map((d:any)=>`<div class="list-row"><div class="grow"><b>${esc(d.label||'Устройство')}</b><div class="sub">${d.status==='active'?'Подтверждён':'Ждёт подтверждения'}${d.last_seen?' · '+esc(ago(d.last_seen)):''}</div><div class="sub">${esc(d.client?(d.client.source==='pwa'?'Оболочка '+d.client.shell_version:'Версия '+d.client.client_version):'Версия пока не сообщалась')}</div></div></div>`).join('')||'<p class="muted">Нет заявки</p>'}`).join('')}
+    ${accountSession&&row.can_reset_password?'<button class="btn" data-team-reset>Сменить пароль</button>':''}
+    <div data-reset-form></div></section>`;
+  host.querySelector('[data-team-reset]')?.addEventListener('click',()=>{
+    const form=host.querySelector<HTMLElement>('[data-reset-form]')!;
+    const operationId='manager-reset-'+crypto.randomUUID();
+    form.innerHTML=`<form><p>Текущие входы будут закрыты. При проверке отзыва устройства удалят локальные данные и неотправленную работу. Сначала дождитесь отправки очередей. Передайте временный пароль сотруднику: он задаст личный, затем владелец подтвердит доступ.</p><label>Временный пароль<input class="input" type="password" autocomplete="new-password" minlength="8" required data-new-password></label><label>Повтор пароля<input class="input" type="password" autocomplete="new-password" minlength="8" required data-repeat-password></label><p data-reset-error role="status"></p><div class="toolbar"><button class="btn primary" type="submit">Сменить и передать на подтверждение</button><button class="btn" type="button" data-cancel>Отмена</button></div></form>`;
+    form.querySelector('[data-cancel]')!.addEventListener('click',()=>form.replaceChildren());
+    form.querySelector('form')!.addEventListener('submit',async event=>{
+      event.preventDefault();const input=form.querySelector<HTMLInputElement>('[data-new-password]')!,repeat=form.querySelector<HTMLInputElement>('[data-repeat-password]')!,error=form.querySelector<HTMLElement>('[data-reset-error]')!,button=form.querySelector<HTMLButtonElement>('[type=submit]')!;
+      if(input.value!==repeat.value){error.textContent='Пароли не совпадают.';return;}
+      if(button.disabled)return;button.disabled=true;error.textContent='';
+      try{
+        const response=await api('/api/manager/account_reset',undefined,'POST',{username:row.username,password:input.value,operation_id:operationId});
+        if(!response.ok||!response.data?.ok){error.textContent=response.data?.error||response.text||'Результат не подтверждён. Обновите список перед новой операцией.';return;}
+        input.value='';repeat.value='';toast('Пароль изменён. Доступ ожидает владельца.');await drawEntered(root,accountSession);
+      }catch(e){error.textContent='Результат не подтверждён. Обновите список; повтор этой операции безопасен.';}
+      finally{if(button.isConnected)button.disabled=false;}
+    });
+    form.querySelector<HTMLInputElement>('[data-new-password]')!.focus();
+  });
+  host.scrollIntoView({behavior:'smooth',block:'start'});
+}
 
 
 async function drawEntered(root: HTMLElement, accountSession: boolean): Promise<void> {
+  const sequence=++enteredSequence;
   const r=await api("/api/manager/entered");
+  if(!root.isConnected||sequence!==enteredSequence)return;
   if(!r.ok){ root.innerHTML=problem(r.text || "Список заявок не загрузился."); return; }
   const rows=(r.data?.entered || []).slice().sort((a:any,b:any)=>Number((b.devices||[]).some((d:any)=>d.status==='pending'))-Number((a.devices||[]).some((d:any)=>d.status==='pending')));
   const pending=rows.flatMap((x:any)=>(x.devices||[]).filter((d:any)=>d.status==='pending').map((d:any)=>({row:x,device:d})));
@@ -93,14 +131,25 @@ async function drawEntered(root: HTMLElement, accountSession: boolean): Promise<
     <div class="notice"><b>Как подтвердить вход</b><p>Сотрудник создаёт профиль или входит на телефоне либо в программе на ПК. Его заявка появится здесь. Сверьте ФИО и нажмите кнопку под заявкой.</p><p>Телефон можно подтвердить без предварительного ПК. Для компьютера лично проверьте сотрудника за этим ПК. Прежнее устройство того же вида будет отключено.</p></div>
     <h3>Ждут подтверждения: ${pending.length}</h3>
     <div id="entered-pending">${pending.length?pending.map(({row,device}:any)=>`<div class="list-row"><div class="grow"><b>${esc(row.employee)}</b><div class="sub">${esc(device.kind==='phone'?'Телефон':'Компьютер')} · ${esc(device.label||'')} · ${esc(row.office||'')}</div></div>${accountSession&&row.can_approve?`<button class="btn primary" data-device="${device.id}">Подтвердить ${device.kind==='phone'?'телефон':'ПК'}</button>`:'<span class="muted">Подтверждает свой руководитель</span>'}</div>`).join(''):'<p class="muted">Новых заявок нет. После регистрации или входа сотрудника нажмите «Обновить».</p>'}</div>
-    <button class="btn" id="entered-reload">Обновить</button><div id="entered-tbl"></div></div>`;
-  new DataTable<any>(root.querySelector("#entered-tbl")!,{id:"team-accounts",key:x=>x.username,exportName:"Регистрация команды",
-    cols:[{key:"employee",title:"Сотрудник",value:x=>x.employee},{key:"office",title:"Офис",value:x=>x.office},
-      {key:"status",title:"Доступ",value:x=>x.ready ? "Доступ подтверждён" : "Ожидает подтверждения"},
+    <div class="toolbar"><button class="btn" id="entered-reload">Обновить</button><input class="input" type="search" id="entered-search" aria-label="Поиск профиля" placeholder="ФИО, логин, офис или устройство" value="${esc(enteredQuery)}"></div><details id="entered-all" ${enteredExpanded||enteredQuery?'open':''}><summary>Все профили команды (${rows.length})</summary><div id="entered-tbl"></div></details><div id="team-profile"></div></div>`;
+  const table=new DataTable<any>(root.querySelector("#entered-tbl")!,{id:"team-accounts",key:x=>x.username,exportName:"Регистрация команды",externalSearch:true,
+    onRow:row=>enteredDetails(root,row,accountSession),
+    cols:[{key:"employee",title:"Сотрудник",value:x=>x.employee},{key:"username",title:"Логин",value:x=>x.username},{key:"office",title:"Офис",value:x=>x.office},
+      {key:"status",title:"Доступ",value:entryState},
       {key:"devices",title:"Устройства и заявки",value:x=>(x.devices||[]).map((d:any)=>d.label).join(", "),html:x=>(x.devices||[]).map((d:any)=>
         `<div class="list-row"><span>${esc(d.kind==="phone"?"Телефон":"Компьютер")}: ${esc(d.label)} · ${esc(d.status==="active"?"подтверждён":"ожидает")}</span>
           </div>`).join("")}
-    ]}).setRows(rows);
+      ,{key:'actions',title:'Профиль',value:()=>'',filter:false,html:x=>`<button class="btn small" data-team-profile="${esc(x.username)}">Открыть профиль</button>`}
+    ]});table.setRows(rows);table.setQuery(enteredQuery);
+  const full=root.querySelector<HTMLDetailsElement>('#entered-all')!;
+  full.addEventListener('toggle',()=>{enteredExpanded=full.open;});
+  root.querySelector<HTMLInputElement>('#entered-search')!.addEventListener('input',event=>{
+    enteredQuery=(event.target as HTMLInputElement).value;table.setQuery(enteredQuery);if(enteredQuery.trim())full.open=true;
+  });
+  root.querySelector('#entered-tbl')!.addEventListener('click',event=>{
+    const button=(event.target as HTMLElement).closest<HTMLElement>('[data-team-profile]');const row=button&&rows.find((x:any)=>x.username===button.dataset.teamProfile);if(row)enteredDetails(root,row,accountSession);
+  });
+  const selected=rows.find((x:any)=>x.username===enteredSelected);if(selected)enteredDetails(root,selected,accountSession);
   root.querySelector("#entered-reload")?.addEventListener("click",()=>void drawEntered(root,accountSession));
   root.querySelectorAll<HTMLButtonElement>("[data-device]").forEach(button=>button.addEventListener("click",async()=>{
     const id=Number(button.dataset.device), row=rows.find((x:any)=>(x.devices||[]).some((d:any)=>d.id===id));
@@ -119,7 +168,7 @@ async function drawEntered(root: HTMLElement, accountSession: boolean): Promise<
 
 export function links(accountSession: boolean): Section {
   return {id:"links",title:"Вход команды",icon:"links",kicker:"Регистрация и подтверждение устройств",
-    async render(root){root.innerHTML='<div class="skeleton"></div>';await drawEntered(root,accountSession);}};
+    async render(root){root.innerHTML='<div class="skeleton"></div>';await drawEntered(root,accountSession);},leave(){enteredSequence++;enteredSelected='';enteredQuery='';enteredExpanded=false;}};
 }
 
 
@@ -141,7 +190,8 @@ export function report(control: boolean): Section {
               <button class="btn primary" data-dl="stats">${icon("download")}Сформировать Excel</button></div>
             ${control ? `<div class="list-row"><div class="grow"><div class="nm">Контроль</div><div class="sub">риск по людям и итоги обзвона</div></div>
               <button class="btn" data-dl="control">${icon("download")}Скачать</button></div>` : ""}
-          </div>`;
+          </div><div id="promise-report"></div>`;
+        mountPromiseReport(root.querySelector<HTMLElement>('#promise-report')!);
         root.querySelector('[data-report-back]')?.addEventListener('click',()=>void go(context.returnTo.id,context.returnTo.params || {}));
         wireRange(root, rep.range, draw);
         for(const key of ['from','to'] as const)root.querySelector<HTMLInputElement>(`[data-report-${key}]`)?.addEventListener('change',event=>{

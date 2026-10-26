@@ -1507,6 +1507,8 @@ def init_db() -> None:
         import pc_registration
         staff_roster.init_schema(conn)
         pc_registration.init_schema(conn)
+        import team_work
+        team_work.init_schema(conn)
         import root_bootstrap
         root_bootstrap.init_schema(conn)
         # Роль в команде руководства: руководитель или безопасник (см. MANAGER_ROLES).
@@ -3650,17 +3652,33 @@ def visit_days_for_contracts(contract_ids, date_from: str, date_to: str) -> dict
 
 
 def last_payment_asof() -> str:
-    """Самая поздняя «Дата последнего платежа» в реестре (ISO) — по какой день
-    сводка вообще знает об оплатах. Реестр приходит импортом раз в день, и
-    «сегодня» оплат в нём ещё нет: без этой даты ноль выглядел бы провалом."""
-    best = None
+    """Latest non-future payment date; this is not a completeness watermark."""
+    return payment_data_freshness()['last_payment_date']
+
+
+def payment_data_freshness(on_date: str | None = None) -> dict:
+    """Separate successful import time from the dates written in payments.
+
+    Neither the latest payment nor an import timestamp proves that a full
+    day's bank statement has arrived. Future source dates remain in the DB.
+    """
+    today = _as_date(on_date) if on_date else workday.today()
+    if today is None:
+        raise ValueError('date')
+    best, future = None, 0
     with connect() as conn:
-        for (v,) in conn.execute("SELECT DISTINCT last_payment_date FROM clients "
-                                 "WHERE last_payment_date IS NOT NULL AND last_payment_date != ''"):
+        for v, count in conn.execute("SELECT last_payment_date,COUNT(*) FROM clients "
+                "WHERE last_payment_date IS NOT NULL AND last_payment_date != '' GROUP BY last_payment_date"):
             d = _as_date(v)
-            if d and (best is None or d > best):
+            if d and d > today:
+                future += count
+            elif d and (best is None or d > best):
                 best = d
-    return best.isoformat() if best else ""
+        imported = conn.execute("SELECT MAX(consumed_at) FROM import_receipts WHERE status='consumed'").fetchone()[0]
+        observed = conn.execute('SELECT MAX(observed_at) FROM registry_payments').fetchone()[0]
+    return {'last_payment_date': best.isoformat() if best else '',
+            'last_import_at': imported or '', 'last_payment_observed_at': observed or '',
+            'future_dated_rows': future, 'completeness_verified': False}
 
 
 def visit_authors(date_from: str, date_to: str) -> dict[str, set[str]]:

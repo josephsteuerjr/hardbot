@@ -15,6 +15,7 @@ import { mountDesktopTools } from "./kit/desktop-tools";
 import { control } from "./views/control";
 import { device, links, promises, report } from "./views/misc";
 import { team } from "./views/team";
+import { employeeBoard, staffTasks } from './views/team-work';
 import { onAdminLink, local } from "./analyst/lib";
 import { useAnalystCardTransport } from './analyst/card-access';
 import { today } from "./analyst/today";
@@ -43,7 +44,7 @@ async function startAnalyst() {
     return;
   }
   setWho(`<b>${esc(st.active || "")}</b>${esc(st.url || "адрес не задан")}`);
-  const list: Section[] = [today, people, managers, accounts, registry, priority,
+  const list: Section[] = [today, employeeBoard('analyst'), staffTasks('analyst'), people, managers, accounts, registry, priority,
                            // «Контроль» целиком (риск/обзвон/закрепления/доступ):
                            // аналитик смотрит ВСЮ компанию через устройство пульта.
                            controlSection(adminControlCall, false),
@@ -153,7 +154,7 @@ async function start() {
   }
   setWho(who ? `<b>${esc(who.name || "Руководитель")}</b>${esc(ROLE[who.role] || "")}${who.scope ? " · " + esc(who.scope) : ""}` : "");
   document.body.classList.add("desktop");
-  const list: Section[] = [managerCRM, teamPortfolio, workspace, activity, team, promises];
+  const list: Section[] = [managerCRM, employeeBoard('manager'), staffTasks('manager'), teamPortfolio, workspace, activity, team, promises];
   if (caps.control) list.push(control);
   if (caps.team_links) list.push(links(!!shell.device?.username &&
     (who?.role === "manager" || who?.role === "full")));
@@ -334,7 +335,7 @@ async function startAgent() {
     startError("У этого входа нет портфеля Софта. Откройте приложение «Хард» или проверьте назначение у руководителя.", startAgent); return;
   }
   setWho(`<b>${esc(who?.employee || "Сотрудник")}</b> · ${soft ? "Софт" : "Хард"}`);
-  const list: Section[] = soft ? [softQueue, ...softEmployeeSections, softHelp] : [portfolio, ...hardEmployeeSections, fieldHelp];
+  const list: Section[] = soft ? [softQueue, staffTasks('employee'), ...softEmployeeSections, softHelp] : [portfolio, staffTasks('employee'), ...hardEmployeeSections, fieldHelp];
   setSections(list);
   await go(soft ? "softqueue" : "portfolio");
   startHeartbeat(async () => {

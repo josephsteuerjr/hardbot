@@ -16,11 +16,33 @@ const st = {
   cols: null as any, colDecisions: [] as any[], scan: null as any,
   expEmps: [] as any[], expSel: new Set<string>(), expSince: "", expUntil: "",
   rec: null as any, recEmp: "",
+  busy: false, progress: "",
 };
+let activeRoot: HTMLElement | null = null;
+
+function showProgress(): void {
+  if (!activeRoot?.isConnected) return;
+  const status = activeRoot.querySelector<HTMLElement>('[data-registry-progress]');
+  if (status) { status.hidden = !st.busy; status.textContent = st.progress; }
+  activeRoot.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement>('#rtab input,#rtab textarea,#rtab select,#rtab button').forEach(control => {
+    if (st.busy) {
+      if (control.dataset.jobDisabled === undefined) control.dataset.jobDisabled = control.disabled ? '1' : '0';
+      control.disabled = true;
+    } else if (control.dataset.jobDisabled !== undefined) {
+      control.disabled = control.dataset.jobDisabled === '1'; delete control.dataset.jobDisabled;
+    }
+  });
+}
 
 /** Задача питон-стороны: ждём конца, журнал — в строку статуса. */
 async function job(path: string, body: unknown, log?: (s: string) => void): Promise<any> {
-  return runJob(path, body, log);
+  if (st.busy) throw new Error('Операция уже выполняется. Дождитесь её результата.');
+  st.busy = true; st.progress = 'Операция выполняется…'; showProgress();
+  try {
+    return await runJob(path, body, line => {
+      st.progress = line; showProgress(); log?.(line);
+    });
+  } finally { st.busy = false; showProgress(); }
 }
 
 function tabs(): string {
@@ -188,7 +210,10 @@ async function enrichTab(el: HTMLElement) {
     ${st.applyRes ? `<div class="section"><div class="section-head"><h2 class="section-title">Итог записи</h2></div>
       <pre style="white-space:pre-wrap;font:13px/1.5 var(--mono);color:var(--ink-2)">${esc((st.applyRes.lines || []).join("\n"))}</pre>
       ${st.applyRes.ledger_error ? `<div class="notice err"><span class="grow">${esc(st.applyRes.ledger_error)}</span><button class="btn small" data-replay>Повторить отправку из квитанции</button></div>` : ""}</div>` : ""}`;
-  const redraw = () => enrichTab(el);
+  const redraw = () => {
+    if (el.isConnected) return enrichTab(el);
+    if (activeRoot?.isConnected && st.tab === 'enrich') return draw(activeRoot);
+  };
   const win = () => { st.since = (el.querySelector("#e-since") as HTMLInputElement).value.trim(); st.until = (el.querySelector("#e-until") as HTMLInputElement).value.trim(); };
   el.querySelector("#e-since")?.addEventListener("change", () => { win(); st.check = null; });
   el.querySelector("#e-until")?.addEventListener("change", () => { win(); st.check = null; });
@@ -348,7 +373,8 @@ async function recalledTab(el: HTMLElement, limit = 500) {
 }
 
 async function draw(root: HTMLElement) {
-  root.innerHTML = `<div class="toolbar">${tabs()}</div><div id="rtab"><div class="skeleton"></div></div>`;
+  activeRoot = root;
+  root.innerHTML = `<div class="toolbar">${tabs()}</div><p class="notice" data-registry-progress role="status" hidden></p><div id="rtab"><div class="skeleton"></div></div>`;
   root.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach((b) => b.addEventListener("click", () => { st.tab = b.dataset.tab as typeof st.tab; void draw(root); }));
   const el = root.querySelector<HTMLElement>("#rtab")!;
   try {
@@ -360,6 +386,7 @@ async function draw(root: HTMLElement) {
   } catch (e) {
     el.innerHTML = `<div class="notice err"><span class="grow">${esc((e as Error).message)}</span></div>`;
   }
+  showProgress();
 }
 
 export const registry: Section = {

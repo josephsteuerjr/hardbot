@@ -40,13 +40,26 @@ export async function runJob(path: string, body: unknown, log?: (s: string) => v
   localStorage.setItem("hard:last-job", id);
   try {
     await local(path, { ...(body as object), request_id: id });
-  } catch (error) {
-    try { await local("/job", { id }); }
-    catch { throw new Fail(`Операция №${id}: ответ потерян. Проверьте журнал задач в «Подключении» перед повтором. ${String((error as Error).message || error)}`); }
+  } catch {
+    // A lost response can follow a committed start. Only read this UUID from now on.
+    log?.(`Проверяю состояние операции №${id} после потери ответа…`);
   }
   for (;;) {
     await new Promise(r => setTimeout(r, 700));
-    const j = await local("/job", { id });
+    let j: any;
+    try {
+      j = await local("/job", { id });
+    } catch (error) {
+      const message = String((error as Error).message || error);
+      if (/нет такой задачи|задача не найдена|ID задачи относится|другому контуру|другому.*запросу/i.test(message))
+        throw new Fail(`Операция №${id}: ${message}. Сверьте журнал задач перед повторным запуском.`);
+      log?.(`Восстанавливаю связь с операцией №${id}. Повторный запуск не выполняется.`);
+      continue;
+    }
+    if (!j || !["running", "done", "failed", "uncertain"].includes(j.state)) {
+      log?.(`Проверяю подтверждение операции №${id}…`);
+      continue;
+    }
     if (log && j.log?.length) log(j.log[j.log.length - 1]);
     if (j.state === "done") return j.result;
     if (["failed", "uncertain"].includes(j.state)) throw new Fail(`Операция №${id}: ${j.error || j.state}`);

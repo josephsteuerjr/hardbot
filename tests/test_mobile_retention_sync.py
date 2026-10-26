@@ -1,4 +1,4 @@
-"""Execute the shipped shell: mobile erasure and durable server acknowledgements."""
+"""Execute the shipped shell: preserved offline sessions and durable acknowledgements."""
 import pytest
 from shell_node import run_shell
 
@@ -16,40 +16,47 @@ const mobile={url:"https://hard.test/",userAgent:"Mozilla/5.0 (iPhone)",now:()=>
 
 
 @pytest.mark.parametrize("agent", ["iPhone", "Android"])
-@pytest.mark.parametrize("age", [14*3600000, 14*3600000+1, 20*3600000])
-def test_expired_mobile_cold_start_erases_before_any_authenticated_request(agent, age):
+@pytest.mark.parametrize("age", [14*3600000, 14*3600000+1, 20*3600000, 30*24*3600000, -3600000])
+def test_mobile_offline_sessions_survive_old_deadline_and_clock_changes(agent, age):
     out = run_shell(PRELUDE + f'''
 const w=world({age});
-const p=await openPage(w,{{...mobile,userAgent:{agent!r},server:fakeServer({{tokens:{{[A]:ME}}}})}});
-await p.booted();out.dump=w.dump();out.app=p.html("app");out.bar=p.html("offbar");out.requests=p.fetchLog;
+const p=await openPage(w,{{...mobile,userAgent:{agent!r},onLine:false,server:fakeServer({{tokens:{{[A]:"neterr"}}}})}});
+await p.booted();out.dump=w.dump();out.app=p.html("app");out.portfolio=p.html("plist");out.bar=p.html("offbar");out.requests=p.fetchLog;
 ''')
-    assert out["dump"]["queue"] == []
-    assert out["dump"]["cards"] == out["dump"]["kv"] == []
-    assert out["dump"]["caches"] == []
-    assert set(out["dump"]["ls"]) <= {"hb_out"}
-    assert out["dump"]["ss"] == {}
-    assert "Synthetic client" not in out["app"]
-    assert "14 часов" in out["bar"]
+    assert out["dump"]["queue"] == ["one"]
+    assert out["dump"]["cards"] == ["S1"]
+    assert "bootstrap" in out["dump"]["kv"]
+    assert out["dump"]["ls"]["app_token"] == "synthetic-test-token-aaaaaaaa"
+    assert out["dump"]["ls"]["hb_device_uuid"] == "synthetic-device"
+    assert out["dump"]["ls"]["draft:1:S1"] == "private draft"
+    assert "Synthetic client" in out["portfolio"]
+    assert 'id="loginuser"' not in out["app"]
+    assert "14 часов" not in out["bar"]
     assert "Всё синхронизировано" not in out["bar"]
-    assert not any(r["token"] == "synthetic-test-token-aaaaaaaa" for r in out["requests"])
 
 
-def test_mobile_offline_before_deadline_then_resume_erases_without_sending():
+def test_mobile_crosses_old_deadline_then_reconnects_and_sends_after_access_check():
     out = run_shell(PRELUDE + r'''
 const w=world(14*3600000-1),cfg={tokens:{[A]:"neterr"}};
 const p=await openPage(w,{...mobile,onLine:false,server:fakeServer(cfg)});await p.booted();
 out.before={dump:w.dump(),app:p.html("plist")};
-clock++;cfg.tokens[A]=ME;await p.run("resumeProfile()");await settle(w);
+clock+=7*24*3600000;await p.run("enforceRetention()");out.offline=w.dump();
+cfg.tokens[A]=ME;await p.run("resumeProfile()");await settle(w);
 out.after=w.dump();out.requests=p.fetchLog;out.bar=p.html("offbar");
 const again=await openPage(w,{...mobile,url:mobile.url+"#t="+A,server:fakeServer(cfg)});await again.booted();
-out.again=w.dump();out.againApp=again.html("app");
+out.again=w.dump();out.againApp=again.html("plist");
 ''')
     assert "Synthetic client" in out["before"]["app"]
     assert out["before"]["dump"]["queue"] == ["one"]
+    assert out["offline"]["queue"] == ["one"]
     assert out["after"]["queue"] == out["again"]["queue"] == []
-    assert "app_token" not in out["again"]["ls"]
-    assert "Synthetic client" not in out["againApp"]
-    assert not any(r["url"].startswith("/api/note") for r in out["requests"])
+    assert out["again"]["ls"]["app_token"] == "synthetic-test-token-aaaaaaaa"
+    assert out["again"]["ls"]["hb_device_uuid"] == "synthetic-device"
+    assert "Synthetic client" in out["againApp"]
+    identity = next(i for i, r in enumerate(out["requests"]) if r["url"].startswith("/api/identity"))
+    note = next(i for i, r in enumerate(out["requests"]) if r["url"].startswith("/api/note"))
+    assert identity < note
+    assert "Всё синхронизировано" in out["bar"]
 
 
 def test_desktop_web_does_not_apply_mobile_deadline():
@@ -62,14 +69,51 @@ await p.booted();out.dump=w.dump();out.app=p.html("plist");
     assert "Synthetic client" in out["app"]
 
 
-def test_reconnect_checks_revocation_before_sending_any_queued_operation():
+def test_mobile_cold_reopens_keep_account_session_and_device_identity():
     out = run_shell(PRELUDE + r'''
-const cfg={tokens:{[A]:"neterr"}},w=world(3600000);
+const w=world(1000,[]);w.ls.setItem("account_role","agent");
+let p=await openPage(w,{...mobile,server:fakeServer({tokens:{[A]:ME}})});await p.booted();
+const original=await p.run("deviceProfile().then(d=>d.fp)");out.reopens=[];
+for(const hours of [1,5,13]){
+  clock+=hours*3600000;
+  p=await openPage(w,{...mobile,server:fakeServer({tokens:{[A]:ME}})});await p.booted();
+  out.reopens.push({sameDevice:(await p.run("deviceProfile().then(d=>d.fp)"))===original,
+    token:w.ls.getItem("app_token"),login:p.html("app").includes('id="loginuser"')});
+}
+''')
+    assert out["reopens"] == [
+        {"sameDevice": True, "token": "synthetic-test-token-aaaaaaaa", "login": False}
+    ] * 3
+
+
+def test_mobile_short_network_outage_keeps_account_session_and_device_identity():
+    out = run_shell(PRELUDE + r'''
+const w=world(1000,[]);w.ls.setItem("account_role","agent");
+let p=await openPage(w,{...mobile,server:fakeServer({tokens:{[A]:ME}})});await p.booted();
+const original=await p.run("deviceProfile().then(d=>d.fp)");clock+=3600000;
+p=await openPage(w,{...mobile,onLine:false,server:fakeServer({tokens:{[A]:"neterr"}})});await p.booted();
+out.sameDevice=(await p.run("deviceProfile().then(d=>d.fp)"))===original;
+out.token=w.ls.getItem("app_token");out.login=p.html("app").includes('id="loginuser"');
+out.portfolio=p.html("plist");
+''')
+    assert out["sameDevice"] is True
+    assert out["token"] == "synthetic-test-token-aaaaaaaa"
+    assert out["login"] is False
+    assert "Synthetic client" in out["portfolio"]
+
+
+@pytest.mark.parametrize("age", [3600000, 30*24*3600000])
+@pytest.mark.parametrize("status", [401, 403])
+def test_reconnect_checks_revocation_before_sending_any_queued_operation(age, status):
+    out = run_shell(PRELUDE + f'const age={age},status={status};' + r'''
+const cfg={tokens:{[A]:"neterr"}},w=world(age);
+w.ss.removeItem("pending_token");
 const p=await openPage(w,{...mobile,server:fakeServer(cfg)});await p.booted();
-cfg.tokens[A]=401;await p.run("resumeProfile()");await settle(w);
+cfg.tokens[A]=status;await p.run("resumeProfile()");await settle(w);
 out.dump=w.dump();out.requests=p.fetchLog;out.bar=p.html("offbar");
 ''')
-    assert out["dump"]["queue"] == []
+    assert out["dump"]["queue"] == out["dump"]["cards"] == out["dump"]["kv"] == []
+    assert "app_token" not in out["dump"]["ls"]
     assert not any(r["url"].startswith("/api/note") for r in out["requests"])
     assert "Доступ отозван" in out["bar"]
 
@@ -118,7 +162,7 @@ await p.booted();await settle(w);await p.run("updateOffBar()");out.dump=w.dump()
 def test_failed_erasure_blocks_new_work_and_retries_before_next_login():
     out = run_shell(PRELUDE + r'''
 const w=world(1000),p=await openPage(w,{...mobile,server:fakeServer({tokens:{[A]:"neterr"}})});await p.booted();
-await p.run("globalThis.originalClear=IDB.clear;IDB.clear=async()=>{throw Error('synthetic unavailable storage')};purgeProfile('expired')");
+await p.run("globalThis.originalClear=IDB.clear;IDB.clear=async()=>{throw Error('synthetic unavailable storage')};purgeProfile('revoked')");
 out.pending=w.dump();out.first=await p.run("enqueue({op_id:'must-not-save',kind:'note'})");
 await p.run("IDB.clear=originalClear;enforceRetention()");await settle(w);out.done=w.dump();
 ''')

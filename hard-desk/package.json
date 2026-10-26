@@ -1,7 +1,7 @@
 {
   "name": "hard-desk",
   "productName": "Взыскание СНГ",
-  "version": "3.2.10",
+  "version": "3.2.12",
   "private": true,
   "description": "Программы взыскания: Хард, Софт, Руководитель и Аналитик",
   "main": "out/main.js",
@@ -21,7 +21,8 @@
     "installers": "node tools/installers.mjs",
     "test:desktop": "node tools/test-desktop.cjs",
     "test:updates": "node tools/run-electron-test.cjs tools/test-update-flow.cjs",
-    "release:prepare": "node tools/prepare-release.mjs"
+    "release:prepare": "node tools/prepare-release.mjs",
+    "test:enrichment-ui": "node tools/test-enrichment-jobs-ui.cjs"
   },
   "devDependencies": {
     "@electron/packager": "20.3.0",

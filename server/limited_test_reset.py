@@ -83,6 +83,7 @@ RESET_TABLES = {
     # GPS). Ограниченный тест начинается с чистого штата — заводятся заново
     # (account_access.py), переживать сброс им незачем, а журнал — ПД.
     "account_logins",
+    "account_client_versions",  # session history follows the account/device reset
     "account_approval_events",
     "account_phone_requests",  # unconsumed one-time approval codes cannot survive reset
     "account_devices",
@@ -172,6 +173,7 @@ DELETE_ORDER = (
     # Журнал и устройства аккаунтов — до самого accounts (на него ссылаются).
     'account_admin_grants', 'account_token_sessions', 'owner_bootstrap_challenges', 'pc_registration_challenges',
     "account_logins",
+    "account_client_versions",  # clear before devices/accounts; not part of a portfolio
     "account_approval_events",
     "account_phone_requests",  # unconsumed one-time approval codes cannot survive reset
     "account_devices",

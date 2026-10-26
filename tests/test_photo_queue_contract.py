@@ -75,6 +75,9 @@ def test_permanent_photo_error_stays_visible_but_does_not_block_queue():
     assert "await retireReplacedPhoto(it);" in INDEX
     assert "const old=it.replaces_op_id;" in INDEX
     assert 'await IDB.ack(op_id)' in INDEX
+    failure = INDEX[INDEX.index('else if(it.kind==="photo"||it.kind==="receipt")'):]
+    failure = failure[:failure.index('else if(it.kind===')]
+    assert 'retireReplacedPhoto' not in failure, 'A rejected replacement must preserve the original'
 
 
 def test_retake_keeps_ios_user_activation_and_links_exact_failed_op():
@@ -102,7 +105,7 @@ def test_exif_is_read_before_the_photo_is_shrunk():
     up = INDEX.index("async function upPhoto(")
     body = INDEX[up:INDEX.index("async function sendPhoto(")]
     exif = body.index("readExifMeta(f)")
-    shrink = body.index("const small=await shrinkPhoto(f);")
+    shrink = body.index("Promise.race([shrinkPhoto(f)")
     materialize = body.index("photoBytes(small||f)")
     clear = body.index('el.value=""')
     assert exif < shrink < materialize < clear

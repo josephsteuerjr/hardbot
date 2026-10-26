@@ -1654,9 +1654,9 @@ def stats_data(mgr: dict, rng: dict, employees: list[str] | None = None) -> dict
                       for c in codes],
         "scope": scope_label(mgr),
         "manager_name": mgr.get("name") or "",
-        # По какой день реестр знает об оплатах: импорт раз в день, и за
-        # «сегодня» оплат ещё нет — без даты ноль читался бы провалом.
+        # Latest payment date is not evidence of a complete daily statement.
         "pay_asof": db.last_payment_asof(),
+        "payment_data": db.payment_data_freshness(),
         # Контур «Софт»: отдельным блоком — у софтников свои метрики (звонки),
         # в выездную таблицу они не смешиваются.
         "soft": soft_block(mgr, rng, employees=employees),

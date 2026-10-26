@@ -1,0 +1,86 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const assert = require('node:assert/strict');
+const root = path.resolve(__dirname, '..');
+
+if (!process.versions.electron) {
+  const {spawnSync} = require('node:child_process');
+  const {buildSync} = require('esbuild');
+  const output = path.resolve(root, '../_local/team-work-2026-10-26/ui');
+  fs.mkdirSync(output,{recursive:true});
+  buildSync({stdin:{contents:`import {employeeBoard,staffTasks} from './ui/views/team-work';
+    import {mountShell,bare,setSections,go,setWho} from './ui/kit/shell';
+    mountShell('Взыскание СНГ');bare(false);setWho('<b>Тестовый руководитель</b>');
+    window.__show=async kind=>{window.__kind=kind;setSections(kind==='employee'?[staffTasks(kind)]:[employeeBoard(kind),staffTasks(kind)]);await go(kind==='employee'?'staff-tasks':'employee-board');};
+    window.__go=go;window.__show('manager');`, resolveDir:root, loader:'ts'},
+    bundle:true, format:'iife', outfile:path.join(output,'qa.js')});
+  let html=fs.readFileSync(path.join(root,'out/ui/index.html'),'utf8');
+  html=html.replace('href="app.css"',`href="${require('node:url').pathToFileURL(path.join(root,'out/ui/app.css')).href}"`).replace('src="app.js"','src="qa.js"');
+  fs.writeFileSync(path.join(output,'index.html'),html);
+  const env={...process.env,HARD_TEAM_QA_DIR:output};delete env.ELECTRON_RUN_AS_NODE;
+  const child=spawnSync(path.join(root,'node_modules/electron/dist/electron.exe'),[__filename],{env,windowsHide:true,stdio:'inherit'});
+  process.exit(child.status??1);
+}
+const {app,BrowserWindow}=require('electron');
+const output=process.env.HARD_TEAM_QA_DIR;
+app.setPath('userData',path.join(output,'synthetic-profile'));
+app.disableHardwareAcceleration();
+app.whenReady().then(async()=>{
+  const win=new BrowserWindow({width:1360,height:960,show:false,webPreferences:{preload:path.join(__dirname,'test-team-work-preload.cjs'),contextIsolation:false,sandbox:false,offscreen:true,backgroundThrottling:false}});
+  const js=code=>win.webContents.executeJavaScript(code);
+  const until=async condition=>{for(let i=0;i<100;i++){if(await js(condition))return;await new Promise(r=>setTimeout(r,40));}throw Error('Timed out: '+condition+' '+await js('JSON.stringify(window.__errors)'));};
+  try {
+    await win.loadFile(path.join(output,'index.html'));
+    await until('document.querySelectorAll(".employee-country").length===2');
+    const columns=await js('[...document.querySelectorAll(".employee-country")].map(x=>({title:x.querySelector("h2").textContent,x:x.getBoundingClientRect().x}))');
+    assert.equal(columns[0].title,'Таджикистан');assert.equal(columns[1].title,'Узбекистан');assert.ok(columns[0].x<columns[1].x);
+    assert.ok(await js('parseFloat(getComputedStyle(document.querySelector(".employee-login")).fontSize)<=12'));
+    await new Promise(r=>setTimeout(r,350));
+    fs.writeFileSync(path.join(output,'board.png'),(await win.webContents.capturePage()).toPNG());
+    await js('document.querySelector("[data-remove-person]").click()');
+    await until('!!document.querySelector("#ask [data-cancel]")');
+    assert.match(await js('document.querySelector("#ask").textContent'),/Удалить также профиль/);
+    assert.equal(await js('document.activeElement.hasAttribute("data-keep-profile")'),true);
+    await new Promise(r=>setTimeout(r,350));
+    fs.writeFileSync(path.join(output,'remove-choice.png'),(await win.webContents.capturePage()).toPNG());
+    await js('document.querySelector("#ask [data-cancel]").click()');
+    assert.equal(await js('window.__requests.filter(x=>x.method==="POST").length'),0);
+    await js('document.querySelector("[data-remove-person]").click()');await until('!!document.querySelector("#ask [data-keep-profile]")');
+    await js('document.querySelector("#ask [data-keep-profile]").click()');await until('document.querySelectorAll(".employee-tile").length===1');
+    assert.equal(await js('window.__people[0].username'),'test.tj');
+    assert.equal(await js('window.__people[0].account_id'),11);
+    assert.equal(await js('window.__requests.filter(x=>x.body?.action==="remove").length'),0);
+    assert.equal(await js('window.__requests.find(x=>x.body?.action==="hide").body.account_id'),undefined);
+    await js('document.querySelector("[data-add-person]").value="0";document.querySelector("[data-add-form]").requestSubmit()');
+    await until('document.querySelectorAll(".employee-tile").length===2');
+    assert.equal(await js('window.__people[0].username'),'test.tj');
+    await js('document.querySelector("[data-remove-person]").click()');await until('!!document.querySelector("#ask [data-delete-profile]")');
+    await js('document.querySelector("#ask [data-delete-profile]").click()');await until('document.querySelectorAll(".employee-tile").length===1');
+    const removed=await js('window.__requests.find(x=>x.body?.action==="remove").body');
+    assert.equal(removed.account_id,11);assert.equal(removed.confirm,'remove_and_delete_profile');assert.ok(removed.operation_id);
+    await js('document.querySelector("[data-add-person]").value="0";document.querySelector("[data-add-form]").requestSubmit()');
+    await until('document.querySelectorAll(".employee-tile").length===2');
+    await js('document.querySelector("[data-assign]").click()');await until('!!document.querySelector("[data-new-task]")');
+    assert.equal(await js('document.querySelector("[name=employee]").value'),'Тестов Первый');
+    await js('document.querySelector("[name=title]").value="Сверить оплату <img src=x onerror=window.__pwned=1>";document.querySelector("[name=description]").value="Запросить чек и сверить сумму";document.querySelector("[name=due_at]").value="2026-11-02T16:00";document.querySelector("[data-new-task]").requestSubmit()');
+    await until('!!document.querySelector("[data-task]")');
+    assert.equal(await js('!!document.querySelector(".task-row img")'),false);
+    await js('document.querySelector("[data-task]").click()');await until('!!document.querySelector("[data-task-action=step]")');
+    await js('document.querySelector("[data-task-text]").value="Проверить чек";document.querySelector("[data-task-action=step]").click()');await until('document.querySelectorAll("[data-step]").length===1');
+    assert.equal(await js('!!document.querySelector("[data-task-action=submit]")'),false);
+    await js('window.__show("employee")');await until('!!document.querySelector("[data-task]")');await js('document.querySelector("[data-task]").click()');await until('!!document.querySelector("[data-task-action=submit]")');
+    await js('document.querySelector("[data-step]").click()');await until('document.querySelector("[data-step]").checked');
+    await js('document.querySelector("[data-task-text]").value="Сумма и дата совпали";document.querySelector("[data-task-action=submit]").click()');await until('!document.querySelector("[data-task-action=submit]")');
+    assert.equal(await js('!!document.querySelector("[data-task-action=confirm]")'),false);
+    await js('window.__show("manager");window.__go("staff-tasks")');await until('!!document.querySelector("[data-task]")');await js('document.querySelector("[data-task]").click()');await until('!!document.querySelector("[data-task-action=confirm]")');
+    await new Promise(r=>setTimeout(r,350));
+    fs.writeFileSync(path.join(output,'task.png'),(await win.webContents.capturePage()).toPNG());
+    await js('document.querySelector("[data-task-action=confirm]").click()');await until('!!document.querySelector("#ask [data-yes]")');await js('document.querySelector("#ask [data-yes]").click()');await until('!document.querySelector(".task-compose")');
+    await js('window.__show("analyst");window.__go("staff-tasks")');await until('!!document.querySelector("[data-task-filter]")');
+    assert.equal(await js('!!document.querySelector("[data-create]")'),false);
+    assert.deepEqual(await js('window.__errors'),[]);
+    const receipt={ok:true,checks:['republic-columns','small-login','remove-asks-about-profile','safe-default','cancel-removal','hide-preserves-profile','readd-preserves-profile','confirm-delete-generation','add-from-registry','assign-from-tile','escaped-user-content','manager-stage','employee-submit','manager-confirm','analyst-read-only'],screenshots:['board.png','remove-choice.png','task.png']};
+    fs.writeFileSync(path.join(output,'RESULT.json'),JSON.stringify(receipt,null,2));
+    console.log('Employee board and task renderer journey PASS');app.exit(0);
+  }catch(error){console.error(error);app.exit(1);}finally{if(!win.isDestroyed())win.destroy();}
+}).catch(error=>{console.error(error);app.exit(1)});

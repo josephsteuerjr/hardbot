@@ -55,13 +55,15 @@ def test_legacy_snapshot_is_corrected_without_rewriting_history(world):
 
 
 def test_old_queue_preserves_callback_and_office_timezone(world, monkeypatch):
-    moment = datetime(2026, 10, 5, 21, 30, tzinfo=timezone.utc)
+    moment = datetime.combine(db.workday.today()-timedelta(days=2), datetime.min.time(), tzinfo=timezone.utc).replace(hour=21, minute=30)
+    event_day = (moment.date()+timedelta(days=1)).isoformat()
+    callback = (moment.date()+timedelta(days=4)).isoformat()
     call(monkeypatch, 'old-queue', 'В работе', occurred_at=moment.timestamp()*1000,
-         values={'soft_comm_date': '2026-10-09'})
+         values={'soft_comm_date': callback})
     row = db.get_client('A')
-    assert row['soft_comm_date'] == '2026-10-06'
-    assert row['soft_next_call_date'] == '2026-10-09'
-    assert db.call_field_day(row, 'overall_result') == '2026-10-06'
+    assert row['soft_comm_date'] == event_day
+    assert row['soft_next_call_date'] == callback
+    assert db.call_field_day(row, 'overall_result') == event_day
 
 
 def test_stale_master_cannot_reset_processed_result(world, monkeypatch):

@@ -88,10 +88,10 @@ def test_payment_survives_import_and_does_not_duplicate_comment(world,monkeypatc
  assert len(db.reported_payments_for()['A'])==1
 
 def test_offline_record_uses_office_event_day(world,monkeypatch):
- event=datetime(2026,10,5,21,30,tzinfo=timezone.utc)
- payment(monkeypatch,paid_at='2026-10-05',occurred_at=event.timestamp()*1000)
+ event=datetime.combine(db.workday.today()-timedelta(days=2),datetime.min.time(),tzinfo=timezone.utc).replace(hour=21,minute=30)
+ payment(monkeypatch,paid_at=event.date().isoformat(),occurred_at=event.timestamp()*1000)
  saved=db.reported_payments_for()['A'][0]
- assert saved['event_day']=='2026-10-06' and saved['paid_at']=='2026-10-05'
+ assert saved['event_day']==(event.date()+timedelta(days=1)).isoformat() and saved['paid_at']==event.date().isoformat()
 
 def test_draft_cannot_record_payment(world,monkeypatch):
  with pytest.raises(aio_web.HTTPBadRequest):payment(monkeypatch,finish=False)

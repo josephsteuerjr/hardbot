@@ -33,6 +33,7 @@ export interface TableOpts<R> {
   empty?: string;
   rowClass?: (r: R) => string;
   searchPlaceholder?: string;
+  externalSearch?: boolean;
   toolsLeft?: string;                  // свои кнопки слева от поиска
   afterRender?: (host: HTMLElement) => void;   // навесить обработчики на поля в ячейках
   profile?: "hard" | "soft";           // encrypted, principal-scoped preferences
@@ -57,6 +58,7 @@ interface State {
 }
 
 const states = new Map<string, State>();
+const searchText = (value: string) => value.normalize('NFKC').toLowerCase().replace(/ё/g, 'е');
 function stateOf(id: string): State {
   let s = states.get(id);
   if (!s) { s = { sort: null, filters: {}, q: "", selected: new Set() }; states.set(id, s); }
@@ -148,9 +150,15 @@ export class DataTable<R> {
   setRows(rows: R[]): void {
     this.rows = rows;
     this.index.clear();
-    for (const row of rows) this.index.set(row, this.o.cols.map(c => text(c.value(row))).join("\n").toLowerCase());
+    for (const row of rows) this.index.set(row, searchText(this.o.cols.map(c => text(c.value(row))).join("\n")));
     const keys = new Set(rows.map((r) => this.o.key(r)));
     for (const k of [...this.st.selected]) if (!keys.has(k)) this.st.selected.delete(k);
+    this.render();
+  }
+
+  setQuery(value: string): void {
+    this.st.q = value;
+    this.st.page = 0;
     this.render();
   }
 
@@ -184,8 +192,8 @@ export class DataTable<R> {
         if (f.max !== undefined && x > f.max) return false;
       }
     }
-    const q = this.st.q.trim().toLowerCase();
-    if (q && !(this.index.get(r) || "").includes(q)) return false;
+    const words = searchText(this.st.q).trim().split(/\s+/).filter(Boolean);
+    if (!words.every(word => (this.index.get(r) || "").includes(word))) return false;
     return true;
   }
 
@@ -256,7 +264,7 @@ export class DataTable<R> {
       <div class="tbar">
         ${o.listHtml ? `<div class="view-tabs" role="group" aria-label="Представление портфеля"><button class="btn small ${st.view !== "list" ? "primary" : ""}" data-view="table" aria-pressed="${st.view !== "list"}">Таблица</button><button class="btn small ${st.view === "list" ? "primary" : ""}" data-view="list" aria-pressed="${st.view === "list"}">Список</button></div>` : ""}
         ${o.toolsLeft || ""}
-        <input class="tsearch" data-tsearch placeholder="${esc(o.searchPlaceholder || "Найти в таблице")}" value="${esc(st.q)}">
+        <input class="tsearch" data-tsearch ${o.externalSearch ? 'hidden' : ''} placeholder="${esc(o.searchPlaceholder || "Найти в таблице")}" value="${esc(st.q)}">
         ${tokens}${active.length > 1 ? '<button class="ftoken quiet" data-unfilter="*">снять все</button>' : ""}
         <span class="spacer"></span>
         <span class="tcount">${count}</span>

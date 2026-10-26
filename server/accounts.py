@@ -96,7 +96,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
         )""")
     acc_cols = {r[1] for r in conn.execute("PRAGMA table_info(accounts)")}
     for col, ddl in (("telegram_id", "INTEGER"), ("approvals", "TEXT NOT NULL DEFAULT '[]'"),
-                     ("registration_gps", "TEXT"), ("registration_ip", "TEXT")):
+                     ("registration_gps", "TEXT"), ("registration_ip", "TEXT"),
+                     ("password_review_pending", "INTEGER NOT NULL DEFAULT 0"),
+                     ("password_reset_operation", "TEXT"), ("password_reset_actor", "INTEGER")):
         if col not in acc_cols:
             conn.execute(f"ALTER TABLE accounts ADD COLUMN {col} {ddl}")
     conn.execute("""
@@ -430,6 +432,52 @@ def set_password(username: str, new: str, *, by: str = "cli") -> dict:
     return {"ok": True}
 
 
+def manager_reset_password(uid: int, username: str, new: str, operation_id: str, *, is_owner=False, ip="") -> dict:
+    """A manager may reset only their staff; only the owner can restore access.
+
+    The caller supplies the temporary password so a lost response never loses
+    the credential. An operation ID makes an explicit retry non-destructive.
+    """
+    username = normalize_username(username)
+    if not _valid_password(new or ""):
+        return {"ok": False, "error": "Пароль от 8 символов, с буквой и цифрой."}
+    if not re.fullmatch(r"[A-Za-z0-9_-]{12,100}", operation_id or ""):
+        return {"ok": False, "error": "operation_id"}
+    with db.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        manager, team = _manager_review_context(uid, is_owner)
+        acc = conn.execute("SELECT * FROM accounts WHERE username=?", (username,)).fetchone()
+        if not _reviewable(conn, acc, uid, manager, team):
+            return {"ok": False, "error": "account"}
+        if acc['password_reset_operation'] == operation_id:
+            if acc['password_reset_actor'] != uid:
+                return {"ok": False, "error": "operation_id"}
+            return {"ok": True, "replayed": True, "password_review_pending": bool(acc['password_review_pending'])}
+        if acc['password_review_pending']:
+            return {"ok": False, "error": "Смена уже ожидает подтверждения владельца. Обновите список."}
+        try:
+            _assert_uid_owned(conn, acc)
+        except UIDConflict as exc:
+            return {"ok": False, "error": str(exc)}
+        actor = f"manager:{uid}:{manager.get('name') or ''}"
+        conn.execute("UPDATE accounts SET password_hash=?, must_change_password=1, status='awaiting',"
+                     "approvals='[]',activated_by=NULL,activated_at=NULL,failed_attempts=0,locked_until=NULL,"
+                     "password_review_pending=1,password_reset_operation=?,password_reset_actor=?,updated_at=? WHERE id=?",
+                     (hash_password(new),operation_id,uid,_now(),acc['id']))
+        _revoke_account_tokens(conn, acc['id'], f"account:password-reset:{actor}")
+        _approval_event(conn, acc['id'], None, uid, actor, 'password_reset', 'pending', ip,
+                        f"operation={operation_id}; owner approval required")
+        conn.commit()
+    return {"ok": True, "password_review_pending": True}
+
+
+def _owner_approver(conn, by: str) -> bool:
+    return bool(by.startswith('principal:') and conn.execute(
+        "SELECT 1 FROM account_admin_grants g JOIN accounts a ON a.id=g.account_id "
+        "WHERE g.granted_by='ssh-root' AND g.principal=? AND a.status='active'",
+        (by[len('principal:'):],)).fetchone())
+
+
 # --- журнал ------------------------------------------------------------------
 
 def _journal(conn: sqlite3.Connection, account_id: int | None, username: str, kind: str,
@@ -662,7 +710,7 @@ def device_gate_by_token(token_table: str, row_id: int) -> tuple[str, str]:
         row = conn.execute(
             "SELECT a.status AS astatus, a.employee AS employee, d.status AS dstatus, "
             "a.id AS account_id, a.created_by AS created_by, a.role AS role,a.telegram_id AS telegram_id, "
-            "a.must_change_password AS change_password, d.id AS device_id, d.kind AS device_kind, d.gps AS gps, "
+            "a.must_change_password AS change_password, a.password_review_pending, d.id AS device_id, d.kind AS device_kind, d.gps AS gps, "
             "d.gps_exception_until AS gps_exception_until, d.gps_seen_at AS gps_seen_at "
             "FROM accounts a JOIN account_devices d ON d.account_id=a.id "
             "JOIN account_token_sessions s ON s.device_id=d.id "
@@ -681,6 +729,8 @@ def device_gate_by_token(token_table: str, row_id: int) -> tuple[str, str]:
                 if db._name_key(r['employee'])==db._name_key(row['employee'])):
             return 'blocked',row['employee']
         import account_policy
+        if row['password_review_pending']:
+            return ('password' if row['change_password'] else 'pending'), row['employee']
         strict=account_policy.strict(connection=conn)
         if (strict and row['role']=='agent' and not _approved_staff_pc(conn,row['account_id'])
                 and not (row['device_kind']=='phone' and _approved_mobile_identity(conn,row['device_id']))):
@@ -783,8 +833,14 @@ def approve_account(username: str, by: str, *, _connection=None, actor_uid=0, ip
             return {"ok": False, "error": "Нет такого аккаунта."}
         if row["status"] == "disabled":
             return {"ok": False, "error": "Аккаунт закрыт; сначала enable."}
+        password_review = bool(row['password_review_pending'])
+        if password_review:
+            if not _owner_approver(conn, by):
+                return {"ok": False, "error": "После смены пароля доступ подтверждает только владелец."}
+            if row['must_change_password']:
+                return {"ok": False, "error": "Сотрудник ещё не сменил временный пароль на личный."}
         import account_policy
-        if (row["created_by"] == "self-registration" or (row['role']=='agent' and account_policy.strict(connection=conn))) and _connection is None:
+        if not password_review and (row["created_by"] == "self-registration" or (row['role']=='agent' and account_policy.strict(connection=conn))) and _connection is None:
             return {"ok": False, "error": "Регистрацию на компьютере подтверждает свой руководитель."}
         approvals = _add_approval(row["approvals"], by)
         need = _approvals_needed(row["role"])
@@ -800,6 +856,10 @@ def approve_account(username: str, by: str, *, _connection=None, actor_uid=0, ip
         _journal(conn, row["id"], username, "approved", label=f"by {by}")
         _approval_event(conn, row["id"], None, actor_uid, by, "account", "approved", ip,
                         f"{row['status']} -> {'active' if active or already else 'awaiting'}")
+        if password_review:
+            conn.execute("UPDATE accounts SET password_review_pending=0 WHERE id=?", (row['id'],))
+            _approval_event(conn, row['id'], None, actor_uid, by, 'password_reset', 'approved', ip,
+                            f"operation={row['password_reset_operation']}")
         if _connection is None:
             conn.commit()
             db.audit_access(actor_uid, "account_approve", row["employee"], f"{username} by {by}")
@@ -827,6 +887,8 @@ def approve_device(device_id: int, by: str, *, _connection=None, actor_uid=0, ip
                            (dev["account_id"],)).fetchone()
         if not acc or acc["status"] == "disabled" or dev["status"] == "revoked":
             return {"ok": False, "error": "Аккаунт или устройство отозвано. Выполните новый вход."}
+        if acc['password_review_pending']:
+            return {"ok": False, "error": "После смены пароля сначала требуется подтверждение владельца."}
         import account_policy
         if (acc["created_by"] == "self-registration" or (acc['role']=='agent' and account_policy.strict(connection=conn))) and _connection is None:
             return {"ok": False, "error": "Устройство сотрудника подтверждает свой руководитель."}
@@ -940,6 +1002,7 @@ def manager_approve(uid: int, *, username="", device_id=None, is_owner=False, ip
                if device else conn.execute("SELECT * FROM accounts WHERE username=?", (normalize_username(username),)).fetchone())
         import account_policy
         if (not _reviewable(conn, acc, uid, manager, team)
+                or (acc and acc['password_review_pending'])
                 or (device_id is not None and (not device or device["status"] == "revoked"))):
             _approval_event(conn, acc["id"] if acc else None, device_id, uid, actor,
                             "device" if device_id is not None else "account", "denied", ip, "scope, role or state")
@@ -1029,27 +1092,35 @@ def delete_account(username: str, by: str, *, expected_id: int) -> dict:
     username = normalize_username(username)
     with db.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT id,telegram_id,employee FROM accounts WHERE username=?", (username,)).fetchone()
-        if row is None or type(expected_id) is not int or row['id'] != expected_id:
-            return {"ok": False, "error": "Аккаунт уже удалён или изменился. Обновите список."}
-        if conn.execute("SELECT 1 FROM account_admin_grants WHERE account_id=? AND granted_by='ssh-root'", (row['id'],)).fetchone():
-            return {"ok": False, "error": "Первичный профиль владельца защищён от удаления."}
-        try:
-            uid = _assert_uid_owned(conn, row)
-        except UIDConflict as exc:
-            return {"ok": False, "error": str(exc)}
-        _revoke_account_tokens(conn, row['id'], f"account:delete:{by}")
-        conn.execute("INSERT INTO account_deletions VALUES(?,?,?,?)", (row['id'], uid, _now(), by))
-        conn.execute("DELETE FROM account_phone_requests WHERE account_id=?", (row['id'],))
-        conn.execute("DELETE FROM account_client_versions WHERE account_id=?", (row['id'],))
-        conn.execute("DELETE FROM account_token_sessions WHERE device_id IN "
-                     "(SELECT id FROM account_devices WHERE account_id=?)", (row['id'],))
-        conn.execute("DELETE FROM account_devices WHERE account_id=?", (row['id'],))
-        conn.execute("DELETE FROM account_admin_grants WHERE account_id=?", (row['id'],))
-        _approval_event(conn, row['id'], None, 0, by, 'account_delete', 'deleted')
-        conn.execute("DELETE FROM accounts WHERE id=?", (row['id'],))
+        result = delete_account_in_transaction(conn, username, by, expected_id=expected_id)
+        if not result.get('ok'):
+            return result
         conn.commit()
     db.audit_access(0, "account_delete", username, f"account={expected_id} by {by}")
+    return result
+
+
+def delete_account_in_transaction(conn, username: str, by: str, *, expected_id: int) -> dict:
+    """Same deletion inside the caller's transaction (e.g. remove from staff)."""
+    row = conn.execute("SELECT id,telegram_id,employee FROM accounts WHERE username=?", (username,)).fetchone()
+    if row is None or type(expected_id) is not int or row['id'] != expected_id:
+        return {"ok": False, "error": "Аккаунт уже удалён или изменился. Обновите список."}
+    if conn.execute("SELECT 1 FROM account_admin_grants WHERE account_id=? AND granted_by='ssh-root'", (row['id'],)).fetchone():
+        return {"ok": False, "error": "Первичный профиль владельца защищён от удаления."}
+    try:
+        uid = _assert_uid_owned(conn, row)
+    except UIDConflict as exc:
+        return {"ok": False, "error": str(exc)}
+    _revoke_account_tokens(conn, row['id'], f"account:delete:{by}")
+    conn.execute("INSERT INTO account_deletions VALUES(?,?,?,?)", (row['id'], uid, _now(), by))
+    conn.execute("DELETE FROM account_phone_requests WHERE account_id=?", (row['id'],))
+    conn.execute("DELETE FROM account_client_versions WHERE account_id=?", (row['id'],))
+    conn.execute("DELETE FROM account_token_sessions WHERE device_id IN "
+                 "(SELECT id FROM account_devices WHERE account_id=?)", (row['id'],))
+    conn.execute("DELETE FROM account_devices WHERE account_id=?", (row['id'],))
+    conn.execute("DELETE FROM account_admin_grants WHERE account_id=?", (row['id'],))
+    _approval_event(conn, row['id'], None, 0, by, 'account_delete', 'deleted')
+    conn.execute("DELETE FROM accounts WHERE id=?", (row['id'],))
     return {"ok": True, "deleted": True, "account_id": expected_id}
 
 
@@ -1103,9 +1174,13 @@ def entered_list(office: str = "", *, include_empty=False) -> list[dict]:
             out.append({
                 "employee": acc["employee"], "username": acc["username"],
                 "office": acc["office"] or "", "status": acc["status"], "role": acc["role"],
+                "password_review_pending": bool(acc['password_review_pending']),
+                "must_change_password": bool(acc['must_change_password']),
                 "self_registration": acc["created_by"] == "self-registration",
                 "devices": [{"id": d["id"], "kind": d["kind"], "label": d["label"],
                              "status": d["status"], "at": d["first_seen"],
+                             "last_seen": d['last_seen'],
+                             **client_versions.for_device(conn, d['id']),
                              "gps_present": bool(d['gps'] and d['gps_seen_at'] and d['gps_seen_at']>(datetime.now(timezone.utc)-timedelta(minutes=2)).isoformat()),
                              "gps_exception_until": d['gps_exception_until'],
                              "approved_by": d["approved_by"], "approved_at": d["approved_at"]}
@@ -1162,6 +1237,7 @@ def admin_accounts() -> list[dict]:
                         "phone_requests": requests,
                         "role": acc["role"], "status": acc["status"],
                         "must_change_password": bool(acc["must_change_password"]),
+                        "password_review_pending": bool(acc['password_review_pending']),
                         "created_at": acc["created_at"], "activated_at": acc["activated_at"],
                         "devices": [{**dict(d), **client_versions.for_device(conn, d['id'])}
                                     for d in devices],

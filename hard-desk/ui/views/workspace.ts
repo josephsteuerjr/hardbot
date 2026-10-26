@@ -64,7 +64,7 @@ async function render(root: HTMLElement) {
   const kpi = (value: string, title: string, note: string, action: string, cls = "") =>
     `<button class="crm-kpi ${cls}" data-action="${action}"><span>${title}</span><b>${value}</b><small>${note} <span aria-hidden="true">↗</span></small></button>`;
   root.classList.add("crm-workspace");
-  root.innerHTML = `${staleNote(stats.stale)}<div class="crm-context"><span>${esc(scope)}</span><span>Реестр оплат: ${esc(d.pay_asof || "дата не получена")}</span></div>
+  root.innerHTML = `${staleNote(stats.stale)}<div class="crm-context"><span>${esc(scope)}</span><span>Последняя дата платежа: ${esc(d.pay_asof || "дата не получена")}</span></div>
     <div class="crm-filters"><div>${rangeChips(state.range, d.range)}</div><div class="crm-filter-row">
       <div class="chips"><button class="chip" data-profile="hard" aria-pressed="${!soft}">Хард · выезды</button><button class="chip" data-profile="soft" aria-pressed="${soft}">Софт · звонки</button></div>
       <label>Страна <select class="input" data-country><option value="">Все доступные</option>${(d.countries || []).map((c: any) => `<option value="${esc(c.code)}" ${state.country === c.code ? "selected" : ""}>${esc(c.short || c.name)}</option>`).join("")}</select></label>

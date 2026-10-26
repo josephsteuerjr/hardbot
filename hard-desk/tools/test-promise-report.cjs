@@ -1,0 +1,61 @@
+const {app,BrowserWindow,session}=require('electron');
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+const lab=process.env.HARD_REPORT_QA_TEMP;
+if(!lab)throw Error('Set an isolated HARD_REPORT_QA_TEMP');
+fs.mkdirSync(lab,{recursive:true});app.setPath('userData',lab);app.disableHardwareAcceleration();
+app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');app.on('window-all-closed',()=>{});
+const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+app.whenReady().then(async()=>{
+ let win;
+ try{
+  session.defaultSession.webRequest.onBeforeRequest({urls:['http://*/*','https://*/*']},(_,done)=>done({cancel:true}));
+  win=new BrowserWindow({show:false,width:1320,height:1000,webPreferences:{preload:path.join(__dirname,'test-promise-report-preload.cjs'),
+   contextIsolation:false,sandbox:false,offscreen:true,backgroundThrottling:false}});
+  await win.loadFile(path.join(__dirname,'../out/ui/index.html'));
+  const js=code=>win.webContents.executeJavaScript(code);
+  const until=async code=>{for(let i=0;i<150;i++){if(await js(code))return;await pause(40);}throw Error('UI timeout '+code+' '+await js('JSON.stringify(window.__errors)'));};
+  await until('!!document.querySelector("[data-go=report]")');await js('document.querySelector("[data-go=report]").click()');
+  await until('!!document.querySelector("[data-promise-preview]")');
+  await js(`for(const [key,value] of Object.entries({from:'2026-10-19',to:'2026-10-19',asof:'2026-10-22',due:'2026-10-22',country:'uz'})){
+    const input=document.querySelector('[data-promise-report="'+key+'"]');input.value=value;input.dispatchEvent(new Event('change'));
+  }document.querySelector('[data-promise-preview]').click()`);
+  await until('document.querySelector("[data-promise-result]").textContent.includes("Обещаний: 23")');
+  assert.deepEqual(await js('window.__reportQA.requests[0].query'),{from:'2026-10-19',to:'2026-10-19',asof:'2026-10-22',due:'2026-10-22',country:'uz'});
+  assert.match(await js('document.querySelector("[data-promise-result]").textContent'),/промежуточный/);
+  await js('document.querySelector("[data-promise-download]").click()');await until('window.__reportQA.downloads.length===1');
+  assert.equal(await js('window.__reportQA.downloads[0].path'),'/api/manager/promise_report.xlsx');
+  await js('document.querySelector("[data-dl=stats]").click()');await until('window.__reportQA.downloads.length===2');
+  assert.equal(await js('window.__reportQA.downloads[1].path'),'/api/manager/stats.xlsx');
+  console.log('Desktop behavior verified; capturing');win.webContents.invalidate();await pause(500);
+  fs.writeFileSync(path.join(lab,'desktop-report.png'),(await win.webContents.capturePage()).toPNG());
+  await js('window.__reportQA.fail=true;document.querySelector("[data-promise-preview]").click()');
+  await until('document.querySelector("[data-promise-result]").textContent.includes("Synthetic report unavailable")');
+  assert(!await js('document.querySelector("[data-promise-result]").textContent.includes("Обещаний: 0")'));
+  await js('window.__reportQA.fail=false;window.__reportQA.stale="2026-10-21T10:00:00";document.querySelector("[data-promise-preview]").click()');
+  await until('document.querySelector("[data-promise-result] .notice")?.textContent.includes("Нет связи")');
+  assert.equal(await js('window.__errors.length'),0);
+  const source=fs.readFileSync(path.join(__dirname,'../../server/miniapp/index.html'),'utf8');
+  const functions=source.slice(source.indexOf('function dgPromiseReport(){'),source.indexOf('async function dgExcel(){'));
+  const markup=source.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,'');
+  await win.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent(markup));
+  win.setSize(430,950);
+  await js(`window.DG={today:'2026-10-22',from:'2026-10-19',to:'2026-10-31'};
+    window.$=id=>document.getElementById(id);window.esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    window.askSheet=(id,inner)=>{let box=$(id);if(!box){box=document.createElement('div');box.id=id;box.className='picksheet ask';document.body.appendChild(box)}box.innerHTML='<div class="pickbg"></div><div class="pickbody">'+inner+'</div>'};
+    window.closeAsk=id=>$(id)?.remove();window.toast=message=>window.__toast=message;
+    window.__authority='synthetic-one';window.authHeaders=()=>({'X-App-Token':window.__authority});
+    window.__pwaRequests=[];window.fetch=async(url,options)=>{window.__pwaRequests.push({url,options});return {ok:true,json:async()=>({totals:{ptp:23,kept:0,partial:2,waiting:21,unpaid:0,incomplete:0,kp_rate:0},payment_data:{last_import_at:'2026-10-21T21:28:00+00:00'},open_deadlines:true})}};
+    ${functions};dgPromiseReport();`);
+  assert.equal(await js('document.querySelector("#promise-report-form [name=to]").value'),'2026-10-22');
+  await js('document.querySelector("#promise-report-form [name=to]").value="2026-10-19";document.querySelector("#promise-report-form [name=due]").value="2026-10-22";dgPromiseReportRun(false)');
+  await until('document.querySelector("#promise-report-form [data-result]").textContent.includes("Обещаний: 23")');
+  assert.match(await js('window.__pwaRequests[0].url'),/from=2026-10-19&to=2026-10-19&asof=2026-10-22/);
+  console.log('PWA behavior verified; capturing');win.webContents.invalidate();await pause(500);
+  fs.writeFileSync(path.join(lab,'pwa-report.png'),(await win.webContents.capturePage()).toPNG());
+  await js(`window.fetch=async()=>{window.__authority='synthetic-two';return {ok:true,json:async()=>({totals:{ptp:999}})}};dgPromiseReportRun(false)`);
+  assert.equal(await js('document.querySelector("#promise-report-form [data-result]").textContent'),'');
+  await js('closeAsk("promisereportsheet")');assert(!await js('!!document.getElementById("promise-report-form")'));
+  fs.writeFileSync(path.join(lab,'RESULTS.json'),JSON.stringify({ok:true,independentDates:true,oldDownloadPreserved:true,errorNotZero:true,stalePreviewMarked:true,pwaPeriodClamped:true,pwaAuthorityChangeDiscarded:true,closeWorks:true},null,2));
+  console.log('Promise report Desktop/PWA UI PASS; evidence '+lab);app.exit(0);
+ }catch(error){console.error(error);app.exit(1);}finally{if(win&&!win.isDestroyed())win.destroy();}
+}).catch(error=>{console.error(error);app.exit(1)});

@@ -46,6 +46,8 @@ let all: any[] = [];
 let selected: string | null = null;
 let approver = "";
 let cutoverActive = false;
+let passwordReviewOwner = false;
+let accountQuery = '', accountExpanded = false;
 
 /** Карточка выбранного аккаунта: устройства с подтверждением и журнал входов. */
 function details(root: HTMLElement, a: any) {
@@ -54,7 +56,8 @@ function details(root: HTMLElement, a: any) {
   const devs: any[] = a.devices || [];
   const logins: any[] = (a.logins || []).slice(0, 10);
   const awaiting = a.status === "awaiting";
-  const phoneRequestOnly = a.created_by === "self-registration" || cutoverActive && a.role==='agent';
+  const passwordReview = a.password_review_pending === true;
+  const phoneRequestOnly = !passwordReview && (a.created_by === "self-registration" || cutoverActive && a.role==='agent');
   box.innerHTML = `<div class="section" style="margin-top:18px">
     <div class="section-head"><h2 class="section-title">${esc(a.employee || a.username || "Аккаунт")}</h2></div>
     <dl class="kv" style="grid-template-columns:200px 1fr;max-width:760px;font-size:15px">
@@ -65,9 +68,10 @@ function details(root: HTMLElement, a: any) {
       <dt>Создан</dt><dd>${esc(fmt(a.created_at) || "—")}</dd>
       <dt>Активирован</dt><dd>${esc(fmt(a.activated_at) || "—")}</dd></dl>
     <div class="toolbar" style="margin-top:12px">
-      ${!phoneRequestOnly&&awaiting?`<button class="btn small primary" data-open ${approver?'':'disabled'}>Открыть доступ</button>`:''}
+      ${!phoneRequestOnly&&awaiting?`<button class="btn small primary" data-open ${approver&&(!passwordReview||(passwordReviewOwner&&!a.must_change_password))?'':'disabled'}>${passwordReview?'Подтвердить доступ после смены пароля':'Открыть доступ'}</button>`:''}
       <span class="muted" style="font-size:13px">${phoneRequestOnly?'Устройства сотрудника подтверждает его руководитель во «Входе команды».':approver ? `Подтверждает: ${esc(approver)}. Достаточно одного администратора.` : "Для подтверждений администратор этого устройства должен быть назначен на сервере."}</span></div>
     ${phoneRequestOnly ? '<p class="notice">Руководитель открывает «Вход команды», находит заявку и нажимает «Подтвердить телефон» или «Подтвердить ПК». Телефон можно подтвердить без предварительного ПК. Компьютер подтверждают после личной сверки сотрудника за этим ПК. Геопозиция не требуется.</p>' : ""}
+    ${passwordReview?`<p class="notice">${a.must_change_password?'Сотрудник ещё не сменил временный пароль на личный.':'Сотрудник сменил пароль. Доступ ожидает вашего подтверждения.'} Подтвердить может только владелец.</p>`:''}
     <div class="block"><h3>Устройства (${n(devs.length)})</h3>
       ${devs.length ? devs.map((x) => `<div class="list-row">
         <div class="grow"><div class="nm">${esc(x.label || kind(x.kind) || "устройство")}</div>
@@ -76,7 +80,7 @@ function details(root: HTMLElement, a: any) {
           <div class="sub">Подтвердил: ${esc(x.approved_by || "—")}${x.approved_at ? ` · ${esc(fmt(x.approved_at))}` : ""}</div></div>
         ${x.status === "revoked" ? '<span class="tag">отозвано</span>'
           : devApproved(x) ? '<span class="tag ok">подтверждено</span>'
-          : phoneRequestOnly ? '<span class="tag warn">Ждёт своего руководителя</span>' : `<button class="btn small primary" data-approve="${esc(String(x.id))}" ${approver ? "" : "disabled"}>Подтвердить ${x.kind==='phone'?'телефон':'ПК'}</button>`}</div>`).join("")
+          : passwordReview ? '<span class="tag warn">Сначала подтвердите смену пароля</span>' : phoneRequestOnly ? '<span class="tag warn">Ждёт своего руководителя</span>' : `<button class="btn small primary" data-approve="${esc(String(x.id))}" ${approver ? "" : "disabled"}>Подтвердить ${x.kind==='phone'?'телефон':'ПК'}</button>`}</div>`).join("")
         : '<p class="muted" style="font-size:13.5px">Устройств нет: логин-пароль на этом аккаунте ещё не вводили.</p>'}</div>
     <div class="block"><h3>Журнал подтверждений доступа</h3>
       ${(a.approval_events || []).length ? tableHtml([["at", "Время"], ["actor", "Кто подтвердил"], ["action", "Действие"], ["decision", "Решение"], ["detail", "Аккаунт / устройство"], ["ip", "IP"]],
@@ -119,13 +123,15 @@ async function load(root: HTMLElement) {
   const d = await adm("GET", "/admin/accounts.json");
   approver = String(d.approver || "");
   cutoverActive = d.cutover_active === true;
+  passwordReviewOwner = d.password_review_owner === true;
   all = ((d.accounts || []) as any[]).slice().sort((a, b) => String(a.username || "").localeCompare(String(b.username || ""), "ru"));
   selected = all.some((a) => String(a.username) === selected) ? selected : null;
   const pending=all.filter(a=>a.status==='awaiting'||(a.devices||[]).some((d:any)=>d.status==='pending'));
   root.innerHTML = `${note("Чтобы открыть карточку и действия, нажмите «Открыть профиль» в строке. Аккаунт и каждое устройство подтверждаются отдельно. Сотрудник может зарегистрироваться с телефона или на ПК; вход подтверждает свой руководитель во «Входе команды». Руководителей и служебные профили подтверждает администратор. Геопозиция для входа не требуется.")}
     <div class="section"><h3>Ждут подтверждения: ${pending.length} профилей</h3>${pending.length?pending.map(a=>`<div class="list-row"><div class="grow"><b>${esc(a.employee||a.username)}</b><div class="sub">${esc(devicesLine(a.devices))}</div></div><button class="btn primary" data-profile="${esc(a.username)}">Открыть профиль</button></div>`).join(''):'<p class="muted">Необработанных заявок нет. Новая заявка появится после регистрации или входа на устройстве.</p>'}</div>
     <div class="bulk" id="bulk" style="margin-top:12px"></div>
-    <div id="tbl"></div>
+    <input class="input" type="search" id="account-search" aria-label="Поиск профиля" placeholder="ФИО, логин, офис или устройство" value="${esc(accountQuery)}">
+    <details id="account-all" ${accountExpanded||accountQuery?'open':''}><summary>Все профили (${all.length})</summary><div id="tbl"></div></details>
     <div id="acc"></div>`;
   const cols: Col<Row>[] = [
     { key: "login", title: "Логин", value: (r) => r.a.username || "", html: (r) => `<span class="who mono">${esc(r.a.username || "")}</span>` },
@@ -134,14 +140,20 @@ async function load(root: HTMLElement) {
     { key: "role", title: "Роль", value: (r) => roleTitle(r.a) },
     { key: "status", title: "Статус", value: (r) => statusTitle(r.a),
       html: (r) => `<span class="tag ${r.a.status === "active" ? "ok" : r.a.status === "awaiting" ? "warn" : ""}">${esc(statusTitle(r.a))}</span>` },
-    { key: "devs", title: "Устройства", value: (r) => devicesLine(r.a.devices), html: (r) => `<span class="who">${esc(devicesLine(r.a.devices))}</span>` },
+    { key: "devs", title: "Устройства", value: (r) => devicesLine(r.a.devices)+' '+(r.a.devices||[]).map((d:any)=>d.label).join(' '), html: (r) => `<span class="who">${esc(devicesLine(r.a.devices))}</span>` },
     { key:'actions',title:'Действия',value:()=>'',filter:false,html:r=>`<button class="btn small" data-profile="${esc(r.a.username)}">Открыть профиль</button>` },
   ];
-  new DataTable<Row>(root.querySelector("#tbl")!, {
+  const table = new DataTable<Row>(root.querySelector("#tbl")!, {
     id: "analyst-accounts", cols, key: (r) => String(r.a.username || ""), exportName: "Аккаунты и устройства",
+    externalSearch: true,
     onRow: (r) => { selected = String(r.a.username || ""); details(root, r.a); },
     empty: "Аккаунтов с логином и паролем пока нет.",
-  }).setRows(all.map((a) => ({ a })));
+  });table.setRows(all.map((a) => ({ a })));table.setQuery(accountQuery);
+  const full=root.querySelector<HTMLDetailsElement>('#account-all')!;
+  full.addEventListener('toggle',()=>{accountExpanded=full.open;});
+  root.querySelector<HTMLInputElement>('#account-search')!.addEventListener('input',event=>{
+    accountQuery=(event.target as HTMLInputElement).value;table.setQuery(accountQuery);if(accountQuery.trim())full.open=true;
+  });
   root.querySelector('#tbl')?.addEventListener('click',event=>{
     const button=(event.target as HTMLElement).closest<HTMLElement>('[data-profile]');
     const account=button&&all.find(a=>a.username===button.dataset.profile);
