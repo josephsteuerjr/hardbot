@@ -36,13 +36,57 @@ def rows(conn, *, active_only=True):
 
 
 def candidates(conn):
-    known = rows(conn)
-    if conn.execute('SELECT 1 FROM staff_roster LIMIT 1').fetchone():
-        return known
-    # Compatibility for an unmigrated database; the operator sees roster coverage.
-    names = {r[0] for r in conn.execute(
-        "SELECT responsible FROM clients UNION SELECT responsible_soft FROM clients") if r[0]}
-    return [{'employee':n, 'office':'', 'products':'[]', 'manager_uid':None} for n in sorted(names)]
+    """Keep roster decisions and add new owners from the current portfolios.
+
+    Both the public picker and self-registration use this function. An import
+    must make a new owner selectable even after the roster has been populated.
+    Reading candidates never creates an account or approves a device.
+    """
+    all_rows = rows(conn, active_only=False)
+    known = [r for r in all_rows if r['active']]
+    covered = set()
+    roster_ids = {r['employee_id'] for r in all_rows}
+    for row in all_rows:
+        covered.add(db._name_key(row['employee']))
+        covered.update(db._name_key(x) for x in json.loads(row['product_names']).values())
+    # Include inactive identities and their aliases: an import must never undo
+    # deactivation. An enrolled person's canonical name remains selectable,
+    # while aliases must not be offered as another person.
+    aliases = list(conn.execute('SELECT name,employee_id FROM employee_aliases'))
+    roster_ids.update(r['employee_id'] for r in aliases if db._name_key(r['name']) in covered)
+    covered.update(db._name_key(r['name']) for r in aliases if r['employee_id'] in roster_ids)
+    enrolled = {db._name_key(r[0]) for r in conn.execute('SELECT employee FROM accounts')}
+    enrolled_ids = {r['employee_id'] for r in aliases if db._name_key(r['name']) in enrolled}
+    covered.update(db._name_key(r['name']) for r in aliases
+                   if r['employee_id'] in enrolled_ids and db._name_key(r['name']) not in enrolled)
+    offices = {}
+    for row in conn.execute('SELECT employee,city FROM employee_city'):
+        offices.setdefault(db._name_key(row['employee']), set()).add(row['city'] or '')
+    additions = {}
+    for row in conn.execute(
+            "SELECT responsible employee, 'hard' product FROM clients WHERE TRIM(COALESCE(responsible,''))<>'' "
+            "UNION SELECT responsible_soft employee, 'soft' product FROM clients WHERE TRIM(COALESCE(responsible_soft,''))<>'' "
+            "ORDER BY employee,product"):
+        name = row['employee'].strip()
+        key = db._name_key(name)
+        # Product labels distinguish portfolio columns, not a second person.
+        # Do not rewrite the owner or infer a new identity from that label.
+        base = key.rsplit(' ', 1)
+        decorated_known = len(base) == 2 and base[1] in ('хард', 'софт', 'hard', 'soft') and base[0] in covered | enrolled
+        if key in covered or decorated_known:
+            continue
+        item = additions.setdefault(key, {'employee':name, 'office':'', 'products':[], 'manager_uid':None})
+        if row['product'] not in item['products']:
+            item['products'].append(row['product'])
+    ambiguous = {db._name_key(n) for n in employee_identity.conflicts(conn, [r['employee'] for r in additions.values()])}
+    for key, item in additions.items():
+        if key in ambiguous:
+            continue
+        cities = offices.get(key, set())
+        item['office'] = next(iter(cities)) if len(cities) == 1 else ''
+        item['products'] = json.dumps(sorted(item['products']))
+        known.append(item)
+    return sorted(known, key=lambda r: db._name_key(r['employee']))
 
 
 def manager_employees(conn, mgr):
