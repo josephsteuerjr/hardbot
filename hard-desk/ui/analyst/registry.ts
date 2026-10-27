@@ -10,7 +10,7 @@ import { adm, chipsHtml, fn, fnMap, guard, kvHtml, local, note, runJob } from ".
 const XLS = [{ name: "Excel", extensions: ["xlsx", "xlsm", "xlsb", "xls"] }];
 const st = {
   tab: "import" as "import" | "enrich" | "columns" | "export" | "recalled",
-  imp: null as any, sel: new Set<string>(), full: false, restore: false, comments: false, softEdits: false, preview: null as any, applied: null as any,
+  imp: null as any, sel: new Set<string>(), full: true, restore: true, comments: false, softEdits: true, preview: null as any, applied: null as any,
   impQuery: "", impFilter: "all", impSort: "name", excludedIds: "",
   enr: null as any, matched: [] as any[], enrSel: new Set<string>(), since: "", until: "", check: null as any, decisions: {} as Record<string, string>, applyRes: null as any,
   cols: null as any, colDecisions: [] as any[], scan: null as any,
@@ -72,7 +72,7 @@ async function importTab(el: HTMLElement) {
   if (st.full) warn.push("ПОЛНЫЙ СРЕЗ: у выбранных сотрудников будут сняты договоры, которых нет среди их выбранных строк. Остальные не затрагиваются. Файл неполный — снимите галочку.");
   if (st.restore) warn.push("ВОЗВРАТ РУЧНЫХ СНЯТИЙ: вернутся только договоры, которые снова есть в выбранных строках с тем же сотрудником.");
   if (st.comments) warn.push("Текущие комментарии будут заменены значениями файла, включая пустые.");
-  if (st.softEdits) warn.push("Офисные правки результатов Софта будут применены к завершённым звонкам. Предпросмотр покажет точные замены. Для обычного обновления портфелей оставьте этот пункт выключенным.");
+  if (st.softEdits) warn.push("Офисные правки результатов Софта будут применены к завершённым звонкам. Предпросмотр покажет точные замены.");
   if (warn.length) warn.push("Точные числа пульт покажет в предпросмотре до записи.");
   el.innerHTML = `${note("Общий реестр: опубликованный master или утверждённое тестовое подмножество. Личные ФИО.xlsb сюда не загружаются. Сначала предпросмотр — запись отдельной кнопкой.")}
     <div class="toolbar" style="margin-top:12px"><button class="btn primary" data-pick>Выбрать реестр…</button><span class="muted" id="imp-cap">${esc(book?.caption || "")}</span></div>
@@ -94,7 +94,7 @@ async function importTab(el: HTMLElement) {
         <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="restore" ${st.restore ? "checked" : ""}><span class="grow">Вернуть ранее вручную снятые договоры, если они снова есть в выбранных строках с тем же ответственным</span></label>
         <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="comments" ${st.comments ? "checked" : ""}><span class="grow">Начало месяца: заменить комментарии выезда значениями файла (пустая ячейка очистит комментарий)</span></label>
         <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="softEdits" ${st.softEdits ? "checked" : ""}><span class="grow">Применить проверенные офисные правки результатов звонков Софта</span></label>
-        <p class="muted" style="font-size:13px">При обычном импорте сохранённые результаты звонков Софта защищены от замены данными реестра.</p>
+        <p class="muted" style="font-size:13px">Без галочки офисных правок сохранённые результаты звонков Софта защищены от замены данными реестра.</p>
         <p class="muted" style="font-size:13px">Историчные комментарии грузятся сами, если колонка есть в файле: значение повторяет файл точно, пустая ячейка очищает.</p></div>
       ${warn.length ? `<div class="notice" style="white-space:pre-line"><span class="grow">${esc(warn.join("\n"))}</span></div>` : ""}
       <div class="toolbar"><button class="btn primary" data-preview ${st.sel.size ? "" : "disabled"}>Предпросмотр выбранных (${n(st.sel.size)})</button>
@@ -124,11 +124,11 @@ async function importTab(el: HTMLElement) {
     } catch (e) {
       st.imp = null; cap.textContent = `Файл не разобран: ${(e as Error).message}`; return;
     }
-    st.sel = new Set(st.imp.selected); st.full = false; st.restore = false; st.comments = false; st.softEdits = false; invalidate(); redraw();
+    st.sel = new Set(st.imp.selected); st.full = true; st.restore = true; st.comments = false; st.softEdits = true; invalidate(); redraw();
   }));
   el.querySelector<HTMLSelectElement>("[data-profile]")?.addEventListener("change", guard(async () => {
     st.imp=await local("/reg/select", {profile:(el.querySelector("[data-profile]") as HTMLSelectElement).value});
-    st.sel=new Set(st.imp.selected); st.full=false; invalidate(); redraw();
+    st.sel=new Set(st.imp.selected); st.full=true; invalidate(); redraw();
   }));
   el.querySelectorAll<HTMLButtonElement>("[data-sel]").forEach((b) => b.addEventListener("click", guard(async () => {
     const r = await local("/reg/select", { mode: b.dataset.sel, full: st.full });
