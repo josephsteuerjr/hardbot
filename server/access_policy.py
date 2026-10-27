@@ -8,7 +8,20 @@ OFFLINE_READ_SECONDS = 8 * 60 * 60
 
 
 def version(team, role="", caps=None):
-    names = sorted(set(team))
+    names = set(team)
+    # Identity, bootstrap and card warmup must agree even when one person's
+    # two products use explicit different portfolio labels. This changes only
+    # the cache version, never the permission checks of those endpoints.
+    import staff_roster
+    with db.connect() as conn:
+        keys = {db._name_key(n) for n in names}
+        roster = (staff_roster.rows(conn) if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='staff_roster'").fetchone() else [])
+        for row in roster:
+            aliases = {row['employee'], *json.loads(row['product_names']).values()}
+            if keys & {db._name_key(n) for n in aliases}:
+                names.update(aliases)
+    names = sorted(names)
     assignments = []
     with db.connect() as conn:
         for start in range(0, len(names), 250):

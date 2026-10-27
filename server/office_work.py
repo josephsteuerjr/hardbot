@@ -224,7 +224,15 @@ def save(uid, employee, body):
         ids = [r["contract_id"] for r in rows]
         prior = conn.execute("SELECT * FROM office_actions WHERE op_id=?", (op,)).fetchone()
         if prior:
-            if prior["actor_uid"] != uid or prior["fingerprint"] != fingerprint:
+            # A lost acknowledgement may be retried after configuring this
+            # same person's Hard label. Preserve the original author and hash;
+            # accept only the identical request by the same stable uid.
+            import staff_roster
+            same_employee = (prior['employee'] == employee or
+                             staff_roster.product_employee(prior['employee'], 'hard') == employee)
+            original_fingerprint = hashlib.sha256(_json([
+                uid, prior['employee'], rep, action, values, ms, body['revision']]).encode()).hexdigest()
+            if prior["actor_uid"] != uid or not same_employee or prior["fingerprint"] != original_fingerprint:
                 raise OfficeError("Идентификатор уже использован для другой записи", 409)
             return {"ok": True, "duplicate": True, "event": _public(dict(prior), set(ids)),
                     "revision": _revision(rows, _events(conn, ids))}
@@ -407,10 +415,18 @@ def report(employee, profile, d_from, d_to):
                 p["rep"] = ""
     else:
         with db.connect() as conn:
-            events = conn.execute("SELECT * FROM office_actions WHERE employee=? AND event_day BETWEEN ? AND ? ORDER BY occurred_at DESC,id DESC",
-                                  (employee, d_from, d_to)).fetchall()
-            visits = conn.execute("SELECT * FROM visits WHERE employee=? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC,id DESC",
-                                  (employee, d_from, d_to)).fetchall()
+            import staff_roster
+            authors = {employee}
+            for person in staff_roster.rows(conn, active_only=False):
+                hard_name = json.loads(person['product_names']).get('hard', person['employee'])
+                if db._name_key(hard_name) == db._name_key(employee):
+                    authors.update([person['employee'], hard_name])
+            authors = sorted(authors)
+            marks = ','.join('?' for _ in authors)
+            events = conn.execute(f"SELECT * FROM office_actions WHERE employee IN ({marks}) AND event_day BETWEEN ? AND ? ORDER BY occurred_at DESC,id DESC",
+                                  (*authors, d_from, d_to)).fetchall()
+            visits = conn.execute(f"SELECT * FROM visits WHERE employee IN ({marks}) AND created_at BETWEEN ? AND ? ORDER BY created_at DESC,id DESC",
+                                  (*authors, d_from, d_to)).fetchall()
         own = {r["contract_id"] for r in rows}
         result["events"] = [{**_public(dict(e)), "source": "Офис Харда"} for e in events]
         for e in result["events"]:

@@ -497,9 +497,10 @@ def _auth(request: web.Request) -> tuple[int, str]:
     emp = _employee(uid, request)
     if not emp:
         raise web.HTTPForbidden(text="not bound")
-    if request.query.get('mode')=='soft' or request.query.get('profile')=='soft' or request.headers.get('X-Work-Product')=='soft':
-        import staff_roster
-        emp=staff_roster.product_employee(emp,'soft')
+    import staff_roster
+    profile = ('soft' if request.query.get('mode')=='soft' or request.query.get('profile')=='soft'
+               or request.headers.get('X-Work-Product')=='soft' else 'hard')
+    emp=staff_roster.product_employee(emp,profile)
     return uid, emp
 
 
@@ -1078,6 +1079,7 @@ async def _bootstrap(request: web.Request) -> web.Response:
     # ответственности. Флаг едет в roles (вместе с режимом ?mode=soft это
     # переключатель «Выездник | Софт» в оболочке).
     import staff_roster
+    hard_employee=staff_roster.product_employee(emp,'hard')
     soft_employee=staff_roster.product_employee(emp,'soft')
     soft_exists = db.soft_portfolio_exists(soft_employee)
     soft_mode = soft_exists and request.query.get("mode") == "soft"
@@ -1085,7 +1087,9 @@ async def _bootstrap(request: web.Request) -> web.Response:
         emp=soft_employee
         grouped = db.persons_for_soft(emp)
     else:
-        grouped = db.persons_for_employee(emp)
+        # Keep the principal name in bootstrap: existing phone queues compare
+        # it with their durable owner. Only portfolio reads use the Hard alias.
+        grouped = db.persons_for_employee(hard_employee)
     persons = [_person_brief(p) for p in grouped]
     if request.get("desk_employee"):
         import office_work
@@ -1135,7 +1139,7 @@ async def _bootstrap(request: web.Request) -> web.Response:
         # если он одновременно выездник (перевод УЗБ на звонки).
         roles = roles or {}
         roles["soft"] = True
-        roles["field"] = bool(db.persons_for_employee(emp))
+        roles["field"] = bool(db.persons_for_employee(hard_employee))
     if roles and roles.get("manager"):
         # Подпись режима в приложении (v62): «Руководитель», «Безопасник»,
         # «Директор» или «Владелец» — какой ролью человек вошёл.
@@ -1238,6 +1242,8 @@ async def _route_day(request: web.Request) -> web.Response:
     emp = _employee(uid, request)
     if not emp:
         raise web.HTTPNotFound(text="bind")
+    import staff_roster
+    emp = staff_roster.product_employee(emp, 'hard')
     # Битая точка старта — как её отсутствие: маршрут строится от первого адреса.
     start = _latlon(request.query.get("lat"), request.query.get("lon"))
     grouped = db.persons_for_employee(emp)
