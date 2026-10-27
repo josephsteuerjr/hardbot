@@ -1082,10 +1082,9 @@ async def _bootstrap(request: web.Request) -> web.Response:
     hard_employee=staff_roster.product_employee(emp,'hard')
     soft_employee=staff_roster.product_employee(emp,'soft')
     soft_exists = db.soft_portfolio_exists(soft_employee)
-    soft_mode = soft_exists and request.query.get("mode") == "soft"
+    soft_mode = request.query.get("mode") == "soft"
     if soft_mode:
-        emp=soft_employee
-        grouped = db.persons_for_soft(emp)
+        grouped = db.persons_for_soft(soft_employee)
     else:
         # Keep the principal name in bootstrap: existing phone queues compare
         # it with their durable owner. Only portfolio reads use the Hard alias.
@@ -1155,6 +1154,8 @@ async def _bootstrap(request: web.Request) -> web.Response:
     scope_version = await asyncio.to_thread(access_policy.version, [emp])
     response = web.json_response({
         "ok": True, "uid": uid, "employee": emp,
+        "owner_names": staff_roster.principal_names(emp),
+        "portfolio_employee": soft_employee if soft_mode else hard_employee,
         "scope_version": scope_version, "offline_read_seconds": access_policy.OFFLINE_READ_SECONDS,
         "kind": db.get_kind(uid), "lang": lang,
         "persons": persons, "meta": _meta(lang),
@@ -1176,9 +1177,10 @@ async def _identity(request: web.Request) -> web.Response:
                                      headers={'Cache-Control': 'no-store'})
         raise web.HTTPUnauthorized(text='auth')
     employee = await asyncio.to_thread(_employee, uid, request) or ''
-    import access_policy
+    import access_policy, staff_roster
     version = await asyncio.to_thread(access_policy.version, [employee] if employee else [])
     return web.json_response({"ok": True, "uid": uid, "employee": employee,
+                             "owner_names": await asyncio.to_thread(staff_roster.principal_names, employee),
                              "scope_version": version, "offline_read_seconds": access_policy.OFFLINE_READ_SECONDS},
                              headers={"Cache-Control": "no-store"})
 
@@ -1334,7 +1336,9 @@ async def _note_add(request: web.Request) -> web.Response:
     rep = (body.get("rep") or "").strip() or None
     if rep:
         row = db.get_client(rep)
-        if not row or (row["responsible"] != emp and row["responsible_soft"] != emp and uid != ADMIN_ID):
+        import staff_roster
+        owners = set(staff_roster.principal_names(emp))
+        if not row or (row["responsible"] not in owners and row["responsible_soft"] not in owners and uid != ADMIN_ID):
             raise web.HTTPNotFound(text="person")
     op_id = (str(body.get("op_id") or "")).strip() or None
     nid = db.add_note(uid, text, employee=emp, client_rep=rep, op_id=op_id)
@@ -2836,7 +2840,9 @@ async def _receipt(request: web.Request) -> web.Response:
     _require_field_write(uid)
     rep = request.query.get("rep", "")
     row = db.get_client(rep)
-    if not row or (row["responsible"] != emp and row["responsible_soft"] != emp and uid != ADMIN_ID):
+    import staff_roster
+    owners = set(staff_roster.principal_names(emp))
+    if not row or (row["responsible"] not in owners and row["responsible_soft"] not in owners and uid != ADMIN_ID):
         raise web.HTTPNotFound(text="person")
     op = re.sub(r"[^A-Za-z0-9_-]", "", request.query.get("op", ""))[:64]
     if not op:
@@ -4318,7 +4324,15 @@ async def _manager_portfolio(request: web.Request) -> web.Response:
     employee = (request.query.get('employee') or '').strip()
     if employee and employee not in team:
         raise web.HTTPNotFound(text='employee')
-    selected = [employee] if employee else team
+    if employee:
+        import staff_roster
+        owner = staff_roster.product_employee(employee, profile)
+        # Mapping a display name must never expand the manager's existing team.
+        if owner not in team:
+            raise web.HTTPNotFound(text='employee')
+        selected = [owner]
+    else:
+        selected = team
     data = await asyncio.to_thread(_team_portfolio,selected,profile)
     await asyncio.to_thread(db.audit_access,uid,'digest_view_portfolio',detail=f'{profile} n={data["persons"]}')
     return _manager_json(data)

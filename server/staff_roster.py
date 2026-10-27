@@ -28,6 +28,27 @@ def product_employee(employee,product):
     return employee
 
 
+def principal_names(employee):
+    """Declared names of this same principal, never inferred from spelling.
+
+    The list is an ownership hint for the caller's durable queue, not a team
+    permission grant. Ambiguous or inactive roster rows cannot add aliases.
+    """
+    if not employee:
+        return []
+    with db.connect() as conn:
+        people = rows(conn)
+    families = [(r['employee_id'], {r['employee'], *json.loads(r['product_names']).values()}) for r in people]
+    matched = [(identifier,names) for identifier,names in families
+               if db._name_key(employee) in {db._name_key(n) for n in names}]
+    if len(matched) != 1:
+        return [employee]
+    identifier,names = matched[0]
+    unique = {n for n in names if {ident for ident,family in families
+              if db._name_key(n) in {db._name_key(x) for x in family}} == {identifier}}
+    return sorted({employee, *unique})
+
+
 def rows(conn, *, active_only=True):
     return [dict(r) for r in conn.execute(
         'SELECT r.*,i.display_name employee FROM staff_roster r '

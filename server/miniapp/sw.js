@@ -14,7 +14,7 @@
  * после этого не нужно: открытие по сети кладёт оболочку обратно (network-first ниже),
  * свои ассеты — при первом запросе (caches.open создаёт кэш заново).
  */
-const CACHE = "hard-shell-v103";
+const CACHE = "hard-shell-v108";
 let cacheEnabled=true,cacheEpoch=0;
 const cacheWrites=new Set();
 function remember(key,response){
@@ -87,10 +87,15 @@ self.addEventListener("fetch", (e) => {
   // Так service worker не может «залипнуть» на старой/сломанной закэшированной странице.
   if (req.mode === "navigate") {
     e.respondWith(
-      fetch(req, {cache: "no-store"}).then((resp) => {
-        if (resp && resp.ok) remember("/",resp.clone());
-        return resp;
-      }).catch(() => caches.match("/"))
+      caches.match("/").then(async hit => {
+        const ctl=new AbortController(), timer=setTimeout(()=>ctl.abort(),hit?5000:30000);
+        try{
+          const resp=await fetch(req,{cache:"no-store",signal:ctl.signal});
+          if(resp.ok){await remember("/",resp.clone());return resp;}
+          return hit||resp;
+        }catch(error){if(hit)return hit;throw error;}
+        finally{clearTimeout(timer);}
+      })
     );
     return;
   }

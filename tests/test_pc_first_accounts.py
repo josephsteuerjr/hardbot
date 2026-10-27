@@ -295,7 +295,8 @@ def test_same_person_two_programs_preserves_separate_portfolio_names_and_fact_au
     headers={'X-App-Token':data['token']}
     status,hard=http('GET','/api/bootstrap?mode=field',headers=headers)
     status2,soft=http('GET','/api/bootstrap?mode=soft',headers=headers)
-    assert status==status2==200 and hard['employee']=='Own Employee' and soft['employee']=='Own Employee SOFT'
+    assert status==status2==200 and hard['employee']==soft['employee']=='Own Employee'
+    assert soft['portfolio_employee']=='Own Employee SOFT'
     assert len(hard['persons'])==len(soft['persons'])==1
     call={'rep':'SYN-MULTI','kind':'call','finish':True,'op_id':'synthetic-multi-call',
           'form_version':web.FORM_PROTOCOL_VERSION,'input_keys':['soft_call_status'],

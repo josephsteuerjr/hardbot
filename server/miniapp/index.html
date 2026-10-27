@@ -138,6 +138,8 @@ body{position:fixed;top:0;left:0;right:0;width:100%;height:var(--app-height);mar
 body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:var(--grain);
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .42 0 0 0 0 .3 0 0 0 0 .18 0 0 0 .9 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
 button,a,input,select,textarea,.pcard{touch-action:manipulation}
+#team-reset-form label{display:block;margin:12px 0 6px}
+#team-reset-form input{display:block;box-sizing:border-box;width:100%;min-width:0;margin-top:6px;padding:12px;border:var(--lw) solid var(--line-ink);border-radius:14px;background:var(--card);color:var(--text);font:inherit}
 button{font-family:inherit}
 a{color:var(--link)}
   .warnfld{border:var(--lw) solid var(--danger);border-radius:14px;padding:10px 12px;color:var(--danger);font-size:13px;line-height:1.35;margin-bottom:10px}
@@ -255,10 +257,19 @@ a{color:var(--link)}
 .btn.acc:active{filter:brightness(1.05);background:var(--terra)}
 .btn.ghost{background:transparent}
 .btn.line{margin-top:8px}
+/* Native hit target: mobile browsers receive the tap on the file control itself. */
+.filepick{position:relative;overflow:hidden}
+.filepick input[type="file"]{position:absolute;inset:0;z-index:1;width:100%;height:100%;
+  margin:0;padding:0;opacity:0;cursor:pointer;font-size:16px}
+.filepick:focus-within{outline:2px solid var(--terra);outline-offset:3px}
 /* Замороженная кнопка: видно, что средство есть, но сейчас не работает. Прятать
    её нельзя — человек в поле не отличит «у меня другое приложение» от «сломалось». */
 .btn.frozen{opacity:.45;cursor:default}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.promise-report-fields{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;margin:12px 0}
+.promise-report-fields label{display:grid;gap:5px;font-size:13px;min-width:0}
+.promise-report-fields label:last-child{grid-column:1/-1}
+.promise-report-fields input,.promise-report-fields select{box-sizing:border-box;min-width:0;width:100%;padding:10px 8px;border:var(--lw) solid var(--line-ink);border-radius:12px;background:var(--card);color:var(--text);font:inherit}
 .providers{display:flex;gap:8px;margin-bottom:12px}
 .providers a{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;
   border:var(--lw) solid var(--line-ink);border-radius:16px;padding:9px 4px;font-size:11.5px;
@@ -855,7 +866,7 @@ const I18N = {
     receipt:"Чеки пардохт",rcShoot:"Чек зама кардан",rcAmount:"Маблағи пардохт",rcDate:"Санаи пардохт",rcPayerClient:"Қарздор пардохт кард",rcPayerOther:"Шахси дигар",rcWho:"Кӣ пардохт кард ва чаро",rcNeedFields:"Маблағ ва санаи пардохтро ворид кунед",rcBadPhoto:"Расми чек нигоҳ дошта нашуд — аз нав кӯшиш кунед",
     nosplit:"тақсимот аз рӯи моддаҳо наомад"},
 };
-let STATE = {lang:"ru", meta:null, persons:[], cur:null, tab:"visit"};
+let STATE = {lang:"ru", meta:null, persons:[], cur:null, tab:"visit", ownerNames:[], ownerUid:null};
 // Старый адрес (только выгрузка очереди): {newUrl} — куда уходить работать.
 let DRAIN=null;
 let FORM_VERSION=0;
@@ -1045,7 +1056,9 @@ function ownedDraftKey(key){
 // Поколение данных устройства. Что стартовало ДО очистки и докатилось после неё
 // (ответ bootstrap, прогрев карточек), обратно в хранилище и на экран не пишет.
 let WIPE_GEN=0;
-const MOBILE_RETENTION_MS=14*60*60*1000;
+// Automatic offline erasure is paused. Logout and server revocation still erase.
+// Zero disables both the timer and the offline snapshot deadline.
+const MOBILE_RETENTION_MS=0;
 const CONTACT_KEY="hb_server_contact";
 let ACCESS_CHECK=null, ACCESS_VERIFIED=0, ACCESS_CREDENTIAL="", PURGING=null, RETENTION_TIMER=null;
 let POLICY_NOTICE="";
@@ -1063,7 +1076,7 @@ function noteServerContact(){
   ACCESS_VERIFIED=Date.now();ACCESS_CREDENTIAL=credential;
   try{localStorage.setItem(CONTACT_KEY,JSON.stringify({mark:tokenMark(credential),at:ACCESS_VERIFIED}));}catch(e){}
   clearTimeout(RETENTION_TIMER);
-  if(mobileProfile())RETENTION_TIMER=setTimeout(()=>void enforceRetention(),MOBILE_RETENTION_MS);
+  if(mobileProfile()&&MOBILE_RETENTION_MS>0)RETENTION_TIMER=setTimeout(()=>void enforceRetention(),MOBILE_RETENTION_MS);
   try{navigator.serviceWorker?.controller?.postMessage({type:"PROFILE_ACTIVE"});}catch(e){}
 }
 async function purgeProfile(reason){
@@ -1093,7 +1106,7 @@ async function purgeProfile(reason){
 async function enforceRetention(){
   if(PURGING)return false;
   if(localStorage.getItem("hb_erasure_pending")){await purgeProfile("revoked");return false;}
-  if(!mobileProfile()||!cacheCredential())return true;
+  if(!mobileProfile()||MOBILE_RETENTION_MS<=0||!cacheCredential())return true;
   const gen=WIPE_GEN,credential=cacheCredential();
   let at=confirmedContact();
   if(!at){
@@ -1126,7 +1139,7 @@ async function ensureAccess(force=false){
       if(identity.ok!==true||!identity.uid)throw new Error("invalid identity");
       if(generation!==WIPE_GEN||credential!==cacheCredential())return false;
       if(!await enforceRetention())return false;
-      noteServerContact();STATE.online=true;return true;
+      setPrincipal(identity);noteServerContact();STATE.online=true;return true;
     }catch(e){ACCESS_VERIFIED=0;STATE.online=false;return false;}
     finally{clearTimeout(timer);if(ACCESS_CHECK===check)ACCESS_CHECK=null;}
   })();
@@ -1149,7 +1162,7 @@ async function wipeDevice(opts){
   clearTimeout(RETENTION_TIMER);
   try{sessionStorage.clear();}catch(e){}
   try{ closePick(); closeAsk("swapsheet"); closeAsk("outsheet"); PhotoAudit.free(); }catch(e){}
-  STATE.cur=null; STATE.persons=[]; STATE.roles=null; STATE.uid=null; STATE.employee="";
+  STATE.cur=null; STATE.persons=[]; STATE.roles=null; STATE.uid=null; STATE.employee="";STATE.ownerNames=[];STATE.ownerUid=null;
   try{
     Object.keys(localStorage).forEach(k=>{ if(LS_KEEP.indexOf(k)<0&&
       !(keepQueue&&(k==="hb_queue_owner_blocked"||ownedDraftKey(k)))) localStorage.removeItem(k); });
@@ -1245,12 +1258,16 @@ async function cacheBootstrap(d){
       if(gen!==WIPE_GEN||credential!==cacheCredential()) return;
     }
     await IDB.put("kv",{uid:d.uid,lang:d.lang,meta:d.meta,persons:d.persons,kind:d.kind,
-      employee:d.employee,roles:d.roles||null,scope_version:d.scope_version,_mode:d._mode||STATE.mode,
+      employee:d.employee,owner_names:d.owner_names||[],roles:d.roles||null,scope_version:d.scope_version,_mode:d._mode||STATE.mode,
       _credential:credential,at:Date.now()},"bootstrap",
       ()=>gen===WIPE_GEN&&credential===cacheCredential());
   }catch(e){}
 }
-function offlineLeaseValid(s){const age=Date.now()-Number(confirmedContact()||(s&&s.at));return Number.isFinite(age)&&age>=0&&(!mobileProfile()||age<MOBILE_RETENTION_MS);}
+function offlineLeaseValid(s){
+  if(mobileProfile()&&MOBILE_RETENTION_MS<=0)return true;
+  const age=Date.now()-Number(confirmedContact()||(s&&s.at));
+  return Number.isFinite(age)&&age>=0&&(!mobileProfile()||age<MOBILE_RETENTION_MS);
+}
 // Credential is a cache selector, NOT proof of a person's identity. Only an
 // online server bootstrap may write a snapshot for a newly presented token.
 function cacheCredential(){
@@ -1469,12 +1486,23 @@ async function stampQueueOwners(){
     try{localStorage.setItem("hb_queue_owner_blocked","1");}catch(_e){}
   }
 }
+function setPrincipal(d){
+  STATE.uid=d.uid;STATE.employee=d.employee||"";
+  STATE.ownerUid=d.uid||null;
+  STATE.ownerNames=d.uid&&Array.isArray(d.owner_names)
+    ?d.owner_names.filter(n=>typeof n==="string"&&n.length<=120):[];
+}
 function queueBelongs(it){
   const owner=it._owner;
   // Keep unlabelled legacy work for recovery, but never send it under a new
   // credential. A matching employee name alone does not establish identity.
   return !!(owner&&owner.uid&&STATE.uid&&owner.uid===STATE.uid&&
-    (!owner.employee||owner.employee===STATE.employee));
+    (!owner.employee||owner.employee===STATE.employee||
+      (STATE.ownerUid===STATE.uid&&Array.isArray(STATE.ownerNames)&&STATE.ownerNames.includes(owner.employee))));
+}
+function queuedHeaders(it,headers){
+  if(it.kind==="receipt"||it.kind==="note"||it.kind==="note_delete")return headers;
+  return Object.assign({},headers,{"X-Work-Product":it.kind==="payment"||it.save_kind==="call"?"soft":"hard"});
 }
 
 // Факт сначала становится durable. Закрытие PWA во время HTTP не теряет
@@ -1506,7 +1534,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=103;
+const SHELL_VERSION=108;
 let LOGIN_GPS=null;
 const ORIGINAL_FETCH=window.fetch.bind(window);
 window.fetch=async(input,init)=>{
@@ -1761,7 +1789,7 @@ async function flushQueue(){
     await updateOffBar();
     let items=[]; try{ items=(await IDB.all("queue"))||[]; }catch(e){ items=[]; }
     if(items.some(it=>it._owner)&&(DRAIN||!STATE.uid)){
-      try{const identity=await api("/api/identity");STATE.uid=identity.uid;STATE.employee=identity.employee||"";}
+      try{const identity=await api("/api/identity");setPrincipal(identity);}
       catch(e){return;}
     }
     items.sort((a,b)=>(a.at||0)-(b.at||0));   // порядок как случилось в поле
@@ -1808,16 +1836,16 @@ async function flushQueue(){
           if(it.save_kind==="call") sbody.append_comment=it.append_comment!==false;
           if(it.geo) sbody.geo=it.geo;
           if(it.pr) Object.assign(sbody, it.pr);     // следы выезда из очереди
-          r=await fetch("/api/save",{method:"POST",headers:jsonHeaders(),signal:ctl.signal,redirect:"error",
+          r=await fetch("/api/save",{method:"POST",headers:queuedHeaders(it,jsonHeaders()),signal:ctl.signal,redirect:"error",
             body:JSON.stringify(sbody)});
         }else if(it.kind==="payment"){
-          r=await fetch("/api/save",{method:"POST",headers:jsonHeaders(),signal:ctl.signal,redirect:"error",body:JSON.stringify({
+          r=await fetch("/api/save",{method:"POST",headers:queuedHeaders(it,jsonHeaders()),signal:ctl.signal,redirect:"error",body:JSON.stringify({
             kind:"payment",finish:true,rep:it.rep,op_id:it.op_id,occurred_at:it.occurred_at,
             paid_at:it.paid_at,amount:it.amount,result_status:it.result_status||"",payment_revision:it.payment_revision})});
         }else if(it.kind==="marker"){
           const body={lat:it.lat,lon:it.lon,op_id:it.op_id};
           if(it.rep) body.rep=it.rep; if(it.label) body.label=it.label;
-          r=await fetch("/api/marker",{method:"POST",headers:jsonHeaders(),signal:ctl.signal,redirect:"error",body:JSON.stringify(body)});
+          r=await fetch("/api/marker",{method:"POST",headers:queuedHeaders(it,jsonHeaders()),signal:ctl.signal,redirect:"error",body:JSON.stringify(body)});
         }else if(it.kind==="note_delete"){
           r=await fetch("/api/note_delete",{method:"POST",headers:jsonHeaders(),signal:ctl.signal,redirect:"error",
             body:JSON.stringify({id:it.id})});
@@ -1830,8 +1858,8 @@ async function flushQueue(){
           try{ bytes=await queuedPhotoBytes(it); }
           catch(e){ await markPhotoFailed(it,"retake"); STATE.online=true; continue; }
           r=await fetch("/api/photo?rep="+enc(it.rep)+"&op="+it.op_id,
-            {method:"POST",signal:ctl.signal,redirect:"error",headers:photoHeaders(it.geo,it.ext,
-               {at:it.at, src:it.src, sm:it.exif&&it.exif.sm, exif:it.exif}),
+            {method:"POST",signal:ctl.signal,redirect:"error",headers:queuedHeaders(it,photoHeaders(it.geo,it.ext,
+               {at:it.at, src:it.src, sm:it.exif&&it.exif.sm, exif:it.exif})),
              body:bytes});
         }else if(it.kind==="receipt"){
           let bytes;
@@ -1874,7 +1902,6 @@ async function flushQueue(){
             // Raw 4xx (в т.ч. 413/422) повтором не вылечится: запись сохраняем
             // как требующую пересъёмки и продолжаем последующие операции.
             await markPhotoFailed(it,String(r.status));
-            await retireReplacedPhoto(it);
             STATE.online=true; continue;
           }
           else if(it.kind==="save"||it.kind==="payment"||it.kind==="note"||it.kind==="marker"){
@@ -2602,7 +2629,7 @@ async function api(path, opts){
   const ctl=new AbortController(), timer=setTimeout(()=>ctl.abort(),30000);
   try{
     const r = await fetch(path, Object.assign({}, opts, {headers:h,signal:ctl.signal,redirect:"error"}));
-    if (!r.ok){let detail;try{detail=await r.json();}catch(e){}const error=new Error(String(r.status));error.detail=detail&&detail.message;throw error;}
+    if (!r.ok){let detail;try{detail=await r.json();}catch(e){}const error=new Error(String(r.status));error.detail=detail&&(detail.message||detail.error);throw error;}
     const data=await r.json();
     // A response initiated under A must not mutate B's state or rewarm B's
     // cache after a logout, revoked-token replacement or same-token UID change.
@@ -2665,16 +2692,17 @@ function renderPending(employee, kind){
   const t=L();
   // Аккаунт «логин-пароль» ждёт подтверждения администратора — это НЕ заявка
   // привязки: другие тексты (pending_kind приходит с сервера, октябрь 2026).
-  const acc=kind==="account" || kind==="gps";
+  const review=kind==="password_review";
+  const acc=kind==="account" || kind==="gps" || review;
   let leader=false;try{leader=acc&&["manager","security","full","analyst"].includes(localStorage.getItem("account_role"));}catch(e){}
-  const title=acc?"Вход записан":t.pendingtitle;
+  const title=review?"Пароль изменён — ждём владельца":acc?"Вход записан":t.pendingtitle;
   const why=leader?"Ваш доступ и телефон подтверждает администратор. Попросите его открыть в Аналитике «Профили и устройства» → «Открыть профиль» напротив вашего ФИО и подтвердить доступ и телефон. Самостоятельно подтвердить своё устройство во «Входе команды» нельзя.":acc?"Профиль и телефон ожидают своего руководителя. Попросите его открыть «Вход команды», сверить ваше ФИО и нажать «Подтвердить телефон». Компьютер для этого не нужен. После подтверждения доступ откроется здесь.":t.pendingwhy;
   const wrong=leader?"После подтверждения администратором нажмите «Проверить снова».":acc?"Проверьте позже кнопкой или спросите руководителя.":t.pendingwrong;
   $("app").innerHTML=`<div class="center" id="pendingAccess" style="padding:24px">
       <div style="font-size:40px;margin-bottom:12px">⏳</div>
       <div>${esc(title)}</div>
       <div class="muted" style="margin-top:8px">${esc(employee||"")}</div>
-      <div class="muted" style="margin-top:12px">${esc(why)}</div>
+      <div class="muted" style="margin-top:12px">${esc(review?'Ваш личный пароль сохранён. Доступ после смены пароля подтверждает владелец. Затем нажмите «Проверить снова».':why)}</div>
       <div class="muted" style="margin-top:16px;font-size:12px">${esc(wrong)}</div>
       ${acc?`<button class="btn acc" style="max-width:280px;margin:16px auto 0" onclick="checkPending()">Проверить снова</button>`:""}
     </div>`;
@@ -2717,6 +2745,9 @@ async function boot(){
     if(availableMode==="soft" && bootMode!=="soft" && !d.needsOnboarding && !d.pending){
       bootMode="soft";
       d=await api("/api/bootstrap?mode=soft");
+    }else if(bootMode==="soft" && availableMode!=="soft" && !d.needsOnboarding && !d.pending){
+      bootMode=availableMode;
+      d=await api("/api/bootstrap");
     }
     // Пока шёл запрос, телефон могли очистить («Выйти», замена входа): поздний
     // ответ не должен вернуть на экран и в хранилище стёртый портфель.
@@ -2744,7 +2775,7 @@ async function boot(){
     if(gen!==WIPE_GEN) return;
     setBottomNav("clients");   // вкладки видны с первого экрана
     setMeta(d.meta, true); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
-    STATE.uid=d.uid; STATE.employee=d.employee||"";
+    setPrincipal(d);
     STATE.roles=d.roles||null;   // роль руководителя: список его сотрудников + текущий
     STATE.mode=bootMode;
     STATE.online=true;
@@ -2785,7 +2816,7 @@ async function boot(){
     if(snap && snap.persons){
       STATE.lang=snap.lang||STATE.lang; renderLangs();
       setMeta(snap.meta); STATE.persons=snap.persons; STATE.kind=snap.kind||"agent";
-      STATE.uid=snap.uid; STATE.employee=snap.employee||"";
+      setPrincipal(snap);
       // Без roles из снимка руководитель в поле терял и переключатель
       // портфелей, и вкладку сводки — читалось как поломка приложения.
       STATE.roles=snap.roles||null;
@@ -3421,11 +3452,11 @@ function panelForm(d,t){
       <label class="fld">${t.tips}</label><textarea id="f_tips" maxlength="4000">${esc(d.tips||"")}</textarea>
     </div>
     <div class="fsec"><div class="fsec-h">${t.photos}</div>
-      <label class="btn line" style="cursor:pointer;margin-top:8px">${ic("camera")}<span>${t.addphoto}</span>
-        <input type="file" accept="image/*" capture="environment" id="photo" style="display:none" onchange="upPhoto('photo',true)">
+      <label class="btn line filepick" style="cursor:pointer;margin-top:8px">${ic("camera")}<span>${t.addphoto}</span>
+        <input type="file" accept="image/*" capture="environment" id="photo" onchange="upPhoto('photo',true)">
       </label>
-      <label class="btn line" style="cursor:pointer;margin-top:8px">${ic("image")}<span>${t.fromgallery}</span>
-        <input type="file" accept="image/*" multiple id="photogal" style="display:none" onchange="upPhoto('photogal',false)">
+      <label class="btn line filepick" style="cursor:pointer;margin-top:8px">${ic("image")}<span>${t.fromgallery}</span>
+        <input type="file" accept="image/*" multiple id="photogal" onchange="upPhoto('photogal',false)">
       </label>
       <div class="muted" style="font-size:11px;margin-top:6px">${t.galhint}</div>
       <div class="muted" id="phc" style="font-size:12px;margin-top:6px">${t.photos}: ${d.photos||0}</div>
@@ -3890,14 +3921,25 @@ async function upPhoto(id, live){
   // security-scoped файлы из picker живы. Дальше в сеть и IndexedDB идут
   // самостоятельные ArrayBuffer'ы, не File/Blob path.
   const prepared=[];
+  const staged=[];
+  let committed=0;
   try{
-    // Materialize every picker file before decoding, EXIF, GPS or network.
-    // iOS may revoke its native file handle while another await is pending.
-    const captured=await Promise.allSettled(files.map(async f=>({
-      name:f.name, file:new Blob([await (f.arrayBuffer?f.arrayBuffer():new Response(f).arrayBuffer())],
-                                {type:f.type||"image/jpeg"})})));
+    // Start reading every native handle immediately; commit ALL originals
+    // before decoding, GPS or network. A suspended app can replay these bytes.
+    const captured=await Promise.allSettled(files.map(async (f,i)=>{
+      const bytes=await (f.arrayBuffer?f.arrayBuffer():new Response(f).arrayBuffer());
+      if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid) throw new Error("stale photo");
+      const entry={op_id:uuid(),kind:"photo",rep,bytes,mime:f.type||"image/jpeg",
+        ext:photoExt(f.name,f.type),geo:null,at:Date.now(),src:live!==false?"camera":"gallery",exif:exifNone()};
+      if(i===0&&retakeOf)entry.replaces_op_id=retakeOf;
+      PHOTO_PREPARING.add(entry.op_id);staged.push(entry);
+      if(!(await enqueue(entry)))throw new Error("photo storage");
+      committed++;
+      return {name:f.name,file:new Blob([bytes],{type:entry.mime}),entry};
+    }));
     for(const result of captured){
       if(result.status!=="fulfilled"){toast(L().photolost);continue;}
+      if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid)return;
       const f=result.value.file;
       try{
         // EXIF — ПЕРВЫМ: shrinkPhoto стирает метаданные без следа и без лога.
@@ -3906,32 +3948,42 @@ async function upPhoto(id, live){
         const exif=await Promise.race([
           readExifMeta(f).catch(()=>exifNone("error")),
           new Promise(r=>setTimeout(()=>r(exifNone("error")),EXIF_MS))]);
-        // Жмём ДО чтения в ArrayBuffer: иначе в память и в IndexedDB ляжет
-        // восьмимегабайтный оригинал, который потом всё равно не уедет.
-        const small=await shrinkPhoto(f);
+        // Original is durable already. A stuck decoder must not block replay.
+        let decodeTimer;
+        const small=await Promise.race([shrinkPhoto(f),new Promise(resolve=>{
+          decodeTimer=setTimeout(()=>resolve(null),15000);
+        })]).finally(()=>clearTimeout(decodeTimer));
         exif.sm=small?1:0;   // «пережато/оригинал»: у HEIC-оригинала разбор возможен позже
         prepared.push({bytes:await photoBytes(small||f),
                        mime:small?"image/jpeg":(f.type||"image/jpeg"),
-                       ext:small?".jpg":photoExt(result.value.name,f.type), exif});
-      }catch(e){ toast(L().photolost); }
+                       ext:small?".jpg":photoExt(result.value.name,f.type), exif,entry:result.value.entry});
+      }catch(e){ /* Original already committed; replay can send it. */ }
     }
     try{ el.value=""; }catch(e){}
-    // Держим «занят» до конца отправки ВСЕЙ пачки: пока идёт сеть по первому
-    // снимку, остальные живут только в памяти, и перезагрузка их потеряет.
+    // Only local preparation is awaited. Network latency never holds the picker
+    // or keeps the remaining photos in volatile memory.
     for(let i=0;i<prepared.length;i++){
       if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid) return;
-      await sendPhoto(rep,prepared[i],live!==false,i===0?retakeOf:null);
+      await sendPhoto(rep,prepared[i],live!==false,i===0?retakeOf:null,true);
     }
-  }finally{ PHOTO_BUSY--; }
+  }finally{
+    for(const entry of staged)PHOTO_PREPARING.delete(entry.op_id);
+    PHOTO_BUSY--;
+    if(gen===WIPE_GEN&&credential===cacheCredential()&&uid===STATE.uid){
+      await updateOffBar();
+      if(committed)toast(L().savedoff);
+      void flushQueue();
+    }
+  }
 }
-async function sendPhoto(rep,p,live,retakeOf){
+async function sendPhoto(rep,p,live,retakeOf,deferNetwork=false){
   const gen=WIPE_GEN, credential=cacheCredential(), uid=STATE.uid;
-  const op_id=uuid(), at=Date.now();
+  const op_id=p.entry?.op_id||uuid(), at=p.entry?.at||Date.now();
   const bytes=p.bytes, mime=p.mime, ext2=p.ext;
   // Сначала фиксируем единственную самостоятельную копию и ждём commit IDB.
   // Только после этого допустимы geolocation/fetch: iOS может выгрузить PWA на
   // любом await, а pageshow/следующий запуск безопасно досылает тот же op_id.
-  const entry={op_id,kind:"photo",rep,bytes,mime,ext:ext2,geo:null,at,
+  const entry={...p.entry,op_id,kind:"photo",rep,bytes,mime,ext:ext2,geo:null,at,
                src:live?"camera":"gallery", exif:p.exif};
   let geo=null;
   PHOTO_PREPARING.add(op_id);
@@ -3955,13 +4007,15 @@ async function sendPhoto(rep,p,live,retakeOf){
       try{ await IDB.put("queue",entry); }catch(e){}  // без geo фото всё равно сохранено
     }
   }finally{
-    PHOTO_PREPARING.delete(op_id);
+    if(!deferNetwork)PHOTO_PREPARING.delete(op_id);
   }
   if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid||!queueBelongs(entry)) return;
+  if(deferNetwork)return;
   PHOTO_INFLIGHT.add(op_id);
+  const ctl=new AbortController(), timer=setTimeout(()=>ctl.abort(),120000);
   try{
     const r=await fetch("/api/photo?rep="+enc(rep)+"&op="+op_id,
-      {method:"POST",headers:photoHeaders(geo,ext2,
+      {method:"POST",signal:ctl.signal,redirect:"error",headers:photoHeaders(geo,ext2,
          {at,src:entry.src,sm:p.exif&&p.exif.sm,exif:p.exif}),body:bytes});
     if(gen!==WIPE_GEN||credential!==cacheCredential()||uid!==STATE.uid) return;
     if(r.ok){
@@ -3974,9 +4028,8 @@ async function sendPhoto(rep,p,live,retakeOf){
       try{ await IDB.ack(op_id); }catch(e){}
       toast(L().saved); updateOffBar(); return;
     }
-    if(r.status!==401&&r.status!==403&&r.status<500){
+    if(r.status!==401&&r.status!==403&&r.status!==408&&r.status!==429&&r.status<500){
       await markPhotoFailed(entry,String(r.status));
-      await retireReplacedPhoto(entry);
       STATE.online=true;
       toast(L().photolost); updateOffBar(); return;
     }
@@ -3995,6 +4048,7 @@ async function sendPhoto(rep,p,live,retakeOf){
     }
     toast(L().savedoff); updateOffBar();
   }finally{
+    clearTimeout(timer);
     PHOTO_INFLIGHT.delete(op_id);
   }
 }
@@ -4036,11 +4090,11 @@ function openReceipt(){
         <label class="fld">${esc(t.rcWho)}</label>
         <input id="rc_who" maxlength="500">
       </div>
-      <label class="btn acc" style="cursor:pointer;margin-top:14px">📷 <span>${esc(t.rcShoot)}</span>
-        <input type="file" accept="image/*" capture="environment" id="rc_file" style="display:none" onchange="upReceipt(true)">
+      <label class="btn acc filepick" style="cursor:pointer;margin-top:14px">📷 <span>${esc(t.rcShoot)}</span>
+        <input type="file" accept="image/*" capture="environment" id="rc_file" onchange="upReceipt(true)">
       </label>
-      <label class="btn line" style="cursor:pointer;margin-top:8px">🖼 <span>${esc(t.fromgallery)}</span>
-        <input type="file" accept="image/*" id="rc_file_gal" style="display:none" onchange="upReceipt(false)">
+      <label class="btn line filepick" style="cursor:pointer;margin-top:8px">🖼 <span>${esc(t.fromgallery)}</span>
+        <input type="file" accept="image/*" id="rc_file_gal" onchange="upReceipt(false)">
       </label>
     </div>`;
   document.body.appendChild(box);
@@ -4821,7 +4875,7 @@ async function refreshData(force=false){
       STATE.mode="field"; return boot();
     }
     setMeta(d.meta, true); STATE.persons=d.persons; STATE.kind=d.kind||"agent";
-    STATE.uid=d.uid; STATE.employee=d.employee||"";
+    setPrincipal(d);
     STATE.roles=d.roles||null;   // роль руководителя: список его сотрудников + текущий
     STATE.online=true; cacheBootstrap(d); updateOffBar();
     if(changed){
@@ -4888,7 +4942,7 @@ function sharedLoginChanged(event){
   WIPE_GEN++;
   try{ hideBottomNav(); $("app").innerHTML=""; }catch(e){}
   try{ stopAutoSync(); stopNavWatch(); }catch(e){}
-  STATE.cur=null;STATE.persons=[];STATE.roles=null;STATE.uid=null;STATE.employee="";
+  STATE.cur=null;STATE.persons=[];STATE.roles=null;STATE.uid=null;STATE.employee="";STATE.ownerNames=[];STATE.ownerUid=null;
   location.reload(); // boot reads the new credential and rejects a foreign cached portfolio
 }
 window.addEventListener("storage",sharedLoginChanged);
@@ -5356,11 +5410,47 @@ function dgAccountEntries(j,b){
   const pending=DG.accountEntries.reduce((n,r)=>n+(r.devices||[]).filter(d=>d.status==="pending").length,0);
   b.innerHTML=`<button class="back" onclick="dgGo('stats')">‹ к сводке</button>`+
     dgTop("Вход команды",pending?"Ждут подтверждения: "+pending:"Все заявки обработаны")+
-    `<div class="box"><b>Как разрешить вход</b><p>Попросите сотрудника зарегистрироваться или войти на своём телефоне либо в программе на ПК. Найдите его заявку ниже, сверьте ФИО и нажмите «Подтвердить телефон» или «Подтвердить ПК».</p><p class="muted">Телефон можно подтвердить без компьютера. Для ПК лично проверьте сотрудника за этим компьютером. Геопозиция не требуется.</p></div>
-     <button class="btn" onclick="dgLoad()">Обновить</button>`+
-    (DG.accountEntries.map((row,i)=>`<div class="lrow"><div class="pname">${esc(row.employee)}</div>`+
-      (row.devices||[]).map((d,k)=>`<div class="psub">${esc(d.kind==="phone"?"Телефон":"Компьютер")}: ${esc(d.label||"")} · ${esc(d.status==="active"?"подтверждён":"ожидает")}</div>`+
-        (row.can_approve&&d.status==="pending"?`<button class="btn acc" onclick="dgApproveAccountDevice(${i},${k},this)">Подтвердить ${d.kind==="phone"?"телефон":"ПК"}</button>`:"")).join("")+`</div>`).join("")||`<div class="center">Заявок пока нет. Сотруднику нужно создать профиль или войти на своём устройстве, затем обновите список.</div>`);
+    `<details class="box"><summary>Как подтвердить вход</summary><p>Сотрудник регистрируется или входит на телефоне либо ПК. Сверьте личность и подтвердите заявку. Для ПК лично проверьте сотрудника за компьютером. Прежнее устройство того же вида будет отключено.</p></details>
+     <button class="btn" onclick="dgLoad()">Обновить</button>
+     <label class="fld" for="team-entry-search">Поиск профиля</label><input id="team-entry-search" type="search" style="${AUTH_INPUT_CSS}" placeholder="ФИО, логин, офис или устройство" value="${esc(DG.entryQuery||'')}" oninput="DG.entryQuery=this.value;dgAccountEntriesDraw()">
+     <div id="team-entry-pending"></div><details id="team-entry-all" ${DG.entryExpanded||DG.entryQuery?'open':''} ontoggle="DG.entryExpanded=this.open"><summary>Все профили команды (${DG.accountEntries.length})</summary><div id="team-entry-list"></div></details>`;
+  dgAccountEntriesDraw();
+}
+function accountSearchText(value){return String(value||'').normalize('NFKC').toLowerCase().replace(/ё/g,'е');}
+function accountEntryStatus(row){
+  if(row.password_review_pending)return row.must_change_password?'Сотрудник меняет временный пароль':'Пароль: ждёт владельца';
+  return {active:'Доступ открыт',awaiting:'Ждёт подтверждения',disabled:'Доступ закрыт',blocked:'Заблокирован'}[row.status]||row.status||'';
+}
+function dgAccountEntriesDraw(){
+  const pending=$('team-entry-pending'),list=$('team-entry-list');if(!pending||!list)return;
+  const words=accountSearchText(DG.entryQuery).trim().split(/\s+/).filter(Boolean);
+  const rows=(DG.accountEntries||[]).map((row,i)=>({row,i})).filter(({row})=>{
+    const text=accountSearchText([row.employee,row.username,row.office,accountEntryStatus(row),...(row.devices||[]).map(d=>d.label)].join(' '));
+    return words.every(word=>text.includes(word));
+  });
+  const device=(row,i,d,k)=>`<div class="box"><b>${esc(d.kind==='phone'?'Телефон':'Компьютер')}</b><div>${esc(d.label||'Устройство')}</div><div class="muted">${esc(d.status==='active'?'Подтверждён':d.status==='pending'?'Ждёт подтверждения':'Отозван')}${d.last_seen?' · '+esc(dgWhen(d.last_seen)):''}</div><div class="muted">${esc(d.client?(d.client.source==='pwa'?'Оболочка '+d.client.shell_version:'Версия '+d.client.client_version):'Версия пока не сообщалась')}</div>${row.can_approve&&d.status==='pending'?`<button class="btn acc" onclick="dgApproveAccountDevice(${i},${k},this)">Подтвердить ${d.kind==='phone'?'телефон':'ПК'}</button>`:''}</div>`;
+  const waiting=rows.filter(({row})=>row.password_review_pending||(row.devices||[]).some(d=>d.status==='pending'));
+  pending.innerHTML='<h3>Ждут подтверждения</h3>'+ (waiting.map(({row,i})=>`<div class="lrow"><b>${esc(row.employee)}</b><div class="psub">Логин: ${esc(row.username)} · ${esc(accountEntryStatus(row))}</div>${(row.devices||[]).map((d,k)=>d.status==='pending'?device(row,i,d,k):'').join('')}</div>`).join('')||'<p class="muted">Нет заявок по этому отбору</p>');
+  list.innerHTML=rows.map(({row,i})=>`<details class="lrow"><summary><b>${esc(row.employee)}</b><div class="psub">${esc(row.username)} · ${esc(row.office||'')} · ${esc(accountEntryStatus(row))}</div></summary><p>Логин: <b>${esc(row.username)}</b></p>${['phone','desktop'].map(kind=>(row.devices||[]).some(d=>d.kind===kind)?(row.devices||[]).map((d,k)=>d.kind===kind?device(row,i,d,k):'').join(''):`<p>${kind==='phone'?'Телефон':'Компьютер'}: нет заявки</p>`).join('')}${row.can_reset_password?`<button class="btn" onclick="dgResetAccountPassword(${i})">Сменить пароль</button>`:''}</details>`).join('')||'<p class="muted">Профили не найдены</p>';
+  if(words.length)$('team-entry-all').open=true;
+}
+function dgResetAccountPassword(i){
+  const row=(DG.accountEntries||[])[i];if(!row?.can_reset_password||$('accountresetsheet'))return;
+  const operationId='manager-reset-'+uuid();
+  askSheet('accountresetsheet',`<h3>Сменить пароль</h3><p>${esc(row.employee)} · ${esc(row.username)}</p><p>Текущие входы будут закрыты. При проверке отзыва устройства удалят локальные данные и неотправленную работу. Сначала дождитесь отправки очередей. Передайте временный пароль сотруднику: он задаст личный, затем владелец подтвердит доступ.</p><form id="team-reset-form"><label>Временный пароль<input id="team-reset-password" type="password" minlength="8" autocomplete="new-password" required></label><label>Повтор пароля<input id="team-reset-repeat" type="password" minlength="8" autocomplete="new-password" required></label><p id="team-reset-error" role="status"></p><button class="btn acc" type="submit">Сменить и передать на подтверждение</button><button class="btn" type="button" onclick="closeAsk('accountresetsheet')">Отмена</button></form>`);
+  $('team-reset-form').onsubmit=async event=>{
+    event.preventDefault();const input=$('team-reset-password'),repeat=$('team-reset-repeat'),error=$('team-reset-error'),button=event.target.querySelector('[type=submit]');
+    if(button.disabled)return;
+    if(input.value!==repeat.value){error.textContent='Пароли не совпадают.';return;}
+    button.disabled=true;error.textContent='';
+    try{
+      const result=await api('/api/manager/account_reset',{method:'POST',body:JSON.stringify({username:row.username,password:input.value,operation_id:operationId})});
+      if(!result?.ok)throw new Error(result?.error||'Смена не подтверждена');
+      input.value='';repeat.value='';closeAsk('accountresetsheet');toast('Доступ ожидает владельца');await dgLoad();
+    }catch(e){error.textContent=e.detail||'Результат не подтверждён. Обновите список; повтор этой операции безопасен.';}
+    finally{if(button.isConnected)button.disabled=false;}
+  };
+  $('team-reset-password').focus();
 }
 function dgConfirmAccountDevice(message){
   return new Promise(resolve=>{
@@ -5392,7 +5482,7 @@ async function dgApproveAccountDevice(i,k,button){
     const result=await api("/api/manager/account_approve",{method:"POST",body:JSON.stringify({device_id:device.id,observed_pc:device.kind==="desktop"})});
     if(!result?.ok) throw new Error(result?.error||"Подтверждение не выполнено");
     toast("Доступ подтверждён"); await dgLoad();
-  }catch(e){toast(String(e?.message||e));}
+  }catch(e){toast(String(e?.detail||e?.message||e));}
   finally{if(button.isConnected)button.disabled=false;}
 }
 const DG_LINK_TEXT={in:"вошёл", live:"ссылка выдана", dead:"ссылка истекла", none:"не выдавали"};
@@ -5630,7 +5720,7 @@ function dgKpis(t,rg){
   out.push(sec("Оплаты",`<div class="drows">
     ${row("оплатили за период",payN?`<small>${payN} чел ·</small> ${esc(t.pay_money_text||"")}`:"0",c("pay"),!payN)}
     ${row("из них после выезда",aftN?`<small>${aftN} чел ·</small> ${esc(t.pay_after_money_text||"")}`:"0",c("pay_after"),!aftN)}
-  </div>`, asof?`по реестру на ${esc(dgDM(asof))}`:"по реестру"));
+  </div>`, asof?`последняя дата платежа: ${esc(dgDM(asof))}`:"по реестру"));
   const money=[];
   if(t.money_text) money.push(row("долг должников периода",esc(t.money_text)));
   if(t.money_paid_text) money.push(row("из них с исходом «Оплачен»",esc(t.money_paid_text)));
@@ -5744,6 +5834,7 @@ function dgTiles(j){
     tile("link","Вход команды","dgGo('account_entries')"),
     caps.control?tile("swap","Закрепления","dgGo('assign')"):"",
     tile("down","Excel","dgExcel()"),
+    tile("down","Выполнение обещаний","dgPromiseReport()"),
   ].join("")}</div>`;
 }
 // --- ЭКРАН: «Сотрудники» — таблица команды за то же окно ---
@@ -5910,6 +6001,49 @@ function dgEmp(j,b){
   });
   parts.push(items.join("")||`<div class="muted" style="margin-top:12px">За этот период выездов не было.</div>`);
   b.innerHTML=parts.join("");
+}
+function dgPromiseReport(){
+  const today=DG.today||new Date().toLocaleDateString('sv-SE');
+  const from=DG.from&&DG.from<today?DG.from:today,to=DG.to&&DG.to<today?DG.to:today;
+  askSheet('promisereportsheet',`<h3>Выполнение обещаний Софта</h3>
+    <div id="promise-report-form"><div class="promise-report-fields">
+      <label>Обещания с<input class="input" type="date" name="from" value="${esc(from)}"></label>
+      <label>По<input class="input" type="date" name="to" value="${esc(to)}"></label>
+      <label>Оплаты на дату<input class="input" type="date" name="asof" max="${esc(today)}" value="${esc(today)}"></label>
+      <label>Срок оплаты<input class="input" type="date" name="due"></label>
+      <label>Страна<select class="input" name="country"><option value="">Все</option><option value="tj">Таджикистан</option><option value="uz">Узбекистан</option></select></label>
+      </div><div class="row2"><button class="btn" onclick="dgPromiseReportRun(false)">Показать</button><button class="btn acc" onclick="dgPromiseReportRun(true)">Скачать Excel</button></div>
+      <div data-result></div></div><button class="btn line" onclick="closeAsk('promisereportsheet')">Закрыть</button>`);
+}
+async function dgPromiseReportRun(download){
+  const form=$('promise-report-form');if(!form||form.dataset.busy==='1')return;
+  const query={};form.querySelectorAll('[name]').forEach(input=>query[input.name]=input.value);
+  const today=DG.today||new Date().toLocaleDateString('sv-SE');
+  if(!query.from||!query.to||!query.asof||query.from>query.to||query.to>query.asof||query.asof>today){toast('Проверьте период обещаний и дату проверки оплат');return;}
+  const headers=authHeaders(),authority=JSON.stringify(headers),result=form.querySelector('[data-result]');
+  form.dataset.busy='1';result.textContent='';
+  const controls=[...form.querySelectorAll('button,input,select')];controls.forEach(control=>control.disabled=true);
+  try{
+    const response=await fetch('/api/manager/promise_report'+(download?'.xlsx':'')+'?'+new URLSearchParams(query),{headers});
+    if(!form.isConnected||JSON.stringify(authHeaders())!==authority)return;
+    if(!response.ok)throw new Error((await response.text()).slice(0,300)||String(response.status));
+    if(download){
+      const blob=await response.blob();
+      if(!form.isConnected||JSON.stringify(authHeaders())!==authority)return;
+      const url=URL.createObjectURL(blob),anchor=document.createElement('a');
+      anchor.href=url;anchor.download=`Обещания ${query.from} — ${query.to}, оплаты ${query.asof}.xlsx`;
+      document.body.appendChild(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+    }else{
+      const data=await response.json();
+      if(!form.isConnected||JSON.stringify(authHeaders())!==authority)return;
+      const t=data.totals,rate=t.kp_rate==null?'—':(t.kp_rate*100).toFixed(1)+'%';
+      const stamp=data.payment_data.last_import_at,imported=stamp?new Date(stamp).toLocaleString('ru-RU',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'нет сведений';
+      result.innerHTML=`<p>Последний успешный импорт: ${esc(imported)}. По сохранённым реестровым оплатам.</p>
+        ${data.open_deadlines?'<p>Срез промежуточный: у части обещаний срок оплаты ещё не завершён.</p>':''}
+        <p>Обещаний: ${t.ptp}; выполнено (KP): ${t.kept}; частичная оплата: ${t.partial}; ожидаем срока: ${t.waiting}; срок прошёл, оплаты нет: ${t.unpaid}; недостаточно данных: ${t.incomplete}; KP от PTP: ${esc(rate)}.</p>`;
+    }
+  }catch(error){if(form.isConnected&&JSON.stringify(authHeaders())===authority)result.textContent=String(error.message||'Не удалось сформировать отчёт');}
+  finally{form.dataset.busy='0';controls.forEach(control=>control.disabled=false);}
 }
 async function dgExcel(){
   // Токен — только в заголовке (как у фото), поэтому не ссылка, а fetch → blob.
