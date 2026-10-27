@@ -49,6 +49,45 @@ def principal_names(employee):
     return sorted({employee, *unique})
 
 
+def product_author_names(employee, product='hard'):
+    """Canonical and explicit product authors of one unambiguous active person.
+
+    This is historical attribution, not a current portfolio permission. Never
+    guess suffixes or include another product's independently named author.
+    Inactive/conflicting declarations cannot join two histories.
+    """
+    if not employee:
+        return [employee]
+    with db.connect() as conn:
+        people = rows(conn, active_only=False)
+    families = [(r, json.loads(r['product_names'])) for r in people]
+    matches = [(r, names) for r, names in families if r['active'] and
+               db._name_key(employee) in {db._name_key(r['employee']),
+                   db._name_key(names.get(product, r['employee']))}]
+    if len(matches) != 1:
+        return [employee]
+    person, names = matches[0]
+    authors = list(dict.fromkeys([person['employee'], names.get(product, person['employee'])]))
+    for author in authors:
+        owners = {r['employee_id'] for r, declared in families if
+                  db._name_key(author) in {db._name_key(n) for n in [r['employee'], *declared.values()]}}
+        if owners != {person['employee_id']}:
+            return [employee]
+    return authors
+
+
+def report_employees(employees):
+    """Collapse explicitly linked Hard authors already present in a scoped list."""
+    employees = list(employees)
+    present = {db._name_key(e): e for e in employees}
+    result = {}
+    for employee in employees:
+        canonical = product_author_names(employee)[0]
+        display = present.get(db._name_key(canonical), employee)
+        result.setdefault(db._name_key(display), display)
+    return list(result.values())
+
+
 def rows(conn, *, active_only=True):
     return [dict(r) for r in conn.execute(
         'SELECT r.*,i.display_name employee FROM staff_roster r '

@@ -459,6 +459,7 @@ def period_report_data(mgr: dict, rng: dict, employees: list[str] | None = None,
     за период считает их для своих листов, и второй проход по выездам ради
     «Сводки» стоил бы ещё столько же секунд."""
     employees = employees if employees is not None else dd.sorted_employees(mgr)
+    employees = dd.staff_roster.report_employees(employees)
     window = window or {}
     country = None
     rows = []
@@ -474,9 +475,9 @@ def period_report_data(mgr: dict, rng: dict, employees: list[str] | None = None,
         else:
             if country is None:
                 country = dd._employee_country_index(rng["from"], rng["to"])
-            code = country.get(emp)
+            code = next((country[n] for n in dd.staff_roster.product_author_names(emp) if country.get(n)), None)
         total = dd._employee_stats(emp, dd.TOTALS_SINCE, rng["to"], with_photos=False)
-        assigned = db._group_persons(db.contracts_of_responsible(emp))
+        assigned = db._group_persons(db.hard_report_contracts(emp))
         money_val, money_unit = dd._units_num(dd._totals_units(assigned))
         rows.append({
             "employee": emp,

@@ -3548,9 +3548,13 @@ def employee_activity(employee: str) -> dict | None:
 
 # Чей выезд: автор из самой строки визита, а у строк, которым автора так и не
 # нашлось (см. _backfill_visit_authors), — текущий ответственный, как было до
-# колонки. Подставляется с алиасами v (visits) и c (clients) и двумя
-# параметрами — ФИО дважды.
-_VISIT_BY = "(v.employee = ? OR (IFNULL(v.employee, '') = '' AND c.responsible = ?))"
+# колонки. Имена автора берём только из явной продуктовой связи одной личности.
+def _visit_by(employee):
+    import staff_roster
+    names = staff_roster.product_author_names(employee)
+    marks = ','.join('?' for _ in names)
+    return (f"(v.employee IN ({marks}) OR (IFNULL(v.employee, '') = '' "
+            f"AND c.responsible IN ({marks})))", (*names, *names))
 
 
 def _processed_rows(employee: str, lo: date, hi: date) -> list[sqlite3.Row]:
@@ -3561,18 +3565,22 @@ def _processed_rows(employee: str, lo: date, hi: date) -> list[sqlite3.Row]:
     (bot_visit_at) есть и у визитов старше журнала — по нему берём свои
     договоры, если в тот же день их не закрывал кто-то другой: иначе новый
     владелец получил бы чужой выезд в свою сводку."""
+    import staff_roster
+    names = staff_roster.product_author_names(employee)
+    marks = ','.join('?' for _ in names)
+    visit_by, args = _visit_by(employee)
     with connect() as conn:
         rows = conn.execute(
             "SELECT * FROM clients c WHERE c.bot_visit_at IS NOT NULL "
             "AND TRIM(c.bot_visit_at) <> '' AND ("
             " c.contract_id IN (SELECT v.contract_id FROM visits v "
             "  JOIN clients c ON c.contract_id = v.contract_id "
-            f"  WHERE {_VISIT_BY} AND substr(v.created_at, 1, 10) BETWEEN ? AND ?)"
-            " OR (c.responsible = ? AND NOT EXISTS (SELECT 1 FROM visits v2 "
+            f"  WHERE {visit_by} AND substr(v.created_at, 1, 10) BETWEEN ? AND ?)"
+            f" OR (c.responsible IN ({marks}) AND NOT EXISTS (SELECT 1 FROM visits v2 "
             "  WHERE v2.contract_id = c.contract_id "
             "  AND substr(v2.created_at, 1, 10) = substr(c.bot_visit_at, 1, 10) "
-            "  AND IFNULL(v2.employee, '') NOT IN ('', ?))))",
-            (employee, employee, lo.isoformat(), hi.isoformat(), employee, employee),
+            f"  AND IFNULL(v2.employee, '') NOT IN ('', {marks}))))",
+            (*args, lo.isoformat(), hi.isoformat(), *names, *names),
         ).fetchall()
     return [r for r in rows if _decode_bot_snapshot(r) is not None
             and (d := _as_date(r["bot_visit_at"])) and lo <= d <= hi]
@@ -3612,6 +3620,7 @@ def visits_for_employee(employee: str, date_from: str, date_to: str) -> list[sql
     lo, hi = _as_date(date_from), _as_date(date_to)
     if lo is None or hi is None:
         return []
+    visit_by, args = _visit_by(employee)
     with connect() as conn:
         return conn.execute(
             "SELECT v.id id, v.contract_id contract_id, "
@@ -3622,9 +3631,9 @@ def visits_for_employee(employee: str, date_from: str, date_to: str) -> list[sql
             "v.op_id op_id, v.evidence_level evidence_level, v.evidence evidence, "
             "c.geo_lat addr_lat, c.geo_lon addr_lon "
             "FROM visits v JOIN clients c ON c.contract_id = v.contract_id "
-            f"WHERE {_VISIT_BY} AND substr(v.created_at, 1, 10) BETWEEN ? AND ? "
+            f"WHERE {visit_by} AND substr(v.created_at, 1, 10) BETWEEN ? AND ? "
             "ORDER BY v.id",
-            (employee, employee, lo.isoformat(), hi.isoformat()),
+            (*args, lo.isoformat(), hi.isoformat()),
         ).fetchall()
 
 
@@ -3764,11 +3773,12 @@ def employee_visited(employee: str, contract_ids) -> bool:
     ids = [str(c) for c in (contract_ids or ()) if c]
     if not ids or not employee:
         return False
+    visit_by, args = _visit_by(employee)
     with connect() as conn:
         return conn.execute(
             "SELECT 1 FROM visits v JOIN clients c ON c.contract_id = v.contract_id "
-            f"WHERE {_VISIT_BY} AND v.contract_id IN ({','.join('?' * len(ids))}) LIMIT 1",
-            (employee, employee, *ids)).fetchone() is not None
+            f"WHERE {visit_by} AND v.contract_id IN ({','.join('?' * len(ids))}) LIMIT 1",
+            (*args, *ids)).fetchone() is not None
 
 
 def first_visit_days(employee: str) -> dict[str, str]:
@@ -3789,15 +3799,28 @@ def first_visit_days(employee: str) -> dict[str, str]:
     визитам к договору, чьи бы они ни были: он принадлежит должнику, а не
     сотруднику, и обещание, данное предшественнику, — тоже полевое обещание.
     """
+    import staff_roster
+    names = staff_roster.product_author_names(employee)
+    marks = ','.join('?' for _ in names)
     with connect() as conn:
         return {r["contract_id"]: r["day"] for r in conn.execute(
             "SELECT v.contract_id contract_id, "
             "MIN(substr(v.created_at, 1, 10)) day FROM visits v "
             "WHERE v.contract_id IN ("
-            " SELECT contract_id FROM clients WHERE responsible = ? "
-            " UNION SELECT contract_id FROM visits WHERE employee = ?) "
+            f" SELECT contract_id FROM clients WHERE responsible IN ({marks}) "
+            f" UNION SELECT contract_id FROM visits WHERE employee IN ({marks})) "
             "GROUP BY v.contract_id",
-            (employee, employee)).fetchall()}
+            (*names, *names)).fetchall()}
+
+
+def hard_report_contracts(employee):
+    """Report assignments for explicit Hard author names; not an access gate."""
+    import staff_roster
+    names = staff_roster.product_author_names(employee)
+    with connect() as conn:
+        return conn.execute(
+            f"SELECT * FROM clients WHERE responsible IN ({','.join('?' for _ in names)}) "
+            "ORDER BY client, contract_id", names).fetchall()
 
 
 def contracts_of_responsible(employee: str) -> list[sqlite3.Row]:
@@ -6184,15 +6207,15 @@ def same_visit_logged_today(contract_id: str, agent_id: int, payload: str,
 def day_map_points(employee: str, on_date: str) -> dict:
     """Точки «Карты дня» руководителя: визиты (точка закрытия из гео-контроля),
     метки выездника за день и адреса обработанных должников (geo клиента)."""
+    visit_by, args = _visit_by(employee)
+    tids = agent_tids(employee)
     with connect() as conn:
         visits = conn.execute(
             "SELECT v.visit_lat lat, v.visit_lon lon, v.dist_m dist_m, "
             "v.geo_far geo_far, v.agent_id agent_id, c.client client "
             "FROM visits v JOIN clients c ON c.contract_id = v.contract_id "
-            f"WHERE {_VISIT_BY} AND v.created_at = ? AND v.visit_lat IS NOT NULL "
-            "ORDER BY v.id", (employee, employee, on_date)).fetchall()
-        tids = [r["telegram_id"] for r in conn.execute(
-            "SELECT telegram_id FROM agent_bind WHERE employee = ?", (employee,))]
+            f"WHERE {visit_by} AND substr(v.created_at, 1, 10) = ? AND v.visit_lat IS NOT NULL "
+            "ORDER BY v.id", (*args, on_date)).fetchall()
         markers = []
         if tids:
             qs = ",".join("?" for _ in tids)
@@ -6228,9 +6251,11 @@ def agent_tids(employee: str) -> list[int]:
     через act_as), нельзя судить как гео-нарушение сотрудника."""
     if not (employee or "").strip():
         return []
+    import staff_roster
+    names = staff_roster.product_author_names(employee)
     with connect() as conn:
         return [r["telegram_id"] for r in conn.execute(
-            "SELECT telegram_id FROM agent_bind WHERE employee = ?", (employee,))]
+            f"SELECT telegram_id FROM agent_bind WHERE employee IN ({','.join('?' for _ in names)})", names)]
 
 
 def last_visit_row(contract_ids: list[str]):

@@ -28,6 +28,7 @@ import statistics
 from datetime import date, datetime, timedelta, timezone
 
 import db
+import staff_roster
 import workday
 import digest_data
 import evidence
@@ -141,7 +142,7 @@ def _pick(team: list[str], of: dict[str, str], office: str, employee: str) -> li
     out = [e for e in team if not office or of.get(e) == office]
     if employee:
         out = [e for e in out if e == employee]
-    return out
+    return staff_roster.report_employees(out)
 
 
 # --- выезды окна -----------------------------------------------------------------
@@ -634,7 +635,7 @@ def visit_in_scope(team: list[str], visit_id: int) -> bool:
     if not emp:
         c = db.clients_by_ids([row["contract_id"]])
         emp = c[0]["responsible"] if c else ""
-    keys = {db._name_key(e) for e in team}
+    keys = {db._name_key(n) for e in team for n in staff_roster.product_author_names(e)}
     return db._name_key(emp or "") in keys
 
 

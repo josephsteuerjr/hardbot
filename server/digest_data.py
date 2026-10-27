@@ -29,6 +29,7 @@ import debt
 import evidence
 import funnel
 import soft_reporting
+import staff_roster
 import photostore
 from i18n import tf
 
@@ -192,8 +193,8 @@ def _covers(mgr: dict, employee: str, countries: set[str],
     direction = (mgr.get("direction") or "").strip()
     if direction:
         return direction == "all" or direction in countries
-    key = db._name_key(employee)
-    if any(db._name_key(e) == key for e in mgr.get("employees") or []):
+    keys = {db._name_key(e) for e in staff_roster.product_author_names(employee)}
+    if any(db._name_key(e) in keys for e in mgr.get("employees") or []):
         return True
     offices = {(c or "").strip().casefold() for c in mgr.get("office_cities") or []}
     return bool(offices) and \
@@ -220,8 +221,8 @@ def window_team(mgr: dict, team: list[str], d_from: str, d_to: str) -> list[str]
     for employee in db.soft_employees_by_direction("all"):
         registry.setdefault(db._name_key(employee), employee)
     if registry:
-        team = [registry[db._name_key(e)] for e in team
-                if db._name_key(e) in registry]
+        team = [registry.get(db._name_key(e), e) for e in team
+                if any(db._name_key(n) in registry for n in staff_roster.product_author_names(e))]
     out = dict.fromkeys(team)
     authors = db.visit_authors(d_from, d_to)
     for employee, countries in db.call_authors(d_from, d_to).items():
@@ -324,8 +325,8 @@ def summary_data(mgr: dict, on_date: str, employees: list[str] | None = None) ->
     # состав ПОКАЗА за этот день (window_team), как у бота и у вкладки.
     if employees is None:
         employees = window_team(mgr, sorted_employees(mgr), on_date, on_date)
-    rows = [{"ei": i, **_employee_row(emp, on_date)}
-            for i, emp in enumerate(employees)]
+    rows = [{"ei": employees.index(emp), **_employee_row(emp, on_date)}
+            for emp in staff_roster.report_employees(employees)]
     # порядок отображения: активные по убыванию числа кейсов, затем «нулевые»
     order = sorted(rows, key=lambda r: (-r["persons"], r["employee"].lower()))
 
@@ -1366,7 +1367,7 @@ def _employee_stats(emp: str, d_from: str, d_to: str, *,
     with_photos=False пропускает подсчёт снимков: он ходит в файловую систему
     по каждому человеку, а окну «за всё время» это стоило бы сотен обращений
     ради колонки, которой в сводном отчёте нет."""
-    persons = db._group_persons(db.contracts_of_responsible(emp))
+    persons = db._group_persons(db.hard_report_contracts(emp))
     by_cid = {c["contract_id"]: p for p in persons for c in p["contracts"]}
     visits = db.visits_for_employee(emp, d_from, d_to)
     # Выезды по договорам, которые с тех пор перезакрепили: должника в портфеле
@@ -1614,13 +1615,14 @@ def _totals_of(rows: list[dict], days: int) -> dict:
 
 def stats_data(mgr: dict, rng: dict, employees: list[str] | None = None) -> dict:
     employees = employees if employees is not None else sorted_employees(mgr)
+    employees = staff_roster.report_employees(employees)
     d_from, d_to = rng["from"], rng["to"]
     country = _employee_country_index(d_from, d_to)
     days = _range_days(rng)
     rows = []
     for emp in employees:
         r = _employee_stats(emp, d_from, d_to)
-        r["country"] = country.get(emp)
+        r["country"] = next((country[n] for n in staff_roster.product_author_names(emp) if country.get(n)), None)
         r["by_day"] = [r["_by_day"].get(x["date"], 0) for x in days]
         has_soft = db.soft_portfolio_exists(emp) or bool(db.soft_calls_for_employee(emp, d_from, d_to))
         r["profiles"] = (["hard"] if r["portfolio"] or r["visits"] or not has_soft else []) + (["soft"] if has_soft else [])
@@ -2305,7 +2307,7 @@ def today_overview(on_date: str | None = None, days: int = 14) -> dict:
     country = _employee_country_index()
     for emp in employees:
         r = _employee_stats(emp, on_date, on_date)
-        assigned = db._group_persons(db.contracts_of_responsible(emp))
+        assigned = db._group_persons(db.hard_report_contracts(emp))
         act = activity.get(emp) or {}
         row = {"employee": emp, "country": country.get(emp),
                "outcomes": r["outcomes"],
