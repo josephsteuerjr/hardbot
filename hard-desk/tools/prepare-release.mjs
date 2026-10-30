@@ -11,7 +11,9 @@ const version = JSON.parse(readFileSync(join(here, 'package.json'))).version;
 // A valid signature on an old binary is still an old, unsafe release.
 // Refuse stale payloads before reading the private key or preparing assets.
 execFileSync(process.execPath, [join(here, 'tools/audit-installers.mjs')], {cwd:here,stdio:'inherit'});
-const key = readFileSync(resolve(here, '../_local/release-signing.private.pem'));
+const key = readFileSync(process.env.HARD_RELEASE_SIGNING_KEY
+  ? resolve(process.env.HARD_RELEASE_SIGNING_KEY)
+  : resolve(here, '../_local/release-signing.private.pem'));
 const pinned = JSON.parse(readFileSync(join(here, 'src/main/release-public-key.json'))).pem;
 if (createPublicKey(key).export({ type: 'spki', format: 'pem' }) !== pinned) throw new Error('Signing key differs from the key pinned in the app');
 const args=process.argv.slice(2);

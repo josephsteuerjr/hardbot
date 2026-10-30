@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from pult.core.manual_sync import track_automatic_file
 
 from .config import ConfigBundle, load_config_bundle
 from .cycle_lock import CycleLock
@@ -370,6 +371,7 @@ def _assert_exact_file(
         raise SafetyViolation(f"{context}: fingerprint изменился: {path}")
 
 
+@track_automatic_file('target')
 def _destructive_replace(source: Path, target: Path) -> None:
     """Narrow seam for fault injection around the actual atomic replace."""
     os.replace(source, target)

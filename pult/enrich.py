@@ -41,6 +41,11 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+_PROJECT_DIR=Path(__file__).resolve().parents[1]
+if str(_PROJECT_DIR) not in sys.path:
+    sys.path.append(str(_PROJECT_DIR))
+from pult.core.manual_sync import track_automatic_file
+
 # Один JSON-контракт живёт в build-context hardbot и теми же байтами читается
 # операторским пультом. Жёстко проверяем origin модуля, чтобы окружение Python
 # не подсунуло одноимённый пакет раньше checkout.
@@ -1216,13 +1221,17 @@ def clear_gen_py():
 def open_excel(xw, log=lambda s: None):
     """xw.App(visible=False) с самолечением битого кэша gen_py."""
     try:
-        return xw.App(visible=False)
+        app = xw.App(visible=False)
+        app.api.EnableEvents = False
+        return app
     except AttributeError as e:
         if "gen_py" not in repr(e) and "CLSIDToPackageMap" not in repr(e):
             raise
         log("Чиню кэш COM-обёрток Excel…")
         clear_gen_py()
-        return xw.App(visible=False)
+        app = xw.App(visible=False)
+        app.api.EnableEvents = False
+        return app
 
 
 def _pick_sheet(wb, fields: list[dict]):
@@ -1760,6 +1769,7 @@ def _plan_summary(plan: dict) -> dict[str, Any]:
     }
 
 
+@track_automatic_file('path')
 def _enrich_with_evidence(
     app,
     path: Path,
@@ -1895,6 +1905,7 @@ def _replace_on_share(src: Path, dst: Path) -> None:
             pass
 
 
+@track_automatic_file('path')
 def _enrich_local(
     app,
     path: Path,
@@ -2281,8 +2292,20 @@ def _record_deliveries(results: list[dict], on_delivered, receipt_path) -> None:
             r["ledger_error"] = str(e)
         return
     recorded = outcome.get("recorded") if isinstance(outcome, dict) else None
+    if recorded is not None and (
+        isinstance(recorded, bool) or not isinstance(recorded, int)
+        or recorded != len(entries)
+    ):
+        message = (f"Сервер подтвердил {recorded} из {len(entries)} значений "
+                   "истории доставки. Сверьте квитанцию перед повтором.")
+        for r in results:
+            r["ledger_error"] = message
+        return
     for r in results:
-        r["ledger_recorded"] = len(entries) if recorded is None else recorded
+        eligible = not r.get("not_attempted") and (
+            "error" not in r or r.get("written_unverified")
+        )
+        r["ledger_recorded"] = len(r.get("ledger_entries") or []) if eligible else 0
 
 
 def replay_ledger_receipt(receipt_path: str | Path, on_delivered) -> dict:

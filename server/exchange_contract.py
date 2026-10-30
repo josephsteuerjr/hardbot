@@ -22,6 +22,7 @@ class ExchangeContractError(RuntimeError):
 
 CONTRACT_PATH = Path(__file__).with_name("data_exchange_contract.json")
 _SUPPORTED_RAW_SHA256 = {
+    11: "a850a6a8aa9671d9bf2c65b113075ecffa4085230611a779ed62b93f1969944c",
     10: "2a762507e57081670d1d23af8981dcc027e989fd8d9e05f39da5a7d3df9d02a5",
     9: "1ab4ea266086ef59a3fdc07561b7596d01a5081905ad8373a9af995b356231bb",
     8: "2d3c871b0dcd702ce6f6e0a638b9508daa34f305cd9d521f6564108252bb65cb",
@@ -84,7 +85,8 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
             "enrichment",
             "office_overlay",
             "imports",
-        } | ({"soft"} if isinstance(payload, dict) and payload.get("version", 0) >= 6 else set()),
+        } | ({"soft"} if isinstance(payload, dict) and payload.get("version", 0) >= 6 else set())
+          | ({"edit_tracking"} if isinstance(payload, dict) and payload.get("version", 0) >= 11 else set()),
         label="contract",
     )
     if root["schema"] != "hardbot.data-exchange-contract.v1":
@@ -247,7 +249,8 @@ def _load() -> tuple[dict[str, Any], bytes, str]:
     )
     if workbook["unknown_headers_policy"] != "block":
         raise ExchangeContractError("unknown workbook headers must be blocked")
-    if workbook["duplicate_headers_policy"] != "block":
+    expected_duplicate_policy = "block_except_contextual_manual_dates" if version >= 11 else "block"
+    if workbook["duplicate_headers_policy"] != expected_duplicate_policy:
         raise ExchangeContractError("duplicate workbook headers must be blocked")
     export_schema_sha256 = _string(
         workbook["export_schema_sha256"],

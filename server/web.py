@@ -25,6 +25,7 @@ import math
 import os
 import re
 import sqlite3
+import edit_tracking
 import tempfile
 import threading
 import time
@@ -772,6 +773,7 @@ def _person_full_from_rows(rows, rep: str, lang: str,
         # Текущий комментарий — живой совместный текст месяца: его можно
         # продолжить до завершения визита, а доказанный snapshot остаётся
         # отдельной неизменяемой историей.
+        "edit_dates": edit_tracking.card(rows),
         "visit_comment": _row_get(rows, "visit_comment") or "",
         # Служебный односторонний контекст из общего реестра; в форму и POST
         # сотрудника этот ключ не входит.
@@ -2058,7 +2060,8 @@ async def _save(request: web.Request) -> web.Response:
              "sum": values.get("forecast_sum", ""),
              "fc": values.get(db.FORECAST_KEY, "")}, ensure_ascii=False))
     if values and not finish:
-        await asyncio.to_thread(db.update_person, rep, values)
+        await asyncio.to_thread(db.update_person, rep, values,
+            result_edit_at=_saved_at(body) or datetime.now(timezone.utc).replace(tzinfo=None).isoformat())
     if finish:
         completed_at = _occurred_on(body)
         cur = db.get_client(rep)
@@ -2303,7 +2306,8 @@ def _save_call(uid: int, emp: str, body: dict, rep: str, row, values: dict,
     if values and not finish:
         # Группа — по СОФТ-закреплению: у человека бывают разные выездные
         # ответственные, звонок обязан лечь во все его договоры софтника.
-        db.update_person(rep, values, by_soft=True)
+        db.update_person(rep, values, by_soft=True,
+            result_edit_at=_saved_at(body) or datetime.now(timezone.utc).replace(tzinfo=None).isoformat())
     if finish:
         completed_at = _occurred_on(body)
         op_id = (str(body.get("op_id") or "")).strip() or None

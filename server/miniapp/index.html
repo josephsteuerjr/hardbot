@@ -1534,7 +1534,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=108;
+const SHELL_VERSION=109;
 let LOGIN_GPS=null;
 const ORIGINAL_FETCH=window.fetch.bind(window);
 window.fetch=async(input,init)=>{
@@ -3322,6 +3322,12 @@ function panelVisit(d,t){
      <div class="kv"><span class="k">${t.photos}</span><span class="v">${d.photos||0}</span></div>
    </div>`;
 }
+function editDatesHtml(d){
+  const rows=Array.isArray(d.edit_dates)?d.edit_dates:[];
+  const stamp=v=>{const s=String(v||"");if(!s)return "—";const at=new Date(/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s)?s:s+"Z");return Number.isFinite(at.valueOf())?at.toLocaleString("ru-RU",{dateStyle:"short",timeStyle:"short"}):"—";};
+  const day=v=>{const m=/^(\d{4})-(\d{2})-(\d{2})(?:T|$)/.exec(String(v||""));return m?m[3]+"."+m[2]+"."+m[1]:"—";};
+  return rows.length?`<div class="box"><details><summary>Даты изменения результатов</summary>${rows.map(r=>`<b>КД ${esc(r.contract_id)}</b>${[["Выезд","excel_visit_edited_on","app_visit_edited_at"],["Звонок","excel_call_edited_on","app_call_edited_at"]].map(([label,x,a])=>`<div class="kv"><span class="k">${label}: ручная правка Excel</span><span class="v">${day(r[x])}</span></div><div class="kv"><span class="k">${label}: правка в приложении</span><span class="v">${stamp(r[a])}</span></div>`).join("")}`).join("")}</details></div>`:"";
+}
 function panelClient(d,t){
   const historical = String(d.historical_visit_comment||"").trim();
   const historicalBox = historical ? `<div class="box">
@@ -3337,7 +3343,7 @@ function panelClient(d,t){
     ${extra.map(r=>
       `<div class="kv"><span class="k">${esc(r.title)}</span><span class="v">${esc(String(r.value))}</span></div>`).join("")}
   </div>` : "";
-  return `${historicalBox}<div class="box">${d.info.map(r=>
+  return `${editDatesHtml(d)}${historicalBox}<div class="box">${d.info.map(r=>
     `<div class="kv"><span class="k">${esc(r.title)}</span><span class="v">${esc(String(r.value))}</span></div>`).join("")}</div>${extraBox}`;
 }
 // Долг человека одним числом существует, только если валюта одна: портфель ЗК — в сумах,

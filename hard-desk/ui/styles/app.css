@@ -553,3 +553,6 @@ label.check input { accent-color: var(--terra); width: 16px; height: 16px; margi
 .dmap-visit { width: 12px; height: 12px; border-radius: 50%; background: #2c6e46;
   border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.35); cursor: default }
 .dmap-visit.bad { background: #B0472C }
+.edit-dates-table{width:100%;border-collapse:collapse;table-layout:fixed;margin-top:8px;font-size:13px}
+.edit-dates-table th,.edit-dates-table td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+.edit-dates-table th:first-child{width:18%}

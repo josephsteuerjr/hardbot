@@ -21,7 +21,7 @@ def test_default_configuration_is_complete_and_renderable():
     assert set(bundle.fields.profile_tags) == {"hard", "soft"}
     assert bundle.master_path(datetime(2026, 7, 27)).name == "ОБЩИЙ РЕЕСТР ИЮЛЬ.xlsb"
     assert bundle.workspace_path().name == "registry_cycle_v2"
-    assert len(bundle.fields.collect) == 22
+    assert len(bundle.fields.collect) == 24
     assert any(
         rule.title == "Телефон глав"
         for rule in bundle.fields.collect

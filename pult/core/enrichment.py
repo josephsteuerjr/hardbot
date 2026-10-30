@@ -115,6 +115,12 @@ def personal_files(entries, emp) -> list[Path]:
     files: list[Path] = []
     for e in entries:
         folder = e["path"]
+        from .manual_config import preferred_path
+        preferred=preferred_path(folder/(folder.name+'.xlsb'))
+        if preferred.name!=folder.name+'.xlsb':
+            if not preferred.is_file():raise ValueError(f'Выбранная активная книга недоступна: {preferred}')
+            if preferred not in files:files.append(preferred)
+            continue
         candidates = [p for p in folder.iterdir() if p.is_file() and p.suffix.casefold() == '.xlsb'
                       and not p.name.startswith('~') and not razbros.is_backup_copy(p.name)]
         xs = personal_workbooks(candidates, emp)

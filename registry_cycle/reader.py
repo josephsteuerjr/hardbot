@@ -98,6 +98,8 @@ def read_portfolio(path: str | Path, fields: FieldConfig) -> WorkbookSnapshot:
     if width == 0:
         raise WorkbookReadError(f"пустая строка заголовков в {source}")
     headers = tuple((rows[header_row] + [None] * width)[:width])
+    from edit_tracking import logical_headers
+    headers = tuple(logical_headers(headers))
     _validate_headers(headers, fields)
 
     type_row = header_row + fields.type_row_offset

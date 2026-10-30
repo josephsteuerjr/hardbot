@@ -21,6 +21,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import country_scope
+import edit_tracking
 import debt
 from exchange_contract import (
     ENRICHMENT_SOURCE_KEYS,
@@ -192,6 +193,10 @@ BOOKKEEPING = [
     ("soft_next_call_date", "TEXT"),
     ("soft_extra_phone", "TEXT"),
     ("payment_status_data", "TEXT"),
+    ("excel_visit_edited_on", "TEXT"),
+    ("excel_call_edited_on", "TEXT"),
+    ("app_visit_edited_at", "TEXT"),
+    ("app_call_edited_at", "TEXT"),
 ]
 
 SOFT_SNAPSHOT_KEYS = ("soft_call_status", "soft_comm_date", "soft_comment",
@@ -521,15 +526,35 @@ def _bump_version() -> None:
     _DATA_VERSION += 1
 
 
+class _Connection(sqlite3.Connection):
+    """A transaction context owns and closes its database connection.
+
+    sqlite3's default context manager only commits or rolls back. Keeping its
+    connections alive until cyclic GC can exhaust the server's file limit.
+    Explicit callers can still use close() and pass the connection through
+    nullcontext() when its lifetime belongs to an outer transaction.
+    """
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.row_factory = sqlite3.Row
-    # WAL: бот и Tkinter-пульт пишут в один файл; WAL переживает аварийную
-    # перезагрузку и допускает одновременное чтение во время записи.
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA busy_timeout=8000")
-    return conn
+    conn = sqlite3.connect(DB_PATH, timeout=10, factory=_Connection)
+    try:
+        conn.row_factory = sqlite3.Row
+        # WAL: бот и Tkinter-пульт пишут в один файл; WAL переживает аварийную
+        # перезагрузку и допускает одновременное чтение во время записи.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=8000")
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def _bot_snapshot(values, completed_at: str) -> dict | None:
@@ -4065,6 +4090,8 @@ def record_reported_payment(op: str, contract_id: str, employee: str, uid: int,
                 if payment_owns_status(updated,"overall_result"):
                     changes["overall_result"] = result_status
                 if changes:
+                    if any(str(row[key] or "") != str(value or "") for key, value in changes.items()):
+                        changes["app_call_edited_at"] = created_at
                     conn.execute("UPDATE clients SET "+', '.join('"'+k+'"=?' for k in changes)+" WHERE contract_id=?",
                                  (*changes.values(),contract_id))
         conn.commit()
@@ -5114,13 +5141,20 @@ def person_contracts_by_soft(rep_contract_id: str) -> list[sqlite3.Row]:
 
 
 def update_person(rep_contract_id: str, values: dict, *,
-                  by_soft: bool = False) -> None:
+                  by_soft: bool = False, result_edit_at: str | None = None) -> None:
     """Записать поля во ВСЕ договоры человека (выезд = на человека, не на КД).
     by_soft — группа по ответственного СОФТ (контур «Софт»)."""
     rows = (person_contracts_by_soft(rep_contract_id) if by_soft
             else person_contracts(rep_contract_id))
     for r in rows:
-        update_fields(r["contract_id"], values)
+        changes = dict(values)
+        # Only an accepted UI result edit supplies this context. Geocoding,
+        # reminders and registry import must not acquire an app result date.
+        result_keys = (set(SOFT_SNAPSHOT_KEYS) if by_soft else set(BOT_VISIT_KEYS) | {"tips"}) - {"reminder_date"}
+        accepted = result_keys & (set(BY_KEY) | set(dict(BOOKKEEPING))) & set(values)
+        if result_edit_at and any(str(r[key] or "") != str(values[key] or "") for key in accepted):
+            changes["app_call_edited_at" if by_soft else "app_visit_edited_at"] = result_edit_at
+        update_fields(r["contract_id"], changes)
 
 
 def record_bot_visit(rep_contract_id: str, values: dict,
@@ -5913,6 +5947,8 @@ def save_visit_result(contract_id: str, agent_id: int, employee: str | None,
                     for key in COMMON_RESULT_KEYS:
                         current.pop(key, None)
                 current["visit_date"] = max(row["visit_date"] or "", day)
+                if any(str(row[k] or "") != str(v or "") for k, v in current.items()):
+                    current["app_visit_edited_at"] = (event_at if journal.get("saved_at") or day == workday.today().isoformat() else None)
                 current["updated_at"] = workday.today().isoformat()
                 sets = ", ".join(f'"{k}"=?' for k in current)
                 conn.execute(f"UPDATE clients SET {sets} WHERE contract_id=?", (*current.values(), row["contract_id"]))
@@ -6021,6 +6057,8 @@ def save_call_result(contract_id: str, agent_id: int, employee: str,
                 current.pop("soft_call_status", None)
                 if payment_owns_status(row,"overall_result"):
                     current.pop("overall_result", None)
+            if any(str(row[k] or "") != str(v or "") for k, v in current.items()):
+                current["app_call_edited_at"] = (event_at if saved_at or on_date == workday.today().isoformat() else None)
             current.update(bot_call_at=event_at,
                            bot_call_data=json.dumps(snapshot, ensure_ascii=False),
                            call_office_data=None,
@@ -7414,6 +7452,7 @@ def registry_rows(
                 continue
         out = {f.key: row[f.key] for f in FIELDS}
         out["responsible_soft"] = row["responsible_soft"]
+        out.update({key: row[key] for key in edit_tracking.KEYS})
         # Поля визита — из ДОКАЗАННОГО снимка, а не из сырых колонок. Сырые
         # хранят копию последнего импорта: у 440 из 890 договоров с визитом там
         # лежит офисное «Не обработан», потому что офис по этому кейсу ещё не
@@ -7459,6 +7498,7 @@ def enrichment_rows() -> list[dict]:
     for raw in rows:
         row = {f.key: raw[f.key] for f in FIELDS}
         row["responsible_soft"] = raw["responsible_soft"]
+        row.update({key: raw[key] for key in edit_tracking.KEYS})
         for key in BOT_VISIT_KEYS:
             if key in row:
                 row[key] = None
@@ -8519,6 +8559,11 @@ def import_grid(
         report["header_row_tried"] = best_h + 1
         report["header_sample"] = [str(c).strip() for c in rows[best_h] if c not in (None, "")][:20]
         return report
+    try:
+        edit_columns = edit_tracking.columns(rows[best_h])
+    except ValueError as exc:
+        report.update(blocked=True, error=str(exc))
+        return report
     recognized_positions: dict[str, list[int]] = {}
     normalized_title_positions: dict[str, list[int]] = {}
     normalized_title_samples: dict[str, str] = {}
@@ -8544,6 +8589,7 @@ def import_grid(
         normalized_title_samples[title]: positions
         for title, positions in normalized_title_positions.items()
         if len(positions) > 1
+        and _norm_title(title) != _norm_title(edit_tracking.CAPTION)
     }
     if duplicate_headers or duplicate_titles:
         report["blocked"] = True
@@ -8621,7 +8667,7 @@ def import_grid(
     extra_columns: list[str] = []
     extra_cols: dict[int, dict] = {}
     for index, (cell, key) in enumerate(zip(rows[best_h], col_keys)):
-        if cell in (None, "") or key is not None:
+        if cell in (None, "") or key is not None or index in edit_columns:
             continue
         title = str(cell).strip()
         if not title:
@@ -8815,6 +8861,15 @@ def import_grid(
             continue
         report["total_rows"] += 1
         data = {}
+        for column, tracking_key in edit_columns.items():
+            raw_date = raw[column] if column < len(raw) else None
+            try:
+                day_value = edit_tracking.canonical_day(raw_date)
+            except ValueError as exc:
+                report.update(blocked=True, error=f"Строка {offset}: {exc}")
+                return report
+            if day_value:
+                data[tracking_key] = day_value
         exact_comment_keys = requested_comment_headers
         for index, key in enumerate(col_keys):
             val = raw[index] if index < len(raw) else None
@@ -9050,7 +9105,8 @@ def import_grid(
             "unassigned_from, unassigned_reason, recall_prev_reason, "
             "recall_date, recall_reason, recall_transfer, recall_withdrawn, "
             "bot_visit_at, bot_visit_data, office_edit_data, visit_value_log, "
-            "bot_call_at, bot_call_data, call_office_data, call_value_log, bot_visit_event_at "
+            "bot_call_at, bot_call_data, call_office_data, call_value_log, bot_visit_event_at, "
+            "excel_visit_edited_on, excel_call_edited_on "
             "FROM clients")}
         # Кому обогащение уже возило комментарий выезда. Единственный честный
         # ответ на вопрос «есть ли этот текст в книгах и в общем реестре»:
@@ -9110,6 +9166,9 @@ def import_grid(
         for cid, data in grouped.items():
             is_update = cid in existing
             row0 = existing.get(cid)
+            for tracking_key in edit_tracking.EXCEL_KEYS:
+                if tracking_key in data and row0 is not None:
+                    data[tracking_key] = max(data[tracking_key], row0[tracking_key] or "")
             comment_updates: dict[str, str] = {}
             office_echo_values = {
                 key: data.get(key)

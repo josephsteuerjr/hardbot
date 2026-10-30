@@ -9,6 +9,7 @@ import { currentId, openPanel, refresh as refreshSection, setHead, type Section 
 import { DataTable } from "../kit/table";
 import { mountModeSwitchIfKit } from "../kit/modeswitch";
 import { receiptHtml, wireReceipt } from "./receipt";
+import { editDatesHtml } from "./edit-dates";
 import { paymentHtml, wirePayment } from "./payment";
 import { cardNavigation, employeeSections, lockCard, personListHtml, promiseText } from "./employee";
 import { accountSectionHtml, wireAccountSection } from "./misc";
@@ -169,6 +170,7 @@ async function openSoftCard(rep: string, preserveDraft = false) {
   const options = `<option value="">—</option>` + (state.dropdowns.soft_call_status || []).map(
     (o) => `<option value="${esc(o.value)}"${o.value === (s.status || "") ? " selected" : ""}>${esc(o.label)}</option>`).join("");
   panel.innerHTML = `
+    ${editDatesHtml(d)}
     <h2 class="employee-name" style="margin:0">${esc(d.client || "")}</h2>
     <div class="muted">${esc(d.address || "адреса в реестре нет")}</div>
     <div class="kpis employee-kpis"><div class="kpi accent money"><b>${esc(debtText(d))}</b><span>долг по валютам</span></div>

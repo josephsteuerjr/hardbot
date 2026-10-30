@@ -263,7 +263,9 @@ def save(uid, employee, body):
         conn.executemany("INSERT INTO office_action_contracts(op_id,contract_id) VALUES(?,?)",
                          [(event["op_id"], cid) for cid in ids])
         if action == "month_comment":
-            conn.executemany("UPDATE clients SET visit_comment=? WHERE contract_id=?", [(values["note"], cid) for cid in ids])
+            conn.executemany("UPDATE clients SET visit_comment=?, app_visit_edited_at=? WHERE contract_id=?",
+                [(values["note"], event_at.isoformat(), r["contract_id"]) for r in rows
+                 if str(r["visit_comment"] or "").strip() != values["note"]])
             rows = _group(conn, rep, employee)
         conn.commit()
         db._bump_version()

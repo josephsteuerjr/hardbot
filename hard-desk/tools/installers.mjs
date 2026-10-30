@@ -10,6 +10,9 @@ import { products, releaseUrl } from './products.mjs';
 import { auditRuntimeDependencies } from './runtime-dependencies.mjs';
 const here = join(dirname(fileURLToPath(import.meta.url)), '..');
 const qa = !!process.env.HARD_SETUP_QA_BUILD;
+const localElectron = process.env.HARD_ELECTRON_DIST;
+if (localElectron && readFileSync(join(localElectron, 'version'), 'utf8').trim() !== JSON.parse(readFileSync(join(here, 'package.json'))).devDependencies.electron)
+  throw new Error('Local Electron distribution differs from the pinned version');
 mkdirSync(join(here,'installer/bin'),{recursive:true});
 execFileSync(join(process.env.WINDIR,'Microsoft.NET/Framework64/v4.0.30319/csc.exe'),['/nologo','/target:winexe','/platform:x64','/reference:System.Web.Extensions.dll','/reference:System.Security.dll','/out:'+join(here,'installer/bin/process-check.exe'),join(here,'installer/process-check.cs')],{stdio:'inherit'});
 const selected = process.argv.slice(2);
@@ -25,6 +28,7 @@ for (const id of (selected.length ? selected : Object.keys(products))) {
       directories: { output: `${qa?'setup-qa':'installers'}/${id}`, buildResources: 'installer' },
       files: ['out/**/*', 'package.json'], asar: true, compression: 'maximum',
       electronVersion: JSON.parse(readFileSync(join(here, 'package.json'))).devDependencies.electron,
+      electronDist: localElectron || undefined,
       extraResources: [{from:'installer/bin/process-check.exe',to:'process-check.exe'},...(id === 'analyst' ? [{ from: 'backend-dist/hard-backend', to: 'backend' }] : [])],
       win: { icon: 'icons/icon.ico', executableName: `hard-${id}`, target: ['nsis'], signExecutable: false },
       nsis: { oneClick: false, perMachine: false, allowElevation: false, allowToChangeInstallationDirectory: false,
@@ -55,6 +59,7 @@ for (const id of (selected.length ? selected : Object.keys(products))) {
       // avoids spending minutes recompressing it in the outer wizard.
       files:['out/setup-main.js','out/setup-preload.js','out/setup-registry.json','out/setup/**/*','package.json'],asar:true,compression:'normal',
       electronVersion:JSON.parse(readFileSync(join(here,'package.json'))).devDependencies.electron,
+      electronDist:localElectron || undefined,
       extraResources:[{from:`${innerRelative}/application-installer.exe`,to:'application-installer.exe'},{from:`${innerRelative}/setup-payload.json`,to:'setup-payload.json'},{from:'installer/bin/process-check.exe',to:'process-check.exe'}],
       win:{icon:'icons/icon.ico',executableName:`hard-setup-${id}`,signExecutable:false,target:['portable']},portable:{requestExecutionLevel:'user'},publish:null},publish:'never'});
   auditRuntimeDependencies(join(inner,'outer/win-unpacked/resources/app.asar'));
