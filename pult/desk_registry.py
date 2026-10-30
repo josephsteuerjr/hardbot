@@ -167,12 +167,12 @@ def imp_selection(body, *, settings, **_):
     settings.save()
     S["preview"] = None
     return {"selected": sorted(sel),
-            "button": ri.preview_button_text(book, sel, bool(body.get("full")))}
+            "button": ri.preview_button_text(book, sel, True)}
 
 
 def _signature(book, sel, full, restore, comments, soft_edits=False, excluded=()):
     return (book.get("file_sha256"), book.get("import_profile", "hard"),
-            tuple(sorted(sel)), bool(full), bool(restore), bool(comments), bool(soft_edits),tuple(sorted(set(excluded))))
+            tuple(sorted(sel)), True, True, bool(comments), True,tuple(sorted(set(excluded))))
 
 
 def imp_preview(body, *, admin, start_job, **_):
@@ -184,8 +184,9 @@ def imp_preview(body, *, admin, start_job, **_):
     picked = sorted(set(body.get("selected") or []))
     if not picked:
         raise RuntimeError("Отметь хотя бы одного сотрудника")
-    full, restore, comments = bool(body.get("full")), bool(body.get("restore_manual")), bool(body.get("replace_comments"))
-    soft_edits = bool(body.get("soft_edits"))
+    # Mandatory import policy, including requests from older saved UI state.
+    full, restore, comments = True, True, bool(body.get("replace_comments"))
+    soft_edits = True
     excluded=body.get('exclude_contracts') or []
     filtered,excluded_rows=ri.exclude_contracts(book,excluded)
     sig = _signature(book, picked, full, restore, comments, soft_edits,excluded)

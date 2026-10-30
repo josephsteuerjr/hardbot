@@ -10,7 +10,7 @@ import { adm, chipsHtml, fn, fnMap, guard, kvHtml, local, note, runJob } from ".
 const XLS = [{ name: "Excel", extensions: ["xlsx", "xlsm", "xlsb", "xls"] }];
 const st = {
   tab: "import" as "import" | "enrich" | "columns" | "export" | "recalled",
-  imp: null as any, sel: new Set<string>(), full: true, restore: true, comments: false, softEdits: true, preview: null as any, applied: null as any,
+  imp: null as any, sel: new Set<string>(), comments: false, preview: null as any, applied: null as any,
   impQuery: "", impFilter: "all", impSort: "name", excludedIds: "",
   enr: null as any, matched: [] as any[], enrSel: new Set<string>(), since: "", until: "", check: null as any, decisions: {} as Record<string, string>, applyRes: null as any,
   cols: null as any, colDecisions: [] as any[], scan: null as any,
@@ -69,10 +69,10 @@ async function importTab(el: HTMLElement) {
     return numeric || a.name.localeCompare(b.name, "ru");
   });
   const warn: string[] = [];
-  if (st.full) warn.push("ПОЛНЫЙ СРЕЗ: у выбранных сотрудников будут сняты договоры, которых нет среди их выбранных строк. Остальные не затрагиваются. Файл неполный — снимите галочку.");
-  if (st.restore) warn.push("ВОЗВРАТ РУЧНЫХ СНЯТИЙ: вернутся только договоры, которые снова есть в выбранных строках с тем же сотрудником.");
+  warn.push("ПОЛНЫЙ СРЕЗ: у выбранных сотрудников будут сняты договоры, которых нет среди их выбранных строк. Остальные не затрагиваются.");
+  warn.push("ВОЗВРАТ РУЧНЫХ СНЯТИЙ: вернутся только договоры, которые снова есть в выбранных строках с тем же сотрудником.");
   if (st.comments) warn.push("Текущие комментарии будут заменены значениями файла, включая пустые.");
-  if (st.softEdits) warn.push("Офисные правки результатов Софта будут применены к завершённым звонкам. Предпросмотр покажет точные замены.");
+  warn.push("Офисные правки результатов Софта будут применены к завершённым звонкам. Предпросмотр покажет точные замены.");
   if (warn.length) warn.push("Точные числа пульт покажет в предпросмотре до записи.");
   el.innerHTML = `${note("Общий реестр: опубликованный master или утверждённое тестовое подмножество. Личные ФИО.xlsb сюда не загружаются. Сначала предпросмотр — запись отдельной кнопкой.")}
     <div class="toolbar" style="margin-top:12px"><button class="btn primary" data-pick>Выбрать реестр…</button><span class="muted" id="imp-cap">${esc(book?.caption || "")}</span></div>
@@ -90,11 +90,7 @@ async function importTab(el: HTMLElement) {
       <div class="grid2" style="max-height:340px;overflow:auto;border-top:var(--lw) solid var(--line)">${employees.map((e: any) => `<label class="list-row" style="cursor:pointer;padding:8px 4px">
         <input type="checkbox" data-emp="${esc(e.key)}" ${st.sel.has(e.key) ? "checked" : ""}><span class="grow"><span class="nm">${esc(e.name)}</span><br><span class="sub">${esc(e.note)}</span></span></label>`).join("")}</div>
       <div class="block">
-        <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="full" ${st.full ? "checked" : ""}><span class="grow">Для выбранных сотрудников это полный срез — снять у них договоры, которых нет в выбранных строках файла</span></label>
-        <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="restore" ${st.restore ? "checked" : ""}><span class="grow">Вернуть ранее вручную снятые договоры, если они снова есть в выбранных строках с тем же ответственным</span></label>
         <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="comments" ${st.comments ? "checked" : ""}><span class="grow">Начало месяца: заменить комментарии выезда значениями файла (пустая ячейка очистит комментарий)</span></label>
-        <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="softEdits" ${st.softEdits ? "checked" : ""}><span class="grow">Применить проверенные офисные правки результатов звонков Софта</span></label>
-        <p class="muted" style="font-size:13px">Без галочки офисных правок сохранённые результаты звонков Софта защищены от замены данными реестра.</p>
         <p class="muted" style="font-size:13px">Историчные комментарии грузятся сами, если колонка есть в файле: значение повторяет файл точно, пустая ячейка очищает.</p></div>
       ${warn.length ? `<div class="notice" style="white-space:pre-line"><span class="grow">${esc(warn.join("\n"))}</span></div>` : ""}
       <div class="toolbar"><button class="btn primary" data-preview ${st.sel.size ? "" : "disabled"}>Предпросмотр выбранных (${n(st.sel.size)})</button>
@@ -124,14 +120,14 @@ async function importTab(el: HTMLElement) {
     } catch (e) {
       st.imp = null; cap.textContent = `Файл не разобран: ${(e as Error).message}`; return;
     }
-    st.sel = new Set(st.imp.selected); st.full = true; st.restore = true; st.comments = false; st.softEdits = true; invalidate(); redraw();
+    st.sel = new Set(st.imp.selected); st.comments = false; invalidate(); redraw();
   }));
   el.querySelector<HTMLSelectElement>("[data-profile]")?.addEventListener("change", guard(async () => {
     st.imp=await local("/reg/select", {profile:(el.querySelector("[data-profile]") as HTMLSelectElement).value});
-    st.sel=new Set(st.imp.selected); st.full=true; invalidate(); redraw();
+    st.sel=new Set(st.imp.selected); invalidate(); redraw();
   }));
   el.querySelectorAll<HTMLButtonElement>("[data-sel]").forEach((b) => b.addEventListener("click", guard(async () => {
-    const r = await local("/reg/select", { mode: b.dataset.sel, full: st.full });
+    const r = await local("/reg/select", { mode: b.dataset.sel, full: true });
     st.sel = new Set(r.selected); invalidate(); redraw();
   })));
   el.querySelectorAll<HTMLInputElement>("[data-emp]").forEach((cb) => cb.addEventListener("change", guard(async () => {
@@ -139,21 +135,20 @@ async function importTab(el: HTMLElement) {
     await local("/reg/select", { selected: [...st.sel] }); redraw();
   })));
   el.querySelectorAll<HTMLInputElement>("[data-opt]").forEach((cb) => cb.addEventListener("change", () => {
-    const k = cb.dataset.opt as "full" | "restore" | "comments" | "softEdits"; st[k] = cb.checked; invalidate();
-    if (k === "full" && cb.checked) toast("Полный режим включён для выбранных сотрудников");
+    st.comments = cb.checked; invalidate();
     redraw();
   }));
   el.querySelector<HTMLTextAreaElement>('[data-excluded-ids]')?.addEventListener('input',event=>{
     st.excludedIds=(event.target as HTMLTextAreaElement).value;st.preview=null;
     el.querySelector<HTMLButtonElement>('[data-apply]')?.setAttribute('disabled','');
   });
-  const body = () => ({ selected: [...st.sel], full: st.full, restore_manual: st.restore, replace_comments: st.comments, soft_edits: st.softEdits,
+  const body = () => ({ selected: [...st.sel], full: true, restore_manual: true, replace_comments: st.comments, soft_edits: true,
     exclude_contracts: st.excludedIds.split(/[\r\n,;]+/).map(x=>x.trim()).filter(Boolean) });
   const logEl = () => el.querySelector("#imp-log")!;
   el.querySelector("[data-preview]")?.addEventListener("click", guard(async () => {
     invalidate(); logEl().textContent = "Проверяю…";
     st.preview = await job("/reg/preview", body(), (s) => { logEl().textContent = s; });
-    toast(st.preview.error ? "Импорт не прошёл" : "Предпросмотр готов" + (st.full ? `: будет снято ${n(st.preview.unassigned)}` : ""));
+    toast(st.preview.error ? "Импорт не прошёл" : `Предпросмотр готов: будет снято ${n(st.preview.unassigned)}`);
     redraw();
   }));
   el.querySelector("[data-apply]")?.addEventListener("click", guard(async () => {

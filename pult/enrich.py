@@ -857,19 +857,49 @@ def book_key(path) -> str:
     return str(path).replace("\\", "/").casefold()
 
 
+def canonical_book_key(path) -> str:
+    """Mapped drives and UNC spellings share the actual workbook identity."""
+    try:
+        return book_key(Path(path).resolve())
+    except (OSError, ValueError):
+        return book_key(path)
+
+
 def ledger_for_book(ledger, path):
     if ledger is None or "_books" not in ledger:
         return ledger
-    return ledger["_books"].get(book_key(path), {})
+    books = ledger["_books"]
+    raw, canonical = book_key(path), canonical_book_key(path)
+    if raw == canonical:
+        return books.get(raw, {})
+    # Older receipts can contain either spelling. Keep the newest acknowledged
+    # field if both exist; never turn a known office edit into missing history.
+    merged = {}
+    for identity in dict.fromkeys((canonical, raw)):
+        for cid, fields in books.get(identity, {}).items():
+            target = merged.setdefault(cid, {})
+            for key, value in fields.items():
+                old = target.get(key)
+                at = value.get("at") if isinstance(value, dict) else ""
+                old_at = old.get("at") if isinstance(old, dict) else ""
+                if old is None or str(at or "") > str(old_at or ""):
+                    target[key] = value
+    return merged
 
 
 def decisions_for_book(decisions, path):
     out = {}
+    target = {book_key(path), canonical_book_key(path)}
+    identities = {}
     for key, value in (decisions or {}).items():
         if len(key) == 2:
             out[key] = value
-        elif len(key) == 3 and book_key(key[0]) == book_key(path):
-            out[key[1:]] = value
+        elif len(key) == 3:
+            raw = book_key(key[0])
+            if raw not in identities:
+                identities[raw] = canonical_book_key(key[0])
+            if raw in target or identities[raw] in target:
+                out[key[1:]] = value
     return out
 
 
