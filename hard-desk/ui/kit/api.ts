@@ -61,7 +61,24 @@ interface Bridge {
   on(name: "revoked" | "win" | "update", cb: (arg?: unknown) => void): void;
 }
 
-export const hard: Bridge = (window as unknown as { hard: Bridge }).hard;
+const bridge: Bridge = (window as unknown as { hard: Bridge }).hard;
+let employeeProfile: "hard" | "soft" | undefined;
+
+/** Keep both portfolios in the existing employee session. */
+export function setEmployeeProfile(profile: "hard" | "soft"): void { employeeProfile = profile; }
+
+function employeeQuery(path: string, query?: Q): Q | undefined {
+  if (!employeeProfile || !path.startsWith("/api/") || path.startsWith("/api/local/")) return query;
+  const explicit = query?.mode || query?.profile;
+  return { ...query, mode: explicit === "hard" || explicit === "soft" ? explicit : employeeProfile };
+}
+
+export const hard: Bridge = {
+  ...bridge,
+  api: (method, path, query, body) => bridge.api(method, path, employeeQuery(path, query), body),
+  image: (path, query) => bridge.image(path, employeeQuery(path, query)),
+  upload: (path, query, file, ext) => bridge.upload(path, employeeQuery(path, query) || {}, file, ext),
+};
 
 type Listener = (s: { level: "live" | "warn" | "off" | "busy"; text: string }) => void;
 const listeners = new Set<Listener>();

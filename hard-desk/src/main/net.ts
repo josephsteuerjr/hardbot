@@ -38,7 +38,19 @@ function net(): Session {
 }
 
 function request(url: string, init: RequestInit, timeoutMs = 30000): Promise<Response> {
-  const headers = { ...(init.headers as Record<string,string> || {}), "X-Client-Version": app.getVersion?.() || "3.2.0", 'X-Work-Product': PRODUCT_ID || 'hard' };
+  const query = new URLSearchParams(url.split("?")[1] || "");
+  let product = query.get("mode") || query.get("profile");
+  // Durable office/call operations keep their own product when the employee
+  // changes the visible portfolio or restarts before a queue is sent.
+  if (typeof init.body === "string") {
+    try {
+      const kind = JSON.parse(init.body).kind;
+      if (kind === "office") product = "hard";
+      else if (kind === "call" || kind === "payment") product = "soft";
+    } catch { /* A non-JSON request keeps its explicit/default product. */ }
+  }
+  const workProduct = product === "hard" || product === "soft" ? product : PRODUCT_ID || "hard";
+  const headers = { ...(init.headers as Record<string,string> || {}), "X-Client-Version": app.getVersion?.() || "3.2.0", 'X-Work-Product': workProduct };
   init = { ...init, headers };
   return fetchBuffered((target, options) => net().fetch(target, options), url, init, timeoutMs);
 }
