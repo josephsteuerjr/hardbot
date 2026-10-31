@@ -161,6 +161,21 @@ def dashboard(employee, profile, month, *, page=1, size=100, detail='payments'):
     rows = _rows(employee, profile)
     visible = {r['contract_id']: r for r in rows}
     report = office_work.report(employee, profile, start.isoformat(), end.isoformat())
+    if profile == 'soft':
+        # One person may have explicit canonical/Soft labels. Preserve both
+        # historical authors without changing stored facts or current scope.
+        import staff_roster, digest_data, soft_reporting
+        authors=staff_roster.product_author_names(employee,'soft')
+        calls={call['id']:call for author in authors for call in db.soft_calls_for_employee(author,start.isoformat(),end.isoformat())}
+        rng={'from':start.isoformat(),'to':end.isoformat(),'days':(end-start).days+1,'kind':'custom','title':month}
+        own_stats=digest_data._soft_employee_stats(employee,rng,calls=list(calls.values()),details=True)
+        report['stats']={key:own_stats[key] for key in ('calls','persons','rpc','ptp','kp','rpc_rate','ptp_rate','kp_rate')}
+        report['events']=[]
+        for case in own_stats.get('cases',[]):
+            ids=soft_reporting.contract_ids(calls[case['id']])
+            rep=next((cid for cid in ids if cid in visible),'')
+            report['events'].append({'id':case['id'],'rep':rep,'contracts':ids,
+                                    'day':case['date'],'title':case['outcome'],'source':'Звонок Софта'})
     with db.connect() as conn:
         payments = {}
         for offset in range(0, len(rows), 400):

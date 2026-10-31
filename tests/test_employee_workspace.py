@@ -80,6 +80,18 @@ def test_explicit_hard_profile_uses_own_alias_despite_soft_header(employee):
     assert status==200 and data['total']==2 and data['employee']=='Own Employee'
 
 
+def test_soft_cabinet_includes_explicit_prior_author_but_not_foreign(employee):
+    import staff_roster
+    items=[{'employee':'Own Employee','products':['hard','soft'],'product_names':{'soft':'Own Employee SOFT','hard':'Own Employee'}}]
+    preview=staff_roster.preview(items);staff_roster.apply(items,preview['sha256'],by='test')
+    with db.connect() as c:
+        c.execute("UPDATE clients SET responsible_soft='Own Employee SOFT' WHERE responsible_soft='Own Employee'")
+        for name in ['Own Employee','Own Employee SOFT','Foreign Employee']:
+            c.execute('INSERT INTO calls(contract_id,employee,created_at,values_json,contracts_json,payload) VALUES(?,?,?,?,?,?)',('OWN-A',name,'2026-10-25',json.dumps({'soft_call_status':'Нет контакта'}),json.dumps(['OWN-A']),'Synthetic call'))
+    data=http('GET','/api/workspace/dashboard?profile=soft&month=2026-10&detail=operations',headers=employee)[1]
+    assert data['stats']['calls']==2 and data['total']==2 and data['stats']['processed_contracts']==1
+
+
 @pytest.mark.parametrize('query',['profile=wrong','profile=soft&month=2026-13','profile=soft&month=2027-01','profile=soft&page=0','profile=soft&size=10000','profile=soft&detail=secret'])
 def test_invalid_parameters_do_not_broaden_scope(employee,query):
     assert http('GET','/api/workspace/dashboard?'+query,headers=employee)[0]==400
