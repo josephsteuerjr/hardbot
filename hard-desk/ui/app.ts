@@ -28,6 +28,7 @@ import { priority, registry } from "./analyst/registry";
 import { fieldHelp, portfolio, hardEmployeeSections } from "./views/field";
 import { softHelp, softQueue, softEmployeeSections } from "./views/soft";
 import { adminControlCall, controlSection } from "./views/control";
+import { employeeRegistry, employeeCabinet } from "./views/employee-cabinet";
 
 /** Пульт аналитика: тот же каркас и облик, данные — через питон-сторону. */
 async function startAnalyst() {
@@ -344,6 +345,8 @@ async function startAgent() {
   });
   const primary: Section[] = soft ? [softQueue, staffTasks('employee'), ...softEmployeeSections, softHelp] : [portfolio, staffTasks('employee'), ...hardEmployeeSections, fieldHelp];
   const list = primary.map(section => scoped(section, profile));
+  const dual=!!who?.roles?.soft && !!who?.roles?.field;
+  list.splice(1,0,scoped(employeeCabinet(profile,dual),profile),scoped(employeeRegistry(profile,dual),profile));
   if (soft && who?.roles?.field) list.splice(1, 0, scoped({
     ...portfolio,
     title: "Выездные клиенты",

@@ -685,14 +685,16 @@ def _person_full_from_rows(rows, rep: str, lang: str,
     visited = visit is not None
     import office_work
     totals = office_work.portfolio_totals(rows)
+    import employee_workspace
     contracts = [{
+        **employee_workspace.row_data(r),
         "contract_id": r["contract_id"], "partner": r["partner"],
         "unit": debt.unit([r["partner"]] if r["partner"] else []),
         "total": db.registry_payment_amount(r["debt_today"] if r["debt_today"] not in (None, "") else r["debt_total"]),
         "last_payment_sum": r["last_payment_sum"] or "",
         "last_payment_date": r["last_payment_date"] or "",
-        "debt": [{"key": k, "title": _title(k, lang), "value": v}
-                 for k, v in debt.breakdown(r)],
+        "debt": [{"key": k, "title": _title(k, lang), "value": float(v)}
+                 for k in debt.ARTICLES if (v := employee_workspace.amount(_cell(r, k))) is not None],
     } for r in rows]
     info = [{"key": k, "title": _title(k, lang), "value": _row_get(rows, k) or "—"}
             for k in INFO_KEYS]
@@ -1731,6 +1733,38 @@ async def _office_action(request: web.Request) -> web.Response:
     except (ValueError, TypeError):
         return web.json_response({"ok": False, "error": "Проверьте тело записи"}, status=400)
     return web.json_response(result)
+
+
+async def _employee_registry_view(request: web.Request) -> web.Response:
+    """Self/authorized acting principal only; no employee name from query."""
+    uid = await asyncio.to_thread(_uid, request)
+    if not uid:
+        raise web.HTTPUnauthorized(text='auth')
+    principal = await asyncio.to_thread(_employee, uid, request)
+    if not principal:
+        raise web.HTTPForbidden(text='not bound')
+    import staff_roster, employee_workspace
+    profile = request.query.get('profile', request.query.get('mode', 'hard'))
+    if profile not in ('hard','soft'):
+        raise web.HTTPBadRequest(text='Выберите Хард или Софт')
+    employee = await asyncio.to_thread(staff_roster.product_employee, principal, profile)
+    try:
+        size = int(request.query.get('size','100'))
+        page = int(request.query.get('page','1'))
+        if request.path.endswith('/portfolio'):
+            result = await asyncio.to_thread(employee_workspace.portfolio, employee, profile,
+                query=request.query.get('q','')[:200], partner=request.query.get('partner','')[:200],
+                sort=request.query.get('sort','client'), direction=request.query.get('direction','asc'),page=page,size=size)
+        else:
+            result = await asyncio.to_thread(employee_workspace.dashboard, employee, profile,
+                request.query.get('month') or workday.today().strftime('%Y-%m'),
+                page=page,size=size,detail=request.query.get('detail','payments'))
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+    result['employee'] = principal
+    import access_policy
+    result['scope_version'] = await asyncio.to_thread(access_policy.version,[principal])
+    response=web.json_response(result);response.enable_compression();return response
 
 
 async def _workspace_report(request: web.Request) -> web.Response:
@@ -7998,6 +8032,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/save", _save)
     app.router.add_post("/api/office/action", _office_action)
     app.router.add_get("/api/workspace/report", _workspace_report)
+    app.router.add_get("/api/workspace/portfolio", _employee_registry_view)
+    app.router.add_get("/api/workspace/dashboard", _employee_registry_view)
     app.router.add_get("/api/workspace/promises", _workspace_promises)
     app.router.add_post("/api/photo", _photo)
     app.router.add_post("/api/receipt", _receipt)

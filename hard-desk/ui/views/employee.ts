@@ -2,6 +2,7 @@ import { api, hard } from "../kit/api";
 import { esc, n, toast } from "../kit/dom";
 import { openPanel, setHead, type Section } from "../kit/shell";
 import { DataTable } from "../kit/table";
+import { registryContracts } from "./registry-detail";
 
 export type Profile = "hard" | "soft";
 export function lockCard(panel:HTMLElement,on:boolean):void {
@@ -39,7 +40,7 @@ export function cardNavigation(panel: HTMLElement, rep: string, table: DataTable
 }
 
 export function contextHtml(d: any): string {
-  return `<details class="section office-context"><summary>Договоры, долг и реестровые оплаты (${n((d.contracts || []).length)})</summary>
+  return `${registryContracts(d)}<details class="section office-context"><summary>Реестровые оплаты и дополнительные сведения</summary>
     ${(d.contracts || []).map((c: any) => `<div class="list-row"><div class="grow"><b class="mono">${esc(c.contract_id)}</b><span class="sub">${esc(c.partner || "Контрагент не указан")}</span></div><span>${esc(money(c.total))} ${esc(c.unit || "")}</span></div>
       ${(c.debt || []).map((x:any)=>`<div class="kv-line"><span>${esc(x.title)}</span><span>${esc(money(x.value))} ${esc(c.unit || "")}</span></div>`).join("")}`).join("")}
     <h4>Оплаты из реестра</h4>${(d.payments || []).map((p:any)=>`<div class="list-row"><div class="grow"><b class="mono">${esc(p.contract_id)}</b><span class="sub">${esc(p.date || "дата не указана")}</span></div><span>${esc(money(p.amount))} ${esc(p.unit || "")}</span></div>`).join("") || '<p class="muted">Сведений пока нет</p>'}

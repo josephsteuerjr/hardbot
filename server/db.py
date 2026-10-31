@@ -882,6 +882,8 @@ def init_db() -> None:
         employee_identity.init_schema(conn)
         import office_work
         office_work.init_schema(conn)
+        import employee_workspace
+        employee_workspace.init_schema(conn)
         call_cols = {r[1] for r in conn.execute("PRAGMA table_info(calls)")}
         for col in ("values_json", "contracts_json"):
             if col not in call_cols:
@@ -8846,6 +8848,9 @@ def import_grid(
 
     # Сначала разобрать ВЕСЬ файл в памяти. Это обязательный preflight: при
     # повторе КД не должна успеть записаться ни одна предыдущая строка.
+    import employee_workspace
+    monthly_columns = employee_workspace.month_columns(rows[best_h])
+    monthly_raw = {}
     grouped: dict[str, dict] = {}
     extra_values: dict[str, dict[str, str]] = {}
     duplicate_conflicts: dict[str, set[str]] = {}
@@ -8947,6 +8952,7 @@ def import_grid(
         if not cid:
             report["skipped_no_id"] += 1
             continue
+        monthly_raw.setdefault(cid, raw)
         if extra_cols:
             # Дополнительные поля сохраняем как ТЕКСТ, как он стоит в файле:
             # смысл новой колонки боту неизвестен, и любое «умное» приведение
@@ -9640,6 +9646,9 @@ def import_grid(
                 tuple(data.values()),
             )
             report["updated" if is_update else "inserted"] += 1
+            if monthly_columns:
+                monthly_partner=conn.execute('SELECT partner FROM clients WHERE contract_id=?',(cid,)).fetchone()[0]
+                employee_workspace.remember_monthly(conn, cid, monthly_raw[cid], monthly_columns, monthly_partner)
             # Журнал закреплений: событие снимается с ИТОГОВОГО data — после
             # всех шлюзов (канонизация имени, ручное снятие, офисные правки).
             prev_owner = (existing[cid]["responsible"] or "").strip() \
@@ -10038,6 +10047,7 @@ def wipe_registry() -> dict:
     with connect() as conn:
         n = conn.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
         conn.execute("DELETE FROM registry_payments")
+        conn.execute("DELETE FROM registry_monthly_totals")
         conn.execute("DELETE FROM office_action_contracts")
         conn.execute("DELETE FROM office_actions")
         conn.execute("DELETE FROM clients")

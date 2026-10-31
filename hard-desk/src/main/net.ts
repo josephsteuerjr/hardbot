@@ -321,6 +321,7 @@ const FIELD_PATH_EXACT = new Set(["/api/person", "/api/cards", "/api/markers", "
                                   "/api/receipt", "/api/photo", "/api/note"]);
 for (const path of ["/api/office/action", "/api/workspace/report", "/api/workspace/promises"])
   FIELD_PATH_EXACT.add(path);
+for (const path of ["/api/workspace/portfolio", "/api/workspace/dashboard"]) FIELD_PATH_EXACT.add(path);
 
 function fieldOk(path: string): boolean {
   return FIELD_PATH.test(path) || FIELD_PATH_EXACT.has(path);

@@ -39,6 +39,15 @@ if not metadata.exists():
                 (cid, client, '1990-01-01', responsible, responsible_soft, 'Таджикистан', debt, debt,
                  'Синтетический контрагент', 'Синтетический адрес', '000001'))
         conn.commit()
+        conn.execute("UPDATE clients SET kd_date='2025-01-15',issued_sum='50000.55',dp='82',debt_overdue='900.10',interest_overdue='100.15' WHERE contract_id LIKE 'LIVE-%'")
+        import employee_workspace,workday
+        current=workday.today()
+        previous=current.replace(day=1)-__import__('datetime').timedelta(days=1)
+        header=['Оплаты за '+previous.strftime('%m.%y'),'Текущие платежи']
+        columns=employee_workspace.month_columns(header)
+        for cid,value in [('LIVE-001','125.50'),('LIVE-002','0'),('LIVE-003','22.55')]:
+            employee_workspace.remember_monthly(conn,cid,[0,value],columns,'Синтетический контрагент')
+        conn.commit()
     tokens, phone_tokens, login_links = {}, {}, {}
     for kind, uid, employee in [('hard', 810101, hard), ('soft', 810102, soft)]:
         if dual and kind == 'hard':
