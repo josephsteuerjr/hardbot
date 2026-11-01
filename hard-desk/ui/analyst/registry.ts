@@ -19,6 +19,54 @@ const st = {
   busy: false, progress: "",
 };
 let activeRoot: HTMLElement | null = null;
+let queueTimer: ReturnType<typeof setTimeout> | undefined;
+let queueGeneration = 0;
+let deliveryOperation: any = null;
+
+async function showDeliveryQueue(root: HTMLElement, generation: number): Promise<void> {
+  if (!root.isConnected || activeRoot !== root || generation !== queueGeneration) return;
+  const host = root.querySelector<HTMLElement>('[data-delivery-queue]');
+  if (!host) return;
+  try {
+    const operation = await local<any>('/enr/operation');
+    if (generation !== queueGeneration || activeRoot !== root) return;
+    deliveryOperation = operation?.id ? operation : null;
+    const signature = JSON.stringify(deliveryOperation);
+    if (host.dataset.signature !== signature && !(host.contains(document.activeElement) && document.activeElement?.tagName === 'SELECT')) {
+      host.dataset.signature = signature;
+      const op = deliveryOperation;
+      host.innerHTML = !op ? '' : `<div class="notice${op.remaining ? ' err' : ''}" role="status"><span class="grow">${esc(op.remaining ? `Перенос не завершён. Проверено книг: ${op.completed} из ${op.total}. Осталось: ${op.remaining}.` : `Обогащение завершено. Проверено книг: ${op.total}. Записано ячеек: ${op.cells}.`)}${op.remaining ? '<br>Занятые книги будут обработаны после закрытия. Импорт реестра доступен после завершения переноса.' : ''}</span></div>
+        ${(op.books || []).filter((b: any) => b.state !== 'done').map((b: any) => `<div class="list-row" style="display:block;overflow-wrap:anywhere"><b>${esc(b.employee)} — ${esc(String(b.file).split(/[\\/]/).pop())}</b><p>${esc(b.message || 'Ожидает обработки')}</p>
+          ${b.conflicts?.length ? `<div class="table-wrap"><table class="grid"><thead><tr><th class="l">Договор / поле</th><th class="l">В книге</th><th class="l">На сервере</th><th class="l">Действие</th></tr></thead><tbody>${b.conflicts.map((c: any, index: number) => `<tr><td>${esc(c.contract_id)} · ${esc(c.column || c.key)}</td><td>${esc(c.file)}</td><td>${esc(c.server)}</td><td><select class="input" data-queue-choice="${b.ordinal}:${index}"><option value="file">Оставить в книге</option><option value="server">Записать сервер</option></select></td></tr>`).join('')}</tbody></table></div><button class="btn small" data-queue-resolve="${b.ordinal}">Применить решения</button>` : ''}</div>`).join('')}
+        ${op.remaining ? '<button class="btn small" data-queue-retry>Повторить проверку ошибок</button>' : ''}`;
+      host.querySelector('[data-queue-retry]')?.addEventListener('click', guard(async () => {
+        await local('/enr/retry', { id: op.id });
+        host.dataset.signature = ''; await showDeliveryQueue(root, generation);
+      }));
+      host.querySelectorAll<HTMLButtonElement>('[data-queue-resolve]').forEach(button => button.addEventListener('click', guard(async () => {
+        const book = op.books.find((b: any) => b.ordinal === Number(button.dataset.queueResolve));
+        const decisions = book.conflicts.map((c: any, index: number) => ({ book_path: book.file, contract_id: c.contract_id, key: c.key,
+          decision: host.querySelector<HTMLSelectElement>(`[data-queue-choice="${book.ordinal}:${index}"]`)!.value }));
+        await local('/enr/retry', { id: op.id, review_token: book.review_token, decisions });
+        host.dataset.signature = ''; await showDeliveryQueue(root, generation);
+      })));
+    }
+    root.querySelectorAll<HTMLButtonElement>(st.tab === 'enrich' ? '[data-apply],[data-check],[data-scan]' : '[data-apply],[data-preview]').forEach(button => {
+      if (deliveryOperation?.remaining) {
+        if (button.dataset.deliveryBlocked === undefined) button.dataset.deliveryBlocked = button.disabled ? '1' : '0';
+        button.disabled = true;
+      } else if (button.dataset.deliveryBlocked !== undefined) {
+        button.disabled = button.dataset.deliveryBlocked === '1'; delete button.dataset.deliveryBlocked;
+      }
+    });
+  } catch (error) {
+    host.innerHTML = `<div class="notice err">Не удалось проверить очередь переноса: ${esc(String((error as Error).message || error))}</div>`;
+  } finally {
+    if (root.isConnected && generation === queueGeneration && activeRoot === root) {
+      clearTimeout(queueTimer); queueTimer = setTimeout(() => void showDeliveryQueue(root, generation), 2000);
+    }
+  }
+}
 
 function showProgress(): void {
   if (!activeRoot?.isConnected) return;
@@ -254,6 +302,7 @@ async function enrichTab(el: HTMLElement) {
     logEl().textContent = "Открываю книги…";
     st.applyRes = await job("/enr/apply", body, (s) => { logEl().textContent = s; });
     st.check = null; toast(st.applyRes.toast); redraw();
+    if (activeRoot) await showDeliveryQueue(activeRoot, queueGeneration);
   }));
   el.querySelector("[data-replay]")?.addEventListener("click", guard(async () => {
     const r = await job("/enr/replay", {}); toast(r.toast); st.applyRes.ledger_error = ""; redraw();
@@ -369,7 +418,8 @@ async function recalledTab(el: HTMLElement, limit = 500) {
 
 async function draw(root: HTMLElement) {
   activeRoot = root;
-  root.innerHTML = `<div class="toolbar">${tabs()}</div><p class="notice" data-registry-progress role="status" hidden></p><div id="rtab"><div class="skeleton"></div></div>`;
+  clearTimeout(queueTimer); const generation = ++queueGeneration;
+  root.innerHTML = `<div class="toolbar">${tabs()}</div><div data-delivery-queue></div><p class="notice" data-registry-progress role="status" hidden></p><div id="rtab"><div class="skeleton"></div></div>`;
   root.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach((b) => b.addEventListener("click", () => { st.tab = b.dataset.tab as typeof st.tab; void draw(root); }));
   const el = root.querySelector<HTMLElement>("#rtab")!;
   try {
@@ -382,6 +432,7 @@ async function draw(root: HTMLElement) {
     el.innerHTML = `<div class="notice err"><span class="grow">${esc((e as Error).message)}</span></div>`;
   }
   showProgress();
+  await showDeliveryQueue(root,generation);
 }
 
 export const registry: Section = {

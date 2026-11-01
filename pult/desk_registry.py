@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import threading
+import os
+import uuid
 from pathlib import Path
 
 from pult.core import bootstrap
@@ -35,6 +37,18 @@ from pult.core.export import (export_confirm_text, export_request,  # noqa: E402
 from pult.core.text import fmt_n  # noqa: E402
 
 _lock = threading.RLock()
+_delivery_service = None
+
+def delivery_service(settings,admin):
+    global _delivery_service
+    from pult.core.enrichment_queue import Service,authority
+    path=Path(getattr(settings,'path',None) or os.environ.get('HARD_PULT_SETTINGS') or Path(__file__).resolve().parents[1]/'_local/backend-settings.json').parent/'enrichment'
+    if _delivery_service is None or _delivery_service.store.directory!=path:
+        _delivery_service=Service(path,lambda:authority(settings),admin)
+    return _delivery_service
+
+def delivery_guard(settings,admin):
+    delivery_service(settings,admin).require_complete()
 def _empty_state() -> dict:
     return {
     "col_path": "", "col_analysis": None,
@@ -175,7 +189,8 @@ def _signature(book, sel, full, restore, comments, soft_edits=False, excluded=()
             tuple(sorted(sel)), True, True, bool(comments), True,tuple(sorted(set(excluded))))
 
 
-def imp_preview(body, *, admin, start_job, **_):
+def imp_preview(body, *, admin, start_job, settings, **_):
+    delivery_guard(settings,admin)
     if not LIMITED_TEST_MASTER_IMPORT_UI_ENABLED:
         raise RuntimeError(LIMITED_TEST_MASTER_IMPORT_DISABLED_MESSAGE)
     book = S["book"]
@@ -192,6 +207,14 @@ def imp_preview(body, *, admin, start_job, **_):
     sig = _signature(book, picked, full, restore, comments, soft_edits,excluded)
 
     def work(say):
+        nonlocal book,filtered,excluded_rows
+        if enrich._sha256_file(Path(book['path']))!=book['file_sha256']:
+            profile=book.get('import_profile','hard');fresh=ri.read_registry(book['path'])
+            stats=admin('GET','/admin/stats')
+            ri.select_profile(fresh,profile,stats.get('employees'),stats.get('soft_employees'))
+            fresh['_selected']=picked;S['book']=book=fresh
+            say('Общий реестр изменился; прочитана последняя версия перед предпросмотром.')
+        filtered,excluded_rows=ri.exclude_contracts(book,excluded)
         say(f"Проверяю импорт {Path(book['path']).name}: {len(picked)} сотр…")
         prepared, proof_path = ri.prepare_import(filtered, picked, full_registry=full,
                                                  force_test_subset=restore)
@@ -206,7 +229,8 @@ def imp_preview(body, *, admin, start_job, **_):
         if isinstance(expected, str):
             S["preview"] = None
             return {"error": expected}
-        S["preview"] = {"body": {**pbody, **expected}, "meta": prepared, "sig": sig, "proof": proof_path}
+        current_sig=_signature(book,picked,full,restore,comments,soft_edits,excluded)
+        S["preview"] = {"body": {**pbody, **expected}, "meta": prepared, "sig": current_sig, "proof": proof_path}
         notes = ri.import_notes(d)
         if excluded_rows:notes.insert(0,f'По выбранным номерам договоров исключено строк: {excluded_rows}.')
         notes.insert(0, ri.preview_headline(d, full))
@@ -215,7 +239,8 @@ def imp_preview(body, *, admin, start_job, **_):
     return {"job": start_job("preview", work)}
 
 
-def imp_apply(body, *, admin, start_job, **_):
+def imp_apply(body, *, admin, start_job, settings, **_):
+    delivery_guard(settings,admin)
     pv = S["preview"]
     book = S["book"] or {}
     sig = _signature(book, body.get("selected") or [], body.get("full"), body.get("restore_manual"),
@@ -225,6 +250,10 @@ def imp_apply(body, *, admin, start_job, **_):
         raise RuntimeError("Сначала сделай свежий предпросмотр импорта")
 
     def work(say):
+        delivery_guard(settings,admin)
+        if enrich._sha256_file(Path(book['path']))!=book['file_sha256']:
+            S['preview']=None
+            raise RuntimeError('Общий реестр изменился после предпросмотра. Сделайте новый предпросмотр; импорт не отправлен.')
         say("Применяю проверенный импорт…")
         meta = pv["meta"]
         registered = None
@@ -234,6 +263,9 @@ def imp_apply(body, *, admin, start_job, **_):
                                timeout=60)
         except Exception:  # noqa: BLE001 — регистратор закрыт: подскажем команду
             registered = None
+        if enrich._sha256_file(Path(book['path']))!=book['file_sha256']:
+            S['preview']=None
+            raise RuntimeError('Общий реестр изменился до отправки. Сделайте новый предпросмотр; импорт не отправлен.')
         d = xs.post_import(admin, "/admin/import.json", pv["body"],
                            sheet=_xc.WORKBOOK_SHEET_NAME, timeout=180, log=say)
         if isinstance(d, dict) and d.get("error"):
@@ -257,23 +289,26 @@ def _base(settings) -> str:
     return str(settings.get("scatterBase") or "")
 
 
-def enr_state(body, *, settings, **_):
+def enr_state(body, *, settings, admin, **_):
     base = _base(settings)
     since, until = en.suggest_window(en.receipt_dir(base)) if base else ("", "")
     return {"base": base, "since": since, "until": until,
             "writes": LIMITED_TEST_ENRICH_WRITES_ENABLED,
             "whole_title": en.WHOLE_HISTORY_TITLE, "whole_text": en.WHOLE_HISTORY_TEXT,
             "decision_hint": en.DECISION_HINT, "decision_labels": en.DECISION_LABELS,
-            "conflict_columns": en.CONFLICT_COLUMNS}
+            "conflict_columns": en.CONFLICT_COLUMNS,
+            "operation":delivery_service(settings,admin).view()}
 
 
-def enr_base(body, *, settings, **_):
+def enr_base(body, *, settings, admin, **_):
+    delivery_guard(settings,admin)
     settings["scatterBase"] = str(body.get("path") or "")
     settings.save()
-    return enr_state({}, settings=settings)
+    return enr_state({}, settings=settings,admin=admin)
 
 
 def enr_preview(body, *, admin, start_job, settings, **_):
+    delivery_guard(settings,admin)
     base = _base(settings)
     if not base:
         raise RuntimeError("Сначала выбери папку с республиками")
@@ -321,7 +356,7 @@ def enr_check(body, *, admin, start_job, **_):
         results = enrich.preview_many(en.build_jobs(picked), S["enr_fields"], say, **kwargs)
         conflicts, office = en.collect_conflicts(results)
         S["enr_check"] = {"keys": sorted(m["key"] for m in picked), "since": since, "until": until,
-                          "conflict_count":len(conflicts)+len(office)}
+                          "conflict_count":len(conflicts)+len(office),"conflicts":conflicts+office}
         return {"lines": en.preview_lines(results), "conflicts": _conf(conflicts), "office": _conf(office)}
     return {"job": start_job("enr_check", work)}
 
@@ -354,29 +389,34 @@ def enr_apply(body, *, admin, start_job, settings, **_):
         raise RuntimeError("Никто не выбран")
     since, until = str(body.get("since") or ""), str(body.get("until") or "")
     decisions = _decisions(body, picked, since, until)
-    base = _base(settings)
-
-    def on_delivered(payload: dict):
-        return admin("POST", "/admin/enrichment/ledger.json", payload, timeout=120)
+    checked=S['enr_check']
+    if not checked or checked['keys']!=sorted(m['key'] for m in picked) or (checked['since'],checked['until'])!=(since,until):
+        raise RuntimeError('Сначала проверьте конфликты для выбранных книг и дат')
+    approved=[]
+    for row in checked.get('conflicts',[]):
+        key=en.conflict_key(row)
+        if key in decisions:approved.append({**row,'decision':decisions[key]})
+    service=delivery_service(settings,admin);service.require_complete()
+    prepared_run=None
+    fields=S['enr_fields'];jobs=en.build_jobs(picked)
+    def prepare(run_id,profile,fingerprint):
+        nonlocal prepared_run
+        prepared_run=service.prepare(run_id,jobs,fields,since,until,approved,fingerprint)
 
     def work(say):
-        ledger = _ledger(admin, [m["employee"] for m in picked])
-        kwargs = en.enrich_many_kwargs(since=since, until=until, backup_root=en.backup_root(base),
-                                       receipt_dir=en.receipt_dir(base), ledger=ledger,
-                                       on_delivered=on_delivered, server_authoritative=False,
-                                       decisions=decisions)
-        # Книга едет на шару только проверенной: Excel работает с локальной копией
-        # (опыт 30.09–01.10.2026: те же книги, в 2–6 раз быстрее, занятую или
-        # изменённую за время прогона книгу не трогает). Переключателя нет.
-        results = enrich.enrich_many(en.build_jobs(picked), S["enr_fields"], say,
-                                     engine="local", **kwargs)
-        S["last_receipt"] = next((r.get("receipt") for r in results if r.get("receipt")), None)
+        result=service.process(prepared_run,say)
         S["enr_check"] = None
-        conflicts, office = en.collect_conflicts(results)
-        text, err = en.toast_text(results)
-        return {"lines": en.report_lines(results), "ledger_error": en.ledger_error(results),
-                "conflicts": _conf(conflicts), "office": _conf(office), "toast": text, "toast_err": err}
-    return {"job": start_job("enr_apply", work)}
+        S['preview']=None
+        return {**result,'lines':[f'Проверено книг: {result["completed"]} из {result["total"]}. Записано ячеек: {result["cells"]}.',
+            'Перенос завершён.' if not result['remaining'] else 'Перенос продолжится после закрытия занятых книг. Ошибки указаны в очереди.'],
+            'conflicts':[],'office':[],'ledger_error':''}
+    return {"job": start_job("enr_apply", work,before_start=prepare)}
+
+def enr_operation(body,*,settings,admin,**_):
+    return delivery_service(settings,admin).view()
+
+def enr_retry(body,*,settings,admin,**_):
+    return delivery_service(settings,admin).retry(str(body.get('id') or ''),body.get('decisions') or (),body.get('review_token'))
 
 
 def enr_replay(body, *, admin, start_job, settings, **_):
@@ -456,6 +496,7 @@ _ROUTES = {
     "/reg/preview": imp_preview, "/reg/apply": imp_apply, "/reg/state": imp_state,
     "/enr/state": enr_state, "/enr/base": enr_base, "/enr/preview": enr_preview,
     "/enr/check": enr_check, "/enr/confirm": enr_confirm, "/enr/apply": enr_apply,
+    "/enr/operation":enr_operation,"/enr/retry":enr_retry,
     "/enr/replay": enr_replay, "/exp/employees": exp_employees, "/exp/prepare": exp_prepare,
     "/exp/save": exp_save, "/exp/markers": exp_markers, "/reg/period": period,
     "/reg/recalled": recalled,

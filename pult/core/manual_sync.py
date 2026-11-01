@@ -80,6 +80,30 @@ def track_automatic_file(parameter='path'):
     return decorate
 
 
+def publication_identity(path):
+    """Identify the already-held provenance lease; do not acquire it twice."""
+    config=active_config(path)
+    if not config or not config.get('journal'):return None
+    from .manual_journal import Journal
+    intent=Journal(config['journal']).active(path)
+    if not intent or intent.get('origin')!='automatic':
+        raise ValueError('Не подтверждена операция автоматической записи')
+    return intent['operation_id']
+
+
+def recover_verified_publication(path,evidence):
+    config=active_config(path)
+    if not config:return
+    if not config.get('journal'):
+        raise ValueError('Прерванная запись старого локального журнала требует проверки')
+    operation=evidence.get('provenance_operation_id')
+    if not operation:raise ValueError('Не найден номер операции происхождения записи')
+    from .manual_shared import SharedEngine
+    engine=SharedEngine(config['journal'],default_state_dir()/'work')
+    engine.recover_verified_publication(path,operation_id=operation,
+        pre_sha256=evidence['pre_sha256'],post_sha256=evidence['post_sha256'])
+
+
 def track_publication(function):
     @wraps(function)
     def wrapped(stage,*args,**kwargs):

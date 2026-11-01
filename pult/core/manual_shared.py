@@ -252,7 +252,10 @@ class SharedEngine:
                 pending={(row,block):day for row,block,day in old['pending']} if old else {}
                 review=set(tuple(x) for x in old['review']) if old else set()
             operation=operation_id or 'auto-'+uuid.uuid4().hex
-            self.journal.begin(path,book,operation,include_blocks=False,extra={'origin':'automatic','ledger_before_version':old['version'] if old else 0})
+            self.journal.begin(path,book,operation,include_blocks=False,extra={
+                'origin':'automatic','ledger_before_version':old['version'] if old else 0,
+                'automatic_pending':[[row,block,day] for (row,block),day in sorted(pending.items())],
+                'automatic_review':[list(x) for x in sorted(review)]})
             try:
                 yield book
             except BaseException:
@@ -265,3 +268,31 @@ class SharedEngine:
                 self._save(path,state)
                 self.journal.finish(path,after,operation,ledger=state,include_blocks=False)
                 self._heartbeat(path,state,time.time())
+
+    def recover_verified_publication(self,path,*,operation_id,pre_sha256,post_sha256):
+        """Close exactly one interrupted automatic write with durable byte proof.
+
+        This cannot approve arbitrary changed bytes or create edit timestamps.
+        Pending/review metadata is the exact state saved before publication.
+        """
+        from .manual_sync import sha
+        path=Path(path);folder=self._folder(path)
+        with file_mutex(folder/'ledger.lock'):
+            old=self._load(path)
+            active=self.journal.active(path)
+            if not active:
+                if sha(path)!=post_sha256:raise ValueError('Не совпал результат записи книги')
+                return
+            if (active.get('operation_id')!=operation_id or active.get('origin')!='automatic'
+                    or active.get('pre_sha256')!=pre_sha256 or sha(path)!=post_sha256):
+                raise ValueError('Квитанция и результат прерванной записи не совпали')
+            if 'automatic_pending' not in active or 'automatic_review' not in active:
+                raise ValueError('Для старой операции нужна ручная проверка происхождения правок')
+            pending={(row,block):day for row,block,day in active['automatic_pending']}
+            review={tuple(item) for item in active['automatic_review']}
+            after=read(path)
+            state=self._state(path,after,old,operation_id,pending,review,time.time())
+            self._save(path,state)
+            self.journal.finish(path,after,operation_id,ledger=state,include_blocks=False,
+                                outcome='recovered_verified_publication')
+            self._heartbeat(path,state,time.time())

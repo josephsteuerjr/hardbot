@@ -1253,6 +1253,7 @@ def open_excel(xw, log=lambda s: None):
     try:
         app = xw.App(visible=False)
         app.api.EnableEvents = False
+        app.api.AutomationSecurity = 3
         return app
     except AttributeError as e:
         if "gen_py" not in repr(e) and "CLSIDToPackageMap" not in repr(e):
@@ -1261,6 +1262,7 @@ def open_excel(xw, log=lambda s: None):
         clear_gen_py()
         app = xw.App(visible=False)
         app.api.EnableEvents = False
+        app.api.AutomationSecurity = 3
         return app
 
 
@@ -1346,11 +1348,12 @@ def _apply_payment_statistics(wb, changes):
 
 def _plan_workbook(app, path: Path, fields: list[dict], rows: list[dict],
                    since=None, until=None, ledger=None,
-                   server_authoritative: bool = False, decisions=None) -> dict:
+                   server_authoritative: bool = False, decisions=None,preservation=None) -> dict:
     """Reopen a saved workbook and recompute the enrichment plan read-only."""
 
     wb = app.books.open(str(path), update_links=False, read_only=True)
     try:
+        if preservation:_verify_unplanned_cells(wb,*preservation)
         _ws, grid = _workbook_grid(wb, fields)
         plan = build_plan(grid, fields, rows, since, until,
                           ledger=ledger, server_authoritative=server_authoritative,
@@ -1359,6 +1362,38 @@ def _plan_workbook(app, path: Path, fields: list[dict], rows: list[dict],
         return plan
     finally:
         wb.close()
+
+
+def _all_sheet_cells(wb):
+    result={}
+    for sheet in wb.sheets:
+        used=sheet.api.UsedRange;raw=used.Formula;r0=int(used.Row)-1;c0=int(used.Column)-1
+        matrix=raw if isinstance(raw,(tuple,list)) else ((raw,),)
+        if matrix and not isinstance(matrix[0],(tuple,list)):matrix=(matrix,)
+        result[sheet.name]={(r0+r,c0+c):value for r,line in enumerate(matrix)
+                            for c,value in enumerate(line) if value is not None and value!=''}
+    return result
+
+
+def _verify_unplanned_cells(wb,before,allowed):
+    after=_all_sheet_cells(wb)
+    if set(before)!=set(after):raise ValueError('Изменился набор листов; книга не опубликована')
+    for sheet in before:
+        for cell in before[sheet].keys()|after[sheet].keys():
+            if (sheet,*cell) not in allowed and before[sheet].get(cell)!=after[sheet].get(cell):
+                from openpyxl.utils.cell import get_column_letter
+                raise ValueError(f'Незапланированное изменение {sheet}!{get_column_letter(cell[1]+1)}{cell[0]+1}; книга не опубликована')
+
+
+def _verify_vba_copy(source,candidate):
+    import zipfile
+    if not zipfile.is_zipfile(source):return None
+    if not zipfile.is_zipfile(candidate):raise ValueError('Изменился формат книги; запись отменена')
+    with zipfile.ZipFile(source) as original,zipfile.ZipFile(candidate) as current:
+        for name in set(original.namelist())|set(current.namelist()):
+            if name.casefold().endswith('vbaproject.bin') and original.read(name)!=current.read(name):
+                raise ValueError('Изменились макросы; книга не опубликована')
+    return True
 
 
 # Excel считает формулой всё, что начинается с =, +, - или @. Комментарий
@@ -1950,6 +1985,7 @@ def _enrich_local(
     decisions=None,
     work_dir=None,
     before_commit=None,
+    on_publication_intent=None,
 ) -> dict:
     """Способ «local»: тот же план, те же доказательства, но Excel — локально.
 
@@ -1982,14 +2018,19 @@ def _enrich_local(
         pristine.write_bytes(blob)
         os.utime(pristine, ns=(st0.st_atime_ns, st0.st_mtime_ns))
         work.write_bytes(blob)
-        wb = app.books.open(str(work))
+        wb = app.books.open(str(work),update_links=False) if on_publication_intent else app.books.open(str(work))
         try:
+            protection=_all_sheet_cells(wb) if on_publication_intent else None
             ws, grid = _workbook_grid(wb, fields)
             plan = build_plan(grid, fields, rows, since, until,
                               ledger=ledger, server_authoritative=server_authoritative,
                               decisions=decisions)
             writes = plan["writes"]
             _set_payment_statistics_plan(plan,wb,grid,fields,rows,since,until)
+            allowed={(ws.name,r,c) for r,c,*rest in writes}
+            for change in plan['statistics_formula_changes']:
+                cell=wb.sheets[change['sheet']].range(change['cell'])
+                allowed.add((change['sheet'],cell.row-1,cell.column-1))
             has_changes = bool(writes or plan['statistics_formula_changes'])
             if has_changes:
                 _write_cells(ws, writes, log, path.name)
@@ -2015,11 +2056,15 @@ def _enrich_local(
             post_plan = _plan_workbook(app, work, fields, rows, since, until,
                                        ledger=ledger,
                                        server_authoritative=server_authoritative,
-                                       decisions=decisions)
+                                       decisions=decisions,
+                                       **({'preservation':(protection,allowed)} if protection is not None else {}))
             if post_plan["cells_written"] or post_plan["changed_cases"] or post_plan.get('statistics_formula_changes'):
                 raise RuntimeError(f"{path.name}: повторный enrichment plan не нулевой "
                                    "— на шару ничего не записано")
             mark("Excel: повторная проверка")
+            if protection is not None:
+                plan['unplanned_cells_and_formulas_preserved']=True
+                plan['vba_preserved']=_verify_vba_copy(pristine,work)
             work_sha = _sha256_file(work)
             backup_path = backup_copy(path, backup_root, source=pristine).resolve()
             backup_sha = _sha256_file(backup_path)
@@ -2038,6 +2083,14 @@ def _enrich_local(
                     f"{path.name}: книгу изменили, пока шло обогащение — ничего не "
                     "записано; прогони заново")
             mark("книга не тронута — проверено")
+            if on_publication_intent:
+                from pult.core.manual_sync import publication_identity
+                evidence = {k:v for k,v in plan.items() if k != 'writes'}
+                evidence.update(path=str(path), file=str(path), pre_sha256=pre_sha,
+                                post_sha256=work_sha, backup_path=str(backup_path),
+                                backup_sha256=backup_sha, post_plan=_plan_summary(post_plan),
+                                provenance_operation_id=publication_identity(path))
+                on_publication_intent(path, evidence)
             try:
                 _replace_on_share(work, path)
             except PermissionError as e:
@@ -2120,7 +2173,7 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
                 receipt_dir=None, ledger=None, on_delivered=None,
                 server_authoritative: bool = False, decisions=None,
                 engine: str = "local", work_dir=None,
-                before_commit=None) -> list[dict]:
+                before_commit=None, on_publication_intent=None) -> list[dict]:
     """Обогатить личные реестры пачкой, одной сессией Excel.
     jobs: [{employee, path, rows}] — каждому файлу свои строки (его кейсы).
     Ошибка одного файла не валит остальные: в результат кладётся {..., error}.
@@ -2173,6 +2226,7 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
                             server_authoritative=server_authoritative,
                             decisions=book_decisions, work_dir=work_dir,
                             before_commit=before_commit,
+                            on_publication_intent=on_publication_intent,
                         )
                     else:
                         # batch — только когда он выбран: прежний вызов остаётся

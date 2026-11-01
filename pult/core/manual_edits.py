@@ -133,7 +133,14 @@ def view(grid: list[list], *, formula_cells: Iterable[tuple[int, int]] = ()) -> 
                                   comparable(value), (row_number, column) in formulas,row_key))
         for column, key in date_cols.items():
             value = row[column] if column < len(row) else None
-            dates[row_key, key] = row_number, column, tracking.canonical_day(value)
+            try:
+                day=tracking.canonical_day(value)
+            except ValueError as exc:
+                from openpyxl.utils.cell import get_column_letter
+                raise ValueError(f'Ячейка {get_column_letter(column+1)}{row_number+1}: '
+                                 f'в колонке «{tracking.CAPTION}» значение «{value}». '
+                                 'Исправьте дату в Excel; дата не будет подставлена автоматически.') from exc
+            dates[row_key, key] = row_number, column, day
     return BookView(tuple(cells), dates, header_row)
 
 

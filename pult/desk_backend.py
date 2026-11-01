@@ -46,13 +46,14 @@ _settings = load_settings()
 _jobs: dict[str, dict] = {}
 _journal = None
 _access_busy = False
+_background_busy = False
 
 
 @contextmanager
 def account_operation():
     global _access_busy
     with _lock:
-        if _access_busy or _mail_busy.locked() or any(j.get('state') == 'running' for j in _jobs.values()):
+        if _access_busy or _background_busy or _mail_busy.locked() or any(j.get('state') == 'running' for j in _jobs.values()):
             raise RuntimeError('Дождитесь завершения текущей операции перед сменой доступа.')
         _access_busy = True
     try:
@@ -276,7 +277,7 @@ class JobBusyError(RuntimeError):
     """Admission refused before a durable job or worker was created."""
 
 
-def start_job(kind: str, fn, *, request_id=None, fingerprint=None) -> str:
+def start_job(kind: str, fn, *, request_id=None, fingerprint=None, before_start=None) -> str:
     jid = str(request_id or uuid.uuid4().hex)
     if not 8 <= len(jid) <= 128 or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in jid):
         raise ValueError("request_id")
@@ -288,8 +289,9 @@ def start_job(kind: str, fn, *, request_id=None, fingerprint=None) -> str:
         previous = job_journal().load(jid, profile, fingerprint)
         if previous:
             return jid
-        if _access_busy or any(j.get("state") == "running" for j in _jobs.values()):
+        if _access_busy or _background_busy or any(j.get("state") == "running" for j in _jobs.values()):
             raise JobBusyError("Дождитесь завершения текущей операции.")
+        if before_start:before_start(jid,profile,fingerprint)
         job_journal().save(job, profile, fingerprint)
         _jobs[jid] = job
 
@@ -300,7 +302,7 @@ def start_job(kind: str, fn, *, request_id=None, fingerprint=None) -> str:
     def run():
         try:
             job["result"] = fn(say)
-            job["state"] = "done"
+            job["state"] = completion_state(job['result']) if kind=='enr_apply' else 'done'
         except Exception as exc:  # noqa: BLE001
             job["state"] = "uncertain" if kind == "mail" else "failed"
             job["error"] = str(exc) or type(exc).__name__
@@ -319,7 +321,64 @@ def job_state(jid: str) -> dict:
     job = job_journal().load(jid, job_profile())
     if not job:
         raise KeyError("нет такой задачи")
+    if job.get('kind')=='enr_apply' and job.get('state')!='done':
+        from pult import desk_registry
+        service=desk_registry.delivery_service(_settings,admin)
+        try:run=service.store.get(jid,service.owner())
+        except ValueError:run=None
+        if run:
+            result=service.view(run)
+            if result['state']=='done':
+                with job_journal().connect() as conn:meta=conn.execute('SELECT fingerprint FROM jobs WHERE id=?',(jid,)).fetchone()
+                job.update(state='done',result=result,error=None)
+                job_journal().save(job,job_profile(),meta[0])
     return {k: job[k] for k in ("id", "kind", "state", "log", "result", "error")}
+
+
+def completion_state(result):
+    status=(result or {}).get('run_state','done') if isinstance(result,dict) else 'done'
+    return 'attention' if status=='attention' else 'waiting' if status in ('waiting','paused') else 'done'
+
+
+def enrichment_tick():
+    """One serialized pass; the queue never depends on renderer polling."""
+    global _background_busy
+    from pult import desk_registry
+    service=desk_registry.delivery_service(_settings,admin)
+    run=service.current()
+    if not service.ready(run):return
+    with _lock:
+        if _access_busy or _background_busy or _mail_busy.locked() or any(j.get('state')=='running' for j in _jobs.values()):return
+        _background_busy=True
+    try:
+        journal=job_journal();profile=job_profile()
+        with journal.connect() as conn:
+            meta=conn.execute('SELECT profile,fingerprint FROM jobs WHERE id=?',(run['id'],)).fetchone()
+        if not meta:
+            recovered=dict(id=run['id'],kind='enr_apply',state='waiting',log=['Возобновление сохранённого переноса'],result=None,error=None,started=run['created'])
+            journal.save(recovered,profile,run.get('fingerprint','enrichment'));meta=(profile,run.get('fingerprint','enrichment'))
+        if meta[0]!=profile:return
+        try:result=service.process(run)
+        except Exception as exc:result=service.failure('Автоматический перенос остановлен: '+str(exc))
+        job=journal.load(run['id'],profile)
+        job.update(state=completion_state(result),result=result,error=None)
+        job['log'].append(result['toast'])
+        job['log']=job['log'][-300:]
+        journal.save(job,profile,meta[1])
+        with _lock:_jobs[run['id']]=job
+        desk_registry.S['preview']=None
+    finally:
+        with _lock:_background_busy=False
+
+
+def enrichment_loop():
+    while True:
+        try:enrichment_tick()
+        except Exception:
+            # A queue/snapshot failure must remain visibly unfinished. It is
+            # never changed to a completed durable job by a daemon exception.
+            pass
+        time.sleep(2)
 
 
 # --- рассылка книг почтой (Outlook через COM) ---------------------------------------------
@@ -485,8 +544,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def route(path: str, body: dict):
     fingerprint = hashlib.sha256(json.dumps([path, body], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-    def durable_start(kind, fn):
-        return start_job(kind, fn, request_id=body.get("request_id"), fingerprint=fingerprint)
+    def durable_start(kind, fn, *, before_start=None):
+        return start_job(kind, fn, request_id=body.get("request_id"), fingerprint=fingerprint,before_start=before_start)
     if path == "/settings/import":
         return import_settings(str(body.get("path") or ""))
     if path == '/account/root_probe':
@@ -596,6 +655,7 @@ def main() -> None:
     srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     print(f"HARD-BACKEND {srv.server_address[1]} {SECRET}", flush=True)
     threading.Thread(target=_mail_loop, daemon=True, name="mail").start()
+    threading.Thread(target=enrichment_loop,daemon=True,name='enrichment').start()
     srv.serve_forever()
 
 
