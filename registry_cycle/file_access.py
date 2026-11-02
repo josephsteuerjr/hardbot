@@ -60,7 +60,8 @@ def exclusive_file_check(path: str | Path) -> None:
 def inspect_busy_file(path: str | Path) -> BusyFile | None:
     source = Path(path)
     lock = excel_lock_path(source)
-    if lock.exists():
+    lock_exists = lock.exists()
+    if lock_exists and os.name != "nt":
         return BusyFile(
             source,
             "обнаружен Excel lock-файл",
@@ -73,7 +74,22 @@ def inspect_busy_file(path: str | Path) -> BusyFile | None:
         code=getattr(cause,'winerror',None)
         if code is None and getattr(cause,'args',None) and isinstance(cause.args[0],int):code=cause.args[0]
         kind='locked' if code in (32,33) else 'missing' if code in (2,3) else 'access' if code==5 else 'unavailable'
-        return BusyFile(source, str(exc),kind=kind)
+        return BusyFile(source, str(exc),lock if lock_exists else None,kind=kind)
+    if lock_exists:
+        # Excel can leave ~$ behind after a crash or a previous file version.
+        # A marker alone does not prove that the current workbook is open.
+        # On Windows require exclusive access to BOTH files; never remove the
+        # marker and never bypass an active workbook/marker sharing lock.
+        try:
+            exclusive_file_check(lock)
+        except Exception as exc:
+            cause=exc.__cause__ or exc
+            code=getattr(cause,'winerror',None)
+            if code is None and getattr(cause,'args',None) and isinstance(cause.args[0],int):code=cause.args[0]
+            if code in (2,3):
+                return None  # The marker disappeared after the workbook check.
+            kind='locked' if code in (32,33) else 'access' if code==5 else 'unavailable'
+            return BusyFile(source,'Excel lock-файл недоступен эксклюзивно: '+str(exc),lock,kind=kind)
     return None
 
 
