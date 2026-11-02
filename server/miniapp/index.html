@@ -1534,7 +1534,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=109;
+const SHELL_VERSION=110;
 let LOGIN_GPS=null;
 const ORIGINAL_FETCH=window.fetch.bind(window);
 window.fetch=async(input,init)=>{
@@ -2695,14 +2695,14 @@ function renderPending(employee, kind){
   const review=kind==="password_review";
   const acc=kind==="account" || kind==="gps" || review;
   let leader=false;try{leader=acc&&["manager","security","full","analyst"].includes(localStorage.getItem("account_role"));}catch(e){}
-  const title=review?"Пароль изменён — ждём владельца":acc?"Вход записан":t.pendingtitle;
+  const title=review?"Пароль изменён — ждём руководителя":acc?"Вход записан":t.pendingtitle;
   const why=leader?"Ваш доступ и телефон подтверждает администратор. Попросите его открыть в Аналитике «Профили и устройства» → «Открыть профиль» напротив вашего ФИО и подтвердить доступ и телефон. Самостоятельно подтвердить своё устройство во «Входе команды» нельзя.":acc?"Профиль и телефон ожидают своего руководителя. Попросите его открыть «Вход команды», сверить ваше ФИО и нажать «Подтвердить телефон». Компьютер для этого не нужен. После подтверждения доступ откроется здесь.":t.pendingwhy;
   const wrong=leader?"После подтверждения администратором нажмите «Проверить снова».":acc?"Проверьте позже кнопкой или спросите руководителя.":t.pendingwrong;
   $("app").innerHTML=`<div class="center" id="pendingAccess" style="padding:24px">
       <div style="font-size:40px;margin-bottom:12px">⏳</div>
       <div>${esc(title)}</div>
       <div class="muted" style="margin-top:8px">${esc(employee||"")}</div>
-      <div class="muted" style="margin-top:12px">${esc(review?'Ваш личный пароль сохранён. Доступ после смены пароля подтверждает владелец. Затем нажмите «Проверить снова».':why)}</div>
+      <div class="muted" style="margin-top:12px">${esc(review?'Ваш личный пароль сохранён. Доступ после смены пароля подтверждает ваш руководитель. Затем нажмите «Проверить снова».':why)}</div>
       <div class="muted" style="margin-top:16px;font-size:12px">${esc(wrong)}</div>
       ${acc?`<button class="btn acc" style="max-width:280px;margin:16px auto 0" onclick="checkPending()">Проверить снова</button>`:""}
     </div>`;
@@ -5424,7 +5424,7 @@ function dgAccountEntries(j,b){
 }
 function accountSearchText(value){return String(value||'').normalize('NFKC').toLowerCase().replace(/ё/g,'е');}
 function accountEntryStatus(row){
-  if(row.password_review_pending)return row.must_change_password?'Сотрудник меняет временный пароль':'Пароль: ждёт владельца';
+  if(row.password_review_pending)return row.must_change_password?'Сотрудник меняет временный пароль':'Пароль: ждёт руководителя';
   return {active:'Доступ открыт',awaiting:'Ждёт подтверждения',disabled:'Доступ закрыт',blocked:'Заблокирован'}[row.status]||row.status||'';
 }
 function dgAccountEntriesDraw(){

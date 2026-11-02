@@ -1,4 +1,4 @@
-"""Delegated resets must never delegate the owner's final access decision."""
+"""Current team leaders complete staff resets after the personal password change."""
 import accounts
 import db
 import pytest
@@ -30,7 +30,7 @@ def reset(world, **extra):
                 dict(username='self-own',password='Temporary123',operation_id='reset-operation-001',**extra))
 
 
-def test_reset_revokes_credentials_and_owner_approves_only_after_personal_password(world):
+def test_reset_revokes_credentials_and_leader_approves_only_after_personal_password(world):
     old, device = activated(world)
     principal = owner()
     status, result = reset(world)
@@ -52,7 +52,11 @@ def test_reset_revokes_credentials_and_owner_approves_only_after_personal_passwo
     assert status==200 and bootstrap['pending_kind']=='password_review' and not bootstrap.get('persons')
     assert call('GET','/api/identity',header)[1]['pending']
     assert not accounts.approve_account('self-own','principal:someone-else')['ok']
-    assert accounts.approve_account('self-own',principal)['active']
+    assert call('GET','/api/manager/entered',world)[1]['entered'][0]['can_approve']
+    with db.connect() as c:
+        phone=c.execute("SELECT id FROM account_devices WHERE fingerprint='reset-phone'").fetchone()[0]
+    assert accounts.manager_approve(MGR,device_id=phone)['active']
+    assert not call('GET','/api/bootstrap',header)[1].get('pending')
     with db.connect() as c:
         acc=c.execute("SELECT * FROM accounts WHERE username='self-own'").fetchone()
         assert acc['status']=='active' and not acc['password_review_pending']
@@ -155,3 +159,18 @@ def test_analyst_http_still_cannot_approve_initial_staff_registration(world,monk
     monkeypatch.setenv('ACCOUNT_CUTOVER_AT_UTC','2000-01-01T00:00:00Z')
     status,result=call('POST','/admin/account_approve.json',headers,{'username':'self-own'})
     assert status==403 and result['error']=='registration_requires_attested_request'
+
+
+def test_personal_password_review_rechecks_current_team(world):
+    activated(world)
+    assert reset(world)[0]==200
+    assert accounts.change_password('self-own','Temporary123','Personal123')['ok']
+    entered=accounts.login('self-own','Personal123',device={'kind':'phone','fp':'new-team-phone'},entrance='public',audience='employee')
+    with db.connect() as c:
+        device=c.execute("SELECT id FROM account_devices WHERE fingerprint='new-team-phone'").fetchone()[0]
+    db.set_manager(MGR,'Synthetic Leader',[],[])
+    assert not accounts.manager_approve(MGR,device_id=device)['ok']
+    with db.connect() as c:
+        row=c.execute("SELECT * FROM accounts WHERE username='self-own'").fetchone()
+        assert row['password_review_pending'] and row['status']=='awaiting'
+        assert c.execute('SELECT status FROM account_devices WHERE id=?',(device,)).fetchone()[0]=='pending'

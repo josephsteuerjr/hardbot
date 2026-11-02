@@ -5712,7 +5712,7 @@ async def _manager_entered(request: web.Request) -> web.Response:
     rows = [r for r in rows if db._name_key(r["employee"]) in team_keys]
     reviewable = await asyncio.to_thread(accounts.manager_reviewable, uid, is_owner=(uid == ADMIN_ID))
     for r in rows:
-        r["can_approve"] = r["username"] in reviewable and not r['password_review_pending']
+        r["can_approve"] = r["username"] in reviewable and not (r['password_review_pending'] and r['must_change_password'])
         r["can_reset_password"] = r["username"] in reviewable and not r['password_review_pending']
         r['can_request_phone'] = False
         if r.get("phone"):
