@@ -140,11 +140,15 @@ def test_invalid_date_identifies_cell_preserves_file_and_blocks_import(tmp_path,
  service.retry(state['id']);assert service.process()['state']=='done'
 
 
-def test_old_server_choice_does_not_overwrite_new_office_value(tmp_path):
+@pytest.mark.parametrize('with_delivery_history',[False,True])
+def test_old_server_choice_does_not_overwrite_new_office_value(tmp_path,with_delivery_history):
  import win32com.client
  job,fields=fixture(tmp_path,old='Previous office value');ledger=Ledger()
- preview=enrich.preview_many([job],fields,ledger={'_books':{}},since='01.11.2026',until='01.11.2026')
- choices=[{**c,'decision':'server'} for c in en.collect_conflicts(preview)[0]]
+ if with_delivery_history:
+  ledger.books[enrich.book_key(job['path'])]={'Alpha':{'call_status':{'value':'Обещает оплатить','at':'2026-10-31T00:00:00Z'}}}
+ preview=enrich.preview_many([job],fields,ledger={'_books':ledger.books},since='01.11.2026',until='01.11.2026')
+ ordinary,office=en.collect_conflicts(preview)
+ choices=[{**c,'decision':'server'} for c in ordinary+office]
  excel=win32com.client.DispatchEx('Excel.Application');excel.Visible=False;excel.DisplayAlerts=False;book=excel.Workbooks.Open(job['path'])
  try:
   service=Service(tmp_path/'queue',lambda:'owner',ledger)

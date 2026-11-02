@@ -143,6 +143,37 @@ def test_office_edit_after_delivery_is_protected():
     assert o["file"] == "Обещал 15.09" and o["delivered"] == "Отказ"
 
 
+@pytest.mark.parametrize("current", ["", "Правка офиса"])
+def test_explicit_server_choice_applies_even_when_server_equals_delivery(current):
+    grid = _grid([{"Номер КД / ID": "A", "Общий результат": current,
+                   "Дата выезда": date(2026, 8, 20)}])
+    plan = enrich.build_plan(
+        grid, FIELDS, [_srv("A", "2026-08-20", call_status="Отказ")],
+        ledger=_ledger(A={"call_status": "Отказ"}),
+        decisions={("A", "call_status"): "server"},
+    )
+    assert _writes_by_key(plan)[(1, TITLES.index("Общий результат"))] == "Отказ"
+    assert plan["office_edits"] == [] and plan["conflicts"] == []
+    assert plan["resolved_server"] == 1
+    assert plan["resolved"][0]["kind"] == enrich.OFFICE_EDIT_AFTER_DELIVERY
+    assert any(e["key"] == "call_status" and e["kind"] == "written"
+               for e in plan["ledger_entries"])
+
+
+def test_explicit_file_choice_resolves_office_edit_without_rewriting_it():
+    grid = _grid([{"Номер КД / ID": "A", "Общий результат": "Правка офиса",
+                   "Дата выезда": date(2026, 8, 20)}])
+    plan = enrich.build_plan(
+        grid, FIELDS, [_srv("A", "2026-08-20", call_status="Отказ")],
+        ledger=_ledger(A={"call_status": "Отказ"}),
+        decisions={("A", "call_status"): "file"},
+    )
+    assert plan["cells_written"] == 0 and plan["office_edits"] == []
+    assert plan["resolved_file"] == 1
+    assert any(e["key"] == "call_status" and e["kind"] == "kept_file"
+               for e in plan["ledger_entries"])
+
+
 def test_server_update_over_own_delivery_is_written_without_displacement():
     """S != D, F == D: сервер обновился, файл нетронут. Пишем, журнал чист."""
     grid = _grid([{"Номер КД / ID": "A", "Общий результат": "Отказ",

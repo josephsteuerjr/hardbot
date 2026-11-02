@@ -1134,11 +1134,23 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
                         file_untouched = _values_equal(cur, delivered, is_date)
                         if not server_changed:
                             # Сервер по-прежнему говорит то, что мы доставили,
-                            # а файл — другое: это правка офиса после прогона.
-                            _note(office_edits, OFFICE_EDIT_AFTER_DELIVERY, cid,
-                                  key, r, cur, out_val, delivered, vdate)
-                            continue
-                        if not file_untouched and cur_txt != "":
+                            # а файл — другое. Без явного решения правка офиса
+                            # сохраняется; проверенный выбор оператора работает
+                            # так же, как для остальных конфликтов.
+                            if decision in ("server", "file"):
+                                _note(resolved, OFFICE_EDIT_AFTER_DELIVERY, cid,
+                                      key, r, cur, out_val, delivered, vdate)
+                                resolved[-1]["decision"] = decision
+                                if decision == "file":
+                                    resolved_file += 1
+                                    _deliver(cid, key, out_val, vdate, "kept_file")
+                                    continue
+                                resolved_server += 1
+                            else:
+                                _note(office_edits, OFFICE_EDIT_AFTER_DELIVERY, cid,
+                                      key, r, cur, out_val, delivered, vdate)
+                                continue
+                        elif not file_untouched and cur_txt != "":
                             if decision == "server":
                                 _note(resolved, CONFLICT_BOTH_CHANGED, cid, key, r,
                                       cur, out_val, delivered, vdate)

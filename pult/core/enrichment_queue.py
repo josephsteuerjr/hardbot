@@ -301,7 +301,8 @@ class Service:
         item.pop('missing',None)
         approved={en.conflict_key(row):row for row in item.get('approved',[])}
         decisions={};unreviewed=[]
-        for conflict in en.collect_conflicts([preview])[0]:
+        ordinary,office=en.collect_conflicts([preview])
+        for conflict in ordinary+office:
             chosen=approved.get(en.conflict_key(conflict))
             if chosen and chosen['decision']=='file':decisions[en.conflict_key(conflict)]='file'
             elif chosen and chosen['decision']=='server' and all(str(chosen.get(k,''))==str(conflict.get(k,'')) for k in ('file','server','delivered','visit_date')):
@@ -389,7 +390,7 @@ class Service:
         from . import enrichment as en
         choices={en.conflict_key(row):row['decision'] for row in item.get('approved',[])}
         post=enrich.preview_many([self.effective_job(inputs['jobs'][item['ordinal']],item)],inputs['fields'],since=inputs['since'],until=inputs['until'],ledger=ledger,decisions=choices)[0]
-        if post.get('error') or post.get('cells_written') or post.get('conflicts') or post.get('missing'):
+        if post.get('error') or post.get('cells_written') or post.get('conflicts') or post.get('office_edits') or post.get('missing'):
             self._attention(run,item,post.get('error') or 'После записи остались различия. Проверьте книгу; повторная запись не выполняется.');return
         item.update(state='done',message='Книга и история доставки проверены',verified_sha256=post['file_sha256'])
         item.pop('reason_code',None)
