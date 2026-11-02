@@ -1,0 +1,92 @@
+def read_records(path):
+    before=fingerprint(path)
+    raw=read_frame(path).where(lambda frame:frame.notna(),None).values.tolist()
+    if fingerprint(path)!=before:raise RuntimeError('Книга изменена при чтении: '+str(path))
+    if len(raw)<3:raise ValueError('Нет заголовков и типов: '+str(path))
+    headers=[canonical(x or '') for x in logical_headers(raw[1])]
+    names=[h for h in headers if h]
+    if len(names)!=len(set(names)):raise ValueError('Повторяющиеся заголовки: '+str(path))
+    if not {KEY_COLUMN,'Партнер',RESP_SOFT_COLUMN,RESP_HARD_COLUMN}.issubset(names):
+        raise ValueError('Не найдены обязательные колонки договора, партнёра и ответственных: '+str(path))
+    return headers,raw[2],[dict(zip(headers,row)) for row in raw[3:]],before
+
+
+def _merge_local(main_path,files_to_process):
+    headers,types,rows,digest=read_records(main_path)
+    roles={h:('soft' if 'софт' in str(t).casefold() else 'hard' if 'хард' in str(t).casefold() else 'shared') for h,t in zip(headers,types)}
+    books=[];hashes={}
+    for path in files_to_process:
+        h,_,r,d=read_records(path)
+        books.append(Book(str(path),workbook_kind(path,h),path.parent.name,r));hashes[str(path)]=d
+    fields={canonical(f) for f in TARGET_COLUMNS} & set(headers)
+    result=plan(rows,books,roles,fields)
+    reviewed=Path(__file__).with_name('rbr-collection-resolutions.json')
+    resolved=0
+    if reviewed.is_file():
+        from legacy_pipeline.resolutions import resolve
+        resolved=resolve(result,rows,json.loads(reviewed.read_text('utf-8')),master_sha256=digest,source_hashes=hashes)
+
+    report_path=Path(os.environ.get('RBR_COLLECTION_RECEIPT',str(Path(os.environ.get('LOCALAPPDATA',Path.home()))/'Hard/registry-cycle'/('collection-'+uuid.uuid4().hex+'.json'))))
+    report_path.parent.mkdir(parents=True,exist_ok=True)
+    report={'resolved_conflicts':resolved,'stage':'blocked' if result.blocked else 'preview','source_hashes':hashes,'changes':result.changes,'conflicts':result.conflicts,'stale_assignments':result.stale_assignments,'unmatched':result.unmatched}
+    def save_report():
+        report_path.write_text(json.dumps(report,ensure_ascii=False,indent=2,default=str),'utf-8')
+    save_report()
+    if result.blocked:
+        import html
+        def cell(value):return '<td>'+html.escape(str(value or ''))+'</td>'
+        table=''.join('<tr>'+''.join(cell(c.get(k)) for k in ('kind','key','field','book','master','incoming'))+'</tr>' for c in result.conflicts)
+        review=report_path.with_suffix('.html')
+        review.write_text('<!doctype html><meta charset="utf-8"><title>Сверка сборки</title><style>body{font:16px Segoe UI;background:#faf4e9;margin:32px}td,th{border:1px solid #cbbba7;padding:9px;vertical-align:top;white-space:pre-wrap}table{border-collapse:collapse}h1{font-size:24px}</style><h1>Сборка остановлена до записи</h1><p>Разные значения требуют сверки. Разборка не запускалась. Исправьте подтверждённые значения в исходных книгах и запустите сборку заново.</p><table><tr><th>Причина</th><th>Договор, партнёр</th><th>Поле</th><th>Книга</th><th>В общем реестре</th><th>В книге сотрудника</th></tr>'+table+'</table>','utf-8')
+        raise RuntimeError(f'Сборка остановлена: {len(result.conflicts)} расхождений. Отчёт: {review}')
+    # A changed source cannot be consumed or overwritten by a subsequent split.
+    for path,value in hashes.items():
+        if fingerprint(path)!=value:raise RuntimeError('Изменился источник сборки: '+path)
+    if result.changes:
+        from legacy_pipeline.validation import cells,verify_cells,macros
+        from legacy_pipeline.collection_guard import comparable
+        before_macros=macros(main_path)
+        app=xw.App(visible=False);book=None
+        try:
+            app.api.EnableEvents=False;app.api.AutomationSecurity=3;app.display_alerts=False;app.screen_updating=False
+            book=app.books.open(str(main_path),update_links=False)
+            ws=book.sheets[TARGET_SHEET_NAME]
+            preserved=cells(book);allowed={(TARGET_SHEET_NAME,DATA_START_ROW+x["row"]-1,headers.index(x["field"])) for x in result.changes}
+            for change in result.changes:
+                title=change['field'];value=change['after'];r=DATA_START_ROW+change['row'];c=headers.index(title)+1
+                if 'дата' in title.casefold() and comparable(value)[0]!='empty' and not day(value):raise ValueError('Не распознана дата: '+title)
+                if title=='Сумма прогноза' and comparable(value)[0] not in ('empty','number'):raise ValueError('Не распознана сумма прогноза')
+                cell=ws.range((r,c))
+                if 'дата' in title.casefold() and day(value):value=datetime.datetime.combine(day(value),datetime.time())
+                elif isinstance(value,str):cell.number_format='@'
+                if value is None or value=='':cell.clear_contents()
+                else:cell.value=value
+            for path,value in hashes.items():
+                if fingerprint(path)!=value:raise RuntimeError('Источник изменился перед сохранением: '+path)
+            save_local(book,main_path);book=None
+            book=app.books.open(str(main_path),update_links=False,read_only=True)
+            verify_cells(preserved,cells(book),allowed)
+            if macros(main_path)!=before_macros:raise ValueError('Изменились макросы; публикация отменена')
+            for change in result.changes:
+                title=change['field'];actual=book.sheets[TARGET_SHEET_NAME].range((DATA_START_ROW+change['row'],headers.index(title)+1)).value
+                expected=change['after']
+                equal=(day(actual)==day(expected)) if 'дата' in title.casefold() and day(expected) else (comparable(actual)==comparable(expected))
+                if not equal:raise ValueError('Не подтверждена запись поля '+title)
+            book.close();book=None
+        finally:
+            if book is not None:book.close()
+            app.quit()
+    report.update(stage='collected',changed_cells=len(result.changes));save_report()
+    print(f'Сборка: {len(books)} книг, {len(result.changes)} ячеек. Квитанция: {report_path}')
+
+
+def main():
+    for root in SOURCE_DIRECTORIES:
+        if not Path(root).is_dir():raise FileNotFoundError('Недоступна папка портфелей: '+str(root))
+    paths=get_files_from_folders(SOURCE_DIRECTORIES)
+    if not paths:raise ValueError('Не найдено ни одного личного реестра')
+    prepare(paths)
+    with staged_master(MAIN_REGISTRY_PATH) as local:_merge_local(local,paths)
+
+
+if __name__=='__main__':main()
