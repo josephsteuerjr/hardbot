@@ -571,6 +571,8 @@ def import_pairs(d: dict) -> list[tuple[str, object]]:
              d.get("current_comments_replaced")),
             ("комментариев выезда очищено",
              d.get("current_comments_cleared")),
+            ("единственных копий комментариев защищено",
+             d.get("current_comments_protected")),
             ("историчных комментариев загружено",
              d.get("historical_comments_imported")),
             ("историчных комментариев очищено",
@@ -707,11 +709,12 @@ def import_notes(d: dict) -> list[str]:
             )
     if d.get("replace_current_visit_comments"):
         notes.append(
-            "Режим начала месяца включён: текущие комментарии заменяются "
-            "точно значениями файла; пустые ячейки очищают БД. "
+            "Замена текущих комментариев включена: принимаются значения файла, "
+            "пустые ячейки очищают комментарии с учётом защиты единственной копии. "
             f"Заменено: {fmt_n(d.get('current_comments_replaced'))}, "
             f"очищено: {fmt_n(d.get('current_comments_cleared'))}, "
-            f"без изменений: {fmt_n(d.get('current_comments_unchanged'))}."
+            f"без изменений: {fmt_n(d.get('current_comments_unchanged'))}. "
+            f"Защищено от потери: {fmt_n(d.get('current_comments_protected'))}."
         )
     else:
         notes.append(

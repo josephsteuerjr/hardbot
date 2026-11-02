@@ -757,7 +757,8 @@ def _clearing_would_destroy_last_copy(row, file_visit_date, delivered: bool) -> 
     if not written or written != str(row["visit_comment"] or "").strip():
         return False
     visit = _as_date(snapshot.get("visit_date"))
-    return visit is not None and _as_date(file_visit_date) != visit
+    return visit is not None and (visit.strftime("%Y-%m") == workday.today().strftime("%Y-%m")
+                                  or _as_date(file_visit_date) != visit)
 
 
 def _backfill_bot_visit_snapshots(conn: sqlite3.Connection) -> int:
@@ -6001,8 +6002,13 @@ def save_call_result(contract_id: str, agent_id: int, employee: str,
         if prior:
             if prior["contract_id"] != contract_id or prior["agent_id"] != agent_id:
                 raise ValueError("op_id принадлежит другому звонку")
-            if expected_revision is not None and prior["values_json"] != encoded:
-                raise ValueError("Идентификатор уже использован для другого результата")
+            if prior["values_json"]:
+                # Idempotency also protects older clients without card_revision.
+                # Exclude values derived anew by the server on a later retry.
+                derived = {"forecast", "overall_result", "soft_comm_date"}
+                original = json.loads(prior["values_json"])
+                if {k: v for k, v in original.items() if k not in derived} != {k: v for k, v in values.items() if k not in derived}:
+                    raise ValueError("Идентификатор уже использован для другого результата")
             return {"dedup": True, "applied": False}
         if expected_revision is not None:
             import office_work
@@ -9106,7 +9112,7 @@ def import_grid(
         # address/phone нужны person_key: без даты рождения человек различается
         # именно по ним, иначе однофамильцы склеятся (см. person_key).
         existing = {r["contract_id"]: r for r in conn.execute(
-            "SELECT contract_id, client, birth_date, responsible, responsible_soft, address, phone, "
+            "SELECT contract_id, partner, client, birth_date, responsible, responsible_soft, address, phone, "
             "visit_comment, historical_visit_comment, "
             "unassigned_from, unassigned_reason, recall_prev_reason, "
             "recall_date, recall_reason, recall_transfer, recall_withdrawn, "
@@ -9117,10 +9123,29 @@ def import_grid(
         # Кому обогащение уже возило комментарий выезда. Единственный честный
         # ответ на вопрос «есть ли этот текст в книгах и в общем реестре»:
         # если не возило, пустая ячейка файла про него ничего не знает.
+        # Contract numbers are not globally unique across creditors.
+        collisions = []
+        for cid, incoming in grouped.items():
+            previous = existing.get(cid)
+            if previous is None:
+                continue
+            old_partner = _name_key(str(previous["partner"] or ""))
+            new_partner = _name_key(str(incoming.get("partner") or ""))
+            if old_partner and new_partner and old_partner != new_partner:
+                collisions.append({"contract_id": cid, "field": "partner"})
+        if collisions:
+            conn.rollback()
+            report.update(blocked=True, contract_identity_conflicts=collisions,
+                          error="Партнёр договора отличается от существующего: сначала разберите идентичность договора")
+            return report
         delivered_comments = {
             r["contract_id"] for r in conn.execute(
-                "SELECT contract_id FROM enrichment_ledger "
-                "WHERE field_key = 'visit_comment'")}
+                "SELECT contract_id, value, visit_date FROM enrichment_ledger "
+                "WHERE field_key = 'visit_comment'")
+            if r["contract_id"] in existing
+            and str(r["value"] or "").strip() == str(existing[r["contract_id"]]["visit_comment"] or "").strip()
+            and _as_date(r["visit_date"]) == _as_date(
+                (_decode_bot_snapshot(existing[r["contract_id"]]) or {}).get("visit_date"))}
         # Журнал закреплений: (КД, прежний, новый, заявленная дата закрепления).
         # Пишется одной пачкой после разбора — в ТОЙ ЖЕ транзакции, что и смена
         # (preview откатывает события вместе со всем импортом).
@@ -9172,6 +9197,7 @@ def import_grid(
         for cid, data in grouped.items():
             is_update = cid in existing
             row0 = existing.get(cid)
+            incoming_call_edit_day = _as_date(data.get("excel_call_edited_on"))
             for tracking_key in edit_tracking.EXCEL_KEYS:
                 if tracking_key in data and row0 is not None:
                     data[tracking_key] = max(data[tracking_key], row0[tracking_key] or "")
@@ -9343,6 +9369,13 @@ def import_grid(
                                str(data.get(k) or "") == str(call_snapshot.get(k) or "") and
                                str(data.get(k) or "").strip()
                                for k in SOFT_SNAPSHOT_KEYS[:3]))
+                # A repeated status/day does not prove that the file saw the
+                # current result. Day-only timestamps cannot order same-day edits.
+                latest_day = max((_as_date(call_field_day(call_row, key)) or _as_date(call_fact_day(call_row)))
+                                 for key in call_keys)
+                manual_after_call = bool(incoming_call_edit_day and latest_day
+                                         and latest_day < incoming_call_edit_day <= workday.today())
+                anchored = anchored and manual_after_call
                 edits = {}
                 for key in call_keys:
                     value = data.pop(key, None)
@@ -9377,6 +9410,15 @@ def import_grid(
                                          if k not in COMMON_RESULT_KEYS or call_owns_field(sibling,k)}
                         if not sibling_edits:
                             continue
+                        prior_effects = report["soft_office_applied"].get(scid, {})
+                        incompatible = [key for key, value in sibling_edits.items()
+                                        if key in prior_effects and str(prior_effects[key]["after"]) != str(value)]
+                        if incompatible:
+                            conn.rollback()
+                            report.update(blocked=True, office_conflicts=[{
+                                "contract_id": scid, "fields": sorted(incompatible)}],
+                                error="Разные офисные исправления одного звонка у договоров одного клиента: разберите конфликт до импорта")
+                            return report
                         merged_call = {**(bot_call_snapshot(sibling) or {}), **sibling_edits}
                         sets = ', '.join(f'"{k}"=?' for k in sibling_edits)
                         conn.execute(f"UPDATE clients SET {sets}, call_office_data=?, call_value_log=? WHERE contract_id=?",

@@ -304,15 +304,12 @@ class Service:
         ordinary,office=en.collect_conflicts([preview])
         for conflict in ordinary+office:
             chosen=approved.get(en.conflict_key(conflict))
-            if chosen and chosen['decision']=='file':decisions[en.conflict_key(conflict)]='file'
-            elif chosen and chosen['decision']=='server' and all(str(chosen.get(k,''))==str(conflict.get(k,'')) for k in ('file','server','delivered','visit_date')):
-                decisions[en.conflict_key(conflict)]='server'
+            if chosen and chosen['decision'] in ('file','server') and all(str(chosen.get(k,''))==str(conflict.get(k,'')) for k in ('file','server','delivered','visit_date')):
+                decisions[en.conflict_key(conflict)]=chosen['decision']
             else:unreviewed.append(conflict)
         if unreviewed:
             item.update(conflicts=unreviewed,review_sha256=preview['file_sha256'],review_token=digest([preview['file_sha256'],unreviewed]))
             self._attention(run,item,'В книге появились новые изменения. Выберите, какие значения оставить.',reason='conflict');return
-        for key,row in approved.items():
-            if row['decision']=='file':decisions.setdefault(key,'file')
         expected=preview['file_sha256']
         folder=Path(run['folder'])
         for name in ('backups','receipts','work'):(folder/name).mkdir(exist_ok=True)
@@ -388,8 +385,28 @@ class Service:
         # write is repeated merely because a previous HTTP response was lost.
         ledger=self._ledger([inputs['jobs'][item['ordinal']]])
         from . import enrichment as en
-        choices={en.conflict_key(row):row['decision'] for row in item.get('approved',[])}
-        post=enrich.preview_many([self.effective_job(inputs['jobs'][item['ordinal']],item)],inputs['fields'],since=inputs['since'],until=inputs['until'],ledger=ledger,decisions=choices)[0]
+        job=self.effective_job(inputs['jobs'][item['ordinal']],item)
+        post=enrich.preview_many([job],inputs['fields'],since=inputs['since'],until=inputs['until'],ledger=ledger)[0]
+        approved={en.conflict_key(row):row for row in item.get('approved',[])}
+        choices={};unreviewed=[]
+        ordinary,office=en.collect_conflicts([post])
+        for conflict in ordinary+office:
+            chosen=approved.get(en.conflict_key(conflict))
+            exact = chosen and all(str(chosen.get(k,''))==str(conflict.get(k,'')) for k in ('file','server','delivered','visit_date'))
+            # This operation may seed the accepted file value into its ledger.
+            # That proven transition is not a new human edit or a blanket waiver.
+            own_delivery = chosen and chosen['decision']=='file' and all(
+                str(chosen.get(k,''))==str(conflict.get(k,'')) for k in ('file','server','visit_date')) and any(
+                e['contract_id']==conflict['contract_id'] and e['key']==conflict['key']
+                and str(e['value'])==str(conflict.get('delivered','')) for e in entries)
+            if exact or own_delivery:
+                choices[en.conflict_key(conflict)]=chosen['decision']
+            else:unreviewed.append(conflict)
+        if unreviewed:
+            item.update(conflicts=unreviewed,review_sha256=post['file_sha256'],review_token=digest([post['file_sha256'],unreviewed]))
+            self._attention(run,item,'После записи появились новые изменения. Прежний выбор к ним не применяется.',reason='conflict');return
+        if choices:
+            post=enrich.preview_many([job],inputs['fields'],since=inputs['since'],until=inputs['until'],ledger=ledger,decisions=choices)[0]
         if post.get('error') or post.get('cells_written') or post.get('conflicts') or post.get('office_edits') or post.get('missing'):
             self._attention(run,item,post.get('error') or 'После записи остались различия. Проверьте книгу; повторная запись не выполняется.');return
         item.update(state='done',message='Книга и история доставки проверены',verified_sha256=post['file_sha256'])
