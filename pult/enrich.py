@@ -2173,7 +2173,7 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
                 receipt_dir=None, ledger=None, on_delivered=None,
                 server_authoritative: bool = False, decisions=None,
                 engine: str = "local", work_dir=None,
-                before_commit=None, on_publication_intent=None) -> list[dict]:
+                before_commit=None, on_publication_intent=None, excel_app=None) -> list[dict]:
     """Обогатить личные реестры пачкой, одной сессией Excel.
     jobs: [{employee, path, rows}] — каждому файлу свои строки (его кейсы).
     Ошибка одного файла не валит остальные: в результат кладётся {..., error}.
@@ -2208,7 +2208,8 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
     attempted: set[int] = set()
     fatal = None
     try:
-        with open_excel(xw, log) as app:
+        from contextlib import nullcontext
+        with (nullcontext(excel_app) if excel_app is not None else open_excel(xw, log)) as app:
             app.display_alerts = False
             app.screen_updating = False
             for i, job in enumerate(jobs, 1):

@@ -13,15 +13,27 @@ if(!process.versions.electron){
   const js=code=>win.webContents.executeJavaScript(code),nap=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   async function until(code){for(let i=0;i<200;i++){if(await js(code))return;await nap(75)}throw Error('Timeout '+code)}
   await win.loadFile(path.join(qa,'queue-ui.html'));await until('!!document.querySelector("[data-delivery-queue]")');
-  await until(phase==='waiting'?'document.querySelector("[data-delivery-queue]").textContent.includes("Перенос не завершён")':'document.querySelector("[data-delivery-queue]").textContent.includes("Обогащение завершено")');
+  await until(phase!=='done'?'document.querySelector("[data-delivery-queue]").textContent.includes("Перенос не завершён")':'document.querySelector("[data-delivery-queue]").textContent.includes("Обогащение завершено")');
   await js('document.querySelector("[data-pick]").click()');await until('!!document.querySelector("[data-preview]")');
-  if(phase==='waiting'){
+  if(phase!=='done'){
    await until('document.querySelector("[data-preview]").disabled && document.querySelector("[data-apply]").disabled');
    await js('window.__refresh()');await until('document.querySelector("[data-delivery-queue]").textContent.includes("Перенос не завершён")');
   }else assert.equal(await js('document.querySelector("[data-apply]").disabled'),true,'No stale preview may become executable when queue completes');
+  if(phase==='waiting'){
+   await js('window.__failQueueRead=1');await until('document.querySelector("[data-delivery-queue]").textContent.includes("Synthetic queue read failure")');
+   await until('document.querySelector("[data-delivery-queue]").textContent.includes("Перенос не завершён")');
+  }
+  if(phase==='attention'){
+   assert.equal(await js('document.querySelector("[data-queue-details]").open'),false,'Unresolved rows must not fill the whole top of the screen');
+   assert.equal(await js('document.querySelector("[data-delivery-queue]").textContent.includes("Открытые книги будут")'),false,'Missing rows are not busy books');
+   fs.writeFileSync(path.join(qa,'queue-attention-collapsed.png'),(await win.webContents.capturePage()).toPNG());
+   await js('document.querySelector("[data-queue-details] summary").click()');
+   await js('document.querySelector("[data-queue-reconcile]").click()');await until('!!document.querySelector("[data-queue-reconcile-apply]")');
+   assert.equal(await js('document.querySelector("[data-queue-reconcile-apply]").disabled'),false);
+  }
   const text=await js('document.querySelector("[data-delivery-queue]").textContent');
-  assert(text.includes(phase==='waiting'?'Осталось: 1':'Проверено книг: 2'));assert.deepEqual(await js('window.__errors'),[]);
+  assert(text.includes(phase!=='done'?'Осталось: 1':'Проверено книг: 2'));assert.deepEqual(await js('window.__errors'),[]);
   await nap(200);fs.writeFileSync(path.join(qa,'queue-'+phase+'.png'),(await win.webContents.capturePage()).toPNG());
   fs.writeFileSync(path.join(qa,'queue-ui-'+phase+'.json'),JSON.stringify({phase,visible:true,refresh_preserved:true,no_stale_apply:true,text},null,2));console.log('Native queue renderer verified: '+phase);app.exit(0);
- }catch(error){console.error(error);app.exit(1)}finally{win?.destroy()}});
+ }catch(error){console.error(error);if(win){console.error(await win.webContents.executeJavaScript('JSON.stringify({text:document.body.innerText,errors:window.__errors,calls:window.__calls,pickDisabled:document.querySelector("[data-pick]")?.disabled})'));fs.writeFileSync(path.join(qa,'queue-'+phase+'-failure.png'),(await win.webContents.capturePage()).toPNG());}app.exit(1)}finally{win?.destroy()}});
 }

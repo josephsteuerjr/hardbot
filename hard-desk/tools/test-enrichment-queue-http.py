@@ -1,6 +1,6 @@
 """Native Excel + real backend HTTP + process restart; synthetic local data only."""
 from pathlib import Path
-import copy,json,os,re,subprocess,sys,threading,time,urllib.request
+import copy,json,os,re,subprocess,sys,threading,time,urllib.request,queue
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 
 repo=Path(__file__).resolve().parents[2];qa=Path(os.environ['HARD_ENR_QUEUE_QA_ROOT']);qa.mkdir(parents=True,exist_ok=True)
@@ -25,7 +25,9 @@ try:
 finally:excel.Quit()
 rows=[dict(contract_id=j['contract_id'],client='Synthetic client',responsible=j['employee'],
            _bot_completed=True,visit_date='2026-11-01',call_status='Обещает оплатить',visit_comment='Synthetic native queue visit') for j in jobs]
-export={'data_exchange_contract':contract_binding(),'fields':fields,'rows':rows};books={};seen=[];posts=[];lose=[True]
+export={'data_exchange_contract':contract_binding(),'fields':fields,'rows':copy.deepcopy(rows)};books={};seen=[];posts=[];lose=[True]
+omission_mode=os.environ.get('HARD_ENR_QUEUE_OMISSION_QA')=='1'
+if omission_mode:export['rows'].append({**rows[0],'contract_id':'OLD-ASSIGNMENT'})
 class Admin(BaseHTTPRequestHandler):
  def reply(self,payload):
   raw=json.dumps(payload,ensure_ascii=False).encode();self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
@@ -51,10 +53,19 @@ process=None;port=None;secret=None
 def start(label):
  global process,port,secret
  stderr=(qa/(label+'.private.log')).open('wb');process=subprocess.Popen(command,cwd=repo,env=env,stdout=subprocess.PIPE,stderr=stderr,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
- for line in iter(process.stdout.readline,b''):
+ lines=queue.Queue()
+ def read_lines():
+  for line in iter(process.stdout.readline,b''):lines.put(line)
+ threading.Thread(target=read_lines,daemon=True).start();deadline=time.monotonic()+45
+ while time.monotonic()<deadline:
+  try:line=lines.get(timeout=1)
+  except queue.Empty:
+   if process.poll() is not None:break
+   continue
   match=re.search(rb'HARD-BACKEND (\d+) (\S+)',line)
   if match:port=int(match[1]);secret=match[2].decode();break
- else:raise RuntimeError('Backend did not start')
+ else:raise RuntimeError('Backend startup exceeded45s; inspect exact process and private log')
+ if process.poll() is not None:raise RuntimeError('Backend exited before startup')
  (qa/'renderer.private.json').write_text(json.dumps({'port':port,'secret':secret,'master':str(qa/'master.xlsx')}),'utf-8')
 def stop():
  if process and process.poll() is None:process.terminate();process.wait(timeout=20)
@@ -77,8 +88,9 @@ def renderer(phase):
  if os.environ.get('HARD_ENR_QUEUE_RENDERER')!='1':return
  result=subprocess.run(['node','tools/test-enrichment-queue-ui.cjs',phase],cwd=repo/'hard-desk',env={**env,'HARD_ENR_QUEUE_QA_ROOT':str(qa)},capture_output=True,text=True,encoding='utf-8')
  (qa/('renderer-'+phase+'.log')).write_text(result.stdout+result.stderr,'utf-8');assert result.returncode==0,result.stdout+result.stderr
-master=Workbook();sheet=master.active;sheet.title=enrich.SHEET_NAME;sheet.append(['Synthetic master']);sheet.append([f['title'] for f in fields]);sheet.append([f['source'] for f in fields]);
-for row in rows:sheet.append([row.get(f['key']) for f in fields])
+master_fields=[*fields,{'key':'responsible_soft','title':'ответственный Сотрудник СОФТ','source':'софт'}]
+master=Workbook();sheet=master.active;sheet.title=enrich.SHEET_NAME;sheet.append(['Synthetic master']);sheet.append([f['title'] for f in master_fields]);sheet.append([f['source'] for f in master_fields]);
+for row in rows:sheet.append([row.get(f['key']) for f in master_fields])
 master.save(qa/'master.xlsx')
 held=None;excel=None
 try:
@@ -94,10 +106,17 @@ try:
  start('restarted');deadline=time.monotonic()+120
  while time.monotonic()<deadline:
   state=call('/job',{'id':identifier});operation=call('/enr/operation')
+  if omission_mode and operation['state']=='attention' and operation.get('missing')==1:
+   assert operation.get('busy')==0 and operation['completed']==1
+   renderer('attention')
+   _,review=job('/enr/reconcile-preview',{'path':str(qa/'master.xlsx')});assert review['state']=='done',review
+   plan=review['result'];assert len(plan['proposals'])==1 and not plan['blocked']
+   call('/enr/reconcile-apply',{'token':plan['token']})
   if state['state']=='done' and operation['state']=='done':break
   time.sleep(.25)
  else:raise RuntimeError('Automatic restart recovery timed out: '+str(operation))
  assert operation['completed']==2 and operation['remaining']==0 and sha(jobs[1]['path'])==done_sha and len(posts)==2
+ if omission_mode:assert operation['excluded']==1 and not any(e['contract_id']=='OLD-ASSIGNMENT' for p in posts for e in p['entries'])
  renderer('done')
  result={'stage':'verified','actual_backend':command[0],'waiting_job_persisted':True,'restart_automatically_completed':True,'completed_book_not_rewritten':True,'lost_ledger_reply_not_reposted':True,'import_blocked_before_any_remote_import':True,'ledger_posts':len(posts),'books':2,'native_excel':True,'synthetic_only':True,'operation':operation}
  (qa/'RESULT.private.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),'utf-8');print(json.dumps({k:v for k,v in result.items() if k!='operation'},ensure_ascii=False),flush=True)

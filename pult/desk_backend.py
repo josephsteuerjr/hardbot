@@ -321,7 +321,7 @@ def job_state(jid: str) -> dict:
     job = job_journal().load(jid, job_profile())
     if not job:
         raise KeyError("нет такой задачи")
-    if job.get('kind')=='enr_apply' and job.get('state')!='done':
+    if job.get('kind')=='enr_apply' and job.get('state')!='done' and not _background_busy:
         from pult import desk_registry
         service=desk_registry.delivery_service(_settings,admin)
         try:run=service.store.get(jid,service.owner())

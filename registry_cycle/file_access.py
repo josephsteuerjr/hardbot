@@ -14,12 +14,14 @@ class BusyFile:
     path: Path
     reason: str
     lock_path: Path | None = None
+    kind: str = 'locked'
 
     def as_dict(self) -> dict[str, str | None]:
         return {
             "path": str(self.path),
             "reason": self.reason,
             "lock_path": str(self.lock_path) if self.lock_path else None,
+            "kind":self.kind,
         }
 
 
@@ -67,7 +69,11 @@ def inspect_busy_file(path: str | Path) -> BusyFile | None:
     try:
         exclusive_file_check(source)
     except Exception as exc:  # noqa: BLE001 — причина нужна в preflight
-        return BusyFile(source, str(exc))
+        cause=exc.__cause__ or exc
+        code=getattr(cause,'winerror',None)
+        if code is None and getattr(cause,'args',None) and isinstance(cause.args[0],int):code=cause.args[0]
+        kind='locked' if code in (32,33) else 'missing' if code in (2,3) else 'access' if code==5 else 'unavailable'
+        return BusyFile(source, str(exc),kind=kind)
     return None
 
 

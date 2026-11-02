@@ -96,6 +96,9 @@ def preview_lines(results: list[dict]) -> list[str]:
                      f"записать сервер {resolved_server}.")
     if office:
         lines.append(f"Правок офиса после доставки: {len(office)} — не трогаются.")
+    missing=sum(len(r.get('missing') or []) for r in ok)
+    if missing:
+        lines.append(f'В личных книгах не найдены строки: {missing}. Сверьте их с текущим общим реестром; прежние назначения автоматически не восстанавливаются.')
     lines.extend(comment_cleared_lines(ok))
     for r in results:
         if not r.get("busy"):

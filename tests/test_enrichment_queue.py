@@ -210,3 +210,30 @@ def test_unplanned_other_sheet_change_stops_before_publication(tmp_path,monkeypa
  state=service.submit('unplanned-cell',[job],fields,'01.11.2026','01.11.2026',[])
  assert state['state']=='attention' and 'Witness!A1' in state['books'][0]['message']
  assert file_sha(job['path'])==before and not ledger.posts
+
+
+def test_multiple_books_share_one_native_excel_session(tmp_path,monkeypatch):
+ from contextlib import contextmanager
+ first,fields=fixture(tmp_path,'First');second,_=fixture(tmp_path,'Second');calls=[];original=enrich.open_excel
+ @contextmanager
+ def counted(*args,**kwargs):
+  calls.append('start')
+  with original(*args,**kwargs) as app:yield app
+ monkeypatch.setattr(enrich,'open_excel',counted)
+ ledger=Ledger();service=Service(tmp_path/'queue',lambda:'owner',ledger)
+ state=service.submit('one-excel-session',[first,second],fields,'01.11.2026','01.11.2026',[])
+ assert state['state']=='done' and state['completed']==2 and len(ledger.posts)==2 and calls==['start']
+
+
+def test_reconciled_missing_rows_do_not_block_other_native_writes(tmp_path):
+ from pult.core.enrichment_queue import file_sha
+ job,fields=fixture(tmp_path);job['profile']='hard';job['rows'].append({**job['rows'][0],'contract_id':'OLD-ASSIGNMENT'})
+ ledger=Ledger();service=Service(tmp_path/'queue',lambda:'owner',ledger)
+ state=service.submit('partial-book',[job],fields,'01.11.2026','01.11.2026',[])
+ assert state['state']=='attention' and state['busy']==0
+ path=tmp_path/'master.xlsx';path.write_bytes(b'synthetic approved master')
+ book=dict(path=str(path),file_sha256=file_sha(path),grid=[['Номер КД / ID','ответственный Сотрудник','ответственный Сотрудник СОФТ'],['сх','хард','софт'],['OLD-ASSIGNMENT','New owner','']])
+ plan=service.preview_reconciliation(book);service.apply_reconciliation(plan)
+ state=service.process()
+ assert state['state']=='done' and state['excluded']==1 and state['remaining']==0 and len(ledger.posts)==1
+ assert all(e['contract_id']=='Alpha' for e in ledger.posts[0]['entries'])

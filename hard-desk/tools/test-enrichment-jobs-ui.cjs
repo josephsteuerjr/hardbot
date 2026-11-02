@@ -2,7 +2,7 @@ const fs=require('node:fs'),path=require('node:path'),assert=require('node:asser
 const ROOT=path.resolve(__dirname,'../..'),D=path.join(ROOT,'hard-desk'),LAB=path.resolve(process.env.HARD_ENR_QA_ROOT||path.join(ROOT,'_local/enrichment-jobs-headless'));fs.mkdirSync(LAB,{recursive:true});
 if(!process.versions.electron){
  fs.rmSync(path.join(LAB,'AFTER.json'),{force:true});
- const code=`import {registry} from './ui/analyst/registry';import {mountShell,bare,setSections,go,refresh} from './ui/kit/shell';mountShell('Headless');bare(false);setSections([registry]);window.__refresh=refresh;go('registry');`;
+ const code=`import {registry} from './ui/analyst/registry';import {runJob} from './ui/analyst/lib';import {hard} from './ui/kit/api';import {mountShell,bare,setSections,go,refresh} from './ui/kit/shell';mountShell('Headless');bare(false);setSections([registry]);window.__refresh=refresh;window.__runJob=runJob;window.__testHard=hard;go('registry');`;
  require(path.join(D,'node_modules/esbuild')).buildSync({stdin:{contents:code,resolveDir:D,loader:'ts'},bundle:true,format:'iife',outfile:path.join(LAB,'repro.js')});
  let html=fs.readFileSync(path.join(D,'out/ui/index.html'),'utf8').replace('src="app.js"','src="repro.js"').replace('href="app.css"',`href="${require('node:url').pathToFileURL(path.join(D,'out/ui/app.css')).href}"`);
  fs.writeFileSync(path.join(LAB,'index.html'),html);
@@ -31,6 +31,8 @@ if(!process.versions.electron){
    const observed={mode,worker_state:worker.data.jobs.at(-1).state,worker_starts:worker.data.jobs.length,
     visible_result:await js('document.body.textContent.includes("HEADLESS_ENRICH_COMPLETED")'),
     visible_error:await js('document.body.textContent.includes("Synthetic interrupted local response")'),errors:await js('window.__errors')};
+   const refused=await js(`(async()=>{const original=window.__testHard.local;let reads=0;window.__testHard.local=async route=>{if(route==='/declined')return {ok:false,error:'Дождитесь завершения текущей операции.'};if(route==='/job')reads++;return original(route,{})};try{await window.__runJob('/declined',{});return {failed:false,reads}}catch(error){return {failed:true,reads,message:error.message}}finally{window.__testHard.local=original}})()`);
+   assert(refused.failed && refused.reads===0 && refused.message.includes('Дождитесь завершения'),'Acknowledged admission refusal must not become a missing job');observed.known_refusal_not_polled=true;
    await nap(250);fs.writeFileSync(path.join(LAB,mode+'-before.png'),(await w.webContents.capturePage()).toPNG());results.push(observed);w.destroy();w=null;
   }
   fs.writeFileSync(path.join(LAB,process.argv.includes('--expect-fixed')?'AFTER.json':'BEFORE.json'),JSON.stringify({results},null,2));

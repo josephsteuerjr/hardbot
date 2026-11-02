@@ -349,17 +349,22 @@ def test_receipt_records_the_applied_window_not_the_typed_text(tmp_path):
     assert data["window_input"]["since"] == "04.08.2026"
 
 
-def test_batch_result_survives_a_dead_excel_session():
+def test_batch_result_survives_a_dead_excel_session(monkeypatch):
     """Результат собирается СНАРУЖИ блока Excel.
 
     Раньше он жил внутри `with open_excel(...)`, и падение на выходе из сессии
     уносило его целиком — вместе с путями резервных копий.
     """
-    src = Path(enrich.__file__).read_text(encoding="utf-8")
-    i = src.index("def enrich_many(")
-    body = src[i:src.index("def write_batch_receipt(")]
-    results_init = body.index("results: list[dict] = []")
-    with_block = body.index("with open_excel(")
-    assert results_init < with_block, "результат снова создаётся внутри сессии"
-    assert "except Exception as e:  # noqa: BLE001 — смерть сессии" in body
-    assert '"not_attempted": True' in body, "недошедшие книги не помечаются"
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    @contextmanager
+    def dead_at_exit(*args):
+        yield SimpleNamespace(display_alerts=True,screen_updating=True)
+        raise RuntimeError('Synthetic Excel died during cleanup')
+    monkeypatch.setattr(enrich,'open_excel',dead_at_exit)
+    monkeypatch.setattr(enrich,'_co_init',lambda:None)
+    monkeypatch.setattr(enrich,'_enrich_local',lambda *a,**k:{'file':'synthetic.xlsx','cells_written':1,'backup_path':'known-backup.xlsx','post_sha256':'verified-copy'})
+    result=enrich.enrich_many([{'path':'synthetic.xlsx','employee':'Synthetic','rows':[]}],[])
+    assert len(result)==1 and result[0]['cells_written']==1
+    assert result[0]['backup_path']=='known-backup.xlsx' and result[0]['post_sha256']=='verified-copy'
+    assert 'Synthetic Excel died during cleanup' in result[0]['session_error']

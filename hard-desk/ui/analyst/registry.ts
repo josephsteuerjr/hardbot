@@ -22,6 +22,9 @@ let activeRoot: HTMLElement | null = null;
 let queueTimer: ReturnType<typeof setTimeout> | undefined;
 let queueGeneration = 0;
 let deliveryOperation: any = null;
+let queueDetailsOpen = false;
+let queueReconciliation: any = null;
+let hiddenQueueRun = '';
 
 async function showDeliveryQueue(root: HTMLElement, generation: number): Promise<void> {
   if (!root.isConnected || activeRoot !== root || generation !== queueGeneration) return;
@@ -31,14 +34,35 @@ async function showDeliveryQueue(root: HTMLElement, generation: number): Promise
     const operation = await local<any>('/enr/operation');
     if (generation !== queueGeneration || activeRoot !== root) return;
     deliveryOperation = operation?.id ? operation : null;
-    const signature = JSON.stringify(deliveryOperation);
+    const signature = JSON.stringify([deliveryOperation,queueReconciliation,hiddenQueueRun]);
     if (host.dataset.signature !== signature && !(host.contains(document.activeElement) && document.activeElement?.tagName === 'SELECT')) {
       host.dataset.signature = signature;
       const op = deliveryOperation;
-      host.innerHTML = !op ? '' : `<div class="notice${op.remaining ? ' err' : ''}" role="status"><span class="grow">${esc(op.remaining ? `Перенос не завершён. Проверено книг: ${op.completed} из ${op.total}. Осталось: ${op.remaining}.` : `Обогащение завершено. Проверено книг: ${op.total}. Записано ячеек: ${op.cells}.`)}${op.remaining ? '<br>Занятые книги будут обработаны после закрытия. Импорт реестра доступен после завершения переноса.' : ''}</span></div>
-        ${(op.books || []).filter((b: any) => b.state !== 'done').map((b: any) => `<div class="list-row" style="display:block;overflow-wrap:anywhere"><b>${esc(b.employee)} — ${esc(String(b.file).split(/[\\/]/).pop())}</b><p>${esc(b.message || 'Ожидает обработки')}</p>
+      host.innerHTML = !op || hiddenQueueRun===op.id ? '' : `<div class="notice${op.attention ? ' err' : ''}" role="status"><span class="grow">${esc(op.remaining ? `Перенос не завершён. Проверено книг: ${op.completed} из ${op.total}. Осталось: ${op.remaining}.` : `Обогащение завершено. Проверено книг: ${op.total}. Записано ячеек: ${op.cells}.`)}${op.busy ? ` Открыто в Excel: ${n(op.busy)}.` : ''}${op.attention ? ` Требуют разбора: ${n(op.attention)}.` : ''}${op.excluded ? ` Исключено по общему реестру: ${n(op.excluded)}. В доставленные эти строки не входят.` : ''}</span>${!op.remaining ? '<button class="btn small" data-queue-dismiss>Скрыть</button>' : ''}</div>
+        ${op.processing ? '<p role="status">Завершаю проверку Excel. Действия станут доступны после окончания прохода.</p>' : ''}
+        <details data-queue-details ${queueDetailsOpen ? 'open' : ''}><summary>Подробности и действия</summary>
+        ${op.busy ? '<p>Открытые книги будут обработаны после закрытия Excel.</p>' : ''}
+        ${op.remaining ? '<p>Импорт станет доступен после проверки оставшихся книг.</p>' : ''}
+        ${(op.books || []).filter((b: any) => b.state !== 'done' || b.omissions?.length).map((b: any) => `<div class="list-row" style="display:block;overflow-wrap:anywhere"><b>${esc(b.employee)} — ${esc(String(b.file).split(/[\\/]/).pop())}</b><p>${esc(b.message || 'Ожидает обработки')}</p>
+          ${b.omissions?.length ? `<p>Исключено по общему реестру: ${n(b.omissions.length)}. Исходные результаты сохранены в журнале операции.</p><div class="table-wrap"><table class="grid"><thead><tr><th>Договор</th><th>По общему реестру</th></tr></thead><tbody>${b.omissions.map((row:any)=>`<tr><td>${esc(row.contract_id)}</td><td>${esc(row.reason==='absent_from_master'?'Договор отсутствует':row.current_owner?`Теперь: ${row.current_owner}`:'Ответственный снят')}</td></tr>`).join('')}</tbody></table></div>` : ''}
           ${b.conflicts?.length ? `<div class="table-wrap"><table class="grid"><thead><tr><th class="l">Договор / поле</th><th class="l">В книге</th><th class="l">На сервере</th><th class="l">Действие</th></tr></thead><tbody>${b.conflicts.map((c: any, index: number) => `<tr><td>${esc(c.contract_id)} · ${esc(c.column || c.key)}</td><td>${esc(c.file)}</td><td>${esc(c.server)}</td><td><select class="input" data-queue-choice="${b.ordinal}:${index}"><option value="file">Оставить в книге</option><option value="server">Записать сервер</option></select></td></tr>`).join('')}</tbody></table></div><button class="btn small" data-queue-resolve="${b.ordinal}">Применить решения</button>` : ''}</div>`).join('')}
-        ${op.remaining ? '<button class="btn small" data-queue-retry>Повторить проверку ошибок</button>' : ''}`;
+        ${op.missing ? '<p>Отсутствующие строки могут относиться к прежним назначениям. Сверка покажет изменения по текущему общему реестру до применения исключений.</p><button class="btn small" data-queue-reconcile>Сверить с общим реестром…</button>' : ''}
+        ${queueReconciliation?.run_id===op.id ? `<div class="block"><b>Сверка: ${esc(String(queueReconciliation.source_path).split(/[\\/]/).pop())}</b><p>Изменились назначения или договоры отсутствуют: ${n(queueReconciliation.proposals.length)}. Требуют проверки состава книги: ${n(queueReconciliation.blocked.length)}.</p>
+          <p>Исключённые строки сохраняются в отчёте и не считаются доставленными. Остальные результаты будут перенесены.</p>
+          <div class="table-wrap"><table class="grid"><thead><tr><th>Сотрудник / договор</th><th>По общему реестру</th></tr></thead><tbody>${[...queueReconciliation.proposals,...queueReconciliation.blocked].map((row:any)=>`<tr><td>${esc(row.employee)} · ${esc(row.contract_id)}</td><td>${esc(row.reason==='absent_from_master'?'Договор отсутствует':row.reason==='assignment_changed'?(row.current_owner?`Теперь: ${row.current_owner}`:'Ответственный снят'):row.reason)}</td></tr>`).join('')}</tbody></table></div>
+          <button class="btn small" data-queue-reconcile-apply ${queueReconciliation.proposals.length?'':'disabled'}>Принять исключения и продолжить перенос</button></div>` : ''}
+        ${op.remaining ? '<button class="btn small" data-queue-retry>Повторить проверку ошибок</button>' : ''}</details>`;
+      host.querySelector('[data-queue-details]')?.addEventListener('toggle',event=>{queueDetailsOpen=(event.target as HTMLDetailsElement).open;});
+      host.querySelector('[data-queue-dismiss]')?.addEventListener('click',()=>{hiddenQueueRun=op.id;host.dataset.signature='';void showDeliveryQueue(root,generation);});
+      host.querySelector('[data-queue-reconcile]')?.addEventListener('click',guard(async()=>{
+        const path=await hard.pick('file',{title:'Текущий общий реестр',filters:XLS});if(!path)return;
+        queueReconciliation=await job('/enr/reconcile-preview',{path});queueDetailsOpen=true;
+        host.dataset.signature='';await showDeliveryQueue(root,generation);
+      }));
+      host.querySelector('[data-queue-reconcile-apply]')?.addEventListener('click',guard(async()=>{
+        await local('/enr/reconcile-apply',{token:queueReconciliation.token});queueReconciliation=null;
+        host.dataset.signature='';await showDeliveryQueue(root,generation);
+      }));
       host.querySelector('[data-queue-retry]')?.addEventListener('click', guard(async () => {
         await local('/enr/retry', { id: op.id });
         host.dataset.signature = ''; await showDeliveryQueue(root, generation);
@@ -52,14 +76,23 @@ async function showDeliveryQueue(root: HTMLElement, generation: number): Promise
       })));
     }
     root.querySelectorAll<HTMLButtonElement>(st.tab === 'enrich' ? '[data-apply],[data-check],[data-scan]' : '[data-apply],[data-preview]').forEach(button => {
-      if (deliveryOperation?.remaining) {
+      if (deliveryOperation?.remaining || deliveryOperation?.processing) {
         if (button.dataset.deliveryBlocked === undefined) button.dataset.deliveryBlocked = button.disabled ? '1' : '0';
         button.disabled = true;
       } else if (button.dataset.deliveryBlocked !== undefined) {
         button.disabled = button.dataset.deliveryBlocked === '1'; delete button.dataset.deliveryBlocked;
       }
     });
+    root.querySelectorAll<HTMLButtonElement>('[data-pick],[data-queue-reconcile],[data-queue-reconcile-apply],[data-queue-retry]').forEach(button=>{
+      if(deliveryOperation?.processing){
+        if(button.dataset.deliveryProcessing===undefined)button.dataset.deliveryProcessing=button.disabled?'1':'0';
+        button.disabled=true;
+      }else if(button.dataset.deliveryProcessing!==undefined){
+        button.disabled=button.dataset.deliveryProcessing==='1';delete button.dataset.deliveryProcessing;
+      }
+    });
   } catch (error) {
+    delete host.dataset.signature;
     host.innerHTML = `<div class="notice err">Не удалось проверить очередь переноса: ${esc(String((error as Error).message || error))}</div>`;
   } finally {
     if (root.isConnected && generation === queueGeneration && activeRoot === root) {

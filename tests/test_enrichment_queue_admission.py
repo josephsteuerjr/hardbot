@@ -59,3 +59,15 @@ def test_source_change_after_preview_prevents_registration_and_import(backend,tm
  with pytest.raises(RuntimeError,match='изменился после предпросмотра'):
   registry.imp_apply(body,admin=lambda *a,**k:posts.append(a),start_job=run,settings=engine._settings)
  assert not posts and registry.S['preview'] is None
+
+
+def test_completed_books_do_not_finish_job_while_excel_is_still_closing(backend,tmp_path):
+ engine,registry=backend;service=registry.delivery_service(engine._settings,lambda *a,**k:{})
+ path=tmp_path/'book.xlsx';path.write_bytes(b'synthetic')
+ run=service.prepare('finishing-excel',[{'employee':'Synthetic','path':str(path),'rows':[]}],[],'01.11.2026','01.11.2026',[])
+ item=service.store.books(run['id'])[0];item.update(state='done');service.store.save_book(run['id'],item)
+ engine.job_journal().save(dict(id=run['id'],kind='enr_apply',state='attention',result=None,error=None,log=[]),engine.job_profile(),'test')
+ engine._background_busy=True
+ assert engine.job_state(run['id'])['state']=='attention'
+ engine._background_busy=False
+ assert engine.job_state(run['id'])['state']=='done'

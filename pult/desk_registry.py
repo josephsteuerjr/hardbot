@@ -53,7 +53,7 @@ def _empty_state() -> dict:
     return {
     "col_path": "", "col_analysis": None,
     "book": None, "preview": None,
-    "enr_fields": None, "enr_matched": [], "enr_check": None, "enr_decisions": {},
+    "enr_fields": None, "enr_matched": [], "enr_check": None, "enr_decisions": {},"enr_reconcile":None,
     "exp_data": None, "exp_request": None, "last_receipt": None,
     }
 
@@ -408,7 +408,7 @@ def enr_apply(body, *, admin, start_job, settings, **_):
         S["enr_check"] = None
         S['preview']=None
         return {**result,'lines':[f'Проверено книг: {result["completed"]} из {result["total"]}. Записано ячеек: {result["cells"]}.',
-            'Перенос завершён.' if not result['remaining'] else 'Перенос продолжится после закрытия занятых книг. Ошибки указаны в очереди.'],
+            'Перенос завершён.' if not result['remaining'] else 'Оставшиеся книги требуют повторной проверки или разбора. Причины указаны в очереди.'],
             'conflicts':[],'office':[],'ledger_error':''}
     return {"job": start_job("enr_apply", work,before_start=prepare)}
 
@@ -417,6 +417,22 @@ def enr_operation(body,*,settings,admin,**_):
 
 def enr_retry(body,*,settings,admin,**_):
     return delivery_service(settings,admin).retry(str(body.get('id') or ''),body.get('decisions') or (),body.get('review_token'))
+
+def enr_reconcile_preview(body,*,settings,admin,start_job,**_):
+    def work(say):
+        say('Сверяю отсутствующие строки с текущим общим реестром…')
+        book=ri.read_registry(str(body.get('path') or ''))
+        plan=delivery_service(settings,admin).preview_reconciliation(book)
+        S['enr_reconcile']=plan
+        return plan
+    return {'job':start_job('enr_reconcile',work)}
+
+def enr_reconcile_apply(body,*,settings,admin,**_):
+    plan=S.get('enr_reconcile')
+    if not plan or body.get('token')!=plan['token']:raise ValueError('Сначала выполните свежую сверку с общим реестром')
+    result=delivery_service(settings,admin).apply_reconciliation(plan)
+    S['enr_reconcile']=None;S['preview']=None
+    return result
 
 
 def enr_replay(body, *, admin, start_job, settings, **_):
@@ -497,6 +513,7 @@ _ROUTES = {
     "/enr/state": enr_state, "/enr/base": enr_base, "/enr/preview": enr_preview,
     "/enr/check": enr_check, "/enr/confirm": enr_confirm, "/enr/apply": enr_apply,
     "/enr/operation":enr_operation,"/enr/retry":enr_retry,
+    "/enr/reconcile-preview":enr_reconcile_preview,"/enr/reconcile-apply":enr_reconcile_apply,
     "/enr/replay": enr_replay, "/exp/employees": exp_employees, "/exp/prepare": exp_prepare,
     "/exp/save": exp_save, "/exp/markers": exp_markers, "/reg/period": period,
     "/reg/recalled": recalled,

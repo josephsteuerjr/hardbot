@@ -38,10 +38,16 @@ export async function local<T = any>(path: string, body: unknown = {}): Promise<
 export async function runJob(path: string, body: unknown, log?: (s: string) => void): Promise<any> {
   const id = crypto.randomUUID();
   localStorage.setItem("hard:last-job", id);
+  let acknowledgement: {ok:boolean;error?:string} | undefined;
   try {
-    await local(path, { ...(body as object), request_id: id });
+    acknowledgement=await hard.local(path, { ...(body as object), request_id: id });
   } catch {
     // A lost response can follow a committed start. Only read this UUID from now on.
+    log?.(`Проверяю состояние операции №${id} после потери ответа…`);
+  }
+  if(acknowledgement && !acknowledgement.ok){
+    const message=acknowledgement.error || 'Операция не принята';
+    if(!/Ответ на операцию потерян|Питон-сторона.*не отвечает/i.test(message))throw new Fail(message);
     log?.(`Проверяю состояние операции №${id} после потери ответа…`);
   }
   for (;;) {
