@@ -551,6 +551,8 @@ def connect() -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=8000")
+        from crm.legacy import writing as _crm_writing
+        conn.create_function('crm_canonical_write',0,lambda:int(_crm_writing.get()))
         return conn
     except BaseException:
         conn.close()

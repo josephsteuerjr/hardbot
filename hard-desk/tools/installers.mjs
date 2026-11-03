@@ -19,7 +19,7 @@ const selected = process.argv.slice(2);
 for (const id of (selected.length ? selected : Object.keys(products))) {
   const p = products[id];
   if (!p) throw new Error('Unknown product: ' + id);
-  if (id === 'analyst' && !existsSync(join(here, 'backend-dist/hard-backend/hard-backend.exe')))
+  if (['analyst','crm'].includes(id) && !existsSync(join(here, 'backend-dist/hard-backend/hard-backend.exe')))
     throw new Error('Build the analyst backend first: npm run backend');
   execFileSync(process.execPath, [join(here, 'build.mjs')], { cwd: here, env: { ...process.env, HARD_PRODUCT: id }, stdio: 'inherit' });
   await build({ targets: Platform.WINDOWS.createTarget(['nsis'], Arch.x64), projectDir: here,
@@ -29,13 +29,13 @@ for (const id of (selected.length ? selected : Object.keys(products))) {
       files: ['out/**/*', 'package.json'], asar: true, compression: 'maximum',
       electronVersion: JSON.parse(readFileSync(join(here, 'package.json'))).devDependencies.electron,
       electronDist: localElectron || undefined,
-      extraResources: [{from:'installer/bin/process-check.exe',to:'process-check.exe'},...(id === 'analyst' ? [{ from: 'backend-dist/hard-backend', to: 'backend' }] : [])],
+      extraResources: [{from:'installer/bin/process-check.exe',to:'process-check.exe'},...(['analyst','crm'].includes(id) ? [{ from: 'backend-dist/hard-backend', to: 'backend' }] : [])],
       win: { icon: 'icons/icon.ico', executableName: `hard-${id}`, target: ['nsis'], signExecutable: false },
       nsis: { oneClick: false, perMachine: false, allowElevation: false, allowToChangeInstallationDirectory: false,
         installerLanguages: ['ru_RU'], language: '1049', createDesktopShortcut: 'always', createStartMenuShortcut: true,
         shortcutName: p.name+(qa?' — проверка':''), uninstallDisplayName: p.name+(qa?' — проверка':''), deleteAppDataOnUninstall: false, include: 'installer/brand.nsh',
         runAfterFinish: false, differentialPackage: false },
-      publish: { provider: 'generic', url: releaseUrl, channel: id, useMultipleRangeRequest: false },
+      publish: { provider: 'generic', url: id==='crm'?'https://invalid.local/crm-pilot-unpublished/':releaseUrl, channel: id, useMultipleRangeRequest: false },
     }, publish: 'never' });
   console.log('Packaged runtime audited:', id, auditRuntimeDependencies(join(here,qa?'setup-qa':'installers',id,'win-unpacked/resources/app.asar')));
   // Builder also emits latest.yml for compatibility; only the product channel is distributable.
@@ -57,7 +57,7 @@ for (const id of (selected.length ? selected : Object.keys(products))) {
       extraMetadata:{name:`hard-setup-${id}`,main:'out/setup-main.js'},directories:{output:`${innerRelative}/outer`,buildResources:'installer'},
       // The application installer is already compressed; normal compression
       // avoids spending minutes recompressing it in the outer wizard.
-      files:['out/setup-main.js','out/setup-preload.js','out/setup-registry.json','out/setup/**/*','package.json'],asar:true,compression:'normal',
+      files:['out/setup-main.js','out/setup-preload.js','out/setup-registry.json','out/setup/**/*','out/licenses/**/*','package.json'],asar:true,compression:'normal',
       electronVersion:JSON.parse(readFileSync(join(here,'package.json'))).devDependencies.electron,
       electronDist:localElectron || undefined,
       extraResources:[{from:`${innerRelative}/application-installer.exe`,to:'application-installer.exe'},{from:`${innerRelative}/setup-payload.json`,to:'setup-payload.json'},{from:'installer/bin/process-check.exe',to:'process-check.exe'}],

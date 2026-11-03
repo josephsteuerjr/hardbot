@@ -49,7 +49,7 @@ function request(url: string, init: RequestInit, timeoutMs = 30000): Promise<Res
       else if (kind === "call" || kind === "payment") product = "soft";
     } catch { /* A non-JSON request keeps its explicit/default product. */ }
   }
-  const workProduct = product === "hard" || product === "soft" ? product : PRODUCT_ID || "hard";
+  const workProduct = product === "hard" || product === "soft" ? product : PRODUCT_ID==='crm'?'hard':PRODUCT_ID || "hard";
   const headers = { ...(init.headers as Record<string,string> || {}), "X-Client-Version": app.getVersion?.() || "3.2.0", 'X-Work-Product': workProduct };
   init = { ...init, headers };
   return fetchBuffered((target, options) => net().fetch(target, options), url, init, timeoutMs);

@@ -1,0 +1,370 @@
+@import "./fonts.css";
+@import "./tokens.css";
+@import "./crm-paper-tokens.css";
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--paper);
+  color: var(--ink);
+  font: 14px/1.5 var(--sans);
+  color-scheme: light;
+}
+body {
+  display: grid;
+  grid-template-columns: 212px 1fr;
+  overflow: hidden;
+}
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+button {
+  cursor: pointer;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  padding: 8px 13px;
+  background: transparent;
+}
+button:hover {
+  background: var(--ctrl-hover);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+button.primary {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+button.link {
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  text-align: left;
+}
+input,
+select,
+textarea {
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 9px;
+  min-width: 0;
+}
+input:focus,
+select:focus,
+textarea:focus,
+button:focus-visible {
+  outline: 2px solid var(--terra);
+  outline-offset: 2px;
+}
+textarea {
+  min-height: 115px;
+  resize: vertical;
+}
+#rail {
+  border-right: 1px solid var(--line);
+  padding: 28px 16px 16px;
+  display: flex;
+  flex-direction: column;
+}
+.brand {
+  font: 29px var(--hand);
+  padding: 0 10px 30px;
+}
+nav {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+nav button {
+  text-align: left;
+  border: 0;
+  padding: 11px 12px;
+}
+nav button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+footer {
+  margin-top: auto;
+  padding: 18px 10px 0;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+#version {
+  font-size: 10px;
+  margin-top: 14px;
+}
+main {
+  overflow: auto;
+}
+.workspace {
+  padding: 28px 34px 18px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  -webkit-app-region: drag;
+}
+h1 {
+  font: 36px/1.2 var(--hand);
+  margin: 0 0 6px;
+}
+h2 {
+  font: 27px/1.2 var(--hand);
+  margin: 0 0 18px;
+}
+h3 {
+  font-size: 15px;
+  margin: 0 0 9px;
+}
+.window-controls {
+  display: flex;
+  -webkit-app-region: no-drag;
+  gap: 2px;
+}
+.window-controls button {
+  border: 0;
+  font-size: 20px;
+  width: 35px;
+  padding: 1px 6px;
+}
+.window-controls button:last-child:hover {
+  background: var(--close-hover);
+  color: white;
+}
+#connection {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+#notice {
+  margin: 0 34px;
+  color: var(--err);
+  white-space: pre-wrap;
+}
+#view {
+  padding: 10px 34px 36px;
+}
+.toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+.toolbar input[type="search"] {
+  min-width: 260px;
+  flex: 1;
+}
+.muted {
+  color: var(--ink-3);
+  font-size: 12px;
+}
+.table-wrap {
+  overflow: auto;
+  border-top: 1px solid var(--line-strong);
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+  text-align: left;
+}
+th {
+  font-size: 12px;
+  color: var(--ink-3);
+  font-weight: 500;
+  padding: 12px 10px;
+  border-bottom: 1px solid var(--line);
+}
+td {
+  padding: 13px 10px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+tr:hover td {
+  background: color-mix(in srgb, var(--surface) 45%, transparent);
+}
+td.amount {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+td pre {
+  font: inherit;
+  white-space: pre-wrap;
+  margin: 0;
+}
+.summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 18px;
+  margin: 22px 0;
+}
+.metric {
+  padding: 18px 0;
+  border-top: 1px solid var(--line-strong);
+}
+.metric strong {
+  display: block;
+  font: 34px var(--hand);
+  margin: 4px 0;
+}
+.metric small {
+  color: var(--ink-3);
+}
+.tabs {
+  display: flex;
+  gap: 18px;
+  border-bottom: 1px solid var(--line);
+  margin: 22px 0;
+}
+.tabs button {
+  border: 0;
+  border-radius: 0;
+  padding: 10px 0;
+}
+.tabs .active {
+  border-bottom: 2px solid var(--accent);
+  color: var(--accent);
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.field label {
+  color: var(--ink-2);
+  font-size: 12px;
+}
+.span {
+  grid-column: 1/-1;
+}
+.actions {
+  display: flex;
+  gap: 9px;
+  justify-content: flex-end;
+  margin-top: 24px;
+}
+.record {
+  padding: 18px 0;
+  border-bottom: 1px solid var(--line);
+}
+.record p {
+  white-space: pre-wrap;
+  margin: 8px 0;
+}
+.tag {
+  font-size: 11px;
+  color: var(--ink-3);
+  border: 1px solid var(--line);
+  padding: 3px 6px;
+  border-radius: 4px;
+}
+.warning {
+  color: var(--warn);
+}
+.empty {
+  padding: 35px 0;
+  color: var(--ink-3);
+}
+dialog {
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  width: 700px;
+  max-width: calc(100vw - 50px);
+  max-height: 90vh;
+  padding: 28px;
+}
+dialog::backdrop {
+  background: rgba(29, 26, 23, 0.28);
+}
+dialog form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+dialog .error {
+  color: var(--err);
+  white-space: pre-wrap;
+}
+.contracts {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+.check input {
+  width: auto;
+}
+.script-step {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+}
+.script-step p {
+  white-space: pre-wrap;
+}
+.help {
+  max-width: 780px;
+}
+.help p {
+  margin: 14px 0;
+}
+.trend {
+  display: flex;
+  gap: 4px;
+  align-items: end;
+  height: 100px;
+  margin: 18px 0;
+}
+.trend div {
+  flex: 1;
+  background: var(--accent-soft);
+  border-top: 2px solid var(--accent);
+  min-height: 3px;
+  position: relative;
+}
+.trend div span {
+  position: absolute;
+  bottom: 100%;
+  font-size: 10px;
+  white-space: nowrap;
+}
+a {
+  color: var(--accent);
+}
+@media (max-width: 1100px) {
+  body {
+    grid-template-columns: 180px 1fr;
+  }
+  .workspace {
+    padding: 24px;
+  }
+  .grid {
+    gap: 12px;
+  }
+  #view {
+    padding: 10px 24px 30px;
+  }
+}

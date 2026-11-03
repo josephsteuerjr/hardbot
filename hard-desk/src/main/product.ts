@@ -1,7 +1,8 @@
-export type ProductId = "hard" | "soft" | "manager" | "analyst";
+export type ProductId = "hard" | "soft" | "manager" | "analyst" | "crm";
 declare const __HARD_PRODUCT__: string;
 const built = typeof __HARD_PRODUCT__ === "undefined" ? "" : __HARD_PRODUCT__;
 export const PRODUCTS = {
+  crm: { id: "crm", name: "Взыскание — CRM пилот", mode: "field", appId: "ru.rimborso.crm.pilot", dataName: "crm-pilot" },
   hard: { id: "hard", name: "Взыскание Хард", mode: "field", appId: "ru.rimborso.hard.field", dataName: "hard" },
   soft: { id: "soft", name: "Взыскание Софт", mode: "field", appId: "ru.rimborso.hard.soft", dataName: "soft" },
   manager: { id: "manager", name: "Взыскание СНГ — Руководитель", mode: "manager", appId: "ru.rimborso.hard.manager", dataName: "manager" },

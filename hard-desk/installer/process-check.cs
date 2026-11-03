@@ -7,11 +7,34 @@ using System.Web.Script.Serialization;
 using System.Security.Cryptography;
 using Microsoft.Win32;
 using System.Threading;
+using System.Runtime.InteropServices;
 
 // No PowerShell/WMI, no process killing. 0=closed, 2=still running, 3=unverifiable.
 class ProcessCheck {
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+  [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref uint value, int size);
   [STAThread] static int Main(string[] args) {
     try {
+      if (args.Length == 1 && (args[0] == "seal" || args[0] == "unseal")) {
+        using (var input = Console.OpenStandardInput())
+        using (var buffer = new MemoryStream()) {
+          input.CopyTo(buffer);
+          if (buffer.Length > 16 * 1024 * 1024) return 3;
+          var data = args[0] == "seal"
+            ? ProtectedData.Protect(buffer.ToArray(), null, DataProtectionScope.CurrentUser)
+            : ProtectedData.Unprotect(buffer.ToArray(), null, DataProtectionScope.CurrentUser);
+          using (var output = Console.OpenStandardOutput()) output.Write(data, 0, data.Length);
+          return 0;
+        }
+      }
+      if (args.Length == 3 && args[0] == "window") {
+        var window = new IntPtr(Int64.Parse(args[1])); uint owner;
+        GetWindowThreadProcessId(window, out owner);
+        if (owner != UInt32.Parse(args[2])) return 3;
+        uint border = 0xfffffffe, corners = 1;
+        var result = DwmSetWindowAttribute(window, 34, ref border, 4);
+        DwmSetWindowAttribute(window, 33, ref corners, 4); return result == 0 ? 0 : 3;
+      }
       if (args.Length == 3 && args[0] == "registration") {
         using (var hive = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Registry64))
         using (var key = hive.OpenSubKey("Software\\" + args[1])) {

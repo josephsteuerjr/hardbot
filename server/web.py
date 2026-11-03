@@ -7861,6 +7861,9 @@ def build_app(bot=None) -> web.Application:
     app.on_response_prepare.append(_security_headers)
     app["bot"] = bot
     app["notification_limit"] = asyncio.Semaphore(4)
+    from crm.http import install as _install_crm
+    import sys as _crm_sys
+    _install_crm(app,_crm_sys.modules[__name__])
     import notification_outbox
     app.cleanup_ctx.append(notification_outbox.lifecycle)
     import audit_spool

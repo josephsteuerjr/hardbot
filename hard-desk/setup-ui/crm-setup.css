@@ -1,0 +1,111 @@
+@import "../ui/styles/fonts.css";
+@import "../ui/styles/tokens.css";
+@import "../ui/styles/crm-paper-tokens.css";
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+body {
+  display: flex;
+  background: var(--paper);
+  color: var(--ink);
+  font: 16px/1.55 var(--sans);
+  overflow: hidden;
+}
+aside {
+  width: 230px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--line-ink);
+  padding: 36px 26px;
+  display: flex;
+  flex-direction: column;
+  -webkit-app-region: drag;
+}
+#brand {
+  font: 32px var(--hand);
+}
+#steps {
+  margin-top: 45px;
+  color: var(--muted);
+  white-space: pre-line;
+  line-height: 2.5;
+}
+#version {
+  margin-top: auto;
+  font-size: 10px;
+  color: var(--muted);
+}
+.workspace {
+  flex: 1;
+  position: relative;
+  min-width: 0;
+}
+nav {
+  height: 65px;
+  display: flex;
+  justify-content: flex-end;
+  -webkit-app-region: drag;
+}
+nav button {
+  -webkit-app-region: no-drag;
+  border: 0;
+  width: 52px;
+  padding: 0;
+  font-size: 25px;
+}
+nav button:last-child:hover {
+  background: var(--close-hover);
+  color: white;
+}
+main {
+  padding: 24px 44px;
+  height: calc(100% - 65px);
+  overflow: auto;
+}
+h1 {
+  font: 46px/1.15 var(--hand);
+  margin: 0 0 25px;
+}
+p {
+  margin: 0 0 22px;
+  color: var(--ink-2);
+}
+button {
+  font: inherit;
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--line-ink);
+  padding: 10px 20px;
+  cursor: pointer;
+}
+button:hover {
+  background: var(--ctrl-hover);
+}
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.primary {
+  background: var(--terra);
+  border-color: var(--accent);
+}
+.actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 30px;
+}
+.path {
+  font: 12px/1.7 var(--mono);
+  overflow-wrap: anywhere;
+  padding: 18px 0;
+  border-block: 1px solid var(--line-ink);
+  user-select: text;
+}
+.error {
+  color: var(--err);
+}

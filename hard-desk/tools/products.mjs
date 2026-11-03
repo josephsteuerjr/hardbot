@@ -1,4 +1,5 @@
 export const products = {
+  crm: { name: 'Взыскание — CRM пилот', appId: 'ru.rimborso.crm.pilot', description: 'Отдельный кандидат CRM' },
   hard: { name: 'Взыскание Хард', appId: 'ru.rimborso.hard.field', description: 'Портфель и работа выездника' },
   soft: { name: 'Взыскание Софт', appId: 'ru.rimborso.hard.soft', description: 'Очередь звонков и результаты Софта' },
   manager: { name: 'Взыскание СНГ — Руководитель', appId: 'ru.rimborso.hard.manager', description: 'Рабочий CRM-обзор, команда и служба безопасности' },

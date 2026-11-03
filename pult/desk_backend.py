@@ -36,6 +36,13 @@ APP_DIR = Path(__file__).resolve().parent
 if str(APP_DIR.parent) not in sys.path:
     sys.path.insert(0, str(APP_DIR.parent))
 
+# The independent CRM candidate must never load an installed Analyst profile.
+if '--crm-pilot' in sys.argv:
+    sys.path.insert(0,str(APP_DIR.parent/'server'))
+    from crm.pilot_server import main as _crm_pilot_main
+    _crm_pilot_main()
+    raise SystemExit(0)
+
 from pult.core import api as api_client  # noqa: E402
 from pult.core import devices as dv  # noqa: E402
 from pult.core.settings import Settings, active_profile, load_settings  # noqa: E402

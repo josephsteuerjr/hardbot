@@ -5,6 +5,8 @@ import { app, safeStorage } from "electron";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { join } from "node:path";
+import { PRODUCT_ID } from './product';
+import { directSeal,directOpen,isDirect } from './windows-dpapi';
 
 export interface Settings {
   server?: string;          // https://… — берётся из ссылки входа
@@ -59,11 +61,13 @@ export function writeSettings(patch: Partial<Settings>): Settings {
 }
 
 function seal(text: string): Buffer {
+  if (PRODUCT_ID === 'crm') return directSeal(text);
   if (!safeStorage.isEncryptionAvailable()) throw new Error("шифрование Windows недоступно");
   return safeStorage.encryptString(text);
 }
 
 function open(buf: Buffer): string {
+  if (PRODUCT_ID === 'crm' && isDirect(buf)) return directOpen(buf);
   return safeStorage.decryptString(buf);
 }
 

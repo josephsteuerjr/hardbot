@@ -25,21 +25,23 @@ const sha = x => createHash('sha256').update(x).digest('hex');
 function guid(value){const b=createHash('sha1').update(Buffer.from('50e065bc313411e69bab38c9862bdaf3','hex')).update(value).digest().subarray(0,16);b[6]=(b[6]&15)|80;b[8]=(b[8]&63)|128;const s=b.toString('hex');return [s.slice(0,8),s.slice(8,12),s.slice(12,16),s.slice(16,20),s.slice(20)].join('-');}
 const productionRegistry=Object.fromEntries(Object.entries(products).map(([id,p])=>[id,guid(p.appId)]));
 const stale = [];
+const crmOnly=selectedProducts.length===1&&selectedProducts[0]==='crm';
+if(selectedProducts.includes('crm')&&!crmOnly)throw new Error('Audit CRM separately from stable products');
 const version=JSON.parse(readFileSync(join(here,'package.json'))).version;
 const backendManifest=JSON.parse(execFileSync(process.env.HARD_BUILD_PYTHON || 'python',
   [join(here,'tools/backend_sources.py')],{encoding:'utf8'}));
 const nodeOptions={bundle:true,platform:'node',format:'cjs',target:'node22',external:['electron','electron-updater','original-fs'],logLevel:'warning',write:false};
-const expectedUi = await build({ entryPoints: [join(here, 'ui/app.ts')], bundle: true, format: 'iife', target: ['chrome130'], logLevel: 'warning', write: false });
-const preload=await build({...nodeOptions,entryPoints:[join(here,'src/preload.ts')]});
+const expectedUi = await build({ entryPoints: [join(here, crmOnly?'ui/crm-app.ts':'ui/app.ts')], bundle: true, format: 'iife', target: ['chrome130'], logLevel: 'warning', write: false });
+const preload=await build({...nodeOptions,entryPoints:[join(here,crmOnly?'src/crm-preload.ts':'src/preload.ts')]});
 const tray=await build({entryPoints:[join(here,'ui/tray.ts')],bundle:true,format:'iife',target:['chrome130'],logLevel:'warning',write:false});
-const styles=await build({entryPoints:[join(here,'ui/styles/index.css')],bundle:true,outfile:join(here,'out/ui/app.css'),
+const styles=await build({entryPoints:[join(here,crmOnly?'ui/styles/crm-pilot.css':'ui/styles/index.css')],bundle:true,outfile:join(here,'out/ui/app.css'),
   loader:{'.woff2':'file','.svg':'dataurl'},assetNames:'fonts/[name]',logLevel:'warning',write:false});
 const setupPreload=await build({...nodeOptions,entryPoints:[join(here,'src/setup/preload.ts')]});
-const setupUi=await build({entryPoints:[join(here,'setup-ui/setup.ts')],bundle:true,format:'iife',target:['chrome130'],logLevel:'warning',write:false});
-const setupStyles=await build({entryPoints:[join(here,'setup-ui/setup.css')],bundle:true,outfile:join(here,'out/setup/setup.css'),loader:{'.woff2':'file','.svg':'dataurl'},assetNames:'fonts/[name]',logLevel:'warning',write:false});
-const setupStatic=[['out/setup-preload.js',setupPreload.outputFiles[0].contents],['out/setup/setup.js',setupUi.outputFiles[0].contents],['out/setup/index.html',readFileSync(join(here,'setup-ui/index.html'))],...setupStyles.outputFiles.map(f=>[relative(here,f.path),f.contents])];
+const setupUi=await build({entryPoints:[join(here,crmOnly?'setup-ui/crm-setup.ts':'setup-ui/setup.ts')],bundle:true,format:'iife',target:['chrome130'],logLevel:'warning',write:false});
+const setupStyles=await build({entryPoints:[join(here,crmOnly?'setup-ui/crm-setup.css':'setup-ui/setup.css')],bundle:true,outfile:join(here,'out/setup/setup.css'),loader:{'.woff2':'file','.svg':'dataurl'},assetNames:'fonts/[name]',logLevel:'warning',write:false});
+const setupStatic=[['out/setup-preload.js',setupPreload.outputFiles[0].contents],['out/setup/setup.js',setupUi.outputFiles[0].contents],['out/setup/index.html',readFileSync(join(here,crmOnly?'setup-ui/crm-index.html':'setup-ui/index.html'))],...setupStyles.outputFiles.map(f=>[relative(here,f.path),f.contents])];
 const staticFiles=[['out/preload.js',preload.outputFiles[0].contents],['out/ui/tray.js',tray.outputFiles[0].contents],
-  ...['index.html','tray.html'].map(name=>['out/ui/'+name,readFileSync(join(here,'ui',name))]),
+  ...['index.html','tray.html'].map(name=>['out/ui/'+name,readFileSync(join(here,'ui',crmOnly&&name==='index.html'?'crm-index.html':name))]),
   ...styles.outputFiles.map(file=>[relative(here,file.path),file.contents])];
 staticFiles.push(...setupStatic);
 function walk(dir){return readdirSync(dir,{withFileTypes:true}).flatMap(e=>e.isDirectory()?walk(join(dir,e.name)):[join(dir,e.name)]);}
@@ -92,9 +94,9 @@ for (const id of selectedProducts) {
   const pkg = JSON.parse(extractFile(packed, 'package.json').toString());
   if (pkg.name !== `hard-${id}` || pkg.version !== version) throw new Error('Wrong product identity in ' + id);
   const feed=yaml.load(readFileSync(join(unpacked,'resources/app-update.yml'),'utf8'));
-  if(feed.provider!=='generic' || feed.url!==releaseUrl || feed.channel!==id)
+  if(feed.provider!=='generic' || feed.url!==(id==='crm'?'https://invalid.local/crm-pilot-unpublished/':releaseUrl) || feed.channel!==id)
     throw new Error('Wrong embedded GitHub update channel in '+id);
-  if(id==='analyst'){
+  if(['analyst','crm'].includes(id)){
     const payload=join(unpacked,'resources/backend/_internal/project');
     if(!existsSync(payload)) throw new Error('Missing analyst source payload');
     const manifestFile=join(unpacked,'resources/backend/SOURCE-MANIFEST.json');

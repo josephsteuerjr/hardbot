@@ -82,7 +82,7 @@ function boot(): void {
       }
     } catch { /* OS temporary-directory cleanup remains available */ }
   });
-  profile = process.env.HARD_SETUP_QA_DATA || join(process.env.LOCALAPPDATA || "", "Hard", product.id, "data");
+  profile = process.env.HARD_SETUP_QA_DATA || join(process.env.LOCALAPPDATA || "", "Hard", product.id === "crm" ? "crm-pilot" : product.id, "data");
   app.whenReady().then(async () => {
     if (!removing) target = registration() || join(process.env.LOCALAPPDATA || "", "Programs", "hard-" + product.id);
     const d = process.argv.find(a => /^\/D=/i.test(a)); if (d && !removing) target = resolve(d.slice(3));
@@ -90,15 +90,15 @@ function boot(): void {
     if (!preview && process.argv.some(a => /^\/S$/i.test(a))) {
       const code = await apply(""); app.exit(code.ok ? 0 : 2); return;
     }
-    if (!removing) candidates = discoverProfiles(product.id, { appData: app.getPath("appData"), localAppData: process.env.LOCALAPPDATA, home: app.getPath("home"),
+    if (!removing && product.id !== "crm") candidates = discoverProfiles(product.id, { appData: app.getPath("appData"), localAppData: process.env.LOCALAPPDATA, home: app.getPath("home"),
       shortcuts: [app.getPath("desktop"), join(app.getPath("appData"), "Microsoft", "Windows", "Start Menu", "Programs")], readShortcut: p => shell.readShortcutLink(p) }, profile);
-    win = new BrowserWindow({ width: 960, height: 700, minWidth: 820, minHeight: 610, frame: false, show: false, backgroundColor: "#f4e4cf", title: product.name + (removing ? " — удаление" : " — установка"),
+    win = new BrowserWindow({ width: 960, height: 700, minWidth: 820, minHeight: 610, frame: false, thickFrame: false, show: false, backgroundColor: "#f8eee0", title: product.name + (removing ? " — удаление" : " — установка"),
       webPreferences: { preload: join(__dirname, "setup-preload.js"), contextIsolation: true, sandbox: true, nodeIntegration: false } });
     const url = pathToFileURL(join(__dirname, "setup", "index.html")).href;
     function trusted(e: Electron.IpcMainInvokeEvent): void { if (e.sender !== win?.webContents || e.senderFrame !== win.webContents.mainFrame || e.senderFrame.url !== url) throw new Error("Недопустимый запрос"); }
     ipcMain.handle("setup:state", e => { trusted(e); return state(); });
     ipcMain.handle("setup:choose", async (e, kind: unknown) => {
-      trusted(e); if (busy || completed || removing || hasProfile(profile, product.id)) return state();
+      trusted(e); if (product.id === "crm" || busy || completed || removing || hasProfile(profile, product.id)) return state();
       if (kind !== "folder" && kind !== "file") return state();
       const result = await dialog.showOpenDialog(win!, { title: kind === "folder" ? "Где лежала прежняя программа?" : "Ярлык или EXE прежней программы", properties: kind === "folder" ? ["openDirectory"] : ["openFile"],
         filters: kind === "file" ? [{ name: "Программа, ярлык или настройки", extensions: ["lnk", "exe", "json"] }] : undefined });
@@ -115,18 +115,21 @@ function boot(): void {
     win.on("close", e => { if (busy) e.preventDefault(); });
     win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     win.webContents.on("will-navigate", (e, next) => { if (next !== url) e.preventDefault(); });
-    await win.loadURL(url); win.show();
+    await win.loadURL(url);
+    if (process.platform === "win32") await execute(helper(), ["window", win.getNativeWindowHandle().readBigUInt64LE().toString(), String(process.pid)], 8000);
+    win.show();
     if (preview && process.env.HARD_SETUP_SHOT) { await new Promise(r => setTimeout(r, 800)); const shot = await win.webContents.capturePage(); writeFileSync(process.env.HARD_SETUP_SHOT, shot.toPNG()); app.quit(); }
   }).catch(() => { if (win) win.webContents.send("setup:progress", "Не удалось открыть мастер. Повторите запуск установщика."); else app.exit(2); });
   app.on("window-all-closed", () => app.quit());
 }
-function state() { return { name: product.name, version: app.getVersion(), removing, target, visible: win?.isVisible() ?? false, current: hasProfile(profile, product.id),
+function state() { return { isolated: product.id === "crm", name: product.name, version: app.getVersion(), removing, target, visible: win?.isVisible() ?? false, current: hasProfile(profile, product.id),
   candidates: candidates.map(c => ({ source: c.source, label: c.label, last: c.last, kind: c.kind })), preview }; }
 function progress(text: string) { win?.webContents.send("setup:progress", text); }
 async function apply(source: string): Promise<{ ok: boolean; message?: string }> {
   if (busy || completed || preview) return { ok: false, message: preview ? "Это предварительный просмотр" : "Дождитесь окончания операции" };
   busy = true;
   try {
+    if (product.id === "crm" && source) throw new Error("CRM использует отдельный профиль.");
     const candidate = source ? candidates.find(c => c.source === source) : null;
     if (source && (!candidate || hasProfile(profile, product.id))) throw new Error("Действующий вход уже сохранён. Перенос поверх него запрещён.");
     if (candidate && !profilesAt(source, product.id).some(c => c.fingerprint === candidate.fingerprint)) throw new Error("Прежние настройки изменились. Выберите их заново.");
