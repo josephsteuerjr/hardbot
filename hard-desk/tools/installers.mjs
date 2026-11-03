@@ -1,7 +1,7 @@
 // Four local builds. This script never uploads or installs an application.
 import { build, Platform, Arch } from 'electron-builder';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync,realpathSync,lstatSync,rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import yaml from 'js-yaml';
 import { dirname, join } from 'node:path';
@@ -51,6 +51,13 @@ for (const id of (selected.length ? selected : Object.keys(products))) {
   const version=JSON.parse(readFileSync(join(here,'package.json'))).version;
   const name=`${id}-${version}-setup.exe`,innerRelative=`setup-build/${qa?'qa-':''}${id}`,inner=join(here,innerRelative);
   mkdirSync(inner,{recursive:true});copyFileSync(join(output,name),join(inner,'application-installer.exe'));
+  if(id==='crm'){
+    // The completed inner archive has been audited and copied. Bound disk use
+    // before assembling the outer wizard; the final EXE is audited afterwards.
+    const completed=join(output,'win-unpacked');
+    if(lstatSync(completed).isSymbolicLink()||dirname(realpathSync(completed))!==realpathSync(output))throw new Error('Unsafe completed build directory');
+    rmSync(completed,{recursive:true});
+  }
   writeFileSync(join(inner,'setup-payload.json'),JSON.stringify({product:id,version,sha512:createHash('sha512').update(readFileSync(join(inner,'application-installer.exe'))).digest('base64')}));
   await build({targets:Platform.WINDOWS.createTarget(['portable'],Arch.x64),projectDir:here,
     config:{appId:p.appId+'.setup'+(qa?'_setupqa':''),productName:p.name+' — Установка',artifactName:name,
