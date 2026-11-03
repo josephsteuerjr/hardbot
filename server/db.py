@@ -1541,6 +1541,8 @@ def init_db() -> None:
         import staff_roster
         import pc_registration
         staff_roster.init_schema(conn)
+        import call_scripts
+        call_scripts.init_schema(conn)
         pc_registration.init_schema(conn)
         import team_work
         team_work.init_schema(conn)

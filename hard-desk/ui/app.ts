@@ -11,6 +11,7 @@ import { activity } from "./views/activity";
 import { workspace } from "./views/workspace";
 import { teamPortfolio } from "./views/team-portfolio";
 import { managerCRM } from "./views/manager-crm";
+import { callScript } from "./views/call-script";
 import { mountDesktopTools } from "./kit/desktop-tools";
 import { control } from "./views/control";
 import { device, links, promises, report } from "./views/misc";
@@ -156,6 +157,7 @@ async function start() {
   setWho(who ? `<b>${esc(who.name || "Руководитель")}</b>${esc(ROLE[who.role] || "")}${who.scope ? " · " + esc(who.scope) : ""}` : "");
   document.body.classList.add("desktop");
   const list: Section[] = [managerCRM, employeeBoard('manager'), staffTasks('manager'), teamPortfolio, workspace, activity, team, promises];
+  if (caps.team_links) list.push(callScript);
   if (caps.control) list.push(control);
   if (caps.team_links) list.push(links(!!shell.device?.username &&
     (who?.role === "manager" || who?.role === "full")));

@@ -1806,6 +1806,23 @@ async def _workspace_promises(request: web.Request) -> web.Response:
                               "items": await asyncio.to_thread(office_work.promises, emp, profile)})
 
 
+async def _call_script(request):
+    _, employee = await asyncio.to_thread(_auth, request)
+    import call_scripts
+    return web.json_response(await asyncio.to_thread(call_scripts.employee_script, employee))
+
+
+async def _manager_call_script(request):
+    uid, _, _ = await asyncio.to_thread(_manager_gate, request)
+    import call_scripts
+    try:
+        result = (await asyncio.to_thread(call_scripts.mutate, uid, await _json_object(request))
+                  if request.method == 'POST' else await asyncio.to_thread(call_scripts.manager_state, uid))
+    except call_scripts.ScriptError as exc:
+        return web.json_response(dict(ok=False, error=str(exc)), status=exc.status)
+    return web.json_response(result)
+
+
 def _cards_payload(uid: int, emp: str, lang: str, requested_soft: bool,
                    started: float) -> dict:
     """Сборка карточек в рабочем потоке: SQLite не задерживает вход других людей."""
@@ -7982,6 +7999,9 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/account/sessions", _account_sessions)
     app.router.add_post("/api/account/logout", _account_logout)
     app.router.add_get("/api/manager/entered", _manager_entered)
+    app.router.add_get("/api/manager/call-script", _manager_call_script)
+    app.router.add_post("/api/manager/call-script", _manager_call_script)
+    app.router.add_get("/api/call-script", _call_script)
     app.router.add_get("/admin/accounts.json", _admin_accounts)
     app.router.add_post('/admin/account_action.json',_admin_account_action)
     app.router.add_post("/admin/account_approve.json", _admin_account_approve)

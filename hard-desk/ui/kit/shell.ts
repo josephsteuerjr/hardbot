@@ -129,6 +129,7 @@ export function preserve(fn: () => void): void {
 }
 
 export function openPanel(titleHtml: string, bodyHtml = '<div class="skeleton"></div><div class="skeleton"></div>'): HTMLElement {
+  $("app").classList.remove('with-call-script');
   const focused = document.activeElement as HTMLElement | null;
   if (focused?.closest("#view-inner")) panelReturn = focused;
   $("panel-title").innerHTML = titleHtml;
@@ -142,6 +143,7 @@ export function openPanel(titleHtml: string, bodyHtml = '<div class="skeleton"><
 export function closePanel(): void {
   if(document.querySelector('#panel-inner [data-saving="1"]')){toast("Дождитесь сохранения записи");return}
   $("app").classList.remove("with-panel");
+  $("app").classList.remove('with-call-script');
   document.querySelectorAll('[aria-selected="true"]').forEach((el) => el.removeAttribute("aria-selected"));
   const target = panelReturn?.isConnected ? panelReturn : document.querySelector<HTMLElement>("#view-inner .current-row") || document.querySelector<HTMLElement>("#view-inner [data-tsearch]");
   target?.focus({ preventScroll: true });
