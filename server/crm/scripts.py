@@ -1,7 +1,7 @@
 """Canonical team adapter for the reviewed draft/publish call-script workflow."""
 
 import json, uuid
-import db
+from . import storage
 from call_scripts import _content, ScriptError
 from . import store
 from .contract import CRMError, canonical, digest, now, operation_id
@@ -31,7 +31,7 @@ def _state(conn, p):
 
 
 def state(p):
-    with db.connect() as conn:
+    with storage.connect() as conn:
         return _state(conn, p)
 
 
@@ -55,8 +55,8 @@ def mutate(p, body):
             raise CRMError(str(exc))
     elif "content" in body:
         raise CRMError("Публикуется только сохранённый черновик.")
-    with db.connect() as conn:
-        store.begin(conn)
+    with storage.connect() as conn:
+        store.begin(conn, [storage.operation_lock(p, operation), "script:" + p.team_id])
         prior = store.replay(conn, p, operation, body)
         if prior is not None:
             return prior

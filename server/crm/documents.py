@@ -2,15 +2,13 @@
 
 from pathlib import Path
 import hashlib, os, uuid
-import db
+from . import storage
 from . import access, store
 from .contract import CRMError, now, operation_id
 
 
 def root():
-    path = Path(db.DB_PATH).resolve().parent / "crm-documents"
-    path.mkdir(exist_ok=True)
-    return path
+    return storage.document_root()
 
 
 def verify(row):
@@ -44,8 +42,8 @@ def upload(principal, identifier, contract_id, filename, media_type, data):
         raise CRMError("Документ должен быть не больше 10 МБ.", "size", 413)
     checksum = hashlib.sha256(data).hexdigest()
     at = now()
-    with db.connect() as conn:
-        store.begin(conn)
+    with storage.connect() as conn:
+        store.begin(conn, ["document:" + identifier, "contract:" + str(contract_id)])
         access.contracts(conn, principal, [contract_id], capability="document")
         previous = conn.execute(
             "SELECT * FROM crm_documents WHERE document_id=?", (identifier,)
@@ -106,7 +104,7 @@ def upload(principal, identifier, contract_id, filename, media_type, data):
 
 
 def download(principal, identifier):
-    with db.connect() as conn:
+    with storage.connect() as conn:
         row = conn.execute(
             "SELECT * FROM crm_documents WHERE document_id=?", (identifier,)
         ).fetchone()

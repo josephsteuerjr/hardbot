@@ -4,7 +4,7 @@ from datetime import timedelta
 import json
 import uuid
 
-import db
+from . import storage
 from . import access
 from .contract import (
     CRMError,
@@ -25,8 +25,8 @@ from .contract import (
 )
 
 
-def begin(conn):
-    conn.execute("BEGIN IMMEDIATE")
+def begin(conn, keys=None):
+    storage.begin(conn, keys)
 
 
 def replay(conn, principal, operation, body):
@@ -65,7 +65,7 @@ def anchor(principal, installation):
         raise CRMError("Некорректный идентификатор установки.")
     at = now()
     identifier = str(uuid.uuid4())
-    with db.connect() as conn:
+    with storage.connect() as conn:
         conn.execute(
             "INSERT INTO crm_clock_anchors VALUES(?,?,?,?)",
             (identifier, principal.actor_uid, installation, at),
@@ -251,8 +251,12 @@ def command(principal, body, *, origin="app", client_version=None):
             else "task" if kind == "task_complete" else kind
         )
     )
-    with db.connect() as conn:
-        begin(conn)
+    with storage.connect() as conn:
+        selected = body.get("contract_ids")
+        if not isinstance(selected, list) or len(selected) > 100:
+            raise CRMError("Выберите от 1 до 100 договоров без повторов.")
+        begin(conn, [storage.operation_lock(principal, operation),
+                     *("contract:" + cid for cid in selected if isinstance(cid, str))])
         previous = replay(conn, principal, operation, body)
         if previous is not None:
             return previous
@@ -520,7 +524,7 @@ def command(principal, body, *, origin="app", client_version=None):
 def rebuild(principal):
     if not principal.owner:
         raise CRMError("Пересборка доступна владельцу.", "forbidden", 403)
-    with db.connect() as conn:
+    with storage.connect() as conn:
         begin(conn)
         conn.execute(
             "UPDATE crm_contracts SET fields_json=baseline_json,revisions_json='{}',provenance_json='{}'"
@@ -629,7 +633,7 @@ def project(conn, row, values, event, happened, origin):
     )
     # Canonical project() is the only writer during the explicit pilot cutover.
     # Keep legacy IDs and readers valid; legacy mutation routes are guarded.
-    if row.get("legacy_id") and values:
+    if row.get("legacy_id") and values and not storage.is_postgres(conn):
         from fields import BY_KEY
 
         valid = {key: value for key, value in values.items() if key in BY_KEY}
@@ -645,15 +649,15 @@ def project(conn, row, values, event, happened, origin):
 
 
 def card(principal, person_uuid):
-    with db.connect() as conn:
-        allowed = access.scoped_contracts(conn, principal)
+    with storage.connect(readonly=True) as conn:
+        allowed = None if principal.owner or principal.all_contracts else access.scoped_contracts(conn, principal)
         rows = [
             dict(r)
             for r in conn.execute(
                 "SELECT * FROM crm_contracts WHERE person_uuid=? ORDER BY creditor_id,external_id",
                 (person_uuid,),
             )
-            if r["contract_uuid"] in allowed
+            if allowed is None or r["contract_uuid"] in allowed
         ]
         if not rows:
             raise CRMError("Клиент недоступен.", "not_found", 404)
@@ -703,7 +707,9 @@ def card(principal, person_uuid):
 def portfolio(principal, search="", limit=200):
     from decimal import Decimal
 
-    with db.connect() as conn:
+    with storage.connect(readonly=True) as conn:
+        if storage.is_postgres(conn):
+            return _postgres_portfolio(conn, principal, search, limit)
         allowed = access.scoped_contracts(conn, principal)
         people = {}
         for row in conn.execute(
@@ -756,3 +762,38 @@ def portfolio(principal, search="", limit=200):
             total_contracts=sum(x["contracts"] for x in items),
             truncated=len(items) > limit,
         )
+
+
+def _postgres_portfolio(conn, principal, search, limit):
+    """Filter and group in PostgreSQL; don't transfer every full card to Python."""
+    from decimal import Decimal
+    limit = min(max(int(limit), 1), 500)
+    predicates, parameters = [], []
+    if not principal.owner and not principal.all_contracts:
+        predicates.append("c.contract_uuid = ANY(?)")
+        parameters.append(sorted(access.scoped_contracts(conn, principal)))
+    if search:
+        predicates.append("strpos(lower(concat_ws(' ',p.name,c.external_id,c.fields_json::jsonb->>'phone',c.fields_json::jsonb->>'address')),lower(?))>0")
+        parameters.append(search)
+    where = ' WHERE ' + ' AND '.join(predicates) if predicates else ''
+    tables = ' FROM crm_contracts c JOIN crm_people p USING(person_uuid)'
+    totals = conn.execute('SELECT COUNT(*) AS contracts,COUNT(DISTINCT c.person_uuid) AS people'
+                          + tables + where, parameters).fetchone()
+    rows = conn.execute("SELECT p.person_uuid,p.name,COUNT(*) AS contracts,"
+                        "json_agg(json_build_object('currency',c.currency,'value',"
+                        "COALESCE(NULLIF(c.fields_json::jsonb->>'debt_today',''),c.fields_json::jsonb->>'debt_total'))) AS amounts"
+                        + tables + where + ' GROUP BY p.person_uuid,p.name ORDER BY p.name,p.person_uuid LIMIT ?',
+                        [*parameters, limit])
+    people = []
+    for row in rows:
+        item = dict(person_uuid=row['person_uuid'], name=row['name'], contracts=row['contracts'],
+                    currencies={}, unknown_amounts=0)
+        for amount in row['amounts']:
+            try:
+                code, exact = currency(amount['currency']), money(amount['value'])
+                item['currencies'][code] = format(Decimal(item['currencies'].get(code, '0')) + Decimal(exact), '.2f')
+            except CRMError:
+                item['unknown_amounts'] += 1
+        people.append(item)
+    return dict(people=people, total_people=totals['people'], total_contracts=totals['contracts'],
+                truncated=totals['people'] > limit)

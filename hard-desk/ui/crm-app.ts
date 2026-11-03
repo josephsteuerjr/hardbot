@@ -699,8 +699,11 @@ function stepEditor(s: any) {
 
 async function exchangePage() {
   const period = new Date().toISOString().slice(0, 7);
+  const target = state.connection.shared
+    ? '<select id="target"><option value="general:pilot">Общий реестр пилота</option></select>'
+    : `<input id="target" value="${state.connection.mode === "synthetic" ? "general:demo" : ""}" placeholder="Идентификатор согласованного реестра">`;
   $("view").innerHTML =
-    `<div class="grid"><div class="field"><label>Период</label><input id="period" type="month" value="${period}"></div><div class="field"><label>Маршрут</label><input id="target" value="${state.connection.mode === "synthetic" ? "general:demo" : ""}" placeholder="Идентификатор согласованного реестра"></div></div><div class="toolbar" style="margin-top:20px">${button("export-new", "Создать реестр", true)}${button("export-template", "Создать копию существующей книги")}${button("import-file", "Сверить изменения Excel")}</div><div id="exchange-result"></div><p class="muted">Пустая ячейка не стирает данные. Для явной очистки введите [[CLEAR]]. Исходная книга сохраняется.</p>`;
+    `<div class="grid"><div class="field"><label>Период</label><input id="period" type="month" value="${period}"></div><div class="field"><label>Реестр</label>${target}</div></div><div class="toolbar" style="margin-top:20px">${button("export-new", "Создать реестр", true)}${button("export-template", "Создать копию существующей книги")}${button("import-file", "Сверить изменения Excel")}</div><div id="exchange-result"></div><p class="muted">Пустая ячейка не стирает данные. Для явной очистки введите [[CLEAR]]. Исходная книга сохраняется.</p>`;
   const write = async (use_template: boolean) => {
     const snapshot = await request("POST", "export", {
       operation_id: crypto.randomUUID(),
@@ -817,7 +820,13 @@ async function adoption() {
 async function connection() {
   state = await crm.state();
   $("view").innerHTML =
-    `<div class="help"><h2>Проверочный сценарий</h2><p>Синтетическая база хранится отдельно на этом компьютере.</p><div class="toolbar"><select id="demo-role"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option><option value="observer">Наблюдатель другой команды</option></select>${button("demo-connect", "Открыть сценарий")}</div><label class="check"><input id="offline" type="checkbox"${state.offline ? " checked" : ""}>Проверить работу без связи</label><h2 style="margin-top:30px">Отдельный пилотный сервер</h2><div class="grid"><div class="field span"><label>HTTPS-адрес</label><input id="server" placeholder="Адрес подготовленного пилотного стенда"></div><div class="field"><label>Роль входа</label><select id="remote-role"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option></select></div><div class="field"><label>Логин</label><input id="login" autocomplete="username"></div><div class="field"><label>Пароль</label><input id="password" type="password" autocomplete="current-password"></div></div><div class="actions">${button("remote-connect", "Войти", true)}</div></div>`;
+    `<div class="help"><h2>Общий пилот</h2><p>${esc(state.existingManager?.text || "Войдите в Руководитель на этом компьютере.")}</p><div class="actions">${button("existing-manager-connect", "Подключить по входу Руководителя", true)}</div>${state.connectionNotice ? `<p role="status">${esc(state.connectionNotice)}</p>` : ""}<h2 style="margin-top:30px">Проверочный сценарий</h2><p>Синтетическая база хранится отдельно на этом компьютере.</p><div class="toolbar"><select id="demo-role"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option><option value="observer">Наблюдатель другой команды</option></select>${button("demo-connect", "Открыть сценарий")}</div><label class="check"><input id="offline" type="checkbox"${state.offline ? " checked" : ""}>Проверить работу без связи</label><h2 style="margin-top:30px">Отдельный пилотный сервер</h2><div class="grid"><div class="field span"><label>HTTPS-адрес</label><input id="server" placeholder="Адрес подготовленного пилотного стенда"></div><div class="field"><label>Роль входа</label><select id="remote-role"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option></select></div><div class="field"><label>Логин</label><input id="login" autocomplete="username"></div><div class="field"><label>Пароль</label><input id="password" type="password" autocomplete="current-password"></div></div><div class="actions">${button("remote-connect", "Войти", true)}</div></div>`;
+  bind("existing-manager-connect", async () => {
+    const result = await crm.connect({action: "existing-manager"});
+    if (!result.ok) throw new Error(result.text || "Не удалось подключить общий пилот.");
+    section = "portfolio";
+    await boot();
+  });
   $<HTMLSelectElement>("demo-role").value = state.connection.role;
   $<HTMLInputElement>("offline").onchange = async () => {
     await crm.connect({

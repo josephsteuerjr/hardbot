@@ -15,6 +15,7 @@ class Principal:
     capabilities: frozenset
     employee_scope: frozenset
     timezone: str = "Europe/Samara"
+    all_contracts: bool = False
 
     @property
     def owner(self):
@@ -27,7 +28,7 @@ def require(principal, capability):
 
 
 def scoped_contracts(conn, principal):
-    if principal.owner:
+    if principal.owner or principal.all_contracts:
         return {r[0] for r in conn.execute("SELECT contract_uuid FROM crm_contracts")}
     if not principal.employee_scope:
         return set()
@@ -54,7 +55,12 @@ def contracts(conn, principal, requested, *, capability=None):
         or len(set(requested)) != len(requested)
     ):
         raise CRMError("Выберите от 1 до 100 договоров без повторов.")
-    allowed = scoped_contracts(conn, principal)
+    if principal.owner or principal.all_contracts:
+        allowed = {r[0] for r in conn.execute(
+            "SELECT contract_uuid FROM crm_contracts WHERE contract_uuid IN ("
+            + ",".join("?" for _ in requested) + ")", requested)}
+    else:
+        allowed = scoped_contracts(conn, principal)
     if not set(requested) <= allowed:
         raise CRMError(
             "Договор недоступен или назначение изменилось.", "scope_changed", 403

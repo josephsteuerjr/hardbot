@@ -4,7 +4,7 @@ import json
 import re
 import uuid
 from datetime import timedelta
-import db
+from . import storage
 from . import access, store
 from .contract import (
     CRMError,
@@ -60,7 +60,7 @@ def export(principal, body):
         raise CRMError("Не задан маршрут реестра.")
     operation = operation_id(body.get("operation_id"))
     at = now()
-    with db.connect() as conn:
+    with storage.connect() as conn:
         store.begin(conn)
         prior = store.replay(conn, principal, operation, body)
         if prior is not None:
@@ -239,7 +239,7 @@ def _snapshot(conn, principal, body):
 
 def preview(principal, body):
     access.require(principal, "exchange")
-    with db.connect() as conn:
+    with storage.connect() as conn:
         store.begin(conn)
         snapshot, changes, counts, state_hash = _snapshot(conn, principal, body)
         identifier = str(uuid.uuid4())
@@ -273,7 +273,7 @@ def apply(principal, body):
         raise CRMError("Неизвестные параметры применения.")
     operation = operation_id(body.get("operation_id"))
     at = now()
-    with db.connect() as conn:
+    with storage.connect() as conn:
         store.begin(conn)
         prior = store.replay(conn, principal, operation, body)
         if prior is not None:
@@ -391,7 +391,7 @@ def receipt(principal, body):
         "[a-f0-9]{64}", body["file_sha256"]
     ):
         raise CRMError("Некорректный SHA-256.")
-    with db.connect() as conn:
+    with storage.connect() as conn:
         store.begin(conn)
         prior = conn.execute(
             "SELECT * FROM crm_delivery_receipts WHERE receipt_id=?", (identifier,)

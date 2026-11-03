@@ -3,6 +3,7 @@
 import asyncio, base64, contextlib, json
 from aiohttp import web
 import db
+from . import storage
 from . import (
     enabled,
     access,
@@ -17,7 +18,7 @@ from . import (
 from .contract import CRMError, fields
 
 
-def install(app, host):
+def install(app, host=None, *, authenticate=None):
     if not enabled():
         return
 
@@ -32,13 +33,13 @@ def install(app, host):
                 raise CRMError(
                     "Требуется подтверждённое устройство CRM.", "identity_unmapped", 403
                 )
-            with db.connect() as conn:
+            with storage.connect() as conn:
                 p = access.from_uid(conn, uid, owner=uid == host.ADMIN_ID)
             return p
         if request.headers.get("X-Pult-Token"):
             uid, manager, names = host._manager_gate(request)
             caps = db.manager_caps(manager.get("role"), is_owner=uid == host.ADMIN_ID)
-            with db.connect() as conn:
+            with storage.connect() as conn:
                 return access.from_uid(
                     conn,
                     uid,
@@ -47,7 +48,7 @@ def install(app, host):
                     manager_write=caps["binds_edit"],
                 )
         uid, _ = host._auth(request)
-        with db.connect() as conn:
+        with storage.connect() as conn:
             return access.from_uid(conn, uid, owner=uid == host.ADMIN_ID)
 
     async def body(request, limit=4 * 1024 * 1024):
@@ -72,7 +73,7 @@ def install(app, host):
     def context(p):
         from fields import DROPDOWNS
 
-        with db.connect() as conn:
+        with storage.connect() as conn:
             cohorts = [
                 dict(r)
                 for r in conn.execute(
@@ -101,7 +102,7 @@ def install(app, host):
 
     async def handler(request):
         try:
-            p = await asyncio.to_thread(principal, request)
+            p = await authenticate(request) if authenticate is not None else await asyncio.to_thread(principal, request)
             action = request.match_info["action"]
             if request.method == "GET":
                 if action == "context":
@@ -147,6 +148,7 @@ def install(app, host):
                         else (
                             15 * 1024 * 1024
                             if action == "document"
+                            else 128 * 1024 * 1024 if action == "import-preview" and authenticate is not None
                             else 4 * 1024 * 1024
                         )
                     ),

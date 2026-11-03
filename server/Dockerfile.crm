@@ -1,0 +1,8 @@
+ARG CRM_BASE_IMAGE
+FROM ${CRM_BASE_IMAGE}
+WORKDIR /app
+COPY server/ /app/
+RUN pip install --no-cache-dir psycopg[binary]==3.3.7
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HARD_CRM_SHARED=1 HARD_CRM_PILOT=1
+USER 1000:1000
+CMD ["python", "-m", "crm.shared_server"]

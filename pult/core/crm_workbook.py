@@ -141,40 +141,42 @@ def _write_meta_openpyxl(book, metadata):
     sheet.sheet_state = "veryHidden"
     raw = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
     for i in range(0, len(raw), 30000):
-        sheet.cell(i // 30000 + 1, 1, raw[i : i + 30000])
+        sheet.append([raw[i : i + 30000]])
 
 
 def _create(snapshot, temp):
     from openpyxl import Workbook
+    from openpyxl.cell import WriteOnlyCell
     from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
 
-    book = Workbook()
-    sheet = book.active
-    sheet.title = SHEET
+    # A full general registry has millions of cells. Stream new workbooks;
+    # never retain all cells or recompute max_row after every appended row.
+    book = Workbook(write_only=True)
+    sheet = book.create_sheet(SHEET)
     keys = [f["key"] for f in snapshot["fields"]] + IDENTITY
     headers = [f["title"] for f in snapshot["fields"]] + IDENTITY
-    sheet.append(["CRM · " + snapshot["manifest"]["period"]])
-    sheet.append(headers)
-    sheet.append([f["source"] for f in snapshot["fields"]] + ["CRM"] * 4)
-    for row in snapshot["rows"]:
-        values = _values(row, keys)
-        sheet.append(values)
-        for cell in sheet[sheet.max_row]:
-            # Text storage preserves every identifier, phone, exact decimal and
-            # literal leading =,+,-,@. It never becomes an Excel formula.
-            if cell.value is not None:
-                cell.data_type = "s"
-                cell.value = str(cell.value)
-                cell.number_format = "@"
-    for cell in sheet[2]:
-        cell.font = Font(bold=True, color="613E30")
-        cell.fill = PatternFill("solid", fgColor="F3E9DD")
     sheet.freeze_panes = "D4"
-    sheet.auto_filter.ref = (
-        f"A2:{sheet.cell(max(4,sheet.max_row),len(keys)).coordinate}"
-    )
+    sheet.auto_filter.ref = f"A2:{get_column_letter(len(keys))}{max(4,len(snapshot['rows'])+3)}"
     for column in range(len(keys) - 3, len(keys) + 1):
-        sheet.column_dimensions[sheet.cell(2, column).column_letter].hidden = True
+        sheet.column_dimensions[get_column_letter(column)].hidden = True
+    def text_row(values, header=False):
+        cells = []
+        for value in values:
+            cell = WriteOnlyCell(sheet, value=None if value is None else str(value))
+            # Identifiers, exact decimals and leading =,+,-,@ remain text.
+            cell.data_type = "s"
+            cell.number_format = "@"
+            if header:
+                cell.font = Font(bold=True, color="613E30")
+                cell.fill = PatternFill("solid", fgColor="F3E9DD")
+            cells.append(cell)
+        return cells
+    sheet.append(text_row(["CRM · " + snapshot["manifest"]["period"]]))
+    sheet.append(text_row(headers, header=True))
+    sheet.append(text_row([f["source"] for f in snapshot["fields"]] + ["CRM"] * 4))
+    for row in snapshot["rows"]:
+        sheet.append(text_row(_values(row, keys)))
     metadata = _meta(
         snapshot,
         {key: i + 1 for i, key in enumerate(keys)},

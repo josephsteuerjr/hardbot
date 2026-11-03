@@ -3,7 +3,7 @@
 import json
 import uuid
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-import db
+from . import storage
 from . import access, store
 from .contract import CRMError, canonical, instant, now, operation_id
 
@@ -28,8 +28,8 @@ def command(principal, body):
     employee = body.get("employee_uuid", principal.employee_uuid)
     if employee != principal.employee_uuid and action != "correct":
         raise CRMError("Смена другого сотрудника недоступна.", "forbidden", 403)
-    with db.connect() as conn:
-        store.begin(conn)
+    with storage.connect() as conn:
+        store.begin(conn, [storage.operation_lock(principal, operation), "shift:" + str(employee)])
         prior = store.replay(conn, principal, operation, body)
         if prior is not None:
             return prior
@@ -137,7 +137,7 @@ def command(principal, body):
 def summary(principal, employee=None):
     employee = employee or principal.employee_uuid
     at = now()
-    with db.connect() as conn:
+    with storage.connect() as conn:
         access.employee(conn, principal, employee)
         rows = [
             dict(r)
@@ -213,7 +213,7 @@ def set_plan(principal, body):
         if any(start < other[1] and end > other[0] for other in parsed):
             raise CRMError("Плановые смены пересекаются.")
         parsed.append((start, end, item, start.astimezone(zone).date().isoformat()))
-    with db.connect() as conn:
+    with storage.connect() as conn:
         store.begin(conn)
         prior = store.replay(conn, principal, operation, body)
         if prior is not None:

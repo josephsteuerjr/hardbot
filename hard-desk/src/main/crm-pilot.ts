@@ -13,7 +13,11 @@ import {
 } from "./store";
 import { fetchBuffered } from "./transport";
 import * as queue from "./crm-queue";
+import { PILOT_BASE, existingManagerStatus } from "./crm-manager-login";
+import { pilotCredential } from "./crm-pilot-session";
 
+const isolatedProfile = !!process.env.HARD_USER_DATA;
+let connectionNotice = "";
 const data =
   process.env.HARD_USER_DATA ||
   join(
@@ -45,11 +49,19 @@ let currentContext: any = null,
 const sessionId = randomUUID();
 const config = () =>
   readSettings().crmConnection as
-    | { mode?: string; role?: string; server?: string }
+    | { mode?: string; role?: string; server?: string; auth?: string }
     | undefined;
+const shared = () => config()?.auth === "existing-manager" && config()?.server === PILOT_BASE;
 const demo = () => config()?.mode !== "remote";
 const role = () => config()?.role || "employee";
 const origin = () => (demo() ? "synthetic-local" : config()?.server || "");
+function forgetAuthority(message: string) {
+  owner = ""; currentContext = null; clock = null;
+  connectionNotice = message;
+  // A known revocation must not become an offline login after a later outage.
+  // Owner-scoped pending operations remain protected in their original files.
+  writeSettings({crmLast: undefined});
+}
 
 async function backendStart() {
   const home = join(data, "synthetic");
@@ -71,6 +83,10 @@ async function backendStart() {
         ...process.env,
         APP_DATA: home,
         HARD_CRM_DEMO_HOME: home,
+        HARD_CRM_SHARED: "0",
+        HARD_CRM_DATABASE_URL: "",
+        HARD_CRM_DATABASE_URL_FILE: "",
+        HARD_CRM_DOCUMENTS: "",
         HARD_CRM_ELECTRON_PID: String(process.pid),
         PYTHONIOENCODING: "utf-8",
         HARD_PULT_SETTINGS: join(home, "unused-settings.json"),
@@ -132,7 +148,7 @@ async function local(
         },
         body: JSON.stringify({ method, body, query }),
       },
-      120000,
+      action.startsWith("workbook-") ? 600000 : 120000,
     );
     const value = await response.json();
     return {
@@ -181,43 +197,35 @@ const send: queue.Transport = async (method, action, body, query) => {
       text: "Проверка офлайн: отправка приостановлена.",
     };
   if (demo()) return local(action, body, query, method);
-  const base = origin(),
-    token = role() === "employee" ? readFieldToken() : readToken();
-  if (!base || !token)
-    return { ok: false, status: 401, text: "Войдите в пилотный сервер." };
+  const base = origin();
   try {
-    const url = new URL("/api/crm/" + action, base);
-    for (const [key, value] of Object.entries(query || {}))
-      if (value != null) url.searchParams.set(key, String(value));
-    const response = await fetchBuffered(
-      (target, init) => net.fetch(target, init),
-      url.toString(),
-      {
-        method,
-        headers: {
-          [role() === "employee" ? "X-App-Token" : "X-Pult-Token"]: token,
-          "Content-Type": "application/json",
-          "X-Client-Version": app.getVersion(),
-          "X-Work-Product": "hard",
-        },
-        body: method === "POST" ? JSON.stringify(body || {}) : undefined,
+    const previous = readSettings().crmLast as any;
+    const expected = currentContext?.employee_uuid || (previous?.origin === base ? previous.context?.employee_uuid : undefined);
+    let token = shared() ? await pilotCredential(expected) : role() === "employee" ? readFieldToken() : readToken();
+    if (!base || !token) return {ok: false, status: 401, text: "Войдите в пилотный сервер."};
+    const url = new URL(shared() ? PILOT_BASE + "/api/crm/" + action : "/api/crm/" + action, base);
+    for (const [key, value] of Object.entries(query || {})) if (value != null) url.searchParams.set(key, String(value));
+    const request = (credential: string) => fetchBuffered((target, init) => net.fetch(target, init), url.toString(), {
+      method,
+      headers: {
+        ...(shared() ? {Authorization: "Bearer " + credential} : {[role() === "employee" ? "X-App-Token" : "X-Pult-Token"]: credential}),
+        "Content-Type": "application/json", "X-Client-Version": app.getVersion(), "X-Work-Product": "hard",
       },
-      30000,
-    );
-    const value = await response.json();
-    return {
-      ok: response.ok,
-      status: response.status,
-      data: value,
-      text: value.text || value.error,
-    };
-  } catch {
-    return {
-      ok: false,
-      status: 0,
-      kind: "offline",
-      text: "Нет подтверждённой связи с пилотным сервером.",
-    };
+      body: method === "POST" ? JSON.stringify(body || {}) : undefined,
+    }, ["export", "import-preview", "import-apply"].includes(action) ? 120000 : 30000);
+    let response = await request(token), value = await response.json();
+    if (shared() && response.status === 401 && value.error === "pilot_session_expired") {
+      token = await pilotCredential(expected, true);
+      response = await request(token); value = await response.json();
+    }
+    if (shared() && (response.status === 401 || (response.status === 403 &&
+        ["manager_required", "identity_unmapped", "pilot_session_invalid"].includes(value.error))))
+      forgetAuthority(value.text || "Сервер отозвал доступ к пилоту.");
+    return {ok: response.ok, status: response.status, data: value, text: value.text || value.error};
+  } catch (error) {
+    const status = Number((error as any)?.status || 0);
+    if (shared() && (status === 401 || status === 403)) forgetAuthority(String((error as Error).message));
+    return {ok: false, status, kind: status ? "auth" : "offline", text: status ? String((error as Error).message) : "Нет подтверждённой связи с пилотным сервером. Проверьте вход Руководителя и подключение к сети."};
   }
 };
 
@@ -239,6 +247,8 @@ async function identify() {
       installation_id: queue.installation(),
     });
     clock = anchor.ok ? { ...anchor.data, monotonic: performance.now() } : null;
+  } else if (result.status === 401 || result.status === 403) {
+    forgetAuthority(result.text || "Сервер не подтвердил доступ.");
   } else {
     const previous = readSettings().crmLast as any;
     if (previous?.origin === origin() && previous?.role === role()) {
@@ -297,6 +307,10 @@ async function recoverExports() {
         );
       job.completed = true;
       job.sha256 = result.data.sha256;
+      // The exact receipt is already durably queued. Retain its manifest and
+      // proof, without accumulating full completed registry copies locally.
+      job.manifest = job.snapshot.manifest;
+      delete job.snapshot;
       delete job.error;
       queue.draft(authority, "exports", jobs);
     }
@@ -337,6 +351,12 @@ app
       return net.fetch(pathToFileURL(path).toString());
     });
     await backendStart();
+    if (!config() && app.isPackaged && !isolatedProfile && existingManagerStatus().available) {
+      try {
+        await pilotCredential();
+        writeSettings({crmConnection: {mode: "remote", role: "manager", server: PILOT_BASE, auth: "existing-manager"}});
+      } catch { connectionNotice = "Общий пилот пока недоступен. Повторите подключение через сохранённый вход Руководителя."; }
+    }
     await identify();
     win = new BrowserWindow({
       width: 1320,
@@ -366,8 +386,11 @@ app
         mode: demo() ? "synthetic" : "remote",
         role: role(),
         server: origin(),
+        shared: shared(),
       },
       context: currentContext,
+      existingManager: existingManagerStatus(),
+      connectionNotice,
       offline,
       owner,
       installation_id: queue.installation(),
@@ -379,7 +402,7 @@ app
           throw new Error("Используйте защищённую очередь.");
         const authority = owner,
           result = await send(method, action, body, query);
-        if (authority !== owner)
+        if (authority !== owner && result.ok)
           return { ok: false, status: 409, text: "Учётная запись изменилась." };
         const key = action + JSON.stringify(query || {});
         if (result.ok && method === "GET" && owner)
@@ -485,7 +508,11 @@ app
         offline = !!input.value;
         return { ok: true };
       }
-      if (input?.mode === "synthetic") {
+      if (input?.action === "existing-manager") {
+        await pilotCredential(undefined, true);
+        writeSettings({crmConnection: {mode: "remote", role: "manager", server: PILOT_BASE, auth: "existing-manager"}, crmLast: undefined});
+        connectionNotice = "";
+      } else if (input?.mode === "synthetic") {
         if (!["employee", "manager", "observer"].includes(input.role))
           throw new Error("Неизвестная роль.");
         writeSettings({
@@ -611,7 +638,7 @@ app
               throw new Error("Не совпадает контрольная сумма документа.");
           } else {
             if (offline) throw new Error("Для загрузки документа нужна связь.");
-            const token =
+            const token = shared() ? await pilotCredential(currentContext?.employee_uuid) :
               role() === "employee" ? readFieldToken() : readToken();
             const response = await fetchBuffered(
               (url, init) => net.fetch(url, init),
@@ -620,8 +647,7 @@ app
                 encodeURIComponent(documentId),
               {
                 headers: {
-                  [role() === "employee" ? "X-App-Token" : "X-Pult-Token"]:
-                    token || "",
+                  ...(shared() ? {Authorization: "Bearer " + token} : {[role() === "employee" ? "X-App-Token" : "X-Pult-Token"]: token || ""}),
                 },
               },
               30000,

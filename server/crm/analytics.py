@@ -4,7 +4,7 @@ from datetime import timedelta
 import json
 import math
 import uuid
-import db
+from . import storage
 from . import access, store
 from .contract import CRMError, USEFUL, canonical, digest, instant, now, operation_id
 
@@ -13,8 +13,8 @@ USEFUL_KINDS = USEFUL | {"script_publish", "manager_review"}
 
 
 def aggregate(limit=500, *, rebuild=False):
-    with db.connect() as conn:
-        store.begin(conn)
+    with storage.connect() as conn:
+        store.begin(conn, None if rebuild else ["metrics"])
         if rebuild:
             conn.execute("DELETE FROM crm_metric_facts")
             conn.execute("UPDATE crm_outbox SET state='pending',processed_at=NULL")
@@ -31,7 +31,7 @@ def aggregate(limit=500, *, rebuild=False):
                 else row["received_at"]
             )
             conn.execute(
-                "INSERT OR REPLACE INTO crm_metric_facts VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO crm_metric_facts VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(event_id) DO NOTHING",
                 (
                     row["event_id"],
                     row["employee_uuid"],
@@ -94,7 +94,7 @@ def configure_cohort(principal, body):
             or not 0 <= value <= (366 if key == "minimum_workdays" else 1)
         ):
             raise CRMError("Некорректный порог.")
-    with db.connect() as conn:
+    with storage.connect() as conn:
         store.begin(conn)
         prior = store.replay(conn, principal, operation, body)
         if prior is not None:
@@ -205,7 +205,7 @@ def report(principal, body):
         raise CRMError("Выберите период до 366 дней.")
     if body.get("feature") and body["feature"] not in USEFUL_KINDS | {"report"}:
         raise CRMError("Неизвестная функция.")
-    with db.connect() as conn:
+    with storage.connect() as conn:
         cohort = conn.execute(
             "SELECT * FROM crm_cohorts WHERE cohort_id=?", (body.get("cohort_id"),)
         ).fetchone()

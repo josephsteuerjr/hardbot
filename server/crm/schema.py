@@ -130,10 +130,21 @@ CREATE TABLE IF NOT EXISTS crm_documents(
 CREATE TABLE IF NOT EXISTS crm_scripts(
  team_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, draft_json TEXT,
  published_json TEXT, published_revision INTEGER, published_at TEXT, author_uid INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS crm_registry_sources(
+ source_id TEXT PRIMARY KEY, workbook_sha256 TEXT NOT NULL, rows_sha256 TEXT NOT NULL,
+ sheet TEXT NOT NULL, imported_at TEXT NOT NULL, row_count INTEGER NOT NULL, receipt_json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS crm_registry_rows(
+ contract_uuid TEXT PRIMARY KEY REFERENCES crm_contracts,
+ source_id TEXT NOT NULL REFERENCES crm_registry_sources, source_row INTEGER NOT NULL,
+ record_json TEXT NOT NULL);
 """
 
 
 def initialize(conn):
+    from . import storage
+    if storage.is_postgres(conn):
+        from .postgres_schema import initialize as pg_initialize
+        return pg_initialize(conn)
     # executescript would commit an enclosing legacy transaction; execute each
     # complete SQL statement instead, including trigger bodies.
     import sqlite3

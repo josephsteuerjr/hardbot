@@ -113,7 +113,7 @@ def test_analytics_worker_failure_cannot_lose_committed_business(
             return self.conn.__exit__(*args)
 
         def execute(self, sql, *args):
-            if sql.startswith("INSERT OR REPLACE INTO crm_metric_facts"):
+            if sql.startswith("INSERT INTO crm_metric_facts"):
                 raise sqlite3.OperationalError("Synthetic projection unavailable")
             return self.conn.execute(sql, *args)
 

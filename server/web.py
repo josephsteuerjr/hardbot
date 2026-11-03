@@ -5010,7 +5010,8 @@ def _link_code(raw: str) -> str:
 def _device_me(uid: int, mgr: dict) -> dict:
     owner = uid == ADMIN_ID
     import access_policy
-    return {"me": {"name": mgr.get("name") or "",
+    return {"subject": {"type": "manager", "actor_uid": int(uid)},
+            "me": {"name": mgr.get("name") or "",
                    "role": "full" if owner else db.manager_role(mgr.get("role")),
                    "direction": mgr.get("direction") or "",
                    "office_cities": mgr.get("office_cities") or [],

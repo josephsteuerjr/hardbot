@@ -313,7 +313,8 @@ def serve():
             ):
                 return self.reply({"error": "forbidden"}, 403)
             size = int(self.headers.get("Content-Length") or 0)
-            if size > 16 * 1024 * 1024:
+            limit = 128 * 1024 * 1024 if self.path in {"/crm/workbook-write", "/crm/workbook-resume"} else 16 * 1024 * 1024
+            if size < 0 or size > limit:
                 return self.reply({"error": "size"}, 413)
             try:
                 body = json.loads(self.rfile.read(size) or b"{}")

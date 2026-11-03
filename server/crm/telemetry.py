@@ -2,7 +2,7 @@
 
 import re
 from datetime import timedelta
-import db
+from . import storage
 from . import store, access
 from .contract import CRMError, canonical, digest, instant, now, operation_id
 
@@ -126,8 +126,8 @@ def ingest(principal, body):
                 raw["occurred_at"]
             )  # Untrusted: never used as attendance or business time.
         items.append(raw)
-    with db.connect() as conn:
-        store.begin(conn)
+    with storage.connect() as conn:
+        store.begin(conn, ["telemetry:" + str(principal.actor_uid)])
         cutoff = (instant(at) - timedelta(minutes=1)).isoformat()
         count = conn.execute(
             "SELECT COUNT(*) FROM crm_telemetry WHERE actor_uid=? AND received_at>=?",
@@ -190,13 +190,13 @@ def prune(principal, days):
     if type(days) is not int or not 30 <= days <= 365:
         raise CRMError("Срок сырых технических событий: от 30 до 365 дней.")
     cutoff = (instant(now()) - timedelta(days=days)).isoformat()
-    with db.connect() as conn:
+    with storage.connect() as conn:
         store.begin(conn)
         count = conn.execute(
             "DELETE FROM crm_telemetry WHERE received_at<?", (cutoff,)
         ).rowcount
         conn.execute(
-            "INSERT OR REPLACE INTO crm_meta VALUES('telemetry_retained_since',?)",
+            "INSERT INTO crm_meta VALUES('telemetry_retained_since',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (cutoff,),
         )
         store.audit(
