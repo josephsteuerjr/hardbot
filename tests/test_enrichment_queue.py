@@ -41,7 +41,7 @@ class Ledger:
   assert path=='/admin/enrichment/ledger.json'
   self.posts.append(copy.deepcopy(body))
   for entry in body['entries']:
-   self.books.setdefault(enrich.book_key(entry['file']),{}).setdefault(entry['contract_id'],{})[entry['key']]={'value':entry['value'],'at':'2026-11-01T00:00:00Z'}
+   self.books.setdefault(enrich.book_key(entry['file']),{}).setdefault(entry['contract_id'],{})[entry['key']]={'value':entry['value'],'at':'2026-11-01T00:00:00Z','visit_date':entry.get('visit_date') or '', 'responsible':entry.get('responsible') or '', 'receipt_digest':body.get('receipt_digest') or ''}
   if self.lose_reply:self.lose_reply=False;raise TimeoutError('Synthetic reply lost after commit')
   return {'recorded':len(body['entries'])}
 
@@ -109,6 +109,34 @@ def test_lost_ledger_response_is_checked_without_rewriting_workbook(tmp_path,mon
  assert state['state']=='done' and len(writes)==1 and len(ledger.posts)==1
  before=file_sha(job['path']);assert Service(tmp_path/'queue',lambda:'owner',ledger).process()['state']=='done'
  assert file_sha(job['path'])==before and len(writes)==1 and len(ledger.posts)==1
+
+
+@pytest.mark.parametrize('newer',[False,True])
+def test_same_values_from_another_receipt_do_not_acknowledge_this_operation(tmp_path,monkeypatch,newer):
+ class Interrupted(Ledger):
+  def __init__(self):super().__init__();self.attempts=0
+  def __call__(self,method,path,body=None,timeout=120):
+   if method=='POST':
+    self.attempts+=1
+    if self.attempts==1:
+     for e in body['entries']:
+      self.books.setdefault(enrich.book_key(e['file']),{}).setdefault(e['contract_id'],{})[e['key']]={
+       'value':e['value'],'visit_date':'2026-10-01','responsible':e['responsible'],
+       'receipt_digest':'another-operation','at':'2099-01-01T00:00:00Z' if newer else '2026-10-01T00:00:00Z'}
+     raise TimeoutError('No acknowledgement of current receipt')
+   return super().__call__(method,path,body,timeout)
+ ledger=Interrupted();job,fields=fixture(tmp_path)
+ original=enrich._replace_on_share;writes=[]
+ def publish(*args):writes.append(args);return original(*args)
+ monkeypatch.setattr(enrich,'_replace_on_share',publish)
+ service=Service(tmp_path/'queue',lambda:'owner',ledger)
+ state=service.submit('different-receipt',[job],fields,'01.11.2026','01.11.2026',[])
+ assert len(writes)==1
+ if newer:
+  assert state['state']=='attention' and ledger.attempts==1
+  assert not state['books'][0].get('ledger_ack')
+ else:
+  assert state['state']=='done' and ledger.attempts==2
 
 
 def test_crash_after_atomic_replace_recovers_provenance_and_does_not_republish(tmp_path,monkeypatch):

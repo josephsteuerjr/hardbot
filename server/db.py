@@ -932,7 +932,8 @@ def init_db() -> None:
                           ("received_at", "TEXT"), ("fill_seconds", "INTEGER"),
                           ("saved_at", "TEXT"), ("session_id", "TEXT"),
                           ("evidence_level", "TEXT"), ("evidence", "TEXT"),
-                          ("employee", "TEXT")):
+                          ("employee", "TEXT"), ("request_hash", "TEXT"),
+                          ("values_json", "TEXT"), ("contracts_json", "TEXT")):
             if col not in vcols:
                 conn.execute(f"ALTER TABLE visits ADD COLUMN {col} {decl}")
         # employee — КТО выезжал (ФИО, от чьего имени закрыт визит). Без неё выезд
@@ -1166,6 +1167,12 @@ def init_db() -> None:
               file_path TEXT NOT NULL, value TEXT NOT NULL, visit_date TEXT,
               responsible TEXT, delivered_at TEXT NOT NULL, receipt_digest TEXT,
               PRIMARY KEY (contract_id, field_key, file_path)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS enrichment_receipts (
+              receipt_digest TEXT PRIMARY KEY, request_hash TEXT NOT NULL,
+              recorded INTEGER NOT NULL, recorded_at TEXT NOT NULL
             )
         """)
         # Мигрируем только доказанную последнюю доставку в конкретную книгу.
@@ -5924,6 +5931,12 @@ def save_visit_result(contract_id: str, agent_id: int, employee: str | None,
                       values: dict, payload: str, **journal) -> bool:
     """One transaction for ownership, idempotence, current fields and provenance."""
     notification = journal.pop("notification", None)
+    request_hash = journal.pop("request_hash", None) or _json_digest({
+        "contract_id": contract_id, "agent_id": agent_id, "employee": employee,
+        "values": values, "payload": payload,
+        "journal": {k: v for k, v in journal.items()
+                    if k not in {"dist_m", "geo_far", "evidence", "evidence_level"}},
+    })
     day = journal.get("on_date") or workday.today().isoformat()
     event_at = journal.get("saved_at") or datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     op_id = journal.get("op_id")
@@ -5932,15 +5945,24 @@ def save_visit_result(contract_id: str, agent_id: int, employee: str | None,
         rep = conn.execute("SELECT * FROM clients WHERE contract_id=?", (contract_id,)).fetchone()
         if not rep or (rep["responsible"] or "") != (employee or ""):
             raise ValueError("Закрепление изменилось. Обновите портфель")
-        prior = conn.execute("SELECT contract_id,agent_id FROM visits WHERE op_id=?", (op_id,)).fetchone() if op_id else None
+        prior = conn.execute("SELECT contract_id,agent_id,request_hash FROM visits WHERE op_id=?", (op_id,)).fetchone() if op_id else None
         if prior:
             if prior["contract_id"] != contract_id or prior["agent_id"] != agent_id:
                 raise ValueError("op_id принадлежит другому выезду")
+            if not prior["request_hash"]:
+                raise ValueError("Выезд уже сохранён, но полный состав старой операции неизвестен. Сверьте сохранённый результат")
+            if prior["request_hash"] != request_hash:
+                raise ValueError("Идентификатор уже использован для другого результата выезда")
             return False
         candidates = conn.execute("SELECT * FROM clients WHERE client IS ? AND IFNULL(responsible,'')=IFNULL(?, '')",
                                   (rep["client"], rep["responsible"])).fetchall()
         contracts = [r for r in candidates if person_key(r) == person_key(rep)]
         is_new = log_visit(contract_id, agent_id, payload, employee=employee, _conn=conn, **journal)
+        if is_new:
+            conn.execute("UPDATE visits SET request_hash=?, values_json=?, contracts_json=? "
+                         "WHERE id=last_insert_rowid()",
+                         (request_hash, _canonical_json(values),
+                          _canonical_json([r["contract_id"] for r in contracts])))
         newer = any((r["bot_visit_event_at"] or (r["bot_visit_at"] + "T00:00:00" if r["bot_visit_at"] else "")) > event_at
                     or (r["bot_visit_at"] or "") > day for r in contracts)
         if is_new and not newer:
@@ -6017,7 +6039,7 @@ def save_call_result(contract_id: str, agent_id: int, employee: str,
                 raise ValueError("Карточка изменилась. Обновите её и сверьте ввод перед повтором")
         last = conn.execute("SELECT * FROM calls WHERE contract_id=? AND created_at=? "
                             "ORDER BY id DESC LIMIT 1", (contract_id, on_date)).fetchone()
-        if last and last["employee"] == employee and last["values_json"] == encoded:
+        if not op_id and last and last["employee"] == employee and last["values_json"] == encoded:
             previous_ms = evidence.to_ms(last["saved_at"] or last["received_at"])
             current_ms = evidence.to_ms(event_at)
             if previous_ms is not None and current_ms is not None and 0 <= current_ms - previous_ms <= 4000:
@@ -7592,7 +7614,7 @@ def enrichment_ledger(employees: list[str] | None = None) -> dict[str, dict]:
     with connect() as conn:
         rows = conn.execute(
             "SELECT contract_id, field_key, value, visit_date, responsible, "
-            "delivered_at FROM enrichment_ledger ORDER BY contract_id, field_key"
+            "delivered_at, receipt_digest FROM enrichment_ledger ORDER BY contract_id, field_key"
         ).fetchall()
     out: dict[str, dict] = {}
     for r in rows:
@@ -7603,6 +7625,7 @@ def enrichment_ledger(employees: list[str] | None = None) -> dict[str, dict]:
             "visit_date": r["visit_date"] or "",
             "at": r["delivered_at"],
             "responsible": r["responsible"] or "",
+            "receipt_digest": r["receipt_digest"] or "",
         }
     return out
 
@@ -7618,8 +7641,17 @@ def enrichment_book_ledger(employees: list[str] | None = None) -> dict:
         path = str(r["file_path"]).replace("\\", "/").casefold()
         out.setdefault(path, {}).setdefault(r["contract_id"], {})[r["field_key"]] = {
             "value": r["value"], "visit_date": r["visit_date"] or "",
-            "at": r["delivered_at"], "responsible": r["responsible"] or ""}
+            "at": r["delivered_at"], "responsible": r["responsible"] or "",
+            "receipt_digest": r["receipt_digest"] or ""}
     return out
+
+
+def enrichment_receipt(receipt_digest: str) -> dict | None:
+    """Immutable acknowledgement, independent of later deliveries to the same cells."""
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM enrichment_receipts WHERE receipt_digest=?",
+                           (str(receipt_digest),)).fetchone()
+    return dict(row) if row else None
 
 
 def record_enrichment_deliveries(entries: list, receipt_digest: str = "") -> int:
@@ -7628,7 +7660,9 @@ def record_enrichment_deliveries(entries: list, receipt_digest: str = "") -> int
     реестра не осталась записанной."""
     if not isinstance(entries, list):
         raise ValueError("entries должен быть списком")
-    digest = str(receipt_digest or "").strip()[:128]
+    digest = str(receipt_digest or "").strip()
+    if len(digest) > 128:
+        raise ValueError("Идентификатор квитанции слишком длинный")
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     prepared: list[tuple] = []
     for i, e in enumerate(entries):
@@ -7653,9 +7687,18 @@ def record_enrichment_deliveries(entries: list, receipt_digest: str = "") -> int
             str(e.get("file") or e.get("file_path") or "")[:1000],
             now, digest,
         ))
-    if not prepared:
-        return 0
+    request_hash = _json_digest(sorted([(*r[:5], str(r[5]).replace("\\", "/").casefold())
+                                       for r in prepared]))
     with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if digest:
+            previous = conn.execute("SELECT * FROM enrichment_receipts WHERE receipt_digest=?", (digest,)).fetchone()
+            if previous:
+                if previous["request_hash"] != request_hash:
+                    raise ValueError("Квитанция уже использована для другого состава доставки")
+                return previous["recorded"]
+        if not prepared:
+            return 0
         conn.executemany(
             "INSERT INTO enrichment_ledger (contract_id, field_key, value, "
             "visit_date, responsible, file_path, delivered_at, receipt_digest) "
@@ -7676,6 +7719,9 @@ def record_enrichment_deliveries(entries: list, receipt_digest: str = "") -> int
             "delivered_at=excluded.delivered_at, receipt_digest=excluded.receipt_digest",
             [(*r[:5], str(r[5]).replace("\\", "/").casefold(), *r[6:]) for r in prepared if r[5]],
         )
+        if digest:
+            conn.execute("INSERT INTO enrichment_receipts VALUES (?,?,?,?)",
+                         (digest, request_hash, len(prepared), now))
         conn.commit()
     return len(prepared)
 

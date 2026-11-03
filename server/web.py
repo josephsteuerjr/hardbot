@@ -2189,6 +2189,7 @@ async def _save(request: web.Request) -> web.Response:
                                                 on_date=completed_at)
         try:
             is_new = await asyncio.to_thread(db.save_visit_result, rep, uid, row["responsible"], values, payload,
+                              request_hash=db._json_digest(body),
                               op_id=op_id, lat=vlat, lon=vlon, dist_m=dist_m,
                               geo_far=geo_far, on_date=completed_at,
                               fill_seconds=_fill_seconds(body),
@@ -6949,6 +6950,7 @@ async def _admin_enrichment_ledger(request: web.Request) -> web.Response:
         return web.json_response({
             "data_exchange_contract": DATA_EXCHANGE_CONTRACT,
             "ledger": ledger,
+            **({"receipt": db.enrichment_receipt(request.query["receipt_digest"])} if request.query.get("receipt_digest") else {}),
             **({"books": db.enrichment_book_ledger(employees or None)} if request.query.get("books") == "1" else {}),
             "count": sum(len(v) for v in ledger.values()),
         })

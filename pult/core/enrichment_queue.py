@@ -211,10 +211,15 @@ class Service:
         run['state']='attention';self.store.save(run)
         return self.view(run)
 
-    def _ledger(self, jobs):
+    def _ledger(self, jobs, receipt_digest=None):
         from . import enrichment as en
-        answer = self.admin('GET', en.ledger_query([j['employee'] for j in jobs])+'&books=1', timeout=120) or {}
-        return {**dict(answer.get('ledger') or {}), '_books':dict(answer.get('books') or {})}
+        from urllib.parse import quote
+        query = en.ledger_query([j['employee'] for j in jobs])+'&books=1'
+        if receipt_digest:
+            query += '&receipt_digest=' + quote(receipt_digest, safe='')
+        answer = self.admin('GET', query, timeout=120) or {}
+        return {**dict(answer.get('ledger') or {}), '_books':dict(answer.get('books') or {}),
+                '_receipt':answer.get('receipt')}
 
     def _attention(self, run, item, message,reason='error'):
         item.update(state='attention', message=str(message),reason_code=reason, next_retry=time.time()+RETRY_SECONDS)
@@ -362,9 +367,18 @@ class Service:
         if result.get('written_unverified'):
             self._attention(run,item,'Не завершена проверка записанного файла; повторная запись запрещена.');return
         if entries and not item.get('ledger_ack'):
-            ledger=self._ledger([inputs['jobs'][item['ordinal']]])
+            receipt_digest=file_sha(result['receipt'])
+            ledger=self._ledger([inputs['jobs'][item['ordinal']]],receipt_digest)
             values=enrich.ledger_for_book(ledger,item['file'])
-            if all((values.get(e['contract_id'],{}).get(e['key']) or {}).get('value')==e['value'] for e in entries):
+            receipt=ledger.get('_receipt') or {}
+            exact_receipt=receipt.get('receipt_digest')==receipt_digest and receipt.get('recorded')==len(entries)
+            exact_entries=all(
+                (actual:=values.get(e['contract_id'],{}).get(e['key']) or {}).get('receipt_digest')==receipt_digest
+                and actual.get('value')==e['value']
+                and str(actual.get('visit_date') or '')==str(e.get('visit_date') or '')
+                and str(actual.get('responsible') or '')==str(e.get('responsible') or '')
+                for e in entries)
+            if exact_receipt or exact_entries:
                 item['ledger_ack']={'recorded':len(entries),'reconciled':True}
             else:
                 # Never overwrite a later delivery from another operator.
@@ -373,7 +387,7 @@ class Service:
                     actual=values.get(entry['contract_id'],{}).get(entry['key']) or {}
                     try:newer=datetime.fromisoformat(str(actual.get('at') or '').replace('Z','+00:00')).timestamp()>run['created']
                     except ValueError:newer=False
-                    if newer and actual.get('value')!=entry['value']:
+                    if newer and actual.get('receipt_digest')!=receipt_digest:
                         self._attention(run,item,'Историю доставки уже изменил другой перенос. Старая квитанция автоматически не отправляется.');return
                 if file_sha(item['file'])!=result.get('post_sha256'):
                     self._attention(run,item,'Книга изменилась, а подтверждение истории доставки отсутствует. Требуется проверка квитанции.');return
