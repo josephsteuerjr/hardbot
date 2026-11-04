@@ -53,3 +53,28 @@ def test_two_manager_sessions_share_data_preserve_authors_and_obey_revocation(cr
     with storage.connect() as conn:
         assert [r[0] for r in conn.execute('SELECT actor_uid FROM crm_events ORDER BY sequence')] == [101,202]
         assert conn.execute('SELECT COUNT(*) FROM crm_commands').fetchone()[0] == 2
+
+
+def test_second_bulk_request_is_busy_before_parsing_another_large_body(crm_world, monkeypatch):
+    import threading
+    from crm import exchange
+    entered,release=threading.Event(),threading.Event()
+    def export(principal,body):
+        entered.set()
+        assert release.wait(timeout=5)
+        return {'ok':True}
+    class Auth:
+        async def authenticate(self,request):return crm_world['owner']
+    monkeypatch.setattr(exchange,'export',export)
+    async def scenario():
+        async with TestClient(TestServer(shared_server.create_app(sessions=Auth()))) as client:
+            first=asyncio.create_task(client.post('/api/crm/export',json={}))
+            try:
+                assert await asyncio.to_thread(entered.wait,3)
+                second=await client.post('/api/crm/import-preview',data=b'not JSON')
+                assert second.status==503 and (await second.json())['error']=='bulk_busy'
+                assert second.headers['Retry-After']=='5'
+            finally:release.set()
+            response=await first
+            assert response.status==200
+    asyncio.run(scenario())

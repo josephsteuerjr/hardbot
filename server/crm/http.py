@@ -264,6 +264,10 @@ def install(app, host=None, *, authenticate=None):
         if authenticate is not None and request.match_info['action'] in {
             'export', 'import-preview', 'import-apply'
         }:
+            if bulk_lock.locked():
+                return web.json_response(dict(error='bulk_busy',
+                    text='Выполняется обмен реестром. Повторите запрос после его завершения.'),
+                    status=503, headers={'Retry-After': '5'})
             async with bulk_lock:
                 return await handler(request)
         return await handler(request)
