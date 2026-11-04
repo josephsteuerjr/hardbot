@@ -68,7 +68,9 @@ CASES = [function for module in (core, exchange_cases, adoption_cases, rebuild_c
          for name, function in vars(module).items()
          if name.startswith('test_') and callable(function)
          and set(inspect.signature(function).parameters) == {'crm_world'}
-         and 'immutable' not in name]
+         # The SQLite-specific assertion expects sqlite3.IntegrityError. Its
+         # actual PG counterpart below also verifies TRUNCATE is rejected.
+         and name != 'test_history_cannot_be_mutated_or_deleted']
 
 
 @pytest.mark.parametrize('case', CASES, ids=lambda case: case.__name__)
@@ -171,3 +173,16 @@ def test_failed_projection_rolls_back_event_outbox_and_ack(pg_world):
 
 def test_parameters_preserve_literal_question_percent_and_quotes():
     assert storage.parameters("SELECT '?' AS q, '%' AS p, 'it''s?' AS s WHERE x=?") == "SELECT '?' AS q, '%%' AS p, 'it''s?' AS s WHERE x=%s"
+
+
+def test_postgres_portfolio_exact_totals_search_and_empty_scope(pg_world):
+    from dataclasses import replace
+    w = pg_world
+    full = replace(w['member'], all_contracts=True)
+    portfolio = store.portfolio(full)
+    assert portfolio['total_contracts'] == 2 and portfolio['total_people'] == 1
+    assert portfolio['people'][0]['currencies'] == {'RUB': '246.90'}
+    assert store.portfolio(full, 'DUPLICATE')['total_contracts'] == 2
+    assert store.portfolio(full, 'No matching person')['total_contracts'] == 0
+    outsider = replace(w['member'], employee_scope=frozenset())
+    assert store.portfolio(outsider)['total_contracts'] == 0
