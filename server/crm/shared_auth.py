@@ -67,7 +67,8 @@ class Authority:
     async def __call__(self, token):
         try:
             async with self.session.get(self.url, headers={'X-Pult-Token': token,
-                    'X-Client-Version': '3.3.0-pilot.2', 'X-Work-Product': 'manager'},
+                    'X-Client-Version': '3.3.0-pilot.2', 'X-Work-Product': 'crm',
+                    'X-Client-Runtime': 'crm-identity-bridge'},
                     timeout=aiohttp.ClientTimeout(total=8), allow_redirects=False) as response:
                 if response.status in {401, 403, 410}:
                     raise fault('manager_required', 403)

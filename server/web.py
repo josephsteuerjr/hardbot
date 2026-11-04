@@ -7834,10 +7834,9 @@ async def _account_client_policy(request,handler):
         await _observe_client_version(request)
     strict=await asyncio.to_thread(account_policy.strict) if protected else False
     if protected and strict:
-        try:
-            version=tuple(int(x) for x in request.headers.get('X-Client-Version','').split('.'))
-        except ValueError: version=()
-        if len(version)!=3 or version<(3,2,0):
+        import client_versions
+        version=client_versions.protocol_version(request.headers.get('X-Client-Version',''))
+        if version is None or version<(3,2,0):
             # Retired installed queues can discard an item on any 4xx. Reject
             # their writes before auth/body handling with a transient status,
             # preserving the unposted evidence until the client is upgraded.

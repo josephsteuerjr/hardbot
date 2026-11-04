@@ -45,6 +45,14 @@ def strict(world):
     assert account_policy.strict()
 
 
+def test_prerelease_protocol_still_runs_auth_and_old_clients_keep_queued_writes(world):
+    strict(world)
+    assert http('GET','/api/manager/device/me',{'X-Client-Version':'3.3.0-pilot.2'})[0] == 401
+    assert http('GET','/api/manager/device/me',{'X-Client-Version':'3.1.9-pilot.2'})[0] == 426
+    assert http('POST','/api/save',{'X-Client-Version':'3.1.9-pilot.2'},body={})[0] == 503
+    assert http('GET','/api/manager/device/me',{'X-Client-Version':'3.3.0/invalid'})[0] == 426
+
+
 def http(method, path, headers=None, body=None):
     async def run():
         async with TestClient(TestServer(web.build_app(None))) as client:

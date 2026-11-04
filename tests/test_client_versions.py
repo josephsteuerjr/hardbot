@@ -15,6 +15,20 @@ NATIVE = {'X-Client-Version': '3.2.7', 'X-Work-Product': 'manager',
           'User-Agent': 'Synthetic Electron/39.0.0'}
 
 
+@pytest.mark.parametrize('raw,expected', [('3.2.0',(3,2,0)),('3.3.0-pilot.2',(3,3,0)),
+                                        ('3.3.0+build.1',(3,3,0)),('3.1.99-beta',(3,1,99)),
+                                        ('3.3',None),('3.3.0/invalid',None),('',None)])
+def test_wire_version_understands_valid_suffixes_without_relaxing_format(raw, expected):
+    assert client_versions.protocol_version(raw) == expected
+
+
+def test_crm_identity_bridge_is_recorded_separately_from_installed_manager():
+    info=client_versions.metadata({'X-Client-Version':'3.3.0-pilot.2','X-Work-Product':'crm',
+                                  'X-Client-Runtime':'crm-identity-bridge'})
+    assert info['client_version']=='3.3.0-pilot.2'
+    assert info['product']=='crm' and info['source']=='compatibility'
+
+
 @pytest.fixture(params=['agent', 'manager'])
 def world(tmp_path, monkeypatch, request):
     monkeypatch.setattr(db, 'DB_PATH', tmp_path / 'versions.db')

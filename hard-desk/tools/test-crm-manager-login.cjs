@@ -58,6 +58,17 @@ async function check(name, fn) {await fn(); checks.push(name);}
     fs.writeFileSync(keyFile, dpapi.directSeal(credential));
     assert.equal(login.readExistingManagerSession().credential, credential);
   });
+  await check('Former project origin and explicit default HTTPS port reuse local login only', () => {
+    for (const server of ['https://rim-borso.duckdns.org','https://hard.rimborso.ru:443/']) {
+      writeSettings({...settings,server});
+      assert.equal(login.readExistingManagerSession().credential,credential);
+    }
+    for (const server of ['https://hard.rimborso.ru/other','https://other@hard.rimborso.ru','https://hard.rimborso.ru/?token=not-allowed','http://rim-borso.duckdns.org']) {
+      writeSettings({...settings,server});
+      assert.throws(() => login.readExistingManagerSession(), e => e.code==='authority_mismatch');
+    }
+    writeSettings(settings);
+  });
   await check('Wrong Windows key, corrupted ciphertext and untrusted authority fail closed', () => {
     chromium();
     assert.throws(() => login.readExistingManagerSession(profile, () => {throw Error('different user');}), e => e.code === 'windows_login_unavailable');

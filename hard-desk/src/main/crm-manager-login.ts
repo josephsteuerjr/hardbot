@@ -8,7 +8,18 @@ import { join, dirname, resolve, parse } from 'node:path';
 import { directOpen, isDirect, unprotectWindows } from './windows-dpapi';
 
 export const PILOT_BASE = 'https://hard.rimborso.ru/crm-pilot';
-const AUTHORITY_ORIGINS = new Set(['https://hard.rimborso.ru', 'https://hard.rimborso.ru:8080']);
+const AUTHORITY_ORIGINS = new Set(['https://hard.rimborso.ru', 'https://hard.rimborso.ru:8080',
+  // Existing profiles can retain the project's former address. It is only
+  // local provenance: exchange ALWAYS targets PILOT_BASE on the current host.
+  'https://rim-borso.duckdns.org']);
+function trustedAuthority(value: unknown): boolean {
+  try {
+    if (typeof value !== 'string') return false;
+    const url = new URL(value);
+    return AUTHORITY_ORIGINS.has(url.origin) && url.pathname === '/' &&
+      !url.username && !url.password && !url.search && !url.hash;
+  } catch { return false; }
+}
 
 export class ManagerLoginError extends Error {
   constructor(public code: string, message: string) { super(message); }
@@ -42,7 +53,7 @@ export function existingManagerStatus(): { available: boolean; text: string } {
     const profile = managerProfile();
     if (!existsSync(join(profile, 'device.key'))) return {available: false, text: 'Сначала войдите в установленный Руководитель на этом компьютере.'};
     const settings = JSON.parse(checkedFile(profile, 'settings.json', 1024 * 1024).toString('utf8'));
-    if (!AUTHORITY_ORIGINS.has(String(settings.server || '').replace(/\/$/, ''))) return {available: false, text: 'Сохранённый Руководитель подключён к другому серверу.'};
+    if (!trustedAuthority(settings.server)) return {available: false, text: 'Сохранённый Руководитель подключён к другому серверу.'};
     managerFingerprint(profile);
     return {available: true, text: 'Найден сохранённый вход Руководителя. Личность и права проверит сервер.'};
   } catch { return {available: false, text: 'Не удалось прочитать сохранённый вход Руководителя.'}; }
@@ -51,7 +62,7 @@ export function existingManagerStatus(): { available: boolean; text: string } {
 export function readExistingManagerSession(profile = managerProfile(), unprotect = unprotectWindows): { credential: string; fingerprint: string } {
   const settingsRaw = checkedFile(profile, 'settings.json', 1024 * 1024);
   const settings = JSON.parse(settingsRaw.toString('utf8'));
-  if (!AUTHORITY_ORIGINS.has(String(settings.server || '').replace(/\/$/, ''))) throw new ManagerLoginError('authority_mismatch', 'Сохранённый вход относится к другому серверу.');
+  if (!trustedAuthority(settings.server)) throw new ManagerLoginError('authority_mismatch', 'Сохранённый вход относится к другому серверу.');
   const blob = checkedFile(profile, 'device.key', 16384);
   let credential: string, stateRaw: Buffer | undefined, key: Buffer | undefined;
   try {
