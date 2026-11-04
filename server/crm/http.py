@@ -255,8 +255,21 @@ def install(app, host=None, *, authenticate=None):
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
+    # Serialize shared bulk requests BEFORE reading their large JSON bodies.
+    # Waiting managers retain their input locally rather than multiplying
+    # full-registry objects in the API process while the DB lock is held.
+    bulk_lock = asyncio.Lock()
+
+    async def post_handler(request):
+        if authenticate is not None and request.match_info['action'] in {
+            'export', 'import-preview', 'import-apply'
+        }:
+            async with bulk_lock:
+                return await handler(request)
+        return await handler(request)
+
     app.middlewares.append(cutover)
     app.cleanup_ctx.append(lifecycle)
     for prefix in ("/api/crm/", "/admin/crm/"):
         app.router.add_get(prefix + "{action}", handler)
-        app.router.add_post(prefix + "{action}", handler)
+        app.router.add_post(prefix + "{action}", post_handler)

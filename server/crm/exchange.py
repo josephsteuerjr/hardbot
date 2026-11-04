@@ -30,7 +30,7 @@ IMMUTABLE = {
 }
 
 
-def _rows(conn, principal, ids=None):
+def _rows(conn, principal, ids=None, *, state_only=False):
     allowed = access.scoped_contracts(conn, principal)
     if ids is not None and (
         not isinstance(ids, list)
@@ -39,9 +39,10 @@ def _rows(conn, principal, ids=None):
     ):
         raise CRMError("Состав выгрузки недоступен.", "scope_changed", 403)
     chosen = allowed if ids is None else set(ids)
+    columns = 'contract_uuid,fields_json,revisions_json' if state_only else '*'
     return [
         dict(r)
-        for r in conn.execute("SELECT * FROM crm_contracts ORDER BY contract_uuid")
+        for r in conn.execute("SELECT " + columns + " FROM crm_contracts ORDER BY contract_uuid")
         if r["contract_uuid"] in chosen
     ]
 
@@ -150,12 +151,14 @@ def _snapshot(conn, principal, body):
     ).fetchone()
     if not snapshot or snapshot["manifest_hash"] != body.get("manifest_hash"):
         raise CRMError("Экспорт или его манифест не найден.", "baseline_missing", 409)
-    baseline = json.loads(snapshot["baseline_json"])
+    snapshot = dict(snapshot)
+    baseline = json.loads(snapshot.pop("baseline_json"))
+    snapshot.pop("scope_json", None)
     rows = body.get("rows")
     if not isinstance(rows, list) or len(rows) > 100000:
         raise CRMError("Некорректные строки реестра.")
     seen = set()
-    current = {r["contract_uuid"]: r for r in _rows(conn, principal)}
+    current = {r["contract_uuid"]: r for r in _rows(conn, principal, state_only=True)}
     changes = []
     unchanged = 0
     definitions = {f["key"] for f in fields()}

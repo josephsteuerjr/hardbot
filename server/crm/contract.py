@@ -76,7 +76,14 @@ def canonical(value):
 
 
 def digest(value):
-    return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
+    # Bulk baselines can exceed 100 MB. Hash the identical canonical byte
+    # stream without retaining a second JSON string and UTF-8 byte buffer.
+    checksum = hashlib.sha256()
+    encoder = json.JSONEncoder(ensure_ascii=False, sort_keys=True,
+                               separators=(",", ":"), allow_nan=False)
+    for chunk in encoder.iterencode(value):
+        checksum.update(chunk.encode("utf-8"))
+    return checksum.hexdigest()
 
 
 def identifier(kind, value):
