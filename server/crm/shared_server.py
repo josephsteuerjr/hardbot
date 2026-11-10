@@ -13,7 +13,6 @@ from .shared_auth import Authority, Sessions, NAMESPACE
 def create_app(*, sessions=None):
     if not storage.postgres_enabled() and sessions is None:
         raise RuntimeError('Shared CRM requires explicit isolated PostgreSQL configuration')
-    os.environ['HARD_CRM_PILOT'] = '1'
     app = web.Application(client_max_size=128 * 1024 * 1024)
 
     @web.middleware

@@ -54,6 +54,7 @@ def upload(principal, identifier, contract_id, filename, media_type, data):
                 or previous["contract_uuid"] != contract_id
                 or previous["sha256"] != checksum
                 or previous["filename"] != filename
+                or previous["media_type"] != media_type
             ):
                 raise CRMError(
                     "ID документа использован другим запросом.",
@@ -61,7 +62,7 @@ def upload(principal, identifier, contract_id, filename, media_type, data):
                     409,
                 )
             verify(previous)
-            return dict(previous)
+            return {key: previous[key] for key in ("document_id", "contract_uuid", "filename", "media_type", "sha256", "bytes", "created_at")}
         target = root() / checksum
         if target.exists():
             if hashlib.sha256(target.read_bytes()).hexdigest() != checksum:

@@ -283,7 +283,7 @@ async function renderCard() {
                         (v ?? "Очищено"),
                     )
                     .join("\n"),
-              )}</p>${e.reason ? `<p>Причина: ${esc(e.reason)}</p>` : ""}${["call", "visit", "note", "contact"].includes(e.kind) && can("correct") ? `<button data-correct="${e.event_id}">Исправить</button>` : ""}</article>`,
+              )}</p>${e.payload.script_ref ? `<p class="muted">Подсказка: версия ${esc(e.payload.script_ref.published_revision)}</p>` : ""}${e.reason ? `<p>Причина: ${esc(e.reason)}</p>` : ""}${["call", "visit", "note", "contact"].includes(e.kind) && can("correct") ? `<button data-correct="${e.event_id}">Исправить</button>` : ""}</article>`,
           )
           .join("")
       : '<div class="empty">История пока пуста</div>';
@@ -407,6 +407,24 @@ async function action(kind: string, original?: any) {
     kind +
     (original ? ":" + original.event_id : "");
   const saved = (await crm.draft(draftKey)).data;
+  // A form owns its script snapshot. Reopening the same draft or opening
+  // the inline panel again must not switch text during the call.
+  let callScript: any = saved?.script_snapshot ?? null;
+  let scriptError = "";
+  if (kind === "call" && !saved?.script_snapshot) {
+    try {
+      const published = await request("GET", "script");
+      callScript = {
+        script: published.script,
+        published_revision: published.published_revision,
+        published_at: published.published_at,
+        script_ref: published.script_ref ?? null,
+      };
+    } catch (error) {
+      scriptError = (error as Error).message;
+    }
+  }
+  let scriptShown = saved?.script_shown === true;
   const controls = keys
     .map((key) => {
       const def = context.fields.find((f: any) => f.key === key);
@@ -416,15 +434,42 @@ async function action(kind: string, original?: any) {
       return `<div class="field ${key.includes("comment") ? "span" : ""}"><label for="v-${key}">${esc(def?.title || key)}</label>${options ? `<select id="v-${key}" data-field="${key}"><option value="">Не выбрано</option>${options.map((v: string) => `<option${v === value ? " selected" : ""}>${esc(v)}</option>`).join("")}</select>` : key.includes("comment") ? `<textarea id="v-${key}" data-field="${key}">${esc(value)}</textarea>` : `<input id="v-${key}" data-field="${key}" type="${def?.type === "date" ? "date" : "text"}" value="${esc(value)}">`}<label class="check"><input type="checkbox" data-clear="${key}">Очистить поле</label></div>`;
     })
     .join("");
-  dialog.innerHTML = `<form id="action-form"><h2>${esc(labels[kind])}</h2><div class="contracts">${card.contracts.map((c: any, i: number) => `<label class="check"><input type="${singular ? "radio" : "checkbox"}" name="contracts" value="${c.contract_uuid}"${!singular || i === 0 ? " checked" : ""}>${esc(c.external_id)} · ${esc(c.creditor_id)}</label>`).join("")}</div><div class="grid">${controls}${["note", "task"].includes(target) ? `<div class="field span"><label>${target === "task" ? "Задача" : "Заметка"}</label><textarea id="free-text">${esc(saved?.text || original?.payload?.text || "")}</textarea></div>` : ""}${["promise", "reported_payment"].includes(target) ? `<div class="field"><label>Сумма</label><input id="money" inputmode="decimal" value="${esc(saved?.amount || "")}"></div><div class="field"><label>Валюта</label><select id="currency"><option>RUB</option><option>TJS</option><option>UZS</option><option>USD</option></select></div>` : ""}${["promise", "task"].includes(target) ? `<div class="field"><label>Срок · ${esc(Intl.DateTimeFormat().resolvedOptions().timeZone)}</label><input id="due" type="datetime-local" value="${esc(saved?.due || "")}"></div>` : ""}${kind === "correction" ? '<div class="field span"><label>Причина исправления</label><textarea id="reason" required></textarea></div>' : ""}</div><div class="error" id="form-error"></div><div class="actions">${button("cancel", "Закрыть")}${target === "call" ? button("show-script", "Скрипт") : ""}<button type="submit" class="primary">Сохранить действие</button></div><div id="script-inline"></div></form>`;
+  dialog.innerHTML = `<form id="action-form"><h2>${esc(labels[kind])}</h2><div class="contracts">${card.contracts.map((c: any, i: number) => `<label class="check"><input type="${singular ? "radio" : "checkbox"}" name="contracts" value="${c.contract_uuid}"${!singular || i === 0 ? " checked" : ""}>${esc(c.external_id)} · ${esc(c.creditor_id)}</label>`).join("")}</div><div class="grid">${controls}${["note", "task"].includes(target) ? `<div class="field span"><label>${target === "task" ? "Задача" : "Заметка"}</label><textarea id="free-text">${esc(saved?.text || original?.payload?.text || "")}</textarea></div>` : ""}${["promise", "reported_payment"].includes(target) ? `<div class="field"><label>Сумма</label><input id="money" inputmode="decimal" value="${esc(saved?.amount || "")}"></div><div class="field"><label>Валюта</label><select id="currency"><option>RUB</option><option>TJS</option><option>UZS</option><option>USD</option></select></div>` : ""}${["promise", "task"].includes(target) ? `<div class="field"><label>Срок · ${esc(Intl.DateTimeFormat().resolvedOptions().timeZone)}</label><input id="due" type="datetime-local" value="${esc(saved?.due || "")}"></div>` : ""}${kind === "correction" ? '<div class="field span"><label>Причина исправления</label><textarea id="reason" required></textarea></div>' : ""}</div><div class="error" id="form-error"></div><div class="actions">${button("cancel", "Закрыть")}${kind === "call" ? button("show-script", "Скрипт") : ""}<button type="submit" class="primary">Сохранить действие</button></div><div id="script-inline"></div></form>`;
+  const selectedIds = saved?.contract_ids ?? original?.contract_ids;
+  dialog.querySelectorAll<HTMLInputElement>("input[name=contracts]").forEach((el) => {
+    if (Array.isArray(selectedIds)) el.checked = selectedIds.includes(el.value);
+    if (kind === "correction") el.disabled = true;
+  });
+  dialog.querySelectorAll<HTMLInputElement>("[data-clear]").forEach((el) => {
+    el.checked = (saved?.clear ?? original?.payload?.clear ?? []).includes(el.dataset.clear);
+  });
+  const freeText = $<HTMLTextAreaElement>("free-text");
+  if (freeText) freeText.value = saved?.text ?? original?.payload?.[target === "task" ? "title" : "text"] ?? "";
+  const currencyInput = $<HTMLSelectElement>("currency");
+  if (currencyInput) {
+    const selected = dialog.querySelector<HTMLInputElement>("input[name=contracts]:checked")?.value;
+    const currentCurrency = saved?.currency ?? original?.payload?.currency ?? card.contracts.find((c: any) => c.contract_uuid === selected)?.currency ?? "";
+    if (!Array.from(currencyInput.options).some((o) => o.value === currentCurrency))
+      currencyInput.add(new Option(currentCurrency || "Выберите валюту", currentCurrency));
+    currencyInput.value = currentCurrency;
+  }
+  const reasonInput = $<HTMLTextAreaElement>("reason");
+  if (reasonInput) reasonInput.value = saved?.reason ?? "";
   const capture = () => ({
+    contract_ids: Array.from(dialog.querySelectorAll<HTMLInputElement>("input[name=contracts]:checked")).map((el) => el.value),
+    clear: Array.from(dialog.querySelectorAll<HTMLInputElement>("[data-clear]:checked")).map((el) => el.dataset.clear),
     values: Object.fromEntries(
       keys.map((k) => [k, ($("v-" + k) as HTMLInputElement).value]),
     ),
     text: ($("free-text") as HTMLTextAreaElement)?.value,
     amount: ($("money") as HTMLInputElement)?.value,
     due: ($("due") as HTMLInputElement)?.value,
+    currency: currencyInput?.value,
+    reason: reasonInput?.value,
+    script_snapshot: callScript,
+    script_shown: scriptShown,
   });
+  if (kind === "call" && callScript) await crm.draft(draftKey, capture());
   dialog.querySelectorAll("input,select,textarea").forEach((el) =>
     el.addEventListener("input", () => {
       void crm.draft(draftKey, capture());
@@ -432,14 +477,19 @@ async function action(kind: string, original?: any) {
   );
   $("cancel").onclick = (e) => {
     e.preventDefault();
+    void crm.draft(draftKey, capture());
     dialog.close();
   };
-  if (target === "call")
+  if (kind === "call")
     $("show-script").onclick = async (e) => {
       e.preventDefault();
-      const data = await request("GET", "script");
-      scriptOpened = data;
-      $("script-inline").innerHTML = scriptMarkup(data);
+      if (!callScript) {
+        $("script-inline").textContent = scriptError || "Для исправления события подсказка нового звонка не открывается.";
+        return;
+      }
+      $("script-inline").innerHTML = scriptMarkup(callScript);
+      scriptShown = !!callScript.script;
+      await crm.draft(draftKey, capture());
       telemetry("script_shown", "script");
     };
   $("action-form").onsubmit = async (e) => {
@@ -464,6 +514,8 @@ async function action(kind: string, original?: any) {
         } else if (value !== "") values[key] = value;
       }
       const payload: any = { values, clear };
+      if (kind === "call" && scriptShown && callScript?.script_ref)
+        payload.script_ref = callScript.script_ref;
       if (target === "note")
         payload.text = $<HTMLTextAreaElement>("free-text").value;
       if (target === "task")
@@ -471,6 +523,7 @@ async function action(kind: string, original?: any) {
       if (["promise", "reported_payment"].includes(target)) {
         payload.amount = $<HTMLInputElement>("money").value.replace(",", ".");
         payload.currency = $<HTMLSelectElement>("currency").value;
+        if (!payload.currency) throw new Error("Выберите валюту.");
       }
       if (["promise", "task"].includes(target)) {
         const dateValue = $<HTMLInputElement>("due").value;

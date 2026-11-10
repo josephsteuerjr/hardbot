@@ -142,6 +142,7 @@ def _payload(kind, raw):
         "related_id",
         "target_kind",
         "entity_revision",
+        "script_ref",
     }
     if set(raw) - allowed:
         raise CRMError("Неизвестные поля действия.")
@@ -154,6 +155,8 @@ def _payload(kind, raw):
     ):
         raise CRMError("Некорректная явная очистка.")
     target = raw.get("target_kind") if kind == "correction" else kind
+    if "script_ref" in raw and kind != "call":
+        raise CRMError("Версия подсказки относится только к исходному звонку.")
     if target not in KINDS - {"correction"}:
         raise CRMError("Некорректный тип исправляемого действия.")
     if set(values) - allowed_fields(target):
@@ -263,6 +266,14 @@ def command(principal, body, *, origin="app", client_version=None):
         rows = access.contracts(
             conn, principal, body.get("contract_ids"), capability=capability
         )
+        if kind == "correction":
+            # Permission to correct history cannot replace the current right
+            # to perform the underlying action (including per-contract scope).
+            target_capability = "accounting" if target == "payment_confirmed" else "task" if target == "task_complete" else target
+            access.contracts(conn, principal, body["contract_ids"], capability=target_capability)
+        if "script_ref" in payload:
+            from .scripts import validate_reference
+            validate_reference(conn, principal, payload["script_ref"])
         if len({r["person_uuid"] for r in rows}) != 1:
             raise CRMError(
                 "Для группового действия выберите договоры одного подтверждённого клиента."

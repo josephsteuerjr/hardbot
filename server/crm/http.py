@@ -19,7 +19,7 @@ from .contract import CRMError, fields
 
 
 def install(app, host=None, *, authenticate=None):
-    if not enabled():
+    if not enabled() and authenticate is None:
         return
 
     def principal(request):

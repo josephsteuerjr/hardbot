@@ -65,6 +65,10 @@ def export(principal, body):
         store.begin(conn)
         prior = store.replay(conn, principal, operation, body)
         if prior is not None:
+            # An idempotent export contains private data, not only an ACK.
+            # Revocation must apply even when returning a stored response.
+            if not {row['contract_uuid'] for row in prior['rows']} <= access.scoped_contracts(conn, principal):
+                raise CRMError("Состав выгрузки недоступен.", "scope_changed", 403)
             return prior
         rows = _rows(conn, principal, body.get("contract_ids"))
         baseline = {}

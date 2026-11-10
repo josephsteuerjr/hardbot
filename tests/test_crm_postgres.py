@@ -17,6 +17,7 @@ import test_crm_core as core
 import test_crm_exchange as exchange_cases
 import test_crm_adoption as adoption_cases
 import test_crm_rebuild as rebuild_cases
+import test_crm_review_20261110 as review_cases
 
 pytestmark = pytest.mark.skipif(not os.environ.get('HARD_CRM_TEST_DSN_FILE'),
                                reason='Requires isolated PostgreSQL QA database')
@@ -64,7 +65,7 @@ def pg_world(tmp_path, monkeypatch):
             admin.execute('DROP SCHEMA ' + namespace + ' CASCADE')
 
 
-CASES = [function for module in (core, exchange_cases, adoption_cases, rebuild_cases)
+CASES = [function for module in (core, exchange_cases, adoption_cases, rebuild_cases, review_cases)
          for name, function in vars(module).items()
          if name.startswith('test_') and callable(function)
          and set(inspect.signature(function).parameters) == {'crm_world'}
@@ -76,6 +77,11 @@ CASES = [function for module in (core, exchange_cases, adoption_cases, rebuild_c
 @pytest.mark.parametrize('case', CASES, ids=lambda case: case.__name__)
 def test_business_invariants_on_postgres(pg_world, case):
     case(pg_world)
+
+
+@pytest.mark.parametrize('revocation', ['capability', 'assignment'])
+def test_correction_authority_on_postgres(pg_world, revocation):
+    review_cases.test_correction_requires_current_original_action_authority(pg_world, revocation)
 
 
 def run_together(functions):

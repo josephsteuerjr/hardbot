@@ -1,6 +1,6 @@
 """Canonical team adapter for the reviewed draft/publish call-script workflow."""
 
-import json, uuid
+import json, re, uuid
 from . import storage
 from call_scripts import _content, ScriptError
 from . import store
@@ -14,6 +14,7 @@ def _state(conn, p):
     editing = p.role in {"owner", "manager"} and (
         p.owner or "analytics" in p.capabilities
     )
+    published = json.loads(row["published_json"]) if row and row["published_json"] else None
     return dict(
         revision=row["revision"] if row else 0,
         script=(
@@ -27,7 +28,27 @@ def _state(conn, p):
             else None
         ),
         can_edit=editing,
+        script_ref=(dict(team_id=p.team_id, published_revision=row["published_revision"],
+                         script_hash=digest(published)) if published else None),
     )
+
+
+def validate_reference(conn, principal, reference):
+    """Accept a known publication, including one pinned before an offline call."""
+    if (not isinstance(reference, dict)
+        or set(reference) != {"team_id", "published_revision", "script_hash"}
+        or reference.get("team_id") != principal.team_id
+        or type(reference.get("published_revision")) is not int
+        or reference["published_revision"] < 1
+        or not isinstance(reference.get("script_hash"), str)
+        or not re.fullmatch(r"[a-f0-9]{64}", reference["script_hash"])):
+        raise CRMError("Некорректная ссылка на версию подсказки.")
+    for row in conn.execute("SELECT payload_json FROM crm_events WHERE team_id=? AND kind='script_publish'", (principal.team_id,)):
+        publication = json.loads(row[0])
+        if (publication.get("script_revision") == reference["published_revision"]
+            and publication.get("script_hash") == reference["script_hash"]):
+            return
+    raise CRMError("Версия подсказки не подтверждена публикацией.", "script_reference_unknown", 409)
 
 
 def state(p):
