@@ -92,11 +92,10 @@ def test_expiry_wrong_key_tampering_and_wrong_audience_are_rejected():
     assert exc.value.code == 'pilot_session_expired'
 
 
-@pytest.mark.parametrize('change', ['missing_subject', 'observer', 'employee', 'no_write', 'false_uid', 'missing_device'])
+@pytest.mark.parametrize('change', ['missing_subject', 'employee', 'no_write', 'false_uid', 'missing_device'])
 def test_server_identity_requires_real_manager_write_authority(change):
     raw = payload()
     if change == 'missing_subject': raw.pop('subject')
-    if change == 'observer': raw['me']['role'] = 'security'
     if change == 'employee': raw['me']['role'] = 'employee'
     if change == 'no_write': raw['caps']['binds_edit'] = False
     if change == 'false_uid': raw['subject']['actor_uid'] = True

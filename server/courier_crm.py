@@ -12,6 +12,16 @@ NAMESPACE = 'crm-shared-pilot-v1'
 def install(app, host, *, transport=None):
     client = None
 
+    @web.middleware
+    async def legacy_guard(request,handler):
+        business=('/api/save','/api/office/','/api/workspace/action','/api/note','/api/marker','/api/photo','/api/receipt')
+        if request.method=='POST' and request.path.startswith(business) and not request.headers.get('X-Pult-Token'):
+            uid,_=await asyncio.to_thread(host._auth,request)
+            if await asyncio.to_thread(host.db.get_kind,uid)=='courier':
+                raise host._json_error(web.HTTPForbidden,'courier_form_only')
+        return await handler(request)
+    app.middlewares.append(legacy_guard)
+
     async def lifecycle(app):
         nonlocal client
         if transport is not None:

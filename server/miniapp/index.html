@@ -1897,6 +1897,9 @@ async function flushQueue(){
             }
             if(it.kind==="receipt"){ renderReceipts(); }
           }
+          else if(r.status===403&&it.kind!=='courier'&&(await r.clone().json().catch(()=>({}))).error==='courier_form_only'){
+            it.failed='server-role-changed';it.failed_at=Date.now();await IDB.put('queue',it);continue;
+          }
           else if(r.status===401||r.status===403||r.status===408||r.status===429||r.status>=500) stop=true;  // временный отказ — позже
           else if(it.kind==="save"&&r.status===409){
             it.failed="refresh-form"; it.failed_at=Date.now();

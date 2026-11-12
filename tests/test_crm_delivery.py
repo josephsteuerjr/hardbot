@@ -55,3 +55,19 @@ def test_common_courier_read_does_not_grant_delivery_on_another_assignment(crm_w
         employee_uuid=w['stranger'].employee_uuid,employee_scope=w['stranger'].employee_scope)
     assert len(store.card(p,w['person'])['contracts'])==2
     with pytest.raises(CRMError):store.command(p,body(w))
+
+
+def test_delivery_is_visible_in_shared_card_and_common_workbook_without_becoming_an_editable_cell(crm_world):
+    from crm import exchange
+    w=crm_world;store.command(courier(w),body(w))
+    card=store.card(w['owner'],w['person'])
+    saved=next(row for row in card['contracts'] if row['contract_uuid']==w['contracts'][0])
+    assert saved['fields']['delivery_result']=='Конверт передан'
+    assert saved['fields']['delivery_phone']=='-' and saved['fields']['delivery_author']=='Employee'
+    snapshot=exchange.export(w['owner'],dict(operation_id=str(uuid.uuid4()),period='2026-11',target_id='general'))
+    exported=next(row for row in snapshot['rows'] if row['contract_uuid']==w['contracts'][0])
+    assert exported['values']['delivery_comment']=='Given to recipient'
+    assert next(field for field in snapshot['fields'] if field['key']=='delivery_comment')['readonly']
+    with pytest.raises(CRMError):
+        exchange.preview(w['owner'],dict(export_id=snapshot['manifest']['export_id'],manifest_hash=snapshot['manifest']['manifest_hash'],file_sha256='a'*64,
+            rows=[dict(contract_uuid=w['contracts'][0],values={'delivery_result':'Forged'},clear=[])]))

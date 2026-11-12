@@ -26,6 +26,7 @@ import test_crm_contract_list as lookup_cases
 import test_crm_cabinet as cabinet_cases
 import test_crm_shift_report as shift_report_cases
 import test_crm_three_hour as three_hour_cases
+import test_crm_authority_import as authority_cases
 
 pytestmark = pytest.mark.skipif(not os.environ.get('HARD_CRM_TEST_DSN_FILE'),
                                reason='Requires isolated PostgreSQL QA database')
@@ -73,7 +74,7 @@ def pg_world(tmp_path, monkeypatch):
             admin.execute('DROP SCHEMA ' + namespace + ' CASCADE')
 
 
-CASES = [function for module in (core, exchange_cases, adoption_cases, rebuild_cases, review_cases, common_cases, task_cases, delivery_cases, lookup_cases,cabinet_cases,shift_report_cases,three_hour_cases)
+CASES = [function for module in (core, exchange_cases, adoption_cases, rebuild_cases, review_cases, common_cases, staff_cases,task_cases, delivery_cases, lookup_cases,cabinet_cases,shift_report_cases,three_hour_cases,authority_cases)
          for name, function in vars(module).items()
          if name.startswith('test_') and callable(function)
          and set(inspect.signature(function).parameters) == {'crm_world'}
@@ -85,6 +86,19 @@ CASES = [function for module in (core, exchange_cases, adoption_cases, rebuild_c
 @pytest.mark.parametrize('case', CASES, ids=lambda case: case.__name__)
 def test_business_invariants_on_postgres(pg_world, case):
     case(pg_world)
+
+
+def test_schema_1_upgrade_adds_source_tables_without_changing_work(pg_world):
+    from crm import postgres_schema
+    store.command(pg_world['member'],core.call_body(pg_world))
+    with storage.connect() as conn:
+        conn.execute('DROP TABLE crm_monthly_totals');conn.execute('DROP TABLE crm_authority_imports')
+        conn.execute("UPDATE crm_meta SET value='1' WHERE key='schema_version'");conn.commit()
+    with storage.connect() as conn:postgres_schema.initialize(conn);conn.commit()
+    with storage.connect() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM crm_events').fetchone()[0]==1
+        assert conn.execute('SELECT COUNT(*) FROM crm_monthly_totals').fetchone()[0]==0
+        assert conn.execute("SELECT value FROM crm_meta WHERE key='schema_version'").fetchone()[0]=='2'
 
 
 @pytest.mark.parametrize('role', ['employee', 'courier', 'manager', 'analyst', 'observer'])

@@ -47,3 +47,18 @@ def test_upstream_unavailable_keeps_retryable_status():
             result=await client.get('/api/courier/context',headers={'X-App-Token':'synthetic-device'})
             assert result.status==503 and (await result.json())['error']=='crm_unavailable'
     asyncio.run(scenario())
+
+
+def test_courier_cannot_bypass_the_form_through_the_old_save_route():
+    kind=['courier'];writes=[]
+    def error(cls,code):return cls(text=json.dumps({'error':code}),content_type='application/json')
+    async def save(request):writes.append('old-save');return web.json_response({'ok':True})
+    async def scenario():
+        app=web.Application();courier_crm.install(app,SimpleNamespace(_auth=lambda request:(101,'Synthetic'),_json_error=error,db=SimpleNamespace(get_kind=lambda uid:kind[0])))
+        app.router.add_post('/api/save',save)
+        async with TestClient(TestServer(app)) as client:
+            blocked=await client.post('/api/save',headers={'X-App-Token':'synthetic'},json={})
+            assert blocked.status==403 and (await blocked.json())['error']=='courier_form_only' and writes==[]
+            kind[0]='agent';assert (await client.post('/api/save',headers={'X-App-Token':'synthetic'},json={})).status==200
+            assert writes==['old-save']
+    asyncio.run(scenario())

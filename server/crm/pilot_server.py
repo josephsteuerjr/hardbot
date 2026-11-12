@@ -24,6 +24,8 @@ from .contract import CRMError, canonical, digest, fields, identifier, now
 DEMO_EMPLOYEE = identifier("staff", "demo-employee")
 DEMO_MANAGER = identifier("staff", "demo-manager")
 DEMO_OTHER = identifier("staff", "demo-other")
+DEMO_COURIER = identifier('staff','demo-courier')
+DEMO_ANALYST = identifier('staff','demo-analyst')
 CAPS = {
     "call",
     "visit",
@@ -38,6 +40,7 @@ CAPS = {
 
 
 def principals():
+    from .shared_auth import ROLE_CAPABILITIES
     result = {
         "employee": access.Principal(
             91001,
@@ -52,8 +55,8 @@ def principals():
             DEMO_MANAGER,
             "demo-team",
             "manager",
-            frozenset(CAPS | {"analytics", "exchange", "shift_correct", "accounting"}),
-            frozenset([DEMO_EMPLOYEE, DEMO_MANAGER, DEMO_OTHER]),
+            frozenset(CAPS | {'delivery',"analytics", "exchange", "shift_correct", "accounting"}),
+            frozenset([DEMO_EMPLOYEE, DEMO_MANAGER, DEMO_OTHER,DEMO_COURIER,DEMO_ANALYST]),
         ),
         "observer": access.Principal(
             91003,
@@ -64,7 +67,25 @@ def principals():
             frozenset([DEMO_OTHER]),
         ),
     }
+    result['courier']=access.Principal(91004,DEMO_COURIER,'demo-team','courier',ROLE_CAPABILITIES['courier'],frozenset({DEMO_COURIER}))
+    result['analyst']=access.Principal(91005,DEMO_ANALYST,'demo-team','analyst',ROLE_CAPABILITIES['analyst'],frozenset({DEMO_EMPLOYEE,DEMO_MANAGER,DEMO_OTHER,DEMO_COURIER,DEMO_ANALYST}))
     return {key: replace(value, read_all_contracts=True) for key, value in result.items()}
+
+
+def ensure_demo_roles(conn):
+    from .shared_auth import ROLE_CAPABILITIES
+    at=now();start=(datetime.fromisoformat(at)-timedelta(days=28)).isoformat()
+    for eid,uid,name,role in [(DEMO_COURIER,91004,'Тестовый курьер','courier'),(DEMO_ANALYST,91005,'Тестовый аналитик','analyst')]:
+        if not conn.execute('SELECT 1 FROM crm_employees WHERE employee_uuid=?',(eid,)).fetchone():
+            conn.execute('INSERT INTO crm_employees VALUES(?,?,?,?,1)',(eid,'DEMO-'+str(uid),name,'synthetic'))
+            conn.execute('INSERT INTO crm_actor_links VALUES(?,?,?,1)',(uid,eid,'synthetic'))
+            conn.execute('INSERT INTO crm_memberships VALUES(?,?,?,?,?,?,?,NULL)',(str(uuid.uuid4()),eid,'demo-team',role,canonical(sorted(ROLE_CAPABILITIES[role])),'Europe/Samara',start))
+    conn.execute("UPDATE crm_memberships SET role='observer',capabilities_json=?,team_id='other-team' WHERE employee_uuid=?",(canonical(['analytics']),DEMO_OTHER))
+    contract=conn.execute('SELECT contract_uuid FROM crm_contracts WHERE person_uuid=? ORDER BY contract_uuid LIMIT 1',(identifier('person','demo-1'),)).fetchone()
+    if contract and not conn.execute("SELECT 1 FROM crm_assignments WHERE employee_uuid=? AND capability='delivery'",(DEMO_COURIER,)).fetchone():
+        conn.execute('INSERT INTO crm_assignments VALUES(?,?,?,?,?,NULL,?)',(str(uuid.uuid4()),DEMO_COURIER,contract[0],'delivery',start,'synthetic'))
+    if contract:
+        conn.execute('INSERT INTO crm_monthly_totals VALUES(?,?,?,?,?,?,?) ON CONFLICT(contract_uuid,month) DO NOTHING',(contract[0],at[:7],'1250.25','RUB','Синтетическая месячная сумма',at,'0'*64))
 
 
 def seed():
@@ -75,6 +96,7 @@ def seed():
         if conn.execute(
             "SELECT 1 FROM crm_meta WHERE key='synthetic_complete'"
         ).fetchone():
+            ensure_demo_roles(conn);conn.commit()
             return
         previous = conn.execute(
             "SELECT value FROM crm_meta WHERE key='synthetic_candidate'"
@@ -143,6 +165,8 @@ def seed():
                         address="Тестовая улица, " + str(number),
                         debt_total=str(12000 * number) + ".00",
                         debt_today=str(10000 * number) + ".00",
+                        issued_sum=str(15000*number)+'.00',kd_date=(datetime.fromisoformat(at)-timedelta(days=120)).date().isoformat(),
+                        dp='45',debt_overdue=str(8500*number)+'.00',interest_overdue=str(1200*number)+'.00',penalty=str(300*number)+'.00',
                         soft_comment="",
                         visit_comment="",
                         responsible="Тестовый сотрудник",
@@ -195,6 +219,7 @@ def seed():
                 )
             conn.execute("INSERT INTO crm_meta VALUES('synthetic_candidate',?)", (at,))
             conn.commit()
+    with db.connect() as conn:ensure_demo_roles(conn);conn.commit()
     manager = principals()["manager"]
     cohort = identifier("cohort", "demo")
     members = [

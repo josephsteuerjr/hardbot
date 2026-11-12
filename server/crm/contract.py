@@ -39,6 +39,11 @@ VISIT_KEYS = {
     "call_comment",
 }
 CONTACT_KEYS = {"phone", "phone_main", "address", "address_customer", "extra_address"}
+DELIVERY_FIELDS = {
+    'delivery_result':'Курьер: результат','delivery_address':'Курьер: адрес передачи',
+    'delivery_phone':'Курьер: телефон','delivery_comment':'Курьер: комментарий',
+    'delivery_received_at':'Курьер: принято CRM','delivery_author':'Курьер: сотрудник',
+}
 PROMISE_KEYS = {"promise_date", "forecast_sum", "forecast", "meeting_date"}
 MONEY_KEYS = {
     "debt_total",
@@ -136,6 +141,7 @@ def operation_id(value):
 
 
 def group(key):
+    if key in DELIVERY_FIELDS:return 'delivery'
     if key in PROMISE_KEYS:
         return "forecast"
     if key in CALL_KEYS:
@@ -170,7 +176,8 @@ def fields():
             nullable=True,
         )
         for f in FIELDS
-    ]
+    ] + [dict(key=key,title=title,group='delivery',type='text',source='work_event',clear='explicit',nullable=True,readonly=True)
+         for key,title in DELIVERY_FIELDS.items()]
 
 
 def field_value(key, value, *, clear=False):

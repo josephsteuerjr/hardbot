@@ -1,7 +1,23 @@
 """Initial PostgreSQL CRM schema. Run with the separate migration role."""
 from . import storage
 
-VERSION = 1
+VERSION = 2
+
+UPGRADE_2 = """
+CREATE TABLE IF NOT EXISTS crm_monthly_totals(
+ contract_uuid TEXT NOT NULL REFERENCES crm_contracts,month TEXT NOT NULL,
+ amount TEXT,currency TEXT,source_column TEXT NOT NULL,observed_at TEXT NOT NULL,
+ source_sha256 TEXT NOT NULL,PRIMARY KEY(contract_uuid,month));
+CREATE TABLE IF NOT EXISTS crm_authority_imports(
+ source_sha256 TEXT PRIMARY KEY,captured_at TEXT NOT NULL,applied_at TEXT NOT NULL,
+ plan_sha256 TEXT NOT NULL,before_sha256 TEXT NOT NULL,receipt_json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS crm_authority_rows(
+ contract_uuid TEXT PRIMARY KEY REFERENCES crm_contracts,source_sha256 TEXT NOT NULL,
+ record_json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS crm_authority_scopes(
+ actor_uid BIGINT PRIMARY KEY REFERENCES crm_actor_links,employees_json TEXT NOT NULL,
+ all_contracts BIGINT NOT NULL,source_sha256 TEXT NOT NULL);
+"""
 DDL = r"""
 CREATE TABLE IF NOT EXISTS crm_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS crm_people(
@@ -151,9 +167,14 @@ def initialize(conn):
     conn.execute("CREATE TABLE IF NOT EXISTS crm_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
     current = conn.execute("SELECT value FROM crm_meta WHERE key='schema_version'").fetchone()
     if current:
+        if int(current[0])==1:
+            conn.execute(UPGRADE_2)
+            conn.execute("UPDATE crm_meta SET value=? WHERE key='schema_version'",(str(VERSION),))
+            return
         if int(current[0]) != VERSION:
             raise RuntimeError("Unsupported CRM PostgreSQL schema version")
         return
     conn.execute(DDL)
+    conn.execute(UPGRADE_2)
     conn.execute("INSERT INTO crm_meta VALUES('schema_version',?)", (str(VERSION),))
     conn.execute("INSERT INTO crm_meta VALUES('storage_engine','postgresql')")

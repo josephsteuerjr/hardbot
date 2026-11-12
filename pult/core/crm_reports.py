@@ -125,6 +125,9 @@ def write(report,path,kind='shifts'):
                     last=len(rows)+3;sheet.cells(last,1).value='Итого'
                     for col in range(2,32):
                         letter=col_name(col)
+                        if not rows:
+                            sheet.cells(last,col).value=0
+                            continue
                         if (col-2)%3==0:
                             formula=f'=IF(COUNT({letter}3:{letter}{last-1})<COUNTA(A3:A{last-1}),"",SUM({letter}3:{letter}{last-1}))'
                         elif (col-1)%3==0:

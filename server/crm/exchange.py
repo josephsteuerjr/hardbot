@@ -16,6 +16,7 @@ from .contract import (
     instant,
     now,
     operation_id,
+    DELIVERY_FIELDS,
 )
 
 IMMUTABLE = {
@@ -28,6 +29,7 @@ IMMUTABLE = {
     "country",
     "city",
 }
+IMMUTABLE.update(DELIVERY_FIELDS)
 
 
 def _rows(conn, principal, ids=None, *, state_only=False):
@@ -75,9 +77,12 @@ def export(principal, body):
         output = []
         if len(rows) > 100000:
             raise CRMError("Разделите выгрузку по командам.")
+        from .delivery import latest
+        deliveries=latest(conn,[row['contract_uuid'] for row in rows])
         for row in rows:
             cid = row["contract_uuid"]
             values = json.loads(row["fields_json"])
+            values.update(deliveries.get(cid,{}))
             baseline[cid] = dict(
                 values=values,
                 revisions=json.loads(row["revisions_json"]),

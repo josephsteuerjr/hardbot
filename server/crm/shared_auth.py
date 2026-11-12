@@ -42,7 +42,7 @@ def fault(code='pilot_session_invalid', status=401):
         'pilot_session_invalid': 'Подключите CRM через действующий вход сотрудника, руководителя или аналитика.',
         'pilot_session_expired': 'Срок подключения истёк. Повторите подключение Руководителя.',
         'authority_unavailable': 'Сервер проверки входа временно недоступен. Сохранённые действия остаются в очереди.',
-        'manager_required': 'Для общего пилота нужен действующий вход руководителя.',
+        'manager_required': 'Этот вход не даёт доступа к CRM. Проверьте действующий вход и назначенную роль.',
         'identity_protocol': 'Сервер входа ещё не поддерживает проверку личности CRM.',
         'identity_unmapped': 'Для этого входа ещё не подтверждено соответствие сотруднику CRM.',
     }
@@ -58,13 +58,13 @@ def validate_identity(value):
     uid = subject.get('actor_uid')
     if type(uid) is not int or not 0 < uid < 2**63:
         raise fault('identity_protocol', 503)
-    if not isinstance(me, dict) or me.get('role') not in {'manager', 'full'}:
+    if not isinstance(me, dict) or me.get('role') not in {'manager', 'full','security'}:
         raise fault('manager_required', 403)
-    if not isinstance(value.get('caps'), dict) or value['caps'].get('binds_edit') is not True:
+    if not isinstance(value.get('caps'), dict) or (me['role']!='security' and value['caps'].get('binds_edit') is not True):
         raise fault('manager_required', 403)
     if not isinstance(device, dict) or type(device.get('id')) is not int or device['id'] < 1:
         raise fault('manager_required', 403)
-    return dict(uid=uid, device_id=device['id'], name=str(me.get('name') or ''), role=me['role'])
+    return dict(uid=uid, device_id=device['id'], name=str(me.get('name') or ''), role='observer' if me['role']=='security' else me['role'])
 
 
 def validate_entry_identity(value, kind):
@@ -95,7 +95,7 @@ class Authority:
         if kind not in ENTRY_KINDS:
             raise fault()
         header = 'X-App-Token' if kind == 'employee' else 'X-Device-Token' if kind == 'analyst-device' else 'X-Pult-Token'
-        headers = {header: token, 'X-Client-Version': '3.3.0-pilot.2',
+        headers = {header: token, 'X-Client-Version': '3.3.0-pilot.3',
                    'X-Work-Product': 'crm', 'X-Client-Runtime': 'crm-identity-bridge'}
         if kind == 'analyst':
             headers['X-CRM-Entry'] = 'analyst'
@@ -135,10 +135,14 @@ def principal(identity):
             raise fault('identity_unmapped', 403)
         if role == 'employee' and membership and membership['role'] == 'courier':
             role = 'courier'
-        legacy_manager = role in {'manager', 'full'} and result.team_id == 'crm-pilot-managers'
+        # An Analyst entry has already passed the authority's admin gate. For
+        # an existing pilot manager identity it is a capability reduction.
+        legacy_manager = role in {'manager', 'full','analyst'} and result.team_id == 'crm-pilot-managers'
         role = 'manager' if role == 'full' else role
+        lower_entry=membership and membership['role']=='manager' and role in {'employee','courier','observer','analyst'}
         if (role not in ROLE_CAPABILITIES or not membership or
                 (membership['role'] != role and not legacy_manager
+                 and not lower_entry
                  and not (role == 'courier' and membership['role'] == 'employee'))):
             raise fault('identity_unmapped', 403)
         # The approved test scope covers this isolated database. It never
@@ -149,8 +153,13 @@ def principal(identity):
                 'SELECT e.employee_uuid FROM crm_employees e JOIN crm_memberships m USING(employee_uuid) '
                 'WHERE e.active=1 AND m.starts_at<=? AND (m.ends_at IS NULL OR m.ends_at>?) '
                 'AND (m.team_id=? OR ?=1)', (now(), now(), result.team_id, int(legacy_manager))))
+        all_contracts=legacy_manager
+        policy=conn.execute('SELECT * FROM crm_authority_scopes WHERE actor_uid=?',(identity['uid'],)).fetchone()
+        if policy and role in {'manager','analyst','observer'}:
+            employees=frozenset(json.loads(policy['employees_json'])) | {result.employee_uuid}
+            all_contracts=bool(policy['all_contracts']) and role in {'manager','analyst'}
         return replace(result, role=role, capabilities=result.capabilities & ROLE_CAPABILITIES[role],
-                       employee_scope=employees, all_contracts=legacy_manager, read_all_contracts=True)
+                       employee_scope=employees, all_contracts=all_contracts, read_all_contracts=True)
 
 
 class Sessions:

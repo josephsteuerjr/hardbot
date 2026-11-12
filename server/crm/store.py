@@ -742,6 +742,9 @@ def card(principal, person_uuid):
             row["provenance"] = json.loads(row.pop("provenance_json"))
             row.pop("baseline_json")
         action_map = {r['contract_uuid']: set(r['allowed_actions']) for r in rows}
+        from .delivery import latest
+        deliveries=latest(conn,ids)
+        for row in rows:row['fields'].update(deliveries.get(row['contract_uuid'],{}))
         for event in events.values():
             event['can_correct'] = bool((principal.owner or principal.role == 'manager'
                 or event['employee_uuid'] == principal.employee_uuid)
@@ -788,7 +791,10 @@ def contract_list(principal, search='', work='', limit=100):
             rows.append(row)
             if len(rows)>limit:
                 break
-        return dict(contracts=rows[:limit],truncated=len(rows)>limit)
+        from .delivery import latest
+        visible=rows[:limit];deliveries=latest(conn,[row['contract_uuid'] for row in visible])
+        for row in visible:row['fields'].update(deliveries.get(row['contract_uuid'],{}))
+        return dict(contracts=visible,truncated=len(rows)>limit)
 
 
 def portfolio(principal, search="", limit=200):

@@ -34,6 +34,12 @@ def dashboard(principal,month,employee=None):
                 'LEFT JOIN crm_registry_rows r USING(contract_uuid) LEFT JOIN crm_registry_sources s ON s.source_id=r.source_id '
                 'WHERE c.contract_uuid IN ('+','.join('?' for _ in chunk)+')',chunk))
         payments=[];totals=defaultdict(Decimal);missing=0;months=set();sources=set()
+        observations={}
+        for offset in range(0,len(ids),400):
+            chunk=sorted(ids)[offset:offset+400]
+            for observed in conn.execute('SELECT * FROM crm_monthly_totals WHERE contract_uuid IN ('+','.join('?' for _ in chunk)+')',chunk):
+                months.add(observed['month'])
+                if observed['month']==month:observations[observed['contract_uuid']]=dict(observed)
         for row in rows:
             raw=json.loads(row['record_json']) if row['record_json'] else {}
             extra=raw.get('extra_columns',[])
@@ -41,6 +47,9 @@ def dashboard(principal,month,employee=None):
             months.update(item[0] for item in mapping.values())
             candidates=[extra[index].get('value') for index,(period,_) in mapping.items() if period==month]
             value=amount(candidates[0] if candidates[0] not in (None,'') else 0) if len(candidates)==1 else None
+            observation=observations.get(row['contract_uuid'])
+            if observation:
+                value=amount(observation['amount']);row['currency']=observation['currency'];row['imported_at']=observation['observed_at']
             if value is None:missing+=1;continue
             fields=json.loads(row['fields_json']);creditor=fields.get('partner') or row['creditor_id']
             unit=row['currency'] or 'unconfirmed:'+row['creditor_id']
@@ -52,12 +61,14 @@ def dashboard(principal,month,employee=None):
         operations=[];unknown=0;counts=Counter();processed=set()
         for event in conn.execute('SELECT * FROM crm_events WHERE employee_uuid=? ORDER BY sequence DESC',(employee,)):
             if event['time_quality']=='legacy_unknown':unknown+=1;continue
-            occurred=instant(event['occurred_at'])
-            if not first<=occurred<last:continue
+            payload=json.loads(event['payload_json'])
+            workday=payload.get('legacy_workday') if event['time_quality']=='legacy_day' else None
+            if workday:
+                if not start<=date.fromisoformat(workday)<next_month:continue
+            elif not first<=instant(event['occurred_at'])<last:continue
             if event['kind'] in {'correction','manual_edit','payment_confirmed'}:continue
             contracts=json.loads(event['contracts_json']);counts[event['kind']]+=1;processed.update(contracts)
-            payload=json.loads(event['payload_json'])
-            operations.append(dict(event_id=event['event_id'],kind=event['kind'],occurred_at=event['occurred_at'],
+            operations.append(dict(event_id=event['event_id'],kind=event['kind'],occurred_at=None if workday else event['occurred_at'],workday=workday,
                 contract_ids=contracts,text=payload.get('text') or payload.get('delivery_comment') or '',origin=event['origin']))
         reliable=conn.execute("SELECT value FROM crm_meta WHERE key='reliable_collection_since'").fetchone()
     return dict(month=month,employee_uuid=employee,employee=person['name'],timezone=principal.timezone,as_of=at,

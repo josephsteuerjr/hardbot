@@ -62,7 +62,8 @@ def report(principal):
             for row in conn.execute('SELECT * FROM crm_contracts WHERE contract_uuid IN ('+','.join('?' for _ in chunk)+')',chunk):
                 key=row['contract_uuid'];current[key]=json.loads(row['fields_json'])
                 previous[key]=json.loads(row['baseline_json'])
-                if instant(row['created_at'])>=boundary:unknown.add(key)
+                baseline=json.loads(row['provenance_json']).get('source_baseline',{}).get('captured_at',row['created_at'])
+                if instant(baseline)>=boundary:unknown.add(key)
                 # Match the existing display policy; explicit canonical currencies win.
                 import debt
                 currency=row['currency'] or ('RUB' if debt.unit([current[key].get('partner')])=='₽' else None)

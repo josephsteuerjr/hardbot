@@ -1,6 +1,6 @@
 """Additive canonical tables; legacy IDs, accounts and documents are retained."""
 
-VERSION = 1
+VERSION = 2
 
 DDL = """
 CREATE TABLE IF NOT EXISTS crm_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -137,6 +137,19 @@ CREATE TABLE IF NOT EXISTS crm_registry_rows(
  contract_uuid TEXT PRIMARY KEY REFERENCES crm_contracts,
  source_id TEXT NOT NULL REFERENCES crm_registry_sources, source_row INTEGER NOT NULL,
  record_json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS crm_monthly_totals(
+ contract_uuid TEXT NOT NULL REFERENCES crm_contracts,month TEXT NOT NULL,
+ amount TEXT,currency TEXT,source_column TEXT NOT NULL,observed_at TEXT NOT NULL,
+ source_sha256 TEXT NOT NULL,PRIMARY KEY(contract_uuid,month));
+CREATE TABLE IF NOT EXISTS crm_authority_imports(
+ source_sha256 TEXT PRIMARY KEY,captured_at TEXT NOT NULL,applied_at TEXT NOT NULL,
+ plan_sha256 TEXT NOT NULL,before_sha256 TEXT NOT NULL,receipt_json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS crm_authority_rows(
+ contract_uuid TEXT PRIMARY KEY REFERENCES crm_contracts,source_sha256 TEXT NOT NULL,
+ record_json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS crm_authority_scopes(
+ actor_uid INTEGER PRIMARY KEY REFERENCES crm_actor_links,employees_json TEXT NOT NULL,
+ all_contracts INTEGER NOT NULL,source_sha256 TEXT NOT NULL);
 """
 
 
@@ -156,7 +169,7 @@ def initialize(conn):
             conn.execute(statement)
             statement = ""
     conn.execute(
-        "INSERT OR IGNORE INTO crm_meta VALUES('schema_version',?)", (str(VERSION),)
+        "INSERT INTO crm_meta VALUES('schema_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(VERSION),)
     )
     for table in ("crm_events", "crm_metric_facts"):
         if "client_version" not in {

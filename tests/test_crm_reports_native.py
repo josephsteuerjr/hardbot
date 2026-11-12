@@ -57,3 +57,13 @@ def test_common_workbook_uses_xlwings_and_preserves_template_formulas(crm_world,
         book=app.books.open(str(second),update_links=False,read_only=True)
         assert book.sheets['Witness'].range('A1').formula=='=SUM(2,3)'
         assert book.sheets['Witness'].range('B2').value=='Preserve unknown data';book.close()
+
+
+def test_empty_three_hour_scope_has_no_circular_total(crm_world,tmp_path):
+    report=three_hour.report(crm_world['owner'])
+    for sheet in report['sheets']:sheet['rows']=[]
+    path=tmp_path/'empty-scope.xlsx';crm_reports.write(report,path,'three-hour')
+    with crm_reports.excel() as app:
+        book=app.books.open(str(path),update_links=False,read_only=True)
+        assert book.sheets[0].range('B3:AE3').api.HasFormula is False
+        assert book.sheets[0].range('B3:D3').value==[0,0,0];book.close()

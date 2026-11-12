@@ -527,7 +527,7 @@ app
           server: PILOT_BASE, auth: "existing-login"}, crmLast: undefined});
         connectionNotice = "";
       } else if (input?.mode === "synthetic") {
-        if (!["employee", "manager", "observer"].includes(input.role))
+        if (!["employee", "manager", "observer","courier","analyst"].includes(input.role))
           throw new Error("Неизвестная роль.");
         writeSettings({
           crmConnection: { mode: "synthetic", role: input.role },

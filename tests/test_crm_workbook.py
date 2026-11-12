@@ -9,8 +9,6 @@ from pult.core import crm_workbook as books
     __import__("sys").platform != "win32", reason="Native Excel integration"
 )
 def test_native_workbook_export_manual_edit_three_way_import(crm_world, tmp_path):
-    from openpyxl import load_workbook
-
     w = crm_world
     store.command(w["member"], call_body(w))
     snapshot = exchange.export(
@@ -24,28 +22,25 @@ def test_native_workbook_export_manual_edit_three_way_import(crm_world, tmp_path
     first = tmp_path / "first.xlsx"
     written = books.write(snapshot, first)
     assert written["sha256"] == books.sha(first)
-    book = load_workbook(first)
-    book.create_sheet("Witness")["A1"] = "=SUM(2,3)"
-    book["Witness"]["B2"] = "Unknown column data"
-    book.save(first)
+    with books.excel() as excel:
+        book=excel.Workbooks.Open(str(first))
+        sheet=book.Worksheets.Add();sheet.Name='Witness'
+        sheet.Range('A1').Formula='=SUM(2,3)'
+        sheet.Range('B2').Value='Unknown column data'
+        book.Save();book.Close(False)
     original = books.sha(first)
     second = tmp_path / "second.xlsx"
     books.write(snapshot, second, first)
     assert books.sha(first) == original
-    book = load_workbook(second)
-    assert (
-        book["Witness"]["A1"].value == "=SUM(2,3)"
-        and book["Witness"]["B2"].value == "Unknown column data"
-    )
-    headers = [c.value for c in book[books.SHEET][2]]
-    col = (
-        headers.index(
-            next(f["title"] for f in snapshot["fields"] if f["key"] == "soft_comment")
-        )
-        + 1
-    )
-    book[books.SHEET].cell(4, col, "Manual native workbook")
-    book.save(second)
+    with books.excel() as excel:
+        book=excel.Workbooks.Open(str(second))
+        assert book.Worksheets('Witness').Range('A1').Formula=='=SUM(2,3)'
+        assert book.Worksheets('Witness').Range('B2').Value=='Unknown column data'
+        sheet=book.Worksheets(books.SHEET)
+        headers=list(sheet.Range(sheet.Cells(2,1),sheet.Cells(2,sheet.UsedRange.Columns.Count)).Value[0])
+        col=headers.index(next(f['title'] for f in snapshot['fields'] if f['key']=='soft_comment'))+1
+        sheet.Cells(4,col).Value='Manual native workbook'
+        book.Save();book.Close(False)
     parsed = books.read(second)
     preview = exchange.preview(w["owner"], parsed)
     assert len(preview["changes"]) == 1 and not preview["conflicts"]
@@ -67,8 +62,6 @@ def test_native_workbook_export_manual_edit_three_way_import(crm_world, tmp_path
 def test_native_binary_and_macro_container_copy_recovery(
     crm_world, tmp_path, suffix, format_id
 ):
-    import pythoncom, win32com.client, gc
-
     w = crm_world
     store.command(w["member"], call_body(w))
     snapshot = exchange.export(
@@ -78,25 +71,12 @@ def test_native_binary_and_macro_container_copy_recovery(
     first = tmp_path / "origin.xlsx"
     books.write(snapshot, first)
     template = tmp_path / ("template" + suffix)
-    pythoncom.CoInitialize()
-    excel = win32com.client.DispatchEx("Excel.Application")
-    excel.Visible = False
-    excel.DisplayAlerts = False
-    book = None
-    try:
+    with books.excel() as excel:
         book = excel.Workbooks.Open(str(first))
         book.Worksheets.Add().Name = "Witness"
         book.Worksheets("Witness").Range("A1").Formula = "=SUM(2,3)"
         book.SaveAs(str(template), FileFormat=format_id)
         book.Close(False)
-        book = None
-    finally:
-        if book is not None:
-            book.Close(False)
-        excel.Quit()
-        excel = None
-        gc.collect()
-        pythoncom.CoUninitialize()
     before = books.sha(template)
     target = tmp_path / ("result" + suffix)
     written = books.write(snapshot, target, template)
