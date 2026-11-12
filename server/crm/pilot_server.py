@@ -1,6 +1,7 @@
 """Local candidate review environment. Canonical services, synthetic data only."""
 
 from pathlib import Path
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import base64, json, os, secrets, sys, threading, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,7 +38,7 @@ CAPS = {
 
 
 def principals():
-    return {
+    result = {
         "employee": access.Principal(
             91001,
             DEMO_EMPLOYEE,
@@ -63,6 +64,7 @@ def principals():
             frozenset([DEMO_OTHER]),
         ),
     }
+    return {key: replace(value, read_all_contracts=True) for key, value in result.items()}
 
 
 def seed():
@@ -284,6 +286,7 @@ def context(p):
         role=p.role,
         capabilities=sorted(p.capabilities),
         owner=False,
+        read_all_contracts=access.reads_all(p),
         timezone=p.timezone,
         fields=fields(),
         dropdowns=DROPDOWNS,

@@ -20,8 +20,8 @@ def roster(tmp_path, monkeypatch):
 def test_independent_roster_preserves_distinct_accounts_without_fake_activity(roster):
     receipt = shared_setup.provision(roster)
     assert shared_setup.provision(roster) == receipt
-    first = shared_auth.principal({'uid':90100000001})
-    second = shared_auth.principal({'uid':90100000002})
+    first = shared_auth.principal({'uid':90100000001, 'role':'manager'})
+    second = shared_auth.principal({'uid':90100000002, 'role':'full'})
     assert first.employee_uuid != second.employee_uuid
     assert first.all_contracts and not first.owner
     assert first.capabilities == shared_auth.CAPABILITIES
@@ -52,5 +52,5 @@ def test_changed_roster_does_not_reassign_existing_identity(roster):
     changed['managers'][0]['actor_uid']=90100000003
     with pytest.raises(CRMError) as exc: shared_setup.provision(changed)
     assert exc.value.code == 'roster_changed'
-    assert shared_auth.principal({'uid':90100000001}).all_contracts
+    assert shared_auth.principal({'uid':90100000001, 'role':'manager'}).all_contracts
     with pytest.raises(CRMError): shared_auth.principal({'uid':90100000003})

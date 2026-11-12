@@ -5,6 +5,7 @@
 import { createDecipheriv, createHash } from 'node:crypto';
 import { lstatSync, readFileSync, existsSync } from 'node:fs';
 import { join, dirname, resolve, parse } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { directOpen, isDirect, unprotectWindows } from './windows-dpapi';
 
 export const PILOT_BASE = 'https://hard.rimborso.ru/crm-pilot';
@@ -59,11 +60,12 @@ export function existingManagerStatus(): { available: boolean; text: string } {
   } catch { return {available: false, text: 'Не удалось прочитать сохранённый вход Руководителя.'}; }
 }
 
-export function readExistingManagerSession(profile = managerProfile(), unprotect = unprotectWindows): { credential: string; fingerprint: string } {
+export function readExistingManagerSession(profile = managerProfile(), unprotect = unprotectWindows,
+  keyName = 'device.key', serverKey = 'server'): { credential: string; fingerprint: string } {
   const settingsRaw = checkedFile(profile, 'settings.json', 1024 * 1024);
   const settings = JSON.parse(settingsRaw.toString('utf8'));
-  if (!trustedAuthority(settings.server)) throw new ManagerLoginError('authority_mismatch', 'Сохранённый вход относится к другому серверу.');
-  const blob = checkedFile(profile, 'device.key', 16384);
+  if (!trustedAuthority(settings[serverKey])) throw new ManagerLoginError('authority_mismatch', 'Сохранённый вход относится к другому серверу.');
+  const blob = checkedFile(profile, keyName, 16384);
   let credential: string, stateRaw: Buffer | undefined, key: Buffer | undefined;
   try {
     if (isDirect(blob)) credential = directOpen(blob);
@@ -82,12 +84,82 @@ export function readExistingManagerSession(profile = managerProfile(), unprotect
     }
     if (!/^[A-Za-z0-9_-]{20,512}$/.test(credential)) throw new Error('Invalid token');
   } catch {
-    throw new ManagerLoginError('windows_login_unavailable', 'Windows не подтвердил сохранённый вход. Откройте Руководитель под тем же пользователем Windows.');
+    throw new ManagerLoginError('windows_login_unavailable', 'Windows не подтвердил сохранённый вход. Откройте исходную программу под тем же пользователем Windows.');
   } finally { key?.fill(0); }
   if (!settingsRaw.equals(checkedFile(profile, 'settings.json', 1024 * 1024)) ||
-      !blob.equals(checkedFile(profile, 'device.key', 16384)) ||
+      !blob.equals(checkedFile(profile, keyName, 16384)) ||
       (stateRaw && !stateRaw.equals(checkedFile(profile, 'Local State', 16 * 1024 * 1024)))) {
     throw new ManagerLoginError('login_changed', 'Вход Руководителя изменился во время проверки. Повторите подключение.');
   }
   return {credential, fingerprint: createHash('sha256').update(blob).digest('hex')};
+}
+
+export type EntrySource = 'manager' | 'hard' | 'soft' | 'analyst';
+export const ENTRY_SOURCES: EntrySource[] = ['manager', 'soft', 'hard', 'analyst'];
+export const ENTRY_LABELS: Record<EntrySource, string> = {
+  manager: 'Руководитель', hard: 'Сотрудник Хард', soft: 'Сотрудник Софт', analyst: 'Аналитик',
+};
+function entryProfile(source: EntrySource): string {
+  if (!ENTRY_SOURCES.includes(source) || !process.env.LOCALAPPDATA)
+    throw new ManagerLoginError('profile_missing', 'Не найден сохранённый вход.');
+  return join(process.env.LOCALAPPDATA, 'Hard', source, 'data');
+}
+export function entryFingerprint(source: EntrySource): string {
+  if (source === 'manager') return managerFingerprint();
+  const profile = entryProfile(source);
+  const hash = createHash('sha256').update(source);
+  for (const name of source === 'analyst' ? ['backend-settings.json'] : ['settings.json', 'field.key'])
+    hash.update(checkedFile(profile, name, 1024 * 1024));
+  return hash.digest('hex');
+}
+function analystRecord(profile: string): {raw: Buffer; record: any} {
+  const raw = checkedFile(profile, 'backend-settings.json', 1024 * 1024);
+  const value = JSON.parse(raw.toString('utf8'));
+  const record = value.profiles ? value.profiles[value.active] : value;
+  if (!record || !trustedAuthority(record.url))
+    throw new ManagerLoginError('authority_mismatch', 'Сохранённый вход относится к другому серверу.');
+  return {raw, record};
+}
+function analystDeviceFingerprint(): string {
+  const source = process.env.HARD_CRM_SOURCE;
+  const executable = source ? process.env.PYTHON || 'python' : join(process.resourcesPath, 'backend', 'hard-backend.exe');
+  const args = source ? ['-X', 'utf8', '-m', 'pult.desk_backend', '--crm-device-fingerprint'] : ['--crm-device-fingerprint'];
+  const result = execFileSync(executable, args, {cwd: source, windowsHide: true, timeout: 15000,
+    maxBuffer: 4096, encoding: 'utf8'}).trim();
+  if (!/^[a-f0-9]{64}$/.test(result)) throw new Error('Не подтверждено устройство Аналитика.');
+  return result;
+}
+export function readExistingLogin(source: EntrySource): {credential: string; fingerprint: string;
+  kind: 'manager' | 'employee' | 'analyst' | 'analyst-device'; deviceFingerprint?: string} {
+  if (source === 'manager') return {...readExistingManagerSession(), kind: 'manager'};
+  const profile = entryProfile(source), fingerprint = entryFingerprint(source);
+  if (source !== 'analyst') {
+    const result = readExistingManagerSession(profile, unprotectWindows, 'field.key', 'fieldServer');
+    if (entryFingerprint(source) !== fingerprint) throw new Error('Сохранённый вход изменился.');
+    return {...result, fingerprint, kind: 'employee'};
+  }
+  const {raw, record} = analystRecord(profile);
+  let credential = String(record.device_token || '');
+  if (credential.startsWith('dpapi-v1:'))
+    credential = unprotectWindows(Buffer.from(credential.slice(9), 'base64')).toString('utf8');
+  const kind = credential.startsWith('account:') ? 'analyst' : 'analyst-device';
+  if (kind === 'analyst') credential = credential.slice(8);
+  if (!/^[A-Za-z0-9_-]{20,512}$/.test(credential)) throw new Error('Сохранённый вход Аналитика недоступен.');
+  if (!raw.equals(checkedFile(profile, 'backend-settings.json', 1024 * 1024))) throw new Error('Вход Аналитика изменился.');
+  return {credential, fingerprint, kind, ...(kind === 'analyst-device' ? {deviceFingerprint: analystDeviceFingerprint()} : {})};
+}
+export function existingLogins(): {source: EntrySource; label: string; available: boolean}[] {
+  return ENTRY_SOURCES.map(source => {
+    try {
+      if (source === 'manager') return {source, label: ENTRY_LABELS[source], available: existingManagerStatus().available};
+      const profile = entryProfile(source);
+      entryFingerprint(source);
+      if (source === 'analyst') analystRecord(profile);
+      else {
+        const settings = JSON.parse(checkedFile(profile, 'settings.json', 1024 * 1024).toString('utf8'));
+        if (!trustedAuthority(settings.fieldServer)) throw new Error('Other origin');
+      }
+      return {source, label: ENTRY_LABELS[source], available: true};
+    } catch { return {source, label: ENTRY_LABELS[source], available: false}; }
+  });
 }

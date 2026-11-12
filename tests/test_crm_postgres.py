@@ -18,6 +18,8 @@ import test_crm_exchange as exchange_cases
 import test_crm_adoption as adoption_cases
 import test_crm_rebuild as rebuild_cases
 import test_crm_review_20261110 as review_cases
+import test_crm_common_access as common_cases
+import test_crm_staff_bridge as staff_cases
 
 pytestmark = pytest.mark.skipif(not os.environ.get('HARD_CRM_TEST_DSN_FILE'),
                                reason='Requires isolated PostgreSQL QA database')
@@ -65,7 +67,7 @@ def pg_world(tmp_path, monkeypatch):
             admin.execute('DROP SCHEMA ' + namespace + ' CASCADE')
 
 
-CASES = [function for module in (core, exchange_cases, adoption_cases, rebuild_cases, review_cases)
+CASES = [function for module in (core, exchange_cases, adoption_cases, rebuild_cases, review_cases, common_cases)
          for name, function in vars(module).items()
          if name.startswith('test_') and callable(function)
          and set(inspect.signature(function).parameters) == {'crm_world'}
@@ -77,6 +79,12 @@ CASES = [function for module in (core, exchange_cases, adoption_cases, rebuild_c
 @pytest.mark.parametrize('case', CASES, ids=lambda case: case.__name__)
 def test_business_invariants_on_postgres(pg_world, case):
     case(pg_world)
+
+
+@pytest.mark.parametrize('role', ['employee', 'courier', 'manager', 'analyst', 'observer'])
+def test_common_read_and_separate_write_on_postgres(pg_world, role):
+    common_cases.test_all_roles_read_other_portfolios_without_assignment(pg_world, role)
+    staff_cases.test_server_identity_and_roster_produce_common_read_and_role_limited_writes(pg_world, role)
 
 
 @pytest.mark.parametrize('revocation', ['capability', 'assignment'])

@@ -34,7 +34,7 @@ def install(app, host=None, *, authenticate=None):
                     "Требуется подтверждённое устройство CRM.", "identity_unmapped", 403
                 )
             with storage.connect() as conn:
-                p = access.from_uid(conn, uid, owner=uid == host.ADMIN_ID)
+                p = access.from_uid(conn, uid, owner=uid == host.ADMIN_ID, common_read=True)
             return p
         if request.headers.get("X-Pult-Token"):
             uid, manager, names = host._manager_gate(request)
@@ -46,10 +46,11 @@ def install(app, host=None, *, authenticate=None):
                     owner=uid == host.ADMIN_ID,
                     manager_names=names,
                     manager_write=caps["binds_edit"],
+                    common_read=True,
                 )
         uid, _ = host._auth(request)
         with storage.connect() as conn:
-            return access.from_uid(conn, uid, owner=uid == host.ADMIN_ID)
+            return access.from_uid(conn, uid, owner=uid == host.ADMIN_ID, common_read=True)
 
     async def body(request, limit=4 * 1024 * 1024):
         if request.content_length is not None and request.content_length > limit:
@@ -94,6 +95,7 @@ def install(app, host=None, *, authenticate=None):
             role=p.role,
             capabilities=sorted(p.capabilities),
             owner=p.owner,
+            read_all_contracts=access.reads_all(p),
             timezone=p.timezone,
             fields=fields(),
             dropdowns=DROPDOWNS,

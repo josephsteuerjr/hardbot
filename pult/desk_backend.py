@@ -23,6 +23,10 @@ import copy
 import hashlib
 import secrets
 import sys
+if '--crm-device-fingerprint' in sys.argv:
+    from pult.core.devices import device_fingerprint
+    print(device_fingerprint(), flush=True)
+    raise SystemExit(0)
 import threading
 import time
 import traceback

@@ -77,9 +77,9 @@ def test_real_device_auth_and_server_scope(pilot_http):
     p = pilot_http
     assert call("GET", "/api/crm/context", {"X-App-Token": "not-a-token"})[0] == 401
     status, own = call("GET", "/api/crm/portfolio", p["employee"])
-    assert status == 200 and own["total_contracts"] == 1
+    assert status == 200 and own["total_contracts"] == 2
     status, manager = call("GET", "/api/crm/portfolio", p["manager"])
-    assert status == 200 and manager["total_contracts"] == 1
+    assert status == 200 and manager["total_contracts"] == 2
     foreign = dict(
         schema_version=1,
         operation_id=str(uuid.uuid4()),

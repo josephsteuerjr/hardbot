@@ -232,7 +232,8 @@ async function renderCard() {
     "task",
     "reported_payment",
     "document",
-  ].filter(can);
+  ].filter(kind => can(kind) && card.contracts.some((contract: any) =>
+    !Array.isArray(contract.allowed_actions) || contract.allowed_actions.includes(kind)));
   const tabs = [
     ["overview", "Обзор"],
     ["contracts", "Договоры"],
@@ -874,6 +875,30 @@ async function connection() {
   state = await crm.state();
   $("view").innerHTML =
     `<div class="help"><h2>Общий пилот</h2><p>${esc(state.existingManager?.text || "Войдите в Руководитель на этом компьютере.")}</p><div class="actions">${button("existing-manager-connect", "Подключить по входу Руководителя", true)}</div>${state.connectionNotice ? `<p role="status">${esc(state.connectionNotice)}</p>` : ""}<h2 style="margin-top:30px">Проверочный сценарий</h2><p>Синтетическая база хранится отдельно на этом компьютере.</p><div class="toolbar"><select id="demo-role"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option><option value="observer">Наблюдатель другой команды</option></select>${button("demo-connect", "Открыть сценарий")}</div><label class="check"><input id="offline" type="checkbox"${state.offline ? " checked" : ""}>Проверить работу без связи</label><h2 style="margin-top:30px">Отдельный пилотный сервер</h2><div class="grid"><div class="field span"><label>HTTPS-адрес</label><input id="server" placeholder="Адрес подготовленного пилотного стенда"></div><div class="field"><label>Роль входа</label><select id="remote-role"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option></select></div><div class="field"><label>Логин</label><input id="login" autocomplete="username"></div><div class="field"><label>Пароль</label><input id="password" type="password" autocomplete="current-password"></div></div><div class="actions">${button("remote-connect", "Войти", true)}</div></div>`;
+  const savedLogins = state.existingLogins || [];
+  const managerConnect = $<HTMLButtonElement>('existing-manager-connect');
+  if (savedLogins.length) {
+    managerConnect.disabled = !savedLogins.some((entry: any) => entry.source === 'manager' && entry.available);
+    const intro = $('view').querySelector('.help > p');
+    if (intro) intro.textContent = 'Выберите сохранённый вход. Личность и права проверяются сервером.';
+    managerConnect.insertAdjacentHTML('afterend', savedLogins.filter((entry: any) => entry.source !== 'manager' && entry.available)
+      .map((entry: any) => `<button data-existing-source="${esc(entry.source)}">${esc(entry.label)}</button>`).join(''));
+    $('view').querySelectorAll<HTMLButtonElement>('[data-existing-source]').forEach(element => {
+      element.onclick = async () => {
+        element.disabled = true;
+        try {
+          const result = await crm.connect({action: 'existing-login', source: element.dataset.existingSource});
+          if (!result.ok) throw new Error(result.text || 'Не удалось подтвердить вход.');
+          section = 'portfolio';
+          await boot();
+        } catch (error) {
+          element.disabled = false;
+          const message = document.createElement('p'); message.setAttribute('role', 'alert');
+          message.textContent = (error as Error).message; element.closest('.actions')?.after(message);
+        }
+      };
+    });
+  }
   bind("existing-manager-connect", async () => {
     const result = await crm.connect({action: "existing-manager"});
     if (!result.ok) throw new Error(result.text || "Не удалось подключить общий пилот.");

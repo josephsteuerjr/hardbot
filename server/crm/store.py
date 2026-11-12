@@ -661,7 +661,7 @@ def project(conn, row, values, event, happened, origin):
 
 def card(principal, person_uuid):
     with storage.connect(readonly=True) as conn:
-        allowed = None if principal.owner or principal.all_contracts else access.scoped_contracts(conn, principal)
+        allowed = None if access.reads_all(principal) else access.readable_contracts(conn, principal)
         rows = [
             dict(r)
             for r in conn.execute(
@@ -699,7 +699,9 @@ def card(principal, person_uuid):
                 item = dict(entity)
                 item["data"] = json.loads(item.pop("data_json"))
                 entities.append(item)
+        write_scope = access.scoped_contracts(conn, principal)
         for row in rows:
+            row['allowed_actions'] = access.writable_actions(conn, principal, row['contract_uuid'], scope=write_scope)
             row["fields"] = json.loads(row.pop("fields_json"))
             row["revisions"] = {
                 key: 0 for key in ("call", "visit", "contact", "forecast", "accounting")
@@ -721,7 +723,7 @@ def portfolio(principal, search="", limit=200):
     with storage.connect(readonly=True) as conn:
         if storage.is_postgres(conn):
             return _postgres_portfolio(conn, principal, search, limit)
-        allowed = access.scoped_contracts(conn, principal)
+        allowed = access.readable_contracts(conn, principal)
         people = {}
         for row in conn.execute(
             "SELECT c.*,p.name FROM crm_contracts c JOIN crm_people p USING(person_uuid) ORDER BY p.name,c.external_id"
@@ -780,9 +782,9 @@ def _postgres_portfolio(conn, principal, search, limit):
     from decimal import Decimal
     limit = min(max(int(limit), 1), 500)
     predicates, parameters = [], []
-    if not principal.owner and not principal.all_contracts:
+    if not access.reads_all(principal):
         predicates.append("c.contract_uuid = ANY(?)")
-        parameters.append(sorted(access.scoped_contracts(conn, principal)))
+        parameters.append(sorted(access.readable_contracts(conn, principal)))
     if search:
         predicates.append("strpos(lower(concat_ws(' ',p.name,c.external_id,c.fields_json::jsonb->>'phone',c.fields_json::jsonb->>'address')),lower(?))>0")
         parameters.append(search)

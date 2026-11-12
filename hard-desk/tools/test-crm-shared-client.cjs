@@ -5,14 +5,20 @@ const {app,BrowserWindow,net,dialog}=require('electron');
 const qa=process.env.HARD_CRM_QA_ROOT, phase=Number(process.env.HARD_CRM_QA_PHASE);
 assert(qa && [1,2].includes(phase));
 const desk=path.resolve(__dirname,'..'), employee='33333333-3333-4333-8333-333333333333';
+const source=process.env.HARD_CRM_QA_ENTRY || 'manager';
+assert(['manager','soft','analyst'].includes(source));
 const credential='synthetic-manager-credential-for-client-qa-0123456789';
 process.env.HARD_USER_DATA=path.join(qa,'profile'); process.env.HARD_CRM_SOURCE=path.dirname(desk);
 process.env.LOCALAPPDATA=path.join(qa,'local-app-data');
 fs.mkdirSync(qa,{recursive:true});
 if (phase===1) {
-  const manager=path.join(process.env.LOCALAPPDATA,'Hard/manager/data');fs.mkdirSync(manager,{recursive:true});
-  fs.writeFileSync(path.join(manager,'settings.json'),JSON.stringify({server:'https://hard.rimborso.ru:8080'}));
-  fs.writeFileSync(path.join(manager,'device.key'),execFileSync(path.join(desk,'installer/bin/process-check.exe'),['seal'],{input:Buffer.from(credential),windowsHide:true}));
+  const profile=path.join(process.env.LOCALAPPDATA,'Hard',source,'data');fs.mkdirSync(profile,{recursive:true});
+  const protect=value=>execFileSync(path.join(desk,'installer/bin/process-check.exe'),['seal'],{input:Buffer.from(value),windowsHide:true});
+  if(source==='analyst')fs.writeFileSync(path.join(profile,'backend-settings.json'),JSON.stringify({active:'QA',profiles:{QA:{url:'https://hard.rimborso.ru',device_token:'dpapi-v1:'+protect('account:'+credential).toString('base64')}}}));
+  else {
+    fs.writeFileSync(path.join(profile,'settings.json'),JSON.stringify(source==='manager'?{server:'https://hard.rimborso.ru:8080'}:{fieldServer:'https://hard.rimborso.ru'}));
+    fs.writeFileSync(path.join(profile,source==='manager'?'device.key':'field.key'),protect(credential));
+  }
 }
 app.getVersion=()=>JSON.parse(fs.readFileSync(path.join(desk,'package.json'))).version;
 const realFetch=net.fetch.bind(net);let mode=phase===1?'active':'offline', exchanges=0;
@@ -23,13 +29,14 @@ net.fetch=async (url,init={})=>{
     const route=new URL(url).pathname;
     let status=200,value;
     if(route.endsWith('/auth/exchange')) {
-      assert.equal(init.headers['X-Pult-Token'],credential);exchanges++;
+      assert.equal(init.headers[source==='soft'?'X-App-Token':'X-Pult-Token'],credential);exchanges++;
+      if(source==='analyst')assert.equal(init.headers['X-CRM-Entry'],'analyst');
       value={ok:true,token:'crm1.'+'B'.repeat(180),employee_uuid:employee,expires_at:Math.floor(Date.now()/1000)+1800,name:'Synthetic manager'};
     } else if(mode==='revoked') {status=403;value={error:'manager_required',text:'Synthetic revoked access'};}
     else {
       assert.equal(init.headers.Authorization,'Bearer crm1.'+'B'.repeat(180));
       assert.equal(init.headers['X-Pult-Token'],undefined);
-      if(route.endsWith('/context'))value={employee_uuid:employee,team_id:'crm-pilot-managers',role:'manager',capabilities:['call','exchange'],owner:false,fields:[],dropdowns:{},cohorts:[]};
+      if(route.endsWith('/context'))value={employee_uuid:employee,team_id:'crm-pilot-managers',role:source==='soft'?'employee':source,read_all_contracts:true,capabilities:['call','exchange'],owner:false,fields:[],dropdowns:{},cohorts:[]};
       else if(route.endsWith('/portfolio'))value={people:[],total_people:0,total_contracts:0,truncated:false};
       else if(route.endsWith('/anchor'))value={anchor_id:crypto.randomUUID(),installation_id:'synthetic-installation',server_at:new Date().toISOString()};
       else {status=503;value={text:'Synthetic temporary failure'};}
@@ -50,7 +57,7 @@ const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).diges
   }
   assert(win);const js=code=>win.webContents.executeJavaScript(code,true);
   if(phase===1){
-    const result=await js('window.crm.connect({action:"existing-manager"})'); assert(result.ok);
+    const result=await js('window.crm.connect('+JSON.stringify(source==='manager'?{action:'existing-manager'}:{action:'existing-login',source})+')'); assert(result.ok);
     const state=await js('window.crm.state()'); assert.equal(state.context.employee_uuid,employee); assert(state.connection.shared);
     assert(!JSON.stringify(state).includes(credential)); assert.equal(exchanges,1);
     await js('window.crm.connect({action:"offline",value:true})');

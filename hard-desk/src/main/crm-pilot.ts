@@ -13,7 +13,7 @@ import {
 } from "./store";
 import { fetchBuffered } from "./transport";
 import * as queue from "./crm-queue";
-import { PILOT_BASE, existingManagerStatus } from "./crm-manager-login";
+import { PILOT_BASE, existingManagerStatus, existingLogins, ENTRY_SOURCES, EntrySource } from "./crm-manager-login";
 import { pilotCredential } from "./crm-pilot-session";
 
 const isolatedProfile = !!process.env.HARD_USER_DATA;
@@ -49,9 +49,10 @@ let currentContext: any = null,
 const sessionId = randomUUID();
 const config = () =>
   readSettings().crmConnection as
-    | { mode?: string; role?: string; server?: string; auth?: string }
+    | { mode?: string; role?: string; server?: string; auth?: string; source?: EntrySource }
     | undefined;
-const shared = () => config()?.auth === "existing-manager" && config()?.server === PILOT_BASE;
+const shared = () => ['existing-manager', 'existing-login'].includes(config()?.auth || '') && config()?.server === PILOT_BASE;
+const entrySource = (): EntrySource => config()?.source || 'manager';
 const demo = () => config()?.mode !== "remote";
 const role = () => config()?.role || "employee";
 const origin = () => (demo() ? "synthetic-local" : config()?.server || "");
@@ -201,7 +202,7 @@ const send: queue.Transport = async (method, action, body, query) => {
   try {
     const previous = readSettings().crmLast as any;
     const expected = currentContext?.employee_uuid || (previous?.origin === base ? previous.context?.employee_uuid : undefined);
-    let token = shared() ? await pilotCredential(expected) : role() === "employee" ? readFieldToken() : readToken();
+    let token = shared() ? await pilotCredential(expected, false, entrySource()) : role() === "employee" ? readFieldToken() : readToken();
     if (!base || !token) return {ok: false, status: 401, text: "Войдите в пилотный сервер."};
     const url = new URL(shared() ? PILOT_BASE + "/api/crm/" + action : "/api/crm/" + action, base);
     for (const [key, value] of Object.entries(query || {})) if (value != null) url.searchParams.set(key, String(value));
@@ -215,7 +216,7 @@ const send: queue.Transport = async (method, action, body, query) => {
     }, ["export", "import-preview", "import-apply"].includes(action) ? 120000 : 30000);
     let response = await request(token), value = await response.json();
     if (shared() && response.status === 401 && value.error === "pilot_session_expired") {
-      token = await pilotCredential(expected, true);
+      token = await pilotCredential(expected, true, entrySource());
       response = await request(token); value = await response.json();
     }
     if (shared() && (response.status === 401 || (response.status === 403 &&
@@ -225,7 +226,7 @@ const send: queue.Transport = async (method, action, body, query) => {
   } catch (error) {
     const status = Number((error as any)?.status || 0);
     if (shared() && (status === 401 || status === 403)) forgetAuthority(String((error as Error).message));
-    return {ok: false, status, kind: status ? "auth" : "offline", text: status ? String((error as Error).message) : "Нет подтверждённой связи с пилотным сервером. Проверьте вход Руководителя и подключение к сети."};
+    return {ok: false, status, kind: status ? "auth" : "offline", text: status ? String((error as Error).message) : "Нет подтверждённой связи с сервером CRM. Проверьте сохранённый вход и подключение к сети."};
   }
 };
 
@@ -351,11 +352,14 @@ app
       return net.fetch(pathToFileURL(path).toString());
     });
     await backendStart();
-    if (!config() && app.isPackaged && !isolatedProfile && existingManagerStatus().available) {
+    const availableLogins = existingLogins().filter(entry => entry.available);
+    if (!config() && app.isPackaged && !isolatedProfile && availableLogins.length === 1) {
       try {
-        await pilotCredential();
-        writeSettings({crmConnection: {mode: "remote", role: "manager", server: PILOT_BASE, auth: "existing-manager"}});
-      } catch { connectionNotice = "Общий пилот пока недоступен. Повторите подключение через сохранённый вход Руководителя."; }
+        const source = availableLogins[0].source;
+        await pilotCredential(undefined, false, source);
+        writeSettings({crmConnection: {mode: "remote", role: source === 'manager' || source === 'analyst' ? source : 'employee', source,
+          server: PILOT_BASE, auth: "existing-login"}});
+      } catch { connectionNotice = "CRM пока недоступна. Повторите подключение через сохранённый вход."; }
     }
     await identify();
     win = new BrowserWindow({
@@ -390,6 +394,7 @@ app
       },
       context: currentContext,
       existingManager: existingManagerStatus(),
+      existingLogins: existingLogins(),
       connectionNotice,
       offline,
       owner,
@@ -508,9 +513,12 @@ app
         offline = !!input.value;
         return { ok: true };
       }
-      if (input?.action === "existing-manager") {
-        await pilotCredential(undefined, true);
-        writeSettings({crmConnection: {mode: "remote", role: "manager", server: PILOT_BASE, auth: "existing-manager"}, crmLast: undefined});
+      if (input?.action === "existing-manager" || input?.action === 'existing-login') {
+        const source: EntrySource = input.action === 'existing-manager' ? 'manager' : input.source;
+        if (!ENTRY_SOURCES.includes(source)) throw new Error('Выберите сохранённый вход.');
+        await pilotCredential(undefined, true, source);
+        writeSettings({crmConnection: {mode: "remote", role: source === 'manager' || source === 'analyst' ? source : 'employee', source,
+          server: PILOT_BASE, auth: "existing-login"}, crmLast: undefined});
         connectionNotice = "";
       } else if (input?.mode === "synthetic") {
         if (!["employee", "manager", "observer"].includes(input.role))

@@ -16,6 +16,7 @@ class Principal:
     employee_scope: frozenset
     timezone: str = "Europe/Samara"
     all_contracts: bool = False
+    read_all_contracts: bool = False
 
     @property
     def owner(self):
@@ -46,6 +47,35 @@ def scoped_contracts(conn, principal):
     return result
 
 
+def reads_all(principal):
+    return principal.owner or principal.all_contracts or principal.read_all_contracts
+
+
+def readable_contracts(conn, principal):
+    if reads_all(principal):
+        return {r[0] for r in conn.execute("SELECT contract_uuid FROM crm_contracts")}
+    return scoped_contracts(conn, principal)
+
+
+def writable_actions(conn, principal, contract_id, *, scope=None):
+    scope = scoped_contracts(conn, principal) if scope is None else scope
+    if contract_id not in scope:
+        return []
+    capabilities = set(principal.capabilities)
+    if principal.owner:
+        capabilities.update({'call', 'visit', 'note', 'contact', 'promise', 'task',
+                             'reported_payment', 'document', 'accounting', 'correct'})
+    if principal.role == 'employee':
+        at = now()
+        assigned = {r[0] for r in conn.execute(
+            'SELECT capability FROM crm_assignments WHERE employee_uuid=? AND contract_uuid=? '
+            'AND starts_at<=? AND (ends_at IS NULL OR ends_at>?)',
+            (principal.employee_uuid, contract_id, at, at))}
+        capabilities -= {'call', 'visit'} - assigned
+    return sorted(capabilities & {'call', 'visit', 'note', 'contact', 'promise', 'task',
+                                  'reported_payment', 'document', 'accounting', 'correct', 'delivery'})
+
+
 def contracts(conn, principal, requested, *, capability=None):
     if (
         not isinstance(requested, list)
@@ -55,7 +85,7 @@ def contracts(conn, principal, requested, *, capability=None):
         or len(set(requested)) != len(requested)
     ):
         raise CRMError("Выберите от 1 до 100 договоров без повторов.")
-    if principal.owner or principal.all_contracts:
+    if principal.owner or principal.all_contracts or (capability is None and principal.read_all_contracts):
         allowed = {r[0] for r in conn.execute(
             "SELECT contract_uuid FROM crm_contracts WHERE contract_uuid IN ("
             + ",".join("?" for _ in requested) + ")", requested)}
@@ -103,7 +133,8 @@ def employee(conn, principal, identifier, capability=None):
     return dict(row)
 
 
-def from_uid(conn, uid, *, owner=False, manager_names=None, manager_write=False):
+def from_uid(conn, uid, *, owner=False, manager_names=None, manager_write=False,
+             common_read=False):
     link = conn.execute(
         "SELECT l.*,e.active FROM crm_actor_links l JOIN crm_employees e USING(employee_uuid) "
         "WHERE actor_uid=? AND l.active=1 AND e.active=1",
@@ -169,4 +200,5 @@ def from_uid(conn, uid, *, owner=False, manager_names=None, manager_write=False)
         frozenset(caps),
         frozenset(scope),
         membership["timezone"],
+        read_all_contracts=common_read,
     )

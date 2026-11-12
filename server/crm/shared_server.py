@@ -46,7 +46,16 @@ def create_app(*, sessions=None):
         # role, subject, server URL or local settings can grant access.
         if request.query_string or request.content_length:
             raise CRMError('Подключение не принимает параметры личности.')
-        result = await sessions.exchange(request.headers.get('X-Pult-Token', ''))
+        entries = [(key, request.headers.get(key, '').strip()) for key in
+                   ('X-Pult-Token', 'X-App-Token', 'X-Device-Token')]
+        entries = [(key, token) for key, token in entries if token]
+        if len(entries) != 1:
+            raise CRMError('Требуется один действующий вход.', 'pilot_session_invalid', 401)
+        header, credential = entries[0]
+        kind = ('employee' if header == 'X-App-Token' else 'analyst-device' if header == 'X-Device-Token'
+                else 'analyst' if request.headers.get('X-CRM-Entry') == 'analyst' else 'manager')
+        result = await sessions.exchange(credential, kind=kind,
+                                        device_fingerprint=request.headers.get('X-Device-Id', ''))
         return web.json_response({'ok': True, **result})
 
     async def health(request):
