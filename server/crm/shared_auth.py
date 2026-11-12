@@ -85,7 +85,7 @@ class Authority:
         if kind not in ENTRY_KINDS:
             raise fault()
         header = 'X-App-Token' if kind == 'employee' else 'X-Device-Token' if kind == 'analyst-device' else 'X-Pult-Token'
-        headers = {header: token, 'X-Client-Version': '3.3.0-pilot.3',
+        headers = {header: token, 'X-Client-Version': '3.3.0-pilot.4',
                    'X-Work-Product': 'crm', 'X-Client-Runtime': 'crm-identity-bridge'}
         if kind == 'analyst':
             headers['X-CRM-Entry'] = 'analyst'

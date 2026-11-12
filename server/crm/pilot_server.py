@@ -377,6 +377,9 @@ def serve():
                     )
                 elif action == "card":
                     result = store.card(p, query.get("person_uuid", ""))
+                elif action == 'work-portfolio':
+                    from . import work_portfolio
+                    result=work_portfolio.read(p,query.get('search',''),query.get('work','all'),query.get('employee_uuid'),query.get('offset',0),query.get('limit',100))
                 elif action == 'contracts':
                     result = store.contract_list(p,query.get('search',''),query.get('work',''),query.get('limit',100))
                 elif action == "shifts":

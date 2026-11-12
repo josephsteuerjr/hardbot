@@ -53,6 +53,8 @@ let state: any,
   scriptOpened: any,
   cardScript: any = null,
   renderGeneration = 0;
+let portfolioView='mine', portfolioWork='all', portfolioEmployee='', portfolioSearch='', portfolioOffset=0;
+let portfolioIdentity='',portfolioGeneration=0;
 const notice = (text = "") => {
   $("notice").textContent = text;
 };
@@ -111,6 +113,17 @@ const table = (heads: string[], rows: string[]) =>
 async function boot() {
   state = await crm.state();
   context = state.context;
+  if (portfolioIdentity!==context?.employee_uuid) {
+    portfolioIdentity=context?.employee_uuid || '';
+    portfolioView=['manager','analyst','observer'].includes(context?.role)?'all':'mine';
+    portfolioEmployee=context?.employee_uuid || '';portfolioWork='all';portfolioSearch='';portfolioOffset=0;
+    const saved=(await crm.draft('portfolio-view')).data;
+    if(saved && ['mine','all'].includes(saved.view)) {
+      portfolioView=saved.view;
+      portfolioWork=['all','call','visit','both','delivery'].includes(saved.work)?saved.work:'all';
+      if((context?.staff || []).some((p:any)=>p.employee_uuid===saved.employee) || saved.employee===context?.employee_uuid)portfolioEmployee=saved.employee;
+    }
+  }
   $("identity").textContent = ({manager:'Руководитель',observer:'Наблюдатель',courier:'Курьер',analyst:'Аналитик'} as any)[context?.role] || 'Сотрудник';
   $("version").textContent = state.version;
   $("connection").textContent =
@@ -219,13 +232,38 @@ function contractDetails(contract: any) {
   return `<article class="contract-details" data-contract-details="${esc(contract.contract_uuid)}"><h3>${esc(contract.external_id)} · ${esc(contract.creditor_id)}</h3><dl class="contract-facts"><div><dt>Дата КД</dt><dd data-field="kd_date">${calendarDate(fields.kd_date)}</dd></div><div><dt>Выданная сумма</dt><dd data-field="issued_sum">${amount(fields.issued_sum, contract.currency || 'Валюта не задана')}</dd></div><div><dt>Дней просрочки</dt><dd data-field="dp">${esc(fields.dp ?? 'Не указано')}</dd></div><div><dt>${people.size ? 'Ответственные' : 'Ответственные из реестра'}</dt><dd data-field="responsibility">${esc(responsibility || 'Не назначены')}</dd></div><div><dt>Последняя оплата</dt><dd>${amount(fields.last_payment_sum, contract.currency || '')}${fields.last_payment_date ? ' · ' + calendarDate(fields.last_payment_date) : ''}</dd></div>${deliveryMarkup(fields)}</dl><details><summary>Структура задолженности</summary>${articles.length ? `<dl class="debt-articles">${articles.map(key => `<div><dt>${esc(title(key))}</dt><dd data-field="${esc(key)}">${amount(fields[key], contract.currency || '')}</dd></div>`).join('')}</dl>` : '<p class="muted">Разбивка в источнике не указана</p>'}</details></article>`;
 }
 
-async function portfolio(search = "") {
-  const data = await request("GET", "portfolio", undefined, {
-    search,
-    limit: 500,
-  });
+async function portfolio(search = portfolioSearch, offset=portfolioOffset) {
+  const generation=++portfolioGeneration;
+  portfolioSearch=search;portfolioOffset=offset;
+  await crm.draft('portfolio-view',{view:portfolioView,work:portfolioWork,employee:portfolioEmployee});
+  const personal=portfolioView==='mine';
+  const data = await request("GET", personal?'work-portfolio':'portfolio', undefined,
+    personal?{search,work:portfolioWork,employee_uuid:portfolioEmployee,offset,limit:100}:{search,limit:500});
+  if(generation!==portfolioGeneration || section!=='portfolio')return;
+  const modes=`<div class="tabs portfolio-modes"><button data-portfolio-view="mine" class="${personal?'active':''}">Мой портфель</button><button data-portfolio-view="all" class="${personal?'':'active'}">Все клиенты</button></div>`;
+  const staff=context.staff || [];
+  const selector=personal&&staff.length>1?`<label class="portfolio-person">Сотрудник <select id="portfolio-employee">${staff.map((p:any)=>`<option value="${esc(p.employee_uuid)}"${p.employee_uuid===portfolioEmployee?' selected':''}>${esc(p.name)}</option>`).join('')}</select></label>`:'';
+  if(personal) {
+    const options=[['all','Все',data.counts.all],['call','Звонки',data.counts.call],['visit','Выезды',data.counts.visit],['both','Оба',data.counts.both],
+      ...(data.counts.delivery||context.role==='courier'?[['delivery','Доставка',data.counts.delivery]]:[])];
+    const filters=`<div class="work-filters">${options.map(([key,title,count])=>`<button data-work-filter="${key}" class="${portfolioWork===key?'active':''}" aria-pressed="${portfolioWork===key}">${title} <span>${count}</span></button>`).join('')}</div>`;
+    const debt=Object.entries(data.currencies || {}).map(([unit,value])=>amount(value,unit)).join(' · ');
+    $('view').innerHTML=modes+selector+filters+`<div class="toolbar"><input type="search" id="search" placeholder="Имя, договор, телефон, адрес" value="${esc(search)}">${button('search-go','Найти')}${button('refresh','Обновить')}</div>`+
+      `<p class="muted" data-work-total>Договоров: ${data.total_contracts} · Клиентов: ${data.total_people}${debt?' · Долг: '+debt:''}${data.unknown_amounts?' · Без подтверждённой суммы или валюты: '+data.unknown_amounts:''}</p>`+
+      table(['Клиент','Договор / кредитор','Работа','Последний звонок','Последний выезд','Долг'],data.contracts.map((row:any)=>{
+        const f=row.fields;
+        return `<tr data-work-contract="${esc(row.contract_uuid)}"><td><button class="link" data-person="${esc(row.person_uuid)}">${esc(row.client_name || 'Без имени')}</button></td><td>${esc(row.external_id)}<br><span class="muted">${esc(row.creditor_id)}</span></td><td>${row.work_kinds.map((kind:string)=>`<span class="work-kind">${esc(labels[kind] || kind)}</span>`).join('')}</td><td>${esc(f.soft_call_status || '—')}${f.soft_comm_date?'<br>'+calendarDate(f.soft_comm_date):''}${f.soft_comment?'<div class="queue-comment">'+esc(f.soft_comment)+'</div>':''}</td><td>${esc(f.call_status || '—')}${f.visit_date?'<br>'+calendarDate(f.visit_date):''}${f.visit_comment?'<div class="queue-comment">'+esc(f.visit_comment)+'</div>':''}</td><td>${amount(f.debt_today ?? f.debt_total,row.currency || 'Валюта не задана')}</td></tr>`;
+      }))+
+      (data.contracts.length?'':'<p class="empty">По выбранным условиям договоров нет</p>')+
+      `<div class="toolbar portfolio-pages"><button id="work-previous"${offset===0?' disabled':''}>Назад</button><span>${data.total_contracts?offset+1:0}–${Math.min(offset+data.contracts.length,data.total_contracts)} из ${data.total_contracts}</span><button id="work-next"${data.has_more?'':' disabled'}>Далее</button></div>`;
+    bind('work-previous',()=>portfolio(portfolioSearch,Math.max(0,portfolioOffset-100)));
+    bind('work-next',()=>portfolio(portfolioSearch,portfolioOffset+100));
+    $('view').querySelectorAll<HTMLButtonElement>('[data-work-filter]').forEach(b=>b.onclick=()=>{portfolioWork=b.dataset.workFilter!;void portfolio(portfolioSearch,0).catch(e=>notice(e.message));});
+    const employee=$<HTMLSelectElement>('portfolio-employee');
+    if(employee)employee.onchange=()=>{portfolioEmployee=employee.value;portfolioWork='all';void portfolio(portfolioSearch,0).catch(e=>notice(e.message));};
+  } else {
   $("view").innerHTML =
-    `<div class="toolbar"><input type="search" id="search" placeholder="Имя, договор, телефон, адрес" value="${esc(search)}">${button("search-go", "Найти")}${button("refresh", "Обновить")}</div><div class="muted">Клиентов: ${data.total_people} · Договоров: ${data.total_contracts}${data.truncated ? " · Уточните поиск" : ""}</div>` +
+    modes+`<div class="toolbar"><input type="search" id="search" placeholder="Имя, договор, телефон, адрес" value="${esc(search)}">${button("search-go", "Найти")}${button("refresh", "Обновить")}</div><div class="muted">Клиентов: ${data.total_people} · Договоров: ${data.total_contracts}${data.truncated ? " · Уточните поиск" : ""}</div>` +
     table(
       ["Клиент", "Договоры", "Остаток по валютам"],
       data.people.map(
@@ -239,10 +277,12 @@ async function portfolio(search = "") {
           }</td></tr>`,
       ),
     );
-  bind("search-go", () => portfolio($<HTMLInputElement>("search").value));
+  }
+  $('view').querySelectorAll<HTMLButtonElement>('[data-portfolio-view]').forEach(b=>b.onclick=()=>{portfolioView=b.dataset.portfolioView!;void portfolio(portfolioSearch,0).catch(e=>notice(e.message));});
+  bind("search-go", () => portfolio($<HTMLInputElement>("search").value,0));
   bind("refresh", () => portfolio());
   $<HTMLInputElement>("search").onkeydown = (e) => {
-    if (e.key === "Enter") void portfolio($<HTMLInputElement>("search").value);
+    if (e.key === "Enter") void portfolio($<HTMLInputElement>("search").value,0).catch(error=>notice(error.message));
   };
   document
     .querySelectorAll<HTMLButtonElement>("[data-person]")
@@ -250,6 +290,7 @@ async function portfolio(search = "") {
 }
 
 async function openCard(person: string) {
+  portfolioGeneration++;
   try {
     card = await request("GET", "card", undefined, { person_uuid: person });
     cardScript = null;

@@ -11,7 +11,7 @@ const card={person:{person_uuid:'person-one',name:'Синтетический к
 window.review={commands:[],scriptReads:0,published:{script:{title:'Подсказка первая',steps:[{title:'Первый шаг',text:'Текст первой версии'}]},published_revision:2,published_at:'2026-11-10T00:00:00Z',script_ref:{team_id:'team-A',published_revision:2,script_hash:'a'.repeat(64)}}};
 window.crm={state:async()=>({version:'review-local',context,connection:{mode:'synthetic'}}),
 api:async(method,action)=>{let data={};if(action==='portfolio')data={people:[{person_uuid:'person-one',name:'Синтетический клиент',contracts:2,currencies:{TJS:'100.00'}}],total_people:1,total_contracts:2};if(action==='card')data=card;if(action==='script'){window.review.scriptReads++;data=window.review.published}return {ok:true,data:structuredClone(data)}},
-draft:async(key,...args)=>{if(args.length)localStorage.setItem('review:'+key,JSON.stringify(args[0]));return {ok:true,data:JSON.parse(localStorage.getItem('review:'+key)||'null')}},
+draft:async(key,...args)=>{if(key==='portfolio-view'&&!args.length&&!localStorage.getItem('portfolio-view'))return {ok:true,data:{view:'all'}};if(args.length)localStorage.setItem('review:'+key,JSON.stringify(args[0]));return {ok:true,data:JSON.parse(localStorage.getItem('review:'+key)||'null')}},
 command:async body=>{window.review.commands.push(structuredClone(body));return {ok:true}},
 telemetry:async()=>({ok:true}),queue:async()=>({ok:true,data:{items:[]}}),win:()=>{}};
 }'''

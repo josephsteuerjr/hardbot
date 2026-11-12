@@ -12,7 +12,7 @@ const card={person:{person_uuid:'person-one',name:'Карточка провер
 window.cardFixture={card,context,commands:[]};
 window.crm={state:async()=>({version:'local-qa',context,connection:{mode:'synthetic'}}),
 api:async(method,action)=>({ok:true,data:structuredClone(action==='portfolio'?{people:[{person_uuid:'person-one',name:card.person.name,contracts:1,currencies:{RUB:'35400.00'}}],total_people:1,total_contracts:1}:action==='card'?card:action==='script'?{script:{title:'Разговор с клиентом',steps:[{title:'Проверить собеседника',text:'Уточните, с кем разговариваете. Проверьте сведения о договоре.'},{title:'Обсудить оплату',text:'Уточните возможную сумму и дату оплаты. Зафиксируйте результат разговора.'}]},published_revision:3,published_at:'2026-11-12T00:00:00Z'}:{})}),
-draft:async(key,...args)=>{if(args.length)localStorage.setItem('card-draft:'+key,JSON.stringify(args[0]));return {ok:true,data:JSON.parse(localStorage.getItem('card-draft:'+key)||'null')}},command:async body=>{cardFixture.commands.push(structuredClone(body));return {ok:true}},telemetry:async()=>({ok:true}),queue:async()=>({ok:true,data:{items:[]}}),win:()=>{}};
+draft:async(key,...args)=>{if(key==='portfolio-view'&&!args.length&&!localStorage.getItem('portfolio-view'))return {ok:true,data:{view:'all'}};if(args.length)localStorage.setItem('card-draft:'+key,JSON.stringify(args[0]));return {ok:true,data:JSON.parse(localStorage.getItem('card-draft:'+key)||'null')}},command:async body=>{cardFixture.commands.push(structuredClone(body));return {ok:true}},telemetry:async()=>({ok:true}),queue:async()=>({ok:true,data:{items:[]}}),win:()=>{}};
 }'''
 with sync_playwright() as p:
     browser=p.chromium.launch(headless=True)
