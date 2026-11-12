@@ -11,8 +11,8 @@ const supervisor={employee_uuid:'manager',name:'Руководитель про�
 const context={role:manager?'manager':'employee',employee_uuid:manager?'manager':'worker',owner:false,read_all_contracts:true,
 capabilities:['call','visit','note',...(manager?['analytics']:[])],staff:manager?[supervisor,worker]:[worker],
 fields:[{key:'soft_comment',title:'Комментарий звонка',type:'text'},{key:'soft_call_status',title:'Результат звонка',type:'text'},{key:'call_status',title:'Результат выезда',type:'text'},{key:'visit_comment',title:'Комментарий выезда',type:'text'}],dropdowns:{}};
-const rows=Array.from({length:469},(_,i)=>({contract_uuid:'contract-'+i,person_uuid:'person-'+i,external_id:'Q'+String(i).padStart(4,'0'),creditor_id:'Тестовый кредитор',currency:'RUB',client_name:'Клиент '+String(i).padStart(4,'0'),
-work_kinds:i<429?['call']:i<435?['visit']:['call','visit'],fields:{phone:'55512345',address:'Тестовый адрес',debt_today:'10.00',soft_call_status:'Нет контакта',soft_comment:'Телефонный результат',call_status:'В работе',visit_comment:'Выездной результат'},revisions:{call:0,visit:0}}));
+const rows=Array.from({length:469},(_,i)=>({contract_uuid:'contract-'+i,person_uuid:'person-'+i,external_id:'Q'+String(i).padStart(4,'0'),creditor_id:'registry-partner:Тестовый кредитор',currency:'RUB',client_name:'Клиент '+String(i).padStart(4,'0'),
+work_kinds:i<429?['call']:i<435?['visit']:['call','visit'],fields:{partner:'Тестовый кредитор',phone:'55512345',address:'Тестовый адрес',debt_today:'10.00',soft_call_status:'Нет контакта',soft_comment:'Телефонный результат',call_status:'В работе',visit_comment:'Выездной результат'},revisions:{call:0,visit:0}}));
 window.workReview={rows,queries:[],commands:[]};
 window.crm={state:async()=>({version:'queue-qa',context,connection:{mode:'synthetic'}}),
 api:async(method,action,body,query={})=>{
@@ -44,6 +44,7 @@ with sync_playwright() as p:
     page.add_init_script('('+fixture+')()');page.goto((folder/'index.html').as_uri())
     page.locator('[data-work-contract]').first.wait_for()
     assert page.locator('[data-work-contract]').count()==100
+    assert 'registry-partner:' not in page.locator('[data-work-contract]').first.inner_text()
     for key,count in [('all',469),('call',463),('visit',40),('both',34)]:
         assert page.locator(f'[data-work-filter={key}] span').inner_text()==str(count)
     assert '4690.00 RUB' in page.locator('[data-work-total]').inner_text()
