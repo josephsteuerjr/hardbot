@@ -66,7 +66,7 @@ def dashboard(principal,month,employee=None):
             if workday:
                 if not start<=date.fromisoformat(workday)<next_month:continue
             elif not first<=instant(event['occurred_at'])<last:continue
-            if event['kind'] in {'correction','manual_edit','payment_confirmed'}:continue
+            if event['kind'] in {'correction','manual_edit','payment_confirmed','source_sync'}:continue
             contracts=json.loads(event['contracts_json']);counts[event['kind']]+=1;processed.update(contracts)
             operations.append(dict(event_id=event['event_id'],kind=event['kind'],occurred_at=None if workday else event['occurred_at'],workday=workday,
                 contract_ids=contracts,text=payload.get('text') or payload.get('delivery_comment') or '',origin=event['origin']))

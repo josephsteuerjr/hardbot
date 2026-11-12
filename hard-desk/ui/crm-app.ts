@@ -30,6 +30,7 @@ const amount = (value: any, currency = "") =>
     : esc(value) + (currency ? " " + esc(currency) : "");
 const labels: Record<string, string> = {
   call: "Звонок",
+  source_sync: 'Сверка прежнего приложения',
   visit: "Выезд",
   delivery: 'Передать конверт',
   note: "Заметка",

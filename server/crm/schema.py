@@ -1,6 +1,6 @@
 """Additive canonical tables; legacy IDs, accounts and documents are retained."""
 
-VERSION = 2
+VERSION = 3
 
 DDL = """
 CREATE TABLE IF NOT EXISTS crm_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -161,9 +161,10 @@ def initialize(conn):
     # executescript would commit an enclosing legacy transaction; execute each
     # complete SQL statement instead, including trigger bodies.
     import sqlite3
+    from .legacy_exchange import DDL as exchange_ddl
 
     statement = ""
-    for line in DDL.splitlines(True):
+    for line in (DDL + exchange_ddl).splitlines(True):
         statement += line
         if sqlite3.complete_statement(statement):
             conn.execute(statement)
