@@ -12,8 +12,7 @@ from .contract import now
 
 def tick(database, employees):
     snapshot=legacy_exchange.capture(database)
-    review=legacy_exchange.preview(snapshot)
-    receipt=legacy_exchange.apply(snapshot,review)
+    receipt=legacy_exchange.apply(snapshot,None)
     outgoing=legacy_mirror.deliver(database,set(employees)) if employees else []
     return dict(at=now(),captured_at=snapshot['captured_at'],incoming=receipt,
                 outgoing=dict(delivered=sum(r['state']=='delivered' for r in outgoing),needs_review=sum(r['state']=='needs_review' for r in outgoing)))

@@ -156,3 +156,12 @@ def test_changed_creditor_never_attaches_new_history_to_the_old_contract(crm_wor
     with storage.connect(readonly=True) as conn:
         assert conn.execute("SELECT contracts_json FROM crm_events WHERE kind='call'").fetchone()[0]=='[]'
 
+
+def test_commit_guard_catches_an_unjournaled_change_to_a_touched_field(crm_world):
+    path=world(crm_world);primary_call(path);snapshot=exchange.capture(path);review=exchange.preview(snapshot)
+    with storage.connect() as conn:
+        row=conn.execute('SELECT fields_json FROM crm_contracts WHERE contract_uuid=?',(crm_world['contracts'][0],)).fetchone()
+        fields=json.loads(row[0]);fields['soft_comment']='Unjournaled change'
+        conn.execute('UPDATE crm_contracts SET fields_json=? WHERE contract_uuid=?',(canonical(fields),crm_world['contracts'][0]))
+    with pytest.raises(CRMError,match='изменилась'):exchange.apply(snapshot,review)
+

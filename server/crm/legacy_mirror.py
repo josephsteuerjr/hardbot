@@ -86,7 +86,7 @@ def deliver(path, employees, *, limit=100, after_sqlite_commit=None):
 
 
 def _sqlite(path, event, payload, rows, expected, employee, timezone_name):
-    primary=sqlite3.connect(Path(path),timeout=15)
+    primary=sqlite3.connect(Path(path),timeout=3)
     primary.row_factory=sqlite3.Row
     try:
         primary.execute('BEGIN IMMEDIATE');_initialize(primary)

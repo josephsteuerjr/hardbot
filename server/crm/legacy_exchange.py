@@ -72,6 +72,36 @@ def _issue(kind, key, detail):
                 kind=kind,legacy_key=key,detail_json=canonical(detail))
 
 
+def _guard(conn, touched):
+    """Small commit guard; full planning never holds the writer lock.
+
+    Canonical history is immutable. Its sequence catches regular commands;
+    rebuild audit and exchange batches cover maintenance. Exact touched rows
+    additionally detect an unjournaled change to a field or source anchor.
+    """
+    proof=hashlib.sha256()
+    queries=[
+        "SELECT key,value FROM crm_meta WHERE key IN ('deployment_namespace','schema_version') ORDER BY key",
+        'SELECT COUNT(*) AS n,MAX(sequence) AS last FROM crm_events',
+        'SELECT COUNT(*) AS n,MAX(audit_id) AS last FROM crm_audit',
+        'SELECT COUNT(*) AS n,MAX(captured_at) AS last FROM crm_legacy_batches',
+        'SELECT contract_uuid,person_uuid,creditor_id,external_id,legacy_id FROM crm_contracts ORDER BY contract_uuid',
+        'SELECT * FROM crm_employees ORDER BY employee_uuid',
+        'SELECT * FROM crm_actor_links ORDER BY actor_uid',
+        'SELECT * FROM crm_assignments WHERE ends_at IS NULL ORDER BY assignment_id',
+    ]
+    for query in queries:
+        for row in conn.execute(query):proof.update(canonical(dict(row)).encode());proof.update(b'\n')
+        proof.update(b'\x00')
+    for table in ('crm_contracts','crm_authority_rows','crm_legacy_state'):
+        proof.update(table.encode())
+        for start in range(0,len(touched),300):
+            batch=touched[start:start+300]
+            for row in conn.execute('SELECT * FROM '+table+' WHERE contract_uuid IN ('+','.join('?' for _ in batch)+') ORDER BY contract_uuid',batch):
+                proof.update(canonical(dict(row)).encode());proof.update(b'\n')
+    return proof.hexdigest()
+
+
 def _read(conn, snapshot, sha):
     marker=conn.execute("SELECT value FROM crm_meta WHERE key='deployment_namespace'").fetchone()
     if not marker or marker[0]!='crm-shared-pilot-v1':raise CRMError('Обмен требует подтверждённого общего контура.')
@@ -85,12 +115,6 @@ def _read(conn, snapshot, sha):
     employees=[dict(r) for r in conn.execute('SELECT * FROM crm_employees ORDER BY employee_uuid')]
     actors={r['actor_uid']:r['employee_uuid'] for r in conn.execute('SELECT * FROM crm_actor_links')}
     assignments=[dict(r) for r in conn.execute('SELECT * FROM crm_assignments WHERE ends_at IS NULL ORDER BY assignment_id')]
-    proof=hashlib.sha256()
-    for collection in (contracts,states,originals,event_rows,employees,actors,assignments):
-        items=sorted(collection.items()) if isinstance(collection,dict) else collection
-        for item in items:proof.update(canonical(item).encode());proof.update(b'\n')
-        proof.update(b'\x00')
-    before=proof.hexdigest()
     staff={r['staff_id']:r['employee_uuid'] for r in employees if r['staff_id']}
     names=defaultdict(set)
     for r in employees:names[_name(r['name'])].add(r['employee_uuid'])
@@ -178,8 +202,10 @@ def _read(conn, snapshot, sha):
     for source in events:
         if source.startswith(('authority:calls:','authority:visits:')) and source not in seen:
             issues.append(_issue('legacy_event_missing',source,dict(source_sha256=sha)))
-    return dict(snapshot_sha256=sha,captured_at=snapshot['captured_at'],before_sha256=before,
-                patches=patches,events=incoming,rows=changed_rows,assignments=responsibility,issues=issues)
+    touched=sorted({r['contract_uuid'] for r in patches+changed_rows+responsibility} |
+                   {cid for event in incoming for cid in event['contract_ids']})
+    return dict(snapshot_sha256=sha,captured_at=snapshot['captured_at'],before_sha256=_guard(conn,touched),
+                touched=touched,patches=patches,events=incoming,rows=changed_rows,assignments=responsibility,issues=issues)
 
 
 def preview(snapshot):
@@ -197,12 +223,18 @@ def _review(plan):
 
 def apply(snapshot, review):
     sha=validate(snapshot);at=now()
+    with storage.connect(readonly=True) as source:
+        old=source.execute('SELECT receipt_json FROM crm_legacy_batches WHERE snapshot_sha256=?',(sha,)).fetchone()
+        if old:return json.loads(old[0])
+        plan=_read(source,snapshot,sha)
+    if review is not None and _review(plan)!=review:
+        raise CRMError('Общая CRM изменилась после просмотра.','review_stale',409)
     with storage.connect() as conn:
         storage.begin(conn)
         old=conn.execute('SELECT receipt_json FROM crm_legacy_batches WHERE snapshot_sha256=?',(sha,)).fetchone()
         if old:return json.loads(old[0])
-        plan=_read(conn,snapshot,sha)
-        if _review(plan)!=review:raise CRMError('Общая CRM изменилась после просмотра.','review_stale',409)
+        if _guard(conn,plan['touched'])!=plan['before_sha256']:
+            raise CRMError('Общая CRM изменилась после просмотра.','review_stale',409)
         for event in plan['events']:
             key=identifier('legacy-event',event['legacy_source'])
             conn.execute('INSERT INTO crm_events(event_id,operation_id,request_hash,actor_uid,employee_uuid,team_id,role,kind,origin,contracts_json,payload_json,occurred_at,received_at,time_quality,projection_status,legacy_source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
