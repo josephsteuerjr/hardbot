@@ -20,6 +20,7 @@ from . import (
     scripts,
 )
 from .contract import CRMError, canonical, digest, fields, identifier, now
+from .roles import ROLE_CAPABILITIES
 
 DEMO_EMPLOYEE = identifier("staff", "demo-employee")
 DEMO_MANAGER = identifier("staff", "demo-manager")
@@ -40,7 +41,6 @@ CAPS = {
 
 
 def principals():
-    from .shared_auth import ROLE_CAPABILITIES
     result = {
         "employee": access.Principal(
             91001,
@@ -73,7 +73,6 @@ def principals():
 
 
 def ensure_demo_roles(conn):
-    from .shared_auth import ROLE_CAPABILITIES
     at=now();start=(datetime.fromisoformat(at)-timedelta(days=28)).isoformat()
     for eid,uid,name,role in [(DEMO_COURIER,91004,'Тестовый курьер','courier'),(DEMO_ANALYST,91005,'Тестовый аналитик','analyst')]:
         if not conn.execute('SELECT 1 FROM crm_employees WHERE employee_uuid=?',(eid,)).fetchone():

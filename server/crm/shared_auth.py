@@ -19,22 +19,12 @@ import aiohttp
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from . import access, storage, store
 from .contract import CRMError, canonical, now
+from .roles import CAPABILITIES, ROLE_CAPABILITIES
 
 AUDIENCE = b'rimborso-crm-pilot-session-v1'
 TTL = 30 * 60
 NAMESPACE = 'crm-shared-pilot-v1'
-CAPABILITIES = frozenset(['call', 'visit', 'delivery', 'note', 'contact', 'promise', 'task',
-                         'reported_payment', 'document', 'correct', 'shift_correct',
-                         'analytics', 'exchange', 'accounting'])
 ENTRY_KINDS = {'manager', 'employee', 'analyst', 'analyst-device'}
-ROLE_CAPABILITIES = {
-    'employee': CAPABILITIES - {'delivery', 'shift_correct', 'analytics', 'exchange', 'accounting'},
-    'courier': frozenset({'delivery', 'task', 'correct'}),
-    'manager': CAPABILITIES,
-    'analyst': frozenset({'note', 'contact', 'document', 'correct', 'analytics',
-                          'exchange', 'accounting', 'shift_correct'}),
-    'observer': frozenset({'analytics'}),
-}
 
 
 def fault(code='pilot_session_invalid', status=401):
