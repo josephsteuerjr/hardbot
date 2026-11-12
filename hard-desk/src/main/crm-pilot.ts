@@ -172,6 +172,7 @@ async function local(
 const actions = new Set([
   "context",
   "portfolio",
+  "work-portfolio",
   "card",
   'contracts',
   "shifts",
