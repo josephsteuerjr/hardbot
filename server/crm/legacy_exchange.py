@@ -75,15 +75,13 @@ def _issue(kind, key, detail):
 def _guard(conn, touched):
     """Small commit guard; full planning never holds the writer lock.
 
-    Canonical history is immutable. Its sequence catches regular commands;
-    rebuild audit and exchange batches cover maintenance. Exact touched rows
-    additionally detect an unjournaled change to a field or source anchor.
+    Exact touched rows catch commands, rebuilds and unjournaled field changes.
+    Exchange batches cover concurrent ingestion. Unrelated commands may keep
+    progressing without invalidating a plan for other contracts.
     """
     proof=hashlib.sha256()
     queries=[
         "SELECT key,value FROM crm_meta WHERE key IN ('deployment_namespace','schema_version') ORDER BY key",
-        'SELECT COUNT(*) AS n,MAX(sequence) AS last FROM crm_events',
-        'SELECT COUNT(*) AS n,MAX(audit_id) AS last FROM crm_audit',
         'SELECT COUNT(*) AS n,MAX(captured_at) AS last FROM crm_legacy_batches',
         'SELECT contract_uuid,person_uuid,creditor_id,external_id,legacy_id FROM crm_contracts ORDER BY contract_uuid',
         'SELECT * FROM crm_employees ORDER BY employee_uuid',

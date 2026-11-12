@@ -125,6 +125,26 @@ def test_legacy_planning_allows_live_commands_and_rejects_a_stale_commit(pg_worl
         with pytest.raises(CRMError,match='изменилась'):pending.result(timeout=5)
 
 
+def test_unrelated_live_command_does_not_starve_a_legacy_plan(pg_world,monkeypatch):
+    from crm import legacy_exchange
+    import sqlite3
+    path=legacy_exchange_cases.world(pg_world);legacy_exchange_cases.primary_call(path)
+    with sqlite3.connect(path) as conn:conn.execute("UPDATE calls SET contracts_json='[\"R0\"]'")
+    snapshot=legacy_exchange.capture(path);review=legacy_exchange.preview(snapshot)
+    ready=threading.Event();release=threading.Event();original=legacy_exchange._read
+    def slow_plan(conn,snapshot,sha):
+        plan=original(conn,snapshot,sha);ready.set();assert release.wait(5);return plan
+    monkeypatch.setattr(legacy_exchange,'_read',slow_plan)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending=pool.submit(legacy_exchange.apply,snapshot,review)
+        try:
+            assert ready.wait(5)
+            body=core.call_body(pg_world);body['contract_ids']=pg_world['contracts'][1:]
+            assert pool.submit(store.command,pg_world['member'],body).result(timeout=3)['projection_status']=='applied'
+        finally:release.set()
+        assert pending.result(timeout=5)['events']=={'call':1}
+
+
 @pytest.mark.parametrize('role', ['employee', 'courier', 'manager', 'analyst', 'observer'])
 def test_common_read_and_separate_write_on_postgres(pg_world, role):
     common_cases.test_all_roles_read_other_portfolios_without_assignment(pg_world, role)
