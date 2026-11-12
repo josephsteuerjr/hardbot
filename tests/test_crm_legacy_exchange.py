@@ -143,3 +143,16 @@ def test_correction_updates_current_fields_without_counting_another_call(crm_wor
         assert conn.execute('SELECT COUNT(*) FROM calls').fetchone()[0]==1
         assert conn.execute('SELECT soft_comment FROM clients LIMIT 1').fetchone()[0]=='Corrected'
 
+
+def test_changed_creditor_never_attaches_new_history_to_the_old_contract(crm_world):
+    path=world(crm_world)
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE clients SET partner='Other creditor' WHERE contract_id='R0'")
+        conn.execute('INSERT INTO calls(contract_id,agent_id,employee,created_at,values_json,contracts_json,op_id) VALUES(?,?,?,?,?,?,?)',
+            ('R0',101,'Employee',now()[:10],'{}','["R0"]',str(uuid.uuid4())))
+    snapshot=exchange.capture(path);review=exchange.preview(snapshot)
+    assert review['issues']=={'legacy_identity_changed':1,'legacy_event_unlinked':1}
+    exchange.apply(snapshot,review)
+    with storage.connect(readonly=True) as conn:
+        assert conn.execute("SELECT contracts_json FROM crm_events WHERE kind='call'").fetchone()[0]=='[]'
+

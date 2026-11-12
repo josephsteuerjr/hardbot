@@ -106,12 +106,14 @@ def _read(conn, snapshot, sha):
         return next(iter(choices)) if len(choices)==1 else None
     patches=[];issues=[];responsibility=[];changed_rows=[];incoming=[]
     known_ids={str(r['contract_id']) for r in snapshot['clients']}
+    verified_ids=set()
     for raw in snapshot['clients']:
         cid=str(raw['contract_id']);row=legacy.get(cid)
         if not row:
             issues.append(_issue('legacy_contract_unmapped',cid,{'source_sha256':sha}));continue
         if row['external_id']!=cid or row['creditor_id']!='registry-partner:'+str(raw.get('partner') or '').strip():
             issues.append(_issue('legacy_identity_changed',cid,{'source_sha256':sha}));continue
+        verified_ids.add(cid)
         key=row['contract_uuid'];prior=states.get(key) or originals.get(key)
         if not prior:
             issues.append(_issue('legacy_baseline_missing',cid,{'contract_uuid':key}));continue
@@ -158,7 +160,7 @@ def _read(conn, snapshot, sha):
             links=[]
             for old_id in ids:
                 row=legacy.get(str(old_id))
-                if row and str(old_id) in known_ids:links.append(row['contract_uuid'])
+                if row and str(old_id) in verified_ids:links.append(row['contract_uuid'])
             links=sorted(set(links))
             if len(links)!=len(set(map(str,ids))):issues.append(_issue('legacy_event_unlinked',source,dict(source_sha256=sha)))
             uid=int(raw.get('agent_id') or 0);eid=person(raw.get('employee'),uid) or 'legacy-author:'+digest([uid,raw.get('employee')])[:32]
