@@ -28,7 +28,7 @@ def require(principal, capability):
         raise CRMError("Недостаточно прав для действия.", "forbidden", 403)
 
 
-def scoped_contracts(conn, principal):
+def scoped_contracts(conn, principal, *, include_tasks=True):
     if principal.owner or principal.all_contracts:
         return {r[0] for r in conn.execute("SELECT contract_uuid FROM crm_contracts")}
     if not principal.employee_scope:
@@ -44,6 +44,9 @@ def scoped_contracts(conn, principal):
                 (employee, at, at),
             )
         )
+    if include_tasks:
+        from . import tasks
+        result.update(tasks.grants(conn, principal))
     return result
 
 
@@ -62,6 +65,10 @@ def writable_actions(conn, principal, contract_id, *, scope=None):
     if contract_id not in scope:
         return []
     capabilities = set(principal.capabilities)
+    if not principal.owner and not principal.all_contracts:
+        from . import tasks
+        if contract_id not in scoped_contracts(conn, principal, include_tasks=False):
+            capabilities &= tasks.grants(conn, principal).get(contract_id, set())
     if principal.owner:
         capabilities.update({'call', 'visit', 'note', 'contact', 'promise', 'task',
                              'reported_payment', 'document', 'accounting', 'correct'})
@@ -71,7 +78,9 @@ def writable_actions(conn, principal, contract_id, *, scope=None):
             'SELECT capability FROM crm_assignments WHERE employee_uuid=? AND contract_uuid=? '
             'AND starts_at<=? AND (ends_at IS NULL OR ends_at>?)',
             (principal.employee_uuid, contract_id, at, at))}
-        capabilities -= {'call', 'visit'} - assigned
+        from . import tasks
+        delegated = tasks.grants(conn, principal).get(contract_id, set())
+        capabilities -= {'call', 'visit'} - assigned - delegated
     return sorted(capabilities & {'call', 'visit', 'note', 'contact', 'promise', 'task',
                                   'reported_payment', 'document', 'accounting', 'correct', 'delivery'})
 
@@ -97,6 +106,12 @@ def contracts(conn, principal, requested, *, capability=None):
         )
     if capability:
         require(principal, capability)
+        if not principal.owner and not principal.all_contracts:
+            from . import tasks
+            direct_scope = scoped_contracts(conn, principal, include_tasks=False)
+            delegated = tasks.grants(conn, principal)
+            if any(key not in direct_scope and capability not in delegated.get(key, set()) for key in requested):
+                raise CRMError('Поручение не даёт права на это действие.', 'forbidden', 403)
         if principal.role == "employee":
             at = now()
             for identifier in requested:
@@ -105,7 +120,9 @@ def contracts(conn, principal, requested, *, capability=None):
                     "AND contract_uuid=? AND capability=? AND starts_at<=? AND (ends_at IS NULL OR ends_at>?)",
                     (principal.employee_uuid, identifier, capability, at, at),
                 ).fetchone()
-                if not permission and capability in {"call", "visit"}:
+                from . import tasks
+                delegated = tasks.grants(conn, principal).get(identifier, set())
+                if not permission and capability in {"call", "visit"} and capability not in delegated:
                     raise CRMError(
                         "Изменилось полномочие по договору.", "scope_changed", 403
                     )

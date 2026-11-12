@@ -2,6 +2,7 @@
 
 import json
 import uuid
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import storage
 from . import access, store
@@ -134,18 +135,20 @@ def command(principal, body):
         return result
 
 
-def summary(principal, employee=None):
+def summary(principal, employee=None, *, window=None, as_of=None):
     employee = employee or principal.employee_uuid
-    at = now()
+    at = as_of or now()
     with storage.connect() as conn:
         access.employee(conn, principal, employee)
         rows = [
             dict(r)
             for r in conn.execute(
-                "SELECT * FROM crm_shifts WHERE employee_uuid=? ORDER BY starts_at DESC LIMIT 90",
+                "SELECT * FROM crm_shifts WHERE employee_uuid=? ORDER BY starts_at DESC" + ("" if window else " LIMIT 90"),
                 (employee,),
             )
         ]
+        if window:
+            rows=[row for row in rows if instant(row['starts_at'])<window[1] and instant(row['ends_at'] or at)>window[0]]
         for row in rows:
             events = [
                 dict(r)
@@ -155,6 +158,9 @@ def summary(principal, employee=None):
                 )
             ]
             start, end = instant(row["starts_at"]), instant(row["ends_at"] or at)
+            workday=start.astimezone(ZoneInfo(row["timezone"])).date().isoformat()
+            if window:
+                start,end=max(start,window[0]),min(end,window[1])
             pause = None
             seconds = 0
             for event in events:
@@ -174,7 +180,8 @@ def summary(principal, employee=None):
                 break_seconds=min(int(seconds), int(duration)),
                 declared_seconds=max(0, int(duration - seconds)),
                 unclosed=row["ends_at"] is None,
-                workday=start.astimezone(ZoneInfo(row["timezone"])).date().isoformat(),
+                workday=workday,
+                period_starts_at=start.isoformat(),period_ends_at=end.isoformat(),
                 events=events,
             )
         return dict(
@@ -182,6 +189,34 @@ def summary(principal, employee=None):
             as_of=at,
             meaning="Заявленная длительность смены; не табель и не расчёт оплаты.",
         )
+
+
+def period_report(principal, since, until, employee=None):
+    try:
+        first,last=date.fromisoformat(since),date.fromisoformat(until)
+        zone=ZoneInfo(principal.timezone)
+        if first>last or (last-first).days>365:raise ValueError()
+    except (ValueError,TypeError,ZoneInfoNotFoundError):
+        raise CRMError('Выберите период от одного дня до года.')
+    window=(datetime.combine(first,time.min,zone),datetime.combine(last+timedelta(days=1),time.min,zone))
+    at=now()
+    with storage.connect(readonly=True) as conn:
+        if employee:
+            people=[access.employee(conn,principal,employee)]
+        else:
+            identifiers=principal.employee_scope if principal.role in {'manager','analyst','observer','owner'} else {principal.employee_uuid}
+            if principal.owner:identifiers={row[0] for row in conn.execute('SELECT employee_uuid FROM crm_employees WHERE active=1')}
+            people=[access.employee(conn,principal,key) for key in sorted(identifiers)]
+    details=[];totals=[]
+    for person in people:
+        shifts=summary(principal,person['employee_uuid'],window=window,as_of=at)['shifts']
+        for shift in shifts:shift.update(employee_uuid=person['employee_uuid'],employee=person['name'])
+        details.extend(shifts)
+        totals.append(dict(employee_uuid=person['employee_uuid'],employee=person['name'],shifts=len(shifts),
+            elapsed_seconds=sum(row['elapsed_seconds'] for row in shifts),break_seconds=sum(row['break_seconds'] for row in shifts),
+            declared_seconds=sum(row['declared_seconds'] for row in shifts),unclosed=sum(row['unclosed'] for row in shifts)))
+    return dict(since=since,until=until,timezone=principal.timezone,as_of=at,employees=totals,shifts=details,
+        meaning='Длительность в выбранном периоде по серверным отметкам начала, перерывов и окончания смен.')
 
 
 def set_plan(principal, body):

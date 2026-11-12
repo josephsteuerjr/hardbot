@@ -604,6 +604,8 @@ details.fold .fcard{border:0;padding:0 2px;margin:0 0 6px}
 <div class="navmode" id="navmode"></div>
 <div class="toast" id="toast"></div>
 
+<link rel="stylesheet" href="/crm-courier/assets/courier.css">
+<script src="/crm-courier/assets/courier.js"></script>
 <script>
 const TG = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
 function lockAppViewport(){
@@ -1838,6 +1840,9 @@ async function flushQueue(){
           if(it.pr) Object.assign(sbody, it.pr);     // следы выезда из очереди
           r=await fetch("/api/save",{method:"POST",headers:queuedHeaders(it,jsonHeaders()),signal:ctl.signal,redirect:"error",
             body:JSON.stringify(sbody)});
+        }else if(it.kind==="courier"){
+          r=await fetch("/api/courier/command",{method:"POST",headers:jsonHeaders(),signal:ctl.signal,redirect:"error",
+            body:JSON.stringify(it.body)});
         }else if(it.kind==="payment"){
           r=await fetch("/api/save",{method:"POST",headers:queuedHeaders(it,jsonHeaders()),signal:ctl.signal,redirect:"error",body:JSON.stringify({
             kind:"payment",finish:true,rep:it.rep,op_id:it.op_id,occurred_at:it.occurred_at,
@@ -1904,7 +1909,7 @@ async function flushQueue(){
             await markPhotoFailed(it,String(r.status));
             STATE.online=true; continue;
           }
-          else if(it.kind==="save"||it.kind==="payment"||it.kind==="note"||it.kind==="marker"){
+          else if(it.kind==="save"||it.kind==="payment"||it.kind==="note"||it.kind==="marker"||it.kind==="courier"){
             // ЗАПИСЬ НЕ УДАЛЯЕМ. Раньше 4xx у save попадал в общий `else
             // ok=true`, и заполненная в поле форма исчезала БЕЗ СЛЕДА; заметки
             // и гео-метки удалялись молча ВСЕГДА — а 404 здесь штатен (договор
@@ -2649,6 +2654,73 @@ function clientMetric(event, metrics){
 function toast(t){ const e=$("toast"); e.textContent=t; e.classList.add("show");
   setTimeout(()=>e.classList.remove("show"),1600); }
 
+// Courier data uses the same verified device identity and durable outbound queue.
+async function prepareCourier(online){
+  STATE.courier=null;
+  const gen=WIPE_GEN,credential=cacheCredential(),uid=STATE.uid;
+  const valid=()=>gen===WIPE_GEN&&credential===cacheCredential()&&uid===STATE.uid;
+  if(!credential||!uid||!appToken())return;
+  const key="crm-courier-context:"+uid;
+  if(online){
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10000);
+    try{
+      const response=await fetch("/api/courier/context",{headers:authHeaders(),signal:controller.signal,redirect:"error"});
+      if(!valid())return;
+      if(response.status===401||response.status===403||response.status===404){
+        await IDB.put("kv",null,key,valid);return;
+      }
+      if(!response.ok)throw new Error("courier context");
+      const value=await response.json();
+      if(!valid())return;
+      if(value.role!=="courier"||!Array.isArray(value.contracts))throw new Error("courier context");
+      const snapshot={...value,_credential:credential,_uid:uid};
+      await IDB.put("kv",snapshot,key,valid);
+      if(valid())STATE.courier=snapshot;
+      return;
+    }catch(e){}finally{clearTimeout(timer);}
+  }
+  const snapshot=await IDB.get("kv",key).catch(()=>null);
+  if(valid()&&snapshot&&snapshot._credential===credential&&snapshot._uid===uid&&snapshot.role==="courier")
+    STATE.courier=snapshot;
+}
+async function renderCourier(){
+  const gen=WIPE_GEN,credential=cacheCredential(),uid=STATE.uid,snapshot=STATE.courier;
+  const valid=()=>gen===WIPE_GEN&&credential===cacheCredential()&&uid===STATE.uid&&STATE.courier===snapshot;
+  hideBottomNav();$("app").classList.remove("wide");
+  $("app").innerHTML='<div id="courier-form"></div>';
+  document.querySelector('.brand').textContent='Курьер';
+  try{
+    await window.CRMDelivery.mount($("courier-form"),snapshot.contracts,{
+      fields:snapshot.fields,
+      draft:async function(key,value){
+        if(!valid())return {ok:false,text:'Вход изменён. Откройте приложение заново.'};
+        const storageKey='crm-courier-draft:'+uid+':'+key;
+        if(arguments.length>1)await IDB.put('kv',{value,_credential:credential},storageKey,valid);
+        const stored=await IDB.get('kv',storageKey);
+        if(!valid())return {ok:false,text:'Вход изменён. Черновик сохранён за прежним сотрудником.'};
+        return {ok:true,data:stored&&stored._credential===credential?stored.value:null};
+      },
+      command:async body=>{
+        if(!valid())return {ok:false,text:'Вход изменён. Результат не отправлен.'};
+        const contract=snapshot.contracts.find(row=>row.contract_uuid===body.contract_ids[0]);
+        const entry={kind:'courier',op_id:body.operation_id,body,rep:contract?.external_id||'',at:Date.now()};
+        if(!await enqueue(entry))return {ok:false,text:'Не удалось сохранить на телефоне. Повторите сохранение.'};
+        if(!valid()||!queueBelongs(entry))return {ok:false,text:'Вход изменён. Результат остаётся в очереди прежнего сотрудника.'};
+        void flushQueue();return {ok:true};
+      },
+      search:async text=>{
+        if(!valid())throw new Error('identity changed');
+        if(!navigator.onLine)return snapshot.contracts.filter(row=>JSON.stringify(row).toLocaleLowerCase().includes(text.toLocaleLowerCase()));
+        const response=await fetch('/api/courier/contracts?search='+encodeURIComponent(text),{headers:authHeaders(),redirect:'error'});
+        if(!response.ok)throw new Error('courier search');
+        const data=await response.json();if(!valid())throw new Error('identity changed');
+        return data.contracts;
+      }
+    });
+  }catch(e){if(valid())$("app").textContent='Не удалось открыть форму. Перезапустите приложение; очередь сохранена.';}
+  updateOffBar();
+}
+
 function renderLangs(){
   const t=L();
   $("langs").innerHTML = ["ru","uz","tg"].map(c =>
@@ -2779,6 +2851,9 @@ async function boot(){
     STATE.roles=d.roles||null;   // роль руководителя: список его сотрудников + текущий
     STATE.mode=bootMode;
     STATE.online=true;
+    await prepareCourier(true);
+    if(gen!==WIPE_GEN)return;
+    if(STATE.courier)STATE.mode='field';
     d._mode=STATE.mode; cacheBootstrap(d);   // снимок с режимом: оффлайн поднимет тот же портфель
     const renderStarted=performance.now();
     // Руководитель открывает приложение в своём режиме (сводка), если сам не
@@ -2791,7 +2866,7 @@ async function boot(){
       contracts:bd.contracts,server_ms:bd.server_ms,
       render_ms:performance.now()-renderStarted,
       download_ms:performance.now()-bootStarted});
-    warmCards();                  // полные карточки всех клиентов в фон-кэш (онлайн)
+    if(!STATE.courier)warmCards(); // courier's assigned canonical cards are cached above
     flushQueue();                 // досыл накопленного оффлайна (визиты/фото/метки)
     if(!START_TAB_USED && (START_TAB==="digest" || ['manager','security','full'].includes(localStorage.getItem('account_role'))) && STATE.roles && STATE.roles.manager){
       START_TAB_USED=true;        // одноразово: boot() зовётся и после actAs/setLang
@@ -2822,6 +2897,9 @@ async function boot(){
       STATE.roles=snap.roles||null;
       STATE.mode=(snap._mode==="soft")?"soft":"field";
       STATE.online=false;
+      await prepareCourier(false);
+      if(gen!==WIPE_GEN)return;
+      if(STATE.courier)STATE.mode='field';
       if(STATE.mode==="soft") renderSoftList(); else renderList();
     }else{
       // Связи нет и снимка портфеля на телефоне ещё нет. Здесь стояла инструкция
@@ -2946,6 +3024,8 @@ function renderList(){
   STATE.cur=null; removeMap(); prStop();
   STATE.mode="field";
   resetScroll();
+  if(STATE.courier){void renderCourier();return;}
+  document.querySelector('.brand').textContent='Хард';
   const t=L();
   const bar=`<div class="lhead"><span class="t">${esc(t.my)}</span><span class="n">${STATE.persons.length}</span></div>`+
     draftsLeftHTML(t);

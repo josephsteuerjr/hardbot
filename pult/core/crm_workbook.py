@@ -23,12 +23,15 @@ def sha(path):
 
 @contextmanager
 def excel():
-    import pythoncom, win32com.client
+    import pythoncom
+    import xlwings as xw
 
     pythoncom.CoInitialize()
     application = None
+    native = None
     try:
-        application = win32com.client.DispatchEx("Excel.Application")
+        native = xw.App(visible=False, add_book=False)
+        application = native.api
         application.Visible = False
         application.DisplayAlerts = False
         application.AutomationSecurity = 3
@@ -38,11 +41,12 @@ def excel():
     finally:
         if application is not None:
             try:
-                application.Quit()
+                native.quit()
             except Exception as exc:
                 if getattr(exc, "hresult", None) != -2147417848:
                     raise
         application = None
+        native = None
         gc.collect()
         pythoncom.CoUninitialize()
 
@@ -134,56 +138,40 @@ def _values(row, keys):
     ]
 
 
-def _write_meta_openpyxl(book, metadata):
-    if META in book:
-        del book[META]
-    sheet = book.create_sheet(META)
-    sheet.sheet_state = "veryHidden"
-    raw = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
-    for i in range(0, len(raw), 30000):
-        sheet.append([raw[i : i + 30000]])
-
-
 def _create(snapshot, temp):
-    from openpyxl import Workbook
-    from openpyxl.cell import WriteOnlyCell
-    from openpyxl.styles import Font, PatternFill
-    from openpyxl.utils import get_column_letter
-
-    # A full general registry has millions of cells. Stream new workbooks;
-    # never retain all cells or recompute max_row after every appended row.
-    book = Workbook(write_only=True)
-    sheet = book.create_sheet(SHEET)
     keys = [f["key"] for f in snapshot["fields"]] + IDENTITY
     headers = [f["title"] for f in snapshot["fields"]] + IDENTITY
-    sheet.freeze_panes = "D4"
-    sheet.auto_filter.ref = f"A2:{get_column_letter(len(keys))}{max(4,len(snapshot['rows'])+3)}"
-    for column in range(len(keys) - 3, len(keys) + 1):
-        sheet.column_dimensions[get_column_letter(column)].hidden = True
-    def text_row(values, header=False):
-        cells = []
-        for value in values:
-            cell = WriteOnlyCell(sheet, value=None if value is None else str(value))
-            # Identifiers, exact decimals and leading =,+,-,@ remain text.
-            cell.data_type = "s"
-            cell.number_format = "@"
-            if header:
-                cell.font = Font(bold=True, color="613E30")
-                cell.fill = PatternFill("solid", fgColor="F3E9DD")
-            cells.append(cell)
-        return cells
-    sheet.append(text_row(["CRM · " + snapshot["manifest"]["period"]]))
-    sheet.append(text_row(headers, header=True))
-    sheet.append(text_row([f["source"] for f in snapshot["fields"]] + ["CRM"] * 4))
-    for row in snapshot["rows"]:
-        sheet.append(text_row(_values(row, keys)))
     metadata = _meta(
         snapshot,
         {key: i + 1 for i, key in enumerate(keys)},
         {str(i + 1): title for i, title in enumerate(headers)},
     )
-    _write_meta_openpyxl(book, metadata)
-    book.save(temp)
+    with excel() as application:
+        book=application.Workbooks.Add()
+        try:
+            while book.Worksheets.Count>1:book.Worksheets(book.Worksheets.Count).Delete()
+            sheet=book.Worksheets(1);sheet.Name=SHEET
+            last=max(4,len(snapshot['rows'])+3);width=len(keys)
+            area=sheet.Range(sheet.Cells(1,1),sheet.Cells(last,width));area.NumberFormat='@'
+            sheet.Cells(1,1).Value2='Портфель '+snapshot['manifest']['period']
+            sheet.Range(sheet.Cells(2,1),sheet.Cells(2,width)).Value2=(tuple(headers),)
+            sheet.Range(sheet.Cells(3,1),sheet.Cells(3,width)).Value2=(tuple([f['source'] for f in snapshot['fields']]+['CRM']*4),)
+            for offset in range(0,len(snapshot['rows']),1000):
+                chunk=snapshot['rows'][offset:offset+1000]
+                values=tuple(tuple(None if value is None else str(value) for value in _values(row,keys)) for row in chunk)
+                sheet.Range(sheet.Cells(offset+4,1),sheet.Cells(offset+3+len(chunk),width)).Value2=values
+            sheet.Range(sheet.Cells(2,1),sheet.Cells(2,width)).Font.Bold=True
+            sheet.Range(sheet.Cells(2,1),sheet.Cells(2,width)).Interior.Color=0xDDE9F3
+            sheet.Range(sheet.Cells(2,1),sheet.Cells(last,width)).AutoFilter()
+            for column in range(width-3,width+1):sheet.Columns(column).Hidden=True
+            book.Activate();sheet.Activate();application.ActiveWindow.SplitRow=3;application.ActiveWindow.SplitColumn=3
+            application.ActiveWindow.FreezePanes=True
+            meta=book.Worksheets.Add();meta.Name=META;meta.Columns(1).NumberFormat='@'
+            raw=json.dumps(metadata,ensure_ascii=False,separators=(',',':'))
+            for i in range(0,len(raw),30000):meta.Cells(i//30000+1,1).Value2=raw[i:i+30000]
+            meta.Visible=2;sheet.Activate()
+            book.SaveAs(str(temp),FileFormat=51)
+        finally:book.Close(SaveChanges=False)
 
 
 def _template(snapshot, template, temp):

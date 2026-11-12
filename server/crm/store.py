@@ -123,6 +123,7 @@ def allowed_fields(kind):
 def _payload(kind, raw):
     if not isinstance(raw, dict):
         raise CRMError("Некорректные поля действия.")
+    raw = dict(raw)
     allowed = {
         "values",
         "clear",
@@ -143,6 +144,12 @@ def _payload(kind, raw):
         "target_kind",
         "entity_revision",
         "script_ref",
+        "assignee_uuid",
+        "work_kind",
+        "delivered",
+        "delivery_address",
+        "delivery_phone",
+        "delivery_comment",
     }
     if set(raw) - allowed:
         raise CRMError("Неизвестные поля действия.")
@@ -155,6 +162,15 @@ def _payload(kind, raw):
     ):
         raise CRMError("Некорректная явная очистка.")
     target = raw.get("target_kind") if kind == "correction" else kind
+    if target != 'delivery' and ({'delivered','delivery_address','delivery_phone','delivery_comment'} & set(raw)):
+        raise CRMError('Результат передачи относится к действию курьера.')
+    if target == 'delivery':
+        if set(raw) - {'values','clear','delivered','delivery_address','delivery_phone','delivery_comment','target_kind'}:
+            raise CRMError('Для передачи конверта укажите адрес, телефон и комментарий.')
+        from . import delivery
+        delivery.normalize(raw)
+    if target != 'task' and ({'assignee_uuid', 'work_kind'} & set(raw)):
+        raise CRMError('Исполнитель и вид работы относятся к задаче.')
     if "script_ref" in raw and kind != "call":
         raise CRMError("Версия подсказки относится только к исходному звонку.")
     if target not in KINDS - {"correction"}:
@@ -287,6 +303,7 @@ def command(principal, body, *, origin="app", client_version=None):
                 "payment_confirmed",
                 "document",
                 "task_complete",
+                "delivery",
             }
             and len(rows) != 1
         ):
@@ -308,6 +325,9 @@ def command(principal, body, *, origin="app", client_version=None):
                 .date()
                 .isoformat(),
             }
+        if target == 'task':
+            from . import tasks
+            tasks.prepare(conn, principal, payload)
         if target == "document":
             attachment = conn.execute(
                 "SELECT * FROM crm_documents WHERE document_id=? AND contract_uuid=?",
@@ -482,6 +502,8 @@ def command(principal, body, *, origin="app", client_version=None):
                 ).fetchone()
                 if not entity:
                     raise CRMError("Задача не найдена.", "not_found", 404)
+                from . import tasks
+                tasks.completion(conn, principal, entity)
                 if (
                     entity["status"] != "open"
                     or payload.get("entity_revision") != entity["revision"]
@@ -700,8 +722,18 @@ def card(principal, person_uuid):
                 item["data"] = json.loads(item.pop("data_json"))
                 entities.append(item)
         write_scope = access.scoped_contracts(conn, principal)
+        from . import tasks
+        for entity in entities:
+            if entity['kind'] == 'task':
+                tasks.describe(conn, principal, entity, write_scope)
+        assignment_time = now()
         for row in rows:
             row['allowed_actions'] = access.writable_actions(conn, principal, row['contract_uuid'], scope=write_scope)
+            row['assignments'] = [dict(r) for r in conn.execute(
+                'SELECT a.employee_uuid,e.name,a.capability,a.starts_at,a.ends_at FROM crm_assignments a '
+                'JOIN crm_employees e USING(employee_uuid) WHERE a.contract_uuid=? '
+                'AND a.starts_at<=? AND (a.ends_at IS NULL OR a.ends_at>?) ORDER BY e.name,a.capability',
+                (row['contract_uuid'], assignment_time, assignment_time))]
             row["fields"] = json.loads(row.pop("fields_json"))
             row["revisions"] = {
                 key: 0 for key in ("call", "visit", "contact", "forecast", "accounting")
@@ -709,12 +741,54 @@ def card(principal, person_uuid):
             row["revisions"].update(json.loads(row.pop("revisions_json")))
             row["provenance"] = json.loads(row.pop("provenance_json"))
             row.pop("baseline_json")
+        action_map = {r['contract_uuid']: set(r['allowed_actions']) for r in rows}
+        for event in events.values():
+            event['can_correct'] = bool((principal.owner or principal.role == 'manager'
+                or event['employee_uuid'] == principal.employee_uuid)
+                and all({'correct', event['kind']} <= action_map[cid] for cid in event['contract_ids']))
         return dict(
             person=person,
             contracts=rows,
             history=sorted(events.values(), key=lambda x: x["sequence"], reverse=True),
             entities=entities,
         )
+
+
+def contract_list(principal, search='', work='', limit=100):
+    limit = min(max(int(limit), 1), 500)
+    if work:
+        access.require(principal, work)
+    with storage.connect(readonly=True) as conn:
+        write_scope = access.scoped_contracts(conn, principal)
+        allowed = write_scope if work else None if access.reads_all(principal) else access.readable_contracts(conn, principal)
+        if allowed is not None and not allowed:
+            return dict(contracts=[], truncated=False)
+        conditions, params = [], []
+        if allowed is not None:
+            conditions.append('c.contract_uuid IN (' + ','.join('?' for _ in allowed) + ')')
+            params.extend(sorted(allowed))
+        postgres = storage.is_postgres(conn)
+        if search and postgres:
+            conditions.append("strpos(lower(concat_ws(' ',p.name,c.external_id,c.fields_json)),lower(?))>0")
+            params.append(search)
+        query = 'SELECT c.contract_uuid,c.person_uuid,c.external_id,c.creditor_id,c.currency,c.fields_json,p.name AS client_name FROM crm_contracts c JOIN crm_people p USING(person_uuid)'
+        if conditions:
+            query += ' WHERE ' + ' AND '.join(conditions)
+        query += ' ORDER BY c.external_id,c.creditor_id'
+        if postgres:
+            query += ' LIMIT ?';params.append(limit+1)
+        rows=[]
+        for source in conn.execute(query, params):
+            if search and not postgres and search.casefold() not in ' '.join((source['client_name'],source['external_id'],source['fields_json'])).casefold():
+                continue
+            row=dict(source);row['fields']=json.loads(row.pop('fields_json'))
+            row['allowed_actions']=access.writable_actions(conn,principal,row['contract_uuid'],scope=write_scope)
+            if work and work not in row['allowed_actions']:
+                continue
+            rows.append(row)
+            if len(rows)>limit:
+                break
+        return dict(contracts=rows[:limit],truncated=len(rows)>limit)
 
 
 def portfolio(principal, search="", limit=200):

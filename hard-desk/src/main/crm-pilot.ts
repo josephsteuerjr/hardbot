@@ -15,6 +15,7 @@ import { fetchBuffered } from "./transport";
 import * as queue from "./crm-queue";
 import { PILOT_BASE, existingManagerStatus, existingLogins, ENTRY_SOURCES, EntrySource } from "./crm-manager-login";
 import { pilotCredential } from "./crm-pilot-session";
+import {ThreeHourReports} from './crm-report-scheduler';
 
 const isolatedProfile = !!process.env.HARD_USER_DATA;
 let connectionNotice = "";
@@ -172,7 +173,11 @@ const actions = new Set([
   "context",
   "portfolio",
   "card",
+  'contracts',
   "shifts",
+  'shift-report',
+  'cabinet',
+  'three-hour',
   "script",
   "anchor",
   "command",
@@ -246,6 +251,7 @@ async function identify() {
     });
     const anchor = await send("POST", "anchor", {
       installation_id: queue.installation(),
+      reports: owner ? (()=>{const job=queue.draft(owner,'three-hour-report')||{};return {slot:job.slot,path:job.path,error:job.error,receipt:job.receipt};})() : null,
     });
     clock = anchor.ok ? { ...anchor.data, monotonic: performance.now() } : null;
   } else if (result.status === 401 || result.status === 403) {
@@ -568,6 +574,16 @@ app
       return identify();
     });
     safeHandler("crm:workbook", async (action: string, input: any) => {
+      if(action==='shift-report'){
+        const authority=owner;
+        if(!authority)throw new Error('Сначала подтвердите вход.');
+        const report=await send('GET','shift-report',undefined,{since:input?.report?.since,until:input?.report?.until});
+        if(!report.ok)return report;
+        const choice=await dialog.showSaveDialog(win!,{title:'Отчёт по сменам',defaultPath:`Смены ${report.data.since} — ${report.data.until}.xlsx`,filters:[{name:'Excel',extensions:['xlsx']}]});
+        if(choice.canceled||!choice.filePath)return {ok:false,cancelled:true};
+        if(owner!==authority)throw new Error('Вход изменён. Повторите выгрузку.');
+        return local('report-write',{report:report.data,kind:'shifts',path:choice.filePath});
+      }
       if (action === "read") {
         const choice = await dialog.showOpenDialog(win!, {
           properties: ["openFile"],
@@ -720,6 +736,15 @@ app
       });
     win.show();
     void recoverExports().catch(() => {});
+    const reports=new ThreeHourReports({
+      identity:()=>owner&&currentContext?{owner,employee:currentContext.employee_uuid,
+        allowed:!isolatedProfile&&!demo()&&!offline&&(currentContext.owner||currentContext.capabilities?.includes('analytics'))}:null,
+      load:authority=>queue.draft(authority,'three-hour-report'),save:(authority,value)=>{queue.draft(authority,'three-hour-report',value);},
+      source:async()=>{const result=await send('GET','three-hour');if(!result.ok)throw new Error(result.text||'Нет связи для сводки.');return result.data;},
+      write:(report,path)=>local('report-write',{report,path,kind:'three-hour'}),desktop:app.getPath('desktop')
+    });
+    void reports.tick();
+    setInterval(()=>{void reports.tick();},60000).unref();
     setInterval(() => {
       if (owner) {
         void recoverExports().catch(() => {});

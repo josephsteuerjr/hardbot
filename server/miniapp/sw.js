@@ -14,7 +14,7 @@
  * после этого не нужно: открытие по сети кладёт оболочку обратно (network-first ниже),
  * свои ассеты — при первом запросе (caches.open создаёт кэш заново).
  */
-const CACHE = "hard-shell-v111";
+const CACHE = "hard-shell-v112";
 let cacheEnabled=true,cacheEpoch=0;
 const cacheWrites=new Set();
 function remember(key,response){
@@ -30,6 +30,8 @@ self.addEventListener("message",event=>{
   }else if(event.data?.type==="PROFILE_ACTIVE"){cacheEnabled=true;}
 });
 const PRECACHE = [
+  "/crm-courier/assets/courier.js",
+  "/crm-courier/assets/courier.css",
   "/",
   "/vendor/telegram-web-app.js",
   "/manifest.webmanifest",

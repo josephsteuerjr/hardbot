@@ -273,12 +273,14 @@ def seed():
 
 
 def context(p):
+    from . import tasks
     with db.connect() as conn:
         cohorts = [
             dict(r)
             for r in conn.execute("SELECT cohort_id,name,starts_at FROM crm_cohorts")
             if p.role == "manager"
         ]
+        staff = tasks.staff(conn, p)
     return dict(
         schema_version=1,
         employee_uuid=p.employee_uuid,
@@ -292,6 +294,7 @@ def context(p):
         dropdowns=DROPDOWNS,
         cohorts=cohorts,
         synthetic=True,
+        staff=staff,
     )
 
 
@@ -350,8 +353,21 @@ def serve():
                     )
                 elif action == "card":
                     result = store.card(p, query.get("person_uuid", ""))
+                elif action == 'contracts':
+                    result = store.contract_list(p,query.get('search',''),query.get('work',''),query.get('limit',100))
                 elif action == "shifts":
                     result = shifts.summary(p)
+                elif action == 'shift-report':
+                    result=shifts.period_report(p,query.get('since'),query.get('until'),query.get('employee_uuid'))
+                elif action == 'cabinet':
+                    from . import cabinet
+                    result=cabinet.dashboard(p,query.get('month'),query.get('employee_uuid'))
+                elif action == 'three-hour':
+                    from . import three_hour
+                    result=three_hour.report(p)
+                elif action == 'report-write':
+                    from pult.core.crm_reports import write
+                    result=write(raw['report'],raw['path'],raw['kind'])
                 elif action == "script" and method == "GET":
                     result = scripts.state(p)
                 elif action == "anchor":

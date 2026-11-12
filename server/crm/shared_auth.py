@@ -23,13 +23,13 @@ from .contract import CRMError, canonical, now
 AUDIENCE = b'rimborso-crm-pilot-session-v1'
 TTL = 30 * 60
 NAMESPACE = 'crm-shared-pilot-v1'
-CAPABILITIES = frozenset(['call', 'visit', 'note', 'contact', 'promise', 'task',
+CAPABILITIES = frozenset(['call', 'visit', 'delivery', 'note', 'contact', 'promise', 'task',
                          'reported_payment', 'document', 'correct', 'shift_correct',
                          'analytics', 'exchange', 'accounting'])
 ENTRY_KINDS = {'manager', 'employee', 'analyst', 'analyst-device'}
 ROLE_CAPABILITIES = {
-    'employee': CAPABILITIES - {'shift_correct', 'analytics', 'exchange', 'accounting'},
-    'courier': frozenset({'delivery', 'correct'}),
+    'employee': CAPABILITIES - {'delivery', 'shift_correct', 'analytics', 'exchange', 'accounting'},
+    'courier': frozenset({'delivery', 'task', 'correct'}),
     'manager': CAPABILITIES,
     'analyst': frozenset({'note', 'contact', 'document', 'correct', 'analytics',
                           'exchange', 'accounting', 'shift_correct'}),
@@ -133,6 +133,8 @@ def principal(identity):
         role = identity.get('role')
         if role not in {*ROLE_CAPABILITIES, 'full'}:
             raise fault('identity_unmapped', 403)
+        if role == 'employee' and membership and membership['role'] == 'courier':
+            role = 'courier'
         legacy_manager = role in {'manager', 'full'} and result.team_id == 'crm-pilot-managers'
         role = 'manager' if role == 'full' else role
         if (role not in ROLE_CAPABILITIES or not membership or

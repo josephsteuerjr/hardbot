@@ -9,6 +9,7 @@ import { dirname, join, relative, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
+if (process.env.HARD_PRODUCT === 'crm') await import('./tools/build-courier.mjs');
 const out = join(here, "out");
 const product = process.env.HARD_PRODUCT || "";
 if (product && !["hard", "soft", "manager", "analyst", "crm"].includes(product)) throw new Error("Unknown product");

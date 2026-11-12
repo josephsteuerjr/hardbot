@@ -1,3 +1,4 @@
+import {mountDeliveryForm} from './crm-delivery';
 type API = {
   state(): Promise<any>;
   api(method: string, action: string, body?: any, query?: any): Promise<any>;
@@ -30,6 +31,7 @@ const amount = (value: any, currency = "") =>
 const labels: Record<string, string> = {
   call: "Звонок",
   visit: "Выезд",
+  delivery: 'Передать конверт',
   note: "Заметка",
   contact: "Контакты",
   promise: "Обещание",
@@ -48,6 +50,7 @@ let state: any,
   card: any,
   tab = "overview",
   scriptOpened: any,
+  cardScript: any = null,
   renderGeneration = 0;
 const notice = (text = "") => {
   $("notice").textContent = text;
@@ -75,6 +78,21 @@ async function request(
 }
 function can(cap: string) {
   return context?.owner || context?.capabilities?.includes(cap);
+}
+function contractCan(contract: any, kind: string) {
+  return !Array.isArray(contract.allowed_actions) || contract.allowed_actions.includes(kind);
+}
+function repaintWatermark(data: any) {
+  let host = document.querySelector('.card-script-watermark');
+  if (!host && data?.script) {
+    const workspace = document.querySelector('.card-workspace');
+    if (workspace) {
+      workspace.classList.add('with-script');
+      workspace.insertAdjacentHTML('beforeend', '<aside class="card-script-watermark" aria-label="Скрипт разговора"></aside>');
+      host = workspace.querySelector('.card-script-watermark');
+    }
+  }
+  if (host && data?.script) host.innerHTML = `<h2>${esc(data.script.title)}</h2>${data.script.steps.map((step: any) => `<section><h3>${esc(step.title)}</h3><p>${esc(step.text)}</p></section>`).join('')}<small>Версия ${esc(data.published_revision)}</small>`;
 }
 function button(id: string, title: string, primary = false) {
   return `<button id="${id}"${primary ? ' class="primary"' : ""}>${esc(title)}</button>`;
@@ -105,6 +123,7 @@ async function boot() {
       : state.connection.server) + (state.offline ? " · офлайн" : "");
   const sections = [
     ["portfolio", "Портфель"],
+    ['cabinet','Мои показатели'],
     ["shift", "Смена"],
     ["script", "Скрипт"],
     ["queue", "Очередь"],
@@ -135,6 +154,7 @@ async function go(next: string) {
     {
       portfolio: "Портфель",
       shift: "Смена",
+      cabinet:'Показатели сотрудника',
       script: "Скрипт звонка",
       queue: "Очередь",
       exchange: "Реестры",
@@ -160,6 +180,7 @@ async function go(next: string) {
         exchange: "exchange",
         adoption: "adoption",
         portfolio: "portfolio",
+        cabinet:'portfolio',
       } as any
     )[next],
   );
@@ -167,6 +188,7 @@ async function go(next: string) {
     await (
       {
         portfolio,
+        cabinet,
         shift,
         script,
         queue: queuePage,
@@ -179,6 +201,23 @@ async function go(next: string) {
   } catch (e) {
     if ((e as Error).name !== "AbortError") notice((e as Error).message);
   }
+}
+
+const debtKeys = ['debt_overdue', 'interest_overdue', 'penalty', 'duty', 'dtp', 'rent',
+  'camera_fine', 'dirt', 'trash', 'new_damage', 'evacuation', 'peni', 'other'];
+function calendarDate(value: any) {
+  const day = String(value || '').slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(day)
+    ? esc(new Date(day + 'T00:00:00').toLocaleDateString('ru-RU')) : esc(value || 'Не указано');
+}
+function contractDetails(contract: any) {
+  const fields = contract.fields;
+  const title = (key: string) => context.fields?.find((field: any) => field.key === key)?.title || key;
+  const articles = debtKeys.filter(key => fields[key] !== null && fields[key] !== undefined && fields[key] !== '');
+  const people = new Map((contract.assignments || []).map((row: any) => [row.employee_uuid, row.name]));
+  const responsibility = people.size ? Array.from(people.values()).join(', ')
+    : Array.from(new Set([fields.responsible, fields.responsible_soft].filter(Boolean))).join(', ');
+  return `<article class="contract-details" data-contract-details="${esc(contract.contract_uuid)}"><h3>${esc(contract.external_id)} · ${esc(contract.creditor_id)}</h3><dl class="contract-facts"><div><dt>Дата КД</dt><dd data-field="kd_date">${calendarDate(fields.kd_date)}</dd></div><div><dt>Выданная сумма</dt><dd data-field="issued_sum">${amount(fields.issued_sum, contract.currency || 'Валюта не задана')}</dd></div><div><dt>Дней просрочки</dt><dd data-field="dp">${esc(fields.dp ?? 'Не указано')}</dd></div><div><dt>${people.size ? 'Ответственные' : 'Ответственные из реестра'}</dt><dd data-field="responsibility">${esc(responsibility || 'Не назначены')}</dd></div><div><dt>Последняя оплата</dt><dd>${amount(fields.last_payment_sum, contract.currency || '')}${fields.last_payment_date ? ' · ' + calendarDate(fields.last_payment_date) : ''}</dd></div></dl><details><summary>Структура задолженности</summary>${articles.length ? `<dl class="debt-articles">${articles.map(key => `<div><dt>${esc(title(key))}</dt><dd data-field="${esc(key)}">${amount(fields[key], contract.currency || '')}</dd></div>`).join('')}</dl>` : '<p class="muted">Разбивка в источнике не указана</p>'}</details></article>`;
 }
 
 async function portfolio(search = "") {
@@ -214,6 +253,11 @@ async function portfolio(search = "") {
 async function openCard(person: string) {
   try {
     card = await request("GET", "card", undefined, { person_uuid: person });
+    cardScript = null;
+    if (can('call')) {
+      try { cardScript = await request('GET', 'script'); }
+      catch { /* The client card remains usable when its optional script is unavailable. */ }
+    }
     tab = "overview";
     telemetry("feature_opened", "card");
     await renderCard();
@@ -226,13 +270,14 @@ async function renderCard() {
   const actions = [
     "call",
     "visit",
+    'delivery',
     "note",
     "contact",
     "promise",
     "task",
     "reported_payment",
     "document",
-  ].filter(kind => can(kind) && card.contracts.some((contract: any) =>
+  ].filter(kind => !(context.role === 'courier' && kind === 'task') && can(kind) && card.contracts.some((contract: any) =>
     !Array.isArray(contract.allowed_actions) || contract.allowed_actions.includes(kind)));
   const tabs = [
     ["overview", "Обзор"],
@@ -244,7 +289,7 @@ async function renderCard() {
     ["documents", "Документы"],
   ];
   $("view").innerHTML =
-    `<div class="toolbar">${button("back", "← Портфель")}${actions.map((k) => `<button data-action="${k}"${k === "call" ? ' class="primary"' : ""}>${labels[k]}</button>`).join("")}</div><div class="tabs">${tabs.map(([id, title]) => `<button data-tab="${id}" class="${tab === id ? "active" : ""}">${title}</button>`).join("")}</div><div id="card-content"></div>`;
+    `<div class="toolbar">${button("back", "← Портфель")}${actions.map((k) => `<button data-action="${k}"${k === "call" ? ' class="primary"' : ""}>${labels[k]}</button>`).join("")}</div><div class="tabs">${tabs.map(([id, title]) => `<button data-tab="${id}" class="${tab === id ? "active" : ""}">${title}</button>`).join("")}</div><div class="card-workspace${cardScript?.script ? ' with-script' : ''}"><div id="card-content"></div>${cardScript?.script ? `<aside class="card-script-watermark" aria-label="Скрипт разговора"><h2>${esc(cardScript.script.title)}</h2>${cardScript.script.steps.map((step: any) => `<section><h3>${esc(step.title)}</h3><p>${esc(step.text)}</p></section>`).join('')}<small>Версия ${esc(cardScript.published_revision)}</small></aside>` : ''}</div>`;
   bind("back", () => portfolio());
   document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach(
     (b) =>
@@ -262,9 +307,10 @@ async function renderCard() {
       ["Договор / кредитор", "Контакты", "Остаток", "Последний результат"],
       card.contracts.map(
         (r: any) =>
-          `<tr><td><b>${esc(r.external_id)}</b><br><span class="muted">${esc(r.creditor_id)}</span></td><td>${esc(r.fields.phone || r.fields.phone_main || "—")}<br>${esc(r.fields.address || "—")}</td><td class="amount">${amount(r.fields.debt_today ?? r.fields.debt_total, r.currency || "Валюта не задана")}</td><td>${esc(r.fields.soft_call_status || r.fields.call_status || "—")}<br><span class="muted">${esc(r.fields.soft_comment || r.fields.visit_comment || "")}</span></td></tr>`,
+          `<tr><td><b>${esc(r.external_id)}</b><br><span class="muted">${esc(r.creditor_id)}</span></td><td>${esc(r.fields.phone || r.fields.phone_main || "—")}<br>${esc(r.fields.address || "—")}</td><td class="amount">${amount(r.fields.debt_today ?? r.fields.debt_total, r.currency || "Валюта не задана")}</td><td>${r.fields.soft_call_status || r.fields.soft_comment ? `<div>Звонок: ${esc(r.fields.soft_call_status || '—')}<br><span class="muted">${esc(r.fields.soft_comment || '')}</span></div>` : ''}${r.fields.call_status || r.fields.visit_comment ? `<div>Выезд: ${esc(r.fields.call_status || '—')}<br><span class="muted">${esc(r.fields.visit_comment || '')}</span></div>` : ''}</td></tr>`,
       ),
     );
+    host.innerHTML += card.contracts.map(contractDetails).join('');
     if (tab === "overview")
       host.innerHTML += `<div class="summary"><div class="metric">Договоры<strong>${card.contracts.length}</strong></div><div class="metric">Открытые задачи<strong>${card.entities.filter((e: any) => e.kind === "task" && e.status === "open").length}</strong></div><div class="metric">Заявленные оплаты<strong>${card.entities.filter((e: any) => e.kind === "reported_payment").length}</strong><small>Подтверждение поступления хранится отдельно</small></div></div>`;
   } else if (tab === "history") {
@@ -273,7 +319,7 @@ async function renderCard() {
           .map(
             (e: any) =>
               `<article class="record"><h3>${esc(labels[e.kind] || e.kind)} <span class="tag">${esc(e.origin)}</span></h3><div class="muted">${date(e.time_quality === "legacy_unknown" ? e.payload.legacy_created_at : e.received_at)} · ${esc(e.author || "Автор не указан")} · ${e.contract_ids.length} дог. ${e.projection_status === "needs_review" ? "· Требует сверки" : ""}</div><p>${esc(
-                e.payload.text ||
+                (e.kind === 'delivery' ? [e.payload.delivered ? 'Конверт передан' : 'Конверт не передан',e.payload.delivery_address,e.payload.delivery_phone,e.payload.delivery_comment].filter(Boolean).join('\n') : '') || e.payload.text ||
                   e.payload.title ||
                   Object.entries(e.payload.values || {})
                     .map(
@@ -284,7 +330,7 @@ async function renderCard() {
                         (v ?? "Очищено"),
                     )
                     .join("\n"),
-              )}</p>${e.payload.script_ref ? `<p class="muted">Подсказка: версия ${esc(e.payload.script_ref.published_revision)}</p>` : ""}${e.reason ? `<p>Причина: ${esc(e.reason)}</p>` : ""}${["call", "visit", "note", "contact"].includes(e.kind) && can("correct") ? `<button data-correct="${e.event_id}">Исправить</button>` : ""}</article>`,
+              )}</p>${e.payload.script_ref ? `<p class="muted">Подсказка: версия ${esc(e.payload.script_ref.published_revision)}</p>` : ""}${e.reason ? `<p>Причина: ${esc(e.reason)}</p>` : ""}${["call", "visit", "note", "contact"].includes(e.kind) && can("correct") && e.can_correct !== false ? `<button data-correct="${e.event_id}">Исправить</button>` : ""}</article>`,
           )
           .join("")
       : '<div class="empty">История пока пуста</div>';
@@ -311,7 +357,7 @@ async function renderCard() {
           ["Вид", "Содержание", "Срок / сумма", "Состояние"],
           rows.map(
             (e: any) =>
-              `<tr><td>${esc(labels[e.kind])}</td><td>${esc(e.data.title || e.data.filename || e.data.text || "—")}</td><td>${e.data.amount != null ? amount(e.data.amount, e.data.currency) : date(e.data.due_at)}</td><td>${e.status === "done" ? "Завершено" : "Зафиксировано"}${e.kind === "document" ? `<br><button class="link" data-document="${e.entity_id}">Сохранить документ</button>` : ""}${e.kind === "task" && e.status === "open" ? `<br><button class="link" data-complete="${e.entity_id}">Выполнено</button>` : ""}</td></tr>`,
+              `<tr><td>${esc(labels[e.kind])}</td><td>${esc(e.data.title || e.data.filename || e.data.text || "—")}${e.assignee ? `<br><span class="muted">${esc(e.assignee)}</span>` : ''}</td><td>${e.data.amount != null ? amount(e.data.amount, e.data.currency) : date(e.data.due_at)}</td><td>${e.status === "done" ? "Завершено" : e.kind === 'task' ? 'В работе' : "Зафиксировано"}${e.kind === "document" ? `<br><button class="link" data-document="${e.entity_id}">Сохранить документ</button>` : ""}${e.kind === "task" && e.status === "open" && e.can_complete !== false ? `<br><button class="link" data-complete="${e.entity_id}">Выполнено</button>` : ""}</td></tr>`,
           ),
         )
       : '<div class="empty">Записей пока нет</div>';
@@ -362,9 +408,16 @@ async function action(kind: string, original?: any) {
   const target = kind === "correction" ? original.kind : kind;
   telemetry("workflow_started", target);
   const dialog = $<HTMLDialogElement>("dialog");
+  if (kind === 'delivery') {
+    await mountDeliveryForm(dialog, card.contracts.map((row: any)=>({...row,client_name:card.person.name})),
+      {fields:context.fields,draft:(key,...value)=>crm.draft(key,...value),command:body=>crm.command(body),close:()=>dialog.close()});
+    dialog.showModal();return;
+  }
   if (target === "document") {
-    const selected = card.contracts[0];
-    if (card.contracts.length > 1) {
+    const available = card.contracts.filter((entry: any) => contractCan(entry, 'document'));
+    const selected = available[0];
+    if (!selected) { notice('Нет права прикреплять документ к этому клиенту.'); return; }
+    if (available.length > 1) {
       await documentForm();
       return;
     }
@@ -410,9 +463,9 @@ async function action(kind: string, original?: any) {
   const saved = (await crm.draft(draftKey)).data;
   // A form owns its script snapshot. Reopening the same draft or opening
   // the inline panel again must not switch text during the call.
-  let callScript: any = saved?.script_snapshot ?? null;
+  let callScript: any = saved?.script_snapshot ?? (kind === 'call' && cardScript?.script ? structuredClone(cardScript) : null);
   let scriptError = "";
-  if (kind === "call" && !saved?.script_snapshot) {
+  if (kind === "call" && !callScript) {
     try {
       const published = await request("GET", "script");
       callScript = {
@@ -425,7 +478,11 @@ async function action(kind: string, original?: any) {
       scriptError = (error as Error).message;
     }
   }
-  let scriptShown = saved?.script_shown === true;
+  if (kind === 'call' && callScript?.script) {
+    cardScript = callScript;
+    repaintWatermark(callScript);
+  }
+  let scriptShown = saved?.script_shown === true || (kind === 'call' && !!callScript?.script && !!document.querySelector('.card-script-watermark'));
   const controls = keys
     .map((key) => {
       const def = context.fields.find((f: any) => f.key === key);
@@ -437,10 +494,33 @@ async function action(kind: string, original?: any) {
     .join("");
   dialog.innerHTML = `<form id="action-form"><h2>${esc(labels[kind])}</h2><div class="contracts">${card.contracts.map((c: any, i: number) => `<label class="check"><input type="${singular ? "radio" : "checkbox"}" name="contracts" value="${c.contract_uuid}"${!singular || i === 0 ? " checked" : ""}>${esc(c.external_id)} · ${esc(c.creditor_id)}</label>`).join("")}</div><div class="grid">${controls}${["note", "task"].includes(target) ? `<div class="field span"><label>${target === "task" ? "Задача" : "Заметка"}</label><textarea id="free-text">${esc(saved?.text || original?.payload?.text || "")}</textarea></div>` : ""}${["promise", "reported_payment"].includes(target) ? `<div class="field"><label>Сумма</label><input id="money" inputmode="decimal" value="${esc(saved?.amount || "")}"></div><div class="field"><label>Валюта</label><select id="currency"><option>RUB</option><option>TJS</option><option>UZS</option><option>USD</option></select></div>` : ""}${["promise", "task"].includes(target) ? `<div class="field"><label>Срок · ${esc(Intl.DateTimeFormat().resolvedOptions().timeZone)}</label><input id="due" type="datetime-local" value="${esc(saved?.due || "")}"></div>` : ""}${kind === "correction" ? '<div class="field span"><label>Причина исправления</label><textarea id="reason" required></textarea></div>' : ""}</div><div class="error" id="form-error"></div><div class="actions">${button("cancel", "Закрыть")}${kind === "call" ? button("show-script", "Скрипт") : ""}<button type="submit" class="primary">Сохранить действие</button></div><div id="script-inline"></div></form>`;
   const selectedIds = saved?.contract_ids ?? original?.contract_ids;
+  const permitted = new Set(card.contracts.filter((entry: any) => contractCan(entry, target)
+    && (kind !== 'correction' || contractCan(entry, 'correct'))).map((entry: any) => entry.contract_uuid));
+  let needsContractSelection = Array.isArray(selectedIds) && selectedIds.some((id: string) => !permitted.has(id));
+  if (target === 'task') {
+    const staff = context.staff?.length ? context.staff : [{employee_uuid: context.employee_uuid, name: 'Я',
+      work_kinds: ['call','visit','delivery'].filter(key => can(key))}];
+    dialog.querySelector('.grid')!.insertAdjacentHTML('beforeend', `<div class="field"><label for="task-assignee">Исполнитель</label><select id="task-assignee">${staff.map((person: any) => `<option value="${esc(person.employee_uuid)}">${esc(person.name)}</option>`).join('')}</select></div><div class="field"><label for="task-work">Вид работы</label><select id="task-work"></select></div>`);
+    const assignee = $<HTMLSelectElement>('task-assignee'), work = $<HTMLSelectElement>('task-work');
+    assignee.value = saved?.assignee_uuid ?? original?.payload?.assignee_uuid ?? context.employee_uuid;
+    const fillWork = () => {
+      const person = staff.find((entry: any) => entry.employee_uuid === assignee.value);
+      work.innerHTML = (person?.work_kinds || ['call','visit']).map((key: string) => `<option value="${esc(key)}">${esc(key === 'delivery' ? 'Передать конверт' : labels[key])}</option>`).join('');
+    };
+    fillWork();work.value = saved?.work_kind ?? original?.payload?.work_kind ?? work.value;
+    assignee.addEventListener('change', () => { fillWork(); void crm.draft(draftKey, capture()); });
+    if (!saved?.due && !original) {
+      const today = new Date();
+      $<HTMLInputElement>('due').value = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}T23:59`;
+    }
+  }
+  const firstPermitted = card.contracts.find((entry: any) => permitted.has(entry.contract_uuid))?.contract_uuid;
   dialog.querySelectorAll<HTMLInputElement>("input[name=contracts]").forEach((el) => {
-    if (Array.isArray(selectedIds)) el.checked = selectedIds.includes(el.value);
-    if (kind === "correction") el.disabled = true;
+    el.checked = permitted.has(el.value) && (Array.isArray(selectedIds) ? selectedIds.includes(el.value) : !singular || el.value === firstPermitted);
+    el.disabled = kind === 'correction' || !permitted.has(el.value);
+    el.addEventListener('input', () => { needsContractSelection = false; });
   });
+  if (needsContractSelection) $('form-error').textContent = 'Права по договору изменились. Выберите доступный договор; прежний черновик сохранён.';
   dialog.querySelectorAll<HTMLInputElement>("[data-clear]").forEach((el) => {
     el.checked = (saved?.clear ?? original?.payload?.clear ?? []).includes(el.dataset.clear);
   });
@@ -457,7 +537,7 @@ async function action(kind: string, original?: any) {
   const reasonInput = $<HTMLTextAreaElement>("reason");
   if (reasonInput) reasonInput.value = saved?.reason ?? "";
   const capture = () => ({
-    contract_ids: Array.from(dialog.querySelectorAll<HTMLInputElement>("input[name=contracts]:checked")).map((el) => el.value),
+    contract_ids: needsContractSelection ? selectedIds : Array.from(dialog.querySelectorAll<HTMLInputElement>("input[name=contracts]:checked")).map((el) => el.value),
     clear: Array.from(dialog.querySelectorAll<HTMLInputElement>("[data-clear]:checked")).map((el) => el.dataset.clear),
     values: Object.fromEntries(
       keys.map((k) => [k, ($("v-" + k) as HTMLInputElement).value]),
@@ -469,6 +549,8 @@ async function action(kind: string, original?: any) {
     reason: reasonInput?.value,
     script_snapshot: callScript,
     script_shown: scriptShown,
+    assignee_uuid: $<HTMLSelectElement>('task-assignee')?.value,
+    work_kind: $<HTMLSelectElement>('task-work')?.value,
   });
   if (kind === "call" && callScript) await crm.draft(draftKey, capture());
   dialog.querySelectorAll("input,select,textarea").forEach((el) =>
@@ -496,6 +578,7 @@ async function action(kind: string, original?: any) {
   $("action-form").onsubmit = async (e) => {
     e.preventDefault();
     try {
+      if (needsContractSelection) throw new Error('Выберите доступный договор после изменения прав.');
       const contract_ids = Array.from(
         dialog.querySelectorAll<HTMLInputElement>(
           "input[name=contracts]:checked",
@@ -519,8 +602,11 @@ async function action(kind: string, original?: any) {
         payload.script_ref = callScript.script_ref;
       if (target === "note")
         payload.text = $<HTMLTextAreaElement>("free-text").value;
-      if (target === "task")
+      if (target === "task") {
         payload.title = $<HTMLTextAreaElement>("free-text").value;
+        payload.assignee_uuid = $<HTMLSelectElement>('task-assignee').value;
+        payload.work_kind = $<HTMLSelectElement>('task-work').value;
+      }
       if (["promise", "reported_payment"].includes(target)) {
         payload.amount = $<HTMLInputElement>("money").value.replace(",", ".");
         payload.currency = $<HTMLSelectElement>("currency").value;
@@ -572,6 +658,9 @@ async function action(kind: string, original?: any) {
 async function documentForm() {
   const dialog = $<HTMLDialogElement>("dialog");
   dialog.innerHTML = `<h2>Документ</h2><div class="field"><label>Договор</label><select id="document-contract">${card.contracts.map((c: any) => `<option value="${c.contract_uuid}">${esc(c.external_id)} · ${esc(c.creditor_id)}</option>`).join("")}</select></div><div class="actions">${button("document-close", "Закрыть")}${button("document-pick", "Выбрать файл", true)}</div>`;
+  dialog.querySelectorAll<HTMLOptionElement>('#document-contract option').forEach(option => {
+    if (!card.contracts.some((entry: any) => entry.contract_uuid === option.value && contractCan(entry, 'document'))) option.remove();
+  });
   bind("document-close", () => dialog.close());
   bind("document-pick", async () => {
     const id = $<HTMLSelectElement>("document-contract").value;
@@ -637,6 +726,20 @@ async function queuePage() {
   );
 }
 
+async function cabinet() {
+  const month=new Date().toLocaleDateString('sv-SE').slice(0,7);
+  const staff=context.staff || [];
+  $('view').innerHTML=`<div class="toolbar"><label>Месяц <input id="cabinet-month" type="month" value="${month}"></label>${staff.length>1?`<label>Сотрудник <select id="cabinet-employee">${staff.map((person:any)=>`<option value="${esc(person.employee_uuid)}"${person.employee_uuid===context.employee_uuid?' selected':''}>${esc(person.name)}</option>`).join('')}</select></label>`:''}${button('cabinet-refresh','Показать')}</div><div id="cabinet-result"></div>`;
+  const show=async()=>{
+    const data=await request('GET','cabinet',undefined,{month:$<HTMLInputElement>('cabinet-month').value,
+      employee_uuid:($('cabinet-employee') as HTMLSelectElement)?.value || context.employee_uuid});
+    const stats=data.stats,payments=data.payments;
+    $('cabinet-result').innerHTML=`<h2>${esc(data.employee)}</h2><div class="summary">${[['Звонки',stats.call||0],['Выезды',stats.visit||0],['Попытки передачи',stats.delivery||0],['Обещания',stats.promise||0],['Задачи завершены',stats.task_complete||0],['Обработано договоров',stats.processed_contracts],['Договоров в портфеле',stats.portfolio_contracts]].map(([title,value])=>`<div class="metric">${esc(title)}<strong>${esc(value)}</strong></div>`).join('')}</div><h2>Оплаты за месяц по реестру</h2><p class="muted">Текущий постоянный портфель сотрудника. Данные на ${payments.source_as_of.length?payments.source_as_of.map(date).join(', '):'—'}. Договоров с месячной суммой: ${payments.known_contracts}; без данных: ${payments.missing_contracts}.</p>${payments.totals.length?table(['Валюта','Сумма'],payments.totals.map((row:any)=>`<tr><td>${esc(row.currency || 'Валюта не подтверждена: '+row.unit.replace('unconfirmed:registry-partner:','').replace('unconfirmed:',''))}</td><td>${amount(row.amount,row.currency||'')}</td></tr>`)):'<div class="empty">Месячные суммы в источнике отсутствуют</div>'}${table(['Клиент','Договор','Кредитор','Сумма'],payments.rows.map((row:any)=>`<tr><td><button class="link" data-cabinet-person="${esc(row.person_uuid)}">${esc(row.client)}</button></td><td>${esc(row.external_id)}</td><td>${esc(row.creditor)}</td><td>${amount(row.amount,row.currency||'Валюта не подтверждена')}</td></tr>`))}<h2>Мои операции за месяц</h2><p class="muted">Авторство сохраняется при передаче договора.${data.history_without_time?' Исторических записей без точного времени: '+data.history_without_time+'.':''}${data.operations_truncated?' Показаны последние 500 операций.':''}</p>${table(['Время','Действие','Договоров','Содержание'],data.operations.map((row:any)=>`<tr><td>${date(row.occurred_at)}</td><td>${esc(labels[row.kind]||row.kind)}</td><td>${row.contract_ids.length}</td><td>${esc(row.text)}</td></tr>`))}`;
+    document.querySelectorAll<HTMLButtonElement>('[data-cabinet-person]').forEach(button=>button.onclick=()=>void openCard(button.dataset.cabinetPerson!));
+  };
+  bind('cabinet-refresh',show);await show();
+}
+
 async function shift() {
   const data = await request("GET", "shifts");
   const current = data.shifts.find((s: any) => !s.ends_at);
@@ -670,6 +773,16 @@ async function shift() {
     send(current.state === "break" ? "resume" : "break"),
   );
   bind("shift-finish", () => send("finish"));
+  const today=new Date().toLocaleDateString('sv-SE');
+  $('view').insertAdjacentHTML('beforeend',`<h2>Отчёт по сменам</h2><div class="toolbar"><label>С <input id="shift-since" type="date" value="${today.slice(0,8)+'01'}"></label><label>По <input id="shift-until" type="date" value="${today}"></label>${button('shift-report-show','Показать')}${button('shift-report-export','Сохранить Excel')}</div><div id="shift-report-result"></div>`);
+  let report:any;
+  const reportShow=async()=>{
+    report=await request('GET','shift-report',undefined,{since:$<HTMLInputElement>('shift-since').value,until:$<HTMLInputElement>('shift-until').value});
+    $('shift-report-result').innerHTML=`<p class="muted">${esc(report.meaning)} Часовой пояс: ${esc(report.timezone)}.</p>`+table(['Сотрудник','Смен','Работа','Перерывы','Не закрыто'],report.employees.map((row:any)=>`<tr><td>${esc(row.employee)}</td><td>${row.shifts}</td><td>${Math.floor(row.declared_seconds/3600)} ч. ${Math.floor(row.declared_seconds/60)%60} мин.</td><td>${Math.floor(row.break_seconds/60)} мин.</td><td>${row.unclosed}</td></tr>`));
+  };
+  bind('shift-report-show',reportShow);
+  bind('shift-report-export',async()=>{await reportShow();const result=await crm.workbook('shift-report',{report});if(!result.ok&&!result.cancelled)throw new Error(result.text);});
+  await reportShow();
 }
 
 function scriptMarkup(data: any) {

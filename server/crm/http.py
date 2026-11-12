@@ -14,6 +14,8 @@ from . import (
     store,
     telemetry,
     scripts,
+    cabinet,
+    three_hour,
 )
 from .contract import CRMError, fields
 
@@ -73,6 +75,7 @@ def install(app, host=None, *, authenticate=None):
 
     def context(p):
         from fields import DROPDOWNS
+        from . import tasks
 
         with storage.connect() as conn:
             cohorts = [
@@ -88,6 +91,7 @@ def install(app, host=None, *, authenticate=None):
                     (r["cohort_id"], *p.employee_scope),
                 ).fetchone()
             ]
+            staff = tasks.staff(conn, p)
         return dict(
             schema_version=1,
             employee_uuid=p.employee_uuid,
@@ -100,6 +104,7 @@ def install(app, host=None, *, authenticate=None):
             fields=fields(),
             dropdowns=DROPDOWNS,
             cohorts=cohorts,
+            staff=staff,
         )
 
     async def handler(request):
@@ -120,10 +125,19 @@ def install(app, host=None, *, authenticate=None):
                     result = await asyncio.to_thread(
                         store.card, p, request.query.get("person_uuid", "")
                     )
+                elif action == 'contracts':
+                    result = await asyncio.to_thread(store.contract_list, p, request.query.get('search',''),
+                        request.query.get('work',''), int(request.query.get('limit','100')))
                 elif action == "shifts":
                     result = await asyncio.to_thread(
                         shifts.summary, p, request.query.get("employee_uuid")
                     )
+                elif action == 'shift-report':
+                    result = await asyncio.to_thread(shifts.period_report,p,request.query.get('since'),request.query.get('until'),request.query.get('employee_uuid'))
+                elif action == 'cabinet':
+                    result = await asyncio.to_thread(cabinet.dashboard,p,request.query.get('month'),request.query.get('employee_uuid'))
+                elif action == 'three-hour':
+                    result=await asyncio.to_thread(three_hour.report,p)
                 elif action == "script":
                     result = await asyncio.to_thread(scripts.state, p)
                 elif action == "document":

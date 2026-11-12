@@ -21,6 +21,7 @@ KINDS = {
     "document",
     "correction",
     "task_complete",
+    "delivery",
 }
 USEFUL = KINDS - {"correction"}
 CALL_KEYS = {"soft_call_status", "soft_comm_date", "soft_comment"}

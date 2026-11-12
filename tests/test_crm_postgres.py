@@ -20,6 +20,12 @@ import test_crm_rebuild as rebuild_cases
 import test_crm_review_20261110 as review_cases
 import test_crm_common_access as common_cases
 import test_crm_staff_bridge as staff_cases
+import test_crm_client_tasks as task_cases
+import test_crm_delivery as delivery_cases
+import test_crm_contract_list as lookup_cases
+import test_crm_cabinet as cabinet_cases
+import test_crm_shift_report as shift_report_cases
+import test_crm_three_hour as three_hour_cases
 
 pytestmark = pytest.mark.skipif(not os.environ.get('HARD_CRM_TEST_DSN_FILE'),
                                reason='Requires isolated PostgreSQL QA database')
@@ -67,7 +73,7 @@ def pg_world(tmp_path, monkeypatch):
             admin.execute('DROP SCHEMA ' + namespace + ' CASCADE')
 
 
-CASES = [function for module in (core, exchange_cases, adoption_cases, rebuild_cases, review_cases, common_cases)
+CASES = [function for module in (core, exchange_cases, adoption_cases, rebuild_cases, review_cases, common_cases, task_cases, delivery_cases, lookup_cases,cabinet_cases,shift_report_cases,three_hour_cases)
          for name, function in vars(module).items()
          if name.startswith('test_') and callable(function)
          and set(inspect.signature(function).parameters) == {'crm_world'}

@@ -39,7 +39,7 @@ with sync_playwright() as p:
     assert page.locator('input[name=contracts][value=B]').is_checked()
     assert page.locator('[data-clear=soft_comment]').is_checked()
     page.locator('#show-script').click()
-    assert page.evaluate('review.scriptReads')==0
+    assert page.evaluate('review.scriptReads')==1
     page.locator('#action-form button[type=submit]').click()
     page.wait_for_function('review.commands.length===1')
     body=page.evaluate('review.commands[0]')
