@@ -15,7 +15,7 @@ def install(app, host, *, transport=None):
     @web.middleware
     async def legacy_guard(request,handler):
         business=('/api/save','/api/office/','/api/workspace/action','/api/note','/api/marker','/api/photo','/api/receipt')
-        if request.method=='POST' and request.path.startswith(business) and not request.headers.get('X-Pult-Token'):
+        if request.method=='POST' and request.path.startswith(business) and (request.headers.get('X-App-Token') or not request.headers.get('X-Pult-Token')):
             uid,_=await asyncio.to_thread(host._auth,request)
             if await asyncio.to_thread(host.db.get_kind,uid)=='courier':
                 raise host._json_error(web.HTTPForbidden,'courier_form_only')

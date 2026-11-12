@@ -59,6 +59,8 @@ def test_courier_cannot_bypass_the_form_through_the_old_save_route():
         async with TestClient(TestServer(app)) as client:
             blocked=await client.post('/api/save',headers={'X-App-Token':'synthetic'},json={})
             assert blocked.status==403 and (await blocked.json())['error']=='courier_form_only' and writes==[]
+            mixed=await client.post('/api/save',headers={'X-App-Token':'synthetic','X-Pult-Token':'untrusted-header'},json={})
+            assert mixed.status==403 and writes==[]
             kind[0]='agent';assert (await client.post('/api/save',headers={'X-App-Token':'synthetic'},json={})).status==200
             assert writes==['old-save']
     asyncio.run(scenario())
