@@ -80,6 +80,9 @@ def test_real_device_auth_and_server_scope(pilot_http):
     assert status == 200 and own["total_contracts"] == 2
     status, manager = call("GET", "/api/crm/portfolio", p["manager"])
     assert status == 200 and manager["total_contracts"] == 2
+    status, tasks = call('GET','/api/crm/tasks',p['employee'])
+    assert status==200 and tasks['total']==0
+    assert call('GET','/api/crm/tasks?employee_uuid=all',p['employee'])[0]==403
     foreign = dict(
         schema_version=1,
         operation_id=str(uuid.uuid4()),

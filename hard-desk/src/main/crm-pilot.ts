@@ -173,6 +173,7 @@ const actions = new Set([
   "context",
   "portfolio",
   "work-portfolio",
+  'tasks',
   "card",
   'contracts',
   "shifts",

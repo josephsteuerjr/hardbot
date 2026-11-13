@@ -17,6 +17,7 @@ from . import (
     cabinet,
     three_hour,
     work_portfolio,
+    tasks,
 )
 from .contract import CRMError, fields
 
@@ -125,6 +126,10 @@ def install(app, host=None, *, authenticate=None):
                 elif action == 'work-portfolio':
                     result=await asyncio.to_thread(work_portfolio.read,p,request.query.get('search',''),
                         request.query.get('work','all'),request.query.get('employee_uuid'),request.query.get('offset','0'),request.query.get('limit','100'))
+                elif action == 'tasks':
+                    result=await asyncio.to_thread(tasks.overview,p,status=request.query.get('status','open'),
+                        employee=request.query.get('employee_uuid'),work=request.query.get('work','all'),
+                        search=request.query.get('search',''),offset=request.query.get('offset','0'),limit=request.query.get('limit','100'))
                 elif action == "card":
                     result = await asyncio.to_thread(
                         store.card, p, request.query.get("person_uuid", "")

@@ -382,6 +382,10 @@ def serve():
                     result=work_portfolio.read(p,query.get('search',''),query.get('work','all'),query.get('employee_uuid'),query.get('offset',0),query.get('limit',100))
                 elif action == 'contracts':
                     result = store.contract_list(p,query.get('search',''),query.get('work',''),query.get('limit',100))
+                elif action == 'tasks':
+                    from . import tasks
+                    result=tasks.overview(p,status=query.get('status','open'),employee=query.get('employee_uuid'),
+                        work=query.get('work','all'),search=query.get('search',''),offset=query.get('offset',0),limit=query.get('limit',100))
                 elif action == "shifts":
                     result = shifts.summary(p)
                 elif action == 'shift-report':

@@ -56,6 +56,8 @@ let state: any,
   renderGeneration = 0;
 let portfolioView='mine', portfolioWork='all', portfolioEmployee='', portfolioSearch='', portfolioOffset=0;
 let portfolioIdentity='',portfolioGeneration=0;
+let taskStatus='open',taskEmployee='all',taskWork='all',taskSearch='',taskOffset=0,taskGeneration=0;
+let cardOrigin='portfolio',taskSelectClient=false,newTaskAssignee='';
 const notice = (text = "") => {
   $("notice").textContent = text;
 };
@@ -115,9 +117,19 @@ async function boot() {
   state = await crm.state();
   context = state.context;
   if (portfolioIdentity!==context?.employee_uuid) {
+    taskSelectClient=false;newTaskAssignee='';cardOrigin='portfolio';
     portfolioIdentity=context?.employee_uuid || '';
     portfolioView=['manager','analyst','observer'].includes(context?.role)?'all':'mine';
     portfolioEmployee=context?.employee_uuid || '';portfolioWork='all';portfolioSearch='';portfolioOffset=0;
+    taskStatus='open';taskEmployee=['manager','analyst','observer','owner'].includes(context?.role)?'all':context?.employee_uuid;
+    taskWork='all';taskSearch='';taskOffset=0;
+    const savedTasks=(await crm.draft('task-view')).data;
+    if(savedTasks){
+      if(['open','today','overdue','done','all'].includes(savedTasks.status))taskStatus=savedTasks.status;
+      if(['all','call','visit','delivery'].includes(savedTasks.work))taskWork=savedTasks.work;
+      if(savedTasks.employee==='all' && ['manager','analyst','observer','owner'].includes(context?.role)
+          || (context?.staff || []).some((p:any)=>p.employee_uuid===savedTasks.employee))taskEmployee=savedTasks.employee;
+    }
     const saved=(await crm.draft('portfolio-view')).data;
     if(saved && ['mine','all'].includes(saved.view)) {
       portfolioView=saved.view;
@@ -133,6 +145,7 @@ async function boot() {
       : state.connection.server) + (state.offline ? " · офлайн" : "");
   const sections = [
     ["portfolio", "Портфель"],
+    ['tasks','Задачи'],
     ['cabinet','Мои показатели'],
     ["shift", "Смена"],
     ["script", "Скрипт"],
@@ -158,11 +171,13 @@ async function boot() {
 }
 async function go(next: string) {
   renderGeneration++;
+  taskSelectClient=false;newTaskAssignee='';
   section = next;
   notice();
   $("title").textContent = (
     {
       portfolio: "Портфель",
+      tasks:'Задачи',
       shift: "Смена",
       cabinet:'Показатели сотрудника',
       script: "Скрипт звонка",
@@ -190,6 +205,7 @@ async function go(next: string) {
         exchange: "exchange",
         adoption: "adoption",
         portfolio: "portfolio",
+        tasks:'task',
         cabinet:'portfolio',
       } as any
     )[next],
@@ -198,6 +214,7 @@ async function go(next: string) {
     await (
       {
         portfolio,
+        tasks:tasksPage,
         cabinet,
         shift,
         script,
@@ -292,6 +309,10 @@ async function portfolio(search = portfolioSearch, offset=portfolioOffset) {
 
 async function openCard(person: string) {
   portfolioGeneration++;
+  taskGeneration++;renderGeneration++;
+  const createTask=taskSelectClient;
+  cardOrigin=section==='tasks' || createTask?'tasks':'portfolio';
+  taskSelectClient=false;
   try {
     card = await request("GET", "card", undefined, { person_uuid: person });
     cardScript = null;
@@ -302,6 +323,10 @@ async function openCard(person: string) {
     tab = "overview";
     telemetry("feature_opened", "card");
     await renderCard();
+    if(createTask){
+      if(can('task') && card.contracts.some((entry:any)=>contractCan(entry,'task')))await action('task');
+      else notice('Нет права назначать задачу по этому клиенту.');
+    }
   } catch (e) {
     notice((e as Error).message);
   }
@@ -330,8 +355,8 @@ async function renderCard() {
     ["documents", "Документы"],
   ];
   $("view").innerHTML =
-    `<div class="toolbar">${button("back", "← Портфель")}${actions.map((k) => `<button data-action="${k}"${k === "call" ? ' class="primary"' : ""}>${labels[k]}</button>`).join("")}</div><div class="tabs">${tabs.map(([id, title]) => `<button data-tab="${id}" class="${tab === id ? "active" : ""}">${title}</button>`).join("")}</div><div class="card-workspace${cardScript?.script ? ' with-script' : ''}"><div id="card-content"></div>${cardScript?.script ? `<aside class="card-script-watermark" aria-label="Скрипт разговора"><h2>${esc(cardScript.script.title)}</h2>${cardScript.script.steps.map((step: any) => `<section><h3>${esc(step.title)}</h3><p>${esc(step.text)}</p></section>`).join('')}<small>Версия ${esc(cardScript.published_revision)}</small></aside>` : ''}</div>`;
-  bind("back", () => portfolio());
+    `<div class="toolbar">${button("back", cardOrigin==='tasks'?'← Задачи':"← Портфель")}${actions.map((k) => `<button data-action="${k}"${k === "call" ? ' class="primary"' : ""}>${labels[k]}</button>`).join("")}</div><div class="tabs">${tabs.map(([id, title]) => `<button data-tab="${id}" class="${tab === id ? "active" : ""}">${title}</button>`).join("")}</div><div class="card-workspace${cardScript?.script ? ' with-script' : ''}"><div id="card-content"></div>${cardScript?.script ? `<aside class="card-script-watermark" aria-label="Скрипт разговора"><h2>${esc(cardScript.script.title)}</h2>${cardScript.script.steps.map((step: any) => `<section><h3>${esc(step.title)}</h3><p>${esc(step.text)}</p></section>`).join('')}<small>Версия ${esc(cardScript.published_revision)}</small></aside>` : ''}</div>`;
+  bind("back", () => cardOrigin==='tasks'?go('tasks'):portfolio());
   document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach(
     (b) =>
       (b.onclick = () => {
@@ -543,7 +568,8 @@ async function action(kind: string, original?: any) {
       work_kinds: ['call','visit','delivery'].filter(key => can(key))}]).filter((person:any)=>person.work_kinds?.length);
     dialog.querySelector('.grid')!.insertAdjacentHTML('beforeend', `<div class="field"><label for="task-assignee">Исполнитель</label><select id="task-assignee">${staff.map((person: any) => `<option value="${esc(person.employee_uuid)}">${esc(person.name)}</option>`).join('')}</select></div><div class="field"><label for="task-work">Вид работы</label><select id="task-work"></select></div>`);
     const assignee = $<HTMLSelectElement>('task-assignee'), work = $<HTMLSelectElement>('task-work');
-    assignee.value = saved?.assignee_uuid ?? original?.payload?.assignee_uuid ?? context.employee_uuid;
+    assignee.value = saved?.assignee_uuid ?? original?.payload?.assignee_uuid ?? (newTaskAssignee || context.employee_uuid);
+    newTaskAssignee='';
     const fillWork = () => {
       const person = staff.find((entry: any) => entry.employee_uuid === assignee.value);
       work.innerHTML = (person?.work_kinds || ['call','visit']).map((key: string) => `<option value="${esc(key)}">${esc(key === 'delivery' ? 'Передать конверт' : labels[key])}</option>`).join('');
@@ -688,6 +714,7 @@ async function action(kind: string, original?: any) {
       await crm.draft(draftKey + ":pending", null);
       dialog.close();
       telemetry("command_queued", target, { operation_id });
+      if(target==='task')await go('tasks');
       notice("Действие сохранено. Отправка и подтверждение — в очереди.");
     } catch (error) {
       $("form-error").textContent = (error as Error).message;
@@ -765,6 +792,44 @@ async function queuePage() {
         await queuePage();
       }),
   );
+}
+
+async function tasksPage() {
+  const generation=++taskGeneration;
+  const [data,queue]=await Promise.all([request('GET','tasks',undefined,{status:taskStatus,employee_uuid:taskEmployee,
+    work:taskWork,search:taskSearch,offset:taskOffset,limit:100}),crm.queue()]);
+  if(generation!==taskGeneration || section!=='tasks')return;
+  const entries=queue.ok?(queue.data?.entries || []):[];
+  const pending=entries.filter((e:any)=>['task','task_complete'].includes(e.body?.kind) && e.state!=='accepted');
+  const team=['manager','owner','analyst','observer'].includes(context.role);
+  const filters=[['open','Открытые'],['today','На сегодня'],['overdue','Просроченные'],['done','Завершённые'],['all','Все']];
+  const due=(value:string)=>value?new Intl.DateTimeFormat('ru-RU',{dateStyle:'short',timeStyle:'short',timeZone:data.timezone}).format(new Date(value)):'Срок не указан';
+  $('title').textContent='Задачи';
+  $('view').innerHTML=`<div class="toolbar"><input id="task-search" type="search" placeholder="Клиент, договор или задача" aria-label="Поиск задач" value="${esc(taskSearch)}">${team?`<label>Исполнитель <select id="task-employee"><option value="all">Вся команда</option>${(context.staff || []).map((p:any)=>`<option value="${esc(p.employee_uuid)}"${p.employee_uuid===taskEmployee?' selected':''}>${esc(p.name)}</option>`).join('')}</select></label>`:''}<label>Работа <select id="task-work">${[['all','Любая'],['call','Звонок'],['visit','Выезд'],['delivery','Передать конверт']].map(([id,label])=>`<option value="${id}"${id===taskWork?' selected':''}>${label}</option>`).join('')}</select></label>${button('task-refresh','Обновить')}${can('task') && context.role!=='courier'?button('task-create',team?'Назначить задачу':'Напомнить',true):''}</div><div class="work-filters">${filters.map(([id,label])=>`<button data-task-filter="${id}" class="${id===taskStatus?'active':''}">${label} <span>${data.counts[id] || 0}</span></button>`).join('')}</div><div id="task-send-state">${!queue.ok?'<p role="alert">Не удалось прочитать очередь. Завершение задач временно недоступно.</p>':pending.length?`<div class="task-pending"><strong>Ожидают подтверждения: ${pending.length}</strong>${pending.map((e:any)=>`<div>${esc(e.body.kind==='task'?e.body.payload?.title:'Завершение задачи')} · ${e.state==='attention'?'Требует сверки':'Ожидает отправки'}</div>`).join('')}<button id="tasks-queue" class="link">Открыть очередь</button></div>`:''}</div><p class="muted">${data.total} задач · сроки по ${esc(data.timezone)}</p>${data.tasks.length?table(['Клиент / договор','Задача','Исполнитель','Срок','Состояние'],data.tasks.map((row:any)=>{
+    const queued=entries.slice().reverse().find((e:any)=>e.body?.kind==='task_complete' && e.body.payload?.entity_id===row.entity_id);
+    const sending=row.status==='open' && queued;
+    const status=row.status==='done'?'Завершена':sending?(queued.state==='attention'?'Требует сверки':'Ожидает подтверждения'):row.overdue?'Просрочена':row.due_today?'На сегодня':'Открыта';
+    return `<tr data-task-row="${esc(row.entity_id)}"><td><button class="link" data-task-person="${esc(row.person_uuid)}">${esc(row.client)}</button><br>${esc(row.external_id)}<br><span class="muted">${esc(row.creditor)}</span></td><td>${esc(row.title)}<br><span class="muted">${esc(labels[row.work_kind] || row.work_kind)}</span></td><td>${esc(row.assignee)}</td><td>${esc(due(row.due_at))}</td><td>${status}${row.can_complete && !sending && queue.ok?`<br><button class="link" data-task-complete="${esc(row.entity_id)}">Выполнено</button>`:''}</td></tr>`;
+  })):'<div class="empty">Задач по выбранным условиям нет</div>'}<div class="toolbar portfolio-pages">${button('task-prev','Назад')}${button('task-next','Далее')}</div>`;
+  const persist=()=>crm.draft('task-view',{status:taskStatus,employee:taskEmployee,work:taskWork});
+  const refresh=async()=>{taskSearch=$<HTMLInputElement>('task-search').value;taskOffset=0;await persist();await tasksPage();};
+  bind('task-refresh',refresh);
+  $('task-search').addEventListener('keydown',(event)=>{if(event.key==='Enter')void refresh().catch(e=>notice(e.message));});
+  const select=async()=>{taskEmployee=$<HTMLSelectElement>('task-employee')?.value || context.employee_uuid;taskWork=$<HTMLSelectElement>('task-work').value;await refresh();};
+  $('task-employee')?.addEventListener('change',()=>void select().catch(e=>notice(e.message)));
+  $('task-work').addEventListener('change',()=>void select().catch(e=>notice(e.message)));
+  document.querySelectorAll<HTMLButtonElement>('[data-task-filter]').forEach(b=>b.onclick=()=>{taskStatus=b.dataset.taskFilter!;void refresh().catch(e=>notice(e.message));});
+  document.querySelectorAll<HTMLButtonElement>('[data-task-person]').forEach(b=>b.onclick=()=>void openCard(b.dataset.taskPerson!));
+  document.querySelectorAll<HTMLButtonElement>('[data-task-complete]').forEach(b=>b.onclick=async()=>{
+    b.disabled=true;const row=data.tasks.find((r:any)=>r.entity_id===b.dataset.taskComplete);
+    try{await submitCommand({kind:'task_complete',contract_ids:[row.contract_uuid],payload:{entity_id:row.entity_id,entity_revision:row.revision}});await tasksPage();notice('Завершение сохранено. Ожидается подтверждение сервера.');}
+    catch(error){notice((error as Error).message);b.disabled=false;}
+  });
+  bind('tasks-queue',()=>go('queue'));
+  bind('task-create',async()=>{const selected=taskEmployee;await go('portfolio');newTaskAssignee=selected==='all'?'':selected;taskSelectClient=true;notice('Выберите клиента для задачи.');});
+  $<HTMLButtonElement>('task-prev').disabled=taskOffset===0;$<HTMLButtonElement>('task-next').disabled=!data.has_more;
+  bind('task-prev',async()=>{taskOffset=Math.max(0,taskOffset-100);await tasksPage();});
+  bind('task-next',async()=>{taskOffset+=100;await tasksPage();});
 }
 
 async function cabinet() {
