@@ -18,6 +18,7 @@ import { pilotCredential } from "./crm-pilot-session";
 import {ThreeHourReports} from './crm-report-scheduler';
 import {ActiveTime} from './crm-active-time';
 import {showStartupRecovery} from './crm-startup-recovery';
+import {applyCrmWindowFrame} from './crm-window-frame';
 
 const isolatedProfile = !!process.env.HARD_USER_DATA;
 let connectionNotice = "";
@@ -858,7 +859,9 @@ app
       else void showStartupRecovery('renderer_unavailable');
     });
     setTimeout(()=>{if(!rendererReady && win && !win.isDestroyed())void showStartupRecovery('preload_or_renderer_unavailable');},10000).unref();
-    if (process.platform === "win32")
+    const framed=await applyCrmWindowFrame(win);
+    diagnostic('window',framed?'window_frame_applied':'window_frame_unavailable',framed);
+    if (!framed && process.platform === "win32")
       await local("window-frame", {
         hwnd: win.getNativeWindowHandle().readBigUInt64LE().toString(),
       });

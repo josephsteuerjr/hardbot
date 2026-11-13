@@ -31,18 +31,18 @@ def require(principal, capability):
 def refresh_write(conn, principal):
     """Recheck the persistent identity/membership inside the write transaction.
 
-    Never broadens the authenticated gate's capabilities. PG row locks also
-    prevent a concurrent local revocation from slipping between check/commit.
+    Never broadens the authenticated gate's capabilities. The caller already
+    holds storage.begin()'s shared maintenance barrier; identity/assignment
+    maintenance takes its exclusive side. Plain reads preserve the app role's
+    SELECT-only access to identity tables (row locking would require UPDATE).
     """
     if principal.owner:return principal
-    from . import storage
-    lock=' FOR SHARE OF l,e' if storage.is_postgres(conn) else ''
     link=conn.execute('SELECT l.employee_uuid FROM crm_actor_links l JOIN crm_employees e USING(employee_uuid) '
-                      'WHERE l.actor_uid=? AND l.active=1 AND e.active=1'+lock,(principal.actor_uid,)).fetchone()
+                      'WHERE l.actor_uid=? AND l.active=1 AND e.active=1',(principal.actor_uid,)).fetchone()
     at=now()
     member=conn.execute('SELECT team_id,capabilities_json FROM crm_memberships WHERE employee_uuid=? '
-        'AND starts_at<=? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at DESC'
-        + (' FOR SHARE' if storage.is_postgres(conn) else ''),(principal.employee_uuid,at,at)).fetchone()
+        'AND starts_at<=? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at DESC',
+        (principal.employee_uuid,at,at)).fetchone()
     if not link or link[0]!=principal.employee_uuid or not member or member['team_id']!=principal.team_id:
         raise CRMError('Изменился действующий вход или кадровый доступ.','scope_changed',403)
     return replace(principal,capabilities=principal.capabilities & frozenset(json.loads(member['capabilities_json'])))
