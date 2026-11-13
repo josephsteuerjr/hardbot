@@ -45,3 +45,21 @@ def test_unconfirmed_currencies_of_different_creditors_are_not_added_together(cr
         conn.commit()
     totals=cabinet.dashboard(w['member'],month)['payments']['totals']
     assert len(totals)==2 and all(row['amount']=='100.10' and row['currency'] is None for row in totals)
+
+
+def test_operations_show_call_visit_and_completed_task_content(crm_world):
+    w=crm_world
+    store.command(w['member'],call_body(w,values={'soft_comment':'Уточнить оплату','soft_call_status':'Нет контакта'}))
+    store.command(w['member'],dict(schema_version=1,operation_id=str(uuid.uuid4()),kind='visit',
+        contract_ids=w['contracts'],base_revisions={key:{'visit':0} for key in w['contracts']},
+        payload={'values':{'visit_comment':'Встреча состоялась'}}))
+    store.command(w['member'],dict(schema_version=1,operation_id=str(uuid.uuid4()),kind='task',
+        contract_ids=[w['contracts'][0]],base_revisions={},
+        payload={'title':'Позвонить завтра','work_kind':'call','assignee_uuid':w['member'].employee_uuid,'due_at':now()}))
+    entity=next(e for e in store.card(w['member'],w['person'])['entities'] if e['kind']=='task')
+    store.command(w['member'],dict(schema_version=1,operation_id=str(uuid.uuid4()),kind='task_complete',
+        contract_ids=[w['contracts'][0]],base_revisions={},payload={'entity_id':entity['entity_id'],'entity_revision':entity['revision']}))
+    operations={row['kind']:row['text'] for row in cabinet.dashboard(w['member'],now()[:7])['operations']}
+    assert 'Уточнить оплату' in operations['call'] and 'Нет контакта' in operations['call']
+    assert 'Встреча состоялась' in operations['visit']
+    assert operations['task']==operations['task_complete']=='Позвонить завтра'

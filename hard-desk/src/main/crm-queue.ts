@@ -67,6 +67,16 @@ export function cache(owner: string, key: string, value?: any): any {
   return read(name, () => null);
 }
 const queueName = (owner: string) => "business-" + digest(owner);
+const changeListeners = new Set<(owner: string) => void>();
+export function onChange(listener: (owner: string) => void) {
+  changeListeners.add(listener);
+  return () => { changeListeners.delete(listener); };
+}
+function changed(owner: string) {
+  for (const listener of changeListeners) {
+    try { listener(owner); } catch { /* A closed UI cannot invalidate a durable save. */ }
+  }
+}
 function business(owner: string): Business {
   const result = read<Business>(queueName(owner), () => ({
     schema: 1,
@@ -124,6 +134,7 @@ export function enqueue(
   };
   queue.entries.push(entry);
   write(queueName(owner), queue);
+  changed(owner);
   return entry;
 }
 const running = new Map<string, Promise<void>>();
@@ -183,6 +194,7 @@ export function flush(
         queue.entries = queue.entries.filter((e) => !old.has(e));
       }
       write(queueName(owner), queue);
+      changed(owner);
       if (response.status === 401 || response.status === 403) return;
     }
   };
@@ -198,6 +210,7 @@ export function retry(owner: string, id: string) {
     delete entry.error;
     delete entry.code;
     write(queueName(owner), queue);
+    changed(owner);
   }
 }
 

@@ -111,6 +111,10 @@ main {
   overflow: auto;
 }
 .workspace {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--paper);
   padding: 28px 34px 18px;
   display: flex;
   justify-content: space-between;
@@ -398,6 +402,20 @@ a {
 .portfolio-pages { justify-content: flex-end; margin-top: 18px; }
 .task-pending { border-left: 2px solid var(--accent); padding: 10px 16px; margin-bottom: 18px; }
 #task-search { min-width: 240px; flex: 1; }
+#notice[data-tone=status] { color: var(--ink-2); }
+.connection-page > h2:not(:first-child) { margin-top: 28px; }
+.connection-testing { margin-top: 32px; border-top: 1px solid var(--line); padding-top: 18px; }
+.connection-testing > summary { cursor: pointer; color: var(--ink-3); }
+.connection-testing h2 { margin-top: 24px; }
+#card-saves:empty { display: none; }
+#card-saves { margin: 4px 0 18px; border-bottom: 1px solid var(--line); padding-bottom: 12px; }
+#card-saves h2 { font: 13px var(--sans); color: var(--ink-3); margin: 0 0 8px; }
+.card-save { display: flex; gap: 8px 18px; align-items: baseline; flex-wrap: wrap; margin: 5px 0; }
+.card-save strong { font-size: 12px; font-weight: 500; }
+.card-save.needs-review strong { color: var(--accent); }
+.card-save p { margin: 0; flex-basis: 100%; }
+.card-save details { flex-basis: 100%; }
+.card-save details p { white-space: pre-wrap; margin-top: 6px; }
 @media (max-width: 1200px) {
   .card-workspace.with-script { grid-template-columns: minmax(0, 1fr); }
   .card-script-watermark { position: static; max-height: none; }

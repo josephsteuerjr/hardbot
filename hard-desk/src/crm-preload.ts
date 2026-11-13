@@ -6,6 +6,14 @@ contextBridge.exposeInMainWorld("crm", {
   command: (body: unknown) => ipcRenderer.invoke("crm:command", body),
   queue: (action?: string, id?: string) =>
     ipcRenderer.invoke("crm:queue", action, id),
+  onChange: (callback: (event: {type: 'queue' | 'identity'}) => void) => {
+    if (typeof callback !== 'function') throw new Error('Нужен обработчик изменения CRM.');
+    const listener = (_: unknown, event: any) => {
+      if (event?.type === 'queue' || event?.type === 'identity') callback({type: event.type});
+    };
+    ipcRenderer.on('crm:changed', listener);
+    return () => ipcRenderer.removeListener('crm:changed', listener);
+  },
   draft: (key: string, value?: unknown) =>
     ipcRenderer.invoke("crm:draft", key, value),
   telemetry: (event: unknown) => ipcRenderer.invoke("crm:telemetry", event),

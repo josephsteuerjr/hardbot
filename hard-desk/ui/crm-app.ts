@@ -4,6 +4,7 @@ type API = {
   api(method: string, action: string, body?: any, query?: any): Promise<any>;
   command(body: any): Promise<any>;
   queue(action?: string, id?: string): Promise<any>;
+  onChange?(callback: (event: {type: 'queue' | 'identity'}) => void): () => void;
   draft(key: string, value?: any): Promise<any>;
   telemetry(event: any): Promise<any>;
   connect(input: any): Promise<any>;
@@ -56,11 +57,101 @@ let state: any,
   renderGeneration = 0;
 let portfolioView='mine', portfolioWork='all', portfolioEmployee='', portfolioSearch='', portfolioOffset=0;
 let portfolioIdentity='',portfolioGeneration=0;
+const sectionScroll=new Map<string,number>();
 let taskStatus='open',taskEmployee='all',taskWork='all',taskSearch='',taskOffset=0,taskGeneration=0;
 let cardOrigin='portfolio',taskSelectClient=false,newTaskAssignee='';
-const notice = (text = "") => {
+let activePerson='',lastCardAcknowledgements='',cardSyncGeneration=0,formOpening=false,cardRefreshPending=false;
+let cardRefreshError='';
+let syncTimer:ReturnType<typeof setTimeout> | undefined,cardRetryTimer:ReturnType<typeof setTimeout> | undefined,syncForced=false;
+const notice = (text = "", tone: 'error' | 'status' = 'error') => {
   $("notice").textContent = text;
+  $('notice').dataset.tone=tone;
 };
+
+function cardEntries(entries:any[]) {
+  const ids=new Set(card?.contracts?.map((row:any)=>row.contract_uuid) || []);
+  return entries.filter(entry=>Array.isArray(entry.body?.contract_ids) && entry.body.contract_ids.some((id:string)=>ids.has(id)));
+}
+async function queueEntries() {
+  const result=await crm.queue();
+  if(!result.ok)throw new Error(result.text || 'Не удалось прочитать состояние отправки.');
+  return result.data?.entries || [];
+}
+function paintCardSaves(entries:any[]) {
+  const host=$('card-saves');if(!host)return;
+  const expanded=new Set(Array.from(host.querySelectorAll<HTMLElement>('[data-operation]'))
+    .filter(el=>el.querySelector('details[open]')).map(el=>el.dataset.operation));
+  const othersOpen=!!host.querySelector('[data-other-saves][open]');
+  const rows=cardEntries(entries).slice(-5).reverse();
+  const markup=(entry:any)=>{
+    const review=entry.state==='attention' || entry.result?.projection_status==='needs_review';
+    const status=entry.state==='pending'?'Сохранено на компьютере · ожидает отправки':entry.state==='attention'?'Требует сверки':entry.result?.projection_status==='needs_review'?'История принята · текущие поля требуют сверки':'Принято сервером';
+    const payload=entry.body.payload || {};
+    const saved=payload.text || payload.title || payload.delivery_comment || Object.entries(payload.values || {}).map(([key,value])=>
+      (context.fields?.find((field:any)=>field.key===key)?.title || key)+': '+(value ?? 'Очищено')).join('\n');
+    return `<div class="card-save ${review?'needs-review':''}" data-operation="${esc(entry.body.operation_id)}" data-save-state="${entry.state}"><span>${esc(labels[entry.body.kind] || entry.body.kind)}</span><strong>${status}</strong>${entry.error?`<p>${esc(entry.error)}</p>`:''}${saved?`<details><summary>Сохранённый результат</summary><p>${esc(saved)}</p></details>`:''}${entry.result?.projection_status==='needs_review'?'<button class="link" data-save-history>Открыть историю</button>':''}</div>`;
+  };
+  const needsReview=rows.slice(1).filter(e=>e.state==='attention' || e.result?.projection_status==='needs_review').length;
+  host.innerHTML=rows.length?`<h2>Отправка результатов</h2>${markup(rows[0])}${rows.length>1?`<details data-other-saves${othersOpen?' open':''}><summary>Предыдущие отправки: ${rows.length-1}${needsReview?' · требуют сверки: '+needsReview:''}</summary>${rows.slice(1).map(markup).join('')}</details>`:''}<button class="link" id="card-open-queue">Все отправки</button>`:'';
+  if(rows[0]?.state==='accepted' && $('notice').textContent==='Действие сохранено на компьютере.')notice();
+  bind('card-open-queue',()=>go('queue'));
+  host.querySelectorAll<HTMLButtonElement>('[data-save-history]').forEach(button=>button.onclick=()=>{tab='history';void renderCard();});
+  host.querySelectorAll<HTMLElement>('[data-operation]').forEach(el=>{
+    if(expanded.has(el.dataset.operation))el.querySelector('details')?.setAttribute('open','');
+  });
+}
+function scheduleSync(force=false) {
+  syncForced ||= force;
+  clearTimeout(syncTimer);
+  syncTimer=setTimeout(()=>{const refresh=syncForced;syncForced=false;void syncCurrentView(refresh).catch(error=>{
+    if(error.name!=='AbortError')notice(error.message);
+  });},100);
+}
+function retryCard(person:string) {
+  cardRefreshPending=true;clearTimeout(cardRetryTimer);
+  cardRetryTimer=setTimeout(()=>{if(activePerson===person)scheduleSync(true);},7000);
+}
+async function syncCurrentView(force=false) {
+  if(!context)return;
+  if(activePerson){
+    if(!card)return;
+    const person=activePerson,generation=++cardSyncGeneration;
+    const entries=await queueEntries();
+    if(person!==activePerson || generation!==cardSyncGeneration)return;
+    paintCardSaves(entries);
+    const acknowledgements=JSON.stringify(cardEntries(entries).filter(e=>e.state==='accepted')
+      .map(e=>[e.body.operation_id,e.result?.event_id,e.result?.projection_status]));
+    const refresh=force || cardRefreshPending || acknowledgements!==lastCardAcknowledgements;
+    if(!refresh)return;
+    if(formOpening || $<HTMLDialogElement>('dialog').open){cardRefreshPending=true;return;}
+    const result=await crm.api('GET','card',undefined,{person_uuid:person});
+    if(person!==activePerson || generation!==cardSyncGeneration)return;
+    if(!result.ok){retryCard(person);cardRefreshError=result.text || 'Не удалось обновить карточку.';throw new Error(cardRefreshError);}
+    if(formOpening || $<HTMLDialogElement>('dialog').open){cardRefreshPending=true;return;}
+    const expanded=Array.from(document.querySelectorAll<HTMLElement>('[data-contract-details]'))
+      .filter(el=>el.querySelector('details[open]')).map(el=>el.dataset.contractDetails);
+    const openSaves=Array.from(document.querySelectorAll<HTMLElement>('[data-operation]'))
+      .filter(el=>el.querySelector('details[open]')).map(el=>el.dataset.operation);
+    const othersOpen=!!document.querySelector('[data-other-saves][open]');
+    const main=document.querySelector('main')!;const scroll=main.scrollTop;
+    clearTimeout(cardRetryTimer);card=result.data;cardRefreshPending=!!result.stale;
+    if(result.stale){$('connection').textContent='Сохранённая копия · '+date(result.stale);retryCard(person);}
+    else {
+      lastCardAcknowledgements=acknowledgements;
+      if(cardRefreshError && $('notice').textContent===cardRefreshError)notice();
+      cardRefreshError='';
+      $('connection').textContent=(state.connection.mode==='synthetic'?'Синтетические данные':state.connection.server)+(state.offline?' · офлайн':'');
+    }
+    await renderCard();
+    for(const host of document.querySelectorAll<HTMLElement>('[data-contract-details]'))
+      if(expanded.includes(host.dataset.contractDetails))host.querySelector('details')?.setAttribute('open','');
+    for(const host of document.querySelectorAll<HTMLElement>('[data-operation]'))
+      if(openSaves.includes(host.dataset.operation))host.querySelector('details')?.setAttribute('open','');
+    if(othersOpen)document.querySelector('[data-other-saves]')?.setAttribute('open','');
+    main.scrollTop=scroll;
+  }else if(section==='tasks' && !$<HTMLDialogElement>('dialog').open){await tasksPage();}
+  else if(section==='queue'){await queuePage();}
+}
 const telemetry = (event_type: string, feature: string, extra: any = {}) => {
   void crm.telemetry({ event_type, feature, ...extra }).catch(() => {});
 };
@@ -117,6 +208,7 @@ async function boot() {
   state = await crm.state();
   context = state.context;
   if (portfolioIdentity!==context?.employee_uuid) {
+    sectionScroll.clear();
     taskSelectClient=false;newTaskAssignee='';cardOrigin='portfolio';
     portfolioIdentity=context?.employee_uuid || '';
     portfolioView=['manager','analyst','observer'].includes(context?.role)?'all':'mine';
@@ -137,12 +229,12 @@ async function boot() {
       if((context?.staff || []).some((p:any)=>p.employee_uuid===saved.employee) || saved.employee===context?.employee_uuid)portfolioEmployee=saved.employee;
     }
   }
-  $("identity").textContent = ({manager:'Руководитель',observer:'Наблюдатель',courier:'Курьер',analyst:'Аналитик'} as any)[context?.role] || 'Сотрудник';
+  $("identity").textContent = context ? ({manager:'Руководитель',observer:'Наблюдатель',courier:'Курьер',analyst:'Аналитик'} as any)[context.role] || 'Сотрудник' : 'Вход в CRM';
   $("version").textContent = state.version;
   $("connection").textContent =
     (state.connection.mode === "synthetic"
       ? "Синтетические данные"
-      : state.connection.server) + (state.offline ? " · офлайн" : "");
+      : state.connection.mode === 'unconfigured' ? 'Не подключено' : state.connection.server) + (state.offline ? " · офлайн" : "");
   const sections = [
     ["portfolio", "Портфель"],
     ['tasks','Задачи'],
@@ -155,7 +247,7 @@ async function boot() {
     ["connection", "Подключение"],
     ["help", "Справка"],
   ];
-  $("navigation").innerHTML = sections
+  $("navigation").innerHTML = sections.filter(([id])=>context || ['connection','help'].includes(id))
     .map(
       ([id, label]) =>
         `<button data-section="${id}" class="${section === id ? "active" : ""}">${label}</button>`,
@@ -170,7 +262,10 @@ async function boot() {
   });
 }
 async function go(next: string) {
-  renderGeneration++;
+  const generation=++renderGeneration;
+  if(!activePerson)sectionScroll.set(section,document.querySelector('main')!.scrollTop);
+  clearTimeout(cardRetryTimer);
+  activePerson='';cardSyncGeneration++;lastCardAcknowledgements='';cardRefreshPending=false;
   taskSelectClient=false;newTaskAssignee='';
   section = next;
   notice();
@@ -228,6 +323,7 @@ async function go(next: string) {
   } catch (e) {
     if ((e as Error).name !== "AbortError") notice((e as Error).message);
   }
+  if(generation===renderGeneration && !activePerson)document.querySelector('main')!.scrollTop=sectionScroll.get(next) || 0;
 }
 
 const debtKeys = ['debt_overdue', 'interest_overdue', 'penalty', 'duty', 'dtp', 'rent',
@@ -308,26 +404,40 @@ async function portfolio(search = portfolioSearch, offset=portfolioOffset) {
 }
 
 async function openCard(person: string) {
+  clearTimeout(cardRetryTimer);
+  clearTimeout(syncTimer);syncForced=false;
+  if(!activePerson)sectionScroll.set(section,document.querySelector('main')!.scrollTop);
   portfolioGeneration++;
-  taskGeneration++;renderGeneration++;
+  taskGeneration++;const generation=++renderGeneration;
+  activePerson=person;cardSyncGeneration++;lastCardAcknowledgements='';cardRefreshPending=false;
+  card=null;cardScript=null;cardRefreshError='';
   const createTask=taskSelectClient;
   cardOrigin=section==='tasks' || createTask?'tasks':'portfolio';
   taskSelectClient=false;
+  $('view').innerHTML='<p role="status">Загрузка карточки…</p>';
   try {
-    card = await request("GET", "card", undefined, { person_uuid: person });
-    cardScript = null;
+    const loaded = await request("GET", "card", undefined, { person_uuid: person });
+    let loadedScript = null;
     if (can('call')) {
-      try { cardScript = await request('GET', 'script'); }
-      catch { /* The client card remains usable when its optional script is unavailable. */ }
+      try { loadedScript = await request('GET', 'script'); }
+      catch (error) { if((error as Error).name==='AbortError')throw error; }
     }
+    if(generation!==renderGeneration || activePerson!==person)return;
+    card=loaded;cardScript=loadedScript;
     tab = "overview";
     telemetry("feature_opened", "card");
     await renderCard();
+    document.querySelector('main')!.scrollTop=0;
+    scheduleSync();
     if(createTask){
       if(can('task') && card.contracts.some((entry:any)=>contractCan(entry,'task')))await action('task');
       else notice('Нет права назначать задачу по этому клиенту.');
     }
   } catch (e) {
+    if(generation!==renderGeneration || (e as Error).name==='AbortError')return;
+    activePerson='';card=null;cardScript=null;
+    $('view').innerHTML=button('card-load-back',cardOrigin==='tasks'?'Вернуться к задачам':'Вернуться к портфелю');
+    bind('card-load-back',()=>go(cardOrigin));
     notice((e as Error).message);
   }
 }
@@ -355,8 +465,9 @@ async function renderCard() {
     ["documents", "Документы"],
   ];
   $("view").innerHTML =
-    `<div class="toolbar">${button("back", cardOrigin==='tasks'?'← Задачи':"← Портфель")}${actions.map((k) => `<button data-action="${k}"${k === "call" ? ' class="primary"' : ""}>${labels[k]}</button>`).join("")}</div><div class="tabs">${tabs.map(([id, title]) => `<button data-tab="${id}" class="${tab === id ? "active" : ""}">${title}</button>`).join("")}</div><div class="card-workspace${cardScript?.script ? ' with-script' : ''}"><div id="card-content"></div>${cardScript?.script ? `<aside class="card-script-watermark" aria-label="Скрипт разговора"><h2>${esc(cardScript.script.title)}</h2>${cardScript.script.steps.map((step: any) => `<section><h3>${esc(step.title)}</h3><p>${esc(step.text)}</p></section>`).join('')}<small>Версия ${esc(cardScript.published_revision)}</small></aside>` : ''}</div>`;
-  bind("back", () => cardOrigin==='tasks'?go('tasks'):portfolio());
+    `<div class="toolbar">${button("back", cardOrigin==='tasks'?'← Задачи':"← Портфель")}${button('card-refresh','Обновить карточку')}${actions.map((k) => `<button data-action="${k}"${k === "call" ? ' class="primary"' : ""}>${labels[k]}</button>`).join("")}</div><section id="card-saves" aria-label="Отправка результатов"></section><div class="tabs">${tabs.map(([id, title]) => `<button data-tab="${id}" class="${tab === id ? "active" : ""}">${title}</button>`).join("")}</div><div class="card-workspace${cardScript?.script ? ' with-script' : ''}"><div id="card-content"></div>${cardScript?.script ? `<aside class="card-script-watermark" aria-label="Скрипт разговора"><h2>${esc(cardScript.script.title)}</h2>${cardScript.script.steps.map((step: any) => `<section><h3>${esc(step.title)}</h3><p>${esc(step.text)}</p></section>`).join('')}<small>Версия ${esc(cardScript.published_revision)}</small></aside>` : ''}</div>`;
+  bind("back", () => go(cardOrigin==='tasks'?'tasks':'portfolio'));
+  bind('card-refresh',()=>syncCurrentView(true));
   document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach(
     (b) =>
       (b.onclick = () => {
@@ -452,6 +563,8 @@ async function renderCard() {
         }),
     );
   }
+  try {paintCardSaves(await queueEntries());}
+  catch(error){if($('card-saves'))$('card-saves').textContent=(error as Error).message;}
 }
 
 async function submitCommand(raw: any) {
@@ -467,10 +580,18 @@ async function submitCommand(raw: any) {
         : raw.kind,
     { operation_id: body.operation_id },
   );
-  notice("Действие сохранено на компьютере. Статус отправки — в очереди.");
+  notice("Действие сохранено на компьютере.",'status');
+  scheduleSync();
 }
 
 async function action(kind: string, original?: any) {
+  if(formOpening || $<HTMLDialogElement>('dialog').open)return;
+  formOpening=true;
+  try {await actionForm(kind,original,renderGeneration);}
+  finally {formOpening=false;if(cardRefreshPending && !$<HTMLDialogElement>('dialog').open)scheduleSync();}
+}
+async function actionForm(kind: string, original: any, viewGeneration:number) {
+  const formRevisions=structuredClone(card.contracts.map((c:any)=>[c.contract_uuid,c.revisions]));
   const target = kind === "correction" ? original.kind : kind;
   telemetry("workflow_started", target);
   const dialog = $<HTMLDialogElement>("dialog");
@@ -690,7 +811,7 @@ async function action(kind: string, original?: any) {
         contract_ids,
         payload,
         base_revisions: Object.fromEntries(
-          card.contracts.map((c: any) => [c.contract_uuid, c.revisions]),
+          formRevisions,
         ),
       };
       if (kind === "correction") {
@@ -715,12 +836,13 @@ async function action(kind: string, original?: any) {
       dialog.close();
       telemetry("command_queued", target, { operation_id });
       if(target==='task')await go('tasks');
-      notice("Действие сохранено. Отправка и подтверждение — в очереди.");
+      notice("Действие сохранено на компьютере.",'status');
+      scheduleSync();
     } catch (error) {
       $("form-error").textContent = (error as Error).message;
     }
   };
-  dialog.showModal();
+  if(viewGeneration===renderGeneration)dialog.showModal();
 }
 
 async function documentForm() {
@@ -822,7 +944,7 @@ async function tasksPage() {
   document.querySelectorAll<HTMLButtonElement>('[data-task-person]').forEach(b=>b.onclick=()=>void openCard(b.dataset.taskPerson!));
   document.querySelectorAll<HTMLButtonElement>('[data-task-complete]').forEach(b=>b.onclick=async()=>{
     b.disabled=true;const row=data.tasks.find((r:any)=>r.entity_id===b.dataset.taskComplete);
-    try{await submitCommand({kind:'task_complete',contract_ids:[row.contract_uuid],payload:{entity_id:row.entity_id,entity_revision:row.revision}});await tasksPage();notice('Завершение сохранено. Ожидается подтверждение сервера.');}
+    try{await submitCommand({kind:'task_complete',contract_ids:[row.contract_uuid],payload:{entity_id:row.entity_id,entity_revision:row.revision}});await tasksPage();notice('Завершение сохранено. Ожидается подтверждение сервера.','status');}
     catch(error){notice((error as Error).message);b.disabled=false;}
   });
   bind('tasks-queue',()=>go('queue'));
@@ -1092,39 +1214,24 @@ async function adoption() {
 
 async function connection() {
   state = await crm.state();
+  const savedLogins = state.existingLogins || [{source:'manager',label:'Руководитель',available:state.existingManager?.available}];
+  const available = savedLogins.filter((entry:any)=>entry.available);
+  const current = state.context ? `<h2>Текущее подключение</h2><p>${state.connection.mode==='synthetic'?'Проверочная база · синтетические данные':esc(state.connection.server)}</p>${button('connection-continue','Открыть портфель',true)}` : '';
   $("view").innerHTML =
-    `<div class="help"><h2>Общий пилот</h2><p>${esc(state.existingManager?.text || "Войдите в Руководитель на этом компьютере.")}</p><div class="actions">${button("existing-manager-connect", "Подключить по входу Руководителя", true)}</div>${state.connectionNotice ? `<p role="status">${esc(state.connectionNotice)}</p>` : ""}<h2 style="margin-top:30px">Проверочный сценарий</h2><p>Синтетическая база хранится отдельно на этом компьютере.</p><div class="toolbar"><select id="demo-role"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option><option value="observer">Наблюдатель другой команды</option></select>${button("demo-connect", "Открыть сценарий")}</div><label class="check"><input id="offline" type="checkbox"${state.offline ? " checked" : ""}>Проверить работу без связи</label><h2 style="margin-top:30px">Отдельный пилотный сервер</h2><div class="grid"><div class="field span"><label>HTTPS-адрес</label><input id="server" placeholder="Адрес подготовленного пилотного стенда"></div><div class="field"><label>Роль входа</label><select id="remote-role"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option></select></div><div class="field"><label>Логин</label><input id="login" autocomplete="username"></div><div class="field"><label>Пароль</label><input id="password" type="password" autocomplete="current-password"></div></div><div class="actions">${button("remote-connect", "Войти", true)}</div></div>`;
-  const savedLogins = state.existingLogins || [];
-  const managerConnect = $<HTMLButtonElement>('existing-manager-connect');
-  if (savedLogins.length) {
-    managerConnect.disabled = !savedLogins.some((entry: any) => entry.source === 'manager' && entry.available);
-    const intro = $('view').querySelector('.help > p');
-    if (intro) intro.textContent = 'Выберите сохранённый вход. Личность и права проверяются сервером.';
-    managerConnect.insertAdjacentHTML('afterend', savedLogins.filter((entry: any) => entry.source !== 'manager' && entry.available)
-      .map((entry: any) => `<button data-existing-source="${esc(entry.source)}">${esc(entry.label)}</button>`).join(''));
-    $('view').querySelectorAll<HTMLButtonElement>('[data-existing-source]').forEach(element => {
-      element.onclick = async () => {
-        element.disabled = true;
-        try {
-          const result = await crm.connect({action: 'existing-login', source: element.dataset.existingSource});
-          if (!result.ok) throw new Error(result.text || 'Не удалось подтвердить вход.');
-          section = 'portfolio';
-          await boot();
-        } catch (error) {
-          element.disabled = false;
-          const message = document.createElement('p'); message.setAttribute('role', 'alert');
-          message.textContent = (error as Error).message; element.closest('.actions')?.after(message);
-        }
-      };
+    `<div class="help connection-page">${current}<h2>Сохранённый вход</h2><p>${available.length?'Выберите вход из установленной рабочей программы. Сервер подтвердит личность и права.':'Сохранённый вход не найден. Войдите в установленную рабочую программу и повторите проверку.'}</p><div class="actions">${available.map((entry:any)=>`<button ${entry.source==='manager'?'id="existing-manager-connect" ':''}data-existing-source="${esc(entry.source)}" class="primary">${esc(entry.label)}</button>`).join('')}${button('connection-refresh','Проверить снова')}</div>${state.connectionNotice ? `<p role="status">${esc(state.connectionNotice)}</p>` : ''}<details class="connection-testing"><summary>Проверочная среда</summary><h2>Синтетические данные</h2><p>Отдельная база на этом компьютере. Результаты не попадают в рабочий портфель.</p><div class="toolbar"><select id="demo-role" aria-label="Роль в проверочной базе"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option><option value="observer">Наблюдатель другой команды</option><option value="courier">Курьер</option><option value="analyst">Аналитик</option></select>${button('demo-connect','Открыть сценарий')}</div><label class="check"><input id="offline" type="checkbox"${state.offline?' checked':''}>Приостановить отправку для проверки офлайн</label><h2>Отдельный сервер</h2><div class="grid"><div class="field span"><label for="server">HTTPS-адрес</label><input id="server" placeholder="Адрес проверочного сервера"></div><div class="field"><label for="remote-role">Роль входа</label><select id="remote-role"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option></select></div><div class="field"><label for="login">Логин</label><input id="login" autocomplete="username"></div><div class="field"><label for="password">Пароль</label><input id="password" type="password" autocomplete="current-password"></div></div><div class="actions">${button('remote-connect','Войти')}</div></details></div>`;
+  bind('connection-continue',()=>go('portfolio'));
+  bind('connection-refresh',()=>connection());
+  $('view').querySelectorAll<HTMLButtonElement>('[data-existing-source]').forEach(element=>{
+    bind(element.id || (element.id='saved-login-'+element.dataset.existingSource),async()=>{
+      const buttons=$('view').querySelectorAll<HTMLButtonElement>('button');
+      buttons.forEach(button=>button.disabled=true);
+      try {
+        const result=await crm.connect({action:'existing-login',source:element.dataset.existingSource});
+        if(!result.ok)throw new Error(result.text || 'Не удалось подтвердить вход.');
+        section='portfolio';await boot();
+      }finally{buttons.forEach(button=>button.disabled=false);}
     });
-  }
-  bind("existing-manager-connect", async () => {
-    const result = await crm.connect({action: "existing-manager"});
-    if (!result.ok) throw new Error(result.text || "Не удалось подключить общий пилот.");
-    section = "portfolio";
-    await boot();
   });
-  $<HTMLSelectElement>('demo-role').insertAdjacentHTML('beforeend','<option value="courier">Курьер</option><option value="analyst">Аналитик</option>');
   $<HTMLSelectElement>("demo-role").value = state.connection.role;
   $<HTMLInputElement>("offline").onchange = async () => {
     await crm.connect({
@@ -1178,4 +1285,14 @@ document.addEventListener("click", (e) => {
 document
   .querySelectorAll<HTMLButtonElement>("[data-win]")
   .forEach((b) => (b.onclick = () => crm.win(b.dataset.win!)));
+$('dialog').addEventListener('close',()=>scheduleSync());
+crm.onChange?.(event=>{
+  if(event.type==='identity'){
+    clearTimeout(cardRetryTimer);
+    renderGeneration++;activePerson='';cardSyncGeneration++;card=null;context=null;
+    $<HTMLDialogElement>('dialog').close();
+    void boot().catch(error=>notice(error.message));
+  }else scheduleSync();
+});
+window.addEventListener('focus',()=>{if(activePerson)scheduleSync(true);});
 void boot().catch((e) => notice(e.message));

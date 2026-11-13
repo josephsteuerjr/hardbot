@@ -61,6 +61,9 @@ async function run() {
           ),
         ),
       ]);
+    await until(()=>js('!!document.querySelector("[data-person],.connection-testing")'),'entry loaded');
+    if((await js('window.crm.state()')).connection.mode==='unconfigured')
+      await js('document.querySelector(".connection-testing summary").click();document.querySelector("#demo-connect").click()');
     await until(
       () => js('!!document.querySelector("[data-person]")'),
       "portfolio loaded",

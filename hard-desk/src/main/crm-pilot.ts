@@ -54,15 +54,24 @@ const config = () =>
     | undefined;
 const shared = () => ['existing-manager', 'existing-login'].includes(config()?.auth || '') && config()?.server === PILOT_BASE;
 const entrySource = (): EntrySource => config()?.source || 'manager';
-const demo = () => config()?.mode !== "remote";
+const demo = () => config()?.mode === "synthetic";
 const role = () => config()?.role || "employee";
 const origin = () => (demo() ? "synthetic-local" : config()?.server || "");
+function notifyChanged(type: 'queue' | 'identity') {
+  if (win && !win.isDestroyed() && !win.webContents.isDestroyed())
+    win.webContents.send('crm:changed', {type});
+}
+const stopQueueChanges = queue.onChange(authority => {
+  if (authority === owner) notifyChanged('queue');
+});
+app.once('will-quit', stopQueueChanges);
 function forgetAuthority(message: string) {
   owner = ""; currentContext = null; clock = null;
   connectionNotice = message;
   // A known revocation must not become an offline login after a later outage.
   // Owner-scoped pending operations remain protected in their original files.
   writeSettings({crmLast: undefined});
+  notifyChanged('identity');
 }
 
 async function backendStart() {
@@ -197,6 +206,8 @@ const actions = new Set([
 const send: queue.Transport = async (method, action, body, query) => {
   if (!actions.has(action) || !["GET", "POST"].includes(method))
     return { ok: false, status: 400, text: "Неизвестный запрос." };
+  if (!["synthetic", "remote"].includes(config()?.mode || ""))
+    return {ok: false, status: 401, text: "Выберите сохранённый вход для подключения к CRM."};
   if (offline)
     return {
       ok: false,
@@ -395,7 +406,7 @@ app
       ok: true,
       version: app.getVersion(),
       connection: {
-        mode: demo() ? "synthetic" : "remote",
+        mode: demo() ? "synthetic" : config()?.mode === "remote" ? "remote" : "unconfigured",
         role: role(),
         server: origin(),
         shared: shared(),

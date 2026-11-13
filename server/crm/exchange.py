@@ -170,7 +170,8 @@ def _snapshot(conn, principal, body):
     current = {r["contract_uuid"]: r for r in _rows(conn, principal, state_only=True)}
     changes = []
     unchanged = 0
-    definitions = {f["key"] for f in fields()}
+    titles = {f['key']:f['title'] for f in fields()}
+    definitions = set(titles)
     for row in rows:
         if not isinstance(row, dict) or set(row) - {"contract_uuid", "values", "clear"}:
             raise CRMError("Некорректная строка реестра.")
@@ -220,7 +221,12 @@ def _snapshot(conn, principal, body):
                 "forecast": "promise",
                 "accounting": "accounting",
             }[group(key)]
-            access.contracts(conn, principal, [cid], capability=capability)
+            try:
+                access.contracts(conn, principal, [cid], capability=capability)
+            except CRMError as error:
+                if error.status!=403:raise
+                raise CRMError(f'Нет права изменять поле «{titles[key]}».',error.code,403,
+                    {'key':key,'capability':capability}) from error
             changes.append(
                 dict(
                     contract_uuid=cid,

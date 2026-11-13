@@ -7,7 +7,20 @@ import json
 import re
 from zoneinfo import ZoneInfo
 from . import access,storage
-from .contract import CRMError,instant,now
+from .contract import CRMError,fields as field_definitions,instant,now
+
+
+def operation_text(conn, kind, payload, titles):
+    text=payload.get('text') or payload.get('title') or payload.get('delivery_comment')
+    if text:return text
+    if kind=='task_complete':
+        row=conn.execute('SELECT data_json FROM crm_entities WHERE entity_id=?',(payload.get('entity_id'),)).fetchone()
+        return json.loads(row['data_json']).get('title','Задача выполнена') if row else 'Задача выполнена'
+    parts=[f'{titles.get(key,key)}: {value}' for key,value in payload.get('values',{}).items() if value not in (None,'')]
+    parts.extend(f'{titles.get(key,key)}: очищено' for key in payload.get('clear',[]))
+    if payload.get('amount') is not None:parts.append(f"Сумма: {payload['amount']} {payload.get('currency') or ''}".strip())
+    if payload.get('due_at'):parts.append('Срок: '+payload['due_at'])
+    return '\n'.join(parts)
 
 
 def dashboard(principal,month,employee=None):
@@ -58,7 +71,7 @@ def dashboard(principal,month,employee=None):
             if value:
                 payments.append(dict(contract_uuid=row['contract_uuid'],external_id=row['external_id'],person_uuid=row['person_uuid'],client=row['name'],
                     creditor=creditor,amount=format(value,'f'),currency=row['currency'],unit=unit,observed_at=row['imported_at']))
-        operations=[];unknown=0;counts=Counter();processed=set()
+        operations=[];unknown=0;counts=Counter();processed=set();titles={row['key']:row['title'] for row in field_definitions()}
         for event in conn.execute('SELECT * FROM crm_events WHERE employee_uuid=? ORDER BY sequence DESC',(employee,)):
             if event['time_quality']=='legacy_unknown':unknown+=1;continue
             payload=json.loads(event['payload_json'])
@@ -69,7 +82,7 @@ def dashboard(principal,month,employee=None):
             if event['kind'] in {'correction','manual_edit','payment_confirmed','source_sync'}:continue
             contracts=json.loads(event['contracts_json']);counts[event['kind']]+=1;processed.update(contracts)
             operations.append(dict(event_id=event['event_id'],kind=event['kind'],occurred_at=None if workday else event['occurred_at'],workday=workday,
-                contract_ids=contracts,text=payload.get('text') or payload.get('delivery_comment') or '',origin=event['origin']))
+                contract_ids=contracts,text=operation_text(conn,event['kind'],payload,titles),origin=event['origin']))
         reliable=conn.execute("SELECT value FROM crm_meta WHERE key='reliable_collection_since'").fetchone()
     return dict(month=month,employee_uuid=employee,employee=person['name'],timezone=principal.timezone,as_of=at,
         stats=dict(counts,processed_contracts=len(processed),portfolio_contracts=len(ids),portfolio_persons=len({row['person_uuid'] for row in rows})),

@@ -1,4 +1,5 @@
 import copy, json, uuid
+from dataclasses import replace
 import pytest
 import db
 from crm import exchange, store
@@ -50,6 +51,18 @@ def test_projection_roundtrip_creates_no_work(crm_world):
     outcome = apply(w, plan)
     assert outcome["changed_rows"] == 0 and not outcome["events"]
     assert len(store.card(w["owner"], w["person"])["history"]) == 1
+
+
+def test_import_names_forbidden_field_and_keeps_role_restrictions(crm_world):
+    w=crm_world
+    analyst=replace(w['member'],role='analyst',capabilities=frozenset({'exchange','contact'}))
+    snapshot=exchange.export(analyst,dict(operation_id=str(uuid.uuid4()),period='2026-11',target_id='general'))
+    with pytest.raises(CRMError,match='Нет права изменять поле') as error:
+        exchange.preview(analyst,imported(snapshot,{'soft_comment':'Forbidden call edit'}))
+    assert error.value.status==403 and error.value.details['key']=='soft_comment'
+    assert not store.card(analyst,w['person'])['history']
+    plan=exchange.preview(analyst,imported(snapshot,{'phone_main':'+79990000002'}))
+    assert len(plan['changes'])==1 and plan['changes'][0]['key']=='phone_main'
 
 
 def test_three_way_conflict_requires_explicit_resolution(crm_world):
