@@ -149,14 +149,20 @@ def _read(conn, snapshot, sha):
                 issues.append(_issue('legacy_field_conflict',key+':'+field,
                     dict(contract_uuid=key,field=field,before=previous.get(field),current=current.get(field),incoming=value,source_sha256=sha)))
             else:patch[field]=value
-        if patch:patches.append(dict(contract_uuid=key,values=patch))
+        observed=dict(raw)
         for field,capability in RESPONSIBILITY.items():
             if old.get(field)==raw.get(field):continue
             name=raw.get(field);employee=person(name)
             empty=not name or _name(name) in {'не закреплен','нет'}
-            if not employee and not empty:issues.append(_issue('legacy_assignee_unmapped',key+':'+field,dict(contract_uuid=key,name=name)))
+            if not employee and not empty:
+                issues.append(_issue('legacy_assignee_unmapped',key+':'+field,dict(contract_uuid=key,name=name)))
+                # Keep the current grant and accepted source value until the
+                # person is explicitly mapped. A later cycle can then retry.
+                patch.pop(field,None);observed[field]=old.get(field)
+                continue
             responsibility.append(dict(contract_uuid=key,capability=capability,employee_uuid=employee))
-        changed_rows.append(dict(contract_uuid=key,raw=raw))
+        if patch:patches.append(dict(contract_uuid=key,values=patch))
+        changed_rows.append(dict(contract_uuid=key,raw=observed))
     for cid,row in legacy.items():
         if cid not in known_ids and row['contract_uuid'] in originals:
             issues.append(_issue('legacy_contract_missing',cid,dict(contract_uuid=row['contract_uuid'])))

@@ -37,6 +37,31 @@ def primary_call(path):
         conn.execute("UPDATE clients SET soft_comment='Phone',visit_comment='Field' WHERE contract_id='R0'")
 
 
+def test_unknown_assignee_keeps_grant_and_retries_after_explicit_mapping(crm_world):
+    w=crm_world;path=world(w)
+    with storage.connect() as conn:
+        before_fields=json.loads(conn.execute('SELECT fields_json FROM crm_contracts WHERE contract_uuid=?',(w['contracts'][0],)).fetchone()[0])
+        conn.execute("UPDATE crm_assignments SET source='authority-source:fixture' WHERE contract_uuid=? AND capability='call'",(w['contracts'][0],))
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE clients SET responsible_soft='Not mapped yet' WHERE contract_id='R0'")
+    snapshot=exchange.capture(path);review=exchange.preview(snapshot)
+    assert review['assignments']==0 and review['issues']=={'legacy_assignee_unmapped':1}
+    exchange.apply(snapshot,review)
+    with storage.connect() as conn:
+        active=conn.execute("SELECT employee_uuid FROM crm_assignments WHERE contract_uuid=? AND capability='call' AND ends_at IS NULL",(w['contracts'][0],)).fetchall()
+        assert any(row[0]==w['member'].employee_uuid for row in active)
+        state=json.loads(conn.execute('SELECT record_json FROM crm_legacy_state WHERE contract_uuid=?',(w['contracts'][0],)).fetchone()[0])
+        assert state['responsible_soft']=='Employee'
+        assert json.loads(conn.execute('SELECT fields_json FROM crm_contracts WHERE contract_uuid=?',(w['contracts'][0],)).fetchone()[0])==before_fields
+        conn.execute('UPDATE crm_employees SET name=? WHERE employee_uuid=?',('Not mapped yet',w['stranger'].employee_uuid))
+    fresh=exchange.capture(path);review=exchange.preview(fresh)
+    assert review['assignments']==1 and not review['issues']
+    exchange.apply(fresh,review)
+    with storage.connect(readonly=True) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM crm_assignments WHERE contract_uuid=? AND capability='call' AND employee_uuid=? AND ends_at IS NULL",(w['contracts'][0],w['stranger'].employee_uuid)).fetchone()[0]==1
+        assert conn.execute("SELECT COUNT(*) FROM crm_assignments WHERE contract_uuid=? AND capability='call' AND employee_uuid=? AND ends_at IS NULL",(w['contracts'][0],w['member'].employee_uuid)).fetchone()[0]==0
+
+
 def test_incremental_history_projection_replay_and_rebuild(crm_world):
     path=world(crm_world);primary_call(path);snapshot=exchange.capture(path)
     review=exchange.preview(snapshot)
