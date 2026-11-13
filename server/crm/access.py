@@ -1,6 +1,6 @@
 """Server-derived principal and current object/field scopes."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 
 from .contract import CRMError, now
@@ -26,6 +26,26 @@ class Principal:
 def require(principal, capability):
     if not principal.owner and capability not in principal.capabilities:
         raise CRMError("Недостаточно прав для действия.", "forbidden", 403)
+
+
+def refresh_write(conn, principal):
+    """Recheck the persistent identity/membership inside the write transaction.
+
+    Never broadens the authenticated gate's capabilities. PG row locks also
+    prevent a concurrent local revocation from slipping between check/commit.
+    """
+    if principal.owner:return principal
+    from . import storage
+    lock=' FOR SHARE OF l,e' if storage.is_postgres(conn) else ''
+    link=conn.execute('SELECT l.employee_uuid FROM crm_actor_links l JOIN crm_employees e USING(employee_uuid) '
+                      'WHERE l.actor_uid=? AND l.active=1 AND e.active=1'+lock,(principal.actor_uid,)).fetchone()
+    at=now()
+    member=conn.execute('SELECT team_id,capabilities_json FROM crm_memberships WHERE employee_uuid=? '
+        'AND starts_at<=? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at DESC'
+        + (' FOR SHARE' if storage.is_postgres(conn) else ''),(principal.employee_uuid,at,at)).fetchone()
+    if not link or link[0]!=principal.employee_uuid or not member or member['team_id']!=principal.team_id:
+        raise CRMError('Изменился действующий вход или кадровый доступ.','scope_changed',403)
+    return replace(principal,capabilities=principal.capabilities & frozenset(json.loads(member['capabilities_json'])))
 
 
 def scoped_contracts(conn, principal, *, include_tasks=True):
@@ -60,15 +80,17 @@ def readable_contracts(conn, principal):
     return scoped_contracts(conn, principal)
 
 
-def writable_actions(conn, principal, contract_id, *, scope=None):
+def writable_actions(conn, principal, contract_id, *, scope=None, direct_scope=None, delegated=None):
     scope = scoped_contracts(conn, principal) if scope is None else scope
     if contract_id not in scope:
         return []
     capabilities = set(principal.capabilities)
     if not principal.owner and not principal.all_contracts:
         from . import tasks
-        if contract_id not in scoped_contracts(conn, principal, include_tasks=False):
-            capabilities &= tasks.grants(conn, principal).get(contract_id, set())
+        if direct_scope is None:direct_scope=scoped_contracts(conn, principal, include_tasks=False)
+        if delegated is None:delegated=tasks.grants(conn, principal)
+        if contract_id not in direct_scope:
+            capabilities &= delegated.get(contract_id, set())
     if principal.owner:
         capabilities.update({'call', 'visit', 'note', 'contact', 'promise', 'task',
                              'reported_payment', 'document', 'accounting', 'correct'})
@@ -79,8 +101,8 @@ def writable_actions(conn, principal, contract_id, *, scope=None):
             'AND starts_at<=? AND (ends_at IS NULL OR ends_at>?)',
             (principal.employee_uuid, contract_id, at, at))}
         from . import tasks
-        delegated = tasks.grants(conn, principal).get(contract_id, set())
-        capabilities -= {'call', 'visit'} - assigned - delegated
+        if delegated is None:delegated=tasks.grants(conn, principal)
+        capabilities -= {'call', 'visit'} - assigned - delegated.get(contract_id, set())
     return sorted(capabilities & {'call', 'visit', 'note', 'contact', 'promise', 'task',
                                   'reported_payment', 'document', 'accounting', 'correct', 'delivery'})
 

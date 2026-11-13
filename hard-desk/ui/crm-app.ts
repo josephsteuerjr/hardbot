@@ -1,11 +1,16 @@
 import {mountDeliveryForm} from './crm-delivery';
+import {mountRegistry} from './crm-registry';
 type API = {
+  ready?():Promise<any>;
   state(): Promise<any>;
   api(method: string, action: string, body?: any, query?: any): Promise<any>;
   command(body: any): Promise<any>;
-  queue(action?: string, id?: string): Promise<any>;
+  registryEdit(body:any, expectedOwner?:string): Promise<any>;
+  diagnostics?(repair?:boolean):Promise<any>;
+  diagnosticsReport?():Promise<any>;
+  queue(action?: string, id?: string,expectedOwner?:string): Promise<any>;
   onChange?(callback: (event: {type: 'queue' | 'identity'}) => void): () => void;
-  draft(key: string, value?: any): Promise<any>;
+  draft(key: string, value?: any, expectedOwner?:string): Promise<any>;
   telemetry(event: any): Promise<any>;
   connect(input: any): Promise<any>;
   workbook(action: string, input?: any): Promise<any>;
@@ -32,6 +37,7 @@ const amount = (value: any, currency = "") =>
 const labels: Record<string, string> = {
   call: "Звонок",
   source_sync: 'Сверка прежнего приложения',
+  registry_edit: 'Правка реестра',
   visit: "Выезд",
   delivery: 'Передать конверт',
   note: "Заметка",
@@ -56,6 +62,7 @@ let state: any,
   cardScript: any = null,
   renderGeneration = 0;
 let portfolioView='mine', portfolioWork='all', portfolioEmployee='', portfolioSearch='', portfolioOffset=0;
+let disposeSection:(()=>void)|undefined;
 let portfolioIdentity='',portfolioGeneration=0;
 const sectionScroll=new Map<string,number>();
 let taskStatus='open',taskEmployee='all',taskWork='all',taskSearch='',taskOffset=0,taskGeneration=0;
@@ -205,6 +212,7 @@ function bind(id: string, fn: () => any) {
 const table = (heads: string[], rows: string[]) =>
   `<div class="table-wrap"><table><thead><tr>${heads.map((x) => `<th>${esc(x)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table></div>`;
 async function boot() {
+  await crm.ready?.();
   state = await crm.state();
   context = state.context;
   if (portfolioIdentity!==context?.employee_uuid) {
@@ -235,7 +243,10 @@ async function boot() {
     (state.connection.mode === "synthetic"
       ? "Синтетические данные"
       : state.connection.mode === 'unconfigured' ? 'Не подключено' : state.connection.server) + (state.offline ? " · офлайн" : "");
-  const sections = [
+  const sections = context?.role==='employee' ? [
+    ['portfolio','Портфель'],['registry','Реестр'],['cabinet','Мои показатели'],
+    ['active-time','Активное время'],['connection','Подключение'],
+  ] : [
     ["portfolio", "Портфель"],
     ['tasks','Задачи'],
     ['cabinet','Мои показатели'],
@@ -262,6 +273,7 @@ async function boot() {
   });
 }
 async function go(next: string) {
+  disposeSection?.();disposeSection=undefined;
   const generation=++renderGeneration;
   if(!activePerson)sectionScroll.set(section,document.querySelector('main')!.scrollTop);
   clearTimeout(cardRetryTimer);
@@ -272,6 +284,8 @@ async function go(next: string) {
   $("title").textContent = (
     {
       portfolio: "Портфель",
+      registry:'Реестр',
+      'active-time':'Активное время',
       tasks:'Задачи',
       shift: "Смена",
       cabinet:'Показатели сотрудника',
@@ -300,6 +314,8 @@ async function go(next: string) {
         exchange: "exchange",
         adoption: "adoption",
         portfolio: "portfolio",
+        registry:'portfolio',
+        'active-time':'shell',
         tasks:'task',
         cabinet:'portfolio',
       } as any
@@ -309,6 +325,12 @@ async function go(next: string) {
     await (
       {
         portfolio,
+        registry:async()=>{
+          const expectedOwner=state.owner;
+          const stop=await mountRegistry($('view'),{...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:(action?:string,id?:string)=>crm.queue(action,id,expectedOwner)},()=>generation===renderGeneration);
+          if(generation===renderGeneration)disposeSection=stop;else stop();
+        },
+        'active-time':activeTimePage,
         tasks:tasksPage,
         cabinet,
         shift,
@@ -344,6 +366,33 @@ function contractDetails(contract: any) {
   const responsibility = people.size ? Array.from(people.values()).join(', ')
     : Array.from(new Set([fields.responsible, fields.responsible_soft].filter(Boolean))).join(', ');
   return `<article class="contract-details" data-contract-details="${esc(contract.contract_uuid)}"><h3>${esc(contract.external_id)} · ${esc(contract.creditor_id)}</h3><dl class="contract-facts"><div><dt>Дата КД</dt><dd data-field="kd_date">${calendarDate(fields.kd_date)}</dd></div><div><dt>Выданная сумма</dt><dd data-field="issued_sum">${amount(fields.issued_sum, contract.currency || 'Валюта не задана')}</dd></div><div><dt>Дней просрочки</dt><dd data-field="dp">${esc(fields.dp ?? 'Не указано')}</dd></div><div><dt>${people.size ? 'Ответственные' : 'Ответственные из реестра'}</dt><dd data-field="responsibility">${esc(responsibility || 'Не назначены')}</dd></div><div><dt>Последняя оплата</dt><dd>${amount(fields.last_payment_sum, contract.currency || '')}${fields.last_payment_date ? ' · ' + calendarDate(fields.last_payment_date) : ''}</dd></div>${deliveryMarkup(fields)}</dl><details><summary>Структура задолженности</summary>${articles.length ? `<dl class="debt-articles">${articles.map(key => `<div><dt>${esc(title(key))}</dt><dd data-field="${esc(key)}">${amount(fields[key], contract.currency || '')}</dd></div>`).join('')}</dl>` : '<p class="muted">Разбивка в источнике не указана</p>'}</details></article>`;
+}
+
+function fullBusiness(contract:any) {
+  const groups=new Map<string,any[]>();
+  const available=new Set(contract.business_source?.present || Object.keys(contract.fields));
+  for(const f of context.fields || []){
+    const section=f.section || ({call:'Звонки',visit:'Выезды',contact:'Контакты',forecast:'Обещания',delivery:'Передача конверта'} as any)[f.group] || 'Реквизиты и учёт';
+    if(!groups.has(section))groups.set(section,[]);
+    const value=contract.fields[f.key];
+    const text=!available.has(f.key)?'Нет в источнике':value===null || value===undefined || value===''?'Пусто':f.type==='date'?calendarDate(value):esc(value);
+    groups.get(section)!.push(`<div data-business-key="${esc(f.key)}"><dt>${esc(f.title)}</dt><dd>${text}</dd></div>`);
+  }
+  const extras=(contract.business_source?.extras || []).map((f:any)=>({...f,value:f.value===null?null:String(f.value)+(f.currency?' '+f.currency:'')}));
+  return `<details class="business-details"><summary>Все сведения · ${esc(contract.external_id)} · ${esc(contract.fields.partner || contract.creditor_id)}${contract.currency?' · '+esc(contract.currency):''}</summary>${Array.from(groups).map(([title,rows])=>`<section><h3>${esc(title)}</h3><dl class="contract-facts">${rows.join('')}</dl></section>`).join('')}${extras.length?`<section><h3>Прочие сведения источника</h3><dl class="contract-facts">${extras.map((f:any)=>`<div><dt>${esc(f.title)}</dt><dd>${f.value===null || f.value===''?'Пусто':esc(f.value)}</dd></div>`).join('')}</dl></section>`:''}</details>`;
+}
+
+async function activeTimePage() {
+  const activity=(await crm.state()).activity;
+  const today=new Date().toLocaleDateString('en-CA',{timeZone:context.timezone || 'Europe/Samara'});
+  $('view').innerHTML=`<div class="toolbar"><label>С <input id="active-since" type="date" value="${today}"></label><label>По <input id="active-until" type="date" value="${today}"></label>${button('active-load','Показать')}${button('active-shift','Заявленная смена')}${button('active-queue','Отправка интервалов')}</div><p>Считается время в видимом окне CRM в фокусе. После 120 секунд без взаимодействия начинается простой. Блокировка, сон и работа в другом окне не учитываются. Чтение и телефонный разговор без ввода могут попасть в простой.</p><div id="active-result"></div>`;
+  if(activity?.clock_quality==='unconfirmed')$('view').insertAdjacentHTML('afterbegin','<p role="status">Нет подтверждённой точки отсчёта. Новые интервалы пока не учитываются. Подключитесь к API; сохранённые интервалы остаются в очереди.</p>');
+  const duration=(ms:number)=>`${Math.floor(ms/3600000)} ч ${Math.floor(ms/60000)%60} мин ${Math.floor(ms/1000)%60} с`;
+  const load=async()=>{
+    const data=await request('GET','active-time',undefined,{since:$<HTMLInputElement>('active-since').value,until:$<HTMLInputElement>('active-until').value});
+    $('active-result').innerHTML=`<div class="summary"><div class="metric">Активное время<strong>${duration(data.active_ms)}</strong></div><div class="metric">Простой в окне CRM<strong>${duration(data.idle_ms)}</strong></div></div><p>Подтверждено сервером · ${esc(data.timezone)} · ${date(data.as_of)}. Пересекающиеся интервалы нескольких устройств учитываются один раз.</p>`+table(['День','Активно','Простой'],data.days.map((d:any)=>`<tr><td>${calendarDate(d.day)}</td><td>${duration(d.active_ms)}</td><td>${duration(d.idle_ms)}</td></tr>`));
+  };
+  bind('active-load',load);bind('active-shift',()=>go('shift'));bind('active-queue',()=>go('queue'));await load();
 }
 
 async function portfolio(search = portfolioSearch, offset=portfolioOffset) {
@@ -398,6 +447,10 @@ async function portfolio(search = portfolioSearch, offset=portfolioOffset) {
   $<HTMLInputElement>("search").onkeydown = (e) => {
     if (e.key === "Enter") void portfolio($<HTMLInputElement>("search").value,0).catch(error=>notice(error.message));
   };
+  if(context.role==='employee'){
+    $('view').insertAdjacentHTML('afterbegin',`<div class="toolbar portfolio-context">${button('portfolio-tasks','Задачи')}${button('portfolio-queue','Отправка результатов')}${button('portfolio-script','Скрипт')}${button('portfolio-help','Справка')}</div>`);
+    bind('portfolio-tasks',()=>go('tasks'));bind('portfolio-queue',()=>go('queue'));bind('portfolio-script',()=>go('script'));bind('portfolio-help',()=>go('help'));
+  }
   document
     .querySelectorAll<HTMLButtonElement>("[data-person]")
     .forEach((b) => (b.onclick = () => void openCard(b.dataset.person!)));
@@ -487,7 +540,7 @@ async function renderCard() {
           `<tr><td><b>${esc(r.external_id)}</b><br><span class="muted">${esc(r.creditor_id)}</span></td><td>${esc(r.fields.phone || r.fields.phone_main || "—")}<br>${esc(r.fields.address || "—")}</td><td class="amount">${amount(r.fields.debt_today ?? r.fields.debt_total, r.currency || "Валюта не задана")}</td><td>${r.fields.soft_call_status || r.fields.soft_comment ? `<div>Звонок: ${esc(r.fields.soft_call_status || '—')}<br><span class="muted">${esc(r.fields.soft_comment || '')}</span></div>` : ''}${r.fields.call_status || r.fields.visit_comment ? `<div>Выезд: ${esc(r.fields.call_status || '—')}<br><span class="muted">${esc(r.fields.visit_comment || '')}</span></div>` : ''}</td></tr>`,
       ),
     );
-    host.innerHTML += card.contracts.map(contractDetails).join('');
+    host.innerHTML += card.contracts.map((c:any)=>contractDetails(c)+fullBusiness(c)).join('');
     if (tab === "overview")
       host.innerHTML += `<div class="summary"><div class="metric">Договоры<strong>${card.contracts.length}</strong></div><div class="metric">Открытые задачи<strong>${card.entities.filter((e: any) => e.kind === "task" && e.status === "open").length}</strong></div><div class="metric">Заявленные оплаты<strong>${card.entities.filter((e: any) => e.kind === "reported_payment").length}</strong><small>Подтверждение поступления хранится отдельно</small></div></div>`;
   } else if (tab === "history") {
@@ -877,12 +930,12 @@ async function queuePage() {
   const result = await crm.queue();
   if (!result.ok) throw new Error(result.text);
   const entries = result.data.entries;
-  const pending = entries.filter((e: any) => e.state !== "accepted");
+  const pending = entries.filter((e: any) => e.state !== "accepted" && !e.reviewed_at);
   const exportErrors = (result.data.exports || []).filter(
     (v: any) => !v.completed,
   );
   $("view").innerHTML =
-    `<div class="toolbar">${button("queue-refresh", "Обновить")}${button("queue-send", "Отправить", true)}</div><div class="muted">На компьютере: ${pending.length} · Незавершённых выгрузок: ${exportErrors.length} · Подтверждено сервером: ${entries.length - pending.length}</div>` +
+    `<div class="toolbar">${button("queue-refresh", "Обновить")}${button("queue-send", "Отправить", true)}</div><div class="muted">Ожидают решения или отправки: ${pending.length} · Незавершённых выгрузок: ${exportErrors.length} · Подтверждено сервером: ${entries.filter((e:any)=>e.state==='accepted').length}</div>` +
     table(
       ["Действие", "Сохранено", "Состояние", "Результат"],
       entries
@@ -890,7 +943,7 @@ async function queuePage() {
         .reverse()
         .map(
           (e: any) =>
-            `<tr><td>${esc(e.action === "receipt" ? "Квитанция реестра" : labels[e.body.kind] || e.body.kind)}</td><td>${date(e.queued_at)}</td><td>${e.state === "accepted" ? "Принято сервером" : e.state === "attention" ? "Требует решения" : "Ожидает отправки"}</td><td>${esc(e.error || (e.result?.projection_status === "needs_review" ? "История сохранена; текущие поля требуют сверки" : e.result?.event_id ? "Подтверждено точным ID операции" : ""))}${e.state === "attention" ? `<br><button class="link" data-retry="${e.body.operation_id || e.body.receipt_id}">Повторить исходный запрос</button>` : ""}</td></tr>`,
+            `<tr><td>${esc(({receipt:'Квитанция реестра','registry-edit':'Правка реестра','active-time':e.body.kind==='idle'?'Простой в CRM':'Активное время'} as any)[e.action] || labels[e.body.kind] || e.body.kind)}</td><td>${date(e.queued_at)}</td><td>${e.reviewed_at?'Возвращено в черновик':e.state === "accepted" ? "Принято сервером" : e.state === "attention" ? "Требует решения" : "Ожидает отправки"}</td><td>${esc(e.error || (e.result?.projection_status === "needs_review" ? "История сохранена; текущие поля требуют сверки" : e.state==='accepted' ? "Подтверждено точным ID операции" : ""))}${e.state === "attention" && !e.reviewed_at ? e.action==='registry-edit'?'<br>Сверьте пакет в разделе «Реестр».':`<br><button class="link" data-retry="${e.body.operation_id || e.body.receipt_id}">Повторить исходный запрос</button>` : ""}</td></tr>`,
         ),
     );
   $("view").insertAdjacentHTML(
@@ -1220,6 +1273,21 @@ async function connection() {
   $("view").innerHTML =
     `<div class="help connection-page">${current}<h2>Сохранённый вход</h2><p>${available.length?'Выберите вход из установленной рабочей программы. Сервер подтвердит личность и права.':'Сохранённый вход не найден. Войдите в установленную рабочую программу и повторите проверку.'}</p><div class="actions">${available.map((entry:any)=>`<button ${entry.source==='manager'?'id="existing-manager-connect" ':''}data-existing-source="${esc(entry.source)}" class="primary">${esc(entry.label)}</button>`).join('')}${button('connection-refresh','Проверить снова')}</div>${state.connectionNotice ? `<p role="status">${esc(state.connectionNotice)}</p>` : ''}<details class="connection-testing"><summary>Проверочная среда</summary><h2>Синтетические данные</h2><p>Отдельная база на этом компьютере. Результаты не попадают в рабочий портфель.</p><div class="toolbar"><select id="demo-role" aria-label="Роль в проверочной базе"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option><option value="observer">Наблюдатель другой команды</option><option value="courier">Курьер</option><option value="analyst">Аналитик</option></select>${button('demo-connect','Открыть сценарий')}</div><label class="check"><input id="offline" type="checkbox"${state.offline?' checked':''}>Приостановить отправку для проверки офлайн</label><h2>Отдельный сервер</h2><div class="grid"><div class="field span"><label for="server">HTTPS-адрес</label><input id="server" placeholder="Адрес проверочного сервера"></div><div class="field"><label for="remote-role">Роль входа</label><select id="remote-role"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option></select></div><div class="field"><label for="login">Логин</label><input id="login" autocomplete="username"></div><div class="field"><label for="password">Пароль</label><input id="password" type="password" autocomplete="current-password"></div></div><div class="actions">${button('remote-connect','Войти')}</div></details></div>`;
   bind('connection-continue',()=>go('portfolio'));
+  $('view').insertAdjacentHTML('afterbegin',`<section class="diagnostics"><h2>Диагностика подключения</h2><div class="actions">${button('diagnostic-run','Проверить и восстановить')}${button('diagnostic-queue','Очередь и сверка')}</div><div id="diagnostic-result" role="status"></div></section>`);
+  const diagnose=async(repair=false)=>{
+    if(!crm.diagnostics)return;
+    const generation=renderGeneration,button=$<HTMLButtonElement>('diagnostic-run');button.disabled=true;
+    try{
+      const result=await crm.diagnostics(repair);
+      if(generation!==renderGeneration || section!=='connection')return;
+      if(!result.ok)throw Error(result.text || 'Диагностика не завершилась.');
+      $('diagnostic-result').innerHTML=table(['Проверка','Результат'],result.data.checks.map((c:any)=>`<tr><td>${esc(({main:'Запуск',renderer:'Интерфейс',disk:'Диск',profile:'Защищённый профиль',helper:'Локальный компонент',network:'Сеть и API',identity:'Вход и права',queue:'Сохранение и очередь'} as any)[c.stage] || c.stage)}<br><small>${esc(c.code)}</small></td><td>${c.ok?'✓':'—'} ${esc(c.text)}</td></tr>`));
+    }finally{if(generation===renderGeneration)button.disabled=false;}
+  };
+  $('diagnostic-run').insertAdjacentHTML('afterend',button('diagnostic-report','Сохранить отчёт'));
+  bind('diagnostic-report',async()=>{const result=await crm.diagnosticsReport?.();if(result && !result.ok)throw Error(result.text);});
+  bind('diagnostic-run',()=>diagnose(true));bind('diagnostic-queue',()=>go('queue'));
+  void diagnose().catch(e=>notice(e.message));
   bind('connection-refresh',()=>connection());
   $('view').querySelectorAll<HTMLButtonElement>('[data-existing-source]').forEach(element=>{
     bind(element.id || (element.id='saved-login-'+element.dataset.existingSource),async()=>{

@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 import json
 import pytest
 from crm import storage,three_hour
@@ -8,7 +9,8 @@ from test_crm_core import crm_world
 
 
 def test_ordinary_summary_keeps_call_sms_and_contract_money_semantics(crm_world):
-    w=crm_world;today=now()[:10];yesterday=(instant(now())-timedelta(days=1)).date().isoformat()
+    w=crm_world;day=instant(now()).astimezone(ZoneInfo(w['owner'].timezone)).date()
+    today=day.isoformat();yesterday=(day-timedelta(days=1)).isoformat()
     with storage.connect() as conn:
         for index,cid in enumerate(w['contracts']):
             before=dict(client='Same client',soft_comm_date=yesterday,soft_call_status='В работе',debt_today='100.10')

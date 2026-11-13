@@ -97,6 +97,22 @@ def test_real_device_auth_and_server_scope(pilot_http):
         assert conn.execute("SELECT COUNT(*) FROM crm_events").fetchone()[0] == 0
 
 
+def test_employee_registry_routes_enforce_current_auth_and_field_rights(pilot_http):
+    p=pilot_http
+    assert call('GET','/api/crm/registry',{'X-App-Token':'wrong'})[0]==401
+    status,data=call('GET','/api/crm/registry?view=all',p['employee'])
+    assert status==200 and data['total']==2
+    own=next(row for row in data['rows'] if row['contract_uuid']!=p['foreign_contract'])
+    body=dict(schema_version=1,operation_id=str(uuid.uuid4()),rows=[dict(contract_uuid=own['contract_uuid'],
+        values={'soft_comment':'HTTP registry correction'},clear=[],base_revisions={'call':own['revisions'].get('call',0)})])
+    status,receipt=call('POST','/api/crm/registry-edit',p['employee'],body)
+    assert status==200 and receipt['status']=='accepted'
+    assert call('POST','/api/crm/registry-edit',p['employee'],body)[1]==receipt
+    body['operation_id']=str(uuid.uuid4());body['rows'][0]['contract_uuid']=p['foreign_contract']
+    assert call('POST','/api/crm/registry-edit',p['employee'],body)[0]==403
+    assert call('GET','/api/crm/active-time',p['employee'])[0]==200
+
+
 def test_http_body_spoof_and_legacy_cutover_are_explicit(pilot_http):
     p = pilot_http
     status, result = call(

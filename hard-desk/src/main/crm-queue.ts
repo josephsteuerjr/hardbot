@@ -6,6 +6,7 @@ import {
   readFileSync,
   renameSync,
   writeFileSync,
+  copyFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { directSeal, directOpen, isDirect } from "./windows-dpapi";
@@ -25,13 +26,14 @@ export type Transport = (
   query?: any,
 ) => Promise<Result>;
 type Entry = {
-  action?: "command" | "receipt";
+  action?: "command" | "receipt" | "registry-edit" | "active-time";
   body: any;
   queued_at: string;
   state: "pending" | "attention" | "accepted";
   result?: any;
   error?: string;
   code?: string;
+  reviewed_at?:string;
 };
 type Business = { schema: 1; owner: string; entries: Entry[] };
 type Technical = { events: any[]; dropped: number; gap_since?: string };
@@ -64,7 +66,16 @@ export function cache(owner: string, key: string, value?: any): any {
   const name = "cache-" + digest(owner + "\n" + key);
   if (value !== undefined)
     write(name, { at: new Date().toISOString(), data: value });
-  return read(name, () => null);
+  try{return read(name, () => null);}catch{
+    // Only recreatable cache files enter this path. Business/drafts still fail
+    // closed. Retain and verify exact bytes before moving the damaged cache.
+    const target=path(name),before=readFileSync(target);
+    const backup=target+'.damaged-'+digest(before.toString('base64'));
+    if(!existsSync(backup))copyFileSync(target,backup);
+    if(!readFileSync(backup).equals(before) || !readFileSync(target).equals(before))throw Error('Кэш изменился во время восстановления.');
+    renameSync(target,target+'.quarantined-'+randomUUID());
+    return null;
+  }
 }
 const queueName = (owner: string) => "business-" + digest(owner);
 const changeListeners = new Set<(owner: string) => void>();
@@ -100,7 +111,7 @@ const entryId = (body: any) => body.operation_id || body.receipt_id;
 export function enqueue(
   owner: string,
   body: any,
-  action: "command" | "receipt" = "command",
+  action: "command" | "receipt" | "registry-edit" | "active-time" = "command",
 ) {
   if (
     typeof entryId(body) !== "string" ||
@@ -205,13 +216,23 @@ export function flush(
 export function retry(owner: string, id: string) {
   const queue = business(owner),
     entry = queue.entries.find((e) => entryId(e.body) === id);
-  if (entry?.state === "attention") {
+  if (entry?.state === "attention" && !entry.reviewed_at) {
     entry.state = "pending";
     delete entry.error;
     delete entry.code;
     write(queueName(owner), queue);
     changed(owner);
   }
+}
+
+export function reviewRegistry(owner:string,id:string){
+  const q=business(owner),entry=q.entries.find(e=>entryId(e.body)===id);
+  if(!entry || entry.action!=='registry-edit' || entry.state!=='attention')throw Error('Отправка не требует сверки.');
+  const saved=draft(owner,'registry-input');
+  if(!entry.body.rows.every((row:any)=>Object.entries(row.values).every(([key,value])=>saved?.[row.contract_uuid]?.values?.[key]===value)))
+    throw Error('Сначала сохраните полный пакет в защищённый черновик.');
+  entry.reviewed_at=new Date().toISOString();
+  write(queueName(owner),q);changed(owner);
 }
 
 export function technical(owner: string, event: any) {

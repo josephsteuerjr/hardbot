@@ -1,6 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain, net, protocol } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, net, protocol, powerMonitor } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, statfsSync, unlinkSync } from "node:fs";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
@@ -16,6 +16,8 @@ import * as queue from "./crm-queue";
 import { PILOT_BASE, existingManagerStatus, existingLogins, ENTRY_SOURCES, EntrySource } from "./crm-manager-login";
 import { pilotCredential } from "./crm-pilot-session";
 import {ThreeHourReports} from './crm-report-scheduler';
+import {ActiveTime} from './crm-active-time';
+import {showStartupRecovery} from './crm-startup-recovery';
 
 const isolatedProfile = !!process.env.HARD_USER_DATA;
 let connectionNotice = "";
@@ -48,6 +50,20 @@ let currentContext: any = null,
   owner = "",
   clock: any = null;
 const sessionId = randomUUID();
+const diagnosticEvents:any[]=[];
+function diagnostic(stage:string,code:string,ok:boolean,extra:Record<string,number>={}){
+  const row={at:new Date().toISOString(),stage,code,ok,version:app.getVersion(),...extra};
+  diagnosticEvents.push(row);if(diagnosticEvents.length>200)diagnosticEvents.shift();
+  try{writeFileSync(join(data,'crm-diagnostics.json'),JSON.stringify(diagnosticEvents),{flush:true});}catch{/* Diagnostic failure must not destroy business work. */}
+}
+let helperRepair:Promise<void>|null=null,helperAttempts:number[]=[],rendererReady=false,lastConfirmedAt:string|null=null;
+let screenLocked=false, sleeping=false;
+const activeTime=new ActiveTime(()=>owner && clock?{
+  owner,anchor_id:clock.anchor_id,installation_id:clock.installation_id,
+  elapsed:Math.max(0,Math.round(performance.now()-clock.monotonic)),
+  kind:win?.isVisible() && win.isFocused() && !win.isMinimized() && !screenLocked && !sleeping
+    ? powerMonitor.getSystemIdleTime()<120?'active':'idle':null,
+}:null);
 const config = () =>
   readSettings().crmConnection as
     | { mode?: string; role?: string; server?: string; auth?: string; source?: EntrySource }
@@ -66,6 +82,7 @@ const stopQueueChanges = queue.onChange(authority => {
 });
 app.once('will-quit', stopQueueChanges);
 function forgetAuthority(message: string) {
+  activeTime.stop();
   owner = ""; currentContext = null; clock = null;
   connectionNotice = message;
   // A known revocation must not become an offline login after a later outage.
@@ -75,6 +92,8 @@ function forgetAuthority(message: string) {
 }
 
 async function backendStart() {
+  if(helperRepair)return helperRepair;
+  const work=async()=>{
   const home = join(data, "synthetic");
   mkdirSync(home, { recursive: true });
   const exe =
@@ -104,32 +123,90 @@ async function backendStart() {
       },
     },
   );
-  backend.stderr.on("data", (chunk: Buffer) => {
-    writeFileSync(join(data, "crm-backend.log"), chunk, { flag: "a" });
-  });
+  const child=backend;
+  child.stderr.on('data',(chunk:Buffer)=>diagnostic('helper','helper_stderr',false,{bytes:chunk.length}));
   await new Promise<void>((resolveReady, reject) => {
-    let output = "";
+    let output = "",settled=false;
     const timeout = setTimeout(
-      () => reject(new Error("Локальная проверочная база не запустилась.")),
-      45000,
+      () => {settled=true;child.kill();reject(new Error("Локальная проверочная база не запустилась."));},
+      15000,
     );
-    backend!.stdout.on("data", (chunk: Buffer) => {
-      output += chunk.toString();
+    child.stdout.on("data", (chunk: Buffer) => {
+      if(settled)return;
+      output=(output+chunk.toString()).slice(-8192);
       const match = output.match(/HARD-CRM (\d+) (\S+)/);
       if (match) {
+        settled=true;
         port = Number(match[1]);
         secret = match[2];
         clearTimeout(timeout);
         resolveReady();
       }
     });
-    backend!.once("exit", () => {
-      port = 0;
-      secret = "";
+    child.once("exit", () => {
+      if(backend===child){port = 0;secret = "";}
       clearTimeout(timeout);
       reject(new Error("Проверочная база завершилась."));
     });
+    child.once('error',()=>{settled=true;clearTimeout(timeout);reject(new Error('Компонент локальной базы недоступен.'));});
   });
+  };
+  helperRepair=work().finally(()=>{helperRepair=null;});
+  return helperRepair;
+}
+
+async function diagnostics(repair=false){
+  const checks:any[]=[];
+  const add=(stage:string,ok:boolean,code:string,text:string)=>{checks.push({stage,ok,code,text});diagnostic(stage,code,ok);};
+  add('main',true,'main_ready','Основной процесс запущен.');
+  add('renderer',rendererReady,rendererReady?'renderer_ready':'renderer_pending',rendererReady?'Интерфейс и защищённый мост отвечают.':'Ожидается интерфейс.');
+  try{
+    const disk=statfsSync(data);const free=Number(disk.bavail)*Number(disk.bsize);
+    add('disk',free>=64*1024*1024,free>=64*1024*1024?'disk_ok':'disk_low',free>=64*1024*1024?'Место для локального сохранения доступно.':'Освободите место на локальном диске.');
+    const probe=join(data,'diagnostic-'+sessionId+'.tmp');writeFileSync(probe,'crm-profile-probe',{flush:true});
+    if(readFileSync(probe,'utf8')!=='crm-profile-probe')throw Error();unlinkSync(probe);
+    queue.installation();
+    add('profile',true,'profile_ok','Защищённое хранилище читается и записывается.');
+  }catch{add('profile',false,'profile_unavailable','Локальное сохранение недоступно. Проверьте доступ к профилю и свободное место.');}
+  if(!port && repair){
+    helperAttempts=helperAttempts.filter(t=>performance.now()-t<300000);
+    if(helperAttempts.length<2){
+      helperAttempts.push(performance.now());backend?.kill();
+      try{await backendStart();}catch{backend?.kill();}
+    }
+  }
+  add('helper',!!port,port?'helper_ready':'helper_unavailable',port?'Локальный компонент отвечает.':'Локальный компонент недоступен. Рабочий API проверяется отдельно; доступен повтор запуска.');
+  if(demo())add('network',!!port,port?'synthetic_ready':'synthetic_unavailable',port?'Проверочная база доступна.':'Проверочная база недоступна.');
+  else{
+    try{
+      const base=config()?.mode==='remote'?origin():PILOT_BASE;
+      const url=base===PILOT_BASE?base+'/health':new URL('/ready.json',base).toString();
+      const result=await fetchBuffered((u,i)=>net.fetch(u,i),url,{method:'GET'},8000);
+      const body=await result.json();
+      const ok=result.ok && body.ok===true && (base!==PILOT_BASE || body.namespace==='crm-shared-pilot-v1');
+      add('network',ok,ok?'api_ready':'api_unavailable',ok?'Публичная проверка API и строгий TLS прошли.':'API не подтвердил готовность или пространство CRM.');
+    }catch(error){
+      const message=String((error as Error).message);
+      const code=/CERT|SSL|TLS/i.test(message)?'tls_failed':/NAME_NOT_RESOLVED|ENOTFOUND/i.test(message)?'dns_failed':'network_unavailable';
+      add('network',false,code,code==='tls_failed'?'Сертификат сервера не прошёл проверку. Проверьте часы и доверенный сертификат.':code==='dns_failed'?'Не удалось определить адрес сервера. Проверьте VPN и DNS.':'API недоступен. Проверьте VPN, сеть и настройки прокси.');
+    }
+  }
+  const authority=owner;
+  if(config()){
+    const result=await identify();
+    const code=result.ok?'identity_confirmed':result.data?.error || (result.status===401?'login_required':result.status===403?'access_denied':'identity_unverified');
+    add('identity',result.ok,code,result.ok?'Сервер подтвердил текущий вход и права.':result.status===401 || result.status===403?(result.text || 'Требуется действующий вход; доступ автоматически не выдаётся.'):'Вход не проверен из-за недоступности API. Локальная работа сохранена.');
+  }else add('identity',false,'login_required','Выберите собственный сохранённый вход.');
+  if(owner){
+    try{
+      const q=queue.queueState(owner);const pending=q.entries.filter(e=>e.state==='pending').length;
+      const attention=q.entries.filter(e=>e.state==='attention' && !e.reviewed_at).length;
+      queue.draft(owner,'registry-input');
+      add('queue',!attention,attention?'queue_attention':'queue_ok',`Сохранено на устройстве: ${pending}. Требует сверки: ${attention}.`);
+      if(repair && owner===authority){await queue.flush(owner,send,()=>owner);}
+    }catch{add('queue',false,'protected_work_unreadable','Очередь или черновик не читается. Исходные файлы сохранены; сброс профиля не выполняется.');}
+  }
+  return {ok:true,data:{checks,at:new Date().toISOString()}};
 }
 
 async function local(
@@ -185,6 +262,9 @@ const actions = new Set([
   'tasks',
   "card",
   'contracts',
+  'registry',
+  'registry-edit',
+  'active-time',
   "shifts",
   'shift-report',
   'cabinet',
@@ -203,7 +283,7 @@ const actions = new Set([
   "telemetry",
   "document",
 ]);
-const send: queue.Transport = async (method, action, body, query) => {
+const transport: queue.Transport = async (method, action, body, query) => {
   if (!actions.has(action) || !["GET", "POST"].includes(method))
     return { ok: false, status: 400, text: "Неизвестный запрос." };
   if (!["synthetic", "remote"].includes(config()?.mode || ""))
@@ -248,6 +328,14 @@ const send: queue.Transport = async (method, action, body, query) => {
   }
 };
 
+const send:queue.Transport=async(method,action,body,query)=>{
+  const result=await transport(method,action,body,query);
+  if(result.ok)lastConfirmedAt=new Date().toISOString();
+  const stage=['registry-edit','command','active-time'].includes(action)?'save':'api';
+  diagnostic(stage,result.ok?'confirmed':result.status===401?'login_required':result.status===403?'access_denied':result.status===409?'requires_review':result.status===0?'network_unavailable':'api_error',result.ok,{status:result.status});
+  return result;
+};
+
 async function identify() {
   const result = await send("GET", "context");
   if (result.ok) {
@@ -264,7 +352,6 @@ async function identify() {
     });
     const anchor = await send("POST", "anchor", {
       installation_id: queue.installation(),
-      reports: owner ? (()=>{const job=queue.draft(owner,'three-hour-report')||{};return {slot:job.slot,path:job.path,error:job.error,receipt:job.receipt};})() : null,
     });
     clock = anchor.ok ? { ...anchor.data, monotonic: performance.now() } : null;
   } else if (result.status === 401 || result.status === 403) {
@@ -370,7 +457,8 @@ app
         return new Response("Forbidden", { status: 403 });
       return net.fetch(pathToFileURL(path).toString());
     });
-    await backendStart();
+    diagnostic('launcher','launcher_ready',true);
+    try{await backendStart();diagnostic('helper','helper_ready',true);}catch{backend?.kill();diagnostic('helper','helper_unavailable',false);}
     const availableLogins = existingLogins().filter(entry => entry.available);
     if (!config() && app.isPackaged && !isolatedProfile && availableLogins.length === 1) {
       try {
@@ -418,11 +506,20 @@ app
       offline,
       owner,
       installation_id: queue.installation(),
+      activity:{clock_quality:clock?'anchored':'unconfirmed',idle_threshold_seconds:120,last_confirmed_at:lastConfirmedAt},
     }));
+    safeHandler('crm:ui-ready',()=>{rendererReady=true;diagnostic('renderer','renderer_ready',true);return {ok:true};});
+    safeHandler('crm:diagnostics',async(repair:boolean=false)=>{rendererReady=true;return diagnostics(repair===true);});
+    safeHandler('crm:diagnostics-report',async()=>{
+      const choice=await dialog.showSaveDialog(win!,{title:'Диагностика CRM',defaultPath:'CRM-диагностика-'+Date.now()+'.json',filters:[{name:'JSON',extensions:['json']}]});
+      if(choice.canceled || !choice.filePath)return {ok:true,cancelled:true};
+      writeFileSync(choice.filePath,JSON.stringify({schema_version:1,at:new Date().toISOString(),events:diagnosticEvents},null,2),{flag:'wx',flush:true});
+      return {ok:true};
+    });
     safeHandler(
       "crm:api",
       async (method: string, action: string, body: any, query: any) => {
-        if (action === "command" || action === "receipt")
+        if (action === "command" || action === "receipt" || action === 'registry-edit' || method==='POST' && action==='active-time')
           throw new Error("Используйте защищённую очередь.");
         const authority = owner,
           result = await send(method, action, body, query);
@@ -444,6 +541,14 @@ app
         return result;
       },
     );
+    safeHandler('crm:registry-edit', async (body:any,expectedOwner?:string) => {
+      if (!owner || !currentContext) throw new Error('Сначала подтвердите вход в CRM.');
+      if(expectedOwner!==undefined && owner!==expectedOwner)throw new Error('Личность правки изменилась. Исходный ввод сохранён.');
+      const authority=owner;
+      queue.enqueue(authority, body, 'registry-edit');
+      void queue.flush(authority, send, () => owner);
+      return {ok:true, queued:true, operation_id:body.operation_id};
+    });
     safeHandler("crm:command", async (body: any) => {
       if (!owner || !currentContext)
         throw new Error("Сначала подтвердите вход в CRM.");
@@ -487,8 +592,10 @@ app
       void queue.flush(authority, send, () => owner);
       return { ok: true, queued: true, operation_id: body.operation_id };
     });
-    safeHandler("crm:queue", async (action: string, id: string) => {
+    safeHandler("crm:queue", async (action: string, id: string,expectedOwner?:string) => {
       if (!owner) throw new Error("Нет входа.");
+      if(expectedOwner!==undefined && owner!==expectedOwner)throw new Error('Личность очереди изменилась.');
+      if(action==='review-registry')queue.reviewRegistry(owner,id);
       if (action === "retry") queue.retry(owner, id);
       if (action === "flush") await queue.flush(owner, send, () => owner);
       return {
@@ -499,7 +606,8 @@ app
         },
       };
     });
-    safeHandler("crm:draft", (key: string, value: any) => {
+    safeHandler("crm:draft", (key: string, value: any, expectedOwner?:string) => {
+      if(expectedOwner!==undefined && owner!==expectedOwner)throw new Error('Личность черновика изменилась. Исходный ввод сохранён.');
       if (!owner || typeof key !== "string" || key.length > 200)
         throw new Error("Нет контекста черновика.");
       return { ok: true, data: queue.draft(owner, key, value) };
@@ -743,11 +851,25 @@ app
         win?.isMaximized() ? win.unmaximize() : win?.maximize();
     });
     await win.loadURL("hard://app/index.html");
+    let rendererRepairs=0;
+    win.webContents.on('render-process-gone',()=>{
+      diagnostic('renderer','renderer_stopped',false);
+      if(++rendererRepairs<=2){rendererReady=false;win?.webContents.reload();}
+      else void showStartupRecovery('renderer_unavailable');
+    });
+    setTimeout(()=>{if(!rendererReady && win && !win.isDestroyed())void showStartupRecovery('preload_or_renderer_unavailable');},10000).unref();
     if (process.platform === "win32")
       await local("window-frame", {
         hwnd: win.getNativeWindowHandle().readBigUInt64LE().toString(),
       });
     win.show();
+    win.on('blur',()=>activeTime.stop());win.on('hide',()=>activeTime.stop());
+    win.on('minimize',()=>activeTime.stop());win.on('close',()=>activeTime.stop());
+    powerMonitor.on('lock-screen',()=>{screenLocked=true;activeTime.stop();});
+    powerMonitor.on('unlock-screen',()=>{screenLocked=false;});
+    powerMonitor.on('suspend',()=>{sleeping=true;activeTime.stop();clock=null;});
+    powerMonitor.on('resume',()=>{sleeping=false;void identify().catch(()=>{});});
+    setInterval(()=>{try{activeTime.tick();}catch{connectionNotice='Не удалось сохранить активный интервал. Проверьте защищённый профиль.';}},2000).unref();
     void recoverExports().catch(() => {});
     const reports=new ThreeHourReports({
       identity:()=>owner&&currentContext?{owner,employee:currentContext.employee_uuid,
@@ -771,10 +893,11 @@ app
     });
   })
   .catch((error) => {
-    dialog.showErrorBox("CRM пилот", String(error.message || error));
-    app.quit();
+    diagnostic('startup','startup_failed',false);
+    void showStartupRecovery('startup_failed');
   });
 app.on("window-all-closed", () => app.quit());
 app.on("before-quit", () => {
+  try{activeTime.stop();}catch{/* The last protected checkpoint remains recoverable. */}
   backend?.kill();
 });

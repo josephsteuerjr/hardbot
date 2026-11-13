@@ -1,6 +1,6 @@
 """Additive canonical tables; legacy IDs, accounts and documents are retained."""
 
-VERSION = 3
+VERSION = 4
 
 DDL = """
 CREATE TABLE IF NOT EXISTS crm_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -164,7 +164,8 @@ def initialize(conn):
     from .legacy_exchange import DDL as exchange_ddl
 
     statement = ""
-    for line in (DDL + exchange_ddl).splitlines(True):
+    from .active_time import DDL as active_ddl
+    for line in (DDL + exchange_ddl + active_ddl).splitlines(True):
         statement += line
         if sqlite3.complete_statement(statement):
             conn.execute(statement)

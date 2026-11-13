@@ -63,7 +63,7 @@ with sync_playwright() as p:
     page.get_by_text('10.25 RUB',exact=True).wait_for()
     assert 'без данных: 1' in page.locator('#cabinet-result').inner_text()
     page.screenshot(path=str(qa/'employee-cabinet.png'),full_page=True)
-    page.locator('[data-section=shift]').click()
+    page.locator('[data-section=active-time]').click();page.locator('#active-shift').click()
     page.get_by_text('7 ч. 30 мин.',exact=True).wait_for()
     assert 'Исполнитель проверки' in page.locator('#shift-report-result').inner_text()
     page.screenshot(path=str(qa/'team-shifts.png'),full_page=True)

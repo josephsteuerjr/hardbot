@@ -68,7 +68,7 @@ with sync_playwright() as p:
     assert page.locator('[data-task-row]').count()==1
     page.screenshot(path=str(folder/'tasks-pending.png'),full_page=True)
     page.evaluate("localStorage.setItem('test-role','employee')");page.reload()
-    page.locator('[data-section=tasks]').click();page.locator('[data-task-row]').first.wait_for()
+    page.locator('#portfolio-tasks').click();page.locator('[data-task-row]').first.wait_for()
     assert page.locator('#task-employee').count()==0
     assert 'Закрытая задача руководителя' not in page.locator('#view').inner_text()
     page.screenshot(path=str(folder/'tasks-employee.png'),full_page=True)

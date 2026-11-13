@@ -728,6 +728,8 @@ def card(principal, person_uuid):
                 tasks.describe(conn, principal, entity, write_scope)
         assignment_time = now()
         for row in rows:
+            from .registry import source_details
+            row['business_source'] = source_details(conn, row)
             row['allowed_actions'] = access.writable_actions(conn, principal, row['contract_uuid'], scope=write_scope)
             row['assignments'] = [dict(r) for r in conn.execute(
                 'SELECT a.employee_uuid,e.name,a.capability,a.starts_at,a.ends_at FROM crm_assignments a '

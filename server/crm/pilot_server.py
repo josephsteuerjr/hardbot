@@ -357,6 +357,8 @@ def serve():
                 query = body.get("query", {})
                 method = body.get("method", "GET")
                 actions = {
+                    "registry-edit": __import__('crm.registry', fromlist=['edit']).edit,
+                    "active-time": __import__('crm.active_time', fromlist=['ingest']).ingest,
                     "command": store.command,
                     "shift": shifts.command,
                     "plan": shifts.set_plan,
@@ -371,6 +373,12 @@ def serve():
                 }
                 if action == "context":
                     result = context(p)
+                elif action == 'registry' and method == 'GET':
+                    from . import registry
+                    result = registry.read(p, **query)
+                elif action == 'active-time' and method == 'GET':
+                    from . import active_time
+                    result = active_time.summary(p, **query)
                 elif action == "portfolio":
                     result = store.portfolio(
                         p, query.get("search", ""), query.get("limit", 200)

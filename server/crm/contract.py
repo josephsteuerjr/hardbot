@@ -161,6 +161,7 @@ def fields():
         dict(
             key=f.key,
             title=f.title,
+            section=f.block,
             group=group(f.key),
             type=(
                 "integer"

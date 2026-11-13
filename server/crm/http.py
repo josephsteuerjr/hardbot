@@ -18,6 +18,8 @@ from . import (
     three_hour,
     work_portfolio,
     tasks,
+    registry,
+    active_time,
 )
 from .contract import CRMError, fields
 
@@ -116,6 +118,10 @@ def install(app, host=None, *, authenticate=None):
             if request.method == "GET":
                 if action == "context":
                     result = await asyncio.to_thread(context, p)
+                elif action == 'registry':
+                    result = await asyncio.to_thread(registry.read, p, **dict(request.query))
+                elif action == 'active-time':
+                    result = await asyncio.to_thread(active_time.summary, p, **dict(request.query))
                 elif action == "portfolio":
                     result = await asyncio.to_thread(
                         store.portfolio,
@@ -179,6 +185,8 @@ def install(app, host=None, *, authenticate=None):
                     ),
                 )
                 actions = {
+                    "registry-edit": registry.edit,
+                    "active-time": active_time.ingest,
                     "command": store.command,
                     "shift": shifts.command,
                     "plan": shifts.set_plan,

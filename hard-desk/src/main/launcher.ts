@@ -4,5 +4,8 @@ if (process.argv.includes("--hard-uninstall") || process.argv.includes("--hard-u
   require("../setup/main").startUninstaller();
 } else {
   const {PRODUCT_ID}=require('./product');
-  if(PRODUCT_ID==='crm')require('./crm-pilot');else require("./main");
+  if(PRODUCT_ID==='crm'){
+    if(process.argv.includes('--crm-diagnose'))void require('./crm-startup-recovery').showStartupRecovery('manual_startup_diagnostics');
+    else try{require('./crm-pilot');}catch{void require('./crm-startup-recovery').showStartupRecovery('main_unavailable');}
+  }else require("./main");
 }

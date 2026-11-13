@@ -63,7 +63,7 @@ with sync_playwright() as p:
     page.screenshot(path=str(folder/'card-accepted.png'),full_page=True)
     page.locator('#back').click();page.evaluate('saving.delayScript=true');page.locator('[data-person]').click()
     page.wait_for_function('() => !!saving.releaseScript')
-    page.locator('[data-section=help]').click();page.get_by_text('Сохранение и обмен',exact=True).wait_for()
+    page.locator('[data-section=portfolio]').click();page.locator('#portfolio-help').click();page.get_by_text('Сохранение и обмен',exact=True).wait_for()
     page.evaluate('saving.releaseScript()');page.wait_for_timeout(200)
     assert page.locator('#title').inner_text()=='Справка'
     assert not page.locator('[data-action=call]').count()
