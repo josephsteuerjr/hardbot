@@ -51,11 +51,30 @@
 ## Проверка и пакет
 
 Доказательства вне Git: ROOT `_local/crm-manager-complete-2026-11-15`.
-На промежуточном исходном срезе: 43 серверных проверки SQLite, 22 PostgreSQL
-(включая ограниченную crm_app), пять настоящих Excel-проверок; tsc и CRM build.
+43 серверных проверки SQLite и пять настоящих Excel-проверок прошли на исходных
+срезах; финальный PostgreSQL-прогон — 22 проверки, включая ограниченную crm_app.
+tsc и CRM build прошли.
 Native `native-2/RESULT.json`: карточка/черновик/ACK, Реестр, срезы, Excel,
 подтверждение/отзыв устройства, сброс пароля и регрессия сотрудника.
 `distribution-2/RESULT.json`: потерянный ACK, точный replay, независимость видов
 работы, массовое снятие и неназначенный портфель в едином Реестре.
-После финальных правок требуется свежий frozen/installer прогон; статусы сборки,
-установки и доставки смотреть в квитанциях этой операции, не в старой manager.1.
+Финальный код `3f9cbfa0c4d01cdc39d5a85cf83a6145425c37ab` упакован в
+`3.3.0-manager.2`. `FROZEN.private.json`: все три сценария manager,
+manager-card и двухзапусковый employee прошли с запрещённым source fallback.
+Проверен фактический payload EXE; установка, переустановка, продолжение исходной
+операции/черновика и удаление прошли. Посторонние регистрации и профили сохранены.
+
+Локальный пакет: ROOT `_local/crm-manager-complete-2026-11-15/release/`.
+EXE `crm-3.3.0-manager.2-setup.exe`, 230365501 байт, SHA-256:
+`d353e30ee62fdaff3504148f2c14017753ff2c521b9387336ccaa502ad7ca928`.
+Манифест подписан существующим CRM Ed25519-ключом; это detached подпись,
+не Authenticode. appId `ru.rimborso.crm.manager.internal`, профиль
+`Hard/crm-manager-internal/data`, обновляющий feed отсутствует.
+
+Свежий внешний периметр приложения/установки/удаления не проверен. После сообщения
+владельца об открытом рабочем столе Computer Use по-прежнему вернул native pipe
+os error 2, Windows-MCP — screen grab failed, Electron desktopCapturer — пустое
+изображение экрана. Renderer-снимки не заменяют сравнение с AuctionDesk.
+Поэтому пакет сохранён локально, на сетевую шару не доставлялся; pilot.7 сохранён.
+Это рабочий внутренний кандидат для проверки функций, а не принятый production-релиз.
+Квитанции: `CANDIDATE.private.json`, `INSTALLED.private.json`, `FINAL.private.json`.
