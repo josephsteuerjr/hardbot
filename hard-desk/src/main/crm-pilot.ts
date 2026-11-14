@@ -395,7 +395,9 @@ async function identify() {
   if (result.ok) {
     currentContext = result.data;
     owner = origin() + "\n" + currentContext.employee_uuid;
-    live.start();
+    // Older deployed pilots have no invalidation protocol. A missing feature
+    // must not turn their otherwise confirmed connection into an offline state.
+    if(currentContext.distribution)live.start();else live.stop();
     queue.cache(owner, "context", currentContext);
     writeSettings({
       crmLast: {

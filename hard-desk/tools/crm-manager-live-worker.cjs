@@ -34,7 +34,7 @@ async function until(fn){for(let i=0;i<300;i++){if(await fn())return;await pause
         else if(req.url==='/shot'){
           assert(/^[a-z0-9-]+$/.test(body.name));await pause(100);
           fs.writeFileSync(path.join(qa,body.name+'.png'),(await win.webContents.capturePage()).toPNG());result={ok:true};
-        }else if(req.url==='/quit'){result={ok:true};setTimeout(()=>{server.close();app.exit(0);},100);}
+        }else if(req.url==='/quit'){result={ok:true};setTimeout(()=>{server.close();app.quit();},100);}
         else throw Error('Unknown control');
         res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true,result:result??null}));
       }catch(error){res.writeHead(500);res.end(JSON.stringify({ok:false,error:error.message}));}

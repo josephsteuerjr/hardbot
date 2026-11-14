@@ -46,6 +46,6 @@ async function until(fn,label){for(let i=0;i<400;i++){if(await fn())return;await
     await click('#manager-free');await until(()=>exists('[data-managed-person]'),'unassigned filter');
     await click('[data-section=manager-statistics]');await until(()=>exists('#manager-statistics-result h2'),'statistics');await shot('manager-statistics');
     await click('[data-section=team]');await until(()=>exists('#manager-access-load'),'team');await shot('manager-team');
-    fs.writeFileSync(path.join(qa,'RESULT.json'),JSON.stringify({passed:true,actual_main:true,actual_preload:true,dpapi_intent:true,lost_ack_exact_receipt:true,work_independence:true,bulk_remove:true,unassigned_management:true,unique_debt:true,source_backend:true},null,2));app.exit(0);
+    fs.writeFileSync(path.join(qa,'RESULT.json'),JSON.stringify({passed:true,actual_main:true,actual_preload:true,dpapi_intent:true,lost_ack_exact_receipt:true,work_independence:true,bulk_remove:true,unassigned_management:true,unique_debt:true,source_backend:true},null,2));app.quit();
   }catch(e){fs.writeFileSync(path.join(qa,'FAIL.txt'),e.stack||String(e));if(win){fs.writeFileSync(path.join(qa,'failure.png'),(await win.webContents.capturePage()).toPNG());fs.writeFileSync(path.join(qa,'failure.txt'),await win.webContents.executeJavaScript('document.body.innerText').catch(()=>''));}app.exit(1);}
 })();
