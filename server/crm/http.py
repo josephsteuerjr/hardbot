@@ -20,6 +20,7 @@ from . import (
     tasks,
     registry,
     active_time,
+    assignments,
 )
 from .contract import CRMError, fields
 
@@ -96,9 +97,11 @@ def install(app, host=None, *, authenticate=None):
                 ).fetchone()
             ]
             staff = tasks.staff(conn, p)
+            distribution = assignments.readiness(conn,p)
         return dict(
             schema_version=1,
             employee_uuid=p.employee_uuid,
+            actor_uid=p.actor_uid,
             team_id=p.team_id,
             role=p.role,
             capabilities=sorted(p.capabilities),
@@ -109,6 +112,7 @@ def install(app, host=None, *, authenticate=None):
             dropdowns=DROPDOWNS,
             cohorts=cohorts,
             staff=staff,
+            distribution=distribution,
         )
 
     async def handler(request):
@@ -120,6 +124,18 @@ def install(app, host=None, *, authenticate=None):
                     result = await asyncio.to_thread(context, p)
                 elif action == 'registry':
                     result = await asyncio.to_thread(registry.read, p, **dict(request.query))
+                elif action == 'managed-portfolio':
+                    result = await asyncio.to_thread(assignments.portfolio,p,**dict(request.query))
+                elif action == 'assignment-staff':
+                    result = await asyncio.to_thread(assignments.staff,p)
+                elif action == 'assignment-receipt':
+                    result = await asyncio.to_thread(assignments.receipt,p,**dict(request.query))
+                elif action == 'assignment-history':
+                    result = await asyncio.to_thread(assignments.history,p,**dict(request.query))
+                elif action == 'manager-statistics':
+                    result = await asyncio.to_thread(assignments.statistics,p,**dict(request.query))
+                elif action == 'changes':
+                    result = await asyncio.to_thread(assignments.changes,p,**dict(request.query))
                 elif action == 'active-time':
                     result = await asyncio.to_thread(active_time.summary, p, **dict(request.query))
                 elif action == "portfolio":
@@ -186,6 +202,8 @@ def install(app, host=None, *, authenticate=None):
                 )
                 actions = {
                     "registry-edit": registry.edit,
+                    "assignment-preview": assignments.preview,
+                    "assignment-commit": assignments.commit,
                     "active-time": active_time.ingest,
                     "command": store.command,
                     "shift": shifts.command,

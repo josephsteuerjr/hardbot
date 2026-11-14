@@ -14,11 +14,14 @@ def grants(conn, principal):
     if not principal.employee_scope:
         return result
     for row in conn.execute(
-        "SELECT x.contract_uuid,x.data_json,e.role,e.employee_uuid FROM crm_entities x "
+        "SELECT x.entity_id,x.contract_uuid,x.data_json,e.role,e.employee_uuid FROM crm_entities x "
         "JOIN crm_events e ON e.event_id=x.event_id WHERE x.kind='task' AND x.status='open'"):
         data = json.loads(row['data_json'])
         if (row['role'] not in {'manager', 'owner'} or not data.get('assignment_grant')
                 or data.get('assignee_uuid') not in principal.employee_scope):
+            continue
+        if conn.execute('SELECT 1 FROM crm_task_grant_revocations WHERE entity_id=? AND capability=?',
+                        (row['entity_id'],data.get('work_kind'))).fetchone():
             continue
         result.setdefault(row['contract_uuid'], set()).update(WORK_ACTIONS.get(data.get('work_kind'), ()))
     return result

@@ -279,6 +279,7 @@ def command(principal, body, *, origin="app", client_version=None):
         previous = replay(conn, principal, operation, body)
         if previous is not None:
             return previous
+        principal = access.refresh_write(conn, principal)
         rows = access.contracts(
             conn, principal, body.get("contract_ids"), capability=capability
         )
@@ -732,11 +733,12 @@ def card(principal, person_uuid):
             row['business_source'] = source_details(conn, row)
             row['allowed_actions'] = access.writable_actions(conn, principal, row['contract_uuid'], scope=write_scope)
             row['assignments'] = [dict(r) for r in conn.execute(
-                'SELECT a.employee_uuid,e.name,a.capability,a.starts_at,a.ends_at FROM crm_assignments a '
+                'SELECT a.employee_uuid,e.name,a.capability,a.starts_at,a.ends_at FROM crm_effective_assignments a '
                 'JOIN crm_employees e USING(employee_uuid) WHERE a.contract_uuid=? '
                 'AND a.starts_at<=? AND (a.ends_at IS NULL OR a.ends_at>?) ORDER BY e.name,a.capability',
                 (row['contract_uuid'], assignment_time, assignment_time))]
-            row["fields"] = json.loads(row.pop("fields_json"))
+            from .assignments import effective_fields
+            row["fields"] = effective_fields(conn,row['contract_uuid'],json.loads(row.pop("fields_json")))
             row["revisions"] = {
                 key: 0 for key in ("call", "visit", "contact", "forecast", "accounting")
             }

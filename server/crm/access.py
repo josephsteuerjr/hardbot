@@ -59,7 +59,7 @@ def scoped_contracts(conn, principal, *, include_tasks=True):
         result.update(
             r[0]
             for r in conn.execute(
-                "SELECT contract_uuid FROM crm_assignments WHERE employee_uuid=? AND starts_at<=? "
+                "SELECT contract_uuid FROM crm_effective_assignments WHERE employee_uuid=? AND starts_at<=? "
                 "AND (ends_at IS NULL OR ends_at>?)",
                 (employee, at, at),
             )
@@ -77,7 +77,12 @@ def reads_all(principal):
 def readable_contracts(conn, principal):
     if reads_all(principal):
         return {r[0] for r in conn.execute("SELECT contract_uuid FROM crm_contracts")}
-    return scoped_contracts(conn, principal)
+    result = scoped_contracts(conn, principal)
+    if principal.role == 'manager' and 'assign' in principal.capabilities:
+        result.update(r[0] for r in conn.execute('SELECT DISTINCT mc.contract_uuid FROM crm_managed_contracts mc '
+            'JOIN crm_distribution_managers dm ON dm.team_id=mc.team_id AND dm.capability=mc.capability WHERE dm.employee_uuid=?',
+            (principal.employee_uuid,)))
+    return result
 
 
 def writable_actions(conn, principal, contract_id, *, scope=None, direct_scope=None, delegated=None):
@@ -97,7 +102,7 @@ def writable_actions(conn, principal, contract_id, *, scope=None, direct_scope=N
     if principal.role == 'employee':
         at = now()
         assigned = {r[0] for r in conn.execute(
-            'SELECT capability FROM crm_assignments WHERE employee_uuid=? AND contract_uuid=? '
+            'SELECT capability FROM crm_effective_assignments WHERE employee_uuid=? AND contract_uuid=? '
             'AND starts_at<=? AND (ends_at IS NULL OR ends_at>?)',
             (principal.employee_uuid, contract_id, at, at))}
         from . import tasks
@@ -121,7 +126,7 @@ def contracts(conn, principal, requested, *, capability=None):
             "SELECT contract_uuid FROM crm_contracts WHERE contract_uuid IN ("
             + ",".join("?" for _ in requested) + ")", requested)}
     else:
-        allowed = scoped_contracts(conn, principal)
+        allowed = readable_contracts(conn, principal) if capability is None else scoped_contracts(conn, principal)
     if not set(requested) <= allowed:
         raise CRMError(
             "Договор недоступен или назначение изменилось.", "scope_changed", 403
@@ -138,7 +143,7 @@ def contracts(conn, principal, requested, *, capability=None):
             at = now()
             for identifier in requested:
                 permission = conn.execute(
-                    "SELECT 1 FROM crm_assignments WHERE employee_uuid=? "
+                    "SELECT 1 FROM crm_effective_assignments WHERE employee_uuid=? "
                     "AND contract_uuid=? AND capability=? AND starts_at<=? AND (ends_at IS NULL OR ends_at>?)",
                     (principal.employee_uuid, identifier, capability, at, at),
                 ).fetchone()
@@ -228,6 +233,7 @@ def from_uid(conn, uid, *, owner=False, manager_names=None, manager_write=False,
             "analytics",
             "exchange",
             "accounting",
+            "assign",
         }
         if not manager_write:
             caps = {"analytics"}

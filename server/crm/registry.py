@@ -123,7 +123,8 @@ def read(principal, *, search='', view='mine', sort='contract_id', direction='as
         output = [];columns=definitions();extra_keys=set()
         for raw in rows:
             row = dict(raw)
-            values=json.loads(row['fields_json'])
+            from .assignments import effective_fields
+            values=effective_fields(conn,row['contract_uuid'],json.loads(row['fields_json']))
             for extra in source_details(conn,row)['extras']:
                 key=extra['key'];value=extra['value']
                 values[key]=str(value)+' '+extra['currency'] if value is not None and extra.get('currency') else value
@@ -173,14 +174,14 @@ def edit(principal, body):
     with storage.connect() as conn:
         store.begin(conn, [storage.operation_lock(principal, operation), *('contract:' + cid for cid in ids)])
         principal=access.refresh_write(conn,principal)
+        previous = store.replay(conn, principal, operation, body)
+        if previous is not None:
+            return previous
         rows = {r['contract_uuid']: r for r in access.contracts(conn, principal, sorted(ids))}
         for patch in normalized:
             permitted = set(writable(conn, principal, rows[patch['contract_uuid']]))
             if not set(patch['values']) <= permitted:
                 raise CRMError('Изменилось назначение или право поля.', 'scope_changed', 403)
-        previous = store.replay(conn, principal, operation, body)
-        if previous is not None:
-            return previous
         conflicts = []
         for patch in normalized:
             actual = json.loads(rows[patch['contract_uuid']]['revisions_json'])

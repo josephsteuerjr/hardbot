@@ -1,7 +1,7 @@
 """Initial PostgreSQL CRM schema. Run with the separate migration role."""
 from . import storage
 
-VERSION = 4
+VERSION = 5
 
 UPGRADE_2 = """
 CREATE TABLE IF NOT EXISTS crm_monthly_totals(
@@ -165,6 +165,7 @@ CREATE TRIGGER crm_events_no_truncate BEFORE TRUNCATE ON crm_events
 def initialize(conn):
     from .legacy_exchange import DDL as exchange_ddl
     from .active_time import DDL as active_ddl
+    from .assignment_schema import ddl as assignment_ddl
     storage.begin(conn)
     conn.execute("CREATE TABLE IF NOT EXISTS crm_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
     current = conn.execute("SELECT value FROM crm_meta WHERE key='schema_version'").fetchone()
@@ -175,6 +176,8 @@ def initialize(conn):
             conn.execute(exchange_ddl)
         if int(current[0]) in (1,2,3):
             conn.execute(active_ddl)
+        if int(current[0]) in (1,2,3,4):
+            conn.execute(assignment_ddl(True))
             conn.execute("UPDATE crm_meta SET value=? WHERE key='schema_version'",(str(VERSION),))
             return
         if int(current[0]) != VERSION:
@@ -184,5 +187,6 @@ def initialize(conn):
     conn.execute(UPGRADE_2)
     conn.execute(exchange_ddl)
     conn.execute(active_ddl)
+    conn.execute(assignment_ddl(True))
     conn.execute("INSERT INTO crm_meta VALUES('schema_version',?)", (str(VERSION),))
     conn.execute("INSERT INTO crm_meta VALUES('storage_engine','postgresql')")

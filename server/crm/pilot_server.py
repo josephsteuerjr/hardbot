@@ -55,7 +55,7 @@ def principals():
             DEMO_MANAGER,
             "demo-team",
             "manager",
-            frozenset(CAPS | {'delivery',"analytics", "exchange", "shift_correct", "accounting"}),
+            frozenset(CAPS | {'delivery',"analytics", "exchange", "shift_correct", "accounting",'assign'}),
             frozenset([DEMO_EMPLOYEE, DEMO_MANAGER, DEMO_OTHER,DEMO_COURIER,DEMO_ANALYST]),
         ),
         "observer": access.Principal(
@@ -73,6 +73,7 @@ def principals():
 
 
 def ensure_demo_roles(conn):
+    ensure_distribution_demo(conn)
     at=now();start=(datetime.fromisoformat(at)-timedelta(days=28)).isoformat()
     for eid,uid,name,role in [(DEMO_COURIER,91004,'Тестовый курьер','courier'),(DEMO_ANALYST,91005,'Тестовый аналитик','analyst')]:
         if not conn.execute('SELECT 1 FROM crm_employees WHERE employee_uuid=?',(eid,)).fetchone():
@@ -83,6 +84,24 @@ def ensure_demo_roles(conn):
     contract=conn.execute('SELECT contract_uuid FROM crm_contracts WHERE person_uuid=? ORDER BY contract_uuid LIMIT 1',(identifier('person','demo-1'),)).fetchone()
     if contract and not conn.execute("SELECT 1 FROM crm_assignments WHERE employee_uuid=? AND capability='delivery'",(DEMO_COURIER,)).fetchone():
         conn.execute('INSERT INTO crm_assignments VALUES(?,?,?,?,?,NULL,?)',(str(uuid.uuid4()),DEMO_COURIER,contract[0],'delivery',start,'synthetic'))
+
+
+def ensure_distribution_demo(conn):
+    if not conn.execute("SELECT 1 FROM crm_meta WHERE key='synthetic_candidate'").fetchone():
+        return
+    from .roles import ROLE_CAPABILITIES
+    conn.execute("INSERT INTO crm_meta VALUES('distribution_mode','isolated') ON CONFLICT(key) DO NOTHING")
+    conn.execute('UPDATE crm_memberships SET capabilities_json=? WHERE employee_uuid=? AND ends_at IS NULL',
+                 (canonical(sorted(ROLE_CAPABILITIES['manager'])),DEMO_MANAGER))
+    for kind in ('call','visit'):
+        conn.execute('INSERT INTO crm_distribution_managers VALUES(?,?,?) ON CONFLICT DO NOTHING',(DEMO_MANAGER,'demo-team',kind))
+        conn.execute('INSERT INTO crm_managed_contracts SELECT ?,contract_uuid,? FROM crm_contracts WHERE 1=1 ON CONFLICT DO NOTHING',('demo-team',kind))
+    target=identifier('staff','demo-unregistered')
+    conn.execute('INSERT INTO crm_employees VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING',
+                 (target,'DEMO-NO-ACCOUNT','Сотрудник без аккаунта','synthetic',1))
+    conn.execute('INSERT INTO crm_memberships VALUES(?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING',
+        (identifier('membership','demo-unregistered'),target,'demo-team','employee',canonical(sorted(ROLE_CAPABILITIES['employee'])),
+         'Europe/Samara','2026-01-01T00:00:00+00:00',None))
     if contract:
         conn.execute('INSERT INTO crm_monthly_totals VALUES(?,?,?,?,?,?,?) ON CONFLICT(contract_uuid,month) DO NOTHING',(contract[0],at[:7],'1250.25','RUB','Синтетическая месячная сумма',at,'0'*64))
 

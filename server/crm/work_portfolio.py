@@ -29,7 +29,7 @@ def read(principal, search='', work='all', employee=None, offset=0, limit=100):
         capabilities=set(json.loads(member['capabilities_json'])) & set(ROLE_CAPABILITIES.get(member['role'],()))
         if employee==principal.employee_uuid and not principal.owner:capabilities &= principal.capabilities
         kinds=defaultdict(set)
-        for row in conn.execute('SELECT contract_uuid,capability FROM crm_assignments WHERE employee_uuid=? '
+        for row in conn.execute('SELECT contract_uuid,capability FROM crm_effective_assignments WHERE employee_uuid=? '
             'AND starts_at<=? AND (ends_at IS NULL OR ends_at>?)',(employee,at,at)):
             if row['capability'] in WORK & capabilities:kinds[row['contract_uuid']].add(row['capability'])
         target=replace(principal,employee_uuid=employee,employee_scope=frozenset({employee}),all_contracts=False)

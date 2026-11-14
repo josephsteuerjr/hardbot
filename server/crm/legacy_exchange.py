@@ -87,6 +87,7 @@ def _guard(conn, touched):
         'SELECT * FROM crm_employees ORDER BY employee_uuid',
         'SELECT * FROM crm_actor_links ORDER BY actor_uid',
         'SELECT * FROM crm_assignments WHERE ends_at IS NULL ORDER BY assignment_id',
+        'SELECT * FROM crm_assignment_heads ORDER BY contract_uuid,capability',
     ]
     for query in queries:
         for row in conn.execute(query):proof.update(canonical(dict(row)).encode());proof.update(b'\n')
@@ -113,6 +114,7 @@ def _read(conn, snapshot, sha):
     employees=[dict(r) for r in conn.execute('SELECT * FROM crm_employees ORDER BY employee_uuid')]
     actors={r['actor_uid']:r['employee_uuid'] for r in conn.execute('SELECT * FROM crm_actor_links')}
     assignments=[dict(r) for r in conn.execute('SELECT * FROM crm_assignments WHERE ends_at IS NULL ORDER BY assignment_id')]
+    heads={(r['contract_uuid'],r['capability']):dict(r) for r in conn.execute('SELECT * FROM crm_assignment_heads')}
     staff={r['staff_id']:r['employee_uuid'] for r in employees if r['staff_id']}
     names=defaultdict(set)
     for r in employees:names[_name(r['name'])].add(r['employee_uuid'])
@@ -158,6 +160,13 @@ def _read(conn, snapshot, sha):
                 issues.append(_issue('legacy_assignee_unmapped',key+':'+field,dict(contract_uuid=key,name=name)))
                 # Keep the current grant and accepted source value until the
                 # person is explicitly mapped. A later cycle can then retry.
+                patch.pop(field,None);observed[field]=old.get(field)
+                continue
+            head=heads.get((key,capability))
+            if head and employee not in (head['employee_uuid'],) and head['employee_uuid']!=head['baseline_employee_uuid']:
+                issues.append(_issue('legacy_assignment_conflict',key+':'+capability,
+                    dict(contract_uuid=key,capability=capability,baseline=head['baseline_employee_uuid'],
+                         current=head['employee_uuid'],incoming=employee,revision=head['revision'])))
                 patch.pop(field,None);observed[field]=old.get(field)
                 continue
             responsibility.append(dict(contract_uuid=key,capability=capability,employee_uuid=employee))
@@ -256,6 +265,29 @@ def apply(snapshot, review):
                 (row['contract_uuid'],canonical(row['raw']),sha,snapshot['captured_at']))
         for row in plan['assignments']:
             cid=row['contract_uuid'];cap=row['capability']
+            head=conn.execute('SELECT * FROM crm_assignment_heads WHERE contract_uuid=? AND capability=?',(cid,cap)).fetchone()
+            if head:
+                incoming=row['employee_uuid']
+                if incoming==head['employee_uuid']:
+                    conn.execute('UPDATE crm_assignment_heads SET baseline_employee_uuid=? WHERE contract_uuid=? AND capability=?',(incoming,cid,cap))
+                    continue
+                # _read's three-way comparison and commit guard established
+                # current==accepted baseline. Inbound change becomes canonical.
+                at=now();revision=head['revision']+1
+                conn.execute('UPDATE crm_assignments SET ends_at=? WHERE contract_uuid=? AND capability=? AND ends_at IS NULL',(at,cid,cap))
+                if incoming:
+                    conn.execute('INSERT INTO crm_assignments VALUES(?,?,?,?,?,?,?)',
+                        (identifier('assignment',sha+canonical(row)),incoming,cid,cap,at,None,'legacy-exchange:'+sha))
+                conn.execute('UPDATE crm_assignment_heads SET employee_uuid=?,revision=?,updated_at=?,operation_id=?,source=?,baseline_employee_uuid=? WHERE contract_uuid=? AND capability=?',
+                    (incoming,revision,at,sha,'legacy-exchange',incoming,cid,cap))
+                conn.execute('INSERT INTO crm_assignment_changes(actor_uid,operation_id,team_id,contract_uuid,capability,before_employee_uuid,after_employee_uuid,revision,at,source) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                    (0,sha,'legacy-source',cid,cap,head['employee_uuid'],incoming,revision,at,'legacy-exchange'))
+                # Old tasks are historical objects, not a surviving bypass.
+                for task in conn.execute("SELECT entity_id,data_json FROM crm_entities WHERE kind='task' AND contract_uuid=? AND status='open'",(cid,)):
+                    data=json.loads(task['data_json'])
+                    if data.get('assignee_uuid')==head['employee_uuid'] and data.get('work_kind')==cap and data.get('assignment_grant'):
+                        conn.execute('INSERT INTO crm_task_grant_revocations VALUES(?,?,?,?) ON CONFLICT(entity_id,capability) DO NOTHING',(task['entity_id'],cap,sha,at))
+                continue
             conn.execute("UPDATE crm_assignments SET ends_at=? WHERE contract_uuid=? AND capability=? AND ends_at IS NULL AND (source LIKE 'authority-source:%' OR source LIKE 'legacy-exchange:%')",
                 (snapshot['captured_at'],cid,cap))
             if row['employee_uuid']:

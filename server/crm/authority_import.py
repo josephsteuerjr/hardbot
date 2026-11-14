@@ -105,6 +105,8 @@ def apply(plan,review):
         if previous:
             if previous['plan_sha256']!=plan_hash:raise CRMError('Источник уже применён с другим планом.')
             return json.loads(previous['receipt_json'])
+        if conn.execute('SELECT 1 FROM crm_assignment_heads LIMIT 1').fetchone():
+            raise CRMError('После интерактивного распределения исходный baseline не заменяется. Используйте трёхсторонний обмен.','native_assignments_exist',409)
         before,counts=fingerprint(conn)
         if counts['crm_events'] or review.get('before_sha256')!=before or review.get('plan_sha256')!=plan_hash:
             raise CRMError('План или общая база изменились после просмотра.','review_stale',409)
