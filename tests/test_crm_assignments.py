@@ -65,6 +65,9 @@ def test_transfer_changes_only_call_and_preserves_debt_and_authorship(crm_world)
     assert stats['debt']=={'RUB':'246.90'} and stats['contracts']==2
     assert next(r for r in stats['staff'] if r['employee_uuid']==w['employee'])['facts']['call']==1
     assert next(r for r in stats['staff'] if r['employee_uuid']==w['target'])['facts']['call']==1
+    register=registry.read(m,view='all')
+    assert any(f['key']=='responsible_soft' for f in register['columns'])
+    assert all(r['fields']['responsible_soft']=='New employee' for r in register['rows'])
     detail=assignments.statistics(m,month=now()[:7],employee_uuid=w['employee'],kind='call')
     assert detail['total']==1 and len(detail['rows'][0]['contracts'])==2
     with pytest.raises(CRMError):assignments.statistics(w['member'],month=now()[:7],employee_uuid=w['employee'],kind='call')

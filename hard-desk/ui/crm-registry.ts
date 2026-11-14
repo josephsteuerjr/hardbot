@@ -199,6 +199,7 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
     allColumns=data.columns;
     if(options.manager){
       const main=['client','contract_id','partner','responsible_soft','responsible','debt_today','soft_call_status','soft_comm_date','call_status','visit_date'];
+      allColumns=allColumns.map(f=>f.key==='responsible'?{...f,title:'Ответственный за выезды'}:f);
       const groups=[...new Set<string>(allColumns.map(f=>f.section))];
       $('registry-fields').innerHTML='<option value="main">Основное</option><option value="all">Все поля</option>'+groups.map(g=>`<option value="${escape(g)}">${escape(g)}</option>`).join('');
       if(!['main','all',...groups].includes(prefs.columnGroup))prefs.columnGroup='main';

@@ -45,8 +45,10 @@ def manager_scope(conn, principal):
 
 def definitions():
     priority={'contract_id':0,'partner':1,'client':2}
-    ordered=sorted(enumerate(fields()),key=lambda item:priority.get(item[1]['key'],item[0]+3))
-    return [dict(f, section=BY_KEY[f['key']].block if f['key'] in BY_KEY else 'Передача конверта',
+    catalog=fields()+[dict(key='responsible_soft',title='Ответственный за звонки',section='Закрепления',group='accounting',
+        type='text',source='assignment',clear='explicit',nullable=True,readonly=True)]
+    ordered=sorted(enumerate(catalog),key=lambda item:priority.get(item[1]['key'],item[0]+3))
+    return [dict(f, section=BY_KEY[f['key']].block if f['key'] in BY_KEY else f.get('section','Передача конверта'),
                  write_capability=WRITE.get(f['key']),
                  options=DROPDOWNS.get(f['key'], []),
                  readonly=f['key'] not in WRITE,sortable=True)
@@ -168,6 +170,9 @@ def read(principal, *, search='', view='mine', sort='contract_id', direction='as
             row = dict(raw)
             from .assignments import effective_fields
             values=effective_fields(conn,row['contract_uuid'],json.loads(row['fields_json']))
+            if 'responsible_soft' not in values:
+                names=[r[0] for r in conn.execute("SELECT DISTINCT e.name FROM crm_effective_assignments a JOIN crm_employees e USING(employee_uuid) WHERE a.contract_uuid=? AND a.capability='call' AND a.starts_at<=? AND (a.ends_at IS NULL OR a.ends_at>?)",(row['contract_uuid'],now(),now()))]
+                values['responsible_soft']=names[0] if len(names)==1 else 'Не назначен' if not names else 'Требует сверки'
             for extra in source_details(conn,row)['extras']:
                 key=extra['key'];value=extra['value']
                 values[key]=str(value)+' '+extra['currency'] if value is not None and extra.get('currency') else value
