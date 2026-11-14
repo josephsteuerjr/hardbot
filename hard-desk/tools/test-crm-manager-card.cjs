@@ -1,0 +1,55 @@
+// Actual main/preload/DPAPI/backend; only a new explicitly isolated QA profile.
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const {app,BrowserWindow,dialog}=require('electron');
+const qa=process.env.HARD_CRM_QA_ROOT;assert(qa,'Explicit QA root required');
+const desk=path.resolve(__dirname,'..');fs.mkdirSync(qa,{recursive:true});
+process.env.HARD_USER_DATA=path.join(qa,'profile');process.env.HARD_CRM_SOURCE=path.dirname(desk);
+app.getVersion=()=>JSON.parse(fs.readFileSync(path.join(desk,'package.json'),'utf8')).version;
+dialog.showErrorBox=(title,message)=>{fs.writeFileSync(path.join(qa,'startup-error.txt'),title+'\n'+message);app.exit(1);};
+require(path.join(desk,'out/main.js'));
+const pause=ms=>new Promise(r=>setTimeout(r,ms));
+async function until(fn,label){fs.appendFileSync(path.join(qa,'stages.txt'),label+'\n');for(let i=0;i<250;i++){if(await fn())return;await pause(100);}throw Error('Timeout: '+label);}
+(async()=>{let win;try{
+  await app.whenReady();await until(()=>{win=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL()==='hard://app/index.html');return win;},'window');
+  const js=s=>Promise.race([win.webContents.executeJavaScript(s,true),pause(8000).then(()=>{throw Error('Renderer timeout: '+s.slice(0,100));})]),exists=s=>js(`!!document.querySelector(${JSON.stringify(s)})`);
+  const click=s=>js(`document.querySelector(${JSON.stringify(s)}).click()`);
+  const fill=(s,value)=>js(`(()=>{const e=document.querySelector(${JSON.stringify(s)});e.value=${JSON.stringify(value)};e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+  const shot=async name=>fs.writeFileSync(path.join(qa,name+'.png'),(await win.webContents.capturePage()).toPNG());
+  const api=async(action,query={})=>{const r=await js(`window.crm.api('GET',${JSON.stringify(action)},undefined,${JSON.stringify(query)})`);assert(r.ok,r.text);return r.data;};
+  await until(()=>exists('#demo-role'),'connect');await fill('#demo-role','manager');await click('#demo-connect');
+  await until(()=>exists('[data-person]'),'client portfolio');
+  assert.deepEqual(await js('[...document.querySelectorAll("nav [data-section]")].map(e=>e.innerText)'),['Портфель','Реестр','Показатели','Команда','Скрипты и задачи','Подключение']);
+  assert.equal(await exists('[data-managed-person]'),false);await shot('01-portfolio');
+  const person=await js('document.querySelector("[data-person]").dataset.person');
+  await click('[data-person]');await until(()=>exists('#card-edit'),'manager card editor action');
+  const before=await api('card',{person_uuid:person});
+  await click('#card-edit');await until(()=>exists('[data-card-field=debt_today]'),'business editor');
+  await fill('[data-card-field=debt_today]','15432,10');await fill('[data-card-field=phone]','12345');
+  await click('#card-edit-close');await click('#card-edit');await until(()=>js('document.querySelector("#dialog").open&&document.querySelector("[data-card-field=debt_today]")?.value==="15432,10"'),'protected input restored');
+  await js('document.querySelector("[data-card-field=debt_today]").closest("details").open=true');await shot('02-card-editor');
+  await click('#card-edit-save');await until(()=>js('!document.querySelector("#dialog").open'),'queued');
+  await until(async()=>{const c=await api('card',{person_uuid:person});return c.contracts[0].fields.debt_today==='15432.10';},'server correction');
+  await until(()=>js('document.querySelector("#card-saves").textContent.includes("Принято сервером")'),'visible ACK');
+  const after=await api('card',{person_uuid:person});
+  assert.equal(after.contracts[0].fields.phone,'12345');
+  assert.equal(after.history.filter(e=>['call','visit'].includes(e.kind)).length,before.history.filter(e=>['call','visit'].includes(e.kind)).length);
+  assert.equal(after.history[0].kind,'registry_edit');await shot('03-card-confirmed');
+  await click('#back');await until(()=>exists('[data-person]'),'portfolio return');
+  await click('[data-section=registry]');await until(()=>exists('.registry-grid'),'native registry');
+  const definitions=await api('registry',{view:'all'});
+  assert.equal(await js('document.querySelectorAll(".registry-grid thead th").length'),definitions.columns.length+1);
+  assert(definitions.columns.length>30);
+  const height=await js('document.querySelector(".registry-grid tbody tr").getBoundingClientRect().height');assert(height<=40,'compact rows: '+height);await shot('04-registry');
+  await click('#manager-register-assignment');await until(()=>exists('[data-managed-person]'),'distribution retained');
+  await click('[data-open-person]');await until(()=>exists('#back'),'registry card');assert.equal(await js('document.querySelector("#back").textContent'),'← Реестр');
+  await click('#back');await until(()=>exists('[data-managed-person]'),'registry context return');
+  await click('[data-section=script]');await until(()=>exists('[data-tool=tasks]'),'scripts tasks tabs');await click('[data-tool=tasks]');await until(()=>exists('#task-search'),'tasks');
+  assert.equal(await js('document.querySelector("nav .active").textContent'),'Скрипты и задачи');
+  // Employee remains in the existing five-section workspace without manager editor.
+  assert((await js('window.crm.connect({mode:"synthetic",role:"employee"})')).ok);win.webContents.reload();
+  await until(()=>js('document.querySelector("#identity").textContent==="Сотрудник"'),'employee identity');
+  await click('[data-section=portfolio]');await until(()=>exists('[data-person]'),'employee portfolio');await click('[data-person]');await until(()=>exists('.business-details'),'employee card');
+  assert.equal(await exists('#card-edit'),false);
+  assert.deepEqual(await js('[...document.querySelectorAll("nav [data-section]")].map(e=>e.innerText)'),['Портфель','Реестр','Мои показатели','Активное время','Подключение']);
+  fs.writeFileSync(path.join(qa,'RESULT.json'),JSON.stringify({passed:true,realMain:true,realPreload:true,realBackend:true,dpapiDraftRestored:true,serverAck:true,correctionNotWork:true,registryRowHeight:height,employeeNavigationPreserved:true},null,2));app.quit();
+}catch(e){fs.writeFileSync(path.join(qa,'FAIL.txt'),e.stack||String(e));if(win){await Promise.race([win.webContents.capturePage().then(im=>fs.writeFileSync(path.join(qa,'failure.png'),im.toPNG())).catch(()=>{}),pause(2000)]);fs.writeFileSync(path.join(qa,'failure.txt'),await Promise.race([win.webContents.executeJavaScript('document.body.innerText').catch(()=>''),pause(2000).then(()=>'Renderer unavailable')]));}app.quit();setTimeout(()=>app.exit(1),2000);}})();

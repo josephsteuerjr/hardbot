@@ -1,6 +1,7 @@
 import {mountDeliveryForm} from './crm-delivery';
 import {mountRegistry} from './crm-registry';
 import {mountManagedPortfolio} from './crm-manager-portfolio';
+import {editClientCard} from './crm-card-editor';
 type API = {
   ready?():Promise<any>;
   state(): Promise<any>;
@@ -68,6 +69,7 @@ let portfolioIdentity='',portfolioGeneration=0;
 const sectionScroll=new Map<string,number>();
 let taskStatus='open',taskEmployee='all',taskWork='all',taskSearch='',taskOffset=0,taskGeneration=0;
 let cardOrigin='portfolio',taskSelectClient=false,newTaskAssignee='';
+let managerRegistryMode='data';
 let activePerson='',lastCardAcknowledgements='',cardSyncGeneration=0,formOpening=false,cardRefreshPending=false;
 let cardRefreshError='';
 let syncTimer:ReturnType<typeof setTimeout> | undefined,cardRetryTimer:ReturnType<typeof setTimeout> | undefined,syncForced=false;
@@ -78,7 +80,8 @@ const notice = (text = "", tone: 'error' | 'status' = 'error') => {
 
 function cardEntries(entries:any[]) {
   const ids=new Set(card?.contracts?.map((row:any)=>row.contract_uuid) || []);
-  return entries.filter(entry=>Array.isArray(entry.body?.contract_ids) && entry.body.contract_ids.some((id:string)=>ids.has(id)));
+  return entries.filter(entry=>Array.isArray(entry.body?.contract_ids) && entry.body.contract_ids.some((id:string)=>ids.has(id))
+    || entry.action==='registry-edit'&&entry.body?.rows?.some((row:any)=>ids.has(row.contract_uuid)));
 }
 async function queueEntries() {
   const result=await crm.queue();
@@ -94,10 +97,10 @@ function paintCardSaves(entries:any[]) {
   const markup=(entry:any)=>{
     const review=entry.state==='attention' || entry.result?.projection_status==='needs_review';
     const status=entry.state==='pending'?'Сохранено на компьютере · ожидает отправки':entry.state==='attention'?'Требует сверки':entry.result?.projection_status==='needs_review'?'История принята · текущие поля требуют сверки':'Принято сервером';
-    const payload=entry.body.payload || {};
+    const payload=entry.action==='registry-edit'?{text:entry.body.rows.map((row:any)=>Object.entries(row.values).map(([key,value])=>(context.fields?.find((f:any)=>f.key===key)?.title||key)+': '+(value??'Очищено')).join('\n')).join('\n')}:entry.body.payload || {};
     const saved=payload.text || payload.title || payload.delivery_comment || Object.entries(payload.values || {}).map(([key,value])=>
       (context.fields?.find((field:any)=>field.key===key)?.title || key)+': '+(value ?? 'Очищено')).join('\n');
-    return `<div class="card-save ${review?'needs-review':''}" data-operation="${esc(entry.body.operation_id)}" data-save-state="${entry.state}"><span>${esc(labels[entry.body.kind] || entry.body.kind)}</span><strong>${status}</strong>${entry.error?`<p>${esc(entry.error)}</p>`:''}${saved?`<details><summary>Сохранённый результат</summary><p>${esc(saved)}</p></details>`:''}${entry.result?.projection_status==='needs_review'?'<button class="link" data-save-history>Открыть историю</button>':''}</div>`;
+    return `<div class="card-save ${review?'needs-review':''}" data-operation="${esc(entry.body.operation_id)}" data-save-state="${entry.state}"><span>${esc(entry.action==='registry-edit'?'Правка карточки':labels[entry.body.kind] || entry.body.kind)}</span><strong>${status}</strong>${entry.error?`<p>${esc(entry.error)}</p>`:''}${saved?`<details><summary>Сохранённый результат</summary><p>${esc(saved)}</p></details>`:''}${entry.result?.projection_status==='needs_review'?'<button class="link" data-save-history>Открыть историю</button>':''}</div>`;
   };
   const needsReview=rows.slice(1).filter(e=>e.state==='attention' || e.result?.projection_status==='needs_review').length;
   host.innerHTML=rows.length?`<h2>Отправка результатов</h2>${markup(rows[0])}${rows.length>1?`<details data-other-saves${othersOpen?' open':''}><summary>Предыдущие отправки: ${rows.length-1}${needsReview?' · требуют сверки: '+needsReview:''}</summary>${rows.slice(1).map(markup).join('')}</details>`:''}<button class="link" id="card-open-queue">Все отправки</button>`:'';
@@ -241,7 +244,7 @@ async function boot() {
     sectionScroll.clear();
     taskSelectClient=false;newTaskAssignee='';cardOrigin='portfolio';
     portfolioIdentity=context?.employee_uuid || '';
-    portfolioView=['manager','analyst','observer'].includes(context?.role)?'all':'mine';
+    portfolioView=['manager','owner','analyst','observer'].includes(context?.role)?'all':'mine';
     portfolioEmployee=context?.employee_uuid || '';portfolioWork='all';portfolioSearch='';portfolioOffset=0;
     taskStatus='open';taskEmployee=['manager','analyst','observer','owner'].includes(context?.role)?'all':context?.employee_uuid;
     taskWork='all';taskSearch='';taskOffset=0;
@@ -270,8 +273,8 @@ async function boot() {
     ['portfolio','Портфель'],['registry','Реестр'],['cabinet','Мои показатели'],
     ['active-time','Активное время'],['connection','Подключение'],
   ] : manager ? [
-    ['overview','Обзор'],['portfolio','Портфель'],['manager-statistics','Показатели'],['team','Команда'],
-    ['script','Скрипт'],['connection','Подключение'],
+    ['portfolio','Портфель'],['registry','Реестр'],['manager-statistics','Показатели'],['team','Команда'],
+    ['script','Скрипты и задачи'],['connection','Подключение'],
   ] : [
     ["portfolio", "Портфель"],
     ['tasks','Задачи'],
@@ -299,6 +302,7 @@ async function boot() {
   });
 }
 async function go(next: string) {
+  if(next==='overview')next='portfolio';
   disposeSection?.();disposeSection=undefined;
   const generation=++renderGeneration;
   if(!activePerson)sectionScroll.set(section,document.querySelector('main')!.scrollTop);
@@ -306,6 +310,13 @@ async function go(next: string) {
   activePerson='';cardSyncGeneration++;lastCardAcknowledgements='';cardRefreshPending=false;
   taskSelectClient=false;newTaskAssignee='';
   section = next;
+  document.getElementById('manager-tools-tabs')?.remove();
+  const manager=['manager','owner'].includes(context?.role);
+  if(manager&&['script','tasks'].includes(next)){
+    const tabs=document.createElement('div');tabs.id='manager-tools-tabs';tabs.className='tabs';
+    tabs.innerHTML=`<button data-tool="script" class="${next==='script'?'active':''}">Скрипты</button><button data-tool="tasks" class="${next==='tasks'?'active':''}">Задачи</button>`;
+    $('view').before(tabs);tabs.querySelectorAll<HTMLButtonElement>('button').forEach(b=>b.onclick=()=>void go(b.dataset.tool!));
+  }
   notice();
   $("title").textContent = (
     {
@@ -329,7 +340,7 @@ async function go(next: string) {
   document
     .querySelectorAll("[data-section]")
     .forEach((b) =>
-      b.classList.toggle("active", (b as HTMLElement).dataset.section === next),
+      b.classList.toggle("active", (b as HTMLElement).dataset.section === (manager&&next==='tasks'?'script':next)),
     );
   telemetry(
     "feature_opened",
@@ -354,10 +365,10 @@ async function go(next: string) {
     await (
       {
         portfolio,
-        overview:managerOverview,
         'manager-statistics':managerStatistics,
         team:managerTeam,
         registry:async()=>{
+          if(['manager','owner'].includes(context.role)){await managerRegistry();return;}
           const expectedOwner=state.owner;
           const stop=await mountRegistry($('view'),{...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:(action?:string,id?:string)=>crm.queue(action,id,expectedOwner)},()=>generation===renderGeneration);
           if(generation===renderGeneration)disposeSection=stop;else stop();
@@ -442,7 +453,7 @@ async function managerOverview(){
 function wireManagerEmployees(){
   $('view').querySelectorAll<HTMLButtonElement>('[data-manager-employee]').forEach(b=>b.onclick=async()=>{
     const saved=(await crm.draft('managed-portfolio-view')).data||{};
-    await crm.draft('managed-portfolio-view',{...saved,employee_uuid:b.dataset.managerEmployee,unassigned:'0',offset:0});await go('portfolio');
+    await crm.draft('managed-portfolio-view',{...saved,search:'',employee_uuid:b.dataset.managerEmployee,work:'all',unassigned:'0',offset:0});managerRegistryMode='distribution';await go('registry');
   });
 }
 async function managerStatistics(){
@@ -482,13 +493,22 @@ async function managerTeam(){
   bind('manager-access-load',loadAccess);
 }
 
+async function managerRegistry(){
+  const generation=renderGeneration,expectedOwner=state.owner;
+  const valid=()=>generation===renderGeneration&&section==='registry'&&!activePerson;
+  $('view').innerHTML=`<div class="tabs"><button id="manager-register-data" class="${managerRegistryMode==='data'?'active':''}">Данные</button><button id="manager-register-assignment" class="${managerRegistryMode==='distribution'?'active':''}">Распределение</button></div><div id="manager-register-body"></div>`;
+  bind('manager-register-data',()=>{managerRegistryMode='data';return go('registry');});
+  bind('manager-register-assignment',()=>{managerRegistryMode='distribution';return go('registry');});
+  const api={...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:(action?:string,id?:string)=>crm.queue(action,id,expectedOwner)};
+  let stop:()=>void;
+  if(managerRegistryMode==='distribution'){
+    if(!context.distribution?.enabled){$('manager-register-body').textContent=context.distribution?.reason||'Распределение недоступно.';return;}
+    stop=await mountManagedPortfolio($('manager-register-body'),api,id=>void openCard(id).catch(e=>notice(e.message)),valid);
+  }else stop=await mountRegistry($('manager-register-body'),api,valid,{manager:true});
+  if(valid())disposeSection=stop;else stop();
+}
+
 async function portfolio(search = portfolioSearch, offset=portfolioOffset) {
-  if(context.distribution?.enabled&&['manager','owner'].includes(context.role)){
-    const generation=renderGeneration,expectedOwner=state.owner;
-    const stop=await mountManagedPortfolio($('view'),{...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner)},
-      id=>void openCard(id).catch(error=>{if(error.name!=='AbortError')notice(error.message);}),()=>generation===renderGeneration&&section==='portfolio');
-    if(generation===renderGeneration)disposeSection=stop;else stop();return;
-  }
   const generation=++portfolioGeneration;
   portfolioSearch=search;portfolioOffset=offset;
   await crm.draft('portfolio-view',{view:portfolioView,work:portfolioWork,employee:portfolioEmployee});
@@ -534,8 +554,6 @@ async function portfolio(search = portfolioSearch, offset=portfolioOffset) {
       ),
     );
   }
-  if(['manager','owner'].includes(context.role)&&context.distribution?.reason)
-    $('view').insertAdjacentHTML('afterbegin',`<p role="status">${esc(context.distribution.reason)}</p>`);
   $('view').querySelectorAll<HTMLButtonElement>('[data-portfolio-view]').forEach(b=>b.onclick=()=>{portfolioView=b.dataset.portfolioView!;void portfolio(portfolioSearch,0).catch(e=>notice(e.message));});
   bind("search-go", () => portfolio($<HTMLInputElement>("search").value,0));
   bind("refresh", () => portfolio());
@@ -560,7 +578,7 @@ async function openCard(person: string) {
   activePerson=person;cardSyncGeneration++;lastCardAcknowledgements='';cardRefreshPending=false;
   card=null;cardScript=null;cardRefreshError='';
   const createTask=taskSelectClient;
-  cardOrigin=section==='tasks' || createTask?'tasks':'portfolio';
+  cardOrigin=section==='tasks' || createTask?'tasks':section==='registry'?'registry':'portfolio';
   taskSelectClient=false;
   $('view').innerHTML='<p role="status">Загрузка карточки…</p>';
   try {
@@ -614,7 +632,16 @@ async function renderCard() {
   ];
   $("view").innerHTML =
     `<div class="toolbar">${button("back", cardOrigin==='tasks'?'← Задачи':"← Портфель")}${button('card-refresh','Обновить карточку')}${actions.map((k) => `<button data-action="${k}"${k === "call" ? ' class="primary"' : ""}>${labels[k]}</button>`).join("")}</div><section id="card-saves" aria-label="Отправка результатов"></section><div class="tabs">${tabs.map(([id, title]) => `<button data-tab="${id}" class="${tab === id ? "active" : ""}">${title}</button>`).join("")}</div><div class="card-workspace${cardScript?.script ? ' with-script' : ''}"><div id="card-content"></div>${cardScript?.script ? `<aside class="card-script-watermark" aria-label="Скрипт разговора"><h2>${esc(cardScript.script.title)}</h2>${cardScript.script.steps.map((step: any) => `<section><h3>${esc(step.title)}</h3><p>${esc(step.text)}</p></section>`).join('')}<small>Версия ${esc(cardScript.published_revision)}</small></aside>` : ''}</div>`;
-  bind("back", () => go(cardOrigin==='tasks'?'tasks':'portfolio'));
+  $('back').textContent=cardOrigin==='tasks'?'← Задачи':cardOrigin==='registry'?'← Реестр':'← Портфель';
+  bind("back", () => go(cardOrigin));
+  if(['manager','owner'].includes(context.role)&&card.contracts.some((r:any)=>r.writable_fields?.length)){
+    $('card-refresh').insertAdjacentHTML('beforebegin',button('card-edit','Редактировать карточку',true));
+    bind('card-edit',async()=>{
+      const generation=renderGeneration,expectedOwner=state.owner;
+      await editClientCard($<HTMLDialogElement>('dialog'),card,{...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:()=>crm.queue(undefined,undefined,expectedOwner)},
+        ()=>{if(generation===renderGeneration){notice('Правки сохранены на компьютере и отправляются. Подтверждение — в карточке и очереди.');scheduleSync(true);}},()=>generation===renderGeneration&&state.owner===expectedOwner);
+    });
+  }
   bind('card-refresh',()=>syncCurrentView(true));
   document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach(
     (b) =>
@@ -1463,8 +1490,7 @@ crm.onChange?.(event=>{
     $('connection').textContent=environment+(event.connected?'Подтверждённая связь · '+date(event.as_of):'Связь не подтверждена · ввод сохранён на компьютере');
     if(event.dirty){
       if(activePerson)scheduleSync(true);
-      else if(section==='portfolio'&&!context.distribution?.enabled)void portfolio().catch(error=>notice(error.message));
-      else if(section==='overview')void managerOverview().catch(error=>notice(error.message));
+      else if(section==='portfolio')void portfolio().catch(error=>notice(error.message));
       else if(section==='manager-statistics')void managerStatistics().catch(error=>notice(error.message));
     }
   }else scheduleSync();

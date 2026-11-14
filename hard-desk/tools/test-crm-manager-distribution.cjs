@@ -21,8 +21,10 @@ async function until(fn,label){for(let i=0;i<400;i++){if(await fn())return;await
     const api=async(action,query={})=>{const r=await js(`window.crm.api('GET',${JSON.stringify(action)},undefined,${JSON.stringify(query)})`);assert(r.ok,r.text);return r.data;};
     const shot=async name=>fs.writeFileSync(path.join(qa,name+'.png'),(await win.webContents.capturePage()).toPNG());
     await until(()=>exists('#demo-role'),'connect');await fill('#demo-role','manager');await click('#demo-connect');
-    await until(()=>exists('[data-managed-person]'),'managed portfolio');
-    assert.deepEqual(await js('[...document.querySelectorAll("nav [data-section]")].map(e=>e.innerText)'),['Обзор','Портфель','Показатели','Команда','Скрипт','Подключение']);
+    await until(()=>exists('[data-person]'),'client portfolio');
+    assert.deepEqual(await js('[...document.querySelectorAll("nav [data-section]")].map(e=>e.innerText)'),['Портфель','Реестр','Показатели','Команда','Скрипты и задачи','Подключение']);
+    await click('[data-section=registry]');await until(()=>exists('#manager-register-assignment'),'registry');await click('#manager-register-assignment');
+    await until(()=>exists('[data-managed-person]'),'managed registry');
     const before=await api('managed-portfolio');assert.equal(before.people.length,3);
     const targets=(await api('assignment-staff')).staff,target=targets.find(p=>p.name==='Сотрудник без аккаунта');assert(target&&!target.has_account);
     await click('[data-person-allocate]');await until(()=>js('document.querySelector("#managed-editor").open'),'editor');
@@ -42,8 +44,7 @@ async function until(fn,label){for(let i=0;i<400;i++){if(await fn())return;await
     await until(()=>js('!document.querySelector("#allocation-apply").disabled'),'remove preview');await click('#allocation-apply');
     await until(()=>js('document.querySelector("#allocation-status").textContent.includes("Применено сервером")'),'remove');await click('#allocation-close');
     const stats=await api('manager-statistics');assert.equal(stats.unassigned_slots,8);assert.equal(stats.contracts,4);assert.deepEqual(stats.debt,{RUB:'70000.00'});
-    await click('[data-section=overview]');await until(()=>exists('#manager-free'),'overview');await shot('manager-overview');
-    await click('#manager-free');await until(()=>exists('[data-managed-person]'),'unassigned filter');
+    await click('#managed-unassigned');await until(()=>exists('[data-managed-person]'),'unassigned filter');
     await click('[data-section=manager-statistics]');await until(()=>exists('#manager-statistics-result h2'),'statistics');await shot('manager-statistics');
     await click('[data-section=team]');await until(()=>exists('#manager-access-load'),'team');await shot('manager-team');
     fs.writeFileSync(path.join(qa,'RESULT.json'),JSON.stringify({passed:true,actual_main:true,actual_preload:true,dpapi_intent:true,lost_ack_exact_receipt:true,work_independence:true,bulk_remove:true,unassigned_management:true,unique_debt:true,source_backend:true},null,2));app.quit();

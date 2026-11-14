@@ -24,6 +24,13 @@ async function until(fn){for(let i=0;i<300;i++){if(await fn())return;await pause
       await js(`(()=>{document.querySelector('#demo-role').value=${JSON.stringify(actor.startsWith('m')?'manager':'employee')};document.querySelector('#demo-connect').click();})()`);
     }
     await until(async()=>{const s=await js('window.crm.state()');return s.context?.actor_uid===({m1:401,m2:402,a:101,c:500})[actor];});
+    if(actor.startsWith('m')){
+      await until(()=>js('!!document.querySelector("[data-section=registry]")'));
+      await js('document.querySelector("[data-section=registry]").click()');
+      await until(()=>js('!!document.querySelector("#manager-register-assignment")'));
+      await js('document.querySelector("#manager-register-assignment").click()');
+      await until(()=>js('!!document.querySelector("[data-managed-person]")'));
+    }
     const server=http.createServer(async(req,res)=>{
       if(req.headers['x-control']!==key){res.writeHead(403);res.end();return;}
       let chunks=[];for await(const chunk of req)chunks.push(chunk);

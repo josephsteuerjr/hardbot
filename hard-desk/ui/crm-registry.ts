@@ -22,7 +22,7 @@ function typed(field:any, raw:string) {
 }
 
 /** Own protected drafts/preferences; no Excel formatting, formulas or card navigation. */
-export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boolean=()=>true) {
+export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boolean=()=>true, options:{manager?:boolean}={}) {
   let disposed=false, generation=0, data:any, active:Cell={row:0,col:0}, anchor:Cell={row:0,col:0};
   let editing:HTMLInputElement|HTMLTextAreaElement|HTMLSelectElement|null=null;
   let prefs=(await crm.draft('registry-view')).data || {};
@@ -32,7 +32,7 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   let preferenceSave:ReturnType<typeof setTimeout>|undefined;
   let resizeStop:(()=>void)|undefined;
   const snapshots=new Map<string,any>();
-  const validView=['mine','all'].includes(prefs.view)?prefs.view:'mine';
+  const validView=options.manager?'all':['mine','all'].includes(prefs.view)?prefs.view:'mine';
   prefs={view:validView,search:String(prefs.search || ''),sort:prefs.sort || 'contract_id',direction:prefs.direction==='desc'?'desc':'asc',offset:Math.max(0,Number(prefs.offset)||0),
     left:Math.max(0,Number(prefs.left)||0),top:Math.max(0,Number(prefs.top)||0),
     active:prefs.active,anchor:prefs.anchor,
@@ -44,6 +44,10 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
     <p id="registry-status" role="status"></p><div class="registry-scroll" tabindex="-1"></div><div class="toolbar"><button id="registry-prev">Назад</button><span id="registry-page"></span><button id="registry-next">Далее</button><button id="registry-reset-widths" class="link">Сбросить ширины</button></div>
     <dialog id="registry-preview"><h2>Правки реестра</h2><div class="registry-preview-values"></div><div class="actions"><button id="registry-apply" class="primary">Сохранить на компьютере и отправить</button><button id="registry-preview-cancel">Вернуться к вводу</button></div></dialog></div>`;
   const $=<T extends HTMLElement=HTMLElement>(id:string)=>host.querySelector<T>('#'+id)!;
+  if(options.manager){
+    host.classList.add('manager-register-data');
+    $('registry-scope').innerHTML='<option value="all">Общий реестр</option>';
+  }
   const scroll=host.querySelector<HTMLElement>('.registry-scroll')!;
   const protectedInput=document.createElement('div');$('registry-status').after(protectedInput);
   let revokedInput=(await crm.draft('registry-revoked-input')).data;

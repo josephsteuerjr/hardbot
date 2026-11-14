@@ -17,6 +17,31 @@ WRITE = {**dict.fromkeys(CONTACT_KEYS, 'contact'),
          **dict.fromkeys(VISIT_KEYS, 'visit'), **dict.fromkeys(CALL_KEYS, 'call')}
 SENSITIVE = re.compile(r'token|password|secret|credential|authorization|bearer|api.?key|access.?key|парол|секрет|токен', re.I)
 
+# Stable contract identity and assignments have their own command paths.
+# Courier evidence is a projection of immutable work events.
+MANAGER_FIELDS = {f['key'] for f in fields() if not f.get('readonly')} - {
+    'contract_id', 'responsible', 'responsible_soft'}
+
+
+def manager_scope(conn, principal):
+    if principal.owner:
+        return access.scoped_contracts(conn, principal, include_tasks=False)
+    if principal.role != 'manager' or 'accounting' not in principal.capabilities:
+        return set()
+    at = now()
+    current = conn.execute('SELECT role FROM crm_memberships WHERE employee_uuid=? AND team_id=? '
+                          'AND starts_at<=? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at DESC',
+                          (principal.employee_uuid, principal.team_id, at, at)).fetchone()
+    if not current or current['role'] != 'manager':
+        return set()
+    result = access.scoped_contracts(conn, principal, include_tasks=False)
+    if 'assign' in principal.capabilities:
+        result.update(r[0] for r in conn.execute(
+            'SELECT DISTINCT mc.contract_uuid FROM crm_managed_contracts mc '
+            'JOIN crm_distribution_managers dm ON dm.team_id=mc.team_id AND dm.capability=mc.capability '
+            'WHERE dm.employee_uuid=?', (principal.employee_uuid,)))
+    return result
+
 
 def definitions():
     priority={'contract_id':0,'partner':1,'client':2}
@@ -29,6 +54,18 @@ def definitions():
 
 
 def writable(conn, principal, row, **scopes):
+    managed = scopes.pop('manager_scope', None)
+    if managed is None:
+        managed = manager_scope(conn, principal)
+    if row['contract_uuid'] in managed:
+        keys = set(MANAGER_FIELDS)
+        # A person's name is shared by all their contracts. Partial visibility
+        # must never grant the ability to change somebody else's card.
+        person_contracts = {r[0] for r in conn.execute(
+            'SELECT contract_uuid FROM crm_contracts WHERE person_uuid=?', (row['person_uuid'],))}
+        if not person_contracts <= managed:
+            keys.discard('client')
+        return sorted(keys)
     actions = set(access.writable_actions(conn, principal, row['contract_uuid'], **scopes))
     # Contact capability alone must not turn common visibility into ownership.
     work = actions & {'call', 'visit'}
@@ -96,6 +133,7 @@ def read(principal, *, search='', view='mine', sort='contract_id', direction='as
         direct=access.scoped_contracts(conn,principal,include_tasks=False)
         delegated=tasks.grants(conn,principal)
         write_scope=direct | set(delegated)
+        managed=manager_scope(conn,principal)
         conditions, args = [], []
         allowed = access.scoped_contracts(conn, principal) if view == 'mine' else (
             None if access.reads_all(principal) else access.readable_contracts(conn, principal))
@@ -135,7 +173,7 @@ def read(principal, *, search='', view='mine', sort='contract_id', direction='as
             output.append(dict(contract_uuid=row['contract_uuid'], external_id=row['external_id'],
                 creditor_id=row['creditor_id'], currency=row['currency'], client_name=row['client_name'],
                 fields=values, revisions=json.loads(row['revisions_json']),
-                writable_fields=writable(conn, principal, row,scope=write_scope,direct_scope=direct,delegated=delegated)))
+                writable_fields=writable(conn, principal, row,scope=write_scope,direct_scope=direct,delegated=delegated,manager_scope=managed)))
         return dict(schema_version=1, columns=columns, rows=output, total=total, offset=offset,
                     has_more=offset+len(output)<total)
 
@@ -158,7 +196,7 @@ def edit(principal, body):
                 or len(set(clear)) != len(clear) or not set(clear) <= set(values)
                 or any(values[k] is not None for k in clear)):
             raise CRMError('Очистка должна явно передавать пустое значение.')
-        if set(values) - WRITE.keys():
+        if set(values) - (WRITE.keys() | MANAGER_FIELDS):
             raise CRMError('Поле доступно только для чтения.', 'forbidden', 403)
         groups = {group(key) for key in values}
         if (not isinstance(revisions, dict) or set(revisions) != groups
@@ -178,10 +216,28 @@ def edit(principal, body):
         if previous is not None:
             return previous
         rows = {r['contract_uuid']: r for r in access.contracts(conn, principal, sorted(ids))}
+        managed = manager_scope(conn, principal)
         for patch in normalized:
-            permitted = set(writable(conn, principal, rows[patch['contract_uuid']]))
+            permitted = set(writable(conn, principal, rows[patch['contract_uuid']], manager_scope=managed))
             if not set(patch['values']) <= permitted:
                 raise CRMError('Изменилось назначение или право поля.', 'scope_changed', 403)
+        names = {}
+        for patch in normalized:
+            if 'client' not in patch['values']:
+                continue
+            name = patch['values']['client']
+            if not name or not name.strip():
+                raise CRMError('Укажите имя клиента.')
+            person = rows[patch['contract_uuid']]['person_uuid']
+            if person in names and names[person] != name:
+                raise CRMError('Имя клиента должно совпадать во всех его договорах.')
+            names[person] = name
+        for person, name in names.items():
+            all_ids = {r[0] for r in conn.execute('SELECT contract_uuid FROM crm_contracts WHERE person_uuid=?', (person,))}
+            changed = {p['contract_uuid'] for p in normalized if p['values'].get('client') == name
+                       and rows[p['contract_uuid']]['person_uuid'] == person}
+            if all_ids != changed:
+                raise CRMError('Измените имя одновременно во всех договорах клиента.', 'scope_changed', 403)
         conflicts = []
         for patch in normalized:
             actual = json.loads(rows[patch['contract_uuid']]['revisions_json'])
@@ -208,6 +264,8 @@ def edit(principal, body):
             events.append(event)
             updated = conn.execute('SELECT fields_json,revisions_json FROM crm_contracts WHERE contract_uuid=?', (row['contract_uuid'],)).fetchone()
             confirmed.append(dict(contract_uuid=row['contract_uuid'], values=values, revisions=json.loads(updated['revisions_json'])))
+        for person, name in names.items():
+            conn.execute('UPDATE crm_people SET name=? WHERE person_uuid=?', (name, person))
         # No outbox work facts or delivery routes: this is a registry correction.
         store.audit(conn, principal, 'registry_edit', operation, dict(rows=len(normalized), cells=cells, event_ids=events))
         result = dict(ok=True, status='accepted', operation_id=operation, event_ids=events,

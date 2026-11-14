@@ -10,7 +10,7 @@ export async function mountManagedPortfolio(host:HTMLElement,crm:any,openPerson:
   prefs={search:String(prefs.search||''),employee_uuid:String(prefs.employee_uuid||''),work:['call','visit'].includes(prefs.work)?prefs.work:'all',
     unassigned:prefs.unassigned==='1'?'1':'0',offset:Math.max(0,Number(prefs.offset)||0),
     zoom:[80,90,100,110,125,150].includes(prefs.zoom)?prefs.zoom:100,widths:prefs.widths||{},
-    selected:Array.isArray(prefs.selected)?prefs.selected:[],expanded:Array.isArray(prefs.expanded)?prefs.expanded:[],left:prefs.left||0,top:prefs.top||0};
+    selected:Array.isArray(prefs.selected)?prefs.selected:[],selectionKind:prefs.selectionKind==='contracts'?'contracts':'people',expanded:Array.isArray(prefs.expanded)?prefs.expanded:[],left:prefs.left||0,top:prefs.top||0};
   let selected=new Set<string>(prefs.selected),expanded=new Set<string>(prefs.expanded),selectionKind=prefs.selectionKind==='contracts'?'contracts':'people',allFilter=false,lastSelected='';
   if(!isCurrent())return ()=>{};
   host.innerHTML=`<div class="registry managed-portfolio"><div class="toolbar"><input id="managed-search" type="search" placeholder="Клиент, договор, кредитор" value="${esc(prefs.search)}"><button id="managed-find">Найти</button><select id="managed-employee" aria-label="Ответственный"><option value="">Все сотрудники</option></select><select id="managed-work" aria-label="Вид работы"><option value="all">Обе работы</option><option value="call">Звонки</option><option value="visit">Выезды</option></select><label class="check"><input type="checkbox" id="managed-unassigned">Не назначены</label><button id="managed-refresh">Обновить</button><label>Масштаб <select id="managed-zoom">${[80,90,100,110,125,150].map(n=>`<option value="${n}">${n}%</option>`).join('')}</select></label></div>
@@ -186,7 +186,7 @@ export async function mountManagedPortfolio(host:HTMLElement,crm:any,openPerson:
   $('managed-find').onclick=protect(changeFilters);$('managed-refresh').onclick=protect(load);
   $<HTMLInputElement>('managed-search').onkeydown=e=>{if(e.key==='Enter')protect(changeFilters)();};
   ['managed-employee','managed-work','managed-unassigned'].forEach(id=>$<HTMLSelectElement>(id).onchange=protect(changeFilters));
-  $('managed-page').onclick=()=>{selectionKind='people';allFilter=false;data.people.forEach((p:any)=>selected.add(p.person_uuid));paint();remember();};
+  $('managed-page').onclick=()=>{if(selectionKind!=='people')selected.clear();selectionKind='people';allFilter=false;data.people.forEach((p:any)=>selected.add(p.person_uuid));paint();remember();};
   $('managed-all').onclick=()=>{allFilter=true;selected.clear();selectionStatus();status(`Выбран весь серверный отбор: ${data.total} клиентов. Большой выбор выполняется серверным заданием с атомарными пакетами.`);};
   $('managed-clear').onclick=()=>{allFilter=false;selected.clear();paint();remember();};
   $('managed-prev').onclick=protect(()=>{prefs.offset=Math.max(0,prefs.offset-50);remember();return load();});

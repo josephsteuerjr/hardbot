@@ -15,3 +15,11 @@
 .registry-grid thead th:nth-child(2){z-index:4;background:var(--surface)}
 .registry-preview-values{max-height:55vh;overflow:auto}.registry-preview-values dl{display:grid;grid-template-columns:1fr 2fr;gap:8px}.registry-preview-values dd{white-space:pre-wrap}
 .business-details{border-bottom:1px solid var(--line);padding:16px 0}.business-details summary{cursor:pointer;color:var(--accent)}.business-details dd{white-space:pre-wrap;overflow-wrap:anywhere}
+.manager-register-data .registry-grid td{height:calc(32px * var(--registry-scale));padding:calc(5px * var(--registry-scale)) calc(8px * var(--registry-scale));white-space:nowrap;vertical-align:middle}
+.manager-register-data .registry-grid td>span{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:calc(21px * var(--registry-scale))}
+.manager-register-data .registry-creditor{display:none}
+.manager-register-data .registry-scroll{max-height:calc(100vh - 390px)}
+.manager-register-data .registry-grid td textarea{white-space:pre-wrap;min-height:70px}
+.card-editor{width:min(1080px,94vw);max-height:88vh}.card-editor form{display:flex;flex-direction:column;max-height:80vh}.card-editor-fields{overflow:auto;min-height:0;padding:8px 4px}
+.card-editor-fields details{border-top:1px solid var(--line);padding:8px 0}.card-editor-fields summary{cursor:pointer;padding:6px 0}.card-editor-fields .grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.card-editor-fields label{display:flex;flex-direction:column;gap:4px;font-size:13px}.card-editor-fields input,.card-editor-fields textarea,.card-editor-fields select{font:inherit;width:100%;box-sizing:border-box}.card-editor-fields textarea{min-height:64px;resize:vertical}.card-editor-fields [data-changed=true]{border-color:var(--accent)}
