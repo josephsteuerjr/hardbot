@@ -5,6 +5,7 @@ Preview freezes identities and revisions; retries bind to the original actor/bod
 The legacy mixed deployment stays disabled until its independent fence is ready.
 """
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 import json
@@ -15,6 +16,7 @@ from .contract import CRMError, canonical, digest, instant, now, operation_id
 
 WORK = {'call', 'visit'}
 MAX_SLOTS = 200
+MAX_JOB_SLOTS = 200000
 
 
 def effective_fields(conn, contract_id, values):
@@ -38,7 +40,7 @@ def readiness(conn, principal):
                 reason='' if enabled and permitted else
                 'Распределение в рабочем смешанном контуре выключено: защита старых писателей ещё не подтверждена.' if not enabled else
                 'Нет полномочия распределения в управляемом портфеле.',
-                max_atomic_slots=MAX_SLOTS, all_selection=True, durable_jobs=False)
+                max_atomic_slots=MAX_SLOTS, max_job_slots=MAX_JOB_SLOTS,all_selection=True, durable_jobs=True)
 
 
 def authorize(conn, principal, *, write=False):
@@ -120,7 +122,7 @@ def targets(conn, principal):
     for r in conn.execute('SELECT a.employee_uuid,COUNT(DISTINCT a.contract_uuid) AS contracts,'
             'COUNT(DISTINCT c.person_uuid) AS people,COUNT(*) AS slots FROM crm_effective_assignments a '
             'JOIN crm_contracts c USING(contract_uuid) WHERE '+clause+
-            ' AND a.starts_at<=? AND (a.ends_at IS NULL OR a.ends_at>?) GROUP BY a.employee_uuid', (*args,at,at)):
+            " AND a.capability IN ('call','visit') AND a.starts_at<=? AND (a.ends_at IS NULL OR a.ends_at>?) GROUP BY a.employee_uuid", (*args,at,at)):
         if r['employee_uuid'] in result:
             result[r['employee_uuid']].update(contracts=r['contracts'],people=r['people'],slots=r['slots'])
     return list(result.values())
@@ -157,12 +159,29 @@ def watermark(conn):
                 facts=conn.execute('SELECT COALESCE(MAX(sequence),0) FROM crm_events').fetchone()[0])
 
 
+@contextmanager
+def snapshot():
+    """Establish a gap-free read snapshot under a *short* writer barrier.
+
+    PostgreSQL REPEATABLE READ keeps this snapshot after the barrier is released.
+    Large reports never hold up work/assignment commits for their entire read.
+    """
+    with storage.connect(readonly=True) as reader:
+        if storage.is_postgres(reader):
+            with storage.connect() as gate:
+                storage.begin(gate)
+                mark=watermark(reader)
+        else:
+            reader.execute('BEGIN')
+            mark=watermark(reader)
+        yield reader,mark
+
+
 def portfolio(principal, *, offset=0, limit=50, **filters):
     try:offset,limit=int(offset),int(limit)
     except (ValueError,TypeError):raise CRMError('Некорректная страница.')
     if offset<0 or offset>1000000 or not 1<=limit<=100:raise CRMError('Некорректная страница.')
-    with storage.connect() as conn:
-        storage.begin(conn)
+    with snapshot() as (conn,mark):
         authorize(conn, principal)
         clause,args=_filters(principal,**filters)
         base=' FROM crm_contracts c JOIN crm_people p USING(person_uuid) WHERE '+clause
@@ -187,7 +206,8 @@ def portfolio(principal, *, offset=0, limit=50, **filters):
                 for kind in sorted(WORK):
                     s=heads[r['contract_uuid'],kind]
                     slots.append(dict(s,name=names.get(s['employee_uuid']),manageable=(r['contract_uuid'],kind) in permitted))
-                value=f.get('debt_today',f.get('debt_total'))
+                value=f.get('debt_today')
+                if value is None or value=='':value=f.get('debt_total')
                 try:
                     number=Decimal(str(value))
                     if not r['currency'] or not number.is_finite():raise InvalidOperation()
@@ -200,7 +220,7 @@ def portfolio(principal, *, offset=0, limit=50, **filters):
                 managed_contracts=len(rows),filtered_contracts=p['filtered_contracts'],partially_managed=whole!=len(rows),
                 currencies={k:format(v,'f') for k,v in money.items()},unknown_amounts=unknown))
         return dict(schema_version=1,people=result,total=total,offset=offset,has_more=offset+len(result)<total,
-                    watermark=watermark(conn),as_of=now(),readiness=readiness(conn,principal))
+                    watermark=mark,as_of=now(),readiness=readiness(conn,principal))
 
 
 def _selection(conn, principal, selection):
@@ -249,10 +269,12 @@ def preview(principal, body):
         storage.begin(conn, ['assignment-preview:'+str(principal.actor_uid)])
         principal=authorize(conn,principal,write=True)
         rows=_selection(conn,principal,body['selection']);ids=[r['contract_uuid'] for r in rows]
-        if len(ids)*len(works)>MAX_SLOTS:
-            raise CRMError('Атомарный пакет: до 200 рабочих мест. Большое серверное задание ещё недоступно.',
-                           'selection_too_large',409,dict(contracts=len(ids),slots=len(ids)*len(works),max_slots=MAX_SLOTS))
-        permitted=allowed_slots(conn,principal,ids);current=states(conn,ids)
+        if len(ids)*len(works)>MAX_JOB_SLOTS:
+            raise CRMError('Выбор превышает 200 000 рабочих мест. Уточните отбор.',
+                           'selection_too_large',409,dict(contracts=len(ids),slots=len(ids)*len(works),max_slots=MAX_JOB_SLOTS))
+        permitted=set();current={}
+        for start in range(0,len(ids),200):
+            permitted.update(allowed_slots(conn,principal,ids[start:start+200]));current.update(states(conn,ids[start:start+200]))
         slots=[]
         for cid in ids:
             for work in sorted(works):
@@ -264,26 +286,35 @@ def preview(principal, body):
         token=str(uuid.uuid4());created=now();expires=(instant(created)+timedelta(minutes=10)).isoformat()
         conn.execute('INSERT INTO crm_assignment_previews VALUES(?,?,?,?,?)',
                      (token,principal.actor_uid,canonical(frozen),created,expires))
-        return dict(preview_id=token,expires_at=expires,**frozen,
+        return dict(preview_id=token,expires_at=expires,**dict(frozen,slots=slots[:MAX_SLOTS]),
+                    slots_count=len(slots),large=len(slots)>MAX_SLOTS,
                     no_op=sum(s['employee_uuid']==target for s in slots),watermark=watermark(conn))
 
 
 def _validate(conn, principal, frozen):
     slots=frozen['slots'];target=frozen['employee_uuid'];action=frozen['action']
-    ids=sorted({s['contract_uuid'] for s in slots});permitted=allowed_slots(conn,principal,ids);current=states(conn,ids)
+    ids=sorted({s['contract_uuid'] for s in slots});permitted=set();current={}
+    for start in range(0,len(ids),200):
+        batch=ids[start:start+200]
+        permitted.update(allowed_slots(conn,principal,batch));current.update(states(conn,batch))
     if any((s['contract_uuid'],s['capability']) not in permitted for s in slots):
         raise CRMError('Изменилась управляемая область.','scope_changed',403)
     if target:
-        candidates={r['employee_uuid']:r for r in targets(conn,principal)};employee=candidates.get(target)
+        at=now();members=conn.execute('SELECT e.active,e.staff_id,m.team_id,m.capabilities_json FROM crm_employees e '
+            'JOIN crm_memberships m USING(employee_uuid) WHERE e.employee_uuid=? AND m.starts_at<=? '
+            'AND (m.ends_at IS NULL OR m.ends_at>?)',(target,at,at)).fetchall()
         works={s['capability'] for s in slots}
-        if not employee or not employee['eligible'] or not works<=set(employee['work_kinds']):
+        if len(members)!=1 or not members[0]['active'] or not members[0]['staff_id'] or not works<=set(json.loads(members[0]['capabilities_json'])):
             raise CRMError('Сотрудник недоступен для выбранной работы.','target_unavailable',403)
         # Target's team must own every selected work place, not merely another
         # contract in the manager's multi-team scope.
-        for s in slots:
-            if not conn.execute('SELECT 1 FROM crm_managed_contracts WHERE team_id=? AND contract_uuid=? AND capability=?',
-                (employee['team_id'],s['contract_uuid'],s['capability'])).fetchone():
-                raise CRMError('Сотрудник не принадлежит управляемому портфелю.','target_unavailable',403)
+        team=members[0]['team_id'];target_slots=set()
+        for start in range(0,len(ids),200):
+            batch=ids[start:start+200]
+            target_slots.update((r[0],r[1]) for r in conn.execute('SELECT contract_uuid,capability FROM crm_managed_contracts '
+                'WHERE team_id=? AND contract_uuid IN ('+','.join('?' for _ in batch)+')',(team,*batch)))
+        if any((s['contract_uuid'],s['capability']) not in target_slots for s in slots):
+            raise CRMError('Сотрудник не принадлежит управляемому портфелю.','target_unavailable',403)
     changed=[]
     for s in slots:
         actual=current[s['contract_uuid'],s['capability']]
@@ -293,6 +324,37 @@ def _validate(conn, principal, frozen):
         if action=='assign' and actual['employee_uuid'] not in (None,target):
             raise CRMError('Место занято. Выберите «Заменить».','assignment_occupied',409,actual)
     if changed:raise CRMError('Закрепления изменились после просмотра.','assignment_conflict',409,changed)
+
+
+def _apply_slots(conn, principal, op, frozen, at):
+    changed=[];target=frozen['employee_uuid']
+    for s in frozen['slots']:
+        if s['employee_uuid']==target:continue
+        cid=s['contract_uuid'];work=s['capability'];revision=s['revision']+1
+        old=conn.execute('SELECT baseline_employee_uuid FROM crm_assignment_heads WHERE contract_uuid=? AND capability=?',(cid,work)).fetchone()
+        baseline=old[0] if old else s['employee_uuid']
+        conn.execute('UPDATE crm_assignments SET ends_at=? WHERE contract_uuid=? AND capability=? AND (ends_at IS NULL OR ends_at>?)',
+                     (at,cid,work,at))
+        if target:
+            conn.execute('INSERT INTO crm_assignments VALUES(?,?,?,?,?,?,?)',
+                         (str(uuid.uuid4()),target,cid,work,at,None,'native-distribution:'+op))
+        conn.execute('INSERT INTO crm_assignment_heads VALUES(?,?,?,?,?,?,?,?) '
+            'ON CONFLICT(contract_uuid,capability) DO UPDATE SET employee_uuid=excluded.employee_uuid,revision=excluded.revision,'
+            'updated_at=excluded.updated_at,operation_id=excluded.operation_id,source=excluded.source',
+            (cid,work,target,revision,at,op,'native-distribution',baseline))
+        if s['employee_uuid']:
+            for task in conn.execute("SELECT entity_id,data_json FROM crm_entities WHERE kind='task' AND contract_uuid=? AND status='open'",(cid,)):
+                data=json.loads(task['data_json'])
+                if data.get('assignee_uuid')==s['employee_uuid'] and data.get('work_kind')==work and data.get('assignment_grant'):
+                    conn.execute('INSERT INTO crm_task_grant_revocations VALUES(?,?,?,?) ON CONFLICT(entity_id,capability) DO NOTHING',
+                                 (task['entity_id'],work,op,at))
+        conn.execute('INSERT INTO crm_assignment_changes(actor_uid,operation_id,team_id,contract_uuid,capability,'
+            'before_employee_uuid,after_employee_uuid,revision,at,source) VALUES(?,?,?,?,?,?,?,?,?,?)',
+            (principal.actor_uid,op,principal.team_id,cid,work,s['employee_uuid'],target,revision,at,'native-distribution'))
+        changed.append(dict(contract_uuid=cid,capability=work,employee_uuid=target,revision=revision))
+    result=dict(status='applied',operation_id=op,actor_employee_uuid=principal.employee_uuid,team_id=principal.team_id,applied_at=at,changes=changed,no_op=len(frozen['slots'])-len(changed),
+                watermark=watermark(conn),projection_status='isolated',comment=frozen['comment'])
+    return result
 
 
 def commit(principal, body):
@@ -313,36 +375,93 @@ def commit(principal, body):
         if not row:raise CRMError('Предпросмотр недоступен.','preview_missing',404)
         if row['expires_at']<at:raise CRMError('Предпросмотр истёк. Обновите состав.','preview_expired',409)
         frozen=json.loads(row['body_json']);_validate(conn,principal,frozen)
-        changed=[];target=frozen['employee_uuid']
-        for s in frozen['slots']:
-            if s['employee_uuid']==target:continue
-            cid=s['contract_uuid'];work=s['capability'];revision=s['revision']+1
-            old=conn.execute('SELECT baseline_employee_uuid FROM crm_assignment_heads WHERE contract_uuid=? AND capability=?',(cid,work)).fetchone()
-            baseline=old[0] if old else s['employee_uuid']
-            conn.execute('UPDATE crm_assignments SET ends_at=? WHERE contract_uuid=? AND capability=? AND (ends_at IS NULL OR ends_at>?)',
-                         (at,cid,work,at))
-            if target:
-                conn.execute('INSERT INTO crm_assignments VALUES(?,?,?,?,?,?,?)',
-                             (str(uuid.uuid4()),target,cid,work,at,None,'native-distribution:'+op))
-            conn.execute('INSERT INTO crm_assignment_heads VALUES(?,?,?,?,?,?,?,?) '
-                'ON CONFLICT(contract_uuid,capability) DO UPDATE SET employee_uuid=excluded.employee_uuid,revision=excluded.revision,'
-                'updated_at=excluded.updated_at,operation_id=excluded.operation_id,source=excluded.source',
-                (cid,work,target,revision,at,op,'native-distribution',baseline))
-            if s['employee_uuid']:
-                for task in conn.execute("SELECT entity_id,data_json FROM crm_entities WHERE kind='task' AND contract_uuid=? AND status='open'",(cid,)):
-                    data=json.loads(task['data_json'])
-                    if data.get('assignee_uuid')==s['employee_uuid'] and data.get('work_kind')==work and data.get('assignment_grant'):
-                        conn.execute('INSERT INTO crm_task_grant_revocations VALUES(?,?,?,?) ON CONFLICT(entity_id,capability) DO NOTHING',
-                                     (task['entity_id'],work,op,at))
-            conn.execute('INSERT INTO crm_assignment_changes(actor_uid,operation_id,team_id,contract_uuid,capability,'
-                'before_employee_uuid,after_employee_uuid,revision,at,source) VALUES(?,?,?,?,?,?,?,?,?,?)',
-                (principal.actor_uid,op,principal.team_id,cid,work,s['employee_uuid'],target,revision,at,'native-distribution'))
-            changed.append(dict(contract_uuid=cid,capability=work,employee_uuid=target,revision=revision))
-        result=dict(status='applied',operation_id=op,applied_at=at,changes=changed,no_op=len(frozen['slots'])-len(changed),
-                    watermark=watermark(conn),projection_status='isolated',comment=frozen['comment'])
+        result = _start_job(conn,principal,op,frozen,at) if len(frozen['slots'])>MAX_SLOTS else _apply_slots(conn,principal,op,frozen,at)
         conn.execute('INSERT INTO crm_assignment_operations VALUES(?,?,?,?,?)',
                      (principal.actor_uid,op,digest(body),canonical(result),at))
         return result
+
+
+def _start_job(conn,principal,op,frozen,at):
+    job_id=op
+    conn.execute('INSERT INTO crm_assignment_jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+        (job_id,principal.actor_uid,op,'running',len(frozen['slots']),0,0,0,0,0,at,at))
+    for index,start in enumerate(range(0,len(frozen['slots']),MAX_SLOTS)):
+        slots=frozen['slots'][start:start+MAX_SLOTS]
+        pack=dict(frozen,slots=slots)
+        pack_op=str(uuid.uuid5(uuid.UUID(job_id),'pack:'+str(index)))
+        conn.execute('INSERT INTO crm_assignment_packs VALUES(?,?,?,?,?,?,?)',
+            (job_id,index,pack_op,canonical(pack),'pending',None,len(slots)))
+    return dict(status='job_started',operation_id=op,actor_employee_uuid=principal.employee_uuid,team_id=principal.team_id,job_id=job_id,total_slots=len(frozen['slots']),
+                changes=[],no_op=0,applied_at=at,projection_status='isolated',watermark=watermark(conn))
+
+
+def _job(conn,principal,job_id):
+    identifier=operation_id(job_id)
+    row=conn.execute('SELECT * FROM crm_assignment_jobs WHERE job_id=? AND actor_uid=?',(identifier,principal.actor_uid)).fetchone()
+    if not row:raise CRMError('Задание недоступно.','job_missing',404)
+    result=dict(row)
+    result['pending_slots']=result['total_slots']-sum(result[k] for k in ('applied_slots','no_op_slots','conflict_slots','cancelled_slots'))
+    return result
+
+
+def job(principal, *, job_id):
+    with storage.connect(readonly=True) as conn:
+        return _job(conn,principal,job_id)
+
+
+def job_step(principal, body):
+    if (not isinstance(body,dict) or set(body)!={'schema_version','job_id','pack_index'} or body['schema_version']!=1
+            or type(body['pack_index']) is not int or body['pack_index']<0):
+        raise CRMError('Неизвестный пакет задания.')
+    at=now()
+    with storage.connect() as conn:
+        storage.begin(conn)
+        principal=authorize(conn,principal,write=True)
+        state=_job(conn,principal,body['job_id'])
+        if body['pack_index']>state['next_pack']:raise CRMError('Нарушен порядок пакетов.','pack_out_of_order',409)
+        if state['state']!='running' or body['pack_index']<state['next_pack']:
+            return state
+        pack=conn.execute('SELECT * FROM crm_assignment_packs WHERE job_id=? AND pack_index=?',
+                          (state['job_id'],state['next_pack'])).fetchone()
+        if not pack:raise CRMError('Пакет задания не найден.','pack_missing',409)
+        frozen=json.loads(pack['body_json'])
+        try:_validate(conn,principal,frozen)
+        except CRMError as error:
+            if error.status==403:
+                # No partial execution after authority/target revocation.
+                raise
+            result=dict(status='conflict',error=error.code,text=str(error))
+            conn.execute('UPDATE crm_assignment_packs SET state=?,result_json=? WHERE job_id=? AND pack_index=?',
+                ('conflict',canonical(result),state['job_id'],state['next_pack']))
+            conn.execute('UPDATE crm_assignment_jobs SET conflict_slots=conflict_slots+?,next_pack=next_pack+1,updated_at=? WHERE job_id=?',
+                (pack['slot_count'],at,state['job_id']))
+        else:
+            result=_apply_slots(conn,principal,pack['operation_id'],frozen,at)
+            conn.execute('INSERT INTO crm_assignment_operations VALUES(?,?,?,?,?)',
+                (principal.actor_uid,pack['operation_id'],digest(dict(job_id=state['job_id'],pack_index=state['next_pack'])),canonical(result),at))
+            conn.execute('UPDATE crm_assignment_packs SET state=?,result_json=? WHERE job_id=? AND pack_index=?',
+                ('applied',canonical(result),state['job_id'],state['next_pack']))
+            conn.execute('UPDATE crm_assignment_jobs SET applied_slots=applied_slots+?,no_op_slots=no_op_slots+?,next_pack=next_pack+1,updated_at=? WHERE job_id=?',
+                (len(result['changes']),result['no_op'],at,state['job_id']))
+        state=_job(conn,principal,state['job_id'])
+        if state['pending_slots']==0:
+            conn.execute('UPDATE crm_assignment_jobs SET state=? WHERE job_id=?',
+                ('completed_with_conflicts' if state['conflict_slots'] else 'completed',state['job_id']))
+        return _job(conn,principal,state['job_id'])
+
+
+def job_cancel(principal,body):
+    if not isinstance(body,dict) or set(body)!={'schema_version','job_id'} or body['schema_version']!=1:
+        raise CRMError('Неизвестный формат остановки.')
+    with storage.connect() as conn:
+        storage.begin(conn)
+        principal=access.refresh_write(conn,principal)
+        state=_job(conn,principal,body['job_id'])
+        if state['state']=='running':
+            conn.execute("UPDATE crm_assignment_packs SET state='cancelled' WHERE job_id=? AND state='pending'",(state['job_id'],))
+            conn.execute("UPDATE crm_assignment_jobs SET state='cancelled',cancelled_slots=?,updated_at=? WHERE job_id=?",
+                (state['pending_slots'],now(),state['job_id']))
+        return _job(conn,principal,state['job_id'])
 
 
 def receipt(principal, *, operation_id):
@@ -354,23 +473,27 @@ def receipt(principal, *, operation_id):
         return json.loads(row[0])
 
 
-def changes(principal, *, assignments='0', facts='0'):
+def changes(principal, *, assignments='0', facts='0', scope=''):
     try:cursor=dict(assignments=int(assignments),facts=int(facts))
     except (TypeError,ValueError):raise CRMError('Некорректный курсор.')
     if min(cursor.values())<0:raise CRMError('Некорректный курсор.')
-    with storage.connect() as conn:
-        # All writers take the shared side; this short exclusive snapshot
-        # prevents a sequence allocated by an uncommitted writer being skipped.
-        # REPEATABLE READ snapshot is obtained *after* the advisory barrier.
-        # Live cursor therefore uses a separate read-write transaction.
-        storage.begin(conn)
-        return _changes(conn,principal,cursor)
+    with snapshot() as (conn,mark):
+        return _changes(conn,principal,cursor,scope)
 
 
-def _changes(conn, principal, cursor):
+def _changes(conn, principal, cursor, previous_scope=''):
     end=watermark(conn)
+    current_scope=digest([principal.employee_uuid,principal.role,principal.team_id,
+        sorted(principal.capabilities),sorted(principal.employee_scope),principal.all_contracts,principal.read_all_contracts,
+        [dict(r) for r in conn.execute('SELECT team_id,capability FROM crm_distribution_managers WHERE employee_uuid=? ORDER BY team_id,capability',
+                                      (principal.employee_uuid,))]])
+    new_cursor=dict(end,scope=current_scope)
+    if previous_scope and previous_scope!=current_scope:
+        return dict(cursor=new_cursor,resync=True,dirty=True,as_of=now())
     if any(cursor[k]>end[k] for k in end):
-        return dict(cursor=end,resync=True,dirty=True,as_of=now())
+        return dict(cursor=new_cursor,resync=True,dirty=True,as_of=now())
+    if cursor==end:
+        return dict(cursor=new_cursor,resync=False,dirty=False,as_of=now())
     read=access.readable_contracts(conn,principal)
     managed_clause,args=scope_sql(principal)
     managed={r[0] for r in conn.execute('SELECT c.contract_uuid FROM crm_contracts c WHERE '+managed_clause,args)}
@@ -385,7 +508,7 @@ def _changes(conn, principal, cursor):
             if r['contract_uuid'] in read or r['contract_uuid'] in managed or r['employee_uuid']==principal.employee_uuid:
                 dirty=True;break
     # No inaccessible contract IDs, assignees, names or fact payloads on channel.
-    return dict(cursor=end,resync=False,dirty=dirty,as_of=now())
+    return dict(cursor=new_cursor,resync=False,dirty=dirty,as_of=now())
 
 
 def staff(principal):
@@ -418,25 +541,28 @@ def statistics(principal, *, month=None):
         first=date.fromisoformat(month+'-01')
         following=date(first.year+(first.month==12),first.month%12+1,1)
     except (ValueError,TypeError):raise CRMError('Период: ГГГГ-ММ.')
-    with storage.connect() as conn:
-        storage.begin(conn)
+    with snapshot() as (conn,mark):
         authorize(conn,principal)
         clause,args=scope_sql(principal)
         rows=conn.execute('SELECT c.*,p.name AS client FROM crm_contracts c JOIN crm_people p USING(person_uuid) WHERE '+clause,args).fetchall()
         ids=[r['contract_uuid'] for r in rows]
-        # Chunked predicates also support SQLite's bounded parameter counts.
-        current={};permitted=set()
-        for start in range(0,len(ids),200):
-            current.update(states(conn,ids[start:start+200]));permitted.update(allowed_slots(conn,principal,ids[start:start+200]))
         unassigned=set();ambiguous=set();free_slots=0;people=set();debt=defaultdict(Decimal);unknown_debt=0
+        at=now()
+        for slot in conn.execute('SELECT mc.contract_uuid,mc.capability,h.contract_uuid AS head_id,h.employee_uuid,'
+                'COUNT(DISTINCT a.employee_uuid) AS candidates FROM crm_managed_contracts mc '
+                'JOIN crm_distribution_managers dm ON dm.team_id=mc.team_id AND dm.capability=mc.capability '
+                'LEFT JOIN crm_assignment_heads h ON h.contract_uuid=mc.contract_uuid AND h.capability=mc.capability '
+                'LEFT JOIN crm_assignments a ON a.contract_uuid=mc.contract_uuid AND a.capability=mc.capability '
+                'AND h.contract_uuid IS NULL AND a.starts_at<=? AND (a.ends_at IS NULL OR a.ends_at>?) '
+                'WHERE dm.employee_uuid=? GROUP BY mc.contract_uuid,mc.capability,h.contract_uuid,h.employee_uuid',
+                (at,at,principal.employee_uuid)):
+            if not slot['head_id'] and slot['candidates']>1:ambiguous.add(slot['contract_uuid'])
+            elif (slot['head_id'] and slot['employee_uuid'] is None) or (not slot['head_id'] and slot['candidates']==0):
+                unassigned.add(slot['contract_uuid']);free_slots+=1
         for r in rows:
             cid=r['contract_uuid'];people.add(r['person_uuid'])
-            for work in WORK:
-                if (cid,work) not in permitted:continue
-                s=current[cid,work]
-                if s['ambiguous']:ambiguous.add(cid)
-                elif s['employee_uuid'] is None:unassigned.add(cid);free_slots+=1
-            f=json.loads(r['fields_json']);value=f.get('debt_today',f.get('debt_total'))
+            f=json.loads(r['fields_json']);value=f.get('debt_today')
+            if value is None or value=='':value=f.get('debt_total')
             try:
                 number=Decimal(str(value))
                 if not r['currency'] or not number.is_finite():raise InvalidOperation()
@@ -473,7 +599,7 @@ def statistics(principal, *, month=None):
         for r in roster:
             f=facts[r['employee_uuid']]
             r['facts']=dict(call=f['call'],visit=f['visit'],processed_contracts=len(f['contracts']))
-        return dict(as_of=now(),watermark=watermark(conn),month=month,people=len(people),contracts=len(ids),
+        return dict(as_of=now(),watermark=mark,month=month,people=len(people),contracts=len(ids),
             unassigned_contracts=len(unassigned),unassigned_slots=free_slots,ambiguous_contracts=len(ambiguous),
             debt={k:format(v,'f') for k,v in debt.items()},unknown_debt=unknown_debt,staff=roster,
             payments=dict(totals={k:format(v,'f') for k,v in payments.items()},known_contracts=known,

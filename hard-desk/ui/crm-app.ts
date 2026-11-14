@@ -1,5 +1,6 @@
 import {mountDeliveryForm} from './crm-delivery';
 import {mountRegistry} from './crm-registry';
+import {mountManagedPortfolio} from './crm-manager-portfolio';
 type API = {
   ready?():Promise<any>;
   state(): Promise<any>;
@@ -9,7 +10,7 @@ type API = {
   diagnostics?(repair?:boolean):Promise<any>;
   diagnosticsReport?():Promise<any>;
   queue(action?: string, id?: string,expectedOwner?:string): Promise<any>;
-  onChange?(callback: (event: {type: 'queue' | 'identity'}) => void): () => void;
+  onChange?(callback: (event: {type: 'queue' | 'identity' | 'live';dirty?:boolean;as_of?:string;connected?:boolean}) => void): () => void;
   draft(key: string, value?: any, expectedOwner?:string): Promise<any>;
   telemetry(event: any): Promise<any>;
   connect(input: any): Promise<any>;
@@ -130,11 +131,32 @@ async function syncCurrentView(force=false) {
       .map(e=>[e.body.operation_id,e.result?.event_id,e.result?.projection_status]));
     const refresh=force || cardRefreshPending || acknowledgements!==lastCardAcknowledgements;
     if(!refresh)return;
-    if(formOpening || $<HTMLDialogElement>('dialog').open){cardRefreshPending=true;return;}
     const result=await crm.api('GET','card',undefined,{person_uuid:person});
     if(person!==activePerson || generation!==cardSyncGeneration)return;
-    if(!result.ok){retryCard(person);cardRefreshError=result.text || 'Не удалось обновить карточку.';throw new Error(cardRefreshError);}
-    if(formOpening || $<HTMLDialogElement>('dialog').open){cardRefreshPending=true;return;}
+    if(!result.ok){
+      if(result.status===403){
+        card.contracts.forEach((r:any)=>{r.allowed_actions=[];});
+        const form=$('action-form');
+        if(form){form.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled=true;$('form-error').textContent='Назначение изменилось. Ввод сохранён; отправка недоступна.';}
+        cardRefreshPending=true;notice('Изменился доступ к клиенту. Сохранённый ввод остаётся у исходной личности.');return;
+      }
+      retryCard(person);cardRefreshError=result.text || 'Не удалось обновить карточку.';throw new Error(cardRefreshError);
+    }
+    if(formOpening || $<HTMLDialogElement>('dialog').open){
+      cardRefreshPending=true;
+      const latest=new Map(result.data.contracts.map((r:any)=>[r.contract_uuid,r.allowed_actions]));
+      card.contracts.forEach((r:any)=>{r.allowed_actions=latest.get(r.contract_uuid)||[];});
+      const form=$('action-form');
+      if(form){
+        const kind=form.dataset.work;
+        const inputs=[...form.querySelectorAll<HTMLInputElement>('input[name="contracts"]:checked')];
+        if(kind&&inputs.some(input=>!contractCan(card.contracts.find((r:any)=>r.contract_uuid===input.value)||{allowed_actions:[]},kind))){
+          form.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled=true;
+          $('form-error').textContent='Назначение изменилось. Ввод сохранён у вас; отправка этой работы недоступна.';
+        }
+      }
+      return;
+    }
     const expanded=Array.from(document.querySelectorAll<HTMLElement>('[data-contract-details]'))
       .filter(el=>el.querySelector('details[open]')).map(el=>el.dataset.contractDetails);
     const openSaves=Array.from(document.querySelectorAll<HTMLElement>('[data-operation]'))
@@ -206,7 +228,7 @@ function bind(id: string, fn: () => any) {
     notice();
     Promise.resolve()
       .then(fn)
-      .catch((e) => notice(e.message));
+      .catch((e) => {if(e.name!=='AbortError')notice(e.message);});
   });
 }
 const table = (heads: string[], rows: string[]) =>
@@ -243,9 +265,13 @@ async function boot() {
     (state.connection.mode === "synthetic"
       ? "Синтетические данные"
       : state.connection.mode === 'unconfigured' ? 'Не подключено' : state.connection.server) + (state.offline ? " · офлайн" : "");
+  const manager=['manager','owner'].includes(context?.role);
   const sections = context?.role==='employee' ? [
     ['portfolio','Портфель'],['registry','Реестр'],['cabinet','Мои показатели'],
     ['active-time','Активное время'],['connection','Подключение'],
+  ] : manager ? [
+    ['overview','Обзор'],['portfolio','Портфель'],['manager-statistics','Показатели'],['team','Команда'],
+    ['script','Скрипт'],['connection','Подключение'],
   ] : [
     ["portfolio", "Портфель"],
     ['tasks','Задачи'],
@@ -284,6 +310,9 @@ async function go(next: string) {
   $("title").textContent = (
     {
       portfolio: "Портфель",
+      overview:'Обзор',
+      'manager-statistics':'Показатели команды',
+      team:'Команда',
       registry:'Реестр',
       'active-time':'Активное время',
       tasks:'Задачи',
@@ -325,6 +354,9 @@ async function go(next: string) {
     await (
       {
         portfolio,
+        overview:managerOverview,
+        'manager-statistics':managerStatistics,
+        team:managerTeam,
         registry:async()=>{
           const expectedOwner=state.owner;
           const stop=await mountRegistry($('view'),{...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:(action?:string,id?:string)=>crm.queue(action,id,expectedOwner)},()=>generation===renderGeneration);
@@ -395,7 +427,68 @@ async function activeTimePage() {
   bind('active-load',load);bind('active-shift',()=>go('shift'));bind('active-queue',()=>go('queue'));await load();
 }
 
+async function managerOverview(){
+  if(!context.distribution?.enabled){
+    $('view').innerHTML=`<p role="status">${esc(context.distribution?.reason||'Управляемый портфель не подключён.')}</p><div class="actions">${button('manager-existing-stats','Показатели сотрудника')}${button('manager-team','Команда')}</div>`;
+    bind('manager-existing-stats',()=>go('cabinet'));bind('manager-team',()=>go('team'));return;
+  }
+  const data=await request('GET','manager-statistics');
+  $('view').innerHTML=`<div class="summary"><button class="metric" id="manager-free">Не назначены<strong>${data.unassigned_contracts}</strong><small>${data.unassigned_slots} рабочих мест</small></button><button class="metric" id="manager-portfolio">Клиенты<strong>${data.people}</strong><small>${data.contracts} договоров</small></button><div class="metric">Требует сверки<strong>${data.ambiguous_contracts}</strong></div></div><h2>Нагрузка сотрудников</h2>`+
+    table(['Сотрудник','Клиенты','Договоры','Рабочие места','Звонки за месяц','Выезды за месяц'],data.staff.map((p:any)=>`<tr><td><button class="link" data-manager-employee="${esc(p.employee_uuid)}">${esc(p.name)}</button>${p.has_account?'':'<br><small>Без аккаунта</small>'}</td><td>${p.people}</td><td>${p.contracts}</td><td>${p.slots}</td><td>${p.facts.call}</td><td>${p.facts.visit}</td></tr>`))+
+    `<p class="muted">Срез на ${date(data.as_of)}. Итоги сотрудников могут пересекаться по видам работ; долг команды считается по уникальным договорам.</p>`;
+  bind('manager-free',async()=>{const saved=(await crm.draft('managed-portfolio-view')).data||{};await crm.draft('managed-portfolio-view',{...saved,unassigned:'1',offset:0});await go('portfolio');});
+  bind('manager-portfolio',()=>go('portfolio'));wireManagerEmployees();
+}
+function wireManagerEmployees(){
+  $('view').querySelectorAll<HTMLButtonElement>('[data-manager-employee]').forEach(b=>b.onclick=async()=>{
+    const saved=(await crm.draft('managed-portfolio-view')).data||{};
+    await crm.draft('managed-portfolio-view',{...saved,employee_uuid:b.dataset.managerEmployee,unassigned:'0',offset:0});await go('portfolio');
+  });
+}
+async function managerStatistics(){
+  if(!context.distribution?.enabled){await cabinet();return;}
+  const saved=(await crm.draft('manager-statistics-view')).data||{};
+  $('view').innerHTML=`<div class="toolbar"><label>Месяц <input type="month" id="manager-month" value="${esc(saved.month||new Date().toISOString().slice(0,7))}"></label>${button('manager-stats-load','Показать')}</div><div id="manager-statistics-result"></div>`;
+  const load=async()=>{
+    const month=$<HTMLInputElement>('manager-month').value;await crm.draft('manager-statistics-view',{month});
+    const data=await request('GET','manager-statistics',undefined,{month});
+    $('manager-statistics-result').innerHTML=`<p class="muted">Срез на ${date(data.as_of)} · ${data.people} клиентов · ${data.contracts} договоров</p><h2>Долг текущего портфеля</h2>${table(['Валюта','Сумма'],Object.entries(data.debt).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`))}<p>Без подтверждённой суммы или валюты: ${data.unknown_debt}</p><h2>Факты работы по исходным авторам</h2><p class="muted">${esc(data.facts_attribution)}</p>${table(['Сотрудник','Звонки','Выезды','Обработано КД','КД сейчас'],data.staff.map((p:any)=>`<tr><td><button class="link" data-manager-employee="${esc(p.employee_uuid)}">${esc(p.name)}</button></td><td>${p.facts.call}</td><td>${p.facts.visit}</td><td>${p.facts.processed_contracts}</td><td>${p.contracts}</td></tr>`))}<h2>Поступления по реестру</h2><p>${esc(data.payments.attribution)}</p>${table(['Валюта','Сумма'],Object.entries(data.payments.totals).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`))}<p>С месячной суммой: ${data.payments.known_contracts}; без подтверждённой суммы: ${data.payments.missing_contracts}. Источник на ${data.payments.source_as_of.map(date).join(', ')||'—'}.</p><div class="actions">${button('manager-source-rows','Договоры текущего портфеля')}${button('manager-personal-report','Показатели и операции сотрудника')}</div>`;
+    wireManagerEmployees();bind('manager-source-rows',()=>go('portfolio'));bind('manager-personal-report',()=>go('cabinet'));
+  };
+  bind('manager-stats-load',load);await load();
+}
+async function managerTeam(){
+  const people=context.distribution?.enabled?(await request('GET','assignment-staff')).staff:context.staff||[];
+  $('view').innerHTML=`<h2>Кадровый состав CRM</h2>${table(['Сотрудник','Команда','Работы','Портфель','Вход'],people.map((p:any)=>`<tr><td><button class="link" data-manager-employee="${esc(p.employee_uuid)}">${esc(p.name)}</button><br><small>${esc(p.employee_uuid)}</small></td><td>${esc(p.team_id||context.team_id)}</td><td>${(p.work_kinds||[]).map((w:string)=>esc(labels[w]||w)).join(', ')}</td><td>${p.contracts??'—'} КД</td><td>${p.has_account===false?'Без аккаунта':p.has_account?'Соответствие входа подтверждено':'Состояние входа проверяется отдельно'}</td></tr>`))}<div class="actions">${button('manager-access-load','Аккаунты и устройства')}${button('manager-tasks','Задачи')}${button('manager-queue','Очередь')}</div><div id="manager-access-result"></div>`;
+  wireManagerEmployees();bind('manager-tasks',()=>go('tasks'));bind('manager-queue',()=>go('queue'));
+  const loadAccess=async()=>{
+    const results=await Promise.all([crm.api('GET','manager-access',undefined,{resource:'roster'}),crm.api('GET','manager-access',undefined,{resource:'entered'})]);
+    const [roster,entered]=results;
+    if(!roster.ok||!entered.ok){$('manager-access-result').textContent=roster.text||entered.text||'Служба входа недоступна.';return;}
+    const rows=entered.data.entered||[],staff=roster.data.employees||[];
+    $('manager-access-result').innerHTML=`<h2>Аккаунты и устройства</h2>${table(['Сотрудник / логин','Состояние','ПК / телефон','Действия'],rows.map((p:any,i:number)=>`<tr><td>${esc(p.employee)}<br>${esc(p.username||'Профиль не создан')}</td><td>${esc(p.password_review_pending?'Пароль ждёт подтверждения':p.must_change_password?'Требуется смена пароля':p.status||'Проверен службой входа')}</td><td>${esc(p.desktop?.status||p.desktop?.state||'—')} / ${esc(p.phone?.status||p.phone?.state||'—')}</td><td>${p.can_approve?`<button data-team-approve="${i}">Подтвердить вход</button>`:''}${p.can_reset_password?`<button data-team-reset="${i}">Временный пароль</button>`:''}</td></tr>`))}<h2>Полный состав службы доступа</h2>${table(['Сотрудник','Офис','Аккаунт','ПК','Телефон'],staff.map((p:any)=>`<tr><td>${esc(p.employee)}</td><td>${esc(p.office||'Не задан')}</td><td>${esc(p.username||'Без аккаунта')}</td><td>${esc(p.desktop||'Нет устройства')}</td><td>${esc(p.phone||'Нет устройства')}</td></tr>`))}<p class="muted">Кадровое соответствие CRM и аккаунт службы доступа показаны отдельно. Неоднозначные личности не объединяются по имени.</p>`;
+    $('manager-access-result').querySelectorAll<HTMLButtonElement>('[data-team-approve]').forEach(b=>b.onclick=async()=>{
+      b.disabled=true;const p=rows[Number(b.dataset.teamApprove)];
+      const result=await crm.api('POST','manager-access',{resource:'approve',payload:{username:p.username}});
+      if(result.ok)await loadAccess();else{notice(result.text);b.disabled=false;}
+    });
+    $('manager-access-result').querySelectorAll<HTMLButtonElement>('[data-team-reset]').forEach(b=>b.onclick=()=>{
+      const p=rows[Number(b.dataset.teamReset)],dialog=$<HTMLDialogElement>('dialog'),op=crypto.randomUUID();
+      dialog.innerHTML=`<form id="team-password-form"><h2>Временный пароль</h2><p>${esc(p.employee)} · ${esc(p.username)}</p><label>Новый пароль <input id="team-password" type="password" autocomplete="new-password" required minlength="10"></label><p id="team-password-status" role="status"></p><div class="actions"><button type="button" id="team-password-close">Закрыть</button><button type="submit" class="primary">Сменить пароль</button></div></form>`;
+      $('team-password-close').onclick=()=>dialog.close();
+      $('team-password-form').onsubmit=async event=>{event.preventDefault();const result=await crm.api('POST','manager-access',{resource:'reset',payload:{username:p.username,password:$<HTMLInputElement>('team-password').value,operation_id:op}});if(result.ok){dialog.close();await loadAccess();}else $('team-password-status').textContent=result.text||'Результат не подтверждён. Повтор использует тот же ID.';};dialog.showModal();
+    });
+  };
+  bind('manager-access-load',loadAccess);
+}
+
 async function portfolio(search = portfolioSearch, offset=portfolioOffset) {
+  if(context.distribution?.enabled&&['manager','owner'].includes(context.role)){
+    const generation=renderGeneration,expectedOwner=state.owner;
+    const stop=await mountManagedPortfolio($('view'),{...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner)},
+      id=>void openCard(id).catch(error=>{if(error.name!=='AbortError')notice(error.message);}),()=>generation===renderGeneration&&section==='portfolio');
+    if(generation===renderGeneration)disposeSection=stop;else stop();return;
+  }
   const generation=++portfolioGeneration;
   portfolioSearch=search;portfolioOffset=offset;
   await crm.draft('portfolio-view',{view:portfolioView,work:portfolioWork,employee:portfolioEmployee});
@@ -441,6 +534,8 @@ async function portfolio(search = portfolioSearch, offset=portfolioOffset) {
       ),
     );
   }
+  if(['manager','owner'].includes(context.role)&&context.distribution?.reason)
+    $('view').insertAdjacentHTML('afterbegin',`<p role="status">${esc(context.distribution.reason)}</p>`);
   $('view').querySelectorAll<HTMLButtonElement>('[data-portfolio-view]').forEach(b=>b.onclick=()=>{portfolioView=b.dataset.portfolioView!;void portfolio(portfolioSearch,0).catch(e=>notice(e.message));});
   bind("search-go", () => portfolio($<HTMLInputElement>("search").value,0));
   bind("refresh", () => portfolio());
@@ -816,6 +911,7 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
       await crm.draft(draftKey, capture());
       telemetry("script_shown", "script");
     };
+  $('action-form').dataset.work=target;
   $("action-form").onsubmit = async (e) => {
     e.preventDefault();
     try {
@@ -826,6 +922,8 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
         ),
       ).map((el) => el.value);
       if (!contract_ids.length) throw new Error("Выберите договор.");
+      if(contract_ids.some(id=>!contractCan(card.contracts.find((r:any)=>r.contract_uuid===id)||{allowed_actions:[]},target)))
+        throw new Error('Изменилось назначение этой работы. Ввод сохранён у исходной личности.');
       const values: any = {},
         clear: string[] = [];
       for (const key of keys) {
@@ -1360,6 +1458,15 @@ crm.onChange?.(event=>{
     renderGeneration++;activePerson='';cardSyncGeneration++;card=null;context=null;
     $<HTMLDialogElement>('dialog').close();
     void boot().catch(error=>notice(error.message));
+  }else if(event.type==='live'){
+    const environment=context?.distribution?.environment==='isolated'?'Изолированный стенд · ':state?.connection?.mode==='synthetic'?'Синтетические данные · ':'';
+    $('connection').textContent=environment+(event.connected?'Подтверждённая связь · '+date(event.as_of):'Связь не подтверждена · ввод сохранён на компьютере');
+    if(event.dirty){
+      if(activePerson)scheduleSync(true);
+      else if(section==='portfolio'&&!context.distribution?.enabled)void portfolio().catch(error=>notice(error.message));
+      else if(section==='overview')void managerOverview().catch(error=>notice(error.message));
+      else if(section==='manager-statistics')void managerStatistics().catch(error=>notice(error.message));
+    }
   }else scheduleSync();
 });
 window.addEventListener('focus',()=>{if(activePerson)scheduleSync(true);});

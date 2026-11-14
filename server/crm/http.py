@@ -132,6 +132,8 @@ def install(app, host=None, *, authenticate=None):
                     result = await asyncio.to_thread(assignments.receipt,p,**dict(request.query))
                 elif action == 'assignment-history':
                     result = await asyncio.to_thread(assignments.history,p,**dict(request.query))
+                elif action == 'assignment-job':
+                    result = await asyncio.to_thread(assignments.job,p,**dict(request.query))
                 elif action == 'manager-statistics':
                     result = await asyncio.to_thread(assignments.statistics,p,**dict(request.query))
                 elif action == 'changes':
@@ -204,6 +206,8 @@ def install(app, host=None, *, authenticate=None):
                     "registry-edit": registry.edit,
                     "assignment-preview": assignments.preview,
                     "assignment-commit": assignments.commit,
+                    "assignment-job-step": assignments.job_step,
+                    "assignment-job-cancel": assignments.job_cancel,
                     "active-time": active_time.ingest,
                     "command": store.command,
                     "shift": shifts.command,

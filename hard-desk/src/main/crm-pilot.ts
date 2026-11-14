@@ -13,12 +13,14 @@ import {
 } from "./store";
 import { fetchBuffered } from "./transport";
 import * as queue from "./crm-queue";
-import { PILOT_BASE, existingManagerStatus, existingLogins, ENTRY_SOURCES, EntrySource } from "./crm-manager-login";
+import { PILOT_BASE, existingManagerStatus, existingLogins, ENTRY_SOURCES, EntrySource,readExistingManagerSession } from "./crm-manager-login";
 import { pilotCredential } from "./crm-pilot-session";
 import {ThreeHourReports} from './crm-report-scheduler';
 import {ActiveTime} from './crm-active-time';
 import {showStartupRecovery} from './crm-startup-recovery';
 import {applyCrmWindowFrame} from './crm-window-frame';
+import {CrmLive} from './crm-live';
+import {PRODUCTS} from './product';
 
 const isolatedProfile = !!process.env.HARD_USER_DATA;
 let connectionNotice = "";
@@ -27,13 +29,13 @@ const data =
   join(
     process.env.LOCALAPPDATA || app.getPath("appData"),
     "Hard",
-    "crm-pilot",
+    PRODUCTS.crm.dataName,
     "data",
   );
 mkdirSync(data, { recursive: true });
-app.setName("Взыскание — CRM пилот");
+app.setName(PRODUCTS.crm.name);
 app.setPath("userData", data);
-app.setAppUserModelId("ru.rimborso.crm.pilot");
+app.setAppUserModelId(PRODUCTS.crm.appId);
 process.env.HARD_USER_DATA = data; // Separate installation identity; never inherit stable profile.
 protocol.registerSchemesAsPrivileged([
   {
@@ -74,15 +76,16 @@ const entrySource = (): EntrySource => config()?.source || 'manager';
 const demo = () => config()?.mode === "synthetic";
 const role = () => config()?.role || "employee";
 const origin = () => (demo() ? "synthetic-local" : config()?.server || "");
-function notifyChanged(type: 'queue' | 'identity') {
+function notifyChanged(type: 'queue' | 'identity' | 'live',extra:any={}) {
   if (win && !win.isDestroyed() && !win.webContents.isDestroyed())
-    win.webContents.send('crm:changed', {type});
+    win.webContents.send('crm:changed', {type,...extra});
 }
 const stopQueueChanges = queue.onChange(authority => {
   if (authority === owner) notifyChanged('queue');
 });
 app.once('will-quit', stopQueueChanges);
 function forgetAuthority(message: string) {
+  live.stop();
   activeTime.stop();
   owner = ""; currentContext = null; clock = null;
   connectionNotice = message;
@@ -265,6 +268,10 @@ const actions = new Set([
   'contracts',
   'registry',
   'registry-edit',
+  'managed-portfolio','assignment-staff','assignment-preview','assignment-commit',
+  'assignment-receipt','assignment-history','manager-statistics','changes',
+  'assignment-job','assignment-job-step','assignment-job-cancel',
+  'manager-access',
   'active-time',
   "shifts",
   'shift-report',
@@ -296,6 +303,21 @@ const transport: queue.Transport = async (method, action, body, query) => {
       kind: "offline",
       text: "Проверка офлайн: отправка приостановлена.",
     };
+  if(action==='manager-access')return managerAccess(method,body,query);
+  if(isolatedProfile&&!app.isPackaged&&process.env.HARD_CRM_QA_SHARED_ORIGIN&&demo()){
+    const endpoint=new URL(process.env.HARD_CRM_QA_SHARED_ORIGIN);
+    if(endpoint.protocol!=='http:'||endpoint.hostname!=='127.0.0.1'||endpoint.pathname!=='/'||endpoint.username||endpoint.password||endpoint.search||endpoint.hash)
+      return {ok:false,status:403,text:'Проверочный сервер должен быть локальным SSH-туннелем.'};
+    try{
+      const key=readFileSync(process.env.HARD_CRM_QA_SECRET_FILE!,'utf8').trim();
+      if(!/^[a-f0-9]{64}$/.test(key))throw Error();
+      const url=new URL('/api/crm/'+action,endpoint);for(const [k,v] of Object.entries(query||{}))if(v!=null)url.searchParams.set(k,String(v));
+      const response=await fetchBuffered((u,i)=>net.fetch(u,i),url.toString(),{method,
+        headers:{'X-QA-Secret':key,'X-QA-Actor':process.env.HARD_CRM_QA_ACTOR||'', 'Content-Type':'application/json'},
+        body:method==='POST'?JSON.stringify(body||{}):undefined},action==='changes'?4000:30000);
+      const value=await response.json();return {ok:response.ok,status:response.status,data:value,text:value.text||value.error};
+    }catch{return {ok:false,status:0,text:'Нет подтверждённого ответа общего проверочного сервера.'};}
+  }
   if (demo()) return local(action, body, query, method);
   const base = origin();
   try {
@@ -312,7 +334,7 @@ const transport: queue.Transport = async (method, action, body, query) => {
         "Content-Type": "application/json", "X-Client-Version": app.getVersion(), "X-Work-Product": "hard",
       },
       body: method === "POST" ? JSON.stringify(body || {}) : undefined,
-    }, ["export", "import-preview", "import-apply"].includes(action) ? 120000 : 30000);
+    }, action==='changes'?4000:["export", "import-preview", "import-apply"].includes(action) ? 120000 : 30000);
     let response = await request(token), value = await response.json();
     if (shared() && response.status === 401 && value.error === "pilot_session_expired") {
       token = await pilotCredential(expected, true, entrySource());
@@ -329,6 +351,31 @@ const transport: queue.Transport = async (method, action, body, query) => {
   }
 };
 
+async function managerAccess(method:string,body:any,query:any):Promise<queue.Result>{
+  const routes:any={roster:['GET','employee_board'],entered:['GET','entered'],
+    approve:['POST','account_approve'],reset:['POST','account_reset'],board:['POST','employee_board']};
+  const resource=method==='GET'?query?.resource:body?.resource;
+  const route=routes[resource];
+  if(!route||route[0]!==method)return {ok:false,status:400,text:'Неизвестное действие доступа.'};
+  if(demo())return {ok:false,status:409,text:'В синтетической базе нет рабочих аккаунтов и устройств. Кадровый состав показан отдельно.'};
+  if(!shared()||entrySource()!=='manager'||currentContext?.role!=='manager')
+    return {ok:false,status:403,text:'Для управления входами нужен действующий вход Руководителя.'};
+  const authority=owner,actor=currentContext.actor_uid;
+  try{
+    await pilotCredential(currentContext.employee_uuid,false,'manager');
+    const login=readExistingManagerSession();
+    const headers={'X-Pult-Token':login.credential,'Content-Type':'application/json','X-Client-Version':app.getVersion()};
+    const identity=await fetchBuffered((u,i)=>net.fetch(u,i),'https://hard.rimborso.ru/api/manager/device/me',{method:'GET',headers},10000);
+    const subject=await identity.json();
+    if(!identity.ok||subject.subject?.actor_uid!==actor||authority!==owner)
+      return {ok:false,status:403,text:'Вход или полномочия изменились. Подключитесь заново.'};
+    const response=await fetchBuffered((u,i)=>net.fetch(u,i),'https://hard.rimborso.ru/api/manager/'+route[1],
+      {method,headers,body:method==='POST'?JSON.stringify(body?.payload||{}):undefined},15000);
+    const value=await response.json();
+    return {ok:response.ok&&value.ok!==false,status:response.status,data:value,text:value.message||value.text||value.error};
+  }catch{return {ok:false,status:0,text:'Не удалось подтвердить результат в службе входа. Не повторяйте изменение с новым ID.'};}
+}
+
 const send:queue.Transport=async(method,action,body,query)=>{
   const result=await transport(method,action,body,query);
   if(result.ok)lastConfirmedAt=new Date().toISOString();
@@ -337,11 +384,18 @@ const send:queue.Transport=async(method,action,body,query)=>{
   return result;
 };
 
+const live=new CrmLive(query=>send('GET','changes',undefined,query),()=>owner,
+  authority=>queue.draft(authority,'live-cursor'),
+  (authority,cursor)=>{queue.draft(authority,'live-cursor',cursor);},
+  event=>notifyChanged('live',event));
+app.once('will-quit',()=>live.stop());
+
 async function identify() {
   const result = await send("GET", "context");
   if (result.ok) {
     currentContext = result.data;
     owner = origin() + "\n" + currentContext.employee_uuid;
+    live.start();
     queue.cache(owner, "context", currentContext);
     writeSettings({
       crmLast: {
@@ -527,9 +581,10 @@ app
         if (authority !== owner && result.ok)
           return { ok: false, status: 409, text: "Учётная запись изменилась." };
         const key = action + JSON.stringify(query || {});
-        if (result.ok && method === "GET" && owner)
+        const freshOnly=action==='changes'||action.startsWith('assignment-')||action==='managed-portfolio'||action==='manager-statistics';
+        if (result.ok && method === "GET" && owner && !freshOnly)
           queue.cache(owner, key, result.data);
-        else if (method === "GET" && result.status === 0 && owner) {
+        else if (method === "GET" && result.status === 0 && owner && !freshOnly) {
           const cached = queue.cache(owner, key);
           if (cached)
             return {

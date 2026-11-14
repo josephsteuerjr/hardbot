@@ -20,7 +20,7 @@ if (existsSync(out)) {
 rmSync(out, { recursive: true, force: true });
 mkdirSync(join(out, "ui"), { recursive: true });
 
-const node = { bundle: true, platform: "node", format: "cjs", target: "node22", external: ["electron", "electron-updater", "original-fs"], logLevel: "warning", define: { __HARD_PRODUCT__: JSON.stringify(product) } };
+const node = { bundle: true, platform: "node", format: "cjs", target: "node22", external: ["electron", "electron-updater", "original-fs"], logLevel: "warning", define: { __HARD_PRODUCT__: JSON.stringify(product),__HARD_CRM_INTERNAL__:String(process.env.HARD_CRM_MANAGER_INTERNAL==='1') } };
 await build({ ...node, entryPoints: [join(here, "src", "main", "launcher.ts")], outfile: join(out, "main.js") });
 await build({ ...node, entryPoints: [join(here, "src", "setup", "entry.ts")], outfile: join(out, "setup-main.js") });
 await build({ ...node, entryPoints: [join(here, "src", "setup", "preload.ts")], outfile: join(out, "setup-preload.js") });

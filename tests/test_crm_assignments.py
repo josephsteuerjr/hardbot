@@ -183,3 +183,64 @@ def test_source_baseline_does_not_restore_native_transfer_or_removal(crm_world):
         assert all('call' not in access.writable_actions(c,w['member'],cid) for cid in w['contracts'])
     current=registry.read(replace(w['member'],read_all_contracts=True),view='all')['rows']
     assert all(r['fields']['responsible_soft']=='Не назначен' for r in current)
+
+
+def expand(w,count=240):
+    with storage.connect() as c:
+        template=dict(c.execute('SELECT * FROM crm_contracts WHERE contract_uuid=?',(w['contracts'][0],)).fetchone())
+        columns=list(template)
+        for i in range(count):
+            cid=identifier('contract','allocation-bulk-'+str(i));row=dict(template,contract_uuid=cid,external_id='BULK-'+str(i))
+            c.execute('INSERT INTO crm_contracts('+','.join(columns)+') VALUES('+','.join('?' for _ in columns)+')',tuple(row[k] for k in columns))
+            for work in ('call','visit'):
+                c.execute('INSERT INTO crm_managed_contracts VALUES(?,?,?)',('team-A',cid,work))
+                c.execute('INSERT INTO crm_assignments VALUES(?,?,?,?,?,?,?)',
+                    (str(uuid.uuid4()),w['employee'],cid,work,'2026-01-01',None,'fixture'))
+
+
+def test_large_job_fixed_selection_replay_restart_and_cancel(crm_world):
+    w=allocation_world(crm_world);expand(w)
+    p=preview(w,works=['call','visit'],selection=dict(kind='filter',filters={},part='whole'))
+    assert p['large'] and p['slots_count']==484 and len(p['slots'])==200
+    result,body=apply(w,p);assert result['status']=='job_started'
+    job=result['job_id'];m=w['managers'][0]
+    assert assignments.commit(m,body)==result
+    step=dict(schema_version=1,job_id=job,pack_index=0)
+    state=assignments.job_step(m,step);assert state['applied_slots']==200
+    assert assignments.job_step(m,step)['applied_slots']==200  # lost ACK/restart
+    assert assignments.job(m,job_id=job)['next_pack']==1
+    with pytest.raises(CRMError):assignments.job(w['managers'][1],job_id=job)
+    stopped=assignments.job_cancel(m,dict(schema_version=1,job_id=job))
+    assert stopped['state']=='cancelled' and stopped['cancelled_slots']==284
+    assert assignments.job_step(m,dict(step,pack_index=1))['applied_slots']==200
+    with storage.connect() as c:assert c.execute('SELECT COUNT(*) FROM crm_assignment_changes').fetchone()[0]==200
+
+
+def test_job_conflicting_pack_does_not_undo_or_poison_other_packs(crm_world):
+    w=allocation_world(crm_world);expand(w)
+    p=preview(w,works=['call','visit'],selection=dict(kind='filter',filters={},part='whole'))
+    result,_=apply(w,p);job=result['job_id'];m=w['managers'][0]
+    assignments.job_step(m,dict(schema_version=1,job_id=job,pack_index=0))
+    with storage.connect() as c:
+        pack=json.loads(c.execute('SELECT body_json FROM crm_assignment_packs WHERE job_id=? AND pack_index=1',(job,)).fetchone()[0])
+    slot=pack['slots'][0]
+    q=preview(w,'remove',[slot['capability']],None,dict(kind='contracts',ids=[slot['contract_uuid']]),manager=1)
+    apply(w,q,manager=1)
+    middle=assignments.job_step(m,dict(schema_version=1,job_id=job,pack_index=1))
+    assert middle['conflict_slots']==200 and middle['applied_slots']==200
+    final=assignments.job_step(m,dict(schema_version=1,job_id=job,pack_index=2))
+    assert final['state']=='completed_with_conflicts' and final['applied_slots']==284
+    assert final['pending_slots']==0
+
+
+def test_permission_cursor_changes_and_history_cannot_be_rewritten(crm_world):
+    w=allocation_world(crm_world);m=w['managers'][0]
+    result,_=apply(w,preview(w))
+    cursor=assignments.changes(m)['cursor']
+    reduced=replace(m,capabilities=m.capabilities-{'assign'})
+    assert assignments.changes(reduced,**cursor)['resync']
+    for table in ('crm_assignment_changes','crm_assignment_operations'):
+        with pytest.raises(Exception):
+            with storage.connect() as c:
+                c.execute('DELETE FROM '+table)
+    assert assignments.receipt(m,operation_id=result['operation_id'])==result

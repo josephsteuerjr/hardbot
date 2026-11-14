@@ -10,10 +10,12 @@ contextBridge.exposeInMainWorld("crm", {
   diagnosticsReport: () => ipcRenderer.invoke('crm:diagnostics-report'),
   queue: (action?: string, id?: string,expectedOwner?:string) =>
     ipcRenderer.invoke("crm:queue", action, id,expectedOwner),
-  onChange: (callback: (event: {type: 'queue' | 'identity'}) => void) => {
+  onChange: (callback: (event: {type: 'queue' | 'identity' | 'live';dirty?:boolean;as_of?:string;connected?:boolean}) => void) => {
     if (typeof callback !== 'function') throw new Error('Нужен обработчик изменения CRM.');
     const listener = (_: unknown, event: any) => {
       if (event?.type === 'queue' || event?.type === 'identity') callback({type: event.type});
+      else if(event?.type==='live')callback({type:'live',dirty:event.dirty===true,connected:event.connected===true,
+        as_of:typeof event.as_of==='string'?event.as_of:undefined});
     };
     ipcRenderer.on('crm:changed', listener);
     return () => ipcRenderer.removeListener('crm:changed', listener);

@@ -3,6 +3,7 @@
 @import "./crm-paper-tokens.css";
 @import '../crm-delivery.css';
 @import '../crm-registry.css';
+@import '../crm-manager-portfolio.css';
 .contract-facts .delivery-fact{grid-column:1/-1}
 .delivery-fact dd{white-space:pre-wrap}
 * {

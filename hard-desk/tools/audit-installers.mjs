@@ -64,7 +64,7 @@ for (const id of selectedProducts) {
     const outerAsar=join(unpacked,'resources/app.asar');
     const outerPackage=JSON.parse(extractFile(outerAsar,'package.json').toString());
     if(JSON.stringify(JSON.parse(extractFile(outerAsar,'out/setup-registry.json').toString()))!==JSON.stringify(productionRegistry))throw new Error('Non-production wizard registry identity: '+id);
-    const setupExpected=await build({...nodeOptions,entryPoints:[join(here,'src/setup/entry.ts')],define:{__HARD_PRODUCT__:JSON.stringify(id)}});
+    const setupExpected=await build({...nodeOptions,entryPoints:[join(here,'src/setup/entry.ts')],define:{__HARD_PRODUCT__:JSON.stringify(id),__HARD_CRM_INTERNAL__:String(process.env.HARD_CRM_MANAGER_INTERNAL==='1')}});
     const receipt=JSON.parse(readFileSync(join(unpacked,'resources/setup-payload.json'),'utf8'));
     if(outerPackage.name!==`hard-setup-${id}`||outerPackage.version!==version||outerPackage.main!=='out/setup-main.js'
       ||receipt.product!==id||receipt.version!==version||receipt.sha512!==createHash('sha512').update(readFileSync(component)).digest('base64')
@@ -84,7 +84,7 @@ for (const id of selectedProducts) {
   if (!existsSync(packed)) throw new Error('Missing actual installer ASAR: '+id);
   auditRuntimeDependencies(packed);
   const expected = await build({ bundle: true, platform: 'node', format: 'cjs', target: 'node22', external: ['electron', 'electron-updater', 'original-fs'],
-    logLevel: 'warning', entryPoints: [join(here, 'src/main/launcher.ts')], write: false, define: { __HARD_PRODUCT__: JSON.stringify(id) } });
+    logLevel: 'warning', entryPoints: [join(here, 'src/main/launcher.ts')], write: false, define: { __HARD_PRODUCT__: JSON.stringify(id),__HARD_CRM_INTERNAL__:String(process.env.HARD_CRM_MANAGER_INTERNAL==='1') } });
   if (sha(extractFile(packed, join('out', 'main.js'))) !== sha(expected.outputFiles[0].contents)
     || sha(extractFile(packed, join('out', 'ui', 'app.js'))) !== sha(expectedUi.outputFiles[0].contents)
     || staticFiles.some(([name,bytes])=>sha(extractFile(packed,normalize(name)))!==sha(bytes))) stale.push(id);

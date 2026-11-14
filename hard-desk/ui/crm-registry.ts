@@ -45,6 +45,17 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
     <dialog id="registry-preview"><h2>Правки реестра</h2><div class="registry-preview-values"></div><div class="actions"><button id="registry-apply" class="primary">Сохранить на компьютере и отправить</button><button id="registry-preview-cancel">Вернуться к вводу</button></div></dialog></div>`;
   const $=<T extends HTMLElement=HTMLElement>(id:string)=>host.querySelector<T>('#'+id)!;
   const scroll=host.querySelector<HTMLElement>('.registry-scroll')!;
+  const protectedInput=document.createElement('div');$('registry-status').after(protectedInput);
+  let revokedInput=(await crm.draft('registry-revoked-input')).data;
+  function showProtectedInput(){
+    protectedInput.replaceChildren();if(!revokedInput)return;
+    const details=document.createElement('details'),summary=document.createElement('summary'),text=document.createElement('pre'),clear=document.createElement('button');
+    summary.textContent='Ввод сохранён после изменения назначения · '+revokedInput.field;
+    text.textContent=revokedInput.value;clear.textContent='Убрать сохранённый ввод';
+    clear.onclick=async()=>{const r=await crm.draft('registry-revoked-input',null);if(r.ok){revokedInput=null;showProtectedInput();}};
+    details.append(summary,text,clear);protectedInput.append(details);
+  }
+  showProtectedInput();
   const status=(text:string)=>{if(!disposed && isCurrent())$('registry-status').textContent=text;};
   const storeInput=async()=>{const r=await crm.draft('registry-input',pending);if(!r.ok)throw Error(r.text || 'Не удалось сохранить ввод на компьютере.');};
   const protect=(fn:()=>any)=>()=>{Promise.resolve().then(fn).catch(e=>status(e.message));};
@@ -346,7 +357,39 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   $('registry-review').onclick=protect(review);
   $('registry-cancel').onclick=protect(async()=>{if(editing){editing.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}));return;}pending={};await storeInput();paint();status('Незавершённые правки отменены.');});
   $('registry-preview-cancel').onclick=()=>$<HTMLDialogElement>('registry-preview').close();
-  const stop=crm.onChange?.((event:any)=>{if(event.type==='queue')void sync().catch(e=>status(e.message));});
+  let liveGeneration=0;
+  async function refreshLive(){
+    if(!data?.rows.length)return;
+    const turn=++liveGeneration,ids=data.rows.map((r:any)=>r.contract_uuid).join(',');
+    const result=await crm.api('GET','registry',undefined,{view:'all',ids,limit:100});
+    if(disposed||!isCurrent()||turn!==liveGeneration)return;
+    if(!result.ok||result.stale){status('Нет подтверждённой актуальности. Исходный ввод сохранён.');return;}
+    const latest=new Map(result.data.rows.map((r:any)=>[r.contract_uuid,r]));
+    if(editing){
+      const cell=editing.closest<HTMLElement>('[data-cell]');
+      const [r,c]=(cell?.dataset.cell||'').split(':').map(Number),row=data.rows[r],field=data.columns[c];
+      const fresh:any=row&&latest.get(row.contract_uuid);
+      if(row&&field&&!fresh?.writable_fields?.includes(field.key)){
+        revokedInput={contract_uuid:row.contract_uuid,field:field.key,value:editing.value,base_revisions:row.revisions};
+        const saved=await crm.draft('registry-revoked-input',revokedInput);
+        if(!saved.ok)throw Error('Не удалось защитить текущий ввод. Оставьте редактор открытым.');
+        showProtectedInput();
+      }
+    }
+    for(const row of data.rows){
+      const fresh:any=latest.get(row.contract_uuid);
+      row.writable_fields=fresh?.writable_fields||[];
+      if(fresh){row.fields=fresh.fields;row.revisions=fresh.revisions;}
+      scroll.querySelectorAll<HTMLElement>(`[data-row="${row.contract_uuid}"] [data-cell]`).forEach(cell=>{
+        const key=cell.dataset.field!,field=data.columns.find((f:any)=>f.key===key);
+        const writable=row.writable_fields.includes(key);
+        cell.setAttribute('aria-readonly',String(!writable));cell.classList.toggle('readonly',!writable);cell.classList.toggle('writable',writable);
+        if(!cell.contains(editing)&&!pending[row.contract_uuid]&&!rowEntry(row.contract_uuid).length&&field){const span=cell.querySelector('span');if(span)span.textContent=showValue(value(row,key),field);}
+      });
+    }
+    await storeInput();status('Назначения и права обновлены. Незавершённый ввод сохранён.');
+  }
+  const stop=crm.onChange?.((event:any)=>{if(event.type==='queue')void sync().catch(e=>status(e.message));else if(event.type==='live'&&event.dirty)void refreshLive().catch(e=>status(e.message));});
   scroll.onscroll=()=>{prefs.left=scroll.scrollLeft;prefs.top=scroll.scrollTop;schedulePreferences();};
   await load();
   if(!isCurrent())stop?.();

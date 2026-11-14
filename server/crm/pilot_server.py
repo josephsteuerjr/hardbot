@@ -84,6 +84,8 @@ def ensure_demo_roles(conn):
     contract=conn.execute('SELECT contract_uuid FROM crm_contracts WHERE person_uuid=? ORDER BY contract_uuid LIMIT 1',(identifier('person','demo-1'),)).fetchone()
     if contract and not conn.execute("SELECT 1 FROM crm_assignments WHERE employee_uuid=? AND capability='delivery'",(DEMO_COURIER,)).fetchone():
         conn.execute('INSERT INTO crm_assignments VALUES(?,?,?,?,?,NULL,?)',(str(uuid.uuid4()),DEMO_COURIER,contract[0],'delivery',start,'synthetic'))
+    if contract:
+        conn.execute('INSERT INTO crm_monthly_totals VALUES(?,?,?,?,?,?,?) ON CONFLICT(contract_uuid,month) DO NOTHING',(contract[0],at[:7],'1250.25','RUB','Синтетическая месячная сумма',at,'0'*64))
 
 
 def ensure_distribution_demo(conn):
@@ -102,8 +104,6 @@ def ensure_distribution_demo(conn):
     conn.execute('INSERT INTO crm_memberships VALUES(?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING',
         (identifier('membership','demo-unregistered'),target,'demo-team','employee',canonical(sorted(ROLE_CAPABILITIES['employee'])),
          'Europe/Samara','2026-01-01T00:00:00+00:00',None))
-    if contract:
-        conn.execute('INSERT INTO crm_monthly_totals VALUES(?,?,?,?,?,?,?) ON CONFLICT(contract_uuid,month) DO NOTHING',(contract[0],at[:7],'1250.25','RUB','Синтетическая месячная сумма',at,'0'*64))
 
 
 def seed():
@@ -316,7 +316,7 @@ def seed():
 
 
 def context(p):
-    from . import tasks
+    from . import tasks,assignments
     with db.connect() as conn:
         cohorts = [
             dict(r)
@@ -324,9 +324,11 @@ def context(p):
             if p.role == "manager"
         ]
         staff = tasks.staff(conn, p)
+        distribution=assignments.readiness(conn,p)
     return dict(
         schema_version=1,
         employee_uuid=p.employee_uuid,
+        actor_uid=p.actor_uid,
         team_id=p.team_id,
         role=p.role,
         capabilities=sorted(p.capabilities),
@@ -338,6 +340,7 @@ def context(p):
         cohorts=cohorts,
         synthetic=True,
         staff=staff,
+        distribution=distribution,
     )
 
 
@@ -376,6 +379,10 @@ def serve():
                 query = body.get("query", {})
                 method = body.get("method", "GET")
                 actions = {
+                    'assignment-preview':__import__('crm.assignments',fromlist=['preview']).preview,
+                    'assignment-commit':__import__('crm.assignments',fromlist=['commit']).commit,
+                    'assignment-job-step':__import__('crm.assignments',fromlist=['job_step']).job_step,
+                    'assignment-job-cancel':__import__('crm.assignments',fromlist=['job_cancel']).job_cancel,
                     "registry-edit": __import__('crm.registry', fromlist=['edit']).edit,
                     "active-time": __import__('crm.active_time', fromlist=['ingest']).ingest,
                     "command": store.command,
@@ -392,6 +399,13 @@ def serve():
                 }
                 if action == "context":
                     result = context(p)
+                elif method=='GET' and action in {'managed-portfolio','assignment-staff','assignment-receipt','assignment-history','assignment-job','manager-statistics','changes'}:
+                    from . import assignments
+                    function={'managed-portfolio':assignments.portfolio,'assignment-staff':assignments.staff,
+                        'assignment-receipt':assignments.receipt,'assignment-history':assignments.history,
+                        'assignment-job':assignments.job,
+                        'manager-statistics':assignments.statistics,'changes':assignments.changes}[action]
+                    result=function(p,**query)
                 elif action == 'registry' and method == 'GET':
                     from . import registry
                     result = registry.read(p, **query)
