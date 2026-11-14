@@ -23,6 +23,7 @@ function typed(field:any, raw:string) {
 
 /** Own protected drafts/preferences; no Excel formatting, formulas or card navigation. */
 export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boolean=()=>true, options:{manager?:boolean;distribution?:boolean;openPerson?:(id:string)=>void}={}) {
+  host.classList.toggle('manager-register-data',!!options.manager);
   let disposed=false, generation=0, data:any, active:Cell={row:0,col:0}, anchor:Cell={row:0,col:0};
   let editing:HTMLInputElement|HTMLTextAreaElement|HTMLSelectElement|null=null;
   let prefs=(await crm.draft('registry-view')).data || {};
