@@ -37,6 +37,29 @@ def number_format(area,value):
     ole.Invoke(ole.GetIDsOfNames('NumberFormat'),1033,pythoncom.DISPATCH_PROPERTYPUT,False,value)
 
 
+def manager_tables(report,kind):
+    if kind=='manager-month':
+        return [('Сотрудники',['Сотрудник','Звонки','Выезды','Обработано КД','КД сейчас'],
+            [[r['name'],r['facts']['call'],r['facts']['visit'],r['facts']['processed_contracts'],r['contracts']] for r in report['staff']]),
+            ('Портфель',['Валюта','Долг','Поступления за месяц'],[[key,float(report['debt'][key]) if key in report['debt'] else None,
+                float(report['payments']['totals'][key]) if key in report['payments']['totals'] else None]
+                for key in sorted(set(report['debt'])|set(report['payments']['totals']))])]
+    metrics=['Встречи','Звонки · клиенты','Обещания · КД','Обещания · сумма','В работе · КД','В работе · сумма',
+             'Третьи лица · КД','Третьи лица · сумма','Оплачено · КД','Оплачено · сумма']
+    result=[]
+    for sms,title in [(False,'Динамика звонков'),(True,'Динамика SMS')]:
+        rows=[];previous=None
+        for snap in report['snapshots']:
+            sheet=next(s for s in snap['sheets'] if s['sms']==sms)
+            from decimal import Decimal
+            values=[sum((Decimal(str(r['current'][i])) for r in sheet['rows']),Decimal(0)) for i in range(10)]
+            row=[snap['captured_at']]
+            for i,value in enumerate(values):row.extend([float(value),None if previous is None else float(value-previous[i])])
+            rows.append(row);previous=values
+        result.append((title,['Снимок']+[label for metric in metrics for label in (metric,'Прирост: '+metric)],rows))
+    return result
+
+
 def verify(path,report,kind):
     from python_calamine import CalamineWorkbook
     saved=CalamineWorkbook.from_path(str(path))
@@ -55,6 +78,15 @@ def verify(path,report,kind):
                     if value is None and got=='':continue
                     if isinstance(value,(float,int)) and isinstance(got,(float,int)) and abs(got-value)<0.000001:continue
                     if got!=value:raise ValueError('Не совпали сохранённые данные сводки.')
+    elif kind in {'manager-month','manager-dynamics'}:
+        for title,headers,rows in manager_tables(report,kind):
+            actual=saved.get_sheet_by_name(title).to_python()
+            for index,row in enumerate(rows,1):
+                for column,value in enumerate(row):
+                    got=actual[index][column]
+                    if value is None and got=='':continue
+                    if isinstance(value,(int,float)) and isinstance(got,(int,float)) and abs(value-got)<0.000001:continue
+                    if got!=value:raise ValueError('Не совпали сохранённые данные отчёта руководителя.')
     else:
         actual=saved.get_sheet_by_name('Свод смен').to_python()
         for r,item in enumerate(report['employees'],1):
@@ -151,6 +183,16 @@ def write(report,path,kind='shifts'):
                     if report.get('yesterday_incomplete_contracts'):
                         sheet.cells(last+3,1).value=f"Нет полного снимка предыдущего дня: {report['yesterday_incomplete_contracts']} договоров. Пустые суммы и проценты не рассчитаны."
                     expected.append((data['name'],rows))
+            elif kind in {'manager-month','manager-dynamics'}:
+                for index,(title,headers,rows) in enumerate(manager_tables(report,kind)):
+                    sheet=book.sheets[0] if index==0 else book.sheets.add(after=book.sheets[-1]);sheet.name=title
+                    table(sheet,headers,rows)
+                    sheet.range((1,1),(1,len(headers))).api.WrapText=True
+                    sheet.range((1,1),(1,len(headers))).row_height=32
+                    sheet.range('A:A').column_width=30
+                    if rows:number_format(sheet.range((2,2),(len(rows)+1,len(headers))),'#,##0.00')
+                    sheet.range((len(rows)+3,1)).value=report.get('as_of') or report.get('day')
+                    sheet.api.PageSetup.Orientation=2;sheet.api.PageSetup.Zoom=False;sheet.api.PageSetup.FitToPagesWide=1;sheet.api.PageSetup.FitToPagesTall=False
             else:raise ValueError('Неизвестный отчёт.')
             metadata=book.sheets.add('_CRM_REPORT',after=book.sheets[-1]);raw=json.dumps(report,ensure_ascii=False,separators=(',',':'))
             chunks=[raw[i:i+30000] for i in range(0,len(raw),30000)]

@@ -11,6 +11,25 @@ from test_crm_core import crm_world
 pytestmark=pytest.mark.skipif(os.name!='nt',reason='Native Windows Excel required')
 
 
+def test_manager_month_and_dynamics_exports(crm_world,tmp_path):
+    from crm import manager_reports,assignments
+    from test_crm_assignments import allocation_world
+    from python_calamine import CalamineWorkbook
+    w=allocation_world(crm_world);p=w['managers'][0]
+    report=manager_reports.read(p)
+    for kind,data in [('manager-dynamics',report),('manager-month',assignments.statistics(p))]:
+        output=tmp_path/(kind+'.xlsx');receipt=crm_reports.write(data,output,kind)
+        assert receipt['verified']
+        book=CalamineWorkbook.from_path(str(output))
+        assert len(book.sheet_names)==3
+        if kind=='manager-month':
+            rows=book.get_sheet_by_name('Портфель').to_python()
+            assert rows[1][:2]==['RUB',246.90]
+        else:
+            rows=book.get_sheet_by_name('Динамика звонков').to_python()
+            assert len(rows[0])==21 and rows[1][2]==''
+
+
 def test_three_hour_native_calculation_readback_and_unknown_acknowledgement(crm_world,tmp_path):
     report=three_hour.report(crm_world['owner'])
     for sheet in report['sheets']:

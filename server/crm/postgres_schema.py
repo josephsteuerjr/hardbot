@@ -1,7 +1,7 @@
 """Initial PostgreSQL CRM schema. Run with the separate migration role."""
 from . import storage
 
-VERSION = 5
+VERSION = 6
 
 UPGRADE_2 = """
 CREATE TABLE IF NOT EXISTS crm_monthly_totals(

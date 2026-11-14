@@ -56,7 +56,7 @@ def principals():
             "demo-team",
             "manager",
             frozenset(CAPS | {'delivery',"analytics", "exchange", "shift_correct", "accounting",'assign'}),
-            frozenset([DEMO_EMPLOYEE, DEMO_MANAGER, DEMO_OTHER,DEMO_COURIER,DEMO_ANALYST]),
+            frozenset([DEMO_EMPLOYEE, DEMO_MANAGER,DEMO_COURIER,DEMO_ANALYST,identifier('staff','demo-unregistered')]),
         ),
         "observer": access.Principal(
             91003,
@@ -239,6 +239,9 @@ def seed():
             conn.commit()
     with db.connect() as conn:ensure_demo_roles(conn);conn.commit()
     manager = principals()["manager"]
+    # Fixture setup includes the separate observer's historical plan. Runtime
+    # manager authority deliberately excludes that other team.
+    manager = replace(manager,employee_scope=manager.employee_scope|{DEMO_OTHER})
     cohort = identifier("cohort", "demo")
     members = [
         dict(employee_uuid=e, access_at=start, features=["call", "visit", "task"])
@@ -399,6 +402,13 @@ def serve():
                 }
                 if action == "context":
                     result = context(p)
+                elif action=='manager-access':
+                    from . import demo_team
+                    result=demo_team.request(p,method,raw,query)
+                    if result.get('ok') is False:raise CRMError(result.get('error','Действие отклонено.'),'access_action',409)
+                elif method=='GET' and action=='manager-report':
+                    from . import manager_reports
+                    result=manager_reports.read(p,**query)
                 elif method=='GET' and action in {'managed-portfolio','assignment-staff','assignment-receipt','assignment-history','assignment-job','manager-statistics','changes'}:
                     from . import assignments
                     function={'managed-portfolio':assignments.portfolio,'assignment-staff':assignments.staff,
@@ -516,6 +526,8 @@ def serve():
         while True:
             try:
                 analytics.aggregate()
+                from . import manager_reports
+                manager_reports.tick()
             except Exception:
                 pass
             threading.Event().wait(2)
@@ -552,6 +564,8 @@ def main():
             ):
                 raise RuntimeError("Refusing a non-demo database")
     seed()
+    from . import demo_team
+    demo_team.seed()
     serve()
 
 

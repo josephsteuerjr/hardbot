@@ -1205,6 +1205,7 @@ def entered_list(office: str = "", *, include_empty=False) -> list[dict]:
             if phone is None and desktop is None and not include_empty:
                 continue
             out.append({
+                "account_id": acc["id"], "actor_uid": acc["telegram_id"],
                 "employee": acc["employee"], "username": acc["username"],
                 "office": acc["office"] or "", "status": acc["status"], "role": acc["role"],
                 "password_review_pending": bool(acc['password_review_pending']),
@@ -1285,6 +1286,40 @@ def sessions_for(agent_dev_id: int, account_id: int, limit: int = 30) -> list[di
             "SELECT kind,at,entrance,device_kind,label,ip,gps FROM account_logins "
             "WHERE account_id=? ORDER BY id DESC LIMIT ?", (account_id, limit)).fetchall()
     return [dict(r) for r in rows]
+
+
+def manager_revoke_device(uid, device_id, *, is_owner=False, ip=''):
+    if type(device_id) is not int or device_id<=0:return {'ok':False,'error':'device_id'}
+    with db.connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        manager,team=_manager_review_context(uid,is_owner)
+        device=conn.execute('SELECT * FROM account_devices WHERE id=?',(device_id,)).fetchone()
+        acc=conn.execute('SELECT * FROM accounts WHERE id=?',(device['account_id'],)).fetchone() if device else None
+        if not _reviewable(conn,acc,uid,manager,team):return {'ok':False,'error':'Устройство недоступно руководителю.'}
+        actor=f'manager:{uid}'
+        _revoke_slot_tokens(conn,device_id,actor)
+        if device['status']!='revoked':
+            conn.execute("UPDATE account_devices SET status='revoked',revoked_at=? WHERE id=?",(_now(),device_id))
+            _approval_event(conn,acc['id'],device_id,uid,actor,'device','revoked',ip,'manager device revocation')
+        conn.commit()
+    return {'ok':True,'revoked':device_id}
+
+
+def manager_team(uid, *, is_owner=False):
+    import team_work
+    manager,team=_manager_review_context(uid,is_owner)
+    if not manager:return {'ok':False,'error':'Нет права управления командой.'}
+    board=team_work.board(team=team,manager=manager,writable=True)
+    reviewable=manager_reviewable(uid,is_owner=is_owner)
+    entered={r['account_id']:r for r in entered_list(include_empty=True)}
+    for row in board['employees']:
+        account=entered.get(row['account_id'])
+        row['account']=account
+        row['can_reset']=bool(account and account['username'] in reviewable and not account['password_review_pending'])
+        row['can_approve']=bool(account and account['username'] in reviewable and not (account['password_review_pending'] and account['must_change_password']))
+        row['can_revoke']=bool(account and account['username'] in reviewable)
+        if account and account.get('phone'):account['phone'].pop('gps',None)
+    return board
 
 
 def revoke_account_device(device_id: int, *, by: str = "operator") -> bool:

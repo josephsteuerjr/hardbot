@@ -5716,6 +5716,16 @@ async def _account_logout(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def _manager_team(request):
+    uid,_mgr,_team=await asyncio.to_thread(_manager_gate,request)
+    if request.method=='POST':
+        body=await _json_object(request)
+        result=await asyncio.to_thread(accounts.manager_revoke_device,uid,(body or {}).get('device_id'),is_owner=uid==ADMIN_ID,ip=_admin_peer(request))
+    else:
+        result=await asyncio.to_thread(accounts.manager_team,uid,is_owner=uid==ADMIN_ID)
+    return web.json_response(result,status=200 if result.get('ok') else 403,headers={'Cache-Control':'no-store'})
+
+
 async def _manager_entered(request: web.Request) -> web.Response:
     """«Кто ввёл» для руководителя: своя команда, телефоны+компьютеры,
     готовность (ввели и там, и там) — список пересылается владельцу.
@@ -8006,6 +8016,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_get("/api/account/sessions", _account_sessions)
     app.router.add_post("/api/account/logout", _account_logout)
     app.router.add_get("/api/manager/entered", _manager_entered)
+    app.router.add_get('/api/manager/team',_manager_team)
+    app.router.add_post('/api/manager/team/device-revoke',_manager_team)
     app.router.add_get("/api/manager/call-script", _manager_call_script)
     app.router.add_post("/api/manager/call-script", _manager_call_script)
     app.router.add_get("/api/call-script", _call_script)

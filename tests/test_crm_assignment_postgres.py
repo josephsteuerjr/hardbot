@@ -11,10 +11,20 @@ from crm import access, assignments, storage, store
 from crm.contract import CRMError
 from test_crm_postgres import pg_world
 import test_crm_assignments as cases
+import test_crm_manager_card as card_cases
+import test_crm_manager_reports as report_cases
 
 pytestmark=pytest.mark.skipif(not os.environ.get('HARD_CRM_TEST_DSN_FILE'),reason='Requires isolated PostgreSQL QA database')
 
-CASES=[f for n,f in vars(cases).items() if n.startswith('test_') and callable(f) and set(inspect.signature(f).parameters)=={'crm_world'}]
+CASES=[f for module in (cases,card_cases,report_cases) for n,f in vars(module).items() if n.startswith('test_') and callable(f) and set(inspect.signature(f).parameters)=={'crm_world'}]
+
+
+def test_report_snapshots_and_independent_jobs_in_postgres(pg_world,monkeypatch):
+    report_cases.test_snapshot_is_immutable_scoped_and_no_fabricated_past(pg_world,monkeypatch)
+
+
+def test_independent_jobs_in_postgres(pg_world,monkeypatch):
+    report_cases.test_server_finishes_packs_without_renderer_and_rechecks_revocation(pg_world,monkeypatch)
 
 @pytest.mark.parametrize('case',CASES,ids=lambda f:f.__name__)
 def test_distribution_in_postgres(pg_world,case):
@@ -66,9 +76,9 @@ def test_full_distribution_under_select_only_identity_role(pg_world,monkeypatch)
         owner.execute('GRANT USAGE ON SCHEMA '+namespace+' TO crm_app')
         owner.execute('GRANT SELECT ON ALL TABLES IN SCHEMA '+namespace+' TO crm_app')
         for table in ('crm_assignment_heads','crm_assignment_operations','crm_assignment_previews','crm_assignment_changes',
-                      'crm_task_grant_revocations','crm_assignment_jobs','crm_assignment_packs','crm_assignments','crm_events','crm_event_contracts','crm_commands','crm_outbox','crm_audit'):
+                      'crm_task_grant_revocations','crm_assignment_jobs','crm_assignment_packs','crm_assignments','crm_events','crm_event_contracts','crm_commands','crm_outbox','crm_audit','crm_background_authorities','crm_report_snapshots'):
             owner.execute('GRANT INSERT ON '+table+' TO crm_app')
-        for table in ('crm_assignment_heads','crm_assignment_jobs','crm_assignment_packs','crm_assignments','crm_contracts'):
+        for table in ('crm_assignment_heads','crm_assignment_jobs','crm_assignment_packs','crm_assignments','crm_contracts','crm_background_authorities'):
             owner.execute('GRANT UPDATE ON '+table+' TO crm_app')
         owner.execute('GRANT USAGE ON ALL SEQUENCES IN SCHEMA '+namespace+' TO crm_app')
     parts=urlsplit(Path(os.environ['HARD_CRM_TEST_APP_DSN_FILE']).read_text().strip())
@@ -85,5 +95,11 @@ def test_full_distribution_under_select_only_identity_role(pg_world,monkeypatch)
     cases.apply(w,cases.preview(w,'assign',['call','visit']))
     assert assignments.statistics(w['managers'][0])['unassigned_slots']==0
     assert assignments.changes(w['member'])['dirty']
+    from crm import manager_reports
+    assert len(manager_reports.read(w['managers'][0])['snapshots'])==1
+    monkeypatch.setattr(assignments,'MAX_SLOTS',1)
+    job,_=cases.apply(w,cases.preview(w))
+    manager_reports.tick();manager_reports.tick()
+    assert assignments.job(w['managers'][0],job_id=job['job_id'])['state']=='completed'
     with storage.connect() as c:
         with pytest.raises(psycopg.errors.InsufficientPrivilege):c.execute('UPDATE crm_memberships SET role=role')

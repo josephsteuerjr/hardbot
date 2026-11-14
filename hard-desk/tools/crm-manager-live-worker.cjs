@@ -27,9 +27,7 @@ async function until(fn){for(let i=0;i<300;i++){if(await fn())return;await pause
     if(actor.startsWith('m')){
       await until(()=>js('!!document.querySelector("[data-section=registry]")'));
       await js('document.querySelector("[data-section=registry]").click()');
-      await until(()=>js('!!document.querySelector("#manager-register-assignment")'));
-      await js('document.querySelector("#manager-register-assignment").click()');
-      await until(()=>js('!!document.querySelector("[data-managed-person]")'));
+      await until(()=>js('!!document.querySelector("[data-allocation=replace]")'));
     }
     const server=http.createServer(async(req,res)=>{
       if(req.headers['x-control']!==key){res.writeHead(403);res.end();return;}

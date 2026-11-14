@@ -113,11 +113,12 @@ def targets(conn, principal):
         kinds = sorted(set(json.loads(row['capabilities_json'])) & WORK) if len(members)==1 else []
         reason = ('Сотрудник отключён' if not row['active'] else 'Нет постоянной кадровой личности' if not row['staff_id']
                   else 'Требует сверки членства' if len(members)!=1 else 'Нет допустимых видов работ' if not kinds else '')
-        result[eid] = dict(employee_uuid=eid,name=row['name'],team_id=row['team_id'],work_kinds=kinds,
+        result[eid] = dict(employee_uuid=eid,name=row['name'],team_id=row['team_id'],role=row['role'],actor_uids=[],work_kinds=kinds,
                            eligible=not reason,reason=reason,has_account=False,contracts=0,people=0,slots=0)
-    for r in conn.execute('SELECT l.employee_uuid FROM crm_actor_links l WHERE l.active=1'):
+    for r in conn.execute('SELECT l.employee_uuid,l.actor_uid FROM crm_actor_links l WHERE l.active=1'):
         if r[0] in result:
             result[r[0]]['has_account'] = True
+            result[r[0]]['actor_uids'].append(r['actor_uid'])
     clause,args = scope_sql(principal)
     for r in conn.execute('SELECT a.employee_uuid,COUNT(DISTINCT a.contract_uuid) AS contracts,'
             'COUNT(DISTINCT c.person_uuid) AS people,COUNT(*) AS slots FROM crm_effective_assignments a '
@@ -383,6 +384,8 @@ def commit(principal, body):
 
 def _start_job(conn,principal,op,frozen,at):
     job_id=op
+    from .manager_reports import remember_authority
+    remember_authority(conn,principal,'assignment:'+job_id,'assignment')
     conn.execute('INSERT INTO crm_assignment_jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
         (job_id,principal.actor_uid,op,'running',len(frozen['slots']),0,0,0,0,0,at,at))
     for index,start in enumerate(range(0,len(frozen['slots']),MAX_SLOTS)):
@@ -533,7 +536,7 @@ def history(principal, *, offset=0, limit=50):
         return dict(rows=[dict(r) for r in rows],offset=offset)
 
 
-def statistics(principal, *, month=None):
+def statistics(principal, *, month=None,employee_uuid=None,kind=None,offset=0):
     from datetime import date
     from zoneinfo import ZoneInfo
     if month is None:month=instant(now()).astimezone(ZoneInfo(principal.timezone)).strftime('%Y-%m')
@@ -541,6 +544,8 @@ def statistics(principal, *, month=None):
         first=date.fromisoformat(month+'-01')
         following=date(first.year+(first.month==12),first.month%12+1,1)
     except (ValueError,TypeError):raise CRMError('Период: ГГГГ-ММ.')
+    if employee_uuid is not None:
+        return statistics_detail(principal,employee_uuid,kind,first.isoformat(),following.isoformat(),offset)
     with snapshot() as (conn,mark):
         authorize(conn,principal)
         clause,args=scope_sql(principal)
@@ -607,3 +612,27 @@ def statistics(principal, *, month=None):
                 attribution='Поступления в текущем управляемом портфеле; закрепление на '+now()),
             facts_attribution='Исходные авторы в текущем кадровом составе; история не ограничена текущими закреплениями. История без достоверного дня не включена.',
             overlapping_staff_totals=True)
+
+
+def statistics_detail(principal,employee_uuid,kind,since,until,offset):
+    from zoneinfo import ZoneInfo
+    try:offset=int(offset)
+    except (TypeError,ValueError):raise CRMError('Некорректная страница.')
+    if kind not in WORK or not 0<=offset<=1000000:raise CRMError('Некорректный отбор фактов.')
+    with snapshot() as (conn,mark):
+        authorize(conn,principal)
+        person=next((r for r in targets(conn,principal) if r['employee_uuid']==employee_uuid),None)
+        if not person:raise CRMError('Сотрудник недоступен.','forbidden',403)
+        zone=ZoneInfo(principal.timezone);events=[]
+        for r in conn.execute('SELECT event_id,occurred_at,time_quality,payload_json FROM crm_events WHERE employee_uuid=? AND kind=? ORDER BY sequence DESC',(employee_uuid,kind)):
+            try:
+                day=json.loads(r['payload_json']).get('legacy_workday','') if r['time_quality']=='legacy_day' else '' if r['time_quality']=='legacy_unknown' else instant(r['occurred_at']).astimezone(zone).date().isoformat()
+            except (CRMError,ValueError,TypeError):continue
+            if since<=day<until:events.append(dict(r,day=day))
+        visible=access.readable_contracts(conn,principal) if not access.reads_all(principal) else None
+        rows=[]
+        for event in events[offset:offset+50]:
+            links=conn.execute('SELECT c.contract_uuid,c.person_uuid,c.external_id,p.name FROM crm_event_contracts ec JOIN crm_contracts c USING(contract_uuid) JOIN crm_people p USING(person_uuid) WHERE ec.event_id=?',(event['event_id'],)).fetchall()
+            rows.append(dict(day=event['day'],at=event['occurred_at'],time_quality=event['time_quality'],
+                contracts=[dict(r) if visible is None or r['contract_uuid'] in visible else dict(name='Договор вне текущей области') for r in links]))
+        return dict(employee=person['name'],kind=kind,rows=rows,total=len(events),offset=offset,has_more=offset+len(rows)<len(events))

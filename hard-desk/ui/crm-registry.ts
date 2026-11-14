@@ -22,20 +22,23 @@ function typed(field:any, raw:string) {
 }
 
 /** Own protected drafts/preferences; no Excel formatting, formulas or card navigation. */
-export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boolean=()=>true, options:{manager?:boolean}={}) {
+export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boolean=()=>true, options:{manager?:boolean;distribution?:boolean;openPerson?:(id:string)=>void}={}) {
   let disposed=false, generation=0, data:any, active:Cell={row:0,col:0}, anchor:Cell={row:0,col:0};
   let editing:HTMLInputElement|HTMLTextAreaElement|HTMLSelectElement|null=null;
   let prefs=(await crm.draft('registry-view')).data || {};
   let colors:Record<string,string>=(await crm.draft('registry-colors')).data || {};
   let pending:Record<string,Pending>=(await crm.draft('registry-input')).data || {};
   let entries:any[]=[],busy=false;
+  let allColumns:any[]=[],allocationStop:(()=>void)|undefined,allSelected=false;
+  const selectedRows=new Set<string>(Array.isArray(prefs.selectedRows)?prefs.selectedRows:[]);
   let preferenceSave:ReturnType<typeof setTimeout>|undefined;
   let resizeStop:(()=>void)|undefined;
   const snapshots=new Map<string,any>();
   const validView=options.manager?'all':['mine','all'].includes(prefs.view)?prefs.view:'mine';
   prefs={view:validView,search:String(prefs.search || ''),sort:prefs.sort || 'contract_id',direction:prefs.direction==='desc'?'desc':'asc',offset:Math.max(0,Number(prefs.offset)||0),
     left:Math.max(0,Number(prefs.left)||0),top:Math.max(0,Number(prefs.top)||0),
-    active:prefs.active,anchor:prefs.anchor,
+    active:prefs.active,anchor:prefs.anchor,selectedRows:[...selectedRows],
+    employee_uuid:String(prefs.employee_uuid||''),work:['call','visit'].includes(prefs.work)?prefs.work:'all',unassigned:prefs.unassigned==='1'?'1':'0',columnGroup:prefs.columnGroup||'main',
     widths:Object.fromEntries(Object.entries(prefs.widths || {}).filter(([key,width])=>key.length<160 && typeof width==='number' && Number.isFinite(width) && width>=80 && width<=640)),
     zoom:[80,90,100,110,125,150].includes(prefs.zoom)?prefs.zoom:100};
   if(disposed || !isCurrent())return ()=>{};
@@ -47,6 +50,7 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   if(options.manager){
     host.classList.add('manager-register-data');
     $('registry-scope').innerHTML='<option value="all">Общий реестр</option>';
+    $('registry-scope').closest('.toolbar')!.insertAdjacentHTML('afterend',`<div class="toolbar"><label>Сотрудник <select id="registry-employee"><option value="">Все сотрудники</option></select></label><label>Работа <select id="registry-work"><option value="all">Все</option><option value="call">Звонки</option><option value="visit">Выезды</option></select></label><label class="check"><input id="registry-unassigned" type="checkbox">Без ответственного</label><label>Поля <select id="registry-fields"><option value="main">Основное</option><option value="all">Все поля</option></select></label><button id="registry-open">Открыть карточку</button></div><div class="toolbar"><button id="registry-select-page">Выбрать страницу</button><button id="registry-select-all">Весь доступный отбор</button><button id="registry-select-clear">Снять выделение</button><span id="registry-selected-count"></span></div><div id="registry-allocation"></div>`);
   }
   const scroll=host.querySelector<HTMLElement>('.registry-scroll')!;
   const protectedInput=document.createElement('div');$('registry-status').after(protectedInput);
@@ -118,7 +122,12 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
     for(const row of data.rows) {
       const queued=rowEntry(row.contract_uuid);
       const el=scroll.querySelector<HTMLElement>(`[data-row="${row.contract_uuid}"] .registry-row-state`);
-      if(el)el.textContent=queued.some(e=>e.state==='attention')?'Требует сверки':queued.length?'Сохранено на устройстве':pending[row.contract_uuid]?'Редактируется':'Подтверждено';
+      if(el){
+        const text=queued.some(e=>e.state==='attention')?'Требует сверки':queued.length?'Сохранено на устройстве':pending[row.contract_uuid]?'Редактируется':'Подтверждено';
+        if(options.manager){el.innerHTML=`<label title="${text}"><input type="checkbox" data-select-row="${row.contract_uuid}" aria-label="Выбрать ${escape(row.external_id)}"${selectedRows.has(row.contract_uuid)||allSelected?' checked':''}><span>${text}</span></label>`;
+          el.querySelector<HTMLInputElement>('input')!.onchange=e=>{allSelected=false;(e.target as HTMLInputElement).checked?selectedRows.add(row.contract_uuid):selectedRows.delete(row.contract_uuid);selectionChanged();};
+        }else el.textContent=text;
+      }
     }
   }
   async function sync() {
@@ -183,10 +192,19 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
     if(editing)editing.blur();
     const n=++generation;
     await savePreferences();
-    const result=await crm.api('GET','registry',undefined,{view:prefs.view,search:prefs.search,sort:prefs.sort,direction:prefs.direction,offset:prefs.offset,limit:50});
+    const result=await crm.api('GET','registry',undefined,{view:prefs.view,search:prefs.search,sort:prefs.sort,direction:prefs.direction,offset:prefs.offset,limit:50,...(options.manager?{employee_uuid:prefs.employee_uuid,work:prefs.work,unassigned:prefs.unassigned}:{})});
     if(disposed || !isCurrent() || n!==generation)return;
     if(!result.ok)throw Error(result.text || 'Не удалось прочитать реестр.');
     data=result.data;
+    allColumns=data.columns;
+    if(options.manager){
+      const main=['client','contract_id','partner','responsible_soft','responsible','debt_today','soft_call_status','soft_comm_date','call_status','visit_date'];
+      const groups=[...new Set<string>(allColumns.map(f=>f.section))];
+      $('registry-fields').innerHTML='<option value="main">Основное</option><option value="all">Все поля</option>'+groups.map(g=>`<option value="${escape(g)}">${escape(g)}</option>`).join('');
+      if(!['main','all',...groups].includes(prefs.columnGroup))prefs.columnGroup='main';
+      $<HTMLSelectElement>('registry-fields').value=prefs.columnGroup;
+      data.columns=prefs.columnGroup==='all'?allColumns:prefs.columnGroup==='main'?main.map(key=>allColumns.find(f=>f.key===key)).filter(Boolean):allColumns.filter(f=>['client','contract_id'].includes(f.key)||f.section===prefs.columnGroup);
+    }
     for(const row of data.rows)snapshots.set(row.contract_uuid,row);
     await sync();if(disposed || !isCurrent() || n!==generation)return;
     paint();status(result.stale?'Сохранённая копия. Правки будут проверены сервером после подключения.':`Правок в черновике: ${pendingCount()}`);
@@ -253,7 +271,7 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
       if(!row)throw Error('Есть ввод на другой странице. Сохраните его на исходной странице или отмените ввод.');
       const values:Record<string,any>={};
       for(const [key,raw] of Object.entries(p.values)){
-        const f=data.columns.find((f:any)=>f.key===key);
+        const f=allColumns.find((f:any)=>f.key===key);
         if(!f || !row.writable_fields.includes(key) || rowEntry(contract_uuid).length)throw Error('Право ячейки изменилось. Ввод сохранён; откройте очередь или обновите реестр.');
         values[key]=raw===null?null:typed(f,String(raw));
       }
@@ -350,7 +368,7 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
     }
     const result=await crm.draft('registry-colors',colors);if(!result.ok)throw Error(result.text);status('Личные пометки сохранены на компьютере.');
   });
-  $('registry-find').onclick=protect(async()=>{prefs.search=$<HTMLInputElement>('registry-search').value;prefs.offset=0;await load();});
+  $('registry-find').onclick=protect(async()=>{prefs.search=$<HTMLInputElement>('registry-search').value;prefs.offset=0;allSelected=false;await load();selectionChanged();});
   $('registry-search').onkeydown=e=>{if(e.key==='Enter')$('registry-find').click();};
   $('registry-reload').onclick=protect(load);
   $('registry-prev').onclick=protect(async()=>{prefs.offset=Math.max(0,prefs.offset-50);await load();});
@@ -361,6 +379,25 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   $('registry-review').onclick=protect(review);
   $('registry-cancel').onclick=protect(async()=>{if(editing){editing.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}));return;}pending={};await storeInput();paint();status('Незавершённые правки отменены.');});
   $('registry-preview-cancel').onclick=()=>$<HTMLDialogElement>('registry-preview').close();
+  function selectionChanged(){
+    if(!options.manager)return;
+    prefs.selectedRows=[...selectedRows];schedulePreferences();
+    $('registry-selected-count').textContent=allSelected?'Весь доступный отбор':`Выбрано договоров: ${selectedRows.size}`;
+    paintStatus();
+  }
+  const filters=()=>({search:prefs.search,employee_uuid:prefs.employee_uuid,work:prefs.work,unassigned:prefs.unassigned});
+  if(options.manager){
+    $('registry-open').onclick=()=>{const row=data?.rows[active.row];if(row?.person_uuid)options.openPerson?.(row.person_uuid);};
+    $('registry-select-page').onclick=()=>{allSelected=false;data.rows.forEach((r:any)=>selectedRows.add(r.contract_uuid));selectionChanged();};
+    $('registry-select-all').onclick=()=>{allSelected=true;selectedRows.clear();selectionChanged();};
+    $('registry-select-clear').onclick=()=>{allSelected=false;selectedRows.clear();selectionChanged();};
+    $('registry-fields').onchange=protect(async()=>{prefs.columnGroup=$<HTMLSelectElement>('registry-fields').value;await load();});
+    if(options.distribution){
+      const staff=await crm.api('GET','assignment-staff');if(staff.ok)$('registry-employee').insertAdjacentHTML('beforeend',staff.data.staff.map((s:any)=>`<option value="${escape(s.employee_uuid)}">${escape(s.name)}</option>`).join(''));
+    }
+    $<HTMLSelectElement>('registry-employee').value=prefs.employee_uuid;$<HTMLSelectElement>('registry-work').value=prefs.work;$<HTMLInputElement>('registry-unassigned').checked=prefs.unassigned==='1';
+    ['registry-employee','registry-work','registry-unassigned'].forEach(id=>$(id).onchange=protect(async()=>{prefs.employee_uuid=$<HTMLSelectElement>('registry-employee').value;prefs.work=$<HTMLSelectElement>('registry-work').value;prefs.unassigned=$<HTMLInputElement>('registry-unassigned').checked?'1':'0';prefs.offset=0;allSelected=false;await load();selectionChanged();}));
+  }
   let liveGeneration=0;
   async function refreshLive(){
     if(!data?.rows.length)return;
@@ -391,11 +428,18 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
         if(!cell.contains(editing)&&!pending[row.contract_uuid]&&!rowEntry(row.contract_uuid).length&&field){const span=cell.querySelector('span');if(span)span.textContent=showValue(value(row,key),field);}
       });
     }
-    await storeInput();status('Назначения и права обновлены. Незавершённый ввод сохранён.');
+    await storeInput();if(options.manager&&!editing&&!pendingCount())await load();else status('Назначения и права обновлены. Незавершённый ввод сохранён.');
   }
   const stop=crm.onChange?.((event:any)=>{if(event.type==='queue')void sync().catch(e=>status(e.message));else if(event.type==='live'&&event.dirty)void refreshLive().catch(e=>status(e.message));});
   scroll.onscroll=()=>{prefs.left=scroll.scrollLeft;prefs.top=scroll.scrollTop;schedulePreferences();};
   await load();
+  if(options.manager&&isCurrent()){
+    selectionChanged();
+    if(options.distribution){
+      const {mountAllocation}=await import('./crm-allocation');
+      allocationStop=await mountAllocation($('registry-allocation'),crm,()=>({ids:[...selectedRows],filters:filters(),all:allSelected,rows:data.rows}),isCurrent,load);
+    }
+  }
   if(!isCurrent())stop?.();
-  return ()=>{if(editing)editing.blur();resizeStop?.();clearTimeout(preferenceSave);void savePreferences().catch(()=>{});disposed=true;generation++;stop?.();};
+  return ()=>{if(editing)editing.blur();resizeStop?.();clearTimeout(preferenceSave);void savePreferences().catch(()=>{});disposed=true;generation++;stop?.();allocationStop?.();};
 }

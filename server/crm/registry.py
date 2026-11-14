@@ -115,7 +115,8 @@ def source_details(conn, row):
     return dict(present=sorted(present), extras=extras, has_source=bool(originals))
 
 
-def read(principal, *, search='', view='mine', sort='contract_id', direction='asc', offset=0, limit=50, ids=None):
+def read(principal, *, search='', view='mine', sort='contract_id', direction='asc', offset=0, limit=50, ids=None,
+         employee_uuid='',work='all',unassigned='0'):
     if (view not in {'mine', 'all'} or direction not in {'asc', 'desc'}
             or sort not in {f['key'] for f in definitions()}):
         raise CRMError('Неизвестный фильтр реестра.')
@@ -142,6 +143,10 @@ def read(principal, *, search='', view='mine', sort='contract_id', direction='as
             args.extend(sorted(allowed))
         if selected is not None:
             conditions.append('c.contract_uuid IN ('+','.join('?' for _ in selected)+')');args.extend(selected)
+        if employee_uuid or work!='all' or str(unassigned)!='0':
+            from .assignments import _filters
+            clause,filter_args=_filters(principal,employee_uuid=employee_uuid,work=work,unassigned=unassigned)
+            conditions.append(clause);args.extend(filter_args)
         if search:
             haystack = "lower(p.name || ' ' || c.external_id || ' ' || c.creditor_id || ' ' || c.fields_json)"
             conditions.append(('strpos(' + haystack + ',lower(?))>0') if storage.is_postgres(conn)
@@ -170,7 +175,7 @@ def read(principal, *, search='', view='mine', sort='contract_id', direction='as
                     extra_keys.add(key)
                     columns.append(dict(key=key,title=extra['title'],section='Прочие сведения источника',group='source_extra',
                         type='text',source='source_row',write_capability=None,readonly=True,options=[],nullable=True,sortable=False))
-            output.append(dict(contract_uuid=row['contract_uuid'], external_id=row['external_id'],
+            output.append(dict(contract_uuid=row['contract_uuid'], person_uuid=row['person_uuid'],external_id=row['external_id'],
                 creditor_id=row['creditor_id'], currency=row['currency'], client_name=row['client_name'],
                 fields=values, revisions=json.loads(row['revisions_json']),
                 writable_fields=writable(conn, principal, row,scope=write_scope,direct_scope=direct,delegated=delegated,manager_scope=managed)))

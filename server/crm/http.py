@@ -21,6 +21,7 @@ from . import (
     registry,
     active_time,
     assignments,
+    manager_reports,
 )
 from .contract import CRMError, fields
 
@@ -136,6 +137,8 @@ def install(app, host=None, *, authenticate=None):
                     result = await asyncio.to_thread(assignments.job,p,**dict(request.query))
                 elif action == 'manager-statistics':
                     result = await asyncio.to_thread(assignments.statistics,p,**dict(request.query))
+                elif action == 'manager-report':
+                    result = await asyncio.to_thread(manager_reports.read,p,**dict(request.query))
                 elif action == 'changes':
                     result = await asyncio.to_thread(assignments.changes,p,**dict(request.query))
                 elif action == 'active-time':
@@ -297,6 +300,7 @@ def install(app, host=None, *, authenticate=None):
             while True:
                 try:
                     await asyncio.to_thread(analytics.aggregate)
+                    await asyncio.to_thread(manager_reports.tick)
                 except asyncio.CancelledError:
                     raise
                 except Exception:

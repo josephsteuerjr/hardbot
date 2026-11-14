@@ -69,9 +69,9 @@ async def main():
             c.execute('GRANT UPDATE (name) ON crm_people TO crm_app')
             for table in ('crm_assignment_heads','crm_assignment_operations','crm_assignment_previews','crm_assignment_changes',
                 'crm_task_grant_revocations','crm_assignment_jobs','crm_assignment_packs','crm_assignments','crm_events','crm_event_contracts',
-                'crm_commands','crm_outbox','crm_audit','crm_entities','crm_delivery_targets','crm_clock_anchors','crm_active_intervals','crm_telemetry'):
+                'crm_commands','crm_outbox','crm_audit','crm_entities','crm_delivery_targets','crm_clock_anchors','crm_active_intervals','crm_telemetry','crm_background_authorities','crm_report_snapshots'):
                 c.execute('GRANT INSERT ON '+table+' TO crm_app')
-            for table in ('crm_assignment_heads','crm_assignment_jobs','crm_assignment_packs','crm_assignments','crm_contracts','crm_entities','crm_outbox'):
+            for table in ('crm_assignment_heads','crm_assignment_jobs','crm_assignment_packs','crm_assignments','crm_contracts','crm_entities','crm_outbox','crm_background_authorities'):
                 c.execute('GRANT UPDATE ON '+table+' TO crm_app')
             c.execute('GRANT USAGE ON ALL SEQUENCES IN SCHEMA '+namespace+' TO crm_app')
         os.environ['HARD_CRM_DATABASE_URL']=scoped(app_dsn,namespace)

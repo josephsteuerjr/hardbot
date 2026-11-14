@@ -44,7 +44,8 @@ def report(principal):
     at=now();zone=ZoneInfo(principal.timezone);today=instant(at).astimezone(zone).date()
     yesterday=today-timedelta(days=1)
     boundary=datetime.combine(today,time.min,zone)
-    with storage.connect(readonly=True) as conn:
+    from .assignments import snapshot
+    with snapshot() as (conn,_watermark):
         scope=principal.employee_scope
         if principal.owner:scope={row[0] for row in conn.execute('SELECT employee_uuid FROM crm_employees WHERE active=1')}
         employees={key:access.employee(conn,principal,key) for key in scope}
@@ -55,6 +56,13 @@ def report(principal):
                 point=instant(at) if day==today else boundary-timedelta(microseconds=1)
                 if instant(row['starts_at'])<=point and (not row['ends_at'] or instant(row['ends_at'])>point):
                     assigned[day][row['employee_uuid']].add(row['contract_uuid']);people[row['employee_uuid']]=employees[row['employee_uuid']]
+        # Current authority is the effective view, including explicit removals.
+        # Keep closed legacy assignments only for yesterday's historical boundary.
+        assigned[today].clear()
+        for row in conn.execute("SELECT * FROM crm_effective_assignments WHERE capability='call'"):
+            if row['employee_uuid'] in scope and instant(row['starts_at'])<=instant(at) and (not row['ends_at'] or instant(row['ends_at'])>instant(at)):
+                assigned[today][row['employee_uuid']].add(row['contract_uuid'])
+                people[row['employee_uuid']]=employees[row['employee_uuid']]
         ids=set().union(*(ids for days in assigned.values() for ids in days.values())) if assigned else set()
         current={};previous={};unknown=set();currencies=set()
         for offset in range(0,len(ids),400):
@@ -83,7 +91,13 @@ def report(principal):
                 before=metrics([previous[cid] for cid in old_ids if cid in previous],yesterday,sms)
                 after=metrics([current[cid] for cid in new_ids if cid in current],today,sms)
                 if old_ids & unknown:before=[None]*10
-                rows.append(dict(employee_uuid=key,employee=person['name'],yesterday=before,current=after))
+                def evidence(keys,values):
+                    return [dict(contract_uuid=cid,client=values[cid].get('client'),contract_id=values[cid].get('contract_id'),
+                        status=values[cid].get('soft_call_status'),date=values[cid].get('soft_comm_date'),
+                        debt=values[cid].get('debt_today'),promise=values[cid].get('agreed_payment'))
+                        for cid in sorted(keys) if cid in values and ('sms' in str(values[cid].get('soft_call_status') or '').casefold())==sms]
+                rows.append(dict(employee_uuid=key,employee=person['name'],yesterday=before,current=after,
+                                 current_records=evidence(new_ids,current),yesterday_records=evidence(old_ids-unknown,previous)))
             sheets.append(dict(name=title,sms=sms,rows=rows))
     return dict(schema_version=1,as_of=at,today=today.isoformat(),yesterday=yesterday.isoformat(),timezone=principal.timezone,
         currency=next(iter(currencies),None),groups=GROUPS,sheets=sheets,yesterday_incomplete_contracts=len(unknown),

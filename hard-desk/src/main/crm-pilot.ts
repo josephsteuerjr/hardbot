@@ -277,6 +277,7 @@ const actions = new Set([
   'shift-report',
   'cabinet',
   'three-hour',
+  'manager-report',
   "script",
   "anchor",
   "command",
@@ -352,12 +353,12 @@ const transport: queue.Transport = async (method, action, body, query) => {
 };
 
 async function managerAccess(method:string,body:any,query:any):Promise<queue.Result>{
-  const routes:any={roster:['GET','employee_board'],entered:['GET','entered'],
+  const routes:any={team:['GET','team'],revoke:['POST','team/device-revoke'],roster:['GET','employee_board'],entered:['GET','entered'],
     approve:['POST','account_approve'],reset:['POST','account_reset'],board:['POST','employee_board']};
   const resource=method==='GET'?query?.resource:body?.resource;
   const route=routes[resource];
   if(!route||route[0]!==method)return {ok:false,status:400,text:'Неизвестное действие доступа.'};
-  if(demo())return {ok:false,status:409,text:'В синтетической базе нет рабочих аккаунтов и устройств. Кадровый состав показан отдельно.'};
+  if(demo())return local('manager-access',body,query,method);
   if(!shared()||entrySource()!=='manager'||currentContext?.role!=='manager')
     return {ok:false,status:403,text:'Для управления входами нужен действующий вход Руководителя.'};
   const authority=owner,actor=currentContext.actor_uid;
@@ -583,7 +584,7 @@ app
         if (authority !== owner && result.ok)
           return { ok: false, status: 409, text: "Учётная запись изменилась." };
         const key = action + JSON.stringify(query || {});
-        const freshOnly=action==='changes'||action.startsWith('assignment-')||action==='managed-portfolio'||action==='manager-statistics';
+        const freshOnly=action==='changes'||action.startsWith('assignment-')||action==='managed-portfolio'||action==='manager-statistics'||action==='manager-report';
         if (result.ok && method === "GET" && owner && !freshOnly)
           queue.cache(owner, key, result.data);
         else if (method === "GET" && result.status === 0 && owner && !freshOnly) {
@@ -753,6 +754,18 @@ app
       return identify();
     });
     safeHandler("crm:workbook", async (action: string, input: any) => {
+      if(action==='manager-report'){
+        const authority=owner;
+        if(!authority)throw new Error('Сначала подтвердите вход.');
+        const month=input?.mode==='month',dynamics=input?.mode==='dynamics';
+        const result=await send('GET',month?'manager-statistics':'manager-report',undefined,month?{month:input.month}:input?.snapshot_id&&!dynamics?{snapshot_id:input.snapshot_id}:{day:input?.day});
+        if(!result.ok)return result;
+        const report=month||dynamics?result.data:result.data.report;
+        const choice=await dialog.showSaveDialog(win!,{title:'Отчёт руководителя',defaultPath:`Отчёт ${month?report.month:dynamics?report.day:report.today} ${new Date().toISOString().replace(/[^0-9]/g,'').slice(8,14)}.xlsx`,filters:[{name:'Excel',extensions:['xlsx']}]});
+        if(choice.canceled||!choice.filePath)return {ok:false,cancelled:true};
+        if(owner!==authority)throw new Error('Вход изменён. Повторите выгрузку.');
+        return local('report-write',{report,kind:month?'manager-month':dynamics?'manager-dynamics':'three-hour',path:choice.filePath});
+      }
       if(action==='shift-report'){
         const authority=owner;
         if(!authority)throw new Error('Сначала подтвердите вход.');

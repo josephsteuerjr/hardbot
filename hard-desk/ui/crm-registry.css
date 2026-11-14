@@ -19,7 +19,40 @@
 .manager-register-data .registry-grid td>span{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:calc(21px * var(--registry-scale))}
 .manager-register-data .registry-creditor{display:none}
 .manager-register-data .registry-scroll{max-height:calc(100vh - 390px)}
+.manager-register-data .registry>.toolbar,.manager-register-data .allocation-actions{margin:0 0 8px;gap:7px;font-size:12px}
+.manager-register-data .registry .toolbar input,.manager-register-data .registry .toolbar select,.manager-register-data .registry .toolbar button{font-size:12px;min-height:30px;padding:5px 9px}
+.manager-register-data .registry .toolbar label{gap:5px}
+.manager-register-data #registry-search{min-width:220px}
+.manager-register-data #registry-status{font-size:12px;margin:8px 0}
+.manager-register-data #registry-fields{max-width:240px}
+.manager-register-data .allocation-actions{padding-top:7px}
+.manager-register-data .registry-grid th{padding-top:8px;padding-bottom:8px}
 .manager-register-data .registry-grid td textarea{white-space:pre-wrap;min-height:70px}
 .card-editor{width:min(1080px,94vw);max-height:88vh}.card-editor form{display:flex;flex-direction:column;max-height:80vh}.card-editor-fields{overflow:auto;min-height:0;padding:8px 4px}
 .card-editor-fields details{border-top:1px solid var(--line);padding:8px 0}.card-editor-fields summary{cursor:pointer;padding:6px 0}.card-editor-fields .grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .card-editor-fields label{display:flex;flex-direction:column;gap:4px;font-size:13px}.card-editor-fields input,.card-editor-fields textarea,.card-editor-fields select{font:inherit;width:100%;box-sizing:border-box}.card-editor-fields textarea{min-height:64px;resize:vertical}.card-editor-fields [data-changed=true]{border-color:var(--accent)}
+.manager-report-scroll{overflow:auto;max-height:65vh;border:1px solid var(--line,#d8cfc1)}
+.manager-report-table{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%;font-size:12px;font-variant-numeric:tabular-nums}
+.manager-report-table th,.manager-report-table td{padding:7px 10px;white-space:nowrap;border-right:1px solid var(--line,#d8cfc1);border-bottom:1px solid var(--line,#d8cfc1);text-align:right;line-height:1.35}
+.manager-report-table thead th{position:sticky;top:0;z-index:2;background:var(--paper,#f4eee3);text-align:center}
+.manager-report-table thead tr:nth-child(2) th{top:32px}
+.manager-report-table tbody th{position:sticky;left:0;z-index:1;text-align:left;background:var(--paper,#f4eee3);font-weight:500}
+.manager-report-table tbody tr:hover td{background:rgba(165,94,63,.06)}
+.manager-report-table .report-delta{display:block;font-size:10px;color:var(--muted,#72685d)}
+.manager-report-detail{max-width:92vw;width:1100px}
+.manager-report-detail .manager-report-scroll{max-height:55vh}
+.manager-team-layout{display:grid;grid-template-columns:minmax(400px,1.1fr) minmax(340px,1fr);gap:28px;align-items:start}
+.team-table{width:100%;border-collapse:collapse;font-size:13px}
+.team-table th,.team-table td{padding:9px 10px;border-bottom:1px solid var(--line,#d8cfc1);text-align:left}
+.team-table td small{display:block;color:var(--muted,#72685d);font-size:11px;margin-top:3px}
+.team-table tr.active{background:rgba(165,94,63,.09)}
+#team-profile{border-left:1px solid var(--line,#d8cfc1);padding-left:28px}
+.team-facts{display:grid;grid-template-columns:100px 1fr;gap:9px;font-size:13px}.team-facts dt{color:var(--muted,#72685d)}.team-facts dd{margin:0}
+.team-device{padding:14px 0;border-top:1px solid var(--line,#d8cfc1);font-size:13px}.team-device p{margin:6px 0;color:var(--muted,#72685d)}
+.team-roster-actions{margin-top:24px}.team-roster-actions button{margin-top:12px}
+@media(max-width:1000px){.manager-team-layout{grid-template-columns:1fr}#team-profile{border-left:0;padding-left:0}}
+.manager-register-data .registry-row-state label{display:flex;align-items:center;gap:6px;white-space:nowrap;font-size:10px}
+.manager-register-data .registry-row-state input{width:14px;height:14px;margin:0;flex:none}
+.allocation-actions{border-top:1px solid var(--line,#d8cfc1);padding-top:10px;margin-bottom:0}
+.allocation-history{max-height:60vh;overflow:auto}
+#allocation-preview details{max-height:30vh;overflow:auto}
