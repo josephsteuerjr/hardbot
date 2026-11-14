@@ -29,21 +29,46 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   let colors:Record<string,string>=(await crm.draft('registry-colors')).data || {};
   let pending:Record<string,Pending>=(await crm.draft('registry-input')).data || {};
   let entries:any[]=[],busy=false;
+  let preferenceSave:ReturnType<typeof setTimeout>|undefined;
+  let resizeStop:(()=>void)|undefined;
   const snapshots=new Map<string,any>();
   const validView=['mine','all'].includes(prefs.view)?prefs.view:'mine';
   prefs={view:validView,search:String(prefs.search || ''),sort:prefs.sort || 'contract_id',direction:prefs.direction==='desc'?'desc':'asc',offset:Math.max(0,Number(prefs.offset)||0),
-    left:Number(prefs.left)||0,
+    left:Math.max(0,Number(prefs.left)||0),top:Math.max(0,Number(prefs.top)||0),
+    active:prefs.active,anchor:prefs.anchor,
+    widths:Object.fromEntries(Object.entries(prefs.widths || {}).filter(([key,width])=>key.length<160 && typeof width==='number' && Number.isFinite(width) && width>=80 && width<=640)),
     zoom:[80,90,100,110,125,150].includes(prefs.zoom)?prefs.zoom:100};
   if(disposed || !isCurrent())return ()=>{};
   host.innerHTML=`<div class="registry"><div class="toolbar"><select id="registry-scope" aria-label="Область реестра"><option value="mine">Мой реестр</option><option value="all">Общий просмотр</option></select><input id="registry-search" type="search" placeholder="Клиент, договор, телефон"><button id="registry-find">Найти</button><button id="registry-reload">Обновить</button><label>Масштаб <select id="registry-zoom">${[80,90,100,110,125,150].map(n=>`<option value="${n}">${n}%</option>`).join('')}</select></label></div>
     <div class="toolbar"><button id="registry-edit">Изменить</button><button id="registry-clear">Очистить</button><button id="registry-cancel">Отменить ввод</button><button id="registry-save" class="primary">Сохранить правки</button><button id="registry-review">Сверить отправку</button><label>Пометка строки <select id="registry-color"><option value="">Без цвета</option><option value="yellow">Жёлтый</option><option value="red">Красный</option><option value="blue">Голубой</option></select></label></div>
-    <p id="registry-status" role="status"></p><div class="registry-scroll" tabindex="-1"></div><div class="toolbar"><button id="registry-prev">Назад</button><span id="registry-page"></span><button id="registry-next">Далее</button></div>
+    <p id="registry-status" role="status"></p><div class="registry-scroll" tabindex="-1"></div><div class="toolbar"><button id="registry-prev">Назад</button><span id="registry-page"></span><button id="registry-next">Далее</button><button id="registry-reset-widths" class="link">Сбросить ширины</button></div>
     <dialog id="registry-preview"><h2>Правки реестра</h2><div class="registry-preview-values"></div><div class="actions"><button id="registry-apply" class="primary">Сохранить на компьютере и отправить</button><button id="registry-preview-cancel">Вернуться к вводу</button></div></dialog></div>`;
   const $=<T extends HTMLElement=HTMLElement>(id:string)=>host.querySelector<T>('#'+id)!;
   const scroll=host.querySelector<HTMLElement>('.registry-scroll')!;
   const status=(text:string)=>{if(!disposed && isCurrent())$('registry-status').textContent=text;};
   const storeInput=async()=>{const r=await crm.draft('registry-input',pending);if(!r.ok)throw Error(r.text || 'Не удалось сохранить ввод на компьютере.');};
   const protect=(fn:()=>any)=>()=>{Promise.resolve().then(fn).catch(e=>status(e.message));};
+  const savePreferences=async()=>{const result=await crm.draft('registry-view',prefs);if(!result.ok)throw Error(result.text || 'Не удалось сохранить настройки таблицы.');};
+  const schedulePreferences=()=>{clearTimeout(preferenceSave);preferenceSave=setTimeout(()=>{if(!disposed && isCurrent())void savePreferences().catch(e=>status(e.message));},200);};
+  const defaultWidth=(key:string)=>key==='$state'?140:key.includes('comment')||key.includes('history')?280:180;
+  const width=(key:string)=>Object.hasOwn(prefs.widths,key)?prefs.widths[key]:defaultWidth(key);
+  function layout() {
+    scroll.style.setProperty('--registry-scale',String(prefs.zoom/100));
+    scroll.style.setProperty('--registry-state-width',`${width('$state')*prefs.zoom/100}px`);
+    const keys=['$state',...data.columns.map((f:any)=>f.key)];
+    const table=scroll.querySelector<HTMLTableElement>('table');
+    if(table)table.style.width=keys.reduce((n,key)=>n+width(key)*prefs.zoom/100,0)+'px';
+    scroll.querySelectorAll<HTMLElement>('[data-column-width]').forEach(el=>{el.style.width=width(el.dataset.columnWidth!)*prefs.zoom/100+'px';});
+    scroll.querySelectorAll<HTMLElement>('[data-resize]').forEach(el=>el.setAttribute('aria-valuenow',String(width(el.dataset.resize!))));
+  }
+  function rememberSelection() {
+    const location=(p:Cell)=>({contract_uuid:data.rows[p.row]?.contract_uuid,field:data.columns[p.col]?.key});
+    prefs.active=location(active);prefs.anchor=location(anchor);schedulePreferences();
+  }
+  function restoreCell(saved:any,fallback:Cell):Cell {
+    const row=data.rows.findIndex((r:any)=>r.contract_uuid===saved?.contract_uuid),col=data.columns.findIndex((f:any)=>f.key===saved?.field);
+    return {row:Math.max(0,Math.min(data.rows.length-1,row<0?fallback.row:row)),col:Math.max(0,Math.min(data.columns.length-1,col<0?fallback.col:col))};
+  }
   const bounds=()=>({r0:Math.min(active.row,anchor.row),r1:Math.max(active.row,anchor.row),c0:Math.min(active.col,anchor.col),c1:Math.max(active.col,anchor.col)});
   const rowEntry=(id:string)=>entries.filter(e=>e.action==='registry-edit' && e.state!=='accepted' && !e.reviewed_at && e.body.rows.some((p:any)=>p.contract_uuid===id));
   const pendingCount=()=>Object.values(pending).reduce((n,p)=>n+Object.keys(p.values).length,0);
@@ -57,7 +82,7 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
     if(f.type==='date' && /^\d{4}-\d{2}-\d{2}$/.test(v))return String(v).split('-').reverse().join('.');
     return String(v);
   }
-  function select(cell:Cell,extend=false,focus=true) {
+  function select(cell:Cell,extend=false,focus=true,remember=true) {
     if(!data?.rows.length)return;
     active={row:Math.max(0,Math.min(data.rows.length-1,cell.row)),col:Math.max(0,Math.min(data.columns.length-1,cell.col))};
     if(!extend)anchor={...active};
@@ -71,6 +96,7 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
     if(focus)scroll.querySelector<HTMLElement>(`[data-cell="${keyOf(active)}"]`)?.focus({preventScroll:true});
     $('registry-color').setAttribute('data-contract',data.rows[active.row].contract_uuid);
     $<HTMLSelectElement>('registry-color').value=colors[data.rows[active.row].contract_uuid] || '';
+    if(remember)rememberSelection();
   }
   function paintStatus() {
     if(!data)return;
@@ -96,14 +122,37 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
     paintStatus();
   }
   function paint() {
+    resizeStop?.();
     editing=null;
-    scroll.style.setProperty('--registry-scale',String(prefs.zoom/100));
-    scroll.innerHTML=`<table class="registry-grid" role="grid" aria-label="Реестр договоров"><thead><tr><th class="registry-row-state">Сохранение</th>${data.columns.map((f:any)=>`<th><button data-sort="${escape(f.key)}">${escape(f.title)}${prefs.sort===f.key?(prefs.direction==='asc'?' ↑':' ↓'):''}</button></th>`).join('')}</tr></thead><tbody>${data.rows.map((row:any,r:number)=>`<tr data-row="${escape(row.contract_uuid)}" data-color="${colors[row.contract_uuid] || ''}"><td class="registry-row-state"></td>${data.columns.map((f:any,c:number)=>`<td role="gridcell" data-cell="${r}:${c}" data-field="${escape(f.key)}" tabindex="-1" aria-readonly="${!row.writable_fields.includes(f.key)}" class="${row.writable_fields.includes(f.key)?'writable':'readonly'}"><span>${escape(showValue(value(row,f.key),f))}</span>${f.key==='contract_id'?`<small class="registry-creditor">${escape(row.fields.partner || row.creditor_id)}</small>`:''}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+    const resizer=(key:string,title:string)=>`<span class="registry-resizer" role="separator" tabindex="0" aria-orientation="vertical" aria-label="Ширина: ${escape(title)}" aria-valuemin="80" aria-valuemax="640" data-resize="${escape(key)}" title="Потяните границу. Стрелки меняют ширину, Home сбрасывает."></span>`;
+    scroll.innerHTML=`<table class="registry-grid" role="grid" aria-label="Реестр договоров"><colgroup>${['$state',...data.columns.map((f:any)=>f.key)].map(key=>`<col data-column-width="${escape(key)}">`).join('')}</colgroup><thead><tr><th class="registry-row-state">Сохранение${resizer('$state','Сохранение')}</th>${data.columns.map((f:any)=>`<th><button data-sort="${escape(f.key)}">${escape(f.title)}${prefs.sort===f.key?(prefs.direction==='asc'?' ↑':' ↓'):''}</button>${resizer(f.key,f.title)}</th>`).join('')}</tr></thead><tbody>${data.rows.map((row:any,r:number)=>`<tr data-row="${escape(row.contract_uuid)}" data-color="${colors[row.contract_uuid] || ''}"><td class="registry-row-state"></td>${data.columns.map((f:any,c:number)=>`<td role="gridcell" data-cell="${r}:${c}" data-field="${escape(f.key)}" tabindex="-1" aria-readonly="${!row.writable_fields.includes(f.key)}" class="${row.writable_fields.includes(f.key)?'writable':'readonly'}"><span>${escape(showValue(value(row,f.key),f))}</span>${f.key==='contract_id'?`<small class="registry-creditor">${escape(row.fields.partner || row.creditor_id)}</small>`:''}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+    layout();
     $('registry-page').textContent=`${data.total?Number(prefs.offset)+1:0}–${Math.min(Number(prefs.offset)+data.rows.length,data.total)} из ${data.total}`;
     $<HTMLButtonElement>('registry-prev').disabled=!prefs.offset;
     $<HTMLButtonElement>('registry-next').disabled=!data.has_more;
-    select(active,false,false);paintStatus();
-    scroll.scrollLeft=prefs.left;
+    $<HTMLSelectElement>('registry-color').disabled=!data.rows.length;
+    active=restoreCell(prefs.active,active);anchor=restoreCell(prefs.anchor,anchor);
+    select(active,true,false,false);paintStatus();
+    scroll.scrollLeft=prefs.left;scroll.scrollTop=prefs.top;
+    scroll.querySelectorAll<HTMLElement>('[data-resize]').forEach(handle=>{
+      const key=handle.dataset.resize!;
+      const change=(next:number)=>{prefs.widths[key]=Math.max(80,Math.min(640,Math.round(next)));layout();};
+      handle.onpointerdown=e=>{
+        if(e.button!==0)return;e.preventDefault();e.stopPropagation();resizeStop?.();
+        const initial=width(key),start=e.clientX,pointer=e.pointerId;
+        handle.setPointerCapture(pointer);scroll.classList.add('resizing');
+        handle.onpointermove=next=>{if(next.pointerId===pointer)change(initial+(next.clientX-start)/(prefs.zoom/100));};
+        const finish=()=>{handle.onpointermove=null;handle.onpointerup=null;handle.onpointercancel=null;handle.onlostpointercapture=null;scroll.classList.remove('resizing');resizeStop=undefined;if(handle.hasPointerCapture(pointer))handle.releasePointerCapture(pointer);schedulePreferences();};
+        handle.onpointerup=finish;handle.onpointercancel=finish;handle.onlostpointercapture=finish;resizeStop=finish;
+      };
+      handle.ondblclick=e=>{e.preventDefault();e.stopPropagation();delete prefs.widths[key];layout();schedulePreferences();};
+      handle.onkeydown=e=>{
+        if(!['ArrowLeft','ArrowRight','Home'].includes(e.key))return;
+        e.preventDefault();e.stopPropagation();
+        if(e.key==='Home')delete prefs.widths[key];else change(width(key)+(e.key==='ArrowRight'?1:-1)*(e.shiftKey?50:10));
+        layout();schedulePreferences();
+      };
+    });
     scroll.querySelectorAll<HTMLElement>('[data-cell]').forEach(el=>{
       const position=()=>{const [row,col]=el.dataset.cell!.split(':').map(Number);return {row,col};};
       el.onmousedown=e=>{if(editing && el.contains(editing))return;select(position(),e.shiftKey);};
@@ -118,7 +167,7 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   async function load() {
     if(editing)editing.blur();
     const n=++generation;
-    await crm.draft('registry-view',prefs);
+    await savePreferences();
     const result=await crm.api('GET','registry',undefined,{view:prefs.view,search:prefs.search,sort:prefs.sort,direction:prefs.direction,offset:prefs.offset,limit:50});
     if(disposed || !isCurrent() || n!==generation)return;
     if(!result.ok)throw Error(result.text || 'Не удалось прочитать реестр.');
@@ -242,20 +291,20 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
     });dialog.showModal();
   }
   scroll.onkeydown=e=>{
-    if(editing)return;
+    if(editing || (e.target as HTMLElement).closest('[data-resize]'))return;
     const moves:Record<string,Cell>={ArrowLeft:{row:0,col:-1},ArrowRight:{row:0,col:1},ArrowUp:{row:-1,col:0},ArrowDown:{row:1,col:0},Tab:{row:0,col:e.shiftKey?-1:1},Enter:{row:1,col:0}};
     if(moves[e.key]){e.preventDefault();const d=moves[e.key];select({row:active.row+d.row,col:active.col+d.col},e.shiftKey&&e.key!=='Tab');scroll.querySelector(`[data-cell="${keyOf(active)}"]`)?.scrollIntoView({block:'nearest',inline:'nearest'});}
     else if(e.key==='F2'){e.preventDefault();beginEdit();}
     else if(e.key==='Delete'){e.preventDefault();protect(clearSelection)();}
   };
   scroll.oncopy=e=>{
-    if(editing || !data)return;
+    if(editing || !data?.rows.length)return;
     const b=bounds(),lines=[];
     for(let r=b.r0;r<=b.r1;r++){const cells=[];for(let c=b.c0;c<=b.c1;c++)cells.push(String(value(data.rows[r],data.columns[c].key) ?? '').replace(/\t/g,' ').replace(/\r?\n/g,' '));lines.push(cells.join('\t'));}
     e.preventDefault();e.clipboardData?.setData('text/plain',lines.join('\n'));
   };
   scroll.onpaste=e=>{
-    if(editing || !data)return;
+    if(editing || !data?.rows.length)return;
     e.preventDefault();const raw=e.clipboardData?.getData('text/plain') || '';
     protect(async()=>{
       const lines=raw.replace(/\r/g,'').replace(/\n$/,'').split('\n').map(line=>line.split('\t'));
@@ -274,8 +323,10 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   $<HTMLInputElement>('registry-search').value=prefs.search;
   $<HTMLSelectElement>('registry-zoom').value=String(prefs.zoom);
   $('registry-scope').onchange=protect(async()=>{prefs.view=$<HTMLSelectElement>('registry-scope').value;prefs.offset=0;await load();});
-  $('registry-zoom').onchange=protect(async()=>{prefs.zoom=Number($<HTMLSelectElement>('registry-zoom').value);scroll.style.setProperty('--registry-scale',String(prefs.zoom/100));await crm.draft('registry-view',prefs);});
+  $('registry-zoom').onchange=protect(async()=>{prefs.zoom=Number($<HTMLSelectElement>('registry-zoom').value);layout();await savePreferences();});
+  $('registry-reset-widths').onclick=protect(async()=>{prefs.widths={};layout();await savePreferences();status('Ширины колонок сброшены.');});
   $('registry-color').onchange=protect(async()=>{
+    if(!data?.rows.length)return;
     const b=bounds(),color=$<HTMLSelectElement>('registry-color').value;
     for(let r=b.r0;r<=b.r1;r++){
       const id=data.rows[r].contract_uuid;
@@ -296,9 +347,8 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   $('registry-cancel').onclick=protect(async()=>{if(editing){editing.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}));return;}pending={};await storeInput();paint();status('Незавершённые правки отменены.');});
   $('registry-preview-cancel').onclick=()=>$<HTMLDialogElement>('registry-preview').close();
   const stop=crm.onChange?.((event:any)=>{if(event.type==='queue')void sync().catch(e=>status(e.message));});
-  let scrollSave:ReturnType<typeof setTimeout>|undefined;
-  scroll.onscroll=()=>{prefs.left=scroll.scrollLeft;clearTimeout(scrollSave);scrollSave=setTimeout(()=>{if(!disposed && isCurrent())void crm.draft('registry-view',prefs);},300);};
+  scroll.onscroll=()=>{prefs.left=scroll.scrollLeft;prefs.top=scroll.scrollTop;schedulePreferences();};
   await load();
   if(!isCurrent())stop?.();
-  return ()=>{if(editing)editing.blur();clearTimeout(scrollSave);disposed=true;generation++;stop?.();};
+  return ()=>{if(editing)editing.blur();resizeStop?.();clearTimeout(preferenceSave);void savePreferences().catch(()=>{});disposed=true;generation++;stop?.();};
 }

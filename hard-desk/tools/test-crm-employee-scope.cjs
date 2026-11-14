@@ -48,6 +48,20 @@ async function until(check,label){for(let n=0;n<350;n++){if(await check())return
       await click('#registry-apply');await until(async()=> (await entries())[0]?.state==='pending','pending protected edit');
       await fill('#registry-color','yellow');await fill('#registry-zoom','125');
       await edit(1,'QA unsaved registry draft');await js('document.activeElement.blur()');
+      // Resize by keyboard and real Chromium pointer input. Widths are logical
+      // pixels, so zoom must not compound them across launches.
+      await js(`(()=>{const h=document.querySelector('[data-resize="$state"]');h.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));h.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));})()`);
+      const handle=await js(`(()=>{const r=document.querySelector('[data-resize="contract_id"]').getBoundingClientRect();return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)}})()`);
+      win.focus();
+      win.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...handle});
+      win.webContents.sendInputEvent({type:'mouseMove',x:handle.x+75,y:handle.y});
+      win.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,x:handle.x+75,y:handle.y});
+      await until(async()=> (await js('window.crm.draft("registry-view")')).data.widths?.contract_id===240,'resized width protected');
+      await js(`(()=>{const cells=document.querySelectorAll('td[data-field="soft_comment"]');cells[0].dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));cells[1].dispatchEvent(new MouseEvent('mousedown',{bubbles:true,shiftKey:true}));})()`);
+      await click('#registry-reload');
+      await until(()=>js('document.querySelectorAll("td.selected").length===2'),'range survives reload');
+      const geometry=await js(`(()=>{const a=document.querySelector('thead th:first-child').getBoundingClientRect(),b=document.querySelector('thead th:nth-child(2)').getBoundingClientRect();return {state:a.width,identity:b.width,gap:b.left-a.right}})()`);
+      assert(Math.abs(geometry.state-200)<1 && Math.abs(geometry.identity-300)<1 && Math.abs(geometry.gap)<1,JSON.stringify(geometry));
       const current=await js('window.crm.state()');
       const wrong=await js('window.crm.registryEdit('+JSON.stringify({schema_version:1,operation_id:'wrong-owner-operation',rows:[]})+',"wrong owner")');assert.equal(wrong.ok,false);
       const files=fs.readdirSync(path.join(qa,'profile/crm')).filter(f=>f.endsWith('.bin'));
@@ -59,6 +73,9 @@ async function until(check,label){for(let n=0;n<350;n++){if(await check())return
     const checkpoint=JSON.parse(fs.readFileSync(path.join(qa,'PHASE1.json'),'utf8'));
     assert.equal((await entries())[0].body.operation_id,checkpoint.operation_id);
     assert.equal(await js('document.querySelector("#registry-zoom").value'),'125');
+    const restoredView=(await js('window.crm.draft("registry-view")')).data;
+    assert.equal(restoredView.widths.contract_id,240);assert.equal(restoredView.widths.$state,160);
+    assert.equal(await js('document.querySelectorAll("td.selected").length'),2);
     assert.equal(await js('document.querySelector(".registry-grid tbody tr").dataset.color'),'yellow');
     assert((await js('window.crm.draft("registry-input")')).data[checkpoint.other].values.soft_comment==='QA unsaved registry draft');
     blocked=false;lose=true;await js('window.crm.queue("flush")');await until(()=>lost===1,'lost registry acknowledgement');
@@ -104,12 +121,25 @@ async function until(check,label){for(let n=0;n<350;n++){if(await check())return
     assert((await js('window.crm.connect({mode:"synthetic",role:"observer"})')).ok);win.webContents.reload();
     await until(async()=> (await js('window.crm.state()')).context?.role==='observer' && await exists('[data-section=portfolio]'),'other identity');
     assert.equal((await js('window.crm.draft("registry-colors")')).data,null);
+    assert.equal((await js('window.crm.draft("registry-view")')).data,null);
     assert((await api('registry',{view:'all'})).rows.every(r=>r.writable_fields.length===0));
     assert.equal((await js('window.crm.draft("registry-input",{},'+JSON.stringify(ownerBefore)+')')).ok,false);
     assert((await js('window.crm.connect({mode:"synthetic",role:"employee"})')).ok);win.webContents.reload();
     await until(()=>exists('[data-section=registry]'),'original identity');
     assert.equal((await js('window.crm.draft("registry-colors")')).data[checkpoint.contract],'yellow');
-    fs.writeFileSync(path.join(qa,'RESULT.json'),JSON.stringify({passed:true,actual_main:true,actual_preload:true,protected_queue:true,restart_draft_and_colors:true,lost_ack_idempotent:true,foreign_owner_rejected:true,personal_colors_separate_identities:true,conflict_restaged_and_confirmed:true,read_only_paste_atomic:true,escape_undo:true,no_fake_work:true,business_card:true,active_time_screen:true,prelogin_and_authenticated_diagnostics:true},null,2));
+    await openRegistry();
+    assert.equal((await js('window.crm.draft("registry-view")')).data.widths.contract_id,240);
+    await js(`document.querySelector('[data-resize="$state"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Home',bubbles:true}))`);
+    await until(async()=> !Object.hasOwn((await js('window.crm.draft("registry-view")')).data.widths,'$state'),'single width reset');
+    assert.equal((await js('window.crm.draft("registry-view")')).data.widths.contract_id,240);
+    await click('#registry-reset-widths');
+    await until(async()=> Object.keys((await js('window.crm.draft("registry-view")')).data.widths).length===0,'all widths reset');
+    assert.equal(await js('document.querySelector("#registry-zoom").value'),'125');
+    assert.equal((await js('window.crm.draft("registry-colors")')).data[checkpoint.contract],'yellow');
+    await fill('#registry-search','QA no matching contract');await click('#registry-find');
+    await until(()=>js('document.querySelectorAll(".registry-grid tbody tr").length===0'),'empty filtered registry');
+    assert.equal(await js('document.querySelector("#registry-color").disabled'),true);
+    fs.writeFileSync(path.join(qa,'RESULT.json'),JSON.stringify({passed:true,actual_main:true,actual_preload:true,protected_queue:true,restart_draft_and_colors:true,column_widths_pointer_keyboard_restart:true,zoom_and_sticky_geometry:true,range_survives_reload_and_restart:true,table_preferences_separate_identities:true,lost_ack_idempotent:true,foreign_owner_rejected:true,personal_colors_separate_identities:true,conflict_restaged_and_confirmed:true,read_only_paste_atomic:true,escape_undo:true,no_fake_work:true,business_card:true,active_time_screen:true,prelogin_and_authenticated_diagnostics:true},null,2));
     app.quit();
   }catch(error){
     fs.writeFileSync(path.join(qa,'failure.txt'),String(error)+'\n'+(win?await win.webContents.executeJavaScript('document.body.innerText'):''));
