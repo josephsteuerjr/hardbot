@@ -13,7 +13,7 @@ SCHEMAS = {
 
 def allowed(path):
     return (path.endswith(".py") and path.startswith(("pult/", "registry_cycle/", "server/"))
-            or path in SCHEMAS)
+            or path in SCHEMAS or path.startswith('server/miniapp/'))
 
 
 def source_manifest(repo):

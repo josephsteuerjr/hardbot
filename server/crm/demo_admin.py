@@ -47,11 +47,14 @@ def endpoint(p):
                 site=web.TCPSite(runner,'127.0.0.1',0);await site.start()
                 result['url']='http://127.0.0.1:'+str(site._server.sockets[0].getsockname()[1])
             try:loop.run_until_complete(start())
-            except Exception as exc:result['error']=type(exc).__name__
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                result['error']=type(exc).__name__
             finally:ready.set()
             if 'url' in result:loop.run_forever()
         threading.Thread(target=serve,name='crm-demo-primary',daemon=True).start()
-        if not ready.wait(20) or 'url' not in result:raise RuntimeError('Demo primary did not start')
+        if not ready.wait(20) or 'url' not in result:raise RuntimeError('Demo primary did not start: '+result.get('error','timeout'))
         from pult.core.account_session import login
         try:session=login(result['url'],username,second,Path(db.DB_PATH).with_name('demo-admin-settings.json'))
         except RuntimeError as exc:
