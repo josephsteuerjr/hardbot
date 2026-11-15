@@ -28,5 +28,6 @@ contextBridge.exposeInMainWorld("crm", {
     ipcRenderer.invoke("crm:workbook", action, input),
   document: (contract: string, id?: string) =>
     ipcRenderer.invoke("crm:document", contract, id),
+  admin:(action:string,args:unknown[],expectedOwner:string)=>ipcRenderer.invoke('crm:admin',action,args,expectedOwner),
   win: (action: string) => ipcRenderer.send("crm:win", action),
 });

@@ -267,14 +267,18 @@ def read_header_grid(path: str, rows: int = 12) -> list[list]:
     """
     import exchange_contract as contract
 
-    from .workbook import read_workbook_sheets
+    from io import BytesIO
+    from pathlib import Path
+    from python_calamine import CalamineWorkbook
+    from .workbook import cell_json
 
-    sheets = read_workbook_sheets(path)
-    for sheet in sheets:
-        if sheet["name"] == contract.WORKBOOK_SHEET_NAME:
-            return list(sheet["grid"][:rows])
-    raise ValueError(
-        f"в книге нет листа «{contract.WORKBOOK_SHEET_NAME}»")
+    # Sequential SMB read once; ZIP seeks and sheet parsing stay in memory.
+    # Profile discovery needs only this header, not every cell on every sheet.
+    with CalamineWorkbook.from_filelike(BytesIO(Path(path).read_bytes())) as book:
+        if contract.WORKBOOK_SHEET_NAME not in book.sheet_names:
+            raise ValueError(f"в книге нет листа «{contract.WORKBOOK_SHEET_NAME}»")
+        grid=book.get_sheet_by_name(contract.WORKBOOK_SHEET_NAME).to_python(nrows=max(0,rows))
+        return [[cell_json(cell) for cell in row] for row in grid]
 
 
 # Решения оператора в таблице экрана. Ключ «field:<key>» строится на лету.

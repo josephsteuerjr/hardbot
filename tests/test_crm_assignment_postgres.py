@@ -13,10 +13,11 @@ from test_crm_postgres import pg_world
 import test_crm_assignments as cases
 import test_crm_manager_card as card_cases
 import test_crm_manager_reports as report_cases
+import test_crm_analyst as analyst_cases
 
 pytestmark=pytest.mark.skipif(not os.environ.get('HARD_CRM_TEST_DSN_FILE'),reason='Requires isolated PostgreSQL QA database')
 
-CASES=[f for module in (cases,card_cases,report_cases) for n,f in vars(module).items() if n.startswith('test_') and callable(f) and set(inspect.signature(f).parameters)=={'crm_world'}]
+CASES=[f for module in (cases,card_cases,report_cases,analyst_cases) for n,f in vars(module).items() if n.startswith('test_') and callable(f) and set(inspect.signature(f).parameters)=={'crm_world'}]
 
 
 def test_report_snapshots_and_independent_jobs_in_postgres(pg_world,monkeypatch):

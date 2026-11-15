@@ -203,12 +203,12 @@ def summary_from_book(blob: bytes) -> list[tuple[str, int]]:
     """Итоги со строки «Итого» листа «Сводка»: [(подпись, число)]."""
     import io
 
-    from openpyxl import load_workbook
+    from python_calamine import CalamineWorkbook
 
-    wb = load_workbook(io.BytesIO(blob), read_only=True, data_only=True)
-    if "Сводка" not in wb.sheetnames:
+    wb = CalamineWorkbook.from_filelike(io.BytesIO(blob))
+    if "Сводка" not in wb.sheet_names:
         return []
-    rows = list(wb["Сводка"].iter_rows(min_row=3, values_only=True))
+    rows = wb.get_sheet_by_name('Сводка').to_python(skip_empty_area=False)[2:]
     if not rows:
         return []
     head = [str(h or "") for h in rows[0]]

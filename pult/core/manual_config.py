@@ -27,6 +27,32 @@ def preferred_path(path,config=None):
     if len(matches)>1:raise ValueError('Несколько выбранных активных книг в одной папке')
     return matches[0] if matches else path
 
+class PreferredBooks:
+    """One discovery's manifest and canonical folder identities, never global.
+
+    Resolving an SMB path is network I/O. Reuse it within a scan, while a new
+    scan always reloads the manifest and rechecks aliases and duplicate choices.
+    """
+    def __init__(self, config=None):
+        self.config=load_config() if config is None else config
+        self.keys={}
+        self.folders={}
+        for name in self.config.get('preferred_books',[]):
+            path=Path(name)
+            self.folders.setdefault(self.key(path.parent),[]).append(path)
+
+    def key(self,path):
+        raw=str(path).casefold()
+        if raw not in self.keys:self.keys[raw]=Store.key(path)
+        return self.keys[raw]
+
+    def __call__(self,path):
+        path=Path(path)
+        if not self.folders:return path
+        matches=self.folders.get(self.key(path.parent),[])
+        if len(matches)>1:raise ValueError('Несколько выбранных активных книг в одной папке')
+        return matches[0] if matches else path
+
 def department_folders(root,config=None,*,extra_active_names=()):
     """Bounded employee folders; legacy nested Hard books need an active Soft peer.
 

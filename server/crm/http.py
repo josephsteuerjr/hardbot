@@ -135,6 +135,9 @@ def install(app, host=None, *, authenticate=None):
                     result = await asyncio.to_thread(assignments.history,p,**dict(request.query))
                 elif action == 'assignment-job':
                     result = await asyncio.to_thread(assignments.job,p,**dict(request.query))
+                elif action in {'analyst-report','analyst-statistics'}:
+                    if p.role!='analyst':raise CRMError('Требуется вход Аналитика.','forbidden',403)
+                    result=await asyncio.to_thread(manager_reports.read if action=='analyst-report' else assignments.statistics,p,**dict(request.query))
                 elif action == 'manager-statistics':
                     result = await asyncio.to_thread(assignments.statistics,p,**dict(request.query))
                 elif action == 'manager-report':

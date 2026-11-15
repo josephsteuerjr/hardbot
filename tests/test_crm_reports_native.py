@@ -10,6 +10,38 @@ from test_crm_core import crm_world
 
 pytestmark=pytest.mark.skipif(os.name!='nt',reason='Native Windows Excel required')
 
+def test_administrator_table_preserves_literal_text_and_numeric_values(tmp_path):
+    from python_calamine import CalamineWorkbook
+    report={'headers':['Сотрудник','Комментарий','Количество'], 'rows':[['Тест','=1+1',3],['Другой','00125',0]]}
+    output=tmp_path/'admin-table.xlsx'
+    assert crm_reports.write(report,output,'table')['verified']
+    rows=CalamineWorkbook.from_path(str(output)).get_sheet_by_name('Данные').to_python()
+    assert rows[1]==['Тест','=1+1',3] and rows[2]==['Другой','00125',0]
+
+def test_mail_summary_reads_native_excel_bytes(tmp_path):
+    from pult.core.mailer import summary_from_book
+    output=tmp_path/'mail-summary.xlsx'
+    with crm_reports.excel() as app:
+        book=app.books.add();sheet=book.sheets[0];sheet.name='Сводка'
+        sheet.range('A3').value=[['Сотрудник','Посещено сегодня','Оплачен сегодня'],['Тест',3,2],['Итого',3,2]]
+        book.save(str(output));book.close()
+    summary=dict(summary_from_book(output.read_bytes()))
+    assert summary['Оплатили']==2
+
+def test_legacy_administrator_exports_use_native_excel(tmp_path):
+    from datetime import datetime
+    from python_calamine import CalamineWorkbook
+    from pult.core.export import write_registry_xlsx,write_markers_xlsx
+    fields=[dict(key='client',title='Клиент',block='Клиент',source='Общий'),dict(key='contract_id',title='КД',block='Договор',source='Общий'),dict(key='debt',title='Долг',block='Договор',source='Общий',num=True)]
+    output=tmp_path/'legacy-register.xlsx'
+    write_registry_xlsx(str(output),fields,[dict(client='=1+1',contract_id='00123',debt='125.50')])
+    row=CalamineWorkbook.from_path(str(output)).get_sheet_by_name('Портфели').to_python()[3]
+    assert row==['=1+1','00123',125.5]
+    markers=tmp_path/'markers.xlsx'
+    write_markers_xlsx(str(markers),[dict(created_at='2026-11-15T12:13:14',kind='office',telegram_id=123,rep='0001',client='=2+2',address='Тестовый адрес',label='Тест',lat=1.5,lon=2.25)])
+    row=CalamineWorkbook.from_path(str(markers)).get_sheet_by_name('Метки').to_python()[1]
+    assert row[0]==datetime(2026,11,15,12,13,14) and row[3:5]==['0001','=2+2'] and row[7:]==[1.5,2.25]
+
 
 def test_manager_month_and_dynamics_exports(crm_world,tmp_path):
     from crm import manager_reports,assignments

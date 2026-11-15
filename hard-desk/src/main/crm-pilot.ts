@@ -13,7 +13,8 @@ import {
 } from "./store";
 import { fetchBuffered } from "./transport";
 import * as queue from "./crm-queue";
-import { PILOT_BASE, existingManagerStatus, existingLogins, ENTRY_SOURCES, EntrySource,readExistingManagerSession } from "./crm-manager-login";
+import { PILOT_BASE, existingManagerStatus, existingLogins, ENTRY_SOURCES, EntrySource,readExistingManagerSession,readExistingLogin } from "./crm-manager-login";
+import {AnalystRuntime} from './crm-analyst-runtime';
 import { pilotCredential } from "./crm-pilot-session";
 import {ThreeHourReports} from './crm-report-scheduler';
 import {ActiveTime} from './crm-active-time';
@@ -122,6 +123,8 @@ async function backendStart() {
         HARD_CRM_DATABASE_URL_FILE: "",
         HARD_CRM_DOCUMENTS: "",
         HARD_CRM_ELECTRON_PID: String(process.pid),
+        HARD_CLIENT_VERSION: app.getVersion().split('-')[0],
+        HARD_CLIENT_PRODUCT: 'analyst',
         PYTHONIOENCODING: "utf-8",
         HARD_PULT_SETTINGS: join(home, "unused-settings.json"),
       },
@@ -278,6 +281,7 @@ const actions = new Set([
   'cabinet',
   'three-hour',
   'manager-report',
+  'analyst-report','analyst-statistics',
   "script",
   "anchor",
   "command",
@@ -384,6 +388,26 @@ const send:queue.Transport=async(method,action,body,query)=>{
   diagnostic(stage,result.ok?'confirmed':result.status===401?'login_required':result.status===403?'access_denied':result.status===409?'requires_review':result.status===0?'network_unavailable':'api_error',result.ok,{status:result.status});
   return result;
 };
+
+const analystRuntime=new AnalystRuntime({home:data,window:()=>win,synthetic:demo,
+  writeTable:(report,path)=>local('report-write',{report,path,kind:'table'}),
+  authorize:async expected=>{
+    if(!expected||expected!==owner||currentContext?.role!=='analyst')throw Error('Нужен действующий вход Аналитика.');
+    const actor=currentContext.actor_uid;
+    const result=await send('GET','context');
+    if(!result.ok||result.data?.role!=='analyst'||expected!==owner||currentContext?.role!=='analyst'||result.data?.actor_uid!==actor)
+      throw Error('Сервер не подтвердил полномочия Аналитика.');
+    if(demo()){
+      const endpoint=await local('analyst-admin-init',{});
+      if(!endpoint.ok)throw Error(endpoint.text||'Не удалось открыть проверочный административный контур.');
+      if(expected!==owner||currentContext?.role!=='analyst'||currentContext?.actor_uid!==actor)throw Error('Вход Аналитика изменился.');
+      return {owner:expected,actor,...endpoint.data};
+    }
+    if(!shared()||entrySource()!=='analyst')throw Error('Подключите сохранённый вход установленного Аналитика.');
+    const login=readExistingLogin('analyst');
+    return {owner:expected,actor,url:'https://hard.rimborso.ru',
+      token:(login.kind==='analyst'?'account:':'')+login.credential,fingerprint:login.fingerprint};
+  }});
 
 const live=new CrmLive(query=>send('GET','changes',undefined,query),()=>owner,
   authority=>queue.draft(authority,'live-cursor'),
@@ -549,6 +573,7 @@ app
       if (!url.startsWith("hard://app/")) event.preventDefault();
     });
     safeHandler("crm:state", () => ({
+      product: PRODUCTS.crm.name,
       ok: true,
       version: app.getVersion(),
       connection: {
@@ -567,6 +592,7 @@ app
       activity:{clock_quality:clock?'anchored':'unconfirmed',idle_threshold_seconds:120,last_confirmed_at:lastConfirmedAt},
     }));
     safeHandler('crm:ui-ready',()=>{rendererReady=true;diagnostic('renderer','renderer_ready',true);return {ok:true};});
+    safeHandler('crm:admin',(action:string,args:any[],expected:string)=>analystRuntime.request(action,args,expected));
     safeHandler('crm:diagnostics',async(repair:boolean=false)=>{rendererReady=true;return diagnostics(repair===true);});
     safeHandler('crm:diagnostics-report',async()=>{
       const choice=await dialog.showSaveDialog(win!,{title:'Диагностика CRM',defaultPath:'CRM-диагностика-'+Date.now()+'.json',filters:[{name:'JSON',extensions:['json']}]});
@@ -584,7 +610,7 @@ app
         if (authority !== owner && result.ok)
           return { ok: false, status: 409, text: "Учётная запись изменилась." };
         const key = action + JSON.stringify(query || {});
-        const freshOnly=action==='changes'||action.startsWith('assignment-')||action==='managed-portfolio'||action==='manager-statistics'||action==='manager-report';
+        const freshOnly=action==='changes'||action.startsWith('assignment-')||action==='managed-portfolio'||action==='manager-statistics'||action==='manager-report'||action==='analyst-report'||action==='analyst-statistics';
         if (result.ok && method === "GET" && owner && !freshOnly)
           queue.cache(owner, key, result.data);
         else if (method === "GET" && result.status === 0 && owner && !freshOnly) {
@@ -754,11 +780,11 @@ app
       return identify();
     });
     safeHandler("crm:workbook", async (action: string, input: any) => {
-      if(action==='manager-report'){
+      if(action==='manager-report'||action==='analyst-report'){
         const authority=owner;
         if(!authority)throw new Error('Сначала подтвердите вход.');
         const month=input?.mode==='month',dynamics=input?.mode==='dynamics';
-        const result=await send('GET',month?'manager-statistics':'manager-report',undefined,month?{month:input.month}:input?.snapshot_id&&!dynamics?{snapshot_id:input.snapshot_id}:{day:input?.day});
+        const result=await send('GET',action==='analyst-report'?(month?'analyst-statistics':'analyst-report'):(month?'manager-statistics':'manager-report'),undefined,month?{month:input.month}:input?.snapshot_id&&!dynamics?{snapshot_id:input.snapshot_id}:{day:input?.day});
         if(!result.ok)return result;
         const report=month||dynamics?result.data:result.data.report;
         const choice=await dialog.showSaveDialog(win!,{title:'Отчёт руководителя',defaultPath:`Отчёт ${month?report.month:dynamics?report.day:report.today} ${new Date().toISOString().replace(/[^0-9]/g,'').slice(8,14)}.xlsx`,filters:[{name:'Excel',extensions:['xlsx']}]});

@@ -22,6 +22,10 @@ let viewScroller: Scroller | null = null;
 let panelScroller: Scroller | null = null;
 let renderSeq = 0;
 let panelReturn: HTMLElement | null = null;
+type EmbeddedShell = {go(id:string,params:Record<string,unknown>):Promise<void>;refresh():Promise<void>;
+  openPanel(title:string,body:string):HTMLElement;closePanel():void;panelOpen():boolean;hasSection(id:string):boolean;currentId():string;setHead(title:string,kicker:string,tools:string):void};
+let embedded:EmbeddedShell|undefined;
+export function setEmbeddedShell(value:EmbeddedShell):()=>void {embedded=value;return()=>{if(embedded===value)embedded=undefined;};}
 
 export function mountShell(sign: string): void {
   const app = $("app");
@@ -81,12 +85,14 @@ export function setWho(html: string): void {
 }
 
 export function setHead(title: string, kicker = "", tools = ""): void {
+  if(embedded){embedded.setHead(title,kicker,tools);return;}
   $("head-title").textContent = title;
   $("head-kicker").textContent = kicker;
   $("head-tools").innerHTML = tools;
 }
 
 export async function go(id: string, params: Record<string, unknown> = {}): Promise<void> {
+  if(embedded)return embedded.go(id,params);
   if(document.querySelector('#panel-inner [data-saving="1"]')){toast("Дождитесь сохранения записи");return}
   const s = sections.find((x) => x.id === id) ?? sections[0];
   if (!s) return;
@@ -109,14 +115,16 @@ export async function go(id: string, params: Record<string, unknown> = {}): Prom
 }
 
 export function refresh(): Promise<void> {
+  if(embedded)return embedded.refresh();
   return current ? go(current.id, currentParams) : Promise.resolve();
 }
 
 export function currentId(): string {
+  if(embedded)return embedded.currentId();
   return current?.id ?? "";
 }
 
-export function hasSection(id: string): boolean { return sections.some(section => section.id === id); }
+export function hasSection(id: string): boolean { return embedded?embedded.hasSection(id):sections.some(section => section.id === id); }
 
 export function currentContext(): { id: string; params: Record<string, unknown> } {
   return { id: currentId(), params: { ...currentParams } };
@@ -129,6 +137,7 @@ export function preserve(fn: () => void): void {
 }
 
 export function openPanel(titleHtml: string, bodyHtml = '<div class="skeleton"></div><div class="skeleton"></div>'): HTMLElement {
+  if(embedded)return embedded.openPanel(titleHtml,bodyHtml);
   $("app").classList.remove('with-call-script');
   const focused = document.activeElement as HTMLElement | null;
   if (focused?.closest("#view-inner")) panelReturn = focused;
@@ -141,6 +150,7 @@ export function openPanel(titleHtml: string, bodyHtml = '<div class="skeleton"><
 }
 
 export function closePanel(): void {
+  if(embedded){embedded.closePanel();return;}
   if(document.querySelector('#panel-inner [data-saving="1"]')){toast("Дождитесь сохранения записи");return}
   $("app").classList.remove("with-panel");
   $("app").classList.remove('with-call-script');
@@ -151,5 +161,6 @@ export function closePanel(): void {
 }
 
 export function panelOpen(): boolean {
+  if(embedded)return embedded.panelOpen();
   return $("app").classList.contains("with-panel");
 }

@@ -58,6 +58,9 @@ class Store:
                 CREATE TABLE IF NOT EXISTS books(
                     run_id TEXT NOT NULL, ordinal INTEGER NOT NULL, payload TEXT NOT NULL,
                     PRIMARY KEY(run_id,ordinal));
+                CREATE TABLE IF NOT EXISTS accepted_file_values(
+                    authority TEXT NOT NULL, identity TEXT NOT NULL, payload TEXT NOT NULL,
+                    PRIMARY KEY(authority,identity));
                 CREATE UNIQUE INDEX IF NOT EXISTS one_active_run ON runs(authority) WHERE state<>'done';
             ''')
 
@@ -127,6 +130,17 @@ class Store:
             raise ValueError('Не подтверждён сохранённый источник переноса')
         return self.codec.open(path.read_text('utf-8'))
 
+    def accepted(self, owner):
+        with self.connect() as conn:
+            rows=conn.execute('SELECT payload FROM accepted_file_values WHERE authority=?',(owner,)).fetchall()
+        return [self.codec.open(row[0]) for row in rows]
+
+    def accept(self, owner, value):
+        identity=digest([value['book_path'],value['contract_id'],value['key']])
+        with self.connect() as conn:
+            conn.execute('INSERT INTO accepted_file_values VALUES(?,?,?) ON CONFLICT(authority,identity) DO UPDATE SET payload=excluded.payload',
+                         (owner,identity,self.codec.seal(value)))
+
 
 class Service:
     def __init__(self, directory, owner, admin):
@@ -137,6 +151,34 @@ class Service:
 
     def current(self):
         return self.store.active(self.owner())
+
+    @staticmethod
+    def review_identity(job, cid):
+        import enrich
+        identities=[]
+        for row in job['rows']:
+            if enrich.norm_cid(row.get('contract_id')) != cid:continue
+            if not row.get('client') or not row.get('partner'):return None
+            identities.append([enrich.norm_name(row.get(k)) for k in
+                ('partner','client','responsible','responsible_soft','_profile')]+[
+                str(row.get(k) or '') for k in ('app_call_edited_at','app_visit_edited_at')])
+        return digest(identities[0]) if identities and all(i==identities[0] for i in identities) else None
+
+    def remembered_choices(self, jobs, conflicts):
+        """Reuse only the same accepted file/source fact, identity and login."""
+        import enrich
+        from . import enrichment as en
+        accepted={en.conflict_key(r):r for r in self.store.accepted(self.owner())}
+        bypath={enrich.canonical_book_key(j['path']):j for j in jobs}
+        choices=[]
+        for row in conflicts:
+            path=enrich.canonical_book_key(row['book_path'])
+            key=(path,str(row['contract_id']),str(row['key']))
+            old=accepted.get(key);job=bypath.get(path)
+            if old and job and old.get('source_identity')==self.review_identity(job,row['contract_id']) and all(
+                    str(old.get(k,''))==str(row.get(k,'')) for k in ('file','server','visit_date')):
+                choices.append({**row,'decision':'file','remembered':True})
+        return choices
 
     def require_complete(self):
         run = self.current()
@@ -186,11 +228,16 @@ class Service:
     def prepare(self, run_id, jobs, fields, since, until, approved, fingerprint='enrichment'):
         self.require_complete()
         # Paths and key spelling are frozen, including UNC versus mapped drives.
-        normalized = [{**job, 'path': str(Path(job['path']).resolve())} for job in jobs]
         import enrich
+        canonical={}
+        def resolve(path):
+            key=enrich.book_key(path)
+            if key not in canonical:canonical[key]=str(Path(path).resolve())
+            return canonical[key]
+        normalized = [{**job, 'path': resolve(job['path'])} for job in jobs]
         choices=[]
         for row in approved:
-            choices.append({**row, 'book_path':str(Path(row['book_path']).resolve())})
+            choices.append({**row, 'book_path':resolve(row['book_path'])})
         run = self.store.create(run_id, self.owner(),
                                 dict(jobs=normalized, fields=fields, since=since, until=until), choices,fingerprint)
         return run
@@ -301,12 +348,29 @@ class Service:
         if preview.get('error'):
             self._attention(run,item,preview['error']);return
         if preview.get('missing'):
-            item['missing']=preview['missing']
-            self._attention(run,item,'В книге нет договоров из выбранного переноса: '+', '.join(str(x) for x in preview['missing'][:12])+'. Сверьте с текущим общим реестром: назначения могли измениться.',reason='missing');return
+            # An absent row cannot receive values, but must not block the
+            # existing rows. Retain the exact source and the excluded IDs;
+            # neither a fabricated row nor a delivery entry is created.
+            item.setdefault('omissions',[]).extend(dict(
+                contract_id=cid,reason='absent_from_book',
+                source_sha256=run['source_sha256'],
+                book_sha256=preview['file_sha256'],at=time.time())
+                for cid in preview['missing'])
+            item.pop('missing',None)
+            self.store.save_book(run['id'],item)
+            job=self.effective_job(inputs['jobs'][item['ordinal']],item)
+            preview=enrich.preview_many([job],inputs['fields'],since=inputs['since'],until=inputs['until'],ledger=ledger)[0]
+            if preview.get('error') or preview.get('missing'):
+                self._attention(run,item,preview.get('error') or 'Состав книги изменился во время проверки; повторите проверку.');return
         item.pop('missing',None)
         approved={en.conflict_key(row):row for row in item.get('approved',[])}
         decisions={};unreviewed=[]
         ordinary,office=en.collect_conflicts([preview])
+        remembered=self.remembered_choices([job],ordinary+office)
+        for choice in remembered:
+            key=en.conflict_key(choice)
+            if key not in approved:
+                approved[key]=choice;item.setdefault('approved',[]).append(choice)
         for conflict in ordinary+office:
             chosen=approved.get(en.conflict_key(conflict))
             if chosen and chosen['decision'] in ('file','server') and all(str(chosen.get(k,''))==str(conflict.get(k,'')) for k in ('file','server','delivered','visit_date')):
@@ -364,6 +428,17 @@ class Service:
     def _finish(self,run,item,inputs):
         import enrich
         result=item['result'];entries=enrich.ledger_entries_of([result])
+        # A file choice for a promise retains its date and amount together.
+        # The writer records the exact companion preimage for post-check/restart.
+        from . import enrichment as en
+        accepted_ids={r['contract_id'] for r in item.get('approved',[]) if r['decision']=='file'
+                      and r['key'] in ('promise_date','forecast_sum')}
+        old_keys={en.conflict_key(r) for r in item.get('approved',[])}
+        for row in result.get('coupled_file_choices') or []:
+            choice={**row,'book_path':item['file'],'employee':item['employee']}
+            key=en.conflict_key(choice)
+            if choice['contract_id'] in accepted_ids and key not in old_keys:
+                item.setdefault('approved',[]).append(choice);old_keys.add(key)
         if result.get('written_unverified'):
             self._attention(run,item,'Не завершена проверка записанного файла; повторная запись запрещена.');return
         if entries and not item.get('ledger_ack'):
@@ -425,6 +500,12 @@ class Service:
             self._attention(run,item,post.get('error') or 'После записи остались различия. Проверьте книгу; повторная запись не выполняется.');return
         item.update(state='done',message='Книга и история доставки проверены',verified_sha256=post['file_sha256'])
         item.pop('reason_code',None)
+        for choice in item.get('approved',[]):
+            if choice['decision']!='file' or en.conflict_key(choice) not in choices:continue
+            identity=self.review_identity(job,choice['contract_id'])
+            if identity:
+                self.store.accept(run['authority'],{**choice,'book_path':enrich.canonical_book_key(item['file']),
+                    'source_identity':identity,'verified_run':run['id']})
         self.store.save_book(run['id'],item)
 
     def preview_reconciliation(self,book):
@@ -484,6 +565,15 @@ class Service:
         for item in self.store.books(run_id):
             if item['state']=='done':continue
             if item.get('conflicts'):
+                if not decisions and review_token is None:
+                    # A book can change while review is open. Explicit refresh
+                    # must obtain a new SHA and choices; previous approvals stay
+                    # exact-bound and _book refuses any newly changed value.
+                    for key in ('conflicts','review_sha256','review_token'):
+                        item.pop(key,None)
+                    item.update(state='waiting',next_retry=0,message='Ожидает новой проверки значений книги')
+                    self.store.save_book(run_id,item)
+                    continue
                 if review_token!=item.get('review_token'):continue
                 if file_sha(item['file'])!=item.get('review_sha256'):raise ValueError('Книгу изменили после проверки; обновите список ошибок')
                 from . import enrichment as en

@@ -3,6 +3,7 @@ import {mountRegistry} from './crm-registry';
 import {editClientCard} from './crm-card-editor';
 import {mountManagerReports} from './crm-manager-reports';
 import {mountManagerTeam} from './crm-manager-team';
+import {mountAnalyst} from './crm-analyst';
 type API = {
   ready?():Promise<any>;
   state(): Promise<any>;
@@ -18,6 +19,7 @@ type API = {
   connect(input: any): Promise<any>;
   workbook(action: string, input?: any): Promise<any>;
   document(contract: string, id?: string): Promise<any>;
+  admin(action:string,args:any[],expectedOwner:string):Promise<any>;
   win(action: string): void;
 };
 const crm = (window as any).crm as API;
@@ -67,6 +69,7 @@ let state: any,
 let portfolioView='mine', portfolioWork='all', portfolioEmployee='', portfolioSearch='', portfolioOffset=0;
 let disposeSection:(()=>void)|undefined;
 let portfolioIdentity='',portfolioGeneration=0;
+let analystIdentity='';
 const sectionScroll=new Map<string,number>();
 let taskStatus='open',taskEmployee='all',taskWork='all',taskSearch='',taskOffset=0,taskGeneration=0;
 let cardOrigin='portfolio',taskSelectClient=false,newTaskAssignee='';
@@ -239,7 +242,12 @@ const table = (heads: string[], rows: string[]) =>
 async function boot() {
   await crm.ready?.();
   state = await crm.state();
+  document.title=state.product||'Взыскание';
+  if(analystIdentity&&analystIdentity!==state.owner){location.reload();return;}
   context = state.context;
+  document.body.classList.toggle('crm-analyst',context?.role==='analyst');
+  if(context?.role==='analyst')analystIdentity=state.owner;
+  if(context?.role==='analyst'&&!['registry','exchange','statistics','team','connection'].includes(section))section='registry';
   if (portfolioIdentity!==context?.employee_uuid) {
     sectionScroll.clear();
     taskSelectClient=false;newTaskAssignee='';cardOrigin='portfolio';
@@ -269,7 +277,9 @@ async function boot() {
       ? "Синтетические данные"
       : state.connection.mode === 'unconfigured' ? 'Не подключено' : state.connection.server) + (state.offline ? " · офлайн" : "");
   const manager=['manager','owner'].includes(context?.role);
-  const sections = context?.role==='employee' ? [
+  const sections = context?.role==='analyst' ? [
+    ['registry','Реестр'],['exchange','Обмен'],['statistics','Показатели'],['team','Команда'],['connection','Подключение'],
+  ] : context?.role==='employee' ? [
     ['portfolio','Портфель'],['registry','Реестр'],['cabinet','Мои показатели'],
     ['active-time','Активное время'],['connection','Подключение'],
   ] : manager ? [
@@ -323,6 +333,7 @@ async function go(next: string) {
       portfolio: "Портфель",
       overview:'Обзор',
       'manager-statistics':'Показатели команды',
+      statistics:'Показатели',
       team:'Команда',
       registry:'Реестр',
       'active-time':'Активное время',
@@ -331,7 +342,7 @@ async function go(next: string) {
       cabinet:'Показатели сотрудника',
       script: "Скрипт звонка",
       queue: "Очередь",
-      exchange: "Реестры",
+      exchange: context?.role==='analyst'?'Обмен':"Реестры",
       adoption: "Внедрение",
       connection: "Подключение",
       help: "Справка",
@@ -362,6 +373,20 @@ async function go(next: string) {
     )[next],
   );
   try {
+    if(context?.role==='analyst'&&['registry','exchange','statistics','team','connection'].includes(next)){
+      const expectedOwner=state.owner,valid=()=>generation===renderGeneration;
+      const api={...crm,api:(method:string,action:string,body?:any,query?:any)=>crm.api(method,action==='manager-report'?'analyst-report':action==='manager-statistics'?'analyst-statistics':action,body,query),
+        workbook:(action:string,input?:any)=>crm.workbook(action==='manager-report'?'analyst-report':action,input),
+        draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:(action?:string,id?:string)=>crm.queue(action,id,expectedOwner)};
+      const stop=await mountAnalyst($('view'),next,api,valid,{owner:expectedOwner,navigate:go,core:{
+        table:async(host,current)=>mountRegistry(host,api,current,{manager:true,distribution:context.distribution?.enabled,openPerson:id=>void openCard(id).catch(e=>notice(e.message))}),
+        reports:async(host,current)=>mountManagerReports(host,api,current),
+        scripts:async host=>script(host),
+        'crm-books':async host=>exchangePage(host),queue:async host=>queuePage(host),connection:async host=>connection(host),
+      }});
+      if(valid())disposeSection=stop;else stop();
+      return;
+    }
     await (
       {
         portfolio,
@@ -589,7 +614,7 @@ async function renderCard() {
     `<div class="toolbar">${button("back", cardOrigin==='tasks'?'← Задачи':"← Портфель")}${button('card-refresh','Обновить карточку')}${actions.map((k) => `<button data-action="${k}"${k === "call" ? ' class="primary"' : ""}>${labels[k]}</button>`).join("")}</div><section id="card-saves" aria-label="Отправка результатов"></section><div class="tabs">${tabs.map(([id, title]) => `<button data-tab="${id}" class="${tab === id ? "active" : ""}">${title}</button>`).join("")}</div><div class="card-workspace${cardScript?.script ? ' with-script' : ''}"><div id="card-content"></div>${cardScript?.script ? `<aside class="card-script-watermark" aria-label="Скрипт разговора"><h2>${esc(cardScript.script.title)}</h2>${cardScript.script.steps.map((step: any) => `<section><h3>${esc(step.title)}</h3><p>${esc(step.text)}</p></section>`).join('')}<small>Версия ${esc(cardScript.published_revision)}</small></aside>` : ''}</div>`;
   $('back').textContent=cardOrigin==='tasks'?'← Задачи':cardOrigin==='registry'?'← Реестр':'← Портфель';
   bind("back", () => go(cardOrigin));
-  if(['manager','owner'].includes(context.role)&&card.contracts.some((r:any)=>r.writable_fields?.length)){
+  if(['manager','owner','analyst'].includes(context.role)&&card.contracts.some((r:any)=>r.writable_fields?.length)){
     $('card-refresh').insertAdjacentHTML('beforebegin',button('card-edit','Редактировать карточку',true));
     bind('card-edit',async()=>{
       const generation=renderGeneration,expectedOwner=state.owner;
@@ -1006,7 +1031,8 @@ async function documentForm() {
   dialog.showModal();
 }
 
-async function queuePage() {
+async function queuePage(host:HTMLElement=document.getElementById('view')!) {
+  const $=<T extends HTMLElement=HTMLElement>(id:string)=>(id==='view'?host:host.querySelector('#'+id)) as T;
   const result = await crm.queue();
   if (!result.ok) throw new Error(result.text);
   const entries = result.data.entries;
@@ -1151,7 +1177,8 @@ function scriptMarkup(data: any) {
     ? `<h3>${esc(data.script.title)}</h3><p class="muted">Версия ${data.published_revision} · ${date(data.published_at)}</p>${data.script.steps.map((s: any, i: number) => `<article class="script-step"><h3>${i + 1}. ${esc(s.title)}</h3><p>${esc(s.text)}</p><button type="button" data-script-used>Шаг использован</button></article>`).join("")}`
     : '<div class="empty">Руководитель ещё не опубликовал скрипт</div>';
 }
-async function script() {
+async function script(host:HTMLElement=document.getElementById('view')!) {
+  const $=<T extends HTMLElement=HTMLElement>(id:string)=>(id==='view'?host:host.querySelector('#'+id)) as T;
   const data = await request("GET", "script");
   scriptOpened = data;
   telemetry("script_shown", "script");
@@ -1166,7 +1193,7 @@ async function script() {
       action: "publish",
       base_revision: data.revision,
     });
-    await script();
+    await script(host);
   });
   bind("script-withdraw", async () => {
     await request("POST", "script", {
@@ -1174,11 +1201,11 @@ async function script() {
       action: "withdraw",
       base_revision: data.revision,
     });
-    await script();
+    await script(host);
   });
-  bind("script-edit", () => scriptEditor(data));
+  bind("script-edit", () => scriptEditor(data,()=>script(host)));
 }
-function scriptEditor(data: any) {
+function scriptEditor(data: any,refresh:()=>Promise<void>=()=>script()) {
   const dialog = $<HTMLDialogElement>("dialog");
   const content = data.draft ||
     data.script || { title: "", steps: [{ title: "", text: "" }] };
@@ -1214,7 +1241,7 @@ function scriptEditor(data: any) {
         content,
       });
       dialog.close();
-      await script();
+      await refresh();
     } catch (error) {
       $("script-error").textContent = (error as Error).message;
     }
@@ -1225,13 +1252,32 @@ function stepEditor(s: any) {
   return `<div class="field script-step" data-script-step><label>Шаг</label><input maxlength="80" value="${esc(s.title)}"><textarea maxlength="6000">${esc(s.text)}</textarea></div>`;
 }
 
-async function exchangePage() {
+async function exchangePage(host:HTMLElement=document.getElementById('view')!) {
+  const $=<T extends HTMLElement=HTMLElement>(id:string)=>(id==='view'?host:host.querySelector('#'+id)) as T;
+  const expectedOwner=state.owner;
+  const intent=()=>crm.draft('workbook-import-intent',undefined,expectedOwner);
+  const applySaved=async()=>{
+    const stored=await intent();const body=stored.data;
+    if(!body)throw Error('Нет сохранённой операции сверки.');
+    const result=await crm.api('POST','import-apply',body);
+    if(result.ok){
+      await crm.draft('workbook-import-intent',null,expectedOwner);
+      $('import-recovery')?.replaceChildren();
+      $('exchange-result').innerHTML=`<article class="record"><h3>Импорт подтверждён</h3><p>Строк: ${result.data.changed_rows} · Полей: ${result.data.changed_cells}</p></article>`;
+      return;
+    }
+    if([400,409,422].includes(result.status))await crm.draft('workbook-import-intent',null,expectedOwner);
+    else if($('import-recovery'))$('import-recovery').innerHTML=`<p>Результат сверки ещё не подтверждён. Сохранён прежний номер операции.</p>${button('check-import','Проверить результат сверки')}`;
+    bind('check-import',applySaved);
+    throw Error(result.text||'Не удалось подтвердить результат сверки.');
+  };
   const period = new Date().toISOString().slice(0, 7);
   const target = state.connection.shared
     ? '<select id="target"><option value="general:pilot">Общий реестр пилота</option></select>'
     : `<input id="target" value="${state.connection.mode === "synthetic" ? "general:demo" : ""}" placeholder="Идентификатор согласованного реестра">`;
   $("view").innerHTML =
-    `<div class="grid"><div class="field"><label>Период</label><input id="period" type="month" value="${period}"></div><div class="field"><label>Реестр</label>${target}</div></div><div class="toolbar" style="margin-top:20px">${button("export-new", "Создать реестр", true)}${button("export-template", "Создать копию существующей книги")}${button("import-file", "Сверить изменения Excel")}</div><div id="exchange-result"></div><p class="muted">Пустая ячейка не стирает данные. Для явной очистки введите [[CLEAR]]. Исходная книга сохраняется.</p>`;
+    `<div id="import-recovery"></div><div class="grid"><div class="field"><label>Период</label><input id="period" type="month" value="${period}"></div><div class="field"><label>Реестр</label>${target}</div></div><div class="toolbar" style="margin-top:20px">${button("export-new", "Создать реестр", true)}${button("export-template", "Создать копию существующей книги")}${button("import-file", "Сверить изменения Excel")}</div><div id="exchange-result"></div><p class="muted">Пустая ячейка не стирает данные. Для явной очистки введите [[CLEAR]]. Исходная книга сохраняется.</p>`;
+  if((await intent()).data){$('import-recovery').innerHTML=`<p>Есть сверка без подтверждённого результата.</p>${button('check-import','Проверить результат сверки')}`;bind('check-import',applySaved);}
   const write = async (use_template: boolean) => {
     const snapshot = await request("POST", "export", {
       operation_id: crypto.randomUUID(),
@@ -1251,6 +1297,7 @@ async function exchangePage() {
   bind("export-new", () => write(false));
   bind("export-template", () => write(true));
   bind("import-file", async () => {
+    if((await intent()).data)throw Error('Сначала проверьте результат сохранённой сверки.');
     const selected = await crm.workbook("read");
     if (!selected.ok) {
       if (!selected.cancelled) throw new Error(selected.text);
@@ -1269,6 +1316,9 @@ async function exchangePage() {
       ) +
       `<div class="actions">${button("apply-import", "Применить сверенные изменения", true)}</div>`;
     bind("apply-import", async () => {
+      const applyButton=$<HTMLButtonElement>('apply-import');if(applyButton.disabled)return;
+      applyButton.disabled=true;
+      try{
       const resolutions: any = {};
       for (const el of Array.from(
         document.querySelectorAll<HTMLSelectElement>("[data-resolution]"),
@@ -1277,14 +1327,15 @@ async function exchangePage() {
         const c = plan.changes[Number(el.dataset.resolution)];
         resolutions[c.contract_uuid + ":" + c.key] = el.value;
       }
-      const result = await request("POST", "import-apply", {
+      const saved={
         operation_id: crypto.randomUUID(),
         preview_id: plan.preview_id,
         file_sha256: input.file_sha256,
         resolutions,
-      });
-      $("exchange-result").innerHTML =
-        `<article class="record"><h3>Импорт подтверждён</h3><p>Строк: ${result.changed_rows} · Полей: ${result.changed_cells}</p></article>`;
+      };
+      if(!(await intent()).data)await crm.draft('workbook-import-intent',saved,expectedOwner);
+      await applySaved();
+      }finally{if(applyButton.isConnected)applyButton.disabled=false;}
     });
   });
 }
@@ -1345,7 +1396,8 @@ async function adoption() {
   await load();
 }
 
-async function connection() {
+async function connection(host:HTMLElement=document.getElementById('view')!) {
+  const $=<T extends HTMLElement=HTMLElement>(id:string)=>(id==='view'?host:host.querySelector('#'+id)) as T;
   state = await crm.state();
   const savedLogins = state.existingLogins || [{source:'manager',label:'Руководитель',available:state.existingManager?.available}];
   const available = savedLogins.filter((entry:any)=>entry.available);

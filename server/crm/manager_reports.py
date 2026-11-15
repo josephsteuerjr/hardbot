@@ -45,7 +45,7 @@ def scope_key(p):
 
 
 def require(p):
-    if p.role not in {'manager','owner'}:raise CRMError('Отчёт доступен руководителю.','forbidden',403)
+    if p.role not in {'manager','owner','analyst'}:raise CRMError('Отчёт доступен руководителю или аналитику.','forbidden',403)
     access.require(p,'analytics')
 
 

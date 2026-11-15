@@ -26,13 +26,14 @@ MANAGER_FIELDS = {f['key'] for f in fields() if not f.get('readonly')} - {
 def manager_scope(conn, principal):
     if principal.owner:
         return access.scoped_contracts(conn, principal, include_tasks=False)
-    if principal.role != 'manager' or 'accounting' not in principal.capabilities:
+    if principal.role not in {'manager','analyst'} or 'accounting' not in principal.capabilities:
         return set()
     at = now()
     current = conn.execute('SELECT role FROM crm_memberships WHERE employee_uuid=? AND team_id=? '
                           'AND starts_at<=? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at DESC',
                           (principal.employee_uuid, principal.team_id, at, at)).fetchone()
-    if not current or current['role'] != 'manager':
+    allowed_roles={'manager','analyst'} if principal.role=='analyst' else {'manager'}
+    if not current or current['role'] not in allowed_roles:
         return set()
     result = access.scoped_contracts(conn, principal, include_tasks=False)
     if 'assign' in principal.capabilities:

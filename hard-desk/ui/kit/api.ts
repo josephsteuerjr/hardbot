@@ -81,6 +81,13 @@ export const hard: Bridge = {
 };
 
 type Listener = (s: { level: "live" | "warn" | "off" | "busy"; text: string }) => void;
+/** Explicit CRM host adapter; main authorizes every call independently. */
+export function setEmbeddedBridge(overrides: Partial<Bridge>): () => void {
+  const previous = Object.fromEntries(Object.keys(overrides).map(key => [key, (hard as any)[key]]));
+  Object.assign(hard, overrides);
+  return () => Object.assign(hard, previous);
+}
+
 const listeners = new Set<Listener>();
 export function onLink(fn: Listener): void { listeners.add(fn); }
 let lostAt = "";

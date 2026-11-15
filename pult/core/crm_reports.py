@@ -78,6 +78,15 @@ def verify(path,report,kind):
                     if value is None and got=='':continue
                     if isinstance(value,(float,int)) and isinstance(got,(float,int)) and abs(got-value)<0.000001:continue
                     if got!=value:raise ValueError('Не совпали сохранённые данные сводки.')
+    elif kind=='table':
+        actual=saved.get_sheet_by_name('Данные').to_python()
+        expected=[report['headers'],*report['rows']]
+        for index,row in enumerate(expected):
+            for column,value in enumerate(row):
+                got=actual[index][column] if index<len(actual) and column<len(actual[index]) else ''
+                if value is None and got=='':continue
+                if isinstance(value,(int,float)) and isinstance(got,(int,float)) and abs(value-got)<0.000001:continue
+                if got!=value:raise ValueError('Не совпали сохранённые данные таблицы.')
     elif kind in {'manager-month','manager-dynamics'}:
         for title,headers,rows in manager_tables(report,kind):
             actual=saved.get_sheet_by_name(title).to_python()
@@ -183,6 +192,10 @@ def write(report,path,kind='shifts'):
                     if report.get('yesterday_incomplete_contracts'):
                         sheet.cells(last+3,1).value=f"Нет полного снимка предыдущего дня: {report['yesterday_incomplete_contracts']} договоров. Пустые суммы и проценты не рассчитаны."
                     expected.append((data['name'],rows))
+            elif kind=='table':
+                sheet=book.sheets[0];sheet.name='Данные'
+                sheet.range((1,1),(len(report['rows'])+1,len(report['headers']))).number_format='@'
+                table(sheet,report['headers'],report['rows'])
             elif kind in {'manager-month','manager-dynamics'}:
                 for index,(title,headers,rows) in enumerate(manager_tables(report,kind)):
                     sheet=book.sheets[0] if index==0 else book.sheets.add(after=book.sheets[-1]);sheet.name=title

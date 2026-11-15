@@ -25,6 +25,21 @@ let deliveryOperation: any = null;
 let queueDetailsOpen = false;
 let queueReconciliation: any = null;
 let hiddenQueueRun = '';
+let embeddedTabs:string[]|undefined;
+let presentedQueueRun = '';
+const queueChoices = new Map<string,string>();
+function queueChoiceKey(op: any, book: any, index: number): string { return JSON.stringify([op.id, book.review_token, book.ordinal, index]); }
+
+function reviewRows(): any[] { return st.check ? [...st.check.conflicts, ...st.check.office] : []; }
+
+function setReviewChoice(row: any, choice: string): void {
+  st.decisions[decisionKey(row)] = choice;
+  if (['promise_date','forecast_sum'].includes(row.key)) {
+    for (const other of reviewRows()) if (other.book_path === row.book_path && other.contract_id === row.contract_id && ['promise_date','forecast_sum'].includes(other.key)) {
+      st.decisions[decisionKey(other)] = choice;
+    }
+  }
+}
 
 async function showDeliveryQueue(root: HTMLElement, generation: number): Promise<void> {
   if (!root.isConnected || activeRoot !== root || generation !== queueGeneration) return;
@@ -34,25 +49,40 @@ async function showDeliveryQueue(root: HTMLElement, generation: number): Promise
     const operation = await local<any>('/enr/operation');
     if (generation !== queueGeneration || activeRoot !== root) return;
     deliveryOperation = operation?.id ? operation : null;
+    if (deliveryOperation?.id !== presentedQueueRun) {
+      presentedQueueRun = deliveryOperation?.id || '';
+      queueDetailsOpen = !!deliveryOperation?.attention;
+    }
     const signature = JSON.stringify([deliveryOperation,queueReconciliation,hiddenQueueRun]);
     if (host.dataset.signature !== signature && !(host.contains(document.activeElement) && document.activeElement?.tagName === 'SELECT')) {
       host.dataset.signature = signature;
       const op = deliveryOperation;
-      host.innerHTML = !op || hiddenQueueRun===op.id ? '' : `<div class="notice${op.attention ? ' err' : ''}" role="status"><span class="grow">${esc(op.remaining ? `Перенос не завершён. Проверено книг: ${op.completed} из ${op.total}. Осталось: ${op.remaining}.` : `Обогащение завершено. Проверено книг: ${op.total}. Записано ячеек: ${op.cells}.`)}${op.busy ? ` Открыто в Excel: ${n(op.busy)}.` : ''}${op.attention ? ` Требуют разбора: ${n(op.attention)}.` : ''}${op.excluded ? ` Исключено по общему реестру: ${n(op.excluded)}. В доставленные эти строки не входят.` : ''}</span>${!op.remaining ? '<button class="btn small" data-queue-dismiss>Скрыть</button>' : ''}</div>
+      host.innerHTML = !op || hiddenQueueRun===op.id ? '' : `<div class="notice${op.attention ? ' err' : ''}" role="status"><span class="grow">${esc(op.remaining ? `Перенос не завершён. Проверено книг: ${op.completed} из ${op.total}. Осталось: ${op.remaining}.` : `Обогащение завершено. Проверено книг: ${op.total}. Записано ячеек: ${op.cells}.`)}${op.excluded ? ` Пропущено строк: ${n(op.excluded)}. В доставленные эти строки не входят.` : ''}</span>${!op.remaining ? '<button class="btn small" data-queue-dismiss>Скрыть</button>' : ''}</div>
+        ${(op.books || []).filter((b: any) => b.state !== 'done').map((b: any) => `<p data-queue-issue><b>${esc(b.employee)}:</b> ${esc(b.reason_code === 'busy' ? `открыта книга ${String(b.file).split(/[\\/]/).pop()}. Закройте её — перенос продолжится автоматически.` : b.conflicts?.length ? `изменились значения в книге: ${b.conflicts.length}. Выберите значения ниже.` : b.message || 'Ожидает обработки')}</p>`).join('')}
         ${op.processing ? '<p role="status">Завершаю проверку Excel. Действия станут доступны после окончания прохода.</p>' : ''}
         <details data-queue-details ${queueDetailsOpen ? 'open' : ''}><summary>Подробности и действия</summary>
         ${op.busy ? '<p>Открытые книги будут обработаны после закрытия Excel.</p>' : ''}
         ${op.remaining ? '<p>Импорт станет доступен после проверки оставшихся книг.</p>' : ''}
         ${(op.books || []).filter((b: any) => b.state !== 'done' || b.omissions?.length).map((b: any) => `<div class="list-row" style="display:block;overflow-wrap:anywhere"><b>${esc(b.employee)} — ${esc(String(b.file).split(/[\\/]/).pop())}</b><p>${esc(b.message || 'Ожидает обработки')}</p>
-          ${b.omissions?.length ? `<p>Исключено по общему реестру: ${n(b.omissions.length)}. Исходные результаты сохранены в журнале операции.</p><div class="table-wrap"><table class="grid"><thead><tr><th>Договор</th><th>По общему реестру</th></tr></thead><tbody>${b.omissions.map((row:any)=>`<tr><td>${esc(row.contract_id)}</td><td>${esc(row.reason==='absent_from_master'?'Договор отсутствует':row.current_owner?`Теперь: ${row.current_owner}`:'Ответственный снят')}</td></tr>`).join('')}</tbody></table></div>` : ''}
-          ${b.conflicts?.length ? `<div class="table-wrap"><table class="grid"><thead><tr><th class="l">Договор / поле</th><th class="l">В книге</th><th class="l">На сервере</th><th class="l">Действие</th></tr></thead><tbody>${b.conflicts.map((c: any, index: number) => `<tr><td>${esc(c.contract_id)} · ${esc(c.column || c.key)}</td><td>${esc(c.file)}</td><td>${esc(c.server)}</td><td><select class="input" data-queue-choice="${b.ordinal}:${index}"><option value="file">Оставить в книге</option><option value="server">Записать сервер</option></select></td></tr>`).join('')}</tbody></table></div><button class="btn small" data-queue-resolve="${b.ordinal}">Применить решения</button>` : ''}</div>`).join('')}
+          ${b.omissions?.length ? `<p>Пропущено строк: ${n(b.omissions.length)}. Исходные результаты сохранены в журнале операции.</p><div class="table-wrap"><table class="grid"><thead><tr><th>Договор</th><th>Причина</th></tr></thead><tbody>${b.omissions.map((row:any)=>`<tr><td>${esc(row.contract_id)}</td><td>${esc(row.reason==='absent_from_book'?'Нет строки в личной книге':row.reason==='absent_from_master'?'Договор отсутствует':row.current_owner?`Теперь: ${row.current_owner}`:'Ответственный снят')}</td></tr>`).join('')}</tbody></table></div>` : ''}
+          ${b.conflicts?.length ? `<div class="table-wrap"><table class="grid"><thead><tr><th class="l">Договор / поле</th><th class="l">В книге</th><th class="l">В приложении</th><th class="l">Дата факта</th><th class="l">Действие</th></tr></thead><tbody>${b.conflicts.map((c: any, index: number) => `<tr><td>${esc(c.contract_id)} · ${esc(c.column || c.key)}</td><td>${esc(c.file)}</td><td>${esc(c.server)}</td><td>${esc(c.visit_date || '')}</td><td><select class="input" data-queue-choice="${b.ordinal}:${index}"><option value="file">Оставить в книге</option><option value="server" ${queueChoices.get(queueChoiceKey(op,b,index))==='server'?'selected':''}>Записать сервер</option></select></td></tr>`).join('')}</tbody></table></div><button class="btn small" data-queue-resolve="${b.ordinal}">Применить решения</button>` : ''}</div>`).join('')}
         ${op.missing ? '<p>Отсутствующие строки могут относиться к прежним назначениям. Сверка покажет изменения по текущему общему реестру до применения исключений.</p><button class="btn small" data-queue-reconcile>Сверить с общим реестром…</button>' : ''}
         ${queueReconciliation?.run_id===op.id ? `<div class="block"><b>Сверка: ${esc(String(queueReconciliation.source_path).split(/[\\/]/).pop())}</b><p>Изменились назначения или договоры отсутствуют: ${n(queueReconciliation.proposals.length)}. Требуют проверки состава книги: ${n(queueReconciliation.blocked.length)}.</p>
           <p>Исключённые строки сохраняются в отчёте и не считаются доставленными. Остальные результаты будут перенесены.</p>
-          <div class="table-wrap"><table class="grid"><thead><tr><th>Сотрудник / договор</th><th>По общему реестру</th></tr></thead><tbody>${[...queueReconciliation.proposals,...queueReconciliation.blocked].map((row:any)=>`<tr><td>${esc(row.employee)} · ${esc(row.contract_id)}</td><td>${esc(row.reason==='absent_from_master'?'Договор отсутствует':row.reason==='assignment_changed'?(row.current_owner?`Теперь: ${row.current_owner}`:'Ответственный снят'):row.reason)}</td></tr>`).join('')}</tbody></table></div>
+          <div class="table-wrap"><table class="grid"><thead><tr><th>Сотрудник / договор</th><th>Причина</th></tr></thead><tbody>${[...queueReconciliation.proposals,...queueReconciliation.blocked].map((row:any)=>`<tr><td>${esc(row.employee)} · ${esc(row.contract_id)}</td><td>${esc(row.reason==='absent_from_master'?'Договор отсутствует':row.reason==='assignment_changed'?(row.current_owner?`Теперь: ${row.current_owner}`:'Ответственный снят'):row.reason)}</td></tr>`).join('')}</tbody></table></div>
           <button class="btn small" data-queue-reconcile-apply ${queueReconciliation.proposals.length?'':'disabled'}>Принять исключения и продолжить перенос</button></div>` : ''}
         ${op.remaining ? '<button class="btn small" data-queue-retry>Повторить проверку ошибок</button>' : ''}</details>`;
       host.querySelector('[data-queue-details]')?.addEventListener('toggle',event=>{queueDetailsOpen=(event.target as HTMLDetailsElement).open;});
+      host.querySelectorAll<HTMLSelectElement>('[data-queue-choice]').forEach(select=>select.addEventListener('change',()=>{
+        const [ordinal,index]=select.dataset.queueChoice!.split(':').map(Number);
+        const book=op.books.find((b:any)=>b.ordinal===ordinal),row=book.conflicts[index];
+        book.conflicts.forEach((other:any,i:number)=>{
+          if(i===index || (other.contract_id===row.contract_id && ['promise_date','forecast_sum'].includes(row.key) && ['promise_date','forecast_sum'].includes(other.key))){
+            queueChoices.set(queueChoiceKey(op,book,i),select.value);
+            host.querySelector<HTMLSelectElement>(`[data-queue-choice="${ordinal}:${i}"]`)!.value=select.value;
+          }
+        });
+      }));
       host.querySelector('[data-queue-dismiss]')?.addEventListener('click',()=>{hiddenQueueRun=op.id;host.dataset.signature='';void showDeliveryQueue(root,generation);});
       host.querySelector('[data-queue-reconcile]')?.addEventListener('click',guard(async()=>{
         const path=await hard.pick('file',{title:'Текущий общий реестр',filters:XLS});if(!path)return;
@@ -128,7 +158,7 @@ async function job(path: string, body: unknown, log?: (s: string) => void): Prom
 
 function tabs(): string {
   return chipsHtml([["import", "Импорт реестра"], ["enrich", "Обогащение книг"], ["columns", "Колонки реестра"],
-    ["export", "Выгрузки и период"], ["recalled", "Отозванные"]].map(([k, t]) => ({ key: k, text: t, on: st.tab === k })), "tab");
+    ["export", "Выгрузки и период"], ["recalled", "Отозванные"]].filter(([k])=>!embeddedTabs||embeddedTabs.includes(k)).map(([k, t]) => ({ key: k, text: t, on: st.tab === k })), "tab");
 }
 
 function pairs(p: [string, unknown][]): string {
@@ -279,10 +309,9 @@ async function enrichTab(el: HTMLElement) {
         ${e.writes ? `<button class="btn" data-apply ${st.enrSel.size ? "" : "disabled"}>Записать выбранных (${n(st.enrSel.size)})</button>` : ""}
         <span class="muted" id="e-log"></span></div>` : ""}
     ${st.check ? `<pre style="white-space:pre-wrap;font:13px/1.5 var(--mono);color:var(--ink-2)">${esc((st.check.lines || []).join("\n"))}</pre>
-      ${st.check.conflicts.length ? `<div class="section"><div class="section-head"><h2 class="section-title">Конфликты — решите, что писать (${n(st.check.conflicts.length)})</h2></div>${note(e.decision_hint)}
+      ${reviewRows().length ? `<div class="section"><div class="section-head"><h2 class="section-title">Выберите значения до записи (${n(reviewRows().length)})</h2></div>${note(e.decision_hint)}<p class="muted">Сумма и дата обещания сохраняются вместе.</p>
         <div class="toolbar" style="margin-top:8px"><button class="btn small" data-dall="file">Везде оставить как в книге</button><button class="btn small" data-dall="server">Везде записать сервер</button></div>
-        ${conflictTable(st.check.conflicts, true, e.decision_labels, cols)}</div>` : ""}
-      ${st.check.office.length ? `<div class="section"><div class="section-head"><h2 class="section-title">Правки офиса (${n(st.check.office.length)})</h2></div>${conflictTable(st.check.office, false, {}, cols)}</div>` : ""}` : ""}
+        ${conflictTable(reviewRows(), true, e.decision_labels, cols)}</div>` : ""}` : ""}
     ${st.applyRes ? `<div class="section"><div class="section-head"><h2 class="section-title">Итог записи</h2></div>
       <pre style="white-space:pre-wrap;font:13px/1.5 var(--mono);color:var(--ink-2)">${esc((st.applyRes.lines || []).join("\n"))}</pre>
       ${st.applyRes.ledger_error ? `<div class="notice err"><span class="grow">${esc(st.applyRes.ledger_error)}</span><button class="btn small" data-replay>Повторить отправку из квитанции</button></div>` : ""}</div>` : ""}`;
@@ -318,16 +347,20 @@ async function enrichTab(el: HTMLElement) {
   el.querySelector("[data-check]")?.addEventListener("click", guard(async () => {
     win(); logEl().textContent = "Проверяю книги…";
     st.check = await job("/enr/check", { keys: [...st.enrSel], since: st.since, until: st.until }, (s) => { logEl().textContent = s; });
-    st.decisions = {}; toast(`Проверено: конфликтов ${st.check.conflicts.length}`); redraw();
+    st.decisions = {}; toast(`Проверено: расхождений ${reviewRows().length}`); redraw();
   }));
-  el.querySelectorAll<HTMLSelectElement>("[data-dec]").forEach((s) => s.addEventListener("change", () => { st.decisions[s.dataset.dec!] = s.value; }));
+  el.querySelectorAll<HTMLSelectElement>("[data-dec]").forEach((s) => s.addEventListener("change", () => {
+    const row=reviewRows().find(c=>decisionKey(c)===s.dataset.dec);
+    if(row)setReviewChoice(row,s.value);
+    el.querySelectorAll<HTMLSelectElement>('[data-dec]').forEach(other=>{other.value=st.decisions[other.dataset.dec!] || 'file';});
+  }));
   el.querySelectorAll<HTMLButtonElement>("[data-dall]").forEach((b) => b.addEventListener("click", () => {
-    for (const c of st.check.conflicts) st.decisions[decisionKey(c)] = b.dataset.dall!; redraw();
+    for (const c of reviewRows()) setReviewChoice(c, b.dataset.dall!); redraw();
   }));
   el.querySelector("[data-apply]")?.addEventListener("click", guard(async () => {
     win();
     const decisions = Object.entries(st.decisions).map(([k, d]) => { const [book_path, contract_id, key] = JSON.parse(k); return { book_path, contract_id, key, decision: d }; });
-    if (st.check) for (const c of st.check.conflicts) if (!st.decisions[decisionKey(c)]) decisions.push({ book_path: c.book_path, contract_id: c.contract_id, key: c.key, decision: "file" });
+    if (st.check) for (const c of reviewRows()) if (!st.decisions[decisionKey(c)]) decisions.push({ book_path: c.book_path, contract_id: c.contract_id, key: c.key, decision: "file" });
     const body = { keys: [...st.enrSel], since: st.since, until: st.until, decisions };
     const conf = await local("/enr/confirm", body);
     if (conf.whole && !(await ask(e.whole_title, e.whole_text, "Вся история", true))) return;
@@ -475,6 +508,13 @@ export const registry: Section = {
   kicker: "импорт, обогащение книг, колонки, выгрузки",
   render(root) { return draw(root); },
 };
+
+export async function mountRegistryTools(root:HTMLElement,onlyColumns=false):Promise<()=>void>{
+  embeddedTabs=onlyColumns?['columns']:['import','enrich','export','recalled'];
+  if(!embeddedTabs.includes(st.tab))st.tab=onlyColumns?'columns':'import';
+  await draw(root);
+  return()=>{if(activeRoot===root){activeRoot=null;queueGeneration++;clearTimeout(queueTimer);}embeddedTabs=undefined;};
+}
 
 // «Приоритет выезда»: очередь по весам — долг, свежесть, кластер.
 const pr = { weights: {} as Record<string, number>, limit: 40 };

@@ -38,6 +38,7 @@ import sys
 import tempfile
 import time
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -712,6 +713,44 @@ class EmployeeSplit(dict):
         self.orphan_dates: tuple[str, str] | None = None
 
 
+def latest_payment_pair(row: dict):
+    """Latest stored payment, independent of the selected activity month.
+
+    The historical _reported ledger keys also address the same two workbook
+    cells for an imported registry payment. This does not change its source in
+    payment_evidence or confirm it for KP.
+    """
+    candidates = []
+    for prefix, origin in (("last_payment", "registry"), ("_reported_payment", "reported")):
+        day = parse_date(row.get(prefix + "_date"))
+        value = row.get(prefix + "_sum")
+        if day is None or day > date.today() or value in (None, ""):
+            continue
+        text = re.sub(r'[^\d.,-]', '', str(value))
+        if ',' in text and '.' in text:
+            separator = ',' if text.rfind(',') > text.rfind('.') else '.'
+            text = text.replace('.' if separator == ',' else ',', '').replace(separator, '.')
+        else:
+            text = text.replace(',', '.')
+        try:
+            number = Decimal(text)
+            amount = float(number.quantize(Decimal('0.01'))) if number.is_finite() else float('nan')
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if math.isfinite(amount) and 0 <= amount <= 1e9 and (origin != "reported" or amount > 0):
+            candidates.append((day, amount, origin))
+    if not candidates:
+        return None
+    latest = max(p[0] for p in candidates)
+    selected = [p for p in candidates if p[0] == latest]
+    if len({p[1] for p in selected}) != 1:
+        # The canonical imported pair wins a same-day disagreement. Employee
+        # evidence remains a separate immutable record/comment, never summed
+        # into the registry amount and never re-labelled bank confirmation.
+        return next(p for p in selected if p[2] == "registry")
+    return selected[-1]
+
+
 def split_by_employee(rows: list[dict]) -> EmployeeSplit:
     """Строки сервера → по ответственным: {ключ: {employee, rows, filled}}.
     filled — сколько кейсов сотрудника заполнено ботом (кандидаты на обогащение).
@@ -740,7 +779,7 @@ def split_by_employee(rows: list[dict]) -> EmployeeSplit:
             continue
         e = out.setdefault(norm_name(emp), {"employee": emp, "rows": [], "filled": 0})
         e["rows"].append(r)
-        if is_filled(r) or (is_soft_filled(r) and any((cell_text(r.get(k)) or k in r.get("_enrichment_clear_keys", [])) and
+        if is_filled(r) or latest_payment_pair(r) is not None or (is_soft_filled(r) and any((cell_text(r.get(k)) or k in r.get("_enrichment_clear_keys", [])) and
                 (r.get("_common_days") or {}).get(k) == r.get("_call_day")
                 for k in ("promise_date", "forecast_sum", "forecast"))):
             e["filled"] += 1
@@ -751,7 +790,7 @@ def split_by_employee(rows: list[dict]) -> EmployeeSplit:
         key = "soft:" + norm_name(emp)
         e = out.setdefault(key, {"employee": emp, "profile": "soft", "rows": [], "filled": 0})
         e["rows"].append({**r, "_profile": "soft"})
-        if is_soft_filled(r):
+        if is_soft_filled(r) or latest_payment_pair(r) is not None:
             e["filled"] += 1
     for key, e in out.items():
         if not key.startswith("soft:"):
@@ -887,10 +926,12 @@ def ledger_for_book(ledger, path):
     return merged
 
 
-def decisions_for_book(decisions, path):
+def decisions_for_book(decisions, path, *, identities=None):
+    if not decisions:
+        return {}
     out = {}
     target = {book_key(path), canonical_book_key(path)}
-    identities = {}
+    identities = {} if identities is None else identities
     for key, value in (decisions or {}).items():
         if len(key) == 2:
             out[key] = value
@@ -901,6 +942,59 @@ def decisions_for_book(decisions, path):
             if raw in target or identities[raw] in target:
                 out[key[1:]] = value
     return out
+
+
+def _enrichment_header(grid, fields, rows):
+    """Repair only a blank ID heading proven by every existing row identity."""
+    try:
+        header, columns = find_header(grid, fields)
+        return header, columns, []
+    except ValueError as original:
+        if 'нет колонки-ключа' not in str(original):
+            raise
+        title = next((f['title'] for f in fields if f['key'] == CONTRACT_KEY), None)
+        source = {}
+        for row in rows:
+            cid = norm_cid(row.get(CONTRACT_KEY))
+            identity = (norm_name(row.get('partner')), norm_name(row.get('client')))
+            if cid and all(identity):
+                source.setdefault(cid, set()).add(identity)
+        candidates = []
+        for h, line in enumerate(grid[:WORKBOOK_HEADER_SEARCH_ROWS]):
+            for c in range(1, len(line)-1):
+                # This is the registered portfolio layout, not a search for
+                # arbitrary columns whose contents happen to look like IDs.
+                if (cell_text(line[c]) or norm_title(line[c-1]) != norm_title('Пул')
+                        or norm_title(line[c+1]) != norm_title('Клиент') or not title):
+                    continue
+                repaired = [list(row) for row in grid]
+                repaired[h][c] = title
+                try:
+                    head, cols = find_header(repaired, fields)
+                except ValueError:
+                    continue
+                if head != h or cols.get(CONTRACT_KEY) != c or not {'partner','client','pool'} <= cols.keys():
+                    continue
+                first = h+1
+                if first < len(grid) and _is_source_row(grid[first]):
+                    first += 1
+                identities = 0
+                for row in grid[first:]:
+                    if not any(cell_text(value) for value in row):
+                        continue
+                    cid = norm_cid(row[c] if c < len(row) else None)
+                    identity = tuple(norm_name(row[cols[k]] if cols[k] < len(row) else None)
+                                     for k in ('partner','client'))
+                    if not cid or not all(identity) or source.get(cid) != {identity}:
+                        break
+                    identities += 1
+                else:
+                    if identities:
+                        candidates.append((h, cols, [{'row': h, 'col': c, 'before': line[c],
+                            'after': title, 'identities_verified': identities}]))
+        if len(candidates) == 1:
+            return candidates[0]
+        raise original
 
 
 def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
@@ -928,7 +1022,7 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
     Возвращает {sheet_writes: [(r, c, value, is_date)], ...статистика}. Индексы
     0-based относительно grid. Пишутся ТОЛЬКО ячейки визита заполненных кейсов,
     и только когда значение отличается от файла."""
-    header_row, col_map = find_header(grid, fields)
+    header_row, col_map, header_repairs = _enrichment_header(grid, fields, rows)
     # Не позволяем fallback в легаси-колонку «Статус звонка»: если целевой
     # «Общий результат» отсутствует, результат должен быть явно отмечен как
     # некуда записывать. Аналогично tips требует «Доп. Адрес/Доп.Номер».
@@ -959,7 +1053,8 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
 
     since_d, until_d = visit_window(since, until)
 
-    writes: list[tuple[int, int, object, bool]] = []
+    writes: list[tuple[int, int, object, bool]] = [
+        (p['row'], p['col'], p['after'], False) for p in header_repairs]
     filled_cases = matched_cases = changed_cases = 0
     cells_already = cells_over_nonempty = 0
     out_of_window = technical_overwrites = 0
@@ -978,6 +1073,9 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
     conflicts: list[dict] = []
     office_edits: list[dict] = []
     resolved: list[dict] = []          # конфликты, решённые оператором
+    preserved_payment_pairs: list[dict] = []
+    preserved_promise_pairs: list[dict] = []
+    coupled_file_choices: list[dict] = []
     resolved_file = resolved_server = 0
     ledger_entries: list[dict] = []
     seeded_keys: set[tuple[str, str]] = set()
@@ -1010,6 +1108,9 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
         cid = norm_cid(srv.get(CONTRACT_KEY))
         if not cid:
             continue
+        payment = latest_payment_pair(srv)
+        if payment and not all(k in col_map for k in ("_reported_payment_sum", "_reported_payment_date")):
+            raise ValueError("Для переноса платежа нужны обе колонки: сумма и дата последнего платежа")
         hard_day = parse_date(srv.get("visit_date")) if is_filled(srv) else None
         call_day = soft_anchor(srv) if is_soft_filled(srv) else None
         common_day = parse_date(srv.get("_common_day")) or call_day or hard_day
@@ -1019,8 +1120,7 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
         anchors = {}
         for key in VISIT_KEYS:
             if key in ("_reported_payment_sum", "_reported_payment_date"):
-                anchor = (parse_date(srv.get("_payment_day"))
-                          if profile != "hard" and srv.get("_bot_payment_recorded") is True else None)
+                anchor = payment[0] if payment else None
             elif key == "soft_call_status" and profile != "hard":
                 anchor = parse_date(srv.get("_payment_status_day")) or call_day
             elif key == "tips":
@@ -1042,14 +1142,17 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
         if not anchors:
             continue
         eligible = {k: d for k, d in anchors.items()
-                    if (not since_d or d >= since_d) and (not until_d or d <= until_d)}
+                    if k in ("_reported_payment_sum", "_reported_payment_date")
+                    or (not since_d or d >= since_d) and (not until_d or d <= until_d)}
         if not eligible:
             out_of_window += 1
             continue
         vdate = max(eligible.values())
         filled_contract_ids.append(cid)
-        values = {k: srv.get(k) for k in eligible
-                  if k in col_map and (cell_text(srv.get(k)) != "" or
+        payment_values = ({"_reported_payment_sum": payment[1], "_reported_payment_date": payment[0]}
+                          if payment else {})
+        values = {k: payment_values.get(k, srv.get(k)) for k in eligible
+                  if k in col_map and (k in payment_values or cell_text(srv.get(k)) != "" or
                       k in ("soft_comm_date", "promise_date", "forecast_sum", "forecast", "meeting_date")
                       and k in srv.get("_enrichment_clear_keys", []))}
         filled_cases += 1
@@ -1065,12 +1168,87 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
             if len(comment_cleared_cids) < ORPHAN_SAMPLE:
                 comment_cleared_cids.append(cid)
         case_changed = False
+        # A payment is one dated fact. An unrelated later call/manual edit must
+        # not hide it, and amount/date must never be published separately.
+        pay_keys = ("_reported_payment_sum", "_reported_payment_date")
+        if payment and all(k in values for k in pay_keys):
+            pc, dc = (col_map[k] for k in pay_keys)
+            for r in targets:
+                for identity_key in ("partner", "client"):
+                    ic = col_map.get(identity_key)
+                    if ic is not None and ic < len(grid[r]) and srv.get(identity_key) and grid[r][ic] \
+                            and norm_name(grid[r][ic]) != norm_name(srv[identity_key]):
+                        raise ValueError("Платёж: не совпадает клиент/партнёр строки реестра")
+                old_sum = grid[r][pc] if pc < len(grid[r]) else None
+                old_date = grid[r][dc] if dc < len(grid[r]) else None
+                file_day = parse_date(old_date)
+                if file_day and file_day > payment[0]:
+                    # Explicitly surface this protected pair; never acknowledge
+                    # an older source value as if it had been written.
+                    preserved_payment_pairs.append(dict(contract_id=cid,row=r+1,
+                        file_date=cell_text(old_date),file_amount=cell_text(old_sum),
+                        source_date=payment[0].isoformat(),source_amount=payment[1]))
+                    continue
+                same_sum = _values_equal(old_sum, payment[1], False)
+                changed_same_day = file_day == payment[0] and not same_sum and not _is_technical_empty(old_sum) and cell_text(old_sum) != ""
+                amount_delivered = _ledger_value(ledger, cid, pay_keys[0])
+                known_correction = amount_delivered is not None and _values_equal(old_sum, amount_delivered, False)
+                if changed_same_day and not known_correction and decisions.get((cid, pay_keys[0])) != "server":
+                    if decisions.get((cid,pay_keys[0])) == 'file':
+                        _note(resolved,'payment_pair_conflict',cid,pay_keys[0],r,
+                              old_sum,payment[1],amount_delivered,payment[0])
+                        resolved[-1]['decision']='file';resolved_file+=1
+                        preserved_payment_pairs.append(dict(contract_id=cid,row=r+1,
+                            file_date=cell_text(old_date),file_amount=cell_text(old_sum),
+                            source_date=payment[0].isoformat(),source_amount=payment[1],reason='accepted_file_payment_pair'))
+                        if ledger_mode:
+                            _deliver(cid,pay_keys[0],payment[1],payment[0],'kept_file')
+                            _deliver(cid,pay_keys[1],payment[0],payment[0],'kept_file')
+                        continue
+                    _note(conflicts, "payment_pair_conflict", cid, pay_keys[0], r,
+                          old_sum, payment[1], amount_delivered, payment[0])
+                    continue
+                for key, c, old, value, is_date in ((pay_keys[0], pc, old_sum, payment[1], False),
+                                                   (pay_keys[1], dc, old_date, payment[0], True)):
+                    if _values_equal(old, value, is_date):
+                        cells_already += 1
+                    else:
+                        writes.append((r, c, value, is_date));case_changed = True
+                        if cell_text(old):
+                            displaced.append(dict(contract_id=cid, key=key, column=title_by_key.get(WRITE_TARGETS.get(key,key),key), row=r+1, was=cell_text(old), now=cell_text(value),visit_date=payment[0].isoformat()))
+                    if ledger_mode:
+                        _deliver(cid, key, value, payment[0], "written" if not _values_equal(old,value,is_date) else "seed")
+            for key in pay_keys:
+                values.pop(key, None)
+        # Keeping one component of a manually retained promise keeps the whole
+        # dated amount. Filling its other component would create a hybrid fact.
+        promise_keys = ('promise_date', 'forecast_sum')
+        keep_promises = set()
+        if all(k in values and k in col_map for k in promise_keys):
+            pair_choices = {decisions.get((cid,k)) for k in promise_keys} - {None}
+            if pair_choices == {'file','server'}:
+                raise ValueError('Сумма и дата обещания должны иметь одно решение')
+            if 'file' in pair_choices:
+                for r in targets:
+                    if any(decisions.get((cid,k)) == 'file' and not _values_equal(
+                            grid[r][col_map[k]] if col_map[k] < len(grid[r]) else None,
+                            values[k], is_date_key.get(k,False)) for k in promise_keys):
+                        keep_promises.add(r)
+                        preserved_promise_pairs.append(dict(contract_id=cid,row=r+1,
+                            reason='accepted_file_promise_pair'))
         for key, val in values.items():
             vdate = eligible[key]
             c = col_map[key]
             is_date = is_date_key.get(key, False)
             for r in targets:
                 cur = grid[r][c] if c < len(grid[r]) else None
+                if key in promise_keys and r in keep_promises:
+                    _note(coupled_file_choices, 'promise_pair', cid, key, r,
+                          cur, val, _ledger_value(ledger,cid,key), vdate)
+                    coupled_file_choices[-1]['decision'] = 'file'
+                    if ledger_mode:
+                        _deliver(cid,key,val,vdate,'kept_file')
+                    continue
                 merge_mode = MERGE_MODES[key]
                 if merge_mode == "unique_lines":
                     out_val = merge_unique_lines(cur, val)
@@ -1222,6 +1400,10 @@ def build_plan(grid: list[list], fields: list[dict], rows: list[dict],
         "server_authoritative": bool(server_authoritative),
         "conflicts": conflicts,            # НЕ записано: решает человек
         "office_edits": office_edits,      # НЕ записано: правка офиса после доставки
+        "preserved_payment_pairs": preserved_payment_pairs,
+        "preserved_promise_pairs": preserved_promise_pairs,
+        "coupled_file_choices": coupled_file_choices,
+        "header_repairs": header_repairs,
         "resolved": resolved,              # конфликты с решением оператора
         "resolved_file": resolved_file,    # оставлено как в книге
         "resolved_server": resolved_server,  # записан сервер по решению
@@ -1263,7 +1445,7 @@ def clear_gen_py():
 def open_excel(xw, log=lambda s: None):
     """xw.App(visible=False) с самолечением битого кэша gen_py."""
     try:
-        app = xw.App(visible=False)
+        app = xw.App(visible=False, add_book=False)
         app.api.EnableEvents = False
         app.api.AutomationSecurity = 3
         return app
@@ -1272,7 +1454,7 @@ def open_excel(xw, log=lambda s: None):
             raise
         log("Чиню кэш COM-обёрток Excel…")
         clear_gen_py()
-        app = xw.App(visible=False)
+        app = xw.App(visible=False, add_book=False)
         app.api.EnableEvents = False
         app.api.AutomationSecurity = 3
         return app
@@ -1377,13 +1559,32 @@ def _plan_workbook(app, path: Path, fields: list[dict], rows: list[dict],
 
 
 def _all_sheet_cells(wb):
+    # Bulk UsedRange.Formula can fail on long literal history comments.
+    # Read saved literals with calamine and exact expressions only from Excel's
+    # formula areas, so cached results never masquerade as changed literals.
+    from python_calamine import CalamineWorkbook
+    book=CalamineWorkbook.from_path(wb.fullname)
     result={}
     for sheet in wb.sheets:
-        used=sheet.api.UsedRange;raw=used.Formula;r0=int(used.Row)-1;c0=int(used.Column)-1
-        matrix=raw if isinstance(raw,(tuple,list)) else ((raw,),)
-        if matrix and not isinstance(matrix[0],(tuple,list)):matrix=(matrix,)
-        result[sheet.name]={(r0+r,c0+c):value for r,line in enumerate(matrix)
-                            for c,value in enumerate(line) if value is not None and value!=''}
+        name=sheet.name;source=book.get_sheet_by_name(name);start=source.start or (0,0)
+        values={(r,c):value for r,line in enumerate(source.to_python(),start[0])
+                for c,value in enumerate(line,start[1]) if value is not None and value!=''}
+        used=sheet.api.UsedRange
+        try:areas=used.SpecialCells(-4123).Areas
+        except Exception:
+            if used.HasFormula is not False:raise
+            areas=None
+        if areas is not None:
+            for index in range(1,areas.Count+1):
+                area=areas.Item(index);raw=area.Formula;r0=int(area.Row)-1;c0=int(area.Column)-1
+                matrix=raw if isinstance(raw,(tuple,list)) else ((raw,),)
+                if matrix and not isinstance(matrix[0],(tuple,list)):matrix=(matrix,)
+                for r,line in enumerate(matrix,r0):
+                    for c,value in enumerate(line,c0):
+                        if not isinstance(value,str) or not value.startswith('='):
+                            raise ValueError('Не удалось проверить формулу Excel')
+                        values[r,c]=value
+        result[name]=values
     return result
 
 
@@ -1393,8 +1594,10 @@ def _verify_unplanned_cells(wb,before,allowed):
     for sheet in before:
         for cell in before[sheet].keys()|after[sheet].keys():
             if (sheet,*cell) not in allowed and before[sheet].get(cell)!=after[sheet].get(cell):
-                from openpyxl.utils.cell import get_column_letter
-                raise ValueError(f'Незапланированное изменение {sheet}!{get_column_letter(cell[1]+1)}{cell[0]+1}; книга не опубликована')
+                column='';number=cell[1]+1
+                while number:
+                    number,remainder=divmod(number-1,26);column=chr(65+remainder)+column
+                raise ValueError(f'Незапланированное изменение {sheet}!{column}{cell[0]+1}; книга не опубликована')
 
 
 def _verify_vba_copy(source,candidate):
@@ -2218,6 +2421,7 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
 
     results: list[dict] = []
     attempted: set[int] = set()
+    decision_identities = {}
     fatal = None
     try:
         from contextlib import nullcontext
@@ -2227,7 +2431,7 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
             for i, job in enumerate(jobs, 1):
                 path = Path(job["path"])
                 book_ledger = ledger_for_book(ledger, path)
-                book_decisions = decisions_for_book(decisions, path)
+                book_decisions = decisions_for_book(decisions, path,identities=decision_identities)
                 log(f"[{i}/{len(jobs)}] {job['employee']} — {path.name}…")
                 attempted.add(i)
                 try:
@@ -2312,9 +2516,13 @@ def preview_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
     """
     visit_window(since, until)
     results: list[dict] = []
-    for i, job in enumerate(jobs, 1):
+    from concurrent.futures import ThreadPoolExecutor
+    decision_identities = {}
+    for key in (decisions or {}):
+        if len(key)==3 and book_key(key[0]) not in decision_identities:
+            decision_identities[book_key(key[0])]=canonical_book_key(key[0])
+    def check(job):
         path = Path(job["path"])
-        log(f"[{i}/{len(jobs)}] проверяю {job['employee']} — {path.name}…")
         try:
             book = read_stable_workbook(path)
             sheet = next((s for s in book["sheets"] if s["name"] == SHEET_NAME), None)
@@ -2322,7 +2530,7 @@ def preview_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
                 raise ValueError(f"обязательный лист «{SHEET_NAME}» отсутствует")
             plan = build_plan(sheet["grid"], fields, job["rows"], since, until,
                               ledger=ledger_for_book(ledger, path), server_authoritative=server_authoritative,
-                              decisions=decisions_for_book(decisions, path))
+                              decisions=decisions_for_book(decisions, path,identities=decision_identities))
             plan.pop("writes", None)
             plan["file_sha256"] = book["file_sha256"]
         except Exception as e:  # noqa: BLE001 — одна книга не валит проверку
@@ -2337,7 +2545,12 @@ def preview_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
         owner = workbook_busy_owner(path)
         plan["busy"] = owner is not None
         plan["busy_owner"] = owner or ""
-        results.append(plan)
+        return plan
+    log(f"Сверяю книги: {len(jobs)}…")
+    with ThreadPoolExecutor(max_workers=min(4,len(jobs) or 1)) as pool:
+        for i,plan in enumerate(pool.map(check,jobs),1):
+            results.append(plan)
+            log(f"[{i}/{len(jobs)}] проверено: {plan['employee']} — {Path(plan['file']).name}")
     return results
 
 

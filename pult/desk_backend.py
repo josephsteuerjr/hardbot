@@ -663,6 +663,19 @@ def route(path: str, body: dict):
 
 
 def main() -> None:
+    if '--crm-analyst' in sys.argv:
+        import os
+        if not os.environ.get('HARD_PULT_SETTINGS') or os.environ.get('HARD_PULT_PROTECT_TOKENS') != '1':
+            raise RuntimeError('The CRM administrator requires a protected independent profile')
+        binding=json.loads(sys.stdin.readline(16384))
+        actor=int(binding['actor'])
+        if _settings.get('crm_actor') not in (None,actor):raise RuntimeError('Administrator profile belongs to another identity')
+        if not isinstance(binding.get('token'),str) or not binding['token']:raise RuntimeError('Missing administrator credential')
+        api_client.require_https(binding['url'])
+        _settings['crm_actor']=actor
+        _settings['active']='CRM'
+        _settings['profiles']={'CRM':{'url':binding['url'],'device_token':binding['token']}}
+        _persist_settings()
     srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     print(f"HARD-BACKEND {srv.server_address[1]} {SECRET}", flush=True)
     threading.Thread(target=_mail_loop, daemon=True, name="mail").start()

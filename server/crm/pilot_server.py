@@ -402,6 +402,13 @@ def serve():
                 }
                 if action == "context":
                     result = context(p)
+                elif action=='analyst-admin-init':
+                    from . import demo_admin
+                    result=demo_admin.endpoint(p)
+                elif method=='GET' and action in {'analyst-report','analyst-statistics'}:
+                    if p.role!='analyst':raise CRMError('Требуется вход Аналитика.','forbidden',403)
+                    from . import manager_reports,assignments
+                    result=(manager_reports.read if action=='analyst-report' else assignments.statistics)(p,**query)
                 elif action=='manager-access':
                     from . import demo_team
                     result=demo_team.request(p,method,raw,query)

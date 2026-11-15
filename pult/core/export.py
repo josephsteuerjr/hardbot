@@ -45,59 +45,8 @@ _col_width = col_width
 
 
 def write_registry_xlsx(path: str, fields: list[dict], rows: list[dict]) -> None:
-    """Слепок БД в новый xlsx: 3 строки шапки (блоки объединены), даты и суммы —
-    типизированные, строки — текстом (никогда не формулой), автофильтр,
-    закреплённая шапка."""
-    from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Font
-    from openpyxl.utils import get_column_letter
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Портфели"
-
-    bold = Font(bold=True)
-    italic = Font(italic=True, color="8A8578")
-    center = Alignment(horizontal="center")
-
-    # строка 1 — шапки блоков (merge по колонкам блока)
-    start = 0
-    for i in range(1, len(fields) + 1):
-        if i == len(fields) or fields[i]["block"] != fields[start]["block"]:
-            c = _text_cell(ws, 1, start + 1, fields[start]["block"])
-            c.font, c.alignment = bold, center
-            if i - 1 > start:
-                ws.merge_cells(start_row=1, start_column=start + 1,
-                               end_row=1, end_column=i)
-            start = i
-    # строка 2 — заголовки, строка 3 — сх/хард, ширины
-    for j, fld in enumerate(fields, start=1):
-        _text_cell(ws, 2, j, fld["title"]).font = bold
-        _text_cell(ws, 3, j, fld["source"]).font = italic
-        ws.column_dimensions[get_column_letter(j)].width = col_width(fld["key"], fld["title"])
-    # данные со строки 4
-    for r, row in enumerate(rows, start=4):
-        for j, fld in enumerate(fields, start=1):
-            v = row.get(fld["key"])
-            if v in (None, ""):
-                continue
-            if fld.get("date"):
-                d = enrich.parse_date(v)
-                if d:
-                    c = ws.cell(row=r, column=j, value=d)
-                    c.number_format = "DD.MM.YYYY"
-                    continue
-            if fld.get("num"):
-                n = parse_num(v)
-                if n is not None:
-                    c = ws.cell(row=r, column=j, value=n)
-                    c.number_format = "#,##0"
-                    continue
-            _text_cell(ws, r, j, str(v))
-    last = max(len(rows) + 3, 4)
-    ws.auto_filter.ref = f"A2:{get_column_letter(len(fields))}{last}"
-    ws.freeze_panes = "A4"
-    wb.save(path)
+    from .native_exports import registry
+    registry(path,fields,rows)
 
 
 MARKER_COLS = [
@@ -108,39 +57,8 @@ MARKER_COLS = [
 
 
 def write_markers_xlsx(path: str, rows: list[dict]) -> None:
-    from openpyxl import Workbook
-    from openpyxl.styles import Font
-    from openpyxl.utils import get_column_letter
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Метки"
-    for j, (_k, title, w) in enumerate(MARKER_COLS, start=1):
-        ws.cell(row=1, column=j, value=title).font = Font(bold=True)
-        ws.column_dimensions[get_column_letter(j)].width = w
-    for r, row in enumerate(rows, start=2):
-        for j, (k, _t, _w) in enumerate(MARKER_COLS, start=1):
-            v = row.get(k)
-            if v in (None, ""):
-                continue
-            if k == "created_at":
-                try:
-                    c = ws.cell(row=r, column=j,
-                                value=datetime.fromisoformat(str(v).replace("T", " ")))
-                    c.number_format = "DD.MM.YYYY HH:MM"
-                    continue
-                except ValueError:
-                    pass
-            elif k in ("lat", "lon") and isinstance(v, (int, float)):
-                c = ws.cell(row=r, column=j, value=float(v))
-                c.number_format = "0.000000"
-                continue
-            # Подпись метки пишет выездник: «=2+2» здесь — формула в книге аналитика.
-            _text_cell(ws, r, j, v if isinstance(v, (int, float)) else str(v))
-    if rows:
-        ws.auto_filter.ref = f"A1:{get_column_letter(len(MARKER_COLS))}{len(rows) + 1}"
-    ws.freeze_panes = "A2"
-    wb.save(path)
+    from .native_exports import markers
+    markers(path,rows)
 
 
 def export_request(employees: list[dict], selected: set[str],

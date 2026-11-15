@@ -314,12 +314,13 @@ def enr_preview(body, *, admin, start_job, settings, **_):
         raise RuntimeError("Сначала выбери папку с республиками")
 
     def work(say):
-        say("Проверяю: данные сервера + папки сотрудников…")
+        say("Получаю данные сервера…")
         d = admin("GET", "/admin/export.json", timeout=120)
         enrich.validate_server_export(d)
         by_emp = enrich.split_by_employee(d["rows"])
+        say("Ищу папки сотрудников…")
         fmap = en.folder_map(base)
-        matched, nofolder, nofile = en.match_employees(by_emp, fmap)
+        matched, nofolder, nofile = en.match_employees(by_emp, fmap,log=say)
         S["enr_fields"], S["enr_matched"], S["enr_check"] = d["fields"], matched, None
         return {"pairs": en.preview_pairs(by_emp, matched),
                 "warning": en.preview_warning(by_emp, matched, nofolder, nofile),
@@ -344,7 +345,7 @@ def _conf(c: list[dict]) -> list[dict]:
              "row": en.conflict_row(x)} for x in c]
 
 
-def enr_check(body, *, admin, start_job, **_):
+def enr_check(body, *, admin, start_job, settings=None, **_):
     picked = _picked(body.get("keys"))
     if not picked:
         raise RuntimeError("Никто не выбран")
@@ -355,9 +356,15 @@ def enr_check(body, *, admin, start_job, **_):
         kwargs = en.preview_kwargs(since=since, until=until, ledger=ledger)
         results = enrich.preview_many(en.build_jobs(picked), S["enr_fields"], say, **kwargs)
         conflicts, office = en.collect_conflicts(results)
+        remembered=delivery_service(settings,admin).remembered_choices(en.build_jobs(picked),conflicts+office) if settings is not None else []
+        remembered_keys={en.conflict_key(row) for row in remembered}
+        visible_conflicts=[row for row in conflicts if en.conflict_key(row) not in remembered_keys]
+        visible_office=[row for row in office if en.conflict_key(row) not in remembered_keys]
         S["enr_check"] = {"keys": sorted(m["key"] for m in picked), "since": since, "until": until,
-                          "conflict_count":len(conflicts)+len(office),"conflicts":conflicts+office}
-        return {"lines": en.preview_lines(results), "conflicts": _conf(conflicts), "office": _conf(office)}
+                          "conflict_count":len(conflicts)+len(office),"conflicts":conflicts+office,"remembered":remembered}
+        lines=en.preview_lines(results,accepted=remembered)
+        if remembered:lines.append(f'Сохранён прежний выбор «оставить в книге»: {len(remembered)}. Значения и источник совпадают с принятой проверкой.')
+        return {"lines": lines, "conflicts": _conf(visible_conflicts), "office": _conf(visible_office),"remembered":len(remembered)}
     return {"job": start_job("enr_check", work)}
 
 
@@ -378,7 +385,20 @@ def _decisions(body, picked, since, until) -> dict:
     pv = S["enr_check"]
     if not pv or pv["keys"] != sorted(m["key"] for m in picked) or (pv["since"], pv["until"]) != (since, until):
         return {}
-    return {en.conflict_key(d): str(d["decision"]) for d in body.get("decisions") or []}
+    allowed={en.conflict_key(row) for row in pv.get('conflicts',[])}
+    choices={en.conflict_key(row):'file' for row in pv.get('remembered',[])}
+    for row in body.get('decisions') or []:
+        key=en.conflict_key(row);value=str(row.get('decision') or '')
+        if key not in allowed or value not in ('file','server'):
+            raise ValueError('Решение не относится к текущей проверке книги')
+        choices[key]=value
+    pairs={}
+    for key,value in choices.items():
+        if key[-1] in ('promise_date','forecast_sum'):
+            pairs.setdefault(key[:-1],set()).add(value)
+    if any(len(values)>1 for values in pairs.values()):
+        raise ValueError('Сумма и дата обещания должны иметь одно решение')
+    return choices
 
 
 def enr_apply(body, *, admin, start_job, settings, **_):
@@ -392,6 +412,8 @@ def enr_apply(body, *, admin, start_job, settings, **_):
     checked=S['enr_check']
     if not checked or checked['keys']!=sorted(m['key'] for m in picked) or (checked['since'],checked['until'])!=(since,until):
         raise RuntimeError('Сначала проверьте конфликты для выбранных книг и дат')
+    if any(en.conflict_key(row) not in decisions for row in checked.get('conflicts',[])):
+        raise ValueError('Выберите значения для всех расхождений, включая правки офиса, до начала записи')
     approved=[]
     for row in checked.get('conflicts',[]):
         key=en.conflict_key(row)
@@ -408,7 +430,8 @@ def enr_apply(body, *, admin, start_job, settings, **_):
         S["enr_check"] = None
         S['preview']=None
         return {**result,'lines':[f'Проверено книг: {result["completed"]} из {result["total"]}. Записано ячеек: {result["cells"]}.',
-            'Перенос завершён.' if not result['remaining'] else 'Оставшиеся книги требуют повторной проверки или разбора. Причины указаны в очереди.'],
+            'Перенос завершён.' if not result['remaining'] else '\n'.join(
+                f'{book["employee"]} — {book["message"]}' for book in result['books'] if book['state']!='done')],
             'conflicts':[],'office':[],'ledger_error':''}
     return {"job": start_job("enr_apply", work,before_start=prepare)}
 

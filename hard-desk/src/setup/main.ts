@@ -84,7 +84,7 @@ function boot(): void {
   });
   profile = process.env.HARD_SETUP_QA_DATA || join(process.env.LOCALAPPDATA || "", "Hard", product.dataName, "data");
   app.whenReady().then(async () => {
-    if (!removing) target = registration() || join(process.env.LOCALAPPDATA || "", "Programs", "hard-" + (product.dataName==='crm-manager-internal'?product.dataName:product.id));
+    if (!removing) target = registration() || join(process.env.LOCALAPPDATA || "", "Programs", "hard-" + (product.dataName.endsWith('-internal')?product.dataName:product.id));
     const d = process.argv.find(a => /^\/D=/i.test(a)); if (d && !removing) target = resolve(d.slice(3));
     if (removing) { checkRoot(target); const registered = registration(); if (!registered || resolve(registered).toLowerCase() !== resolve(target).toLowerCase()) throw new Error("Папка не совпадает с установленной программой"); }
     if (!preview && process.argv.some(a => /^\/S$/i.test(a))) {
