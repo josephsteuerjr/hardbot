@@ -58,6 +58,7 @@ _jobs: dict[str, dict] = {}
 _journal = None
 _access_busy = False
 _background_busy = False
+_runtime_stop = None
 
 
 @contextmanager
@@ -608,8 +609,12 @@ def route(path: str, body: dict):
     if path == '/account/password':
         return api_client.request(_profile().get('url',''),'POST','/api/account/password',{
             'username':str(body.get('username') or ''),'current':str(body.get('current') or ''),'new':str(body.get('new') or '')})
-    if path == "/busy":
-        return {"busy": _access_busy or _mail_busy.locked() or any(j.get("state") == "running" for j in _jobs.values())}
+    if path in {"/busy","/runtime/stop"}:
+        busy=_access_busy or _background_busy or _mail_busy.locked() or any(j.get("state") == "running" for j in _jobs.values())
+        if path=='/runtime/stop':
+            if _runtime_stop is None or busy:raise ValueError('Исполнитель занят. Сначала завершите текущие задания.')
+            threading.Timer(0.2,_runtime_stop).start()
+        return {"busy":busy}
     if path == "/state":
         return state()
     if path == "/admin":
@@ -663,10 +668,14 @@ def route(path: str, body: dict):
 
 
 def main() -> None:
+    global _runtime_stop
+    runtime_lease=None
     if '--crm-analyst' in sys.argv:
         import os
         if not os.environ.get('HARD_PULT_SETTINGS') or os.environ.get('HARD_PULT_PROTECT_TOKENS') != '1':
             raise RuntimeError('The CRM administrator requires a protected independent profile')
+        from pult.core.runtime_lock import acquire
+        runtime_lease=acquire(Path(os.environ['HARD_PULT_SETTINGS']).with_name('runtime.lock'))
         binding=json.loads(sys.stdin.readline(16384))
         actor=int(binding['actor'])
         if _settings.get('crm_actor') not in (None,actor):raise RuntimeError('Administrator profile belongs to another identity')
@@ -677,6 +686,7 @@ def main() -> None:
         _settings['profiles']={'CRM':{'url':binding['url'],'device_token':binding['token']}}
         _persist_settings()
     srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    if runtime_lease is not None:_runtime_stop=srv.shutdown
     print(f"HARD-BACKEND {srv.server_address[1]} {SECRET}", flush=True)
     threading.Thread(target=_mail_loop, daemon=True, name="mail").start()
     threading.Thread(target=enrichment_loop,daemon=True,name='enrichment').start()

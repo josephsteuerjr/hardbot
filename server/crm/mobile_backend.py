@@ -1,5 +1,5 @@
 """Server-side transport for the mobile shell; no working token in JavaScript."""
-import asyncio, hashlib, json, os, re, secrets, sys
+import asyncio, contextlib, hashlib, json, os, re, secrets, sys
 from pathlib import Path
 import aiohttp
 from .contract import CRMError
@@ -172,13 +172,74 @@ class WindowsExecutor:
         self.home=Path(home).resolve();self.primary=primary;self.children={};self.locks={};self.excel_lock=asyncio.Lock()
     async def start(self):
         self.home.mkdir(parents=True,exist_ok=True);self.client=aiohttp.ClientSession(trust_env=False,timeout=aiohttp.ClientTimeout(total=300))
+        self.supervisor=asyncio.create_task(self.recover(),name='crm-windows-executor')
     async def close(self):
+        self.supervisor.cancel()
+        with contextlib.suppress(asyncio.CancelledError):await self.supervisor
         await self.client.close()
-        for child,_,_ in self.children.values():
-            if child.returncode is None:
-                child.terminate()
-                try:await asyncio.wait_for(child.wait(),8)
-                except asyncio.TimeoutError:child.kill();await child.wait()
+        # The Python queue belongs to the server, not this HTTP process. Its
+        # endpoint and credentials are DPAPI-sealed; a new BFF reattaches.
+
+    async def recover(self):
+        from . import executor_state
+        while True:
+            for path in self.home.glob('*/authority.bin'):
+                try:
+                    session=executor_state.read(path)
+                    async with self.locks.setdefault(session['owner'],asyncio.Lock()):await self.ensure(session)
+                except asyncio.CancelledError:raise
+                except Exception:
+                    # Keep the queue intact. A denied account never starts work;
+                    # temporary authority failures are retried on the next pass.
+                    continue
+            await asyncio.sleep(10)
+
+    async def ensure(self,session):
+        from . import executor_state
+        owner=session['owner'];folder=self.home/hashlib.sha256(owner.encode()).hexdigest();folder.mkdir(parents=True,exist_ok=True)
+        async with self.client.get(self.primary+'/api/crm-identity',headers={'X-Pult-Token':session['credential']},
+                allow_redirects=False,timeout=aiohttp.ClientTimeout(total=10)) as response:
+            value=await response.json()
+            if response.status!=200 or value.get('subject',{}).get('actor_uid')!=session['context']['actor_uid'] or value.get('me',{}).get('role')!='analyst':
+                raise CRMError('Доступ Аналитика отозван. Задания сохранены.','authority_denied',403)
+        binding=hashlib.sha256(session['credential'].encode()).hexdigest()
+        lease=executor_state.read(folder/'runtime.bin');live=False
+        if lease:
+            if not re.fullmatch(r'http://127\.0\.0\.1:\d{1,5}',lease.get('url','')):raise CRMError('Повреждён адрес исполнителя.','executor_state',503)
+            try:
+                async with self.client.post(lease['url']+'/busy',headers={'X-Local-Secret':lease['secret']},json={},timeout=aiohttp.ClientTimeout(total=3)) as response:
+                    state=await response.json();live=response.status==200 and state.get('ok') is True
+            except (aiohttp.ClientError,asyncio.TimeoutError,ValueError):pass
+            if live and lease['binding']!=binding:
+                if state.get('data',{}).get('busy',True):raise CRMError('Завершите прежние задания перед сменой входа.','executor_busy',409)
+                await self.stop(owner)
+                live=False
+        if not live:
+            env=dict(os.environ,PYTHONIOENCODING='utf-8',HARD_PULT_SETTINGS=str(folder/'settings.json'),HARD_PULT_PROTECT_TOKENS='1',HARD_CLIENT_VERSION='3.3.0',HARD_CLIENT_PRODUCT='analyst')
+            child,url,secret=await start_runtime(folder,['--crm-analyst'],env,dict(actor=session['context']['actor_uid'],url=self.primary,token='account:'+session['credential']),'HARD-BACKEND')
+            self.children[owner]=child
+            lease=dict(url=url,secret=secret,binding=binding,pid=child.pid)
+            executor_state.write(folder/'runtime.bin',lease)
+        executor_state.write(folder/'authority.bin',{k:session[k] for k in ('owner','role','credential','context')})
+        return lease
+
+    async def stop(self,owner):
+        from . import executor_state
+        path=self.home/hashlib.sha256(owner.encode()).hexdigest()/'runtime.bin';lease=executor_state.read(path)
+        if not lease:return
+        async with self.client.post(lease['url']+'/runtime/stop',headers={'X-Local-Secret':lease['secret']},json={}) as response:
+            result=await response.json()
+            if not result.get('ok'):raise CRMError('Исполнитель ещё занят.','executor_busy',409)
+        child=self.children.get(owner)
+        if child:await asyncio.wait_for(child.wait(),10)
+        else:
+            for _ in range(30):
+                await asyncio.sleep(0.1)
+                try:
+                    async with self.client.post(lease['url']+'/busy',headers={'X-Local-Secret':lease['secret']},json={},timeout=aiohttp.ClientTimeout(total=1)):pass
+                except (aiohttp.ClientError,asyncio.TimeoutError):break
+            else:raise CRMError('Исполнитель ещё останавливается.','executor_busy',409)
+        path.unlink(missing_ok=True)
     async def file_action(self,session,action,body):
         if session['role'] not in {'analyst','manager'} and not (action in {'report-write','report-resume'} and body.get('kind')=='shifts'):raise CRMError('Нет права на работу с книгами.','forbidden',403)
         def execute():
@@ -195,19 +256,9 @@ class WindowsExecutor:
     async def admin(self,session,path,body):
         if session['role']!='analyst':raise CRMError('Требуется вход Аналитика.','forbidden',403)
         validate_admin(path,body);owner=session['owner']
-        binding=hashlib.sha256(session['credential'].encode()).hexdigest()
         async with self.locks.setdefault(owner,asyncio.Lock()):
-            prior=self.children.get(owner)
-            if prior and prior[0].returncode is None and getattr(prior[0],'mobile_binding',None)!=binding:
-                async with self.client.post(prior[1]+'/busy',headers={'X-Local-Secret':prior[2]},json={}) as response:state=await response.json()
-                if not state.get('ok') or state.get('data',{}).get('busy',True):raise CRMError('Завершите прежние задания перед сменой входа.','executor_busy',409)
-                prior[0].terminate();await prior[0].wait()
-            if not prior or prior[0].returncode is not None:
-                folder=self.home/hashlib.sha256(owner.encode()).hexdigest();folder.mkdir(parents=True,exist_ok=True)
-                env=dict(os.environ,PYTHONIOENCODING='utf-8',HARD_PULT_SETTINGS=str(folder/'settings.json'),HARD_PULT_PROTECT_TOKENS='1',HARD_CLIENT_VERSION='3.3.0',HARD_CLIENT_PRODUCT='analyst')
-                prior=await start_runtime(folder,['--crm-analyst'],env,dict(actor=session['context']['actor_uid'],url=self.primary,token='account:'+session['credential']),'HARD-BACKEND')
-                prior[0].mobile_binding=binding;self.children[owner]=prior
-        async with self.client.post(prior[1]+path,headers={'X-Local-Secret':prior[2]},json=body) as response:
+            lease=await self.ensure(session)
+        async with self.client.post(lease['url']+path,headers={'X-Local-Secret':lease['secret']},json=body) as response:
             result=await response.json()
             if path=='/state' and isinstance(result.get('data'),dict):result['data'].pop('settings_path',None)
             return result

@@ -30,13 +30,12 @@ def effective_fields(conn, contract_id, values):
 
 def readiness(conn, principal):
     mode = conn.execute("SELECT value FROM crm_meta WHERE key='distribution_mode'").fetchone()
-    enabled = bool(mode and mode[0] == 'isolated')
-    # There is intentionally no 'production ready' value yet. An old primary
-    # SQLite endpoint cannot be fenced by a PostgreSQL advisory lock alone.
+    from . import primary_fence
+    enabled = bool(mode and (mode[0] == 'isolated' or mode[0] == 'cutover' and primary_fence.ready(conn)))
     managed = conn.execute('SELECT 1 FROM crm_distribution_managers WHERE employee_uuid=?',
                            (principal.employee_uuid,)).fetchone()
     permitted = principal.role in {'manager', 'owner'} and (principal.owner or 'assign' in principal.capabilities) and bool(managed)
-    return dict(enabled=enabled and permitted, environment='isolated' if enabled else 'mixed',
+    return dict(enabled=enabled and permitted, environment=mode[0] if enabled else 'mixed',
                 reason='' if enabled and permitted else
                 'Распределение в рабочем смешанном контуре выключено: защита старых писателей ещё не подтверждена.' if not enabled else
                 'Нет полномочия распределения в управляемом портфеле.',
@@ -190,17 +189,26 @@ def portfolio(principal, *, offset=0, limit=50, **filters):
         people=conn.execute('SELECT c.person_uuid,p.name,COUNT(*) AS filtered_contracts'+base+
             ' GROUP BY c.person_uuid,p.name ORDER BY p.name,c.person_uuid LIMIT ? OFFSET ?',(*args,limit,offset)).fetchall()
         names={r['employee_uuid']:r['name'] for r in conn.execute('SELECT employee_uuid,name FROM crm_employees')}
+        grouped=defaultdict(list);heads={};permitted=set();matching=set();whole={}
+        if people:
+            page_ids=[p['person_uuid'] for p in people];marks=','.join('?' for _ in page_ids)
+            person_clause,person_args=scope_sql(principal)
+            page_where='c.person_uuid IN ('+marks+') AND '+person_clause
+            counts=conn.execute('SELECT c.person_uuid,COUNT(*) FROM crm_contracts c WHERE '+page_where+
+                ' GROUP BY c.person_uuid',(*page_ids,*person_args)).fetchall()
+            if any(r[1]>500 for r in counts):
+                raise CRMError('У клиента более 500 договоров: уточните отбор.','selection_too_large',409)
+            page_rows=conn.execute('SELECT c.* FROM crm_contracts c WHERE '+page_where+
+                ' ORDER BY c.creditor_id,c.external_id,c.contract_uuid',(*page_ids,*person_args)).fetchall()
+            ids=[r['contract_uuid'] for r in page_rows]
+            for start in range(0,len(ids),200):
+                batch=ids[start:start+200];heads.update(states(conn,batch));permitted.update(allowed_slots(conn,principal,batch))
+            for row in page_rows:grouped[row['person_uuid']].append(row)
+            matching={r[0] for r in conn.execute('SELECT c.contract_uuid'+base+' AND c.person_uuid IN ('+marks+')',(*args,*page_ids))}
+            whole={r[0]:r[1] for r in conn.execute('SELECT person_uuid,COUNT(*) FROM crm_contracts WHERE person_uuid IN ('+marks+') GROUP BY person_uuid',page_ids)}
         result=[]
         for p in people:
-            person_clause,person_args=scope_sql(principal)
-            all_rows=conn.execute('SELECT c.* FROM crm_contracts c WHERE c.person_uuid=? AND '+person_clause+
-                ' ORDER BY c.creditor_id,c.external_id,c.contract_uuid',(p['person_uuid'],*person_args)).fetchall()
-            # A page is bounded in clients and contracts; giant people are
-            # explicitly refused rather than silently partially transferred.
-            if len(all_rows)>500:
-                raise CRMError('У клиента более 500 договоров: уточните отбор.','selection_too_large',409)
-            ids=[r['contract_uuid'] for r in all_rows];heads=states(conn,ids);permitted=allowed_slots(conn,principal,ids)
-            matching={r[0] for r in conn.execute('SELECT c.contract_uuid'+base+' AND c.person_uuid=?',(*args,p['person_uuid']))}
+            all_rows=grouped[p['person_uuid']]
             rows=[];money=defaultdict(Decimal);unknown=0
             for r in all_rows:
                 f=json.loads(r['fields_json']);slots=[]
@@ -216,9 +224,8 @@ def portfolio(principal, *, offset=0, limit=50, **filters):
                 except (InvalidOperation,ValueError,TypeError):unknown+=1
                 rows.append(dict(contract_uuid=r['contract_uuid'],external_id=r['external_id'],creditor_id=r['creditor_id'],
                     currency=r['currency'],fields=f,slots=slots,in_filter=r['contract_uuid'] in matching))
-            whole=conn.execute('SELECT COUNT(*) FROM crm_contracts WHERE person_uuid=?',(p['person_uuid'],)).fetchone()[0]
             result.append(dict(person_uuid=p['person_uuid'],name=p['name'],contracts=rows,
-                managed_contracts=len(rows),filtered_contracts=p['filtered_contracts'],partially_managed=whole!=len(rows),
+                managed_contracts=len(rows),filtered_contracts=p['filtered_contracts'],partially_managed=whole[p['person_uuid']]!=len(rows),
                 currencies={k:format(v,'f') for k,v in money.items()},unknown_amounts=unknown))
         return dict(schema_version=1,people=result,total=total,offset=offset,has_more=offset+len(result)<total,
                     watermark=mark,as_of=now(),readiness=readiness(conn,principal))
@@ -295,6 +302,8 @@ def preview(principal, body):
 def _validate(conn, principal, frozen):
     slots=frozen['slots'];target=frozen['employee_uuid'];action=frozen['action']
     ids=sorted({s['contract_uuid'] for s in slots});permitted=set();current={}
+    from .primary_fence import require_contracts
+    require_contracts(conn,ids)
     for start in range(0,len(ids),200):
         batch=ids[start:start+200]
         permitted.update(allowed_slots(conn,principal,batch));current.update(states(conn,batch))
@@ -353,8 +362,10 @@ def _apply_slots(conn, principal, op, frozen, at):
             'before_employee_uuid,after_employee_uuid,revision,at,source) VALUES(?,?,?,?,?,?,?,?,?,?)',
             (principal.actor_uid,op,principal.team_id,cid,work,s['employee_uuid'],target,revision,at,'native-distribution'))
         changed.append(dict(contract_uuid=cid,capability=work,employee_uuid=target,revision=revision))
+        if conn.execute('SELECT 1 FROM crm_primary_fences WHERE contract_uuid=?',(cid,)).fetchone():
+            conn.execute('INSERT INTO crm_primary_pending VALUES(?,?) ON CONFLICT(contract_uuid) DO UPDATE SET changed_at=excluded.changed_at',(cid,at))
     result=dict(status='applied',operation_id=op,actor_employee_uuid=principal.employee_uuid,team_id=principal.team_id,applied_at=at,changes=changed,no_op=len(frozen['slots'])-len(changed),
-                watermark=watermark(conn),projection_status='isolated',comment=frozen['comment'])
+                watermark=watermark(conn),projection_status='pending' if any(conn.execute('SELECT 1 FROM crm_primary_pending WHERE contract_uuid=?',(s['contract_uuid'],)).fetchone() for s in changed) else 'isolated',comment=frozen['comment'])
     return result
 
 
@@ -497,19 +508,31 @@ def _changes(conn, principal, cursor, previous_scope=''):
         return dict(cursor=new_cursor,resync=True,dirty=True,as_of=now())
     if cursor==end:
         return dict(cursor=new_cursor,resync=False,dirty=False,as_of=now())
-    read=access.readable_contracts(conn,principal)
-    managed_clause,args=scope_sql(principal)
-    managed={r[0] for r in conn.execute('SELECT c.contract_uuid FROM crm_contracts c WHERE '+managed_clause,args)}
-    dirty=False
-    for r in conn.execute('SELECT * FROM crm_assignment_changes WHERE sequence>? AND sequence<=? ORDER BY sequence',
-                          (cursor['assignments'],end['assignments'])):
-        if r['contract_uuid'] in managed or r['before_employee_uuid'] in principal.employee_scope or r['after_employee_uuid'] in principal.employee_scope:
-            dirty=True
-    if not dirty:
-        for r in conn.execute('SELECT ec.contract_uuid,e.employee_uuid FROM crm_events e JOIN crm_event_contracts ec USING(event_id) '
-                              'WHERE e.sequence>? AND e.sequence<=?',(cursor['facts'],end['facts'])):
-            if r['contract_uuid'] in read or r['contract_uuid'] in managed or r['employee_uuid']==principal.employee_uuid:
-                dirty=True;break
+    # Filter the changed rows in SQL. Reading the entire 50k portfolio for each
+    # invalidation made the one-second client polling miss its latency budget.
+    staff=sorted(principal.employee_scope);marks=','.join('?' for _ in staff)
+    clause,args=scope_sql(principal,alias='d')
+    if staff:
+        clause+=' OR d.before_employee_uuid IN ('+marks+') OR d.after_employee_uuid IN ('+marks+')'
+        args.extend(staff+staff)
+    dirty=bool(conn.execute('SELECT 1 FROM crm_assignment_changes d WHERE d.sequence>? AND d.sequence<=? AND ('
+        +clause+') LIMIT 1',(cursor['assignments'],end['assignments'],*args)).fetchone())
+    if not dirty and cursor['facts']<end['facts']:
+        clause,args=scope_sql(principal,alias='ec')
+        clause+=' OR e.employee_uuid=?';args.append(principal.employee_uuid)
+        if access.reads_all(principal):clause='1=1';args=[]
+        elif staff:
+            at=now()
+            clause+=' OR EXISTS(SELECT 1 FROM crm_effective_assignments a WHERE a.contract_uuid=ec.contract_uuid '
+            clause+='AND a.employee_uuid IN ('+marks+') AND a.starts_at<=? AND (a.ends_at IS NULL OR a.ends_at>?))'
+            args.extend([*staff,at,at])
+            from . import tasks
+            delegated=sorted(tasks.grants(conn,principal))
+            if delegated:
+                clause+=' OR ec.contract_uuid IN ('+','.join('?' for _ in delegated)+')';args.extend(delegated)
+        dirty=bool(conn.execute('SELECT 1 FROM crm_events e JOIN crm_event_contracts ec USING(event_id) '
+            'WHERE e.sequence>? AND e.sequence<=? AND ('+clause+') LIMIT 1',
+            (cursor['facts'],end['facts'],*args)).fetchone())
     # No inaccessible contract IDs, assignees, names or fact payloads on channel.
     return dict(cursor=new_cursor,resync=False,dirty=dirty,as_of=now())
 

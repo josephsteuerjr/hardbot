@@ -1,0 +1,6 @@
+{
+  "database": "/primary/hardbot.db",
+  "employees": [],
+  "status": "/status/worker.json",
+  "interval_seconds": 30
+}

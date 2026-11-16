@@ -22,6 +22,7 @@ import {showStartupRecovery} from './crm-startup-recovery';
 import {applyCrmWindowFrame} from './crm-window-frame';
 import {CrmLive} from './crm-live';
 import {PRODUCTS} from './product';
+import {accountAction} from './crm-account';
 
 const isolatedProfile = !!process.env.HARD_USER_DATA;
 let connectionNotice = "";
@@ -363,12 +364,12 @@ async function managerAccess(method:string,body:any,query:any):Promise<queue.Res
   const route=routes[resource];
   if(!route||route[0]!==method)return {ok:false,status:400,text:'Неизвестное действие доступа.'};
   if(demo())return local('manager-access',body,query,method);
-  if(!shared()||entrySource()!=='manager'||currentContext?.role!=='manager')
+  if(!shared()||!['manager','crm'].includes(entrySource())||currentContext?.role!=='manager')
     return {ok:false,status:403,text:'Для управления входами нужен действующий вход Руководителя.'};
   const authority=owner,actor=currentContext.actor_uid;
   try{
-    await pilotCredential(currentContext.employee_uuid,false,'manager');
-    const login=readExistingManagerSession();
+    await pilotCredential(currentContext.employee_uuid,false,entrySource());
+    const login=readExistingLogin(entrySource());
     const headers={'X-Pult-Token':login.credential,'Content-Type':'application/json','X-Client-Version':app.getVersion()};
     const identity=await fetchBuffered((u,i)=>net.fetch(u,i),'https://hard.rimborso.ru/api/manager/device/me',{method:'GET',headers},10000);
     const subject=await identity.json();
@@ -403,8 +404,8 @@ const analystRuntime=new AnalystRuntime({home:data,window:()=>win,synthetic:demo
       if(expected!==owner||currentContext?.role!=='analyst'||currentContext?.actor_uid!==actor)throw Error('Вход Аналитика изменился.');
       return {owner:expected,actor,...endpoint.data};
     }
-    if(!shared()||entrySource()!=='analyst')throw Error('Подключите сохранённый вход установленного Аналитика.');
-    const login=readExistingLogin('analyst');
+    if(!shared()||!['analyst','crm'].includes(entrySource()))throw Error('Подключите вход Аналитика.');
+    const login=readExistingLogin(entrySource());
     return {owner:expected,actor,url:'https://hard.rimborso.ru',
       token:(login.kind==='analyst'?'account:':'')+login.credential,fingerprint:login.fingerprint};
   }});
@@ -721,6 +722,16 @@ app
       return { ok: true };
     });
     safeHandler("crm:connect", async (input: any) => {
+      if(['account-login','account-password','account-status','account-logout'].includes(input?.action)){
+        const result=await accountAction(input.action,input);
+        if(input.action==='account-password')return result;
+        forgetAuthority('');
+        writeSettings({crmConnection:undefined,crmLast:undefined});
+        if(input.action==='account-logout'||(result.data as any).pending)return result;
+        await pilotCredential(undefined,true,'crm');
+        writeSettings({crmConnection:{mode:'remote',source:'crm',server:PILOT_BASE,auth:'existing-login'}});
+        offline=false;return identify();
+      }
       if (input?.action === "offline") {
         offline = !!input.value;
         return { ok: true };

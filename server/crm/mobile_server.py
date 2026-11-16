@@ -1,5 +1,5 @@
 """Mobile CRM BFF and PWA. Separate namespace; never replaces legacy PWA."""
-import argparse, asyncio, base64, hashlib, json, os, re, secrets, shutil, sqlite3, time, uuid
+import argparse, asyncio, base64, hashlib, json, os, re, secrets, shutil, sqlite3, ssl, time, uuid
 from datetime import datetime,timezone
 from pathlib import Path
 from urllib.parse import quote, unquote
@@ -339,6 +339,8 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         yield
         await backend.close()
     app.cleanup_ctx.append(lifecycle)
+    async def health(request):return web.json_response(dict(ok=True,service='crm-mobile',executor='windows' if isinstance(getattr(backend,'executor',None),WindowsExecutor) else 'synthetic' if backend.synthetic else 'unconfigured'))
+    app.router.add_get(prefix+'health',health)
     app.router.add_get(prefix+'boot',boot);app.router.add_post(prefix+'login',login);app.router.add_post(prefix+'logout',logout)
     app.router.add_post(prefix+'password',password)
     app.router.add_get(prefix+'receipts',receipts);app.router.add_post(prefix+'receipts',receipts)
@@ -351,7 +353,15 @@ if __name__=='__main__':
     homes.add_argument('--demo-home');homes.add_argument('--home');parser.add_argument('--port',type=int,default=0);parser.add_argument('--receipt')
     parser.add_argument('--primary');parser.add_argument('--crm');parser.add_argument('--session-key-file');parser.add_argument('--native-executor',action='store_true')
     parser.add_argument('--source-root',action='append',default=[]);parser.add_argument('--prefix',default=PREFIX);parser.add_argument('--public-origin');parser.add_argument('--assets')
+    parser.add_argument('--host',default='127.0.0.1');parser.add_argument('--tls-cert');parser.add_argument('--tls-key')
     args=parser.parse_args();home=Path(args.demo_home or args.home).resolve();key=None
+    if bool(args.tls_cert)!=bool(args.tls_key) or (args.host not in {'127.0.0.1','::1','localhost'} and not args.tls_cert):parser.error('A non-loopback listener requires its own TLS certificate and key')
+    tls=None
+    if args.tls_cert:
+        tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);tls.minimum_version=ssl.TLSVersion.TLSv1_2
+        tls.load_cert_chain(args.tls_cert,args.tls_key)
+    from pult.core.runtime_lock import acquire
+    lease=acquire(home/'mobile-server.lock')
     if args.assets:
         ASSETS=Path(args.assets).resolve()
         if not (ASSETS/'index.html').is_file() or not (ASSETS/'BUILD.json').is_file():parser.error('--assets must name a complete mobile build')
@@ -366,7 +376,7 @@ if __name__=='__main__':
         backend=SharedBackend(args.primary,args.crm,executor)
     async def run():
         app=create_app(backend,home,key=key,public_origin=args.public_origin,source_roots=args.source_root,prefix=args.prefix);runner=web.AppRunner(app,access_log=None);await runner.setup()
-        site=web.TCPSite(runner,'127.0.0.1',args.port);await site.start();url='http://127.0.0.1:'+str(site._server.sockets[0].getsockname()[1])+args.prefix
+        site=web.TCPSite(runner,args.host,args.port,ssl_context=tls);await site.start();url=('https' if tls else 'http')+'://'+args.host+':'+str(site._server.sockets[0].getsockname()[1])+args.prefix
         if args.receipt:Path(args.receipt).write_text(json.dumps(dict(url=url,pid=os.getpid(),synthetic=backend.synthetic)),encoding='utf-8')
         print('MOBILE-CRM '+url,flush=True)
         try:await asyncio.Event().wait()

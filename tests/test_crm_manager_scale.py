@@ -2,6 +2,8 @@
 import json
 import os
 import time
+import math
+from dataclasses import replace
 import pytest
 from crm import assignments,storage
 from test_crm_postgres import pg_world
@@ -13,19 +15,23 @@ pytestmark=pytest.mark.skipif(not os.environ.get('HARD_CRM_TEST_DSN_FILE'),reaso
 def test_fifty_thousand_contracts_paging_frozen_selection_and_latency(pg_world,record_property):
     w=allocation_world(pg_world);m=w['managers'][0]
     with storage.connect() as c:
+        c.execute("INSERT INTO crm_employees SELECT md5('scale-staff-' || i::text)::uuid::text,'scale-staff-' || i::text,'Scale employee ' || i::text,'synthetic-scale',1 FROM generate_series(0,199) i")
+        c.execute("INSERT INTO crm_memberships SELECT md5('scale-member-' || employee_uuid)::uuid::text,employee_uuid,'team-A','employee','[\"call\",\"visit\"]','Europe/Samara','2026-01-01',NULL FROM crm_employees WHERE source='synthetic-scale'")
+        roster={r[0] for r in c.execute("SELECT employee_uuid FROM crm_employees WHERE source='synthetic-scale'")}
+        m=replace(m,employee_scope=m.employee_scope|roster);w['managers'][0]=m
         c.execute("INSERT INTO crm_people SELECT md5('scale-person-' || (i/2)::text)::uuid::text,'Scale ' || (i/2)::text,'synthetic-scale','2026-01-01' FROM generate_series(0,49999) i GROUP BY i/2")
         c.execute("INSERT INTO crm_contracts SELECT md5('scale-contract-' || i::text)::uuid::text,md5('scale-person-' || (i/2)::text)::uuid::text,'scale-creditor-' || (i%2)::text,'SCALE-' || (i/2)::text,NULL,'RUB',"
             "'{\"debt_today\":\"1.25\"}','{\"debt_today\":\"1.25\"}','{}','{}','2026-01-01' FROM generate_series(0,49999) i")
         c.execute("INSERT INTO crm_managed_contracts SELECT 'team-A',contract_uuid,work FROM crm_contracts CROSS JOIN (VALUES('call'),('visit')) k(work) WHERE creditor_id LIKE 'scale-%'")
-        c.execute("INSERT INTO crm_assignments SELECT md5(c.contract_uuid || k.work)::uuid::text,?,c.contract_uuid,k.work,'2026-01-01',NULL,'synthetic-scale' FROM crm_contracts c CROSS JOIN (VALUES('call'),('visit')) k(work) WHERE creditor_id LIKE 'scale-%'",(w['employee'],))
+        c.execute("INSERT INTO crm_assignments SELECT md5(c.contract_uuid || k.work)::uuid::text,md5('scale-staff-' || ((split_part(c.external_id,'-',2)::integer)%200)::text)::uuid::text,c.contract_uuid,k.work,'2026-01-01',NULL,'synthetic-scale' FROM crm_contracts c CROSS JOIN (VALUES('call'),('visit')) k(work) WHERE creditor_id LIKE 'scale-%'")
         c.execute('ANALYZE crm_contracts');c.execute('ANALYZE crm_assignments');c.execute('ANALYZE crm_managed_contracts')
     measures={}
     for name,fn in [('page',lambda:assignments.portfolio(m,search='Scale',offset=10000,limit=50)),
                     ('statistics',lambda:assignments.statistics(m)),('idle_changes',lambda:assignments.changes(m))]:
         times=[]
-        for _ in range(3):
+        for _ in range(20):
             start=time.perf_counter();result=fn();times.append(round((time.perf_counter()-start)*1000,2))
-        measures[name]=dict(samples_ms=times,max_ms=max(times))
+        measures[name]=dict(samples_ms=times,max_ms=max(times),p95_ms=sorted(times)[math.ceil(len(times)*.95)-1])
         if name=='page':assert result['total']==25000 and len(result['people'])==50
         if name=='statistics':assert result['contracts']==50002 and result['debt']=={'RUB':'62746.90'}
     start=time.perf_counter()
@@ -34,10 +40,21 @@ def test_fifty_thousand_contracts_paging_frozen_selection_and_latency(pg_world,r
     assert p['slots_count']==100000 and len(p['slots'])==200 and p['contracts']==50000
     started=time.perf_counter();result,_=apply(w,p);measures['start_job_ms']=round((time.perf_counter()-started)*1000,2)
     assert result['status']=='job_started'
-    started=time.perf_counter();first=assignments.job_step(m,dict(schema_version=1,job_id=result['job_id'],pack_index=0));measures['atomic_pack_ms']=round((time.perf_counter()-started)*1000,2)
-    assert first['applied_slots']==200
+    packs=[];changes=[]
+    cursor=assignments.changes(m)['cursor']
+    for index in range(20):
+        started=time.perf_counter()
+        current=assignments.job_step(m,dict(schema_version=1,job_id=result['job_id'],pack_index=index))
+        packs.append(round((time.perf_counter()-started)*1000,2))
+        assert current['applied_slots']==(index+1)*200
+        committed=time.perf_counter();observed=assignments.changes(m,**cursor)
+        changes.append(round((time.perf_counter()-committed)*1000,2))
+        assert observed['dirty'];cursor=observed['cursor']
+    for name,times in [('atomic_pack',packs),('committed_changes',changes)]:
+        measures[name]=dict(samples_ms=times,max_ms=max(times),p95_ms=sorted(times)[math.ceil(len(times)*.95)-1])
     assignments.job_cancel(m,dict(schema_version=1,job_id=result['job_id']))
     record_property('manager_scale_measurements',json.dumps(measures))
     print(json.dumps(measures))
     assert measures['page']['max_ms']<5000
-    assert measures['atomic_pack_ms']<2000
+    assert measures['atomic_pack']['p95_ms']<2000
+    assert measures['committed_changes']['p95_ms']<2000

@@ -44,6 +44,7 @@ def upload(principal, identifier, contract_id, filename, media_type, data):
     at = now()
     with storage.connect() as conn:
         store.begin(conn, ["document:" + identifier, "contract:" + str(contract_id)])
+        principal=access.refresh_write(conn,principal)
         access.contracts(conn, principal, [contract_id], capability="document")
         previous = conn.execute(
             "SELECT * FROM crm_documents WHERE document_id=?", (identifier,)

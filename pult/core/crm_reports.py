@@ -2,7 +2,7 @@
 from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime
-import hashlib,json,os,uuid
+import gc,hashlib,json,os,uuid
 
 
 @contextmanager
@@ -15,8 +15,13 @@ def excel():
         app.api.AutomationSecurity=3;app.api.EnableEvents=False;app.api.AskToUpdateLinks=False
         yield app
     finally:
-        if app is not None:app.quit()
-        pythoncom.CoUninitialize()
+        try:
+            if app is not None:
+                try:app.quit()
+                except Exception as exc:
+                    if getattr(exc,'hresult',None)!=-2147417848:raise
+        finally:
+            app=None;gc.collect();pythoncom.CoUninitialize()
 
 
 def table(sheet,headers,rows):

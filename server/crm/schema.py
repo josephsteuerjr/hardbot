@@ -1,6 +1,6 @@
 """Additive canonical tables; legacy IDs, accounts and documents are retained."""
 
-VERSION = 6
+VERSION = 7
 
 DDL = """
 CREATE TABLE IF NOT EXISTS crm_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -166,7 +166,8 @@ def initialize(conn):
     statement = ""
     from .active_time import DDL as active_ddl
     from .assignment_schema import ddl as assignment_ddl
-    for line in (DDL + exchange_ddl + active_ddl + assignment_ddl()).splitlines(True):
+    from .runtime_schema import DDL as runtime_ddl
+    for line in (DDL + exchange_ddl + active_ddl + assignment_ddl() + runtime_ddl).splitlines(True):
         statement += line
         if sqlite3.complete_statement(statement):
             conn.execute(statement)
@@ -174,6 +175,8 @@ def initialize(conn):
     conn.execute(
         "INSERT INTO crm_meta VALUES('schema_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(VERSION),)
     )
+    import uuid
+    conn.execute("INSERT INTO crm_meta VALUES('instance_id',?) ON CONFLICT(key) DO NOTHING",(str(uuid.uuid4()),))
     for table in ("crm_events", "crm_metric_facts"):
         if "client_version" not in {
             r[1] for r in conn.execute("PRAGMA table_info(" + table + ")")

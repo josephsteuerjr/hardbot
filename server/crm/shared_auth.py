@@ -1,8 +1,9 @@
 """Pilot-only sessions derived from the live, existing Manager authority.
 
 The working credential is accepted only at exchange on the pinned first-party
-origin. It is sealed inside an audience-bound pilot session. No working token
-is written to the CRM database, logs or renderer. Every use rechecks the live
+origin. It is sealed inside an audience-bound pilot session. Background work
+stores a separately sealed credential; plaintext never enters DB/logs/renderer.
+Every use rechecks the live
 authority, so a revoked working login cannot keep using the pilot session.
 """
 import asyncio
@@ -127,7 +128,8 @@ def principal(identity):
             role = 'courier'
         # An Analyst entry has already passed the authority's admin gate. For
         # an existing pilot manager identity it is a capability reduction.
-        legacy_manager = role in {'manager', 'full','analyst'} and result.team_id == 'crm-pilot-managers'
+        legacy_manager = (role in {'manager', 'full','analyst'} and result.team_id == 'crm-pilot-managers'
+                          and membership and membership['role']=='manager')
         role = 'manager' if role == 'full' else role
         lower_entry=membership and membership['role']=='manager' and role in {'employee','courier','observer','analyst'}
         if (role not in ROLE_CAPABILITIES or not membership or
@@ -153,11 +155,25 @@ def principal(identity):
 
 
 class Sessions:
-    def __init__(self, key, verifier, *, resolve=principal, clock=time.time, audit=None):
+    def __init__(self, key, verifier, *, resolve=principal, clock=time.time, audit=None, background_store=None):
         if not isinstance(key, bytes) or len(key) != 32:
             raise RuntimeError('CRM requires its own 32-byte session key')
         self.cipher, self.verify, self.resolve, self.clock = AESGCM(key), verifier, resolve, clock
         self.audit = audit or audit_exchange
+        self.background_store = background_store
+
+    def background_seal(self, payload):
+        nonce=os.urandom(12)
+        return base64.urlsafe_b64encode(nonce+self.cipher.encrypt(nonce,canonical(payload).encode(),AUDIENCE+b':background')).decode()
+
+    async def background_principal(self, sealed):
+        try:
+            raw=base64.urlsafe_b64decode(sealed)
+            payload=json.loads(self.cipher.decrypt(raw[:12],raw[12:],AUDIENCE+b':background'))
+        except Exception:raise fault() from None
+        identity=await self._verify(payload['credential'],**payload.get('entry',{}))
+        if identity['uid']!=payload['uid'] or identity['device_id']!=payload['device_id']:raise fault()
+        return await asyncio.to_thread(self.resolve,identity)
 
     def seal(self, payload):
         nonce = os.urandom(12)
@@ -212,6 +228,8 @@ class Sessions:
                        expires=issued + TTL, id=str(uuid.uuid4()), credential=credential, audience=NAMESPACE)
         if kind != 'manager':
             payload['entry'] = dict(kind=kind, device_fingerprint=device_fingerprint)
+        if self.background_store and p.role in {'manager','owner','analyst'}:
+            await asyncio.to_thread(self.background_store,p.actor_uid,self.background_seal(payload))
         return dict(token=self.seal(payload), expires_at=payload['expires'],
                     employee_uuid=p.employee_uuid, name=identity['name'], role=p.role)
 

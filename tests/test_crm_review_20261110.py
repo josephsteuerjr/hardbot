@@ -57,11 +57,15 @@ def test_document_retry_is_exact_and_media_type_cannot_change(crm_world, tmp_pat
 def test_accounting_revocation_also_blocks_payment_correction(crm_world):
     w=crm_world
     accounting=replace(w['member'],capabilities=w['member'].capabilities|{'accounting'})
+    from crm import storage
+    from crm.contract import canonical
+    with storage.connect() as c:c.execute('UPDATE crm_memberships SET capabilities_json=? WHERE employee_uuid=?',(canonical(sorted(accounting.capabilities)),accounting.employee_uuid))
     cid=w['contracts'][0]
     event=store.command(accounting,dict(schema_version=1,operation_id=str(uuid.uuid4()),
         kind='payment_confirmed',contract_ids=[cid],payload=dict(amount='10.00',currency='RUB',source='fixture',source_id='payment-1')))
+    with storage.connect() as c:c.execute('UPDATE crm_memberships SET capabilities_json=? WHERE employee_uuid=?',(canonical(sorted(w['member'].capabilities)),accounting.employee_uuid))
     with pytest.raises(CRMError) as caught:
-        store.command(w['member'],dict(schema_version=1,operation_id=str(uuid.uuid4()),
+        store.command(accounting,dict(schema_version=1,operation_id=str(uuid.uuid4()),
             kind='correction',contract_ids=[cid],correction_of=event['event_id'],reason='Synthetic correction',
             payload=dict(target_kind='payment_confirmed',amount='20.00',currency='RUB',source='fixture',source_id='payment-1')))
     assert caught.value.code=='forbidden'

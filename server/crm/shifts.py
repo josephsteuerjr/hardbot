@@ -35,7 +35,8 @@ def command(principal, body):
         if prior is not None:
             return prior
         access.employee(
-            conn, principal, employee, "shift_correct" if action == "correct" else None
+            # Check membership/capabilities inside the committing transaction.
+            conn, access.refresh_write(conn,principal), employee, "shift_correct" if action == "correct" else None
         )
         if action == "start":
             if any(k in body for k in ("starts_at", "ends_at", "shift_id", "reason")):
@@ -253,6 +254,8 @@ def set_plan(principal, body):
         prior = store.replay(conn, principal, operation, body)
         if prior is not None:
             return prior
+        principal=access.refresh_write(conn,principal)
+        access.require(principal,'shift_correct')
         access.employee(conn, principal, body.get("employee_uuid"))
         for start, end, item, workday in parsed:
             overlaps = conn.execute(

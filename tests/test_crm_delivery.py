@@ -10,7 +10,11 @@ from test_crm_core import crm_world
 
 
 def courier(w):
-    return replace(w['member'],role='courier',capabilities=frozenset({'delivery','correct','task'}),read_all_contracts=True)
+    p=replace(w['member'],role='courier',capabilities=frozenset({'delivery','correct','task'}),read_all_contracts=True)
+    with storage.connect() as c:
+        c.execute("UPDATE crm_memberships SET role='courier',capabilities_json=? WHERE employee_uuid=?",
+                  (json.dumps(sorted(p.capabilities)),p.employee_uuid))
+    return p
 
 
 def body(w, *, delivered=True, address='Delivery address', phone='-', comment='Given to recipient'):

@@ -81,6 +81,9 @@ def mutate(p, body):
         prior = store.replay(conn, p, operation, body)
         if prior is not None:
             return prior
+        from . import access
+        p=access.refresh_write(conn,p)
+        access.require(p,'analytics')
         previous = conn.execute(
             "SELECT * FROM crm_scripts WHERE team_id=?", (p.team_id,)
         ).fetchone()

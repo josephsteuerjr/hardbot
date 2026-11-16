@@ -1,0 +1,14 @@
+-- Apply as schema owner after schema 4/6 -> 7. Identity/scope tables remain SELECT-only.
+GRANT SELECT ON crm_primary_fences,crm_primary_pending,crm_runtime_status,crm_background_credentials,
+ crm_background_authorities,crm_report_snapshots,crm_managed_contracts,crm_distribution_managers,
+ crm_assignment_heads,crm_assignment_operations,crm_assignment_previews,crm_assignment_changes,
+ crm_task_grant_revocations,crm_assignment_jobs,crm_assignment_packs,crm_effective_assignments TO crm_app;
+GRANT INSERT ON crm_assignment_heads,crm_assignment_operations,crm_assignment_previews,crm_assignment_changes,
+ crm_task_grant_revocations,crm_assignment_jobs,crm_assignment_packs,crm_assignments,
+ crm_background_authorities,crm_report_snapshots,crm_primary_pending,crm_runtime_status,
+ crm_background_credentials,crm_migration_issues TO crm_app;
+GRANT UPDATE ON crm_assignment_heads,crm_assignment_jobs,crm_assignment_packs,crm_assignments,
+ crm_background_authorities,crm_primary_pending,crm_runtime_status,crm_background_credentials TO crm_app;
+GRANT DELETE ON crm_primary_pending TO crm_app;
+GRANT UPDATE (name) ON crm_people TO crm_app;
+GRANT USAGE ON SEQUENCE crm_assignment_changes_sequence_seq TO crm_app;

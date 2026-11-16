@@ -5732,22 +5732,11 @@ async def _manager_entered(request: web.Request) -> web.Response:
     Координаты входа НЕ отправляем: руководителю достаточно факта «ввели с
     телефона», GPS-точка — персональные данные (администраторам остаётся)."""
     uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
-    rows = await asyncio.to_thread(accounts.entered_list, include_empty=True)
-    team_set = set(team)
-    own = db.get_binding(uid)
-    if own:
-        team_set.add(own)
-    team_keys = {db._name_key(name) for name in team_set}
-    rows = [r for r in rows if db._name_key(r["employee"]) in team_keys]
-    reviewable = await asyncio.to_thread(accounts.manager_reviewable, uid, is_owner=(uid == ADMIN_ID))
-    for r in rows:
-        r["can_approve"] = r["username"] in reviewable and not (r['password_review_pending'] and r['must_change_password'])
-        r["can_reset_password"] = r["username"] in reviewable and not r['password_review_pending']
-        r['can_request_phone'] = False
-        if r.get("phone"):
-            r["phone"] = {k: v for k, v in r["phone"].items() if k != "gps"}
-    return web.json_response({"ok": True, "entered": rows,
-                              "generated_at": datetime.now().isoformat(timespec="seconds")})
+    import team_entry
+    result = await asyncio.to_thread(team_entry.snapshot, uid, mgr, team,
+                                    is_owner=(uid == ADMIN_ID), shell_version=_shell_version())
+    result['scope_version']=_device_me(uid,mgr)['scope_version']
+    return web.json_response(result, headers={'Cache-Control':'no-store'})
 
 
 async def _manager_phone_request(request: web.Request) -> web.Response:
@@ -7864,6 +7853,26 @@ async def _account_client_policy(request,handler):
     return await handler(request)
 
 
+async def _manager_entry_profile(request: web.Request) -> web.Response:
+    uid,mgr,team=await asyncio.to_thread(_manager_gate,request)
+    import team_entry
+    result=await asyncio.to_thread(team_entry.profile,uid,mgr,team,str(request.query.get('employee') or ''),
+                                 is_owner=(uid==ADMIN_ID),shell_version=_shell_version())
+    if result is None:raise _json_error(web.HTTPNotFound,'Сотрудник не входит в текущую команду.')
+    return web.json_response({'ok':True,'employee':result},headers={'Cache-Control':'no-store'})
+
+
+async def _manager_entry_revoke(request: web.Request) -> web.Response:
+    uid,_mgr,_team=await asyncio.to_thread(_manager_gate,request)
+    body=await _json_object(request)
+    import team_entry
+    try:
+        result=await asyncio.to_thread(team_entry.revoke,uid,body,is_owner=(uid==ADMIN_ID),ip=_admin_peer(request))
+    except PermissionError as exc:raise _json_error(web.HTTPForbidden,str(exc))
+    except ValueError as exc:raise _json_error(web.HTTPBadRequest,str(exc))
+    return web.json_response(result,headers={'Cache-Control':'no-store'})
+
+
 def build_app(bot=None) -> web.Application:
     account_policy.activate()  # invalid UTC fails; persisted cutover survives restart
     app = web.Application(client_max_size=CLIENT_MAX_SIZE,
@@ -8011,6 +8020,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/account/login", _account_login)
     app.router.add_post("/api/manager/account_approve", _manager_account_approve)
     app.router.add_post("/api/manager/account_reset", _manager_account_reset)
+    app.router.add_get("/api/manager/entry_profile", _manager_entry_profile)
+    app.router.add_post("/api/manager/entry_revoke", _manager_entry_revoke)
     app.router.add_post("/api/manager/account_phone_request", _manager_phone_request)
     app.router.add_post("/api/account/password", _account_password)
     app.router.add_get("/api/account/sessions", _account_sessions)

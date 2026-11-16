@@ -57,6 +57,11 @@ def definitions():
 
 
 def writable(conn, principal, row, **scopes):
+    from .primary_fence import writable_contracts
+    enabled=scopes.get('enabled')
+    if enabled is None:
+        enabled=writable_contracts(conn,[row['contract_uuid']]);scopes['enabled']=enabled
+    if row['contract_uuid'] not in enabled:return []
     managed = scopes.pop('manager_scope', None)
     if managed is None:
         managed = manager_scope(conn, principal)
@@ -166,6 +171,8 @@ def read(principal, *, search='', view='mine', sort='contract_id', direction='as
             # Text ordering stays deterministic without risky implicit casts.
         rows = conn.execute('SELECT c.*,p.name AS client_name' + base + ' ORDER BY ' + expression
                             + ' ' + direction + ',c.contract_uuid LIMIT ? OFFSET ?', (*args, limit, offset)).fetchall()
+        from .primary_fence import writable_contracts
+        enabled=writable_contracts(conn,[row['contract_uuid'] for row in rows])
         output = [];columns=definitions();extra_keys=set()
         for raw in rows:
             row = dict(raw)
@@ -184,7 +191,7 @@ def read(principal, *, search='', view='mine', sort='contract_id', direction='as
             output.append(dict(contract_uuid=row['contract_uuid'], person_uuid=row['person_uuid'],external_id=row['external_id'],
                 creditor_id=row['creditor_id'], currency=row['currency'], client_name=row['client_name'],
                 fields=values, revisions=json.loads(row['revisions_json']),
-                writable_fields=writable(conn, principal, row,scope=write_scope,direct_scope=direct,delegated=delegated,manager_scope=managed)))
+                writable_fields=writable(conn, principal, row,scope=write_scope,direct_scope=direct,delegated=delegated,manager_scope=managed,enabled=enabled)))
         return dict(schema_version=1, columns=columns, rows=output, total=total, offset=offset,
                     has_more=offset+len(output)<total)
 
@@ -226,6 +233,8 @@ def edit(principal, body):
         previous = store.replay(conn, principal, operation, body)
         if previous is not None:
             return previous
+        from .primary_fence import require_contracts
+        require_contracts(conn, sorted(ids))
         rows = {r['contract_uuid']: r for r in access.contracts(conn, principal, sorted(ids))}
         managed = manager_scope(conn, principal)
         for patch in normalized:

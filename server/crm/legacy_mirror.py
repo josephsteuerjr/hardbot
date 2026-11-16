@@ -5,6 +5,7 @@ the PostgreSQL acknowledgement is recoverable without a second business fact.
 This module does not authenticate users or expand a command's contract set.
 """
 from datetime import datetime, timezone
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import sqlite3
@@ -45,12 +46,15 @@ def _call_snapshot(conn, row, values, happened, day):
 
 def deliver(path, employees, *, limit=100, after_sqlite_commit=None):
     """Only current, already-authorized applied work of this explicit cohort."""
-    if not employees or len(employees)>100:raise CRMError('Не задана точная группа обмена.')
+    if len(employees)>100:raise CRMError('Не задана точная группа обмена.')
     if not 1<=limit<=500:raise CRMError('Некорректный размер обмена.')
     with storage.connect(readonly=True) as conn:
         events=[r['event_id'] for r in conn.execute("SELECT e.event_id,e.kind,e.payload_json FROM crm_events e LEFT JOIN crm_legacy_exports x USING(event_id) "
-            "WHERE e.kind IN ('call','visit','correction') AND e.origin!='legacy' AND e.projection_status='applied' "
-            "AND x.event_id IS NULL AND e.employee_uuid IN ("+','.join('?' for _ in employees)+") ORDER BY e.sequence LIMIT ?",(*sorted(employees),limit))]
+            "WHERE e.kind IN ('call','visit','correction','registry_edit','manual_edit','contact') AND e.origin!='legacy' AND e.projection_status='applied' "
+            "AND x.event_id IS NULL AND ("+('e.employee_uuid IN ('+','.join('?' for _ in employees)+') OR ' if employees else '')+
+            "(EXISTS(SELECT 1 FROM crm_event_contracts ec JOIN crm_primary_fences f USING(contract_uuid) WHERE ec.event_id=e.event_id) "
+            "AND NOT EXISTS(SELECT 1 FROM crm_event_contracts ec LEFT JOIN crm_primary_fences f USING(contract_uuid) WHERE ec.event_id=e.event_id AND f.contract_uuid IS NULL))) "
+            "ORDER BY e.sequence LIMIT ?",(*sorted(employees),limit))]
     results=[]
     for eid in events:
         with storage.connect() as conn:
@@ -88,6 +92,7 @@ def deliver(path, employees, *, limit=100, after_sqlite_commit=None):
 def _sqlite(path, event, payload, rows, expected, employee, timezone_name):
     primary=sqlite3.connect(Path(path),timeout=3)
     primary.row_factory=sqlite3.Row
+    permits=ExitStack()
     try:
         primary.execute('BEGIN IMMEDIATE');_initialize(primary)
         prior=primary.execute('SELECT * FROM crm_exchange_receipts WHERE event_id=?',(event['event_id'],)).fetchone()
@@ -106,19 +111,21 @@ def _sqlite(path, event, payload, rows, expected, employee, timezone_name):
             active.append((raw,owned))
         if conflicts:
             primary.rollback();return dict(event_id=event['event_id'],state='needs_review',conflicts=conflicts)
+        from .primary_fence import projection
+        permits.enter_context(projection(primary))
         day=instant(event['occurred_at']).astimezone(ZoneInfo(timezone_name)).date().isoformat()
         # Existing journals use naive UTC saved_at and a separate local workday.
         happened=instant(event['occurred_at']).astimezone(timezone.utc).replace(tzinfo=None).isoformat(timespec='milliseconds')
         received=instant(event['received_at']).astimezone(timezone.utc).replace(tzinfo=None).isoformat(timespec='milliseconds')
         target=payload.get('target_kind') if event['kind']=='correction' else event['kind']
-        table='calls' if target=='call' else 'visits'
+        table='calls' if target=='call' else 'visits' if target=='visit' else None
         journal_fact=event['kind'] in {'call','visit'}
         rawids=[r['legacy_id'] for r in rows];op='crm:'+event['event_id']
-        if primary.execute('SELECT 1 FROM '+table+' WHERE op_id=?',(op,)).fetchone():raise CRMError('Событие есть без квитанции обмена.','mirror_conflict',409)
+        if table and primary.execute('SELECT 1 FROM '+table+' WHERE op_id=?',(op,)).fetchone():raise CRMError('Событие есть без квитанции обмена.','mirror_conflict',409)
         columns={'contract_id':rawids[0],'agent_id':event['actor_uid'],'created_at':day,'payload':'CRM '+event['event_id'],
             'op_id':op,'received_at':received,'saved_at':happened,'employee':employee,
             'values_json':canonical(payload['values']),'contracts_json':canonical(rawids)}
-        available={r[1] for r in primary.execute('PRAGMA table_info('+table+')')}
+        available={r[1] for r in primary.execute('PRAGMA table_info('+table+')')} if table else set()
         columns={k:v for k,v in columns.items() if k in available}
         if table=='visits' and 'request_hash' in available:columns['request_hash']=event['request_hash']
         cursor=primary.execute('INSERT INTO '+table+'('+','.join(columns)+') VALUES('+','.join('?' for _ in columns)+')',tuple(columns.values())) if journal_fact else None
@@ -128,7 +135,7 @@ def _sqlite(path, event, payload, rows, expected, employee, timezone_name):
             if not set(values)<=available:raise CRMError('Поле отсутствует в прежнем приложении.')
             primary.execute('UPDATE clients SET '+','.join('"'+k+'"=?' for k in values)+' WHERE contract_id=?',(*values.values(),raw['contract_id']))
             if table=='calls':_call_snapshot(primary,raw,values,happened,day)
-            else:
+            elif table=='visits':
                 import db
                 previous=db.bot_visit_snapshot(raw) or {}
                 db.record_bot_visit(raw['contract_id'],{**previous,**values},day,happened,_conn=primary,_contracts=[raw])
@@ -139,7 +146,8 @@ def _sqlite(path, event, payload, rows, expected, employee, timezone_name):
         receipt=dict(event_id=event['event_id'],state='delivered',table=table if journal_fact else None,row_id=cursor.lastrowid if cursor else None,contract_ids=rawids,
                      projected_fields={str(raw['contract_id']):sorted(values) for raw,values in active},verified_at=now())
         primary.execute('INSERT INTO crm_exchange_receipts VALUES(?,?,?)',(event['event_id'],event['request_hash'],canonical(receipt)))
-        primary.commit();return receipt
+        permits.close();primary.commit();return receipt
     except BaseException:
         primary.rollback();raise
-    finally:primary.close()
+    finally:
+        permits.close();primary.close()

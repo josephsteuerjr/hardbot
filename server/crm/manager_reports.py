@@ -1,7 +1,7 @@
 """Captured three-hour reports and durable work, with the original bounded authority.
 
 Snapshots are observations, never reconstructed observations for missed slots.
-Background writes run only in the explicitly isolated distribution contour.
+Background writes require isolated mode or a verified primary cutover.
 """
 from dataclasses import asdict, replace
 import hashlib
@@ -31,12 +31,13 @@ def current_authority(conn, raw):
         'JOIN crm_employees e USING(employee_uuid) WHERE l.actor_uid=? AND l.active=1 AND e.active=1 '
         'AND m.employee_uuid=? AND m.starts_at<=? AND (m.ends_at IS NULL OR m.ends_at>?) ORDER BY m.starts_at DESC',
         (p.actor_uid,p.employee_uuid,at,at)).fetchone()
-    if not member or member['role']!=p.role or member['team_id']!=p.team_id:
+    reduced_analyst=member and member['role']=='manager' and p.role=='analyst'
+    if not member or (member['role']!=p.role and not reduced_analyst) or member['team_id']!=p.team_id:
         raise CRMError('Роль автора задания изменилась.','scope_changed',403)
     active={r[0] for r in conn.execute('SELECT m.employee_uuid FROM crm_memberships m JOIN crm_employees e USING(employee_uuid) '
         'WHERE e.active=1 AND m.team_id=? AND m.starts_at<=? AND (m.ends_at IS NULL OR m.ends_at>?)',(p.team_id,at,at))}
     return replace(p,capabilities=p.capabilities & frozenset(json.loads(member['capabilities_json'])),
-                   employee_scope=p.employee_scope & active)
+                   employee_scope=p.employee_scope & active,timezone=member['timezone'])
 
 
 def scope_key(p):
@@ -99,7 +100,22 @@ def read(p, *, snapshot_id=None, day=None):
                 schedule_hours=3,history_policy='captured_only')
 
 
-def tick():
+def pending(conn):
+    """Do not poll primary credentials for completed jobs or a captured slot."""
+    work=[]
+    for row in conn.execute("SELECT a.* FROM crm_background_authorities a LEFT JOIN crm_assignment_jobs j ON a.work_id='assignment:' || j.job_id "
+                            "WHERE a.kind='report' OR j.state='running'"):
+        item=dict(row)
+        if item['kind']=='report':
+            value=json.loads(item['authority_json'])
+            point=instant(now()).astimezone(ZoneInfo(value['timezone']))
+            boundary=point.replace(hour=point.hour//3*3,minute=0,second=0,microsecond=0)
+            if instant(item['updated_at'])>=boundary:continue
+        work.append(item)
+    return work
+
+
+def tick(verified=None):
     """One bounded pass. Job commit/step owns the exclusive DB transaction.
 
     Multiple API processes may race; unique slots and idempotent packs serialize
@@ -108,12 +124,23 @@ def tick():
     from . import assignments
     with storage.connect(readonly=True) as conn:
         mode=conn.execute("SELECT value FROM crm_meta WHERE key='distribution_mode'").fetchone()
-        if not mode or mode[0]!='isolated':return
-        work=[dict(r) for r in conn.execute('SELECT * FROM crm_background_authorities')]
+        if not mode or mode[0] not in {'isolated','cutover'}:return
+        shared=storage.postgres_enabled() or mode[0]=='cutover'
+        if shared and verified is None:return
+        work=pending(conn)
+    completed=0;blocked=0
     for item in work:
         try:
             with storage.connect(readonly=True) as conn:
                 p=current_authority(conn,item['authority_json'])
+                if shared:
+                    fresh=(verified or {}).get(p.actor_uid)
+                    if not fresh or fresh.employee_uuid!=p.employee_uuid or fresh.role!=p.role or fresh.team_id!=p.team_id:
+                        blocked+=1;continue
+                    p=replace(p,capabilities=p.capabilities & fresh.capabilities,
+                              employee_scope=fresh.employee_scope if item['kind']=='report' else p.employee_scope & fresh.employee_scope,
+                              all_contracts=p.all_contracts and fresh.all_contracts,
+                              read_all_contracts=p.read_all_contracts and fresh.read_all_contracts)
                 if item['kind']=='assignment':
                     job=conn.execute('SELECT * FROM crm_assignment_jobs WHERE job_id=? AND state=?',
                                       (item['work_id'].removeprefix('assignment:'),'running')).fetchone()
@@ -128,6 +155,8 @@ def tick():
             if item['kind']=='assignment':
                 assignments.job_step(p,dict(schema_version=1,job_id=job['job_id'],pack_index=job['next_pack']))
             else:capture(p)
+            completed+=1
         except CRMError:
             # Scope/versions are rechecked in the next pass; never bypass a denial.
-            continue
+            blocked+=1
+    return dict(completed=completed,blocked=blocked)

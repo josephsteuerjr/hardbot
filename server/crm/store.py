@@ -728,11 +728,13 @@ def card(principal, person_uuid):
             if entity['kind'] == 'task':
                 tasks.describe(conn, principal, entity, write_scope)
         assignment_time = now()
+        from .primary_fence import writable_contracts
+        enabled=writable_contracts(conn,ids)
         for row in rows:
             from .registry import source_details, writable
             row['business_source'] = source_details(conn, row)
-            row['writable_fields'] = writable(conn, principal, row, scope=write_scope)
-            row['allowed_actions'] = access.writable_actions(conn, principal, row['contract_uuid'], scope=write_scope)
+            row['writable_fields'] = writable(conn, principal, row, scope=write_scope,enabled=enabled)
+            row['allowed_actions'] = access.writable_actions(conn, principal, row['contract_uuid'], scope=write_scope,enabled=enabled)
             row['assignments'] = [dict(r) for r in conn.execute(
                 'SELECT a.employee_uuid,e.name,a.capability,a.starts_at,a.ends_at FROM crm_effective_assignments a '
                 'JOIN crm_employees e USING(employee_uuid) WHERE a.contract_uuid=? '
@@ -768,6 +770,8 @@ def contract_list(principal, search='', work='', limit=100):
         access.require(principal, work)
     with storage.connect(readonly=True) as conn:
         write_scope = access.scoped_contracts(conn, principal)
+        from .primary_fence import writable_contracts
+        enabled=writable_contracts(conn,write_scope)
         allowed = write_scope if work else None if access.reads_all(principal) else access.readable_contracts(conn, principal)
         if allowed is not None and not allowed:
             return dict(contracts=[], truncated=False)
@@ -790,7 +794,7 @@ def contract_list(principal, search='', work='', limit=100):
             if search and not postgres and search.casefold() not in ' '.join((source['client_name'],source['external_id'],source['fields_json'])).casefold():
                 continue
             row=dict(source);row['fields']=json.loads(row.pop('fields_json'))
-            row['allowed_actions']=access.writable_actions(conn,principal,row['contract_uuid'],scope=write_scope)
+            row['allowed_actions']=access.writable_actions(conn,principal,row['contract_uuid'],scope=write_scope,enabled=enabled)
             if work and work not in row['allowed_actions']:
                 continue
             rows.append(row)

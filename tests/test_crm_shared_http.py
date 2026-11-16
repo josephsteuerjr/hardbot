@@ -12,7 +12,7 @@ def test_two_manager_sessions_share_data_preserve_authors_and_obey_revocation(cr
     monkeypatch.setenv('HARD_CRM_PILOT', '1')
     with storage.connect() as conn:
         conn.execute("INSERT INTO crm_meta VALUES('deployment_namespace',?)", (shared_auth.NAMESPACE,))
-        conn.execute('UPDATE crm_memberships SET team_id=?,capabilities_json=?',
+        conn.execute("UPDATE crm_memberships SET role='manager',team_id=?,capabilities_json=?",
                      ('crm-pilot-managers', canonical(sorted(shared_auth.CAPABILITIES))))
     source = {secrets.token_urlsafe(32):dict(uid=uid,device_id=uid+1,name='Synthetic manager',role='manager') for uid in [101,202]}
     credentials = list(source)

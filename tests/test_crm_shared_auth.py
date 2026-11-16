@@ -111,7 +111,7 @@ def test_confirmed_identity_still_requires_independent_pilot_roster(crm_world):
         conn.execute("INSERT INTO crm_meta VALUES('deployment_namespace',?)", (shared_auth.NAMESPACE,))
     with pytest.raises(CRMError): shared_auth.principal(identity)
     with storage.connect() as conn:
-        conn.execute('UPDATE crm_memberships SET team_id=?,capabilities_json=? WHERE employee_uuid=?',
+        conn.execute("UPDATE crm_memberships SET role='manager',team_id=?,capabilities_json=? WHERE employee_uuid=?",
                      ('crm-pilot-managers', canonical(sorted(shared_auth.CAPABILITIES)), w['employee']))
     p = shared_auth.principal(identity)
     assert p.role == 'manager' and p.all_contracts and not p.owner

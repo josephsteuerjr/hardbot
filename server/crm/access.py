@@ -85,9 +85,12 @@ def readable_contracts(conn, principal):
     return result
 
 
-def writable_actions(conn, principal, contract_id, *, scope=None, direct_scope=None, delegated=None):
+def writable_actions(conn, principal, contract_id, *, scope=None, direct_scope=None, delegated=None, enabled=None):
     scope = scoped_contracts(conn, principal) if scope is None else scope
     if contract_id not in scope:
+        return []
+    from .primary_fence import writable_contracts
+    if contract_id not in (writable_contracts(conn,[contract_id]) if enabled is None else enabled):
         return []
     capabilities = set(principal.capabilities)
     if not principal.owner and not principal.all_contracts:
@@ -133,6 +136,8 @@ def contracts(conn, principal, requested, *, capability=None):
         )
     if capability:
         require(principal, capability)
+        from .primary_fence import require_contracts
+        require_contracts(conn, requested)
         if not principal.owner and not principal.all_contracts:
             from . import tasks
             direct_scope = scoped_contracts(conn, principal, include_tasks=False)

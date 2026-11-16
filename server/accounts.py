@@ -623,7 +623,8 @@ def login(username: str, password: str, *, device: dict, entrance: str,
                 or (audience == 'analyst' and (device_kind!='desktop' or not conn.execute('SELECT 1 FROM account_admin_grants WHERE account_id=?',(row['id'],)).fetchone()))
                 or (audience == 'mobile' and (device_kind != 'phone' or row['role'] not in ('agent','manager','security','full')))
                 or (audience == 'crm-mobile' and (os.getenv('HARD_CRM_MOBILE')!='1' or device_kind!='phone' or row['role'] not in ('agent','manager','security','full','analyst') or row['role']=='analyst' and not conn.execute('SELECT 1 FROM account_admin_grants WHERE account_id=?',(row['id'],)).fetchone()))
-                or (account_policy.strict(connection=conn) and audience not in ("employee", "manager", "mobile", "analyst", "crm-mobile"))):
+                or (audience == 'crm-desktop' and (os.getenv('HARD_CRM_DESKTOP')!='1' or device_kind!='desktop' or row['role'] not in ('agent','manager','security','full','analyst') or row['role']=='analyst' and not conn.execute('SELECT 1 FROM account_admin_grants WHERE account_id=?',(row['id'],)).fetchone()))
+                or (account_policy.strict(connection=conn) and audience not in ("employee", "manager", "mobile", "analyst", "crm-mobile", "crm-desktop"))):
             return {"action": "blocked", "error": "Неверный класс входа для этой роли."}
         if not fingerprint or len(fingerprint) > 128:
             _journal(conn, row["id"], username, "no_fingerprint", entrance=entrance,
@@ -981,18 +982,22 @@ def _privileged_names(conn):
     return {db._name_key(name) for name in names if name}
 
 
-def _reviewable(conn, acc, uid, manager, team):
+def _reviewable(conn, acc, uid, manager, team, *, declared=None, privileged=None):
+    keys = {db._name_key(acc['employee'])} if acc else set()
     if acc:
-        import staff_roster
-        listed=[r for r in staff_roster.rows(conn,active_only=False)
-                if db._name_key(r['employee'])==db._name_key(acc['employee'])]
-        if listed and any(not r['active'] or (r['manager_uid'] is not None and r['manager_uid']!=uid) for r in listed):
+        from team_entry import families
+        declared=families(conn) if declared is None else declared
+        listed=[r for r in declared if db._name_key(acc['employee']) in r['keys']]
+        if len(listed)>1 or any(not r['active'] or (r['manager_uid'] is not None and r['manager_uid']!=uid) for r in listed):
             return False
+        if listed:
+            keys=listed[0]['keys']
+            if any(keys & r['keys'] for r in declared if r['employee_id']!=listed[0]['employee_id']):return False
     return bool(acc and manager and acc["role"] == "agent" and acc["status"] != "disabled"
-                and db._name_key(acc["employee"]) in team
+                and keys & team
                 and acc["telegram_id"] != uid
                 and db._name_key(acc["employee"]) != db._name_key(manager.get("name"))
-                and db._name_key(acc["employee"]) not in _privileged_names(conn)
+                and not keys & (_privileged_names(conn) if privileged is None else privileged)
                 and not conn.execute("SELECT 1 FROM managers WHERE telegram_id=?", (acc["telegram_id"],)).fetchone())
 
 

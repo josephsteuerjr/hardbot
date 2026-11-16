@@ -7,6 +7,7 @@ import { lstatSync, readFileSync, existsSync } from 'node:fs';
 import { join, dirname, resolve, parse } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { directOpen, isDirect, unprotectWindows } from './windows-dpapi';
+import {ownLogin,ownFingerprint} from './crm-account';
 
 export const PILOT_BASE = 'https://hard.rimborso.ru/crm-pilot';
 const AUTHORITY_ORIGINS = new Set(['https://hard.rimborso.ru', 'https://hard.rimborso.ru:8080',
@@ -94,10 +95,10 @@ export function readExistingManagerSession(profile = managerProfile(), unprotect
   return {credential, fingerprint: createHash('sha256').update(blob).digest('hex')};
 }
 
-export type EntrySource = 'manager' | 'hard' | 'soft' | 'analyst';
-export const ENTRY_SOURCES: EntrySource[] = ['manager', 'soft', 'hard', 'analyst'];
+export type EntrySource = 'manager' | 'hard' | 'soft' | 'analyst' | 'crm';
+export const ENTRY_SOURCES: EntrySource[] = ['crm','manager', 'soft', 'hard', 'analyst'];
 export const ENTRY_LABELS: Record<EntrySource, string> = {
-  manager: 'Руководитель', hard: 'Сотрудник Хард', soft: 'Сотрудник Софт', analyst: 'Аналитик',
+  manager: 'Руководитель', hard: 'Сотрудник Хард', soft: 'Сотрудник Софт', analyst: 'Аналитик',crm:'CRM',
 };
 function entryProfile(source: EntrySource): string {
   if (!ENTRY_SOURCES.includes(source) || !process.env.LOCALAPPDATA)
@@ -105,6 +106,7 @@ function entryProfile(source: EntrySource): string {
   return join(process.env.LOCALAPPDATA, 'Hard', source, 'data');
 }
 export function entryFingerprint(source: EntrySource): string {
+  if(source==='crm')return ownFingerprint();
   if (source === 'manager') return managerFingerprint();
   const profile = entryProfile(source);
   const hash = createHash('sha256').update(source);
@@ -131,6 +133,7 @@ function analystDeviceFingerprint(): string {
 }
 export function readExistingLogin(source: EntrySource): {credential: string; fingerprint: string;
   kind: 'manager' | 'employee' | 'analyst' | 'analyst-device'; deviceFingerprint?: string} {
+  if(source==='crm')return ownLogin();
   if (source === 'manager') return {...readExistingManagerSession(), kind: 'manager'};
   const profile = entryProfile(source), fingerprint = entryFingerprint(source);
   if (source !== 'analyst') {
@@ -151,6 +154,7 @@ export function readExistingLogin(source: EntrySource): {credential: string; fin
 export function existingLogins(): {source: EntrySource; label: string; available: boolean}[] {
   return ENTRY_SOURCES.map(source => {
     try {
+      if(source==='crm'){ownLogin();return {source,label:ENTRY_LABELS[source],available:true};}
       if (source === 'manager') return {source, label: ENTRY_LABELS[source], available: existingManagerStatus().available};
       const profile = entryProfile(source);
       entryFingerprint(source);

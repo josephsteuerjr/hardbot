@@ -296,6 +296,8 @@ def apply(principal, body):
         prior = store.replay(conn, principal, operation, body)
         if prior is not None:
             return prior
+        principal=access.refresh_write(conn,principal)
+        access.require(principal,'exchange')
         item = conn.execute(
             "SELECT * FROM crm_import_previews WHERE preview_id=? AND actor_uid=?",
             (body.get("preview_id"), principal.actor_uid),

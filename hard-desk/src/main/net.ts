@@ -369,11 +369,11 @@ export async function enrollField(raw: string): Promise<ApiResult> {
 /** Отпечаток этого компьютера для входа по логину-паролю: sha-256 имени машины,
  *  пользователя Windows и каталога данных — стабилен, пока программа живёт на
  *  этом же месте; смена машины видна аккаунту как новое устройство. */
-function desktopFingerprint(): string {
+export function desktopFingerprint(): string {
   return pcIdentity().fingerprint;
 }
 
-async function pcLoginProof(base: string, username: string, password: string): Promise<any> {
+export async function pcLoginProof(base: string, username: string, password: string): Promise<any> {
   const identity = pcIdentity();
   const response = await request(base + "/api/account/pc_challenge", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ public_key: identity.publicKey, fingerprint: identity.fingerprint, label: deviceName() }) });

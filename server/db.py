@@ -5946,9 +5946,6 @@ def save_visit_result(contract_id: str, agent_id: int, employee: str | None,
     op_id = journal.get("op_id")
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        rep = conn.execute("SELECT * FROM clients WHERE contract_id=?", (contract_id,)).fetchone()
-        if not rep or (rep["responsible"] or "") != (employee or ""):
-            raise ValueError("Закрепление изменилось. Обновите портфель")
         prior = conn.execute("SELECT contract_id,agent_id,request_hash FROM visits WHERE op_id=?", (op_id,)).fetchone() if op_id else None
         if prior:
             if prior["contract_id"] != contract_id or prior["agent_id"] != agent_id:
@@ -5958,9 +5955,14 @@ def save_visit_result(contract_id: str, agent_id: int, employee: str | None,
             if prior["request_hash"] != request_hash:
                 raise ValueError("Идентификатор уже использован для другого результата выезда")
             return False
+        rep = conn.execute("SELECT * FROM clients WHERE contract_id=?", (contract_id,)).fetchone()
+        if not rep or (rep["responsible"] or "") != (employee or ""):
+            raise ValueError("Закрепление изменилось. Обновите портфель")
         candidates = conn.execute("SELECT * FROM clients WHERE client IS ? AND IFNULL(responsible,'')=IFNULL(?, '')",
                                   (rep["client"], rep["responsible"])).fetchall()
         contracts = [r for r in candidates if person_key(r) == person_key(rep)]
+        from crm.primary_fence import check_old_work
+        check_old_work(conn,[r['contract_id'] for r in contracts])
         is_new = log_visit(contract_id, agent_id, payload, employee=employee, _conn=conn, **journal)
         if is_new:
             conn.execute("UPDATE visits SET request_hash=?, values_json=?, contracts_json=? "
@@ -6018,12 +6020,6 @@ def save_call_result(contract_id: str, agent_id: int, employee: str,
         event_at = on_date + "T00:00:00"
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        current_rep = conn.execute("SELECT * FROM clients WHERE contract_id=?", (contract_id,)).fetchone()
-        if not current_rep or current_rep["responsible_soft"] != employee:
-            raise ValueError("Закрепление изменилось. Обновите портфель")
-        candidates = conn.execute("SELECT * FROM clients WHERE client IS ? AND responsible_soft=?",
-                                  (current_rep["client"], employee)).fetchall()
-        rows = [r for r in candidates if person_key(r) == person_key(current_rep)]
         prior = conn.execute("SELECT * FROM calls WHERE op_id=?", (op_id,)).fetchone() if op_id else None
         if prior:
             if prior["contract_id"] != contract_id or prior["agent_id"] != agent_id:
@@ -6036,6 +6032,14 @@ def save_call_result(contract_id: str, agent_id: int, employee: str,
                 if {k: v for k, v in original.items() if k not in derived} != {k: v for k, v in values.items() if k not in derived}:
                     raise ValueError("Идентификатор уже использован для другого результата")
             return {"dedup": True, "applied": False}
+        current_rep = conn.execute("SELECT * FROM clients WHERE contract_id=?", (contract_id,)).fetchone()
+        if not current_rep or current_rep["responsible_soft"] != employee:
+            raise ValueError("Закрепление изменилось. Обновите портфель")
+        candidates = conn.execute("SELECT * FROM clients WHERE client IS ? AND responsible_soft=?",
+                                  (current_rep["client"], employee)).fetchall()
+        rows = [r for r in candidates if person_key(r) == person_key(current_rep)]
+        from crm.primary_fence import check_old_work
+        check_old_work(conn,[r['contract_id'] for r in rows])
         if expected_revision is not None:
             import office_work
             events = office_work._events(conn, [r["contract_id"] for r in rows])
@@ -9244,7 +9248,13 @@ def import_grid(
                 known_resp.get(key, employee)
                 for key, employee in authoritative_by_key.items()
             ]
-        for cid, data in grouped.items():
+        from crm.primary_fence import import_rows as import_crm_rows
+        legacy_grouped=dict(grouped)
+        crm_import=import_crm_rows(conn,legacy_grouped,monthly_raw=monthly_raw,
+                                  monthly_columns=monthly_columns,extra_columns=extra_cols,extra_values=extra_values)
+        report['updated']+=crm_import['updated'];report['extra_cells']+=crm_import['extra_cells']
+        report['crm_source_rows']=crm_import['updated']
+        for cid, data in legacy_grouped.items():
             is_update = cid in existing
             row0 = existing.get(cid)
             incoming_call_edit_day = _as_date(data.get("excel_call_edited_on"))
@@ -9828,6 +9838,7 @@ def import_grid(
             for employee in sorted(manual_by_employee, key=_name_key)
         }
         auto_unassigned_effect: list[tuple[str, str]] = []
+        from crm.primary_fence import source_removal as crm_source_removal
         if full_registry and import_profile in ("hard", "both"):
             # Отсутствующий КД или пустая колонка владельца в полном срезе
             # снимает прежнее назначение только явно выбранного сотрудника.
@@ -9842,6 +9853,8 @@ def import_grid(
                     or _name_key(former) not in authoritative_by_key
                     or cid in grouped and not present_blank
                 ):
+                    continue
+                if crm_source_removal(conn,cid,'responsible'):
                     continue
                 changed = conn.execute(
                     "UPDATE clients SET responsible='', unassigned_from=?, "
@@ -9862,6 +9875,8 @@ def import_grid(
                                  and not str(grouped[cid].get("responsible_soft") or "").strip())
                 if (not former or _name_key(former) not in authoritative_by_key
                         or cid in grouped and not present_blank):
+                    continue
+                if crm_source_removal(conn,cid,'responsible_soft'):
                     continue
                 changed = conn.execute("UPDATE clients SET responsible_soft='' "
                                        "WHERE contract_id=? AND responsible_soft=?",

@@ -1,0 +1,15 @@
+# Insert inside the existing hard.rimborso.ru site; retain all other namespaces.
+handle_path /crm-pilot/* {
+    reverse_proxy crm-runtime-api:8080
+}
+redir /mobile /mobile/ 308
+handle /mobile/* {
+    reverse_proxy https://{$CRM_WINDOWS_UPSTREAM} {
+        transport http {
+            tls_server_name {$CRM_WINDOWS_TLS_NAME}
+            tls_trust_pool file {
+                pem_file {$CRM_WINDOWS_CA_FILE}
+            }
+        }
+    }
+}

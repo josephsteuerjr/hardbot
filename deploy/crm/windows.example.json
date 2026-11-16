@@ -1,0 +1,14 @@
+{
+  "source": "C:\\Rimborso\\CRM\\app",
+  "python": "C:\\Rimborso\\CRM\\venv\\Scripts\\python.exe",
+  "home": "C:\\Rimborso\\CRM\\state",
+  "assets": "C:\\Rimborso\\CRM\\mobile",
+  "sessionKey": "C:\\Rimborso\\CRM\\secrets\\mobile-session.key",
+  "tlsCertificate": "C:\\Rimborso\\CRM\\secrets\\executor.pem",
+  "tlsKey": "C:\\Rimborso\\CRM\\secrets\\executor-key.pem",
+  "primary": "https://hard.rimborso.ru",
+  "crm": "https://hard.rimborso.ru/crm-pilot",
+  "host": "0.0.0.0",
+  "port": 8443,
+  "sourceRoots": []
+}

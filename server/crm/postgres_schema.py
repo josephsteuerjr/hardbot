@@ -1,7 +1,7 @@
 """Initial PostgreSQL CRM schema. Run with the separate migration role."""
 from . import storage
 
-VERSION = 6
+VERSION = 7
 
 UPGRADE_2 = """
 CREATE TABLE IF NOT EXISTS crm_monthly_totals(
@@ -166,8 +166,11 @@ def initialize(conn):
     from .legacy_exchange import DDL as exchange_ddl
     from .active_time import DDL as active_ddl
     from .assignment_schema import ddl as assignment_ddl
+    from .runtime_schema import DDL as runtime_ddl
     storage.begin(conn)
     conn.execute("CREATE TABLE IF NOT EXISTS crm_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+    import uuid
+    conn.execute("INSERT INTO crm_meta VALUES('instance_id',?) ON CONFLICT(key) DO NOTHING",(str(uuid.uuid4()),))
     current = conn.execute("SELECT value FROM crm_meta WHERE key='schema_version'").fetchone()
     if current:
         if int(current[0])==1:
@@ -178,6 +181,8 @@ def initialize(conn):
             conn.execute(active_ddl)
         if int(current[0]) in (1,2,3,4):
             conn.execute(assignment_ddl(True))
+        if int(current[0]) in (1,2,3,4,6):
+            conn.execute(runtime_ddl)
             conn.execute("UPDATE crm_meta SET value=? WHERE key='schema_version'",(str(VERSION),))
             return
         if int(current[0]) != VERSION:
@@ -188,5 +193,6 @@ def initialize(conn):
     conn.execute(exchange_ddl)
     conn.execute(active_ddl)
     conn.execute(assignment_ddl(True))
+    conn.execute(runtime_ddl)
     conn.execute("INSERT INTO crm_meta VALUES('schema_version',?)", (str(VERSION),))
     conn.execute("INSERT INTO crm_meta VALUES('storage_engine','postgresql')")
