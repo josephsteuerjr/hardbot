@@ -1082,16 +1082,16 @@ async function queuePage(host:HTMLElement=document.getElementById('view')!) {
       .join(""),
   );
   host.querySelectorAll<HTMLButtonElement>('[data-export-retry]').forEach(b=>b.onclick=()=>{b.disabled=true;void crm.workbook('resume',{operation_id:b.dataset.exportRetry}).then(()=>queuePage(host)).catch(e=>{notice(e.message);b.disabled=false;});});
-  bind("queue-refresh", queuePage);
+  bind("queue-refresh", ()=>queuePage(host));
   bind("queue-send", async () => {
     await crm.queue("flush");
-    await queuePage();
+    await queuePage(host);
   });
   document.querySelectorAll<HTMLButtonElement>("[data-retry]").forEach(
     (b) =>
       (b.onclick = async () => {
         await crm.queue("retry", b.dataset.retry);
-        await queuePage();
+        await queuePage(host);
       }),
   );
 }

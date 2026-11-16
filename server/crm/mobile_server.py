@@ -20,7 +20,7 @@ class Sessions:
         self.source_roots=tuple(Path(p).resolve() for p in source_roots)
         if any(p==Path(p.anchor) or p==Path.home() for p in self.source_roots):raise RuntimeError('Use explicit portfolio directories, not an entire drive or home')
         with self.connect() as conn:
-            conn.executescript('CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,sealed BLOB NOT NULL,expires REAL NOT NULL); CREATE TABLE IF NOT EXISTS files(id TEXT PRIMARY KEY,owner TEXT NOT NULL,path TEXT NOT NULL,name TEXT NOT NULL); CREATE TABLE IF NOT EXISTS downloads(id TEXT PRIMARY KEY,owner TEXT NOT NULL,sealed BLOB NOT NULL);')
+            conn.executescript('CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,sealed BLOB NOT NULL,expires REAL NOT NULL); CREATE TABLE IF NOT EXISTS ended_sessions(id TEXT PRIMARY KEY); CREATE TABLE IF NOT EXISTS files(id TEXT PRIMARY KEY,owner TEXT NOT NULL,path TEXT NOT NULL,name TEXT NOT NULL); CREATE TABLE IF NOT EXISTS downloads(id TEXT PRIMARY KEY,owner TEXT NOT NULL,sealed BLOB NOT NULL);')
     def connect(self):
         conn=sqlite3.connect(self.path,timeout=15);conn.row_factory=sqlite3.Row;return conn
     def read(self,sid):
@@ -31,10 +31,14 @@ class Sessions:
     def write(self,value,sid=None):
         sid=sid or secrets.token_urlsafe(32);nonce=os.urandom(12)
         sealed=nonce+self.cipher.encrypt(nonce,json.dumps(value,ensure_ascii=False).encode(),sid.encode())
-        with self.connect() as conn:conn.execute('INSERT OR REPLACE INTO sessions VALUES(?,?,?)',(sid,sealed,value['expires_at']/1000))
+        with self.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            if conn.execute('SELECT 1 FROM ended_sessions WHERE id=?',(sid,)).fetchone():raise CRMError('Вход изменился. Исходная работа сохранена.','session',401)
+            conn.execute('INSERT OR REPLACE INTO sessions VALUES(?,?,?)',(sid,sealed,value['expires_at']/1000))
         return sid
     def forget(self,sid):
-        with self.connect() as conn:conn.execute('DELETE FROM sessions WHERE id=?',(sid,))
+        with self.connect() as conn:
+            conn.execute('INSERT OR IGNORE INTO ended_sessions VALUES(?)',(sid,));conn.execute('DELETE FROM sessions WHERE id=?',(sid,))
     def job(self,owner,identifier,value=None):
         with self.connect() as conn:
             old=conn.execute('SELECT * FROM downloads WHERE id=?',(identifier,)).fetchone()
@@ -150,7 +154,7 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
             except CRMError as exc:
                 if exc.status not in {401,403,410}:raise
         if session.get('owner'):session=await authorize(request)
-        sid=sessions.write(session,request['mobile_sid'] or None)
+        sid=sessions.write(session,request['mobile_sid'] if request['mobile_session'] else None)
         public={k:session[k] for k in ('owner','context','synthetic','expires_at') if k in session}
         response=web.json_response(dict(csrf=session['csrf'],session=public if session.get('owner') else None,pending=session.get('pending'),synthetic=backend.synthetic))
         cookie(response,sid,request);return response

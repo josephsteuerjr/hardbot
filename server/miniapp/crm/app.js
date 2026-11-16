@@ -5770,15 +5770,15 @@ ${x.employee}
         b.disabled = false;
       });
     });
-    bind("queue-refresh", queuePage);
+    bind("queue-refresh", () => queuePage(host));
     bind("queue-send", async () => {
       await crm.queue("flush");
-      await queuePage();
+      await queuePage(host);
     });
     document.querySelectorAll("[data-retry]").forEach(
       (b) => b.onclick = async () => {
         await crm.queue("retry", b.dataset.retry);
-        await queuePage();
+        await queuePage(host);
       }
     );
   }
@@ -6700,20 +6700,23 @@ ${x.employee}
     if (!current?.owner || expected && expected !== current.owner) throw Error("\u0412\u0445\u043E\u0434 \u0438\u0437\u043C\u0435\u043D\u0438\u043B\u0441\u044F. \u0412\u0432\u043E\u0434 \u0441\u043E\u0445\u0440\u0430\u043D\u0451\u043D \u0443 \u0438\u0441\u0445\u043E\u0434\u043D\u043E\u0433\u043E \u0441\u043E\u0442\u0440\u0443\u0434\u043D\u0438\u043A\u0430.");
     return current.owner;
   }
-  async function revoke(status2) {
-    if (status2 === 401 && current?.owner) {
-      await put("device", "last-state", null);
+  async function revoke(status2, expected = current?.owner) {
+    if (status2 === 401 && expected && current?.owner === expected) {
+      await update("device", "last-state", (saved) => saved?.owner === expected ? null : saved);
+      if (current?.owner !== expected) return;
       current = null;
       background(activity.stop());
       emit({ type: "identity" });
     }
   }
   async function request(path, body) {
+    const startedOwner = current?.owner;
     if (offline || !navigator.onLine) return { ok: false, status: 0, text: "\u041D\u0435\u0442 \u0441\u0432\u044F\u0437\u0438. \u0414\u0430\u043D\u043D\u044B\u0435 \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u044B \u043D\u0430 \u0442\u0435\u043B\u0435\u0444\u043E\u043D\u0435." };
     try {
       const response = await fetch("./" + path, { method: body === void 0 ? "GET" : "POST", credentials: "same-origin", cache: "no-store", headers: { "Content-Type": "application/json", "X-CRM-CSRF": csrf }, body: body === void 0 ? void 0 : JSON.stringify(body), signal: AbortSignal.timeout(45e3) });
       const data2 = await response.json();
-      await revoke(response.status);
+      if (current?.owner !== startedOwner) return { ok: false, status: 401, text: "\u0412\u0445\u043E\u0434 \u0438\u0437\u043C\u0435\u043D\u0438\u043B\u0441\u044F. \u0418\u0441\u0445\u043E\u0434\u043D\u0430\u044F \u0440\u0430\u0431\u043E\u0442\u0430 \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0430." };
+      await revoke(response.status, startedOwner);
       if (response.status === 403 && data2.error === "csrf") {
         csrf = "";
         return { ok: false, status: 0, text: "\u041F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435 \u043E\u0431\u043D\u043E\u0432\u043B\u044F\u0435\u0442\u0441\u044F. \u0418\u0441\u0445\u043E\u0434\u043D\u0430\u044F \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u044F \u043E\u0441\u0442\u0430\u0451\u0442\u0441\u044F \u0432 \u043E\u0447\u0435\u0440\u0435\u0434\u0438." };
@@ -6901,20 +6904,26 @@ ${x.employee}
       input.click();
     });
   }
-  async function pickSource(kind2) {
+  async function pickSource(kind2, expected) {
+    authority(expected);
     return new Promise((resolve) => {
       const dialog = document.createElement("dialog");
       dialog.className = "mobile-source-picker";
       dialog.innerHTML = '<h2>\u0418\u0441\u0442\u043E\u0447\u043D\u0438\u043A</h2><div data-source-list></div><p data-source-status role="status"></p><div class="actions"><button data-source-phone class="primary">\u0417\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044C \u0441 \u0442\u0435\u043B\u0435\u0444\u043E\u043D\u0430</button><button data-source-close>\u041E\u0442\u043C\u0435\u043D\u0430</button></div>';
       const list = dialog.querySelector("[data-source-list]"), status2 = dialog.querySelector("[data-source-status]");
       let settled = false;
+      const changed = (event) => {
+        if (event.type === "identity") finish("");
+      };
       const finish = (value) => {
         if (settled) return;
         settled = true;
+        listeners.delete(changed);
         dialog.close();
         dialog.remove();
         resolve(value);
       };
+      listeners.add(changed);
       const load3 = async (parent) => {
         status2.textContent = "";
         const response = await request("sources?kind=" + kind2 + (parent ? "&parent=" + encodeURIComponent(parent) : ""));
@@ -6955,13 +6964,15 @@ ${x.employee}
         const button2 = dialog.querySelector("[data-source-phone]");
         button2.disabled = true;
         try {
+          authority(expected);
           if (files.length > 500 || files.reduce((n2, f) => n2 + f.size, 0) > 512 * 1024 * 1024) throw Error("\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0434\u043E 500 \u0444\u0430\u0439\u043B\u043E\u0432 \u043E\u0431\u0449\u0438\u043C \u0440\u0430\u0437\u043C\u0435\u0440\u043E\u043C \u0434\u043E 512 \u041C\u0411.");
           const handles = [];
           for (const [i, file] of files.entries()) {
             status2.textContent = `\u0417\u0430\u0433\u0440\u0443\u0437\u043A\u0430 ${i + 1} \u0438\u0437 ${files.length} \xB7 ${file.name}`;
-            const handle = await upload(file);
+            const handle = await upload(file, expected);
             handles.push(kind2 === "folder" ? { file: handle, relative_path: file.webkitRelativePath?.split("/").slice(1).join("/") || file.name } : handle);
           }
+          authority(expected);
           if (kind2 === "folder") {
             const response = await request("admin", { action: "folder", args: handles });
             if (!response.ok) throw Error(response.text);
@@ -6982,21 +6993,26 @@ ${x.employee}
       void load3();
     });
   }
-  async function upload(file) {
+  async function upload(file, expected) {
+    authority(expected);
     if (file.size > 64 * 1024 * 1024) throw Error("\u0424\u0430\u0439\u043B \u0431\u043E\u043B\u044C\u0448\u0435 64 \u041C\u0411.");
     const response = await fetch("./upload", { method: "POST", credentials: "same-origin", headers: { "X-CRM-CSRF": csrf, "X-CRM-Filename": encodeURIComponent(file.name) }, body: file });
-    await revoke(response.status);
+    await revoke(response.status, expected);
+    authority(expected);
     const value = await response.json();
     if (!response.ok) throw Error(value.text || "\u0424\u0430\u0439\u043B \u043D\u0435 \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043D.");
     return value.file;
   }
-  async function download(response, name) {
-    await revoke(response.status);
+  async function download(response, name, expected = current?.owner) {
+    authority(expected);
+    await revoke(response.status, expected);
     if (!response.ok) {
       const value = await response.json();
       throw Error(value.text || "\u0424\u0430\u0439\u043B \u043D\u0435 \u043F\u043E\u0434\u0433\u043E\u0442\u043E\u0432\u043B\u0435\u043D.");
     }
-    const blob = await response.blob(), url = URL.createObjectURL(blob), a = document.createElement("a");
+    const blob = await response.blob();
+    authority(expected);
+    const url = URL.createObjectURL(blob), a = document.createElement("a");
     a.href = url;
     a.download = name || decodeURIComponent(response.headers.get("X-CRM-Filename") || "\u0412\u044B\u0433\u0440\u0443\u0437\u043A\u0430.xlsx");
     a.click();
@@ -7014,12 +7030,12 @@ ${x.employee}
     if (action3 === "read") {
       const [file] = await chooseFile(".xlsx,.xlsm,.xlsb,.xls");
       if (!file) return { ok: false, cancelled: true };
-      payload.file = await upload(file);
+      payload.file = await upload(file, owner);
     }
     if (!prior && action3 === "write" && input.use_template) {
       const [file] = await chooseFile(".xlsx,.xlsm,.xlsb,.xls");
       if (!file) return { ok: false, cancelled: true };
-      payload.template = await upload(file);
+      payload.template = await upload(file, owner);
     }
     const operation_id = prior?.operation_id || crypto.randomUUID();
     if (action3 !== "read" && !prior) await put(owner, intentKey, { operation_id, input: payload });
@@ -7028,14 +7044,16 @@ ${x.employee}
       return jobs.some((j) => j.operation_id === operation_id) ? jobs : [...jobs, { operation_id, action: action3, intentKey, completed: false, path: input.snapshot ? "\u0420\u0435\u0435\u0441\u0442\u0440 CRM \xB7 " + input.snapshot.manifest.period : input.name || "\u041E\u0442\u0447\u0451\u0442 CRM" }];
     });
     try {
+      authority(owner);
       const response = await fetch("./workbook", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CRM-CSRF": csrf }, body: JSON.stringify({ action: action3, input: payload, operation_id }), signal: AbortSignal.timeout(18e4) });
-      await revoke(response.status);
+      await revoke(response.status, owner);
+      authority(owner);
       if (action3 === "read") {
         const value = await response.json();
         return { ok: response.ok, status: response.status, data: value, text: value.text };
       }
       if ([400, 409, 422].includes(response.status)) await put(owner, intentKey, null);
-      const result2 = await download(response);
+      const result2 = await download(response, void 0, owner);
       await put(owner, intentKey, null);
       await update(owner, "download-jobs", (jobs) => jobs.map((j) => j.operation_id === operation_id ? { ...j, completed: true, error: null } : j));
       if (payload.snapshot?.manifest?.export_id) {
@@ -7084,7 +7102,7 @@ ${x.employee}
     if (id) {
       const response = await api("GET", "document-read", void 0, { document_id: id });
       if (!response.ok) return response;
-      return download(new Response(Uint8Array.from(atob(response.data.content_base64), (c) => c.charCodeAt(0))), response.data.filename);
+      return download(new Response(Uint8Array.from(atob(response.data.content_base64), (c) => c.charCodeAt(0))), response.data.filename, owner);
     }
     const [selected2] = await chooseFile("image/*,.pdf,.docx");
     if (!selected2) return { ok: false, cancelled: true };
@@ -7105,14 +7123,14 @@ ${x.employee}
     if (action3 === "pick") {
       const [kind2, opts = {}] = args;
       if (kind2 === "save") return await request("admin", { action: "reserve", args: [opts.defaultPath || "\u0412\u044B\u0433\u0440\u0443\u0437\u043A\u0430.xlsx"] }).then((r) => r.data?.file || "");
-      return pickSource(kind2);
+      return pickSource(kind2, expected);
     }
     if (action3 === "saveText") {
       return download(new Response(String(args[1]), { headers: { "Content-Type": "text/plain;charset=utf-8" } }), String(args[0]));
     }
     if (action3 === "xlsx") return workbook("table", { name: args[0], headers: args[1], rows: args[2] });
     if (action3 === "open") {
-      return download(await fetch("./file/" + encodeURIComponent(args[0]), { credentials: "same-origin" }));
+      return download(await fetch("./file/" + encodeURIComponent(args[0]), { credentials: "same-origin" }), void 0, expected);
     }
     if (action3 === "autostart") return false;
     if (action3 === "state") return { mode: "analyst", productId: "crm", fixedProduct: true, product: "\u0410\u043D\u0430\u043B\u0438\u0442\u0438\u043A", version: "3.3.0-mobile.1", platform: "mobile" };

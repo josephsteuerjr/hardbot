@@ -20,13 +20,15 @@ const activity=new MobileActivity(api,async(action,body,owner)=>persistEntry(own
 const emit=(event:any,broadcast=false)=>{for(const fn of listeners)fn(event);if(broadcast)channel?.postMessage(event);};
 channel?.addEventListener('message',event=>{if(event.data?.owner===current?.owner)emit(event.data);else if(event.data?.type==='identity')background(initialize().then(()=>emit({type:'identity'})));});
 function authority(expected?:string){if(!current?.owner||expected&&expected!==current.owner)throw Error('Вход изменился. Ввод сохранён у исходного сотрудника.');return current.owner;}
-async function revoke(status:number){if(status===401&&current?.owner){await vault.put('device','last-state',null);current=null;background(activity.stop());emit({type:'identity'});}}
+async function revoke(status:number,expected=current?.owner){if(status===401&&expected&&current?.owner===expected){await vault.update('device','last-state',saved=>saved?.owner===expected?null:saved);if(current?.owner!==expected)return;current=null;background(activity.stop());emit({type:'identity'});}}
 async function request(path:string,body?:any):Promise<Reply>{
+  const startedOwner=current?.owner;
   if(offline||!navigator.onLine)return {ok:false,status:0,text:'Нет связи. Данные сохранены на телефоне.'};
   try{
     const response=await fetch('./'+path,{method:body===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','X-CRM-CSRF':csrf},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(45000)});
     const data=await response.json();
-    await revoke(response.status);
+    if(current?.owner!==startedOwner)return {ok:false,status:401,text:'Вход изменился. Исходная работа сохранена.'};
+    await revoke(response.status,startedOwner);
     if(response.status===403&&data.error==='csrf'){csrf='';return {ok:false,status:0,text:'Подключение обновляется. Исходная операция остаётся в очереди.'};}
     return {ok:response.ok,status:response.status,data,text:data.text||data.error};
   }catch{return {ok:false,status:0,text:'Ответ не получен. Исходная операция сохранена на телефоне.'};}
@@ -125,12 +127,14 @@ export function chooseFile(accept='',multiple=false,folder=false):Promise<File[]
   let settled=false;const finish=(files:File[])=>{if(settled)return;settled=true;input.remove();resolve(files);};
   input.onchange=()=>finish(Array.from(input.files||[]));input.addEventListener('cancel',()=>finish([]));input.click();
 });}
-async function pickSource(kind:string){
+async function pickSource(kind:string,expected:string){
+  authority(expected);
   return new Promise<string>(resolve=>{
     const dialog=document.createElement('dialog');dialog.className='mobile-source-picker';
     dialog.innerHTML='<h2>Источник</h2><div data-source-list></div><p data-source-status role="status"></p><div class="actions"><button data-source-phone class="primary">Загрузить с телефона</button><button data-source-close>Отмена</button></div>';
     const list=dialog.querySelector<HTMLElement>('[data-source-list]')!,status=dialog.querySelector<HTMLElement>('[data-source-status]')!;let settled=false;
-    const finish=(value:string)=>{if(settled)return;settled=true;dialog.close();dialog.remove();resolve(value);};
+    const changed=(event:any)=>{if(event.type==='identity')finish('');};
+    const finish=(value:string)=>{if(settled)return;settled=true;listeners.delete(changed);dialog.close();dialog.remove();resolve(value);};listeners.add(changed);
     const load=async(parent?:string)=>{
       status.textContent='';const response=await request('sources?kind='+kind+(parent?'&parent='+encodeURIComponent(parent):''));
       if(!response.ok){status.textContent=response.text||'Корпоративные источники недоступны.';return;}
@@ -143,23 +147,26 @@ async function pickSource(kind:string){
     dialog.querySelector<HTMLButtonElement>('[data-source-phone]')!.onclick=async()=>{
       const files=await chooseFile(kind==='folder'?'':'.xlsx,.xlsm,.xlsb,.xls,.csv,.txt',kind==='folder',kind==='folder');if(!files.length)return;
       const button=dialog.querySelector<HTMLButtonElement>('[data-source-phone]')!;button.disabled=true;
-      try{if(files.length>500||files.reduce((n,f)=>n+f.size,0)>512*1024*1024)throw Error('Выберите до 500 файлов общим размером до 512 МБ.');const handles:any[]=[];for(const [i,file] of files.entries()){status.textContent=`Загрузка ${i+1} из ${files.length} · ${file.name}`;const handle=await upload(file);handles.push(kind==='folder'?{file:handle,relative_path:file.webkitRelativePath?.split('/').slice(1).join('/')||file.name}:handle);}
+      try{authority(expected);if(files.length>500||files.reduce((n,f)=>n+f.size,0)>512*1024*1024)throw Error('Выберите до 500 файлов общим размером до 512 МБ.');const handles:any[]=[];for(const [i,file] of files.entries()){status.textContent=`Загрузка ${i+1} из ${files.length} · ${file.name}`;const handle=await upload(file,expected);handles.push(kind==='folder'?{file:handle,relative_path:file.webkitRelativePath?.split('/').slice(1).join('/')||file.name}:handle);}
+        authority(expected);
         if(kind==='folder'){const response=await request('admin',{action:'folder',args:handles});if(!response.ok)throw Error(response.text);finish(response.data.file);}else finish(handles[0]);
       }catch(error){status.textContent=(error as Error).message;button.disabled=false;}
     };
     dialog.querySelector('[data-source-close]')!.addEventListener('click',()=>finish(''));dialog.addEventListener('cancel',event=>{event.preventDefault();finish('');});document.body.append(dialog);dialog.showModal();void load();
   });
 }
-async function upload(file:File){
+async function upload(file:File,expected:string){
+  authority(expected);
   if(file.size>64*1024*1024)throw Error('Файл больше 64 МБ.');
   const response=await fetch('./upload',{method:'POST',credentials:'same-origin',headers:{'X-CRM-CSRF':csrf,'X-CRM-Filename':encodeURIComponent(file.name)},body:file});
-  await revoke(response.status);
+  await revoke(response.status,expected);
+  authority(expected);
   const value=await response.json();if(!response.ok)throw Error(value.text||'Файл не загружен.');return value.file;
 }
-async function download(response:Response,name?:string){
-  await revoke(response.status);
+async function download(response:Response,name?:string,expected=current?.owner){
+  authority(expected);await revoke(response.status,expected);
   if(!response.ok){const value=await response.json();throw Error(value.text||'Файл не подготовлен.');}
-  const blob=await response.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name||decodeURIComponent(response.headers.get('X-CRM-Filename')||'Выгрузка.xlsx');a.click();setTimeout(()=>URL.revokeObjectURL(url),60000);
+  const blob=await response.blob();authority(expected);const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name||decodeURIComponent(response.headers.get('X-CRM-Filename')||'Выгрузка.xlsx');a.click();setTimeout(()=>URL.revokeObjectURL(url),60000);
   return {ok:true,status:200,data:{downloaded:true}};
 }
 async function workbook(action:string,input:any={}){
@@ -169,16 +176,18 @@ async function workbook(action:string,input:any={}){
   const intentKey=resumed?.intentKey||'download-intent:'+action+':'+JSON.stringify(input);
   const prior=action==='read'?null:await vault.get(owner,intentKey);let payload=prior?.input||{...input};
   if(resumed&&!prior)throw Error('Исходная выгрузка уже завершена.');
-  if(action==='read'){const [file]=await chooseFile('.xlsx,.xlsm,.xlsb,.xls');if(!file)return {ok:false,cancelled:true};payload.file=await upload(file);}
-  if(!prior&&action==='write'&&input.use_template){const [file]=await chooseFile('.xlsx,.xlsm,.xlsb,.xls');if(!file)return {ok:false,cancelled:true};payload.template=await upload(file);}
+  if(action==='read'){const [file]=await chooseFile('.xlsx,.xlsm,.xlsb,.xls');if(!file)return {ok:false,cancelled:true};payload.file=await upload(file,owner);}
+  if(!prior&&action==='write'&&input.use_template){const [file]=await chooseFile('.xlsx,.xlsm,.xlsb,.xls');if(!file)return {ok:false,cancelled:true};payload.template=await upload(file,owner);}
   const operation_id=prior?.operation_id||crypto.randomUUID();if(action!=='read'&&!prior)await vault.put(owner,intentKey,{operation_id,input:payload});
   if(action!=='read')await vault.update(owner,'download-jobs',(jobs:any[]|null)=>{jobs||=[];return jobs.some(j=>j.operation_id===operation_id)?jobs:[...jobs,{operation_id,action,intentKey,completed:false,path:input.snapshot?'Реестр CRM · '+input.snapshot.manifest.period:input.name||'Отчёт CRM'}];});
   try{
+  authority(owner);
   const response=await fetch('./workbook',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CRM-CSRF':csrf},body:JSON.stringify({action,input:payload,operation_id}),signal:AbortSignal.timeout(180000)});
-  await revoke(response.status);
+  await revoke(response.status,owner);
+  authority(owner);
   if(action==='read'){const value=await response.json();return {ok:response.ok,status:response.status,data:value,text:value.text};}
   if([400,409,422].includes(response.status))await vault.put(owner,intentKey,null);
-  const result=await download(response);await vault.put(owner,intentKey,null);
+  const result=await download(response,undefined,owner);await vault.put(owner,intentKey,null);
   await vault.update(owner,'download-jobs',(jobs:any[])=>jobs.map(j=>j.operation_id===operation_id?{...j,completed:true,error:null}:j));
   if(payload.snapshot?.manifest?.export_id){const key=await vault.get(owner,'export-key:'+payload.snapshot.manifest.export_id);if(key)await vault.put(owner,key,null);}
   return {...result,data:{...result.data,path:'Файл скачан',receipt_state:response.headers.get('X-CRM-Receipt-State')}};
@@ -203,7 +212,7 @@ async function phoneDocument(input:File){
 }
 async function documentFile(contract:string,id?:string,expected?:string){
   const owner=authority(expected);
-  if(id){const response=await api('GET','document-read',undefined,{document_id:id});if(!response.ok)return response;return download(new Response(Uint8Array.from(atob(response.data.content_base64),c=>c.charCodeAt(0))),response.data.filename);}
+  if(id){const response=await api('GET','document-read',undefined,{document_id:id});if(!response.ok)return response;return download(new Response(Uint8Array.from(atob(response.data.content_base64),c=>c.charCodeAt(0))),response.data.filename,owner);}
   const [selected]=await chooseFile('image/*,.pdf,.docx');if(!selected)return {ok:false,cancelled:true};
   const file=await phoneDocument(selected);
   const bytes=new Uint8Array(await file.arrayBuffer());let binary='';for(let i=0;i<bytes.length;i+=8192)binary+=String.fromCharCode(...bytes.subarray(i,i+8192));
@@ -216,11 +225,11 @@ async function admin(action:string,args:any[],expected:string){
   if(action==='copy'){await navigator.clipboard.writeText(String(args[0]));return true;}
   if(action==='pick'){
     const [kind,opts={}]=args;if(kind==='save')return await request('admin',{action:'reserve',args:[opts.defaultPath||'Выгрузка.xlsx']}).then(r=>r.data?.file||'');
-    return pickSource(kind);
+    return pickSource(kind,expected);
   }
   if(action==='saveText'){return download(new Response(String(args[1]),{headers:{'Content-Type':'text/plain;charset=utf-8'}}),String(args[0]));}
   if(action==='xlsx')return workbook('table',{name:args[0],headers:args[1],rows:args[2]});
-  if(action==='open'){return download(await fetch('./file/'+encodeURIComponent(args[0]),{credentials:'same-origin'}));}
+  if(action==='open'){return download(await fetch('./file/'+encodeURIComponent(args[0]),{credentials:'same-origin'}),undefined,expected);}
   if(action==='autostart')return false;
   if(action==='state')return {mode:'analyst',productId:'crm',fixedProduct:true,product:'Аналитик',version:'3.3.0-mobile.1',platform:'mobile'};
   const response=await request('admin',{action,args});return response.ok?response.data:{ok:false,error:response.text,text:response.text};

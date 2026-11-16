@@ -2,10 +2,20 @@
 import asyncio
 from datetime import datetime,timezone
 import uuid
+import os,time,pytest
 import aiohttp
 from aiohttp.test_utils import TestClient,TestServer
 from crm.mobile_backend import SyntheticBackend
 from crm.mobile_server import create_app
+from crm.mobile_server import Sessions
+from crm.contract import CRMError
+
+def test_finished_session_cannot_be_revived_by_a_late_request(tmp_path):
+    store=Sessions(tmp_path,os.urandom(32));state=dict(expires_at=int((time.time()+60)*1000),csrf='synthetic')
+    sid=store.write(state);late=store.read(sid);store.forget(sid)
+    with pytest.raises(CRMError) as denied:store.write(late,sid)
+    assert denied.value.status==401 and store.read(sid) is None
+    assert store.read(store.write(state))==state
 
 def test_cookie_csrf_origin_and_client_role_cannot_elevate(tmp_path):
     async def run():
