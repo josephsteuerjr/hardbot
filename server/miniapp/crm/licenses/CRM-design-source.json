@@ -1,0 +1,10 @@
+{
+  "reference": "https://github.com/josephsteuerjr/praxis",
+  "commit": "42d7bf532e665602b5a3cc26a0824b5a5b0904d8",
+  "token_sha256": "2eed71db191e92801e1a7270c1468e2cd4b4936a098546540c78f3bfe87f8315",
+  "font_licenses": [
+    "https://raw.githubusercontent.com/google/fonts/main/ofl/golostext/OFL.txt",
+    "https://raw.githubusercontent.com/google/fonts/main/ofl/zenkurenaido/OFL.txt",
+    "https://raw.githubusercontent.com/google/fonts/main/ofl/ptmono/OFL.txt"
+  ]
+}

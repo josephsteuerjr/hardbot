@@ -38,7 +38,7 @@ export async function mountAllocation(host:HTMLElement,crm:any,selection:()=>Sel
   dialog.querySelector('form')!.onsubmit=async e=>{
     e.preventDefault();if(busy||!connected||(!preview&&!intent))return;busy=true;$<HTMLButtonElement>('allocation-submit').disabled=true;
     try{
-      if(!intent){intent={schema_version:1,operation_id:crypto.randomUUID(),preview_id:preview.preview_id};const r=await crm.draft('managed-allocation-intent',intent);if(!r.ok){intent=null;throw Error('Не удалось защитить операцию на компьютере.');}}
+      if(!intent){intent={schema_version:1,operation_id:crypto.randomUUID(),preview_id:preview.preview_id};const r=await crm.draft('managed-allocation-intent',intent);if(!r.ok){intent=null;throw Error(crm.platform==='mobile'?'Не удалось защитить операцию на телефоне.':'Не удалось защитить операцию на компьютере.');}}
       lock();let result;
       try{result=await request('GET','assignment-receipt',undefined,{operation_id:intent.operation_id});}
       catch(e){if((e as any).result?.status!==404)throw e;result=await request('POST','assignment-commit',intent);}

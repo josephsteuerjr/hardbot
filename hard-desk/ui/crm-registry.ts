@@ -70,7 +70,7 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   const protect=(fn:()=>any)=>()=>{Promise.resolve().then(fn).catch(e=>status(e.message));};
   const savePreferences=async()=>{const result=await crm.draft('registry-view',prefs);if(!result.ok)throw Error(result.text || 'Не удалось сохранить настройки таблицы.');};
   const schedulePreferences=()=>{clearTimeout(preferenceSave);preferenceSave=setTimeout(()=>{if(!disposed && isCurrent())void savePreferences().catch(e=>status(e.message));},200);};
-  const defaultWidth=(key:string)=>key==='$state'?140:key.includes('comment')||key.includes('history')?280:180;
+  const defaultWidth=(key:string)=>key==='$state'?(crm.platform==='mobile'?44:140):key.includes('comment')||key.includes('history')?280:180;
   const width=(key:string)=>Object.hasOwn(prefs.widths,key)?prefs.widths[key]:defaultWidth(key);
   function layout() {
     scroll.style.setProperty('--registry-scale',String(prefs.zoom/100));

@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import math
+import os
 import re
 import secrets
 import sqlite3
@@ -621,7 +622,8 @@ def login(username: str, password: str, *, device: dict, entrance: str,
                 or (audience == "manager" and row["role"] not in ("manager", "security", "full"))
                 or (audience == 'analyst' and (device_kind!='desktop' or not conn.execute('SELECT 1 FROM account_admin_grants WHERE account_id=?',(row['id'],)).fetchone()))
                 or (audience == 'mobile' and (device_kind != 'phone' or row['role'] not in ('agent','manager','security','full')))
-                or (account_policy.strict(connection=conn) and audience not in ("employee", "manager", "mobile", "analyst"))):
+                or (audience == 'crm-mobile' and (os.getenv('HARD_CRM_MOBILE')!='1' or device_kind!='phone' or row['role'] not in ('agent','manager','security','full','analyst') or row['role']=='analyst' and not conn.execute('SELECT 1 FROM account_admin_grants WHERE account_id=?',(row['id'],)).fetchone()))
+                or (account_policy.strict(connection=conn) and audience not in ("employee", "manager", "mobile", "analyst", "crm-mobile"))):
             return {"action": "blocked", "error": "Неверный класс входа для этой роли."}
         if not fingerprint or len(fingerprint) > 128:
             _journal(conn, row["id"], username, "no_fingerprint", entrance=entrance,
@@ -699,6 +701,8 @@ def login(username: str, password: str, *, device: dict, entrance: str,
             'WHERE account_id=? AND kind=? AND consumed_at IS NULL',(row['id'],device_kind)).fetchone()
         reset_next=bool(reset_grant and row['role'] in ('manager','security','full'))
         first_privileged = row['role'] in PRIVILEGED and row['status']=='active' and (not ever or root_next or reset_next)
+        if audience=='crm-mobile' and row['role']=='analyst' and device_kind=='phone':
+            first_privileged=False  # New analyst phones require explicit device approval.
         if dev['status']=='pending' and first_privileged:
             if root_next:
                 conn.execute('UPDATE account_admin_grants SET next_pc_allowed=0 WHERE account_id=?',(row['id'],))

@@ -4,7 +4,7 @@ const num=(v:any)=>v===null||v===undefined?'—':Number(v).toLocaleString('ru-RU
 const metrics=['Встречи','Звонки · клиенты','Обещания · КД','Обещания · сумма','В работе · КД','В работе · сумма','Третьи лица · КД','Третьи лица · сумма','Оплачено · КД','Оплачено · сумма'];
 
 export async function mountManagerReports(host:HTMLElement,crm:any,valid:()=>boolean){
-  let disposed=false,turn=0,payload:any,sms=false,mode='report',selected='',day='',busy=false;
+  let disposed=false,turn=0,payload:any,sms=false,mode='report',selected='',day='',busy=false,phoneTable=false;
   const current=()=>!disposed&&valid();
   host.innerHTML=`<div class="toolbar"><label>Дата <input id="report-day" type="date"></label><label>Отсечка <select id="report-cutoff"><option value="">Сейчас</option></select></label><button id="report-refresh">Обновить</button><button id="report-export">Выгрузить Excel</button></div><div class="tabs"><button data-report-tab="report" class="active">Трёхчасовой отчёт</button><button data-report-tab="dynamics">Динамика</button><button data-report-tab="month">Итоги месяца</button></div><div class="toolbar" id="report-channel"><button data-channel="calls" class="active">Звонки</button><button data-channel="sms">SMS</button></div><p id="report-status" role="status"></p><div id="report-body"></div>`;
   const $=<T extends HTMLElement=HTMLElement>(id:string)=>host.querySelector<T>('#'+id)!;
@@ -25,7 +25,9 @@ export async function mountManagerReports(host:HTMLElement,crm:any,valid:()=>boo
     if(mode==='report'){
       const head='<tr><th rowspan="2">Сотрудник</th>'+metrics.map(m=>`<th colspan="3">${m}</th>`).join('')+'</tr>';
       const sub='<tr>'+metrics.map(()=>'<th>Вчера</th><th>Срез</th><th>%</th>').join('')+'</tr>';
-      $('report-body').innerHTML=table([head,sub],rows.map((r:any,i:number)=>`<tr><th><button class="link" data-report-person="${i}">${esc(r.employee)}</button></th>${r.current.map((v:any,j:number)=>`<td>${num(r.yesterday[j])}</td><td>${num(v)}</td><td>${r.yesterday[j]==null||v==null||Number(r.yesterday[j])===0?'—':num(Number(v)/Number(r.yesterday[j])*100)+'%'}</td>`).join('')}</tr>`));
+      const fullTable=table([head,sub],rows.map((r:any,i:number)=>`<tr><th><button class="link" data-report-person="${i}">${esc(r.employee)}</button></th>${r.current.map((v:any,j:number)=>`<td>${num(r.yesterday[j])}</td><td>${num(v)}</td><td>${r.yesterday[j]==null||v==null||Number(r.yesterday[j])===0?'—':num(Number(v)/Number(r.yesterday[j])*100)+'%'}</td>`).join('')}</tr>`));
+      $('report-body').innerHTML=crm.platform==='mobile'&&!phoneTable?`<div class="mobile-report-cards">${rows.map((r:any,i:number)=>`<section><button class="link mobile-report-person" data-report-person="${i}">${esc(r.employee)} <span>↗</span></button><div class="mobile-report-stats">${[1,3,4,9].map(j=>`<div><span>${metrics[j]}</span><strong>${num(r.current[j])}</strong><small>Вчера ${num(r.yesterday[j])}</small></div>`).join('')}</div><details><summary>Все показатели</summary>${metrics.map((title,j)=>`<div class="mobile-report-detail"><span>${title}</span><strong>${num(r.current[j])}</strong><small>Вчера ${num(r.yesterday[j])}</small></div>`).join('')}</details></section>`).join('')}</div><button id="mobile-report-table" class="link">Открыть таблицу отчёта</button>`:fullTable+(crm.platform==='mobile'?'<button id="mobile-report-table" class="link">Показать сводку</button>':'');
+      host.querySelector<HTMLButtonElement>('#mobile-report-table')?.addEventListener('click',()=>{phoneTable=!phoneTable;paint();});
       host.querySelectorAll<HTMLButtonElement>('[data-report-person]').forEach(b=>b.onclick=()=>evidence(Number(b.dataset.reportPerson)));
       status(`На ${stamp(report.as_of)} · ${report.currency||'Валюта не подтверждена'}${report.yesterday_incomplete_contracts?' · Вчера: неполная история по '+report.yesterday_incomplete_contracts+' КД':''}`);
     }else{

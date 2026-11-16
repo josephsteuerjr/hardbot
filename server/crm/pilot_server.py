@@ -457,6 +457,9 @@ def serve():
                 elif action == 'report-write':
                     from pult.core.crm_reports import write
                     result=write(raw['report'],raw['path'],raw['kind'])
+                elif action == 'report-resume':
+                    from pult.core.crm_reports import verify,receipt
+                    verify(raw['path'],raw['report'],raw['kind']);result=receipt(raw['path'])
                 elif action == "script" and method == "GET":
                     result = scripts.state(p)
                 elif action == "anchor":

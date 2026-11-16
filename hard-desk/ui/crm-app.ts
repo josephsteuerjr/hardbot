@@ -5,24 +5,31 @@ import {mountManagerReports} from './crm-manager-reports';
 import {mountManagerTeam} from './crm-manager-team';
 import {mountAnalyst} from './crm-analyst';
 type API = {
+  platform?:string;
+  initialSection?():string;
+  initialPerson?():string;
+  navigated?(route:{section:string;person?:string}):void;
+  onNavigate?(handler:(route:{section:string;person?:string})=>Promise<void>):void;
+  renderConnection?(host:HTMLElement,refresh:()=>Promise<void>):Promise<void>;
   ready?():Promise<any>;
   state(): Promise<any>;
   api(method: string, action: string, body?: any, query?: any): Promise<any>;
-  command(body: any): Promise<any>;
+  command(body: any,expectedOwner?:string): Promise<any>;
   registryEdit(body:any, expectedOwner?:string): Promise<any>;
   diagnostics?(repair?:boolean):Promise<any>;
   diagnosticsReport?():Promise<any>;
   queue(action?: string, id?: string,expectedOwner?:string): Promise<any>;
-  onChange?(callback: (event: {type: 'queue' | 'identity' | 'live';dirty?:boolean;as_of?:string;connected?:boolean}) => void): () => void;
+  onChange?(callback: (event: {type: 'queue' | 'identity' | 'live' | 'storage-error';text?:string;dirty?:boolean;as_of?:string;connected?:boolean}) => void): () => void;
   draft(key: string, value?: any, expectedOwner?:string): Promise<any>;
   telemetry(event: any): Promise<any>;
   connect(input: any): Promise<any>;
   workbook(action: string, input?: any): Promise<any>;
-  document(contract: string, id?: string): Promise<any>;
+  document(contract: string, id?: string,expectedOwner?:string): Promise<any>;
   admin(action:string,args:any[],expectedOwner:string):Promise<any>;
   win(action: string): void;
 };
 const crm = (window as any).crm as API;
+const savedOn=crm.platform==='mobile'?'на телефоне':'на компьютере';
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id) as T;
 const esc = (value: any) =>
@@ -52,6 +59,7 @@ const labels: Record<string, string> = {
   reported_payment: "Заявленная оплата",
   payment_confirmed: "Подтверждённое поступление",
   document: "Документ",
+  attachment:"Файл документа",
   correction: "Исправление",
   manual_edit: "Ручная правка Excel",
   task_complete: "Завершение задачи",
@@ -99,7 +107,7 @@ function paintCardSaves(entries:any[]) {
   const rows=cardEntries(entries).slice(-5).reverse();
   const markup=(entry:any)=>{
     const review=entry.state==='attention' || entry.result?.projection_status==='needs_review';
-    const status=entry.state==='pending'?'Сохранено на компьютере · ожидает отправки':entry.state==='attention'?'Требует сверки':entry.result?.projection_status==='needs_review'?'История принята · текущие поля требуют сверки':'Принято сервером';
+    const status=entry.state==='pending'?`Сохранено ${savedOn} · ожидает отправки`:entry.state==='attention'?'Требует сверки':entry.result?.projection_status==='needs_review'?'История принята · текущие поля требуют сверки':'Принято сервером';
     const payload=entry.action==='registry-edit'?{text:entry.body.rows.map((row:any)=>Object.entries(row.values).map(([key,value])=>(context.fields?.find((f:any)=>f.key===key)?.title||key)+': '+(value??'Очищено')).join('\n')).join('\n')}:entry.body.payload || {};
     const saved=payload.text || payload.title || payload.delivery_comment || Object.entries(payload.values || {}).map(([key,value])=>
       (context.fields?.find((field:any)=>field.key===key)?.title || key)+': '+(value ?? 'Очищено')).join('\n');
@@ -107,7 +115,7 @@ function paintCardSaves(entries:any[]) {
   };
   const needsReview=rows.slice(1).filter(e=>e.state==='attention' || e.result?.projection_status==='needs_review').length;
   host.innerHTML=rows.length?`<h2>Отправка результатов</h2>${markup(rows[0])}${rows.length>1?`<details data-other-saves${othersOpen?' open':''}><summary>Предыдущие отправки: ${rows.length-1}${needsReview?' · требуют сверки: '+needsReview:''}</summary>${rows.slice(1).map(markup).join('')}</details>`:''}<button class="link" id="card-open-queue">Все отправки</button>`:'';
-  if(rows[0]?.state==='accepted' && $('notice').textContent==='Действие сохранено на компьютере.')notice();
+  if(rows[0]?.state==='accepted' && $('notice').textContent===`Действие сохранено ${savedOn}.`)notice();
   bind('card-open-queue',()=>go('queue'));
   host.querySelectorAll<HTMLButtonElement>('[data-save-history]').forEach(button=>button.onclick=()=>{tab='history';void renderCard();});
   host.querySelectorAll<HTMLElement>('[data-operation]').forEach(el=>{
@@ -245,6 +253,7 @@ async function boot() {
   document.title=state.product||'Взыскание';
   if(analystIdentity&&analystIdentity!==state.owner){location.reload();return;}
   context = state.context;
+  const mobileTarget=crm.initialSection?.();if(mobileTarget)section=mobileTarget;
   document.body.classList.toggle('crm-analyst',context?.role==='analyst');
   if(context?.role==='analyst')analystIdentity=state.owner;
   if(context?.role==='analyst'&&!['registry','exchange','statistics','team','connection'].includes(section))section='registry';
@@ -285,6 +294,10 @@ async function boot() {
   ] : manager ? [
     ['portfolio','Портфель'],['registry','Реестр'],['manager-statistics','Показатели'],['team','Команда'],
     ['script','Скрипты и задачи'],['connection','Подключение'],
+  ] : crm.platform==='mobile'&&context?.role==='courier'?[
+    ['portfolio','Передачи'],['tasks','Задачи'],['cabinet','Мои результаты'],['queue','Отправки'],['shift','Смена'],['connection','Подключение'],['help','Справка'],
+  ] : crm.platform==='mobile'&&context?.role==='observer'?[
+    ['portfolio','Портфель'],['cabinet','Показатели'],['tasks','Задачи'],['connection','Подключение'],['help','Справка'],
   ] : [
     ["portfolio", "Портфель"],
     ['tasks','Задачи'],
@@ -307,6 +320,7 @@ async function boot() {
     .querySelectorAll<HTMLButtonElement>("[data-section]")
     .forEach((b) => (b.onclick = () => void go(b.dataset.section!)));
   await go(context ? section : "connection");
+  const initialPerson=crm.initialPerson?.();if(context&&initialPerson)await openCard(initialPerson);
   telemetry("client_ready", "shell", {
     duration_ms: Math.round(performance.now()),
   });
@@ -320,6 +334,7 @@ async function go(next: string) {
   activePerson='';cardSyncGeneration++;lastCardAcknowledgements='';cardRefreshPending=false;
   taskSelectClient=false;newTaskAssignee='';
   section = next;
+  if(context)crm.navigated?.({section:next});
   document.getElementById('manager-tools-tabs')?.remove();
   const manager=['manager','owner'].includes(context?.role);
   if(manager&&['script','tasks'].includes(next)){
@@ -556,6 +571,7 @@ async function openCard(person: string) {
   portfolioGeneration++;
   taskGeneration++;const generation=++renderGeneration;
   activePerson=person;cardSyncGeneration++;lastCardAcknowledgements='';cardRefreshPending=false;
+  crm.navigated?.({section:section==='registry'?'registry':section==='tasks'?'tasks':'portfolio',person});
   card=null;cardScript=null;cardRefreshError='';
   const createTask=taskSelectClient;
   cardOrigin=section==='tasks' || createTask?'tasks':section==='registry'?'registry':'portfolio';
@@ -619,7 +635,7 @@ async function renderCard() {
     bind('card-edit',async()=>{
       const generation=renderGeneration,expectedOwner=state.owner;
       await editClientCard($<HTMLDialogElement>('dialog'),card,{...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:()=>crm.queue(undefined,undefined,expectedOwner)},
-        ()=>{if(generation===renderGeneration){notice('Правки сохранены на компьютере и отправляются. Подтверждение — в карточке и очереди.');scheduleSync(true);}},()=>generation===renderGeneration&&state.owner===expectedOwner);
+        ()=>{if(generation===renderGeneration){notice(`Правки сохранены ${savedOn} и отправляются. Подтверждение — в карточке и очереди.`);scheduleSync(true);}},()=>generation===renderGeneration&&state.owner===expectedOwner);
     });
   }
   bind('card-refresh',()=>syncCurrentView(true));
@@ -722,9 +738,9 @@ async function renderCard() {
   catch(error){if($('card-saves'))$('card-saves').textContent=(error as Error).message;}
 }
 
-async function submitCommand(raw: any) {
+async function submitCommand(raw: any,expectedOwner=state.owner) {
   const body = { schema_version: 1, operation_id: crypto.randomUUID(), ...raw };
-  const result = await crm.command(body);
+  const result = await crm.command(body,expectedOwner);
   if (!result.ok) throw new Error(result.text);
   telemetry(
     "command_queued",
@@ -735,7 +751,7 @@ async function submitCommand(raw: any) {
         : raw.kind,
     { operation_id: body.operation_id },
   );
-  notice("Действие сохранено на компьютере.",'status');
+  notice(`Действие сохранено ${savedOn}.`,'status');
   scheduleSync();
 }
 
@@ -746,13 +762,16 @@ async function action(kind: string, original?: any) {
   finally {formOpening=false;if(cardRefreshPending && !$<HTMLDialogElement>('dialog').open)scheduleSync();}
 }
 async function actionForm(kind: string, original: any, viewGeneration:number) {
+  const expectedOwner=state.owner;
+  const formAPI={draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),command:(body:any)=>crm.command(body,expectedOwner),document:(contract:string)=>crm.document(contract,undefined,expectedOwner)};
+
   const formRevisions=structuredClone(card.contracts.map((c:any)=>[c.contract_uuid,c.revisions]));
   const target = kind === "correction" ? original.kind : kind;
   telemetry("workflow_started", target);
   const dialog = $<HTMLDialogElement>("dialog");
   if (kind === 'delivery') {
     await mountDeliveryForm(dialog, card.contracts.map((row: any)=>({...row,client_name:card.person.name})),
-      {fields:context.fields,draft:(key,...value)=>crm.draft(key,...value),command:body=>crm.command(body),close:()=>dialog.close()});
+      {fields:context.fields,draft:(key,...value)=>formAPI.draft(key,...value),command:body=>formAPI.command(body),close:()=>dialog.close()});
     dialog.showModal();return;
   }
   if (target === "document") {
@@ -763,7 +782,7 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
       await documentForm();
       return;
     }
-    const uploaded = await crm.document(selected.contract_uuid);
+    const uploaded = await formAPI.document(selected.contract_uuid);
     if (!uploaded.ok) {
       if (!uploaded.cancelled) notice(uploaded.text);
       return;
@@ -776,7 +795,7 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
         sha256: uploaded.data.sha256,
         filename: uploaded.data.filename,
       },
-    });
+    },expectedOwner);
     return;
   }
   const map: Record<string, string[]> = {
@@ -802,7 +821,7 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
     ":" +
     kind +
     (original ? ":" + original.event_id : "");
-  const saved = (await crm.draft(draftKey)).data;
+  const saved = (await formAPI.draft(draftKey)).data;
   // A form owns its script snapshot. Reopening the same draft or opening
   // the inline panel again must not switch text during the call.
   let callScript: any = saved?.script_snapshot ?? (kind === 'call' && cardScript?.script ? structuredClone(cardScript) : null);
@@ -851,7 +870,7 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
       work.innerHTML = (person?.work_kinds || ['call','visit']).map((key: string) => `<option value="${esc(key)}">${esc(key === 'delivery' ? 'Передать конверт' : labels[key])}</option>`).join('');
     };
     fillWork();work.value = saved?.work_kind ?? original?.payload?.work_kind ?? work.value;
-    assignee.addEventListener('change', () => { fillWork(); void crm.draft(draftKey, capture()); });
+    assignee.addEventListener('change', () => { fillWork(); void formAPI.draft(draftKey, capture()); });
     if (!saved?.due && !original) {
       const today = new Date();
       $<HTMLInputElement>('due').value = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}T23:59`;
@@ -895,15 +914,15 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
     assignee_uuid: $<HTMLSelectElement>('task-assignee')?.value,
     work_kind: $<HTMLSelectElement>('task-work')?.value,
   });
-  if (kind === "call" && callScript) await crm.draft(draftKey, capture());
+  if (kind === "call" && callScript) await formAPI.draft(draftKey, capture());
   dialog.querySelectorAll("input,select,textarea").forEach((el) =>
     el.addEventListener("input", () => {
-      void crm.draft(draftKey, capture());
+      void formAPI.draft(draftKey, capture());
     }),
   );
   $("cancel").onclick = (e) => {
     e.preventDefault();
-    void crm.draft(draftKey, capture());
+    void formAPI.draft(draftKey, capture());
     dialog.close();
   };
   if (kind === "call")
@@ -915,7 +934,7 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
       }
       $("script-inline").innerHTML = scriptMarkup(callScript);
       scriptShown = !!callScript.script;
-      await crm.draft(draftKey, capture());
+      await formAPI.draft(draftKey, capture());
       telemetry("script_shown", "script");
     };
   $('action-form').dataset.work=target;
@@ -976,25 +995,25 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
         raw.correction_of = original.event_id;
         raw.reason = $<HTMLTextAreaElement>("reason").value;
       }
-      const existing = (await crm.draft(draftKey + ":pending")).data;
+      const existing = (await formAPI.draft(draftKey + ":pending")).data;
       const content = JSON.stringify(raw);
       const operation_id =
         existing?.content === content
           ? existing.operation_id
           : crypto.randomUUID();
-      await crm.draft(draftKey + ":pending", { content, operation_id });
-      const result = await crm.command({
+      await formAPI.draft(draftKey + ":pending", { content, operation_id });
+      const result = await formAPI.command({
         schema_version: 1,
         operation_id,
         ...raw,
       });
       if (!result.ok) throw new Error(result.text);
-      await crm.draft(draftKey, null);
-      await crm.draft(draftKey + ":pending", null);
+      await formAPI.draft(draftKey, null);
+      await formAPI.draft(draftKey + ":pending", null);
       dialog.close();
       telemetry("command_queued", target, { operation_id });
       if(target==='task')await go('tasks');
-      notice("Действие сохранено на компьютере.",'status');
+      notice(`Действие сохранено ${savedOn}.`,'status');
       scheduleSync();
     } catch (error) {
       $("form-error").textContent = (error as Error).message;
@@ -1004,6 +1023,7 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
 }
 
 async function documentForm() {
+  const expectedOwner=state.owner;
   const dialog = $<HTMLDialogElement>("dialog");
   dialog.innerHTML = `<h2>Документ</h2><div class="field"><label>Договор</label><select id="document-contract">${card.contracts.map((c: any) => `<option value="${c.contract_uuid}">${esc(c.external_id)} · ${esc(c.creditor_id)}</option>`).join("")}</select></div><div class="actions">${button("document-close", "Закрыть")}${button("document-pick", "Выбрать файл", true)}</div>`;
   dialog.querySelectorAll<HTMLOptionElement>('#document-contract option').forEach(option => {
@@ -1012,7 +1032,7 @@ async function documentForm() {
   bind("document-close", () => dialog.close());
   bind("document-pick", async () => {
     const id = $<HTMLSelectElement>("document-contract").value;
-    const result = await crm.document(id);
+    const result = await crm.document(id,undefined,expectedOwner);
     if (!result.ok) {
       if (!result.cancelled) throw new Error(result.text);
       return;
@@ -1025,7 +1045,7 @@ async function documentForm() {
         sha256: result.data.sha256,
         filename: result.data.filename,
       },
-    });
+    },expectedOwner);
     dialog.close();
   });
   dialog.showModal();
@@ -1057,10 +1077,11 @@ async function queuePage(host:HTMLElement=document.getElementById('view')!) {
     exportErrors
       .map(
         (v: any) =>
-          `<article class="record"><h3>Выгрузка требует проверки</h3><p>${esc(v.path)}</p><p>${esc(v.error || "Запись файла ещё не подтверждена.")}</p></article>`,
+          `<article class="record"><h3>Выгрузка требует проверки</h3><p>${esc(v.path)}</p><p>${esc(v.error || "Запись файла ещё не подтверждена.")}</p>${crm.platform==='mobile'&&v.operation_id?`<button data-export-retry="${esc(v.operation_id)}">Проверить и скачать файл</button>`:''}</article>`,
       )
       .join(""),
   );
+  host.querySelectorAll<HTMLButtonElement>('[data-export-retry]').forEach(b=>b.onclick=()=>{b.disabled=true;void crm.workbook('resume',{operation_id:b.dataset.exportRetry}).then(()=>queuePage(host)).catch(e=>{notice(e.message);b.disabled=false;});});
   bind("queue-refresh", queuePage);
   bind("queue-send", async () => {
     await crm.queue("flush");
@@ -1290,7 +1311,7 @@ async function exchangePage(host:HTMLElement=document.getElementById('view')!) {
       return;
     }
     const receiptText =
-      "Квитанция сохранена в защищённой очереди. Статус подтверждения — в разделе «Очередь».";
+      crm.platform==='mobile'?"Файл скачан. Статус квитанции доставки — в разделе «Отправки».":"Квитанция сохранена в защищённой очереди. Статус подтверждения — в разделе «Очередь».";
     $("exchange-result").innerHTML =
       `<article class="record"><h3>Книга записана и повторно прочитана</h3><p>${esc(result.data.path)}</p><p>${esc(receiptText)}</p></article>`;
   };
@@ -1397,6 +1418,7 @@ async function adoption() {
 }
 
 async function connection(host:HTMLElement=document.getElementById('view')!) {
+  if(crm.renderConnection){await crm.renderConnection(host,boot);return;}
   const $=<T extends HTMLElement=HTMLElement>(id:string)=>(id==='view'?host:host.querySelector('#'+id)) as T;
   state = await crm.state();
   const savedLogins = state.existingLogins || [{source:'manager',label:'Руководитель',available:state.existingManager?.available}];
@@ -1470,7 +1492,7 @@ async function connection(host:HTMLElement=document.getElementById('view')!) {
 }
 async function help() {
   $("view").innerHTML =
-    `<div class="help"><h2>Сохранение и обмен</h2><p>Звонки, выезды и остальные действия сначала сохраняются в зашифрованной очереди на этом компьютере. Подтверждение сервера видно в очереди. При изменении назначения исходная запись остаётся для сверки.</p><p>Устаревшее действие сохраняется в истории. Оно не затирает более свежий результат карточки. Исправление оформляется новым событием с причиной.</p><p>Excel получает версию выгрузки и внутренние ID договоров. Ручные изменения проходят сверку с исходной версией и текущим сервером. Пропущенная строка не снимает назначение. Исходная книга сохраняется, запись и чтение новой копии проверяются.</p><h2>Смена и диагностика</h2><p>Начало, перерыв и окончание смены фиксируются серверным временем. Это заявленная длительность, а не расчёт оплаты.</p><p>Для панели внедрения учитываются принятые рабочие действия, заданные плановые смены, квитанции доставки и ограниченные технические события: открытие функций, готовность экрана, коды ошибок и версия. Тексты заметок, контакты клиентов, нажатия клавиш, снимки и геолокация в диагностику не передаются.</p><p>Сырые технические события можно хранить 30–365 дней по настройке владельца. Предлагается 90 дней; автоматическая очистка до выбора политики отключена. Бизнес-история хранится отдельно.</p></div>`;
+    `<div class="help"><h2>Сохранение и обмен</h2><p>Звонки, выезды и остальные действия сначала сохраняются в зашифрованной очереди ${savedOn}. Подтверждение сервера видно в очереди. При изменении назначения исходная запись остаётся для сверки.</p><p>Устаревшее действие сохраняется в истории. Оно не затирает более свежий результат карточки. Исправление оформляется новым событием с причиной.</p><p>Excel получает версию выгрузки и внутренние ID договоров. Ручные изменения проходят сверку с исходной версией и текущим сервером. Пропущенная строка не снимает назначение. Исходная книга сохраняется, запись и чтение новой копии проверяются.</p><h2>Смена и диагностика</h2><p>Начало, перерыв и окончание смены фиксируются серверным временем. Это заявленная длительность, а не расчёт оплаты.</p><p>Для панели внедрения учитываются принятые рабочие действия, заданные плановые смены, квитанции доставки и ограниченные технические события: открытие функций, готовность экрана, коды ошибок и версия. Тексты заметок, контакты клиентов, нажатия клавиш, снимки и геолокация в диагностику не передаются.</p><p>Сырые технические события можно хранить 30–365 дней по настройке владельца. Предлагается 90 дней; автоматическая очистка до выбора политики отключена. Бизнес-история хранится отдельно.</p></div>`;
 }
 document.addEventListener("click", (e) => {
   const target = (e.target as HTMLElement).closest(
@@ -1487,14 +1509,15 @@ document
   .forEach((b) => (b.onclick = () => crm.win(b.dataset.win!)));
 $('dialog').addEventListener('close',()=>scheduleSync());
 crm.onChange?.(event=>{
-  if(event.type==='identity'){
+  if(event.type==='storage-error'){notice(event.text);}
+  else if(event.type==='identity'){
     clearTimeout(cardRetryTimer);
     renderGeneration++;activePerson='';cardSyncGeneration++;card=null;context=null;
     $<HTMLDialogElement>('dialog').close();
     void boot().catch(error=>notice(error.message));
   }else if(event.type==='live'){
     const environment=context?.distribution?.environment==='isolated'?'Изолированный стенд · ':state?.connection?.mode==='synthetic'?'Синтетические данные · ':'';
-    $('connection').textContent=environment+(event.connected?'Подтверждённая связь · '+date(event.as_of):'Связь не подтверждена · ввод сохранён на компьютере');
+    $('connection').textContent=environment+(event.connected?'Подтверждённая связь · '+date(event.as_of):`Связь не подтверждена · ввод сохранён ${savedOn}`);
     if(event.dirty){
       if(activePerson)scheduleSync(true);
       else if(section==='portfolio')void portfolio().catch(error=>notice(error.message));
@@ -1502,5 +1525,17 @@ crm.onChange?.(event=>{
     }
   }else scheduleSync();
 });
+crm.onNavigate?.(async route=>{
+  $<HTMLDialogElement>('dialog').close();
+  if(!document.querySelector(`#navigation [data-section="${CSS.escape(route.section)}"]`)&&!['queue','tasks','shift','script','help'].includes(route.section))return;
+  await go(route.section);if(route.person)await openCard(route.person);
+});
 window.addEventListener('focus',()=>{if(activePerson)scheduleSync(true);});
-void boot().catch((e) => notice(e.message));
+void boot().catch((e) => {
+  notice(e.message);
+  if(crm.platform==='mobile'){
+    $('title').textContent='Подключение';
+    $('view').innerHTML='<p>Не удалось открыть рабочее место. Сохранённые результаты остаются на телефоне.</p><button id="retry-start">Повторить запуск</button>';
+    $('retry-start').onclick=()=>location.reload();
+  }
+});
