@@ -2074,6 +2074,21 @@ a {
   color: var(--accent);
   cursor: pointer;
 }
+.mobile-demo-entry {
+  border: 0;
+  padding: 4px 0 0;
+  margin: 0;
+}
+.mobile-demo-entry h2 {
+  font: 30px/1.2 var(--hand);
+  margin: 0 0 8px;
+}
+.mobile-demo-entry p {
+  margin: 0 0 22px;
+}
+.mobile-demo-entry .mobile-role-options button {
+  min-height: 56px;
+}
 @media (max-width: 760px) {
   .mobile-crm {
     display: block;
