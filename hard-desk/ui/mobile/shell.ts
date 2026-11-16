@@ -35,9 +35,18 @@ export function mobileShell(){
    search?.querySelectorAll('select,label').forEach(el=>{if(!el.closest('label')||el.tagName==='LABEL')body.append(el);});
    for(const bar of bars.slice(1,-1))body.append(bar);const allocation=registry.querySelector('#registry-allocation');if(allocation)body.append(allocation);bars.at(-1)?.classList.add('mobile-registry-pagination');
    const save=registry.querySelector('#registry-save');if(save){const strip=document.createElement('div');strip.className='mobile-save-strip';strip.append(save);tools.after(strip);}
+   const count=registry.querySelector('#registry-selected-count');
+   if(count){
+    const selection=document.createElement('div');selection.className='mobile-selection-bar';selection.append(count);
+    const actions=document.createElement('button');actions.textContent='Действия с выбранными';actions.onclick=()=>{tools.open=true;requestAnimationFrame(()=>{(registry.querySelector('#registry-allocation')?.firstElementChild||tools).scrollIntoView({block:'center'});});};selection.append(actions);tools.after(selection);
+   }
   }
   view.querySelectorAll<HTMLTableElement>('table:not(.registry-grid):not(.manager-report-table)').forEach(t=>{if(t.querySelector('[data-person]')){t.classList.add('mobile-portfolio-table');t.classList.toggle('mobile-manager-portfolio',!t.querySelector('[data-work-contract]'));}const headers=Array.from(t.querySelectorAll('thead th')).map(h=>h.textContent||'');t.querySelectorAll('tbody tr').forEach(r=>Array.from(r.children).forEach((c,i)=>{if(!c.hasAttribute('data-label'))c.setAttribute('data-label',headers[i]||'');}));});
+  view.querySelectorAll<HTMLElement>('[data-work-contract] td:nth-child(4),[data-work-contract] td:nth-child(5)').forEach(cell=>cell.classList.toggle('mobile-empty-result',cell.textContent?.trim()==='—'));
+  const refresh=view.querySelector('#refresh');if(refresh)refresh.setAttribute('aria-label','Обновить портфель');
+  const reload=view.querySelector('#registry-reload');if(reload)reload.setAttribute('aria-label','Обновить реестр');
   const text=document.querySelector('#registry-status')?.textContent||'',strip=view.querySelector<HTMLElement>('.mobile-save-strip');if(strip)strip.hidden=!text||/черновике:\s*0(?:\D|$)/.test(text);
+  const selection=view.querySelector<HTMLElement>('.mobile-selection-bar'),selected=view.querySelector('#registry-selected-count')?.textContent||'';if(selection)selection.hidden=!selected||/договоров:\s*0$/.test(selected);
  };
  let scheduled=false;new MutationObserver(()=>{if(!scheduled){scheduled=true;requestAnimationFrame(()=>{scheduled=false;adapt();});}}).observe(view,{childList:true,subtree:true});decorate();adapt();
  const viewport=window.visualViewport;viewport?.addEventListener('resize',()=>document.body.classList.toggle('mobile-keyboard',!!viewport&&viewport.height<window.innerHeight*.72));

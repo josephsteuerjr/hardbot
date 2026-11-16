@@ -1,3 +1,5 @@
+import {decimalText} from './crm-format';
+
 type Cell = {row:number; col:number};
 type Pending = {values:Record<string,any>; clear:string[]; base_revisions:Record<string,number>};
 const escape = (v:any) => String(v ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
@@ -54,6 +56,21 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
     $('registry-scope').closest('.toolbar')!.insertAdjacentHTML('afterend',`<div class="toolbar"><label>Сотрудник <select id="registry-employee"><option value="">Все сотрудники</option></select></label><label>Работа <select id="registry-work"><option value="all">Все</option><option value="call">Звонки</option><option value="visit">Выезды</option></select></label><label class="check"><input id="registry-unassigned" type="checkbox">Без ответственного</label><label>Поля <select id="registry-fields"><option value="main">Основное</option><option value="all">Все поля</option></select></label><button id="registry-open">Открыть карточку</button></div><div class="toolbar"><button id="registry-select-page">Выбрать страницу</button><button id="registry-select-all">Весь доступный отбор</button><button id="registry-select-clear">Снять выделение</button><span id="registry-selected-count"></span></div><div id="registry-allocation"></div>`);
   }
   const scroll=host.querySelector<HTMLElement>('.registry-scroll')!;
+  const mobile=crm.platform==='mobile';
+  let mobileTable=false;
+  const mobileRows=document.createElement('div');mobileRows.className='registry-mobile-cards';
+  if(mobile){
+    scroll.after(mobileRows);
+    const mode=document.createElement('div');mode.className='registry-view-mode';
+    mode.innerHTML='<button data-registry-mode="list" class="active" aria-pressed="true">Список</button><button data-registry-mode="table" aria-pressed="false">Таблица и правки</button>';
+    scroll.before(mode);
+    mode.querySelectorAll<HTMLButtonElement>('button').forEach(b=>b.onclick=()=>{
+      if(editing)editing.blur();mobileTable=b.dataset.registryMode==='table';
+      mode.querySelectorAll('button').forEach(t=>{const active=t===b;t.classList.toggle('active',active);t.setAttribute('aria-pressed',String(active));});
+      scroll.hidden=!mobileTable;mobileRows.hidden=mobileTable;
+    });
+    scroll.hidden=true;
+  }
   const protectedInput=document.createElement('div');$('registry-status').after(protectedInput);
   let revokedInput=(await crm.draft('registry-revoked-input')).data;
   function showProtectedInput(){
@@ -127,9 +144,26 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
         const text=queued.some(e=>e.state==='attention')?'Требует сверки':queued.length?'Сохранено на устройстве':pending[row.contract_uuid]?'Редактируется':'Подтверждено';
         if(options.manager){el.innerHTML=`<label title="${text}"><input type="checkbox" data-select-row="${row.contract_uuid}" aria-label="Выбрать ${escape(row.external_id)}"${selectedRows.has(row.contract_uuid)||allSelected?' checked':''}><span>${text}</span></label>`;
           el.querySelector<HTMLInputElement>('input')!.onchange=e=>{allSelected=false;(e.target as HTMLInputElement).checked?selectedRows.add(row.contract_uuid):selectedRows.delete(row.contract_uuid);selectionChanged();};
-        }else el.textContent=text;
+        }else {el.textContent=mobile?(queued.some(e=>e.state==='attention')?'!':queued.length?'↑':pending[row.contract_uuid]?'✎':'✓'):text;el.title=text;el.setAttribute('aria-label',text);}
       }
     }
+    paintMobile();
+  }
+  function paintMobile(){
+    if(!mobile||!data)return;
+    mobileRows.innerHTML=data.rows.map((row:any)=>{
+      const queued=rowEntry(row.contract_uuid);
+      const f=Object.fromEntries(['client','partner','phone','responsible_soft','responsible','soft_call_status','call_status'].map(key=>[key,value(row,key)]));
+      const state=queued.some(e=>e.state==='attention')?'Требует сверки':queued.length?'Ожидает отправки':pending[row.contract_uuid]?'Есть несохранённые правки':'';
+      const today=value(row,'debt_today');
+      const raw=today==null||today===''?value(row,'debt_total'):today;
+      const debt=raw==null||raw===''?'Сумма не указана':decimalText(raw);
+      return `<article data-registry-card="${escape(row.contract_uuid)}" data-color="${escape(colors[row.contract_uuid]||'')}"><div class="registry-mobile-heading">${options.manager?`<label class="registry-mobile-check"><input type="checkbox" data-mobile-select="${escape(row.contract_uuid)}" aria-label="Выбрать ${escape(row.client_name)} · ${escape(row.external_id)}"${selectedRows.has(row.contract_uuid)||allSelected?' checked':''}></label>`:''}<button class="link" data-registry-person="${escape(row.person_uuid)}">${escape(row.client_name||f.client||'Без имени')}</button><strong>${escape(debt)}<small>${escape(row.currency||'Валюта не задана')}</small></strong></div><p>${escape(row.external_id)} · ${escape(f.partner||row.creditor_id)}</p>${f.phone?`<p>${escape(f.phone)}</p>`:''}${options.manager?`<dl><div><dt>Звонки</dt><dd>${escape(f.responsible_soft||'Не назначен')}</dd></div><div><dt>Выезды</dt><dd>${escape(f.responsible||'Не назначен')}</dd></div></dl>`:''}${f.soft_call_status||f.call_status?`<p>${[f.soft_call_status&&'Звонок: '+f.soft_call_status,f.call_status&&'Выезд: '+f.call_status].filter(Boolean).map(escape).join(' · ')}</p>`:''}${state?`<p class="registry-mobile-state" role="status">${state}</p>`:''}</article>`;
+    }).join('')||'<p class="empty">По выбранным условиям договоров нет</p>';
+    mobileRows.querySelectorAll<HTMLButtonElement>('[data-registry-person]').forEach(b=>b.onclick=()=>options.openPerson?.(b.dataset.registryPerson!));
+    mobileRows.querySelectorAll<HTMLInputElement>('[data-mobile-select]').forEach(input=>input.onchange=()=>{
+      allSelected=false;input.checked?selectedRows.add(input.dataset.mobileSelect!):selectedRows.delete(input.dataset.mobileSelect!);selectionChanged();
+    });
   }
   async function sync() {
     const result=await crm.queue();
@@ -261,7 +295,7 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   }
   async function preview() {
     if(editing)editing.blur();await storeInput();await sync();
-    $<HTMLButtonElement>('registry-apply').textContent='Сохранить на компьютере и отправить';
+    $<HTMLButtonElement>('registry-apply').textContent=mobile?'Сохранить на телефоне и отправить':'Сохранить на компьютере и отправить';
     const missing=Object.keys(pending).filter(id=>!snapshots.has(id));
     if(missing.length){
       const result=await crm.api('GET','registry',undefined,{view:'all',ids:missing.join(','),limit:100});
@@ -284,7 +318,7 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
     const dialog=$<HTMLDialogElement>('registry-preview');
     dialog.querySelector('.registry-preview-values')!.innerHTML=rows.map(p=>{
       const row=snapshots.get(p.contract_uuid);
-      return `<h3>${escape(row.external_id)} · ${escape(row.fields.partner || row.creditor_id)}</h3><dl>${Object.entries(p.values).map(([key,v])=>`<dt>${escape(data.columns.find((f:any)=>f.key===key).title)}</dt><dd>${escape(showValue(row.fields[key],data.columns.find((f:any)=>f.key===key)))} → ${v===null?'Очистить':escape(v)}</dd>`).join('')}</dl>`;
+      return `<h3>${escape(row.external_id)} · ${escape(row.fields.partner || row.creditor_id)}</h3><dl>${Object.entries(p.values).map(([key,v])=>`<dt>${escape(allColumns.find((f:any)=>f.key===key)?.title||key)}</dt><dd>${escape(showValue(row.fields[key],allColumns.find((f:any)=>f.key===key)||{}))} → ${v===null?'Очистить':escape(v)}</dd>`).join('')}</dl>`;
     }).join('');
     $('registry-apply').onclick=protect(async()=>{
       if(busy)return;busy=true;$<HTMLButtonElement>('registry-apply').disabled=true;
@@ -375,7 +409,7 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   $('registry-reload').onclick=protect(load);
   $('registry-prev').onclick=protect(async()=>{prefs.offset=Math.max(0,prefs.offset-50);await load();});
   $('registry-next').onclick=protect(async()=>{prefs.offset+=50;await load();});
-  $('registry-edit').onclick=()=>beginEdit();
+  $('registry-edit').onclick=()=>{if(mobile&&!mobileTable)host.querySelector<HTMLButtonElement>('[data-registry-mode="table"]')?.click();beginEdit();};
   $('registry-clear').onclick=protect(clearSelection);
   $('registry-save').onclick=protect(preview);
   $('registry-review').onclick=protect(review);
@@ -430,7 +464,7 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
         if(!cell.contains(editing)&&!pending[row.contract_uuid]&&!rowEntry(row.contract_uuid).length&&field){const span=cell.querySelector('span');if(span)span.textContent=showValue(value(row,key),field);}
       });
     }
-    await storeInput();if(options.manager&&!editing&&!pendingCount())await load();else status('Назначения и права обновлены. Незавершённый ввод сохранён.');
+    await storeInput();paintMobile();if(options.manager&&!editing&&!pendingCount())await load();else status('Назначения и права обновлены. Незавершённый ввод сохранён.');
   }
   const stop=crm.onChange?.((event:any)=>{if(event.type==='queue')void sync().catch(e=>status(e.message));else if(event.type==='live'&&event.dirty)void refreshLive().catch(e=>status(e.message));});
   scroll.onscroll=()=>{prefs.left=scroll.scrollLeft;prefs.top=scroll.scrollTop;schedulePreferences();};

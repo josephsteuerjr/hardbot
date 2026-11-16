@@ -3,7 +3,11 @@ import {cpSync,mkdirSync,readFileSync,writeFileSync,readdirSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {dirname,resolve,join,relative} from 'node:path';
 import {fileURLToPath} from 'node:url';
-const desk=resolve(dirname(fileURLToPath(import.meta.url)),'..'),out=process.env.HARD_CRM_MOBILE_OUT?resolve(process.env.HARD_CRM_MOBILE_OUT):resolve(desk,'../server/miniapp/crm');
+const desk=resolve(dirname(fileURLToPath(import.meta.url)),'..');
+// The source static directory can be served by a running preview. Never publish
+// into it implicitly when a caller forgot an environment variable or path failed.
+if(!process.env.HARD_CRM_MOBILE_OUT?.trim())throw Error('Set HARD_CRM_MOBILE_OUT to an explicit isolated build directory.');
+const out=resolve(process.env.HARD_CRM_MOBILE_OUT);
 mkdirSync(out,{recursive:true});
 await build({entryPoints:[join(desk,'ui/mobile/main.ts')],outfile:join(out,'app.js'),bundle:true,format:'iife',target:['safari16.4','chrome110'],logLevel:'warning'});
 await build({entryPoints:[join(desk,'ui/mobile/styles.css')],outfile:join(out,'app.css'),bundle:true,loader:{'.woff2':'file','.svg':'dataurl'},assetNames:'fonts/[name]-[hash]',logLevel:'warning'});

@@ -4,6 +4,7 @@ import {editClientCard} from './crm-card-editor';
 import {mountManagerReports} from './crm-manager-reports';
 import {mountManagerTeam} from './crm-manager-team';
 import {mountAnalyst} from './crm-analyst';
+import {decimalText} from './crm-format';
 type API = {
   platform?:string;
   initialSection?():string;
@@ -45,7 +46,7 @@ const date = (value: any) =>
 const amount = (value: any, currency = "") =>
   value == null || value === ""
     ? "Не указано"
-    : esc(value) + (currency ? " " + esc(currency) : "");
+    : esc(decimalText(value)) + (currency ? " " + esc(currency) : "");
 const labels: Record<string, string> = {
   call: "Звонок",
   source_sync: 'Сверка прежнего приложения',
@@ -88,6 +89,8 @@ const notice = (text = "", tone: 'error' | 'status' = 'error') => {
   $("notice").textContent = text;
   $('notice').dataset.tone=tone;
 };
+
+function reportError(error:any){if(error?.name!=='AbortError')notice(error?.message||String(error));}
 
 function cardEntries(entries:any[]) {
   const ids=new Set(card?.contracts?.map((row:any)=>row.contract_uuid) || []);
@@ -250,6 +253,7 @@ const table = (heads: string[], rows: string[]) =>
 async function boot() {
   await crm.ready?.();
   state = await crm.state();
+  if(!state || state.ok===false || !state.connection)throw Error(state?.text || 'Не удалось прочитать защищённый профиль CRM.');
   document.title=state.product||'Взыскание';
   if(analystIdentity&&analystIdentity!==state.owner){location.reload();return;}
   context = state.context;
@@ -288,6 +292,9 @@ async function boot() {
   const manager=['manager','owner'].includes(context?.role);
   const sections = context?.role==='analyst' ? [
     ['registry','Реестр'],['exchange','Обмен'],['statistics','Показатели'],['team','Команда'],['connection','Подключение'],
+  ] : crm.platform==='mobile'&&context?.role==='employee' ? [
+    ['portfolio','Портфель'],['registry','Реестр'],['cabinet','Показатели'],['queue','Отправки'],
+    ['tasks','Задачи'],['active-time','Активное время'],['script','Скрипт'],['connection','Подключение'],['help','Справка'],
   ] : context?.role==='employee' ? [
     ['portfolio','Портфель'],['registry','Реестр'],['cabinet','Мои показатели'],
     ['active-time','Активное время'],['connection','Подключение'],
@@ -394,7 +401,7 @@ async function go(next: string) {
         workbook:(action:string,input?:any)=>crm.workbook(action==='manager-report'?'analyst-report':action,input),
         draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:(action?:string,id?:string)=>crm.queue(action,id,expectedOwner)};
       const stop=await mountAnalyst($('view'),next,api,valid,{owner:expectedOwner,navigate:go,core:{
-        table:async(host,current)=>mountRegistry(host,api,current,{manager:true,distribution:context.distribution?.enabled,openPerson:id=>void openCard(id).catch(e=>notice(e.message))}),
+        table:async(host,current)=>mountRegistry(host,api,current,{manager:true,distribution:context.distribution?.enabled,openPerson:id=>void openCard(id).catch(reportError)}),
         reports:async(host,current)=>mountManagerReports(host,api,current),
         scripts:async host=>script(host),
         'crm-books':async host=>exchangePage(host),queue:async host=>queuePage(host),connection:async host=>connection(host),
@@ -410,7 +417,7 @@ async function go(next: string) {
         registry:async()=>{
           if(['manager','owner'].includes(context.role)){await managerRegistry();return;}
           const expectedOwner=state.owner;
-          const stop=await mountRegistry($('view'),{...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:(action?:string,id?:string)=>crm.queue(action,id,expectedOwner)},()=>generation===renderGeneration);
+          const stop=await mountRegistry($('view'),{...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:(action?:string,id?:string)=>crm.queue(action,id,expectedOwner)},()=>generation===renderGeneration,{openPerson:id=>void openCard(id).catch(reportError)});
           if(generation===renderGeneration)disposeSection=stop;else stop();
         },
         'active-time':activeTimePage,
@@ -499,7 +506,7 @@ async function managerRegistry(){
   const generation=renderGeneration,expectedOwner=state.owner;
   const valid=()=>generation===renderGeneration&&section==='registry'&&!activePerson;
   const api={...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:(action?:string,id?:string)=>crm.queue(action,id,expectedOwner)};
-  const stop=await mountRegistry($('view'),api,valid,{manager:true,distribution:context.distribution?.enabled,openPerson:id=>void openCard(id).catch(e=>notice(e.message))});
+  const stop=await mountRegistry($('view'),api,valid,{manager:true,distribution:context.distribution?.enabled,openPerson:id=>void openCard(id).catch(reportError)});
   if(valid())disposeSection=stop;else stop();
 }
 
@@ -511,13 +518,14 @@ async function portfolio(search = portfolioSearch, offset=portfolioOffset) {
   const data = await request("GET", personal?'work-portfolio':'portfolio', undefined,
     personal?{search,work:portfolioWork,employee_uuid:portfolioEmployee,offset,limit:100}:{search,limit:500});
   if(generation!==portfolioGeneration || section!=='portfolio')return;
-  const modes=`<div class="tabs portfolio-modes"><button data-portfolio-view="mine" class="${personal?'active':''}">Мой портфель</button><button data-portfolio-view="all" class="${personal?'':'active'}">Все клиенты</button></div>`;
+  const mobile=crm.platform==='mobile';
+  const modes=`<div class="tabs portfolio-modes"><button data-portfolio-view="mine" class="${personal?'active':''}">${mobile?'Мой':'Мой портфель'}</button><button data-portfolio-view="all" class="${personal?'':'active'}">${mobile?'Общий':'Все клиенты'}</button></div>`;
   const staff=context.staff || [];
   const selector=personal&&staff.length>1?`<label class="portfolio-person">Сотрудник <select id="portfolio-employee">${staff.map((p:any)=>`<option value="${esc(p.employee_uuid)}"${p.employee_uuid===portfolioEmployee?' selected':''}>${esc(p.name)}</option>`).join('')}</select></label>`:'';
   if(personal) {
     const options=[['all','Все',data.counts.all],['call','Звонки',data.counts.call],['visit','Выезды',data.counts.visit],['both','Оба',data.counts.both],
       ...(data.counts.delivery||context.role==='courier'?[['delivery','Доставка',data.counts.delivery]]:[])];
-    const filters=`<div class="work-filters">${options.map(([key,title,count])=>`<button data-work-filter="${key}" class="${portfolioWork===key?'active':''}" aria-pressed="${portfolioWork===key}">${title} <span>${count}</span></button>`).join('')}</div>`;
+    const filters=mobile?'':`<div class="work-filters">${options.map(([key,title,count])=>`<button data-work-filter="${key}" class="${portfolioWork===key?'active':''}" aria-pressed="${portfolioWork===key}">${title} <span>${count}</span></button>`).join('')}</div>`;
     const debt=Object.entries(data.currencies || {}).map(([unit,value])=>amount(value,unit)).join(' · ');
     $('view').innerHTML=modes+selector+filters+`<div class="toolbar"><input type="search" id="search" placeholder="Имя, договор, телефон, адрес" value="${esc(search)}">${button('search-go','Найти')}${button('refresh','Обновить')}</div>`+
       `<p class="muted" data-work-total>Договоров: ${data.total_contracts} · Клиентов: ${data.total_people}${debt?' · Долг: '+debt:''}${data.unknown_amounts?' · Без подтверждённой суммы или валюты: '+data.unknown_amounts:''}</p>`+
@@ -528,10 +536,14 @@ async function portfolio(search = portfolioSearch, offset=portfolioOffset) {
       (data.contracts.length?'':'<p class="empty">По выбранным условиям договоров нет</p>')+
       `<div class="toolbar portfolio-pages"><button id="work-previous"${offset===0?' disabled':''}>Назад</button><span>${data.total_contracts?offset+1:0}–${Math.min(offset+data.contracts.length,data.total_contracts)} из ${data.total_contracts}</span><button id="work-next"${data.has_more?'':' disabled'}>Далее</button></div>`;
     bind('work-previous',()=>portfolio(portfolioSearch,Math.max(0,portfolioOffset-100)));
+    if(mobile){
+      $('view').querySelector('.portfolio-modes')!.insertAdjacentHTML('beforeend',`<select id="portfolio-work" aria-label="Вид работы">${options.map(([key,title,count])=>`<option value="${key}"${portfolioWork===key?' selected':''}>${title} · ${count}</option>`).join('')}</select>`);
+      $<HTMLSelectElement>('portfolio-work').onchange=()=>{portfolioWork=$<HTMLSelectElement>('portfolio-work').value;void portfolio(portfolioSearch,0).catch(reportError);};
+    }
     bind('work-next',()=>portfolio(portfolioSearch,portfolioOffset+100));
-    $('view').querySelectorAll<HTMLButtonElement>('[data-work-filter]').forEach(b=>b.onclick=()=>{portfolioWork=b.dataset.workFilter!;void portfolio(portfolioSearch,0).catch(e=>notice(e.message));});
+    $('view').querySelectorAll<HTMLButtonElement>('[data-work-filter]').forEach(b=>b.onclick=()=>{portfolioWork=b.dataset.workFilter!;void portfolio(portfolioSearch,0).catch(reportError);});
     const employee=$<HTMLSelectElement>('portfolio-employee');
-    if(employee)employee.onchange=()=>{portfolioEmployee=employee.value;portfolioWork='all';void portfolio(portfolioSearch,0).catch(e=>notice(e.message));};
+    if(employee)employee.onchange=()=>{portfolioEmployee=employee.value;portfolioWork='all';void portfolio(portfolioSearch,0).catch(reportError);};
   } else {
   $("view").innerHTML =
     modes+`<div class="toolbar"><input type="search" id="search" placeholder="Имя, договор, телефон, адрес" value="${esc(search)}">${button("search-go", "Найти")}${button("refresh", "Обновить")}</div><div class="muted">Клиентов: ${data.total_people} · Договоров: ${data.total_contracts}${data.truncated ? " · Уточните поиск" : ""}</div>` +
@@ -549,13 +561,13 @@ async function portfolio(search = portfolioSearch, offset=portfolioOffset) {
       ),
     );
   }
-  $('view').querySelectorAll<HTMLButtonElement>('[data-portfolio-view]').forEach(b=>b.onclick=()=>{portfolioView=b.dataset.portfolioView!;void portfolio(portfolioSearch,0).catch(e=>notice(e.message));});
+  $('view').querySelectorAll<HTMLButtonElement>('[data-portfolio-view]').forEach(b=>b.onclick=()=>{portfolioView=b.dataset.portfolioView!;void portfolio(portfolioSearch,0).catch(reportError);});
   bind("search-go", () => portfolio($<HTMLInputElement>("search").value,0));
   bind("refresh", () => portfolio());
   $<HTMLInputElement>("search").onkeydown = (e) => {
-    if (e.key === "Enter") void portfolio($<HTMLInputElement>("search").value,0).catch(error=>notice(error.message));
+    if (e.key === "Enter") void portfolio($<HTMLInputElement>("search").value,0).catch(reportError);
   };
-  if(context.role==='employee'){
+  if(context.role==='employee'&&crm.platform!=='mobile'){
     $('view').insertAdjacentHTML('afterbegin',`<div class="toolbar portfolio-context">${button('portfolio-tasks','Задачи')}${button('portfolio-queue','Отправка результатов')}${button('portfolio-script','Скрипт')}${button('portfolio-help','Справка')}</div>`);
     bind('portfolio-tasks',()=>go('tasks'));bind('portfolio-queue',()=>go('queue'));bind('portfolio-script',()=>go('script'));bind('portfolio-help',()=>go('help'));
   }
@@ -1116,11 +1128,11 @@ async function tasksPage() {
   const persist=()=>crm.draft('task-view',{status:taskStatus,employee:taskEmployee,work:taskWork});
   const refresh=async()=>{taskSearch=$<HTMLInputElement>('task-search').value;taskOffset=0;await persist();await tasksPage();};
   bind('task-refresh',refresh);
-  $('task-search').addEventListener('keydown',(event)=>{if(event.key==='Enter')void refresh().catch(e=>notice(e.message));});
+  $('task-search').addEventListener('keydown',(event)=>{if(event.key==='Enter')void refresh().catch(reportError);});
   const select=async()=>{taskEmployee=$<HTMLSelectElement>('task-employee')?.value || context.employee_uuid;taskWork=$<HTMLSelectElement>('task-work').value;await refresh();};
-  $('task-employee')?.addEventListener('change',()=>void select().catch(e=>notice(e.message)));
-  $('task-work').addEventListener('change',()=>void select().catch(e=>notice(e.message)));
-  document.querySelectorAll<HTMLButtonElement>('[data-task-filter]').forEach(b=>b.onclick=()=>{taskStatus=b.dataset.taskFilter!;void refresh().catch(e=>notice(e.message));});
+  $('task-employee')?.addEventListener('change',()=>void select().catch(reportError));
+  $('task-work').addEventListener('change',()=>void select().catch(reportError));
+  document.querySelectorAll<HTMLButtonElement>('[data-task-filter]').forEach(b=>b.onclick=()=>{taskStatus=b.dataset.taskFilter!;void refresh().catch(reportError);});
   document.querySelectorAll<HTMLButtonElement>('[data-task-person]').forEach(b=>b.onclick=()=>void openCard(b.dataset.taskPerson!));
   document.querySelectorAll<HTMLButtonElement>('[data-task-complete]').forEach(b=>b.onclick=async()=>{
     b.disabled=true;const row=data.tasks.find((r:any)=>r.entity_id===b.dataset.taskComplete);
@@ -1421,13 +1433,14 @@ async function connection(host:HTMLElement=document.getElementById('view')!) {
   if(crm.renderConnection){await crm.renderConnection(host,boot);return;}
   const $=<T extends HTMLElement=HTMLElement>(id:string)=>(id==='view'?host:host.querySelector('#'+id)) as T;
   state = await crm.state();
+  if(!state || state.ok===false || !state.connection)throw Error(state?.text || 'Не удалось прочитать защищённый профиль CRM.');
   const savedLogins = state.existingLogins || [{source:'manager',label:'Руководитель',available:state.existingManager?.available}];
   const available = savedLogins.filter((entry:any)=>entry.available);
   const current = state.context ? `<h2>Текущее подключение</h2><p>${state.connection.mode==='synthetic'?'Проверочная база · синтетические данные':esc(state.connection.server)}</p>${button('connection-continue','Открыть портфель',true)}` : '';
   $("view").innerHTML =
     `<div class="help connection-page">${current}<h2>Сохранённый вход</h2><p>${available.length?'Выберите вход из установленной рабочей программы. Сервер подтвердит личность и права.':'Сохранённый вход не найден. Войдите в установленную рабочую программу и повторите проверку.'}</p><div class="actions">${available.map((entry:any)=>`<button ${entry.source==='manager'?'id="existing-manager-connect" ':''}data-existing-source="${esc(entry.source)}" class="primary">${esc(entry.label)}</button>`).join('')}${button('connection-refresh','Проверить снова')}</div>${state.connectionNotice ? `<p role="status">${esc(state.connectionNotice)}</p>` : ''}<details class="connection-testing"><summary>Проверочная среда</summary><h2>Синтетические данные</h2><p>Отдельная база на этом компьютере. Результаты не попадают в рабочий портфель.</p><div class="toolbar"><select id="demo-role" aria-label="Роль в проверочной базе"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option><option value="observer">Наблюдатель другой команды</option><option value="courier">Курьер</option><option value="analyst">Аналитик</option></select>${button('demo-connect','Открыть сценарий')}</div><label class="check"><input id="offline" type="checkbox"${state.offline?' checked':''}>Приостановить отправку для проверки офлайн</label><h2>Отдельный сервер</h2><div class="grid"><div class="field span"><label for="server">HTTPS-адрес</label><input id="server" placeholder="Адрес проверочного сервера"></div><div class="field"><label for="remote-role">Роль входа</label><select id="remote-role"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option></select></div><div class="field"><label for="login">Логин</label><input id="login" autocomplete="username"></div><div class="field"><label for="password">Пароль</label><input id="password" type="password" autocomplete="current-password"></div></div><div class="actions">${button('remote-connect','Войти')}</div></details></div>`;
   bind('connection-continue',()=>go('portfolio'));
-  $('view').insertAdjacentHTML('afterbegin',`<section class="diagnostics"><h2>Диагностика подключения</h2><div class="actions">${button('diagnostic-run','Проверить и восстановить')}${button('diagnostic-queue','Очередь и сверка')}</div><div id="diagnostic-result" role="status"></div></section>`);
+  $('view').insertAdjacentHTML('beforeend',`<details class="diagnostics"><summary>Диагностика подключения</summary><div class="actions">${button('diagnostic-run','Проверить и восстановить')}${button('diagnostic-queue','Очередь и сверка')}</div><div id="diagnostic-result" role="status"></div></details>`);
   const diagnose=async(repair=false)=>{
     if(!crm.diagnostics)return;
     const generation=renderGeneration,button=$<HTMLButtonElement>('diagnostic-run');button.disabled=true;
@@ -1441,7 +1454,7 @@ async function connection(host:HTMLElement=document.getElementById('view')!) {
   $('diagnostic-run').insertAdjacentHTML('afterend',button('diagnostic-report','Сохранить отчёт'));
   bind('diagnostic-report',async()=>{const result=await crm.diagnosticsReport?.();if(result && !result.ok)throw Error(result.text);});
   bind('diagnostic-run',()=>diagnose(true));bind('diagnostic-queue',()=>go('queue'));
-  void diagnose().catch(e=>notice(e.message));
+  void diagnose().catch(reportError);
   bind('connection-refresh',()=>connection());
   $('view').querySelectorAll<HTMLButtonElement>('[data-existing-source]').forEach(element=>{
     bind(element.id || (element.id='saved-login-'+element.dataset.existingSource),async()=>{
@@ -1514,13 +1527,13 @@ crm.onChange?.(event=>{
     clearTimeout(cardRetryTimer);
     renderGeneration++;activePerson='';cardSyncGeneration++;card=null;context=null;
     $<HTMLDialogElement>('dialog').close();
-    void boot().catch(error=>notice(error.message));
+    void boot().catch(reportError);
   }else if(event.type==='live'){
     const environment=context?.distribution?.environment==='isolated'?'Изолированный стенд · ':state?.connection?.mode==='synthetic'?'Синтетические данные · ':'';
     $('connection').textContent=environment+(event.connected?'Подтверждённая связь · '+date(event.as_of):`Связь не подтверждена · ввод сохранён ${savedOn}`);
     if(event.dirty){
       if(activePerson)scheduleSync(true);
-      else if(section==='portfolio')void portfolio().catch(error=>notice(error.message));
+      else if(section==='portfolio')void portfolio().catch(reportError);
 
     }
   }else scheduleSync();
@@ -1533,9 +1546,8 @@ crm.onNavigate?.(async route=>{
 window.addEventListener('focus',()=>{if(activePerson)scheduleSync(true);});
 void boot().catch((e) => {
   notice(e.message);
-  if(crm.platform==='mobile'){
-    $('title').textContent='Подключение';
-    $('view').innerHTML='<p>Не удалось открыть рабочее место. Сохранённые результаты остаются на телефоне.</p><button id="retry-start">Повторить запуск</button>';
-    $('retry-start').onclick=()=>location.reload();
-  }
+  $('title').textContent='Не удалось открыть CRM';
+  $('connection').textContent='Вход не подтверждён';
+  $('view').innerHTML=`<p>Сохранённые данные остаются ${savedOn}. Повторите запуск после восстановления доступа.</p><button id="retry-start" class="primary">Повторить запуск</button>`;
+  $('retry-start').onclick=()=>location.reload();
 });

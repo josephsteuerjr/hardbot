@@ -350,8 +350,11 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser();homes=parser.add_mutually_exclusive_group(required=True)
     homes.add_argument('--demo-home');homes.add_argument('--home');parser.add_argument('--port',type=int,default=0);parser.add_argument('--receipt')
     parser.add_argument('--primary');parser.add_argument('--crm');parser.add_argument('--session-key-file');parser.add_argument('--native-executor',action='store_true')
-    parser.add_argument('--source-root',action='append',default=[]);parser.add_argument('--prefix',default=PREFIX);parser.add_argument('--public-origin')
+    parser.add_argument('--source-root',action='append',default=[]);parser.add_argument('--prefix',default=PREFIX);parser.add_argument('--public-origin');parser.add_argument('--assets')
     args=parser.parse_args();home=Path(args.demo_home or args.home).resolve();key=None
+    if args.assets:
+        ASSETS=Path(args.assets).resolve()
+        if not (ASSETS/'index.html').is_file() or not (ASSETS/'BUILD.json').is_file():parser.error('--assets must name a complete mobile build')
     if args.demo_home:
         if args.primary or args.crm or args.native_executor:parser.error('Synthetic mode cannot use shared services')
         backend=SyntheticBackend(home/'synthetic')

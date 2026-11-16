@@ -48,3 +48,86 @@
 }
 @media(min-width:761px) and (max-width:1100px){.mobile-crm{grid-template-columns:180px 1fr}.mobile-crm #rail{padding-inline:10px}.mobile-crm main{padding-inline:28px}}
 @media(prefers-reduced-motion:reduce){.mobile-crm *{scroll-behavior:auto!important;transition:none!important}}
+
+ .mobile-crm .registry-view-mode{display:flex;gap:16px;border-bottom:1px solid var(--line);margin:8px 0 0}
+ .mobile-crm .registry-view-mode button{border:0;border-radius:0;font-size:13px;padding:8px 0}
+ .mobile-crm .registry-view-mode .active{color:var(--accent);border-bottom:2px solid var(--accent)}
+ .registry-mobile-cards article{padding:14px 0;border-bottom:1px solid var(--line);font-size:12px}
+ .registry-mobile-heading{display:flex;align-items:flex-start;gap:10px}
+ .registry-mobile-heading>button{flex:1;min-width:0;font-size:16px;color:var(--ink)!important;line-height:1.35;overflow-wrap:anywhere}
+ .registry-mobile-heading strong{font-size:16px;font-weight:500;max-width:110px;text-align:right;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+ .registry-mobile-heading strong small{display:block;font-size:10px;font-weight:400;color:var(--muted)}
+ .registry-mobile-cards p{margin:4px 0;color:var(--ink-2);overflow-wrap:anywhere}
+ .registry-mobile-cards dl{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0 0}
+ .registry-mobile-cards dt{font-size:10px;color:var(--muted)}
+ .registry-mobile-cards dd{margin:2px 0 0;overflow-wrap:anywhere}
+ .registry-mobile-cards .registry-mobile-state{color:var(--accent);margin-top:8px}
+ .registry-mobile-check{display:flex;min-width:32px;min-height:44px;align-items:center;justify-content:center}
+ .registry-mobile-check input{width:20px;height:20px;margin:0}
+ .registry-mobile-cards [data-color=yellow]{border-left:3px solid #d8ac39;padding-left:8px}
+ .registry-mobile-cards [data-color=red]{border-left:3px solid #a5422d;padding-left:8px}
+ .registry-mobile-cards [data-color=blue]{border-left:3px solid #477c96;padding-left:8px}
+
+/* Phone workspaces: content comes before secondary controls. */
+@media(max-width:760px){
+ .mobile-crm{--mobile-bar:64px}
+ .mobile-crm main{padding-inline:16px;scroll-padding-top:78px}
+ .mobile-crm header.workspace{margin-inline:-16px;padding:14px 16px 10px;min-height:76px}
+ .mobile-crm header.workspace>div:first-child{min-width:0;width:100%}
+ .mobile-crm h1{font-size:29px;line-height:1.15;margin-bottom:4px;overflow-wrap:anywhere}
+ .mobile-crm #connection{font-size:10px}
+ .mobile-crm #view{padding-top:12px}
+ .mobile-crm .toolbar{margin-bottom:12px;gap:8px}
+ .mobile-crm .toolbar input[type=search],.mobile-crm .manager-register-data #registry-search{min-width:0;flex:1 1 0;width:0}
+ .mobile-crm .tabs{margin:12px 0;gap:18px}
+ .mobile-crm .portfolio-modes{margin-top:0;margin-bottom:10px}
+ .mobile-crm .portfolio-modes button{font-size:13px}
+ .mobile-crm .portfolio-modes{align-items:center}
+ .mobile-crm #portfolio-work{margin-left:auto;max-width:145px;min-height:44px;font-size:13px}
+ .mobile-crm .mobile-portfolio-table td.mobile-empty-result{display:none}
+ .mobile-crm .work-filters{padding-bottom:4px;margin-bottom:10px;gap:6px}
+ .mobile-crm .work-filters button{min-height:44px;padding:8px 10px}
+ .mobile-crm #search-go{background:var(--accent);color:white;border-color:var(--accent)}
+ .mobile-crm #refresh{font-size:0;min-width:44px;padding:8px}
+ .mobile-crm #refresh::after{content:'↻';font-size:22px}
+ .mobile-crm [data-work-total]{font-size:11px;line-height:1.5;margin:12px 0}
+ .mobile-crm .mobile-portfolio-table tr{padding:13px 0;gap:5px 12px}
+ .mobile-crm .mobile-portfolio-table td:first-child{font-size:16px}
+ .mobile-crm .mobile-portfolio-table td:nth-child(6){font-size:15px;max-width:104px}
+ .mobile-crm .work-kind{display:inline-block;margin:0 8px 0 0;font-size:11px}
+ .mobile-crm .mobile-portfolio-table td:nth-child(4),.mobile-crm .mobile-portfolio-table td:nth-child(5){padding-top:4px}
+ .mobile-crm .summary{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 16px;margin:14px 0}
+ .mobile-crm .metric{padding:10px 0;font-size:12px}
+ .mobile-crm .metric strong{font:25px/1.2 var(--sans);font-variant-numeric:tabular-nums;margin:5px 0}
+ .mobile-crm h2{font-size:25px;margin-bottom:12px}
+ .mobile-crm .mobile-card-actions{gap:8px;margin-bottom:10px}
+ .mobile-crm .mobile-card-actions #back{border:0;padding-left:0;font-size:13px}
+ .mobile-crm .mobile-card-actions #card-refresh{border:0}
+ .mobile-crm .mobile-card-actions [data-action=call],.mobile-crm .mobile-card-actions [data-action=visit]{min-height:46px}
+ .mobile-crm .mobile-card-more summary{padding:10px 0;min-height:44px;align-items:center}
+ .mobile-crm #card-content>.table-wrap:first-child tr{padding:12px 0;gap:8px}
+ .mobile-crm .mobile-registry-tools{margin:8px 0}
+ .mobile-registry-tools summary{padding:10px 0;min-height:44px;align-items:center}
+ .mobile-crm #registry-status{font-size:11px;margin:8px 0}
+ .mobile-crm .registry-scroll{height:calc(100dvh - 360px);min-height:220px}
+ .mobile-crm .registry-grid .registry-row-state{font-size:16px;color:var(--accent)}
+ .mobile-crm .registry-grid th:nth-child(2),.mobile-crm .registry-grid td:nth-child(2){position:static}
+
+ .mobile-crm .mobile-registry-pagination{margin-top:12px}
+ .mobile-crm #registry-allocation:empty{display:none}
+ .mobile-crm .mobile-save-strip{top:76px}
+ .mobile-crm .mobile-selection-bar{display:flex;align-items:center;gap:8px;justify-content:space-between;border-bottom:1px solid var(--line);padding:8px 0;font-size:12px}
+ .mobile-crm .mobile-selection-bar button{font-size:12px;padding:8px;color:var(--accent)}
+ .mobile-crm .manager-team-layout{gap:16px}
+ .mobile-crm .team-table td:first-child button{font-size:14px;min-height:44px}
+ .mobile-crm dialog{padding:18px 16px calc(18px + env(safe-area-inset-bottom));border-radius:12px 12px 0 0}
+ .mobile-crm dialog form>.actions{position:sticky;bottom:-18px;background:var(--paper);padding:12px 0;border-top:1px solid var(--line);z-index:2}
+ .mobile-crm dialog .actions .primary{flex:1 1 100%;order:-1}
+ .mobile-crm .mobile-report-stats{gap:16px;padding:14px 0}
+ .mobile-crm .mobile-report-cards>section{padding:12px 0;margin-bottom:14px}
+ .mobile-crm #report-status{font-size:11px;color:var(--muted);line-height:1.5}
+ .mobile-crm .toolbar:has(#report-day){display:grid;grid-template-columns:1fr 1fr;gap:8px}
+ .mobile-crm .toolbar:has(#report-day)>label{display:grid;gap:4px;font-size:11px;min-width:0}
+ .mobile-crm #report-day,.mobile-crm #report-cutoff{width:100%;min-height:44px}
+ .mobile-crm #report-channel{margin:8px 0}
+}
