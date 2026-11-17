@@ -227,6 +227,7 @@ function contractCan(contract: any, kind: string) {
   return !Array.isArray(contract.allowed_actions) || contract.allowed_actions.includes(kind);
 }
 function repaintWatermark(data: any) {
+  if(tab!=='overview')return;
   let host = document.querySelector('.card-script-watermark');
   if (!host && data?.script) {
     const workspace = document.querySelector('.card-workspace');
@@ -473,6 +474,26 @@ function fullBusiness(contract:any) {
   return `<details class="business-details"><summary>Все сведения · ${esc(contract.external_id)} · ${esc(contract.fields.partner || contract.creditor_id)}${contract.currency?' · '+esc(contract.currency):''}</summary>${Array.from(groups).map(([title,rows])=>`<section><h3>${esc(title)}</h3><dl class="contract-facts">${rows.join('')}</dl></section>`).join('')}${extras.length?`<section><h3>Прочие сведения источника</h3><dl class="contract-facts">${extras.map((f:any)=>`<div><dt>${esc(f.title)}</dt><dd>${f.value===null || f.value===''?'Пусто':esc(f.value)}</dd></div>`).join('')}</dl></section>`:''}</details>`;
 }
 
+function registryCardData(currentTab:string){
+  const titles:Record<string,string>={soft_history:'История звонков',historical_visit_comment:'История выездов',soft_comm_date:'Дата звонка',soft_call_status:'Результат звонка',soft_comment:'Комментарий к звонку',visit_date:'Дата выезда',call_status:'Результат выезда',visit_comment:'Комментарий к выезду',call_comment:'Комментарий',overall_result:'Общий результат',soft_next_call_date:'Дата следующего звонка',meeting_date:'Дата встречи / перезвона',promise_date:'Дата обещания',forecast_sum:'Сумма прогноза',forecast:'Прогноз'};
+  const keys:Record<string,string[]>={
+    history:['soft_history','historical_visit_comment','soft_comm_date','soft_call_status','soft_comment','visit_date','call_status','visit_comment','call_comment','overall_result'],
+    tasks:['soft_next_call_date','meeting_date'],
+    promises:['promise_date','forecast_sum','forecast'],
+  };
+  const available=keys[currentTab];if(!available)return '';
+  const records=card.contracts.map((contract:any)=>{
+    const values=available.filter(key=>contract.fields[key]!==undefined&&contract.fields[key]!==null&&contract.fields[key]!=='');
+    if(!values.length)return '';
+    return `<article class="record" data-registry-contract="${esc(contract.contract_uuid)}"><h3>${esc(contract.external_id)} · ${esc(contract.fields.partner||contract.creditor_id)}</h3><dl class="contract-facts">${values.map(key=>{
+      const field=context.fields.find((f:any)=>f.key===key),value=contract.fields[key];
+      const formatted=field?.type==='date'||key.endsWith('_date')?calendarDate(value):field?.type==='money'||key==='forecast_sum'?amount(value,contract.currency||'Валюта не задана'):esc(value);
+      return `<div data-registry-field="${key}"><dt>${esc(field?.title||titles[key])}</dt><dd>${formatted}</dd></div>`;
+    }).join('')}</dl></article>`;
+  }).join('');
+  return records?`<section class="card-registry-data"><h2>${currentTab==='tasks'?'Запланировано в реестре':'Данные реестра'}</h2>${records}</section>`:'';
+}
+
 async function activeTimePage() {
   const activity=(await crm.state()).activity;
   const today=new Date().toLocaleDateString('en-CA',{timeZone:context.timezone || 'Europe/Samara'});
@@ -623,6 +644,7 @@ async function openCard(person: string) {
   }
 }
 async function renderCard() {
+  const showCardScript=tab==='overview'&&!!cardScript?.script;
   $("title").textContent = card.person.name || "Карточка клиента";
   const actions = [
     "call",
@@ -646,7 +668,7 @@ async function renderCard() {
     ["documents", "Документы"],
   ];
   $("view").innerHTML =
-    `<div class="toolbar">${button("back", cardOrigin==='tasks'?'← Задачи':"← Портфель")}${button('card-refresh','Обновить карточку')}${actions.map((k) => `<button data-action="${k}"${k === "call" ? ' class="primary"' : ""}>${labels[k]}</button>`).join("")}</div><section id="card-saves" aria-label="Отправка результатов"></section><div class="tabs">${tabs.map(([id, title]) => `<button data-tab="${id}" class="${tab === id ? "active" : ""}">${title}</button>`).join("")}</div><div class="card-workspace${cardScript?.script ? ' with-script' : ''}"><div id="card-content"></div>${cardScript?.script ? `<aside class="card-script-watermark" aria-label="Скрипт разговора"><h2>${esc(cardScript.script.title)}</h2>${cardScript.script.steps.map((step: any) => `<section><h3>${esc(step.title)}</h3><p>${esc(step.text)}</p></section>`).join('')}<small>Версия ${esc(cardScript.published_revision)}</small></aside>` : ''}</div>`;
+    `<div class="toolbar">${button("back", cardOrigin==='tasks'?'← Задачи':"← Портфель")}${button('card-refresh','Обновить карточку')}${actions.map((k) => `<button data-action="${k}"${k === "call" ? ' class="primary"' : ""}>${labels[k]}</button>`).join("")}</div><section id="card-saves" aria-label="Отправка результатов"></section><div class="tabs">${tabs.map(([id, title]) => `<button data-tab="${id}" class="${tab === id ? "active" : ""}">${title}</button>`).join("")}</div><div class="card-workspace${showCardScript ? ' with-script' : ''}"><div id="card-content"></div>${showCardScript ? `<aside class="card-script-watermark" aria-label="Скрипт разговора"><h2>${esc(cardScript.script.title)}</h2>${cardScript.script.steps.map((step: any) => `<section><h3>${esc(step.title)}</h3><p>${esc(step.text)}</p></section>`).join('')}<small>Версия ${esc(cardScript.published_revision)}</small></aside>` : ''}</div>`;
   $('back').textContent=cardOrigin==='tasks'?'← Задачи':cardOrigin==='registry'?'← Реестр':'← Портфель';
   bind("back", () => go(cardOrigin));
   if(crm.platform!=='mobile'){
@@ -670,7 +692,7 @@ async function renderCard() {
     (b) =>
       (b.onclick = () => {
         tab = b.dataset.tab!;
-        void renderCard();
+        void renderCard().then(()=>document.querySelector<HTMLElement>(`#view .tabs [data-tab="${tab}"]`)?.scrollIntoView({block:'nearest',inline:'nearest'}));
       }),
   );
   document
@@ -689,7 +711,8 @@ async function renderCard() {
     if (tab === "overview")
       host.innerHTML += `<div class="summary"><div class="metric">Договоры<strong>${card.contracts.length}</strong></div><div class="metric">Открытые задачи<strong>${card.entities.filter((e: any) => e.kind === "task" && e.status === "open").length}</strong></div><div class="metric">Заявленные оплаты<strong>${card.entities.filter((e: any) => e.kind === "reported_payment").length}</strong><small>Подтверждение поступления хранится отдельно</small></div></div>`;
   } else if (tab === "history") {
-    host.innerHTML = card.history.length
+    const registry=registryCardData(tab);
+    host.innerHTML = registry+(card.history.length
       ? card.history
           .map(
             (e: any) =>
@@ -708,7 +731,7 @@ async function renderCard() {
               )}</p>${e.payload.script_ref ? `<p class="muted">Подсказка: версия ${esc(e.payload.script_ref.published_revision)}</p>` : ""}${e.reason ? `<p>Причина: ${esc(e.reason)}</p>` : ""}${["call", "visit", "note", "contact"].includes(e.kind) && can("correct") && e.can_correct !== false ? `<button data-correct="${e.event_id}">Исправить</button>` : ""}</article>`,
           )
           .join("")
-      : '<div class="empty">История пока пуста</div>';
+      : `<div class="empty">${registry?'Отдельных событий CRM пока нет':'Истории по этому клиенту пока нет'}</div>`);
     document.querySelectorAll<HTMLButtonElement>("[data-correct]").forEach(
       (b) =>
         (b.onclick = () =>
@@ -727,15 +750,17 @@ async function renderCard() {
       } as any
     )[tab];
     const rows = card.entities.filter((e: any) => kinds.includes(e.kind));
-    host.innerHTML = rows.length
+    const registry=registryCardData(tab);
+    const empty=({tasks:'Задач по этому клиенту пока нет',promises:'Обещаний по этому клиенту пока нет',payments:'Оплат по этому клиенту пока нет',documents:'Документов по этому клиенту пока нет'} as Record<string,string>)[tab];
+    host.innerHTML = (rows.length
       ? table(
           ["Вид", "Содержание", "Срок / сумма", "Состояние"],
           rows.map(
             (e: any) =>
-              `<tr><td>${esc(labels[e.kind])}</td><td>${esc(e.data.title || e.data.filename || e.data.text || "—")}${e.assignee ? `<br><span class="muted">${esc(e.assignee)}</span>` : ''}</td><td>${e.data.amount != null ? amount(e.data.amount, e.data.currency) : date(e.data.due_at)}</td><td>${e.status === "done" ? "Завершено" : e.kind === 'task' ? 'В работе' : "Зафиксировано"}${e.kind === "document" ? `<br><button class="link" data-document="${e.entity_id}">Сохранить документ</button>` : ""}${e.kind === "task" && e.status === "open" && e.can_complete !== false ? `<br><button class="link" data-complete="${e.entity_id}">Выполнено</button>` : ""}</td></tr>`,
+              `<tr><td>${esc(labels[e.kind])}</td><td>${esc(e.data.title || e.data.filename || e.data.text || "—")}${e.assignee ? `<br><span class="muted">${esc(e.assignee)}</span>` : ''}</td><td>${e.data.amount != null ? amount(e.data.amount, e.data.currency)+(e.data.due_at?'<br>'+date(e.data.due_at):'') : date(e.data.due_at)}</td><td>${e.status === "done" ? "Завершено" : e.kind === 'task' ? 'В работе' : "Зафиксировано"}${e.kind === "document" ? `<br><button class="link" data-document="${e.entity_id}">Сохранить документ</button>` : ""}${e.kind === "task" && e.status === "open" && e.can_complete !== false ? `<br><button class="link" data-complete="${e.entity_id}">Выполнено</button>` : ""}</td></tr>`,
           ),
         )
-      : '<div class="empty">Записей пока нет</div>';
+      : `<div class="empty">${registry?(tab==='tasks'?'Отдельных задач CRM пока нет':'Отдельных обещаний CRM пока нет'):empty}</div>`)+registry;
     document.querySelectorAll<HTMLButtonElement>("[data-document]").forEach(
       (b) =>
         (b.onclick = async () => {

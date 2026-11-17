@@ -2,6 +2,7 @@
 .mobile-crm{--mobile-bar:68px;--sans:'Golos Text','Segoe UI',sans-serif;font-size:15px}
 .mobile-crm .window-controls{display:none}.mobile-crm input,.mobile-crm select,.mobile-crm textarea{font-size:16px}.mobile-crm button{touch-action:manipulation;min-height:44px}
 .mobile-crm [hidden]{display:none!important}
+.card-registry-data dd{white-space:pre-wrap;overflow-wrap:anywhere}
 .mobile-crm #navigation svg,.mobile-menu svg{width:23px;height:23px;fill:none;stroke:currentColor;stroke-width:1.55;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
 .mobile-crm #navigation button{display:flex;align-items:center;gap:12px}.mobile-crm #mobile-more{display:none}
 .mobile-menu{padding:24px;max-width:440px}.mobile-menu h2{font:32px var(--hand);margin:0 0 20px}.mobile-menu>button{display:flex;align-items:center;gap:16px;width:100%;border:0;border-bottom:1px solid var(--line);padding:16px 0;text-align:left}.mobile-menu>button span:last-child{margin-left:auto;color:var(--accent)}.mobile-menu .mobile-menu-close{justify-content:center;border:1px solid var(--line);margin-top:24px}
