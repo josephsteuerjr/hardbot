@@ -11,6 +11,7 @@ export interface ApiResult<T = any> {
 }
 
 export interface Shell {
+  platform?: string;
   mode: "manager" | "analyst" | "field";
   productId?: "hard" | "soft" | "manager" | "analyst";
   fixedProduct?: boolean;

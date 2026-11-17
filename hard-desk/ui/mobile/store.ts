@@ -30,7 +30,18 @@ export async function get(owner:string,name:string){
   if(await result(db.transaction('vault').objectStore('vault').get(owner+'\n'+name)))return update(owner,name,value=>value);
   return null;
 }
-export async function update(owner:string,name:string,change:(value:any)=>any){
+const writes=new Set<Promise<any>>();
+let failedWrite=false;
+export async function settled(){
+  while(writes.size)await Promise.all([...writes]);
+  if(failedWrite)throw Error("Сохранение не подтверждено. Оставьте приложение открытым и повторите сохранение.");
+}
+export function update(owner:string,name:string,change:(value:any)=>any){
+  const work=updateRecord(owner,name,change);writes.add(work);
+  void work.then(()=>writes.delete(work),()=>{writes.delete(work);failedWrite=true;});
+  return work;
+}
+async function updateRecord(owner:string,name:string,change:(value:any)=>any){
   const id=await address(owner,name),legacy=owner+'\n'+name,db=await database();
   for(let attempt=0;attempt<20;attempt++){
     const before=await result(db.transaction('vault').objectStore('vault').get(id)) as RecordValue|undefined;

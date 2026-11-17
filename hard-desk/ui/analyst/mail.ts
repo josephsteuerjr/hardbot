@@ -19,6 +19,10 @@ export const mail: Section = {
   icon: "mail",
   kicker: "книги Excel почтой — из вашего Outlook, по расписанию",
   async render(root) {
+    if ((await hard.state()).platform === "mobile") {
+      root.innerHTML = `<h2>Рассылка через Outlook</h2><p>Настройте и отправьте письма в Windows-программе «Аналитик» на компьютере с Outlook.</p><p>На телефоне готовые отчёты доступны в «Показателях», новые книги — в «Обмен → Книги CRM».</p>`;
+      return;
+    }
     const s = await local("/mail/state");
     const cfg = s.config;
     const auto = await hard.autostart().catch(() => false);

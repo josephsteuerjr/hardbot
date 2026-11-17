@@ -284,6 +284,10 @@ function conflictTable(list: any[], decide: boolean, labels: Record<string, stri
 }
 
 async function enrichTab(el: HTMLElement) {
+  if ((await hard.state()).platform === "mobile") {
+    el.innerHTML = `<h2>Обогащение исходных книг</h2><p>Откройте «Обмен → Импорт и обогащение» в Windows-программе «Аналитик». Изменение исходных XLSB/XLSM выполняется на компьютере с Excel.</p><p>На телефоне можно импортировать реестр и скачать новые XLSX в «Книгах CRM».</p>`;
+    return;
+  }
   st.enr ||= await local("/enr/state");
   if (!st.since && !st.until) { st.since = st.enr.since || ""; st.until = st.enr.until || ""; }
   const e = st.enr;
