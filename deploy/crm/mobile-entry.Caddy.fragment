@@ -1,0 +1,12 @@
+# Add inside the CRM site at cutover, with /mobile/ already healthy.
+# The v112 root service worker falls back to its cached page on a redirect.
+@crm_legacy_shortcut path /
+handle @crm_legacy_shortcut {
+    header {
+        Content-Type "text/html; charset=utf-8"
+        Cache-Control "no-store"
+        Referrer-Policy "no-referrer"
+        Content-Security-Policy "default-src 'none'; script-src 'sha256-ps3E8BPpEdNpSs0eOZkq0BlwKQeKOJ8gYT5aGjZItGw='; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org"
+    }
+    respond `<!doctype html><html lang="ru"><meta charset="utf-8"><title>CRM СНГ</title><p role="status">Подключитесь к сети, чтобы завершить обновление.</p><script>if(location.pathname!=="/mobile/"){location.replace("/mobile/")}else{addEventListener("online",()=>location.reload(),{once:true})}</script></html>` 200
+}
