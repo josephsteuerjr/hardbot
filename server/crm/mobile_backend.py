@@ -165,11 +165,14 @@ class SharedBackend:
 
 class WindowsExecutor:
     """Actual Excel and the existing durable administrator engine on Windows."""
-    def __init__(self,home,primary):
-        if os.name!='nt':raise RuntimeError('The native Excel executor requires Windows')
+    def __init__(self,home,primary,*,server_key_file=None):
+        if os.name!='nt' and not server_key_file:raise RuntimeError('The native Excel executor requires Windows')
         source=str(Path(__file__).resolve().parents[2])
         if source not in sys.path:sys.path.insert(0,source)
         self.home=Path(home).resolve();self.primary=primary;self.children={};self.locks={};self.excel_lock=asyncio.Lock()
+        from . import executor_state
+        self.key_file=server_key_file
+        self.state=executor_state.ServerStore(server_key_file) if server_key_file else executor_state
     async def start(self):
         self.home.mkdir(parents=True,exist_ok=True);self.client=aiohttp.ClientSession(trust_env=False,timeout=aiohttp.ClientTimeout(total=300))
         self.supervisor=asyncio.create_task(self.recover(),name='crm-windows-executor')
@@ -181,11 +184,10 @@ class WindowsExecutor:
         # endpoint and credentials are DPAPI-sealed; a new BFF reattaches.
 
     async def recover(self):
-        from . import executor_state
         while True:
             for path in self.home.glob('*/authority.bin'):
                 try:
-                    session=executor_state.read(path)
+                    session=self.state.read(path)
                     async with self.locks.setdefault(session['owner'],asyncio.Lock()):await self.ensure(session)
                 except asyncio.CancelledError:raise
                 except Exception:
@@ -195,7 +197,6 @@ class WindowsExecutor:
             await asyncio.sleep(10)
 
     async def ensure(self,session):
-        from . import executor_state
         owner=session['owner'];folder=self.home/hashlib.sha256(owner.encode()).hexdigest();folder.mkdir(parents=True,exist_ok=True)
         async with self.client.get(self.primary+'/api/crm-identity',headers={'X-Pult-Token':session['credential']},
                 allow_redirects=False,timeout=aiohttp.ClientTimeout(total=10)) as response:
@@ -203,7 +204,7 @@ class WindowsExecutor:
             if response.status!=200 or value.get('subject',{}).get('actor_uid')!=session['context']['actor_uid'] or value.get('me',{}).get('role')!='analyst':
                 raise CRMError('Доступ Аналитика отозван. Задания сохранены.','authority_denied',403)
         binding=hashlib.sha256(session['credential'].encode()).hexdigest()
-        lease=executor_state.read(folder/'runtime.bin');live=False
+        lease=self.state.read(folder/'runtime.bin');live=False
         if lease:
             if not re.fullmatch(r'http://127\.0\.0\.1:\d{1,5}',lease.get('url','')):raise CRMError('Повреждён адрес исполнителя.','executor_state',503)
             try:
@@ -216,16 +217,16 @@ class WindowsExecutor:
                 live=False
         if not live:
             env=dict(os.environ,PYTHONIOENCODING='utf-8',HARD_PULT_SETTINGS=str(folder/'settings.json'),HARD_PULT_PROTECT_TOKENS='1',HARD_CLIENT_VERSION='3.3.0',HARD_CLIENT_PRODUCT='analyst')
+            if self.key_file:env.update(HARD_CRM_RUNTIME_KEY_FILE=str(self.key_file),HARD_CRM_SERVER_XLSX='1')
             child,url,secret=await start_runtime(folder,['--crm-analyst'],env,dict(actor=session['context']['actor_uid'],url=self.primary,token='account:'+session['credential']),'HARD-BACKEND')
             self.children[owner]=child
             lease=dict(url=url,secret=secret,binding=binding,pid=child.pid)
-            executor_state.write(folder/'runtime.bin',lease)
-        executor_state.write(folder/'authority.bin',{k:session[k] for k in ('owner','role','credential','context')})
+            self.state.write(folder/'runtime.bin',lease)
+        self.state.write(folder/'authority.bin',{k:session[k] for k in ('owner','role','credential','context')})
         return lease
 
     async def stop(self,owner):
-        from . import executor_state
-        path=self.home/hashlib.sha256(owner.encode()).hexdigest()/'runtime.bin';lease=executor_state.read(path)
+        path=self.home/hashlib.sha256(owner.encode()).hexdigest()/'runtime.bin';lease=self.state.read(path)
         if not lease:return
         async with self.client.post(lease['url']+'/runtime/stop',headers={'X-Local-Secret':lease['secret']},json={}) as response:
             result=await response.json()
@@ -262,3 +263,26 @@ class WindowsExecutor:
             result=await response.json()
             if path=='/state' and isinstance(result.get('data'),dict):result['data'].pop('settings_path',None)
             return result
+
+
+class ServerExecutor(WindowsExecutor):
+    """Headless Python and XLSX on the same Linux server as the mobile BFF."""
+    def __init__(self,home,primary,key_file):super().__init__(home,primary,server_key_file=key_file)
+    async def admin(self,session,path,body):
+        if session['role']!='analyst':raise CRMError('Требуется вход Аналитика.','forbidden',403)
+        validate_admin(path,body)
+        if path in {'/enr/confirm','/enr/apply','/enr/retry','/enr/replay','/enr/reconcile-apply','/mail/send'} or path=='/mail/set' and body.get('enabled'):
+            raise CRMError('Правка исходных книг и отправка через Outlook выполняются в Windows-программе. Серверные отчёты и новые выгрузки доступны здесь.','native_operation_required',409)
+        return await super().admin(session,path,body)
+    async def file_action(self,session,action,body):
+        if session['role'] not in {'analyst','manager'} and not (action in {'report-write','report-resume'} and body.get('kind')=='shifts'):
+            raise CRMError('Нет права на работу с книгами.','forbidden',403)
+        def execute():
+            from pult.core import portable_xlsx,crm_reports,crm_workbook
+            if action=='report-write':return portable_xlsx.write_report(body['report'],body['path'],body['kind'])
+            if action=='report-resume':crm_reports.verify(body['path'],body['report'],body['kind']);return crm_reports.receipt(Path(body['path']))
+            if action=='workbook-read':return portable_xlsx.read_workbook(body['path'])
+            if action=='workbook-write':return portable_xlsx.write_workbook(body['snapshot'],body['path'],body.get('template'))
+            if action=='workbook-resume':return crm_workbook.resume(body['snapshot'],body['path'])
+            raise CRMError('Неизвестная операция с книгой.')
+        async with self.excel_lock:return await asyncio.to_thread(execute)

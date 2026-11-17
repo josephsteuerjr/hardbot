@@ -10,6 +10,9 @@ def _sha(path):
     with path.open('rb') as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
 
 def _write(path,title,headers,rows,widths,*,groups=None,sources=None,date_columns=None,numeric_columns=None):
+    if os.environ.get('HARD_CRM_SERVER_XLSX')=='1':
+        from .portable_xlsx import export_table
+        return export_table(path,title,headers,rows,widths,groups=groups,sources=sources,date_columns=date_columns,numeric_columns=numeric_columns)
     from python_calamine import CalamineWorkbook
     target=Path(path).resolve();before=_sha(target) if target.exists() else None
     temporary=target.with_name(target.stem+'.'+uuid.uuid4().hex+'.xlsx')

@@ -4,12 +4,5 @@ handle_path /crm-pilot/* {
 }
 redir /mobile /mobile/ 308
 handle /mobile/* {
-    reverse_proxy https://{$CRM_WINDOWS_UPSTREAM} {
-        transport http {
-            tls_server_name {$CRM_WINDOWS_TLS_NAME}
-            tls_trust_pool file {
-                pem_file {$CRM_WINDOWS_CA_FILE}
-            }
-        }
-    }
+    reverse_proxy crm-mobile-api:8081
 }

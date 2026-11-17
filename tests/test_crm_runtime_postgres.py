@@ -49,7 +49,7 @@ def test_cutover_projection_and_runtime_under_restricted_application(pg_world,tm
     with sqlite3.connect(path) as p:assert p.execute('SELECT responsible_soft FROM clients ORDER BY contract_id').fetchall()==[('New employee',)]*2
 
 
-def test_import_distribution_work_mirror_and_report_form_one_pipeline(pg_world,monkeypatch,record_property):
+def test_import_distribution_work_mirror_and_report_form_one_pipeline(pg_world,monkeypatch,record_property,tmp_path):
     from dataclasses import replace
     from crm import legacy_worker,store,manager_reports
     from crm.contract import canonical
@@ -79,3 +79,9 @@ def test_import_distribution_work_mirror_and_report_form_one_pipeline(pg_world,m
     result=manager_reports.read(manager)['report']
     assert result['sheets']
     record_property('crm_pipeline_report',canonical(result))
+    if os.environ.get('HARD_CRM_TEST_PORTABLE_XLSX')=='1':
+        from pult.core.portable_xlsx import write_report
+        import uuid
+        path=Path(os.environ.get('HARD_CRM_TEST_ARTIFACT_DIR',str(tmp_path)))/('crm-linux-report-'+uuid.uuid4().hex+'.xlsx')
+        saved=write_report(result,path,'three-hour');assert saved['verified']
+        record_property('crm_linux_report',canonical(saved))

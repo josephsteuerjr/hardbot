@@ -344,73 +344,9 @@ def _template(snapshot, template, temp):
 
 
 def read(path):
-    path = Path(path).resolve()
-    before = sha(path)
-    if path.suffix.lower() not in {".xlsx", ".xlsm", ".xlsb"}:
-        raise ValueError("Поддерживаются XLSX, XLSM и XLSB.")
-    with excel() as application:
-        book = application.Workbooks.Open(str(path), UpdateLinks=0, ReadOnly=True)
-        try:
-            sheet = book.Worksheets(SHEET)
-            try:
-                meta = book.Worksheets(META)
-            except Exception as exc:
-                raise ValueError(
-                    "Нет манифеста CRM и исходной версии. Сначала создайте версионированную копию реестра."
-                ) from exc
-            raw = "".join(
-                str(meta.Cells(r, 1).Value2 or "")
-                for r in range(1, meta.UsedRange.Rows.Count + 1)
-            )
-            metadata = json.loads(raw)
-            if metadata["manifest"]["schema_version"] != 1:
-                raise ValueError("Неизвестная версия CRM.")
-            columns = metadata["columns"]
-            last = max(3, int(sheet.UsedRange.Row + sheet.UsedRange.Rows.Count - 1))
-            last_col = max(columns.values())
-            if last * last_col > 5_000_000:
-                raise ValueError("Область книги слишком велика.")
-            matrix = sheet.Range(sheet.Cells(1, 1), sheet.Cells(last, last_col)).Value2
-            for col, title in metadata["headers"].items():
-                if matrix[1][int(col) - 1] != title:
-                    raise ValueError(
-                        "Изменён порядок или заголовок колонок. Нужна новая сверка сопоставления."
-                    )
-            rows = []
-            seen = set()
-            for r in range(4, last + 1):
-                cid = matrix[r - 1][columns["_crm_contract_uuid"] - 1]
-                if not cid:
-                    continue  # Retained unrelated template rows are outside this export.
-                if cid in seen:
-                    raise ValueError("В книге повторён внутренний ID договора.")
-                seen.add(cid)
-                values = {}
-                clear = []
-                for key, col in columns.items():
-                    if key in IDENTITY:
-                        continue
-                    value = matrix[r - 1][col - 1]
-                    if value == CLEAR:
-                        value = None
-                        clear.append(key)
-                    elif isinstance(value, (int, float)):
-                        value = format(value, ".15g")
-                    values[key] = value
-                rows.append(dict(contract_uuid=cid, values=values, clear=clear))
-        finally:
-            book.Close(SaveChanges=False)
-            book = sheet = meta = application = None
-    if sha(path) != before:
-        raise ValueError("Файл изменился во время чтения.")
-    manifest = metadata["manifest"]
-    return dict(
-        export_id=manifest["export_id"],
-        manifest_hash=manifest["manifest_hash"],
-        schema_version=1,
-        file_sha256=before,
-        rows=rows,
-    )
+    """Read any supported Excel container with calamine, without starting Office."""
+    from .portable_xlsx import read_workbook
+    return read_workbook(path)
 
 
 def resume(snapshot, path):

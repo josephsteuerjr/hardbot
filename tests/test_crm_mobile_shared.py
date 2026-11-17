@@ -3,12 +3,12 @@
 Only transport origins are redirected to ephemeral loopback test servers.
 No production connection or weakening of the pinned-origin constructors.
 """
-import asyncio,os,time
+import asyncio,os,time,uuid
 import aiohttp
 from aiohttp.test_utils import TestClient,TestServer
 import accounts,db
 import web as primary
-from crm.mobile_backend import SharedBackend
+from crm.mobile_backend import SharedBackend,ServerExecutor
 from crm.mobile_server import create_app
 from crm.shared_auth import Authority,Sessions
 from crm.shared_server import create_app as shared_app
@@ -33,7 +33,9 @@ def test_pending_password_own_phone_approval_refresh_and_revocation(crm_world,tm
                         elif url.startswith(self.primary+'/'):url=str(authority_server.make_url(url[len(self.primary):]))
                         else:raise AssertionError('Unexpected outbound origin')
                         return await super().json(url,*args,**kwargs)
-                backend=Loopback('https://hard.rimborso.ru','https://hard.rimborso.ru/crm-shared-pilot')
+                key=tmp_path/'runtime.key';key.write_bytes(os.urandom(32))
+                executor=ServerExecutor(tmp_path/'executor','https://hard.rimborso.ru',key)
+                backend=Loopback('https://hard.rimborso.ru','https://hard.rimborso.ru/crm-shared-pilot',executor)
                 app=create_app(backend,tmp_path/'mobile',key=os.urandom(32))
                 async with TestClient(TestServer(app)) as client:
                     async def boot():
@@ -52,6 +54,14 @@ def test_pending_password_own_phone_approval_refresh_and_revocation(crm_world,tm
                     status,b=await boot();assert status==200 and b['pending'] is None
                     assert b['session']['context']['role']=='employee'
                     assert b['session']['context']['employee_uuid']==crm_world['employee']
+                    assert (await (await client.get('/mobile/health')).json())['executor']=='python-xlsxwriter'
+                    headers={'X-CRM-CSRF':b['csrf']}
+                    download=dict(action='shift-report',operation_id=str(uuid.uuid4()),input=dict(report=dict(since='2026-11-01',until='2026-11-17')))
+                    response=await client.post('/mobile/workbook',headers=headers,json=download)
+                    assert response.status==200,await response.text() if response.status!=200 else ''
+                    saved=await response.read();assert saved.startswith(b'PK')
+                    response=await client.post('/mobile/workbook',headers=headers,json=download)
+                    assert response.status==200 and await response.read()==saved
                     store=app['mobile_sessions'];sid=client.session.cookie_jar.filter_cookies(client.make_url('/mobile/boot'))['crm_mobile_v1'].value
                     original=store.read(sid)['crm_session'];now[0]+=1801
                     assert (await boot())[0]==200

@@ -1,2 +1,3 @@
 -r requirements.txt
 psycopg[binary]==3.3.7
+python-calamine==0.9.0

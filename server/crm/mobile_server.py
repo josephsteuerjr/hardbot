@@ -7,7 +7,7 @@ import aiohttp
 from aiohttp import web
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from .contract import CRMError
-from .mobile_backend import SyntheticBackend, SharedBackend, WindowsExecutor
+from .mobile_backend import SyntheticBackend, SharedBackend, WindowsExecutor, ServerExecutor
 
 PREFIX='/mobile/'
 COOKIE='crm_mobile_v1'
@@ -339,7 +339,7 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         yield
         await backend.close()
     app.cleanup_ctx.append(lifecycle)
-    async def health(request):return web.json_response(dict(ok=True,service='crm-mobile',executor='windows' if isinstance(getattr(backend,'executor',None),WindowsExecutor) else 'synthetic' if backend.synthetic else 'unconfigured'))
+    async def health(request):return web.json_response(dict(ok=True,service='crm-mobile',executor='python-xlsxwriter' if isinstance(getattr(backend,'executor',None),ServerExecutor) else 'windows' if isinstance(getattr(backend,'executor',None),WindowsExecutor) else 'synthetic' if backend.synthetic else 'unconfigured'))
     app.router.add_get(prefix+'health',health)
     app.router.add_get(prefix+'boot',boot);app.router.add_post(prefix+'login',login);app.router.add_post(prefix+'logout',logout)
     app.router.add_post(prefix+'password',password)
@@ -354,8 +354,10 @@ if __name__=='__main__':
     parser.add_argument('--primary');parser.add_argument('--crm');parser.add_argument('--session-key-file');parser.add_argument('--native-executor',action='store_true')
     parser.add_argument('--source-root',action='append',default=[]);parser.add_argument('--prefix',default=PREFIX);parser.add_argument('--public-origin');parser.add_argument('--assets')
     parser.add_argument('--host',default='127.0.0.1');parser.add_argument('--tls-cert');parser.add_argument('--tls-key')
+    parser.add_argument('--internal-proxy',action='store_true',help='Private Docker network behind the pinned HTTPS reverse proxy; no published host port')
     args=parser.parse_args();home=Path(args.demo_home or args.home).resolve();key=None
-    if bool(args.tls_cert)!=bool(args.tls_key) or (args.host not in {'127.0.0.1','::1','localhost'} and not args.tls_cert):parser.error('A non-loopback listener requires its own TLS certificate and key')
+    if args.internal_proxy and (args.demo_home or args.public_origin!='https://hard.rimborso.ru'):parser.error('Internal proxy mode requires the first-party shared service')
+    if bool(args.tls_cert)!=bool(args.tls_key) or (args.host not in {'127.0.0.1','::1','localhost'} and not args.tls_cert and not args.internal_proxy):parser.error('A non-loopback listener requires its own TLS certificate and key')
     tls=None
     if args.tls_cert:
         tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);tls.minimum_version=ssl.TLSVersion.TLSv1_2
@@ -372,7 +374,7 @@ if __name__=='__main__':
         if not args.primary or not args.crm or not args.session_key_file or args.public_origin!='https://hard.rimborso.ru':parser.error('Shared mode requires pinned services, explicit key and first-party public origin')
         key=Path(args.session_key_file).read_bytes()
         if len(key)!=32:parser.error('The mobile session key must contain 32 bytes')
-        executor=WindowsExecutor(home/'executor',args.primary) if args.native_executor else None
+        executor=WindowsExecutor(home/'executor',args.primary) if args.native_executor else ServerExecutor(home/'executor',args.primary,args.session_key_file)
         backend=SharedBackend(args.primary,args.crm,executor)
     async def run():
         app=create_app(backend,home,key=key,public_origin=args.public_origin,source_roots=args.source_root,prefix=args.prefix);runner=web.AppRunner(app,access_log=None);await runner.setup()
