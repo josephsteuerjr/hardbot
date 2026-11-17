@@ -99,6 +99,9 @@ for (const id of selectedProducts) {
   if(includesBackend(id)){
     const payload=join(unpacked,'resources/backend/_internal/project');
     if(!existsSync(payload)) throw new Error('Missing analyst source payload');
+    const exchangeSchema=join(unpacked,'resources/backend/_internal/data_exchange_contract.json');
+    if(!existsSync(exchangeSchema)||sha(readFileSync(exchangeSchema))!==sha(readFileSync(join(here,'../server/data_exchange_contract.json'))))
+      throw new Error('Missing or stale frozen exchange schema: '+id);
     const manifestFile=join(unpacked,'resources/backend/SOURCE-MANIFEST.json');
     if(!existsSync(manifestFile) || JSON.stringify(JSON.parse(readFileSync(manifestFile,'utf8')))!==JSON.stringify(backendManifest))
       throw new Error('Missing or stale analyst source manifest');

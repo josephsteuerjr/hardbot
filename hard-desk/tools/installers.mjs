@@ -26,7 +26,7 @@ for (const id of (selected.length ? selected : stableProducts)) {
     config: { appId: p.appId+(qa?'_setupqa':''), productName: p.name, artifactName: `${id}-\${version}-setup.\${ext}`,
       extraMetadata: { name: `hard-${id}`, description: p.description },
       directories: { output: `${qa?'setup-qa':'installers'}/${id}`, buildResources: 'installer' },
-      files: ['out/**/*', 'package.json'], asar: true, compression: 'maximum',
+      files: ['out/**/*', 'package.json'], asar: true, compression: 'normal',
       electronVersion: JSON.parse(readFileSync(join(here, 'package.json'))).devDependencies.electron,
       electronDist: localElectron || undefined,
       extraResources: [{from:'installer/bin/process-check.exe',to:'process-check.exe'},...(includesBackend(id) ? [{ from: 'backend-dist/hard-backend', to: 'backend' }] : [])],
