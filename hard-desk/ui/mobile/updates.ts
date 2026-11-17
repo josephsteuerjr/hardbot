@@ -8,9 +8,9 @@ export function mobileUpdates(){
  banner.setAttribute('role','status');
  const text=document.createElement('span'),button=document.createElement('button');
  button.textContent='Обновить приложение';banner.append(text,button);document.body.append(banner);
- navigator.serviceWorker.addEventListener('controllerchange',()=>{if(applying)location.reload();});
+ navigator.serviceWorker.addEventListener('controllerchange',()=>{banner.hidden=true;if(applying)location.reload();});
  void navigator.serviceWorker.register('./sw.js',{scope:'./',updateViaCache:'none'}).then(registration=>{
-  const ready=()=>{if(registration.waiting&&navigator.serviceWorker.controller){banner.hidden=false;text.textContent='Доступно обновление.';}};
+  const ready=()=>{banner.hidden=!(registration.waiting&&navigator.serviceWorker.controller);if(!banner.hidden)text.textContent='Доступно обновление.';};
   ready();registration.addEventListener('updatefound',()=>{
    registration.installing?.addEventListener('statechange',ready);
   });

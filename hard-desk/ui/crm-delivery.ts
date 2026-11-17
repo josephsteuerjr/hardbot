@@ -37,6 +37,7 @@ export async function mountDeliveryForm(host: HTMLElement, initial: any[], api: 
   };
   const paint=()=>{
     const selected=chosen();
+    info.hidden=!selected;
     find<HTMLOutputElement>('#courier-name').textContent=selected?.client_name || selected?.fields?.client || '';
     const fields=selected?.fields || {};
     find<HTMLDataListElement>('#courier-addresses').innerHTML=Array.from(new Set([fields.address,fields.address_customer,fields.extra_address].filter(Boolean)))
