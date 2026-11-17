@@ -78,6 +78,7 @@ export async function installUpdate(canClose: () => Promise<boolean>, beforeInst
     if (hash.digest("base64") !== signed.sha512) throw new Error("Checksum mismatch");
     beforeInstall();
     updater.quitAndInstall(true, true);
+    if (updateState().phase === "error") return { ok: false, text: updateState().text };
     return { ok: true };
   } catch {
     // electron-updater reuses an in-memory download without hashing it again.

@@ -34,11 +34,6 @@ command.append(str(desk / 'tools/backend-entry.py'))
 subprocess.run(command, cwd=repo, check=True)
 if source_manifest(repo) != manifest:
     raise SystemExit('Backend sources changed during the build; rebuild before packaging.')
-distribution = desk / 'backend-dist/hard-backend'
-# The frozen top-level exchange_contract module reads the schema beside its
-# __file__ in _internal. Keep the original schema in the staged project as well.
-shutil.copy2(stage / 'server/data_exchange_contract.json',
-             distribution / '_internal/data_exchange_contract.json')
-(distribution / 'SOURCE-MANIFEST.json').write_text(
+(desk / 'backend-dist/hard-backend/SOURCE-MANIFEST.json').write_text(
     json.dumps(manifest, indent=2), encoding='utf-8')
 print('Analyst runtime built from tracked source only; no settings, registries, or databases included.')

@@ -107,6 +107,7 @@ function mountUpdates(api: NonNullable<API['update']>) {
     check.hidden=update.phase==='disabled'||ready;
     check.disabled=update.phase==='checking'||update.phase==='downloading';
     install.hidden=!ready;
+    if(!ready)install.disabled=false;
     dismiss.hidden=ready;
     panel.hidden=!detail&&!ready;
     panel.classList.toggle('ready',ready);
