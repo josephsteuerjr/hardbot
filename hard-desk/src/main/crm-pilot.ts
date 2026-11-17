@@ -21,31 +21,35 @@ import {ActiveTime} from './crm-active-time';
 import {showStartupRecovery} from './crm-startup-recovery';
 import {applyCrmWindowFrame} from './crm-window-frame';
 import {CrmLive} from './crm-live';
-import {PRODUCTS} from './product';
+import {FIXED_PRODUCT,PRODUCTS,STABLE_CRM} from './product';
 import {accountAction,accountState} from './crm-account';
+import {checkUpdates,installUpdate,startUpdates,updateState} from './updates';
 
 const isolatedProfile = !!process.env.HARD_USER_DATA;
+const product = STABLE_CRM ? FIXED_PRODUCT! : PRODUCTS.crm;
 let connectionNotice = "";
 const data =
   process.env.HARD_USER_DATA ||
   join(
     process.env.LOCALAPPDATA || app.getPath("appData"),
     "Hard",
-    PRODUCTS.crm.dataName,
+    product.dataName,
     "data",
   );
 mkdirSync(data, { recursive: true });
-app.setName(PRODUCTS.crm.name);
+app.setName(product.name);
 app.setPath("userData", data);
-app.setAppUserModelId(PRODUCTS.crm.appId);
-process.env.HARD_USER_DATA = data; // Separate installation identity; never inherit stable profile.
+app.setAppUserModelId(product.appId);
+// Stable Hard and Soft keep the same Windows device key they used before CRM.
+if(!STABLE_CRM)process.env.HARD_USER_DATA = data;
 protocol.registerSchemesAsPrivileged([
   {
     scheme: "hard",
     privileges: { standard: true, secure: true, supportFetchAPI: true },
   },
 ]);
-if (!app.requestSingleInstanceLock()) app.quit();
+const firstInstance=app.requestSingleInstanceLock();
+if(!firstInstance)app.quit();
 let win: BrowserWindow | null = null,
   backend: ChildProcessWithoutNullStreams | null = null,
   port = 0,
@@ -510,6 +514,7 @@ async function recoverExports() {
   }
 }
 
+let activeRequests = 0, installingUpdate = false;
 function safeHandler(name: string, fn: (...args: any[]) => any) {
   ipcMain.handle(name, async (event, ...args) => {
     if (
@@ -517,6 +522,10 @@ function safeHandler(name: string, fn: (...args: any[]) => any) {
       !event.senderFrame?.url.startsWith("hard://app/")
     )
       throw new Error("Недоверенное окно.");
+    const workingRequest = name !== 'crm:update';
+    if(workingRequest && installingUpdate)
+      return {ok:false,status:409,text:'Началась установка обновления.'};
+    if(workingRequest)activeRequests++;
     try {
       return await fn(...args);
     } catch (error) {
@@ -525,13 +534,14 @@ function safeHandler(name: string, fn: (...args: any[]) => any) {
         status: 0,
         text: String((error as Error).message || error),
       };
-    }
+    } finally { if(workingRequest)activeRequests--; }
   });
 }
 
 app
   .whenReady()
   .then(async () => {
+    if(!firstInstance)return;
     const ui = resolve(__dirname, "ui");
     protocol.handle("hard", (request) => {
       const url = new URL(request.url),
@@ -566,7 +576,7 @@ app
       if (!url.startsWith("hard://app/")) event.preventDefault();
     });
     safeHandler("crm:state", () => ({
-      product: PRODUCTS.crm.name,
+      product: product.name,
       ok: true,
       version: app.getVersion(),
       connection: {
@@ -587,6 +597,23 @@ app
       activity:{clock_quality:clock?'anchored':'unconfirmed',idle_threshold_seconds:120,last_confirmed_at:lastConfirmedAt},
     }));
     safeHandler('crm:ui-ready',()=>{rendererReady=true;diagnostic('renderer','renderer_ready',true);return {ok:true};});
+    safeHandler('crm:update',async(action:string)=>{
+      if(action==='state')return updateState();
+      if(action==='check')return checkUpdates();
+      if(action!=='install')throw Error('Неизвестное действие обновления.');
+      if(activeRequests||installingUpdate||exportRecovery)
+        return {ok:false,text:'Дождитесь завершения текущей операции и повторите.'};
+      installingUpdate=true;
+      try{
+        if(await analystRuntime.busy())
+          return {ok:false,text:'Дождитесь завершения операции Аналитика и повторите.'};
+        return await installUpdate(async()=>!exportRecovery,()=>activeTime.stop());
+      }finally{installingUpdate=false;}
+    });
+    if(STABLE_CRM&&!isolatedProfile)startUpdates(
+      update=>{if(win&&!win.isDestroyed())win.webContents.send('crm:update-state',update);},
+      ()=>diagnostic('update','update_check_failed',false)
+    );
     safeHandler('crm:admin',(action:string,args:any[],expected:string)=>analystRuntime.request(action,args,expected));
     safeHandler('crm:diagnostics',async(repair:boolean=false)=>{rendererReady=true;return diagnostics(repair===true);});
     safeHandler('crm:diagnostics-report',async()=>{

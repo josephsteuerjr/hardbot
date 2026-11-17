@@ -19,6 +19,12 @@ export class AnalystRuntime{
   private filesOwner='';
   constructor(private options:Options){app.once('will-quit',()=>this.stop());}
   stop(){this.child?.kill();this.child=null;this.port=0;this.secret='';this.authority='';this.starting=null;}
+  async busy():Promise<boolean>{
+    if(this.starting)return true;
+    if(!this.child)return false;
+    const status=await this.rpc('/busy',{});
+    return !status.ok||status.data?.busy!==false;
+  }
   private async start(subject:AnalystAuthority){
     const binding=subject.owner+'\n'+subject.fingerprint;
     if(this.child&&this.port&&this.authority===binding)return;

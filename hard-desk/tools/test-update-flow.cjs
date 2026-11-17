@@ -22,9 +22,10 @@ const results = [];
 app.whenReady().then(async () => {
   const server = http.createServer((req,res) => {
     const product = req.url.split('/')[1].split(/[.-]/)[0];
-    const version = mode === 'downgrade' ? '3.0.0' : '3.0.2';
+    const version = mode === 'downgrade' ? '3.0.0' : mode === 'current' ? '3.0.1' : '3.0.2';
     const file = `${product}-${version}-setup.exe`;
     if(req.url.split('?')[0] === `/${product}-signed.json`){
+      if(mode==='missing'){res.statusCode=404;res.end();return;}
       const payload = Buffer.from(JSON.stringify({product:mode==='wrong-product'?'other':product, version,file,sha512,size:bytes.length}));
       const signature = crypto.sign(null,payload,pair.privateKey);
       if(mode==='bad-signature')signature[0]^=1;
@@ -80,7 +81,11 @@ app.whenReady().then(async () => {
         assert.equal(downloads,before,'Rejected metadata must not download a package');
       }
       mode='downgrade';assert.equal((await flow.checkUpdates()).phase,'idle');assert.equal(downloads,before);
-      mode='valid';assert.equal((await flow.checkUpdates()).phase,'ready');assert.equal(downloads,before+1);
+      mode='missing';assert.equal((await flow.checkUpdates()).text,'Доступных обновлений нет.');
+      mode='current';assert.equal((await flow.checkUpdates()).text,'У вас установлена последняя версия приложения.');
+      assert.equal(downloads,before);
+      mode='valid';const ready=await flow.checkUpdates();
+      assert.equal(ready.phase,'ready');assert.match(ready.text,/Перезагрузите приложение/);assert.equal(downloads,before+1);
       let closeChecked=false,beforeInstall=false;
       assert.equal((await flow.installUpdate(async()=>{closeChecked=true;return false;},()=>{beforeInstall=true;})).ok,false);
       assert.equal(closeChecked,true);assert.equal(beforeInstall,false);assert.equal(flow.updateState().phase,'ready');

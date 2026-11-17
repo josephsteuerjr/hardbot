@@ -6,6 +6,7 @@ import {mountManagerReports} from './crm-manager-reports';
 import {mountManagerTeam} from './crm-manager-team';
 import {mountAnalyst} from './crm-analyst';
 import {decimalText} from './crm-format';
+import type {UpdateState} from '../src/main/updates';
 type API = {
   platform?:string;
   initialSection?():string;
@@ -15,6 +16,8 @@ type API = {
   renderConnection?(host:HTMLElement,refresh:()=>Promise<void>):Promise<void>;
   ready?():Promise<any>;
   state(): Promise<any>;
+  update?(action: 'state' | 'check' | 'install'): Promise<UpdateState | {ok:boolean;text?:string}>;
+  onUpdate?(callback:(state:UpdateState)=>void):()=>void;
   api(method: string, action: string, body?: any, query?: any): Promise<any>;
   command(body: any,expectedOwner?:string): Promise<any>;
   registryEdit(body:any, expectedOwner?:string): Promise<any>;
@@ -92,6 +95,49 @@ const notice = (text = "", tone: 'error' | 'status' = 'error') => {
 };
 
 function reportError(error:any){if(error?.name!=='AbortError')notice(error?.message||String(error));}
+
+function mountUpdates(api: NonNullable<API['update']>) {
+  const panel=$('crm-update'), status=$('crm-update-status');
+  const check=$<HTMLButtonElement>('crm-update-check');
+  const install=$<HTMLButtonElement>('crm-update-install');
+  const dismiss=$<HTMLButtonElement>('crm-update-dismiss');
+  let detail=false;
+  const render=(update:UpdateState)=>{
+    const ready=update.phase==='ready';
+    check.hidden=update.phase==='disabled'||ready;
+    check.disabled=update.phase==='checking'||update.phase==='downloading';
+    install.hidden=!ready;
+    dismiss.hidden=ready;
+    panel.hidden=!detail&&!ready;
+    panel.classList.toggle('ready',ready);
+    status.textContent=ready ? `Обновление ${update.version || ''} скачано.`.replace('  ',' ') :
+      update.text+(update.phase==='downloading'&&update.percent!==undefined ? ` · ${update.percent}%` : '');
+  };
+  const showError=(text:string)=>{panel.hidden=false;status.textContent=text;};
+  check.onclick=async()=>{
+    detail=true;
+    try{
+      const update=await api('check');
+      if('phase' in update)render(update);else showError(update.text||'Не удалось проверить обновления.');
+    }catch{showError('Не удалось проверить обновления.');}
+  };
+  dismiss.onclick=()=>{detail=false;panel.hidden=true;};
+  install.onclick=async()=>{
+    if(document.querySelector('dialog[open]')){
+      showError('Сохраните или закройте открытую форму перед перезагрузкой.');
+      return;
+    }
+    install.disabled=true;
+    try{
+      const result=await api('install');
+      if('ok' in result&&result.ok)return;
+      showError(result.text||'Не удалось начать установку.');
+    }catch{showError('Не удалось начать установку.');}
+    install.disabled=false;
+  };
+  crm.onUpdate?.(render);
+  void api('state').then(update=>{if('phase' in update)render(update);}).catch(()=>{});
+}
 
 function cardEntries(entries:any[]) {
   const ids=new Set(card?.contracts?.map((row:any)=>row.contract_uuid) || []);
@@ -1596,6 +1642,7 @@ crm.onNavigate?.(async route=>{
   await go(route.section);if(route.person)await openCard(route.person);
 });
 window.addEventListener('focus',()=>{if(activePerson)scheduleSync(true);});
+if(crm.update)mountUpdates(crm.update);
 void boot().catch((e) => {
   notice(e.message);
   $('title').textContent='Не удалось открыть CRM';

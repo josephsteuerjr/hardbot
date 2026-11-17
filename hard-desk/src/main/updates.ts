@@ -7,6 +7,7 @@ import publicKey from "./release-public-key.json";
 import { matchUpdate, verifyRelease, type SignedRelease } from "./update-policy";
 
 export interface UpdateState { phase: "disabled" | "idle" | "checking" | "downloading" | "ready" | "error"; version?: string; percent?: number; text: string }
+const currentVersion = "У вас установлена последняя версия приложения.";
 let state: UpdateState = { phase: "disabled", text: "Обновления доступны в установленной программе" };
 let updater: NsisUpdater | null = null;
 let signed: SignedRelease | null = null;
@@ -19,7 +20,7 @@ export function updateState(): UpdateState { return { ...state }; }
 
 export function startUpdates(onState: (s: UpdateState) => void, log: (s: string) => void): void {
   notify = onState;
-  if (!app.isPackaged || !PRODUCT_ID) return;
+  if (!app.isPackaged || !PRODUCT_ID || PRODUCT_ID === "crm") return;
   updater = new NsisUpdater({ provider: "generic", url: RELEASE_URL, channel: PRODUCT_ID, useMultipleRangeRequest: false });
   updater.autoDownload = false;
   updater.autoInstallOnAppQuit = false;
@@ -31,7 +32,7 @@ export function startUpdates(onState: (s: UpdateState) => void, log: (s: string)
   updater.on("download-progress", p => tell({ phase: "downloading", version: signed?.version, percent: Math.round(p.percent), text: "Загрузка обновления" }));
   updater.on("update-downloaded", e => {
     downloaded = e.downloadedFile;
-    tell({ phase: "ready", version: e.version, text: "Обновление загружено. Сохраните форму и нажмите «Перезагрузить для установки обновления»." });
+    tell({ phase: "ready", version: e.version, text: "Обновление скачано. Перезагрузите приложение, чтобы установить его." });
   });
   tell({ phase: "idle", text: "Обновления проверяются автоматически" });
   const check = () => void checkUpdates().catch(() => log("Обновление: проверка не удалась; текущая версия сохранена"));
@@ -45,14 +46,14 @@ export async function checkUpdates(): Promise<UpdateState> {
   try {
     tell({ phase: "checking", text: "Проверка новой версии" });
     const res = await net.fetch(RELEASE_URL + PRODUCT_ID + "-signed.json", { signal: AbortSignal.timeout(20000) });
-    if (res.status === 404) { tell({ phase: "idle", text: "Новых опубликованных версий пока нет" }); return updateState(); }
+    if (res.status === 404) { tell({ phase: "idle", text: "Доступных обновлений нет." }); return updateState(); }
     if (!res.ok) throw new Error("Release feed unavailable");
     signed = verifyRelease(await res.json(), publicKey.pem, PRODUCT_ID);
     const r = await updater.checkForUpdates();
     if (!r) throw new Error("Update metadata unavailable");
     matchUpdate(r.updateInfo, signed);
     // Сравнение версий остаётся у updater; signed metadata не разрешает откат.
-    if (!r.isUpdateAvailable) { tell({ phase: "idle", text: "Установлена актуальная версия" }); return updateState(); }
+    if (!r.isUpdateAvailable) { tell({ phase: "idle", text: currentVersion }); return updateState(); }
     tell({ phase: "downloading", version: signed.version, percent: 0, text: "Загрузка обновления" });
     await updater.downloadUpdate();
   } catch {

@@ -1,7 +1,14 @@
 import { contextBridge, ipcRenderer } from "electron";
+import type {UpdateState} from './main/updates';
 contextBridge.exposeInMainWorld("crm", {
   ready: () => ipcRenderer.invoke('crm:ui-ready'),
   state: () => ipcRenderer.invoke("crm:state"),
+  update: (action: 'state' | 'check' | 'install') => ipcRenderer.invoke('crm:update',action),
+  onUpdate: (callback: (update: UpdateState) => void) => {
+    const listener = (_: unknown, update: UpdateState) => callback(update);
+    ipcRenderer.on('crm:update-state',listener);
+    return () => ipcRenderer.removeListener('crm:update-state',listener);
+  },
   api: (method: string, action: string, body?: unknown, query?: unknown) =>
     ipcRenderer.invoke("crm:api", method, action, body, query),
   command: (body: unknown) => ipcRenderer.invoke("crm:command", body),

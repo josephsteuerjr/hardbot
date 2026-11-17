@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import yaml from 'js-yaml';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { products, releaseUrl } from './products.mjs';
+import { includesBackend, products, releaseUrl, stableProducts, usesCrm } from './products.mjs';
 import { auditRuntimeDependencies } from './runtime-dependencies.mjs';
 const here = join(dirname(fileURLToPath(import.meta.url)), '..');
 const qa = !!process.env.HARD_SETUP_QA_BUILD;
@@ -16,10 +16,10 @@ if (localElectron && readFileSync(join(localElectron, 'version'), 'utf8').trim()
 mkdirSync(join(here,'installer/bin'),{recursive:true});
 execFileSync(join(process.env.WINDIR,'Microsoft.NET/Framework64/v4.0.30319/csc.exe'),['/nologo','/target:winexe','/platform:x64','/reference:System.Web.Extensions.dll','/reference:System.Security.dll','/out:'+join(here,'installer/bin/process-check.exe'),join(here,'installer/process-check.cs')],{stdio:'inherit'});
 const selected = process.argv.slice(2);
-for (const id of (selected.length ? selected : Object.keys(products))) {
+for (const id of (selected.length ? selected : stableProducts)) {
   const p = products[id];
   if (!p) throw new Error('Unknown product: ' + id);
-  if (['analyst','crm'].includes(id) && !existsSync(join(here, 'backend-dist/hard-backend/hard-backend.exe')))
+  if (includesBackend(id) && !existsSync(join(here, 'backend-dist/hard-backend/hard-backend.exe')))
     throw new Error('Build the analyst backend first: npm run backend');
   execFileSync(process.execPath, [join(here, 'build.mjs')], { cwd: here, env: { ...process.env, HARD_PRODUCT: id }, stdio: 'inherit' });
   await build({ targets: Platform.WINDOWS.createTarget(['nsis'], Arch.x64), projectDir: here,
@@ -29,7 +29,7 @@ for (const id of (selected.length ? selected : Object.keys(products))) {
       files: ['out/**/*', 'package.json'], asar: true, compression: 'maximum',
       electronVersion: JSON.parse(readFileSync(join(here, 'package.json'))).devDependencies.electron,
       electronDist: localElectron || undefined,
-      extraResources: [{from:'installer/bin/process-check.exe',to:'process-check.exe'},...(['analyst','crm'].includes(id) ? [{ from: 'backend-dist/hard-backend', to: 'backend' }] : [])],
+      extraResources: [{from:'installer/bin/process-check.exe',to:'process-check.exe'},...(includesBackend(id) ? [{ from: 'backend-dist/hard-backend', to: 'backend' }] : [])],
       win: { icon: 'icons/icon.ico', executableName: `hard-${id}`, target: ['nsis'], signExecutable: false },
       nsis: { oneClick: false, perMachine: false, allowElevation: false, allowToChangeInstallationDirectory: false,
         installerLanguages: ['ru_RU'], language: '1049', createDesktopShortcut: 'always', createStartMenuShortcut: true,
@@ -51,7 +51,7 @@ for (const id of (selected.length ? selected : Object.keys(products))) {
   const version=JSON.parse(readFileSync(join(here,'package.json'))).version;
   const name=`${id}-${version}-setup.exe`,innerRelative=`setup-build/${qa?'qa-':''}${id}`,inner=join(here,innerRelative);
   mkdirSync(inner,{recursive:true});copyFileSync(join(output,name),join(inner,'application-installer.exe'));
-  if(id==='crm'){
+  if(usesCrm(id)){
     // The completed inner archive has been audited and copied. Bound disk use
     // before assembling the outer wizard; the final EXE is audited afterwards.
     const completed=join(output,'win-unpacked');

@@ -2,6 +2,7 @@ export type ProductId = "hard" | "soft" | "manager" | "analyst" | "crm";
 declare const __HARD_PRODUCT__: string;
 declare const __HARD_CRM_INTERNAL__: boolean;
 declare const __HARD_CRM_ANALYST_INTERNAL__: boolean;
+declare const __HARD_CRM_STABLE__: boolean;
 export const CRM_INTERNAL=typeof __HARD_CRM_INTERNAL__!=='undefined'&&__HARD_CRM_INTERNAL__;
 export const CRM_ANALYST_INTERNAL=typeof __HARD_CRM_ANALYST_INTERNAL__!=='undefined'&&__HARD_CRM_ANALYST_INTERNAL__;
 const built = typeof __HARD_PRODUCT__ === "undefined" ? "" : __HARD_PRODUCT__;
@@ -14,5 +15,7 @@ export const PRODUCTS = {
 } as const;
 export const PRODUCT_ID = built in PRODUCTS ? built as ProductId : null;
 export const FIXED_PRODUCT = PRODUCT_ID ? PRODUCTS[PRODUCT_ID] : null;
+export const STABLE_CRM = !!PRODUCT_ID && PRODUCT_ID !== "crm" &&
+  typeof __HARD_CRM_STABLE__ !== "undefined" && __HARD_CRM_STABLE__;
 export const DEFAULT_SERVER = "https://hard.rimborso.ru";
 export const RELEASE_URL = "https://github.com/josephsteuerjr/hard-desktop-releases/releases/latest/download/";

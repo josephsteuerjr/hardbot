@@ -3,6 +3,7 @@ import argparse,ast,hashlib,json
 from pathlib import Path
 
 SOURCE=Path(__file__).resolve().parents[1]/'server'
+RELEASE_GATE=SOURCE.parent/'deploy/crm/release_gate.py'
 
 
 def functions(text):
@@ -43,6 +44,9 @@ def build(baseline,output):
             for method,route,handler in routes:
                 if route in before:raise ValueError('Primary already has a target route; reconcile instead of adding a duplicate')
             result=result.replace(marker,marker+''.join(f'    app.router.add_{method}({route!r},{handler})\n' for method,route,handler in routes))
+            app_marker='    app.on_response_prepare.append(_security_headers)\n'
+            if result.count(app_marker)!=1:raise ValueError('Primary middleware anchor changed')
+            result=result.replace(app_marker,app_marker+'    from crm.release_gate import install as install_release_gate\n    install_release_gate(app)\n')
         # Every other top-level function remains structurally identical.
         old=functions(before);new=functions(result)
         for key in old.keys()-set(names)-({'build_app'} if name=='web.py' else set()):
@@ -52,6 +56,10 @@ def build(baseline,output):
     for name in ['call_scripts.py','crm/__init__.py','crm/primary_fence.py','crm/storage.py','crm/contract.py']:
         previous=baseline/name
         built[name]=(SOURCE/name).read_bytes();manifest[name]={'before_sha256':hashlib.sha256(previous.read_bytes()).hexdigest() if previous.exists() else None,'module':True}
+    gate='crm/release_gate.py'
+    previous=baseline/gate
+    built[gate]=RELEASE_GATE.read_bytes()
+    manifest[gate]={'before_sha256':hashlib.sha256(previous.read_bytes()).hexdigest() if previous.exists() else None,'module':True}
     output.mkdir(parents=True)
     for name,value in built.items():
         target=output/name;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(value)

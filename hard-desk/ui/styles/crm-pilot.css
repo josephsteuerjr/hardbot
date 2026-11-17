@@ -122,6 +122,7 @@ main {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
+  flex-wrap: wrap;
   -webkit-app-region: drag;
 }
 h1 {
@@ -151,6 +152,22 @@ h3 {
   background: var(--close-hover);
   color: white;
 }
+#crm-update {
+  flex: 0 0 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  -webkit-app-region: no-drag;
+}
+#crm-update[hidden] { display: none; }
+#crm-update-status { flex: 1; }
+#crm-update.ready { background: #8b211a; color: #fff; border-color: #8b211a; font-weight: 600; }
+#crm-update-install { background: #fff5e8; color: #751912; border-color: #fff5e8; font-weight: 800; }
+#crm-update-install:hover { background: #fff; }
 #connection {
   font-size: 12px;
   color: var(--ink-3);

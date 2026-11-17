@@ -4,7 +4,7 @@
 import { build } from "esbuild";
 import { cpSync, existsSync, lstatSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { products } from "./tools/products.mjs";
+import { products, productDefines, usesCrm } from "./tools/products.mjs";
 import { dirname, join, relative, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -12,6 +12,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 if (process.env.HARD_PRODUCT === 'crm') await import('./tools/build-courier.mjs');
 const out = join(here, "out");
 const product = process.env.HARD_PRODUCT || "";
+const crm = usesCrm(product);
 if (product && !["hard", "soft", "manager", "analyst", "crm"].includes(product)) throw new Error("Unknown product");
 if (existsSync(out)) {
   const rel = relative(realpathSync(here), realpathSync(out));
@@ -20,7 +21,7 @@ if (existsSync(out)) {
 rmSync(out, { recursive: true, force: true });
 mkdirSync(join(out, "ui"), { recursive: true });
 
-const node = { bundle: true, platform: "node", format: "cjs", target: "node22", external: ["electron", "electron-updater", "original-fs"], logLevel: "warning", define: { __HARD_PRODUCT__: JSON.stringify(product),__HARD_CRM_INTERNAL__:String(process.env.HARD_CRM_MANAGER_INTERNAL==='1'),__HARD_CRM_ANALYST_INTERNAL__:String(process.env.HARD_CRM_ANALYST_INTERNAL==='1') } };
+const node = { bundle: true, platform: "node", format: "cjs", target: "node22", external: ["electron", "electron-updater", "original-fs"], logLevel: "warning", define: productDefines(product) };
 await build({ ...node, entryPoints: [join(here, "src", "main", "launcher.ts")], outfile: join(out, "main.js") });
 await build({ ...node, entryPoints: [join(here, "src", "setup", "entry.ts")], outfile: join(out, "setup-main.js") });
 await build({ ...node, entryPoints: [join(here, "src", "setup", "preload.ts")], outfile: join(out, "setup-preload.js") });
@@ -35,9 +36,9 @@ function registryKey(id) {
   const s=bytes.toString('hex');return [s.slice(0,8),s.slice(8,12),s.slice(12,16),s.slice(16,20),s.slice(20)].join('-');
 }
 writeFileSync(join(out,'setup-registry.json'),JSON.stringify(Object.fromEntries(Object.entries(products).map(([id,p])=>[id,registryKey(p.appId+(process.env.HARD_SETUP_QA_BUILD?'_setupqa':''))]))));
-await build({ ...node, entryPoints: [join(here, "src", product==='crm'?"crm-preload.ts":"preload.ts")], outfile: join(out, "preload.js") });
+await build({ ...node, entryPoints: [join(here, "src", crm?"crm-preload.ts":"preload.ts")], outfile: join(out, "preload.js") });
 await build({
-  entryPoints: [join(here, "ui", product==='crm'?"crm-app.ts":"app.ts")],
+  entryPoints: [join(here, "ui", crm?"crm-app.ts":"app.ts")],
   bundle: true,
   format: "iife",
   target: ["chrome130"],
@@ -45,17 +46,17 @@ await build({
   logLevel: "warning",
 });
 await build({
-  entryPoints: [join(here, "ui", "styles", product==='crm'?"crm-pilot.css":"index.css")],
+  entryPoints: [join(here, "ui", "styles", crm?"crm-pilot.css":"index.css")],
   bundle: true,
   outfile: join(out, "ui", "app.css"),
   loader: { ".woff2": "file", ".svg": "dataurl" },
   assetNames: "fonts/[name]",
   logLevel: "warning",
 });
-cpSync(join(here, "ui", product==='crm'?"crm-index.html":"index.html"), join(out, "ui", "index.html"));
+cpSync(join(here, "ui", crm?"crm-index.html":"index.html"), join(out, "ui", "index.html"));
 cpSync(join(here, "ui", "tray.html"), join(out, "ui", "tray.html"));
 await build({ entryPoints: [join(here, "ui", "tray.ts")], bundle: true, format: "iife", target: ["chrome130"], outfile: join(out, "ui", "tray.js"), logLevel: "warning" });
 cpSync(join(here, "icons", "icon.svg"), join(out, "ui", "icon.svg"));
 cpSync(join(here, "icons"), join(out, "icons"), { recursive: true });
-if(product==='crm')cpSync(join(here,'ui','licenses'),join(out,'licenses'),{recursive:true});
+if(crm)cpSync(join(here,'ui','licenses'),join(out,'licenses'),{recursive:true});
 console.log("out/ готов");

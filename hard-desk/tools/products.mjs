@@ -8,3 +8,12 @@ export const products = {
   analyst: { name: 'Взыскание СНГ — Аналитик', appId: 'ru.rimborso.hard.analyst', description: 'Реестры, обогащение, отчёты и контуры' },
 };
 export const releaseUrl = 'https://github.com/josephsteuerjr/hard-desktop-releases/releases/latest/download/';
+export const stableProducts = ['hard', 'soft', 'manager', 'analyst'];
+export const usesCrm = id => id === 'crm' || (stableProducts.includes(id) && process.env.HARD_CRM_STABLE === '1');
+export const includesBackend = id => id === 'analyst' || usesCrm(id);
+export const productDefines = id => ({
+  __HARD_PRODUCT__: JSON.stringify(id),
+  __HARD_CRM_INTERNAL__: String(internal),
+  __HARD_CRM_ANALYST_INTERNAL__: String(analystInternal),
+  __HARD_CRM_STABLE__: String(usesCrm(id) && id !== 'crm'),
+});
