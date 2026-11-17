@@ -7,7 +7,7 @@ parser=argparse.ArgumentParser();parser.add_argument('--assets',type=Path,requir
 SOURCE=Path(__file__).resolve().parents[2];BASE=args.output.resolve();BASE.mkdir(parents=True,exist_ok=True)
 assert (args.assets/'BUILD.json').is_file()
 def save(name,value):(BASE/name).write_text(json.dumps(value,ensure_ascii=False,indent=2),encoding='utf-8')
-import asyncio,shutil,subprocess,threading,uuid
+import asyncio,hashlib,shutil,subprocess,threading,uuid
 from playwright.sync_api import sync_playwright
 def until(page,expression,arg=None,timeout=45):
  deadline=time.monotonic()+timeout
@@ -23,8 +23,12 @@ import crm.mobile_server as server
 qa=BASE/('update-'+args.engine+'-'+str(int(time.time())));qa.mkdir(exist_ok=False);assets=qa/'web';shutil.copytree(args.assets,assets);server.ASSETS=assets
 sw=(assets/'sw.js').read_text();version=json.loads((assets/'BUILD.json').read_text())['version']
 # Two complete shell versions: activation must not interrupt the loaded old UI.
-legacy=sw.replace("const VERSION='"+version+"'", "const VERSION='"+version+"-previous'")
-index=(assets/'index.html').read_text();(assets/'index.html').write_text(index.replace(version,version+'-previous'))
+previous=hashlib.sha256((version+'-previous').encode()).hexdigest()[:16]
+index=(assets/'index.html').read_bytes().decode('utf-8');old_index=index.replace(version,previous)
+legacy=sw.replace('const VERSION='+json.dumps(version),'const VERSION='+json.dumps(previous))
+legacy=legacy.replace(hashlib.sha256(index.encode()).hexdigest(),hashlib.sha256(old_index.encode()).hexdigest())
+build=(assets/'BUILD.json').read_text();(assets/'BUILD.json').write_text(build.replace(version,previous))
+(assets/'index.html').write_bytes(old_index.encode('utf-8'))
 (assets/'sw.js').write_text(legacy)
 stop=threading.Event();state={}
 async def serve():
@@ -42,10 +46,10 @@ try:
   owner=p.evaluate('()=>crm.state().then(s=>s.owner)');cid=p.evaluate('(person)=>crm.api("GET","card",undefined,{person_uuid:person}).then(r=>r.data.contracts[0].contract_uuid)',person)
   p.evaluate('()=>crm.connect({action:"offline",value:true})');op=str(uuid.uuid4());p.evaluate('({cid,op})=>crm.command({schema_version:1,operation_id:op,kind:"note",contract_ids:[cid],payload:{text:"Update pending"}})',dict(cid=cid,op=op))
   p.evaluate('()=>caches.open("crm-mobile:other-scope:preserve").then(c=>c.put("/other",new Response("keep")))')
-  (assets/'index.html').write_text(index);(assets/'sw.js').write_text(sw);p.evaluate('()=>navigator.serviceWorker.getRegistration().then(r=>r.update()).then(()=>true)');p.locator('#mobile-update').wait_for();until(p,'()=>navigator.serviceWorker.getRegistration().then(r=>!r.waiting&&!r.installing)');p.locator('#mobile-update button').evaluate('(b)=>b.click()');assert 'форму' in p.locator('#mobile-update').inner_text();assert p.locator('#v-soft_comment').input_value()=='Draft retained across mobile update'
+  (assets/'BUILD.json').write_text(build);(assets/'index.html').write_bytes(index.encode('utf-8'));(assets/'sw.js').write_text(sw);p.evaluate('()=>navigator.serviceWorker.getRegistration().then(r=>r.update()).then(()=>true)');p.locator('#mobile-update').wait_for();until(p,'()=>navigator.serviceWorker.getRegistration().then(r=>!r.waiting&&!r.installing)');p.locator('#mobile-update button').evaluate('(b)=>b.click()');assert 'форму' in p.locator('#mobile-update').inner_text();assert p.locator('#v-soft_comment').input_value()=='Draft retained across mobile update'
   p.locator('dialog[open]').get_by_role('button',name='Закрыть',exact=True).click()
   second=ctx.new_page();second.goto(state['url']);second.locator('[data-person]').first.wait_for();p.locator('#mobile-update button').click();until(p,'()=>document.querySelector("#mobile-update").textContent.includes("другие окна")');second.close()
-  with p.expect_navigation():p.locator('#mobile-update button').click()
+  with p.expect_event('domcontentloaded'):p.locator('#mobile-update button').click()
   p.locator('[data-action=call]').wait_for();p.locator('[data-action=call]').click();assert p.locator('#v-soft_comment').input_value()=='Draft retained across mobile update'
   assert p.evaluate('(op)=>crm.queue().then(r=>r.data.entries.some(e=>e.body.operation_id===op))',op)
   assert p.evaluate('()=>caches.has("crm-mobile:other-scope:preserve")')
