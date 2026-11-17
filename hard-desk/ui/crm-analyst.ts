@@ -26,7 +26,7 @@ const routes:Record<string,[string,string]>={people:['team','people'],managers:[
   registry:['exchange','files'],prio:['registry','priority'],mail:['exchange','mail'],conn:['connection','connection'],maint:['connection','maintenance']};
 
 export async function mountAnalyst(host:HTMLElement,group:string,crm:any,valid:()=>boolean,options:Options){
-  let disposed=false,sequence=0,leave:(()=>void)|undefined,current='';
+  let disposed=false,sequence=0,leave:(()=>void)|undefined,current='',panel:HTMLDialogElement|null=null;
   const live=()=>!disposed&&valid(),request=async(action:string,...args:any[])=>{
     if(!live())throw Error('Раздел закрыт.');const value=await crm.admin(action,args,options.owner);
     if(value?.ok===false&&value.text&&!value.error){if(action==='local')return {...value,error:value.text};throw Error(value.text);}
@@ -38,9 +38,9 @@ export async function mountAnalyst(host:HTMLElement,group:string,crm:any,valid:(
     open:file=>request('open',file),autostart:on=>request('autostart',on),
     state:()=>request('state'),win:action=>crm.win(action)});
   const closePanel=()=>{
-    const dialog=document.getElementById('analyst-panel') as HTMLDialogElement|null;
+    const dialog=panel;
     if(dialog?.querySelector('[data-saving="1"]'))return;
-    dialog?.close();dialog?.remove();
+    dialog?.close();dialog?.remove();panel=null;
   };
   const navigate=async(id:string)=>{
     const target=routes[id];if(!target)throw Error('Раздел недоступен в рабочем месте Аналитика.');
@@ -51,7 +51,7 @@ export async function mountAnalyst(host:HTMLElement,group:string,crm:any,valid:(
     setHead:(_title,_kicker,tools)=>{const target=host.querySelector('#head-tools');if(target)target.innerHTML=tools;},
     hasSection:id=>!!routes[id],panelOpen:()=>!!document.getElementById('analyst-panel'),closePanel,
     openPanel:(title,body)=>{
-      closePanel();const dialog=document.createElement('dialog');dialog.id='analyst-panel';dialog.className='analyst-tools analyst-panel';
+      closePanel();const dialog=document.createElement('dialog');panel=dialog;dialog.id='analyst-panel';dialog.className='analyst-tools analyst-panel';
       dialog.innerHTML=`<div class="analyst-panel-head"><h2>${title}</h2><button data-panel-close>Закрыть</button></div><div id="panel-inner"><div class="page">${body}</div></div>`;
       document.body.append(dialog);dialog.querySelector('[data-panel-close]')!.addEventListener('click',closePanel);
       dialog.addEventListener('cancel',e=>{if(dialog.querySelector('[data-saving="1"]'))e.preventDefault();});

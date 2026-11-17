@@ -419,6 +419,33 @@ a {
 .connection-page > h2:not(:first-child) { margin-top: 28px; }
 .connection-testing { margin-top: 32px; border-top: 1px solid var(--line); padding-top: 18px; }
 .connection-testing > summary { cursor: pointer; color: var(--ink-3); }
+.account-entry { max-width: 760px; padding-bottom: 20px; border-bottom: 1px solid var(--line); margin-bottom: 20px; }
+.account-entry form { margin-bottom: 12px; }
+.account-entry .grid { margin-bottom: 16px; }
+.account-entry #account-message:empty { display: none; }
+.saved-login-options { margin: 16px 0; }
+.saved-login-options > summary { color: var(--accent); cursor: pointer; }
+.card-more-actions { position: relative; }
+.card-more-actions > summary { color: var(--accent); cursor: pointer; padding: 8px; }
+.card-more-actions > div { position: absolute; top: 100%; right: 0; min-width: 230px; display: grid; gap: 6px; padding: 12px; z-index: 12; background: var(--paper); border: 1px solid var(--line); }
+.registry-desktop .registry-settings,.registry-desktop .registry-selection-settings,.registry-desktop .registry-filter-settings { position: relative; }
+.registry-desktop details > summary { cursor: pointer; color: var(--accent); padding: 8px 0; }
+.registry-desktop .registry-settings > .toolbar,.registry-desktop .registry-selection-settings > .toolbar,.registry-desktop .registry-filter-settings > .toolbar { position: absolute; top: 100%; right: 0; z-index: 12; min-width: 270px; padding: 16px; border: 1px solid var(--line); background: var(--paper); }
+.registry-desktop .registry-edit-settings { display: inline-block; }
+.registry-desktop .registry-save-bar { display: inline-flex; margin-left: 12px; }
+.registry-desktop .registry-save-bar:has(button:not([hidden])) { margin-bottom: 8px; }
+.registry-desktop [hidden] { display: none !important; }
+.registry-desktop #registry-status { margin: 4px 0 8px; font-size: 12px; }
+.registry-desktop #registry-status:empty { display: none; }
+.registry-desktop .registry-save-bar { margin-inline-start: 12px !important; }
+.portfolio-desktop .portfolio-modes { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
+.portfolio-desktop .portfolio-modes > .work-filters { margin: 0 0 0 auto; gap: 4px; }
+.portfolio-desktop .work-filters button { font-size: 12px; padding: 6px 10px; }
+.portfolio-desktop .portfolio-context { position: relative; margin-left: 8px; }
+.portfolio-desktop .portfolio-context > summary { cursor: pointer; color: var(--accent); }
+.portfolio-desktop .portfolio-context > div { position: absolute; top: 100%; right: 0; padding: 12px; min-width: 230px; z-index: 12; background: var(--paper); border: 1px solid var(--line); display: grid; gap: 6px; }
+.portfolio-desktop [data-work-total] { margin: 8px 0; font-size: 12px; }
+.registry-desktop #registry-selected-count { font-size: 12px; }
 .connection-testing h2 { margin-top: 24px; }
 #card-saves:empty { display: none; }
 #card-saves { margin: 4px 0 18px; border-bottom: 1px solid var(--line); padding-bottom: 12px; }

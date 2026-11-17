@@ -22,7 +22,7 @@ import {showStartupRecovery} from './crm-startup-recovery';
 import {applyCrmWindowFrame} from './crm-window-frame';
 import {CrmLive} from './crm-live';
 import {PRODUCTS} from './product';
-import {accountAction} from './crm-account';
+import {accountAction,accountState} from './crm-account';
 
 const isolatedProfile = !!process.env.HARD_USER_DATA;
 let connectionNotice = "";
@@ -136,7 +136,7 @@ async function backendStart() {
   await new Promise<void>((resolveReady, reject) => {
     let output = "",settled=false;
     const timeout = setTimeout(
-      () => {settled=true;child.kill();reject(new Error("Локальная проверочная база не запустилась."));},
+      () => {settled=true;child.kill();reject(new Error("Локальный компонент CRM не запустился."));},
       15000,
     );
     child.stdout.on("data", (chunk: Buffer) => {
@@ -204,7 +204,7 @@ async function diagnostics(repair=false){
     const result=await identify();
     const code=result.ok?'identity_confirmed':result.data?.error || (result.status===401?'login_required':result.status===403?'access_denied':'identity_unverified');
     add('identity',result.ok,code,result.ok?'Сервер подтвердил текущий вход и права.':result.status===401 || result.status===403?(result.text || 'Требуется действующий вход; доступ автоматически не выдаётся.'):'Вход не проверен из-за недоступности API. Локальная работа сохранена.');
-  }else add('identity',false,'login_required','Выберите собственный сохранённый вход.');
+  }else add('identity',false,'login_required','Войдите с рабочим логином и паролем.');
   if(owner){
     try{
       const q=queue.queueState(owner);const pending=q.entries.filter(e=>e.state==='pending').length;
@@ -301,7 +301,7 @@ const transport: queue.Transport = async (method, action, body, query) => {
   if (!actions.has(action) || !["GET", "POST"].includes(method))
     return { ok: false, status: 400, text: "Неизвестный запрос." };
   if (!["synthetic", "remote"].includes(config()?.mode || ""))
-    return {ok: false, status: 401, text: "Выберите сохранённый вход для подключения к CRM."};
+    return {ok: false, status: 401, text: "Введите логин и пароль для подключения к CRM."};
   if (offline)
     return {
       ok: false,
@@ -330,7 +330,7 @@ const transport: queue.Transport = async (method, action, body, query) => {
     const previous = readSettings().crmLast as any;
     const expected = currentContext?.employee_uuid || (previous?.origin === base ? previous.context?.employee_uuid : undefined);
     let token = shared() ? await pilotCredential(expected, false, entrySource()) : role() === "employee" ? readFieldToken() : readToken();
-    if (!base || !token) return {ok: false, status: 401, text: "Войдите в пилотный сервер."};
+    if (!base || !token) return {ok: false, status: 401, text: "Войдите в CRM."};
     const url = new URL(shared() ? PILOT_BASE + "/api/crm/" + action : "/api/crm/" + action, base);
     for (const [key, value] of Object.entries(query || {})) if (value != null) url.searchParams.set(key, String(value));
     const request = (credential: string) => fetchBuffered((target, init) => net.fetch(target, init), url.toString(), {
@@ -348,7 +348,7 @@ const transport: queue.Transport = async (method, action, body, query) => {
     }
     if (shared() && (response.status === 401 || (response.status === 403 &&
         ["manager_required", "identity_unmapped", "pilot_session_invalid"].includes(value.error))))
-      forgetAuthority(value.text || "Сервер отозвал доступ к пилоту.");
+      forgetAuthority(value.text || "Сервер отозвал доступ к CRM.");
     return {ok: response.ok, status: response.status, data: value, text: value.text || value.error};
   } catch (error) {
     const status = Number((error as any)?.status || 0);
@@ -542,15 +542,7 @@ app
     });
     diagnostic('launcher','launcher_ready',true);
     try{await backendStart();diagnostic('helper','helper_ready',true);}catch{backend?.kill();diagnostic('helper','helper_unavailable',false);}
-    const availableLogins = existingLogins().filter(entry => entry.available);
-    if (!config() && app.isPackaged && !isolatedProfile && availableLogins.length === 1) {
-      try {
-        const source = availableLogins[0].source;
-        await pilotCredential(undefined, false, source);
-        writeSettings({crmConnection: {mode: "remote", role: source === 'manager' || source === 'analyst' ? source : 'employee', source,
-          server: PILOT_BASE, auth: "existing-login"}});
-      } catch { connectionNotice = "CRM пока недоступна. Повторите подключение через сохранённый вход."; }
-    }
+    // A new profile or explicit logout must show entry, even if a legacy app is signed in.
     await identify();
     win = new BrowserWindow({
       width: 1320,
@@ -586,6 +578,8 @@ app
       context: currentContext,
       existingManager: existingManagerStatus(),
       existingLogins: existingLogins(),
+      account: accountState(),
+      testingAllowed: isolatedProfile,
       connectionNotice,
       offline,
       owner,
@@ -744,6 +738,7 @@ app
           server: PILOT_BASE, auth: "existing-login"}, crmLast: undefined});
         connectionNotice = "";
       } else if (input?.mode === "synthetic") {
+        if(!isolatedProfile)throw new Error('Проверочная база доступна только в отдельном проверочном профиле.');
         if (!["employee", "manager", "observer","courier","analyst"].includes(input.role))
           throw new Error("Неизвестная роль.");
         writeSettings({
@@ -765,7 +760,7 @@ app
           (!url.port || url.port === "443")
         )
           throw new Error(
-            "Рабочий сервер не подключён к пилоту. Укажите отдельный согласованный адрес.",
+            "Для рабочего сервера используйте форму «Войти в CRM».",
           );
         const login =
           input.role === "employee"
@@ -979,7 +974,11 @@ app
     powerMonitor.on('unlock-screen',()=>{screenLocked=false;});
     powerMonitor.on('suspend',()=>{sleeping=true;activeTime.stop();clock=null;});
     powerMonitor.on('resume',()=>{sleeping=false;void identify().catch(()=>{});});
-    setInterval(()=>{try{activeTime.tick();}catch{connectionNotice='Не удалось сохранить активный интервал. Проверьте защищённый профиль.';}},2000).unref();
+    const activeTimeError='Не удалось сохранить активный интервал. Проверьте защищённый профиль.';
+    setInterval(()=>{
+      try{activeTime.tick();if(connectionNotice===activeTimeError)connectionNotice='';}
+      catch{connectionNotice=activeTimeError;}
+    },2000).unref();
     void recoverExports().catch(() => {});
     const reports=new ThreeHourReports({
       identity:()=>owner&&currentContext?{owner,employee:currentContext.employee_uuid,

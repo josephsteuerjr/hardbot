@@ -31,10 +31,11 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   let prefs=(await crm.draft('registry-view')).data || {};
   let colors:Record<string,string>=(await crm.draft('registry-colors')).data || {};
   let pending:Record<string,Pending>=(await crm.draft('registry-input')).data || {};
-  let entries:any[]=[],busy=false;
+  let entries:any[]=[],busy=false,queueLoaded=false;
   let allColumns:any[]=[],allocationStop:(()=>void)|undefined,allSelected=false;
   const selectedRows=new Set<string>(Array.isArray(prefs.selectedRows)?prefs.selectedRows:[]);
   let preferenceSave:ReturnType<typeof setTimeout>|undefined;
+  let savedPreferences='';
   let resizeStop:(()=>void)|undefined;
   const snapshots=new Map<string,any>();
   const validView=options.manager?'all':['mine','all'].includes(prefs.view)?prefs.view:'mine';
@@ -57,6 +58,35 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   }
   const scroll=host.querySelector<HTMLElement>('.registry-scroll')!;
   const mobile=crm.platform==='mobile';
+  if(!mobile){
+    host.classList.add('registry-desktop');
+    const toolbar=$('registry-search').parentElement!;
+    const settings=document.createElement('details');settings.className='registry-settings';
+    settings.innerHTML='<summary>Вид таблицы</summary><div class="toolbar"></div>';
+    settings.lastElementChild!.append($('registry-zoom').parentElement!,$('registry-reset-widths'));
+    if(options.manager)settings.lastElementChild!.prepend($('registry-fields').parentElement!);
+    toolbar.append(settings);
+    const editTools=$('registry-edit').parentElement!;
+    editTools.classList.add('registry-edit-tools');
+    const editDetails=document.createElement('details');editDetails.className='registry-edit-settings';
+    editDetails.innerHTML='<summary>Правки и пометки</summary>';
+    editTools.before(editDetails);editDetails.append(editTools);
+    const saveBar=document.createElement('div');saveBar.className='toolbar registry-save-bar';
+    editDetails.after(saveBar);saveBar.append($('registry-save'),$('registry-cancel'),$('registry-review'));
+    if(options.manager){
+      const filters=document.createElement('details');filters.className='registry-filter-settings';
+      filters.innerHTML='<summary>Фильтры</summary>';
+      toolbar.append(filters);filters.append($('registry-employee').closest('.toolbar')!);
+      const selection=$('registry-select-page').parentElement!;
+      selection.classList.add('registry-selection-tools');
+      $('registry-allocation').prepend(selection);
+      // Keep the selected count outside the collapsed settings.
+      const selectionDetails=document.createElement('details');selectionDetails.className='registry-selection-settings';
+      selectionDetails.innerHTML='<summary>Выбор договоров</summary>';
+      toolbar.append(selectionDetails);selectionDetails.append(selection);
+      toolbar.append($('registry-selected-count'));saveBar.prepend($('registry-open'));
+    }
+  }
   let mobileTable=false;
   const mobileRows=document.createElement('div');mobileRows.className='registry-mobile-cards';
   if(mobile){
@@ -85,7 +115,7 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   const status=(text:string)=>{if(!disposed && isCurrent())$('registry-status').textContent=text;};
   const storeInput=async()=>{const r=await crm.draft('registry-input',pending);if(!r.ok)throw Error(r.text || 'Не удалось сохранить ввод на компьютере.');};
   const protect=(fn:()=>any)=>()=>{Promise.resolve().then(fn).catch(e=>status(e.message));};
-  const savePreferences=async()=>{const result=await crm.draft('registry-view',prefs);if(!result.ok)throw Error(result.text || 'Не удалось сохранить настройки таблицы.');};
+  const savePreferences=async()=>{const encoded=JSON.stringify(prefs);if(encoded===savedPreferences)return;const result=await crm.draft('registry-view',JSON.parse(encoded));if(!result.ok)throw Error(result.text || 'Не удалось сохранить настройки таблицы.');savedPreferences=encoded;};
   const schedulePreferences=()=>{clearTimeout(preferenceSave);preferenceSave=setTimeout(()=>{if(!disposed && isCurrent())void savePreferences().catch(e=>status(e.message));},200);};
   const defaultWidth=(key:string)=>key==='$state'?(crm.platform==='mobile'?44:140):key.includes('comment')||key.includes('history')?280:180;
   const width=(key:string)=>Object.hasOwn(prefs.widths,key)?prefs.widths[key]:defaultWidth(key);
@@ -137,6 +167,11 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   }
   function paintStatus() {
     if(!data)return;
+    if(!mobile){
+      $('registry-save').hidden=pendingCount()===0;
+      $('registry-cancel').hidden=pendingCount()===0;
+      $('registry-review').hidden=!entries.some(e=>e.state==='attention'&&!e.reviewed_at);
+    }
     for(const row of data.rows) {
       const queued=rowEntry(row.contract_uuid);
       const el=scroll.querySelector<HTMLElement>(`[data-row="${row.contract_uuid}"] .registry-row-state`);
@@ -169,16 +204,24 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
     const result=await crm.queue();
     if(disposed || !isCurrent() || !result.ok)return;
     entries=result.data.entries || [];
+    queueLoaded=true;
+    applyAcknowledgements();
+    paintStatus();
+  }
+  function applyAcknowledgements(){
     // Update only acknowledged cells. Keep active editor and staged text intact.
     for(const entry of entries.filter((e:any)=>e.action==='registry-edit' && e.state==='accepted')) {
       for(const ack of entry.result?.rows || []) {
         const row=data?.rows.find((r:any)=>r.contract_uuid===ack.contract_uuid);
         if(!row)continue;
-        const newer=Object.entries(ack.revisions).some(([key,rev])=>Number(rev)>Number(row.revisions[key] || 0));
-        if(newer){Object.assign(row.fields,ack.values);Object.assign(row.revisions,ack.revisions);}
+        const newer=new Set(Object.entries(ack.revisions).filter(([group,rev])=>Number(rev)>Number(row.revisions[group] || 0)).map(([group])=>group));
+        for(const [key,value] of Object.entries(ack.values)){
+          const field=allColumns.find(f=>f.key===key);
+          if(field&&newer.has(field.group))row.fields[key]=value;
+        }
+        for(const group of newer)row.revisions[group]=ack.revisions[group];
       }
     }
-    paintStatus();
   }
   function paint() {
     resizeStop?.();
@@ -242,8 +285,9 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
       data.columns=prefs.columnGroup==='all'?allColumns:prefs.columnGroup==='main'?main.map(key=>allColumns.find(f=>f.key===key)).filter(Boolean):allColumns.filter(f=>['client','contract_id'].includes(f.key)||f.section===prefs.columnGroup);
     }
     for(const row of data.rows)snapshots.set(row.contract_uuid,row);
-    await sync();if(disposed || !isCurrent() || n!==generation)return;
-    paint();status(result.stale?'Сохранённая копия. Правки будут проверены сервером после подключения.':`Правок в черновике: ${pendingCount()}`);
+    if(!queueLoaded)await sync();if(disposed || !isCurrent() || n!==generation)return;
+    applyAcknowledgements();
+    paint();status(result.stale?'Сохранённая копия. Правки будут проверены сервером после подключения.':pendingCount()?`Правок в черновике: ${pendingCount()}`:'');
   }
   function stage(r:any,f:any,raw:any) {
     if(!r.writable_fields.includes(f.key))throw Error(`${f.title}: поле доступно только для чтения.`);
@@ -419,7 +463,16 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
     if(!options.manager)return;
     prefs.selectedRows=[...selectedRows];schedulePreferences();
     $('registry-selected-count').textContent=allSelected?'Весь доступный отбор':`Выбрано договоров: ${selectedRows.size}`;
+    if(!mobile)$('registry-selected-count').hidden=!allSelected&&!selectedRows.size;
+    updateAllocationTools();
     paintStatus();
+  }
+  function updateAllocationTools(){
+    if(mobile)return;
+    const actions=host.querySelector<HTMLElement>('.allocation-actions');
+    if(actions)actions.hidden=!allSelected&&!selectedRows.size;
+    const summary=host.querySelector('.registry-filter-settings > summary');
+    if(summary){const count=Number(!!prefs.employee_uuid)+Number(prefs.work!=='all')+Number(prefs.unassigned==='1');summary.textContent='Фильтры'+(count?' · '+count:'');}
   }
   const filters=()=>({search:prefs.search,employee_uuid:prefs.employee_uuid,work:prefs.work,unassigned:prefs.unassigned});
   if(options.manager){
@@ -436,7 +489,9 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   }
   let liveGeneration=0;
   async function refreshLive(){
-    if(!data?.rows.length)return;
+    if(!data)return;
+    // Reload the filtered page once. The ID refresh below protects active editors.
+    if(!editing&&(!pendingCount()||!data.rows.length)){await load();return;}
     const turn=++liveGeneration,ids=data.rows.map((r:any)=>r.contract_uuid).join(',');
     const result=await crm.api('GET','registry',undefined,{view:'all',ids,limit:100});
     if(disposed||!isCurrent()||turn!==liveGeneration)return;
@@ -464,7 +519,7 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
         if(!cell.contains(editing)&&!pending[row.contract_uuid]&&!rowEntry(row.contract_uuid).length&&field){const span=cell.querySelector('span');if(span)span.textContent=showValue(value(row,key),field);}
       });
     }
-    await storeInput();paintMobile();if(options.manager&&!editing&&!pendingCount())await load();else status('Назначения и права обновлены. Незавершённый ввод сохранён.');
+    paintMobile();status('Назначения и права обновлены. Незавершённый ввод сохранён.');
   }
   const stop=crm.onChange?.((event:any)=>{if(event.type==='queue')void sync().catch(e=>status(e.message));else if(event.type==='live'&&event.dirty)void refreshLive().catch(e=>status(e.message));});
   scroll.onscroll=()=>{prefs.left=scroll.scrollLeft;prefs.top=scroll.scrollTop;schedulePreferences();};
@@ -474,6 +529,11 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
     if(options.distribution){
       const {mountAllocation}=await import('./crm-allocation');
       allocationStop=await mountAllocation($('registry-allocation'),crm,()=>({ids:[...selectedRows],filters:filters(),all:allSelected,rows:data.rows}),isCurrent,load);
+      if(!mobile){
+        const history=$('allocation-history');
+        if(history)host.querySelector('.registry-selection-settings .toolbar')?.append(history);
+        updateAllocationTools();
+      }
     }
   }
   if(!isCurrent())stop?.();

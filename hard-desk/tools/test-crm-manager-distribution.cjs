@@ -35,6 +35,14 @@ async function until(fn,label){for(let i=0;i<400;i++){if(await fn())return;await
     await shot('manager-preview');loseAck=true;await click('#allocation-submit');
     await until(()=>js('!document.querySelector("#allocation-submit").disabled&&document.querySelector("#allocation-submit").textContent.includes("Проверить")'),'lost ACK');assert.equal(lost,1);
     const intent=(await js('window.crm.draft("managed-allocation-intent")')).data;assert(intent.operation_id);
+    await click('#allocation-close');await click('#registry-select-clear');
+    await until(async()=>!(await js('window.crm.draft("registry-view")')).data.selectedRows.length,'cleared selection saved');
+    win.webContents.reload();
+    await until(()=>exists('[data-section=registry]'),'restart after unknown outcome');
+    await click('[data-section=registry]');await until(()=>exists('#allocation-recover'),'recover button');
+    assert.equal(await js('document.querySelector("#allocation-recover").hidden'),false);
+    assert.equal(await js('document.querySelector(".allocation-actions").hidden'),true);
+    await click('#allocation-recover');await until(()=>js('document.querySelector("#allocation-dialog").open'),'restore intent without selection');
     await click('#allocation-submit');await until(()=>js('document.querySelector("#allocation-status").textContent.includes("Применено:")'),'receipt');
     assert.equal((await api('assignment-receipt',{operation_id:intent.operation_id})).changes.length,2);
     await click('#allocation-close');await shot('manager-after-transfer');

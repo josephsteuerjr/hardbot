@@ -63,6 +63,11 @@ async def main():
                 c.executemany('INSERT INTO '+name+'('+','.join(columns)+') VALUES('+','.join('?' for _ in columns)+')',values)
         w=allocation_world(fixture)
         with storage.connect() as c:
+            if os.environ.get('HARD_CRM_QA_SCALE')=='1':
+                c.execute("INSERT INTO crm_people SELECT md5('windows-person-' || i::text)::uuid::text,'Scale ' || i::text,'synthetic-windows','2026-01-01' FROM generate_series(0,49999) i")
+                c.execute("INSERT INTO crm_contracts SELECT md5('windows-contract-' || i::text)::uuid::text,md5('windows-person-' || i::text)::uuid::text,'scale-creditor','SCALE-' || i::text,NULL,'RUB','{\"debt_today\":\"1.25\"}','{\"debt_today\":\"1.25\"}','{}','{}','2026-01-01' FROM generate_series(0,49999) i")
+                c.execute("INSERT INTO crm_managed_contracts SELECT 'team-A',contract_uuid,work FROM crm_contracts CROSS JOIN (VALUES('call'),('visit')) k(work) WHERE creditor_id='scale-creditor'")
+                c.execute('ANALYZE crm_contracts');c.execute('ANALYZE crm_managed_contracts')
             c.execute('INSERT INTO crm_actor_links VALUES(?,?,?,?)',(500,w['target'],'fixture',1))
             c.execute('GRANT USAGE ON SCHEMA '+namespace+' TO crm_app')
             c.execute('GRANT SELECT ON ALL TABLES IN SCHEMA '+namespace+' TO crm_app')

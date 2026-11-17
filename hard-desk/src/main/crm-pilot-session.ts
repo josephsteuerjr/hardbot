@@ -34,7 +34,7 @@ async function exchange(entry: EntrySource): Promise<PilotSession> {
       typeof result.token !== 'string' || !/^crm1\.[A-Za-z0-9_-]{100,4096}$/.test(result.token) ||
       !/^[a-f0-9-]{36}$/.test(result.employee_uuid) || !Number.isSafeInteger(result.expires_at) ||
       result.expires_at <= Date.now() / 1000 || result.expires_at > Date.now() / 1000 + 1900) {
-    throw new Error('Сервер не подтвердил отдельную сессию пилота.');
+    throw new Error('Сервер не подтвердил сессию CRM.');
   }
   if (entryFingerprint(entry) !== source.fingerprint) throw new Error('Сохранённый вход изменился. Повторите подключение.');
   return {token: result.token, expires_at: result.expires_at, employee_uuid: result.employee_uuid,

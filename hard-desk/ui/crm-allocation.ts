@@ -6,11 +6,14 @@ export async function mountAllocation(host:HTMLElement,crm:any,selection:()=>Sel
   host.innerHTML=`<div class="toolbar allocation-actions"><span>Распределение</span><button data-allocation="assign">Назначить</button><button data-allocation="replace">Заменить</button><button data-allocation="remove">Снять</button><button id="allocation-history" class="link">История</button></div><div id="allocation-job" role="status"></div><dialog id="allocation-dialog"><form><h2 id="allocation-title"></h2><div class="toolbar"><label>Работа<select id="allocation-kind"><option value="call">Звонки</option><option value="visit">Выезды</option><option value="both">Звонки и выезды</option></select></label><label id="allocation-target-label">Сотрудник<select id="allocation-target"></select></label></div><label>Комментарий<input id="allocation-note" maxlength="1000"></label><div id="allocation-preview"></div><p id="allocation-status" role="status"></p><div class="actions"><button type="button" id="allocation-close">Закрыть</button><button type="submit" id="allocation-submit">Применить</button></div></form></dialog>`;
   const $=<T extends HTMLElement=HTMLElement>(id:string)=>host.querySelector<T>('#'+id)!;
   const dialog=$<HTMLDialogElement>('allocation-dialog');
+  const recover=document.createElement('button');recover.id='allocation-recover';recover.textContent='Проверить незавершённое распределение';recover.hidden=true;
+  $('allocation-job').before(recover);
+  recover.onclick=()=>host.querySelector<HTMLButtonElement>('[data-allocation=replace]')?.click();
   const request=async(method:string,action:string,body?:any,query?:any)=>{const r=await crm.api(method,action,body,query);if(!r.ok||r.stale)throw Object.assign(Error(r.text||'Нужна подтверждённая связь.'),{result:r});return r.data;};
   const protect=(fn:()=>any)=>()=>{void Promise.resolve().then(fn).catch(e=>{if(current())$('allocation-status').textContent=e.message;});};
   const staff=(await request('GET','assignment-staff')).staff;
   function targets(){const kind=$<HTMLSelectElement>('allocation-kind').value,prior=$<HTMLSelectElement>('allocation-target').value;$<HTMLSelectElement>('allocation-target').innerHTML='<option value="">Выберите сотрудника</option>'+staff.filter((s:any)=>s.eligible&&(kind==='both'?['call','visit'].every(k=>s.work_kinds.includes(k)):s.work_kinds.includes(kind))).map((s:any)=>`<option value="${esc(s.employee_uuid)}">${esc(s.name)} · ${s.contracts} КД</option>`).join('');$<HTMLSelectElement>('allocation-target').value=prior;}
-  function lock(){['allocation-kind','allocation-target','allocation-note'].forEach(id=>$<HTMLInputElement>(id).disabled=!!intent||busy);$<HTMLButtonElement>('allocation-submit').textContent=intent?'Проверить исход операции':'Применить';}
+  function lock(){recover.hidden=!intent;['allocation-kind','allocation-target','allocation-note'].forEach(id=>$<HTMLInputElement>(id).disabled=!!intent||busy);$<HTMLButtonElement>('allocation-submit').textContent=intent?'Проверить исход операции':'Применить';}
   async function check(){
     if(intent||busy)return;const n=++turn;preview=null;$<HTMLButtonElement>('allocation-submit').disabled=true;targets();
     const s=selection(),kind=$<HTMLSelectElement>('allocation-kind').value,target=$<HTMLSelectElement>('allocation-target').value;
@@ -50,6 +53,7 @@ export async function mountAllocation(host:HTMLElement,crm:any,selection:()=>Sel
   ['allocation-kind','allocation-target'].forEach(id=>$(id).onchange=protect(check));$('allocation-note').onchange=protect(check);$('allocation-close').onclick=()=>dialog.close();
   $('allocation-history').onclick=protect(async()=>{const result=await request('GET','assignment-history');if(!current())return;const panel=document.createElement('dialog');panel.innerHTML=`<h2>История распределения</h2><div class="allocation-history">${result.rows.map((r:any)=>`<p>${new Date(r.at).toLocaleString('ru-RU')} · ${esc(r.client)} · ${esc(r.external_id)}<br>${r.capability==='call'?'Звонки':'Выезды'}: ${esc(r.before_name||'Не назначен')} → ${esc(r.after_name||'Не назначен')}</p>`).join('')||'Изменений нет.'}</div><button>Закрыть</button>`;host.append(panel);panel.querySelector('button')!.onclick=()=>{panel.close();panel.remove();};panel.showModal();});
   const stop=crm.onChange?.((e:any)=>{if(e.type!=='live')return;connected=!!e.connected;if(!connected){preview=null;$<HTMLButtonElement>('allocation-submit').disabled=true;}else if(e.dirty&&dialog.open&&!intent)void check().catch(e=>{$('allocation-status').textContent=e.message;});});
+  intent=(await crm.draft('managed-allocation-intent')).data;lock();
   job=(await crm.draft('managed-active-job')).data||'';if(job)void monitor();
   return ()=>{disposed=true;turn++;clearTimeout(timer);stop?.();};
 }

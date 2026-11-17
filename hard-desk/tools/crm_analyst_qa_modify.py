@@ -1,11 +1,13 @@
 """Modify only the explicitly isolated native QA export, through xlwings."""
 from pathlib import Path
-import json,sys
+import json,sys,os
 from python_calamine import CalamineWorkbook
 import pythoncom
 import xlwings as xw
 path=Path(sys.argv[1]).resolve()
-assert path.suffix=='.xlsx' and path.name.startswith('analyst-report-') and 'crm-analyst-2026-11-15' in path.parts
+qa=Path(os.environ['HARD_CRM_QA_ROOT']).resolve()
+assert path.parent==qa and path.suffix=='.xlsx' and path.name.startswith('analyst-report-')
+assert (qa/'profile/synthetic').is_dir(), 'An isolated CRM test profile is required'
 book=CalamineWorkbook.from_path(str(path))
 meta=json.loads(''.join(str(r[0]) for r in book.get_sheet_by_name('_CRM').to_python() if r and r[0]))
 column=int(meta['columns']['phone'])

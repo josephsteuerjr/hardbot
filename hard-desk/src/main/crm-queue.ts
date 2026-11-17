@@ -57,15 +57,21 @@ function write(name: string, value: any) {
   });
   renameSync(target + ".tmp", target);
 }
+let installationId:string|undefined;
 export function installation(): string {
+  if(installationId)return installationId;
+  const exists=existsSync(path('installation'));
   const value = read("installation", () => ({ id: randomUUID() }));
-  write("installation", value);
-  return value.id;
+  if(!exists)write("installation", value);
+  return installationId=value.id;
 }
 export function cache(owner: string, key: string, value?: any): any {
   const name = "cache-" + digest(owner + "\n" + key);
-  if (value !== undefined)
-    write(name, { at: new Date().toISOString(), data: value });
+  if (value !== undefined){
+    const record={at:new Date().toISOString(),data:value};
+    write(name,record);
+    return record;
+  }
   try{return read(name, () => null);}catch{
     // Only recreatable cache files enter this path. Business/drafts still fail
     // closed. Retain and verify exact bytes before moving the damaged cache.

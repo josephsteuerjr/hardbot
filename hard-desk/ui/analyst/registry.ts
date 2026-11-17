@@ -185,7 +185,7 @@ async function importTab(el: HTMLElement) {
   if (st.comments) warn.push("Текущие комментарии будут заменены значениями файла, включая пустые.");
   warn.push("Офисные правки результатов Софта будут применены к завершённым звонкам. Предпросмотр покажет точные замены.");
   if (warn.length) warn.push("Точные числа пульт покажет в предпросмотре до записи.");
-  el.innerHTML = `${note("Общий реестр: опубликованный master или утверждённое тестовое подмножество. Личные ФИО.xlsb сюда не загружаются. Сначала предпросмотр — запись отдельной кнопкой.")}
+  el.innerHTML = `${note("Выберите общий реестр для импорта. Личные книги сотрудников загружаются в разделе «Обогащение книг». Перед применением проверьте предпросмотр изменений.")}
     <div class="toolbar" style="margin-top:12px"><button class="btn primary" data-pick>Выбрать реестр…</button><span class="muted" id="imp-cap">${esc(book?.caption || "")}</span></div>
     ${book ? `<div class="toolbar"><span class="muted" style="font-size:13.5px">Тип сотрудников:</span>
         <select class="input" data-profile style="width:auto">${[["hard","Хард"],["soft","Софт"],["both","Оба типа"]].map(([k,v])=>`<option value="${k}" ${book.profile===k?'selected':''}>${v}</option>`).join("")}</select>

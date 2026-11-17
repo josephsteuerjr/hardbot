@@ -10,7 +10,7 @@ export class CrmLive {
     let cursor=this.load(owner) || {assignments:0,facts:0},failures=0;
     const tick=async()=>{
       if(generation!==this.generation || owner!==this.current())return;
-      let delay=1000;
+      let delay=500;
       try{
         const result=await this.send(cursor);
         if(generation!==this.generation || owner!==this.current())return;

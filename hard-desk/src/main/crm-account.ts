@@ -22,6 +22,10 @@ export function ownLogin(){
 }
 function publicState(value:Account){return {ok:true,data:{username:value.username,role:value.role,pending:value.pending,
   must_change_password:value.password,action:value.pending?'ok_pending':'ok'}};}
+export function accountState(){
+  try{return {available:true,...publicState(read()).data};}
+  catch(error){return {available:false,...((error as any).code==='ENOENT'?{}:{error:'Не удалось прочитать сохранённый вход. Войдите заново.'})};}
+}
 async function request(path:string,body?:unknown,credential?:Account){
   const response=await fetchBuffered((url,init)=>net.fetch(url,init),PRIMARY+path,{
     method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json','X-Client-Version':app.getVersion(),

@@ -35,7 +35,10 @@ async function until(fn,label){fs.appendFileSync(path.join(qa,'stages.txt'),labe
   await js('(()=>{const e=document.querySelector("[data-card-field=debt_today]");e.value="15432.10";e.dispatchEvent(new Event("input",{bubbles:true}));e.dispatchEvent(new Event("change",{bubbles:true}));})()');await click('#card-edit-save');
   await until(()=>js('document.querySelector("#card-saves").textContent.includes("Принято сервером")'),'analyst correction ACK');
   await click('#back');await until(()=>exists('#registry-open'),'return to native register');
-  await click('[data-section=exchange]');await until(()=>exists('[data-pick]'),'actual legacy import');await shot('02-exchange');
+  await js(`document.querySelector('[data-section=registry]').click();document.querySelector('[data-section=exchange]').click()`);
+  await until(()=>exists('[data-pick]'),'actual legacy import');
+  await until(()=>js('!!document.querySelector("[data-delivery-queue]")?.dataset.signature'),'import queue connected after rapid navigation');
+  assert.equal(await js('document.querySelectorAll("[data-delivery-queue] .err").length'),0);await shot('02-exchange');
   const response=await js('window.crm.state().then(s=>window.crm.admin("local",["/admin",{method:"GET",path:"/admin/accounts.json"}],s.owner))');
   assert(response.ok,JSON.stringify(response));assert(JSON.stringify(response.data).includes('crm-demo-employee'));
   await click('[data-analyst-tab="crm-books"]');await until(()=>exists('#export-new'),'versioned workbook actions');
@@ -71,4 +74,4 @@ async function until(fn,label){fs.appendFileSync(path.join(qa,'stages.txt'),labe
   const deniedRole=await js('window.crm.state().then(s=>window.crm.admin("local",["/admin",{method:"GET",path:"/admin/accounts.json"}],s.owner)).then(r=>r.ok===false,()=>true)');assert(deniedRole);
   assert.deepEqual(await js('[...document.querySelectorAll("nav [data-section]")].map(b=>b.innerText)'),['Портфель','Реестр','Показатели','Команда','Скрипты и задачи','Подключение']);
   fs.writeFileSync(path.join(qa,'RESULT.json'),JSON.stringify({passed:true,actualMain:true,actualBackend:true,realPrimaryAdminApi:true,navigationFive:true,nativeRegistry:true,cardEdit:true,versionedWorkbookRoundtrip:true,lostImportAckExactReplay:true,report:true,nativeExcel:true,teamAccounts:true,passwordReset:true,accountDelete:true,forbiddenProfileSwitch:true,managerPreserved:true},null,2));app.quit();
-}catch(e){fs.writeFileSync(path.join(qa,'FAIL.txt'),e.stack||String(e));if(win){try{fs.writeFileSync(path.join(qa,'failure.txt'),await win.webContents.executeJavaScript('document.body.innerText'));fs.writeFileSync(path.join(qa,'failure.png'),(await win.webContents.capturePage()).toPNG());}catch{}}app.quit();setTimeout(()=>app.exit(1),2000);}})();
+}catch(e){fs.writeFileSync(path.join(qa,'FAIL.txt'),e.stack||String(e));if(win){try{fs.writeFileSync(path.join(qa,'failure.txt'),await win.webContents.executeJavaScript('document.body.innerText'));fs.writeFileSync(path.join(qa,'failure.png'),(await win.webContents.capturePage()).toPNG());}catch{}}app.exit(1);}})();

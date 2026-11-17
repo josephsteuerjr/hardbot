@@ -1,0 +1,12 @@
+const {buildSync}=require('esbuild'),vm=require('node:vm'),path=require('node:path'),assert=require('node:assert/strict');
+const base=()=> 'base',first=()=> 'old screen',second=()=> 'current screen',copy=()=> 'copy';
+const context=vm.createContext({window:{hard:{local:base}}});
+vm.runInContext(buildSync({entryPoints:[path.join(__dirname,'../ui/kit/api.ts')],bundle:true,format:'iife',globalName:'Api',write:false}).outputFiles[0].text,context);
+const {hard,setEmbeddedBridge}=context.Api;
+const stopFirst=setEmbeddedBridge({local:first}),stopSecond=setEmbeddedBridge({local:second,copy});
+stopFirst();assert.equal(hard.local,second);assert.equal(hard.copy,copy);
+stopFirst();assert.equal(hard.local,second);
+stopSecond();assert.equal(hard.local,base);assert.equal(hard.copy,undefined);
+const stopThird=setEmbeddedBridge({local:first}),stopFourth=setEmbeddedBridge({local:second});
+stopFourth();assert.equal(hard.local,first);stopThird();assert.equal(hard.local,base);
+console.log('PASS: closing old or current screens restores the correct bridge');

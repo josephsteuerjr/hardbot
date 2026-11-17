@@ -82,10 +82,22 @@ export const hard: Bridge = {
 
 type Listener = (s: { level: "live" | "warn" | "off" | "busy"; text: string }) => void;
 /** Explicit CRM host adapter; main authorizes every call independently. */
+const embeddedBridges:Partial<Bridge>[]=[];
+const embeddedBase=new Map<string,any>();
 export function setEmbeddedBridge(overrides: Partial<Bridge>): () => void {
-  const previous = Object.fromEntries(Object.keys(overrides).map(key => [key, (hard as any)[key]]));
-  Object.assign(hard, overrides);
-  return () => Object.assign(hard, previous);
+  const layer={...overrides};
+  for(const key of Object.keys(layer))if(!embeddedBase.has(key))embeddedBase.set(key,(hard as any)[key]);
+  embeddedBridges.push(layer);Object.assign(hard,layer);
+  return()=>{
+    const index=embeddedBridges.indexOf(layer);if(index<0)return;
+    embeddedBridges.splice(index,1);
+    // A slow old screen can finish after its replacement has installed a bridge.
+    for(const key of Object.keys(layer)){
+      const current=[...embeddedBridges].reverse().find(value=>Object.hasOwn(value,key));
+      (hard as any)[key]=current?(current as any)[key]:embeddedBase.get(key);
+      if(!current)embeddedBase.delete(key);
+    }
+  };
 }
 
 const listeners = new Set<Listener>();

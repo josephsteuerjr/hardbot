@@ -6,7 +6,7 @@ export const CRM_INTERNAL=typeof __HARD_CRM_INTERNAL__!=='undefined'&&__HARD_CRM
 export const CRM_ANALYST_INTERNAL=typeof __HARD_CRM_ANALYST_INTERNAL__!=='undefined'&&__HARD_CRM_ANALYST_INTERNAL__;
 const built = typeof __HARD_PRODUCT__ === "undefined" ? "" : __HARD_PRODUCT__;
 export const PRODUCTS = {
-  crm: { id: "crm", name: CRM_ANALYST_INTERNAL?'Взыскание — Аналитик (внутренний)':CRM_INTERNAL?'Взыскание — Руководитель (внутренний)':"Взыскание — CRM пилот", mode: "field", appId: CRM_ANALYST_INTERNAL?'ru.rimborso.crm.analyst.internal':CRM_INTERNAL?'ru.rimborso.crm.manager.internal':"ru.rimborso.crm.pilot", dataName: CRM_ANALYST_INTERNAL?'crm-analyst-internal':CRM_INTERNAL?'crm-manager-internal':"crm-pilot" },
+  crm: { id: "crm", name: CRM_ANALYST_INTERNAL?'Взыскание — Аналитик (внутренний)':CRM_INTERNAL?'Взыскание — Руководитель (внутренний)':"Взыскание — CRM СНГ", mode: "field", appId: CRM_ANALYST_INTERNAL?'ru.rimborso.crm.analyst.internal':CRM_INTERNAL?'ru.rimborso.crm.manager.internal':"ru.rimborso.crm.pilot", dataName: CRM_ANALYST_INTERNAL?'crm-analyst-internal':CRM_INTERNAL?'crm-manager-internal':"crm-pilot" },
   hard: { id: "hard", name: "Взыскание Хард", mode: "field", appId: "ru.rimborso.hard.field", dataName: "hard" },
   soft: { id: "soft", name: "Взыскание Софт", mode: "field", appId: "ru.rimborso.hard.soft", dataName: "soft" },
   manager: { id: "manager", name: "Взыскание СНГ — Руководитель", mode: "manager", appId: "ru.rimborso.hard.manager", dataName: "manager" },

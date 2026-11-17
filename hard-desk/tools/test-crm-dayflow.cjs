@@ -31,7 +31,7 @@ async function run(){
     const screenshot=async name=>fs.writeFileSync(path.join(qa,name+'.png'),(await win.webContents.capturePage()).toPNG());
     const click=selector=>js('document.querySelector('+JSON.stringify(selector)+').click()');
     const fill=(selector,value)=>js('(()=>{const el=document.querySelector('+JSON.stringify(selector)+');el.value='+JSON.stringify(value)+';el.dispatchEvent(new Event("input",{bubbles:true}));})()');
-    const queue=async()=> (await js('window.crm.queue()')).data.entries;
+    const queue=async()=> (await js('window.crm.queue()')).data.entries.filter(e=>e.action==='command');
     const openForm=async kind=>{await click('[data-action='+kind+']');await until(()=>js('document.querySelector("#dialog").open'),'form '+kind);};
     const submit=async()=>{await js('document.querySelector("#action-form").requestSubmit()');await until(()=>js('!document.querySelector("#dialog").open'),'durable save');};
     if(phase===1){

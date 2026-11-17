@@ -21,7 +21,7 @@ function bind(id: string, handler: () => void) {
   element(id)?.addEventListener("click", handler);
 }
 function draw(done = false, error = "") {
-  element("brand").textContent = "CRM пилот";
+  element("brand").textContent = "CRM СНГ";
   element("version").textContent = state.version;
   element("steps").textContent = state.removing
     ? "Удаление"
@@ -33,15 +33,15 @@ function draw(done = false, error = "") {
       ? "Удаление завершено"
       : "Установка завершена"
     : state.removing
-      ? "Удаление CRM пилота"
-      : "Установка CRM пилота";
+      ? "Удаление CRM СНГ"
+      : "Установка CRM СНГ";
   const description = done
     ? state.removing
       ? "Приложение удалено. Настройки и очередь сохранены."
       : "Приложение готово. При первом запуске откроется отдельная синтетическая база."
     : state.removing
       ? "Будут удалены программа и её ярлыки. Настройки, история проверочного сценария и неотправленные действия сохранятся."
-      : "Программа устанавливается для текущего пользователя. Пилот использует отдельный профиль и очередь. Подключение к пилотному серверу выполняется в настройках.";
+      : "Программа устанавливается для текущего пользователя. После установки войдите в CRM с рабочим логином и паролем.";
   element("main").innerHTML =
     `<h1>${title}</h1><p>${description}</p><div class="path">${escape(state.target)}</div>${error ? `<p class="error">${escape(error)}</p>` : ""}<div class="actions">${done ? `${state.removing ? "" : '<button class="primary" id="launch">Открыть</button>'}<button id="finish">Закрыть</button>` : `<button class="primary" id="apply">${state.removing ? "Удалить" : "Установить"}</button><button id="cancel">Отмена</button>`}</div>`;
   bind("apply", () => void apply());

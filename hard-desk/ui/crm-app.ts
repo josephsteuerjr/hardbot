@@ -1,4 +1,5 @@
 import {mountDeliveryForm} from './crm-delivery';
+import {mountAccount} from './crm-account';
 import {mountRegistry} from './crm-registry';
 import {editClientCard} from './crm-card-editor';
 import {mountManagerReports} from './crm-manager-reports';
@@ -568,8 +569,14 @@ async function portfolio(search = portfolioSearch, offset=portfolioOffset) {
     if (e.key === "Enter") void portfolio($<HTMLInputElement>("search").value,0).catch(reportError);
   };
   if(context.role==='employee'&&crm.platform!=='mobile'){
-    $('view').insertAdjacentHTML('afterbegin',`<div class="toolbar portfolio-context">${button('portfolio-tasks','Задачи')}${button('portfolio-queue','Отправка результатов')}${button('portfolio-script','Скрипт')}${button('portfolio-help','Справка')}</div>`);
+    $('view').querySelector('.portfolio-modes')!.insertAdjacentHTML('beforeend',`<details class="portfolio-context"><summary>Инструменты</summary><div>${button('portfolio-tasks','Задачи')}${button('portfolio-queue','Отправка результатов')}${button('portfolio-script','Скрипт')}${button('portfolio-help','Справка')}</div></details>`);
     bind('portfolio-tasks',()=>go('tasks'));bind('portfolio-queue',()=>go('queue'));bind('portfolio-script',()=>go('script'));bind('portfolio-help',()=>go('help'));
+  }
+  if(!mobile){
+    const modes=$('view').querySelector('.portfolio-modes')!;
+    const filters=$('view').querySelector('.work-filters');
+    if(filters)modes.append(filters);
+    $('view').classList.add('portfolio-desktop');
   }
   document
     .querySelectorAll<HTMLButtonElement>("[data-person]")
@@ -642,6 +649,14 @@ async function renderCard() {
     `<div class="toolbar">${button("back", cardOrigin==='tasks'?'← Задачи':"← Портфель")}${button('card-refresh','Обновить карточку')}${actions.map((k) => `<button data-action="${k}"${k === "call" ? ' class="primary"' : ""}>${labels[k]}</button>`).join("")}</div><section id="card-saves" aria-label="Отправка результатов"></section><div class="tabs">${tabs.map(([id, title]) => `<button data-tab="${id}" class="${tab === id ? "active" : ""}">${title}</button>`).join("")}</div><div class="card-workspace${cardScript?.script ? ' with-script' : ''}"><div id="card-content"></div>${cardScript?.script ? `<aside class="card-script-watermark" aria-label="Скрипт разговора"><h2>${esc(cardScript.script.title)}</h2>${cardScript.script.steps.map((step: any) => `<section><h3>${esc(step.title)}</h3><p>${esc(step.text)}</p></section>`).join('')}<small>Версия ${esc(cardScript.published_revision)}</small></aside>` : ''}</div>`;
   $('back').textContent=cardOrigin==='tasks'?'← Задачи':cardOrigin==='registry'?'← Реестр':'← Портфель';
   bind("back", () => go(cardOrigin));
+  if(crm.platform!=='mobile'){
+    const secondary=[...$('view').querySelectorAll<HTMLButtonElement>('[data-action]')].filter(b=>!['call','visit','delivery'].includes(b.dataset.action!));
+    if(secondary.length){
+      const menu=document.createElement('details');menu.className='card-more-actions';
+      menu.innerHTML='<summary>Другие действия</summary><div></div>';
+      secondary[0].before(menu);menu.lastElementChild!.append(...secondary);
+    }
+  }
   if(['manager','owner','analyst'].includes(context.role)&&card.contracts.some((r:any)=>r.writable_fields?.length)){
     $('card-refresh').insertAdjacentHTML('beforebegin',button('card-edit','Редактировать карточку',true));
     bind('card-edit',async()=>{
@@ -862,7 +877,7 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
       const value =
         saved?.values?.[key] ?? original?.payload?.values?.[key] ?? "";
       const options = context.dropdowns[key];
-      return `<div class="field ${key.includes("comment") ? "span" : ""}"><label for="v-${key}">${esc(def?.title || key)}</label>${options ? `<select id="v-${key}" data-field="${key}"><option value="">Не выбрано</option>${options.map((v: string) => `<option${v === value ? " selected" : ""}>${esc(v)}</option>`).join("")}</select>` : key.includes("comment") ? `<textarea id="v-${key}" data-field="${key}">${esc(value)}</textarea>` : `<input id="v-${key}" data-field="${key}" type="${def?.type === "date" ? "date" : "text"}" value="${esc(value)}">`}<label class="check"><input type="checkbox" data-clear="${key}">Очистить поле</label></div>`;
+      return `<div class="field ${key.includes("comment") ? "span" : ""}"><label for="v-${key}">${esc(({soft_call_status:"Результат звонка",soft_comment:"Комментарий к звонку",soft_comm_date:"Дата звонка",call_status:"Результат выезда",visit_comment:"Комментарий к выезду",visit_date:"Дата выезда"} as Record<string,string>)[key] || def?.title || key)}</label>${options ? `<select id="v-${key}" data-field="${key}"><option value="">Не выбрано</option>${options.map((v: string) => `<option${v === value ? " selected" : ""}>${esc(v)}</option>`).join("")}</select>` : key.includes("comment") ? `<textarea id="v-${key}" data-field="${key}">${esc(value)}</textarea>` : `<input id="v-${key}" data-field="${key}" type="${def?.type === "date" ? "date" : "text"}" value="${esc(value)}">`}<label class="check"><input type="checkbox" data-clear="${key}">Очистить поле</label></div>`;
     })
     .join("");
   dialog.innerHTML = `<form id="action-form"><h2>${esc(labels[kind])}</h2><div class="contracts">${card.contracts.map((c: any, i: number) => `<label class="check"><input type="${singular ? "radio" : "checkbox"}" name="contracts" value="${c.contract_uuid}"${!singular || i === 0 ? " checked" : ""}>${esc(c.external_id)} · ${esc(c.creditor_id)}</label>`).join("")}</div><div class="grid">${controls}${["note", "task"].includes(target) ? `<div class="field span"><label>${target === "task" ? "Задача" : "Заметка"}</label><textarea id="free-text">${esc(saved?.text || original?.payload?.text || "")}</textarea></div>` : ""}${["promise", "reported_payment"].includes(target) ? `<div class="field"><label>Сумма</label><input id="money" inputmode="decimal" value="${esc(saved?.amount || "")}"></div><div class="field"><label>Валюта</label><select id="currency"><option>RUB</option><option>TJS</option><option>UZS</option><option>USD</option></select></div>` : ""}${["promise", "task"].includes(target) ? `<div class="field"><label>Срок · ${esc(Intl.DateTimeFormat().resolvedOptions().timeZone)}</label><input id="due" type="datetime-local" value="${esc(saved?.due || "")}"></div>` : ""}${kind === "correction" ? '<div class="field span"><label>Причина исправления</label><textarea id="reason" required></textarea></div>' : ""}</div><div class="error" id="form-error"></div><div class="actions">${button("cancel", "Закрыть")}${kind === "call" ? button("show-script", "Скрипт") : ""}<button type="submit" class="primary">Сохранить действие</button></div><div id="script-inline"></div></form>`;
@@ -1306,7 +1321,7 @@ async function exchangePage(host:HTMLElement=document.getElementById('view')!) {
   };
   const period = new Date().toISOString().slice(0, 7);
   const target = state.connection.shared
-    ? '<select id="target"><option value="general:pilot">Общий реестр пилота</option></select>'
+    ? '<select id="target"><option value="general:pilot">Общий реестр</option></select>'
     : `<input id="target" value="${state.connection.mode === "synthetic" ? "general:demo" : ""}" placeholder="Идентификатор согласованного реестра">`;
   $("view").innerHTML =
     `<div id="import-recovery"></div><div class="grid"><div class="field"><label>Период</label><input id="period" type="month" value="${period}"></div><div class="field"><label>Реестр</label>${target}</div></div><div class="toolbar" style="margin-top:20px">${button("export-new", "Создать реестр", true)}${button("export-template", "Создать копию существующей книги")}${button("import-file", "Сверить изменения Excel")}</div><div id="exchange-result"></div><p class="muted">Пустая ячейка не стирает данные. Для явной очистки введите [[CLEAR]]. Исходная книга сохраняется.</p>`;
@@ -1436,10 +1451,21 @@ async function connection(host:HTMLElement=document.getElementById('view')!) {
   if(!state || state.ok===false || !state.connection)throw Error(state?.text || 'Не удалось прочитать защищённый профиль CRM.');
   const savedLogins = state.existingLogins || [{source:'manager',label:'Руководитель',available:state.existingManager?.available}];
   const available = savedLogins.filter((entry:any)=>entry.available);
-  const current = state.context ? `<h2>Текущее подключение</h2><p>${state.connection.mode==='synthetic'?'Проверочная база · синтетические данные':esc(state.connection.server)}</p>${button('connection-continue','Открыть портфель',true)}` : '';
+  const current = state.context ? `<h2>Текущее подключение</h2><p>${state.connection.mode==='synthetic'?'Проверочная база · синтетические данные':esc(state.connection.server)}</p>${button('connection-continue','Продолжить работу',true)}` : '';
   $("view").innerHTML =
-    `<div class="help connection-page">${current}<h2>Сохранённый вход</h2><p>${available.length?'Выберите вход из установленной рабочей программы. Сервер подтвердит личность и права.':'Сохранённый вход не найден. Войдите в установленную рабочую программу и повторите проверку.'}</p><div class="actions">${available.map((entry:any)=>`<button ${entry.source==='manager'?'id="existing-manager-connect" ':''}data-existing-source="${esc(entry.source)}" class="primary">${esc(entry.label)}</button>`).join('')}${button('connection-refresh','Проверить снова')}</div>${state.connectionNotice ? `<p role="status">${esc(state.connectionNotice)}</p>` : ''}<details class="connection-testing"><summary>Проверочная среда</summary><h2>Синтетические данные</h2><p>Отдельная база на этом компьютере. Результаты не попадают в рабочий портфель.</p><div class="toolbar"><select id="demo-role" aria-label="Роль в проверочной базе"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option><option value="observer">Наблюдатель другой команды</option><option value="courier">Курьер</option><option value="analyst">Аналитик</option></select>${button('demo-connect','Открыть сценарий')}</div><label class="check"><input id="offline" type="checkbox"${state.offline?' checked':''}>Приостановить отправку для проверки офлайн</label><h2>Отдельный сервер</h2><div class="grid"><div class="field span"><label for="server">HTTPS-адрес</label><input id="server" placeholder="Адрес проверочного сервера"></div><div class="field"><label for="remote-role">Роль входа</label><select id="remote-role"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option></select></div><div class="field"><label for="login">Логин</label><input id="login" autocomplete="username"></div><div class="field"><label for="password">Пароль</label><input id="password" type="password" autocomplete="current-password"></div></div><div class="actions">${button('remote-connect','Войти')}</div></details></div>`;
-  bind('connection-continue',()=>go('portfolio'));
+    `<div class="help connection-page">${current}<h2>Сохранённый вход</h2><p>${available.length?'Выберите вход из установленной рабочей программы. Сервер подтвердит личность и права.':'Сохранённый вход из другой программы не найден.'}</p><div class="actions">${available.map((entry:any)=>`<button ${entry.source==='manager'?'id="existing-manager-connect" ':''}data-existing-source="${esc(entry.source)}" class="primary">${esc(entry.label)}</button>`).join('')}${button('connection-refresh','Проверить снова')}</div>${state.connectionNotice ? `<p role="status">${esc(state.connectionNotice)}</p>` : ''}<details class="connection-testing"><summary>Проверочная среда</summary><h2>Синтетические данные</h2><p>Отдельная база на этом компьютере. Результаты не попадают в рабочий портфель.</p><div class="toolbar"><select id="demo-role" aria-label="Роль в проверочной базе"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option><option value="observer">Наблюдатель другой команды</option><option value="courier">Курьер</option><option value="analyst">Аналитик</option></select>${button('demo-connect','Открыть сценарий')}</div><label class="check"><input id="offline" type="checkbox"${state.offline?' checked':''}>Приостановить отправку для проверки офлайн</label><h2>Отдельный сервер</h2><div class="grid"><div class="field span"><label for="server">HTTPS-адрес</label><input id="server" placeholder="Адрес проверочного сервера"></div><div class="field"><label for="remote-role">Роль входа</label><select id="remote-role"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option></select></div><div class="field"><label for="login">Логин</label><input id="login" autocomplete="username"></div><div class="field"><label for="password">Пароль</label><input id="password" type="password" autocomplete="current-password"></div></div><div class="actions">${button('remote-connect','Войти')}</div></details></div>`;
+  const accountHost=document.createElement('div');
+  $('view').querySelector('.connection-page')!.prepend(accountHost);
+  mountAccount(accountHost,crm,state.account,!!state.context,async()=>{section='connection';await boot();});
+  const savedHeading=[...$('view').querySelectorAll('h2')].find(e=>e.textContent==='Сохранённый вход');
+  if(savedHeading){
+    const savedDetails=document.createElement('details');savedDetails.className='saved-login-options';
+    savedDetails.innerHTML='<summary>Вход из установленной программы</summary>';
+    savedHeading.before(savedDetails);
+    const description=savedHeading.nextElementSibling!,actions=description.nextElementSibling!;
+    savedDetails.append(description,actions);savedHeading.remove();
+  }
+  bind('connection-continue',()=>go(context?.role==='analyst'?'registry':'portfolio'));
   $('view').insertAdjacentHTML('beforeend',`<details class="diagnostics"><summary>Диагностика подключения</summary><div class="actions">${button('diagnostic-run','Проверить и восстановить')}${button('diagnostic-queue','Очередь и сверка')}</div><div id="diagnostic-result" role="status"></div></details>`);
   const diagnose=async(repair=false)=>{
     if(!crm.diagnostics)return;
@@ -1474,7 +1500,7 @@ async function connection(host:HTMLElement=document.getElementById('view')!) {
       value: $<HTMLInputElement>("offline").checked,
     });
     state = await crm.state();
-    $("connection").textContent = state.offline
+    document.getElementById("connection")!.textContent = state.offline
       ? "Проверка офлайн: отправка приостановлена"
       : "Связь включена";
   };
@@ -1502,6 +1528,7 @@ async function connection(host:HTMLElement=document.getElementById('view')!) {
     section = "portfolio";
     await boot();
   });
+  if(!state.testingAllowed)$('view').querySelector('.connection-testing')?.remove();
 }
 async function help() {
   $("view").innerHTML =
