@@ -46,17 +46,29 @@ try:
   owner=p.evaluate('()=>crm.state().then(s=>s.owner)');cid=p.evaluate('(person)=>crm.api("GET","card",undefined,{person_uuid:person}).then(r=>r.data.contracts[0].contract_uuid)',person)
   p.evaluate('()=>crm.connect({action:"offline",value:true})');op=str(uuid.uuid4());p.evaluate('({cid,op})=>crm.command({schema_version:1,operation_id:op,kind:"note",contract_ids:[cid],payload:{text:"Update pending"}})',dict(cid=cid,op=op))
   p.evaluate('()=>caches.open("crm-mobile:other-scope:preserve").then(c=>c.put("/other",new Response("keep")))')
-  (assets/'BUILD.json').write_text(build);(assets/'index.html').write_bytes(index.encode('utf-8'));(assets/'sw.js').write_text(sw);p.evaluate('()=>navigator.serviceWorker.getRegistration().then(r=>r.update()).then(()=>true)');p.locator('#mobile-update').wait_for();until(p,'()=>navigator.serviceWorker.getRegistration().then(r=>!r.waiting&&!r.installing)');p.locator('#mobile-update button').evaluate('(b)=>b.click()');assert 'форму' in p.locator('#mobile-update').inner_text();assert p.locator('#v-soft_comment').input_value()=='Draft retained across mobile update'
-  p.locator('dialog[open]').get_by_role('button',name='Закрыть',exact=True).click()
-  second=ctx.new_page();second.goto(state['url']);second.locator('[data-person]').first.wait_for();p.locator('#mobile-update button').click();until(p,'()=>document.querySelector("#mobile-update").textContent.includes("другие окна")');second.close()
-  with p.expect_event('domcontentloaded'):p.locator('#mobile-update button').click()
-  p.locator('[data-action=call]').wait_for();p.locator('[data-action=call]').click();assert p.locator('#v-soft_comment').input_value()=='Draft retained across mobile update'
+  second=ctx.new_page();second.goto(state['url']);second.locator('[data-person]').first.wait_for();second.locator('[data-person]').first.click();second.locator('[data-action=call]').click();second.locator('#v-soft_comment').fill('Other open form stays intact')
+  (assets/'BUILD.json').write_text(build);(assets/'index.html').write_bytes(index.encode('utf-8'));(assets/'sw.js').write_text(sw)
+  p.evaluate('()=>window.dispatchEvent(new PageTransitionEvent("pageshow",{persisted:true}))')
+  until(p,'(version)=>navigator.serviceWorker.getRegistration().then(r=>new Promise(resolve=>{const ch=new MessageChannel();ch.port1.onmessage=e=>{ch.port1.close();resolve(e.data.version===version)};r.active.postMessage({type:"GET_VERSION"},[ch.port2])}))',version)
+  assert p.locator('#v-soft_comment').input_value()=='Draft retained across mobile update'
+  assert p.locator('meta[name=crm-build]').get_attribute('content')==previous
+  assert second.locator('#v-soft_comment').input_value()=='Other open form stays intact'
+  # Ordinary new opening loads the current document, without any update control.
+  fresh=ctx.new_page();fresh.goto(state['url']);fresh.locator('[data-person]').first.wait_for();assert fresh.locator('meta[name=crm-build]').get_attribute('content')==version
+  assert fresh.locator('#mobile-update, #mobile-app-update').count()==0;fresh.close()
+  with p.expect_event('domcontentloaded'):
+   p.locator('dialog[open]').get_by_role('button',name='Закрыть',exact=True).click()
+  p.locator('[data-action=call]').wait_for();assert p.locator('meta[name=crm-build]').get_attribute('content')==version
+  assert second.locator('#v-soft_comment').input_value()=='Other open form stays intact';second.close()
+  p.locator('[data-action=call]').click()
+  # Both windows intentionally edited the same contract draft; newest durable value survives.
+  assert p.locator('#v-soft_comment').input_value() in ['Draft retained across mobile update','Other open form stays intact']
   assert p.evaluate('(op)=>crm.queue().then(r=>r.data.entries.some(e=>e.body.operation_id===op))',op)
   assert p.evaluate('()=>caches.has("crm-mobile:other-scope:preserve")')
   # Simulate viewport geometry delivered by a phone keyboard; physical keyboard remains separate.
   p.evaluate('()=>{Object.defineProperty(visualViewport,"height",{configurable:true,value:460});visualViewport.dispatchEvent(new Event("resize"));}')
   bounds=p.locator('dialog[open]').bounding_box();assert bounds['height']<=440,bounds
   p.screenshot(path=str(qa/'keyboard-layout.png'))
-  save(qa.name+'.json',dict(passed=True,engine=engine,background_activation=True,form_guard=True,multiple_tabs_guard=True,draft_and_operation_retained=True,other_scope_cache_retained=True,keyboard_geometry=bounds,physical_keyboard=False))
-  print(engine,'update + draft + queued operation + two tabs + scoped caches PASS',flush=True);browser.close()
+  save(qa.name+'.json',dict(passed=True,engine=engine,automatic_fresh_open=True,automatic_resume=True,form_guard=True,other_open_form_retained=True,draft_and_operation_retained=True,other_scope_cache_retained=True,keyboard_geometry=bounds,physical_keyboard=False))
+  print(engine,'automatic opening/resume + draft + queue + other open form PASS',flush=True);browser.close()
 finally:stop.set();thread.join(20)

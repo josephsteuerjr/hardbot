@@ -40,7 +40,7 @@ for engine in ['chromium','webkit']:
    assert p.locator('#v-soft_comment').input_value()=='Open legacy form must survive activation';assert p.locator('#mobile-update').count()==0
    p.locator('dialog[open]').get_by_role('button',name='Закрыть',exact=True).click()
    # A normal reload now uses the new shell; closing every app window is unnecessary.
-   p.reload();until(p,'()=>!!document.querySelector("[data-person], [data-action=call]")');until(p,'()=>!!document.querySelector("#mobile-update")')
+   p.reload();until(p,'()=>!!document.querySelector("[data-person], [data-action=call]")');until(p,'(version)=>document.querySelector("meta[name=crm-build]")?.content===version',current_version)
    assert p.evaluate('()=>crm.state().then(s=>s.owner)')==owner
    assert p.evaluate('()=>crm.draft("qa-actual-legacy").then(r=>r.data.text)')=='Retained original legacy draft'
    assert p.evaluate('(op)=>crm.queue().then(r=>r.data.entries.some(e=>e.body.operation_id===op))',op)

@@ -1,4 +1,4 @@
-"""Recover a poisoned shell cache without deleting business data or another PWA."""
+"""Opening automatically replaces stale shell files without deleting business data."""
 from pathlib import Path
 import argparse,asyncio,hashlib,json,os,sys,threading,time,uuid
 from playwright.sync_api import sync_playwright
@@ -38,15 +38,16 @@ for engine in ['chromium','webkit']:
    person=p.locator('[data-person]').first.get_attribute('data-person');cid=p.evaluate('(id)=>crm.api("GET","card",undefined,{person_uuid:id}).then(r=>r.data.contracts[0].contract_uuid)',person)
    owner=p.evaluate('()=>crm.state().then(s=>s.owner)');p.evaluate('()=>crm.draft("qa-refresh",{text:"Keep encrypted draft"})');p.evaluate('()=>crm.connect({action:"offline",value:true})');op=str(uuid.uuid4());p.evaluate('({cid,op})=>crm.command({schema_version:1,operation_id:op,kind:"note",contract_ids:[cid],payload:{text:"Keep pending result"}})',dict(cid=cid,op=op))
    p.evaluate('()=>{localStorage.setItem("qa-preserve-local-storage","keep");return caches.open("crm-mobile:other-scope:preserve").then(c=>c.put("/other",new Response("keep")))}')
-   p.locator('#mobile-more').click();p.locator('.mobile-menu').get_by_role('button',name='Подключение').click();p.locator('#mobile-app-update').wait_for()
    cache_name=p.evaluate('(v)=>navigator.serviceWorker.getRegistration().then(r=>"crm-mobile:"+encodeURIComponent(r.scope)+":"+v)',version)
-   p.evaluate('(name)=>caches.open(name).then(async c=>{await c.put(new URL("./index.html",location.href),new Response("stale-html"));await c.put(new URL("./app.js",location.href),new Response("stale-js"))})',cache_name)
    cached_js='(name)=>caches.open(name).then(c=>c.match(new URL("./app.js",location.href))).then(r=>r.text())'
-   state['mode']='fail';p.locator('#mobile-app-update').click();until(p,'()=>document.querySelector("#mobile-update").textContent.includes("Не удалось проверить")');assert p.evaluate(cached_js,cache_name)=='stale-js'
-   state['mode']='bad-js';p.locator('#mobile-app-update').click();until(p,'()=>document.querySelector("#mobile-update").textContent.includes("Пакет обновления изменился")');assert p.evaluate(cached_js,cache_name)=='stale-js'
+   original=p.evaluate(cached_js,cache_name)
+   # Unreachable server and a bad new response preserve the last verified shell.
+   state['mode']='fail';p.reload();p.locator('[data-person]').first.wait_for();assert p.evaluate(cached_js,cache_name)==original
+   state['mode']='bad-js';p.reload();p.locator('[data-person]').first.wait_for();assert p.evaluate(cached_js,cache_name)==original
    state['mode']='normal'
-   with p.expect_event('domcontentloaded'):p.locator('#mobile-app-update').click()
-   p.locator('#mobile-app-update').wait_for();assert p.locator('meta[name=crm-build]').get_attribute('content')==version
+   p.evaluate('(name)=>caches.open(name).then(async c=>{await c.put(new URL("./index.html",location.href),new Response("stale-html"));await c.put(new URL("./app.js",location.href),new Response("stale-js"))})',cache_name)
+   p.close();p=ctx.new_page();p.goto(state['url']);p.locator('[data-person]').first.wait_for()
+   assert p.locator('meta[name=crm-build]').get_attribute('content')==version;assert p.locator('#mobile-update, #mobile-app-update').count()==0
    actual=p.evaluate(cached_js,cache_name);assert hashlib.sha256(actual.encode()).hexdigest()==hashlib.sha256((assets/'app.js').read_bytes()).hexdigest()
    assert p.evaluate('()=>crm.state().then(s=>s.owner)')==owner
    assert p.evaluate('()=>crm.draft("qa-refresh").then(r=>r.data.text)')=='Keep encrypted draft'
@@ -54,7 +55,7 @@ for engine in ['chromium','webkit']:
    assert p.evaluate('()=>localStorage.getItem("qa-preserve-local-storage")')=='keep'
    assert p.evaluate('()=>caches.has("crm-mobile:other-scope:preserve")')
    # Same genuine SW fallback for both engines, avoiding WebKit's DevTools-offline bug.
-   state['mode']='fail';p.reload();p.locator('#mobile-app-update').wait_for();assert p.locator('meta[name=crm-build]').get_attribute('content')==version
-   p.screenshot(path=str(qa/'refreshed.png'));rows.append(dict(engine=engine,passed=True,poisoned_shell_replaced=True,failed_network_preserves_cache=True,wrong_asset_hash_preserves_cache=True,owner_draft_queue_preserved=True,localstorage_preserved=True,other_scope_preserved=True,server_503_cold_fallback=True,output=str(qa)));browser.close();print(engine,'force refresh + corruption + network failure + data preservation PASS',flush=True)
+   state['mode']='fail';p.reload();p.locator('[data-person]').first.wait_for();assert p.locator('meta[name=crm-build]').get_attribute('content')==version
+   p.screenshot(path=str(qa/'refreshed.png'));rows.append(dict(engine=engine,passed=True,automatic_fresh_open=True,poisoned_shell_replaced=True,failed_network_preserves_cache=True,wrong_asset_hash_preserves_cache=True,owner_draft_queue_preserved=True,localstorage_preserved=True,other_scope_preserved=True,server_503_cold_fallback=True,output=str(qa)));browser.close();print(engine,'automatic fresh opening + poisoned cache + offline/data preservation PASS',flush=True)
  finally:stop.set();thread.join(20)
 (B/'RESULT.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')

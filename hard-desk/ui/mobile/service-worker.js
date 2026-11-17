@@ -61,5 +61,20 @@ self.addEventListener('fetch',event=>{
   }
   if(!ASSETS.includes(name))return;
   if(url.searchParams.has('v')&&url.searchParams.get('v')!==VERSION){event.respondWith(fetch(request,{cache:'no-store'}));return;}
+  if(name==='./app.js'||name==='./app.css'){
+    event.respondWith((async()=>{
+      const cache=await caches.open(CACHE),hit=await cache.match(assetURL(name));
+      const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),hit?5000:30000);
+      try{
+        const response=await fetch(request,{cache:'no-store',signal:abort.signal});
+        if(!response.ok)return hit||response;
+        const digest=await crypto.subtle.digest('SHA-256',await response.clone().arrayBuffer());
+        const hash=Array.from(new Uint8Array(digest),n=>n.toString(16).padStart(2,'0')).join('');
+        if(hash!==HASHES[name]){if(hit)return hit;throw Error('Shell version mismatch');}
+        await cache.put(assetURL(name),response.clone());return response;
+      }catch(error){if(hit)return hit;throw error;}
+      finally{clearTimeout(timer);}
+    })());return;
+  }
   event.respondWith(caches.open(CACHE).then(cache=>cache.match(assetURL(name))).then(hit=>hit||fetch(request,{cache:'no-store'})));
 });
