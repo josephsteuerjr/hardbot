@@ -22,8 +22,9 @@ from crm.mobile_backend import SyntheticBackend
 import crm.mobile_server as server
 qa=BASE/('update-'+args.engine+'-'+str(int(time.time())));qa.mkdir(exist_ok=False);assets=qa/'web';shutil.copytree(args.assets,assets);server.ASSETS=assets
 sw=(assets/'sw.js').read_text();version=json.loads((assets/'BUILD.json').read_text())['version']
-# Start with the actual predecessor's global cache name and no skip-waiting handler.
-legacy=sw.replace("const PREFIX='crm-mobile:'+encodeURIComponent(self.registration.scope)+':',CACHE=PREFIX+'"+version+"'", "const PREFIX='legacy-only:',CACHE='crm-mobile-legacy-stage3'")
+# Two complete shell versions: activation must not interrupt the loaded old UI.
+legacy=sw.replace("const VERSION='"+version+"'", "const VERSION='"+version+"-previous'")
+index=(assets/'index.html').read_text();(assets/'index.html').write_text(index.replace(version,version+'-previous'))
 (assets/'sw.js').write_text(legacy)
 stop=threading.Event();state={}
 async def serve():
@@ -41,7 +42,7 @@ try:
   owner=p.evaluate('()=>crm.state().then(s=>s.owner)');cid=p.evaluate('(person)=>crm.api("GET","card",undefined,{person_uuid:person}).then(r=>r.data.contracts[0].contract_uuid)',person)
   p.evaluate('()=>crm.connect({action:"offline",value:true})');op=str(uuid.uuid4());p.evaluate('({cid,op})=>crm.command({schema_version:1,operation_id:op,kind:"note",contract_ids:[cid],payload:{text:"Update pending"}})',dict(cid=cid,op=op))
   p.evaluate('()=>caches.open("crm-mobile:other-scope:preserve").then(c=>c.put("/other",new Response("keep")))')
-  (assets/'sw.js').write_text(sw);p.evaluate('()=>navigator.serviceWorker.getRegistration().then(r=>r.update()).then(()=>true)');p.locator('#mobile-update').wait_for();p.locator('#mobile-update button').evaluate('(b)=>b.click()');assert 'форму' in p.locator('#mobile-update').inner_text();assert p.locator('#v-soft_comment').input_value()=='Draft retained across mobile update'
+  (assets/'index.html').write_text(index);(assets/'sw.js').write_text(sw);p.evaluate('()=>navigator.serviceWorker.getRegistration().then(r=>r.update()).then(()=>true)');p.locator('#mobile-update').wait_for();until(p,'()=>navigator.serviceWorker.getRegistration().then(r=>!r.waiting&&!r.installing)');p.locator('#mobile-update button').evaluate('(b)=>b.click()');assert 'форму' in p.locator('#mobile-update').inner_text();assert p.locator('#v-soft_comment').input_value()=='Draft retained across mobile update'
   p.locator('dialog[open]').get_by_role('button',name='Закрыть',exact=True).click()
   second=ctx.new_page();second.goto(state['url']);second.locator('[data-person]').first.wait_for();p.locator('#mobile-update button').click();until(p,'()=>document.querySelector("#mobile-update").textContent.includes("другие окна")');second.close()
   with p.expect_navigation():p.locator('#mobile-update button').click()
@@ -52,6 +53,6 @@ try:
   p.evaluate('()=>{Object.defineProperty(visualViewport,"height",{configurable:true,value:460});visualViewport.dispatchEvent(new Event("resize"));}')
   bounds=p.locator('dialog[open]').bounding_box();assert bounds['height']<=440,bounds
   p.screenshot(path=str(qa/'keyboard-layout.png'))
-  save(qa.name+'.json',dict(passed=True,engine=engine,legacy_worker_upgrade=True,form_guard=True,multiple_tabs_guard=True,draft_and_operation_retained=True,other_scope_cache_retained=True,keyboard_geometry=bounds,physical_keyboard=False))
+  save(qa.name+'.json',dict(passed=True,engine=engine,background_activation=True,form_guard=True,multiple_tabs_guard=True,draft_and_operation_retained=True,other_scope_cache_retained=True,keyboard_geometry=bounds,physical_keyboard=False))
   print(engine,'update + draft + queued operation + two tabs + scoped caches PASS',flush=True);browser.close()
 finally:stop.set();thread.join(20)

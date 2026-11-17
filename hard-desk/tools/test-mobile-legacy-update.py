@@ -34,10 +34,13 @@ for engine in ['chromium','webkit']:
    assert p.locator('.card-script-watermark').count()==1;assert p.locator('#mobile-update').count()==0
    owner=p.evaluate('()=>crm.state().then(s=>s.owner)');p.evaluate('()=>crm.draft("qa-actual-legacy",{text:"Retained original legacy draft"})');p.screenshot(path=str(qa/'old-app.png'))
    cid=p.evaluate('(person)=>crm.api("GET","card",undefined,{person_uuid:person}).then(r=>r.data.contracts[0].contract_uuid)',person);op=str(uuid.uuid4());p.evaluate('()=>crm.connect({action:"offline",value:true})');p.evaluate('({cid,op})=>crm.command({schema_version:1,operation_id:op,kind:"note",contract_ids:[cid],payload:{text:"Preserved legacy queue"}})',dict(cid=cid,op=op))
-   mobile.ASSETS=CURRENT;p.evaluate('()=>navigator.serviceWorker.getRegistration().then(r=>r.update()).then(()=>true)');until(p,'()=>navigator.serviceWorker.getRegistration().then(r=>!!r.waiting)')
-   # Reloading an open old app still uses the old active worker and has no update UI.
-   p.reload();until(p,'()=>!!document.querySelector("[data-person], [data-action=call]")');assert p.locator('#mobile-update').count()==0
-   p.close();p=ctx.new_page();p.goto(state['url']);until(p,'()=>!!document.querySelector("[data-person], [data-action=call]")');until(p,'()=>!!document.querySelector("#mobile-update")')
+   p.locator('[data-action=call]').click();p.locator('#v-soft_comment').fill('Open legacy form must survive activation')
+   mobile.ASSETS=CURRENT;p.evaluate('()=>navigator.serviceWorker.getRegistration().then(r=>r.update()).then(()=>true)')
+   until(p,'(version)=>navigator.serviceWorker.getRegistration().then(r=>new Promise(resolve=>{const ch=new MessageChannel(),timer=setTimeout(()=>{ch.port1.close();resolve(false)},500);ch.port1.onmessage=e=>{clearTimeout(timer);ch.port1.close();resolve(e.data.version===version)};r.active.postMessage({type:"GET_VERSION"},[ch.port2])}))',current_version)
+   assert p.locator('#v-soft_comment').input_value()=='Open legacy form must survive activation';assert p.locator('#mobile-update').count()==0
+   p.locator('dialog[open]').get_by_role('button',name='Закрыть',exact=True).click()
+   # A normal reload now uses the new shell; closing every app window is unnecessary.
+   p.reload();until(p,'()=>!!document.querySelector("[data-person], [data-action=call]")');until(p,'()=>!!document.querySelector("#mobile-update")')
    assert p.evaluate('()=>crm.state().then(s=>s.owner)')==owner
    assert p.evaluate('()=>crm.draft("qa-actual-legacy").then(r=>r.data.text)')=='Retained original legacy draft'
    assert p.evaluate('(op)=>crm.queue().then(r=>r.data.entries.some(e=>e.body.operation_id===op))',op)
@@ -45,6 +48,6 @@ for engine in ['chromium','webkit']:
    for tab in ['history','tasks','promises']:
     p.locator('[data-tab='+tab+']').click();assert p.locator('.card-script-watermark').count()==0
    p.screenshot(path=str(qa/'updated-app.png'));browser.close()
-   results.append(dict(engine=engine,passed=True,original_bundle=previous_version,current_bundle=current_version,original_has_no_update_button=True,reload_stays_old=True,close_all_and_reopen_updates=True,owner_draft_queue_retained=True,tabs_fixed=True,output=str(qa)));print(engine,'actual old UI + worker, reopen, preserved draft and operation PASS',flush=True)
+   results.append(dict(engine=engine,passed=True,original_bundle=previous_version,current_bundle=current_version,original_has_no_update_button=True,background_activation=True,open_legacy_form_retained=True,normal_reload_updates=True,owner_draft_queue_retained=True,tabs_fixed=True,output=str(qa)));print(engine,'actual old UI + worker, normal reload, preserved form, draft and operation PASS',flush=True)
  finally:stop.set();thread.join(20)
 (B/'ACTUAL-LEGACY.private.json').write_text(json.dumps(results,ensure_ascii=False,indent=2),encoding='utf-8')

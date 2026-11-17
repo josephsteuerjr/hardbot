@@ -53,7 +53,7 @@ const labels: Record<string, string> = {
   source_sync: 'Сверка прежнего приложения',
   registry_edit: 'Правка реестра',
   visit: "Выезд",
-  delivery: 'Передать конверт',
+  delivery: 'Результат доставки',
   note: "Заметка",
   contact: "Контакты",
   promise: "Обещание",
