@@ -3,6 +3,7 @@
 No exchange/accounting grant is manufactured. Registry corrections share the
 canonical projection and revisions, but are never contact/work facts.
 """
+from collections import defaultdict
 import json
 import re
 import uuid
@@ -23,9 +24,9 @@ MANAGER_FIELDS = {f['key'] for f in fields() if not f.get('readonly')} - {
     'contract_id', 'responsible', 'responsible_soft'}
 
 
-def manager_scope(conn, principal):
+def manager_scope(conn, principal, *, candidates=None):
     if principal.owner:
-        return access.scoped_contracts(conn, principal, include_tasks=False)
+        return candidates if candidates is not None else access.scoped_contracts(conn, principal, include_tasks=False)
     if principal.role not in {'manager','analyst'} or 'accounting' not in principal.capabilities:
         return set()
     at = now()
@@ -35,6 +36,8 @@ def manager_scope(conn, principal):
     allowed_roles={'manager','analyst'} if principal.role=='analyst' else {'manager'}
     if not current or current['role'] not in allowed_roles:
         return set()
+    if principal.all_contracts and candidates is not None:
+        return candidates
     result = access.scoped_contracts(conn, principal, include_tasks=False)
     if 'assign' in principal.capabilities:
         result.update(r[0] for r in conn.execute(
@@ -63,16 +66,18 @@ def writable(conn, principal, row, **scopes):
         enabled=writable_contracts(conn,[row['contract_uuid']]);scopes['enabled']=enabled
     if row['contract_uuid'] not in enabled:return []
     managed = scopes.pop('manager_scope', None)
+    managed_all = scopes.pop('managed_all', False)
     if managed is None:
         managed = manager_scope(conn, principal)
     if row['contract_uuid'] in managed:
         keys = set(MANAGER_FIELDS)
         # A person's name is shared by all their contracts. Partial visibility
         # must never grant the ability to change somebody else's card.
-        person_contracts = {r[0] for r in conn.execute(
-            'SELECT contract_uuid FROM crm_contracts WHERE person_uuid=?', (row['person_uuid'],))}
-        if not person_contracts <= managed:
-            keys.discard('client')
+        if not managed_all:
+            person_contracts = {r[0] for r in conn.execute(
+                'SELECT contract_uuid FROM crm_contracts WHERE person_uuid=?', (row['person_uuid'],))}
+            if not person_contracts <= managed:
+                keys.discard('client')
         return sorted(keys)
     actions = set(access.writable_actions(conn, principal, row['contract_uuid'], **scopes))
     # Contact capability alone must not turn common visibility into ownership.
@@ -81,15 +86,27 @@ def writable(conn, principal, row, **scopes):
             if capability in actions and (capability != 'contact' or work)]
 
 
-def source_details(conn, row):
+SOURCE_TABLES = ('crm_registry_rows', 'crm_authority_rows')
+
+
+def _source_rows(conn, ids):
+    rows = defaultdict(list)
+    if ids:
+        placeholders = ','.join('?' for _ in ids)
+        for table in SOURCE_TABLES:
+            for item in conn.execute('SELECT contract_uuid,record_json FROM ' + table +
+                                     ' WHERE contract_uuid IN (' + placeholders + ')', ids):
+                rows[item['contract_uuid']].append(json.loads(item['record_json']))
+    return rows
+
+
+def source_details(conn, row, *, originals=None, totals=None):
     """Business-only DTO. Never expose arbitrary raw source/authentication JSON."""
-    originals = []
-    for table in ('crm_registry_rows', 'crm_authority_rows'):
-        item = conn.execute('SELECT record_json FROM ' + table + ' WHERE contract_uuid=?',
-                            (row['contract_uuid'],)).fetchone()
-        if item:
-            raw = json.loads(item[0])
-            originals.append(raw)
+    if originals is None:
+        originals = _source_rows(conn, [row['contract_uuid']]).get(row['contract_uuid'], ())
+    if totals is None:
+        totals = conn.execute('SELECT month,amount,currency,source_column FROM crm_monthly_totals '
+                              'WHERE contract_uuid=? ORDER BY month', (row['contract_uuid'],))
     present = set()
     extras = []
     seen = set()
@@ -109,8 +126,7 @@ def source_details(conn, row):
             if identity not in seen:
                 seen.add(identity)
                 extras.append(dict(key='extra_'+digest(identity)[:24],title=title,value=value,present=True))
-    for total in conn.execute('SELECT month,amount,currency,source_column FROM crm_monthly_totals WHERE contract_uuid=? ORDER BY month',
-                              (row['contract_uuid'],)):
+    for total in totals:
         title=total['source_column'] or (total['month']+' · Поступления по реестру')
         if not SENSITIVE.search(title) and not any(extra['title']==title for extra in extras):
             extras.append(dict(key='monthly_'+total['month'],title=title,value=total['amount'],currency=total['currency'],present=True))
@@ -139,16 +155,20 @@ def read(principal, *, search='', view='mine', sort='contract_id', direction='as
         raise CRMError('Некорректные внутренние ID строк.')
     with storage.connect(readonly=True) as conn:
         from . import tasks
-        direct=access.scoped_contracts(conn,principal,include_tasks=False)
-        delegated=tasks.grants(conn,principal)
-        write_scope=direct | set(delegated)
-        managed=manager_scope(conn,principal)
+        full_scope = principal.owner or principal.all_contracts
         conditions, args = [], []
-        allowed = access.scoped_contracts(conn, principal) if view == 'mine' else (
-            None if access.reads_all(principal) else access.readable_contracts(conn, principal))
+        allowed = None
+        if view == 'mine' and not full_scope:
+            allowed = access.scoped_contracts(conn, principal)
+        elif view == 'all' and not access.reads_all(principal):
+            allowed = access.readable_contracts(conn, principal)
         if allowed is not None:
-            conditions.append('c.contract_uuid IN (' + ','.join('?' for _ in allowed) + ')' if allowed else '1=0')
-            args.extend(sorted(allowed))
+            if storage.is_postgres(conn):
+                conditions.append('c.contract_uuid = ANY(?::text[])')
+                args.append(sorted(allowed))
+            else:
+                conditions.append('c.contract_uuid IN (' + ','.join('?' for _ in allowed) + ')' if allowed else '1=0')
+                args.extend(sorted(allowed))
         if selected is not None:
             conditions.append('c.contract_uuid IN ('+','.join('?' for _ in selected)+')');args.extend(selected)
         if employee_uuid or work!='all' or str(unassigned)!='0':
@@ -171,17 +191,41 @@ def read(principal, *, search='', view='mine', sort='contract_id', direction='as
             # Text ordering stays deterministic without risky implicit casts.
         rows = conn.execute('SELECT c.*,p.name AS client_name' + base + ' ORDER BY ' + expression
                             + ' ' + direction + ',c.contract_uuid LIMIT ? OFFSET ?', (*args, limit, offset)).fetchall()
+        ids_on_page = [row['contract_uuid'] for row in rows]
+        page_ids = set(ids_on_page)
+        direct = page_ids if full_scope else access.scoped_contracts(conn, principal, include_tasks=False)
+        delegated = tasks.grants(conn, principal)
+        write_scope = direct | set(delegated)
+        managed = manager_scope(conn, principal, candidates=page_ids if full_scope else None)
         from .primary_fence import writable_contracts
-        enabled=writable_contracts(conn,[row['contract_uuid'] for row in rows])
+        enabled=writable_contracts(conn,ids_on_page)
+        originals = _source_rows(conn, ids_on_page)
+        totals = defaultdict(list)
+        calls = defaultdict(set)
+        if ids_on_page:
+            placeholders = ','.join('?' for _ in ids_on_page)
+            for total in conn.execute('SELECT contract_uuid,month,amount,currency,source_column '
+                                      'FROM crm_monthly_totals WHERE contract_uuid IN (' + placeholders + ') ORDER BY month',
+                                      ids_on_page):
+                totals[total['contract_uuid']].append(total)
+            at = now()
+            for row in conn.execute('SELECT a.contract_uuid,e.name FROM crm_effective_assignments a '
+                                    "JOIN crm_employees e USING(employee_uuid) WHERE a.capability='call' "
+                                    'AND a.contract_uuid IN (' + placeholders + ') AND a.starts_at<=? '
+                                    'AND (a.ends_at IS NULL OR a.ends_at>?)', (*ids_on_page, at, at)):
+                calls[row['contract_uuid']].add(row['name'])
+        from .assignments import responsibility_fields
+        assignments = responsibility_fields(conn, ids_on_page)
         output = [];columns=definitions();extra_keys=set()
         for raw in rows:
             row = dict(raw)
-            from .assignments import effective_fields
-            values=effective_fields(conn,row['contract_uuid'],json.loads(row['fields_json']))
+            cid = row['contract_uuid']
+            values = json.loads(row['fields_json'])
+            values.update(assignments.get(cid, {}))
             if 'responsible_soft' not in values:
-                names=[r[0] for r in conn.execute("SELECT DISTINCT e.name FROM crm_effective_assignments a JOIN crm_employees e USING(employee_uuid) WHERE a.contract_uuid=? AND a.capability='call' AND a.starts_at<=? AND (a.ends_at IS NULL OR a.ends_at>?)",(row['contract_uuid'],now(),now()))]
-                values['responsible_soft']=names[0] if len(names)==1 else 'Не назначен' if not names else 'Требует сверки'
-            for extra in source_details(conn,row)['extras']:
+                names = calls.get(cid, ())
+                values['responsible_soft'] = next(iter(names)) if len(names) == 1 else 'Не назначен' if not names else 'Требует сверки'
+            for extra in source_details(conn, row, originals=originals.get(cid, ()), totals=totals.get(cid, ()))['extras']:
                 key=extra['key'];value=extra['value']
                 values[key]=str(value)+' '+extra['currency'] if value is not None and extra.get('currency') else value
                 if key not in extra_keys:
@@ -191,7 +235,8 @@ def read(principal, *, search='', view='mine', sort='contract_id', direction='as
             output.append(dict(contract_uuid=row['contract_uuid'], person_uuid=row['person_uuid'],external_id=row['external_id'],
                 creditor_id=row['creditor_id'], currency=row['currency'], client_name=row['client_name'],
                 fields=values, revisions=json.loads(row['revisions_json']),
-                writable_fields=writable(conn, principal, row,scope=write_scope,direct_scope=direct,delegated=delegated,manager_scope=managed,enabled=enabled)))
+                writable_fields=writable(conn, principal, row,scope=write_scope,direct_scope=direct,delegated=delegated,
+                                         manager_scope=managed,managed_all=full_scope and bool(managed),enabled=enabled)))
         return dict(schema_version=1, columns=columns, rows=output, total=total, offset=offset,
                     has_more=offset+len(output)<total)
 

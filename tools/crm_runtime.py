@@ -8,27 +8,10 @@ from crm.contract import canonical,digest
 
 
 def review_cutover(ids):
-    rows = []
-    with storage.connect(readonly=True) as conn:
-        for start in range(0, len(ids), 200):
-            rows.extend(primary_fence._projection_rows(conn, ids[start:start+200]))
-    with primary_fence.connect(readonly=True) as primary:
-        drift = dict(responsible=0, responsible_soft=0)
-        for row in rows:
-            current = primary.execute(
-                'SELECT partner,responsible,responsible_soft FROM clients WHERE contract_id=?',
-                (row['legacy_id'],),
-            ).fetchone()
-            if not current or row['creditor_id'] != 'registry-partner:'+str(current['partner'] or '').strip():
-                raise ValueError('Primary identity mismatch')
-            row['primary_assignments'] = {
-                field: current[field] or '' for field in drift
-            }
-            for field, value in row['primary_assignments'].items():
-                if value != row[field]:
-                    drift[field] += 1
-    return dict(contracts=len(ids), selection_sha256=digest(rows), ids_sha256=digest(ids),
-                assignment_differences=drift, old_work_writes='will_close', activated=False)
+    with storage.connect(readonly=True) as conn, primary_fence.connect(readonly=True) as primary:
+        primary.execute('BEGIN')
+        review = primary_fence.cutover_review(primary_fence._cutover_rows(conn, primary, ids))
+    return dict(review, contracts=len(ids), ids_sha256=digest(ids), old_work_writes='will_close', activated=False)
 
 
 def main():
@@ -50,7 +33,7 @@ def main():
                 raise ValueError('The reviewed contract selection and current assignments must match')
             if any(review['assignment_differences'].values()):
                 raise ValueError('Reconcile the current assignee differences before activation')
-            print(canonical(primary_fence.activate(ids)));return
+            print(canonical(primary_fence.activate(ids, expected_sha256=args.expected_sha256)));return
         print(canonical(review));return
     with storage.connect(readonly=True) as conn:
         meta={r[0]:r[1] for r in conn.execute("SELECT key,value FROM crm_meta WHERE key IN ('schema_version','distribution_mode','primary_fence_id')")}

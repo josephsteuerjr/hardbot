@@ -21,11 +21,19 @@ MAX_JOB_SLOTS = 200000
 
 def effective_fields(conn, contract_id, values):
     """Current responsibility is a projection, never an editable source grant."""
-    values=dict(values)
-    for r in conn.execute('SELECT h.capability,h.employee_uuid,e.name FROM crm_assignment_heads h '
-            'LEFT JOIN crm_employees e USING(employee_uuid) WHERE h.contract_uuid=?',(contract_id,)):
-        values['responsible_soft' if r['capability']=='call' else 'responsible']=r['name'] if r['employee_uuid'] else 'Не назначен'
-    return values
+    return dict(values, **responsibility_fields(conn, [contract_id]).get(contract_id, {}))
+
+
+def responsibility_fields(conn, ids):
+    result = defaultdict(dict)
+    if ids:
+        placeholders = ','.join('?' for _ in ids)
+        for row in conn.execute('SELECT h.contract_uuid,h.capability,h.employee_uuid,e.name FROM crm_assignment_heads h '
+                                'LEFT JOIN crm_employees e USING(employee_uuid) WHERE h.contract_uuid IN ('
+                                + placeholders + ')', ids):
+            field = 'responsible_soft' if row['capability'] == 'call' else 'responsible'
+            result[row['contract_uuid']][field] = row['name'] if row['employee_uuid'] else 'Не назначен'
+    return result
 
 
 def readiness(conn, principal):

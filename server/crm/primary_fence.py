@@ -5,6 +5,7 @@ old writes closed, never two enabled writers. Projections use a permit inserted 
 removed in the same SQLite write transaction, invisible to other writers. No SQL
 function is required in old clients. The selected database is never inferred.
 """
+from collections import defaultdict
 from contextlib import contextmanager
 import json
 import os
@@ -234,7 +235,57 @@ def source_removal(conn,cid,field):
     return True
 
 
-def _projection_rows(conn, ids):
+ASSIGNMENT_FIELDS = {'call': ('responsible_soft', 'soft'), 'visit': ('responsible', 'hard')}
+NO_ASSIGNEE = {'', 'не закреплен', 'нет', 'не назначен'}
+
+
+def _label(value):
+    return ' '.join(str(value or '').casefold().replace('ё', 'е').split())
+
+
+def _primary_aliases(conn, primary):
+    aliases = defaultdict(set)
+    declared = defaultdict(set)
+    staff = {}
+    def add(employee, name, products=('soft', 'hard')):
+        if _label(name) not in NO_ASSIGNEE:
+            for product in products:
+                aliases[product, _label(name)].add(employee)
+    for row in conn.execute('SELECT employee_uuid,staff_id,name FROM crm_employees'):
+        staff[row['staff_id']] = row['employee_uuid']
+        add(row['employee_uuid'], row['name'])
+    tables = {row[0] for row in primary.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if {'employee_identities', 'staff_roster'} <= tables:
+        for row in primary.execute('SELECT i.id,i.display_name,s.product_names,s.active FROM employee_identities i '
+                                   'LEFT JOIN staff_roster s ON i.id=s.employee_id'):
+            employee = staff.get('authority-staff:' + str(row['id']))
+            if employee:
+                add(employee, row['display_name'])
+                for product, value in json.loads(row['product_names'] or '{}').items():
+                    if product in {'soft', 'hard'}:
+                        add(employee, value, (product,))
+                        if row['active'] and _label(value) not in NO_ASSIGNEE:
+                            declared[product, _label(value)].add(employee)
+    if 'employee_aliases' in tables:
+        for row in primary.execute('SELECT employee_id,name FROM employee_aliases'):
+            employee = staff.get('authority-staff:' + str(row['employee_id']))
+            if employee:
+                add(employee, row['name'])
+    if 'accounts' in tables:
+        actors = {row[0]: row[1] for row in conn.execute(
+            'SELECT l.actor_uid,l.employee_uuid FROM crm_actor_links l JOIN crm_employees e USING(employee_uuid) '
+            'WHERE l.active=1 AND e.active=1')}
+        for row in primary.execute("SELECT telegram_id,employee FROM accounts WHERE status='active' AND role='agent'"):
+            employee = actors.get(row['telegram_id'])
+            if employee:
+                add(employee, row['employee'])
+    # The approved spelling for a product is more specific than a display
+    # name or older generic alias. Multiple declarations still require review.
+    aliases.update(declared)
+    return aliases
+
+
+def _projection_rows(conn, ids, *, primary=None, aliases=None):
     from .assignments import states
     values=states(conn,ids);names={r[0]:r[1] for r in conn.execute('SELECT employee_uuid,name FROM crm_employees')}
     rows=[]
@@ -243,12 +294,46 @@ def _projection_rows(conn, ids):
         row=records.get(cid)
         if not row or not row['legacy_id']:raise CRMError('Договор не сопоставлен с прежним реестром.','cutover_unmapped',409)
         item=dict(row)
-        for work,field in [('call','responsible_soft'),('visit','responsible')]:
+        if primary is not None:
+            current = primary.execute('SELECT partner,responsible,responsible_soft FROM clients WHERE contract_id=?',
+                                      (row['legacy_id'],)).fetchone()
+            if not current or 'registry-partner:'+str(current['partner'] or '').strip() != row['creditor_id']:
+                raise CRMError('Изменилась личность договора в прежнем реестре.','cutover_identity_changed',409)
+            item['primary_assignments'] = {field: current[field] or '' for field, _ in ASSIGNMENT_FIELDS.values()}
+            item['assignment_employee_uuids'] = {}
+            item['ambiguous_spellings'] = []
+        for work, (field, product) in ASSIGNMENT_FIELDS.items():
             state=values[cid,work]
             if state['ambiguous']:raise CRMError('Неоднозначное исходное назначение.','cutover_ambiguous',409)
-            item[field]=names[state['employee_uuid']] if state['employee_uuid'] else ''
+            employee = state['employee_uuid']
+            item[field] = names[employee] if employee else ''
+            if primary is not None:
+                item['assignment_employee_uuids'][field] = employee
+                existing = item['primary_assignments'][field]
+                choices = aliases.get((product, _label(existing)), set())
+                if choices and choices != {employee}:
+                    item['ambiguous_spellings'].append(field)
+                if ((employee and choices == {employee})
+                        or (not employee and _label(existing) in NO_ASSIGNEE)):
+                    item[field] = existing
         rows.append(item)
     return rows
+
+
+def _cutover_rows(conn, primary, ids):
+    aliases = _primary_aliases(conn, primary)
+    rows = []
+    for start in range(0, len(ids), 200):
+        rows.extend(_projection_rows(conn, ids[start:start + 200], primary=primary, aliases=aliases))
+    return rows
+
+
+def cutover_review(rows):
+    differences = {
+        field: sum(row[field] != row['primary_assignments'][field] or field in row['ambiguous_spellings'] for row in rows)
+        for field, _ in ASSIGNMENT_FIELDS.values()
+    }
+    return dict(assignment_differences=differences, selection_sha256=digest(rows))
 
 
 def _project(primary, rows):
@@ -263,7 +348,7 @@ def _project(primary, rows):
                 (row['responsible'],row['responsible_soft'],row['legacy_id']))
 
 
-def activate(ids):
+def activate(ids, *, expected_sha256=None):
     """Operator-selected exact scope; restart-safe activation, no implicit expansion."""
     ids=sorted(set(ids))
     if not ids or len(ids)>100000:raise CRMError('Требуется явный состав перехода.')
@@ -273,10 +358,15 @@ def activate(ids):
         instance=conn.execute("SELECT value FROM crm_meta WHERE key='instance_id'").fetchone()
         if not instance:raise CRMError('Сначала выполните миграцию CRM.','schema_mismatch',409)
         fence_id=prior[0] if prior else str(uuid.uuid4())
-        rows=[]
-        for start in range(0,len(ids),200):rows.extend(_projection_rows(conn,ids[start:start+200]))
         with connect() as primary:
             primary.execute('BEGIN IMMEDIATE')
+            rows = _cutover_rows(conn, primary, ids)
+            if expected_sha256 is not None:
+                review = cutover_review(rows)
+                if review['selection_sha256'] != expected_sha256:
+                    raise CRMError('Состав или назначения изменились после сверки.','review_stale',409)
+                if any(review['assignment_differences'].values()):
+                    raise CRMError('Сверьте назначения перед включением CRM.','cutover_assignment_drift',409)
             if installed(primary):
                 bound=primary.execute("SELECT value FROM crm_primary_guard_meta WHERE key='fence_id'").fetchone()
                 if bound:_validate(primary,bound[0],instance[0])
@@ -314,7 +404,8 @@ def project_pending(limit=200):
         if not ids:return dict(projected=0,ready=True)
         require_contracts(conn,ids)
         with connect() as primary:
-            primary.execute('BEGIN IMMEDIATE');_project(primary,_projection_rows(conn,ids))
+            primary.execute('BEGIN IMMEDIATE')
+            _project(primary,_cutover_rows(conn,primary,ids))
         conn.executemany('DELETE FROM crm_primary_pending WHERE contract_uuid=?',[(cid,) for cid in ids])
         return dict(projected=len(ids),ready=True)
 

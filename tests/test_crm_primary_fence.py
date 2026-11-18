@@ -31,6 +31,35 @@ def test_raw_old_writer_blocked_while_unmanaged_contract_and_import_work(crm_wor
     with storage.connect() as c:assert assignments.readiness(c,w['managers'][0])['environment']=='cutover'
 
 
+def test_reviewed_cutover_keeps_the_verified_soft_name_and_rechecks_the_source(crm_world, monkeypatch):
+    world, path = setup(crm_world, monkeypatch)
+    with storage.connect() as conn:
+        conn.execute("UPDATE crm_employees SET staff_id='authority-staff:staff-one' WHERE employee_uuid=?",
+                     (world['member'].employee_uuid,))
+        conn.execute("UPDATE crm_employees SET name='Soft employee' WHERE employee_uuid=?",
+                     (world['stranger'].employee_uuid,))
+    with sqlite3.connect(path) as primary:
+        primary.execute("INSERT INTO employee_identities(id,display_name) VALUES('staff-one','Employee')")
+        primary.execute("INSERT INTO staff_roster(employee_id,source_sha256,product_names) VALUES(?,?,?)",
+                        ('staff-one', 'fixture', json.dumps({'soft':'Soft employee'})))
+        primary.execute("UPDATE clients SET responsible_soft='Soft employee' WHERE contract_id='R0'")
+    ids = sorted(world['contracts'])
+    with storage.connect(readonly=True) as conn, fence.connect(readonly=True) as primary:
+        rows = fence._cutover_rows(conn, primary, ids)
+    review = fence.cutover_review(rows)
+    assert review['assignment_differences'] == {'responsible':0, 'responsible_soft':0}
+    with sqlite3.connect(path) as primary:
+        primary.execute("UPDATE clients SET responsible_soft='SOFT EMPLOYEE' WHERE contract_id='R0'")
+    with pytest.raises(CRMError) as error:
+        fence.activate(ids, expected_sha256=review['selection_sha256'])
+    assert error.value.code == 'review_stale'
+    with sqlite3.connect(path) as primary:
+        primary.execute("UPDATE clients SET responsible_soft='Soft employee' WHERE contract_id='R0'")
+    assert fence.activate(ids, expected_sha256=review['selection_sha256'])['contracts'] == len(ids)
+    with sqlite3.connect(path) as primary:
+        assert primary.execute("SELECT responsible_soft FROM clients WHERE contract_id='R0'").fetchone()[0] == 'Soft employee'
+
+
 def test_assignment_projects_and_old_source_cannot_return_previous_employee(crm_world,monkeypatch):
     w,path=setup(crm_world,monkeypatch);fence.activate(w['contracts'])
     result,body=apply(w,preview(w))
