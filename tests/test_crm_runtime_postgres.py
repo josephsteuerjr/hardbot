@@ -49,8 +49,8 @@ def test_cutover_projection_and_runtime_under_restricted_application(pg_world,tm
         c.execute('GRANT USAGE ON SCHEMA '+namespace+' TO crm_app')
         c.execute('GRANT SELECT ON ALL TABLES IN SCHEMA '+namespace+' TO crm_app')
         c.execute((Path(__file__).parents[1]/'tools/crm_runtime_permissions.sql').read_text())
-        exchange = c.execute("SELECT has_table_privilege('crm_exchange','crm_primary_fences','SELECT'),"
-                             "has_table_privilege('crm_exchange','crm_primary_fences','UPDATE')").fetchone()
+        exchange = c.execute("SELECT has_table_privilege('crm_exchange','crm_primary_fences','SELECT') AS can_read,"
+                             "has_table_privilege('crm_exchange','crm_primary_fences','UPDATE') AS can_write").fetchone()
         assert exchange[0] and not exchange[1]
         c.execute('GRANT INSERT ON crm_audit TO crm_app');c.execute('GRANT USAGE ON ALL SEQUENCES IN SCHEMA '+namespace+' TO crm_app')
     primary_fence.activate(w['contracts'])
