@@ -491,3 +491,12 @@ a {
     padding: 10px 24px 30px;
   }
 }
+.logistics-preview-list {
+  max-height: 18rem;
+  overflow: auto;
+  margin-block: 8px;
+}
+
+.logistics-preview-list > div {
+  padding-block: 4px;
+}

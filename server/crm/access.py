@@ -78,6 +78,9 @@ def readable_contracts(conn, principal):
     if reads_all(principal):
         return {r[0] for r in conn.execute("SELECT contract_uuid FROM crm_contracts")}
     result = scoped_contracts(conn, principal)
+    if principal.role == 'employee' and 'call' in principal.capabilities:
+        from . import logistics
+        result.update(logistics.for_employee(conn, principal.employee_uuid, 'call'))
     if principal.role == 'manager' and 'assign' in principal.capabilities:
         result.update(r[0] for r in conn.execute('SELECT DISTINCT mc.contract_uuid FROM crm_managed_contracts mc '
             'JOIN crm_distribution_managers dm ON dm.team_id=mc.team_id AND dm.capability=mc.capability WHERE dm.employee_uuid=?',

@@ -17,8 +17,21 @@ def test_schema_four_upgrade_preserves_work_and_adds_runtime(pg_world):
         c.execute("UPDATE crm_meta SET value='4' WHERE key='schema_version'")
         schema.initialize(c)
         assert c.execute('SELECT COUNT(*) FROM crm_contracts').fetchone()[0]==before
-        assert c.execute("SELECT value FROM crm_meta WHERE key='schema_version'").fetchone()[0]=='7'
+        assert c.execute("SELECT value FROM crm_meta WHERE key='schema_version'").fetchone()[0]==str(schema.VERSION)
         schema.initialize(c)
+
+
+def test_schema_seven_upgrade_adds_empty_logistics_tables(pg_world):
+    with storage.connect() as c:
+        before=c.execute('SELECT COUNT(*) FROM crm_contracts').fetchone()[0]
+        for name in ('crm_logistics_calls','crm_logistics_cases','crm_logistics_staff'):
+            c.execute('DROP TABLE '+name)
+        c.execute("UPDATE crm_meta SET value='7' WHERE key='schema_version'")
+        schema.initialize(c)
+        assert c.execute('SELECT COUNT(*) FROM crm_contracts').fetchone()[0]==before
+        for name in ('crm_logistics_staff','crm_logistics_cases','crm_logistics_calls'):
+            assert c.execute('SELECT COUNT(*) FROM '+name).fetchone()[0]==0
+        assert c.execute("SELECT value FROM crm_meta WHERE key='schema_version'").fetchone()[0]==str(schema.VERSION)
 
 
 def test_cutover_projection_and_runtime_under_restricted_application(pg_world,tmp_path,monkeypatch):

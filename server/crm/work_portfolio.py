@@ -3,7 +3,7 @@ from collections import Counter,defaultdict
 from dataclasses import replace
 from decimal import Decimal
 import json
-from . import access,storage,tasks
+from . import access, logistics, storage, tasks
 from .contract import CRMError,currency,money,now
 from .roles import ROLE_CAPABILITIES
 
@@ -11,7 +11,7 @@ WORK={'call','visit','delivery'}
 
 
 def read(principal, search='', work='all', employee=None, offset=0, limit=100):
-    if work not in {'all','call','visit','both','delivery'}:
+    if work not in {'all','call','visit','both','delivery','logistics'}:
         raise CRMError('Неизвестный фильтр работы.')
     if not isinstance(search,str) or len(search)>200:
         raise CRMError('Поиск: не более 200 символов.')
@@ -35,6 +35,12 @@ def read(principal, search='', work='all', employee=None, offset=0, limit=100):
         target=replace(principal,employee_uuid=employee,employee_scope=frozenset({employee}),all_contracts=False)
         for cid,granted in tasks.grants(conn,target).items():
             kinds[cid].update(granted & WORK & capabilities)
+        courier_calls = logistics.for_employee(conn, employee, 'call') if 'call' in capabilities else {}
+        courier_deliveries = logistics.for_employee(conn, employee, 'delivery') if 'delivery' in capabilities else {}
+        for cid in courier_calls:
+            kinds[cid].add('logistics')
+        for cid in courier_deliveries:
+            kinds[cid].add('delivery')
         ids=sorted(cid for cid,work_kinds in kinds.items() if work_kinds)
         rows=[]
         for start in range(0,len(ids),400):
@@ -42,6 +48,7 @@ def read(principal, search='', work='all', employee=None, offset=0, limit=100):
             for source in conn.execute('SELECT c.contract_uuid,c.person_uuid,c.external_id,c.creditor_id,c.currency,c.fields_json,p.name AS client_name '
                 'FROM crm_contracts c JOIN crm_people p USING(person_uuid) WHERE c.contract_uuid IN ('+','.join('?' for _ in batch)+')',batch):
                 row=dict(source);row['fields']=json.loads(row.pop('fields_json'))
+                row['logistics_call']=courier_calls.get(row['contract_uuid'])
                 row['work_kinds']=sorted(kinds[row['contract_uuid']]);rows.append(row)
     counts=Counter(all=len(rows),call=0,visit=0,both=0,delivery=0,only_call=0,only_visit=0)
     selected=[]
@@ -49,9 +56,13 @@ def read(principal, search='', work='all', employee=None, offset=0, limit=100):
         assigned=set(row['work_kinds']);both={'call','visit'}<=assigned
         for kind in assigned:counts[kind]+=1
         counts['both']+=both;counts['only_call']+=assigned=={'call'};counts['only_visit']+=assigned=={'visit'}
-        if work=='both' and not both or work not in {'all','both'} and work not in assigned:continue
+        if work == 'logistics':
+            if not row['logistics_call']:
+                continue
+        elif work=='both' and not both or work not in {'all','both'} and work not in assigned:continue
         values=row['fields']
-        if search.casefold() not in ' '.join(str(v or '') for v in (row['client_name'],row['external_id'],row['creditor_id'],values.get('phone'),values.get('address'))).casefold():continue
+        logistics_phone=(row['logistics_call'] or {}).get('phone')
+        if search.casefold() not in ' '.join(str(v or '') for v in (row['client_name'],row['external_id'],row['creditor_id'],values.get('phone'),values.get('address'),logistics_phone)).casefold():continue
         selected.append(row)
     selected.sort(key=lambda row:(row['client_name'].casefold(),row['external_id'],row['creditor_id'],row['contract_uuid']))
     sums=defaultdict(Decimal);unknown=0
@@ -60,6 +71,8 @@ def read(principal, search='', work='all', employee=None, offset=0, limit=100):
         if value in (None,''):value=values.get('debt_total')
         try:sums[currency(row['currency'])]+=Decimal(money(value))
         except CRMError:unknown+=1
+    if courier_calls or work == 'logistics':
+        counts['logistics'] = len(courier_calls)
     return dict(employee_uuid=employee,employee=person['name'],work=work,search=search,as_of=at,counts=dict(counts),
         total_contracts=len(selected),total_people=len({row['person_uuid'] for row in selected}),offset=offset,limit=limit,
         has_more=offset+limit<len(selected),contracts=selected[offset:offset+limit],

@@ -13,6 +13,9 @@ def grants(conn, principal):
     result = {}
     if not principal.employee_scope:
         return result
+    if principal.role == 'courier' and 'delivery' in principal.capabilities:
+        from . import logistics
+        result.update((cid, {'delivery'}) for cid in logistics.for_employee(conn, principal.employee_uuid, 'delivery'))
     for row in conn.execute(
         "SELECT x.entity_id,x.contract_uuid,x.data_json,e.role,e.employee_uuid FROM crm_entities x "
         "JOIN crm_events e ON e.event_id=x.event_id WHERE x.kind='task' AND x.status='open'"):

@@ -5,6 +5,7 @@ CAPABILITIES = frozenset(['call', 'visit', 'delivery', 'note', 'contact', 'promi
 ROLE_CAPABILITIES = {
     'employee': CAPABILITIES - {'delivery', 'shift_correct', 'analytics', 'exchange', 'accounting', 'assign'},
     'courier': frozenset({'delivery', 'task', 'correct'}),
+    'logistic': frozenset({'logistics'}),
     'manager': CAPABILITIES,
     'analyst': frozenset({'note', 'contact', 'document', 'correct', 'analytics',
                           'exchange', 'accounting', 'shift_correct'}),

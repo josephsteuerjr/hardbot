@@ -279,6 +279,7 @@ const actions = new Set([
   'managed-portfolio','assignment-staff','assignment-preview','assignment-commit',
   'assignment-receipt','assignment-history','manager-statistics','changes',
   'assignment-job','assignment-job-step','assignment-job-cancel',
+  'logistics','logistics-export','logistics-preview','logistics-apply','logistics-update','logistics-call',
   'manager-access',
   'active-time',
   "shifts",
@@ -632,7 +633,7 @@ app
         if (authority !== owner && result.ok)
           return { ok: false, status: 409, text: "Учётная запись изменилась." };
         const key = action + JSON.stringify(query || {});
-        const freshOnly=action==='changes'||action.startsWith('assignment-')||action==='managed-portfolio'||action==='manager-statistics'||action==='manager-report'||action==='analyst-report'||action==='analyst-statistics';
+        const freshOnly=action==='changes'||action.startsWith('assignment-')||action.startsWith('logistics')||action==='managed-portfolio'||action==='manager-statistics'||action==='manager-report'||action==='analyst-report'||action==='analyst-statistics';
         if (result.ok && method === "GET" && owner && !freshOnly)
           queue.cache(owner, key, result.data);
         else if (method === "GET" && result.status === 0 && owner && !freshOnly) {
@@ -813,6 +814,31 @@ app
       return identify();
     });
     safeHandler("crm:workbook", async (action: string, input: any) => {
+      if (action === 'logistics-read' || action === 'logistics-export') {
+        const authority = owner;
+        if (!authority || currentContext?.role !== 'logistic') throw new Error('Требуется вход логиста.');
+        if (action === 'logistics-read') {
+          const choice = await dialog.showOpenDialog(win!, {
+            properties: ['openFile'], filters: [{name: 'Реестры', extensions: ['xlsx', 'xlsm', 'xlsb']}],
+          });
+          if (choice.canceled || !choice.filePaths[0]) return {ok: false, cancelled: true};
+          if (owner !== authority) throw new Error('Учётная запись изменилась.');
+          const result = await local('logistics-workbook-read', {path: choice.filePaths[0]});
+          if (owner !== authority) throw new Error('Учётная запись изменилась.');
+          if (result.ok) result.data.filename = basename(choice.filePaths[0]);
+          return result;
+        }
+        const choice = await dialog.showSaveDialog(win!, {
+          title: 'Выгрузить курьерский пул', defaultPath: 'Курьерский пул.xlsx',
+          filters: [{name: 'Excel', extensions: ['xlsx']}],
+        });
+        if (choice.canceled || !choice.filePath) return {ok: false, cancelled: true};
+        if (owner !== authority) throw new Error('Учётная запись изменилась.');
+        const result = await send('GET', 'logistics-export', undefined, input);
+        if (!result.ok) return result;
+        if (owner !== authority) throw new Error('Учётная запись изменилась.');
+        return local('logistics-workbook-write', {path: choice.filePath, snapshot: result.data});
+      }
       if(action==='manager-report'||action==='analyst-report'){
         const authority=owner;
         if(!authority)throw new Error('Сначала подтвердите вход.');

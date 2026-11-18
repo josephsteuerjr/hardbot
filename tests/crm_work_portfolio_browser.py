@@ -14,7 +14,7 @@ fields:[{key:'soft_comment',title:'Комментарий звонка',type:'te
 const rows=Array.from({length:469},(_,i)=>({contract_uuid:'contract-'+i,person_uuid:'person-'+i,external_id:'Q'+String(i).padStart(4,'0'),creditor_id:'registry-partner:Тестовый кредитор',currency:'RUB',client_name:'Клиент '+String(i).padStart(4,'0'),
 work_kinds:i<429?['call']:i<435?['visit']:['call','visit'],fields:{partner:'Тестовый кредитор',phone:'55512345',address:'Тестовый адрес',debt_today:'10.00',soft_call_status:'Нет контакта',soft_comment:'Телефонный результат',call_status:'В работе',visit_comment:'Выездной результат'},revisions:{call:0,visit:0}}));
 window.workReview={rows,queries:[],commands:[]};
-window.crm={state:async()=>({version:'queue-qa',context,connection:{mode:'synthetic'}}),
+window.crm={state:async()=>({owner:context.employee_uuid,version:'queue-qa',context,connection:{mode:'synthetic'}}),
 api:async(method,action,body,query={})=>{
  workReview.queries.push({action,...query});let data={};
  if(action==='work-portfolio'){
@@ -33,7 +33,7 @@ api:async(method,action,body,query={})=>{
  }
  return {ok:true,data};
 },
-draft:async(key,...value)=>{const id=context.employee_uuid+':'+key;if(value.length)localStorage.setItem(id,JSON.stringify(value[0]));return {ok:true,data:JSON.parse(localStorage.getItem(id)||'null')}},
+draft:async(key,value)=>{const id=context.employee_uuid+':'+key;if(value!==undefined)localStorage.setItem(id,JSON.stringify(value));return {ok:true,data:JSON.parse(localStorage.getItem(id)||'null')}},
 command:async body=>{workReview.commands.push(body);const row=rows.find(r=>r.contract_uuid===body.contract_ids[0]);Object.assign(row.fields,body.payload.values);return {ok:true}},
 telemetry:async()=>({ok:true}),queue:async()=>({ok:true,data:{items:[]}}),win:()=>{}};
 }'''
@@ -47,11 +47,11 @@ with sync_playwright() as p:
     assert 'registry-partner:' not in page.locator('[data-work-contract]').first.inner_text()
     for key,count in [('all',469),('call',463),('visit',40),('both',34)]:
         assert page.locator(f'[data-work-filter={key}] span').inner_text()==str(count)
-    assert '4690.00 RUB' in page.locator('[data-work-total]').inner_text()
+    assert '4\u00a0690 RUB' in page.locator('[data-work-total]').inner_text()
     page.screenshot(path=str(folder/'work-portfolio-all.png'),full_page=False)
     page.locator('#work-next').click();page.wait_for_function("document.querySelector('[data-work-contract]')?.dataset.workContract==='contract-100'")
     page.locator('[data-work-filter=both]').click();page.wait_for_function("document.querySelectorAll('[data-work-contract]').length===34")
-    assert '340.00 RUB' in page.locator('[data-work-total]').inner_text()
+    assert '340 RUB' in page.locator('[data-work-total]').inner_text()
     page.screenshot(path=str(folder/'work-portfolio-both.png'),full_page=False)
     page.locator('[data-person]').first.click();page.locator('[data-action=call]').wait_for()
     assert page.locator('[data-action=visit]').count()==1

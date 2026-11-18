@@ -81,7 +81,7 @@ def install(app, host=None, *, authenticate=None):
 
     def context(p):
         from fields import DROPDOWNS
-        from . import tasks
+        from . import logistics, tasks
 
         with storage.connect() as conn:
             cohorts = [
@@ -99,6 +99,7 @@ def install(app, host=None, *, authenticate=None):
             ]
             staff = tasks.staff(conn, p)
             distribution = assignments.readiness(conn,p)
+            logistics_countries = logistics.countries(conn, p)
         return dict(
             schema_version=1,
             employee_uuid=p.employee_uuid,
@@ -114,12 +115,14 @@ def install(app, host=None, *, authenticate=None):
             cohorts=cohorts,
             staff=staff,
             distribution=distribution,
+            logistics_countries=logistics_countries,
         )
 
     async def handler(request):
         try:
             p = await authenticate(request) if authenticate is not None else await asyncio.to_thread(principal, request)
             action = request.match_info["action"]
+            from . import logistics
             if request.method == "GET":
                 if action == "context":
                     result = await asyncio.to_thread(context, p)
@@ -144,6 +147,9 @@ def install(app, host=None, *, authenticate=None):
                     result = await asyncio.to_thread(manager_reports.read,p,**dict(request.query))
                 elif action == 'changes':
                     result = await asyncio.to_thread(assignments.changes,p,**dict(request.query))
+                elif action in {'logistics', 'logistics-export'}:
+                    result = await asyncio.to_thread(logistics.read if action == 'logistics' else logistics.export,
+                                                     p, **dict(request.query))
                 elif action == 'active-time':
                     result = await asyncio.to_thread(active_time.summary, p, **dict(request.query))
                 elif action == "portfolio":
@@ -226,6 +232,10 @@ def install(app, host=None, *, authenticate=None):
                     "receipt": exchange.receipt,
                     "telemetry": telemetry.ingest,
                     "script": scripts.mutate,
+                    "logistics-preview": logistics.preview,
+                    "logistics-apply": logistics.apply,
+                    "logistics-update": logistics.update,
+                    "logistics-call": logistics.record_call,
                 }
                 if action == "command":
                     result = await asyncio.to_thread(

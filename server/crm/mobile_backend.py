@@ -5,7 +5,7 @@ import aiohttp
 from .contract import CRMError
 
 GET_ACTIONS=frozenset('context portfolio work-portfolio tasks card contracts registry managed-portfolio assignment-staff assignment-receipt assignment-history assignment-job manager-statistics manager-report analyst-report analyst-statistics changes active-time shifts shift-report cabinet three-hour script adoption document-read'.split())
-POST_ACTIONS=frozenset('registry-edit assignment-preview assignment-commit assignment-job-step assignment-job-cancel active-time anchor command shift plan cohort export import-preview import-apply receipt telemetry script document'.split())
+POST_ACTIONS=frozenset('registry-edit assignment-preview assignment-commit assignment-job-step assignment-job-cancel active-time anchor command shift plan cohort export import-preview import-apply receipt telemetry script document logistics-call'.split())
 ADMIN_ROUTES=frozenset(['/state','/busy','/fn','/job','/jobs','/admin','/admin_image','/mail/state','/mail/set','/mail/send'])
 ROLES=frozenset(['employee','courier','manager','analyst','observer'])
 

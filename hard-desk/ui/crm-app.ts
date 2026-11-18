@@ -5,6 +5,7 @@ import {editClientCard} from './crm-card-editor';
 import {mountManagerReports} from './crm-manager-reports';
 import {mountManagerTeam} from './crm-manager-team';
 import {mountAnalyst} from './crm-analyst';
+import {mountLogistics, mountLogisticsCall} from './crm-logistics';
 import {decimalText} from './crm-format';
 import type {UpdateState} from '../src/main/updates';
 type API = {
@@ -34,6 +35,7 @@ type API = {
   win(action: string): void;
 };
 const crm = (window as any).crm as API;
+let logisticsView: ReturnType<typeof mountLogistics> | undefined;
 const savedOn=crm.platform==='mobile'?'на телефоне':'на компьютере';
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id) as T;
@@ -310,6 +312,8 @@ async function boot() {
   document.body.classList.toggle('crm-analyst',context?.role==='analyst');
   if(context?.role==='analyst')analystIdentity=state.owner;
   if(context?.role==='analyst'&&!['registry','exchange','statistics','team','connection'].includes(section))section='registry';
+  if(context?.role==='logistic'&&!['logistics','connection'].includes(section))section='logistics';
+  if(context?.role!=='logistic'&&section==='logistics')section='portfolio';
   if (portfolioIdentity!==context?.employee_uuid) {
     sectionScroll.clear();
     taskSelectClient=false;newTaskAssignee='';cardOrigin='portfolio';
@@ -328,18 +332,20 @@ async function boot() {
     const saved=(await crm.draft('portfolio-view')).data;
     if(saved && ['mine','all'].includes(saved.view)) {
       portfolioView=saved.view;
-      portfolioWork=['all','call','visit','both','delivery'].includes(saved.work)?saved.work:'all';
+      portfolioWork=['all','call','visit','both','delivery','logistics'].includes(saved.work)?saved.work:'all';
       if((context?.staff || []).some((p:any)=>p.employee_uuid===saved.employee) || saved.employee===context?.employee_uuid)portfolioEmployee=saved.employee;
     }
   }
-  $("identity").textContent = context ? ({manager:'Руководитель',observer:'Наблюдатель',courier:'Курьер',analyst:'Аналитик'} as any)[context.role] || 'Сотрудник' : 'Вход в CRM';
+  $("identity").textContent = context ? ({manager:'Руководитель',observer:'Наблюдатель',courier:'Курьер',analyst:'Аналитик',logistic:'Логист'} as any)[context.role] || 'Сотрудник' : 'Вход в CRM';
   $("version").textContent = state.version;
   $("connection").textContent =
     (state.connection.mode === "synthetic"
       ? "Синтетические данные"
       : state.connection.mode === 'unconfigured' ? 'Не подключено' : state.connection.server) + (state.offline ? " · офлайн" : "");
   const manager=['manager','owner'].includes(context?.role);
-  const sections = context?.role==='analyst' ? [
+  const sections = context?.role==='logistic' ? [
+    ['logistics','Курьерские пулы'],['connection','Подключение'],
+  ] : context?.role==='analyst' ? [
     ['registry','Реестр'],['exchange','Обмен'],['statistics','Показатели'],['team','Команда'],['connection','Подключение'],
   ] : crm.platform==='mobile'&&context?.role==='employee' ? [
     ['portfolio','Портфель'],['registry','Реестр'],['cabinet','Показатели'],['queue','Отправки'],
@@ -383,6 +389,7 @@ async function boot() {
 }
 async function go(next: string) {
   if(next==='overview')next='portfolio';
+  if(context?.role==='logistic'&&!['logistics','connection'].includes(next))next='logistics';
   disposeSection?.();disposeSection=undefined;
   const generation=++renderGeneration;
   if(!activePerson)sectionScroll.set(section,document.querySelector('main')!.scrollTop);
@@ -406,6 +413,7 @@ async function go(next: string) {
       'manager-statistics':'Показатели команды',
       statistics:'Показатели',
       team:'Команда',
+      logistics:'Курьерские пулы',
       registry:'Реестр',
       'active-time':'Активное время',
       tasks:'Задачи',
@@ -444,6 +452,17 @@ async function go(next: string) {
     )[next],
   );
   try {
+    if (next === 'logistics' && context?.role === 'logistic') {
+      if (crm.platform==='mobile') {
+        $('view').textContent = 'Курьерские пулы доступны в Windows CRM.';
+        return;
+      }
+      const view = mountLogistics($('view'),crm,context.logistics_countries || []);
+      logisticsView = view;
+      disposeSection = () => { view.dispose(); if (logisticsView === view) logisticsView = undefined; };
+      await view.refresh();
+      return;
+    }
     if(context?.role==='analyst'&&['registry','exchange','statistics','team','connection'].includes(next)){
       const expectedOwner=state.owner,valid=()=>generation===renderGeneration;
       const api={...crm,api:(method:string,action:string,body?:any,query?:any)=>crm.api(method,action==='manager-report'?'analyst-report':action==='manager-statistics'?'analyst-statistics':action,body,query),
@@ -593,17 +612,35 @@ async function portfolio(search = portfolioSearch, offset=portfolioOffset) {
   const selector=personal&&staff.length>1?`<label class="portfolio-person">Сотрудник <select id="portfolio-employee">${staff.map((p:any)=>`<option value="${esc(p.employee_uuid)}"${p.employee_uuid===portfolioEmployee?' selected':''}>${esc(p.name)}</option>`).join('')}</select></label>`:'';
   if(personal) {
     const options=[['all','Все',data.counts.all],['call','Звонки',data.counts.call],['visit','Выезды',data.counts.visit],['both','Оба',data.counts.both],
-      ...(data.counts.delivery||context.role==='courier'?[['delivery','Доставка',data.counts.delivery]]:[])];
+      ...(data.counts.delivery||context.role==='courier'?[['delivery','Доставка',data.counts.delivery]]:[]),
+      ...(data.counts.logistics || portfolioWork==='logistics'?[['logistics','Курьерский обзвон',data.counts.logistics || 0]]:[])];
     const filters=mobile?'':`<div class="work-filters">${options.map(([key,title,count])=>`<button data-work-filter="${key}" class="${portfolioWork===key?'active':''}" aria-pressed="${portfolioWork===key}">${title} <span>${count}</span></button>`).join('')}</div>`;
     const debt=Object.entries(data.currencies || {}).map(([unit,value])=>amount(value,unit)).join(' · ');
     $('view').innerHTML=modes+selector+filters+`<div class="toolbar"><input type="search" id="search" placeholder="Имя, договор, телефон, адрес" value="${esc(search)}">${button('search-go','Найти')}${button('refresh','Обновить')}</div>`+
       `<p class="muted" data-work-total>Договоров: ${data.total_contracts} · Клиентов: ${data.total_people}${debt?' · Долг: '+debt:''}${data.unknown_amounts?' · Без подтверждённой суммы или валюты: '+data.unknown_amounts:''}</p>`+
       table(['Клиент','Договор / кредитор','Работа','Последний звонок','Последний выезд','Долг'],data.contracts.map((row:any)=>{
         const f=row.fields;
-        return `<tr data-work-contract="${esc(row.contract_uuid)}"><td><button class="link" data-person="${esc(row.person_uuid)}">${esc(row.client_name || 'Без имени')}</button></td><td>${esc(row.external_id)}<br><span class="muted">${esc(f.partner || row.creditor_id)}</span></td><td>${row.work_kinds.map((kind:string)=>`<span class="work-kind">${esc(labels[kind] || kind)}</span>`).join('')}</td><td>${esc(f.soft_call_status || '—')}${f.soft_comm_date?'<br>'+calendarDate(f.soft_comm_date):''}${f.soft_comment?'<div class="queue-comment">'+esc(f.soft_comment)+'</div>':''}</td><td>${esc(f.call_status || '—')}${f.visit_date?'<br>'+calendarDate(f.visit_date):''}${f.visit_comment?'<div class="queue-comment">'+esc(f.visit_comment)+'</div>':''}</td><td>${amount(f.debt_today ?? f.debt_total,row.currency || 'Валюта не задана')}</td></tr>`;
+        const logistics = row.logistics_call ? (portfolioEmployee === context.employee_uuid
+          ? `<button type="button" class="link work-kind" data-logistics-call="${esc(row.contract_uuid)}">Курьерский обзвон</button>`
+          : '<span class="work-kind">Курьерский обзвон</span>') : '';
+        const kinds = row.work_kinds.filter((kind: string) => kind !== 'logistics')
+          .map((kind: string) => `<span class="work-kind">${esc(labels[kind] || kind)}</span>`).join('');
+        return `<tr data-work-contract="${esc(row.contract_uuid)}"><td><button class="link" data-person="${esc(row.person_uuid)}">${esc(row.client_name || 'Без имени')}</button></td><td>${esc(row.external_id)}<br><span class="muted">${esc(f.partner || row.creditor_id)}</span></td><td>${kinds}${logistics}</td><td>${esc(f.soft_call_status || '—')}${f.soft_comm_date?'<br>'+calendarDate(f.soft_comm_date):''}${f.soft_comment?'<div class="queue-comment">'+esc(f.soft_comment)+'</div>':''}</td><td>${esc(f.call_status || '—')}${f.visit_date?'<br>'+calendarDate(f.visit_date):''}${f.visit_comment?'<div class="queue-comment">'+esc(f.visit_comment)+'</div>':''}</td><td>${amount(f.debt_today ?? f.debt_total,row.currency || 'Валюта не задана')}</td></tr>`;
       }))+
       (data.contracts.length?'':'<p class="empty">По выбранным условиям договоров нет</p>')+
       `<div class="toolbar portfolio-pages"><button id="work-previous"${offset===0?' disabled':''}>Назад</button><span>${data.total_contracts?offset+1:0}–${Math.min(offset+data.contracts.length,data.total_contracts)} из ${data.total_contracts}</span><button id="work-next"${data.has_more?'':' disabled'}>Далее</button></div>`;
+    const logisticsRows = new Map<string, any>(data.contracts.filter((row:any)=>row.logistics_call).map((row:any)=>[row.contract_uuid,row]));
+    $('view').querySelectorAll<HTMLButtonElement>('[data-logistics-call]').forEach(button => {
+      button.onclick = () => {
+        const row = logisticsRows.get(button.dataset.logisticsCall!);
+        const owner = state.owner;
+        if (!row || $<HTMLDialogElement>('dialog').open || formOpening) return;
+        formOpening = true;
+        void mountLogisticsCall($<HTMLDialogElement>('dialog'),row,crm,owner,context.dropdowns.soft_call_status || [],
+          async () => { if (state.owner === owner && section === 'portfolio') await portfolio(); })
+          .catch(reportError).finally(()=>{formOpening=false;});
+      };
+    });
     bind('work-previous',()=>portfolio(portfolioSearch,Math.max(0,portfolioOffset-100)));
     if(mobile){
       $('view').querySelector('.portfolio-modes')!.insertAdjacentHTML('beforeend',`<select id="portfolio-work" aria-label="Вид работы">${options.map(([key,title,count])=>`<option value="${key}"${portfolioWork===key?' selected':''}>${title} · ${count}</option>`).join('')}</select>`);
@@ -1537,7 +1574,7 @@ async function connection(host:HTMLElement=document.getElementById('view')!) {
     const description=savedHeading.nextElementSibling!,actions=description.nextElementSibling!;
     savedDetails.append(description,actions);savedHeading.remove();
   }
-  bind('connection-continue',()=>go(context?.role==='analyst'?'registry':'portfolio'));
+  bind('connection-continue',()=>go(context?.role==='logistic'?'logistics':context?.role==='analyst'?'registry':'portfolio'));
   $('view').insertAdjacentHTML('beforeend',`<details class="diagnostics"><summary>Диагностика подключения</summary><div class="actions">${button('diagnostic-run','Проверить и восстановить')}${button('diagnostic-queue','Очередь и сверка')}</div><div id="diagnostic-result" role="status"></div></details>`);
   const diagnose=async(repair=false)=>{
     if(!crm.diagnostics)return;
@@ -1633,6 +1670,7 @@ crm.onChange?.(event=>{
     if(event.dirty){
       if(activePerson)scheduleSync(true);
       else if(section==='portfolio')void portfolio().catch(reportError);
+      else if(section==='logistics')void logisticsView?.refresh().catch(reportError);
 
     }
   }else scheduleSync();

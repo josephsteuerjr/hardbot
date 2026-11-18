@@ -472,6 +472,10 @@ def serve():
                     from pult.core.crm_workbook import read
 
                     result = read(raw["path"])
+                elif action in {'logistics-workbook-read', 'logistics-workbook-write'} and method == 'POST':
+                    from pult.core import logistics_workbook
+                    result = (logistics_workbook.read(raw['path']) if action.endswith('-read')
+                              else logistics_workbook.write(raw['path'], raw['snapshot']))
                 elif action == "workbook-resume":
                     from pult.core.crm_workbook import resume
 

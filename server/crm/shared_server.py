@@ -65,6 +65,7 @@ def create_app(*, sessions=None):
         return web.json_response({'ok': True, **result})
 
     async def health(request):
+        from .schema import VERSION
         def probe():
             with storage.connect(readonly=True) as conn:
                 meta={r[0]:r[1] for r in conn.execute("SELECT key,value FROM crm_meta WHERE key IN ('deployment_namespace','schema_version')")}
@@ -72,11 +73,11 @@ def create_app(*, sessions=None):
                 return meta,dict(worker) if worker else None
         try:
             meta,worker = await asyncio.to_thread(probe)
-            if meta.get('deployment_namespace') != NAMESPACE or meta.get('schema_version')!='7':
+            if meta.get('deployment_namespace') != NAMESPACE or meta.get('schema_version') != str(VERSION):
                 raise ValueError()
             if managed_runtime and (not worker or not worker['ok'] or (instant(now())-instant(worker['heartbeat_at'])).total_seconds()>90):
                 raise ValueError()
-            return web.json_response({'ok': True, 'namespace': NAMESPACE, 'storage': 'postgresql','schema_version':7,
+            return web.json_response({'ok': True, 'namespace': NAMESPACE, 'storage': 'postgresql','schema_version':VERSION,
                 'scheduler': 'running' if worker and worker['ok'] else 'injected'})
         except Exception:
             return web.json_response({'ok': False}, status=503)

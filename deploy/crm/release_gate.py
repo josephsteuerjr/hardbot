@@ -22,13 +22,17 @@ def install(app):
     async def require_crm(request, handler):
         headers = request.headers
         protected = request.path.startswith(('/api/', '/admin/'))
+        legacy_tauri = (
+            headers.get('X-Client-Runtime') == 'tauri'
+            and headers.get('X-Data-Protocol') == '10'
+        )
         desktop = 'Electron/' in headers.get('User-Agent', '') or (
             headers.get('X-Client-Runtime') == 'desktop'
             and headers.get('X-Work-Product') == 'analyst'
         )
-        if protected and desktop and request.method != 'OPTIONS':
+        if protected and (desktop or legacy_tauri) and request.method != 'OPTIONS':
             current = version(headers.get('X-Client-Version', ''))
-            if current is None or current < limit:
+            if legacy_tauri or current is None or current < limit:
                 write = request.method not in ('GET', 'HEAD')
                 return web.json_response({
                     'ok': False,

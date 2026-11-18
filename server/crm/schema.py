@@ -1,6 +1,6 @@
 """Additive canonical tables; legacy IDs, accounts and documents are retained."""
 
-VERSION = 7
+VERSION = 8
 
 DDL = """
 CREATE TABLE IF NOT EXISTS crm_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -167,7 +167,8 @@ def initialize(conn):
     from .active_time import DDL as active_ddl
     from .assignment_schema import ddl as assignment_ddl
     from .runtime_schema import DDL as runtime_ddl
-    for line in (DDL + exchange_ddl + active_ddl + assignment_ddl() + runtime_ddl).splitlines(True):
+    from .logistics_schema import DDL as logistics_ddl
+    for line in (DDL + exchange_ddl + active_ddl + assignment_ddl() + runtime_ddl + logistics_ddl).splitlines(True):
         statement += line
         if sqlite3.complete_statement(statement):
             conn.execute(statement)

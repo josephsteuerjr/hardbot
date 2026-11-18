@@ -1,7 +1,7 @@
 """Initial PostgreSQL CRM schema. Run with the separate migration role."""
 from . import storage
 
-VERSION = 7
+VERSION = 8
 
 UPGRADE_2 = """
 CREATE TABLE IF NOT EXISTS crm_monthly_totals(
@@ -167,6 +167,7 @@ def initialize(conn):
     from .active_time import DDL as active_ddl
     from .assignment_schema import ddl as assignment_ddl
     from .runtime_schema import DDL as runtime_ddl
+    from .logistics_schema import DDL as logistics_ddl
     storage.begin(conn)
     conn.execute("CREATE TABLE IF NOT EXISTS crm_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
     import uuid
@@ -183,6 +184,8 @@ def initialize(conn):
             conn.execute(assignment_ddl(True))
         if int(current[0]) in (1,2,3,4,6):
             conn.execute(runtime_ddl)
+        if int(current[0]) in (1,2,3,4,6,7):
+            conn.execute(logistics_ddl)
             conn.execute("UPDATE crm_meta SET value=? WHERE key='schema_version'",(str(VERSION),))
             return
         if int(current[0]) != VERSION:
@@ -194,5 +197,6 @@ def initialize(conn):
     conn.execute(active_ddl)
     conn.execute(assignment_ddl(True))
     conn.execute(runtime_ddl)
+    conn.execute(logistics_ddl)
     conn.execute("INSERT INTO crm_meta VALUES('schema_version',?)", (str(VERSION),))
     conn.execute("INSERT INTO crm_meta VALUES('storage_engine','postgresql')")

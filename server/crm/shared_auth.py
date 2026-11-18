@@ -126,6 +126,8 @@ def principal(identity):
             raise fault('identity_unmapped', 403)
         if role == 'employee' and membership and membership['role'] == 'courier':
             role = 'courier'
+        if role in {'employee', 'manager', 'full'} and membership and membership['role'] == 'logistic':
+            role = 'logistic'
         # An Analyst entry has already passed the authority's admin gate. For
         # an existing pilot manager identity it is a capability reduction.
         legacy_manager = (role in {'manager', 'full','analyst'} and result.team_id == 'crm-pilot-managers'
@@ -151,7 +153,7 @@ def principal(identity):
             employees=frozenset(json.loads(policy['employees_json'])) | {result.employee_uuid}
             all_contracts=bool(policy['all_contracts']) and role in {'manager','analyst'}
         return replace(result, role=role, capabilities=result.capabilities & ROLE_CAPABILITIES[role],
-                       employee_scope=employees, all_contracts=all_contracts, read_all_contracts=True)
+                       employee_scope=employees, all_contracts=all_contracts, read_all_contracts=role != 'logistic')
 
 
 class Sessions:

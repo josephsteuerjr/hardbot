@@ -7,7 +7,7 @@ import sys
 
 import pytest
 from aiohttp.test_utils import TestClient,TestServer
-from crm import shared_server,shared_auth,storage
+from crm import schema,shared_server,shared_auth,storage
 from test_crm_postgres import pg_world
 
 pytestmark=pytest.mark.skipif(not os.environ.get('HARD_CRM_TEST_DSN_FILE'),reason='Isolated PostgreSQL')
@@ -27,10 +27,10 @@ def test_real_scheduler_lifecycle_health_and_operator_status(pg_world,tmp_path,m
             assert (await response.json())['scheduler']=='running'
             with storage.connect() as c:c.execute("UPDATE crm_meta SET value='4' WHERE key='schema_version'")
             assert (await client.get('/health')).status==503
-            with storage.connect() as c:c.execute("UPDATE crm_meta SET value='7' WHERE key='schema_version'")
+            with storage.connect() as c:c.execute("UPDATE crm_meta SET value=? WHERE key='schema_version'",(str(schema.VERSION),))
     asyncio.run(run())
     tool=Path(__file__).parents[1]/'tools/crm_runtime.py'
     monkeypatch.setattr(sys,'argv',[str(tool),'status']);runpy.run_path(str(tool),run_name='__main__')
     result=json.loads(capsys.readouterr().out)
-    assert result['meta']['schema_version']=='7'
+    assert result['meta']['schema_version']==str(schema.VERSION)
     assert result['workers'][0]['worker']=='scheduler' and result['workers'][0]['ok']==1

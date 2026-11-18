@@ -15,9 +15,20 @@ def review_cutover(ids):
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('action',choices=['migrate','plan','activate','status'])
+    parser=argparse.ArgumentParser();parser.add_argument('action',choices=['migrate','plan','activate','status','logistics-staff'])
     parser.add_argument('--contracts',type=Path);parser.add_argument('--expected-sha256')
+    parser.add_argument('--roster',type=Path)
     args=parser.parse_args()
+    if args.action=='logistics-staff':
+        from crm import logistics
+        if not args.roster:
+            parser.error('logistics-staff requires --roster')
+        manifest=json.loads(args.roster.read_text(encoding='utf-8-sig'))
+        with storage.connect(readonly=args.expected_sha256 is None) as conn:
+            if args.expected_sha256 is not None:
+                storage.begin(conn)
+            result=logistics.configure_staff(conn,manifest,args.expected_sha256)
+        print(canonical(result));return
     if args.action=='migrate':
         with storage.connect() as conn:
             schema.initialize(conn)

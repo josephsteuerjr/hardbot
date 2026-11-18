@@ -508,6 +508,8 @@ def _changes(conn, principal, cursor, previous_scope=''):
     current_scope=digest([principal.employee_uuid,principal.role,principal.team_id,
         sorted(principal.capabilities),sorted(principal.employee_scope),principal.all_contracts,principal.read_all_contracts,
         [dict(r) for r in conn.execute('SELECT team_id,capability FROM crm_distribution_managers WHERE employee_uuid=? ORDER BY team_id,capability',
+                                      (principal.employee_uuid,))],
+        [dict(r) for r in conn.execute('SELECT country,work FROM crm_logistics_staff WHERE employee_uuid=? ORDER BY country,work',
                                       (principal.employee_uuid,))]])
     new_cursor=dict(end,scope=current_scope)
     if previous_scope and previous_scope!=current_scope:
@@ -523,12 +525,22 @@ def _changes(conn, principal, cursor, previous_scope=''):
     if staff:
         clause+=' OR d.before_employee_uuid IN ('+marks+') OR d.after_employee_uuid IN ('+marks+')'
         args.extend(staff+staff)
+    if principal.role == 'logistic' and 'logistics' in principal.capabilities:
+        clause += (" OR EXISTS(SELECT 1 FROM crm_logistics_cases lc JOIN crm_logistics_staff ls "
+                   "ON ls.country=lc.country AND ls.work='logist' "
+                   "WHERE lc.contract_uuid=d.contract_uuid AND ls.employee_uuid=?)")
+        args.append(principal.employee_uuid)
     dirty=bool(conn.execute('SELECT 1 FROM crm_assignment_changes d WHERE d.sequence>? AND d.sequence<=? AND ('
         +clause+') LIMIT 1',(cursor['assignments'],end['assignments'],*args)).fetchone())
     if not dirty and cursor['facts']<end['facts']:
         clause,args=scope_sql(principal,alias='ec')
         clause+=' OR e.employee_uuid=?';args.append(principal.employee_uuid)
         if access.reads_all(principal):clause='1=1';args=[]
+        elif principal.role == 'logistic' and 'logistics' in principal.capabilities:
+            clause += (" OR EXISTS(SELECT 1 FROM crm_logistics_cases lc JOIN crm_logistics_staff ls "
+                       "ON ls.country=lc.country AND ls.work='logist' "
+                       "WHERE lc.contract_uuid=ec.contract_uuid AND ls.employee_uuid=?)")
+            args.append(principal.employee_uuid)
         elif staff:
             at=now()
             clause+=' OR EXISTS(SELECT 1 FROM crm_effective_assignments a WHERE a.contract_uuid=ec.contract_uuid '
@@ -563,7 +575,7 @@ def history(principal, *, offset=0, limit=50):
             'JOIN crm_contracts c USING(contract_uuid) JOIN crm_people p USING(person_uuid) '
             'LEFT JOIN crm_employees b ON b.employee_uuid=x.before_employee_uuid '
             'LEFT JOIN crm_employees a ON a.employee_uuid=x.after_employee_uuid '
-            'WHERE '+clause+' ORDER BY x.sequence DESC LIMIT ? OFFSET ?',(*args,limit,offset)).fetchall()
+            "WHERE x.capability IN ('call','visit') AND ("+clause+') ORDER BY x.sequence DESC LIMIT ? OFFSET ?',(*args,limit,offset)).fetchall()
         return dict(rows=[dict(r) for r in rows],offset=offset)
 
 
