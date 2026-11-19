@@ -55,7 +55,9 @@ def validate_identity(value):
         raise fault('manager_required', 403)
     if not isinstance(device, dict) or type(device.get('id')) is not int or device['id'] < 1:
         raise fault('manager_required', 403)
-    return dict(uid=uid, device_id=device['id'], name=str(me.get('name') or ''), role='observer' if me['role']=='security' else me['role'])
+    return dict(uid=uid, device_id=device['id'], name=str(me.get('name') or ''),
+                role='observer' if me['role']=='security' else me['role'],
+                server_operator=me['role'] != 'security' and value.get('server_operator') is True)
 
 
 def validate_entry_identity(value, kind):
@@ -153,7 +155,9 @@ def principal(identity):
             employees=frozenset(json.loads(policy['employees_json'])) | {result.employee_uuid}
             all_contracts=bool(policy['all_contracts']) and role in {'manager','analyst'}
         return replace(result, role=role, capabilities=result.capabilities & ROLE_CAPABILITIES[role],
-                       employee_scope=employees, all_contracts=all_contracts, read_all_contracts=role != 'logistic')
+                       employee_scope=employees, all_contracts=all_contracts,
+                       read_all_contracts=role != 'logistic',
+                       server_operator=role == 'manager' and identity.get('server_operator') is True)
 
 
 class Sessions:

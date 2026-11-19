@@ -17,6 +17,7 @@ class Principal:
     timezone: str = "Europe/Samara"
     all_contracts: bool = False
     read_all_contracts: bool = False
+    server_operator: bool = False
 
     @property
     def owner(self):

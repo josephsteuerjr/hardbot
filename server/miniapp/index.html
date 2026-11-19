@@ -1539,7 +1539,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=113;
+const SHELL_VERSION=114;
 let LOGIN_GPS=null;
 const ORIGINAL_FETCH=window.fetch.bind(window);
 window.fetch=async(input,init)=>{
@@ -2158,7 +2158,7 @@ function renderAppAuthGone(expired=false){
       <button class="btn acc" id="loginbtn" onclick="${registering?"accountRegister()":"accountLogin()"}">${registering?"Создать профиль":"Войти"}</button>
       <button class="btn" style="margin-top:12px" onclick="authTab('${registering?"login":"register"}')">${registering?"Уже есть профиль — войти":"Нет профиля — зарегистрироваться"}</button>
       <p class="muted">Руководитель подтверждает устройства сотрудников во «Входе команды».</p>
-      ${registering?"":`<p><a href="/admin/analyst/">Вход для аналитика</a></p>`}</div></div>`;
+      </div></div>`;
   if(registering) loadRegistrationStaff();
 }
 
@@ -2793,6 +2793,28 @@ async function checkPending(){
   if(btn && btn.isConnected){ btn.disabled=false; btn.textContent="Проверить снова"; }
 }
 
+// Keep the previous workspace available while it owns unconfirmed work.
+async function openCrmAfterRollout(){
+  if(!navigator.onLine||location.pathname!=="/"||location.search||
+     location.hash&&!/^#(?:token|t)=/.test(location.hash))return false;
+  try{
+    const credential=appToken(),role=localStorage.getItem("account_role");
+    if(!credential&&TG&&TG.initData||credential&&!role)return false;
+    const response=await fetch("/version.json",{cache:"no-store",signal:AbortSignal.timeout(4000)});
+    if(!response.ok||!(await response.json()).crmRollout)return false;
+    if(await IDB.count("queue"))await flushQueueSettled(4000);
+    if(await IDB.count("queue"))return false;
+    for(let i=0;i<localStorage.length;i++){
+      const key=localStorage.key(i);
+      if(key?.startsWith("draft:")||key?.startsWith("softdraft:"))return false;
+    }
+    const build=await fetch("/mobile/BUILD.json",{cache:"no-store",signal:AbortSignal.timeout(4000)});
+    if(!build.ok||!(/^[a-f0-9]{16}$/).test((await build.json()).version))return false;
+    location.replace("/mobile/");
+    return true;
+  }catch{return false;}
+}
+
 async function boot(){
   if(!await enforceRetention())return;
   const bootStarted=performance.now(); let gen=WIPE_GEN;
@@ -2802,6 +2824,7 @@ async function boot(){
   tgGeoInit();                // внутри Телеграма — её собственный LocationManager
   if(!REDEEMED){ REDEEMED=true;                          // код из ссылки входа
     if((await redeemFromUrl())==="reload") return; }        // страница перезагружается
+  if(!STATE.uid&&await openCrmAfterRollout())return;
   // Диплинк из пуша (?tab=digest&d=дата): параметры вычищаются из адреса СРАЗУ
   // — stampTokenUrl сохраняет query, а перезагрузка здесь штатная (обновление
   // оболочки делает location.reload), и человека выбрасывало бы в сводку на

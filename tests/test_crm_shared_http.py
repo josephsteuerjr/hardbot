@@ -2,6 +2,7 @@ import asyncio
 import json
 import secrets
 import pytest
+import db
 from aiohttp.test_utils import TestClient, TestServer
 from test_crm_core import crm_world, call_body
 from crm import shared_auth, shared_server, storage
@@ -77,4 +78,40 @@ def test_second_bulk_request_is_busy_before_parsing_another_large_body(crm_world
             finally:release.set()
             response=await first
             assert response.status==200
+    asyncio.run(scenario())
+
+
+def test_server_overview_stays_outside_normal_manager_scope(crm_world, monkeypatch):
+    monkeypatch.setenv('HARD_CRM_PRIMARY_DB', str(db.DB_PATH))
+    with storage.connect() as conn:
+        conn.execute("INSERT INTO crm_meta VALUES('deployment_namespace',?)", (shared_auth.NAMESPACE,))
+        conn.execute("UPDATE crm_memberships SET role='manager',capabilities_json=?",
+                     (canonical(sorted(shared_auth.CAPABILITIES)),))
+        conn.execute("INSERT INTO accounts(username,employee,password_hash,role,status) VALUES(?,?,?,?,?)",
+                     ('example-user', 'Test contact', 'private-test-hash', 'agent', 'active'))
+    operator = True
+
+    async def verify(token):
+        return dict(uid=101,device_id=1,name='Synthetic manager',role='manager',
+                    server_operator=operator)
+
+    async def scenario():
+        nonlocal operator
+        sessions=shared_auth.Sessions(secrets.token_bytes(32),verify)
+        async with TestClient(TestServer(shared_server.create_app(sessions=sessions))) as client:
+            exchange=await client.post('/auth/exchange',headers={'X-Pult-Token':secrets.token_urlsafe(32)})
+            assert exchange.status==200
+            headers={'Authorization':'Bearer '+(await exchange.json())['token']}
+            context=await (await client.get('/api/crm/context',headers=headers)).json()
+            assert context['role']=='manager' and not context['owner'] and context['server_operator']
+            response=await client.get('/api/crm/operator-status',headers=headers)
+            assert response.status==200
+            assert response.headers['Cache-Control']=='no-store'
+            data=await response.json()
+            assert data['entries'][0]['username']=='example-user'
+            assert 'private-test-hash' not in json.dumps(data)
+            operator=False
+            response=await client.get('/api/crm/operator-status',headers=headers)
+            assert response.status==403
+            assert (await client.get('/api/crm/context',headers=headers)).status==200
     asyncio.run(scenario())

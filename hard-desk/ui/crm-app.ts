@@ -5,6 +5,7 @@ import {editClientCard} from './crm-card-editor';
 import {mountManagerReports} from './crm-manager-reports';
 import {mountManagerTeam} from './crm-manager-team';
 import {mountAnalyst} from './crm-analyst';
+import {mountOperator} from './crm-operator';
 import {mountLogistics, mountLogisticsCall} from './crm-logistics';
 import {decimalText} from './crm-format';
 import type {UpdateState} from '../src/main/updates';
@@ -311,8 +312,7 @@ async function boot() {
   const mobileTarget=crm.initialSection?.();if(mobileTarget)section=mobileTarget;
   document.body.classList.toggle('crm-analyst',context?.role==='analyst');
   if(context?.role==='analyst')analystIdentity=state.owner;
-  const analystWeb=context?.source==='legacy-analyst-web';
-  if(context?.role==='analyst'&&!(analystWeb?['registry','statistics','connection']:['registry','exchange','statistics','team','connection']).includes(section))section='registry';
+  if(context?.role==='analyst'&&!['registry','exchange','statistics','team','connection'].includes(section))section='registry';
   if(context?.role==='logistic'&&!['logistics','connection'].includes(section))section='logistics';
   if(context?.role!=='logistic'&&section==='logistics')section='portfolio';
   if (portfolioIdentity!==context?.employee_uuid) {
@@ -346,8 +346,6 @@ async function boot() {
   const manager=['manager','owner'].includes(context?.role);
   const sections = context?.role==='logistic' ? [
     ['logistics','Курьерские пулы'],['connection','Подключение'],
-  ] : analystWeb ? [
-    ['registry','Реестр'],['statistics','Показатели'],['connection','Подключение'],
   ] : context?.role==='analyst' ? [
     ['registry','Реестр'],['exchange','Обмен'],['statistics','Показатели'],['team','Команда'],['connection','Подключение'],
   ] : crm.platform==='mobile'&&context?.role==='employee' ? [
@@ -358,7 +356,10 @@ async function boot() {
     ['active-time','Активное время'],['connection','Подключение'],
   ] : manager ? [
     ['portfolio','Портфель'],['registry','Реестр'],['manager-statistics','Показатели'],['team','Команда'],
-    ['script','Скрипты и задачи'],['connection','Подключение'],
+    ['script','Скрипты и задачи'],
+    ...(can('exchange')?[['exchange','Обмен']]:[]),
+    ...(context?.server_operator?[['operator','Сервер и входы']]:[]),
+    ['connection','Подключение'],
   ] : crm.platform==='mobile'&&context?.role==='courier'?[
     ['portfolio','Передачи'],['tasks','Задачи'],['cabinet','Мои результаты'],['queue','Отправки'],['shift','Смена'],['connection','Подключение'],['help','Справка'],
   ] : crm.platform==='mobile'&&context?.role==='observer'?[
@@ -392,6 +393,7 @@ async function boot() {
 }
 async function go(next: string) {
   if(next==='overview')next='portfolio';
+  if(next==='operator'&&!context?.server_operator)next='portfolio';
   if(context?.role==='logistic'&&!['logistics','connection'].includes(next))next='logistics';
   disposeSection?.();disposeSection=undefined;
   const generation=++renderGeneration;
@@ -416,6 +418,7 @@ async function go(next: string) {
       'manager-statistics':'Показатели команды',
       statistics:'Показатели',
       team:'Команда',
+      operator:'Сервер и входы',
       logistics:'Курьерские пулы',
       registry:'Реестр',
       'active-time':'Активное время',
@@ -424,7 +427,7 @@ async function go(next: string) {
       cabinet:'Показатели сотрудника',
       script: "Скрипт звонка",
       queue: "Очередь",
-      exchange: context?.role==='analyst'?'Обмен':"Реестры",
+      exchange: "Обмен",
       adoption: "Внедрение",
       connection: "Подключение",
       help: "Справка",
@@ -466,14 +469,7 @@ async function go(next: string) {
       await view.refresh();
       return;
     }
-    if(context?.source==='legacy-analyst-web'&&next==='statistics'){
-      const report=await request('GET','analyst-statistics');
-      if(generation===renderGeneration)$('view').innerHTML=table(
-        ['Кредитор','Договоры','Назначено в Софт','Назначено в Хард'],
-        report.rows.map((row:any)=>[row.partner,row.contracts,row.soft,row.hard].map(value=>'<td>'+esc(value)+'</td>').join('')).map((row:string)=>'<tr>'+row+'</tr>'));
-      return;
-    }
-    if(context?.role==='analyst'&&context.source!=='legacy-analyst-web'&&['registry','exchange','statistics','team','connection'].includes(next)){
+    if(context?.role==='analyst'&&['registry','exchange','statistics','team','connection'].includes(next)){
       const expectedOwner=state.owner,valid=()=>generation===renderGeneration;
       const api={...crm,api:(method:string,action:string,body?:any,query?:any)=>crm.api(method,action==='manager-report'?'analyst-report':action==='manager-statistics'?'analyst-statistics':action,body,query),
         workbook:(action:string,input?:any)=>crm.workbook(action==='manager-report'?'analyst-report':action,input),
@@ -492,10 +488,11 @@ async function go(next: string) {
         portfolio,
         'manager-statistics':managerStatistics,
         team:managerTeam,
+        operator:()=>mountOperator($('view'),()=>request('GET','operator-status'),()=>generation===renderGeneration),
         registry:async()=>{
           if(['manager','owner'].includes(context.role)){await managerRegistry();return;}
           const expectedOwner=state.owner;
-          const stop=await mountRegistry($('view'),{...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:(action?:string,id?:string)=>crm.queue(action,id,expectedOwner)},()=>generation===renderGeneration,{onlyAll:context?.source==='legacy-analyst-web',openPerson:id=>void openCard(id).catch(reportError)});
+          const stop=await mountRegistry($('view'),{...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:(action?:string,id?:string)=>crm.queue(action,id,expectedOwner)},()=>generation===renderGeneration,{openPerson:id=>void openCard(id).catch(reportError)});
           if(generation===renderGeneration)disposeSection=stop;else stop();
         },
         'active-time':activeTimePage,

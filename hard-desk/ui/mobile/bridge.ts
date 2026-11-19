@@ -7,6 +7,7 @@ const listeners=new Set<(event:any)=>void>();
 const canonical=(v:any):string=>JSON.stringify(v,(_,x)=>x&&typeof x==='object'&&!Array.isArray(x)?Object.fromEntries(Object.keys(x).sort().map(k=>[k,x[k]])):x);
 const background=(work:Promise<any>)=>{void work.catch(()=>emit({type:'storage-error',text:'Не удалось сохранить данные на телефоне. Оставьте окно открытым и повторите действие.'}));};
 let current:any=null,csrf='',offline=false,flushing:Promise<any>|null=null,liveTimer:ReturnType<typeof setTimeout>,polling=false;
+let initializing:Promise<Reply>|null=null, legacyTried=false;
 let navigationTarget='';
 let initialPerson='';
 let navigating=false,routeHandler:((route:any)=>Promise<void>)|undefined;
@@ -15,10 +16,8 @@ window.addEventListener('popstate',()=>{
   if(!route||route.owner!==current?.owner||!routeHandler)return;
   navigating=true;background(routeHandler(route).finally(()=>{navigating=false;}));
 });
-const analystShell=location.pathname.startsWith('/admin/analyst/');
-const deviceScope=analystShell?'analyst-web-device':'device';
-const scopeSuffix=analystShell?'-analyst':'';
-const channel=typeof BroadcastChannel!=='undefined'?new BroadcastChannel('crm-mobile-events'+scopeSuffix):null;
+const deviceScope='device';
+const channel=typeof BroadcastChannel!=='undefined'?new BroadcastChannel('crm-mobile-events'):null;
 const activity=new MobileActivity(api,async(action,body,owner)=>persistEntry(owner,action,body),()=>emit({type:'storage-error',text:'Не удалось сохранить активный интервал. Оставьте окно открытым и повторите подключение.'}));
 const emit=(event:any,broadcast=false)=>{for(const fn of listeners)fn(event);if(broadcast)channel?.postMessage(event);};
 channel?.addEventListener('message',event=>{if(event.data?.owner===current?.owner)emit(event.data);else if(event.data?.type==='identity')background(initialize().then(()=>emit({type:'identity'})));});
@@ -37,23 +36,36 @@ async function request(path:string,body?:any):Promise<Reply>{
   }catch{return {ok:false,status:0,text:'Ответ не получен. Исходная операция сохранена на телефоне.'};}
 }
 async function initialize(){
+  initializing ??= loadSession().finally(()=>{initializing=null;});
+  return initializing;
+}
+async function loadSession():Promise<Reply>{
   if(!await vault.get(deviceScope,'installation')){
-    if(analystShell){
-      const previous=await vault.get('device','last-state');
-      if(previous?.context?.source==='legacy-analyst-web')await vault.put(deviceScope,'last-state',previous);
-    }
     await vault.update(deviceScope,'installation',value=>value||crypto.randomUUID());
   }
-  const response=await request('boot');
+  let response=await request('boot');
+  if(response.ok){
+    csrf=response.data.csrf;
+    if(!legacyTried&&!response.data.synthetic&&!response.data.session&&!response.data.pending){
+      try{
+        const credential=localStorage.getItem('app_token'),entry_role=localStorage.getItem('account_role');
+        if(credential&&entry_role){
+          const resumed=await request('resume',{credential,entry_role});
+          legacyTried=resumed.ok||[400,401,403,410].includes(resumed.status);
+          if(resumed.ok||resumed.status===409)response=await request('boot');
+        }
+      }catch{/* Session access stays available when local storage is restricted. */}
+    }
+  }
   if(response.ok){csrf=response.data.csrf;current=response.data.session||null;await vault.put(deviceScope,'last-state',current);}
   else if(response.status===0){
     const saved=await vault.get(deviceScope,'last-state');
-    current=saved&&saved.expires_at>Date.now()&&(saved.context?.source==='legacy-analyst-web')===analystShell?saved:null;
+    current=saved&&saved.expires_at>Date.now()&&saved.context?.source!=='legacy-analyst-web'?saved:null;
   }
   if(current?.owner&&response.ok&&!document.hidden&&current.context?.source!=='legacy-analyst-web')
     await activity.start(current.owner,await vault.get(deviceScope,'installation'));
   else if(!current||current.context?.source==='legacy-analyst-web')await activity.stop();
-  startPolling();return current;
+  startPolling();return response;
 }
 async function api(method:string,action:string,body?:any,query?:any):Promise<Reply>{
   const owner=authority(),key='read:'+action+':'+JSON.stringify(query||{});
@@ -65,8 +77,8 @@ async function api(method:string,action:string,body?:any,query?:any):Promise<Rep
   const response=await request('api',{method,action,body:body||{},query:query||{}});
   if(exportKey){if(response.ok)await vault.put(owner,'export-key:'+response.data.manifest.export_id,exportKey);else if([400,409,422].includes(response.status))await vault.put(owner,exportKey,null);}
   if(current?.owner!==owner)return {ok:false,status:401,text:'Вход изменился.'};
-  if(method==='GET'&&response.ok)await vault.put(owner,key,{at:new Date().toISOString(),data:response.data});
-  if(method==='GET'&&response.status===0&&!['changes','assignment-job','assignment-receipt'].includes(action)){
+  if(method==='GET'&&response.ok&&action!=='operator-status')await vault.put(owner,key,{at:new Date().toISOString(),data:response.data});
+  if(method==='GET'&&response.status===0&&!['operator-status','changes','assignment-job','assignment-receipt'].includes(action)){
     const saved=await vault.get(owner,key);if(saved)return {ok:true,status:200,data:saved.data,stale:saved.at};
   }
   return response;
@@ -264,18 +276,20 @@ export const bridge:any={
     if(input.action==='offline'){offline=!!input.value;if(!offline)background(flush());return {ok:true};}
     const installation=await vault.get(deviceScope,'installation');
     const device_id=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(installation)))).map(v=>v.toString(16).padStart(2,'0')).join('');
-    const legacyLogout=input.action==='logout'&&current?.context?.source==='legacy-analyst-web';
+    if(input.action==='login'||input.action==='logout')legacyTried=true;
     const response=await request(input.action==='logout'?'logout':input.action==='password'?'password':'login',{...input,device_id,device_label:navigator.userAgent.slice(0,120)});
-    if(response.ok&&legacyLogout){
-      current=null;csrf='';clearTimeout(liveTimer);
-      await vault.put(deviceScope,'last-state',null);
-      channel?.postMessage({type:'identity'});
-      return response; // mountConnection reloads once, after the old identity is cleared.
-    }
     if(response.ok){await initialize();navigationTarget=current?.context?.role==='analyst'?'registry':current?'portfolio':'connection';emit({type:'identity',owner:current?.owner},true);background(flush());}return response;
   },workbook,document:documentFile,admin,win:()=>{},
   diagnostics:async()=>({ok:true,data:{checks:[{title:'Хранилище телефона',code:'storage_ready',ok:!!await vault.get(deviceScope,'installation')},{title:'Связь',code:navigator.onLine?'network_ready':'offline',ok:navigator.onLine}]}}),
-  renderConnection:async(host:HTMLElement)=>mountConnection(host,bridge,()=>request('boot')),
+  renderConnection:async(host:HTMLElement)=>mountConnection(host,bridge,async()=>{
+    const before=current?.owner;
+    const response=await initialize();
+    if(current?.owner&&before!==current.owner){
+      navigationTarget=current.context.role==='analyst'?'registry':'portfolio';
+      queueMicrotask(()=>emit({type:'identity',owner:current.owner},true));
+    }
+    return response;
+  }),
 };
 window.addEventListener('online',()=>{background(initialize().then(()=>flush()));});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)background(initialize().then(()=>flush()));});

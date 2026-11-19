@@ -28,12 +28,17 @@ class Sessions:
         with self.connect() as conn:row=conn.execute('SELECT * FROM sessions WHERE id=?',(sid,)).fetchone()
         if not row or row['expires']<time.time():return None
         value=row['sealed'];return json.loads(self.cipher.decrypt(value[:12],value[12:],sid.encode()))
-    def write(self,value,sid=None):
+    def write(self,value,sid=None,*,replaces=None):
         sid=sid or secrets.token_urlsafe(32);nonce=os.urandom(12)
         sealed=nonce+self.cipher.encrypt(nonce,json.dumps(value,ensure_ascii=False).encode(),sid.encode())
         with self.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             if conn.execute('SELECT 1 FROM ended_sessions WHERE id=?',(sid,)).fetchone():raise CRMError('Вход изменился. Исходная работа сохранена.','session',401)
+            if replaces:
+                if not conn.execute('SELECT 1 FROM sessions WHERE id=?',(replaces,)).fetchone():
+                    raise CRMError('Подключение уже изменилось. Обновите страницу.','session',409)
+                conn.execute('INSERT OR IGNORE INTO ended_sessions VALUES(?)',(replaces,))
+                conn.execute('DELETE FROM sessions WHERE id=?',(replaces,))
             conn.execute('INSERT OR REPLACE INTO sessions VALUES(?,?,?)',(sid,sealed,value['expires_at']/1000))
         return sid
     def forget(self,sid):
@@ -162,8 +167,27 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         body=await request.json();session=await backend.login(body)
         session.update(empty())
         if not session.get('pending'):bind_owner(session)
-        sessions.forget(request['mobile_sid']);sid=sessions.write(session)
+        sid=sessions.write(session,replaces=request['mobile_sid'])
         response=web.json_response(dict(ok=True));cookie(response,sid,request);return response
+    async def resume(request):
+        if backend.synthetic:
+            raise CRMError('Перенос входа доступен в рабочей CRM.', 'synthetic', 403)
+        if request.headers.get('Origin') != (public_origin or request.scheme+'://'+request.host):
+            raise CRMError('Источник запроса не совпадает.', 'origin', 403)
+        previous = request['mobile_session']
+        if previous.get('owner') or previous.get('pending'):
+            raise CRMError('В рабочем месте уже открыт вход.', 'session', 409)
+        if request.content_length is None or request.content_length > 2048:
+            raise CRMError('Недопустимый размер запроса.', 'size', 413)
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) != {'credential', 'entry_role'}:
+            raise CRMError('Некорректные параметры запроса.', 'invalid', 400)
+        session = await backend.resume(body['credential'], body['entry_role'])
+        session.update(empty())
+        bind_owner(session)
+        response = web.json_response(dict(ok=True))
+        cookie(response, sessions.write(session, replaces=request['mobile_sid']), request)
+        return response
     async def password(request):
         session=request['mobile_session']
         if backend.synthetic:raise CRMError('Смена личного пароля доступна в рабочем входе.','synthetic',403)
@@ -175,6 +199,8 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         session=await authorize(request);body=await request.json()
         method=body.get('method','GET');action=body.get('action','')
         if method not in {'GET','POST'}:raise CRMError('Недопустимый метод.')
+        if method=='GET' and action=='context':
+            return web.json_response(session['context'])
         data=await backend.request(session,method,action,body.get('body') or {},body.get('query') or {})
         sessions.write(session,request['mobile_sid'])
         return web.json_response(data)
@@ -342,6 +368,7 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
     async def health(request):return web.json_response(dict(ok=True,service='crm-mobile',executor='python-xlsxwriter' if isinstance(getattr(backend,'executor',None),ServerExecutor) else 'windows' if isinstance(getattr(backend,'executor',None),WindowsExecutor) else 'synthetic' if backend.synthetic else 'unconfigured'))
     app.router.add_get(prefix+'health',health)
     app.router.add_get(prefix+'boot',boot);app.router.add_post(prefix+'login',login);app.router.add_post(prefix+'logout',logout)
+    app.router.add_post(prefix+'resume',resume)
     app.router.add_post(prefix+'password',password)
     app.router.add_get(prefix+'receipts',receipts);app.router.add_post(prefix+'receipts',receipts)
     app.router.add_post(prefix+'api',api);app.router.add_post(prefix+'upload',upload);app.router.add_post(prefix+'admin',admin);app.router.add_post(prefix+'workbook',workbook);app.router.add_get(prefix+'sources',sources)

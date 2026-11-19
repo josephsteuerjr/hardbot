@@ -13,7 +13,7 @@
  * При открытии по сети service worker кладёт оболочку обратно (network-first ниже),
  * свои ассеты — при первом запросе (caches.open создаёт кэш заново).
  */
-const CACHE = "hard-shell-v113";
+const CACHE = "hard-shell-v114";
 const ROOT_SHELL_CACHE = /^hard-shell-v\d+$/;
 let cacheEnabled=true,cacheEpoch=0;
 const cacheWrites=new Set();
@@ -85,6 +85,7 @@ self.addEventListener("fetch", (e) => {
   // Данные, админ-API и тайлы — всегда из сети (оффлайн-данные держит IndexedDB миниаппа).
   if (sameOrigin && (url.pathname.startsWith("/api/") ||
                      url.pathname.startsWith("/admin/") ||
+                     url.pathname.startsWith("/mobile/") ||
                      url.pathname.startsWith("/tiles/"))) return;
 
   // Открытие приложения — NETWORK-FIRST: онлайн всегда берём свежую оболочку с сервера

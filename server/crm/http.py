@@ -22,6 +22,7 @@ from . import (
     active_time,
     assignments,
     manager_reports,
+    operator,
 )
 from .contract import CRMError, fields
 
@@ -108,6 +109,7 @@ def install(app, host=None, *, authenticate=None):
             role=p.role,
             capabilities=sorted(p.capabilities),
             owner=p.owner,
+            server_operator=p.server_operator,
             read_all_contracts=access.reads_all(p),
             timezone=p.timezone,
             fields=fields(),
@@ -126,6 +128,8 @@ def install(app, host=None, *, authenticate=None):
             if request.method == "GET":
                 if action == "context":
                     result = await asyncio.to_thread(context, p)
+                elif action == 'operator-status':
+                    result = await asyncio.to_thread(operator.status, p)
                 elif action == 'registry':
                     result = await asyncio.to_thread(registry.read, p, **dict(request.query))
                 elif action == 'managed-portfolio':

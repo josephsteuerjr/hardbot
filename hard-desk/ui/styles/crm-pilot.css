@@ -5,6 +5,7 @@
 @import '../crm-registry.css';
 @import '../crm-manager-portfolio.css';
 @import './crm-analyst.css';
+@import './crm-operator.css';
 .contract-facts .delivery-fact{grid-column:1/-1}
 .delivery-fact dd{white-space:pre-wrap}
 * {

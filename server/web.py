@@ -903,6 +903,7 @@ async def _version(request: web.Request) -> web.Response:
         "shellVersion": _shell_version(),
         "visitGeoRequired": config.VISIT_GEO_REQUIRED,
         "dataExchangeContract": DATA_EXCHANGE_CONTRACT,
+        "crmRollout": os.getenv('HARD_CRM_MOBILE_ROLLOUT') == '1',
     }
     if _is_drain(request):
         payload["drain"] = _drain_payload()
@@ -5068,13 +5069,16 @@ async def _manager_device_enroll(request: web.Request) -> web.Response:
 async def _manager_device_me(request: web.Request) -> web.Response:
     uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     device = None
+    server_operator = False
     ptok = (request.headers.get("X-Pult-Token") or "").strip()
     if ptok:
         _, dev = db.manager_device_check(ptok)
         if dev:
             device = {"id": dev["id"], "name": dev["device"] or "",
                       "created_at": dev["created_at"]}
-    return _manager_json({"ok": True, "device": device, "team": len(team),
+            if dev["account_id"]:
+                server_operator = await asyncio.to_thread(accounts.is_server_operator, dev["account_id"], uid)
+    return _manager_json({"ok": True, "device": device, "team": len(team), "server_operator": server_operator,
                           **await asyncio.to_thread(_device_me, uid, mgr)})
 
 
@@ -6099,9 +6103,10 @@ def _admin(request: web.Request) -> None:
         if state=='ok' and linked and linked['account_id']:
             gate,_employee=accounts.device_gate_by_token('manager_devices',int(linked['id']))
             with db.connect() as conn:
-                grant=conn.execute('SELECT g.principal,a.role,a.telegram_id FROM account_admin_grants g '
+                grant=conn.execute('SELECT g.principal,g.granted_by,a.role,a.telegram_id FROM account_admin_grants g '
                     'JOIN accounts a ON a.id=g.account_id WHERE g.account_id=?',(linked['account_id'],)).fetchone()
-            if gate=='ok' and grant and (grant['role']=='analyst' or (grant['role']=='full' and grant['telegram_id']==ADMIN_ID)):
+            root_manager=bool(grant and grant['granted_by']=='ssh-root' and grant['role'] in {'manager','full'})
+            if gate=='ok' and grant and (root_manager or grant['role']=='analyst' or (grant['role']=='full' and grant['telegram_id']==ADMIN_ID)):
                 request['admin_device']={**dict(linked),'role':'operator','account_approver':grant['principal'],'account_session':True}
                 _admin_auth_ok(request)
                 return
@@ -7882,10 +7887,12 @@ def build_app(bot=None) -> web.Application:
     app["notification_limit"] = asyncio.Semaphore(4)
     from crm.http import install as _install_crm
     from crm_identity import install as _install_crm_identity
+    from crm.retired_entry import install as _install_crm_retired_entry
     from courier_crm import install as _install_courier_crm
     import sys as _crm_sys
     _install_crm(app,_crm_sys.modules[__name__])
     _install_crm_identity(app, _crm_sys.modules[__name__])
+    _install_crm_retired_entry(app)
     _install_courier_crm(app, _crm_sys.modules[__name__])
     import notification_outbox
     app.cleanup_ctx.append(notification_outbox.lifecycle)

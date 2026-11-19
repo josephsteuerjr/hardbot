@@ -268,7 +268,7 @@ async function local(
 }
 
 const actions = new Set([
-  "context",
+  "context", "operator-status",
   "portfolio",
   "work-portfolio",
   'tasks',
@@ -633,7 +633,7 @@ app
         if (authority !== owner && result.ok)
           return { ok: false, status: 409, text: "Учётная запись изменилась." };
         const key = action + JSON.stringify(query || {});
-        const freshOnly=action==='changes'||action.startsWith('assignment-')||action.startsWith('logistics')||action==='managed-portfolio'||action==='manager-statistics'||action==='manager-report'||action==='analyst-report'||action==='analyst-statistics';
+        const freshOnly=action==='operator-status'||action==='changes'||action.startsWith('assignment-')||action.startsWith('logistics')||action==='managed-portfolio'||action==='manager-statistics'||action==='manager-report'||action==='analyst-report'||action==='analyst-statistics';
         if (result.ok && method === "GET" && owner && !freshOnly)
           queue.cache(owner, key, result.data);
         else if (method === "GET" && result.status === 0 && owner && !freshOnly) {

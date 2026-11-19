@@ -14,8 +14,7 @@ await build({entryPoints:[join(desk,'ui/mobile/styles.css')],outfile:join(out,'a
 cpSync(join(desk,'ui/mobile/index.html'),join(out,'index.html'));cpSync(join(desk,'icons/icon.svg'),join(out,'icon.svg'));
 cpSync(join(desk,'icons/icon-512.png'),join(out,'icon-512.png'));
 cpSync(join(desk,'ui/licenses'),join(out,'licenses'),{recursive:true});
-const analystWeb=process.env.HARD_CRM_MOBILE_VARIANT==='analyst-web';
-writeFileSync(join(out,'manifest.webmanifest'),JSON.stringify({id:'./',name:analystWeb?'Взыскание — Аналитик':'Взыскание',short_name:analystWeb?'Аналитик':'Взыскание',start_url:'./',scope:'./',display:'standalone',background_color:'#f8eee0',theme_color:'#f8eee0',icons:[{src:'icon-512.png',sizes:'512x512',type:'image/png',purpose:'any'},{src:'icon.svg',sizes:'any',type:'image/svg+xml',purpose:'any'}]},null,2));
+writeFileSync(join(out,'manifest.webmanifest'),JSON.stringify({id:'./',name:'Взыскание',short_name:'Взыскание',start_url:'./',scope:'./',display:'standalone',background_color:'#f8eee0',theme_color:'#f8eee0',icons:[{src:'icon-512.png',sizes:'512x512',type:'image/png',purpose:'any'},{src:'icon.svg',sizes:'any',type:'image/svg+xml',purpose:'any'}]},null,2));
 function files(dir){return readdirSync(dir,{withFileTypes:true}).flatMap(x=>x.isDirectory()?files(join(dir,x.name)):[join(dir,x.name)]);}
 const assets=files(out).filter(p=>!['sw.js','BUILD.json'].includes(relative(out,p))).map(p=>'./'+relative(out,p).replaceAll('\\','/')).sort();
 const worker=readFileSync(join(desk,'ui/mobile/service-worker.js'),'utf8');

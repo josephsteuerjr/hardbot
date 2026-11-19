@@ -1,7 +1,8 @@
 ﻿const esc=(v:any)=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
 const passwordForm=(temporary=false)=>'<form data-mobile-password class="mobile-login"><h2>'+(temporary?'Смените временный пароль':'Изменить пароль')+'</h2><label>Текущий пароль<input name="current" type="password" autocomplete="current-password" required></label><label>Новый пароль<input name="new" type="password" autocomplete="new-password" minlength="8" required></label><label>Повторите новый пароль<input name="repeat" type="password" autocomplete="new-password" minlength="8" required></label><button type="submit" class="primary">Сохранить пароль</button></form>';
 export async function mountConnection(host:HTMLElement,crm:any,boot:()=>Promise<any>){
-  const [response,state]=await Promise.all([boot(),crm.state()]);
+  const response=await boot();
+  const state=await crm.state();
   const connected=!!state.context,pending=response.data?.pending,network=!!response.ok,synthetic=response.data?.synthetic===true||state.connection.mode==='synthetic';
   const choosingRole=synthetic&&!connected&&!pending;
   let account='';

@@ -78,8 +78,8 @@ def provision(username,secret,operation_id,nonce,*,legacy_token='',legacy_device
         if not recovery and c.execute("SELECT 1 FROM account_admin_grants WHERE granted_by='ssh-root'").fetchone():
             raise RuntimeError('Первичный профиль Аналитика уже существует. Используйте вход или восстановление, не создавайте второго администратора.')
         if recovery:
-            if not existing or existing['role']!='analyst' or existing['granted_by']!='ssh-root':
-                raise RuntimeError('Восстановление root-доступом доступно только первичному профилю Аналитика.')
+            if not existing or existing['role'] not in {'analyst','manager','full'} or existing['granted_by']!='ssh-root':
+                raise RuntimeError('Восстановление root-доступом доступно только первичному профилю оператора.')
             principal=existing['principal']
         else:
             principal=_operator(c,username,legacy_token,legacy_device_id)
@@ -113,7 +113,7 @@ def provision(username,secret,operation_id,nonce,*,legacy_token='',legacy_device
             raise RuntimeError('Запрос изменился или истёк. Профиль не менялся.')
         if recovery:
             acc=c.execute("SELECT a.* FROM accounts a JOIN account_admin_grants g ON g.account_id=a.id "
-                "WHERE a.username=? AND a.role='analyst' AND g.principal=? AND g.granted_by='ssh-root'",(username,principal)).fetchone()
+                "WHERE a.username=? AND a.role IN ('analyst','manager','full') AND g.principal=? AND g.granted_by='ssh-root'",(username,principal)).fetchone()
             if not acc:raise RuntimeError('Профиль изменился после проверки. Повторите предпросмотр.')
             accounts._assert_uid_owned(c,acc)
             accounts._revoke_account_tokens(c,acc['id'],'ssh-root:recovery')

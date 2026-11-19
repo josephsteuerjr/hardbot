@@ -63,6 +63,23 @@ def test_pending_password_own_phone_approval_refresh_and_revocation(crm_world,tm
                     response=await client.post('/mobile/workbook',headers=headers,json=download)
                     assert response.status==200 and await response.read()==saved
                     store=app['mobile_sessions'];sid=client.session.cookie_jar.filter_cookies(client.make_url('/mobile/boot'))['crm_mobile_v1'].value
+                    credential=store.read(sid)['credential']
+                    async with TestClient(TestServer(create_app(Loopback(backend.primary,backend.crm),tmp_path/'resumed',key=os.urandom(32)))) as old_shortcut:
+                        boot_response=await old_shortcut.get('/mobile/boot')
+                        initial=await boot_response.json()
+                        resume=dict(credential=credential,entry_role='agent')
+                        resume_headers={'X-CRM-CSRF':initial['csrf']}
+                        denied=await old_shortcut.post('/mobile/resume',headers=resume_headers,json=resume)
+                        assert denied.status==403
+                        resume_headers['Origin']=str(old_shortcut.make_url('/').origin())
+                        resumed=await old_shortcut.post('/mobile/resume',headers=resume_headers,json=resume)
+                        assert resumed.status==200,await resumed.text()
+                        rebound=await (await old_shortcut.get('/mobile/boot')).json()
+                        assert rebound['session']['owner']==b['session']['owner']
+                        assert rebound['csrf']!=initial['csrf']
+                        resume_headers['X-CRM-CSRF']=rebound['csrf']
+                        duplicate=await old_shortcut.post('/mobile/resume',headers=resume_headers,json=resume)
+                        assert duplicate.status==409
                     original=store.read(sid)['crm_session'];now[0]+=1801
                     assert (await boot())[0]==200
                     renewed=store.read(sid)['crm_session'];assert renewed!=original

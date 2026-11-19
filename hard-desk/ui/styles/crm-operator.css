@@ -1,0 +1,27 @@
+.operator-workspace { display: grid; gap: 22px; min-width: 0; }
+.operator-header, .operator-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.operator-header { justify-content: space-between; color: var(--muted); }
+.operator-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.operator-metrics article { border: 1px solid var(--line); padding: 15px 19px; background: var(--surface); min-width: 0; }
+.operator-metrics article[data-state="attention"] { border-color: var(--accent); }
+.operator-metrics h2 { margin: 0 0 8px; font: 500 13px var(--sans); color: var(--muted); }
+.operator-metrics strong { display: block; font-size: clamp(19px, 2.5vw, 28px); line-height: 1.25; font-weight: 550; }
+.operator-metrics small { display: block; color: var(--muted); margin-top: 7px; }
+.operator-controls label { display: flex; align-items: center; gap: 8px; }
+.operator-table { overflow: auto; }
+.operator-table table { margin: 0; }
+.operator-table th { text-align: left; }
+@media (max-width: 650px) {
+  .operator-workspace { gap: 16px; }
+  .operator-metrics { grid-template-columns: 1fr; gap: 6px; }
+  .operator-metrics article { padding: 9px 12px; display: grid; grid-template-columns: 1fr auto; column-gap: 8px; align-items: center; }
+  .operator-metrics h2 { margin: 0; }
+  .operator-metrics small { grid-column: 1 / -1; margin-top: 2px; }
+  .operator-controls label { flex: 1 1 100%; justify-content: space-between; }
+  .operator-controls input, .operator-controls select { max-width: 72%; }
+  .operator-table table, .operator-table tbody { display: block; }
+  .operator-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .operator-table tr { display: block; padding: 9px 0; border-top: 1px solid var(--line); }
+  .operator-table td { display: flex; justify-content: space-between; gap: 10px; border: 0; padding: 2px 4px; text-align: right; }
+  .operator-table td::before { content: attr(data-label); color: var(--muted); text-align: left; }
+}

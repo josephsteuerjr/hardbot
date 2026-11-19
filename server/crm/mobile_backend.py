@@ -4,7 +4,7 @@ from pathlib import Path
 import aiohttp
 from .contract import CRMError
 
-GET_ACTIONS=frozenset('context portfolio work-portfolio tasks card contracts registry managed-portfolio assignment-staff assignment-receipt assignment-history assignment-job manager-statistics manager-report analyst-report analyst-statistics changes active-time shifts shift-report cabinet three-hour script adoption document-read'.split())
+GET_ACTIONS=frozenset('context operator-status portfolio work-portfolio tasks card contracts registry managed-portfolio assignment-staff assignment-receipt assignment-history assignment-job manager-statistics manager-report analyst-report analyst-statistics changes active-time shifts shift-report cabinet three-hour script adoption document-read'.split())
 POST_ACTIONS=frozenset('registry-edit assignment-preview assignment-commit assignment-job-step assignment-job-cancel active-time anchor command shift plan cohort export import-preview import-apply receipt telemetry script document logistics-call'.split())
 ADMIN_ROUTES=frozenset(['/state','/busy','/fn','/job','/jobs','/admin','/admin_image','/mail/state','/mail/set','/mail/send'])
 ROLES=frozenset(['employee','courier','manager','analyst','observer'])
@@ -115,7 +115,7 @@ class SharedBackend:
                 raise CRMError('Служба входа отклонила запрос.' if response.status in {401,403,410} else 'Служба вернула неполный ответ. Исходная операция сохранена.','authority_denied' if response.status in {401,403,410} else 'upstream_protocol',response.status if response.status>=400 else 502) from None
             if not response.ok:raise CRMError(value.get('text') or value.get('error') or 'Служба недоступна.',value.get('error','request'),response.status)
             return value
-    def headers(self,session):return {session['credential_header']:session['credential'],'X-CRM-Entry':'analyst' if session['role']=='analyst' else 'manager','X-Client-Version':'3.3.0-mobile.1','X-Work-Product':'crm','X-Client-Runtime':'crm-mobile'}
+    def headers(self,session):return {session['credential_header']:session['credential'],'X-CRM-Entry':'analyst' if session.get('entry_role',session['role'])=='analyst' else 'manager','X-Client-Version':'3.3.0-mobile.1','X-Work-Product':'crm','X-Client-Runtime':'crm-mobile'}
     async def login(self,body):
         value=await self.json(self.primary+'/api/account/login','POST',body=dict(username=body.get('username'),password=body.get('password'),device=dict(kind='phone',fp=body.get('device_id'),label=body.get('device_label','Мобильная CRM')),entrance='crm-mobile',audience='crm-mobile',gps=body.get('gps')))
         if value.get('action') not in {'ok','ok_pending'}:raise CRMError(value.get('error') or 'Вход не выполнен.','login',403)
@@ -127,9 +127,24 @@ class SharedBackend:
         return await self.activate(session)
     async def activate(self,session):
         identity=await self.json(self.primary+'/api/crm-identity',headers=self.headers(session))
-        session['role']=identity['me']['role']
+        session['entry_role']=identity['me']['role']
         exchanged=await self.json(self.crm+'/auth/exchange','POST',headers=self.headers(session))
-        session['crm_session']=exchanged['token'];session['context']=await self.request(session,'GET','context');session.pop('pending',None);return session
+        session['crm_session']=exchanged['token']
+        session['context']=await self.request(session,'GET','context')
+        session['role']=session['context']['role']
+        session.pop('pending',None)
+        return session
+    async def resume(self, credential, entry_role):
+        if not isinstance(credential, str) or not re.fullmatch(r'[A-Za-z0-9_-]{20,512}', credential):
+            raise CRMError('Сохранённый вход недоступен.', 'session', 401)
+        if entry_role not in {'agent', 'manager', 'full', 'security', 'analyst'}:
+            raise CRMError('Неизвестный тип сохранённого входа.', 'session', 401)
+        role = 'employee' if entry_role == 'agent' else 'analyst' if entry_role == 'analyst' else 'manager'
+        session = dict(role=role, credential_header='X-App-Token' if role=='employee' else 'X-Pult-Token',
+                       credential=credential, synthetic=False)
+        identity = await self.json(self.primary+'/api/crm-mobile-session', headers=self.headers(session))
+        session['username'] = identity['username']
+        return await self.activate(session)
     async def password(self,session,body):
         if not session.get('username'):raise CRMError('Сначала введите логин и пароль.','session',401)
         result=await self.json(self.primary+'/api/account/password','POST',body=dict(username=session['username'],current=body.get('current'),new=body.get('new')))

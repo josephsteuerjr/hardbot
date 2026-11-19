@@ -696,8 +696,9 @@ def login(username: str, password: str, *, device: dict, entrance: str,
         ever = conn.execute("SELECT 1 FROM account_devices WHERE account_id=? AND kind=? AND approved_at IS NOT NULL LIMIT 1",
                             (row['id'],device_kind)).fetchone()
         approved_pc = _approved_staff_pc(conn,row['id'])
-        root_grant=conn.execute('SELECT next_pc_allowed FROM account_admin_grants WHERE account_id=?',(row['id'],)).fetchone()
-        root_next=bool(root_grant and root_grant['next_pc_allowed'] and row['role']=='analyst' and device_kind=='desktop')
+        root_grant=conn.execute('SELECT next_pc_allowed,granted_by FROM account_admin_grants WHERE account_id=?',(row['id'],)).fetchone()
+        root_next=bool(root_grant and root_grant['next_pc_allowed'] and device_kind=='desktop'
+                       and (row['role']=='analyst' or root_grant['granted_by']=='ssh-root' and row['role'] in {'manager','full'}))
         reset_grant=conn.execute('SELECT actor FROM account_reset_device_grants '
             'WHERE account_id=? AND kind=? AND consumed_at IS NULL',(row['id'],device_kind)).fetchone()
         reset_next=bool(reset_grant and row['role'] in ('manager','security','full'))
@@ -1237,6 +1238,17 @@ def entered_list(office: str = "", *, include_empty=False) -> list[dict]:
                 "desktop_ready": bool(desktop and desktop['status']=='active'),
             })
         return out
+
+
+def is_server_operator(account_id, uid):
+    """Authority is attached to the exact root-provisioned account."""
+    with db.connect() as conn:
+        return conn.execute(
+            "SELECT 1 FROM account_admin_grants g JOIN accounts a ON a.id=g.account_id "
+            "WHERE a.id=? AND a.telegram_id=? AND a.status='active' AND a.role IN ('manager','full') "
+            "AND g.granted_by='ssh-root'",
+            (account_id, uid),
+        ).fetchone() is not None
 
 
 def admin_accounts() -> list[dict]:
