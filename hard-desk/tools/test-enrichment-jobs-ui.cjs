@@ -25,6 +25,10 @@ if(!process.versions.electron){
    const until=async c=>{for(let i=0;i<120;i++){if(await js(c))return;await nap(50)}throw Error('Timeout '+c)};
    await w.loadFile(path.join(LAB,'index.html'));await until('!!document.querySelector("[data-scan]")');
    await js(`window.hard.local('/scenario',{mode:${JSON.stringify(mode)}})`);
+   await until('document.querySelector("main > .workspace [data-registry-progress]")?.textContent.includes("26 из 58")');
+   assert(await js('!document.querySelector("[data-queue-details]").open'));
+   assert.equal(await js('document.querySelectorAll("[data-scan]").length'),1);
+   await until('!document.querySelector("[data-scan]").disabled');
    await js(`for(const [id,value] of [['e-since','03.02.2026'],['e-until','05.02.2026']]) {
      const input=document.getElementById(id);input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));
    }document.querySelector('[data-base]').click()`);
@@ -38,7 +42,11 @@ if(!process.versions.electron){
    await js('document.querySelector("[data-scan]").click()');await until('!!document.querySelector("[data-check]")');
    await js('document.querySelector("[data-check]").click()');await nap(400);
    if(mode==='refresh')await js('window.__refresh()');
+   await js(`const page = document.querySelector('#view'); const spacer = document.createElement('div');
+     spacer.style.height = '2000px'; page.append(spacer); document.querySelector('main').scrollTop = 800`);
    await until('document.querySelector("[data-registry-progress]")?.textContent.includes("Подготавливаю список решений")');
+   assert(await js(`(()=>{const r=document.querySelector('[data-registry-progress]').getBoundingClientRect();
+     return r.top>=0 && r.bottom<window.innerHeight && document.querySelector('main').scrollTop>100})()`));
    await until('document.body.textContent.includes("HEADLESS_ENRICH_COMPLETED")');
    assert.equal(await js('document.querySelectorAll("[data-dec]").length'),80);
    await js(`const choice=document.querySelector('[data-dec]');choice.value='server';choice.dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('[data-review-page="1"]').click()`);

@@ -27,8 +27,15 @@ class Handler(BaseHTTPRequestHandler):
                     'since':'01.01.2026', 'until':'02.01.2026', 'writes':True,
                     'conflict_columns':[['contract_id', 'Договор']],
                     'decision_labels':{'file':'Оставить в книге','server':'Записать сервер'}}
+        elif self.path=='/enr/operation':
+            result={'id':'previous-batch','total':58,'completed':26,'remaining':32,'attention':32,
+                    'restart_allowed':True,'books':[
+                        {'file':f'book-{i}.xlsb','employee':f'Synthetic {i}','state':'attention','message':'Synthetic prior failure'}
+                        for i in range(32)
+                    ]}
         elif self.path=='/enr/preview':
-            def preview(say):return {'pairs':[],'warning':'','matched':[{'key':'synthetic','employee':'Тестовый сотрудник','note':'synthetic','profile':'hard'}]}
+            assert not body.get('restart_from')
+            def preview(say):return {'pairs':[],'warning':'','replaces':'previous-batch','matched':[{'key':'synthetic','employee':'Тестовый сотрудник','note':'synthetic','profile':'hard'}]}
             result={'job':backend.start_job('enr_preview',preview,request_id=body['request_id'],fingerprint='synthetic-preview')}
         elif self.path=='/enr/check':
             jid=backend.start_job('enr_check',work,request_id=body['request_id'],fingerprint='synthetic-check');ids.append(jid);result={'job':jid}

@@ -156,3 +156,42 @@ def test_new_pass_keeps_completed_books_and_replaces_pending_batch_atomically(ba
     assert service.store.books(old['id']) == books
     assert service.current()['id'] == fresh['id']
     assert service.view()['total'] == 2 and service.view()['completed'] == 0
+
+
+
+def test_usual_enrichment_preview_is_fresh_with_pending_writes(backend, tmp_path, monkeypatch):
+    import enrich
+    engine, registry = backend
+    settings = engine._settings
+    settings['scatterBase'] = str(tmp_path)
+    reads = []
+
+    def admin(method, path, **kwargs):
+        reads.append((method, path))
+        return {'rows': [], 'fields': []}
+
+    service = registry.delivery_service(settings, admin)
+    path = tmp_path / 'book.xlsb'
+    path.write_bytes(b'synthetic')
+    job = {'employee': 'Synthetic', 'path': str(path), 'rows': []}
+    run = service.prepare('old-attention-pass', [job], [], '01.11.2026', '01.11.2026', [])
+    run['state'] = 'attention'
+    service.store.save(run)
+    book = service.store.books(run['id'])[0]
+    book.update(state='attention', intent={'sha256': 'unknown-result'})
+    service.store.save_book(run['id'], book)
+
+    monkeypatch.setattr(enrich, 'validate_server_export', lambda _: None)
+    monkeypatch.setattr(registry.en, 'folder_map', lambda _: {})
+    def run_job(kind, work):
+        return work(lambda _: None)
+    def preview():
+        return registry.enr_preview({}, settings=settings, admin=admin, start_job=run_job)['job']
+
+    assert preview()['replaces'] is None
+    assert service.current()['id'] == run['id']
+    del book['intent']
+    service.store.save_book(run['id'], book)
+    assert preview()['replaces'] == run['id']
+    assert service.current()['id'] == run['id']
+    assert reads == [('GET', '/admin/export.json')] * 2

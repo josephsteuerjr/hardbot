@@ -319,12 +319,8 @@ def enr_base(body, *, settings, admin, **_):
 
 
 def enr_preview(body, *, admin, start_job, settings, **_):
-    replaces = body.get('restart_from')
-    service = delivery_service(settings, admin)
-    if replaces:
-        service.check_replacement(replaces)
-    else:
-        service.require_complete()
+    operation = delivery_service(settings, admin).view()
+    replaces = operation['id'] if operation and operation['restart_allowed'] else None
     base = _base(settings)
     if not base:
         raise RuntimeError("Сначала выбери папку с республиками")
@@ -344,7 +340,7 @@ def enr_preview(body, *, admin, start_job, settings, **_):
                 raise RuntimeError("Выбрана другая папка. Проверьте соответствия для неё.")
             S["enr_fields"], S["enr_matched"], S["enr_check"] = d["fields"], matched, None
             S["enr_replaces"] = replaces
-        return {"pairs": en.preview_pairs(by_emp, matched),
+        return {"pairs": en.preview_pairs(by_emp, matched), "replaces": replaces,
                 "warning": en.preview_warning(by_emp, matched, nofolder, nofile),
                 "matched": [{"key": m["key"], "employee": m["employee"], "profile": m["profile"], "note": en.pick_note(m)}
                             for m in matched]}

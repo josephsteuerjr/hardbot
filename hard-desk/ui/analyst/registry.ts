@@ -24,6 +24,9 @@ let activeRoot: HTMLElement | null = null;
 let queueTimer: ReturnType<typeof setTimeout> | undefined;
 let queueGeneration = 0;
 let deliveryOperation: any = null;
+let deliveryKnown = false;
+let deliveryReadFailed = false;
+let enrichmentStatus: HTMLElement | null = null;
 let queueDetailsOpen = false;
 let queueReconciliation: any = null;
 let hiddenQueueRun = '';
@@ -44,6 +47,28 @@ function setReviewChoice(row: any, choice: string): void {
   }
 }
 
+function updateEnrichmentStatus(): void {
+  if (!enrichmentStatus?.isConnected) return;
+  const op = deliveryOperation;
+  let text: string;
+  if (st.busy) text = st.progress;
+  else if (deliveryReadFailed) text = 'Состояние очереди недоступно. Повторяю проверку…';
+  else if (!deliveryKnown) text = 'Проверяю состояние очереди…';
+  else if (op?.processing) {
+    const book = (op.books || []).find((b: any) => ['preparing', 'publishing', 'ledger'].includes(b.state));
+    const steps: Record<string, string> = { preparing: 'Проверяю книгу в Excel', publishing: 'Сверяю запись', ledger: 'Подтверждаю доставку' };
+    text = book ? `[${book.ordinal + 1}/${op.total}] ${steps[book.state]} · ${book.employee}`
+      : `Сверяю книги и журнал. Завершено ${op.completed} из ${op.total}.`;
+  } else if (st.check) text = `Проверка завершена. Расхождений: ${n(reviewRows().length)}.`;
+  else if (st.scan) text = 'Подбор завершён. Можно проверить конфликты в выбранных книгах.';
+  else if (op?.remaining) text = `Проход приостановлен. Завершено ${op.completed} из ${op.total}, осталось ${op.remaining}.`;
+  else if (op && op.id !== hiddenQueueRun) text = `Обогащение завершено. Книг: ${op.total}. Записано ячеек: ${op.cells}.`;
+  else text = 'Обогащение не запущено. Начните с проверки соответствий.';
+
+  const label = enrichmentStatus.querySelector<HTMLElement>('[data-registry-progress]')!;
+  if (label.textContent !== text) label.textContent = text;
+}
+
 async function showDeliveryQueue(root: HTMLElement, generation: number): Promise<void> {
   if (!root.isConnected || activeRoot !== root || generation !== queueGeneration) return;
   const host = root.querySelector<HTMLElement>('[data-delivery-queue]');
@@ -52,30 +77,35 @@ async function showDeliveryQueue(root: HTMLElement, generation: number): Promise
     const operation = await local<any>('/enr/operation');
     if (generation !== queueGeneration || activeRoot !== root) return;
     deliveryOperation = operation?.id ? operation : null;
+    deliveryKnown = true;
+    deliveryReadFailed = false;
+    updateEnrichmentStatus();
     if (deliveryOperation?.id !== presentedQueueRun) {
       presentedQueueRun = deliveryOperation?.id || '';
-      queueDetailsOpen = !!deliveryOperation?.attention;
+      queueDetailsOpen = false;
     }
     const signature = JSON.stringify([deliveryOperation,queueReconciliation,hiddenQueueRun]);
     if (host.dataset.signature !== signature && !(host.contains(document.activeElement) && document.activeElement?.tagName === 'SELECT')) {
       host.dataset.signature = signature;
       const op = deliveryOperation;
-      host.innerHTML = !op || hiddenQueueRun===op.id ? '' : `<div class="notice${op.attention ? ' err' : ''}" role="status"><span class="grow">${esc(op.remaining ? `Завершено книг: ${op.completed} из ${op.total}. Осталось: ${op.remaining}.` : `Обогащение завершено. Книг: ${op.total}. Записано ячеек: ${op.cells}.`)}${op.excluded ? ` Пропущено строк: ${n(op.excluded)}. В доставленные эти строки не входят.` : ''}</span>${!op.remaining ? '<button class="btn small" data-queue-dismiss>Скрыть</button>' : ''}</div>
-        ${(op.books || []).filter((b: any) => b.state !== 'done').map((b: any) => `<p data-queue-issue><b>${esc(b.employee)}:</b> ${esc(b.reason_code === 'busy' ? `открыта книга ${String(b.file).split(/[\\/]/).pop()}. Закройте её — перенос продолжится автоматически.` : b.conflicts?.length ? `изменились значения в книге: ${b.conflicts.length}. Выберите значения ниже.` : b.message || 'Ожидает обработки')}</p>`).join('')}
-        ${op.processing ? '<p role="status">Завершаю проверку Excel. Действия станут доступны после окончания прохода.</p>' : ''}
-        <details data-queue-details ${queueDetailsOpen ? 'open' : ''}><summary>Подробности и действия</summary>
+      host.innerHTML = !op || hiddenQueueRun===op.id ? '' : `${st.tab === 'enrich' ? '' : `<div class="notice${op.attention ? ' err' : ''}" role="status"><span class="grow">${esc(op.remaining ? `Завершено книг: ${op.completed} из ${op.total}. Осталось: ${op.remaining}.` : `Обогащение завершено. Книг: ${op.total}. Записано ячеек: ${op.cells}.`)}</span></div>`}
+        <details data-queue-details ${queueDetailsOpen ? 'open' : ''}><summary>Подробности и действия${op.remaining ? ` · осталось ${n(op.remaining)}` : ''}</summary>
+        <div class="toolbar">
+          ${op.remaining ? '<button class="btn small" data-queue-retry>Повторить проверку ошибок</button>' : '<button class="btn small" data-queue-dismiss>Скрыть итог</button>'}
+          ${op.missing ? '<button class="btn small" data-queue-reconcile>Сверить с общим реестром…</button>' : ''}
+        </div>
         ${op.busy ? '<p>Открытые книги будут обработаны после закрытия Excel.</p>' : ''}
-        ${op.remaining ? '<p>Импорт станет доступен после проверки оставшихся книг.</p>' : ''}
+        ${op.excluded ? `<p>Пропущено строк: ${n(op.excluded)}. Эти строки сохранены в журнале.</p>` : ''}
+        <div class="analyst-queue-issues">
         ${(op.books || []).filter((b: any) => b.state !== 'done' || b.omissions?.length).map((b: any) => `<div class="list-row" style="display:block;overflow-wrap:anywhere"><b>${esc(b.employee)} — ${esc(String(b.file).split(/[\\/]/).pop())}</b><p>${esc(b.message || 'Ожидает обработки')}</p>
           ${b.omissions?.length ? `<p>Пропущено строк: ${n(b.omissions.length)}. Исходные результаты сохранены в журнале операции.</p><div class="table-wrap"><table class="grid"><thead><tr><th>Договор</th><th>Причина</th></tr></thead><tbody>${b.omissions.map((row:any)=>`<tr><td>${esc(row.contract_id)}</td><td>${esc(row.reason==='absent_from_book'?'Нет строки в личной книге':row.reason==='absent_from_master'?'Договор отсутствует':row.current_owner?`Теперь: ${row.current_owner}`:'Ответственный снят')}</td></tr>`).join('')}</tbody></table></div>` : ''}
           ${b.conflicts?.length ? `<div class="table-wrap"><table class="grid"><thead><tr><th class="l">Договор / поле</th><th class="l">В книге</th><th class="l">В приложении</th><th class="l">Дата факта</th><th class="l">Действие</th></tr></thead><tbody>${b.conflicts.map((c: any, index: number) => `<tr><td>${esc(c.contract_id)} · ${esc(c.column || c.key)}</td><td>${esc(c.file)}</td><td>${esc(c.server)}</td><td>${esc(c.visit_date || '')}</td><td><select class="input" data-queue-choice="${b.ordinal}:${index}"><option value="file">Оставить в книге</option><option value="server" ${queueChoices.get(queueChoiceKey(op,b,index))==='server'?'selected':''}>Записать сервер</option></select></td></tr>`).join('')}</tbody></table></div><button class="btn small" data-queue-resolve="${b.ordinal}">Применить решения</button>` : ''}</div>`).join('')}
-        ${op.missing ? '<p>Отсутствующие строки могут относиться к прежним назначениям. Сверка покажет изменения по текущему общему реестру до применения исключений.</p><button class="btn small" data-queue-reconcile>Сверить с общим реестром…</button>' : ''}
+        </div>
         ${queueReconciliation?.run_id===op.id ? `<div class="block"><b>Сверка: ${esc(String(queueReconciliation.source_path).split(/[\\/]/).pop())}</b><p>Изменились назначения или договоры отсутствуют: ${n(queueReconciliation.proposals.length)}. Требуют проверки состава книги: ${n(queueReconciliation.blocked.length)}.</p>
           <p>Исключённые строки сохраняются в отчёте и не считаются доставленными. Остальные результаты будут перенесены.</p>
           <div class="table-wrap"><table class="grid"><thead><tr><th>Сотрудник / договор</th><th>Причина</th></tr></thead><tbody>${[...queueReconciliation.proposals,...queueReconciliation.blocked].map((row:any)=>`<tr><td>${esc(row.employee)} · ${esc(row.contract_id)}</td><td>${esc(row.reason==='absent_from_master'?'Договор отсутствует':row.reason==='assignment_changed'?(row.current_owner?`Теперь: ${row.current_owner}`:'Ответственный снят'):row.reason)}</td></tr>`).join('')}</tbody></table></div>
           <button class="btn small" data-queue-reconcile-apply ${queueReconciliation.proposals.length?'':'disabled'}>Принять исключения и продолжить перенос</button></div>` : ''}
-        ${op.remaining ? '<button class="btn small" data-queue-retry>Повторить проверку ошибок</button>' : ''}
-        ${op.restart_allowed && st.tab === "enrich" ? '<button class="btn small" data-queue-restart>Проверить заново</button>' : ''}</details>`;
+        </details>`;
       host.querySelector('[data-queue-details]')?.addEventListener('toggle',event=>{queueDetailsOpen=(event.target as HTMLDetailsElement).open;});
       host.querySelectorAll<HTMLSelectElement>('[data-queue-choice]').forEach(select=>select.addEventListener('change',()=>{
         const [ordinal,index]=select.dataset.queueChoice!.split(':').map(Number);
@@ -97,9 +127,6 @@ async function showDeliveryQueue(root: HTMLElement, generation: number): Promise
         await local('/enr/reconcile-apply',{token:queueReconciliation.token});queueReconciliation=null;
         host.dataset.signature='';await showDeliveryQueue(root,generation);
       }));
-      host.querySelector('[data-queue-restart]')?.addEventListener('click', guard(async () => {
-        await scanEnrichment(root, op.id);
-      }));
       host.querySelector('[data-queue-retry]')?.addEventListener('click', guard(async () => {
         await local('/enr/retry', { id: op.id });
         host.dataset.signature = ''; await showDeliveryQueue(root, generation);
@@ -114,7 +141,8 @@ async function showDeliveryQueue(root: HTMLElement, generation: number): Promise
     }
     const replacing = st.tab === 'enrich' && deliveryOperation?.restart_allowed && deliveryOperation.id === st.replacingRun;
     root.querySelectorAll<HTMLButtonElement>(st.tab === 'enrich' ? '[data-apply],[data-check],[data-scan]' : '[data-apply],[data-preview]').forEach(button => {
-      if (deliveryOperation?.processing || deliveryOperation?.remaining && !replacing) {
+      const previewOnly = st.tab === 'enrich' && button.matches('[data-scan],[data-check]');
+      if (deliveryOperation?.processing || deliveryOperation?.remaining && !replacing && !previewOnly) {
         if (button.dataset.deliveryBlocked === undefined) button.dataset.deliveryBlocked = button.disabled ? '1' : '0';
         button.disabled = true;
       } else if (button.dataset.deliveryBlocked !== undefined) {
@@ -130,6 +158,8 @@ async function showDeliveryQueue(root: HTMLElement, generation: number): Promise
       }
     });
   } catch (error) {
+    deliveryReadFailed = true;
+    updateEnrichmentStatus();
     delete host.dataset.signature;
     host.innerHTML = `<div class="notice err">Не удалось проверить очередь переноса: ${esc(String((error as Error).message || error))}</div>`;
   } finally {
@@ -141,7 +171,8 @@ async function showDeliveryQueue(root: HTMLElement, generation: number): Promise
 
 function showProgress(): void {
   if (!activeRoot?.isConnected) return;
-  const status = activeRoot.querySelector<HTMLElement>('[data-registry-progress]');
+  updateEnrichmentStatus();
+  const status = st.tab !== 'enrich' && activeRoot.querySelector<HTMLElement>('[data-registry-progress]');
   if (status) { status.hidden = !st.busy; status.textContent = st.progress; }
   activeRoot.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement>('#rtab input,#rtab textarea,#rtab select,#rtab button').forEach(control => {
     if (st.busy) {
@@ -156,7 +187,14 @@ function showProgress(): void {
 /** Задача питон-стороны: ждём конца, журнал — в строку статуса. */
 async function job(path: string, body: unknown, log?: (s: string) => void): Promise<any> {
   if (st.busy) throw new Error('Операция уже выполняется. Дождитесь её результата.');
-  st.busy = true; st.progress = 'Операция выполняется…'; showProgress();
+  st.busy = true;
+  const messages: Record<string, string> = {
+    '/enr/preview': 'Запрашиваю данные для подбора книг…',
+    '/enr/check': 'Запускаю проверку конфликтов…',
+    '/enr/apply': 'Подготавливаю запись в книги…',
+  };
+  st.progress = messages[path] || 'Операция выполняется…';
+  showProgress();
   try {
     return await runJob(path, body, line => {
       st.progress = line; showProgress(); log?.(line);
@@ -291,13 +329,13 @@ function conflictTable(list: any[], decide: boolean, labels: Record<string, stri
   }).join("")}</tbody></table></div>`;
 }
 
-async function scanEnrichment(root: HTMLElement, replaces: string) {
+async function scanEnrichment(root: HTMLElement) {
   const out = root.querySelector("#e-scan-out")!;
   out.innerHTML = '<p class="muted">Проверяю: данные сервера + папки сотрудников…</p>';
-  const r = await job("/enr/preview", replaces ? { restart_from: replaces } : {}, (line) => {
+  const r = await job("/enr/preview", {}, (line) => {
     out.innerHTML = `<p class="muted">${esc(line)}</p>`;
   });
-  st.replacingRun = replaces;
+  st.replacingRun = r.replaces || '';
   st.scan = r; st.matched = r.matched; st.enrSel = new Set(r.matched.map((m: any) => m.key));
   st.check = null; st.decisions = {}; st.reviewPage = 0; st.applyRes = null;
   if (activeRoot?.isConnected && st.tab === 'enrich') await draw(activeRoot);
@@ -388,7 +426,7 @@ async function enrichTab(el: HTMLElement) {
     redraw();
   }));
   el.querySelector("[data-scan]")?.addEventListener("click", guard(async () => {
-    if (activeRoot) await scanEnrichment(activeRoot, st.replacingRun);
+    if (activeRoot) await scanEnrichment(activeRoot);
   }));
   el.querySelectorAll<HTMLButtonElement>("[data-esel]").forEach((b) => b.addEventListener("click", () => {
     st.enrSel = b.dataset.esel === "all" ? new Set(st.matched.map((m) => m.key)) : new Set(); clearReview(); redraw();
@@ -543,7 +581,20 @@ async function recalledTab(el: HTMLElement, limit = 500) {
 async function draw(root: HTMLElement) {
   activeRoot = root;
   clearTimeout(queueTimer); const generation = ++queueGeneration;
-  root.innerHTML = `${embeddedTab ? '' : `<div class="toolbar">${tabs()}</div>`}<div data-delivery-queue></div><p class="notice" data-registry-progress role="status" hidden></p><div id="rtab"><div class="skeleton"></div></div>`;
+  enrichmentStatus?.remove();
+  enrichmentStatus = null;
+  deliveryKnown = false; deliveryReadFailed = false;
+  const enrich = st.tab === 'enrich';
+  root.innerHTML = `${embeddedTab ? '' : `<div class="toolbar">${tabs()}</div>`}${enrich ? '' : '<p class="notice" data-registry-progress role="status" hidden></p>'}<div data-delivery-queue></div><div id="rtab"><div class="skeleton"></div></div>`;
+  if (enrich) {
+    const panel = document.createElement('div');
+    panel.className = 'analyst-enrichment-status';
+    panel.innerHTML = '<span data-registry-progress role="status"></span>';
+    enrichmentStatus = panel;
+    const header = document.querySelector('main > .workspace');
+    if (header) header.append(panel); else root.prepend(panel);
+    updateEnrichmentStatus();
+  }
   root.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach((b) => b.addEventListener("click", () => { st.tab = b.dataset.tab as typeof st.tab; void draw(root); }));
   const el = root.querySelector<HTMLElement>("#rtab")!;
   try {
@@ -565,13 +616,14 @@ export const registry: Section = {
   icon: "registry",
   kicker: "импорт, обогащение книг, колонки, выгрузки",
   render(root) { return draw(root); },
+  leave() { enrichmentStatus?.remove(); enrichmentStatus = null; },
 };
 
 export async function mountRegistryTools(root:HTMLElement,tab:RegistryTab):Promise<()=>void>{
   embeddedTab=tab;
   st.tab=tab;
   await draw(root);
-  return()=>{if(activeRoot===root){activeRoot=null;queueGeneration++;clearTimeout(queueTimer);embeddedTab=undefined;}};
+  return()=>{if(activeRoot===root){activeRoot=null;queueGeneration++;clearTimeout(queueTimer);embeddedTab=undefined;enrichmentStatus?.remove();enrichmentStatus=null;}};
 }
 
 // «Приоритет выезда»: очередь по весам — долг, свежесть, кластер.
