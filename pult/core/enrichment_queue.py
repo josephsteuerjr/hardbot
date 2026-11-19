@@ -47,6 +47,12 @@ def authority(settings):
                    hashlib.sha256(str(profile.get('device_token', '')).encode()).hexdigest()])
 
 
+def can_replace(run, books):
+    pending = [book for book in books if book['state'] != 'done']
+    return (run['state'] == 'attention' and bool(pending)
+            and all(not book.get('intent') and not book.get('result') for book in pending))
+
+
 class Store:
     def __init__(self, directory):
         self.directory = Path(directory)
@@ -110,7 +116,7 @@ class Store:
             conn.execute('UPDATE runs SET state=?,payload=? WHERE id=? AND authority=?',
                          (run['state'], self.codec.seal(run), run['id'], run['authority']))
 
-    def create(self, run_id, owner, inputs, approved, fingerprint='enrichment'):
+    def create(self, run_id, owner, inputs, approved, fingerprint='enrichment', *, replaces=None):
         if not run_id or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_' for c in run_id):
             raise ValueError('Некорректный номер операции')
         folder = self.directory / run_id
@@ -123,7 +129,22 @@ class Store:
                    since=inputs['since'], until=inputs['until'], source_sha256=file_sha(snapshot),
                    folder=str(folder), paused=False,fingerprint=fingerprint)
         with self.connect() as conn:
-            if conn.execute("SELECT 1 FROM runs WHERE authority=? AND state<>'done'", (owner,)).fetchone():
+            conn.execute('BEGIN IMMEDIATE')
+            current = conn.execute("SELECT id,payload FROM runs WHERE authority=? AND state<>'done'", (owner,)).fetchone()
+            if replaces:
+                if not current or current[0] != replaces:
+                    raise ValueError('Предыдущий проход изменился. Начните новую проверку книг.')
+                previous = self.codec.open(current[1])
+                books = [self.codec.open(row[0]) for row in conn.execute(
+                    "SELECT payload FROM books WHERE run_id=? ORDER BY ordinal", (replaces,))]
+                if not can_replace(previous, books):
+                    raise ValueError('Предыдущий проход изменился. Начните новую проверку книг.')
+                # In the index, done means the record is no longer active.
+                # Keep the partial outcome and receipts under the original ID.
+                previous.update(state='done', replaced_by=run_id)
+                conn.execute("UPDATE runs SET state='done',payload=? WHERE id=?",
+                             (self.codec.seal(previous), replaces))
+            elif current:
                 raise ValueError('Сначала завершите предыдущий перенос книг')
             conn.execute('INSERT INTO runs VALUES(?,?,?,?,?)', (run_id, owner, run['state'], run['created'], self.codec.seal(run)))
             for ordinal, job in enumerate(inputs['jobs']):
@@ -213,6 +234,13 @@ class Service:
                                'Закройте занятые книги или исправьте указанные ошибки. '
                                'После завершения сделайте новый предпросмотр импорта.')
 
+    def check_replacement(self, expected_id):
+        run = self.current()
+        if (self.mutex.locked() or not run or run['id'] != expected_id
+                or not can_replace(run, self.store.books(expected_id))):
+            raise ValueError('Предыдущий проход ещё работает либо требуется сверка сделанной записи.')
+        return run
+
     def view(self, run=None):
         run = run or self.current() or self.store.latest(self.owner())
         if not run:
@@ -221,10 +249,13 @@ class Service:
         done = [book for book in books if book['state'] == 'done']
         pending = [book for book in books if book['state'] != 'done']
         state = 'done' if not pending else 'paused' if run.get('paused') else 'attention' if any(b['state'] == 'attention' for b in pending) else 'waiting'
+        if run.get('replaced_by'):
+            state = 'replaced'
         issues=[{**b,'reason_code':self.reason(b)} for b in books]
         exclusions=sum(len(b.get('omissions') or []) for b in books)
         return dict(id=run['id'], state=state, since=run['since'], until=run['until'],processing=self.mutex.locked(),
                     total=len(books), completed=len(done), remaining=len(pending),
+                    restart_allowed=not self.mutex.locked() and can_replace(run, books),
                     busy=sum(b['reason_code']=='busy' and b['state']!='done' for b in issues),
                     attention=sum(b['state']=='attention' for b in books),
                     missing=sum(len(b.get('missing') or []) for b in pending),excluded=exclusions,
@@ -247,8 +278,11 @@ class Service:
         omitted={row['contract_id'] for row in item.get('omissions') or []}
         return {**job,'rows':[row for row in job['rows'] if norm_cid(row.get('contract_id')) not in omitted]}
 
-    def prepare(self, run_id, jobs, fields, since, until, approved, fingerprint='enrichment'):
-        self.require_complete()
+    def prepare(self, run_id, jobs, fields, since, until, approved, fingerprint='enrichment', *, replaces=None):
+        if replaces:
+            self.check_replacement(replaces)
+        else:
+            self.require_complete()
         # Paths and key spelling are frozen, including UNC versus mapped drives.
         import enrich
         canonical={}
@@ -261,7 +295,7 @@ class Service:
         for row in approved:
             choices.append({**row, 'book_path':resolve(row['book_path'])})
         run = self.store.create(run_id, self.owner(),
-                                dict(jobs=normalized, fields=fields, since=since, until=until), choices,fingerprint)
+                                dict(jobs=normalized, fields=fields, since=since, until=until), choices, fingerprint, replaces=replaces)
         return run
 
     def submit(self,run_id,jobs,fields,since,until,approved,say=lambda line:None):

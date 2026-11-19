@@ -54,7 +54,7 @@ def _empty_state() -> dict:
     "col_path": "", "col_analysis": None,
     "book": None, "preview": None,
     "enr_fields": None, "enr_matched": [], "enr_check": None, "enr_decisions": {},"enr_reconcile":None,
-    "exp_data": None, "exp_request": None, "last_receipt": None,
+    "exp_data": None, "exp_request": None, "last_receipt": None, "enr_replaces": None,
     }
 
 
@@ -314,12 +314,17 @@ def enr_base(body, *, settings, admin, **_):
             raise RuntimeError("Не удалось сохранить папку в настройках Аналитика")
         with _lock:
             S.update(enr_fields=None, enr_matched=[], enr_check=None, enr_decisions={},
-                     enr_reconcile=None, last_receipt=None)
+                     enr_reconcile=None, last_receipt=None, enr_replaces=None)
     return enr_state({}, settings=settings,admin=admin)
 
 
 def enr_preview(body, *, admin, start_job, settings, **_):
-    delivery_guard(settings,admin)
+    replaces = body.get('restart_from')
+    service = delivery_service(settings, admin)
+    if replaces:
+        service.check_replacement(replaces)
+    else:
+        service.require_complete()
     base = _base(settings)
     if not base:
         raise RuntimeError("Сначала выбери папку с республиками")
@@ -338,6 +343,7 @@ def enr_preview(body, *, admin, start_job, settings, **_):
             if _base(settings) != base:
                 raise RuntimeError("Выбрана другая папка. Проверьте соответствия для неё.")
             S["enr_fields"], S["enr_matched"], S["enr_check"] = d["fields"], matched, None
+            S["enr_replaces"] = replaces
         return {"pairs": en.preview_pairs(by_emp, matched),
                 "warning": en.preview_warning(by_emp, matched, nofolder, nofile),
                 "matched": [{"key": m["key"], "employee": m["employee"], "profile": m["profile"], "note": en.pick_note(m)}
@@ -441,17 +447,19 @@ def enr_apply(body, *, admin, start_job, settings, **_):
     for row in checked.get('conflicts',[]):
         key=en.conflict_key(row)
         if key in decisions:approved.append({**row,'decision':decisions[key]})
-    service=delivery_service(settings,admin);service.require_complete()
+    service = delivery_service(settings, admin)
+    replaces = S['enr_replaces']
     prepared_run=None
     fields=S['enr_fields'];jobs=en.build_jobs(picked)
     def prepare(run_id,profile,fingerprint):
         nonlocal prepared_run
-        prepared_run=service.prepare(run_id,jobs,fields,since,until,approved,fingerprint)
+        prepared_run = service.prepare(run_id, jobs, fields, since, until, approved, fingerprint, replaces=replaces)
 
     def work(say):
         result=service.process(prepared_run,say)
         S["enr_check"] = None
         S['preview']=None
+        S['enr_replaces'] = None
         summary = f'Завершено книг: {result["completed"]} из {result["total"]}. Записано ячеек: {result["cells"]}.'
         status = (f'Осталось книг: {result["remaining"]}. Причины и действия — в подробностях очереди.'
                   if result['remaining'] else 'Перенос завершён.')

@@ -117,3 +117,42 @@ def test_excel_start_disconnect_without_write_intent_leaves_book_for_retry(backe
     assert status['state'] == 'waiting'
     assert 'Запись не начиналась' in status['books'][0]['message']
     assert path.read_bytes() == b'synthetic'
+
+
+
+def test_new_pass_keeps_completed_books_and_replaces_pending_batch_atomically(backend, tmp_path):
+    engine, registry = backend
+    service = registry.delivery_service(engine._settings, lambda *a, **k: {})
+    jobs = [{'employee': 'Synthetic', 'path': str(tmp_path / f'book-{i}.xlsb'), 'rows': []}
+            for i in range(2)]
+    for job in jobs:
+        Path(job['path']).write_bytes(b'synthetic')
+    day = '01.11.2026'
+    old = service.prepare('old-partial-pass', jobs, [], day, day, [])
+    books = service.store.books(old['id'])
+    books[0].update(state='done', result={'cells_written': 1})
+    books[1].update(state='attention', message='Ошибка до записи')
+    for book in books:
+        service.store.save_book(old['id'], book)
+    old['state'] = 'attention'
+    service.store.save(old)
+    assert service.view()['restart_allowed']
+
+    books[1]['intent'] = {'post_sha256': 'unknown'}
+    service.store.save_book(old['id'], books[1])
+    assert not service.view()['restart_allowed']
+    with pytest.raises(ValueError, match='требуется сверка'):
+        service.prepare('cannot-replace-written', jobs, [], day, day, [], replaces=old['id'])
+    del books[1]['intent']
+    service.store.save_book(old['id'], books[1])
+
+    assert service.check_replacement(old['id'])['id'] == old['id']
+    with pytest.raises(RuntimeError, match='не завершено'):
+        service.require_complete()
+    fresh = service.prepare('fresh-after-partial', jobs, [], day, day, [], replaces=old['id'])
+    history = service.store.get(old['id'], service.owner())
+    assert history['replaced_by'] == fresh['id']
+    assert service.view(history)['state'] == 'replaced'
+    assert service.store.books(old['id']) == books
+    assert service.current()['id'] == fresh['id']
+    assert service.view()['total'] == 2 and service.view()['completed'] == 0

@@ -14,7 +14,7 @@ const st = {
   imp: null as any, sel: new Set<string>(), comments: false, preview: null as any, applied: null as any,
   impQuery: "", impFilter: "all", impSort: "name", excludedIds: "",
   enr: null as any, matched: [] as any[], enrSel: new Set<string>(), since: "", until: "", check: null as any, decisions: {} as Record<string, string>, applyRes: null as any,
-  enrPeriodEdited: false, reviewPage: 0,
+  enrPeriodEdited: false, reviewPage: 0, replacingRun: '',
   cols: null as any, colDecisions: [] as any[], scan: null as any,
   expEmps: [] as any[], expSel: new Set<string>(), expSince: "", expUntil: "",
   rec: null as any, recEmp: "",
@@ -74,7 +74,8 @@ async function showDeliveryQueue(root: HTMLElement, generation: number): Promise
           <p>Исключённые строки сохраняются в отчёте и не считаются доставленными. Остальные результаты будут перенесены.</p>
           <div class="table-wrap"><table class="grid"><thead><tr><th>Сотрудник / договор</th><th>Причина</th></tr></thead><tbody>${[...queueReconciliation.proposals,...queueReconciliation.blocked].map((row:any)=>`<tr><td>${esc(row.employee)} · ${esc(row.contract_id)}</td><td>${esc(row.reason==='absent_from_master'?'Договор отсутствует':row.reason==='assignment_changed'?(row.current_owner?`Теперь: ${row.current_owner}`:'Ответственный снят'):row.reason)}</td></tr>`).join('')}</tbody></table></div>
           <button class="btn small" data-queue-reconcile-apply ${queueReconciliation.proposals.length?'':'disabled'}>Принять исключения и продолжить перенос</button></div>` : ''}
-        ${op.remaining ? '<button class="btn small" data-queue-retry>Повторить проверку ошибок</button>' : ''}</details>`;
+        ${op.remaining ? '<button class="btn small" data-queue-retry>Повторить проверку ошибок</button>' : ''}
+        ${op.restart_allowed && st.tab === "enrich" ? '<button class="btn small" data-queue-restart>Проверить заново</button>' : ''}</details>`;
       host.querySelector('[data-queue-details]')?.addEventListener('toggle',event=>{queueDetailsOpen=(event.target as HTMLDetailsElement).open;});
       host.querySelectorAll<HTMLSelectElement>('[data-queue-choice]').forEach(select=>select.addEventListener('change',()=>{
         const [ordinal,index]=select.dataset.queueChoice!.split(':').map(Number);
@@ -96,6 +97,9 @@ async function showDeliveryQueue(root: HTMLElement, generation: number): Promise
         await local('/enr/reconcile-apply',{token:queueReconciliation.token});queueReconciliation=null;
         host.dataset.signature='';await showDeliveryQueue(root,generation);
       }));
+      host.querySelector('[data-queue-restart]')?.addEventListener('click', guard(async () => {
+        await scanEnrichment(root, op.id);
+      }));
       host.querySelector('[data-queue-retry]')?.addEventListener('click', guard(async () => {
         await local('/enr/retry', { id: op.id });
         host.dataset.signature = ''; await showDeliveryQueue(root, generation);
@@ -108,8 +112,9 @@ async function showDeliveryQueue(root: HTMLElement, generation: number): Promise
         host.dataset.signature = ''; await showDeliveryQueue(root, generation);
       })));
     }
+    const replacing = st.tab === 'enrich' && deliveryOperation?.restart_allowed && deliveryOperation.id === st.replacingRun;
     root.querySelectorAll<HTMLButtonElement>(st.tab === 'enrich' ? '[data-apply],[data-check],[data-scan]' : '[data-apply],[data-preview]').forEach(button => {
-      if (deliveryOperation?.remaining || deliveryOperation?.processing) {
+      if (deliveryOperation?.processing || deliveryOperation?.remaining && !replacing) {
         if (button.dataset.deliveryBlocked === undefined) button.dataset.deliveryBlocked = button.disabled ? '1' : '0';
         button.disabled = true;
       } else if (button.dataset.deliveryBlocked !== undefined) {
@@ -286,6 +291,18 @@ function conflictTable(list: any[], decide: boolean, labels: Record<string, stri
   }).join("")}</tbody></table></div>`;
 }
 
+async function scanEnrichment(root: HTMLElement, replaces: string) {
+  const out = root.querySelector("#e-scan-out")!;
+  out.innerHTML = '<p class="muted">Проверяю: данные сервера + папки сотрудников…</p>';
+  const r = await job("/enr/preview", replaces ? { restart_from: replaces } : {}, (line) => {
+    out.innerHTML = `<p class="muted">${esc(line)}</p>`;
+  });
+  st.replacingRun = replaces;
+  st.scan = r; st.matched = r.matched; st.enrSel = new Set(r.matched.map((m: any) => m.key));
+  st.check = null; st.decisions = {}; st.reviewPage = 0; st.applyRes = null;
+  if (activeRoot?.isConnected && st.tab === 'enrich') await draw(activeRoot);
+}
+
 async function enrichTab(el: HTMLElement) {
   if ((await hard.state()).platform === "mobile") {
     el.innerHTML = `<h2>Обогащение исходных книг</h2><p>Откройте «Обмен → Обогащение книг» в Windows-программе «Аналитик». Изменение исходных XLSB/XLSM выполняется на компьютере с Excel.</p><p>На телефоне можно импортировать реестр и скачать новые XLSX в «Книгах CRM».</p>`;
@@ -371,11 +388,7 @@ async function enrichTab(el: HTMLElement) {
     redraw();
   }));
   el.querySelector("[data-scan]")?.addEventListener("click", guard(async () => {
-    const out = el.querySelector("#e-scan-out")!;
-    out.innerHTML = '<p class="muted">Проверяю: данные сервера + папки сотрудников…</p>';
-    const r = await job("/enr/preview", {}, (s) => { out.innerHTML = `<p class="muted">${esc(s)}</p>`; });
-    st.scan = r; st.matched = r.matched; st.enrSel = new Set(r.matched.map((m: any) => m.key));
-    clearReview(); st.applyRes = null; redraw();
+    if (activeRoot) await scanEnrichment(activeRoot, st.replacingRun);
   }));
   el.querySelectorAll<HTMLButtonElement>("[data-esel]").forEach((b) => b.addEventListener("click", () => {
     st.enrSel = b.dataset.esel === "all" ? new Set(st.matched.map((m) => m.key)) : new Set(); clearReview(); redraw();
@@ -412,7 +425,7 @@ async function enrichTab(el: HTMLElement) {
     if (!(await ask("Обогащение реестров", conf.text, "Записать"))) return;
     logEl().textContent = "Открываю книги…";
     st.applyRes = await job("/enr/apply", body, (s) => { logEl().textContent = s; });
-    clearReview(); toast(st.applyRes.toast); redraw();
+    st.replacingRun = ""; clearReview(); toast(st.applyRes.toast); redraw();
     if (activeRoot) await showDeliveryQueue(activeRoot, queueGeneration);
   }));
   el.querySelector("[data-replay]")?.addEventListener("click", guard(async () => {
