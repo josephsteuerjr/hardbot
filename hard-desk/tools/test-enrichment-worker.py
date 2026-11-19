@@ -13,13 +13,20 @@ from pult import desk_backend as backend
 mode='poll';polls=0;ids=[]
 def work(say):
     for i in range(12):say('Тестовая книга '+str(i+1));time.sleep(.2)
-    return {'lines':['HEADLESS_ENRICH_COMPLETED'], 'conflicts':[], 'office':[]}
+    say('Подготавливаю список решений и итог проверки…');time.sleep(1.1)
+    conflicts = [{'contract_id': str(i), 'book_path': 'synthetic', 'key': 'comment', 'row': [str(i)]}
+                 for i in range(190)]
+    return {'lines':['HEADLESS_ENRICH_COMPLETED'], 'conflicts':conflicts, 'office':[]}
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         global mode,polls
         body=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))) or '{}')
         if self.path=='/scenario':mode=body['mode'];polls=0;result={'ok':True}
-        elif self.path=='/enr/state':result={'base':'synthetic','since':'','until':'','writes':False,'conflict_columns':[]}
+        elif self.path in ('/enr/state', '/enr/base'):
+            result={'base': body['path'] if self.path == '/enr/base' else 'synthetic',
+                    'since':'01.01.2026', 'until':'02.01.2026', 'writes':True,
+                    'conflict_columns':[['contract_id', 'Договор']],
+                    'decision_labels':{'file':'Оставить в книге','server':'Записать сервер'}}
         elif self.path=='/enr/preview':
             def preview(say):return {'pairs':[],'warning':'','matched':[{'key':'synthetic','employee':'Тестовый сотрудник','note':'synthetic','profile':'hard'}]}
             result={'job':backend.start_job('enr_preview',preview,request_id=body['request_id'],fingerprint='synthetic-preview')}

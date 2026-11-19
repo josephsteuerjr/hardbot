@@ -7,12 +7,14 @@ import type { Section } from "../kit/shell";
 import { DataTable, tupleCols } from "../kit/table";
 import { adm, chipsHtml, fn, fnMap, guard, kvHtml, local, note, runJob } from "./lib";
 
+const REVIEW_PAGE_SIZE = 80;
 const XLS = [{ name: "Excel", extensions: ["xlsx", "xlsm", "xlsb", "xls"] }];
 const st = {
   tab: "import" as "import" | "enrich" | "columns" | "export" | "recalled",
   imp: null as any, sel: new Set<string>(), comments: false, preview: null as any, applied: null as any,
   impQuery: "", impFilter: "all", impSort: "name", excludedIds: "",
   enr: null as any, matched: [] as any[], enrSel: new Set<string>(), since: "", until: "", check: null as any, decisions: {} as Record<string, string>, applyRes: null as any,
+  enrPeriodEdited: false, reviewPage: 0,
   cols: null as any, colDecisions: [] as any[], scan: null as any,
   expEmps: [] as any[], expSel: new Set<string>(), expSince: "", expUntil: "",
   rec: null as any, recEmp: "",
@@ -289,16 +291,23 @@ async function enrichTab(el: HTMLElement) {
     el.innerHTML = `<h2>Обогащение исходных книг</h2><p>Откройте «Обмен → Обогащение книг» в Windows-программе «Аналитик». Изменение исходных XLSB/XLSM выполняется на компьютере с Excel.</p><p>На телефоне можно импортировать реестр и скачать новые XLSX в «Книгах CRM».</p>`;
     return;
   }
-  st.enr ||= await local("/enr/state");
-  if (!st.since && !st.until) { st.since = st.enr.since || ""; st.until = st.enr.until || ""; }
+  if (!st.enr) {
+    st.enr = await local("/enr/state");
+    st.since = st.enr.since || ""; st.until = st.enr.until || "";
+  }
   const e = st.enr;
+  const reviews = reviewRows();
+  const firstReview = st.reviewPage * REVIEW_PAGE_SIZE;
+  const visibleReviews = reviews.slice(firstReview, firstReview + REVIEW_PAGE_SIZE);
+  const reviewsByKey = new Map(visibleReviews.map(row => [decisionKey(row), row]));
   const cols = e.conflict_columns as [string, string][];
   el.innerHTML = `${note("Переносит сохраненные визиты и звонки в личные книги Хард и Софт. Рабочая книга называется ФИО.xlsb; копии и датированные файлы рядом не участвуют. Правки книги защищены реестром доставки. Сначала проверка, запись — отдельной кнопкой.")}
     <div class="toolbar" style="margin-top:12px"><button class="btn" data-base>Папка с республиками…</button><span class="muted">${esc(e.base ? "база: " + e.base : "базовая папка не выбрана")}</span>
       <span class="spacer"></span><button class="btn primary" data-scan ${e.base ? "" : "disabled"}>Проверить соответствия</button></div>
     <div class="toolbar"><span class="muted" style="font-size:13.5px">Результаты с</span><input class="input" id="e-since" value="${esc(st.since)}" placeholder="ДД.ММ.ГГГГ" style="width:130px">
       <span class="muted" style="font-size:13.5px">по</span><input class="input" id="e-until" value="${esc(st.until)}" placeholder="ДД.ММ.ГГГГ" style="width:130px">
-      <button class="btn small" data-today>Только сегодня</button><span class="muted" style="font-size:12.5px">пусто = без границы</span></div>
+      <button class="btn small" data-day="0">Сегодня</button><button class="btn small" data-day="1">Вчера</button>
+      <button class="btn small" data-day="2">Позавчера</button><span class="muted" style="font-size:12.5px">пусто = без границы</span></div>
     <div id="e-scan-out">${st.scan ? `${pairs(st.scan.pairs)}${st.scan.warning ? `<div class="notice" style="white-space:pre-line;margin-top:12px"><span class="grow">${esc(st.scan.warning)}</span></div>` : ""}` : ""}</div>
     ${st.matched.length ? `<div class="toolbar"><span class="muted" style="font-size:13.5px">Кого обогащать:</span>
         <button class="btn small" data-esel="none">снять</button><button class="btn small" data-esel="all">все</button>
@@ -311,12 +320,15 @@ async function enrichTab(el: HTMLElement) {
           <input type="checkbox" data-ek="${esc(m.key)}" ${st.enrSel.has(m.key) ? "checked" : ""}><span class="grow"><span class="nm">${esc(m.employee)}</span><br><span class="sub">${esc(m.note)}</span></span></label>`).join('') || '<p class="muted">Нет сотрудников с сохранёнными результатами.</p>'}</div></div>`;
       }).join('')}</div>
       <div class="toolbar" style="margin-top:12px"><button class="btn primary" data-check ${st.enrSel.size ? "" : "disabled"}>Проверить конфликты (без записи)</button>
-        ${e.writes ? `<button class="btn" data-apply ${st.enrSel.size ? "" : "disabled"}>Записать выбранных (${n(st.enrSel.size)})</button>` : ""}
+        ${e.writes ? `<button class="btn" data-apply ${st.enrSel.size && st.check ? "" : "disabled"}>Записать выбранных (${n(st.enrSel.size)})</button>` : ""}
         <span class="muted" id="e-log"></span></div>` : ""}
-    ${st.check ? `<pre style="white-space:pre-wrap;font:13px/1.5 var(--mono);color:var(--ink-2)">${esc((st.check.lines || []).join("\n"))}</pre>
-      ${reviewRows().length ? `<div class="section"><div class="section-head"><h2 class="section-title">Выберите значения до записи (${n(reviewRows().length)})</h2></div>${note(e.decision_hint)}<p class="muted">Сумма и дата обещания сохраняются вместе.</p>
+    <div data-enr-review>${st.check ? `<pre style="white-space:pre-wrap;font:13px/1.5 var(--mono);color:var(--ink-2)">${esc((st.check.lines || []).join("\n"))}</pre>
+      ${reviews.length ? `<div class="section"><div class="section-head"><h2 class="section-title">Выберите значения до записи (${n(reviews.length)})</h2></div>${note(e.decision_hint)}<p class="muted">Сумма и дата обещания сохраняются вместе.</p>
         <div class="toolbar" style="margin-top:8px"><button class="btn small" data-dall="file">Везде оставить как в книге</button><button class="btn small" data-dall="server">Везде записать сервер</button></div>
-        ${conflictTable(reviewRows(), true, e.decision_labels, cols)}</div>` : ""}` : ""}
+        ${reviews.length > REVIEW_PAGE_SIZE ? `<div class="toolbar"><button class="btn small" data-review-page="-1" ${firstReview ? "" : "disabled"}>Назад</button>
+          <span role="status">Строки ${n(firstReview + 1)}–${n(firstReview + visibleReviews.length)} из ${n(reviews.length)}</span>
+          <button class="btn small" data-review-page="1" ${firstReview + visibleReviews.length < reviews.length ? "" : "disabled"}>Далее</button></div>` : ""}
+        ${conflictTable(visibleReviews, true, e.decision_labels, cols)}</div>` : ""}` : ""}</div>
     ${st.applyRes ? `<div class="section"><div class="section-head"><h2 class="section-title">Итог записи</h2></div>
       <pre style="white-space:pre-wrap;font:13px/1.5 var(--mono);color:var(--ink-2)">${esc((st.applyRes.lines || []).join("\n"))}</pre>
       ${st.applyRes.ledger_error ? `<div class="notice err"><span class="grow">${esc(st.applyRes.ledger_error)}</span><button class="btn small" data-replay>Повторить отправку из квитанции</button></div>` : ""}</div>` : ""}`;
@@ -325,13 +337,24 @@ async function enrichTab(el: HTMLElement) {
     if (activeRoot?.isConnected && st.tab === 'enrich') return draw(activeRoot);
   };
   const win = () => { st.since = (el.querySelector("#e-since") as HTMLInputElement).value.trim(); st.until = (el.querySelector("#e-until") as HTMLInputElement).value.trim(); };
-  el.querySelector("#e-since")?.addEventListener("change", () => { win(); st.check = null; });
-  el.querySelector("#e-until")?.addEventListener("change", () => { win(); st.check = null; });
-  el.querySelector("[data-today]")?.addEventListener("click", () => {
-    const d = new Date(); const t = `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}.${d.getFullYear()}`;
-    st.since = t; st.until = t; st.check = null; redraw();
+  const clearReview = () => {
+    st.check = null; st.decisions = {}; st.reviewPage = 0;
+    el.querySelector("[data-enr-review]")?.replaceChildren();
+    el.querySelector<HTMLButtonElement>("[data-apply]")?.setAttribute("disabled", "");
+  };
+  el.querySelectorAll<HTMLInputElement>("#e-since, #e-until").forEach(input => {
+    input.addEventListener("input", () => {
+      win(); st.enrPeriodEdited = true; clearReview();
+    });
   });
+  el.querySelectorAll<HTMLButtonElement>("[data-day]").forEach(button => button.addEventListener("click", () => {
+    const d = new Date();
+    d.setDate(d.getDate() - Number(button.dataset.day));
+    const day = `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}.${d.getFullYear()}`;
+    st.since = day; st.until = day; st.enrPeriodEdited = true; clearReview(); redraw();
+  }));
   el.querySelector("[data-base]")?.addEventListener("click", guard(async () => {
+    win();
     const p = await hard.pick("folder", { title: "Папка, в которой лежат папки республик", defaultPath: e.base || undefined });
     if (!p) return;
     st.enr = await local("/enr/base", { path: p });
@@ -339,37 +362,45 @@ async function enrichTab(el: HTMLElement) {
       st.scan = null;
       st.matched = [];
       st.enrSel.clear();
-      st.check = null;
-      st.decisions = {};
+      clearReview();
       st.applyRes = null;
     }
-    st.since = st.enr.since || ""; st.until = st.enr.until || ""; redraw();
+    if (!e.base && !st.enrPeriodEdited) {
+      st.since = st.enr.since || ""; st.until = st.enr.until || "";
+    }
+    redraw();
   }));
   el.querySelector("[data-scan]")?.addEventListener("click", guard(async () => {
     const out = el.querySelector("#e-scan-out")!;
     out.innerHTML = '<p class="muted">Проверяю: данные сервера + папки сотрудников…</p>';
     const r = await job("/enr/preview", {}, (s) => { out.innerHTML = `<p class="muted">${esc(s)}</p>`; });
-    st.scan = r; st.matched = r.matched; st.enrSel = new Set(r.matched.map((m: any) => m.key)); st.check = null; st.applyRes = null; redraw();
+    st.scan = r; st.matched = r.matched; st.enrSel = new Set(r.matched.map((m: any) => m.key));
+    clearReview(); st.applyRes = null; redraw();
   }));
   el.querySelectorAll<HTMLButtonElement>("[data-esel]").forEach((b) => b.addEventListener("click", () => {
-    st.enrSel = b.dataset.esel === "all" ? new Set(st.matched.map((m) => m.key)) : new Set(); st.check = null; redraw();
+    st.enrSel = b.dataset.esel === "all" ? new Set(st.matched.map((m) => m.key)) : new Set(); clearReview(); redraw();
   }));
   el.querySelectorAll<HTMLInputElement>("[data-ek]").forEach((cb) => cb.addEventListener("change", () => {
-    if (cb.checked) st.enrSel.add(cb.dataset.ek!); else st.enrSel.delete(cb.dataset.ek!); st.check = null; redraw();
+    if (cb.checked) st.enrSel.add(cb.dataset.ek!); else st.enrSel.delete(cb.dataset.ek!); clearReview(); redraw();
   }));
   const logEl = () => el.querySelector("#e-log")!;
   el.querySelector("[data-check]")?.addEventListener("click", guard(async () => {
-    win(); logEl().textContent = "Проверяю книги…";
+    win(); clearReview(); logEl().textContent = "Проверяю книги…";
     st.check = await job("/enr/check", { keys: [...st.enrSel], since: st.since, until: st.until }, (s) => { logEl().textContent = s; });
-    st.decisions = {}; toast(`Проверено: расхождений ${reviewRows().length}`); redraw();
+    toast(`Проверено: расхождений ${reviewRows().length}`); redraw();
   }));
   el.querySelectorAll<HTMLSelectElement>("[data-dec]").forEach((s) => s.addEventListener("change", () => {
-    const row=reviewRows().find(c=>decisionKey(c)===s.dataset.dec);
+    const row = reviewsByKey.get(s.dataset.dec!);
     if(row)setReviewChoice(row,s.value);
     el.querySelectorAll<HTMLSelectElement>('[data-dec]').forEach(other=>{other.value=st.decisions[other.dataset.dec!] || 'file';});
   }));
   el.querySelectorAll<HTMLButtonElement>("[data-dall]").forEach((b) => b.addEventListener("click", () => {
-    for (const c of reviewRows()) setReviewChoice(c, b.dataset.dall!); redraw();
+    for (const row of reviews) st.decisions[decisionKey(row)] = b.dataset.dall!;
+    redraw();
+  }));
+  el.querySelectorAll<HTMLButtonElement>("[data-review-page]").forEach(button => button.addEventListener("click", () => {
+    st.reviewPage += Number(button.dataset.reviewPage);
+    redraw();
   }));
   el.querySelector("[data-apply]")?.addEventListener("click", guard(async () => {
     win();
@@ -381,7 +412,7 @@ async function enrichTab(el: HTMLElement) {
     if (!(await ask("Обогащение реестров", conf.text, "Записать"))) return;
     logEl().textContent = "Открываю книги…";
     st.applyRes = await job("/enr/apply", body, (s) => { logEl().textContent = s; });
-    st.check = null; toast(st.applyRes.toast); redraw();
+    clearReview(); toast(st.applyRes.toast); redraw();
     if (activeRoot) await showDeliveryQueue(activeRoot, queueGeneration);
   }));
   el.querySelector("[data-replay]")?.addEventListener("click", guard(async () => {

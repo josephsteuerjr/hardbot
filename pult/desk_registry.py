@@ -304,8 +304,14 @@ def enr_base(body, *, settings, admin, **_):
     delivery_guard(settings,admin)
     selected = str(body.get("path") or "")
     if selected != _base(settings):
+        previous = settings.get("scatterBase")
         settings["scatterBase"] = selected
-        settings.save()
+        if not settings.save():
+            if previous is None:
+                settings.pop("scatterBase", None)
+            else:
+                settings["scatterBase"] = previous
+            raise RuntimeError("Не удалось сохранить папку в настройках Аналитика")
         with _lock:
             S.update(enr_fields=None, enr_matched=[], enr_check=None, enr_decisions={},
                      enr_reconcile=None, last_receipt=None)
@@ -322,10 +328,12 @@ def enr_preview(body, *, admin, start_job, settings, **_):
         say("Получаю данные сервера…")
         d = admin("GET", "/admin/export.json", timeout=120)
         enrich.validate_server_export(d)
+        say("Группирую результаты по сотрудникам…")
         by_emp = enrich.split_by_employee(d["rows"])
         say("Ищу папки сотрудников…")
         fmap = en.folder_map(base)
         matched, nofolder, nofile = en.match_employees(by_emp, fmap,log=say)
+        say("Подготавливаю итог подбора папок и книг…")
         with _lock:
             if _base(settings) != base:
                 raise RuntimeError("Выбрана другая папка. Проверьте соответствия для неё.")
@@ -360,11 +368,18 @@ def enr_check(body, *, admin, start_job, settings=None, **_):
     since, until = str(body.get("since") or ""), str(body.get("until") or "")
 
     def work(say):
+        jobs = en.build_jobs(picked)
+        say("Загружаю журнал доставки…")
         ledger = _ledger(admin, [m["employee"] for m in picked])
         kwargs = en.preview_kwargs(since=since, until=until, ledger=ledger)
-        results = enrich.preview_many(en.build_jobs(picked), S["enr_fields"], say, **kwargs)
+        results = enrich.preview_many(jobs, S["enr_fields"], say, **kwargs)
+        say("Собираю найденные расхождения…")
         conflicts, office = en.collect_conflicts(results)
-        remembered=delivery_service(settings,admin).remembered_choices(en.build_jobs(picked),conflicts+office) if settings is not None else []
+        remembered = []
+        if settings is not None and (conflicts or office):
+            say(f"Сверяю прежние решения для {len(conflicts) + len(office)} расхождений…")
+            remembered = delivery_service(settings, admin).remembered_choices(jobs, conflicts + office)
+        say("Подготавливаю список решений и итог проверки…")
         remembered_keys={en.conflict_key(row) for row in remembered}
         visible_conflicts=[row for row in conflicts if en.conflict_key(row) not in remembered_keys]
         visible_office=[row for row in office if en.conflict_key(row) not in remembered_keys]

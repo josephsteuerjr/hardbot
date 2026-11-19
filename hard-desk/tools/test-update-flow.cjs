@@ -68,9 +68,11 @@ app.whenReady().then(async () => {
           build.onLoad({filter:/release-public-key\.json$/},()=>({contents:JSON.stringify({pem:publicKey}),loader:'json'}));
         }}]})).outputFiles[0].text;
       const module = {exports:{}};
+      const timeouts = [], intervals = [], appEvents = new Map();
       vm.runInNewContext(code,{module,exports:module.exports,Buffer,AbortSignal,
-        setTimeout:()=>({unref(){}}),setInterval:()=>({unref(){}}),require(name){
-          if(name==='electron')return {app:{isPackaged:true},net:{fetch(feed,options){
+        setTimeout:(fn,ms)=>(timeouts.push(ms),{unref(){}}),
+        setInterval:(fn,ms)=>(intervals.push(ms),{unref(){}}),require(name){
+          if(name==='electron')return {app:{isPackaged:true,on:(event,listener)=>appEvents.set(event,listener)},net:{fetch(feed,options){
             assert.equal(feed,origin+product+'-signed.json');
             return net.fetch(url+product+'-signed.json',options);
           }}};
@@ -78,6 +80,9 @@ app.whenReady().then(async () => {
           return require(name);
         }});
       const flow = module.exports;flow.startUpdates(()=>{},()=>{});
+      assert.deepEqual(timeouts,[30_000]);
+      assert.deepEqual(intervals,[15 * 60 * 1000]);
+      assert.equal(typeof appEvents.get('browser-window-focus'),'function');
       const before = downloads;
       for(mode of ['bad-signature','wrong-product','wrong-channel']) {
         assert.equal((await flow.checkUpdates()).phase,'error',mode);

@@ -1810,7 +1810,7 @@ def open_for_write(app, path: str | Path):
 
 
 def backup_copy(path: Path, root: str | Path | None = None,
-                source: Path | None = None) -> Path:
+                source: Path | None = None, *, slot: int | None = None) -> Path:
     """Копия «Имя (до обогащения 13.07.2026 14-05).xlsb». Откат = переименовать.
 
     root — корень для копий. Без него копия ложится рядом с книгой, как раньше.
@@ -1825,17 +1825,21 @@ def backup_copy(path: Path, root: str | Path | None = None,
     файла, а оно сбрасывается при переносе на другой том — и цепочка копий
     выстраивалась в неверном порядке.
     """
-    stamp = datetime.now().strftime("%d.%m.%Y %H-%M")
-    name = f"{path.stem} (до обогащения {stamp}){path.suffix}"
-    if root:
-        folder = Path(root) / path.parent.parent.name / path.parent.name
-        folder.mkdir(parents=True, exist_ok=True)
+    now = datetime.now()
+    stamp = now.strftime("%d.%m.%Y %H-%M")
+    if slot is None:
+        stem = f"{path.stem} (до обогащения {stamp})"
+        folder = Path(root) / path.parent.parent.name / path.parent.name if root else path.parent
     else:
-        folder = path.parent
-    dst = folder / name
+        # The durable receipt stores the original name and exact path to the backup.
+        stem = f"book-{slot:03d}-{now:%Y%m%d-%H%M%S}"
+        folder = Path(root)
+    folder.mkdir(parents=True, exist_ok=True)
+    dst = folder / f"{stem}{path.suffix}"
     n = 2
     while dst.exists():
-        dst = folder / f"{path.stem} (до обогащения {stamp}, {n}){path.suffix}"
+        filename = f"{path.stem} (до обогащения {stamp}, {n})" if slot is None else f"{stem}-{n}"
+        dst = folder / f"{filename}{path.suffix}"
         n += 1
     # source — нетронутая локальная копия той же книги (способ «local»):
     # байты те же, что на шаре до записи, а второе чтение по сети не нужно.
@@ -2202,6 +2206,7 @@ def _enrich_local(
     work_dir=None,
     before_commit=None,
     on_publication_intent=None,
+    backup_slot: int | None = None,
 ) -> dict:
     """Способ «local»: тот же план, те же доказательства, но Excel — локально.
 
@@ -2282,7 +2287,7 @@ def _enrich_local(
                 plan['unplanned_cells_and_formulas_preserved']=True
                 plan['vba_preserved']=_verify_vba_copy(pristine,work)
             work_sha = _sha256_file(work)
-            backup_path = backup_copy(path, backup_root, source=pristine).resolve()
+            backup_path = backup_copy(path, backup_root, source=pristine, slot=backup_slot).resolve()
             backup_sha = _sha256_file(backup_path)
             if backup_sha != pre_sha:
                 raise RuntimeError(f"{path.name}: копия «до обогащения» не совпала с "
@@ -2389,7 +2394,8 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
                 receipt_dir=None, ledger=None, on_delivered=None,
                 server_authoritative: bool = False, decisions=None,
                 engine: str = "local", work_dir=None,
-                before_commit=None, on_publication_intent=None, excel_app=None) -> list[dict]:
+                before_commit=None, on_publication_intent=None, excel_app=None,
+                show_book_counter: bool = True, backup_slot: int | None = None) -> list[dict]:
     """Обогатить личные реестры пачкой, одной сессией Excel.
     jobs: [{employee, path, rows}] — каждому файлу свои строки (его кейсы).
     Ошибка одного файла не валит остальные: в результат кладётся {..., error}.
@@ -2433,7 +2439,8 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
                 path = Path(job["path"])
                 book_ledger = ledger_for_book(ledger, path)
                 book_decisions = decisions_for_book(decisions, path,identities=decision_identities)
-                log(f"[{i}/{len(jobs)}] {job['employee']} — {path.name}…")
+                if show_book_counter:
+                    log(f"[{i}/{len(jobs)}] {job['employee']} — {path.name}…")
                 attempted.add(i)
                 try:
                     if engine == "local":
@@ -2445,6 +2452,7 @@ def enrich_many(jobs: list[dict], fields: list[dict], log=lambda s: None,
                             decisions=book_decisions, work_dir=work_dir,
                             before_commit=before_commit,
                             on_publication_intent=on_publication_intent,
+                            backup_slot=backup_slot,
                         )
                     else:
                         # batch — только когда он выбран: прежний вызов остаётся

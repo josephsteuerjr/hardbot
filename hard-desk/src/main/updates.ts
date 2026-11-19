@@ -14,6 +14,7 @@ let signed: SignedRelease | null = null;
 let downloaded = "";
 let busy = false;
 let installing = false;
+let lastCheckAt = 0;
 let notify = (_s: UpdateState) => {};
 function tell(s: UpdateState) { state = s; notify({ ...s }); }
 export function updateState(): UpdateState { return { ...state }; }
@@ -35,14 +36,20 @@ export function startUpdates(onState: (s: UpdateState) => void, log: (s: string)
     tell({ phase: "ready", version: e.version, text: "Обновление скачано. Перезагрузите приложение, чтобы установить его." });
   });
   tell({ phase: "idle", text: "Обновления проверяются автоматически" });
-  const check = () => void checkUpdates().catch(() => log("Обновление: проверка не удалась; текущая версия сохранена"));
-  setTimeout(check, 30000).unref();
-  setInterval(check, 4 * 60 * 60 * 1000).unref();
+  const check = () => {
+    if (Date.now() - lastCheckAt >= 60 * 1000) {
+      void checkUpdates().catch(() => log("Обновление: проверка не удалась; текущая версия сохранена"));
+    }
+  };
+  setTimeout(check, 30 * 1000).unref();
+  setInterval(check, 15 * 60 * 1000).unref();
+  app.on("browser-window-focus", check);
 }
 
 export async function checkUpdates(): Promise<UpdateState> {
   if (!updater || !PRODUCT_ID || busy || state.phase === "ready") return updateState();
   busy = true;
+  lastCheckAt = Date.now();
   try {
     tell({ phase: "checking", text: "Проверка новой версии" });
     const res = await net.fetch(RELEASE_URL + PRODUCT_ID + "-signed.json", { signal: AbortSignal.timeout(20000) });

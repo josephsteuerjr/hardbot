@@ -36,3 +36,17 @@ def test_conflict_decision_follows_real_alias_but_not_another_workbook(monkeypat
     monkeypatch.setattr(enrich, 'canonical_book_key', lambda path: unc if str(path) == mapped else enrich.book_key(path))
     decisions = {(mapped, 'A', 'status'): 'server', ('//other/share/book.xlsb', 'B', 'status'): 'server'}
     assert enrich.decisions_for_book(decisions, unc) == {('A', 'status'): 'server'}
+
+
+
+def test_durable_backup_for_long_original_name_keeps_a_short_unique_path(tmp_path):
+    root = tmp_path / ("x" * max(1, 176 - len(str(tmp_path)) - 1))
+    original = tmp_path / "city" / "Example Person With Long Name" / "Example Person With Long Name.xlsb"
+    source = tmp_path / "pristine.xlsb"
+    source.write_bytes(b"original bytes")
+
+    first = enrich.backup_copy(original, root, source=source, slot=7)
+    second = enrich.backup_copy(original, root, source=source, slot=7)
+    assert first.parent == second.parent == root
+    assert first != second and len(str(second)) < 260
+    assert first.read_bytes() == second.read_bytes() == source.read_bytes()

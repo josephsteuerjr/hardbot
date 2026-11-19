@@ -2,7 +2,10 @@ const fs=require('node:fs'),path=require('node:path'),assert=require('node:asser
 const ROOT=path.resolve(__dirname,'../..'),D=path.join(ROOT,'hard-desk'),LAB=path.resolve(process.env.HARD_ENR_QA_ROOT||path.join(ROOT,'_local/enrichment-jobs-headless'));fs.mkdirSync(LAB,{recursive:true});
 if(!process.versions.electron){
  fs.rmSync(path.join(LAB,'AFTER.json'),{force:true});
- const code=`import {registry} from './ui/analyst/registry';import {runJob} from './ui/analyst/lib';import {hard} from './ui/kit/api';import {mountShell,bare,setSections,go,refresh} from './ui/kit/shell';mountShell('Headless');bare(false);setSections([registry]);window.__refresh=refresh;window.__runJob=runJob;window.__testHard=hard;go('registry');`;
+ const code=`import {mountRegistryTools} from './ui/analyst/registry';
+ import {runJob} from './ui/analyst/lib';import {hard} from './ui/kit/api';
+ async function mount(){const root=document.createElement('div');document.querySelector('#view').replaceChildren(root);await mountRegistryTools(root,'enrich')}
+ window.__refresh=mount;window.__runJob=runJob;window.__testHard=hard;void mount();`;
  require(path.join(D,'node_modules/esbuild')).buildSync({stdin:{contents:code,resolveDir:D,loader:'ts'},bundle:true,format:'iife',outfile:path.join(LAB,'repro.js')});
  let html=fs.readFileSync(path.join(D,'out/ui/index.html'),'utf8').replace('src="app.js"','src="repro.js"').replace('href="app.css"',`href="${require('node:url').pathToFileURL(path.join(D,'out/ui/app.css')).href}"`);
  fs.writeFileSync(path.join(LAB,'index.html'),html);
@@ -20,13 +23,29 @@ if(!process.versions.electron){
    w=new BrowserWindow({show:false,width:1200,height:800,webPreferences:{preload:path.join(__dirname,'test-enrichment-jobs-preload.cjs'),contextIsolation:false,sandbox:false,offscreen:true,backgroundThrottling:false}});
    const js=c=>w.webContents.executeJavaScript(c),nap=ms=>new Promise(r=>setTimeout(r,ms));
    const until=async c=>{for(let i=0;i<120;i++){if(await js(c))return;await nap(50)}throw Error('Timeout '+c)};
-   await w.loadFile(path.join(LAB,'index.html'));await until('!!document.querySelector("[data-tab=enrich]")');
+   await w.loadFile(path.join(LAB,'index.html'));await until('!!document.querySelector("[data-scan]")');
    await js(`window.hard.local('/scenario',{mode:${JSON.stringify(mode)}})`);
-   await js('document.querySelector("[data-tab=enrich]").click()');await until('!!document.querySelector("[data-scan]")');
+   await js(`for(const [id,value] of [['e-since','03.02.2026'],['e-until','05.02.2026']]) {
+     const input=document.getElementById(id);input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));
+   }document.querySelector('[data-base]').click()`);
+   await until('document.body.textContent.includes("next-synthetic")');
+   assert.deepEqual(await js("['e-since','e-until'].map(id=>document.getElementById(id).value)"),['03.02.2026','05.02.2026']);
+   for(const offset of [1,2]) {
+     const expected=await js(`(()=>{const date=new Date();date.setDate(date.getDate()-${offset});return date.toLocaleDateString('ru-RU')})()`);
+     await js(`document.querySelector('[data-day="${offset}"]').click()`);
+     await until(`document.getElementById('e-since').value===${JSON.stringify(expected)} && document.getElementById('e-until').value===${JSON.stringify(expected)}`);
+   }
    await js('document.querySelector("[data-scan]").click()');await until('!!document.querySelector("[data-check]")');
    await js('document.querySelector("[data-check]").click()');await nap(400);
    if(mode==='refresh')await js('window.__refresh()');
-   await nap(4000);
+   await until('document.querySelector("[data-registry-progress]")?.textContent.includes("Подготавливаю список решений")');
+   await until('document.body.textContent.includes("HEADLESS_ENRICH_COMPLETED")');
+   assert.equal(await js('document.querySelectorAll("[data-dec]").length'),80);
+   await js(`const choice=document.querySelector('[data-dec]');choice.value='server';choice.dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('[data-review-page="1"]').click()`);
+   await until('document.body.textContent.includes("Строки 81")');
+   await js(`document.querySelector('[data-review-page="-1"]').click()`);
+   await until('document.body.textContent.includes("Строки 1–80")');
+   assert.equal(await js('document.querySelector("[data-dec]").value'),'server');
    const worker=await js('window.hard.local("/inspect",{})');
    const observed={mode,worker_state:worker.data.jobs.at(-1).state,worker_starts:worker.data.jobs.length,
     visible_result:await js('document.body.textContent.includes("HEADLESS_ENRICH_COMPLETED")'),

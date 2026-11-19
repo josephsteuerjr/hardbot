@@ -169,15 +169,28 @@ class Service:
         import enrich
         from . import enrichment as en
         accepted={en.conflict_key(r):r for r in self.store.accepted(self.owner())}
-        bypath={enrich.canonical_book_key(j['path']):j for j in jobs}
-        choices=[]
+        if not accepted:
+            return []
+        paths = {job['path']: enrich.canonical_book_key(job['path']) for job in jobs}
+        by_path = {paths[job['path']]: job for job in jobs}
+        identities = {}
+        choices = []
         for row in conflicts:
-            path=enrich.canonical_book_key(row['book_path'])
-            key=(path,str(row['contract_id']),str(row['key']))
-            old=accepted.get(key);job=bypath.get(path)
-            if old and job and old.get('source_identity')==self.review_identity(job,row['contract_id']) and all(
-                    str(old.get(k,''))==str(row.get(k,'')) for k in ('file','server','visit_date')):
-                choices.append({**row,'decision':'file','remembered':True})
+            filename = row['book_path']
+            if filename not in paths:
+                paths[filename] = enrich.canonical_book_key(filename)
+            path = paths[filename]
+            cid = row['contract_id']
+            old = accepted.get((path, str(cid), str(row['key'])))
+            job = by_path.get(path)
+            if not old or not job or any(str(old.get(k, '')) != str(row.get(k, ''))
+                                         for k in ('file', 'server', 'visit_date')):
+                continue
+            identity_key = (path, cid)
+            if identity_key not in identities:
+                identities[identity_key] = self.review_identity(job, cid)
+            if old.get('source_identity') == identities[identity_key]:
+                choices.append({**row, 'decision': 'file', 'remembered': True})
         return choices
 
     def require_complete(self):
@@ -287,25 +300,32 @@ class Service:
                 raise ValueError('Вход изменился; автоматический перенос остановлен')
             inputs = self.store.inputs(run)
             stack=ExitStack();native=[None]
-            def get_excel():
+            def get_excel(report):
                 import enrich,xlwings as xw
                 if native[0] is not None:
                     try:native[0].api.Workbooks.Count;return native[0]
                     except Exception:stack.close();native[0]=None
-                enrich._co_init();native[0]=stack.enter_context(enrich.open_excel(xw,say));return native[0]
-            for item in self.store.books(run['id']):
+                enrich._co_init();native[0]=stack.enter_context(enrich.open_excel(xw,report));return native[0]
+            books = self.store.books(run['id'])
+            for number, item in enumerate(books, 1):
                 if item['state'] in ('done','attention') or item.get('next_retry',0)>time.time():
                     continue
                 if self.owner() != run['authority']:
                     break
-                say(f'{item["employee"]} — {Path(item["file"]).name}')
+                label = f'[{number}/{len(books)}] {item["employee"]} — {Path(item["file"]).name}'
+                say(label)
+
+                def report(message):
+                    say(f'{label} · {message}')
+
                 try:
-                    self._book(run, item, inputs, say,get_excel)
+                    self._book(run, item, inputs, report, lambda: get_excel(report))
                 except Exception as exc:
                     if item.get('intent') or item.get('result'):
                         self._wait(run, item, 'Проверяется результат записи: '+str(exc))
                     else:
                         self._attention(run, item, str(exc))
+            say("Сохраняю итог прохода по книгам…")
             books = self.store.books(run['id'])
             run['state'] = 'done' if all(b['state']=='done' for b in books) else 'attention' if any(b['state']=='attention' for b in books) else 'waiting'
             self.store.save(run)
@@ -340,10 +360,12 @@ class Service:
             if getattr(busy,'kind','locked')!='locked':
                 self._attention(run,item,'Не удалось получить доступ к книге: '+busy.reason,reason='access');return
             self._wait(run,item,'Книга открыта в Excel. Перенос продолжится после закрытия.',reason='busy');return
+        say("Сверяю журнал доставки")
         try:
             ledger=self._ledger([job])
         except Exception as exc:
             self._wait(run,item,'Нет подтверждённой истории доставки: '+str(exc));return
+        say("Проверяю книгу перед записью")
         preview=enrich.preview_many([job],inputs['fields'],since=inputs['since'],until=inputs['until'],ledger=ledger)[0]
         if preview.get('error'):
             self._attention(run,item,preview['error']);return
@@ -381,7 +403,7 @@ class Service:
             self._attention(run,item,'В книге появились новые изменения. Выберите, какие значения оставить.',reason='conflict');return
         expected=preview['file_sha256']
         folder=Path(run['folder'])
-        for name in ('backups','receipts','work'):(folder/name).mkdir(exist_ok=True)
+        for name in ('backups','receipts'):(folder/name).mkdir(exist_ok=True)
         item.update(state='preparing',message='Запись и проверка книги');self.store.save_book(run['id'],item)
         def before_commit(path):
             if file_sha(path)!=expected:
@@ -402,9 +424,10 @@ class Service:
             if not isinstance(answer,dict) or answer.get('recorded')!=len(payload['entries']):
                 raise ValueError('История доставки подтверждена не полностью')
             item['ledger_ack']=answer;self.store.save_book(run['id'],item);return answer
+        say("Записываю и проверяю книгу в Excel")
         results=enrich.enrich_many([job],inputs['fields'],say,since=inputs['since'],until=inputs['until'],
-                    ledger=ledger,decisions=decisions,server_authoritative=False,
-                    backup_root=folder/'backups',receipt_dir=folder/'receipts',work_dir=folder/'work',
+                    ledger=ledger,decisions=decisions,server_authoritative=False, show_book_counter=False,
+                    backup_root=folder/'backups',receipt_dir=folder/'receipts',backup_slot=item['ordinal'] + 1,
                     before_commit=before_commit,on_publication_intent=publication,on_delivered=delivered,
                     **({'excel_app':get_excel()} if get_excel else {}))
         result=results[0]

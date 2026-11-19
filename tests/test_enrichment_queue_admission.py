@@ -1,5 +1,6 @@
 import hashlib
 import threading
+from pathlib import Path
 import pytest
 from pult.core.settings import Settings
 from pult.core.durable_jobs import Journal
@@ -71,3 +72,29 @@ def test_completed_books_do_not_finish_job_while_excel_is_still_closing(backend,
  assert engine.job_state(run['id'])['state']=='attention'
  engine._background_busy=False
  assert engine.job_state(run['id'])['state']=='done'
+
+
+
+def test_enrichment_progress_counts_all_approved_books_after_resume(backend, tmp_path, monkeypatch):
+    engine, registry = backend
+    service = registry.delivery_service(engine._settings, lambda *a, **k: {})
+    jobs = [{'employee': 'Synthetic', 'path': str(tmp_path / f'book-{i}.xlsb'), 'rows': []}
+            for i in range(3)]
+    for job in jobs:
+        Path(job['path']).write_bytes(b'synthetic')
+    run = service.prepare('batch-progress', jobs, [], '01.11.2026', '01.11.2026', [])
+    first = service.store.books(run['id'])[0]
+    first['state'] = 'done'
+    service.store.save_book(run['id'], first)
+
+    def check_book(run, item, inputs, report, get_excel):
+        report('Проверка книги')
+        item['state'] = 'done'
+        service.store.save_book(run['id'], item)
+
+    monkeypatch.setattr(service, '_book', check_book)
+    lines = []
+    result = service.process(run, lines.append)
+    assert result['completed'] == result['total'] == 3
+    assert [line.split()[0] for line in lines if line.endswith('Проверка книги')] == ['[2/3]', '[3/3]']
+    assert not any(line.startswith('[1/1]') for line in lines)
