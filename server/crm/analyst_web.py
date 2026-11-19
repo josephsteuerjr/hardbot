@@ -5,13 +5,20 @@ from contextlib import closing, contextmanager
 from hashlib import sha256, scrypt
 import hmac
 from html import escape
+import json
 from pathlib import Path
+import re
 import secrets
 import sqlite3
 import time
 from urllib.parse import urlencode
 
 from aiohttp import web
+
+if __package__:
+    from .analyst_registry_write import Catalog, RegistryConflict, card, change
+else:
+    from analyst_registry_write import Catalog, RegistryConflict, card, change
 
 
 PREFIX = "/admin/analyst/"
@@ -68,12 +75,14 @@ def page(title, body, *, signed_in=False, status=200):
 
 
 class AnalystSite:
-    def __init__(self, primary, state, origin, username, account_id):
+    def __init__(self, primary, state, origin, username, account_id, operator=None):
         self.primary = primary.resolve()
         self.state = state.resolve()
         self.origin = origin.rstrip("/")
         self.username = username
         self.account_id = account_id
+        self.operator = operator
+        self.catalog = Catalog() if operator else None
 
     @contextmanager
     def authority(self):
@@ -96,9 +105,25 @@ class AnalystSite:
                 CREATE TABLE IF NOT EXISTS sessions (digest TEXT PRIMARY KEY, expires INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS failures (at INTEGER NOT NULL);
             """)
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute("INSERT OR IGNORE INTO credential VALUES (1,?)", (verifier,))
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+            if "username" not in columns:
+                conn.execute("ALTER TABLE sessions ADD COLUMN username TEXT")
+                conn.execute("UPDATE sessions SET username=?", (self.username,))
+            conn.execute("CREATE TABLE IF NOT EXISTS operator_credentials(username TEXT PRIMARY KEY, verifier TEXT NOT NULL)")
+            if self.operator:
+                conn.execute("INSERT OR IGNORE INTO operator_credentials VALUES (?,?)",
+                             (self.operator["username"], self.operator["verifier"]))
 
-    def authorized(self, conn):
+    def authorized(self, conn, username):
+        if self.operator and username == self.operator["username"]:
+            row = conn.execute("SELECT name,role,direction FROM managers WHERE telegram_id=?",
+                               (self.operator["uid"],)).fetchone()
+            return bool(row and row["name"] == self.operator["name"] and
+                        row["role"] == self.operator["directory_role"] and row["direction"] == "all")
+        if username != self.username:
+            return False
         return conn.execute(
             "SELECT 1 FROM accounts a JOIN account_admin_grants g ON g.account_id=a.id "
             "WHERE a.id=? AND a.username=? AND a.role='analyst' AND a.status='active' "
@@ -112,18 +137,27 @@ class AnalystSite:
             return None
         digest = sha256(token.encode()).hexdigest()
         with self.sessions() as conn:
-            row = conn.execute("SELECT 1 FROM sessions WHERE digest=? AND expires>?", (digest, time.time())).fetchone()
-        return digest if row else None
+            row = conn.execute("SELECT username FROM sessions WHERE digest=? AND expires>?", (digest, time.time())).fetchone()
+        return (digest, row[0]) if row else None
 
     def require_origin(self, request):
         if request.headers.get("Origin") != self.origin:
             raise web.HTTPForbidden(text="Запрос должен быть отправлен со страницы Аналитика.")
 
     def require_user(self, request, primary):
-        digest = self.session(request)
-        if not digest or not self.authorized(primary):
+        session = self.session(request)
+        if not session or not self.authorized(primary, session[1]):
             raise web.HTTPSeeOther(location=link("login"))
-        return digest
+        return session
+
+    def can_write(self, username):
+        return bool(self.operator and username == self.operator["username"])
+
+    def get_verifier(self, conn, username):
+        owner = conn.execute("SELECT verifier FROM credential WHERE id=1").fetchone()[0]
+        if self.can_write(username):
+            return conn.execute("SELECT verifier FROM operator_credentials WHERE username=?", (username,)).fetchone()[0]
+        return owner
 
     def login_form(self, error="", status=200):
         alert = f'<p role="alert">{html(error)}</p>' if error else ""
@@ -144,29 +178,30 @@ class AnalystSite:
         username, password = data.get("username"), data.get("password")
         if not isinstance(username, str) or not isinstance(password, str) or len(password) > 128:
             return self.login_form("Введите логин и пароль.", 400)
+        username = username.strip().casefold()
         with self.sessions() as conn:
             conn.execute("BEGIN IMMEDIATE")
             now = int(time.time())
             conn.execute("DELETE FROM failures WHERE at<=?", (now - 300,))
             if conn.execute("SELECT count(*) FROM failures").fetchone()[0] >= 8:
                 return self.login_form("Слишком много попыток. Повторите через пять минут.", 429)
-            verifier = conn.execute("SELECT verifier FROM credential WHERE id=1").fetchone()[0]
+            verifier = self.get_verifier(conn, username)
             with self.authority() as primary:
-                allowed = self.authorized(primary)
+                allowed = self.authorized(primary, username)
             password_ok = matches(password, verifier)
-            if not (hmac.compare_digest(username.strip().casefold().encode(), self.username.encode())
-                    and password_ok and allowed):
+            if not (password_ok and allowed):
                 conn.execute("INSERT INTO failures VALUES (?)", (now,))
                 return self.login_form("Проверьте логин и веб-пароль.", 401)
-            token = self.new_session(conn, now)
+            token = self.new_session(conn, now, username)
         return self.redirect_with_session(token)
 
     @staticmethod
-    def new_session(conn, now):
+    def new_session(conn, now, username):
         token = secrets.token_urlsafe(32)
         conn.execute("DELETE FROM failures")
         conn.execute("DELETE FROM sessions WHERE expires<=?", (now,))
-        conn.execute("INSERT INTO sessions VALUES (?,?)", (sha256(token.encode()).hexdigest(), now + SESSION_SECONDS))
+        conn.execute("INSERT INTO sessions(digest,expires,username) VALUES (?,?,?)",
+                     (sha256(token.encode()).hexdigest(), now + SESSION_SECONDS, username))
         return token
 
     @staticmethod
@@ -177,9 +212,9 @@ class AnalystSite:
 
     async def logout(self, request):
         self.require_origin(request)
-        if digest := self.session(request):
+        if session := self.session(request):
             with self.sessions() as conn:
-                conn.execute("DELETE FROM sessions WHERE digest=?", (digest,))
+                conn.execute("DELETE FROM sessions WHERE digest=?", (session[0],))
         response = web.HTTPSeeOther(location=link("login"))
         response.set_cookie(COOKIE, "", max_age=0, path=PREFIX, secure=True, httponly=True, samesite="Strict")
         return response
@@ -203,7 +238,7 @@ class AnalystSite:
             self.require_origin(request)
             data = await request.post()
         with self.authority() as primary:
-            digest = self.require_user(request, primary)
+            digest, username = self.require_user(request, primary)
         if data is None:
             return self.password_form()
         current, new = data.get("current"), data.get("new")
@@ -217,13 +252,16 @@ class AnalystSite:
             conn.execute("DELETE FROM failures WHERE at<=?", (now - 300,))
             if conn.execute("SELECT count(*) FROM failures").fetchone()[0] >= 8:
                 return self.password_form("Слишком много попыток. Повторите через пять минут.", 429)
-            verifier = conn.execute("SELECT verifier FROM credential WHERE id=1").fetchone()[0]
+            verifier = self.get_verifier(conn, username)
             if not matches(current, verifier):
                 conn.execute("INSERT INTO failures VALUES (?)", (now,))
                 return self.password_form("Текущий веб-пароль не подошёл.", 401)
-            conn.execute("UPDATE credential SET verifier=? WHERE id=1", (password_hash(new),))
-            conn.execute("DELETE FROM sessions")
-            token = self.new_session(conn, now)
+            if self.can_write(username):
+                conn.execute("UPDATE operator_credentials SET verifier=? WHERE username=?", (password_hash(new), username))
+            else:
+                conn.execute("UPDATE credential SET verifier=? WHERE id=1", (password_hash(new),))
+            conn.execute("DELETE FROM sessions WHERE username=?", (username,))
+            token = self.new_session(conn, now, username)
         return self.redirect_with_session(token)
 
     async def registry(self, request):
@@ -268,12 +306,55 @@ class AnalystSite:
         if len(raw) > 18:
             raise web.HTTPNotFound()
         with self.authority() as conn:
-            self.require_user(request, conn)
+            _, username = self.require_user(request, conn)
             row = conn.execute("SELECT " + ",".join(DETAIL) + " FROM clients WHERE id=?", (int(raw),)).fetchone()
         if not row:
             raise web.HTTPNotFound(text="Договор не найден.")
         fields = "".join(f'<div><dt>{html(label)}</dt><dd>{html(row[key]) or "—"}</dd></div>' for key, label in DETAIL.items())
-        return page(row["client"] or "Договор", f'<dl>{fields}</dl>', signed_in=True)
+        edit = f'<p><a href="{link(f"contract/{raw}/edit")}">Редактировать</a></p>' if self.can_write(username) else ""
+        return page(row["client"] or "Договор", f'<dl>{fields}</dl>{edit}', signed_in=True)
+
+    async def edit(self, request):
+        raw = request.match_info["id"]
+        if not re.fullmatch(r"[0-9]{1,18}", raw):
+            raise web.HTTPNotFound()
+        row_id = int(raw)
+        if request.method == "POST":
+            self.require_origin(request)
+            form = await request.post()
+            with self.authority() as primary:
+                _, username = self.require_user(request, primary)
+                if not self.can_write(username):
+                    raise web.HTTPForbidden(text="Доступна только работа на чтение.")
+            with closing(sqlite3.connect(self.primary.as_uri() + "?mode=rw", uri=True, timeout=6)) as conn, conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute("BEGIN IMMEDIATE")
+                _, username = self.require_user(request, conn)
+                if not self.can_write(username):
+                    raise web.HTTPForbidden(text="Доступна только работа на чтение.")
+                change(conn, self.catalog, row_id, form.get("revision"), form.get("operation"),
+                       form.get("field"), form.get("value"), self.operator["uid"])
+            raise web.HTTPSeeOther(location=link(f"contract/{raw}", saved=1))
+        with self.authority() as primary:
+            _, username = self.require_user(request, primary)
+            if not self.can_write(username):
+                raise web.HTTPForbidden(text="Доступна только работа на чтение.")
+            row, revision = card(primary, self.catalog, row_id)
+        options = "".join(f'<option value="{html(key)}">{html(title)}</option>' for key, title in self.catalog.labels.items())
+        values = "".join(f'<tr><th>{html(title)}</th><td>{html(row[key]) or "—"}</td></tr>'
+                         for key, title in self.catalog.labels.items())
+        return page("Правка карточки", f'''
+            <p><a href="{link(f"contract/{raw}")}">{html(row['contract_id'])}</a></p>
+            <form class="panel" method="post" action="{link(f"contract/{raw}/edit")}">
+              <input type="hidden" name="revision" value="{revision}">
+              <input type="hidden" name="operation" value="{secrets.token_hex(16)}">
+              <label>Поле<select name="field">{options}</select></label>
+              <label>Новое значение<textarea name="value" maxlength="4096"></textarea></label>
+              <p>Пустое значение очищает выбранное поле.</p>
+              <button>Сохранить</button>
+            </form>
+            <div class="table"><table><tbody>{values}</tbody></table></div>
+        ''', signed_in=True)
 
     async def summary(self, request):
         with self.authority() as conn:
@@ -293,7 +374,9 @@ class AnalystSite:
 
     async def health(self, request):
         with self.authority() as conn:
-            allowed = self.authorized(conn)
+            allowed = self.authorized(conn, self.username)
+            if self.operator:
+                allowed = allowed and self.authorized(conn, self.operator["username"])
             conn.execute("SELECT " + ",".join(DETAIL) + " FROM clients LIMIT 1").fetchone()
         with self.sessions() as conn:
             ready = conn.execute("SELECT 1 FROM credential WHERE id=1").fetchone()
@@ -306,6 +389,8 @@ async def web_headers(request, handler):
         response = await handler(request)
     except web.HTTPException as exc:
         response = web.Response(status=exc.status, headers=exc.headers, body=exc.body)
+    except RegistryConflict as exc:
+        response = page("Правка не сохранена", f'<p role="alert">{html(exc)}</p>', signed_in=True, status=exc.status)
     except sqlite3.Error:
         response = page("Реестр недоступен", "<p>Повторите через несколько секунд.</p>", status=503)
     response.headers.update({
@@ -328,6 +413,8 @@ def create_app(site, stylesheet, asset_dir=None):
         web.post(link("logout"), site.logout), web.get(link("password"), site.change_password),
         web.post(link("password"), site.change_password), web.get(link("summary"), site.summary),
         web.get(PREFIX + r"contract/{id:\d+}", site.contract), web.get(link("health"), site.health),
+        web.get(PREFIX + r"contract/{id:\d+}/edit", site.edit),
+        web.post(PREFIX + r"contract/{id:\d+}/edit", site.edit),
     ])
 
     async def css(request):
@@ -353,10 +440,12 @@ def main():
     parser.add_argument("--username", required=True)
     parser.add_argument("--account-id", type=int, required=True)
     parser.add_argument("--seed", type=Path, required=True)
+    parser.add_argument("--operator", type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
-    site = AnalystSite(args.primary, args.state, args.origin, args.username, args.account_id)
+    operator = json.loads(args.operator.read_text(encoding="utf-8")) if args.operator else None
+    site = AnalystSite(args.primary, args.state, args.origin, args.username, args.account_id, operator)
     site.initialize(args.seed.read_text(encoding="ascii").strip())
     css = Path(__file__).with_name("analyst_web.css").read_bytes()
     web.run_app(create_app(site, css, Path(__file__).parent), host=args.host, port=args.port, access_log=None)

@@ -52,8 +52,8 @@ form { margin: 0; }
 .panel { display: grid; gap: 1rem; }
 .panel button { justify-self: start; }
 label { display: grid; gap: .35rem; }
-input, button { font: inherit; color: inherit; border: 1px solid var(--line); border-radius: 3px; }
-input { width: 100%; min-width: 0; padding: .5rem .65rem; background: var(--panel); }
+input, select, textarea, button { font: inherit; color: inherit; border: 1px solid var(--line); border-radius: 3px; }
+input, select, textarea { width: 100%; min-width: 0; padding: .5rem .65rem; background: var(--panel); }
 button { padding: .45rem .9rem; cursor: pointer; background: var(--accent); color: #fffaf2; }
 nav button { background: transparent; color: var(--accent); padding: .25rem .6rem; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
