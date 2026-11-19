@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld("crm", {
     const listener = (_: unknown, event: any) => {
       if (event?.type === 'queue' || event?.type === 'identity') callback({type: event.type});
       else if(event?.type==='live')callback({type:'live',dirty:event.dirty===true,connected:event.connected===true,
+        pending:event.pending===true,
         as_of:typeof event.as_of==='string'?event.as_of:undefined});
     };
     ipcRenderer.on('crm:changed', listener);
