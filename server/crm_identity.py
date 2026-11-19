@@ -1,5 +1,6 @@
 """Read-only CRM identity bridge through existing account/device gates."""
 import asyncio
+import os
 from aiohttp import web
 import db
 import accounts
@@ -64,7 +65,10 @@ def install(app, host):
         raise host._json_error(web.HTTPForbidden, 'crm_approved_phone_required')
 
     async def mobile_session(request):
-        if request.headers.get('X-Device-Token') or request.headers.get('X-App-Token') and request.headers.get('X-Pult-Token'):
+        if os.getenv('HARD_CRM_MOBILE') != '1':
+            raise host._json_error(web.HTTPForbidden, 'crm_mobile_disabled')
+        if (request.headers.get('X-Device-Token') or
+                (request.headers.get('X-App-Token') and request.headers.get('X-Pult-Token'))):
             raise host._json_error(web.HTTPUnauthorized, 'crm_identity_required')
         return web.json_response(await asyncio.to_thread(approved_phone, request),
                                  headers={'Cache-Control': 'no-store'})
