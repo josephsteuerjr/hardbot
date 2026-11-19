@@ -204,10 +204,10 @@ def read(principal, *, search='', view='mine', sort='contract_id', direction='as
         calls = defaultdict(set)
         if ids_on_page:
             placeholders = ','.join('?' for _ in ids_on_page)
-            for total in conn.execute('SELECT contract_uuid,month,amount,currency,source_column '
-                                      'FROM crm_monthly_totals WHERE contract_uuid IN (' + placeholders + ') ORDER BY month',
-                                      ids_on_page):
-                totals[total['contract_uuid']].append(total)
+            for monthly_total in conn.execute('SELECT contract_uuid,month,amount,currency,source_column '
+                                              'FROM crm_monthly_totals WHERE contract_uuid IN (' + placeholders + ') ORDER BY month',
+                                              ids_on_page):
+                totals[monthly_total['contract_uuid']].append(monthly_total)
             at = now()
             for row in conn.execute('SELECT a.contract_uuid,e.name FROM crm_effective_assignments a '
                                     "JOIN crm_employees e USING(employee_uuid) WHERE a.capability='call' "

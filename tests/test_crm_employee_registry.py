@@ -119,9 +119,15 @@ def test_registry_source_details_preserve_business_without_raw_blobs(crm_world):
 
 def test_registry_pagination_identity_sort_and_input_validation(crm_world):
     w=crm_world
+    with db.connect() as conn:
+        for cid in w['contracts']:
+            conn.execute('INSERT INTO crm_monthly_totals VALUES(?,?,?,?,?,?,?)',
+                         (cid, '2026-01', '120.50', 'RUB', 'Январь', now(), '0'*64))
+        conn.commit()
     page=registry.read(w['member'],limit=1)
     assert page['total']==2 and page['has_more'] and len(page['rows'])==1
     second=registry.read(w['member'],offset=1,limit=1)
+    assert second['total']==2 and not second['has_more']
     assert page['rows'][0]['contract_uuid']!=second['rows'][0]['contract_uuid']
     assert registry.read(w['member'],search='not present')['rows']==[]
     assert len(registry.read(w['member'],ids=w['contracts'][1])['rows'])==1
