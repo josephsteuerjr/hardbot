@@ -15,10 +15,24 @@ def review_cutover(ids):
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('action',choices=['migrate','plan','activate','status','logistics-staff'])
+    parser=argparse.ArgumentParser();parser.add_argument('action',choices=['migrate','plan','activate','status','logistics-staff','contact-status'])
     parser.add_argument('--contracts',type=Path);parser.add_argument('--expected-sha256')
     parser.add_argument('--roster',type=Path)
+    parser.add_argument('--evidence',type=Path)
     args=parser.parse_args()
+    if args.action=='contact-status':
+        from crm import withdrawals
+        if not args.evidence:
+            parser.error('contact-status requires --evidence')
+        evidence=json.loads(args.evidence.read_text(encoding='utf-8-sig'))
+        apply=args.expected_sha256 is not None
+        if apply and digest(evidence)!=args.expected_sha256:
+            raise ValueError('The reviewed evidence digest must match')
+        with storage.connect(readonly=not apply) as conn:
+            if apply:
+                storage.begin(conn)
+            result=withdrawals.apply_confirmed(conn,evidence,apply=apply)
+        print(canonical(result));return
     if args.action=='logistics-staff':
         from crm import logistics
         if not args.roster:

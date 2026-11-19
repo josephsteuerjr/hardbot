@@ -18,7 +18,8 @@ def grants(conn, principal):
         result.update((cid, {'delivery'}) for cid in logistics.for_employee(conn, principal.employee_uuid, 'delivery'))
     for row in conn.execute(
         "SELECT x.entity_id,x.contract_uuid,x.data_json,e.role,e.employee_uuid FROM crm_entities x "
-        "JOIN crm_events e ON e.event_id=x.event_id WHERE x.kind='task' AND x.status='open'"):
+        "JOIN crm_events e ON e.event_id=x.event_id WHERE x.kind='task' AND x.status='open' "
+        "AND NOT EXISTS(SELECT 1 FROM crm_contact_withdrawals w WHERE w.contract_uuid=x.contract_uuid)"):
         data = json.loads(row['data_json'])
         if (row['role'] not in {'manager', 'owner'} or not data.get('assignment_grant')
                 or data.get('assignee_uuid') not in principal.employee_scope):
@@ -117,7 +118,9 @@ def overview(principal, *, status='open', employee=None, work='all', search='', 
         rows=[];counts=Counter(all=0,open=0,today=0,overdue=0,done=0)
         for source in conn.execute("SELECT x.*,e.employee_uuid AS source_employee,c.person_uuid,c.external_id,c.creditor_id,c.fields_json,p.name AS client "
                 "FROM crm_entities x JOIN crm_events e ON e.event_id=x.event_id JOIN crm_contracts c USING(contract_uuid) "
-                "JOIN crm_people p USING(person_uuid) WHERE x.kind='task'"):
+                "JOIN crm_people p USING(person_uuid) WHERE x.kind='task' "
+                "AND (x.status<>'open' OR NOT EXISTS("
+                "SELECT 1 FROM crm_contact_withdrawals w WHERE w.contract_uuid=x.contract_uuid))"):
             row=dict(source);data=json.loads(row['data_json']);assigned=data.get('assignee_uuid') or row['source_employee']
             if allowed is not None and assigned not in allowed:continue
             if readable is not None and row['contract_uuid'] not in readable:continue

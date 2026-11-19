@@ -15,6 +15,8 @@ GRANT USAGE ON SEQUENCE crm_assignment_changes_sequence_seq TO crm_app;
 GRANT SELECT ON crm_logistics_staff,crm_logistics_cases,crm_logistics_calls TO crm_app;
 GRANT INSERT, UPDATE ON crm_logistics_cases TO crm_app;
 GRANT INSERT ON crm_logistics_calls TO crm_app;
+GRANT SELECT ON crm_contact_status,crm_contact_withdrawals TO crm_app;
+GRANT SELECT ON crm_contact_withdrawals TO crm_exchange;
 
 -- The existing exchange role must advance each accepted source baseline and
 -- reconcile an assignment within the same transaction as its audit record.

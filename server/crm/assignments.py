@@ -320,6 +320,9 @@ def _validate(conn, principal, frozen):
     ids=sorted({s['contract_uuid'] for s in slots});permitted=set();current={}
     from .primary_fence import require_contracts
     require_contracts(conn,ids)
+    if target:
+        from . import withdrawals
+        withdrawals.require_contactable(conn, ids)
     for start in range(0,len(ids),200):
         batch=ids[start:start+200]
         permitted.update(allowed_slots(conn,principal,batch));current.update(states(conn,batch))
@@ -526,7 +529,8 @@ def _changes(conn, principal, cursor, previous_scope=''):
         [dict(r) for r in conn.execute('SELECT team_id,capability FROM crm_distribution_managers WHERE employee_uuid=? ORDER BY team_id,capability',
                                       (principal.employee_uuid,))],
         [dict(r) for r in conn.execute('SELECT country,work FROM crm_logistics_staff WHERE employee_uuid=? ORDER BY country,work',
-                                      (principal.employee_uuid,))]])
+                                      (principal.employee_uuid,))],
+        conn.execute('SELECT MAX(recorded_at) FROM crm_contact_status').fetchone()[0]])
     new_cursor=dict(end,scope=current_scope)
     if previous_scope and previous_scope!=current_scope:
         return dict(cursor=new_cursor,resync=True,dirty=True,as_of=now())

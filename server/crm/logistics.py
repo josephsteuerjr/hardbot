@@ -428,6 +428,7 @@ def for_employee(conn, employee, work):
         'SELECT c.contract_uuid,c.phone,c.revision,c.country,c.call_status FROM crm_logistics_cases c '
         'JOIN crm_logistics_staff s ON s.country=c.country AND s.employee_uuid=c.' + column
         + " WHERE c.active=1 AND s.work=? AND s.employee_uuid=? "
+        "AND NOT EXISTS(SELECT 1 FROM crm_contact_withdrawals w WHERE w.contract_uuid=c.contract_uuid) "
         "AND EXISTS(SELECT 1 FROM crm_meta WHERE key='distribution_mode' AND value IN ('isolated','cutover'))",
         (work, employee))}
 
@@ -519,6 +520,8 @@ def record_call(principal, body):
         if prior is not None:
             return prior
         require_ready(conn)
+        from . import withdrawals
+        withdrawals.require_contactable(conn, [cid])
         row = for_employee(conn, p.employee_uuid, 'call').get(cid)
         if not row or row['revision'] != body['revision']:
             raise CRMError('Курьерское назначение изменилось.', 'scope_changed', 409)

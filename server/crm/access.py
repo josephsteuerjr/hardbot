@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 import json
 
 from .contract import CRMError, now
+from . import withdrawals
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,8 @@ def readable_contracts(conn, principal):
         result.update(r[0] for r in conn.execute('SELECT DISTINCT mc.contract_uuid FROM crm_managed_contracts mc '
             'JOIN crm_distribution_managers dm ON dm.team_id=mc.team_id AND dm.capability=mc.capability WHERE dm.employee_uuid=?',
             (principal.employee_uuid,)))
+    if principal.role in {'employee', 'courier'}:
+        result.difference_update(withdrawals.blocked(conn, result))
     return result
 
 
@@ -115,6 +118,8 @@ def writable_actions(conn, principal, contract_id, *, scope=None, direct_scope=N
         from . import tasks
         if delegated is None:delegated=tasks.grants(conn, principal)
         capabilities -= {'call', 'visit'} - assigned - delegated.get(contract_id, set())
+    if capabilities & (withdrawals.CONTACT_ACTIONS | {'task'}) and withdrawals.blocked(conn, [contract_id]):
+        capabilities -= withdrawals.CONTACT_ACTIONS | {'task'}
     return sorted(capabilities & {'call', 'visit', 'note', 'contact', 'promise', 'task',
                                   'reported_payment', 'document', 'accounting', 'correct', 'delivery'})
 
@@ -140,6 +145,8 @@ def contracts(conn, principal, requested, *, capability=None):
         )
     if capability:
         require(principal, capability)
+        if capability in withdrawals.CONTACT_ACTIONS:
+            withdrawals.require_contactable(conn, requested)
         from .primary_fence import require_contracts
         require_contracts(conn, requested)
         if not principal.owner and not principal.all_contracts:

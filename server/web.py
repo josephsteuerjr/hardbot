@@ -1433,8 +1433,9 @@ async def _route(request: web.Request) -> web.Response:
     if point is None:
         raise web.HTTPBadRequest(text="lat/lon")
     lat, lon = point
-    row = db.get_client(rep)
-    if not row or (row["responsible"] != emp and uid != ADMIN_ID):
+    rows = await asyncio.to_thread(db.person_contracts, rep)
+    row = next((contact for contact in rows if contact["contract_id"] == rep), None)
+    if row is None or (row["responsible"] != emp and uid != ADMIN_ID):
         raise web.HTTPNotFound(text="person")
     glat, glon = row["geo_lat"], row["geo_lon"]
     if glat is None or glon is None:

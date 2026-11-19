@@ -3,7 +3,7 @@ from collections import Counter,defaultdict
 from dataclasses import replace
 from decimal import Decimal
 import json
-from . import access, logistics, storage, tasks
+from . import access, logistics, storage, tasks, withdrawals
 from .contract import CRMError,currency,money,now
 from .roles import ROLE_CAPABILITIES
 
@@ -41,7 +41,8 @@ def read(principal, search='', work='all', employee=None, offset=0, limit=100):
             kinds[cid].add('logistics')
         for cid in courier_deliveries:
             kinds[cid].add('delivery')
-        ids=sorted(cid for cid,work_kinds in kinds.items() if work_kinds)
+        blocked = withdrawals.blocked(conn, kinds)
+        ids=sorted(cid for cid,work_kinds in kinds.items() if work_kinds and cid not in blocked)
         rows=[]
         for start in range(0,len(ids),400):
             batch=ids[start:start+400]

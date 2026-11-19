@@ -4979,6 +4979,20 @@ def _group_persons(rows: list[sqlite3.Row]) -> list[dict]:
     return persons
 
 
+def _contactable_legacy_rows(rows, representative=None):
+    if not rows or not os.environ.get("HARD_REGISTRY_DATABASE_URL_FILE"):
+        return rows
+    ids = [row["contract_id"] for row in rows]
+    with registry_connect(readonly=True) as conn:
+        blocked = {row[0] for row in conn.execute(
+            "SELECT c.legacy_id FROM public.crm_contact_withdrawals w "
+            "JOIN public.crm_contracts c USING(contract_uuid) "
+            "WHERE c.legacy_id=ANY(?)", (ids,))}
+    if representative in blocked:
+        return []
+    return [row for row in rows if row["contract_id"] not in blocked]
+
+
 def clients_for_employee(employee: str) -> list[sqlite3.Row]:
     lo, hi = _period_bounds()
     with connect() as conn:
@@ -4986,6 +5000,7 @@ def clients_for_employee(employee: str) -> list[sqlite3.Row]:
             "SELECT * FROM clients WHERE responsible = ? ORDER BY client, contract_id",
             (employee,),
         ).fetchall()
+    rows = _contactable_legacy_rows(rows)
     if lo is None and hi is None:
         return rows
     return [r for r in rows if _date_in(r["assign_date"], lo, hi)]   # период по дате закрепления
@@ -4998,11 +5013,12 @@ def persons_for_employee(employee: str) -> list[dict]:
 # --- Контур «Софт»: портфель по второй колонке ответственности ---------------
 def clients_for_soft(employee: str) -> list[sqlite3.Row]:
     with connect() as conn:
-        return conn.execute(
+        rows = conn.execute(
             "SELECT * FROM clients WHERE responsible_soft = ? "
             "ORDER BY client, contract_id",
             (employee,),
         ).fetchall()
+    return _contactable_legacy_rows(rows)
 
 
 def persons_for_soft(employee: str) -> list[dict]:
@@ -5148,7 +5164,7 @@ def person_contracts(rep_contract_id: str) -> list[sqlite3.Row]:
     # Фильтруем ТЕМ ЖЕ ключом, что и группировка: иначе SQL и _group_persons
     # разойдутся, и визит разнесётся по договорам, которых карточка не показывает.
     key = person_key(row)
-    return [c for c in candidates if person_key(c) == key]
+    return _contactable_legacy_rows([c for c in candidates if person_key(c) == key], rep_contract_id)
 
 
 def search_persons(employee: str, query: str) -> list[dict]:
@@ -5162,16 +5178,17 @@ def search_persons(employee: str, query: str) -> list[dict]:
     lo, hi = _period_bounds()
     if lo or hi:
         rows = [r for r in rows if _date_in(r["assign_date"], lo, hi)]
-    return _group_persons(rows)
+    return _group_persons(_contactable_legacy_rows(rows))
 
 
 def plans_for_employee(employee: str) -> list[sqlite3.Row]:
     with connect() as conn:
-        return conn.execute(
+        rows = conn.execute(
             "SELECT * FROM clients WHERE responsible = ? AND reminder_date IS NOT NULL "
             "ORDER BY reminder_date",
             (employee,),
         ).fetchall()
+    return _contactable_legacy_rows(rows)
 
 
 def person_contracts_by_soft(rep_contract_id: str) -> list[sqlite3.Row]:
@@ -5190,7 +5207,7 @@ def person_contracts_by_soft(rep_contract_id: str) -> list[sqlite3.Row]:
             (row["client"], row["responsible_soft"]),
         ).fetchall()
     key = person_key(row)
-    return [c for c in candidates if person_key(c) == key]
+    return _contactable_legacy_rows([c for c in candidates if person_key(c) == key], rep_contract_id)
 
 
 def update_person(rep_contract_id: str, values: dict, *,

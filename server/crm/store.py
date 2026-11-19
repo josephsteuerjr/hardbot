@@ -334,7 +334,8 @@ def command(principal, body, *, origin="app", client_version=None):
                 .isoformat(),
             }
         if target == 'task':
-            from . import tasks
+            from . import tasks, withdrawals
+            withdrawals.require_contactable(conn, [rows[0]['contract_uuid']])
             tasks.prepare(conn, principal, payload)
         if target == "document":
             attachment = conn.execute(
