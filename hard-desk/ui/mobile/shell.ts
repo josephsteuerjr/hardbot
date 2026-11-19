@@ -1,6 +1,7 @@
 import {mobileUpdates} from './updates';
 const paths:Record<string,string>={portfolio:'M4 6h16v14H4z M8 6V3h8v3 M4 11h16',registry:'M5 3h14v18H5z M9 8h6 M9 12h6 M9 16h4',statistics:'M4 19h16 M7 15V9 M12 15V4 M17 15v-7',team:'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M15 4a4 4 0 0 1 0 8 M22 21v-2a4 4 0 0 0-3-3.87 M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0',exchange:'M4 7h15l-4-4 M20 17H5l4 4 M19 7l-4 4 M5 17l4-4',connection:'M8 5h8v14H8z M11 16h2',tasks:'M9 5h11 M9 12h11 M9 19h11 M3 5h1 M3 12h1 M3 19h1',script:'M5 4h14v16H5z M8 8h8 M8 12h8 M8 16h4','active-time':'M12 8v5l3 2 M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',queue:'M4 12h5l3 4 3-4h5 M6 4h12l3 8v8H3v-8z'};
 paths.cabinet=paths.statistics;paths['manager-statistics']=paths.statistics;
+paths.operator='M4 4h16v6H4z M4 14h16v6H4z M7 7h1 M7 17h1';
 const icon=(id:string)=>`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[id]||'M5 7h14 M5 12h14 M5 17h14'}"/></svg>`;
 export function mobileShell(){
  document.body.classList.add('mobile-crm');

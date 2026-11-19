@@ -4,7 +4,7 @@
 .mobile-crm [hidden]{display:none!important}
 .card-registry-data dd{white-space:pre-wrap;overflow-wrap:anywhere}
 .mobile-crm #navigation svg,.mobile-menu svg{width:23px;height:23px;fill:none;stroke:currentColor;stroke-width:1.55;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
-.mobile-crm #navigation button{display:flex;align-items:center;gap:12px}.mobile-crm #mobile-more{display:none}
+.mobile-crm #navigation button{display:flex;align-items:center;gap:12px}.mobile-crm #navigation #mobile-more{display:none}
 .mobile-menu{padding:24px;max-width:440px}.mobile-menu h2{font:32px var(--hand);margin:0 0 20px}.mobile-menu>button{display:flex;align-items:center;gap:16px;width:100%;border:0;border-bottom:1px solid var(--line);padding:16px 0;text-align:left}.mobile-menu>button span:last-child{margin-left:auto;color:var(--accent)}.mobile-menu .mobile-menu-close{justify-content:center;border:1px solid var(--line);margin-top:24px}
 .mobile-crm .mobile-registry-tools{display:block}.mobile-save-strip[hidden]{display:none!important}.mobile-save-strip{display:flex;justify-content:flex-end;padding:8px 0}
 .mobile-connection{max-width:560px;margin:auto}.mobile-login{display:grid;gap:22px;padding:24px 0}.mobile-login h2{font:30px var(--hand);margin:0 0 6px}.mobile-login label{display:grid;gap:8px;color:var(--ink-2)}.mobile-login input,.mobile-login button{height:52px}
