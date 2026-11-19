@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import yaml from 'js-yaml';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { includesBackend, products, releaseUrl, stableProducts, usesCrm } from './products.mjs';
+import { includesBackend, productReleaseUrl, products, stableProducts, usesCrm } from './products.mjs';
 import { auditRuntimeDependencies } from './runtime-dependencies.mjs';
 const here = join(dirname(fileURLToPath(import.meta.url)), '..');
 const qa = !!process.env.HARD_SETUP_QA_BUILD;
@@ -35,7 +35,7 @@ for (const id of (selected.length ? selected : stableProducts)) {
         installerLanguages: ['ru_RU'], language: '1049', createDesktopShortcut: 'always', createStartMenuShortcut: true,
         shortcutName: p.name+(qa?' — проверка':''), uninstallDisplayName: p.name+(qa?' — проверка':''), deleteAppDataOnUninstall: false, include: 'installer/brand.nsh',
         runAfterFinish: false, differentialPackage: false },
-      publish: { provider: 'generic', url: id==='crm'?'https://invalid.local/crm-pilot-unpublished/':releaseUrl, channel: id, useMultipleRangeRequest: false },
+      publish: { provider: 'generic', url: productReleaseUrl(id), channel: id, useMultipleRangeRequest: false },
     }, publish: 'never' });
   console.log('Packaged runtime audited:', id, auditRuntimeDependencies(join(here,qa?'setup-qa':'installers',id,'win-unpacked/resources/app.asar')));
   // Builder also emits latest.yml for compatibility; only the product channel is distributable.

@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { includesBackend, productDefines, products, releaseUrl, stableProducts, usesCrm } from './products.mjs';
+import { includesBackend, productDefines, productReleaseUrl, products, stableProducts, usesCrm } from './products.mjs';
 import yaml from 'js-yaml';
 const here = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args=process.argv.slice(2);
@@ -94,8 +94,8 @@ for (const id of selectedProducts) {
   const pkg = JSON.parse(extractFile(packed, 'package.json').toString());
   if (pkg.name !== `hard-${id}` || pkg.version !== version) throw new Error('Wrong product identity in ' + id);
   const feed=yaml.load(readFileSync(join(unpacked,'resources/app-update.yml'),'utf8'));
-  if(feed.provider!=='generic' || feed.url!==(id==='crm'?'https://invalid.local/crm-pilot-unpublished/':releaseUrl) || feed.channel!==id)
-    throw new Error('Wrong embedded GitHub update channel in '+id);
+  if(feed.provider!=='generic' || feed.url!==productReleaseUrl(id) || feed.channel!==id)
+    throw new Error('Wrong embedded update channel in '+id);
   if(includesBackend(id)){
     const payload=join(unpacked,'resources/backend/_internal/project');
     if(!existsSync(payload)) throw new Error('Missing analyst source payload');

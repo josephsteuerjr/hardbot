@@ -20,6 +20,7 @@ const sha512 = crypto.createHash('sha512').update(bytes).digest('base64');
 let mode = 'valid', downloads = 0, installs = 0;
 const results = [];
 app.whenReady().then(async () => {
+  const {productDefines} = await import('./products.mjs');
   const server = http.createServer((req,res) => {
     const product = req.url.split('/')[1].split(/[.-]/)[0];
     const version = mode === 'downgrade' ? '3.0.0' : mode === 'current' ? '3.0.1' : '3.0.2';
@@ -41,6 +42,9 @@ app.whenReady().then(async () => {
   const url = `http://127.0.0.1:${server.address().port}/`;
   try {
     for(const product of ['hard','soft','manager','analyst']) {
+      const serverAnalyst = product==='analyst' && process.env.HARD_ANALYST_SERVER_CHANNEL==='1';
+      const origin = serverAnalyst ? 'https://hard.rimborso.ru/updates/cis-collection-analyst/'
+        : 'https://github.com/josephsteuerjr/hard-desktop-releases/releases/latest/download/';
       const data = path.join(dir,product+'-'+Date.now()); fs.mkdirSync(data);
       const config = path.join(data,'app-update.yml');
       fs.writeFileSync(config,`provider: generic\nurl: ${url}\nchannel: ${product}\nupdaterCacheDirName: flow-${product}-${Date.now()}\n`);
@@ -50,7 +54,7 @@ app.whenReady().then(async () => {
       class IsolatedUpdater extends NsisUpdater {
         constructor(options){
           assert.equal(options.channel,product);
-          assert.equal(options.url,'https://github.com/josephsteuerjr/hard-desktop-releases/releases/latest/download/');
+          assert.equal(options.url,origin);
           super(null,adapter);
           this.httpExecutor = new ElectronHttpExecutor();
           this.setFeedURL({...options,url});
@@ -60,15 +64,14 @@ app.whenReady().then(async () => {
       }
       const code = (await build({entryPoints:[path.join(__dirname,'../src/main/updates.ts')],
         bundle:true,platform:'node',format:'cjs',write:false,external:['electron','electron-updater'],
-        define:{__HARD_PRODUCT__:JSON.stringify(product)},plugins:[{name:'test-key',setup(build){
+        define:productDefines(product),plugins:[{name:'test-key',setup(build){
           build.onLoad({filter:/release-public-key\.json$/},()=>({contents:JSON.stringify({pem:publicKey}),loader:'json'}));
         }}]})).outputFiles[0].text;
       const module = {exports:{}};
       vm.runInNewContext(code,{module,exports:module.exports,Buffer,AbortSignal,
         setTimeout:()=>({unref(){}}),setInterval:()=>({unref(){}}),require(name){
           if(name==='electron')return {app:{isPackaged:true},net:{fetch(feed,options){
-            const prefix='https://github.com/josephsteuerjr/hard-desktop-releases/releases/latest/download/';
-            assert.equal(feed,prefix+product+'-signed.json');
+            assert.equal(feed,origin+product+'-signed.json');
             return net.fetch(url+product+'-signed.json',options);
           }}};
           if(name==='electron-updater')return {NsisUpdater:IsolatedUpdater};
@@ -95,7 +98,7 @@ app.whenReady().then(async () => {
       assert.equal((await flow.checkUpdates()).phase,'ready');assert.equal(downloads,before+2);
       const install = await flow.installUpdate(async()=>true,()=>{beforeInstall=true;});
       assert.equal(install.ok,true);assert.equal(beforeInstall,true);
-      results.push({product,productionFeed:true,signature:true,channel:true,noDowngrade:true,
+      results.push({product,origin,signature:true,channel:true,noDowngrade:true,
         automaticDownload:true,unsavedOrBusyBlocked:true,preInstallChecksum:true,cacheRecovery:true});
     }
     assert.equal(installs,4);
