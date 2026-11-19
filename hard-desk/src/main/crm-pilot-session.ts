@@ -8,16 +8,20 @@ import { fetchBuffered } from './transport';
 type PilotSession = { token: string; expires_at: number; employee_uuid: string; name: string; fingerprint: string; source?: EntrySource };
 const exchanging = new Map<EntrySource, Promise<PilotSession>>();
 const path = () => join(app.getPath('userData'), 'crm-shared-session.bin');
+let decoded: {file: string; bytes: Buffer; session: PilotSession} | undefined;
 
 function saved(): PilotSession | null {
   try {
-    const bytes = readFileSync(path());
+    const file = path(), bytes = readFileSync(file);
+    if (decoded?.file === file && decoded.bytes.equals(bytes)) return decoded.session;
+    decoded = undefined;
     if (bytes.length > 32768) return null;
     const value = JSON.parse(directOpen(bytes));
     if (!/^crm1\.[A-Za-z0-9_-]+$/.test(value.token) || !Number.isSafeInteger(value.expires_at) ||
         !/^[a-f0-9-]{36}$/.test(value.employee_uuid) || !/^[a-f0-9]{64}$/.test(value.fingerprint)) return null;
+    decoded = {file, bytes, session: value};
     return value;
-  } catch { return null; }
+  } catch { decoded = undefined; return null; }
 }
 
 async function exchange(entry: EntrySource): Promise<PilotSession> {
@@ -54,8 +58,10 @@ export async function pilotCredential(expectedEmployee?: string, force = false, 
     throw Object.assign(new Error('В Руководителе вошёл другой пользователь. Подключите его явно; прежняя очередь сохранена.'), {status: 409});
   }
   if (changed) {
-    writeFileSync(path() + '.tmp', directSeal(JSON.stringify(session)), {flush: true});
-    renameSync(path() + '.tmp', path());
+    const file = path(), bytes = directSeal(JSON.stringify(session));
+    writeFileSync(file + '.tmp', bytes, {flush: true});
+    renameSync(file + '.tmp', file);
+    decoded = {file, bytes, session};
   }
   return session.token;
 }

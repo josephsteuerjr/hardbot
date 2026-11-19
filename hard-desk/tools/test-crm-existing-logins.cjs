@@ -97,6 +97,29 @@ check('Entry discovery exposes only labels and availability',()=>{
   await assert.rejects(()=>sessions.pilotCredential(undefined,true,'analyst'));
   assert.equal(hash(sessionFile),savedHash);
   checks.push('Failed reconnect preserves protected session');
+  check('Active checkpoints stay encrypted and recover after restart without a helper per write',()=>{
+    const children=require('node:child_process');
+    const native=children.execFileSync, queue=load('crm-queue');
+    const owner='synthetic-active-checkpoint', value={end_ms:2000};
+    const name='draft-'+crypto.createHash('sha256').update(owner+'\nactive-open').digest('hex')+'.bin';
+    const target=path.join(qa,'crm',name);
+    const calls=[];
+    children.execFileSync=(file,args,...options)=>{
+      if(path.basename(file)==='process-check.exe')calls.push(args[0]);
+      return native(file,args,...options);
+    };
+    try {
+      assert.deepEqual(queue.draft(owner,'active-open',value),value);
+      const first=hash(target);
+      assert.deepEqual(queue.draft(owner,'active-open',value),value);
+      assert.notEqual(hash(target),first);
+      assert.deepEqual(calls,['seal']);
+      assert.deepEqual(load('crm-queue').draft(owner,'active-open'),value);
+      assert.deepEqual(calls,['seal','unseal']);
+      fs.writeFileSync(target,Buffer.from('CRM-DPAPI-1\ncorrupt'));
+      assert.throws(()=>queue.draft(owner,'active-open'),/Windows/);
+    }finally{children.execFileSync=native;}
+  });
   const result={passed:checks.length,checks,realWindowsDPAPI:true,productionRequests:0};
   fs.writeFileSync(path.join(qa,'RESULT.json'),JSON.stringify(result,null,2));
   console.log(JSON.stringify(result));

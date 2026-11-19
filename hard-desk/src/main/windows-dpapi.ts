@@ -6,6 +6,7 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 const HEADER = Buffer.from("CRM-DPAPI-1\n");
 const ENVELOPE = Buffer.from("CRM-DPAPI-AES-1\n");
 const MAX_BYTES = 256 * 1024 * 1024;
+let checkpointKey: { key: Buffer; wrapped: Buffer } | undefined;
 function transform(mode: "seal" | "unseal", bytes: Buffer): Buffer {
   const packaged = join(process.resourcesPath, "process-check.exe");
   const helper = existsSync(packaged)
@@ -24,22 +25,38 @@ function transform(mode: "seal" | "unseal", bytes: Buffer): Buffer {
     );
   }
 }
-export function directSeal(text: string): Buffer {
+function checkedBytes(text: string): Buffer {
   const bytes = Buffer.from(text, "utf8");
   if (bytes.length > MAX_BYTES) throw new Error("Защищённый файл слишком большой. Исходный файл сохранён.");
+  return bytes;
+}
+function sealEnvelope(bytes: Buffer, key: Buffer, wrapped: Buffer): Buffer {
+  const nonce = randomBytes(12), length = Buffer.alloc(4);
+  length.writeUInt32BE(wrapped.length);
+  const prefix = Buffer.concat([ENVELOPE, length, wrapped, nonce]);
+  const cipher = createCipheriv("aes-256-gcm", key, nonce);
+  cipher.setAAD(prefix);
+  return Buffer.concat([prefix, cipher.update(bytes), cipher.final(), cipher.getAuthTag()]);
+}
+export function directSeal(text: string): Buffer {
+  const bytes = checkedBytes(text);
   if (bytes.length <= 8 * 1024 * 1024)
     return Buffer.concat([HEADER, transform("seal", bytes)]);
   // The random key is wrapped by this Windows user and stored in the SAME
   // atomically replaced file. No external first-run key can be lost on a crash.
-  const key = randomBytes(32), nonce = randomBytes(12);
-  try {
-    const wrapped = transform("seal", key), length = Buffer.alloc(4);
-    length.writeUInt32BE(wrapped.length);
-    const prefix = Buffer.concat([ENVELOPE, length, wrapped, nonce]);
-    const cipher = createCipheriv("aes-256-gcm", key, nonce);
-    cipher.setAAD(prefix);
-    return Buffer.concat([prefix, cipher.update(bytes), cipher.final(), cipher.getAuthTag()]);
-  } finally { key.fill(0); }
+  const key = randomBytes(32);
+  try { return sealEnvelope(bytes, key, transform("seal", key)); }
+  finally { key.fill(0); }
+}
+/** Each checkpoint includes the Windows-wrapped key and can be opened after a restart. */
+export function directSealCheckpoint(text: string): Buffer {
+  const bytes = checkedBytes(text);
+  if (!checkpointKey) {
+    const key = randomBytes(32);
+    try { checkpointKey = { key, wrapped: transform("seal", key) }; }
+    catch (error) { key.fill(0); throw error; }
+  }
+  return sealEnvelope(bytes, checkpointKey.key, checkpointKey.wrapped);
 }
 export function isDirect(bytes: Buffer): boolean {
   return bytes.subarray(0, HEADER.length).equals(HEADER) || bytes.subarray(0, ENVELOPE.length).equals(ENVELOPE);

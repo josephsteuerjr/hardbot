@@ -60,9 +60,19 @@ let currentContext: any = null,
   clock: any = null;
 const sessionId = randomUUID();
 const diagnosticEvents:any[]=[];
+let lastRecordedApiSuccess = -Infinity;
 function diagnostic(stage:string,code:string,ok:boolean,extra:Record<string,number>={}){
   const row={at:new Date().toISOString(),stage,code,ok,version:app.getVersion(),...extra};
   diagnosticEvents.push(row);if(diagnosticEvents.length>200)diagnosticEvents.shift();
+  if (stage === 'api') {
+    const now = performance.now();
+    if (ok && code === 'confirmed') {
+      if (now - lastRecordedApiSuccess < 60_000) return;
+      lastRecordedApiSuccess = now;
+    } else {
+      lastRecordedApiSuccess = -Infinity;
+    }
+  }
   try{writeFileSync(join(data,'crm-diagnostics.json'),JSON.stringify(diagnosticEvents),{flush:true});}catch{/* Diagnostic failure must not destroy business work. */}
 }
 let helperRepair:Promise<void>|null=null,helperAttempts:number[]=[],rendererReady=false,lastConfirmedAt:string|null=null;
@@ -463,10 +473,16 @@ async function recoverExports() {
   const authority = owner;
   try {
     const jobs = queue.draft(authority, "exports") || [];
+    let errorsChanged = false;
+    const recordError = (job: any, message: string | undefined) => {
+      if (job.error === message) return;
+      job.error = message;
+      errorsChanged = true;
+    };
     for (const job of jobs.filter((v: any) => !v.completed)) {
       if (owner !== authority) return;
       if (!existsSync(job.path)) {
-        job.error = "Файл выгрузки не найден. Исходный запрос сохранён.";
+        recordError(job, "Файл выгрузки не найден. Исходный запрос сохранён.");
         continue;
       }
       const result = await local("workbook-resume", {
@@ -474,7 +490,7 @@ async function recoverExports() {
         path: job.path,
       });
       if (!result.ok) {
-        job.error = result.text;
+        recordError(job, result.text);
         continue;
       }
       const cells = job.snapshot.rows.flatMap((row: any) =>
@@ -508,8 +524,9 @@ async function recoverExports() {
       delete job.snapshot;
       delete job.error;
       queue.draft(authority, "exports", jobs);
+      errorsChanged = false;
     }
-    queue.draft(authority, "exports", jobs);
+    if (errorsChanged) queue.draft(authority, "exports", jobs);
   } finally {
     exportRecovery = false;
   }

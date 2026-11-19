@@ -9,7 +9,7 @@ import {
   copyFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { directSeal, directOpen, isDirect } from "./windows-dpapi";
+import { directSeal, directSealCheckpoint, directOpen, isDirect } from "./windows-dpapi";
 
 export interface Result {
   ok: boolean;
@@ -40,22 +40,40 @@ type Technical = { events: any[]; dropped: number; gap_since?: string };
 const digest = (v: string) => createHash("sha256").update(v).digest("hex");
 const path = (name: string) =>
   join(app.getPath("userData"), "crm", name + ".bin");
+const recentlyDecoded = new Map<string, { bytes: Buffer; json: string }>();
+function remember(target: string, bytes: Buffer, json: string) {
+  recentlyDecoded.delete(target);
+  if (bytes.length > 64 * 1024) return;
+  recentlyDecoded.set(target, { bytes, json });
+  if (recentlyDecoded.size > 16)
+    recentlyDecoded.delete(recentlyDecoded.keys().next().value!);
+}
 function read<T>(name: string, fallback: () => T): T {
   const target = path(name);
-  if (!existsSync(target)) return fallback();
+  if (!existsSync(target)) {
+    recentlyDecoded.delete(target);
+    return fallback();
+  }
   // A damaged or inaccessible protected queue is an error, never an empty queue.
   const bytes = readFileSync(target);
-  return JSON.parse(
-    isDirect(bytes) ? directOpen(bytes) : safeStorage.decryptString(bytes),
-  );
+  const previous = recentlyDecoded.get(target);
+  if (previous?.bytes.equals(bytes)) return JSON.parse(previous.json);
+  recentlyDecoded.delete(target);
+  const json = isDirect(bytes) ? directOpen(bytes) : safeStorage.decryptString(bytes);
+  const value = JSON.parse(json);
+  remember(target, bytes, json);
+  return value;
 }
-function write(name: string, value: any) {
+function write(name: string, value: any, seal = directSeal) {
   mkdirSync(join(app.getPath("userData"), "crm"), { recursive: true });
   const target = path(name);
-  writeFileSync(target + ".tmp", directSeal(JSON.stringify(value)), {
+  const json = JSON.stringify(value);
+  const bytes = seal(json);
+  writeFileSync(target + ".tmp", bytes, {
     flush: true,
   });
   renameSync(target + ".tmp", target);
+  remember(target, bytes, json);
 }
 let installationId:string|undefined;
 export function installation(): string {
@@ -312,6 +330,6 @@ export async function flushTechnical(
 
 export function draft(owner: string, key: string, value?: any): any {
   const name = "draft-" + digest(owner + "\n" + key);
-  if (value !== undefined) write(name, value);
+  if (value !== undefined) write(name, value, key === "active-open" ? directSealCheckpoint : directSeal);
   return read<any>(name, () => null);
 }
