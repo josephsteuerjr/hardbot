@@ -20,6 +20,15 @@ from .durable_jobs import Journal
 TERMINAL = {'done'}
 RETRY_SECONDS = 10
 
+EXCEL_RETRY_MESSAGE = 'Excel временно не ответил. Запись не начиналась; проверка будет повторена автоматически.'
+
+
+def excel_connection_error(message):
+    return any(code in message.lower() for code in (
+        'rpc', '-2146959355', '-2147023174', '-2147023170', '-2147417848',
+        'сервер приложения', 'сессия excel',
+    ))
+
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
@@ -299,13 +308,31 @@ class Service:
             if run['authority'] != self.owner():
                 raise ValueError('Вход изменился; автоматический перенос остановлен')
             inputs = self.store.inputs(run)
-            stack=ExitStack();native=[None]
+            stack = ExitStack()
+            native = None
+
+            def close_excel():
+                nonlocal native
+                native = None
+                try:
+                    stack.close()
+                except Exception as exc:
+                    if not excel_connection_error(str(exc)):
+                        raise
+
             def get_excel(report):
-                import enrich,xlwings as xw
-                if native[0] is not None:
-                    try:native[0].api.Workbooks.Count;return native[0]
-                    except Exception:stack.close();native[0]=None
-                enrich._co_init();native[0]=stack.enter_context(enrich.open_excel(xw,report));return native[0]
+                import enrich
+                import xlwings as xw
+                nonlocal native
+                if native is not None:
+                    try:
+                        native.api.Workbooks.Count
+                        return native
+                    except Exception:
+                        close_excel()
+                enrich._co_init()
+                native = stack.enter_context(enrich.open_excel(xw, report))
+                return native
             books = self.store.books(run['id'])
             for number, item in enumerate(books, 1):
                 if item['state'] in ('done','attention') or item.get('next_retry',0)>time.time():
@@ -323,6 +350,8 @@ class Service:
                 except Exception as exc:
                     if item.get('intent') or item.get('result'):
                         self._wait(run, item, 'Проверяется результат записи: '+str(exc))
+                    elif excel_connection_error(str(exc)):
+                        self._wait(run, item, EXCEL_RETRY_MESSAGE)
                     else:
                         self._attention(run, item, str(exc))
             say("Сохраняю итог прохода по книгам…")
@@ -332,7 +361,8 @@ class Service:
             return self.view(run)
         finally:
             try:
-                if 'stack' in locals():stack.close()
+                if 'stack' in locals():
+                    close_excel()
             finally:self.mutex.release()
 
     def _book(self, run, item, inputs, say,get_excel=None):
@@ -439,8 +469,8 @@ class Service:
             message=result['error']
             if item.get('intent'):
                 self._wait(run,item,'Проверяется результат записи: '+message)
-            elif any(code in message.lower() for code in ('rpc','-2146959355','-2147023174','-2147417848','сервер приложения','сессия excel')):
-                self._wait(run,item,'Excel временно не ответил. Запись не начиналась; проверка будет повторена автоматически.')
+            elif excel_connection_error(message):
+                self._wait(run,item,EXCEL_RETRY_MESSAGE)
             elif any(word in message.lower() for word in ('занят','откры','изменили','изменена','другом компьютере','sharing violation','zero-write')):
                 self._wait(run,item,message)
             else:self._attention(run,item,message)

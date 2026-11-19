@@ -98,3 +98,22 @@ def test_enrichment_progress_counts_all_approved_books_after_resume(backend, tmp
     assert result['completed'] == result['total'] == 3
     assert [line.split()[0] for line in lines if line.endswith('Проверка книги')] == ['[2/3]', '[3/3]']
     assert not any(line.startswith('[1/1]') for line in lines)
+
+
+
+def test_excel_start_disconnect_without_write_intent_leaves_book_for_retry(backend, tmp_path, monkeypatch):
+    engine, registry = backend
+    service = registry.delivery_service(engine._settings, lambda *a, **k: {})
+    path = tmp_path / 'book.xlsb'
+    path.write_bytes(b'synthetic')
+    run = service.prepare('excel-start-error', [{'employee': 'Synthetic', 'path': str(path), 'rows': []}],
+                          [], '01.11.2026', '01.11.2026', [])
+
+    def disconnected(*args):
+        raise RuntimeError("(-2147023174, 'Сервер RPC недоступен.', None, None)")
+
+    monkeypatch.setattr(service, '_book', disconnected)
+    status = service.process(run)
+    assert status['state'] == 'waiting'
+    assert 'Запись не начиналась' in status['books'][0]['message']
+    assert path.read_bytes() == b'synthetic'
