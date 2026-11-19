@@ -36,11 +36,21 @@ export async function mountManagerTeam(host:HTMLElement,crm:any,context:any,vali
   async function confirmAction(title:string,text:string,action:()=>Promise<any>,check?:string){
     const dialog=document.createElement('dialog');dialog.innerHTML=`<form><h2>${esc(title)}</h2><p>${esc(text)}</p>${check?`<label class="check"><input type="checkbox" required>${esc(check)}</label>`:''}<p role="status"></p><div class="actions"><button type="button">Отмена</button><button type="submit">Подтвердить</button></div></form>`;host.append(dialog);
     dialog.querySelector('button')!.onclick=()=>dialog.close();dialog.onclose=()=>dialog.remove();
-    dialog.querySelector('form')!.onsubmit=async e=>{e.preventDefault();const button=dialog.querySelector<HTMLButtonElement>('[type="submit"]')!;button.disabled=true;try{await action();dialog.close();await load();}catch(e){dialog.querySelector('[role="status"]')!.textContent=(e as Error).message;button.disabled=false;}};dialog.showModal();
+    dialog.querySelector('form')!.onsubmit=async e=>{
+      e.preventDefault();
+      const button=dialog.querySelector<HTMLButtonElement>('[type="submit"]')!;
+      button.disabled=true;
+      try{await action();}
+      catch(e){dialog.querySelector('[role="status"]')!.textContent=(e as Error).message;button.disabled=false;return;}
+      try{await load(true);}
+      catch(e){status((e as Error).message);}
+      finally{dialog.close();}
+    };dialog.showModal();
   }
   async function password(row:any){
     const key='manager-password-intent:'+row.account.username;
     let intent=(await crm.draft(key)).data;
+    if(!current())return;
     const dialog=document.createElement('dialog');dialog.innerHTML=`<form><h2>Сбросить пароль</h2><p>${esc(row.employee)} · ${esc(row.account.username)}</p><p>Входы будут закрыты. Сотрудник сменит временный пароль на личный, затем подтвердите его устройство.</p><label>Временный пароль <input name="password" type="password" autocomplete="new-password" minlength="8" required></label><label>Повторите пароль <input name="repeat" type="password" autocomplete="new-password" minlength="8" required></label><p role="status"></p><div class="actions"><button type="button">Закрыть</button><button type="submit">${intent?'Проверить исход операции':'Сбросить пароль'}</button></div></form>`;host.append(dialog);
     const inputs=[...dialog.querySelectorAll<HTMLInputElement>('input')];if(intent)inputs.forEach(i=>{i.value=intent.password;i.disabled=true;});
     dialog.querySelector('button')!.onclick=()=>dialog.close();dialog.onclose=()=>dialog.remove();
@@ -49,15 +59,18 @@ export async function mountManagerTeam(host:HTMLElement,crm:any,context:any,vali
       try{
         if(!intent){if(inputs[0].value!==inputs[1].value)throw Error('Пароли не совпадают.');intent={username:row.account.username,password:inputs[0].value,operation_id:crypto.randomUUID()};const saved=await crm.draft(key,intent);if(!saved.ok){intent=null;throw Error(crm.platform==='mobile'?'Не удалось защитить операцию на телефоне.':'Не удалось защитить операцию на компьютере.');}}
         inputs.forEach(i=>i.disabled=true);
-        await request('POST','reset',intent);await crm.draft(key,null);intent=null;dialog.close();await load();status('Временный пароль установлен. Передайте его сотруднику.');
+        await request('POST','reset',intent);await crm.draft(key,null);intent=null;
       }catch(e){
         if([400,409,422].includes((e as any).status)){await crm.draft(key,null);intent=null;inputs.forEach(i=>i.disabled=false);}
-        dialog.querySelector('[role="status"]')!.textContent=(e as Error).message;button.textContent=intent?'Проверить исход операции':'Сбросить пароль';button.disabled=false;
+        dialog.querySelector('[role="status"]')!.textContent=(e as Error).message;button.textContent=intent?'Проверить исход операции':'Сбросить пароль';button.disabled=false;return;
       }
+      try{await load(true);status('Временный пароль установлен. Передайте его сотруднику.');}
+      catch(e){status((e as Error).message);}
+      finally{dialog.close();}
     };dialog.showModal();
   }
-  async function load(){
-    if(busy)return;busy=true;const n=++generation;
+  async function load(force=false){
+    if(busy&&!force)return;busy=true;const n=++generation;
     try{
       const [teamResult,staffResult]=await Promise.allSettled([request('GET','team'),context.distribution?.enabled?crm.api('GET','assignment-staff'):Promise.resolve({ok:true,data:{staff:context.staff||[]}})]);
       if(!current()||n!==generation)return;
@@ -67,7 +80,7 @@ export async function mountManagerTeam(host:HTMLElement,crm:any,context:any,vali
       rows.push(...staff.filter((s:any)=>!used.has(s.employee_uuid)).map((s:any)=>({key:'crm:'+s.employee_uuid,employee:s.name,role:s.role,crm:s,account:null})));
       rows.sort((a,b)=>a.employee.localeCompare(b.employee,'ru'));if(!rows.some(r=>r.key===selected))selected=rows[0]?.key||'';paint();
       status(teamResult.status==='rejected'?teamResult.reason.message:'Обновлено '+new Date().toLocaleTimeString('ru-RU'));
-    }finally{busy=false;}
+    }finally{if(n===generation)busy=false;}
   }
   $<HTMLInputElement>('team-search').oninput=()=>{query=$<HTMLInputElement>('team-search').value.toLocaleLowerCase();paint();};$('team-refresh').onclick=protect(load);
   const focus=()=>{if(current()&&!host.querySelector('dialog[open]'))void load().catch(e=>status(e.message));};window.addEventListener('focus',focus);
