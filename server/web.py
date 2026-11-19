@@ -2958,7 +2958,7 @@ async def _manager_receipt_file(request: web.Request) -> web.Response:
     rows = db.photo_index_for_dirs(ctx["dirs"])
     soft_owner = any(c["contract_id"] == ctx["cid"] and (c["responsible_soft"] or "") in scope
                      for c in ctx["contracts"])
-    with db.connect() as conn:
+    with db.registry_connect(readonly=True) as conn:
         authors = [r[0] for r in conn.execute("SELECT employee FROM payment_evidence WHERE file=?", (key,))]
     receipt_author = any(name in scope for name in authors)
     if not (_photo_scope_ok(uid, scope, ctx["contracts"], rows) or soft_owner or receipt_author):
@@ -6736,7 +6736,17 @@ _IMPORT_SERIAL = threading.Lock()
 
 def _import_grid_serial(grid, **options) -> dict:
     with _IMPORT_SERIAL:
-        return db.import_grid(grid, **options)
+        if not os.environ.get("HARD_REGISTRY_DATABASE_URL_FILE"):
+            return db.import_grid(grid, **options)
+        from psycopg.errors import SerializationFailure, DeadlockDetected
+        for attempt in range(2):
+            try:
+                return db.import_grid(grid, **options)
+            except (SerializationFailure, DeadlockDetected):
+                if attempt:
+                    return dict(blocked=True, preview_stale=True,
+                                error="Во время импорта изменился реестр. Обновите предпросмотр.")
+
 
 
 # --- Перевоз реестра разницей (опыт exp/fast-exchange, 30.09.2026) -----------

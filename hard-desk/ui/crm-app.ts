@@ -1001,6 +1001,10 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
   const permitted = new Set(card.contracts.filter((entry: any) => contractCan(entry, target)
     && (kind !== 'correction' || contractCan(entry, 'correct'))).map((entry: any) => entry.contract_uuid));
   let needsContractSelection = Array.isArray(selectedIds) && selectedIds.some((id: string) => !permitted.has(id));
+  if (target === 'reported_payment') {
+    dialog.querySelector('.grid')!.insertAdjacentHTML('beforeend', '<div class="field"><label for="paid-at">Дата оплаты</label><input id="paid-at" type="date"></div>');
+    $<HTMLInputElement>('paid-at').value = saved?.paid_at ?? original?.payload?.paid_at ?? '';
+  }
   if (target === 'task') {
     const staff = (context.staff?.length ? context.staff : [{employee_uuid: context.employee_uuid, name: 'Я',
       work_kinds: ['call','visit','delivery'].filter(key => can(key))}]).filter((person:any)=>person.work_kinds?.length);
@@ -1049,6 +1053,7 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
     ),
     text: ($("free-text") as HTMLTextAreaElement)?.value,
     amount: ($("money") as HTMLInputElement)?.value,
+    paid_at: ($("paid-at") as HTMLInputElement)?.value,
     due: ($("due") as HTMLInputElement)?.value,
     currency: currencyInput?.value,
     reason: reasonInput?.value,
@@ -1119,6 +1124,9 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
         payload.amount = $<HTMLInputElement>("money").value.replace(",", ".");
         payload.currency = $<HTMLSelectElement>("currency").value;
         if (!payload.currency) throw new Error("Выберите валюту.");
+      }
+      if (target === "reported_payment" && $<HTMLInputElement>("paid-at").value) {
+        payload.paid_at = $<HTMLInputElement>("paid-at").value;
       }
       if (["promise", "task"].includes(target)) {
         const dateValue = $<HTMLInputElement>("due").value;

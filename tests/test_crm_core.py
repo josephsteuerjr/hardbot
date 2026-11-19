@@ -287,3 +287,18 @@ def test_revoked_assignment_preserves_no_false_acceptance(crm_world):
     with pytest.raises(CRMError) as error:
         store.command(w["member"], call_body(w))
     assert error.value.code == "scope_changed"
+
+def test_payment_correction_preserves_explicit_payment_date(crm_world):
+    w = crm_world
+    body = dict(schema_version=1, operation_id=str(uuid.uuid4()), kind="reported_payment",
+                contract_ids=w["contracts"][:1], payload=dict(amount="500.00", currency="RUB", paid_at="2026-01-10"))
+    initial = store.command(w["member"], body)
+    correction = dict(body, operation_id=str(uuid.uuid4()), kind="correction", correction_of=initial["event_id"],
+                      reason="Исправлена сумма", payload=dict(target_kind="reported_payment", amount="550.00", currency="RUB"))
+    store.command(w["member"], correction)
+    entity = store.card(w["member"], w["person"])["entities"][0]
+    assert entity["data"]["paid_at"] == "2026-01-10"
+    assert entity["data"]["amount"] == "550.00"
+    with pytest.raises(CRMError):
+        store.command(w["member"], dict(body, operation_id=str(uuid.uuid4()),
+                                        payload=dict(body["payload"], paid_at="2026-02-30")))

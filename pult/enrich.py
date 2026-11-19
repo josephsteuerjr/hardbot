@@ -38,6 +38,7 @@ import sys
 import tempfile
 import time
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -724,7 +725,7 @@ def latest_payment_pair(row: dict):
     for prefix, origin in (("last_payment", "registry"), ("_reported_payment", "reported")):
         day = parse_date(row.get(prefix + "_date"))
         value = row.get(prefix + "_sum")
-        if day is None or day > date.today() or value in (None, ""):
+        if day is None or day > datetime.now(ZoneInfo("Asia/Tashkent")).date() or value in (None, ""):
             continue
         text = re.sub(r'[^\d.,-]', '', str(value))
         if ',' in text and '.' in text:

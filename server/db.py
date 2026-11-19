@@ -543,6 +543,14 @@ class _Connection(sqlite3.Connection):
             self.close()
 
 
+def registry_connect(*, readonly=False):
+    secret = os.environ.get("HARD_REGISTRY_DATABASE_URL_FILE")
+    if secret:
+        import registry_postgres
+        return registry_postgres.connect(secret, readonly=readonly)
+    return connect()
+
+
 def connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=10, factory=_Connection)
     try:
@@ -1891,7 +1899,7 @@ def guest(telegram_id: int) -> dict | None:
 # --- Привязка «кто есть кто» (telegram_id → сотрудник, одноразово) -----------
 def employees_in_registry() -> list[sqlite3.Row]:
     """Список ответственных сотрудников из реестра (для самовыбора)."""
-    with connect() as conn:
+    with registry_connect() as conn:
         return conn.execute(
             "SELECT responsible AS employee, COUNT(*) AS contracts FROM clients "
             "WHERE responsible IS NOT NULL AND TRIM(responsible) <> '' "
@@ -3070,13 +3078,15 @@ def track_points_between(employee: str, lo_iso: str, hi_iso: str) -> list[dict]:
 
 # --- Настройки --------------------------------------------------------------
 def get_setting(key: str) -> str | None:
-    with connect() as conn:
+    connection = registry_connect if key == REGISTRY_COLUMN_MAP_SETTING else connect
+    with connection() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else None
 
 
 def set_setting(key: str, value: str) -> None:
-    with connect() as conn:
+    connection = registry_connect if key == REGISTRY_COLUMN_MAP_SETTING else connect
+    with connection() as conn:
         conn.execute(
             "INSERT INTO settings (key, value) VALUES (?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -4019,7 +4029,14 @@ def receipts_for(contract_ids: list[str]) -> dict[str, list[dict]]:
     return out
 
 
-def reported_payments_for(contract_ids: list[str] | None = None, *, include_receipts=False) -> dict[str, list[dict]]:
+def _crm_payment_facts(conn, kind, ids=None, *, include_revisions=False):
+    if getattr(conn, "dialect", None) != "postgresql":
+        return []
+    from crm.payment_read import facts
+    return facts(conn, kind, ids, include_revisions=include_revisions)
+
+
+def reported_payments_for(contract_ids: list[str] | None = None, *, include_receipts=False, _conn=None) -> dict[str, list[dict]]:
     """Оплаты конкретного КД; экспорт включает также чеки из приложения.
 
     Это свидетельства сотрудников, а не независимое банковское подтверждение.
@@ -4033,11 +4050,12 @@ def reported_payments_for(contract_ids: list[str] | None = None, *, include_rece
         if ids is not None:
             where += " AND contract_id IN (" + ','.join('?' for _ in ids) + ")"
             args = ids
-        with connect() as conn:
+        with (nullcontext(_conn) if _conn is not None else registry_connect(readonly=True)) as conn:
             rows = conn.execute("SELECT * FROM payment_evidence WHERE " + where +
                                 " ORDER BY created_at, id", args).fetchall()
-        for row in rows:
-            item = dict(row)
+            from itertools import chain
+            native = _crm_payment_facts(conn, "reported_payment", ids)
+        for item in chain(map(dict, rows), native):
             # Legacy attachments may have no entered amount/date. They remain
             # visible as receipts, but cannot populate typed payment columns.
             if item.get('source') == 'app' and (
@@ -4045,9 +4063,10 @@ def reported_payments_for(contract_ids: list[str] | None = None, *, include_rece
                     or not isinstance(item.get('amount'), (int, float))
                     or not math.isfinite(item['amount']) or item['amount'] <= 0):
                 continue
-            item["event_day"] = _payment_event_day(item)
+            if "event_day" not in item:
+                item["event_day"] = _payment_event_day(item)
             item["text"] = reported_payment_text(item)
-            out.setdefault(row["contract_id"], []).append(item)
+            out.setdefault(item["contract_id"], []).append(item)
     return out
 
 
@@ -4060,7 +4079,8 @@ def _payment_event_day(item: dict) -> str:
 
 def reported_payment_text(item: dict) -> str:
     amount = format(float(item["amount"]), '.2f').rstrip('0').rstrip('.')
-    return (f"Оплата №{item['id']} · КД {item['contract_id']} · {item['paid_at']} · "
+    label = "CRM №" if item.get("source") == "crm" else "№"
+    return (f"Оплата {label}{item['id']} · КД {item['contract_id']} · {item['paid_at']} · "
             f"{amount} {item['currency'] or ''} · записал {item['employee'] or ''}").strip()
 
 
@@ -4272,15 +4292,14 @@ def photo_contract_dirs(contract_id: str) -> dict:
     лежат на диске. Здесь группируем ТЕМ ЖЕ person_key, но без фильтра
     ответственного."""
     cid = canonical_contract_id(contract_id)
-    row = get_client(cid)
     contracts, person = [], None
-    if row is not None:
-        key = person_key(row)
-        with connect() as conn:
-            cand = conn.execute("SELECT * FROM clients WHERE client IS ?",
-                                (row["client"],)).fetchall()
-        contracts = [c for c in cand if person_key(c) == key]
-        person = row["client"]
+    with registry_connect(readonly=True) as conn:
+        row = conn.execute("SELECT * FROM clients WHERE contract_id=?", (cid,)).fetchone()
+        if row is not None:
+            key = person_key(row)
+            person = row["client"]
+            candidates = conn.execute("SELECT * FROM clients WHERE client IS NOT DISTINCT FROM ?", (person,))
+            contracts = [item for item in candidates if person_key(item) == key]
     dirs = {cid} | {c["contract_id"] for c in contracts if c["contract_id"]}
     return {"cid": cid, "person": person, "contracts": contracts,
             "dirs": sorted(d for d in dirs if d)}
@@ -4296,7 +4315,7 @@ def visits_for_contracts(contract_ids: list[str]) -> list[sqlite3.Row]:
     for i in range(0, len(ids), 400):
         chunk = ids[i:i + 400]
         qs = ",".join("?" for _ in chunk)
-        with connect() as conn:
+        with registry_connect(readonly=True) as conn:
             out += conn.execute(
                 f"SELECT * FROM visits WHERE contract_id IN ({qs}) "
                 "ORDER BY COALESCE(created_at,'') DESC, id DESC",
@@ -5002,10 +5021,12 @@ def soft_portfolio_exists(employee: str) -> bool:
 def soft_employees() -> list[sqlite3.Row]:
     """Состав софт-команды из реестра: имя + счётчик + страны (как
     employees_in_registry, но по ответственного Сотрудник СОФТ)."""
-    with connect() as conn:
+    with registry_connect() as conn:
+        countries = ("STRING_AGG(DISTINCT COALESCE(country,''),',' ORDER BY COALESCE(country,''))"
+                     if getattr(conn, "dialect", None) == "postgresql" else "GROUP_CONCAT(DISTINCT COALESCE(country,''))")
         return conn.execute(
             "SELECT responsible_soft AS employee, COUNT(*) AS contracts, "
-            "GROUP_CONCAT(DISTINCT IFNULL(country,'')) AS countries "
+            f"{countries} AS countries "
             "FROM clients WHERE responsible_soft IS NOT NULL "
             "AND TRIM(responsible_soft) <> '' "
             "GROUP BY responsible_soft ORDER BY responsible_soft"
@@ -5036,7 +5057,7 @@ def registry_payments_for(contract_ids) -> list[dict]:
     import debt
     ids = sorted(set(str(cid) for cid in contract_ids))
     payments = {}
-    with connect() as conn:
+    with registry_connect() as conn:
         echoes = _manual_payment_echoes(conn)
         for start in range(0, len(ids), 400):
             chunk = ids[start:start + 400]
@@ -5053,6 +5074,10 @@ def registry_payments_for(contract_ids) -> list[dict]:
                     payments[(row["contract_id"], day.isoformat(), unit)] = {
                         "contract_id": row["contract_id"], "paid_at": day.isoformat(),
                         "currency": unit, "amount": amount}
+        posted = _crm_payment_facts(conn, "payment_confirmed", ids)
+    if posted:
+        from crm.payment_read import payment_history
+        return payment_history(payments, posted)
     return list(payments.values())
 
 
@@ -5062,8 +5087,10 @@ def _manual_payment_echoes(conn) -> set[tuple]:
     Existing independent observations remain in registry_payments. A matching
     employee echo in latest-payment columns cannot create/replace an observation.
     """
-    return {(r["contract_id"],r["paid_at"],registry_payment_amount(r["amount"]),r["currency"] or "")
-            for r in conn.execute("SELECT contract_id,paid_at,amount,currency FROM payment_evidence WHERE source IN ('manual','app')")}
+    from itertools import chain
+    evidence = conn.execute("SELECT contract_id,paid_at,amount,currency FROM payment_evidence WHERE source IN ('manual','app')")
+    return {(r["contract_id"], r["paid_at"], registry_payment_amount(r["amount"]), r["currency"] or "")
+            for r in chain(evidence, _crm_payment_facts(conn, "reported_payment", include_revisions=True))}
 
 
 def calls_for_contracts(contract_ids, until: str) -> list:
@@ -5425,7 +5452,7 @@ def search_all(query: str) -> list[sqlite3.Row]:
 
 
 def stats_all() -> dict:
-    with connect() as conn:
+    with registry_connect() as conn:
         total = conn.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
         visited = conn.execute(
             "SELECT COUNT(*) FROM clients WHERE bot_visit_at IS NOT NULL "
@@ -5450,7 +5477,7 @@ def stats_by_country() -> list[dict]:
     остаются в общей статистике ``stats_all``, но не угадываются здесь.
     """
     employee_map = country_scope.employee_countries(list_managers())
-    with connect() as conn:
+    with registry_connect() as conn:
         registry_employees = {r["responsible"] for r in conn.execute(
             "SELECT DISTINCT responsible FROM clients "
             "WHERE responsible IS NOT NULL AND TRIM(responsible) <> ''")}
@@ -7478,9 +7505,10 @@ def registry_rows(
         raise ValueError("неверная дата окончания выгрузки")
     if since and until and since > until:
         raise ValueError("начало окна выгрузки позже окончания")
-    with connect() as conn:
+    with registry_connect(readonly=True) as conn:
         rows = conn.execute("SELECT * FROM clients ORDER BY client").fetchall()
-    payments = reported_payments_for(include_receipts=True)
+        confirmations = _crm_latest_confirmations(conn)
+        payments = reported_payments_for(include_receipts=True, _conn=conn)
     result = []
     for row in rows:
         if (
@@ -7501,6 +7529,7 @@ def registry_rows(
                        (until is None or day <= until) for day in fact_days):
                 continue
         out = {f.key: row[f.key] for f in FIELDS}
+        _apply_confirmed_payment(out, confirmations)
         out["responsible_soft"] = row["responsible_soft"]
         out.update({key: row[key] for key in edit_tracking.KEYS})
         # Поля визита — из ДОКАЗАННОГО снимка, а не из сырых колонок. Сырые
@@ -7530,6 +7559,24 @@ def registry_rows(
     return result
 
 
+def _crm_latest_confirmations(conn):
+    posted = _crm_payment_facts(conn, "payment_confirmed")
+    if not posted:
+        return {}
+    from crm.payment_read import latest_confirmations
+    return latest_confirmations(posted)
+
+
+def _apply_confirmed_payment(row, confirmations):
+    posted = confirmations.get(row["contract_id"])
+    if posted:
+        registry_day = _as_date(row.get("last_payment_date"))
+        if registry_day is None or date.fromisoformat(posted["paid_at"]) > registry_day or (
+                date.fromisoformat(posted["paid_at"]) == registry_day and registry_payment_amount(row.get("last_payment_sum")) is None):
+            row["last_payment_date"] = posted["paid_at"]
+            row["last_payment_sum"] = posted["amount"]
+
+
 def enrichment_rows() -> list[dict]:
     """Безопасные строки для точечного обогащения живых файлов.
 
@@ -7538,15 +7585,17 @@ def enrichment_rows() -> list[dict]:
     boolean-маркер нужен новому пульту. Поэтому даже старый пульт, который всё
     ещё смотрит лишь на непустой visit_date, не увидит неподтверждённый мусор.
     """
-    with connect() as conn:
+    with registry_connect(readonly=True) as conn:
         rows = conn.execute("SELECT * FROM clients ORDER BY client").fetchall()
+        confirmations = _crm_latest_confirmations(conn)
         # Окно определяется фактом из журнала, включая legacy-снимки.
         call_days = {r[0]: r[1] for r in conn.execute(
             "SELECT contract_id, MAX(created_at) FROM calls GROUP BY contract_id")}
-    payments = reported_payments_for(include_receipts=True)
+        payments = reported_payments_for(include_receipts=True, _conn=conn)
     result = []
     for raw in rows:
         row = {f.key: raw[f.key] for f in FIELDS}
+        _apply_confirmed_payment(row, confirmations)
         row["responsible_soft"] = raw["responsible_soft"]
         row.update({key: raw[key] for key in edit_tracking.KEYS})
         for key in BOT_VISIT_KEYS:
@@ -7606,9 +7655,11 @@ def enrichment_rows() -> list[dict]:
         if reported:
             row["_payment_day"] = max(p["event_day"] for p in reported)
             row["soft_comment"] = append_reported_payments(row.get("soft_comment"), reported)
-            latest = max(reported,key=lambda p:(p["paid_at"],p["created_at"],p["id"]))
-            row["_reported_payment_sum"] = latest["amount"]
-            row["_reported_payment_date"] = latest["paid_at"]
+            typed = [p for p in reported if p.get("same_currency", True) and p["amount"] > 0]
+            if typed:
+                latest = max(typed, key=lambda p: (p["paid_at"], p["created_at"], p["id"]))
+                row["_reported_payment_sum"] = latest["amount"]
+                row["_reported_payment_date"] = latest["paid_at"]
         if payment_owns_status(raw):
             status = payment_status_snapshot(raw)
             row["soft_call_status"] = status["status"]
@@ -7631,7 +7682,7 @@ def enrichment_ledger(employees: list[str] | None = None) -> dict[str, dict]:
     "responsible"}}}. employees — сузить до книг этих ответственных; пусто —
     весь реестр. Пульт передаёт его в enrich.build_plan как ``ledger``."""
     wanted = {str(e).strip().casefold() for e in (employees or []) if str(e).strip()}
-    with connect() as conn:
+    with registry_connect() as conn:
         rows = conn.execute(
             "SELECT contract_id, field_key, value, visit_date, responsible, "
             "delivered_at, receipt_digest FROM enrichment_ledger ORDER BY contract_id, field_key"
@@ -7652,7 +7703,7 @@ def enrichment_ledger(employees: list[str] | None = None) -> dict[str, dict]:
 
 def enrichment_book_ledger(employees: list[str] | None = None) -> dict:
     wanted = {_name_key(e) for e in (employees or []) if str(e).strip()}
-    with connect() as conn:
+    with registry_connect() as conn:
         rows = conn.execute("SELECT * FROM enrichment_book_ledger ORDER BY file_path, contract_id, field_key").fetchall()
     out = {}
     for r in rows:
@@ -7668,7 +7719,7 @@ def enrichment_book_ledger(employees: list[str] | None = None) -> dict:
 
 def enrichment_receipt(receipt_digest: str) -> dict | None:
     """Immutable acknowledgement, independent of later deliveries to the same cells."""
-    with connect() as conn:
+    with registry_connect() as conn:
         row = conn.execute("SELECT * FROM enrichment_receipts WHERE receipt_digest=?",
                            (str(receipt_digest),)).fetchone()
     return dict(row) if row else None
@@ -7709,7 +7760,7 @@ def record_enrichment_deliveries(entries: list, receipt_digest: str = "") -> int
         ))
     request_hash = _json_digest(sorted([(*r[:5], str(r[5]).replace("\\", "/").casefold())
                                        for r in prepared]))
-    with connect() as conn:
+    with registry_connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if digest:
             previous = conn.execute("SELECT * FROM enrichment_receipts WHERE receipt_digest=?", (digest,)).fetchone()
@@ -7869,7 +7920,7 @@ def register_import_authorization(
     source_id = verified["source_id"]
     sequence = verified["sequence"]
     proof_json = _canonical_json(proof)
-    with connect() as conn:
+    with registry_connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
             "SELECT * FROM import_receipts WHERE proof_digest=?",
@@ -7942,7 +7993,7 @@ def register_import_authorization(
 
 
 def import_authorization_status(proof_digest: str) -> dict | None:
-    with connect() as conn:
+    with registry_connect() as conn:
         row = conn.execute(
             "SELECT proof_digest, source_kind, source_id, sequence, status, "
             "registered_at, expires_at, consumed_at, result_digest "
@@ -7955,7 +8006,7 @@ def import_authorization_status(proof_digest: str) -> dict | None:
 def clear_pending_import_authorizations() -> int:
     """Invalidate pre-reset permissions while preserving consumed audit/head."""
 
-    with connect() as conn:
+    with registry_connect() as conn:
         count = conn.execute(
             "DELETE FROM import_receipts WHERE status='pending'"
         ).rowcount
@@ -8001,8 +8052,8 @@ def _register_authorization_row(
     # мы внутри BEGIN IMMEDIATE — второй коннект встал бы на блокировке, и запись
     # молча терялась бы (audit_access глушит исключения намеренно).
     conn.execute(
-        "INSERT INTO audit (ts, actor, action, target, detail) VALUES (?,?,?,?,?)",
-        (now.isoformat(timespec="seconds"), 0,
+        "INSERT INTO audit (ts, actor, action, target, detail) VALUES (?,'0',?,?,?)",
+        (now.isoformat(timespec="seconds"),
          "import_self_authorized" if self_issued else "import_authorized",
          verified_source["digest"], source_kind))
 
@@ -9148,9 +9199,14 @@ def import_grid(
         for key in owned - data.keys():
             data[key] = None
 
-    with connect() as conn:
-        if require_source_proof:
+    with registry_connect() as conn:
+        native_registry = getattr(conn, "dialect", None) == "postgresql"
+        if native_registry:
+            from registry_postgres import begin_import
+            begin_import(conn)
+        elif require_source_proof:
             conn.execute("BEGIN IMMEDIATE")
+        if require_source_proof:
             try:
                 replay = _authorized_import_state(
                     conn,
@@ -9165,7 +9221,14 @@ def import_grid(
             if replay is not None:
                 conn.rollback()
                 return replay
+        if native_registry:
+            from registry_postgres import stage_clients
+            stage_clients(conn)
         import employee_identity
+        protected_slots = {}
+        if native_registry:
+            from registry_postgres import protected_assignments, note_assignment_conflict
+            protected_slots = protected_assignments(conn, grouped, owner_keys)
         incoming_names = [str(data.get(key) or "").strip() for data in grouped.values() for key in owner_keys]
         identity_conflicts = employee_identity.conflicts(conn, incoming_names)
         if identity_conflicts:
@@ -9185,7 +9248,7 @@ def import_grid(
             "bot_visit_at, bot_visit_data, office_edit_data, visit_value_log, "
             "bot_call_at, bot_call_data, call_office_data, call_value_log, bot_visit_event_at, "
             "excel_visit_edited_on, excel_call_edited_on "
-            "FROM clients")}
+            "FROM clients ORDER BY id")}
         # Кому обогащение уже возило комментарий выезда. Единственный честный
         # ответ на вопрос «есть ли этот текст в книгах и в общем реестре»:
         # если не возило, пустая ячейка файла про него ничего не знает.
@@ -9866,6 +9929,9 @@ def import_grid(
                     or cid in grouped and not present_blank
                 ):
                     continue
+                if (cid, "responsible") in protected_slots:
+                    note_assignment_conflict(conn, protected_slots[cid, "responsible"], "responsible", None, former)
+                    continue
                 if crm_source_removal(conn,cid,'responsible'):
                     continue
                 changed = conn.execute(
@@ -9887,6 +9953,9 @@ def import_grid(
                                  and not str(grouped[cid].get("responsible_soft") or "").strip())
                 if (not former or _name_key(former) not in authoritative_by_key
                         or cid in grouped and not present_blank):
+                    continue
+                if (cid, "responsible_soft") in protected_slots:
+                    note_assignment_conflict(conn, protected_slots[cid, "responsible_soft"], "responsible_soft", None, former)
                     continue
                 if crm_source_removal(conn,cid,'responsible_soft'):
                     continue
@@ -9947,9 +10016,10 @@ def import_grid(
                     "WHERE contract_id=? AND profile=? AND window_to<?", (cid, profile, today_iso)
                 ).fetchone()[0]
                 conn.execute(
-                    "INSERT OR IGNORE INTO assignment_events (contract_id, "
+                    "INSERT INTO assignment_events (contract_id, "
                     "employee, prev_employee, kind, window_to, window_from, "
-                    "claimed_at, source, created_at, profile) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    "claimed_at, source, created_at, profile) VALUES (?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(contract_id,window_to,employee,prev_employee,profile) DO NOTHING",
                     (cid, new_owner, prev_owner, kind, today_iso, prev_window,
                      claimed, source_kind, now_iso, profile))
             report["assignment_events"] = len(assignment_events)
@@ -10107,6 +10177,10 @@ def import_grid(
             if require_source_proof:
                 _consume_import_authorization(conn, verified_source, report)
             _remember_registry_payments(conn)
+            if native_registry:
+                from registry_postgres import publish_import, publish_clients
+                publish_import(conn, set(grouped).union(cid for cid, _ in auto_unassigned_effect))
+                publish_clients(conn)
             conn.commit()
     # Человеку в пульте нужны заголовки реестра, а не ключи схемы: в отчёте
     # появились «дата обещания», «Сумма прогноза» и «Прогноз», и строка вида

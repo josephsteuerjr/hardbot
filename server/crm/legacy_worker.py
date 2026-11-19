@@ -11,6 +11,13 @@ from .contract import now
 
 
 def tick(database, employees):
+    from . import storage
+    from registry_postgres import active
+    if storage.postgres_enabled():
+        with storage.connect(readonly=True) as conn:
+            if active(conn):
+                return dict(at=now(), mode="postgresql", incoming=dict(events={}, changed_fields=0, issues={}),
+                            outgoing=dict(delivered=0, needs_review=0))
     snapshot=legacy_exchange.capture(database)
     receipt=legacy_exchange.apply(snapshot,None)
     outgoing=legacy_mirror.deliver(database,set(employees))

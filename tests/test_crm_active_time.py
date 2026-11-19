@@ -24,10 +24,14 @@ def test_activity_replay_union_idle_and_separate_work(crm_world):
     second=interval(w,start=15000,end=45000,anchor=first['anchor_id'])
     active_time.ingest(w['member'],second)
     active_time.ingest(w['member'],interval(w,start=30000,end=60000,kind='idle',anchor=first['anchor_id']))
-    day=instant(now()).astimezone(__import__('zoneinfo').ZoneInfo(w['member'].timezone)).date().isoformat()
-    result=active_time.summary(w['member'],day,day)
+    with db.connect() as conn:
+        saved = conn.execute("SELECT server_at FROM crm_clock_anchors WHERE anchor_id=?", (first["anchor_id"],)).fetchone()[0]
+    zone = __import__('zoneinfo').ZoneInfo(w['member'].timezone)
+    since = instant(saved).astimezone(zone).date().isoformat()
+    until = (instant(saved) + timedelta(seconds=60)).astimezone(zone).date().isoformat()
+    result=active_time.summary(w['member'],since,until)
     assert result['active_ms']==45000 and result['idle_ms']==15000
-    assert active_time.summary(w['stranger'],day,day)['active_ms']==0
+    assert active_time.summary(w['stranger'],since,until)['active_ms']==0
     with db.connect() as conn:
         assert conn.execute('SELECT COUNT(*) FROM crm_events').fetchone()[0]==0
         assert conn.execute('SELECT COUNT(*) FROM crm_shifts').fetchone()[0]==0

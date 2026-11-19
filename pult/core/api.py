@@ -154,7 +154,7 @@ GZIP_BODY_FROM = 64 * 1024     # байт JSON, с которых тело за�
 
 def request(base_url: str, method: str, path: str, body: dict | None = None, *,
             key: str = "", device_token: str = "", timeout: float = 20,
-            opener=None, expected_source: str | None = None):
+            opener=None):
     """Один запрос к admin-API.
 
     401 — два разных текста (токен отозван / неверный ключ); 404 — «сервер
@@ -190,8 +190,6 @@ def request(base_url: str, method: str, path: str, body: dict | None = None, *,
     try:
         try:
             with urlopen(req, timeout=timeout) as r:
-                if expected_source and r.headers.get("X-Rimborso-Enrichment-Source") != expected_source:
-                    raise RuntimeError("Сервер не подтвердил источник контрольных книг.")
                 return _read_json(r)
         except urllib.error.URLError as e:
             if isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):

@@ -375,6 +375,8 @@ def apply(principal, body):
             conn.execute("INSERT INTO crm_event_contracts VALUES(?,?)", (event, cid))
             conn.execute("INSERT INTO crm_outbox(event_id) VALUES(?)", (event,))
             store.project(conn, row, values, event, at, "excel")
+            from registry_postgres import project_event
+            project_event(conn, event)
             events.append(event)
         result = dict(
             ok=True,

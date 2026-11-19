@@ -148,6 +148,15 @@ fi
 # Единственный ready-маркер записывается ПОСЛЕ всех копий. Старые копии без
 # описи restore отвергает: он не может доказать полноту чеков и audit-spool.
 need_cmd sha256sum "нужен coreutils для контроля копии"
+# The CRM release points this directory at the same configuration as the serving API.
+crm_runtime=/opt/rimborso-crm-runtime/current
+if [ -e "$crm_runtime" ] || [ -L "$crm_runtime" ]; then
+  /usr/bin/python3 "$crm_runtime/backup_postgres.py" --destination "$dest" \
+    --container crm-pilot-postgres --dsn-file "$crm_runtime/secrets/app-dsn" \
+    --documents /opt/rimborso-crm-pilot/documents --mobile-state "$crm_runtime/mobile-state" \
+    || die "Не удалось сохранить рабочую PostgreSQL CRM. Подробности выше."
+fi
+
 ( cd "$dest" && find . -type f ! -name SHA256SUMS ! -name .SHA256SUMS.part -print0 | sort -z | xargs -0 sha256sum > .SHA256SUMS.part )
 mv "$dest/.SHA256SUMS.part" "$dest/SHA256SUMS"
 ok "состав и SHA256: $dest/SHA256SUMS"

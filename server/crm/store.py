@@ -1,6 +1,6 @@
 """Transactional event journal and deterministic current projections."""
 
-from datetime import timedelta
+from datetime import date, timedelta
 import json
 import uuid
 
@@ -130,6 +130,7 @@ def _payload(kind, raw):
         "text",
         "amount",
         "currency",
+        "paid_at",
         "due_at",
         "title",
         "entity_id",
@@ -203,6 +204,12 @@ def _payload(kind, raw):
             or len(raw[key]) > (32700 if key == "text" else 300)
         ):
             raise CRMError("Некорректный текст действия.")
+    if "paid_at" in raw:
+        try:
+            if target not in {"reported_payment", "payment_confirmed"} or date.fromisoformat(raw["paid_at"]).isoformat() != raw["paid_at"]:
+                raise ValueError
+        except (TypeError, ValueError) as exc:
+            raise CRMError("Укажите календарную дату оплаты в формате ГГГГ-ММ-ДД.") from exc
     if target in {"promise", "reported_payment", "payment_confirmed"}:
         result["amount"] = money(raw.get("amount"))
         result["currency"] = currency(raw.get("currency"))
@@ -382,6 +389,10 @@ def command(principal, body, *, origin="app", client_version=None):
                 if not old_entity:
                     raise CRMError("Исправляемая запись не найдена.", "not_found", 404)
                 payload["entity_id"] = old_entity["entity_id"]
+                if target in {"reported_payment", "payment_confirmed"} and "paid_at" not in payload:
+                    old_day = json.loads(old_entity["data_json"]).get("paid_at")
+                    if old_day:
+                        payload["paid_at"] = old_day
             else:
                 payload["entity_id"] = str(uuid.uuid4())
         happened, quality = event_time(conn, principal, body, received)
@@ -550,6 +561,8 @@ def command(principal, body, *, origin="app", client_version=None):
             time_quality=quality,
             entity_id=payload.get("entity_id"),
         )
+        from registry_postgres import project_event
+        project_event(conn, event)
         acknowledge(conn, principal, operation, body, result, received)
         conn.commit()
     return result

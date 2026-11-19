@@ -200,35 +200,14 @@ def admin(method: str, path: str, body=None, timeout: float = 30, key: str = "")
     token = "" if key else prof.get("device_token", "")
     if not prof.get("url"):
         raise RuntimeError(api_client.NO_URL_TEXT)
-    # A marked rehearsal folder has its own same-origin endpoint. Versions,
-    # display names and day-to-day accounts never select a data source.
-    options = {}
-    base = _settings.get("scatterBase")
-    endpoint = path.split("?", 1)[0]
-    if base and (path == "/admin/export.json" or endpoint == "/admin/enrichment/ledger.json"):
-        marker = Path(base) / ".rimborso-enrichment-control"
-        try:
-            with marker.open(encoding="ascii") as stream:
-                control = stream.read(64).strip()
-        except FileNotFoundError:
-            control = None
-        if control is not None:
-            if control != "postgresql-trial":
-                raise ValueError("Неизвестный источник контрольных книг.")
-            if method == "POST":
-                root = Path(base).resolve(strict=True)
-                entries = (body or {}).get("entries")
-                if not isinstance(entries, list) or any(
-                    not isinstance(entry, dict) or not Path(entry.get("file") or entry.get("file_path") or "").is_absolute()
-                    or not Path(entry.get("file") or entry.get("file_path")).resolve().is_relative_to(root)
-                    for entry in entries
-                ):
-                    raise ValueError("Квитанция относится к другой папке книг.")
-            path = "/crm-control/enrichment" + path
-            options["expected_source"] = control
+    # Retired control copies must never acknowledge deliveries to the working journal.
+    if path.split("?", 1)[0] == "/admin/enrichment/ledger.json":
+        base = _settings.get("scatterBase")
+        if base and (Path(base) / ".rimborso-enrichment-control").is_file():
+            raise ValueError("Выбрана папка завершённой проверки. Выберите рабочую папку личных книг.")
     try:
         return api_client.request(prof["url"], method, path, body, key=key, device_token=token,
-                                  timeout=timeout, **options)
+                                  timeout=timeout)
     except api_client.AccessRevoked:
         with _lock:
             if _profile().get('device_token') == token:

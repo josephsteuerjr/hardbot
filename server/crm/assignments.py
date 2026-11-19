@@ -357,6 +357,7 @@ def _validate(conn, principal, frozen):
 
 def _apply_slots(conn, principal, op, frozen, at):
     changed=[];target=frozen['employee_uuid']
+    projected = False
     for s in frozen['slots']:
         if s['employee_uuid']==target:continue
         cid=s['contract_uuid'];work=s['capability'];revision=s['revision']+1
@@ -381,10 +382,14 @@ def _apply_slots(conn, principal, op, frozen, at):
             'before_employee_uuid,after_employee_uuid,revision,at,source) VALUES(?,?,?,?,?,?,?,?,?,?)',
             (principal.actor_uid,op,principal.team_id,cid,work,s['employee_uuid'],target,revision,at,'native-distribution'))
         changed.append(dict(contract_uuid=cid,capability=work,employee_uuid=target,revision=revision))
+        from registry_postgres import project_assignment
+        if project_assignment(conn, cid, work, target):
+            projected = True
+            continue
         if conn.execute('SELECT 1 FROM crm_primary_fences WHERE contract_uuid=?',(cid,)).fetchone():
             conn.execute('INSERT INTO crm_primary_pending VALUES(?,?) ON CONFLICT(contract_uuid) DO UPDATE SET changed_at=excluded.changed_at',(cid,at))
     result=dict(status='applied',operation_id=op,actor_employee_uuid=principal.employee_uuid,team_id=principal.team_id,applied_at=at,changes=changed,no_op=len(frozen['slots'])-len(changed),
-                watermark=watermark(conn),projection_status='pending' if any(conn.execute('SELECT 1 FROM crm_primary_pending WHERE contract_uuid=?',(s['contract_uuid'],)).fetchone() for s in changed) else 'isolated',comment=frozen['comment'])
+                watermark=watermark(conn),projection_status='pending' if any(conn.execute('SELECT 1 FROM crm_primary_pending WHERE contract_uuid=?',(s['contract_uuid'],)).fetchone() for s in changed) else ('projected' if projected else 'isolated'),comment=frozen['comment'])
     return result
 
 

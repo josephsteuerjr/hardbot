@@ -109,7 +109,7 @@ def _guard(conn, touched):
     return proof.hexdigest()
 
 
-def _read(conn, snapshot, sha):
+def _read(conn, snapshot, sha, *, registry_import=False):
     marker=conn.execute("SELECT value FROM crm_meta WHERE key='deployment_namespace'").fetchone()
     if not marker or marker[0]!='crm-shared-pilot-v1':raise CRMError('Обмен требует подтверждённого общего контура.')
     last=conn.execute('SELECT MAX(captured_at) FROM crm_legacy_batches').fetchone()[0]
@@ -121,7 +121,7 @@ def _read(conn, snapshot, sha):
     additions=[]
     states={r['contract_uuid']:dict(r) for r in conn.execute('SELECT * FROM crm_legacy_state')}
     originals={r['contract_uuid']:dict(r) for r in conn.execute('SELECT * FROM crm_authority_rows')}
-    event_rows=[dict(r) for r in conn.execute('SELECT event_id,request_hash,legacy_source,actor_uid,employee_uuid FROM crm_events ORDER BY event_id')]
+    event_rows=[] if registry_import else [dict(r) for r in conn.execute('SELECT event_id,request_hash,legacy_source,actor_uid,employee_uuid FROM crm_events ORDER BY event_id')]
     events={r['legacy_source']:r for r in event_rows if r['legacy_source']}
     by_event={r['event_id']:r for r in event_rows}
     employees=[dict(r) for r in conn.execute('SELECT * FROM crm_employees ORDER BY employee_uuid')]
@@ -141,11 +141,20 @@ def _read(conn, snapshot, sha):
         eid=staff.get('authority-staff:'+str(r.get('employee_id')))
         if eid:names[_name(r['name'])].add(eid)
     active_staff={r['employee_uuid'] for r in employees if r['active']}
-    def assignee(name):
-        choices=names.get(_name(name),set())
+    registry_staff={r['employee_uuid'] for r in employees if r['source']=='registry-portfolio'}
+    product_names = defaultdict(set)
+    if registry_import:
+        for roster in conn.execute("SELECT employee_id,product_names FROM crm_registry.staff_roster WHERE active=1"):
+            employee = staff.get("authority-staff:" + str(roster["employee_id"]))
+            if employee:
+                for product, label in json.loads(roster["product_names"] or "{}").items():
+                    product_names[product, _name(label)].add(employee)
+    def assignee(name, capability, grants):
+        product = "soft" if capability == "call" else "hard"
+        choices = product_names.get((product, _name(name))) or names.get(_name(name), set())
         if len(choices) == 1:
             eid=next(iter(choices))
-            if eid in active_staff:
+            if eid in active_staff or (registry_import and (eid in registry_staff or grants == {eid})):
                 return eid
     patches=[];issues=[];responsibility=[];changed_rows=[];incoming=[]
     known_ids={str(r['contract_id']) for r in snapshot['clients']}
@@ -171,7 +180,7 @@ def _read(conn, snapshot, sha):
                 label=raw.get(field)
                 if _name(label) in {'','не закреплен','нет','не назначен'}:
                     continue
-                employee=assignee(label)
+                employee=assignee(label, cap, known_grants.get((key, cap), set()))
                 if existing:
                     # The existing CRM portfolio remains authoritative when a
                     # previously unlinked workbook row is first recognized.
@@ -193,7 +202,7 @@ def _read(conn, snapshot, sha):
         if not prior:
             issues.append(_issue('legacy_baseline_missing',cid,{'contract_uuid':key}));continue
         old=json.loads(prior['record_json'])
-        if digest(old)==digest(raw):continue
+        if not registry_import and digest(old)==digest(raw):continue
         previous,_=typed_values(old);values,invalid=typed_values(raw)
         invalid={r['key'] for r in invalid};current=json.loads(row['fields_json']);patch={}
         for field,value in values.items():
@@ -204,9 +213,13 @@ def _read(conn, snapshot, sha):
             else:patch[field]=value
         observed=dict(raw)
         for field,capability in RESPONSIBILITY.items():
-            if old.get(field)==raw.get(field):continue
-            name=raw.get(field);employee=assignee(name)
+            if not registry_import and old.get(field)==raw.get(field):continue
+            name=raw.get(field);employee=assignee(name, capability, known_grants.get((key, capability), set()))
             empty=not name or _name(name) in {'не закреплен','нет','не назначен'}
+            if registry_import:
+                effective = known_grants.get((key, capability), set())
+                if (employee and effective == {employee}) or (empty and not effective):
+                    continue
             if not employee and not empty:
                 issues.append(_issue('legacy_assignee_unmapped',key+':'+field,dict(contract_uuid=key,name=name)))
                 # Keep the current grant and accepted source value until the
@@ -222,9 +235,10 @@ def _read(conn, snapshot, sha):
                 continue
             responsibility.append(dict(contract_uuid=key,capability=capability,employee_uuid=employee))
         if patch:patches.append(dict(contract_uuid=key,values=patch))
-        changed_rows.append(dict(contract_uuid=key,raw=observed))
+        if not registry_import or old != observed:
+            changed_rows.append(dict(contract_uuid=key,raw=observed))
     for cid,row in legacy.items():
-        if cid not in known_ids and row['contract_uuid'] in originals:
+        if not registry_import and cid not in known_ids and row['contract_uuid'] in originals:
             issues.append(_issue('legacy_contract_missing',cid,dict(contract_uuid=row['contract_uuid'])))
     mirrored={(r['table_name'],int(r['row_id'])):r for r in snapshot['mirror_links']}
     seen=set()
@@ -292,7 +306,7 @@ def _read(conn, snapshot, sha):
             monthly.append(value)
     touched=sorted({r['contract_uuid'] for r in patches+changed_rows+responsibility+monthly} |
                    {cid for event in incoming for cid in event['contract_ids']})
-    return dict(snapshot_sha256=sha,captured_at=snapshot['captured_at'],before_sha256=_guard(conn,touched),
+    return dict(snapshot_sha256=sha,captured_at=snapshot['captured_at'],before_sha256=None if registry_import else _guard(conn,touched),
                 touched=touched,additions=additions,monthly=monthly,patches=patches,events=incoming,rows=changed_rows,assignments=responsibility,issues=issues)
 
 
@@ -324,74 +338,88 @@ def apply(snapshot, review):
         if old:return json.loads(old[0])
         if _guard(conn,plan['touched'])!=plan['before_sha256']:
             raise CRMError('Общая CRM изменилась после просмотра.','review_stale',409)
-        for item in plan['additions']:
-            cid,legacy_id,raw=item['contract_uuid'],item['legacy_id'],item['raw']
-            if item['link']:
-                conn.execute('UPDATE crm_contracts SET legacy_id=? WHERE contract_uuid=? AND legacy_id IS NULL',(legacy_id,cid))
-            else:
-                from debt import unit
-                person=identifier('person','registry-contract:'+cid)
-                fields,_=typed_values(raw)
-                provenance=canonical({'source_baseline':{'source_sha256':sha,'captured_at':snapshot['captured_at']}})
-                currency='RUB' if unit([raw['partner']])=='₽' else None
-                conn.execute('INSERT INTO crm_people VALUES(?,?,?,?)',(person,raw.get('client') or '','legacy-exchange:'+sha,at))
-                conn.execute('INSERT INTO crm_contracts VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-                             (cid,person,item['creditor_id'],legacy_id,legacy_id,currency,canonical(fields),canonical(fields),'{}',provenance,at))
-                conn.execute('INSERT INTO crm_authority_rows VALUES(?,?,?)',(cid,sha,canonical(raw)))
-        conn.executemany('INSERT INTO crm_monthly_totals VALUES(?,?,?,?,?,?,?) ON CONFLICT(contract_uuid,month) '
-                         'DO UPDATE SET amount=excluded.amount,currency=excluded.currency,source_column=excluded.source_column,'
-                         'observed_at=excluded.observed_at,source_sha256=excluded.source_sha256',
-                         [(r['contract_uuid'],r['month'],r['amount'],r['currency'],r['source_column'],r['observed_at'],sha)
-                          for r in plan['monthly']])
-        for event in plan['events']:
-            key=identifier('legacy-event',event['legacy_source'])
-            conn.execute('INSERT INTO crm_events(event_id,operation_id,request_hash,actor_uid,employee_uuid,team_id,role,kind,origin,contracts_json,payload_json,occurred_at,received_at,time_quality,projection_status,legacy_source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                (key,event['operation_id'],event['request_hash'],event['actor_uid'],event['employee_uuid'],'legacy-source','legacy',event['kind'],'legacy',canonical(event['contract_ids']),canonical(event['payload']),event['occurred_at'],at,event['time_quality'],'historical_only',event['legacy_source']))
-            conn.executemany('INSERT INTO crm_event_contracts VALUES(?,?)',[(key,cid) for cid in event['contract_ids']])
-        for patch in plan['patches']:
-            cid=patch['contract_uuid'];key=identifier('legacy-projection',sha+cid)
-            conn.execute('INSERT INTO crm_events(event_id,operation_id,request_hash,actor_uid,employee_uuid,team_id,role,kind,origin,contracts_json,payload_json,occurred_at,received_at,time_quality,projection_status,legacy_source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                (key,key,digest(patch),0,'system:legacy-exchange','legacy-source','system','source_sync','legacy',canonical([cid]),canonical(dict(values=patch['values'],text='Сверка прежнего приложения',source_sha256=sha)),snapshot['captured_at'],at,'server','applied','exchange:'+sha+':'+cid))
-            conn.execute('INSERT INTO crm_event_contracts VALUES(?,?)',(key,cid))
-            row=dict(conn.execute('SELECT * FROM crm_contracts WHERE contract_uuid=?',(cid,)).fetchone())
-            store.project(conn,row,patch['values'],key,snapshot['captured_at'],'legacy')
-        for row in plan['rows']:
-            conn.execute('INSERT INTO crm_legacy_state VALUES(?,?,?,?) ON CONFLICT(contract_uuid) DO UPDATE SET record_json=excluded.record_json,source_sha256=excluded.source_sha256,observed_at=excluded.observed_at',
-                (row['contract_uuid'],canonical(row['raw']),sha,snapshot['captured_at']))
-        for row in plan['assignments']:
-            cid=row['contract_uuid'];cap=row['capability']
-            head=conn.execute('SELECT * FROM crm_assignment_heads WHERE contract_uuid=? AND capability=?',(cid,cap)).fetchone()
-            if head:
-                incoming=row['employee_uuid']
-                if incoming==head['employee_uuid']:
-                    conn.execute('UPDATE crm_assignment_heads SET baseline_employee_uuid=? WHERE contract_uuid=? AND capability=?',(incoming,cid,cap))
-                    continue
-                # _read's three-way comparison and commit guard established
-                # current==accepted baseline. Inbound change becomes canonical.
-                at=now();revision=head['revision']+1
-                conn.execute('UPDATE crm_assignments SET ends_at=? WHERE contract_uuid=? AND capability=? AND ends_at IS NULL',(at,cid,cap))
-                if incoming:
-                    conn.execute('INSERT INTO crm_assignments VALUES(?,?,?,?,?,?,?)',
-                        (identifier('assignment',sha+canonical(row)),incoming,cid,cap,at,None,'legacy-exchange:'+sha))
-                conn.execute('UPDATE crm_assignment_heads SET employee_uuid=?,revision=?,updated_at=?,operation_id=?,source=?,baseline_employee_uuid=? WHERE contract_uuid=? AND capability=?',
-                    (incoming,revision,at,sha,'legacy-exchange',incoming,cid,cap))
-                conn.execute('INSERT INTO crm_assignment_changes(actor_uid,operation_id,team_id,contract_uuid,capability,before_employee_uuid,after_employee_uuid,revision,at,source) VALUES(?,?,?,?,?,?,?,?,?,?)',
-                    (0,sha,'legacy-source',cid,cap,head['employee_uuid'],incoming,revision,at,'legacy-exchange'))
-                # Old tasks are historical objects, not a surviving bypass.
-                for task in conn.execute("SELECT entity_id,data_json FROM crm_entities WHERE kind='task' AND contract_uuid=? AND status='open'",(cid,)):
-                    data=json.loads(task['data_json'])
-                    if data.get('assignee_uuid')==head['employee_uuid'] and data.get('work_kind')==cap and data.get('assignment_grant'):
-                        conn.execute('INSERT INTO crm_task_grant_revocations VALUES(?,?,?,?) ON CONFLICT(entity_id,capability) DO NOTHING',(task['entity_id'],cap,sha,at))
+        return _write_plan(conn, snapshot, sha, at, plan)
+
+
+def apply_registry_transaction(conn, snapshot):
+    """The source import owns the transaction and the canonical maintenance lock."""
+    sha = validate(snapshot)
+    old = conn.execute('SELECT receipt_json FROM crm_legacy_batches WHERE snapshot_sha256=?', (sha,)).fetchone()
+    if old:
+        return json.loads(old[0])
+    plan = _read(conn, snapshot, sha, registry_import=True)
+    return _write_plan(conn, snapshot, sha, now(), plan)
+
+
+def _write_plan(conn, snapshot, sha, at, plan):
+    for item in plan['additions']:
+        cid,legacy_id,raw=item['contract_uuid'],item['legacy_id'],item['raw']
+        if item['link']:
+            conn.execute('UPDATE crm_contracts SET legacy_id=? WHERE contract_uuid=? AND legacy_id IS NULL',(legacy_id,cid))
+        else:
+            from debt import unit
+            person=identifier('person','registry-contract:'+cid)
+            fields,_=typed_values(raw)
+            provenance=canonical({'source_baseline':{'source_sha256':sha,'captured_at':snapshot['captured_at']}})
+            currency='RUB' if unit([raw['partner']])=='₽' else None
+            conn.execute('INSERT INTO crm_people VALUES(?,?,?,?)',(person,raw.get('client') or '','legacy-exchange:'+sha,at))
+            conn.execute('INSERT INTO crm_contracts VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                         (cid,person,item['creditor_id'],legacy_id,legacy_id,currency,canonical(fields),canonical(fields),'{}',provenance,at))
+            conn.execute('INSERT INTO crm_authority_rows VALUES(?,?,?)',(cid,sha,canonical(raw)))
+    conn.executemany('INSERT INTO crm_monthly_totals VALUES(?,?,?,?,?,?,?) ON CONFLICT(contract_uuid,month) '
+                     'DO UPDATE SET amount=excluded.amount,currency=excluded.currency,source_column=excluded.source_column,'
+                     'observed_at=excluded.observed_at,source_sha256=excluded.source_sha256',
+                     [(r['contract_uuid'],r['month'],r['amount'],r['currency'],r['source_column'],r['observed_at'],sha)
+                      for r in plan['monthly']])
+    for event in plan['events']:
+        key=identifier('legacy-event',event['legacy_source'])
+        conn.execute('INSERT INTO crm_events(event_id,operation_id,request_hash,actor_uid,employee_uuid,team_id,role,kind,origin,contracts_json,payload_json,occurred_at,received_at,time_quality,projection_status,legacy_source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            (key,event['operation_id'],event['request_hash'],event['actor_uid'],event['employee_uuid'],'legacy-source','legacy',event['kind'],'legacy',canonical(event['contract_ids']),canonical(event['payload']),event['occurred_at'],at,event['time_quality'],'historical_only',event['legacy_source']))
+        conn.executemany('INSERT INTO crm_event_contracts VALUES(?,?)',[(key,cid) for cid in event['contract_ids']])
+    for patch in plan['patches']:
+        cid=patch['contract_uuid'];key=identifier('legacy-projection',sha+cid)
+        conn.execute('INSERT INTO crm_events(event_id,operation_id,request_hash,actor_uid,employee_uuid,team_id,role,kind,origin,contracts_json,payload_json,occurred_at,received_at,time_quality,projection_status,legacy_source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            (key,key,digest(patch),0,'system:legacy-exchange','legacy-source','system','source_sync','legacy',canonical([cid]),canonical(dict(values=patch['values'],text='Сверка прежнего приложения',source_sha256=sha)),snapshot['captured_at'],at,'server','applied','exchange:'+sha+':'+cid))
+        conn.execute('INSERT INTO crm_event_contracts VALUES(?,?)',(key,cid))
+        row=dict(conn.execute('SELECT * FROM crm_contracts WHERE contract_uuid=?',(cid,)).fetchone())
+        store.project(conn,row,patch['values'],key,snapshot['captured_at'],'legacy')
+    for row in plan['rows']:
+        conn.execute('INSERT INTO crm_legacy_state VALUES(?,?,?,?) ON CONFLICT(contract_uuid) DO UPDATE SET record_json=excluded.record_json,source_sha256=excluded.source_sha256,observed_at=excluded.observed_at',
+            (row['contract_uuid'],canonical(row['raw']),sha,snapshot['captured_at']))
+    for row in plan['assignments']:
+        cid=row['contract_uuid'];cap=row['capability']
+        head=conn.execute('SELECT * FROM crm_assignment_heads WHERE contract_uuid=? AND capability=?',(cid,cap)).fetchone()
+        if head:
+            incoming=row['employee_uuid']
+            if incoming==head['employee_uuid']:
+                conn.execute('UPDATE crm_assignment_heads SET baseline_employee_uuid=? WHERE contract_uuid=? AND capability=?',(incoming,cid,cap))
                 continue
-            conn.execute("UPDATE crm_assignments SET ends_at=? WHERE contract_uuid=? AND capability=? AND ends_at IS NULL AND (source LIKE 'authority-source:%' OR source LIKE 'legacy-exchange:%')",
-                (snapshot['captured_at'],cid,cap))
-            if row['employee_uuid']:
+            # _read's three-way comparison and commit guard established
+            # current==accepted baseline. Inbound change becomes canonical.
+            at=now();revision=head['revision']+1
+            conn.execute('UPDATE crm_assignments SET ends_at=? WHERE contract_uuid=? AND capability=? AND ends_at IS NULL',(at,cid,cap))
+            if incoming:
                 conn.execute('INSERT INTO crm_assignments VALUES(?,?,?,?,?,?,?)',
-                    (identifier('assignment',sha+canonical(row)),row['employee_uuid'],cid,cap,snapshot['captured_at'],None,'legacy-exchange:'+sha))
-        for issue in plan['issues']:
-            conn.execute('INSERT INTO crm_migration_issues VALUES(?,?,?,?,NULL,NULL) ON CONFLICT(issue_id) DO NOTHING',
-                tuple(issue[k] for k in ('issue_id','kind','legacy_key','detail_json')))
-        receipt=dict(_review(plan),applied_at=at,baseline_replaced=False,accounts_changed=False)
-        conn.execute('INSERT INTO crm_legacy_batches VALUES(?,?,?)',(sha,snapshot['captured_at'],canonical(receipt)))
-        conn.execute("INSERT INTO crm_meta VALUES('legacy_exchange_last',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(canonical(receipt),))
-        return receipt
+                    (identifier('assignment',sha+canonical(row)),incoming,cid,cap,at,None,'legacy-exchange:'+sha))
+            conn.execute('UPDATE crm_assignment_heads SET employee_uuid=?,revision=?,updated_at=?,operation_id=?,source=?,baseline_employee_uuid=? WHERE contract_uuid=? AND capability=?',
+                (incoming,revision,at,sha,'legacy-exchange',incoming,cid,cap))
+            conn.execute('INSERT INTO crm_assignment_changes(actor_uid,operation_id,team_id,contract_uuid,capability,before_employee_uuid,after_employee_uuid,revision,at,source) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                (0,sha,'legacy-source',cid,cap,head['employee_uuid'],incoming,revision,at,'legacy-exchange'))
+            # Old tasks are historical objects, not a surviving bypass.
+            for task in conn.execute("SELECT entity_id,data_json FROM crm_entities WHERE kind='task' AND contract_uuid=? AND status='open'",(cid,)):
+                data=json.loads(task['data_json'])
+                if data.get('assignee_uuid')==head['employee_uuid'] and data.get('work_kind')==cap and data.get('assignment_grant'):
+                    conn.execute('INSERT INTO crm_task_grant_revocations VALUES(?,?,?,?) ON CONFLICT(entity_id,capability) DO NOTHING',(task['entity_id'],cap,sha,at))
+            continue
+        conn.execute("UPDATE crm_assignments SET ends_at=? WHERE contract_uuid=? AND capability=? AND ends_at IS NULL AND (source LIKE 'authority-source:%' OR source LIKE 'legacy-exchange:%')",
+            (snapshot['captured_at'],cid,cap))
+        if row['employee_uuid']:
+            conn.execute('INSERT INTO crm_assignments VALUES(?,?,?,?,?,?,?)',
+                (identifier('assignment',sha+canonical(row)),row['employee_uuid'],cid,cap,snapshot['captured_at'],None,'legacy-exchange:'+sha))
+    for issue in plan['issues']:
+        conn.execute('INSERT INTO crm_migration_issues VALUES(?,?,?,?,NULL,NULL) ON CONFLICT(issue_id) DO NOTHING',
+            tuple(issue[k] for k in ('issue_id','kind','legacy_key','detail_json')))
+    receipt=dict(_review(plan),applied_at=at,baseline_replaced=False,accounts_changed=False)
+    conn.execute('INSERT INTO crm_legacy_batches VALUES(?,?,?)',(sha,snapshot['captured_at'],canonical(receipt)))
+    conn.execute("INSERT INTO crm_meta VALUES('legacy_exchange_last',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(canonical(receipt),))
+    return receipt

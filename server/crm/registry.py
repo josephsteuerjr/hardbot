@@ -326,6 +326,8 @@ def edit(principal, body):
                  principal.role, 'registry_edit', 'app', canonical([row['contract_uuid']]), canonical(payload), at, at, 'server', 'applied'))
             conn.execute('INSERT INTO crm_event_contracts VALUES(?,?)', (event, row['contract_uuid']))
             store.project(conn, row, values, event, at, 'app')
+            from registry_postgres import project_event
+            project_event(conn, event)
             events.append(event)
             updated = conn.execute('SELECT fields_json,revisions_json FROM crm_contracts WHERE contract_uuid=?', (row['contract_uuid'],)).fetchone()
             confirmed.append(dict(contract_uuid=row['contract_uuid'], values=values, revisions=json.loads(updated['revisions_json'])))

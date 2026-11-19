@@ -49,6 +49,8 @@ def connect(path=None, *, readonly=False):
 
 
 def installed(conn):
+    if getattr(conn, "dialect", None) == "postgresql":
+        return conn.execute("SELECT to_regclass('crm_primary_guard_meta')").fetchone()[0] is not None
     return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='crm_primary_guard_meta'").fetchone())
 
 
@@ -136,6 +138,8 @@ def _validate(primary, fence_id, instance_id):
 
 
 def ready(conn):
+    from registry_postgres import active
+    if active(conn):return True
     row=conn.execute("SELECT value FROM crm_meta WHERE key='primary_fence_id'").fetchone()
     if not row:return False
     instance=conn.execute("SELECT value FROM crm_meta WHERE key='instance_id'").fetchone()
@@ -146,11 +150,21 @@ def ready(conn):
     except (CRMError,sqlite3.Error,OSError):return False
 
 
+def _native_contracts(conn, ids):
+    return {r[0] for r in conn.execute("""
+        SELECT c.contract_uuid FROM public.crm_contracts c JOIN crm_registry.clients r
+          ON r.contract_id=c.legacy_id AND c.creditor_id='registry-partner:' || trim(r.partner)
+         WHERE c.contract_uuid=ANY(?)
+        """, (sorted(ids),))}
+
+
 def writable_contracts(conn, ids):
     """Batch availability for read DTOs; commands still verify both databases."""
     ids=set(ids)
     mode=conn.execute("SELECT value FROM crm_meta WHERE key='distribution_mode'").fetchone()
     if not mode or mode[0]!='cutover':return ids
+    from registry_postgres import active
+    if active(conn):return _native_contracts(conn, ids)
     if not ready(conn):return set()
     result=set();ordered=sorted(ids)
     for start in range(0,len(ordered),200):
@@ -164,6 +178,11 @@ def writable_contracts(conn, ids):
 def require_contracts(conn, ids):
     mode=conn.execute("SELECT value FROM crm_meta WHERE key='distribution_mode'").fetchone()
     if not mode or mode[0]!='cutover':return
+    from registry_postgres import active
+    if active(conn):
+        if _native_contracts(conn, ids) != set(ids):
+            raise CRMError("Договор отсутствует в рабочем реестре PostgreSQL.", "cutover_unmapped", 409)
+        return
     if not ready(conn):raise CRMError('Защита прежней системы недоступна.','primary_fence_unavailable',503)
     fence_id=conn.execute("SELECT value FROM crm_meta WHERE key='primary_fence_id'").fetchone()[0]
     ids=sorted(set(ids))
@@ -397,7 +416,9 @@ def activate(ids, *, expected_sha256=None):
 
 
 def project_pending(limit=200):
+    from registry_postgres import active
     with storage.connect() as conn:
+        if active(conn):return dict(projected=0,ready=True)
         storage.begin(conn)
         if not ready(conn):return dict(projected=0,ready=False)
         ids=[r[0] for r in conn.execute('SELECT contract_uuid FROM crm_primary_pending ORDER BY changed_at,contract_uuid LIMIT ?',(limit,))]
@@ -412,7 +433,9 @@ def project_pending(limit=200):
 
 def sync_source_conflicts(limit=200):
     """Copy the append-only source journal in bounded, restartable batches."""
+    from registry_postgres import active
     with storage.connect() as conn:
+        if active(conn):return 0
         storage.begin(conn)
         state=conn.execute("SELECT detail_json FROM crm_runtime_status WHERE worker='source-conflicts'").fetchone()
         cursor=json.loads(state[0]).get('cursor',0) if state else 0
