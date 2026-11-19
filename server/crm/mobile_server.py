@@ -1,5 +1,6 @@
 """Mobile CRM BFF and PWA. Separate namespace; never replaces legacy PWA."""
 import argparse, asyncio, base64, hashlib, json, os, re, secrets, shutil, sqlite3, ssl, time, uuid
+from contextlib import closing, contextmanager
 from datetime import datetime,timezone
 from pathlib import Path
 from urllib.parse import quote, unquote
@@ -21,8 +22,11 @@ class Sessions:
         if any(p==Path(p.anchor) or p==Path.home() for p in self.source_roots):raise RuntimeError('Use explicit portfolio directories, not an entire drive or home')
         with self.connect() as conn:
             conn.executescript('CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,sealed BLOB NOT NULL,expires REAL NOT NULL); CREATE TABLE IF NOT EXISTS ended_sessions(id TEXT PRIMARY KEY); CREATE TABLE IF NOT EXISTS files(id TEXT PRIMARY KEY,owner TEXT NOT NULL,path TEXT NOT NULL,name TEXT NOT NULL); CREATE TABLE IF NOT EXISTS downloads(id TEXT PRIMARY KEY,owner TEXT NOT NULL,sealed BLOB NOT NULL);')
+    @contextmanager
     def connect(self):
-        conn=sqlite3.connect(self.path,timeout=15);conn.row_factory=sqlite3.Row;return conn
+        with closing(sqlite3.connect(self.path,timeout=15)) as conn, conn:
+            conn.row_factory=sqlite3.Row
+            yield conn
     def read(self,sid):
         if not re.fullmatch(r'[A-Za-z0-9_-]{40,60}',sid or ''):return None
         with self.connect() as conn:row=conn.execute('SELECT * FROM sessions WHERE id=?',(sid,)).fetchone()

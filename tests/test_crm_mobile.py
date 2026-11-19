@@ -1,6 +1,7 @@
 """Mobile boundary against actual isolated canonical engines, never live data."""
 import asyncio
 from datetime import datetime,timezone
+import sqlite3
 import uuid
 import os,time,pytest
 import aiohttp
@@ -9,6 +10,13 @@ from crm.mobile_backend import SyntheticBackend
 from crm.mobile_server import create_app
 from crm.mobile_server import Sessions
 from crm.contract import CRMError
+
+def test_session_transaction_releases_its_database_handle(tmp_path):
+    store=Sessions(tmp_path,os.urandom(32))
+    with store.connect() as conn:
+        assert conn.execute('SELECT count(*) FROM sessions').fetchone()[0]==0
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute('SELECT 1')
 
 def test_finished_session_cannot_be_revived_by_a_late_request(tmp_path):
     store=Sessions(tmp_path,os.urandom(32));state=dict(expires_at=int((time.time()+60)*1000),csrf='synthetic')
