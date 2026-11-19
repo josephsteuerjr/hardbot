@@ -15,12 +15,15 @@ window.addEventListener('popstate',()=>{
   if(!route||route.owner!==current?.owner||!routeHandler)return;
   navigating=true;background(routeHandler(route).finally(()=>{navigating=false;}));
 });
-const channel=typeof BroadcastChannel!=='undefined'?new BroadcastChannel('crm-mobile-events'):null;
+const analystShell=location.pathname.startsWith('/admin/analyst/');
+const deviceScope=analystShell?'analyst-web-device':'device';
+const scopeSuffix=analystShell?'-analyst':'';
+const channel=typeof BroadcastChannel!=='undefined'?new BroadcastChannel('crm-mobile-events'+scopeSuffix):null;
 const activity=new MobileActivity(api,async(action,body,owner)=>persistEntry(owner,action,body),()=>emit({type:'storage-error',text:'Не удалось сохранить активный интервал. Оставьте окно открытым и повторите подключение.'}));
 const emit=(event:any,broadcast=false)=>{for(const fn of listeners)fn(event);if(broadcast)channel?.postMessage(event);};
 channel?.addEventListener('message',event=>{if(event.data?.owner===current?.owner)emit(event.data);else if(event.data?.type==='identity')background(initialize().then(()=>emit({type:'identity'})));});
 function authority(expected?:string){if(!current?.owner||expected&&expected!==current.owner)throw Error('Вход изменился. Ввод сохранён у исходного сотрудника.');return current.owner;}
-async function revoke(status:number,expected=current?.owner){if(status===401&&expected&&current?.owner===expected){await vault.update('device','last-state',saved=>saved?.owner===expected?null:saved);if(current?.owner!==expected)return;current=null;background(activity.stop());emit({type:'identity'});}}
+async function revoke(status:number,expected=current?.owner){if(status===401&&expected&&current?.owner===expected){await vault.update(deviceScope,'last-state',saved=>saved?.owner===expected?null:saved);if(current?.owner!==expected)return;current=null;background(activity.stop());emit({type:'identity'});}}
 async function request(path:string,body?:any):Promise<Reply>{
   const startedOwner=current?.owner;
   if(offline||!navigator.onLine)return {ok:false,status:0,text:'Нет связи. Данные сохранены на телефоне.'};
@@ -34,12 +37,22 @@ async function request(path:string,body?:any):Promise<Reply>{
   }catch{return {ok:false,status:0,text:'Ответ не получен. Исходная операция сохранена на телефоне.'};}
 }
 async function initialize(){
-  if(!await vault.get('device','installation'))await vault.put('device','installation',crypto.randomUUID());
+  if(!await vault.get(deviceScope,'installation')){
+    if(analystShell){
+      const previous=await vault.get('device','last-state');
+      if(previous?.context?.source==='legacy-analyst-web')await vault.put(deviceScope,'last-state',previous);
+    }
+    await vault.update(deviceScope,'installation',value=>value||crypto.randomUUID());
+  }
   const response=await request('boot');
-  if(response.ok){csrf=response.data.csrf;current=response.data.session||null;if(current)await vault.put('device','last-state',current);else await vault.put('device','last-state',null);}
-  else if(response.status===0){const saved=await vault.get('device','last-state');current=saved&&saved.expires_at>Date.now()?saved:null;}
-  if(current?.owner&&response.ok&&!document.hidden)await activity.start(current.owner,await vault.get('device','installation'));
-  else if(!current)await activity.stop();
+  if(response.ok){csrf=response.data.csrf;current=response.data.session||null;await vault.put(deviceScope,'last-state',current);}
+  else if(response.status===0){
+    const saved=await vault.get(deviceScope,'last-state');
+    current=saved&&saved.expires_at>Date.now()&&(saved.context?.source==='legacy-analyst-web')===analystShell?saved:null;
+  }
+  if(current?.owner&&response.ok&&!document.hidden&&current.context?.source!=='legacy-analyst-web')
+    await activity.start(current.owner,await vault.get(deviceScope,'installation'));
+  else if(!current||current.context?.source==='legacy-analyst-web')await activity.stop();
   startPolling();return current;
 }
 async function api(method:string,action:string,body?:any,query?:any):Promise<Reply>{
@@ -94,7 +107,7 @@ async function flush(){
     }
     if(current?.owner===owner&&!offline)await request('receipts',{action:'flush'});
   };
-  flushing=(navigator.locks?navigator.locks.request('crm-mobile-send',run):run()).finally(()=>{flushing=null;});return flushing;
+  flushing=(navigator.locks?navigator.locks.request('crm-mobile-send'+scopeSuffix,run):run()).finally(()=>{flushing=null;});return flushing;
 }
 async function queue(action?:string,id?:string,expected?:string){
   const owner=authority(expected);
@@ -115,7 +128,7 @@ function startPolling(){clearTimeout(liveTimer);liveTimer=setTimeout(async()=>{
       // Facts refresh in place. Evicting all reads here left a cold offline start empty.
       // Assignment/scope changes can remove authority, so those do invalidate reads.
       if(response.data.resync||response.data.cursor.assignments!==cursor.assignments||cursor.scope&&response.data.cursor.scope!==cursor.scope){await vault.clearReads(owner);await api('GET','work-portfolio');}
-      const context=await request('api',{method:'GET',action:'context'});if(context.ok&&current?.owner===owner){current.context=context.data;await vault.put('device','last-state',current);}
+      const context=await request('api',{method:'GET',action:'context'});if(context.ok&&current?.owner===owner){current.context=context.data;await vault.put(deviceScope,'last-state',current);}
     }}
     emit({type:'live',connected:response.ok,dirty:!!response.data?.dirty,resync:!!response.data?.resync,as_of:response.data?.as_of||new Date().toISOString()});
   }catch{emit({type:'live',connected:false,dirty:false});}finally{polling=false;}}
@@ -249,12 +262,19 @@ export const bridge:any={
   connect:async(input:any)=>{
     if(input.action==='refresh'){const before=current?.owner;await initialize();if(current?.owner&&before!==current.owner){navigationTarget=current.context.role==='analyst'?'registry':'portfolio';emit({type:'identity',owner:current.owner},true);}return {ok:true};}
     if(input.action==='offline'){offline=!!input.value;if(!offline)background(flush());return {ok:true};}
-    const installation=await vault.get('device','installation');
+    const installation=await vault.get(deviceScope,'installation');
     const device_id=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(installation)))).map(v=>v.toString(16).padStart(2,'0')).join('');
+    const legacyLogout=input.action==='logout'&&current?.context?.source==='legacy-analyst-web';
     const response=await request(input.action==='logout'?'logout':input.action==='password'?'password':'login',{...input,device_id,device_label:navigator.userAgent.slice(0,120)});
+    if(response.ok&&legacyLogout){
+      current=null;csrf='';clearTimeout(liveTimer);
+      await vault.put(deviceScope,'last-state',null);
+      channel?.postMessage({type:'identity'});
+      return response; // mountConnection reloads once, after the old identity is cleared.
+    }
     if(response.ok){await initialize();navigationTarget=current?.context?.role==='analyst'?'registry':current?'portfolio':'connection';emit({type:'identity',owner:current?.owner},true);background(flush());}return response;
   },workbook,document:documentFile,admin,win:()=>{},
-  diagnostics:async()=>({ok:true,data:{checks:[{title:'Хранилище телефона',code:'storage_ready',ok:!!await vault.get('device','installation')},{title:'Связь',code:navigator.onLine?'network_ready':'offline',ok:navigator.onLine}]}}),
+  diagnostics:async()=>({ok:true,data:{checks:[{title:'Хранилище телефона',code:'storage_ready',ok:!!await vault.get(deviceScope,'installation')},{title:'Связь',code:navigator.onLine?'network_ready':'offline',ok:navigator.onLine}]}}),
   renderConnection:async(host:HTMLElement)=>mountConnection(host,bridge,()=>request('boot')),
 };
 window.addEventListener('online',()=>{background(initialize().then(()=>flush()));});

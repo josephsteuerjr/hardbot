@@ -174,26 +174,29 @@ class AnalystSite:
         if request.method == "GET":
             return self.login_form()
         self.require_origin(request)
-        data = await request.post()
+        is_pwa = request.content_type == "application/json"
+        data = await (request.json() if is_pwa else request.post())
+        def feedback(message, status):
+            return web.json_response({"text":message}, status=status) if is_pwa else self.login_form(message, status)
         username, password = data.get("username"), data.get("password")
         if not isinstance(username, str) or not isinstance(password, str) or len(password) > 128:
-            return self.login_form("Введите логин и пароль.", 400)
+            return feedback("Введите логин и пароль.", 400)
         username = username.strip().casefold()
         with self.sessions() as conn:
             conn.execute("BEGIN IMMEDIATE")
             now = int(time.time())
             conn.execute("DELETE FROM failures WHERE at<=?", (now - 300,))
             if conn.execute("SELECT count(*) FROM failures").fetchone()[0] >= 8:
-                return self.login_form("Слишком много попыток. Повторите через пять минут.", 429)
+                return feedback("Слишком много попыток. Повторите через пять минут.", 429)
             verifier = self.get_verifier(conn, username)
             with self.authority() as primary:
                 allowed = self.authorized(primary, username)
             password_ok = matches(password, verifier)
             if not (password_ok and allowed):
                 conn.execute("INSERT INTO failures VALUES (?)", (now,))
-                return self.login_form("Проверьте логин и веб-пароль.", 401)
+                return feedback("Проверьте логин и веб-пароль.", 401)
             token = self.new_session(conn, now, username)
-        return self.redirect_with_session(token)
+        return self.redirect_with_session(token, is_pwa)
 
     @staticmethod
     def new_session(conn, now, username):
@@ -205,8 +208,8 @@ class AnalystSite:
         return token
 
     @staticmethod
-    def redirect_with_session(token):
-        response = web.HTTPSeeOther(location=PREFIX)
+    def redirect_with_session(token, is_pwa=False):
+        response = web.json_response({"ok":True}) if is_pwa else web.HTTPSeeOther(location=PREFIX)
         response.set_cookie(COOKIE, token, path=PREFIX, secure=True, httponly=True, samesite="Strict", max_age=SESSION_SECONDS)
         return response
 
@@ -215,7 +218,8 @@ class AnalystSite:
         if session := self.session(request):
             with self.sessions() as conn:
                 conn.execute("DELETE FROM sessions WHERE digest=?", (session[0],))
-        response = web.HTTPSeeOther(location=link("login"))
+        response = (web.json_response({"ok":True}) if request.content_type == "application/json"
+                    else web.HTTPSeeOther(location=link("login")))
         response.set_cookie(COOKIE, "", max_age=0, path=PREFIX, secure=True, httponly=True, samesite="Strict")
         return response
 
@@ -234,16 +238,19 @@ class AnalystSite:
 
     async def change_password(self, request):
         data = None
+        is_pwa = request.content_type == "application/json"
+        def feedback(message, status):
+            return web.json_response({"text":message}, status=status) if is_pwa else self.password_form(message, status)
         if request.method == "POST":
             self.require_origin(request)
-            data = await request.post()
+            data = await (request.json() if is_pwa else request.post())
         with self.authority() as primary:
             digest, username = self.require_user(request, primary)
         if data is None:
             return self.password_form()
         current, new = data.get("current"), data.get("new")
         if not (isinstance(current, str) and len(current) <= 128 and isinstance(new, str) and 14 <= len(new) <= 128):
-            return self.password_form("Введите текущий пароль и новый пароль длиной от 14 символов.", 400)
+            return feedback("Введите текущий пароль и новый пароль длиной от 14 символов.", 400)
         with self.sessions() as conn:
             conn.execute("BEGIN IMMEDIATE")
             now = int(time.time())
@@ -251,18 +258,18 @@ class AnalystSite:
                 raise web.HTTPSeeOther(location=link("login"))
             conn.execute("DELETE FROM failures WHERE at<=?", (now - 300,))
             if conn.execute("SELECT count(*) FROM failures").fetchone()[0] >= 8:
-                return self.password_form("Слишком много попыток. Повторите через пять минут.", 429)
+                return feedback("Слишком много попыток. Повторите через пять минут.", 429)
             verifier = self.get_verifier(conn, username)
             if not matches(current, verifier):
                 conn.execute("INSERT INTO failures VALUES (?)", (now,))
-                return self.password_form("Текущий веб-пароль не подошёл.", 401)
+                return feedback("Текущий веб-пароль не подошёл.", 401)
             if self.can_write(username):
                 conn.execute("UPDATE operator_credentials SET verifier=? WHERE username=?", (password_hash(new), username))
             else:
                 conn.execute("UPDATE credential SET verifier=? WHERE id=1", (password_hash(new),))
             conn.execute("DELETE FROM sessions WHERE username=?", (username,))
             token = self.new_session(conn, now, username)
-        return self.redirect_with_session(token)
+        return self.redirect_with_session(token, is_pwa)
 
     async def registry(self, request):
         phrase = request.query.get("q", "").strip()[:100]
@@ -393,9 +400,14 @@ async def web_headers(request, handler):
         response = page("Правка не сохранена", f'<p role="alert">{html(exc)}</p>', signed_in=True, status=exc.status)
     except sqlite3.Error:
         response = page("Реестр недоступен", "<p>Повторите через несколько секунд.</p>", status=503)
+    policy = "default-src 'none'; style-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+    if request.get("analyst_pwa_asset"):
+        policy = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+                  "font-src 'self'; connect-src 'self'; worker-src 'self'; object-src 'none'; frame-ancestors 'none'; "
+                  "base-uri 'self'; form-action 'self'")
     response.headers.update({
         "Cache-Control": "no-store",
-        "Content-Security-Policy": "default-src 'none'; style-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+        "Content-Security-Policy": policy,
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "same-origin",
         "X-Robots-Tag": "noindex, nofollow",
@@ -406,10 +418,17 @@ async def web_headers(request, handler):
 WEB_ASSETS = ("golos-cyrillic.woff2", "golos-latin.woff2", "golos-OFL.txt")
 
 
-def create_app(site, stylesheet, asset_dir=None):
-    app = web.Application(client_max_size=8192, middlewares=[web_headers])
+def create_app(site, stylesheet, asset_dir=None, pwa_assets=None):
+    app = web.Application(client_max_size=20*1024*1024 if pwa_assets else 8192, middlewares=[web_headers])
+    if pwa_assets:
+        if __package__:
+            from .analyst_pwa import mount_pwa
+        else:
+            from analyst_pwa import mount_pwa
+        mount_pwa(app, site, pwa_assets, PREFIX, COOKIE)
     app.add_routes([
-        web.get(PREFIX, site.registry), web.get(link("login"), site.login), web.post(link("login"), site.login),
+        web.get(link("classic") if pwa_assets else PREFIX, site.registry),
+        web.get(link("login"), site.login), web.post(link("login"), site.login),
         web.post(link("logout"), site.logout), web.get(link("password"), site.change_password),
         web.post(link("password"), site.change_password), web.get(link("summary"), site.summary),
         web.get(PREFIX + r"contract/{id:\d+}", site.contract), web.get(link("health"), site.health),
@@ -441,6 +460,7 @@ def main():
     parser.add_argument("--account-id", type=int, required=True)
     parser.add_argument("--seed", type=Path, required=True)
     parser.add_argument("--operator", type=Path)
+    parser.add_argument("--pwa-assets", type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
@@ -448,7 +468,7 @@ def main():
     site = AnalystSite(args.primary, args.state, args.origin, args.username, args.account_id, operator)
     site.initialize(args.seed.read_text(encoding="ascii").strip())
     css = Path(__file__).with_name("analyst_web.css").read_bytes()
-    web.run_app(create_app(site, css, Path(__file__).parent), host=args.host, port=args.port, access_log=None)
+    web.run_app(create_app(site, css, Path(__file__).parent, args.pwa_assets), host=args.host, port=args.port, access_log=None)
 
 
 if __name__ == "__main__":

@@ -21,13 +21,17 @@ async function refreshShell(){
   const keep=new Set(ASSETS.map(assetURL));
   await Promise.all((await cache.keys()).filter(request=>!keep.has(request.url)).map(request=>cache.delete(request)));
 }
-self.addEventListener('install',event=>event.waitUntil(refreshShell().then(()=>self.skipWaiting())));
+self.addEventListener('install',event=>event.waitUntil(Promise.all([self.skipWaiting(),refreshShell()])));
 self.addEventListener('activate',event=>event.waitUntil(caches.keys()
   .then(keys=>Promise.all(keys.filter(key=>key.startsWith(PREFIX)&&key!==CACHE).map(key=>caches.delete(key))))
   .then(()=>self.clients.claim())));
 self.addEventListener('message',event=>{
   const type=event.data?.type,reply=value=>event.ports[0]?.postMessage(value);
   if(type==='GET_VERSION'){reply({version:VERSION});return;}
+  if(type==='ACTIVATE_VERIFIED_VERSION'&&event.data.version===VERSION){
+    event.waitUntil(self.skipWaiting().then(()=>reply({ok:true,version:VERSION})));
+    return;
+  }
   if(!['APPLY_UPDATE','REFRESH_SHELL'].includes(type))return;
   event.waitUntil((async()=>{
     const clients=await self.clients.matchAll({type:'window',includeUncontrolled:true});

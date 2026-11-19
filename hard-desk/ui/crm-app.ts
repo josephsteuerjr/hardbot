@@ -311,7 +311,8 @@ async function boot() {
   const mobileTarget=crm.initialSection?.();if(mobileTarget)section=mobileTarget;
   document.body.classList.toggle('crm-analyst',context?.role==='analyst');
   if(context?.role==='analyst')analystIdentity=state.owner;
-  if(context?.role==='analyst'&&!['registry','exchange','statistics','team','connection'].includes(section))section='registry';
+  const analystWeb=context?.source==='legacy-analyst-web';
+  if(context?.role==='analyst'&&!(analystWeb?['registry','statistics','connection']:['registry','exchange','statistics','team','connection']).includes(section))section='registry';
   if(context?.role==='logistic'&&!['logistics','connection'].includes(section))section='logistics';
   if(context?.role!=='logistic'&&section==='logistics')section='portfolio';
   if (portfolioIdentity!==context?.employee_uuid) {
@@ -345,6 +346,8 @@ async function boot() {
   const manager=['manager','owner'].includes(context?.role);
   const sections = context?.role==='logistic' ? [
     ['logistics','Курьерские пулы'],['connection','Подключение'],
+  ] : analystWeb ? [
+    ['registry','Реестр'],['statistics','Показатели'],['connection','Подключение'],
   ] : context?.role==='analyst' ? [
     ['registry','Реестр'],['exchange','Обмен'],['statistics','Показатели'],['team','Команда'],['connection','Подключение'],
   ] : crm.platform==='mobile'&&context?.role==='employee' ? [
@@ -463,7 +466,14 @@ async function go(next: string) {
       await view.refresh();
       return;
     }
-    if(context?.role==='analyst'&&['registry','exchange','statistics','team','connection'].includes(next)){
+    if(context?.source==='legacy-analyst-web'&&next==='statistics'){
+      const report=await request('GET','analyst-statistics');
+      if(generation===renderGeneration)$('view').innerHTML=table(
+        ['Кредитор','Договоры','Назначено в Софт','Назначено в Хард'],
+        report.rows.map((row:any)=>[row.partner,row.contracts,row.soft,row.hard].map(value=>'<td>'+esc(value)+'</td>').join('')).map((row:string)=>'<tr>'+row+'</tr>'));
+      return;
+    }
+    if(context?.role==='analyst'&&context.source!=='legacy-analyst-web'&&['registry','exchange','statistics','team','connection'].includes(next)){
       const expectedOwner=state.owner,valid=()=>generation===renderGeneration;
       const api={...crm,api:(method:string,action:string,body?:any,query?:any)=>crm.api(method,action==='manager-report'?'analyst-report':action==='manager-statistics'?'analyst-statistics':action,body,query),
         workbook:(action:string,input?:any)=>crm.workbook(action==='manager-report'?'analyst-report':action,input),
@@ -485,7 +495,7 @@ async function go(next: string) {
         registry:async()=>{
           if(['manager','owner'].includes(context.role)){await managerRegistry();return;}
           const expectedOwner=state.owner;
-          const stop=await mountRegistry($('view'),{...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:(action?:string,id?:string)=>crm.queue(action,id,expectedOwner)},()=>generation===renderGeneration,{openPerson:id=>void openCard(id).catch(reportError)});
+          const stop=await mountRegistry($('view'),{...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:(action?:string,id?:string)=>crm.queue(action,id,expectedOwner)},()=>generation===renderGeneration,{onlyAll:context?.source==='legacy-analyst-web',openPerson:id=>void openCard(id).catch(reportError)});
           if(generation===renderGeneration)disposeSection=stop;else stop();
         },
         'active-time':activeTimePage,

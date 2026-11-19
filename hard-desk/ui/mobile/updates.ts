@@ -13,16 +13,25 @@ export function mobileUpdates(){
  });
  void navigator.serviceWorker.register('./sw.js',{scope:'./',updateViaCache:'none'}).then(registration=>{
   const later=()=>{clearTimeout(retry);if(target!==loaded)retry=setTimeout(()=>void apply(),1000);};
+  const activateWaiting=()=>{
+    if(target!==loaded)registration.waiting?.postMessage({type:'ACTIVATE_VERIFIED_VERSION',version:target});
+  };
   const apply=async()=>{
    if(target===loaded||applying||document.hidden)return;
+   activateWaiting();
    if(busy()){later();return;}
    applying=true;
    try{
-    const worker=registration.active,expected=target;
-    if(!worker||worker.state!=='activated'||await version(worker)!==expected)return;
+    const expected=target;
+    let worker=registration.active;
+    if(!worker||worker.state!=='activated'||await version(worker)!==expected){
+      worker=registration.waiting;
+      if(!worker||worker.state!=='installed'||await version(worker)!==expected)return;
+    }
     await settled();
     // Recheck after asynchronous storage writes: a new form may have opened meanwhile.
-    if(document.hidden||busy()||target!==expected||registration.active!==worker)return;
+    if(document.hidden||busy()||target!==expected||
+       (registration.active!==worker&&registration.waiting!==worker))return;
     const url=new URL(location.href);url.searchParams.set('_crm_refresh',expected);
     history.replaceState(history.state,'',url.href);location.reload();
    }catch{/* Keep the current document and durable work if storage or the worker is unavailable. */}
@@ -34,11 +43,13 @@ export function mobileUpdates(){
     const response=await fetch('./BUILD.json',{cache:'no-store'});
     if(!response.ok)return;const build=await response.json();
     if(!/^[a-f0-9]{16}$/.test(build.version))return;
-    target=build.version;await registration.update();await apply();
+    target=build.version;activateWaiting();await registration.update();activateWaiting();await apply();
    }catch{/* Offline startup keeps the verified cached shell. */}
    finally{checking=false;}
   };
-  registration.addEventListener('updatefound',()=>registration.installing?.addEventListener('statechange',()=>void apply()));
+  registration.addEventListener('updatefound',()=>registration.installing?.addEventListener('statechange',()=>{
+   activateWaiting();void apply();
+  }));
   navigator.serviceWorker.addEventListener('controllerchange',()=>void apply());
   document.addEventListener('visibilitychange',()=>{if(!document.hidden)void check();});
   window.addEventListener('pageshow',()=>void check());window.addEventListener('online',()=>void check());window.addEventListener('focus',()=>void check());
