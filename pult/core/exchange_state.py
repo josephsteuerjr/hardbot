@@ -23,6 +23,10 @@ KEEP = 3
 FALLBACK_ERRORS = {"delta_base_unknown", "delta_mismatch", "delta_and_sheets"}
 
 
+class ImportOutcomeUnknown(RuntimeError):
+    """The apply request was sent; keep its preview and confirm the receipt."""
+
+
 def enabled() -> bool:
     return os.getenv("HARD_EXCHANGE_DELTA", "1").strip() not in ("0", "false", "no")
 
@@ -64,6 +68,17 @@ def latest(sheet: str) -> tuple[str, list[list]] | None:
     return row[0], json.loads(gzip.decompress(row[1]))
 
 
+def _latest_digest(sheet: str) -> str | None:
+    with _conn() as conn:
+        row = conn.execute("SELECT digest FROM grids WHERE sheet=? ORDER BY at DESC LIMIT 1",
+                           (sheet,)).fetchone()
+    return row[0] if row else None
+
+
+def _size(n: int) -> str:
+    return f"{n / 1024:.1f} КБ" if n >= 1024 else f"{n} Б"
+
+
 def post_import(admin, path: str, body: dict, *, sheet: str, timeout: float = 180,
                 log=lambda s: None):
     """POST импорта/предпросмотра: разницей, если есть база и это выгодно,
@@ -72,14 +87,27 @@ def post_import(admin, path: str, body: dict, *, sheet: str, timeout: float = 18
     grid = next((s.get("grid") for s in sheets
                  if isinstance(s, dict) and s.get("name") == sheet), None)
     answer = None
+    known = None
     if enabled() and isinstance(grid, list):
-        base = latest(sheet)
-        if base:
-            delta = grid_delta.make_delta(base[1], grid)
-            full_n = len(grid_delta.canonical(grid))
-            delta_n = len(json.dumps(delta, ensure_ascii=False))
+        known = _latest_digest(sheet)
+        if known:
+            raw = grid_delta.canonical(grid)
+            import hashlib
+            digest = hashlib.sha256(raw).hexdigest()
+            if known == digest:
+                delta = {"base": known, "digest": digest, "rows": len(grid),
+                         "ops": [["=", len(grid)]]}
+            else:
+                base = latest(sheet)
+                delta = grid_delta.make_delta(base[1], grid) if base else None
+            full_n = len(raw)
+            delta_n = len(grid_delta.canonical(delta)) if delta else full_n
             if delta_n < full_n // 2:
-                log(f"Шлю разницей: {delta_n // 1024} КБ вместо {full_n // 1024} КБ")
+                if known == digest:
+                    log("Данные книги уже переданы. Сервер проверяет импорт." if path.endswith("/preview.json")
+                        else "Данные книги уже переданы. Жду результат применения на сервере.")
+                else:
+                    log(f"Отправляю разницу книги, {_size(delta_n)} вместо {_size(full_n)} до сжатия.")
                 slim = {k: v for k, v in body.items() if k != "sheets"}
                 slim["sheets_delta"] = delta
                 answer = admin("POST", path, slim, timeout=timeout)
@@ -90,8 +118,9 @@ def post_import(admin, path: str, body: dict, *, sheet: str, timeout: float = 18
         answer = admin("POST", path, body, timeout=timeout)
     if (isinstance(grid, list) and isinstance(answer, dict) and not answer.get("error")
             and answer.get("delta_base")):
-        try:
-            remember(grid, sheet)
-        except Exception:  # noqa: BLE001 — память пульта не важнее импорта
-            pass
+        if answer["delta_base"] != known:
+            try:
+                remember(grid, sheet)
+            except Exception:  # noqa: BLE001 — память пульта не важнее импорта
+                pass
     return answer

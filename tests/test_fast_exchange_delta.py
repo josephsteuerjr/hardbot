@@ -186,3 +186,20 @@ def test_pult_sends_full_when_delta_does_not_pay_off_or_is_off(monkeypatch, tmp_
     monkeypatch.setenv("HARD_EXCHANGE_DELTA", "0")
     xs.post_import(adm, "/p", {**BODY, "sheets": [{"name": SHEET, "grid": other}]}, sheet=SHEET)
     assert adm.sent == ["full", "full", "full"]
+
+
+def test_identical_import_reuses_preview_grid_without_diff(monkeypatch, tmp_path):
+    monkeypatch.setenv("HARD_EXCHANGE_DB", str(tmp_path / "x.sqlite"))
+    monkeypatch.setenv("HARD_EXCHANGE_DELTA", "1")
+    admin = _Admin()
+    body = {**BODY, "sheets": [{"name": SHEET, "grid": _grid()}]}
+    xs.post_import(admin, "/admin/import/preview.json", body, sheet=SHEET)
+
+    def unexpected_diff(*args):
+        pytest.fail("An unchanged grid should not be diffed again")
+
+    monkeypatch.setattr(gd, "make_delta", unexpected_diff)
+    messages = []
+    xs.post_import(admin, "/admin/import.json", body, sheet=SHEET, log=messages.append)
+    assert admin.sent == ["full", "delta"]
+    assert messages == ["Данные книги уже переданы. Жду результат применения на сервере."]

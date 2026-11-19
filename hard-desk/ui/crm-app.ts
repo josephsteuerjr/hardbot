@@ -26,7 +26,7 @@ type API = {
   diagnostics?(repair?:boolean):Promise<any>;
   diagnosticsReport?():Promise<any>;
   queue(action?: string, id?: string,expectedOwner?:string): Promise<any>;
-  onChange?(callback: (event: {type: 'queue' | 'identity' | 'live' | 'storage-error';text?:string;dirty?:boolean;as_of?:string;connected?:boolean}) => void): () => void;
+  onChange?(callback: (event: {type: 'queue' | 'identity' | 'live' | 'storage-error';text?:string;dirty?:boolean;as_of?:string;connected?:boolean;pending?:boolean}) => void): () => void;
   draft(key: string, value?: any, expectedOwner?:string): Promise<any>;
   telemetry(event: any): Promise<any>;
   connect(input: any): Promise<any>;
@@ -1681,7 +1681,9 @@ crm.onChange?.(event=>{
     void boot().catch(reportError);
   }else if(event.type==='live'){
     const environment=context?.distribution?.environment==='isolated'?'Изолированный стенд · ':state?.connection?.mode==='synthetic'?'Синтетические данные · ':'';
-    $('connection').textContent=environment+(event.connected?'Подтверждённая связь · '+date(event.as_of):`Связь не подтверждена · ввод сохранён ${savedOn}`);
+    $('connection').textContent=environment+(event.connected
+      ? event.pending ? 'Сервер отвечает · обрабатывает обмен' : 'Подтверждённая связь · '+date(event.as_of)
+      : `Связь не подтверждена · ввод сохранён ${savedOn}`);
     if(event.dirty){
       if(activePerson)scheduleSync(true);
       else if(section==='portfolio')void portfolio().catch(reportError);

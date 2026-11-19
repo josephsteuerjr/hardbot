@@ -69,20 +69,27 @@ def month_columns(header):
     return result
 
 
-def remember_monthly(conn, cid, raw, columns, partner):
-    now = datetime.now(timezone.utc).isoformat(timespec='seconds')
+MONTHLY_TOTAL_UPSERT = '''INSERT INTO registry_monthly_totals VALUES(?,?,?,?,?,?)
+    ON CONFLICT(contract_id,month) DO UPDATE SET amount=excluded.amount,
+    currency=excluded.currency,source_column=excluded.source_column,
+    observed_at=excluded.observed_at'''
+
+
+def monthly_rows(cid, raw, columns, partner, observed_at):
+    currency = debt.unit([partner])
     for index, (month, title) in columns.items():
         cell = raw[index] if index < len(raw) else None
         # In this registry template a present monthly payment column with an
         # empty cell means no payment, as in db.paid_months. Missing columns
         # and missing contract/month snapshots never turn into known zero.
         value = Decimal('0.00') if cell is None or str(cell).strip() == '' else amount(cell)
-        conn.execute('''INSERT INTO registry_monthly_totals VALUES(?,?,?,?,?,?)
-            ON CONFLICT(contract_id,month) DO UPDATE SET amount=excluded.amount,
-            currency=excluded.currency,source_column=excluded.source_column,
-            observed_at=excluded.observed_at''',
-            (cid, month, str(value) if value is not None else None,
-             debt.unit([partner]), title, now))
+        yield (cid, month, str(value) if value is not None else None,
+               currency, title, observed_at)
+
+
+def remember_monthly(conn, cid, raw, columns, partner):
+    observed_at = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    conn.executemany(MONTHLY_TOTAL_UPSERT, monthly_rows(cid, raw, columns, partner, observed_at))
 
 
 def row_data(row):

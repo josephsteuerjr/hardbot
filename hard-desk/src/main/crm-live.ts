@@ -18,13 +18,18 @@ export class CrmLive {
           const next=result.data.cursor;
           if(JSON.stringify(next)!==JSON.stringify(cursor))this.save(owner,next);
           cursor=next;failures=0;
-          this.notify({type:'live',dirty:!!result.data.dirty,resync:!!result.data.resync,as_of:result.data.as_of,connected:true});
+          this.notify({type:'live',dirty:!!result.data.dirty,resync:!!result.data.resync,
+            pending:!!result.data.pending,as_of:result.data.as_of,connected:true});
         }else{
           failures++;delay=Math.min(4000,1000*2**Math.min(failures,2));
-          this.notify({type:'live',dirty:false,connected:false});
-          if([401,403,404].includes(result.status))return;
+          const denied=[401,403,404].includes(result.status);
+          if(denied || failures>=3)this.notify({type:'live',dirty:false,connected:false});
+          if(denied)return;
         }
-      }catch{failures++;delay=4000;this.notify({type:'live',dirty:false,connected:false});}
+      }catch{
+        failures++;delay=4000;
+        if(failures>=3)this.notify({type:'live',dirty:false,connected:false});
+      }
       if(generation===this.generation && owner===this.current())this.timer=setTimeout(tick,delay);
     };
     this.timer=setTimeout(tick,50);

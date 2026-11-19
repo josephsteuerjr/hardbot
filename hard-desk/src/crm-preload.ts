@@ -17,7 +17,7 @@ contextBridge.exposeInMainWorld("crm", {
   diagnosticsReport: () => ipcRenderer.invoke('crm:diagnostics-report'),
   queue: (action?: string, id?: string,expectedOwner?:string) =>
     ipcRenderer.invoke("crm:queue", action, id,expectedOwner),
-  onChange: (callback: (event: {type: 'queue' | 'identity' | 'live';dirty?:boolean;as_of?:string;connected?:boolean}) => void) => {
+  onChange: (callback: (event: {type: 'queue' | 'identity' | 'live';dirty?:boolean;as_of?:string;connected?:boolean;pending?:boolean}) => void) => {
     if (typeof callback !== 'function') throw new Error('Нужен обработчик изменения CRM.');
     const listener = (_: unknown, event: any) => {
       if (event?.type === 'queue' || event?.type === 'identity') callback({type: event.type});

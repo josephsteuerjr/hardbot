@@ -6509,6 +6509,14 @@ async def _admin_import_authorize(request: web.Request) -> web.Response:
                               "authorization": authorization})
 
 
+async def _admin_import_status(request: web.Request) -> web.Response:
+    await asyncio.to_thread(_admin, request)
+    digest = request.query.get("proof_digest", "")
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        raise web.HTTPBadRequest(text="Некорректный номер квитанции импорта.")
+    return web.json_response(await asyncio.to_thread(db.import_receipt_result, digest))
+
+
 async def _admin_import_json(request: web.Request) -> web.Response:
     """Импорт published master: гриды уже распарсены клиентом (calamine).
 
@@ -7936,6 +7944,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/admin/import.json", _admin_import_json)
     app.router.add_post("/admin/import/preview.json", _admin_import_preview_json)
     app.router.add_post("/admin/import/authorize.json", _admin_import_authorize)
+    app.router.add_get("/admin/import/status.json", _admin_import_status)
     app.router.add_get("/admin/registry_columns.json", _admin_registry_columns)
     app.router.add_post("/admin/registry_columns.json",
                         _admin_registry_columns_save)

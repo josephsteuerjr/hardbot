@@ -327,9 +327,10 @@ def start_job(kind: str, fn, *, request_id=None, fingerprint=None, before_start=
             job["result"] = fn(say)
             job["state"] = completion_state(job['result']) if kind=='enr_apply' else 'done'
         except Exception as exc:  # noqa: BLE001
-            job["state"] = "uncertain" if kind == "mail" else "failed"
+            from pult.core.exchange_state import ImportOutcomeUnknown
+            job["state"] = "uncertain" if kind == "mail" or isinstance(exc, ImportOutcomeUnknown) else "failed"
             job["error"] = str(exc) or type(exc).__name__
-            job["log"].append(traceback.format_exc()[-1200:])
+            traceback.print_exc()
         finally:
             try:
                 job_journal().save(job, profile, fingerprint)

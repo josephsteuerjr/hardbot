@@ -130,6 +130,12 @@ def operation_lock(principal, operation):
     return 'operation:' + str(principal.actor_uid) + ':' + operation
 
 
+def try_maintenance_barrier(conn):
+    """Take the exclusive snapshot barrier immediately, or report an active writer."""
+    return conn.execute("SELECT pg_try_advisory_xact_lock(?)",
+                        (_lock_key('maintenance'),)).fetchone()[0]
+
+
 def document_root():
     if postgres_enabled():
         value = os.environ.get('HARD_CRM_DOCUMENTS')

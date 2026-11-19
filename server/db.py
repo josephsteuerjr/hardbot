@@ -5054,18 +5054,20 @@ def _remember_registry_payments(conn) -> None:
     import debt
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     echoes = _manual_payment_echoes(conn)
+    payments = []
     for row in conn.execute("SELECT contract_id, last_payment_date, last_payment_sum, partner FROM clients "
                             "WHERE last_payment_date IS NOT NULL AND last_payment_sum IS NOT NULL").fetchall():
         day = _as_date(row["last_payment_date"])
         amount = registry_payment_amount(row["last_payment_sum"])
         if day is None or amount is None:
             continue
-        if (row["contract_id"],day.isoformat(),amount,debt.unit([row["partner"]])) in echoes:
+        currency = debt.unit([row["partner"]])
+        if (row["contract_id"],day.isoformat(),amount,currency) in echoes:
             continue
-        conn.execute("INSERT INTO registry_payments VALUES (?,?,?,?,?) "
+        payments.append((row["contract_id"], day.isoformat(), currency, amount, stamp))
+    conn.executemany("INSERT INTO registry_payments VALUES (?,?,?,?,?) "
                      "ON CONFLICT(contract_id,paid_at,currency) DO UPDATE SET amount=excluded.amount "
-                     "WHERE registry_payments.amount != excluded.amount",
-                     (row["contract_id"], day.isoformat(), debt.unit([row["partner"]]), amount, stamp))
+                     "WHERE registry_payments.amount != excluded.amount", payments)
 
 
 def registry_payments_for(contract_ids) -> list[dict]:
@@ -8020,6 +8022,20 @@ def import_authorization_status(proof_digest: str) -> dict | None:
     return dict(row) if row is not None else None
 
 
+def import_receipt_result(proof_digest: str) -> dict:
+    with registry_connect(readonly=True) as conn:
+        row = conn.execute(
+            "SELECT status,consumed_at,result_json,result_digest FROM import_receipts WHERE proof_digest=?",
+            (proof_digest,),
+        ).fetchone()
+    if not row or row["status"] != "consumed":
+        return {"status": row["status"] if row else "absent"}
+    result = json.loads(row["result_json"])
+    if _json_digest(result) != row["result_digest"]:
+        raise ValueError("Квитанция импорта не прошла проверку.")
+    return {"status": "consumed", "consumed_at": row["consumed_at"], "result": result}
+
+
 def clear_pending_import_authorizations() -> int:
     """Invalidate pre-reset permissions while preserving consumed audit/head."""
 
@@ -9296,6 +9312,8 @@ def import_grid(
         # Пишется одной пачкой после разбора — в ТОЙ ЖЕ транзакции, что и смена
         # (preview откатывает события вместе со всем импортом).
         assignment_events: list[tuple[str, str, str, str | None, str]] = []
+        monthly_snapshots = []
+        monthly_observed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         # Визит — на человека: принятая правка разносится по всем его договорам
         # с тем же визитом, иначе карточка/дайджест (первый КД человека) её не
         # увидят, а файлы разъедутся построчно.
@@ -9504,30 +9522,31 @@ def import_grid(
             # и доставка в личную книгу не доказывают свежесть общего master.
             # Предыдущая строка могла уже применить правку того же звонка
             # ко второму КД человека. Читаем этот overlay внутри транзакции.
-            call_row = conn.execute("SELECT * FROM clients WHERE contract_id=?", (cid,)).fetchone() if row0 is not None else None
+            call_row = row0
+            if row0 is not None and (cid in report["soft_office_applied"] or cid in fresh_overlays):
+                call_row = conn.execute("SELECT * FROM clients WHERE contract_id=?", (cid,)).fetchone()
             call_snapshot = bot_call_snapshot(call_row) if call_row is not None else None
             call_protected = set()
             if call_snapshot:
                 call_keys = set(SOFT_SNAPSHOT_KEYS[:3])
                 call_keys.update(k for k in COMMON_RESULT_KEYS if call_owns_field(call_row, k))
                 call_protected = call_keys
-                delivered = {r["field_key"]: r for r in conn.execute(
-                    "SELECT * FROM enrichment_ledger WHERE contract_id=?", (cid,))}
-                anchored = (allow_soft_office_edits and
-                            str(data.get("soft_comm_date") or "") == call_fact_day(call_row) and
-                            any(k in delivered and
-                               delivered[k]["visit_date"] == call_fact_day(call_row) and
-                               str(delivered[k]["value"] or "") == str(call_snapshot.get(k) or "") and
-                               str(data.get(k) or "") == str(call_snapshot.get(k) or "") and
-                               str(data.get(k) or "").strip()
-                               for k in SOFT_SNAPSHOT_KEYS[:3]))
                 # A repeated status/day does not prove that the file saw the
                 # current result. Day-only timestamps cannot order same-day edits.
                 latest_day = max((_as_date(call_field_day(call_row, key)) or _as_date(call_fact_day(call_row)))
                                  for key in call_keys)
                 manual_after_call = bool(incoming_call_edit_day and latest_day
                                          and latest_day < incoming_call_edit_day <= workday.today())
-                anchored = anchored and manual_after_call
+                fact_day = call_fact_day(call_row)
+                anchored = False
+                if (allow_soft_office_edits and manual_after_call
+                        and str(data.get("soft_comm_date") or "") == fact_day):
+                    delivered = {r["field_key"]: r for r in conn.execute(
+                        "SELECT * FROM enrichment_ledger WHERE contract_id=?", (cid,))}
+                    anchored = any(k in delivered and delivered[k]["visit_date"] == fact_day and
+                                   str(delivered[k]["value"] or "") == str(call_snapshot.get(k) or "") and
+                                   str(data.get(k) or "") == str(call_snapshot.get(k) or "") and
+                                   str(data.get(k) or "").strip() for k in SOFT_SNAPSHOT_KEYS[:3])
                 edits = {}
                 for key in call_keys:
                     value = data.pop(key, None)
@@ -9841,8 +9860,9 @@ def import_grid(
             )
             report["updated" if is_update else "inserted"] += 1
             if monthly_columns:
-                monthly_partner=conn.execute('SELECT partner FROM clients WHERE contract_id=?',(cid,)).fetchone()[0]
-                employee_workspace.remember_monthly(conn, cid, monthly_raw[cid], monthly_columns, monthly_partner)
+                monthly_partner = data.get("partner", row0["partner"] if row0 is not None else None)
+                monthly_snapshots.extend(employee_workspace.monthly_rows(
+                    cid, monthly_raw[cid], monthly_columns, monthly_partner, monthly_observed_at))
             # Журнал закреплений: событие снимается с ИТОГОВОГО data — после
             # всех шлюзов (канонизация имени, ручное снятие, офисные правки).
             prev_owner = (existing[cid]["responsible"] or "").strip() \
@@ -10191,6 +10211,8 @@ def import_grid(
         if preview_only:
             conn.rollback()
         else:
+            if monthly_snapshots:
+                conn.executemany(employee_workspace.MONTHLY_TOTAL_UPSERT, monthly_snapshots)
             if require_source_proof:
                 _consume_import_authorization(conn, verified_source, report)
             _remember_registry_payments(conn)

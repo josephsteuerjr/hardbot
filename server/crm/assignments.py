@@ -176,7 +176,7 @@ def watermark(conn):
 
 
 @contextmanager
-def snapshot():
+def snapshot(*, wait=True):
     """Establish a gap-free read snapshot under a *short* writer barrier.
 
     PostgreSQL REPEATABLE READ keeps this snapshot after the barrier is released.
@@ -185,8 +185,11 @@ def snapshot():
     with storage.connect(readonly=True) as reader:
         if storage.is_postgres(reader):
             with storage.connect() as gate:
-                storage.begin(gate)
-                mark=watermark(reader)
+                if wait:
+                    storage.begin(gate)
+                    mark=watermark(reader)
+                else:
+                    mark=watermark(reader) if storage.try_maintenance_barrier(gate) else None
         else:
             reader.execute('BEGIN')
             mark=watermark(reader)
@@ -518,7 +521,10 @@ def changes(principal, *, assignments='0', facts='0', scope=''):
     try:cursor=dict(assignments=int(assignments),facts=int(facts))
     except (TypeError,ValueError):raise CRMError('Некорректный курсор.')
     if min(cursor.values())<0:raise CRMError('Некорректный курсор.')
-    with snapshot() as (conn,mark):
+    with snapshot(wait=False) as (conn,mark):
+        if mark is None:
+            return dict(cursor=dict(cursor, scope=scope), resync=False, dirty=False,
+                        pending=True, as_of=now())
         return _changes(conn,principal,cursor,scope)
 
 

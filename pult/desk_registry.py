@@ -24,6 +24,7 @@ from pult.core import enrichment as en  # noqa: E402
 from pult.core import header_map as hm  # noqa: E402
 import exchange_contract as _xc  # noqa: E402 — контракт обмена (server/)
 from pult.core import exchange_state as xs  # noqa: E402
+from pult.core.api import AccessRevoked  # noqa: E402
 from pult.core import registry_import as ri  # noqa: E402
 from pult.core.constants import (  # noqa: E402
     LIMITED_TEST_ENRICH_DISABLED_MESSAGE,
@@ -266,8 +267,23 @@ def imp_apply(body, *, admin, start_job, settings, **_):
         if enrich._sha256_file(Path(book['path']))!=book['file_sha256']:
             S['preview']=None
             raise RuntimeError('Общий реестр изменился до отправки. Сделайте новый предпросмотр; импорт не отправлен.')
-        d = xs.post_import(admin, "/admin/import.json", pv["body"],
-                           sheet=_xc.WORKBOOK_SHEET_NAME, timeout=180, log=say)
+        try:
+            d = xs.post_import(admin, "/admin/import.json", pv["body"],
+                               sheet=_xc.WORKBOOK_SHEET_NAME, timeout=300, log=say)
+        except (RuntimeError, OSError) as error:
+            if isinstance(error, AccessRevoked):
+                raise
+            say("Ответ на применение прервался. Проверяю квитанцию сервера…")
+            try:
+                receipt = admin("GET", "/admin/import/status.json?proof_digest=" + meta["proof_digest"], timeout=10)
+            except (RuntimeError, OSError):
+                receipt = {}
+            if receipt.get("status") != "consumed" or not isinstance(receipt.get("result"), dict):
+                raise xs.ImportOutcomeUnknown(
+                    "Квитанция применения пока не получена. Сохранён предпросмотр этого импорта."
+                ) from error
+            d = receipt["result"]
+            say("Применение подтверждено квитанцией сервера.")
         if isinstance(d, dict) and d.get("error"):
             d = {**d, "_proof_digest": meta["proof_digest"], "_source_kind": meta["source_kind"],
                  "_registered": bool(registered and registered.get("ok"))}
