@@ -69,10 +69,16 @@ def test_payment_reaches_excel_without_inventing_a_call(world,monkeypatch):
  columns=[f for f in schema if f['key'] in keys]
  book=[[f['title'] for f in columns],['софт']*len(columns),
        ['A' if f['key']=='contract_id' else None for f in columns]]
- plan=enrich.build_plan(book,schema,[{**exported,'_profile':'soft'}],ledger={},
-                       since=db.workday.today().isoformat(),until=db.workday.today().isoformat())
- assert {columns[col]['key'] for _,col,_,_ in plan['writes']}=={'soft_comment'}
- assert '1500.5' in plan['writes'][0][2]
+ options=dict(ledger={},since=db.workday.today().isoformat(),until=db.workday.today().isoformat())
+ with pytest.raises(ValueError,match='обе колонки'):
+  enrich.build_plan(book,schema,[{**exported,'_profile':'soft'}],**options)
+ for field in schema:
+  if field['key'] in ('last_payment_sum','last_payment_date'):
+   columns.append(field);book[0].append(field['title']);book[1].append('софт');book[2].append(None)
+ plan=enrich.build_plan(book,schema,[{**exported,'_profile':'soft'}],**options)
+ changes={columns[col]['key']:value for _,col,value,_ in plan['writes']}
+ assert set(changes)=={'soft_comment','last_payment_date','last_payment_sum'}
+ assert '1500.5' in changes['soft_comment']
  assert [r['contract_id'] for r in db.registry_rows(employees=['S1'],visit_from=db.workday.today(),visit_to=db.workday.today())]==['A']
 
 def test_payment_survives_import_and_does_not_duplicate_comment(world,monkeypatch):

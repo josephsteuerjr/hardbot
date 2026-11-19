@@ -25,7 +25,8 @@ let deliveryOperation: any = null;
 let queueDetailsOpen = false;
 let queueReconciliation: any = null;
 let hiddenQueueRun = '';
-let embeddedTabs:string[]|undefined;
+type RegistryTab = typeof st.tab;
+let embeddedTab:RegistryTab|undefined;
 let presentedQueueRun = '';
 const queueChoices = new Map<string,string>();
 function queueChoiceKey(op: any, book: any, index: number): string { return JSON.stringify([op.id, book.review_token, book.ordinal, index]); }
@@ -158,7 +159,7 @@ async function job(path: string, body: unknown, log?: (s: string) => void): Prom
 
 function tabs(): string {
   return chipsHtml([["import", "Импорт реестра"], ["enrich", "Обогащение книг"], ["columns", "Колонки реестра"],
-    ["export", "Выгрузки и период"], ["recalled", "Отозванные"]].filter(([k])=>!embeddedTabs||embeddedTabs.includes(k)).map(([k, t]) => ({ key: k, text: t, on: st.tab === k })), "tab");
+    ["export", "Выгрузки и период"], ["recalled", "Отозванные"]].map(([k, t]) => ({ key: k, text: t, on: st.tab === k })), "tab");
 }
 
 function pairs(p: [string, unknown][]): string {
@@ -285,7 +286,7 @@ function conflictTable(list: any[], decide: boolean, labels: Record<string, stri
 
 async function enrichTab(el: HTMLElement) {
   if ((await hard.state()).platform === "mobile") {
-    el.innerHTML = `<h2>Обогащение исходных книг</h2><p>Откройте «Обмен → Импорт и обогащение» в Windows-программе «Аналитик». Изменение исходных XLSB/XLSM выполняется на компьютере с Excel.</p><p>На телефоне можно импортировать реестр и скачать новые XLSX в «Книгах CRM».</p>`;
+    el.innerHTML = `<h2>Обогащение исходных книг</h2><p>Откройте «Обмен → Обогащение книг» в Windows-программе «Аналитик». Изменение исходных XLSB/XLSM выполняется на компьютере с Excel.</p><p>На телефоне можно импортировать реестр и скачать новые XLSX в «Книгах CRM».</p>`;
     return;
   }
   st.enr ||= await local("/enr/state");
@@ -333,7 +334,16 @@ async function enrichTab(el: HTMLElement) {
   el.querySelector("[data-base]")?.addEventListener("click", guard(async () => {
     const p = await hard.pick("folder", { title: "Папка, в которой лежат папки республик", defaultPath: e.base || undefined });
     if (!p) return;
-    st.enr = await local("/enr/base", { path: p }); st.since = st.enr.since || ""; st.until = st.enr.until || ""; redraw();
+    st.enr = await local("/enr/base", { path: p });
+    if (st.enr.base !== e.base) {
+      st.scan = null;
+      st.matched = [];
+      st.enrSel.clear();
+      st.check = null;
+      st.decisions = {};
+      st.applyRes = null;
+    }
+    st.since = st.enr.since || ""; st.until = st.enr.until || ""; redraw();
   }));
   el.querySelector("[data-scan]")?.addEventListener("click", guard(async () => {
     const out = el.querySelector("#e-scan-out")!;
@@ -489,7 +499,7 @@ async function recalledTab(el: HTMLElement, limit = 500) {
 async function draw(root: HTMLElement) {
   activeRoot = root;
   clearTimeout(queueTimer); const generation = ++queueGeneration;
-  root.innerHTML = `<div class="toolbar">${tabs()}</div><div data-delivery-queue></div><p class="notice" data-registry-progress role="status" hidden></p><div id="rtab"><div class="skeleton"></div></div>`;
+  root.innerHTML = `${embeddedTab ? '' : `<div class="toolbar">${tabs()}</div>`}<div data-delivery-queue></div><p class="notice" data-registry-progress role="status" hidden></p><div id="rtab"><div class="skeleton"></div></div>`;
   root.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach((b) => b.addEventListener("click", () => { st.tab = b.dataset.tab as typeof st.tab; void draw(root); }));
   const el = root.querySelector<HTMLElement>("#rtab")!;
   try {
@@ -513,11 +523,11 @@ export const registry: Section = {
   render(root) { return draw(root); },
 };
 
-export async function mountRegistryTools(root:HTMLElement,onlyColumns=false):Promise<()=>void>{
-  embeddedTabs=onlyColumns?['columns']:['import','enrich','export','recalled'];
-  if(!embeddedTabs.includes(st.tab))st.tab=onlyColumns?'columns':'import';
+export async function mountRegistryTools(root:HTMLElement,tab:RegistryTab):Promise<()=>void>{
+  embeddedTab=tab;
+  st.tab=tab;
   await draw(root);
-  return()=>{if(activeRoot===root){activeRoot=null;queueGeneration++;clearTimeout(queueTimer);}embeddedTabs=undefined;};
+  return()=>{if(activeRoot===root){activeRoot=null;queueGeneration++;clearTimeout(queueTimer);embeddedTab=undefined;}};
 }
 
 // «Приоритет выезда»: очередь по весам — долг, свежесть, кластер.

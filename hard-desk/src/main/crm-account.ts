@@ -29,6 +29,7 @@ export function accountState(){
 async function request(path:string,body?:unknown,credential?:Account){
   const response=await fetchBuffered((url,init)=>net.fetch(url,init),PRIMARY+path,{
     method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json','X-Client-Version':app.getVersion(),
+      ...(credential?.kind === 'analyst' ? {'X-CRM-Entry':'analyst'} : {}),
       ...(credential?{[credential.kind==='employee'?'X-App-Token':'X-Pult-Token']:credential.credential}:{} )},
     ...(body===undefined?{}:{body:JSON.stringify(body)})},20000);
   const result=await response.json();

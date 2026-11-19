@@ -24,3 +24,7 @@ GRANT UPDATE (employee_uuid,revision,updated_at,operation_id,source,baseline_emp
  ON crm_assignment_heads TO crm_exchange;
 GRANT INSERT ON crm_assignment_changes,crm_task_grant_revocations TO crm_exchange;
 GRANT USAGE ON SEQUENCE crm_assignment_changes_sequence_seq TO crm_exchange;
+GRANT SELECT, INSERT ON crm_monthly_totals TO crm_exchange;
+GRANT UPDATE (amount,currency,source_column,observed_at,source_sha256) ON crm_monthly_totals TO crm_exchange;
+GRANT INSERT ON crm_people,crm_contracts,crm_authority_rows TO crm_exchange;
+GRANT UPDATE (legacy_id) ON crm_contracts TO crm_exchange;

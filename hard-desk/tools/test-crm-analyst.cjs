@@ -72,6 +72,6 @@ async function until(fn,label){fs.appendFileSync(path.join(qa,'stages.txt'),labe
   await js('document.querySelector("#demo-role").value="manager"');await click('#demo-connect');
   await until(()=>exists('[data-person]'),'manager after analyst reload');
   const deniedRole=await js('window.crm.state().then(s=>window.crm.admin("local",["/admin",{method:"GET",path:"/admin/accounts.json"}],s.owner)).then(r=>r.ok===false,()=>true)');assert(deniedRole);
-  assert.deepEqual(await js('[...document.querySelectorAll("nav [data-section]")].map(b=>b.innerText)'),['Портфель','Реестр','Показатели','Команда','Скрипты и задачи','Подключение']);
+  assert.deepEqual(await js('[...document.querySelectorAll("nav [data-section]")].map(b=>b.innerText)'),['Портфель','Реестр','Показатели','Команда','Скрипты и задачи','Обмен','Подключение']);
   fs.writeFileSync(path.join(qa,'RESULT.json'),JSON.stringify({passed:true,actualMain:true,actualBackend:true,realPrimaryAdminApi:true,navigationFive:true,nativeRegistry:true,cardEdit:true,versionedWorkbookRoundtrip:true,lostImportAckExactReplay:true,report:true,nativeExcel:true,teamAccounts:true,passwordReset:true,accountDelete:true,forbiddenProfileSwitch:true,managerPreserved:true},null,2));app.quit();
 }catch(e){fs.writeFileSync(path.join(qa,'FAIL.txt'),e.stack||String(e));if(win){try{fs.writeFileSync(path.join(qa,'failure.txt'),await win.webContents.executeJavaScript('document.body.innerText'));fs.writeFileSync(path.join(qa,'failure.png'),(await win.webContents.capturePage()).toPNG());}catch{}}app.exit(1);}})();

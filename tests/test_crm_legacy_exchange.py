@@ -190,3 +190,56 @@ def test_commit_guard_catches_an_unjournaled_change_to_a_touched_field(crm_world
         conn.execute('UPDATE crm_contracts SET fields_json=? WHERE contract_uuid=?',(canonical(fields),crm_world['contracts'][0]))
     with pytest.raises(CRMError,match='изменилась'):exchange.apply(snapshot,review)
 
+
+def test_next_registry_cycle_adds_contract_and_updates_monthly_portfolio(crm_world):
+    path = world(crm_world)
+    with sqlite3.connect(path) as primary:
+        primary.execute("INSERT INTO clients(contract_id,client,partner,responsible_soft) VALUES('NEXT','New','P','Employee')")
+        primary.execute("INSERT INTO registry_monthly_totals VALUES(?,?,?,?,?,?)",
+                        ('NEXT','2026-11','0.00','₽','Current','2026-11-18T10:00:00+00:00'))
+    first = exchange.capture(path)
+    result = exchange.apply(first,exchange.preview(first))
+    assert (result['new_contracts'],result['assignments'],result['monthly_totals']) == (1,1,1)
+    assert exchange.apply(first,None) == result
+    with sqlite3.connect(path) as primary:
+        primary.execute("UPDATE registry_monthly_totals SET amount='1250.50', observed_at='2026-11-19T11:00:00+00:00'")
+    second = exchange.capture(path)
+    result = exchange.apply(second,exchange.preview(second))
+    assert (result['new_contracts'],result['assignments'],result['monthly_totals']) == (0,0,1)
+    assert exchange.preview(exchange.capture(path))['monthly_totals'] == 0
+    with storage.connect(readonly=True) as conn:
+        row=conn.execute("SELECT t.amount,t.currency,a.employee_uuid FROM crm_monthly_totals t JOIN crm_assignments a USING(contract_uuid) JOIN crm_contracts c USING(contract_uuid) WHERE c.legacy_id='NEXT'").fetchone()
+        assert tuple(row)==('1250.50','RUB',crm_world['employee'])
+        assert not conn.execute("SELECT 1 FROM crm_events WHERE kind IN ('call','visit','payment_confirmed')").fetchone()
+
+
+def test_login_and_conflicting_employee_name_do_not_credit_another_person(crm_world):
+    path=world(crm_world)
+    with storage.connect(readonly=True) as conn:
+        other=conn.execute('SELECT name FROM crm_employees WHERE employee_uuid=?',(crm_world['stranger'].employee_uuid,)).fetchone()[0]
+    primary_call(path)
+    with sqlite3.connect(path) as primary:
+        primary.execute("UPDATE calls SET employee=?",(other,))
+    snapshot=exchange.capture(path)
+    receipt=exchange.apply(snapshot,None)
+    assert receipt['issues']['legacy_author_unconfirmed']==1
+    with storage.connect(readonly=True) as conn:
+        event=conn.execute("SELECT employee_uuid,actor_uid,payload_json FROM crm_events WHERE kind='call'").fetchone()
+        assert event[0].startswith('legacy-author:') and event[1]==101
+        assert json.loads(event[2])['legacy_employee']==other
+
+
+def test_first_match_preserves_preexisting_crm_contract_and_assignments(crm_world):
+    path=world(crm_world)
+    key=crm_world['contracts'][0]
+    with storage.connect() as conn:
+        conn.execute('UPDATE crm_contracts SET legacy_id=NULL WHERE contract_uuid=?',(key,))
+        before=dict(conn.execute('SELECT * FROM crm_contracts WHERE contract_uuid=?',(key,)).fetchone())
+        grants=[tuple(r) for r in conn.execute('SELECT * FROM crm_assignments WHERE contract_uuid=? ORDER BY assignment_id',(key,))]
+    snapshot=exchange.capture(path)
+    result=exchange.apply(snapshot,None)
+    assert result['linked_contracts']==1 and result['new_contracts']==0
+    with storage.connect(readonly=True) as conn:
+        after=dict(conn.execute('SELECT * FROM crm_contracts WHERE contract_uuid=?',(key,)).fetchone())
+        assert after==dict(before,legacy_id='R0')
+        assert [tuple(r) for r in conn.execute('SELECT * FROM crm_assignments WHERE contract_uuid=? ORDER BY assignment_id',(key,))]==grants

@@ -109,8 +109,9 @@ export function entryFingerprint(source: EntrySource): string {
   if(source==='crm')return ownFingerprint();
   if (source === 'manager') return managerFingerprint();
   const profile = entryProfile(source);
+  if (source === 'analyst') return analystCredentials(profile).fingerprint;
   const hash = createHash('sha256').update(source);
-  for (const name of source === 'analyst' ? ['backend-settings.json'] : ['settings.json', 'field.key'])
+  for (const name of ['settings.json', 'field.key'])
     hash.update(checkedFile(profile, name, 1024 * 1024));
   return hash.digest('hex');
 }
@@ -132,7 +133,7 @@ function analystDeviceFingerprint(): string {
   return result;
 }
 export function readExistingLogin(source: EntrySource): {credential: string; fingerprint: string;
-  kind: 'manager' | 'employee' | 'analyst' | 'analyst-device'; deviceFingerprint?: string} {
+  kind: 'manager' | 'employee' | 'analyst' | 'analyst-device'; deviceFingerprint?: string; profileUrl?:string} {
   if(source==='crm')return ownLogin();
   if (source === 'manager') return {...readExistingManagerSession(), kind: 'manager'};
   const profile = entryProfile(source), fingerprint = entryFingerprint(source);
@@ -141,7 +142,15 @@ export function readExistingLogin(source: EntrySource): {credential: string; fin
     if (entryFingerprint(source) !== fingerprint) throw new Error('Сохранённый вход изменился.');
     return {...result, fingerprint, kind: 'employee'};
   }
+  return analystCredentials(profile);
+}
+let cachedAnalyst: {key:string;value:{credential:string;fingerprint:string;kind:'analyst'|'analyst-device';profileUrl:string;deviceFingerprint?:string}} | undefined;
+function analystCredentials(profile:string) {
   const {raw, record} = analystRecord(profile);
+  const active = JSON.parse(raw.toString('utf8')).active || '';
+  const key = JSON.stringify([profile,active,record.url,record.device_token]);
+  if (cachedAnalyst?.key === key) return cachedAnalyst.value;
+
   let credential = String(record.device_token || '');
   if (credential.startsWith('dpapi-v1:'))
     credential = unprotectWindows(Buffer.from(credential.slice(9), 'base64')).toString('utf8');
@@ -149,7 +158,11 @@ export function readExistingLogin(source: EntrySource): {credential: string; fin
   if (kind === 'analyst') credential = credential.slice(8);
   if (!/^[A-Za-z0-9_-]{20,512}$/.test(credential)) throw new Error('Сохранённый вход Аналитика недоступен.');
   if (!raw.equals(checkedFile(profile, 'backend-settings.json', 1024 * 1024))) throw new Error('Вход Аналитика изменился.');
-  return {credential, fingerprint, kind, ...(kind === 'analyst-device' ? {deviceFingerprint: analystDeviceFingerprint()} : {})};
+  const fingerprint = createHash('sha256').update(JSON.stringify(['analyst',active,record.url,kind,credential])).digest('hex');
+  const value = {credential,fingerprint,kind:kind as 'analyst'|'analyst-device',profileUrl:record.url,
+    ...(kind === 'analyst-device' ? {deviceFingerprint:analystDeviceFingerprint()} : {})};
+  cachedAnalyst = {key,value};
+  return value;
 }
 export function existingLogins(): {source: EntrySource; label: string; available: boolean}[] {
   return ENTRY_SOURCES.map(source => {
@@ -157,9 +170,9 @@ export function existingLogins(): {source: EntrySource; label: string; available
       if(source==='crm'){ownLogin();return {source,label:ENTRY_LABELS[source],available:true};}
       if (source === 'manager') return {source, label: ENTRY_LABELS[source], available: existingManagerStatus().available};
       const profile = entryProfile(source);
-      entryFingerprint(source);
       if (source === 'analyst') analystRecord(profile);
       else {
+        entryFingerprint(source);
         const settings = JSON.parse(checkedFile(profile, 'settings.json', 1024 * 1024).toString('utf8'));
         if (!trustedAuthority(settings.fieldServer)) throw new Error('Other origin');
       }

@@ -59,6 +59,7 @@ _journal = None
 _access_busy = False
 _background_busy = False
 _runtime_stop = None
+_runtime_url = None
 
 
 @contextmanager
@@ -154,6 +155,11 @@ def _profile() -> dict:
     return active_profile(_settings)
 
 
+def _network_profile() -> dict:
+    profile = _profile()
+    return {**profile, 'url': _runtime_url} if _runtime_url else profile
+
+
 def _persist_settings() -> None:
     if not _settings.save():
         raise RuntimeError("Настройки не сохранены на диске. Не закрывайте пульт; проверьте место, права и доступность шифрования, затем сохраните настройки в «Подключении».")
@@ -190,17 +196,43 @@ def import_settings(path: str) -> dict:
 
 
 def admin(method: str, path: str, body=None, timeout: float = 30, key: str = ""):
-    prof = _profile()
+    prof = _network_profile()
     token = "" if key else prof.get("device_token", "")
     if not prof.get("url"):
         raise RuntimeError(api_client.NO_URL_TEXT)
+    # A marked rehearsal folder has its own same-origin endpoint. Versions,
+    # display names and day-to-day accounts never select a data source.
+    options = {}
+    base = _settings.get("scatterBase")
+    endpoint = path.split("?", 1)[0]
+    if base and (path == "/admin/export.json" or endpoint == "/admin/enrichment/ledger.json"):
+        marker = Path(base) / ".rimborso-enrichment-control"
+        try:
+            with marker.open(encoding="ascii") as stream:
+                control = stream.read(64).strip()
+        except FileNotFoundError:
+            control = None
+        if control is not None:
+            if control != "postgresql-trial":
+                raise ValueError("Неизвестный источник контрольных книг.")
+            if method == "POST":
+                root = Path(base).resolve(strict=True)
+                entries = (body or {}).get("entries")
+                if not isinstance(entries, list) or any(
+                    not isinstance(entry, dict) or not Path(entry.get("file") or entry.get("file_path") or "").is_absolute()
+                    or not Path(entry.get("file") or entry.get("file_path")).resolve().is_relative_to(root)
+                    for entry in entries
+                ):
+                    raise ValueError("Квитанция относится к другой папке книг.")
+            path = "/crm-control/enrichment" + path
+            options["expected_source"] = control
     try:
         return api_client.request(prof["url"], method, path, body, key=key, device_token=token,
-                                  timeout=timeout)
+                                  timeout=timeout, **options)
     except api_client.AccessRevoked:
         with _lock:
-            if prof.get('device_token') == token:
-                prof['device_token'] = ''
+            if _profile().get('device_token') == token:
+                _profile()['device_token'] = ''
                 _persist_settings()
         raise
 
@@ -447,7 +479,7 @@ def mail_send(book: str, *, manual: bool, display: bool = False, say=print, oper
         name = mailer.file_name(book, cfg, today)
         try:
             say(f"Беру книгу «{mailer.BOOKS[book]}» с сервера…")
-            prof = _profile()
+            prof = _network_profile()
             path = "/admin/stats_book.xlsx?" + urllib.parse.urlencode(mailer.query(book, cfg, today))
             blob = api_client.download(prof.get("url", ""), path,
                                        device_token=prof.get("device_token", ""))
@@ -633,7 +665,7 @@ def route(path: str, body: dict):
                 '.jpe':'image/jpeg'}.get(suffix)
         if not mime:
             raise ValueError('Недопустимый формат снимка')
-        prof = _profile()
+        prof = _network_profile()
         raw = api_client.download(prof.get('url', ''), '/admin/control/'+kind+'?'+
                                   urllib.parse.urlencode({'file':file}),
                                   device_token=prof.get('device_token', ''), timeout=90)
@@ -668,7 +700,7 @@ def route(path: str, body: dict):
 
 
 def main() -> None:
-    global _runtime_stop
+    global _runtime_stop, _runtime_url
     runtime_lease=None
     if '--crm-analyst' in sys.argv:
         import os
@@ -677,14 +709,27 @@ def main() -> None:
         from pult.core.runtime_lock import acquire
         runtime_lease=acquire(Path(os.environ['HARD_PULT_SETTINGS']).with_name('runtime.lock'))
         binding=json.loads(sys.stdin.readline(16384))
-        actor=int(binding['actor'])
-        if _settings.get('crm_actor') not in (None,actor):raise RuntimeError('Administrator profile belongs to another identity')
-        if not isinstance(binding.get('token'),str) or not binding['token']:raise RuntimeError('Missing administrator credential')
+        actor = binding.get('actor')
+        if type(actor) is not int or actor == 0:
+            raise RuntimeError('Не подтверждена личность Аналитика')
+        if _settings.get('crm_actor') not in (None, actor):
+            raise RuntimeError('Administrator profile belongs to another identity')
+        if not isinstance(binding.get('token'),str) or not binding['token']:
+            raise RuntimeError('Missing administrator credential')
         api_client.require_https(binding['url'])
-        _settings['crm_actor']=actor
-        _settings['active']='CRM'
-        _settings['profiles']={'CRM':{'url':binding['url'],'device_token':binding['token']}}
-        _persist_settings()
+        if binding.get('existing_profile') is True:
+            profile = _profile()
+            if (profile.get('url') != binding.get('profile_url')
+                    or profile.get('device_token') != binding['token']):
+                raise RuntimeError('Сохранённый вход Аналитика изменился')
+            _runtime_url = binding['url']
+            # Keep active profile name, token, jobs and delivery-ledger identity.
+            # Do not save or re-encrypt the legacy file just because CRM started.
+        else:
+            _settings['crm_actor']=actor
+            _settings['active']='CRM'
+            _settings['profiles']={'CRM':{'url':binding['url'],'device_token':binding['token']}}
+            _persist_settings()
     srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     if runtime_lease is not None:_runtime_stop=srv.shutdown
     print(f"HARD-BACKEND {srv.server_address[1]} {SECRET}", flush=True)

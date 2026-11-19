@@ -67,3 +67,40 @@ def test_failed_import_keeps_current_settings(backend, tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="сохранить"):
         backend.import_settings(str(source))
     assert dict(backend._settings) == previous
+
+
+def test_only_marked_workbooks_use_the_control_source(backend, tmp_path, monkeypatch):
+    base = tmp_path / "copies"
+    base.mkdir()
+    backend._settings["scatterBase"] = str(base)
+    monkeypatch.setattr(backend, "_network_profile", lambda: {"url": "https://example.invalid"})
+    sent = []
+    def capture(url, method, path, body, **kwargs):
+        sent.append((path, kwargs.get("expected_source")))
+    monkeypatch.setattr(backend.api_client, "request", capture)
+    export, ledger = "/admin/export.json", "/admin/enrichment/ledger.json"
+    backend.admin("GET", export)
+    (base / ".rimborso-enrichment-control").write_text("postgresql-trial", encoding="ascii")
+    backend.admin("GET", export)
+    backend.admin("GET", ledger + "?books=1")
+    backend.admin("POST", ledger, {"entries": [{"file": str(base / "book.xlsb")}]})
+    backend.admin("GET", export + "?mode=full")
+    with pytest.raises(ValueError, match="другой папке"):
+        backend.admin("POST", ledger, {"entries": [{"file": str(tmp_path / "outside.xlsb")}]})
+    assert sent == [(export, None), ("/crm-control/enrichment" + export, "postgresql-trial"),
+                    ("/crm-control/enrichment" + ledger + "?books=1", "postgresql-trial"),
+                    ("/crm-control/enrichment" + ledger, "postgresql-trial"), (export + "?mode=full", None)]
+
+
+def test_control_export_requires_source_confirmation():
+    from io import BytesIO
+    from pult.core import api
+    class Response(BytesIO):
+        headers = {}
+    def reply(request, timeout):
+        return Response(b'{"rows":[]}')
+    with pytest.raises(RuntimeError, match="не подтвердил источник"):
+        api.request("https://example.invalid", "GET", "/control", opener=reply, expected_source="postgresql-trial")
+    Response.headers = {"X-Rimborso-Enrichment-Source": "postgresql-trial"}
+    assert api.request("https://example.invalid", "GET", "/control", opener=reply,
+                       expected_source="postgresql-trial") == {"rows": []}

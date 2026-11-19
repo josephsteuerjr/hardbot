@@ -9,6 +9,7 @@
 import hashlib
 import hmac
 import json
+import math
 import workday
 import logging
 import os
@@ -4018,12 +4019,16 @@ def receipts_for(contract_ids: list[str]) -> dict[str, list[dict]]:
     return out
 
 
-def reported_payments_for(contract_ids: list[str] | None = None) -> dict[str, list[dict]]:
-    """Записанные сотрудником оплаты: конкретный КД, отдельно от чеков и реестра."""
+def reported_payments_for(contract_ids: list[str] | None = None, *, include_receipts=False) -> dict[str, list[dict]]:
+    """Оплаты конкретного КД; экспорт включает также чеки из приложения.
+
+    Это свидетельства сотрудников, а не независимое банковское подтверждение.
+    Обычный экран по-прежнему получает чеки отдельно от ручных записей.
+    """
     out = {}
     chunks = [None] if contract_ids is None else [contract_ids[i:i+400] for i in range(0,len(contract_ids),400)]
     for ids in chunks:
-        where = "source='manual'"
+        where = "source IN ('manual','app')" if include_receipts else "source='manual'"
         args = []
         if ids is not None:
             where += " AND contract_id IN (" + ','.join('?' for _ in ids) + ")"
@@ -4033,6 +4038,13 @@ def reported_payments_for(contract_ids: list[str] | None = None) -> dict[str, li
                                 " ORDER BY created_at, id", args).fetchall()
         for row in rows:
             item = dict(row)
+            # Legacy attachments may have no entered amount/date. They remain
+            # visible as receipts, but cannot populate typed payment columns.
+            if item.get('source') == 'app' and (
+                    _as_date(item.get('paid_at')) is None
+                    or not isinstance(item.get('amount'), (int, float))
+                    or not math.isfinite(item['amount']) or item['amount'] <= 0):
+                continue
             item["event_day"] = _payment_event_day(item)
             item["text"] = reported_payment_text(item)
             out.setdefault(row["contract_id"], []).append(item)
@@ -5048,10 +5060,10 @@ def _manual_payment_echoes(conn) -> set[tuple]:
     """A copied employee payment is not independent registry confirmation.
 
     Existing independent observations remain in registry_payments. A matching
-    manual echo in latest-payment columns cannot create/replace an observation.
+    employee echo in latest-payment columns cannot create/replace an observation.
     """
     return {(r["contract_id"],r["paid_at"],registry_payment_amount(r["amount"]),r["currency"] or "")
-            for r in conn.execute("SELECT contract_id,paid_at,amount,currency FROM payment_evidence WHERE source='manual'")}
+            for r in conn.execute("SELECT contract_id,paid_at,amount,currency FROM payment_evidence WHERE source IN ('manual','app')")}
 
 
 def calls_for_contracts(contract_ids, until: str) -> list:
@@ -7468,7 +7480,7 @@ def registry_rows(
         raise ValueError("начало окна выгрузки позже окончания")
     with connect() as conn:
         rows = conn.execute("SELECT * FROM clients ORDER BY client").fetchall()
-    payments = reported_payments_for()
+    payments = reported_payments_for(include_receipts=True)
     result = []
     for row in rows:
         if (
@@ -7531,7 +7543,7 @@ def enrichment_rows() -> list[dict]:
         # Окно определяется фактом из журнала, включая legacy-снимки.
         call_days = {r[0]: r[1] for r in conn.execute(
             "SELECT contract_id, MAX(created_at) FROM calls GROUP BY contract_id")}
-    payments = reported_payments_for()
+    payments = reported_payments_for(include_receipts=True)
     result = []
     for raw in rows:
         row = {f.key: raw[f.key] for f in FIELDS}

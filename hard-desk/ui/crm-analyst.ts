@@ -14,7 +14,7 @@ const esc=(v:any)=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
 type Options={owner:string;core:Record<string,(host:HTMLElement,valid:()=>boolean)=>Promise<void|(()=>void)>>;navigate(section:string):Promise<void>};
 const groups:Record<string,[string,string][]>= {
   registry:[['table','Общий реестр'],['columns','Колонки'],['priority','Приоритет']],
-  exchange:[['files','Импорт и обогащение'],['crm-books','Книги CRM'],['mail','Рассылка'],['queue','Отправки']],
+  exchange:[['files','Импорт реестра'],['enrich','Обогащение книг'],['export','Выгрузки и период'],['recalled','Отозванные'],['crm-books','Книги CRM'],['mail','Рассылка'],['queue','Отправки']],
   statistics:[['reports','Отчёты'],['activity','Активность'],['tasks','Задачи']],
   team:[['board','Состав'],['people','Сотрудники'],['managers','Руководители'],['accounts','Аккаунты и устройства'],['scripts','Скрипты']],
   connection:[['connection','Подключение'],['maintenance','Обслуживание']],
@@ -72,7 +72,8 @@ export async function mountAnalyst(host:HTMLElement,group:string,crm:any,valid:(
     const currentView=()=>live()&&turn===sequence&&page.isConnected;
     try{
       let cleanup:void|(()=>void)=undefined;
-      if(current==='files'||current==='columns')cleanup=await mountRegistryTools(page,current==='columns');
+      if(current==='files'||current==='columns'||current==='enrich'||current==='export'||current==='recalled')
+        cleanup=await mountRegistryTools(page,current==='files'?'import':current);
       else if(options.core[current])cleanup=await options.core[current](page,currentView);
       else await legacy[current].render(page,{});
       if(currentView())leave=typeof cleanup==='function'?cleanup:undefined;else cleanup?.();

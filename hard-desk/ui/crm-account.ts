@@ -1,6 +1,11 @@
 /** Windows account entry. Passwords stay in the form only until the request ends. */
 export function mountAccount(host:HTMLElement,crm:any,account:any,connected:boolean,refresh:()=>Promise<void>) {
   const esc=(s:any)=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
+  if (connected && !account?.available) {
+    host.innerHTML='<button id="account-switch">Войти под другой учётной записью</button>';
+    host.querySelector('#account-switch')!.addEventListener('click',()=>mountAccount(host,crm,account,false,refresh));
+    return;
+  }
   host.innerHTML=`<section class="account-entry"><h2>${account?.available?'Вход в CRM':'Войти в CRM'}</h2>
     ${account?.available?`<p>${esc(account.username)}</p>${account.must_change_password?`<form id="account-password"><div class="grid"><label class="field">Временный пароль<input name="current" type="password" autocomplete="current-password" required></label><label class="field">Новый пароль<input name="new" type="password" autocomplete="new-password" required></label><label class="field">Повторите новый пароль<input name="repeat" type="password" autocomplete="new-password" required></label></div><button class="primary">Сменить пароль</button></form>`:`${account.pending?'<p>Устройство ожидает подтверждения руководителем.</p>':''}<button id="account-status" class="primary">${connected?'Проверить вход':'Продолжить'}</button>`}<button id="account-logout">Выйти из учётной записи</button>`:
     `<form id="account-login"><div class="grid"><label class="field">Логин<input name="username" autocomplete="username" required></label><label class="field">Пароль<input name="password" type="password" autocomplete="current-password" required></label></div><button class="primary">Войти</button></form>`}

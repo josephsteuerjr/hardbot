@@ -129,3 +129,31 @@ def test_invalid_result_is_rejected_before_writing(world,monkeypatch,extra):
     with pytest.raises(aio_web.HTTPBadRequest):
         payment(monkeypatch,**extra)
     assert not db.reported_payments_for()
+
+
+@pytest.mark.parametrize('profile', ['hard', 'soft'])
+def test_app_receipt_routes_payment_only_without_fake_call_or_bank_confirmation(world, profile):
+    day = db.workday.today().isoformat()
+    db.record_receipt('app-receipt', 'A', 'H1', 100, paid_at=day, amount=2500.5,
+                      currency='₽', source='app', file='synthetic.jpg', sha256='a'*64)
+    db.record_receipt('incomplete', 'A', 'H1', 100, source='app', file='legacy.jpg')
+    assert not db.reported_payments_for(['A'])
+    exported = next(r for r in db.enrichment_rows() if r['contract_id'] == 'A')
+    assert exported['_reported_payment_sum'] == 2500.5
+    assert not exported['_bot_call_completed']
+    split = enrich.split_by_employee([exported])
+    assert split['h1']['filled'] == split['soft:s1']['filled'] == 1
+    schema = db.export_schema()
+    columns = schema
+    book = [[f['title'] for f in columns], ['сх'] * len(columns),
+            ['A' if f['key']=='contract_id' else None for f in columns]]
+    row = {**exported, '_profile': profile}
+    plan = enrich.build_plan(book, schema, [row], ledger={}, since=day, until=day)
+    expected = {'last_payment_sum','last_payment_date'} | ({'soft_comment'} if profile == 'soft' else set())
+    assert {columns[c]['key'] for _,c,_,_ in plan['writes']} == expected
+    for r,c,v,d in plan['writes']: book[r][c] = v
+    assert not enrich.build_plan(book,schema,[row],ledger={})['writes']
+    world[0].update(last_payment_sum='2500.50',last_payment_date=day)
+    assert not db.import_grid(grid(world),source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)['blocked']
+    assert not db.registry_payments_for(['A'])
+    assert not db.calls_for_person('A')

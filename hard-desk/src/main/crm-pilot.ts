@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, net, protocol, powerMonitor } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, net, protocol, powerMonitor, Menu, Tray } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, statfsSync, unlinkSync } from "node:fs";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
@@ -13,7 +13,7 @@ import {
 } from "./store";
 import { fetchBuffered } from "./transport";
 import * as queue from "./crm-queue";
-import { PILOT_BASE, existingManagerStatus, existingLogins, ENTRY_SOURCES, EntrySource,readExistingManagerSession,readExistingLogin } from "./crm-manager-login";
+import { PILOT_BASE, existingManagerStatus, existingLogins, ENTRY_SOURCES, EntrySource, entryFingerprint,readExistingManagerSession,readExistingLogin } from "./crm-manager-login";
 import {AnalystRuntime} from './crm-analyst-runtime';
 import { pilotCredential } from "./crm-pilot-session";
 import {ThreeHourReports} from './crm-report-scheduler';
@@ -76,6 +76,13 @@ function diagnostic(stage:string,code:string,ok:boolean,extra:Record<string,numb
   try{writeFileSync(join(data,'crm-diagnostics.json'),JSON.stringify(diagnosticEvents),{flush:true});}catch{/* Diagnostic failure must not destroy business work. */}
 }
 let helperRepair:Promise<void>|null=null,helperAttempts:number[]=[],rendererReady=false,lastConfirmedAt:string|null=null;
+let tray: Tray | null = null;
+let quitting = false;
+function showWindow() {
+  if (win?.isMinimized()) win.restore();
+  win?.show();
+  win?.focus();
+}
 let screenLocked=false, sleeping=false;
 const activeTime=new ActiveTime(()=>owner && clock?{
   owner,anchor_id:clock.anchor_id,installation_id:clock.installation_id,
@@ -102,6 +109,7 @@ const stopQueueChanges = queue.onChange(authority => {
 app.once('will-quit', stopQueueChanges);
 function forgetAuthority(message: string) {
   live.stop();
+  analystRuntime.stop();
   activeTime.stop();
   owner = ""; currentContext = null; clock = null;
   connectionNotice = message;
@@ -388,7 +396,9 @@ async function managerAccess(method:string,body:any,query:any):Promise<queue.Res
     const headers={'X-Pult-Token':login.credential,'Content-Type':'application/json','X-Client-Version':app.getVersion()};
     const identity=await fetchBuffered((u,i)=>net.fetch(u,i),'https://hard.rimborso.ru/api/manager/device/me',{method:'GET',headers},10000);
     const subject=await identity.json();
-    if(!identity.ok||subject.subject?.actor_uid!==actor||authority!==owner)
+    const confirmed = subject.subject?.actor_uid;
+    if(!identity.ok || subject.subject?.type !== 'manager' || !Number.isSafeInteger(confirmed) || confirmed <= 0 ||
+       (actor !== undefined && actor !== confirmed) || authority!==owner || login.fingerprint!==entryFingerprint(entrySource()))
       return {ok:false,status:403,text:'Вход или полномочия изменились. Подключитесь заново.'};
     const response=await fetchBuffered((u,i)=>net.fetch(u,i),'https://hard.rimborso.ru/api/manager/'+route[1],
       {method,headers,body:method==='POST'?JSON.stringify(body?.payload||{}):undefined},15000);
@@ -409,20 +419,44 @@ const analystRuntime=new AnalystRuntime({home:data,window:()=>win,synthetic:demo
   writeTable:(report,path)=>local('report-write',{report,path,kind:'table'}),
   authorize:async expected=>{
     if(!expected||expected!==owner||currentContext?.role!=='analyst')throw Error('Нужен действующий вход Аналитика.');
-    const actor=currentContext.actor_uid;
-    const result=await send('GET','context');
-    if(!result.ok||result.data?.role!=='analyst'||expected!==owner||currentContext?.role!=='analyst'||result.data?.actor_uid!==actor)
+    const employee = currentContext.employee_uuid;
+    const previousActor = currentContext.actor_uid;
+    const source = entrySource();
+    const fingerprint = demo() ? '' : entryFingerprint(source);
+    const valid = () => expected === owner && currentContext?.role === 'analyst'
+      && currentContext.employee_uuid === employee && (demo() || (entrySource() === source && entryFingerprint(source) === fingerprint));
+    const result = await send('GET','context');
+    if (!result.ok || result.data?.role !== 'analyst' || result.data.employee_uuid !== employee || !valid())
       throw Error('Сервер не подтвердил полномочия Аналитика.');
+    let actor = result.data.actor_uid;
     if(demo()){
       const endpoint=await local('analyst-admin-init',{});
-      if(!endpoint.ok)throw Error(endpoint.text||'Не удалось открыть проверочный административный контур.');
-      if(expected!==owner||currentContext?.role!=='analyst'||currentContext?.actor_uid!==actor)throw Error('Вход Аналитика изменился.');
-      return {owner:expected,actor,...endpoint.data};
+      if(!endpoint.ok || !Number.isSafeInteger(actor) || !actor || !valid())throw Error('Вход Аналитика изменился.');
+      return {owner:expected,...endpoint.data,actor,current:valid};
     }
-    if(!shared()||!['analyst','crm'].includes(entrySource()))throw Error('Подключите вход Аналитика.');
-    const login=readExistingLogin(entrySource());
+    if (!shared() || !['analyst','crm'].includes(source)) throw Error('Подключите вход Аналитика.');
+    const login = readExistingLogin(source);
+    if (!['analyst','analyst-device'].includes(login.kind) || login.fingerprint !== fingerprint)
+      throw Error('Вход Аналитика изменился.');
+    if (actor === undefined) {
+      // The previous CRM context supplied the employee UUID only. Resolve the
+      // numeric identity through the authority that issued this same credential.
+      const response = await fetchBuffered((url, init) => net.fetch(url,init), 'https://hard.rimborso.ru/api/crm-identity', {
+        method:'GET', redirect:'error', headers:{
+          [login.kind === 'analyst' ? 'X-Pult-Token' : 'X-Device-Token']:login.credential,
+          'X-CRM-Entry':'analyst','X-Client-Version':app.getVersion(),
+          ...(login.deviceFingerprint ? {'X-Device-Id':login.deviceFingerprint} : {})
+        }},10000);
+      const identity = await response.json();
+      if (!response.ok || identity.ok !== true || identity.subject?.type !== 'analyst' || identity.me?.role !== 'analyst')
+        throw Error('Сервер не подтвердил личность Аналитика.');
+      actor = identity.subject.actor_uid;
+    }
+    if (!Number.isSafeInteger(actor) || !actor || (previousActor !== undefined && previousActor !== actor) || !valid())
+      throw Error('Изменилась личность Аналитика.');
     return {owner:expected,actor,url:'https://hard.rimborso.ru',
-      token:(login.kind==='analyst'?'account:':'')+login.credential,fingerprint:login.fingerprint};
+      token:(login.kind==='analyst'?'account:':'')+login.credential,fingerprint,
+      existingProfile: STABLE_CRM && product.id === 'analyst' && source === 'analyst' && !isolatedProfile, profileUrl:login.profileUrl,current:valid};
   }});
 
 const live=new CrmLive(query=>send('GET','changes',undefined,query),()=>owner,
@@ -436,6 +470,9 @@ async function identify() {
   if (result.ok) {
     currentContext = result.data;
     owner = origin() + "\n" + currentContext.employee_uuid;
+    if (STABLE_CRM && product.id === 'analyst' && currentContext.role === 'analyst' && !isolatedProfile) {
+      void analystRuntime.resume(owner).catch(() => diagnostic('helper','analyst_start_failed',false));
+    }
     // Older deployed pilots have no invalidation protocol. A missing feature
     // must not turn their otherwise confirmed connection into an offline state.
     if(currentContext.distribution)live.start();else live.stop();
@@ -570,7 +607,19 @@ app
     });
     diagnostic('launcher','launcher_ready',true);
     try{await backendStart();diagnostic('helper','helper_ready',true);}catch{backend?.kill();diagnostic('helper','helper_unavailable',false);}
-    // A new profile or explicit logout must show entry, even if a legacy app is signed in.
+    // A stable in-place upgrade uses only this product's previously approved
+    // sign-in. Separate CRM installations and explicit logouts keep the entry form.
+    if (STABLE_CRM && !isolatedProfile && !config() && !readSettings().crmExplicitEntry &&
+        !existsSync(join(data,'crm-shared-session.bin')) && !existsSync(join(data,'crm-account.bin'))) {
+      const source = product.id as EntrySource;
+      if (existingLogins().some(login => login.source === source && login.available)) {
+        try {
+          await pilotCredential(undefined,true,source);
+          writeSettings({crmConnection:{mode:'remote',server:PILOT_BASE,source,auth:'existing-login',
+            role:source==='analyst'||source==='manager'?source:'employee'}});
+        } catch { connectionNotice='Сохранённый вход не подтверждён. Проверьте подключение или войдите в CRM.'; }
+      }
+    }
     await identify();
     win = new BrowserWindow({
       width: 1320,
@@ -625,7 +674,9 @@ app
       try{
         if(await analystRuntime.busy())
           return {ok:false,text:'Дождитесь завершения операции Аналитика и повторите.'};
-        return await installUpdate(async()=>!exportRecovery,()=>activeTime.stop());
+        const result=await installUpdate(async()=>!exportRecovery,()=>{activeTime.stop();quitting=true;});
+        if (!result.ok) quitting=false;
+        return result;
       }finally{installingUpdate=false;}
     });
     if(STABLE_CRM&&!isolatedProfile)startUpdates(
@@ -761,11 +812,14 @@ app
       return { ok: true };
     });
     safeHandler("crm:connect", async (input: any) => {
+      if (input?.action !== 'offline' && await analystRuntime.busy())
+        throw Error('Дождитесь завершения текущей операции Аналитика перед сменой входа.');
+      if (input?.action !== 'offline') analystRuntime.stop();
       if(['account-login','account-password','account-status','account-logout'].includes(input?.action)){
         const result=await accountAction(input.action,input);
         if(input.action==='account-password')return result;
         forgetAuthority('');
-        writeSettings({crmConnection:undefined,crmLast:undefined});
+        writeSettings({crmConnection:undefined,crmLast:undefined,crmExplicitEntry:true});
         if(input.action==='account-logout'||(result.data as any).pending)return result;
         await pilotCredential(undefined,true,'crm');
         writeSettings({crmConnection:{mode:'remote',source:'crm',server:PILOT_BASE,auth:'existing-login'}});
@@ -1037,7 +1091,25 @@ app
       await local("window-frame", {
         hwnd: win.getNativeWindowHandle().readBigUInt64LE().toString(),
       });
-    win.show();
+    if (process.platform === 'win32' && (STABLE_CRM || product.id === 'crm')) {
+      tray = new Tray(join(__dirname, 'icons', 'tray-32.png'));
+      tray.setToolTip(product.name);
+      tray.on('click', showWindow);
+      tray.setContextMenu(Menu.buildFromTemplate([
+        {label:'Открыть',click:showWindow},
+        {label:'Выход',click:async () => {
+          if (activeRequests || await analystRuntime.busy()) {
+            showWindow();
+            await dialog.showMessageBox(win!,{message:'Дождитесь завершения текущей операции.'});
+          } else app.quit();
+        }}
+      ]));
+      win.on('close', event => {
+        if (!quitting && !installingUpdate) { event.preventDefault(); win?.hide(); }
+      });
+      win.on('minimize', () => { if (!quitting) win?.hide(); });
+    }
+    if (!tray || !process.argv.includes('--tray')) win.show();
     win.on('blur',()=>activeTime.stop());win.on('hide',()=>activeTime.stop());
     win.on('minimize',()=>activeTime.stop());win.on('close',()=>activeTime.stop());
     powerMonitor.on('lock-screen',()=>{screenLocked=true;activeTime.stop();});
@@ -1066,17 +1138,16 @@ app
         void queue.flushTechnical(owner, send, () => owner).catch(() => {});
       }
     }, 7000).unref();
-    app.on("second-instance", () => {
-      win?.show();
-      win?.focus();
-    });
+
   })
   .catch((error) => {
     diagnostic('startup','startup_failed',false);
     void showStartupRecovery('startup_failed');
   });
+app.on("second-instance", (_event, argv) => { if (!argv.includes('--tray')) showWindow(); });
 app.on("window-all-closed", () => app.quit());
 app.on("before-quit", () => {
+  quitting = true;
   try{activeTime.stop();}catch{/* The last protected checkpoint remains recoverable. */}
   backend?.kill();
 });

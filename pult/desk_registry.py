@@ -302,8 +302,13 @@ def enr_state(body, *, settings, admin, **_):
 
 def enr_base(body, *, settings, admin, **_):
     delivery_guard(settings,admin)
-    settings["scatterBase"] = str(body.get("path") or "")
-    settings.save()
+    selected = str(body.get("path") or "")
+    if selected != _base(settings):
+        settings["scatterBase"] = selected
+        settings.save()
+        with _lock:
+            S.update(enr_fields=None, enr_matched=[], enr_check=None, enr_decisions={},
+                     enr_reconcile=None, last_receipt=None)
     return enr_state({}, settings=settings,admin=admin)
 
 
@@ -321,7 +326,10 @@ def enr_preview(body, *, admin, start_job, settings, **_):
         say("Ищу папки сотрудников…")
         fmap = en.folder_map(base)
         matched, nofolder, nofile = en.match_employees(by_emp, fmap,log=say)
-        S["enr_fields"], S["enr_matched"], S["enr_check"] = d["fields"], matched, None
+        with _lock:
+            if _base(settings) != base:
+                raise RuntimeError("Выбрана другая папка. Проверьте соответствия для неё.")
+            S["enr_fields"], S["enr_matched"], S["enr_check"] = d["fields"], matched, None
         return {"pairs": en.preview_pairs(by_emp, matched),
                 "warning": en.preview_warning(by_emp, matched, nofolder, nofile),
                 "matched": [{"key": m["key"], "employee": m["employee"], "profile": m["profile"], "note": en.pick_note(m)}

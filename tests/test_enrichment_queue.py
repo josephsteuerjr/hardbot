@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 import pytest
-from openpyxl import Workbook,load_workbook
+import xlwings as xw
 
 from pult.core.enrichment_queue import Service,file_sha
 from pult.core import enrichment as en
@@ -47,12 +47,19 @@ class Ledger:
 
 
 def fixture(tmp_path,name='Alpha',*,old=None,bad_date=None):
- path=tmp_path/(name+'.xlsx');book=Workbook();sheet=book.active;sheet.title=enrich.SHEET_NAME
+ path=tmp_path/(name+'.xlsx')
  fields=copy.deepcopy(FIELDS)
  fields.insert(2,{'key':'excel_visit_edited_on','title':'Дата ручной правки','source':'хард'})
- sheet.append(['Synthetic workbook']);sheet.append([f['title'] for f in fields]);sheet.append(['сх']*len(fields))
  initial={'contract_id':name,'client':'Synthetic '+name,'overall_result':old,'excel_visit_edited_on':bad_date}
- sheet.append([initial.get(f['key']) for f in fields]);book.create_sheet('Witness')['A1']='=SUM(2,3)';book.save(path)
+ with xw.App(visible=False, add_book=False) as excel:
+  book=excel.books.add()
+  sheet=book.sheets[0]
+  sheet.name=enrich.SHEET_NAME
+  sheet.range('A1').value='Synthetic workbook'
+  sheet.range('A2').value=[[f['title'] for f in fields], ['сх']*len(fields), [initial.get(f['key']) for f in fields]]
+  book.sheets.add('Witness').range('A1').formula='=SUM(2,3)'
+  book.save(str(path))
+  book.close()
  row={'contract_id':name,'responsible':name,'visit_date':'2026-11-01','_bot_completed':True,
       'call_status':'Обещает оплатить','visit_comment':'Synthetic visit'}
  return {'employee':name,'path':str(path),'rows':[row]},fields
@@ -74,9 +81,15 @@ def tracking(tmp_path,monkeypatch,jobs):
 
 
 def value(job,key):
- book=load_workbook(job['path'],data_only=False);sheet=book[enrich.SHEET_NAME]
- column=next(c.column for c in sheet[2] if c.value==next(f['title'] for f in FIELDS if f['key']==key))
- result=sheet.cell(4,column).value;assert book['Witness']['A1'].value=='=SUM(2,3)';book.close();return result
+ with xw.App(visible=False, add_book=False) as excel:
+  book=excel.books.open(job['path'], read_only=True, update_links=False)
+  sheet=book.sheets[enrich.SHEET_NAME]
+  headers=sheet.range('A2').expand('right').value
+  index=headers.index(next(f['title'] for f in FIELDS if f['key']==key))+1
+  result=sheet.cells(4,index).value
+  assert book.sheets['Witness'].range('A1').formula=='=SUM(2,3)'
+  book.close()
+  return result
 
 
 def test_open_excel_book_waits_and_restart_only_delivers_remaining_book(tmp_path):
@@ -164,27 +177,31 @@ def test_invalid_date_identifies_cell_preserves_file_and_blocks_import(tmp_path,
  item=next(b for b in state['books'] if b['state']!='done')
  assert 'C4' in item['message'] and 'ra' in item['message'] and file_sha(bad['path'])==before
  with pytest.raises(RuntimeError,match='не завершено'):service.require_complete()
- workbook=load_workbook(bad['path']);workbook[enrich.SHEET_NAME]['C4']=None;workbook.save(bad['path']);workbook.close()
+ with xw.App(visible=False, add_book=False) as excel:
+  workbook=excel.books.open(bad['path'])
+  workbook.sheets[enrich.SHEET_NAME].range('C4').clear_contents()
+  workbook.save()
+  workbook.close()
  service.retry(state['id']);assert service.process()['state']=='done'
 
 
 @pytest.mark.parametrize('with_delivery_history',[False,True])
 @pytest.mark.parametrize('decision',['server','file'])
 def test_old_choice_does_not_approve_new_office_value(tmp_path,with_delivery_history,decision):
- import win32com.client
  job,fields=fixture(tmp_path,old='Previous office value');ledger=Ledger()
  if with_delivery_history:
   ledger.books[enrich.book_key(job['path'])]={'Alpha':{'call_status':{'value':'Обещает оплатить','at':'2026-10-31T00:00:00Z'}}}
  preview=enrich.preview_many([job],fields,ledger={'_books':ledger.books},since='01.11.2026',until='01.11.2026')
  ordinary,office=en.collect_conflicts(preview)
  choices=[{**c,'decision':decision} for c in ordinary+office]
- excel=win32com.client.DispatchEx('Excel.Application');excel.Visible=False;excel.DisplayAlerts=False;book=excel.Workbooks.Open(job['path'])
- try:
+ with xw.App(visible=False, add_book=False) as excel:
+  book=excel.books.open(job['path'])
   service=Service(tmp_path/'queue',lambda:'owner',ledger)
   state=service.submit('stale-choice',[job],fields,'01.11.2026','01.11.2026',choices);assert state['remaining']==1
   col=next(i+1 for i,f in enumerate([*FIELDS[:2],{'key':'date'},*FIELDS[2:]]) if f['key']=='overall_result')
-  book.Worksheets(enrich.SHEET_NAME).Cells(4,col).Value='New office value';book.Save()
- finally:book.Close(False);excel.Quit()
+  book.sheets[enrich.SHEET_NAME].cells(4,col).value='New office value'
+  book.save()
+  book.close()
  before=file_sha(job['path']);state=service.process()
  assert state['state']=='attention' and file_sha(job['path'])==before and not ledger.posts
  item=state['books'][0];assert item['conflicts'] and 'новые изменения' in item['message']
@@ -206,8 +223,14 @@ def test_missing_contract_is_visible_and_never_counted_as_delivered(tmp_path):
  job,fields=fixture(tmp_path);job['rows'].append({**job['rows'][0],'contract_id':'MISSING-IN-BOOK'})
  ledger=Ledger();before=file_sha(job['path']);service=Service(tmp_path/'queue',lambda:'owner',ledger)
  state=service.submit('missing-contract',[job],fields,'01.11.2026','01.11.2026',[])
- assert state['state']=='attention' and state['completed']==0 and state['remaining']==1
- assert 'MISSING-IN-BOOK' in state['books'][0]['message'] and file_sha(job['path'])==before and not ledger.posts
+ assert state['state']=='done' and state['completed']==1 and state['remaining']==0 and state['excluded']==1
+ assert state['books'][0]['omissions'][0]['contract_id']=='MISSING-IN-BOOK'
+ assert state['books'][0]['omissions'][0]['reason']=='absent_from_book'
+ assert value(job,'overall_result')=='Обещает оплатить' and file_sha(job['path'])!=before
+ assert ledger.posts and all(e['contract_id']=='Alpha' for p in ledger.posts for e in p['entries'])
+ after=file_sha(job['path']);posts=len(ledger.posts)
+ assert Service(tmp_path/'queue',lambda:'owner',ledger).process()['state']=='done'
+ assert file_sha(job['path'])==after and len(ledger.posts)==posts
 
 
 def test_restart_after_last_book_commit_finishes_summary_without_rewriting(tmp_path,monkeypatch):
@@ -258,15 +281,11 @@ def test_multiple_books_share_one_native_excel_session(tmp_path,monkeypatch):
  assert state['state']=='done' and state['completed']==2 and len(ledger.posts)==2 and calls==['start']
 
 
-def test_reconciled_missing_rows_do_not_block_other_native_writes(tmp_path):
+def test_missing_rows_do_not_block_other_books_or_require_master(tmp_path):
  from pult.core.enrichment_queue import file_sha
  job,fields=fixture(tmp_path);job['profile']='hard';job['rows'].append({**job['rows'][0],'contract_id':'OLD-ASSIGNMENT'})
  ledger=Ledger();service=Service(tmp_path/'queue',lambda:'owner',ledger)
- state=service.submit('partial-book',[job],fields,'01.11.2026','01.11.2026',[])
- assert state['state']=='attention' and state['busy']==0
- path=tmp_path/'master.xlsx';path.write_bytes(b'synthetic approved master')
- book=dict(path=str(path),file_sha256=file_sha(path),grid=[['Номер КД / ID','ответственный Сотрудник','ответственный Сотрудник СОФТ'],['сх','хард','софт'],['OLD-ASSIGNMENT','New owner','']])
- plan=service.preview_reconciliation(book);service.apply_reconciliation(plan)
- state=service.process()
- assert state['state']=='done' and state['excluded']==1 and state['remaining']==0 and len(ledger.posts)==1
+ second,_=fixture(tmp_path,'Beta')
+ state=service.submit('partial-book',[job,second],fields,'01.11.2026','01.11.2026',[])
+ assert state['state']=='done' and state['excluded']==1 and state['remaining']==0 and state['completed']==2 and len(ledger.posts)==2
  assert all(e['contract_id']=='Alpha' for e in ledger.posts[0]['entries'])
