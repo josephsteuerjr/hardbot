@@ -452,10 +452,10 @@ def enr_apply(body, *, admin, start_job, settings, **_):
         result=service.process(prepared_run,say)
         S["enr_check"] = None
         S['preview']=None
-        return {**result,'lines':[f'Проверено книг: {result["completed"]} из {result["total"]}. Записано ячеек: {result["cells"]}.',
-            'Перенос завершён.' if not result['remaining'] else '\n'.join(
-                f'{book["employee"]} — {book["message"]}' for book in result['books'] if book['state']!='done')],
-            'conflicts':[],'office':[],'ledger_error':''}
+        summary = f'Завершено книг: {result["completed"]} из {result["total"]}. Записано ячеек: {result["cells"]}.'
+        status = (f'Осталось книг: {result["remaining"]}. Причины и действия — в подробностях очереди.'
+                  if result['remaining'] else 'Перенос завершён.')
+        return {**result, 'lines': [summary, status], 'conflicts': [], 'office': [], 'ledger_error': ''}
     return {"job": start_job("enr_apply", work,before_start=prepare)}
 
 def enr_operation(body,*,settings,admin,**_):
