@@ -11,6 +11,7 @@ import asyncio
 import copy
 import random
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -138,6 +139,48 @@ def test_server_keeps_only_a_few_bases(server):
     for s in range(5):
         _post("/admin/import/preview.json", {**BODY, "sheets": [{"name": SHEET, "grid": _grid(seed=s)}]})
     assert len(list(web._import_bases_dir().glob("*.json.gz"))) == web.IMPORT_BASES_KEEP
+
+
+def test_apply_responds_while_transaction_runs_and_returns_one_result(server, monkeypatch):
+    proof = "a" * 64
+    release = threading.Event()
+    calls = []
+
+    def apply(grid, **options):
+        calls.append(grid)
+        assert release.wait(5)
+        return {"updated": 11, "idempotent_replay": True}
+
+    monkeypatch.setattr(web, "_IMPORT_JOBS", {})
+    monkeypatch.setattr(web, "validate_import_source_proof_record", lambda *a, **k: {"digest": proof})
+    monkeypatch.setattr(web, "_import_grid_serial", apply)
+    monkeypatch.setattr(db, "import_receipt_result", lambda digest: {"status": "absent"})
+
+    async def scenario():
+        body = {**BODY, "background_apply": True, "sheets": [{"name": SHEET, "grid": _grid()}]}
+        path = "/admin/import/status.json?proof_digest=" + proof
+        async with TestClient(TestServer(web.build_app(None))) as client:
+            try:
+                for _ in range(2):
+                    response = await client.post("/admin/import.json", json=body)
+                    assert response.status == 202
+                    assert await response.json() == {"status": "running", "proof_digest": proof}
+                status = await client.get(path)
+                assert await status.json() == {"status": "running"}
+            finally:
+                release.set()
+            for _ in range(30):
+                status = await client.get(path)
+                receipt = await status.json()
+                if receipt["status"] == "consumed":
+                    assert receipt["result"]["updated"] == 11
+                    break
+                await asyncio.sleep(.02)
+            else:
+                pytest.fail("Background apply did not publish a result")
+
+    asyncio.run(scenario())
+    assert len(calls) == 1
 
 
 # --- пульт: когда разницей, когда целиком ---------------------------------------------

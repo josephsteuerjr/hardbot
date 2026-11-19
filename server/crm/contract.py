@@ -2,6 +2,7 @@
 
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 import hashlib
 import json
 import re
@@ -181,19 +182,24 @@ def fields():
          for key,title in DELIVERY_FIELDS.items()]
 
 
+@lru_cache(maxsize=1)
+def _field_types():
+    return {definition["key"]: definition["type"] for definition in fields()}
+
+
 def field_value(key, value, *, clear=False):
     from fields import DROPDOWNS
 
-    definitions = {f["key"]: f for f in fields()}
-    if key not in definitions:
+    field_type = _field_types().get(key)
+    if field_type is None:
         raise CRMError("Неизвестное поле.", details={"key": key})
     if value is None:
         if not clear:
             raise CRMError("Очистка поля должна быть явной.", details={"key": key})
         return None
-    if definitions[key]["type"] == "money":
+    if field_type == "money":
         return money(value)
-    if definitions[key]["type"] == "integer":
+    if field_type == "integer":
         if isinstance(value, bool) or not re.fullmatch(r"\d{1,8}", str(value)):
             raise CRMError("Ожидается целое число.")
         return str(int(value))
@@ -201,7 +207,7 @@ def field_value(key, value, *, clear=False):
         raise CRMError("Некорректный текст поля.", details={"key": key})
     if key in DROPDOWNS and value not in DROPDOWNS[key]:
         raise CRMError("Выберите допустимое значение поля.", details={"key": key})
-    if definitions[key]["type"] == "date" and value:
+    if field_type == "date" and value:
         try:
             date.fromisoformat(value)
         except ValueError as exc:

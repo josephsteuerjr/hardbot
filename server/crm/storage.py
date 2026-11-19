@@ -5,6 +5,7 @@ remain parameterized; the adapter translates placeholders, not SQL values.
 """
 import hashlib
 import os
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -20,6 +21,7 @@ def _row_factory(cursor):
     return lambda values: Row(zip(names, values))
 
 
+@lru_cache(maxsize=256)
 def parameters(sql):
     """Translate qmarks outside SQL literals; escape psycopg's percent syntax."""
     result, quote, index = [], None, 0

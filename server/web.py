@@ -55,6 +55,7 @@ from exchange_contract import (
     OFFICE_RESULT_SNAPSHOT_KEY,
     contract_binding,
     validate_contract_binding,
+    validate_import_source_proof_record,
 )
 from fields import BY_KEY, DROPDOWNS, SOFT
 from i18n import FIELD_TITLES, FORM_FIELD_TITLES, LANGUAGES, t, tf, tv
@@ -6514,7 +6515,11 @@ async def _admin_import_status(request: web.Request) -> web.Response:
     digest = request.query.get("proof_digest", "")
     if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
         raise web.HTTPBadRequest(text="Некорректный номер квитанции импорта.")
-    return web.json_response(await asyncio.to_thread(db.import_receipt_result, digest))
+    job = _IMPORT_JOBS.get(digest)
+    if job and job["status"] == "running":
+        return web.json_response({"status": "running"})
+    receipt = await asyncio.to_thread(db.import_receipt_result, digest)
+    return web.json_response(receipt if receipt["status"] == "consumed" else job or receipt)
 
 
 async def _admin_import_json(request: web.Request) -> web.Response:
@@ -6665,9 +6670,7 @@ async def _admin_import_json(request: web.Request) -> web.Response:
             {"blocked": True, "error": f"импорт заблокирован: {exc}"},
             status=409,
         )
-    report = await asyncio.to_thread(
-        _import_grid_serial,
-        grid,
+    options = dict(
         source_kind=source_kind,
         source_proof=body.get("source_proof"),
         require_source_proof=True,
@@ -6688,27 +6691,55 @@ async def _admin_import_json(request: web.Request) -> web.Response:
         expected_recall_restored=expected_recall_restored,
         expected_recall_restored_digest=expected_recall_restored_digest,
     )
+    if body.get("background_apply") is True:
+        try:
+            proof = await asyncio.to_thread(validate_import_source_proof_record,
+                                            options["source_proof"], source_kind=source_kind)
+        except (ExchangeContractError, ValueError) as exc:
+            return web.json_response({"blocked": True, "error": str(exc)}, status=409)
+        digest = proof["digest"]
+        if any(key != digest and job["status"] == "running" for key, job in _IMPORT_JOBS.items()):
+            return web.json_response({"error": "Сервер уже применяет другой импорт."}, status=409)
+        if not _IMPORT_JOBS.get(digest) or _IMPORT_JOBS[digest]["status"] != "running":
+            if len(_IMPORT_JOBS) >= 8:
+                _IMPORT_JOBS.pop(next(iter(_IMPORT_JOBS)))
+            _IMPORT_JOBS[digest] = {"status": "running"}
+            asyncio.create_task(_background_admin_import(digest, grid, options))
+        return web.json_response({"status": "running", "proof_digest": digest}, status=202)
+    report = await _apply_admin_import(grid, options)
+    return web.json_response(report, status=409 if report.get("blocked") else 200)
+
+
+_IMPORT_JOBS = {}
+
+
+async def _background_admin_import(digest, grid, options):
+    try:
+        report = await _apply_admin_import(grid, options)
+        _IMPORT_JOBS[digest] = {"status": "rejected" if report.get("blocked") else "consumed",
+                                "result": report}
+    except Exception:
+        logging.exception("background registry import failed")
+        _IMPORT_JOBS[digest] = {"status": "rejected", "result": {
+            "blocked": True, "error": "Сервер не смог применить импорт. Проверьте квитанцию."}}
+
+
+async def _apply_admin_import(grid, options):
+    report = await asyncio.to_thread(_import_grid_serial, grid, **options)
     if report.get("blocked"):
         # Машиночитаемый код: операторский CLI различает «нужен предпросмотр
         # отзыва» и «расписка не зарегистрирована», не разбирая свободный текст.
         if report.get("recall_preview_required"):
             report["code"] = "recall_preview_required"
-        return web.json_response(report, status=409)
+        return report
     # A consumed receipt is an exact zero-write replay. Do not run ancillary
     # mutators behind it: otherwise replaying the same import could still
     # change coordinates after the atomic import transaction.
     if report.get("idempotent_replay"):
-        return web.json_response(report)
-    # Геокодинг — по-прежнему здесь, в цикле, и это НАМЕРЕННО. Проход держит
-    # ОДНУ транзакцию записи от первой найденной точки до конца: на свежей машине
-    # это ~19 с, больше busy_timeout (8 с). В потоке каждый телефон, пишущий в
-    # это время, простоял бы в цикле событий до 8 с на каждой записи и получил
-    # бы 500 (а журнал доступа — дыру). Пока проход не коммитит порциями
-    # (scoring.py), честнее один раз подождать всем. В ежедневном импорте он
-    # стоит десятые доли секунды: точки уже есть, считать нечего.
+        return report
     try:
         import scoring
-        report["geocoded"] = scoring.geocode_city_centroids()
+        report["geocoded"] = await asyncio.to_thread(scoring.geocode_city_centroids)
     except Exception as e:  # noqa: BLE001
         logging.warning("geocode after import: %s", e)
     # Новые люди из реестра сразу получают офис — по географии их должников
@@ -6725,7 +6756,7 @@ async def _admin_import_json(request: web.Request) -> web.Response:
                             detail=f"auto={len(guessed['filled'])}")
     except Exception as e:  # noqa: BLE001
         logging.warning("guess offices after import: %s", e)
-    return web.json_response(report)
+    return report
 
 
 # import_grid — в потоке, а не в корутине: разбор и запись всего реестра (0,6 с

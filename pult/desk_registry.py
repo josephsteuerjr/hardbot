@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import threading
 import os
+import time
 import uuid
 from pathlib import Path
 
@@ -267,23 +268,42 @@ def imp_apply(body, *, admin, start_job, settings, **_):
         if enrich._sha256_file(Path(book['path']))!=book['file_sha256']:
             S['preview']=None
             raise RuntimeError('Общий реестр изменился до отправки. Сделайте новый предпросмотр; импорт не отправлен.')
+        outcome_error = None
         try:
-            d = xs.post_import(admin, "/admin/import.json", pv["body"],
+            d = xs.post_import(admin, "/admin/import.json", {**pv["body"], "background_apply": True},
                                sheet=_xc.WORKBOOK_SHEET_NAME, timeout=300, log=say)
         except (RuntimeError, OSError) as error:
             if isinstance(error, AccessRevoked):
                 raise
             say("Ответ на применение прервался. Проверяю квитанцию сервера…")
-            try:
-                receipt = admin("GET", "/admin/import/status.json?proof_digest=" + meta["proof_digest"], timeout=10)
-            except (RuntimeError, OSError):
-                receipt = {}
-            if receipt.get("status") != "consumed" or not isinstance(receipt.get("result"), dict):
-                raise xs.ImportOutcomeUnknown(
-                    "Квитанция применения пока не получена. Сохранён предпросмотр этого импорта."
-                ) from error
-            d = receipt["result"]
-            say("Применение подтверждено квитанцией сервера.")
+            outcome_error = error
+            d = {"status": "running"}
+        if d.get("status") == "running":
+            if d.get("proof_digest", meta["proof_digest"]) != meta["proof_digest"]:
+                raise xs.ImportOutcomeUnknown("Сервер ответил номером другой квитанции.")
+            started = time.monotonic()
+            failures = 0
+            say("Сервер обрабатывает импорт. Жду подтверждение записи.")
+            while time.monotonic() - started < 1800:
+                try:
+                    receipt = admin("GET", "/admin/import/status.json?proof_digest=" + meta["proof_digest"], timeout=10)
+                except AccessRevoked:
+                    raise
+                except (RuntimeError, OSError):
+                    receipt = {}
+                if receipt.get("status") in {"consumed", "rejected"} and isinstance(receipt.get("result"), dict):
+                    d = receipt["result"]
+                    if receipt["status"] == "consumed":
+                        say("Применение подтверждено квитанцией сервера.")
+                    break
+                failures = 0 if receipt.get("status") == "running" else failures + 1
+                if failures >= 4:
+                    raise xs.ImportOutcomeUnknown(
+                        "Квитанция применения пока не получена. Сохранён предпросмотр этого импорта."
+                    ) from outcome_error
+                time.sleep(2)
+            else:
+                raise xs.ImportOutcomeUnknown("Сервер ещё выполняет импорт. Предпросмотр сохранён.")
         if isinstance(d, dict) and d.get("error"):
             d = {**d, "_proof_digest": meta["proof_digest"], "_source_kind": meta["source_kind"],
                  "_registered": bool(registered and registered.get("ok"))}
