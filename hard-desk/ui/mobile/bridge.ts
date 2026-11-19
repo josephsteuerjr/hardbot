@@ -119,7 +119,7 @@ async function flush(){
     }
     if(current?.owner===owner&&!offline)await request('receipts',{action:'flush'});
   };
-  flushing=(navigator.locks?navigator.locks.request('crm-mobile-send'+scopeSuffix,run):run()).finally(()=>{flushing=null;});return flushing;
+  flushing=(navigator.locks?navigator.locks.request('crm-mobile-send',run):run()).finally(()=>{flushing=null;});return flushing;
 }
 async function queue(action?:string,id?:string,expected?:string){
   const owner=authority(expected);
