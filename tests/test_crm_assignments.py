@@ -44,6 +44,22 @@ def apply(w,p,manager=0,op=None):
     return assignments.commit(w['managers'][manager],body),body
 
 
+def test_persisted_authority_restricts_same_team_targets_and_open_previews(crm_world):
+    w = allocation_world(crm_world)
+    manager = w['managers'][0]
+    prepared = preview(w)
+    with storage.connect() as conn:
+        conn.execute('INSERT INTO crm_authority_scopes VALUES(?,?,?,?)',
+                     (manager.actor_uid, canonical([w['employee']]), 0, 'verified-authority'))
+        assert w['target'] not in {row['employee_uuid'] for row in assignments.targets(conn, manager)}
+    with pytest.raises(CRMError) as denied:
+        preview(w)
+    assert denied.value.code == 'target_unavailable'
+    with pytest.raises(CRMError) as denied:
+        apply(w, prepared)
+    assert denied.value.code == 'target_unavailable'
+
+
 def test_transfer_changes_only_call_and_preserves_debt_and_authorship(crm_world):
     w=allocation_world(crm_world);m=w['managers'][0]
     accepted=store.command(w['member'],call_body(w))

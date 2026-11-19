@@ -101,8 +101,15 @@ def states(conn, ids):
     return result
 
 
+def _authority_targets(conn, principal):
+    row = conn.execute('SELECT employees_json FROM crm_authority_scopes WHERE actor_uid=?',
+                       (principal.actor_uid,)).fetchone()
+    return None if row is None else frozenset(json.loads(row['employees_json'])) & principal.employee_scope
+
+
 def targets(conn, principal):
     at = now()
+    authorized_staff = _authority_targets(conn, principal)
     teams = {r[0] for r in conn.execute('SELECT DISTINCT team_id FROM crm_distribution_managers WHERE employee_uuid=?',
                                       (principal.employee_uuid,))}
     result = {}
@@ -111,7 +118,8 @@ def targets(conn, principal):
         'AND m.starts_at<=? AND (m.ends_at IS NULL OR m.ends_at>?) ORDER BY e.name,e.employee_uuid', (at,at))
     memberships = defaultdict(list)
     for r in rows:
-        memberships[r['employee_uuid']].append(dict(r))
+        if authorized_staff is None or r['employee_uuid'] in authorized_staff:
+            memberships[r['employee_uuid']].append(dict(r))
     for eid, members in memberships.items():
         visible = [r for r in members if r['team_id'] in teams]
         if not visible:
@@ -318,6 +326,9 @@ def _validate(conn, principal, frozen):
     if any((s['contract_uuid'],s['capability']) not in permitted for s in slots):
         raise CRMError('Изменилась управляемая область.','scope_changed',403)
     if target:
+        authorized_staff = _authority_targets(conn, principal)
+        if authorized_staff is not None and target not in authorized_staff:
+            raise CRMError('Сотрудник вне вашей области распределения.','target_unavailable',403)
         at=now();members=conn.execute('SELECT e.active,e.staff_id,m.team_id,m.capabilities_json FROM crm_employees e '
             'JOIN crm_memberships m USING(employee_uuid) WHERE e.employee_uuid=? AND m.starts_at<=? '
             'AND (m.ends_at IS NULL OR m.ends_at>?)',(target,at,at)).fetchall()
