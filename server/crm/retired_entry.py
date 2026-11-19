@@ -5,6 +5,9 @@ from pathlib import Path
 from aiohttp import web
 
 PREFIX = '/admin/analyst/'
+PUBLIC_ASSETS = frozenset({
+    PREFIX.rstrip('/'), PREFIX, PREFIX+'BUILD.json', PREFIX+'sw.js', PREFIX+'continue.js',
+})
 WORKER = (Path(__file__).resolve().parents[1] / 'miniapp' / 'crm-retired.js').read_text(encoding='utf-8')
 VERSION = sha256(WORKER.encode()).hexdigest()[:16]
 HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',

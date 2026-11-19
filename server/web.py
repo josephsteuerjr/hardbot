@@ -7833,6 +7833,10 @@ async def _observe_client_version(request, *, token=None, login=False):
 async def _account_client_policy(request,handler):
     # Protocol admission retires unmodified old clients; it is not binary or
     # hardware attestation. Every data gate still validates account and device.
+    if request.method in ('GET', 'HEAD') and request.path.startswith('/admin/analyst'):
+        from crm.retired_entry import PUBLIC_ASSETS
+        if request.path in PUBLIC_ASSETS:
+            return await handler(request)
     protected=request.path.startswith(('/api/','/admin/'))
     if protected and request.method != 'OPTIONS':
         await _observe_client_version(request)
