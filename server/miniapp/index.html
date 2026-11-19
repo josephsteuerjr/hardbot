@@ -54,7 +54,10 @@
 <script>
 // Регистрируем service worker (кэш оболочки для оффлайна). Тихо, без влияния на онлайн.
 if("serviceWorker" in navigator){
-  window.addEventListener("load", function(){ navigator.serviceWorker.register("/sw.js").catch(function(){}); });
+  window.addEventListener("load", function(){
+    navigator.serviceWorker.register("/sw.js", {updateViaCache:"none"})
+      .then(registration => registration.update()).catch(function(){});
+  });
 }
 </script>
 <style>
@@ -1095,7 +1098,7 @@ async function purgeProfile(reason){
     // unavailable. A new login cannot revive remnants under the same UID.
     let erased=true;
     for(const name of ["cards","kv","queue"]){try{if(await IDB.count(name))erased=false;}catch(e){erased=false;}}
-    try{if((await caches.keys()).length)erased=false;}catch(e){erased=false;}
+    try{if((await caches.keys()).some(key=>/^hard-shell-v\d+$/.test(key)))erased=false;}catch(e){erased=false;}
     if(!erased){POLICY_NOTICE="Очистка данных не завершена: хранилище недоступно. Повторим при открытии приложения.";renderLangs();renderAppAuthGone(true);await updateOffBar();return;}
     try{localStorage.removeItem("hb_erasure_pending");}catch(e){}
     if(replacement){
@@ -1187,7 +1190,7 @@ async function wipeDevice(opts){
     }
     if(typeof caches!=="undefined" && caches.keys){
       const ks=await caches.keys();
-      await Promise.all(ks.map(k=>caches.delete(k).catch(()=>false)));
+      await Promise.all(ks.filter(k=>/^hard-shell-v\d+$/.test(k)).map(k=>caches.delete(k).catch(()=>false)));
     }
   }catch(e){}
   try{ updateOffBar(); }catch(e){}
@@ -1536,7 +1539,7 @@ const PHOTO_MAX_BYTES=25*1024*1024;
 // Версия ЭТОЙ оболочки. Сервер отдаёт свою в meta.shellVersion, и если он
 // ушёл вперёд — приложение предложит обновиться само. Держать в синхроне с
 // sw.js: тест test_pwa_shell_lock не даст забыть.
-const SHELL_VERSION=112;
+const SHELL_VERSION=113;
 let LOGIN_GPS=null;
 const ORIGINAL_FETCH=window.fetch.bind(window);
 window.fetch=async(input,init)=>{
@@ -2154,7 +2157,8 @@ function renderAppAuthGone(expired=false){
       <div class="muted" style="margin:12px 0">Геопозиция для входа не нужна. Телефон сотрудника подтверждает его руководитель.</div><div id="loginerr" style="display:none;color:var(--danger)"></div>
       <button class="btn acc" id="loginbtn" onclick="${registering?"accountRegister()":"accountLogin()"}">${registering?"Создать профиль":"Войти"}</button>
       <button class="btn" style="margin-top:12px" onclick="authTab('${registering?"login":"register"}')">${registering?"Уже есть профиль — войти":"Нет профиля — зарегистрироваться"}</button>
-      <p class="muted">Руководитель подтверждает устройства сотрудников во «Входе команды».</p></div></div>`;
+      <p class="muted">Руководитель подтверждает устройства сотрудников во «Входе команды».</p>
+      ${registering?"":`<p><a href="/admin/analyst/">Вход для аналитика</a></p>`}</div></div>`;
   if(registering) loadRegistrationStaff();
 }
 
