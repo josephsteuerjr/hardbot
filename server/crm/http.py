@@ -120,7 +120,7 @@ def install(app, host=None, *, authenticate=None):
             logistics_countries=logistics_countries,
         )
 
-    async def handler(request):
+    async def dispatch(request):
         try:
             p = await authenticate(request) if authenticate is not None else await asyncio.to_thread(principal, request)
             action = request.match_info["action"]
@@ -291,6 +291,34 @@ def install(app, host=None, *, authenticate=None):
                 dict(error="invalid", text="Некорректные параметры запроса."),
                 status=400,
             )
+
+    shared_slots = None
+    database_errors = ()
+    if authenticate is not None and storage.postgres_enabled():
+        from psycopg import OperationalError
+
+        shared_slots = asyncio.Semaphore(8)
+        database_errors = (OperationalError,)
+
+    def server_busy():
+        return web.json_response(
+            dict(error='crm_busy', text='Сервер занят. Повторите запрос. Сохранённая работа остаётся в очереди.'),
+            status=503, headers={'Retry-After': '2'},
+        )
+
+    async def handler(request):
+        if shared_slots is None:
+            return await dispatch(request)
+        try:
+            await asyncio.wait_for(shared_slots.acquire(), timeout=25)
+        except asyncio.TimeoutError:
+            return server_busy()
+        try:
+            return await dispatch(request)
+        except database_errors:
+            return server_busy()
+        finally:
+            shared_slots.release()
 
     @web.middleware
     async def cutover(request, handler):
