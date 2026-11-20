@@ -38,6 +38,7 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   let savedPreferences='';
   let resizeStop:(()=>void)|undefined;
   const snapshots=new Map<string,any>();
+  const mobile=crm.platform==='mobile';
   const validView=options.manager||options.onlyAll?'all':['mine','all'].includes(prefs.view)?prefs.view:'mine';
   prefs={view:validView,search:String(prefs.search || ''),sort:prefs.sort || 'contract_id',direction:prefs.direction==='desc'?'desc':'asc',offset:Math.max(0,Number(prefs.offset)||0),
     left:Math.max(0,Number(prefs.left)||0),top:Math.max(0,Number(prefs.top)||0),
@@ -48,7 +49,7 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   if(disposed || !isCurrent())return ()=>{};
   host.innerHTML=`<div class="registry"><div class="toolbar"><select id="registry-scope" aria-label="Область реестра"><option value="mine">Мой реестр</option><option value="all">Общий просмотр</option></select><input id="registry-search" type="search" placeholder="Клиент, договор, телефон"><button id="registry-find">Найти</button><button id="registry-reload">Обновить</button><label>Масштаб <select id="registry-zoom">${[80,90,100,110,125,150].map(n=>`<option value="${n}">${n}%</option>`).join('')}</select></label></div>
     <div class="toolbar"><button id="registry-edit">Изменить</button><button id="registry-clear">Очистить</button><button id="registry-cancel">Отменить ввод</button><button id="registry-save" class="primary">Сохранить правки</button><button id="registry-review">Сверить отправку</button><label>Пометка строки <select id="registry-color"><option value="">Без цвета</option><option value="yellow">Жёлтый</option><option value="red">Красный</option><option value="blue">Голубой</option></select></label></div>
-    <p id="registry-status" role="status"></p><div class="registry-scroll" tabindex="-1"></div><div class="toolbar"><button id="registry-prev">Назад</button><span id="registry-page"></span><button id="registry-next">Далее</button><button id="registry-reset-widths" class="link">Сбросить ширины</button></div>
+    <p id="registry-status" role="status">${mobile?'Загружаем реестр…':''}</p><div class="registry-scroll" tabindex="-1"></div><div class="toolbar"><button id="registry-prev" disabled>Назад</button><span id="registry-page"></span><button id="registry-next" disabled>Далее</button><button id="registry-reset-widths" class="link">Сбросить ширины</button></div>
     <dialog id="registry-preview"><h2>Правки реестра</h2><div class="registry-preview-values"></div><div class="actions"><button id="registry-apply" class="primary">Сохранить на компьютере и отправить</button><button id="registry-preview-cancel">Вернуться к вводу</button></div></dialog></div>`;
   const $=<T extends HTMLElement=HTMLElement>(id:string)=>host.querySelector<T>('#'+id)!;
   if(options.onlyAll)$('registry-scope').innerHTML='<option value="all">Общий реестр</option>';
@@ -58,7 +59,6 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
     $('registry-scope').closest('.toolbar')!.insertAdjacentHTML('afterend',`<div class="toolbar"><label>Сотрудник <select id="registry-employee"><option value="">Все сотрудники</option></select></label><label>Работа <select id="registry-work"><option value="all">Все</option><option value="call">Звонки</option><option value="visit">Выезды</option></select></label><label class="check"><input id="registry-unassigned" type="checkbox">Без ответственного</label><label>Поля <select id="registry-fields"><option value="main">Основное</option><option value="all">Все поля</option></select></label><button id="registry-open">Открыть карточку</button></div><div class="toolbar"><button id="registry-select-page">Выбрать страницу</button><button id="registry-select-all">Весь доступный отбор</button><button id="registry-select-clear">Снять выделение</button><span id="registry-selected-count"></span></div><div id="registry-allocation"></div>`);
   }
   const scroll=host.querySelector<HTMLElement>('.registry-scroll')!;
-  const mobile=crm.platform==='mobile';
   if(!mobile){
     host.classList.add('registry-desktop');
     const toolbar=$('registry-search').parentElement!;
@@ -202,7 +202,7 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
     });
   }
   async function sync() {
-    const result=await crm.queue();
+    const result=mobile?await crm.queue('registry'):await crm.queue();
     if(disposed || !isCurrent() || !result.ok)return;
     entries=result.data.entries || [];
     queueLoaded=true;
@@ -480,14 +480,22 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   const filters=()=>({search:prefs.search,employee_uuid:prefs.employee_uuid,work:prefs.work,unassigned:prefs.unassigned});
   if(options.manager){
     $('registry-open').onclick=()=>{const row=data?.rows[active.row];if(row?.person_uuid)options.openPerson?.(row.person_uuid);};
-    $('registry-select-page').onclick=()=>{allSelected=false;data.rows.forEach((r:any)=>selectedRows.add(r.contract_uuid));selectionChanged();};
+    $('registry-select-page').onclick=()=>{if(!data)return;allSelected=false;data.rows.forEach((r:any)=>selectedRows.add(r.contract_uuid));selectionChanged();};
     $('registry-select-all').onclick=()=>{allSelected=true;selectedRows.clear();selectionChanged();};
     $('registry-select-clear').onclick=()=>{allSelected=false;selectedRows.clear();selectionChanged();};
     $('registry-fields').onchange=protect(async()=>{prefs.columnGroup=$<HTMLSelectElement>('registry-fields').value;await load();});
+    const employeeFilter=$<HTMLSelectElement>('registry-employee');
     if(options.distribution){
-      const staff=await crm.api('GET','assignment-staff');if(staff.ok)$('registry-employee').insertAdjacentHTML('beforeend',staff.data.staff.map((s:any)=>`<option value="${escape(s.employee_uuid)}">${escape(s.name)}</option>`).join(''));
+      const fillStaff=async()=>{
+        const staff=await crm.api('GET','assignment-staff');
+        if(disposed||!isCurrent()||!staff.ok)return;
+        employeeFilter.insertAdjacentHTML('beforeend',staff.data.staff.map((s:any)=>`<option value="${escape(s.employee_uuid)}">${escape(s.name)}</option>`).join(''));
+        employeeFilter.value=prefs.employee_uuid;
+      };
+      if(mobile)void fillStaff().catch(()=>{});
+      else await fillStaff();
     }
-    $<HTMLSelectElement>('registry-employee').value=prefs.employee_uuid;$<HTMLSelectElement>('registry-work').value=prefs.work;$<HTMLInputElement>('registry-unassigned').checked=prefs.unassigned==='1';
+    employeeFilter.value=prefs.employee_uuid;$<HTMLSelectElement>('registry-work').value=prefs.work;$<HTMLInputElement>('registry-unassigned').checked=prefs.unassigned==='1';
     ['registry-employee','registry-work','registry-unassigned'].forEach(id=>$(id).onchange=protect(async()=>{prefs.employee_uuid=$<HTMLSelectElement>('registry-employee').value;prefs.work=$<HTMLSelectElement>('registry-work').value;prefs.unassigned=$<HTMLInputElement>('registry-unassigned').checked?'1':'0';prefs.offset=0;allSelected=false;await load();selectionChanged();}));
   }
   let liveGeneration=0;
@@ -526,12 +534,13 @@ export async function mountRegistry(host:HTMLElement, crm:any, isCurrent:()=>boo
   }
   const stop=crm.onChange?.((event:any)=>{if(event.type==='queue')void sync().catch(e=>status(e.message));else if(event.type==='live'&&event.dirty)void refreshLive().catch(e=>status(e.message));});
   scroll.onscroll=()=>{prefs.left=scroll.scrollLeft;prefs.top=scroll.scrollTop;schedulePreferences();};
-  await load();
+  if(mobile)await protect(load)();
+  else await load();
   if(options.manager&&isCurrent()){
     selectionChanged();
     if(options.distribution){
       const {mountAllocation}=await import('./crm-allocation');
-      allocationStop=await mountAllocation($('registry-allocation'),crm,()=>({ids:[...selectedRows],filters:filters(),all:allSelected,rows:data.rows}),isCurrent,load);
+      allocationStop=await mountAllocation($('registry-allocation'),crm,()=>({ids:[...selectedRows],filters:filters(),all:allSelected,rows:data?.rows||[]}),isCurrent,load);
       if(!mobile){
         const history=$('allocation-history');
         if(history)host.querySelector('.registry-selection-settings .toolbar')?.append(history);

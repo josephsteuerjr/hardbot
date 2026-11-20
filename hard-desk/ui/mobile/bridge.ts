@@ -124,6 +124,10 @@ async function flush(){
 }
 async function queue(action?:string,id?:string,expected?:string){
   const owner=authority(expected);
+  if(action==='registry'){
+    const entries:Entry[]=await vault.get(owner,'queue')||[];
+    return {ok:true,status:200,data:{entries:entries.filter(entry=>entry.action==='registry-edit')}};
+  }
   if(action==='retry'||action==='review-registry')await vault.update(owner,'queue',(rows:Entry[]|null)=>(rows||[]).map(e=>e.body.operation_id===id?{...e,state:action==='retry'?'pending':'attention',reviewed_at:action==='review-registry'?new Date().toISOString():undefined}:e));
   if(action==='retry')await request('receipts',{action:'retry',operation_id:id});
   if(action==='retry'||action==='flush')await flush();
