@@ -1,5 +1,5 @@
 /** Windows account entry. Passwords stay in the form only until the request ends. */
-export function mountAccount(host:HTMLElement,crm:any,account:any,connected:boolean,refresh:()=>Promise<void>) {
+export function mountAccount(host:HTMLElement,crm:any,account:any,connected:boolean,refresh:(action:string)=>Promise<void>) {
   const esc=(s:any)=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
   if (connected && !account?.available) {
     host.innerHTML='<button id="account-switch">Войти под другой учётной записью</button>';
@@ -18,7 +18,7 @@ export function mountAccount(host:HTMLElement,crm:any,account:any,connected:bool
     try{
       const result=await crm.connect({action,...body});
       if(!result.ok)throw Error(result.text||'Не удалось подтвердить вход. Повторите попытку.');
-      await refresh();
+      await refresh(action);
     }catch(e){message.textContent=(e as Error).message;}
     finally{busy=false;host.querySelectorAll<HTMLInputElement>('input[type=password]').forEach(e=>e.value='');host.querySelectorAll<HTMLButtonElement>('button').forEach(b=>b.disabled=false);}
   };

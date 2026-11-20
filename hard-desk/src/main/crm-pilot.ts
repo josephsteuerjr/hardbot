@@ -607,6 +607,13 @@ app
     });
     diagnostic('launcher','launcher_ready',true);
     try{await backendStart();diagnostic('helper','helper_ready',true);}catch{backend?.kill();diagnostic('helper','helper_unavailable',false);}
+    const savedAccount=accountState();
+    if(STABLE_CRM&&!isolatedProfile&&!config()&&savedAccount.available&&!savedAccount.pending){
+      try {
+        await pilotCredential(undefined,true,'crm');
+        writeSettings({crmConnection:{mode:'remote',server:PILOT_BASE,source:'crm',auth:'existing-login'}});
+      } catch { connectionNotice='Вход сохранён. Нажмите «Продолжить», чтобы подтвердить его.'; }
+    }
     // A stable in-place upgrade uses only this product's previously approved
     // sign-in. Separate CRM installations and explicit logouts keep the entry form.
     if (STABLE_CRM && !isolatedProfile && !config() && !readSettings().crmExplicitEntry &&

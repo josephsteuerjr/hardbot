@@ -339,7 +339,10 @@ function bind(id: string, fn: () => any) {
 }
 const table = (heads: string[], rows: string[]) =>
   `<div class="table-wrap"><table><thead><tr>${heads.map((x) => `<th>${esc(x)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table></div>`;
-async function boot() {
+function workSection(role?:string) {
+  return role==='analyst'?'registry':role==='logistic'?'logistics':'portfolio';
+}
+async function boot(openWork=false) {
   await crm.ready?.();
   state = await crm.state();
   if(!state || state.ok===false || !state.connection)throw Error(state?.text || 'Не удалось прочитать защищённый профиль CRM.');
@@ -347,6 +350,7 @@ async function boot() {
   if(analystIdentity&&analystIdentity!==state.owner){location.reload();return;}
   context = state.context;
   const mobileTarget=crm.initialSection?.();if(mobileTarget)section=mobileTarget;
+  if(openWork&&context)section=workSection(context.role);
   document.body.classList.toggle('crm-analyst',context?.role==='analyst');
   if(context?.role==='analyst')analystIdentity=state.owner;
   if(context?.role==='analyst'&&!['registry','exchange','statistics','team','connection'].includes(section))section='registry';
@@ -1618,7 +1622,11 @@ async function connection(host:HTMLElement=document.getElementById('view')!) {
     `<div class="help connection-page">${current}<h2>Сохранённый вход</h2><p>${available.length?'Выберите вход из установленной рабочей программы. Сервер подтвердит личность и права.':'Сохранённый вход из другой программы не найден.'}</p><div class="actions">${available.map((entry:any)=>`<button ${entry.source==='manager'?'id="existing-manager-connect" ':''}data-existing-source="${esc(entry.source)}" class="primary">${esc(entry.label)}</button>`).join('')}${button('connection-refresh','Проверить снова')}</div>${state.connectionNotice ? `<p role="status">${esc(state.connectionNotice)}</p>` : ''}<details class="connection-testing"><summary>Проверочная среда</summary><h2>Синтетические данные</h2><p>Отдельная база на этом компьютере. Результаты не попадают в рабочий портфель.</p><div class="toolbar"><select id="demo-role" aria-label="Роль в проверочной базе"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option><option value="observer">Наблюдатель другой команды</option><option value="courier">Курьер</option><option value="analyst">Аналитик</option></select>${button('demo-connect','Открыть сценарий')}</div><label class="check"><input id="offline" type="checkbox"${state.offline?' checked':''}>Приостановить отправку для проверки офлайн</label><h2>Отдельный сервер</h2><div class="grid"><div class="field span"><label for="server">HTTPS-адрес</label><input id="server" placeholder="Адрес проверочного сервера"></div><div class="field"><label for="remote-role">Роль входа</label><select id="remote-role"><option value="employee">Сотрудник</option><option value="manager">Руководитель</option></select></div><div class="field"><label for="login">Логин</label><input id="login" autocomplete="username"></div><div class="field"><label for="password">Пароль</label><input id="password" type="password" autocomplete="current-password"></div></div><div class="actions">${button('remote-connect','Войти')}</div></details></div>`;
   const accountHost=document.createElement('div');
   $('view').querySelector('.connection-page')!.prepend(accountHost);
-  mountAccount(accountHost,crm,state.account,!!state.context,async()=>{section='connection';await boot();});
+  const wasConnected=!!state.context;
+  mountAccount(accountHost,crm,state.account,wasConnected,async action=>{
+    section='connection';
+    await boot(action==='account-login'||(action==='account-status'&&!wasConnected));
+  });
   const savedHeading=[...$('view').querySelectorAll('h2')].find(e=>e.textContent==='Сохранённый вход');
   if(savedHeading){
     const savedDetails=document.createElement('details');savedDetails.className='saved-login-options';
@@ -1627,7 +1635,7 @@ async function connection(host:HTMLElement=document.getElementById('view')!) {
     const description=savedHeading.nextElementSibling!,actions=description.nextElementSibling!;
     savedDetails.append(description,actions);savedHeading.remove();
   }
-  bind('connection-continue',()=>go(context?.role==='logistic'?'logistics':context?.role==='analyst'?'registry':'portfolio'));
+  bind('connection-continue',()=>go(workSection(context?.role)));
   $('view').insertAdjacentHTML('beforeend',`<details class="diagnostics"><summary>Диагностика подключения</summary><div class="actions">${button('diagnostic-run','Проверить и восстановить')}${button('diagnostic-queue','Очередь и сверка')}</div><div id="diagnostic-result" role="status"></div></details>`);
   const diagnose=async(repair=false)=>{
     if(!crm.diagnostics)return;
