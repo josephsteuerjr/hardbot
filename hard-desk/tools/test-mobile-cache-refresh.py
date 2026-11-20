@@ -2,8 +2,9 @@
 from pathlib import Path
 import argparse,asyncio,hashlib,json,os,sys,threading,time,uuid
 from playwright.sync_api import sync_playwright
-parser=argparse.ArgumentParser();parser.add_argument('--assets',type=Path,required=True);parser.add_argument('--output',type=Path,required=True);args=parser.parse_args()
+parser=argparse.ArgumentParser();parser.add_argument('--assets',type=Path,required=True);parser.add_argument('--output',type=Path,required=True);parser.add_argument('--engine',choices=['chromium','webkit']);args=parser.parse_args()
 S=Path(__file__).resolve().parents[2];B=args.output.resolve();B.mkdir(parents=True,exist_ok=True);assets=args.assets.resolve();version=json.loads((assets/'BUILD.json').read_text())['version']
+script_name='app-'+version+'.js'
 sys.path[:0]=list(map(str,[S,S/'server',S/'engine']));os.environ['PYTHONPATH']=os.pathsep.join(map(str,[S,S/'server',S/'engine']))
 from aiohttp import web
 from crm.mobile_backend import SyntheticBackend
@@ -16,13 +17,14 @@ def until(p,code,arg=None):
   p.wait_for_timeout(100)
  raise AssertionError(code)
 rows=[]
-for engine in ['chromium','webkit']:
+for engine in [args.engine] if args.engine else ['chromium','webkit']:
  qa=B/(engine+'-'+str(int(time.time())));qa.mkdir();stop=threading.Event();state={'mode':'normal'}
  async def serve():
   @web.middleware
   async def failure(request,handler):
    if state['mode']=='fail':return web.Response(status=503,text='Controlled offline fallback')
-   if state['mode']=='bad-js' and request.path.endswith('/app.js'):return web.Response(text='wrong-version',content_type='application/javascript')
+   if request.path.endswith(('/app.js','/app.css','/sw.js')):return web.Response(status=404)
+   if state['mode']=='bad-js' and request.path.endswith('/'+script_name):return web.Response(text='wrong-version',content_type='application/javascript')
    return await handler(request)
   app=mobile.create_app(SyntheticBackend(qa/'data/synthetic'),qa/'data');app.middlewares.insert(0,failure);runner=web.AppRunner(app);await runner.setup();site=web.TCPSite(runner,'127.0.0.1',0);await site.start();state['url']='http://127.0.0.1:'+str(site._server.sockets[0].getsockname()[1])+'/mobile/'
   try:
@@ -39,16 +41,20 @@ for engine in ['chromium','webkit']:
    owner=p.evaluate('()=>crm.state().then(s=>s.owner)');p.evaluate('()=>crm.draft("qa-refresh",{text:"Keep encrypted draft"})');p.evaluate('()=>crm.connect({action:"offline",value:true})');op=str(uuid.uuid4());p.evaluate('({cid,op})=>crm.command({schema_version:1,operation_id:op,kind:"note",contract_ids:[cid],payload:{text:"Keep pending result"}})',dict(cid=cid,op=op))
    p.evaluate('()=>{localStorage.setItem("qa-preserve-local-storage","keep");return caches.open("crm-mobile:other-scope:preserve").then(c=>c.put("/other",new Response("keep")))}')
    cache_name=p.evaluate('(v)=>navigator.serviceWorker.getRegistration().then(r=>"crm-mobile:"+encodeURIComponent(r.scope)+":"+v)',version)
-   cached_js='(name)=>caches.open(name).then(c=>c.match(new URL("./app.js",location.href))).then(r=>r.text())'
+   cached_js='''async name=>{
+     const cached=await (await caches.open(name)).match(document.querySelector("script[src]").src);
+     const bytes=await crypto.subtle.digest("SHA-256",await cached.arrayBuffer());
+     return Array.from(new Uint8Array(bytes),n=>n.toString(16).padStart(2,"0")).join("");
+   }'''
    original=p.evaluate(cached_js,cache_name)
    # Unreachable server and a bad new response preserve the last verified shell.
    state['mode']='fail';p.reload();p.locator('[data-person]').first.wait_for();assert p.evaluate(cached_js,cache_name)==original
    state['mode']='bad-js';p.reload();p.locator('[data-person]').first.wait_for();assert p.evaluate(cached_js,cache_name)==original
    state['mode']='normal'
-   p.evaluate('(name)=>caches.open(name).then(async c=>{await c.put(new URL("./index.html",location.href),new Response("stale-html"));await c.put(new URL("./app.js",location.href),new Response("stale-js"))})',cache_name)
+   p.evaluate('(name)=>caches.open(name).then(async c=>{await c.put(new URL("./index.html",location.href),new Response("stale-html"));await c.put(document.querySelector("script[src]").src,new Response("stale-js"))})',cache_name)
    p.close();p=ctx.new_page();p.goto(state['url']);p.locator('[data-person]').first.wait_for()
    assert p.locator('meta[name=crm-build]').get_attribute('content')==version;assert p.locator('#mobile-update, #mobile-app-update').count()==0
-   actual=p.evaluate(cached_js,cache_name);assert hashlib.sha256(actual.encode()).hexdigest()==hashlib.sha256((assets/'app.js').read_bytes()).hexdigest()
+   actual=p.evaluate(cached_js,cache_name);assert actual==hashlib.sha256((assets/script_name).read_bytes()).hexdigest()
    assert p.evaluate('()=>crm.state().then(s=>s.owner)')==owner
    assert p.evaluate('()=>crm.draft("qa-refresh").then(r=>r.data.text)')=='Keep encrypted draft'
    assert p.evaluate('(op)=>crm.queue().then(r=>r.data.entries.some(e=>e.body.operation_id===op))',op)

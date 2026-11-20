@@ -65,7 +65,7 @@ self.addEventListener('fetch',event=>{
   }
   if(!ASSETS.includes(name))return;
   if(url.searchParams.has('v')&&url.searchParams.get('v')!==VERSION){event.respondWith(fetch(request,{cache:'no-store'}));return;}
-  if(name==='./app.js'||name==='./app.css'){
+  if(name==='./app-'+VERSION+'.js'||name==='./app-'+VERSION+'.css'){
     event.respondWith((async()=>{
       const cache=await caches.open(CACHE),hit=await cache.match(assetURL(name));
       const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),hit?5000:30000);

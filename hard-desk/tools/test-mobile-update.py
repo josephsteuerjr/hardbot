@@ -25,11 +25,14 @@ sw=(assets/'sw.js').read_text();version=json.loads((assets/'BUILD.json').read_te
 # Two complete shell versions: activation must not interrupt the loaded old UI.
 previous=hashlib.sha256((version+'-previous').encode()).hexdigest()[:16]
 index=(assets/'index.html').read_bytes().decode('utf-8');old_index=index.replace(version,previous)
-legacy=sw.replace('const VERSION='+json.dumps(version),'const VERSION='+json.dumps(previous))
+legacy=sw.replace(version,previous)
+for ext in ('js','css'):
+ shutil.copyfile(assets/f'app-{version}.{ext}',assets/f'app-{previous}.{ext}')
 legacy=legacy.replace(hashlib.sha256(index.encode()).hexdigest(),hashlib.sha256(old_index.encode()).hexdigest())
 build=(assets/'BUILD.json').read_text();(assets/'BUILD.json').write_text(build.replace(version,previous))
 (assets/'index.html').write_bytes(old_index.encode('utf-8'))
 (assets/'sw.js').write_text(legacy)
+(assets/f'sw-{previous}.js').write_text(legacy)
 stop=threading.Event();state={}
 async def serve():
  runner=web.AppRunner(server.create_app(SyntheticBackend(qa/'data/synthetic'),qa/'data'));await runner.setup()
@@ -48,6 +51,7 @@ try:
   p.evaluate('()=>caches.open("crm-mobile:other-scope:preserve").then(c=>c.put("/other",new Response("keep")))')
   second=ctx.new_page();second.goto(state['url']);second.locator('[data-person]').first.wait_for();second.locator('[data-person]').first.click();second.locator('[data-action=call]').click();second.locator('#v-soft_comment').fill('Other open form stays intact')
   (assets/'BUILD.json').write_text(build);(assets/'index.html').write_bytes(index.encode('utf-8'));(assets/'sw.js').write_text(sw)
+  p.bring_to_front()
   p.evaluate('()=>window.dispatchEvent(new PageTransitionEvent("pageshow",{persisted:true}))')
   until(p,'(version)=>navigator.serviceWorker.getRegistration().then(r=>new Promise(resolve=>{const ch=new MessageChannel();ch.port1.onmessage=e=>{ch.port1.close();resolve(e.data.version===version)};r.active.postMessage({type:"GET_VERSION"},[ch.port2])}))',version)
   assert p.locator('#v-soft_comment').input_value()=='Draft retained across mobile update'
@@ -56,6 +60,8 @@ try:
   # Ordinary new opening loads the current document, without any update control.
   fresh=ctx.new_page();fresh.goto(state['url']);fresh.locator('[data-person]').first.wait_for();assert fresh.locator('meta[name=crm-build]').get_attribute('content')==version
   assert fresh.locator('#mobile-update, #mobile-app-update').count()==0;fresh.close()
+  p.bring_to_front()
+  p.evaluate('()=>window.dispatchEvent(new PageTransitionEvent("pageshow",{persisted:true}))')
   with p.expect_event('domcontentloaded'):
    p.locator('dialog[open]').get_by_role('button',name='Закрыть',exact=True).click()
   p.locator('[data-action=call]').wait_for();assert p.locator('meta[name=crm-build]').get_attribute('content')==version
