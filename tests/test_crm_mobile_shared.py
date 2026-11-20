@@ -5,6 +5,7 @@ No production connection or weakening of the pinned-origin constructors.
 """
 import asyncio,os,time,uuid
 import aiohttp
+from aiohttp import web
 from aiohttp.test_utils import TestClient,TestServer
 import accounts,db
 import web as primary
@@ -13,6 +14,40 @@ from crm.mobile_server import create_app
 from crm.shared_auth import Authority,Sessions
 from crm.shared_server import create_app as shared_app
 from test_crm_core import crm_world
+
+
+def test_shared_password_requests_report_the_mobile_protocol_version():
+    async def run():
+        seen = []
+
+        async def account_request(request):
+            seen.append(request.path)
+            assert request.headers['X-Client-Version'] == '3.3.0-mobile.1'
+            assert request.headers['X-Work-Product'] == 'crm'
+            assert request.headers['X-Client-Runtime'] == 'crm-mobile'
+            if request.path.endswith('/login'):
+                return web.json_response(dict(action='ok_pending', token='synthetic', employee='Employee',
+                                              role='agent', username='synthetic', must_change_password=True))
+            return web.json_response(dict(ok=True))
+
+        app = web.Application()
+        app.router.add_post('/api/account/{action}', account_request)
+        async with TestServer(app) as authority:
+            class Loopback(SharedBackend):
+                async def json(self, url, *args, **kwargs):
+                    return await super().json(str(authority.make_url(url[len(self.primary):])), *args, **kwargs)
+
+            backend = Loopback('https://hard.rimborso.ru', 'https://hard.rimborso.ru/crm-pilot')
+            await backend.start()
+            try:
+                login = await backend.login(dict(username='synthetic', password='temporary123', device_id='test-phone'))
+                assert login['pending']['status'] == 'password'
+                assert (await backend.password(login, dict(current='temporary123', new='personal456')))['ok']
+            finally:
+                await backend.close()
+        assert seen == ['/api/account/login', '/api/account/password']
+
+    asyncio.run(run())
 
 def test_pending_password_own_phone_approval_refresh_and_revocation(crm_world,tmp_path,monkeypatch):
     monkeypatch.setenv('HARD_CRM_MOBILE','1')

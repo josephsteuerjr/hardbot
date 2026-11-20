@@ -109,13 +109,16 @@ class SharedBackend:
         if self.executor:await self.executor.close()
         await self.client.close()
     async def json(self,url,method='GET',headers=None,body=None):
-        async with self.client.request(method,url,headers=headers,json=body if method=='POST' else None,allow_redirects=False) as response:
+        mobile_headers={'X-Client-Version':'3.3.0-mobile.1','X-Work-Product':'crm','X-Client-Runtime':'crm-mobile',
+                        **(headers or {})}
+        async with self.client.request(method,url,headers=mobile_headers,json=body if method=='POST' else None,allow_redirects=False) as response:
             try:value=await response.json()
             except (aiohttp.ContentTypeError,ValueError):
                 raise CRMError('Служба входа отклонила запрос.' if response.status in {401,403,410} else 'Служба вернула неполный ответ. Исходная операция сохранена.','authority_denied' if response.status in {401,403,410} else 'upstream_protocol',response.status if response.status>=400 else 502) from None
             if not response.ok:raise CRMError(value.get('text') or value.get('error') or 'Служба недоступна.',value.get('error','request'),response.status)
             return value
-    def headers(self,session):return {session['credential_header']:session['credential'],'X-CRM-Entry':'analyst' if session.get('entry_role',session['role'])=='analyst' else 'manager','X-Client-Version':'3.3.0-mobile.1','X-Work-Product':'crm','X-Client-Runtime':'crm-mobile'}
+    def headers(self,session):return {session['credential_header']:session['credential'],
+                                      'X-CRM-Entry':'analyst' if session.get('entry_role',session['role'])=='analyst' else 'manager'}
     async def login(self,body):
         value=await self.json(self.primary+'/api/account/login','POST',body=dict(username=body.get('username'),password=body.get('password'),device=dict(kind='phone',fp=body.get('device_id'),label=body.get('device_label','Мобильная CRM')),entrance='crm-mobile',audience='crm-mobile',gps=body.get('gps')))
         if value.get('action') not in {'ok','ok_pending'}:raise CRMError(value.get('error') or 'Вход не выполнен.','login',403)
