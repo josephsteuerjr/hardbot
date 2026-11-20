@@ -1,11 +1,11 @@
-"""Existing PWA authentication/queue adapter for the isolated canonical CRM."""
+"""Adapter from the existing PWA's authentication and queue to CRM."""
 import asyncio
 import json
 from pathlib import Path
 import aiohttp
 from aiohttp import web
 
-UPSTREAM = 'http://crm-pilot-api:8080'
+UPSTREAM = 'http://crm-runtime-api:8080'
 NAMESPACE = 'crm-shared-pilot-v1'
 
 
