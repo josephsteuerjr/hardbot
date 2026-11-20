@@ -35,7 +35,11 @@ app.whenReady().then(async () => {
     } else if(req.url.startsWith(`/${product}.yml`)) {
       res.setHeader('Content-Type','text/yaml');
       res.end(`version: ${version}\nfiles:\n  - url: ${mode==='wrong-channel'?'another-3.0.2-setup.exe':file}\n    sha512: ${sha512}\n    size: ${bytes.length}\npath: ${file}\nsha512: ${sha512}\n`);
-    } else if(req.url.startsWith(`/${file}`)) { downloads++;res.end(bytes); }
+    } else if(req.url.startsWith(`/${file}`)) {
+      downloads++;
+      res.setHeader('Content-Length',bytes.length);
+      if(mode==='stall')res.write(bytes.subarray(0,2));else res.end(bytes);
+    }
     else {res.statusCode=404;res.end();}
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -69,8 +73,8 @@ app.whenReady().then(async () => {
         }}]})).outputFiles[0].text;
       const module = {exports:{}};
       const timeouts = [], intervals = [], appEvents = new Map();
-      vm.runInNewContext(code,{module,exports:module.exports,Buffer,AbortSignal,
-        setTimeout:(fn,ms)=>(timeouts.push(ms),{unref(){}}),
+      vm.runInNewContext(code,{module,exports:module.exports,Buffer,AbortSignal,clearTimeout,
+        setTimeout:(fn,ms)=>ms===90_000?setTimeout(fn,mode==='stall'?150:ms):(timeouts.push(ms),{unref(){}}),
         setInterval:(fn,ms)=>(intervals.push(ms),{unref(){}}),require(name){
           if(name==='electron')return {app:{isPackaged:true,on:(event,listener)=>appEvents.set(event,listener)},net:{fetch(feed,options){
             assert.equal(feed,origin+product+'-signed.json');
@@ -79,7 +83,8 @@ app.whenReady().then(async () => {
           if(name==='electron-updater')return {NsisUpdater:IsolatedUpdater};
           return require(name);
         }});
-      const flow = module.exports;flow.startUpdates(()=>{},()=>{});
+      const states=[];
+      const flow = module.exports;flow.startUpdates(state=>states.push(state),()=>{});
       assert.deepEqual(timeouts,[30_000]);
       assert.deepEqual(intervals,[15 * 60 * 1000]);
       assert.equal(typeof appEvents.get('browser-window-focus'),'function');
@@ -92,19 +97,26 @@ app.whenReady().then(async () => {
       mode='missing';assert.equal((await flow.checkUpdates()).text,'Доступных обновлений нет.');
       mode='current';assert.equal((await flow.checkUpdates()).text,'У вас установлена последняя версия приложения.');
       assert.equal(downloads,before);
+      mode='stall';
+      const stalled=await flow.checkUpdates();
+      assert.equal(stalled.phase,'error');
+      assert.match(stalled.text,/За 90 секунд не поступило новых данных/);
+      assert.equal(downloads,before+1);
       mode='valid';const ready=await flow.checkUpdates();
-      assert.equal(ready.phase,'ready');assert.match(ready.text,/Перезагрузите приложение/);assert.equal(downloads,before+1);
+      assert.equal(ready.phase,'ready');assert.match(ready.text,/Перезагрузите приложение/);assert.equal(downloads,before+2);
+      assert.ok(states.some(state=>state.phase==='downloading'&&state.transferred===0&&state.total===bytes.length));
+      assert.ok(states.some(state=>state.phase==='downloading'&&state.transferred===bytes.length));
       let closeChecked=false,beforeInstall=false;
       assert.equal((await flow.installUpdate(async()=>{closeChecked=true;return false;},()=>{beforeInstall=true;})).ok,false);
       assert.equal(closeChecked,true);assert.equal(beforeInstall,false);assert.equal(flow.updateState().phase,'ready');
       fs.writeFileSync(payloadPath,'corrupted after download');
       assert.equal((await flow.installUpdate(async()=>true,()=>{beforeInstall=true;})).ok,false);
       assert.equal(beforeInstall,false);assert.equal(flow.updateState().phase,'error');
-      assert.equal((await flow.checkUpdates()).phase,'ready');assert.equal(downloads,before+2);
+      assert.equal((await flow.checkUpdates()).phase,'ready');assert.equal(downloads,before+3);
       const install = await flow.installUpdate(async()=>true,()=>{beforeInstall=true;});
       assert.equal(install.ok,true);assert.equal(beforeInstall,true);
       results.push({product,origin,signature:true,channel:true,noDowngrade:true,
-        automaticDownload:true,unsavedOrBusyBlocked:true,preInstallChecksum:true,cacheRecovery:true});
+        automaticDownload:true,downloadProgress:true,stalledDownloadRetry:true,unsavedOrBusyBlocked:true,preInstallChecksum:true,cacheRecovery:true});
     }
     assert.equal(installs,4);
     fs.writeFileSync(path.join(dir,'RESULTS.json'),JSON.stringify({results,downloads,interceptedInstalls:installs},null,2));

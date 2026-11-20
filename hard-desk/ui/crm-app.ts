@@ -101,46 +101,83 @@ function reportError(error:any){if(error?.name!=='AbortError')notice(error?.mess
 
 function mountUpdates(api: NonNullable<API['update']>) {
   const panel=$('crm-update'), status=$('crm-update-status');
+  const progress=$<HTMLProgressElement>('crm-update-progress'), transfer=$('crm-update-transfer');
   const check=$<HTMLButtonElement>('crm-update-check');
   const install=$<HTMLButtonElement>('crm-update-install');
   const dismiss=$<HTMLButtonElement>('crm-update-dismiss');
-  let detail=false;
-  const render=(update:UpdateState)=>{
-    const ready=update.phase==='ready';
-    check.hidden=update.phase==='disabled'||ready;
-    check.disabled=update.phase==='checking'||update.phase==='downloading';
-    install.hidden=!ready;
-    if(!ready)install.disabled=false;
-    dismiss.hidden=ready;
-    panel.hidden=!detail&&!ready;
-    panel.classList.toggle('ready',ready);
-    status.textContent=ready ? `Обновление ${update.version || ''} скачано.`.replace('  ',' ') :
-      update.text+(update.phase==='downloading'&&update.percent!==undefined ? ` · ${update.percent}%` : '');
+  const megabytes=new Intl.NumberFormat('ru-RU',{maximumFractionDigits:1});
+  let detail=false, checking=false, installing=false, revision=0;
+  let last:UpdateState|undefined;
+  const setVisible=(visible:boolean)=>{
+    panel.hidden=!visible;
+    check.setAttribute('aria-expanded',String(visible));
   };
-  const showError=(text:string)=>{panel.hidden=false;status.textContent=text;};
+  const render=(update:UpdateState)=>{
+    last=update;
+    const enabled=update.phase!=='disabled';
+    const ready=update.phase==='ready';
+    const downloading=update.phase==='downloading';
+    const working=update.phase==='checking'||downloading;
+    check.hidden=!enabled;
+    check.title=check.ariaLabel=working||ready ? 'Состояние обновления' : 'Проверить обновления';
+    install.hidden=!ready;
+    install.disabled=installing;
+    dismiss.hidden=working||ready;
+    setVisible(enabled&&(detail||working||ready||update.phase==='error'));
+    panel.classList.toggle('ready',ready);
+    const text=ready ? ['Обновление',update.version,'скачано.'].filter(Boolean).join(' ')
+      : downloading&&update.version ? `${update.text} ${update.version}` : update.text;
+    if(status.textContent!==text)status.textContent=text;
+    progress.hidden=transfer.hidden=!downloading;
+    if(!downloading)return;
+    const {transferred=0,total=0}=update;
+    if(total>0){
+      progress.max=total;
+      progress.value=Math.min(transferred,total);
+      const percent=Math.floor(progress.value/total*100);
+      transfer.textContent=`${percent} % · ${megabytes.format(transferred/1_000_000)} из ${megabytes.format(total/1_000_000)} МБ`;
+    }else{
+      progress.removeAttribute('value');
+      transfer.textContent=`${megabytes.format(transferred/1_000_000)} МБ`;
+    }
+  };
+  const showStatus=(text:string)=>{setVisible(true);status.textContent=text;};
   check.onclick=async()=>{
     detail=true;
-    try{
-      const update=await api('check');
-      if('phase' in update)render(update);else showError(update.text||'Не удалось проверить обновления.');
-    }catch{showError('Не удалось проверить обновления.');}
-  };
-  dismiss.onclick=()=>{detail=false;panel.hidden=true;};
-  install.onclick=async()=>{
-    if(document.querySelector('dialog[open]')){
-      showError('Сохраните или закройте открытую форму перед перезагрузкой.');
+    if(checking||installing)return;
+    if(last&&(last.phase==='checking'||last.phase==='downloading'||last.phase==='ready')){
+      render(last);
       return;
     }
-    install.disabled=true;
+    checking=true;
+    const startedAt=revision;
+    render({phase:'checking',text:'Проверка новой версии…'});
+    try{
+      const update=await api('check');
+      if(startedAt!==revision)return;
+      if('phase' in update)render(update);
+      else render({phase:'error',text:update.text||'Не удалось проверить обновления.'});
+    }catch{
+      if(startedAt===revision)render({phase:'error',text:'Не удалось проверить обновления.'});
+    }finally{checking=false;}
+  };
+  dismiss.onclick=()=>{detail=false;setVisible(false);};
+  install.onclick=async()=>{
+    if(document.querySelector('dialog[open]')){
+      showStatus('Сохраните или закройте открытую форму перед перезагрузкой.');
+      return;
+    }
+    installing=install.disabled=true;
+    showStatus('Подготовка к установке…');
     try{
       const result=await api('install');
-      if('ok' in result&&result.ok)return;
-      showError(result.text||'Не удалось начать установку.');
-    }catch{showError('Не удалось начать установку.');}
-    install.disabled=false;
+      if('ok' in result&&result.ok){showStatus('Запуск установщика…');return;}
+      showStatus(result.text||'Не удалось начать установку.');
+    }catch{showStatus('Не удалось начать установку.');}
+    installing=install.disabled=false;
   };
-  crm.onUpdate?.(render);
-  void api('state').then(update=>{if('phase' in update)render(update);}).catch(()=>{});
+  crm.onUpdate?.(update=>{revision++;render(update);});
+  void api('state').then(update=>{if(revision===0&&!checking&&'phase' in update)render(update);}).catch(()=>{});
 }
 
 function cardEntries(entries:any[]) {

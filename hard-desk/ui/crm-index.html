@@ -2,10 +2,14 @@
 <body><aside id="rail"><div class="brand">Взыскание</div><nav id="navigation" aria-label="Разделы"></nav><footer><div id="identity"></div><div id="version"></div></footer></aside><main>
 <header class="workspace">
   <div><h1 id="title">Портфель</h1><div id="connection" role="status"></div></div>
-  <div class="window-controls"><button id="crm-update-check" aria-label="Проверить обновления" title="Проверить обновления" hidden>↻</button><button data-win="minimize" aria-label="Свернуть">−</button><button data-win="maximize" aria-label="Развернуть">□</button><button data-win="close" aria-label="Закрыть">×</button></div>
+  <div class="window-controls"><button id="crm-update-check" aria-label="Проверить обновления" title="Проверить обновления" aria-controls="crm-update" aria-expanded="false" hidden>↻</button><button data-win="minimize" aria-label="Свернуть">−</button><button data-win="maximize" aria-label="Развернуть">□</button><button data-win="close" aria-label="Закрыть">×</button></div>
   <div id="crm-update" hidden>
-    <div id="crm-update-status" role="status"></div>
-    <button id="crm-update-install" hidden>ПЕРЕЗАГРУЗИТЬ ПРИЛОЖЕНИЕ</button>
+    <div class="crm-update-detail">
+      <div id="crm-update-status" role="status"></div>
+      <progress id="crm-update-progress" aria-label="Загрузка обновления" hidden></progress>
+      <span id="crm-update-transfer" hidden></span>
+    </div>
+    <button id="crm-update-install" hidden>Установить и перезапустить</button>
     <button id="crm-update-dismiss" aria-label="Закрыть состояние обновления" hidden>×</button>
   </div>
 </header>

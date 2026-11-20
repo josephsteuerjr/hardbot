@@ -13,7 +13,7 @@ import { pathToFileURL } from "node:url";
 const rawFs = require("original-fs") as typeof import("node:fs");
 
 let win: BrowserWindow | null = null, busy = false, completed = false, removing = false;
-let target = "", candidates: OldProfile[] = [], profile = "", preview = false;
+let target = "", candidates: OldProfile[] = [], profile = "", preview = false, automaticUpdate = false;
 const product = FIXED_PRODUCT!;
 const helper = () => join(process.resourcesPath, "process-check.exe");
 const exeName = () => "hard-" + product.id + ".exe";
@@ -87,10 +87,12 @@ function boot(): void {
     if (!removing) target = registration() || join(process.env.LOCALAPPDATA || "", "Programs", "hard-" + (product.dataName.endsWith('-internal')?product.dataName:product.id));
     const d = process.argv.find(a => /^\/D=/i.test(a)); if (d && !removing) target = resolve(d.slice(3));
     if (removing) { checkRoot(target); const registered = registration(); if (!registered || resolve(registered).toLowerCase() !== resolve(target).toLowerCase()) throw new Error("Папка не совпадает с установленной программой"); }
-    if (!preview && process.argv.some(a => /^\/S$/i.test(a))) {
+    const silent = process.argv.some(a => /^\/S$/i.test(a));
+    automaticUpdate = silent && !preview && !removing && product.id !== "crm" && process.argv.includes("--updated");
+    if (!preview && silent && !automaticUpdate) {
       const code = await apply(""); app.exit(code.ok ? 0 : 2); return;
     }
-    if (!removing && product.id !== "crm") candidates = discoverProfiles(product.id, { appData: app.getPath("appData"), localAppData: process.env.LOCALAPPDATA, home: app.getPath("home"),
+    if (!removing && !automaticUpdate && product.id !== "crm") candidates = discoverProfiles(product.id, { appData: app.getPath("appData"), localAppData: process.env.LOCALAPPDATA, home: app.getPath("home"),
       shortcuts: [app.getPath("desktop"), join(app.getPath("appData"), "Microsoft", "Windows", "Start Menu", "Programs")], readShortcut: p => shell.readShortcutLink(p) }, profile);
     win = new BrowserWindow({ width: 960, height: 700, minWidth: 820, minHeight: 610, frame: false, thickFrame: false, show: false, backgroundColor: "#f8eee0", title: product.name + (removing ? " — удаление" : " — установка"),
       webPreferences: { preload: join(__dirname, "setup-preload.js"), contextIsolation: true, sandbox: true, nodeIntegration: false } });
@@ -123,7 +125,7 @@ function boot(): void {
   app.on("window-all-closed", () => app.quit());
 }
 function state() { return { isolated: product.id === "crm", name: product.name, version: app.getVersion(), removing, target, visible: win?.isVisible() ?? false, current: hasProfile(profile, product.id),
-  candidates: candidates.map(c => ({ source: c.source, label: c.label, last: c.last, kind: c.kind })), preview }; }
+  candidates: candidates.map(c => ({ source: c.source, label: c.label, last: c.last, kind: c.kind })), preview, automaticUpdate }; }
 function progress(text: string) { win?.webContents.send("setup:progress", text); }
 async function apply(source: string): Promise<{ ok: boolean; message?: string }> {
   if (busy || completed || preview) return { ok: false, message: preview ? "Это предварительный просмотр" : "Дождитесь окончания операции" };

@@ -1,5 +1,5 @@
 interface Candidate { source: string; label: string; last: number; kind: string }
-interface State { name: string; version: string; removing: boolean; target: string; current: boolean; candidates: Candidate[]; preview: boolean; message?: string }
+interface State { name: string; version: string; removing: boolean; target: string; current: boolean; candidates: Candidate[]; preview: boolean; automaticUpdate: boolean; message?: string }
 declare global { interface Window { setup: { state(): Promise<State>; choose(kind: "folder" | "file"): Promise<State>; apply(source: string): Promise<{ ok: boolean; message?: string }>; finish(launch: boolean): Promise<boolean>; window(action: string): void; progress(fn: (text: string) => void): void } } }
 export {};
 let state: State, chosen = "", scene = "welcome";
@@ -26,12 +26,24 @@ function draw() {
   }
 }
 async function apply() {
-  main.innerHTML = `<p class="eyebrow">${esc(state.name)}</p><h1>${state.removing ? "Снимаем программу." : "Готовим рабочее место."}</h1><p class="lead" id="progress">Проверяем настройки…</p><div class="progress-line"></div><p class="small">Дождитесь завершения операции.</p>`;
+  const title = state.automaticUpdate ? `Установка обновления ${esc(state.version)}` : state.removing ? "Снимаем программу." : "Готовим рабочее место.";
+  main.innerHTML = `<p class="eyebrow">${esc(state.name)}</p><h1>${title}</h1><p class="lead" id="progress" role="status">Проверяем настройки…</p><div class="progress-line"></div><p class="small">Дождитесь завершения операции.</p>`;
   let result: { ok: boolean; message?: string };
   try { result = await window.setup.apply(chosen); } catch { result = { ok: false, message: "Мастер не завершил операцию. Повторите запуск." }; }
-  if (result.ok) { scene = "done"; draw(); }
-  else { main.innerHTML = `<p class="eyebrow">${esc(state.name)}</p><h1>Нужно ещё одно действие.</h1><p class="lead">${esc(result.message)}</p><div class="actions"><button class="primary" id="retry">Повторить</button><button id="back">Назад</button></div>`; button("retry", () => void apply()); button("back", () => draw()); }
+  if (result.ok) {
+    if (state.automaticUpdate) { await window.setup.finish(false); return; }
+    scene = "done"; draw();
+  } else {
+    main.innerHTML = `<p class="eyebrow">${esc(state.name)}</p><h1>${state.automaticUpdate ? "Обновление не установлено" : "Нужно ещё одно действие."}</h1><p class="lead" role="alert">${esc(result.message)}</p><div class="actions"><button class="primary" id="retry">Повторить</button><button id="back">${state.automaticUpdate ? "Закрыть" : "Назад"}</button></div>`;
+    button("retry", () => void apply());
+    button("back", () => state.automaticUpdate ? void window.setup.finish(false) : draw());
+  }
 }
 button("min", () => window.setup.window("minimize")); button("close", () => window.setup.window("close"));
 window.setup.progress(text => { const el = document.getElementById("progress"); if (el) el.textContent = text; });
-window.setup.state().then(s => { state = s; if (s.candidates.length === 1 && !s.current) chosen = s.candidates[0].source; draw(); });
+window.setup.state().then(s => {
+  state = s;
+  if (s.automaticUpdate) { void apply(); return; }
+  if (s.candidates.length === 1 && !s.current) chosen = s.candidates[0].source;
+  draw();
+});
