@@ -6,6 +6,7 @@ import { ask, esc, n, toast } from "../kit/dom";
 import type { Section } from "../kit/shell";
 import { DataTable, tupleCols } from "../kit/table";
 import { adm, chipsHtml, fn, fnMap, guard, kvHtml, local, note, runJob } from "./lib";
+import { mountImportStatus } from "./import-status";
 
 const REVIEW_PAGE_SIZE = 80;
 const XLS = [{ name: "Excel", extensions: ["xlsx", "xlsm", "xlsb", "xls"] }];
@@ -18,7 +19,7 @@ const st = {
   cols: null as any, colDecisions: [] as any[], scan: null as any,
   expEmps: [] as any[], expSel: new Set<string>(), expSince: "", expUntil: "",
   rec: null as any, recEmp: "",
-  busy: false, progress: "",
+  busy: false, progress: "", jobStarted: 0,
 };
 let activeRoot: HTMLElement | null = null;
 let queueTimer: ReturnType<typeof setTimeout> | undefined;
@@ -27,6 +28,7 @@ let deliveryOperation: any = null;
 let deliveryKnown = false;
 let deliveryReadFailed = false;
 let enrichmentStatus: HTMLElement | null = null;
+let importStatus: ReturnType<typeof mountImportStatus> | undefined;
 let queueDetailsOpen = false;
 let queueReconciliation: any = null;
 let hiddenQueueRun = '';
@@ -172,10 +174,12 @@ async function showDeliveryQueue(root: HTMLElement, generation: number): Promise
 function showProgress(): void {
   if (!activeRoot?.isConnected) return;
   updateEnrichmentStatus();
+  importStatus?.show(st.busy ? {started: st.jobStarted, text: st.progress} : undefined);
   const status = st.tab !== 'enrich' && activeRoot.querySelector<HTMLElement>('[data-registry-progress]');
   if (status) { status.hidden = !st.busy; status.textContent = st.progress; }
+  const busy = st.busy || importStatus?.working();
   activeRoot.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement>('#rtab input,#rtab textarea,#rtab select,#rtab button').forEach(control => {
-    if (st.busy) {
+    if (busy) {
       if (control.dataset.jobDisabled === undefined) control.dataset.jobDisabled = control.disabled ? '1' : '0';
       control.disabled = true;
     } else if (control.dataset.jobDisabled !== undefined) {
@@ -186,9 +190,13 @@ function showProgress(): void {
 
 /** Задача питон-стороны: ждём конца, журнал — в строку статуса. */
 async function job(path: string, body: unknown, log?: (s: string) => void): Promise<any> {
-  if (st.busy) throw new Error('Операция уже выполняется. Дождитесь её результата.');
+  if (st.busy || importStatus?.working()) throw new Error('Операция уже выполняется. Дождитесь её результата.');
   st.busy = true;
+  st.jobStarted = Date.now();
   const messages: Record<string, string> = {
+    '/reg/pick': 'Читаю общий реестр…',
+    '/reg/preview': 'Готовлю данные для предпросмотра импорта…',
+    '/reg/apply': 'Проверяю файл перед отправкой импорта…',
     '/enr/preview': 'Запрашиваю данные для подбора книг…',
     '/enr/check': 'Запускаю проверку конфликтов…',
     '/enr/apply': 'Подготавливаю запись в книги…',
@@ -199,7 +207,11 @@ async function job(path: string, body: unknown, log?: (s: string) => void): Prom
     return await runJob(path, body, line => {
       st.progress = line; showProgress(); log?.(line);
     });
-  } finally { st.busy = false; showProgress(); }
+  } finally {
+    st.busy = false;
+    showProgress();
+    if (path === '/reg/apply') void importStatus?.refresh();
+  }
 }
 
 function tabs(): string {
@@ -251,12 +263,11 @@ async function importTab(el: HTMLElement) {
         <p class="muted" style="font-size:13px">Историчные комментарии грузятся сами, если колонка есть в файле: значение повторяет файл точно, пустая ячейка очищает.</p></div>
       ${warn.length ? `<div class="notice" style="white-space:pre-line"><span class="grow">${esc(warn.join("\n"))}</span></div>` : ""}
       <div class="toolbar"><button class="btn primary" data-preview ${st.sel.size ? "" : "disabled"}>Предпросмотр выбранных (${n(st.sel.size)})</button>
-        <button class="btn" data-apply ${st.preview && !st.preview.error ? "" : "disabled"}>${esc(st.preview?.apply || "Применить импорт")}</button>
-        <span class="muted" id="imp-log"></span></div>
+        <button class="btn" data-apply ${st.preview && !st.preview.error ? "" : "disabled"}>${esc(st.preview?.apply || "Применить импорт")}</button></div>
       ${st.preview ? (st.preview.error ? `<div class="notice err" style="white-space:pre-line"><span class="grow">${esc(st.preview.error)}</span></div>`
         : `${pairs(st.preview.pairs)}<div class="notice" style="white-space:pre-line;margin-top:12px"><span class="grow">${esc((st.preview.notes || []).join("\n"))}</span></div>`) : ""}
       ${st.applied ? `${pairs(st.applied.pairs)}<div class="notice" style="white-space:pre-line;margin-top:12px"><span class="grow">${esc((st.applied.notes || []).join("\n"))}</span></div>` : ""}` : ""}`;
-  const redraw = () => importTab(el);
+  const redraw = () => { void importTab(el); showProgress(); };
   const invalidate = () => { st.preview = null; st.applied = null; };
   el.querySelector<HTMLInputElement>("[data-imp-query]")?.addEventListener("input", (event) => {
     const input = event.target as HTMLInputElement;
@@ -301,16 +312,14 @@ async function importTab(el: HTMLElement) {
   });
   const body = () => ({ selected: [...st.sel], full: true, restore_manual: true, replace_comments: st.comments, soft_edits: true,
     exclude_contracts: st.excludedIds.split(/[\r\n,;]+/).map(x=>x.trim()).filter(Boolean) });
-  const logEl = () => el.querySelector("#imp-log")!;
   el.querySelector("[data-preview]")?.addEventListener("click", guard(async () => {
-    invalidate(); logEl().textContent = "Проверяю…";
-    st.preview = await job("/reg/preview", body(), (s) => { logEl().textContent = s; });
+    invalidate();
+    st.preview = await job("/reg/preview", body());
     toast(st.preview.error ? "Импорт не прошёл" : `Предпросмотр готов: будет снято ${n(st.preview.unassigned)}`);
     redraw();
   }));
   el.querySelector("[data-apply]")?.addEventListener("click", guard(async () => {
-    logEl().textContent = "Применяю…";
-    const r = await job("/reg/apply", body(), (s) => { logEl().textContent = s; });
+    const r = await job("/reg/apply", body());
     if (r.error) { st.preview = { error: r.error }; toast("Импорт не прошёл"); redraw(); return; }
     st.preview = null; st.applied = r; toast(r.toast); redraw();
   }));
@@ -583,15 +592,18 @@ async function draw(root: HTMLElement) {
   clearTimeout(queueTimer); const generation = ++queueGeneration;
   enrichmentStatus?.remove();
   enrichmentStatus = null;
+  importStatus?.dispose();
+  importStatus = undefined;
   deliveryKnown = false; deliveryReadFailed = false;
   const enrich = st.tab === 'enrich';
-  root.innerHTML = `${embeddedTab ? '' : `<div class="toolbar">${tabs()}</div>`}${enrich ? '' : '<p class="notice" data-registry-progress role="status" hidden></p>'}<div data-delivery-queue></div><div id="rtab"><div class="skeleton"></div></div>`;
+  const header = document.querySelector<HTMLElement>('main > .workspace');
+  root.innerHTML = `${embeddedTab ? '' : `<div class="toolbar">${tabs()}</div>`}${enrich || st.tab === 'import' ? '' : '<p class="notice" data-registry-progress role="status" hidden></p>'}<div data-delivery-queue></div><div id="rtab"><div class="skeleton"></div></div>`;
+  if (st.tab === 'import') importStatus = mountImportStatus(header || root, showProgress);
   if (enrich) {
     const panel = document.createElement('div');
     panel.className = 'analyst-enrichment-status';
     panel.innerHTML = '<span data-registry-progress role="status"></span>';
     enrichmentStatus = panel;
-    const header = document.querySelector('main > .workspace');
     if (header) header.append(panel); else root.prepend(panel);
     updateEnrichmentStatus();
   }
@@ -616,14 +628,14 @@ export const registry: Section = {
   icon: "registry",
   kicker: "импорт, обогащение книг, колонки, выгрузки",
   render(root) { return draw(root); },
-  leave() { enrichmentStatus?.remove(); enrichmentStatus = null; },
+  leave() { enrichmentStatus?.remove(); enrichmentStatus = null; importStatus?.dispose(); importStatus = undefined; },
 };
 
 export async function mountRegistryTools(root:HTMLElement,tab:RegistryTab):Promise<()=>void>{
   embeddedTab=tab;
   st.tab=tab;
   await draw(root);
-  return()=>{if(activeRoot===root){activeRoot=null;queueGeneration++;clearTimeout(queueTimer);embeddedTab=undefined;enrichmentStatus?.remove();enrichmentStatus=null;}};
+  return()=>{if(activeRoot===root){activeRoot=null;queueGeneration++;clearTimeout(queueTimer);embeddedTab=undefined;registry.leave?.();}};
 }
 
 // «Приоритет выезда»: очередь по весам — долг, свежесть, кластер.

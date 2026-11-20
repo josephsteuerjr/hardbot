@@ -1,7 +1,7 @@
 {
   "name": "hard-desk",
   "productName": "Взыскание СНГ",
-  "version": "3.3.9",
+  "version": "3.3.10",
   "private": true,
   "description": "Программы взыскания: Хард, Софт, Руководитель и Аналитик",
   "main": "out/main.js",
