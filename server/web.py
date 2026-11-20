@@ -6516,7 +6516,7 @@ async def _admin_import_status(request: web.Request) -> web.Response:
     if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
         raise web.HTTPBadRequest(text="Некорректный номер квитанции импорта.")
     job = _IMPORT_JOBS.get(digest)
-    if job and job["status"] == "running":
+    if job and job["status"] == "running" and not job.get("registry_written"):
         return web.json_response({"status": "running"})
     receipt = await asyncio.to_thread(db.import_receipt_result, digest)
     return web.json_response(receipt if receipt["status"] == "consumed" else job or receipt)
@@ -6715,7 +6715,7 @@ _IMPORT_JOBS = {}
 
 async def _background_admin_import(digest, grid, options):
     try:
-        report = await _apply_admin_import(grid, options)
+        report = await _apply_admin_import(grid, options, background_job=_IMPORT_JOBS[digest])
         _IMPORT_JOBS[digest] = {"status": "rejected" if report.get("blocked") else "consumed",
                                 "result": report}
     except Exception:
@@ -6724,7 +6724,7 @@ async def _background_admin_import(digest, grid, options):
             "blocked": True, "error": "Сервер не смог применить импорт. Проверьте квитанцию."}}
 
 
-async def _apply_admin_import(grid, options):
+async def _apply_admin_import(grid, options, *, background_job=None):
     report = await asyncio.to_thread(_import_grid_serial, grid, **options)
     if report.get("blocked"):
         # Машиночитаемый код: операторский CLI различает «нужен предпросмотр
@@ -6732,6 +6732,10 @@ async def _apply_admin_import(grid, options):
         if report.get("recall_preview_required"):
             report["code"] = "recall_preview_required"
         return report
+    if background_job is not None:
+        # The import transaction has returned. Status can read the durable
+        # receipt while the job still owns the slot for follow-up work.
+        background_job["registry_written"] = True
     # A consumed receipt is an exact zero-write replay. Do not run ancillary
     # mutators behind it: otherwise replaying the same import could still
     # change coordinates after the atomic import transaction.
