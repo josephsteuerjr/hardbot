@@ -376,7 +376,8 @@ async function boot() {
   }
   $("identity").textContent = context ? ({manager:'Руководитель',observer:'Наблюдатель',courier:'Курьер',analyst:'Аналитик',logistic:'Логист'} as any)[context.role] || 'Сотрудник' : 'Вход в CRM';
   $("version").textContent = state.version;
-  $("connection").textContent =
+  const mobileSignIn = crm.platform === 'mobile' && !context && state.connection.mode !== 'synthetic';
+  $("connection").textContent = mobileSignIn ? '' :
     (state.connection.mode === "synthetic"
       ? "Синтетические данные"
       : state.connection.mode === 'unconfigured' ? 'Не подключено' : state.connection.server) + (state.offline ? " · офлайн" : "");
@@ -416,7 +417,7 @@ async function boot() {
   $("navigation").innerHTML = sections.filter(([id])=>context || ['connection','help'].includes(id))
     .map(
       ([id, label]) =>
-        `<button data-section="${id}" class="${section === id ? "active" : ""}">${label}</button>`,
+        `<button data-section="${id}" class="${section === id ? "active" : ""}">${mobileSignIn && id === 'connection' ? 'Вход' : label}</button>`,
     )
     .join("");
   document
@@ -466,7 +467,7 @@ async function go(next: string) {
       queue: "Очередь",
       exchange: "Обмен",
       adoption: "Внедрение",
-      connection: "Подключение",
+      connection: crm.platform === 'mobile' && !context && state.connection.mode !== 'synthetic' ? 'Вход' : 'Подключение',
       help: "Справка",
     } as any
   )[next];

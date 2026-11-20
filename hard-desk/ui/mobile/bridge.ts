@@ -32,8 +32,9 @@ async function request(path:string,body?:any):Promise<Reply>{
     if(current?.owner!==startedOwner)return {ok:false,status:401,text:'Вход изменился. Исходная работа сохранена.'};
     await revoke(response.status,startedOwner);
     if(response.status===403&&data.error==='csrf'){csrf='';return {ok:false,status:0,text:'Подключение обновляется. Исходная операция остаётся в очереди.'};}
-    return {ok:response.ok,status:response.status,data,text:data.text||data.error};
-  }catch{return {ok:false,status:0,text:'Ответ не получен. Исходная операция сохранена на телефоне.'};}
+    const text=typeof data.text==='string'&&!/^[a-z0-9_-]+$/i.test(data.text)?data.text:undefined;
+    return {ok:response.ok,status:response.status,data,text};
+  }catch{return {ok:false,status:0,text:body===undefined?'Не удалось подключиться.':'Ответ не получен. Исходная операция сохранена на телефоне.'};}
 }
 async function initialize(){
   initializing ??= loadSession().finally(()=>{initializing=null;});

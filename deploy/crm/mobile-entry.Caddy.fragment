@@ -1,4 +1,12 @@
     # BEGIN CRM mobile root entry
+    @crm_old_mobile_port {
+        method GET HEAD
+        path / /mobile /mobile/
+        expression `{http.request.hostport} == 'hard.rimborso.ru:8080'`
+        not query legacy=1
+    }
+    redir @crm_old_mobile_port https://hard.rimborso.ru{uri} 302
+
     @crm_root_recovery {
         method GET HEAD
         path /
@@ -18,10 +26,10 @@
         header {
             Cache-Control "no-store, max-age=0"
             Referrer-Policy "no-referrer"
-            Content-Security-Policy "default-src 'none'; script-src 'self'; connect-src 'self'; worker-src 'self'; base-uri 'none'; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org"
+            Content-Security-Policy "frame-ancestors 'self' https://web.telegram.org https://*.telegram.org"
         }
-        rewrite * /crm-root-mobile-1/index.html
-        reverse_proxy cis-collection-analyst-updates:8080
+        rewrite * /mobile/root-index.html
+        reverse_proxy crm-mobile-api:8081
     }
 
     handle /crm-root-mobile-entry-1.js {
