@@ -66,7 +66,7 @@ services:
   # и DNS-запись домена на этот сервер. Включение: COMPOSE_PROFILES=proxy в .env.
   caddy:
     profiles: ["proxy"]
-    image: caddy:2
+    image: hard-caddy:2.11.7-go1.26.10-20261026
     restart: unless-stopped
     depends_on:
       - app

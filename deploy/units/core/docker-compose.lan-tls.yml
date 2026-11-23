@@ -3,7 +3,7 @@
 # Append this file to COMPOSE_FILE after docker-compose.lan.yml.
 services:
   caddy-lan:
-    image: caddy:2
+    image: hard-caddy:2.11.7-go1.26.10-20261026
     restart: unless-stopped
     environment:
       APP_LAN_IP: ${APP_LAN_IP:?Set APP_LAN_IP to the private corporate interface}

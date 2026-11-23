@@ -69,6 +69,7 @@ engine/web/dashboard.html
 engine/web/data.json
 
 # === Готовые локальные отчёты/сборки для передачи пользователю ===
+/output/
 outputs/
 
 # === Python ===

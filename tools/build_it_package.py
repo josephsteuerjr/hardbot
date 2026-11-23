@@ -149,6 +149,7 @@ LEAK_ALLOW: dict[str, tuple[str, ...]] = {
     ),
     "server/miniapp/index.html": (
         'const failName={bad_pass' 'word:"неверный пароль", locked:"блокировка",',
+        "const result=await api('/api/manager/account_reset',{method:'POST',body:JSON.stringify({username:row.username,pass" "word:input.value,operation_id:operationId})});",
     ),
     "tests/test_account_login.py": (
         'def login(username="kurbanov", pass' 'word="parol1234", device=None, entrance="public", gps=GPS):',
@@ -159,6 +160,14 @@ LEAK_ALLOW: dict[str, tuple[str, ...]] = {
     ),
     "tests/test_shell_account_review.py": (
         'must_change_pass' 'word:true,username:"test-login",pending_kind:"password"}}});',
+    ),
+    "tests/test_account_device_revoke.py": (
+        "def enter(fp='synthetic-phone', kind='phone', pass" "word='changed123', username='revoke-user'):",
+        "again = enter(pass" "word='reset1234')",
+        "other = enter('other-phone', pass" "word='initial123', username='other-user')",
+    ),
+    "tests/test_manager_password_reset.py": (
+        "dict(username='self-own',pass" "word='Temporary123',operation_id='reset-operation-001',**extra))",
     ),
 }
 
@@ -200,7 +209,9 @@ def candidate_files(root: Path) -> list[Path]:
     """Все файлы, которые могут попасть в пакет: в git-репозитории — tracked и
     untracked-не-ignored (то есть ровно то, что видит `git status`), иначе —
     обход каталога. Исключения применяются после."""
-    listing = _git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+    top = _git(root, "rev-parse", "--show-toplevel")
+    own_repo = top is not None and Path(top.strip()).resolve() == root.resolve()
+    listing = _git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard") if own_repo else None
     if listing is not None:
         names = [n for n in listing.split("\0") if n]
         paths = [root / Path(*PurePosixPath(n).parts) for n in names]

@@ -665,7 +665,9 @@
       "in_env_example": false,
       "required": false,
       "default": "",
-      "readers": ["server/account_policy.py"],
+      "readers": [
+        "server/account_policy.py"
+      ],
       "why": "Пусто — совместимый доступ без переключения. Явная UTC-дата после утверждённого пилота включает необратимую защёлку строгого входа в БД; нельзя включать без подтверждённой миграции и процедуры аварийного отката."
     },
     {
@@ -1269,6 +1271,39 @@
         "tests/test_registry_cycle_gui_smoke.py:10"
       ],
       "why": "Как Qt рисует окна. Тесты окон ставят offscreen сами: иначе на сервере без экрана они не запустились бы вовсе."
+    },
+    {
+      "name": "ACCOUNT_CUTOVER",
+      "unit": "тесты",
+      "in_env_example": false,
+      "required": false,
+      "default": "",
+      "readers": [
+        "tests/test_account_device_revoke.py"
+      ],
+      "why": "Устаревший переключатель в проверке отзыва; рабочий strict cutover хранится в БД."
+    },
+    {
+      "name": "HARD_CLIENT_PRODUCT",
+      "unit": "pult",
+      "in_env_example": false,
+      "required": false,
+      "default": "",
+      "readers": [
+        "pult/core/api.py"
+      ],
+      "why": "Идентификатор установленного приложения для диагностики версии устройства; задаётся launcher."
+    },
+    {
+      "name": "HARD_CLIENT_VERSION",
+      "unit": "pult",
+      "in_env_example": false,
+      "required": false,
+      "default": "",
+      "readers": [
+        "pult/core/api.py"
+      ],
+      "why": "Версия установленного приложения для диагностики устройства; задаётся launcher."
     }
   ]
 }

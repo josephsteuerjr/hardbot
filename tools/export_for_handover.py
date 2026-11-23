@@ -77,6 +77,7 @@ class Stop(SystemExit):
 CARRY = {
     "office_actions", "office_action_contracts",
     "employee_identities", "employee_aliases",
+    "staff_tasks", "staff_task_events", "staff_task_steps",  # задачи команды и их история
     "call_reviews", "call_review_history",
     "registry_payments",       # история оплат реестра
     "clients",                # портфели: договоры, адреса, суммы, закрепление
@@ -119,6 +120,7 @@ ALWAYS_CLEAR = {
     "account_deletions",  # retired identity authority of the previous installation
     'account_admin_grants', 'account_token_sessions', 'owner_bootstrap_challenges',
     'pc_registration_challenges', 'staff_roster',  # local authority and people mapping need fresh reconciliation
+    "employee_board_visibility", "team_work_operations",  # настройки и повторы запросов этой установки
     "notification_outbox", "notification_attempts",
     "enrichment_book_ledger", # доказанная доставка в конкретный путь книги этой установки;
                               # на новом сервере связь с книгами подтверждается заново
@@ -139,6 +141,7 @@ ALWAYS_CLEAR = {
     "accounts",
     "account_devices",
     "account_logins",
+    "account_client_versions",  # session/device history of the original installation
     "account_approval_events",  # журнал доступа прежней установки, остаётся в её архиве
     "account_phone_requests",  # короткие коды/утверждения людей прежней установки
     # Контрольный обзвон безопасника: внутренняя проверка людей этой установки,
