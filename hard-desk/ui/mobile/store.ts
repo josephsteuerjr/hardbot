@@ -36,10 +36,13 @@ export async function settled(){
   while(writes.size)await Promise.all([...writes]);
   if(failedWrite)throw Error("Сохранение не подтверждено. Оставьте приложение открытым и повторите сохранение.");
 }
-export function update(owner:string,name:string,change:(value:any)=>any){
-  const work=updateRecord(owner,name,change);writes.add(work);
+function trackWrite<T>(work:Promise<T>){
+  writes.add(work);
   void work.then(()=>writes.delete(work),()=>{writes.delete(work);failedWrite=true;});
   return work;
+}
+export function update(owner:string,name:string,change:(value:any)=>any){
+  return trackWrite(updateRecord(owner,name,change));
 }
 async function updateRecord(owner:string,name:string,change:(value:any)=>any){
   const id=await address(owner,name),legacy=owner+'\n'+name,db=await database();
@@ -56,6 +59,48 @@ async function updateRecord(owner:string,name:string,change:(value:any)=>any){
   throw Error('Данные меняются в другой вкладке. Повторите сохранение.');
 }
 export const put=(owner:string,name:string,value:any)=>update(owner,name,()=>value);
+
+const photoPrefix=async(owner:string,form:string)=>(await address(owner,'visit-photos:'+form))+':';
+export function stagePhotoFiles(owner:string,form:string,contract:string,files:File[]){
+  return trackWrite((async()=>{
+    const prefix=await photoPrefix(owner,form),db=await database(),secret=await key();
+    for(const file of files){
+      const id=prefix+crypto.randomUUID(),iv=crypto.getRandomValues(new Uint8Array(12));
+      const meta=new TextEncoder().encode(JSON.stringify({contract,name:file.name,type:file.type}));
+      const data=new Uint8Array(4+meta.length+file.size);
+      new DataView(data.buffer).setUint32(0,meta.length);
+      data.set(meta,4);data.set(new Uint8Array(await file.arrayBuffer()),4+meta.length);
+      const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv,
+        additionalData:new TextEncoder().encode(location.origin+'\n'+id)},secret,data);
+      const tx=db.transaction('vault','readwrite'),done=complete(tx);
+      tx.objectStore('vault').add({iv,cipher},id);
+      await done;
+    }
+  })());
+}
+export async function stagedPhotoIds(owner:string,form:string){
+  const prefix=await photoPrefix(owner,form),db=await database();
+  const ids=await result(db.transaction('vault').objectStore('vault').getAllKeys(IDBKeyRange.bound(prefix,prefix+'\uffff')));
+  return ids.map(id=>String(id).slice(prefix.length));
+}
+export async function stagedPhoto(owner:string,form:string,photo:string){
+  const id=(await photoPrefix(owner,form))+photo,db=await database();
+  const row=await result(db.transaction('vault').objectStore('vault').get(id));
+  if(!row)return null;
+  const data=await crypto.subtle.decrypt({name:'AES-GCM',iv:new Uint8Array(row.iv),
+    additionalData:new TextEncoder().encode(location.origin+'\n'+id)},await key(),row.cipher);
+  const end=4+new DataView(data).getUint32(0);
+  const meta=JSON.parse(new TextDecoder().decode(data.slice(4,end)));
+  return {contract:meta.contract as string,file:new File([data.slice(end)],meta.name,{type:meta.type})};
+}
+export function releasePhoto(owner:string,form:string,photo:string){
+  return trackWrite((async()=>{
+    const id=(await photoPrefix(owner,form))+photo,db=await database(),tx=db.transaction('vault','readwrite'),done=complete(tx);
+    tx.objectStore('vault').delete(id);
+    await done;
+  })());
+}
+
 export async function clearReads(owner:string){
   const db=await database(),tx=db.transaction('vault','readwrite'),done=complete(tx);
   const cursor=tx.objectStore('vault').openKeyCursor();cursor.onsuccess=()=>{const row=cursor.result;if(!row)return;if(String(row.key).startsWith(owner+'\nread:'))tx.objectStore('vault').delete(row.key);row.continue();};await done;

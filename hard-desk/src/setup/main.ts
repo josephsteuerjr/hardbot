@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -15,6 +15,8 @@ const rawFs = require("original-fs") as typeof import("node:fs");
 let win: BrowserWindow | null = null, busy = false, completed = false, removing = false;
 let target = "", candidates: OldProfile[] = [], profile = "", preview = false, automaticUpdate = false;
 const product = FIXED_PRODUCT!;
+const localHome = () => process.env.LOCALAPPDATA || app.getPath('appData');
+const unifiedEmployee = () => product.id === 'hard' && !process.env.HARD_SETUP_QA_DATA;
 const helper = () => join(process.resourcesPath, "process-check.exe");
 const exeName = () => "hard-" + product.id + ".exe";
 function option(name: string): string { const i = process.argv.indexOf(name); return i >= 0 ? process.argv[i + 1] || "" : ""; }
@@ -34,18 +36,48 @@ function windowsQuote(value: string): string {
 function executeNsis(exe: string, args: string[]): Promise<number> {
   return new Promise((resolve, reject) => {
     const child = spawn(exe, args.map(a => a.startsWith("/D=") || a.startsWith("_?=") || !/[\s"]/.test(a) ? a : windowsQuote(a)), {
-      windowsHide: true, windowsVerbatimArguments: true, argv0: windowsQuote(exe), stdio: "ignore",
+      windowsHide: true, windowsVerbatimArguments: true, argv0: windowsQuote(exe), stdio: "ignore", timeout: 180000,
     });
     child.once("error", () => reject(new Error("Не удалось запустить установку. Повторите операцию.")));
     child.once("exit", code => resolve(code ?? 2));
   });
 }
-function registration(): string {
+function registration(id=product.id): string {
   // electron-builder's stable UUIDv5 key, derived from the public product id.
   const keys: Record<string, string> = JSON.parse(readFileSync(join(__dirname, "setup-registry.json"), "utf8"));
   const file = join(app.getPath("userData"), "registration.json");
-  execFileSync(helper(), ["registration", keys[product.id], file], { windowsHide: true, timeout: 8000, stdio: "ignore" });
+  execFileSync(helper(), ["registration", keys[id], file], { windowsHide: true, timeout: 8000, stdio: "ignore" });
   return String(jsonFile(file)?.path || "");
+}
+function formerSoftRoot():string {
+  const registered=registration('soft');
+  const root=registered||join(localHome(),'Programs','hard-soft');
+  return isAbsolute(root)&&existsSync(join(root,'hard-soft.exe'))?root:'';
+}
+async function closeApplication(root:string,exe:string) {
+  if (await execute(helper(), [root,exe], 8000)===0)return;
+  progress("Завершаем работу программы…");
+  const check = await execute(helper(), ["close",root,exe], 45000);
+  if (check === 2) throw new Error("Программа ещё завершает операцию. Повторите через несколько секунд.");
+  if (check !== 0) throw new Error("Windows не подтвердила завершение программы. Повторите операцию.");
+}
+function redirectEmployeeShortcuts(soft:string) {
+  if(!soft)return;
+  const start=join(app.getPath('appData'),'Microsoft','Windows');
+  const roots=[app.getPath('desktop'),join(start,'Start Menu','Programs'),
+    join(app.getPath('appData'),'Microsoft','Internet Explorer','Quick Launch','User Pinned','TaskBar')];
+  const previous=resolve(soft,'hard-soft.exe').toLowerCase();
+  for(const root of roots){
+    if(!existsSync(root))continue;
+    for(const entry of readdirSync(root,{withFileTypes:true})){
+      if(!entry.isFile()||!entry.name.toLowerCase().endsWith('.lnk'))continue;
+      const path=join(root,entry.name);
+      try{
+        if(resolve(shell.readShortcutLink(path).target).toLowerCase()===previous)
+          shell.writeShortcutLink(path,'update',{target:join(target,exeName()),cwd:target,args:'',appUserModelId:product.appId});
+      }catch{ /* A protected shortcut remains available after installation. */ }
+    }
+  }
 }
 export function startUninstaller(): void {
   if (!product) { app.exit(2); return; }
@@ -71,8 +103,11 @@ export function startInstaller(): void { if (!product) { app.exit(2); return; } 
 function boot(): void {
   preview = process.argv.includes("--setup-preview");
   app.setName(product.name + " — мастер");
-  const user = mkdtempSync(join(tmpdir(), "hard-wizard-profile-"));
+  const sharedGuard=unifiedEmployee()&&!preview;
+  const user = sharedGuard ? join(localHome(),'Hard','employee-setup') : mkdtempSync(join(tmpdir(), "hard-wizard-profile-"));
+  if(sharedGuard)mkdirSync(user,{recursive:true});
   app.setPath("userData", user);
+  if(sharedGuard&&!app.requestSingleInstanceLock()){app.exit(0);return;}
   app.once("will-quit", () => {
     try {
       const cleanup = join(tmpdir(), "hard-cleanup-" + process.pid + ".exe"); cpSync(helper(), cleanup);
@@ -85,7 +120,8 @@ function boot(): void {
   profile = process.env.HARD_SETUP_QA_DATA || join(process.env.LOCALAPPDATA || "", "Hard", product.dataName, "data");
   app.whenReady().then(async () => {
     if (!removing) target = registration() || join(process.env.LOCALAPPDATA || "", "Programs", "hard-" + (product.dataName.endsWith('-internal')?product.dataName:product.id));
-    const d = process.argv.find(a => /^\/D=/i.test(a)); if (d && !removing) target = resolve(d.slice(3));
+    const d = process.argv.find(a => /^\/D=/i.test(a));
+    if (d && !removing && !(unifiedEmployee()&&process.argv.includes('--updated')))target=resolve(d.slice(3));
     if (removing) { checkRoot(target); const registered = registration(); if (!registered || resolve(registered).toLowerCase() !== resolve(target).toLowerCase()) throw new Error("Папка не совпадает с установленной программой"); }
     const silent = process.argv.some(a => /^\/S$/i.test(a));
     automaticUpdate = silent && !preview && !removing && product.id !== "crm" && process.argv.includes("--updated");
@@ -124,7 +160,7 @@ function boot(): void {
   }).catch(() => { if (win) win.webContents.send("setup:progress", "Не удалось открыть мастер. Повторите запуск установщика."); else app.exit(2); });
   app.on("window-all-closed", () => app.quit());
 }
-function state() { return { isolated: product.id === "crm", name: product.name, version: app.getVersion(), removing, target, visible: win?.isVisible() ?? false, current: hasProfile(profile, product.id),
+function state() { return { isolated: product.id === "crm", name: product.name, version: app.getVersion(), removing, target, visible: win?.isVisible() ?? false, installed: existsSync(join(target, exeName())), current: hasProfile(profile, product.id),
   candidates: candidates.map(c => ({ source: c.source, label: c.label, last: c.last, kind: c.kind })), preview, automaticUpdate }; }
 function progress(text: string) { win?.webContents.send("setup:progress", text); }
 async function apply(source: string): Promise<{ ok: boolean; message?: string }> {
@@ -135,11 +171,25 @@ async function apply(source: string): Promise<{ ok: boolean; message?: string }>
     const candidate = source ? candidates.find(c => c.source === source) : null;
     if (source && (!candidate || hasProfile(profile, product.id))) throw new Error("Действующий вход уже сохранён. Перенос поверх него запрещён.");
     if (candidate && !profilesAt(source, product.id).some(c => c.fingerprint === candidate.fingerprint)) throw new Error("Прежние настройки изменились. Выберите их заново.");
-    progress("Проверяем, закрыта ли программа…");
-    const check = await execute(helper(), [target, exeName()], 10000);
-    if (check !== 0) throw new Error("Закройте " + product.name + " через значок у часов и нажмите «Повторить».");
+    const dataLocation = relative(target, profile);
+    if (!dataLocation || (!isAbsolute(dataLocation) && !/^\.\.(?:[\\/]|$)/.test(dataLocation)))
+      throw new Error("Папка программы содержит рабочий профиль. Для сохранения данных нужна другая папка программы.");
+    const payload = join(process.resourcesPath, "application-installer.exe");
+    if (removing) checkRoot(target);
+    else {
+      progress("Проверяем файл установки…");
+      const manifest = jsonFile(join(process.resourcesPath, "setup-payload.json"));
+      if (!manifest || manifest.product !== product.id || manifest.version !== app.getVersion() ||
+          createHash("sha512").update(readFileSync(payload)).digest("base64") !== manifest.sha512)
+        throw new Error("Установщик повреждён. Используйте новую копию файла.");
+    }
+    const soft=unifiedEmployee()&&!removing?formerSoftRoot():'';
+    if(soft&&resolve(soft).toLowerCase()===resolve(target).toLowerCase())
+      throw Error('Для единой программы выбрана папка прежнего Софта. Используйте отдельную папку установки.');
+    await closeApplication(target,exeName());
+    if(soft)await closeApplication(soft,'hard-soft.exe');
     if (removing) {
-      checkRoot(target); progress("Удаляем программу… Настройки и очередь остаются.");
+      progress("Удаляем программу…");
       // Run an independent copy with NSIS's explicit _?= root. Otherwise the
       // uninstaller relaunches itself and its first process may exit early.
       const native = join(app.getPath("userData"), "native-remove.exe");
@@ -148,15 +198,15 @@ async function apply(source: string): Promise<{ ok: boolean; message?: string }>
       for (let i = 0; i < 100 && existsSync(join(target, exeName())); i++) await new Promise(r => setTimeout(r, 200));
       if (code !== 0 || existsSync(join(target, exeName())) || registration()) throw new Error("Удаление не завершено. Настройки сохранены; повторите операцию.");
     } else {
-      const payload = join(process.resourcesPath, "application-installer.exe");
-      const manifest = jsonFile(join(process.resourcesPath, "setup-payload.json"));
-      if (!manifest || manifest.product !== product.id || manifest.version !== app.getVersion() || createHash("sha512").update(readFileSync(payload)).digest("base64") !== manifest.sha512) throw new Error("Установщик повреждён. Используйте новую копию файла.");
       progress("Устанавливаем " + product.name + "…");
       // electron-updater passes --force-run to the OUTER wizard. Forward it
       // to NSIS, which owns launching the installed executable after replacement.
       const code = await executeNsis(payload, ["/S", "/currentuser", ...process.argv.filter(a => a === "--updated" || a === "--force-run"), "/D=" + target]);
-      if (code !== 0 || !existsSync(join(target, exeName()))) throw new Error("Установка не завершена. Закройте программу и повторите.");
+      if (code !== 0 || !existsSync(join(target, exeName()))) throw new Error(code === 2
+        ? "Не удалось заменить файлы прежней версии. Повторите обновление через несколько секунд. Если ошибка повторится, обратитесь к ответственному за CRM."
+        : "Windows не завершила установку. Повторите операцию.");
       if (candidate) { progress("Переносим выбранные настройки…"); importData(candidate.source, profile, product.id); }
+      redirectEmployeeShortcuts(soft);
     }
     completed = true; return { ok: true };
   } catch (error) { return { ok: false, message: (error as Error).message }; }

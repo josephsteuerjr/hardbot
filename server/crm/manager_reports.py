@@ -40,9 +40,11 @@ def current_authority(conn, raw):
                    employee_scope=p.employee_scope & active,timezone=member['timezone'])
 
 
-def scope_key(p):
-    return hashlib.sha256(canonical([p.employee_uuid,p.team_id,p.role,sorted(p.employee_scope),
-                                   sorted(p.capabilities)]).encode()).hexdigest()
+def scope_key(p, country='', members=None):
+    scope = [p.employee_uuid,p.team_id,p.role,sorted(p.employee_scope),sorted(p.capabilities)]
+    if country:
+        scope.extend((country, sorted(members)))
+    return hashlib.sha256(canonical(scope).encode()).hexdigest()
 
 
 def require(p):
@@ -50,38 +52,64 @@ def require(p):
     access.require(p,'analytics')
 
 
-def capture(p):
+def country_members(conn, p, country):
+    if not country:
+        return None
+    scopes = three_hour.country_scopes(conn, p)
+    if country not in scopes:
+        raise CRMError('Отчёт по этой стране недоступен.','forbidden',403)
+    return scopes[country]
+
+
+def _capture(p, country, *, register=True):
     require(p)
     with storage.connect(readonly=True) as conn:
         p=access.refresh_write(conn,p)
         require(p)
-    report=three_hour.report(p)
+        members=country_members(conn,p,country)
+    report=three_hour.report(p,country=country,members=members)
     point=instant(report['as_of']).astimezone(ZoneInfo(p.timezone))
     slot=point.replace(hour=point.hour//3*3,minute=0,second=0,microsecond=0).isoformat()
-    key=scope_key(p)
+    key=scope_key(p,country,members)
     with storage.connect() as conn:
         storage.begin(conn)
         refreshed=access.refresh_write(conn,p)
         require(refreshed)
         if refreshed.capabilities!=p.capabilities:raise CRMError('Права изменились во время расчёта. Повторите запрос.','scope_changed',403)
-        remember_authority(conn,p,'report:'+str(p.actor_uid),'report')
-        existing=conn.execute('SELECT snapshot_id FROM crm_report_snapshots WHERE actor_uid=? AND scope_key=? AND slot=?',
-                              (p.actor_uid,key,slot)).fetchone()
-        if not existing:
-            conn.execute('INSERT INTO crm_report_snapshots VALUES(?,?,?,?,?,?)',
-                         (str(uuid.uuid4()),p.actor_uid,key,slot,report['as_of'],canonical(report)))
+        if country_members(conn,refreshed,country)!=members:
+            raise CRMError('Состав страны изменился во время расчёта. Повторите запрос.','scope_changed',403)
+        if register:
+            remember_authority(conn,p,'report:'+str(p.actor_uid),'report')
+        conn.execute('INSERT INTO crm_report_snapshots VALUES(?,?,?,?,?,?) '
+                     'ON CONFLICT(actor_uid,scope_key,slot) DO NOTHING',
+                     (str(uuid.uuid4()),p.actor_uid,key,slot,report['as_of'],canonical(report)))
         conn.commit()
-    return report
+    return report, key
 
 
-def read(p, *, snapshot_id=None, day=None):
+def capture(p, country=''):
+    return _capture(p, country)[0]
+
+
+def snapshot_summary(sheets):
+    """Dynamics and Excel totals use metrics. Contract details come with the selected snapshot."""
+    return [{**sheet, 'rows': [{key: value for key, value in row.items()
+                               if key not in {'current_records', 'yesterday_records'}}
+                              for row in sheet['rows']]} for sheet in sheets]
+
+
+def read(p, *, snapshot_id=None, day=None, country='', options=None):
     require(p)
+    if options == '1':
+        from country_scope import info
+        with storage.connect(readonly=True) as conn:
+            return {'countries': [info(code) for code in three_hour.country_scopes(conn,p)]}
     # GET current also registers the authoritative report schedule. A repeated
     # read cannot rewrite a captured slot or manufacture an earlier observation.
-    report=None if snapshot_id else capture(p)
+    report, key = (None, None) if snapshot_id else _capture(p,country)
     with storage.connect(readonly=True) as conn:
-        key=scope_key(p)
         if snapshot_id:
+            key=scope_key(p,country,country_members(conn,p,country))
             row=conn.execute('SELECT * FROM crm_report_snapshots WHERE snapshot_id=? AND actor_uid=? AND scope_key=?',
                              (snapshot_id,p.actor_uid,key)).fetchone()
             if not row:raise CRMError('Срез недоступен при текущем составе команды.','snapshot_missing',404)
@@ -95,9 +123,9 @@ def read(p, *, snapshot_id=None, day=None):
             'WHERE actor_uid=? AND scope_key=? AND slot>=? AND slot<? ORDER BY captured_at',
             (p.actor_uid,key,selected_day,selected_day+'T~')).fetchall()
         history=[dict(snapshot_id=r['snapshot_id'],slot=r['slot'],captured_at=r['captured_at'],
-                      sheets=json.loads(r['report_json'])['sheets']) for r in rows]
+                      sheets=snapshot_summary(json.loads(r['report_json'])['sheets'])) for r in rows]
     return dict(report=report,snapshots=history,selected_snapshot=snapshot_id,day=selected_day,
-                schedule_hours=3,history_policy='captured_only')
+                schedule_hours=3,history_policy='captured_only',country=country)
 
 
 def pending(conn):
@@ -147,14 +175,22 @@ def tick(verified=None):
                     if not job:continue
                     job=dict(job)
                 else:
-                    latest=conn.execute('SELECT MAX(captured_at) FROM crm_report_snapshots WHERE actor_uid=? AND scope_key=?',
-                                        (p.actor_uid,scope_key(p))).fetchone()[0]
+                    scopes = {'': None, **three_hour.country_scopes(conn,p)}
                     point=instant(now()).astimezone(ZoneInfo(p.timezone))
                     boundary=point.replace(hour=point.hour//3*3,minute=0,second=0,microsecond=0)
-                    if latest and instant(latest)>=boundary:continue
+                    missing=[]
+                    for country,members in scopes.items():
+                        latest=conn.execute('SELECT MAX(captured_at) FROM crm_report_snapshots WHERE actor_uid=? AND scope_key=?',
+                                            (p.actor_uid,scope_key(p,country,members))).fetchone()[0]
+                        if not latest or instant(latest)<boundary:
+                            missing.append(country)
             if item['kind']=='assignment':
                 assignments.job_step(p,dict(schema_version=1,job_id=job['job_id'],pack_index=job['next_pack']))
-            else:capture(p)
+            else:
+                for country in missing:
+                    try:capture(p,country)
+                    except CRMError as exc:
+                        if exc.code!='mixed_currencies':raise
             completed+=1
         except CRMError:
             # Scope/versions are rechecked in the next pass; never bypass a denial.

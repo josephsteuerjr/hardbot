@@ -1,3 +1,4 @@
+import { safeStorage } from "electron";
 import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -5,6 +6,7 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
 const HEADER = Buffer.from("CRM-DPAPI-1\n");
 const ENVELOPE = Buffer.from("CRM-DPAPI-AES-1\n");
+const ELECTRON_RECORD = Buffer.from("CRM-ELECTRON-1\n");
 const MAX_BYTES = 256 * 1024 * 1024;
 let checkpointKey: { key: Buffer; wrapped: Buffer } | undefined;
 function transform(mode: "seal" | "unseal", bytes: Buffer): Buffer {
@@ -13,12 +15,14 @@ function transform(mode: "seal" | "unseal", bytes: Buffer): Buffer {
     ? packaged
     : join(__dirname, "..", "installer", "bin", "process-check.exe");
   try {
-    return execFileSync(helper, [mode], {
+    const result = execFileSync(helper, [mode], {
       input: bytes,
       windowsHide: true,
       timeout: 15000,
       maxBuffer: 17 * 1024 * 1024,
     });
+    if (mode === 'seal' && result.length === 0) throw new Error('Empty encrypted record');
+    return result;
   } catch {
     throw new Error(
       "Windows не подтвердил шифрование данных. Исходный файл сохранён.",
@@ -60,6 +64,34 @@ export function directSealCheckpoint(text: string): Buffer {
 }
 export function isDirect(bytes: Buffer): boolean {
   return bytes.subarray(0, HEADER.length).equals(HEADER) || bytes.subarray(0, ENVELOPE.length).equals(ENVELOPE);
+}
+
+export function isCrmRecord(bytes: Buffer): boolean {
+  return isDirect(bytes) || bytes.subarray(0, ELECTRON_RECORD.length).equals(ELECTRON_RECORD);
+}
+
+let useProfileEncryption = false;
+export function sealCrmRecord(text: string, primary = directSeal): Buffer {
+  if (Buffer.byteLength(text) > MAX_BYTES)
+    throw new Error('Защищённый файл слишком большой. Исходный файл сохранён.');
+  // Avoid retrying an unavailable helper during every cache and queue write.
+  if (!useProfileEncryption) {
+    try { return primary(text); }
+    catch { useProfileEncryption = true; }
+  }
+  try {
+    if (process.platform === 'win32' && safeStorage.isEncryptionAvailable()) {
+      const bytes = safeStorage.encryptString(text);
+      if (safeStorage.decryptString(bytes) === text) return Buffer.concat([ELECTRON_RECORD, bytes]);
+    }
+  } catch { /* Neither provider could verify the encrypted record. */ }
+  throw new Error('Windows не смог защитить данные входа. Войдите в CRM через браузер.');
+}
+
+export function openCrmRecord(bytes: Buffer): string {
+  if (bytes.subarray(0, ELECTRON_RECORD.length).equals(ELECTRON_RECORD))
+    return safeStorage.decryptString(bytes.subarray(ELECTRON_RECORD.length));
+  return directOpen(bytes);
 }
 export function directOpen(bytes: Buffer): string {
   if (!isDirect(bytes))

@@ -416,6 +416,9 @@ def serve():
                 elif method=='GET' and action=='manager-report':
                     from . import manager_reports
                     result=manager_reports.read(p,**query)
+                elif method=='GET' and action=='manager-report-download':
+                    from . import report_presets
+                    result=report_presets.download(p,**query)
                 elif method=='GET' and action in {'managed-portfolio','assignment-staff','assignment-receipt','assignment-history','assignment-job','manager-statistics','changes'}:
                     from . import assignments
                     function={'managed-portfolio':assignments.portfolio,'assignment-staff':assignments.staff,
@@ -437,7 +440,7 @@ def serve():
                     result = store.card(p, query.get("person_uuid", ""))
                 elif action == 'work-portfolio':
                     from . import work_portfolio
-                    result=work_portfolio.read(p,query.get('search',''),query.get('work','all'),query.get('employee_uuid'),query.get('offset',0),query.get('limit',100))
+                    result=work_portfolio.read_query(p,query)
                 elif action == 'contracts':
                     result = store.contract_list(p,query.get('search',''),query.get('work',''),query.get('limit',100))
                 elif action == 'tasks':

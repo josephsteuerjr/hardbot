@@ -95,9 +95,10 @@ def write_report(report,path,kind='shifts'):
                         a,b=xl_col_to_name(col),xl_col_to_name(col+1);r=last+1
                         ratio='' if values[0] is None else values[1]/values[0] if values[0] else 0
                         sheet.write_formula(last,col+2,f'=IF({a}{r}="","",IF({a}{r}=0,0,{b}{r}/{a}{r}))',fmts['total-percent'],ratio)
-                    caption=f"{report['as_of']} · {report['timezone']} · {report['currency'] or 'Валюта не указана'}"
+                    caption=f"{data.get('as_of',report['as_of'])} · {data.get('timezone',report['timezone'])} · {data.get('currency',report['currency']) or 'Валюта не указана'}"
                     sheet.write_string(last+2,0,caption,fmts['muted'])
-                    if report.get('yesterday_incomplete_contracts'):sheet.write_string(last+3,0,f"Нет полного снимка предыдущего дня: {report['yesterday_incomplete_contracts']} договоров.",fmts['muted'])
+                    incomplete=data.get('yesterday_incomplete_contracts',report.get('yesterday_incomplete_contracts'))
+                    if incomplete:sheet.write_string(last+3,0,f"Нет полного снимка предыдущего дня: {incomplete} договоров.",fmts['muted'])
                     sheet.autofilter(1,0,max(1,last-1),30)
             elif kind=='table':table(book,'Данные',report['headers'],report['rows'],fmts)
             elif kind in {'manager-month','manager-dynamics'}:

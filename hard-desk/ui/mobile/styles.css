@@ -2,14 +2,19 @@
 .mobile-crm{--mobile-bar:68px;--sans:'Golos Text','Segoe UI',sans-serif;font-size:15px}
 .mobile-crm .window-controls{display:none}.mobile-crm input,.mobile-crm select,.mobile-crm textarea{font-size:16px}.mobile-crm button{touch-action:manipulation;min-height:44px}
 .mobile-crm [hidden]{display:none!important}
+.mobile-crm .portfolio-filter-form label{width:calc(50% - 4px);min-width:0}
 .card-registry-data dd{white-space:pre-wrap;overflow-wrap:anywhere}
 .mobile-crm #navigation svg,.mobile-menu svg{width:23px;height:23px;fill:none;stroke:currentColor;stroke-width:1.55;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
 .mobile-crm #navigation button{display:flex;align-items:center;gap:12px}.mobile-crm #navigation #mobile-more{display:none}
 .mobile-menu{padding:24px;max-width:440px}.mobile-menu h2{font:32px var(--hand);margin:0 0 20px}.mobile-menu>button{display:flex;align-items:center;gap:16px;width:100%;border:0;border-bottom:1px solid var(--line);padding:16px 0;text-align:left}.mobile-menu>button span:last-child{margin-left:auto;color:var(--accent)}.mobile-menu .mobile-menu-close{justify-content:center;border:1px solid var(--line);margin-top:24px}
+.mobile-menu{background:var(--surface);color:var(--ink)}
+.mobile-menu>button{min-height:52px;font-size:15px}
+.mobile-menu>button:hover{background:var(--paper)}
+.mobile-menu .mobile-menu-close{min-height:48px;padding:10px 16px;border-radius:10px;background:var(--accent);color:white;border-color:var(--accent)}
 .mobile-crm .mobile-registry-tools{display:block}.mobile-save-strip[hidden]{display:none!important}.mobile-save-strip{display:flex;justify-content:flex-end;padding:8px 0}
 .mobile-connection{max-width:560px;margin:auto}.mobile-login{display:grid;gap:22px;padding:24px 0}.mobile-login h2{font:30px var(--hand);margin:0 0 6px}.mobile-login label{display:grid;gap:8px;color:var(--ink-2)}.mobile-login input,.mobile-login button{height:52px}
 .mobile-account{display:flex;align-items:center;gap:16px;padding:20px 0 28px;border-bottom:1px solid var(--line)}.mobile-account h2{font:27px var(--hand);margin:0}.mobile-account p{margin:5px 0;color:var(--muted)}.mobile-account>button{margin-left:auto}.mobile-avatar{display:grid;place-items:center;width:52px;height:52px;border:1px solid var(--line-strong);border-radius:50%;color:var(--accent);font:28px var(--hand)}
-.mobile-connection-status{display:flex;align-items:center;gap:14px;padding:26px 0}.mobile-connection-status p{font-size:13px;color:var(--muted);margin:5px 0}.mobile-signal{width:8px;height:8px;background:var(--muted);border-radius:50%}.mobile-signal.online{background:var(--ok)}.mobile-wide{width:100%}
+.mobile-connection-status{display:flex;align-items:center;gap:14px;padding:26px 0}.mobile-connection-status p{font-size:13px;color:var(--muted);margin:5px 0}.mobile-signal{width:8px;height:8px;background:var(--muted);border-radius:50%}.mobile-signal.online{background:var(--ok)}.mobile-wide{width:100%}.mobile-session-expiry,.mobile-queue-summary{font-size:13px;color:var(--muted);line-height:1.55;margin:0 0 18px}
 .mobile-demo,.mobile-diagnostics{border-top:1px solid var(--line);padding:22px 0;margin-top:24px}.mobile-demo summary,.mobile-diagnostics summary{font-weight:500;cursor:pointer}.mobile-demo p{font-size:13px;color:var(--muted)}.mobile-role-options{display:grid;gap:8px}.mobile-role-options button{text-align:left;display:flex;justify-content:space-between;padding:14px}.mobile-role-options span{color:var(--accent)}.mobile-build{display:block;color:var(--muted);font-size:10px;margin:32px 0 12px}
 .mobile-report-cards>section{border-block:1px solid var(--line);padding:18px 0;margin-bottom:20px}.mobile-report-person{display:flex;justify-content:space-between;width:100%;font-size:17px;color:var(--ink)!important}.mobile-report-person span{color:var(--accent)}.mobile-report-stats{display:grid;grid-template-columns:1fr 1fr;gap:22px 20px;padding:20px 0}.mobile-report-stats>div{display:flex;flex-direction:column}.mobile-report-stats span,.mobile-report-stats small{font-size:11px;color:var(--muted)}.mobile-report-stats strong{font-size:25px;font-weight:400;font-variant-numeric:tabular-nums;color:var(--ink);margin:3px 0}.mobile-report-cards summary{font-size:12px;color:var(--accent);padding:8px 0;cursor:pointer}.mobile-report-detail{display:grid;grid-template-columns:1fr auto;gap:4px;padding:10px 0;border-top:1px solid var(--line);font-size:12px}.mobile-report-detail small{grid-column:2;color:var(--muted)}.mobile-team-back{margin-bottom:18px}
 .mobile-source-picker [data-source-list]{display:grid;gap:8px;margin:20px 0}.mobile-source-picker [data-source-list]>button{text-align:left;padding:13px;overflow-wrap:anywhere}
@@ -86,7 +91,6 @@
  .mobile-crm .portfolio-modes{margin-top:0;margin-bottom:10px}
  .mobile-crm .portfolio-modes button{font-size:13px}
  .mobile-crm .portfolio-modes{align-items:center}
- .mobile-crm #portfolio-work{margin-left:auto;max-width:145px;min-height:44px;font-size:13px}
  .mobile-crm .mobile-portfolio-table td.mobile-empty-result{display:none}
  .mobile-crm .work-filters{padding-bottom:4px;margin-bottom:10px;gap:6px}
  .mobile-crm .work-filters button{min-height:44px;padding:8px 10px}

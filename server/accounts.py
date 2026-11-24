@@ -60,12 +60,12 @@ def _fresh_gps(device):
 def _approved_staff_pc(conn, account_id):
     return bool(conn.execute("SELECT 1 FROM account_devices d WHERE d.account_id=? AND d.kind='desktop' "
         "AND d.status='active' AND COALESCE(d.public_key,'')<>'' AND EXISTS(SELECT 1 FROM account_approval_events e "
-        "WHERE e.device_id=d.id AND e.action='pc_observation' AND e.decision='approved') LIMIT 1",(account_id,)).fetchone())
+        "WHERE e.device_id=d.id AND e.action IN ('pc_observation','device_policy') AND e.decision='approved') LIMIT 1",(account_id,)).fetchone())
 
 
 def _approved_mobile_identity(conn, device_id):
     return bool(conn.execute("SELECT 1 FROM account_approval_events WHERE device_id=? "
-        "AND action='phone_identity' AND decision='approved' LIMIT 1", (device_id,)).fetchone())
+        "AND action IN ('phone_identity','device_policy') AND decision='approved' LIMIT 1", (device_id,)).fetchone())
 
 
 def _approvals_needed(role: str) -> int:
@@ -691,8 +691,29 @@ def login(username: str, password: str, *, device: dict, entrance: str,
         if device_kind == 'phone':
             conn.execute("UPDATE account_devices SET gps=?,gps_seen_at=? WHERE id=?",
                          (gps_text, datetime.now(timezone.utc).isoformat() if gps_text else None, dev['id']))
-        # Every staff phone requires its own manager approval, even with GPS.
-        # An approved PC alone never activates a phone.
+        verified_entry = bool(pc) if device_kind == 'desktop' else audience in ('mobile', 'crm-mobile')
+        paused = verified_entry and account_policy.device_confirmation_paused(conn)
+        if paused and row['role']=='agent' and row['status']=='awaiting' and row['password_review_pending'] and row['password_reset_operation'] and row['password_reset_actor']:
+            actor = 'policy:device-confirmation-paused'
+            conn.execute("UPDATE accounts SET status='active',password_review_pending=0,activated_by=?,activated_at=?,updated_at=? WHERE id=?",
+                         (actor,_now(),_now(),row['id']))
+            _approval_event(conn,row['id'],None,0,actor,'password_reset','approved',ip,
+                            'Existing staff credential verified while manual confirmation is paused')
+            row=conn.execute('SELECT * FROM accounts WHERE id=?',(row['id'],)).fetchone()
+        account_active = row['status'] == 'active'
+        if (dev['status'] == 'pending' and account_active and not row['password_review_pending']
+                and paused
+                and not conn.execute("SELECT 1 FROM account_devices WHERE account_id=? AND kind=? "
+                                     "AND fingerprint=? AND status='revoked' LIMIT 1",
+                                     (row['id'], device_kind, fingerprint)).fetchone()):
+            actor = 'policy:device-confirmation-paused'
+            approved = approve_device(dev['id'], actor, _connection=conn, ip=ip, replace_same_kind=False)
+            if approved.get('active'):
+                _approval_event(conn,row['id'],dev['id'],0,actor,'device_policy','approved',ip,
+                                'Valid password and verified application entry while manual confirmation is paused')
+                dev=conn.execute('SELECT * FROM account_devices WHERE id=?',(dev['id'],)).fetchone()
+        # Outside the temporary window, a new staff phone is approved on its
+        # own. An approved PC and GPS do not activate it.
         ever = conn.execute("SELECT 1 FROM account_devices WHERE account_id=? AND kind=? AND approved_at IS NOT NULL LIMIT 1",
                             (row['id'],device_kind)).fetchone()
         approved_pc = _approved_staff_pc(conn,row['id'])
@@ -717,7 +738,6 @@ def login(username: str, password: str, *, device: dict, entrance: str,
                 f"owner reset by {reset_grant['actor']}" if reset_next else 'first device after account approval')
             dev=conn.execute('SELECT * FROM account_devices WHERE id=?',(dev['id'],)).fetchone()
         token = _mint_token(conn, row, dev)
-        account_active = row["status"] == "active"
         device_active = dev["status"] == "active"
         action = "ok" if (account_active and device_active) else "ok_pending"
         _journal(conn, row["id"], username, action, entrance=entrance,
@@ -908,7 +928,7 @@ def approve_account(username: str, by: str, *, _connection=None, actor_uid=0, ip
                          f"Нужно подтверждение ещё одного администратора."}
 
 
-def approve_device(device_id: int, by: str, *, _connection=None, actor_uid=0, ip="") -> dict:
+def approve_device(device_id: int, by: str, *, _connection=None, actor_uid=0, ip="", replace_same_kind=True) -> dict:
     """Подтвердить устройство (сотруднику — с первого подтверждения,
     руководителю/аналитику — тоже с одного администратора). Активация нового
     ТЕЛЕФОНА гасит прежний телефон аккаунта: сменить — значит сменить.
@@ -937,7 +957,7 @@ def approve_device(device_id: int, by: str, *, _connection=None, actor_uid=0, ip
             conn.execute("UPDATE account_devices SET status='active', approved_by=?, "
                          "approved_at=?, approvals=? WHERE id=?",
                          (by, _now(), json.dumps(approvals), device_id))
-            if dev["kind"] in ("phone", "desktop"):
+            if replace_same_kind and dev["kind"] in ("phone", "desktop"):
                 old = conn.execute(
                     "SELECT id, agent_dev_id, token_table FROM account_devices "
                     "WHERE account_id=? AND kind=? AND status='active' AND id<>?",

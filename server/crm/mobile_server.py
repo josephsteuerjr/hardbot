@@ -13,6 +13,8 @@ from .mobile_backend import SyntheticBackend, SharedBackend, WindowsExecutor, Se
 PREFIX='/mobile/'
 COOKIE='crm_mobile_v1'
 ASSETS=Path(__file__).resolve().parents[1]/'miniapp/crm'
+SESSION_SECONDS=48*3600
+LEGACY_SESSION_SECONDS=8*3600
 
 class Sessions:
     def __init__(self,home,key,source_roots=()):
@@ -132,20 +134,26 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         except (ValueError,TypeError,KeyError):response=web.json_response(dict(error='invalid',text='Некорректные параметры запроса.'),status=400)
         except asyncio.TimeoutError:response=web.json_response(dict(error='timeout',text='Ответ задерживается. Проверьте исходную операцию.'),status=504)
         except aiohttp.ClientError:response=web.json_response(dict(error='upstream_unavailable',text='Служба временно недоступна. Исходная операция сохранена.'),status=503)
+        except sqlite3.OperationalError:response=web.json_response(dict(error='storage_unavailable',text='Хранилище мобильных сессий недоступно. Данные на устройстве сохранены. Повторите позже или сообщите ответственному за CRM.'),status=503)
         except OSError as exc:
             response=web.json_response(dict(error='file_path_long' if getattr(exc,'winerror',None)==206 else 'storage_unavailable',text='Папка слишком глубокая для Excel. Выберите вложенную папку отдельно.' if getattr(exc,'winerror',None)==206 else 'Хранилище недоступно. Исходные файлы сохранены.'),status=400 if getattr(exc,'winerror',None)==206 else 503)
         response.headers.update({'X-Content-Type-Options':'nosniff','Referrer-Policy':'same-origin','Cache-Control':'no-store','X-CRM-Mobile-Version':'3.3.0-mobile.1'})
         return response
     app.middlewares.append(boundary)
 
-    def cookie(response,sid,request):response.set_cookie(COOKIE,sid,httponly=True,secure=bool(public_origin and public_origin.startswith('https:') or request.secure),samesite='Strict',path=prefix,max_age=8*3600)
-    def empty():return dict(csrf=secrets.token_urlsafe(32),expires_at=int((time.time()+8*3600)*1000))
+    def cookie(response,sid,request,session):
+        remaining=max(0,(session['expires_at']-int(time.time()*1000)+999)//1000)
+        response.set_cookie(COOKIE,sid,httponly=True,secure=bool(public_origin and public_origin.startswith('https:') or request.secure),
+                            samesite='Strict',path=prefix,max_age=remaining)
+    def empty(seconds=SESSION_SECONDS):
+        return dict(csrf=secrets.token_urlsafe(32),expires_at=int((time.time()+seconds)*1000),lifetime_seconds=seconds)
     def bind_owner(session):
         context=session['context'];namespace=str(home) if backend.synthetic else 'shared'
         session['owner']='mobile:'+hashlib.sha256((namespace+'\n'+str(context['actor_uid'])+'\n'+context['employee_uuid']+'\n'+context['role']).encode()).hexdigest()
-    async def authorize(request):
+    async def authorize(request, refresh=True):
         session=request['mobile_session']
         if not session or not session.get('owner'):raise CRMError('Войдите в рабочее место.','session',401)
+        if not refresh:return session
         try:context=await backend.request(session,'GET','context')
         except CRMError as exc:
             if exc.status in {401,403,410}:
@@ -155,9 +163,17 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         if str(context['actor_uid'])!=str(session['context']['actor_uid']) or context['employee_uuid']!=session['context']['employee_uuid'] or context['role']!=session['role']:
             sessions.forget(request['mobile_sid'])
             raise CRMError('Вход изменился. Исходная работа сохранена.','identity_changed',401)
-        session['context']=context;sessions.write(session,request['mobile_sid']);return session
+        upgraded=False
+        if 'lifetime_seconds' not in session:
+            session['expires_at']+=(SESSION_SECONDS-LEGACY_SESSION_SECONDS)*1000
+            session['lifetime_seconds']=SESSION_SECONDS
+            upgraded=True
+        if upgraded or session['context']!=context:
+            session['context']=context
+            sessions.write(session,request['mobile_sid'])
+        return session
     async def boot(request):
-        session=request['mobile_session'] or empty()
+        session=request['mobile_session'] or empty(LEGACY_SESSION_SECONDS)
         if session.get('pending') and session['pending']['status']!='password':
             try:await backend.activate(session);bind_owner(session)
             except CRMError as exc:
@@ -166,13 +182,13 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         sid=sessions.write(session,request['mobile_sid'] if request['mobile_session'] else None)
         public={k:session[k] for k in ('owner','context','synthetic','expires_at') if k in session}
         response=web.json_response(dict(csrf=session['csrf'],session=public if session.get('owner') else None,pending=session.get('pending'),synthetic=backend.synthetic))
-        cookie(response,sid,request);return response
+        cookie(response,sid,request,session);return response
     async def login(request):
         body=await request.json();session=await backend.login(body)
         session.update(empty())
         if not session.get('pending'):bind_owner(session)
         sid=sessions.write(session,replaces=request['mobile_sid'])
-        response=web.json_response(dict(ok=True));cookie(response,sid,request);return response
+        response=web.json_response(dict(ok=True));cookie(response,sid,request,session);return response
     async def resume(request):
         if backend.synthetic:
             raise CRMError('Перенос входа доступен в рабочей CRM.', 'synthetic', 403)
@@ -190,7 +206,7 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         session.update(empty())
         bind_owner(session)
         response = web.json_response(dict(ok=True))
-        cookie(response, sessions.write(session, replaces=request['mobile_sid']), request)
+        cookie(response, sessions.write(session, replaces=request['mobile_sid']), request, session)
         return response
     async def password(request):
         session=request['mobile_session']
@@ -200,13 +216,16 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         if not backend.synthetic:await backend.logout(request['mobile_session'])
         sessions.forget(request['mobile_sid']);response=web.json_response(dict(ok=True));response.del_cookie(COOKIE,path=prefix);return response
     async def api(request):
-        session=await authorize(request);body=await request.json()
+        body=await request.json()
         method=body.get('method','GET');action=body.get('action','')
         if method not in {'GET','POST'}:raise CRMError('Недопустимый метод.')
+        session=await authorize(request,refresh=action in {'context','manager-access'})
         if method=='GET' and action=='context':
             return web.json_response(session['context'])
+        before=json.dumps(session,ensure_ascii=False,sort_keys=True)
         data=await backend.request(session,method,action,body.get('body') or {},body.get('query') or {})
-        sessions.write(session,request['mobile_sid'])
+        if json.dumps(session,ensure_ascii=False,sort_keys=True)!=before:
+            sessions.write(session,request['mobile_sid'])
         return web.json_response(data)
     async def upload(request):
         session=await authorize(request)
@@ -307,10 +326,20 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         except PermissionError:return True
     async def workbook(request):
         session=await authorize(request);value=await request.json();action=value['action'];data=value.get('input') or {};role=session['role']
-        if role not in {'manager','analyst'} and action!='shift-report':raise CRMError('Нет права на работу с книгами.','forbidden',403)
+        if role not in {'manager','analyst'} and action not in {'shift-report','logistics-export-download'}:raise CRMError('Нет права на работу с книгами.','forbidden',403)
         if action=='read':
             path,name=sessions.file(session['owner'],data['file']);result=await backend.file_action(session,'workbook-read',dict(path=str(path)));result['filename']=name;return web.json_response(result)
         identifier=str(uuid.UUID(value['operation_id']));owner=session['owner']
+        if action in {'report-preset','logistics-export-download'}:
+            result=await backend.request(session,'GET','manager-report-download' if action=='report-preset' else 'logistics-export-download',query=data)
+            await authorize(request)
+            content=base64.b64decode(result['content_base64'],validate=True)
+            if hashlib.sha256(content).hexdigest()!=result['sha256']:
+                raise CRMError('Проверка файла отчёта не прошла.','file_changed',502)
+            name=quote(result['filename'],safe='')
+            return web.Response(body=content,content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                headers={'Content-Disposition':"attachment; filename*=UTF-8''"+name,'X-CRM-Filename':name,
+                         'X-CRM-Download-Id':identifier,'Cache-Control':'no-store'})
         expected=hashlib.sha256(json.dumps(dict(action=action,input=data),ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()).hexdigest()
         async with download_locks.setdefault(identifier,asyncio.Lock()):
             job=sessions.job(owner,identifier)
@@ -327,7 +356,13 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
                     if action=='table':report=dict(headers=data['headers'],rows=data['rows']);kind='table'
                     elif action in {'manager-report','analyst-report'}:
                         month=data.get('mode')=='month';dynamics=data.get('mode')=='dynamics';report_prefix='analyst' if action=='analyst-report' else 'manager'
-                        report=await backend.request(session,'GET',report_prefix+('-statistics' if month else '-report'),query=dict(month=data.get('month')) if month else dict(snapshot_id=data['snapshot_id']) if data.get('snapshot_id') and not dynamics else dict(day=data.get('day')))
+                        if month:
+                            query={'month':data.get('month')}
+                        else:
+                            query={'snapshot_id':data['snapshot_id']} if data.get('snapshot_id') and not dynamics else {'day':data.get('day')}
+                            if data.get('country'):
+                                query['country']=data['country']
+                        report=await backend.request(session,'GET',report_prefix+('-statistics' if month else '-report'),query=query)
                         if not month and not dynamics:report=report['report']
                         kind='manager-month' if month else 'manager-dynamics' if dynamics else 'three-hour'
                     elif action=='shift-report':report=await backend.request(session,'GET','shift-report',query={k:v for k,v in data.get('report',{}).items() if k in {'since','until'}});kind='shifts'

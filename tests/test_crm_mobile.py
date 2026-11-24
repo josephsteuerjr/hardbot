@@ -45,6 +45,75 @@ def test_cookie_csrf_origin_and_client_role_cannot_elevate(tmp_path):
             assert (await client.post('/mobile/admin',headers=headers,json={'action':'local','args':['/profile',{}]})).status==403
     asyncio.run(run())
 
+def test_mobile_session_absolute_deadline_and_existing_session_upgrade(tmp_path):
+    async def run():
+        backend=SyntheticBackend(tmp_path/'synthetic')
+        app=create_app(backend,tmp_path/'mobile')
+        async with TestClient(TestServer(app)) as client:
+            boot=await (await client.get('/mobile/boot')).json()
+            before=int(time.time()*1000)
+            response=await client.post('/mobile/login',headers={'X-CRM-CSRF':boot['csrf']},
+                                       json={'action':'synthetic','role':'employee'})
+            assert response.status==200 and int(response.cookies['crm_mobile_v1']['max-age']) in {172799,172800}
+            sid=response.cookies['crm_mobile_v1'].value
+            sessions=app['mobile_sessions']
+            current=sessions.read(sid)
+            assert before+48*3600*1000<=current['expires_at']<=int(time.time()*1000)+48*3600*1000
+            current.pop('lifetime_seconds')
+            current['expires_at']-=40*3600*1000
+            sessions.write(current,sid)
+            cutoff=current['expires_at']+40*3600*1000
+            for _ in range(2):
+                response=await client.get('/mobile/boot')
+                state=(await response.json())['session']
+                assert state['expires_at']==cutoff and state['owner']==current['owner']
+            assert sessions.read(sid)['lifetime_seconds']==48*3600
+            current=sessions.read(sid)
+            current['expires_at']=int(time.time()*1000)-1
+            sessions.write(current,sid)
+            assert (await (await client.get('/mobile/boot')).json())['session'] is None
+            assert sessions.read(sid) is None
+    asyncio.run(run())
+
+
+def test_unchanged_context_is_not_rewritten_on_every_api_call(tmp_path):
+    async def run():
+        backend=SyntheticBackend(tmp_path/'synthetic')
+        app=create_app(backend,tmp_path/'mobile')
+        async with TestClient(TestServer(app)) as client:
+            boot=await (await client.get('/mobile/boot')).json()
+            response=await client.post('/mobile/login',headers={'X-CRM-CSRF':boot['csrf']},json={'action':'synthetic','role':'employee'})
+            sid=response.cookies['crm_mobile_v1'].value
+            boot=await (await client.get('/mobile/boot')).json();headers={'X-CRM-CSRF':boot['csrf']}
+            sessions=app['mobile_sessions']
+            with sessions.connect() as conn:before=conn.execute('SELECT sealed,expires FROM sessions WHERE id=?',(sid,)).fetchone()
+            for action in ('context','work-portfolio','work-portfolio'):
+                response=await client.post('/mobile/api',headers=headers,json={'method':'GET','action':action,'body':{},'query':{}})
+                assert response.status==200
+                with sessions.connect() as conn:after=conn.execute('SELECT sealed,expires FROM sessions WHERE id=?',(sid,)).fetchone()
+                assert tuple(after)==tuple(before)
+    asyncio.run(run())
+
+
+def test_storage_full_is_a_temporary_error_and_does_not_end_the_session(tmp_path):
+    async def run():
+        backend=SyntheticBackend(tmp_path/'synthetic')
+        app=create_app(backend,tmp_path/'mobile')
+        async with TestClient(TestServer(app)) as client:
+            boot=await (await client.get('/mobile/boot')).json()
+            response=await client.post('/mobile/login',headers={'X-CRM-CSRF':boot['csrf']},json={'action':'synthetic','role':'employee'})
+            sid=response.cookies['crm_mobile_v1'].value
+            sessions=app['mobile_sessions'];original=sessions.write
+            def unavailable(*args,**kwargs):raise sqlite3.OperationalError('database or disk is full')
+            sessions.write=unavailable
+            response=await client.get('/mobile/boot')
+            assert response.status==503 and (await response.json())['error']=='storage_unavailable'
+            sessions.write=original
+            assert sessions.read(sid) is not None
+            assert (await client.get('/mobile/boot')).status==200
+    asyncio.run(run())
+
+
 def test_replayed_real_call_is_one_event_and_courier_cannot_write_call(tmp_path):
     async def run():
         backend=SyntheticBackend(tmp_path/'synthetic')

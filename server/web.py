@@ -5712,7 +5712,7 @@ async def _account_gps_request(request):
 async def _account_logout(request: web.Request) -> web.Response:
     found = _account_device_of_request(request)
     if not found:
-        raise web.HTTPUnauthorized(text="auth")
+        raise _json_error(web.HTTPUnauthorized, "auth")
     # Гасим токен в ЕГО таблице: id строк agent_devices/manager_devices
     # независимы, agent_device_revoke по менеджерскому id отзывал чужое
     # устройство выездника и оставлял живым сам менеджерский вход.

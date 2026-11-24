@@ -78,7 +78,8 @@ def create_app(*, sessions=None):
             if managed_runtime and (not worker or not worker['ok'] or (instant(now())-instant(worker['heartbeat_at'])).total_seconds()>90):
                 raise ValueError()
             return web.json_response({'ok': True, 'namespace': NAMESPACE, 'storage': 'postgresql','schema_version':VERSION,
-                'scheduler': 'running' if worker and worker['ok'] else 'injected'})
+                'scheduler': 'running' if worker and worker['ok'] else 'injected',
+                'authority_cache': sessions.authority_metrics()})
         except Exception:
             return web.json_response({'ok': False}, status=503)
 

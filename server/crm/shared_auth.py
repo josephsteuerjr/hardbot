@@ -3,8 +3,9 @@
 The working credential is accepted only at exchange on the pinned first-party
 origin. It is sealed inside an audience-bound pilot session. Background work
 stores a separately sealed credential; plaintext never enters DB/logs/renderer.
-Every use rechecks the live
-authority, so a revoked working login cannot keep using the pilot session.
+A fresh exchange always checks the live authority. API calls reuse a successful
+confirmation for 15 seconds; an unavailable authority allows at most 30 further
+seconds of that confirmation, while explicit denial clears it immediately.
 """
 import asyncio
 import base64
@@ -24,6 +25,9 @@ from .roles import CAPABILITIES, ROLE_CAPABILITIES
 
 AUDIENCE = b'rimborso-crm-pilot-session-v1'
 TTL = 30 * 60
+AUTHORITY_CACHE_SECONDS = 15
+AUTHORITY_GRACE_SECONDS = 30
+AUTHORITY_CACHE_LIMIT = 2048
 NAMESPACE = 'crm-shared-pilot-v1'
 ENTRY_KINDS = {'manager', 'employee', 'analyst', 'analyst-device'}
 
@@ -120,7 +124,7 @@ def principal(identity):
         if not marker or marker[0] != NAMESPACE:
             raise fault('identity_unmapped', 403)
         result = access.from_uid(conn, identity['uid'], common_read=True)
-        membership = conn.execute('SELECT role FROM crm_memberships WHERE employee_uuid=? '
+        membership = conn.execute('SELECT role,capabilities_json FROM crm_memberships WHERE employee_uuid=? '
             'AND starts_at<=? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at DESC',
             (result.employee_uuid, now(), now())).fetchone()
         role = identity.get('role')
@@ -154,7 +158,8 @@ def principal(identity):
         if policy and role in {'manager','analyst','observer'}:
             employees=frozenset(json.loads(policy['employees_json'])) | {result.employee_uuid}
             all_contracts=bool(policy['all_contracts']) and role in {'manager','analyst'}
-        return replace(result, role=role, capabilities=result.capabilities & ROLE_CAPABILITIES[role],
+        logistics_caps = set(json.loads(membership['capabilities_json'])) & {'logistics'} if membership and membership['role'] in {'manager', 'owner'} else set()
+        return replace(result, role=role, capabilities=(result.capabilities & ROLE_CAPABILITIES[role]) | logistics_caps,
                        employee_scope=employees, all_contracts=all_contracts,
                        read_all_contracts=role != 'logistic',
                        server_operator=role == 'manager' and identity.get('server_operator') is True)
@@ -167,6 +172,12 @@ class Sessions:
         self.cipher, self.verify, self.resolve, self.clock = AESGCM(key), verifier, resolve, clock
         self.audit = audit or audit_exchange
         self.background_store = background_store
+        self._authority_cache = {}
+        self._authority_metrics = dict(exchange=0, refresh=0, hit=0, grace=0, denied=0)
+
+    def authority_metrics(self):
+        return dict(self._authority_metrics, entries=len(self._authority_cache),
+                    ttl_seconds=AUTHORITY_CACHE_SECONDS, grace_seconds=AUTHORITY_GRACE_SECONDS)
 
     def background_seal(self, payload):
         nonce=os.urandom(12)
@@ -214,19 +225,44 @@ class Sessions:
         except Exception:
             raise fault() from None
 
-    async def _verify(self, credential, kind='manager', device_fingerprint=''):
+    async def _verify(self, credential, kind='manager', device_fingerprint='', allow_cache=True):
         if kind not in ENTRY_KINDS:
             raise fault()
         if kind == 'analyst-device' and not re.fullmatch(r'[a-f0-9]{64}', device_fingerprint):
             raise fault()
-        if kind == 'manager':
-            return await self.verify(credential)
-        return await self.verify(credential, kind=kind, device_fingerprint=device_fingerprint)
+        key = (credential, kind, device_fingerprint)
+        at = self.clock()
+        cached = self._authority_cache.get(key)
+        age = at - cached[1] if cached else None
+        if allow_cache and cached and 0 <= age < AUTHORITY_CACHE_SECONDS:
+            self._authority_metrics['hit'] += 1
+            return cached[0]
+        if cached and (age < 0 or age >= AUTHORITY_CACHE_SECONDS + AUTHORITY_GRACE_SECONDS):
+            self._authority_cache.pop(key, None)
+            cached = None
+        try:
+            identity = (await self.verify(credential) if kind == 'manager' else
+                        await self.verify(credential, kind=kind, device_fingerprint=device_fingerprint))
+        except CRMError as exc:
+            if allow_cache and cached and 0 <= age < AUTHORITY_CACHE_SECONDS + AUTHORITY_GRACE_SECONDS and exc.code == 'authority_unavailable':
+                self._authority_metrics['grace'] += 1
+                return cached[0]
+            if exc.status in {401, 403, 410}:
+                self._authority_cache.pop(key, None)
+                self._authority_metrics['denied'] += 1
+            raise
+        self._authority_metrics['refresh'] += 1
+        self._authority_cache[key] = (identity, at)
+        if len(self._authority_cache) > AUTHORITY_CACHE_LIMIT:
+            oldest = min(self._authority_cache, key=lambda item: self._authority_cache[item][1])
+            self._authority_cache.pop(oldest, None)
+        return identity
 
     async def exchange(self, credential, *, kind='manager', device_fingerprint=''):
         if not isinstance(credential, str) or not re.fullmatch(r'[A-Za-z0-9_-]{20,512}', credential):
             raise fault()
-        identity = await self._verify(credential, kind, device_fingerprint)
+        identity = await self._verify(credential, kind, device_fingerprint, allow_cache=False)
+        self._authority_metrics['exchange'] += 1
         p = await asyncio.to_thread(self.resolve, identity)
         await asyncio.to_thread(self.audit, p, identity)
         issued = int(self.clock())

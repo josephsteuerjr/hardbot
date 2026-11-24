@@ -4,7 +4,7 @@ from pathlib import Path
 import aiohttp
 from .contract import CRMError
 
-GET_ACTIONS=frozenset('context operator-status portfolio work-portfolio tasks card contracts registry managed-portfolio assignment-staff assignment-receipt assignment-history assignment-job manager-statistics manager-report analyst-report analyst-statistics changes active-time shifts shift-report cabinet three-hour script adoption document-read'.split())
+GET_ACTIONS=frozenset('context operator-status portfolio work-portfolio tasks card contracts registry managed-portfolio assignment-staff assignment-receipt assignment-history assignment-job manager-statistics manager-report manager-report-download analyst-report analyst-statistics changes active-time shifts shift-report cabinet three-hour script adoption document-read logistics-export-download'.split())
 POST_ACTIONS=frozenset('registry-edit assignment-preview assignment-commit assignment-job-step assignment-job-cancel active-time anchor command shift plan cohort export import-preview import-apply receipt telemetry script document logistics-call'.split())
 ADMIN_ROUTES=frozenset(['/state','/busy','/fn','/job','/jobs','/admin','/admin_image','/mail/state','/mail/set','/mail/send'])
 ROLES=frozenset(['employee','courier','manager','analyst','observer'])
@@ -126,6 +126,10 @@ class SharedBackend:
         session=dict(role=role,credential_header='X-App-Token' if role=='employee' else 'X-Pult-Token',credential=value['token'],synthetic=False,username=value['username'])
         if value.get('action')!='ok' or value.get('must_change_password'):
             session['pending']=dict(status='password' if value.get('must_change_password') else 'device',username=value['username'],employee=value['employee'])
+            if not value.get('must_change_password'):
+                try:return await self.activate(session)
+                except CRMError as exc:
+                    if exc.status not in {401,403,410}:raise
             return session
         return await self.activate(session)
     async def activate(self,session):
@@ -161,17 +165,68 @@ class SharedBackend:
             if exc.status not in {401,403,410}:raise
     async def request(self,session,method,action,body=None,query=None):
         from urllib.parse import urlencode
+        if action in {'field-route','field-geocode','field-directions','field-marks','field-track'}:
+            return await self.field_workspace(session,method,action,body or {},query or {})
         if action=='manager-access':
-            routes={'team':'/api/manager/team','approve':'/api/manager/account_approve','reset':'/api/manager/account_reset','revoke':'/api/manager/team/device-revoke','board':'/api/manager/employee_board'}
+            routes={'team':'/api/manager/team','approve':'/api/manager/account_approve','reset':'/api/manager/account_reset','revoke':'/api/manager/team/device-revoke','board':'/api/manager/employee_board','plan':'/api/manager/plan'}
             resource=(body if method=='POST' else query or {}).get('resource')
             if resource not in routes:raise CRMError('Неизвестное действие Команды.')
+            if resource=='plan' and (method!='POST' or session['role']!='manager'):
+                raise CRMError('Норму может изменить руководитель.','forbidden',403)
             return await self.json(self.primary+routes[resource],method,self.headers(session),(body or {}).get('payload') if method=='POST' else None)
         if action not in (GET_ACTIONS if method=='GET' else POST_ACTIONS):raise CRMError('Неизвестный запрос.')
         try:return await self.json(self.crm+'/api/crm/'+action+('?' + urlencode(query) if query else ''),method,{'Authorization':'Bearer '+session['crm_session']},body)
         except CRMError as exc:
-            if exc.code!='pilot_session_expired':raise
+            if exc.code not in {'pilot_session_expired','pilot_session_invalid'}:raise
             exchanged=await self.json(self.crm+'/auth/exchange','POST',headers=self.headers(session));session['crm_session']=exchanged['token']
             return await self.json(self.crm+'/api/crm/'+action+('?' + urlencode(query) if query else ''),method,{'Authorization':'Bearer '+session['crm_session']},body)
+
+    async def field_workspace(self,session,method,action,body,query):
+        from urllib.parse import urlencode
+        if session['role']!='employee' or 'visit' not in session['context'].get('capabilities',[]):
+            raise CRMError('Раздел доступен выезднику.','forbidden',403)
+        paths={
+            ('GET','field-route'):('route_day',('lat','lon')),
+            ('GET','field-geocode'):('geocode',('q',)),
+            ('GET','field-directions'):('route_to',('lat','lon','dlat','dlon')),
+            ('GET','field-marks'):('markers',()),
+            ('POST','field-marks'):('marker',()),
+            ('POST','field-track'):('track',()),
+        }
+        route=paths.get((method,action))
+        if route is None:raise CRMError('Неизвестное действие навигатора.')
+        route,keys=route
+        selection={key:query[key] for key in keys if key in query}
+        if method=='POST' and action=='field-marks':
+            body={key:body[key] for key in ('lat','lon','label','op_id') if key in body}
+        if method=='POST' and action=='field-track':
+            body={key:body[key] for key in ('session_id','points') if key in body}
+            if not isinstance(body.get('points'),list) or len(body['points'])>100:
+                raise CRMError('Отправьте до 100 точек трека за раз.')
+        reply=await self.json(self.primary+'/api/'+route+('?' + urlencode(selection) if selection else ''),
+                              method,self.headers(session),body if method=='POST' else None)
+        if action!='field-route':return reply
+        current={}
+        offset=0
+        while True:
+            page=await self.request(session,'GET','work-portfolio',query=dict(work='visit',offset=offset,limit=100))
+            for row in page['contracts']:
+                if not row.get('legacy_id'):continue
+                key=str(row['legacy_id'])
+                current[key]=row if key not in current else None
+            if not page['has_more']:break
+            offset+=100
+        order=[]
+        for stop in reply.get('order',[]):
+            item=current.get(str(stop.get('rep')))
+            if item:
+                order.append(dict(client=item['client_name'],person_uuid=item['person_uuid'],
+                                  rep=str(stop['rep']),lat=stop['lat'],lon=stop['lon'],km=stop.get('km')))
+        exact=len(order)==len(reply.get('order',[]))
+        if not exact:
+            for stop in order:stop['km']=None
+        return dict(order=order,km=reply.get('km') if exact else None,complete=exact,
+                    matrix_src=reply.get('matrix_src') if exact else None)
     async def file_action(self,session,action,body):
         if self.executor is None:raise CRMError('Исполнитель Excel недоступен. Файл и исходная операция сохранены.','executor_unavailable',503)
         return await self.executor.file_action(session,action,body)

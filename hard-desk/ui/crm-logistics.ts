@@ -12,6 +12,7 @@ type CaseRow = {
 };
 
 const labels: Record<string, string> = {UZ: 'Узбекистан', TJ: 'Таджикистан'};
+const poolStatus = (row: CaseRow) => !row.active ? 'Завершён' : (row.courier || row.courier_label) ? 'В работе у курьеров' : 'Не назначено';
 const esc = (v: unknown) => String(v ?? '').replace(/[&<>"']/g, c => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 }[c]!));
@@ -27,8 +28,9 @@ export function mountLogistics(host: HTMLElement, api: LogisticsAPI, countries: 
   const today = new Date().toLocaleDateString('en-CA', {timeZone: 'Asia/Tashkent'});
   host.innerHTML = `<div class="toolbar">
     <label>Страна <select data-country>${countries.map(c => `<option value="${esc(c)}">${esc(labels[c])}</option>`).join('')}</select></label>
+    <button type="button" data-import-open>Загрузить Excel</button>
     <button type="button" data-export>Выгрузить XLSX</button></div>
-    <details data-import><summary>Загрузить пул</summary><div class="toolbar">
+    <details data-import id="logistics-import"><summary>Загрузка и сверка Excel</summary><div class="toolbar">
     <label>Дата передачи с <input type="date" data-since value="${esc(today.slice(0,7))}-01"></label>
     <label>по <input type="date" data-until value="${esc(today)}"></label>
     <button type="button" data-load class="primary">Выбрать Excel</button></div><div data-preview></div></details>
@@ -84,7 +86,7 @@ export function mountLogistics(host: HTMLElement, api: LogisticsAPI, countries: 
         <td><input type="checkbox" aria-label="Выбрать договор ${esc(row.external_id)}" data-case="${esc(row.contract_uuid)}"${selected.has(row.contract_uuid) ? ' checked' : ''}${row.active ? '' : ' disabled'}></td>
         <td>${esc(row.external_id)}<br><small>${esc(row.partner)}</small></td><td>${esc(row.client)}</td>
         <td>${esc(row.courier || row.courier_label || '—')}</td><td>${esc(row.transferred_on)}</td><td>${esc(row.available_phone || '—')}</td>
-        <td>${esc(row.delivery.delivery_result || (row.active ? 'В работе у курьеров' : 'Завершён'))}</td>
+        <td>${esc(row.delivery.delivery_result || poolStatus(row))}</td>
         <td>${esc(row.caller || '—')}</td><td>${esc(row.call_status || '—')}${row.call_comment ? `<div class="queue-comment">${esc(row.call_comment)}</div>` : ''}</td>
         <td>${row.active ? `<button type="button" data-row-edit="${esc(row.contract_uuid)}">Изменить</button>` : ''}</td></tr>`).join('')}
       </tbody></table></div>${rows.length ? '' : '<p>По выбранным условиям договоров нет</p>'}
@@ -169,6 +171,11 @@ export function mountLogistics(host: HTMLElement, api: LogisticsAPI, countries: 
     el<HTMLSelectElement>('caller').value = ''; el<HTMLSelectElement>('courier').value = '';
     selectionState(); void refresh();
   };
+  el('import-open').onclick = () => {
+    const details = el<HTMLDetailsElement>('import');
+    details.open = true;
+    el('load').focus();
+  };
   el('load').onclick = () => void perform(async () => {
     const selectedCountry = value('country'), version = ++previewGeneration;
     const input = await api.workbook('logistics-read');
@@ -195,7 +202,7 @@ export function mountLogistics(host: HTMLElement, api: LogisticsAPI, countries: 
     });
   });
   el('export').onclick = () => void perform(async () => {
-    const result = await api.workbook('logistics-export',filters());
+    const result = await api.workbook('logistics-export-download',filters());
     if (result.cancelled) return;
     if (!result.ok) throw new Error(result.text || 'Выгрузка не подтверждена.');
     status(`Выгружено договоров: ${result.data.rows}`);

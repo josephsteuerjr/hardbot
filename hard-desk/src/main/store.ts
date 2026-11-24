@@ -3,10 +3,10 @@
 // на другую машину или под другого пользователя файл токена ничего не даёт.
 import { app, safeStorage } from "electron";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { createHash, generateKeyPairSync } from "node:crypto";
-import { join } from "node:path";
-import { PRODUCT_ID } from './product';
-import { directSeal,directOpen,isDirect } from './windows-dpapi';
+import { createHash, createPublicKey, generateKeyPairSync } from "node:crypto";
+import { dirname, join } from "node:path";
+import { PRODUCT_ID, STABLE_CRM } from './product';
+import { directSeal,directOpen,isDirect,openCrmRecord,sealCrmRecord } from './windows-dpapi';
 
 export interface Settings {
   server?: string;          // https://… — берётся из ссылки входа
@@ -22,17 +22,68 @@ export interface Settings {
 const dir = () => app.getPath("userData");
 const file = (name: string) => join(dir(), name);
 
-/** One installation key shared by Hard and Soft for this Windows user. */
-export function pcIdentity(): { privateKey: string; publicKey: string; fingerprint: string } {
+type PcIdentity = { privateKey: string; publicKey: string; fingerprint: string };
+
+function describePcKey(privateKey: string): PcIdentity {
+  const publicKey = createPublicKey(privateKey);
+  if (publicKey.asymmetricKeyType !== 'ed25519') throw new Error('Invalid PC key type');
+  const publicRaw = publicKey.export({ type: 'spki', format: 'der' }).subarray(-32);
+  return { privateKey, publicKey: publicRaw.toString('base64'),
+    fingerprint: createHash('sha256').update(publicRaw).digest('hex') };
+}
+
+function newPcKey(): PcIdentity {
+  const pair = generateKeyPairSync('ed25519');
+  return describePcKey(pair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString());
+}
+
+function readPcKey(json: string): PcIdentity {
+  const saved: PcIdentity = JSON.parse(json);
+  const identity = describePcKey(saved.privateKey);
+  if (identity.publicKey !== saved.publicKey || identity.fingerprint !== saved.fingerprint)
+    throw new Error('Invalid PC key attributes');
+  return identity;
+}
+
+function availablePcKey(target: string, legacy = false): PcIdentity | undefined {
+  try {
+    const bytes = readFileSync(target);
+    const json = legacy && !isDirect(bytes) ? safeStorage.decryptString(bytes) : openCrmRecord(bytes);
+    return readPcKey(json);
+  } catch { return undefined; }
+}
+
+function crmPcIdentity(base: string, legacy: string): PcIdentity {
+  const shared = join(base, 'pc-identity.dpapi');
+  const profile = file('pc-identity.profile.bin');
+  const saved = availablePcKey(profile) ?? availablePcKey(shared);
+  if (saved) return saved;
+
+  const identity = availablePcKey(legacy, true) ?? newPcKey();
+  const bytes = sealCrmRecord(JSON.stringify(identity));
+  // Electron's fallback belongs to this profile. A redirected or read-only
+  // shared folder can also be skipped without touching its existing files.
+  const targets = isDirect(bytes) ? [shared, profile] : [profile];
+  for (const target of targets) {
+    try {
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, bytes, { flag: 'wx', flush: true });
+    } catch { /* A concurrent launch or an inaccessible folder may already have a key. */ }
+    const key = availablePcKey(target);
+    if (key) return key;
+  }
+  throw new Error('Не удалось сохранить ключ компьютера в профиле Windows. Войдите в CRM через браузер.');
+}
+
+/** One installation key shared by the CRM clients for this Windows user. */
+export function pcIdentity(): PcIdentity {
   const base = process.env.HARD_USER_DATA ? join(process.env.HARD_USER_DATA, "shared")
     : join(process.env.LOCALAPPDATA || app.getPath("appData"), "Hard", "shared");
-  mkdirSync(base, { recursive: true });
   const target = join(base, "pc-identity.bin");
+  if (PRODUCT_ID === 'crm' || STABLE_CRM) return crmPcIdentity(base, target);
+  mkdirSync(base, { recursive: true });
   if (!existsSync(target)) {
-    const pair = generateKeyPairSync("ed25519");
-    const publicRaw = pair.publicKey.export({ type: "spki", format: "der" }).subarray(-32);
-    const value = JSON.stringify({ privateKey: pair.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
-      publicKey: publicRaw.toString("base64"), fingerprint: createHash("sha256").update(publicRaw).digest("hex") });
+    const value = JSON.stringify(newPcKey());
     try { writeFileSync(target, seal(value), { flag: "wx", flush: true }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
   }

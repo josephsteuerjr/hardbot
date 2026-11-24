@@ -1,12 +1,16 @@
 import * as vault from './store';
+import {mountFieldOffline} from './field-offline';
+import {mountFieldWorkspace} from './field-workspace';
 import {mountConnection} from './connection';
 import {MobileActivity} from './activity';
-type Reply={ok:boolean;status:number;data?:any;text?:string;stale?:string;cancelled?:boolean};
-type Entry={action:string;body:any;queued_at:string;state:'pending'|'attention'|'accepted';result?:any;error?:string;code?:string};
+type Reply={ok:boolean;status:number;data?:any;text?:string;stale?:string;cancelled?:boolean;retryAt?:number};
+type Entry={action:string;body:any;queued_at:string;state:'pending'|'attention'|'accepted';result?:any;error?:string;code?:string;sha256?:string};
 const listeners=new Set<(event:any)=>void>();
 const canonical=(v:any):string=>JSON.stringify(v,(_,x)=>x&&typeof x==='object'&&!Array.isArray(x)?Object.fromEntries(Object.keys(x).sort().map(k=>[k,x[k]])):x);
 const background=(work:Promise<any>)=>{void work.catch(()=>emit({type:'storage-error',text:'Не удалось сохранить данные на телефоне. Оставьте окно открытым и повторите действие.'}));};
 let current:any=null,csrf='',offline=false,flushing:Promise<any>|null=null,liveTimer:ReturnType<typeof setTimeout>,polling=false;
+let expiryTimer:ReturnType<typeof setTimeout>;
+let queueRetryAt=0;
 let initializing:Promise<Reply>|null=null, legacyTried=false;
 let navigationTarget='';
 let initialPerson='';
@@ -21,19 +25,28 @@ const channel=typeof BroadcastChannel!=='undefined'?new BroadcastChannel('crm-mo
 const activity=new MobileActivity(api,async(action,body,owner)=>persistEntry(owner,action,body),()=>emit({type:'storage-error',text:'Не удалось сохранить активный интервал. Оставьте окно открытым и повторите подключение.'}));
 const emit=(event:any,broadcast=false)=>{for(const fn of listeners)fn(event);if(broadcast)channel?.postMessage(event);};
 channel?.addEventListener('message',event=>{if(event.data?.owner===current?.owner)emit(event.data);else if(event.data?.type==='identity')background(initialize().then(()=>emit({type:'identity'})));});
-function authority(expected?:string){if(!current?.owner||expected&&expected!==current.owner)throw Error('Вход изменился. Ввод сохранён у исходного сотрудника.');return current.owner;}
+function expireSession(){
+  const expired=current;
+  if(!expired?.owner||expired.expires_at>Date.now())return;
+  current=null;csrf='';clearTimeout(expiryTimer);
+  background(vault.update(deviceScope,'last-state',saved=>saved?.owner===expired.owner&&saved.expires_at===expired.expires_at?null:saved));
+  background(activity.stop());queueMicrotask(()=>emit({type:'identity'}));
+}
+function authority(expected?:string){expireSession();if(!current?.owner||expected&&expected!==current.owner)throw Error('Вход изменился. Ввод сохранён у исходного сотрудника.');return current.owner;}
 async function revoke(status:number,expected=current?.owner){if(status===401&&expected&&current?.owner===expected){await vault.update(deviceScope,'last-state',saved=>saved?.owner===expected?null:saved);if(current?.owner!==expected)return;current=null;background(activity.stop());emit({type:'identity'});}}
 async function request(path:string,body?:any):Promise<Reply>{
   const startedOwner=current?.owner;
   if(offline||!navigator.onLine)return {ok:false,status:0,text:'Нет связи. Данные сохранены на телефоне.'};
   try{
-    const response=await fetch('./'+path,{method:body===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','X-CRM-CSRF':csrf},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(45000)});
+    const response=await fetch('./'+path,{method:body===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','X-CRM-CSRF':csrf},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(120000)});
     const data=await response.json();
     if(current?.owner!==startedOwner)return {ok:false,status:401,text:'Вход изменился. Исходная работа сохранена.'};
     await revoke(response.status,startedOwner);
     if(response.status===403&&data.error==='csrf'){csrf='';return {ok:false,status:0,text:'Подключение обновляется. Исходная операция остаётся в очереди.'};}
     const text=typeof data.text==='string'&&!/^[a-z0-9_-]+$/i.test(data.text)?data.text:undefined;
-    return {ok:response.ok,status:response.status,data,text};
+    const delay=response.headers.get('Retry-After');
+    const retryAt=delay?(/^\d+$/.test(delay)?Date.now()+Number(delay)*1000:Date.parse(delay)):undefined;
+    return {ok:response.ok,status:response.status,data,text,retryAt};
   }catch{return {ok:false,status:0,text:body===undefined?'Не удалось подключиться.':'Ответ не получен. Исходная операция сохранена на телефоне.'};}
 }
 async function initialize(){
@@ -63,6 +76,8 @@ async function loadSession():Promise<Reply>{
     const saved=await vault.get(deviceScope,'last-state');
     current=saved&&saved.expires_at>Date.now()&&saved.context?.source!=='legacy-analyst-web'?saved:null;
   }
+  clearTimeout(expiryTimer);
+  if(current?.owner)expiryTimer=setTimeout(expireSession,Math.max(0,current.expires_at-Date.now()));
   if(current?.owner&&response.ok&&!document.hidden&&current.context?.source!=='legacy-analyst-web')
     await activity.start(current.owner,await vault.get(deviceScope,'installation'));
   else if(!current||current.context?.source==='legacy-analyst-web')await activity.stop();
@@ -84,15 +99,15 @@ async function api(method:string,action:string,body?:any,query?:any):Promise<Rep
   }
   return response;
 }
-async function enqueue(action:string,body:any,expected?:string){
-  const owner=authority(expected);return persistEntry(owner,action,body);
+async function enqueue(action:string,body:any,expected?:string,sha256?:string){
+  const owner=authority(expected);return persistEntry(owner,action,body,sha256);
 }
-async function persistEntry(owner:string,action:string,body:any){
+async function persistEntry(owner:string,action:string,body:any,sha256?:string){
   if(!body?.operation_id)throw Error('Не указан номер операции.');
   await vault.update(owner,'queue',(rows:Entry[]|null)=>{
     rows||=[];const prior=rows.find(r=>r.body.operation_id===body.operation_id);
     if(prior){if(canonical(prior.body)!==canonical(body)||prior.action!==action)throw Error('Номер операции уже связан с другими данными.');return rows;}
-    return [...rows,{action,body,queued_at:new Date().toISOString(),state:'pending'}];
+    return [...rows,{action,body,queued_at:new Date().toISOString(),state:'pending',sha256}];
   });
   if(current?.owner===owner){emit({type:'queue',owner},true);background(flush());}return {ok:true,status:202,data:{operation_id:body.operation_id,state:'pending'}};
 }
@@ -104,17 +119,33 @@ async function command(body:any,expected?:string){
 async function flush(){
   if(flushing)return flushing;
   const run=async()=>{
-    if(!current?.owner||offline||!navigator.onLine)return;
+    expireSession();
+    if(!current?.owner||offline||!navigator.onLine||queueRetryAt>Date.now())return;
     const owner=authority();if(!csrf){await initialize();if(current?.owner!==owner||!csrf)return;}
     const rows:Entry[]=await vault.get(owner,'queue')||[];
     for(const entry of rows.filter(e=>e.state==='pending')){
       if(current?.owner!==owner)break;
+      if(entry.action==='command'&&entry.body.kind==='visit'&&entry.body.payload?.field_visit?.photos?.length){
+        const ids=entry.body.payload.field_visit.photos;
+        const latest:Entry[]=await vault.get(owner,'queue')||[];
+        if(latest.some(e=>e.action==='document' && ids.includes(e.body.document_id) && e.state!=='accepted'))continue;
+      }
       if(entry.action==='command'&&entry.body.kind==='document'){
         const latest:Entry[]=await vault.get(owner,'queue')||[];
         if(latest.some(e=>e.action==='document'&&e.body.document_id===entry.body.payload.document_id&&e.state!=='accepted'))continue;
       }
       const response=await api('POST',entry.action,entry.body);
-      if(!response.status||response.status>=500||response.status===401)break;
+      if(!response.status||response.status>=500||[401,408,425,429].includes(response.status)){
+        if([408,425,429,503].includes(response.status))queueRetryAt=Math.max(Date.now()+5000,response.retryAt||0);
+        break;
+      }
+      if(response.ok&&entry.action==='command'&&
+         (response.data?.status!=='accepted'||response.data.operation_id!==entry.body.operation_id||!response.data.event_id))break;
+      if(response.ok&&entry.action==='document'){
+        const digest=entry.sha256||await bytesSha256(Uint8Array.from(atob(entry.body.content_base64),c=>c.charCodeAt(0)));
+        if(response.data?.document_id!==entry.body.document_id||response.data.contract_uuid!==entry.body.contract_uuid||
+           response.data.sha256!==digest)break;
+      }
       await vault.update(owner,'queue',(latest:Entry[])=>latest.map(e=>e.body.operation_id!==entry.body.operation_id?e:{...e,state:response.ok?'accepted':'attention',result:response.data,error:response.ok?undefined:response.text,code:response.data?.error}));
       emit({type:'queue',owner},true);
     }
@@ -147,10 +178,10 @@ function startPolling(){clearTimeout(liveTimer);liveTimer=setTimeout(async()=>{
       if(response.data.resync||response.data.cursor.assignments!==cursor.assignments||cursor.scope&&response.data.cursor.scope!==cursor.scope){await vault.clearReads(owner);await api('GET','work-portfolio');}
       const context=await request('api',{method:'GET',action:'context'});if(context.ok&&current?.owner===owner){current.context=context.data;await vault.put(deviceScope,'last-state',current);}
     }}
-    emit({type:'live',connected:response.ok,dirty:!!response.data?.dirty,resync:!!response.data?.resync,as_of:response.data?.as_of||new Date().toISOString()});
-  }catch{emit({type:'live',connected:false,dirty:false});}finally{polling=false;}}
+    emit({type:'live',connected:response.ok,dirty:!!response.data?.dirty,resync:!!response.data?.resync,as_of:response.data?.as_of||new Date().toISOString(),reason:response.ok?'':response.status===0?'offline':response.data?.error||'server'});
+  }catch{emit({type:'live',connected:false,dirty:false,reason:'offline'});}finally{polling=false;}}
   startPolling();
-},document.hidden?15000:2000);}
+},document.hidden?15000:2000+Math.floor(Math.random()*750));}
 export function chooseFile(accept='',multiple=false,folder=false):Promise<File[]>{return new Promise(resolve=>{
   const input=document.createElement('input');input.type='file';input.accept=accept;input.multiple=multiple;input.hidden=true;document.body.append(input);
   if(folder)input.setAttribute('webkitdirectory','');
@@ -200,12 +231,24 @@ async function download(response:Response,name?:string,expected=current?.owner){
   return {ok:true,status:200,data:{downloaded:true}};
 }
 async function workbook(action:string,input:any={}){
+  if(action==='team-visits'){
+    const expected=authority();
+    const result=await request('api',{method:'GET',action:'manager-statistics',query:{...input,download:'visits'}});
+    if(!result.ok)return result;
+    authority(expected);
+    const {filename,content_base64,sha256}=result.data;
+    const bytes=Uint8Array.from(atob(content_base64),c=>c.charCodeAt(0));
+    const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),n=>n.toString(16).padStart(2,'0')).join('');
+    if(hash!==sha256)throw Error('Проверка файла отчёта не прошла.');
+    return download(new Response(bytes),filename,expected);
+  }
   const owner=authority(),resumed=action==='resume'?(await vault.get(owner,'download-jobs')||[]).find((j:any)=>j.operation_id===input.operation_id):null;
   if(action==='resume'&&!resumed)throw Error('Сохранённая выгрузка не найдена у этого сотрудника.');
   if(resumed)action=resumed.action;
   const intentKey=resumed?.intentKey||'download-intent:'+action+':'+JSON.stringify(input);
   const prior=action==='read'?null:await vault.get(owner,intentKey);let payload=prior?.input||{...input};
   if(resumed&&!prior)throw Error('Исходная выгрузка уже завершена.');
+  if(!prior&&action==='table'&&typeof payload.name==='string')payload.name=payload.name.replace(/\.xlsx$/i,'');
   if(action==='read'){const [file]=await chooseFile('.xlsx,.xlsm,.xlsb,.xls');if(!file)return {ok:false,cancelled:true};payload.file=await upload(file,owner);}
   if(!prior&&action==='write'&&input.use_template){const [file]=await chooseFile('.xlsx,.xlsm,.xlsb,.xls');if(!file)return {ok:false,cancelled:true};payload.template=await upload(file,owner);}
   const operation_id=prior?.operation_id||crypto.randomUUID();if(action!=='read'&&!prior)await vault.put(owner,intentKey,{operation_id,input:payload});
@@ -244,11 +287,33 @@ async function documentFile(contract:string,id?:string,expected?:string){
   const owner=authority(expected);
   if(id){const response=await api('GET','document-read',undefined,{document_id:id});if(!response.ok)return response;return download(new Response(Uint8Array.from(atob(response.data.content_base64),c=>c.charCodeAt(0))),response.data.filename,owner);}
   const [selected]=await chooseFile('image/*,.pdf,.docx');if(!selected)return {ok:false,cancelled:true};
+  return queueFile(contract,selected,owner);
+}
+async function bytesSha256(bytes:Uint8Array<ArrayBuffer>){
+  return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(v=>v.toString(16).padStart(2,'0')).join('');
+}
+async function queueFile(contract:string,selected:File,owner:string,photoOnly=false,document_id:string=crypto.randomUUID()){
   const file=await phoneDocument(selected);
+  if(photoOnly&&!['image/jpeg','image/png'].includes(file.type))throw Error('Выберите фотографию.');
   const bytes=new Uint8Array(await file.arrayBuffer());let binary='';for(let i=0;i<bytes.length;i+=8192)binary+=String.fromCharCode(...bytes.subarray(i,i+8192));
-  const document_id=crypto.randomUUID(),checksum=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(v=>v.toString(16).padStart(2,'0')).join('');
-  await enqueue('document',{operation_id:document_id,kind:'attachment',document_id,contract_uuid:contract,filename:file.name,media_type:file.type||'application/octet-stream',content_base64:btoa(binary)},owner);
+  const checksum=await bytesSha256(bytes);
+  await enqueue('document',{operation_id:document_id,kind:'attachment',document_id,contract_uuid:contract,filename:file.name,media_type:file.type||'application/octet-stream',content_base64:btoa(binary)},owner,checksum);
   return {ok:true,status:202,data:{document_id,sha256:checksum,filename:file.name}};
+}
+async function prepareVisitPhoto(form:string,id:string,allowed:string[],expected:string){
+  const owner=authority(expected);
+  const run=async()=>{
+    authority(owner);
+    const queued=(await vault.get(owner,'queue') as Entry[]|null)?.find(e=>e.action==='document'&&e.body.document_id===id);
+    const check=(contract:string)=>{if(!allowed.includes(contract))throw Error('Для договора с сохранённым фото изменились права.');};
+    if(queued){check(queued.body.contract_uuid);return {document_id:id,contract:queued.body.contract_uuid,filename:queued.body.filename};}
+    const raw=await vault.stagedPhoto(owner,form,id);
+    if(!raw)throw Error('Исходное фото отсутствует на телефоне.');
+    check(raw.contract);
+    const result=await queueFile(raw.contract,raw.file,owner,true,id);
+    return {document_id:id,contract:raw.contract,filename:result.data.filename};
+  };
+  return navigator.locks?navigator.locks.request('crm-mobile-photo:'+id,run):run();
 }
 async function admin(action:string,args:any[],expected:string){
   authority(expected);
@@ -265,13 +330,24 @@ async function admin(action:string,args:any[],expected:string){
   const response=await request('admin',{action,args});return response.ok?response.data:{ok:false,error:response.text,text:response.text};
 }
 export const bridge:any={
+  renderFieldWorkspace:(host:HTMLElement,openPerson:(person:string)=>Promise<void>,valid:()=>boolean)=>{
+    if(current?.owner&&current.context?.role==='employee'&&current.context.capabilities.includes('visit')){
+      return mountFieldWorkspace(host,bridge,current.owner,current.context.employee_uuid,openPerson,valid);
+    }
+    return ()=>{};
+  },
+  renderFieldOffline:(host:HTMLElement)=>{
+    if(current?.owner&&current.context?.role==='employee'&&current.context.capabilities.includes('visit')){
+      mountFieldOffline(host,bridge,current.owner,current.context.employee_uuid);
+    }
+  },
   platform:'mobile',ready:initialize,
   navigated:(route:any)=>{if(navigating||!current?.owner)return;const next={...route,owner:current.owner};if(canonical(history.state?.crmMobile)===canonical(next))return;const method=history.state?.crmMobile?.owner===current.owner?'pushState':'replaceState';history[method]({crmMobile:next},'',location.pathname+'#'+route.section+(route.person?'/'+route.person:''));},
   onNavigate:(handler:any)=>{routeHandler=handler;},
   initialSection:()=>{const target=navigationTarget;navigationTarget='';initialPerson='';const route=history.state?.crmMobile;if(!target&&route&&current?.owner&&route.owner===current.owner){navigating=true;initialPerson=route.person||'';return route.section;}return target;},
   initialPerson:()=>{navigating=false;const person=initialPerson;initialPerson='';return person;},
-  state:async()=>({owner:current?.owner||'',context:current?.context||null,version:'3.3.0-mobile.1',product:'Взыскание',offline:offline||!navigator.onLine,
-    connection:{mode:current?.synthetic?'synthetic':current?'mobile':'unconfigured',role:current?.context?.role||'employee',server:location.origin,shared:!current?.synthetic},existingLogins:[],activity:activity.state()}),
+  state:async()=>{expireSession();return {owner:current?.owner||'',context:current?.context||null,version:'3.3.0-mobile.1',product:'Взыскание',offline:offline||!navigator.onLine,
+    connection:{mode:current?.synthetic?'synthetic':current?'mobile':'unconfigured',role:current?.context?.role||'employee',server:location.origin,shared:!current?.synthetic},existingLogins:[],activity:activity.state()};},
   api,command,registryEdit:(body:any,owner?:string)=>enqueue('registry-edit',body,owner),queue,
   draft:async(name:string,value?:any,expected?:string)=>{if(!current?.owner&&value===undefined)return {ok:true,data:null};const owner=authority(expected);return {ok:true,data:value===undefined?await vault.get(owner,'draft:'+name):await vault.put(owner,'draft:'+name,value)};},
   onChange:(fn:(event:any)=>void)=>{listeners.add(fn);return()=>listeners.delete(fn);},
@@ -284,7 +360,16 @@ export const bridge:any={
     if(input.action==='login'||input.action==='logout')legacyTried=true;
     const response=await request(input.action==='logout'?'logout':input.action==='password'?'password':'login',{...input,device_id,device_label:navigator.userAgent.slice(0,120)});
     if(response.ok){await initialize();navigationTarget=current?.context?.role==='analyst'?'registry':current?'portfolio':'connection';emit({type:'identity',owner:current?.owner},true);background(flush());}return response;
-  },workbook,document:documentFile,admin,win:()=>{},
+  },workbook,document:documentFile,visitPhoto:(contract:string,file:File,expected:string)=>queueFile(contract,file,authority(expected),true),admin,win:()=>{},
+  visitPhotoQueue:(form:string,expected:string)=>({
+    stage:(contract:string,files:File[])=>{
+      if(files.some(file=>!file.size||file.size>25*1024*1024))throw Error('Размер каждого фото должен быть от 1 байта до 25 МБ.');
+      return vault.stagePhotoFiles(authority(expected),form,contract,files);
+    },
+    staged:()=>vault.stagedPhotoIds(authority(expected),form),
+    prepare:(id:string,allowed:string[])=>prepareVisitPhoto(form,id,allowed,expected),
+    release:(id:string)=>vault.releasePhoto(authority(expected),form,id),
+  }),
   diagnostics:async()=>({ok:true,data:{checks:[{title:'Хранилище телефона',code:'storage_ready',ok:!!await vault.get(deviceScope,'installation')},{title:'Связь',code:navigator.onLine?'network_ready':'offline',ok:navigator.onLine}]}}),
   renderConnection:async(host:HTMLElement)=>mountConnection(host,bridge,async()=>{
     const before=current?.owner;

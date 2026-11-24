@@ -42,10 +42,10 @@ export async function mountAnalyst(host:HTMLElement,group:string,crm:any,valid:(
     if(dialog?.querySelector('[data-saving="1"]'))return;
     dialog?.close();dialog?.remove();panel=null;
   };
-  const navigate=async(id:string)=>{
+  const navigate=async(id:string,params:Record<string,unknown>)=>{
     const target=routes[id];if(!target)throw Error('Раздел недоступен в рабочем месте Аналитика.');
     await crm.draft('analyst-tab-'+target[0],target[1],options.owner);
-    if(target[0]===group)await show(target[1]);else await options.navigate(target[0]);
+    if(target[0]===group)await show(target[1],params);else await options.navigate(target[0]);
   };
   const restoreShell=setEmbeddedShell({go:navigate,refresh:()=>show(current),currentId:()=>legacy[current]?.id||current,
     setHead:(_title,_kicker,tools)=>{const target=host.querySelector('#head-tools');if(target)target.innerHTML=tools;},
@@ -60,7 +60,7 @@ export async function mountAnalyst(host:HTMLElement,group:string,crm:any,valid:(
   useAnalystCardTransport();
   if(!document.getElementById('toast')){const toast=document.createElement('div');toast.id='toast';toast.role='status';document.body.append(toast);}
   host.innerHTML=`<div class="tabs analyst-tabs">${groups[group].map(([id,title])=>`<button data-analyst-tab="${id}">${title}</button>`).join('')}</div><div><div id="head-tools" class="toolbar analyst-tools"></div><div id="analyst-workspace"></div></div>`;
-  async function show(id:string){
+  async function show(id:string,params:Record<string,unknown>={}){
     if(!live())return;closePanel();leave?.();leave=undefined;
     const turn=++sequence;current=groups[group].some(([key])=>key===id)?id:groups[group][0][0];
     host.querySelector('#head-tools')!.replaceChildren();
@@ -75,7 +75,7 @@ export async function mountAnalyst(host:HTMLElement,group:string,crm:any,valid:(
       if(current==='files'||current==='columns'||current==='enrich'||current==='export'||current==='recalled')
         cleanup=await mountRegistryTools(page,current==='files'?'import':current);
       else if(options.core[current])cleanup=await options.core[current](page,currentView);
-      else await legacy[current].render(page,{});
+      else await legacy[current].render(page,params);
       if(currentView())leave=typeof cleanup==='function'?cleanup:undefined;else cleanup?.();
     }catch(e){if(currentView())page.innerHTML=`<p class="notice err" role="alert">${esc((e as Error).message)}</p>`;}
   }

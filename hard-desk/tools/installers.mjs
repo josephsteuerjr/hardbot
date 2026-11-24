@@ -1,7 +1,7 @@
 // Four local builds. This script never uploads or installs an application.
 import { build, Platform, Arch } from 'electron-builder';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync,realpathSync,lstatSync,rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync,realpathSync,lstatSync,rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import yaml from 'js-yaml';
 import { dirname, join } from 'node:path';
@@ -29,7 +29,9 @@ for (const id of (selected.length ? selected : stableProducts)) {
       files: ['out/**/*', 'package.json'], asar: true, compression: 'normal',
       electronVersion: JSON.parse(readFileSync(join(here, 'package.json'))).devDependencies.electron,
       electronDist: localElectron || undefined,
-      extraResources: [{from:'installer/bin/process-check.exe',to:'process-check.exe'},...(includesBackend(id) ? [{ from: 'backend-dist/hard-backend', to: 'backend' }] : [])],
+      extraResources: [{from:'installer/bin/process-check.exe',to:'process-check.exe'},
+        ...(usesCrm(id) ? [{from:'installer/setup-exit-v1',to:'setup-exit-v1'}] : []),
+        ...(includesBackend(id) ? [{ from: 'backend-dist/hard-backend', to: 'backend' }] : [])],
       win: { icon: 'icons/icon.ico', executableName: `hard-${id}`, target: ['nsis'], signExecutable: false },
       nsis: { oneClick: false, perMachine: false, allowElevation: false, allowToChangeInstallationDirectory: false,
         installerLanguages: ['ru_RU'], language: '1049', createDesktopShortcut: 'always', createStartMenuShortcut: true,
@@ -50,7 +52,7 @@ for (const id of (selected.length ? selected : stableProducts)) {
   // embedded and runs silently. Updater /S arguments pass through unchanged.
   const version=JSON.parse(readFileSync(join(here,'package.json'))).version;
   const name=`${id}-${version}-setup.exe`,innerRelative=`setup-build/${qa?'qa-':''}${id}`,inner=join(here,innerRelative);
-  mkdirSync(inner,{recursive:true});copyFileSync(join(output,name),join(inner,'application-installer.exe'));
+  mkdirSync(inner,{recursive:true});renameSync(join(output,name),join(inner,'application-installer.exe'));
   if(usesCrm(id)){
     // The completed inner archive has been audited and copied. Bound disk use
     // before assembling the outer wizard; the final EXE is audited afterwards.
@@ -68,9 +70,10 @@ for (const id of (selected.length ? selected : stableProducts)) {
       electronVersion:JSON.parse(readFileSync(join(here,'package.json'))).devDependencies.electron,
       electronDist:localElectron || undefined,
       extraResources:[{from:`${innerRelative}/application-installer.exe`,to:'application-installer.exe'},{from:`${innerRelative}/setup-payload.json`,to:'setup-payload.json'},{from:'installer/bin/process-check.exe',to:'process-check.exe'}],
-      win:{icon:'icons/icon.ico',executableName:`hard-setup-${id}`,signExecutable:false,target:['portable']},portable:{requestExecutionLevel:'user'},publish:null},publish:'never'});
+      win:{icon:'icons/icon.ico',executableName:`hard-setup-${id}`,signExecutable:false,target:['portable']},
+      portable:{requestExecutionLevel:'user',unpackDirName:true},publish:null},publish:'never'});
   auditRuntimeDependencies(join(inner,'outer/win-unpacked/resources/app.asar'));
-  copyFileSync(join(inner,'outer',name),join(output,name));
+  renameSync(join(inner,'outer',name),join(output,name));
   for(const file of metadata.files){file.size=statSync(join(output,name)).size;file.sha512=createHash('sha512').update(readFileSync(join(output,name))).digest('base64');}
   metadata.sha512=metadata.files[0].sha512;writeFileSync(channel,yaml.dump(metadata));
   console.log('Custom local installer ready:', id);

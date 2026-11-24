@@ -149,11 +149,15 @@ def install(app, host=None, *, authenticate=None):
                     result = await asyncio.to_thread(assignments.statistics,p,**dict(request.query))
                 elif action == 'manager-report':
                     result = await asyncio.to_thread(manager_reports.read,p,**dict(request.query))
+                elif action == 'manager-report-download':
+                    from . import report_presets
+                    result = await asyncio.to_thread(report_presets.download,p,**dict(request.query))
                 elif action == 'changes':
                     result = await asyncio.to_thread(assignments.changes,p,**dict(request.query))
-                elif action in {'logistics', 'logistics-export'}:
-                    result = await asyncio.to_thread(logistics.read if action == 'logistics' else logistics.export,
-                                                     p, **dict(request.query))
+                elif action in {'logistics', 'logistics-export', 'logistics-export-download'}:
+                    handlers = {'logistics': logistics.read, 'logistics-export': logistics.export,
+                                'logistics-export-download': logistics.download}
+                    result = await asyncio.to_thread(handlers[action], p, **dict(request.query))
                 elif action == 'active-time':
                     result = await asyncio.to_thread(active_time.summary, p, **dict(request.query))
                 elif action == "portfolio":
@@ -164,8 +168,7 @@ def install(app, host=None, *, authenticate=None):
                         int(request.query.get("limit", "200")),
                     )
                 elif action == 'work-portfolio':
-                    result=await asyncio.to_thread(work_portfolio.read,p,request.query.get('search',''),
-                        request.query.get('work','all'),request.query.get('employee_uuid'),request.query.get('offset','0'),request.query.get('limit','100'))
+                    result=await asyncio.to_thread(work_portfolio.read_query,p,request.query)
                 elif action == 'tasks':
                     result=await asyncio.to_thread(tasks.overview,p,status=request.query.get('status','open'),
                         employee=request.query.get('employee_uuid'),work=request.query.get('work','all'),
@@ -189,6 +192,8 @@ def install(app, host=None, *, authenticate=None):
                     result=await asyncio.to_thread(three_hour.report,p)
                 elif action == "script":
                     result = await asyncio.to_thread(scripts.state, p)
+                elif action == "document-read":
+                    result = await asyncio.to_thread(documents.download_json, p, request.query.get("document_id", ""))
                 elif action == "document":
                     row, path = await asyncio.to_thread(
                         documents.download, p, request.query.get("document_id", "")
@@ -257,6 +262,9 @@ def install(app, host=None, *, authenticate=None):
                         store.anchor, p, raw["installation_id"]
                     )
                 elif action == "document":
+                    if raw.get('kind') == 'attachment' and raw.get('operation_id') == raw.get('document_id'):
+                        raw.pop('kind')
+                        raw.pop('operation_id', None)
                     if set(raw) != {
                         "document_id",
                         "contract_uuid",

@@ -606,27 +606,50 @@ def history(principal, *, offset=0, limit=50):
 
 
 def report_authorize(conn,principal):
-    if principal.role!='analyst':return authorize(conn,principal)
+    if principal.role not in {'manager','owner','analyst'}:
+        raise CRMError('Сводка доступна руководителю или аналитику.','forbidden',403)
+    if principal.owner:return principal
     access.require(principal,'analytics')
     current=access.refresh_write(conn,principal)
-    member=conn.execute('SELECT role FROM crm_memberships WHERE employee_uuid=? AND team_id=? AND starts_at<=? AND (ends_at IS NULL OR ends_at>?)',
-                        (principal.employee_uuid,principal.team_id,now(),now())).fetchone()
-    # Existing pilot identities may retain their manager membership. The
-    # authenticated Analyst entry is already reduced by shared_auth.principal.
-    if not member or member['role'] not in {'analyst','manager'}:raise CRMError('Полномочия Аналитика изменились.','forbidden',403)
+    at=now()
+    member=conn.execute('SELECT role FROM crm_memberships WHERE employee_uuid=? AND team_id=? AND starts_at<=? '
+                        'AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at DESC LIMIT 1',
+                        (principal.employee_uuid,principal.team_id,at,at)).fetchone()
+    # Some Analyst logins use a manager membership with reduced capabilities.
+    allowed={'manager','analyst'} if principal.role=='analyst' else {'manager'}
+    if not member or member['role'] not in allowed:
+        raise CRMError('Полномочия для отчёта изменились.','forbidden',403)
     access.require(current,'analytics')
+    if current.role=='manager' and not report_distribution_scope(conn,current):
+        from dataclasses import replace
+        current=replace(current,employee_scope=frozenset(team_results_roster(conn,current)))
     return current
 
 
+def report_distribution_scope(conn, principal):
+    return principal.role in {'manager','owner'} and (principal.owner or 'assign' in principal.capabilities) and bool(
+        conn.execute('SELECT 1 FROM crm_distribution_managers WHERE employee_uuid=? LIMIT 1',
+                     (principal.employee_uuid,)).fetchone())
+
+
 def report_scope(conn,principal):
-    if principal.role!='analyst':return scope_sql(principal)
-    if access.reads_all(principal):return '1=1',[]
-    ids=sorted(access.readable_contracts(conn,principal))
-    return ('c.contract_uuid IN ('+','.join('?' for _ in ids)+')',ids) if ids else ('1=0',[])
+    if report_distribution_scope(conn,principal):return scope_sql(principal)
+    if principal.owner or principal.role=='analyst' and access.reads_all(principal):
+        return '1=1',[]
+    if principal.role=='analyst':
+        ids=sorted(access.readable_contracts(conn,principal))
+        return ('c.contract_uuid IN ('+','.join('?' for _ in ids)+')',ids) if ids else ('1=0',[])
+    scope=sorted(principal.employee_scope)
+    if not scope:return '1=0',[]
+    at=now()
+    return ("c.contract_uuid IN (SELECT scoped.contract_uuid FROM crm_effective_assignments scoped "
+            "WHERE scoped.capability IN ('call','visit') AND scoped.starts_at<=? "
+            "AND (scoped.ends_at IS NULL OR scoped.ends_at>?) "
+            "AND scoped.employee_uuid IN ("+','.join('?' for _ in scope)+'))',[at,at,*scope])
 
 
 def report_targets(conn,principal):
-    if principal.role!='analyst':return targets(conn,principal)
+    if report_distribution_scope(conn,principal):return targets(conn,principal)
     at=now();result={}
     for row in conn.execute('SELECT e.employee_uuid,e.name,m.role,m.capabilities_json FROM crm_employees e JOIN crm_memberships m USING(employee_uuid) WHERE e.active=1 AND m.starts_at<=? AND (m.ends_at IS NULL OR m.ends_at>?)',(at,at)):
         if row['employee_uuid'] not in principal.employee_scope and not principal.owner:continue
@@ -637,9 +660,17 @@ def report_targets(conn,principal):
     return list(result.values())
 
 
-def statistics(principal, *, month=None,employee_uuid=None,kind=None,offset=0):
+def statistics(principal, *, month=None,period=None,employee_uuid=None,kind=None,offset=0,country='',office='',
+               date_from=None,date_to=None,download=None,employee_search=''):
     from datetime import date
     from zoneinfo import ZoneInfo
+    if period is not None:
+        if month is not None:
+            raise CRMError('Выберите один период отчёта.')
+        return statistics_period(principal, period, employee_uuid, kind, offset, country, office,
+                                 date_from, date_to, download, employee_search)
+    if country or office or date_from is not None or date_to is not None or download or employee_search:
+        raise CRMError('Выберите период результатов команды.')
     if month is None:month=instant(now()).astimezone(ZoneInfo(principal.timezone)).strftime('%Y-%m')
     try:
         first=date.fromisoformat(month+'-01')
@@ -650,18 +681,21 @@ def statistics(principal, *, month=None,employee_uuid=None,kind=None,offset=0):
     with snapshot() as (conn,mark):
         principal=report_authorize(conn,principal)
         clause,args=report_scope(conn,principal)
-        rows=conn.execute('SELECT c.*,p.name AS client FROM crm_contracts c JOIN crm_people p USING(person_uuid) WHERE '+clause,args).fetchall()
+        rows=conn.execute('SELECT c.contract_uuid,c.person_uuid,c.fields_json,c.currency '
+                          'FROM crm_contracts c WHERE '+clause,args).fetchall()
         ids=[r['contract_uuid'] for r in rows]
         unassigned=set();ambiguous=set();free_slots=0;people=set();debt=defaultdict(Decimal);unknown_debt=0
         at=now()
-        for slot in conn.execute('SELECT mc.contract_uuid,mc.capability,h.contract_uuid AS head_id,h.employee_uuid,'
+        managed=report_distribution_scope(conn,principal)
+        slots=conn.execute('SELECT mc.contract_uuid,mc.capability,h.contract_uuid AS head_id,h.employee_uuid,'
                 'COUNT(DISTINCT a.employee_uuid) AS candidates FROM crm_managed_contracts mc '
                 'JOIN crm_distribution_managers dm ON dm.team_id=mc.team_id AND dm.capability=mc.capability '
                 'LEFT JOIN crm_assignment_heads h ON h.contract_uuid=mc.contract_uuid AND h.capability=mc.capability '
                 'LEFT JOIN crm_assignments a ON a.contract_uuid=mc.contract_uuid AND a.capability=mc.capability '
                 'AND h.contract_uuid IS NULL AND a.starts_at<=? AND (a.ends_at IS NULL OR a.ends_at>?) '
                 'WHERE dm.employee_uuid=? GROUP BY mc.contract_uuid,mc.capability,h.contract_uuid,h.employee_uuid',
-                (at,at,principal.employee_uuid)):
+                (at,at,principal.employee_uuid)) if managed else ()
+        for slot in slots:
             if not slot['head_id'] and slot['candidates']>1:ambiguous.add(slot['contract_uuid'])
             elif (slot['head_id'] and slot['employee_uuid'] is None) or (not slot['head_id'] and slot['candidates']==0):
                 unassigned.add(slot['contract_uuid']);free_slots+=1
@@ -681,7 +715,7 @@ def statistics(principal, *, month=None,employee_uuid=None,kind=None,offset=0):
                 if not r['currency'] or not value.is_finite():raise InvalidOperation()
                 payments[r['currency']]+=value;known+=1;sources.add(r['observed_at'])
             except (InvalidOperation,TypeError,ValueError):unknown_payment+=1
-        if principal.role=='analyst':
+        if not managed:
             visible=set(ids);counts=defaultdict(set)
             for slot in conn.execute("SELECT contract_uuid,capability,employee_uuid FROM crm_effective_assignments WHERE capability IN ('call','visit') AND starts_at<=? AND (ends_at IS NULL OR ends_at>?)",(at,at)):
                 if slot['contract_uuid'] in visible:counts[(slot['contract_uuid'],slot['capability'])].add(slot['employee_uuid'])
@@ -724,25 +758,150 @@ def statistics(principal, *, month=None,employee_uuid=None,kind=None,offset=0):
             overlapping_staff_totals=True)
 
 
+def fact_day(row, zone):
+    if row['time_quality']=='legacy_day':
+        return json.loads(row['payload_json']).get('legacy_workday','')
+    if row['time_quality']=='legacy_unknown':
+        return ''
+    return instant(row['occurred_at']).astimezone(zone).date().isoformat()
+
+
+def team_results_roster(conn, principal):
+    from . import team_territories
+    if principal.role not in {'manager','owner'}:
+        raise CRMError('Результаты команды доступны руководителю.','forbidden',403)
+    principal=access.refresh_write(conn,principal)
+    access.require(principal,'analytics')
+    at=now()
+    rows = [row for row in conn.execute(
+        'SELECT DISTINCT e.employee_uuid,e.name,e.staff_id FROM crm_employees e JOIN crm_memberships m USING(employee_uuid) '
+        'WHERE e.active=1 AND m.starts_at<=? AND (m.ends_at IS NULL OR m.ends_at>?) ORDER BY e.name,e.employee_uuid',
+        (at,at)) if principal.owner or row['employee_uuid'] in principal.employee_scope]
+    shared = conn.execute("SELECT 1 FROM crm_meta WHERE key='deployment_namespace' AND value='crm-shared-pilot-v1'").fetchone()
+    return team_territories.staff(principal, rows, shared=bool(shared))
+
+
+def statistics_period(principal, period, employee_uuid, kind, offset, country='', office='',
+                      date_from=None,date_to=None,download=None,employee_search=''):
+    from datetime import date, datetime, time, timezone
+    from zoneinfo import ZoneInfo
+
+    zone=ZoneInfo(principal.timezone)
+    if download not in (None,'visits','daily') or (download and (employee_uuid is not None or kind is not None)):
+        raise CRMError('Неизвестная выгрузка результатов команды.')
+    if not isinstance(employee_search,str) or len(employee_search)>150 or (employee_search and not download):
+        raise CRMError('Некорректный поиск сотрудника.')
+    employee_search=employee_search.strip().casefold()
+    today=instant(now()).astimezone(zone).date()
+    end=today+timedelta(days=1)
+    if period!='custom' and (date_from is not None or date_to is not None):
+        raise CRMError('Выберите один период отчёта.')
+    if period=='today':
+        start=today
+    elif period=='yesterday':
+        start=today-timedelta(days=1)
+        end=today
+    elif period=='week':
+        start=today-timedelta(days=6)
+    elif period=='month':
+        start=today.replace(day=1)
+    elif period=='custom':
+        try:
+            start, last = date.fromisoformat(date_from), date.fromisoformat(date_to)
+        except (ValueError, TypeError):
+            raise CRMError('Укажите начало и конец периода.') from None
+        if not start <= last <= today or (last-start).days >= 31:
+            raise CRMError('Выберите до 31 дня включительно, без будущих дат.')
+        end=last+timedelta(days=1)
+    else:
+        raise CRMError('Неизвестный период отчёта.')
+    since,until=start.isoformat(),end.isoformat()
+    lower=datetime.combine(start,time.min,zone).astimezone(timezone.utc).isoformat()
+    upper=datetime.combine(end,time.min,zone).astimezone(timezone.utc).isoformat()
+    workdays=sum((start+timedelta(days=offset)).weekday()<5 for offset in range((end-start).days))
+    with snapshot() as (conn,mark):
+        roster = team_results_roster(conn,principal)
+        territories = defaultdict(set)
+        groups = {}
+        authors = {}
+        for uid, person in roster.items():
+            region = person['country'] or '!none'
+            cities = person['offices'] or ['!none']
+            territories[region].update(cities)
+            if (country and region != country) or (office and office not in cities):
+                continue
+            if employee_search and employee_search not in person['name'].casefold():
+                continue
+            group = person.get('group',uid)
+            authors[uid] = group
+            if group not in groups:
+                norm=person.get('visit_norm')
+                groups[group] = dict(employee_uuid=uid,name=person['name'],country=region,offices=cities,
+                                     call=0,visit=0,by_day={},outcomes={},visit_norm=norm,
+                                     personal_norm=person.get('personal_norm'),visit_plan=norm*workdays if norm else None)
+        if employee_uuid is not None:
+            if employee_uuid not in authors:
+                raise CRMError('Сотрудник недоступен.','forbidden',403)
+            related = [uid for uid, group in authors.items() if group == authors[employee_uuid]]
+            return team_detail(conn,principal,related,groups[authors[employee_uuid]]['name'],kind,since,until,offset)
+        visits=[]
+        if authors:
+            employees=','.join('?' for _ in authors)
+            events=conn.execute(
+                "SELECT event_id,employee_uuid,kind,time_quality,occurred_at,received_at,origin,payload_json FROM crm_events "
+                "WHERE employee_uuid IN ("+employees+") AND kind IN ('call','visit') "
+                "AND (time_quality='legacy_day' OR (time_quality<>'legacy_unknown' AND occurred_at>=? AND occurred_at<?))",
+                (*authors,lower,upper))
+            for row in events:
+                try:day=fact_day(row,zone)
+                except (CRMError,ValueError,TypeError):continue
+                if since<=day<until:
+                    summary = groups[authors[row['employee_uuid']]]
+                    summary[row['kind']] += 1
+                    if row['kind']=='visit':
+                        daily = summary['by_day']
+                        daily[day] = daily.get(day,0)+1
+                        values = json.loads(row['payload_json']).get('values') or {}
+                        outcome = str(values.get('call_status') or '').strip() or 'Без результата'
+                        counts = summary['outcomes']
+                        counts[outcome] = counts.get(outcome,0)+1
+                        if download:
+                            visits.append((row,day,summary))
+        report=dict(as_of=now(),watermark=mark,since=since,through=(end-timedelta(days=1)).isoformat(),
+                    timezone=principal.timezone,workdays=workdays,territories={key:sorted(value) for key,value in territories.items()},
+                    staff=list(groups.values()))
+        if download:
+            from . import team_visits_export
+            principal = access.refresh_write(conn,principal)
+            return team_visits_export.workbook(report,team_visits_export.details(conn,principal,visits,zone),
+                                              daily=download=='daily')
+        return report
+
+
 def statistics_detail(principal,employee_uuid,kind,since,until,offset):
+    with snapshot() as (conn,mark):
+        principal=report_authorize(conn,principal)
+        name=next((r['name'] for r in report_targets(conn,principal) if r['employee_uuid']==employee_uuid),None)
+        if name is None:raise CRMError('Сотрудник недоступен.','forbidden',403)
+        return team_detail(conn,principal,[employee_uuid],name,kind,since,until,offset)
+
+
+def team_detail(conn,principal,authors,name,kind,since,until,offset):
     from zoneinfo import ZoneInfo
     try:offset=int(offset)
     except (TypeError,ValueError):raise CRMError('Некорректная страница.')
     if kind not in WORK or not 0<=offset<=1000000:raise CRMError('Некорректный отбор фактов.')
-    with snapshot() as (conn,mark):
-        principal=report_authorize(conn,principal)
-        person=next((r for r in report_targets(conn,principal) if r['employee_uuid']==employee_uuid),None)
-        if not person:raise CRMError('Сотрудник недоступен.','forbidden',403)
-        zone=ZoneInfo(principal.timezone);events=[]
-        for r in conn.execute('SELECT event_id,occurred_at,time_quality,payload_json FROM crm_events WHERE employee_uuid=? AND kind=? ORDER BY sequence DESC',(employee_uuid,kind)):
-            try:
-                day=json.loads(r['payload_json']).get('legacy_workday','') if r['time_quality']=='legacy_day' else '' if r['time_quality']=='legacy_unknown' else instant(r['occurred_at']).astimezone(zone).date().isoformat()
-            except (CRMError,ValueError,TypeError):continue
-            if since<=day<until:events.append(dict(r,day=day))
-        visible=access.readable_contracts(conn,principal) if not access.reads_all(principal) else None
-        rows=[]
-        for event in events[offset:offset+50]:
-            links=conn.execute('SELECT c.contract_uuid,c.person_uuid,c.external_id,p.name FROM crm_event_contracts ec JOIN crm_contracts c USING(contract_uuid) JOIN crm_people p USING(person_uuid) WHERE ec.event_id=?',(event['event_id'],)).fetchall()
-            rows.append(dict(day=event['day'],at=event['occurred_at'],time_quality=event['time_quality'],
-                contracts=[dict(r) if visible is None or r['contract_uuid'] in visible else dict(name='Договор вне текущей области') for r in links]))
-        return dict(employee=person['name'],kind=kind,rows=rows,total=len(events),offset=offset,has_more=offset+len(rows)<len(events))
+    zone=ZoneInfo(principal.timezone);events=[]
+    placeholders=','.join('?' for _ in authors)
+    for r in conn.execute('SELECT event_id,occurred_at,time_quality,payload_json FROM crm_events WHERE employee_uuid IN ('+placeholders+') AND kind=? ORDER BY sequence DESC',(*authors,kind)):
+        try:
+            day=fact_day(r,zone)
+        except (CRMError,ValueError,TypeError):continue
+        if since<=day<until:events.append(dict(r,day=day))
+    visible=access.readable_contracts(conn,principal) if not access.reads_all(principal) else None
+    rows=[]
+    for event in events[offset:offset+50]:
+        links=conn.execute('SELECT c.contract_uuid,c.person_uuid,c.external_id,p.name FROM crm_event_contracts ec JOIN crm_contracts c USING(contract_uuid) JOIN crm_people p USING(person_uuid) WHERE ec.event_id=?',(event['event_id'],)).fetchall()
+        rows.append(dict(event_id=event['event_id'],day=event['day'],at=event['occurred_at'],time_quality=event['time_quality'],
+            contracts=[dict(r) if visible is None or r['contract_uuid'] in visible else dict(name='Договор вне текущей области') for r in links]))
+    return dict(employee=name,kind=kind,rows=rows,total=len(events),offset=offset,has_more=offset+len(rows)<len(events))

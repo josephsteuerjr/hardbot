@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, net, protocol, powerMonitor, Menu, Tray } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, statfsSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, statfsSync, statSync, unlinkSync } from "node:fs";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
@@ -22,7 +22,7 @@ import {showStartupRecovery} from './crm-startup-recovery';
 import {applyCrmWindowFrame} from './crm-window-frame';
 import {CrmLive} from './crm-live';
 import {FIXED_PRODUCT,PRODUCTS,STABLE_CRM} from './product';
-import {accountAction,accountState} from './crm-account';
+import {accountAction,accountState,adoptSoftAccount,markAccountLoginRequired,savedAccountFingerprint} from './crm-account';
 import {checkUpdates,installUpdate,startUpdates,updateState} from './updates';
 
 const isolatedProfile = !!process.env.HARD_USER_DATA;
@@ -117,6 +117,13 @@ function forgetAuthority(message: string) {
   // Owner-scoped pending operations remain protected in their original files.
   writeSettings({crmLast: undefined});
   notifyChanged('identity');
+}
+
+function requireFreshAccountLogin(fingerprint:string|undefined,status:number) {
+  if (![401,403,410].includes(status) || !markAccountLoginRequired(fingerprint))return false;
+  writeSettings({crmConnection:undefined,crmLast:undefined,crmExplicitEntry:true});
+  forgetAuthority('Сохранённый сеанс завершён. Войдите в CRM с текущим паролем.');
+  return true;
 }
 
 async function backendStart() {
@@ -297,7 +304,7 @@ const actions = new Set([
   'managed-portfolio','assignment-staff','assignment-preview','assignment-commit',
   'assignment-receipt','assignment-history','manager-statistics','changes',
   'assignment-job','assignment-job-step','assignment-job-cancel',
-  'logistics','logistics-export','logistics-preview','logistics-apply','logistics-update','logistics-call',
+  'logistics','logistics-export','logistics-export-download','logistics-preview','logistics-apply','logistics-update','logistics-call',
   'manager-access',
   'active-time',
   "shifts",
@@ -305,6 +312,7 @@ const actions = new Set([
   'cabinet',
   'three-hour',
   'manager-report',
+  'manager-report-download',
   'analyst-report','analyst-statistics',
   "script",
   "anchor",
@@ -349,6 +357,8 @@ const transport: queue.Transport = async (method, action, body, query) => {
   }
   if (demo()) return local(action, body, query, method);
   const base = origin();
+  const source = shared() ? entrySource() : undefined;
+  const fingerprint = source === 'crm' ? savedAccountFingerprint() : undefined;
   try {
     const previous = readSettings().crmLast as any;
     const expected = currentContext?.employee_uuid || (previous?.origin === base ? previous.context?.employee_uuid : undefined);
@@ -363,26 +373,31 @@ const transport: queue.Transport = async (method, action, body, query) => {
         "Content-Type": "application/json", "X-Client-Version": app.getVersion(), "X-Work-Product": "hard",
       },
       body: method === "POST" ? JSON.stringify(body || {}) : undefined,
-    }, action==='changes'?4000:["export", "import-preview", "import-apply"].includes(action) ? 120000 : 30000);
+    }, action==='changes'?12000:["export", "import-preview", "import-apply", "manager-report", "manager-statistics", "manager-report-download", "analyst-report", "analyst-statistics", "three-hour"].includes(action) ? 120000 : 30000);
     let response = await request(token), value = await response.json();
-    if (shared() && response.status === 401 && value.error === "pilot_session_expired") {
-      token = await pilotCredential(expected, true, entrySource());
+    if (source && response.status === 401 && ["pilot_session_expired","pilot_session_invalid"].includes(value.error)) {
+      token = await pilotCredential(expected, true, source);
       response = await request(token); value = await response.json();
     }
-    if (shared() && (response.status === 401 || (response.status === 403 &&
-        ["manager_required", "identity_unmapped", "pilot_session_invalid"].includes(value.error))))
-      forgetAuthority(value.text || "Сервер отозвал доступ к CRM.");
+    if (source && (response.status === 401 || (response.status === 403 &&
+        ["manager_required", "identity_unmapped", "pilot_session_invalid"].includes(value.error)))) {
+      if (!requireFreshAccountLogin(fingerprint,response.status) && shared())
+        forgetAuthority(value.text || "Сервер отозвал доступ к CRM.");
+    }
     return {ok: response.ok, status: response.status, data: value, text: value.text || value.error};
   } catch (error) {
     const status = Number((error as any)?.status || 0);
-    if (shared() && (status === 401 || status === 403)) forgetAuthority(String((error as Error).message));
+    if (source && [401,403,410].includes(status)) {
+      if(!requireFreshAccountLogin(fingerprint,status) && shared())
+        forgetAuthority(String((error as Error).message));
+    }
     return {ok: false, status, kind: status ? "auth" : "offline", text: status ? String((error as Error).message) : "Нет подтверждённой связи с сервером CRM. Проверьте сохранённый вход и подключение к сети."};
   }
 };
 
 async function managerAccess(method:string,body:any,query:any):Promise<queue.Result>{
   const routes:any={team:['GET','team'],revoke:['POST','team/device-revoke'],roster:['GET','employee_board'],entered:['GET','entered'],
-    approve:['POST','account_approve'],reset:['POST','account_reset'],board:['POST','employee_board']};
+    approve:['POST','account_approve'],reset:['POST','account_reset'],board:['POST','employee_board'],plan:['POST','plan']};
   const resource=method==='GET'?query?.resource:body?.resource;
   const route=routes[resource];
   if(!route||route[0]!==method)return {ok:false,status:400,text:'Неизвестное действие доступа.'};
@@ -470,6 +485,10 @@ async function identify() {
   if (result.ok) {
     currentContext = result.data;
     owner = origin() + "\n" + currentContext.employee_uuid;
+    if(STABLE_CRM&&product.id==='hard'&&currentContext.role==='employee'){
+      try{queue.importSoftQueue(owner);}
+      catch(error){connectionNotice=(error as Error).message;}
+    }
     if (STABLE_CRM && product.id === 'analyst' && currentContext.role === 'analyst' && !isolatedProfile) {
       void analystRuntime.resume(owner).catch(() => diagnostic('helper','analyst_start_failed',false));
     }
@@ -490,7 +509,7 @@ async function identify() {
     });
     clock = anchor.ok ? { ...anchor.data, monotonic: performance.now() } : null;
   } else if (result.status === 401 || result.status === 403) {
-    forgetAuthority(result.text || "Сервер не подтвердил доступ.");
+    if(config())forgetAuthority(result.text || "Сервер не подтвердил доступ.");
   } else {
     const previous = readSettings().crmLast as any;
     if (previous?.origin === origin() && previous?.role === role()) {
@@ -593,10 +612,34 @@ function safeHandler(name: string, fn: (...args: any[]) => any) {
   });
 }
 
+function watchInstallerExit(): void {
+  if (process.platform !== 'win32' || (!STABLE_CRM && product.id !== 'crm')) return;
+  let checking = false;
+  const installPath = createHash('sha256').update(process.execPath.toLowerCase()).digest('hex');
+  const request = join(process.env.LOCALAPPDATA || app.getPath('appData'), 'Hard', 'installer-requests', installPath + '.request');
+  const timer = setInterval(() => {
+    if (checking || installingUpdate) return;
+    let age: number;
+    try { age = Date.now() - statSync(request).mtimeMs; } catch { return; }
+    if (age < 0 || age > 35000) return;
+    checking = true;
+    void (async () => {
+      try {
+        if (activeRequests || exportRecovery || await analystRuntime.busy() || activeRequests || exportRecovery) return;
+        app.quit();
+      } catch { /* Keep running and let the installer retry. */ }
+      finally { checking = false; }
+    })();
+  }, 350);
+  timer.unref();
+  app.once('will-quit', () => clearInterval(timer));
+}
+
 app
   .whenReady()
   .then(async () => {
     if(!firstInstance)return;
+    watchInstallerExit();
     const ui = resolve(__dirname, "ui");
     protocol.handle("hard", (request) => {
       const url = new URL(request.url),
@@ -607,19 +650,31 @@ app
     });
     diagnostic('launcher','launcher_ready',true);
     try{await backendStart();diagnostic('helper','helper_ready',true);}catch{backend?.kill();diagnostic('helper','helper_unavailable',false);}
+    if(quitting)return;
+    if(STABLE_CRM&&product.id==='hard'&&!isolatedProfile&&!config()&&!readSettings().crmExplicitEntry){
+      try{adoptSoftAccount();}
+      catch(error){connectionNotice=(error as Error).message;}
+    }
     const savedAccount=accountState();
     if(STABLE_CRM&&!isolatedProfile&&!config()&&savedAccount.available&&!savedAccount.pending){
+      const fingerprint=savedAccountFingerprint();
       try {
         await pilotCredential(undefined,true,'crm');
         writeSettings({crmConnection:{mode:'remote',server:PILOT_BASE,source:'crm',auth:'existing-login'}});
-      } catch { connectionNotice='Вход сохранён. Нажмите «Продолжить», чтобы подтвердить его.'; }
+      } catch(error) {
+        if(!requireFreshAccountLogin(fingerprint,Number((error as any)?.status)))
+          connectionNotice='Сервер CRM недоступен. Повторите подключение, когда появится сеть.';
+      }
     }
+    if(quitting)return;
     // A stable in-place upgrade uses only this product's previously approved
     // sign-in. Separate CRM installations and explicit logouts keep the entry form.
     if (STABLE_CRM && !isolatedProfile && !config() && !readSettings().crmExplicitEntry &&
         !existsSync(join(data,'crm-shared-session.bin')) && !existsSync(join(data,'crm-account.bin'))) {
-      const source = product.id as EntrySource;
-      if (existingLogins().some(login => login.source === source && login.available)) {
+      const logins=existingLogins();
+      const candidates:EntrySource[]=product.id==='hard'?['hard','soft']:[product.id as EntrySource];
+      const source=candidates.find(id=>logins.some(login=>login.source===id&&login.available));
+      if (source) {
         try {
           await pilotCredential(undefined,true,source);
           writeSettings({crmConnection:{mode:'remote',server:PILOT_BASE,source,auth:'existing-login',
@@ -627,7 +682,9 @@ app
         } catch { connectionNotice='Сохранённый вход не подтверждён. Проверьте подключение или войдите в CRM.'; }
       }
     }
+    if(quitting)return;
     await identify();
+    if(quitting)return;
     win = new BrowserWindow({
       width: 1320,
       height: 880,
@@ -823,12 +880,25 @@ app
         throw Error('Дождитесь завершения текущей операции Аналитика перед сменой входа.');
       if (input?.action !== 'offline') analystRuntime.stop();
       if(['account-login','account-password','account-status','account-logout'].includes(input?.action)){
-        const result=await accountAction(input.action,input);
+        const previous=accountState(),previousFingerprint=savedAccountFingerprint();
+        const result=await accountAction(input.action,input).catch(error=>{
+          if(input.action==='account-status'&&previous.available&&!previous.pending&&
+             requireFreshAccountLogin(previousFingerprint,Number(error?.status)))
+            return {ok:true,data:{pending:true}};
+          throw error;
+        });
         if(input.action==='account-password')return result;
+        if(input.action==='account-status'&&!accountState().available)return result;
         forgetAuthority('');
         writeSettings({crmConnection:undefined,crmLast:undefined,crmExplicitEntry:true});
         if(input.action==='account-logout'||(result.data as any).pending)return result;
-        await pilotCredential(undefined,true,'crm');
+        const fingerprint=savedAccountFingerprint();
+        try{await pilotCredential(undefined,true,'crm');}
+        catch(error){
+          if(requireFreshAccountLogin(fingerprint,Number((error as any)?.status)))
+            return {ok:true,data:{pending:true}};
+          throw error;
+        }
         writeSettings({crmConnection:{mode:'remote',source:'crm',server:PILOT_BASE,auth:'existing-login'}});
         offline=false;return identify();
       }
@@ -892,9 +962,22 @@ app
       return identify();
     });
     safeHandler("crm:workbook", async (action: string, input: any) => {
-      if (action === 'logistics-read' || action === 'logistics-export') {
+      if (action === 'logistics-read' || action === 'logistics-export' || action === 'logistics-export-download') {
         const authority = owner;
         if (!authority || currentContext?.role !== 'logistic') throw new Error('Требуется вход логиста.');
+        if (action === 'logistics-export-download') {
+          const result = await send('GET', action, undefined, input);
+          if (!result.ok) return result;
+          if (owner !== authority) throw new Error('Учётная запись изменилась.');
+          const {filename,content_base64,sha256}=result.data;
+          const bytes=Buffer.from(content_base64,'base64');
+          if(createHash('sha256').update(bytes).digest('hex')!==sha256)throw Error('Проверка файла выгрузки не прошла.');
+          const choice=await dialog.showSaveDialog(win!,{title:'Выгрузить курьерский пул',defaultPath:basename(filename),filters:[{name:'Excel',extensions:['xlsx']}]});
+          if(choice.canceled||!choice.filePath)return {ok:false,cancelled:true};
+          if(owner!==authority)throw new Error('Учётная запись изменилась.');
+          writeFileSync(choice.filePath,bytes,{flag:'wx',flush:true});
+          return {ok:true,data:{filename,rows:result.data.rows}};
+        }
         if (action === 'logistics-read') {
           const choice = await dialog.showOpenDialog(win!, {
             properties: ['openFile'], filters: [{name: 'Реестры', extensions: ['xlsx', 'xlsm', 'xlsb']}],
@@ -917,11 +1000,41 @@ app
         if (owner !== authority) throw new Error('Учётная запись изменилась.');
         return local('logistics-workbook-write', {path: choice.filePath, snapshot: result.data});
       }
+      if(action==='team-visits'||action==='report-preset'){
+        const authority=owner;
+        if(!authority || !['manager','owner'].includes(currentContext?.role))throw Error('Для выгрузки нужен вход руководителя.');
+        const result=action==='report-preset'
+          ? await send('GET','manager-report-download',undefined,input)
+          : await send('GET','manager-statistics',undefined,{...input,download:'visits'});
+        if(!result.ok)return result;
+        if(owner!==authority)throw new Error('Вход изменён. Повторите выгрузку.');
+        const {filename,content_base64,sha256}=result.data;
+        const bytes=Buffer.from(content_base64,'base64');
+        if(createHash('sha256').update(bytes).digest('hex')!==sha256)throw Error('Проверка файла отчёта не прошла.');
+        const choice=await dialog.showSaveDialog(win!,{title:'Сохранить отчёт',defaultPath:basename(filename),filters:[{name:'Excel',extensions:['xlsx']}]});
+        if(choice.canceled||!choice.filePath)return {ok:false,cancelled:true};
+        if(owner!==authority)throw new Error('Вход изменён. Повторите выгрузку.');
+        writeFileSync(choice.filePath,bytes,{flag:'wx',flush:true});
+        return {ok:true,data:{filename}};
+      }
+      if(action==='table'){
+        const authority=owner;
+        if(!authority||!['manager','analyst','owner'].includes(currentContext?.role))throw Error('Для выгрузки нужен вход руководителя или аналитика.');
+        const clean=(value:unknown)=>typeof value==='string'&&/^[=+\-@]/.test(value)?'\''+value:value;
+        const report={headers:input.headers.map(clean),rows:input.rows.map((row:unknown[])=>row.map(clean))};
+        const name=String(input.name||'Результаты.xlsx').replace(/[<>:"/\\|?*\x00-\x1f]/g,'_');
+        const choice=await dialog.showSaveDialog(win!,{title:'Выгрузить Excel',defaultPath:name,filters:[{name:'Excel',extensions:['xlsx']}]});
+        if(choice.canceled||!choice.filePath)return {ok:false,cancelled:true};
+        if(owner!==authority)throw new Error('Вход изменён. Повторите выгрузку.');
+        return local('report-write',{report,kind:'table',path:choice.filePath});
+      }
       if(action==='manager-report'||action==='analyst-report'){
         const authority=owner;
         if(!authority)throw new Error('Сначала подтвердите вход.');
         const month=input?.mode==='month',dynamics=input?.mode==='dynamics';
-        const result=await send('GET',action==='analyst-report'?(month?'analyst-statistics':'analyst-report'):(month?'manager-statistics':'manager-report'),undefined,month?{month:input.month}:input?.snapshot_id&&!dynamics?{snapshot_id:input.snapshot_id}:{day:input?.day});
+        const selection=month?{month:input.month}:{country:input?.country||undefined,
+          ...(input?.snapshot_id&&!dynamics?{snapshot_id:input.snapshot_id}:{day:input?.day})};
+        const result=await send('GET',action==='analyst-report'?(month?'analyst-statistics':'analyst-report'):(month?'manager-statistics':'manager-report'),undefined,selection);
         if(!result.ok)return result;
         const report=month||dynamics?result.data:result.data.report;
         const choice=await dialog.showSaveDialog(win!,{title:'Отчёт руководителя',defaultPath:`Отчёт ${month?report.month:dynamics?report.day:report.today} ${new Date().toISOString().replace(/[^0-9]/g,'').slice(8,14)}.xlsx`,filters:[{name:'Excel',extensions:['xlsx']}]});
@@ -1148,6 +1261,7 @@ app
 
   })
   .catch((error) => {
+    if(quitting)return;
     diagnostic('startup','startup_failed',false);
     void showStartupRecovery('startup_failed');
   });

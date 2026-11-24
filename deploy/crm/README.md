@@ -59,6 +59,9 @@ SQLite копировать через backup API или при полность
 - В окружении оператора с явным owner DSN выполнить `crm_runtime.py migrate`:
   схема 4/6/7 → 8 и дополнительные права crm_app в одной транзакции. API получает
   только app DSN; обмен сохраняет свой worker DSN. Owner DSN не монтировать в API.
+- Для поиска в «Все клиенты» выполнить `psql -v ON_ERROR_STOP=1 -f portfolio-search.sql`
+  с отдельным DSN владельца схемы. Запускать файл вне обёртки `BEGIN`: индексы создаются
+  через `CREATE INDEX CONCURRENTLY`.
 - Применить подготовленный hash-bound primary-патч с backup; сохранить существующие
   `/api/manager/entry_profile`, `/entry_revoke` и проверки неоднозначных имён.
   В primary явно включить `HARD_CRM_MOBILE=1`, `HARD_CRM_MOBILE_ROLLOUT=1` и `HARD_CRM_DESKTOP=1`.

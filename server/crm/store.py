@@ -151,6 +151,7 @@ def _payload(kind, raw):
         "delivery_address",
         "delivery_phone",
         "delivery_comment",
+        "field_visit",
     }
     if set(raw) - allowed:
         raise CRMError("Неизвестные поля действия.")
@@ -163,6 +164,11 @@ def _payload(kind, raw):
     ):
         raise CRMError("Некорректная явная очистка.")
     target = raw.get("target_kind") if kind == "correction" else kind
+    if 'field_visit' in raw:
+        if kind != 'visit':
+            raise CRMError('Точка и фото относятся к выезду.')
+        from .visit_details import normalize
+        raw['field_visit'] = normalize(raw['field_visit'])
     if target != 'delivery' and ({'delivered','delivery_address','delivery_phone','delivery_comment'} & set(raw)):
         raise CRMError('Результат передачи относится к действию курьера.')
     if target == 'delivery':
@@ -298,6 +304,10 @@ def command(principal, body, *, origin="app", client_version=None):
         if "script_ref" in payload:
             from .scripts import validate_reference
             validate_reference(conn, principal, payload["script_ref"])
+        photos = payload.get('field_visit', {}).get('photos')
+        if photos:
+            from .visit_details import verify_photos
+            verify_photos(conn, principal, body['contract_ids'], photos)
         if len({r["person_uuid"] for r in rows}) != 1:
             raise CRMError(
                 "Для группового действия выберите договоры одного подтверждённого клиента."
@@ -696,6 +706,24 @@ def project(conn, row, values, event, happened, origin):
                 )
 
 
+def previous_statuses(baseline, fields, provenance, events, contract_uuid):
+    results = []
+    for key in ('call_status', 'overall_result', 'soft_call_status'):
+        previous = baseline.get(key)
+        current = fields.get(key)
+        if previous not in ('Рассрочка', 'Обещает оплатить'):
+            continue
+        if current not in (None, '', 'В работе', 'В работе sms', 'Не отработан'):
+            continue
+        reference = provenance.get('_fields', {}).get(key, {})
+        event = events.get(reference.get('event_id'), {})
+        if (event.get('kind') != 'source_sync' or event.get('origin') != 'legacy'
+                or contract_uuid not in event.get('contract_ids', [])):
+            continue
+        results.append(dict(key=key, baseline=previous, current=current, exchanged_at=event['occurred_at']))
+    return results
+
+
 def card(principal, person_uuid):
     with storage.connect(readonly=True) as conn:
         allowed = None if access.reads_all(principal) else access.readable_contracts(conn, principal)
@@ -761,7 +789,9 @@ def card(principal, person_uuid):
             }
             row["revisions"].update(json.loads(row.pop("revisions_json")))
             row["provenance"] = json.loads(row.pop("provenance_json"))
-            row.pop("baseline_json")
+            row["previous_statuses"] = previous_statuses(
+                json.loads(row.pop("baseline_json")), row["fields"], row["provenance"], events, row["contract_uuid"]
+            )
         action_map = {r['contract_uuid']: set(r['allowed_actions']) for r in rows}
         from .delivery import latest
         deliveries=latest(conn,ids)
@@ -880,36 +910,74 @@ def portfolio(principal, search="", limit=200):
         )
 
 
+PORTFOLIO_CONTRACT_SEARCH = (
+    "lower(external_id || ' ' || coalesce(fields_json::jsonb->>'phone','')"
+    " || ' ' || coalesce(fields_json::jsonb->>'address',''))"
+)
+
+
 def _postgres_portfolio(conn, principal, search, limit):
     """Filter and group in PostgreSQL; don't transfer every full card to Python."""
     from decimal import Decimal
+    import re
     limit = min(max(int(limit), 1), 500)
     predicates, parameters = [], []
     if not access.reads_all(principal):
         predicates.append("c.contract_uuid = ANY(?)")
         parameters.append(sorted(access.readable_contracts(conn, principal)))
+    contacts, candidates, candidate_join = '', '', ''
+    candidate_parameters = []
     if search:
-        predicates.append("strpos(lower(concat_ws(' ',p.name,c.external_id,c.fields_json::jsonb->>'phone',c.fields_json::jsonb->>'address')),lower(?))>0")
+        # Any complete alphanumeric term must occur within one of the fields.
+        # Look it up with the trigram indexes before parsing candidate cards.
+        term = max(re.findall(r'[^\W_]+', search), key=len, default='')
+        if len(term) >= 3:
+            candidates = f"""
+                candidates AS MATERIALIZED (
+                    SELECT c.contract_uuid FROM crm_people p JOIN crm_contracts c USING (person_uuid)
+                    WHERE lower(p.name) LIKE lower(?)
+                    UNION
+                    SELECT contract_uuid FROM crm_contracts
+                    WHERE {PORTFOLIO_CONTRACT_SEARCH} LIKE lower(?)
+                ),
+            """
+            candidate_join = ' JOIN candidates USING (contract_uuid)'
+            candidate_parameters = ['%' + term + '%'] * 2
+        # Read just the two search fields. Converting an entire historical card
+        # to jsonb is considerably more expensive than normalizing these values.
+        contacts = ' CROSS JOIN LATERAL json_to_record(c.fields_json::json) AS contact(phone json, address json)'
+        predicates.append("strpos(lower(concat_ws(' ',p.name,c.external_id,"
+                          "contact.phone::jsonb #>> '{}',contact.address::jsonb #>> '{}')),lower(?))>0")
         parameters.append(search)
     where = ' WHERE ' + ' AND '.join(predicates) if predicates else ''
-    tables = ' FROM crm_contracts c JOIN crm_people p USING(person_uuid)'
-    totals = conn.execute('SELECT COUNT(*) AS contracts,COUNT(DISTINCT c.person_uuid) AS people'
-                          + tables + where, parameters).fetchone()
-    rows = conn.execute("SELECT p.person_uuid,p.name,COUNT(*) AS contracts,"
-                        "json_agg(json_build_object('currency',c.currency,'value',"
-                        "COALESCE(NULLIF(c.fields_json::jsonb->>'debt_today',''),c.fields_json::jsonb->>'debt_total'))) AS amounts"
-                        + tables + where + ' GROUP BY p.person_uuid,p.name ORDER BY p.name,p.person_uuid LIMIT ?',
-                        [*parameters, limit])
+    # Determine the matching contracts once. Only the visible people need amounts.
+    rows = conn.execute(f"""
+        WITH {candidates} matched AS MATERIALIZED (
+            SELECT c.contract_uuid, c.person_uuid, p.name
+            FROM crm_contracts c JOIN crm_people p USING (person_uuid)
+            {candidate_join} {contacts} {where}
+        ), page AS (
+            SELECT person_uuid, name, count(*) AS contracts,
+                   count(*) OVER () AS total_people, sum(count(*)) OVER () AS total_contracts
+            FROM matched GROUP BY person_uuid, name ORDER BY name, person_uuid LIMIT ?
+        )
+        SELECT page.*, c.currency,
+               COALESCE(NULLIF(c.fields_json::jsonb->>'debt_today',''),c.fields_json::jsonb->>'debt_total') AS amount
+        FROM page JOIN matched USING (person_uuid) JOIN crm_contracts c USING (contract_uuid)
+        ORDER BY page.name, page.person_uuid
+    """, [*candidate_parameters, *parameters, limit])
     people = []
+    total_people = total_contracts = 0
     for row in rows:
-        item = dict(person_uuid=row['person_uuid'], name=row['name'], contracts=row['contracts'],
-                    currencies={}, unknown_amounts=0)
-        for amount in row['amounts']:
-            try:
-                code, exact = currency(amount['currency']), money(amount['value'])
-                item['currencies'][code] = format(Decimal(item['currencies'].get(code, '0')) + Decimal(exact), '.2f')
-            except CRMError:
-                item['unknown_amounts'] += 1
-        people.append(item)
-    return dict(people=people, total_people=totals['people'], total_contracts=totals['contracts'],
-                truncated=totals['people'] > limit)
+        if not people or people[-1]['person_uuid'] != row['person_uuid']:
+            people.append(dict(person_uuid=row['person_uuid'], name=row['name'], contracts=row['contracts'],
+                               currencies={}, unknown_amounts=0))
+            total_people, total_contracts = row['total_people'], int(row['total_contracts'])
+        item = people[-1]
+        try:
+            code, exact = currency(row['currency']), money(row['amount'])
+            item['currencies'][code] = format(Decimal(item['currencies'].get(code, '0')) + Decimal(exact), '.2f')
+        except CRMError:
+            item['unknown_amounts'] += 1
+    return dict(people=people, total_people=total_people, total_contracts=total_contracts,
+                truncated=total_people > limit)

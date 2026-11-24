@@ -102,12 +102,16 @@ export function employeeBoard(kind: 'manager' | 'analyst'): Section {
           const rows = shown.filter(x => code ? x.direction === code : !['tj', 'uz'].includes(x.direction));
           return `<section class="employee-country ${code ? '' : 'unmapped'}"><div class="section-head"><h2>${title}</h2><span class="muted">${rows.length}</span></div>${rows.map(x => {
             const index = active.indexOf(x);
-            return `<article class="employee-tile"><div class="row"><b class="grow">${esc(x.employee)}</b>${kind === 'manager' && d.can_edit ? `<button class="btn small" data-assign="${index}">+ Задача</button>` : ''}</div>
+            const profile = kind === 'analyst' && x.username
+              ? `<button type="button" class="link" data-board-profile="${index}">${esc(x.employee)}</button>`
+              : `<b class="grow">${esc(x.employee)}</b>`;
+            return `<article class="employee-tile"><div class="row">${profile}${kind === 'manager' && d.can_edit ? `<button class="btn small" data-assign="${index}">+ Задача</button>` : ''}</div>
               ${x.office ? `<div class="sub">${esc(x.office)} · ${esc(x.products.map((p: string) => p === 'soft' ? 'Софт' : 'Хард').join(' / '))}</div>` : `<div class="sub">${esc(x.products.map((p: string) => p === 'soft' ? 'Софт' : 'Хард').join(' / '))}</div>`}
               <div class="employee-login"><span class="mono">${esc(x.username || '—')}</span> · ${esc(x.password_review_pending ? 'Ждёт подтверждения смены пароля' : loginStatus[x.login_status] || x.login_status)}${x.must_change_password ? ' · требуется смена пароля' : ''}<br>ПК: ${esc(deviceStatus[x.desktop])} · Телефон: ${esc(deviceStatus[x.phone])}${x.last_seen ? `<br>Последняя связь: ${esc(dateText(x.last_seen))}` : ''}</div>
               ${x.can_remove ? `<button class="btn small employee-remove" data-remove-person="${index}">Убрать</button>` : ''}</article>`;
           }).join('') || '<p class="muted">Сотрудников нет</p>'}</section>`;
         }).join('');
+        action(host, '[data-board-profile]', async b => { await go('accounts', {username: active[Number(b.dataset.boardProfile)].username}); });
         action(host, '[data-assign]', async b => { await go('staff-tasks', {employee: active[Number(b.dataset.assign)].employee, create: true}); });
         action(host, '[data-remove-person]', async b => {
           const x = active[Number(b.dataset.removePerson)];

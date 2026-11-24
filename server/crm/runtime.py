@@ -1,7 +1,7 @@
 """Persistent service loop: revalidate the original account, then do bounded work."""
 import asyncio
 import contextlib
-from . import manager_reports, primary_fence, storage
+from . import manager_reports, primary_fence, report_presets, storage
 from .contract import CRMError, canonical, now
 
 
@@ -21,11 +21,11 @@ def credentials():
         return result
 
 
-def status(ok,code,detail):
+def status(ok,code,detail,worker='scheduler'):
     with storage.connect() as conn:
         conn.execute('INSERT INTO crm_runtime_status VALUES(?,?,?,?,?) ON CONFLICT(worker) DO UPDATE SET '
             'heartbeat_at=excluded.heartbeat_at,ok=excluded.ok,code=excluded.code,detail_json=excluded.detail_json',
-            ('scheduler',now(),int(ok),code,canonical(detail)))
+            (worker,now(),int(ok),code,canonical(detail)))
 
 
 async def tick(sessions):
@@ -49,7 +49,7 @@ async def tick(sessions):
     return result
 
 
-async def serve(sessions,interval=2):
+async def serve_operations(sessions,interval):
     while True:
         busy=False
         try:
@@ -60,3 +60,25 @@ async def serve(sessions,interval=2):
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(status,False,getattr(exc,'code',type(exc).__name__),{})
         await asyncio.sleep(0.05 if busy else interval)
+
+
+async def serve_reports():
+    while True:
+        try:
+            result=await asyncio.to_thread(report_presets.schedule)
+            await asyncio.to_thread(status,True,'',result,'report-scheduler')
+        except asyncio.CancelledError:raise
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(status,False,getattr(exc,'code',type(exc).__name__),{},'report-scheduler')
+        await asyncio.sleep(60)
+
+
+async def serve(sessions,interval=2):
+    reports=asyncio.create_task(serve_reports())
+    try:
+        await serve_operations(sessions,interval)
+    finally:
+        reports.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reports

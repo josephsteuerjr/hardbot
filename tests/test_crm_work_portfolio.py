@@ -17,6 +17,33 @@ def test_two_work_kinds_are_one_contract_and_one_debt(crm_world):
     assert len({r['creditor_id'] for r in result['contracts']})==2
 
 
+def test_personal_search_and_filters_use_displayed_contract_values(crm_world):
+    w=crm_world
+    with storage.connect() as conn:
+        conn.execute("UPDATE crm_people SET name=? WHERE person_uuid=?",('Семён Петров',w['person']))
+        conn.execute('UPDATE crm_contracts SET fields_json=? WHERE contract_uuid=?',(
+            canonical(dict(partner='Контрагент А',phone_main='+992 (123) 45-67',
+                           overall_result='Рассрочка',soft_call_status='В работе')),w['contracts'][0]))
+    p=w['member']
+    assert work_portfolio.read(p,search=' петров   семен ')['total_contracts']==2
+    assert work_portfolio.read(p,search='9921234567')['total_contracts']==1
+    result=work_portfolio.read_query(p,dict(partner='Контрагент А',overall_result='Рассрочка',call_status='В работе'))
+    assert [row['contract_uuid'] for row in result['contracts']]==[w['contracts'][0]]
+    assert 'Контрагент А' in result['filter_options']['partner']
+    assert work_portfolio.read(w['stranger'],partner='Контрагент А')['filter_options']['partner']==[]
+
+
+def test_work_priority_can_be_changed_in_registry(crm_world):
+    with storage.connect() as conn:
+        for cid, amount, day in zip(crm_world['contracts'], ('100.00', '10.00'), ('2026-12-01', '2026-11-01')):
+            conn.execute('UPDATE crm_contracts SET fields_json=? WHERE contract_uuid=?', (
+                canonical(dict(debt_today=amount, soft_next_call_date=day)), cid))
+    assert work_portfolio.read(crm_world['member'], sort='debt_desc')['contracts'][0]['contract_uuid'] == crm_world['contracts'][0]
+    assert work_portfolio.read(crm_world['member'], sort='call_date')['contracts'][0]['contract_uuid'] == crm_world['contracts'][1]
+    with pytest.raises(CRMError):
+        work_portfolio.read(crm_world['member'], sort='unknown')
+
+
 def test_current_assignments_and_viewer_scope_are_separate(crm_world):
     w=crm_world
     with storage.connect() as conn:
@@ -58,7 +85,9 @@ def test_469_contracts_are_filtered_before_paging_and_counted_once(crm_world):
         # 429 call-only, 6 visit-only, 34 with both work kinds.
         for index in range(469):
             cid=identifier('contract','dual-queue-'+str(index))
-            values=canonical(dict(debt_total='10.00',phone='555-12345',address='Synthetic address'))
+            values=canonical(dict(debt_total='10.00',phone='555-12345',address='Synthetic address',
+                                  pool='10' if index in (11,438,468) else '2',
+                                  soft_call_status='В работе' if index != 11 else 'Нет ответа'))
             conn.execute('INSERT INTO crm_contracts VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                 (cid,w['person'],'synthetic-creditor',f'Q{index:04}',None,'RUB',values,values,'{}','{}',at))
             kinds=['call'] if index<429 else ['visit'] if index<435 else ['call','visit']
@@ -72,6 +101,16 @@ def test_469_contracts_are_filtered_before_paging_and_counted_once(crm_world):
     last=work_portfolio.read(w['member'],work='both',offset=30,limit=10)
     assert len(last['contracts'])==4 and not last['has_more']
     assert work_portfolio.read(w['member'],search='Q0468')['total_contracts']==1
+    query=dict(work='both',pool='10',call_status='В работе',visit_status='',debt_from='10',debt_to='10.00',debt_currency='RUB',limit='1')
+    filtered=work_portfolio.read_query(w['member'],query)
+    assert filtered['total_contracts']==2 and filtered['currencies']=={'RUB':'20.00'}
+    assert filtered['filter_options']['pool']==['10','2']
+    assert filtered['has_more'] and filtered['contracts'][0]['external_id']=='Q0438'
+    second=work_portfolio.read_query(w['member'],{**query,'offset':1})
+    assert not second['has_more'] and second['contracts'][0]['external_id']=='Q0468'
+    assert work_portfolio.read_query(w['member'],{**query,'debt_from':'9','debt_to':'9.99'})['total_contracts']==0
+    assert work_portfolio.read_query(w['stranger'],query)['filter_options']['pool']==[]
+    with pytest.raises(CRMError):work_portfolio.read_query(w['member'],{**query,'debt_from':'11'})
 
 
 def test_inactive_staff_and_invalid_query_do_not_return_a_queue(crm_world):

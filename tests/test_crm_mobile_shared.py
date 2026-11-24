@@ -11,7 +11,7 @@ import accounts,db
 import web as primary
 from crm.mobile_backend import SharedBackend,ServerExecutor
 from crm.mobile_server import create_app
-from crm.shared_auth import Authority,Sessions
+from crm.shared_auth import Authority,Sessions,AUTHORITY_CACHE_SECONDS
 from crm.shared_server import create_app as shared_app
 from test_crm_core import crm_world
 
@@ -49,6 +49,25 @@ def test_shared_password_requests_report_the_mobile_protocol_version():
 
     asyncio.run(run())
 
+def test_automatic_confirmation_is_completed_before_pending_screen():
+    async def run():
+        activations = []
+        class AutoBackend(SharedBackend):
+            async def json(self, url, *args, **kwargs):
+                assert url.endswith('/api/account/login')
+                return dict(action='ok_pending', token='synthetic-credential', employee='Employee',
+                            role='agent', username='synthetic', must_change_password=False)
+            async def activate(self, session):
+                activations.append(True)
+                session.pop('pending', None)
+                session['context'] = {'role': 'employee'}
+                return session
+        backend = AutoBackend('https://hard.rimborso.ru', 'https://hard.rimborso.ru/crm-pilot')
+        session = await backend.login(dict(username='synthetic', password='personal456', device_id='test-phone'))
+        assert activations == [True]
+        assert 'pending' not in session and session['context']['role'] == 'employee'
+    asyncio.run(run())
+
 def test_pending_password_own_phone_approval_refresh_and_revocation(crm_world,tmp_path,monkeypatch):
     monkeypatch.setenv('HARD_CRM_MOBILE','1')
     monkeypatch.setattr(primary,'DEV',False)
@@ -56,7 +75,15 @@ def test_pending_password_own_phone_approval_refresh_and_revocation(crm_world,tm
     assert accounts.create_account('Employee','mobile-shared','temporary123',telegram_id=101,by='fixture')['ok']
     assert accounts.approve_account('mobile-shared','fixture')['ok']
     async def run():
-        async with TestServer(primary.build_app(None)) as authority_server, aiohttp.ClientSession() as transport:
+        identity_calls = []
+        authority_app = primary.build_app(None)
+        @web.middleware
+        async def count_identity(request, handler):
+            if request.path == '/api/crm-identity':
+                identity_calls.append(request.path)
+            return await handler(request)
+        authority_app.middlewares.append(count_identity)
+        async with TestServer(authority_app) as authority_server, aiohttp.ClientSession() as transport:
             authority=Authority(transport)
             authority.identity_url=str(authority_server.make_url('/api/crm-identity'))
             authority.url=str(authority_server.make_url('/api/manager/device/me'))
@@ -119,7 +146,21 @@ def test_pending_password_own_phone_approval_refresh_and_revocation(crm_world,tm
                     assert (await boot())[0]==200
                     renewed=store.read(sid)['crm_session'];assert renewed!=original
                     assert (await boot())[0]==200 and store.read(sid)['crm_session']==renewed
+                    before = len(identity_calls)
+                    response = await client.post('/mobile/api', headers=headers,
+                        json=dict(method='GET', action='work-portfolio', query={}))
+                    assert response.status == 200, await response.text()
+                    assert len(identity_calls) <= before + 1
+                    stored = store.read(sid)
+                    stored['crm_session'] = 'crm1.' + 'x' * 120
+                    store.write(stored, sid)
+                    response = await client.post('/mobile/api', headers=headers,
+                        json=dict(method='GET', action='work-portfolio', query={}))
+                    assert response.status == 200, await response.text()
+                    assert store.read(sid) is not None
+                    assert store.read(sid)['crm_session'] != stored['crm_session']
                     with db.connect() as conn:conn.execute("UPDATE account_devices SET status='revoked' WHERE id=?",(device,));conn.commit()
+                    now[0] += AUTHORITY_CACHE_SECONDS
                     assert (await boot())[0]==401
                     assert store.read(sid) is None
                     _,anonymous=await boot();assert anonymous['session'] is None

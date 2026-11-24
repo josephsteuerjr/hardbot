@@ -1,15 +1,21 @@
+import {visitEvidence,type VisitPhotoQueue} from './crm-visit';
 import {mountDeliveryForm} from './crm-delivery';
 import {mountAccount} from './crm-account';
 import {mountRegistry} from './crm-registry';
 import {editClientCard} from './crm-card-editor';
 import {mountManagerReports} from './crm-manager-reports';
 import {mountManagerTeam} from './crm-manager-team';
+import {bindPortfolioFilters,portfolioFiltersMarkup,restorePortfolioFilters,type PortfolioFilters} from './crm-portfolio-filters';
+import {mountTeamResults} from './crm-team-results';
 import {mountAnalyst} from './crm-analyst';
 import {mountOperator} from './crm-operator';
 import {mountLogistics, mountLogisticsCall} from './crm-logistics';
 import {decimalText} from './crm-format';
 import type {UpdateState} from '../src/main/updates';
 type API = {
+  renderLegacyVisits?(host:HTMLElement,previous?:HTMLElement|null):void;
+  renderFieldOffline?(host:HTMLElement):void;
+  renderFieldWorkspace?(host:HTMLElement,openPerson:(person:string)=>Promise<void>,valid:()=>boolean):()=>void;
   platform?:string;
   initialSection?():string;
   initialPerson?():string;
@@ -26,11 +32,12 @@ type API = {
   diagnostics?(repair?:boolean):Promise<any>;
   diagnosticsReport?():Promise<any>;
   queue(action?: string, id?: string,expectedOwner?:string): Promise<any>;
-  onChange?(callback: (event: {type: 'queue' | 'identity' | 'live' | 'storage-error';text?:string;dirty?:boolean;as_of?:string;connected?:boolean;pending?:boolean}) => void): () => void;
+  onChange?(callback: (event: {type: 'queue' | 'identity' | 'live' | 'storage-error';text?:string;dirty?:boolean;as_of?:string;connected?:boolean;pending?:boolean;reason?:string}) => void): () => void;
   draft(key: string, value?: any, expectedOwner?:string): Promise<any>;
   telemetry(event: any): Promise<any>;
   connect(input: any): Promise<any>;
   workbook(action: string, input?: any): Promise<any>;
+  visitPhotoQueue?(form:string,owner:string):VisitPhotoQueue;
   document(contract: string, id?: string,expectedOwner?:string): Promise<any>;
   admin(action:string,args:any[],expectedOwner:string):Promise<any>;
   win(action: string): void;
@@ -60,7 +67,7 @@ const labels: Record<string, string> = {
   registry_edit: 'Правка реестра',
   visit: "Выезд",
   delivery: 'Результат доставки',
-  note: "Заметка",
+  note: "Комментарий к клиенту",
   contact: "Контакты",
   promise: "Обещание",
   task: "Задача",
@@ -83,12 +90,15 @@ let state: any,
   cardScript: any = null,
   renderGeneration = 0;
 let portfolioView='mine', portfolioWork='all', portfolioEmployee='', portfolioSearch='', portfolioOffset=0;
+let portfolioFilters:PortfolioFilters={}, portfolioFiltersOpen=false;
+let portfolioCallQueue='today';
 let disposeSection:(()=>void)|undefined;
-let portfolioIdentity='',portfolioGeneration=0;
+let portfolioIdentity='',portfolioGeneration=0, portfolioLoading=false;
 let analystIdentity='';
 const sectionScroll=new Map<string,number>();
 let taskStatus='open',taskEmployee='all',taskWork='all',taskSearch='',taskOffset=0,taskGeneration=0;
 let cardOrigin='portfolio',taskSelectClient=false,newTaskAssignee='';
+let managerReportWork:'soft'|'hard'='soft';
 let activePerson='',lastCardAcknowledgements='',cardSyncGeneration=0,formOpening=false,cardRefreshPending=false;
 let cardRefreshError='';
 let syncTimer:ReturnType<typeof setTimeout> | undefined,cardRetryTimer:ReturnType<typeof setTimeout> | undefined,syncForced=false;
@@ -274,7 +284,7 @@ async function syncCurrentView(force=false) {
       lastCardAcknowledgements=acknowledgements;
       if(cardRefreshError && $('notice').textContent===cardRefreshError)notice();
       cardRefreshError='';
-      $('connection').textContent=(state.connection.mode==='synthetic'?'Синтетические данные':state.connection.server)+(state.offline?' · офлайн':'');
+      $('connection').textContent=state.offline?'Нет связи · ввод сохранён '+savedOn:(state.connection.mode==='synthetic'?'Синтетические данные':'Связь есть · '+state.connection.server);
     }
     await renderCard();
     for(const host of document.querySelectorAll<HTMLElement>('[data-contract-details]'))
@@ -358,10 +368,11 @@ async function boot(openWork=false) {
   if(context?.role!=='logistic'&&section==='logistics')section='portfolio';
   if (portfolioIdentity!==context?.employee_uuid) {
     sectionScroll.clear();
-    taskSelectClient=false;newTaskAssignee='';cardOrigin='portfolio';
+    taskSelectClient=false;newTaskAssignee='';cardOrigin='portfolio';managerReportWork='soft';
     portfolioIdentity=context?.employee_uuid || '';
     portfolioView=['manager','owner','analyst','observer'].includes(context?.role)?'all':'mine';
     portfolioEmployee=context?.employee_uuid || '';portfolioWork='all';portfolioSearch='';portfolioOffset=0;
+    portfolioFilters={};portfolioFiltersOpen=false;portfolioCallQueue='today';
     taskStatus='open';taskEmployee=['manager','analyst','observer','owner'].includes(context?.role)?'all':context?.employee_uuid;
     taskWork='all';taskSearch='';taskOffset=0;
     const savedTasks=(await crm.draft('task-view')).data;
@@ -376,15 +387,17 @@ async function boot(openWork=false) {
       portfolioView=saved.view;
       portfolioWork=['all','call','visit','both','delivery','logistics'].includes(saved.work)?saved.work:'all';
       if((context?.staff || []).some((p:any)=>p.employee_uuid===saved.employee) || saved.employee===context?.employee_uuid)portfolioEmployee=saved.employee;
+      portfolioFilters=restorePortfolioFilters(saved.filters);
+      portfolioCallQueue=saved.callQueue==='all'?'all':'today';
+      portfolioFiltersOpen=Object.keys(portfolioFilters).length>0;
     }
   }
   $("identity").textContent = context ? ({manager:'Руководитель',observer:'Наблюдатель',courier:'Курьер',analyst:'Аналитик',logistic:'Логист'} as any)[context.role] || 'Сотрудник' : 'Вход в CRM';
   $("version").textContent = state.version;
   const mobileSignIn = crm.platform === 'mobile' && !context && state.connection.mode !== 'synthetic';
-  $("connection").textContent = mobileSignIn ? '' :
-    (state.connection.mode === "synthetic"
-      ? "Синтетические данные"
-      : state.connection.mode === 'unconfigured' ? 'Не подключено' : state.connection.server) + (state.offline ? " · офлайн" : "");
+  $("connection").textContent = mobileSignIn ? '' : state.offline ? 'Нет связи · ввод сохранён '+savedOn :
+    state.connection.mode === "synthetic" ? "Синтетические данные" :
+    state.connection.mode === 'unconfigured' ? 'Нужен вход · данные сохранены' : 'Связь есть · '+state.connection.server;
   const manager=['manager','owner'].includes(context?.role);
   const sections = context?.role==='logistic' ? [
     ['logistics','Курьерские пулы'],['connection','Подключение'],
@@ -392,12 +405,15 @@ async function boot(openWork=false) {
     ['registry','Реестр'],['exchange','Обмен'],['statistics','Показатели'],['team','Команда'],['connection','Подключение'],
   ] : crm.platform==='mobile'&&context?.role==='employee' ? [
     ['portfolio','Портфель'],['registry','Реестр'],['cabinet','Показатели'],['queue','Отправки'],
+    ...(can('visit')?[['field','Маршрут']]:[]),
     ['tasks','Задачи'],['active-time','Активное время'],['script','Скрипт'],['connection','Подключение'],['help','Справка'],
   ] : context?.role==='employee' ? [
     ['portfolio','Портфель'],['registry','Реестр'],['cabinet','Мои показатели'],
     ['active-time','Активное время'],['connection','Подключение'],
   ] : manager ? [
-    ['portfolio','Портфель'],['registry','Реестр'],['manager-statistics','Показатели'],['team','Команда'],
+    ['portfolio','Портфель'],['registry','Реестр'],['manager-statistics','Показатели'],
+    ...(context?.capabilities?.includes('logistics')?[['logistics','Курьерские пулы']]:[]),
+    ['active-time','Активное время'],['team','Команда'],
     ['script','Скрипты и задачи'],
     ...(can('exchange')?[['exchange','Обмен']]:[]),
     ...(context?.server_operator?[['operator','Сервер и входы']]:[]),
@@ -460,6 +476,7 @@ async function go(next: string) {
       'manager-statistics':'Показатели команды',
       statistics:'Показатели',
       team:'Команда',
+      field:'Маршрут',
       operator:'Сервер и входы',
       logistics:'Курьерские пулы',
       registry:'Реестр',
@@ -518,7 +535,7 @@ async function go(next: string) {
         draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:(action?:string,id?:string)=>crm.queue(action,id,expectedOwner)};
       const stop=await mountAnalyst($('view'),next,api,valid,{owner:expectedOwner,navigate:go,core:{
         table:async(host,current)=>mountRegistry(host,api,current,{manager:true,distribution:context.distribution?.enabled,openPerson:id=>void openCard(id).catch(reportError)}),
-        reports:async(host,current)=>mountManagerReports(host,api,current),
+        reports:async(host,current)=>mountManagerReports(host,api,current,false),
         scripts:async host=>script(host),
         'crm-books':async host=>exchangePage(host),queue:async host=>queuePage(host),connection:async host=>connection(host),
       }});
@@ -528,6 +545,9 @@ async function go(next: string) {
     await (
       {
         portfolio,
+        field:()=>{
+          if(crm.renderFieldWorkspace)disposeSection=crm.renderFieldWorkspace($('view'),openCard,()=>generation===renderGeneration);
+        },
         'manager-statistics':managerStatistics,
         team:managerTeam,
         operator:()=>mountOperator($('view'),()=>request('GET','operator-status'),()=>generation===renderGeneration),
@@ -565,6 +585,14 @@ function calendarDate(value: any) {
 function deliveryMarkup(fields:any){
   return fields.delivery_result?`<div class="delivery-fact"><dt>Передача конверта</dt><dd data-field="delivery-result">${esc(fields.delivery_result)}${fields.delivery_address?'<br>'+esc(fields.delivery_address):''}<br>${esc(fields.delivery_phone || '-')}<br>${esc(fields.delivery_comment)}<br><span class="muted">Принято ${date(fields.delivery_received_at)} · ${esc(fields.delivery_author)}</span></dd></div>`:'';
 }
+function statusReconciliation(contract: any, title: (key: string) => string) {
+  const rows = contract.previous_statuses || [];
+  if (!rows.length) return '';
+  return `<section data-status-reconciliation><h4>Сверка статусов</h4><dl class="contract-facts">${rows.map((row: any) =>
+    `<div><dt>${esc(title(row.key))}</dt><dd>Исходный срез · ${esc(row.baseline)}<br>Текущий статус · ${esc(row.current || 'Пусто')}<br>Обмен · ${date(row.exchanged_at)}</dd></div>`
+  ).join('')}</dl></section>`;
+}
+
 function contractDetails(contract: any) {
   const fields = contract.fields;
   const title = (key: string) => context.fields?.find((field: any) => field.key === key)?.title || key;
@@ -572,7 +600,7 @@ function contractDetails(contract: any) {
   const people = new Map((contract.assignments || []).map((row: any) => [row.employee_uuid, row.name]));
   const responsibility = people.size ? Array.from(people.values()).join(', ')
     : Array.from(new Set([fields.responsible, fields.responsible_soft].filter(Boolean))).join(', ');
-  return `<article class="contract-details" data-contract-details="${esc(contract.contract_uuid)}"><h3>${esc(contract.external_id)} · ${esc(contract.creditor_id)}</h3><dl class="contract-facts"><div><dt>Дата КД</dt><dd data-field="kd_date">${calendarDate(fields.kd_date)}</dd></div><div><dt>Выданная сумма</dt><dd data-field="issued_sum">${amount(fields.issued_sum, contract.currency || 'Валюта не задана')}</dd></div><div><dt>Дней просрочки</dt><dd data-field="dp">${esc(fields.dp ?? 'Не указано')}</dd></div><div><dt>${people.size ? 'Ответственные' : 'Ответственные из реестра'}</dt><dd data-field="responsibility">${esc(responsibility || 'Не назначены')}</dd></div><div><dt>Последняя оплата</dt><dd>${amount(fields.last_payment_sum, contract.currency || '')}${fields.last_payment_date ? ' · ' + calendarDate(fields.last_payment_date) : ''}</dd></div>${deliveryMarkup(fields)}</dl><details><summary>Структура задолженности</summary>${articles.length ? `<dl class="debt-articles">${articles.map(key => `<div><dt>${esc(title(key))}</dt><dd data-field="${esc(key)}">${amount(fields[key], contract.currency || '')}</dd></div>`).join('')}</dl>` : '<p class="muted">Разбивка в источнике не указана</p>'}</details></article>`;
+  return `<article class="contract-details" data-contract-details="${esc(contract.contract_uuid)}"><h3>${esc(contract.external_id)} · ${esc(contract.creditor_id)}</h3><dl class="contract-facts"><div><dt>Дата КД</dt><dd data-field="kd_date">${calendarDate(fields.kd_date)}</dd></div><div><dt>Выданная сумма</dt><dd data-field="issued_sum">${amount(fields.issued_sum, contract.currency || 'Валюта не задана')}</dd></div><div><dt>Дней просрочки</dt><dd data-field="dp">${esc(fields.dp ?? 'Не указано')}</dd></div><div><dt>${people.size ? 'Ответственные' : 'Ответственные из реестра'}</dt><dd data-field="responsibility">${esc(responsibility || 'Не назначены')}</dd></div><div><dt>Последняя оплата</dt><dd>${amount(fields.last_payment_sum, contract.currency || '')}${fields.last_payment_date ? ' · ' + calendarDate(fields.last_payment_date) : ''}</dd></div>${deliveryMarkup(fields)}</dl>${statusReconciliation(contract,title)}<details><summary>Структура задолженности</summary>${articles.length ? `<dl class="debt-articles">${articles.map(key => `<div><dt>${esc(title(key))}</dt><dd data-field="${esc(key)}">${amount(fields[key], contract.currency || '')}</dd></div>`).join('')}</dl>` : '<p class="muted">Разбивка в источнике не указана</p>'}</details></article>`;
 }
 
 function fullBusiness(contract:any) {
@@ -625,18 +653,69 @@ async function activeTimePage() {
 async function managerStatistics(){
   const generation=renderGeneration,expectedOwner=state.owner;
   const valid=()=>generation===renderGeneration&&section==='manager-statistics';
-  const stop=await mountManagerReports($('view'),{...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner)},valid);
-  if(valid())disposeSection=stop;else stop();
+  const host=$('view');
+  const api={...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner)};
+  if(crm.platform!=='mobile'){
+    const stop=await mountManagerReports(host,api,valid);
+    if(valid())disposeSection=stop;else stop();
+    return;
+  }
+  host.innerHTML='<div class="tabs" aria-label="Вид отчёта"><button data-manager-report="soft">Софт · Звонки</button><button data-manager-report="hard">Хард · Выезды</button></div><div id="manager-report-content"></div>';
+  const content=host.querySelector<HTMLElement>('#manager-report-content')!;
+  const buttons=host.querySelectorAll<HTMLButtonElement>('[data-manager-report]');
+  let revision=0;
+  let stop:(()=>void)|undefined;
+  async function show(work:'soft'|'hard'){
+    stop?.();stop=undefined;
+    const selected=++revision;
+    const current=()=>valid()&&selected===revision;
+    managerReportWork=work;
+    for(const button of buttons){
+      const active=button.dataset.managerReport===work;
+      button.classList.toggle('active',active);
+      button.setAttribute('aria-pressed',String(active));
+    }
+    try{
+      const mounted=work==='hard'
+        ? mountTeamResults(content,api,current,(person,event)=>openCard(person,undefined,event),'visit')
+        : await mountManagerReports(content,api,current);
+      if(current())stop=mounted;else mounted();
+    }catch(error){if(current())reportError(error);}
+  }
+  disposeSection=()=>{revision++;stop?.();};
+  for(const button of buttons)button.onclick=()=>void show(button.dataset.managerReport==='hard'?'hard':'soft');
+  await show(managerReportWork);
 }
 async function managerTeam(){
   const generation=renderGeneration,expectedOwner=state.owner;
   const valid=()=>generation===renderGeneration&&section==='team';
-  const stop=await mountManagerTeam($('view'),{...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner)},context,valid,async id=>{
+  const host=$('view');
+  host.innerHTML='<div class="tabs"><button data-team-tab="results" class="active" aria-pressed="true">Результаты</button><button data-team-tab="access" aria-pressed="false">Доступы и устройства</button></div><div id="team-content"></div>';
+  const content=host.querySelector<HTMLElement>('#team-content')!;
+  const tabs=host.querySelectorAll<HTMLButtonElement>('[data-team-tab]');
+  const api={...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner)};
+  let subview=0;
+  let stop: (()=>void)|undefined;
+  const openPortfolio=async (id:string)=>{
     const saved=(await crm.draft('registry-view')).data||{};
     await crm.draft('registry-view',{...saved,search:'',employee_uuid:id,work:'all',unassigned:'0',offset:0},expectedOwner);
     await go('registry');
-  });
-  if(valid())disposeSection=stop;else stop();
+  };
+  const show=async (tab:string)=>{
+    stop?.();
+    const next=++subview;
+    const active=()=>valid()&&next===subview;
+    for(const button of tabs){
+      const selected=button.dataset.teamTab===tab;
+      button.classList.toggle('active',selected);
+      button.setAttribute('aria-pressed',String(selected));
+    }
+    const mounted=tab==='results'?mountTeamResults(content,api,active,(person,event)=>openCard(person,undefined,event)):await mountManagerTeam(content,api,context,active,openPortfolio);
+    if(active())stop=mounted;else mounted();
+  };
+  disposeSection=()=>{subview++;stop?.();};
+  for(const button of tabs)button.onclick=()=>void show(button.dataset.teamTab!).catch(reportError);
+  await show('results');
 }
 
 async function managerRegistry(){
@@ -647,34 +726,52 @@ async function managerRegistry(){
   if(valid())disposeSection=stop;else stop();
 }
 
-async function portfolio(search = portfolioSearch, offset=portfolioOffset) {
+async function portfolio(search = portfolioSearch, offset=portfolioOffset, selectedFilters=portfolioFilters) {
+  search=search.trim();
   const generation=++portfolioGeneration;
-  portfolioSearch=search;portfolioOffset=offset;
-  await crm.draft('portfolio-view',{view:portfolioView,work:portfolioWork,employee:portfolioEmployee});
   const personal=portfolioView==='mine';
-  const data = await request("GET", personal?'work-portfolio':'portfolio', undefined,
-    personal?{search,work:portfolioWork,employee_uuid:portfolioEmployee,offset,limit:100}:{search,limit:500});
-  if(generation!==portfolioGeneration || section!=='portfolio')return;
   const mobile=crm.platform==='mobile';
-  const modes=`<div class="tabs portfolio-modes"><button data-portfolio-view="mine" class="${personal?'active':''}">${mobile?'Мой':'Мой портфель'}</button><button data-portfolio-view="all" class="${personal?'':'active'}">${mobile?'Общий':'Все клиенты'}</button></div>`;
+  const searchInput=$<HTMLInputElement>('search');
+  const initialInput=searchInput?.value;
+  const searchStatus=$('portfolio-search-status');
+  if(searchStatus)searchStatus.textContent='Загрузка…';
+  portfolioLoading=true;
+  const data = await request("GET", personal?'work-portfolio':'portfolio', undefined,
+    personal?{search,work:portfolioWork,employee_uuid:portfolioEmployee,offset,limit:100,
+      ...(portfolioWork==='call'?{call_queue:portfolioCallQueue}:{}),...selectedFilters}:{search,limit:500})
+    .finally(()=>{if(generation===portfolioGeneration){portfolioLoading=false;if(searchStatus)searchStatus.textContent='';}});
+  if(generation!==portfolioGeneration || section!=='portfolio')return;
+  portfolioSearch=search;portfolioOffset=offset;portfolioFilters=selectedFilters;
+  await crm.draft('portfolio-view',{view:portfolioView,work:portfolioWork,employee:portfolioEmployee,filters:portfolioFilters,callQueue:portfolioCallQueue});
+  if(generation!==portfolioGeneration || section!=='portfolio')return;
+  const modes=`<div class="tabs portfolio-modes"><button data-portfolio-view="mine" class="${personal?'active':''}">${mobile?'Мой':'Мой портфель'}</button><button data-portfolio-view="all" class="${personal?'':'active'}">${mobile?'Общий':'Все клиенты'}</button>${mobile&&!personal&&context.role==='employee'&&can('visit')?'<button id="my-visits">Мои выезды</button>':''}</div>`;
   const staff=context.staff || [];
   const selector=personal&&staff.length>1?`<label class="portfolio-person">Сотрудник <select id="portfolio-employee">${staff.map((p:any)=>`<option value="${esc(p.employee_uuid)}"${p.employee_uuid===portfolioEmployee?' selected':''}>${esc(p.name)}</option>`).join('')}</select></label>`:'';
+  const inputValue=searchInput?.value!==initialInput ? searchInput!.value : search;
+  const searchBar=`<div class="toolbar"><input type="search" id="search" maxlength="200" placeholder="Имя, договор, телефон, адрес" value="${esc(inputValue)}">${button('search-go','Найти')}${button('refresh','Обновить')}<span id="portfolio-search-status" role="status"></span></div>`;
   if(personal) {
     const options=[['all','Все',data.counts.all],['call','Звонки',data.counts.call],['visit','Выезды',data.counts.visit],['both','Оба',data.counts.both],
       ...(data.counts.delivery||context.role==='courier'?[['delivery','Доставка',data.counts.delivery]]:[]),
       ...(data.counts.logistics || portfolioWork==='logistics'?[['logistics','Курьерский обзвон',data.counts.logistics || 0]]:[])];
-    const filters=mobile?'':`<div class="work-filters">${options.map(([key,title,count])=>`<button data-work-filter="${key}" class="${portfolioWork===key?'active':''}" aria-pressed="${portfolioWork===key}">${title} <span>${count}</span></button>`).join('')}</div>`;
+    const workOptions=mobile?[options[0],options[2],options[1],...options.slice(3)]:options;
+    const filters=`<div class="work-filters" role="group" aria-label="Вид работы">${workOptions.map(([key,title,count])=>`<button data-work-filter="${key}" class="${portfolioWork===key?'active':''}" aria-pressed="${portfolioWork===key}">${title} <span>${count}</span></button>`).join('')}</div>`;
+    const callQueue=portfolioWork==='call'?`<div class="work-filters" role="group" aria-label="Очередь звонков">${[['today','Сегодня'],['all','Все звонки']].map(([key,title])=>
+      `<button data-call-queue="${key}" class="${portfolioCallQueue===key?'active':''}" aria-pressed="${portfolioCallQueue===key}">${title}</button>`).join('')}</div>`:'';
     const debt=Object.entries(data.currencies || {}).map(([unit,value])=>amount(value,unit)).join(' · ');
-    $('view').innerHTML=modes+selector+filters+`<div class="toolbar"><input type="search" id="search" placeholder="Имя, договор, телефон, адрес" value="${esc(search)}">${button('search-go','Найти')}${button('refresh','Обновить')}</div>`+
+    $('view').innerHTML=modes+selector+filters+callQueue+(mobile&&portfolioWork==='visit'&&can('visit')?'<div class="toolbar" id="field-offline"></div>':'')+searchBar+
+      (data.filter_options?portfolioFiltersMarkup(portfolioFilters,data.filter_options,portfolioFiltersOpen):'')+
       `<p class="muted" data-work-total>Договоров: ${data.total_contracts} · Клиентов: ${data.total_people}${debt?' · Долг: '+debt:''}${data.unknown_amounts?' · Без подтверждённой суммы или валюты: '+data.unknown_amounts:''}</p>`+
-      table(['Клиент','Договор / кредитор','Работа','Последний звонок','Последний выезд','Долг'],data.contracts.map((row:any)=>{
+      table(['Клиент','Договор / кредитор','Работа','Общий статус','Последний звонок','Последний выезд','Долг'],data.contracts.map((row:any)=>{
         const f=row.fields;
         const logistics = row.logistics_call ? (portfolioEmployee === context.employee_uuid
           ? `<button type="button" class="link work-kind" data-logistics-call="${esc(row.contract_uuid)}">Курьерский обзвон</button>`
           : '<span class="work-kind">Курьерский обзвон</span>') : '';
         const kinds = row.work_kinds.filter((kind: string) => kind !== 'logistics')
           .map((kind: string) => `<span class="work-kind">${esc(labels[kind] || kind)}</span>`).join('');
-        return `<tr data-work-contract="${esc(row.contract_uuid)}"><td><button class="link" data-person="${esc(row.person_uuid)}">${esc(row.client_name || 'Без имени')}</button></td><td>${esc(row.external_id)}<br><span class="muted">${esc(f.partner || row.creditor_id)}</span></td><td>${kinds}${logistics}</td><td>${esc(f.soft_call_status || '—')}${f.soft_comm_date?'<br>'+calendarDate(f.soft_comm_date):''}${f.soft_comment?'<div class="queue-comment">'+esc(f.soft_comment)+'</div>':''}</td><td>${esc(f.call_status || '—')}${f.visit_date?'<br>'+calendarDate(f.visit_date):''}${f.visit_comment?'<div class="queue-comment">'+esc(f.visit_comment)+'</div>':''}</td><td>${amount(f.debt_today ?? f.debt_total,row.currency || 'Валюта не задана')}</td></tr>`;
+        const debtValue=f.debt_today==null||f.debt_today===''?f.debt_total:f.debt_today;
+        const schedule=row.call_schedule;
+        const scheduleText=schedule?({overdue:'Просрочен на '+schedule.overdue_days+' дн.',no_status:'Без результата звонка',today:'Перезвон сегодня',no_date:'Дата перезвона не назначена',scheduled:'Запланирован'} as Record<string,string>)[schedule.reason]:'';
+        return `<tr data-work-contract="${esc(row.contract_uuid)}"><td><button class="link" data-person="${esc(row.person_uuid)}">${esc(row.client_name || 'Без имени')}</button></td><td>${esc(row.external_id)}<br><span class="muted">${esc(f.partner || row.creditor_id)}</span></td><td>${kinds}${logistics}${mobile && context.role==='employee' && portfolioEmployee===context.employee_uuid && row.work_kinds.includes('visit') ? `<button type="button" data-record-visit="${esc(row.contract_uuid)}" data-visit-person="${esc(row.person_uuid)}">Записать выезд</button>` : ''}${scheduleText?`<div class="queue-comment" data-call-reason>${esc(scheduleText)}${schedule.date?' · '+calendarDate(schedule.date):''}</div>`:''}</td><td>${esc(f.overall_result || '—')}</td><td>${esc(f.soft_call_status || '—')}${f.soft_comm_date?'<br>'+calendarDate(f.soft_comm_date):''}${f.soft_comment?'<div class="queue-comment">'+esc(f.soft_comment)+'</div>':''}</td><td>${esc(f.call_status || '—')}${f.visit_date?'<br>'+calendarDate(f.visit_date):''}${f.visit_comment?'<div class="queue-comment">'+esc(f.visit_comment)+'</div>':''}</td><td>${amount(debtValue,row.currency || 'Валюта не задана')}</td></tr>`;
       }))+
       (data.contracts.length?'':'<p class="empty">По выбранным условиям договоров нет</p>')+
       `<div class="toolbar portfolio-pages"><button id="work-previous"${offset===0?' disabled':''}>Назад</button><span>${data.total_contracts?offset+1:0}–${Math.min(offset+data.contracts.length,data.total_contracts)} из ${data.total_contracts}</span><button id="work-next"${data.has_more?'':' disabled'}>Далее</button></div>`;
@@ -691,17 +788,21 @@ async function portfolio(search = portfolioSearch, offset=portfolioOffset) {
       };
     });
     bind('work-previous',()=>portfolio(portfolioSearch,Math.max(0,portfolioOffset-100)));
-    if(mobile){
-      $('view').querySelector('.portfolio-modes')!.insertAdjacentHTML('beforeend',`<select id="portfolio-work" aria-label="Вид работы">${options.map(([key,title,count])=>`<option value="${key}"${portfolioWork===key?' selected':''}>${title} · ${count}</option>`).join('')}</select>`);
-      $<HTMLSelectElement>('portfolio-work').onchange=()=>{portfolioWork=$<HTMLSelectElement>('portfolio-work').value;void portfolio(portfolioSearch,0).catch(reportError);};
-    }
     bind('work-next',()=>portfolio(portfolioSearch,portfolioOffset+100));
+    const fieldOffline=$<HTMLElement>('field-offline');
+    if(fieldOffline)crm.renderFieldOffline?.(fieldOffline);
+    const filterPanel=$<HTMLDetailsElement>('portfolio-filters');
+    if(filterPanel){
+      filterPanel.ontoggle=()=>{if(filterPanel.isConnected)portfolioFiltersOpen=filterPanel.open;};
+      bindPortfolioFilters(filterPanel,values=>portfolio($<HTMLInputElement>('search').value,0,values));
+    }
     $('view').querySelectorAll<HTMLButtonElement>('[data-work-filter]').forEach(b=>b.onclick=()=>{portfolioWork=b.dataset.workFilter!;void portfolio(portfolioSearch,0).catch(reportError);});
+    $('view').querySelectorAll<HTMLButtonElement>('[data-call-queue]').forEach(b=>b.onclick=()=>{portfolioCallQueue=b.dataset.callQueue!;void portfolio(portfolioSearch,0).catch(reportError);});
     const employee=$<HTMLSelectElement>('portfolio-employee');
     if(employee)employee.onchange=()=>{portfolioEmployee=employee.value;portfolioWork='all';void portfolio(portfolioSearch,0).catch(reportError);};
   } else {
   $("view").innerHTML =
-    modes+`<div class="toolbar"><input type="search" id="search" placeholder="Имя, договор, телефон, адрес" value="${esc(search)}">${button("search-go", "Найти")}${button("refresh", "Обновить")}</div><div class="muted">Клиентов: ${data.total_people} · Договоров: ${data.total_contracts}${data.truncated ? " · Уточните поиск" : ""}</div>` +
+    modes+searchBar+`<div class="muted">Клиентов: ${data.total_people} · Договоров: ${data.total_contracts}${data.truncated ? " · Уточните поиск" : ""}</div>` +
     table(
       ["Клиент", "Договоры", "Остаток по валютам"],
       data.people.map(
@@ -726,6 +827,9 @@ async function portfolio(search = portfolioSearch, offset=portfolioOffset) {
     $('view').querySelector('.portfolio-modes')!.insertAdjacentHTML('beforeend',`<details class="portfolio-context"><summary>Инструменты</summary><div>${button('portfolio-tasks','Задачи')}${button('portfolio-queue','Отправка результатов')}${button('portfolio-script','Скрипт')}${button('portfolio-help','Справка')}</div></details>`);
     bind('portfolio-tasks',()=>go('tasks'));bind('portfolio-queue',()=>go('queue'));bind('portfolio-script',()=>go('script'));bind('portfolio-help',()=>go('help'));
   }
+  const shortcut=$('my-visits');
+  if(shortcut)shortcut.onclick=()=>{portfolioView='mine';portfolioWork='visit';portfolioEmployee=context.employee_uuid;void portfolio('',0).catch(reportError);};
+  $('view').querySelectorAll<HTMLButtonElement>('[data-record-visit]').forEach(b=>b.onclick=()=>void openCard(b.dataset.visitPerson!,b.dataset.recordVisit!));
   if(!mobile){
     const modes=$('view').querySelector('.portfolio-modes')!;
     const filters=$('view').querySelector('.work-filters');
@@ -737,17 +841,18 @@ async function portfolio(search = portfolioSearch, offset=portfolioOffset) {
     .forEach((b) => (b.onclick = () => void openCard(b.dataset.person!)));
 }
 
-async function openCard(person: string) {
+async function openCard(person: string, visitContract?:string, resultEvent?:string) {
   clearTimeout(cardRetryTimer);
   clearTimeout(syncTimer);syncForced=false;
   if(!activePerson)sectionScroll.set(section,document.querySelector('main')!.scrollTop);
   portfolioGeneration++;
   taskGeneration++;const generation=++renderGeneration;
   activePerson=person;cardSyncGeneration++;lastCardAcknowledgements='';cardRefreshPending=false;
-  crm.navigated?.({section:section==='registry'?'registry':section==='tasks'?'tasks':'portfolio',person});
+  const linkedSection=['registry','tasks','team','field','manager-statistics'].includes(section)?section:'portfolio';
+  crm.navigated?.({section:linkedSection,person});
   card=null;cardScript=null;cardRefreshError='';
   const createTask=taskSelectClient;
-  cardOrigin=section==='tasks' || createTask?'tasks':section==='registry'?'registry':'portfolio';
+  cardOrigin=createTask?'tasks':linkedSection;
   taskSelectClient=false;
   $('view').innerHTML='<p role="status">Загрузка карточки…</p>';
   try {
@@ -759,11 +864,20 @@ async function openCard(person: string) {
     }
     if(generation!==renderGeneration || activePerson!==person)return;
     card=loaded;cardScript=loadedScript;
-    tab = "overview";
+    tab = resultEvent?'history':'overview';
     telemetry("feature_opened", "card");
     await renderCard();
     document.querySelector('main')!.scrollTop=0;
+    if(resultEvent){
+      const event=document.querySelector<HTMLElement>(`[data-history-event="${CSS.escape(resultEvent)}"]`);
+      if(event)event.scrollIntoView({block:'center'});
+      else notice('Карточка открыта. Выбранное событие отсутствует среди загруженных записей.');
+    }
     scheduleSync();
+    if(visitContract && generation===renderGeneration && activePerson===person){
+      if(can('visit') && card.contracts.some((r:any)=>r.contract_uuid===visitContract && contractCan(r,'visit')))await action('visit',undefined,visitContract);
+      else notice('Этот выезд больше не назначен вам. Обновите портфель.');
+    }
     if(createTask){
       if(can('task') && card.contracts.some((entry:any)=>contractCan(entry,'task')))await action('task');
       else notice('Нет права назначать задачу по этому клиенту.');
@@ -802,10 +916,10 @@ async function renderCard() {
   ];
   $("view").innerHTML =
     `<div class="toolbar">${button("back", cardOrigin==='tasks'?'← Задачи':"← Портфель")}${button('card-refresh','Обновить карточку')}${actions.map((k) => `<button data-action="${k}"${k === "call" ? ' class="primary"' : ""}>${labels[k]}</button>`).join("")}</div><section id="card-saves" aria-label="Отправка результатов"></section><div class="tabs">${tabs.map(([id, title]) => `<button data-tab="${id}" class="${tab === id ? "active" : ""}">${title}</button>`).join("")}</div><div class="card-workspace${showCardScript ? ' with-script' : ''}"><div id="card-content"></div>${showCardScript ? `<aside class="card-script-watermark" aria-label="Скрипт разговора"><h2>${esc(cardScript.script.title)}</h2>${cardScript.script.steps.map((step: any) => `<section><h3>${esc(step.title)}</h3><p>${esc(step.text)}</p></section>`).join('')}<small>Версия ${esc(cardScript.published_revision)}</small></aside>` : ''}</div>`;
-  $('back').textContent=cardOrigin==='tasks'?'← Задачи':cardOrigin==='registry'?'← Реестр':'← Портфель';
+  $('back').textContent=cardOrigin==='tasks'?'← Задачи':cardOrigin==='registry'?'← Реестр':cardOrigin==='team'?'← Команда':cardOrigin==='field'?'← Маршрут':cardOrigin==='manager-statistics'?'← Показатели':'← Портфель';
   bind("back", () => go(cardOrigin));
   if(crm.platform!=='mobile'){
-    const secondary=[...$('view').querySelectorAll<HTMLButtonElement>('[data-action]')].filter(b=>!['call','visit','delivery'].includes(b.dataset.action!));
+    const secondary=[...$('view').querySelectorAll<HTMLButtonElement>('[data-action]')].filter(b=>!['call','visit','delivery','note'].includes(b.dataset.action!));
     if(secondary.length){
       const menu=document.createElement('details');menu.className='card-more-actions';
       menu.innerHTML='<summary>Другие действия</summary><div></div>';
@@ -834,10 +948,10 @@ async function renderCard() {
   const host = $("card-content");
   if (tab === "overview" || tab === "contracts") {
     host.innerHTML = table(
-      ["Договор / кредитор", "Контакты", "Остаток", "Последний результат"],
+      ["Договор / кредитор", "Контакты", "Остаток", "Общий статус", "Последний результат"],
       card.contracts.map(
         (r: any) =>
-          `<tr><td><b>${esc(r.external_id)}</b><br><span class="muted">${esc(r.creditor_id)}</span></td><td>${esc(r.fields.phone || r.fields.phone_main || "—")}<br>${esc(r.fields.address || "—")}</td><td class="amount">${amount(r.fields.debt_today ?? r.fields.debt_total, r.currency || "Валюта не задана")}</td><td>${r.fields.soft_call_status || r.fields.soft_comment ? `<div>Звонок: ${esc(r.fields.soft_call_status || '—')}<br><span class="muted">${esc(r.fields.soft_comment || '')}</span></div>` : ''}${r.fields.call_status || r.fields.visit_comment ? `<div>Выезд: ${esc(r.fields.call_status || '—')}<br><span class="muted">${esc(r.fields.visit_comment || '')}</span></div>` : ''}</td></tr>`,
+          `<tr><td><b>${esc(r.external_id)}</b><br><span class="muted">${esc(r.creditor_id)}</span></td><td>${esc(r.fields.phone || r.fields.phone_main || "—")}<br>${esc(r.fields.address || "—")}</td><td class="amount">${amount(r.fields.debt_today ?? r.fields.debt_total, r.currency || "Валюта не задана")}</td><td>${esc(r.fields.overall_result || '—')}</td><td>${r.fields.soft_call_status || r.fields.soft_comment ? `<div>Звонок: ${esc(r.fields.soft_call_status || '—')}<br><span class="muted">${esc(r.fields.soft_comment || '')}</span></div>` : ''}${r.fields.call_status || r.fields.visit_comment ? `<div>Выезд: ${esc(r.fields.call_status || '—')}<br><span class="muted">${esc(r.fields.visit_comment || '')}</span></div>` : ''}</td></tr>`,
       ),
     );
     host.innerHTML += card.contracts.map((c:any)=>contractDetails(c)+fullBusiness(c)).join('');
@@ -849,7 +963,7 @@ async function renderCard() {
       ? card.history
           .map(
             (e: any) =>
-              `<article class="record"><h3>${esc(labels[e.kind] || e.kind)} <span class="tag">${esc(({legacy:'Прежнее приложение',app:'Приложение',excel:'Реестр',unknown:'Источник не определён'} as any)[e.origin] || e.origin)}</span></h3><div class="muted">${historyWhen(e)} · ${esc(e.author || e.payload.legacy_employee || "Автор не указан")} · ${e.contract_ids.length} дог. ${e.projection_status === "needs_review" ? "· Требует сверки" : ""}</div><p>${esc(
+              `<article class="record" data-history-event="${esc(e.event_id)}"><h3>${esc(labels[e.kind] || e.kind)} <span class="tag">${esc(({legacy:'Прежнее приложение',app:'Приложение',excel:'Реестр',unknown:'Источник не определён'} as any)[e.origin] || e.origin)}</span></h3><div class="muted">${historyWhen(e)} · ${esc(e.author || e.payload.legacy_employee || "Автор не указан")} · ${e.contract_ids.length} дог. ${e.projection_status === "needs_review" ? "· Требует сверки" : ""}</div><p>${esc(
                 (e.kind === 'delivery' ? [e.payload.delivered ? 'Конверт передан' : 'Конверт не передан',e.payload.delivery_address,e.payload.delivery_phone,e.payload.delivery_comment].filter(Boolean).join('\n') : '') || e.payload.text ||
                   e.payload.title ||
                   Object.entries(e.payload.values || {})
@@ -861,10 +975,13 @@ async function renderCard() {
                         (v ?? "Очищено"),
                     )
                     .join("\n"),
-              )}</p>${e.payload.script_ref ? `<p class="muted">Подсказка: версия ${esc(e.payload.script_ref.published_revision)}</p>` : ""}${e.reason ? `<p>Причина: ${esc(e.reason)}</p>` : ""}${["call", "visit", "note", "contact"].includes(e.kind) && can("correct") && e.can_correct !== false ? `<button data-correct="${e.event_id}">Исправить</button>` : ""}</article>`,
+              )}</p>${e.payload.field_visit ? `<p>${esc([e.payload.field_visit.phone && 'Телефон: '+e.payload.field_visit.phone,e.payload.field_visit.point && 'Точка: '+e.payload.field_visit.point.lat+', '+e.payload.field_visit.point.lon].filter(Boolean).join(' · '))}</p>${(e.payload.field_visit.photos||[]).map((id:string,i:number)=>`<button data-visit-photo="${esc(id)}">Фото ${i+1}</button>`).join(' ')}` : ''}${e.payload.script_ref ? `<p class="muted">Подсказка: версия ${esc(e.payload.script_ref.published_revision)}</p>` : ""}${e.reason ? `<p>Причина: ${esc(e.reason)}</p>` : ""}${["call", "visit", "note", "contact"].includes(e.kind) && can("correct") && e.can_correct !== false ? `<button data-correct="${e.event_id}">Исправить</button>` : ""}</article>`,
           )
           .join("")
       : `<div class="empty">${registry?'Отдельных событий CRM пока нет':'Истории по этому клиенту пока нет'}</div>`);
+    host.querySelectorAll<HTMLButtonElement>('[data-visit-photo]').forEach((b)=>b.onclick=async()=>{
+      const result=await crm.document('',b.dataset.visitPhoto,state.owner);if(!result.ok&&!result.cancelled)notice(result.text);
+    });
     document.querySelectorAll<HTMLButtonElement>("[data-correct]").forEach(
       (b) =>
         (b.onclick = () =>
@@ -940,13 +1057,13 @@ async function submitCommand(raw: any,expectedOwner=state.owner) {
   scheduleSync();
 }
 
-async function action(kind: string, original?: any) {
+async function action(kind: string, original?: any, contractHint?:string) {
   if(formOpening || $<HTMLDialogElement>('dialog').open)return;
   formOpening=true;
-  try {await actionForm(kind,original,renderGeneration);}
+  try {await actionForm(kind,original,renderGeneration,contractHint);}
   finally {formOpening=false;if(cardRefreshPending && !$<HTMLDialogElement>('dialog').open)scheduleSync();}
 }
-async function actionForm(kind: string, original: any, viewGeneration:number) {
+async function actionForm(kind: string, original: any, viewGeneration:number, contractHint?:string) {
   const expectedOwner=state.owner;
   const formAPI={draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),command:(body:any)=>crm.command(body,expectedOwner),document:(contract:string)=>crm.document(contract,undefined,expectedOwner)};
 
@@ -983,8 +1100,9 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
     },expectedOwner);
     return;
   }
+  const mobileVisit=kind==='visit' && crm.platform==='mobile' && !!crm.visitPhotoQueue;
   const map: Record<string, string[]> = {
-    call: ["soft_call_status", "soft_comment", "soft_comm_date"],
+    call: ["soft_call_status", "soft_comment", "soft_comm_date", "soft_next_call_date"],
     visit: [
       "call_status",
       "visit_date",
@@ -1000,12 +1118,12 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
     reported_payment: [],
   };
   const keys = map[target] || [],
-    singular = ["promise", "task", "reported_payment"].includes(target);
+    singular = mobileVisit || ["promise", "task", "reported_payment"].includes(target);
   const draftKey =
     card.person.person_uuid +
     ":" +
     kind +
-    (original ? ":" + original.event_id : "");
+    (original ? ":" + original.event_id : kind==='visit' && contractHint ? ":" + contractHint : "");
   const saved = (await formAPI.draft(draftKey)).data;
   // A form owns its script snapshot. Reopening the same draft or opening
   // the inline panel again must not switch text during the call.
@@ -1039,7 +1157,7 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
     })
     .join("");
   dialog.innerHTML = `<form id="action-form"><h2>${esc(labels[kind])}</h2><div class="contracts">${card.contracts.map((c: any, i: number) => `<label class="check"><input type="${singular ? "radio" : "checkbox"}" name="contracts" value="${c.contract_uuid}"${!singular || i === 0 ? " checked" : ""}>${esc(c.external_id)} · ${esc(c.creditor_id)}</label>`).join("")}</div><div class="grid">${controls}${["note", "task"].includes(target) ? `<div class="field span"><label>${target === "task" ? "Задача" : "Заметка"}</label><textarea id="free-text">${esc(saved?.text || original?.payload?.text || "")}</textarea></div>` : ""}${["promise", "reported_payment"].includes(target) ? `<div class="field"><label>Сумма</label><input id="money" inputmode="decimal" value="${esc(saved?.amount || "")}"></div><div class="field"><label>Валюта</label><select id="currency"><option>RUB</option><option>TJS</option><option>UZS</option><option>USD</option></select></div>` : ""}${["promise", "task"].includes(target) ? `<div class="field"><label>Срок · ${esc(Intl.DateTimeFormat().resolvedOptions().timeZone)}</label><input id="due" type="datetime-local" value="${esc(saved?.due || "")}"></div>` : ""}${kind === "correction" ? '<div class="field span"><label>Причина исправления</label><textarea id="reason" required></textarea></div>' : ""}</div><div class="error" id="form-error"></div><div class="actions">${button("cancel", "Закрыть")}${kind === "call" ? button("show-script", "Скрипт") : ""}<button type="submit" class="primary">Сохранить действие</button></div><div id="script-inline"></div></form>`;
-  const selectedIds = saved?.contract_ids ?? original?.contract_ids;
+  const selectedIds = contractHint && !saved ? [contractHint] : saved?.contract_ids ?? original?.contract_ids;
   const permitted = new Set(card.contracts.filter((entry: any) => contractCan(entry, target)
     && (kind !== 'correction' || contractCan(entry, 'correct'))).map((entry: any) => entry.contract_uuid));
   let needsContractSelection = Array.isArray(selectedIds) && selectedIds.some((id: string) => !permitted.has(id));
@@ -1076,7 +1194,29 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
     el.checked = (saved?.clear ?? original?.payload?.clear ?? []).includes(el.dataset.clear);
   });
   const freeText = $<HTMLTextAreaElement>("free-text");
-  if (freeText) freeText.value = saved?.text ?? original?.payload?.[target === "task" ? "title" : "text"] ?? "";
+  if (freeText) {
+    freeText.value = saved?.text ?? original?.payload?.[target === "task" ? "title" : "text"] ?? "";
+    freeText.previousElementSibling!.textContent = target === 'task' ? 'Задача' : 'Комментарий';
+    freeText.previousElementSibling!.setAttribute('for', freeText.id);
+  }
+  const statusInput = kind === 'call' ? $<HTMLSelectElement>('v-soft_call_status') : kind === 'visit' ? $<HTMLSelectElement>('v-call_status') : undefined;
+  if (kind==='call' && !saved)
+    $<HTMLInputElement>('v-soft_comm_date').value = new Date().toLocaleDateString('en-CA',{timeZone:context.timezone || 'Europe/Samara'});
+  const moneyAction = () => {
+    const status = statusInput?.value.trim().toLocaleLowerCase('ru').replace(/ sms$/, '');
+    const next = status === 'оплачен' ? 'reported_payment' : status === 'обещает оплатить' ? 'promise' : '';
+    if (!next || !can(next)) return null;
+    const ids = new Set([...dialog.querySelectorAll<HTMLInputElement>('input[name=contracts]:checked')].map(input => input.value));
+    const contracts = card.contracts.filter((entry: any) => ids.has(entry.contract_uuid) && contractCan(entry, next));
+    return contracts.length ? {kind:next, contract:contracts.length === 1 ? contracts[0].contract_uuid : undefined} : null;
+  };
+  if (statusInput) {
+    dialog.querySelector('.actions')!.insertAdjacentHTML('beforeend','<button type="submit" id="save-with-amount" hidden>Сохранить и указать сумму</button>');
+    const nextButton = $<HTMLButtonElement>('save-with-amount');
+    const update = () => { nextButton.hidden = !moneyAction(); };
+    dialog.querySelector('form')!.addEventListener('input', update);
+    update();
+  }
   const currencyInput = $<HTMLSelectElement>("currency");
   if (currencyInput) {
     const selected = dialog.querySelector<HTMLInputElement>("input[name=contracts]:checked")?.value;
@@ -1087,7 +1227,15 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
   }
   const reasonInput = $<HTMLTextAreaElement>("reason");
   if (reasonInput) reasonInput.value = saved?.reason ?? "";
-  const capture = () => ({
+  let evidence: ReturnType<typeof visitEvidence> | undefined;
+  let draftWrites:Promise<unknown>=Promise.resolve();
+  const persistEvidence=async()=>{
+    const draft=capture();
+    draftWrites=draftWrites.catch(()=>{}).then(()=>formAPI.draft(draftKey,draft));
+    await draftWrites;
+  };
+  const capture = ():any => ({
+    ...(evidence?{field_visit:evidence.draft()}:{}),
     contract_ids: needsContractSelection ? selectedIds : Array.from(dialog.querySelectorAll<HTMLInputElement>("input[name=contracts]:checked")).map((el) => el.value),
     clear: Array.from(dialog.querySelectorAll<HTMLInputElement>("[data-clear]:checked")).map((el) => el.dataset.clear),
     values: Object.fromEntries(
@@ -1104,15 +1252,23 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
     assignee_uuid: $<HTMLSelectElement>('task-assignee')?.value,
     work_kind: $<HTMLSelectElement>('task-work')?.value,
   });
+  if(mobileVisit){
+    const form=$<HTMLFormElement>('action-form');
+    const date=form.querySelector<HTMLInputElement>('#v-visit_date')!;
+    if(!saved && !date.value){const d=new Date();date.value=[d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-');}
+    evidence=visitEvidence(form,saved?.field_visit,card.contracts,crm.visitPhotoQueue!(draftKey,expectedOwner),persistEvidence);
+    form.querySelector<HTMLButtonElement>('[type=submit]')!.textContent='Сохранить выезд';
+  }
   if (kind === "call" && callScript) await formAPI.draft(draftKey, capture());
   dialog.querySelectorAll("input,select,textarea").forEach((el) =>
     el.addEventListener("input", () => {
-      void formAPI.draft(draftKey, capture());
+      if(evidence)void persistEvidence().catch(reportError);else void formAPI.draft(draftKey, capture());
     }),
   );
   $("cancel").onclick = (e) => {
     e.preventDefault();
-    void formAPI.draft(draftKey, capture());
+    if(evidence?.busy)return;
+    if(evidence)void persistEvidence().catch(reportError);else void formAPI.draft(draftKey, capture());
     dialog.close();
   };
   if (kind === "call")
@@ -1128,8 +1284,12 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
       telemetry("script_shown", "script");
     };
   $('action-form').dataset.work=target;
+  let saving=false;
   $("action-form").onsubmit = async (e) => {
     e.preventDefault();
+    if(saving)return;
+    saving=true;
+    const next=(e as SubmitEvent).submitter?.id==='save-with-amount'?moneyAction():null;
     try {
       if (needsContractSelection) throw new Error('Выберите доступный договор после изменения прав.');
       const contract_ids = Array.from(
@@ -1153,6 +1313,10 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
         } else if (value !== "") values[key] = value;
       }
       const payload: any = { values, clear };
+      if(evidence){
+        await draftWrites;
+        payload.field_visit=evidence.payload(contract_ids);
+      }
       if (kind === "call" && scriptShown && callScript?.script_ref)
         payload.script_ref = callScript.script_ref;
       if (target === "note")
@@ -1208,8 +1372,12 @@ async function actionForm(kind: string, original: any, viewGeneration:number) {
       if(target==='task')await go('tasks');
       notice(`Действие сохранено ${savedOn}.`,'status');
       scheduleSync();
+      if(next && viewGeneration===renderGeneration && expectedOwner===state.owner)
+        void action(next.kind,undefined,next.contract).catch(reportError);
     } catch (error) {
-      $("form-error").textContent = (error as Error).message;
+      if($("form-error"))$("form-error").textContent = (error as Error).message;
+    } finally {
+      saving=false;
     }
   };
   if(viewGeneration===renderGeneration)dialog.showModal();
@@ -1250,6 +1418,7 @@ async function queuePage(host:HTMLElement=document.getElementById('view')!) {
   if (!result.ok) throw new Error(result.text);
   const entries = result.data.entries;
   const pending = entries.filter((e: any) => e.state !== "accepted" && !e.reviewed_at);
+  const previousLegacyPanel=host.querySelector<HTMLElement>('[data-legacy-visit-panel]');
   const exportErrors = (result.data.exports || []).filter(
     (v: any) => !v.completed,
   );
@@ -1275,6 +1444,7 @@ async function queuePage(host:HTMLElement=document.getElementById('view')!) {
       .join(""),
   );
   host.querySelectorAll<HTMLButtonElement>('[data-export-retry]').forEach(b=>b.onclick=()=>{b.disabled=true;void crm.workbook('resume',{operation_id:b.dataset.exportRetry}).then(()=>queuePage(host)).catch(e=>{notice(e.message);b.disabled=false;});});
+  crm.renderLegacyVisits?.(host,previousLegacyPanel);
   bind("queue-refresh", ()=>queuePage(host));
   bind("queue-send", async () => {
     await crm.queue("flush");
@@ -1728,11 +1898,12 @@ crm.onChange?.(event=>{
   }else if(event.type==='live'){
     const environment=context?.distribution?.environment==='isolated'?'Изолированный стенд · ':state?.connection?.mode==='synthetic'?'Синтетические данные · ':'';
     $('connection').textContent=environment+(event.connected
-      ? event.pending ? 'Сервер отвечает · обрабатывает обмен' : 'Подтверждённая связь · '+date(event.as_of)
-      : `Связь не подтверждена · ввод сохранён ${savedOn}`);
+      ? event.pending ? 'Сервер обрабатывает изменения' : 'Связь есть · обновлено '+date(event.as_of)
+      : event.reason==='offline' ? `Нет связи · ввод сохранён ${savedOn}` : `Сервер временно недоступен · ввод сохранён ${savedOn}`);
     if(event.dirty){
       if(activePerson)scheduleSync(true);
-      else if(section==='portfolio')void portfolio().catch(reportError);
+      else if(section==='portfolio'&&!portfolioLoading&&!$('view').querySelector('#portfolio-filters[open] form[data-edited]')
+        && ($<HTMLInputElement>('search')?.value.trim() ?? portfolioSearch)===portfolioSearch)void portfolio().catch(reportError);
       else if(section==='logistics')void logisticsView?.refresh().catch(reportError);
 
     }

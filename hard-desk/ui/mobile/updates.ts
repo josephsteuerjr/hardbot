@@ -54,7 +54,7 @@ export function mobileUpdates(){
   const check=async()=>{
    if(checking||document.hidden)return;checking=true;
    try{
-    const response=await fetch('./BUILD.json',{cache:'no-store'});
+    const response=await fetch('./BUILD.json',{cache:'no-store',signal:AbortSignal.timeout(8000)});
     if(!response.ok)return;const build=await response.json();
     if(!/^[a-f0-9]{16}$/.test(build.version))return;
     target=build.version;

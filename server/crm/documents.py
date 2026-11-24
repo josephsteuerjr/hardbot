@@ -11,6 +11,13 @@ def root():
     return storage.document_root()
 
 
+def download_json(principal, identifier):
+    import base64
+    row, path = download(principal, identifier)
+    return dict(filename=row['filename'], media_type=row['media_type'],
+                content_base64=base64.b64encode(path.read_bytes()).decode('ascii'))
+
+
 def verify(row):
     path = root() / row["sha256"]
     if (

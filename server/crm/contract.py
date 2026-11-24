@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import uuid
+from functools import lru_cache
 
 SCHEMA_VERSION = 1
 NAMESPACE = uuid.UUID("95c044ee-8090-4ab8-a15f-68aa12332181")
@@ -25,7 +26,7 @@ KINDS = {
     "delivery",
 }
 USEFUL = KINDS - {"correction"}
-CALL_KEYS = {"soft_call_status", "soft_comm_date", "soft_comment"}
+CALL_KEYS = {"soft_call_status", "soft_comm_date", "soft_comment", "soft_next_call_date"}
 VISIT_KEYS = {
     "call_status",
     "visit_date",
@@ -104,6 +105,11 @@ def now():
 def instant(value):
     if not isinstance(value, str):
         raise CRMError("Укажите время с часовым поясом.")
+    return _instant(value)
+
+
+@lru_cache(maxsize=32768)
+def _instant(value):
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
@@ -178,6 +184,8 @@ def fields():
             nullable=True,
         )
         for f in FIELDS
+    ] + [dict(key='soft_next_call_date',title='Дата следующего звонка',section='Звонки',group='call',
+              type='date',source='work_event',clear='explicit',nullable=True)
     ] + [dict(key=key,title=title,group='delivery',type='text',source='work_event',clear='explicit',nullable=True,readonly=True)
          for key,title in DELIVERY_FIELDS.items()]
 

@@ -2,9 +2,14 @@
 
 from collections import Counter, defaultdict
 from datetime import date, timedelta, timezone
+import base64
+import hashlib
 import json
+import os
 import re
+import tempfile
 import uuid
+from pathlib import Path
 
 from . import access, delivery, primary_fence, storage, store
 from .contract import CRMError, digest, field_value, instant, now, operation_id
@@ -28,7 +33,7 @@ def country_code(value):
 
 
 def countries(conn, principal):
-    if principal.role != 'logistic' or 'logistics' not in principal.capabilities:
+    if principal.role not in {'logistic', 'manager', 'owner'} or 'logistics' not in principal.capabilities:
         return []
     return [r[0] for r in conn.execute(
         "SELECT country FROM crm_logistics_staff WHERE employee_uuid=? AND work='logist' ORDER BY country",
@@ -62,6 +67,25 @@ def roster(conn, country):
         work = row['work']
         role = 'employee' if work == 'call' else 'courier'
         if row['role'] == role and work in json.loads(row['capabilities_json']):
+            staff[work].setdefault(row['employee_uuid'], row['name'])
+    from . import team_territories
+    owner = access.Principal(0, '', '', 'owner', frozenset(), frozenset(), all_contracts=True, read_all_contracts=True)
+    employees = [dict(row) for row in conn.execute(
+        "SELECT e.employee_uuid,e.name,m.role,m.capabilities_json,m.starts_at,m.ends_at FROM crm_employees e "
+        "JOIN crm_memberships m USING(employee_uuid) JOIN crm_actor_links a USING(employee_uuid) "
+        "WHERE e.active=1 AND a.active=1 ORDER BY e.name")]
+    try:
+        geography = team_territories.staff(owner, employees, shared=bool(os.environ.get('HARD_CRM_PRIMARY_DB')))
+    except Exception:
+        geography = {}
+    at = now()
+    for row in employees:
+        person = geography.get(row['employee_uuid'])
+        if not person or person['country'] != country:
+            continue
+        work = 'call' if row['role'] == 'employee' else 'delivery' if row['role'] == 'courier' else None
+        if work and (row['starts_at'] <= at and (row['ends_at'] is None or row['ends_at'] > at)
+                   and work in json.loads(row['capabilities_json'])):
             staff[work].setdefault(row['employee_uuid'], row['name'])
     return staff
 
@@ -169,8 +193,14 @@ def import_review(conn, principal, body):
     existing = {r['contract_uuid']: dict(r) for r in conn.execute(
         'SELECT contract_uuid,revision,active FROM crm_logistics_cases WHERE country=?', (country,))}
     couriers = defaultdict(list)
-    for employee, name in roster(conn, country)['delivery'].items():
-        couriers[normalized(name)].append(employee)
+    at = now()
+    for row in conn.execute(
+        "SELECT e.employee_uuid,e.name,m.capabilities_json FROM crm_employees e "
+        "JOIN crm_memberships m USING(employee_uuid) JOIN crm_actor_links a USING(employee_uuid) "
+        "WHERE e.active=1 AND a.active=1 AND m.role='courier' AND m.starts_at<=? "
+        "AND (m.ends_at IS NULL OR m.ends_at>?) ORDER BY m.starts_at DESC", (at, at)):
+        if 'delivery' in json.loads(row['capabilities_json']):
+            couriers[normalized(row['name'])].append(row['employee_uuid'])
     eligible = []
     for row in selected:
         identity = normalized(row['partner']), row['number']
@@ -242,6 +272,10 @@ def apply(principal, body):
             raise CRMError('В выбранном периоде нет новых подтверждённых договоров.')
         ids = [row['contract_uuid'] for row in eligible]
         primary_fence.require_contracts(conn, ids)
+        for row in eligible:
+            if row['courier_uuid']:
+                conn.execute("INSERT OR IGNORE INTO crm_logistics_staff(country,work,employee_uuid) VALUES(?,?,?)",
+                             (body['source']['country'], 'delivery', row['courier_uuid']))
         at = now()
         columns = ('contract_uuid', 'country', 'workbook_sha256', 'courier_label', 'courier_uuid',
                    'transferred_on', 'phone')
@@ -332,8 +366,24 @@ def export(principal, country='', **filters):
             [r['partner'], r['external_id'], r['client'], r['courier'] or r['courier_label'],
              r['transferred_on'], r['available_phone'], r['delivery'].get('delivery_result', ''),
              r['delivery'].get('delivery_comment', ''), r['caller'] or '', r['call_status'],
-             r['call_comment'], r['call_at'], 'В работе у курьеров' if r['active'] else 'Завершён']
+             r['call_comment'], r['call_at'], 'Завершён' if not r['active'] else 'В работе у курьеров' if r['courier_uuid'] or r['courier_label'] else 'Не назначено']
             for r in rows])
+
+
+def download(principal, country='', **filters):
+    report = export(principal, country=country, **filters)
+    from pult.core.portable_xlsx import export_table
+    handle, name = tempfile.mkstemp(prefix='crm-logistics-', suffix='.xlsx')
+    os.close(handle)
+    path = Path(name)
+    try:
+        export_table(path, report['title'], report['headers'], report['rows'],
+                     [19, 19, 31, 24, 18, 22, 24, 37, 26, 21, 37, 28, 21])
+        content = path.read_bytes()
+        return dict(filename=report['title'] + '.xlsx', content_base64=base64.b64encode(content).decode(),
+                    sha256=hashlib.sha256(content).hexdigest(), rows=len(report['rows']))
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def get_cases(conn, requested, country):
@@ -481,7 +531,7 @@ def configure_staff(conn, manifest, expected=None):
     entries, proof = staff_plan(conn, manifest)
     transitions = Counter()
     for row in entries:
-        target = {'logist': 'logistic', 'delivery': 'courier'}.get(row['work'])
+        target = row['current_role'] if row['work'] == 'logist' and row['current_role'] in {'manager', 'owner'} else {'logist': 'logistic', 'delivery': 'courier'}.get(row['work'])
         if target and target != row['current_role']:
             transitions[row['current_role'] + ' → ' + target] += 1
     if expected is not None:
@@ -493,8 +543,12 @@ def configure_staff(conn, manifest, expected=None):
             conn.execute('INSERT INTO crm_logistics_staff VALUES(?,?,?)',
                          (row['employee_uuid'], row['country'], row['work']))
             if row['work'] in {'logist', 'delivery'}:
-                caps = ['logistics'] if row['work'] == 'logist' else ['correct', 'delivery', 'task']
-                role = 'logistic' if row['work'] == 'logist' else 'courier'
+                if row['work'] == 'logist' and row['current_role'] in {'manager', 'owner'}:
+                    role = row['current_role']
+                    caps = sorted(set(row['capabilities']) | {'logistics'})
+                else:
+                    role = 'logistic' if row['work'] == 'logist' else 'courier'
+                    caps = ['logistics'] if row['work'] == 'logist' else ['correct', 'delivery', 'task']
                 conn.execute('UPDATE crm_memberships SET role=?,capabilities_json=? WHERE membership_id=?',
                              (role, canonical(caps), row['membership_id']))
     return dict(countries=sorted(manifest), scope_count=len(entries), role_changes=dict(transitions),

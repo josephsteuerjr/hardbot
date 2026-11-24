@@ -4,20 +4,21 @@
 !define MUI_TEXTCOLOR 1D1A17
 !define MUI_INSTFILESPAGE_COLORS "1D1A17 F4E4CF"
 
-; Native bounded check replaces the stock unbounded PowerShell/WMI shutdown.
-; It never kills an application containing unfinished work.
+; The wizard closes the installed product before the transaction. Keep a
+; bounded check here for concurrent launches and the direct native path.
 !macro customCheckAppRunning
+  WriteRegStr SHELL_CONTEXT "${INSTALL_REGISTRY_KEY}" InstallLocation "$INSTDIR"
   InitPluginsDir
   File /oname=$PLUGINSDIR\hard-process-check.exe "${BUILD_RESOURCES_DIR}\bin\process-check.exe"
   hardCheckAgain:
-  nsExec::Exec /TIMEOUT=10000 '"$PLUGINSDIR\hard-process-check.exe" "$INSTDIR" "${APP_EXECUTABLE_FILENAME}"'
+  nsExec::Exec /TIMEOUT=45000 '"$PLUGINSDIR\hard-process-check.exe" close "$INSTDIR" "${APP_EXECUTABLE_FILENAME}"'
   Pop $R0
   ${If} $R0 != 0
     ${If} ${Silent}
       SetErrorLevel 2
       Quit
     ${Else}
-      MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "Закройте ${PRODUCT_NAME} через значок у часов, затем нажмите «Повторить»." IDRETRY hardCheckAgain
+      MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "Не удалось завершить работу ${PRODUCT_NAME}. Подождите несколько секунд и нажмите «Повторить»." IDRETRY hardCheckAgain
       SetErrorLevel 2
       Quit
     ${EndIf}
@@ -27,8 +28,25 @@
 ; Keep the native uninstaller in the registry: electron-builder also uses it
 ; for silent upgrades. Its interactive entry delegates to our own wizard.
 !macro customUnInit
-  ${IfNot} ${Silent}
+  ${If} ${Silent}
+    ${If} ${isUpdated}
+      GetFullPathName /SHORT $R0 $INSTDIR
+      ${If} $R0 != ""
+        StrCpy $INSTDIR $R0
+      ${EndIf}
+    ${EndIf}
+  ${Else}
     Exec '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --hard-uninstall'
+    Quit
+  ${EndIf}
+!macroend
+
+!macro customUnInstallCheck
+  IfErrors 0 +3
+  SetErrorLevel 2
+  Quit
+  ${If} $R0 != 0
+    SetErrorLevel 2
     Quit
   ${EndIf}
 !macroend

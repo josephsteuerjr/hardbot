@@ -2,14 +2,15 @@ import { app, safeStorage } from "electron";
 import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   renameSync,
   writeFileSync,
   copyFileSync,
 } from "node:fs";
-import { join } from "node:path";
-import { directSeal, directSealCheckpoint, directOpen, isDirect } from "./windows-dpapi";
+import { dirname, join, parse } from "node:path";
+import { directSealCheckpoint, isCrmRecord, openCrmRecord, sealCrmRecord } from "./windows-dpapi";
 
 export interface Result {
   ok: boolean;
@@ -35,7 +36,7 @@ type Entry = {
   code?: string;
   reviewed_at?:string;
 };
-type Business = { schema: 1; owner: string; entries: Entry[] };
+type Business = { schema: 1; owner: string; entries: Entry[]; importedSoft?: Record<string,string> };
 type Technical = { events: any[]; dropped: number; gap_since?: string };
 const digest = (v: string) => createHash("sha256").update(v).digest("hex");
 const path = (name: string) =>
@@ -49,7 +50,9 @@ function remember(target: string, bytes: Buffer, json: string) {
     recentlyDecoded.delete(recentlyDecoded.keys().next().value!);
 }
 function read<T>(name: string, fallback: () => T): T {
-  const target = path(name);
+  return readAt(path(name),fallback);
+}
+function readAt<T>(target:string,fallback:()=>T):T{
   if (!existsSync(target)) {
     recentlyDecoded.delete(target);
     return fallback();
@@ -59,16 +62,16 @@ function read<T>(name: string, fallback: () => T): T {
   const previous = recentlyDecoded.get(target);
   if (previous?.bytes.equals(bytes)) return JSON.parse(previous.json);
   recentlyDecoded.delete(target);
-  const json = isDirect(bytes) ? directOpen(bytes) : safeStorage.decryptString(bytes);
+  const json = isCrmRecord(bytes) ? openCrmRecord(bytes) : safeStorage.decryptString(bytes);
   const value = JSON.parse(json);
   remember(target, bytes, json);
   return value;
 }
-function write(name: string, value: any, seal = directSeal) {
+function write(name: string, value: any, primary?: typeof directSealCheckpoint) {
   mkdirSync(join(app.getPath("userData"), "crm"), { recursive: true });
   const target = path(name);
   const json = JSON.stringify(value);
-  const bytes = seal(json);
+  const bytes = sealCrmRecord(json, primary);
   writeFileSync(target + ".tmp", bytes, {
     flush: true,
   });
@@ -78,9 +81,21 @@ function write(name: string, value: any, seal = directSeal) {
 let installationId:string|undefined;
 export function installation(): string {
   if(installationId)return installationId;
-  const exists=existsSync(path('installation'));
-  const value = read("installation", () => ({ id: randomUUID() }));
-  if(!exists)write("installation", value);
+  const fresh = () => ({ id: randomUUID() });
+  let name = "installation";
+  let value: { id: string };
+  try {
+    // Keep using a recovery identity after a restart if one was needed.
+    if (existsSync(path('installation-recovery'))) name = 'installation-recovery';
+    value = read(name, fresh);
+  } catch (error) {
+    if (name !== 'installation') throw error;
+    // An unreadable installation identifier must not block the login screen.
+    // Leave the original and all business files in place.
+    name = 'installation-recovery';
+    value = read(name, fresh);
+  }
+  if(!existsSync(path(name)))write(name, value);
   return installationId=value.id;
 }
 export function cache(owner: string, key: string, value?: any): any {
@@ -132,6 +147,51 @@ export function queueState(owner: string) {
   return business(owner);
 }
 const entryId = (body: any) => body.operation_id || body.receipt_id;
+
+function softProfileFile(name:string):string|undefined {
+  const home=process.env.LOCALAPPDATA;
+  if(process.platform!=='win32'||!home||app.getPath('userData')!==join(home,'Hard','hard','data'))return;
+  const target=join(home,'Hard','soft','data','crm',name+'.bin');
+  if(!existsSync(target))return;
+  for(let cursor=target;cursor!==parse(cursor).root;cursor=dirname(cursor)){
+    if(lstatSync(cursor).isSymbolicLink())throw Error('Папка прежней очереди перенаправлена. Исходные файлы сохранены.');
+  }
+  if(!lstatSync(target).isFile())throw Error('Файл прежней очереди требует сверки.');
+  return target;
+}
+
+export function importSoftQueue(owner:string){
+  const name=queueName(owner),source=softProfileFile(name);
+  if(!source)return;
+  const previous=readAt<Business|null>(source,()=>null);
+  if(!previous||previous.schema!==1||previous.owner!==owner||!Array.isArray(previous.entries))
+    throw Error('Не удалось подтвердить владельца прежней очереди.');
+  const queue=business(owner);
+  const merged=mergeBusinessQueues(queue,previous);
+  if(merged!==queue){write(name,merged);changed(owner);}
+}
+
+export function mergeBusinessQueues(queue:Business,previous:Business):Business{
+  if(previous.owner!==queue.owner)throw Error('Прежняя очередь принадлежит другой учётной записи.');
+  const entries=new Map(queue.entries.map(entry=>[entryId(entry.body),entry]));
+  const imported={...queue.importedSoft};
+  const rank={pending:0,attention:1,accepted:2};
+  const signature=(entry:Entry)=>digest(JSON.stringify([entry.action||'command',entry.body]));
+  let changed=false;
+  for(const entry of previous.entries){
+    const id=entryId(entry.body);
+    if(typeof id!=='string'||!/^[A-Za-z0-9_-]{12,100}$/.test(id)||!Object.hasOwn(rank,entry.state))
+      throw Error('Прежняя очередь содержит операцию неизвестного формата.');
+    const expected=signature(entry),existing=entries.get(id);
+    if((imported[id]&&imported[id]!==expected)||(existing&&signature(existing)!==expected))
+      throw Error('Две записи имеют одинаковый ID и разное содержимое. Исходные очереди сохранены.');
+    if((!imported[id]&&!existing)||(existing&&rank[entry.state]>rank[existing.state])){
+      entries.set(id,entry);changed=true;
+    }
+    if(!imported[id]){imported[id]=expected;changed=true;}
+  }
+  return changed?{...queue,entries:[...entries.values()],importedSoft:imported}:queue;
+}
 export function enqueue(
   owner: string,
   body: any,
@@ -330,6 +390,13 @@ export async function flushTechnical(
 
 export function draft(owner: string, key: string, value?: any): any {
   const name = "draft-" + digest(owner + "\n" + key);
-  if (value !== undefined) write(name, value, key === "active-open" ? directSealCheckpoint : directSeal);
+  if (value !== undefined) write(name, value, key === "active-open" ? directSealCheckpoint : undefined);
+  else if(owner&&key!=='live-cursor'&&!existsSync(path(name))){
+    const source=softProfileFile(name);
+    if(source){
+      const draft=readAt(source,()=>null);
+      if(draft!==null)write(name,draft,key==='active-open'?directSealCheckpoint:undefined);
+    }
+  }
   return read<any>(name, () => null);
 }

@@ -33,44 +33,57 @@ def request(token):
     return SimpleNamespace(headers={'Authorization': 'Bearer ' + token})
 
 
-def test_session_is_separate_sealed_and_checks_authority_on_every_use():
+def test_session_is_separate_sealed_and_reuses_short_authority_confirmation():
     calls = []
+    now = [1000]
     async def verify(token):
         calls.append(token)
         return dict(IDENTITY)
-    sessions = session(verify)
+    sessions = session(verify, clock=lambda: now[0])
     result = asyncio.run(sessions.exchange(TOKEN))
     assert TOKEN not in result['token'] and result['token'].startswith('crm1.')
     assert asyncio.run(sessions.authenticate(request(result['token']))) == PERSON
     assert asyncio.run(sessions.authenticate(request(result['token']))) == PERSON
-    assert calls == [TOKEN] * 3
+    assert calls == [TOKEN]
+    now[0] += shared_auth.AUTHORITY_CACHE_SECONDS
+    assert asyncio.run(sessions.authenticate(request(result['token']))) == PERSON
+    assert calls == [TOKEN] * 2
+    assert sessions.authority_metrics()['hit'] == 2
 
 
-def test_live_revocation_invalidates_an_already_issued_session():
+def test_live_revocation_invalidates_an_already_issued_session_after_cache_ttl():
     active = True
+    now = [1000]
     async def verify(token):
         if not active:
             raise shared_auth.fault('manager_required', 403)
         return dict(IDENTITY)
-    sessions = session(verify)
+    sessions = session(verify, clock=lambda: now[0])
     token = asyncio.run(sessions.exchange(TOKEN))['token']
     active = False
+    assert asyncio.run(sessions.authenticate(request(token))) == PERSON
+    now[0] += shared_auth.AUTHORITY_CACHE_SECONDS
     with pytest.raises(CRMError) as exc:
         asyncio.run(sessions.authenticate(request(token)))
     assert exc.value.status == 403
+    assert not sessions._authority_cache
 
 
 def test_different_identity_or_device_cannot_reuse_a_session():
     identity = dict(IDENTITY)
+    now = [1000]
     async def verify(token):
         return identity
-    sessions = session(verify)
+    sessions = session(verify, clock=lambda: now[0])
     token = asyncio.run(sessions.exchange(TOKEN))['token']
     for key in ['uid', 'device_id']:
         identity[key] += 1
+        now[0] += shared_auth.AUTHORITY_CACHE_SECONDS
         with pytest.raises(CRMError):
             asyncio.run(sessions.authenticate(request(token)))
         identity[key] -= 1
+        now[0] += shared_auth.AUTHORITY_CACHE_SECONDS
+        assert asyncio.run(sessions.authenticate(request(token))) == PERSON
 
 
 def test_expiry_wrong_key_tampering_and_wrong_audience_are_rejected():
@@ -131,6 +144,28 @@ def test_original_credential_and_local_claims_are_not_api_authority():
 
 def test_authority_origin_cannot_be_set_by_an_external_address():
     with pytest.raises(RuntimeError): shared_auth.Authority(None, 'https://elsewhere.invalid')
+
+
+def test_unavailable_authority_has_only_bounded_grace_after_a_live_confirmation():
+    now = [1000]
+    available = True
+    async def verify(token):
+        if not available:
+            raise shared_auth.fault('authority_unavailable', 503)
+        return dict(IDENTITY)
+    sessions = session(verify, clock=lambda: now[0])
+    token = asyncio.run(sessions.exchange(TOKEN))['token']
+    available = False
+    with pytest.raises(CRMError) as exc:
+        asyncio.run(sessions.exchange(TOKEN))
+    assert exc.value.status == 503
+    now[0] += shared_auth.AUTHORITY_CACHE_SECONDS
+    assert asyncio.run(sessions.authenticate(request(token))) == PERSON
+    assert sessions.authority_metrics()['grace'] == 1
+    now[0] += shared_auth.AUTHORITY_GRACE_SECONDS
+    with pytest.raises(CRMError) as exc:
+        asyncio.run(sessions.authenticate(request(token)))
+    assert exc.value.status == 503
 
 
 def test_unavailable_authority_cannot_issue_or_validate_a_session():

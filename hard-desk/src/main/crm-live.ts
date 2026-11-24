@@ -10,7 +10,7 @@ export class CrmLive {
     let cursor=this.load(owner) || {assignments:0,facts:0},failures=0;
     const tick=async()=>{
       if(generation!==this.generation || owner!==this.current())return;
-      let delay=500;
+      let delay=2000+Math.floor(Math.random()*500);
       try{
         const result=await this.send(cursor);
         if(generation!==this.generation || owner!==this.current())return;
@@ -21,13 +21,13 @@ export class CrmLive {
           this.notify({type:'live',dirty:!!result.data.dirty,resync:!!result.data.resync,
             pending:!!result.data.pending,as_of:result.data.as_of,connected:true});
         }else{
-          failures++;delay=Math.min(4000,1000*2**Math.min(failures,2));
+          failures++;delay=Math.min(10000,2000*2**Math.min(failures,2))+Math.floor(Math.random()*500);
           const denied=[401,403,404].includes(result.status);
           if(denied || failures>=3)this.notify({type:'live',dirty:false,connected:false});
           if(denied)return;
         }
       }catch{
-        failures++;delay=4000;
+        failures++;delay=8000+Math.floor(Math.random()*500);
         if(failures>=3)this.notify({type:'live',dirty:false,connected:false});
       }
       if(generation===this.generation && owner===this.current())this.timer=setTimeout(tick,delay);

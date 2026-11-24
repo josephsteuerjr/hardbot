@@ -1,7 +1,7 @@
 import { app, net } from 'electron';
 import { readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
-import { directOpen, directSeal } from './windows-dpapi';
+import { openCrmRecord, sealCrmRecord } from './windows-dpapi';
 import { PILOT_BASE, readExistingLogin, entryFingerprint, EntrySource } from './crm-manager-login';
 import { fetchBuffered } from './transport';
 
@@ -16,7 +16,7 @@ function saved(): PilotSession | null {
     if (decoded?.file === file && decoded.bytes.equals(bytes)) return decoded.session;
     decoded = undefined;
     if (bytes.length > 32768) return null;
-    const value = JSON.parse(directOpen(bytes));
+    const value = JSON.parse(openCrmRecord(bytes));
     if (!/^crm1\.[A-Za-z0-9_-]+$/.test(value.token) || !Number.isSafeInteger(value.expires_at) ||
         !/^[a-f0-9-]{36}$/.test(value.employee_uuid) || !/^[a-f0-9]{64}$/.test(value.fingerprint)) return null;
     decoded = {file, bytes, session: value};
@@ -58,7 +58,7 @@ export async function pilotCredential(expectedEmployee?: string, force = false, 
     throw Object.assign(new Error('В Руководителе вошёл другой пользователь. Подключите его явно; прежняя очередь сохранена.'), {status: 409});
   }
   if (changed) {
-    const file = path(), bytes = directSeal(JSON.stringify(session));
+    const file = path(), bytes = sealCrmRecord(JSON.stringify(session));
     writeFileSync(file + '.tmp', bytes, {flush: true});
     renameSync(file + '.tmp', file);
     decoded = {file, bytes, session};

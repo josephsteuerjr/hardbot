@@ -1,7 +1,11 @@
+import base64
 import json
 import os
 from pathlib import Path
+import tempfile
 import uuid
+
+from python_calamine import CalamineWorkbook
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
@@ -95,6 +99,14 @@ def test_pool_delivery_call_reassignment_and_export(crm_world):
     assert logistics.read(logist,country='UZ')['rows'][0]['call_comment']=='Courier number tested'
     workbook=logistics.export(logist,country='UZ',caller=w['stranger'].employee_uuid)
     assert len(workbook['rows'])==1 and workbook['rows'][0][9]=='Нет контакта'
+    downloaded=logistics.download(logist,country='UZ',caller=w['stranger'].employee_uuid)
+    content=base64.b64decode(downloaded['content_base64'])
+    with tempfile.TemporaryDirectory() as folder:
+        path=Path(folder)/downloaded['filename'];path.write_bytes(content)
+        with CalamineWorkbook.from_path(str(path)) as book:
+            rows=book.get_sheet_by_name(workbook['title']).to_python()
+            assert len(rows)==2 and rows[1][9]=='Нет контакта'
+    assert downloaded['rows']==1 and downloaded['sha256']==__import__('hashlib').sha256(content).hexdigest()
     cursor=assignments.changes(w['stranger'])['cursor']
     current=logistics.read(logist,country='UZ')['rows'][0]
     change(logist,current,caller_uuid=w['member'].employee_uuid)
@@ -110,6 +122,75 @@ def test_pool_delivery_call_reassignment_and_export(crm_world):
         assert conn.execute('SELECT COUNT(*) FROM crm_assignments').fetchone()[0]==4
         values=json.loads(conn.execute('SELECT fields_json FROM crm_contracts WHERE contract_uuid=?',(cid,)).fetchone()[0])
         assert values['responsible_soft']=='Ordinary Soft' and values['soft_comment']=='Base'
+
+
+def test_manager_retains_manager_role_when_logistics_is_added(crm_world):
+    with storage.connect() as conn:
+        conn.execute("INSERT INTO crm_meta VALUES('distribution_mode','isolated')")
+        conn.execute('INSERT INTO crm_meta VALUES(?,?)', ('deployment_namespace', shared_auth.NAMESPACE))
+        manager = create_staff(conn, 'Manager', 306)
+        conn.execute("UPDATE crm_memberships SET role='manager',capabilities_json='[\"analytics\",\"visit\"]' WHERE employee_uuid=?", (manager,))
+        manifest = {'TJ': {'logist': [manager], 'call': [], 'delivery': []}}
+        plan = logistics.configure_staff(conn, manifest)
+        assert plan['role_changes'] == {}
+        logistics.configure_staff(conn, manifest, plan['selection_sha256'])
+    member = shared_auth.principal({'uid': 306, 'role': 'manager'})
+    assert member.role == 'manager' and 'logistics' in member.capabilities
+    with storage.connect(readonly=True) as conn:
+        assert logistics.countries(conn, member) == ['TJ']
+    assert 'analytics' in member.capabilities and 'visit' in member.capabilities
+
+
+def test_excel_courier_is_linked_to_existing_account_without_registration(crm_world):
+    with storage.connect() as conn:
+        conn.execute("INSERT INTO crm_meta VALUES('distribution_mode','isolated')")
+        conn.execute('INSERT INTO crm_meta VALUES(?,?)', ('deployment_namespace', shared_auth.NAMESPACE))
+        logist = create_staff(conn, 'Logistic', 303)
+        courier = create_staff(conn, 'Courier', 305)
+        conn.execute("UPDATE crm_memberships SET role='courier',capabilities_json='[\"delivery\"]' WHERE employee_uuid=?", (courier,))
+        contract = crm_world['contracts'][0]
+        row = conn.execute('SELECT fields_json FROM crm_contracts WHERE contract_uuid=?', (contract,)).fetchone()
+        values = canonical(dict(json.loads(row[0]), country='Узбекистан', responsible_soft='Ordinary Soft'))
+        conn.execute('UPDATE crm_contracts SET fields_json=?,baseline_json=? WHERE contract_uuid=?', (values, values, contract))
+        manifest = {'UZ': {'logist': [logist], 'call': [], 'delivery': []}}
+        plan = logistics.configure_staff(conn, manifest)
+        logistics.configure_staff(conn, manifest, plan['selection_sha256'])
+    result = upload(shared_auth.principal({'uid': 303, 'role': 'employee'}), source())
+    assert result['imported'] == 1
+    with storage.connect(readonly=True) as conn:
+        assert conn.execute("SELECT courier_uuid FROM crm_logistics_cases WHERE country='UZ'").fetchone()[0] == courier
+        assert conn.execute("SELECT 1 FROM crm_logistics_staff WHERE country='UZ' AND work='delivery' AND employee_uuid=?",
+                            (courier,)).fetchone()
+        assert conn.execute("SELECT count(*) FROM accounts").fetchone()[0] == 0
+
+
+def test_unassigned_case_is_not_reported_as_courier_work(crm_world):
+    with storage.connect() as conn:
+        conn.execute("INSERT INTO crm_meta VALUES('distribution_mode','isolated')")
+        conn.execute('INSERT INTO crm_meta VALUES(?,?)', ('deployment_namespace', shared_auth.NAMESPACE))
+        logist = create_staff(conn, 'Logistic', 303)
+        row = conn.execute('SELECT fields_json FROM crm_contracts WHERE contract_uuid=?', (crm_world['contracts'][0],)).fetchone()
+        values = canonical(dict(json.loads(row[0]), country='Узбекистан', responsible_soft='Ordinary Soft'))
+        conn.execute('UPDATE crm_contracts SET fields_json=?,baseline_json=? WHERE contract_uuid=?', (values, values, crm_world['contracts'][0]))
+        manifest = {'UZ': {'logist': [logist], 'call': [], 'delivery': []}}
+        plan = logistics.configure_staff(conn, manifest)
+        logistics.configure_staff(conn, manifest, plan['selection_sha256'])
+    principal = shared_auth.principal({'uid': 303, 'role': 'employee'})
+    body = source()
+    body['rows'][0]['courier'] = ''
+    upload(principal, body)
+    assert logistics.export(principal, country='UZ')['rows'][0][-1] == 'Не назначено'
+
+
+def test_roster_can_offer_existing_staff_by_country(crm_world, monkeypatch):
+    with storage.connect() as conn:
+        employee = create_staff(conn, 'Existing Soft', 307)
+        courier = create_staff(conn, 'Existing Courier', 308)
+        conn.execute("UPDATE crm_memberships SET role='courier',capabilities_json='[\"delivery\"]' WHERE employee_uuid=?", (courier,))
+        from crm import team_territories
+        monkeypatch.setattr(team_territories, 'staff', lambda principal, rows, shared: {
+            employee: {'country': 'UZ'}, courier: {'country': 'UZ'}})
+        assert logistics.roster(conn, 'UZ') == {'call': {employee: 'Existing Soft'}, 'delivery': {courier: 'Existing Courier'}}
 
 
 def test_country_mismatch_stale_preview_and_atomic_assignment(crm_world):
@@ -163,9 +244,11 @@ def test_logistics_uses_restricted_app_role(pg_world, monkeypatch):
     query = dict(parse_qsl(parts.query), options='-csearch_path=' + namespace)
     monkeypatch.setenv('HARD_CRM_DATABASE_URL', urlunsplit(parts._replace(query=urlencode(query))))
     with storage.connect(readonly=True) as conn:
-        identity = conn.execute(
-            "SELECT current_user,has_table_privilege('crm_logistics_staff','UPDATE')").fetchone()
-        assert identity[0] == 'crm_app' and not identity[1]
+        identity = conn.execute("SELECT current_user,current_schema,current_schemas(true)").fetchone()
+        assert identity[0] == 'crm_app', identity
+        allowed = conn.execute("SELECT has_table_privilege(?, 'UPDATE')",
+                               (f'"{namespace}".crm_logistics_staff',)).fetchone()
+        assert not allowed[0], identity
     member = pg_world['member']
     assert upload(logist, source(phone='998901234567'))['imported'] == 1
     case = logistics.read(logist, country='UZ')['rows'][0]
