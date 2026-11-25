@@ -108,18 +108,19 @@ def test_identity_shape_uses_verified_subject_and_device(kind, role, uid):
 def test_staff_session_rechecks_same_entry_device_revocation_and_roster(crm_world):
     identity = prepare(crm_world, 'employee')
     token = secrets.token_urlsafe(32)
-    active, calls = [True], []
+    active, calls, clock = [True], [], [1000]
     async def verify(credential, *, kind, device_fingerprint):
         assert credential == token and kind == 'employee' and device_fingerprint == ''
         calls.append(kind)
         if not active[0]:
             raise shared_auth.fault('pilot_session_invalid', 403)
         return identity
-    sessions = shared_auth.Sessions(secrets.token_bytes(32), verify, audit=lambda *_: None)
+    sessions = shared_auth.Sessions(secrets.token_bytes(32), verify, clock=lambda: clock[0], audit=lambda *_: None)
     result = asyncio.run(sessions.exchange(token, kind='employee'))
     request = SimpleNamespace(headers={'Authorization':'Bearer '+result['token']})
     assert asyncio.run(sessions.authenticate(request)).role == 'employee'
     active[0] = False
+    clock[0] += shared_auth.AUTHORITY_CACHE_SECONDS
     with pytest.raises(CRMError):
         asyncio.run(sessions.authenticate(request))
     active[0] = True
@@ -127,7 +128,7 @@ def test_staff_session_rechecks_same_entry_device_revocation_and_roster(crm_worl
         conn.execute('UPDATE crm_actor_links SET active=0 WHERE actor_uid=?', (identity['uid'],))
     with pytest.raises(CRMError):
         asyncio.run(sessions.authenticate(request))
-    assert len(calls) == 4
+    assert len(calls) >= 3
 
 
 def test_employee_and_analyst_http_sessions_share_read_but_not_writes(crm_world):

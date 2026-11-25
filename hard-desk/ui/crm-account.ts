@@ -17,7 +17,10 @@ export function mountAccount(host:HTMLElement,crm:any,account:any,connected:bool
     const message=host.querySelector<HTMLElement>('#account-message')!;message.textContent='Проверяем вход…';
     try{
       const result=await crm.connect({action,...body});
-      if(!result.ok)throw Error(result.text||'Не удалось подтвердить вход. Повторите попытку.');
+      if(!result.ok){
+        if(result.error==='grant_required'||result.details?.grants){await refresh(action);return;}
+        throw Error(result.text||'Не удалось подтвердить вход. Повторите попытку.');
+      }
       await refresh(action);
     }catch(e){message.textContent=(e as Error).message;}
     finally{busy=false;host.querySelectorAll<HTMLInputElement>('input[type=password]').forEach(e=>e.value='');host.querySelectorAll<HTMLButtonElement>('button').forEach(b=>b.disabled=false);}

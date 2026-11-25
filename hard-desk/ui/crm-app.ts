@@ -1854,7 +1854,10 @@ async function connection(host:HTMLElement=document.getElementById('view')!) {
       buttons.forEach(button=>button.disabled=true);
       try {
         const result=await crm.connect({action:'existing-login',source:element.dataset.existingSource});
-        if(!result.ok)throw new Error(result.text || 'Не удалось подтвердить вход.');
+        if(!result.ok){
+          if(result.error==='grant_required'||result.details?.grants){section='connection';await boot();return;}
+          throw new Error(result.text || 'Не удалось подтвердить вход.');
+        }
         section='portfolio';await boot();
       }finally{buttons.forEach(button=>button.disabled=false);}
     });

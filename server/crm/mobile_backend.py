@@ -50,8 +50,11 @@ def server_role(session):
 
 
 def server_capabilities(session):
+    context=session.get('context') or {}
     grant=selected_grant(session)
-    return frozenset(grant.get('capabilities',()) if grant else (session.get('context') or {}).get('capabilities',()))
+    if not grant and context.get('access_model',session.get('access_model',1))!=2 and 'capabilities' not in context and 'capabilities' not in session:
+        return None
+    return frozenset(grant.get('capabilities',()) if grant else context.get('capabilities',session.get('capabilities',())))
 
 
 def workspace_has(session,*modules):
@@ -70,7 +73,8 @@ def require_grant_workspace(session,modules,roles,capability=None):
     modules=(modules,) if isinstance(modules,str) else tuple(modules)
     if not workspace_has(session,*modules) or server_role(session) not in roles:
         raise CRMError('Раздел недоступен для выбранного полномочия.','forbidden',403)
-    if capability and capability not in server_capabilities(session):
+    capabilities=server_capabilities(session)
+    if capability and capabilities is not None and capability not in capabilities:
         raise CRMError('Действие недоступно для выбранного полномочия.','forbidden',403)
 
 

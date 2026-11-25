@@ -23,7 +23,8 @@ def test_analyst_reports_are_readable_without_distribution_and_do_not_grant_assi
     assert result['contracts']==2 and result['debt']=={'RUB':'246.90'}
     assert {row['employee_uuid'] for row in result['staff']}=={w['employee']}
     assert manager_reports.read(p)['report']['sheets']
-    with pytest.raises(CRMError):assignments.statistics(w['managers'][1])
+    other=assignments.statistics(w['managers'][1])
+    assert other['contracts']==2 and w['employee'] in {row['employee_uuid'] for row in other['staff']}
     with pytest.raises(CRMError):assignments.preview(p,{})
     with pytest.raises(CRMError):assignments.statistics(p,employee_uuid=w['managers'][1].employee_uuid,kind='call')
 

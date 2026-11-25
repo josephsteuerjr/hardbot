@@ -30,7 +30,8 @@ function renderGrantPicker(){
   const host=connectionHost;host?.querySelector('[data-grant-picker]')?.remove();if(!host)return;
   const connected=!!current?.owner;
   const entryRole=current?.context?.entry_role;
-  const allowedRoles=entryRole==='analyst'?['analyst']:['employee','agent'].includes(entryRole)?['employee','courier']:
+  const allowedRoles=!entryRole?['employee','courier','manager','analyst','observer','owner','logistic']:
+    entryRole==='analyst'?['analyst']:['employee','agent'].includes(entryRole)?['employee','courier']:
     ['observer','security'].includes(entryRole)?['observer']:['manager','owner'];
   const grants=connected?(current.context?.grants||[]).filter((grant:any)=>allowedRoles.includes(grant.role)):connectionResponse?.data?.details?.grants;
   if(!Array.isArray(grants)||grants.length<2||!connected&&connectionResponse?.data?.error!=='grant_required')return;
