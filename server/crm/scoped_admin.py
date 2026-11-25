@@ -64,6 +64,7 @@ def scoped(session):
 
 
 def require_safe_admin(session,path,body):
+    if scoped(session) is None:return
     if path in {'/state','/busy'}:return
     if path=='/admin' and body.get('method')=='GET' and body.get('path')=='/admin/accounts.json':return
     raise CRMError('Для этой полномочия доступны только чтение состояния и список аккаунтов в его территории.','forbidden',403)

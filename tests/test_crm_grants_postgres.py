@@ -54,6 +54,7 @@ def test_grant_admin_concurrent_apply_allows_only_one_revision(pg_world):
     from test_crm_grant_admin import apply_body, grant, preview
     with storage.connect() as conn:
         conn.execute("INSERT INTO crm_meta VALUES('synthetic_candidate','postgres-grant-admin') ON CONFLICT(key) DO NOTHING")
+        conn.commit()
     first = preview(pg_world, 0, [grant(role='employee', capabilities=('call',), is_default=True)])
     second = preview(pg_world, 0, [grant(role='analyst', capabilities=('analytics',), is_default=True)])
     owner = pg_world['owner']
