@@ -34,10 +34,13 @@ def test_actor_grants_backfill_opt_in_and_audit_on_postgres(pg_world):
 
 def test_postgres_schema_9_upgrade_is_additive_and_idempotent(pg_world):
     with storage.connect() as conn:
+        conn.execute('DROP TABLE IF EXISTS crm_grant_changes,crm_grant_employees,crm_grants,crm_actor_access CASCADE')
         conn.execute("UPDATE crm_meta SET value='9' WHERE key='schema_version'")
     with storage.connect() as conn:
         postgres_schema.initialize(conn)
     with storage.connect() as conn:
         assert conn.execute("SELECT value FROM crm_meta WHERE key='schema_version'").fetchone()[0] == str(schema.VERSION)
         assert conn.execute('SELECT COUNT(*) FROM crm_actor_access').fetchone()[0] == 0
+        tables = {row[0] for row in conn.execute("SELECT tablename FROM pg_tables WHERE schemaname=current_schema()")}
+        assert {'crm_actor_access','crm_grants','crm_grant_employees','crm_grant_changes'} <= tables
         postgres_schema.initialize(conn)

@@ -28,7 +28,11 @@ let connectionHost:HTMLElement|undefined,connectionResponse:Reply|undefined;
 const grantLabel=(grant:any)=>`${({employee:'Сотрудник',manager:'Руководитель',analyst:'Аналитик',courier:'Курьер',observer:'Наблюдатель',owner:'Владелец'} as any)[grant.role]||grant.role} · ${({self:'Личная область',employees:'Назначенные сотрудники',team:'Команда',all:'Вся область'} as any)[grant.territory]||grant.territory}`;
 function renderGrantPicker(){
   const host=connectionHost;host?.querySelector('[data-grant-picker]')?.remove();if(!host)return;
-  const connected=!!current?.owner,grants=connected?current.context?.grants:connectionResponse?.data?.details?.grants;
+  const connected=!!current?.owner;
+  const entryRole=current?.context?.entry_role;
+  const allowedRoles=entryRole==='analyst'?['analyst']:['employee','agent'].includes(entryRole)?['employee','courier']:
+    ['observer','security'].includes(entryRole)?['observer']:['manager','owner'];
+  const grants=connected?(current.context?.grants||[]).filter((grant:any)=>allowedRoles.includes(grant.role)):connectionResponse?.data?.details?.grants;
   if(!Array.isArray(grants)||grants.length<2||!connected&&connectionResponse?.data?.error!=='grant_required')return;
   const form=document.createElement('form');form.dataset.grantPicker='';form.className='mobile-login';
   const title=document.createElement('h2');title.textContent='Полномочие';const label=document.createElement('label');label.textContent='Рабочая область';

@@ -26,7 +26,8 @@ export type Transport = (
   body?: any,
   query?: any,
 ) => Promise<Result>;
-type Entry = {
+export type AuthorityBinding = {actor_uid?: number|string; access_model?: number; grant_id?: string|null};
+type Entry = AuthorityBinding & {
   action?: "command" | "receipt" | "registry-edit" | "active-time";
   body: any;
   queued_at: string;
@@ -196,6 +197,7 @@ export function enqueue(
   owner: string,
   body: any,
   action: "command" | "receipt" | "registry-edit" | "active-time" = "command",
+  authority?: AuthorityBinding,
 ) {
   if (
     typeof entryId(body) !== "string" ||
@@ -224,6 +226,9 @@ export function enqueue(
   const entry: Entry = {
     action,
     body,
+    ...(authority?.actor_uid !== undefined ? {actor_uid:authority.actor_uid} : {}),
+    access_model:authority?.access_model === 2 ? 2 : 1,
+    grant_id:authority?.access_model === 2 ? authority.grant_id : null,
     queued_at: new Date().toISOString(),
     state: "pending",
   };
@@ -232,22 +237,30 @@ export function enqueue(
   changed(owner);
   return entry;
 }
+function authorityMatches(expected:AuthorityBinding|undefined,actual:AuthorityBinding|undefined):boolean {
+  if(!expected)return true;
+  if(expected.access_model===2)
+    return actual?.access_model===2 && actual.grant_id===expected.grant_id && String(actual.actor_uid)===String(expected.actor_uid);
+  return actual?.access_model!==2 && (expected.actor_uid===undefined || String(actual?.actor_uid)===String(expected.actor_uid));
+}
 const running = new Map<string, Promise<void>>();
 export function flush(
   owner: string,
   send: Transport,
   current: () => string,
+  authority?: () => AuthorityBinding|undefined,
 ): Promise<void> {
   if (running.has(owner)) return running.get(owner)!;
   const work = async () => {
     if (current() !== owner) return;
     // Access is freshly checked before each replay. Cached cards never authorize a write.
     const context = await send("GET", "context");
-    if (!context.ok || current() !== owner) return;
+    if (!context.ok || current() !== owner || !authorityMatches(authority?.(),context.data)) return;
     for (const snapshot of business(owner).entries.filter(
       (e) => e.state === "pending",
     )) {
       if (current() !== owner) return;
+      if(authority && !authorityMatches(snapshot,context.data))continue;
       const response = await send(
         "POST",
         snapshot.action || "command",

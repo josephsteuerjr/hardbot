@@ -156,7 +156,7 @@ def _project(conn, legacy, grant, access_model, policy_revision, available):
     return replace(
         legacy,
         role=grant.role,
-        capabilities=grant.capabilities,
+        capabilities=grant.capabilities | ({'access_manage'} & legacy.capabilities if grant.role == 'analyst' else set()),
         employee_scope=_scope(conn, legacy, grant),
         all_contracts=all_contracts,
         read_all_contracts=grant.read_all_contracts or all_contracts,

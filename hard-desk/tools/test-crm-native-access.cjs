@@ -3,7 +3,7 @@ const {buildSync}=require('esbuild');
 const desk=path.resolve(__dirname,'..'),filename=path.join(desk,'out','qa-crm-native-access.cjs');
 const code=buildSync({entryPoints:[path.join(desk,'src/main/crm-native-access.ts')],bundle:true,platform:'node',format:'cjs',write:false}).outputFiles[0].text;
 const mod=new Module(filename,module);mod.filename=filename;mod.paths=Module._nodeModulePaths(path.dirname(filename));mod._compile(code,filename);
-const {nativeCapability}=mod.exports;
+const {legacyAdministrationAllowed,nativeCapability}=mod.exports;
 const features=['workbook-exchange','workbook-logistics','workbook-manager-report','workbook-table','admin','manager-access','manager-plan'];
 const context=(role,capabilities,modules,extra={})=>({role,capabilities,workspace:{schema_version:1,revision:4,tree:modules.map(id=>({id,children:[]}))},...extra});
 const legacy=(role,capabilities,extra={})=>({role,capabilities,...extra});
@@ -36,4 +36,7 @@ check('logistics module alone is insufficient',!nativeCapability(context('logist
 check('other actor grants do not expand native access',!nativeCapability(context('employee',['exchange'],['connection'],{actor_uid:101,grants:[{actor_uid:202,role:'owner',territory:'all',capabilities:features}]}),'admin'));
 check('malformed workspace fails closed',!nativeCapability({role:'analyst',capabilities:['exchange'],workspace:{tree:[{id:'exchange',children:{}}]}},'admin'));
 check('explicit empty workspace does not reactivate legacy admin',!nativeCapability(context('analyst',['exchange'],[]),'admin'));
+check('legacy administration remains available in model 1',legacyAdministrationAllowed(legacy('manager',[],{access_model:1})));
+check('scoped model 2 cannot use broad legacy administration',!legacyAdministrationAllowed(legacy('manager',[],{access_model:2})));
+check('global owner can use legacy administration',legacyAdministrationAllowed(legacy('owner',[],{access_model:2,owner:true})));
 console.log(JSON.stringify({passed:true,checks:checks.length,ownerFeatures:features.length,legacyFallback:true,selectedGrantRoleCapabilityWorkspace:true,crossGrantDenied:true}));

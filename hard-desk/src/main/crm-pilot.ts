@@ -14,7 +14,7 @@ import { fetchBuffered } from "./transport";
 import * as queue from "./crm-queue";
 import { PILOT_BASE, existingManagerStatus, existingLogins, ENTRY_SOURCES, EntrySource, entryFingerprint,readExistingManagerSession,readExistingLogin } from "./crm-manager-login";
 import {AnalystRuntime} from './crm-analyst-runtime';
-import { pilotCredential } from "./crm-pilot-session";
+import { pilotCredential,pilotGrantCandidates } from "./crm-pilot-session";
 import {ThreeHourReports} from './crm-report-scheduler';
 import {ActiveTime} from './crm-active-time';
 import {showStartupRecovery} from './crm-startup-recovery';
@@ -23,7 +23,7 @@ import {CrmLive} from './crm-live';
 import {FIXED_PRODUCT,PRODUCTS,STABLE_CRM} from './product';
 import {accountAction,accountState,adoptSoftAccount,markAccountLoginRequired,savedAccountFingerprint} from './crm-account';
 import {checkUpdates,installUpdate,startUpdates,updateState} from './updates';
-import {nativeCapability} from './crm-native-access';
+import {legacyAdministrationAllowed,nativeCapability} from './crm-native-access';
 
 const isolatedProfile = !!process.env.HARD_USER_DATA;
 const product = STABLE_CRM ? FIXED_PRODUCT! : PRODUCTS.crm;
@@ -92,7 +92,7 @@ let screenLocked=false, sleeping=false;
 const activeTime=new ActiveTime(()=>{
   const current=currentWindow();
   return owner && clock?{
-    owner,anchor_id:clock.anchor_id,installation_id:clock.installation_id,
+    owner,anchor_id:clock.anchor_id,installation_id:clock.installation_id,authority:currentContext,
     elapsed:Math.max(0,Math.round(performance.now()-clock.monotonic)),
     kind:current?.isVisible() && current.isFocused() && !current.isMinimized() && !screenLocked && !sleeping
       ? powerMonitor.getSystemIdleTime()<120?'active':'idle':null,
@@ -248,7 +248,7 @@ async function diagnostics(repair=false){
       const attention=q.entries.filter(e=>e.state==='attention' && !e.reviewed_at).length;
       queue.draft(owner,'registry-input');
       add('queue',!attention,attention?'queue_attention':'queue_ok',`Сохранено на устройстве: ${pending}. Требует сверки: ${attention}.`);
-      if(repair && owner===authority){await queue.flush(owner,send,()=>owner);}
+      if(repair && owner===authority){await queue.flush(owner,send,()=>owner,()=>currentContext);}
     }catch{add('queue',false,'protected_work_unreadable','Очередь или черновик не читается. Исходные файлы сохранены; сброс профиля не выполняется.');}
   }
   return {ok:true,data:{checks,at:new Date().toISOString()}};
@@ -370,7 +370,7 @@ const transport: queue.Transport = async (method, action, body, query) => {
   try {
     const previous = readSettings().crmLast as any;
     const expected = currentContext?.employee_uuid || (previous?.origin === base ? previous.context?.employee_uuid : undefined);
-    let token = shared() ? await pilotCredential(expected, false, entrySource()) : role() === "employee" ? readFieldToken() : readToken();
+    let token = shared() ? await pilotCredential(expected, false, entrySource(), currentContext?.grant_id || undefined) : role() === "employee" ? readFieldToken() : readToken();
     if (!base || !token) return {ok: false, status: 401, text: "Войдите в CRM."};
     const url = new URL(shared() ? PILOT_BASE + "/api/crm/" + action : "/api/crm/" + action, base);
     for (const [key, value] of Object.entries(query || {})) if (value != null) url.searchParams.set(key, String(value));
@@ -384,7 +384,7 @@ const transport: queue.Transport = async (method, action, body, query) => {
     }, action==='changes'?12000:["export", "import-preview", "import-apply", "manager-report", "manager-statistics", "manager-report-download", "analyst-report", "analyst-statistics", "three-hour"].includes(action) ? 120000 : 30000);
     let response = await request(token), value = await response.json();
     if (source && response.status === 401 && ["pilot_session_expired","pilot_session_invalid"].includes(value.error)) {
-      token = await pilotCredential(expected, true, source);
+      token = await pilotCredential(expected, true, source, currentContext?.grant_id || undefined);
       response = await request(token); value = await response.json();
     }
     if (source && (response.status === 401 || (response.status === 403 &&
@@ -420,12 +420,14 @@ async function managerAccess(method:string,body:any,query:any):Promise<queue.Res
       !nativeCapability(fresh.data,capability))
     return {ok:false,status:403,text:'Полномочие управления входами отозвано или изменилось.'};
   currentContext=fresh.data;
+  if(!legacyAdministrationAllowed(fresh.data))
+    return {ok:false,status:403,text:'Для этой полномочия нужен отдельный территориально ограниченный контур управления входами.'};
   if(demo())return local('manager-access',body,query,method);
   if(!shared()||!['manager','analyst','crm'].includes(entrySource()))
     return {ok:false,status:403,text:'Для управления входами нужно подтверждённое подключение к рабочему месту.'};
   const actor=currentContext.actor_uid;
   try{
-    await pilotCredential(currentContext.employee_uuid,false,entrySource());
+    await pilotCredential(currentContext.employee_uuid,false,entrySource(),currentContext.grant_id || undefined);
     const login=readExistingLogin(entrySource());
     const headers={'X-Pult-Token':login.credential,'Content-Type':'application/json','X-Client-Version':app.getVersion()};
     const identity=await fetchBuffered((u,i)=>net.fetch(u,i),'https://hard.rimborso.ru/api/manager/device/me',{method:'GET',headers},10000);
@@ -463,6 +465,8 @@ const analystRuntime=new AnalystRuntime({home:data,window:()=>win,synthetic:demo
     const result = await send('GET','context');
     if (!result.ok || !nativeCapability(result.data,'admin') || result.data.employee_uuid !== employee || !valid())
       throw Error('Сервер не подтвердил полномочия администрирования.');
+    if (!legacyAdministrationAllowed(result.data))
+      throw Error('Для этой полномочия нужен отдельный территориально ограниченный контур администрирования.');
     const ownerAccess = result.data.owner === true;
     let actor = result.data.actor_uid;
     if(demo()){
@@ -507,7 +511,8 @@ async function identify() {
   const result = await send("GET", "context");
   if (result.ok) {
     currentContext = result.data;
-    owner = origin() + "\n" + currentContext.employee_uuid;
+    owner = origin() + "\n" + currentContext.employee_uuid +
+      (currentContext.access_model === 2 ? "\n" + currentContext.actor_uid + "\n" + currentContext.grant_id : "");
     if(STABLE_CRM&&product.id==='hard'&&currentContext.role==='employee'){
       try{queue.importSoftQueue(owner);}
       catch(error){connectionNotice=(error as Error).message;}
@@ -595,6 +600,7 @@ async function recoverExports() {
             cells,
           },
           "receipt",
+          currentContext,
         );
       job.completed = true;
       job.sha256 = result.data.sha256;
@@ -631,8 +637,10 @@ function safeHandler(name: string, fn: (...args: any[]) => any) {
     } catch (error) {
       return {
         ok: false,
-        status: 0,
+        status: Number((error as any)?.status || 0),
         text: String((error as Error).message || error),
+        ...((error as any)?.code ? {error:(error as any).code} : {}),
+        ...((error as any)?.details ? {details:(error as any).details} : {}),
       };
     } finally { if(workingRequest)activeRequests--; }
   });
@@ -744,8 +752,10 @@ app
         mode: demo() ? "synthetic" : config()?.mode === "remote" ? "remote" : "unconfigured",
         role: role(),
         server: origin(),
+        source: entrySource(),
         shared: shared(),
       },
+      grantCandidates: pilotGrantCandidates(),
       context: currentContext,
       existingManager: existingManagerStatus(),
       existingLogins: existingLogins(),
@@ -815,8 +825,8 @@ app
       if (!owner || !currentContext) throw new Error('Сначала подтвердите вход в CRM.');
       if(expectedOwner!==undefined && owner!==expectedOwner)throw new Error('Личность правки изменилась. Исходный ввод сохранён.');
       const authority=owner;
-      queue.enqueue(authority, body, 'registry-edit');
-      void queue.flush(authority, send, () => owner);
+      queue.enqueue(authority, body, 'registry-edit', currentContext);
+      void queue.flush(authority, send, () => owner, () => currentContext);
       return {ok:true, queued:true, operation_id:body.operation_id};
     });
     safeHandler("crm:command", async (body: any) => {
@@ -834,7 +844,7 @@ app
         }
         if (JSON.stringify(input) !== JSON.stringify(body))
           throw new Error("ID операции уже сохранён с другим содержимым.");
-        void queue.flush(authority, send, () => owner);
+        void queue.flush(authority, send, () => owner, () => currentContext);
         return {
           ok: true,
           queued: previous.state !== "accepted",
@@ -858,8 +868,8 @@ app
           };
         else body = { ...body, occurred_at: new Date().toISOString() };
       }
-      queue.enqueue(authority, body);
-      void queue.flush(authority, send, () => owner);
+      queue.enqueue(authority, body, undefined, currentContext);
+      void queue.flush(authority, send, () => owner, () => currentContext);
       return { ok: true, queued: true, operation_id: body.operation_id };
     });
     safeHandler("crm:queue", async (action: string, id: string,expectedOwner?:string) => {
@@ -867,7 +877,7 @@ app
       if(expectedOwner!==undefined && owner!==expectedOwner)throw new Error('Личность очереди изменилась.');
       if(action==='review-registry')queue.reviewRegistry(owner,id);
       if (action === "retry") queue.retry(owner, id);
-      if (action === "flush") await queue.flush(owner, send, () => owner);
+      if (action === "flush") await queue.flush(owner, send, () => owner, () => currentContext);
       return {
         ok: true,
         data: {
@@ -923,7 +933,7 @@ app
         writeSettings({crmConnection:undefined,crmLast:undefined,crmExplicitEntry:true});
         if(input.action==='account-logout'||(result.data as any).pending)return result;
         const fingerprint=savedAccountFingerprint();
-        try{await pilotCredential(undefined,true,'crm');}
+        try{await pilotCredential(undefined,true,'crm',input.grant_id);}
         catch(error){
           if(requireFreshAccountLogin(fingerprint,Number((error as any)?.status)))
             return {ok:true,data:{pending:true}};
@@ -939,7 +949,7 @@ app
       if (input?.action === "existing-manager" || input?.action === 'existing-login') {
         const source: EntrySource = input.action === 'existing-manager' ? 'manager' : input.source;
         if (!ENTRY_SOURCES.includes(source)) throw new Error('Выберите сохранённый вход.');
-        await pilotCredential(undefined, true, source);
+        await pilotCredential(undefined, true, source, input.grant_id);
         writeSettings({crmConnection: {mode: "remote", role: source === 'manager' || source === 'analyst' ? source : 'employee', source,
           server: PILOT_BASE, auth: "existing-login"}, crmLast: undefined});
         connectionNotice = "";
@@ -1141,7 +1151,7 @@ app
       });
       if (owner === authority) {
         await recoverExports();
-        void queue.flush(authority, send, () => owner);
+        void queue.flush(authority, send, () => owner, () => currentContext);
       }
       return result;
     });
@@ -1167,7 +1177,7 @@ app
               throw new Error("Не совпадает контрольная сумма документа.");
           } else {
             if (offline) throw new Error("Для загрузки документа нужна связь.");
-            const token = shared() ? await pilotCredential(currentContext?.employee_uuid) :
+            const token = shared() ? await pilotCredential(currentContext?.employee_uuid, false, entrySource(), currentContext?.grant_id || undefined) :
               role() === "employee" ? readFieldToken() : readToken();
             const response = await fetchBuffered(
               (url, init) => net.fetch(url, init),
@@ -1297,7 +1307,7 @@ app
     setInterval(() => {
       if (owner) {
         void recoverExports().catch(() => {});
-        void queue.flush(owner, send, () => owner).catch(() => {});
+        void queue.flush(owner, send, () => owner, () => currentContext).catch(() => {});
         void queue.flushTechnical(owner, send, () => owner).catch(() => {});
       }
     }, 7000).unref();

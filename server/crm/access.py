@@ -53,7 +53,10 @@ def refresh_write(conn, principal):
         raise CRMError('Изменился действующий вход или кадровый доступ.','scope_changed',403)
     if principal.access_model == 2:
         from . import grants
-        legacy = replace(principal, grants=(), access_model=1, policy_revision=0, grant_id=None)
+        member_caps = frozenset(json.loads(member['capabilities_json']))
+        legacy = replace(principal,
+                         capabilities=(principal.capabilities - {'access_manage', 'logistics'}) | (member_caps & {'access_manage', 'logistics'}),
+                         grants=(), access_model=1, policy_revision=0, grant_id=None)
         return grants.resolve(conn, legacy, role=principal.role, grant_id=principal.grant_id,
                               allow_owner=principal.owner)
     return replace(principal,capabilities=principal.capabilities & frozenset(json.loads(member['capabilities_json'])))

@@ -91,14 +91,15 @@ def replay(conn, principal, operation, body):
                 409,
             )
         result = json.loads(row["result_json"])
-        if (principal.access_model == 2 and 'grant_id' in result
-                and result['grant_id'] != principal.grant_id):
+        if principal.access_model == 2 and result.get('grant_id') != principal.grant_id:
             raise CRMError('Операция принадлежит другому полномочию.', 'grant_required', 409)
         return result
     return None
 
 
 def acknowledge(conn, principal, operation, body, result, at):
+    if principal.access_model == 2:
+        result = dict(result, grant_id=principal.grant_id)
     conn.execute(
         "INSERT INTO crm_commands VALUES(?,?,?,?,?)",
         (principal.actor_uid, operation, digest(body), canonical(result), at),

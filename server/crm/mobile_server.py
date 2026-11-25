@@ -151,7 +151,8 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
     def bind_owner(session):
         context=session['context']
         origin='synthetic://'+str(home) if backend.synthetic else public_origin or backend.crm
-        session['owner']='mobile:'+hashlib.sha256((origin+'\n'+context['employee_uuid']).encode()).hexdigest()
+        identity=str(context['actor_uid']) if context.get('access_model')==2 else context['employee_uuid']
+        session['owner']='mobile:'+hashlib.sha256((origin+'\n'+identity).encode()).hexdigest()
     def operation_binding(session):
         context=session['context']
         return dict(grant_id=context.get('grant_id'),actor_uid=context.get('actor_uid'),access_model=context.get('access_model',1))

@@ -1,6 +1,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import copy
+import json
 import threading
 
 import pytest
@@ -9,7 +10,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from crm import grant_admin, grants, http, shared_auth, storage
 from crm.access import Principal
-from crm.contract import CRMError
+from crm.contract import CRMError, canonical
 from crm.roles import GRANT_ROLE_CAPABILITIES
 from test_crm_core import crm_world
 
@@ -265,6 +266,11 @@ def analyst_admin(world, *, capabilities=("access_manage", "note", "analytics"),
             "INSERT INTO crm_actor_links VALUES(?,?,?,?) ON CONFLICT(actor_uid) DO NOTHING",
             (303, world["employee"], "synthetic-grant-admin", 1),
         )
+        existing = json.loads(conn.execute("SELECT capabilities_json FROM crm_memberships WHERE employee_uuid=?",
+                                          (world["employee"],)).fetchone()[0])
+        fresh = set(existing) | ({'access_manage'} if 'access_manage' in capabilities else set())
+        conn.execute("UPDATE crm_memberships SET capabilities_json=? WHERE employee_uuid=?",
+                     (canonical(sorted(fresh)), world["employee"]))
     return Principal(
         303,
         world["employee"],
@@ -441,3 +447,24 @@ def test_http_grant_contract_list_preview_apply_stale_and_replay(admin_world):
             assert (await response.json())["error"] == "policy_revision_conflict"
 
     asyncio.run(scenario())
+
+
+
+def test_apply_takes_actor_lock_before_reading_revision(admin_world, monkeypatch):
+    checked = preview(admin_world, 0, [grant(is_default=True)])
+    events = []
+    original_begin = grants._begin
+    original_load = grants.load
+
+    def begin(conn, actor_uid):
+        events.append('begin')
+        return original_begin(conn, actor_uid)
+
+    def load(conn, actor_uid):
+        events.append('load')
+        return original_load(conn, actor_uid)
+
+    monkeypatch.setattr(grants, '_begin', begin)
+    monkeypatch.setattr(grants, 'load', load)
+    apply_preview(admin_world, checked)
+    assert events[:2] == ['begin', 'load']

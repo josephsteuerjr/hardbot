@@ -80,6 +80,12 @@ def require_grant_role(session,roles):
         raise CRMError('Действие недоступно для выбранного полномочия.','forbidden',403)
 
 
+def require_legacy_admin(session):
+    context=session.get('context') or {}
+    if context.get('access_model',session.get('access_model',1))==2 and not context.get('owner'):
+        raise CRMError('Для этой полномочия нужен отдельный территориально ограниченный контур администрирования.','forbidden',403)
+
+
 def require_file_action(session,action,body):
     if action in {'workbook-read','workbook-write','workbook-resume'}:
         require_grant_workspace(session,'exchange',{'manager','analyst','owner'},'exchange')
@@ -136,6 +142,7 @@ class SyntheticBackend:
                 return value
     async def admin(self,session,path,body):
         require_grant_workspace(session,'exchange',{'analyst','owner'},'exchange')
+        require_legacy_admin(session)
         validate_admin(path,body)
         if path=='/admin' and str(body.get('path','')).startswith('/ops/') and body.get('method')=='POST':raise CRMError('Изменения служб отключены в проверочной среде.','synthetic_boundary',403)
         async with self.admin_locks.setdefault(session['owner'],asyncio.Lock()):
@@ -194,6 +201,7 @@ class SharedBackend:
     def context(self,session,value):
         for key in ('grant_id','grants','access_model','policy_revision'):
             if key in session:value.setdefault(key,session[key])
+        if session.get('entry_role'):value.setdefault('entry_role',session['entry_role'])
         return value
     async def exchange(self,session):
         headers=self.headers(session)
@@ -253,6 +261,7 @@ class SharedBackend:
             resource=(body if method=='POST' else query or {}).get('resource')
             if resource not in routes:raise CRMError('Неизвестное действие Команды.')
             require_grant_workspace(session,'team',{'manager','analyst','owner'})
+            require_legacy_admin(session)
             if resource=='plan':
                 require_grant_workspace(session,'team',{'manager','owner'},'assign')
                 if method!='POST':raise CRMError('Норму может изменить руководитель.','forbidden',403)
@@ -316,6 +325,7 @@ class SharedBackend:
         return await self.executor.file_action(session,action,body)
     async def admin(self,session,path,body):
         require_grant_workspace(session,'exchange',{'analyst','owner'},'exchange')
+        require_legacy_admin(session)
         validate_admin(path,body)
         if self.executor is None:raise CRMError('Исполнитель обмена недоступен. Исходная операция сохранена.','executor_unavailable',503)
         return await self.executor.admin(session,path,body)
@@ -387,6 +397,7 @@ class WindowsExecutor:
             raise CRMError('Полномочие фонового задания изменилось.','authority_denied',403)
         session['context']=context;session['role']=context['role']
         require_grant_workspace(session,'exchange',{'analyst','owner'},'exchange')
+        require_legacy_admin(session)
         return context
     async def ensure(self,session):
         owner=session['owner'];folder=self.home/hashlib.sha256(owner.encode()).hexdigest();folder.mkdir(parents=True,exist_ok=True)
@@ -449,6 +460,7 @@ class WindowsExecutor:
         async with self.excel_lock:return await asyncio.to_thread(execute)
     async def admin(self,session,path,body):
         require_grant_workspace(session,'exchange',{'analyst','owner'},'exchange')
+        require_legacy_admin(session)
         validate_admin(path,body);owner=session['owner']
         async with self.locks.setdefault(owner,asyncio.Lock()):
             lease=await self.ensure(session)

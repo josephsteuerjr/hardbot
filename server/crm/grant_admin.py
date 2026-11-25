@@ -1,6 +1,5 @@
 """Isolated actor-grant administration with optimistic, idempotent apply."""
 
-from dataclasses import replace
 import json
 import re
 
@@ -70,11 +69,6 @@ def _require_admin(principal):
 
 def _refresh_admin(conn, principal):
     refreshed = access.refresh_write(conn, principal)
-    if principal.role == "analyst" and "access_manage" in principal.capabilities:
-        refreshed = replace(
-            refreshed,
-            capabilities=refreshed.capabilities | {"access_manage"},
-        )
     _require_admin(refreshed)
     return refreshed
 
@@ -551,6 +545,7 @@ def apply(principal, body):
         principal = _refresh_admin(conn, principal)
         actor = _actor(conn, body["actor_uid"])
         _authorize_target(principal, actor)
+        grants._begin(conn, actor["actor_uid"])
         current = grants.load(conn, actor["actor_uid"])
         if not principal.owner:
             ceiling = _target_ceiling(conn, actor)

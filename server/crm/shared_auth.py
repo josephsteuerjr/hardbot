@@ -161,7 +161,8 @@ def _legacy_principal(conn, identity):
         employees=frozenset(json.loads(policy['employees_json'])) | {result.employee_uuid}
         all_contracts=bool(policy['all_contracts']) and role in {'manager','analyst'}
     logistics_caps = set(json.loads(membership['capabilities_json'])) & {'logistics'} if membership and membership['role'] in {'manager', 'owner'} else set()
-    legacy = replace(result, role=role, capabilities=(result.capabilities & ROLE_CAPABILITIES[role]) | logistics_caps,
+    access_caps = {'access_manage'} if membership and membership['role'] == 'analyst' and 'access_manage' in json.loads(membership['capabilities_json']) else set()
+    legacy = replace(result, role=role, capabilities=(result.capabilities & ROLE_CAPABILITIES[role]) | logistics_caps | access_caps,
                      employee_scope=employees, all_contracts=all_contracts,
                      read_all_contracts=role != 'logistic',
                      server_operator=role == 'manager' and identity.get('server_operator') is True)
@@ -311,7 +312,7 @@ class Sessions:
         if self.background_store and p.role in {'manager','owner','analyst'}:
             await asyncio.to_thread(self.background_store,p.actor_uid,self.background_seal(payload))
         return dict(token=self.seal(payload), expires_at=payload['expires'],
-                    employee_uuid=p.employee_uuid, name=identity['name'], role=p.role,
+                    employee_uuid=p.employee_uuid, actor_uid=p.actor_uid, name=identity['name'], role=p.role,
                     access_model=p.access_model, policy_revision=p.policy_revision,
                     grant_id=p.grant_id, grants=[grant.to_dict() for grant in p.grants])
 

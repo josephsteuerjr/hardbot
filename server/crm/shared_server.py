@@ -22,7 +22,7 @@ def create_app(*, sessions=None):
         try:
             response = await handler(request)
         except CRMError as exc:
-            response = web.json_response(dict(error=exc.code, text=str(exc)), status=exc.status)
+            response = web.json_response(dict(error=exc.code, text=str(exc), details=exc.details), status=exc.status)
         response.headers['Cache-Control'] = 'no-store'
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['X-CRM-Namespace'] = NAMESPACE

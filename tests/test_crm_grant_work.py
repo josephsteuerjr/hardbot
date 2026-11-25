@@ -263,3 +263,22 @@ def test_background_pack_rechecks_revoked_grant_and_cannot_switch_grant(crm_worl
     assert assignments.job(team, job_id=result['job_id'])['applied_slots'] == 1
     with storage.connect() as conn:
         assert conn.execute('SELECT COUNT(*) FROM crm_assignment_changes').fetchone()[0] == 1
+
+
+
+def test_replay_requires_exact_grant_even_for_legacy_unbound_receipt(crm_world):
+    world = crm_world
+    with storage.connect() as conn:
+        narrow = make_grant(conn, world['member'], territory='self', capabilities={'call'})
+        wide = make_grant(conn, world['member'], territory='all', capabilities={'call', 'visit'})
+        operation = str(uuid.uuid4())
+        body = {'operation_id': operation, 'synthetic': 'replay-binding'}
+        store.acknowledge(conn, narrow, operation, body, {'ok': True}, now())
+        assert store.replay(conn, narrow, operation, body)['grant_id'] == narrow.grant_id
+        with pytest.raises(CRMError) as denied:
+            store.replay(conn, wide, operation, body)
+        assert denied.value.code == 'grant_required'
+        conn.execute("UPDATE crm_commands SET result_json='{\"ok\":true}' WHERE operation_id=?", (operation,))
+        with pytest.raises(CRMError) as denied:
+            store.replay(conn, narrow, operation, body)
+        assert denied.value.code == 'grant_required'

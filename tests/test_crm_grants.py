@@ -309,3 +309,26 @@ def test_schema_10_contains_only_additive_grant_tables(crm_world):
         assert {'crm_grants', 'crm_grant_employees', 'crm_grant_changes'} <= tables
         assert 'crm_actor_access' in {row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='crm_actor_access'")}
+
+
+
+def test_access_manage_comes_from_fresh_membership_not_stale_principal(crm_world):
+    namespace()
+    actor = identity(crm_world, 'analyst')
+    capabilities = sorted(set(ROLE_CAPABILITIES['analyst']) | {'access_manage'})
+    with storage.connect() as conn:
+        conn.execute("UPDATE crm_memberships SET role='analyst',capabilities_json=? WHERE employee_uuid=?",
+                     (canonical(capabilities), crm_world['employee']))
+    legacy = shared_auth.principal(actor)
+    assert 'access_manage' in legacy.capabilities
+    with storage.connect() as conn:
+        grants.upsert(conn, actor['uid'], role='analyst', territory='self',
+                      capabilities={'analytics'}, is_default=True)
+        grants.set_model(conn, actor['uid'], 2)
+    selected = shared_auth.principal(actor)
+    assert 'access_manage' in selected.capabilities
+    with storage.connect() as conn:
+        conn.execute("UPDATE crm_memberships SET capabilities_json=? WHERE employee_uuid=?",
+                     (canonical(sorted(ROLE_CAPABILITIES['analyst'])), crm_world['employee']))
+        refreshed = access.refresh_write(conn, selected)
+    assert 'access_manage' not in refreshed.capabilities

@@ -93,6 +93,13 @@ const ownerContext=context=>({...context,role:'owner',owner:true,capabilities:[]
   transform=context=>{const value=selected('analyst',['exchange'],['exchange'])(context);delete value.workspace;return value;};
   assert((await admin()).ok,'Legacy analyst default grant must retain admin');
 
+  await connect('manager',selected('manager',['assign'],['team'],{access_model:2,grant_id:'narrow-manager'}));
+  assert.equal((await access()).status,403,'Scoped model 2 must not use broad legacy team routes');
+  await connect('analyst',selected('analyst',['exchange'],['exchange'],{access_model:2,grant_id:'narrow-analyst'}));
+  assert.equal((await admin()).ok,false,'Scoped model 2 must not use broad legacy admin');
+  await connect('analyst',context=>ownerContext({...context,access_model:2,grant_id:'global-owner'}));
+  assert((await admin()).ok,'Global owner retains legacy administration');
+
   fs.writeFileSync(path.join(qa,'RESULT.json'),JSON.stringify({passed:true,actualMain:true,actualPreload:true,actualRenderer:true,actualSyntheticBackend:true,
     ownerAdmin:true,ownerWorkbook:true,ownerManagerAccess:true,analystManagerAccess:true,managerPlanCapability:true,
     roleCapabilityWorkspaceRequired:true,legacyDefaultGrants:true,freshAdminRecheck:true,freshManagerAccessRecheck:true,externalRequests:0},null,2));

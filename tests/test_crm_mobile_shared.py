@@ -184,6 +184,14 @@ def test_team_adapter_uses_registered_primary_routes():
         session=dict(role='manager',credential_header='X-Pult-Token',credential='synthetic-test-credential')
         for resource in ['team','approve','reset','revoke','board']:
             assert (await backend.request(session,'GET' if resource=='team' else 'POST','manager-access',dict(resource=resource,payload={}),dict(resource=resource)))['ok']
+        scoped=dict(session,context=dict(access_model=2,actor_uid=303,grant_id='grant-narrow',role='manager',
+            grants=[dict(grant_id='grant-narrow',actor_uid=303,role='manager',capabilities=[])],
+            workspace=dict(tree=[dict(id='team',children=[])])))
+        try:
+            await backend.request(scoped,'GET','manager-access',{},dict(resource='team'))
+            raise AssertionError('Scoped grant reached broad legacy team route')
+        except CRMError as exc:
+            assert exc.status==403
     asyncio.run(run())
 
 
@@ -286,4 +294,45 @@ def test_background_executor_rechecks_revoked_grant_before_starting(tmp_path):
                     raise AssertionError('revoked background grant was accepted')
                 except CRMError as exc:
                     assert exc.code=='grant_revoked'
+    asyncio.run(run())
+
+
+
+def test_exchange_preserves_grant_candidates_for_native_and_mobile():
+    async def run():
+        class ExchangeSessions:
+            async def exchange(self,credential,**kwargs):
+                raise CRMError('Выберите полномочие.','grant_required',409,
+                    {'grants':[dict(grant_id='grant-a',role='manager'),dict(grant_id='grant-b',role='manager')]})
+            def authority_metrics(self):return {}
+        async with TestClient(TestServer(shared_app(sessions=ExchangeSessions()))) as client:
+            response=await client.post('/auth/exchange',headers={'X-Pult-Token':'synthetic-credential'})
+            assert response.status==409
+            payload=await response.json()
+            assert [grant['grant_id'] for grant in payload['details']['grants']]==['grant-a','grant-b']
+    asyncio.run(run())
+
+
+def test_mobile_vault_separates_actors_of_one_employee(tmp_path):
+    class ActorBackend(SharedBackend):
+        async def login(self,body):
+            actor=303 if body['username']=='first' else 404
+            context=dict(actor_uid=actor,employee_uuid='person-one',role='employee',access_model=2,
+                         grant_id='grant-'+str(actor),capabilities=['call'])
+            return dict(role='employee',context=context,synthetic=False)
+        async def request(self,session,method,action,body=None,query=None):
+            assert action=='context'
+            return session['context']
+    async def run():
+        backend=ActorBackend('https://hard.rimborso.ru','https://hard.rimborso.ru/crm-shared-pilot')
+        app=create_app(backend,tmp_path/'mobile',key=os.urandom(32))
+        async with TestClient(TestServer(app)) as client:
+            owners=[]
+            for username in ('first','second'):
+                initial=await (await client.get('/mobile/boot')).json()
+                response=await client.post('/mobile/login',headers={'X-CRM-CSRF':initial['csrf']},json=dict(username=username,password='synthetic'))
+                assert response.status==200
+                boot=await (await client.get('/mobile/boot')).json()
+                owners.append(boot['session']['owner'])
+            assert owners[0]!=owners[1]
     asyncio.run(run())

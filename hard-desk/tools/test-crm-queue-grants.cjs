@@ -1,0 +1,35 @@
+const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const esbuild=require('esbuild'),crypto=require('node:crypto');
+const temp=fs.mkdtempSync(path.join(os.tmpdir(),'crm-queue-grants-'));
+const electron={app:{getPath:()=>temp},safeStorage:{isEncryptionAvailable:()=>true,encryptString:text=>Buffer.from(text,'utf8'),decryptString:bytes=>Buffer.from(bytes).toString('utf8')}};
+const code=esbuild.buildSync({entryPoints:[path.join(__dirname,'../src/main/crm-queue.ts')],bundle:true,platform:'node',format:'cjs',external:['electron'],write:false}).outputFiles[0].text;
+const loaded={exports:{}};
+vm.runInNewContext(code,{module:loaded,exports:loaded.exports,require:id=>id==='electron'?electron:require(id),Buffer,process,console,setTimeout,clearTimeout});
+const queue=loaded.exports;
+const owner='synthetic\nperson\n303\ngrant-a',binding={actor_uid:303,access_model:2,grant_id:'grant-a'};
+const body={operation_id:crypto.randomUUID(),kind:'call'};
+queue.enqueue(owner,body,'command',binding);
+let context=binding,posts=[];
+const send=async(method,action,payload)=>{
+  if(action==='context')return {ok:true,status:200,data:context};
+  posts.push({method,action,payload});
+  return {ok:true,status:200,data:{operation_id:payload.operation_id,status:'accepted'}};
+};
+(async()=>{
+  context={...binding,grant_id:'grant-b'};
+  await queue.flush(owner,send,()=>owner,()=>binding);
+  assert.equal(posts.length,0,'Default grant change must not replay the old queue');
+  assert.equal(queue.queueState(owner).entries[0].state,'pending');
+  context=binding;
+  await queue.flush(owner,send,()=>owner,()=>binding);
+  assert.equal(posts.length,1);
+  assert.equal(queue.queueState(owner).entries[0].state,'accepted');
+  const unbound={operation_id:crypto.randomUUID(),kind:'note'};
+  queue.enqueue(owner,unbound,'command');
+  posts=[];
+  await queue.flush(owner,send,()=>owner,()=>binding);
+  assert.equal(posts.length,0,'Unbound legacy entry must stay pending in grant model 2');
+  const states=Object.fromEntries(queue.queueState(owner).entries.map(entry=>[entry.body.operation_id,entry.state]));
+  assert.equal(states[unbound.operation_id],'pending');
+  console.log(JSON.stringify({passed:true,defaultSwitchBlocked:true,exactGrantAccepted:true,unboundEntryBlocked:true}));
+})().catch(error=>{console.error(error);process.exitCode=1;}).finally(()=>fs.rmSync(temp,{recursive:true,force:true}));

@@ -59,6 +59,10 @@ function workspaceModules(workspace: any): Set<string> | null {
   return visit(workspace.tree) ? result : null;
 }
 
+export function legacyAdministrationAllowed(context: any): boolean {
+  return context?.access_model !== 2 || context.owner === true;
+}
+
 export function nativeCapability(context: any, capability: NativeCapability): boolean {
   if (!context) return false;
   if (context.owner === true) return true;
