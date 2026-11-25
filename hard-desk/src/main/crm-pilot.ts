@@ -3,7 +3,6 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, statfsSync, statSync, unlinkSync } from "node:fs";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { pathToFileURL } from "node:url";
 import { accountLogin, accountManagerLogin } from "./net";
 import {
   readFieldToken,
@@ -79,18 +78,26 @@ function diagnostic(stage:string,code:string,ok:boolean,extra:Record<string,numb
 let helperRepair:Promise<void>|null=null,helperAttempts:number[]=[],rendererReady=false,lastConfirmedAt:string|null=null;
 let tray: Tray | null = null;
 let quitting = false;
+function currentWindow(): BrowserWindow | null {
+  return win && !win.isDestroyed() && !win.webContents.isDestroyed() ? win : null;
+}
 function showWindow() {
-  if (win?.isMinimized()) win.restore();
-  win?.show();
-  win?.focus();
+  const current = currentWindow();
+  if (!current) return;
+  if (current.isMinimized()) current.restore();
+  current.show();
+  current.focus();
 }
 let screenLocked=false, sleeping=false;
-const activeTime=new ActiveTime(()=>owner && clock?{
-  owner,anchor_id:clock.anchor_id,installation_id:clock.installation_id,
-  elapsed:Math.max(0,Math.round(performance.now()-clock.monotonic)),
-  kind:win?.isVisible() && win.isFocused() && !win.isMinimized() && !screenLocked && !sleeping
-    ? powerMonitor.getSystemIdleTime()<120?'active':'idle':null,
-}:null);
+const activeTime=new ActiveTime(()=>{
+  const current=currentWindow();
+  return owner && clock?{
+    owner,anchor_id:clock.anchor_id,installation_id:clock.installation_id,
+    elapsed:Math.max(0,Math.round(performance.now()-clock.monotonic)),
+    kind:current?.isVisible() && current.isFocused() && !current.isMinimized() && !screenLocked && !sleeping
+      ? powerMonitor.getSystemIdleTime()<120?'active':'idle':null,
+  }:null;
+});
 const config = () =>
   readSettings().crmConnection as
     | { mode?: string; role?: string; server?: string; auth?: string; source?: EntrySource }
@@ -608,8 +615,10 @@ async function recoverExports() {
 let activeRequests = 0, installingUpdate = false;
 function safeHandler(name: string, fn: (...args: any[]) => any) {
   ipcMain.handle(name, async (event, ...args) => {
+    const current = currentWindow();
+    if (!current) return {ok:false,status:409,text:'Окно закрыто. Повторите действие после запуска.'};
     if (
-      event.sender !== win?.webContents ||
+      event.sender !== current.webContents ||
       !event.senderFrame?.url.startsWith("hard://app/")
     )
       throw new Error("Недоверенное окно.");
@@ -658,12 +667,16 @@ app
     if(!firstInstance)return;
     watchInstallerExit();
     const ui = resolve(__dirname, "ui");
+    const mime: Record<string, string> = {
+      ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
+      ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".woff2": "font/woff2", ".json": "application/json",
+    };
     protocol.handle("hard", (request) => {
       const url = new URL(request.url),
         path = resolve(ui, decodeURIComponent(url.pathname).replace(/^\//, ""));
       if (url.hostname !== "app" || !path.startsWith(ui + sep))
         return new Response("Forbidden", { status: 403 });
-      return net.fetch(pathToFileURL(path).toString());
+      return new Response(readFileSync(path), { headers: { "content-type": mime[extname(path).toLowerCase()] || "application/octet-stream", "cache-control": "no-cache" } });
     });
     diagnostic('launcher','launcher_ready',true);
     try{await backendStart();diagnostic('helper','helper_ready',true);}catch{backend?.kill();diagnostic('helper','helper_unavailable',false);}
@@ -1215,13 +1228,16 @@ app
       },
     );
     ipcMain.on("crm:win", (event, action) => {
-      if (event.sender !== win?.webContents) return;
-      if (action === "close") win?.close();
-      else if (action === "minimize") win?.minimize();
+      const current = currentWindow();
+      if (!current || event.sender !== current.webContents) return;
+      if (action === "close") current.close();
+      else if (action === "minimize") current.minimize();
       else if (action === "maximize")
-        win?.isMaximized() ? win.unmaximize() : win?.maximize();
+        current.isMaximized() ? current.unmaximize() : current.maximize();
     });
-    await win.loadURL("hard://app/index.html");
+    const startupWindow = win;
+    await startupWindow.loadURL("hard://app/index.html");
+    if (quitting || startupWindow.isDestroyed()) return;
     let rendererRepairs=0;
     win.webContents.on('render-process-gone',()=>{
       diagnostic('renderer','renderer_stopped',false);
@@ -1229,12 +1245,14 @@ app
       else void showStartupRecovery('renderer_unavailable');
     });
     setTimeout(()=>{if(!rendererReady && win && !win.isDestroyed())void showStartupRecovery('preload_or_renderer_unavailable');},10000).unref();
-    const framed=await applyCrmWindowFrame(win);
+    const framed=await applyCrmWindowFrame(startupWindow);
+    if (quitting || startupWindow.isDestroyed()) return;
     diagnostic('window',framed?'window_frame_applied':'window_frame_unavailable',framed);
     if (!framed && process.platform === "win32")
       await local("window-frame", {
-        hwnd: win.getNativeWindowHandle().readBigUInt64LE().toString(),
+        hwnd: startupWindow.getNativeWindowHandle().readBigUInt64LE().toString(),
       });
+    if (quitting || startupWindow.isDestroyed()) return;
     if (process.platform === 'win32' && (STABLE_CRM || product.id === 'crm')) {
       tray = new Tray(join(__dirname, 'icons', 'tray-32.png'));
       tray.setToolTip(product.name);
@@ -1244,7 +1262,8 @@ app
         {label:'Выход',click:async () => {
           if (activeRequests || await analystRuntime.busy()) {
             showWindow();
-            await dialog.showMessageBox(win!,{message:'Дождитесь завершения текущей операции.'});
+            const current = currentWindow();
+            if (current) await dialog.showMessageBox(current,{message:'Дождитесь завершения текущей операции.'});
           } else app.quit();
         }}
       ]));
@@ -1285,7 +1304,7 @@ app
 
   })
   .catch((error) => {
-    if(quitting)return;
+    if(quitting || win?.isDestroyed())return;
     diagnostic('startup','startup_failed',false);
     void showStartupRecovery('startup_failed');
   });

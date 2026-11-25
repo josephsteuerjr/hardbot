@@ -50,6 +50,12 @@ function walk(dir){return readdirSync(dir,{withFileTypes:true}).flatMap(e=>e.isD
 const sevenZip=join(here,'node_modules/electron-winstaller/vendor/7z-x64.exe');
 if(!existsSync(sevenZip)) throw new Error('The local NSIS audit requires the bundled Windows 7-Zip');
 const lab=mkdtempSync(join(tmpdir(),'hard-nsis-audit-'));
+const pristineElectron=join(process.env.HARD_ELECTRON_DIST?resolve(process.env.HARD_ELECTRON_DIST):join(here,'node_modules/electron/dist'),'electron.exe');
+const pristineElectronSha=sha(readFileSync(pristineElectron));
+function assertPristineElectron(directory,id,setup=false){
+  const executable=join(directory,(setup?'hard-setup-':'hard-')+id+'.exe');
+  if(sha(readFileSync(executable))!==pristineElectronSha)throw new Error('Modified Electron runtime breaks renderer navigation: '+id);
+}
 try {
 for (const id of selectedProducts) {
   const installer=join(assetDirectory || join(here,'installers',id),`${id}-${version}-setup.exe`);
@@ -61,6 +67,7 @@ for (const id of selectedProducts) {
   execFileSync(sevenZip,['x','-y','-bd','-o'+unpacked,archive],{stdio:'pipe'});
   const component=join(unpacked,'resources/application-installer.exe');
   if(existsSync(component)){
+    assertPristineElectron(unpacked,id,true);
     const outerAsar=join(unpacked,'resources/app.asar');
     const outerPackage=JSON.parse(extractFile(outerAsar,'package.json').toString());
     if(JSON.stringify(JSON.parse(extractFile(outerAsar,'out/setup-registry.json').toString()))!==JSON.stringify(productionRegistry))throw new Error('Non-production wizard registry identity: '+id);
@@ -78,6 +85,7 @@ for (const id of selectedProducts) {
     if(sha(extractFile(join(unpacked,'resources/app.asar'),'out/setup-main.js'))!==sha(setupExpected.outputFiles[0].contents))throw new Error('Stale removal wizard: '+id);
     if(nativeHelperDigest(readFileSync(join(unpacked,'resources/process-check.exe')))!==nativeHelperDigest(readFileSync(join(here,'installer/bin/process-check.exe'))))throw new Error('Stale app native helper: '+id);
   }
+  assertPristineElectron(unpacked,id);
   if(walk(unpacked).some(path=>/(?:^|[/\\])(?:_local|\.env(?:\..*)?|calls-pending\.bin|backend-settings\.json)(?:[/\\]|$)|\.(?:db|xlsb|xlsx|private\.pem)$/i.test(relative(unpacked,path))))
     throw new Error('Forbidden operational data in installer resources: '+id);
   const packed=join(unpacked,'resources/app.asar');

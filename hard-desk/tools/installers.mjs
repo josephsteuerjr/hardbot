@@ -1,7 +1,7 @@
 // Four local builds. This script never uploads or installs an application.
 import { build, Platform, Arch } from 'electron-builder';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync,realpathSync,lstatSync,rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync,realpathSync,lstatSync,rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import yaml from 'js-yaml';
 import { dirname, join } from 'node:path';
@@ -11,8 +11,15 @@ import { auditRuntimeDependencies } from './runtime-dependencies.mjs';
 const here = join(dirname(fileURLToPath(import.meta.url)), '..');
 const qa = !!process.env.HARD_SETUP_QA_BUILD;
 const localElectron = process.env.HARD_ELECTRON_DIST;
-if (localElectron && readFileSync(join(localElectron, 'version'), 'utf8').trim() !== JSON.parse(readFileSync(join(here, 'package.json'))).devDependencies.electron)
+const pinnedElectron = JSON.parse(readFileSync(join(here, 'package.json'))).devDependencies.electron;
+if (localElectron && readFileSync(join(localElectron, 'version'), 'utf8').trim() !== pinnedElectron)
   throw new Error('Local Electron distribution differs from the pinned version');
+const restoreElectron = name => async context => {
+  const pristine = localElectron || join(here, 'node_modules/electron/dist');
+  if (readFileSync(join(pristine, 'version'), 'utf8').trim() !== pinnedElectron) throw new Error('Pristine Electron distribution differs from the pinned version');
+  // electron-builder's resedit breaks all renderer navigation in Electron 44.
+  copyFileSync(join(pristine, 'electron.exe'), join(context.appOutDir, name));
+};
 mkdirSync(join(here,'installer/bin'),{recursive:true});
 execFileSync(join(process.env.WINDIR,'Microsoft.NET/Framework64/v4.0.30319/csc.exe'),['/nologo','/target:winexe','/platform:x64','/reference:System.Web.Extensions.dll','/reference:System.Security.dll','/out:'+join(here,'installer/bin/process-check.exe'),join(here,'installer/process-check.cs')],{stdio:'inherit'});
 const selected = process.argv.slice(2);
@@ -38,6 +45,7 @@ for (const id of (selected.length ? selected : stableProducts)) {
         shortcutName: p.name+(qa?' — проверка':''), uninstallDisplayName: p.name+(qa?' — проверка':''), deleteAppDataOnUninstall: false, include: 'installer/brand.nsh',
         runAfterFinish: false, differentialPackage: false },
       publish: { provider: 'generic', url: productReleaseUrl(id), channel: id, useMultipleRangeRequest: false },
+      afterSign: restoreElectron(`hard-${id}.exe`),
     }, publish: 'never' });
   console.log('Packaged runtime audited:', id, auditRuntimeDependencies(join(here,qa?'setup-qa':'installers',id,'win-unpacked/resources/app.asar')));
   // Builder also emits latest.yml for compatibility; only the product channel is distributable.
@@ -71,7 +79,7 @@ for (const id of (selected.length ? selected : stableProducts)) {
       electronDist:localElectron || undefined,
       extraResources:[{from:`${innerRelative}/application-installer.exe`,to:'application-installer.exe'},{from:`${innerRelative}/setup-payload.json`,to:'setup-payload.json'},{from:'installer/bin/process-check.exe',to:'process-check.exe'}],
       win:{icon:'icons/icon.ico',executableName:`hard-setup-${id}`,signExecutable:false,target:['portable']},
-      portable:{requestExecutionLevel:'user',unpackDirName:true},publish:null},publish:'never'});
+      portable:{requestExecutionLevel:'user',unpackDirName:true},afterSign:restoreElectron(`hard-setup-${id}.exe`),publish:null},publish:'never'});
   auditRuntimeDependencies(join(inner,'outer/win-unpacked/resources/app.asar'));
   renameSync(join(inner,'outer',name),join(output,name));
   for(const file of metadata.files){file.size=statSync(join(output,name)).size;file.sha512=createHash('sha512').update(readFileSync(join(output,name))).digest('base64');}
