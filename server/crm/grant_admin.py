@@ -42,12 +42,10 @@ def _error(message, code="grant_invalid", status=400, details=None):
 
 
 def _environment(conn):
-    rows = dict(
-        conn.execute(
-            "SELECT key,value FROM crm_meta WHERE key IN "
-            "('synthetic_candidate','distribution_mode')"
-        )
-    )
+    rows = {row['key']: row['value'] for row in conn.execute(
+        "SELECT key,value FROM crm_meta WHERE key IN "
+        "('synthetic_candidate','distribution_mode')"
+    )}
     if "synthetic_candidate" not in rows and rows.get("distribution_mode") != "isolated":
         raise _error(
             "Управление grants доступно только в изолированном проверочном контуре.",

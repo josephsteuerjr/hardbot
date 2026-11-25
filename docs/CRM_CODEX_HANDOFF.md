@@ -19,6 +19,17 @@ P0, P1 и P2 из этого документа реализованы. Допо
 
 Production, рабочие БД и каналы обновлений не менялись. Эта ветка по-прежнему кандидат на отдельную изолированную приёмку, а не production-выкладка.
 
+## 0.1. Scoped admin proxy — `f2ca06f` и PostgreSQL
+
+Следующий этап после `cbef398` реализован:
+
+- Manager proxy фильтрует состав команды по `employee_scope`; reset/revoke/approve/board/plan проверяют целевого сотрудника, аккаунт и устройство перед записью.
+- Для model 2 доступны безопасные `/state`, `/busy` и список аккаунтов с фильтром территории. Прежние широкие admin-записи остаются запрещены; Excel и exchange используют canonical grant-aware пути, а не полный legacy token.
+- Model 1 и глобальный owner сохраняют прежнее поведение.
+- Найден и исправлен отдельный PostgreSQL-дефект чтения `crm_meta` в `grant_admin._environment`.
+
+Проверка на сервере в disposable schemas: **33 passed, 2 skipped**. Подтверждены миграция 9→10, concurrent apply одной revision, actor lock и assignment/runtime инварианты. Полная выдача всех старых admin-операций ограниченным ролям не объявляется: им нужны отдельные scoped адаптеры каждой операции либо canonical аналоги.
+
 ## 1. Стартовая точка
 
 - Production-hotfix находится в `main` и включён в эту ветку merge-коммитом `41c42a6`.
