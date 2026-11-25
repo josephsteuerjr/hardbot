@@ -187,11 +187,8 @@ def test_team_adapter_uses_registered_primary_routes():
         scoped=dict(session,context=dict(access_model=2,actor_uid=303,grant_id='grant-narrow',role='manager',
             grants=[dict(grant_id='grant-narrow',actor_uid=303,role='manager',capabilities=[])],
             workspace=dict(tree=[dict(id='team',children=[])])))
-        try:
-            await backend.request(scoped,'GET','manager-access',{},dict(resource='team'))
-            raise AssertionError('Scoped grant reached broad legacy team route')
-        except CRMError as exc:
-            assert exc.status==403
+        scoped_result=await backend.request(scoped,'GET','manager-access',{},dict(resource='team'))
+        assert scoped_result['ok'] and scoped_result['employees']==[]
     asyncio.run(run())
 
 
@@ -399,4 +396,66 @@ def test_mobile_logistics_read_uses_dedicated_file_action(tmp_path):
             response=await client.post('/mobile/workbook',headers=headers,json=dict(action='logistics-read',operation_id=str(uuid.uuid4()),input=dict(file=handle)))
             assert response.status==200,await response.text()
             assert (await response.json())['workbook_sha256']=='synthetic'
+    asyncio.run(run())
+
+
+
+def test_scoped_manager_proxy_filters_team_and_every_mutation():
+    session=dict(role='manager',credential_header='X-Pult-Token',credential='synthetic-scoped',context=dict(
+        access_model=2,actor_uid=303,grant_id='narrow',role='manager',
+        staff=[dict(name='Allowed person',employee_uuid='person-allowed',actor_uids=[101])],
+        grants=[dict(grant_id='narrow',actor_uid=303,role='manager',capabilities=['assign'])],
+        workspace=dict(tree=[dict(id='team',children=[])])))
+    team=dict(ok=True,employees=[
+        dict(employee='Allowed person',account=dict(username='allowed',actor_uid=101,devices=[dict(id=55)])),
+        dict(employee='Outside person',account=dict(username='outside',actor_uid=202,devices=[dict(id=66)]))])
+    calls=[]
+    class Backend(SharedBackend):
+        async def json(self,url,method='GET',headers=None,body=None):
+            calls.append((url,body))
+            if url.endswith('/api/manager/plan') and method=='GET':
+                return dict(ok=True,employees=team['employees'])
+            if url.endswith('/api/manager/team') and method=='GET':return team
+            return dict(ok=True)
+    backend=Backend('https://hard.rimborso.ru','https://hard.rimborso.ru/crm-shared-pilot')
+    async def run():
+        filtered=await backend.request(session,'GET','manager-access',{},dict(resource='team'))
+        assert [row['employee'] for row in filtered['employees']]==['Allowed person']
+        assert (await backend.request(session,'POST','manager-access',dict(resource='reset',payload=dict(username='allowed',password='synthetic1',operation_id='scoped-operation-1'))))['ok']
+        for resource,payload in [
+            ('reset',dict(username='outside',password='synthetic1',operation_id='scoped-operation-2')),
+            ('revoke',dict(device_id=66)),('approve',dict(device_id=66)),
+            ('board',dict(employee='Outside person',action='add')),
+            ('plan',dict(plan={'Outside person':3}))]:
+            before=len(calls)
+            try:
+                await backend.request(session,'POST','manager-access',dict(resource=resource,payload=payload))
+                raise AssertionError('Foreign mutation passed: '+resource)
+            except CRMError as exc:
+                assert exc.status==403
+                assert len(calls)==before or resource in {'reset','revoke','approve'} and len(calls)==before+1
+        assert (await backend.request(session,'POST','manager-access',dict(resource='revoke',payload=dict(device_id=55))))['ok']
+        assert (await backend.request(session,'POST','manager-access',dict(resource='plan',payload=dict(plan={'Allowed person':3}))))['ok']
+    asyncio.run(run())
+
+
+def test_scoped_admin_proxy_allows_only_safe_reads_and_filters_accounts():
+    session=dict(role='analyst',credential_header='X-Pult-Token',credential='synthetic-scoped',context=dict(
+        access_model=2,actor_uid=303,grant_id='narrow',role='analyst',
+        staff=[dict(name='Allowed person',employee_uuid='person-allowed',actor_uids=[101])],
+        grants=[dict(grant_id='narrow',actor_uid=303,role='analyst',capabilities=['exchange'])],
+        workspace=dict(tree=[dict(id='exchange',children=[])])))
+    class Executor:
+        async def admin(self,session,path,body):
+            if path=='/state':return dict(ok=True,data=dict(busy=False))
+            return dict(ok=True,accounts=[dict(username='allowed',actor_uid=101),dict(username='outside',actor_uid=202)])
+    backend=SharedBackend('https://hard.rimborso.ru','https://hard.rimborso.ru/crm-shared-pilot',Executor())
+    async def run():
+        result=await backend.admin(session,'/admin',dict(method='GET',path='/admin/accounts.json'))
+        assert [row['username'] for row in result['accounts']]==['allowed']
+        try:
+            await backend.admin(session,'/enr/apply',{})
+            raise AssertionError('Scoped admin reached broad import')
+        except CRMError as exc:
+            assert exc.status==403
     asyncio.run(run())

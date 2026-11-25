@@ -3,6 +3,7 @@ import asyncio, contextlib, hashlib, json, os, re, secrets, sys
 from pathlib import Path
 import aiohttp
 from .contract import CRMError
+from . import scoped_admin
 
 GET_ACTIONS=frozenset('context operator-status portfolio work-portfolio tasks card contracts registry managed-portfolio assignment-staff assignment-receipt assignment-history assignment-job manager-statistics manager-report manager-report-download analyst-report analyst-statistics changes active-time shifts shift-report cabinet three-hour script adoption document-read logistics-export-download grant-catalog logistics logistics-export'.split())
 POST_ACTIONS=frozenset('registry-edit assignment-preview assignment-commit assignment-job-step assignment-job-cancel active-time anchor command shift plan cohort export import-preview import-apply receipt telemetry script document logistics-call grant-admin logistics-preview logistics-apply logistics-update'.split())
@@ -84,12 +85,6 @@ def require_grant_role(session,roles):
         raise CRMError('Действие недоступно для выбранного полномочия.','forbidden',403)
 
 
-def require_legacy_admin(session):
-    context=session.get('context') or {}
-    if context.get('access_model',session.get('access_model',1))==2 and not context.get('owner'):
-        raise CRMError('Для этой полномочия нужен отдельный территориально ограниченный контур администрирования.','forbidden',403)
-
-
 def require_file_action(session,action,body):
     if action in {'workbook-read','workbook-write','workbook-resume'}:
         require_grant_workspace(session,'exchange',{'manager','analyst','owner'},'exchange')
@@ -147,7 +142,7 @@ class SyntheticBackend:
                 return value
     async def admin(self,session,path,body):
         require_grant_workspace(session,'exchange',{'analyst','owner'},'exchange')
-        require_legacy_admin(session)
+        scoped_admin.require_safe_admin(session,path,body)
         validate_admin(path,body)
         if path=='/admin' and str(body.get('path','')).startswith('/ops/') and body.get('method')=='POST':raise CRMError('Изменения служб отключены в проверочной среде.','synthetic_boundary',403)
         async with self.admin_locks.setdefault(session['owner'],asyncio.Lock()):
@@ -160,7 +155,7 @@ class SyntheticBackend:
         async with self.client.post(url+path,headers={'X-Local-Secret':secret},json=body) as response:
             value=await response.json()
             if path=='/state' and isinstance(value.get('data'),dict):value['data'].pop('settings_path',None)
-            return value
+            return scoped_admin.filter_safe_admin_result(session,path,body,value)
 
 class SharedBackend:
     """Pinned CRM/primary access. Excel/legacy work runs on a configured executor."""
@@ -266,11 +261,27 @@ class SharedBackend:
             resource=(body if method=='POST' else query or {}).get('resource')
             if resource not in routes:raise CRMError('Неизвестное действие Команды.')
             require_grant_workspace(session,'team',{'manager','analyst','owner'})
-            require_legacy_admin(session)
+            scope=scoped_admin.scoped(session)
+            payload=(body or {}).get('payload') or {}
             if resource=='plan':
                 require_grant_workspace(session,'team',{'manager','owner'},'assign')
-                if method!='POST':raise CRMError('Норму может изменить руководитель.','forbidden',403)
-            return await self.json(self.primary+routes[resource],method,self.headers(session),(body or {}).get('payload') if method=='POST' else None)
+                if scope is not None:
+                    if method=='POST':
+                        for name in (payload.get('plan') or {}):scope.require_employee(name)
+                        return await self.json(self.primary+routes[resource],method,self.headers(session),payload)
+                    return scope.filter_plan(await self.json(self.primary+routes[resource],method,self.headers(session)))
+            if scope is not None:
+                if resource=='team':
+                    return scope.filter_team(await self.json(self.primary+routes[resource],method,self.headers(session)))
+                if resource=='board':scope.require_employee(payload.get('employee'))
+                elif resource=='reset':
+                    team=await self.json(self.primary+'/api/manager/team','GET',self.headers(session))
+                    scope.require_username(scope.filter_team(team),payload.get('username'))
+                elif resource in {'revoke','approve'}:
+                    team=scope.filter_team(await self.json(self.primary+'/api/manager/team','GET',self.headers(session)))
+                    if payload.get('device_id') is not None:scope.require_device(team,payload.get('device_id'))
+                    else:scope.require_username(team,payload.get('username'))
+            return await self.json(self.primary+routes[resource],method,self.headers(session),payload if method=='POST' else None)
         if action not in (GET_ACTIONS if method=='GET' else POST_ACTIONS):raise CRMError('Неизвестный запрос.')
         try:
             value=await self.json(self.crm+'/api/crm/'+action+('?' + urlencode(query) if query else ''),method,{'Authorization':'Bearer '+session['crm_session']},body)
@@ -330,10 +341,11 @@ class SharedBackend:
         return await self.executor.file_action(session,action,body)
     async def admin(self,session,path,body):
         require_grant_workspace(session,'exchange',{'analyst','owner'},'exchange')
-        require_legacy_admin(session)
+        scoped_admin.require_safe_admin(session,path,body)
         validate_admin(path,body)
         if self.executor is None:raise CRMError('Исполнитель обмена недоступен. Исходная операция сохранена.','executor_unavailable',503)
-        return await self.executor.admin(session,path,body)
+        result=await self.executor.admin(session,path,body)
+        return scoped_admin.filter_safe_admin_result(session,path,body,result)
 
 class WindowsExecutor:
     """Actual Excel and the existing durable administrator engine on Windows."""
@@ -402,7 +414,6 @@ class WindowsExecutor:
             raise CRMError('Полномочие фонового задания изменилось.','authority_denied',403)
         session['context']=context;session['role']=context['role']
         require_grant_workspace(session,'exchange',{'analyst','owner'},'exchange')
-        require_legacy_admin(session)
         return context
     async def ensure(self,session):
         owner=session['owner'];folder=self.home/hashlib.sha256(owner.encode()).hexdigest();folder.mkdir(parents=True,exist_ok=True)
@@ -470,7 +481,7 @@ class WindowsExecutor:
         async with self.excel_lock:return await asyncio.to_thread(execute)
     async def admin(self,session,path,body):
         require_grant_workspace(session,'exchange',{'analyst','owner'},'exchange')
-        require_legacy_admin(session)
+        scoped_admin.require_safe_admin(session,path,body)
         validate_admin(path,body);owner=session['owner']
         async with self.locks.setdefault(owner,asyncio.Lock()):
             lease=await self.ensure(session)

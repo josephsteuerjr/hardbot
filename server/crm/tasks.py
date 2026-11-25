@@ -78,7 +78,11 @@ def completion(conn, principal, entity):
 def staff(conn, principal):
     at = now()
     grant_mode = principal.access_model == 2
+    actor_links = {}
+    for link in conn.execute('SELECT actor_uid,employee_uuid FROM crm_actor_links WHERE active=1'):
+        actor_links.setdefault(link['employee_uuid'], []).append(link['actor_uid'])
     return [dict(employee_uuid=row['employee_uuid'], name=row['name'], role=row['role'],
+                 actor_uids=sorted(actor_links.get(row['employee_uuid'], [])),
                  work_kinds=sorted((set(json.loads(row['capabilities_json']))
                                     & (principal.capabilities if grant_mode else set(WORK_ACTIONS)))
                                    & set(WORK_ACTIONS)))

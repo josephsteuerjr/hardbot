@@ -23,7 +23,7 @@ import {CrmLive} from './crm-live';
 import {FIXED_PRODUCT,PRODUCTS,STABLE_CRM} from './product';
 import {accountAction,accountState,adoptSoftAccount,markAccountLoginRequired,savedAccountFingerprint} from './crm-account';
 import {checkUpdates,installUpdate,startUpdates,updateState} from './updates';
-import {legacyAdministrationAllowed,nativeCapability} from './crm-native-access';
+import {filterScopedAdminResult,filterScopedManagerPlan,filterScopedManagerTeam,legacyAdministrationAllowed,nativeCapability,requireScopedManagerMutation,scopedAdminActionAllowed} from './crm-native-access';
 
 const isolatedProfile = !!process.env.HARD_USER_DATA;
 const product = STABLE_CRM ? FIXED_PRODUCT! : PRODUCTS.crm;
@@ -420,9 +420,15 @@ async function managerAccess(method:string,body:any,query:any):Promise<queue.Res
       !nativeCapability(fresh.data,capability))
     return {ok:false,status:403,text:'Полномочие управления входами отозвано или изменилось.'};
   currentContext=fresh.data;
-  if(!legacyAdministrationAllowed(fresh.data))
-    return {ok:false,status:403,text:'Для этой полномочия нужен отдельный территориально ограниченный контур управления входами.'};
-  if(demo())return local('manager-access',body,query,method);
+  if(demo()){
+    if(!legacyAdministrationAllowed(currentContext)&&['reset','revoke','approve'].includes(resource)){
+      const team=await local('manager-access',undefined,{resource:'team'},'GET');
+      requireScopedManagerMutation(currentContext,resource,body?.payload,filterScopedManagerTeam(currentContext,team.data));
+    }else requireScopedManagerMutation(currentContext,resource,body?.payload,undefined);
+    const result=await local('manager-access',body,query,method);
+    if(!result.ok)return result;
+    return {...result,data:resource==='team'?filterScopedManagerTeam(currentContext,result.data):resource==='plan'?filterScopedManagerPlan(currentContext,result.data):result.data};
+  }
   if(!shared()||!['manager','analyst','crm'].includes(entrySource()))
     return {ok:false,status:403,text:'Для управления входами нужно подтверждённое подключение к рабочему месту.'};
   const actor=currentContext.actor_uid;
@@ -440,10 +446,15 @@ async function managerAccess(method:string,body:any,query:any):Promise<queue.Res
     if(!identity.ok || !confirmedKind || !Number.isSafeInteger(confirmed) || confirmed === 0 ||
        (actor !== undefined && actor !== confirmed) || authority!==owner || login.fingerprint!==entryFingerprint(entrySource()))
       return {ok:false,status:403,text:'Вход или полномочия изменились. Подключитесь заново.'};
+    if(!legacyAdministrationAllowed(currentContext)&&['reset','revoke','approve'].includes(resource)){
+      const teamResponse=await fetchBuffered((u,i)=>net.fetch(u,i),'https://hard.rimborso.ru/api/manager/team',{method:'GET',headers},10000);
+      requireScopedManagerMutation(currentContext,resource,body?.payload,filterScopedManagerTeam(currentContext,await teamResponse.json()));
+    }else requireScopedManagerMutation(currentContext,resource,body?.payload,undefined);
     const response=await fetchBuffered((u,i)=>net.fetch(u,i),'https://hard.rimborso.ru/api/manager/'+route[1],
       {method,headers,body:method==='POST'?JSON.stringify(body?.payload||{}):undefined},15000);
     const value=await response.json();
-    return {ok:response.ok&&value.ok!==false,status:response.status,data:value,text:value.message||value.text||value.error};
+    const scoped=resource==='team'?filterScopedManagerTeam(currentContext,value):resource==='plan'?filterScopedManagerPlan(currentContext,value):value;
+    return {ok:response.ok&&scoped.ok!==false,status:response.status,data:scoped,text:scoped.message||scoped.text||scoped.error};
   }catch{return {ok:false,status:0,text:'Не удалось подтвердить результат в службе входа. Не повторяйте изменение с новым ID.'};}
 }
 
@@ -469,8 +480,6 @@ const analystRuntime=new AnalystRuntime({home:data,window:()=>win,synthetic:demo
     const result = await send('GET','context');
     if (!result.ok || !nativeCapability(result.data,'admin') || result.data.employee_uuid !== employee || !valid())
       throw Error('Сервер не подтвердил полномочия администрирования.');
-    if (!legacyAdministrationAllowed(result.data))
-      throw Error('Для этой полномочия нужен отдельный территориально ограниченный контур администрирования.');
     const ownerAccess = result.data.owner === true;
     let actor = result.data.actor_uid;
     if(demo()){
@@ -522,7 +531,7 @@ async function identify() {
       catch(error){connectionNotice=(error as Error).message;}
     }
     if (STABLE_CRM && !isolatedProfile && (product.id === 'analyst' || currentContext.owner === true) &&
-        nativeCapability(currentContext,'admin')) {
+        nativeCapability(currentContext,'admin') && legacyAdministrationAllowed(currentContext)) {
       void analystRuntime.resume(owner).catch(() => diagnostic('helper','analyst_start_failed',false));
     }
     // Older deployed pilots have no invalidation protocol. A missing feature
@@ -791,7 +800,12 @@ app
       update=>{if(win&&!win.isDestroyed())win.webContents.send('crm:update-state',update);},
       ()=>diagnostic('update','update_check_failed',false)
     );
-    safeHandler('crm:admin',(action:string,args:any[],expected:string)=>analystRuntime.request(action,args,expected));
+    safeHandler('crm:admin',async(action:string,args:any[],expected:string)=>{
+      if(!scopedAdminActionAllowed(currentContext,action,args))
+        return {ok:false,status:403,text:'Для этой полномочия доступны только чтение состояния и список аккаунтов в его территории.'};
+      const result=await analystRuntime.request(action,args,expected);
+      return filterScopedAdminResult(currentContext,action,args,result);
+    });
     safeHandler('crm:diagnostics',async(repair:boolean=false)=>{rendererReady=true;return diagnostics(repair===true);});
     safeHandler('crm:diagnostics-report',async()=>{
       const choice=await dialog.showSaveDialog(win!,{title:'Диагностика CRM',defaultPath:'CRM-диагностика-'+Date.now()+'.json',filters:[{name:'JSON',extensions:['json']}]});

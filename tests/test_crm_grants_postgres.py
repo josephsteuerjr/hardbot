@@ -4,6 +4,7 @@ import os
 import pytest
 
 from crm import grants, postgres_schema, schema, shared_auth, storage
+from crm.contract import CRMError
 from test_crm_postgres import pg_world
 
 
@@ -44,3 +45,28 @@ def test_postgres_schema_9_upgrade_is_additive_and_idempotent(pg_world):
         tables = {row[0] for row in conn.execute("SELECT tablename FROM pg_tables WHERE schemaname=current_schema()")}
         assert {'crm_actor_access','crm_grants','crm_grant_employees','crm_grant_changes'} <= tables
         postgres_schema.initialize(conn)
+
+
+
+def test_grant_admin_concurrent_apply_allows_only_one_revision(pg_world):
+    from concurrent.futures import ThreadPoolExecutor
+    from crm import grant_admin
+    from test_crm_grant_admin import apply_body, grant, preview
+    with storage.connect() as conn:
+        conn.execute("INSERT INTO crm_meta VALUES('synthetic_candidate','postgres-grant-admin') ON CONFLICT(key) DO NOTHING")
+    first = preview(pg_world, 0, [grant(role='employee', capabilities=('call',), is_default=True)])
+    second = preview(pg_world, 0, [grant(role='analyst', capabilities=('analytics',), is_default=True)])
+    owner = pg_world['owner']
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(lambda body: _apply_catching(grant_admin, owner, body),
+                                 (apply_body(first), apply_body(second))))
+    assert sum(isinstance(item, dict) for item in outcomes) == 1
+    conflict = next(item for item in outcomes if isinstance(item, CRMError))
+    assert conflict.status == 409 and conflict.code == 'policy_revision_conflict'
+
+
+def _apply_catching(grant_admin, principal, body):
+    try:
+        return grant_admin.apply(principal, body)
+    except CRMError as exc:
+        return exc
