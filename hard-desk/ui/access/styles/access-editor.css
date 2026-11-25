@@ -1,0 +1,22 @@
+.access-editor{border-top:1px solid var(--line);margin-top:20px;padding-top:16px;min-width:0}
+.access-editor-fields{border:0;padding:0;margin:0;min-width:0}
+.access-editor-head{display:flex;align-items:start;justify-content:space-between;gap:12px}
+.access-editor-head h3{margin:0 0 4px}.access-editor-head p{margin:0;color:var(--ink-3)}
+.access-editor-meta{font-size:12px;color:var(--ink-3);overflow-wrap:anywhere}
+.access-grant-list{display:grid;gap:10px;margin:14px 0}
+.access-grant-card{border:1px solid var(--line-strong);border-radius:8px;padding:12px;background:var(--panel)}
+.access-grant-card-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}
+.access-grant-card-head strong{font-size:13px}.access-grant-default{display:flex;align-items:center;gap:6px;font-size:12px}
+.access-grant-fields{display:grid;grid-template-columns:minmax(150px,1fr) minmax(180px,1fr);gap:10px}
+.access-grant-fields label{display:grid;gap:5px;font-size:12px;color:var(--ink-2)}
+.access-grant-fields select{width:100%}.access-grant-employees{grid-column:1/-1}
+.access-grant-employees select{min-height:92px}.access-grant-readonly{color:var(--ink-3);font-size:12px;margin:8px 0 0}
+.access-editor-actions{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+.access-editor-status{min-height:1.5em;color:var(--ink-2)}.access-editor-status[data-kind=error]{color:var(--err)}
+.access-editor-warnings{color:var(--warn)}.access-editor-warnings p{margin:5px 0}
+.access-diff{margin:14px 0;padding:10px 12px;border-left:3px solid var(--accent);background:var(--accent-soft)}
+.access-diff p{margin:5px 0}.access-diff small{display:block;overflow-wrap:anywhere;color:var(--ink-3)}
+.access-history{margin-top:14px}.access-history-list{max-height:240px;overflow:auto}
+.access-history-item{border-top:1px solid var(--line);padding:8px 0}.access-history-item p{margin:2px 0}
+.access-history-item small{color:var(--ink-3)}.access-confirm-diff{max-height:45vh;overflow:auto}
+@media(max-width:640px){.access-grant-fields{grid-template-columns:1fr}.access-editor-head{display:block}.access-editor-head button{margin-top:8px}}
