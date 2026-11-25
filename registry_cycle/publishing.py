@@ -21,6 +21,7 @@ from .models import Issue, SyncPlan
 from .reader import read_portfolio
 from .staging import StageSet, StagedFile, load_stage
 from .validation import ValidationReport
+from pult.core.manual_sync import track_publication
 
 
 @dataclass(slots=True)
@@ -439,6 +440,7 @@ def _busy_targets(
     return sidecars
 
 
+@track_publication
 def atomic_publish_files(
     stage: StageSet,
     *,

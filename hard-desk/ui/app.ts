@@ -1,7 +1,7 @@
 // Хард — страница окна. Режим «руководитель»: вход по учётке или прежней ссылке, дальше пульт
 // открывается сразу. Разделы видны по возможностям, которые считает сервер (caps):
 // сотрудник службы безопасности видит «Контроль», руководитель — «Вход команды».
-import { api, hard, type Shell } from "./kit/api";
+import { api, hard, setEmployeeProfile, type Shell } from "./kit/api";
 import { DEFAULT_SERVER } from "../src/main/product";
 import { currentLanguage, setLanguage } from "./kit/i18n";
 import { $, esc, toast } from "./kit/dom";
@@ -11,6 +11,7 @@ import { activity } from "./views/activity";
 import { workspace } from "./views/workspace";
 import { teamPortfolio } from "./views/team-portfolio";
 import { managerCRM } from "./views/manager-crm";
+import { callScript } from "./views/call-script";
 import { mountDesktopTools } from "./kit/desktop-tools";
 import { control } from "./views/control";
 import { device, links, promises, report } from "./views/misc";
@@ -28,6 +29,7 @@ import { priority, registry } from "./analyst/registry";
 import { fieldHelp, portfolio, hardEmployeeSections } from "./views/field";
 import { softHelp, softQueue, softEmployeeSections } from "./views/soft";
 import { adminControlCall, controlSection } from "./views/control";
+import { employeeRegistry, employeeCabinet } from "./views/employee-cabinet";
 
 /** Пульт аналитика: тот же каркас и облик, данные — через питон-сторону. */
 async function startAnalyst() {
@@ -155,6 +157,7 @@ async function start() {
   setWho(who ? `<b>${esc(who.name || "Руководитель")}</b>${esc(ROLE[who.role] || "")}${who.scope ? " · " + esc(who.scope) : ""}` : "");
   document.body.classList.add("desktop");
   const list: Section[] = [managerCRM, employeeBoard('manager'), staffTasks('manager'), teamPortfolio, workspace, activity, team, promises];
+  if (caps.team_links) list.push(callScript);
   if (caps.control) list.push(control);
   if (caps.team_links) list.push(links(!!shell.device?.username &&
     (who?.role === "manager" || who?.role === "full")));
@@ -324,9 +327,8 @@ async function startAgent() {
   // данных нет — экран ожидания вместо портфеля (см. pendingApprovalScreen).
   if (who?.pending) { pendingApprovalScreen(String(who.employee || "")); return; }
   setLanguage(who?.lang || currentLanguage());
-  // Какой экран показать — решает СЕРВЕР: есть портфель софта → очередь звонков
-  // (перевод УЗБ на колл-центр), иначе — портфель выездника. Смешанный случай
-  // тоже открывает очередь: визит всё равно закрывается телефоном.
+  // Product selects the first workspace; current server roles can add the
+  // employee's other portfolio without another installation or login.
   const soft = shell.productId === "soft" || (!shell.fixedProduct && !!who?.roles?.soft);
   if (shell.productId === "hard" && who?.roles?.soft && !who?.roles?.field) {
     startError("У этого входа есть только портфель Софта. Откройте программу «Софт».", startAgent); return;
@@ -335,7 +337,26 @@ async function startAgent() {
     startError("У этого входа нет портфеля Софта. Откройте приложение «Хард» или проверьте назначение у руководителя.", startAgent); return;
   }
   setWho(`<b>${esc(who?.employee || "Сотрудник")}</b> · ${soft ? "Софт" : "Хард"}`);
-  const list: Section[] = soft ? [softQueue, staffTasks('employee'), ...softEmployeeSections, softHelp] : [portfolio, staffTasks('employee'), ...hardEmployeeSections, fieldHelp];
+  const profile = soft ? "soft" : "hard";
+  const scoped = (section: Section, work: "hard" | "soft"): Section => ({
+    ...section,
+    async render(root, params) {
+      setEmployeeProfile(work);
+      await section.render(root, params);
+    },
+  });
+  const primary: Section[] = soft ? [softQueue, staffTasks('employee'), ...softEmployeeSections, softHelp] : [portfolio, staffTasks('employee'), ...hardEmployeeSections, fieldHelp];
+  const list = primary.map(section => scoped(section, profile));
+  const dual=!!who?.roles?.soft && !!who?.roles?.field;
+  list.splice(1,0,scoped(employeeCabinet(profile,dual),profile),scoped(employeeRegistry(profile,dual),profile));
+  if (soft && who?.roles?.field) list.splice(1, 0, scoped({
+    ...portfolio,
+    title: "Выездные клиенты",
+    async render(root, params) {
+      await portfolio.render(root, params);
+      if (root.isConnected) setHead("Выездные клиенты");
+    },
+  }, "hard"));
   setSections(list);
   await go(soft ? "softqueue" : "portfolio");
   startHeartbeat(async () => {

@@ -45,6 +45,20 @@ def strict(world):
     assert account_policy.strict()
 
 
+def test_prerelease_protocol_still_runs_auth_and_old_clients_keep_queued_writes(world):
+    strict(world)
+    assert http('GET','/api/manager/device/me',{'X-Client-Version':'3.3.0-pilot.2'})[0] == 401
+    assert http('GET','/api/manager/device/me',{'X-Client-Version':'3.1.9-pilot.2'})[0] == 426
+    assert http('POST','/api/save',{'X-Client-Version':'3.1.9-pilot.2'},body={})[0] == 503
+    assert http('GET','/api/manager/device/me',{'X-Client-Version':'3.3.0/invalid'})[0] == 426
+
+
+def test_logout_with_a_stale_token_preserves_the_desktop_json_contract(world):
+    strict(world)
+    assert http('POST','/api/account/logout',{'X-App-Token':'expired-desktop-session'},body={}) == (
+        401, {'error':'auth'})
+
+
 def http(method, path, headers=None, body=None):
     async def run():
         async with TestClient(TestServer(web.build_app(None))) as client:
@@ -95,6 +109,60 @@ def test_durable_cutover_latch_is_rechecked_after_another_writer(world):
     db.set_setting("account_cutover_activated_at_utc", "2026-10-17T12:00:00+00:00")
     assert account_policy.strict()
     assert http("GET", "/version.json")[0] == 200
+
+
+def test_temporary_device_confirmation_keeps_normal_account_and_device_checks(world):
+    strict(world)
+    assert accounts.create_account(EMP, 'paused-user', TEST_SECRET)['ok']
+    db.set_setting('account_device_confirmation_paused_until_utc',
+                   (datetime.now(timezone.utc)+timedelta(hours=2)).isoformat())
+    _, awaiting = login('paused-user', fp='new-phone', kind='phone', role='mobile', gps=None)
+    assert awaiting['action'] == 'ok_pending'
+    with db.connect() as conn:
+        conn.execute("UPDATE accounts SET status='active' WHERE username='paused-user'")
+    assert accounts.change_password('paused-user',TEST_SECRET,CHANGED_SECRET)['ok']
+    _, bad = login('paused-user', 'wrong', fp='new-phone', kind='phone', role='mobile', gps=None)
+    assert bad['action'] == 'bad'
+    _, phone = login('paused-user', CHANGED_SECRET, fp='new-phone', kind='phone', role='mobile', gps=None)
+    assert phone['action'] == 'ok'
+    def active_gate(kind):
+        with db.connect() as conn:
+            pair=conn.execute("SELECT s.token_table,s.token_id FROM account_token_sessions s "
+                              "JOIN account_devices d ON d.id=s.device_id JOIN accounts a ON a.id=d.account_id "
+                              "WHERE a.username='paused-user' AND d.kind=? AND d.status='active'",(kind,)).fetchone()
+        return accounts.device_gate_by_token(*pair)[0]
+    assert active_gate('phone') == 'ok'
+    _, desktop = login('paused-user',CHANGED_SECRET,fp='new-desktop')
+    assert desktop['action'] == 'ok' and active_gate('desktop') == 'ok'
+    with db.connect() as conn:
+        row=conn.execute("SELECT id FROM account_devices WHERE kind='phone' AND status='active'").fetchone()
+    assert accounts.revoke_account_device(row[0],by='test')
+    _, revoked = login('paused-user', CHANGED_SECRET, fp='new-phone', kind='phone', role='mobile', gps=None)
+    assert revoked['action'] == 'ok_pending'
+    db.set_setting('account_device_confirmation_paused_until_utc',
+                   (datetime.now(timezone.utc)-timedelta(seconds=1)).isoformat())
+    assert active_gate('desktop') == 'ok'
+    _, other = login('paused-user', CHANGED_SECRET, fp='after-window',kind='phone',role='mobile',gps=None)
+    assert other['action'] == 'ok_pending'
+
+
+def test_open_ended_pause_recovers_an_existing_staff_reset_and_retains_both_phones(world):
+    strict(world)
+    assert accounts.create_account(EMP, 'reset-user', TEST_SECRET)['ok']
+    with db.connect() as conn:
+        conn.execute("UPDATE accounts SET password_review_pending=1,password_reset_operation=?,"
+                     "password_reset_actor=? WHERE username='reset-user'", ('test-reset', MANAGER))
+    db.set_setting('account_device_confirmation_paused_until_utc', 'until-disabled')
+    wrong = login('reset-user', 'wrong', fp='first-phone', kind='phone', role='mobile', gps=None)[1]
+    assert wrong['action'] == 'bad'
+    for fp in ('first-phone', 'second-phone'):
+        assert login('reset-user', fp=fp, kind='phone', role='mobile', gps=None)[1]['action'] == 'ok'
+    with db.connect() as conn:
+        assert tuple(conn.execute("SELECT status,password_review_pending,must_change_password FROM accounts "
+                                  "WHERE username='reset-user'").fetchone()) == ('active', 0, 1)
+        assert conn.execute("SELECT COUNT(*) FROM account_devices WHERE status='active'").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM account_approval_events WHERE action='password_reset' "
+                            "AND decision='approved'").fetchone()[0] == 1
 
 
 def test_existing_http_server_crosses_cutover_on_first_password_login(world):

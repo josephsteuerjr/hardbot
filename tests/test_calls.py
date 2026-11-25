@@ -98,7 +98,7 @@ def test_call_save_writes_columns_and_journal(tmp_path, monkeypatch):
     assert len(calls) == 1
     assert calls[0]["employee"] == EMP_SOFT
     assert "Обещает оплатить" in calls[0]["payload"]
-    assert calls[0]["created_at"] == date.today().isoformat()
+    assert calls[0]["created_at"] == db.workday.today().isoformat()
 
 
 def test_call_requires_status_and_is_idempotent(tmp_path, monkeypatch):

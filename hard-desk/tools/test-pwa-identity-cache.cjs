@@ -14,7 +14,7 @@ function source(name) {
 }
 const names = ['appToken', 'cacheCredential', 'offlineLeaseValid', 'cacheBootstrap',
   'loadBootstrapSnapshot', 'cardKey', 'storeCard', 'loadCard', 'warmCards',
-  'enqueue', 'stampQueueOwners', 'queueBelongs', 'updateOffBar', 'wipeDevice',
+  'enqueue', 'stampQueueOwners', 'setPrincipal', 'queueBelongs', 'updateOffBar', 'wipeDevice',
   'submitSavedOperation', 'flushQueue',
   'tokenMark', 'markTokenOut', 'tokenIsOut', 'clearPendingToken', 'pendingToken',
   'setPendingToken', 'cleanHashFromUrl', 'onAuthRejected', 'purgeProfile', 'clearLocalData', 'boot', 'sharedLoginChanged',
@@ -82,7 +82,7 @@ function page({db = idb(), local = storage(), responses = []} = {}) {
       calls.rendered.push(output); app.innerHTML = output; },
     renderAppAuthGone() { app.innerHTML = 'Access gone'; },
     toast() {},
-    renderDrain() {}, flushQueue: () => { calls.sent++; },
+    renderDrain() {}, prepareCourier:async()=>{}, flushQueue: () => { calls.sent++; },
     api: async url => { assert(url.startsWith('/api/bootstrap'));
       assert(queue.length, 'unexpected bootstrap request');
       const outcome = queue.shift(); if (outcome instanceof Error) throw outcome;

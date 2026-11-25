@@ -87,7 +87,7 @@ let enteredQuery = "", enteredExpanded = false, enteredSelected = "";
 let enteredSequence = 0;
 
 function entryState(row: any): string {
-  if (row.password_review_pending) return row.must_change_password ? "Сотрудник меняет временный пароль" : "Пароль: ждёт владельца";
+  if (row.password_review_pending) return row.must_change_password ? "Сотрудник меняет временный пароль" : "Пароль: требуется ваше подтверждение";
   return ({active:"Доступ открыт",awaiting:"Ждёт подтверждения",disabled:"Доступ закрыт",blocked:"Заблокирован"} as Record<string,string>)[row.status] || row.status;
 }
 
@@ -101,7 +101,7 @@ function enteredDetails(root: HTMLElement, row: any, accountSession: boolean): v
   host.querySelector('[data-team-reset]')?.addEventListener('click',()=>{
     const form=host.querySelector<HTMLElement>('[data-reset-form]')!;
     const operationId='manager-reset-'+crypto.randomUUID();
-    form.innerHTML=`<form><p>Текущие входы будут закрыты. При проверке отзыва устройства удалят локальные данные и неотправленную работу. Сначала дождитесь отправки очередей. Передайте временный пароль сотруднику: он задаст личный, затем владелец подтвердит доступ.</p><label>Временный пароль<input class="input" type="password" autocomplete="new-password" minlength="8" required data-new-password></label><label>Повтор пароля<input class="input" type="password" autocomplete="new-password" minlength="8" required data-repeat-password></label><p data-reset-error role="status"></p><div class="toolbar"><button class="btn primary" type="submit">Сменить и передать на подтверждение</button><button class="btn" type="button" data-cancel>Отмена</button></div></form>`;
+    form.innerHTML=`<form><p>Текущие входы будут закрыты. При проверке отзыва устройства удалят локальные данные и неотправленную работу. Сначала дождитесь отправки очередей. Передайте временный пароль сотруднику: он задаст личный, после этого подтвердите его устройство здесь.</p><label>Временный пароль<input class="input" type="password" autocomplete="new-password" minlength="8" required data-new-password></label><label>Повтор пароля<input class="input" type="password" autocomplete="new-password" minlength="8" required data-repeat-password></label><p data-reset-error role="status"></p><div class="toolbar"><button class="btn primary" type="submit">Сменить пароль</button><button class="btn" type="button" data-cancel>Отмена</button></div></form>`;
     form.querySelector('[data-cancel]')!.addEventListener('click',()=>form.replaceChildren());
     form.querySelector('form')!.addEventListener('submit',async event=>{
       event.preventDefault();const input=form.querySelector<HTMLInputElement>('[data-new-password]')!,repeat=form.querySelector<HTMLInputElement>('[data-repeat-password]')!,error=form.querySelector<HTMLElement>('[data-reset-error]')!,button=form.querySelector<HTMLButtonElement>('[type=submit]')!;
@@ -110,7 +110,7 @@ function enteredDetails(root: HTMLElement, row: any, accountSession: boolean): v
       try{
         const response=await api('/api/manager/account_reset',undefined,'POST',{username:row.username,password:input.value,operation_id:operationId});
         if(!response.ok||!response.data?.ok){error.textContent=response.data?.error||response.text||'Результат не подтверждён. Обновите список перед новой операцией.';return;}
-        input.value='';repeat.value='';toast('Пароль изменён. Доступ ожидает владельца.');await drawEntered(root,accountSession);
+        input.value='';repeat.value='';toast('Временный пароль установлен. После смены на личный подтвердите устройство сотрудника.');await drawEntered(root,accountSession);
       }catch(e){error.textContent='Результат не подтверждён. Обновите список; повтор этой операции безопасен.';}
       finally{if(button.isConnected)button.disabled=false;}
     });
@@ -130,7 +130,7 @@ async function drawEntered(root: HTMLElement, accountSession: boolean): Promise<
   root.innerHTML=`<div class="section"><h2>Регистрация и устройства команды</h2>
     <div class="notice"><b>Как подтвердить вход</b><p>Сотрудник создаёт профиль или входит на телефоне либо в программе на ПК. Его заявка появится здесь. Сверьте ФИО и нажмите кнопку под заявкой.</p><p>Телефон можно подтвердить без предварительного ПК. Для компьютера лично проверьте сотрудника за этим ПК. Прежнее устройство того же вида будет отключено.</p></div>
     <h3>Ждут подтверждения: ${pending.length}</h3>
-    <div id="entered-pending">${pending.length?pending.map(({row,device}:any)=>`<div class="list-row"><div class="grow"><b>${esc(row.employee)}</b><div class="sub">${esc(device.kind==='phone'?'Телефон':'Компьютер')} · ${esc(device.label||'')} · ${esc(row.office||'')}</div></div>${accountSession&&row.can_approve?`<button class="btn primary" data-device="${device.id}">Подтвердить ${device.kind==='phone'?'телефон':'ПК'}</button>`:'<span class="muted">Подтверждает свой руководитель</span>'}</div>`).join(''):'<p class="muted">Новых заявок нет. После регистрации или входа сотрудника нажмите «Обновить».</p>'}</div>
+    <div id="entered-pending">${pending.length?pending.map(({row,device}:any)=>`<div class="list-row"><div class="grow"><b>${esc(row.employee)}</b><div class="sub">${esc(device.kind==='phone'?'Телефон':'Компьютер')} · ${esc(device.label||'')} · ${esc(row.office||'')}</div></div>${accountSession&&row.can_approve?`<button class="btn primary" data-device="${device.id}">Подтвердить ${device.kind==='phone'?'телефон':'ПК'}</button>`:`<span class="muted">${esc(row.password_review_pending&&row.must_change_password?'Сотрудник меняет временный пароль':'Подтверждает свой руководитель')}</span>`}</div>`).join(''):'<p class="muted">Новых заявок нет. После регистрации или входа сотрудника нажмите «Обновить».</p>'}</div>
     <div class="toolbar"><button class="btn" id="entered-reload">Обновить</button><input class="input" type="search" id="entered-search" aria-label="Поиск профиля" placeholder="ФИО, логин, офис или устройство" value="${esc(enteredQuery)}"></div><details id="entered-all" ${enteredExpanded||enteredQuery?'open':''}><summary>Все профили команды (${rows.length})</summary><div id="entered-tbl"></div></details><div id="team-profile"></div></div>`;
   const table=new DataTable<any>(root.querySelector("#entered-tbl")!,{id:"team-accounts",key:x=>x.username,exportName:"Регистрация команды",externalSearch:true,
     onRow:row=>enteredDetails(root,row,accountSession),

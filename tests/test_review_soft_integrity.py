@@ -17,9 +17,15 @@ from fields import FIELDS
 
 
 def grid(rows):
-    return [[f.title for f in FIELDS] + ["ответственный Сотрудник СОФТ"],
-            [f.source for f in FIELDS] + ["софт"],
-            *[[r.get(f.key) for f in FIELDS] + [r.get("responsible_soft")] for r in rows]]
+    result = [[f.title for f in FIELDS] + ["ответственный Сотрудник СОФТ"],
+              [f.source for f in FIELDS] + ["софт"],
+              *[[r.get(f.key) for f in FIELDS] + [r.get("responsible_soft")] for r in rows]]
+    index = result[0].index("статус звонка софт")
+    result[0].insert(index, "Дата ручной правки")
+    result[1].insert(index, "софт")
+    for cells, row in zip(result[2:], rows):
+        cells.insert(index, row.get("excel_call_edited_on"))
+    return result
 
 
 @pytest.fixture
@@ -81,15 +87,15 @@ def test_soft_group_read_matches_write_and_does_not_read_s2(world, monkeypatch):
 
 
 def test_stale_master_preserves_call_but_delivered_office_edit_is_accepted(world, monkeypatch):
-    call(monkeypatch, "new", "Обещает оплатить", values={"forecast_sum": "12000", "soft_comment": "новый звонок"})
+    call(monkeypatch, "new", "Обещает оплатить", values={"forecast_sum": "12000", "soft_comment": "новый звонок"}, occurred_at=datetime.combine(db.workday.today()-timedelta(days=1), time(8)).timestamp()*1000)
     world[0].update(soft_call_status="Нет контакта", forecast_sum="100", soft_comment="старый master")
     db.import_grid(grid(world), source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER)
     assert db.get_client("A")["forecast_sum"] == "12000"
     assert db.get_client("A")["soft_comment"] == "новый звонок"
     db.record_enrichment_deliveries([{"contract_id": "A", "key": "soft_call_status",
-        "value": "Обещает оплатить", "visit_date": date.today().isoformat(), "responsible": "S1"}])
+        "value": "Обещает оплатить", "visit_date": db.call_fact_day(db.get_client("A")), "responsible": "S1"}])
     world[0].update(soft_call_status="Обещает оплатить", soft_comm_date=db.call_fact_day(db.get_client('A')),
-                    forecast_sum="13000", soft_comment="проверено офисом")
+                    forecast_sum="13000", soft_comment="проверено офисом", excel_call_edited_on=db.workday.today().isoformat())
     preview=db.import_grid(grid(world), source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
                            allow_soft_office_edits=True, preview_only=True)
     db.import_grid(grid(world), source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,

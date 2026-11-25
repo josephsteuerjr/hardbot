@@ -77,3 +77,17 @@ def _activate_connection(conn: sqlite3.Connection, due: bool) -> bool:
 
 def strict(*, connection: sqlite3.Connection | None = None) -> bool:
     return activate(connection=connection)
+
+
+def device_confirmation_paused(connection: sqlite3.Connection) -> bool:
+    row = connection.execute("SELECT value FROM settings WHERE key=?",
+                             ("account_device_confirmation_paused_until_utc",)).fetchone()
+    if not row or not row[0]:
+        return False
+    if row[0] == "until-disabled":
+        return True
+    try:
+        expires = datetime.fromisoformat(row[0])
+    except (TypeError, ValueError):
+        return False
+    return expires.utcoffset() == timezone.utc.utcoffset(expires) and expires > datetime.now(timezone.utc)

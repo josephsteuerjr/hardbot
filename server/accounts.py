@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import math
+import os
 import re
 import secrets
 import sqlite3
@@ -59,12 +60,12 @@ def _fresh_gps(device):
 def _approved_staff_pc(conn, account_id):
     return bool(conn.execute("SELECT 1 FROM account_devices d WHERE d.account_id=? AND d.kind='desktop' "
         "AND d.status='active' AND COALESCE(d.public_key,'')<>'' AND EXISTS(SELECT 1 FROM account_approval_events e "
-        "WHERE e.device_id=d.id AND e.action='pc_observation' AND e.decision='approved') LIMIT 1",(account_id,)).fetchone())
+        "WHERE e.device_id=d.id AND e.action IN ('pc_observation','device_policy') AND e.decision='approved') LIMIT 1",(account_id,)).fetchone())
 
 
 def _approved_mobile_identity(conn, device_id):
     return bool(conn.execute("SELECT 1 FROM account_approval_events WHERE device_id=? "
-        "AND action='phone_identity' AND decision='approved' LIMIT 1", (device_id,)).fetchone())
+        "AND action IN ('phone_identity','device_policy') AND decision='approved' LIMIT 1", (device_id,)).fetchone())
 
 
 def _approvals_needed(role: str) -> int:
@@ -151,6 +152,10 @@ def init_schema(conn: sqlite3.Connection) -> None:
         decision TEXT NOT NULL, ip TEXT, detail TEXT, at TEXT NOT NULL)""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_account_approval_events_acc "
                  "ON account_approval_events(account_id, id)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS account_reset_device_grants (
+        account_id INTEGER NOT NULL, kind TEXT NOT NULL, actor TEXT NOT NULL,
+        issued_at TEXT NOT NULL, consumed_at TEXT, device_id INTEGER,
+        PRIMARY KEY(account_id, kind))""")
     conn.execute("""CREATE TABLE IF NOT EXISTS account_phone_requests (
         id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL,
         device_id INTEGER NOT NULL, code_hash TEXT NOT NULL UNIQUE,
@@ -416,7 +421,7 @@ def set_password(username: str, new: str, *, by: str = "cli") -> dict:
         return {"ok": False, "error": "Пароль от 8 символов, с буквой и цифрой."}
     with db.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT id, telegram_id, employee FROM accounts WHERE username=?", (username,)).fetchone()
+        row = conn.execute("SELECT * FROM accounts WHERE username=?", (username,)).fetchone()
         if row is None:
             return {"ok": False, "error": "Нет такого аккаунта."}
         try:
@@ -427,13 +432,28 @@ def set_password(username: str, new: str, *, by: str = "cli") -> dict:
                      "failed_attempts=0, locked_until=NULL, "
                      "updated_at=? WHERE id=?", (hash_password(new), _now(), row["id"]))
         _revoke_account_tokens(conn, row["id"], f"account:password-reset:{by}")
+        conn.execute("DELETE FROM account_reset_device_grants WHERE account_id=?", (row["id"],))
+        # A verified owner reset is itself the access decision for a leader.
+        # Each device kind may enter once; later replacements need approval.
+        if (row['role'] in ('manager', 'security', 'full') and row['status'] != 'disabled'
+                and (by == 'cli' or _owner_approver(conn, by))):
+            conn.execute("UPDATE accounts SET status='active', approvals=?, activated_by=?, "
+                         "activated_at=?, password_review_pending=0 WHERE id=?",
+                         (json.dumps([by]), by, _now(), row['id']))
+            for kind in ('desktop', 'phone'):
+                conn.execute("INSERT INTO account_reset_device_grants VALUES(?,?,?,?,NULL,NULL) "
+                             "ON CONFLICT(account_id,kind) DO UPDATE SET actor=excluded.actor, "
+                             "issued_at=excluded.issued_at,consumed_at=NULL,device_id=NULL",
+                             (row['id'], kind, by, _now()))
+            _approval_event(conn, row['id'], None, 0, by, 'owner_password_reset', 'approved',
+                            detail='next desktop and phone allowed; personal password required')
         conn.commit()
     db.audit_access(0, "account_passwd", username, f"by {by}")
     return {"ok": True}
 
 
 def manager_reset_password(uid: int, username: str, new: str, operation_id: str, *, is_owner=False, ip="") -> dict:
-    """A manager may reset only their staff; only the owner can restore access.
+    """A manager resets and restores only their current staff's access.
 
     The caller supplies the temporary password so a lost response never loses
     the credential. An operation ID makes an explicit retry non-destructive.
@@ -454,7 +474,7 @@ def manager_reset_password(uid: int, username: str, new: str, operation_id: str,
                 return {"ok": False, "error": "operation_id"}
             return {"ok": True, "replayed": True, "password_review_pending": bool(acc['password_review_pending'])}
         if acc['password_review_pending']:
-            return {"ok": False, "error": "Смена уже ожидает подтверждения владельца. Обновите список."}
+            return {"ok": False, "error": "Смена уже ожидает подтверждения руководителя. Обновите список."}
         try:
             _assert_uid_owned(conn, acc)
         except UIDConflict as exc:
@@ -466,7 +486,7 @@ def manager_reset_password(uid: int, username: str, new: str, operation_id: str,
                      (hash_password(new),operation_id,uid,_now(),acc['id']))
         _revoke_account_tokens(conn, acc['id'], f"account:password-reset:{actor}")
         _approval_event(conn, acc['id'], None, uid, actor, 'password_reset', 'pending', ip,
-                        f"operation={operation_id}; owner approval required")
+                        f"operation={operation_id}; current team leader approval required")
         conn.commit()
     return {"ok": True, "password_review_pending": True}
 
@@ -602,7 +622,9 @@ def login(username: str, password: str, *, device: dict, entrance: str,
                 or (audience == "manager" and row["role"] not in ("manager", "security", "full"))
                 or (audience == 'analyst' and (device_kind!='desktop' or not conn.execute('SELECT 1 FROM account_admin_grants WHERE account_id=?',(row['id'],)).fetchone()))
                 or (audience == 'mobile' and (device_kind != 'phone' or row['role'] not in ('agent','manager','security','full')))
-                or (account_policy.strict(connection=conn) and audience not in ("employee", "manager", "mobile", "analyst"))):
+                or (audience == 'crm-mobile' and (os.getenv('HARD_CRM_MOBILE')!='1' or device_kind!='phone' or row['role'] not in ('agent','manager','security','full','analyst') or row['role']=='analyst' and not conn.execute('SELECT 1 FROM account_admin_grants WHERE account_id=?',(row['id'],)).fetchone()))
+                or (audience == 'crm-desktop' and (os.getenv('HARD_CRM_DESKTOP')!='1' or device_kind!='desktop' or row['role'] not in ('agent','manager','security','full','analyst') or row['role']=='analyst' and not conn.execute('SELECT 1 FROM account_admin_grants WHERE account_id=?',(row['id'],)).fetchone()))
+                or (account_policy.strict(connection=conn) and audience not in ("employee", "manager", "mobile", "analyst", "crm-mobile", "crm-desktop"))):
             return {"action": "blocked", "error": "Неверный класс входа для этой роли."}
         if not fingerprint or len(fingerprint) > 128:
             _journal(conn, row["id"], username, "no_fingerprint", entrance=entrance,
@@ -669,22 +691,53 @@ def login(username: str, password: str, *, device: dict, entrance: str,
         if device_kind == 'phone':
             conn.execute("UPDATE account_devices SET gps=?,gps_seen_at=? WHERE id=?",
                          (gps_text, datetime.now(timezone.utc).isoformat() if gps_text else None, dev['id']))
-        # Every staff phone requires its own manager approval, even with GPS.
-        # An approved PC alone never activates a phone.
+        verified_entry = bool(pc) if device_kind == 'desktop' else audience in ('mobile', 'crm-mobile')
+        paused = verified_entry and account_policy.device_confirmation_paused(conn)
+        if paused and row['role']=='agent' and row['status']=='awaiting' and row['password_review_pending'] and row['password_reset_operation'] and row['password_reset_actor']:
+            actor = 'policy:device-confirmation-paused'
+            conn.execute("UPDATE accounts SET status='active',password_review_pending=0,activated_by=?,activated_at=?,updated_at=? WHERE id=?",
+                         (actor,_now(),_now(),row['id']))
+            _approval_event(conn,row['id'],None,0,actor,'password_reset','approved',ip,
+                            'Existing staff credential verified while manual confirmation is paused')
+            row=conn.execute('SELECT * FROM accounts WHERE id=?',(row['id'],)).fetchone()
+        account_active = row['status'] == 'active'
+        if (dev['status'] == 'pending' and account_active and not row['password_review_pending']
+                and paused
+                and not conn.execute("SELECT 1 FROM account_devices WHERE account_id=? AND kind=? "
+                                     "AND fingerprint=? AND status='revoked' LIMIT 1",
+                                     (row['id'], device_kind, fingerprint)).fetchone()):
+            actor = 'policy:device-confirmation-paused'
+            approved = approve_device(dev['id'], actor, _connection=conn, ip=ip, replace_same_kind=False)
+            if approved.get('active'):
+                _approval_event(conn,row['id'],dev['id'],0,actor,'device_policy','approved',ip,
+                                'Valid password and verified application entry while manual confirmation is paused')
+                dev=conn.execute('SELECT * FROM account_devices WHERE id=?',(dev['id'],)).fetchone()
+        # Outside the temporary window, a new staff phone is approved on its
+        # own. An approved PC and GPS do not activate it.
         ever = conn.execute("SELECT 1 FROM account_devices WHERE account_id=? AND kind=? AND approved_at IS NOT NULL LIMIT 1",
                             (row['id'],device_kind)).fetchone()
         approved_pc = _approved_staff_pc(conn,row['id'])
-        root_grant=conn.execute('SELECT next_pc_allowed FROM account_admin_grants WHERE account_id=?',(row['id'],)).fetchone()
-        root_next=bool(root_grant and root_grant['next_pc_allowed'] and row['role']=='analyst' and device_kind=='desktop')
-        first_privileged = row['role'] in PRIVILEGED and row['status']=='active' and (not ever or root_next)
+        root_grant=conn.execute('SELECT next_pc_allowed,granted_by FROM account_admin_grants WHERE account_id=?',(row['id'],)).fetchone()
+        root_next=bool(root_grant and root_grant['next_pc_allowed'] and device_kind=='desktop'
+                       and (row['role']=='analyst' or root_grant['granted_by']=='ssh-root' and row['role'] in {'manager','full'}))
+        reset_grant=conn.execute('SELECT actor FROM account_reset_device_grants '
+            'WHERE account_id=? AND kind=? AND consumed_at IS NULL',(row['id'],device_kind)).fetchone()
+        reset_next=bool(reset_grant and row['role'] in ('manager','security','full'))
+        first_privileged = row['role'] in PRIVILEGED and row['status']=='active' and (not ever or root_next or reset_next)
+        if audience=='crm-mobile' and row['role']=='analyst' and device_kind=='phone':
+            first_privileged=False  # New analyst phones require explicit device approval.
         if dev['status']=='pending' and first_privileged:
             if root_next:
                 conn.execute('UPDATE account_admin_grants SET next_pc_allowed=0 WHERE account_id=?',(row['id'],))
-            conn.execute("UPDATE account_devices SET status='active',approved_by='account:first-login',approved_at=? WHERE id=?",(_now(),dev['id']))
-            _approval_event(conn,row['id'],dev['id'],int(row['telegram_id'] or 0),'account:first-login','device','approved',ip,'first device after account approval')
+            approver = 'account:owner-password-reset' if reset_next else 'account:first-login'
+            if reset_next:
+                conn.execute('UPDATE account_reset_device_grants SET consumed_at=?,device_id=? '
+                    'WHERE account_id=? AND kind=?',(_now(),dev['id'],row['id'],device_kind))
+            conn.execute("UPDATE account_devices SET status='active',approved_by=?,approved_at=? WHERE id=?",(approver,_now(),dev['id']))
+            _approval_event(conn,row['id'],dev['id'],int(row['telegram_id'] or 0),approver,'device','approved',ip,
+                f"owner reset by {reset_grant['actor']}" if reset_next else 'first device after account approval')
             dev=conn.execute('SELECT * FROM account_devices WHERE id=?',(dev['id'],)).fetchone()
         token = _mint_token(conn, row, dev)
-        account_active = row["status"] == "active"
         device_active = dev["status"] == "active"
         action = "ok" if (account_active and device_active) else "ok_pending"
         _journal(conn, row["id"], username, action, entrance=entrance,
@@ -835,8 +888,12 @@ def approve_account(username: str, by: str, *, _connection=None, actor_uid=0, ip
             return {"ok": False, "error": "Аккаунт закрыт; сначала enable."}
         password_review = bool(row['password_review_pending'])
         if password_review:
-            if not _owner_approver(conn, by):
-                return {"ok": False, "error": "После смены пароля доступ подтверждает только владелец."}
+            from config import ADMIN_ID
+            manager, team = _manager_review_context(actor_uid, actor_uid == ADMIN_ID) if _connection is not None and actor_uid else (None, set())
+            scoped_leader = bool(manager and by == f"manager:{actor_uid}:{manager.get('name') or ''}"
+                                 and _reviewable(conn, row, actor_uid, manager, team))
+            if not (_owner_approver(conn, by) or scoped_leader):
+                return {"ok": False, "error": "После смены пароля доступ подтверждает свой руководитель."}
             if row['must_change_password']:
                 return {"ok": False, "error": "Сотрудник ещё не сменил временный пароль на личный."}
         import account_policy
@@ -871,7 +928,7 @@ def approve_account(username: str, by: str, *, _connection=None, actor_uid=0, ip
                          f"Нужно подтверждение ещё одного администратора."}
 
 
-def approve_device(device_id: int, by: str, *, _connection=None, actor_uid=0, ip="") -> dict:
+def approve_device(device_id: int, by: str, *, _connection=None, actor_uid=0, ip="", replace_same_kind=True) -> dict:
     """Подтвердить устройство (сотруднику — с первого подтверждения,
     руководителю/аналитику — тоже с одного администратора). Активация нового
     ТЕЛЕФОНА гасит прежний телефон аккаунта: сменить — значит сменить.
@@ -888,7 +945,7 @@ def approve_device(device_id: int, by: str, *, _connection=None, actor_uid=0, ip
         if not acc or acc["status"] == "disabled" or dev["status"] == "revoked":
             return {"ok": False, "error": "Аккаунт или устройство отозвано. Выполните новый вход."}
         if acc['password_review_pending']:
-            return {"ok": False, "error": "После смены пароля сначала требуется подтверждение владельца."}
+            return {"ok": False, "error": "После смены пароля сначала требуется подтверждение руководителя."}
         import account_policy
         if (acc["created_by"] == "self-registration" or (acc['role']=='agent' and account_policy.strict(connection=conn))) and _connection is None:
             return {"ok": False, "error": "Устройство сотрудника подтверждает свой руководитель."}
@@ -900,7 +957,7 @@ def approve_device(device_id: int, by: str, *, _connection=None, actor_uid=0, ip
             conn.execute("UPDATE account_devices SET status='active', approved_by=?, "
                          "approved_at=?, approvals=? WHERE id=?",
                          (by, _now(), json.dumps(approvals), device_id))
-            if dev["kind"] in ("phone", "desktop"):
+            if replace_same_kind and dev["kind"] in ("phone", "desktop"):
                 old = conn.execute(
                     "SELECT id, agent_dev_id, token_table FROM account_devices "
                     "WHERE account_id=? AND kind=? AND status='active' AND id<>?",
@@ -946,18 +1003,22 @@ def _privileged_names(conn):
     return {db._name_key(name) for name in names if name}
 
 
-def _reviewable(conn, acc, uid, manager, team):
+def _reviewable(conn, acc, uid, manager, team, *, declared=None, privileged=None):
+    keys = {db._name_key(acc['employee'])} if acc else set()
     if acc:
-        import staff_roster
-        listed=[r for r in staff_roster.rows(conn,active_only=False)
-                if db._name_key(r['employee'])==db._name_key(acc['employee'])]
-        if listed and any(not r['active'] or (r['manager_uid'] is not None and r['manager_uid']!=uid) for r in listed):
+        from team_entry import families
+        declared=families(conn) if declared is None else declared
+        listed=[r for r in declared if db._name_key(acc['employee']) in r['keys']]
+        if len(listed)>1 or any(not r['active'] or (r['manager_uid'] is not None and r['manager_uid']!=uid) for r in listed):
             return False
+        if listed:
+            keys=listed[0]['keys']
+            if any(keys & r['keys'] for r in declared if r['employee_id']!=listed[0]['employee_id']):return False
     return bool(acc and manager and acc["role"] == "agent" and acc["status"] != "disabled"
-                and db._name_key(acc["employee"]) in team
+                and keys & team
                 and acc["telegram_id"] != uid
                 and db._name_key(acc["employee"]) != db._name_key(manager.get("name"))
-                and db._name_key(acc["employee"]) not in _privileged_names(conn)
+                and not keys & (_privileged_names(conn) if privileged is None else privileged)
                 and not conn.execute("SELECT 1 FROM managers WHERE telegram_id=?", (acc["telegram_id"],)).fetchone())
 
 
@@ -1002,12 +1063,13 @@ def manager_approve(uid: int, *, username="", device_id=None, is_owner=False, ip
                if device else conn.execute("SELECT * FROM accounts WHERE username=?", (normalize_username(username),)).fetchone())
         import account_policy
         if (not _reviewable(conn, acc, uid, manager, team)
-                or (acc and acc['password_review_pending'])
                 or (device_id is not None and (not device or device["status"] == "revoked"))):
             _approval_event(conn, acc["id"] if acc else None, device_id, uid, actor,
                             "device" if device_id is not None else "account", "denied", ip, "scope, role or state")
             conn.commit()
             return {"ok": False, "error": "account"}
+        if acc['password_review_pending'] and acc['must_change_password']:
+            return {'ok':False,'error':'Сотрудник ещё не сменил временный пароль на личный.'}
         if acc['created_by']=='self-registration' or account_policy.strict(connection=conn):
             if device is None:
                 return {'ok':False,'error':'Выберите заявку компьютера или телефона сотрудника.'}
@@ -1017,9 +1079,9 @@ def manager_approve(uid: int, *, username="", device_id=None, is_owner=False, ip
                 _approval_event(conn,acc['id'],device['id'],uid,actor,'pc_observation','approved',ip,'Employee and PC observed in person')
             elif device['kind']=='phone':
                 _approval_event(conn,acc['id'],device['id'],uid,actor,'phone_identity','approved',ip,'Manager confirmed employee identity and phone; no prior PC required')
-            if acc['status']!='active':
-                first=approve_account(acc['username'],actor,_connection=conn,actor_uid=uid,ip=ip)
-                if not first.get('ok'): return first
+        if acc['status']!='active' or acc['password_review_pending']:
+            first=approve_account(acc['username'],actor,_connection=conn,actor_uid=uid,ip=ip)
+            if not first.get('ok'): return first
         if device_id is None:
             result = approve_account(acc["username"], actor, _connection=conn, actor_uid=uid, ip=ip)
         else:
@@ -1141,6 +1203,7 @@ def set_status(username: str, status: str, by: str) -> dict:
         # Re-enabling an account must go through its normal approval policy.
         if status == "active":
             status = "awaiting"
+        conn.execute("DELETE FROM account_reset_device_grants WHERE account_id=?", (row['id'],))
         conn.execute("UPDATE accounts SET status=?, approvals='[]', activated_by=NULL, "
                      "activated_at=NULL, updated_at=? WHERE id=?",
                      (status, _now(), row["id"]))
@@ -1172,6 +1235,7 @@ def entered_list(office: str = "", *, include_empty=False) -> list[dict]:
             if phone is None and desktop is None and not include_empty:
                 continue
             out.append({
+                "account_id": acc["id"], "actor_uid": acc["telegram_id"],
                 "employee": acc["employee"], "username": acc["username"],
                 "office": acc["office"] or "", "status": acc["status"], "role": acc["role"],
                 "password_review_pending": bool(acc['password_review_pending']),
@@ -1194,6 +1258,17 @@ def entered_list(office: str = "", *, include_empty=False) -> list[dict]:
                 "desktop_ready": bool(desktop and desktop['status']=='active'),
             })
         return out
+
+
+def is_server_operator(account_id, uid):
+    """Authority is attached to the exact root-provisioned account."""
+    with db.connect() as conn:
+        return conn.execute(
+            "SELECT 1 FROM account_admin_grants g JOIN accounts a ON a.id=g.account_id "
+            "WHERE a.id=? AND a.telegram_id=? AND a.status='active' AND a.role IN ('manager','full') "
+            "AND g.granted_by='ssh-root'",
+            (account_id, uid),
+        ).fetchone() is not None
 
 
 def admin_accounts() -> list[dict]:
@@ -1252,6 +1327,40 @@ def sessions_for(agent_dev_id: int, account_id: int, limit: int = 30) -> list[di
             "SELECT kind,at,entrance,device_kind,label,ip,gps FROM account_logins "
             "WHERE account_id=? ORDER BY id DESC LIMIT ?", (account_id, limit)).fetchall()
     return [dict(r) for r in rows]
+
+
+def manager_revoke_device(uid, device_id, *, is_owner=False, ip=''):
+    if type(device_id) is not int or device_id<=0:return {'ok':False,'error':'device_id'}
+    with db.connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        manager,team=_manager_review_context(uid,is_owner)
+        device=conn.execute('SELECT * FROM account_devices WHERE id=?',(device_id,)).fetchone()
+        acc=conn.execute('SELECT * FROM accounts WHERE id=?',(device['account_id'],)).fetchone() if device else None
+        if not _reviewable(conn,acc,uid,manager,team):return {'ok':False,'error':'Устройство недоступно руководителю.'}
+        actor=f'manager:{uid}'
+        _revoke_slot_tokens(conn,device_id,actor)
+        if device['status']!='revoked':
+            conn.execute("UPDATE account_devices SET status='revoked',revoked_at=? WHERE id=?",(_now(),device_id))
+            _approval_event(conn,acc['id'],device_id,uid,actor,'device','revoked',ip,'manager device revocation')
+        conn.commit()
+    return {'ok':True,'revoked':device_id}
+
+
+def manager_team(uid, *, is_owner=False):
+    import team_work
+    manager,team=_manager_review_context(uid,is_owner)
+    if not manager:return {'ok':False,'error':'Нет права управления командой.'}
+    board=team_work.board(team=team,manager=manager,writable=True)
+    reviewable=manager_reviewable(uid,is_owner=is_owner)
+    entered={r['account_id']:r for r in entered_list(include_empty=True)}
+    for row in board['employees']:
+        account=entered.get(row['account_id'])
+        row['account']=account
+        row['can_reset']=bool(account and account['username'] in reviewable and not account['password_review_pending'])
+        row['can_approve']=bool(account and account['username'] in reviewable and not (account['password_review_pending'] and account['must_change_password']))
+        row['can_revoke']=bool(account and account['username'] in reviewable)
+        if account and account.get('phone'):account['phone'].pop('gps',None)
+    return board
 
 
 def revoke_account_device(device_id: int, *, by: str = "operator") -> bool:

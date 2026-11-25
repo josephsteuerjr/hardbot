@@ -11,6 +11,7 @@ import asyncio
 import copy
 import random
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -140,6 +141,82 @@ def test_server_keeps_only_a_few_bases(server):
     assert len(list(web._import_bases_dir().glob("*.json.gz"))) == web.IMPORT_BASES_KEEP
 
 
+def test_apply_responds_while_transaction_runs_and_returns_one_result(server, monkeypatch):
+    proof = "a" * 64
+    release = threading.Event()
+    calls = []
+
+    def apply(grid, **options):
+        calls.append(grid)
+        assert release.wait(5)
+        return {"updated": 11, "idempotent_replay": True}
+
+    monkeypatch.setattr(web, "_IMPORT_JOBS", {})
+    monkeypatch.setattr(web, "validate_import_source_proof_record", lambda *a, **k: {"digest": proof})
+    monkeypatch.setattr(web, "_import_grid_serial", apply)
+    monkeypatch.setattr(db, "import_receipt_result", lambda digest: {"status": "absent"})
+
+    async def scenario():
+        body = {**BODY, "background_apply": True, "sheets": [{"name": SHEET, "grid": _grid()}]}
+        path = "/admin/import/status.json?proof_digest=" + proof
+        async with TestClient(TestServer(web.build_app(None))) as client:
+            try:
+                for _ in range(2):
+                    response = await client.post("/admin/import.json", json=body)
+                    assert response.status == 202
+                    assert await response.json() == {"status": "running", "proof_digest": proof}
+                status = await client.get(path)
+                assert await status.json() == {"status": "running"}
+            finally:
+                release.set()
+            for _ in range(30):
+                status = await client.get(path)
+                receipt = await status.json()
+                if receipt["status"] == "consumed":
+                    assert receipt["result"]["updated"] == 11
+                    break
+                await asyncio.sleep(.02)
+            else:
+                pytest.fail("Background apply did not publish a result")
+
+    asyncio.run(scenario())
+    assert len(calls) == 1
+
+
+def test_apply_receipt_is_available_during_geocoding(server, monkeypatch):
+    import scoring
+
+    digest = "a" * 64
+    geocoding = threading.Event()
+    finish = threading.Event()
+    result = {"updated": 11}
+    job = {"status": "running"}
+
+    def geocode():
+        geocoding.set()
+        assert finish.wait(5)
+
+    monkeypatch.setattr(web, "_IMPORT_JOBS", {digest: job})
+    monkeypatch.setattr(web, "_import_grid_serial", lambda *a, **k: dict(result))
+    monkeypatch.setattr(scoring, "geocode_city_centroids", geocode)
+    monkeypatch.setattr(db, "guess_offices", lambda **k: {"filled": {}, "undecided": []})
+    monkeypatch.setattr(db, "import_receipt_result", lambda key: {"status": "consumed", "result": result})
+
+    async def scenario():
+        task = asyncio.create_task(web._background_admin_import(digest, [], {}))
+        try:
+            assert await asyncio.to_thread(geocoding.wait, 4)
+            assert job["status"] == "running", "Follow-up work still owns the import slot"
+            async with TestClient(TestServer(web.build_app(None))) as client:
+                response = await client.get("/admin/import/status.json?proof_digest=" + digest)
+                assert await response.json() == {"status": "consumed", "result": result}
+        finally:
+            finish.set()
+            await task
+
+    asyncio.run(scenario())
+
+
 # --- пульт: когда разницей, когда целиком ---------------------------------------------
 class _Admin:
     """Сервер в одном процессе: та же развёртка разницы и та же память баз."""
@@ -186,3 +263,20 @@ def test_pult_sends_full_when_delta_does_not_pay_off_or_is_off(monkeypatch, tmp_
     monkeypatch.setenv("HARD_EXCHANGE_DELTA", "0")
     xs.post_import(adm, "/p", {**BODY, "sheets": [{"name": SHEET, "grid": other}]}, sheet=SHEET)
     assert adm.sent == ["full", "full", "full"]
+
+
+def test_identical_import_reuses_preview_grid_without_diff(monkeypatch, tmp_path):
+    monkeypatch.setenv("HARD_EXCHANGE_DB", str(tmp_path / "x.sqlite"))
+    monkeypatch.setenv("HARD_EXCHANGE_DELTA", "1")
+    admin = _Admin()
+    body = {**BODY, "sheets": [{"name": SHEET, "grid": _grid()}]}
+    xs.post_import(admin, "/admin/import/preview.json", body, sheet=SHEET)
+
+    def unexpected_diff(*args):
+        pytest.fail("An unchanged grid should not be diffed again")
+
+    monkeypatch.setattr(gd, "make_delta", unexpected_diff)
+    messages = []
+    xs.post_import(admin, "/admin/import.json", body, sheet=SHEET, log=messages.append)
+    assert admin.sent == ["full", "delta"]
+    assert messages == ["Данные книги уже переданы. Жду результат применения на сервере."]

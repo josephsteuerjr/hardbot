@@ -37,6 +37,7 @@ SETTINGS_PATH = (Path(os.environ["HARD_PULT_SETTINGS"]) if os.environ.get("HARD_
 DEFAULT_PROFILE = "Прод"
 
 TOKEN_PREFIX = "dpapi-v1:"
+SERVER_TOKEN_PREFIX = 'server-aes-v1:'
 
 
 def _dpapi(data: bytes, *, decrypt: bool = False) -> bytes:
@@ -76,6 +77,10 @@ def decode_tokens(data: dict) -> dict:
         token = record.get("device_token")
         if isinstance(token, str) and token.startswith(TOKEN_PREFIX):
             record["device_token"] = _dpapi(base64.b64decode(token[len(TOKEN_PREFIX):], validate=True), decrypt=True).decode("utf-8")
+        elif isinstance(token,str) and token.startswith(SERVER_TOKEN_PREFIX):
+            from .runtime_secrets import open_sealed
+            record['device_token']=open_sealed(base64.b64decode(token[len(SERVER_TOKEN_PREFIX):],validate=True),
+                os.environ['HARD_CRM_RUNTIME_KEY_FILE'],b'crm-python-account-v1').decode('utf-8')
     return result
 
 
@@ -116,7 +121,8 @@ class Settings(dict):
     def __init__(self, data: dict | None = None, path: Path = SETTINGS_PATH) -> None:
         incoming = data or {}
         self.protect_tokens = (os.name == "nt" or os.environ.get("HARD_PULT_PROTECT_TOKENS") == "1"
-                               or incoming.get("token_protection") == "windows-dpapi")
+                               or bool(os.environ.get('HARD_CRM_RUNTIME_KEY_FILE'))
+                               or incoming.get("token_protection") in {"windows-dpapi",'server-aes'})
         super().__init__(decode_tokens(incoming))
         self.path = Path(path)
         ensure_profiles(self)
@@ -147,11 +153,15 @@ class Settings(dict):
         try:
             payload = copy.deepcopy(dict(self))
             if self.protect_tokens:
-                payload["token_protection"] = "windows-dpapi"
+                server_key=os.environ.get('HARD_CRM_RUNTIME_KEY_FILE')
+                payload["token_protection"] = 'server-aes' if server_key else "windows-dpapi"
                 for record in [payload, *payload["profiles"].values()]:
                     token = record.get("device_token")
                     if token:
-                        record["device_token"] = TOKEN_PREFIX + base64.b64encode(_dpapi(str(token).encode("utf-8"))).decode("ascii")
+                        if server_key:
+                            from .runtime_secrets import seal
+                            record['device_token']=SERVER_TOKEN_PREFIX+base64.b64encode(seal(str(token).encode('utf-8'),server_key,b'crm-python-account-v1')).decode('ascii')
+                        else:record["device_token"] = TOKEN_PREFIX + base64.b64encode(_dpapi(str(token).encode("utf-8"))).decode("ascii")
             temporary = self.path.with_name(self.path.name + ".tmp")
             temporary.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")

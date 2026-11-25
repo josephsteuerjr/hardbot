@@ -97,7 +97,8 @@ def test_match_employees_and_preview_texts(tmp_path, monkeypatch):
 
 # --- окно и подтверждение --------------------------------------------------------
 def test_window_text_is_loud_when_empty():
-    assert en.window_text("01.08.2026", "") == "Окно результатов: с 01.08.2026 по —. Дата факта выезда или звонка."
+    assert en.window_text("01.08.2026", "") == ("Окно результатов: с 01.08.2026 по —. Дата факта выезда или звонка. "
+        "Последний платёж переносится независимо от окна результатов.")
     assert en.window_text("", "").startswith("ОКНО НЕ ЗАДАНО")
     text = en.confirm_text(2, 3, "", "05.08.2026")
     assert text.startswith("Обогатить личные реестры: сотрудников 2, файлов 3?")

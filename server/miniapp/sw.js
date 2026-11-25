@@ -9,12 +9,12 @@
  * ВАЖНО при обновлении оболочки на сервере: поднимите версию CACHE (v1→v2), иначе у уже
  * открывавших приложение выездников останется старый index.html из кэша до смены версии.
  *
- * Страница сама стирает Cache Storage целиком при выходе и при отзыве входа (wipeDevice
- * в index.html): там лежит и персональный manifest.webmanifest?t=<токен>. Ничего чинить
- * после этого не нужно: открытие по сети кладёт оболочку обратно (network-first ниже),
+ * Страница стирает кэш оболочки при выходе и при отзыве входа (wipeDevice в index.html).
+ * При открытии по сети service worker кладёт оболочку обратно (network-first ниже),
  * свои ассеты — при первом запросе (caches.open создаёт кэш заново).
  */
-const CACHE = "hard-shell-v108";
+const CACHE = "hard-shell-v114";
+const ROOT_SHELL_CACHE = /^hard-shell-v\d+$/;
 let cacheEnabled=true,cacheEpoch=0;
 const cacheWrites=new Set();
 function remember(key,response){
@@ -30,6 +30,8 @@ self.addEventListener("message",event=>{
   }else if(event.data?.type==="PROFILE_ACTIVE"){cacheEnabled=true;}
 });
 const PRECACHE = [
+  "/crm-courier/assets/courier.js",
+  "/crm-courier/assets/courier.css",
   "/",
   "/vendor/telegram-web-app.js",
   "/manifest.webmanifest",
@@ -52,14 +54,17 @@ const PRECACHE = [
 
 self.addEventListener("install", (e) => {
   e.waitUntil(
-    caches.open(CACHE).then((c) => c.addAll(PRECACHE)).then(() => self.skipWaiting())
+    caches.open(CACHE)
+      .then((c) => c.addAll(PRECACHE.map(path => new Request(path, {cache:"reload"}))))
+      .then(() => self.skipWaiting())
   );
 });
 
 self.addEventListener("activate", (e) => {
   e.waitUntil(
     caches.keys()
-      .then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then((ks) => Promise.all(ks.filter(k => k !== CACHE && ROOT_SHELL_CACHE.test(k))
+        .map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
@@ -80,6 +85,7 @@ self.addEventListener("fetch", (e) => {
   // Данные, админ-API и тайлы — всегда из сети (оффлайн-данные держит IndexedDB миниаппа).
   if (sameOrigin && (url.pathname.startsWith("/api/") ||
                      url.pathname.startsWith("/admin/") ||
+                     url.pathname.startsWith("/mobile/") ||
                      url.pathname.startsWith("/tiles/"))) return;
 
   // Открытие приложения — NETWORK-FIRST: онлайн всегда берём свежую оболочку с сервера
@@ -87,11 +93,14 @@ self.addEventListener("fetch", (e) => {
   // Так service worker не может «залипнуть» на старой/сломанной закэшированной странице.
   if (req.mode === "navigate") {
     e.respondWith(
-      caches.match("/").then(async hit => {
+      caches.match("/", {cacheName:CACHE}).then(async hit => {
         const ctl=new AbortController(), timer=setTimeout(()=>ctl.abort(),hit?5000:30000);
         try{
           const resp=await fetch(req,{cache:"no-store",signal:ctl.signal});
-          if(resp.ok){await remember("/",resp.clone());return resp;}
+          if(resp.ok){
+            if(sameOrigin && url.pathname==="/")await remember("/",resp.clone());
+            return resp;
+          }
           return hit||resp;
         }catch(error){if(hit)return hit;throw error;}
         finally{clearTimeout(timer);}
@@ -103,7 +112,7 @@ self.addEventListener("fetch", (e) => {
   if (sameOrigin) {
     // Свои ассеты (SDK, иконки, манифест) — cache-first с фоновым обновлением.
     e.respondWith(
-      caches.match(req).then((hit) => {
+      caches.match(req, {cacheName:CACHE}).then((hit) => {
         const net = fetch(req).then((resp) => {
           if (resp && resp.ok) remember(req,resp.clone());
           return resp;
@@ -117,7 +126,7 @@ self.addEventListener("fetch", (e) => {
   // Кросс-ориджин (карты/шрифты с CDN) — из кэша, иначе сеть; удачный ответ кладём в кэш
   // на будущее (в т.ч. opaque-ответы no-cors — тогда и карта заработает оффлайн повторно).
   e.respondWith(
-    caches.match(req).then((hit) =>
+    caches.match(req, {cacheName:CACHE}).then((hit) =>
       hit || fetch(req).then((resp) => {
         remember(req,resp.clone());
         return resp;

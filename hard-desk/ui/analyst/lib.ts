@@ -38,10 +38,16 @@ export async function local<T = any>(path: string, body: unknown = {}): Promise<
 export async function runJob(path: string, body: unknown, log?: (s: string) => void): Promise<any> {
   const id = crypto.randomUUID();
   localStorage.setItem("hard:last-job", id);
+  let acknowledgement: {ok:boolean;error?:string} | undefined;
   try {
-    await local(path, { ...(body as object), request_id: id });
+    acknowledgement=await hard.local(path, { ...(body as object), request_id: id });
   } catch {
     // A lost response can follow a committed start. Only read this UUID from now on.
+    log?.(`Проверяю состояние операции №${id} после потери ответа…`);
+  }
+  if(acknowledgement && !acknowledgement.ok){
+    const message=acknowledgement.error || 'Операция не принята';
+    if(!/Ответ на операцию потерян|Питон-сторона.*не отвечает/i.test(message))throw new Fail(message);
     log?.(`Проверяю состояние операции №${id} после потери ответа…`);
   }
   for (;;) {
@@ -56,12 +62,12 @@ export async function runJob(path: string, body: unknown, log?: (s: string) => v
       log?.(`Восстанавливаю связь с операцией №${id}. Повторный запуск не выполняется.`);
       continue;
     }
-    if (!j || !["running", "done", "failed", "uncertain"].includes(j.state)) {
+    if (!j || !["running", "done", "waiting", "attention", "failed", "uncertain"].includes(j.state)) {
       log?.(`Проверяю подтверждение операции №${id}…`);
       continue;
     }
     if (log && j.log?.length) log(j.log[j.log.length - 1]);
-    if (j.state === "done") return j.result;
+    if (["done","waiting","attention"].includes(j.state)) return j.result;
     if (["failed", "uncertain"].includes(j.state)) throw new Fail(`Операция №${id}: ${j.error || j.state}`);
   }
 }

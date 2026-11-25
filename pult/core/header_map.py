@@ -205,6 +205,8 @@ def analyze(grid: list[list]) -> dict:
     by_key = {f["key"]: f for f in fields}
 
     header = rows[best_h] if rows else []
+    import edit_tracking
+    edit_columns = edit_tracking.columns(header)
     present = {k for k in best_keys if k}
     ignored_titles, patterns = _ignored_titles(), _ignored_patterns()
     extras = extras_by_slot()
@@ -221,11 +223,11 @@ def analyze(grid: list[list]) -> dict:
         if not title:
             continue
         slot = norm_title(title)
-        key = best_keys[index] if index < len(best_keys) else None
+        key = edit_columns.get(index) or (best_keys[index] if index < len(best_keys) else None)
         if key:
             recognized.append({
                 "column": index + 1, "title": title, "key": key,
-                "field_title": by_key.get(key, {}).get("title", key),
+                "field_title": edit_tracking.LOGICAL_TITLES.get(key, by_key.get(key, {}).get("title", key)),
                 "by_operator": operator_alias_of.get(slot) == key,
             })
         elif slot in extras:
@@ -265,14 +267,18 @@ def read_header_grid(path: str, rows: int = 12) -> list[list]:
     """
     import exchange_contract as contract
 
-    from .workbook import read_workbook_sheets
+    from io import BytesIO
+    from pathlib import Path
+    from python_calamine import CalamineWorkbook
+    from .workbook import cell_json
 
-    sheets = read_workbook_sheets(path)
-    for sheet in sheets:
-        if sheet["name"] == contract.WORKBOOK_SHEET_NAME:
-            return list(sheet["grid"][:rows])
-    raise ValueError(
-        f"в книге нет листа «{contract.WORKBOOK_SHEET_NAME}»")
+    # Sequential SMB read once; ZIP seeks and sheet parsing stay in memory.
+    # Profile discovery needs only this header, not every cell on every sheet.
+    with CalamineWorkbook.from_filelike(BytesIO(Path(path).read_bytes())) as book:
+        if contract.WORKBOOK_SHEET_NAME not in book.sheet_names:
+            raise ValueError(f"в книге нет листа «{contract.WORKBOOK_SHEET_NAME}»")
+        grid=book.get_sheet_by_name(contract.WORKBOOK_SHEET_NAME).to_python(nrows=max(0,rows))
+        return [[cell_json(cell) for cell in row] for row in grid]
 
 
 # Решения оператора в таблице экрана. Ключ «field:<key>» строится на лету.

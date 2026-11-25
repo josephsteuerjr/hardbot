@@ -1,0 +1,13 @@
+ARG CRM_BASE_IMAGE
+FROM ${CRM_BASE_IMAGE}
+USER 0:0
+WORKDIR /runtime
+COPY server/ /runtime/server/
+COPY pult/ /runtime/pult/
+COPY registry_cycle/ /runtime/registry_cycle/
+COPY tools/crm_runtime.py tools/crm_runtime_permissions.sql /runtime/tools/
+RUN pip install --no-cache-dir psycopg[binary]==3.3.7 python-calamine==0.9.0 xlsxwriter==3.2.9
+ENV PYTHONPATH=/runtime/server:/runtime
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HARD_CRM_SHARED=1 HARD_CRM_PILOT=1 APP_DATA=/tmp/crm-compat
+USER 1000:1000
+CMD ["python", "-m", "crm.shared_server"]

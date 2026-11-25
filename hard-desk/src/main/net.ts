@@ -38,7 +38,19 @@ function net(): Session {
 }
 
 function request(url: string, init: RequestInit, timeoutMs = 30000): Promise<Response> {
-  const headers = { ...(init.headers as Record<string,string> || {}), "X-Client-Version": app.getVersion?.() || "3.2.0", 'X-Work-Product': PRODUCT_ID || 'hard' };
+  const query = new URLSearchParams(url.split("?")[1] || "");
+  let product = query.get("mode") || query.get("profile");
+  // Durable office/call operations keep their own product when the employee
+  // changes the visible portfolio or restarts before a queue is sent.
+  if (typeof init.body === "string") {
+    try {
+      const kind = JSON.parse(init.body).kind;
+      if (kind === "office") product = "hard";
+      else if (kind === "call" || kind === "payment") product = "soft";
+    } catch { /* A non-JSON request keeps its explicit/default product. */ }
+  }
+  const workProduct = product === "hard" || product === "soft" ? product : PRODUCT_ID==='crm'?'hard':PRODUCT_ID || "hard";
+  const headers = { ...(init.headers as Record<string,string> || {}), "X-Client-Version": app.getVersion?.() || "3.2.0", 'X-Work-Product': workProduct };
   init = { ...init, headers };
   return fetchBuffered((target, options) => net().fetch(target, options), url, init, timeoutMs);
 }
@@ -309,6 +321,7 @@ const FIELD_PATH_EXACT = new Set(["/api/person", "/api/cards", "/api/markers", "
                                   "/api/receipt", "/api/photo", "/api/note"]);
 for (const path of ["/api/office/action", "/api/workspace/report", "/api/workspace/promises"])
   FIELD_PATH_EXACT.add(path);
+for (const path of ["/api/workspace/portfolio", "/api/workspace/dashboard"]) FIELD_PATH_EXACT.add(path);
 
 function fieldOk(path: string): boolean {
   return FIELD_PATH.test(path) || FIELD_PATH_EXACT.has(path);
@@ -356,11 +369,11 @@ export async function enrollField(raw: string): Promise<ApiResult> {
 /** Отпечаток этого компьютера для входа по логину-паролю: sha-256 имени машины,
  *  пользователя Windows и каталога данных — стабилен, пока программа живёт на
  *  этом же месте; смена машины видна аккаунту как новое устройство. */
-function desktopFingerprint(): string {
+export function desktopFingerprint(): string {
   return pcIdentity().fingerprint;
 }
 
-async function pcLoginProof(base: string, username: string, password: string): Promise<any> {
+export async function pcLoginProof(base: string, username: string, password: string): Promise<any> {
   const identity = pcIdentity();
   const response = await request(base + "/api/account/pc_challenge", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ public_key: identity.publicKey, fingerprint: identity.fingerprint, label: deviceName() }) });

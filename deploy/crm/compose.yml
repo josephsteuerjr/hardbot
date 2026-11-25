@@ -1,0 +1,81 @@
+name: rimborso-crm
+services:
+  mobile:
+    image: ${CRM_IMAGE:?exact tested image required}
+    restart: unless-stopped
+    command: [python, -m, crm.mobile_server, --home, /mobile-state, --primary, 'https://hard.rimborso.ru', --crm, 'https://hard.rimborso.ru/crm-pilot', --session-key-file, /run/secrets/mobile-key, --public-origin, 'https://hard.rimborso.ru', --internal-proxy, --host, '0.0.0.0', --port, '8081', --assets, /mobile-assets]
+    environment:
+      HARD_CRM_SHARED: '0'
+      HARD_CRM_SERVER_XLSX: '1'
+      HARD_CRM_RUNTIME_KEY_FILE: /run/secrets/mobile-key
+    volumes:
+      - ${CRM_MOBILE_STATE_DIR:?}:/mobile-state
+      - ${CRM_MOBILE_KEY_FILE:?}:/run/secrets/mobile-key:ro
+      - ${CRM_MOBILE_ASSETS_DIR:?}:/mobile-assets:ro
+    networks:
+      hard-net:
+        aliases: [crm-mobile-api]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/mobile/health',timeout=5).read()"]
+      interval: 30s
+      start_period: 30s
+      timeout: 8s
+      retries: 3
+  api:
+    image: ${CRM_IMAGE:?exact tested image required}
+    restart: unless-stopped
+    command: [python, -m, crm.shared_server]
+    environment:
+      HARD_CRM_SHARED: '1'
+      HARD_CRM_PILOT: '1'
+      HARD_CRM_DATABASE_URL_FILE: /run/secrets/app-dsn
+      HARD_CRM_SESSION_KEY_FILE: /run/secrets/session-key
+      HARD_CRM_PRIMARY_DB: /primary/${CRM_PRIMARY_FILE:?exact primary filename required}
+      HARD_CRM_DOCUMENTS: /documents
+    volumes:
+      - ${CRM_APP_DSN_FILE:?}:/run/secrets/app-dsn:ro
+      - ${CRM_SESSION_KEY_FILE:?}:/run/secrets/session-key:ro
+      - ${CRM_POSTGRES_SOCKET:?}:/run/crm-postgres:ro
+      - ${CRM_PRIMARY_DIR:?}:/primary
+      - ${CRM_DOCUMENTS_DIR:?}:/documents
+    networks:
+      hard-net:
+        aliases: [crm-runtime-api]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=5).read()"]
+      interval: 30s
+      start_period: 30s
+      timeout: 8s
+      retries: 3
+  exchange:
+    image: ${CRM_IMAGE:?exact tested image required}
+    restart: unless-stopped
+    command: [python, -m, crm.legacy_worker, --config, /run/exchange.json]
+    environment:
+      HARD_CRM_SHARED: '1'
+      HARD_CRM_DATABASE_URL_FILE: /run/secrets/exchange-dsn
+    volumes:
+      - ${CRM_EXCHANGE_DSN_FILE:?}:/run/secrets/exchange-dsn:ro
+      - ${CRM_EXCHANGE_CONFIG:?}:/run/exchange.json:ro
+      - ${CRM_POSTGRES_SOCKET:?}:/run/crm-postgres:ro
+      - ${CRM_PRIMARY_DIR:?}:/primary
+      - ${CRM_EXCHANGE_STATUS_DIR:?}:/status
+    network_mode: none
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, python, -m, crm.legacy_worker, --config, /run/exchange.json, --health]
+      interval: 30s
+      start_period: 120s
+      timeout: 10s
+      retries: 3
+networks:
+  hard-net:
+    external: true

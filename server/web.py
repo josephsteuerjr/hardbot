@@ -25,6 +25,7 @@ import math
 import os
 import re
 import sqlite3
+import edit_tracking
 import tempfile
 import threading
 import time
@@ -54,6 +55,7 @@ from exchange_contract import (
     OFFICE_RESULT_SNAPSHOT_KEY,
     contract_binding,
     validate_contract_binding,
+    validate_import_source_proof_record,
 )
 from fields import BY_KEY, DROPDOWNS, SOFT
 from i18n import FIELD_TITLES, FORM_FIELD_TITLES, LANGUAGES, t, tf, tv
@@ -684,14 +686,16 @@ def _person_full_from_rows(rows, rep: str, lang: str,
     visited = visit is not None
     import office_work
     totals = office_work.portfolio_totals(rows)
+    import employee_workspace
     contracts = [{
+        **employee_workspace.row_data(r),
         "contract_id": r["contract_id"], "partner": r["partner"],
         "unit": debt.unit([r["partner"]] if r["partner"] else []),
         "total": db.registry_payment_amount(r["debt_today"] if r["debt_today"] not in (None, "") else r["debt_total"]),
         "last_payment_sum": r["last_payment_sum"] or "",
         "last_payment_date": r["last_payment_date"] or "",
-        "debt": [{"key": k, "title": _title(k, lang), "value": v}
-                 for k, v in debt.breakdown(r)],
+        "debt": [{"key": k, "title": _title(k, lang), "value": float(v)}
+                 for k in debt.ARTICLES if (v := employee_workspace.amount(_cell(r, k))) is not None],
     } for r in rows]
     info = [{"key": k, "title": _title(k, lang), "value": _row_get(rows, k) or "—"}
             for k in INFO_KEYS]
@@ -772,6 +776,7 @@ def _person_full_from_rows(rows, rep: str, lang: str,
         # Текущий комментарий — живой совместный текст месяца: его можно
         # продолжить до завершения визита, а доказанный snapshot остаётся
         # отдельной неизменяемой историей.
+        "edit_dates": edit_tracking.card(rows),
         "visit_comment": _row_get(rows, "visit_comment") or "",
         # Служебный односторонний контекст из общего реестра; в форму и POST
         # сотрудника этот ключ не входит.
@@ -899,6 +904,7 @@ async def _version(request: web.Request) -> web.Response:
         "shellVersion": _shell_version(),
         "visitGeoRequired": config.VISIT_GEO_REQUIRED,
         "dataExchangeContract": DATA_EXCHANGE_CONTRACT,
+        "crmRollout": os.getenv('HARD_CRM_MOBILE_ROLLOUT') == '1',
     }
     if _is_drain(request):
         payload["drain"] = _drain_payload()
@@ -1428,8 +1434,9 @@ async def _route(request: web.Request) -> web.Response:
     if point is None:
         raise web.HTTPBadRequest(text="lat/lon")
     lat, lon = point
-    row = db.get_client(rep)
-    if not row or (row["responsible"] != emp and uid != ADMIN_ID):
+    rows = await asyncio.to_thread(db.person_contracts, rep)
+    row = next((contact for contact in rows if contact["contract_id"] == rep), None)
+    if row is None or (row["responsible"] != emp and uid != ADMIN_ID):
         raise web.HTTPNotFound(text="person")
     glat, glon = row["geo_lat"], row["geo_lon"]
     if glat is None or glon is None:
@@ -1731,6 +1738,38 @@ async def _office_action(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def _employee_registry_view(request: web.Request) -> web.Response:
+    """Self/authorized acting principal only; no employee name from query."""
+    uid = await asyncio.to_thread(_uid, request)
+    if not uid:
+        raise web.HTTPUnauthorized(text='auth')
+    principal = await asyncio.to_thread(_employee, uid, request)
+    if not principal:
+        raise web.HTTPForbidden(text='not bound')
+    import staff_roster, employee_workspace
+    profile = request.query.get('profile', request.query.get('mode', 'hard'))
+    if profile not in ('hard','soft'):
+        raise web.HTTPBadRequest(text='Выберите Хард или Софт')
+    employee = await asyncio.to_thread(staff_roster.product_employee, principal, profile)
+    try:
+        size = int(request.query.get('size','100'))
+        page = int(request.query.get('page','1'))
+        if request.path.endswith('/portfolio'):
+            result = await asyncio.to_thread(employee_workspace.portfolio, employee, profile,
+                query=request.query.get('q','')[:200], partner=request.query.get('partner','')[:200],
+                sort=request.query.get('sort','client'), direction=request.query.get('direction','asc'),page=page,size=size)
+        else:
+            result = await asyncio.to_thread(employee_workspace.dashboard, employee, profile,
+                request.query.get('month') or workday.today().strftime('%Y-%m'),
+                page=page,size=size,detail=request.query.get('detail','payments'))
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+    result['employee'] = principal
+    import access_policy
+    result['scope_version'] = await asyncio.to_thread(access_policy.version,[principal])
+    response=web.json_response(result);response.enable_compression();return response
+
+
 async def _workspace_report(request: web.Request) -> web.Response:
     uid, emp = await asyncio.to_thread(_auth, request)
     import office_work
@@ -1768,6 +1807,23 @@ async def _workspace_promises(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="profile")
     return web.json_response({"ok": True, "profile": profile, "today": workday.today().isoformat(),
                               "items": await asyncio.to_thread(office_work.promises, emp, profile)})
+
+
+async def _call_script(request):
+    _, employee = await asyncio.to_thread(_auth, request)
+    import call_scripts
+    return web.json_response(await asyncio.to_thread(call_scripts.employee_script, employee))
+
+
+async def _manager_call_script(request):
+    uid, _, _ = await asyncio.to_thread(_manager_gate, request)
+    import call_scripts
+    try:
+        result = (await asyncio.to_thread(call_scripts.mutate, uid, await _json_object(request))
+                  if request.method == 'POST' else await asyncio.to_thread(call_scripts.manager_state, uid))
+    except call_scripts.ScriptError as exc:
+        return web.json_response(dict(ok=False, error=str(exc)), status=exc.status)
+    return web.json_response(result)
 
 
 def _cards_payload(uid: int, emp: str, lang: str, requested_soft: bool,
@@ -2058,7 +2114,8 @@ async def _save(request: web.Request) -> web.Response:
              "sum": values.get("forecast_sum", ""),
              "fc": values.get(db.FORECAST_KEY, "")}, ensure_ascii=False))
     if values and not finish:
-        await asyncio.to_thread(db.update_person, rep, values)
+        await asyncio.to_thread(db.update_person, rep, values,
+            result_edit_at=_saved_at(body) or datetime.now(timezone.utc).replace(tzinfo=None).isoformat())
     if finish:
         completed_at = _occurred_on(body)
         cur = db.get_client(rep)
@@ -2152,6 +2209,7 @@ async def _save(request: web.Request) -> web.Response:
                                                 on_date=completed_at)
         try:
             is_new = await asyncio.to_thread(db.save_visit_result, rep, uid, row["responsible"], values, payload,
+                              request_hash=db._json_digest(body),
                               op_id=op_id, lat=vlat, lon=vlon, dist_m=dist_m,
                               geo_far=geo_far, on_date=completed_at,
                               fill_seconds=_fill_seconds(body),
@@ -2303,7 +2361,8 @@ def _save_call(uid: int, emp: str, body: dict, rep: str, row, values: dict,
     if values and not finish:
         # Группа — по СОФТ-закреплению: у человека бывают разные выездные
         # ответственные, звонок обязан лечь во все его договоры софтника.
-        db.update_person(rep, values, by_soft=True)
+        db.update_person(rep, values, by_soft=True,
+            result_edit_at=_saved_at(body) or datetime.now(timezone.utc).replace(tzinfo=None).isoformat())
     if finish:
         completed_at = _occurred_on(body)
         op_id = (str(body.get("op_id") or "")).strip() or None
@@ -2901,7 +2960,7 @@ async def _manager_receipt_file(request: web.Request) -> web.Response:
     rows = db.photo_index_for_dirs(ctx["dirs"])
     soft_owner = any(c["contract_id"] == ctx["cid"] and (c["responsible_soft"] or "") in scope
                      for c in ctx["contracts"])
-    with db.connect() as conn:
+    with db.registry_connect(readonly=True) as conn:
         authors = [r[0] for r in conn.execute("SELECT employee FROM payment_evidence WHERE file=?", (key,))]
     receipt_author = any(name in scope for name in authors)
     if not (_photo_scope_ok(uid, scope, ctx["contracts"], rows) or soft_owner or receipt_author):
@@ -4954,7 +5013,8 @@ def _link_code(raw: str) -> str:
 def _device_me(uid: int, mgr: dict) -> dict:
     owner = uid == ADMIN_ID
     import access_policy
-    return {"me": {"name": mgr.get("name") or "",
+    return {"subject": {"type": "manager", "actor_uid": int(uid)},
+            "me": {"name": mgr.get("name") or "",
                    "role": "full" if owner else db.manager_role(mgr.get("role")),
                    "direction": mgr.get("direction") or "",
                    "office_cities": mgr.get("office_cities") or [],
@@ -5011,13 +5071,16 @@ async def _manager_device_enroll(request: web.Request) -> web.Response:
 async def _manager_device_me(request: web.Request) -> web.Response:
     uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
     device = None
+    server_operator = False
     ptok = (request.headers.get("X-Pult-Token") or "").strip()
     if ptok:
         _, dev = db.manager_device_check(ptok)
         if dev:
             device = {"id": dev["id"], "name": dev["device"] or "",
                       "created_at": dev["created_at"]}
-    return _manager_json({"ok": True, "device": device, "team": len(team),
+            if dev["account_id"]:
+                server_operator = await asyncio.to_thread(accounts.is_server_operator, dev["account_id"], uid)
+    return _manager_json({"ok": True, "device": device, "team": len(team), "server_operator": server_operator,
                           **await asyncio.to_thread(_device_me, uid, mgr)})
 
 
@@ -5649,7 +5712,7 @@ async def _account_gps_request(request):
 async def _account_logout(request: web.Request) -> web.Response:
     found = _account_device_of_request(request)
     if not found:
-        raise web.HTTPUnauthorized(text="auth")
+        raise _json_error(web.HTTPUnauthorized, "auth")
     # Гасим токен в ЕГО таблице: id строк agent_devices/manager_devices
     # независимы, agent_device_revoke по менеджерскому id отзывал чужое
     # устройство выездника и оставлял живым сам менеджерский вход.
@@ -5659,28 +5722,27 @@ async def _account_logout(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def _manager_team(request):
+    uid,_mgr,_team=await asyncio.to_thread(_manager_gate,request)
+    if request.method=='POST':
+        body=await _json_object(request)
+        result=await asyncio.to_thread(accounts.manager_revoke_device,uid,(body or {}).get('device_id'),is_owner=uid==ADMIN_ID,ip=_admin_peer(request))
+    else:
+        result=await asyncio.to_thread(accounts.manager_team,uid,is_owner=uid==ADMIN_ID)
+    return web.json_response(result,status=200 if result.get('ok') else 403,headers={'Cache-Control':'no-store'})
+
+
 async def _manager_entered(request: web.Request) -> web.Response:
     """«Кто ввёл» для руководителя: своя команда, телефоны+компьютеры,
     готовность (ввели и там, и там) — список пересылается владельцу.
     Координаты входа НЕ отправляем: руководителю достаточно факта «ввели с
     телефона», GPS-точка — персональные данные (администраторам остаётся)."""
     uid, mgr, team = await asyncio.to_thread(_manager_gate, request)
-    rows = await asyncio.to_thread(accounts.entered_list, include_empty=True)
-    team_set = set(team)
-    own = db.get_binding(uid)
-    if own:
-        team_set.add(own)
-    team_keys = {db._name_key(name) for name in team_set}
-    rows = [r for r in rows if db._name_key(r["employee"]) in team_keys]
-    reviewable = await asyncio.to_thread(accounts.manager_reviewable, uid, is_owner=(uid == ADMIN_ID))
-    for r in rows:
-        r["can_approve"] = r["username"] in reviewable and not r['password_review_pending']
-        r["can_reset_password"] = r["username"] in reviewable and not r['password_review_pending']
-        r['can_request_phone'] = False
-        if r.get("phone"):
-            r["phone"] = {k: v for k, v in r["phone"].items() if k != "gps"}
-    return web.json_response({"ok": True, "entered": rows,
-                              "generated_at": datetime.now().isoformat(timespec="seconds")})
+    import team_entry
+    result = await asyncio.to_thread(team_entry.snapshot, uid, mgr, team,
+                                    is_owner=(uid == ADMIN_ID), shell_version=_shell_version())
+    result['scope_version']=_device_me(uid,mgr)['scope_version']
+    return web.json_response(result, headers={'Cache-Control':'no-store'})
 
 
 async def _manager_phone_request(request: web.Request) -> web.Response:
@@ -6043,9 +6105,10 @@ def _admin(request: web.Request) -> None:
         if state=='ok' and linked and linked['account_id']:
             gate,_employee=accounts.device_gate_by_token('manager_devices',int(linked['id']))
             with db.connect() as conn:
-                grant=conn.execute('SELECT g.principal,a.role,a.telegram_id FROM account_admin_grants g '
+                grant=conn.execute('SELECT g.principal,g.granted_by,a.role,a.telegram_id FROM account_admin_grants g '
                     'JOIN accounts a ON a.id=g.account_id WHERE g.account_id=?',(linked['account_id'],)).fetchone()
-            if gate=='ok' and grant and (grant['role']=='analyst' or (grant['role']=='full' and grant['telegram_id']==ADMIN_ID)):
+            root_manager=bool(grant and grant['granted_by']=='ssh-root' and grant['role'] in {'manager','full'})
+            if gate=='ok' and grant and (root_manager or grant['role']=='analyst' or (grant['role']=='full' and grant['telegram_id']==ADMIN_ID)):
                 request['admin_device']={**dict(linked),'role':'operator','account_approver':grant['principal'],'account_session':True}
                 _admin_auth_ok(request)
                 return
@@ -6447,6 +6510,18 @@ async def _admin_import_authorize(request: web.Request) -> web.Response:
                               "authorization": authorization})
 
 
+async def _admin_import_status(request: web.Request) -> web.Response:
+    await asyncio.to_thread(_admin, request)
+    digest = request.query.get("proof_digest", "")
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        raise web.HTTPBadRequest(text="Некорректный номер квитанции импорта.")
+    job = _IMPORT_JOBS.get(digest)
+    if job and job["status"] == "running" and not job.get("registry_written"):
+        return web.json_response({"status": "running"})
+    receipt = await asyncio.to_thread(db.import_receipt_result, digest)
+    return web.json_response(receipt if receipt["status"] == "consumed" else job or receipt)
+
+
 async def _admin_import_json(request: web.Request) -> web.Response:
     """Импорт published master: гриды уже распарсены клиентом (calamine).
 
@@ -6595,9 +6670,7 @@ async def _admin_import_json(request: web.Request) -> web.Response:
             {"blocked": True, "error": f"импорт заблокирован: {exc}"},
             status=409,
         )
-    report = await asyncio.to_thread(
-        _import_grid_serial,
-        grid,
+    options = dict(
         source_kind=source_kind,
         source_proof=body.get("source_proof"),
         require_source_proof=True,
@@ -6618,27 +6691,59 @@ async def _admin_import_json(request: web.Request) -> web.Response:
         expected_recall_restored=expected_recall_restored,
         expected_recall_restored_digest=expected_recall_restored_digest,
     )
+    if body.get("background_apply") is True:
+        try:
+            proof = await asyncio.to_thread(validate_import_source_proof_record,
+                                            options["source_proof"], source_kind=source_kind)
+        except (ExchangeContractError, ValueError) as exc:
+            return web.json_response({"blocked": True, "error": str(exc)}, status=409)
+        digest = proof["digest"]
+        if any(key != digest and job["status"] == "running" for key, job in _IMPORT_JOBS.items()):
+            return web.json_response({"error": "Сервер уже применяет другой импорт."}, status=409)
+        if not _IMPORT_JOBS.get(digest) or _IMPORT_JOBS[digest]["status"] != "running":
+            if len(_IMPORT_JOBS) >= 8:
+                _IMPORT_JOBS.pop(next(iter(_IMPORT_JOBS)))
+            _IMPORT_JOBS[digest] = {"status": "running"}
+            asyncio.create_task(_background_admin_import(digest, grid, options))
+        return web.json_response({"status": "running", "proof_digest": digest}, status=202)
+    report = await _apply_admin_import(grid, options)
+    return web.json_response(report, status=409 if report.get("blocked") else 200)
+
+
+_IMPORT_JOBS = {}
+
+
+async def _background_admin_import(digest, grid, options):
+    try:
+        report = await _apply_admin_import(grid, options, background_job=_IMPORT_JOBS[digest])
+        _IMPORT_JOBS[digest] = {"status": "rejected" if report.get("blocked") else "consumed",
+                                "result": report}
+    except Exception:
+        logging.exception("background registry import failed")
+        _IMPORT_JOBS[digest] = {"status": "rejected", "result": {
+            "blocked": True, "error": "Сервер не смог применить импорт. Проверьте квитанцию."}}
+
+
+async def _apply_admin_import(grid, options, *, background_job=None):
+    report = await asyncio.to_thread(_import_grid_serial, grid, **options)
     if report.get("blocked"):
         # Машиночитаемый код: операторский CLI различает «нужен предпросмотр
         # отзыва» и «расписка не зарегистрирована», не разбирая свободный текст.
         if report.get("recall_preview_required"):
             report["code"] = "recall_preview_required"
-        return web.json_response(report, status=409)
+        return report
+    if background_job is not None:
+        # The import transaction has returned. Status can read the durable
+        # receipt while the job still owns the slot for follow-up work.
+        background_job["registry_written"] = True
     # A consumed receipt is an exact zero-write replay. Do not run ancillary
     # mutators behind it: otherwise replaying the same import could still
     # change coordinates after the atomic import transaction.
     if report.get("idempotent_replay"):
-        return web.json_response(report)
-    # Геокодинг — по-прежнему здесь, в цикле, и это НАМЕРЕННО. Проход держит
-    # ОДНУ транзакцию записи от первой найденной точки до конца: на свежей машине
-    # это ~19 с, больше busy_timeout (8 с). В потоке каждый телефон, пишущий в
-    # это время, простоял бы в цикле событий до 8 с на каждой записи и получил
-    # бы 500 (а журнал доступа — дыру). Пока проход не коммитит порциями
-    # (scoring.py), честнее один раз подождать всем. В ежедневном импорте он
-    # стоит десятые доли секунды: точки уже есть, считать нечего.
+        return report
     try:
         import scoring
-        report["geocoded"] = scoring.geocode_city_centroids()
+        report["geocoded"] = await asyncio.to_thread(scoring.geocode_city_centroids)
     except Exception as e:  # noqa: BLE001
         logging.warning("geocode after import: %s", e)
     # Новые люди из реестра сразу получают офис — по географии их должников
@@ -6655,7 +6760,7 @@ async def _admin_import_json(request: web.Request) -> web.Response:
                             detail=f"auto={len(guessed['filled'])}")
     except Exception as e:  # noqa: BLE001
         logging.warning("guess offices after import: %s", e)
-    return web.json_response(report)
+    return report
 
 
 # import_grid — в потоке, а не в корутине: разбор и запись всего реестра (0,6 с
@@ -6675,7 +6780,17 @@ _IMPORT_SERIAL = threading.Lock()
 
 def _import_grid_serial(grid, **options) -> dict:
     with _IMPORT_SERIAL:
-        return db.import_grid(grid, **options)
+        if not os.environ.get("HARD_REGISTRY_DATABASE_URL_FILE"):
+            return db.import_grid(grid, **options)
+        from psycopg.errors import SerializationFailure, DeadlockDetected
+        for attempt in range(2):
+            try:
+                return db.import_grid(grid, **options)
+            except (SerializationFailure, DeadlockDetected):
+                if attempt:
+                    return dict(blocked=True, preview_stale=True,
+                                error="Во время импорта изменился реестр. Обновите предпросмотр.")
+
 
 
 # --- Перевоз реестра разницей (опыт exp/fast-exchange, 30.09.2026) -----------
@@ -6911,6 +7026,7 @@ async def _admin_enrichment_ledger(request: web.Request) -> web.Response:
         return web.json_response({
             "data_exchange_contract": DATA_EXCHANGE_CONTRACT,
             "ledger": ledger,
+            **({"receipt": db.enrichment_receipt(request.query["receipt_digest"])} if request.query.get("receipt_digest") else {}),
             **({"books": db.enrichment_book_ledger(employees or None)} if request.query.get("books") == "1" else {}),
             "count": sum(len(v) for v in ledger.values()),
         })
@@ -7771,15 +7887,18 @@ async def _observe_client_version(request, *, token=None, login=False):
 async def _account_client_policy(request,handler):
     # Protocol admission retires unmodified old clients; it is not binary or
     # hardware attestation. Every data gate still validates account and device.
+    if request.method in ('GET', 'HEAD') and request.path.startswith('/admin/analyst'):
+        from crm.retired_entry import PUBLIC_ASSETS
+        if request.path in PUBLIC_ASSETS:
+            return await handler(request)
     protected=request.path.startswith(('/api/','/admin/'))
     if protected and request.method != 'OPTIONS':
         await _observe_client_version(request)
     strict=await asyncio.to_thread(account_policy.strict) if protected else False
     if protected and strict:
-        try:
-            version=tuple(int(x) for x in request.headers.get('X-Client-Version','').split('.'))
-        except ValueError: version=()
-        if len(version)!=3 or version<(3,2,0):
+        import client_versions
+        version=client_versions.protocol_version(request.headers.get('X-Client-Version',''))
+        if version is None or version<(3,2,0):
             # Retired installed queues can discard an item on any 4xx. Reject
             # their writes before auth/body handling with a transient status,
             # preserving the unposted evidence until the client is upgraded.
@@ -7797,6 +7916,26 @@ async def _account_client_policy(request,handler):
     return await handler(request)
 
 
+async def _manager_entry_profile(request: web.Request) -> web.Response:
+    uid,mgr,team=await asyncio.to_thread(_manager_gate,request)
+    import team_entry
+    result=await asyncio.to_thread(team_entry.profile,uid,mgr,team,str(request.query.get('employee') or ''),
+                                 is_owner=(uid==ADMIN_ID),shell_version=_shell_version())
+    if result is None:raise _json_error(web.HTTPNotFound,'Сотрудник не входит в текущую команду.')
+    return web.json_response({'ok':True,'employee':result},headers={'Cache-Control':'no-store'})
+
+
+async def _manager_entry_revoke(request: web.Request) -> web.Response:
+    uid,_mgr,_team=await asyncio.to_thread(_manager_gate,request)
+    body=await _json_object(request)
+    import team_entry
+    try:
+        result=await asyncio.to_thread(team_entry.revoke,uid,body,is_owner=(uid==ADMIN_ID),ip=_admin_peer(request))
+    except PermissionError as exc:raise _json_error(web.HTTPForbidden,str(exc))
+    except ValueError as exc:raise _json_error(web.HTTPBadRequest,str(exc))
+    return web.json_response(result,headers={'Cache-Control':'no-store'})
+
+
 def build_app(bot=None) -> web.Application:
     account_policy.activate()  # invalid UTC fails; persisted cutover survives restart
     app = web.Application(client_max_size=CLIENT_MAX_SIZE,
@@ -7804,6 +7943,15 @@ def build_app(bot=None) -> web.Application:
     app.on_response_prepare.append(_security_headers)
     app["bot"] = bot
     app["notification_limit"] = asyncio.Semaphore(4)
+    from crm.http import install as _install_crm
+    from crm_identity import install as _install_crm_identity
+    from crm.retired_entry import install as _install_crm_retired_entry
+    from courier_crm import install as _install_courier_crm
+    import sys as _crm_sys
+    _install_crm(app,_crm_sys.modules[__name__])
+    _install_crm_identity(app, _crm_sys.modules[__name__])
+    _install_crm_retired_entry(app)
+    _install_courier_crm(app, _crm_sys.modules[__name__])
     import notification_outbox
     app.cleanup_ctx.append(notification_outbox.lifecycle)
     import audit_spool
@@ -7831,6 +7979,7 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/admin/import.json", _admin_import_json)
     app.router.add_post("/admin/import/preview.json", _admin_import_preview_json)
     app.router.add_post("/admin/import/authorize.json", _admin_import_authorize)
+    app.router.add_get("/admin/import/status.json", _admin_import_status)
     app.router.add_get("/admin/registry_columns.json", _admin_registry_columns)
     app.router.add_post("/admin/registry_columns.json",
                         _admin_registry_columns_save)
@@ -7937,11 +8086,18 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/account/login", _account_login)
     app.router.add_post("/api/manager/account_approve", _manager_account_approve)
     app.router.add_post("/api/manager/account_reset", _manager_account_reset)
+    app.router.add_get("/api/manager/entry_profile", _manager_entry_profile)
+    app.router.add_post("/api/manager/entry_revoke", _manager_entry_revoke)
     app.router.add_post("/api/manager/account_phone_request", _manager_phone_request)
     app.router.add_post("/api/account/password", _account_password)
     app.router.add_get("/api/account/sessions", _account_sessions)
     app.router.add_post("/api/account/logout", _account_logout)
     app.router.add_get("/api/manager/entered", _manager_entered)
+    app.router.add_get('/api/manager/team',_manager_team)
+    app.router.add_post('/api/manager/team/device-revoke',_manager_team)
+    app.router.add_get("/api/manager/call-script", _manager_call_script)
+    app.router.add_post("/api/manager/call-script", _manager_call_script)
+    app.router.add_get("/api/call-script", _call_script)
     app.router.add_get("/admin/accounts.json", _admin_accounts)
     app.router.add_post('/admin/account_action.json',_admin_account_action)
     app.router.add_post("/admin/account_approve.json", _admin_account_approve)
@@ -7994,6 +8150,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/save", _save)
     app.router.add_post("/api/office/action", _office_action)
     app.router.add_get("/api/workspace/report", _workspace_report)
+    app.router.add_get("/api/workspace/portfolio", _employee_registry_view)
+    app.router.add_get("/api/workspace/dashboard", _employee_registry_view)
     app.router.add_get("/api/workspace/promises", _workspace_promises)
     app.router.add_post("/api/photo", _photo)
     app.router.add_post("/api/receipt", _receipt)

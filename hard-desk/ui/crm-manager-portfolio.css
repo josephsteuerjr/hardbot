@@ -1,0 +1,22 @@
+.managed-table{table-layout:fixed;width:max-content;min-width:100%;font-size:calc(13px * var(--registry-scale,1))}
+.managed-table th{position:relative;text-align:left;min-width:70px}
+.managed-table td{vertical-align:top;white-space:normal;overflow-wrap:anywhere}
+.managed-table th:first-child,.managed-table td:first-child{position:sticky;left:0;z-index:2;background:var(--paper,#f7f3e8)}
+.managed-table th:nth-child(2),.managed-table td:nth-child(2){position:sticky;left:var(--managed-first-width,80px);z-index:2;background:var(--paper,#f7f3e8)}
+.managed-table th:nth-child(3),.managed-table td:nth-child(3){position:sticky;left:calc(var(--managed-first-width,80px) + var(--managed-second-width,300px));z-index:1;background:var(--paper,#f7f3e8)}
+.managed-table thead th{position:sticky;top:0;z-index:3}
+.managed-table .managed-contract td{background:rgba(112,81,57,.04)}
+.managed-scroll{max-height:calc(100vh - 310px);min-height:200px}
+.managed-portfolio .registry-column-resizer{position:absolute;right:0;top:0;bottom:0;width:8px;cursor:col-resize;border-right:1px solid var(--line,#cfc5b4)}
+.managed-portfolio dialog{width:min(780px,calc(100vw - 48px));max-height:85vh;overflow:auto;padding:20px}
+.managed-portfolio dialog form{display:grid;gap:12px}
+.managed-portfolio dialog h2{margin:0 0 8px}
+.managed-portfolio dialog label{display:grid;gap:4px;margin:0}
+.managed-portfolio dialog select[size]{width:100%;min-height:110px;height:120px}
+.managed-portfolio dialog .toolbar label{display:flex;align-items:center}
+.managed-portfolio dialog .toolbar,.managed-portfolio dialog p{margin:0}
+.managed-portfolio dialog .actions{position:sticky;bottom:-20px;background:var(--paper);padding:12px 0 0;border-top:1px solid var(--line)}
+.managed-portfolio #allocation-preview details{max-height:150px;overflow:auto}
+.managed-selection{flex-wrap:wrap}
+.managed-portfolio input[type=checkbox]{width:18px;height:18px}
+.managed-portfolio [role=status]{min-height:1.5em}

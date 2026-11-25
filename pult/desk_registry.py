@@ -11,6 +11,9 @@
 from __future__ import annotations
 
 import threading
+import os
+import time
+import uuid
 from pathlib import Path
 
 from pult.core import bootstrap
@@ -22,6 +25,7 @@ from pult.core import enrichment as en  # noqa: E402
 from pult.core import header_map as hm  # noqa: E402
 import exchange_contract as _xc  # noqa: E402 — контракт обмена (server/)
 from pult.core import exchange_state as xs  # noqa: E402
+from pult.core.api import AccessRevoked  # noqa: E402
 from pult.core import registry_import as ri  # noqa: E402
 from pult.core.constants import (  # noqa: E402
     LIMITED_TEST_ENRICH_DISABLED_MESSAGE,
@@ -35,12 +39,24 @@ from pult.core.export import (export_confirm_text, export_request,  # noqa: E402
 from pult.core.text import fmt_n  # noqa: E402
 
 _lock = threading.RLock()
+_delivery_service = None
+
+def delivery_service(settings,admin):
+    global _delivery_service
+    from pult.core.enrichment_queue import Service,authority
+    path=Path(getattr(settings,'path',None) or os.environ.get('HARD_PULT_SETTINGS') or Path(__file__).resolve().parents[1]/'_local/backend-settings.json').parent/'enrichment'
+    if _delivery_service is None or _delivery_service.store.directory!=path:
+        _delivery_service=Service(path,lambda:authority(settings),admin)
+    return _delivery_service
+
+def delivery_guard(settings,admin):
+    delivery_service(settings,admin).require_complete()
 def _empty_state() -> dict:
     return {
     "col_path": "", "col_analysis": None,
     "book": None, "preview": None,
-    "enr_fields": None, "enr_matched": [], "enr_check": None, "enr_decisions": {},
-    "exp_data": None, "exp_request": None, "last_receipt": None,
+    "enr_fields": None, "enr_matched": [], "enr_check": None, "enr_decisions": {},"enr_reconcile":None,
+    "exp_data": None, "exp_request": None, "last_receipt": None, "enr_replaces": None,
     }
 
 
@@ -167,15 +183,16 @@ def imp_selection(body, *, settings, **_):
     settings.save()
     S["preview"] = None
     return {"selected": sorted(sel),
-            "button": ri.preview_button_text(book, sel, bool(body.get("full")))}
+            "button": ri.preview_button_text(book, sel, True)}
 
 
 def _signature(book, sel, full, restore, comments, soft_edits=False, excluded=()):
     return (book.get("file_sha256"), book.get("import_profile", "hard"),
-            tuple(sorted(sel)), bool(full), bool(restore), bool(comments), bool(soft_edits),tuple(sorted(set(excluded))))
+            tuple(sorted(sel)), True, True, bool(comments), True,tuple(sorted(set(excluded))))
 
 
-def imp_preview(body, *, admin, start_job, **_):
+def imp_preview(body, *, admin, start_job, settings, **_):
+    delivery_guard(settings,admin)
     if not LIMITED_TEST_MASTER_IMPORT_UI_ENABLED:
         raise RuntimeError(LIMITED_TEST_MASTER_IMPORT_DISABLED_MESSAGE)
     book = S["book"]
@@ -184,13 +201,22 @@ def imp_preview(body, *, admin, start_job, **_):
     picked = sorted(set(body.get("selected") or []))
     if not picked:
         raise RuntimeError("Отметь хотя бы одного сотрудника")
-    full, restore, comments = bool(body.get("full")), bool(body.get("restore_manual")), bool(body.get("replace_comments"))
-    soft_edits = bool(body.get("soft_edits"))
+    # Mandatory import policy, including requests from older saved UI state.
+    full, restore, comments = True, True, bool(body.get("replace_comments"))
+    soft_edits = True
     excluded=body.get('exclude_contracts') or []
     filtered,excluded_rows=ri.exclude_contracts(book,excluded)
     sig = _signature(book, picked, full, restore, comments, soft_edits,excluded)
 
     def work(say):
+        nonlocal book,filtered,excluded_rows
+        if enrich._sha256_file(Path(book['path']))!=book['file_sha256']:
+            profile=book.get('import_profile','hard');fresh=ri.read_registry(book['path'])
+            stats=admin('GET','/admin/stats')
+            ri.select_profile(fresh,profile,stats.get('employees'),stats.get('soft_employees'))
+            fresh['_selected']=picked;S['book']=book=fresh
+            say('Общий реестр изменился; прочитана последняя версия перед предпросмотром.')
+        filtered,excluded_rows=ri.exclude_contracts(book,excluded)
         say(f"Проверяю импорт {Path(book['path']).name}: {len(picked)} сотр…")
         prepared, proof_path = ri.prepare_import(filtered, picked, full_registry=full,
                                                  force_test_subset=restore)
@@ -205,7 +231,8 @@ def imp_preview(body, *, admin, start_job, **_):
         if isinstance(expected, str):
             S["preview"] = None
             return {"error": expected}
-        S["preview"] = {"body": {**pbody, **expected}, "meta": prepared, "sig": sig, "proof": proof_path}
+        current_sig=_signature(book,picked,full,restore,comments,soft_edits,excluded)
+        S["preview"] = {"body": {**pbody, **expected}, "meta": prepared, "sig": current_sig, "proof": proof_path}
         notes = ri.import_notes(d)
         if excluded_rows:notes.insert(0,f'По выбранным номерам договоров исключено строк: {excluded_rows}.')
         notes.insert(0, ri.preview_headline(d, full))
@@ -214,7 +241,8 @@ def imp_preview(body, *, admin, start_job, **_):
     return {"job": start_job("preview", work)}
 
 
-def imp_apply(body, *, admin, start_job, **_):
+def imp_apply(body, *, admin, start_job, settings, **_):
+    delivery_guard(settings,admin)
     pv = S["preview"]
     book = S["book"] or {}
     sig = _signature(book, body.get("selected") or [], body.get("full"), body.get("restore_manual"),
@@ -224,6 +252,10 @@ def imp_apply(body, *, admin, start_job, **_):
         raise RuntimeError("Сначала сделай свежий предпросмотр импорта")
 
     def work(say):
+        delivery_guard(settings,admin)
+        if enrich._sha256_file(Path(book['path']))!=book['file_sha256']:
+            S['preview']=None
+            raise RuntimeError('Общий реестр изменился после предпросмотра. Сделайте новый предпросмотр; импорт не отправлен.')
         say("Применяю проверенный импорт…")
         meta = pv["meta"]
         registered = None
@@ -233,8 +265,45 @@ def imp_apply(body, *, admin, start_job, **_):
                                timeout=60)
         except Exception:  # noqa: BLE001 — регистратор закрыт: подскажем команду
             registered = None
-        d = xs.post_import(admin, "/admin/import.json", pv["body"],
-                           sheet=_xc.WORKBOOK_SHEET_NAME, timeout=180, log=say)
+        if enrich._sha256_file(Path(book['path']))!=book['file_sha256']:
+            S['preview']=None
+            raise RuntimeError('Общий реестр изменился до отправки. Сделайте новый предпросмотр; импорт не отправлен.')
+        outcome_error = None
+        try:
+            d = xs.post_import(admin, "/admin/import.json", {**pv["body"], "background_apply": True},
+                               sheet=_xc.WORKBOOK_SHEET_NAME, timeout=300, log=say)
+        except (RuntimeError, OSError) as error:
+            if isinstance(error, AccessRevoked):
+                raise
+            say("Ответ на применение прервался. Проверяю квитанцию сервера…")
+            outcome_error = error
+            d = {"status": "running"}
+        if d.get("status") == "running":
+            if d.get("proof_digest", meta["proof_digest"]) != meta["proof_digest"]:
+                raise xs.ImportOutcomeUnknown("Сервер ответил номером другой квитанции.")
+            started = time.monotonic()
+            failures = 0
+            say("Сервер обрабатывает импорт. Жду подтверждение записи.")
+            while time.monotonic() - started < 1800:
+                try:
+                    receipt = admin("GET", "/admin/import/status.json?proof_digest=" + meta["proof_digest"], timeout=10)
+                except AccessRevoked:
+                    raise
+                except (RuntimeError, OSError):
+                    receipt = {}
+                if receipt.get("status") in {"consumed", "rejected"} and isinstance(receipt.get("result"), dict):
+                    d = receipt["result"]
+                    if receipt["status"] == "consumed":
+                        say("Применение подтверждено квитанцией сервера.")
+                    break
+                failures = 0 if receipt.get("status") == "running" else failures + 1
+                if failures >= 4:
+                    raise xs.ImportOutcomeUnknown(
+                        "Квитанция применения пока не получена. Сохранён предпросмотр этого импорта."
+                    ) from outcome_error
+                time.sleep(2)
+            else:
+                raise xs.ImportOutcomeUnknown("Сервер ещё выполняет импорт. Предпросмотр сохранён.")
         if isinstance(d, dict) and d.get("error"):
             d = {**d, "_proof_digest": meta["proof_digest"], "_source_kind": meta["source_kind"],
                  "_registered": bool(registered and registered.get("ok"))}
@@ -256,36 +325,58 @@ def _base(settings) -> str:
     return str(settings.get("scatterBase") or "")
 
 
-def enr_state(body, *, settings, **_):
+def enr_state(body, *, settings, admin, **_):
     base = _base(settings)
     since, until = en.suggest_window(en.receipt_dir(base)) if base else ("", "")
     return {"base": base, "since": since, "until": until,
             "writes": LIMITED_TEST_ENRICH_WRITES_ENABLED,
             "whole_title": en.WHOLE_HISTORY_TITLE, "whole_text": en.WHOLE_HISTORY_TEXT,
             "decision_hint": en.DECISION_HINT, "decision_labels": en.DECISION_LABELS,
-            "conflict_columns": en.CONFLICT_COLUMNS}
+            "conflict_columns": en.CONFLICT_COLUMNS,
+            "operation":delivery_service(settings,admin).view()}
 
 
-def enr_base(body, *, settings, **_):
-    settings["scatterBase"] = str(body.get("path") or "")
-    settings.save()
-    return enr_state({}, settings=settings)
+def enr_base(body, *, settings, admin, **_):
+    delivery_guard(settings,admin)
+    selected = str(body.get("path") or "")
+    if selected != _base(settings):
+        previous = settings.get("scatterBase")
+        settings["scatterBase"] = selected
+        if not settings.save():
+            if previous is None:
+                settings.pop("scatterBase", None)
+            else:
+                settings["scatterBase"] = previous
+            raise RuntimeError("Не удалось сохранить папку в настройках Аналитика")
+        with _lock:
+            S.update(enr_fields=None, enr_matched=[], enr_check=None, enr_decisions={},
+                     enr_reconcile=None, last_receipt=None, enr_replaces=None)
+    return enr_state({}, settings=settings,admin=admin)
 
 
 def enr_preview(body, *, admin, start_job, settings, **_):
+    operation = delivery_service(settings, admin).view()
+    replaces = operation['id'] if operation and operation['restart_allowed'] else None
     base = _base(settings)
     if not base:
         raise RuntimeError("Сначала выбери папку с республиками")
 
     def work(say):
-        say("Проверяю: данные сервера + папки сотрудников…")
+        say("Получаю данные сервера…")
         d = admin("GET", "/admin/export.json", timeout=120)
         enrich.validate_server_export(d)
+        say("Группирую результаты по сотрудникам…")
         by_emp = enrich.split_by_employee(d["rows"])
+        say("Ищу папки сотрудников…")
         fmap = en.folder_map(base)
-        matched, nofolder, nofile = en.match_employees(by_emp, fmap)
-        S["enr_fields"], S["enr_matched"], S["enr_check"] = d["fields"], matched, None
-        return {"pairs": en.preview_pairs(by_emp, matched),
+        matched, nofolder, nofile = en.match_employees(by_emp, fmap,log=say)
+        say("Подготавливаю итог подбора папок и книг…")
+        with _lock:
+            if _base(settings) != base:
+                raise RuntimeError("Выбрана другая папка. Проверьте соответствия для неё.")
+            S["enr_fields"], S["enr_matched"], S["enr_check"] = d["fields"], matched, None
+            S["enr_replaces"] = replaces
+        return {"pairs": en.preview_pairs(by_emp, matched), "replaces": replaces,
                 "warning": en.preview_warning(by_emp, matched, nofolder, nofile),
                 "matched": [{"key": m["key"], "employee": m["employee"], "profile": m["profile"], "note": en.pick_note(m)}
                             for m in matched]}
@@ -308,20 +399,33 @@ def _conf(c: list[dict]) -> list[dict]:
              "row": en.conflict_row(x)} for x in c]
 
 
-def enr_check(body, *, admin, start_job, **_):
+def enr_check(body, *, admin, start_job, settings=None, **_):
     picked = _picked(body.get("keys"))
     if not picked:
         raise RuntimeError("Никто не выбран")
     since, until = str(body.get("since") or ""), str(body.get("until") or "")
 
     def work(say):
+        jobs = en.build_jobs(picked)
+        say("Загружаю журнал доставки…")
         ledger = _ledger(admin, [m["employee"] for m in picked])
         kwargs = en.preview_kwargs(since=since, until=until, ledger=ledger)
-        results = enrich.preview_many(en.build_jobs(picked), S["enr_fields"], say, **kwargs)
+        results = enrich.preview_many(jobs, S["enr_fields"], say, **kwargs)
+        say("Собираю найденные расхождения…")
         conflicts, office = en.collect_conflicts(results)
+        remembered = []
+        if settings is not None and (conflicts or office):
+            say(f"Сверяю прежние решения для {len(conflicts) + len(office)} расхождений…")
+            remembered = delivery_service(settings, admin).remembered_choices(jobs, conflicts + office)
+        say("Подготавливаю список решений и итог проверки…")
+        remembered_keys={en.conflict_key(row) for row in remembered}
+        visible_conflicts=[row for row in conflicts if en.conflict_key(row) not in remembered_keys]
+        visible_office=[row for row in office if en.conflict_key(row) not in remembered_keys]
         S["enr_check"] = {"keys": sorted(m["key"] for m in picked), "since": since, "until": until,
-                          "conflict_count":len(conflicts)+len(office)}
-        return {"lines": en.preview_lines(results), "conflicts": _conf(conflicts), "office": _conf(office)}
+                          "conflict_count":len(conflicts)+len(office),"conflicts":conflicts+office,"remembered":remembered}
+        lines=en.preview_lines(results,accepted=remembered)
+        if remembered:lines.append(f'Сохранён прежний выбор «оставить в книге»: {len(remembered)}. Значения и источник совпадают с принятой проверкой.')
+        return {"lines": lines, "conflicts": _conf(visible_conflicts), "office": _conf(visible_office),"remembered":len(remembered)}
     return {"job": start_job("enr_check", work)}
 
 
@@ -342,7 +446,20 @@ def _decisions(body, picked, since, until) -> dict:
     pv = S["enr_check"]
     if not pv or pv["keys"] != sorted(m["key"] for m in picked) or (pv["since"], pv["until"]) != (since, until):
         return {}
-    return {en.conflict_key(d): str(d["decision"]) for d in body.get("decisions") or []}
+    allowed={en.conflict_key(row) for row in pv.get('conflicts',[])}
+    choices={en.conflict_key(row):'file' for row in pv.get('remembered',[])}
+    for row in body.get('decisions') or []:
+        key=en.conflict_key(row);value=str(row.get('decision') or '')
+        if key not in allowed or value not in ('file','server'):
+            raise ValueError('Решение не относится к текущей проверке книги')
+        choices[key]=value
+    pairs={}
+    for key,value in choices.items():
+        if key[-1] in ('promise_date','forecast_sum'):
+            pairs.setdefault(key[:-1],set()).add(value)
+    if any(len(values)>1 for values in pairs.values()):
+        raise ValueError('Сумма и дата обещания должны иметь одно решение')
+    return choices
 
 
 def enr_apply(body, *, admin, start_job, settings, **_):
@@ -353,29 +470,55 @@ def enr_apply(body, *, admin, start_job, settings, **_):
         raise RuntimeError("Никто не выбран")
     since, until = str(body.get("since") or ""), str(body.get("until") or "")
     decisions = _decisions(body, picked, since, until)
-    base = _base(settings)
-
-    def on_delivered(payload: dict):
-        return admin("POST", "/admin/enrichment/ledger.json", payload, timeout=120)
+    checked=S['enr_check']
+    if not checked or checked['keys']!=sorted(m['key'] for m in picked) or (checked['since'],checked['until'])!=(since,until):
+        raise RuntimeError('Сначала проверьте конфликты для выбранных книг и дат')
+    if any(en.conflict_key(row) not in decisions for row in checked.get('conflicts',[])):
+        raise ValueError('Выберите значения для всех расхождений, включая правки офиса, до начала записи')
+    approved=[]
+    for row in checked.get('conflicts',[]):
+        key=en.conflict_key(row)
+        if key in decisions:approved.append({**row,'decision':decisions[key]})
+    service = delivery_service(settings, admin)
+    replaces = S['enr_replaces']
+    prepared_run=None
+    fields=S['enr_fields'];jobs=en.build_jobs(picked)
+    def prepare(run_id,profile,fingerprint):
+        nonlocal prepared_run
+        prepared_run = service.prepare(run_id, jobs, fields, since, until, approved, fingerprint, replaces=replaces)
 
     def work(say):
-        ledger = _ledger(admin, [m["employee"] for m in picked])
-        kwargs = en.enrich_many_kwargs(since=since, until=until, backup_root=en.backup_root(base),
-                                       receipt_dir=en.receipt_dir(base), ledger=ledger,
-                                       on_delivered=on_delivered, server_authoritative=False,
-                                       decisions=decisions)
-        # Книга едет на шару только проверенной: Excel работает с локальной копией
-        # (опыт 30.09–01.10.2026: те же книги, в 2–6 раз быстрее, занятую или
-        # изменённую за время прогона книгу не трогает). Переключателя нет.
-        results = enrich.enrich_many(en.build_jobs(picked), S["enr_fields"], say,
-                                     engine="local", **kwargs)
-        S["last_receipt"] = next((r.get("receipt") for r in results if r.get("receipt")), None)
+        result=service.process(prepared_run,say)
         S["enr_check"] = None
-        conflicts, office = en.collect_conflicts(results)
-        text, err = en.toast_text(results)
-        return {"lines": en.report_lines(results), "ledger_error": en.ledger_error(results),
-                "conflicts": _conf(conflicts), "office": _conf(office), "toast": text, "toast_err": err}
-    return {"job": start_job("enr_apply", work)}
+        S['preview']=None
+        S['enr_replaces'] = None
+        summary = f'Завершено книг: {result["completed"]} из {result["total"]}. Записано ячеек: {result["cells"]}.'
+        status = (f'Осталось книг: {result["remaining"]}. Причины и действия — в подробностях очереди.'
+                  if result['remaining'] else 'Перенос завершён.')
+        return {**result, 'lines': [summary, status], 'conflicts': [], 'office': [], 'ledger_error': ''}
+    return {"job": start_job("enr_apply", work,before_start=prepare)}
+
+def enr_operation(body,*,settings,admin,**_):
+    return delivery_service(settings,admin).view()
+
+def enr_retry(body,*,settings,admin,**_):
+    return delivery_service(settings,admin).retry(str(body.get('id') or ''),body.get('decisions') or (),body.get('review_token'))
+
+def enr_reconcile_preview(body,*,settings,admin,start_job,**_):
+    def work(say):
+        say('Сверяю отсутствующие строки с текущим общим реестром…')
+        book=ri.read_registry(str(body.get('path') or ''))
+        plan=delivery_service(settings,admin).preview_reconciliation(book)
+        S['enr_reconcile']=plan
+        return plan
+    return {'job':start_job('enr_reconcile',work)}
+
+def enr_reconcile_apply(body,*,settings,admin,**_):
+    plan=S.get('enr_reconcile')
+    if not plan or body.get('token')!=plan['token']:raise ValueError('Сначала выполните свежую сверку с общим реестром')
+    result=delivery_service(settings,admin).apply_reconciliation(plan)
+    S['enr_reconcile']=None;S['preview']=None
+    return result
 
 
 def enr_replay(body, *, admin, start_job, settings, **_):
@@ -455,6 +598,8 @@ _ROUTES = {
     "/reg/preview": imp_preview, "/reg/apply": imp_apply, "/reg/state": imp_state,
     "/enr/state": enr_state, "/enr/base": enr_base, "/enr/preview": enr_preview,
     "/enr/check": enr_check, "/enr/confirm": enr_confirm, "/enr/apply": enr_apply,
+    "/enr/operation":enr_operation,"/enr/retry":enr_retry,
+    "/enr/reconcile-preview":enr_reconcile_preview,"/enr/reconcile-apply":enr_reconcile_apply,
     "/enr/replay": enr_replay, "/exp/employees": exp_employees, "/exp/prepare": exp_prepare,
     "/exp/save": exp_save, "/exp/markers": exp_markers, "/reg/period": period,
     "/reg/recalled": recalled,

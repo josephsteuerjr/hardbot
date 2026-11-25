@@ -23,6 +23,10 @@ import copy
 import hashlib
 import secrets
 import sys
+if '--crm-device-fingerprint' in sys.argv:
+    from pult.core.devices import device_fingerprint
+    print(device_fingerprint(), flush=True)
+    raise SystemExit(0)
 import threading
 import time
 import traceback
@@ -36,6 +40,13 @@ APP_DIR = Path(__file__).resolve().parent
 if str(APP_DIR.parent) not in sys.path:
     sys.path.insert(0, str(APP_DIR.parent))
 
+# The independent CRM candidate must never load an installed Analyst profile.
+if '--crm-pilot' in sys.argv:
+    sys.path.insert(0,str(APP_DIR.parent/'server'))
+    from crm.pilot_server import main as _crm_pilot_main
+    _crm_pilot_main()
+    raise SystemExit(0)
+
 from pult.core import api as api_client  # noqa: E402
 from pult.core import devices as dv  # noqa: E402
 from pult.core.settings import Settings, active_profile, load_settings  # noqa: E402
@@ -46,13 +57,16 @@ _settings = load_settings()
 _jobs: dict[str, dict] = {}
 _journal = None
 _access_busy = False
+_background_busy = False
+_runtime_stop = None
+_runtime_url = None
 
 
 @contextmanager
 def account_operation():
     global _access_busy
     with _lock:
-        if _access_busy or _mail_busy.locked() or any(j.get('state') == 'running' for j in _jobs.values()):
+        if _access_busy or _background_busy or _mail_busy.locked() or any(j.get('state') == 'running' for j in _jobs.values()):
             raise RuntimeError('Дождитесь завершения текущей операции перед сменой доступа.')
         _access_busy = True
     try:
@@ -141,6 +155,11 @@ def _profile() -> dict:
     return active_profile(_settings)
 
 
+def _network_profile() -> dict:
+    profile = _profile()
+    return {**profile, 'url': _runtime_url} if _runtime_url else profile
+
+
 def _persist_settings() -> None:
     if not _settings.save():
         raise RuntimeError("Настройки не сохранены на диске. Не закрывайте пульт; проверьте место, права и доступность шифрования, затем сохраните настройки в «Подключении».")
@@ -177,17 +196,22 @@ def import_settings(path: str) -> dict:
 
 
 def admin(method: str, path: str, body=None, timeout: float = 30, key: str = ""):
-    prof = _profile()
+    prof = _network_profile()
     token = "" if key else prof.get("device_token", "")
     if not prof.get("url"):
         raise RuntimeError(api_client.NO_URL_TEXT)
+    # Retired control copies must never acknowledge deliveries to the working journal.
+    if path.split("?", 1)[0] == "/admin/enrichment/ledger.json":
+        base = _settings.get("scatterBase")
+        if base and (Path(base) / ".rimborso-enrichment-control").is_file():
+            raise ValueError("Выбрана папка завершённой проверки. Выберите рабочую папку личных книг.")
     try:
         return api_client.request(prof["url"], method, path, body, key=key, device_token=token,
                                   timeout=timeout)
     except api_client.AccessRevoked:
         with _lock:
-            if prof.get('device_token') == token:
-                prof['device_token'] = ''
+            if _profile().get('device_token') == token:
+                _profile()['device_token'] = ''
                 _persist_settings()
         raise
 
@@ -276,7 +300,7 @@ class JobBusyError(RuntimeError):
     """Admission refused before a durable job or worker was created."""
 
 
-def start_job(kind: str, fn, *, request_id=None, fingerprint=None) -> str:
+def start_job(kind: str, fn, *, request_id=None, fingerprint=None, before_start=None) -> str:
     jid = str(request_id or uuid.uuid4().hex)
     if not 8 <= len(jid) <= 128 or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in jid):
         raise ValueError("request_id")
@@ -288,8 +312,9 @@ def start_job(kind: str, fn, *, request_id=None, fingerprint=None) -> str:
         previous = job_journal().load(jid, profile, fingerprint)
         if previous:
             return jid
-        if _access_busy or any(j.get("state") == "running" for j in _jobs.values()):
+        if _access_busy or _background_busy or any(j.get("state") == "running" for j in _jobs.values()):
             raise JobBusyError("Дождитесь завершения текущей операции.")
+        if before_start:before_start(jid,profile,fingerprint)
         job_journal().save(job, profile, fingerprint)
         _jobs[jid] = job
 
@@ -300,11 +325,12 @@ def start_job(kind: str, fn, *, request_id=None, fingerprint=None) -> str:
     def run():
         try:
             job["result"] = fn(say)
-            job["state"] = "done"
+            job["state"] = completion_state(job['result']) if kind=='enr_apply' else 'done'
         except Exception as exc:  # noqa: BLE001
-            job["state"] = "uncertain" if kind == "mail" else "failed"
+            from pult.core.exchange_state import ImportOutcomeUnknown
+            job["state"] = "uncertain" if kind == "mail" or isinstance(exc, ImportOutcomeUnknown) else "failed"
             job["error"] = str(exc) or type(exc).__name__
-            job["log"].append(traceback.format_exc()[-1200:])
+            traceback.print_exc()
         finally:
             try:
                 job_journal().save(job, profile, fingerprint)
@@ -319,7 +345,64 @@ def job_state(jid: str) -> dict:
     job = job_journal().load(jid, job_profile())
     if not job:
         raise KeyError("нет такой задачи")
+    if job.get('kind')=='enr_apply' and job.get('state')!='done' and not _background_busy:
+        from pult import desk_registry
+        service=desk_registry.delivery_service(_settings,admin)
+        try:run=service.store.get(jid,service.owner())
+        except ValueError:run=None
+        if run:
+            result=service.view(run)
+            if result['state']=='done':
+                with job_journal().connect() as conn:meta=conn.execute('SELECT fingerprint FROM jobs WHERE id=?',(jid,)).fetchone()
+                job.update(state='done',result=result,error=None)
+                job_journal().save(job,job_profile(),meta[0])
     return {k: job[k] for k in ("id", "kind", "state", "log", "result", "error")}
+
+
+def completion_state(result):
+    status=(result or {}).get('run_state','done') if isinstance(result,dict) else 'done'
+    return 'attention' if status=='attention' else 'waiting' if status in ('waiting','paused') else 'done'
+
+
+def enrichment_tick():
+    """One serialized pass; the queue never depends on renderer polling."""
+    global _background_busy
+    from pult import desk_registry
+    service=desk_registry.delivery_service(_settings,admin)
+    run=service.current()
+    if not service.ready(run):return
+    with _lock:
+        if _access_busy or _background_busy or _mail_busy.locked() or any(j.get('state')=='running' for j in _jobs.values()):return
+        _background_busy=True
+    try:
+        journal=job_journal();profile=job_profile()
+        with journal.connect() as conn:
+            meta=conn.execute('SELECT profile,fingerprint FROM jobs WHERE id=?',(run['id'],)).fetchone()
+        if not meta:
+            recovered=dict(id=run['id'],kind='enr_apply',state='waiting',log=['Возобновление сохранённого переноса'],result=None,error=None,started=run['created'])
+            journal.save(recovered,profile,run.get('fingerprint','enrichment'));meta=(profile,run.get('fingerprint','enrichment'))
+        if meta[0]!=profile:return
+        try:result=service.process(run)
+        except Exception as exc:result=service.failure('Автоматический перенос остановлен: '+str(exc))
+        job=journal.load(run['id'],profile)
+        job.update(state=completion_state(result),result=result,error=None)
+        job['log'].append(result['toast'])
+        job['log']=job['log'][-300:]
+        journal.save(job,profile,meta[1])
+        with _lock:_jobs[run['id']]=job
+        desk_registry.S['preview']=None
+    finally:
+        with _lock:_background_busy=False
+
+
+def enrichment_loop():
+    while True:
+        try:enrichment_tick()
+        except Exception:
+            # A queue/snapshot failure must remain visibly unfinished. It is
+            # never changed to a completed durable job by a daemon exception.
+            pass
+        time.sleep(2)
 
 
 # --- рассылка книг почтой (Outlook через COM) ---------------------------------------------
@@ -376,7 +459,7 @@ def mail_send(book: str, *, manual: bool, display: bool = False, say=print, oper
         name = mailer.file_name(book, cfg, today)
         try:
             say(f"Беру книгу «{mailer.BOOKS[book]}» с сервера…")
-            prof = _profile()
+            prof = _network_profile()
             path = "/admin/stats_book.xlsx?" + urllib.parse.urlencode(mailer.query(book, cfg, today))
             blob = api_client.download(prof.get("url", ""), path,
                                        device_token=prof.get("device_token", ""))
@@ -485,8 +568,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def route(path: str, body: dict):
     fingerprint = hashlib.sha256(json.dumps([path, body], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-    def durable_start(kind, fn):
-        return start_job(kind, fn, request_id=body.get("request_id"), fingerprint=fingerprint)
+    def durable_start(kind, fn, *, before_start=None):
+        return start_job(kind, fn, request_id=body.get("request_id"), fingerprint=fingerprint,before_start=before_start)
     if path == "/settings/import":
         return import_settings(str(body.get("path") or ""))
     if path == '/account/root_probe':
@@ -538,8 +621,12 @@ def route(path: str, body: dict):
     if path == '/account/password':
         return api_client.request(_profile().get('url',''),'POST','/api/account/password',{
             'username':str(body.get('username') or ''),'current':str(body.get('current') or ''),'new':str(body.get('new') or '')})
-    if path == "/busy":
-        return {"busy": _access_busy or _mail_busy.locked() or any(j.get("state") == "running" for j in _jobs.values())}
+    if path in {"/busy","/runtime/stop"}:
+        busy=_access_busy or _background_busy or _mail_busy.locked() or any(j.get("state") == "running" for j in _jobs.values())
+        if path=='/runtime/stop':
+            if _runtime_stop is None or busy:raise ValueError('Исполнитель занят. Сначала завершите текущие задания.')
+            threading.Timer(0.2,_runtime_stop).start()
+        return {"busy":busy}
     if path == "/state":
         return state()
     if path == "/admin":
@@ -558,7 +645,7 @@ def route(path: str, body: dict):
                 '.jpe':'image/jpeg'}.get(suffix)
         if not mime:
             raise ValueError('Недопустимый формат снимка')
-        prof = _profile()
+        prof = _network_profile()
         raw = api_client.download(prof.get('url', ''), '/admin/control/'+kind+'?'+
                                   urllib.parse.urlencode({'file':file}),
                                   device_token=prof.get('device_token', ''), timeout=90)
@@ -593,9 +680,41 @@ def route(path: str, body: dict):
 
 
 def main() -> None:
+    global _runtime_stop, _runtime_url
+    runtime_lease=None
+    if '--crm-analyst' in sys.argv:
+        import os
+        if not os.environ.get('HARD_PULT_SETTINGS') or os.environ.get('HARD_PULT_PROTECT_TOKENS') != '1':
+            raise RuntimeError('The CRM administrator requires a protected independent profile')
+        from pult.core.runtime_lock import acquire
+        runtime_lease=acquire(Path(os.environ['HARD_PULT_SETTINGS']).with_name('runtime.lock'))
+        binding=json.loads(sys.stdin.readline(16384))
+        actor = binding.get('actor')
+        if type(actor) is not int or actor == 0:
+            raise RuntimeError('Не подтверждена личность Аналитика')
+        if _settings.get('crm_actor') not in (None, actor):
+            raise RuntimeError('Administrator profile belongs to another identity')
+        if not isinstance(binding.get('token'),str) or not binding['token']:
+            raise RuntimeError('Missing administrator credential')
+        api_client.require_https(binding['url'])
+        if binding.get('existing_profile') is True:
+            profile = _profile()
+            if (profile.get('url') != binding.get('profile_url')
+                    or profile.get('device_token') != binding['token']):
+                raise RuntimeError('Сохранённый вход Аналитика изменился')
+            _runtime_url = binding['url']
+            # Keep active profile name, token, jobs and delivery-ledger identity.
+            # Do not save or re-encrypt the legacy file just because CRM started.
+        else:
+            _settings['crm_actor']=actor
+            _settings['active']='CRM'
+            _settings['profiles']={'CRM':{'url':binding['url'],'device_token':binding['token']}}
+            _persist_settings()
     srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    if runtime_lease is not None:_runtime_stop=srv.shutdown
     print(f"HARD-BACKEND {srv.server_address[1]} {SECRET}", flush=True)
     threading.Thread(target=_mail_loop, daemon=True, name="mail").start()
+    threading.Thread(target=enrichment_loop,daemon=True,name='enrichment').start()
     srv.serve_forever()
 
 

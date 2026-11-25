@@ -1,6 +1,6 @@
 {
   "schema": "hardbot.data-exchange-contract.v1",
-  "version": 10,
+  "version": 11,
   "soft": {
     "provenance_marker": "_bot_call_completed",
     "event_day": "_call_day",
@@ -94,7 +94,7 @@
       ]
     },
     "unknown_headers_policy": "block",
-    "duplicate_headers_policy": "block",
+    "duplicate_headers_policy": "block_except_contextual_manual_dates",
     "export_schema_sha256": "e5e77c93d25dc46b8bd13e2a88a4374141e714ba5ded840ef169422fbb62ebc4",
     "contract_key": "contract_id",
     "responsible_key": "responsible",
@@ -354,5 +354,22 @@
       "published_master",
       "test_subset"
     ]
+  },
+  "edit_tracking": {
+    "schema": "hardbot.result-edit-tracking.v1",
+    "caption": "Дата ручной правки",
+    "excel_keys": [
+      "excel_visit_edited_on",
+      "excel_call_edited_on"
+    ],
+    "app_keys": [
+      "app_visit_edited_at",
+      "app_call_edited_at"
+    ],
+    "excel_format": "dd.mm.yyyy",
+    "legacy_unknown": "empty",
+    "same_day_conflicts": "require_explicit_decision",
+    "automatic_writers": "disable_events_and_preserve_manual_dates",
+    "import": "nonblank_excel_dates_only_never_app_dates"
   }
 }

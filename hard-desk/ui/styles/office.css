@@ -1,4 +1,37 @@
 /* Employee CRM uses the existing paper, terra, type and motion tokens. */
+/* Candidate: guidance occupies the background area beside the call form. */
+#soft-call-guide { display:none; min-height:0; flex:1; flex-direction:column; }
+#app.with-panel.with-call-script #soft-call-guide { display:flex; }
+#app.with-panel.with-call-script #view, #app.with-panel.with-call-script #head { display:none; }
+.script-pane-head { padding:24px 28px 16px; display:flex; align-items:start; gap:16px; border-bottom:1px solid var(--line); }
+.script-pane-head > div { flex:1; min-width:0; }
+.script-pane-head h2 { margin:0; font:400 29px/1.2 var(--hand); }
+.script-pane-head p { margin:8px 0 0; font-size:11px; }
+.script-pane-body { overflow:auto; min-height:0; flex:1; padding:22px 28px; scrollbar-width:thin; }
+.script-pane-foot { display:flex; gap:12px; align-items:center; justify-content:space-between; padding:12px 28px; border-top:1px solid var(--line); font-size:10px; }
+.script-name { font:600 19px/1.4 var(--sans); margin:0 0 20px; overflow-wrap:anywhere; }
+.script-step { border-top:1px solid var(--line); padding:15px 0; }
+.script-step summary { display:flex; gap:12px; align-items:center; cursor:pointer; font-weight:600; list-style:none; font-size:14px; }
+.script-number { display:grid; place-items:center; flex-shrink:0; width:27px; height:27px; border:1px solid var(--terra); border-radius:50%; color:var(--terra); font-size:12px; }
+.script-text { white-space:pre-wrap; overflow-wrap:anywhere; font-size:14px; line-height:1.7; padding:10px 0 0 39px; }
+.script-editor-grid { display:grid; grid-template-columns:minmax(280px,1fr) minmax(320px,1fr); gap:32px; align-items:start; }
+.script-edit label { display:block; margin:10px 0; font-size:12px; color:var(--ink-2); }
+.script-edit .input { display:block; margin-top:7px; width:100%; }
+.script-edit-step { border-top:1px solid var(--line); padding-top:14px; margin-top:20px; }
+.script-preview { padding:20px 24px; background:var(--surface); border:1px solid var(--line); border-radius:8px; }
+.script-preview h3 { margin:0; font-size:13px; }
+.script-status { margin-bottom:22px; display:flex; align-items:start; justify-content:space-between; gap:20px; }
+.script-status > details { max-width:45%; font-size:12px; }
+.script-status summary { cursor:pointer; color:var(--ink-3); }
+.script-status .sub { margin-top:5px; }
+.script-edit-actions { position:sticky; bottom:0; margin-top:24px; padding:14px 0 10px; border-top:1px solid var(--line); background:var(--paper); z-index:3; }
+.script-edit-actions .row,.script-edit-step > .row { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+.script-edit-actions .grow,.script-edit-step .grow { flex:1; }
+.script-edit-actions .hint { margin:8px 0 0; font-size:11px; }
+#app.with-call-script [data-open-call-script] { display:none; }
+.employee-card .call-form > .row { display:flex; flex-wrap:wrap; gap:8px; }
+@media(max-width:1150px) { .script-editor-grid { grid-template-columns:minmax(260px,1fr) minmax(280px,1fr); gap:20px; } }
+@media(max-width:900px) { .script-editor-grid { grid-template-columns:minmax(0,1fr); } .script-pane-head,.script-pane-body,.script-pane-foot { padding-inline:16px; } .script-text { padding-left:0; } }
 .employee-workspace .kpi.money b { white-space: normal; overflow-wrap: anywhere; font-size: 18px; line-height: 1.35; }
 .employee-workspace .kpi b { font-size: 25px; }
 .employee-workspace .kpi { padding: 10px 10px 10px 0; margin-right: 10px; }

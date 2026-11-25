@@ -132,7 +132,7 @@ async function load(root: HTMLElement) {
     <div class="bulk" id="bulk" style="margin-top:12px"></div>
     <input class="input" type="search" id="account-search" aria-label="Поиск профиля" placeholder="ФИО, логин, офис или устройство" value="${esc(accountQuery)}">
     <details id="account-all" ${accountExpanded||accountQuery?'open':''}><summary>Все профили (${all.length})</summary><div id="tbl"></div></details>
-    <div id="acc"></div>`;
+    <div id="acc" tabindex="-1"></div>`;
   const cols: Col<Row>[] = [
     { key: "login", title: "Логин", value: (r) => r.a.username || "", html: (r) => `<span class="who mono">${esc(r.a.username || "")}</span>` },
     { key: "emp", title: "ФИО", value: (r) => r.a.employee || "" },
@@ -174,8 +174,17 @@ export const accounts: Section = {
   title: "Профили и устройства",
   icon: "device",
   kicker: "Регистрация, подтверждения, пароли и отзыв устройств",
-  async render(root) {
+  async render(root, params) {
+    const username = typeof params.username === 'string' ? params.username : '';
+    if (username) {
+      selected = username;
+      accountQuery = username;
+      accountExpanded = true;
+    }
     root.innerHTML = '<div class="skeleton"></div>';
-    try { await load(root); } catch (e) { root.innerHTML = `<div class="notice err">${esc((e as Error).message)}</div>`; }
+    try {
+      await load(root);
+      if (username && selected === username) root.querySelector<HTMLElement>('#acc')?.focus();
+    } catch (e) { root.innerHTML = `<div class="notice err">${esc((e as Error).message)}</div>`; }
   },
 };

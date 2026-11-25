@@ -67,3 +67,18 @@ def test_failed_import_keeps_current_settings(backend, tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="сохранить"):
         backend.import_settings(str(source))
     assert dict(backend._settings) == previous
+
+
+def test_all_exports_use_working_api_and_trial_receipts_stay_local(backend, tmp_path, monkeypatch):
+    backend._settings["scatterBase"] = str(tmp_path)
+    monkeypatch.setattr(backend, "_network_profile", lambda: {"url": "https://example.invalid"})
+    sent = []
+    monkeypatch.setattr(backend.api_client, "request", lambda url, method, path, body, **kw: sent.append((method, path)))
+    export, ledger = "/admin/export.json", "/admin/enrichment/ledger.json"
+    backend.admin("GET", export)
+    backend.admin("POST", ledger, {"entries": []})
+    (tmp_path / ".rimborso-enrichment-control").write_text("postgresql-trial", encoding="ascii")
+    backend.admin("GET", export)
+    with pytest.raises(ValueError, match="рабочую папку"):
+        backend.admin("POST", ledger, {"entries": []})
+    assert sent == [("GET", export), ("POST", ledger), ("GET", export)]

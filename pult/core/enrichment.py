@@ -53,7 +53,7 @@ DECISION_LABELS = {DECISION_FILE: "оставить как в книге",
                    DECISION_SERVER: "записать сервер"}
 DECISION_DEFAULT = DECISION_FILE
 DECISION_HINT = ("По каждой строке выбери, что делать: оставить значение книги "
-                 "(сервер его запомнит и больше не будет спорить) или записать "
+                 "(программа запомнит выбор для этих значений и источника) или записать "
                  "значение сервера поверх (с журналом вытесненного). Кнопки "
                  "«везде…» ставят один ответ на все строки; потом нажми «Записать».")
 
@@ -76,13 +76,16 @@ def preview_kwargs(*, since: str, until: str, ledger: dict | None,
             "decisions": dict(decisions or {})}
 
 
-def preview_lines(results: list[dict]) -> list[str]:
+def preview_lines(results: list[dict], *, accepted=()) -> list[str]:
     """Итог проверки без записи: что будет дописано, что спорно."""
     ok = [r for r in results if "error" not in r]
     bad = [r for r in results if "error" in r]
     cells = sum(r.get("cells_written") or 0 for r in ok)
     conflicts, office = collect_conflicts(results)
-    resolved_file = sum(r.get("resolved_file") or 0 for r in ok)
+    accepted_keys={conflict_key(row) for row in accepted}
+    conflicts=[row for row in conflicts if conflict_key(row) not in accepted_keys]
+    office=[row for row in office if conflict_key(row) not in accepted_keys]
+    resolved_file = sum(r.get("resolved_file") or 0 for r in ok)+len(accepted_keys)
     resolved_server = sum(r.get("resolved_server") or 0 for r in ok)
     lines = [f"Проверено без записи: файлов {len(ok)} из {len(results)} · "
              f"будет дописано ячеек: {cells}"]
@@ -95,7 +98,13 @@ def preview_lines(results: list[dict]) -> list[str]:
         lines.append(f"Решено: оставить как в книге {resolved_file}, "
                      f"записать сервер {resolved_server}.")
     if office:
-        lines.append(f"Правок офиса после доставки: {len(office)} — не трогаются.")
+        lines.append(f"Изменений в книге после доставки: {len(office)} — выберите значения до записи.")
+    repairs=sum(len(r.get('header_repairs') or []) for r in ok)
+    if repairs:
+        lines.append(f'Будет восстановлено пустых заголовков номера КД: {repairs}; все договоры, клиенты и партнёры проверены.')
+    missing=sum(len(r.get('missing') or []) for r in ok)
+    if missing:
+        lines.append(f'В личных книгах не найдены строки: {missing}. Сверьте их с текущим общим реестром; прежние назначения автоматически не восстанавливаются.')
     lines.extend(comment_cleared_lines(ok))
     for r in results:
         if not r.get("busy"):
@@ -110,13 +119,21 @@ def preview_lines(results: list[dict]) -> list[str]:
 
 
 # --- подбор файлов ----------------------------------------------------------
-def personal_files(entries, emp) -> list[Path]:
+def personal_files(entries, emp, *, preferred=None) -> list[Path]:
     """ФИО.xlsb: посторонние, датированные и резервные книги не участвуют."""
     files: list[Path] = []
+    if preferred is None:
+        from .manual_config import PreferredBooks
+        preferred=PreferredBooks()
     for e in entries:
         folder = e["path"]
-        candidates = [p for p in folder.iterdir() if p.is_file() and p.suffix.casefold() == '.xlsb'
-                      and not p.name.startswith('~') and not razbros.is_backup_copy(p.name)]
+        chosen=preferred(folder/(folder.name+'.xlsb'))
+        if chosen.name!=folder.name+'.xlsb':
+            if not chosen.is_file():raise ValueError(f'Выбранная активная книга недоступна: {chosen}')
+            if chosen not in files:files.append(chosen)
+            continue
+        candidates = [p for p in folder.iterdir() if p.suffix.casefold() == '.xlsb'
+                      and not p.name.startswith('~') and not razbros.is_backup_copy(p.name) and p.is_file()]
         xs = personal_workbooks(candidates, emp)
         if not xs:
             xs = personal_workbooks(candidates, folder.name)
@@ -149,37 +166,52 @@ def workbook_profile(path) -> str:
     raise ValueError(f"Не удалось определить профиль книги по колонкам: {path}")
 
 
-def match_employees(by_emp, fmap) -> tuple[list[dict], list[str], list[str]]:
+def match_employees(by_emp, fmap, log=lambda message: None) -> tuple[list[dict], list[str], list[str]]:
     """Активные владельцы с доказанными визитами/звонками → подбор по профилю."""
     matched, nofolder, nofile = [], [], []
+    from concurrent.futures import ThreadPoolExecutor, Future
+    from threading import Lock
     profiles = {}
-    for key, e in sorted(by_emp.items(), key=lambda kv: kv[1]["employee"].lower()):
-        if not e["filled"]:
-            continue        # бот ничего не заполнял — обогащать нечего
+    profile_lock=Lock()
+    def detected_profile(path):
+        with profile_lock:
+            future=profiles.get(path)
+            creator=future is None
+            if creator:future=profiles[path]=Future()
+        if creator:
+            try:future.set_result(workbook_profile(path))
+            except Exception as exc:future.set_exception(exc)
+        return future.result()
+    from .manual_config import PreferredBooks
+    preferred=PreferredBooks()
+    active=sorted(((key,e) for key,e in by_emp.items() if e['filled']),key=lambda kv:kv[1]['employee'].lower())
+    def match(pair):
+        key,e=pair
         profile = e.get("profile", "hard")
         entries = fmap.get(enrich.norm_name(e["employee"]))
         if not entries:
-            nofolder.append(f"{e['employee']} ({e['filled']})")
-            continue
+            return 'nofolder',f"{e['employee']} ({e['filled']})"
         files = []
         try:
             for entry in entries:
-                for path in personal_files([entry], e["employee"]):
-                    if path not in profiles:
-                        profiles[path] = workbook_profile(path)
-                    detected = profiles[path]
+                for path in personal_files([entry], e["employee"],preferred=preferred):
+                    detected = detected_profile(path)
                     if detected == profile or detected == "both" and entry.get("kind", "hard") == profile:
                         files.append(path)
         except Exception as exc:  # нечитаемая/неоднозначная книга не блокирует остальных
-            nofile.append(f"{e['employee']}: {exc}")
-            continue
+            return 'nofile',f"{e['employee']}: {exc}"
         if not files:
-            nofile.append(f"{e['employee']} — нет .xlsb профиля {profile.upper()}")
-            continue
-        matched.append({"key": key, "employee": e["employee"],
+            return 'nofile',f"{e['employee']} — нет .xlsb профиля {profile.upper()}"
+        return 'matched',{"key": key, "employee": e["employee"],
                         "profile": profile,
                         "filled": e["filled"], "files": files,
-                        "rows": e["rows"]})
+                        "rows": e["rows"]}
+    # Independent read-only SMB operations overlap; at most four books are read
+    # at once. Ordered results keep selection and error reporting deterministic.
+    with ThreadPoolExecutor(max_workers=min(4,len(active) or 1)) as pool:
+        for number,((key,e),(kind,result)) in enumerate(zip(active,pool.map(match,active)),1):
+            log(f"[{number}/{len(active)}] Проверен подбор: {e['employee']} — {e.get('profile','hard').upper()}")
+            {'matched':matched,'nofolder':nofolder,'nofile':nofile}[kind].append(result)
     return matched, nofolder, nofile
 
 
@@ -257,7 +289,8 @@ def window_text(since: str, until: str) -> str:
     """Строка про окно для подтверждения. Без окна прогон переутверждает базу
     поверх всей истории визитов — об этом говорим прямо."""
     if since or until:
-        return f"Окно результатов: с {since or '—'} по {until or '—'}. Дата факта выезда или звонка."
+        return (f"Окно результатов: с {since or '—'} по {until or '—'}. Дата факта выезда или звонка. "
+                "Последний платёж переносится независимо от окна результатов.")
     return ("ОКНО НЕ ЗАДАНО: будут проверены выезды и звонки за ВСЮ историю. "
             "Правки книги защищены историей доставки; спорные ячейки "
             "останутся без изменений до решения конфликта.")

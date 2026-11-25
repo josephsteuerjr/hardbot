@@ -9,9 +9,12 @@ import { currentId, openPanel, refresh as refreshSection, setHead, type Section 
 import { DataTable } from "../kit/table";
 import { mountModeSwitchIfKit } from "../kit/modeswitch";
 import { receiptHtml, wireReceipt } from "./receipt";
+import { editDatesHtml } from "./edit-dates";
 import { paymentHtml, wirePayment } from "./payment";
 import { cardNavigation, employeeSections, lockCard, personListHtml, promiseText } from "./employee";
 import { accountSectionHtml, wireAccountSection } from "./misc";
+import { registryContracts } from "./registry-detail";
+import { showCallScript } from './call-script';
 
 const state = {
   persons: [] as any[],
@@ -146,7 +149,7 @@ export const softQueue: Section = {
 };
 
 /** Карточка софтника: телефоны, состояние звонка, журнал и форма «Звонок». */
-async function openSoftCard(rep: string, preserveDraft = false) {
+export async function openSoftCard(rep: string, preserveDraft = false) {
   if(document.querySelector('#panel-inner [data-saving="1"]')){toast("Дождитесь сохранения записи");return}
   const previous = document.querySelector<HTMLElement>('#panel-inner [data-soft-rep]');
   const draft = new Map<string, { value: string; checked: boolean }>();
@@ -169,6 +172,7 @@ async function openSoftCard(rep: string, preserveDraft = false) {
   const options = `<option value="">—</option>` + (state.dropdowns.soft_call_status || []).map(
     (o) => `<option value="${esc(o.value)}"${o.value === (s.status || "") ? " selected" : ""}>${esc(o.label)}</option>`).join("");
   panel.innerHTML = `
+    ${editDatesHtml(d)}
     <h2 class="employee-name" style="margin:0">${esc(d.client || "")}</h2>
     <div class="muted">${esc(d.address || "адреса в реестре нет")}</div>
     <div class="kpis employee-kpis"><div class="kpi accent money"><b>${esc(debtText(d))}</b><span>долг по валютам</span></div>
@@ -179,7 +183,7 @@ async function openSoftCard(rep: string, preserveDraft = false) {
         <div class="list-row"><div class="grow"><div class="nm mono">${esc(t)}</div>
           <div class="sub">контакт из реестра</div></div><button class="btn small" data-copy-phone="${index}">Копировать</button></div>`).join("") || '<div class="muted">телефона в основных колонках нет</div>'}
       </div>${d.extra_contact ? `<div class="muted" style="margin-top:8px">Дополнительные контакты и адреса из реестра</div><div style="white-space:pre-wrap">${esc(d.extra_contact)}</div>` : ''}${s.extra_phone ? `<div class="muted" style="margin-top:8px">Сохранённые дополнительные контакты</div><div style="white-space:pre-wrap">${esc(s.extra_phone)}</div>` : ''}</div>
-    <details style="margin-bottom:12px"><summary>Договоры (${n((d.contracts || []).length)})</summary>${(d.contracts || []).map((c: any) => `<div class="list-row"><span class="mono">${esc(c.contract_id)}</span><span>${esc(c.partner || '')}</span><span>${esc(money(c.total))} ${esc(c.unit || '')}</span></div>`).join('')}</details>
+    <details class="section"><summary>Договоры и структура долга</summary>${registryContracts(d)}</details>
     <details class="section"><summary>Оплаты из реестра</summary><div class="section-head"><h3 class="section-title">Оплаты из реестра</h3></div>
       ${(d.payments || []).map((p: any) => `<div class="list-row"><div class="grow"><div class="nm mono">${esc(p.contract_id)}</div><div class="sub">Текущие платежи: ${esc(p.current === '' || p.current == null ? '—' : Number(p.current).toLocaleString('ru-RU')+' '+(p.unit || ''))}<br>${esc(d.paymentTitles?.date || 'Дата последнего платежа')}: ${esc(p.date || '—')}</div></div><div><span class="muted">${esc(d.paymentTitles?.amount || 'Сумма последнего платежа')}</span><br>${esc(p.amount !== '' && p.amount != null ? money(p.amount) + ' ' + (p.unit || '') : '—')}</div></div>`).join('')}</details>
     <details class="section"><summary>Записать оплату вручную / внесённые оплаты</summary>${paymentHtml(d)}</details>
@@ -211,6 +215,11 @@ async function openSoftCard(rep: string, preserveDraft = false) {
           <div class="sub" style="white-space:pre-wrap">${esc(c.payload || "")}</div></div></div>`).join("")
         : '<div class="muted">звонков пока не было</div>'}</div></div>${receiptHtml(d, false)}`;
   cardNavigation(panel,rep,state.table,next=>void openSoftCard(next));
+  const scriptButton=document.createElement('button');
+  scriptButton.className='btn small';scriptButton.textContent='Скрипт звонка';scriptButton.dataset.openCallScript='';
+  panel.querySelector('.call-form')!.prepend(scriptButton);
+  scriptButton.addEventListener('click',()=>void showCallScript(panel,true));
+  void showCallScript(panel);
   panel.querySelectorAll<HTMLButtonElement>("[data-copy-phone]").forEach(button => button.addEventListener("click", async () => {
     await hard.copy(phones[Number(button.dataset.copyPhone)]);
     toast("Номер скопирован");

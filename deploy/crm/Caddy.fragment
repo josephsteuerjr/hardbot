@@ -1,0 +1,8 @@
+# Insert inside the existing hard.rimborso.ru site; retain all other namespaces.
+handle_path /crm-pilot/* {
+    reverse_proxy crm-runtime-api:8080
+}
+redir /mobile /mobile/ 308
+handle /mobile/* {
+    reverse_proxy crm-mobile-api:8081
+}

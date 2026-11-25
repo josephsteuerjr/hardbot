@@ -5,13 +5,15 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import { execFileSync } from 'node:child_process';
-import { products } from './products.mjs';
+import { stableProducts } from './products.mjs';
 const here = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const version = JSON.parse(readFileSync(join(here, 'package.json'))).version;
 // A valid signature on an old binary is still an old, unsafe release.
 // Refuse stale payloads before reading the private key or preparing assets.
 execFileSync(process.execPath, [join(here, 'tools/audit-installers.mjs')], {cwd:here,stdio:'inherit'});
-const key = readFileSync(resolve(here, '../_local/release-signing.private.pem'));
+const key = readFileSync(process.env.HARD_RELEASE_SIGNING_KEY
+  ? resolve(process.env.HARD_RELEASE_SIGNING_KEY)
+  : resolve(here, '../_local/release-signing.private.pem'));
 const pinned = JSON.parse(readFileSync(join(here, 'src/main/release-public-key.json'))).pem;
 if (createPublicKey(key).export({ type: 'spki', format: 'pem' }) !== pinned) throw new Error('Signing key differs from the key pinned in the app');
 const args=process.argv.slice(2);
@@ -19,7 +21,7 @@ if(args.length && (args.length!==2 || args[0]!=='--out')) throw new Error('Usage
 const output = args.length ? resolve(here,args[1]) : resolve(here, '../_local/redesign-2026-10-09/release', version);
 mkdirSync(output, { recursive: true });
 const assets = [];
-for (const product of Object.keys(products)) {
+for (const product of stableProducts) {
   const directory = join(here, 'installers', product), file = `${product}-${version}-setup.exe`;
   const exe = join(directory, file), buffer = readFileSync(exe), sha512 = createHash('sha512').update(buffer).digest('base64'), size = statSync(exe).size;
   const channel = product + '.yml', info = yaml.load(readFileSync(join(directory, channel), 'utf8'));

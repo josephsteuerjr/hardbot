@@ -1,0 +1,20 @@
+[data-courier-form] {font:inherit;max-width:760px;}
+[data-courier-form] .field {display:flex;flex-direction:column;gap:7px;margin-bottom:18px;}
+[data-courier-form] label {font-size:14px;color:var(--ink-2,var(--ink));}
+[data-courier-form] input,[data-courier-form] select,[data-courier-form] textarea {
+  width:100%;min-width:0;min-height:44px;border:1px solid var(--line-strong,var(--border));
+  border-radius:6px;background:var(--surface,var(--card));color:var(--ink);padding:10px;font:inherit;box-sizing:border-box;
+}
+[data-courier-form] textarea {min-height:110px;resize:vertical;}
+[data-courier-form] output {min-height:24px;overflow-wrap:anywhere;font-weight:600;}
+[data-courier-form] small {font-size:12px;color:var(--ink-3,var(--muted));}
+[data-courier-form] .actions {display:flex;gap:10px;}
+[data-courier-form] button {min-height:44px;padding:10px 18px;font:inherit;border:1px solid var(--border,var(--line));border-radius:6px;}
+[data-courier-form] button.primary {background:var(--accent);color:var(--accent-ink,#fff);border-color:var(--accent);}
+[data-courier-form] button:disabled {opacity:.5;}
+[data-courier-status] {font-size:13px;overflow-wrap:anywhere;}
+@media(max-width:600px){[data-courier-form] .actions button[type=submit]{flex:1;}}
+[data-courier-form] .courier-client-info{font-size:14px}
+[data-courier-form] .courier-client-info dl{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:8px;margin:12px 0}
+[data-courier-form] .courier-client-info dt{color:var(--muted)}
+[data-courier-form] .courier-client-info dd{margin:0;overflow-wrap:anywhere;white-space:pre-wrap}

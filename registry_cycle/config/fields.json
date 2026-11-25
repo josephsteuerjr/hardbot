@@ -253,6 +253,26 @@
       "empty": "ignore",
       "conflict": "error",
       "master_conflict": "accept_superset"
+    },
+    {
+      "title": "Дата ручной правки выезда",
+      "profiles": [
+        "hard"
+      ],
+      "empty": "ignore",
+      "conflict": "error",
+      "value_type": "date",
+      "invalid": "error"
+    },
+    {
+      "title": "Дата ручной правки звонка",
+      "profiles": [
+        "soft"
+      ],
+      "empty": "ignore",
+      "conflict": "error",
+      "value_type": "date",
+      "invalid": "error"
     }
   ],
   "preserve_if_master_blank": [

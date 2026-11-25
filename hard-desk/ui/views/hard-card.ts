@@ -4,6 +4,7 @@ import { currentId, openPanel, refresh } from "../kit/shell";
 import { type DataTable } from "../kit/table";
 import { cardNavigation, contextHtml, debtText, lockCard, money, promiseText } from "./employee";
 import { receiptHtml, wireReceipt } from "./receipt";
+import { editDatesHtml } from "./edit-dates";
 
 export async function openHardCard(rep:string,table:DataTable<any>|undefined,open:(rep:string)=>void):Promise<void>{
   if(document.querySelector('#panel-inner [data-saving="1"]')){toast("Дождитесь сохранения записи");return}
@@ -31,6 +32,7 @@ export async function openHardCard(rep:string,table:DataTable<any>|undefined,ope
       <div class="notice err" id="o-error" role="status" hidden></div><div class="card-save-actions row"><button class="btn primary" id="o-save">Сохранить</button><button class="btn" id="o-save-next">Сохранить и дальше →</button><button class="btn small" id="o-reload" hidden>Обновить и сверить</button></div>
       ${!office.revision?'<p class="notice err">Сервер ещё не поддерживает офисную запись. Требуется обновление сервера.</p>':""}</div>
     ${contextHtml(d)}
+    ${editDatesHtml(d)}
     <details class="section"><summary>Обещания и результаты телефона / реестра</summary><p class="hint">Реальный выезд: ${esc(d.visit_date || "не зафиксирован")} · ${esc(d.status || "")}</p>${(d.promise || []).map((p:any)=>`<div class="kv-line"><span>${esc(p.title)}</span><span>${esc(p.value)}</span></div>`).join("")}<p class="hint">Софтом записано: ${esc(d.soft?.status || "нет результата")} · ${esc(d.soft?.comm_date || "")}</p></details>
     <div class="section"><h3 class="section-title">Офисные обещания</h3><p class="hint">${esc(promiseText(office.promises)) || "Пока нет"}</p></div>
     <details class="section"><summary>Текущий комментарий месяца</summary><textarea class="input" id="f-comment">${esc(d.visit_comment || "")}</textarea><label class="hint"><input type="checkbox" id="f-clear-comment"> Явно очистить комментарий месяца</label><button class="btn" id="f-savec">Сохранить комментарий</button><p class="hint">Совместный текст месяца. Сохранение проверяет версию карточки и оставляет запись в истории.</p></details>

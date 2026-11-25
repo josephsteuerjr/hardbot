@@ -135,9 +135,30 @@ def test_enroll_gives_device_token_and_caps():
     assert len(token) >= 40 and body["caps"]["team_links"] and not body["caps"]["control"]
     st, me = _call("GET", "/api/manager/device/me", headers={"X-Pult-Token": token})
     assert st == 200 and me["me"]["name"] == "Руководитель" and me["device"]["name"] == "ПК-1"
+    assert me["subject"] == {"type": "manager", "actor_uid": MGR}
     with db.connect() as conn:
         stored = conn.execute("SELECT token_hash FROM manager_devices").fetchone()[0]
     assert stored != token and stored == db.app_token_key(token)
+
+
+def test_manager_subject_is_stable_across_devices_and_distinguishes_homonyms():
+    _seed()
+    first, _ = _enroll(MGR)
+    second, _ = _enroll(MGR)
+    db.set_manager(FULL, "Руководитель", [], [EMP_A, EMP_B], role="full")
+    homonym, _ = _enroll(FULL)
+    identities = []
+    for token in [first, second, homonym]:
+        status, body = _call("GET", "/api/manager/device/me?actor_uid=999", headers={"X-Pult-Token": token, "X-Actor-Uid": "999"})
+        assert status == 200
+        identities.append(body)
+    assert identities[0]["subject"] == identities[1]["subject"] == {"type": "manager", "actor_uid": MGR}
+    assert identities[0]["device"]["id"] != identities[1]["device"]["id"]
+    assert identities[2]["subject"] == {"type": "manager", "actor_uid": FULL}
+    assert identities[2]["me"]["name"] == identities[0]["me"]["name"]
+    db.drop_manager_device(first)
+    assert _call("GET", "/api/manager/device/me", headers={"X-Pult-Token": first})[0] == 401
+    assert _call("GET", "/api/manager/device/me", headers={"X-Pult-Token": second})[0] == 200
 
 
 def test_enroll_spends_one_use_and_dead_link_is_410():

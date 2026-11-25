@@ -6,26 +6,180 @@ import { ask, esc, n, toast } from "../kit/dom";
 import type { Section } from "../kit/shell";
 import { DataTable, tupleCols } from "../kit/table";
 import { adm, chipsHtml, fn, fnMap, guard, kvHtml, local, note, runJob } from "./lib";
+import { mountImportStatus } from "./import-status";
 
+const REVIEW_PAGE_SIZE = 80;
 const XLS = [{ name: "Excel", extensions: ["xlsx", "xlsm", "xlsb", "xls"] }];
 const st = {
   tab: "import" as "import" | "enrich" | "columns" | "export" | "recalled",
-  imp: null as any, sel: new Set<string>(), full: true, restore: true, comments: false, softEdits: true, preview: null as any, applied: null as any,
+  imp: null as any, sel: new Set<string>(), comments: false, preview: null as any, applied: null as any,
   impQuery: "", impFilter: "all", impSort: "name", excludedIds: "",
   enr: null as any, matched: [] as any[], enrSel: new Set<string>(), since: "", until: "", check: null as any, decisions: {} as Record<string, string>, applyRes: null as any,
+  enrPeriodEdited: false, reviewPage: 0, replacingRun: '',
   cols: null as any, colDecisions: [] as any[], scan: null as any,
   expEmps: [] as any[], expSel: new Set<string>(), expSince: "", expUntil: "",
   rec: null as any, recEmp: "",
-  busy: false, progress: "",
+  busy: false, progress: "", jobStarted: 0,
 };
 let activeRoot: HTMLElement | null = null;
+let queueTimer: ReturnType<typeof setTimeout> | undefined;
+let queueGeneration = 0;
+let deliveryOperation: any = null;
+let deliveryKnown = false;
+let deliveryReadFailed = false;
+let enrichmentStatus: HTMLElement | null = null;
+let importStatus: ReturnType<typeof mountImportStatus> | undefined;
+let queueDetailsOpen = false;
+let queueReconciliation: any = null;
+let hiddenQueueRun = '';
+type RegistryTab = typeof st.tab;
+let embeddedTab:RegistryTab|undefined;
+let presentedQueueRun = '';
+const queueChoices = new Map<string,string>();
+function queueChoiceKey(op: any, book: any, index: number): string { return JSON.stringify([op.id, book.review_token, book.ordinal, index]); }
+
+function reviewRows(): any[] { return st.check ? [...st.check.conflicts, ...st.check.office] : []; }
+
+function setReviewChoice(row: any, choice: string): void {
+  st.decisions[decisionKey(row)] = choice;
+  if (['promise_date','forecast_sum'].includes(row.key)) {
+    for (const other of reviewRows()) if (other.book_path === row.book_path && other.contract_id === row.contract_id && ['promise_date','forecast_sum'].includes(other.key)) {
+      st.decisions[decisionKey(other)] = choice;
+    }
+  }
+}
+
+function updateEnrichmentStatus(): void {
+  if (!enrichmentStatus?.isConnected) return;
+  const op = deliveryOperation;
+  let text: string;
+  if (st.busy) text = st.progress;
+  else if (deliveryReadFailed) text = 'Состояние очереди недоступно. Повторяю проверку…';
+  else if (!deliveryKnown) text = 'Проверяю состояние очереди…';
+  else if (op?.processing) {
+    const book = (op.books || []).find((b: any) => ['preparing', 'publishing', 'ledger'].includes(b.state));
+    const steps: Record<string, string> = { preparing: 'Проверяю книгу в Excel', publishing: 'Сверяю запись', ledger: 'Подтверждаю доставку' };
+    text = book ? `[${book.ordinal + 1}/${op.total}] ${steps[book.state]} · ${book.employee}`
+      : `Сверяю книги и журнал. Завершено ${op.completed} из ${op.total}.`;
+  } else if (st.check) text = `Проверка завершена. Расхождений: ${n(reviewRows().length)}.`;
+  else if (st.scan) text = 'Подбор завершён. Можно проверить конфликты в выбранных книгах.';
+  else if (op?.remaining) text = `Проход приостановлен. Завершено ${op.completed} из ${op.total}, осталось ${op.remaining}.`;
+  else if (op && op.id !== hiddenQueueRun) text = `Обогащение завершено. Книг: ${op.total}. Записано ячеек: ${op.cells}.`;
+  else text = 'Обогащение не запущено. Начните с проверки соответствий.';
+
+  const label = enrichmentStatus.querySelector<HTMLElement>('[data-registry-progress]')!;
+  if (label.textContent !== text) label.textContent = text;
+}
+
+async function showDeliveryQueue(root: HTMLElement, generation: number): Promise<void> {
+  if (!root.isConnected || activeRoot !== root || generation !== queueGeneration) return;
+  const host = root.querySelector<HTMLElement>('[data-delivery-queue]');
+  if (!host) return;
+  try {
+    const operation = await local<any>('/enr/operation');
+    if (generation !== queueGeneration || activeRoot !== root) return;
+    deliveryOperation = operation?.id ? operation : null;
+    deliveryKnown = true;
+    deliveryReadFailed = false;
+    updateEnrichmentStatus();
+    if (deliveryOperation?.id !== presentedQueueRun) {
+      presentedQueueRun = deliveryOperation?.id || '';
+      queueDetailsOpen = false;
+    }
+    const signature = JSON.stringify([deliveryOperation,queueReconciliation,hiddenQueueRun]);
+    if (host.dataset.signature !== signature && !(host.contains(document.activeElement) && document.activeElement?.tagName === 'SELECT')) {
+      host.dataset.signature = signature;
+      const op = deliveryOperation;
+      host.innerHTML = !op || hiddenQueueRun===op.id ? '' : `${st.tab === 'enrich' ? '' : `<div class="notice${op.attention ? ' err' : ''}" role="status"><span class="grow">${esc(op.remaining ? `Завершено книг: ${op.completed} из ${op.total}. Осталось: ${op.remaining}.` : `Обогащение завершено. Книг: ${op.total}. Записано ячеек: ${op.cells}.`)}</span></div>`}
+        <details data-queue-details ${queueDetailsOpen ? 'open' : ''}><summary>Подробности и действия${op.remaining ? ` · осталось ${n(op.remaining)}` : ''}</summary>
+        <div class="toolbar">
+          ${op.remaining ? '<button class="btn small" data-queue-retry>Повторить проверку ошибок</button>' : '<button class="btn small" data-queue-dismiss>Скрыть итог</button>'}
+          ${op.missing ? '<button class="btn small" data-queue-reconcile>Сверить с общим реестром…</button>' : ''}
+        </div>
+        ${op.busy ? '<p>Открытые книги будут обработаны после закрытия Excel.</p>' : ''}
+        ${op.excluded ? `<p>Пропущено строк: ${n(op.excluded)}. Эти строки сохранены в журнале.</p>` : ''}
+        <div class="analyst-queue-issues">
+        ${(op.books || []).filter((b: any) => b.state !== 'done' || b.omissions?.length).map((b: any) => `<div class="list-row" style="display:block;overflow-wrap:anywhere"><b>${esc(b.employee)} — ${esc(String(b.file).split(/[\\/]/).pop())}</b><p>${esc(b.message || 'Ожидает обработки')}</p>
+          ${b.omissions?.length ? `<p>Пропущено строк: ${n(b.omissions.length)}. Исходные результаты сохранены в журнале операции.</p><div class="table-wrap"><table class="grid"><thead><tr><th>Договор</th><th>Причина</th></tr></thead><tbody>${b.omissions.map((row:any)=>`<tr><td>${esc(row.contract_id)}</td><td>${esc(row.reason==='absent_from_book'?'Нет строки в личной книге':row.reason==='absent_from_master'?'Договор отсутствует':row.current_owner?`Теперь: ${row.current_owner}`:'Ответственный снят')}</td></tr>`).join('')}</tbody></table></div>` : ''}
+          ${b.conflicts?.length ? `<div class="table-wrap"><table class="grid"><thead><tr><th class="l">Договор / поле</th><th class="l">В книге</th><th class="l">В приложении</th><th class="l">Дата факта</th><th class="l">Действие</th></tr></thead><tbody>${b.conflicts.map((c: any, index: number) => `<tr><td>${esc(c.contract_id)} · ${esc(c.column || c.key)}</td><td>${esc(c.file)}</td><td>${esc(c.server)}</td><td>${esc(c.visit_date || '')}</td><td><select class="input" data-queue-choice="${b.ordinal}:${index}"><option value="file">Оставить в книге</option><option value="server" ${queueChoices.get(queueChoiceKey(op,b,index))==='server'?'selected':''}>Записать сервер</option></select></td></tr>`).join('')}</tbody></table></div><button class="btn small" data-queue-resolve="${b.ordinal}">Применить решения</button>` : ''}</div>`).join('')}
+        </div>
+        ${queueReconciliation?.run_id===op.id ? `<div class="block"><b>Сверка: ${esc(String(queueReconciliation.source_path).split(/[\\/]/).pop())}</b><p>Изменились назначения или договоры отсутствуют: ${n(queueReconciliation.proposals.length)}. Требуют проверки состава книги: ${n(queueReconciliation.blocked.length)}.</p>
+          <p>Исключённые строки сохраняются в отчёте и не считаются доставленными. Остальные результаты будут перенесены.</p>
+          <div class="table-wrap"><table class="grid"><thead><tr><th>Сотрудник / договор</th><th>Причина</th></tr></thead><tbody>${[...queueReconciliation.proposals,...queueReconciliation.blocked].map((row:any)=>`<tr><td>${esc(row.employee)} · ${esc(row.contract_id)}</td><td>${esc(row.reason==='absent_from_master'?'Договор отсутствует':row.reason==='assignment_changed'?(row.current_owner?`Теперь: ${row.current_owner}`:'Ответственный снят'):row.reason)}</td></tr>`).join('')}</tbody></table></div>
+          <button class="btn small" data-queue-reconcile-apply ${queueReconciliation.proposals.length?'':'disabled'}>Принять исключения и продолжить перенос</button></div>` : ''}
+        </details>`;
+      host.querySelector('[data-queue-details]')?.addEventListener('toggle',event=>{queueDetailsOpen=(event.target as HTMLDetailsElement).open;});
+      host.querySelectorAll<HTMLSelectElement>('[data-queue-choice]').forEach(select=>select.addEventListener('change',()=>{
+        const [ordinal,index]=select.dataset.queueChoice!.split(':').map(Number);
+        const book=op.books.find((b:any)=>b.ordinal===ordinal),row=book.conflicts[index];
+        book.conflicts.forEach((other:any,i:number)=>{
+          if(i===index || (other.contract_id===row.contract_id && ['promise_date','forecast_sum'].includes(row.key) && ['promise_date','forecast_sum'].includes(other.key))){
+            queueChoices.set(queueChoiceKey(op,book,i),select.value);
+            host.querySelector<HTMLSelectElement>(`[data-queue-choice="${ordinal}:${i}"]`)!.value=select.value;
+          }
+        });
+      }));
+      host.querySelector('[data-queue-dismiss]')?.addEventListener('click',()=>{hiddenQueueRun=op.id;host.dataset.signature='';void showDeliveryQueue(root,generation);});
+      host.querySelector('[data-queue-reconcile]')?.addEventListener('click',guard(async()=>{
+        const path=await hard.pick('file',{title:'Текущий общий реестр',filters:XLS});if(!path)return;
+        queueReconciliation=await job('/enr/reconcile-preview',{path});queueDetailsOpen=true;
+        host.dataset.signature='';await showDeliveryQueue(root,generation);
+      }));
+      host.querySelector('[data-queue-reconcile-apply]')?.addEventListener('click',guard(async()=>{
+        await local('/enr/reconcile-apply',{token:queueReconciliation.token});queueReconciliation=null;
+        host.dataset.signature='';await showDeliveryQueue(root,generation);
+      }));
+      host.querySelector('[data-queue-retry]')?.addEventListener('click', guard(async () => {
+        await local('/enr/retry', { id: op.id });
+        host.dataset.signature = ''; await showDeliveryQueue(root, generation);
+      }));
+      host.querySelectorAll<HTMLButtonElement>('[data-queue-resolve]').forEach(button => button.addEventListener('click', guard(async () => {
+        const book = op.books.find((b: any) => b.ordinal === Number(button.dataset.queueResolve));
+        const decisions = book.conflicts.map((c: any, index: number) => ({ book_path: book.file, contract_id: c.contract_id, key: c.key,
+          decision: host.querySelector<HTMLSelectElement>(`[data-queue-choice="${book.ordinal}:${index}"]`)!.value }));
+        await local('/enr/retry', { id: op.id, review_token: book.review_token, decisions });
+        host.dataset.signature = ''; await showDeliveryQueue(root, generation);
+      })));
+    }
+    const replacing = st.tab === 'enrich' && deliveryOperation?.restart_allowed && deliveryOperation.id === st.replacingRun;
+    root.querySelectorAll<HTMLButtonElement>(st.tab === 'enrich' ? '[data-apply],[data-check],[data-scan]' : '[data-apply],[data-preview]').forEach(button => {
+      const previewOnly = st.tab === 'enrich' && button.matches('[data-scan],[data-check]');
+      if (deliveryOperation?.processing || deliveryOperation?.remaining && !replacing && !previewOnly) {
+        if (button.dataset.deliveryBlocked === undefined) button.dataset.deliveryBlocked = button.disabled ? '1' : '0';
+        button.disabled = true;
+      } else if (button.dataset.deliveryBlocked !== undefined) {
+        button.disabled = button.dataset.deliveryBlocked === '1'; delete button.dataset.deliveryBlocked;
+      }
+    });
+    root.querySelectorAll<HTMLButtonElement>('[data-pick],[data-queue-reconcile],[data-queue-reconcile-apply],[data-queue-retry]').forEach(button=>{
+      if(deliveryOperation?.processing){
+        if(button.dataset.deliveryProcessing===undefined)button.dataset.deliveryProcessing=button.disabled?'1':'0';
+        button.disabled=true;
+      }else if(button.dataset.deliveryProcessing!==undefined){
+        button.disabled=button.dataset.deliveryProcessing==='1';delete button.dataset.deliveryProcessing;
+      }
+    });
+  } catch (error) {
+    deliveryReadFailed = true;
+    updateEnrichmentStatus();
+    delete host.dataset.signature;
+    host.innerHTML = `<div class="notice err">Не удалось проверить очередь переноса: ${esc(String((error as Error).message || error))}</div>`;
+  } finally {
+    if (root.isConnected && generation === queueGeneration && activeRoot === root) {
+      clearTimeout(queueTimer); queueTimer = setTimeout(() => void showDeliveryQueue(root, generation), 2000);
+    }
+  }
+}
 
 function showProgress(): void {
   if (!activeRoot?.isConnected) return;
-  const status = activeRoot.querySelector<HTMLElement>('[data-registry-progress]');
+  updateEnrichmentStatus();
+  importStatus?.show(st.busy ? {started: st.jobStarted, text: st.progress} : undefined);
+  const status = st.tab !== 'enrich' && activeRoot.querySelector<HTMLElement>('[data-registry-progress]');
   if (status) { status.hidden = !st.busy; status.textContent = st.progress; }
+  const busy = st.busy || importStatus?.working();
   activeRoot.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement>('#rtab input,#rtab textarea,#rtab select,#rtab button').forEach(control => {
-    if (st.busy) {
+    if (busy) {
       if (control.dataset.jobDisabled === undefined) control.dataset.jobDisabled = control.disabled ? '1' : '0';
       control.disabled = true;
     } else if (control.dataset.jobDisabled !== undefined) {
@@ -36,13 +190,28 @@ function showProgress(): void {
 
 /** Задача питон-стороны: ждём конца, журнал — в строку статуса. */
 async function job(path: string, body: unknown, log?: (s: string) => void): Promise<any> {
-  if (st.busy) throw new Error('Операция уже выполняется. Дождитесь её результата.');
-  st.busy = true; st.progress = 'Операция выполняется…'; showProgress();
+  if (st.busy || importStatus?.working()) throw new Error('Операция уже выполняется. Дождитесь её результата.');
+  st.busy = true;
+  st.jobStarted = Date.now();
+  const messages: Record<string, string> = {
+    '/reg/pick': 'Читаю общий реестр…',
+    '/reg/preview': 'Готовлю данные для предпросмотра импорта…',
+    '/reg/apply': 'Проверяю файл перед отправкой импорта…',
+    '/enr/preview': 'Запрашиваю данные для подбора книг…',
+    '/enr/check': 'Запускаю проверку конфликтов…',
+    '/enr/apply': 'Подготавливаю запись в книги…',
+  };
+  st.progress = messages[path] || 'Операция выполняется…';
+  showProgress();
   try {
     return await runJob(path, body, line => {
       st.progress = line; showProgress(); log?.(line);
     });
-  } finally { st.busy = false; showProgress(); }
+  } finally {
+    st.busy = false;
+    showProgress();
+    if (path === '/reg/apply') void importStatus?.refresh();
+  }
 }
 
 function tabs(): string {
@@ -69,12 +238,12 @@ async function importTab(el: HTMLElement) {
     return numeric || a.name.localeCompare(b.name, "ru");
   });
   const warn: string[] = [];
-  if (st.full) warn.push("ПОЛНЫЙ СРЕЗ: у выбранных сотрудников будут сняты договоры, которых нет среди их выбранных строк. Остальные не затрагиваются. Файл неполный — снимите галочку.");
-  if (st.restore) warn.push("ВОЗВРАТ РУЧНЫХ СНЯТИЙ: вернутся только договоры, которые снова есть в выбранных строках с тем же сотрудником.");
+  warn.push("ПОЛНЫЙ СРЕЗ: у выбранных сотрудников будут сняты договоры, которых нет среди их выбранных строк. Остальные не затрагиваются.");
+  warn.push("ВОЗВРАТ РУЧНЫХ СНЯТИЙ: вернутся только договоры, которые снова есть в выбранных строках с тем же сотрудником.");
   if (st.comments) warn.push("Текущие комментарии будут заменены значениями файла, включая пустые.");
-  if (st.softEdits) warn.push("Офисные правки результатов Софта будут применены к завершённым звонкам. Предпросмотр покажет точные замены.");
+  warn.push("Офисные правки результатов Софта будут применены к завершённым звонкам. Предпросмотр покажет точные замены.");
   if (warn.length) warn.push("Точные числа пульт покажет в предпросмотре до записи.");
-  el.innerHTML = `${note("Общий реестр: опубликованный master или утверждённое тестовое подмножество. Личные ФИО.xlsb сюда не загружаются. Сначала предпросмотр — запись отдельной кнопкой.")}
+  el.innerHTML = `${note("Выберите общий реестр для импорта. Личные книги сотрудников загружаются в разделе «Обогащение книг». Перед применением проверьте предпросмотр изменений.")}
     <div class="toolbar" style="margin-top:12px"><button class="btn primary" data-pick>Выбрать реестр…</button><span class="muted" id="imp-cap">${esc(book?.caption || "")}</span></div>
     ${book ? `<div class="toolbar"><span class="muted" style="font-size:13.5px">Тип сотрудников:</span>
         <select class="input" data-profile style="width:auto">${[["hard","Хард"],["soft","Софт"],["both","Оба типа"]].map(([k,v])=>`<option value="${k}" ${book.profile===k?'selected':''}>${v}</option>`).join("")}</select>
@@ -90,20 +259,15 @@ async function importTab(el: HTMLElement) {
       <div class="grid2" style="max-height:340px;overflow:auto;border-top:var(--lw) solid var(--line)">${employees.map((e: any) => `<label class="list-row" style="cursor:pointer;padding:8px 4px">
         <input type="checkbox" data-emp="${esc(e.key)}" ${st.sel.has(e.key) ? "checked" : ""}><span class="grow"><span class="nm">${esc(e.name)}</span><br><span class="sub">${esc(e.note)}</span></span></label>`).join("")}</div>
       <div class="block">
-        <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="full" ${st.full ? "checked" : ""}><span class="grow">Для выбранных сотрудников это полный срез — снять у них договоры, которых нет в выбранных строках файла</span></label>
-        <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="restore" ${st.restore ? "checked" : ""}><span class="grow">Вернуть ранее вручную снятые договоры, если они снова есть в выбранных строках с тем же ответственным</span></label>
         <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="comments" ${st.comments ? "checked" : ""}><span class="grow">Начало месяца: заменить комментарии выезда значениями файла (пустая ячейка очистит комментарий)</span></label>
-        <label class="list-row" style="cursor:pointer"><input type="checkbox" data-opt="softEdits" ${st.softEdits ? "checked" : ""}><span class="grow">Применить проверенные офисные правки результатов звонков Софта</span></label>
-        <p class="muted" style="font-size:13px">Без галочки офисных правок сохранённые результаты звонков Софта защищены от замены данными реестра.</p>
         <p class="muted" style="font-size:13px">Историчные комментарии грузятся сами, если колонка есть в файле: значение повторяет файл точно, пустая ячейка очищает.</p></div>
       ${warn.length ? `<div class="notice" style="white-space:pre-line"><span class="grow">${esc(warn.join("\n"))}</span></div>` : ""}
       <div class="toolbar"><button class="btn primary" data-preview ${st.sel.size ? "" : "disabled"}>Предпросмотр выбранных (${n(st.sel.size)})</button>
-        <button class="btn" data-apply ${st.preview && !st.preview.error ? "" : "disabled"}>${esc(st.preview?.apply || "Применить импорт")}</button>
-        <span class="muted" id="imp-log"></span></div>
+        <button class="btn" data-apply ${st.preview && !st.preview.error ? "" : "disabled"}>${esc(st.preview?.apply || "Применить импорт")}</button></div>
       ${st.preview ? (st.preview.error ? `<div class="notice err" style="white-space:pre-line"><span class="grow">${esc(st.preview.error)}</span></div>`
         : `${pairs(st.preview.pairs)}<div class="notice" style="white-space:pre-line;margin-top:12px"><span class="grow">${esc((st.preview.notes || []).join("\n"))}</span></div>`) : ""}
       ${st.applied ? `${pairs(st.applied.pairs)}<div class="notice" style="white-space:pre-line;margin-top:12px"><span class="grow">${esc((st.applied.notes || []).join("\n"))}</span></div>` : ""}` : ""}`;
-  const redraw = () => importTab(el);
+  const redraw = () => { void importTab(el); showProgress(); };
   const invalidate = () => { st.preview = null; st.applied = null; };
   el.querySelector<HTMLInputElement>("[data-imp-query]")?.addEventListener("input", (event) => {
     const input = event.target as HTMLInputElement;
@@ -124,14 +288,14 @@ async function importTab(el: HTMLElement) {
     } catch (e) {
       st.imp = null; cap.textContent = `Файл не разобран: ${(e as Error).message}`; return;
     }
-    st.sel = new Set(st.imp.selected); st.full = true; st.restore = true; st.comments = false; st.softEdits = true; invalidate(); redraw();
+    st.sel = new Set(st.imp.selected); st.comments = false; invalidate(); redraw();
   }));
   el.querySelector<HTMLSelectElement>("[data-profile]")?.addEventListener("change", guard(async () => {
     st.imp=await local("/reg/select", {profile:(el.querySelector("[data-profile]") as HTMLSelectElement).value});
-    st.sel=new Set(st.imp.selected); st.full=true; invalidate(); redraw();
+    st.sel=new Set(st.imp.selected); invalidate(); redraw();
   }));
   el.querySelectorAll<HTMLButtonElement>("[data-sel]").forEach((b) => b.addEventListener("click", guard(async () => {
-    const r = await local("/reg/select", { mode: b.dataset.sel, full: st.full });
+    const r = await local("/reg/select", { mode: b.dataset.sel, full: true });
     st.sel = new Set(r.selected); invalidate(); redraw();
   })));
   el.querySelectorAll<HTMLInputElement>("[data-emp]").forEach((cb) => cb.addEventListener("change", guard(async () => {
@@ -139,26 +303,23 @@ async function importTab(el: HTMLElement) {
     await local("/reg/select", { selected: [...st.sel] }); redraw();
   })));
   el.querySelectorAll<HTMLInputElement>("[data-opt]").forEach((cb) => cb.addEventListener("change", () => {
-    const k = cb.dataset.opt as "full" | "restore" | "comments" | "softEdits"; st[k] = cb.checked; invalidate();
-    if (k === "full" && cb.checked) toast("Полный режим включён для выбранных сотрудников");
+    st.comments = cb.checked; invalidate();
     redraw();
   }));
   el.querySelector<HTMLTextAreaElement>('[data-excluded-ids]')?.addEventListener('input',event=>{
     st.excludedIds=(event.target as HTMLTextAreaElement).value;st.preview=null;
     el.querySelector<HTMLButtonElement>('[data-apply]')?.setAttribute('disabled','');
   });
-  const body = () => ({ selected: [...st.sel], full: st.full, restore_manual: st.restore, replace_comments: st.comments, soft_edits: st.softEdits,
+  const body = () => ({ selected: [...st.sel], full: true, restore_manual: true, replace_comments: st.comments, soft_edits: true,
     exclude_contracts: st.excludedIds.split(/[\r\n,;]+/).map(x=>x.trim()).filter(Boolean) });
-  const logEl = () => el.querySelector("#imp-log")!;
   el.querySelector("[data-preview]")?.addEventListener("click", guard(async () => {
-    invalidate(); logEl().textContent = "Проверяю…";
-    st.preview = await job("/reg/preview", body(), (s) => { logEl().textContent = s; });
-    toast(st.preview.error ? "Импорт не прошёл" : "Предпросмотр готов" + (st.full ? `: будет снято ${n(st.preview.unassigned)}` : ""));
+    invalidate();
+    st.preview = await job("/reg/preview", body());
+    toast(st.preview.error ? "Импорт не прошёл" : `Предпросмотр готов: будет снято ${n(st.preview.unassigned)}`);
     redraw();
   }));
   el.querySelector("[data-apply]")?.addEventListener("click", guard(async () => {
-    logEl().textContent = "Применяю…";
-    const r = await job("/reg/apply", body(), (s) => { logEl().textContent = s; });
+    const r = await job("/reg/apply", body());
     if (r.error) { st.preview = { error: r.error }; toast("Импорт не прошёл"); redraw(); return; }
     st.preview = null; st.applied = r; toast(r.toast); redraw();
   }));
@@ -177,17 +338,40 @@ function conflictTable(list: any[], decide: boolean, labels: Record<string, stri
   }).join("")}</tbody></table></div>`;
 }
 
+async function scanEnrichment(root: HTMLElement) {
+  const out = root.querySelector("#e-scan-out")!;
+  out.innerHTML = '<p class="muted">Проверяю: данные сервера + папки сотрудников…</p>';
+  const r = await job("/enr/preview", {}, (line) => {
+    out.innerHTML = `<p class="muted">${esc(line)}</p>`;
+  });
+  st.replacingRun = r.replaces || '';
+  st.scan = r; st.matched = r.matched; st.enrSel = new Set(r.matched.map((m: any) => m.key));
+  st.check = null; st.decisions = {}; st.reviewPage = 0; st.applyRes = null;
+  if (activeRoot?.isConnected && st.tab === 'enrich') await draw(activeRoot);
+}
+
 async function enrichTab(el: HTMLElement) {
-  st.enr ||= await local("/enr/state");
-  if (!st.since && !st.until) { st.since = st.enr.since || ""; st.until = st.enr.until || ""; }
+  if ((await hard.state()).platform === "mobile") {
+    el.innerHTML = `<h2>Обогащение исходных книг</h2><p>Откройте «Обмен → Обогащение книг» в Windows-программе «Аналитик». Изменение исходных XLSB/XLSM выполняется на компьютере с Excel.</p><p>На телефоне можно импортировать реестр и скачать новые XLSX в «Книгах CRM».</p>`;
+    return;
+  }
+  if (!st.enr) {
+    st.enr = await local("/enr/state");
+    st.since = st.enr.since || ""; st.until = st.enr.until || "";
+  }
   const e = st.enr;
+  const reviews = reviewRows();
+  const firstReview = st.reviewPage * REVIEW_PAGE_SIZE;
+  const visibleReviews = reviews.slice(firstReview, firstReview + REVIEW_PAGE_SIZE);
+  const reviewsByKey = new Map(visibleReviews.map(row => [decisionKey(row), row]));
   const cols = e.conflict_columns as [string, string][];
   el.innerHTML = `${note("Переносит сохраненные визиты и звонки в личные книги Хард и Софт. Рабочая книга называется ФИО.xlsb; копии и датированные файлы рядом не участвуют. Правки книги защищены реестром доставки. Сначала проверка, запись — отдельной кнопкой.")}
     <div class="toolbar" style="margin-top:12px"><button class="btn" data-base>Папка с республиками…</button><span class="muted">${esc(e.base ? "база: " + e.base : "базовая папка не выбрана")}</span>
       <span class="spacer"></span><button class="btn primary" data-scan ${e.base ? "" : "disabled"}>Проверить соответствия</button></div>
     <div class="toolbar"><span class="muted" style="font-size:13.5px">Результаты с</span><input class="input" id="e-since" value="${esc(st.since)}" placeholder="ДД.ММ.ГГГГ" style="width:130px">
       <span class="muted" style="font-size:13.5px">по</span><input class="input" id="e-until" value="${esc(st.until)}" placeholder="ДД.ММ.ГГГГ" style="width:130px">
-      <button class="btn small" data-today>Только сегодня</button><span class="muted" style="font-size:12.5px">пусто = без границы</span></div>
+      <button class="btn small" data-day="0">Сегодня</button><button class="btn small" data-day="1">Вчера</button>
+      <button class="btn small" data-day="2">Позавчера</button><span class="muted" style="font-size:12.5px">пусто = без границы</span></div>
     <div id="e-scan-out">${st.scan ? `${pairs(st.scan.pairs)}${st.scan.warning ? `<div class="notice" style="white-space:pre-line;margin-top:12px"><span class="grow">${esc(st.scan.warning)}</span></div>` : ""}` : ""}</div>
     ${st.matched.length ? `<div class="toolbar"><span class="muted" style="font-size:13.5px">Кого обогащать:</span>
         <button class="btn small" data-esel="none">снять</button><button class="btn small" data-esel="all">все</button>
@@ -200,13 +384,15 @@ async function enrichTab(el: HTMLElement) {
           <input type="checkbox" data-ek="${esc(m.key)}" ${st.enrSel.has(m.key) ? "checked" : ""}><span class="grow"><span class="nm">${esc(m.employee)}</span><br><span class="sub">${esc(m.note)}</span></span></label>`).join('') || '<p class="muted">Нет сотрудников с сохранёнными результатами.</p>'}</div></div>`;
       }).join('')}</div>
       <div class="toolbar" style="margin-top:12px"><button class="btn primary" data-check ${st.enrSel.size ? "" : "disabled"}>Проверить конфликты (без записи)</button>
-        ${e.writes ? `<button class="btn" data-apply ${st.enrSel.size ? "" : "disabled"}>Записать выбранных (${n(st.enrSel.size)})</button>` : ""}
+        ${e.writes ? `<button class="btn" data-apply ${st.enrSel.size && st.check ? "" : "disabled"}>Записать выбранных (${n(st.enrSel.size)})</button>` : ""}
         <span class="muted" id="e-log"></span></div>` : ""}
-    ${st.check ? `<pre style="white-space:pre-wrap;font:13px/1.5 var(--mono);color:var(--ink-2)">${esc((st.check.lines || []).join("\n"))}</pre>
-      ${st.check.conflicts.length ? `<div class="section"><div class="section-head"><h2 class="section-title">Конфликты — решите, что писать (${n(st.check.conflicts.length)})</h2></div>${note(e.decision_hint)}
+    <div data-enr-review>${st.check ? `<pre style="white-space:pre-wrap;font:13px/1.5 var(--mono);color:var(--ink-2)">${esc((st.check.lines || []).join("\n"))}</pre>
+      ${reviews.length ? `<div class="section"><div class="section-head"><h2 class="section-title">Выберите значения до записи (${n(reviews.length)})</h2></div>${note(e.decision_hint)}<p class="muted">Сумма и дата обещания сохраняются вместе.</p>
         <div class="toolbar" style="margin-top:8px"><button class="btn small" data-dall="file">Везде оставить как в книге</button><button class="btn small" data-dall="server">Везде записать сервер</button></div>
-        ${conflictTable(st.check.conflicts, true, e.decision_labels, cols)}</div>` : ""}
-      ${st.check.office.length ? `<div class="section"><div class="section-head"><h2 class="section-title">Правки офиса (${n(st.check.office.length)})</h2></div>${conflictTable(st.check.office, false, {}, cols)}</div>` : ""}` : ""}
+        ${reviews.length > REVIEW_PAGE_SIZE ? `<div class="toolbar"><button class="btn small" data-review-page="-1" ${firstReview ? "" : "disabled"}>Назад</button>
+          <span role="status">Строки ${n(firstReview + 1)}–${n(firstReview + visibleReviews.length)} из ${n(reviews.length)}</span>
+          <button class="btn small" data-review-page="1" ${firstReview + visibleReviews.length < reviews.length ? "" : "disabled"}>Далее</button></div>` : ""}
+        ${conflictTable(visibleReviews, true, e.decision_labels, cols)}</div>` : ""}` : ""}</div>
     ${st.applyRes ? `<div class="section"><div class="section-head"><h2 class="section-title">Итог записи</h2></div>
       <pre style="white-space:pre-wrap;font:13px/1.5 var(--mono);color:var(--ink-2)">${esc((st.applyRes.lines || []).join("\n"))}</pre>
       ${st.applyRes.ledger_error ? `<div class="notice err"><span class="grow">${esc(st.applyRes.ledger_error)}</span><button class="btn small" data-replay>Повторить отправку из квитанции</button></div>` : ""}</div>` : ""}`;
@@ -215,50 +401,79 @@ async function enrichTab(el: HTMLElement) {
     if (activeRoot?.isConnected && st.tab === 'enrich') return draw(activeRoot);
   };
   const win = () => { st.since = (el.querySelector("#e-since") as HTMLInputElement).value.trim(); st.until = (el.querySelector("#e-until") as HTMLInputElement).value.trim(); };
-  el.querySelector("#e-since")?.addEventListener("change", () => { win(); st.check = null; });
-  el.querySelector("#e-until")?.addEventListener("change", () => { win(); st.check = null; });
-  el.querySelector("[data-today]")?.addEventListener("click", () => {
-    const d = new Date(); const t = `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}.${d.getFullYear()}`;
-    st.since = t; st.until = t; st.check = null; redraw();
+  const clearReview = () => {
+    st.check = null; st.decisions = {}; st.reviewPage = 0;
+    el.querySelector("[data-enr-review]")?.replaceChildren();
+    el.querySelector<HTMLButtonElement>("[data-apply]")?.setAttribute("disabled", "");
+  };
+  el.querySelectorAll<HTMLInputElement>("#e-since, #e-until").forEach(input => {
+    input.addEventListener("input", () => {
+      win(); st.enrPeriodEdited = true; clearReview();
+    });
   });
+  el.querySelectorAll<HTMLButtonElement>("[data-day]").forEach(button => button.addEventListener("click", () => {
+    const d = new Date();
+    d.setDate(d.getDate() - Number(button.dataset.day));
+    const day = `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}.${d.getFullYear()}`;
+    st.since = day; st.until = day; st.enrPeriodEdited = true; clearReview(); redraw();
+  }));
   el.querySelector("[data-base]")?.addEventListener("click", guard(async () => {
+    win();
     const p = await hard.pick("folder", { title: "Папка, в которой лежат папки республик", defaultPath: e.base || undefined });
     if (!p) return;
-    st.enr = await local("/enr/base", { path: p }); st.since = st.enr.since || ""; st.until = st.enr.until || ""; redraw();
+    st.enr = await local("/enr/base", { path: p });
+    if (st.enr.base !== e.base) {
+      st.scan = null;
+      st.matched = [];
+      st.enrSel.clear();
+      clearReview();
+      st.applyRes = null;
+    }
+    if (!e.base && !st.enrPeriodEdited) {
+      st.since = st.enr.since || ""; st.until = st.enr.until || "";
+    }
+    redraw();
   }));
   el.querySelector("[data-scan]")?.addEventListener("click", guard(async () => {
-    const out = el.querySelector("#e-scan-out")!;
-    out.innerHTML = '<p class="muted">Проверяю: данные сервера + папки сотрудников…</p>';
-    const r = await job("/enr/preview", {}, (s) => { out.innerHTML = `<p class="muted">${esc(s)}</p>`; });
-    st.scan = r; st.matched = r.matched; st.enrSel = new Set(r.matched.map((m: any) => m.key)); st.check = null; st.applyRes = null; redraw();
+    if (activeRoot) await scanEnrichment(activeRoot);
   }));
   el.querySelectorAll<HTMLButtonElement>("[data-esel]").forEach((b) => b.addEventListener("click", () => {
-    st.enrSel = b.dataset.esel === "all" ? new Set(st.matched.map((m) => m.key)) : new Set(); st.check = null; redraw();
+    st.enrSel = b.dataset.esel === "all" ? new Set(st.matched.map((m) => m.key)) : new Set(); clearReview(); redraw();
   }));
   el.querySelectorAll<HTMLInputElement>("[data-ek]").forEach((cb) => cb.addEventListener("change", () => {
-    if (cb.checked) st.enrSel.add(cb.dataset.ek!); else st.enrSel.delete(cb.dataset.ek!); st.check = null; redraw();
+    if (cb.checked) st.enrSel.add(cb.dataset.ek!); else st.enrSel.delete(cb.dataset.ek!); clearReview(); redraw();
   }));
   const logEl = () => el.querySelector("#e-log")!;
   el.querySelector("[data-check]")?.addEventListener("click", guard(async () => {
-    win(); logEl().textContent = "Проверяю книги…";
+    win(); clearReview(); logEl().textContent = "Проверяю книги…";
     st.check = await job("/enr/check", { keys: [...st.enrSel], since: st.since, until: st.until }, (s) => { logEl().textContent = s; });
-    st.decisions = {}; toast(`Проверено: конфликтов ${st.check.conflicts.length}`); redraw();
+    toast(`Проверено: расхождений ${reviewRows().length}`); redraw();
   }));
-  el.querySelectorAll<HTMLSelectElement>("[data-dec]").forEach((s) => s.addEventListener("change", () => { st.decisions[s.dataset.dec!] = s.value; }));
+  el.querySelectorAll<HTMLSelectElement>("[data-dec]").forEach((s) => s.addEventListener("change", () => {
+    const row = reviewsByKey.get(s.dataset.dec!);
+    if(row)setReviewChoice(row,s.value);
+    el.querySelectorAll<HTMLSelectElement>('[data-dec]').forEach(other=>{other.value=st.decisions[other.dataset.dec!] || 'file';});
+  }));
   el.querySelectorAll<HTMLButtonElement>("[data-dall]").forEach((b) => b.addEventListener("click", () => {
-    for (const c of st.check.conflicts) st.decisions[decisionKey(c)] = b.dataset.dall!; redraw();
+    for (const row of reviews) st.decisions[decisionKey(row)] = b.dataset.dall!;
+    redraw();
+  }));
+  el.querySelectorAll<HTMLButtonElement>("[data-review-page]").forEach(button => button.addEventListener("click", () => {
+    st.reviewPage += Number(button.dataset.reviewPage);
+    redraw();
   }));
   el.querySelector("[data-apply]")?.addEventListener("click", guard(async () => {
     win();
     const decisions = Object.entries(st.decisions).map(([k, d]) => { const [book_path, contract_id, key] = JSON.parse(k); return { book_path, contract_id, key, decision: d }; });
-    if (st.check) for (const c of st.check.conflicts) if (!st.decisions[decisionKey(c)]) decisions.push({ book_path: c.book_path, contract_id: c.contract_id, key: c.key, decision: "file" });
+    if (st.check) for (const c of reviewRows()) if (!st.decisions[decisionKey(c)]) decisions.push({ book_path: c.book_path, contract_id: c.contract_id, key: c.key, decision: "file" });
     const body = { keys: [...st.enrSel], since: st.since, until: st.until, decisions };
     const conf = await local("/enr/confirm", body);
     if (conf.whole && !(await ask(e.whole_title, e.whole_text, "Вся история", true))) return;
     if (!(await ask("Обогащение реестров", conf.text, "Записать"))) return;
     logEl().textContent = "Открываю книги…";
     st.applyRes = await job("/enr/apply", body, (s) => { logEl().textContent = s; });
-    st.check = null; toast(st.applyRes.toast); redraw();
+    st.replacingRun = ""; clearReview(); toast(st.applyRes.toast); redraw();
+    if (activeRoot) await showDeliveryQueue(activeRoot, queueGeneration);
   }));
   el.querySelector("[data-replay]")?.addEventListener("click", guard(async () => {
     const r = await job("/enr/replay", {}); toast(r.toast); st.applyRes.ledger_error = ""; redraw();
@@ -374,7 +589,24 @@ async function recalledTab(el: HTMLElement, limit = 500) {
 
 async function draw(root: HTMLElement) {
   activeRoot = root;
-  root.innerHTML = `<div class="toolbar">${tabs()}</div><p class="notice" data-registry-progress role="status" hidden></p><div id="rtab"><div class="skeleton"></div></div>`;
+  clearTimeout(queueTimer); const generation = ++queueGeneration;
+  enrichmentStatus?.remove();
+  enrichmentStatus = null;
+  importStatus?.dispose();
+  importStatus = undefined;
+  deliveryKnown = false; deliveryReadFailed = false;
+  const enrich = st.tab === 'enrich';
+  const header = document.querySelector<HTMLElement>('main > .workspace');
+  root.innerHTML = `${embeddedTab ? '' : `<div class="toolbar">${tabs()}</div>`}${enrich || st.tab === 'import' ? '' : '<p class="notice" data-registry-progress role="status" hidden></p>'}<div data-delivery-queue></div><div id="rtab"><div class="skeleton"></div></div>`;
+  if (st.tab === 'import') importStatus = mountImportStatus(header || root, showProgress);
+  if (enrich) {
+    const panel = document.createElement('div');
+    panel.className = 'analyst-enrichment-status';
+    panel.innerHTML = '<span data-registry-progress role="status"></span>';
+    enrichmentStatus = panel;
+    if (header) header.append(panel); else root.prepend(panel);
+    updateEnrichmentStatus();
+  }
   root.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach((b) => b.addEventListener("click", () => { st.tab = b.dataset.tab as typeof st.tab; void draw(root); }));
   const el = root.querySelector<HTMLElement>("#rtab")!;
   try {
@@ -387,6 +619,7 @@ async function draw(root: HTMLElement) {
     el.innerHTML = `<div class="notice err"><span class="grow">${esc((e as Error).message)}</span></div>`;
   }
   showProgress();
+  await showDeliveryQueue(root,generation);
 }
 
 export const registry: Section = {
@@ -395,7 +628,15 @@ export const registry: Section = {
   icon: "registry",
   kicker: "импорт, обогащение книг, колонки, выгрузки",
   render(root) { return draw(root); },
+  leave() { enrichmentStatus?.remove(); enrichmentStatus = null; importStatus?.dispose(); importStatus = undefined; },
 };
+
+export async function mountRegistryTools(root:HTMLElement,tab:RegistryTab):Promise<()=>void>{
+  embeddedTab=tab;
+  st.tab=tab;
+  await draw(root);
+  return()=>{if(activeRoot===root){activeRoot=null;queueGeneration++;clearTimeout(queueTimer);embeddedTab=undefined;registry.leave?.();}};
+}
 
 // «Приоритет выезда»: очередь по весам — долг, свежесть, кластер.
 const pr = { weights: {} as Record<string, number>, limit: 40 };

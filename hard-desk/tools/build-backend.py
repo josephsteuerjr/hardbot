@@ -23,9 +23,11 @@ for source in manifest['files']:
     shutil.copy2(repo / rel, target)
 command = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir', '--console',
     '--name', 'hard-backend', '--distpath', str(desk / 'backend-dist'), '--workpath', str(work / 'pyinstaller'),
-    '--specpath', str(work), '--paths', str(stage), '--add-data', str(stage) + ';project']
-for package in ['python_calamine', 'openpyxl', 'xlwings', 'win32com', 'pythoncom', 'pywintypes', 'segno', 'xlsxwriter', 'psutil', 'paramiko', 'cryptography']:
+    '--specpath', str(work), '--paths', str(stage), '--paths', str(stage / 'server'),
+    '--paths', str(stage / 'pult'), '--hidden-import', 'web', '--add-data', str(stage) + ';project']
+for package in ['python_calamine', 'openpyxl', 'lxml', 'tzdata', 'xlwings', 'win32com', 'pythoncom', 'pywintypes', 'segno', 'xlsxwriter', 'psutil', 'paramiko', 'cryptography']:
     command += ['--collect-all', package]
+command += ['--hidden-import','zoneinfo','--hidden-import','win32file','--collect-all','dotenv']
 for package in ['PySide6', 'PyQt6', 'PyQt5', 'numpy', 'pandas', 'matplotlib', 'scipy', 'torch', 'tkinter', 'IPython', 'pytest']:
     command += ['--exclude-module', package]
 command.append(str(desk / 'tools/backend-entry.py'))

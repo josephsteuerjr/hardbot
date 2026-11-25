@@ -10,6 +10,14 @@ import re
 import db
 
 
+def protocol_version(value):
+    """Numeric wire version; diagnostic prerelease/build suffix stays intact."""
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r'([0-9]{1,4})\.([0-9]{1,4})\.([0-9]{1,4})(?:[-+][A-Za-z0-9.-]{1,24})?', value)
+    return tuple(map(int, match.groups())) if match else None
+
+
 def init_schema(conn):
     conn.execute("""CREATE TABLE IF NOT EXISTS account_client_versions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,11 +44,12 @@ def metadata(headers):
     if not version and not shell:
         return None
     product = headers.get('X-Work-Product', '')
-    if product not in ('hard', 'soft', 'manager', 'analyst'):
+    if product not in ('hard', 'soft', 'manager', 'analyst', 'crm'):
         product = ''
     ua = headers.get('User-Agent', '')
     desktop_bridge = headers.get('X-Client-Runtime') == 'desktop' and product == 'analyst'
-    source = ('pwa' if shell else 'desktop' if desktop_bridge else 'compatibility' if ua.startswith('Python-urllib/')
+    identity_bridge = product == 'crm' and headers.get('X-Client-Runtime') == 'crm-identity-bridge'
+    source = ('compatibility' if identity_bridge else 'pwa' if shell else 'desktop' if desktop_bridge else 'compatibility' if ua.startswith('Python-urllib/')
               else 'desktop' if 'Electron/' in ua else 'reported')
     return {'client_version': version, 'shell_version': shell, 'product': product, 'source': source}
 

@@ -1,0 +1,56 @@
+    # BEGIN CRM mobile root entry
+    @crm_old_mobile_port {
+        method GET HEAD
+        path / /mobile /mobile/
+        expression `{http.request.hostport} == 'hard.rimborso.ru:8080'`
+        not query legacy=1
+    }
+    redir @crm_old_mobile_port https://hard.rimborso.ru{uri} 302
+
+    @crm_root_recovery {
+        method GET HEAD
+        path /
+        query legacy=1
+    }
+    header @crm_root_recovery {
+        +Content-Security-Policy "worker-src 'none'"
+        defer
+    }
+
+    @crm_root_entry {
+        method GET HEAD
+        path /
+        not query legacy=1
+    }
+    handle @crm_root_entry {
+        header {
+            Cache-Control "no-store, max-age=0"
+            Referrer-Policy "no-referrer"
+            Content-Security-Policy "frame-ancestors 'self' https://web.telegram.org https://*.telegram.org"
+        }
+        rewrite * /mobile/root-index.html
+        reverse_proxy crm-mobile-api:8081
+    }
+
+    handle /crm-root-mobile-entry-1.js {
+        header {
+            Content-Type "text/javascript; charset=utf-8"
+            X-Content-Type-Options "nosniff"
+            Cache-Control "no-store"
+        }
+        rewrite * /crm-root-mobile-1/launch.js
+        reverse_proxy cis-collection-analyst-updates:8080
+    }
+
+    @crm_root_worker path /sw.js /crm-root-mobile-worker-1.js
+    handle @crm_root_worker {
+        header {
+            Content-Type "text/javascript; charset=utf-8"
+            Service-Worker-Allowed /
+            X-Content-Type-Options "nosniff"
+            Cache-Control "no-store"
+        }
+        rewrite * /crm-root-mobile-1/worker.js
+        reverse_proxy cis-collection-analyst-updates:8080
+    }
+    # END CRM mobile root entry

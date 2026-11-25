@@ -4,6 +4,7 @@ The disposable runtime is unchanged. Preview, check and apply use its actual
 HTTP API against a synthetic loopback server and a synthetic workbook.
 """
 import json
+from datetime import date
 import os
 import shutil
 import subprocess
@@ -22,6 +23,8 @@ repo = Path(__file__).resolve().parents[2]
 soft_payment = os.environ.get('HARD_QA_PROFILE') == 'soft_payment'
 qa = Path(os.environ.get('HARD_QA_ROOT', repo / '_local/redesign-2026-10-09')) / ('soft-excel-qa' if soft_payment else 'excel-qa')
 qa.mkdir(parents=True, exist_ok=True)
+if os.environ.get('HARD_QA_TRACKING')=='1':
+    assert not (qa/'journal').exists(),'Use a fresh HARD_QA_ROOT: the previous primary ledger records earlier fixture writes.'
 runtime = qa / 'runtime'
 if runtime.exists():
     assert runtime.resolve().parent == qa.resolve() and not runtime.is_symlink()
@@ -34,6 +37,11 @@ fields = [f for f in db.export_schema() if f['source'] in ('сх', 'хард')]
 if soft_payment:
     hard_keys={'visit_date','who_at_address','contact_with','visit_comment','client_location','purpose_rf','agreed_payment'}
     fields=[f for f in db.export_schema() if f['key'] not in hard_keys]
+manual_key = 'excel_call_edited_on' if soft_payment else 'excel_visit_edited_on'
+anchor_key = 'soft_call_status' if soft_payment else 'visit_date'
+anchor = next(index for index, field in enumerate(fields) if field['key'] == anchor_key)
+fields.insert(anchor, {'key': manual_key, 'title': 'Дата ручной правки',
+                      'source': 'софт' if soft_payment else 'хард'})
 columns = {f['key']: index for index, f in enumerate(fields)}
 xlsx = qa / 'sample.xlsx'
 book = Workbook()
@@ -43,6 +51,7 @@ sheet.append(['Инфо', None, None, 'Выезд'])
 sheet.append([f['title'] for f in fields])
 sheet.append([f['source'] for f in fields])
 initial = {'contract_id':'TEST-01', 'client':'Синтетический клиент', 'debt_total':123.45}
+initial[manual_key] = date(2026, 1, 2)
 sheet.append([initial.get(f['key']) for f in fields])
 book.create_sheet('Не менять')['A1'] = 'Preserved witness'
 if soft_payment:
@@ -109,6 +118,11 @@ settings = qa / 'settings.json'
 settings.write_text(json.dumps({'profiles': {'Test': {'url': f'http://127.0.0.1:{remote.server_port}',
                             'device_token': 'synthetic-excel-token'}}, 'active': 'Test'}), encoding='utf-8')
 env = dict(os.environ, HARD_PULT_SETTINGS=str(settings), HARD_PULT_PROTECT_TOKENS='1', PYTHONIOENCODING='utf-8')
+tracking_qa=os.environ.get('HARD_QA_TRACKING')=='1'
+if tracking_qa:
+    tracking_config=qa/'manual-dates.json'
+    tracking_config.write_text(json.dumps(dict(enabled=True,books=[str(xlsb)],journal=str(qa/'journal'))),encoding='utf-8')
+    env.update(HARD_MANUAL_DATES_CONFIG=str(tracking_config),LOCALAPPDATA=str(qa/'local-profile'))
 p = subprocess.Popen([str(runtime / 'hard-backend.exe')], env=env, stdout=subprocess.PIPE,
                      stderr=subprocess.PIPE, text=True, encoding='utf-8', creationflags=subprocess.CREATE_NO_WINDOW)
 try:
@@ -151,6 +165,8 @@ try:
     with python_calamine.CalamineWorkbook.from_path(xlsb) as result:
         rows = result.get_sheet_by_name('Портфели').to_python()
         assert [rows[3][columns[k]] for k in ('contract_id','client','debt_total')] == ['TEST-01', 'Синтетический клиент', 123.45]
+        manual_date = rows[3][columns[manual_key]]
+        assert str(manual_date)[:10] == '2026-01-02', manual_date
         if soft_payment:
             assert rows[3][columns['soft_comment']]=='Synthetic completed call'
             assert rows[3][columns['last_payment_sum']]==1249.3
@@ -165,8 +181,17 @@ try:
             assert checked.Worksheets('Статистика сотрудника').Range('C2').Formula==original_formula
             checked.Close(False)
         finally:app.Quit()
+    if tracking_qa:
+        sys.path.insert(0,str(repo))
+        from pult.core.manual_shared import SharedEngine
+        observer=SharedEngine(qa/'journal',qa/'other-computer')
+        tracking_result=observer.scan(xlsb)
+        assert tracking_result['writes']==0 and tracking_result['pending']==0,tracking_result
+        assert list((qa/'journal').rglob('auto-*.complete.json'))
     (qa / 'RESULTS.json').write_text(json.dumps({'frozenRuntime': True, 'unchangedEnrichmentEngine': True,
         'realExcelCOM': True, 'xlsbWriteVerified': True, 'unrelatedSheetPreserved': True,
+        'manualExcelDatePreserved': True,
+        'sharedPythonAutomaticWriteVerified':tracking_qa,
         'realFrozenHTTPPreviewCheckApply': True, 'loopbackSyntheticAdmin': True,
         'softMissingPaymentColumnRegression':soft_payment,
         'applied': applied}, ensure_ascii=False, indent=2), encoding='utf-8')

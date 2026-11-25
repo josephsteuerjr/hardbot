@@ -1,0 +1,22 @@
+**
+!server/
+!server/**
+!pult/
+!pult/**
+!registry_cycle/
+!registry_cycle/**
+!tools/
+!tools/crm_runtime.py
+!tools/crm_runtime_permissions.sql
+**/__pycache__/**
+**/*.pyc
+**/.env
+**/.env.*
+**/_local/**
+**/*.db
+**/*.db-*
+**/*.sqlite*
+**/data/**
+**/settings.json
+**/backend-settings.json
+**/настройки пульта.json

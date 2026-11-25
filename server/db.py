@@ -9,6 +9,7 @@
 import hashlib
 import hmac
 import json
+import math
 import workday
 import logging
 import os
@@ -21,6 +22,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import country_scope
+import edit_tracking
 import debt
 from exchange_contract import (
     ENRICHMENT_SOURCE_KEYS,
@@ -192,6 +194,10 @@ BOOKKEEPING = [
     ("soft_next_call_date", "TEXT"),
     ("soft_extra_phone", "TEXT"),
     ("payment_status_data", "TEXT"),
+    ("excel_visit_edited_on", "TEXT"),
+    ("excel_call_edited_on", "TEXT"),
+    ("app_visit_edited_at", "TEXT"),
+    ("app_call_edited_at", "TEXT"),
 ]
 
 SOFT_SNAPSHOT_KEYS = ("soft_call_status", "soft_comm_date", "soft_comment",
@@ -521,15 +527,45 @@ def _bump_version() -> None:
     _DATA_VERSION += 1
 
 
+class _Connection(sqlite3.Connection):
+    """A transaction context owns and closes its database connection.
+
+    sqlite3's default context manager only commits or rolls back. Keeping its
+    connections alive until cyclic GC can exhaust the server's file limit.
+    Explicit callers can still use close() and pass the connection through
+    nullcontext() when its lifetime belongs to an outer transaction.
+    """
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
+def registry_connect(*, readonly=False):
+    secret = os.environ.get("HARD_REGISTRY_DATABASE_URL_FILE")
+    if secret:
+        import registry_postgres
+        return registry_postgres.connect(secret, readonly=readonly)
+    return connect()
+
+
 def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.row_factory = sqlite3.Row
-    # WAL: бот и Tkinter-пульт пишут в один файл; WAL переживает аварийную
-    # перезагрузку и допускает одновременное чтение во время записи.
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA busy_timeout=8000")
-    return conn
+    conn = sqlite3.connect(DB_PATH, timeout=10, factory=_Connection)
+    try:
+        conn.row_factory = sqlite3.Row
+        # WAL: бот и Tkinter-пульт пишут в один файл; WAL переживает аварийную
+        # перезагрузку и допускает одновременное чтение во время записи.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=8000")
+        from crm.legacy import writing as _crm_writing
+        conn.create_function('crm_canonical_write',0,lambda:int(_crm_writing.get()))
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def _bot_snapshot(values, completed_at: str) -> dict | None:
@@ -732,7 +768,8 @@ def _clearing_would_destroy_last_copy(row, file_visit_date, delivered: bool) -> 
     if not written or written != str(row["visit_comment"] or "").strip():
         return False
     visit = _as_date(snapshot.get("visit_date"))
-    return visit is not None and _as_date(file_visit_date) != visit
+    return visit is not None and (visit.strftime("%Y-%m") == workday.today().strftime("%Y-%m")
+                                  or _as_date(file_visit_date) != visit)
 
 
 def _backfill_bot_visit_snapshots(conn: sqlite3.Connection) -> int:
@@ -857,6 +894,8 @@ def init_db() -> None:
         employee_identity.init_schema(conn)
         import office_work
         office_work.init_schema(conn)
+        import employee_workspace
+        employee_workspace.init_schema(conn)
         call_cols = {r[1] for r in conn.execute("PRAGMA table_info(calls)")}
         for col in ("values_json", "contracts_json"):
             if col not in call_cols:
@@ -904,7 +943,8 @@ def init_db() -> None:
                           ("received_at", "TEXT"), ("fill_seconds", "INTEGER"),
                           ("saved_at", "TEXT"), ("session_id", "TEXT"),
                           ("evidence_level", "TEXT"), ("evidence", "TEXT"),
-                          ("employee", "TEXT")):
+                          ("employee", "TEXT"), ("request_hash", "TEXT"),
+                          ("values_json", "TEXT"), ("contracts_json", "TEXT")):
             if col not in vcols:
                 conn.execute(f"ALTER TABLE visits ADD COLUMN {col} {decl}")
         # employee — КТО выезжал (ФИО, от чьего имени закрыт визит). Без неё выезд
@@ -1138,6 +1178,12 @@ def init_db() -> None:
               file_path TEXT NOT NULL, value TEXT NOT NULL, visit_date TEXT,
               responsible TEXT, delivered_at TEXT NOT NULL, receipt_digest TEXT,
               PRIMARY KEY (contract_id, field_key, file_path)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS enrichment_receipts (
+              receipt_digest TEXT PRIMARY KEY, request_hash TEXT NOT NULL,
+              recorded INTEGER NOT NULL, recorded_at TEXT NOT NULL
             )
         """)
         # Мигрируем только доказанную последнюю доставку в конкретную книгу.
@@ -1506,6 +1552,8 @@ def init_db() -> None:
         import staff_roster
         import pc_registration
         staff_roster.init_schema(conn)
+        import call_scripts
+        call_scripts.init_schema(conn)
         pc_registration.init_schema(conn)
         import team_work
         team_work.init_schema(conn)
@@ -1851,7 +1899,7 @@ def guest(telegram_id: int) -> dict | None:
 # --- Привязка «кто есть кто» (telegram_id → сотрудник, одноразово) -----------
 def employees_in_registry() -> list[sqlite3.Row]:
     """Список ответственных сотрудников из реестра (для самовыбора)."""
-    with connect() as conn:
+    with registry_connect() as conn:
         return conn.execute(
             "SELECT responsible AS employee, COUNT(*) AS contracts FROM clients "
             "WHERE responsible IS NOT NULL AND TRIM(responsible) <> '' "
@@ -3030,13 +3078,15 @@ def track_points_between(employee: str, lo_iso: str, hi_iso: str) -> list[dict]:
 
 # --- Настройки --------------------------------------------------------------
 def get_setting(key: str) -> str | None:
-    with connect() as conn:
+    connection = registry_connect if key == REGISTRY_COLUMN_MAP_SETTING else connect
+    with connection() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else None
 
 
 def set_setting(key: str, value: str) -> None:
-    with connect() as conn:
+    connection = registry_connect if key == REGISTRY_COLUMN_MAP_SETTING else connect
+    with connection() as conn:
         conn.execute(
             "INSERT INTO settings (key, value) VALUES (?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -3979,24 +4029,44 @@ def receipts_for(contract_ids: list[str]) -> dict[str, list[dict]]:
     return out
 
 
-def reported_payments_for(contract_ids: list[str] | None = None) -> dict[str, list[dict]]:
-    """Записанные сотрудником оплаты: конкретный КД, отдельно от чеков и реестра."""
+def _crm_payment_facts(conn, kind, ids=None, *, include_revisions=False):
+    if getattr(conn, "dialect", None) != "postgresql":
+        return []
+    from crm.payment_read import facts
+    return facts(conn, kind, ids, include_revisions=include_revisions)
+
+
+def reported_payments_for(contract_ids: list[str] | None = None, *, include_receipts=False, _conn=None) -> dict[str, list[dict]]:
+    """Оплаты конкретного КД; экспорт включает также чеки из приложения.
+
+    Это свидетельства сотрудников, а не независимое банковское подтверждение.
+    Обычный экран по-прежнему получает чеки отдельно от ручных записей.
+    """
     out = {}
     chunks = [None] if contract_ids is None else [contract_ids[i:i+400] for i in range(0,len(contract_ids),400)]
     for ids in chunks:
-        where = "source='manual'"
+        where = "source IN ('manual','app')" if include_receipts else "source='manual'"
         args = []
         if ids is not None:
             where += " AND contract_id IN (" + ','.join('?' for _ in ids) + ")"
             args = ids
-        with connect() as conn:
+        with (nullcontext(_conn) if _conn is not None else registry_connect(readonly=True)) as conn:
             rows = conn.execute("SELECT * FROM payment_evidence WHERE " + where +
                                 " ORDER BY created_at, id", args).fetchall()
-        for row in rows:
-            item = dict(row)
-            item["event_day"] = _payment_event_day(item)
+            from itertools import chain
+            native = _crm_payment_facts(conn, "reported_payment", ids)
+        for item in chain(map(dict, rows), native):
+            # Legacy attachments may have no entered amount/date. They remain
+            # visible as receipts, but cannot populate typed payment columns.
+            if item.get('source') == 'app' and (
+                    _as_date(item.get('paid_at')) is None
+                    or not isinstance(item.get('amount'), (int, float))
+                    or not math.isfinite(item['amount']) or item['amount'] <= 0):
+                continue
+            if "event_day" not in item:
+                item["event_day"] = _payment_event_day(item)
             item["text"] = reported_payment_text(item)
-            out.setdefault(row["contract_id"], []).append(item)
+            out.setdefault(item["contract_id"], []).append(item)
     return out
 
 
@@ -4009,7 +4079,8 @@ def _payment_event_day(item: dict) -> str:
 
 def reported_payment_text(item: dict) -> str:
     amount = format(float(item["amount"]), '.2f').rstrip('0').rstrip('.')
-    return (f"Оплата №{item['id']} · КД {item['contract_id']} · {item['paid_at']} · "
+    label = "CRM №" if item.get("source") == "crm" else "№"
+    return (f"Оплата {label}{item['id']} · КД {item['contract_id']} · {item['paid_at']} · "
             f"{amount} {item['currency'] or ''} · записал {item['employee'] or ''}").strip()
 
 
@@ -4065,6 +4136,8 @@ def record_reported_payment(op: str, contract_id: str, employee: str, uid: int,
                 if payment_owns_status(updated,"overall_result"):
                     changes["overall_result"] = result_status
                 if changes:
+                    if any(str(row[key] or "") != str(value or "") for key, value in changes.items()):
+                        changes["app_call_edited_at"] = created_at
                     conn.execute("UPDATE clients SET "+', '.join('"'+k+'"=?' for k in changes)+" WHERE contract_id=?",
                                  (*changes.values(),contract_id))
         conn.commit()
@@ -4219,15 +4292,14 @@ def photo_contract_dirs(contract_id: str) -> dict:
     лежат на диске. Здесь группируем ТЕМ ЖЕ person_key, но без фильтра
     ответственного."""
     cid = canonical_contract_id(contract_id)
-    row = get_client(cid)
     contracts, person = [], None
-    if row is not None:
-        key = person_key(row)
-        with connect() as conn:
-            cand = conn.execute("SELECT * FROM clients WHERE client IS ?",
-                                (row["client"],)).fetchall()
-        contracts = [c for c in cand if person_key(c) == key]
-        person = row["client"]
+    with registry_connect(readonly=True) as conn:
+        row = conn.execute("SELECT * FROM clients WHERE contract_id=?", (cid,)).fetchone()
+        if row is not None:
+            key = person_key(row)
+            person = row["client"]
+            candidates = conn.execute("SELECT * FROM clients WHERE client IS NOT DISTINCT FROM ?", (person,))
+            contracts = [item for item in candidates if person_key(item) == key]
     dirs = {cid} | {c["contract_id"] for c in contracts if c["contract_id"]}
     return {"cid": cid, "person": person, "contracts": contracts,
             "dirs": sorted(d for d in dirs if d)}
@@ -4243,7 +4315,7 @@ def visits_for_contracts(contract_ids: list[str]) -> list[sqlite3.Row]:
     for i in range(0, len(ids), 400):
         chunk = ids[i:i + 400]
         qs = ",".join("?" for _ in chunk)
-        with connect() as conn:
+        with registry_connect(readonly=True) as conn:
             out += conn.execute(
                 f"SELECT * FROM visits WHERE contract_id IN ({qs}) "
                 "ORDER BY COALESCE(created_at,'') DESC, id DESC",
@@ -4907,6 +4979,20 @@ def _group_persons(rows: list[sqlite3.Row]) -> list[dict]:
     return persons
 
 
+def _contactable_legacy_rows(rows, representative=None):
+    if not rows or not os.environ.get("HARD_REGISTRY_DATABASE_URL_FILE"):
+        return rows
+    ids = [row["contract_id"] for row in rows]
+    with registry_connect(readonly=True) as conn:
+        blocked = {row[0] for row in conn.execute(
+            "SELECT c.legacy_id FROM public.crm_contact_withdrawals w "
+            "JOIN public.crm_contracts c USING(contract_uuid) "
+            "WHERE c.legacy_id=ANY(?)", (ids,))}
+    if representative in blocked:
+        return []
+    return [row for row in rows if row["contract_id"] not in blocked]
+
+
 def clients_for_employee(employee: str) -> list[sqlite3.Row]:
     lo, hi = _period_bounds()
     with connect() as conn:
@@ -4914,6 +5000,7 @@ def clients_for_employee(employee: str) -> list[sqlite3.Row]:
             "SELECT * FROM clients WHERE responsible = ? ORDER BY client, contract_id",
             (employee,),
         ).fetchall()
+    rows = _contactable_legacy_rows(rows)
     if lo is None and hi is None:
         return rows
     return [r for r in rows if _date_in(r["assign_date"], lo, hi)]   # период по дате закрепления
@@ -4926,11 +5013,12 @@ def persons_for_employee(employee: str) -> list[dict]:
 # --- Контур «Софт»: портфель по второй колонке ответственности ---------------
 def clients_for_soft(employee: str) -> list[sqlite3.Row]:
     with connect() as conn:
-        return conn.execute(
+        rows = conn.execute(
             "SELECT * FROM clients WHERE responsible_soft = ? "
             "ORDER BY client, contract_id",
             (employee,),
         ).fetchall()
+    return _contactable_legacy_rows(rows)
 
 
 def persons_for_soft(employee: str) -> list[dict]:
@@ -4949,10 +5037,12 @@ def soft_portfolio_exists(employee: str) -> bool:
 def soft_employees() -> list[sqlite3.Row]:
     """Состав софт-команды из реестра: имя + счётчик + страны (как
     employees_in_registry, но по ответственного Сотрудник СОФТ)."""
-    with connect() as conn:
+    with registry_connect() as conn:
+        countries = ("STRING_AGG(DISTINCT COALESCE(country,''),',' ORDER BY COALESCE(country,''))"
+                     if getattr(conn, "dialect", None) == "postgresql" else "GROUP_CONCAT(DISTINCT COALESCE(country,''))")
         return conn.execute(
             "SELECT responsible_soft AS employee, COUNT(*) AS contracts, "
-            "GROUP_CONCAT(DISTINCT IFNULL(country,'')) AS countries "
+            f"{countries} AS countries "
             "FROM clients WHERE responsible_soft IS NOT NULL "
             "AND TRIM(responsible_soft) <> '' "
             "GROUP BY responsible_soft ORDER BY responsible_soft"
@@ -4964,18 +5054,20 @@ def _remember_registry_payments(conn) -> None:
     import debt
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     echoes = _manual_payment_echoes(conn)
+    payments = []
     for row in conn.execute("SELECT contract_id, last_payment_date, last_payment_sum, partner FROM clients "
                             "WHERE last_payment_date IS NOT NULL AND last_payment_sum IS NOT NULL").fetchall():
         day = _as_date(row["last_payment_date"])
         amount = registry_payment_amount(row["last_payment_sum"])
         if day is None or amount is None:
             continue
-        if (row["contract_id"],day.isoformat(),amount,debt.unit([row["partner"]])) in echoes:
+        currency = debt.unit([row["partner"]])
+        if (row["contract_id"],day.isoformat(),amount,currency) in echoes:
             continue
-        conn.execute("INSERT INTO registry_payments VALUES (?,?,?,?,?) "
+        payments.append((row["contract_id"], day.isoformat(), currency, amount, stamp))
+    conn.executemany("INSERT INTO registry_payments VALUES (?,?,?,?,?) "
                      "ON CONFLICT(contract_id,paid_at,currency) DO UPDATE SET amount=excluded.amount "
-                     "WHERE registry_payments.amount != excluded.amount",
-                     (row["contract_id"], day.isoformat(), debt.unit([row["partner"]]), amount, stamp))
+                     "WHERE registry_payments.amount != excluded.amount", payments)
 
 
 def registry_payments_for(contract_ids) -> list[dict]:
@@ -4983,7 +5075,7 @@ def registry_payments_for(contract_ids) -> list[dict]:
     import debt
     ids = sorted(set(str(cid) for cid in contract_ids))
     payments = {}
-    with connect() as conn:
+    with registry_connect() as conn:
         echoes = _manual_payment_echoes(conn)
         for start in range(0, len(ids), 400):
             chunk = ids[start:start + 400]
@@ -5000,6 +5092,10 @@ def registry_payments_for(contract_ids) -> list[dict]:
                     payments[(row["contract_id"], day.isoformat(), unit)] = {
                         "contract_id": row["contract_id"], "paid_at": day.isoformat(),
                         "currency": unit, "amount": amount}
+        posted = _crm_payment_facts(conn, "payment_confirmed", ids)
+    if posted:
+        from crm.payment_read import payment_history
+        return payment_history(payments, posted)
     return list(payments.values())
 
 
@@ -5007,10 +5103,12 @@ def _manual_payment_echoes(conn) -> set[tuple]:
     """A copied employee payment is not independent registry confirmation.
 
     Existing independent observations remain in registry_payments. A matching
-    manual echo in latest-payment columns cannot create/replace an observation.
+    employee echo in latest-payment columns cannot create/replace an observation.
     """
-    return {(r["contract_id"],r["paid_at"],registry_payment_amount(r["amount"]),r["currency"] or "")
-            for r in conn.execute("SELECT contract_id,paid_at,amount,currency FROM payment_evidence WHERE source='manual'")}
+    from itertools import chain
+    evidence = conn.execute("SELECT contract_id,paid_at,amount,currency FROM payment_evidence WHERE source IN ('manual','app')")
+    return {(r["contract_id"], r["paid_at"], registry_payment_amount(r["amount"]), r["currency"] or "")
+            for r in chain(evidence, _crm_payment_facts(conn, "reported_payment", include_revisions=True))}
 
 
 def calls_for_contracts(contract_ids, until: str) -> list:
@@ -5068,7 +5166,7 @@ def person_contracts(rep_contract_id: str) -> list[sqlite3.Row]:
     # Фильтруем ТЕМ ЖЕ ключом, что и группировка: иначе SQL и _group_persons
     # разойдутся, и визит разнесётся по договорам, которых карточка не показывает.
     key = person_key(row)
-    return [c for c in candidates if person_key(c) == key]
+    return _contactable_legacy_rows([c for c in candidates if person_key(c) == key], rep_contract_id)
 
 
 def search_persons(employee: str, query: str) -> list[dict]:
@@ -5082,16 +5180,17 @@ def search_persons(employee: str, query: str) -> list[dict]:
     lo, hi = _period_bounds()
     if lo or hi:
         rows = [r for r in rows if _date_in(r["assign_date"], lo, hi)]
-    return _group_persons(rows)
+    return _group_persons(_contactable_legacy_rows(rows))
 
 
 def plans_for_employee(employee: str) -> list[sqlite3.Row]:
     with connect() as conn:
-        return conn.execute(
+        rows = conn.execute(
             "SELECT * FROM clients WHERE responsible = ? AND reminder_date IS NOT NULL "
             "ORDER BY reminder_date",
             (employee,),
         ).fetchall()
+    return _contactable_legacy_rows(rows)
 
 
 def person_contracts_by_soft(rep_contract_id: str) -> list[sqlite3.Row]:
@@ -5110,17 +5209,24 @@ def person_contracts_by_soft(rep_contract_id: str) -> list[sqlite3.Row]:
             (row["client"], row["responsible_soft"]),
         ).fetchall()
     key = person_key(row)
-    return [c for c in candidates if person_key(c) == key]
+    return _contactable_legacy_rows([c for c in candidates if person_key(c) == key], rep_contract_id)
 
 
 def update_person(rep_contract_id: str, values: dict, *,
-                  by_soft: bool = False) -> None:
+                  by_soft: bool = False, result_edit_at: str | None = None) -> None:
     """Записать поля во ВСЕ договоры человека (выезд = на человека, не на КД).
     by_soft — группа по ответственного СОФТ (контур «Софт»)."""
     rows = (person_contracts_by_soft(rep_contract_id) if by_soft
             else person_contracts(rep_contract_id))
     for r in rows:
-        update_fields(r["contract_id"], values)
+        changes = dict(values)
+        # Only an accepted UI result edit supplies this context. Geocoding,
+        # reminders and registry import must not acquire an app result date.
+        result_keys = (set(SOFT_SNAPSHOT_KEYS) if by_soft else set(BOT_VISIT_KEYS) | {"tips"}) - {"reminder_date"}
+        accepted = result_keys & (set(BY_KEY) | set(dict(BOOKKEEPING))) & set(values)
+        if result_edit_at and any(str(r[key] or "") != str(values[key] or "") for key in accepted):
+            changes["app_call_edited_at" if by_soft else "app_visit_edited_at"] = result_edit_at
+        update_fields(r["contract_id"], changes)
 
 
 def record_bot_visit(rep_contract_id: str, values: dict,
@@ -5365,7 +5471,7 @@ def search_all(query: str) -> list[sqlite3.Row]:
 
 
 def stats_all() -> dict:
-    with connect() as conn:
+    with registry_connect() as conn:
         total = conn.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
         visited = conn.execute(
             "SELECT COUNT(*) FROM clients WHERE bot_visit_at IS NOT NULL "
@@ -5390,7 +5496,7 @@ def stats_by_country() -> list[dict]:
     остаются в общей статистике ``stats_all``, но не угадываются здесь.
     """
     employee_map = country_scope.employee_countries(list_managers())
-    with connect() as conn:
+    with registry_connect() as conn:
         registry_employees = {r["responsible"] for r in conn.execute(
             "SELECT DISTINCT responsible FROM clients "
             "WHERE responsible IS NOT NULL AND TRIM(responsible) <> ''")}
@@ -5887,23 +5993,40 @@ def save_visit_result(contract_id: str, agent_id: int, employee: str | None,
                       values: dict, payload: str, **journal) -> bool:
     """One transaction for ownership, idempotence, current fields and provenance."""
     notification = journal.pop("notification", None)
+    request_hash = journal.pop("request_hash", None) or _json_digest({
+        "contract_id": contract_id, "agent_id": agent_id, "employee": employee,
+        "values": values, "payload": payload,
+        "journal": {k: v for k, v in journal.items()
+                    if k not in {"dist_m", "geo_far", "evidence", "evidence_level"}},
+    })
     day = journal.get("on_date") or workday.today().isoformat()
     event_at = journal.get("saved_at") or datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     op_id = journal.get("op_id")
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        rep = conn.execute("SELECT * FROM clients WHERE contract_id=?", (contract_id,)).fetchone()
-        if not rep or (rep["responsible"] or "") != (employee or ""):
-            raise ValueError("Закрепление изменилось. Обновите портфель")
-        prior = conn.execute("SELECT contract_id,agent_id FROM visits WHERE op_id=?", (op_id,)).fetchone() if op_id else None
+        prior = conn.execute("SELECT contract_id,agent_id,request_hash FROM visits WHERE op_id=?", (op_id,)).fetchone() if op_id else None
         if prior:
             if prior["contract_id"] != contract_id or prior["agent_id"] != agent_id:
                 raise ValueError("op_id принадлежит другому выезду")
+            if not prior["request_hash"]:
+                raise ValueError("Выезд уже сохранён, но полный состав старой операции неизвестен. Сверьте сохранённый результат")
+            if prior["request_hash"] != request_hash:
+                raise ValueError("Идентификатор уже использован для другого результата выезда")
             return False
+        rep = conn.execute("SELECT * FROM clients WHERE contract_id=?", (contract_id,)).fetchone()
+        if not rep or (rep["responsible"] or "") != (employee or ""):
+            raise ValueError("Закрепление изменилось. Обновите портфель")
         candidates = conn.execute("SELECT * FROM clients WHERE client IS ? AND IFNULL(responsible,'')=IFNULL(?, '')",
                                   (rep["client"], rep["responsible"])).fetchall()
         contracts = [r for r in candidates if person_key(r) == person_key(rep)]
+        from crm.primary_fence import check_old_work
+        check_old_work(conn,[r['contract_id'] for r in contracts])
         is_new = log_visit(contract_id, agent_id, payload, employee=employee, _conn=conn, **journal)
+        if is_new:
+            conn.execute("UPDATE visits SET request_hash=?, values_json=?, contracts_json=? "
+                         "WHERE id=last_insert_rowid()",
+                         (request_hash, _canonical_json(values),
+                          _canonical_json([r["contract_id"] for r in contracts])))
         newer = any((r["bot_visit_event_at"] or (r["bot_visit_at"] + "T00:00:00" if r["bot_visit_at"] else "")) > event_at
                     or (r["bot_visit_at"] or "") > day for r in contracts)
         if is_new and not newer:
@@ -5913,6 +6036,8 @@ def save_visit_result(contract_id: str, agent_id: int, employee: str | None,
                     for key in COMMON_RESULT_KEYS:
                         current.pop(key, None)
                 current["visit_date"] = max(row["visit_date"] or "", day)
+                if any(str(row[k] or "") != str(v or "") for k, v in current.items()):
+                    current["app_visit_edited_at"] = (event_at if journal.get("saved_at") or day == workday.today().isoformat() else None)
                 current["updated_at"] = workday.today().isoformat()
                 sets = ", ".join(f'"{k}"=?' for k in current)
                 conn.execute(f"UPDATE clients SET {sets} WHERE contract_id=?", (*current.values(), row["contract_id"]))
@@ -5953,19 +6078,26 @@ def save_call_result(contract_id: str, agent_id: int, employee: str,
         event_at = on_date + "T00:00:00"
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        prior = conn.execute("SELECT * FROM calls WHERE op_id=?", (op_id,)).fetchone() if op_id else None
+        if prior:
+            if prior["contract_id"] != contract_id or prior["agent_id"] != agent_id:
+                raise ValueError("op_id принадлежит другому звонку")
+            if prior["values_json"]:
+                # Idempotency also protects older clients without card_revision.
+                # Exclude values derived anew by the server on a later retry.
+                derived = {"forecast", "overall_result", "soft_comm_date"}
+                original = json.loads(prior["values_json"])
+                if {k: v for k, v in original.items() if k not in derived} != {k: v for k, v in values.items() if k not in derived}:
+                    raise ValueError("Идентификатор уже использован для другого результата")
+            return {"dedup": True, "applied": False}
         current_rep = conn.execute("SELECT * FROM clients WHERE contract_id=?", (contract_id,)).fetchone()
         if not current_rep or current_rep["responsible_soft"] != employee:
             raise ValueError("Закрепление изменилось. Обновите портфель")
         candidates = conn.execute("SELECT * FROM clients WHERE client IS ? AND responsible_soft=?",
                                   (current_rep["client"], employee)).fetchall()
         rows = [r for r in candidates if person_key(r) == person_key(current_rep)]
-        prior = conn.execute("SELECT * FROM calls WHERE op_id=?", (op_id,)).fetchone() if op_id else None
-        if prior:
-            if prior["contract_id"] != contract_id or prior["agent_id"] != agent_id:
-                raise ValueError("op_id принадлежит другому звонку")
-            if expected_revision is not None and prior["values_json"] != encoded:
-                raise ValueError("Идентификатор уже использован для другого результата")
-            return {"dedup": True, "applied": False}
+        from crm.primary_fence import check_old_work
+        check_old_work(conn,[r['contract_id'] for r in rows])
         if expected_revision is not None:
             import office_work
             events = office_work._events(conn, [r["contract_id"] for r in rows])
@@ -5973,7 +6105,7 @@ def save_call_result(contract_id: str, agent_id: int, employee: str,
                 raise ValueError("Карточка изменилась. Обновите её и сверьте ввод перед повтором")
         last = conn.execute("SELECT * FROM calls WHERE contract_id=? AND created_at=? "
                             "ORDER BY id DESC LIMIT 1", (contract_id, on_date)).fetchone()
-        if last and last["employee"] == employee and last["values_json"] == encoded:
+        if not op_id and last and last["employee"] == employee and last["values_json"] == encoded:
             previous_ms = evidence.to_ms(last["saved_at"] or last["received_at"])
             current_ms = evidence.to_ms(event_at)
             if previous_ms is not None and current_ms is not None and 0 <= current_ms - previous_ms <= 4000:
@@ -6021,6 +6153,8 @@ def save_call_result(contract_id: str, agent_id: int, employee: str,
                 current.pop("soft_call_status", None)
                 if payment_owns_status(row,"overall_result"):
                     current.pop("overall_result", None)
+            if any(str(row[k] or "") != str(v or "") for k, v in current.items()):
+                current["app_call_edited_at"] = (event_at if saved_at or on_date == workday.today().isoformat() else None)
             current.update(bot_call_at=event_at,
                            bot_call_data=json.dumps(snapshot, ensure_ascii=False),
                            call_office_data=None,
@@ -7390,9 +7524,10 @@ def registry_rows(
         raise ValueError("неверная дата окончания выгрузки")
     if since and until and since > until:
         raise ValueError("начало окна выгрузки позже окончания")
-    with connect() as conn:
+    with registry_connect(readonly=True) as conn:
         rows = conn.execute("SELECT * FROM clients ORDER BY client").fetchall()
-    payments = reported_payments_for()
+        confirmations = _crm_latest_confirmations(conn)
+        payments = reported_payments_for(include_receipts=True, _conn=conn)
     result = []
     for row in rows:
         if (
@@ -7413,7 +7548,9 @@ def registry_rows(
                        (until is None or day <= until) for day in fact_days):
                 continue
         out = {f.key: row[f.key] for f in FIELDS}
+        _apply_confirmed_payment(out, confirmations)
         out["responsible_soft"] = row["responsible_soft"]
+        out.update({key: row[key] for key in edit_tracking.KEYS})
         # Поля визита — из ДОКАЗАННОГО снимка, а не из сырых колонок. Сырые
         # хранят копию последнего импорта: у 440 из 890 договоров с визитом там
         # лежит офисное «Не обработан», потому что офис по этому кейсу ещё не
@@ -7441,6 +7578,24 @@ def registry_rows(
     return result
 
 
+def _crm_latest_confirmations(conn):
+    posted = _crm_payment_facts(conn, "payment_confirmed")
+    if not posted:
+        return {}
+    from crm.payment_read import latest_confirmations
+    return latest_confirmations(posted)
+
+
+def _apply_confirmed_payment(row, confirmations):
+    posted = confirmations.get(row["contract_id"])
+    if posted:
+        registry_day = _as_date(row.get("last_payment_date"))
+        if registry_day is None or date.fromisoformat(posted["paid_at"]) > registry_day or (
+                date.fromisoformat(posted["paid_at"]) == registry_day and registry_payment_amount(row.get("last_payment_sum")) is None):
+            row["last_payment_date"] = posted["paid_at"]
+            row["last_payment_sum"] = posted["amount"]
+
+
 def enrichment_rows() -> list[dict]:
     """Безопасные строки для точечного обогащения живых файлов.
 
@@ -7449,16 +7604,19 @@ def enrichment_rows() -> list[dict]:
     boolean-маркер нужен новому пульту. Поэтому даже старый пульт, который всё
     ещё смотрит лишь на непустой visit_date, не увидит неподтверждённый мусор.
     """
-    with connect() as conn:
+    with registry_connect(readonly=True) as conn:
         rows = conn.execute("SELECT * FROM clients ORDER BY client").fetchall()
+        confirmations = _crm_latest_confirmations(conn)
         # Окно определяется фактом из журнала, включая legacy-снимки.
         call_days = {r[0]: r[1] for r in conn.execute(
             "SELECT contract_id, MAX(created_at) FROM calls GROUP BY contract_id")}
-    payments = reported_payments_for()
+        payments = reported_payments_for(include_receipts=True, _conn=conn)
     result = []
     for raw in rows:
         row = {f.key: raw[f.key] for f in FIELDS}
+        _apply_confirmed_payment(row, confirmations)
         row["responsible_soft"] = raw["responsible_soft"]
+        row.update({key: raw[key] for key in edit_tracking.KEYS})
         for key in BOT_VISIT_KEYS:
             if key in row:
                 row[key] = None
@@ -7516,9 +7674,11 @@ def enrichment_rows() -> list[dict]:
         if reported:
             row["_payment_day"] = max(p["event_day"] for p in reported)
             row["soft_comment"] = append_reported_payments(row.get("soft_comment"), reported)
-            latest = max(reported,key=lambda p:(p["paid_at"],p["created_at"],p["id"]))
-            row["_reported_payment_sum"] = latest["amount"]
-            row["_reported_payment_date"] = latest["paid_at"]
+            typed = [p for p in reported if p.get("same_currency", True) and p["amount"] > 0]
+            if typed:
+                latest = max(typed, key=lambda p: (p["paid_at"], p["created_at"], p["id"]))
+                row["_reported_payment_sum"] = latest["amount"]
+                row["_reported_payment_date"] = latest["paid_at"]
         if payment_owns_status(raw):
             status = payment_status_snapshot(raw)
             row["soft_call_status"] = status["status"]
@@ -7541,10 +7701,10 @@ def enrichment_ledger(employees: list[str] | None = None) -> dict[str, dict]:
     "responsible"}}}. employees — сузить до книг этих ответственных; пусто —
     весь реестр. Пульт передаёт его в enrich.build_plan как ``ledger``."""
     wanted = {str(e).strip().casefold() for e in (employees or []) if str(e).strip()}
-    with connect() as conn:
+    with registry_connect() as conn:
         rows = conn.execute(
             "SELECT contract_id, field_key, value, visit_date, responsible, "
-            "delivered_at FROM enrichment_ledger ORDER BY contract_id, field_key"
+            "delivered_at, receipt_digest FROM enrichment_ledger ORDER BY contract_id, field_key"
         ).fetchall()
     out: dict[str, dict] = {}
     for r in rows:
@@ -7555,13 +7715,14 @@ def enrichment_ledger(employees: list[str] | None = None) -> dict[str, dict]:
             "visit_date": r["visit_date"] or "",
             "at": r["delivered_at"],
             "responsible": r["responsible"] or "",
+            "receipt_digest": r["receipt_digest"] or "",
         }
     return out
 
 
 def enrichment_book_ledger(employees: list[str] | None = None) -> dict:
     wanted = {_name_key(e) for e in (employees or []) if str(e).strip()}
-    with connect() as conn:
+    with registry_connect() as conn:
         rows = conn.execute("SELECT * FROM enrichment_book_ledger ORDER BY file_path, contract_id, field_key").fetchall()
     out = {}
     for r in rows:
@@ -7570,8 +7731,17 @@ def enrichment_book_ledger(employees: list[str] | None = None) -> dict:
         path = str(r["file_path"]).replace("\\", "/").casefold()
         out.setdefault(path, {}).setdefault(r["contract_id"], {})[r["field_key"]] = {
             "value": r["value"], "visit_date": r["visit_date"] or "",
-            "at": r["delivered_at"], "responsible": r["responsible"] or ""}
+            "at": r["delivered_at"], "responsible": r["responsible"] or "",
+            "receipt_digest": r["receipt_digest"] or ""}
     return out
+
+
+def enrichment_receipt(receipt_digest: str) -> dict | None:
+    """Immutable acknowledgement, independent of later deliveries to the same cells."""
+    with registry_connect() as conn:
+        row = conn.execute("SELECT * FROM enrichment_receipts WHERE receipt_digest=?",
+                           (str(receipt_digest),)).fetchone()
+    return dict(row) if row else None
 
 
 def record_enrichment_deliveries(entries: list, receipt_digest: str = "") -> int:
@@ -7580,7 +7750,9 @@ def record_enrichment_deliveries(entries: list, receipt_digest: str = "") -> int
     реестра не осталась записанной."""
     if not isinstance(entries, list):
         raise ValueError("entries должен быть списком")
-    digest = str(receipt_digest or "").strip()[:128]
+    digest = str(receipt_digest or "").strip()
+    if len(digest) > 128:
+        raise ValueError("Идентификатор квитанции слишком длинный")
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     prepared: list[tuple] = []
     for i, e in enumerate(entries):
@@ -7605,9 +7777,18 @@ def record_enrichment_deliveries(entries: list, receipt_digest: str = "") -> int
             str(e.get("file") or e.get("file_path") or "")[:1000],
             now, digest,
         ))
-    if not prepared:
-        return 0
-    with connect() as conn:
+    request_hash = _json_digest(sorted([(*r[:5], str(r[5]).replace("\\", "/").casefold())
+                                       for r in prepared]))
+    with registry_connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if digest:
+            previous = conn.execute("SELECT * FROM enrichment_receipts WHERE receipt_digest=?", (digest,)).fetchone()
+            if previous:
+                if previous["request_hash"] != request_hash:
+                    raise ValueError("Квитанция уже использована для другого состава доставки")
+                return previous["recorded"]
+        if not prepared:
+            return 0
         conn.executemany(
             "INSERT INTO enrichment_ledger (contract_id, field_key, value, "
             "visit_date, responsible, file_path, delivered_at, receipt_digest) "
@@ -7628,6 +7809,9 @@ def record_enrichment_deliveries(entries: list, receipt_digest: str = "") -> int
             "delivered_at=excluded.delivered_at, receipt_digest=excluded.receipt_digest",
             [(*r[:5], str(r[5]).replace("\\", "/").casefold(), *r[6:]) for r in prepared if r[5]],
         )
+        if digest:
+            conn.execute("INSERT INTO enrichment_receipts VALUES (?,?,?,?)",
+                         (digest, request_hash, len(prepared), now))
         conn.commit()
     return len(prepared)
 
@@ -7755,7 +7939,7 @@ def register_import_authorization(
     source_id = verified["source_id"]
     sequence = verified["sequence"]
     proof_json = _canonical_json(proof)
-    with connect() as conn:
+    with registry_connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
             "SELECT * FROM import_receipts WHERE proof_digest=?",
@@ -7828,7 +8012,7 @@ def register_import_authorization(
 
 
 def import_authorization_status(proof_digest: str) -> dict | None:
-    with connect() as conn:
+    with registry_connect() as conn:
         row = conn.execute(
             "SELECT proof_digest, source_kind, source_id, sequence, status, "
             "registered_at, expires_at, consumed_at, result_digest "
@@ -7838,10 +8022,24 @@ def import_authorization_status(proof_digest: str) -> dict | None:
     return dict(row) if row is not None else None
 
 
+def import_receipt_result(proof_digest: str) -> dict:
+    with registry_connect(readonly=True) as conn:
+        row = conn.execute(
+            "SELECT status,consumed_at,result_json,result_digest FROM import_receipts WHERE proof_digest=?",
+            (proof_digest,),
+        ).fetchone()
+    if not row or row["status"] != "consumed":
+        return {"status": row["status"] if row else "absent"}
+    result = json.loads(row["result_json"])
+    if _json_digest(result) != row["result_digest"]:
+        raise ValueError("Квитанция импорта не прошла проверку.")
+    return {"status": "consumed", "consumed_at": row["consumed_at"], "result": result}
+
+
 def clear_pending_import_authorizations() -> int:
     """Invalidate pre-reset permissions while preserving consumed audit/head."""
 
-    with connect() as conn:
+    with registry_connect() as conn:
         count = conn.execute(
             "DELETE FROM import_receipts WHERE status='pending'"
         ).rowcount
@@ -7887,8 +8085,8 @@ def _register_authorization_row(
     # мы внутри BEGIN IMMEDIATE — второй коннект встал бы на блокировке, и запись
     # молча терялась бы (audit_access глушит исключения намеренно).
     conn.execute(
-        "INSERT INTO audit (ts, actor, action, target, detail) VALUES (?,?,?,?,?)",
-        (now.isoformat(timespec="seconds"), 0,
+        "INSERT INTO audit (ts, actor, action, target, detail) VALUES (?,'0',?,?,?)",
+        (now.isoformat(timespec="seconds"),
          "import_self_authorized" if self_issued else "import_authorized",
          verified_source["digest"], source_kind))
 
@@ -8519,6 +8717,11 @@ def import_grid(
         report["header_row_tried"] = best_h + 1
         report["header_sample"] = [str(c).strip() for c in rows[best_h] if c not in (None, "")][:20]
         return report
+    try:
+        edit_columns = edit_tracking.columns(rows[best_h])
+    except ValueError as exc:
+        report.update(blocked=True, error=str(exc))
+        return report
     recognized_positions: dict[str, list[int]] = {}
     normalized_title_positions: dict[str, list[int]] = {}
     normalized_title_samples: dict[str, str] = {}
@@ -8544,6 +8747,7 @@ def import_grid(
         normalized_title_samples[title]: positions
         for title, positions in normalized_title_positions.items()
         if len(positions) > 1
+        and _norm_title(title) != _norm_title(edit_tracking.CAPTION)
     }
     if duplicate_headers or duplicate_titles:
         report["blocked"] = True
@@ -8621,7 +8825,7 @@ def import_grid(
     extra_columns: list[str] = []
     extra_cols: dict[int, dict] = {}
     for index, (cell, key) in enumerate(zip(rows[best_h], col_keys)):
-        if cell in (None, "") or key is not None:
+        if cell in (None, "") or key is not None or index in edit_columns:
             continue
         title = str(cell).strip()
         if not title:
@@ -8800,6 +9004,9 @@ def import_grid(
 
     # Сначала разобрать ВЕСЬ файл в памяти. Это обязательный preflight: при
     # повторе КД не должна успеть записаться ни одна предыдущая строка.
+    import employee_workspace
+    monthly_columns = employee_workspace.month_columns(rows[best_h])
+    monthly_raw = {}
     grouped: dict[str, dict] = {}
     extra_values: dict[str, dict[str, str]] = {}
     duplicate_conflicts: dict[str, set[str]] = {}
@@ -8815,6 +9022,15 @@ def import_grid(
             continue
         report["total_rows"] += 1
         data = {}
+        for column, tracking_key in edit_columns.items():
+            raw_date = raw[column] if column < len(raw) else None
+            try:
+                day_value = edit_tracking.canonical_day(raw_date)
+            except ValueError as exc:
+                report.update(blocked=True, error=f"Строка {offset}: {exc}")
+                return report
+            if day_value:
+                data[tracking_key] = day_value
         exact_comment_keys = requested_comment_headers
         for index, key in enumerate(col_keys):
             val = raw[index] if index < len(raw) else None
@@ -8892,6 +9108,7 @@ def import_grid(
         if not cid:
             report["skipped_no_id"] += 1
             continue
+        monthly_raw.setdefault(cid, raw)
         if extra_cols:
             # Дополнительные поля сохраняем как ТЕКСТ, как он стоит в файле:
             # смысл новой колонки боту неизвестен, и любое «умное» приведение
@@ -9015,9 +9232,14 @@ def import_grid(
         for key in owned - data.keys():
             data[key] = None
 
-    with connect() as conn:
-        if require_source_proof:
+    with registry_connect() as conn:
+        native_registry = getattr(conn, "dialect", None) == "postgresql"
+        if native_registry:
+            from registry_postgres import begin_import
+            begin_import(conn)
+        elif require_source_proof:
             conn.execute("BEGIN IMMEDIATE")
+        if require_source_proof:
             try:
                 replay = _authorized_import_state(
                     conn,
@@ -9032,7 +9254,14 @@ def import_grid(
             if replay is not None:
                 conn.rollback()
                 return replay
+        if native_registry:
+            from registry_postgres import stage_clients
+            stage_clients(conn)
         import employee_identity
+        protected_slots = {}
+        if native_registry:
+            from registry_postgres import protected_assignments, note_assignment_conflict
+            protected_slots = protected_assignments(conn, grouped, owner_keys)
         incoming_names = [str(data.get(key) or "").strip() for data in grouped.values() for key in owner_keys]
         identity_conflicts = employee_identity.conflicts(conn, incoming_names)
         if identity_conflicts:
@@ -9045,24 +9274,46 @@ def import_grid(
         # address/phone нужны person_key: без даты рождения человек различается
         # именно по ним, иначе однофамильцы склеятся (см. person_key).
         existing = {r["contract_id"]: r for r in conn.execute(
-            "SELECT contract_id, client, birth_date, responsible, responsible_soft, address, phone, "
+            "SELECT contract_id, partner, client, birth_date, responsible, responsible_soft, address, phone, "
             "visit_comment, historical_visit_comment, "
             "unassigned_from, unassigned_reason, recall_prev_reason, "
             "recall_date, recall_reason, recall_transfer, recall_withdrawn, "
             "bot_visit_at, bot_visit_data, office_edit_data, visit_value_log, "
-            "bot_call_at, bot_call_data, call_office_data, call_value_log, bot_visit_event_at "
-            "FROM clients")}
+            "bot_call_at, bot_call_data, call_office_data, call_value_log, bot_visit_event_at, "
+            "excel_visit_edited_on, excel_call_edited_on "
+            "FROM clients ORDER BY id")}
         # Кому обогащение уже возило комментарий выезда. Единственный честный
         # ответ на вопрос «есть ли этот текст в книгах и в общем реестре»:
         # если не возило, пустая ячейка файла про него ничего не знает.
+        # Contract numbers are not globally unique across creditors.
+        collisions = []
+        for cid, incoming in grouped.items():
+            previous = existing.get(cid)
+            if previous is None:
+                continue
+            old_partner = _name_key(str(previous["partner"] or ""))
+            new_partner = _name_key(str(incoming.get("partner") or ""))
+            if old_partner and new_partner and old_partner != new_partner:
+                collisions.append({"contract_id": cid, "field": "partner"})
+        if collisions:
+            conn.rollback()
+            report.update(blocked=True, contract_identity_conflicts=collisions,
+                          error="Партнёр договора отличается от существующего: сначала разберите идентичность договора")
+            return report
         delivered_comments = {
             r["contract_id"] for r in conn.execute(
-                "SELECT contract_id FROM enrichment_ledger "
-                "WHERE field_key = 'visit_comment'")}
+                "SELECT contract_id, value, visit_date FROM enrichment_ledger "
+                "WHERE field_key = 'visit_comment'")
+            if r["contract_id"] in existing
+            and str(r["value"] or "").strip() == str(existing[r["contract_id"]]["visit_comment"] or "").strip()
+            and _as_date(r["visit_date"]) == _as_date(
+                (_decode_bot_snapshot(existing[r["contract_id"]]) or {}).get("visit_date"))}
         # Журнал закреплений: (КД, прежний, новый, заявленная дата закрепления).
         # Пишется одной пачкой после разбора — в ТОЙ ЖЕ транзакции, что и смена
         # (preview откатывает события вместе со всем импортом).
         assignment_events: list[tuple[str, str, str, str | None, str]] = []
+        monthly_snapshots = []
+        monthly_observed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         # Визит — на человека: принятая правка разносится по всем его договорам
         # с тем же визитом, иначе карточка/дайджест (первый КД человека) её не
         # увидят, а файлы разъедутся построчно.
@@ -9107,9 +9358,19 @@ def import_grid(
                 known_resp.get(key, employee)
                 for key, employee in authoritative_by_key.items()
             ]
-        for cid, data in grouped.items():
+        from crm.primary_fence import import_rows as import_crm_rows
+        legacy_grouped=dict(grouped)
+        crm_import=import_crm_rows(conn,legacy_grouped,monthly_raw=monthly_raw,
+                                  monthly_columns=monthly_columns,extra_columns=extra_cols,extra_values=extra_values)
+        report['updated']+=crm_import['updated'];report['extra_cells']+=crm_import['extra_cells']
+        report['crm_source_rows']=crm_import['updated']
+        for cid, data in legacy_grouped.items():
             is_update = cid in existing
             row0 = existing.get(cid)
+            incoming_call_edit_day = _as_date(data.get("excel_call_edited_on"))
+            for tracking_key in edit_tracking.EXCEL_KEYS:
+                if tracking_key in data and row0 is not None:
+                    data[tracking_key] = max(data[tracking_key], row0[tracking_key] or "")
             comment_updates: dict[str, str] = {}
             office_echo_values = {
                 key: data.get(key)
@@ -9261,23 +9522,31 @@ def import_grid(
             # и доставка в личную книгу не доказывают свежесть общего master.
             # Предыдущая строка могла уже применить правку того же звонка
             # ко второму КД человека. Читаем этот overlay внутри транзакции.
-            call_row = conn.execute("SELECT * FROM clients WHERE contract_id=?", (cid,)).fetchone() if row0 is not None else None
+            call_row = row0
+            if row0 is not None and (cid in report["soft_office_applied"] or cid in fresh_overlays):
+                call_row = conn.execute("SELECT * FROM clients WHERE contract_id=?", (cid,)).fetchone()
             call_snapshot = bot_call_snapshot(call_row) if call_row is not None else None
             call_protected = set()
             if call_snapshot:
                 call_keys = set(SOFT_SNAPSHOT_KEYS[:3])
                 call_keys.update(k for k in COMMON_RESULT_KEYS if call_owns_field(call_row, k))
                 call_protected = call_keys
-                delivered = {r["field_key"]: r for r in conn.execute(
-                    "SELECT * FROM enrichment_ledger WHERE contract_id=?", (cid,))}
-                anchored = (allow_soft_office_edits and
-                            str(data.get("soft_comm_date") or "") == call_fact_day(call_row) and
-                            any(k in delivered and
-                               delivered[k]["visit_date"] == call_fact_day(call_row) and
-                               str(delivered[k]["value"] or "") == str(call_snapshot.get(k) or "") and
-                               str(data.get(k) or "") == str(call_snapshot.get(k) or "") and
-                               str(data.get(k) or "").strip()
-                               for k in SOFT_SNAPSHOT_KEYS[:3]))
+                # A repeated status/day does not prove that the file saw the
+                # current result. Day-only timestamps cannot order same-day edits.
+                latest_day = max((_as_date(call_field_day(call_row, key)) or _as_date(call_fact_day(call_row)))
+                                 for key in call_keys)
+                manual_after_call = bool(incoming_call_edit_day and latest_day
+                                         and latest_day < incoming_call_edit_day <= workday.today())
+                fact_day = call_fact_day(call_row)
+                anchored = False
+                if (allow_soft_office_edits and manual_after_call
+                        and str(data.get("soft_comm_date") or "") == fact_day):
+                    delivered = {r["field_key"]: r for r in conn.execute(
+                        "SELECT * FROM enrichment_ledger WHERE contract_id=?", (cid,))}
+                    anchored = any(k in delivered and delivered[k]["visit_date"] == fact_day and
+                                   str(delivered[k]["value"] or "") == str(call_snapshot.get(k) or "") and
+                                   str(data.get(k) or "") == str(call_snapshot.get(k) or "") and
+                                   str(data.get(k) or "").strip() for k in SOFT_SNAPSHOT_KEYS[:3])
                 edits = {}
                 for key in call_keys:
                     value = data.pop(key, None)
@@ -9312,6 +9581,15 @@ def import_grid(
                                          if k not in COMMON_RESULT_KEYS or call_owns_field(sibling,k)}
                         if not sibling_edits:
                             continue
+                        prior_effects = report["soft_office_applied"].get(scid, {})
+                        incompatible = [key for key, value in sibling_edits.items()
+                                        if key in prior_effects and str(prior_effects[key]["after"]) != str(value)]
+                        if incompatible:
+                            conn.rollback()
+                            report.update(blocked=True, office_conflicts=[{
+                                "contract_id": scid, "fields": sorted(incompatible)}],
+                                error="Разные офисные исправления одного звонка у договоров одного клиента: разберите конфликт до импорта")
+                            return report
                         merged_call = {**(bot_call_snapshot(sibling) or {}), **sibling_edits}
                         sets = ', '.join(f'"{k}"=?' for k in sibling_edits)
                         conn.execute(f"UPDATE clients SET {sets}, call_office_data=?, call_value_log=? WHERE contract_id=?",
@@ -9581,6 +9859,10 @@ def import_grid(
                 tuple(data.values()),
             )
             report["updated" if is_update else "inserted"] += 1
+            if monthly_columns:
+                monthly_partner = data.get("partner", row0["partner"] if row0 is not None else None)
+                monthly_snapshots.extend(employee_workspace.monthly_rows(
+                    cid, monthly_raw[cid], monthly_columns, monthly_partner, monthly_observed_at))
             # Журнал закреплений: событие снимается с ИТОГОВОГО data — после
             # всех шлюзов (канонизация имени, ручное снятие, офисные правки).
             prev_owner = (existing[cid]["responsible"] or "").strip() \
@@ -9668,6 +9950,7 @@ def import_grid(
             for employee in sorted(manual_by_employee, key=_name_key)
         }
         auto_unassigned_effect: list[tuple[str, str]] = []
+        from crm.primary_fence import source_removal as crm_source_removal
         if full_registry and import_profile in ("hard", "both"):
             # Отсутствующий КД или пустая колонка владельца в полном срезе
             # снимает прежнее назначение только явно выбранного сотрудника.
@@ -9682,6 +9965,11 @@ def import_grid(
                     or _name_key(former) not in authoritative_by_key
                     or cid in grouped and not present_blank
                 ):
+                    continue
+                if (cid, "responsible") in protected_slots:
+                    note_assignment_conflict(conn, protected_slots[cid, "responsible"], "responsible", None, former)
+                    continue
+                if crm_source_removal(conn,cid,'responsible'):
                     continue
                 changed = conn.execute(
                     "UPDATE clients SET responsible='', unassigned_from=?, "
@@ -9702,6 +9990,11 @@ def import_grid(
                                  and not str(grouped[cid].get("responsible_soft") or "").strip())
                 if (not former or _name_key(former) not in authoritative_by_key
                         or cid in grouped and not present_blank):
+                    continue
+                if (cid, "responsible_soft") in protected_slots:
+                    note_assignment_conflict(conn, protected_slots[cid, "responsible_soft"], "responsible_soft", None, former)
+                    continue
+                if crm_source_removal(conn,cid,'responsible_soft'):
                     continue
                 changed = conn.execute("UPDATE clients SET responsible_soft='' "
                                        "WHERE contract_id=? AND responsible_soft=?",
@@ -9760,9 +10053,10 @@ def import_grid(
                     "WHERE contract_id=? AND profile=? AND window_to<?", (cid, profile, today_iso)
                 ).fetchone()[0]
                 conn.execute(
-                    "INSERT OR IGNORE INTO assignment_events (contract_id, "
+                    "INSERT INTO assignment_events (contract_id, "
                     "employee, prev_employee, kind, window_to, window_from, "
-                    "claimed_at, source, created_at, profile) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    "claimed_at, source, created_at, profile) VALUES (?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(contract_id,window_to,employee,prev_employee,profile) DO NOTHING",
                     (cid, new_owner, prev_owner, kind, today_iso, prev_window,
                      claimed, source_kind, now_iso, profile))
             report["assignment_events"] = len(assignment_events)
@@ -9917,9 +10211,15 @@ def import_grid(
         if preview_only:
             conn.rollback()
         else:
+            if monthly_snapshots:
+                conn.executemany(employee_workspace.MONTHLY_TOTAL_UPSERT, monthly_snapshots)
             if require_source_proof:
                 _consume_import_authorization(conn, verified_source, report)
             _remember_registry_payments(conn)
+            if native_registry:
+                from registry_postgres import publish_import, publish_clients
+                publish_import(conn, set(grouped).union(cid for cid, _ in auto_unassigned_effect))
+                publish_clients(conn)
             conn.commit()
     # Человеку в пульте нужны заголовки реестра, а не ключи схемы: в отчёте
     # появились «дата обещания», «Сумма прогноза» и «Прогноз», и строка вида
@@ -9979,6 +10279,7 @@ def wipe_registry() -> dict:
     with connect() as conn:
         n = conn.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
         conn.execute("DELETE FROM registry_payments")
+        conn.execute("DELETE FROM registry_monthly_totals")
         conn.execute("DELETE FROM office_action_contracts")
         conn.execute("DELETE FROM office_actions")
         conn.execute("DELETE FROM clients")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import edit_tracking
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime
@@ -1032,7 +1033,7 @@ def _copy_appended_column_formats(
         )
         personal_sheet.range(
             (personal_snapshot.header_row + 1, target_column)
-        ).value = title
+        ).value = edit_tracking.physical_title(title)
         personal_sheet.range(
             (personal_snapshot.type_row + 1, target_column)
         ).value = projection.type_tags[source_width + offset]

@@ -24,6 +24,7 @@ from datetime import date, datetime, timedelta
 import country_scope
 import comment_view
 import db
+import edit_tracking
 import workday
 import debt
 import evidence
@@ -598,6 +599,7 @@ def _person_payload(p: dict, on_date: str) -> dict:
         "geo": geo,
         # Даты тоже через pick: пока ключа нет в снимке, отдаётся сырая колонка;
         # когда контракт добавит promise_date в snapshot_keys — снимок победит сам.
+        "edit_dates": edit_tracking.card(cs),
         "dates": {"visit_date": pick("visit_date"),
                   "reminder_date": pick("reminder_date"),
                   "promise_date": pick("promise_date"),

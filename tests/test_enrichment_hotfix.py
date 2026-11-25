@@ -19,7 +19,7 @@ def _deliver_current(cid='A'):
 
 @pytest.mark.parametrize('same_day', [False,True])
 def test_delivery_to_personal_book_does_not_authorize_stale_master(world,monkeypatch,same_day):
-    call(monkeypatch,'current',values={'soft_comment':'Current result','forecast_sum':'12000'})
+    call(monkeypatch,'current',occurred_at=datetime.combine(db.workday.today()-timedelta(days=1),time(8),tzinfo=timezone.utc).timestamp()*1000,values={'soft_comment':'Current result','forecast_sum':'12000'})
     current=_deliver_current()
     world[0].update(soft_call_status='Нет контакта',soft_comment='Stale master note',
                     soft_comm_date=current['_call_day'] if same_day else (db.workday.today()-timedelta(days=3)).isoformat(),
@@ -32,10 +32,10 @@ def test_delivery_to_personal_book_does_not_authorize_stale_master(world,monkeyp
 
 
 def test_explicit_soft_edit_requires_exact_fresh_preview_and_keeps_call_history(world,monkeypatch):
-    call(monkeypatch,'current',values={'soft_comment':'Current result'})
+    call(monkeypatch,'current',occurred_at=datetime.combine(db.workday.today()-timedelta(days=1),time(8),tzinfo=timezone.utc).timestamp()*1000,values={'soft_comment':'Current result'})
     current=_deliver_current()
     original=[dict(r) for r in db.calls_for_person('A')]
-    world[0].update(soft_call_status='Нет контакта',soft_comm_date=current['_call_day'],soft_comment='Office correction')
+    world[0].update(soft_call_status='Нет контакта',soft_comm_date=current['_call_day'],soft_comment='Office correction',excel_call_edited_on=db.workday.today().isoformat())
     args={'source_kind':db.IMPORT_SOURCE_PUBLISHED_MASTER,'allow_soft_office_edits':True}
     rejected=db.import_grid(grid(world),**args)
     assert rejected['blocked']
@@ -75,7 +75,7 @@ def test_soft_office_preview_is_bound_to_latest_call_event_even_for_same_values(
     first=call(monkeypatch,'first-attempt',occurred_at=stamp,values={'soft_comment':'Same current result'})
     assert first['applied']
     current=_deliver_current()
-    world[0].update(soft_call_status='Нет контакта',soft_comm_date=current['_call_day'],soft_comment='Office correction')
+    world[0].update(soft_call_status='Нет контакта',soft_comm_date=current['_call_day'],soft_comment='Office correction',excel_call_edited_on=db.workday.today().isoformat())
     options={'source_kind':db.IMPORT_SOURCE_PUBLISHED_MASTER,'allow_soft_office_edits':True}
     preview=db.import_grid(grid(world),preview_only=True,**options)
     later=call(monkeypatch,'later-attempt',occurred_at=stamp+60000,values={'soft_comment':'Same current result'})
@@ -85,17 +85,17 @@ def test_soft_office_preview_is_bound_to_latest_call_event_even_for_same_values(
     assert db.get_client('A')['soft_comment']=='Same current result'
 
 
-def test_person_sibling_effect_keeps_original_before_value(world,monkeypatch):
-    call(monkeypatch,'current',values={'soft_comment':'Original'})
+def test_person_sibling_conflicting_corrections_are_not_order_dependent(world,monkeypatch):
+    call(monkeypatch,'current',occurred_at=datetime.combine(db.workday.today()-timedelta(days=1),time(8),tzinfo=timezone.utc).timestamp()*1000,values={'soft_comment':'Original'})
     current=_deliver_current()
     _deliver_current('B')
-    world[0].update(soft_call_status='Нет контакта',soft_comm_date=current['_call_day'],soft_comment='First correction')
-    world[1].update(soft_call_status='Нет контакта',soft_comm_date=current['_call_day'],soft_comment='Second correction')
+    world[0].update(soft_call_status='Нет контакта',soft_comm_date=current['_call_day'],soft_comment='First correction',excel_call_edited_on=db.workday.today().isoformat())
+    world[1].update(soft_call_status='Нет контакта',soft_comm_date=current['_call_day'],soft_comment='Second correction',excel_call_edited_on=db.workday.today().isoformat())
     preview=db.import_grid(grid(world),source_kind=db.IMPORT_SOURCE_PUBLISHED_MASTER,
                            allow_soft_office_edits=True,preview_only=True)
+    assert preview['blocked'] and preview['office_conflicts']
     for cid in ('A','B'):
-        effect=preview['soft_office_applied'][cid]['soft_comment']
-        assert effect['before']=='Original' and effect['after']=='Second correction'
+        assert db.bot_call_snapshot(db.get_client(cid))['soft_comment']=='Original'
 
 
 def test_daily_dry_export_uses_employee_name_for_soft_profile(monkeypatch,tmp_path):
