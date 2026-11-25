@@ -134,6 +134,36 @@ def test_confirmed_identity_still_requires_independent_pilot_roster(crm_world):
     with pytest.raises(CRMError): shared_auth.principal(identity)
 
 
+def test_employee_and_manager_identities_share_one_person_without_sharing_scope(crm_world):
+    w = crm_world
+    manager_uid = 303
+    with storage.connect() as conn:
+        conn.execute("INSERT INTO crm_meta VALUES('deployment_namespace',?)", (shared_auth.NAMESPACE,))
+        conn.execute("UPDATE crm_memberships SET team_id='crm-cis',role='manager',capabilities_json=? WHERE employee_uuid=?",
+                     (canonical(sorted(shared_auth.CAPABILITIES)), w['employee']))
+        conn.execute('INSERT INTO crm_actor_links VALUES(?,?,?,?)', (manager_uid, w['employee'], 'fixture-manager', 1))
+        conn.execute('INSERT INTO crm_authority_scopes VALUES(?,?,?,?)',
+                     (manager_uid, canonical(sorted([w['employee'], w['stranger'].employee_uuid])), 1, 'fixture'))
+
+    employee = shared_auth.principal({'uid': w['member'].actor_uid, 'role': 'employee'})
+    manager = shared_auth.principal({'uid': manager_uid, 'role': 'manager'})
+    assert employee.employee_uuid == manager.employee_uuid == w['employee']
+    assert employee.role == 'employee' and employee.employee_scope == frozenset([w['employee']])
+    assert not employee.all_contracts
+    assert manager.role == 'manager' and manager.all_contracts
+    assert manager.employee_scope == frozenset([w['employee'], w['stranger'].employee_uuid])
+
+    from crm import manager_reports, work_portfolio
+    manager_reports.require(manager)
+    with pytest.raises(CRMError) as exc:
+        manager_reports.require(employee)
+    assert exc.value.status == 403
+    for principal in (employee, manager):
+        portfolio = work_portfolio.read(principal, work='all')
+        assert portfolio['total_contracts'] == 2
+        assert portfolio['counts']['call'] == 2 and portfolio['counts']['visit'] == 2
+
+
 def test_original_credential_and_local_claims_are_not_api_authority():
     sessions = session()
     for headers in [{'X-Pult-Token': TOKEN}, {'X-Device-Token': TOKEN},
