@@ -8,7 +8,8 @@ import aiohttp
 from aiohttp import web
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from .contract import CRMError
-from .mobile_backend import SyntheticBackend, SharedBackend, WindowsExecutor, ServerExecutor
+from .mobile_backend import (SyntheticBackend, SharedBackend, WindowsExecutor, ServerExecutor,
+                             require_grant_workspace, require_grant_role)
 
 PREFIX='/mobile/'
 COOKIE='crm_mobile_v1'
@@ -148,8 +149,18 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
     def empty(seconds=SESSION_SECONDS):
         return dict(csrf=secrets.token_urlsafe(32),expires_at=int((time.time()+seconds)*1000),lifetime_seconds=seconds)
     def bind_owner(session):
-        context=session['context'];namespace=str(home) if backend.synthetic else 'shared'
-        session['owner']='mobile:'+hashlib.sha256((namespace+'\n'+str(context['actor_uid'])+'\n'+context['employee_uuid']+'\n'+context['role']).encode()).hexdigest()
+        context=session['context']
+        origin='synthetic://'+str(home) if backend.synthetic else public_origin or backend.crm
+        session['owner']='mobile:'+hashlib.sha256((origin+'\n'+context['employee_uuid']).encode()).hexdigest()
+    def operation_binding(session):
+        context=session['context']
+        return dict(grant_id=context.get('grant_id'),actor_uid=context.get('actor_uid'),access_model=context.get('access_model',1))
+    def operation_matches(session,job):
+        current=operation_binding(session)
+        if current['access_model']==2:
+            return job.get('access_model')==2 and job.get('grant_id')==current['grant_id'] and str(job.get('actor_uid'))==str(current['actor_uid'])
+        return (job.get('access_model',1)!=2 and
+                (job.get('actor_uid') is None or str(job.get('actor_uid'))==str(current['actor_uid'])))
     async def authorize(request, refresh=True):
         session=request['mobile_session']
         if not session or not session.get('owner'):raise CRMError('Войдите в рабочее место.','session',401)
@@ -157,12 +168,14 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         try:context=await backend.request(session,'GET','context')
         except CRMError as exc:
             if exc.status in {401,403,410}:
+                if exc.code in {'grant_revoked','grant_required'}:raise
                 sessions.forget(request['mobile_sid'])
                 raise CRMError('Доступ к рабочему месту изменился. Исходная работа сохранена.','identity_changed',401) from None
             raise
-        if str(context['actor_uid'])!=str(session['context']['actor_uid']) or context['employee_uuid']!=session['context']['employee_uuid'] or context['role']!=session['role']:
+        if str(context['actor_uid'])!=str(session['context']['actor_uid']) or context['employee_uuid']!=session['context']['employee_uuid']:
             sessions.forget(request['mobile_sid'])
             raise CRMError('Вход изменился. Исходная работа сохранена.','identity_changed',401)
+        session['role']=context['role'];bind_owner(session)
         upgraded=False
         if 'lifetime_seconds' not in session:
             session['expires_at']+=(SESSION_SECONDS-LEGACY_SESSION_SECONDS)*1000
@@ -219,7 +232,18 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         body=await request.json()
         method=body.get('method','GET');action=body.get('action','')
         if method not in {'GET','POST'}:raise CRMError('Недопустимый метод.')
-        session=await authorize(request,refresh=action in {'context','manager-access'})
+        if method=='POST' and action=='grant':
+            if backend.synthetic:raise CRMError('Полномочия доступны в рабочей CRM.','synthetic',403)
+            session=await authorize(request,refresh=False)
+            previous=session['context'];data=await backend.select_grant(session,(body.get('body') or {}).get('grant_id'))
+            if str(data['actor_uid'])!=str(previous['actor_uid']) or data['employee_uuid']!=previous['employee_uuid']:
+                raise CRMError('Полномочие принадлежит другому входу.','identity_changed',401)
+            bind_owner(session);sessions.write(session,request['mobile_sid'])
+            return web.json_response(data)
+        session=await authorize(request,refresh=method=='POST' or action in {'context','manager-access'})
+        expected_grant=body.get('grant_id')
+        if expected_grant is not None and expected_grant!=session['context'].get('grant_id'):
+            raise CRMError('Полномочие изменилось. Исходная операция сохранена.','grant_changed',409)
         if method=='GET' and action=='context':
             return web.json_response(session['context'])
         before=json.dumps(session,ensure_ascii=False,sort_keys=True)
@@ -245,7 +269,7 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         return web.FileResponse(path,headers={'Content-Disposition':"attachment; filename*=UTF-8''"+quote(name),'X-CRM-Filename':quote(name)})
     async def admin(request):
         session=await authorize(request)
-        if session['role']!='analyst':raise CRMError('Требуется вход Аналитика.','forbidden',403)
+        require_grant_workspace(session,'exchange',{'analyst','owner'},'exchange')
         value=await request.json()
         if value.get('action')=='reserve':
             fid,path,name=sessions.reserve(session['owner'],str(value['args'][0]));return web.json_response(dict(file=fid,name=name))
@@ -271,7 +295,7 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         return web.json_response(sessions.public_files(session['owner'],result))
     async def sources(request):
         session=await authorize(request)
-        if session['role']!='analyst':raise CRMError('Требуется вход Аналитика.','forbidden',403)
+        require_grant_workspace(session,'exchange',{'analyst','owner'},'exchange')
         parent=request.query.get('parent');mode=request.query.get('kind','folder')
         if not parent:
             entries=[dict(file=sessions.grant(session['owner'],p),name=p.name,directory=True) for p in sessions.source_roots if p.is_dir()]
@@ -304,6 +328,9 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
             async with download_locks.setdefault(identifier,asyncio.Lock()):
                 job=sessions.job(owner,identifier)
                 if not job.get('receipt'):continue
+                if not operation_matches(session,job):
+                    entries.append(dict(action='receipt',body={**job['receipt'],'operation_id':identifier},queued_at=job.get('queued_at',datetime.now(timezone.utc).isoformat()),state='pending',error='Выберите исходное полномочие этой операции.',code='grant_changed',server=True))
+                    continue
                 if input.get('action')=='retry' and input.get('operation_id')==identifier:job['receipt_state']='pending'
                 if request.method=='POST':await settle_receipt(session,identifier,job)
                 entries.append(dict(action='receipt',body={**job['receipt'],'operation_id':identifier},queued_at=job.get('queued_at',datetime.now(timezone.utc).isoformat()),state=job['receipt_state'],result=job.get('receipt_result'),error=job.get('receipt_error'),code=job.get('receipt_code'),server=True))
@@ -325,8 +352,17 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         except ProcessLookupError:return False
         except PermissionError:return True
     async def workbook(request):
-        session=await authorize(request);value=await request.json();action=value['action'];data=value.get('input') or {};role=session['role']
-        if role not in {'manager','analyst'} and action not in {'shift-report','logistics-export-download'}:raise CRMError('Нет права на работу с книгами.','forbidden',403)
+        session=await authorize(request);value=await request.json();action=value['action'];data=value.get('input') or {}
+        if value.get('grant_id') is not None and value['grant_id']!=session['context'].get('grant_id'):
+            raise CRMError('Полномочие изменилось. Исходная выгрузка сохранена.','grant_changed',409)
+        if action in {'read','write','table'}:
+            require_grant_workspace(session,'exchange',{'manager','analyst','owner'},'exchange')
+        elif action=='shift-report':
+            require_grant_role(session,{'employee','courier','manager','analyst','observer','owner'})
+        elif action=='logistics-export-download':
+            require_grant_workspace(session,'logistics',{'employee','courier','manager','analyst','observer','logistic','owner'})
+        else:
+            require_grant_workspace(session,('manager-statistics','statistics'),{'manager','analyst','owner'})
         if action=='read':
             path,name=sessions.file(session['owner'],data['file']);result=await backend.file_action(session,'workbook-read',dict(path=str(path)));result['filename']=name;return web.json_response(result)
         identifier=str(uuid.UUID(value['operation_id']));owner=session['owner']
@@ -344,11 +380,12 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         async with download_locks.setdefault(identifier,asyncio.Lock()):
             job=sessions.job(owner,identifier)
             if job and job['request_hash']!=expected:raise CRMError('Номер выгрузки связан с другим запросом.','operation_conflict',409)
+            if job and not operation_matches(session,job):raise CRMError('Выгрузка принадлежит другому полномочию.','grant_changed',409)
             if not job:
                 template=sessions.file(owner,data['template'])[0] if data.get('template') else None
                 suffix=template.suffix.lower() if template else '.xlsx'
                 fid,path,name=sessions.reserve(owner,str(data.get('name','Отчёт CRM'))+suffix)
-                job=dict(request_hash=expected,file=fid,phase='planned',input=data,action=action,queued_at=datetime.now(timezone.utc).isoformat())
+                job=dict(request_hash=expected,file=fid,phase='planned',input=data,action=action,queued_at=datetime.now(timezone.utc).isoformat(),**operation_binding(session))
                 if action=='write':
                     if not isinstance(data.get('snapshot'),dict):raise CRMError('Нет подтверждённой выгрузки.')
                     job.update(runtime_action='workbook-write',body=dict(snapshot=data['snapshot'],path=str(path),template=str(template) if template else None))

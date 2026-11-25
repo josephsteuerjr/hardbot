@@ -32,12 +32,37 @@ def country_code(value):
     return None
 
 
+def selected_grant(principal):
+    if principal.access_model != 2:
+        return None
+    grant = next((item for item in principal.grants
+                  if item.actor_uid == principal.actor_uid and item.grant_id == principal.grant_id), None)
+    if grant is None or grant.role != principal.role:
+        raise CRMError('Выбранное полномочие отозвано или не принадлежит этому входу.', 'grant_revoked', 403)
+    return grant
+
+
 def countries(conn, principal):
     if principal.role not in {'logistic', 'manager', 'owner'} or 'logistics' not in principal.capabilities:
         return []
+    grant = selected_grant(principal)
+    if grant is None:
+        return [r[0] for r in conn.execute(
+            "SELECT country FROM crm_logistics_staff WHERE employee_uuid=? AND work='logist' ORDER BY country",
+            (principal.employee_uuid,))]
+    if 'logistics' not in grant.capabilities:
+        return []
+    if grant.role == 'owner':
+        if grant.territory != 'all':
+            raise CRMError('Глобальное полномочие владельца имеет некорректную область.', 'grant_invalid', 403)
+        return [r[0] for r in conn.execute(
+            "SELECT DISTINCT country FROM crm_logistics_staff WHERE work='logist' ORDER BY country")]
+    scope = {principal.employee_uuid} if grant.territory == 'self' else set(principal.employee_scope)
+    if not scope:
+        return []
     return [r[0] for r in conn.execute(
-        "SELECT country FROM crm_logistics_staff WHERE employee_uuid=? AND work='logist' ORDER BY country",
-        (principal.employee_uuid,))]
+        "SELECT DISTINCT country FROM crm_logistics_staff WHERE work='logist' AND employee_uuid IN ("
+        + ','.join('?' for _ in scope) + ') ORDER BY country', sorted(scope))]
 
 
 def authorize(conn, principal, country):

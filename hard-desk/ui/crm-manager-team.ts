@@ -1,3 +1,5 @@
+import {mountRoleEditor,type RoleEditorHandle} from './access/role-editor';
+
 const esc=(v:any)=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
 const roles:any={employee:'Сотрудник',agent:'Сотрудник',manager:'Руководитель',observer:'Наблюдатель',courier:'Курьер',analyst:'Аналитик',owner:'Владелец'};
 const states:any={active:'Доступ открыт',pending:'Ждёт подтверждения',awaiting:'Ждёт подтверждения',disabled:'Отключён',revoked:'Отозван',none:'Не создан',ambiguous:'Требует сверки'};
@@ -5,7 +7,9 @@ const stamp=(v:any)=>v?new Date(v).toLocaleString('ru-RU'):'—';
 
 export async function mountManagerTeam(host:HTMLElement,crm:any,context:any,valid:()=>boolean,openPortfolio:(id:string)=>void){
   let disposed=false,generation=0,rows:any[]=[],selected='',query='',busy=false,profileOpen=false;
+  let profileKey='',roleEditor:RoleEditorHandle|undefined,roleEditorGeneration=0;
   const current=()=>!disposed&&valid();
+  const disposeRoleEditor=()=>{roleEditorGeneration++;roleEditor?.dispose();roleEditor=undefined;};
   host.innerHTML=`<div class="toolbar"><input id="team-search" type="search" placeholder="Сотрудник, логин, роль"><button id="team-refresh">Обновить</button><span id="team-count"></span></div><p id="team-status" role="status"></p><div class="manager-team-layout"><div id="team-list"></div><section id="team-profile"></section></div>`;
   const $=<T extends HTMLElement=HTMLElement>(id:string)=>host.querySelector<T>('#'+id)!;
   const status=(s:string)=>{if(current())$('team-status').textContent=s;};
@@ -20,18 +24,41 @@ export async function mountManagerTeam(host:HTMLElement,crm:any,context:any,vali
     $('team-list').innerHTML=`<table class="team-table"><thead><tr><th>Сотрудник</th><th>Роль</th><th>Вход</th></tr></thead><tbody>${filtered.map(r=>`<tr class="${r.key===selected?'active':''}"><td><button class="link" data-team-person="${esc(r.key)}">${esc(r.employee)}</button><small>${esc(r.account?.username||'Аккаунт не создан')}</small></td><td>${esc(roles[r.role]||r.role||'Сотрудник')}</td><td>${esc(r.account?.password_review_pending?'Смена пароля':states[r.account?.status]||states[r.login_status]||'Не создан')}</td></tr>`).join('')}</tbody></table>`;
     host.querySelectorAll<HTMLButtonElement>('[data-team-person]').forEach(b=>b.onclick=()=>{selected=b.dataset.teamPerson!;profileOpen=true;paint();});
     const r=rows.find(r=>r.key===selected);
-    if(!r){$('team-profile').innerHTML='<p>Выберите сотрудника.</p>';return;}
+    if(!r){profileKey='';disposeRoleEditor();$('team-profile').innerHTML='<p>Выберите сотрудника.</p>';return;}
+    const actorProfileKey=`${r.key}:${r.account?.actor_uid||'none'}`;
+    if(profileKey!==actorProfileKey){
+      profileKey=actorProfileKey;
+      $('team-profile').innerHTML='<div id="team-details"></div><div id="team-role-editor"></div>';
+      void mountRoles(r,actorProfileKey);
+    }
+    paintDetails(r);
+  }
+  function paintDetails(r:any){
     const a=r.account,devices=a?.devices||[];
-    $('team-profile').innerHTML=`<h2>${esc(r.employee)}</h2><dl class="team-facts"><dt>Роль</dt><dd>${esc(roles[r.role]||r.role||'Сотрудник')}</dd><dt>Офис</dt><dd>${esc(r.office||'—')}</dd><dt>Логин</dt><dd>${esc(a?.username||'Аккаунт не создан')}</dd><dt>Вход</dt><dd>${esc(a?.password_review_pending?a.must_change_password?'Сотрудник должен сменить временный пароль':'Подтвердите личный пароль на устройстве':states[a?.status]||states[r.login_status]||'Не создан')}</dd><dt>Работы</dt><dd>${(r.crm?.work_kinds||[]).map((w:string)=>w==='call'?'Звонки':'Выезды').join(', ')||'—'}</dd><dt>Портфель</dt><dd>${r.crm?`${r.crm.people} клиентов · ${r.crm.contracts} КД`:'—'}</dd></dl><div class="actions">${r.crm?'<button id="team-portfolio">Открыть портфель</button>':''}${r.can_reset?'<button id="team-password">Сбросить пароль</button>':''}</div><h3>Устройства</h3>${devices.length?devices.map((d:any,i:number)=>`<div class="team-device"><strong>${d.kind==='desktop'?'Компьютер':'Телефон'} · ${esc(d.label||'Без названия')}</strong><p>${esc(states[d.status]||d.status)} · Последний вход ${stamp(d.last_seen||d.at)}</p>${d.client_version?`<p>Версия ${esc(d.client_version)}</p>`:''}<div class="actions">${r.can_approve&&d.status==='pending'?`<button data-team-approve="${i}">Подтвердить устройство</button>`:''}${r.can_revoke?`<button data-team-revoke="${i}">Отозвать доступ</button>`:''}</div></div>`).join(''):'<p>Устройства не подключены.</p>'}${r.can_remove?`<details class="team-roster-actions"><summary>Состав команды</summary><button id="team-board">${r.on_board?'Убрать из списка':'Вернуть в список'}</button></details>`:''}`;
+    $('team-details').innerHTML=`<h2>${esc(r.employee)}</h2><dl class="team-facts"><dt>Роль</dt><dd>${esc(roles[r.role]||r.role||'Сотрудник')}</dd><dt>Офис</dt><dd>${esc(r.office||'—')}</dd><dt>Логин</dt><dd>${esc(a?.username||'Аккаунт не создан')}</dd><dt>Вход</dt><dd>${esc(a?.password_review_pending?a.must_change_password?'Сотрудник должен сменить временный пароль':'Подтвердите личный пароль на устройстве':states[a?.status]||states[r.login_status]||'Не создан')}</dd><dt>Работы</dt><dd>${(r.crm?.work_kinds||[]).map((w:string)=>w==='call'?'Звонки':'Выезды').join(', ')||'—'}</dd><dt>Портфель</dt><dd>${r.crm?`${r.crm.people} клиентов · ${r.crm.contracts} КД`:'—'}</dd></dl><div class="actions">${r.crm?'<button id="team-portfolio">Открыть портфель</button>':''}${r.can_reset?'<button id="team-password">Сбросить пароль</button>':''}</div><h3>Устройства</h3>${devices.length?devices.map((d:any,i:number)=>`<div class="team-device"><strong>${d.kind==='desktop'?'Компьютер':'Телефон'} · ${esc(d.label||'Без названия')}</strong><p>${esc(states[d.status]||d.status)} · Последний вход ${stamp(d.last_seen||d.at)}</p>${d.client_version?`<p>Версия ${esc(d.client_version)}</p>`:''}<div class="actions">${r.can_approve&&d.status==='pending'?`<button data-team-approve="${i}">Подтвердить устройство</button>`:''}${r.can_revoke?`<button data-team-revoke="${i}">Отозвать доступ</button>`:''}</div></div>`).join(''):'<p>Устройства не подключены.</p>'}${r.can_remove?`<details class="team-roster-actions"><summary>Состав команды</summary><button id="team-board">${r.on_board?'Убрать из списка':'Вернуть в список'}</button></details>`:''}`;
     if(crm.platform==='mobile'){
       $('team-list').hidden=profileOpen;$('team-profile').hidden=!profileOpen;
-      if(profileOpen){const back=document.createElement('button');back.className='link mobile-team-back';back.textContent='← Команда';back.onclick=()=>{profileOpen=false;paint();};$('team-profile').prepend(back);}
+      if(profileOpen){const back=document.createElement('button');back.className='link mobile-team-back';back.textContent='← Команда';back.onclick=()=>{profileOpen=false;paint();};$('team-details').prepend(back);}
     }
     if($('team-portfolio'))$('team-portfolio').onclick=()=>openPortfolio(r.crm.employee_uuid);
     if($('team-password'))$('team-password').onclick=protect(()=>password(r));
     if($('team-board'))$('team-board').onclick=protect(()=>confirmAction(r.on_board?'Убрать из списка?':'Вернуть в список?',r.employee,()=>request('POST','board',{action:r.on_board?'hide':'add',employee:r.employee,operation_id:crypto.randomUUID()})));
     host.querySelectorAll<HTMLButtonElement>('[data-team-approve]').forEach(b=>b.onclick=protect(()=>{const d=devices[Number(b.dataset.teamApprove)];return confirmAction('Подтвердить устройство',`${r.employee} · ${d.label||'Устройство'}`,()=>request('POST','approve',{device_id:d.id,observed_pc:d.kind==='desktop'}),d.kind==='desktop'?'Я лично сверил сотрудника и его компьютер':'Я подтвердил сотрудника и его телефон');}));
     host.querySelectorAll<HTMLButtonElement>('[data-team-revoke]').forEach(b=>b.onclick=protect(()=>{const d=devices[Number(b.dataset.teamRevoke)];return confirmAction('Отозвать доступ устройства',`${r.employee} · ${d.label||'Устройство'}. Текущий вход будет закрыт. Для нового входа потребуется подтверждение.`,()=>request('POST','revoke',{device_id:d.id}));}));
+  }
+  async function mountRoles(r:any,actorProfileKey:string){
+    const key=r.key,n=++roleEditorGeneration,roleHost=$('team-role-editor');
+    roleEditor?.dispose();roleEditor=undefined;
+    const actorUid=Number(r.account?.actor_uid);
+    if(!Number.isInteger(actorUid)||actorUid<=0){roleHost.innerHTML='<p class="access-editor-meta">Для управления полномочиями нужен связанный аккаунт.</p>';return;}
+    roleHost.innerHTML='<p class="access-editor-meta">Загрузка полномочий…</p>';
+    try{
+      const handle=await mountRoleEditor(roleHost,crm,{actorUid,employeeName:r.employee,owner:context?.role==='owner'||context?.owner===true,
+        employees:rows.filter(row=>row.crm?.employee_uuid).map(row=>({employee_uuid:row.crm.employee_uuid,name:row.employee})),
+        valid:()=>current()&&profileKey===actorProfileKey&&selected===key,
+        onApplied:()=>load(true)});
+      if(n!==roleEditorGeneration||!current()||profileKey!==actorProfileKey)handle.dispose();else roleEditor=handle;
+    }catch(e){if(current()&&profileKey===actorProfileKey)status((e as Error).message);}
   }
   async function confirmAction(title:string,text:string,action:()=>Promise<any>,check?:string){
     const dialog=document.createElement('dialog');dialog.innerHTML=`<form><h2>${esc(title)}</h2><p>${esc(text)}</p>${check?`<label class="check"><input type="checkbox" required>${esc(check)}</label>`:''}<p role="status"></p><div class="actions"><button type="button">Отмена</button><button type="submit">Подтвердить</button></div></form>`;host.append(dialog);
@@ -85,5 +112,5 @@ export async function mountManagerTeam(host:HTMLElement,crm:any,context:any,vali
   $<HTMLInputElement>('team-search').oninput=()=>{query=$<HTMLInputElement>('team-search').value.toLocaleLowerCase();paint();};$('team-refresh').onclick=protect(load);
   const focus=()=>{if(current()&&!host.querySelector('dialog[open]'))void load().catch(e=>status(e.message));};window.addEventListener('focus',focus);
   const stop=crm.onChange?.((e:any)=>{if(e.type==='live'&&e.dirty)focus();});
-  await load();return ()=>{disposed=true;generation++;stop?.();window.removeEventListener('focus',focus);};
+  await load();return ()=>{disposed=true;generation++;disposeRoleEditor();stop?.();window.removeEventListener('focus',focus);};
 }

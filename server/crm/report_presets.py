@@ -138,16 +138,28 @@ def active_managers():
 
 
 def archive_day(principal, key, day):
-    book = assignments.statistics(principal, period='custom', date_from=day, date_to=day, download='daily')
-    if active_managers().get(principal.actor_uid) not in {'manager','full'}:
+    manager_reports.require(principal)
+    with storage.connect(readonly=True) as conn:
+        current=access.refresh_write(conn,principal)
+        manager_reports.require(current)
+        if (current.access_model==2 and
+                manager_reports.authority_version(current)!=manager_reports.authority_version(principal)):
+            raise CRMError('Полномочие отчёта изменилось. Повторите запрос.','scope_changed',403)
+    book = assignments.statistics(current, period='custom', date_from=day, date_to=day, download='daily')
+    if active_managers().get(current.actor_uid) not in {'manager','full'}:
         return False
     with storage.connect() as conn:
         storage.begin(conn)
-        if daily_key(conn, principal) != key:
+        refreshed=access.refresh_write(conn,current)
+        manager_reports.require(refreshed)
+        if (refreshed.access_model==2 and
+                manager_reports.authority_version(refreshed)!=manager_reports.authority_version(current)):
+            raise CRMError('Полномочие отчёта изменилось. Повторите запрос.','scope_changed',403)
+        if daily_key(conn, refreshed) != key:
             return False
         conn.execute('INSERT INTO crm_report_snapshots VALUES(?,?,?,?,?,?) '
                      'ON CONFLICT(actor_uid,scope_key,slot) DO NOTHING',
-                     (str(uuid4()),principal.actor_uid,key,day,book['as_of'],canonical(book)))
+                     (str(uuid4()),refreshed.actor_uid,key,day,book['as_of'],canonical(book)))
         conn.commit()
     return True
 

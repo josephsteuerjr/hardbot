@@ -118,51 +118,77 @@ class Authority:
             raise fault('authority_unavailable', 503) from None
 
 
-def principal(identity):
+def _legacy_principal(conn, identity):
+    marker = conn.execute("SELECT value FROM crm_meta WHERE key='deployment_namespace'").fetchone()
+    if not marker or marker[0] != NAMESPACE:
+        raise fault('identity_unmapped', 403)
+    result = access.from_uid(conn, identity['uid'], common_read=True, use_grants=False)
+    membership = conn.execute('SELECT role,capabilities_json FROM crm_memberships WHERE employee_uuid=? '
+        'AND starts_at<=? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at DESC',
+        (result.employee_uuid, now(), now())).fetchone()
+    authority_role = identity.get('role')
+    role = authority_role
+    if role not in {*ROLE_CAPABILITIES, 'full'}:
+        raise fault('identity_unmapped', 403)
+    if role == 'employee' and membership and membership['role'] == 'courier':
+        role = 'courier'
+    if role in {'employee', 'manager', 'full'} and membership and membership['role'] == 'logistic':
+        role = 'logistic'
+    # An Analyst entry has already passed the authority's admin gate. For
+    # an existing pilot manager identity it is a capability reduction.
+    legacy_manager = (role in {'manager', 'full','analyst'} and result.team_id == 'crm-pilot-managers'
+                      and membership and membership['role']=='manager')
+    role = 'manager' if role == 'full' else role
+    lower_entry=membership and membership['role']=='manager' and role in {'employee','courier','observer','analyst'}
+    from . import grants
+    if (role not in ROLE_CAPABILITIES or not membership or
+            (grants.model(conn, identity['uid']) == grants.LEGACY_MODEL
+             and membership['role'] != role and not legacy_manager
+             and not lower_entry
+             and not (role == 'courier' and membership['role'] == 'employee'))):
+        raise fault('identity_unmapped', 403)
+    # The approved test scope covers this isolated database. It never
+    # changes the authority's role, team or production permissions.
+    employees = result.employee_scope
+    if role in {'manager', 'analyst', 'observer'}:
+        employees = frozenset(r[0] for r in conn.execute(
+            'SELECT e.employee_uuid FROM crm_employees e JOIN crm_memberships m USING(employee_uuid) '
+            'WHERE e.active=1 AND m.starts_at<=? AND (m.ends_at IS NULL OR m.ends_at>?) '
+            'AND (m.team_id=? OR ?=1)', (now(), now(), result.team_id, int(legacy_manager))))
+    all_contracts=legacy_manager
+    policy=conn.execute('SELECT * FROM crm_authority_scopes WHERE actor_uid=?',(identity['uid'],)).fetchone()
+    if policy and role in {'manager','analyst','observer'}:
+        employees=frozenset(json.loads(policy['employees_json'])) | {result.employee_uuid}
+        all_contracts=bool(policy['all_contracts']) and role in {'manager','analyst'}
+    logistics_caps = set(json.loads(membership['capabilities_json'])) & {'logistics'} if membership and membership['role'] in {'manager', 'owner'} else set()
+    legacy = replace(result, role=role, capabilities=(result.capabilities & ROLE_CAPABILITIES[role]) | logistics_caps,
+                     employee_scope=employees, all_contracts=all_contracts,
+                     read_all_contracts=role != 'logistic',
+                     server_operator=role == 'manager' and identity.get('server_operator') is True)
+    return legacy, role, authority_role in {'manager', 'full'}
+
+
+def principal(identity, *, grant_id=None):
+    from . import grants
     with storage.connect(readonly=True) as conn:
-        marker = conn.execute("SELECT value FROM crm_meta WHERE key='deployment_namespace'").fetchone()
-        if not marker or marker[0] != NAMESPACE:
-            raise fault('identity_unmapped', 403)
-        result = access.from_uid(conn, identity['uid'], common_read=True)
-        membership = conn.execute('SELECT role,capabilities_json FROM crm_memberships WHERE employee_uuid=? '
-            'AND starts_at<=? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at DESC',
-            (result.employee_uuid, now(), now())).fetchone()
-        role = identity.get('role')
-        if role not in {*ROLE_CAPABILITIES, 'full'}:
-            raise fault('identity_unmapped', 403)
-        if role == 'employee' and membership and membership['role'] == 'courier':
-            role = 'courier'
-        if role in {'employee', 'manager', 'full'} and membership and membership['role'] == 'logistic':
-            role = 'logistic'
-        # An Analyst entry has already passed the authority's admin gate. For
-        # an existing pilot manager identity it is a capability reduction.
-        legacy_manager = (role in {'manager', 'full','analyst'} and result.team_id == 'crm-pilot-managers'
-                          and membership and membership['role']=='manager')
-        role = 'manager' if role == 'full' else role
-        lower_entry=membership and membership['role']=='manager' and role in {'employee','courier','observer','analyst'}
-        if (role not in ROLE_CAPABILITIES or not membership or
-                (membership['role'] != role and not legacy_manager
-                 and not lower_entry
-                 and not (role == 'courier' and membership['role'] == 'employee'))):
-            raise fault('identity_unmapped', 403)
-        # The approved test scope covers this isolated database. It never
-        # changes the authority's role, team or production permissions.
-        employees = result.employee_scope
-        if role in {'manager', 'analyst', 'observer'}:
-            employees = frozenset(r[0] for r in conn.execute(
-                'SELECT e.employee_uuid FROM crm_employees e JOIN crm_memberships m USING(employee_uuid) '
-                'WHERE e.active=1 AND m.starts_at<=? AND (m.ends_at IS NULL OR m.ends_at>?) '
-                'AND (m.team_id=? OR ?=1)', (now(), now(), result.team_id, int(legacy_manager))))
-        all_contracts=legacy_manager
-        policy=conn.execute('SELECT * FROM crm_authority_scopes WHERE actor_uid=?',(identity['uid'],)).fetchone()
-        if policy and role in {'manager','analyst','observer'}:
-            employees=frozenset(json.loads(policy['employees_json'])) | {result.employee_uuid}
-            all_contracts=bool(policy['all_contracts']) and role in {'manager','analyst'}
-        logistics_caps = set(json.loads(membership['capabilities_json'])) & {'logistics'} if membership and membership['role'] in {'manager', 'owner'} else set()
-        return replace(result, role=role, capabilities=(result.capabilities & ROLE_CAPABILITIES[role]) | logistics_caps,
-                       employee_scope=employees, all_contracts=all_contracts,
-                       read_all_contracts=role != 'logistic',
-                       server_operator=role == 'manager' and identity.get('server_operator') is True)
+        legacy, role, allow_owner = _legacy_principal(conn, identity)
+        return grants.resolve(conn, legacy, role=role, grant_id=grant_id, allow_owner=allow_owner)
+
+
+def backfill(identity, *, activate=False, expected_revision=None):
+    from . import grants
+    with storage.connect() as conn:
+        legacy, role, allow_owner = _legacy_principal(conn, identity)
+        return grants.backfill(conn, legacy, role=role, allow_owner=allow_owner,
+                               activate=activate, expected_revision=expected_revision,
+                               changed_by_uid=identity['uid'])
+
+
+def shadow(identity):
+    from . import grants
+    with storage.connect(readonly=True) as conn:
+        legacy, role, allow_owner = _legacy_principal(conn, identity)
+        return grants.shadow(conn, legacy, role=role, allow_owner=allow_owner)
 
 
 class Sessions:
@@ -183,6 +209,10 @@ class Sessions:
         nonce=os.urandom(12)
         return base64.urlsafe_b64encode(nonce+self.cipher.encrypt(nonce,canonical(payload).encode(),AUDIENCE+b':background')).decode()
 
+    async def _resolve(self, identity, grant_id=None):
+        kwargs = {'grant_id': grant_id} if grant_id is not None else {}
+        return await asyncio.to_thread(self.resolve, identity, **kwargs)
+
     async def background_principal(self, sealed):
         try:
             raw=base64.urlsafe_b64decode(sealed)
@@ -190,7 +220,7 @@ class Sessions:
         except Exception:raise fault() from None
         identity=await self._verify(payload['credential'],**payload.get('entry',{}))
         if identity['uid']!=payload['uid'] or identity['device_id']!=payload['device_id']:raise fault()
-        return await asyncio.to_thread(self.resolve,identity)
+        return await self._resolve(identity, payload.get('grant_id'))
 
     def seal(self, payload):
         nonce = os.urandom(12)
@@ -204,7 +234,10 @@ class Sessions:
             raw = base64.urlsafe_b64decode(token[5:] + '=' * (-len(token[5:]) % 4))
             value = json.loads(self.cipher.decrypt(raw[:12], raw[12:], AUDIENCE))
             keys = {'uid', 'device_id', 'issued', 'expires', 'id', 'credential', 'audience'}
-            if set(value) not in (keys, keys | {'entry'}):
+            if not keys <= set(value) <= keys | {'entry', 'grant_id'}:
+                raise ValueError()
+            if 'grant_id' in value and (not isinstance(value['grant_id'], str)
+                                        or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', value['grant_id'])):
                 raise ValueError()
             if 'entry' in value:
                 entry = value['entry']
@@ -258,22 +291,29 @@ class Sessions:
             self._authority_cache.pop(oldest, None)
         return identity
 
-    async def exchange(self, credential, *, kind='manager', device_fingerprint=''):
+    async def exchange(self, credential, *, kind='manager', device_fingerprint='', grant_id=None):
         if not isinstance(credential, str) or not re.fullmatch(r'[A-Za-z0-9_-]{20,512}', credential):
+            raise fault()
+        if grant_id is not None and (not isinstance(grant_id, str)
+                                     or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', grant_id)):
             raise fault()
         identity = await self._verify(credential, kind, device_fingerprint, allow_cache=False)
         self._authority_metrics['exchange'] += 1
-        p = await asyncio.to_thread(self.resolve, identity)
+        p = await self._resolve(identity, grant_id)
         await asyncio.to_thread(self.audit, p, identity)
         issued = int(self.clock())
         payload = dict(uid=identity['uid'], device_id=identity['device_id'], issued=issued,
                        expires=issued + TTL, id=str(uuid.uuid4()), credential=credential, audience=NAMESPACE)
         if kind != 'manager':
             payload['entry'] = dict(kind=kind, device_fingerprint=device_fingerprint)
+        if p.grant_id is not None:
+            payload['grant_id'] = p.grant_id
         if self.background_store and p.role in {'manager','owner','analyst'}:
             await asyncio.to_thread(self.background_store,p.actor_uid,self.background_seal(payload))
         return dict(token=self.seal(payload), expires_at=payload['expires'],
-                    employee_uuid=p.employee_uuid, name=identity['name'], role=p.role)
+                    employee_uuid=p.employee_uuid, name=identity['name'], role=p.role,
+                    access_model=p.access_model, policy_revision=p.policy_revision,
+                    grant_id=p.grant_id, grants=[grant.to_dict() for grant in p.grants])
 
     async def authenticate(self, request):
         header = request.headers.get('Authorization', '')
@@ -283,7 +323,7 @@ class Sessions:
         identity = await self._verify(payload['credential'], **payload.get('entry', {}))
         if identity['uid'] != payload['uid'] or identity['device_id'] != payload['device_id']:
             raise fault()
-        return await asyncio.to_thread(self.resolve, identity)
+        return await self._resolve(identity, payload.get('grant_id'))
 
 
 def audit_exchange(employee, identity):

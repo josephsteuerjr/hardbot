@@ -19,6 +19,10 @@ class Principal:
     all_contracts: bool = False
     read_all_contracts: bool = False
     server_operator: bool = False
+    grants: tuple = ()
+    access_model: int = 1
+    policy_revision: int = 0
+    grant_id: str | None = None
 
     @property
     def owner(self):
@@ -38,7 +42,7 @@ def refresh_write(conn, principal):
     maintenance takes its exclusive side. Plain reads preserve the app role's
     SELECT-only access to identity tables (row locking would require UPDATE).
     """
-    if principal.owner:return principal
+    if principal.owner and principal.access_model != 2:return principal
     link=conn.execute('SELECT l.employee_uuid FROM crm_actor_links l JOIN crm_employees e USING(employee_uuid) '
                       'WHERE l.actor_uid=? AND l.active=1 AND e.active=1',(principal.actor_uid,)).fetchone()
     at=now()
@@ -47,6 +51,11 @@ def refresh_write(conn, principal):
         (principal.employee_uuid,at,at)).fetchone()
     if not link or link[0]!=principal.employee_uuid or not member or member['team_id']!=principal.team_id:
         raise CRMError('Изменился действующий вход или кадровый доступ.','scope_changed',403)
+    if principal.access_model == 2:
+        from . import grants
+        legacy = replace(principal, grants=(), access_model=1, policy_revision=0, grant_id=None)
+        return grants.resolve(conn, legacy, role=principal.role, grant_id=principal.grant_id,
+                              allow_owner=principal.owner)
     return replace(principal,capabilities=principal.capabilities & frozenset(json.loads(member['capabilities_json'])))
 
 
@@ -194,7 +203,7 @@ def employee(conn, principal, identifier, capability=None):
 
 
 def from_uid(conn, uid, *, owner=False, manager_names=None, manager_write=False,
-             common_read=False):
+             common_read=False, use_grants=True, grant_id=None):
     link = conn.execute(
         "SELECT l.*,e.active FROM crm_actor_links l JOIN crm_employees e USING(employee_uuid) "
         "WHERE actor_uid=? AND l.active=1 AND e.active=1",
@@ -253,7 +262,7 @@ def from_uid(conn, uid, *, owner=False, manager_names=None, manager_write=False,
         }
         if not manager_write:
             caps = {"analytics"}
-    return Principal(
+    legacy = Principal(
         int(uid),
         link["employee_uuid"],
         membership["team_id"],
@@ -263,3 +272,7 @@ def from_uid(conn, uid, *, owner=False, manager_names=None, manager_write=False,
         membership["timezone"],
         read_all_contracts=common_read,
     )
+    if use_grants:
+        from . import grants
+        return grants.resolve(conn, legacy, role=role, grant_id=grant_id)
+    return legacy

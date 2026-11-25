@@ -13,9 +13,30 @@ from . import access, storage, three_hour
 from .contract import CRMError, canonical, instant, now
 
 
+def selected_grant(p):
+    if p.access_model != 2:
+        return None
+    grant = next((item for item in p.grants
+                  if item.actor_uid == p.actor_uid and item.grant_id == p.grant_id), None)
+    if grant is None or grant.role != p.role:
+        raise CRMError('Выбранное полномочие отозвано или не принадлежит этому входу.','grant_revoked',403)
+    return grant
+
+
+def authority_version(p):
+    grant = selected_grant(p)
+    return (p.access_model,p.grant_id,grant.revision if grant else 0,p.policy_revision,p.timezone)
+
+
+def report_work_id(p):
+    grant=selected_grant(p)
+    return 'report:'+str(p.actor_uid)+(':'+grant.grant_id if grant else '')
+
+
 def remember_authority(conn, principal, work_id, kind):
     value=asdict(principal)
     for key in ('capabilities','employee_scope'):value[key]=sorted(value[key])
+    value['grants']=()
     conn.execute('INSERT INTO crm_background_authorities VALUES(?,?,?,?,?) '
                  'ON CONFLICT(work_id) DO UPDATE SET authority_json=excluded.authority_json,updated_at=excluded.updated_at',
                  (work_id,principal.actor_uid,kind,canonical(value),now()))
@@ -24,6 +45,7 @@ def remember_authority(conn, principal, work_id, kind):
 def current_authority(conn, raw):
     value=json.loads(raw)
     for key in ('capabilities','employee_scope'):value[key]=frozenset(value[key])
+    value['grants']=()
     p=access.Principal(**value)
     # Persisting an old authenticated role must never keep a removed manager alive.
     at=now()
@@ -31,8 +53,15 @@ def current_authority(conn, raw):
         'JOIN crm_employees e USING(employee_uuid) WHERE l.actor_uid=? AND l.active=1 AND e.active=1 '
         'AND m.employee_uuid=? AND m.starts_at<=? AND (m.ends_at IS NULL OR m.ends_at>?) ORDER BY m.starts_at DESC',
         (p.actor_uid,p.employee_uuid,at,at)).fetchone()
-    reduced_analyst=member and member['role']=='manager' and p.role=='analyst'
-    if not member or (member['role']!=p.role and not reduced_analyst) or member['team_id']!=p.team_id:
+    if not member or member['team_id']!=p.team_id:
+        raise CRMError('Роль автора задания изменилась.','scope_changed',403)
+    if p.access_model == 2:
+        current=access.refresh_write(conn,p)
+        active={r[0] for r in conn.execute('SELECT m.employee_uuid FROM crm_memberships m JOIN crm_employees e USING(employee_uuid) '
+            'WHERE e.active=1 AND m.starts_at<=? AND (m.ends_at IS NULL OR m.ends_at>?)',(at,at))}
+        return replace(current,employee_scope=current.employee_scope & active,timezone=member['timezone'])
+    reduced_analyst=member['role']=='manager' and p.role=='analyst'
+    if member['role']!=p.role and not reduced_analyst:
         raise CRMError('Роль автора задания изменилась.','scope_changed',403)
     active={r[0] for r in conn.execute('SELECT m.employee_uuid FROM crm_memberships m JOIN crm_employees e USING(employee_uuid) '
         'WHERE e.active=1 AND m.team_id=? AND m.starts_at<=? AND (m.ends_at IS NULL OR m.ends_at>?)',(p.team_id,at,at))}
@@ -42,6 +71,9 @@ def current_authority(conn, raw):
 
 def scope_key(p, country='', members=None):
     scope = [p.employee_uuid,p.team_id,p.role,sorted(p.employee_scope),sorted(p.capabilities)]
+    if p.access_model == 2:
+        grant=selected_grant(p)
+        scope.extend((p.grant_id,grant.revision,p.policy_revision,p.timezone))
     if country:
         scope.extend((country, sorted(members)))
     return hashlib.sha256(canonical(scope).encode()).hexdigest()
@@ -50,6 +82,12 @@ def scope_key(p, country='', members=None):
 def require(p):
     if p.role not in {'manager','owner','analyst'}:raise CRMError('Отчёт доступен руководителю или аналитику.','forbidden',403)
     access.require(p,'analytics')
+    grant=selected_grant(p)
+    if grant is not None:
+        if 'analytics' not in grant.capabilities:
+            raise CRMError('Недостаточно прав для действия.','forbidden',403)
+        if grant.role=='owner' and grant.territory!='all':
+            raise CRMError('Глобальное полномочие владельца имеет некорректную область.','grant_invalid',403)
 
 
 def country_members(conn, p, country):
@@ -75,11 +113,13 @@ def _capture(p, country, *, register=True):
         storage.begin(conn)
         refreshed=access.refresh_write(conn,p)
         require(refreshed)
-        if refreshed.capabilities!=p.capabilities:raise CRMError('Права изменились во время расчёта. Повторите запрос.','scope_changed',403)
+        if refreshed.capabilities!=p.capabilities or (p.access_model==2 and (
+                authority_version(refreshed)!=authority_version(p) or refreshed.employee_scope!=p.employee_scope)):
+            raise CRMError('Права изменились во время расчёта. Повторите запрос.','scope_changed',403)
         if country_members(conn,refreshed,country)!=members:
             raise CRMError('Состав страны изменился во время расчёта. Повторите запрос.','scope_changed',403)
         if register:
-            remember_authority(conn,p,'report:'+str(p.actor_uid),'report')
+            remember_authority(conn,refreshed,report_work_id(refreshed),'report')
         conn.execute('INSERT INTO crm_report_snapshots VALUES(?,?,?,?,?,?) '
                      'ON CONFLICT(actor_uid,scope_key,slot) DO NOTHING',
                      (str(uuid.uuid4()),p.actor_uid,key,slot,report['as_of'],canonical(report)))
@@ -163,7 +203,9 @@ def tick(verified=None):
                 p=current_authority(conn,item['authority_json'])
                 if shared:
                     fresh=(verified or {}).get(p.actor_uid)
-                    if not fresh or fresh.employee_uuid!=p.employee_uuid or fresh.role!=p.role or fresh.team_id!=p.team_id:
+                    if (not fresh or fresh.employee_uuid!=p.employee_uuid or fresh.role!=p.role or fresh.team_id!=p.team_id
+                            or fresh.access_model!=p.access_model or fresh.grant_id!=p.grant_id
+                            or (p.access_model==2 and fresh.policy_revision!=p.policy_revision)):
                         blocked+=1;continue
                     p=replace(p,capabilities=p.capabilities & fresh.capabilities,
                               employee_scope=fresh.employee_scope if item['kind']=='report' else p.employee_scope & fresh.employee_scope,

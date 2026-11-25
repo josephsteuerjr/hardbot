@@ -11,6 +11,7 @@ import {mountAnalyst} from './crm-analyst';
 import {mountOperator} from './crm-operator';
 import {mountLogistics, mountLogisticsCall} from './crm-logistics';
 import {decimalText} from './crm-format';
+import {WorkspaceHost,WorkspaceRegistry,workspaceManifestModules,type ModuleContext,type WorkspaceManifest,type WorkspaceModule,type WorkspaceModuleManifest} from './workspace';
 import type {UpdateState} from '../src/main/updates';
 type API = {
   renderLegacyVisits?(host:HTMLElement,previous?:HTMLElement|null):void;
@@ -43,6 +44,8 @@ type API = {
   win(action: string): void;
 };
 const crm = (window as any).crm as API;
+const workspaceRegistry=createCrmWorkspaceRegistry();
+let workspaceHost:WorkspaceHost|undefined;
 let logisticsView: ReturnType<typeof mountLogistics> | undefined;
 const savedOn=crm.platform==='mobile'?'на телефоне':'на компьютере';
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
@@ -95,7 +98,6 @@ let portfolioCallQueue='today';
 let disposeSection:(()=>void)|undefined;
 let portfolioIdentity='',portfolioGeneration=0, portfolioLoading=false;
 let analystIdentity='';
-const sectionScroll=new Map<string,number>();
 let taskStatus='open',taskEmployee='all',taskWork='all',taskSearch='',taskOffset=0,taskGeneration=0;
 let cardOrigin='portfolio',taskSelectClient=false,newTaskAssignee='';
 let managerReportWork:'soft'|'hard'='soft';
@@ -352,6 +354,185 @@ const table = (heads: string[], rows: string[]) =>
 function workSection(role?:string) {
   return role==='analyst'?'registry':role==='logistic'?'logistics':'portfolio';
 }
+function workspaceModule(id:string,label:string,title=label,feature?:string):WorkspaceModule {
+  return {id,label,title,feature,mount:moduleContext=>mountWorkspaceModule(id,moduleContext)};
+}
+export function createCrmWorkspaceRegistry():WorkspaceRegistry {
+  return new WorkspaceRegistry().register(
+    workspaceModule('portfolio','Портфель','Портфель','portfolio'),
+    workspaceModule('field','Маршрут'),
+    workspaceModule('manager-statistics','Показатели','Показатели команды'),
+    workspaceModule('statistics','Показатели'),
+    workspaceModule('team','Команда'),
+    workspaceModule('operator','Сервер и входы'),
+    workspaceModule('logistics','Курьерские пулы'),
+    workspaceModule('registry','Реестр','Реестр','portfolio'),
+    workspaceModule('active-time','Активное время','Активное время','shell'),
+    workspaceModule('tasks','Задачи','Задачи','task'),
+    workspaceModule('cabinet','Показатели сотрудника','Показатели сотрудника','portfolio'),
+    workspaceModule('shift','Смена','Смена','shift'),
+    workspaceModule('script','Скрипт','Скрипт звонка','script'),
+    workspaceModule('queue','Очередь','Очередь','shell'),
+    workspaceModule('exchange','Обмен','Обмен','exchange'),
+    workspaceModule('adoption','Внедрение'),
+    workspaceModule('connection','Подключение','Подключение','shell'),
+    workspaceModule('help','Справка','Справка','shell'),
+  );
+}
+function legacyWorkspaceManifest():WorkspaceManifest {
+  const mobileSignIn=crm.platform==='mobile'&&!context&&state.connection.mode!=='synthetic';
+  if(!context)return {
+    modules:[{id:'connection',label:mobileSignIn?'Вход':'Подключение'},{id:'help'}],
+    identity_epoch:state.owner||'anonymous',policy_epoch:'anonymous',scope:'anonymous',default_module:'connection',
+  };
+  const manager=['manager','owner'].includes(context.role);
+  const sections:Array<[string,string]>=context.role==='logistic'?[
+    ['logistics','Курьерские пулы'],['connection','Подключение'],
+  ]:context.role==='analyst'?[
+    ['registry','Реестр'],['exchange','Обмен'],['statistics','Показатели'],['team','Команда'],['connection','Подключение'],
+  ]:crm.platform==='mobile'&&context.role==='employee'?[
+    ['portfolio','Портфель'],['registry','Реестр'],['cabinet','Показатели'],['queue','Отправки'],
+    ...(can('visit')?[['field','Маршрут'] as [string,string]]:[]),
+    ['tasks','Задачи'],['active-time','Активное время'],['script','Скрипт'],['connection','Подключение'],['help','Справка'],
+  ]:context.role==='employee'?[
+    ['portfolio','Портфель'],['registry','Реестр'],['cabinet','Мои показатели'],
+    ['active-time','Активное время'],['connection','Подключение'],
+  ]:manager?[
+    ['portfolio','Портфель'],['registry','Реестр'],['manager-statistics','Показатели'],
+    ...(context.capabilities?.includes('logistics')?[['logistics','Курьерские пулы'] as [string,string]]:[]),
+    ['active-time','Активное время'],['team','Команда'],['script','Скрипты и задачи'],
+    ...(can('exchange')?[['exchange','Обмен'] as [string,string]]:[]),
+    ...(context.server_operator?[['operator','Сервер и входы'] as [string,string]]:[]),
+    ['connection','Подключение'],
+  ]:crm.platform==='mobile'&&context.role==='courier'?[
+    ['portfolio','Передачи'],['tasks','Задачи'],['cabinet','Мои результаты'],['queue','Отправки'],['shift','Смена'],['connection','Подключение'],['help','Справка'],
+  ]:crm.platform==='mobile'&&context.role==='observer'?[
+    ['portfolio','Портфель'],['cabinet','Показатели'],['tasks','Задачи'],['connection','Подключение'],['help','Справка'],
+  ]:[
+    ['portfolio','Портфель'],['tasks','Задачи'],['cabinet','Мои показатели'],['shift','Смена'],['script','Скрипт'],['queue','Очередь'],
+    ...(can('exchange')?[['exchange','Реестры'] as [string,string]]:[]),
+    ...(can('analytics')?[['adoption','Внедрение'] as [string,string]]:[]),
+    ['connection','Подключение'],['help','Справка'],
+  ];
+  const modules=sections.map(([id,label])=>({id,label}));
+  if(context.role!=='logistic')for(const id of ['queue','tasks','shift','script','help']){
+    if(!modules.some(module=>module.id===id))modules.push({id,label:workspaceRegistry.get(id)?.label||id});
+  }
+  const routed=modules.map(module=>({...module,hidden:!sections.some(([id])=>id===module.id),
+    active:manager&&module.id==='tasks'?'script':undefined}));
+  return {
+    modules:routed,
+    identity_epoch:state.owner||context.employee_uuid||'anonymous',
+    policy_epoch:JSON.stringify([context.role,crm.platform,routed.map(module=>[module.id,module.hidden])]),
+    scope:`${context.role}:${context.employee_uuid||'none'}`,
+    default_module:workSection(context.role),
+  };
+}
+function currentWorkspaceManifest():WorkspaceManifest {
+  const legacy=legacyWorkspaceManifest();
+  const server=context?.workspace;
+  if(!server)return legacy;
+  const modules=workspaceManifestModules(server).map(module=>typeof module==='string'?{id:module}:module);
+  if(!workspaceRegistry.resolve(modules).length)return legacy;
+  const legacyRoutes=new Set((legacy.modules||[]).map(module=>typeof module==='string'?module:module.id));
+  const has=(id:string)=>modules.some(module=>module.id===id);
+  const addHidden=(id:string,parent:string,active?:string)=>{
+    if(has(parent)&&!has(id)&&legacyRoutes.has(id))modules.push({id,hidden:true,active});
+  };
+  for(const id of ['queue','tasks','script','help'])addHidden(id,'portfolio',id==='tasks'&&has('script')?'script':undefined);
+  addHidden('shift','active-time');
+  return {
+    ...legacy,...server,modules,
+    identity_epoch:server.identity_epoch??legacy.identity_epoch,
+    policy_epoch:server.policy_epoch??server.revision??legacy.policy_epoch,
+    scope:server.scope??server.scope_id??legacy.scope,
+    default_module:server.default_module??server.defaultModule??server.default??legacy.default_module,
+  };
+}
+function workspaceHasModule(id:string):boolean {
+  return (currentWorkspaceManifest().modules||[]).some(module=>(typeof module==='string'?module:module.id)===id);
+}
+function managerWorkspace():boolean {
+  return ['manager','owner'].includes(context?.role)||workspaceHasModule('manager-statistics');
+}
+function saveWorkspaceScroll(moduleContext?:ModuleContext){
+  if(!moduleContext)return;
+  const saved=moduleContext.getState<Record<string,any>>()||{};
+  moduleContext.setState({...saved,scroll:document.querySelector('main')!.scrollTop});
+}
+function createWorkspaceHost():WorkspaceHost {
+  return new WorkspaceHost({
+    registry:workspaceRegistry,view:$('view'),navigation:$('navigation'),title:$('title'),
+    onLeave:previous=>{if(!activePerson)saveWorkspaceScroll(previous);},
+    onDispose:()=>{disposeSection?.();disposeSection=undefined;},
+    onRoute:(route,module)=>{
+      section=route;
+      if(context)crm.navigated?.({section:route});
+      telemetry('feature_opened',module.feature as string);
+    },
+    onBeforeMount:()=>{
+      ++renderGeneration;
+      clearTimeout(cardRetryTimer);
+      activePerson='';cardSyncGeneration++;lastCardAcknowledgements='';cardRefreshPending=false;
+      taskSelectClient=false;newTaskAssignee='';
+      document.getElementById('manager-tools-tabs')?.remove();
+      const manager=managerWorkspace();
+      if(manager&&['script','tasks'].includes(section)){
+        const tabs=document.createElement('div');tabs.id='manager-tools-tabs';tabs.className='tabs';
+        tabs.innerHTML=`<button data-tool="script" class="${section==='script'?'active':''}">Скрипты</button><button data-tool="tasks" class="${section==='tasks'?'active':''}">Задачи</button>`;
+        $('view').before(tabs);tabs.querySelectorAll<HTMLButtonElement>('button').forEach(button=>button.onclick=()=>void go(button.dataset.tool!));
+      }
+      notice();
+    },
+    onAfterMount:moduleContext=>{
+      const saved=moduleContext.getState<{scroll?:number}>();
+      if(!activePerson)document.querySelector('main')!.scrollTop=saved?.scroll||0;
+    },
+    onError:reportError,
+  });
+}
+async function mountWorkspaceModule(route:string,moduleContext:ModuleContext):Promise<void> {
+  const generation=renderGeneration;
+  if(route==='logistics'){
+    if(crm.platform==='mobile'){$('view').textContent='Курьерские пулы доступны в Windows CRM.';return;}
+    const view=mountLogistics($('view'),crm,context.logistics_countries||[]);
+    logisticsView=view;
+    disposeSection=()=>{view.dispose();if(logisticsView===view)logisticsView=undefined;};
+    await view.refresh();return;
+  }
+  const analystPresentation=['registry','exchange','statistics','team','connection'].includes(route)&&(
+    context?.role==='analyst'||route==='statistics'||workspaceHasModule('statistics')&&!workspaceHasModule('manager-statistics')&&route!=='connection');
+  if(analystPresentation){
+    const expectedOwner=state.owner,valid=()=>moduleContext.valid()&&generation===renderGeneration;
+    const api={...crm,api:(method:string,action:string,body?:any,query?:any)=>crm.api(method,action==='manager-report'?'analyst-report':action==='manager-statistics'?'analyst-statistics':action,body,query),
+      workbook:(action:string,input?:any)=>crm.workbook(action==='manager-report'?'analyst-report':action,input),
+      draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:(action?:string,id?:string)=>crm.queue(action,id,expectedOwner)};
+    const stop=await mountAnalyst($('view'),route,api,valid,{owner:expectedOwner,navigate:go,core:{
+      table:async(host,current)=>mountRegistry(host,api,current,{manager:true,distribution:context.distribution?.enabled,openPerson:id=>void openCard(id).catch(reportError)}),
+      reports:async(host,current)=>mountManagerReports(host,api,current,false),
+      scripts:async host=>script(host),
+      'crm-books':async host=>exchangePage(host),queue:async host=>queuePage(host),connection:async host=>connection(host),
+    }});
+    if(valid())disposeSection=stop;else stop();return;
+  }
+  const handlers:Record<string,()=>void|Promise<void>>={
+    portfolio:()=>portfolio(),
+    field:()=>{if(crm.renderFieldWorkspace)disposeSection=crm.renderFieldWorkspace($('view'),openCard,()=>moduleContext.valid()&&generation===renderGeneration);},
+    'manager-statistics':()=>managerStatistics(moduleContext),
+    team:managerTeam,
+    operator:()=>mountOperator($('view'),()=>request('GET','operator-status'),()=>moduleContext.valid()&&generation===renderGeneration),
+    registry:async()=>{
+      if(managerWorkspace()){await managerRegistry();return;}
+      const expectedOwner=state.owner;
+      const stop=await mountRegistry($('view'),{...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:(action?:string,id?:string)=>crm.queue(action,id,expectedOwner)},()=>moduleContext.valid()&&generation===renderGeneration,{openPerson:id=>void openCard(id).catch(reportError)});
+      if(moduleContext.valid()&&generation===renderGeneration)disposeSection=stop;else stop();
+    },
+    'active-time':activeTimePage,tasks:tasksPage,cabinet,shift,script,queue:queuePage,exchange:exchangePage,adoption,connection,help,
+  };
+  const handler=handlers[route];
+  if(!handler)throw new Error(`Неизвестный раздел CRM: ${route}`);
+  await handler();
+}
 async function boot(openWork=false) {
   await crm.ready?.();
   state = await crm.state();
@@ -363,11 +544,7 @@ async function boot(openWork=false) {
   if(openWork&&context)section=workSection(context.role);
   document.body.classList.toggle('crm-analyst',context?.role==='analyst');
   if(context?.role==='analyst')analystIdentity=state.owner;
-  if(context?.role==='analyst'&&!['registry','exchange','statistics','team','connection'].includes(section))section='registry';
-  if(context?.role==='logistic'&&!['logistics','connection'].includes(section))section='logistics';
-  if(context?.role!=='logistic'&&section==='logistics')section='portfolio';
   if (portfolioIdentity!==context?.employee_uuid) {
-    sectionScroll.clear();
     taskSelectClient=false;newTaskAssignee='';cardOrigin='portfolio';managerReportWork='soft';
     portfolioIdentity=context?.employee_uuid || '';
     portfolioView=['manager','owner','analyst','observer'].includes(context?.role)?'all':'mine';
@@ -398,181 +575,19 @@ async function boot(openWork=false) {
   $("connection").textContent = mobileSignIn ? '' : state.offline ? 'Нет связи · ввод сохранён '+savedOn :
     state.connection.mode === "synthetic" ? "Синтетические данные" :
     state.connection.mode === 'unconfigured' ? 'Нужен вход · данные сохранены' : 'Связь есть · '+state.connection.server;
-  const manager=['manager','owner'].includes(context?.role);
-  const sections = context?.role==='logistic' ? [
-    ['logistics','Курьерские пулы'],['connection','Подключение'],
-  ] : context?.role==='analyst' ? [
-    ['registry','Реестр'],['exchange','Обмен'],['statistics','Показатели'],['team','Команда'],['connection','Подключение'],
-  ] : crm.platform==='mobile'&&context?.role==='employee' ? [
-    ['portfolio','Портфель'],['registry','Реестр'],['cabinet','Показатели'],['queue','Отправки'],
-    ...(can('visit')?[['field','Маршрут']]:[]),
-    ['tasks','Задачи'],['active-time','Активное время'],['script','Скрипт'],['connection','Подключение'],['help','Справка'],
-  ] : context?.role==='employee' ? [
-    ['portfolio','Портфель'],['registry','Реестр'],['cabinet','Мои показатели'],
-    ['active-time','Активное время'],['connection','Подключение'],
-  ] : manager ? [
-    ['portfolio','Портфель'],['registry','Реестр'],['manager-statistics','Показатели'],
-    ...(context?.capabilities?.includes('logistics')?[['logistics','Курьерские пулы']]:[]),
-    ['active-time','Активное время'],['team','Команда'],
-    ['script','Скрипты и задачи'],
-    ...(can('exchange')?[['exchange','Обмен']]:[]),
-    ...(context?.server_operator?[['operator','Сервер и входы']]:[]),
-    ['connection','Подключение'],
-  ] : crm.platform==='mobile'&&context?.role==='courier'?[
-    ['portfolio','Передачи'],['tasks','Задачи'],['cabinet','Мои результаты'],['queue','Отправки'],['shift','Смена'],['connection','Подключение'],['help','Справка'],
-  ] : crm.platform==='mobile'&&context?.role==='observer'?[
-    ['portfolio','Портфель'],['cabinet','Показатели'],['tasks','Задачи'],['connection','Подключение'],['help','Справка'],
-  ] : [
-    ["portfolio", "Портфель"],
-    ['tasks','Задачи'],
-    ['cabinet','Мои показатели'],
-    ["shift", "Смена"],
-    ["script", "Скрипт"],
-    ["queue", "Очередь"],
-    ...(can("exchange") ? [["exchange", "Реестры"]] : []),
-    ...(can("analytics") ? [["adoption", "Внедрение"]] : []),
-    ["connection", "Подключение"],
-    ["help", "Справка"],
-  ];
-  $("navigation").innerHTML = sections.filter(([id])=>context || ['connection','help'].includes(id))
-    .map(
-      ([id, label]) =>
-        `<button data-section="${id}" class="${section === id ? "active" : ""}">${mobileSignIn && id === 'connection' ? 'Вход' : label}</button>`,
-    )
-    .join("");
-  document
-    .querySelectorAll<HTMLButtonElement>("[data-section]")
-    .forEach((b) => (b.onclick = () => void go(b.dataset.section!)));
-  await go(context ? section : "connection");
+  if(!workspaceHost)workspaceHost=createWorkspaceHost();
+  await workspaceHost.open(currentWorkspaceManifest(),context?section:'connection');
+  section=workspaceHost.currentRoute||section;
   const initialPerson=crm.initialPerson?.();if(context&&initialPerson)await openCard(initialPerson);
   telemetry("client_ready", "shell", {
     duration_ms: Math.round(performance.now()),
   });
 }
-async function go(next: string) {
+async function go(next:string) {
   if(next==='overview')next='portfolio';
-  if(next==='operator'&&!context?.server_operator)next='portfolio';
-  if(context?.role==='logistic'&&!['logistics','connection'].includes(next))next='logistics';
-  disposeSection?.();disposeSection=undefined;
-  const generation=++renderGeneration;
-  if(!activePerson)sectionScroll.set(section,document.querySelector('main')!.scrollTop);
-  clearTimeout(cardRetryTimer);
-  activePerson='';cardSyncGeneration++;lastCardAcknowledgements='';cardRefreshPending=false;
-  taskSelectClient=false;newTaskAssignee='';
-  section = next;
-  if(context)crm.navigated?.({section:next});
-  document.getElementById('manager-tools-tabs')?.remove();
-  const manager=['manager','owner'].includes(context?.role);
-  if(manager&&['script','tasks'].includes(next)){
-    const tabs=document.createElement('div');tabs.id='manager-tools-tabs';tabs.className='tabs';
-    tabs.innerHTML=`<button data-tool="script" class="${next==='script'?'active':''}">Скрипты</button><button data-tool="tasks" class="${next==='tasks'?'active':''}">Задачи</button>`;
-    $('view').before(tabs);tabs.querySelectorAll<HTMLButtonElement>('button').forEach(b=>b.onclick=()=>void go(b.dataset.tool!));
-  }
-  notice();
-  $("title").textContent = (
-    {
-      portfolio: "Портфель",
-      overview:'Обзор',
-      'manager-statistics':'Показатели команды',
-      statistics:'Показатели',
-      team:'Команда',
-      field:'Маршрут',
-      operator:'Сервер и входы',
-      logistics:'Курьерские пулы',
-      registry:'Реестр',
-      'active-time':'Активное время',
-      tasks:'Задачи',
-      shift: "Смена",
-      cabinet:'Показатели сотрудника',
-      script: "Скрипт звонка",
-      queue: "Очередь",
-      exchange: "Обмен",
-      adoption: "Внедрение",
-      connection: crm.platform === 'mobile' && !context && state.connection.mode !== 'synthetic' ? 'Вход' : 'Подключение',
-      help: "Справка",
-    } as any
-  )[next];
-  document
-    .querySelectorAll("[data-section]")
-    .forEach((b) =>
-      b.classList.toggle("active", (b as HTMLElement).dataset.section === (manager&&next==='tasks'?'script':next)),
-    );
-  telemetry(
-    "feature_opened",
-    (
-      {
-        queue: "shell",
-        connection: "shell",
-        help: "shell",
-        shift: "shift",
-        script: "script",
-        exchange: "exchange",
-        adoption: "adoption",
-        portfolio: "portfolio",
-        registry:'portfolio',
-        'active-time':'shell',
-        tasks:'task',
-        cabinet:'portfolio',
-      } as any
-    )[next],
-  );
-  try {
-    if (next === 'logistics' && context?.role === 'logistic') {
-      if (crm.platform==='mobile') {
-        $('view').textContent = 'Курьерские пулы доступны в Windows CRM.';
-        return;
-      }
-      const view = mountLogistics($('view'),crm,context.logistics_countries || []);
-      logisticsView = view;
-      disposeSection = () => { view.dispose(); if (logisticsView === view) logisticsView = undefined; };
-      await view.refresh();
-      return;
-    }
-    if(context?.role==='analyst'&&['registry','exchange','statistics','team','connection'].includes(next)){
-      const expectedOwner=state.owner,valid=()=>generation===renderGeneration;
-      const api={...crm,api:(method:string,action:string,body?:any,query?:any)=>crm.api(method,action==='manager-report'?'analyst-report':action==='manager-statistics'?'analyst-statistics':action,body,query),
-        workbook:(action:string,input?:any)=>crm.workbook(action==='manager-report'?'analyst-report':action,input),
-        draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:(action?:string,id?:string)=>crm.queue(action,id,expectedOwner)};
-      const stop=await mountAnalyst($('view'),next,api,valid,{owner:expectedOwner,navigate:go,core:{
-        table:async(host,current)=>mountRegistry(host,api,current,{manager:true,distribution:context.distribution?.enabled,openPerson:id=>void openCard(id).catch(reportError)}),
-        reports:async(host,current)=>mountManagerReports(host,api,current,false),
-        scripts:async host=>script(host),
-        'crm-books':async host=>exchangePage(host),queue:async host=>queuePage(host),connection:async host=>connection(host),
-      }});
-      if(valid())disposeSection=stop;else stop();
-      return;
-    }
-    await (
-      {
-        portfolio,
-        field:()=>{
-          if(crm.renderFieldWorkspace)disposeSection=crm.renderFieldWorkspace($('view'),openCard,()=>generation===renderGeneration);
-        },
-        'manager-statistics':managerStatistics,
-        team:managerTeam,
-        operator:()=>mountOperator($('view'),()=>request('GET','operator-status'),()=>generation===renderGeneration),
-        registry:async()=>{
-          if(['manager','owner'].includes(context.role)){await managerRegistry();return;}
-          const expectedOwner=state.owner;
-          const stop=await mountRegistry($('view'),{...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),registryEdit:(body:any)=>crm.registryEdit(body,expectedOwner),queue:(action?:string,id?:string)=>crm.queue(action,id,expectedOwner)},()=>generation===renderGeneration,{openPerson:id=>void openCard(id).catch(reportError)});
-          if(generation===renderGeneration)disposeSection=stop;else stop();
-        },
-        'active-time':activeTimePage,
-        tasks:tasksPage,
-        cabinet,
-        shift,
-        script,
-        queue: queuePage,
-        exchange: exchangePage,
-        adoption,
-        connection,
-        help,
-      } as any
-    )[next]();
-  } catch (e) {
-    if ((e as Error).name !== "AbortError") notice((e as Error).message);
-  }
-  if(generation===renderGeneration && !activePerson)document.querySelector('main')!.scrollTop=sectionScroll.get(next) || 0;
+  if(!workspaceHost)throw new Error('Рабочая область CRM ещё не открыта.');
+  await workspaceHost.navigate(next);
+  section=workspaceHost.currentRoute||section;
 }
 
 const debtKeys = ['debt_overdue', 'interest_overdue', 'penalty', 'duty', 'dtp', 'rent',
@@ -650,9 +665,11 @@ async function activeTimePage() {
   bind('active-load',load);bind('active-shift',()=>go('shift'));bind('active-queue',()=>go('queue'));await load();
 }
 
-async function managerStatistics(){
+async function managerStatistics(moduleContext:ModuleContext){
   const generation=renderGeneration,expectedOwner=state.owner;
-  const valid=()=>generation===renderGeneration&&section==='manager-statistics';
+  const valid=()=>moduleContext.valid()&&generation===renderGeneration&&section==='manager-statistics';
+  const savedWork=moduleContext.getState<{work?:string}>()?.work;
+  if(savedWork==='soft'||savedWork==='hard')managerReportWork=savedWork;
   const host=$('view');
   const api={...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner)};
   if(crm.platform!=='mobile'){
@@ -670,6 +687,7 @@ async function managerStatistics(){
     const selected=++revision;
     const current=()=>valid()&&selected===revision;
     managerReportWork=work;
+    moduleContext.setState({...moduleContext.getState<Record<string,any>>(),work});
     for(const button of buttons){
       const active=button.dataset.managerReport===work;
       button.classList.toggle('active',active);
@@ -844,7 +862,7 @@ async function portfolio(search = portfolioSearch, offset=portfolioOffset, selec
 async function openCard(person: string, visitContract?:string, resultEvent?:string) {
   clearTimeout(cardRetryTimer);
   clearTimeout(syncTimer);syncForced=false;
-  if(!activePerson)sectionScroll.set(section,document.querySelector('main')!.scrollTop);
+  if(!activePerson)saveWorkspaceScroll(workspaceHost?.currentContext);
   portfolioGeneration++;
   taskGeneration++;const generation=++renderGeneration;
   activePerson=person;cardSyncGeneration++;lastCardAcknowledgements='';cardRefreshPending=false;
@@ -1892,6 +1910,7 @@ crm.onChange?.(event=>{
   if(event.type==='storage-error'){notice(event.text);}
   else if(event.type==='identity'){
     clearTimeout(cardRetryTimer);
+    workspaceHost?.dispose();workspaceHost=undefined;
     renderGeneration++;activePerson='';cardSyncGeneration++;card=null;context=null;
     $<HTMLDialogElement>('dialog').close();
     void boot().catch(reportError);

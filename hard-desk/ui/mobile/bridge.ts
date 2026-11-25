@@ -4,7 +4,7 @@ import {mountFieldWorkspace} from './field-workspace';
 import {mountConnection} from './connection';
 import {MobileActivity} from './activity';
 type Reply={ok:boolean;status:number;data?:any;text?:string;stale?:string;cancelled?:boolean;retryAt?:number};
-type Entry={action:string;body:any;queued_at:string;state:'pending'|'attention'|'accepted';result?:any;error?:string;code?:string;sha256?:string};
+type Entry={action:string;body:any;queued_at:string;state:'pending'|'attention'|'accepted';result?:any;error?:string;code?:string;sha256?:string;grant_id?:string|null;actor_uid?:string|number;access_model?:number};
 const listeners=new Set<(event:any)=>void>();
 const canonical=(v:any):string=>JSON.stringify(v,(_,x)=>x&&typeof x==='object'&&!Array.isArray(x)?Object.fromEntries(Object.keys(x).sort().map(k=>[k,x[k]])):x);
 const background=(work:Promise<any>)=>{void work.catch(()=>emit({type:'storage-error',text:'Не удалось сохранить данные на телефоне. Оставьте окно открытым и повторите действие.'}));};
@@ -14,6 +14,38 @@ let queueRetryAt=0;
 let initializing:Promise<Reply>|null=null, legacyTried=false;
 let navigationTarget='';
 let initialPerson='';
+const grantId=(context=current?.context)=>context?.access_model===2?context.grant_id||null:null;
+const grantScope=(context=current?.context)=>JSON.stringify([context?.actor_uid??null,grantId(context),context?.policy_revision||0]);
+const operationScope=(context=current?.context)=>JSON.stringify([context?.actor_uid??null,grantId(context)]);
+const hasModule=(id:string,context=current?.context)=>{
+  const visit=(nodes:any[]):boolean=>nodes.some(node=>node?.id===id||visit(node?.children||[]));
+  return Array.isArray(context?.workspace?.tree)?visit(context.workspace.tree):context?.access_model!==2;
+};
+const defaultSection=()=>current?.context?.workspace?.defaultModule||current?.context?.workspace?.default_module||(current?.context?.role==='analyst'?'registry':'portfolio');
+const serverRole=(context=current?.context)=>context?.access_model===2?context.grants?.find((grant:any)=>grant.grant_id===grantId(context)&&String(grant.actor_uid)===String(context.actor_uid))?.role:context?.role;
+const fieldAllowed=()=>['employee','owner'].includes(serverRole())&&hasModule('field')&&(current?.context?.capabilities||[]).includes('visit');
+let connectionHost:HTMLElement|undefined,connectionResponse:Reply|undefined;
+const grantLabel=(grant:any)=>`${({employee:'Сотрудник',manager:'Руководитель',analyst:'Аналитик',courier:'Курьер',observer:'Наблюдатель',owner:'Владелец'} as any)[grant.role]||grant.role} · ${({self:'Личная область',employees:'Назначенные сотрудники',team:'Команда',all:'Вся область'} as any)[grant.territory]||grant.territory}`;
+function renderGrantPicker(){
+  const host=connectionHost;host?.querySelector('[data-grant-picker]')?.remove();if(!host)return;
+  const connected=!!current?.owner,grants=connected?current.context?.grants:connectionResponse?.data?.details?.grants;
+  if(!Array.isArray(grants)||grants.length<2||!connected&&connectionResponse?.data?.error!=='grant_required')return;
+  const form=document.createElement('form');form.dataset.grantPicker='';form.className='mobile-login';
+  const title=document.createElement('h2');title.textContent='Полномочие';const label=document.createElement('label');label.textContent='Рабочая область';
+  const select=document.createElement('select');select.name='grant_id';select.required=true;
+  for(const grant of grants){const option=document.createElement('option');option.value=grant.grant_id;option.textContent=grantLabel(grant);option.selected=connected&&grant.grant_id===grantId();select.append(option);}
+  const button=document.createElement('button');button.type='submit';button.className='primary';button.textContent=connected?'Применить':'Выбрать и войти';
+  label.append(select);form.append(title,label,button);host.querySelector('.mobile-connection')?.prepend(form);
+  form.onsubmit=event=>{event.preventDefault();button.disabled=true;void (async()=>{
+    const grant_id=select.value;let response:Reply;
+    if(connected)response=await bridge.connect({action:'grant',grant_id});
+    else{
+      const login=host.querySelector<HTMLFormElement>('#mobile-login');if(!login)throw Error('Сначала введите логин и пароль.');
+      const data=new FormData(login);response=await bridge.connect({action:'login',username:data.get('username'),password:data.get('password'),grant_id});
+    }
+    if(!response.ok){button.disabled=false;const feedback=host.querySelector<HTMLElement>('#mobile-connect-result');if(feedback)feedback.textContent=response.text||'Полномочие не подтверждено.';}
+  })().catch(error=>{button.disabled=false;const feedback=host.querySelector<HTMLElement>('#mobile-connect-result');if(feedback)feedback.textContent=(error as Error).message;});};
+}
 let navigating=false,routeHandler:((route:any)=>Promise<void>)|undefined;
 window.addEventListener('popstate',()=>{
   const route=history.state?.crmMobile;
@@ -54,6 +86,7 @@ async function initialize(){
   return initializing;
 }
 async function loadSession():Promise<Reply>{
+  const previousOwner=current?.owner,previousScope=grantScope();
   if(!await vault.get(deviceScope,'installation')){
     await vault.update(deviceScope,'installation',value=>value||crypto.randomUUID());
   }
@@ -76,6 +109,7 @@ async function loadSession():Promise<Reply>{
     const saved=await vault.get(deviceScope,'last-state');
     current=saved&&saved.expires_at>Date.now()&&saved.context?.source!=='legacy-analyst-web'?saved:null;
   }
+  if(current?.owner&&current.owner===previousOwner&&grantScope()!==previousScope)await vault.clearReads(current.owner);
   clearTimeout(expiryTimer);
   if(current?.owner)expiryTimer=setTimeout(expireSession,Math.max(0,current.expires_at-Date.now()));
   if(current?.owner&&response.ok&&!document.hidden&&current.context?.source!=='legacy-analyst-web')
@@ -84,14 +118,14 @@ async function loadSession():Promise<Reply>{
   startPolling();return response;
 }
 async function api(method:string,action:string,body?:any,query?:any):Promise<Reply>{
-  const owner=authority(),key='read:'+action+':'+JSON.stringify(query||{});
+  const owner=authority(),requestedGrant=grantId(),scope=current.context?.access_model===2?grantScope()+':':'',operation=current.context?.access_model===2?operationScope()+':':'',key='read:'+scope+action+':'+JSON.stringify(query||{});
   let exportKey='';
   if(method==='POST'&&action==='export'){
-    const {operation_id,...selection}=body;exportKey='export-intent:'+canonical(selection);
+    const {operation_id,...selection}=body;exportKey='export-intent:'+operation+canonical(selection);
     const prior=await vault.get(owner,exportKey);if(prior)body=prior;else await vault.put(owner,exportKey,body);
   }
-  const response=await request('api',{method,action,body:body||{},query:query||{}});
-  if(exportKey){if(response.ok)await vault.put(owner,'export-key:'+response.data.manifest.export_id,exportKey);else if([400,409,422].includes(response.status))await vault.put(owner,exportKey,null);}
+  const response=await request('api',{method,action,body:body||{},query:query||{},...(requestedGrant!==null?{grant_id:requestedGrant}:{})});
+  if(exportKey){if(response.ok)await vault.put(owner,'export-key:'+operation+response.data.manifest.export_id,exportKey);else if([400,409,422].includes(response.status))await vault.put(owner,exportKey,null);}
   if(current?.owner!==owner)return {ok:false,status:401,text:'Вход изменился.'};
   if(method==='GET'&&response.ok&&action!=='operator-status')await vault.put(owner,key,{at:new Date().toISOString(),data:response.data});
   if(method==='GET'&&response.status===0&&!['operator-status','changes','assignment-job','assignment-receipt'].includes(action)){
@@ -102,12 +136,18 @@ async function api(method:string,action:string,body?:any,query?:any):Promise<Rep
 async function enqueue(action:string,body:any,expected?:string,sha256?:string){
   const owner=authority(expected);return persistEntry(owner,action,body,sha256);
 }
+const entryMatchesGrant=(entry:Entry)=>{
+  const context=current?.context;if(!context)return false;
+  if(context.access_model===2)return entry.access_model===2&&entry.grant_id===grantId(context)&&String(entry.actor_uid)===String(context.actor_uid);
+  return entry.access_model!==2&&(entry.actor_uid===undefined||String(entry.actor_uid)===String(context.actor_uid));
+};
 async function persistEntry(owner:string,action:string,body:any,sha256?:string){
   if(!body?.operation_id)throw Error('Не указан номер операции.');
+  const binding={grant_id:grantId(),actor_uid:current?.context?.actor_uid,access_model:current?.context?.access_model===2?2:1};
   await vault.update(owner,'queue',(rows:Entry[]|null)=>{
     rows||=[];const prior=rows.find(r=>r.body.operation_id===body.operation_id);
     if(prior){if(canonical(prior.body)!==canonical(body)||prior.action!==action)throw Error('Номер операции уже связан с другими данными.');return rows;}
-    return [...rows,{action,body,queued_at:new Date().toISOString(),state:'pending',sha256}];
+    return [...rows,{action,body,queued_at:new Date().toISOString(),state:'pending',sha256,...binding}];
   });
   if(current?.owner===owner){emit({type:'queue',owner},true);background(flush());}return {ok:true,status:202,data:{operation_id:body.operation_id,state:'pending'}};
 }
@@ -125,6 +165,7 @@ async function flush(){
     const rows:Entry[]=await vault.get(owner,'queue')||[];
     for(const entry of rows.filter(e=>e.state==='pending')){
       if(current?.owner!==owner)break;
+      if(!entryMatchesGrant(entry))continue;
       if(entry.action==='command'&&entry.body.kind==='visit'&&entry.body.payload?.field_visit?.photos?.length){
         const ids=entry.body.payload.field_visit.photos;
         const latest:Entry[]=await vault.get(owner,'queue')||[];
@@ -134,6 +175,7 @@ async function flush(){
         const latest:Entry[]=await vault.get(owner,'queue')||[];
         if(latest.some(e=>e.action==='document'&&e.body.document_id===entry.body.payload.document_id&&e.state!=='accepted'))continue;
       }
+      if(!entryMatchesGrant(entry))continue;
       const response=await api('POST',entry.action,entry.body);
       if(!response.status||response.status>=500||[401,408,425,429].includes(response.status)){
         if([408,425,429,503].includes(response.status))queueRetryAt=Math.max(Date.now()+5000,response.retryAt||0);
@@ -176,7 +218,7 @@ function startPolling(){clearTimeout(liveTimer);liveTimer=setTimeout(async()=>{
       // Facts refresh in place. Evicting all reads here left a cold offline start empty.
       // Assignment/scope changes can remove authority, so those do invalidate reads.
       if(response.data.resync||response.data.cursor.assignments!==cursor.assignments||cursor.scope&&response.data.cursor.scope!==cursor.scope){await vault.clearReads(owner);await api('GET','work-portfolio');}
-      const context=await request('api',{method:'GET',action:'context'});if(context.ok&&current?.owner===owner){current.context=context.data;await vault.put(deviceScope,'last-state',current);}
+      const context=await request('api',{method:'GET',action:'context'});if(context.ok&&current?.owner===owner){const before=grantScope();current.context=context.data;if(grantScope()!==before)await vault.clearReads(owner);await vault.put(deviceScope,'last-state',current);}
     }}
     emit({type:'live',connected:response.ok,dirty:!!response.data?.dirty,resync:!!response.data?.resync,as_of:response.data?.as_of||new Date().toISOString(),reason:response.ok?'':response.status===0?'offline':response.data?.error||'server'});
   }catch{emit({type:'live',connected:false,dirty:false,reason:'offline'});}finally{polling=false;}}
@@ -232,37 +274,38 @@ async function download(response:Response,name?:string,expected=current?.owner){
 }
 async function workbook(action:string,input:any={}){
   if(action==='team-visits'){
-    const expected=authority();
-    const result=await request('api',{method:'GET',action:'manager-statistics',query:{...input,download:'visits'}});
+    const expected=authority(),requestedGrant=grantId();
+    const result=await request('api',{method:'GET',action:'manager-statistics',query:{...input,download:'visits'},...(requestedGrant!==null?{grant_id:requestedGrant}:{})});
     if(!result.ok)return result;
-    authority(expected);
+    authority(expected);if(requestedGrant!==grantId())throw Error('Полномочие изменилось. Повторите выгрузку.');
     const {filename,content_base64,sha256}=result.data;
     const bytes=Uint8Array.from(atob(content_base64),c=>c.charCodeAt(0));
     const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),n=>n.toString(16).padStart(2,'0')).join('');
     if(hash!==sha256)throw Error('Проверка файла отчёта не прошла.');
     return download(new Response(bytes),filename,expected);
   }
-  const owner=authority(),resumed=action==='resume'?(await vault.get(owner,'download-jobs')||[]).find((j:any)=>j.operation_id===input.operation_id):null;
+  const owner=authority(),requestedGrant=grantId(),resumed=action==='resume'?(await vault.get(owner,'download-jobs')||[]).find((j:any)=>j.operation_id===input.operation_id):null;
   if(action==='resume'&&!resumed)throw Error('Сохранённая выгрузка не найдена у этого сотрудника.');
+  if(resumed&&!entryMatchesGrant(resumed))throw Error('Выгрузка принадлежит другому полномочию.');
   if(resumed)action=resumed.action;
-  const intentKey=resumed?.intentKey||'download-intent:'+action+':'+JSON.stringify(input);
+  const scope=current.context?.access_model===2?operationScope()+':':'',intentKey=resumed?.intentKey||'download-intent:'+scope+action+':'+JSON.stringify(input);
   const prior=action==='read'?null:await vault.get(owner,intentKey);let payload=prior?.input||{...input};
   if(resumed&&!prior)throw Error('Исходная выгрузка уже завершена.');
   if(!prior&&action==='table'&&typeof payload.name==='string')payload.name=payload.name.replace(/\.xlsx$/i,'');
   if(action==='read'){const [file]=await chooseFile('.xlsx,.xlsm,.xlsb,.xls');if(!file)return {ok:false,cancelled:true};payload.file=await upload(file,owner);}
   if(!prior&&action==='write'&&input.use_template){const [file]=await chooseFile('.xlsx,.xlsm,.xlsb,.xls');if(!file)return {ok:false,cancelled:true};payload.template=await upload(file,owner);}
   const operation_id=prior?.operation_id||crypto.randomUUID();if(action!=='read'&&!prior)await vault.put(owner,intentKey,{operation_id,input:payload});
-  if(action!=='read')await vault.update(owner,'download-jobs',(jobs:any[]|null)=>{jobs||=[];return jobs.some(j=>j.operation_id===operation_id)?jobs:[...jobs,{operation_id,action,intentKey,completed:false,path:input.snapshot?'Реестр CRM · '+input.snapshot.manifest.period:input.name||'Отчёт CRM'}];});
+  if(action!=='read')await vault.update(owner,'download-jobs',(jobs:any[]|null)=>{jobs||=[];return jobs.some(j=>j.operation_id===operation_id)?jobs:[...jobs,{operation_id,action,intentKey,completed:false,path:input.snapshot?'Реестр CRM · '+input.snapshot.manifest.period:input.name||'Отчёт CRM',grant_id:requestedGrant,actor_uid:current?.context?.actor_uid,access_model:current?.context?.access_model===2?2:1}];});
   try{
   authority(owner);
-  const response=await fetch('./workbook',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CRM-CSRF':csrf},body:JSON.stringify({action,input:payload,operation_id}),signal:AbortSignal.timeout(180000)});
+  const response=await fetch('./workbook',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CRM-CSRF':csrf},body:JSON.stringify({action,input:payload,operation_id,...(requestedGrant!==null?{grant_id:requestedGrant}:{})}),signal:AbortSignal.timeout(180000)});
   await revoke(response.status,owner);
-  authority(owner);
+  authority(owner);if(requestedGrant!==grantId())throw Error('Полномочие изменилось. Проверьте исходную выгрузку.');
   if(action==='read'){const value=await response.json();return {ok:response.ok,status:response.status,data:value,text:value.text};}
   if([400,409,422].includes(response.status))await vault.put(owner,intentKey,null);
   const result=await download(response,undefined,owner);await vault.put(owner,intentKey,null);
   await vault.update(owner,'download-jobs',(jobs:any[])=>jobs.map(j=>j.operation_id===operation_id?{...j,completed:true,error:null}:j));
-  if(payload.snapshot?.manifest?.export_id){const key=await vault.get(owner,'export-key:'+payload.snapshot.manifest.export_id);if(key)await vault.put(owner,key,null);}
+  if(payload.snapshot?.manifest?.export_id){const key=await vault.get(owner,'export-key:'+scope+payload.snapshot.manifest.export_id);if(key)await vault.put(owner,key,null);}
   return {...result,data:{...result.data,path:'Файл скачан',receipt_state:response.headers.get('X-CRM-Receipt-State')}};
   }catch(error){if(action!=='read')await vault.update(owner,'download-jobs',(jobs:any[])=>jobs.map(j=>j.operation_id===operation_id?{...j,error:'Скачивание не подтверждено. Повторите исходную выгрузку.'}:j));throw error;}
 }
@@ -331,13 +374,13 @@ async function admin(action:string,args:any[],expected:string){
 }
 export const bridge:any={
   renderFieldWorkspace:(host:HTMLElement,openPerson:(person:string)=>Promise<void>,valid:()=>boolean)=>{
-    if(current?.owner&&current.context?.role==='employee'&&current.context.capabilities.includes('visit')){
+    if(current?.owner&&fieldAllowed()){
       return mountFieldWorkspace(host,bridge,current.owner,current.context.employee_uuid,openPerson,valid);
     }
     return ()=>{};
   },
   renderFieldOffline:(host:HTMLElement)=>{
-    if(current?.owner&&current.context?.role==='employee'&&current.context.capabilities.includes('visit')){
+    if(current?.owner&&fieldAllowed()){
       mountFieldOffline(host,bridge,current.owner,current.context.employee_uuid);
     }
   },
@@ -353,13 +396,14 @@ export const bridge:any={
   onChange:(fn:(event:any)=>void)=>{listeners.add(fn);return()=>listeners.delete(fn);},
   telemetry:async(event:any)=>current?api('POST','telemetry',event):{ok:true},
   connect:async(input:any)=>{
-    if(input.action==='refresh'){const before=current?.owner;await initialize();if(current?.owner&&before!==current.owner){navigationTarget=current.context.role==='analyst'?'registry':'portfolio';emit({type:'identity',owner:current.owner},true);}return {ok:true};}
+    if(input.action==='refresh'){const before=current?.owner,scope=grantScope();await initialize();if(current?.owner&&(before!==current.owner||scope!==grantScope())){navigationTarget=defaultSection();emit({type:'identity',owner:current.owner},true);}return {ok:true};}
     if(input.action==='offline'){offline=!!input.value;if(!offline)background(flush());return {ok:true};}
     const installation=await vault.get(deviceScope,'installation');
     const device_id=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(installation)))).map(v=>v.toString(16).padStart(2,'0')).join('');
     if(input.action==='login'||input.action==='logout')legacyTried=true;
-    const response=await request(input.action==='logout'?'logout':input.action==='password'?'password':'login',{...input,device_id,device_label:navigator.userAgent.slice(0,120)});
-    if(response.ok){await initialize();navigationTarget=current?.context?.role==='analyst'?'registry':current?'portfolio':'connection';emit({type:'identity',owner:current?.owner},true);background(flush());}return response;
+    const response=input.action==='grant'?await api('POST','grant',{grant_id:input.grant_id}):await request(input.action==='logout'?'logout':input.action==='password'?'password':'login',{...input,device_id,device_label:navigator.userAgent.slice(0,120)});
+    connectionResponse=response;
+    if(response.ok){await initialize();navigationTarget=current?defaultSection():'connection';emit({type:'identity',owner:current?.owner},true);background(flush());}else renderGrantPicker();return response;
   },workbook,document:documentFile,visitPhoto:(contract:string,file:File,expected:string)=>queueFile(contract,file,authority(expected),true),admin,win:()=>{},
   visitPhotoQueue:(form:string,expected:string)=>({
     stage:(contract:string,files:File[])=>{
@@ -371,15 +415,17 @@ export const bridge:any={
     release:(id:string)=>vault.releasePhoto(authority(expected),form,id),
   }),
   diagnostics:async()=>({ok:true,data:{checks:[{title:'Хранилище телефона',code:'storage_ready',ok:!!await vault.get(deviceScope,'installation')},{title:'Связь',code:navigator.onLine?'network_ready':'offline',ok:navigator.onLine}]}}),
-  renderConnection:async(host:HTMLElement)=>mountConnection(host,bridge,async()=>{
-    const before=current?.owner;
-    const response=await initialize();
-    if(current?.owner&&before!==current.owner){
-      navigationTarget=current.context.role==='analyst'?'registry':'portfolio';
-      queueMicrotask(()=>emit({type:'identity',owner:current.owner},true));
-    }
-    return response;
-  }),
+  renderConnection:async(host:HTMLElement)=>{
+    connectionHost=host;await mountConnection(host,bridge,async()=>{
+      const before=current?.owner;
+      const response=await initialize();connectionResponse=response;
+      if(current?.owner&&before!==current.owner){
+        navigationTarget=defaultSection();
+        queueMicrotask(()=>emit({type:'identity',owner:current.owner},true));
+      }
+      return response;
+    });if(connectionHost===host)renderGrantPicker();
+  },
 };
 window.addEventListener('online',()=>{background(initialize().then(()=>flush()));});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)background(initialize().then(()=>flush()));});

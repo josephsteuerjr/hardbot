@@ -40,10 +40,7 @@ def manager_scope(conn, principal, *, candidates=None):
         return candidates
     result = access.scoped_contracts(conn, principal, include_tasks=False)
     if 'assign' in principal.capabilities:
-        result.update(r[0] for r in conn.execute(
-            'SELECT DISTINCT mc.contract_uuid FROM crm_managed_contracts mc '
-            'JOIN crm_distribution_managers dm ON dm.team_id=mc.team_id AND dm.capability=mc.capability '
-            'WHERE dm.employee_uuid=?', (principal.employee_uuid,)))
+        result.update(store.managed_contracts(conn, principal))
     return result
 
 
@@ -161,7 +158,7 @@ def read(principal, *, search='', view='mine', sort='contract_id', direction='as
         if view == 'mine' and not full_scope:
             allowed = access.scoped_contracts(conn, principal)
         elif view == 'all' and not access.reads_all(principal):
-            allowed = access.readable_contracts(conn, principal)
+            allowed = store.readable_contracts(conn, principal)
         if allowed is not None:
             if storage.is_postgres(conn):
                 conditions.append('c.contract_uuid = ANY(?::text[])')
@@ -193,10 +190,11 @@ def read(principal, *, search='', view='mine', sort='contract_id', direction='as
                             + ' ' + direction + ',c.contract_uuid LIMIT ? OFFSET ?', (*args, limit, offset)).fetchall()
         ids_on_page = [row['contract_uuid'] for row in rows]
         page_ids = set(ids_on_page)
-        direct = page_ids if full_scope else access.scoped_contracts(conn, principal, include_tasks=False)
-        delegated = tasks.grants(conn, principal)
+        writer = store.write_principal(principal)
+        direct = page_ids if full_scope else access.scoped_contracts(conn, writer, include_tasks=False)
+        delegated = tasks.grants(conn, writer)
         write_scope = direct | set(delegated)
-        managed = manager_scope(conn, principal, candidates=page_ids if full_scope else None)
+        managed = manager_scope(conn, writer, candidates=page_ids if full_scope else None)
         from .primary_fence import writable_contracts
         enabled=writable_contracts(conn,ids_on_page)
         originals = _source_rows(conn, ids_on_page)
@@ -235,7 +233,7 @@ def read(principal, *, search='', view='mine', sort='contract_id', direction='as
             output.append(dict(contract_uuid=row['contract_uuid'], person_uuid=row['person_uuid'],external_id=row['external_id'],
                 creditor_id=row['creditor_id'], currency=row['currency'], client_name=row['client_name'],
                 fields=values, revisions=json.loads(row['revisions_json']),
-                writable_fields=writable(conn, principal, row,scope=write_scope,direct_scope=direct,delegated=delegated,
+                writable_fields=writable(conn, writer, row,scope=write_scope,direct_scope=direct,delegated=delegated,
                                          manager_scope=managed,managed_all=full_scope and bool(managed),enabled=enabled)))
         return dict(schema_version=1, columns=columns, rows=output, total=total, offset=offset,
                     has_more=offset+len(output)<total)
@@ -274,7 +272,7 @@ def edit(principal, body):
     at = now()
     with storage.connect() as conn:
         store.begin(conn, [storage.operation_lock(principal, operation), *('contract:' + cid for cid in ids)])
-        principal=access.refresh_write(conn,principal)
+        principal=store.write_principal(access.refresh_write(conn,principal))
         previous = store.replay(conn, principal, operation, body)
         if previous is not None:
             return previous
@@ -337,6 +335,8 @@ def edit(principal, body):
         store.audit(conn, principal, 'registry_edit', operation, dict(rows=len(normalized), cells=cells, event_ids=events))
         result = dict(ok=True, status='accepted', operation_id=operation, event_ids=events,
                       projection_status='applied', received_at=at, rows=confirmed)
+        if principal.grant_id is not None:
+            result['grant_id'] = principal.grant_id
         store.acknowledge(conn, principal, operation, body, result, at)
         conn.commit()
         return result

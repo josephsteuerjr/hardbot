@@ -60,8 +60,10 @@ def create_app(*, sessions=None):
         header, credential = entries[0]
         kind = ('employee' if header == 'X-App-Token' else 'analyst-device' if header == 'X-Device-Token'
                 else 'analyst' if request.headers.get('X-CRM-Entry') == 'analyst' else 'manager')
+        grant_id = request.headers.get('X-CRM-Grant', '').strip() or None
         result = await sessions.exchange(credential, kind=kind,
-                                        device_fingerprint=request.headers.get('X-Device-Id', ''))
+                                        device_fingerprint=request.headers.get('X-Device-Id', ''),
+                                        grant_id=grant_id)
         return web.json_response({'ok': True, **result})
 
     async def health(request):

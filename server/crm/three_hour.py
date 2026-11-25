@@ -66,7 +66,8 @@ def country_scopes(conn, principal):
 
 
 def report(principal, *, country='', members=None):
-    access.require(principal,'analytics')
+    from . import manager_reports
+    manager_reports.require(principal)
     at=now();zone=ZoneInfo(principal.timezone);today=instant(at).astimezone(zone).date()
     yesterday=today-timedelta(days=1)
     boundary=datetime.combine(today,time.min,zone)

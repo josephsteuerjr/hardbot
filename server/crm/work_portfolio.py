@@ -85,7 +85,8 @@ def read(principal, search='', work='all', employee=None, offset=0, limit=100, *
         if not member:raise CRMError('Нет действующего доступа сотрудника.','identity_unmapped',403)
         today=instant(at).astimezone(ZoneInfo(member['timezone'])).date()
         capabilities=set(json.loads(member['capabilities_json'])) & set(ROLE_CAPABILITIES.get(member['role'],()))
-        if employee==principal.employee_uuid and not principal.owner:capabilities &= principal.capabilities
+        if not principal.owner and (employee==principal.employee_uuid or principal.access_model==2):
+            capabilities &= principal.capabilities
         kinds=defaultdict(set)
         for row in conn.execute('SELECT contract_uuid,capability FROM crm_effective_assignments WHERE employee_uuid=? '
             'AND starts_at<=? AND (ends_at IS NULL OR ends_at>?)',(employee,at,at)):

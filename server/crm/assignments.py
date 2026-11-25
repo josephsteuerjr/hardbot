@@ -6,6 +6,7 @@ The legacy mixed deployment stays disabled until its independent fence is ready.
 """
 from collections import defaultdict
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 import json
@@ -59,6 +60,25 @@ def authorize(conn, principal, *, write=False):
     return principal
 
 
+def _territory_sql(principal, *, managed='mc', manager='dm'):
+    from .store import selected_grant
+    grant = selected_grant(principal)
+    if grant is None or grant.territory == 'all':
+        return '', []
+    if grant.territory == 'team':
+        return ' AND ' + manager + '.team_id=?', [principal.team_id]
+    if not principal.employee_scope:
+        return ' AND 1=0', []
+    at = now()
+    employees = ','.join('?' for _ in principal.employee_scope)
+    return (' AND EXISTS(SELECT 1 FROM crm_effective_assignments territory '
+            'WHERE territory.contract_uuid=' + managed + '.contract_uuid '
+            'AND territory.capability=' + managed + '.capability '
+            'AND territory.employee_uuid IN (' + employees + ') '
+            'AND territory.starts_at<=? AND (territory.ends_at IS NULL OR territory.ends_at>?))',
+            [*sorted(principal.employee_scope), at, at])
+
+
 def scope_sql(principal, alias='c', work=None):
     clause = ('EXISTS(SELECT 1 FROM crm_managed_contracts mc '
               'JOIN crm_distribution_managers dm ON dm.team_id=mc.team_id AND dm.capability=mc.capability '
@@ -66,18 +86,25 @@ def scope_sql(principal, alias='c', work=None):
     args = [principal.employee_uuid]
     if work:
         clause += ' AND mc.capability=?'; args.append(work)
-    return clause + ')', args
+    territory, territory_args = _territory_sql(principal)
+    return clause + territory + ')', [*args, *territory_args]
 
 
 def allowed_slots(conn, principal, ids):
     if not ids:
         return set()
     placeholders = ','.join('?' for _ in ids)
+    territory, territory_args = _territory_sql(principal)
+    from .store import selected_grant
+    works = sorted(WORK if selected_grant(principal) is None else WORK & principal.capabilities)
+    if not works:
+        return set()
     return {(r['contract_uuid'], r['capability']) for r in conn.execute(
         'SELECT DISTINCT mc.contract_uuid,mc.capability FROM crm_managed_contracts mc '
         'JOIN crm_distribution_managers dm ON dm.team_id=mc.team_id AND dm.capability=mc.capability '
-        'WHERE dm.employee_uuid=? AND mc.contract_uuid IN (' + placeholders + ')',
-        (principal.employee_uuid, *ids))}
+        'WHERE dm.employee_uuid=? AND mc.contract_uuid IN (' + placeholders + ')' + territory
+        + ' AND mc.capability IN (' + ','.join('?' for _ in works) + ')',
+        (principal.employee_uuid, *ids, *territory_args, *works))}
 
 
 def states(conn, ids):
@@ -104,6 +131,8 @@ def states(conn, ids):
 def _authority_targets(conn, principal):
     row = conn.execute('SELECT employees_json FROM crm_authority_scopes WHERE actor_uid=?',
                        (principal.actor_uid,)).fetchone()
+    if principal.access_model == 2 and row is None:
+        return principal.employee_scope
     return None if row is None else frozenset(json.loads(row['employees_json'])) & principal.employee_scope
 
 
@@ -112,6 +141,10 @@ def targets(conn, principal):
     authorized_staff = _authority_targets(conn, principal)
     teams = {r[0] for r in conn.execute('SELECT DISTINCT team_id FROM crm_distribution_managers WHERE employee_uuid=?',
                                       (principal.employee_uuid,))}
+    from .store import selected_grant
+    grant = selected_grant(principal)
+    if grant is not None and grant.territory == 'team':
+        teams &= {principal.team_id}
     result = {}
     rows = conn.execute('SELECT e.employee_uuid,e.name,e.staff_id,e.active,m.team_id,m.role,m.capabilities_json '
         'FROM crm_employees e LEFT JOIN crm_memberships m ON m.employee_uuid=e.employee_uuid '
@@ -125,7 +158,10 @@ def targets(conn, principal):
         if not visible:
             continue
         row = visible[0]
-        kinds = sorted(set(json.loads(row['capabilities_json'])) & WORK) if len(members)==1 else []
+        capabilities = set(json.loads(row['capabilities_json']))
+        if grant is not None:
+            capabilities &= principal.capabilities
+        kinds = sorted(capabilities & WORK) if len(members)==1 else []
         reason = ('Сотрудник отключён' if not row['active'] else 'Нет постоянной кадровой личности' if not row['staff_id']
                   else 'Требует сверки членства' if len(members)!=1 else 'Нет допустимых видов работ' if not kinds else '')
         result[eid] = dict(employee_uuid=eid,name=row['name'],team_id=row['team_id'],role=row['role'],actor_uids=[],work_kinds=kinds,
@@ -160,13 +196,15 @@ def _filters(principal, *, search='', employee_uuid='', work='all', unassigned='
         args.append(employee_uuid)
         if work!='all':args.append(work)
     if str(unassigned)=='1':
+        territory, territory_args = _territory_sql(principal, managed='free', manager='dm')
         clauses.append('EXISTS(SELECT 1 FROM crm_managed_contracts free WHERE free.contract_uuid=c.contract_uuid '
             'AND EXISTS(SELECT 1 FROM crm_distribution_managers dm WHERE dm.employee_uuid=? AND dm.team_id=free.team_id AND dm.capability=free.capability) '
-            + ('AND free.capability=? ' if work!='all' else '') +
-            'AND NOT EXISTS(SELECT 1 FROM crm_effective_assignments a WHERE a.contract_uuid=c.contract_uuid '
+            + ('AND free.capability=? ' if work!='all' else '') + territory +
+            ' AND NOT EXISTS(SELECT 1 FROM crm_effective_assignments a WHERE a.contract_uuid=c.contract_uuid '
             'AND a.capability=free.capability AND a.ends_at IS NULL))')
         args.append(principal.employee_uuid)
         if work!='all':args.append(work)
+        args.extend(territory_args)
     return ' AND '.join(clauses),args
 
 
@@ -309,6 +347,8 @@ def preview(principal, body):
                 slots.append(current[cid,work])
         frozen=dict(action=action,employee_uuid=target,slots=slots,comment=comment,
                     selection=body['selection'],people=len({r['person_uuid'] for r in rows}),contracts=len(ids))
+        if principal.grant_id is not None:
+            frozen['grant_id'] = principal.grant_id
         _validate(conn,principal,frozen)
         token=str(uuid.uuid4());created=now();expires=(instant(created)+timedelta(minutes=10)).isoformat()
         conn.execute('INSERT INTO crm_assignment_previews VALUES(?,?,?,?,?)',
@@ -319,6 +359,8 @@ def preview(principal, body):
 
 
 def _validate(conn, principal, frozen):
+    if frozen.get('grant_id') != principal.grant_id:
+        raise CRMError('Предпросмотр принадлежит другому полномочию.', 'grant_required', 409)
     slots=frozen['slots'];target=frozen['employee_uuid'];action=frozen['action']
     ids=sorted({s['contract_uuid'] for s in slots});permitted=set();current={}
     from .primary_fence import require_contracts
@@ -396,6 +438,8 @@ def _apply_slots(conn, principal, op, frozen, at):
             conn.execute('INSERT INTO crm_primary_pending VALUES(?,?) ON CONFLICT(contract_uuid) DO UPDATE SET changed_at=excluded.changed_at',(cid,at))
     result=dict(status='applied',operation_id=op,actor_employee_uuid=principal.employee_uuid,team_id=principal.team_id,applied_at=at,changes=changed,no_op=len(frozen['slots'])-len(changed),
                 watermark=watermark(conn),projection_status='pending' if any(conn.execute('SELECT 1 FROM crm_primary_pending WHERE contract_uuid=?',(s['contract_uuid'],)).fetchone() for s in changed) else ('projected' if projected else 'isolated'),comment=frozen['comment'])
+    if principal.grant_id is not None:
+        result['grant_id'] = principal.grant_id
     return result
 
 
@@ -406,17 +450,28 @@ def commit(principal, body):
     with storage.connect() as conn:
         storage.begin(conn)  # exclusive: valid through work writers' commits
         principal=access.refresh_write(conn,principal)
+        frozen=None
+        if principal.access_model == 2:
+            authorize(conn,principal)
+            row=conn.execute('SELECT * FROM crm_assignment_previews WHERE preview_id=? AND actor_uid=?',
+                             (token,principal.actor_uid)).fetchone()
+            if not row:raise CRMError('Предпросмотр недоступен.','preview_missing',404)
+            frozen=json.loads(row['body_json'])
+            if frozen.get('grant_id') != principal.grant_id:
+                raise CRMError('Предпросмотр принадлежит другому полномочию.', 'grant_required', 409)
         previous=conn.execute('SELECT request_hash,result_json FROM crm_assignment_operations WHERE actor_uid=? AND operation_id=?',
                               (principal.actor_uid,op)).fetchone()
         if previous:
             if previous['request_hash']!=digest(body):raise CRMError('Идентификатор уже использован с другим телом.','operation_reused',409)
             return json.loads(previous['result_json'])
         authorize(conn,principal)
-        row=conn.execute('SELECT * FROM crm_assignment_previews WHERE preview_id=? AND actor_uid=?',
-                         (token,principal.actor_uid)).fetchone()
-        if not row:raise CRMError('Предпросмотр недоступен.','preview_missing',404)
+        if frozen is None:
+            row=conn.execute('SELECT * FROM crm_assignment_previews WHERE preview_id=? AND actor_uid=?',
+                             (token,principal.actor_uid)).fetchone()
+            if not row:raise CRMError('Предпросмотр недоступен.','preview_missing',404)
+            frozen=json.loads(row['body_json'])
         if row['expires_at']<at:raise CRMError('Предпросмотр истёк. Обновите состав.','preview_expired',409)
-        frozen=json.loads(row['body_json']);_validate(conn,principal,frozen)
+        _validate(conn,principal,frozen)
         result = _start_job(conn,principal,op,frozen,at) if len(frozen['slots'])>MAX_SLOTS else _apply_slots(conn,principal,op,frozen,at)
         conn.execute('INSERT INTO crm_assignment_operations VALUES(?,?,?,?,?)',
                      (principal.actor_uid,op,digest(body),canonical(result),at))
@@ -426,7 +481,7 @@ def commit(principal, body):
 def _start_job(conn,principal,op,frozen,at):
     job_id=op
     from .manager_reports import remember_authority
-    remember_authority(conn,principal,'assignment:'+job_id,'assignment')
+    remember_authority(conn,replace(principal,grants=()),'assignment:'+job_id,'assignment')
     conn.execute('INSERT INTO crm_assignment_jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
         (job_id,principal.actor_uid,op,'running',len(frozen['slots']),0,0,0,0,0,at,at))
     for index,start in enumerate(range(0,len(frozen['slots']),MAX_SLOTS)):
@@ -435,14 +490,21 @@ def _start_job(conn,principal,op,frozen,at):
         pack_op=str(uuid.uuid5(uuid.UUID(job_id),'pack:'+str(index)))
         conn.execute('INSERT INTO crm_assignment_packs VALUES(?,?,?,?,?,?,?)',
             (job_id,index,pack_op,canonical(pack),'pending',None,len(slots)))
-    return dict(status='job_started',operation_id=op,actor_employee_uuid=principal.employee_uuid,team_id=principal.team_id,job_id=job_id,total_slots=len(frozen['slots']),
-                changes=[],no_op=0,applied_at=at,projection_status='isolated',watermark=watermark(conn))
+    result = dict(status='job_started',operation_id=op,actor_employee_uuid=principal.employee_uuid,team_id=principal.team_id,job_id=job_id,total_slots=len(frozen['slots']),
+                  changes=[],no_op=0,applied_at=at,projection_status='isolated',watermark=watermark(conn))
+    if principal.grant_id is not None:
+        result['grant_id'] = principal.grant_id
+    return result
 
 
 def _job(conn,principal,job_id):
     identifier=operation_id(job_id)
     row=conn.execute('SELECT * FROM crm_assignment_jobs WHERE job_id=? AND actor_uid=?',(identifier,principal.actor_uid)).fetchone()
     if not row:raise CRMError('Задание недоступно.','job_missing',404)
+    authority=conn.execute("SELECT authority_json FROM crm_background_authorities WHERE work_id=? AND kind='assignment'",
+                           ('assignment:'+identifier,)).fetchone()
+    if authority and json.loads(authority['authority_json']).get('grant_id') != principal.grant_id:
+        raise CRMError('Задание принадлежит другому полномочию.','grant_required',409)
     result=dict(row)
     result['pending_slots']=result['total_slots']-sum(result[k] for k in ('applied_slots','no_op_slots','conflict_slots','cancelled_slots'))
     return result
@@ -514,7 +576,10 @@ def receipt(principal, *, operation_id):
         row=conn.execute('SELECT result_json FROM crm_assignment_operations WHERE actor_uid=? AND operation_id=?',
                          (principal.actor_uid,op)).fetchone()
         if not row:raise CRMError('Операция пока не найдена.','operation_unknown',404)
-        return json.loads(row[0])
+        result=json.loads(row[0])
+        if 'grant_id' in result and result['grant_id'] != principal.grant_id:
+            raise CRMError('Операция принадлежит другому полномочию.','grant_required',409)
+        return result
 
 
 def changes(principal, *, assignments='0', facts='0', scope=''):
@@ -530,13 +595,16 @@ def changes(principal, *, assignments='0', facts='0', scope=''):
 
 def _changes(conn, principal, cursor, previous_scope=''):
     end=watermark(conn)
-    current_scope=digest([principal.employee_uuid,principal.role,principal.team_id,
-        sorted(principal.capabilities),sorted(principal.employee_scope),principal.all_contracts,principal.read_all_contracts,
+    scope = [principal.employee_uuid,principal.role,principal.team_id]
+    if principal.access_model == 2:
+        scope.extend([principal.grant_id,principal.policy_revision])
+    scope.extend([sorted(principal.capabilities),sorted(principal.employee_scope),principal.all_contracts,principal.read_all_contracts,
         [dict(r) for r in conn.execute('SELECT team_id,capability FROM crm_distribution_managers WHERE employee_uuid=? ORDER BY team_id,capability',
                                       (principal.employee_uuid,))],
         [dict(r) for r in conn.execute('SELECT country,work FROM crm_logistics_staff WHERE employee_uuid=? ORDER BY country,work',
                                       (principal.employee_uuid,))],
         conn.execute('SELECT MAX(recorded_at) FROM crm_contact_status').fetchone()[0]])
+    current_scope=digest(scope)
     new_cursor=dict(end,scope=current_scope)
     if previous_scope and previous_scope!=current_scope:
         return dict(cursor=new_cursor,resync=True,dirty=True,as_of=now())
@@ -695,7 +763,9 @@ def statistics(principal, *, month=None,period=None,employee_uuid=None,kind=None
                 'AND h.contract_uuid IS NULL AND a.starts_at<=? AND (a.ends_at IS NULL OR a.ends_at>?) '
                 'WHERE dm.employee_uuid=? GROUP BY mc.contract_uuid,mc.capability,h.contract_uuid,h.employee_uuid',
                 (at,at,principal.employee_uuid)) if managed else ()
+        visible = set(ids)
         for slot in slots:
+            if slot['contract_uuid'] not in visible:continue
             if not slot['head_id'] and slot['candidates']>1:ambiguous.add(slot['contract_uuid'])
             elif (slot['head_id'] and slot['employee_uuid'] is None) or (not slot['head_id'] and slot['candidates']==0):
                 unassigned.add(slot['contract_uuid']);free_slots+=1

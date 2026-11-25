@@ -18,6 +18,7 @@ from . import (
     shifts,
     documents,
     scripts,
+    workspace,
 )
 from .contract import CRMError, canonical, digest, fields, identifier, now
 from .roles import ROLE_CAPABILITIES
@@ -318,8 +319,9 @@ def seed():
         conn.commit()
 
 
-def context(p):
+def context(p, requested_module=None):
     from . import tasks,assignments
+    workspace_manifest = workspace.manifest(p, requested_module)
     with db.connect() as conn:
         cohorts = [
             dict(r)
@@ -344,6 +346,7 @@ def context(p):
         synthetic=True,
         staff=staff,
         distribution=distribution,
+        workspace=workspace_manifest,
     )
 
 
@@ -401,7 +404,7 @@ def serve():
                     "script": scripts.mutate,
                 }
                 if action == "context":
-                    result = context(p)
+                    result = context(p, query.get("module"))
                 elif action=='analyst-admin-init':
                     from . import demo_admin
                     result=demo_admin.endpoint(p)

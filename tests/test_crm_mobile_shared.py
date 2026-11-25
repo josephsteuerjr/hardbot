@@ -10,6 +10,7 @@ from aiohttp.test_utils import TestClient,TestServer
 import accounts,db
 import web as primary
 from crm.mobile_backend import SharedBackend,ServerExecutor
+from crm.contract import CRMError
 from crm.mobile_server import create_app
 from crm.shared_auth import Authority,Sessions,AUTHORITY_CACHE_SECONDS
 from crm.shared_server import create_app as shared_app
@@ -183,4 +184,106 @@ def test_team_adapter_uses_registered_primary_routes():
         session=dict(role='manager',credential_header='X-Pult-Token',credential='synthetic-test-credential')
         for resource in ['team','approve','reset','revoke','board']:
             assert (await backend.request(session,'GET' if resource=='team' else 'POST','manager-access',dict(resource=resource,payload={}),dict(resource=resource)))['ok']
+    asyncio.run(run())
+
+
+def test_shared_exchange_forwards_only_the_explicit_grant_header():
+    async def run():
+        calls=[]
+        class ExchangeSessions:
+            async def exchange(self,credential,**kwargs):
+                calls.append((credential,kwargs))
+                return dict(token='synthetic-crm-token')
+            def authority_metrics(self):return {}
+        async with TestClient(TestServer(shared_app(sessions=ExchangeSessions()))) as client:
+            response=await client.post('/auth/exchange',headers={'X-Pult-Token':'synthetic-credential','X-CRM-Grant':'grant-manager'})
+            assert response.status==200
+            response=await client.post('/auth/exchange',headers={'X-Pult-Token':'synthetic-credential'})
+            assert response.status==200
+            assert (await client.post('/auth/exchange?grant_id=grant-manager',headers={'X-Pult-Token':'synthetic-credential'})).status==400
+        assert [call[1]['grant_id'] for call in calls]==['grant-manager',None]
+    asyncio.run(run())
+
+
+def test_mobile_grant_switch_keeps_person_owner_and_rejects_stale_envelope(tmp_path):
+    contexts={
+        'grant-manager':dict(actor_uid=303,employee_uuid='person-one',role='manager',capabilities=['assign','exchange'],workspace=dict(defaultModule='portfolio',tree=[dict(id='portfolio',children=[]),dict(id='team',children=[])])),
+        'grant-analyst':dict(actor_uid=303,employee_uuid='person-one',role='analyst',capabilities=['exchange'],workspace=dict(defaultModule='registry',tree=[dict(id='registry',children=[]),dict(id='exchange',children=[])])),
+    }
+    grants=[dict(grant_id=key,actor_uid=303,role=value['role'],territory='self',capabilities=value['capabilities']) for key,value in contexts.items()]
+    exchanges=[];receipts=[]
+    class GrantsBackend(SharedBackend):
+        async def json(self,url,method='GET',headers=None,body=None):
+            if url.endswith('/api/account/login'):
+                return dict(action='ok',token='synthetic-account-credential',role='full',username='synthetic')
+            if url.endswith('/api/crm-identity'):
+                return dict(me=dict(role='manager'))
+            if url.endswith('/auth/exchange'):
+                grant_id=(headers or {}).get('X-CRM-Grant','grant-manager');exchanges.append(grant_id)
+                return dict(token='token-'+grant_id,grant_id=grant_id,grants=grants,access_model=2,policy_revision=7)
+            if url.endswith('/api/crm/context'):
+                grant_id=session_grant[0]
+                return dict(contexts[grant_id],grant_id=grant_id)
+            if url.endswith('/api/crm/receipt'):
+                receipts.append((headers['Authorization'],body));return dict(ok=True)
+            raise AssertionError(url)
+    session_grant=['grant-manager']
+    backend=GrantsBackend('https://hard.rimborso.ru','https://hard.rimborso.ru/crm-shared-pilot')
+    original_exchange=backend.exchange
+    async def exchange(session):
+        result=await original_exchange(session);session_grant[0]=session['grant_id'];return result
+    backend.exchange=exchange
+    async def run():
+        app=create_app(backend,tmp_path/'mobile',key=os.urandom(32))
+        async with TestClient(TestServer(app)) as client:
+            initial=await (await client.get('/mobile/boot')).json()
+            response=await client.post('/mobile/login',headers={'X-CRM-CSRF':initial['csrf']},json=dict(username='synthetic',password='synthetic',grant_id='grant-manager'))
+            assert response.status==200
+            manager=await (await client.get('/mobile/boot')).json();headers={'X-CRM-CSRF':manager['csrf']}
+            owner=manager['session']['owner']
+            denied=await client.post('/mobile/admin',headers=headers,json=dict(action='reserve',args=['synthetic.xlsx']))
+            assert denied.status==403
+            response=await client.post('/mobile/api',headers=headers,json=dict(method='POST',action='grant',body=dict(grant_id='grant-analyst')))
+            assert response.status==200,await response.text()
+            analyst=await (await client.get('/mobile/boot')).json()
+            assert analyst['session']['owner']==owner
+            assert analyst['session']['context']['role']=='analyst'
+            assert analyst['session']['context']['grant_id']=='grant-analyst'
+            assert analyst['session']['context']['workspace']['defaultModule']=='registry'
+            headers={'X-CRM-CSRF':analyst['csrf']}
+            reserved=await client.post('/mobile/admin',headers=headers,json=dict(action='reserve',args=['synthetic.xlsx']))
+            assert reserved.status==200
+            stale=await client.post('/mobile/api',headers=headers,json=dict(method='GET',action='context',grant_id='grant-manager'))
+            assert stale.status==409 and (await stale.json())['error']=='grant_changed'
+            identifier=str(uuid.uuid4());store=app['mobile_sessions']
+            store.job(owner,identifier,dict(access_model=2,actor_uid=303,grant_id='grant-manager',receipt=dict(receipt_id=identifier),receipt_state='pending'))
+            response=await client.post('/mobile/receipts',headers=headers,json=dict(action='flush'))
+            entries=(await response.json())['entries']
+            assert entries[0]['code']=='grant_changed' and receipts==[]
+            await client.post('/mobile/api',headers=headers,json=dict(method='POST',action='grant',body=dict(grant_id='grant-manager')))
+            manager=await (await client.get('/mobile/boot')).json();headers={'X-CRM-CSRF':manager['csrf']}
+            response=await client.post('/mobile/receipts',headers=headers,json=dict(action='flush'))
+            assert (await response.json())['entries'][0]['state']=='accepted'
+            assert len(receipts)==1 and receipts[0][0]=='Bearer token-grant-manager'
+        assert exchanges==['grant-manager','grant-analyst','grant-manager']
+    asyncio.run(run())
+
+
+def test_background_executor_rechecks_revoked_grant_before_starting(tmp_path):
+    async def run():
+        async def denied(request):
+            return web.json_response(dict(error='grant_revoked',text='Grant revoked'),status=403)
+        authority=web.Application();authority.router.add_get('/api/crm/context',denied)
+        key=tmp_path/'runtime.key';key.write_bytes(os.urandom(32))
+        executor=ServerExecutor(tmp_path/'executor','https://hard.rimborso.ru',key)
+        async with TestServer(authority) as server:
+            executor.crm=str(server.make_url('')).rstrip('/')
+            async with aiohttp.ClientSession() as client:
+                executor.client=client
+                session=dict(context=dict(actor_uid=303,employee_uuid='person-one',role='analyst',grant_id='grant-revoked',access_model=2),crm_session='stale-token',grant_id='grant-revoked',access_model=2)
+                try:
+                    await executor.crm_context(session)
+                    raise AssertionError('revoked background grant was accepted')
+                except CRMError as exc:
+                    assert exc.code=='grant_revoked'
     asyncio.run(run())

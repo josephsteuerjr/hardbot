@@ -24,6 +24,7 @@ import {CrmLive} from './crm-live';
 import {FIXED_PRODUCT,PRODUCTS,STABLE_CRM} from './product';
 import {accountAction,accountState,adoptSoftAccount,markAccountLoginRequired,savedAccountFingerprint} from './crm-account';
 import {checkUpdates,installUpdate,startUpdates,updateState} from './updates';
+import {nativeCapability} from './crm-native-access';
 
 const isolatedProfile = !!process.env.HARD_USER_DATA;
 const product = STABLE_CRM ? FIXED_PRODUCT! : PRODUCTS.crm;
@@ -401,10 +402,21 @@ async function managerAccess(method:string,body:any,query:any):Promise<queue.Res
   const resource=method==='GET'?query?.resource:body?.resource;
   const route=routes[resource];
   if(!route||route[0]!==method)return {ok:false,status:400,text:'Неизвестное действие доступа.'};
+  const capability=resource==='plan'?'manager-plan':'manager-access';
+  if(!nativeCapability(currentContext,capability))
+    return {ok:false,status:403,text:'Сервер не выдал полномочие управления входами в этом рабочем месте.'};
+  const authority=owner,previous=currentContext,fresh=await send('GET','context');
+  if(!fresh.ok)return fresh;
+  if(authority!==owner)return {ok:false,status:409,text:'Учётная запись изменилась. Повторите действие.'};
+  if(fresh.data?.employee_uuid!==previous?.employee_uuid ||
+      previous?.actor_uid!==undefined&&fresh.data?.actor_uid!==previous.actor_uid ||
+      !nativeCapability(fresh.data,capability))
+    return {ok:false,status:403,text:'Полномочие управления входами отозвано или изменилось.'};
+  currentContext=fresh.data;
   if(demo())return local('manager-access',body,query,method);
-  if(!shared()||!['manager','crm'].includes(entrySource())||currentContext?.role!=='manager')
-    return {ok:false,status:403,text:'Для управления входами нужен действующий вход Руководителя.'};
-  const authority=owner,actor=currentContext.actor_uid;
+  if(!shared()||!['manager','analyst','crm'].includes(entrySource()))
+    return {ok:false,status:403,text:'Для управления входами нужно подтверждённое подключение к рабочему месту.'};
+  const actor=currentContext.actor_uid;
   try{
     await pilotCredential(currentContext.employee_uuid,false,entrySource());
     const login=readExistingLogin(entrySource());
@@ -433,42 +445,46 @@ const send:queue.Transport=async(method,action,body,query)=>{
 const analystRuntime=new AnalystRuntime({home:data,window:()=>win,synthetic:demo,
   writeTable:(report,path)=>local('report-write',{report,path,kind:'table'}),
   authorize:async expected=>{
-    if(!expected||expected!==owner||currentContext?.role!=='analyst')throw Error('Нужен действующий вход Аналитика.');
+    if(!expected||expected!==owner||!nativeCapability(currentContext,'admin'))
+      throw Error('Сервер не выдал полномочие администрирования в этом рабочем месте.');
     const employee = currentContext.employee_uuid;
     const previousActor = currentContext.actor_uid;
     const source = entrySource();
     const fingerprint = demo() ? '' : entryFingerprint(source);
-    const valid = () => expected === owner && currentContext?.role === 'analyst'
+    const valid = () => expected === owner && nativeCapability(currentContext,'admin')
       && currentContext.employee_uuid === employee && (demo() || (entrySource() === source && entryFingerprint(source) === fingerprint));
     const result = await send('GET','context');
-    if (!result.ok || result.data?.role !== 'analyst' || result.data.employee_uuid !== employee || !valid())
-      throw Error('Сервер не подтвердил полномочия Аналитика.');
+    if (!result.ok || !nativeCapability(result.data,'admin') || result.data.employee_uuid !== employee || !valid())
+      throw Error('Сервер не подтвердил полномочия администрирования.');
+    const ownerAccess = result.data.owner === true;
     let actor = result.data.actor_uid;
     if(demo()){
       const endpoint=await local('analyst-admin-init',{});
-      if(!endpoint.ok || !Number.isSafeInteger(actor) || !actor || !valid())throw Error('Вход Аналитика изменился.');
+      if(!endpoint.ok || !Number.isSafeInteger(actor) || !actor || !valid())throw Error('Полномочие администрирования изменилось.');
       return {owner:expected,...endpoint.data,actor,current:valid};
     }
-    if (!shared() || !['analyst','crm'].includes(source)) throw Error('Подключите вход Аналитика.');
+    if (!shared() || !(ownerAccess ? ['manager','analyst','crm'] : ['analyst','crm']).includes(source))
+      throw Error('Подключите вход с подтверждённым полномочием администрирования.');
     const login = readExistingLogin(source);
-    if (!['analyst','analyst-device'].includes(login.kind) || login.fingerprint !== fingerprint)
-      throw Error('Вход Аналитика изменился.');
+    if (!(ownerAccess ? ['manager','analyst','analyst-device'] : ['analyst','analyst-device']).includes(login.kind) || login.fingerprint !== fingerprint)
+      throw Error('Вход администратора изменился.');
     if (actor === undefined) {
-      // The previous CRM context supplied the employee UUID only. Resolve the
-      // numeric identity through the authority that issued this same credential.
       const response = await fetchBuffered((url, init) => net.fetch(url,init), 'https://hard.rimborso.ru/api/crm-identity', {
         method:'GET', redirect:'error', headers:{
-          [login.kind === 'analyst' ? 'X-Pult-Token' : 'X-Device-Token']:login.credential,
-          'X-CRM-Entry':'analyst','X-Client-Version':app.getVersion(),
+          [login.kind === 'analyst-device' ? 'X-Device-Token' : 'X-Pult-Token']:login.credential,
+          ...(login.kind === 'analyst' ? {'X-CRM-Entry':'analyst'} : {}),'X-Client-Version':app.getVersion(),
           ...(login.deviceFingerprint ? {'X-Device-Id':login.deviceFingerprint} : {})
         }},10000);
       const identity = await response.json();
-      if (!response.ok || identity.ok !== true || identity.subject?.type !== 'analyst' || identity.me?.role !== 'analyst')
-        throw Error('Сервер не подтвердил личность Аналитика.');
+      const confirmed = ownerAccess
+        ? identity.subject?.type === 'manager' && ['manager','full'].includes(identity.me?.role)
+        : identity.subject?.type === 'analyst' && identity.me?.role === 'analyst';
+      if (!response.ok || identity.ok !== true || !confirmed)
+        throw Error('Сервер не подтвердил личность администратора.');
       actor = identity.subject.actor_uid;
     }
     if (!Number.isSafeInteger(actor) || !actor || (previousActor !== undefined && previousActor !== actor) || !valid())
-      throw Error('Изменилась личность Аналитика.');
+      throw Error('Изменилась личность администратора.');
     return {owner:expected,actor,url:'https://hard.rimborso.ru',
       token:(login.kind==='analyst'?'account:':'')+login.credential,fingerprint,
       existingProfile: STABLE_CRM && product.id === 'analyst' && source === 'analyst' && !isolatedProfile, profileUrl:login.profileUrl,current:valid};
@@ -489,7 +505,8 @@ async function identify() {
       try{queue.importSoftQueue(owner);}
       catch(error){connectionNotice=(error as Error).message;}
     }
-    if (STABLE_CRM && product.id === 'analyst' && currentContext.role === 'analyst' && !isolatedProfile) {
+    if (STABLE_CRM && !isolatedProfile && (product.id === 'analyst' || currentContext.owner === true) &&
+        nativeCapability(currentContext,'admin')) {
       void analystRuntime.resume(owner).catch(() => diagnostic('helper','analyst_start_failed',false));
     }
     // Older deployed pilots have no invalidation protocol. A missing feature
@@ -964,7 +981,8 @@ app
     safeHandler("crm:workbook", async (action: string, input: any) => {
       if (action === 'logistics-read' || action === 'logistics-export' || action === 'logistics-export-download') {
         const authority = owner;
-        if (!authority || currentContext?.role !== 'logistic') throw new Error('Требуется вход логиста.');
+        if (!authority || !nativeCapability(currentContext,'workbook-logistics'))
+          throw new Error('Сервер не выдал полномочие работы с курьерскими книгами.');
         if (action === 'logistics-export-download') {
           const result = await send('GET', action, undefined, input);
           if (!result.ok) return result;
@@ -1002,7 +1020,8 @@ app
       }
       if(action==='team-visits'||action==='report-preset'){
         const authority=owner;
-        if(!authority || !['manager','owner'].includes(currentContext?.role))throw Error('Для выгрузки нужен вход руководителя.');
+        if(!authority || !nativeCapability(currentContext,'workbook-manager-report'))
+          throw Error('Сервер не выдал полномочие выгрузки отчётов руководителя.');
         const result=action==='report-preset'
           ? await send('GET','manager-report-download',undefined,input)
           : await send('GET','manager-statistics',undefined,{...input,download:'visits'});
@@ -1019,7 +1038,8 @@ app
       }
       if(action==='table'){
         const authority=owner;
-        if(!authority||!['manager','analyst','owner'].includes(currentContext?.role))throw Error('Для выгрузки нужен вход руководителя или аналитика.');
+        if(!authority || !nativeCapability(currentContext,'workbook-table'))
+          throw Error('Сервер не выдал полномочие табличной выгрузки.');
         const clean=(value:unknown)=>typeof value==='string'&&/^[=+\-@]/.test(value)?'\''+value:value;
         const report={headers:input.headers.map(clean),rows:input.rows.map((row:unknown[])=>row.map(clean))};
         const name=String(input.name||'Результаты.xlsx').replace(/[<>:"/\\|?*\x00-\x1f]/g,'_');
@@ -1053,6 +1073,8 @@ app
         return local('report-write',{report:report.data,kind:'shifts',path:choice.filePath});
       }
       if (action === "read") {
+        if(!owner || !nativeCapability(currentContext,'workbook-exchange'))
+          throw Error('Сервер не выдал полномочие обмена книгами.');
         const choice = await dialog.showOpenDialog(win!, {
           properties: ["openFile"],
           filters: [{ name: "Реестры", extensions: ["xlsx", "xlsm", "xlsb"] }],
@@ -1064,6 +1086,8 @@ app
         if (result.ok) result.data.filename = basename(choice.filePaths[0]);
         return result;
       }
+      if(!owner || !nativeCapability(currentContext,'workbook-exchange'))
+        throw Error('Сервер не выдал полномочие обмена книгами.');
       if (action !== "write" || !input?.snapshot)
         throw new Error("Нет подтверждённой выгрузки.");
       let template: string | undefined;

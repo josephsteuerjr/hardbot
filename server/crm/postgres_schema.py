@@ -169,6 +169,7 @@ def initialize(conn):
     from .runtime_schema import DDL as runtime_ddl
     from .logistics_schema import DDL as logistics_ddl
     from .withdrawals import DDL as withdrawal_ddl
+    from .grant_schema import ddl as grant_ddl
     withdrawal_ddl = withdrawal_ddl.replace("CREATE VIEW IF NOT EXISTS", "CREATE OR REPLACE VIEW")
     storage.begin(conn)
     conn.execute("CREATE TABLE IF NOT EXISTS crm_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
@@ -176,23 +177,26 @@ def initialize(conn):
     conn.execute("INSERT INTO crm_meta VALUES('instance_id',?) ON CONFLICT(key) DO NOTHING",(str(uuid.uuid4()),))
     current = conn.execute("SELECT value FROM crm_meta WHERE key='schema_version'").fetchone()
     if current:
-        if int(current[0])==1:
+        version = int(current[0])
+        if version == 1:
             conn.execute(UPGRADE_2)
-        if int(current[0]) in (1,2):
+        if version in (1,2):
             conn.execute(exchange_ddl)
-        if int(current[0]) in (1,2,3):
+        if version in (1,2,3):
             conn.execute(active_ddl)
-        if int(current[0]) in (1,2,3,4):
+        if version in (1,2,3,4):
             conn.execute(assignment_ddl(True))
-        if int(current[0]) in (1,2,3,4,6):
+        if version in (1,2,3,4,6):
             conn.execute(runtime_ddl)
-        if int(current[0]) in (1,2,3,4,6,7):
+        if version in (1,2,3,4,6,7):
             conn.execute(logistics_ddl)
-        if int(current[0]) in (1,2,3,4,6,7,8):
+        if version in (1,2,3,4,6,7,8):
             conn.execute(withdrawal_ddl)
+        if version in (1,2,3,4,6,7,8,9):
+            conn.execute(grant_ddl(True))
             conn.execute("UPDATE crm_meta SET value=? WHERE key='schema_version'",(str(VERSION),))
             return
-        if int(current[0]) != VERSION:
+        if version != VERSION:
             raise RuntimeError("Unsupported CRM PostgreSQL schema version")
         return
     conn.execute(DDL)
@@ -203,5 +207,6 @@ def initialize(conn):
     conn.execute(runtime_ddl)
     conn.execute(logistics_ddl)
     conn.execute(withdrawal_ddl)
+    conn.execute(grant_ddl(True))
     conn.execute("INSERT INTO crm_meta VALUES('schema_version',?)", (str(VERSION),))
     conn.execute("INSERT INTO crm_meta VALUES('storage_engine','postgresql')")

@@ -32,6 +32,63 @@ def validate_admin(path,body):
     if path not in ADMIN_ROUTES and not re.fullmatch(r'/(?:imp|enr|reg|exp)/[a-z_-]+',path):raise CRMError('Действие не разрешено.','forbidden',403)
     if path=='/admin' and (body.get('method') not in {'GET','POST'} or not re.match(r'^/(?:admin|ops)/[a-zA-Z0-9_./?-]',str(body.get('path',''))) or '..' in body.get('path','') or body.get('key')):raise CRMError('Недопустимый административный запрос.','forbidden',403)
 
+
+def selected_grant(session):
+    context=session.get('context') or {}
+    grant_id=context.get('grant_id',session.get('grant_id'))
+    if context.get('access_model',session.get('access_model',1))!=2 and grant_id is None:return None
+    grants=context.get('grants',session.get('grants'))
+    selected=next((grant for grant in grants or () if grant.get('grant_id')==grant_id),None)
+    if selected is None or str(selected.get('actor_uid'))!=str(context.get('actor_uid')):
+        raise CRMError('Выбранное полномочие недоступно.','grant_revoked',403)
+    return selected
+
+
+def server_role(session):
+    grant=selected_grant(session)
+    return grant['role'] if grant else (session.get('context') or {}).get('role',session.get('role'))
+
+
+def server_capabilities(session):
+    grant=selected_grant(session)
+    return frozenset(grant.get('capabilities',()) if grant else (session.get('context') or {}).get('capabilities',()))
+
+
+def workspace_has(session,*modules):
+    context=session.get('context') or {}
+    tree=(context.get('workspace') or {}).get('tree')
+    if tree is None:return context.get('access_model',session.get('access_model',1))!=2
+    found=set()
+    def visit(nodes):
+        for node in nodes:
+            found.add(node.get('id'));visit(node.get('children') or ())
+    visit(tree)
+    return any(module in found for module in modules)
+
+
+def require_grant_workspace(session,modules,roles,capability=None):
+    modules=(modules,) if isinstance(modules,str) else tuple(modules)
+    if not workspace_has(session,*modules) or server_role(session) not in roles:
+        raise CRMError('Раздел недоступен для выбранного полномочия.','forbidden',403)
+    if capability and capability not in server_capabilities(session):
+        raise CRMError('Действие недоступно для выбранного полномочия.','forbidden',403)
+
+
+def require_grant_role(session,roles):
+    selected_grant(session)
+    if server_role(session) not in roles:
+        raise CRMError('Действие недоступно для выбранного полномочия.','forbidden',403)
+
+
+def require_file_action(session,action,body):
+    if action in {'workbook-read','workbook-write','workbook-resume'}:
+        require_grant_workspace(session,'exchange',{'manager','analyst','owner'},'exchange')
+    elif body.get('kind')=='shifts':
+        require_grant_role(session,{'employee','courier','manager','analyst','observer','owner'})
+    else:
+        require_grant_workspace(session,('manager-statistics','statistics'),{'manager','analyst','owner'})
+
+
 class SyntheticBackend:
     synthetic=True
     def __init__(self,home):
@@ -78,7 +135,7 @@ class SyntheticBackend:
                 if not response.ok:raise CRMError(value.get('text') or 'Файл не подготовлен.',value.get('error','file'),response.status)
                 return value
     async def admin(self,session,path,body):
-        if session['role']!='analyst':raise CRMError('Требуется вход Аналитика.','forbidden',403)
+        require_grant_workspace(session,'exchange',{'analyst','owner'},'exchange')
         validate_admin(path,body)
         if path=='/admin' and str(body.get('path','')).startswith('/ops/') and body.get('method')=='POST':raise CRMError('Изменения служб отключены в проверочной среде.','synthetic_boundary',403)
         async with self.admin_locks.setdefault(session['owner'],asyncio.Lock()):
@@ -102,6 +159,7 @@ class SharedBackend:
             parsed=urlsplit(url)
             if parsed.scheme!='https' or parsed.hostname!='hard.rimborso.ru' or parsed.username or parsed.password or parsed.fragment or parsed.query:raise RuntimeError('Pinned first-party HTTPS services required')
         self.primary=primary.rstrip('/');self.crm=crm.rstrip('/');self.executor=executor
+        if executor is not None and getattr(executor,'crm',None) is None:executor.crm=self.crm
     async def start(self):
         self.client=aiohttp.ClientSession(trust_env=False,timeout=aiohttp.ClientTimeout(total=90))
         if self.executor:await self.executor.start()
@@ -115,7 +173,7 @@ class SharedBackend:
             try:value=await response.json()
             except (aiohttp.ContentTypeError,ValueError):
                 raise CRMError('Служба входа отклонила запрос.' if response.status in {401,403,410} else 'Служба вернула неполный ответ. Исходная операция сохранена.','authority_denied' if response.status in {401,403,410} else 'upstream_protocol',response.status if response.status>=400 else 502) from None
-            if not response.ok:raise CRMError(value.get('text') or value.get('error') or 'Служба недоступна.',value.get('error','request'),response.status)
+            if not response.ok:raise CRMError(value.get('text') or value.get('error') or 'Служба недоступна.',value.get('error','request'),response.status,value.get('details'))
             return value
     def headers(self,session):return {session['credential_header']:session['credential'],
                                       'X-CRM-Entry':'analyst' if session.get('entry_role',session['role'])=='analyst' else 'manager'}
@@ -124,6 +182,7 @@ class SharedBackend:
         if value.get('action') not in {'ok','ok_pending'}:raise CRMError(value.get('error') or 'Вход не выполнен.','login',403)
         role='employee' if value['role']=='agent' else 'observer' if value['role']=='security' else 'manager' if value['role']=='full' else value['role']
         session=dict(role=role,credential_header='X-App-Token' if role=='employee' else 'X-Pult-Token',credential=value['token'],synthetic=False,username=value['username'])
+        if body.get('grant_id') is not None:session['grant_id']=body['grant_id']
         if value.get('action')!='ok' or value.get('must_change_password'):
             session['pending']=dict(status='password' if value.get('must_change_password') else 'device',username=value['username'],employee=value['employee'])
             if not value.get('must_change_password'):
@@ -132,15 +191,37 @@ class SharedBackend:
                     if exc.status not in {401,403,410}:raise
             return session
         return await self.activate(session)
+    def context(self,session,value):
+        for key in ('grant_id','grants','access_model','policy_revision'):
+            if key in session:value.setdefault(key,session[key])
+        return value
+    async def exchange(self,session):
+        headers=self.headers(session)
+        if session.get('grant_id') is not None:headers['X-CRM-Grant']=session['grant_id']
+        exchanged=await self.json(self.crm+'/auth/exchange','POST',headers=headers)
+        session['crm_session']=exchanged['token']
+        for key in ('grant_id','grants','access_model','policy_revision'):
+            if key in exchanged:session[key]=exchanged[key]
+            else:session.pop(key,None)
+        return exchanged
     async def activate(self,session):
         identity=await self.json(self.primary+'/api/crm-identity',headers=self.headers(session))
         session['entry_role']=identity['me']['role']
-        exchanged=await self.json(self.crm+'/auth/exchange','POST',headers=self.headers(session))
-        session['crm_session']=exchanged['token']
+        await self.exchange(session)
         session['context']=await self.request(session,'GET','context')
         session['role']=session['context']['role']
         session.pop('pending',None)
         return session
+    async def select_grant(self,session,grant_id):
+        if not isinstance(grant_id,str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}',grant_id):
+            raise CRMError('Некорректное полномочие.','invalid',400)
+        candidate=dict(session,grant_id=grant_id)
+        await self.activate(candidate)
+        for key in ('entry_role','crm_session','grant_id','grants','access_model','policy_revision','context','role'):
+            if key in candidate:session[key]=candidate[key]
+            else:session.pop(key,None)
+        session.pop('pending',None)
+        return session['context']
     async def resume(self, credential, entry_role):
         if not isinstance(credential, str) or not re.fullmatch(r'[A-Za-z0-9_-]{20,512}', credential):
             raise CRMError('Сохранённый вход недоступен.', 'session', 401)
@@ -171,20 +252,23 @@ class SharedBackend:
             routes={'team':'/api/manager/team','approve':'/api/manager/account_approve','reset':'/api/manager/account_reset','revoke':'/api/manager/team/device-revoke','board':'/api/manager/employee_board','plan':'/api/manager/plan'}
             resource=(body if method=='POST' else query or {}).get('resource')
             if resource not in routes:raise CRMError('Неизвестное действие Команды.')
-            if resource=='plan' and (method!='POST' or session['role']!='manager'):
-                raise CRMError('Норму может изменить руководитель.','forbidden',403)
+            require_grant_workspace(session,'team',{'manager','analyst','owner'})
+            if resource=='plan':
+                require_grant_workspace(session,'team',{'manager','owner'},'assign')
+                if method!='POST':raise CRMError('Норму может изменить руководитель.','forbidden',403)
             return await self.json(self.primary+routes[resource],method,self.headers(session),(body or {}).get('payload') if method=='POST' else None)
         if action not in (GET_ACTIONS if method=='GET' else POST_ACTIONS):raise CRMError('Неизвестный запрос.')
-        try:return await self.json(self.crm+'/api/crm/'+action+('?' + urlencode(query) if query else ''),method,{'Authorization':'Bearer '+session['crm_session']},body)
+        try:
+            value=await self.json(self.crm+'/api/crm/'+action+('?' + urlencode(query) if query else ''),method,{'Authorization':'Bearer '+session['crm_session']},body)
         except CRMError as exc:
             if exc.code not in {'pilot_session_expired','pilot_session_invalid'}:raise
-            exchanged=await self.json(self.crm+'/auth/exchange','POST',headers=self.headers(session));session['crm_session']=exchanged['token']
-            return await self.json(self.crm+'/api/crm/'+action+('?' + urlencode(query) if query else ''),method,{'Authorization':'Bearer '+session['crm_session']},body)
+            await self.exchange(session)
+            value=await self.json(self.crm+'/api/crm/'+action+('?' + urlencode(query) if query else ''),method,{'Authorization':'Bearer '+session['crm_session']},body)
+        return self.context(session,value) if action=='context' else value
 
     async def field_workspace(self,session,method,action,body,query):
         from urllib.parse import urlencode
-        if session['role']!='employee' or 'visit' not in session['context'].get('capabilities',[]):
-            raise CRMError('Раздел доступен выезднику.','forbidden',403)
+        require_grant_workspace(session,'field',{'employee','owner'},'visit')
         paths={
             ('GET','field-route'):('route_day',('lat','lon')),
             ('GET','field-geocode'):('geocode',('q',)),
@@ -231,7 +315,7 @@ class SharedBackend:
         if self.executor is None:raise CRMError('Исполнитель Excel недоступен. Файл и исходная операция сохранены.','executor_unavailable',503)
         return await self.executor.file_action(session,action,body)
     async def admin(self,session,path,body):
-        if session['role']!='analyst':raise CRMError('Требуется вход Аналитика.','forbidden',403)
+        require_grant_workspace(session,'exchange',{'analyst','owner'},'exchange')
         validate_admin(path,body)
         if self.executor is None:raise CRMError('Исполнитель обмена недоступен. Исходная операция сохранена.','executor_unavailable',503)
         return await self.executor.admin(session,path,body)
@@ -242,7 +326,7 @@ class WindowsExecutor:
         if os.name!='nt' and not server_key_file:raise RuntimeError('The native Excel executor requires Windows')
         source=str(Path(__file__).resolve().parents[2])
         if source not in sys.path:sys.path.insert(0,source)
-        self.home=Path(home).resolve();self.primary=primary;self.children={};self.locks={};self.excel_lock=asyncio.Lock()
+        self.home=Path(home).resolve();self.primary=primary;self.crm=None;self.children={};self.locks={};self.excel_lock=asyncio.Lock()
         from . import executor_state
         self.key_file=server_key_file
         self.state=executor_state.ServerStore(server_key_file) if server_key_file else executor_state
@@ -269,6 +353,41 @@ class WindowsExecutor:
                     continue
             await asyncio.sleep(10)
 
+    async def crm_context(self,session):
+        context=session['context']
+        if context.get('access_model',session.get('access_model',1))!=2:return context
+        if not self.crm or not session.get('crm_session'):
+            raise CRMError('Полномочие фонового задания не подтверждено.','authority_denied',403)
+        async def read_context():
+            async with self.client.get(self.crm+'/api/crm/context',headers={'Authorization':'Bearer '+session['crm_session']},
+                    allow_redirects=False,timeout=aiohttp.ClientTimeout(total=10)) as response:
+                value=await response.json()
+                if response.status!=200:raise CRMError(value.get('text') or 'Полномочие фонового задания отозвано.',value.get('error','authority_denied'),response.status)
+                return value
+        try:context=await read_context()
+        except CRMError as exc:
+            if exc.code not in {'pilot_session_expired','pilot_session_invalid'}:raise
+            headers={session.get('credential_header','X-Pult-Token'):session['credential'],
+                     'X-CRM-Entry':'analyst' if session.get('entry_role')=='analyst' else 'manager'}
+            if session.get('grant_id') is not None:headers['X-CRM-Grant']=session['grant_id']
+            async with self.client.post(self.crm+'/auth/exchange',headers=headers,allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=10)) as response:
+                exchanged=await response.json()
+                if response.status!=200:raise CRMError(exchanged.get('text') or 'Полномочие фонового задания отозвано.',exchanged.get('error','authority_denied'),response.status)
+            session['crm_session']=exchanged['token']
+            for key in ('grant_id','grants','access_model','policy_revision'):
+                if key in exchanged:session[key]=exchanged[key]
+            context=await read_context()
+        for key in ('grant_id','grants','access_model','policy_revision'):
+            if key in session:context.setdefault(key,session[key])
+        previous=session['context']
+        if (str(context.get('actor_uid'))!=str(previous.get('actor_uid')) or
+                context.get('employee_uuid')!=previous.get('employee_uuid') or
+                context.get('grant_id')!=previous.get('grant_id')):
+            raise CRMError('Полномочие фонового задания изменилось.','authority_denied',403)
+        session['context']=context;session['role']=context['role']
+        require_grant_workspace(session,'exchange',{'analyst','owner'},'exchange')
+        return context
     async def ensure(self,session):
         owner=session['owner'];folder=self.home/hashlib.sha256(owner.encode()).hexdigest();folder.mkdir(parents=True,exist_ok=True)
         async with self.client.get(self.primary+'/api/crm-identity',headers={'X-Pult-Token':session['credential']},
@@ -276,6 +395,7 @@ class WindowsExecutor:
             value=await response.json()
             if response.status!=200 or value.get('subject',{}).get('actor_uid')!=session['context']['actor_uid'] or value.get('me',{}).get('role')!='analyst':
                 raise CRMError('Доступ Аналитика отозван. Задания сохранены.','authority_denied',403)
+        await self.crm_context(session)
         binding=hashlib.sha256(session['credential'].encode()).hexdigest()
         lease=self.state.read(folder/'runtime.bin');live=False
         if lease:
@@ -295,7 +415,7 @@ class WindowsExecutor:
             self.children[owner]=child
             lease=dict(url=url,secret=secret,binding=binding,pid=child.pid)
             self.state.write(folder/'runtime.bin',lease)
-        self.state.write(folder/'authority.bin',{k:session[k] for k in ('owner','role','credential','context')})
+        self.state.write(folder/'authority.bin',{k:session[k] for k in ('owner','role','credential','credential_header','entry_role','crm_session','grant_id','grants','access_model','policy_revision','context') if k in session})
         return lease
 
     async def stop(self,owner):
@@ -315,7 +435,7 @@ class WindowsExecutor:
             else:raise CRMError('Исполнитель ещё останавливается.','executor_busy',409)
         path.unlink(missing_ok=True)
     async def file_action(self,session,action,body):
-        if session['role'] not in {'analyst','manager'} and not (action in {'report-write','report-resume'} and body.get('kind')=='shifts'):raise CRMError('Нет права на работу с книгами.','forbidden',403)
+        require_file_action(session,action,body)
         def execute():
             if action in {'report-write','report-resume'}:
                 from pult.core.crm_reports import write,verify,receipt
@@ -328,7 +448,7 @@ class WindowsExecutor:
             raise CRMError('Неизвестная операция с книгой.')
         async with self.excel_lock:return await asyncio.to_thread(execute)
     async def admin(self,session,path,body):
-        if session['role']!='analyst':raise CRMError('Требуется вход Аналитика.','forbidden',403)
+        require_grant_workspace(session,'exchange',{'analyst','owner'},'exchange')
         validate_admin(path,body);owner=session['owner']
         async with self.locks.setdefault(owner,asyncio.Lock()):
             lease=await self.ensure(session)
@@ -342,14 +462,13 @@ class ServerExecutor(WindowsExecutor):
     """Headless Python and XLSX on the same Linux server as the mobile BFF."""
     def __init__(self,home,primary,key_file):super().__init__(home,primary,server_key_file=key_file)
     async def admin(self,session,path,body):
-        if session['role']!='analyst':raise CRMError('Требуется вход Аналитика.','forbidden',403)
+        require_grant_workspace(session,'exchange',{'analyst','owner'},'exchange')
         validate_admin(path,body)
         if path in {'/enr/confirm','/enr/apply','/enr/retry','/enr/replay','/enr/reconcile-apply','/mail/send'} or path=='/mail/set' and body.get('enabled'):
             raise CRMError('Правка исходных книг и отправка через Outlook выполняются в Windows-программе. Серверные отчёты и новые выгрузки доступны здесь.','native_operation_required',409)
         return await super().admin(session,path,body)
     async def file_action(self,session,action,body):
-        if session['role'] not in {'analyst','manager'} and not (action in {'report-write','report-resume'} and body.get('kind')=='shifts'):
-            raise CRMError('Нет права на работу с книгами.','forbidden',403)
+        require_file_action(session,action,body)
         def execute():
             from pult.core import portable_xlsx,crm_reports,crm_workbook
             if action=='report-write':return portable_xlsx.write_report(body['report'],body['path'],body['kind'])

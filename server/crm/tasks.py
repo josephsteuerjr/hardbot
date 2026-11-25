@@ -13,6 +13,9 @@ def grants(conn, principal):
     result = {}
     if not principal.employee_scope:
         return result
+    assignees = principal.employee_scope
+    if principal.access_model == 2 and principal.role == 'employee':
+        assignees = frozenset({principal.employee_uuid}) & assignees
     if principal.role == 'courier' and 'delivery' in principal.capabilities:
         from . import logistics
         result.update((cid, {'delivery'}) for cid in logistics.for_employee(conn, principal.employee_uuid, 'delivery'))
@@ -22,7 +25,7 @@ def grants(conn, principal):
         "AND NOT EXISTS(SELECT 1 FROM crm_contact_withdrawals w WHERE w.contract_uuid=x.contract_uuid)"):
         data = json.loads(row['data_json'])
         if (row['role'] not in {'manager', 'owner'} or not data.get('assignment_grant')
-                or data.get('assignee_uuid') not in principal.employee_scope):
+                or data.get('assignee_uuid') not in assignees):
             continue
         if conn.execute('SELECT 1 FROM crm_task_grant_revocations WHERE entity_id=? AND capability=?',
                         (row['entity_id'],data.get('work_kind'))).fetchone():
@@ -50,6 +53,8 @@ def prepare(conn, principal, payload):
     # Old self-tasks remain valid. Only an explicit task from a manager creates
     # delegated authority; creating a personal reminder never expands access.
     delegated = principal.role in {'manager', 'owner'}
+    if delegated and principal.access_model == 2 and work not in principal.capabilities:
+        raise CRMError('Полномочие не включает выбранный вид работы.', 'forbidden', 403)
     if delegated and work not in json.loads(member['capabilities_json']):
         raise CRMError('У исполнителя нет права на выбранный вид работы.', 'forbidden', 403)
     if assignee != principal.employee_uuid and not delegated:
@@ -72,8 +77,11 @@ def completion(conn, principal, entity):
 
 def staff(conn, principal):
     at = now()
+    grant_mode = principal.access_model == 2
     return [dict(employee_uuid=row['employee_uuid'], name=row['name'], role=row['role'],
-                 work_kinds=sorted(set(json.loads(row['capabilities_json'])) & set(WORK_ACTIONS)))
+                 work_kinds=sorted((set(json.loads(row['capabilities_json']))
+                                    & (principal.capabilities if grant_mode else set(WORK_ACTIONS)))
+                                   & set(WORK_ACTIONS)))
         for row in conn.execute('SELECT e.employee_uuid,e.name,m.role,m.capabilities_json FROM crm_employees e '
             'JOIN crm_memberships m USING(employee_uuid) WHERE e.active=1 AND m.starts_at<=? '
             'AND (m.ends_at IS NULL OR m.ends_at>?) ORDER BY e.name', (at, at))
@@ -96,7 +104,7 @@ def overview(principal, *, status='open', employee=None, work='all', search='', 
     """Personal plan or a supervisor's team, independent of common client read."""
     from collections import Counter
     from zoneinfo import ZoneInfo
-    from . import access,storage
+    from . import access,storage,store
     if status not in {'open','today','overdue','done','all'} or work not in {'all',*WORK_ACTIONS}:
         raise CRMError('Неизвестный фильтр задач.')
     if not isinstance(search,str) or len(search)>200:raise CRMError('Поиск: не более 200 символов.')
@@ -112,8 +120,9 @@ def overview(principal, *, status='open', employee=None, work='all', search='', 
             raise CRMError('Доступен собственный список задач.','forbidden',403)
         allowed=None if principal.owner else set(principal.employee_scope) if team else {principal.employee_uuid}
         if target!='all':allowed={target}
-        readable=None if access.reads_all(principal) else access.readable_contracts(conn,principal)
-        writable=access.scoped_contracts(conn,principal)
+        readable=None if access.reads_all(principal) else store.readable_contracts(conn,principal)
+        writer=store.write_principal(principal)
+        writable=access.scoped_contracts(conn,writer)
         names={r['employee_uuid']:r['name'] for r in conn.execute('SELECT employee_uuid,name FROM crm_employees')}
         rows=[];counts=Counter(all=0,open=0,today=0,overdue=0,done=0)
         for source in conn.execute("SELECT x.*,e.employee_uuid AS source_employee,c.person_uuid,c.external_id,c.creditor_id,c.fields_json,p.name AS client "
@@ -136,7 +145,7 @@ def overview(principal, *, status='open', employee=None, work='all', search='', 
             counts['all']+=1;counts['open']+=open_task;counts['done']+=row['status']=='done';counts['today']+=due_today;counts['overdue']+=overdue
             if status=='today' and not due_today or status=='overdue' and not overdue:continue
             if status in {'open','done'} and row['status']!=status:continue
-            entity=dict(row,data=data);describe(conn,principal,entity,writable)
+            entity=dict(row,data=data);describe(conn,writer,entity,writable)
             rows.append(dict(entity_id=row['entity_id'],revision=row['revision'],contract_uuid=row['contract_uuid'],
                 person_uuid=row['person_uuid'],client=row['client'],external_id=row['external_id'],
                 creditor=fields.get('partner') or row['creditor_id'],title=data.get('title') or 'Задача',

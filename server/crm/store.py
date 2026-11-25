@@ -1,5 +1,6 @@
 """Transactional event journal and deterministic current projections."""
 
+from dataclasses import replace
 from datetime import date, timedelta
 import json
 import uuid
@@ -29,6 +30,53 @@ def begin(conn, keys=None):
     storage.begin(conn, keys)
 
 
+def selected_grant(principal):
+    if principal.access_model != 2:
+        return None
+    selected = next((grant for grant in principal.grants
+                     if grant.grant_id == principal.grant_id
+                     and grant.actor_uid == principal.actor_uid), None)
+    if selected is None:
+        raise CRMError(
+            "Выбранное полномочие отозвано или не принадлежит этому входу.",
+            "grant_revoked", 403,
+        )
+    return selected
+
+
+def write_principal(principal):
+    if principal.access_model == 2 and principal.role == 'employee':
+        return replace(
+            principal,
+            employee_scope=frozenset({principal.employee_uuid}) & principal.employee_scope,
+            all_contracts=False,
+        )
+    return principal
+
+
+def managed_contracts(conn, principal):
+    from .assignments import scope_sql
+    clause, args = scope_sql(principal)
+    return {row[0] for row in conn.execute(
+        'SELECT c.contract_uuid FROM crm_contracts c WHERE ' + clause, args)}
+
+
+def readable_contracts(conn, principal):
+    if principal.access_model != 2 or access.reads_all(principal):
+        return access.readable_contracts(conn, principal)
+    result = access.scoped_contracts(conn, principal)
+    if principal.role == 'employee' and 'call' in principal.capabilities:
+        from . import logistics
+        for employee in principal.employee_scope:
+            result.update(logistics.for_employee(conn, employee, 'call'))
+    if principal.role == 'manager' and 'assign' in principal.capabilities:
+        result.update(managed_contracts(conn, principal))
+    if principal.role in {'employee', 'courier'}:
+        from . import withdrawals
+        result.difference_update(withdrawals.blocked(conn, result))
+    return result
+
+
 def replay(conn, principal, operation, body):
     operation_id(operation)
     row = conn.execute(
@@ -42,7 +90,11 @@ def replay(conn, principal, operation, body):
                 "operation_conflict",
                 409,
             )
-        return json.loads(row["result_json"])
+        result = json.loads(row["result_json"])
+        if (principal.access_model == 2 and 'grant_id' in result
+                and result['grant_id'] != principal.grant_id):
+            raise CRMError('Операция принадлежит другому полномочию.', 'grant_required', 409)
+        return result
     return None
 
 
@@ -66,6 +118,9 @@ def anchor(principal, installation):
     at = now()
     identifier = str(uuid.uuid4())
     with storage.connect() as conn:
+        if principal.access_model == 2:
+            storage.begin(conn)
+            principal = access.refresh_write(conn, principal)
         conn.execute(
             "INSERT INTO crm_clock_anchors VALUES(?,?,?,?)",
             (identifier, principal.actor_uid, installation, at),
@@ -289,10 +344,14 @@ def command(principal, body, *, origin="app", client_version=None):
             raise CRMError("Выберите от 1 до 100 договоров без повторов.")
         begin(conn, [storage.operation_lock(principal, operation),
                      *("contract:" + cid for cid in selected if isinstance(cid, str))])
+        if principal.access_model == 2:
+            principal = access.refresh_write(conn, principal)
         previous = replay(conn, principal, operation, body)
         if previous is not None:
             return previous
-        principal = access.refresh_write(conn, principal)
+        if principal.access_model != 2:
+            principal = access.refresh_write(conn, principal)
+        principal = write_principal(principal)
         rows = access.contracts(
             conn, principal, body.get("contract_ids"), capability=capability
         )
@@ -572,6 +631,8 @@ def command(principal, body, *, origin="app", client_version=None):
             time_quality=quality,
             entity_id=payload.get("entity_id"),
         )
+        if principal.grant_id is not None:
+            result['grant_id'] = principal.grant_id
         from registry_postgres import project_event
         project_event(conn, event)
         acknowledge(conn, principal, operation, body, result, received)
@@ -584,6 +645,10 @@ def rebuild(principal):
         raise CRMError("Пересборка доступна владельцу.", "forbidden", 403)
     with storage.connect() as conn:
         begin(conn)
+        if principal.access_model == 2:
+            principal = access.refresh_write(conn, principal)
+            if not principal.owner:
+                raise CRMError("Пересборка доступна владельцу.", "forbidden", 403)
         conn.execute(
             "UPDATE crm_contracts SET fields_json=baseline_json,revisions_json='{}',provenance_json='{}'"
         )
@@ -726,7 +791,7 @@ def previous_statuses(baseline, fields, provenance, events, contract_uuid):
 
 def card(principal, person_uuid):
     with storage.connect(readonly=True) as conn:
-        allowed = None if access.reads_all(principal) else access.readable_contracts(conn, principal)
+        allowed = None if access.reads_all(principal) else readable_contracts(conn, principal)
         rows = [
             dict(r)
             for r in conn.execute(
@@ -764,19 +829,20 @@ def card(principal, person_uuid):
                 item = dict(entity)
                 item["data"] = json.loads(item.pop("data_json"))
                 entities.append(item)
-        write_scope = access.scoped_contracts(conn, principal)
+        writer = write_principal(principal)
+        write_scope = access.scoped_contracts(conn, writer)
         from . import tasks
         for entity in entities:
             if entity['kind'] == 'task':
-                tasks.describe(conn, principal, entity, write_scope)
+                tasks.describe(conn, writer, entity, write_scope)
         assignment_time = now()
         from .primary_fence import writable_contracts
         enabled=writable_contracts(conn,ids)
         for row in rows:
             from .registry import source_details, writable
             row['business_source'] = source_details(conn, row)
-            row['writable_fields'] = writable(conn, principal, row, scope=write_scope,enabled=enabled)
-            row['allowed_actions'] = access.writable_actions(conn, principal, row['contract_uuid'], scope=write_scope,enabled=enabled)
+            row['writable_fields'] = writable(conn, writer, row, scope=write_scope,enabled=enabled)
+            row['allowed_actions'] = access.writable_actions(conn, writer, row['contract_uuid'], scope=write_scope,enabled=enabled)
             row['assignments'] = [dict(r) for r in conn.execute(
                 'SELECT a.employee_uuid,e.name,a.capability,a.starts_at,a.ends_at FROM crm_effective_assignments a '
                 'JOIN crm_employees e USING(employee_uuid) WHERE a.contract_uuid=? '
@@ -813,10 +879,11 @@ def contract_list(principal, search='', work='', limit=100):
     if work:
         access.require(principal, work)
     with storage.connect(readonly=True) as conn:
-        write_scope = access.scoped_contracts(conn, principal)
+        writer = write_principal(principal)
+        write_scope = access.scoped_contracts(conn, writer)
         from .primary_fence import writable_contracts
         enabled=writable_contracts(conn,write_scope)
-        allowed = write_scope if work else None if access.reads_all(principal) else access.readable_contracts(conn, principal)
+        allowed = write_scope if work else None if access.reads_all(principal) else readable_contracts(conn, principal)
         if allowed is not None and not allowed:
             return dict(contracts=[], truncated=False)
         conditions, params = [], []
@@ -838,7 +905,7 @@ def contract_list(principal, search='', work='', limit=100):
             if search and not postgres and search.casefold() not in ' '.join((source['client_name'],source['external_id'],source['fields_json'])).casefold():
                 continue
             row=dict(source);row['fields']=json.loads(row.pop('fields_json'))
-            row['allowed_actions']=access.writable_actions(conn,principal,row['contract_uuid'],scope=write_scope,enabled=enabled)
+            row['allowed_actions']=access.writable_actions(conn,writer,row['contract_uuid'],scope=write_scope,enabled=enabled)
             if work and work not in row['allowed_actions']:
                 continue
             rows.append(row)
@@ -856,7 +923,7 @@ def portfolio(principal, search="", limit=200):
     with storage.connect(readonly=True) as conn:
         if storage.is_postgres(conn):
             return _postgres_portfolio(conn, principal, search, limit)
-        allowed = access.readable_contracts(conn, principal)
+        allowed = readable_contracts(conn, principal)
         people = {}
         for row in conn.execute(
             "SELECT c.*,p.name FROM crm_contracts c JOIN crm_people p USING(person_uuid) ORDER BY p.name,c.external_id"
@@ -924,7 +991,7 @@ def _postgres_portfolio(conn, principal, search, limit):
     predicates, parameters = [], []
     if not access.reads_all(principal):
         predicates.append("c.contract_uuid = ANY(?)")
-        parameters.append(sorted(access.readable_contracts(conn, principal)))
+        parameters.append(sorted(readable_contracts(conn, principal)))
     contacts, candidates, candidate_join = '', '', ''
     candidate_parameters = []
     if search:

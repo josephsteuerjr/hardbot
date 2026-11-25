@@ -11,3 +11,7 @@ ROLE_CAPABILITIES = {
                           'exchange', 'accounting', 'shift_correct'}),
     'observer': frozenset({'analytics'}),
 }
+GRANT_ROLE_CAPABILITIES = dict(ROLE_CAPABILITIES,
+    manager=ROLE_CAPABILITIES['manager'] | {'logistics'},
+    owner=CAPABILITIES | {'logistics'},
+)

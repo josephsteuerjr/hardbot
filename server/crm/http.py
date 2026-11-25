@@ -23,6 +23,8 @@ from . import (
     assignments,
     manager_reports,
     operator,
+    workspace,
+    grant_admin,
 )
 from .contract import CRMError, fields
 
@@ -80,10 +82,11 @@ def install(app, host=None, *, authenticate=None):
             raise CRMError("Ожидается объект запроса.")
         return value
 
-    def context(p):
+    def context(p, requested_module=None):
         from fields import DROPDOWNS
         from . import logistics, tasks
 
+        workspace_manifest = workspace.manifest(p, requested_module)
         with storage.connect() as conn:
             cohorts = [
                 dict(r)
@@ -118,6 +121,7 @@ def install(app, host=None, *, authenticate=None):
             staff=staff,
             distribution=distribution,
             logistics_countries=logistics_countries,
+            workspace=workspace_manifest,
         )
 
     async def dispatch(request):
@@ -127,7 +131,9 @@ def install(app, host=None, *, authenticate=None):
             from . import logistics
             if request.method == "GET":
                 if action == "context":
-                    result = await asyncio.to_thread(context, p)
+                    result = await asyncio.to_thread(context, p, request.query.get("module"))
+                elif action == 'grant-catalog':
+                    result = await asyncio.to_thread(grant_admin.catalog, p)
                 elif action == 'operator-status':
                     result = await asyncio.to_thread(operator.status, p)
                 elif action == 'registry':
@@ -225,6 +231,7 @@ def install(app, host=None, *, authenticate=None):
                 )
                 actions = {
                     "registry-edit": registry.edit,
+                    "grant-admin": grant_admin.command,
                     "assignment-preview": assignments.preview,
                     "assignment-commit": assignments.commit,
                     "assignment-job-step": assignments.job_step,
