@@ -109,9 +109,9 @@ async function run() {
         .readFileSync(path.join(qa, "profile/crm", protectedFiles[0]))
         .includes(Buffer.from("Synthetic offline action")),
     );
-    await js('document.querySelector("[data-section=queue]").click()');
+    await js('document.querySelector("[data-section=queue]")?.click()');
     await until(
-      () => js('document.body.innerText.includes("Ожидает отправки")'),
+      () => js('document.body.innerText.toLowerCase().includes("ожидает отправки")'),
       "queue display",
     );
     fs.writeFileSync(
@@ -142,25 +142,25 @@ async function run() {
     );
     phase("role switched through actual UI");
     await until(
-      () => js('!!document.querySelector("[data-section=adoption]")'),
+      () => js('!!document.querySelector("[data-section=manager-statistics]")'),
       "manager role",
     );
-    await js('document.querySelector("[data-section=adoption]").click()');
+    await js('document.querySelector("[data-section=manager-statistics]").click()');
     await until(
-      () => js('!!document.querySelector(".metric strong")'),
-      "adoption",
+      () => js('!!document.querySelector("#report-body") && document.querySelector("#report-body").innerText.length > 0'),
+      "manager statistics",
     );
     await nap(2300);
-    await js('document.querySelector("#adoption-refresh").click()');
+    await js('document.querySelector("#report-refresh").click()');
     await nap(400);
     fs.writeFileSync(
-      path.join(qa, "04-adoption.png"),
+      path.join(qa, "04-manager-statistics.png"),
       (await win.webContents.capturePage()).toPNG(),
     );
     assert(
       (
-        await js('document.querySelector("#adoption-report").innerText')
-      ).includes("50%"),
+        await js('document.querySelector("#report-body").innerText')
+      ).includes("Тестовый сотрудник"),
     );
     assert.equal(
       (await js("window.crm.queue()")).data.entries.length,
@@ -187,7 +187,7 @@ async function run() {
           exact_event_ack: event,
           operation_id: operation,
           scope_queue_isolated: true,
-          activation: "1/2",
+          manager_statistics: true,
           screenshots: 5,
         },
         null,

@@ -248,7 +248,7 @@ def test_background_pack_rechecks_revoked_grant_and_cannot_switch_grant(crm_worl
     with pytest.raises(CRMError) as denied:
         assignments.job_step(narrow, step)
     assert denied.value.code == 'grant_required'
-    assert manager_reports.tick({team.actor_uid: team}) == dict(completed=1, blocked=0)
+    assert manager_reports.tick({(team.actor_uid, team.grant_id): team}) == dict(completed=1, blocked=0)
     assert assignments.job(team, job_id=result['job_id'])['applied_slots'] == 1
 
     with storage.connect() as conn:
@@ -256,7 +256,7 @@ def test_background_pack_rechecks_revoked_grant_and_cannot_switch_grant(crm_worl
     with pytest.raises(CRMError) as denied:
         assignments.job_step(team, dict(step, pack_index=1))
     assert denied.value.code == 'grant_revoked'
-    assert manager_reports.tick({team.actor_uid: team}) == dict(completed=0, blocked=1)
+    assert manager_reports.tick({(team.actor_uid, team.grant_id): team}) == dict(completed=0, blocked=1)
     with pytest.raises(CRMError) as denied:
         assignments.commit(team, command)
     assert denied.value.code == 'grant_revoked'

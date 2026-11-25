@@ -57,8 +57,31 @@ def test_report_uses_fresh_team_at_next_slot_without_polling_idle_credentials(cr
     future=(datetime.now(timezone.utc)+timedelta(hours=4)).isoformat()
     monkeypatch.setattr(manager_reports,'now',lambda:future);monkeypatch.setattr(three_hour,'now',lambda:future)
     fresh=replace(p,employee_scope=p.employee_scope|{w['target']})
-    assert manager_reports.tick({p.actor_uid:fresh})['completed']==1
+    monkeypatch.setattr(three_hour,'country_scopes',lambda conn,principal:{})
+    result=manager_reports.tick({(p.actor_uid,fresh.grant_id):fresh})
+    assert result=={'completed':1,'blocked':0}
     with storage.connect() as c:
         authority=json.loads(c.execute("SELECT authority_json FROM crm_background_authorities WHERE kind='report'").fetchone()[0])
         assert w['target'] in authority['employee_scope']
         assert manager_reports.pending(c)==[]
+
+
+
+def test_background_credentials_keep_each_grant_separate(crm_world,monkeypatch):
+    monkeypatch.setattr(runtime.manager_reports,'pending',lambda conn:[{'actor_uid':303}])
+    runtime.remember(303,'sealed-grant-a','grant-a')
+    runtime.remember(303,'sealed-grant-b','grant-b')
+    items=runtime.credentials()
+    assert {(item['grant_id'],item['sealed']) for item in items}=={
+        ('grant-a','sealed-grant-a'),('grant-b','sealed-grant-b')}
+
+    class Sessions:
+        async def background_principal(self,sealed):
+            from types import SimpleNamespace
+            return SimpleNamespace(grant_id='grant-a' if sealed=='sealed-grant-a' else 'grant-b')
+
+    seen={}
+    monkeypatch.setattr(runtime.manager_reports,'tick',lambda verified:seen.update(verified=verified) or {'completed':0,'blocked':0})
+    monkeypatch.setattr(runtime.primary_fence,'project_pending',lambda:{'ready':True})
+    asyncio.run(runtime.tick(Sessions()))
+    assert set(seen['verified'])=={(303,'grant-a'),(303,'grant-b')}

@@ -99,6 +99,9 @@ const ownerContext=context=>({...context,role:'owner',owner:true,capabilities:[]
   assert.equal((await admin()).ok,false,'Scoped model 2 must not use broad legacy admin');
   await connect('analyst',context=>ownerContext({...context,access_model:2,grant_id:'global-owner'}));
   assert((await admin()).ok,'Global owner retains legacy administration');
+  const grantCatalog=await js('window.crm.api("GET","grant-catalog")');
+  assert(grantCatalog.ok,JSON.stringify(grantCatalog));
+  assert(Array.isArray(grantCatalog.data.roles));
 
   fs.writeFileSync(path.join(qa,'RESULT.json'),JSON.stringify({passed:true,actualMain:true,actualPreload:true,actualRenderer:true,actualSyntheticBackend:true,
     ownerAdmin:true,ownerWorkbook:true,ownerManagerAccess:true,analystManagerAccess:true,managerPlanCapability:true,

@@ -313,7 +313,7 @@ const actions = new Set([
   'assignment-receipt','assignment-history','manager-statistics','changes',
   'assignment-job','assignment-job-step','assignment-job-cancel',
   'logistics','logistics-export','logistics-export-download','logistics-preview','logistics-apply','logistics-update','logistics-call',
-  'manager-access',
+  'manager-access','grant-catalog','grant-admin',
   'active-time',
   "shifts",
   'shift-report',
@@ -429,11 +429,15 @@ async function managerAccess(method:string,body:any,query:any):Promise<queue.Res
   try{
     await pilotCredential(currentContext.employee_uuid,false,entrySource(),currentContext.grant_id || undefined);
     const login=readExistingLogin(entrySource());
-    const headers={'X-Pult-Token':login.credential,'Content-Type':'application/json','X-Client-Version':app.getVersion()};
-    const identity=await fetchBuffered((u,i)=>net.fetch(u,i),'https://hard.rimborso.ru/api/manager/device/me',{method:'GET',headers},10000);
+    const analyst=login.kind==='analyst'||login.kind==='analyst-device';
+    const headers:any={...(analyst&&login.kind==='analyst-device'?{'X-Device-Token':login.credential}:{'X-Pult-Token':login.credential}),
+      'Content-Type':'application/json','X-Client-Version':app.getVersion(),
+      ...(login.kind==='analyst'?{'X-CRM-Entry':'analyst'}:{}),...(login.deviceFingerprint?{'X-Device-Id':login.deviceFingerprint}:{})};
+    const identity=await fetchBuffered((u,i)=>net.fetch(u,i),analyst?'https://hard.rimborso.ru/api/crm-identity':'https://hard.rimborso.ru/api/manager/device/me',{method:'GET',headers},10000);
     const subject=await identity.json();
     const confirmed = subject.subject?.actor_uid;
-    if(!identity.ok || subject.subject?.type !== 'manager' || !Number.isSafeInteger(confirmed) || confirmed <= 0 ||
+    const confirmedKind=analyst?subject.subject?.type==='analyst'&&subject.me?.role==='analyst':subject.subject?.type==='manager';
+    if(!identity.ok || !confirmedKind || !Number.isSafeInteger(confirmed) || confirmed === 0 ||
        (actor !== undefined && actor !== confirmed) || authority!==owner || login.fingerprint!==entryFingerprint(entrySource()))
       return {ok:false,status:403,text:'Вход или полномочия изменились. Подключитесь заново.'};
     const response=await fetchBuffered((u,i)=>net.fetch(u,i),'https://hard.rimborso.ru/api/manager/'+route[1],

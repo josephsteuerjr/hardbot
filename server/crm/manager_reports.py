@@ -202,7 +202,7 @@ def tick(verified=None):
             with storage.connect(readonly=True) as conn:
                 p=current_authority(conn,item['authority_json'])
                 if shared:
-                    fresh=(verified or {}).get(p.actor_uid)
+                    fresh=(verified or {}).get((p.actor_uid,p.grant_id))
                     if (not fresh or fresh.employee_uuid!=p.employee_uuid or fresh.role!=p.role or fresh.team_id!=p.team_id
                             or fresh.access_model!=p.access_model or fresh.grant_id!=p.grant_id
                             or (p.access_model==2 and fresh.policy_revision!=p.policy_revision)):

@@ -96,13 +96,13 @@ def test_server_finishes_packs_without_renderer_and_rechecks_revocation(crm_worl
     monkeypatch.setattr(assignments,'MAX_SLOTS',1)
     result,_=apply(w,preview(w))
     assert result['status']=='job_started'
-    manager_reports.tick({p.actor_uid:p})
+    manager_reports.tick({(p.actor_uid,p.grant_id):p})
     assert assignments.job(p,job_id=result['job_id'])['applied_slots']==1
     with storage.connect() as c:c.execute("UPDATE crm_memberships SET role='observer' WHERE employee_uuid=?",(p.employee_uuid,))
-    manager_reports.tick({p.actor_uid:p})
+    manager_reports.tick({(p.actor_uid,p.grant_id):p})
     assert assignments.job(p,job_id=result['job_id'])['applied_slots']==1
     with storage.connect() as c:c.execute("UPDATE crm_memberships SET role='manager' WHERE employee_uuid=?",(p.employee_uuid,))
-    manager_reports.tick({p.actor_uid:p})
+    manager_reports.tick({(p.actor_uid,p.grant_id):p})
     assert assignments.job(p,job_id=result['job_id'])['state']=='completed'
 
 

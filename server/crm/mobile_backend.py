@@ -4,8 +4,8 @@ from pathlib import Path
 import aiohttp
 from .contract import CRMError
 
-GET_ACTIONS=frozenset('context operator-status portfolio work-portfolio tasks card contracts registry managed-portfolio assignment-staff assignment-receipt assignment-history assignment-job manager-statistics manager-report manager-report-download analyst-report analyst-statistics changes active-time shifts shift-report cabinet three-hour script adoption document-read logistics-export-download'.split())
-POST_ACTIONS=frozenset('registry-edit assignment-preview assignment-commit assignment-job-step assignment-job-cancel active-time anchor command shift plan cohort export import-preview import-apply receipt telemetry script document logistics-call'.split())
+GET_ACTIONS=frozenset('context operator-status portfolio work-portfolio tasks card contracts registry managed-portfolio assignment-staff assignment-receipt assignment-history assignment-job manager-statistics manager-report manager-report-download analyst-report analyst-statistics changes active-time shifts shift-report cabinet three-hour script adoption document-read logistics-export-download grant-catalog logistics logistics-export'.split())
+POST_ACTIONS=frozenset('registry-edit assignment-preview assignment-commit assignment-job-step assignment-job-cancel active-time anchor command shift plan cohort export import-preview import-apply receipt telemetry script document logistics-call grant-admin logistics-preview logistics-apply logistics-update'.split())
 ADMIN_ROUTES=frozenset(['/state','/busy','/fn','/job','/jobs','/admin','/admin_image','/mail/state','/mail/set','/mail/send'])
 ROLES=frozenset(['employee','courier','manager','analyst','observer'])
 
@@ -136,7 +136,8 @@ class SyntheticBackend:
     async def file_action(self,session,action,body):
         # Native Excel must never hold the canonical demo HTTP server's thread.
         async with self.native_lock:
-            async with self.client.post(self.native_url+'/crm/'+action,headers={'X-Local-Secret':self.native_secret,'X-Demo-Role':session['role']},json=dict(method='POST',body=body,query={})) as response:
+            endpoint='logistics-workbook-read' if action=='logistics-read' else action
+            async with self.client.post(self.native_url+'/crm/'+endpoint,headers={'X-Local-Secret':self.native_secret,'X-Demo-Role':session['role']},json=dict(method='POST',body=body,query={})) as response:
                 value=await response.json()
                 if not response.ok:raise CRMError(value.get('text') or 'Файл не подготовлен.',value.get('error','file'),response.status)
                 return value
@@ -401,11 +402,13 @@ class WindowsExecutor:
         return context
     async def ensure(self,session):
         owner=session['owner'];folder=self.home/hashlib.sha256(owner.encode()).hexdigest();folder.mkdir(parents=True,exist_ok=True)
+        owner_access=session['context'].get('owner') is True
         async with self.client.get(self.primary+'/api/crm-identity',headers={'X-Pult-Token':session['credential']},
                 allow_redirects=False,timeout=aiohttp.ClientTimeout(total=10)) as response:
             value=await response.json()
-            if response.status!=200 or value.get('subject',{}).get('actor_uid')!=session['context']['actor_uid'] or value.get('me',{}).get('role')!='analyst':
-                raise CRMError('Доступ Аналитика отозван. Задания сохранены.','authority_denied',403)
+            roles={'manager','full'} if owner_access else {'analyst'}
+            if response.status!=200 or value.get('subject',{}).get('actor_uid')!=session['context']['actor_uid'] or value.get('me',{}).get('role') not in roles:
+                raise CRMError('Доступ администратора отозван. Задания сохранены.','authority_denied',403)
         await self.crm_context(session)
         binding=hashlib.sha256(session['credential'].encode()).hexdigest()
         lease=self.state.read(folder/'runtime.bin');live=False
@@ -422,7 +425,7 @@ class WindowsExecutor:
         if not live:
             env=dict(os.environ,PYTHONIOENCODING='utf-8',HARD_PULT_SETTINGS=str(folder/'settings.json'),HARD_PULT_PROTECT_TOKENS='1',HARD_CLIENT_VERSION='3.3.0',HARD_CLIENT_PRODUCT='analyst')
             if self.key_file:env.update(HARD_CRM_RUNTIME_KEY_FILE=str(self.key_file),HARD_CRM_SERVER_XLSX='1')
-            child,url,secret=await start_runtime(folder,['--crm-analyst'],env,dict(actor=session['context']['actor_uid'],url=self.primary,token='account:'+session['credential']),'HARD-BACKEND')
+            child,url,secret=await start_runtime(folder,['--crm-analyst'],env,dict(actor=session['context']['actor_uid'],url=self.primary,token=('' if owner_access else 'account:')+session['credential']),'HARD-BACKEND')
             self.children[owner]=child
             lease=dict(url=url,secret=secret,binding=binding,pid=child.pid)
             self.state.write(folder/'runtime.bin',lease)
@@ -452,6 +455,9 @@ class WindowsExecutor:
                 from pult.core.crm_reports import write,verify,receipt
                 if action=='report-resume':verify(body['path'],body['report'],body['kind']);return receipt(body['path'])
                 return write(body['report'],body['path'],body['kind'])
+            if action=='logistics-read':
+                from pult.core import logistics_workbook
+                return logistics_workbook.read(body['path'])
             from pult.core import crm_workbook
             if action=='workbook-read':return crm_workbook.read(body['path'])
             if action=='workbook-write':return crm_workbook.write(body['snapshot'],body['path'],body.get('template'))
@@ -485,6 +491,9 @@ class ServerExecutor(WindowsExecutor):
             from pult.core import portable_xlsx,crm_reports,crm_workbook
             if action=='report-write':return portable_xlsx.write_report(body['report'],body['path'],body['kind'])
             if action=='report-resume':crm_reports.verify(body['path'],body['report'],body['kind']);return crm_reports.receipt(Path(body['path']))
+            if action=='logistics-read':
+                from pult.core import logistics_workbook
+                return logistics_workbook.read(body['path'])
             if action=='workbook-read':return portable_xlsx.read_workbook(body['path'])
             if action=='workbook-write':return portable_xlsx.write_workbook(body['snapshot'],body['path'],body.get('template'))
             if action=='workbook-resume':return crm_workbook.resume(body['snapshot'],body['path'])

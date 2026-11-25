@@ -336,3 +336,67 @@ def test_mobile_vault_separates_actors_of_one_employee(tmp_path):
                 owners.append(boot['session']['owner'])
             assert owners[0]!=owners[1]
     asyncio.run(run())
+
+
+
+def test_mobile_grant_and_logistics_actions_are_in_transport_allowlists():
+    from crm.mobile_backend import GET_ACTIONS,POST_ACTIONS
+    assert {'grant-catalog','logistics','logistics-export'} <= GET_ACTIONS
+    assert {'grant-admin','logistics-preview','logistics-apply','logistics-update'} <= POST_ACTIONS
+
+
+def test_owner_executor_uses_manager_identity_and_unprefixed_token(tmp_path,monkeypatch):
+    async def run():
+        authority=web.Application()
+        authority.router.add_get('/api/crm-identity',lambda request:web.json_response(
+            dict(subject=dict(actor_uid=303,type='manager'),me=dict(role='manager'))))
+        key=tmp_path/'runtime.key';key.write_bytes(os.urandom(32))
+        executor=ServerExecutor(tmp_path/'executor','https://hard.rimborso.ru',key)
+        captured={}
+        class Child:pid=12345
+        async def start(folder,args,env,input,prefix):
+            captured.update(input)
+            return Child(),'http://127.0.0.1:54321','synthetic-secret'
+        monkeypatch.setattr('crm.mobile_backend.start_runtime',start)
+        async with TestServer(authority) as server,aiohttp.ClientSession() as client:
+            executor.primary=str(server.make_url('')).rstrip('/')
+            executor.client=client
+            session=dict(owner='mobile:owner',role='owner',credential='manager-credential',credential_header='X-Pult-Token',
+                         entry_role='manager',context=dict(actor_uid=303,employee_uuid='person-one',role='owner',owner=True,access_model=1))
+            lease=await executor.ensure(session)
+            assert lease['url']=='http://127.0.0.1:54321'
+        assert captured['token']=='manager-credential'
+        assert captured['actor']==303
+    asyncio.run(run())
+
+
+
+def test_mobile_logistics_read_uses_dedicated_file_action(tmp_path):
+    class Backend:
+        synthetic=True
+        native_pid=12345
+        async def start(self):pass
+        async def close(self):pass
+        async def login(self,body):
+            return dict(role='logistic',context=dict(actor_uid=303,employee_uuid='person-one',role='logistic',
+                capabilities=['logistics'],access_model=1,workspace=dict(tree=[dict(id='logistics',children=[])])),synthetic=True)
+        async def request(self,session,method,action,body=None,query=None):
+            assert action=='context'
+            return session['context']
+        async def file_action(self,session,action,body):
+            assert action=='logistics-read'
+            return dict(rows=[],workbook_sha256='synthetic')
+    async def run():
+        app=create_app(Backend(),tmp_path/'mobile',key=os.urandom(32))
+        async with TestClient(TestServer(app)) as client:
+            initial=await (await client.get('/mobile/boot')).json()
+            response=await client.post('/mobile/login',headers={'X-CRM-CSRF':initial['csrf']},json=dict(role='logistic'))
+            assert response.status==200
+            boot=await (await client.get('/mobile/boot')).json();headers={'X-CRM-CSRF':boot['csrf']}
+            upload=await client.post('/mobile/upload',headers={**headers,'X-CRM-Filename':'pool.xlsx'},data=b'PK synthetic')
+            assert upload.status==200
+            handle=(await upload.json())['file']
+            response=await client.post('/mobile/workbook',headers=headers,json=dict(action='logistics-read',operation_id=str(uuid.uuid4()),input=dict(file=handle)))
+            assert response.status==200,await response.text()
+            assert (await response.json())['workbook_sha256']=='synthetic'
+    asyncio.run(run())

@@ -1,14 +1,25 @@
 """Persistent service loop: revalidate the original account, then do bounded work."""
 import asyncio
 import contextlib
+import json
 from . import manager_reports, primary_fence, report_presets, storage
 from .contract import CRMError, canonical, now
 
 
-def remember(actor_uid,sealed):
+def remember(actor_uid,sealed,grant_id=None):
     with storage.connect() as conn:
+        row=conn.execute('SELECT sealed FROM crm_background_credentials WHERE actor_uid=?',(actor_uid,)).fetchone()
+        slots={}
+        if row:
+            try:
+                decoded=json.loads(row['sealed'])
+                if isinstance(decoded,dict):slots=decoded
+            except (ValueError,TypeError):
+                slots['']=row['sealed']
+        slots[grant_id or '']=sealed
         conn.execute('INSERT INTO crm_background_credentials VALUES(?,?,?) ON CONFLICT(actor_uid) '
-            'DO UPDATE SET sealed=excluded.sealed,updated_at=excluded.updated_at',(actor_uid,sealed,now()))
+            'DO UPDATE SET sealed=excluded.sealed,updated_at=excluded.updated_at',
+            (actor_uid,json.dumps(slots,separators=(',',':')),now()))
 
 
 def credentials():
@@ -17,7 +28,15 @@ def credentials():
         result=[]
         for start in range(0,len(actors),200):
             batch=actors[start:start+200]
-            result.extend(dict(r) for r in conn.execute('SELECT actor_uid,sealed FROM crm_background_credentials WHERE actor_uid IN ('+','.join('?' for _ in batch)+')',batch))
+            rows=conn.execute('SELECT actor_uid,sealed FROM crm_background_credentials WHERE actor_uid IN ('+','.join('?' for _ in batch)+')',batch)
+            for row in rows:
+                try:
+                    slots=json.loads(row['sealed'])
+                    if not isinstance(slots,dict):raise ValueError()
+                except (ValueError,TypeError):
+                    slots={'':row['sealed']}
+                for grant_id,sealed in slots.items():
+                    result.append(dict(actor_uid=row['actor_uid'],grant_id=grant_id or None,sealed=sealed))
         return result
 
 
@@ -32,8 +51,10 @@ async def tick(sessions):
     verified={};denied=[];slots=asyncio.Semaphore(4)
     async def verify(item):
         async with slots:
-            try:verified[item['actor_uid']]=await sessions.background_principal(item['sealed'])
-            except CRMError:denied.append(item['actor_uid'])
+            try:
+                principal=await sessions.background_principal(item['sealed'])
+                verified[(item['actor_uid'],principal.grant_id)]=principal
+            except CRMError:denied.append((item['actor_uid'],item.get('grant_id')))
     await asyncio.gather(*(verify(item) for item in await asyncio.to_thread(credentials)))
     work=await asyncio.to_thread(manager_reports.tick,verified)
     projection=await asyncio.to_thread(primary_fence.project_pending)

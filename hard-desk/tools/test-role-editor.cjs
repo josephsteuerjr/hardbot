@@ -64,6 +64,7 @@ async function browser() {
     show: false, width: 1100, height: 800,
     webPreferences: { contextIsolation: true, sandbox: true, backgroundThrottling: false, offscreen: true },
   });
+  win.webContents.on('console-message', details => { if (details.level === 'error') console.error(details.message); });
   const js = code => win.webContents.executeJavaScript(code, true);
   const until = async (condition, label) => {
     for (let index = 0; index < 100; index += 1) {
@@ -92,7 +93,7 @@ async function browser() {
         {grant_id:'g-team',actor_uid:7,role:'manager',territory:'team',capabilities:['assign'],employees:[],all_contracts:false,read_all_contracts:false,is_default:false,revision:4}
       ];
       window.currentGrants=structuredClone(initialGrants);window.currentRevision=4;
-      window.previewConflict=false;window.applyFailures=0;window.applyCalls=0;
+      window.previewConflict=false;window.applyFailures=0;window.applyCalls=0;window.changeDuringApply=false;window.activationOnly=false;
       window.listResponder=null;window.liveListener=null;window.editor=null;window.teamHandle=null;
       const ok=data=>({ok:true,status:200,data});
       window.crm={
@@ -112,11 +113,15 @@ async function browser() {
           }
           if(body.operation==='preview'){
             if(previewConflict)return {ok:false,status:409,text:'Версия изменилась.',data:{error:'Версия изменилась.',details:{policy_revision:9}}};
-            return ok({actor_uid:7,base_revision:body.base_revision,grants:structuredClone(body.grants),diff:body.grants.length>currentGrants.length?[{action:'create',text:'Добавить: Аналитик / глобально',before:null,after:body.grants.at(-1)}]:[],preview_sha256:'sha-preview-1',operation_id:body.operation_id,warnings:['Предупреждение предпросмотра']});
+            return ok({actor_uid:7,base_revision:body.base_revision,grants:structuredClone(body.grants),access_model:activationOnly?2:1,diff:activationOnly?[{action:'activate',text:'Активировать grants'}]:body.grants.length>currentGrants.length?[{action:'create',text:'Добавить: Аналитик / глобально',before:null,after:body.grants.at(-1)}]:[],preview_sha256:'sha-preview-1',operation_id:body.operation_id,warnings:['Предупреждение предпросмотра']});
           }
           if(body.operation==='apply'){
             applyCalls++;
             if(applyFailures>0){applyFailures--;throw Error('Синтетическая потеря квитанции');}
+            if(changeDuringApply){
+              changeDuringApply=false;
+              const role=document.querySelector('[data-access-role="2"]');role.value='manager';role.dispatchEvent(new Event('change',{bubbles:true}));
+            }
             currentGrants=structuredClone(body.grants);currentRevision++;
             return ok({actor_uid:7,base_revision:body.base_revision,policy_revision:currentRevision,result_grants:structuredClone(currentGrants),diff:body.diff,repeated:applyCalls>1,operation_id:body.operation_id,warnings:[],applied_at:'2026-11-24T10:01:00Z'});
           }
@@ -132,7 +137,7 @@ async function browser() {
       window.resetFixture=()=>{
         if(editor)editor.dispose();if(teamHandle)teamHandle();editor=null;teamHandle=null;
         document.querySelector('#host').replaceChildren();calls=[];draftWrites=[];savedDraft=null;
-        currentGrants=structuredClone(initialGrants);currentRevision=4;previewConflict=false;applyFailures=0;applyCalls=0;listCalls=0;teamCalls=0;
+        currentGrants=structuredClone(initialGrants);currentRevision=4;previewConflict=false;applyFailures=0;applyCalls=0;changeDuringApply=false;activationOnly=false;listCalls=0;teamCalls=0;
       };
       window.mountEditor=async(asOwner=true)=>{
         editor=await RoleEditor.mountRoleEditor(document.querySelector('#host'),crm,{actorUid:7,employeeName:'Синтетический сотрудник',owner:asOwner,employees:[{employee_uuid:'e1',name:'Синтетический сотрудник'}]});
@@ -216,6 +221,21 @@ async function browser() {
     assert.equal(operationIds[0], operationIds[1]);
     assert.match(await js('document.querySelector("[data-access-status]").textContent'), /прежняя квитанция/);
     console.log('Role editor Chromium: unknown outcome retries one durable operation and accepts repeated receipt PASS');
+
+    await js('(async()=>{resetFixture();await mountEditor();editNewCard();document.querySelector("[data-access-form]").requestSubmit();return true})()');
+    await until('calls.some(call=>call.body?.operation==="preview")', 'apply with newer edit preview');
+    await js('changeDuringApply=true;document.querySelector("[data-access-apply]").click();document.querySelector("[data-access-confirm-apply]").click()');
+    await until('document.querySelector("[data-access-status]").textContent.includes("Более новый ввод")', 'newer edit survives apply');
+    assert.equal(await js(`document.querySelector('[data-access-role="2"]')?.value`), 'manager');
+    assert.notEqual(await js('savedDraft'), null);
+    assert.equal(await js('savedDraft.grants[2].role'), 'manager');
+    assert.notEqual(await js('savedDraft.operation_id'), await js('calls.find(call=>call.body?.operation==="preview").body.operation_id'));
+    console.log('Role editor Chromium: stale receipt does not erase newer draft PASS');
+
+    await js('(async()=>{resetFixture();activationOnly=true;await mountEditor();document.querySelector("[data-access-form]").requestSubmit();return true})()');
+    await until('calls.some(call=>call.body?.operation==="preview")', 'activation preview');
+    assert.equal(await js('document.querySelector("[data-access-apply]").disabled'), false);
+    console.log('Role editor Chromium: activation-only server diff enables apply PASS');
 
     await js('(async()=>{resetFixture();catalog.editable_roles=["employee"];await mountEditor(false);return true})()');
     assert.equal(await js(`document.querySelector('[data-access-role="0"]').disabled`), false);

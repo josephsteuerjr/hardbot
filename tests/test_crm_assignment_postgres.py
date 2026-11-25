@@ -100,7 +100,7 @@ def test_full_distribution_under_select_only_identity_role(pg_world,monkeypatch)
     assert len(manager_reports.read(w['managers'][0])['snapshots'])==1
     monkeypatch.setattr(assignments,'MAX_SLOTS',1)
     job,_=cases.apply(w,cases.preview(w))
-    verified={w['managers'][0].actor_uid:w['managers'][0]}
+    verified={(w['managers'][0].actor_uid,w['managers'][0].grant_id):w['managers'][0]}
     manager_reports.tick(verified);manager_reports.tick(verified)
     assert assignments.job(w['managers'][0],job_id=job['job_id'])['state']=='completed'
     with storage.connect() as c:

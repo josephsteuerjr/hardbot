@@ -310,7 +310,7 @@ class Sessions:
         if p.grant_id is not None:
             payload['grant_id'] = p.grant_id
         if self.background_store and p.role in {'manager','owner','analyst'}:
-            await asyncio.to_thread(self.background_store,p.actor_uid,self.background_seal(payload))
+            await asyncio.to_thread(self.background_store,p.actor_uid,self.background_seal(payload),p.grant_id)
         return dict(token=self.seal(payload), expires_at=payload['expires'],
                     employee_uuid=p.employee_uuid, actor_uid=p.actor_uid, name=identity['name'], role=p.role,
                     access_model=p.access_model, policy_revision=p.policy_revision,

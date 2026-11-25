@@ -445,8 +445,9 @@ export async function mountRoleEditor(
     const validPreview = !!preview?.preview_sha256 && previewFingerprint === fingerprint(state.grants);
     $<HTMLButtonElement>('[data-access-add]').disabled = busy || !canManage || !roles.length;
     $<HTMLButtonElement>('[data-access-preview]').disabled = busy || !canManage;
+    const serverDiff = Array.isArray(preview?.diff) ? preview.diff.length > 0 : !!preview?.diff && Object.keys(preview.diff).length > 0;
     $<HTMLButtonElement>('[data-access-apply]').hidden = !validPreview;
-    $<HTMLButtonElement>('[data-access-apply]').disabled = busy || !dirty && !preview?.receipt;
+    $<HTMLButtonElement>('[data-access-apply]').disabled = busy || !dirty && !serverDiff && !preview?.receipt && !uncertain;
     $<HTMLButtonElement>('[data-access-apply]').textContent = uncertain ? 'Проверить исход операции' : 'Применить изменения';
     $<HTMLButtonElement>('[data-access-refresh]').disabled = busy;
     dialogManager.setSubmitting(busy && dialog.open);
@@ -561,6 +562,7 @@ export async function mountRoleEditor(
 
   async function runApply() {
     if (!preview?.preview_sha256 || previewFingerprint !== fingerprint(state.grants)) return;
+    const submittedEdit = editRevision;
     const operationId = state.operation_id;
     const result: ActionResult<any> = await runner.run({
       target: `grant-apply:${actorUid}`,
@@ -594,6 +596,15 @@ export async function mountRoleEditor(
       })) : [];
       history = receipt.history || [...appliedHistory, ...history];
       remoteWarnings = receipt.warnings || remoteWarnings;
+      if (submittedEdit !== editRevision) {
+        serverGrants = appliedGrants;
+        dialogManager.forceClose();
+        await refresh(false);
+        status('Прежняя операция применена. Более новый ввод сохранён и требует отдельного предпросмотра.');
+        await options.onApplied?.();
+        renderControls();
+        return;
+      }
       await save(null);
       serverGrants = appliedGrants;
       state.grants = normalizeGrants(appliedGrants);

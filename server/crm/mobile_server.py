@@ -362,8 +362,12 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
             require_grant_role(session,{'employee','courier','manager','analyst','observer','owner'})
         elif action=='logistics-export-download':
             require_grant_workspace(session,'logistics',{'employee','courier','manager','analyst','observer','logistic','owner'})
+        elif action=='logistics-read':
+            require_grant_workspace(session,'logistics',{'employee','courier','manager','analyst','observer','logistic','owner'})
         else:
             require_grant_workspace(session,('manager-statistics','statistics'),{'manager','analyst','owner'})
+        if action=='logistics-read':
+            path,name=sessions.file(session['owner'],data['file']);result=await backend.file_action(session,'logistics-read',dict(path=str(path)));result['filename']=name;return web.json_response(result)
         if action=='read':
             path,name=sessions.file(session['owner'],data['file']);result=await backend.file_action(session,'workbook-read',dict(path=str(path)));result['filename']=name;return web.json_response(result)
         identifier=str(uuid.UUID(value['operation_id']));owner=session['owner']

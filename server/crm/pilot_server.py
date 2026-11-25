@@ -69,7 +69,7 @@ def principals():
         ),
     }
     result['courier']=access.Principal(91004,DEMO_COURIER,'demo-team','courier',ROLE_CAPABILITIES['courier'],frozenset({DEMO_COURIER}))
-    result['analyst']=access.Principal(91005,DEMO_ANALYST,'demo-team','analyst',ROLE_CAPABILITIES['analyst'],frozenset({DEMO_EMPLOYEE,DEMO_MANAGER,DEMO_OTHER,DEMO_COURIER,DEMO_ANALYST}))
+    result['analyst']=access.Principal(91005,DEMO_ANALYST,'demo-team','analyst',ROLE_CAPABILITIES['analyst']|{'access_manage'},frozenset({DEMO_EMPLOYEE,DEMO_MANAGER,DEMO_OTHER,DEMO_COURIER,DEMO_ANALYST}))
     return {key: replace(value, read_all_contracts=True) for key, value in result.items()}
 
 
@@ -80,7 +80,8 @@ def ensure_demo_roles(conn):
         if not conn.execute('SELECT 1 FROM crm_employees WHERE employee_uuid=?',(eid,)).fetchone():
             conn.execute('INSERT INTO crm_employees VALUES(?,?,?,?,1)',(eid,'DEMO-'+str(uid),name,'synthetic'))
             conn.execute('INSERT INTO crm_actor_links VALUES(?,?,?,1)',(uid,eid,'synthetic'))
-            conn.execute('INSERT INTO crm_memberships VALUES(?,?,?,?,?,?,?,NULL)',(str(uuid.uuid4()),eid,'demo-team',role,canonical(sorted(ROLE_CAPABILITIES[role])),'Europe/Samara',start))
+            capabilities=set(ROLE_CAPABILITIES[role])|({'access_manage'} if role=='analyst' else set())
+            conn.execute('INSERT INTO crm_memberships VALUES(?,?,?,?,?,?,?,NULL)',(str(uuid.uuid4()),eid,'demo-team',role,canonical(sorted(capabilities)),'Europe/Samara',start))
     conn.execute("UPDATE crm_memberships SET role='observer',capabilities_json=?,team_id='other-team' WHERE employee_uuid=?",(canonical(['analytics']),DEMO_OTHER))
     contract=conn.execute('SELECT contract_uuid FROM crm_contracts WHERE person_uuid=? ORDER BY contract_uuid LIMIT 1',(identifier('person','demo-1'),)).fetchone()
     if contract and not conn.execute("SELECT 1 FROM crm_assignments WHERE employee_uuid=? AND capability='delivery'",(DEMO_COURIER,)).fetchone():
@@ -412,6 +413,12 @@ def serve():
                     if p.role!='analyst':raise CRMError('Требуется вход Аналитика.','forbidden',403)
                     from . import manager_reports,assignments
                     result=(manager_reports.read if action=='analyst-report' else assignments.statistics)(p,**query)
+                elif action=='grant-catalog' and method=='GET':
+                    from . import grant_admin
+                    result=grant_admin.catalog(p)
+                elif action=='grant-admin' and method=='POST':
+                    from . import grant_admin
+                    result=grant_admin.command(p,raw)
                 elif action=='manager-access':
                     from . import demo_team
                     result=demo_team.request(p,method,raw,query)
