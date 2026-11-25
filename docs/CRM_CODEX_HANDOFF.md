@@ -4,6 +4,21 @@
 
 Это не новое ТЗ и не просьба спланировать работу. Нужно продолжить существующую реализацию, закрыть подтверждённые дефекты и довести её до изолированной приёмки. Не начинать архитектуру заново.
 
+## 0. Статус после выполнения — `cbef398`
+
+P0, P1 и P2 из этого документа реализованы. Дополнительно закрыты найденные приёмкой проблемы: явный render после `grant_required`, legacy-сессии без capabilities и activation-only Apply. Исходный observer workflow восстановлен без ослабления территории.
+
+Подтверждено на изолированных данных:
+
+- TypeScript, role editor, UI kit 18/18, native capabilities и grant queue PASS;
+- полный Windows workflow, native workspace, legacy pilot, analyst, sealed-session restart и явный выбор grant через 409 PASS;
+- mobile grant composition, offline queue/revocation и cache в Chromium и WebKit PASS;
+- полный `tests/test_crm_*.py`: остаются только два ранее задокументированных baseline failure `test_two_manager_sessions_share_data_preserve_authors_and_obey_revocation` и `test_server_overview_stays_outside_normal_manager_scope` про немедленный отзыв вопреки 15-секундному authority cache; остальные проверки прошли;
+- actor lock перед revision читается и проверен регрессией, миграция 9→10 исправлена в fixture. Реальный PostgreSQL на машине отсутствует, поэтому PostgreSQL concurrent apply и настоящая миграция не выполнялись и в зелёный результат не включены;
+- native Excel в полном наборе продолжает выдавать Windows RPC warnings окружающей среды; изменённые grant/identity/transport проверки это не затрагивает.
+
+Production, рабочие БД и каналы обновлений не менялись. Эта ветка по-прежнему кандидат на отдельную изолированную приёмку, а не production-выкладка.
+
 ## 1. Стартовая точка
 
 - Production-hotfix находится в `main` и включён в эту ветку merge-коммитом `41c42a6`.
