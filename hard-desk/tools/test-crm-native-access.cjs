@@ -46,6 +46,16 @@ assert.throws(()=>requireScopedManagerMutation(scoped,'reset',{username:'outside
 assert.throws(()=>requireScopedManagerMutation(scoped,'revoke',{device_id:66},team),/территории/);
 requireScopedManagerMutation(scoped,'reset',{username:'allowed'},team);
 requireScopedManagerMutation(scoped,'revoke',{device_id:55},team);
+const pendingTeam={employees:[{employee:'New employee',registration_pending:true,can_approve:true,
+  account:{username:'new',actor_uid:303,devices:[{id:77,status:'pending'},{id:78,status:'active'}]}}]};
+const full={...scoped,primary_team_review:true};
+check('first device can be reviewed before linking the employee to CRM',
+  filterScopedManagerTeam(full,pendingTeam).employees[0]?.account.devices.map(d=>d.id).join()==='77');
+requireScopedManagerMutation(full,'approve',{device_id:77},pendingTeam);
+assert.throws(()=>requireScopedManagerMutation(scoped,'approve',{device_id:77},pendingTeam),/территории/);
+assert.throws(()=>requireScopedManagerMutation(full,'approve',{device_id:78},pendingTeam),/территории/);
+assert.throws(()=>requireScopedManagerMutation(full,'revoke',{device_id:77},pendingTeam),/территории/);
+assert.throws(()=>requireScopedManagerMutation(full,'reset',{username:'new'},pendingTeam),/территории/);
 check('scoped admin permits account list',scopedAdminActionAllowed(scoped,'local',['/admin',{method:'GET',path:'/admin/accounts.json'}]));
 check('scoped admin denies broad import',!scopedAdminActionAllowed(scoped,'local',['/enr/apply',{}]));
 const accountRequest=['/admin',{method:'GET',path:'/admin/accounts.json'}];

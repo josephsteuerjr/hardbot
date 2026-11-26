@@ -25,6 +25,8 @@ class Principal:
     grant_id: str | None = None
     account_bound: bool = False
     registered_manager: bool = False
+    primary_manager_scope: frozenset | None = None
+    primary_team_verified: bool = False
     recover_legacy_receipt: bool = False
 
     @property

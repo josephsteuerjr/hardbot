@@ -21,6 +21,7 @@ sys.path[:0] = [str(source),str(source/'server')]
 os.environ['PYTHONPATH'] = os.pathsep.join(sys.path[:2])
 from crm import mobile_server
 from crm.mobile_backend import SyntheticBackend
+from crm.contract import CRMError
 
 mobile_server.ASSETS = args.assets.resolve()
 output = args.output.resolve()
@@ -28,6 +29,13 @@ output.mkdir(parents=True,exist_ok=True)
 ready = threading.Event()
 stop = threading.Event()
 state = {'online':True}
+
+
+class RetentionBackend(SyntheticBackend):
+    async def request(self, session, method, action, body=None, query=None):
+        if state.get('grant_revoked') and action == 'context':
+            raise CRMError('Выбранное полномочие отозвано.', 'grant_revoked', 403)
+        return await super().request(session, method, action, body, query)
 
 
 async def serve():
@@ -39,7 +47,7 @@ async def serve():
             return web.json_response({'error':'upstream_unavailable'},status=503)
         return await handler(request)
 
-    app = mobile_server.create_app(SyntheticBackend(output/'data/synthetic'),output/'data')
+    app = mobile_server.create_app(RetentionBackend(output/'data/synthetic'),output/'data')
     app.middlewares.insert(0,network)
     runner = web.AppRunner(app,access_log=None)
     await runner.setup()
@@ -137,6 +145,21 @@ try:
             assert page.evaluate('q=>crm.api("GET","work-portfolio",undefined,q).then(r=>r.ok&&!r.stale)',query)
             assert any(c['name']==mobile_server.COOKIE and c['value']==cookie for c in context.cookies(url))
             assert page.evaluate('()=>crm.state().then(s=>s.owner)')==owner
+            state['grant_revoked']=True
+            with page.expect_response(lambda r:r.url.endswith('/mobile/boot') and r.status==403) as denied:
+                page.evaluate('()=>crm.connect({action:"refresh"})')
+            assert denied.value.json()['error']=='grant_revoked'
+            assert page.evaluate('()=>crm.state().then(s=>s.owner)')==''
+            assert inspect_cache(page)['reads']==0
+            state.update(grant_revoked=False,online=False)
+            page.reload()
+            page.locator('.mobile-connection-status strong').filter(has_text='Сервер временно недоступен').wait_for()
+            assert page.evaluate('()=>crm.state().then(s=>s.owner)')==''
+            state['online']=True
+            page.reload()
+            wait_for_owner(page,owner)
+            assert any(c['name']==mobile_server.COOKIE and c['value']==cookie for c in context.cookies(url))
+            assert page.evaluate('()=>crm.draft("retention-draft").then(r=>r.data.text)')=='Synthetic draft'
             state['revoked']=True
             page.reload()
             page.get_by_text('Нужно войти снова',exact=True).wait_for()
@@ -146,7 +169,7 @@ try:
             assert page.evaluate('()=>crm.state().then(s=>s.owner)')==''
             (output/'RESULT.json').write_text(json.dumps({'engine':args.engine,'owner_retained':True,
                 'idle_cache_purged':True,'draft_and_queue_kept':True,'same_cookie_after_reconnect':True,
-                'does_not_restore_confirmed_revocation':True},indent=2))
+                'does_not_restore_confirmed_revocation':True,'grant_revocation_clears_previous_workspace':True},indent=2))
             print(args.engine,'48h read retention, durable work and session PASS',flush=True)
 finally:
     stop.set()

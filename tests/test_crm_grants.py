@@ -444,3 +444,35 @@ def test_access_manage_comes_from_fresh_membership_not_stale_principal(crm_world
                      (canonical(sorted(ROLE_CAPABILITIES['analyst'])), crm_world['employee']))
         refreshed = access.refresh_write(conn, selected)
     assert 'access_manage' not in refreshed.capabilities
+
+
+@pytest.mark.parametrize('territory', ['team', 'employees', 'all'])
+def test_primary_manager_scope_caps_migrated_pilot_writes(crm_world, territory):
+    namespace()
+    manager = crm_world['member']
+    outsider = crm_world['stranger']
+    actor = dict(identity(crm_world, 'manager'), account_bound=True, manager_team=['Employee'])
+    inside, outside = crm_world['contracts']
+    with storage.connect() as conn:
+        conn.execute("UPDATE crm_memberships SET team_id='crm-pilot-managers',role='manager',capabilities_json=? WHERE employee_uuid=?",
+                     (canonical(sorted(ROLE_CAPABILITIES['manager'])), manager.employee_uuid))
+        conn.execute("UPDATE crm_memberships SET team_id='crm-pilot-managers' WHERE employee_uuid=?", (outsider.employee_uuid,))
+        conn.execute('UPDATE crm_assignments SET employee_uuid=? WHERE contract_uuid=?', (outsider.employee_uuid, outside))
+    legacy = shared_auth.principal(actor)
+    with storage.connect() as conn:
+        assert legacy.employee_scope == {manager.employee_uuid}
+        assert access.scoped_contracts(conn, legacy) == {inside}
+        allowed = [manager.employee_uuid, outsider.employee_uuid] if territory == 'employees' else []
+        grant = grants.upsert(conn, manager.actor_uid, role='manager', territory=territory,
+                              employees=allowed, capabilities={'note','assign'}, all_contracts=True, is_default=True)
+        other = grants.upsert(conn, manager.actor_uid, role='employee', territory='self', capabilities={'call'})
+        grants.set_model(conn, manager.actor_uid, 2)
+    current = shared_auth.principal(actor, grant_id=grant.grant_id)
+    with storage.connect() as conn:
+        assert access.scoped_contracts(conn, current) == {inside}
+        assert access.scoped_contracts(conn, access.refresh_write(conn, current)) == {inside}
+        assert not access.writable_actions(conn, current, outside)
+        assert 'note' in access.writable_actions(conn, current, inside)
+    alternate = shared_auth.principal(actor, grant_id=other.grant_id)
+    assert alternate.role == 'employee'
+    assert alternate.capabilities == {'call'}

@@ -1007,6 +1007,22 @@ def _privileged_names(conn):
     return {db._name_key(name) for name in names if name}
 
 
+def separate_staff_account(conn, account, keys):
+    """An established employee login may coexist with a different privileged login."""
+    uid = account['telegram_id']
+    if account['role'] != 'agent' or not uid or conn.execute(
+            'SELECT 1 FROM managers WHERE telegram_id=?', (uid,)).fetchone():
+        return False
+    aliases = [row for row in conn.execute("SELECT id,employee FROM accounts WHERE role='agent'")
+               if db._name_key(row['employee']) in keys]
+    if len(aliases) != 1 or aliases[0]['id'] != account['id']:
+        return False
+    try:
+        return _assert_uid_owned(conn, account) == uid
+    except UIDConflict:
+        return False
+
+
 def _reviewable(conn, acc, uid, manager, team, *, declared=None, privileged=None):
     keys = {db._name_key(acc['employee'])} if acc else set()
     if acc:
@@ -1021,8 +1037,9 @@ def _reviewable(conn, acc, uid, manager, team, *, declared=None, privileged=None
     return bool(acc and manager and acc["role"] == "agent" and acc["status"] != "disabled"
                 and keys & team
                 and acc["telegram_id"] != uid
-                and db._name_key(acc["employee"]) != db._name_key(manager.get("name"))
-                and not keys & (_privileged_names(conn) if privileged is None else privileged)
+                and db._name_key(manager.get("name")) not in keys
+                and (not keys & (_privileged_names(conn) if privileged is None else privileged)
+                     or separate_staff_account(conn, acc, keys))
                 and not conn.execute("SELECT 1 FROM managers WHERE telegram_id=?", (acc["telegram_id"],)).fetchone())
 
 
@@ -1364,6 +1381,9 @@ def manager_team(uid, *, is_owner=False):
         row['account']=account
         row['can_reset']=bool(account and account['username'] in reviewable and not account['password_review_pending'])
         row['can_approve']=bool(account and account['username'] in reviewable and not (account['password_review_pending'] and account['must_change_password']))
+        row['registration_pending']=bool(row['can_approve'] and account['status']=='awaiting'
+            and account['self_registration'] and not account['password_review_pending']
+            and not account['must_change_password'] and any(d['status']=='pending' for d in account['devices']))
         row['can_revoke']=bool(account and account['username'] in reviewable)
         if account and account.get('phone'):account['phone'].pop('gps',None)
     return board

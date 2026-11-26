@@ -256,7 +256,7 @@ def test_mobile_grant_switch_isolates_work_and_rejects_stale_envelope(tmp_path):
         'grant-analyst':dict(actor_uid=303,employee_uuid='person-one',role='analyst',capabilities=['exchange'],workspace=dict(defaultModule='registry',tree=[dict(id='registry',children=[]),dict(id='exchange',children=[])])),
     }
     grants=[dict(grant_id=key,actor_uid=303,role=value['role'],territory='self',capabilities=value['capabilities']) for key,value in contexts.items()]
-    exchanges=[];receipts=[]
+    exchanges=[];receipts=[];revoked=set()
     class GrantsBackend(SharedBackend):
         async def json(self,url,method='GET',headers=None,body=None):
             if url.endswith('/api/account/login'):
@@ -264,10 +264,19 @@ def test_mobile_grant_switch_isolates_work_and_rejects_stale_envelope(tmp_path):
             if url.endswith('/api/crm-identity'):
                 return dict(me=dict(role='manager'))
             if url.endswith('/auth/exchange'):
-                grant_id=(headers or {}).get('X-CRM-Grant','grant-manager');exchanges.append(grant_id)
-                return dict(token='token-'+grant_id,grant_id=grant_id,grants=grants,access_model=2,policy_revision=7)
+                requested=(headers or {}).get('X-CRM-Grant')
+                if requested and (requested in revoked or requested not in contexts):
+                    raise CRMError('Полномочие отозвано.','grant_revoked',403)
+                available=[grant for grant in grants if grant['grant_id'] not in revoked]
+                if not requested and revoked:
+                    raise CRMError('Выберите полномочие.','grant_required',409,{'grants':available})
+                grant_id=requested or 'grant-manager'
+                exchanges.append(grant_id)
+                return dict(token='token-'+grant_id,grant_id=grant_id,grants=available,access_model=2,policy_revision=7)
             if url.endswith('/api/crm/context'):
                 grant_id=session_grant[0]
+                if grant_id in revoked:
+                    raise CRMError('Полномочие отозвано.','grant_revoked',403)
                 return dict(contexts[grant_id],grant_id=grant_id)
             if url.endswith('/api/crm/receipt'):
                 receipts.append((headers['Authorization'],body));return dict(ok=True)
@@ -310,7 +319,20 @@ def test_mobile_grant_switch_isolates_work_and_rejects_stale_envelope(tmp_path):
             response=await client.post('/mobile/receipts',headers=headers,json=dict(action='flush'))
             assert (await response.json())['entries'][0]['state']=='accepted'
             assert len(receipts)==1 and receipts[0][0]=='Bearer token-grant-manager'
-        assert exchanges==['grant-manager','grant-analyst','grant-manager']
+            invalid=await client.post('/mobile/api',headers=headers,json=dict(method='POST',action='grant',body=dict(grant_id='grant-invalid')))
+            assert invalid.status==403 and 'revoked_owner' not in await invalid.json()
+            revoked.add('grant-manager')
+            response=await client.get('/mobile/boot')
+            picker=await response.json()
+            assert response.status==409 and picker['retained_session'] and picker['revoked_owner']==owner
+            assert [g['grant_id'] for g in picker['details']['grants']]==['grant-analyst']
+            response=await client.post('/mobile/api',headers={'X-CRM-CSRF':picker['csrf']},
+                                       json=dict(method='POST',action='grant',body=dict(grant_id='grant-analyst')))
+            assert response.status==200
+            recovered=await (await client.get('/mobile/boot')).json()
+            assert recovered['session']['owner']==analyst['session']['owner']
+            assert recovered['session']['context']['grant_id']=='grant-analyst'
+        assert exchanges==['grant-manager','grant-analyst','grant-manager','grant-analyst']
     asyncio.run(run())
 
 

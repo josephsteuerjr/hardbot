@@ -125,6 +125,8 @@ def install(app, host=None, *, authenticate=None):
             dropdowns=DROPDOWNS,
             cohorts=cohorts,
             staff=staff,
+            primary_team_review=(p.role == 'manager' and p.primary_team_verified
+                                 and p.employee_scope == p.primary_manager_scope),
             distribution=distribution,
             logistics_countries=logistics_countries,
             workspace=workspace_manifest,

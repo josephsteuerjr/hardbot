@@ -5080,7 +5080,9 @@ async def _manager_device_me(request: web.Request) -> web.Response:
                       "created_at": dev["created_at"], "account_bound": bool(dev["account_id"])}
             if dev["account_id"]:
                 server_operator = await asyncio.to_thread(accounts.is_server_operator, dev["account_id"], uid)
-    return _manager_json({"ok": True, "device": device, "team": len(team), "server_operator": server_operator,
+    crm_scope = {"crm_team": team} if (uid != ADMIN_ID and
+        request.headers.get('X-Client-Runtime') == 'crm-identity-bridge') else {}
+    return _manager_json({"ok": True, "device": device, "team": len(team), "server_operator": server_operator, **crm_scope,
                           **await asyncio.to_thread(_device_me, uid, mgr)})
 
 

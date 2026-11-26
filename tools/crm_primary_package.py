@@ -27,7 +27,9 @@ def build(baseline,output):
     baseline=Path(baseline).resolve();output=Path(output).resolve()
     if output.exists():raise ValueError('Use a new output directory; no existing package is overwritten')
     selected={'db.py':['save_call_result','save_visit_result','import_grid','init_db'],
-              'accounts.py':['login','entered_list','manager_team','manager_revoke_device'],
+              'accounts.py':['login','entered_list','manager_team','manager_revoke_device',
+                             '_reviewable','separate_staff_account'],
+              'team_work.py':['board'],
               'web.py':['_manager_team','_call_script','_manager_call_script']}
     built={};manifest={}
     for name,names in selected.items():
@@ -78,7 +80,9 @@ def build_registration(baseline,output):
     output=Path(output).resolve()
     if output.exists():
         raise ValueError('Use a new output directory; no existing package is overwritten')
-    selected={'accounts.py':['create_account','login','admin_accounts'],
+    selected={'accounts.py':['create_account','login','admin_accounts','manager_team',
+                             '_reviewable','separate_staff_account'],
+              'team_work.py':['board'],
               'staff_roster.py':['candidates'], 'crm_identity.py':['identity'],
               'account_access.py':['cmd_approve','cmd_registration_code','main'],
               'web.py':['_account_login','_admin_account_approve','_admin','_crm_account_registration','_manager_device_me'],
@@ -90,7 +94,7 @@ def build_registration(baseline,output):
         before=path.read_text(encoding='utf-8-sig')
         after=(SOURCE/name).read_text(encoding='utf-8-sig')
         original=functions(before)
-        if any(key not in original for key in names if key not in {'_crm_account_registration','cmd_registration_code'}):
+        if any(key not in original for key in names if key not in {'_crm_account_registration','cmd_registration_code','separate_staff_account'}):
             raise ValueError(f'Primary CRM baseline lacks a required function in {name}')
         result=replace_functions(before,after,names,'build_app' if name=='web.py' else 'main' if name=='account_access.py' else None)
         if name=='web.py':

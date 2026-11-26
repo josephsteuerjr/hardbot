@@ -78,8 +78,13 @@ function scopedAccountAllowed(context:any,account:any):boolean {
 }
 export function filterScopedManagerTeam(context:any,result:any):any {
   if(legacyAdministrationAllowed(context)||!result)return result;
-  return {...result,employees:(result.employees||[]).filter((row:any)=>
-    scopedEmployeeAllowed(context,row.employee)&&scopedAccountAllowed(context,row.account))};
+  const employees=(result.employees||[]).flatMap((row:any)=>{
+    if(scopedEmployeeAllowed(context,row.employee)&&scopedAccountAllowed(context,row.account))return [row];
+    if(context.primary_team_review!==true||row.registration_pending!==true)return [];
+    return [{...row,registration_only:true,can_reset:false,can_revoke:false,can_remove:false,
+      can_delete_profile:false,account:{...row.account,devices:(row.account?.devices||[]).filter((d:any)=>d.status==='pending')}}];
+  });
+  return {...result,employees};
 }
 export function filterScopedManagerPlan(context:any,result:any):any {
   if(legacyAdministrationAllowed(context)||!result)return result;
@@ -95,7 +100,8 @@ export function requireScopedManagerMutation(context:any,resource:string,payload
     if(!scopedEmployeeAllowed(context,payload?.employee))throw Error('Сотрудник вне доступной территории.');
     return;
   }
-  const employees=filterScopedManagerTeam(context,team)?.employees||[];
+  const employees=(filterScopedManagerTeam(context,team)?.employees||[]).filter((row:any)=>
+    !row.registration_only || resource==='approve' && payload?.device_id!=null);
   if(resource==='reset'){
     const username=String(payload?.username||'').toLocaleLowerCase();
     if(!employees.some((row:any)=>String(row.account?.username||'').toLocaleLowerCase()===username))throw Error('Аккаунт вне доступной территории.');

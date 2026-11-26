@@ -134,16 +134,18 @@ def board(*, team=None, manager=None, writable=True):
     with db.connect() as c:
         privileged = accounts._privileged_names(c)
         hidden = {r[0] for r in c.execute('SELECT employee_id FROM employee_board_visibility WHERE visible=0')}
-        accs = [dict(x) for x in c.execute("SELECT id,employee,username,status,must_change_password,password_review_pending FROM accounts WHERE role='agent'")]
+        accs = [dict(x) for x in c.execute("SELECT id,employee,username,telegram_id,role,status,must_change_password,password_review_pending FROM accounts WHERE role='agent'")]
         devices = [dict(x) for x in c.execute("SELECT account_id,kind,status,last_seen FROM account_devices WHERE status<>'revoked'")]
         out = []
         for r in _registry(c):
-            if not _covered(r, team, manager) or db._name_key(r['employee']) in privileged:
+            if not _covered(r, team, manager):
                 continue
             keys = _aliases(c, r['employee'])
-            eid = r['employee_id'] or _identity(c, r['employee'])
             matches = [a for a in accs if db._name_key(a['employee']) in keys]
             a = matches[0] if len(matches) == 1 else None
+            if db._name_key(r['employee']) in privileged and not (a and accounts.separate_staff_account(c, a, keys)):
+                continue
+            eid = r['employee_id'] or _identity(c, r['employee'])
             devs = [d for d in devices if a and d['account_id'] == a['id']]
             def device_status(kind):
                 ds = [d for d in devs if d['kind'] == kind]

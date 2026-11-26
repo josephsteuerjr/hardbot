@@ -46,7 +46,7 @@ function renderGrantPicker(){
   label.append(select);form.append(title,label,button);host.querySelector('.mobile-connection')?.prepend(form);
   form.onsubmit=event=>{event.preventDefault();button.disabled=true;void (async()=>{
     const grant_id=select.value;let response:Reply;
-    if(connected)response=await bridge.connect({action:'grant',grant_id});
+    if(connected||connectionResponse?.data?.retained_session)response=await bridge.connect({action:'grant',grant_id});
     else{
       const login=host.querySelector<HTMLFormElement>('#mobile-login');if(!login)throw Error('Сначала введите логин и пароль.');
       const data=new FormData(login);response=await bridge.connect({action:'login',username:data.get('username'),password:data.get('password'),grant_id});
@@ -64,7 +64,12 @@ const deviceScope='device';
 const channel=typeof BroadcastChannel!=='undefined'?new BroadcastChannel('crm-mobile-events'):null;
 const activity=new MobileActivity(api,async(action,body,owner)=>persistEntry(owner,action,body),()=>emit({type:'storage-error',text:'Не удалось сохранить активный интервал. Оставьте окно открытым и повторите подключение.'}));
 const emit=(event:any,broadcast=false)=>{for(const fn of listeners)fn(event);if(broadcast)channel?.postMessage(event);};
-channel?.addEventListener('message',event=>{if(event.data?.owner===current?.owner)emit(event.data);else if(event.data?.type==='identity')background(initialize().then(()=>emit({type:'identity'})));});
+channel?.addEventListener('message',event=>{
+  if(event.data?.type==='workspace-revoked'){
+    if(event.data.owner===current?.owner)closeWorkspace(event.data.owner);
+  }else if(event.data?.owner===current?.owner)emit(event.data);
+  else if(event.data?.type==='identity')background(initialize().then(()=>emit({type:'identity'})));
+});
 async function checkReadCache(touch:boolean){
   const state=await vault.maintainReadCache(touch);
   clearTimeout(cacheTimer);
@@ -99,6 +104,20 @@ function scheduleSessionExpiry(){
 }
 function authority(expected?:string){expireSession();if(!current?.owner||expected&&expected!==current.owner)throw Error('Вход изменился. Ввод сохранён у исходного сотрудника.');return current.owner;}
 async function revoke(status:number,expected=current?.owner){if(status===401&&expected&&current?.owner===expected){await vault.update(deviceScope,'last-state',saved=>saved?.owner===expected?null:saved);if(current?.owner!==expected)return;current=null;background(activity.stop());emit({type:'identity'});}}
+function closeWorkspace(owner:string,duringBoot=false){
+  if(current?.owner!==owner)return;
+  current=null;clearTimeout(expiryTimer);clearTimeout(liveTimer);navigationTarget='connection';
+  background(activity.stop());
+  if(!duringBoot)emit({type:'identity'});
+}
+async function revokeWorkspace(owner:string,duringBoot:boolean){
+  closeWorkspace(owner,duringBoot);
+  const revokedAt=Date.now();
+  await vault.update(owner,'workspace-revoked',prior=>Math.max(prior||0,revokedAt));
+  await vault.update(deviceScope,'last-state',saved=>saved?.owner===owner?null:saved);
+  await vault.clearReads(owner);
+  channel?.postMessage({type:'workspace-revoked',owner});
+}
 async function request(path:string,body?:any):Promise<Reply>{
   const startedOwner=current?.owner;
   if(offline||!navigator.onLine)return {ok:false,status:0,text:'Нет связи. Неотправленные действия сохранены на телефоне.'};
@@ -106,6 +125,10 @@ async function request(path:string,body?:any):Promise<Reply>{
     const response=await fetch('./'+path,{method:body===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','X-CRM-CSRF':csrf},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(120000)});
     const data=await response.json();
     if(current?.owner!==startedOwner)return {ok:false,status:401,text:'Вход изменился. Исходная работа сохранена.'};
+    const revokedOwner=data.revoked_owner||
+      (['grant_revoked','grant_required'].includes(data.error)&&
+       (path==='boot'||path==='api'&&body?.action!=='grant')?startedOwner:null);
+    if(typeof revokedOwner==='string'&&revokedOwner)await revokeWorkspace(revokedOwner,path==='boot');
     await revoke(response.status,startedOwner);
     if(response.status===403&&data.error==='csrf'){csrf='';return {ok:false,status:0,text:'Подключение обновляется. Исходная операция остаётся в очереди.'};}
     const text=typeof data.text==='string'&&!/^[a-z0-9_-]+$/i.test(data.text)?data.text:undefined;
@@ -154,6 +177,7 @@ async function loadSession():Promise<Reply>{
     await vault.update(deviceScope,'installation',value=>value||crypto.randomUUID());
   }
   const savedBefore=await vault.get(deviceScope,'last-state');
+  const checkedAt=Date.now();
   let response=await request('boot');
   if(response.ok){
     csrf=response.data.csrf;
@@ -168,16 +192,26 @@ async function loadSession():Promise<Reply>{
       }catch{/* Session access stays available when local storage is restricted. */}
     }
   }
+  if(response.data?.retained_session)csrf=response.data.csrf;
+  if(!response.ok&&savedBefore?.owner&&!response.data?.revoked_owner&&
+    ['grant_revoked','grant_required'].includes(response.data?.error)){
+    await revokeWorkspace(savedBefore.owner,true);
+  }
   if(response.ok){
     csrf=response.data.csrf;
     const next=response.data.session||null;
+    if(next?.owner&&await vault.update(next.owner,'workspace-revoked',value=>value>=checkedAt?value:null)){
+      closeWorkspace(next.owner,true);
+      return {ok:false,status:403,data:{error:'grant_revoked'},text:'Обновите подтверждение рабочего места.'};
+    }
     await carryLegacyWork(current||savedBefore,next);
     current=next;
     await vault.put(deviceScope,'last-state',current);
   }
   else if(response.status===0||response.status>=500){
     const saved=await vault.get(deviceScope,'last-state');
-    current=saved&&saved.expires_at>Date.now()&&saved.context?.source!=='legacy-analyst-web'?saved:null;
+    current=saved&&saved.expires_at>Date.now()&&saved.context?.source!=='legacy-analyst-web'&&
+      !await vault.get(saved.owner,'workspace-revoked')?saved:null;
   }else if([401,410].includes(response.status)&&savedBefore?.owner){
     await vault.update(deviceScope,'last-state',saved=>
       saved?.owner===savedBefore.owner&&saved.expires_at===savedBefore.expires_at?null:saved);
@@ -492,13 +526,21 @@ export const bridge:any={
   telemetry:async(event:any)=>current?api('POST','telemetry',event):{ok:true},
   connect:async(input:any)=>{
     if(input.action==='account-registration-options')return request('registration');
-    if(input.action==='refresh'){const before=current?.owner,scope=grantScope();await initialize();if(current?.owner&&(before!==current.owner||scope!==grantScope())){navigationTarget=defaultSection();emit({type:'identity',owner:current.owner},true);}return {ok:true};}
+    if(input.action==='refresh'){
+      const before=current?.owner,scope=grantScope();
+      const response=await initialize();connectionResponse=response;
+      if(before!==current?.owner||scope!==grantScope()){
+        navigationTarget=current?defaultSection():'connection';
+        emit({type:'identity',owner:current?.owner},true);
+      }
+      return response;
+    }
     if(input.action==='offline'){offline=!!input.value;if(!offline)background(flush());return {ok:true};}
     const installation=await vault.get(deviceScope,'installation');
     const device_id=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(installation)))).map(v=>v.toString(16).padStart(2,'0')).join('');
     if(input.action==='account-register')return request('registration',{...input,device_id,device_label:navigator.userAgent.slice(0,120)});
     if(input.action==='login'||input.action==='logout')legacyTried=true;
-    const response=input.action==='grant'?await api('POST','grant',{grant_id:input.grant_id}):await request(input.action==='logout'?'logout':input.action==='password'?'password':'login',{...input,device_id,device_label:navigator.userAgent.slice(0,120)});
+    const response=input.action==='grant'?await request('api',{method:'POST',action:'grant',body:{grant_id:input.grant_id}}):await request(input.action==='logout'?'logout':input.action==='password'?'password':'login',{...input,device_id,device_label:navigator.userAgent.slice(0,120)});
     connectionResponse=response;
     if(response.ok){await initialize();navigationTarget=current?defaultSection():'connection';emit({type:'identity',owner:current?.owner},true);background(flush());}else renderGrantPicker();return response;
   },workbook,document:documentFile,visitPhoto:(contract:string,file:File,expected:string)=>queueFile(contract,file,authority(expected),true),admin,win:()=>{},

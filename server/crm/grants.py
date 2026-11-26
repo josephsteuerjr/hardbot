@@ -153,15 +153,22 @@ def _project(conn, legacy, grant, access_model, policy_revision, available):
     if grant.role == "owner" and grant.territory != "all":
         raise _error("Глобальное полномочие владельца имеет некорректную область.", "grant_invalid", 403)
     limited_manager = legacy.registered_manager and grant.role == 'manager'
-    scope = _scope(conn, legacy, grant)
+    primary_scope = legacy.primary_manager_scope if grant.role == 'manager' else None
+    # A formerly unrestricted grant follows the current authoritative team.
+    scope = primary_scope if primary_scope is not None and grant.all_contracts else _scope(conn, legacy, grant)
     if limited_manager:
         scope &= access.registered_manager_staff(conn, legacy)
-    all_contracts = not limited_manager and (grant.all_contracts or grant.territory == "all" or grant.role == "owner")
+    if primary_scope is not None:
+        scope &= primary_scope
+    all_contracts = not limited_manager and primary_scope is None and (grant.all_contracts or grant.territory == "all" or grant.role == "owner")
     return replace(
         legacy,
         role=grant.role,
         capabilities=grant.capabilities | ({'access_manage'} & legacy.capabilities if grant.role == 'analyst' else set()),
         employee_scope=scope,
+        primary_team_verified=(legacy.primary_team_verified and grant.role == 'manager'
+            and (grant.all_contracts or grant.territory in {'all', 'team'}
+                 or grant.grant_id == identifier('grant-backfill', legacy.actor_uid))),
         all_contracts=all_contracts,
         read_all_contracts=not limited_manager and (grant.read_all_contracts or all_contracts),
         server_operator=legacy.server_operator and legacy.role == grant.role == 'manager',

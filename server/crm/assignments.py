@@ -64,20 +64,29 @@ def authorize(conn, principal, *, write=False):
 def _territory_sql(principal, *, managed='mc', manager='dm'):
     from .store import selected_grant
     grant = selected_grant(principal)
-    if grant is None or grant.territory == 'all':
-        return '', []
-    if grant.territory == 'team':
-        return ' AND ' + manager + '.team_id=?', [principal.team_id]
+    primary_bounded = principal.role == 'manager' and principal.primary_manager_scope is not None
+    if not primary_bounded:
+        if grant is None or grant.territory == 'all':
+            return '', []
+        if grant.territory == 'team':
+            return ' AND ' + manager + '.team_id=?', [principal.team_id]
     if not principal.employee_scope:
         return ' AND 1=0', []
     at = now()
     employees = ','.join('?' for _ in principal.employee_scope)
-    return (' AND EXISTS(SELECT 1 FROM crm_effective_assignments territory '
-            'WHERE territory.contract_uuid=' + managed + '.contract_uuid '
-            'AND territory.capability=' + managed + '.capability '
-            'AND territory.employee_uuid IN (' + employees + ') '
-            'AND territory.starts_at<=? AND (territory.ends_at IS NULL OR territory.ends_at>?))',
-            [*sorted(principal.employee_scope), at, at])
+    current = ('EXISTS(SELECT 1 FROM crm_effective_assignments territory '
+               'WHERE territory.contract_uuid=' + managed + '.contract_uuid '
+               'AND territory.capability=' + managed + '.capability '
+               'AND territory.employee_uuid IN (' + employees + ') '
+               'AND territory.starts_at<=? AND (territory.ends_at IS NULL OR territory.ends_at>?))')
+    staff = sorted(principal.employee_scope)
+    if not primary_bounded:
+        return ' AND ' + current, [*staff, at, at]
+    vacant = ('EXISTS(SELECT 1 FROM crm_assignment_heads h '
+              'WHERE h.contract_uuid=' + managed + '.contract_uuid '
+              'AND h.capability=' + managed + '.capability AND h.employee_uuid IS NULL '
+              'AND h.baseline_employee_uuid IN (' + employees + '))')
+    return ' AND (' + current + ' OR ' + vacant + ')', [*staff, at, at, *staff]
 
 
 def _registered_distribution(principal):
@@ -174,7 +183,7 @@ def states(conn, ids):
 def _authority_targets(conn, principal):
     row = conn.execute('SELECT employees_json FROM crm_authority_scopes WHERE actor_uid=?',
                        (principal.actor_uid,)).fetchone()
-    if principal.access_model == 2 and row is None:
+    if row is None and (principal.access_model == 2 or principal.primary_manager_scope is not None):
         return principal.employee_scope
     return None if row is None else frozenset(json.loads(row['employees_json'])) & principal.employee_scope
 

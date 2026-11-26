@@ -7,6 +7,8 @@ const connectionStatus=(response:any,connected:boolean,pending:any)=>{
   const code=response.data?.error||'';
   if(response.status===401||response.status===410||['session','identity_changed','pilot_session_invalid'].includes(code))
     return {title:'Нужно войти снова',text:'Войдите под тем же сотрудником. Черновики и очередь сохранены на этом телефоне.'};
+  if(response.data?.retained_session)return {title:'Выберите рабочую область',text:'Вход сохранён. Доступные полномочия показаны выше.'};
+  if(code==='grant_revoked')return {title:'Полномочие отозвано',text:'Скачанный портфель удалён. Черновики и очередь сохранены.'};
   if(response.status===403)return {title:'Доступ нужно подтвердить',text:'Проверьте назначение и подтверждение устройства с руководителем. Локальные данные сохранены.'};
   if(response.status===0)return {title:'Нет связи',text:'Проверьте интернет. Работу можно сохранить на телефоне и отправить после восстановления связи.'};
   if(response.status>=500)return {title:'Сервер временно недоступен',text:'Не повторяйте отправку вслепую. Проверьте «Отправки» и повторите позже — локальные данные сохранены.'};
@@ -22,6 +24,7 @@ export async function mountConnection(host:HTMLElement,crm:any,boot:()=>Promise<
   let account='';
   if(connected)account='<section class="mobile-account"><div class="mobile-avatar">В</div><div><h2>'+esc(({employee:'Сотрудник',manager:'Руководитель',analyst:'Аналитик',courier:'Курьер',observer:'Наблюдатель'} as any)[state.context.role]||'Рабочее место')+'</h2></div><button id="mobile-logout" class="link">Выйти</button></section>';
   else if(pending)account='<section class="mobile-pending"><h2>'+esc(pending.employee)+'</h2><p>'+esc(pending.username)+'</p>'+(pending.status==='password'?passwordForm(true):'<p>Телефон ожидает подтверждения руководителем или администратором. Подключение проверяется автоматически.</p><button id="mobile-refresh">Проверить доступ</button>')+'<button id="mobile-logout" class="link">Сменить вход</button></section>';
+  else if(response.data?.retained_session)account='<button id="mobile-logout" class="link">Выйти</button>';
   else if(!synthetic)account='<form id="mobile-login" class="mobile-login" aria-labelledby="title"><label>Логин<input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required></label><label>Пароль<input name="password" type="password" autocomplete="current-password" required></label><button type="submit" class="primary">Войти</button></form>';
   const choices='<p>Синтетические данные</p><div class="mobile-role-options">'+[['employee','Сотрудник'],['courier','Курьер'],['manager','Руководитель'],['analyst','Аналитик'],['observer','Наблюдатель']].map(([id,name])=>'<button data-mobile-role="'+id+'">'+name+'<span aria-hidden="true">↗</span></button>').join('')+'</div>';
   const demo=synthetic?(choosingRole?'<section class="mobile-demo mobile-demo-entry" aria-label="Выбор роли"><h2>Выберите роль</h2>'+choices+'</section>':'<details class="mobile-demo"><summary>Сменить роль</summary>'+choices+'</details>'):'';

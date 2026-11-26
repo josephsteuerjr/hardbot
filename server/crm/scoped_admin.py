@@ -6,6 +6,7 @@ class AdminScope:
     def __init__(self,session):
         context=session.get('context') or {}
         self.actor_uid=context.get('actor_uid')
+        self.primary_team_review=context.get('primary_team_review') is True
         staff=list(context.get('staff') or [])
         self.names={str(person.get('name','')).strip().casefold() for person in staff}
         self.uids={int(actor) for person in staff for actor in person.get('actor_uids',())}
@@ -26,8 +27,16 @@ class AdminScope:
     def filter_team(self,result):
         if not isinstance(result,dict):return result
         result=dict(result)
-        result['employees']=[dict(row) for row in result.get('employees',())
-                             if self.employee(row.get('employee')) and (row.get('account') is None or self.account(row['account']))]
+        employees=[]
+        for row in result.get('employees',()):
+            if self.employee(row.get('employee')) and (row.get('account') is None or self.account(row['account'])):
+                employees.append(dict(row))
+            elif self.primary_team_review and row.get('registration_pending') is True:
+                account=row.get('account') or {}
+                employees.append(dict(row, registration_only=True, can_reset=False, can_revoke=False,
+                    can_remove=False, can_delete_profile=False, account=dict(account,
+                    devices=[d for d in account.get('devices',()) if d.get('status')=='pending'])))
+        result['employees']=employees
         return result
 
     def filter_plan(self,result):
@@ -44,14 +53,15 @@ class AdminScope:
         team=self.filter_team(team)
         normalized=str(username or '').strip().casefold()
         if not any(str((row.get('account') or {}).get('username','')).casefold()==normalized
-                   for row in team.get('employees',())):
+                   for row in team.get('employees',()) if not row.get('registration_only')):
             raise CRMError('Аккаунт вне доступной территории.','forbidden',403)
 
-    def require_device(self,team,device_id):
+    def require_device(self,team,device_id, *, registration=False):
         team=self.filter_team(team)
         if type(device_id) is not int:
             raise CRMError('Некорректное устройство.','forbidden',403)
         if not any(device.get('id')==device_id for row in team.get('employees',())
+                   if registration or not row.get('registration_only')
                    for device in (row.get('account') or {}).get('devices',())):
             raise CRMError('Устройство вне доступной территории.','forbidden',403)
 

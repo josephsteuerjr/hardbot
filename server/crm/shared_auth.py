@@ -60,7 +60,11 @@ def validate_identity(value):
         raise fault('manager_required', 403)
     if not isinstance(device, dict) or type(device.get('id')) is not int or device['id'] < 1:
         raise fault('manager_required', 403)
-    return dict(uid=uid, device_id=device['id'], name=str(me.get('name') or ''),
+    team = value.get('crm_team')
+    if team is not None and (not isinstance(team, list) or not all(isinstance(name, str) for name in team)):
+        raise fault('identity_protocol', 503)
+    manager_team = {} if me.get('isOwner') is True or me['role'] == 'security' else {'manager_team': team}
+    return dict(uid=uid, device_id=device['id'], name=str(me.get('name') or ''), **manager_team,
                 role='observer' if me['role']=='security' else me['role'],
                 server_operator=me['role'] != 'security' and value.get('server_operator') is True,
                 account_bound=device.get('account_bound') is True)
@@ -121,6 +125,26 @@ class Authority:
             raise fault('authority_unavailable', 503) from None
 
 
+def _primary_manager_scope(conn, identity, employee_uuid):
+    if 'manager_team' not in identity:
+        return None
+    names = identity['manager_team']
+    if names is None:
+        return frozenset({employee_uuid})
+    from db import _name_key
+    wanted = {_name_key(name) for name in names} - {''}
+    matched = {}
+    at = now()
+    for row in conn.execute('SELECT DISTINCT e.employee_uuid,e.name FROM crm_employees e '
+                            'JOIN crm_memberships m USING(employee_uuid) WHERE e.active=1 AND m.starts_at<=? '
+                            'AND (m.ends_at IS NULL OR m.ends_at>?)', (at, at)):
+        key = _name_key(row['name'])
+        if key in wanted:
+            matched.setdefault(key, set()).add(row['employee_uuid'])
+    # An ambiguous spelling is not authority to add either employee.
+    return frozenset().union(*(ids for ids in matched.values() if len(ids) == 1), {employee_uuid})
+
+
 def _legacy_principal(conn, identity):
     marker = conn.execute("SELECT value FROM crm_meta WHERE key='deployment_namespace'").fetchone()
     if not marker or marker[0] != NAMESPACE:
@@ -170,12 +194,17 @@ def _legacy_principal(conn, identity):
     if registered_manager:
         employees = access.registered_manager_staff(conn, result)
         all_contracts = False
+    primary_scope = _primary_manager_scope(conn, identity, result.employee_uuid)
+    if primary_scope is not None and role == 'manager':
+        employees = employees & primary_scope if policy or registered_manager else primary_scope
+        all_contracts = False
     legacy = replace(result, role=role, capabilities=(result.capabilities & ROLE_CAPABILITIES[role]) | logistics_caps | access_caps,
                      employee_scope=employees, all_contracts=all_contracts,
                      read_all_contracts=role != 'logistic' and not registered_manager,
                      server_operator=role == 'manager' and identity.get('server_operator') is True,
                      account_bound=identity.get('account_bound') is True,
-                     registered_manager=bool(registered_manager))
+                     registered_manager=bool(registered_manager), primary_manager_scope=primary_scope,
+                     primary_team_verified=identity.get('manager_team') is not None)
     return legacy, role, authority_role in {'manager', 'full'}
 
 

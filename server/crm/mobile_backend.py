@@ -285,7 +285,7 @@ class SharedBackend:
                     scope.require_username(scope.filter_team(team),payload.get('username'))
                 elif resource in {'revoke','approve'}:
                     team=scope.filter_team(await self.json(self.primary+'/api/manager/team','GET',self.headers(session)))
-                    if payload.get('device_id') is not None:scope.require_device(team,payload.get('device_id'))
+                    if payload.get('device_id') is not None:scope.require_device(team,payload.get('device_id'),registration=resource=='approve')
                     else:scope.require_username(team,payload.get('username'))
             return await self.json(self.primary+routes[resource],method,self.headers(session),payload if method=='POST' else None)
         if action not in (GET_ACTIONS if method=='GET' else POST_ACTIONS):raise CRMError('Неизвестный запрос.')

@@ -312,3 +312,28 @@ def test_roster_rejects_shared_portfolio_at_two_persons(world):
     with pytest.raises(ValueError,match='разных сотрудников'):
         staff_roster.preview([{'employee':'A','products':['soft'],'product_names':{'soft':'Shared'}},
                               {'employee':'B','products':['soft'],'product_names':{'soft':'Shared'}}])
+
+
+def test_existing_employee_with_separate_privileged_login_can_confirm_replacement_pc(world):
+    _, first = approve_pc(world)
+    with db.connect() as conn:
+        employee = conn.execute("SELECT id,telegram_id FROM accounts WHERE username='own-employee'").fetchone()
+    db.set_manager(MANAGER+2, 'Own Employee', [], ['Zero Portfolio'])
+    with db.connect() as conn:
+        # This row predates the prohibition on creating another account under the same name.
+        conn.execute("INSERT INTO accounts(username,employee,role,password_hash,status,telegram_id,created_at,updated_at,created_by) "
+                     "SELECT 'separate-manager',employee,'manager',password_hash,'active',?,created_at,updated_at,'fixture' "
+                     "FROM accounts WHERE id=?", (MANAGER+2,employee['id']))
+    replacement = pc_login('own-employee', identity())
+    assert replacement['action'] == 'ok_pending'
+    with db.connect() as conn:
+        second = conn.execute('SELECT id FROM account_devices WHERE account_id=? AND status=?',
+                              (employee['id'], 'pending')).fetchone()[0]
+    row = next(row for row in accounts.manager_team(MANAGER)['employees'] if row['employee']=='Own Employee')
+    assert row['can_approve'] and row['account']['username']=='own-employee'
+    assert not accounts.manager_approve(MANAGER+1,device_id=second,observed_pc=True)['ok']
+    assert not accounts.manager_approve(MANAGER+2,device_id=second,observed_pc=True)['ok']
+    assert accounts.manager_approve(MANAGER,device_id=second,observed_pc=True)['active']
+    with db.connect() as conn:
+        assert conn.execute('SELECT status FROM account_devices WHERE id=?',(first,)).fetchone()[0]=='revoked'
+        assert conn.execute("SELECT telegram_id FROM accounts WHERE username='separate-manager'").fetchone()[0]==MANAGER+2

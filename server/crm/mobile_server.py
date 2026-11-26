@@ -132,7 +132,12 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
                 if request.headers.get('Origin') not in (None,expected):raise CRMError('Источник запроса не совпадает.','origin',403)
                 if not session or not secrets.compare_digest(request.headers.get('X-CRM-CSRF',''),session['csrf']):raise CRMError('Обновите подключение перед отправкой.','csrf',403)
             response=await handler(request)
-        except CRMError as exc:response=web.json_response(dict(error=exc.code,text=str(exc),details=exc.details),status=exc.status)
+        except CRMError as exc:
+            session=request.get('mobile_session') or {}
+            unavailable=(exc.code in {'grant_revoked','grant_required'}
+                         and request.get('workspace_check') and not request.get('selecting_grant'))
+            workspace=dict(revoked_owner=session['owner']) if unavailable and session.get('owner') else {}
+            response=web.json_response(dict(error=exc.code,text=str(exc),details=exc.details,**workspace),status=exc.status)
         except (ValueError,TypeError,KeyError):response=web.json_response(dict(error='invalid',text='Некорректные параметры запроса.'),status=400)
         except asyncio.TimeoutError:response=web.json_response(dict(error='timeout',text='Ответ задерживается. Проверьте исходную операцию.'),status=504)
         except aiohttp.ClientError:response=web.json_response(dict(error='upstream_unavailable',text='Служба временно недоступна. Исходная операция сохранена.'),status=503)
@@ -170,6 +175,7 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
     async def authorize(request, refresh=True):
         session=request['mobile_session']
         if not session or not session.get('owner'):raise CRMError('Войдите в рабочее место.','session',401)
+        request['workspace_check']=True
         if not refresh:return session
         try:context=await backend.request(session,'GET','context')
         except CRMError as exc:
@@ -195,12 +201,37 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
             try:await backend.activate(session);bind_owner(session)
             except CRMError as exc:
                 if exc.status not in {401,403,410}:raise
+        workspace={}
         if session.get('owner'):
-            session=await authorize(request)
+            try:
+                session=await authorize(request)
+            except CRMError as exc:
+                if exc.code not in {'grant_revoked','grant_required'} or backend.synthetic:
+                    raise
+                workspace['revoked_owner']=session['owner']
+                previous=session['context']
+                candidate=dict(session)
+                candidate.pop('grant_id',None)
+                try:
+                    await backend.activate(candidate)
+                except CRMError as retry:
+                    if retry.code=='grant_required':
+                        return web.json_response(dict(error=retry.code,text=str(retry),details=retry.details,
+                            csrf=session['csrf'],retained_session=True,**workspace),status=retry.status)
+                    if retry.status in {401,403,410} and retry.code!='grant_revoked':
+                        sessions.forget(request['mobile_sid'])
+                        raise CRMError('Подтвердите вход заново. Черновики сохранены.','identity_changed',401)
+                    return web.json_response(dict(error=exc.code,text=str(exc),details=exc.details,**workspace),status=exc.status)
+                context=candidate['context']
+                if str(context['actor_uid'])!=str(previous['actor_uid']) or context['employee_uuid']!=previous['employee_uuid']:
+                    sessions.forget(request['mobile_sid'])
+                    raise CRMError('Вход изменился. Исходная работа сохранена.','identity_changed',401)
+                bind_owner(candidate)
+                session=candidate
             keep_login(session)
         sid=sessions.write(session,request['mobile_sid'] if request['mobile_session'] else None)
         public={k:session[k] for k in ('owner','context','synthetic','expires_at') if k in session}
-        response=web.json_response(dict(csrf=session['csrf'],session=public if session.get('owner') else None,pending=session.get('pending'),synthetic=backend.synthetic))
+        response=web.json_response(dict(csrf=session['csrf'],session=public if session.get('owner') else None,pending=session.get('pending'),synthetic=backend.synthetic,**workspace))
         cookie(response,sid,request,session);return response
     async def login(request):
         body=await request.json();session=await backend.login(body)
@@ -252,6 +283,7 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         method=body.get('method','GET');action=body.get('action','')
         if method not in {'GET','POST'}:raise CRMError('Недопустимый метод.')
         if method=='POST' and action=='grant':
+            request['selecting_grant']=True
             if backend.synthetic:raise CRMError('Полномочия доступны в рабочей CRM.','synthetic',403)
             session=await authorize(request,refresh=False)
             previous=session['context'];data=await backend.select_grant(session,(body.get('body') or {}).get('grant_id'))
