@@ -33,6 +33,16 @@ def phone(label):
     return dict(kind='phone',fp='android-fixture-'+label,label='Synthetic phone')
 
 
+def test_pending_desktop_login_keeps_the_successful_response_contract(world):
+    assert accounts.create_account('Own Employee','pending-employee',PASSWORD)['ok']
+    status, result = http('POST','/api/account/login',dict(
+        username='pending-employee',password=PASSWORD,audience='crm-desktop',entrance='internal',
+        device={'kind':'desktop','fp':world[2]},pc_proof=proof(world,'','pending-employee')))
+    assert status==200 and result['action']=='ok_pending'
+    assert result['token'] and result['must_change_password']
+    assert result['text'] and 'error' not in result
+
+
 def test_public_options_hide_staff_and_submission_uses_current_assignments(world):
     assignments()
     status,options=http('GET',REGISTRATION)

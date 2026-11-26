@@ -5658,6 +5658,9 @@ async def _account_login(request: web.Request) -> web.Response:
     else:
         _admin_auth_ok(request, scope="account")
     if result.get("action") in ("ok", "ok_pending"):
+        if result["action"] == "ok_pending" and result.get("error"):
+            # CRM clients treat an error field as a failed login, including on HTTP 200.
+            result["text"] = result.pop("error")
         if result['action']=='ok' and not result.get('must_change_password') and body.get('audience') in ('crm-desktop','crm-mobile'):
             import crm_registration
             await asyncio.to_thread(crm_registration.project_verified_account,result['uid'])
